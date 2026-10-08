@@ -466,6 +466,25 @@ that touches that surface with neither a changeset nor an explicit opt-out.
 
 ## GA-cut runbook (rc → 1.0.0)
 
+> **Amended 2026-10-08 — founder decision (option A): `1.0.0` GA is DECOUPLED from the 14-night
+> credential.** `1.0.0` = the semver-stable API, `knext.config.ts` schema and CLI; it ships from the
+> `v1.0.0-rc.6` bytes (version fields only — proven by the GA-vs-rc tarball diff) while the
+> credential windows keep running on `v1.0.0-rc.6` **after** GA. So for `1.0.0`:
+>
+> - the "14/14" precondition and steps 1–2 below (confirm the window closed, clear `rcTag`) do
+>   **not** apply — `rcTag` stays `v1.0.0-rc.6`, and the windows keep banking on those bytes;
+> - steps 3–4 (`pre exit` + version to `1.0.0`) were done together in one hand-prepared
+>   "release: prepare v1.0.0" PR;
+> - release notes, `docs/COMPATIBILITY.md` and the docs site must say the credential is **in
+>   progress** and must not say "verified" or "credentialed" until all four cells reach 14/14.
+>   Verified status is announced separately when it completes;
+> - `vinext` stays Beta.
+>
+> The `ga-tarball-diff` gate is unaffected: it keys on the release tags, finds `v1.0.0-rc.6` as the
+> highest `v1.0.0-rc.N`, and `rcTag` pins the same tag, so it runs (not ambiguous) and must be
+> green before `release` publishes. Everything from step 5 on applies unchanged, plus the
+> `latest-1.0` dist-tag step under [Dist-tags after GA](#dist-tags-after-ga).
+
 This is the exact sequence from "the credential window closed 14/14 green on all four cells" to
 "`1.0.0` is on npm `latest`". It assumes the credential window's own gate (14 consecutive nightly
 green runs on the pinned rc, across every credentialed runtime/builder combination) has already
@@ -575,6 +594,37 @@ Confirm every box before starting step 1 below:
 10. **Announce.** Publish the announcement once steps 1–9 are all confirmed, not before — an
     announcement pointing at a still-parked publish or a stale docs deploy sends strangers to a
     broken front door on day one.
+
+### Dist-tags after GA
+
+`changeset publish` puts a stable version on `latest` (it uses the `rc` tag only in pre mode), so
+`1.0.0` lands on `latest`, replacing `0.4.3`. The `1.3` line (prereleases on `next`) will later
+publish `1.3.0`, which takes `latest`. To keep the `1.0` line reachable by name after that:
+
+- **[FOUNDER] right after the `1.0.0` publish lands**, add a `latest-1.0` dist-tag on all four
+  fixed-group packages:
+
+  ```sh
+  npm dist-tag add @getknext/core@1.0.0 latest-1.0
+  npm dist-tag add @getknext/lib@1.0.0 latest-1.0
+  npm dist-tag add @getknext/db@1.0.0 latest-1.0
+  npm dist-tag add kn-next@1.0.0 latest-1.0
+  ```
+
+  Verify with `npm view @getknext/core dist-tags` (and the same for the other three).
+- **Not `v1.0` or `v1`:** npm refuses a dist-tag name that parses as a semver range, and both do
+  (`v1.0` is `>=1.0.0 <1.1.0-0`). `latest-1.0` does not. `lts` was rejected because the release
+  policy makes no long-term-support promise.
+- A semver range needs no tag at all: `npm install @getknext/core@1.0` resolves the newest `1.0.x`
+  regardless of dist-tags. The tag is the named handle for `npx`/docs and for the patch flow below.
+- **Every later `1.0.x` publish must carry `--tag latest-1.0` once `1.3.0` holds `latest`** —
+  otherwise npm moves `latest` back to the `1.0.x` patch. `release.yml` publishes from `main` only
+  and passes no tag for a stable version today, so a `1.0.x` publish after `1.3.0` needs a
+  branch-aware publish path first (see [Patch release runbook](#patch-release-runbook-101)).
+- The `rc` dist-tag stays on `1.0.0-rc.6` (the credentialed bytes); leave it.
+
+(Decision record: jev `pick`, 2026-10-08 — `latest-1.0` 0.63 vs no tag 0.29, `lts` 0.07, `v1.0`
+0.01.)
 
 ### If a night reds between 14/14 and the cut
 
@@ -693,7 +743,7 @@ above.
 
 ## Patch release runbook (1.0.1)
 
-`1.0.0` ships from the `1.0.0-rc.5` bytes with two known issues documented in
+`1.0.0` ships from the `1.0.0-rc.6` bytes with two known issues documented in
 `docs/release/v1.0.0.md` rather than held for a re-credentialed rc cycle (see [Rollback runbook](#rollback-runbook-100-ships-broken)'s
 note that a hotfix does not borrow the previous rc's credential — the same reasoning applies to a
 planned patch, not just an incident). `1.0.1` closes both, fixed on `integration/v1.3` ahead of GA.
@@ -706,7 +756,11 @@ After GA:
    known issue) from `integration/v1.3` onto `release/1.0`.
 4. Run the normal release gate (`pack`, `audit`, the GA-tarball-diff check does not apply here —
    `1.0.1` has no matching rc tag, which is expected per the diff gate's own skip condition) against
-   `release/1.0`, then publish `1.0.1` through the usual Changesets flow.
+   `release/1.0`, then publish `1.0.1` through the usual Changesets flow. **If `1.3.0` already holds
+   `latest`, publish `1.0.1` with `--tag latest-1.0`** (see [Dist-tags after GA](#dist-tags-after-ga))
+   — `release.yml` runs on `main` only and passes no tag for a stable version, so that path needs
+   wiring before it is used. If `1.0.1` ships while `1.0.x` still holds `latest`, publish normally
+   and then move `latest-1.0` to `1.0.1` as well.
 5. Update `docs/release/v1.0.0.md`'s "Known issues" entries to say they are fixed in `1.0.1`
    (already worded that way as of this writing — just confirm before publishing), and drop the
    matching callouts from the affected `apps/docs` pages once `1.0.1` is the published `latest`.

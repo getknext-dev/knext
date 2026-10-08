@@ -1,10 +1,10 @@
 ---
-title: Verified against the official Next.js test suite
+title: The official Next.js compatibility credential
 description: Exactly what knext's compatibility credential covers, what it does not, and its current status — stated honestly, not as a marketing claim.
 ---
 
 knext's goal is **verified-adapter status**: open source, validated against the official
-Next.js compatibility suite, honest about every exclusion. This page states precisely what that
+Next.js compatibility suite, honest about every exclusion. knext does not claim that status yet. This page states precisely what that
 credential covers today, what it explicitly does not cover, and the current status of the
 in-progress credentialing window — including while that window has not yet completed.
 
@@ -14,7 +14,7 @@ only counts as credentialed once it has banked **14 consecutive scheduled nights
 every shard reporting zero failed and zero not-run tests, run against one frozen release-candidate
 build. No cell has reached that bar yet. Treat every number on this page as current evidence for
 where a cell stands today — never as a finished, all-fourteen-nights-passing result. See
-[Verified compatibility numbers](/docs/compat-matrix) for the live per-cell counts and evidence,
+[the compatibility matrix](/docs/compat-matrix) for the live per-cell counts and evidence,
 which this page deliberately does not duplicate.
 </Callout>
 
@@ -51,7 +51,7 @@ v1.0 cells — see [what's out of scope](#whats-out-of-scope) below.
 </Callout>
 
 For the current evidence behind each of these four cells — run counts, pass/fail totals, and
-credential-night progress — see [Verified compatibility numbers](/docs/compat-matrix); this page
+credential-night progress — see [the compatibility matrix](/docs/compat-matrix); this page
 is the scope-and-methodology reference, not the scoreboard.
 
 ## The Next.js version under credential
@@ -74,6 +74,15 @@ and it means the credential is earned by the exact bytes an outside user install
 Nightly runs on `main` keep running as an early-warning signal — a red one still raises an alarm —
 but they can never advance a cell toward its 14-night credential. Only a scheduled run against the
 pinned release-candidate build counts.
+
+### Stable releases and the credential
+
+A stable release can ship while its credential is still in progress. When it does, its packages are
+cut from the release candidate under credential with **only the version fields changed** — every
+other byte of every published tarball is identical, and the release pipeline checks that before it
+publishes. So the nights banking against the release candidate describe exactly the code a stable
+install runs. The stable release is still **not credentialed** until every cell reaches its 14
+consecutive nights; its release notes say so, and so does this page until then.
 
 <Callout type="warn">
 **The 14-night window is currently open, not complete.** A release-candidate build is pinned and

@@ -15,12 +15,13 @@ It is **not** a general-purpose PaaS, and **not** "Coolify for Kubernetes." The 
 **Self-Contained Systems**.
 
 <Callout type="info">
-**Validated against the official suite.** knext passes the official Next.js deploy-mode e2e suite
-on the Node runtime — **792 tests, zero failures**, re-verified **nightly** against Next.js 16.2.
-The default Bun cell has one 792/0 run on the compiled executable. The exact scope (including
-documented exclusions and per-cell status) is on
-[Verified compatibility](/docs/compat-suite); per-feature status lives in the
-[compatibility matrix](/docs/compat-matrix).
+**Tested against the official suite — credential in progress.** knext runs the official Next.js
+deploy-mode e2e suite against all four default runtime x builder combinations (Node/Bun x
+Turbopack/Webpack). Its compatibility credential — 14 consecutive green nightly runs per
+combination — is in progress, not complete; knext does not claim verified-adapter status until it
+is. The exact scope (including documented exclusions) is on
+[the compatibility credential](/docs/compat-suite); live per-cell counts and per-feature status
+live in the [compatibility matrix](/docs/compat-matrix).
 </Callout>
 
 ## Philosophy: Self-Contained Systems
@@ -87,15 +88,15 @@ in-core-vs-recipe split, and never treat an unbuilt generator as shipping.
 
 ## The pillars
 
-- **Honest claims, verified in the open.** The default build (`next build`) uses knext's adapter on
-  the official Next.js Deployment Adapter API (`@getknext/core/adapter`) — the lane where its
-  792/792 suite result was earned. A selectable **vinext** build (an open-source Vite-based
+- **Honest claims, measured in the open.** The default build (`next build`) uses knext's adapter on
+  the official Next.js Deployment Adapter API (`@getknext/core/adapter`) — the lane the official
+  suite runs against. A selectable **vinext** build (an open-source Vite-based
   Next.js implementation, compiled into a single executable) is also available, and knext never
   blurs which claim covers which path. See
   [The adapter and the compiled build](/docs/official-adapter).
-- **Verified compatibility.** The official `vercel/next.js` deploy-mode e2e suite runs against
-  knext nightly: 792 tests, zero failures on Node. See
-  [Verified compatibility](/docs/compat-suite).
+- **Official-suite compatibility, credential in progress.** The official `vercel/next.js`
+  deploy-mode e2e suite runs against knext nightly; the 14-night credential is in progress. See
+  [the compatibility credential](/docs/compat-suite).
 - **True scale-to-zero.** Knative's autoscaler + activator take idle services to `0` replicas and
   wake them on the first request. See [Scale-to-zero & cold starts](/docs/scale-to-zero).
 - **A compiled executable by default.** The standalone server is minified and precompiled to

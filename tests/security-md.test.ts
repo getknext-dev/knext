@@ -36,12 +36,19 @@ describe('root SECURITY.md', () => {
     expect(content).toMatch(/supported versions?/i);
   });
 
-  it('names the real pre-1.0 published version line (1.0.0-rc)', () => {
-    // Sourced from packages/kn-next/package.json — never invent a version.
+  it('names the real published stable version line (derived major, e.g. 1.x)', () => {
+    // Sourced from packages/kn-next/package.json — never invent a version. Since 1.0.0 the tree
+    // carries a stable version, so the supported line is the MAJOR it belongs to.
     const pkg = JSON.parse(
       readFileSync(resolve(ROOT, 'packages/kn-next/package.json'), 'utf-8'),
     ) as { version: string };
-    expect(pkg.version).toMatch(/^1\.0\.0-rc\./);
-    expect(content).toContain('1.0.0-rc');
+    expect(pkg.version).toMatch(/^\d+\.\d+\.\d+$/);
+    const major = pkg.version.split('.')[0];
+    expect(content).toContain(`${major}.x`);
+  });
+
+  it('no longer describes knext as pre-1.0 once a stable version is in the tree', () => {
+    expect(content).not.toMatch(/has not reached a `1\.0\.0` release/i);
+    expect(content).not.toMatch(/\bpre-1\.0\b/i);
   });
 });

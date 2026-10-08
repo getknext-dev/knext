@@ -5,7 +5,7 @@ import type { ReactNode } from 'react';
 export const metadata = {
   title: 'knext — scale-to-zero Next.js on Knative',
   description:
-    'knext is the scale-to-zero Next.js deployment framework for Knative. Optimized cold starts, suite-verified compatibility, multi-cloud — no lock-in.',
+    'knext is the scale-to-zero Next.js deployment framework for Knative. Optimized cold starts, official Next.js test-suite compatibility, multi-cloud — no lock-in.',
 };
 
 export default function Layout({ children }: { children: ReactNode }) {

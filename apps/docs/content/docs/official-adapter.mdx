@@ -82,17 +82,18 @@ changes nothing.
 
 If you assemble the standalone output without the knext CLI, upgrade to Next.js 16.4.0 or later.
 
-## Verified against the official suite
+## Tested against the official suite
 
-knext validates the adapter against the official Next.js compatibility suite: the
-`vercel/next.js` deploy-mode e2e harness runs through knext's lifecycle scripts and passes
-**792 tests with zero failures** on the Node runtime, re-verified **nightly** (Next.js v16.2.12).
-The default Bun cell, which compiles the same standalone server, passed once at 792/0. A
-fast smoke gate additionally runs a Node + Bun matrix on every change.
+knext tests the adapter against the official Next.js compatibility suite: the `vercel/next.js`
+deploy-mode e2e harness runs through knext's lifecycle scripts, nightly, on all four default
+runtime x builder combinations. The 14-night compatibility credential for those combinations is
+in progress, not complete — the live per-cell counts are on the
+[compatibility matrix](/docs/compat-matrix). A fast smoke gate additionally runs a Node + Bun
+matrix on every change.
 
 <Callout type="info">
 The exact scope of that claim — including the four documented architectural exclusions (edge
 runtime, edge middleware, PPR, cache components) and per-cell status — is on
-[Verified compatibility](/docs/compat-suite). Row-by-row feature status lives in the
+[the compatibility credential](/docs/compat-suite). Row-by-row feature status lives in the
 [compatibility matrix](/docs/compat-matrix).
 </Callout>
