@@ -137,11 +137,10 @@ const config: NextConfig = {
 or remove the lockfile you do not need. `knext deploy` reads `outputFileTracingRoot` too, to
 choose the directory it sends to `docker build`.
 
-**Monorepos are not supported yet.** knext looks for the standalone server at
-`.next/standalone/server.js`, which only exists when the tracing root is the app's own directory.
-An app in a workspace monorepo that shares dependencies from a root above it would need that root
-as its tracing root, and knext cannot package the nested layout that produces. Keep the root at the
-app, and install the app's dependencies in the app directory.
+**A workspace monorepo is the one case where a root above the app is what you want.** If the app
+shares packages with a root above it, set that root on purpose in both keys and knext packages the
+nested layout; see [Deploy from a workspace monorepo](/docs/monorepo). A root that was only
+inferred from a parent lockfile is never treated that way.
 </Callout>
 
 ## 2 · Write the deploy config

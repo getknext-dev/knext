@@ -1,0 +1,7 @@
+{
+  "name": "knext-monorepo-workspace-fixture",
+  "version": "0.0.0",
+  "private": true,
+  "description": "A real workspace monorepo used ONLY by standalone-monorepo-root.test.ts: a root package.json with workspaces, a shared package, and an app that imports it with the tracing root set explicitly. NOT a member of the knext root workspace; the test copies it into a throwaway dir and installs there.",
+  "workspaces": ["apps/*", "packages/*"]
+}

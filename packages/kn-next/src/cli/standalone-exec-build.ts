@@ -28,7 +28,10 @@ import {
 import { packageRoot } from "./create";
 import { runQuiet } from "./exec";
 import { UsageError } from "./shared";
-import { diagnoseNestedStandalone } from "./standalone-layout";
+import {
+    diagnoseNestedStandalone,
+    resolveStandaloneLayout,
+} from "./standalone-layout";
 import {
     bunCompileTarget,
     bunMeetsFloor,
@@ -143,8 +146,12 @@ export function buildStandaloneExecutable(
         );
     }
 
-    const root = join(opts.cwd, ".next", "standalone");
-    const server = join(root, "server.js");
+    // The traced tree is the confinement boundary for the module graph; the
+    // server is wherever Next put it in that tree, which is deeper than the
+    // tree root when the app sits under an explicit monorepo root.
+    const layout = resolveStandaloneLayout(opts.cwd);
+    const root = layout.standaloneDir;
+    const server = layout.serverPath;
     if (!existsSync(server)) {
         const nested = diagnoseNestedStandalone(opts.cwd);
         if (nested !== null) {

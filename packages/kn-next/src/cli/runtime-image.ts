@@ -35,13 +35,18 @@
  */
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import {
     BUILDERS,
     DEFAULT_BUILDER_ID,
     DEFAULT_RUNTIME_ID,
 } from "../adapters/artifact-contract";
 import { packageRoot } from "./create";
+import { UsageError } from "./shared";
+import {
+    resolveStandaloneLayout,
+    type StandaloneLayout,
+} from "./standalone-layout";
 
 /** The Docker build `--target` for each standalone runtime. */
 export type StandaloneTarget =
@@ -408,8 +413,10 @@ export function dockerBuildxArgs(opts: {
  * needed subtrees is a follow-up, gated on a real buildx proof, not the
  * evaluator alone.
  */
-export function standaloneDockerignore(): string {
-    return `# knext standalone runtime build context (ADR-0055) — per-Dockerfile ignore.
+export function standaloneDockerignore(
+    opts: { nested?: boolean } = {},
+): string {
+    const base = `# knext standalone runtime build context (ADR-0055) — per-Dockerfile ignore.
 #
 # BuildKit reads this in preference to the app .dockerignore, so it scopes the
 # ignore to the standalone build only. It deliberately does NOT exclude
@@ -477,6 +484,202 @@ Dockerfile*
 .dockerignore
 docker-compose*.yml
 `;
+    if (!opts.nested) return base;
+    // The context is a workspace root: the patterns above are anchored at it, so
+    // the app's own Next cache (under its path) would otherwise be sent to the
+    // builder. The image never COPYs it.
+    return `${base}
+# Workspace-root context: the app's Next cache is not at the context root.
+**/.next/cache
+`;
+}
+
+/**
+ * One anchored rewrite of the staged Dockerfile for a nested layout. An exact
+ * line (`line`) or a substring of one (`part`) is replaced, and `count` is how
+ * many lines must match in the shipped template. A different count means the
+ * template moved under the rewrite, and the rewrite refuses rather than ship a
+ * Dockerfile that is half flat and half nested.
+ */
+interface NestRule {
+    readonly kind: "line" | "part";
+    readonly from: string;
+    readonly to: (o: { prefix: string; coreSrc: string }) => string;
+    readonly count: number;
+    /** Lines appended after each matched line (new instructions, not rewrites). */
+    readonly append?: (o: { prefix: string }) => string[];
+}
+
+const STANDALONE = "/app/.next/standalone";
+
+const NEST_RULES: readonly NestRule[] = [
+    // standalone-bun, standalone-node: the traced tree, then static and public
+    // beside the nested server (Next serves both relative to its own directory).
+    {
+        kind: "line",
+        from: `COPY .next/standalone ${STANDALONE}`,
+        to: ({ prefix }) => `COPY ${prefix}.next/standalone ${STANDALONE}`,
+        count: 2,
+    },
+    {
+        kind: "line",
+        from: `COPY .next/static ${STANDALONE}/.next/static`,
+        to: ({ prefix }) =>
+            `COPY ${prefix}.next/static ${STANDALONE}/${prefix}.next/static`,
+        count: 2,
+    },
+    {
+        kind: "line",
+        from: `COPY public ${STANDALONE}/public`,
+        to: ({ prefix }) =>
+            `COPY ${prefix}public ${STANDALONE}/${prefix}public`,
+        count: 2,
+        // Next writes its runtime cache (ISR, fetch cache, optimized images) under
+        // <server dir>/.next/cache. The operator mounts a writable volume at
+        // the FLAT path, so make that the real directory and link the nested one
+        // to it. The directory must exist: a link to a missing target makes
+        // Next's recursive mkdir fail with EEXIST.
+        append: ({ prefix }) => [
+            `RUN mkdir -p ${STANDALONE}/.next/cache && ln -s ${STANDALONE}/.next/cache ${STANDALONE}/${prefix}.next/cache`,
+        ],
+    },
+    // standalone-bun: the compiled executable sits in the server's directory
+    // (it anchors on its own location, like `server.js` does).
+    {
+        kind: "line",
+        from: `COPY knext-standalone-exec-linux-x64 ${STANDALONE}/knext-standalone-exec`,
+        to: ({ prefix }) =>
+            `COPY ${prefix}knext-standalone-exec-linux-x64 ${STANDALONE}/${prefix}knext-standalone-exec`,
+        count: 1,
+    },
+    // The supervisor's start paths.
+    {
+        kind: "part",
+        from: `STANDALONE_SERVER_PATH=${STANDALONE}/server.js`,
+        to: ({ prefix }) =>
+            `STANDALONE_SERVER_PATH=${STANDALONE}/${prefix}server.js`,
+        count: 2,
+    },
+    {
+        kind: "part",
+        from: `STANDALONE_SERVER_EXEC=${STANDALONE}/knext-standalone-exec`,
+        to: ({ prefix }) =>
+            `STANDALONE_SERVER_EXEC=${STANDALONE}/${prefix}knext-standalone-exec`,
+        count: 1,
+    },
+    // standalone-node: the V8 compile cache lives where the supervisor derives
+    // it from the server path (<server dir>/.next/compile-cache).
+    {
+        kind: "part",
+        from: `${STANDALONE}/.next/compile-cache`,
+        to: ({ prefix }) => `${STANDALONE}/${prefix}.next/compile-cache`,
+        count: 5,
+    },
+    // The supervisor's own package, from wherever the workspace installed it.
+    {
+        kind: "line",
+        from: "COPY node_modules/@getknext/core /app/node_modules/@getknext/core",
+        to: ({ coreSrc }) => `COPY ${coreSrc} /app/node_modules/@getknext/core`,
+        count: 2,
+    },
+    // standalone-bun-self-contained: only static assets and the executable
+    // are read from disk; the rest is inside the executable.
+    {
+        kind: "line",
+        from: "COPY public /app/public",
+        to: ({ prefix }) => `COPY ${prefix}public /app/public`,
+        count: 1,
+    },
+    {
+        kind: "line",
+        from: "COPY .next/static /app/.next/static",
+        to: ({ prefix }) => `COPY ${prefix}.next/static /app/.next/static`,
+        count: 1,
+    },
+    {
+        kind: "line",
+        from: "COPY knext-standalone-exec-linux-x64 /app/knext-standalone-exec",
+        to: ({ prefix }) =>
+            `COPY ${prefix}knext-standalone-exec-linux-x64 /app/knext-standalone-exec`,
+        count: 1,
+    },
+];
+
+/**
+ * Rewrite the standalone Dockerfile for an app that sits under an explicit
+ * monorepo root. `contextPrefix` is the app's path under the build context
+ * with a trailing slash (`apps/web/`); `coreSrc` is where the context holds
+ * `@getknext/core`.
+ *
+ * The flat Dockerfile is never passed through here, so it stays byte-identical
+ * to the template. Comment lines are left alone (they describe the flat
+ * layout); every rule must match exactly its expected number of instruction
+ * lines or the rewrite throws.
+ */
+export function nestStandaloneDockerfile(
+    dockerfile: string,
+    opts: { contextPrefix: string; coreSrc: string },
+): string {
+    if (/[\s"'\\]/.test(opts.contextPrefix) || /[\s"'\\]/.test(opts.coreSrc)) {
+        throw new UsageError(
+            `the app's path under the build context (${opts.contextPrefix}) contains whitespace or a quote, ` +
+                "which the Dockerfile's COPY lines cannot carry. Move the app to a path without them.",
+        );
+    }
+    const counts = NEST_RULES.map(() => 0);
+    const out: string[] = [];
+    for (const line of dockerfile.split("\n")) {
+        if (line.trimStart().startsWith("#")) {
+            out.push(line);
+            continue;
+        }
+        let rewritten = line;
+        const extra: string[] = [];
+        NEST_RULES.forEach((rule, i) => {
+            const hit =
+                rule.kind === "line"
+                    ? line.trim() === rule.from
+                    : line.includes(rule.from);
+            if (!hit) return;
+            counts[i] += 1;
+            const to = rule.to({
+                prefix: opts.contextPrefix,
+                coreSrc: opts.coreSrc,
+            });
+            rewritten =
+                rule.kind === "line" ? to : rewritten.split(rule.from).join(to);
+            extra.push(
+                ...(rule.append?.({ prefix: opts.contextPrefix }) ?? []),
+            );
+        });
+        out.push(rewritten, ...extra);
+    }
+    NEST_RULES.forEach((rule, i) => {
+        if (counts[i] !== rule.count) {
+            throw new Error(
+                `cannot nest the standalone Dockerfile: expected ${rule.count} instruction line(s) matching '${rule.from}', found ${counts[i]}. ` +
+                    "The template changed under the monorepo rewrite (runtime-image.ts NEST_RULES); refusing to emit a half-nested Dockerfile.",
+            );
+        }
+    });
+    return out.join("\n");
+}
+
+/**
+ * Where the build context holds `@getknext/core`: the app's own install first
+ * (the flat layout's `node_modules/@getknext/core`, under the app's path), then
+ * each directory up to the workspace root, where a hoisting package manager puts
+ * it.
+ */
+function coreSourceInContext(layout: StandaloneLayout): string {
+    for (let dir = layout.appDir; ; dir = dirname(dir)) {
+        const candidate = join(dir, "node_modules", "@getknext", "core");
+        if (existsSync(candidate)) {
+            return relative(layout.root, candidate).split(sep).join("/");
+        }
+        if (dir === layout.root || dirname(dir) === dir) break;
+    }
+    return `${layout.contextPrefix}node_modules/@getknext/core`;
 }
 
 /**
@@ -531,7 +734,7 @@ export function stageStandaloneBuildContext(opts: {
         );
     }
 
-    const dockerfileText = readFileSync(dockerfileSrc, "utf8");
+    let dockerfileText = readFileSync(dockerfileSrc, "utf8");
     const entryText = readFileSync(entrySrc, "utf8");
     const bakeText = readFileSync(bakeSrc, "utf8");
     const scServerShimText = readFileSync(scServerShimSrc, "utf8");
@@ -565,6 +768,24 @@ export function stageStandaloneBuildContext(opts: {
         );
     }
 
+    // A deliberate monorepo root: the build context IS the tracing root, and the
+    // image places the app where Next put it inside that tree. Anything else is
+    // the flat layout, left exactly as the template has it.
+    const layout = resolveStandaloneLayout(opts.cwd);
+    if (layout.nested) {
+        if (resolve(opts.buildContext) !== layout.root) {
+            throw new UsageError(
+                `the Docker build context (${resolve(opts.buildContext)}) is not the tracing root ` +
+                    `(${layout.root}, from ${layout.configSource}) — the standalone tree mirrors that root, ` +
+                    "so the image would copy paths that are not in the context.",
+            );
+        }
+        dockerfileText = nestStandaloneDockerfile(dockerfileText, {
+            contextPrefix: layout.contextPrefix,
+            coreSrc: coreSourceInContext(layout),
+        });
+    }
+
     const dockerfile = join(opts.cwd, STANDALONE_DOCKERFILE_NAME);
     writeFileSync(dockerfile, dockerfileText, "utf8");
     writeFileSync(
@@ -584,7 +805,7 @@ export function stageStandaloneBuildContext(opts: {
     );
     writeFileSync(
         `${dockerfile}.dockerignore`,
-        standaloneDockerignore(),
+        standaloneDockerignore({ nested: layout.nested }),
         "utf8",
     );
     return { dockerfile };

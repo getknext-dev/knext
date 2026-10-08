@@ -58,6 +58,11 @@ import {
     standaloneExecFileName,
 } from "./standalone-exec-build";
 import {
+    diagnoseNestedStandalone,
+    resolveStandaloneLayout,
+    type StandaloneLayout,
+} from "./standalone-layout";
+import {
     buildVinextExecutable,
     stageOgHarfbuzzForVinextNode,
     stageSharpForVinextNode,
@@ -95,9 +100,16 @@ export function resolveBuildArtifact(
     // The runtime is threaded through because vinext's shape depends on it
     // (#1260: the nitro preset IS the runtime choice). Builders whose shape
     // does not vary ignore it.
+    // A standalone build nests its server under the app's path when the app's
+    // config sets a tracing root above it (a workspace monorepo). Builders whose
+    // output does not nest ignore the layout; only ask for it where it applies.
+    const layout =
+        builder.emits === "next-standalone"
+            ? { appRel: resolveStandaloneLayout(root).appRel }
+            : undefined;
     return {
         builder,
-        artifact: builder.describeArtifact(root, config.runtime),
+        artifact: builder.describeArtifact(root, config.runtime, layout),
     };
 }
 
@@ -141,6 +153,28 @@ export function resolveSelfContained(
     override?: boolean,
 ): boolean {
     return override ?? config.selfContained ?? false;
+}
+
+/**
+ * The bun-condition export heal over a standalone tree, flat or nested.
+ *
+ * The heal only looks at `<dir>/node_modules`. Under a monorepo root the traced
+ * packages are split across TWO such directories: the hoisted one at the tree
+ * root (shared workspace dependencies) and the app's own under the nested
+ * directory. Healing only the first would leave the app's own packages with an
+ * exports map pointing at files the tree does not contain.
+ */
+function healStandaloneTree(cwd: string, layout: StandaloneLayout): HealResult {
+    const dirs = layout.nested
+        ? [layout.standaloneDir, layout.serverDir]
+        : [layout.standaloneDir];
+    const result: HealResult = { copied: [], skipped: [] };
+    for (const standaloneDir of dirs) {
+        const healed = healBunExportTargets({ projectDir: cwd, standaloneDir });
+        result.copied.push(...healed.copied);
+        result.skipped.push(...healed.skipped);
+    }
+    return result;
 }
 
 export interface CompileForDeployResult {
@@ -227,12 +261,25 @@ export function compileArtifactForDeploy(
     }
 
     if (standaloneStepsApply(artifact)) {
-        const standaloneDir = join(cwd, ".next", "standalone");
+        const layout = resolveStandaloneLayout(cwd);
+        const { standaloneDir } = layout;
         // Heal is unconditional on the shape (build.ts step 2b) — additive
         // and version-checked, so it costs nothing on the node leg.
         const healed = existsSync(standaloneDir)
-            ? healBunExportTargets({ projectDir: cwd, standaloneDir })
+            ? healStandaloneTree(cwd, layout)
             : undefined;
+        // The server is not where the config says it is, but one is somewhere
+        // else in the tree: say why (an inferred root nobody chose, or two root
+        // settings that disagree) on EVERY runtime, not only the one that
+        // compiles. Without this, the node leg ships a tree with no server.
+        if (!existsSync(layout.serverPath)) {
+            const nested = diagnoseNestedStandalone(cwd);
+            if (nested !== null) {
+                throw new UsageError(
+                    `The standalone build finished but '${layout.serverPath}' is not there.\n\n${nested}`,
+                );
+            }
+        }
         if (runtimeId !== "bun") {
             return { compiled: false, healed };
         }
@@ -241,9 +288,9 @@ export function compileArtifactForDeploy(
         // BEFORE shelling out to `bun build`, not after, and it holds even
         // when a caller injects its own `buildStandaloneExecutable` (a test
         // double, say) that does not replicate that internal check.
-        if (!existsSync(join(standaloneDir, "server.js"))) {
+        if (!existsSync(layout.serverPath)) {
             throw new UsageError(
-                `No standalone server at ${join(standaloneDir, "server.js")} to compile.\n\n` +
+                `No standalone server at ${layout.serverPath} to compile.\n\n` +
                     "The standalone-on-Bun image runs a compiled executable of that server. " +
                     "Check that next.config sets output: 'standalone' and that the project build ran.",
             );
@@ -352,7 +399,7 @@ export function compiledExecPathFor(
     if (standaloneStepsApply(artifact) && runtimeId === "bun") {
         return {
             execPath: join(cwd, standaloneExecFileName(arch)),
-            sourcePath: join(cwd, ".next", "standalone", "server.js"),
+            sourcePath: resolveStandaloneLayout(cwd).serverPath,
             sourceDirs: [join(cwd, ".next", "standalone")],
             builderId: builder.id,
             runtimeId,

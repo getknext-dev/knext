@@ -112,6 +112,22 @@ export interface BuildArtifact {
     readonly execution: ExecutionMode;
 }
 
+/**
+ * Where the app sits under its tracing root, for builders whose output nests
+ * with it. `appRel` is the app's path under the root with `/` separators and
+ * is empty (or absent) when the root IS the app. Only a deliberate, explicit
+ * root above the app makes it non-empty (see `cli/standalone-layout.ts`).
+ */
+export interface ArtifactLayout {
+    readonly appRel?: string;
+}
+
+/** The standalone server's path under `root`, for an app `appRel` below the tracing root. */
+function standaloneEntry(layout?: ArtifactLayout): string {
+    const rel = layout?.appRel ?? "";
+    return `.next/standalone/${rel ? `${rel}/` : ""}server.js`;
+}
+
 /** Produces an artifact of exactly one shape. */
 export interface BuilderAdapter {
     readonly id: BuilderId;
@@ -140,7 +156,11 @@ export interface BuilderAdapter {
      * nitro preset IS the runtime choice, so it emits a different shape per
      * runtime (#1260). Absent means the builder's default (`emits`).
      */
-    describeArtifact(root: string, runtime?: RuntimeId): BuildArtifact;
+    describeArtifact(
+        root: string,
+        runtime?: RuntimeId,
+        layout?: ArtifactLayout,
+    ): BuildArtifact;
 }
 
 /** Executes artifacts of the shapes it accepts. */
@@ -205,11 +225,15 @@ export const turbopackBuilder: BuilderAdapter = {
     // both are selectable. THE default since #1183/ADR-0058, once the
     // bun-standalone lane was credentialed; see DEFAULT_BUILDER_ID below.
     available: true,
-    describeArtifact(root: string): BuildArtifact {
+    describeArtifact(
+        root: string,
+        _runtime?: RuntimeId,
+        layout?: ArtifactLayout,
+    ): BuildArtifact {
         return {
             shape: "next-standalone",
             root,
-            entry: ".next/standalone/server.js",
+            entry: standaloneEntry(layout),
             execution: "spawn",
         };
     },
@@ -240,11 +264,15 @@ export const webpackBuilder: BuilderAdapter = {
     id: "webpack",
     emits: "next-standalone",
     available: true,
-    describeArtifact(root: string): BuildArtifact {
+    describeArtifact(
+        root: string,
+        _runtime?: RuntimeId,
+        layout?: ArtifactLayout,
+    ): BuildArtifact {
         return {
             shape: "next-standalone",
             root,
-            entry: ".next/standalone/server.js",
+            entry: standaloneEntry(layout),
             execution: "spawn",
         };
     },
