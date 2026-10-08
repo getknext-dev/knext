@@ -313,6 +313,75 @@ describe("blankStandaloneAdapterPath -- strictly gated on the Next.js version", 
     });
 });
 
+describe("blankStandaloneAdapterPath -- fails loudly on serialisation drift", () => {
+    /** server.js whose config names adapterPath in a form the rewrite cannot match. */
+    function drifted(serverDir: string): void {
+        writeFileSync(
+            join(serverDir, "server.js"),
+            `const nextConfig = { output: 'standalone', adapterPath: '${ADAPTER}' }\n`,
+        );
+    }
+
+    it("throws, naming the file and the expected pattern, on an affected Next", () => {
+        const { serverDir } = tree({ nextVersion: "16.3.6" });
+        drifted(serverDir);
+        const server = join(serverDir, "server.js");
+        let err: unknown;
+        try {
+            blankStandaloneAdapterPath({ serverDir });
+        } catch (e) {
+            err = e;
+        }
+        expect(err).toBeInstanceOf(Error);
+        const message = (err as Error).message;
+        expect(message).toContain(server);
+        expect(message).toContain("adapterPath");
+        expect(message).toContain('"adapterPath":"/path/adapter.mjs"');
+        expect(message).toContain("NOT blanked");
+    });
+
+    it("throws for required-server-files.json drift too, and writes nothing", () => {
+        const { serverDir } = tree({ nextVersion: "16.3.6" });
+        const manifest = join(serverDir, ".next", "required-server-files.json");
+        writeFileSync(manifest, `{ config: { adapterPath: '${ADAPTER}' } }\n`);
+        const before = read(manifest);
+        expect(() => blankStandaloneAdapterPath({ serverDir })).toThrow(
+            manifest,
+        );
+        expect(read(manifest)).toBe(before);
+    });
+
+    it("also throws for a pre-release of 16.4.0, which is still affected", () => {
+        const { serverDir } = tree({ nextVersion: "16.4.0-canary.3" });
+        drifted(serverDir);
+        expect(() => blankStandaloneAdapterPath({ serverDir })).toThrow(
+            "adapterPath",
+        );
+    });
+
+    it("does not throw on a fixed Next, whatever the format", () => {
+        const { serverDir } = tree({ nextVersion: "16.4.0" });
+        drifted(serverDir);
+        const result = blankStandaloneAdapterPath({ serverDir });
+        expect(result.applied).toBe(false);
+    });
+
+    it("does not throw when adapterPath is already unset (blank or null)", () => {
+        const { serverDir } = tree({ nextVersion: "16.3.6" });
+        writeFileSync(
+            join(serverDir, "server.js"),
+            'const nextConfig = {"adapterPath":"","x":1}\n',
+        );
+        writeFileSync(
+            join(serverDir, ".next", "required-server-files.json"),
+            '{ "config": { "adapterPath": null } }\n',
+        );
+        const result = blankStandaloneAdapterPath({ serverDir });
+        expect(result.applied).toBe(false);
+        expect(result.reason).toContain("sets no adapterPath");
+    });
+});
+
 describe("resolveStandaloneNextVersion", () => {
     it("reads the next the server would require, walking up from the server dir", () => {
         const { serverDir } = tree({ nextVersion: "16.3.5", nested: true });

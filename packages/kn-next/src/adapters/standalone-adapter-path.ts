@@ -134,7 +134,18 @@ export function resolveStandaloneNextVersion(
  */
 const ADAPTER_PATH_MEMBER = /("adapterPath"\s*:\s*)"(?:[^"\\]|\\.)+"/g;
 
-/** Rewrite one file; returns how many members it blanked (0 = file untouched). */
+/** An `adapterPath` member that is already unset: blank, or JSON null. */
+const UNSET_ADAPTER_PATH_MEMBER = /"adapterPath"\s*:\s*(?:""|null)/g;
+
+/**
+ * Rewrite one file; returns how many members it blanked (0 = file untouched).
+ *
+ * THROWS when the file still names `adapterPath` after the rewrite in any form
+ * other than an unset member: that is serialisation drift (a Next.js release
+ * that emits the config differently), and it means the adapter is still live in
+ * the runtime config. Returning quietly would ship the very 500 this exists to
+ * prevent and report success, so the build fails instead, naming the file.
+ */
 function blankMembers(file: string): number {
     if (!existsSync(file)) return 0;
     const src = readFileSync(file, "utf8");
@@ -143,6 +154,14 @@ function blankMembers(file: string): number {
         count++;
         return `${key}""`;
     });
+    if (out.replace(UNSET_ADAPTER_PATH_MEMBER, "").includes("adapterPath")) {
+        throw new Error(
+            `[knext] ${file} sets adapterPath in a form the Next.js < ${ADAPTER_PATH_404_FIXED_IN} workaround does not recognise, so it was NOT blanked. ` +
+                `Expected a JSON member matching ${ADAPTER_PATH_MEMBER} (e.g. "adapterPath":"/path/adapter.mjs"). ` +
+                "Left as is, a dynamicParams=false 404 can answer a burst of concurrent prefetches with a 500. " +
+                `Upgrade Next.js to ${ADAPTER_PATH_404_FIXED_IN} or later, or update standalone-adapter-path.ts for the new serialisation.`,
+        );
+    }
     if (count > 0) writeFileSync(file, out);
     return count;
 }
@@ -161,10 +180,11 @@ export interface BlankAdapterPathOptions {
  * Blank `adapterPath` in the standalone tree's runtime config when (and only
  * when) the installed Next.js is below 16.4.0. See the module comment.
  *
- * Never throws on an unreadable version or a tree with nothing to patch: those
- * are reported in the result instead, because a deploy must not die on a
- * workaround. It does not guess: an unreadable version is NOT treated as
- * affected.
+ * An unreadable version or a tree with no adapterPath is reported in the result,
+ * not thrown: a deploy must not die on a workaround it cannot judge, and an
+ * unreadable version is NOT treated as affected. But on an AFFECTED version
+ * whose config sets adapterPath in a form this cannot rewrite, it THROWS (see
+ * `blankMembers`): a silent `applied: false` there would ship the bug.
  */
 export function blankStandaloneAdapterPath(
     opts: BlankAdapterPathOptions,
