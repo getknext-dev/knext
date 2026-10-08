@@ -285,7 +285,7 @@ describe('the v1.3 workflow is DERIVED from the tag harness, provably', () => {
     expect(
       checkLineWorkflow({
         line: 'v1.3',
-        tag: 'v1.3.0-rc.10',
+        tag: 'v1.3.0-rc.999', // never a real pin: any tag other than the derived one
         sourceText: source.sourceText,
         executingText: committed,
       }).ok,
