@@ -211,6 +211,11 @@ describe('bun-version pins (#754) — scanned across every workflow', () => {
       // (same expression, lane-gated) immediately before the fold. A count
       // RISING is a decision; this one is it.
       'test-e2e-deploy.yml': 3,
+      // NEW: the parallel v1.3 credential lane. Its workflow is GENERATED from
+      // the v1.3 tag's own test-e2e-deploy.yml (scripts/compat-line-workflow.mjs),
+      // so it carries that file's three setup-bun steps byte for byte — and the
+      // pin assertions below cover them the same way. A count RISING is a decision.
+      'compat-credential-v1.3.yml': 3,
       // #608 — the vinext-axis compat lane. Its one setup-bun is UNCONDITIONAL
       // (the compiled artifact has no node arm) and carries the same
       // `inputs.bun-version || '<pin>'` fallback form, so the pin assertion

@@ -217,6 +217,71 @@ close` fail every time. It never checks out or executes the PR's own head conten
 list comes from the GitHub API, and the PR's pin-file content is read as a git blob, never a
 checkout.
 
+### The parallel v1.3 credential window (its own pin, workflow, ledger and tracker)
+
+The v1.3 line earns the same four-cell credential as v1.0 — node/bun × turbopack/webpack on the
+default standalone target, 16 shards per cell, 14 consecutive green nights per cell on one RC tag —
+**in parallel** with v1.0's window, not after v1.0 GA (founder decision 2026-10-08). vinext stays
+Beta on both lines and is not credentialed. The two windows share nothing a red night can cross:
+
+| | v1.0 | v1.3 |
+| --- | --- | --- |
+| pin | `.github/compat-credential-ref.json` | `.github/compat-credential-ref-v1.3.json` (`line: "v1.3"`) |
+| resolver | `scripts/compat-credential-ref.mjs` | `scripts/compat-credential-line.mjs --line v1.3` (refuses any tag that is not `v1.3.N-rc.M`) |
+| workflow | `test-e2e-deploy.yml` | `compat-credential-v1.3.yml` — **generated**, see below |
+| credential crons (UTC) | 01:17 node, 05:47 bun, 22:17 node-webpack, 23:47 bun-webpack | 11:17 node, 12:47 bun, 14:17 node-webpack, 15:47 bun-webpack |
+| per-cell red issue | `Compat CREDENTIAL RED (<lane>, RC tag)`, label `credential-reset` | `Compat v1.3 CREDENTIAL RED (<lane>, RC tag)`, label `credential-reset-v1.3` |
+| tracker | `compat-matrix-tracker-nightly.yml` → the pinned v1.0 tracker | `compat-credential-v1.3-tracker.yml` → **Compat v1.3 credential matrix tracker** (unpinned) |
+
+A v1.3 night's ledger lives in a `compat-credential-v1.3.yml` run, which the v1.0 audit never lists,
+and the v1.3 audit (`scripts/compat-line-tracker.mjs`) lists only that workflow and holds a cell unmet
+if any of its nights ran a tag off the v1.3 line. None of the v1.3 files is in the v1.0 freeze guard's
+frozen set, so landing or bumping the v1.3 lane never restarts a v1.0 window.
+
+**The v1.3 workflow is derived, not hand-written.** Scheduled workflows only run from `main`, so the
+v1.3 lane needs a file on `main`; it must still run the v1.3 tag's own harness. So
+`compat-credential-v1.3.yml` is the pinned tag's own `.github/workflows/test-e2e-deploy.yml` with only
+the substitutions declared in `scripts/compat-line-workflow.mjs` applied, plus a header recording the
+tag and the source's sha256. Every scripted step still runs the tag's own `scripts/` (checked out at
+the resolved sha), and `NEXTJS_REF` is whatever the tag's workflow declares (`v16.3.8` on rc.9). Every
+night, the credential-ref job fetches the resolved tag's `test-e2e-deploy.yml` and **refuses the
+night** unless the executing file is exactly that file derived — a stale or hand-edited workflow can
+never run a night. `tests/compat-credential-line.test.ts` checks the same thing at PR time without
+needing the tag.
+
+**Moving the v1.3 pin (rc.N → rc.N+1) restarts only the v1.3 window.** It is the v1.3 mirror of the
+v1.0 pin PR (the rc.6 one was a pin-only diff of `.github/compat-credential-ref.json`):
+
+1. The founder pushes the annotated `v1.3.X-rc.N+1` tag on `integration/v1.3` (publishing it is the
+   normal release lane). Confirm it exists: `git ls-remote --tags origin v1.3.X-rc.N+1`.
+2. On a branch off `origin/main`, set `rcTag` in `.github/compat-credential-ref-v1.3.json` to the new
+   tag. No `rcBumpMarker` is needed: the v1.0 freeze guard does not cover the v1.3 pin.
+3. Regenerate the derived workflow from the new tag, in the same PR:
+
+   ```bash
+   git fetch origin tag v1.3.X-rc.N+1
+   git show v1.3.X-rc.N+1:.github/workflows/test-e2e-deploy.yml > /tmp/v13-source.yml
+   node scripts/compat-line-workflow.mjs --write --line v1.3 --tag v1.3.X-rc.N+1 --source /tmp/v13-source.yml
+   bun test tests/compat-credential-line.test.ts
+   ```
+
+   If the new tag changed its own workflow so that an anchor moved, `--write` fails and names the
+   anchor; update `lineSubstitutions` deliberately (its expected counts are part of the proof).
+4. Open the PR with only those two files (plus a `lineSubstitutions` change, if step 3 required one).
+   It merges through the merge queue like any PR; the next v1.3 slot runs the new tag and every v1.3
+   cell's window restarts (its fingerprint moved). The v1.0 windows do not move.
+
+**What is not built for v1.3 yet.** There is no PR-time freeze guard for the v1.3 harness (the v1.0
+one protects v1.0's files only): a PR that edits `compat-credential-v1.3.yml` or the three v1.3
+scripts mid-window is not refused — it restarts the v1.3 windows through the fingerprint instead, and
+an edit that breaks the derivation refuses the next night. There is also no late-slot watchdog for
+the v1.3 crons; a dropped v1.3 night shows up as a missing night in the v1.3 tracker.
+
+**Capacity.** Eight credential cells now run per day (four per line), each 16 shards at up to 8 in
+parallel. The v1.3 slots sit between v1.0's last (05:47) and first (22:17) slots so the two lines do
+not compete for runners; GitHub can start a scheduled run hours late, so overlap is still possible on
+a bad day.
+
 ## First publish — DONE (2026-07-26)
 
 **The first npmjs publish has happened.** Verified against the registry:
