@@ -73,8 +73,8 @@ custom resource that the knext operator reconciles into a Knative Service. See
 - No global edge network or CDN — knext deploys to the cluster(s) you run.
 - No edge middleware or Partial Prerendering (PPR) — partly gated on upstream Next.js, not solely a
   knext gap.
-- The compiled single-executable ("vinext") build target is experimental and outside the v1.0
-  compatibility credential's scope.
+- The compiled single-executable ("vinext") build target is Beta, stays Beta in every release, and
+  is outside the compatibility credential's scope.
 
 ---
 
