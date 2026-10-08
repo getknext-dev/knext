@@ -13,10 +13,11 @@ The credential window now runs against Next.js v16.3.8. That is the same release
 today, and every credential night runs against that published release-candidate build, not the
 fast-moving main branch. The 14-consecutive-night count needed before any cell is
 considered fully credentialed **started recently and has not yet completed for any cell** — do not
-read anything on this page as "14 of 14, passing." Dispatched confirmation runs at this Next.js
-version have passed on all four v1.0 cells (node/bun x turbopack/webpack, 16 shards each),
-including knext's own build-cache verification step on every Node shard after a fix to that step —
-that is real evidence of current health, not a completed credential. See
+read anything on this page as "14 of 14, passing." Dispatched confirmation runs at the previous
+credentialed Next.js version (v16.3.5) passed on all four v1.0 cells (node/bun x turbopack/webpack,
+16 shards each), including knext's own build-cache verification step on every Node shard after a fix
+to that step. No dispatched confirmation run at v16.3.8 has been recorded yet, so that earlier
+evidence is not a claim about this version. See
 [Verified against the official Next.js test suite](/docs/compat-suite) for exactly what the
 credential covers, what counts as a credentialed night, and the honest current status.
 </Callout>
