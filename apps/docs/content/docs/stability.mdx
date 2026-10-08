@@ -50,12 +50,13 @@ more room for change than a Stable feature.
 
 ISR/Redis caching and object storage move to Stable once a scheduled, red-on-fail check covers
 them end-to-end on a real cluster against the default build target — the same bar every other
-Stable entry above already meets. That check does not exist yet. The `vinext` build target moves
-to Stable once it is behind its own 14-consecutive-night compatibility credential, the same bar
-the four default-target cells above already meet — it is implemented and exercised by a scheduled
-check today, but that check publishes a measured pass/fail count rather than gating on an
-unbroken green streak; see [the compatibility matrix](/docs/compat-matrix) for the current
-numbers and conditions on each runtime.
+Stable entry above already meets. That check does not exist yet.
+
+The `vinext` build target stays Beta in every release; it is not on the path to Stable. It is
+exercised by a scheduled compatibility check that publishes a measured pass/fail count rather than
+gating on an unbroken green streak; see [the compatibility matrix](/docs/compat-matrix) for the
+current numbers and conditions on each runtime. The four default-target cells above are being
+credentialed against the 14-consecutive-night bar; the matrix shows their current status.
 
 ## Experimental
 
