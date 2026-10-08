@@ -15,6 +15,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
@@ -2463,6 +2464,290 @@ describe("the bundled patches against the published tarball", () => {
             applyVinextPatches(patched);
             expect(readFileSync(join(patched, rel), "utf8")).toContain(wiring);
         });
+    });
+    it("vinext#3769: on Nitro, a public file the middleware matcher covers goes to vinext first; the setup hook registers the plugin", async () => {
+        // Ported from Next.js: test/e2e/middleware-static-files — a matcher
+        // that lists `/file.svg` must make middleware answer that request.
+        // Nitro's static handler runs first, so the setup hook registers a
+        // Nitro runtime plugin listing the covered files.
+        applyVinextPatches(patched);
+        writeFileSync(
+            join(patched, "dist", "__knext_vite_resolve_bridge.mjs"),
+            'export { resolveConfig } from "vite";\n',
+        );
+        const { resolveConfig } = await importPatched<{
+            resolveConfig: (
+                config: unknown,
+                command: "build",
+            ) => Promise<{ plugins: readonly Record<string, unknown>[] }>;
+        }>("dist/__knext_vite_resolve_bridge.mjs");
+        const vinextMod = await importPatched<{
+            default: (options?: Record<string, unknown>) => unknown;
+        }>("dist/index.js");
+
+        type FakeNitro = {
+            options: {
+                dev: boolean;
+                exportConditions?: string[];
+                output: { publicDir: string; serverDir: string };
+                plugins: string[];
+                publicAssets: Record<string, unknown>[];
+                routeRules: Record<string, Record<string, unknown>>;
+                traceDeps: string[];
+                virtual: Record<string, () => string>;
+            };
+            logger: { warn: () => void };
+        };
+        const runSetup = async (
+            middleware: string | null,
+            exportConditions?: string[],
+        ) => {
+            const root = mkdtempSync(join(tmpdir(), "knext-vp-3769-"));
+            tempRoots.push(root);
+            symlinkSync(
+                dirname(INSTALLED_VINEXT),
+                join(root, "node_modules"),
+                "junction",
+            );
+            writeFileSync(
+                join(root, "package.json"),
+                JSON.stringify({ type: "module" }),
+            );
+            mkdirSync(join(root, "app"));
+            mkdirSync(join(root, "public", "docs"), { recursive: true });
+            writeFileSync(
+                join(root, "app", "layout.tsx"),
+                "export default function RootLayout({ children }) {\n  return <html><body>{children}</body></html>;\n}\n",
+            );
+            writeFileSync(
+                join(root, "app", "page.tsx"),
+                "export default function Page() {\n  return <p>home</p>;\n}\n",
+            );
+            for (const file of [
+                "file.svg",
+                "vercel copy.svg",
+                "open.txt",
+                "docs/index.html",
+            ]) {
+                writeFileSync(join(root, "public", file), file);
+            }
+            if (middleware !== null) {
+                writeFileSync(join(root, "middleware.ts"), middleware);
+            }
+            const resolved = await resolveConfig(
+                {
+                    root,
+                    configFile: false,
+                    logLevel: "silent",
+                    plugins: [vinextMod.default({ appDir: root })],
+                },
+                "build",
+            );
+            // Nitro calls every Vite plugin's `nitro.setup`, in plugin order.
+            const hooks = resolved.plugins.filter(
+                (p) =>
+                    typeof (p as { nitro?: { setup?: unknown } }).nitro
+                        ?.setup === "function",
+            ) as unknown as {
+                name: string;
+                nitro: { setup: (n: FakeNitro) => Promise<void> };
+            }[];
+            expect(hooks.map((h) => h.name)).toContain(
+                "vinext:nitro-middleware-public-files",
+            );
+            const nitro: FakeNitro = {
+                options: {
+                    dev: false,
+                    ...(exportConditions ? { exportConditions } : {}),
+                    output: {
+                        publicDir: join(root, ".output", "public"),
+                        serverDir: join(root, ".output", "server"),
+                    },
+                    plugins: [],
+                    publicAssets: [],
+                    routeRules: {},
+                    traceDeps: [],
+                    virtual: {},
+                },
+                logger: { warn: () => {} },
+            };
+            for (const hook of hooks) await hook.nitro.setup(nitro);
+            return { root, nitro };
+        };
+        const PLUGIN_ID = "#vinext/nitro-middleware-public-files";
+        const MIDDLEWARE = `import { NextResponse } from "next/server";
+export const config = { matcher: ["/file.svg", "/vercel copy.svg", "/docs"] };
+export default function middleware() { return NextResponse.json({ middleware: true }); }
+`;
+
+        const withMatcher = await runSetup(MIDDLEWARE);
+        expect(withMatcher.nitro.options.plugins).toEqual([PLUGIN_ID]);
+        const source = withMatcher.nitro.options.virtual[PLUGIN_ID]?.();
+        if (!source) throw new Error("plugin source not registered");
+        expect(source).toContain(
+            'new Set(["/docs/index.html","/file.svg","/vercel copy.svg"])',
+        );
+
+        // No matcher: middleware covers every public file (Next.js parity).
+        const everything = await runSetup(
+            "export default function middleware() {}\n",
+        );
+        expect(everything.nitro.options.virtual[PLUGIN_ID]?.()).toContain(
+            'new Set(["/docs/index.html","/file.svg","/open.txt","/vercel copy.svg"])',
+        );
+
+        // No middleware, or a workerd preset: no plugin.
+        expect((await runSetup(null)).nitro.options.plugins).toEqual([]);
+        expect(
+            (await runSetup(MIDDLEWARE, ["workerd"])).nitro.options.plugins,
+        ).toEqual([]);
+
+        // The plugin itself, run against a fake Nitro app. Its one import is
+        // Nitro's own service fetch, stubbed here.
+        const pluginFile = join(withMatcher.root, "nitro-plugin.mjs");
+        writeFileSync(
+            pluginFile,
+            source.replace(
+                'import { fetchViteEnv } from "nitro/vite/runtime";',
+                "const fetchViteEnv = (name, request) => globalThis.__knextFetchViteEnv(name, request);",
+            ),
+        );
+        const seen: string[] = [];
+        const store = () =>
+            String(
+                (
+                    globalThis as Record<
+                        symbol,
+                        { getStore(): unknown } | undefined
+                    >
+                )[Symbol.for("vinext.nitro.middlewarePublicFile")]?.getStore(),
+            );
+        const app = {
+            fetch: async (request: Request): Promise<Response> => {
+                seen.push(
+                    `nitro:${request.method}:${new URL(request.url).pathname}:${store()}`,
+                );
+                return new Response("nitro");
+            },
+        };
+        const g = globalThis as { __knextFetchViteEnv?: unknown };
+        g.__knextFetchViteEnv = async (name: string, request: Request) => {
+            const path = new URL(request.url).pathname;
+            seen.push(`vinext:${name}:${request.method}:${path}:${store()}`);
+            // vinext fetching the file back once middleware lets it continue:
+            // the nested fetch must reach the Nitro app (its static handler).
+            if (path === "/file.svg" && request.method === "GET") {
+                await app.fetch(new Request("http://app/file.svg"));
+            }
+            return new Response("vinext");
+        };
+        try {
+            const plugin = (
+                (await import(pathToFileURL(pluginFile).href)) as {
+                    default: (a: typeof app) => void;
+                }
+            ).default;
+            plugin(app);
+            const hit = (path: string, method = "GET") =>
+                app.fetch(new Request(`http://app${path}`, { method }));
+            for (const path of [
+                "/file.svg",
+                "/file.svg/",
+                "/vercel%20copy.svg",
+                "/file.svg.gz",
+                "/docs",
+            ]) {
+                await hit(path);
+            }
+            await hit("/file.svg", "HEAD");
+            await hit("/file.svg", "POST");
+            await hit("/open.txt");
+            await hit("/_next/static/chunks/a.js");
+            await hit("/file%2esvg/x");
+            expect(seen).toEqual([
+                "vinext:ssr:GET:/file.svg:forwarded",
+                "nitro:GET:/file.svg:forwarded",
+                "vinext:ssr:GET:/file.svg/:forwarded",
+                "vinext:ssr:GET:/vercel%20copy.svg:forwarded",
+                "vinext:ssr:GET:/file.svg.gz:forwarded",
+                "vinext:ssr:GET:/docs:forwarded",
+                "vinext:ssr:HEAD:/file.svg:forwarded",
+                "nitro:POST:/file.svg:handling",
+                "nitro:GET:/open.txt:handling",
+                "nitro:GET:/_next/static/chunks/a.js:handling",
+                "nitro:GET:/file%2esvg/x:handling",
+            ]);
+
+            // An encoded slash is not a path separator: Nitro's static handler
+            // keeps `%2F` un-decoded, so `/a%2Fb.svg` is not the covered public
+            // file `/a/b.svg` and must stay on the static fast path.
+            const slashSource = source.replace(
+                /new Set\(\[.*?\]\)/,
+                'new Set(["/a/b.svg"])',
+            );
+            expect(slashSource).not.toBe(source);
+            const slashFile = join(withMatcher.root, "nitro-plugin-slash.mjs");
+            writeFileSync(
+                slashFile,
+                slashSource.replace(
+                    'import { fetchViteEnv } from "nitro/vite/runtime";',
+                    "const fetchViteEnv = (name, request) => globalThis.__knextFetchViteEnv(name, request);",
+                ),
+            );
+            const slashPlugin = (
+                (await import(pathToFileURL(slashFile).href)) as {
+                    default: (a: typeof app) => void;
+                }
+            ).default;
+            slashPlugin(app);
+            seen.length = 0;
+            await hit("/a/b.svg");
+            await hit("/a%2Fb.svg");
+            await hit("/a%2fb.svg");
+            expect(seen).toEqual([
+                "vinext:ssr:GET:/a/b.svg:forwarded",
+                "nitro:GET:/a%2Fb.svg:handling",
+                "nitro:GET:/a%2fb.svg:handling",
+            ]);
+        } finally {
+            delete g.__knextFetchViteEnv;
+        }
+    }, 120_000);
+
+    it("vinext#3769: the Pages filesystem route serves a direct public-file request only when the Nitro plugin forwarded it", async () => {
+        applyVinextPatches(patched);
+        const { fetchWorkerFilesystemRoute } = await importPatched<{
+            fetchWorkerFilesystemRoute: (
+                request: Request,
+                pathname: string,
+                phase: string,
+                fetchAsset: (r: Request) => Promise<Response>,
+                publicFiles: ReadonlySet<string>,
+            ) => Promise<Response | false>;
+        }>("dist/server/pages-request-pipeline.js");
+        const key = Symbol.for("vinext.nitro.middlewarePublicFile");
+        const registry = globalThis as Record<
+            symbol,
+            AsyncLocalStorage<string> | undefined
+        >;
+        registry[key] ??= new AsyncLocalStorage<string>();
+        const als = registry[key];
+        const direct = () =>
+            fetchWorkerFilesystemRoute(
+                new Request("http://app/file.svg"),
+                "/file.svg",
+                "direct",
+                async () => new Response("file"),
+                new Set(["/file.svg"]),
+            );
+        // Workers, or a Nitro request the plugin did not forward: the host's
+        // asset layer owns direct requests.
+        expect(await direct()).toBe(false);
+        expect(await als.run("handling", direct)).toBe(false);
+        const served = await als.run("forwarded", direct);
+        expect(served instanceof Response && (await served.text())).toBe(
+            "file",
+        );
     });
 });
 
