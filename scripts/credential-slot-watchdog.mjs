@@ -486,7 +486,7 @@ export function runCli({
     } catch (err) {
       // No anchor, so no start bound: name what is unchecked by its end.
       const end = new Date(now.getTime() - graceHours * 60 * 60 * 1000).toISOString();
-      window = `(the last successful scheduled watchdog run's start - ${graceHours} h, ${end}]`;
+      window = `(the start of the last scheduled watchdog run that succeeded on its first attempt - ${graceHours} h, ${end}]`;
       writeOutput('window', window);
       throw err;
     }

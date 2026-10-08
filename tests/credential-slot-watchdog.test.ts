@@ -2495,7 +2495,7 @@ describe('round 4: a failed listing crashes, and only a first-attempt success an
     expect(outputs.alert).toBeUndefined();
     // The crash alert names the window it did not check.
     expect(outputs.window).toBe(
-      "(the last successful scheduled watchdog run's start - 8 h, 2026-10-10T07:00:30.000Z]",
+      '(the start of the last scheduled watchdog run that succeeded on its first attempt - 8 h, 2026-10-10T07:00:30.000Z]',
     );
     expect(errors.join('\n')).toContain(`did NOT check the credential fires in ${outputs.window}`);
     expect(errors.join('\n')).toContain('api down');
