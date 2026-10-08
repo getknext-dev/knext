@@ -118,17 +118,17 @@ operator](/docs/operator#installing-the-operator) for the versioned-release URL 
 each release channel means.
 
 <Callout type="warn">
-**The `operator-latest` release URL resolves only once an operator release has been cut.** If no
-release exists yet — or you are building from a fork — generate the bundle locally instead, from
-the operator source directory:
+**Building from a fork, or want to build the operator yourself?** A fork has no `operator-latest`
+release of its own. Generate the bundle locally instead, from the operator source directory:
 
 ```sh title="shell"
 make build-installer IMG=<some-registry>/kn-next-operator:tag
 kubectl apply --server-side -f dist/install.yaml
 ```
 
-The checked-in `dist/install.yaml` carries a clearly-fake all-zeros bootstrap digest until the first
-published release.
+The manifests in the source tree carry a clearly-fake all-zeros placeholder digest; the release
+pipeline substitutes the real pushed digest. Pass your own `IMG` as above — the local bundle
+references the image you built, not a published one.
 </Callout>
 
 The published bundle's manager image is **digest-pinned** (`@sha256:…`), never `:latest`. You can

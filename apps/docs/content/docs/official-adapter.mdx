@@ -5,8 +5,8 @@ description: How knext's default (standalone) build uses the official Next.js ad
 
 <Callout type="info">
 **Scope, stated plainly.** knext's **default build** (`build: 'turbopack'`) uses this adapter: the
-adapter hooks described below run on `next build`, producing the standalone output the **792/792
-official-suite result** was earned on. The selectable **`build: 'vinext'`** target — which
+adapter hooks described below run on `next build`, producing the standalone output the official-suite
+results on the compatibility matrix were measured on. The selectable **`build: 'vinext'`** target — which
 compiles your app with [vinext](https://vinext.dev), an open-source, Vite-based implementation of
 the Next.js framework, into a [single executable](/docs/bun-runtime) — does **not** use this
 adapter; the hooks below are never called on that path. Which claim covers which path is tracked

@@ -45,8 +45,9 @@ below carries its own condition — none of them is "Bun is faster":
 **Choose the Node runtime instead if:** your app or a dependency relies on a Node-only API or a
 native module Bun doesn't support, your team standardizes its tooling on Node, or you need
 Node-specific build or debugging tooling. Node is fully supported — the official Next.js adapter
-runs on it the same way it runs on Bun — and it carries the same compatibility credential as Bun:
-two of the four credentialed runtime x builder combinations (Turbopack and Webpack) are Node's.
+runs on it the same way it runs on Bun — and it is covered by the same compatibility credential
+(still in progress) as Bun: two of the four runtime x builder combinations in that credential
+(Turbopack and Webpack) are Node's.
 
 ## The numbers
 
@@ -187,8 +188,9 @@ exactly as it does on a folder deployment — verified in CI against the product
 ## Verification status, stated honestly
 
 The default cell — Turbopack build on the compiled Bun executable — passed the official suite in
-one run (792 passed, 0 failed) with every deploy confirmed to boot the bytecode executable. It has
-passed once and is not yet credentialed: see [the compatibility credential](/docs/compat-suite). The vinext
+dispatched runs (792 passed, 0 failed at Next.js v16.2.12, and 1101 of 1101 at v16.3.8), with every
+deploy confirmed to boot the bytecode executable. It is not yet credentialed: see
+[the compatibility credential](/docs/compat-suite). The vinext
 build is a different artifact. It is measured, not credentialed: its latest run passed 728 of 778
 tests (38 failed, 12 quarantined). Read the per-feature status on the [compatibility matrix](/docs/compat-matrix) rather than
 assuming one number carries over.

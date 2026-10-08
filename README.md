@@ -56,7 +56,7 @@ custom resource that the knext operator reconciles into a Knative Service. See
 
 | Feature | Knative (via knext) |
 |---------|----------------------|
-| **Portability** | Any Kubernetes cluster (portable by design; GKE/kind-verified, and the **core operator/CLI deploy path validated end-to-end on EKS** — remaining data-plane/CI legs and other clouds tracked in [#46](https://github.com/getknext-dev/knext/issues/46)) |
+| **Portability** | Any Kubernetes cluster (portable by design; verified end-to-end on GKE and OKE, kind in CI, and the **core operator/CLI deploy path validated end-to-end on EKS**; AKS and OpenShift are not yet live-validated) |
 | **Scale-to-Zero** | Idle apps run zero pods; the platform brings a pod back up on the next request |
 | **Autoscaling** | Configurable (KPA/HPA) |
 | **Cold starts** | Optimized for scale-to-zero — the build pipeline includes bytecode compile caching to remove V8 compilation work from a cold wake. End-to-end wake time is dominated by cluster scheduling and is environment-dependent; see [docs/benchmarks/scale-to-zero-oke.md](docs/benchmarks/scale-to-zero-oke.md) and the [tuning cold start](https://knext-platform.dev/docs/tuning-cold-start) guide for measured numbers and their conditions — we do not publish a single number as a universal guarantee |
@@ -130,7 +130,7 @@ flowchart LR
 - ✅ **V8 Bytecode Caching** – the compile cache is populated at build time and baked into the image (Vercel-Fluid-style), so it is present from the very first cold pod on a stock cluster. Nothing to enable, no volume, no storage class, and no limit on how wide the app scales
 - ✅ **Fluid Compute** – Scale-to-zero, high concurrency, auto-scaling
 - ✅ **Distributed Caching** – Redis-backed caching with automatic tag invalidation
-- 🟡 **Portable by design** – GKE/kind-verified, and the **core operator/CLI deploy path is now verified end-to-end on EKS** (`knext deploy` → NextApp CR → operator reconciles → Knative Service → live `200` route); AKS/OKE remain portable by design. Remaining EKS data-plane/CI legs (S3 asset upload, ISR/tag invalidation, CI smoke) are in progress (tracked in [#46](https://github.com/getknext-dev/knext/issues/46)). See [Multi-Cloud Portability](docs/operator/multi-cloud-portability.md)
+- 🟡 **Portable by design** – verified end-to-end on GKE and OKE (kind in CI), and the **core operator/CLI deploy path is also verified end-to-end on EKS** (`knext deploy` → NextApp CR → operator reconciles → Knative Service → live `200` route). The EKS data-plane steps (S3 asset upload, ISR/tag invalidation) are documented but not each validated there; AKS and OpenShift are not yet live-validated. See [Multi-Cloud Portability](docs/operator/multi-cloud-portability.md) and the docs-site [support matrix](https://knext-platform.dev/docs/support-matrix).
 - ✅ **Cache Monitoring** – Built-in cache event dashboard
 - ✅ **Single-Command Deploy** – Automated build, push, and deploy
 - ✅ **Monorepo Ready** – Turborepo for efficient builds
@@ -138,9 +138,11 @@ flowchart LR
 
 > **What Next.js features does knext support?** See the evidence-gated
 > [compatibility matrix](docs/compat-matrix.md) — every ✅ is backed by a red-on-fail check, and a
-> guard test fails CI on any overclaim. knext **passes the official Next.js deploy-test suite**
-> (788 tests, zero failures, Node runtime, against Next.js 16.2) with a small, documented set of
-> exclusions — the matrix has the exact scope and the run evidence.
+> guard test fails CI on any overclaim. knext's dispatched runs of the official Next.js deploy-test
+> suite pass on all four default cells (Node/Bun x Turbopack/Webpack) — 1101 of 1101 tests at
+> Next.js v16.3.8 — with a small, documented set of exclusions. That is evidence, **not** the
+> credential, which is still in progress (see above). The matrix has the
+> exact scope and the run evidence.
 
 ---
 
@@ -151,7 +153,7 @@ flowchart LR
 
 ### Cold Start Performance (Scale from Zero)
 
-With `minScale: 0`, pods terminate after 10 seconds of inactivity and must be provisioned fresh on next request. The figures below are from a **single early GKE run** and are **not representative** — cold start is scheduling-dominated and environment-dependent. Our more rigorous multi-run OKE benchmark measures **~4s median (scheduling-bound)** on a 2-node cluster; treat that as the honest number and these as one favorable data point. See [benchmarks](docs/benchmarks/scale-to-zero-oke.md).
+With `minScale: 0`, pods terminate after 10 seconds of inactivity and must be provisioned fresh on next request. The figures below are from a **single early GKE run** and are **not representative** — cold start is scheduling-dominated and environment-dependent. Our multi-run OKE measurements on a quiet two-node cluster, with a light app and the image already on the node, gave medians of **about 1.9 to 2.4 s** from the first request to a full page (scheduling-bound; individual wakes can take several times the median; your numbers will differ) — treat that as the honest figure and these as one favorable data point. See [scale-to-zero & cold starts](https://knext-platform.dev/docs/scale-to-zero#measured-cold-start-by-runtime-and-builder) for the method and the table, and [benchmarks](docs/benchmarks/scale-to-zero-oke.md) for the older multi-run record.
 
 | Metric | Value (single early GKE run — not representative) |
 |--------|-------|
@@ -270,11 +272,11 @@ npx @getknext/core deploy
 ```
 
 This single command:
-1. Runs `next build` (`output: 'standalone'`) with the kn-next adapter
+1. Runs `next build` (`output: 'standalone'`) with the knext adapter
 2. Syncs static assets + prerenders to cloud storage (keyed by `buildId`)
-3. Builds & pushes the distroless Node Docker image
-4. Generates the Knative manifest
-5. Deploys to cluster
+3. Builds & pushes the runtime image, pinned by digest
+4. Applies a `NextApp` custom resource — the only thing the CLI writes to your cluster
+5. The operator reconciles it into a scale-to-zero Knative Service
 
 ---
 
@@ -614,10 +616,10 @@ events.onmessage = (e) => {
 
 ## Multi-Cloud Deployment
 
-> **Verification status:** knext is **portable by design**, but end-to-end deploys are
-> currently **verified on GKE and kind only**. The EKS/AKS/OKE examples below are
-> design-correct configurations, not yet validated on a live 2nd cloud — that
-> verification is tracked in [#46](https://github.com/getknext-dev/knext/issues/46).
+> **Verification status:** knext is **portable by design**. End-to-end deploys are verified on
+> **GKE and OKE** (and on kind in CI), and the core deploy path is validated on **EKS**; the AKS
+> example below is a design-correct configuration, not yet validated on a live cluster. See the
+> docs-site [support matrix](https://knext-platform.dev/docs/support-matrix).
 > Before deploying to a non-GKE cluster, read
 > **[Multi-Cloud Portability](docs/operator/multi-cloud-portability.md)** for the
 > per-cloud prerequisites (ingress-class, StorageClass, LoadBalancer/gateway IP, and

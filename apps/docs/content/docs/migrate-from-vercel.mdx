@@ -7,7 +7,7 @@ This guide is for a platform engineer who knows Vercel and wants to run the same
 Kubernetes cluster with Knative. It covers what maps across, what does not, how to move an app, and
 how to work out the cost for your own workload.
 
-It describes the **v1.0 line**. Where a later pre-release differs, the text says so.
+It describes the **v1.0 line**. Where a later release candidate differs, the text says so.
 
 <Callout type="warn">
 **Read [What you lose](#what-you-lose) before you start.** knext is a Next.js adapter for Knative,
@@ -237,7 +237,7 @@ node. Across our measurements on that cluster the median time from the first req
 was **about 1.9 to 2.4 seconds**:
 
 - A four-cell run (10 wakes per runtime and build combination, images already pulled) gave medians of 2.1 to 2.4 seconds.
-- A later run on a 1.3 pre-release (22 wakes per build, two builds) gave medians of about 1.9 seconds (standalone build on Bun) and about 2.1 seconds (vinext build on Bun). Its slowest wakes were about 5.1 and 5.7 seconds.
+- A later run on a 1.3 release candidate (22 wakes per build, two builds) gave medians of about 1.9 seconds (standalone build on Bun) and about 2.1 seconds (vinext build on Bun). Its slowest wakes were about 5.1 and 5.7 seconds.
 
 Individual wakes can take several times the median. See [Scale-to-zero & cold starts](/docs/scale-to-zero#measured-cold-start-by-runtime-and-builder)
 for the method and the full table.
