@@ -486,8 +486,12 @@ The fixes bundled with vinext 1.0.1:
 - **A rewrite to a file in `public/`** (a `next.config` rewrite, or `NextResponse.rewrite()` in
   middleware) serves that file instead of the 404 page. Pages Router apps get this for
   `beforeFiles`, `afterFiles` and `fallback` rewrites, App Router apps for `beforeFiles` and
-  middleware rewrites. Middleware still does not run for a direct request to a file in `public/`:
-  the server answers those before your middleware.
+  middleware rewrites.
+- **Middleware runs before a file in `public/` that its `matcher` covers**, as in Next.js. A
+  request for such a file reaches your middleware first, and the file is served only if the
+  middleware lets the request continue. Middleware without a `matcher` runs for every file in
+  `public/`. Files the matcher does not cover, and the build's own `/_next/static/` assets, are
+  still served directly without running middleware.
 - **A tsconfig `paths` entry with several targets** (`"@lib/*": ["lib/a/*", "lib/b/*"]`) falls back
   to the later targets when the first one does not resolve, and a `.d.ts` target is never used as
   a module, as in TypeScript and Next.js. Before, only the first target was used.
@@ -497,6 +501,12 @@ The fixes bundled with vinext 1.0.1:
   instrumentation file that requires a module only when the runtime is neither `nodejs` nor
   `edge`) is no longer resolved, so the build no longer fails on a module that branch could never
   load.
+- **In an app with both `app/` and `pages/`, a Pages route that returns `notFound`** (from
+  `getStaticProps` or `getServerSideProps`, or a path a `fallback: false` page does not list)
+  renders `app/not-found`, as in Next.js, instead of `pages/404`. The 404 response keeps the Pages
+  route's `Cache-Control`. An app with no `app/not-found` of its own gets the built-in not-found page,
+  not `pages/404`, as in Next.js. This applies to production builds; the development server still
+  shows `pages/404`.
 
 ## Build the image on your own builder (Cloud Build / CI)
 

@@ -126,6 +126,21 @@
       "file": "vinext-3766-nitro-absolute-asset-prefix-path.patch",
       "upstream": "https://github.com/cloudflare/vinext/pull/3766",
       "summary": "Nitro builds: with an absolute-URL `assetPrefix` that has a path (`https://cdn.example.com/sub`), the client bundles also answer at `/sub/_next/static/...` on the deployment origin, as with `next start`. The Nitro setup hook publishes the on-disk `_next/static` directory under the prefixed path as a fallthrough public asset (misses still reach vinext's middleware and plain-text 404), with Nitro's immutable cache rule unless the user set one. Open upstream (issue cloudflare/vinext#3765); retire when the pinned vinext includes cloudflare/vinext#3766."
+    },
+    {
+      "file": "vinext-3768-app-router-new-scroll-handler.patch",
+      "upstream": "https://github.com/cloudflare/vinext/pull/3768",
+      "summary": "App Router navigation scroll: adopts the Next.js 16.3 default scroll and focus handler. After a client navigation focus stays where it was (the navigated segment is not focused), the route content's highest client rect is measured against the root `scroll-padding-top` (so a fixed, sticky or display:none first child no longer picks the target, and a first node React hoists into <head> no longer suppresses scrolling to the top), and an intercepted route hands the scroll to its parallel slot instead of the retained page scrolling or blurring. Builds on cloudflare/vinext#2839 (scroll-padding-top). Open upstream (issue cloudflare/vinext#2831); retire when the pinned vinext includes cloudflare/vinext#3768."
+    },
+    {
+      "file": "vinext-3769-nitro-middleware-public-files.patch",
+      "upstream": "https://github.com/cloudflare/vinext/pull/3769",
+      "summary": "Nitro builds (node/bun presets): middleware runs before a `public/` file its matcher covers, as with `next start` (Next.js deploy test middleware-static-files). The setup hook lists the covered files and registers a Nitro runtime plugin that sends a GET/HEAD for one of them to the vinext service ahead of Nitro's static handler; once middleware lets it continue, the file is fetched back through the Nitro app (vinext-3750's fetcher), where the static handler serves it. `/_next/static/` and uncovered files keep the static fast path. Middleware without a matcher now runs for every public file. Applies on top of vinext-3750-nitro-public-file-rewrites.patch. Open upstream (issue cloudflare/vinext#3217); retire when the pinned vinext includes cloudflare/vinext#3769."
+    },
+    {
+      "file": "vinext-3771-hybrid-pages-not-found.patch",
+      "upstream": "https://github.com/cloudflare/vinext/pull/3771",
+      "summary": "Hybrid app/ + pages/: a Pages route that resolves to `notFound` (getStaticProps/getServerSideProps `notFound`, or a `fallback: false` miss) renders the App Router not-found instead of pages/404, keeping the source route Cache-Control, as Next.js does when the app directory is enabled (Next.js deploy tests not-found-with-pages-i18n and pages-router-app-not-found). Production only; dev is unchanged. Open upstream (issue cloudflare/vinext#3428); retire when the pinned vinext includes cloudflare/vinext#3771."
     }
   ],
   "pristine": {
@@ -134,7 +149,7 @@
     "dist/check.js": "d408170d32517d2eb6f882f54c18c7f3417cd323dcdea3f4e1be2c794e672b50",
     "dist/entries/app-ssr-entry.js": "6b025a80f17e7904229cf26502f074bd4770599224047b826b7781c76cd673bf",
     "dist/shims/public-shim-map.json.js": "46ffbbbacc08fc670e3d1998f91829842cb1abd3893854b2617ecd7ce9d9ea38",
-    "dist/config/next-config.js":"4bdf5a32040b293783c7893d34baafd67b5fde359308cbba84d393672abf7851",
+    "dist/config/next-config.js": "4bdf5a32040b293783c7893d34baafd67b5fde359308cbba84d393672abf7851",
     "dist/index.js": "511ef30c3c0d758448caf8b683d1dba02ab2286646a8abf94183a9248fc0430e",
     "dist/plugins/require-condition-resolution.js": "f8776d98dfc63c228810a8f6d3691fb0f8f7c7b42f700e6ed40c3501607a8321",
     "dist/server/pages-request-stage-entry.js": "dea2d42fbd269d1124e280e86648cc3bca831548e320b74d065ee6228698ca6a",
@@ -154,6 +169,12 @@
     "dist/server/prod-server.js": "a024dcbc8d33d1ed77f889df6aec0fd74c38061bfcc40093f9cf7cd77766dfa2",
     "dist/server/request-pipeline.js": "f50f66325cbbddd0c42fd47053d34ccfaa06e2969abf3106db886b3c8736afc7",
     "dist/server/worker-revalidation-context.js": "f28e0a44b8a49460a77db90594c23d118f33f9a740882faf061e1e4652fd46e7",
-    "dist/shims/dynamic.js": "66caec229001994c1db53882fb893dc442135494df0aba462226bbab749f3b34"
+    "dist/shims/dynamic.js": "66caec229001994c1db53882fb893dc442135494df0aba462226bbab749f3b34",
+    "dist/shims/app-router-scroll-state.js": "1c31a7ccc19ac69ecc50f6f2d07fc718c7e7ec2f4600bb1cf2af18d50e02984e",
+    "dist/shims/app-router-scroll.js": "0a43b02e382a6b4c3fcca38e8afb12e689b9b6a877e459b01bfd0a6f480053de",
+    "dist/server/app-browser-navigation-controller.js": "88d86bd6a56ca60617ca8607b3112b5d70bf6c5449d6b5be43a461050a9124a2",
+    "dist/server/pages-request-pipeline.js": "28e0b1a13966c2ccdcc43461927c7e49beb869fa9f70c2cca9cf2924ab8093ea",
+    "dist/server/app-pages-bridge.js": "5a6a66420eb53e8813c0169b7fa92f0334fbdfbcf5f6c1b59259fb695e89aa2c",
+    "dist/server/pages-page-handler.js": "bb70d235225807fe8357c1f3e055b47677c39666878e653eb07901d8cdcbbe17"
   }
 }

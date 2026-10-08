@@ -15,6 +15,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
@@ -51,6 +52,10 @@ import {
     vinextPatchesDir,
     vinextPatchesMain,
 } from "../cli/vinext-patches";
+import type {
+    HarnessOptions,
+    HarnessOutcome,
+} from "./helpers/vinext-scroll-harness";
 
 const PKG_ROOT = join(import.meta.dir, "..", "..");
 const PATCHES_DIR = join(PKG_ROOT, "templates", "vinext-patches");
@@ -2298,6 +2303,698 @@ describe("the bundled patches against the published tarball", () => {
             ).toEqual([]);
         }
     }, 120_000);
+
+    describe("vinext#3768: the Next.js 16.3 scroll and focus handler", () => {
+        // The scenarios run in a child process (helpers/vinext-scroll-harness.ts)
+        // against the REAL patched app-router-scroll module and scroll-intent
+        // state, in a happy-dom tree. See that file for why they cannot share
+        // this process.
+        function navigate(options: HarnessOptions): HarnessOutcome {
+            applyVinextPatches(patched);
+            const r = spawnSync(
+                process.execPath,
+                [
+                    join(
+                        import.meta.dir,
+                        "helpers",
+                        "vinext-scroll-harness.ts",
+                    ),
+                    patched,
+                    JSON.stringify(options),
+                ],
+                {
+                    encoding: "utf8",
+                    env: { ...process.env, NODE_ENV: "development" },
+                },
+            );
+            if (r.status !== 0) {
+                throw new Error(
+                    `scroll harness failed (${r.status}): ${r.stderr}`,
+                );
+            }
+            return JSON.parse(r.stdout) as HarnessOutcome;
+        }
+
+        it("scrolls the route content into view and leaves focus on the clicked link", () => {
+            const outcome = navigate({
+                route: [{ id: "page", documentTop: 2000 }],
+                scrollY: 500,
+            });
+            expect(outcome.scrollY).toBe(2000);
+            // The legacy handler called target.focus() on the route's element.
+            expect(outcome.activeElementId).toBe("clicked-link");
+            expect(outcome.pendingIntent).toBeNull();
+        });
+
+        it("measures the route against the root scroll-padding-top, not the viewport edge", () => {
+            // The page top sits 50px below the viewport top: visible, unless the
+            // root reserves 100px for a sticky header.
+            const route = [{ id: "page", documentTop: 100 }];
+            const padded = navigate({
+                route,
+                scrollY: 50,
+                padding: "100px",
+            });
+            expect(padded.scrollY).toBe(0);
+            const unpadded = navigate({ route, scrollY: 50 });
+            expect(unpadded.scrollY).toBe(50);
+            // Percentages resolve against the viewport height (800 * 50% = 400).
+            const percent = navigate({
+                route: [{ id: "page", documentTop: 300 }],
+                scrollY: 0,
+                padding: "50%",
+            });
+            expect(percent.scrollY).toBe(300);
+        });
+
+        it("targets the highest box across the route content, so a box-less first child does not decide the target", () => {
+            const outcome = navigate({
+                route: [
+                    { id: "hidden-first", documentTop: null },
+                    { id: "content", documentTop: 1000 },
+                ],
+                scrollY: 1500,
+            });
+            expect(outcome.scrollY).toBe(1000);
+            expect(outcome.activeElementId).toBe("clicked-link");
+            expect(outcome.pendingIntent).toBeNull();
+        });
+
+        it("measures every box of the route content, so a fixed first child does not make the page look already in view", () => {
+            // A fixed header sits at 100px for the whole navigation. The page
+            // content itself is above the viewport, so the page must scroll:
+            // judging only the first box (the header) would leave scrollY at 1500.
+            const outcome = navigate({
+                route: [
+                    { id: "fixed-header", documentTop: null, viewportTop: 100 },
+                    { id: "content", documentTop: 1000 },
+                ],
+                scrollY: 1500,
+            });
+            expect(outcome.scrollY).toBe(0);
+            expect(outcome.activeElementId).toBe("clicked-link");
+            expect(outcome.pendingIntent).toBeNull();
+        });
+
+        it("does not treat a resource React hoists into <head> as the route content, and leaves the intent for the document-top fallback", () => {
+            const outcome = navigate({
+                route: [{ id: "page", documentTop: 2900 }],
+                scrollY: 100,
+                hoistedStyleFirst: true,
+            });
+            expect(outcome.pendingIntent).not.toBeNull();
+            // The legacy handler marked the intent as hoisted, which made the
+            // fallback decline to scroll.
+            expect(outcome.pendingIntent?.targetHoistedInHead).toBeFalsy();
+            expect(outcome.activeElementId).toBe("clicked-link");
+        });
+
+        it("hands an intercepted navigation's scroll to the parallel slot: the retained page neither scrolls nor blurs, and the intent is consumed", () => {
+            const route = [{ id: "retained-page", documentTop: 2000 }];
+            const owned = navigate({
+                route,
+                scrollY: 500,
+                claim: { parallelSlotOwned: true },
+            });
+            expect(owned.scrollY).toBe(500);
+            expect(owned.activeElementId).toBe("clicked-link");
+            // Consumed, so the document-top fallback has nothing to act on.
+            expect(owned.pendingIntent).toBeNull();
+
+            // The same page scrolls when the navigation is not an interception.
+            const ordinary = navigate({ route, scrollY: 500 });
+            expect(ordinary.scrollY).toBe(2000);
+        });
+
+        it("still scrolls a real hash target from the retained page of an intercepted navigation, and consumes a missing one without scrolling", () => {
+            const route = [
+                { id: "retained-page", documentTop: 0 },
+                { id: "hash-target", documentTop: 3000 },
+            ];
+            const found = navigate({
+                route,
+                scrollY: 500,
+                hash: "#hash-target",
+                claim: { parallelSlotOwned: true },
+            });
+            expect(found.scrollY).toBe(3000);
+            expect(found.activeElementId).toBe("clicked-link");
+            expect(found.pendingIntent).toBeNull();
+
+            const missing = navigate({
+                route,
+                scrollY: 500,
+                hash: "#missing-target",
+                claim: { parallelSlotOwned: true },
+            });
+            expect(missing.scrollY).toBe(500);
+            expect(missing.activeElementId).toBe("clicked-link");
+            expect(missing.pendingIntent).toBeNull();
+        });
+
+        it("the navigation controller marks a committed interception as parallel-slot owned", () => {
+            const rel = "dist/server/app-browser-navigation-controller.js";
+            const wiring =
+                "claimAppRouterScrollIntentForCommit(options.scrollIntent, renderId, { parallelSlotOwned: approvedCommit.interception !== null })";
+            // The published controller never passes the ownership flag ...
+            expect(
+                readFileSync(join(INSTALLED_VINEXT, rel), "utf8"),
+            ).not.toContain("parallelSlotOwned");
+            // ... and the patched one derives it from the committed interception.
+            applyVinextPatches(patched);
+            expect(readFileSync(join(patched, rel), "utf8")).toContain(wiring);
+        });
+    });
+    it("vinext#3769: on Nitro, a public file the middleware matcher covers goes to vinext first; the setup hook registers the plugin", async () => {
+        // Ported from Next.js: test/e2e/middleware-static-files — a matcher
+        // that lists `/file.svg` must make middleware answer that request.
+        // Nitro's static handler runs first, so the setup hook registers a
+        // Nitro runtime plugin listing the covered files.
+        applyVinextPatches(patched);
+        writeFileSync(
+            join(patched, "dist", "__knext_vite_resolve_bridge.mjs"),
+            'export { resolveConfig } from "vite";\n',
+        );
+        const { resolveConfig } = await importPatched<{
+            resolveConfig: (
+                config: unknown,
+                command: "build",
+            ) => Promise<{ plugins: readonly Record<string, unknown>[] }>;
+        }>("dist/__knext_vite_resolve_bridge.mjs");
+        const vinextMod = await importPatched<{
+            default: (options?: Record<string, unknown>) => unknown;
+        }>("dist/index.js");
+
+        type FakeNitro = {
+            options: {
+                dev: boolean;
+                exportConditions?: string[];
+                output: { publicDir: string; serverDir: string };
+                plugins: string[];
+                publicAssets: Record<string, unknown>[];
+                routeRules: Record<string, Record<string, unknown>>;
+                traceDeps: string[];
+                virtual: Record<string, () => string>;
+            };
+            logger: { warn: () => void };
+        };
+        const runSetup = async (
+            middleware: string | null,
+            exportConditions?: string[],
+        ) => {
+            const root = mkdtempSync(join(tmpdir(), "knext-vp-3769-"));
+            tempRoots.push(root);
+            symlinkSync(
+                dirname(INSTALLED_VINEXT),
+                join(root, "node_modules"),
+                "junction",
+            );
+            writeFileSync(
+                join(root, "package.json"),
+                JSON.stringify({ type: "module" }),
+            );
+            mkdirSync(join(root, "app"));
+            mkdirSync(join(root, "public", "docs"), { recursive: true });
+            writeFileSync(
+                join(root, "app", "layout.tsx"),
+                "export default function RootLayout({ children }) {\n  return <html><body>{children}</body></html>;\n}\n",
+            );
+            writeFileSync(
+                join(root, "app", "page.tsx"),
+                "export default function Page() {\n  return <p>home</p>;\n}\n",
+            );
+            for (const file of [
+                "file.svg",
+                "vercel copy.svg",
+                "open.txt",
+                "docs/index.html",
+            ]) {
+                writeFileSync(join(root, "public", file), file);
+            }
+            if (middleware !== null) {
+                writeFileSync(join(root, "middleware.ts"), middleware);
+            }
+            const resolved = await resolveConfig(
+                {
+                    root,
+                    configFile: false,
+                    logLevel: "silent",
+                    plugins: [vinextMod.default({ appDir: root })],
+                },
+                "build",
+            );
+            // Nitro calls every Vite plugin's `nitro.setup`, in plugin order.
+            const hooks = resolved.plugins.filter(
+                (p) =>
+                    typeof (p as { nitro?: { setup?: unknown } }).nitro
+                        ?.setup === "function",
+            ) as unknown as {
+                name: string;
+                nitro: { setup: (n: FakeNitro) => Promise<void> };
+            }[];
+            expect(hooks.map((h) => h.name)).toContain(
+                "vinext:nitro-middleware-public-files",
+            );
+            const nitro: FakeNitro = {
+                options: {
+                    dev: false,
+                    ...(exportConditions ? { exportConditions } : {}),
+                    output: {
+                        publicDir: join(root, ".output", "public"),
+                        serverDir: join(root, ".output", "server"),
+                    },
+                    plugins: [],
+                    publicAssets: [],
+                    routeRules: {},
+                    traceDeps: [],
+                    virtual: {},
+                },
+                logger: { warn: () => {} },
+            };
+            for (const hook of hooks) await hook.nitro.setup(nitro);
+            return { root, nitro };
+        };
+        const PLUGIN_ID = "#vinext/nitro-middleware-public-files";
+        const MIDDLEWARE = `import { NextResponse } from "next/server";
+export const config = { matcher: ["/file.svg", "/vercel copy.svg", "/docs"] };
+export default function middleware() { return NextResponse.json({ middleware: true }); }
+`;
+
+        const withMatcher = await runSetup(MIDDLEWARE);
+        expect(withMatcher.nitro.options.plugins).toEqual([PLUGIN_ID]);
+        const source = withMatcher.nitro.options.virtual[PLUGIN_ID]?.();
+        if (!source) throw new Error("plugin source not registered");
+        expect(source).toContain(
+            'new Set(["/docs/index.html","/file.svg","/vercel copy.svg"])',
+        );
+
+        // No matcher: middleware covers every public file (Next.js parity).
+        const everything = await runSetup(
+            "export default function middleware() {}\n",
+        );
+        expect(everything.nitro.options.virtual[PLUGIN_ID]?.()).toContain(
+            'new Set(["/docs/index.html","/file.svg","/open.txt","/vercel copy.svg"])',
+        );
+
+        // No middleware, or a workerd preset: no plugin.
+        expect((await runSetup(null)).nitro.options.plugins).toEqual([]);
+        expect(
+            (await runSetup(MIDDLEWARE, ["workerd"])).nitro.options.plugins,
+        ).toEqual([]);
+
+        // The plugin itself, run against a fake Nitro app. Its one import is
+        // Nitro's own service fetch, stubbed here.
+        const pluginFile = join(withMatcher.root, "nitro-plugin.mjs");
+        writeFileSync(
+            pluginFile,
+            source.replace(
+                'import { fetchViteEnv } from "nitro/vite/runtime";',
+                "const fetchViteEnv = (name, request) => globalThis.__knextFetchViteEnv(name, request);",
+            ),
+        );
+        const seen: string[] = [];
+        const store = () =>
+            String(
+                (
+                    globalThis as Record<
+                        symbol,
+                        { getStore(): unknown } | undefined
+                    >
+                )[Symbol.for("vinext.nitro.middlewarePublicFile")]?.getStore(),
+            );
+        const app = {
+            fetch: async (request: Request): Promise<Response> => {
+                seen.push(
+                    `nitro:${request.method}:${new URL(request.url).pathname}:${store()}`,
+                );
+                return new Response("nitro");
+            },
+        };
+        const g = globalThis as { __knextFetchViteEnv?: unknown };
+        g.__knextFetchViteEnv = async (name: string, request: Request) => {
+            const path = new URL(request.url).pathname;
+            seen.push(`vinext:${name}:${request.method}:${path}:${store()}`);
+            // vinext fetching the file back once middleware lets it continue:
+            // the nested fetch must reach the Nitro app (its static handler).
+            if (path === "/file.svg" && request.method === "GET") {
+                await app.fetch(new Request("http://app/file.svg"));
+            }
+            return new Response("vinext");
+        };
+        try {
+            const plugin = (
+                (await import(pathToFileURL(pluginFile).href)) as {
+                    default: (a: typeof app) => void;
+                }
+            ).default;
+            plugin(app);
+            const hit = (path: string, method = "GET") =>
+                app.fetch(new Request(`http://app${path}`, { method }));
+            for (const path of [
+                "/file.svg",
+                "/file.svg/",
+                "/vercel%20copy.svg",
+                "/file.svg.gz",
+                "/docs",
+            ]) {
+                await hit(path);
+            }
+            await hit("/file.svg", "HEAD");
+            await hit("/file.svg", "POST");
+            await hit("/open.txt");
+            await hit("/_next/static/chunks/a.js");
+            await hit("/file%2esvg/x");
+            expect(seen).toEqual([
+                "vinext:ssr:GET:/file.svg:forwarded",
+                "nitro:GET:/file.svg:forwarded",
+                "vinext:ssr:GET:/file.svg/:forwarded",
+                "vinext:ssr:GET:/vercel%20copy.svg:forwarded",
+                "vinext:ssr:GET:/file.svg.gz:forwarded",
+                "vinext:ssr:GET:/docs:forwarded",
+                "vinext:ssr:HEAD:/file.svg:forwarded",
+                "nitro:POST:/file.svg:handling",
+                "nitro:GET:/open.txt:handling",
+                "nitro:GET:/_next/static/chunks/a.js:handling",
+                "nitro:GET:/file%2esvg/x:handling",
+            ]);
+
+            // An encoded slash is not a path separator: Nitro's static handler
+            // keeps `%2F` un-decoded, so `/a%2Fb.svg` is not the covered public
+            // file `/a/b.svg` and must stay on the static fast path.
+            const slashSource = source.replace(
+                /new Set\(\[.*?\]\)/,
+                'new Set(["/a/b.svg"])',
+            );
+            expect(slashSource).not.toBe(source);
+            const slashFile = join(withMatcher.root, "nitro-plugin-slash.mjs");
+            writeFileSync(
+                slashFile,
+                slashSource.replace(
+                    'import { fetchViteEnv } from "nitro/vite/runtime";',
+                    "const fetchViteEnv = (name, request) => globalThis.__knextFetchViteEnv(name, request);",
+                ),
+            );
+            const slashPlugin = (
+                (await import(pathToFileURL(slashFile).href)) as {
+                    default: (a: typeof app) => void;
+                }
+            ).default;
+            slashPlugin(app);
+            seen.length = 0;
+            await hit("/a/b.svg");
+            await hit("/a%2Fb.svg");
+            await hit("/a%2fb.svg");
+            expect(seen).toEqual([
+                "vinext:ssr:GET:/a/b.svg:forwarded",
+                "nitro:GET:/a%2Fb.svg:handling",
+                "nitro:GET:/a%2fb.svg:handling",
+            ]);
+        } finally {
+            delete g.__knextFetchViteEnv;
+        }
+    }, 120_000);
+
+    it("vinext#3769: the Pages filesystem route serves a direct public-file request only when the Nitro plugin forwarded it", async () => {
+        applyVinextPatches(patched);
+        const { fetchWorkerFilesystemRoute } = await importPatched<{
+            fetchWorkerFilesystemRoute: (
+                request: Request,
+                pathname: string,
+                phase: string,
+                fetchAsset: (r: Request) => Promise<Response>,
+                publicFiles: ReadonlySet<string>,
+            ) => Promise<Response | false>;
+        }>("dist/server/pages-request-pipeline.js");
+        const key = Symbol.for("vinext.nitro.middlewarePublicFile");
+        const registry = globalThis as Record<
+            symbol,
+            AsyncLocalStorage<string> | undefined
+        >;
+        registry[key] ??= new AsyncLocalStorage<string>();
+        const als = registry[key];
+        const direct = () =>
+            fetchWorkerFilesystemRoute(
+                new Request("http://app/file.svg"),
+                "/file.svg",
+                "direct",
+                async () => new Response("file"),
+                new Set(["/file.svg"]),
+            );
+        // Workers, or a Nitro request the plugin did not forward: the host's
+        // asset layer owns direct requests.
+        expect(await direct()).toBe(false);
+        expect(await als.run("handling", direct)).toBe(false);
+        const served = await als.run("forwarded", direct);
+        expect(served instanceof Response && (await served.text())).toBe(
+            "file",
+        );
+    });
+    // Builds a hybrid app/ + pages/ fixture with the patched vinext and
+    // serves it from the production server.
+    const serveHybridFixture = async (files: Record<string, string>) => {
+        applyVinextPatches(patched);
+        writeFileSync(
+            join(patched, "dist", "__knext_vite_builder_bridge.mjs"),
+            'export { createBuilder } from "vite";\n',
+        );
+        const { createBuilder } = await importPatched<{
+            createBuilder: (config: unknown) => Promise<{
+                buildApp: () => Promise<unknown>;
+            }>;
+        }>("dist/__knext_vite_builder_bridge.mjs");
+        const vinextMod = await importPatched<{
+            default: (options?: Record<string, unknown>) => unknown;
+        }>("dist/index.js");
+        const { startProdServer } = await importPatched<{
+            startProdServer: (options: Record<string, unknown>) => Promise<{
+                server: {
+                    address: () => { port: number } | string | null;
+                    close: (cb: (err?: Error) => void) => void;
+                };
+            }>;
+        }>("dist/server/prod-server.js");
+
+        const root = mkdtempSync(join(tmpdir(), "knext-vp-3771-"));
+        tempRoots.push(root);
+        // react, react-dom, react-server-dom-webpack, vite and the
+        // @vitejs plugins are installed beside vinext itself.
+        symlinkSync(
+            dirname(INSTALLED_VINEXT),
+            join(root, "node_modules"),
+            "junction",
+        );
+        for (const [rel, content] of Object.entries(files)) {
+            mkdirSync(dirname(join(root, rel)), { recursive: true });
+            writeFileSync(join(root, rel), content);
+        }
+        const builder = await createBuilder({
+            root,
+            configFile: false,
+            logLevel: "silent",
+            plugins: [vinextMod.default({ appDir: root })],
+        });
+        await builder.buildApp();
+
+        const { server } = await startProdServer({
+            port: 0,
+            host: "127.0.0.1",
+            outDir: join(root, "dist"),
+            noCompression: true,
+        });
+        const address = server.address();
+        if (!address || typeof address === "string") {
+            throw new Error("the hybrid fixture did not bind a port");
+        }
+        const request = async (
+            pathname: string,
+            init: { method?: string } = {},
+        ) => {
+            const res = await fetch(
+                `http://127.0.0.1:${address.port}${pathname}`,
+                {
+                    method: init.method ?? "GET",
+                    headers: {
+                        accept: "text/html",
+                        cookie: "nf-marker=marker-3771",
+                    },
+                },
+            );
+            return { res, body: await res.text() };
+        };
+        return {
+            request,
+            close: () =>
+                new Promise<void>((resolve) => server.close(() => resolve())),
+        };
+    };
+
+    const HYBRID_APP_FILES: Record<string, string> = {
+        "package.json": JSON.stringify({ type: "module" }),
+        "next.config.mjs":
+            'export default { i18n: { locales: ["en-GB", "en"], defaultLocale: "en", localeDetection: false } };\n',
+        "app/layout.tsx":
+            "export default function RootLayout({ children }) {\n  return <html><body>{children}</body></html>;\n}\n",
+        // Next.js only emits /_not-found for an app directory with pages.
+        "app/app-dir/page.tsx":
+            "export default function Page() {\n  return <p>app page</p>;\n}\n",
+        "pages/404.tsx":
+            "export default function NotFound() {\n  return <h1>PAGES ROUTER - 404 PAGE</h1>;\n}\n",
+        "pages/[[...slug]].tsx": [
+            'export function getStaticPaths() { return { paths: [], fallback: "blocking" }; }',
+            "export function getStaticProps({ params }) {",
+            "  const slug = params.slug ?? [];",
+            '  if (slug.length !== 1 || slug[0] !== "about") return { notFound: true };',
+            "  return { props: {} };",
+            "}",
+            "export default function CatchAll() { return <h1>Pages catch-all</h1>; }",
+            "",
+        ].join("\n"),
+    };
+
+    it("vinext#3771: in a hybrid app, a Pages route's notFound renders app/not-found with the source Cache-Control", async () => {
+        // Ported from Next.js: test/e2e/app-dir/not-found-with-pages-i18n and
+        // test/e2e/app-dir/pages-router-app-not-found — with the app
+        // directory enabled, a Pages notFound renders the App Router
+        // not-found (fully, request-time content included), not pages/404.
+        const app = await serveHybridFixture({
+            ...HYBRID_APP_FILES,
+            "app/not-found.tsx": [
+                'import { Suspense } from "react";',
+                'import { cookies } from "next/headers";',
+                "async function Marker() {",
+                "  const store = await cookies();",
+                '  return <p id="marker">{store.get("nf-marker")?.value ?? "missing"}</p>;',
+                "}",
+                "export default function NotFound() {",
+                "  return <main><h1>APP ROUTER - 404 PAGE</h1><Suspense fallback={<p>loading</p>}><Marker /></Suspense></main>;",
+                "}",
+                "",
+            ].join("\n"),
+            "pages/pages-route/[...slug].tsx": [
+                'export function getStaticPaths() { return { paths: [], fallback: "blocking" }; }',
+                "export function getStaticProps() { return { notFound: true, revalidate: 1 }; }",
+                "export default function PagesRoute() { return <p>never</p>; }",
+                "",
+            ].join("\n"),
+            "pages/ssr/[id].tsx": [
+                "export function getServerSideProps({ params }) {",
+                '  if (params.id === "found") return { props: { id: params.id } };',
+                "  return { notFound: true };",
+                "}",
+                "export default function SsrPage({ id }) { return <h1>SSR page {id}</h1>; }",
+                "",
+            ].join("\n"),
+            "pages/static/[id].tsx": [
+                'export function getStaticPaths() { return { paths: [{ params: { id: "listed" } }], fallback: false }; }',
+                "export function getStaticProps({ params }) { return { props: { id: params.id } }; }",
+                "export default function StaticPage({ id }) { return <h1>Static page {id}</h1>; }",
+                "",
+            ].join("\n"),
+            // A page that renders fine. The middleware below tries to set the
+            // internal notFound marker on it.
+            "pages/mw-marker.tsx":
+                "export default function MwMarker() { return <h1>Pages mw-marker page</h1>; }\n",
+            "middleware.ts": [
+                'import { NextResponse } from "next/server";',
+                "export function middleware() {",
+                "  const response = NextResponse.next();",
+                '  response.headers.set("x-vinext-pages-not-found", "1");',
+                "  return response;",
+                "}",
+                'export const config = { matcher: ["/mw-marker"] };',
+                "",
+            ].join("\n"),
+        });
+        try {
+            for (const pathname of [
+                "/",
+                "/foo",
+                "/en-GB/foo",
+                "/ssr/missing",
+                "/static/unlisted",
+            ]) {
+                const { res, body } = await app.request(pathname);
+                expect(`${pathname} ${res.status}`).toBe(`${pathname} 404`);
+                expect(body).toContain("APP ROUTER - 404 PAGE");
+                expect(body).not.toContain("PAGES ROUTER - 404 PAGE");
+                expect(body).toContain("marker-3771");
+                expect(res.headers.get("x-vinext-pages-not-found")).toBeNull();
+            }
+            // HEAD gets the same status and no body.
+            const head = await app.request("/foo", { method: "HEAD" });
+            expect(head.res.status).toBe(404);
+            expect(head.body).toBe("");
+            expect(head.res.headers.get("x-vinext-pages-not-found")).toBeNull();
+
+            const isr = await app.request("/pages-route/anything");
+            expect(isr.res.status).toBe(404);
+            expect(isr.body).toContain("APP ROUTER - 404 PAGE");
+            expect(isr.res.headers.get("cache-control")).toBe(
+                "s-maxage=1, stale-while-revalidate=31535999",
+            );
+
+            const found = await app.request("/about");
+            expect(found.res.status).toBe(200);
+            expect(found.body).toContain("Pages catch-all");
+            expect((await app.request("/ssr/found")).body).toContain(
+                "SSR page",
+            );
+            expect((await app.request("/static/listed")).body).toContain(
+                "Static page",
+            );
+
+            // `/_next/data/` requests are not documents: their 404 stays the
+            // JSON notFound payload, never the App Router page or the marker.
+            const buildId = /"buildId":"([^"]+)"/.exec(found.body)?.[1];
+            expect(buildId).toBeTruthy();
+            for (const pathname of [
+                `/_next/data/${buildId}/foo.json`,
+                `/_next/data/${buildId}/static/unlisted.json`,
+                `/_next/data/${buildId}/ssr/missing.json`,
+            ]) {
+                const data = await app.request(pathname);
+                expect(`${pathname} ${data.res.status}`).toBe(
+                    `${pathname} 404`,
+                );
+                expect(data.res.headers.get("content-type")).toContain(
+                    "application/json",
+                );
+                expect(data.body).not.toContain("APP ROUTER - 404 PAGE");
+                expect(
+                    data.res.headers.get("x-vinext-pages-not-found"),
+                ).toBeNull();
+            }
+
+            // Middleware cannot set the marker: a page that renders fine stays
+            // a 200 with its own content, and the header does not leak.
+            const mw = await app.request("/mw-marker");
+            expect(mw.res.status).toBe(200);
+            expect(mw.body).toContain("Pages mw-marker page");
+            expect(mw.body).not.toContain("APP ROUTER - 404 PAGE");
+            expect(mw.res.headers.get("x-vinext-pages-not-found")).toBeNull();
+        } finally {
+            await app.close();
+        }
+    }, 180_000);
+
+    it("vinext#3771: a hybrid app without app/not-found renders the built-in App not-found, not pages/404", async () => {
+        // Next.js always adds the built-in /_not-found entry to an app
+        // directory with pages (build/route-discovery.ts), and
+        // renderErrorToResponseImpl looks it up before /404, so pages/404 is
+        // never reached when the app has no not-found of its own.
+        const app = await serveHybridFixture(HYBRID_APP_FILES);
+        try {
+            for (const pathname of ["/foo", "/app-dir/missing"]) {
+                const { res, body } = await app.request(pathname);
+                expect(`${pathname} ${res.status}`).toBe(`${pathname} 404`);
+                expect(body).not.toContain("PAGES ROUTER - 404 PAGE");
+                expect(body).toContain("could not be found");
+                expect(res.headers.get("x-vinext-pages-not-found")).toBeNull();
+            }
+        } finally {
+            await app.close();
+        }
+    }, 180_000);
 });
 
 // ---------------------------------------------------------------------------

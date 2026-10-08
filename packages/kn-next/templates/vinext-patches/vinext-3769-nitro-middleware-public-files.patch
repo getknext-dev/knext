@@ -1,0 +1,189 @@
+knext bundled fix for vinext 1.0.1 (dist output)
+Upstream: https://github.com/cloudflare/vinext/pull/3769 (issue https://github.com/cloudflare/vinext/issues/3217)
+What it fixes: on a Nitro build for a Node-like preset (node, bun), Nitro's static handler is the
+first middleware of the app, so a direct request for a `public/` file was answered before the
+vinext service ran and middleware never saw it, even when its matcher listed the file (Next.js
+deploy test middleware-static-files: `/file.svg`, `/vercel copy.svg`, `/vercel%20copy.svg`,
+`/another/file.svg`, `/glob/file.svg`).
+The Nitro setup hook now lists the public files the middleware matcher can cover (`has`/`missing`
+ignored; no matcher, or one that cannot be read statically, covers every file) and registers a
+Nitro runtime plugin that sends a GET/HEAD for one of them to the vinext service, the same
+service Nitro's renderer calls. If middleware lets the request continue, vinext fetches the file
+back through the Nitro app (the fetcher from vinext-3750); a fetch nested inside a request the
+plugin handles reaches the Nitro app unchanged, so the static handler serves it and a rewrite
+destination never runs middleware twice. `/_next/static/` build assets and uncovered files keep
+Nitro's static fast path. Dev, workerd presets and apps without middleware are unchanged.
+Behaviour change: middleware WITHOUT a matcher now runs for every public file on these presets,
+as under `next start`.
+Port difference: upstream passes a `servesDirectRetrievals` argument from the Nitro Pages branch
+that vinext-3750 adds; editing that line here would stop vinext-3750 recognising itself as
+applied. Instead the plugin's request store lives on `globalThis`, and the Pages filesystem route
+serves a direct public-file request when the store says the plugin forwarded it. The setup
+lives in its own Nitro plugin object (vinext:nitro-middleware-public-files) rather than inside
+vinext:nitro-route-rules, whose lines vinext-3436/3747/3766 already edit. Same behaviour.
+Applies on top of vinext-3750-nitro-public-file-rewrites.patch (depends on its fetcher).
+Retire: delete this file (and its manifest entry) when the pinned vinext is >= the first
+release that includes cloudflare/vinext#3769.
+Applied by `knext vinext-patches` (runs from the app's postinstall and before `knext build`).
+
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -3943,6 +3943,33 @@
+ 				if (skippedRoutes.length > 0) (nitro.logger?.warn ?? console.warn)(`[vinext] Skipping generated Nitro routeRules for routes with existing exact cache config: ${skippedRoutes.join(", ")}`);
+ 			} }
+ 		},
++		(() => {
++			// Nitro's static handler answers public/ files before the vinext
++			// service, so middleware would never run for them. Send the ones the
++			// matcher can cover to vinext first (knext port of vinext#3769).
++			let publicDir = "public";
++			return {
++				name: "vinext:nitro-middleware-public-files",
++				configResolved(config) {
++					publicDir = config.publicDir === "" ? false : config.publicDir;
++				},
++				nitro: { setup: async (nitro) => {
++					if (!nextConfig || !hasAppDir && !hasPagesDir) return;
++					if (nitro.options.dev || !middlewarePath || nitroHostRuntime !== "node") return;
++					const middlewareFile = middlewarePath;
++					const { NITRO_MIDDLEWARE_PUBLIC_FILES_PLUGIN_ID, collectMiddlewareCoveredPublicFiles, generateNitroMiddlewarePublicFilesPlugin } = await import("./build/nitro-middleware-public-files.js");
++					nitro.options.virtual ??= {};
++					nitro.options.virtual[NITRO_MIDDLEWARE_PUBLIC_FILES_PLUGIN_ID] = () => generateNitroMiddlewarePublicFilesPlugin(collectMiddlewareCoveredPublicFiles({
++						root,
++						publicDir,
++						matcher: extractMiddlewareMatcherConfigValue(middlewareFile),
++						i18n: nextConfig?.i18n
++					}));
++					nitro.options.plugins ??= [];
++					if (!nitro.options.plugins.includes(NITRO_MIDDLEWARE_PUBLIC_FILES_PLUGIN_ID)) nitro.options.plugins.push(NITRO_MIDDLEWARE_PUBLIC_FILES_PLUGIN_ID);
++				} }
++			};
++		})(),
+ 		{
+ 			name: "vinext:ssr-manifest-backfill",
+ 			apply: "build",
+--- a/dist/server/pages-request-pipeline.js
++++ b/dist/server/pages-request-pipeline.js
+@@ -32,9 +32,16 @@
+ 	else headers.set(name, value);
+ 	return headers;
+ }
++/**
++* Serve a filesystem route through an asset fetcher. A direct GET/HEAD is left
++* to the host's asset layer, which answers those before the worker runs,
++* unless Nitro's middleware/public-file plugin sent it here first (see
++* build/nitro-middleware-public-files.js).
++*/
+ async function fetchWorkerFilesystemRoute(request, requestPathname, phase, fetchAsset, publicFiles, basePath = "", assetPathPrefix = "") {
+ 	const isRetrievalMethod = request.method === "GET" || request.method === "HEAD";
+-	if (phase === "direct" && isRetrievalMethod || requestPathname === "/api" || requestPathname.startsWith("/api/")) return false;
++	const forwardedByHost = globalThis[Symbol.for("vinext.nitro.middlewarePublicFile")]?.getStore() === "forwarded";
++	if (phase === "direct" && isRetrievalMethod && !forwardedByHost || requestPathname === "/api" || requestPathname.startsWith("/api/")) return false;
+ 	const assetUrl = new URL(request.url);
+ 	assetUrl.pathname = requestPathname;
+ 	assetUrl.search = "";
+--- /dev/null
++++ b/dist/build/nitro-middleware-public-files.js
+@@ -0,0 +1,102 @@
++import { matchesMiddlewarePathname } from "../server/middleware-matcher.js";
++import { scanPublicFileRoutes } from "../utils/public-routes.js";
++//#region src/build/nitro-middleware-public-files.ts
++/**
++* Middleware before `public/` files on Nitro's Node-like presets.
++*
++* Nitro's static handler is the first middleware of the Nitro app, so it
++* answers a request for a `public/` file before the vinext service runs, and
++* Next.js middleware never sees it. The build lists the public files the
++* middleware matcher can cover, and a Nitro runtime plugin sends a GET/HEAD for
++* one of them to the vinext service, the same service Nitro's renderer calls.
++* A fetch nested inside a request the plugin handles (vinext fetching the file
++* back once middleware lets the request continue, or a rewrite destination)
++* goes to the Nitro app unchanged, so the static handler serves it.
++*
++* knext port: the plugin's request store lives on `globalThis` and records
++* whether the request was sent to vinext for this reason, which is how the
++* Pages filesystem route knows to serve a direct public-file request.
++*/
++const NITRO_MIDDLEWARE_PUBLIC_FILE_KEY = "vinext.nitro.middlewarePublicFile";
++const NITRO_MIDDLEWARE_PUBLIC_FILES_PLUGIN_ID = "#vinext/nitro-middleware-public-files";
++function decodePublicFileRoute(route) {
++	try {
++		return decodeURIComponent(route);
++	} catch {
++		return route;
++	}
++}
++/**
++* The `public/` files, as the decoded pathnames Nitro's static handler looks
++* them up by, whose pathname (or, for an `index.html`, its directory's) the
++* middleware matcher can match. `has`/`missing`
++* conditions are ignored (they depend on the request), and a matcher that
++* cannot be read statically (`undefined`) covers every file, so the list never
++* misses a file middleware could run for. Middleware evaluates the full matcher
++* per request; a file it does not match is then served as usual.
++*/
++function collectMiddlewareCoveredPublicFiles(options) {
++	const matcher = options.matcher;
++	const covered = /* @__PURE__ */ new Set();
++	for (const route of scanPublicFileRoutes(options.root, options.publicDir)) {
++		if (!(route.endsWith("/index.html") ? [route, route.slice(0, -11) || "/"] : [route]).some((pathname) => matchesMiddlewarePathname(pathname, matcher, options.i18n))) continue;
++		covered.add(decodePublicFileRoute(route));
++	}
++	return [...covered].sort();
++}
++/**
++* Source of the Nitro runtime plugin. It wraps `nitroApp.fetch`, which every
++* Nitro preset reads after plugins run.
++*/
++function generateNitroMiddlewarePublicFilesPlugin(coveredPublicFiles) {
++	if (coveredPublicFiles.length === 0) return "export default function () {}\n";
++	return `import { AsyncLocalStorage } from "node:async_hooks";
++import { fetchViteEnv } from "nitro/vite/runtime";
++
++const coveredPublicFiles = new Set(${JSON.stringify(coveredPublicFiles)});
++// Set while a request from the server is handled, so a fetch nested inside it
++// (vinext fetching a public file back) reaches the Nitro app unchanged. The
++// value is "forwarded" when this plugin sent the request to vinext.
++const handling = (globalThis[Symbol.for(${JSON.stringify(NITRO_MIDDLEWARE_PUBLIC_FILE_KEY)})] ??= new AsyncLocalStorage());
++
++// The asset id Nitro's static handler derives from a pathname: one trailing
++// slash dropped, then decoded except for encoded slashes.
++function toAssetId(pathname) {
++  let id = pathname.length > 1 && pathname.endsWith("/") ? pathname.slice(0, -1) : pathname;
++  if (!id.startsWith("/")) id = "/" + id;
++  try {
++    return decodeURIComponent(id.replace(/%2f/gi, "%252F"));
++  } catch {
++    return id;
++  }
++}
++
++// The static handler also serves a directory's index.html and the
++// precompressed .gz/.br/.zst sibling of a file.
++function coversAssetId(id) {
++  return coveredPublicFiles.has(id) || coveredPublicFiles.has(id === "/" ? "/index.html" : id + "/index.html");
++}
++
++function isCoveredPublicFile(pathname) {
++  const id = toAssetId(pathname);
++  if (coversAssetId(id)) return true;
++  const uncompressed = id.replace(/\\.(?:gz|br|zst)$/, "");
++  return uncompressed !== id && coversAssetId(uncompressed);
++}
++
++export default function vinextMiddlewarePublicFiles(nitroApp) {
++  const fetch = nitroApp.fetch;
++  nitroApp.fetch = (request) => {
++    if (handling.getStore()) return fetch(request);
++    const forwarded =
++      (request.method === "GET" || request.method === "HEAD") &&
++      isCoveredPublicFile(new URL(request.url).pathname);
++    return handling.run(forwarded ? "forwarded" : "handling", () =>
++      forwarded ? fetchViteEnv("ssr", request) : fetch(request),
++    );
++  };
++}
++`;
++}
++//#endregion
++export { NITRO_MIDDLEWARE_PUBLIC_FILE_KEY, NITRO_MIDDLEWARE_PUBLIC_FILES_PLUGIN_ID, collectMiddlewareCoveredPublicFiles, generateNitroMiddlewarePublicFilesPlugin };

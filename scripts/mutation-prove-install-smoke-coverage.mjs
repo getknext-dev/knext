@@ -221,7 +221,7 @@ const MUTATIONS = [
     expect: 'red',
     guard: 'the scaffolded app cannot install — a dependency the template names does not exist',
     apply: (checkOnly) =>
-      mutate(APP_PKG_TPL, '"next": "16.3.6"', '"next": "0.0.0-does-not-exist"', checkOnly),
+      mutate(APP_PKG_TPL, '"next": "16.3.8"', '"next": "0.0.0-does-not-exist"', checkOnly),
     restore: () => git('checkout', '--', '.'),
   },
   {
