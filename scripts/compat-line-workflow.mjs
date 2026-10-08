@@ -74,6 +74,13 @@ function count(hay, needle) {
   return hay.split(needle).length - 1;
 }
 
+/** The pinned action lines the `nights` shape's cold-cache substitutions anchor on. */
+const CACHE_USES = '        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0';
+const SETUP_BUN_USES =
+  '        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0';
+const SETUP_NODE_USES =
+  '        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0';
+
 /**
  * The SHAPES a tag's own `test-e2e-deploy.yml` can take, keyed by id. Each
  * names, per cell, the v1.0 credential cron literal that tag schedules and how
@@ -87,7 +94,10 @@ function count(hay, needle) {
  *
  * Exactly one shape must match a source (`sourceShapeOf`), and either shape
  * derives to the SAME v1.3 crons (`spec.cronMap`, keyed by lane) and the same
- * prose.
+ * prose. That is how the v1.3 lane runs three times a day from the moment its
+ * workflow is regenerated, without waiting for its pin to reach a tag that
+ * carries the new schedule. Underiving tries each shape and keeps the one
+ * whose recovered source hashes to the header digest.
  *
  * FRESH CACHES (ADR-0056 Amendment 5, D11). A `runs` tag already skips every
  * cache restore on a credential run (its actions/cache steps carry
@@ -96,18 +106,8 @@ function count(hay, needle) {
  * Playwright). A `nights` tag predates that, so its `coldCaches` substitutions
  * add exactly those lines — the v1.3 lane runs cold from the moment it is
  * regenerated, like the v1.0 lane. tests/compat-credential-runs.test.ts scans
- * the derived file for any cache restore on a credential run. That is how the v1.3 lane runs three times a day from the moment its
- * workflow is regenerated, without waiting for its pin to reach a tag that
- * carries the new schedule. Underiving tries each shape and keeps the one
- * whose recovered source hashes to the header digest.
+ * the derived file for any cache restore on a credential run.
  */
-/** The pinned action lines the `nights` shape's cold-cache substitutions anchor on. */
-const CACHE_USES = '        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0';
-const SETUP_BUN_USES =
-  '        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0';
-const SETUP_NODE_USES =
-  '        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0';
-
 export const SOURCE_SHAPES = Object.freeze({
   nights: Object.freeze({
     crons: Object.freeze({

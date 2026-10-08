@@ -952,10 +952,11 @@ describe('evaluateWatchdog — end to end, offline', () => {
         run_started_at: '2026-09-29T23:49:00Z',
       },
     ]);
-    // ADR-0056 Amendment 5: the watchdog checks each lane's latest DUE fire
-    // (the latest at or before now - grace). 07:48 the next morning is 8 h
-    // after the last of the four (bun-webpack 23:47), so all four checked
-    // fires are 2026-09-29's, and none has rolled over to 09-30 yet.
+    // No previous watchdog run is given, so the window is the lookback:
+    // (now - grace - WATCHDOG_LOOKBACK_HOURS, now - grace] = (09-28 23:48,
+    // 09-29 23:48]. That holds exactly the four once-a-day fires of 09-29 —
+    // bun-webpack 23:47 is the last, one minute inside the due point — and
+    // every one has its run above.
     const now = new Date('2026-09-30T07:48:00Z');
     const verdicts = evaluateWatchdog({
       workflowYamlText: LEGACY_WORKFLOW,
