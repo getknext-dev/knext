@@ -1,5 +1,23 @@
 # kn-next
 
+## 1.3.0-rc.9
+
+### Patch Changes
+
+- bf2abb8: Security: new apps now scaffold with Next.js 16.3.8. The default and vinext builder templates move from 16.3.6. Next.js 16.0.0 through 16.3.7 have a high-severity server-side request forgery in Image Optimization (GHSA-cjq9-62q9-8jv4), fixed in 16.3.8. If you scaffolded an app from an earlier release candidate, upgrade it with `npm install next@16.3.8` (or a later 16.3.x).
+  
+  The Next.js cache handler now follows Next 16.3.7+, which scopes cached entries to their source route (cache keys now start with `/route-cache/`): the revalidate window handed back to Next after a scale-to-zero wake is filed under that exact key, so ISR pages generated at request time still read fresh after a wake. After upgrading, cache entries written under the old key shape (before Next 16.3.7) stay unread in Redis until their TTL expires.
+- Updated dependencies [5d904e5]
+- Updated dependencies [b4dc43d]
+- Updated dependencies [bf2abb8]
+- Updated dependencies [8da3bac]
+- Updated dependencies [565d906]
+- Updated dependencies [cb25f75]
+- Updated dependencies [35ae9c2]
+- Updated dependencies [7c7a06e]
+- Updated dependencies [b5d77d0]
+  - @getknext/core@1.3.0-rc.9
+
 ## 1.3.0-rc.8
 
 ### Patch Changes

@@ -1,5 +1,27 @@
 # @getknext/core
 
+## 1.3.0-rc.9
+
+### Minor Changes
+
+- b4dc43d: `knext build` and `knext deploy` now support an app in a workspace monorepo. Set `outputFileTracingRoot` and `turbopack.root` in the app's next.config to the workspace root and knext follows Next.js's nested layout, `.next/standalone/<app path>/server.js`, everywhere it looks for the server: the build, the bun-export heal, the compiled Bun executable, the generated Dockerfile and its build context (the workspace root), and the runtime image, which keeps the traced workspace files outside the app directory. Only an explicit setting enables this: a tracing root that Next merely inferred from a parent lockfile still stops `knext build` with an error that names the lockfile, and that error now says how to opt in. The flat layout is unchanged byte for byte, including the generated Dockerfile. See "Deploy from a workspace monorepo" in the docs.
+- 8da3bac: A default `knext build` no longer prints a dozen multi-line compile notes. They are folded into one line, such as `[knext standalone-compile] 12 notes; rerun with --verbose for details`, and the new `knext build --verbose` (or `KNEXT_VERBOSE=1`) lists them all. The same applies to the `[knext compile]` lines of the vinext target. Warnings, errors and strict-mode failures still print in full, and a failed compile prints every held note first. `knext create` now names the build target and runtime it chose, defaults included, and how to change them with `--builder` and `--runtime` or the `build` and `runtime` keys in `knext.config.ts`.
+
+### Patch Changes
+
+- 5d904e5: On Next.js before 16.4.0, a route with `dynamicParams = false` could answer a burst of concurrent prefetches for a parameter outside `generateStaticParams` with a 500 instead of a 404, whenever an adapter was configured; Next.js fixed it in 16.4.0 and did not backport it. `knext build`, `deploy` and `preview` now clear `adapterPath` from the standalone server's runtime configuration (`server.js` and `.next/required-server-files.json`) when the installed Next.js is older than 16.4.0, before the Bun executable is compiled, so both runtimes ship the fix. The adapter only works during `next build`, so nothing at runtime depends on it; those requests become plain 404s, as on a standalone server without an adapter, and each one logs `Error: Internal: NoFallbackError`. On Next.js 16.4.0 or later nothing changes. The workaround is gated on the installed Next.js version and removes itself there.
+- bf2abb8: Security: new apps now scaffold with Next.js 16.3.8. The default and vinext builder templates move from 16.3.6. Next.js 16.0.0 through 16.3.7 have a high-severity server-side request forgery in Image Optimization (GHSA-cjq9-62q9-8jv4), fixed in 16.3.8. If you scaffolded an app from an earlier release candidate, upgrade it with `npm install next@16.3.8` (or a later 16.3.x).
+  
+  The Next.js cache handler now follows Next 16.3.7+, which scopes cached entries to their source route (cache keys now start with `/route-cache/`): the revalidate window handed back to Next after a scale-to-zero wake is filed under that exact key, so ISR pages generated at request time still read fresh after a wake. After upgrading, cache entries written under the old key shape (before Next 16.3.7) stay unread in Redis until their TTL expires.
+- 565d906: A vinext app now scrolls and focuses after a client navigation the way Next.js 16.3 does. Focus stays on the link you clicked instead of jumping to the new page, the page is measured against the root `scroll-padding-top` so a sticky header no longer hides the top of it, a stylesheet React hoists into `<head>` no longer stops the scroll to the top, and an intercepted route (a modal in a parallel slot) no longer scrolls or blurs the page underneath. This is a bundled fix for vinext 1.0.1 until a vinext release includes it.
+- cb25f75: On the vinext target, in an app with both `app/` and `pages/`, a Pages route that returns `notFound` (from `getStaticProps` or `getServerSideProps`, or a path a `fallback: false` page does not list) now renders `app/not-found`, as Next.js does, instead of `pages/404`. The 404 keeps the Pages route's `Cache-Control`.
+- 35ae9c2: An absolute-URL `assetPrefix` with a path, such as `https://cdn.example.com/assets`, now works on the vinext target with both runtimes. The app also serves its client bundles at `/assets/_next/static/...` on its own origin, as `next start` does, so a CDN or proxy in front of it can fetch them from there. Before this, those requests returned 404.
+- 7c7a06e: On the vinext target, with both runtimes, middleware now runs before a file in `public/` that its `matcher` covers, as with `next start`. The file is served only if the middleware lets the request continue. Middleware without a `matcher` now runs for every file in `public/`. Before this, the server returned such files directly and middleware never saw the request.
+- b5d77d0: New vinext apps now pin `h3` to `2.0.2` (npm, Bun, pnpm and Yarn overrides). The `h3` that Nitro pins answered a malformed path such as `/%2/` with a 500 or an uncaught error; the pinned release answers 400.
+- Updated dependencies [bf2abb8]
+  - @getknext/lib@1.3.0-rc.9
+  - @getknext/db@1.3.0-rc.9
+
 ## 1.3.0-rc.8
 
 ### Patch Changes
