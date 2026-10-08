@@ -11,7 +11,7 @@
  * CI only consumes the committed record it helps produce.
  *
  * Usage:
- *   git clone --depth 1 --branch v16.3.6 --filter=blob:none --sparse \
+ *   git clone --depth 1 --branch v16.3.8 --filter=blob:none --sparse \
  *     https://github.com/vercel/next.js.git next && \
  *     git -C next sparse-checkout set test
  *   bun scripts/scan-suite-native-addons.mjs next

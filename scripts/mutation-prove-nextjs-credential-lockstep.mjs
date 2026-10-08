@@ -82,7 +82,7 @@ const MUTATIONS = [
     label: 'test-e2e-deploy.yml: bump the workflow_dispatch nextjsRef DEFAULT to a drifted value',
     subject: 'testE2eDeploy',
     anchor:
-      "        description: 'vercel/next.js git ref to test against (pinned tag ≥ v16.2.0; do NOT use canary)'\n        required: false\n        default: 'v16.3.6'",
+      "        description: 'vercel/next.js git ref to test against (pinned tag ≥ v16.2.0; do NOT use canary)'\n        required: false\n        default: 'v16.3.8'",
     replacement:
       "        description: 'vercel/next.js git ref to test against (pinned tag ≥ v16.2.0; do NOT use canary)'\n        required: false\n        default: 'v16.3.3'",
   },
@@ -108,64 +108,29 @@ const MUTATIONS = [
   {
     label: 'docs/compat-matrix.md: drift the cited vercel/next.js version from the manifest',
     subject: 'docsMatrixMd',
-    anchor: 'against `vercel/next.js` **v16.3.6**',
+    anchor: 'against `vercel/next.js` **v16.3.8**',
     replacement: 'against `vercel/next.js` **v16.3.3**',
   },
   {
     label: 'compat-matrix.mdx: drift the cited Next.js version from the manifest',
     subject: 'docsMatrixMdx',
-    anchor: 'The credential window now runs against Next.js v16.3.6.',
+    anchor: 'The credential window now runs against Next.js v16.3.8.',
     replacement: 'The credential window now runs against Next.js v16.3.3.',
   },
   {
-    // The manifest legitimately DIVERGES today (harness v16.3.6, scaffold
-    // 16.3.8), so a bare "add a newer-release claim" edit would be decorative.
-    // Converge the manifest and every other credentialed-ref site on 16.3.8,
-    // leaving the docs' "newer Next.js release" sentence the ONLY stale thing.
     label:
-      'converge credentialed ref on the shipped pin everywhere EXCEPT the docs "newer Next.js release" claim -> that claim is now false and must red',
-    edits: [
-      {
-        subject: 'manifest',
-        anchor: '"credentialedNextRef": "v16.3.6",',
-        replacement: '"credentialedNextRef": "v16.3.8",',
-      },
-      {
-        subject: 'testE2eDeploy',
-        anchor:
-          "        description: 'vercel/next.js git ref to test against (pinned tag ≥ v16.2.0; do NOT use canary)'\n        required: false\n        default: 'v16.3.6'",
-        replacement:
-          "        description: 'vercel/next.js git ref to test against (pinned tag ≥ v16.2.0; do NOT use canary)'\n        required: false\n        default: 'v16.3.8'",
-      },
-      {
-        subject: 'testE2eDeploy',
-        anchor: "  NEXTJS_REF: ${{ github.event.inputs.nextjsRef || 'v16.3.6' }}",
-        replacement: "  NEXTJS_REF: ${{ github.event.inputs.nextjsRef || 'v16.3.8' }}",
-      },
-      {
-        subject: 'docsMatrixMd',
-        anchor: 'against `vercel/next.js` **v16.3.6**',
-        replacement: 'against `vercel/next.js` **v16.3.8**',
-      },
-      {
-        subject: 'docsMatrixMdx',
-        anchor: 'The credential window now runs against Next.js v16.3.6.',
-        replacement: 'The credential window now runs against Next.js v16.3.8.',
-      },
-    ],
-  },
-  {
-    label:
-      'compat-matrix.mdx: drop the "newer Next.js release" explanation while the manifest STILL documents a divergence',
+      'compat-matrix.mdx: falsely claim a "newer Next.js release" while the manifest shows NO divergence (credentialedNextRef already equals shippedNextPin)',
     subject: 'docsMatrixMdx',
-    anchor: 'scaffold a newer Next.js release\nin the same',
-    replacement: 'scaffold a Next.js version\nin the same',
+    anchor:
+      'anything a self-hosted deploy can or should reproduce; those are documented and excluded the same\nway the architectural gaps below are, with their own evidence trail.\n</Callout>',
+    replacement:
+      'anything a self-hosted deploy can or should reproduce; those are documented and excluded the same\nway the architectural gaps below are, with their own evidence trail.\n\nNew apps pin a newer Next.js release than what is credentialed above.\n</Callout>',
   },
   {
     label:
       'manifest: reintroduce a divergence (credentialedNextRef != shippedNextPin) with no explanation added to the docs',
     subject: 'manifest',
-    anchor: '"credentialedNextRef": "v16.3.6",',
+    anchor: '"credentialedNextRef": "v16.3.8",',
     replacement: '"credentialedNextRef": "v16.2.12",',
   },
 
@@ -268,7 +233,7 @@ const MUTATIONS = [
   },
 ];
 
-declareMutations(17);
+declareMutations(16);
 
 const RUNNER = resolveSpecRunner(REPO_ROOT, SPEC);
 
@@ -281,8 +246,8 @@ function specPasses() {
   return r.status === 0;
 }
 
-if (MUTATIONS.length !== 17) {
-  console.error(`FATAL: declared 17 mutations, table has ${MUTATIONS.length}`);
+if (MUTATIONS.length !== 16) {
+  console.error(`FATAL: declared 16 mutations, table has ${MUTATIONS.length}`);
   process.exit(1);
 }
 
