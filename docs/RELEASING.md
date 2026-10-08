@@ -234,8 +234,8 @@ Beta on both lines and is not credentialed. The two windows share nothing a red 
 | tracker | `compat-matrix-tracker-nightly.yml` → the pinned v1.0 tracker | `compat-credential-v1.3-tracker.yml` → **Compat v1.3 credential matrix tracker** (unpinned) |
 
 A v1.3 night's ledger lives in a `compat-credential-v1.3.yml` run, which the v1.0 audit never lists,
-and the v1.3 audit (`scripts/compat-line-tracker.mjs`) lists only that workflow and holds a cell unmet
-if any of its nights ran a tag off the v1.3 line. None of the v1.3 files is in the v1.0 freeze guard's
+and the v1.3 tracker (`scripts/compat-line-tracker.mjs`, which grades with the same `auditWindow` as
+v1.0) lists only that workflow and holds a cell unmet if any of its nights ran a tag off the v1.3 line. None of the v1.3 files is in the v1.0 freeze guard's
 frozen set, so landing or bumping the v1.3 lane never restarts a v1.0 window.
 
 **The v1.3 workflow is derived, not hand-written.** Scheduled workflows only run from `main`, so the
@@ -268,7 +268,7 @@ v1.0 pin PR (the rc.6 one was a pin-only diff of `.github/compat-credential-ref.
    If the new tag changed its own workflow so that an anchor moved, `--write` fails and names the
    anchor; update `lineSubstitutions` deliberately (its expected counts are part of the proof).
 4. Open the PR with only those two files (plus a `lineSubstitutions` change, if step 3 required one;
-   a guard-script edit regenerates the same workflow the same way).
+   an edit to any file in the guard closure regenerates the same workflow the same way).
    It merges through the merge queue like any PR; the next v1.3 slot runs the new tag and every v1.3
    cell's window restarts (its fingerprint moved). The v1.0 windows do not move.
 
@@ -278,16 +278,28 @@ v1.0 pin PR (the rc.6 one was a pin-only diff of `.github/compat-credential-ref.
 - The v1.3 night's fingerprint hashes the RC tag's checkout and the **executing workflow file**
   `compat-credential-v1.3.yml`. A PR that edits that file mid-window is not refused, but it restarts
   the v1.3 windows (and the next night refuses it unless it is still exactly the derivation).
-- The three `main`-side scripts that resolve and grade the line — `scripts/compat-credential-line.mjs`
-  (resolver, off-line refusal, cron map), `scripts/compat-line-workflow.mjs` (the byte-equality gate)
-  and `scripts/compat-line-tracker.mjs` (the audit) — are in neither the v1.0 frozen set nor the
-  fingerprint's checkout. So their sha256 digests are written into the generated header of
-  `compat-credential-v1.3.yml` (`# guard-script-sha256: …`). Editing one of them makes the committed
-  workflow stale: the PR-time spec and the run-time `--check` both refuse it until it is regenerated
-  (`node scripts/compat-line-workflow.mjs --write …`, same command as a pin bump), and the regenerated
-  file has different bytes — a different fingerprint — so every v1.3 cell's window restarts. A
-  guard-script edit can therefore never keep banking nights on the old window. This is mutation-proved
-  by exit code in `scripts/mutation-prove-compat-credential-line.mjs`.
+- The code that resolves and grades the line runs from `main`: the three entry scripts
+  `scripts/compat-credential-line.mjs` (resolver, off-line refusal, cron map),
+  `scripts/compat-line-workflow.mjs` (the byte-equality gate) and `scripts/compat-line-tracker.mjs`
+  (the tracker), **plus everything they import, transitively**. The grading itself is
+  `auditWindow` in `scripts/compat-window-audit.mjs`, the tracker rows come from
+  `scripts/compat-matrix-tracker.mjs`, and the resolver uses `gitLsRemote`/`isRcTag` from
+  `scripts/compat-credential-ref.mjs`. None of that is in the fingerprint's checkout. So the sha256 of
+  every file in that import closure is written into the generated header of
+  `compat-credential-v1.3.yml` (`# guard-script-sha256: …`). The closure is computed by following the
+  imports, not from a list, so a file a future edit imports is covered without anyone adding it.
+  Editing any of those files makes the committed workflow stale: the PR-time spec and the run-time
+  `--check` both refuse it until it is regenerated (`node scripts/compat-line-workflow.mjs --write …`,
+  same command as a pin bump). The regenerated file has different bytes, so it has a different
+  fingerprint and every v1.3 cell's window restarts. Some of these files (`compat-window-audit.mjs`,
+  `compat-credential-ref.mjs`) are also frozen for v1.0, so an approved v1.0 edit to them restarts the
+  v1.3 windows too. That is the intended effect, because it changes how v1.3 is graded as well.
+  This is mutation-proved in `scripts/mutation-prove-compat-credential-line.mjs`, which attributes
+  each mutation to the one named test it must turn red.
+- Limits. Protection rests on the PR-time spec plus the next night's `--check`. If an edit reaches
+  `main` without the spec (an admin bypass), it is caught only when the next v1.3 night refuses, and
+  the tracker runs the edited code until then. The closure covers JavaScript imports only. It does
+  not cover the tracker workflow file or the Node version the scripts run on.
 
 There is no late-slot watchdog for the v1.3 crons; a dropped v1.3 night shows up as a missing night
 in the v1.3 tracker.

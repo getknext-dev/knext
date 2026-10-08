@@ -28,15 +28,18 @@
  *     asserts the recovered source hashes to the header digest, re-derives to
  *     the committed file, and that the header tag equals the line's pin.
  *
- * A THIRD PROOF, FOR THE SCRIPTS THAT GRADE THE LINE. The resolver
- * (`compat-credential-line.mjs`), this gate and the tracker run from `main`;
- * the fingerprint covers the RC tag's checkout plus the one executing workflow
- * file, so by themselves they are neither fingerprinted nor frozen. Their
- * sha256 digests (`lineGuardDigests`) are therefore recorded in the header —
- * i.e. in the executing file's bytes. Editing any of them changes the
- * expected header, so `--check` and the PR-time spec refuse the old file;
- * the regenerated file has different bytes, a different fingerprint, and
- * every v1.3 cell's window restarts. No v1.0 frozen file is involved.
+ * A THIRD PROOF, FOR THE CODE THAT GRADES THE LINE. The resolver
+ * (`compat-credential-line.mjs`), this gate and the tracker run from `main`,
+ * together with everything they transitively import (`lineGuardClosure`:
+ * the audit's `auditWindow`, the matrix tracker's row formatting, the v1.0
+ * resolver's `gitLsRemote` / `isRcTag`, …). The fingerprint covers the RC
+ * tag's checkout plus the one executing workflow file, so none of that is
+ * fingerprinted. Every closure file's sha256 (`lineGuardDigests`) is therefore
+ * recorded in the header — i.e. in the executing file's bytes. Editing any of
+ * them changes the expected header, so `--check` and the PR-time spec refuse
+ * the old file; the regenerated file has different bytes, a different
+ * fingerprint, and every v1.3 cell's window restarts. Some closure files are
+ * also in the v1.0 frozen set; they are only READ here, never edited.
  *
  * ANCHORS ARE COUNTED, NOT HOPED FOR. Each substitution names the exact number
  * of occurrences it expects; a different count THROWS. When a future tag
@@ -53,8 +56,8 @@
  */
 
 import { createHash } from 'node:crypto';
-import { readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { lineSpec } from './compat-credential-line.mjs';
 
@@ -196,23 +199,137 @@ export function lineSubstitutions(spec) {
   return subs;
 }
 
+/** `import … from '…'` / `export … from '…'` / bare `import '…'`. */
+const STATIC_SPECIFIER_RE = /\b(?:from|import)\s*(['"])([^'"\n]+)\1/g;
 /**
- * sha256 of each of the line's GUARD SCRIPTS (`spec.guardScripts`), read from
- * `repoRoot` (default: this repo). These are the main-side scripts that decide
- * what a night runs and how it is graded — the resolver, this derivation gate
- * and the tracker — and none of them is in the v1.0 frozen set or in the
- * fingerprint. Writing their digests into the derived header (the executing
- * file, which the fingerprint hashes byte for byte) is what makes editing one
- * mid-window restart the window: the edit changes the expected header, so
- * `--check` and the PR-time spec refuse the old file, and the regenerated one
- * has different bytes.
+ * `import(` / `require(` as CODE — the argument is inspected separately.
+ * Two prose exclusions keep the fail-closed below from firing on comments:
+ * a match right after a backtick is skipped (in valid JS that is
+ * template-literal TEXT, never a call), and so is a space before the paren
+ * ("they import (…)") — biome, which formats every script here, writes a
+ * call with no space, so formatted code never takes that shape.
+ */
+const CALL_RE = /(?<!`)\b(?:import|require)\(/g;
+/** The ways an ES module can load by a name the scan cannot read. */
+const LOADER_ESCAPE_RE = /(?<!`)\bgetBuiltinModule\(/;
+/** A call argument that is one plain string literal, then `)`. */
+const LITERAL_CALL_ARG_RE = /^\s*(['"])([^'"\n]+)\1\s*\)/;
+
+/**
+ * Every RELATIVE module specifier `src` may load: static `import`/`export …
+ * from`, bare `import '…'`, and literal `import('…')` / `require('…')`.
+ *
+ * DELIBERATELY OVER-INCLUSIVE, AND DEPENDENCY-FREE. This runs inside the
+ * derived workflow's credential-ref job, which has no `node_modules` — so no
+ * parser. Instead the scan reads RAW text, comments and strings included: a
+ * prose mention of `from './x.mjs'` adds that file to the guard set, which
+ * costs only an extra digest (a file that does not exist is skipped by the
+ * caller). Missing a real import is the failure that matters, and it is
+ * covered from the other side: `tests/compat-credential-line.test.ts`
+ * re-derives the closure with a REAL parser (`Bun.Transpiler`) and reds if any
+ * file it finds is absent from this one.
+ *
+ * FAILS CLOSED on an `import(` / `require(` whose argument is not one plain
+ * string literal, and on any route to node:module's `createRequire` — a
+ * computed specifier might be relative, and a silently-unguarded dependency is
+ * exactly what this closure exists to rule out.
+ *
+ * @param {string} src
+ * @param {string} where  the file, for the error text
+ * @returns {string[]}
+ */
+export function localImportSpecifiers(src, where) {
+  /** @type {string[]} */
+  const specs = [];
+  for (const m of src.matchAll(STATIC_SPECIFIER_RE)) specs.push(m[2]);
+  for (const m of src.matchAll(CALL_RE)) {
+    const rest = src.slice((m.index ?? 0) + m[0].length);
+    if (/^\s*\)/.test(rest)) continue; // `import()` in prose names nothing
+    const lit = rest.match(LITERAL_CALL_ARG_RE);
+    if (!lit) {
+      throw new Error(
+        `compat-line-workflow: ${where} has a non-literal ${m[0]}…) — the guard closure cannot follow a computed specifier; use a static import`,
+      );
+    }
+    specs.push(lit[2]);
+  }
+  // `createRequire` (and every alias of it) comes from node:module, and
+  // `process.getBuiltinModule` reaches it without an import: either one is a
+  // loader this scan cannot follow, so refuse rather than under-report.
+  if (specs.some((s) => s === 'module' || s === 'node:module') || LOADER_ESCAPE_RE.test(src)) {
+    throw new Error(
+      `compat-line-workflow: ${where} reaches node:module (createRequire) — the guard closure cannot follow an aliased require; use a static import`,
+    );
+  }
+  // A package `imports` alias (`#x`), an absolute path or a file: URL can name a
+  // repo file without looking relative — refuse rather than skip it as a package.
+  const opaque = specs.find((s) => s.startsWith('#') || s.startsWith('/') || s.startsWith('file:'));
+  if (opaque !== undefined) {
+    throw new Error(
+      `compat-line-workflow: ${where} imports ${JSON.stringify(opaque)} — the guard closure follows only relative specifiers; use one`,
+    );
+  }
+  return specs.filter((s) => s.startsWith('./') || s.startsWith('../'));
+}
+
+/**
+ * The line's GUARD CLOSURE: `spec.guardEntries` plus every repo file they
+ * TRANSITIVELY import (relative specifiers, followed recursively), as sorted
+ * repo-relative paths, read from `repoRoot` (default: this repo).
+ *
+ * Why transitive: the entries grade nights with code they import — the
+ * tracker's `auditWindow` (compat-window-audit.mjs) and `formatCellRow` /
+ * `looksLikeFetchFailure` (compat-matrix-tracker.mjs), the resolver's
+ * `gitLsRemote` / `isRcTag` (compat-credential-ref.mjs), and whatever those
+ * import in turn. An edit to any of them changes v1.3 grading as surely as an
+ * edit to an entry, so all of them are digested. Computed, not enumerated: a
+ * new import is in the set the moment it is written.
+ *
+ * @param {ReturnType<typeof lineSpec>} spec
+ * @param {string} [repoRoot]
+ * @returns {string[]}
+ */
+export function lineGuardClosure(spec, repoRoot = REPO_ROOT) {
+  const root = resolve(repoRoot);
+  const seen = new Set();
+  const queue = [...spec.guardEntries];
+  while (queue.length > 0) {
+    const rel = /** @type {string} */ (queue.shift());
+    if (seen.has(rel)) continue;
+    seen.add(rel);
+    const abs = join(root, rel);
+    for (const s of localImportSpecifiers(readFileSync(abs, 'utf8'), rel)) {
+      const target = resolve(dirname(abs), s);
+      const relTarget = relative(root, target);
+      if (relTarget.startsWith('..') || isAbsolute(relTarget)) {
+        throw new Error(
+          `compat-line-workflow: ${rel} imports ${s}, outside the repo — the guard closure cannot cover it`,
+        );
+      }
+      // Over-inclusive scan (see localImportSpecifiers): a prose match that
+      // names no file is not a dependency.
+      if (!existsSync(target) || !statSync(target).isFile()) continue;
+      queue.push(relTarget.split(sep).join('/'));
+    }
+  }
+  return [...seen].sort();
+}
+
+/**
+ * sha256 of each file in the line's GUARD CLOSURE (`lineGuardClosure`). None
+ * of these is in the fingerprint (it hashes the RC tag's checkout plus the one
+ * executing workflow file), and most are in no frozen set. Writing their
+ * digests into the derived header (the executing file, which the fingerprint
+ * hashes byte for byte) is what makes editing one mid-window restart the
+ * window: the edit changes the expected header, so `--check` and the PR-time
+ * spec refuse the old file, and the regenerated one has different bytes.
  *
  * @param {ReturnType<typeof lineSpec>} spec
  * @param {string} [repoRoot]
  * @returns {[string, string][]}
  */
 export function lineGuardDigests(spec, repoRoot = REPO_ROOT) {
-  return spec.guardScripts.map((path) => [
+  return lineGuardClosure(spec, repoRoot).map((path) => [
     path,
     sha256(readFileSync(join(repoRoot, path), 'utf8')),
   ]);
@@ -244,9 +361,11 @@ function buildHeader(spec, tag, digest, guards) {
     '# byte — including every comment below, which still names v1.0 slots and',
     "# paths — is the tag's. The credential-ref job REFUSES the night unless this",
     '# file equals derive(<resolved tag>:.github/workflows/test-e2e-deploy.yml).',
-    '# The guard-script digests below fold the main-side scripts that resolve and',
-    '# grade this line into the bytes the compat-window fingerprint hashes: editing',
-    '# one forces a regeneration, which moves the fingerprint and restarts the window.',
+    '# The guard-script digests below fold the main-side code that resolves and',
+    '# grades this line (the resolver, this gate and the tracker, plus everything they',
+    '# transitively import) into the bytes the compat-window fingerprint hashes:',
+    '# editing any of it forces a regeneration, which moves the fingerprint and',
+    '# restarts the window.',
     `# Regenerate on a ${spec.line} pin bump or a guard-script edit: docs/RELEASING.md.`,
     ...guards.map(([path, d]) => `# guard-script-sha256: ${path} ${d}`),
     `# derived-from-tag: ${tag}`,
@@ -289,12 +408,14 @@ const HEADER_TAG_RE = /^# derived-from-tag: (\S+)$/m;
 const HEADER_DIGEST_RE = /^# derived-from-sha256: ([0-9a-f]{64})$/m;
 
 /**
- * Read the provenance header; throws unless it is exactly the generated one.
+ * Read the provenance header; throws unless it is exactly the generated one
+ * and records exactly the guard closure computed from `repoRoot`.
  *
  * @param {string} derivedText
  * @param {string} [line]
+ * @param {string} [repoRoot]
  */
-export function parseDerivedHeader(derivedText, line = 'v1.3') {
+export function parseDerivedHeader(derivedText, line = 'v1.3', repoRoot = REPO_ROOT) {
   const spec = lineSpec(line);
   const tag = derivedText.match(HEADER_TAG_RE)?.[1];
   const digest = derivedText.match(HEADER_DIGEST_RE)?.[1];
@@ -302,9 +423,10 @@ export function parseDerivedHeader(derivedText, line = 'v1.3') {
     throw new Error('compat-line-workflow: no derived-from-tag / derived-from-sha256 header');
   }
   const guards = [...derivedText.matchAll(GUARD_LINE_RE)].map((m) => [m[1], m[2]]);
-  if (JSON.stringify(guards.map(([p]) => p)) !== JSON.stringify(spec.guardScripts)) {
+  const closure = lineGuardClosure(spec, repoRoot);
+  if (JSON.stringify(guards.map(([p]) => p)) !== JSON.stringify(closure)) {
     throw new Error(
-      `compat-line-workflow: the header must record exactly the guard scripts ${spec.guardScripts.join(', ')}`,
+      `compat-line-workflow: the header must record exactly the guard closure ${closure.join(', ')}`,
     );
   }
   const header = buildHeader(spec, tag, digest, guards);
@@ -319,11 +441,11 @@ export function parseDerivedHeader(derivedText, line = 'v1.3') {
  * reverse order (each `to` must occur exactly `count` times at that point).
  *
  * @param {string} derivedText
- * @param {{line: string}} opts
+ * @param {{line: string, repoRoot?: string}} opts
  */
-export function underiveLineWorkflow(derivedText, { line }) {
+export function underiveLineWorkflow(derivedText, { line, repoRoot }) {
   const spec = lineSpec(line);
-  const { tag, digest, guards, header } = parseDerivedHeader(derivedText, line);
+  const { tag, digest, guards, header } = parseDerivedHeader(derivedText, line, repoRoot);
   let text = derivedText.slice(header.length);
   for (const s of [...lineSubstitutions(spec)].reverse()) {
     const n = count(text, s.to);
@@ -346,7 +468,7 @@ export function underiveLineWorkflow(derivedText, { line }) {
 export function checkLineWorkflow({ line, tag, sourceText, executingText, repoRoot }) {
   let header;
   try {
-    header = parseDerivedHeader(executingText, line);
+    header = parseDerivedHeader(executingText, line, repoRoot);
   } catch (err) {
     return { ok: false, reason: err.message };
   }
@@ -373,7 +495,7 @@ export function checkLineWorkflow({ line, tag, sourceText, executingText, repoRo
     return {
       ok: false,
       reason:
-        "the executing workflow differs from derive(tag's test-e2e-deploy.yml) — it was hand-edited, or a guard script (resolver / derivation gate / tracker) changed since it was generated; regenerate it",
+        "the executing workflow differs from derive(tag's test-e2e-deploy.yml) — it was hand-edited, or a file in the guard closure (resolver / derivation gate / tracker or anything they import) changed since it was generated; regenerate it",
     };
   }
   return {
