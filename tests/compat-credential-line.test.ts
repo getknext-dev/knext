@@ -280,6 +280,7 @@ describe('the v1.3 workflow is DERIVED from the tag harness, provably', () => {
     const subs = lineSubstitutions(SPEC);
     expect(subs.length).toBeGreaterThan(5);
     const first = subs.find((s: { count: number }) => s.count === 1);
+    if (!first) throw new Error('expected at least one single-occurrence substitution');
     const missing = source.sourceText.replace(first.from, '');
     expect(() => deriveLineWorkflow(missing, { line: 'v1.3', tag: header.tag })).toThrow();
     const doubled = `${source.sourceText}\n${first.from}`;
@@ -317,7 +318,7 @@ describe('the v1.3 workflow is DERIVED from the tag harness, provably', () => {
   it('EVALUATED: exactly the four v1.3 crons are scheduled, each a credential night of its own cell', () => {
     const wf = parse(committed) as any;
     const crons = (wf.on.schedule as { cron: string }[]).map((s) => s.cron).sort();
-    expect(crons).toEqual(Object.values(SPEC.cronMap).sort());
+    expect(crons).toEqual(Object.values(SPEC.cronMap as Record<string, string>).sort());
     const ev = (key: string, event: Record<string, unknown>) =>
       evaluate(exprBody(wf.env[key]), { github: { event } });
     const want: Record<string, string> = {
@@ -509,7 +510,7 @@ function v13Night(lane: string, i: number, over: Record<string, unknown> = {}) {
   };
 }
 const NOW = new Date('2026-01-15T12:00:00.000Z');
-const allGreen = () =>
+const allGreen = (): ReturnType<typeof v13Night>[] =>
   SPEC.cells.flatMap((c: { lane: string }) =>
     Array.from({ length: 14 }, (_, i) => v13Night(c.lane, i)),
   );
