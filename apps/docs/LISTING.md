@@ -48,7 +48,7 @@ against the official Next.js compatibility suite.
 > targeting Knative on any Kubernetes cluster (GKE, EKS, AKS, OKE, bare-metal). It runs against the
 > official Next.js compatibility test suite (Next.js v16.3.6, all four runtime×builder cells:
 > node/bun × turbopack/webpack) on a nightly/scheduled basis — `[FILL AT GA]` for the final
-> consecutive-night count and pass/fail totals once the 14-night credential window closes; do not
+> consecutive-run count and pass/fail totals once the 14-run credential window closes; do not
 > cite a count here before then. It provides true scale-to-zero (idle services drop to zero
 > replicas and wake via the Knative activator), cached cold starts (`NODE_COMPILE_CACHE` on Node;
 > opt-in per-file bytecode compilation on the Bun runtime), and a Go operator that is the single
@@ -68,7 +68,7 @@ against the official Next.js compatibility suite.
 [compatibility matrix](https://knext-platform.dev/docs/compat-matrix): every claim cites the CI run that
 proves it, and the matrix row reverts on any unexplained red. Both runtimes (Node and Bun) and both
 builders (Turbopack and Webpack) run against the suite — `[FILL AT GA]` for per-cell run IDs and
-pass/fail counts once the 14-night credential window closes (tracked at
+pass/fail counts once the 14-run credential window closes (tracked at
 getknext-dev/knext#1359). Claims here are limited to what those four cells show; no vinext/compiled
 claim is made.
 

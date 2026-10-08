@@ -29,7 +29,7 @@
 > matches the self-hosted expectation in every case — full per-test provenance is in the ADR
 > addendum and `.github/compat-credentialed-next-version.json`.
 >
-> **The last COMPLETED 14-night-eligible credential evidence is the rc.1 rehearsal, still at
+> **The last COMPLETED 14-run-eligible credential evidence is the rc.1 rehearsal, still at
 > `v16.2.12`.** re-credentialed 2026-09-27 (#1570) — the four credential cells each ran green
 > across 16 shards at that ref, the latest published 16.2.x tag at or above the CVE floor 16.2.11.
 > That evidence is real and unchanged by the rc.2 ref bump above. The exact scope of that claim
