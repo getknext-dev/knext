@@ -45,6 +45,16 @@ export type HarnessOutcome = {
     scrollY: number;
 };
 
+/** Just the React surface the harness uses (the helper is not DOM-typed). */
+type ReactLike = {
+    createElement: (
+        type: unknown,
+        props: unknown,
+        ...children: unknown[]
+    ) => unknown;
+    act: (callback: () => Promise<void> | void) => Promise<void>;
+};
+
 type ScrollState = {
     beginAppRouterScrollIntent: (hash: string | null) => unknown;
     claimAppRouterScrollIntentForCommit: (
@@ -69,10 +79,13 @@ async function main(): Promise<HarnessOutcome> {
 
     // React must be the copy the patched module resolves.
     const req = createRequire(join(patched, "package.json"));
-    const React = req("react") as typeof import("react");
-    const { createRoot } = req(
-        "react-dom/client",
-    ) as typeof import("react-dom/client");
+    const React = req("react") as ReactLike;
+    const { createRoot } = req("react-dom/client") as {
+        createRoot: (host: unknown) => {
+            render: (tree: unknown) => void;
+            unmount: () => void;
+        };
+    };
 
     const win = new Window({ url: "http://localhost/" });
     const w = win as unknown as Record<string, unknown>;
@@ -142,7 +155,7 @@ async function main(): Promise<HarnessOutcome> {
             }),
         );
     }
-    const root = createRoot(host as unknown as Element);
+    const root = createRoot(host);
     await React.act(async () => {
         root.render(
             React.createElement(
@@ -161,7 +174,9 @@ async function main(): Promise<HarnessOutcome> {
     });
 
     const outcome: HarnessOutcome = {
-        activeElementId: (win.document.activeElement as Element).id,
+        activeElementId: (
+            win.document.activeElement as unknown as { id: string }
+        ).id,
         pendingIntent: state.getPendingAppRouterScrollIntent(),
         scrollY,
     };
