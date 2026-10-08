@@ -5,8 +5,10 @@
 > deploy path is now validated end-to-end on EKS** (a second real cloud): `kn-next deploy`
 > → NextApp CR → operator reconciles → Knative Service → live `200` route (see
 > [EKS: validated](#eks-validated) below and `docs/release/eks-306-validation.md`). End-to-end
-> deploys remain **verified on GKE and kind**; the remaining EKS legs (S3 asset upload,
-> ISR/tag invalidation, CI smoke) and standing up AKS / OKE are **tracked in #46**. This
+> deploys are **verified on GKE and OKE** (OKE is the project's standing verification cluster:
+> scale-to-zero benchmarks in `docs/benchmarks/scale-to-zero-oke.md`, docs site, operator
+> e2e) and on kind in CI. The remaining EKS legs (S3 asset upload, ISR/tag invalidation, CI
+> smoke) and AKS are **tracked in #46**. This
 > document records the per-cloud prerequisites you must satisfy, with the real config
 > keys/files.
 
@@ -196,10 +198,11 @@ throughput numbers, and a (cost-gated) **CI smoke workflow**. Until those land, 
 | Concern | Status |
 | --- | --- |
 | GKE end-to-end deploy + scale-to-zero | **Verified** |
+| OKE end-to-end deploy + scale-to-zero | **Verified** (standing verification cluster; `docs/benchmarks/scale-to-zero-oke.md`) |
 | kind (CI / e2e) | **Verified** |
 | EKS — core operator/CLI deploy path (`deploy` → CR → operator → ksvc → live `200`) | **Validated end-to-end (dated run, `docs/release/eks-306-validation.md`)** |
 | EKS — S3 asset upload / ISR invalidation / CI smoke | **In progress — #46** |
-| AKS / OKE end-to-end (live `200` route) | **Not yet verified — human work, #46** |
+| AKS end-to-end (live `200` route) | **Not yet verified — human work, #46** |
 | Ingress-class override (Istio/Contour) | Config + test landed; **live route unverified** |
 
 This is **not multi-region or CDN** work — knext matches Vercel's *compute* layer, not its
