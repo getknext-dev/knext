@@ -681,7 +681,7 @@ jobs:
       # still fails `knext build` with the real cause. Same no-skip contract;
       # guarded by tests/standalone-drain-image-ci.test.ts.
       - name: Monorepo root — knext build + nested server runs, accidental root still fails e2e
-        run: node scripts/bun-test.mjs packages/kn-next/src/__tests__/monorepo-root.docker-e2e.test.ts
+        run: node scripts/bun-test.mjs --no-skip packages/kn-next/src/__tests__/monorepo-root.docker-e2e.test.ts
 
       # The IMAGE for that layout: the Dockerfile.standalone `knext build` stages
       # at the workspace root, built for standalone-bun and standalone-node and
@@ -689,7 +689,7 @@ jobs:
       # beside the nested server, the compile cache and the runtime cache link are
       # right once Docker resolves them against a workspace-root build context.
       - name: Monorepo root — standalone image (bun + node) builds and serves e2e
-        run: node scripts/bun-test.mjs packages/kn-next/src/__tests__/monorepo-root-image.docker-e2e.test.ts
+        run: node scripts/bun-test.mjs --no-skip packages/kn-next/src/__tests__/monorepo-root-image.docker-e2e.test.ts
 
   # seam-alive gates: RETIRED (#885, stability sprint). The #352 defect class —
   # webpack layers duplicating @getknext/lib module state across the

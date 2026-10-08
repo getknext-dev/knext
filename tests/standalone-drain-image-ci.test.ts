@@ -1499,6 +1499,16 @@ describe('the monorepo-root e2es are wired into CI', () => {
       expect(audit.problems, audit.problems.join('\n')).toEqual([]);
     });
 
+    it(`the \`run:\` that invokes ${name} passes --no-skip, so a skipped test fails the step`, () => {
+      const run = [...jobBlock().matchAll(/run:\s*([^\n]*)/g)]
+        .map((m) => m[1])
+        .find((cmd) => cmd.includes(path));
+      expect(run, `no \`run:\` invokes ${path}`).toBeDefined();
+      expect(run, `the step for ${name} must run bun-test.mjs with --no-skip`).toMatch(
+        /bun-test\.mjs\s+--no-skip\b/,
+      );
+    });
+
     it(`${name} exists, is a container e2e, imports bun:test, and has no skip path`, () => {
       const full = resolve(REPO_ROOT, path);
       expect(existsSync(full), `${path} does not exist`).toBe(true);
