@@ -12,6 +12,7 @@
  */
 
 import {
+    afterAll,
     afterEach,
     beforeEach,
     describe,
@@ -20,6 +21,8 @@ import {
     jest,
     mock,
 } from "bun:test";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { requireIsolatedProcess } from "../../../../tests/helpers/require-isolated-process";
 import type { KnativeNextConfig } from "../config";
 
@@ -180,7 +183,23 @@ function infoMessages(): string[] {
     );
 }
 
+// #1989: `build()` stages the standalone Dockerfile + supervisor entry into the
+// project (lockfile-inferred build context). Run from the repo checkout that
+// wrote them into the repo ROOT, so every test works inside a scratch project
+// (a lockfile makes it its own tracing root) drained after the file.
+const tempRoots: string[] = [];
+afterAll(() => {
+    for (const r of tempRoots)
+        __knextRealFs.rmSync(r, { recursive: true, force: true });
+});
+const savedCwd = process.cwd();
+
 beforeEach(() => {
+    const r = __knextRealFs.mkdtempSync(join(tmpdir(), "knext-gc-build-"));
+    tempRoots.push(r);
+    __knextRealFs.writeFileSync(join(r, "package.json"), "{}");
+    __knextRealFs.writeFileSync(join(r, "bun.lock"), "");
+    process.chdir(r);
     // No `resetModules()`: everything this file varies goes through the mocks
     // cleared on the next line and the fixtures set below. bun has no registry
     // reset, and the deploy path holds no module state of its own — it reads
@@ -190,6 +209,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+    process.chdir(savedCwd);
     jest.restoreAllMocks();
 });
 
