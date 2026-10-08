@@ -129,12 +129,12 @@ the scaffolded `knext-bun-entry.mjs` and `knext-node-entry.mjs` read it.
   With the cap removed it reads `REQUEST_BYTE_CAP:none (uncapped)`.
 
 <Callout type="warn">
-**Apps created with `knext create` before 1.0.1 have `containerConcurrency: 100` in their
+**Apps created with `knext create` on 1.0.0 or earlier have `containerConcurrency: 100` in their
 `knext.config.ts`** — five times the `20` this cap's sizing assumes. At `100`, concurrent large
 uploads can buffer far more request-body bytes than a 1Gi pod's memory limit allows, which can get
-the pod OOM-killed instead of cleanly answering `413`. If your app predates 1.0.1, either delete
-that line (the operator's default of `20` then applies) or set it to `20` or lower. Apps created
-with 1.0.1 or later will not set this line.
+the pod OOM-killed instead of cleanly answering `413`. Either delete that line (the operator's
+default of `20` then applies) or set it to `20` or lower. A fix so that new apps no longer set this
+line is planned for 1.0.1.
 </Callout>
 
 Change it per app with an environment variable — in `knext.config.ts`:

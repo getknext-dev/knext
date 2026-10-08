@@ -91,7 +91,7 @@ npm install -D @getknext/core@latest
 
 ## Version-specific step: upgrading a 0.4.x app to 1.0
 
-1.0 changes four things a 0.4.x app needs to walk through, in this order.
+1.0 changes five things a 0.4.x app needs to walk through, in this order.
 
 ### 1. Upgrade the operator and CRD first
 
@@ -153,6 +153,17 @@ users hit it — set `KNEXT_MAX_REQUEST_BYTES` (bytes) in your config's `env` ma
 the `NextApp`. `0` removes the cap entirely (the app logs this loudly on start so an unintentional
 `0` is visible). The app also prints the cap actually in force on start:
 `REQUEST_BYTE_CAP:<bytes> (<source>)`.
+
+### 5. Check whether your app writes to `/tmp` or `.next/cache` at runtime
+
+Standalone apps no longer get a writable `/tmp` or `.next/cache` by default; the container's root
+filesystem is read-only. If your own code writes to `os.tmpdir()`, or anywhere else at runtime that
+isn't your database or object storage, that write now fails. Before upgrading a running cluster, set
+`spec.security.writableCache: true` on the `NextApp` (this field needs the 1.0 operator from step 1,
+and an older operator rejects it with a strict-decoding error). Two shapes keep their previous
+behaviour with nothing to change: apps with `spec.storage` configured keep a writable
+`.next/cache`, and single-executable builds (`build: 'vinext'` or `selfContained: true`) keep a
+writable `/tmp`. See [Read-only root filesystem](/docs/security#read-only-root-filesystem).
 
 ## Version-specific step: the metrics port moved from 9091 to 9464
 

@@ -16,15 +16,15 @@ scale-to-zero Knative Service via a `NextApp` CR.
   `NextApp` CR).
 - A container **registry** you can push to.
 - An object-storage **bucket** (`gcs`, `s3`, or `minio`) + credentials for asset upload.
-- A checkout of the knext repo (the `knext` CLI is not on npm yet — issue #53).
+- A checkout of the knext repo (the `knext` CLI is published on npm as `@getknext/core`, but this app builds against the workspace copy).
 
 ## 1. Resolve `@getknext/core`
 
-`package.json` depends on `@getknext/core` via a `file:../knext/packages/kn-next` path for local builds.
+`package.json` depends on `@getknext/core` through the monorepo workspace (`workspace:*`).
 For a container build, either:
 
 - vendor the package into the build context, or
-- switch to the published `@getknext/core` once issue #53 (npm publish) lands.
+- switch to the published `@getknext/core` (npm `latest`) pinned to an exact version.
 
 ### Also vendor the shared compile-cache warm-up (#439)
 

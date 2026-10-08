@@ -110,9 +110,10 @@ export default function HomePage() {
               <h3>Multi-cloud, no lock-in</h3>
               <p>
                 One Go operator + a <code>NextApp</code> CRD, on any Kubernetes cluster running
-                Knative Serving. Verified end-to-end on <strong>GKE, OKE and kind</strong>; portable
-                to EKS, AKS and bare-metal by design, not yet certified there. Object storage via
-                gcs, s3, azure or minio. Your manifests are yours.
+                Knative Serving. Verified end-to-end on <strong>GKE and OKE</strong> (and on kind in
+                CI); the core deploy path is also validated on <strong>EKS</strong>. AKS, OpenShift
+                and bare-metal are portable by design, not yet live-validated there. Object storage
+                via gcs, s3, azure or minio. Your manifests are yours.
               </p>
             </div>
           </div>
@@ -225,8 +226,10 @@ spec:
             <Link href="/docs/getting-started">getting started</Link> ·{' '}
             <Link href="/docs/operator">operator + CRD</Link> ·{' '}
             <Link href="/docs/compat-matrix">compat matrix</Link> ·{' '}
-            <a href="https://github.com/getknext-dev/scale-zero-pg">scale-zero-pg</a> ·{' '}
-            <a href="https://knext-platform.dev/">knext-platform.dev</a>
+            <a href="https://github.com/getknext-dev/knext/tree/main/packages/scale-zero-pg">
+              scale-zero-pg
+            </a>{' '}
+            · <a href="https://knext-platform.dev/">knext-platform.dev</a>
           </div>
         </div>
       </footer>

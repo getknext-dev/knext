@@ -50,6 +50,12 @@ Each stable release is published to npm's `latest` tag. When a newer minor takes
 line stays installable: `npm install -D @getknext/core@1.0` resolves the newest `1.0.x`, and the
 `latest-1.0` dist-tag points at the same release.
 
+Release candidates for a coming minor are published under their own dist-tag, never `latest`, so a
+plain `npm install @getknext/core` always gives you a stable release. The `next` dist-tag carries
+the 1.3 release candidates. A release candidate is a preview of a release that has not shipped yet:
+try it in a branch or a staging cluster, not in production, and expect it to change before the
+final release.
+
 The three packages depend on each other with caret ranges, so an older `@getknext/core` can still
 resolve a newer `@getknext/lib` or `@getknext/db` once a later minor exists. If you stay on an older
 line, list all three packages in your own `package.json` at the same version.

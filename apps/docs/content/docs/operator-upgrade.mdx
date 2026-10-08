@@ -46,7 +46,7 @@ manager image is `ghcr.io/getknext-dev/kn-next-operator@sha256:…`, never `:lat
 version you tested:
 
 ```sh title="shell"
-OPERATOR_TAG=operator-v1.2.3   # any published operator-vX.Y.Z tag
+OPERATOR_TAG=operator-v1.0.0   # any published operator-vX.Y.Z tag
 curl -sL -o install-new.yaml \
   "https://github.com/getknext-dev/knext/releases/download/${OPERATOR_TAG}/install.yaml"
 grep 'image: ghcr.io/getknext-dev/kn-next-operator' install-new.yaml   # note the @sha256 digest
