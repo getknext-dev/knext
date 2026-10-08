@@ -2749,6 +2749,138 @@ export default function middleware() { return NextResponse.json({ middleware: tr
             "file",
         );
     });
+    it("vinext#3771: in a hybrid app, a Pages route's notFound renders app/not-found with the source Cache-Control", async () => {
+        // Ported from Next.js: test/e2e/app-dir/not-found-with-pages-i18n and
+        // test/e2e/app-dir/pages-router-app-not-found — with the app
+        // directory enabled, a Pages notFound renders the App Router
+        // not-found (fully, request-time content included), not pages/404.
+        applyVinextPatches(patched);
+        writeFileSync(
+            join(patched, "dist", "__knext_vite_builder_bridge.mjs"),
+            'export { createBuilder } from "vite";\n',
+        );
+        const { createBuilder } = await importPatched<{
+            createBuilder: (config: unknown) => Promise<{
+                buildApp: () => Promise<unknown>;
+            }>;
+        }>("dist/__knext_vite_builder_bridge.mjs");
+        const vinextMod = await importPatched<{
+            default: (options?: Record<string, unknown>) => unknown;
+        }>("dist/index.js");
+        const { startProdServer } = await importPatched<{
+            startProdServer: (options: Record<string, unknown>) => Promise<{
+                server: {
+                    address: () => { port: number } | string | null;
+                    close: (cb: (err?: Error) => void) => void;
+                };
+            }>;
+        }>("dist/server/prod-server.js");
+
+        const root = mkdtempSync(join(tmpdir(), "knext-vp-3771-"));
+        tempRoots.push(root);
+        // react, react-dom, react-server-dom-webpack, vite and the
+        // @vitejs plugins are installed beside vinext itself.
+        symlinkSync(
+            dirname(INSTALLED_VINEXT),
+            join(root, "node_modules"),
+            "junction",
+        );
+        const files: Record<string, string> = {
+            "package.json": JSON.stringify({ type: "module" }),
+            "next.config.mjs":
+                'export default { i18n: { locales: ["en-GB", "en"], defaultLocale: "en", localeDetection: false } };\n',
+            "app/layout.tsx":
+                "export default function RootLayout({ children }) {\n  return <html><body>{children}</body></html>;\n}\n",
+            "app/not-found.tsx": [
+                'import { Suspense } from "react";',
+                'import { cookies } from "next/headers";',
+                "async function Marker() {",
+                "  const store = await cookies();",
+                '  return <p id="marker">{store.get("nf-marker")?.value ?? "missing"}</p>;',
+                "}",
+                "export default function NotFound() {",
+                "  return <main><h1>APP ROUTER - 404 PAGE</h1><Suspense fallback={<p>loading</p>}><Marker /></Suspense></main>;",
+                "}",
+                "",
+            ].join("\n"),
+            // Next.js only emits /_not-found for an app directory with pages.
+            "app/app-dir/page.tsx":
+                "export default function Page() {\n  return <p>app page</p>;\n}\n",
+            "pages/404.tsx":
+                "export default function NotFound() {\n  return <h1>PAGES ROUTER - 404 PAGE</h1>;\n}\n",
+            "pages/[[...slug]].tsx": [
+                'export function getStaticPaths() { return { paths: [], fallback: "blocking" }; }',
+                "export function getStaticProps({ params }) {",
+                "  const slug = params.slug ?? [];",
+                '  if (slug.length !== 1 || slug[0] !== "about") return { notFound: true };',
+                "  return { props: {} };",
+                "}",
+                "export default function CatchAll() { return <h1>Pages catch-all</h1>; }",
+                "",
+            ].join("\n"),
+            "pages/pages-route/[...slug].tsx": [
+                'export function getStaticPaths() { return { paths: [], fallback: "blocking" }; }',
+                "export function getStaticProps() { return { notFound: true, revalidate: 1 }; }",
+                "export default function PagesRoute() { return <p>never</p>; }",
+                "",
+            ].join("\n"),
+        };
+        for (const [rel, content] of Object.entries(files)) {
+            mkdirSync(dirname(join(root, rel)), { recursive: true });
+            writeFileSync(join(root, rel), content);
+        }
+        const builder = await createBuilder({
+            root,
+            configFile: false,
+            logLevel: "silent",
+            plugins: [vinextMod.default({ appDir: root })],
+        });
+        await builder.buildApp();
+
+        const { server } = await startProdServer({
+            port: 0,
+            host: "127.0.0.1",
+            outDir: join(root, "dist"),
+            noCompression: true,
+        });
+        try {
+            const address = server.address();
+            if (!address || typeof address === "string") {
+                throw new Error("the hybrid fixture did not bind a port");
+            }
+            const get = async (pathname: string) => {
+                const res = await fetch(
+                    `http://127.0.0.1:${address.port}${pathname}`,
+                    {
+                        headers: {
+                            accept: "text/html",
+                            cookie: "nf-marker=marker-3771",
+                        },
+                    },
+                );
+                return { res, html: await res.text() };
+            };
+            for (const pathname of ["/", "/foo", "/en-GB/foo"]) {
+                const { res, html } = await get(pathname);
+                expect(`${pathname} ${res.status}`).toBe(`${pathname} 404`);
+                expect(html).toContain("APP ROUTER - 404 PAGE");
+                expect(html).not.toContain("PAGES ROUTER - 404 PAGE");
+                expect(html).toContain("marker-3771");
+                expect(res.headers.get("x-vinext-pages-not-found")).toBeNull();
+            }
+            const isr = await get("/pages-route/anything");
+            expect(isr.res.status).toBe(404);
+            expect(isr.html).toContain("APP ROUTER - 404 PAGE");
+            expect(isr.res.headers.get("cache-control")).toBe(
+                "s-maxage=1, stale-while-revalidate=31535999",
+            );
+            const found = await get("/about");
+            expect(found.res.status).toBe(200);
+            expect(found.html).toContain("Pages catch-all");
+        } finally {
+            await new Promise<void>((resolve) => server.close(() => resolve()));
+        }
+    }, 180_000);
 });
 
 // ---------------------------------------------------------------------------

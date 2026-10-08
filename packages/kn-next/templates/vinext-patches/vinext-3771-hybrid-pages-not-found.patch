@@ -1,0 +1,165 @@
+knext bundled fix for vinext 1.0.1 (dist output)
+Upstream: https://github.com/cloudflare/vinext/pull/3771 (issue https://github.com/cloudflare/vinext/issues/3428)
+What it fixes: in an app with both app/ and pages/, a Pages route that resolves to `notFound`
+(getStaticProps/getServerSideProps `notFound`, or a `fallback: false` miss) rendered pages/404,
+or the Pages error page when there is none. Next.js renders the App Router not-found in that case:
+with the app directory enabled it looks up /_not-found before /404 (Next.js deploy tests
+not-found-with-pages-i18n and pages-router-app-not-found).
+The hybrid bridge now asks the Pages renderer to mark a document 404 that came from a notFound
+result (`x-vinext-pages-not-found`; middleware cannot set it). The App request handler consumes
+the marker and renders its not-found in place, keeping the source route's Cache-Control as
+Next.js does. Data requests, pages that render themselves with a 404 status, and apps without
+an app/ directory are unchanged. Dev is unchanged (it renders hybrid Pages separately).
+Port difference: upstream exports the header name from server/headers.js and moves the
+unmatched-route not-found render into a shared helper. Here each file declares the header name
+locally and the unmatched-route branch is left as it is (vinext-3682 edits it); a copy of the
+not-found render sits beside renderPagesForMatchKind. Same behaviour.
+Retire: delete this file (and its manifest entry) when the pinned vinext is >= the first
+release that includes cloudflare/vinext#3771.
+Applied by `knext vinext-patches` (runs from the app's postinstall and before `knext build`).
+
+--- a/dist/server/app-pages-bridge.js
++++ b/dist/server/app-pages-bridge.js
+@@ -4,11 +4,16 @@
+ import { mergeHeaders } from "./worker-utils.js";
+ import { pagesRouteHasPriorityOverAppRoute } from "./hybrid-route-priority.js";
+ //#region src/server/app-pages-bridge.ts
++const VINEXT_PAGES_NOT_FOUND_HEADER = "x-vinext-pages-not-found";
+ function applyPagesMiddlewareContext(response, middlewareContext) {
+ 	if (!middlewareContext.headers && middlewareContext.status === null) return response;
+ 	const middlewareHeaders = {};
+ 	if (middlewareContext.headers) {
+-		for (const [key, value] of middlewareContext.headers) if (key.toLowerCase() !== "set-cookie") middlewareHeaders[key] = value;
++		for (const [key, value] of middlewareContext.headers) {
++			const lowerKey = key.toLowerCase();
++			if (lowerKey === VINEXT_PAGES_NOT_FOUND_HEADER) continue;
++			if (lowerKey !== "set-cookie") middlewareHeaders[key] = value;
++		}
+ 		const cookies = middlewareContext.headers.getSetCookie();
+ 		if (cookies.length > 0) middlewareHeaders["set-cookie"] = cookies;
+ 	}
+@@ -67,7 +72,7 @@
+ 		getRequestExecutionContext() ?? void 0,
+ 		middlewareContext.requestHeaders
+ 	];
+-	const pagesRes = isDataRequest ? await (initialResponseHeaders ? pagesEntry.renderPage(...renderArgs, { isDataReq: true }, initialResponseHeaders) : pagesEntry.renderPage(...renderArgs, { isDataReq: true })) : await (initialResponseHeaders ? pagesEntry.renderPage(...renderArgs, void 0, initialResponseHeaders) : pagesEntry.renderPage(...renderArgs));
++	const pagesRes = isDataRequest ? await (initialResponseHeaders ? pagesEntry.renderPage(...renderArgs, { isDataReq: true }, initialResponseHeaders) : pagesEntry.renderPage(...renderArgs, { isDataReq: true })) : pagesDataRequest ? await (initialResponseHeaders ? pagesEntry.renderPage(...renderArgs, void 0, initialResponseHeaders) : pagesEntry.renderPage(...renderArgs)) : await (initialResponseHeaders ? pagesEntry.renderPage(...renderArgs, { markNotFound: true }, initialResponseHeaders) : pagesEntry.renderPage(...renderArgs, { markNotFound: true }));
+ 	if (pagesRes.status === 404 && pageMatch === null) return null;
+ 	return applyDraftModeCookie(applyPagesMiddlewareContext(pagesRes, middlewareContext), getDraftModeCookieHeader());
+ }
+--- a/dist/server/app-rsc-handler.js
++++ b/dist/server/app-rsc-handler.js
+@@ -169,6 +169,28 @@
+ 		query: new URL(resolvedUrl, baseUrl).searchParams
+ 	};
+ }
++const VINEXT_PAGES_NOT_FOUND_HEADER = "x-vinext-pages-not-found";
++function withoutPagesNotFoundMarker(response) {
++	const headers = new Headers(response.headers);
++	headers.delete(VINEXT_PAGES_NOT_FOUND_HEADER);
++	return preserveFullyBufferedBodyMetadata(response, new Response(response.body, {
++		headers,
++		status: response.status,
++		statusText: response.statusText
++	}));
++}
++/** Give an App not-found that replaces a Pages notFound the source route's Cache-Control. */
++function withPagesNotFoundCacheControl(appNotFoundResponse, pagesNotFoundResponse) {
++	const cacheControl = pagesNotFoundResponse.headers.get("Cache-Control");
++	const headers = new Headers(appNotFoundResponse.headers);
++	headers.delete(VINEXT_PAGES_NOT_FOUND_HEADER);
++	if (cacheControl !== null) headers.set("Cache-Control", cacheControl);
++	return preserveFullyBufferedBodyMetadata(appNotFoundResponse, new Response(appNotFoundResponse.body, {
++		headers,
++		status: appNotFoundResponse.status,
++		statusText: appNotFoundResponse.statusText
++	}));
++}
+ function pathnameForResolvedUrl(resolvedUrl) {
+ 	return resolvedUrl.split("#", 1)[0].split("?", 1)[0];
+ }
+@@ -784,6 +806,33 @@
+ 	if (serverActionResponse) return serverActionResponse;
+ 	if (filesystemRouteEligible && isPostRequest && actionId && !options.handleServerActionRequest) return createMissingServerActionResponse(options, actionId);
+ 	let match = preActionMatch;
++	const renderAppNotFound = async () => {
++		setFrameworkRequestRoute("/404", isRscRequest);
++		const notFoundResponseStage = transportedResponseStage ?? options.renderResponseStageLocally;
++		if (notFoundResponseStage) return composeResponseStageResponse(await notFoundResponseStage(responseStageRequest(), {
++			kind: "app-not-found",
++			buildId: options.buildId,
++			cacheability: responseStageCacheability(resolvedUrl),
++			canonicalPathname,
++			cleanPathname,
++			draftModeCookie,
++			isRscRequest,
++			middlewareCookieOverlay,
++			mountedSlotsHeader,
++			protocolVersion: 10,
++			requestOrigin: url.origin,
++			renderMode,
++			resolvedUrl,
++			scriptNonce: scriptNonce ?? null
++		}));
++		return traceAppPageRender("/404", "render", () => options.renderNotFound({
++			isRscRequest,
++			middlewareContext,
++			request,
++			route: null,
++			scriptNonce
++		}));
++	};
+ 	const renderPagesForMatchKind = async (matchKind) => {
+ 		if (!filesystemRouteEligible) return null;
+ 		let sharedOuterPolicyNeedsReconciliation = false;
+@@ -830,7 +879,7 @@
+ 			if (!responseStageHasContentLength) response.headers.delete("Content-Length");
+ 			return response;
+ 		} : void 0;
+-		const response = !isInterceptionMatch && (match === null || match.route.isDynamic) ? await options.renderPagesFallback?.({
++		let response = !isInterceptionMatch && (match === null || match.route.isDynamic) ? await options.renderPagesFallback?.({
+ 			appRouteMatch: match ?? null,
+ 			allowRscDocumentFallback: didMiddlewareRewritePathname || allowInternalRscDocumentFallback,
+ 			dispatchPagesResponseStage,
+@@ -843,6 +892,14 @@
+ 			request,
+ 			url
+ 		}) ?? null : null;
++		if (response?.headers.has(VINEXT_PAGES_NOT_FOUND_HEADER)) {
++			const appNotFoundResponse = await renderAppNotFound();
++			if (appNotFoundResponse) {
++				options.clearRequestContext();
++				return withPagesNotFoundCacheControl(appNotFoundResponse, response);
++			}
++			response = withoutPagesNotFoundMarker(response);
++		}
+ 		if (response) preserveRouteCacheabilityResponsePolicy();
+ 		if (!response) return null;
+ 		if (sharedOuterPolicyNeedsReconciliation) reconcileCdnResponseHeadersAfterOuterPolicy(response.headers, await loadOuterResponsePolicy());
+--- a/dist/server/pages-page-handler.js
++++ b/dist/server/pages-page-handler.js
+@@ -79,6 +79,16 @@
+ 		statusText: response.statusText
+ 	});
+ }
++/**
++* Marks a hybrid Pages 404 that came from the route's notFound result, so the
++* App Router renders its not-found in its place (knext port of vinext#3771).
++*/
++const VINEXT_PAGES_NOT_FOUND_HEADER = "x-vinext-pages-not-found";
++function withPagesNotFoundMarker(response) {
++	const headers = new Headers(response.headers);
++	headers.set(VINEXT_PAGES_NOT_FOUND_HEADER, "1");
++	return new Response(response.body, { headers, status: response.status, statusText: response.statusText });
++}
+ function stripPagesNotFoundFramingHeaders(response) {
+ 	if (!response.headers.has("Content-Length") && !response.headers.has("Transfer-Encoding")) return response;
+ 	const headers = new Headers(response.headers);
+@@ -440,6 +450,7 @@
+ 					notFoundResponse = stripPagesNotFoundFramingHeaders(notFoundResponse);
+ 					if (isOnDemandRevalidate) notFoundResponse = withPagesCacheState(notFoundResponse, "REVALIDATED", isrCachePathname);
+ 					else if (pageDataResult.cacheState) notFoundResponse = withPagesCacheState(notFoundResponse, pageDataResult.cacheState);
++					if (options?.markNotFound && !isDataReq) notFoundResponse = withPagesNotFoundMarker(notFoundResponse);
+ 					return finalizePagesPreviewResponse(withBrowserPolicy(notFoundResponse), preview);
+ 				}
+ 				if (pageDataResult.kind === "response") {

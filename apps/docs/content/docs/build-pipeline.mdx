@@ -501,6 +501,10 @@ The fixes bundled with vinext 1.0.1:
   instrumentation file that requires a module only when the runtime is neither `nodejs` nor
   `edge`) is no longer resolved, so the build no longer fails on a module that branch could never
   load.
+- **In an app with both `app/` and `pages/`, a Pages route that returns `notFound`** (from
+  `getStaticProps` or `getServerSideProps`, or a path a `fallback: false` page does not list)
+  renders `app/not-found`, as in Next.js, instead of `pages/404`. The 404 response keeps the Pages
+  route's `Cache-Control`. This applies to production builds; the development server still shows `pages/404`.
 
 ## Build the image on your own builder (Cloud Build / CI)
 
