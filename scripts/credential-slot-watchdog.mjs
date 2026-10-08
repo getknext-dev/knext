@@ -482,7 +482,7 @@ export function runCli({
     error(
       `::error::credential-slot-watchdog crashed and did NOT check the credential fires in ${where}: ${message}. ` +
         'The next scheduled run anchors only on a run that evaluated its window, so it reaches back over these fires ' +
-        `(at most ${WATCHDOG_MAX_WINDOW_HOURS} h, which raises a coverage-gap alert; ${WATCHDOG_LOOKBACK_HOURS} h without a readable anchor).`,
+        `to the last successful run (a gap over ${WATCHDOG_MAX_WINDOW_HOURS} h is clamped and alerts coverage-gap).`,
     );
     return 1;
   }
