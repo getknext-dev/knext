@@ -461,6 +461,38 @@ describe("ISR freshness survives a scale-to-zero wake on the Next path (#1888)",
         await handler.get("/fetch-like", { kind: "FETCH" });
         expect(SharedCacheControls.cacheControls.size).toBe(0);
     });
+
+    it("seeds a pre-16.3.7 `/index` key under Next's toRoute form `/` (older-Next branch)", async () => {
+        // Peer floor is next >= 16.0.0: those Nexts hand the handler the bare
+        // `/index` key (no `/route-cache/` prefix) and file the window under `/`.
+        const mod = (await import(
+            `../adapters/cache-handler.js?wakeold=${Math.random()}`
+        )) as {
+            default: new (
+                o: unknown,
+            ) => {
+                get: (k: string, ctx?: unknown) => Promise<unknown>;
+            };
+            __setRedisClientForTests: (c: unknown) => void;
+        };
+        const handler = new mod.default({ serverDistDir: THIS_DIST });
+        mod.__setRedisClientForTests({
+            connected: true,
+            async connect() {},
+            async get() {
+                return storedEntry(
+                    { revalidate: 3600, expire: ONE_YEAR_S },
+                    SEVEN_MINUTES_MS,
+                );
+            },
+            async send() {
+                return "OK";
+            },
+        });
+        await handler.get("/index", { kind: "APP_PAGE" });
+        expect(SharedCacheControls.cacheControls.has("/")).toBe(true);
+        expect(SharedCacheControls.cacheControls.has("/index")).toBe(false);
+    });
 });
 
 describe("the in-memory path (no REDIS_URL) gets the same treatment", () => {
