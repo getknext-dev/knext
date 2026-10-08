@@ -898,15 +898,20 @@ watchdog that checks only each lane's latest due fire skips a fire whenever two 
 delays differ enough, and checks another twice. Each scheduled run (`25 1,9,17 * * *`) instead
 checks **every** fire in `(previous scheduled watchdog run's start − grace, this run's start − grace]`,
 both starts read from the Actions API. Consecutive windows meet exactly whatever the delays, so every
-fire is checked once and a missing run alerts once. A cancelled previous run is skipped (it may not
-have evaluated). Without a readable previous run the window is the last 24 hours: at least the
+fire is checked once and a missing run alerts once. Only a previous run that **evaluated its window**
+anchors: the check exits 0 whenever it evaluated and carries its verdict in an `alert` job output,
+which the alert job keys on, so a run concludes `success` exactly when its window was checked. A run
+that crashed before evaluating (`failure`), timed out (`cancelled`) or is still in progress is
+skipped, and the next window reaches back over its fires; the crash still raises the pinned alert,
+naming the window it did not check. Without a readable previous run the window is the last 24 hours: at least the
 watchdog period plus the worst measured delay (8 + 7.4 h), and one dropped watchdog run
 (2 × 8 + 7.4 h); it may repeat a check, never skip one. A previous run more than 72 hours back raises a
 `coverage-gap` alert. Each fire is judged in its own context (every lane's slot at that fire), so
 attribution and the ambiguity rule are unchanged per fire, and a run whose own mode marker reads
 early-warning is never credited to a credential lane. A seeded simulation over ten days, with the
 measured delays and with wider ones plus a dropped watchdog run, checks every fire exactly once and
-alerts exactly the dropped runs, once each.
+alerts exactly the dropped runs, once each; with crashed, timed-out and in-progress watchdog runs
+injected, every fire is still checked at least once.
 
 ### Options considered
 

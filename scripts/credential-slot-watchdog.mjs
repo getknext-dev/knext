@@ -5,23 +5,29 @@
  * Thin fetch/attribution layer around `scripts/lib/credential-slot-watchdog.mjs`'s
  * pure decision function. READ-ONLY: it lists scheduled runs of
  * `test-e2e-deploy.yml` and their artifact-marker listings via the GitHub API
- * and never dispatches, cancels, or writes anything. Exits 1 when any
- * credential lane needs the standard pinned alert (`missing`,
- * `queued-too-long`, or `ambiguous` — see the lib module's header), so the
- * companion workflow job (`.github/workflows/credential-slot-watchdog.yml`)
- * can gate its alert step on this job's result — the same
- * `needs.<job>.result == 'failure'` pattern every other nightly alert in
- * this repo uses. Also exits 1 (via the generic handler below) when the
- * workflow's cron shape cannot be parsed at all — see
- * `resolveCredentialLanes`'s fail-closed contract in the lib module.
+ * and never dispatches, cancels, or writes anything.
+ *
+ * VERDICT VIA OUTPUT, NOT EXIT CODE (PR #2013 round 3). When any credential
+ * fire needs the standard pinned alert (`missing`, `queued-too-long`,
+ * `ambiguous`, `coverage-gap` — see the lib module's header) the script
+ * writes `alert=true` to `$GITHUB_OUTPUT` and still EXITS 0; the companion
+ * workflow's alert job (`.github/workflows/credential-slot-watchdog.yml`)
+ * keys on that output. Exit 0 therefore means "this run evaluated its
+ * window", which is what the next run anchors on (`resolveCheckAnchors`).
+ * It exits 1 only when it did NOT evaluate — a crash (both run listings
+ * down; a workflow whose cron shape cannot be parsed, per
+ * `resolveCredentialLanes`'s fail-closed contract) or an alert with no
+ * output to carry it — and the alert job fires on that `failure` too, naming
+ * the window that was not checked (`runCli`).
  *
  * Env:
  *   WATCHDOG_GRACE_HOURS  optional override for the grace-period hours
  *                         (default: DEFAULT_GRACE_HOURS, currently 8).
  *   GITHUB_RUN_ID / GITHUB_EVENT_NAME  set by Actions. A SCHEDULED run checks
- *                         every fire since the previous scheduled watchdog
- *                         run (`resolveCheckAnchors`); anything else checks
- *                         the WATCHDOG_LOOKBACK_HOURS window.
+ *                         every fire since the previous SUCCESSFUL scheduled
+ *                         watchdog run (`resolveCheckAnchors`); anything else
+ *                         checks the WATCHDOG_LOOKBACK_HOURS window.
+ *   GITHUB_OUTPUT         set by Actions; receives `window` and `alert`.
  *   GH_TOKEN / GITHUB_TOKEN  read by the `gh` CLI itself, not read directly
  *                            here.
  *

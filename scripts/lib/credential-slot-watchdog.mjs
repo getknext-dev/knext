@@ -100,17 +100,24 @@
  * consecutive runs' delays differed enough, and checked another twice — a
  * false quiet. Each run now checks EVERY fire in
  * `(previous run's start - grace, this run's start - grace]`
- * (`watchdogWindow` + `dueFiresInWindow`). Consecutive windows tile the time
- * line exactly whatever the delays, so every fire is checked once and an
- * alert for a missing fire is raised once, not on every later run.
+ * (`watchdogWindow` + `dueFiresInWindow`). The windows of consecutive
+ * successful runs tile the time line exactly whatever the delays, so every
+ * fire is checked once and an alert for a missing fire is raised once, not on
+ * every later run.
  *
  *   * Both anchors are `run_started_at` of watchdog runs (the CLI reads them
  *     from the Actions API), so two consecutive windows share their boundary
  *     to the second.
- *   * The previous run is the newest SCHEDULED run that completed `success`
- *     (quiet) or `failure` (alerted — or crashed, which raises the same
- *     pinned alert). A cancelled run may not have evaluated, so it is skipped
- *     and the window reaches back to the run before it.
+ *   * The previous run is the newest SCHEDULED run that completed `success`,
+ *     and only `success` (PR #2013 round 3). The CLI exits 0 whenever it
+ *     evaluated its window and carries the alert in a job output, so
+ *     `success` means "window evaluated (and any alert filed)". A run that
+ *     crashed before evaluating (`failure`), timed out or lost its runner
+ *     (`cancelled`), or is still in progress is skipped, and the window
+ *     reaches back to the last run that did evaluate — the skipped run's
+ *     fires are checked now, not lost. With earlier runs in view but none
+ *     successful, the window reaches back to the oldest of them minus the
+ *     lookback.
  *   * No readable previous run (first run, API failure, a dispatch): the
  *     window is `WATCHDOG_LOOKBACK_HOURS` (24 h). That is at least the
  *     watchdog period (8 h) plus the worst measured scheduler delay (7.4 h),
@@ -120,9 +127,11 @@
  *   * A previous run more than `WATCHDOG_MAX_WINDOW_HOURS` (72 h) back is
  *     clamped to that window and alerts `coverage-gap`: the watchdog itself
  *     stopped running, and the older fires are not checked.
- *   * A run that crashed (API down) concludes `failure` like an alerting run,
- *     so the next run does not re-check its window. It is not silent — the
- *     crash raised the same pinned alert — but those fires go unchecked.
+ *   * A run that crashed (API down) concludes `failure` and raises the pinned
+ *     alert naming the window it did not check; because it is no anchor, the
+ *     next run checks that window. Only when non-evaluating runs reach back
+ *     past the 72 h maximum are fires left unchecked, and that alerts
+ *     `coverage-gap`.
  *   * The grace is assumed unchanged between two runs. Changing it moves the
  *     boundary by the difference: lowering it leaves that many hours unchecked
  *     once, raising it re-checks them.
