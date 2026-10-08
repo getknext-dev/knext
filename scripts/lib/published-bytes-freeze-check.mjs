@@ -308,7 +308,7 @@ export function overrideMarkerIntroducedByPr(mergeBasePin, headPin) {
  * freeze/unfrozen while `headPin` decides the marker, and why no separate
  * "pin-only diff" case is needed here the way the sibling guard needs one.
  *
- * @param {{ basePin: unknown, headPin: unknown, mergeBasePin?: unknown, changedFiles: string[], packageDirs: string[], rootInputFiles?: readonly string[], now: Date }} input
+ * @param {{ basePin: unknown, headPin: unknown, mergeBasePin?: unknown, changedFiles: string[], packageDirs: string[], rootInputFiles?: readonly string[], baseRef?: string, now: Date }} input
  * @returns {{ action: 'skip', reason: string } | { action: 'proceed', rcTag: string, reason: string, matchedFiles: string[] }}
  */
 export function decidePublishedBytesScope({
