@@ -529,8 +529,11 @@ Verified on 2026-10-08: `git diff v1.0.0-rc.6 origin/main -- packages/kn-next-op
    release exists.
 3. **Only then merge the `1.0.0` Version PR** (step 5 — the publish).
 
-The release notes and the compatibility table point users at the **versioned**
-`releases/download/operator-v1.0.0/install.yaml`, which only exists after step 1.
+The release notes keep the canonical `operator-latest` install URL — the only one
+`scripts/verify-anonymous-install.mjs` allows in published docs, because it is the URL the nightly
+anonymous-install check walks — and name the `operator-v1.0.0` release in prose as the bundle it
+carries. That is only true after step 1 re-points `operator-latest`, which is exactly why step 1
+precedes the merge. The compatibility table names `operator-v1.0.0` as the 1.0.0 operator bundle.
 
 ### GA preconditions
 
