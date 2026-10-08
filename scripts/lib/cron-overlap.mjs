@@ -8,11 +8,13 @@
 // file against each other).
 //
 // This repo's crons are all `M H * * D` (minute hour * * day-of-week) — day-
-// of-month and month are always `*`. parseCron() fails closed on anything
-// else rather than guessing.
+// of-month and month are always `*`. The hour may be a comma list (ADR-0056
+// Amendment 5: a credential cron fires three times a day), and each listed
+// hour is compared. parseCron() fails closed on anything else (a range, a
+// step) rather than guessing.
 
 /**
- * @typedef {{ minute: number, hour: number, daysOfWeek: Set<number> }} ParsedCron
+ * @typedef {{ minute: number, hours: Set<number>, daysOfWeek: Set<number> }} ParsedCron
  */
 
 /** @param {string} cron @returns {ParsedCron} */
@@ -28,13 +30,20 @@ export function parseCron(cron) {
     );
   }
   const minute = Number(minuteRaw);
-  const hour = Number(hourRaw);
   if (!Number.isInteger(minute) || minute < 0 || minute > 59) {
     throw new Error(`parseCron: minute must be an integer 0-59, got "${minuteRaw}" in "${cron}"`);
   }
-  if (!Number.isInteger(hour) || hour < 0 || hour > 23) {
-    throw new Error(`parseCron: hour must be an integer 0-23, got "${hourRaw}" in "${cron}"`);
-  }
+  const hours = new Set(
+    hourRaw.split(',').map((h) => {
+      const n = /^\d{1,2}$/.test(h) ? Number(h) : Number.NaN;
+      if (!Number.isInteger(n) || n < 0 || n > 23) {
+        throw new Error(
+          `parseCron: hour must be an integer 0-23 or a comma list of them, got "${hourRaw}" in "${cron}"`,
+        );
+      }
+      return n;
+    }),
+  );
   const daysOfWeek =
     dayOfWeekRaw === '*'
       ? new Set([0, 1, 2, 3, 4, 5, 6])
@@ -47,14 +56,14 @@ export function parseCron(cron) {
             return n;
           }),
         );
-  return { minute, hour, daysOfWeek };
+  return { minute, hours, daysOfWeek };
 }
 
 /** Do two crons fire in the same UTC minute-of-day on at least one shared day-of-week? */
 export function cronsOverlap(a, b) {
   const pa = parseCron(a);
   const pb = parseCron(b);
-  if (pa.minute !== pb.minute || pa.hour !== pb.hour) return false;
+  if (pa.minute !== pb.minute || ![...pa.hours].some((h) => pb.hours.has(h))) return false;
   for (const d of pa.daysOfWeek) {
     if (pb.daysOfWeek.has(d)) return true;
   }

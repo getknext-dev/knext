@@ -10,7 +10,13 @@ net new quarantine entries, the harness fingerprint unchanged across all of them
 observed Bun build (the `bun-version` input + `bun --revision`, not just the version string)
 unchanged across all of them.**
 
-That is the **same contract class** as the node lane's 14-night gate, plus one bun-specific
+> **Runs, not nights (ADR-0056 Amendment 5, 2026-10-08).** The credential now counts **14
+> consecutive qualifying runs**, not 14 calendar nights. Each credential cron fires three times a
+> day, eight hours apart, and a green run counts only if it started at least two hours after the
+> previous counted run of the same cell (rule 10 in `scripts/compat-window-audit.mjs`). Every other
+> rule below is unchanged and applies per run: where this file says "night", read "scheduled run".
+
+That is the **same contract class** as the node lane's 14-run gate, plus one bun-specific
 clause (rule 4 below). It is deliberately not a weaker bar: the bun axis is the v1.0 default
 target under ADR-0054, so "credentialed" for it must clear the same height "green" clears for node,
 not a discounted version of it.
@@ -20,7 +26,7 @@ not a discounted version of it.
 Since 2026-09-23 the bar is banked **only by credential nights**, which run against a frozen
 release-candidate tag, never `main`:
 
-- The **credential** cron is `47 5 * * *`. It checks out the RC tag pinned in
+- The **credential** cron is `47 5,13,21 * * *` (three runs a day). It checks out the RC tag pinned in
   `.github/compat-credential-ref.json`, resolved to its peeled commit by the `credential-ref` job.
 - The original `47 4 * * *` cron still runs `main` as **early warning**. It alerts as before but
   **never advances this count**.
@@ -69,7 +75,7 @@ scheduled (credential or early-warning) night, so it never affects the streak.
 
 **Credential window: NOT OPEN — no release candidate has been cut.** The scheduled bun-1.4.0
 lane exists (#1147) and, since ADR-0056, runs `main` as early warning (`47 4 * * *`). The
-credential cron (`47 5 * * *`) refuses until an RC is pinned. Until **14** consecutive scheduled
+credential cron (`47 5,13,21 * * *`) refuses until an RC is pinned. Until **14** consecutive scheduled
 bun **credential** nights bank on one unchanged harness **and one unchanged Bun build**, its 778/0
 stays **verified-once** (two dispatch runs, 2026-09-22), not **credentialed**. The compat-matrix
 Bun row stays ✅-verified-once, and this file's record table below fills as credential nights
@@ -78,9 +84,9 @@ land.
 | | |
 |---|---|
 | lane | bun (`KNEXT_RUNTIME=bun`, the compiled standalone-on-Bun bytecode executable — see "What the bun lane boots" above) |
-| required nights | **14** consecutive qualifying (`WINDOW_REQUIRED_NIGHTS`, `scripts/compat-window-audit.mjs`) |
+| required runs | **14** consecutive qualifying runs (`WINDOW_REQUIRED_RUNS`, `scripts/compat-window-audit.mjs`), each started at least 2 h after the previous counted run (`MIN_RUN_SPACING_HOURS`) |
 | grader | `node scripts/compat-window-audit.mjs --fetch --lane bun` — the lane is read from each run's `compat-run-ledger`, already lane-attributed, and from a `compat-lane-<lane>` marker artifact when the ledger cannot be read, so a night lost on one lane does not restart the other. Grades rules 1–3 (and the three stricter audit rules); **rule 4 (Bun-build freeze) landed with #1147** — the fingerprint folds the observed `bun --version` + `bun --revision` on the bun lane. |
-| window opened | on the first scheduled bun **credential** night (cron `47 5 * * *`, RC tag) — none yet: no RC cut |
+| window opened | on the first scheduled bun **credential** run (cron `47 5,13,21 * * *`, RC tag) — none yet: no RC cut |
 | current streak | 0 / 14 — credential window not open; `47 4 * * *` runs `main` as early warning only |
 
 ## The rules a night must satisfy to qualify

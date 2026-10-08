@@ -44,17 +44,19 @@ describe('bun-lane credentialed bar (issue #1158)', () => {
   // doc's stated N against it — a legitimate change to the constant is *compared*
   // (doc must move with it), not silently red by a hardcoded literal. A drift on
   // either side reds this test.
-  it('the bar states N consecutive nights EQUAL to the grader-enforced constant', () => {
+  // ADR-0056 Amendment 5: the bar counts RUNS (`WINDOW_REQUIRED_RUNS`; the old
+  // `WINDOW_REQUIRED_NIGHTS` name is now an alias of it).
+  it('the bar states N consecutive runs EQUAL to the grader-enforced constant', () => {
     const audit = read(AUDIT);
-    const m = audit.match(/WINDOW_REQUIRED_NIGHTS\s*=\s*(\d+)/);
-    expect(m, 'grader must define WINDOW_REQUIRED_NIGHTS = <n>').not.toBeNull();
+    const m = audit.match(/WINDOW_REQUIRED_RUNS\s*=\s*(\d+)/);
+    expect(m, 'grader must define WINDOW_REQUIRED_RUNS = <n>').not.toBeNull();
     const n = m![1];
     const md = read(BAR_DOC).toLowerCase();
     // the doc's consecutive-night count is exactly that n (not a hardcoded 14).
     // \b so a weakened constant ("4") does NOT false-pass against doc "14" (R3).
     expect(md).toMatch(new RegExp(`\\b${n}\\s+consecutive`));
     // and it pins that count to the constant by name, so the two cannot drift.
-    expect(read(BAR_DOC)).toContain('WINDOW_REQUIRED_NIGHTS');
+    expect(read(BAR_DOC)).toContain('WINDOW_REQUIRED_RUNS');
   });
 
   // AC2 ("#1147's scheduled lane is measured against it") made concrete: the

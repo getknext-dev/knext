@@ -64,32 +64,39 @@ export const CREDENTIAL_LINES = Object.freeze({
     sourceWorkflow: '.github/workflows/test-e2e-deploy.yml',
     workflowName: 'Compat suite v1.3 credential (official Next.js deploy harness)',
     /**
-     * v1.0 credential cron → this line's cron for the SAME cell.
+     * This line's credential cron for each cell (lane → cron). The derivation
+     * (`lineSubstitutions` in compat-line-workflow.mjs) replaces the cell's
+     * v1.0 cron literal in the tag's own workflow with this one, whichever
+     * shape the tag's schedule has (`SOURCE_SHAPES` there) — so this grid is
+     * what v1.3 runs on from the moment the derived file is regenerated, even
+     * on a tag (v1.3.0-rc.9) whose own schedule still fired once a day.
      *
-     * WHY 14:17 / 15:47 / 17:17 / 18:47 UTC. GitHub starts v1.0's scheduled
-     * runs HOURS LATE, every day — measured 2026-10-07/08: the 22:17 node-webpack
-     * slot started 01:31 / 01:54, the 01:17 node slot 07:18 / 07:29, the two
-     * early-warnings 10:18-11:17 and 11:21-12:42, and the 05:47 bun credential
-     * night 12:02-13:07. Every v1.0 run of a day had ended by ~13:07 UTC. The
-     * previous v1.3 slots (11:17 / 12:47) sat INSIDE that tail and collided with
-     * it daily. These start after it, and 90 min apart (each night is ~1 h
-     * wall-clock), so the four v1.3 nights neither queue behind v1.0's tail nor
-     * behind each other.
+     * THREE RUNS A DAY PER CELL (ADR-0056 Amendment 5, founder decision
+     * 2026-10-08: the credential is 14 consecutive green independent RUNS, not
+     * nights). Each cron fires 8 h apart, at :32, in the hours v1.0 leaves
+     * free: v1.0's four cells hold hours 1, 5, 6, 7 (+8, +16) of every 8 h
+     * band, these hold 0, 2, 3, 4 — one credential fire per clock hour across
+     * both lines (24 a day). Why 8 h: GitHub started v1.0's schedules
+     * 2.3-7.4 h late (48 runs, 2026-10-01..08); the audit places a run on the
+     * latest fire of its own cron at or before its creation, so the gap
+     * between a cell's fires must exceed that delay, and 8 h also keeps two
+     * runs of a cell >= 2.9 h apart under it (the audit's spacing floor is
+     * 2 h). Why :32: no other workflow schedules on that minute.
      *
-     * HONEST RISK. This is a measurement of the last few days, not a guarantee:
-     * GitHub can delay any schedule by hours, in either line. Overlap therefore
-     * costs QUEUEING (a night starts late), never cancellation — nothing in
-     * either workflow cancels the other's runs (the concurrency group is keyed
-     * by workflow name). And the v1.3 slots now fall in the daytime, so a v1.3
-     * night's 16 shards x up-to-8 parallel jobs can slow daytime PR CI and the
-     * merge queue while they run. Guarded by tests/compat-credential-line.test.ts
-     * (start >= 14:00 UTC, spacing >= 90 min, disjoint from every v1.0 cron).
+     * HONEST RISK. 24 credential runs a day of 16 shards (8 parallel) is about
+     * one full run every hour on the shared 20-job pool, day and night, plus
+     * the two v1.0 early-warning runs. Overlap costs QUEUEING, never
+     * cancellation (scheduled runs get a per-run concurrency group), but PR CI
+     * and the merge queue share that pool. Guarded by
+     * tests/compat-credential-line.test.ts (three fires 8 h apart per cell, one
+     * credential fire per clock hour across both lines, no fire shared with
+     * v1.0).
      */
     cronMap: Object.freeze({
-      '17 1 * * *': '17 14 * * *', // node × turbopack   (lane `node`)
-      '47 5 * * *': '47 15 * * *', // bun × turbopack    (lane `bun`)
-      '17 22 * * *': '17 17 * * *', // node × webpack    (lane `node-webpack`)
-      '47 23 * * *': '47 18 * * *', // bun × webpack     (lane `bun-webpack`)
+      node: '32 0,8,16 * * *', // node × turbopack
+      bun: '32 2,10,18 * * *', // bun × turbopack
+      'node-webpack': '32 3,11,19 * * *', // node × webpack
+      'bun-webpack': '32 4,12,20 * * *', // bun × webpack
     }),
     /**
      * The ENTRY POINTS of the main-side code that decides what a night of this

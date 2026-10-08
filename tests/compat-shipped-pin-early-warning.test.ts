@@ -66,7 +66,7 @@ describe('shipped-pin early-warning lane cannot count toward the v1.0 credential
       'could not extract the KNEXT_COMPAT_MODE credential-cron literal set — this test needs updating',
     ).not.toEqual([]);
     expect(new Set(literals)).toEqual(
-      new Set(['17 1 * * *', '47 5 * * *', '17 22 * * *', '47 23 * * *']),
+      new Set(['17 1,9,17 * * *', '47 5,13,21 * * *', '17 6,14,22 * * *', '47 7,15,23 * * *']),
     );
   });
 

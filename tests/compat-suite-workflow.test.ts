@@ -2804,11 +2804,15 @@ describe('compat-suite Bun runtime axis (test-e2e-deploy.yml, #147 item 4)', () 
     expect(all, 'the bun credentialing cron must exist (#1147)').toContain('47 4 * * *');
     // The two lanes must fire at DISTINCT times so they never contend for the
     // same runner window, and there must be no other schedule.
-    expect(all, 'the node RC credential cron must exist (#850)').toContain('17 1 * * *');
-    expect(all, 'the bun RC credential cron must exist (#850)').toContain('47 5 * * *');
+    expect(all, 'the node RC credential cron must exist (#850)').toContain('17 1,9,17 * * *');
+    expect(all, 'the bun RC credential cron must exist (#850)').toContain('47 5,13,21 * * *');
     // #1245: the two webpack CREDENTIAL crons.
-    expect(all, 'the webpack × node credential cron must exist (#1245)').toContain('17 22 * * *');
-    expect(all, 'the webpack × bun credential cron must exist (#1245)').toContain('47 23 * * *');
+    expect(all, 'the webpack × node credential cron must exist (#1245)').toContain(
+      '17 6,14,22 * * *',
+    );
+    expect(all, 'the webpack × bun credential cron must exist (#1245)').toContain(
+      '47 7,15,23 * * *',
+    );
     expect(new Set(all).size, 'the six crons must be distinct').toBe(6);
     expect(
       all.filter(
@@ -2816,10 +2820,10 @@ describe('compat-suite Bun runtime axis (test-e2e-deploy.yml, #147 item 4)', () 
           ![
             '17 3 * * *',
             '47 4 * * *',
-            '17 1 * * *',
-            '47 5 * * *',
-            '17 22 * * *',
-            '47 23 * * *',
+            '17 1,9,17 * * *',
+            '47 5,13,21 * * *',
+            '17 6,14,22 * * *',
+            '47 7,15,23 * * *',
           ].includes(c),
       ),
       'exactly six schedules: node + bun on main, node + bun on the RC tag, webpack node + bun on the RC tag',
@@ -2928,13 +2932,13 @@ describe('compat-suite Bun runtime axis (test-e2e-deploy.yml, #147 item 4)', () 
     });
 
     it('the RC credential crons keep their lanes: 47 5 → bun, 17 1 → node (#850)', () => {
-      expect(resolveLane({ schedule: '47 5 * * *' })).toBe('bun');
-      expect(resolveLane({ schedule: '17 1 * * *' })).toBe('node');
+      expect(resolveLane({ schedule: '47 5,13,21 * * *' })).toBe('bun');
+      expect(resolveLane({ schedule: '17 1,9,17 * * *' })).toBe('node');
     });
 
     it('the webpack credential crons pick their runtime: 47 23 → bun, 17 22 → node (#1245)', () => {
-      expect(resolveLane({ schedule: '47 23 * * *' })).toBe('bun');
-      expect(resolveLane({ schedule: '17 22 * * *' })).toBe('node');
+      expect(resolveLane({ schedule: '47 7,15,23 * * *' })).toBe('bun');
+      expect(resolveLane({ schedule: '17 6,14,22 * * *' })).toBe('node');
     });
 
     it('a dispatch runtime input WINS over any schedule', () => {

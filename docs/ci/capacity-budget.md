@@ -40,11 +40,14 @@ by-design lanes):
 
 `test-e2e-deploy.yml`'s own 6 credential/early-warning crons were already
 staggered ≥60–90 minutes apart before this issue (`17 1`, `17 3`, `47 4`, `47
-5`, `17 22`, `47 23`) and are unchanged here.
+5`, `17 22`, `47 23`) and are unchanged here. **Superseded for the credential
+crons by §6 (ADR-0056 Amendment 5)**, which fires each credential cell three
+times a day.
 
 Enforced by `tests/ci-capacity-budget.test.ts` (`no two scheduled crons across
 all workflows share the exact same UTC minute-of-day`) — mechanical, not
-self-reported.
+self-reported. Since §6 a cron's hour field may be a comma list; every listed
+hour is compared.
 
 **What staggering does NOT fix, stated rather than implied**: GitHub's
 own ~5-hour scheduling delay is outside this repo's control, so the literal
@@ -172,3 +175,50 @@ informational signal does not need nightly cadence to be useful. The
 dispatching job itself is cheap (mostly idle polling, not compute); the real
 cost is the 4 dispatched smoke runs, each bounded by the same
 `max-parallel: 8` §2 already enforces on `test-e2e-deploy.yml`.
+
+## 6. Three credential runs per cell per day (ADR-0056 Amendment 5)
+
+The credential is now **14 consecutive green independent runs per cell**, not
+14 nights. Each credential cron is one literal firing three times a day, eight
+hours apart, in both release lines:
+
+| Line | Cell | Cron (UTC) |
+| --- | --- | --- |
+| v1.0 | node × turbopack | `17 1,9,17 * * *` |
+| v1.0 | bun × turbopack | `47 5,13,21 * * *` |
+| v1.0 | node × webpack | `17 6,14,22 * * *` |
+| v1.0 | bun × webpack | `47 7,15,23 * * *` |
+| v1.3 | node × turbopack | `32 0,8,16 * * *` |
+| v1.3 | bun × turbopack | `32 2,10,18 * * *` |
+| v1.3 | node × webpack | `32 3,11,19 * * *` |
+| v1.3 | bun × webpack | `32 4,12,20 * * *` |
+
+**Measured before choosing** (48 scheduled `test-e2e-deploy.yml` runs,
+2026-10-01..08): GitHub started them 2.3–7.4 h after their cron (median
+5.9 h), each run lasted 36–66 min (median 48), and each run peaks at 8 of the
+20 concurrent jobs.
+
+**Budget.** 24 credential runs plus the 2 v1.0 early-warning runs a day, about
+21 pool run-hours a day: roughly one full run active every hour, 8 of the 20
+jobs. The two lines interleave so exactly one credential fire lands in each
+clock hour. Overlap costs queueing, never cancellation (scheduled runs keep the
+per-`run_id` concurrency group of §4). PR CI and the merge queue share the
+pool, so expect slower PR feedback while a credential run is active.
+
+**Why three, not four.** At four a day the fires of one cell are 6 h apart,
+less than the measured 7.4 h worst delay. The audit places a run on the latest
+fire of its own cron at or before its creation, so a run delayed past the next
+fire would land in that slot and reset the cell. Four a day also brings two
+runs of a cell to within 0.9 h, below the audit's 2 h spacing floor. Three a
+day keeps runs of a cell at least 2.9 h apart under the measured delay spread.
+
+**What changed in the tests.** The literal stagger between crons inside
+`test-e2e-deploy.yml` is now ≥ 30 min, not ≥ 60, and the 08:30 UTC pile-up
+rule is gone (`tests/compat-webpack-credential-lanes.test.ts`). With a fire in
+nearly every hour neither could hold; the measured delay spread and
+`max-parallel: 8` are what bound contention. No two crons across all workflows
+share a UTC minute (§1, unchanged).
+
+**Watchdog.** `credential-slot-watchdog.yml` now fires every 8 h
+(`25 1,9,17 * * *`) and checks each lane's latest fire that is past its grace,
+so every fire is checked exactly once.

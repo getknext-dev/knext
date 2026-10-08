@@ -199,9 +199,14 @@ export function evaluateWatchdog({ workflowYamlText, gh, now = new Date(), grace
   const resolvedGraceHours =
     graceHours ?? (Number(process.env.WATCHDOG_GRACE_HOURS) || DEFAULT_GRACE_HOURS);
 
+  // ADR-0056 Amendment 5 — check each lane's latest DUE fire (the latest at
+  // or before now - grace). A lane fires every 8 h, so its latest fire at or
+  // before NOW is never past an 8 h grace; checking that one could never
+  // alert. The watchdog fires every 8 h, so every fire is checked once.
+  const nowDate = now instanceof Date ? now : new Date(now);
   const lanes = computeExpectedSlots(
     resolveCredentialLanes(workflowYamlText, { defaultGraceHours: resolvedGraceHours }),
-    now,
+    new Date(nowDate.getTime() - resolvedGraceHours * 60 * 60 * 1000),
   );
 
   let allSlots;
@@ -218,7 +223,9 @@ export function evaluateWatchdog({ workflowYamlText, gh, now = new Date(), grace
     // than crashing the watchdog: it can only make an early-warning run look
     // like it satisfies a credential lane in the fallback heuristic, never
     // the reverse, and `detectAmbiguousAttribution` still runs on the result.
-    allSlots = lanes.map(({ cron, hour, minute }) => ({ cron, hour, minute }));
+    allSlots = lanes.flatMap(({ cron, hour, hours, minute }) =>
+      (hours ?? [hour]).map((h) => ({ cron, hour: h, minute })),
+    );
   }
 
   const since = lanes.map((l) => l.expectedSlotTime).sort()[0];

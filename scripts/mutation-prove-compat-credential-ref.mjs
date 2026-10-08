@@ -69,7 +69,7 @@ const MUTATIONS = [
     // check is itself credential-scoped — so dropping ONLY the scope term is
     // now an equivalent mutant. The mutation drops the whole guard instead.
     anchor:
-      "    met: scope === 'credential' && calendar.checked && longest.nights >= requiredNights,",
+      "    met:\n      scope === 'credential' &&\n      calendar.checked &&\n      spacingUnverified.length === 0 &&\n      longest.nights >= requiredNights,",
     replacement: '    met: longest.nights >= requiredNights,',
   },
   {
@@ -81,8 +81,10 @@ const MUTATIONS = [
   {
     label: 'guard 1: map every non-credential trigger (dispatch included) to credential mode',
     subject: 'workflow',
-    anchor: "|| (github.event.schedule == '47 23 * * *' && 'credential') || 'early-warning' }}",
-    replacement: "|| (github.event.schedule == '47 23 * * *' && 'credential') || 'credential' }}",
+    anchor:
+      "|| (github.event.schedule == '47 7,15,23 * * *' && 'credential') || 'early-warning' }}",
+    replacement:
+      "|| (github.event.schedule == '47 7,15,23 * * *' && 'credential') || 'credential' }}",
   },
 
   {

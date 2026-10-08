@@ -15,6 +15,7 @@ import {
   decideCredentialSlotVerdicts,
   detectAmbiguousAttribution,
   extractScheduleCrons,
+  mostRecentFireAtOrBefore,
   mostRecentSlotAtOrBefore,
   parseAllDeclaredSlots,
   parseSimpleDailyCron,
@@ -34,11 +35,44 @@ const REAL_WORKFLOW = readFileSync(
   'utf8',
 );
 
+/**
+ * ADR-0056 Amendment 5 moved every credential cell from one fire a day to
+ * three (one cron literal with a comma-listed hour field). The attribution,
+ * ambiguity and pagination tests below replay REAL runs recorded under the
+ * previous one-fire-a-day schedule, so they run against that schedule: the real
+ * workflow with each multi-fire literal put back to its single historical fire.
+ * The live multi-fire schedule has its own block ("three fires a day").
+ */
+const LEGACY_CRONS: Record<string, string> = {
+  '17 1,9,17 * * *': '17 1 * * *',
+  '47 5,13,21 * * *': '47 5 * * *',
+  '17 6,14,22 * * *': '17 22 * * *',
+  '47 7,15,23 * * *': '47 23 * * *',
+};
+const LEGACY_WORKFLOW = Object.entries(LEGACY_CRONS).reduce((text, [now, then]) => {
+  if (!text.includes(`'${now}'`)) throw new Error(`fixture drift: '${now}' not in the workflow`);
+  return text.replaceAll(`'${now}'`, `'${then}'`);
+}, REAL_WORKFLOW);
+
 // ── parseSimpleDailyCron ─────────────────────────────────────────────────────
 
 describe('parseSimpleDailyCron', () => {
   it('parses a once-daily "M H * * *" cron', () => {
-    expect(parseSimpleDailyCron('17 1 * * *')).toEqual({ minute: 17, hour: 1 });
+    expect(parseSimpleDailyCron('17 1 * * *')).toEqual({ minute: 17, hour: 1, hours: [1] });
+  });
+
+  it('parses a multi-fire "M H1,H2,H3 * * *" cron into every fire hour (ADR-0056 Amendment 5)', () => {
+    expect(parseSimpleDailyCron('17 1,9,17 * * *')).toEqual({
+      minute: 17,
+      hour: 1,
+      hours: [1, 9, 17],
+    });
+  });
+
+  it('rejects an hour range, a step or a duplicate hour (it could not enumerate the fires)', () => {
+    expect(() => parseSimpleDailyCron('17 1-9 * * *')).toThrow(/not a supported/);
+    expect(() => parseSimpleDailyCron('17 */8 * * *')).toThrow(/not a supported/);
+    expect(() => parseSimpleDailyCron('17 1,1 * * *')).toThrow(/duplicate/);
   });
 
   it('rejects a cron with a non-daily field (e.g. every 5 minutes)', () => {
@@ -59,16 +93,22 @@ describe('resolveCredentialLaneCrons against the real test-e2e-deploy.yml', () =
     expect(crons).toEqual([
       '17 3 * * *',
       '47 4 * * *',
-      '17 1 * * *',
-      '47 5 * * *',
-      '17 22 * * *',
-      '47 23 * * *',
+      '17 1,9,17 * * *',
+      '47 5,13,21 * * *',
+      '17 6,14,22 * * *',
+      '47 7,15,23 * * *',
     ]);
   });
 
   it('resolves exactly the 4 credential lanes, matching DEFAULT_CREDENTIAL_LANES', () => {
     const lanes = resolveCredentialLaneCrons(REAL_WORKFLOW);
-    const stripped = lanes.map(({ cron, lane, hour, minute }) => ({ cron, lane, hour, minute }));
+    const stripped = lanes.map(({ cron, lane, hour, hours, minute }) => ({
+      cron,
+      lane,
+      hour,
+      hours,
+      minute,
+    }));
     expect(stripped).toEqual(DEFAULT_CREDENTIAL_LANES.map((l) => ({ ...l })));
   });
 
@@ -86,7 +126,13 @@ describe('resolveCredentialLanes — fails closed on a parse failure', () => {
   it('uses live parsing against real input and does not throw', () => {
     expect(() => resolveCredentialLanes(REAL_WORKFLOW)).not.toThrow();
     const lanes = resolveCredentialLanes(REAL_WORKFLOW);
-    const stripped = lanes.map(({ cron, lane, hour, minute }) => ({ cron, lane, hour, minute }));
+    const stripped = lanes.map(({ cron, lane, hour, hours, minute }) => ({
+      cron,
+      lane,
+      hour,
+      hours,
+      minute,
+    }));
     expect(stripped).toEqual(DEFAULT_CREDENTIAL_LANES.map((l) => ({ ...l })));
   });
 
@@ -133,7 +179,7 @@ describe('mostRecentSlotAtOrBefore', () => {
 
 // ── attributeRunsToLanes — basic mechanics (heuristic path, non-ambiguous) ──
 
-const ALL_SLOTS = parseAllDeclaredSlots(REAL_WORKFLOW);
+const ALL_SLOTS = parseAllDeclaredSlots(LEGACY_WORKFLOW);
 
 describe('attributeRunsToLanes', () => {
   // Every lane's own current-cycle slot lands the SAME UTC day at this `now`
@@ -141,7 +187,7 @@ describe('attributeRunsToLanes', () => {
   // for why that matters): node 01:17, bun 05:47, node-webpack 22:17,
   // bun-webpack 23:47, all 2026-09-29.
   const now = new Date('2026-09-29T23:50:00Z');
-  const lanes = computeExpectedSlots(resolveCredentialLanes(REAL_WORKFLOW), now);
+  const lanes = computeExpectedSlots(resolveCredentialLanes(LEGACY_WORKFLOW), now);
 
   /** Every lane's own clean, on-time run at `now`'s cycle — a realistic night where nothing is wrong. */
   function allLanesOnTime() {
@@ -302,7 +348,7 @@ describe('attributeRunsToLanes', () => {
 
 describe('detectAmbiguousAttribution — cross-lane masking, each adjacent pair', () => {
   const now = new Date('2026-09-29T23:50:00Z');
-  const lanes = computeExpectedSlots(resolveCredentialLanes(REAL_WORKFLOW), now);
+  const lanes = computeExpectedSlots(resolveCredentialLanes(LEGACY_WORKFLOW), now);
 
   // Pair: bun-webpack <- node-webpack (gap 1.5h, AT RISK)
   it('bun-webpack <- node-webpack: ambiguous when node-webpack has no evidence of its own', () => {
@@ -429,7 +475,7 @@ describe('detectAmbiguousAttribution — cross-lane masking, each adjacent pair'
 
 describe('attributeRunsToLanes — exact-marker signal takes priority over the heuristic', () => {
   const now = new Date('2026-09-29T23:50:00Z');
-  const lanes = computeExpectedSlots(resolveCredentialLanes(REAL_WORKFLOW), now);
+  const lanes = computeExpectedSlots(resolveCredentialLanes(LEGACY_WORKFLOW), now);
 
   it('attributes a same-cycle exact-marker run to its declared lane, overriding what the nearest-slot heuristic would have guessed', () => {
     // The nearest declared slot before this created_at is bun-webpack's
@@ -851,7 +897,12 @@ describe('evaluateWatchdog — end to end, offline', () => {
   it('reports "missing" when the runs list is empty and grace has elapsed', () => {
     const { gh } = fakeGh([]);
     const now = new Date('2026-09-29T20:00:00Z'); // every credential slot's +8h has passed
-    const verdicts = evaluateWatchdog({ workflowYamlText: REAL_WORKFLOW, gh, now, graceHours: 8 });
+    const verdicts = evaluateWatchdog({
+      workflowYamlText: LEGACY_WORKFLOW,
+      gh,
+      now,
+      graceHours: 8,
+    });
     expect(verdicts).toHaveLength(4);
     expect(anyLaneNeedsAlert(verdicts)).toBe(true);
     expect(verdicts.find((v) => v.lane === 'node')?.verdict).toBe('missing');
@@ -884,11 +935,17 @@ describe('evaluateWatchdog — end to end, offline', () => {
         run_started_at: '2026-09-29T23:49:00Z',
       },
     ]);
-    // Same UTC day as every run above, so none of the 4 lanes' expected slots
-    // have rolled over to the next occurrence yet (which would make these
-    // runs read as a STALE prior-day occurrence rather than this cycle's).
-    const now = new Date('2026-09-29T23:59:00Z');
-    const verdicts = evaluateWatchdog({ workflowYamlText: REAL_WORKFLOW, gh, now, graceHours: 8 });
+    // ADR-0056 Amendment 5: the watchdog checks each lane's latest DUE fire
+    // (the latest at or before now - grace). 07:48 the next morning is 8 h
+    // after the last of the four (bun-webpack 23:47), so all four checked
+    // fires are 2026-09-29's, and none has rolled over to 09-30 yet.
+    const now = new Date('2026-09-30T07:48:00Z');
+    const verdicts = evaluateWatchdog({
+      workflowYamlText: LEGACY_WORKFLOW,
+      gh,
+      now,
+      graceHours: 8,
+    });
     expect(anyLaneNeedsAlert(verdicts)).toBe(false);
   });
 
@@ -924,21 +981,44 @@ describe('evaluateWatchdog — end to end, offline', () => {
       },
     ]);
     const now = new Date('2026-09-29T09:30:00Z'); // slot + 8h13m
-    const verdicts = evaluateWatchdog({ workflowYamlText: REAL_WORKFLOW, gh, now, graceHours: 8 });
+    const verdicts = evaluateWatchdog({
+      workflowYamlText: LEGACY_WORKFLOW,
+      gh,
+      now,
+      graceHours: 8,
+    });
     expect(verdicts.find((v) => v.lane === 'node')?.verdict).toBe('queued-too-long');
   });
 
   it('honors an explicit graceHours override over the default', () => {
-    const { gh } = fakeGh([]);
-    const now = new Date('2026-09-29T03:00:00Z'); // 1h43m after the node slot (01:17)
+    // Only YESTERDAY's node run exists. At 03:00, 1h43m after today's 01:17
+    // node slot: with the 8 h default the latest DUE node fire is yesterday's
+    // (quiet — its run exists); with a 1 h grace it is today's (missing).
+    // node's predecessor (bun-webpack, 23:47 the day before) has its own run,
+    // so the marker-less node run is unambiguously node's.
+    const { gh } = fakeGh([
+      {
+        event: 'schedule',
+        status: 'completed',
+        created_at: '2026-09-27T23:48:00Z',
+        run_started_at: '2026-09-27T23:49:00Z',
+      },
+      {
+        event: 'schedule',
+        status: 'completed',
+        created_at: '2026-09-28T01:18:00Z',
+        run_started_at: '2026-09-28T01:19:00Z',
+      },
+    ]);
+    const now = new Date('2026-09-29T03:00:00Z');
     const withDefaultGrace = evaluateWatchdog({
-      workflowYamlText: REAL_WORKFLOW,
+      workflowYamlText: LEGACY_WORKFLOW,
       gh,
       now,
       graceHours: 8,
     });
     const withTightGrace = evaluateWatchdog({
-      workflowYamlText: REAL_WORKFLOW,
+      workflowYamlText: LEGACY_WORKFLOW,
       gh,
       now,
       graceHours: 1,
@@ -1089,7 +1169,7 @@ function simGh(
 
 const verdictsOf = (gh: (a: string[]) => string, now = WATCHDOG_NOW): Record<string, string> =>
   Object.fromEntries(
-    evaluateWatchdog({ workflowYamlText: REAL_WORKFLOW, gh, now, graceHours: 8 }).map((v) => [
+    evaluateWatchdog({ workflowYamlText: LEGACY_WORKFLOW, gh, now, graceHours: 8 }).map((v) => [
       v.lane,
       v.verdict,
     ]),
@@ -1200,11 +1280,28 @@ describe('#1895 — night-4 replay: a run outside its grace window IS flagged', 
     expect(verdictsOf(gh).node).not.toBe('quiet');
   });
 
-  it('is quiet before grace elapses with no run, and flagged once it does (boundary)', () => {
+  it('checks a slot only once its grace has elapsed (boundary)', () => {
+    // ADR-0056 Amendment 5: the watchdog checks the latest DUE fire. One
+    // second before 10-05 01:17 + 8 h, node's due fire is still 10-04's
+    // (outside this fixture, so it reads missing for 10-04 — never for
+    // 10-05); from 09:17:00 it is 10-05's.
     const noNode = NIGHT4_RUNS.filter((r) => r.id !== NIGHT4_NODE);
     const { gh } = simGh(noNode);
-    expect(verdictsOf(gh, new Date('2026-10-05T09:16:59Z')).node).toBe('quiet');
-    expect(verdictsOf(gh, new Date('2026-10-05T09:17:00Z')).node).toBe('missing');
+    const before = evaluateWatchdog({
+      workflowYamlText: LEGACY_WORKFLOW,
+      gh,
+      now: new Date('2026-10-05T09:16:59Z'),
+      graceHours: 8,
+    }).find((v) => v.lane === 'node');
+    const at = evaluateWatchdog({
+      workflowYamlText: LEGACY_WORKFLOW,
+      gh,
+      now: new Date('2026-10-05T09:17:00Z'),
+      graceHours: 8,
+    }).find((v) => v.lane === 'node');
+    expect(before?.reason).toContain('2026-10-04T01:17:00.000Z');
+    expect(at?.reason).toContain('2026-10-05T01:17:00.000Z');
+    expect(at?.verdict).toBe('missing');
   });
 });
 
@@ -1235,5 +1332,122 @@ describe('fetchScheduledRuns / fetchWindowRuns — pagination and union (#1895)'
         37305584727,
       ].sort(),
     );
+  });
+});
+// ── ADR-0056 Amendment 5 — three fires a day per lane ──────────────────────
+
+describe('three fires a day — the live schedule (ADR-0056 Amendment 5)', () => {
+  const WATCHDOG_WORKFLOW = readFileSync(
+    new URL('../.github/workflows/credential-slot-watchdog.yml', import.meta.url),
+    'utf8',
+  );
+  const H = 3_600_000;
+  const at = (day: string, hour: number, minute: number) =>
+    new Date(`${day}T${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:00Z`);
+
+  it('every credential lane resolves to three fires, 8 h apart', () => {
+    const lanes = resolveCredentialLanes(REAL_WORKFLOW);
+    expect(lanes).toHaveLength(4);
+    for (const l of lanes) {
+      expect(l.hours).toHaveLength(3);
+      expect(l.hours[1] - l.hours[0]).toBe(8);
+      expect(l.hours[2] - l.hours[1]).toBe(8);
+    }
+  });
+
+  it('mostRecentFireAtOrBefore picks the latest of the listed hours', () => {
+    const fire = (iso: string) =>
+      mostRecentFireAtOrBefore([1, 9, 17], 17, new Date(iso)).toISOString();
+    expect(fire('2026-10-10T09:16:59Z')).toBe('2026-10-10T01:17:00.000Z');
+    expect(fire('2026-10-10T09:17:00Z')).toBe('2026-10-10T09:17:00.000Z');
+    expect(fire('2026-10-10T00:30:00Z')).toBe('2026-10-09T17:17:00.000Z');
+  });
+
+  it('checks the latest DUE fire: a run of a LATER, not-yet-due fire never satisfies it', () => {
+    // 02:05 - 8 h = 18:05 the day before, so node's due fire is 10-09 17:17.
+    // The only node run belongs to 10-10 01:17 — a different fire.
+    const { gh } = simGh([fixtureRun(1, 'schedule', '2026-10-10T01:20:00Z', CRED('node'))]);
+    const node = evaluateWatchdog({
+      workflowYamlText: REAL_WORKFLOW,
+      gh,
+      now: new Date('2026-10-10T02:05:00Z'),
+      graceHours: 8,
+    }).find((v) => v.lane === 'node');
+    expect(node?.verdict).toBe('missing');
+    expect(node?.reason).toContain('2026-10-09T17:17:00.000Z');
+  });
+
+  it('is quiet when the due fire has its own run, even one created 7 h late', () => {
+    const { gh } = simGh([fixtureRun(1, 'schedule', '2026-10-10T00:17:00Z', CRED('node'))]);
+    const node = evaluateWatchdog({
+      workflowYamlText: REAL_WORKFLOW,
+      gh,
+      now: new Date('2026-10-10T02:05:00Z'),
+      graceHours: 8,
+    }).find((v) => v.lane === 'node');
+    expect(node?.verdict).toBe('quiet');
+  });
+
+  it('the heuristic fallback (no markers) places a run on the right fire of a multi-fire cron', () => {
+    const lanes = computeExpectedSlots(
+      resolveCredentialLanes(REAL_WORKFLOW),
+      new Date('2026-10-10T10:00:00Z'),
+    );
+    // node's 09:17 fire; its predecessor (bun-webpack 07:47) has its own run,
+    // so the conservative ambiguity check does not drop node's.
+    const { attributed } = attributeRunsToLanes(
+      [
+        {
+          event: 'schedule',
+          status: 'completed',
+          created_at: '2026-10-10T07:50:00Z',
+          run_started_at: '2026-10-10T07:50:00Z',
+        },
+        {
+          event: 'schedule',
+          status: 'completed',
+          created_at: '2026-10-10T09:20:00Z',
+          run_started_at: '2026-10-10T09:20:00Z',
+        },
+      ],
+      lanes,
+      parseAllDeclaredSlots(REAL_WORKFLOW),
+    );
+    expect(attributed.find((r) => r.created_at === '2026-10-10T09:20:00Z')?.lane).toBe('node');
+  });
+
+  it("the watchdog's own schedule checks every fire of every lane exactly once", () => {
+    const watchdogCrons = extractScheduleCrons(WATCHDOG_WORKFLOW).map(parseSimpleDailyCron);
+    const lanes = resolveCredentialLanes(REAL_WORKFLOW);
+    const checks: Date[] = [];
+    for (const day of ['2026-10-10', '2026-10-11']) {
+      for (const c of watchdogCrons) for (const h of c.hours) checks.push(at(day, h, c.minute));
+    }
+    checks.sort((a, b) => a.getTime() - b.getTime());
+    const checked: string[] = [];
+    for (const t of checks) {
+      const due = new Date(t.getTime() - DEFAULT_GRACE_HOURS * H);
+      for (const l of computeExpectedSlots(lanes, due)) {
+        checked.push(`${l.lane}@${l.expectedSlotTime}`);
+      }
+    }
+    // No fire is checked twice …
+    expect(new Set(checked).size).toBe(checked.length);
+    // … and every fire between the first and last check's due point is checked.
+    const first = (checks[0] as Date).getTime() - DEFAULT_GRACE_HOURS * H - 8 * H;
+    const last = (checks.at(-1) as Date).getTime() - DEFAULT_GRACE_HOURS * H;
+    let covered = 0;
+    for (const l of lanes) {
+      for (const day of ['2026-10-09', '2026-10-10', '2026-10-11']) {
+        for (const h of l.hours) {
+          const fire = at(day, h, l.minute);
+          if (fire.getTime() > first && fire.getTime() <= last) {
+            expect(checked).toContain(`${l.lane}@${fire.toISOString()}`);
+            covered += 1;
+          }
+        }
+      }
+    }
+    expect(covered).toBe(checked.length);
   });
 });

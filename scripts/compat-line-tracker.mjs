@@ -146,25 +146,25 @@ export function buildLineTrackerBody(audit, opts = {}) {
     .filter((cell) => audit.cells[cell.lane].offLineNights.length > 0)
     .map(
       (cell) =>
-        `- \`${cell.lane}\`: ${audit.cells[cell.lane].offLineNights.length} night(s) ran a tag OFF the ${audit.line} line — the cell cannot be met`,
+        `- \`${cell.lane}\`: ${audit.cells[cell.lane].offLineNights.length} run(s) ran a tag OFF the ${audit.line} line — the cell cannot be met`,
     );
   const verdict =
     audit.allMet && audit.calendarUnverified.length === 0
       ? `${audit.line} CREDENTIAL MET — every stable cell banked its window on a ${audit.line} RC tag.`
       : audit.calendarUnverified.length > 0
         ? `${audit.line} credential NOT YET met — CALENDAR UNVERIFIED for ${audit.calendarUnverified.join(', ')}.`
-        : `${audit.line} credential NOT YET met — every stable cell needs its own 14 ${audit.line} RC-tag nights.`;
+        : `${audit.line} credential NOT YET met — every stable cell needs its own 14 consecutive green runs on a ${audit.line} RC tag.`;
   return `Daily ${audit.line} matrix audit — generated ${generatedAt}${opts.runUrl ? ` by ${opts.runUrl}` : ''}.
 
 The ${audit.line} line earns its credential IN PARALLEL with v1.0, on its own RC tag
-(\`${spec.pinFile}\`), its own workflow (\`${spec.workflowFile}\`) and its own nights:
+(\`${spec.pinFile}\`), its own workflow (\`${spec.workflowFile}\`) and its own runs:
 a ${audit.line} red never restarts a v1.0 window and a v1.0 red never restarts a
 ${audit.line} one. The four stable cells are node/bun × turbopack/webpack; vinext is
 Beta and is not credentialed. A per-cell red opens or updates its own
 \`${spec.resetLabel}\`-labelled issue. This tracker is deliberately not pinned (the
 repository's pin slots belong to the v1.0 tracker).
 
-| Cell | Lane | Wired | Nights (current/required) | Status |
+| Cell | Lane | Wired | Consecutive green runs (current streak) | Status |
 | --- | --- | --- | --- | --- |
 ${rows.join('\n')}
 ${offLine.length > 0 ? `\n${offLine.join('\n')}\n` : ''}

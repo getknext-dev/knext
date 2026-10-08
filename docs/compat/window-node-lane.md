@@ -1,11 +1,17 @@
 # Compat window — node lane
 
 The v1.0 gate for the **node × turbopack cell**. **14 consecutive scheduled node-lane
-*credential* nights — run against a frozen release-candidate tag, never `main` — every shard
+*credential* runs — run against a frozen release-candidate tag, never `main` — every shard
 `failed:0`/`notRun:0`, zero net new quarantine entries, and the fingerprint unchanged across all of
 them.** Since ADR-0056 (2026-09-23) this is one cell of the per-cell v1.0 matrix; see
 [The RC-ref model](#the-rc-ref-model-adr-0056) below.
 
+> **Runs, not nights (ADR-0056 Amendment 5, 2026-10-08).** The credential now counts **14
+> consecutive qualifying runs**, not 14 calendar nights. Each credential cron fires three times a
+> day, eight hours apart, and a green run counts only if it started at least two hours after the
+> previous counted run of the same cell (rule 10 in `scripts/compat-window-audit.mjs`). Every other
+> rule below is unchanged and applies per run: where this file says "night", read "scheduled run".
+>
 > **Read this first.** The window history further down (2026-07-29 → 2026-08-24) was banked on
 > `main`, before the RC-ref model. Under ADR-0056 those are **early-warning** nights. They are
 > kept as the measurement that motivated the change, but **none of them counts toward the v1.0
@@ -17,8 +23,8 @@ them.** Since ADR-0056 (2026-09-23) this is one cell of the per-cell v1.0 matrix
 
 | cron (UTC) | lane | mode | knext ref under test | counts toward v1.0? |
 |---|---|---|---|---|
-| `17 1 * * *` | node | **credential** | the RC tag pinned in `.github/compat-credential-ref.json` | **yes** |
-| `47 5 * * *` | bun | **credential** | the same RC tag | **yes** (bun cell) |
+| `17 1,9,17 * * *` | node | **credential** (three runs a day) | the RC tag pinned in `.github/compat-credential-ref.json` | **yes** |
+| `47 5,13,21 * * *` | bun | **credential** (three runs a day) | the same RC tag | **yes** (bun cell) |
 | `17 3 * * *` | node | early-warning | `main` | **never** |
 | `47 4 * * *` | bun | early-warning | `main` | **never** |
 

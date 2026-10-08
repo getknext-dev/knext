@@ -6,7 +6,8 @@ ADR-0056 freezes the compat harness for the life of a release-candidate
 window: `.github/compat-credential-ref.json`'s `rcTag` pins the ref a
 credential night runs against, and a scheduled night's fingerprint step
 (`scripts/compat-window-fingerprint.mjs`) DETECTS a mismatch — but only
-after the fact, restarting the 14-night streak on the next scheduled run.
+after the fact, restarting the 14-run streak (14 consecutive green runs since ADR-0056
+Amendment 5) on the next scheduled run.
 
 `.github/workflows/compat-credential-freeze-guard.yml` is the PR-time half:
 while a window is live (`rcTag` is non-null), it refuses any PR that touches

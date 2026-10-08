@@ -91,7 +91,7 @@ The workflow's own existing design comment (`.github/workflows/test-e2e-deploy.y
 decision made deliberately the other way: credential and early-warning crons
 are **never** grouped together, specifically so an in-progress credential
 night's shards are never cancelled by a later cron starting (cancelling a
-pending credential run resets its 14-night window). Adding a per-cluster lock
+pending credential run resets its 14-run window). Adding a per-cluster lock
 across those same crons would need to reopen that decision, not layer on top
 of it.
 

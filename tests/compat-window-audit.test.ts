@@ -3,8 +3,8 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
-  auditCredentialMatrix,
-  auditWindow,
+  auditCredentialMatrix as auditCredentialMatrixLive,
+  auditWindow as auditWindowLive,
   CREDENTIAL_CELLS,
   credentialCronForLane,
   DEFAULT_FETCH_LIMIT,
@@ -20,6 +20,29 @@ import {
   unresolvedNight,
   WINDOW_REQUIRED_NIGHTS,
 } from '../scripts/compat-window-audit.mjs';
+
+/**
+ * ADR-0056 Amendment 5 moved every credential cell from one scheduled run a
+ * day to three. The rules this file exercises (fingerprint continuity, reds,
+ * reruns, lanes, modes, rule 5, rule 7, the VOID grade, the once-a-day slot
+ * calendar) do not depend on how often a cell fires, and their fixtures sit
+ * one run per UTC day — so they are graded against the ONCE-A-DAY calendar the
+ * cells ran on before Amendment 5. The live three-a-day schedule, spacing and
+ * the multi-fire calendar are exercised in tests/compat-credential-runs.test.ts.
+ */
+const ONCE_A_DAY: Record<string, string> = {
+  node: '17 1 * * *',
+  bun: '47 5 * * *',
+  'node-webpack': '17 22 * * *',
+  'bun-webpack': '47 23 * * *',
+};
+const onceADay = (lane: string) => ONCE_A_DAY[lane] ?? null;
+// biome-ignore lint/suspicious/noExplicitAny: thin pass-through over the untyped .mjs API
+const auditWindow = (ledgers: any, opts: Record<string, unknown> = {}) =>
+  auditWindowLive(ledgers, { credentialCronForLane: onceADay, ...opts });
+// biome-ignore lint/suspicious/noExplicitAny: thin pass-through over the untyped .mjs API
+const auditCredentialMatrix = (ledgers: any, opts: Record<string, unknown> = {}) =>
+  auditCredentialMatrixLive(ledgers, { credentialCronForLane: onceADay, ...opts });
 
 /**
  * #545 AC 1 + AC 3 — "per-shard outcomes for the last N scheduled runs are
@@ -723,7 +746,7 @@ describe('compat-window-audit — the v1.0 node-lane window, computed not recall
         { runId: '40000013000', marker: a.voidNights[0]?.marker },
       ]);
       expect(formatReport(a)).toMatch(/VOID — bridged, not counted \(#1553\)/);
-      expect(formatReport(a)).toMatch(/VOID \(#1553\): 1 night\(s\) bridged/);
+      expect(formatReport(a)).toMatch(/VOID \(#1553\): 1 run\(s\) bridged/);
       expect(formatReport(a)).toMatch(/40000013000\s+phase=runner-setup/);
     });
 
@@ -964,7 +987,7 @@ describe('compat-window-audit — the v1.0 node-lane window, computed not recall
     it('prints the restart and fingerprint tallies, so a doc can quote the instrument', () => {
       const report = formatReport(auditWindow(streakOf(3, 'sha256:aaaa')));
       expect(report).toContain('streak restarts: 0');
-      expect(report).toContain('fingerprint moves: 0 across 3 night(s) carrying one');
+      expect(report).toContain('fingerprint moves: 0 across 3 run(s) carrying one');
       expect(report).toContain('1 distinct fingerprint(s)');
     });
   });
@@ -1830,10 +1853,11 @@ describe('parseCredentialCronsFromWorkflow (#1607) — reads the cron↔lane map
 
 describe('credentialCronForLane + the real workflow (#1607) — drift guard', () => {
   it('matches the real test-e2e-deploy.yml cron literals for every wired credential cell', () => {
-    expect(credentialCronForLane('node')).toBe('17 1 * * *');
-    expect(credentialCronForLane('bun')).toBe('47 5 * * *');
-    expect(credentialCronForLane('node-webpack')).toBe('17 22 * * *');
-    expect(credentialCronForLane('bun-webpack')).toBe('47 23 * * *');
+    // ADR-0056 Amendment 5: three fires a day per cell, one literal each.
+    expect(credentialCronForLane('node')).toBe('17 1,9,17 * * *');
+    expect(credentialCronForLane('bun')).toBe('47 5,13,21 * * *');
+    expect(credentialCronForLane('node-webpack')).toBe('17 6,14,22 * * *');
+    expect(credentialCronForLane('bun-webpack')).toBe('47 7,15,23 * * *');
   });
 
   it('an unwired lane (no workflow, or no credential mode wired yet) has no credential cron', () => {
@@ -2075,7 +2099,15 @@ describe('#1612 finding 2 — a night is dated by its CRON SLOT, not the wall cl
       '2026-01-06',
     );
     expect(a23.missingNights).toEqual([]);
-    expect(a23.met).toBe(true);
+    // Placed on its own slot — but ADR-0056 Amendment 5's spacing rule then
+    // applies: the NEXT run started 1 h after this one, so it is not counted
+    // (not reset either). 13 counted runs: not met for that reason alone.
+    const next = a23.nights.find((n: { runId: string }) => n.runId === on23[6].runId);
+    expect(next.counted).toBe(false);
+    expect(next.notCountedReason).toMatch(/spacing/);
+    expect(a23.longest.nights).toBe(13);
+    expect(a23.restartsByCause).toEqual({});
+    expect(a23.met).toBe(false);
 
     const on25 = [...nights];
     on25[5] = { ...on25[5], scheduledAt: late(String(on25[5].scheduledAt), 25 * 60) };

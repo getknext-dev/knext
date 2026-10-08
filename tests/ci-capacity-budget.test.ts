@@ -105,14 +105,16 @@ describe('cron staggering — no overlapping UTC minute-of-day across any workfl
     ).toEqual([]);
   });
 
-  it('parseCron normalises minute/hour as integers and day-of-week "*" to all 7 days', () => {
+  it('parseCron normalises minute/hours as integers and day-of-week "*" to all 7 days', () => {
     expect(parseCron('17 3 * * *')).toEqual({
       minute: 17,
-      hour: 3,
+      hours: new Set([3]),
       daysOfWeek: new Set([0, 1, 2, 3, 4, 5, 6]),
     });
     // Leading zero on the hour is the SAME integer hour.
-    expect(parseCron('17 03 * * *').hour).toBe(3);
+    expect(parseCron('17 03 * * *').hours).toEqual(new Set([3]));
+    // ADR-0056 Amendment 5 — a credential cron fires several times a day.
+    expect(parseCron('17 1,9,17 * * *').hours).toEqual(new Set([1, 9, 17]));
     expect(parseCron('17 3 * * 0').daysOfWeek).toEqual(new Set([0]));
   });
 
@@ -120,6 +122,10 @@ describe('cron staggering — no overlapping UTC minute-of-day across any workfl
     expect(() => parseCron('17 3 1 * *')).toThrow(/day-of-month/);
     expect(() => parseCron('17 3 * 6 *')).toThrow(/day-of-month/);
     expect(() => parseCron('not a cron')).toThrow();
+    // A range or a step names fires this check cannot enumerate — refuse it.
+    expect(() => parseCron('17 1-9 * * *')).toThrow(/hour/);
+    expect(() => parseCron('17 */8 * * *')).toThrow(/hour/);
+    expect(() => parseCron('17 1,24 * * *')).toThrow(/hour/);
   });
 
   // ── MUTATION-PROOF: cronsOverlap discriminates every shape a string
@@ -144,6 +150,12 @@ describe('cron staggering — no overlapping UTC minute-of-day across any workfl
     it('NEGATIVE CONTROL: different minute or hour never overlaps', () => {
       expect(cronsOverlap('17 3 * * *', '18 3 * * *')).toBe(false);
       expect(cronsOverlap('17 3 * * *', '17 4 * * *')).toBe(false);
+    });
+
+    it('a multi-hour cron OVERLAPS a daily cron on ANY of its hours (ADR-0056 Amendment 5)', () => {
+      expect(cronsOverlap('17 9 * * *', '17 1,9,17 * * *')).toBe(true);
+      expect(cronsOverlap('17 1,9,17 * * *', '17 17 * * 1')).toBe(true);
+      expect(cronsOverlap('17 2 * * *', '17 1,9,17 * * *')).toBe(false);
     });
 
     it('NEGATIVE CONTROL: same minute+hour but disjoint days-of-week does not overlap', () => {

@@ -92,6 +92,15 @@ describe('compat-matrix-tracker: buildTrackerBody', () => {
     expect(body).toContain('fingerprint-changed');
   });
 
+  it('ADR-0056 Amendment 5: a row counts RUNS — "run 5 of 14" — and the body never says nights', () => {
+    const row = formatCellRow(CREDENTIAL_CELLS[0], entry());
+    expect(row).toContain('| run 5 of 14 |');
+    const body = buildTrackerBody(fullMatrix());
+    expect(body).toContain('Consecutive green runs');
+    expect(body).toContain('14 consecutive green runs');
+    expect(body).not.toMatch(/\bnights?\b/i);
+  });
+
   it('omits a restart-cause parenthetical when the streak never restarted', () => {
     const row = formatCellRow(
       CREDENTIAL_CELLS[0],

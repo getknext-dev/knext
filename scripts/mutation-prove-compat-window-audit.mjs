@@ -209,26 +209,26 @@ prove(
 
 prove(
   'missing-night insertion: never synthesize a stand-in for an empty cron slot',
-  '.filter((d) => !known.has(d))',
+  '.filter((fire) => !known.has(fire))',
   '.filter(() => false)',
 );
 
 prove(
   'grace removed: call a slot missing the moment it fires, not slot + grace',
-  'while (fireMs(slot) + graceMs > now.getTime())',
-  'while (fireMs(slot) > now.getTime())',
+  'return fireAtOrBefore(now.getTime() - MISSING_NIGHT_GRACE_HOURS * 60 * 60 * 1000);',
+  'return fireAtOrBefore(now.getTime());',
 );
 
 prove(
   'grace boundary: a night exactly at slot + grace is still treated as in flight',
-  '+ graceMs > now.getTime()',
-  '+ graceMs >= now.getTime()',
+  'if (fire <= ms) return fire;',
+  'if (fire < ms) return fire;',
 );
 
 prove(
   'fail-open: met stops requiring a verified calendar',
-  "met: scope === 'credential' && calendar.checked && longest.nights >= requiredNights,",
-  "met: scope === 'credential' && longest.nights >= requiredNights,",
+  "      scope === 'credential' &&\n      calendar.checked &&\n      spacingUnverified.length === 0 &&",
+  "      scope === 'credential' &&\n      spacingUnverified.length === 0 &&",
 );
 
 prove(
@@ -245,8 +245,8 @@ prove(
 
 prove(
   'wall-clock dating: a run belongs to its createdAt date, not its cron slot',
-  'return ms >= fireMs(d) ? d : addUTCDays(d, -1);',
-  'return d;',
+  'return Number.isNaN(t) ? null : fireAtOrBefore(t);',
+  'return Number.isNaN(t) ? null : t;',
 );
 
 prove(

@@ -21,7 +21,8 @@
 > (node/webpack) show bytecode live on every shard, 0 bake failures. All four credential cells
 > therefore run clean at v16.3.5 — the ledger re-audit's test-content assertions above, plus the
 > fix's bytecode-liveness proof on the node cells. That is dispatched confirmation regardless, not
-> the 14 consecutive scheduled credential nights the v1.0 gate requires — those start fresh at this
+> the 14 consecutive scheduled credential runs the v1.0 gate requires (three scheduled runs per
+> cell per day since ADR-0056 Amendment 5) — those start fresh at this
 > ref. Six upstream tests are evidence-quarantined at this ref (the
 > `vercel-infra-coupled` family, ADR-0007 §h addendum): each fails deterministically because its
 > `deploy` branch encodes behaviour only Vercel's own infrastructure produces, and knext's result
@@ -138,7 +139,7 @@ gate, not the official suite — the official suite has its own row, own workflo
   issue that closes itself in the same run — never a fake/dry-run code path, and never runs on a
   schedule.
 - **A credential night requires bytecode caching proven LIVE, in every cell.** Bytecode caching is
-  mandatory in every supported runtime×builder cell. A night counts toward a cell's 14-night window
+  mandatory in every supported runtime×builder cell. A run counts toward a cell's 14-run window
   only if **every shard** proves that **every deploy** had live caching at runtime. Being configured
   is not enough.
   - **Bun cells:** the deploy booted the compiled `--bytecode` executable, and the fail-closed

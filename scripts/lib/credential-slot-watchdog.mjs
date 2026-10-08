@@ -81,6 +81,21 @@
  * risk — not only the two webpack lanes a purely time-based heuristic would
  * suggest. The dangerous direction is a false "quiet", never a false alert,
  * so the fallback errs toward alerting whenever it cannot be sure.
+ *
+ * THREE FIRES A DAY (ADR-0056 Amendment 5). Each credential cron is one
+ * literal with a comma-listed hour field (`17 1,9,17 * * *`), so every lane
+ * fires three times a day, 8 h apart, and every fire is its own slot. Two
+ * consequences here:
+ *
+ *   * slot math is hours-aware: a lane's (and a run's) slot is the latest of
+ *     ITS fires at or before the reference time (`mostRecentFireAtOrBefore`);
+ *   * the watchdog checks each lane's latest DUE fire — the latest at or
+ *     before `now - grace` — never "the latest fire at or before now". With
+ *     fires 8 h apart and an 8 h grace, the latest fire at or before now is
+ *     never due, so a watchdog keyed on it could never alert. The watchdog
+ *     workflow fires every 8 h, so each check covers exactly one fire per lane
+ *     and every fire is checked exactly once
+ *     (`tests/credential-slot-watchdog.test.ts` proves it on the live crons).
  */
 
 /** Default grace period (hours) if no override is supplied. */
@@ -89,34 +104,56 @@ export const DEFAULT_GRACE_HOURS = 8;
 /**
  * Static drift-detection fixture — NEVER consulted at runtime (see the
  * "FAILS CLOSED" section of the module header). Mirrors test-e2e-deploy.yml's
- * 4 credential crons as of #1640. `tests/credential-slot-watchdog.test.ts`
- * asserts live parsing of the real workflow file produces exactly this
- * table, so drift between the two is caught at PR time, not by a runtime
- * fallback silently masking it.
+ * 4 credential crons (three fires a day each since ADR-0056 Amendment 5).
+ * `tests/credential-slot-watchdog.test.ts` asserts live parsing of the real
+ * workflow file produces exactly this table, so drift between the two is
+ * caught at PR time, not by a runtime fallback silently masking it.
  */
 export const DEFAULT_CREDENTIAL_LANES = Object.freeze([
-  Object.freeze({ cron: '17 1 * * *', lane: 'node', hour: 1, minute: 17 }),
-  Object.freeze({ cron: '47 5 * * *', lane: 'bun', hour: 5, minute: 47 }),
-  Object.freeze({ cron: '17 22 * * *', lane: 'node-webpack', hour: 22, minute: 17 }),
-  Object.freeze({ cron: '47 23 * * *', lane: 'bun-webpack', hour: 23, minute: 47 }),
+  Object.freeze({ cron: '17 1,9,17 * * *', lane: 'node', hour: 1, hours: [1, 9, 17], minute: 17 }),
+  Object.freeze({ cron: '47 5,13,21 * * *', lane: 'bun', hour: 5, hours: [5, 13, 21], minute: 47 }),
+  Object.freeze({
+    cron: '17 6,14,22 * * *',
+    lane: 'node-webpack',
+    hour: 6,
+    hours: [6, 14, 22],
+    minute: 17,
+  }),
+  Object.freeze({
+    cron: '47 7,15,23 * * *',
+    lane: 'bun-webpack',
+    hour: 7,
+    hours: [7, 15, 23],
+    minute: 47,
+  }),
 ]);
 
-const SIMPLE_DAILY_CRON = /^(\d{1,2})\s+(\d{1,2})\s+\*\s+\*\s+\*$/;
+const SIMPLE_DAILY_CRON = /^(\d{1,2})\s+(\d{1,2}(?:,\d{1,2})*)\s+\*\s+\*\s+\*$/;
 
-/** Parse a simple "M H * * *" (once-daily UTC) cron string. */
+/**
+ * Parse a daily UTC cron: once a day (`M H * * *`) or several times a day with
+ * a comma-listed hour field (`M H1,H2,… * * *`, ADR-0056 Amendment 5).
+ * Returns `{ minute, hour, hours }` — `hours` ascending, `hour` its first
+ * entry (the once-a-day shape's single hour). A range, a step or a duplicate
+ * hour is refused: the watchdog could not enumerate the fires.
+ */
 export function parseSimpleDailyCron(cron) {
   const m = SIMPLE_DAILY_CRON.exec(String(cron).trim());
   if (!m) {
     throw new Error(
-      `credential-slot-watchdog: cron "${cron}" is not a supported once-daily "M H * * *" form`,
+      `credential-slot-watchdog: cron "${cron}" is not a supported daily "M H * * *" / "M H1,H2 * * *" form`,
     );
   }
   const minute = Number(m[1]);
-  const hour = Number(m[2]);
-  if (minute < 0 || minute > 59 || hour < 0 || hour > 23) {
+  const hours = m[2].split(',').map(Number);
+  if (minute < 0 || minute > 59 || hours.some((h) => h < 0 || h > 23)) {
     throw new Error(`credential-slot-watchdog: cron "${cron}" has an out-of-range minute/hour`);
   }
-  return { minute, hour };
+  if (new Set(hours).size !== hours.length) {
+    throw new Error(`credential-slot-watchdog: cron "${cron}" lists a duplicate hour`);
+  }
+  hours.sort((a, b) => a - b);
+  return { minute, hour: hours[0], hours };
 }
 
 /**
@@ -225,8 +262,8 @@ export function resolveCredentialLaneCrons(yamlText) {
           'but it is not declared under `schedule:`',
       );
     }
-    const { hour, minute } = parseSimpleDailyCron(cron);
-    return { cron, lane: laneMap.get(cron) ?? fallbackLane, hour, minute };
+    const { hour, hours, minute } = parseSimpleDailyCron(cron);
+    return { cron, lane: laneMap.get(cron) ?? fallbackLane, hour, hours, minute };
   });
 }
 
@@ -249,9 +286,15 @@ export function resolveCredentialLanes(yamlText, { defaultGraceHours = DEFAULT_G
   return lanes.map((l) => ({ ...l, graceHours: defaultGraceHours }));
 }
 
-/** Every declared schedule slot (credential and early-warning alike). */
+/**
+ * Every declared schedule slot (credential and early-warning alike) — one entry
+ * per FIRE, so a multi-fire cron contributes one slot per listed hour.
+ */
 export function parseAllDeclaredSlots(yamlText) {
-  return extractScheduleCrons(yamlText).map((cron) => ({ cron, ...parseSimpleDailyCron(cron) }));
+  return extractScheduleCrons(yamlText).flatMap((cron) => {
+    const { minute, hours } = parseSimpleDailyCron(cron);
+    return hours.map((hour) => ({ cron, hour, minute }));
+  });
 }
 
 /** The most recent UTC occurrence of `H:M` at or before `referenceDate`. */
@@ -266,11 +309,37 @@ export function mostRecentSlotAtOrBefore(hour, minute, referenceDate) {
   return slot;
 }
 
-/** Attach each lane's expected slot time (this cycle's occurrence) as of `now`. */
+/**
+ * The latest UTC fire of a cron firing at `minute` past each of `hours`, at or
+ * before `referenceDate` (ADR-0056 Amendment 5: one fire per listed hour).
+ *
+ * @param {number[]} hours at least one
+ * @param {number} minute
+ * @param {Date|string} referenceDate
+ * @returns {Date}
+ */
+export function mostRecentFireAtOrBefore(hours, minute, referenceDate) {
+  if (hours.length === 0) throw new Error('credential-slot-watchdog: a cron with no fire hour');
+  let best = mostRecentSlotAtOrBefore(hours[0], minute, referenceDate);
+  for (const hour of hours.slice(1)) {
+    const fire = mostRecentSlotAtOrBefore(hour, minute, referenceDate);
+    if (fire.getTime() > best.getTime()) best = fire;
+  }
+  return best;
+}
+
+/** The fire hours of a lane/slot definition (`hours` when present, else its single `hour`). */
+const firesOf = (l) => (Array.isArray(l.hours) && l.hours.length > 0 ? l.hours : [l.hour]);
+
+/**
+ * Attach each lane's expected slot time — its latest fire at or before `now`.
+ * The watchdog passes `now - grace` (`evaluateWatchdog`), so the slot checked
+ * is the latest DUE one (see the module header).
+ */
 export function computeExpectedSlots(lanes, now) {
   return lanes.map((l) => ({
     ...l,
-    expectedSlotTime: mostRecentSlotAtOrBefore(l.hour, l.minute, now).toISOString(),
+    expectedSlotTime: mostRecentFireAtOrBefore(firesOf(l), l.minute, now).toISOString(),
   }));
 }
 
@@ -287,7 +356,7 @@ function findPredecessorLane(laneDef, lanes) {
   let best = null;
   for (const other of lanes) {
     if (other.lane === laneDef.lane) continue;
-    const occurrence = mostRecentSlotAtOrBefore(other.hour, other.minute, justBeforeOwnSlot);
+    const occurrence = mostRecentFireAtOrBefore(firesOf(other), other.minute, justBeforeOwnSlot);
     if (!best || occurrence.getTime() > best.occurrence.getTime()) {
       best = { laneDef: other, occurrence };
     }
@@ -384,7 +453,7 @@ export function attributeRunsToLanes(runs, lanes, allSlots) {
 
     if (run.exactLane && laneDefByName.has(run.exactLane)) {
       const laneDef = laneDefByName.get(run.exactLane);
-      const occurrence = mostRecentSlotAtOrBefore(laneDef.hour, laneDef.minute, createdAt);
+      const occurrence = mostRecentFireAtOrBefore(firesOf(laneDef), laneDef.minute, createdAt);
       if (occurrence.toISOString() === expectedByLane.get(run.exactLane)) {
         exact.push({
           lane: run.exactLane,
