@@ -1,5 +1,17 @@
 # @getknext/core
 
+## 1.0.0-rc.6
+
+### Patch Changes
+
+- 69a8060: On Next.js before 16.4.0, a route with `dynamicParams = false` could answer a burst of concurrent prefetches for a parameter outside `generateStaticParams` with a 500 instead of a 404, whenever an adapter was configured; Next.js fixed it in 16.4.0 and did not backport it. `knext build`, `deploy` and `preview` now clear `adapterPath` from the standalone server's runtime configuration (`server.js` and `.next/required-server-files.json`) when the installed Next.js is older than 16.4.0, before the Bun executable is compiled, so both runtimes ship the fix. The adapter only works during `next build`, so nothing at runtime depends on it; those requests become plain 404s, as on a standalone server without an adapter, and each one logs `Error: Internal: NoFallbackError`. On Next.js 16.4.0 or later nothing changes. The workaround is gated on the installed Next.js version and removes itself there.
+- bbe455d: Security: new apps now scaffold with Next.js 16.3.8. The default and vinext builder templates move from 16.3.6. Next.js 16.0.0 through 16.3.7 have a high-severity server-side request forgery in Image Optimization (GHSA-cjq9-62q9-8jv4), fixed in 16.3.8. If you scaffolded an app from an earlier release candidate, upgrade it with `npm install next@16.3.8` (or a later 16.3.x). The compatibility credential suite now runs against Next.js 16.3.8.
+  
+  Next.js 16.3.7 and later scope every cached entry to its source route, so cache keys now start with `/route-cache/`. The knext cache handler treats every key as an opaque string, so it needs no change. After upgrading an existing app, entries written to Redis under the old key shape (by Next.js before 16.3.7) are never read again and stay in Redis until their TTL expires; the affected pages are regenerated on first request.
+- Updated dependencies [bbe455d]
+  - @getknext/lib@1.0.0-rc.6
+  - @getknext/db@1.0.0-rc.6
+
 ## 1.0.0-rc.5
 
 ### Patch Changes
