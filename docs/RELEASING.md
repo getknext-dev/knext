@@ -545,8 +545,10 @@ Confirm every box before starting step 1 below:
 - [ ] The docs launch pass is live on knext-platform.dev (quickstart, compatibility table, and version
       numbers all reflect the rc under credential — not a stale prior release).
 - [ ] The operator tag-release line (`operator-vX.Y.Z`, semver GitHub Releases from a pushed tag,
-      #1667) has merged — it has, as of this writing; step 7 below's rolling-`operator-latest`
-      fallback is only a last resort if the `operator-v1.0.0` tag push is skipped.
+      #1667) has merged — it has, as of this writing. For `1.0.0` the `operator-v1.0.0` tag is
+      **mandatory** and its green release must exist **before** the publish (the Version PR merge) —
+      there is no rolling-channel fallback; see
+      [Operator first for 1.0.0](#operator-first-for-100-the-exact-order).
 - [ ] The rollback rehearsal on the `rc` npm dist-tag (see [Rollback runbook](#rollback-runbook-100-ships-broken)
       below) has been run and its result recorded, so the rollback path is proven reachable
       *before* it is ever needed for real.
