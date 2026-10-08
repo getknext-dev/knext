@@ -29,7 +29,15 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { cpSync, existsSync, mkdirSync, rmSync } from "node:fs";
+import {
+    cpSync,
+    existsSync,
+    mkdirSync,
+    mkdtempSync,
+    realpathSync,
+    rmSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
     freePorts,
@@ -77,7 +85,9 @@ beforeAll(() => {
         }
     }
 
-    monorepo = stageMonorepo(tempRoots);
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "knext-monorepo-")));
+    tempRoots.push(root);
+    monorepo = stageMonorepo(root);
 
     // @getknext/core as a HOISTED workspace install would leave it, at the
     // workspace root, dereferenced into a real directory (the repo's own

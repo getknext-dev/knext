@@ -36,7 +36,15 @@
 //   - Servers are stopped by handle, never by name.
 
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+    existsSync,
+    mkdtempSync,
+    readFileSync,
+    realpathSync,
+    rmSync,
+    writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildStandaloneExecutable } from "../cli/standalone-exec-build";
 import { hostSmokeArch } from "../cli/vinext-build";
@@ -55,6 +63,12 @@ import {
 const tempRoots: string[] = [];
 const servers: RunningServer[] = [];
 
+function newRoot(): string {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "knext-monorepo-")));
+    tempRoots.push(root);
+    return root;
+}
+
 afterAll(async () => {
     for (const s of servers) await stopServer(s);
     for (const r of tempRoots) rmSync(r, { recursive: true, force: true });
@@ -70,7 +84,7 @@ let build: { status: number | null; stdout: string; stderr: string };
 let serverDir: string;
 
 beforeAll(() => {
-    monorepo = stageMonorepo(tempRoots);
+    monorepo = stageMonorepo(newRoot());
     build = knextBuild(monorepo.app);
     serverDir = join(monorepo.app, ".next", "standalone", "apps", "web");
 }, 900_000);
@@ -176,7 +190,7 @@ describe("the nested standalone server runs", () => {
 
 describe("an ACCIDENTAL parent root still fails with the real cause", () => {
     it("the same app without an explicit root: Next infers the workspace root from the lockfile, and `knext build` refuses", () => {
-        const accidental = stageMonorepo(tempRoots, ({ app }) => {
+        const accidental = stageMonorepo(newRoot(), ({ app }) => {
             writeFileSync(
                 join(app, "next.config.js"),
                 `module.exports = {

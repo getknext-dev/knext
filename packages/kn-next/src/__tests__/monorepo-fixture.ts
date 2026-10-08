@@ -3,15 +3,13 @@
  * fixture into a throwaway dir, install it, and drive the SHIPPED `knext build`
  * against it. Not a test file (no `.test.` in the name).
  *
- * The caller owns the cleanup: every dir this makes is pushed onto the
- * `tempRoots` registry it is handed, and the suite drains that registry in its
- * `afterAll`.
+ * The caller owns the temp dirs: each suite creates its root, registers it, and
+ * removes it in its own `afterAll`.
  */
 
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
-import { cpSync, mkdtempSync, realpathSync } from "node:fs";
+import { cpSync } from "node:fs";
 import { createServer } from "node:net";
-import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 /** packages/kn-next (this file lives in src/__tests__). */
@@ -42,13 +40,17 @@ function run(
     });
 }
 
-/** Copy the fixture into a fresh temp dir and `bun install` the workspace. */
+/**
+ * Copy the fixture into `root` and `bun install` the workspace.
+ *
+ * `root` is an EMPTY temp directory the CALLER created and registered for
+ * removal in its own file (the D9 pairing is file-local, so the creation and
+ * the `rmSync` live together in each suite).
+ */
 export function stageMonorepo(
-    tempRoots: string[],
+    root: string,
     mutate?: (staged: StagedMonorepo) => void,
 ): StagedMonorepo {
-    const root = realpathSync(mkdtempSync(join(tmpdir(), "knext-monorepo-")));
-    tempRoots.push(root);
     cpSync(MONOREPO_FIXTURE_SRC, root, { recursive: true });
     const staged = { root, app: join(root, "apps", "web") };
     mutate?.(staged);

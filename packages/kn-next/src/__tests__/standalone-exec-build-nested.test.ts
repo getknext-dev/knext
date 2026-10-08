@@ -27,9 +27,7 @@ afterAll(() => {
 });
 
 function tree(files: Record<string, string>): string {
-    const base = realpathSync(
-        mkdtempSync(join(tmpdir(), "knext-exec-nested-")),
-    );
+    const base = realpathSync(mkdtempSync(join(tmpdir(), "knext-xn-")));
     tempRoots.push(base);
     for (const [rel, contents] of Object.entries(files)) {
         const abs = join(base, rel);
