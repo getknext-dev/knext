@@ -12,9 +12,11 @@ A feature is **Stable** only when a scheduled, red-on-fail check covers it — n
 "been around a while." Stable features follow the full [semver policy](/docs/versioning): a patch
 or minor release never breaks them, and a breaking change requires a major version.
 
-- The four credentialed runtime x builder combinations: Node/Bun runtime, each with the Turbopack
-  or Webpack builder, on the standalone build target (see [How your app is built](/docs/build-pipeline)
-  and [Compatibility matrix](/docs/compat-matrix)).
+- The four default-target runtime x builder combinations: Node/Bun runtime, each with the
+  Turbopack or Webpack builder, on the standalone build target (see
+  [How your app is built](/docs/build-pipeline) and [Compatibility matrix](/docs/compat-matrix)).
+  Their official Next.js compatibility credential is still in progress — see
+  [the compatibility credential](/docs/compat-suite) for its current status.
 - The `knext.config.ts` schema and the public TypeScript types (`@getknext/core`,
   `@getknext/lib`, `@getknext/db`).
 - The core CLI verbs — `create`, `build`, `deploy`, `status`, `doctor` — including their exit

@@ -1,5 +1,28 @@
 # @getknext/lib
 
+## 1.0.0
+
+### Patch Changes
+
+- 7661878: Rewrite package READMEs for v1.0 release: concise one-paragraph introductions, quickstart commands that work, supported platforms table (Node/Bun × Turbopack/Webpack, with the Next.js versions on the compatibility page), and clear links to docs, compatibility, security, and contributing pages. Remove internal references (ADR numbers, issue/PR numbers) to prepare for npm publication.
+- 65eef13: `@getknext/lib/clients`: `getCerbosClient()` and `getMinioClient()` now load their SDKs
+  (`@cerbos/grpc` → `@grpc/grpc-js`, and `minio`) lazily, on first use, instead of at import time.
+  Together these two were about 60% of the ~0.8–0.9 s boot cost `@getknext/lib/clients` added when
+  an app imported it — paid even by apps that never called either getter. An app with tracing on, or
+  one that imports `@getknext/lib/clients` directly, no longer pays to load either SDK unless it
+  actually calls the corresponding getter.
+  
+  Both getters keep their existing synchronous signatures — no public API change. Each now returns a
+  lightweight facade that loads the real SDK (once, memoized) the first time a method is actually
+  called on it; every existing call site is unaffected.
+- 0a32380: Security: new apps now scaffold with Next.js 16.3.6. The default template moves from 16.3.5, and the vinext builder template from 16.3.3. Next.js 16.2.0 through 16.3.5 have a critical remote code execution vulnerability in `next/og` `ImageResponse` (GHSA-vcvr-r3jv-pc5j), fixed in 16.3.6. If you scaffolded an app from an earlier release candidate, upgrade it with `npm install next@16.3.6` (or a later 16.3.x). The compatibility credential suite now runs against Next.js 16.3.6.
+  
+  `@getknext/lib` depends on `@grpc/grpc-js` through `@cerbos/grpc` with a range that already admits the patched 1.14.5 (GHSA-m9gg-hp2v-232j), so a fresh install resolves the fix. If your lockfile still holds `@grpc/grpc-js` 1.14.4 or older, update it.
+- bbe455d: Security: new apps now scaffold with Next.js 16.3.8. The default and vinext builder templates move from 16.3.6. Next.js 16.0.0 through 16.3.7 have a high-severity server-side request forgery in Image Optimization (GHSA-cjq9-62q9-8jv4), fixed in 16.3.8. If you scaffolded an app from an earlier release candidate, upgrade it with `npm install next@16.3.8` (or a later 16.3.x). The compatibility credential suite now runs against Next.js 16.3.8.
+  
+  Next.js 16.3.7 and later scope every cached entry to its source route, so cache keys now start with `/route-cache/`. The knext cache handler treats every key as an opaque string, so it needs no change. After upgrading an existing app, entries written to Redis under the old key shape (by Next.js before 16.3.7) are never read again and stay in Redis until their TTL expires; the affected pages are regenerated on first request.
+- 2fc1476: Release-candidate re-cut with no changes to package code. The compatibility credential test harness now covers the sharp version that Next.js 16.3.5 ships, so the Bun credential runs can execute against this candidate.
+
 ## 1.0.0-rc.6
 
 ### Patch Changes
