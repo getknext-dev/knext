@@ -2310,7 +2310,9 @@ describe('the alert job keys on the check job `alert` output, or a check that di
     const step = (alertJob.steps ?? []).find((s) =>
       String(s.run ?? '').includes('nightly-alert-issue.mjs'),
     );
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: literal workflow text, not an interpolation
     expect(step?.env?.WINDOW).toBe('${{ needs.check-credential-slots.outputs.window }}');
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: literal workflow text, not an interpolation
     expect(step?.env?.CHECK_RESULT).toBe('${{ needs.check-credential-slots.result }}');
     expect(step?.run).toContain('${WINDOW');
     expect(step?.run).toContain('CHECK_RESULT');

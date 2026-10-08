@@ -18,6 +18,10 @@
  *   * the late-slot watchdog checks only DUE fires, every one of them since its
  *     previous run (jittered starts never skip or repeat a fire), never counts
  *     an early-warning run, and alerts a coverage gap;
+ *   * only a watchdog run that EVALUATED its window anchors the next one: the
+ *     CLI exits 0 once it evaluated and reports the alert through an output
+ *     the alert job keys on, and a crashed, timed-out or in-progress run is
+ *     skipped, its window re-checked; a crash names the window it missed;
  *   * fresh caches: a credential run restores no cache, on both lines.
  *
  * ATTRIBUTION — each mutation names the ONE test (`expect`) in its `spec` that
@@ -66,6 +70,7 @@ const PROOF = {
     lineWorkflow: 'scripts/compat-line-workflow.mjs',
     watchdog: 'scripts/credential-slot-watchdog.mjs',
     watchdogLib: 'scripts/lib/credential-slot-watchdog.mjs',
+    watchdogWorkflow: '.github/workflows/credential-slot-watchdog.yml',
   },
 };
 
@@ -262,10 +267,9 @@ const MUTATIONS = [
     expect:
       'skips a cancelled previous run (it may not have evaluated), reaching back to the one before',
     subject: 'watchdog',
-    anchor:
-      "    if (r.status !== 'completed' || !['success', 'failure'].includes(r.conclusion)) continue;",
+    anchor: "    if (r.status !== 'completed' || r.conclusion !== 'success') continue;",
     replacement:
-      "    if (r.status !== 'completed' || !['success', 'failure', 'cancelled'].includes(r.conclusion)) continue;",
+      "    if (r.status !== 'completed' || !['success', 'cancelled'].includes(r.conclusion)) continue;",
   },
   {
     label: 'an early-warning run is credited to a credential lane again',
@@ -284,6 +288,86 @@ const MUTATIONS = [
     subject: 'watchdogLib',
     anchor: '    gap: start < earliest,',
     replacement: '    gap: false,',
+  },
+
+  // ── round 3: only a run that evaluated its window anchors the next one ──
+  {
+    label: 'a crashed (failure) previous watchdog run anchors the window again (the round-2 rule)',
+    spec: WATCHDOG_SPEC,
+    expect:
+      'a crashed previous run (failure) is skipped: the window widens back to the last success',
+    subject: 'watchdog',
+    anchor: "    if (r.status !== 'completed' || r.conclusion !== 'success') continue;",
+    replacement:
+      "    if (r.status !== 'completed' || !['success', 'failure'].includes(r.conclusion)) continue;",
+  },
+  {
+    label: 'a previous watchdog run still in progress anchors the window',
+    spec: WATCHDOG_SPEC,
+    expect: 'a previous run still in progress is skipped (it has not finished evaluating)',
+    subject: 'watchdog',
+    anchor: "    if (r.status !== 'completed' || r.conclusion !== 'success') continue;",
+    replacement: "    if (r.status === 'completed' && r.conclusion !== 'success') continue;",
+  },
+  {
+    label: 'no successful run in view: fall back to the plain lookback, missing the crashed runs',
+    spec: WATCHDOG_SPEC,
+    expect: 'no successful run in view: the window reaches back past the oldest run it can see',
+    subject: 'watchdog',
+    anchor: '  if (!previous && oldestEarlier) {',
+    replacement: '  if (false) {',
+  },
+  {
+    label: 'the CLI reports an alert through its exit code again (an alerting run is no anchor)',
+    spec: WATCHDOG_SPEC,
+    expect: 'an alerting window exits 0 and reports alert=true and the window it checked',
+    subject: 'watchdog',
+    anchor: '    return 0;\n  } catch (err) {',
+    replacement: '    return alerting.length > 0 ? 1 : 0;\n  } catch (err) {',
+  },
+  {
+    label: 'an alert with no output to carry it exits 0 (fails open)',
+    spec: WATCHDOG_SPEC,
+    expect: 'an alert with nowhere to report it fails closed (exit 1), never a silent exit 0',
+    subject: 'watchdog',
+    anchor: '    if (!reported && alerting.length > 0) {',
+    replacement: '    if (false) {',
+  },
+  {
+    label: 'a crash no longer names the window it did not check',
+    spec: WATCHDOG_SPEC,
+    expect:
+      'a crash before evaluating (both run listings down) exits 1 and names the window it did not check',
+    subject: 'watchdog',
+    anchor: "    const where = window ?? 'its window (it stopped before computing it)';",
+    replacement: "    const where = 'its window';",
+  },
+  {
+    label: 'the alert job ignores the check job alert output',
+    spec: WATCHDOG_SPEC,
+    expect: 'fires on alert=true from a check that succeeded, and on a failed or cancelled check',
+    subject: 'watchdogWorkflow',
+    anchor:
+      "      (needs.check-credential-slots.outputs.alert == 'true' || needs.check-credential-slots.result == 'failure'",
+    replacement: "      (needs.check-credential-slots.result == 'failure'",
+  },
+  {
+    label: 'the check job stops exposing the alert output',
+    spec: WATCHDOG_SPEC,
+    expect: 'the check step exposes `alert` and `window` as job outputs',
+    subject: 'watchdogWorkflow',
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: literal workflow text, not an interpolation
+    anchor: '      alert: ${{ steps.check.outputs.alert }}\n',
+    replacement: '',
+  },
+  {
+    label: 'the alert issue stops naming the window a crashed check did not check',
+    spec: WATCHDOG_SPEC,
+    expect: 'the issue body names the window a check that did not finish left unchecked',
+    subject: 'watchdogWorkflow',
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: literal workflow text, not an interpolation
+    anchor: '          WINDOW: ${{ needs.check-credential-slots.outputs.window }}\n',
+    replacement: '',
   },
 
   // ── fresh caches: a credential run restores no cache (round 2) ──────────
@@ -337,10 +421,10 @@ const MUTATIONS = [
   },
 ];
 
-declareMutations(27);
+declareMutations(36);
 
-if (MUTATIONS.length !== 27) {
-  console.error(`FATAL: declared 27 mutations, table has ${MUTATIONS.length}`);
+if (MUTATIONS.length !== 36) {
+  console.error(`FATAL: declared 36 mutations, table has ${MUTATIONS.length}`);
   process.exit(1);
 }
 
