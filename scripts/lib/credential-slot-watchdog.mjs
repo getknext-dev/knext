@@ -115,10 +115,16 @@
  *     crashed before evaluating (`failure`), timed out or lost its runner
  *     (`cancelled`), or is still in progress is skipped, and the window
  *     reaches back to the last run that did evaluate — the skipped run's
- *     fires are checked now, not lost. With earlier runs in view but none
- *     successful, the window reaches back to the oldest of them minus the
- *     lookback.
- *   * No readable previous run (first run, API failure, a dispatch): the
+ *     fires are checked now, not lost. Only a FIRST attempt anchors
+ *     (`run_attempt === 1`, round 4): a re-run resets `run_started_at`, so a
+ *     re-run of a failed alert job would otherwise anchor hours after its
+ *     check and skip the fires in between. With earlier runs in view but none
+ *     anchoring, the window reaches back to the oldest of them (by creation,
+ *     which a re-run does not reset) minus the lookback.
+ *   * A scheduled run whose listing of its own runs FAILS crashes (round 4):
+ *     the lookback below reaches back 24 h, not to the last successful run,
+ *     so after a crash streak it would skip fires and still succeed.
+ *   * No previous run at all (the first run, a dispatch): the
  *     window is `WATCHDOG_LOOKBACK_HOURS` (24 h). That is at least the
  *     watchdog period (8 h) plus the worst measured scheduler delay (7.4 h),
  *     and also covers one dropped watchdog run (2 x 8 h + 7.4 h = 23.4 h). It

@@ -15,7 +15,8 @@
  * keys on that output. Exit 0 therefore means "this run evaluated its
  * window", which is what the next run anchors on (`resolveCheckAnchors`).
  * It exits 1 only when it did NOT evaluate — a crash (both run listings
- * down; a workflow whose cron shape cannot be parsed, per
+ * down; on a scheduled run, its listing of its own runs down; a workflow
+ * whose cron shape cannot be parsed, per
  * `resolveCredentialLanes`'s fail-closed contract) or an alert with no
  * output to carry it — and the alert job fires on that `failure` too, naming
  * the window that was not checked (`runCli`).
@@ -24,8 +25,9 @@
  *   WATCHDOG_GRACE_HOURS  optional override for the grace-period hours
  *                         (default: DEFAULT_GRACE_HOURS, currently 8).
  *   GITHUB_RUN_ID / GITHUB_EVENT_NAME  set by Actions. A SCHEDULED run checks
- *                         every fire since the previous SUCCESSFUL scheduled
- *                         watchdog run (`resolveCheckAnchors`); anything else
+ *                         every fire since the previous scheduled watchdog
+ *                         run that SUCCEEDED ON ITS FIRST ATTEMPT
+ *                         (`resolveCheckAnchors`); anything else
  *                         checks the WATCHDOG_LOOKBACK_HOURS window.
  *   GITHUB_OUTPUT         set by Actions; receives `window` and `alert`.
  *   GH_TOKEN / GITHUB_TOKEN  read by the `gh` CLI itself, not read directly

@@ -903,15 +903,19 @@ anchors: the check exits 0 whenever it evaluated and carries its verdict in an `
 which the alert job keys on, so a run concludes `success` exactly when its window was checked. A run
 that crashed before evaluating (`failure`), timed out (`cancelled`) or is still in progress is
 skipped, and the next window reaches back over its fires; the crash still raises the pinned alert,
-naming the window it did not check. Without a readable previous run the window is the last 24 hours: at least the
+naming the window it did not check. Only a **first attempt** anchors (`run_attempt` 1): a re-run
+resets the run's start time, so a re-run of a failed alert job would anchor hours after its check.
+A scheduled run that cannot list its own previous runs crashes rather than fall back to the
+lookback, which after a crash streak would skip fires. With no previous run at all the window is the last 24 hours: at least the
 watchdog period plus the worst measured delay (8 + 7.4 h), and one dropped watchdog run
 (2 × 8 + 7.4 h); it may repeat a check, never skip one. A previous run more than 72 hours back raises a
 `coverage-gap` alert. Each fire is judged in its own context (every lane's slot at that fire), so
 attribution and the ambiguity rule are unchanged per fire, and a run whose own mode marker reads
 early-warning is never credited to a credential lane. A seeded simulation over ten days, with the
 measured delays and with wider ones plus a dropped watchdog run, checks every fire exactly once and
-alerts exactly the dropped runs, once each; with crashed, timed-out and in-progress watchdog runs
-injected, every fire is still checked at least once.
+alerts exactly the dropped runs, once each; with crashed (including a streak of four), timed-out,
+in-progress, failed-listing and partially re-run watchdog runs injected, every fire is still checked
+at least once.
 
 ### Options considered
 

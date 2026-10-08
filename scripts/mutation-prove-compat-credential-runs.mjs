@@ -22,6 +22,10 @@
  *     CLI exits 0 once it evaluated and reports the alert through an output
  *     the alert job keys on, and a crashed, timed-out or in-progress run is
  *     skipped, its window re-checked; a crash names the window it missed;
+ *   * a scheduled run whose listing of its own runs fails crashes (never the
+ *     24 h lookback), and only a FIRST-attempt success anchors (a re-run
+ *     resets its start); with no anchor in view, a re-run reaches back from
+ *     its creation;
  *   * fresh caches: a credential run restores no cache, on both lines.
  *
  * ATTRIBUTION — each mutation names the ONE test (`expect`) in its `spec` that
@@ -382,6 +386,54 @@ const MUTATIONS = [
     replacement: "          WINDOW: ''\n",
   },
 
+  // ── round 4: a failed listing crashes; only a first-attempt success anchors ─
+  {
+    label: 'a failed listing of the watchdog own runs falls back to the 24 h lookback again',
+    spec: WATCHDOG_SPEC,
+    expect:
+      'the reproduction: a failed listing after three crashed runs crashes (exit 1), and the next run reaches back to the last success',
+    subject: 'watchdog',
+    anchor:
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: literal source text, not an interpolation
+      "    const message = err instanceof Error ? err.message : String(err);\n    throw new Error(\n      `cannot list this workflow's own scheduled runs to anchor the window: ${message}`,\n    );\n",
+    replacement: '    void err;\n    return fallback;\n',
+  },
+  {
+    label: 'a crash with no anchor stops naming the window it did not check',
+    spec: WATCHDOG_SPEC,
+    expect:
+      'the reproduction: a failed listing after three crashed runs crashes (exit 1), and the next run reaches back to the last success',
+    subject: 'watchdog',
+    anchor: "      writeOutput('window', window);\n      throw err;\n",
+    replacement: '      throw err;\n',
+  },
+  {
+    label: 'a re-run (run_attempt > 1) anchors the window again',
+    spec: WATCHDOG_SPEC,
+    expect:
+      'a partial re-run (attempt 2) is never an anchor: the next window reaches back to the last attempt-1 success',
+    subject: 'watchdog',
+    anchor: '    if (r.run_attempt !== 1) continue;\n',
+    replacement: '    void r.run_attempt;\n',
+  },
+  {
+    label: 'a run with no run_attempt is taken for a first attempt',
+    spec: WATCHDOG_SPEC,
+    expect: 'a run with no run_attempt is never an anchor (it cannot prove it is a first attempt)',
+    subject: 'watchdog',
+    anchor: '    if (r.run_attempt !== 1) continue;\n',
+    replacement: '    if ((r.run_attempt ?? 1) !== 1) continue;\n',
+  },
+  {
+    label: 'the no-anchor reach-back reads the re-run (reset) start, not the creation time',
+    spec: WATCHDOG_SPEC,
+    expect:
+      'with no first-attempt success in view, a re-run reaches back from when it was CREATED (its start was reset)',
+    subject: 'watchdog',
+    anchor: '    const first = [started, created]',
+    replacement: '    const first = [started]',
+  },
+
   // ── fresh caches: a credential run restores no cache (round 2) ──────────
   {
     label: 'v1.0: the pnpm-store cache restores on a credential run',
@@ -433,10 +485,10 @@ const MUTATIONS = [
   },
 ];
 
-declareMutations(37);
+declareMutations(42);
 
-if (MUTATIONS.length !== 37) {
-  console.error(`FATAL: declared 37 mutations, table has ${MUTATIONS.length}`);
+if (MUTATIONS.length !== 42) {
+  console.error(`FATAL: declared 42 mutations, table has ${MUTATIONS.length}`);
   process.exit(1);
 }
 
