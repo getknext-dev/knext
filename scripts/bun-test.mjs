@@ -69,6 +69,15 @@ const withCoverage = argv.includes('--coverage');
  */
 const noSkip = argv.includes('--no-skip');
 const bunBin = flag('bun', process.env.KNEXT_BUN ?? 'bun');
+/**
+ * `--junit-dir=<dir>`: each file's child also writes bun's JUnit report to
+ * `<dir>/<file slug>.xml`. This is the STRUCTURED per-test outcome a mutation
+ * prover needs to attribute a red run to the one named test it targets
+ * (`scripts/mutation-prove-compat-credential-line.mjs`), instead of reading
+ * pass/fail off human-facing console text. A file that fails to load writes no
+ * report at all, which a caller must treat as "no test outcome", not as proof.
+ */
+const junitDir = flag('junit-dir', undefined);
 
 /**
  * Everything here is anchored on the REPO ROOT, not the caller's cwd.
@@ -414,6 +423,9 @@ function runFile(file) {
     const covDir = join(COVERAGE_RAW, slug);
     if (withCoverage) {
       args.push('--coverage', '--coverage-reporter=lcov', `--coverage-dir=${covDir}`);
+    }
+    if (junitDir !== undefined) {
+      args.push('--reporter=junit', `--reporter-outfile=${join(junitDir, `${slug}.xml`)}`);
     }
     // `detached: true`: makes this child the leader of its own process
     // GROUP (see `killProcessTree`), so a kill can reach a real grandchild
