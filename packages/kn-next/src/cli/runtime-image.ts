@@ -494,6 +494,12 @@ docker-compose*.yml
 `;
 }
 
+const UNQUOTABLE_PATH =
+    "contains whitespace or a quote, which the Dockerfile's COPY lines cannot carry. Move the app to a path without them.";
+
+const TEMPLATE_DRIFT =
+    "The template changed under the monorepo rewrite (runtime-image.ts NEST_RULES); refusing to emit a half-nested Dockerfile.";
+
 /**
  * One anchored rewrite of the staged Dockerfile for a nested layout. An exact
  * line (`line`) or a substring of one (`part`) is replaced, and `count` is how
@@ -622,8 +628,7 @@ export function nestStandaloneDockerfile(
 ): string {
     if (/[\s"'\\]/.test(opts.contextPrefix) || /[\s"'\\]/.test(opts.coreSrc)) {
         throw new UsageError(
-            `the app's path under the build context (${opts.contextPrefix}) contains whitespace or a quote, ` +
-                "which the Dockerfile's COPY lines cannot carry. Move the app to a path without them.",
+            `the app's path under the build context (${opts.contextPrefix}) ${UNQUOTABLE_PATH}`,
         );
     }
     const counts = NEST_RULES.map(() => 0);
@@ -657,8 +662,7 @@ export function nestStandaloneDockerfile(
     NEST_RULES.forEach((rule, i) => {
         if (counts[i] !== rule.count) {
             throw new Error(
-                `cannot nest the standalone Dockerfile: expected ${rule.count} instruction line(s) matching '${rule.from}', found ${counts[i]}. ` +
-                    "The template changed under the monorepo rewrite (runtime-image.ts NEST_RULES); refusing to emit a half-nested Dockerfile.",
+                `cannot nest the standalone Dockerfile: expected ${rule.count} instruction line(s) matching '${rule.from}', found ${counts[i]}. ${TEMPLATE_DRIFT}`,
             );
         }
     });
@@ -775,9 +779,7 @@ export function stageStandaloneBuildContext(opts: {
     if (layout.nested) {
         if (resolve(opts.buildContext) !== layout.root) {
             throw new UsageError(
-                `the Docker build context (${resolve(opts.buildContext)}) is not the tracing root ` +
-                    `(${layout.root}, from ${layout.configSource}) — the standalone tree mirrors that root, ` +
-                    "so the image would copy paths that are not in the context.",
+                `the Docker build context (${resolve(opts.buildContext)}) is not the tracing root (${layout.root}, from ${layout.configSource}) — the standalone tree mirrors that root, so the image would copy paths that are not in the context.`,
             );
         }
         dockerfileText = nestStandaloneDockerfile(dockerfileText, {

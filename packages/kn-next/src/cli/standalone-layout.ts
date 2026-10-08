@@ -152,44 +152,45 @@ function findNestedServerDir(standaloneDir: string): string | null {
     return null;
 }
 
+/** Why a deliberate root whose server landed elsewhere is a config problem. */
+const MISMATCH_ADVICE =
+    "That happens when `outputFileTracingRoot` and `turbopack.root` name different directories, or the root Next used is not the one in the config. Set both to the same directory, the workspace root that contains the app, and rebuild.";
+
+/** Why an inferred root is refused, and what the nested layout needs instead. */
+const OPT_IN_EXPLANATION =
+    "knext packages that nested layout only when the root is set on purpose: the files Next traced can live outside the app directory, and a root that merely happened to be inferred would ship an image the app never asked for. `output: 'standalone'` is set correctly — the root is what is wrong.";
+
+const NO_LOCKFILE_CAUSE =
+    "No lockfile was found there, so the root was set another way (an outputFileTracingRoot or turbopack.root that knext could not read as a directory above this app).";
+
 /**
  * An actionable explanation when the standalone server is missing from where
  * the app's config says it should be, because Next wrote it somewhere else, or
  * null when there is no such server (the expected layout, or no standalone
  * output at all).
  *
+ * A deliberate root (nested layout) whose server landed elsewhere means the two
+ * root keys disagree, or the config names a root other than the one Next traced
+ * from. Otherwise the root was inferred: ask the same lockfile walk Next uses
+ * which marker put it there, preferring one sitting AT the inferred root.
+ *
  * Call only after the expected `server.js` has been found MISSING; a present
  * one means the layout is fine and there is nothing to diagnose.
  */
 export function diagnoseNestedStandalone(appDir: string): string | null {
     const layout = resolveStandaloneLayout(appDir);
-    const app = layout.appDir;
-    const { standaloneDir } = layout;
-    if (existsSync(layout.serverPath)) return null;
-    if (!existsSync(standaloneDir)) return null;
-
+    const { appDir: app, standaloneDir } = layout;
+    if (existsSync(layout.serverPath) || !existsSync(standaloneDir))
+        return null;
     const foundRel = findNestedServerDir(standaloneDir);
     if (foundRel === null) return null;
-
     const segments = foundRel.split(sep).filter(Boolean);
     const foundPath = `.next/standalone/${segments.join("/")}/server.js`;
     const expectedPath = `.next/standalone/${layout.appRel ? `${layout.appRel}/` : ""}server.js`;
-
-    // A deliberate root whose server landed somewhere else: the two keys
-    // disagree, or the config names a root other than the one Next traced from.
     if (layout.nested) {
-        return (
-            `next.config sets the tracing root to ${layout.root} (${layout.configSource}), so knext expected the standalone server at '${expectedPath}', ` +
-            `but Next.js wrote it to '${foundPath}'.\n\n` +
-            "That happens when `outputFileTracingRoot` and `turbopack.root` name different directories, or the root Next used is not the one in the config. " +
-            "Set both to the same directory, the workspace root that contains the app, and rebuild."
-        );
+        return `next.config sets the tracing root to ${layout.root} (${layout.configSource}), so knext expected the standalone server at '${expectedPath}', but Next.js wrote it to '${foundPath}'.\n\n${MISMATCH_ADVICE}`;
     }
-
     const root = resolve(app, ...segments.map(() => ".."));
-
-    // Which lockfile put the root there? Ask the same walk Next uses, then
-    // prefer a marker sitting AT the inferred root.
     const { lockFiles } = findTracingRoot(app);
     const atRoot =
         lockFiles.find((f) => dirname(f) === root) ??
@@ -197,22 +198,17 @@ export function diagnoseNestedStandalone(appDir: string): string | null {
         (existsSync(join(root, "pnpm-workspace.yaml"))
             ? join(root, "pnpm-workspace.yaml")
             : null);
-
+    const wrote = `it wrote the standalone server to '${foundPath}' instead of '${expectedPath}'.`;
     const cause = atRoot
-        ? `Next.js picked ${root} as the workspace root because of ${atRoot}, so it wrote the standalone server to '${foundPath}' instead of '${expectedPath}'.`
-        : `Next.js traced from ${root}, not from the app directory (${app}), so it wrote the standalone server to '${foundPath}' instead of '${expectedPath}'. No lockfile was found there, so the root was set another way (an outputFileTracingRoot or turbopack.root that knext could not read as a directory above this app).`;
-
-    return (
-        `${cause}\n\n` +
-        "knext packages that nested layout only when the root is set on purpose: the files Next traced can live outside the app directory, " +
-        "and a root that merely happened to be inferred would ship an image the app never asked for. " +
-        "`output: 'standalone'` is set correctly — the root is what is wrong.\n\n" +
-        "Fix it one of three ways:\n" +
-        `  - if this is a workspace monorepo and ${root} is the root you want, set \`outputFileTracingRoot\` AND \`turbopack.root\` in next.config to that directory (for example \`path.join(__dirname, '${relative(app, root).split(sep).join("/") || "."}')\`); knext then packages the nested layout, or\n` +
-        `  - set both to this app directory (${app}) so the app is its own root, or\n` +
-        (atRoot
-            ? `  - remove the lockfile you do not need (${atRoot}) so the app is its own workspace root.\n`
-            : "  - remove the outputFileTracingRoot / turbopack.root that points above the app.\n") +
-        `Then rebuild. (Relative to the root, the app is '${relative(root, app) || "."}'.)`
-    );
+        ? `Next.js picked ${root} as the workspace root because of ${atRoot}, so ${wrote}`
+        : `Next.js traced from ${root}, not from the app directory (${app}), so ${wrote} ${NO_LOCKFILE_CAUSE}`;
+    const relToApp = relative(app, root).split(sep).join("/") || ".";
+    const fixes = [
+        `  - if this is a workspace monorepo and ${root} is the root you want, set \`outputFileTracingRoot\` AND \`turbopack.root\` in next.config to that directory (for example \`path.join(__dirname, '${relToApp}')\`); knext then packages the nested layout, or`,
+        `  - set both to this app directory (${app}) so the app is its own root, or`,
+        atRoot
+            ? `  - remove the lockfile you do not need (${atRoot}) so the app is its own workspace root.`
+            : "  - remove the outputFileTracingRoot / turbopack.root that points above the app.",
+    ].join("\n");
+    return `${cause}\n\n${OPT_IN_EXPLANATION}\n\nFix it one of three ways:\n${fixes}\nThen rebuild. (Relative to the root, the app is '${relative(root, app) || "."}'.)`;
 }

@@ -76,6 +76,11 @@ export interface ResolvedBuild {
 /**
  * Resolve the builder and its artifact for this config.
  *
+ * A standalone build nests its server under the app's path when the app's
+ * config sets a tracing root above it (a workspace monorepo); builders whose
+ * output does not nest ignore the layout, so it is only asked for where it
+ * applies.
+ *
  * Throws on an unknown builder rather than falling back to the default. A
  * silent fallback would build one thing, look for another, and report success
  * — the #857 shape, where `next build` exited 0 the whole way while emitting a
@@ -100,9 +105,6 @@ export function resolveBuildArtifact(
     // The runtime is threaded through because vinext's shape depends on it
     // (#1260: the nitro preset IS the runtime choice). Builders whose shape
     // does not vary ignore it.
-    // A standalone build nests its server under the app's path when the app's
-    // config sets a tracing root above it (a workspace monorepo). Builders whose
-    // output does not nest ignore the layout; only ask for it where it applies.
     const layout =
         builder.emits === "next-standalone"
             ? { appRel: resolveStandaloneLayout(root).appRel }
@@ -214,6 +216,12 @@ export interface CompileForDeployResult {
  * such file) or, worse, silently shipped a STALE binary left over from an
  * earlier `knext build` run in the same checkout.
  *
+ * When the server is not where the app's config says it is but one sits
+ * somewhere else in the standalone tree, this fails on EVERY runtime with the
+ * real cause (an inferred root nobody chose, or two root settings that
+ * disagree), not only the runtime that compiles; otherwise the node leg would
+ * ship a tree with no server.
+ *
  * Called UNCONDITIONALLY whenever `deploy`/`preview` run a fresh project
  * build (i.e. NOT under `--skip-build`) — never gated on "does a binary
  * already exist", the same policy `knext build` itself follows, so
@@ -268,10 +276,6 @@ export function compileArtifactForDeploy(
         const healed = existsSync(standaloneDir)
             ? healStandaloneTree(cwd, layout)
             : undefined;
-        // The server is not where the config says it is, but one is somewhere
-        // else in the tree: say why (an inferred root nobody chose, or two root
-        // settings that disagree) on EVERY runtime, not only the one that
-        // compiles. Without this, the node leg ships a tree with no server.
         if (!existsSync(layout.serverPath)) {
             const nested = diagnoseNestedStandalone(cwd);
             if (nested !== null) {
