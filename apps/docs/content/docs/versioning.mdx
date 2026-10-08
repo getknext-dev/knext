@@ -19,7 +19,7 @@ pinned all three:
 ```json
 {
   "dependencies": {
-    "@getknext/core": "0.4.3"
+    "@getknext/core": "^1.0.0"
   }
 }
 ```
@@ -42,8 +42,17 @@ The version follows [semantic versioning](https://semver.org/) over the document
   change in any release. If you need something that only exists there, open an issue — that is a
   signal the capability belongs on the public surface.
 
-While the leading digit is `0`, npm's default range for a dependency (`^0.4.3`) will not pick up
-`0.5.0`. So either pin exactly, or expect to bump minors by hand.
+From 1.0 on, npm's default caret range (`^1.0.0`) picks up every later `1.x` minor and patch, which
+the rules above make safe. (Before 1.0, a caret range on a `0.x` version did not pick up the next
+minor, so `0.x` upgrades were by hand.)
+
+Each stable release is published to npm's `latest` tag. When a newer minor takes `latest`, an older
+line stays installable: `npm install -D @getknext/core@1.0` resolves the newest `1.0.x`, and the
+`latest-1.0` dist-tag points at the same release.
+
+The three packages depend on each other with caret ranges, so an older `@getknext/core` can still
+resolve a newer `@getknext/lib` or `@getknext/db` once a later minor exists. If you stay on an older
+line, list all three packages in your own `package.json` at the same version.
 
 Not every feature is covered by this policy yet — see [Stability tiers](/docs/stability) for which
 features are Stable (covered above), Beta (may still change with notice), or Experimental
@@ -63,8 +72,8 @@ your migration window.
 ## Which releases get fixes
 
 **The latest release line is the supported one.** Fixes, including security fixes, land in the next
-release. There are no maintenance branches and no patches cut against an older minor — knext is
-pre-1.0, and a maintenance promise that went unmet would be worse than none.
+release. There is no long-term-support promise for an older minor — knext has one maintainer, and a
+maintenance promise that went unmet would be worse than none.
 
 In practice that means: **upgrade forward to get a fix.** Because minors never break the public
 surface, that is a version bump and a redeploy.

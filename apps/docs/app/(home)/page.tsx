@@ -5,9 +5,10 @@ import styles from './home.module.css';
 /**
  * knext landing page — ports the "acid-lime-on-void" hero from the original static
  * _design-reference/index.html into a React Server Component. Copy is honesty-gated:
- * the official-suite claim below (778 tests, Node, nightly) mirrors the verified
- * status documented in /docs/compat-suite and must be withdrawn if the nightly
- * goes red. Detailed compat status lives in /docs/compat-matrix.
+ * the official-suite claim below states the 14-night credential is IN PROGRESS, as
+ * documented in /docs/compat-suite — it must not say "verified" or "credentialed"
+ * until all four default cells reach 14/14. Detailed compat status lives in
+ * /docs/compat-matrix.
  */
 export default function HomePage() {
   return (
@@ -72,15 +73,16 @@ export default function HomePage() {
           <div className={styles.grid}>
             <div className={styles.cell}>
               <div className={styles.n}>01</div>
-              <h3>Verified in the open — claims match the code</h3>
+              <h3>Measured in the open — claims match the code</h3>
               <p>
                 The default build runs on the official Next.js Deployment Adapter API, packaged as a
                 bytecode-cached standalone executable. knext&apos;s compatibility record is public
-                and honest: <b>778 tests, zero failures</b> against Next.js&apos;s own deploy-mode
-                e2e suite, re-verified nightly. An optional <b>vinext</b> build (an open-source
-                Vite-based Next.js implementation, compiled into one binary) is also available,
-                measured per feature until its own suite lane is green. Scope, exclusions, and what
-                each claim covers: <Link href="/docs/compat-suite">verified compatibility</Link>.
+                and honest: Next.js&apos;s own deploy-mode e2e suite runs against it nightly, and
+                its compatibility credential is <b>in progress</b> — not yet complete. An optional{' '}
+                <b>vinext</b> build (an open-source Vite-based Next.js implementation, compiled into
+                one binary) is also available as a Beta, with its measured suite results published.
+                Scope, exclusions, and what each claim covers:{' '}
+                <Link href="/docs/compat-suite">the compatibility credential</Link>.
               </p>
             </div>
             <div className={styles.cell}>

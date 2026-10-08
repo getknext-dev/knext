@@ -21,12 +21,12 @@ have with a maintainer.
 
 ## Supported versions
 
-knext has not reached a `1.0.0` release. Pre-1.0, there is **no long-term-support branch** — only
-the latest published `1.0.0-rc.*` on the npm `@getknext/*` scope receives fixes, including security
-fixes. Report against the version you are actually running; if it predates the current `rc`, the
-first response will usually be "upgrade and confirm."
-
-Once `1.0.0` ships, this section will name which major version lines receive security fixes.
+The **`1.x`** major line receives fixes, including security fixes, and they land on the **newest**
+published `1.x` release on the npm `@getknext/*` scope. There is **no long-term-support branch**:
+an older `1.x` minor stays installable, with no promise of backported fixes. Report against the
+version you are actually running; if it predates the newest `1.x` release, the first response will
+usually be "upgrade and confirm." The `1.0.0-rc.*` release candidates are superseded by `1.0.0` and
+receive no further fixes, and neither does the `0.x` line.
 
 ## Scope
 
