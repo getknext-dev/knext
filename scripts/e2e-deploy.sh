@@ -257,7 +257,9 @@ else
   # The heal is TS source in-repo (not directly loadable); contract-test mode
   # never boots bun fixtures, so leave it unset — the bun branch warns+skips.
   KNEXT_BUN_EXPORTS_HEAL="${KNEXT_BUN_EXPORTS_HEAL:-}"
-  # Same: TS source in-repo, so the workaround is skipped (with a warning).
+  # Same: TS source in-repo, so the module is unavailable here. The fallback
+  # below warns when the Next version is unknown or fixed (the contract tests'
+  # fake `next` has no version) and exits 1 on an affected Next < 16.4.0.
   KNEXT_ADAPTER_PATH_FIX="${KNEXT_ADAPTER_PATH_FIX:-}"
 fi
 if [ ! -f "${KNEXT_CC_PRELOAD}" ]; then
