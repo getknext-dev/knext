@@ -1,5 +1,7 @@
 # @getknext/lib
 
+## 1.3.0-rc.10
+
 ## 1.3.0-rc.9
 
 ### Patch Changes

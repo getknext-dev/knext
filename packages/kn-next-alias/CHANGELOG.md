@@ -1,5 +1,12 @@
 # kn-next
 
+## 1.3.0-rc.10
+
+### Patch Changes
+
+- Updated dependencies [0c2a6bd]
+  - @getknext/core@1.3.0-rc.10
+
 ## 1.3.0-rc.9
 
 ### Patch Changes
