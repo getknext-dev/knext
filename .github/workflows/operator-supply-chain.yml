@@ -426,24 +426,6 @@ jobs:
           DIGEST: ${{ steps.push.outputs.digest }}
         run: bash packages/kn-next-operator/hack/cosign-verify.sh "${IMAGE}@${DIGEST}"
 
-      # Version tags only (#1947): make the `vX.Y.Z` image tag the bundle will
-      # carry (hack/stamp-release-version.sh) a REAL registry tag on the exact
-      # gated digest, so `image: …:vX.Y.Z@sha256:…` is not a label that lies.
-      # The digest still decides what runs; the tag is for humans and `knext
-      # doctor`. Runs only AFTER the Trivy gate, the push, the provenance check,
-      # the cosign sign AND the cosign verify: a version tag must never land on
-      # an unsigned or unverified digest, and (the release is immutable) a
-      # failed run therefore leaves no `:vX.Y.Z` behind for a re-run to re-point.
-      - name: Tag the verified digest with the release version (version tags only, #1947)
-        if: steps.channel.outputs.is_version_tag == 'true' && steps.trivy.outcome == 'success'
-        env:
-          DIGEST: ${{ steps.push.outputs.digest }}
-          VERSION: ${{ steps.channel.outputs.version }}
-        run: |
-          set -euo pipefail
-          crane tag "${IMAGE}@${DIGEST}" "v${VERSION}"
-          echo "Tagged ${IMAGE}@${DIGEST} as v${VERSION}"
-
       # Marketplace-bound index (#1954), version tags only. Pushed under a
       # throwaway `<sha>-mp` tag FIRST, because the proof below reads the
       # registry (not local files); the user-visible `vX.Y.Z-mp` tag is applied
@@ -491,6 +473,7 @@ jobs:
       - name: Tag the Marketplace index (version tags only, #1954)
         if: steps.channel.outputs.is_version_tag == 'true' && steps.trivy.outcome == 'success'
         env:
+          GATED_DIGEST: ${{ steps.push.outputs.digest }}
           MP_DIGEST: ${{ steps.push_mp.outputs.digest }}
           VERSION: ${{ steps.channel.outputs.version }}
         run: |
@@ -500,8 +483,32 @@ jobs:
           {
             echo "### Marketplace-bound operator image (not yet pushed to any Marketplace registry)"
             echo "- \`${IMAGE}:v${VERSION}-mp\` = \`${MP_DIGEST}\`"
-            echo "- same platform manifests as \`${IMAGE}@${{ steps.push.outputs.digest }}\`, no attestation manifests"
+            echo "- same platform manifests as \`${IMAGE}@${GATED_DIGEST}\`, no attestation manifests"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # ORDERING (#1954 review): both release tags are applied LAST, after the
+      # Marketplace index has been pushed, asserted, signed and verified. The
+      # gated `vX.Y.Z` tag used to land before those steps, so a failure in any
+      # of them left `vX.Y.Z` tagged with no release, and a re-run (new build,
+      # new digest) would have moved the immutable tag. The gated tag below is
+      # the last registry mutation: nothing that can fail runs after it.
+      # Version tags only (#1947): make the `vX.Y.Z` image tag the bundle will
+      # carry (hack/stamp-release-version.sh) a REAL registry tag on the exact
+      # gated digest, so `image: …:vX.Y.Z@sha256:…` is not a label that lies.
+      # The digest still decides what runs; the tag is for humans and `knext
+      # doctor`. Runs only AFTER the Trivy gate, the push, the provenance check,
+      # the cosign sign AND the cosign verify: a version tag must never land on
+      # an unsigned or unverified digest, and (the release is immutable) a
+      # failed run therefore leaves no `:vX.Y.Z` behind for a re-run to re-point.
+      - name: Tag the verified digest with the release version (version tags only, #1947)
+        if: steps.channel.outputs.is_version_tag == 'true' && steps.trivy.outcome == 'success'
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+          VERSION: ${{ steps.channel.outputs.version }}
+        run: |
+          set -euo pipefail
+          crane tag "${IMAGE}@${DIGEST}" "v${VERSION}"
+          echo "Tagged ${IMAGE}@${DIGEST} as v${VERSION}"
 
       # On the publish channel (main or an operator-v* tag): regenerate dist/install.yaml with the REAL pushed digest. This is
       # the bootstrap-resolution step — the placeholder all-zeros digest in the

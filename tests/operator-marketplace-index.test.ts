@@ -540,7 +540,7 @@ describe('operator-supply-chain.yml wires the Marketplace variant (#1954)', () =
     }
   });
 
-  it('orders: gated sign+verify -> push -> assert -> sign -> tag (a failed assertion never leaves a tag or signature)', () => {
+  it('orders: gated sign+verify -> push -> assert -> sign -> mp tag -> gated vX.Y.Z tag (no release tag exists unless every Marketplace step passed)', () => {
     const at = (n: string) => text.indexOf(`name: ${n}`);
     const order = [
       'Verify operator image signature (cosign verify, publish channel)',
@@ -548,12 +548,13 @@ describe('operator-supply-chain.yml wires the Marketplace variant (#1954)', () =
       'Assert Marketplace index has no attestations and identical bits (#1954)',
       'Sign + verify Marketplace index (version tags only, #1954)',
       'Tag the Marketplace index (version tags only, #1954)',
+      'Tag the verified digest with the release version (version tags only, #1947)',
     ].map(at);
     for (const i of order) expect(i).toBeGreaterThan(-1);
     expect([...order].sort((a, b) => a - b)).toEqual(order);
   });
 
-  it('pushes under a throwaway sha tag first, and only the final step applies the -mp version tag', () => {
+  it('pushes under a throwaway sha tag first, and only a late step applies the -mp version tag', () => {
     expect(step('Push Marketplace index (version tags only, #1954)')).toContain('GITHUB_SHA}-mp');
     const tag = step('Tag the Marketplace index (version tags only, #1954)');
     expect(tag).toContain('crane tag');

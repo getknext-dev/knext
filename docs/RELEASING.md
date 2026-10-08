@@ -473,7 +473,11 @@ Confirm every box before starting step 1 below:
    `hack/marketplace-index-assert.sh` proves against the registry — before the index is signed or the
    `-mp` tag applied — that it has no attestation manifests and that every platform manifest's
    config and layer digests equal the gated image's. The index digest differs from the gated one, so it
-   carries its own cosign signature. Confirm after a release:
+   carries its own cosign signature, but **no SBOM attestation**: `cosign verify-attestation` (and the
+   provenance) applies to the GHCR `vX.Y.Z` image only, while `cosign verify` works on both. Both release
+   tags (`vX.Y.Z-mp`, then `vX.Y.Z`) are applied last, after every Marketplace step has passed, so a
+   failed run leaves neither behind and a re-run cannot move an already-released tag. Confirm after a
+   release:
    `crane manifest ghcr.io/getknext-dev/kn-next-operator:vX.Y.Z-mp | jq '.manifests | map(.platform)'`
    lists only real platforms (no `unknown/unknown`). Nothing is pushed to a Marketplace registry by
    this workflow; that copy is a separate, manual step that copies this digest.
