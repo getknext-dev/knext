@@ -5,8 +5,8 @@
 > ✅ ("supported") row cannot be backed up. When in doubt we mark ⚠️, not ✅.
 >
 > **The compat credential window now runs against `vercel/next.js` **v16.3.6**** (rc.2's
-> re-credential, #1560, 2026-09-30) — the same tag `knext create` scaffolds today, closing the
-> deliberate v16.2.x/16.3.x divergence rc.1 opened. `NEXTJS_REF` in `test-e2e-deploy.yml` moved to
+> re-credential, #1560, 2026-09-30) — `knext create` now scaffolds the later 16.3.x patch
+> release 16.3.8 (a security fix); the credential harness stays on v16.3.6 until the next re-credential. `NEXTJS_REF` in `test-e2e-deploy.yml` moved to
 > this ref in the same PR that re-audited the pre-existing quarantine ledger against it with real
 > dispatch evidence: all four cells (node/bun x turbopack/webpack), 16/16 shards each attempted
 > (runs 36638853381 / 36638856495 / 36638859599 / 36638862596). The two **bun** cells and the

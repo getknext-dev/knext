@@ -169,12 +169,12 @@ const MUTATIONS = [
     edits: [
       {
         subject: 'scaffoldPkg',
-        anchor: '"next": "16.3.6",',
+        anchor: '"next": "16.3.8",',
         replacement: '"next": "16.4.0",',
       },
       {
         subject: 'manifest',
-        anchor: '"shippedNextPin": "16.3.6",',
+        anchor: '"shippedNextPin": "16.3.8",',
         replacement: '"shippedNextPin": "16.4.0",',
       },
     ],
