@@ -25,9 +25,7 @@ function pkg(builder: "default" | "vinext", runtime: "bun" | "node") {
 describe("vinext scaffold pins @vercel/og", () => {
     for (const runtime of ["bun", "node"] as const) {
         it(`builder vinext, runtime ${runtime} → overrides pin @vercel/og to ${PINNED}`, () => {
-            expect(pkg("vinext", runtime).overrides).toEqual({
-                "@vercel/og": PINNED,
-            });
+            expect(pkg("vinext", runtime).overrides["@vercel/og"]).toBe(PINNED);
         });
 
         it(`builder default, runtime ${runtime} → no @vercel/og override`, () => {

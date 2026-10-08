@@ -264,6 +264,17 @@ jobs:
           test "$(jq '.manifests | length' operator-oci-sbom/index.json)" = "1" || {
             echo "SBOM view must hold exactly one manifest" >&2; exit 1; }
 
+      # AWS Marketplace-bound variant (#1954). Marketplace rejects an image index
+      # that carries attestation (in-toto) manifests, and the GHCR index above
+      # does by design (provenance: mode=max — those images keep it). This does
+      # NOT rebuild: it writes a second index over the SAME platform manifests
+      # (same digests, so provably the same config + layers) with the
+      # attestation entries removed. Local file work only, safe on every ref, and
+      # self-checks its output; the publish/prove/sign steps further down run on
+      # version tags only. Nothing is pushed to any Marketplace registry here.
+      - name: Derive attestation-free Marketplace index (#1954)
+        run: bash packages/kn-next-operator/hack/marketplace-index-build.sh operator-oci operator-oci-mp
+
       # output-file is resolved relative to $GITHUB_WORKSPACE (repo root) for a
       # `uses:` step. This is the single canonical SBOM path; upload + attest below
       # reference the SAME path so they never diverge.
@@ -415,6 +426,72 @@ jobs:
           DIGEST: ${{ steps.push.outputs.digest }}
         run: bash packages/kn-next-operator/hack/cosign-verify.sh "${IMAGE}@${DIGEST}"
 
+      # Marketplace-bound index (#1954), version tags only. Pushed under a
+      # throwaway `<sha>-mp` tag FIRST, because the proof below reads the
+      # registry (not local files); the user-visible `vX.Y.Z-mp` tag is applied
+      # only by the last of these four steps, after the assertion and signature,
+      # so a failed run leaves no `-mp` release tag behind. The platform blobs
+      # already exist in the repository, so this uploads one small index.
+      - name: Push Marketplace index (version tags only, #1954)
+        if: steps.channel.outputs.publish == 'true' && steps.channel.outputs.is_version_tag == 'true' && steps.trivy.outcome == 'success'
+        id: push_mp
+        run: |
+          set -euo pipefail
+          PUSHED_REF="$(crane push operator-oci-mp "${IMAGE}:${GITHUB_SHA}-mp")"
+          DIGEST="${PUSHED_REF##*@}"
+          if ! printf '%s' "${DIGEST}" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
+            echo "::error::could not resolve the pushed Marketplace index digest (crane output: ${PUSHED_REF}) — refusing to sign"
+            exit 1
+          fi
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "Pushed ${IMAGE}@${DIGEST} (Marketplace-bound, no attestation manifests)"
+
+      # The acceptance proof, against the registry: the Marketplace index has no
+      # attestation manifest and its platform manifests carry the SAME config +
+      # layer digests as the gated, signed image. Fails the run otherwise.
+      - name: Assert Marketplace index has no attestations and identical bits (#1954)
+        if: steps.channel.outputs.publish == 'true' && steps.channel.outputs.is_version_tag == 'true' && steps.trivy.outcome == 'success'
+        env:
+          GATED_DIGEST: ${{ steps.push.outputs.digest }}
+          MP_DIGEST: ${{ steps.push_mp.outputs.digest }}
+        run: bash packages/kn-next-operator/hack/marketplace-index-assert.sh "${IMAGE}@${GATED_DIGEST}" "${IMAGE}@${MP_DIGEST}"
+
+      # The Marketplace index is a different index digest than the gated one, so
+      # it gets its own keyless signature (same OIDC identity as the gated image).
+      # The platform manifests underneath are the already-signed gated ones.
+      - name: Sign + verify Marketplace index (version tags only, #1954)
+        if: steps.channel.outputs.publish == 'true' && steps.channel.outputs.is_version_tag == 'true' && steps.trivy.outcome == 'success'
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+          IDENTITY_REGEXP: https://github.com/${{ github.repository }}/.*
+          MP_DIGEST: ${{ steps.push_mp.outputs.digest }}
+        run: |
+          set -euo pipefail
+          cosign sign --yes "${IMAGE}@${MP_DIGEST}"
+          bash packages/kn-next-operator/hack/cosign-verify.sh "${IMAGE}@${MP_DIGEST}"
+
+      - name: Tag the Marketplace index (version tags only, #1954)
+        if: steps.channel.outputs.publish == 'true' && steps.channel.outputs.is_version_tag == 'true' && steps.trivy.outcome == 'success'
+        env:
+          GATED_DIGEST: ${{ steps.push.outputs.digest }}
+          MP_DIGEST: ${{ steps.push_mp.outputs.digest }}
+          VERSION: ${{ steps.channel.outputs.version }}
+        run: |
+          set -euo pipefail
+          crane tag "${IMAGE}@${MP_DIGEST}" "v${VERSION}-mp"
+          echo "Tagged ${IMAGE}@${MP_DIGEST} as v${VERSION}-mp"
+          {
+            echo "### Marketplace-bound operator image (not yet pushed to any Marketplace registry)"
+            echo "- \`${IMAGE}:v${VERSION}-mp\` = \`${MP_DIGEST}\`"
+            echo "- same platform manifests as \`${IMAGE}@${GATED_DIGEST}\`, no attestation manifests"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ORDERING (#1954 review): both release tags are applied LAST, after the
+      # Marketplace index has been pushed, asserted, signed and verified. The
+      # gated `vX.Y.Z` tag used to land before those steps, so a failure in any
+      # of them left `vX.Y.Z` tagged with no release, and a re-run (new build,
+      # new digest) would have moved the immutable tag. The gated tag below is
+      # the last registry mutation: nothing that can fail runs after it.
       # Version tags only (#1947): make the `vX.Y.Z` image tag the bundle will
       # carry (hack/stamp-release-version.sh) a REAL registry tag on the exact
       # gated digest, so `image: …:vX.Y.Z@sha256:…` is not a label that lies.
