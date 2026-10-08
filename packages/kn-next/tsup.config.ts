@@ -89,6 +89,10 @@ export default defineConfig([
       // #188 round 3 — own dist entry so e2e-deploy.sh can import the heal
       // POST-build (onBuildComplete fires before .next/standalone exists).
       'adapters/standalone-bun-exports': 'src/adapters/standalone-bun-exports.ts',
+      // The Next.js < 16.4.0 `adapterPath` workaround (retire with the pin).
+      // Own dist entry so e2e-deploy.sh applies it to the standalone tree it
+      // assembles BEFORE the compile; the CLI calls it in-process.
+      'adapters/standalone-adapter-path': 'src/adapters/standalone-adapter-path.ts',
       // cache-handler is plain JS (untyped) — bundled to dist, no .d.ts emitted
       'adapters/cache-handler': 'src/adapters/cache-handler.js',
       // #1843: the per-runtime cache handlers the knext adapter points
@@ -196,6 +200,7 @@ export default defineConfig([
       // The #1533/ADR-0061 exec-plugin/cloud-credential kubeconfig refusal.
       'cli/ci/kubeconfig-safety': 'src/cli/ci/kubeconfig-safety.ts',
         'adapters/standalone-bun-exports': 'src/adapters/standalone-bun-exports.ts',
+        'adapters/standalone-adapter-path': 'src/adapters/standalone-adapter-path.ts',
         'adapters/otel-config': 'src/adapters/otel-config.ts',
         'adapters/tracing': 'src/adapters/tracing.ts',
         'adapters/metrics': 'src/adapters/metrics.ts',

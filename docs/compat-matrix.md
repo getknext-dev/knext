@@ -4,9 +4,9 @@
 > real, on-disk evidence and a mechanical guard test (`tests/compat-matrix.test.ts`) fails CI if a
 > ✅ ("supported") row cannot be backed up. When in doubt we mark ⚠️, not ✅.
 >
-> **The compat credential window now runs against `vercel/next.js` **v16.3.6**** (rc.2's
-> re-credential, #1560, 2026-09-30) — `knext create` now scaffolds the later 16.3.x patch
-> release 16.3.8 (a security fix); the credential harness stays on v16.3.6 until the next re-credential. `NEXTJS_REF` in `test-e2e-deploy.yml` moved to
+> **The compat credential window now runs against `vercel/next.js` **v16.3.8**** (rc.2's
+> re-credential, #1560, 2026-09-30) — the same tag `knext create` scaffolds today, closing the
+> deliberate v16.2.x/16.3.x divergence rc.1 opened. `NEXTJS_REF` in `test-e2e-deploy.yml` moved to
 > this ref in the same PR that re-audited the pre-existing quarantine ledger against it with real
 > dispatch evidence: all four cells (node/bun x turbopack/webpack), 16/16 shards each attempted
 > (runs 36638853381 / 36638856495 / 36638859599 / 36638862596). The two **bun** cells and the
@@ -27,6 +27,15 @@
 > `deploy` branch encodes behaviour only Vercel's own infrastructure produces, and knext's result
 > matches the self-hosted expectation in every case — full per-test provenance is in the ADR
 > addendum and `.github/compat-credentialed-next-version.json`.
+>
+> **v16.3.8 confirmation runs (v1.0 branch, not this line).** The harness ref moved from v16.3.6
+> to v16.3.8 so it equals the scaffold pin again. Dispatched confirmation at v16.3.8 on the
+> **v1.0 branch**: run 37771073433 (node x turbopack) and run 37771077402 (bun x turbopack),
+> 1101 passed / 1101 each. They did not run on this integration line; the same
+> adapterPath workaround and the same harness ref/ledger are applied here, so they are
+> cited as evidence for the ref, not as a run of this line. The 8 quarantine-ledger entries
+> are re-stamped `reaudited: v16.3.8` by source equivalence (none of the 8 test files is touched
+> by the v16.3.6...v16.3.8 compare), not by a fresh run.
 >
 > **The last COMPLETED 14-night-eligible credential evidence is the rc.1 rehearsal, still at
 > `v16.2.12`.** re-credentialed 2026-09-27 (#1570) — the four credential cells each ran green

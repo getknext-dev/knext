@@ -43,6 +43,10 @@ import {
 } from "../adapters/artifact-contract";
 import { HARFBUZZ_NOTICE_FILE } from "../adapters/og-harfbuzz.mjs";
 import {
+    type BlankAdapterPathResult,
+    blankStandaloneAdapterPath,
+} from "../adapters/standalone-adapter-path";
+import {
     type HealResult,
     healBunExportTargets,
 } from "../adapters/standalone-bun-exports";
@@ -191,6 +195,13 @@ export interface CompileForDeployResult {
      */
     readonly healed?: HealResult;
     /**
+     * What the Next.js < 16.4.0 `adapterPath` workaround did to the standalone
+     * config (see `adapters/standalone-adapter-path.ts`), present whenever a
+     * standalone server was there to inspect. `applied: false` carries the
+     * reason (a fixed Next, or nothing to blank).
+     */
+    readonly adapterPathWorkaround?: BlankAdapterPathResult;
+    /**
      * vinext × node only: what staging the IMAGE platform's payload did.
      * `knext build` logs it; `deploy`/`preview` get the staging for free,
      * which they need because they run no `knext build` (see the call site).
@@ -284,8 +295,17 @@ export function compileArtifactForDeploy(
                 );
             }
         }
+        // The Next.js < 16.4.0 `adapterPath` workaround, BEFORE any compile so
+        // the Bun executable bundles the already-blanked config. Both runtimes:
+        // the node image ships this same tree. A no-op on Next >= 16.4.0.
+        const adapterPathWorkaround = existsSync(layout.serverPath)
+            ? blankStandaloneAdapterPath({
+                  serverDir: layout.serverDir,
+                  projectDir: cwd,
+              })
+            : undefined;
         if (runtimeId !== "bun") {
-            return { compiled: false, healed };
+            return { compiled: false, healed, adapterPathWorkaround };
         }
         // `buildStandaloneExecutable` ALSO throws a UsageError when there is
         // no server.js — this check runs first anyway, deliberately: it fails
@@ -313,7 +333,7 @@ export function compileArtifactForDeploy(
             builderId: builder.id,
             runtimeId,
         });
-        return { compiled: true, binaryPath, healed };
+        return { compiled: true, binaryPath, healed, adapterPathWorkaround };
     }
 
     if (artifact.shape === "nitro-output-bun") {
