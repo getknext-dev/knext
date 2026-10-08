@@ -486,8 +486,12 @@ The fixes bundled with vinext 1.0.1:
 - **A rewrite to a file in `public/`** (a `next.config` rewrite, or `NextResponse.rewrite()` in
   middleware) serves that file instead of the 404 page. Pages Router apps get this for
   `beforeFiles`, `afterFiles` and `fallback` rewrites, App Router apps for `beforeFiles` and
-  middleware rewrites. Middleware still does not run for a direct request to a file in `public/`:
-  the server answers those before your middleware.
+  middleware rewrites.
+- **Middleware runs before a file in `public/` that its `matcher` covers**, as in Next.js. A
+  request for such a file reaches your middleware first, and the file is served only if the
+  middleware lets the request continue. Middleware without a `matcher` runs for every file in
+  `public/`. Files the matcher does not cover, and the build's own `/_next/static/` assets, are
+  still served directly without running middleware.
 - **A tsconfig `paths` entry with several targets** (`"@lib/*": ["lib/a/*", "lib/b/*"]`) falls back
   to the later targets when the first one does not resolve, and a `.d.ts` target is never used as
   a module, as in TypeScript and Next.js. Before, only the first target was used.
