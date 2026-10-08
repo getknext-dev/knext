@@ -236,6 +236,11 @@ jobs:
       # file, in `coverage-bun/`, and it is the NUMERATOR of the coverage gate
       # below; `check-coverage.mjs` supplies the honest DENOMINATOR itself by
       # enumerating the source tree and folding untested files in at 0%.
+      # #1989: record the tree before the suite and fail if the suite leaves
+      # files in it (a test staging into the repo root instead of a temp dir).
+      - name: Snapshot working tree (before the suite)
+        run: node scripts/assert-tree-unchanged.mjs snapshot "$RUNNER_TEMP/tree-before.txt"
+
       - name: Run tests (bun — the suite)
         # Read-only default token, this step only: tests/upstream-retirement
         # verifies every cited upstream issue/PR against api.github.com and FAILS
@@ -243,6 +248,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: node scripts/bun-test.mjs --coverage
+
+      - name: Assert the suite left the working tree unchanged
+        run: node scripts/assert-tree-unchanged.mjs check "$RUNNER_TEMP/tree-before.txt"
 
       # The gate itself: merge the bun per-file lcov, add the 0% denominator, then
       # check the floors from scripts/lib/coverage-policy.mjs. It must run AFTER
