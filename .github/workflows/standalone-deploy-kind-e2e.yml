@@ -9,7 +9,7 @@ name: Standalone deploy — kind e2e (build-id lock-step)
 #
 # This lane runs the REAL CLI end to end on both default builders
 # (turbopack, webpack — #1733) at the Next version the scaffold pins
-# (16.3.6): `kn-next deploy` -> NextApp CR -> the operator built from HEAD ->
+# (16.3.8): `kn-next deploy` -> NextApp CR -> the operator built from HEAD ->
 # Knative on an ephemeral kind cluster. It asserts the built `.next/BUILD_ID`
 # IS the deploy tag, the CR carries that `spec.buildId`, the NextApp goes
 # Ready, and `/api/health` answers 200 — the same health check on every leg.
@@ -82,7 +82,7 @@ jobs:
       CLUSTER: standalone-e2e
       APP_NS: standalone-e2e
       APP_NAME: standalone-e2e
-      NEXT_VERSION: 16.3.6
+      NEXT_VERSION: 16.3.8
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 

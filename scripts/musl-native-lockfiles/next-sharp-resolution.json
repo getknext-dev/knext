@@ -1,8 +1,8 @@
 {
   "$comment": "Which sharp the credentialed Next.js version resolves to, so the bun lane's musl rebuild has a committed lockfile for it. Next pins sharp only as an optionalDependencies RANGE; the compat harness installs the highest published version in that range, and scripts/e2e-deploy.sh mounts the committed lockfiles for whatever the app actually resolved. Credential mode refuses a sharp with no committed lockfile, which is how Next 16.3.5 (sharp 0.35.5) turned every bun credential deploy red while only 0.34.5 was committed. tests/musl-lockfile-credential-sharp-coverage.test.ts fails when nextVersion drifts from .github/compat-credentialed-next-version.json / test-e2e-deploy.yml's NEXTJS_REF, or when the sharp + libvips recorded here have no committed, frozen lockfile. On a Next bump: `npm view next@<v> optionalDependencies.sharp`, `npm view sharp@'<range>' version` (take the highest), `npm view @img/sharp-linuxmusl-x64@<sharp> optionalDependencies`, then scripts/generate-musl-native-lockfile.sh for both and list them in MUSL_NATIVE_LOCKFILE_FILES. In bun credential mode scripts/compat-sharp-pin.mjs pins the fixture install to exactly `sharp` below (refusing if it has no committed lockfile), so a sharp patch published inside the range mid-window cannot change what is installed; early-warning keeps floating so it surfaces such a patch.",
-  "nextVersion": "16.3.6",
+  "nextVersion": "16.3.8",
   "sharpRange": "^0.35.4",
   "sharp": "0.35.5",
   "libvips": "1.3.4",
-  "resolvedOn": "2026-10-01"
+  "resolvedOn": "2026-10-08"
 }
