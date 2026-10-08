@@ -141,6 +141,11 @@
       "file": "vinext-3771-hybrid-pages-not-found.patch",
       "upstream": "https://github.com/cloudflare/vinext/pull/3771",
       "summary": "Hybrid app/ + pages/: a Pages route that resolves to `notFound` (getStaticProps/getServerSideProps `notFound`, or a `fallback: false` miss) renders the App Router not-found instead of pages/404, keeping the source route Cache-Control, as Next.js does when the app directory is enabled (Next.js deploy tests not-found-with-pages-i18n and pages-router-app-not-found). Production only; dev is unchanged. Open upstream (issue cloudflare/vinext#3428); retire when the pinned vinext includes cloudflare/vinext#3771."
+    },
+    {
+      "file": "vinext-3774-build-manifest-sorted-pages.patch",
+      "upstream": "https://github.com/cloudflare/vinext/pull/3774",
+      "summary": "Client build manifest: `_next/static/<buildId>/_buildManifest.js` lists the app's Pages routes in `sortedPages` (it was always empty), as Next.js does (Next.js deploy test custom-routes-catchall). Every pages/ entry, pages/api included as on Turbopack, plus `/_app` and `/_error`, sorted with a port of Next.js getSortedRoutes (static, then dynamic, then catch-all, then optional catch-all). An App Router-only build lists just `/_app` and `/_error`. Page-to-chunk entries are not added. Open upstream (issue cloudflare/vinext#3773); retire when the pinned vinext includes cloudflare/vinext#3774."
     }
   ],
   "pristine": {
@@ -175,6 +180,8 @@
     "dist/server/app-browser-navigation-controller.js": "88d86bd6a56ca60617ca8607b3112b5d70bf6c5449d6b5be43a461050a9124a2",
     "dist/server/pages-request-pipeline.js": "28e0b1a13966c2ccdcc43461927c7e49beb869fa9f70c2cca9cf2924ab8093ea",
     "dist/server/app-pages-bridge.js": "5a6a66420eb53e8813c0169b7fa92f0334fbdfbcf5f6c1b59259fb695e89aa2c",
-    "dist/server/pages-page-handler.js": "bb70d235225807fe8357c1f3e055b47677c39666878e653eb07901d8cdcbbe17"
+    "dist/server/pages-page-handler.js": "bb70d235225807fe8357c1f3e055b47677c39666878e653eb07901d8cdcbbe17",
+    "dist/routing/route-validation.js": "4b771688d4b83ab77368d9cff2d609c25cda9d57df201a438c255484f5285d12",
+    "dist/build/next-client-runtime-manifests.js": "790b80f96a3c00f64b61581d4df24667114a5db2b7a4e0d2be2c607ccbdbca12"
   }
 }

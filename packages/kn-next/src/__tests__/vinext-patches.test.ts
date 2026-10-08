@@ -2822,6 +2822,7 @@ export default function middleware() { return NextResponse.json({ middleware: tr
             return { res, body: await res.text() };
         };
         return {
+            root,
             request,
             close: () =>
                 new Promise<void>((resolve) => server.close(() => resolve())),
@@ -2995,6 +2996,114 @@ export default function middleware() { return NextResponse.json({ middleware: tr
             await app.close();
         }
     }, 180_000);
+
+    // The client build manifest as served: the JSON between the assignment
+    // and the callback.
+    const sortedPagesOf = (body: string): unknown => {
+        const start = body.indexOf("self.__BUILD_MANIFEST = ");
+        const end = body.indexOf(";self.__BUILD_MANIFEST_CB");
+        if (start !== 0 || end < 0) {
+            throw new Error(
+                `not a client build manifest: ${body.slice(0, 120)}`,
+            );
+        }
+        return JSON.parse(body.slice("self.__BUILD_MANIFEST = ".length, end))
+            .sortedPages;
+    };
+
+    it("vinext#3774: _buildManifest.js lists the Pages and API routes in Next.js sortedPages order", async () => {
+        // Ported from Next.js: test/e2e/custom-routes-catchall — the manifest
+        // reached through a /docs/:path* rewrite must list /hello. Next.js
+        // (Turbopack, writeBuildManifest) writes sortedPages as
+        // getSortedRoutes over every pages/ entry, pages/api included, plus
+        // /_app and /_error. getSortedRoutes puts a static segment before a
+        // dynamic one, then catch-all, then optional catch-all, which plain
+        // string order inverts at every level used below.
+        const page = (text: string) =>
+            `export default function Page() {\n  return <p>${text}</p>;\n}\n`;
+        const app = await serveHybridFixture({
+            "package.json": JSON.stringify({ type: "module" }),
+            "next.config.mjs":
+                'export default { async rewrites() { return [{ source: "/docs/:path*", destination: "/:path*" }]; } };\n',
+            "pages/_app.js":
+                "export default function App({ Component, pageProps }) {\n  return <Component {...pageProps} />;\n}\n",
+            "pages/index.js": page("home"),
+            "pages/hello.js": page("hello world"),
+            "pages/posts/new.js": page("new post"),
+            "pages/posts/[id].js": page("post"),
+            "pages/blog/[id].js": page("blog post"),
+            "pages/blog/[...slug].js": page("blog rest"),
+            "pages/shop/[id].js": page("item"),
+            "pages/shop/[[...path]].js": page("shop"),
+            "pages/api/ping.js":
+                "export default function handler(req, res) {\n  res.end('pong');\n}\n",
+        });
+        try {
+            const buildId = readFileSync(
+                join(app.root, "dist", "server", "BUILD_ID"),
+                "utf-8",
+            ).trim();
+            const { res, body } = await app.request(
+                `/docs/_next/static/${buildId}/_buildManifest.js`,
+            );
+            expect(res.status).toBe(200);
+            expect(body).toContain("/hello");
+            expect(sortedPagesOf(body)).toEqual([
+                "/",
+                "/_app",
+                "/_error",
+                "/api/ping",
+                "/blog/[id]",
+                "/blog/[...slug]",
+                "/hello",
+                "/posts/new",
+                "/posts/[id]",
+                "/shop/[id]",
+                "/shop/[[...path]]",
+            ]);
+        } finally {
+            await app.close();
+        }
+    }, 180_000);
+
+    it("vinext#3774: an App Router-only build lists just /_app and /_error, as Next.js always builds both", async () => {
+        const app = await serveHybridFixture({
+            "package.json": JSON.stringify({ type: "module" }),
+            "app/layout.tsx":
+                "export default function RootLayout({ children }) {\n  return <html><body>{children}</body></html>;\n}\n",
+            "app/page.tsx":
+                "export default function Page() {\n  return <p>app page</p>;\n}\n",
+        });
+        try {
+            const buildId = readFileSync(
+                join(app.root, "dist", "server", "BUILD_ID"),
+                "utf-8",
+            ).trim();
+            const { res, body } = await app.request(
+                `/_next/static/${buildId}/_buildManifest.js`,
+            );
+            expect(res.status).toBe(200);
+            expect(sortedPagesOf(body)).toEqual(["/_app", "/_error"]);
+        } finally {
+            await app.close();
+        }
+    }, 180_000);
+
+    it("vinext#3774: getSortedRoutes keeps Next.js's optional catch-all specificity error", async () => {
+        // The pages scan validates first, so a build never reaches this; the
+        // error belongs to the ported sort all the same.
+        applyVinextPatches(patched);
+        const { getSortedRoutes } = await importPatched<{
+            getSortedRoutes: (pages: readonly string[]) => string[];
+        }>("dist/routing/route-validation.js");
+        expect(() => getSortedRoutes(["/sub", "/sub/[[...all]]"])).toThrow(
+            /same specificity as a optional catch-all route \("\/sub" and "\/sub\[\[\.\.\.all\]\]"\)/,
+        );
+        expect(getSortedRoutes(["/sub/[[...all]]", "/other"])).toEqual([
+            "/other",
+            "/sub/[[...all]]",
+        ]);
+    });
 });
 
 // ---------------------------------------------------------------------------

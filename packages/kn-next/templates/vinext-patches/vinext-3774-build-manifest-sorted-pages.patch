@@ -1,0 +1,125 @@
+knext bundled fix for vinext 1.0.1 (dist output)
+Upstream: https://github.com/cloudflare/vinext/pull/3774 (issue https://github.com/cloudflare/vinext/issues/3773)
+What it fixes: `_next/static/<buildId>/_buildManifest.js` was written with `sortedPages: []`, so
+it never listed the app's Pages routes (Next.js deploy test custom-routes-catchall fetches it
+through a rewrite and expects `/hello`). Next.js fills `sortedPages` with every pages/ entry
+(pages/api included, as Turbopack does) plus `/_app` and `/_error`, in getSortedRoutes order:
+a static segment before a dynamic one, then catch-all, then optional catch-all. Its client reads
+the list through pageLoader.getPageList().
+The client-build writeBundle hook now scans the Pages and API routes and passes them, in Next.js
+format, to the manifest, which sorts them with a port of Next.js getSortedRoutes (the smoosh half
+of the UrlNode route-validation.js already carries). An App Router-only build lists just `/_app`
+and `/_error`, as Next.js always builds both. Page-to-chunk entries are not added (only Next.js's
+own route loader reads them; vinext's client does not).
+Port difference: none in behaviour; the dist hunks mirror the upstream source change.
+Retire: delete this file (and its manifest entry) when the pinned vinext is >= the first
+release that includes cloudflare/vinext#3774.
+Applied by `knext vinext-patches` (runs from the app's postinstall and before `knext build`).
+
+--- a/dist/build/next-client-runtime-manifests.js
++++ b/dist/build/next-client-runtime-manifests.js
+@@ -1,11 +1,17 @@
+ import path from "../deps/.pnpm/pathslash@0.1.0/deps/pathslash/dist/index.js";
+ import { toClientRewrites } from "../client/client-rewrites.js";
++import { getSortedRoutes } from "../routing/route-validation.js";
+ import fs from "node:fs";
+ //#region src/build/next-client-runtime-manifests.ts
+-function buildNextClientBuildManifestContent(rewrites) {
++/**
++* Next.js always builds an `_app` and an `_error` entry (its defaults when the
++* app has none) and lists both in `sortedPages`.
++*/
++const GLOBAL_PAGES = ["/_app", "/_error"];
++function buildNextClientBuildManifestContent(rewrites, pages) {
+ 	const manifest = {
+ 		__rewrites: toClientRewrites(rewrites),
+-		sortedPages: []
++		sortedPages: getSortedRoutes([...pages, ...GLOBAL_PAGES])
+ 	};
+ 	return `self.__BUILD_MANIFEST = ${JSON.stringify(manifest)};self.__BUILD_MANIFEST_CB && self.__BUILD_MANIFEST_CB()`;
+ }
+@@ -15,7 +21,7 @@
+ function emitNextClientRuntimeManifests(options) {
+ 	const manifestDir = path.join(options.clientDir, options.assetsSubdir, options.buildId);
+ 	fs.mkdirSync(manifestDir, { recursive: true });
+-	fs.writeFileSync(path.join(manifestDir, "_buildManifest.js"), buildNextClientBuildManifestContent(options.rewrites), "utf-8");
++	fs.writeFileSync(path.join(manifestDir, "_buildManifest.js"), buildNextClientBuildManifestContent(options.rewrites, options.pages), "utf-8");
+ 	fs.writeFileSync(path.join(manifestDir, "_ssgManifest.js"), buildNextClientSsgManifestContent(), "utf-8");
+ }
+ //#endregion
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -19,7 +19,7 @@
+ import { hasBasePath, stripBasePath } from "./utils/base-path.js";
+ import { appRouteGraph, appRouter, invalidateAppRouteCache, matchAppRoute } from "./routing/app-router.js";
+ import { generateRouteTypes } from "./typegen.js";
+-import { apiRouter, invalidateRouteCache, matchRoute, pagesRouter } from "./routing/pages-router.js";
++import { apiRouter, invalidateRouteCache, matchRoute, pagesRouter, patternToNextFormat } from "./routing/pages-router.js";
+ import { resolveRuntimeEntryModule } from "./entries/runtime-entry-module.js";
+ import { INTERNAL_HEADERS, NEXTJS_DEPLOYMENT_ID_HEADER, VINEXT_INTERNAL_HEADERS, VINEXT_TIMING_HEADER } from "./server/headers.js";
+ import { normalizePath as normalizePath$1 } from "./server/normalize-path.js";
+@@ -4002,15 +4002,17 @@
+ 			writeBundle: {
+ 				sequential: true,
+ 				order: "post",
+-				handler(outputOptions) {
++				async handler(outputOptions) {
+ 					const clientDir = outputOptions.dir;
+ 					if (!clientDir) return;
+ 					if (!(this.environment?.name === "client")) return;
++					const pageRoutes = hasPagesDir ? [...await pagesRouter(pagesDir, nextConfig?.pageExtensions, fileMatcher), ...await apiRouter(pagesDir, nextConfig?.pageExtensions, fileMatcher)] : [];
+ 					emitNextClientRuntimeManifests({
+ 						clientDir,
+ 						assetsSubdir: resolveAssetsDir(nextConfig.assetPrefix),
+ 						buildId: nextConfig.buildId,
+-						rewrites: nextConfig.rewrites
++						rewrites: nextConfig.rewrites,
++						pages: pageRoutes.map((route) => patternToNextFormat(route.pattern))
+ 					});
+ 				}
+ 			}
+--- a/dist/routing/route-validation.js
++++ b/dist/routing/route-validation.js
+@@ -79,6 +79,22 @@
+ 			child.assertOptionalCatchAllSpecificity(`${prefix}${nextPrefixSegment}/`);
+ 		}
+ 	}
++	smoosh(prefix = "/") {
++		const childrenPaths = [...this.children.keys()].sort();
++		if (this.slugName !== null) childrenPaths.splice(childrenPaths.indexOf("[]"), 1);
++		if (this.restSlugName !== null) childrenPaths.splice(childrenPaths.indexOf("[...]"), 1);
++		if (this.optionalRestSlugName !== null) childrenPaths.splice(childrenPaths.indexOf("[[...]]"), 1);
++		const routes = childrenPaths.flatMap((segment) => this.children.get(segment).smoosh(`${prefix}${segment}/`));
++		if (this.slugName !== null) routes.push(...this.children.get("[]").smoosh(`${prefix}[${this.slugName}]/`));
++		if (!this.placeholder) {
++			const route = prefix === "/" ? "/" : prefix.slice(0, -1);
++			if (this.optionalRestSlugName !== null) throw new Error(`You cannot define a route with the same specificity as a optional catch-all route ("${route}" and "${route}[[...${this.optionalRestSlugName}]]").`);
++			routes.unshift(route);
++		}
++		if (this.restSlugName !== null) routes.push(...this.children.get("[...]").smoosh(`${prefix}[...${this.restSlugName}]/`));
++		if (this.optionalRestSlugName !== null) routes.push(...this.children.get("[[...]]").smoosh(`${prefix}[[...${this.optionalRestSlugName}]]/`));
++		return routes;
++	}
+ };
+ function patternToNextFormat(pattern) {
+ 	if (pattern === "/") return "/";
+@@ -104,5 +120,18 @@
+ 	}
+ 	root.assertOptionalCatchAllSpecificity();
+ }
++/**
++* Sort Next.js-format page paths (`/posts/[id]`) into route priority order:
++* static segments first, then a dynamic segment, then catch-all, then
++* optional catch-all. This is the order Next.js writes `sortedPages` in.
++*
++* Ported from Next.js: getSortedRoutes in
++* packages/next/src/shared/lib/router/utils/sorted-routes.ts
++*/
++function getSortedRoutes(normalizedPages) {
++	const root = new UrlNode();
++	for (const page of normalizedPages) root.insert(page);
++	return root.smoosh();
++}
+ //#endregion
+-export { patternToNextFormat, validateRoutePatterns };
++export { getSortedRoutes, patternToNextFormat, validateRoutePatterns };
