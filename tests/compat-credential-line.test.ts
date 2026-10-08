@@ -29,6 +29,7 @@ import {
   lineSubstitutions,
   parseDerivedHeader,
   sha256,
+  sourceShapeOf,
   underiveLineWorkflow,
 } from '../scripts/compat-line-workflow.mjs';
 import {
@@ -41,6 +42,7 @@ import {
   parseCredentialCronsFromWorkflow,
   parseScheduleCrons,
 } from '../scripts/compat-window-audit.mjs';
+import { cronsOverlap } from '../scripts/lib/cron-overlap.mjs';
 import { evaluate, exprBody } from './helpers/gha-expr';
 
 /**
@@ -509,10 +511,10 @@ describe('the v1.3 workflow is DERIVED from the tag harness, provably', () => {
     const ev = (key: string, event: Record<string, unknown>) =>
       evaluate(exprBody(wf.env[key]), { github: { event } });
     const want: Record<string, string> = {
-      '17 14 * * *': 'node',
-      '47 15 * * *': 'bun',
-      '17 17 * * *': 'node-webpack',
-      '47 18 * * *': 'bun-webpack',
+      '32 0,8,16 * * *': 'node',
+      '32 2,10,18 * * *': 'bun',
+      '32 3,11,19 * * *': 'node-webpack',
+      '32 4,12,20 * * *': 'bun-webpack',
     };
     for (const [cron, lane] of Object.entries(want)) {
       expect(ev('KNEXT_COMPAT_MODE', { schedule: cron, inputs: null })).toBe('credential');
@@ -525,11 +527,50 @@ describe('the v1.3 workflow is DERIVED from the tag harness, provably', () => {
       requiredLanes: SPEC.cells.map((c: { lane: string }) => c.lane),
     });
     expect(Object.fromEntries(parsed)).toEqual({
-      node: '17 14 * * *',
-      bun: '47 15 * * *',
-      'node-webpack': '17 17 * * *',
-      'bun-webpack': '47 18 * * *',
+      node: '32 0,8,16 * * *',
+      bun: '32 2,10,18 * * *',
+      'node-webpack': '32 3,11,19 * * *',
+      'bun-webpack': '32 4,12,20 * * *',
     });
+  });
+
+  it('RUNS NOT NIGHTS: the derived alert prose names the v1.3 14-run window, never a night', () => {
+    expect(committed).toContain('CREDENTIAL run** — it ran against');
+    expect(committed).toContain(
+      "RESTARTS this cell's v1.3 14-run window (14 consecutive green runs)",
+    );
+    expect(committed).toContain("A credential run restarted this cell's v1.3 14-run window");
+    expect(committed).not.toContain('v1.3 14-night window');
+    expect(committed).not.toContain('v1.0 14-night window');
+  });
+
+  it('SHAPES: a tag that already carries the three-runs-a-day schedule derives to the SAME v1.3 crons and prose, and round-trips', () => {
+    // main's test-e2e-deploy.yml carries this change; the next v1.3 tag cut
+    // from a branch that has it will look like this.
+    const runsSource = read(V10_WORKFLOW);
+    expect(sourceShapeOf(runsSource)).toBe('runs');
+    expect(sourceShapeOf(derived().source.sourceText)).toBe('nights');
+    const fromRuns = deriveLineWorkflow(runsSource, { line: 'v1.3', tag: 'v1.3.0-rc.99' });
+    const wf = parse(fromRuns) as any;
+    expect((wf.on.schedule as { cron: string }[]).map((x) => x.cron).sort()).toEqual(
+      Object.values(SPEC.cronMap as Record<string, string>).sort(),
+    );
+    expect(fromRuns).toContain(
+      "RESTARTS this cell's v1.3 14-run window (14 consecutive green runs)",
+    );
+    const back = underiveLineWorkflow(fromRuns, { line: 'v1.3' });
+    expect(back.sourceText).toBe(runsSource);
+    expect(back.shape).toBe('runs');
+  });
+
+  it('SHAPES: a source that matches no known shape (or both) is refused, never half-derived', () => {
+    const runsSource = read(V10_WORKFLOW);
+    expect(() =>
+      sourceShapeOf(runsSource.replaceAll("'17 1,9,17 * * *'", "'17 2,10,18 * * *'")),
+    ).toThrow(/shape/);
+    expect(() =>
+      sourceShapeOf(`${runsSource}\n# '17 1 * * *' '47 5 * * *' '17 22 * * *' '47 23 * * *'\n`),
+    ).toThrow(/shape/);
   });
 
   it('runs the same 16-shard x 4-cell shape and the tag-declared NEXTJS_REF', () => {
@@ -573,36 +614,38 @@ describe('B — the v1.0 lane is untouched and nothing collides with it', () => 
         }),
       ),
     ).toEqual({
-      node: '17 1 * * *',
-      bun: '47 5 * * *',
-      'node-webpack': '17 22 * * *',
-      'bun-webpack': '47 23 * * *',
+      node: '17 1,9,17 * * *',
+      bun: '47 5,13,21 * * *',
+      'node-webpack': '17 6,14,22 * * *',
+      'bun-webpack': '47 7,15,23 * * *',
     });
   });
 
-  it('the v1.3 crons are disjoint from every v1.0 cron (offset, not shared slots)', () => {
-    const v10 = parseScheduleCrons(read(V10_WORKFLOW));
-    for (const c of Object.values(SPEC.cronMap)) expect(v10.has(c as string)).toBe(false);
-    for (const c of Object.keys(SPEC.cronMap)) expect(v10.has(c)).toBe(true);
+  it('the v1.3 crons share no FIRE with any v1.0 cron (offset slots, not shared ones)', () => {
+    const v10 = [...parseScheduleCrons(read(V10_WORKFLOW))];
+    for (const c of Object.values(SPEC.cronMap) as string[]) {
+      for (const d of v10) expect(cronsOverlap(c, d), `${c} vs ${d}`).toBe(false);
+    }
+    // Every v1.3 cell is keyed by its lane — one cron per cell.
+    expect(Object.keys(SPEC.cronMap).sort()).toEqual(
+      SPEC.cells.map((c: { lane: string }) => c.lane).sort(),
+    );
   });
 
-  it('the v1.3 crons start after v1.0\u2019s measured late-start window and are spaced >= 90 min', () => {
-    // MEASURED (2026-10-07/08): GitHub starts v1.0\u2019s schedules 3-7 h late EVERY
-    // day \u2014 the latest v1.0 run of a day started 12:02-12:15 UTC (its 05:47
-    // bun slot) and ended ~13:07. The v1.3 slots must not sit inside that.
-    const minutes = (Object.values(SPEC.cronMap) as string[])
-      .map((c) => {
-        const [m, h] = c.split(' ').map(Number);
-        return h * 60 + m;
-      })
-      .sort((a, b) => a - b);
-    expect(minutes).toHaveLength(4);
-    expect(minutes[0]).toBeGreaterThanOrEqual(14 * 60);
-    for (let i = 1; i < minutes.length; i++) {
-      expect(minutes[i] - minutes[i - 1]).toBeGreaterThanOrEqual(90);
+  it('THE SLOT GRID: each v1.3 cell fires 3x a day 8 h apart, and the two lines together put ONE credential fire in every clock hour', () => {
+    // ADR-0056 Amendment 5: 8 cells x 3 runs = 24 credential fires a day.
+    // Spreading them one per hour is what keeps two full runs (8 of the 20
+    // concurrent jobs each) from piling onto the shared pool at once.
+    const hoursOf = (c: string) => c.split(' ')[1].split(',').map(Number);
+    for (const c of Object.values(SPEC.cronMap) as string[]) {
+      const h = hoursOf(c);
+      expect(h).toHaveLength(3);
+      expect(h[1] - h[0]).toBe(8);
+      expect(h[2] - h[1]).toBe(8);
     }
-    // ...and the last one is still well before v1.0\u2019s first nominal slot (22:17).
-    expect(minutes[3]).toBeLessThan(22 * 60 + 17 - 3 * 60);
+    const v10 = [...parseCredentialCronsFromWorkflow(read(V10_WORKFLOW)).values()];
+    const all = [...v10, ...(Object.values(SPEC.cronMap) as string[])].flatMap(hoursOf);
+    expect(all.sort((a, b) => a - b)).toEqual(Array.from({ length: 24 }, (_, h) => h));
   });
 
   it('the workflow names differ, so github.workflow-keyed concurrency groups never collide', () => {
@@ -676,19 +719,21 @@ describe('B — the v1.0 lane is untouched and nothing collides with it', () => 
 
 // ── The line's own audit + tracker ───────────────────────────────────────────
 
+/** Each v1.3 cell's FIRST fire of 2026-01-01; it fires again every 8 h (ADR-0056 Amendment 5). */
 const HHMM: Record<string, string> = {
-  node: '14:17',
-  bun: '15:47',
-  'node-webpack': '17:17',
-  'bun-webpack': '18:47',
+  node: '00:32',
+  bun: '02:32',
+  'node-webpack': '03:32',
+  'bun-webpack': '04:32',
 };
 let seq = 90_000_000_000;
 function v13Night(lane: string, i: number, over: Record<string, unknown> = {}) {
   seq += 1;
   const runtime = lane.startsWith('bun') ? 'bun' : 'node';
-  const d = new Date(`2026-01-01T${HHMM[lane]}:00.000Z`);
-  d.setUTCDate(d.getUTCDate() + i);
+  // Run i sits on the cell's i-th fire: three a day, 8 h apart.
+  const d = new Date(Date.parse(`2026-01-01T${HHMM[lane]}:00.000Z`) + i * 8 * 3_600_000);
   return {
+    fixtureIndex: i,
     runId: String(seq),
     runAttempt: '1',
     event: 'schedule',
@@ -705,6 +750,7 @@ function v13Night(lane: string, i: number, over: Record<string, unknown> = {}) {
     missingShards: [],
     windowFingerprint: `sha256:${lane}`,
     scheduledAt: d.toISOString(),
+    startedAt: d.toISOString(),
     shards: Array.from({ length: 16 }, (_, k) => ({
       shard: `${k + 1}/16`,
       passed: 40,
@@ -716,7 +762,9 @@ function v13Night(lane: string, i: number, over: Record<string, unknown> = {}) {
     ...over,
   };
 }
-const NOW = new Date('2026-01-15T12:00:00.000Z');
+// Run 13 of the latest cell (bun-webpack) fires 2026-01-05 12:32; NOW is past
+// its 10 h grace and before any cell's 15th fire falls due.
+const NOW = new Date('2026-01-06T00:00:00.000Z');
 const allGreen = (): ReturnType<typeof v13Night>[] =>
   SPEC.cells.flatMap((c: { lane: string }) =>
     Array.from({ length: 14 }, (_, i) => v13Night(c.lane, i)),
@@ -725,7 +773,7 @@ const allGreen = (): ReturnType<typeof v13Night>[] =>
 describe('the v1.3 audit + tracker are the line’s own', () => {
   const workflowText = read(V13_WORKFLOW);
 
-  it('14 green on-calendar v1.3 nights per cell → every cell MET', () => {
+  it('14 green on-calendar v1.3 runs per cell (three a day) → every cell MET', () => {
     const a = auditLine(allGreen(), { line: 'v1.3', workflowText, now: NOW });
     for (const c of SPEC.cells) {
       expect(a.cells[c.lane].calendarChecked).toBe(true);
@@ -736,7 +784,7 @@ describe('the v1.3 audit + tracker are the line’s own', () => {
 
   it('a night that ran ANOTHER line’s tag (v1.0) can never bank in the v1.3 window', () => {
     const ledgers = allGreen().map((l) =>
-      l.lane === 'bun' && l.scheduledAt.startsWith('2026-01-05')
+      l.lane === 'bun' && l.fixtureIndex === 9
         ? { ...l, knextRef: 'refs/tags/v1.0.0-rc.6', knextSha: SHA_10 }
         : l,
     );
@@ -753,7 +801,7 @@ describe('the v1.3 audit + tracker are the line’s own', () => {
 
   it('a red v1.3 night restarts only its own cell', () => {
     const ledgers = allGreen().map((l) =>
-      l.lane === 'node-webpack' && l.scheduledAt.startsWith('2026-01-10')
+      l.lane === 'node-webpack' && l.fixtureIndex === 9
         ? { ...l, shards: l.shards.map((s, k) => (k === 3 ? { ...s, failed: 1 } : s)) }
         : l,
     );
@@ -803,19 +851,44 @@ describe('the v1.3 audit + tracker are the line’s own', () => {
     expect(calls2.find((a) => a[1] === 'comment')?.[2]).toBe('9');
   });
 
-  it('the tracker workflow audits the v1.3 line and runs after every v1.3 slot’s grace', () => {
+  it('the tracker workflow audits the v1.3 line, and at its cron time no fire still inside its grace reads missing', () => {
     const wf = parse(read(V13_TRACKER_WORKFLOW)) as any;
     const text = read(V13_TRACKER_WORKFLOW);
     expect(text).toContain('scripts/compat-line-tracker.mjs');
     expect(text).toContain('--line v1.3');
     expect(text).not.toContain('compat-matrix-tracker.mjs');
     const cron = wf.on.schedule[0].cron as string;
-    const [m, h] = cron.split(' ').map(Number);
-    // Last v1.3 slot 18:47 + the audit's 10 h missing-night grace = 04:47 UTC;
-    // and before the first v1.3 slot (14:17), so the tracker reads a settled day.
-    const minutes = h * 60 + m;
-    expect(minutes).toBeGreaterThanOrEqual(4 * 60 + 47);
-    expect(minutes).toBeLessThan(14 * 60 + 17);
+    const [tm, th] = cron.split(' ').map(Number);
+    // ADR-0056 Amendment 5: each v1.3 cell fires three times a day, so some
+    // fire is always inside its 10 h grace when the once-a-day tracker runs.
+    // The audit's cutoff (rule 8) is what keeps that honest: put a run on every
+    // fire already past its grace, none on the ones inside it, and the line
+    // audit at the tracker's real time reports no missing run in any cell.
+    const now = new Date(Date.UTC(2026, 0, 10, th, tm));
+    const workflowText = read(V13_WORKFLOW);
+    const ledgers: ReturnType<typeof v13Night>[] = [];
+    let inGrace = 0;
+    for (const c of SPEC.cells as { lane: string }[]) {
+      const [m, hours] = (SPEC.cronMap as Record<string, string>)[c.lane].split(' ');
+      for (let day = 6; day <= 10; day += 1) {
+        for (const h of hours.split(',').map(Number)) {
+          const fire = Date.UTC(2026, 0, day, h, Number(m));
+          if (fire > now.getTime()) continue;
+          if (fire + 10 * 3_600_000 > now.getTime()) {
+            inGrace += 1;
+            continue;
+          }
+          const at = new Date(fire).toISOString();
+          ledgers.push(v13Night(c.lane, 0, { scheduledAt: at, startedAt: at }));
+        }
+      }
+    }
+    const a = auditLine(ledgers, { line: 'v1.3', workflowText, now });
+    for (const c of SPEC.cells as { lane: string }[]) {
+      expect(a.cells[c.lane].calendarChecked, c.lane).toBe(true);
+      expect(a.cells[c.lane].missingNights, c.lane).toEqual([]);
+    }
+    expect(inGrace).toBeGreaterThan(0);
     expect(wf.jobs[Object.keys(wf.jobs)[0]].permissions).toEqual({
       contents: 'read',
       actions: 'read',

@@ -33,11 +33,14 @@ failures that block this 1.0 are the ones that currently return `Ready=True`.
 - ADR-0054 amendments (Bun-default runtime decision)
 - Pre-audit of all known quarantined failures (#1553, #1663, #743, #1664, #1665, #1666)
 
-**Phase 2** (14-night rc window, open now) — Release-candidate credential runs:
-- Each supported runtime × builder cell banks 14 consecutive scheduled nights against rc.2 tag
+**Phase 2** (14-run rc window, open now) — Release-candidate credential runs:
+- Each supported runtime × builder cell banks 14 consecutive scheduled credential runs against the
+  pinned rc tag (ADR-0056 Amendment 5, 2026-10-08: three scheduled runs per cell per day, each
+  counted only if it started at least 2 h after the previous counted run — about five days per
+  cell instead of fourteen; release candidates are cut per milestone)
 - Early-warning nightlies moved to weekly to reduce runner contention (#1675)
 - No new features — only hotfixes for credential failures
-- GA gate: every cell must have `failed:0`, `notRun:0` on 14 consecutive nights
+- GA gate: every cell must have `failed:0`, `notRun:0` on 14 consecutive scheduled runs
 
 **Expected GA timeline:** 26 October – 3 November 2026
 
@@ -169,7 +172,8 @@ until green.
 this replaces the node-lane-only wording, which contradicted ADR-0054's bun-standalone default):
 
 > **Every supported runtime × builder cell** (node/bun × vinext/turbopack/webpack) banks its **own**
-> 14 consecutive scheduled **credential nights** on the official suite: every shard `failed:0` and
+> 14 consecutive scheduled **credential runs** (ADR-0056 Amendment 5; it read "nights" until
+> 2026-10-08) on the official suite: every shard `failed:0` and
 > `notRun:0`, **zero net new entries in the quarantine ledger**, and the cell's frozen-set
 > fingerprint unchanged across the window. A credential night runs against a **frozen
 > release-candidate tag** (`vX.Y.Z-rc.N`, pinned in `.github/compat-credential-ref.json`), never

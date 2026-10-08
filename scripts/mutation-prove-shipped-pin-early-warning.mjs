@@ -40,16 +40,16 @@ const MUTATIONS = [
   {
     label: 'test-e2e-deploy.yml: add a 5th credential cron literal to KNEXT_COMPAT_MODE',
     subject: 'testE2eDeploy',
-    anchor: "(github.event.schedule == '47 23 * * *' && 'credential') || 'early-warning' }}",
+    anchor: "(github.event.schedule == '47 7,15,23 * * *' && 'credential') || 'early-warning' }}",
     replacement:
-      "(github.event.schedule == '47 23 * * *' && 'credential') || (github.event.schedule == '17 8 * * 1' && 'credential') || 'early-warning' }}",
+      "(github.event.schedule == '47 7,15,23 * * *' && 'credential') || (github.event.schedule == '17 8 * * 1' && 'credential') || 'early-warning' }}",
   },
   {
     label:
       "compat-shipped-pin-early-warning.yml: reuse one of test-e2e-deploy.yml's credential cron literals",
     subject: 'earlyWarningWorkflow',
     anchor: "cron: '17 8 * * 1'",
-    replacement: "cron: '17 1 * * *'",
+    replacement: "cron: '17 1,9,17 * * *'",
   },
   {
     label: 'compat-shipped-pin-early-warning.yml: add a pull_request trigger',

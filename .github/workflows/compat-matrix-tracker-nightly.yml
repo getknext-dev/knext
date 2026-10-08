@@ -18,14 +18,12 @@ name: Compat v1.0 credential matrix tracker
 # report" vs. "the tracker itself stopped running".
 
 on:
-  # 15:53 UTC (#1643) — after the missed-night grace
-  # (MISSING_NIGHT_GRACE_HOURS, 10h) of EVERY credential slot: 22:17, 23:47,
-  # 01:17 and 05:47 UTC (test-e2e-deploy.yml). The old 05:10 ran before the
-  # 05:47 bun credential cron, and GitHub has been starting scheduled
-  # credential runs up to ~6h late, so the tracker reported a night that had
-  # not run yet. Past every slot's grace, each night has either landed or is
-  # genuinely missing in the audit's own terms. Guarded by
-  # tests/compat-credential-alert-wiring.test.ts.
+  # 15:53 UTC (#1643), once a day. Since ADR-0056 Amendment 5 each credential
+  # cell runs three times a day (test-e2e-deploy.yml), so some fire is always
+  # inside the audit's 10 h grace (MISSING_NIGHT_GRACE_HOURS) when this runs.
+  # The audit requires only the fires whose grace has passed, so an in-flight
+  # run is never reported missing — each comment is the state as of its run.
+  # Guarded by tests/compat-credential-alert-wiring.test.ts.
   schedule:
     - cron: '53 15 * * *'
   workflow_dispatch:

@@ -335,7 +335,8 @@ describe('#1300 review round 2, finding 5: credential-recovery (close on green)'
     // parses BOTH expressions for their `'H M * * *'` cron literals and
     // asserts the two SETS are equal — a cron added to one and not the other
     // fails in either direction.
-    const CRON_RE = /'(\d{1,2} \d{1,2} \* \* \*)'/g;
+    // ADR-0056 Amendment 5: an hour field may be a comma list (three fires a day).
+    const CRON_RE = /'(\d{1,2} \d{1,2}(?:,\d{1,2})* \* \* \*)'/g;
     const parseCrons = (expr: string): Set<string> => {
       const found = new Set<string>();
       for (const m of expr.matchAll(CRON_RE)) found.add(m[1]);
@@ -433,30 +434,60 @@ describe('#1643 — the nightly alert fires on cancelled / timed-out jobs, not o
   });
 });
 
-describe('#1643 — the matrix tracker runs after every credential slot has had its full grace', () => {
-  it('the tracker cron fires at least MISSING_NIGHT_GRACE_HOURS after every credential cron', async () => {
-    const { MISSING_NIGHT_GRACE_HOURS, parseCredentialCronsFromWorkflow } = await import(
-      '../scripts/compat-window-audit.mjs'
-    );
-    const minuteOfDay = (cron: string) => {
-      const [m, h] = cron.trim().split(/\s+/).map(Number);
-      return h * 60 + m;
-    };
+describe('#1643 — the matrix tracker never reports a run that is still inside its grace as missing', () => {
+  // #1643 placed the once-a-day tracker after the 10 h grace of EVERY
+  // credential slot. ADR-0056 Amendment 5 fires each cell three times a day,
+  // so some fire is always inside its grace whenever the tracker runs. What
+  // keeps that honest is the audit's own cutoff (rule 8): a fire is required
+  // only once fire + MISSING_NIGHT_GRACE_HOURS has passed. Asserted here at
+  // the tracker's REAL cron time against every REAL credential cron: runs on
+  // every fire already past its grace, none on the ones still inside it, and
+  // the audit reports no missing run.
+  it('at the tracker cron time, every fire still inside its grace is not yet due', async () => {
+    const { MISSING_NIGHT_GRACE_HOURS, auditWindow, parseCredentialCronsFromWorkflow } =
+      await import('../scripts/compat-window-audit.mjs');
     const tracker = parse(readFileSync(TRACKER_WORKFLOW_PATH, 'utf8')) as {
       on: { schedule: { cron: string }[] };
     };
     const trackerCrons = tracker.on.schedule.map((s) => s.cron);
     expect(trackerCrons.length).toBe(1);
-    const t = minuteOfDay(trackerCrons[0]);
+    const [tm, th] = trackerCrons[0].trim().split(/\s+/).map(Number);
+    const now = new Date(Date.UTC(2026, 0, 10, th, tm));
     const credential = [
-      ...parseCredentialCronsFromWorkflow(readFileSync(ALERT_WORKFLOW_PATH, 'utf8')).values(),
-    ] as string[];
+      ...parseCredentialCronsFromWorkflow(readFileSync(ALERT_WORKFLOW_PATH, 'utf8')).entries(),
+    ] as [string, string][];
     expect(credential.length).toBeGreaterThanOrEqual(4);
-    for (const c of credential) {
-      const since = (t - minuteOfDay(c) + 1440) % 1440;
-      expect(since, `tracker ${trackerCrons[0]} vs credential ${c}`).toBeGreaterThanOrEqual(
-        MISSING_NIGHT_GRACE_HOURS * 60,
-      );
+    const H = 3_600_000;
+    let inGrace = 0;
+    for (const [lane, cron] of credential) {
+      const [m, hours] = cron.split(' ');
+      const fires: number[] = [];
+      for (let day = 6; day <= 10; day += 1) {
+        for (const h of hours.split(',').map(Number)) {
+          const f = Date.UTC(2026, 0, day, h, Number(m));
+          if (f <= now.getTime()) fires.push(f);
+        }
+      }
+      const due = fires.filter((f) => f + MISSING_NIGHT_GRACE_HOURS * H <= now.getTime());
+      inGrace += fires.length - due.length;
+      const ledgers = due.map((f, i) => ({
+        runId: String(1000 + i),
+        runAttempt: '1',
+        event: 'schedule',
+        lane,
+        compatMode: 'credential',
+        credential: true,
+        knextRef: 'refs/tags/v1.0.0-rc.6',
+        knextSha: 'a'.repeat(40),
+        windowFingerprint: 'sha256:aaaa',
+        shards: [],
+        scheduledAt: new Date(f).toISOString(),
+      }));
+      const a = auditWindow(ledgers, { lane, now, credentialCronForLane: () => cron });
+      expect(a.calendarChecked, `${lane} ${cron}`).toBe(true);
+      expect(a.missingNights, `${lane} ${cron} at tracker time ${trackerCrons[0]}`).toEqual([]);
     }
+    // The property is not vacuous: at the tracker's time, some fire IS in grace.
+    expect(inGrace).toBeGreaterThan(0);
   });
 });

@@ -1,10 +1,14 @@
 import { describe, expect, it, mock } from 'bun:test';
 import { readFileSync } from 'node:fs';
+import { parse as parseYaml } from 'yaml';
 import {
   attachExactLanes,
   evaluateWatchdog,
   fetchScheduledRuns,
   fetchWindowRuns,
+  resolveCheckAnchors,
+  runCli,
+  runWatchdogFromEnv,
 } from '../scripts/credential-slot-watchdog.mjs';
 import {
   anyLaneNeedsAlert,
@@ -14,12 +18,17 @@ import {
   DEFAULT_GRACE_HOURS,
   decideCredentialSlotVerdicts,
   detectAmbiguousAttribution,
+  dueFiresInWindow,
   extractScheduleCrons,
+  mostRecentFireAtOrBefore,
   mostRecentSlotAtOrBefore,
   parseAllDeclaredSlots,
   parseSimpleDailyCron,
   resolveCredentialLaneCrons,
   resolveCredentialLanes,
+  WATCHDOG_LOOKBACK_HOURS,
+  WATCHDOG_MAX_WINDOW_HOURS,
+  watchdogWindow,
 } from '../scripts/lib/credential-slot-watchdog.mjs';
 
 /**
@@ -34,11 +43,44 @@ const REAL_WORKFLOW = readFileSync(
   'utf8',
 );
 
+/**
+ * ADR-0056 Amendment 5 moved every credential cell from one fire a day to
+ * three (one cron literal with a comma-listed hour field). The attribution,
+ * ambiguity and pagination tests below replay REAL runs recorded under the
+ * previous one-fire-a-day schedule, so they run against that schedule: the real
+ * workflow with each multi-fire literal put back to its single historical fire.
+ * The live multi-fire schedule has its own block ("three fires a day").
+ */
+const LEGACY_CRONS: Record<string, string> = {
+  '17 1,9,17 * * *': '17 1 * * *',
+  '47 5,13,21 * * *': '47 5 * * *',
+  '17 6,14,22 * * *': '17 22 * * *',
+  '47 7,15,23 * * *': '47 23 * * *',
+};
+const LEGACY_WORKFLOW = Object.entries(LEGACY_CRONS).reduce((text, [now, then]) => {
+  if (!text.includes(`'${now}'`)) throw new Error(`fixture drift: '${now}' not in the workflow`);
+  return text.replaceAll(`'${now}'`, `'${then}'`);
+}, REAL_WORKFLOW);
+
 // ── parseSimpleDailyCron ─────────────────────────────────────────────────────
 
 describe('parseSimpleDailyCron', () => {
   it('parses a once-daily "M H * * *" cron', () => {
-    expect(parseSimpleDailyCron('17 1 * * *')).toEqual({ minute: 17, hour: 1 });
+    expect(parseSimpleDailyCron('17 1 * * *')).toEqual({ minute: 17, hour: 1, hours: [1] });
+  });
+
+  it('parses a multi-fire "M H1,H2,H3 * * *" cron into every fire hour (ADR-0056 Amendment 5)', () => {
+    expect(parseSimpleDailyCron('17 1,9,17 * * *')).toEqual({
+      minute: 17,
+      hour: 1,
+      hours: [1, 9, 17],
+    });
+  });
+
+  it('rejects an hour range, a step or a duplicate hour (it could not enumerate the fires)', () => {
+    expect(() => parseSimpleDailyCron('17 1-9 * * *')).toThrow(/not a supported/);
+    expect(() => parseSimpleDailyCron('17 */8 * * *')).toThrow(/not a supported/);
+    expect(() => parseSimpleDailyCron('17 1,1 * * *')).toThrow(/duplicate/);
   });
 
   it('rejects a cron with a non-daily field (e.g. every 5 minutes)', () => {
@@ -59,16 +101,22 @@ describe('resolveCredentialLaneCrons against the real test-e2e-deploy.yml', () =
     expect(crons).toEqual([
       '17 3 * * *',
       '47 4 * * *',
-      '17 1 * * *',
-      '47 5 * * *',
-      '17 22 * * *',
-      '47 23 * * *',
+      '17 1,9,17 * * *',
+      '47 5,13,21 * * *',
+      '17 6,14,22 * * *',
+      '47 7,15,23 * * *',
     ]);
   });
 
   it('resolves exactly the 4 credential lanes, matching DEFAULT_CREDENTIAL_LANES', () => {
     const lanes = resolveCredentialLaneCrons(REAL_WORKFLOW);
-    const stripped = lanes.map(({ cron, lane, hour, minute }) => ({ cron, lane, hour, minute }));
+    const stripped = lanes.map(({ cron, lane, hour, hours, minute }) => ({
+      cron,
+      lane,
+      hour,
+      hours,
+      minute,
+    }));
     expect(stripped).toEqual(DEFAULT_CREDENTIAL_LANES.map((l) => ({ ...l })));
   });
 
@@ -86,7 +134,13 @@ describe('resolveCredentialLanes — fails closed on a parse failure', () => {
   it('uses live parsing against real input and does not throw', () => {
     expect(() => resolveCredentialLanes(REAL_WORKFLOW)).not.toThrow();
     const lanes = resolveCredentialLanes(REAL_WORKFLOW);
-    const stripped = lanes.map(({ cron, lane, hour, minute }) => ({ cron, lane, hour, minute }));
+    const stripped = lanes.map(({ cron, lane, hour, hours, minute }) => ({
+      cron,
+      lane,
+      hour,
+      hours,
+      minute,
+    }));
     expect(stripped).toEqual(DEFAULT_CREDENTIAL_LANES.map((l) => ({ ...l })));
   });
 
@@ -133,7 +187,7 @@ describe('mostRecentSlotAtOrBefore', () => {
 
 // ── attributeRunsToLanes — basic mechanics (heuristic path, non-ambiguous) ──
 
-const ALL_SLOTS = parseAllDeclaredSlots(REAL_WORKFLOW);
+const ALL_SLOTS = parseAllDeclaredSlots(LEGACY_WORKFLOW);
 
 describe('attributeRunsToLanes', () => {
   // Every lane's own current-cycle slot lands the SAME UTC day at this `now`
@@ -141,7 +195,7 @@ describe('attributeRunsToLanes', () => {
   // for why that matters): node 01:17, bun 05:47, node-webpack 22:17,
   // bun-webpack 23:47, all 2026-09-29.
   const now = new Date('2026-09-29T23:50:00Z');
-  const lanes = computeExpectedSlots(resolveCredentialLanes(REAL_WORKFLOW), now);
+  const lanes = computeExpectedSlots(resolveCredentialLanes(LEGACY_WORKFLOW), now);
 
   /** Every lane's own clean, on-time run at `now`'s cycle — a realistic night where nothing is wrong. */
   function allLanesOnTime() {
@@ -302,7 +356,7 @@ describe('attributeRunsToLanes', () => {
 
 describe('detectAmbiguousAttribution — cross-lane masking, each adjacent pair', () => {
   const now = new Date('2026-09-29T23:50:00Z');
-  const lanes = computeExpectedSlots(resolveCredentialLanes(REAL_WORKFLOW), now);
+  const lanes = computeExpectedSlots(resolveCredentialLanes(LEGACY_WORKFLOW), now);
 
   // Pair: bun-webpack <- node-webpack (gap 1.5h, AT RISK)
   it('bun-webpack <- node-webpack: ambiguous when node-webpack has no evidence of its own', () => {
@@ -429,7 +483,7 @@ describe('detectAmbiguousAttribution — cross-lane masking, each adjacent pair'
 
 describe('attributeRunsToLanes — exact-marker signal takes priority over the heuristic', () => {
   const now = new Date('2026-09-29T23:50:00Z');
-  const lanes = computeExpectedSlots(resolveCredentialLanes(REAL_WORKFLOW), now);
+  const lanes = computeExpectedSlots(resolveCredentialLanes(LEGACY_WORKFLOW), now);
 
   it('attributes a same-cycle exact-marker run to its declared lane, overriding what the nearest-slot heuristic would have guessed', () => {
     // The nearest declared slot before this created_at is bun-webpack's
@@ -851,7 +905,12 @@ describe('evaluateWatchdog — end to end, offline', () => {
   it('reports "missing" when the runs list is empty and grace has elapsed', () => {
     const { gh } = fakeGh([]);
     const now = new Date('2026-09-29T20:00:00Z'); // every credential slot's +8h has passed
-    const verdicts = evaluateWatchdog({ workflowYamlText: REAL_WORKFLOW, gh, now, graceHours: 8 });
+    const verdicts = evaluateWatchdog({
+      workflowYamlText: LEGACY_WORKFLOW,
+      gh,
+      now,
+      graceHours: 8,
+    });
     expect(verdicts).toHaveLength(4);
     expect(anyLaneNeedsAlert(verdicts)).toBe(true);
     expect(verdicts.find((v) => v.lane === 'node')?.verdict).toBe('missing');
@@ -859,6 +918,17 @@ describe('evaluateWatchdog — end to end, offline', () => {
 
   it('is fully quiet when every lane ran on time', () => {
     const { gh } = fakeGh([
+      // The night before's bun-webpack run. These runs carry no lane markers,
+      // so node's 01:18 run is placed by timing — and it is only unambiguously
+      // node's when the fire just before it (bun-webpack 09-28 23:47) has its
+      // own run. Each fire is judged in its own context (round 2), so it is
+      // that fire's run that counts, not bun-webpack's later 09-29 run.
+      {
+        event: 'schedule',
+        status: 'completed',
+        created_at: '2026-09-28T23:48:00Z',
+        run_started_at: '2026-09-28T23:49:00Z',
+      },
       {
         event: 'schedule',
         status: 'completed',
@@ -884,11 +954,18 @@ describe('evaluateWatchdog — end to end, offline', () => {
         run_started_at: '2026-09-29T23:49:00Z',
       },
     ]);
-    // Same UTC day as every run above, so none of the 4 lanes' expected slots
-    // have rolled over to the next occurrence yet (which would make these
-    // runs read as a STALE prior-day occurrence rather than this cycle's).
-    const now = new Date('2026-09-29T23:59:00Z');
-    const verdicts = evaluateWatchdog({ workflowYamlText: REAL_WORKFLOW, gh, now, graceHours: 8 });
+    // No previous watchdog run is given, so the window is the lookback:
+    // (now - grace - WATCHDOG_LOOKBACK_HOURS, now - grace] = (09-28 23:48,
+    // 09-29 23:48]. That holds exactly the four once-a-day fires of 09-29 —
+    // bun-webpack 23:47 is the last, one minute inside the due point — and
+    // every one has its run above.
+    const now = new Date('2026-09-30T07:48:00Z');
+    const verdicts = evaluateWatchdog({
+      workflowYamlText: LEGACY_WORKFLOW,
+      gh,
+      now,
+      graceHours: 8,
+    });
     expect(anyLaneNeedsAlert(verdicts)).toBe(false);
   });
 
@@ -924,21 +1001,44 @@ describe('evaluateWatchdog — end to end, offline', () => {
       },
     ]);
     const now = new Date('2026-09-29T09:30:00Z'); // slot + 8h13m
-    const verdicts = evaluateWatchdog({ workflowYamlText: REAL_WORKFLOW, gh, now, graceHours: 8 });
+    const verdicts = evaluateWatchdog({
+      workflowYamlText: LEGACY_WORKFLOW,
+      gh,
+      now,
+      graceHours: 8,
+    });
     expect(verdicts.find((v) => v.lane === 'node')?.verdict).toBe('queued-too-long');
   });
 
   it('honors an explicit graceHours override over the default', () => {
-    const { gh } = fakeGh([]);
-    const now = new Date('2026-09-29T03:00:00Z'); // 1h43m after the node slot (01:17)
+    // Only YESTERDAY's node run exists. At 03:00, 1h43m after today's 01:17
+    // node slot: with the 8 h default the latest DUE node fire is yesterday's
+    // (quiet — its run exists); with a 1 h grace it is today's (missing).
+    // node's predecessor (bun-webpack, 23:47 the day before) has its own run,
+    // so the marker-less node run is unambiguously node's.
+    const { gh } = fakeGh([
+      {
+        event: 'schedule',
+        status: 'completed',
+        created_at: '2026-09-27T23:48:00Z',
+        run_started_at: '2026-09-27T23:49:00Z',
+      },
+      {
+        event: 'schedule',
+        status: 'completed',
+        created_at: '2026-09-28T01:18:00Z',
+        run_started_at: '2026-09-28T01:19:00Z',
+      },
+    ]);
+    const now = new Date('2026-09-29T03:00:00Z');
     const withDefaultGrace = evaluateWatchdog({
-      workflowYamlText: REAL_WORKFLOW,
+      workflowYamlText: LEGACY_WORKFLOW,
       gh,
       now,
       graceHours: 8,
     });
     const withTightGrace = evaluateWatchdog({
-      workflowYamlText: REAL_WORKFLOW,
+      workflowYamlText: LEGACY_WORKFLOW,
       gh,
       now,
       graceHours: 1,
@@ -1089,7 +1189,7 @@ function simGh(
 
 const verdictsOf = (gh: (a: string[]) => string, now = WATCHDOG_NOW): Record<string, string> =>
   Object.fromEntries(
-    evaluateWatchdog({ workflowYamlText: REAL_WORKFLOW, gh, now, graceHours: 8 }).map((v) => [
+    evaluateWatchdog({ workflowYamlText: LEGACY_WORKFLOW, gh, now, graceHours: 8 }).map((v) => [
       v.lane,
       v.verdict,
     ]),
@@ -1200,11 +1300,28 @@ describe('#1895 — night-4 replay: a run outside its grace window IS flagged', 
     expect(verdictsOf(gh).node).not.toBe('quiet');
   });
 
-  it('is quiet before grace elapses with no run, and flagged once it does (boundary)', () => {
+  it('checks a slot only once its grace has elapsed (boundary)', () => {
+    // ADR-0056 Amendment 5: the watchdog checks the latest DUE fire. One
+    // second before 10-05 01:17 + 8 h, node's due fire is still 10-04's
+    // (outside this fixture, so it reads missing for 10-04 — never for
+    // 10-05); from 09:17:00 it is 10-05's.
     const noNode = NIGHT4_RUNS.filter((r) => r.id !== NIGHT4_NODE);
     const { gh } = simGh(noNode);
-    expect(verdictsOf(gh, new Date('2026-10-05T09:16:59Z')).node).toBe('quiet');
-    expect(verdictsOf(gh, new Date('2026-10-05T09:17:00Z')).node).toBe('missing');
+    const before = evaluateWatchdog({
+      workflowYamlText: LEGACY_WORKFLOW,
+      gh,
+      now: new Date('2026-10-05T09:16:59Z'),
+      graceHours: 8,
+    }).find((v) => v.lane === 'node');
+    const at = evaluateWatchdog({
+      workflowYamlText: LEGACY_WORKFLOW,
+      gh,
+      now: new Date('2026-10-05T09:17:00Z'),
+      graceHours: 8,
+    }).find((v) => v.lane === 'node');
+    expect(before?.reason).toContain('2026-10-04T01:17:00.000Z');
+    expect(at?.reason).toContain('2026-10-05T01:17:00.000Z');
+    expect(at?.verdict).toBe('missing');
   });
 });
 
@@ -1235,5 +1352,1278 @@ describe('fetchScheduledRuns / fetchWindowRuns — pagination and union (#1895)'
         37305584727,
       ].sort(),
     );
+  });
+});
+// ── ADR-0056 Amendment 5 — three fires a day per lane ──────────────────────
+
+describe('three fires a day — the live schedule (ADR-0056 Amendment 5)', () => {
+  const WATCHDOG_WORKFLOW = readFileSync(
+    new URL('../.github/workflows/credential-slot-watchdog.yml', import.meta.url),
+    'utf8',
+  );
+  const H = 3_600_000;
+  const at = (day: string, hour: number, minute: number) =>
+    new Date(`${day}T${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:00Z`);
+
+  it('every credential lane resolves to three fires, 8 h apart', () => {
+    const lanes = resolveCredentialLanes(REAL_WORKFLOW);
+    expect(lanes).toHaveLength(4);
+    for (const l of lanes) {
+      expect(l.hours).toHaveLength(3);
+      expect(l.hours[1] - l.hours[0]).toBe(8);
+      expect(l.hours[2] - l.hours[1]).toBe(8);
+    }
+  });
+
+  it('mostRecentFireAtOrBefore picks the latest of the listed hours', () => {
+    const fire = (iso: string) =>
+      mostRecentFireAtOrBefore([1, 9, 17], 17, new Date(iso)).toISOString();
+    expect(fire('2026-10-10T09:16:59Z')).toBe('2026-10-10T01:17:00.000Z');
+    expect(fire('2026-10-10T09:17:00Z')).toBe('2026-10-10T09:17:00.000Z');
+    expect(fire('2026-10-10T00:30:00Z')).toBe('2026-10-09T17:17:00.000Z');
+  });
+
+  it('checks the latest DUE fire: a run of a LATER, not-yet-due fire never satisfies it', () => {
+    // 02:05 - 8 h = 18:05 the day before, so node's due fire is 10-09 17:17.
+    // The only node run belongs to 10-10 01:17 — a different fire.
+    const { gh } = simGh([fixtureRun(1, 'schedule', '2026-10-10T01:20:00Z', CRED('node'))]);
+    const node = evaluateWatchdog({
+      workflowYamlText: REAL_WORKFLOW,
+      gh,
+      now: new Date('2026-10-10T02:05:00Z'),
+      previousCheckAt: new Date('2026-10-09T18:05:00Z'),
+      graceHours: 8,
+    }).find((v) => v.lane === 'node');
+    expect(node?.verdict).toBe('missing');
+    expect(node?.reason).toContain('2026-10-09T17:17:00.000Z');
+  });
+
+  it('is quiet when the due fire has its own run, even one created 7 h late', () => {
+    const { gh } = simGh([fixtureRun(1, 'schedule', '2026-10-10T00:17:00Z', CRED('node'))]);
+    const node = evaluateWatchdog({
+      workflowYamlText: REAL_WORKFLOW,
+      gh,
+      now: new Date('2026-10-10T02:05:00Z'),
+      previousCheckAt: new Date('2026-10-09T18:05:00Z'),
+      graceHours: 8,
+    }).find((v) => v.lane === 'node');
+    expect(node?.verdict).toBe('quiet');
+  });
+
+  it('the heuristic fallback (no markers) places a run on the right fire of a multi-fire cron', () => {
+    const lanes = computeExpectedSlots(
+      resolveCredentialLanes(REAL_WORKFLOW),
+      new Date('2026-10-10T10:00:00Z'),
+    );
+    // node's 09:17 fire; its predecessor (bun-webpack 07:47) has its own run,
+    // so the conservative ambiguity check does not drop node's.
+    const { attributed } = attributeRunsToLanes(
+      [
+        {
+          event: 'schedule',
+          status: 'completed',
+          created_at: '2026-10-10T07:50:00Z',
+          run_started_at: '2026-10-10T07:50:00Z',
+        },
+        {
+          event: 'schedule',
+          status: 'completed',
+          created_at: '2026-10-10T09:20:00Z',
+          run_started_at: '2026-10-10T09:20:00Z',
+        },
+      ],
+      lanes,
+      parseAllDeclaredSlots(REAL_WORKFLOW),
+    );
+    expect(attributed.find((r) => r.created_at === '2026-10-10T09:20:00Z')?.lane).toBe('node');
+  });
+
+  it("the watchdog's own schedule, on time, checks every fire of every lane exactly once", () => {
+    const watchdogCrons = extractScheduleCrons(WATCHDOG_WORKFLOW).map(parseSimpleDailyCron);
+    const lanes = resolveCredentialLanes(REAL_WORKFLOW);
+    const checks: Date[] = [];
+    for (const day of ['2026-10-10', '2026-10-11']) {
+      for (const c of watchdogCrons) for (const h of c.hours) checks.push(at(day, h, c.minute));
+    }
+    checks.sort((a, b) => a.getTime() - b.getTime());
+    const checked: string[] = [];
+    checks.forEach((t, i) => {
+      const w = watchdogWindow({
+        checkAt: t,
+        previousCheckAt: i === 0 ? null : checks[i - 1],
+        graceHours: DEFAULT_GRACE_HOURS,
+      });
+      for (const f of dueFiresInWindow(lanes, w)) checked.push(`${f.lane}@${f.fire.toISOString()}`);
+    });
+    // No fire is checked twice …
+    expect(new Set(checked).size).toBe(checked.length);
+    // … and every fire from the first check's lookback to the last check's due point is checked.
+    const first =
+      (checks[0] as Date).getTime() - (DEFAULT_GRACE_HOURS + WATCHDOG_LOOKBACK_HOURS) * H;
+    const last = (checks.at(-1) as Date).getTime() - DEFAULT_GRACE_HOURS * H;
+    let covered = 0;
+    for (const l of lanes) {
+      for (const day of ['2026-10-08', '2026-10-09', '2026-10-10', '2026-10-11']) {
+        for (const h of l.hours) {
+          const fire = at(day, h, l.minute);
+          if (fire.getTime() > first && fire.getTime() <= last) {
+            expect(checked).toContain(`${l.lane}@${fire.toISOString()}`);
+            covered += 1;
+          }
+        }
+      }
+    }
+    expect(covered).toBe(checked.length);
+  });
+});
+// ── Jittered watchdog starts — every fire checked once (PR #2013 round 2) ───
+//
+// GitHub starts this watchdog's scheduled runs late, and by a DIFFERENT amount
+// each time (measured 4.9-6.6 h; the e2e credential runs it watches start
+// 2.3-7.4 h late). A watchdog that checks only "the latest fire at or before
+// now - grace" skips a fire whenever two consecutive runs' delays differ enough
+// (and checks another twice). The fix checks EVERY fire in the window since the
+// previous watchdog run: (previous start - grace, this start - grace]. These
+// tests replay jittered start times, seeded so a failure reproduces.
+
+describe('jittered watchdog starts — every fire is checked exactly once', () => {
+  const H = 3_600_000;
+  const WATCHDOG_WORKFLOW = readFileSync(
+    new URL('../.github/workflows/credential-slot-watchdog.yml', import.meta.url),
+    'utf8',
+  );
+  const lanes = resolveCredentialLanes(REAL_WORKFLOW);
+  const watchdogCrons = extractScheduleCrons(WATCHDOG_WORKFLOW).map(parseSimpleDailyCron);
+  const WATCHDOG_PERIOD_HOURS = 24 / watchdogCrons.reduce((n, c) => n + c.hours.length, 0);
+  // Measured 2026-10-01..08: the watchdog's own scheduled runs, and the
+  // credential e2e runs it watches.
+  const WATCHDOG_DELAY_HOURS: [number, number] = [4.9, 6.6];
+  const E2E_DELAY_HOURS: [number, number] = [2.3, 7.4];
+  const DAYS = Array.from({ length: 10 }, (_, i) =>
+    new Date(Date.UTC(2026, 9, 10 + i)).toISOString().slice(0, 10),
+  );
+
+  /** mulberry32 — a tiny seeded PRNG, so a red seed reproduces exactly. */
+  const prng = (seed: number) => () => {
+    seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  const uniform = (rand: () => number, [lo, hi]: [number, number]) => lo + (hi - lo) * rand();
+  const nominal = (day: string, hour: number, minute: number) =>
+    new Date(`${day}T${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:00Z`);
+
+  /** The watchdog's scheduled starts over DAYS, each delayed by a random amount in `delay`. */
+  function jitteredStarts(rand: () => number, delay: [number, number]): Date[] {
+    const starts: Date[] = [];
+    for (const day of DAYS) {
+      for (const c of watchdogCrons) {
+        for (const h of c.hours) {
+          starts.push(
+            new Date(nominal(day, h, c.minute).getTime() + Math.round(uniform(rand, delay) * H)),
+          );
+        }
+      }
+    }
+    return starts.sort((a, b) => a.getTime() - b.getTime());
+  }
+
+  /** Every credential fire in (from, to]. */
+  function firesBetween(from: number, to: number): string[] {
+    const out: string[] = [];
+    for (const day of ['2026-10-08', '2026-10-09', ...DAYS]) {
+      for (const l of lanes) {
+        for (const h of l.hours) {
+          const t = nominal(day, h, l.minute).getTime();
+          if (t > from && t <= to) out.push(`${l.lane}@${new Date(t).toISOString()}`);
+        }
+      }
+    }
+    return out.sort();
+  }
+
+  /** How many times each fire is checked, when run i anchors on run i-1's start. */
+  function coverage(starts: Date[]): Map<string, number> {
+    const checked = new Map<string, number>();
+    starts.forEach((checkAt, i) => {
+      const w = watchdogWindow({
+        checkAt,
+        previousCheckAt: i === 0 ? null : starts[i - 1],
+        graceHours: DEFAULT_GRACE_HOURS,
+      });
+      for (const f of dueFiresInWindow(lanes, w)) {
+        const key = `${f.lane}@${f.fire.toISOString()}`;
+        checked.set(key, (checked.get(key) ?? 0) + 1);
+      }
+    });
+    return checked;
+  }
+
+  function expectExactlyOnce(starts: Date[]) {
+    const checked = coverage(starts);
+    const expected = firesBetween(
+      (starts[0] as Date).getTime() - (DEFAULT_GRACE_HOURS + WATCHDOG_LOOKBACK_HOURS) * H,
+      (starts.at(-1) as Date).getTime() - DEFAULT_GRACE_HOURS * H,
+    );
+    expect(expected.length).toBeGreaterThanOrEqual(7 * 12); // ≥ 7 days of 12 fires
+    expect([...checked.keys()].sort()).toEqual(expected);
+    expect([...checked.values()].every((n) => n === 1)).toBe(true);
+  }
+
+  it('the no-previous-run lookback covers the watchdog period plus the worst measured delay', () => {
+    // A run must reach back past the previous run's window end; consecutive starts
+    // can be as far apart as one period plus the delay spread. 24 h also covers
+    // ONE dropped watchdog run (2 periods + the worst e2e delay = 23.4 h).
+    expect(WATCHDOG_PERIOD_HOURS).toBe(8);
+    expect(WATCHDOG_LOOKBACK_HOURS).toBeGreaterThanOrEqual(
+      WATCHDOG_PERIOD_HOURS + Math.max(WATCHDOG_DELAY_HOURS[1], E2E_DELAY_HOURS[1]),
+    );
+    expect(WATCHDOG_LOOKBACK_HOURS).toBeGreaterThanOrEqual(
+      2 * WATCHDOG_PERIOD_HOURS + E2E_DELAY_HOURS[1],
+    );
+    expect(WATCHDOG_MAX_WINDOW_HOURS).toBeGreaterThan(WATCHDOG_LOOKBACK_HOURS);
+  });
+
+  it('watchdogWindow: (previous start - grace, this start - grace]; the lookback only without a previous run', () => {
+    const checkAt = new Date('2026-10-10T15:00:00Z');
+    expect(
+      watchdogWindow({
+        checkAt,
+        previousCheckAt: new Date('2026-10-10T06:30:00Z'),
+        graceHours: 8,
+      }),
+    ).toEqual({
+      start: new Date('2026-10-09T22:30:00Z'),
+      end: new Date('2026-10-10T07:00:00Z'),
+      anchored: true,
+      gap: false,
+    });
+    expect(watchdogWindow({ checkAt, previousCheckAt: null, graceHours: 8 })).toEqual({
+      start: new Date(new Date('2026-10-10T07:00:00Z').getTime() - WATCHDOG_LOOKBACK_HOURS * H),
+      end: new Date('2026-10-10T07:00:00Z'),
+      anchored: false,
+      gap: false,
+    });
+    // A previous run that is not before this one is no anchor (clock skew, a re-run).
+    expect(watchdogWindow({ checkAt, previousCheckAt: checkAt, graceHours: 8 }).anchored).toBe(
+      false,
+    );
+  });
+
+  it('watchdogWindow: a previous run older than the maximum window is clamped and flagged as a gap', () => {
+    const checkAt = new Date('2026-10-20T15:00:00Z');
+    const w = watchdogWindow({
+      checkAt,
+      previousCheckAt: new Date('2026-10-10T06:30:00Z'),
+      graceHours: 8,
+    });
+    expect(w.gap).toBe(true);
+    expect(w.end.getTime() - w.start.getTime()).toBe(WATCHDOG_MAX_WINDOW_HOURS * H);
+  });
+
+  it('dueFiresInWindow: start exclusive, end inclusive, every listed hour', () => {
+    const fires = dueFiresInWindow(lanes, {
+      start: new Date('2026-10-10T01:17:00Z'),
+      end: new Date('2026-10-10T09:17:00Z'),
+    }).map((f) => `${f.lane}@${f.fire.toISOString().slice(11, 16)}`);
+    expect(fires).toEqual(['bun@05:47', 'node-webpack@06:17', 'bun-webpack@07:47', 'node@09:17']);
+  });
+
+  it("the reviewer's reproduction: delays 6.6 h, 4.9 h, 6.6 h skip nothing and repeat nothing", () => {
+    // 09:25 + 6.6 h, 17:25 + 4.9 h, 01:25 + 6.6 h. Checking only the latest due
+    // fire, bun-webpack 07:47 is checked by the first two runs and 15:47 by
+    // none. Anchoring on the previous run's start checks each exactly once.
+    const starts = [
+      new Date('2026-10-10T16:01:00Z'),
+      new Date('2026-10-10T22:19:00Z'),
+      new Date('2026-10-11T08:01:00Z'),
+    ];
+    const checked = coverage(starts);
+    expect(checked.get('bun-webpack@2026-10-10T07:47:00.000Z')).toBe(1);
+    expect(checked.get('bun-webpack@2026-10-10T15:47:00.000Z')).toBe(1);
+    expect(checked.get('bun-webpack@2026-10-10T23:47:00.000Z')).toBe(1);
+  });
+
+  it("the reviewer's reproduction, end to end: a missing bun-webpack 15:47 run alerts exactly once", () => {
+    // Every fire 10-09..10-11 has its credential run (2 h late) except
+    // bun-webpack 10-10 15:47. Watchdog runs start 16:01, 22:19 and 08:01 the
+    // next day (09:25 + 6.6 h, 17:25 + 4.9 h, 01:25 + 6.6 h), each anchored on
+    // the one before. Checking only the latest due fire never looks at 15:47.
+    const runs: FixtureRun[] = [];
+    let id = 1;
+    for (const day of ['2026-10-09', '2026-10-10', '2026-10-11']) {
+      for (const l of lanes) {
+        for (const h of l.hours) {
+          const fire = nominal(day, h, l.minute);
+          if (l.lane === 'bun-webpack' && fire.toISOString() === '2026-10-10T15:47:00.000Z') {
+            continue;
+          }
+          const created = new Date(fire.getTime() + 2 * H).toISOString();
+          runs.push(fixtureRun(id++, 'schedule', created, CRED(l.lane)));
+        }
+      }
+    }
+    const starts = [
+      new Date('2026-10-10T09:00:00Z'),
+      new Date('2026-10-10T16:01:00Z'),
+      new Date('2026-10-10T22:19:00Z'),
+      new Date('2026-10-11T08:01:00Z'),
+    ];
+    const alerts: string[] = [];
+    starts.forEach((checkAt, i) => {
+      if (i === 0) return; // the first start is only the anchor
+      const { gh } = simGh(runs.filter((r) => new Date(r.created_at) <= checkAt));
+      const verdicts = evaluateWatchdog({
+        workflowYamlText: REAL_WORKFLOW,
+        gh,
+        now: checkAt,
+        checkAt,
+        previousCheckAt: starts[i - 1],
+        graceHours: DEFAULT_GRACE_HOURS,
+      });
+      for (const v of verdicts) {
+        if (v.verdict !== 'quiet') alerts.push(`${v.lane}@${v.slot}:${v.verdict}`);
+      }
+    });
+    expect(alerts).toEqual(['bun-webpack@2026-10-10T15:47:00.000Z:missing']);
+  });
+
+  it.each(
+    Array.from({ length: 25 }, (_, i) => i + 1),
+  )('seed %i: measured watchdog delays (4.9-6.6 h) over 10 days — every fire checked exactly once', (seed) => {
+    expectExactlyOnce(jitteredStarts(prng(seed), WATCHDOG_DELAY_HOURS));
+  });
+
+  it.each(
+    Array.from({ length: 25 }, (_, i) => i + 101),
+  )('seed %i: stress — e2e-wide delays (2.3-7.4 h) and one dropped watchdog run — every fire checked exactly once', (seed) => {
+    const rand = prng(seed);
+    const starts = jitteredStarts(rand, E2E_DELAY_HOURS);
+    starts.splice(1 + Math.floor(rand() * (starts.length - 2)), 1);
+    expectExactlyOnce(starts);
+  });
+
+  // Round 3: some watchdog runs CRASH (conclude `failure` before evaluating),
+  // TIME OUT (`cancelled`), or are still IN PROGRESS when the next run lists
+  // them. Round 4 adds a run whose own listing FAILS (it must crash, not check
+  // the lookback), right after a crash streak of four, and a run whose alert
+  // job failed and was then re-run on its own (`success`, attempt 2, its
+  // `run_started_at` reset to the re-run time). Every run resolves its anchor
+  // through the real `resolveCheckAnchors` over a fake Actions listing of the
+  // runs before it, as each one would have seen it; a run's conclusion is what
+  // the code made of it. Only a run that evaluated checks anything, and every
+  // fire in range must still be checked at least once.
+  it.each(
+    Array.from({ length: 25 }, (_, i) => i + 301),
+  )('seed %i: crash streaks, failed listings, partial re-runs, timed-out and in-progress watchdog runs — every fire is still checked', (seed) => {
+    const rand = prng(seed);
+    const starts = jitteredStarts(rand, WATCHDOG_DELAY_HOURS);
+    // `slow` / `slow-crash`: still in progress when the next run lists it,
+    // then concludes success / failure. `listing-down`: this run's listing of
+    // its own workflow fails. `rerun`: the check evaluated, the alert job
+    // failed, and a re-run of the failed job turned the run `success` before
+    // the next run listed it.
+    type Outcome =
+      | 'success'
+      | 'failure'
+      | 'cancelled'
+      | 'slow'
+      | 'slow-crash'
+      | 'listing-down'
+      | 'rerun';
+    const anchors = (o: Outcome) => o === 'success' || o === 'slow';
+    const evaluates = (o: Outcome) => anchors(o) || o === 'rerun';
+    const outcomes: Outcome[] = [];
+    let streak = 0;
+    starts.forEach((_, i) => {
+      const r = rand();
+      let o: Outcome =
+        r < 0.08
+          ? 'failure'
+          : r < 0.16
+            ? 'cancelled'
+            : r < 0.24
+              ? 'slow'
+              : r < 0.32
+                ? 'slow-crash'
+                : r < 0.38
+                  ? 'listing-down'
+                  : r < 0.44
+                    ? 'rerun'
+                    : 'success';
+      // Keep a run of runs that cannot anchor well inside the 72 h maximum
+      // window, and end on a run that evaluated (the range below ends at its
+      // due point).
+      if (!anchors(o) && (streak >= 3 || i === starts.length - 1)) o = 'success';
+      // Every seed starts with each kind once: the very first run crashes (so
+      // the next has no successful run in view), the second is still in
+      // progress when the third lists it, the third times out, and the fourth
+      // is in progress when the fifth lists it and then crashes. Then a
+      // success, a crash streak of four, a failed listing, a partial re-run,
+      // and a success: the last one reaches back seven runs.
+      const fixed = [
+        'failure',
+        'slow',
+        'cancelled',
+        'slow-crash',
+        'success',
+        'failure',
+        'cancelled',
+        'slow-crash',
+        'failure',
+        'listing-down',
+        'rerun',
+        'success',
+      ] as const;
+      if (i < fixed.length) o = fixed[i] as Outcome;
+      streak = anchors(o) ? 0 : streak + 1;
+      outcomes.push(o);
+    });
+    for (const kind of [
+      'failure',
+      'cancelled',
+      'slow',
+      'slow-crash',
+      'listing-down',
+      'rerun',
+    ] as const) {
+      expect(outcomes.filter((o) => o === kind).length).toBeGreaterThan(0);
+    }
+
+    /** What each run concluded, as the code left it — set before the next run lists it. */
+    const concluded: string[] = [];
+    /** A partial re-run happens three quarters of the way to the next run's start. */
+    const rerunAt = (j: number) =>
+      new Date(
+        (starts[j] as Date).getTime() +
+          0.75 * ((starts[j + 1] as Date).getTime() - (starts[j] as Date).getTime()),
+      );
+    /** Run j as run i's listing shows it: a slow run is still in progress for the next run. */
+    const asSeenBy = (i: number, j: number) => {
+      const iso = (starts[j] as Date).toISOString();
+      const o = outcomes[j] as Outcome;
+      const live = j === i || ((o === 'slow' || o === 'slow-crash') && j === i - 1);
+      const rerun = o === 'rerun' && j < i;
+      return {
+        id: 1000 + j,
+        event: 'schedule',
+        status: live ? 'in_progress' : 'completed',
+        conclusion: live ? null : concluded[j],
+        created_at: iso,
+        run_started_at: rerun ? rerunAt(j).toISOString() : iso,
+        run_attempt: rerun ? 2 : 1,
+        html_url: `https://x/${1000 + j}`,
+      };
+    };
+
+    const checked = new Map<string, number>();
+    starts.forEach((checkAt, i) => {
+      const o = outcomes[i] as Outcome;
+      const listingNewestFirst = Array.from({ length: i + 1 }, (_, k) => asSeenBy(i, i - k)).slice(
+        0,
+        30,
+      );
+      const gh = () => {
+        if (o === 'listing-down') throw new Error('api down');
+        return JSON.stringify({
+          total_count: listingNewestFirst.length,
+          workflow_runs: listingNewestFirst,
+        });
+      };
+      let resolved: ReturnType<typeof resolveCheckAnchors>;
+      try {
+        resolved = resolveCheckAnchors(gh, {
+          runId: String(1000 + i),
+          eventName: 'schedule',
+          now: new Date(checkAt.getTime() + 60_000),
+        });
+      } catch {
+        concluded[i] = 'failure'; // crashed before evaluating: exit 1
+        return;
+      }
+      if (o === 'listing-down') {
+        // It did not crash, so it checked whatever window it got and succeeded.
+        concluded[i] = 'success';
+      } else {
+        expect(resolved.checkAt.getTime()).toBe(checkAt.getTime());
+        concluded[i] = evaluates(o) ? 'success' : o === 'cancelled' ? 'cancelled' : 'failure';
+        if (!evaluates(o)) return; // crashed: evaluated nothing
+      }
+      const w = watchdogWindow({ ...resolved, graceHours: DEFAULT_GRACE_HOURS });
+      expect(w.gap).toBe(false);
+      for (const f of dueFiresInWindow(lanes, w)) {
+        const key = `${f.lane}@${f.fire.toISOString()}`;
+        checked.set(key, (checked.get(key) ?? 0) + 1);
+      }
+    });
+    const expected = firesBetween(
+      (starts[0] as Date).getTime() - (DEFAULT_GRACE_HOURS + WATCHDOG_LOOKBACK_HOURS) * H,
+      (starts.at(-1) as Date).getTime() - DEFAULT_GRACE_HOURS * H,
+    );
+    expect(expected.length).toBeGreaterThanOrEqual(7 * 12);
+    const unchecked = expected.filter((k) => !checked.has(k));
+    expect(unchecked).toEqual([]);
+    // Nothing outside the range is checked either (the window never overshoots).
+    expect([...checked.keys()].filter((k) => !expected.includes(k))).toEqual([]);
+  });
+
+  it.each(
+    Array.from({ length: 8 }, (_, i) => i + 201),
+  )('seed %i: end to end — alerts exactly the dropped credential runs, each exactly once', (seed) => {
+    const rand = prng(seed);
+    const starts = jitteredStarts(rand, WATCHDOG_DELAY_HOURS);
+    const runs: FixtureRun[] = [];
+    const dropped = new Set<string>();
+    let id = 1;
+    for (const day of ['2026-10-08', '2026-10-09', ...DAYS]) {
+      for (const l of lanes) {
+        for (const h of l.hours) {
+          const fire = nominal(day, h, l.minute);
+          if (rand() < 0.15) {
+            dropped.add(`${l.lane}@${fire.toISOString()}`);
+            continue;
+          }
+          const created = new Date(fire.getTime() + uniform(rand, E2E_DELAY_HOURS) * H);
+          runs.push(fixtureRun(id++, 'schedule', created.toISOString(), CRED(l.lane)));
+        }
+      }
+      // The two early-warning runs share the run list and are just as late.
+      for (const [hh, mm, lane] of [
+        [3, 17, 'node'],
+        [4, 47, 'bun'],
+      ] as const) {
+        const created = new Date(
+          nominal(day, hh, mm).getTime() + uniform(rand, E2E_DELAY_HOURS) * H,
+        );
+        runs.push(fixtureRun(id++, 'schedule', created.toISOString(), EW(lane)));
+      }
+    }
+    const alerted = new Map<string, number>();
+    starts.forEach((checkAt, i) => {
+      const { gh } = simGh(runs.filter((r) => new Date(r.created_at) <= checkAt));
+      const verdicts = evaluateWatchdog({
+        workflowYamlText: REAL_WORKFLOW,
+        gh,
+        now: new Date(checkAt.getTime() + 60_000),
+        checkAt,
+        previousCheckAt: i === 0 ? null : starts[i - 1],
+        graceHours: DEFAULT_GRACE_HOURS,
+      });
+      for (const v of verdicts.filter((x) => x.verdict !== 'quiet')) {
+        const key = `${v.lane}@${v.slot}`;
+        alerted.set(key, (alerted.get(key) ?? 0) + 1);
+      }
+    });
+    const inRange = new Set(
+      firesBetween(
+        (starts[0] as Date).getTime() - (DEFAULT_GRACE_HOURS + WATCHDOG_LOOKBACK_HOURS) * H,
+        (starts.at(-1) as Date).getTime() - DEFAULT_GRACE_HOURS * H,
+      ),
+    );
+    const expected = [...dropped].filter((k) => inRange.has(k)).sort();
+    expect(expected.length).toBeGreaterThan(0);
+    expect([...alerted.keys()].sort()).toEqual(expected);
+    expect([...alerted.values()].every((n) => n === 1)).toBe(true);
+  });
+
+  it('evaluateWatchdog alerts a coverage gap when its previous run is older than the maximum window', () => {
+    const { gh } = simGh([]);
+    const verdicts = evaluateWatchdog({
+      workflowYamlText: REAL_WORKFLOW,
+      gh,
+      now: new Date('2026-10-20T15:00:00Z'),
+      previousCheckAt: new Date('2026-10-10T06:30:00Z'),
+      graceHours: 8,
+    });
+    expect(verdicts.some((v) => v.verdict === 'coverage-gap')).toBe(true);
+  });
+
+  it('every verdict names the fire it checked', () => {
+    const { gh } = simGh([]);
+    const verdicts = evaluateWatchdog({
+      workflowYamlText: REAL_WORKFLOW,
+      gh,
+      now: new Date('2026-10-10T15:00:00Z'),
+      previousCheckAt: new Date('2026-10-10T07:00:00Z'),
+      graceHours: 8,
+    });
+    // (10-09 23:00, 10-10 07:00]: bun-webpack 23:47, node 01:17, bun 05:47, node-webpack 06:17.
+    expect(verdicts.map((v) => `${v.lane}@${v.slot}`).sort()).toEqual(
+      [
+        'bun-webpack@2026-10-09T23:47:00.000Z',
+        'node@2026-10-10T01:17:00.000Z',
+        'bun@2026-10-10T05:47:00.000Z',
+        'node-webpack@2026-10-10T06:17:00.000Z',
+      ].sort(),
+    );
+    expect(verdicts.every((v) => v.verdict === 'missing')).toBe(true);
+  });
+});
+
+describe('resolveCheckAnchors — this run and the previous one, from the Actions API', () => {
+  const watchdogRun = (
+    id: number,
+    started: string,
+    status = 'completed',
+    conclusion: string | null = 'success',
+    event = 'schedule',
+  ) => ({
+    id,
+    event,
+    status,
+    conclusion,
+    created_at: started,
+    run_started_at: started,
+    run_attempt: 1,
+    html_url: `https://x/${id}`,
+  });
+  const listing = (runs: unknown[]) => {
+    const calls: string[] = [];
+    const gh = (args: string[]) => {
+      calls.push(args.join(' '));
+      return JSON.stringify({ total_count: runs.length, workflow_runs: runs });
+    };
+    return { gh, calls };
+  };
+  const now = new Date('2026-10-10T15:00:30Z');
+
+  it("anchors on this run's own start and the newest SUCCESSFUL scheduled run before it", () => {
+    const { gh, calls } = listing([
+      watchdogRun(30, '2026-10-10T15:00:00Z', 'in_progress', null),
+      watchdogRun(29, '2026-10-10T06:30:00Z', 'completed', 'success'),
+      watchdogRun(28, '2026-10-09T23:10:00Z'),
+    ]);
+    const a = resolveCheckAnchors(gh, { runId: '30', eventName: 'schedule', now });
+    expect(a.checkAt.toISOString()).toBe('2026-10-10T15:00:00.000Z');
+    // `success` means the run evaluated its window (an alerting run exits 0 too).
+    expect(a.previousCheckAt?.toISOString()).toBe('2026-10-10T06:30:00.000Z');
+    expect(calls[0]).toContain('actions/workflows/credential-slot-watchdog.yml/runs');
+    expect(calls[0]).toContain('event=schedule');
+  });
+
+  it('skips a cancelled previous run (it may not have evaluated), reaching back to the one before', () => {
+    const { gh } = listing([
+      watchdogRun(30, '2026-10-10T15:00:00Z', 'in_progress', null),
+      watchdogRun(29, '2026-10-10T06:30:00Z', 'completed', 'cancelled'),
+      watchdogRun(28, '2026-10-09T23:10:00Z'),
+    ]);
+    const a = resolveCheckAnchors(gh, { runId: '30', eventName: 'schedule', now });
+    expect(a.previousCheckAt?.toISOString()).toBe('2026-10-09T23:10:00.000Z');
+  });
+
+  it('a dispatch is never anchored (full lookback; it never alerts anyway)', () => {
+    const { gh, calls } = listing([watchdogRun(28, '2026-10-09T23:10:00Z')]);
+    const a = resolveCheckAnchors(gh, { runId: '31', eventName: 'workflow_dispatch', now });
+    expect(a).toEqual({ checkAt: now, previousCheckAt: null });
+    expect(calls).toEqual([]);
+  });
+
+  it('an unreadable listing THROWS on a scheduled run (the lookback can skip a crash streak)', () => {
+    // Round 4: the lookback reaches back 24 h, not to the last successful
+    // run, so after a crash streak it skips fires (the reproduction is in the
+    // round-4 block below). A dispatch never lists, so it keeps the lookback.
+    const gh = () => {
+      throw new Error('api down');
+    };
+    expect(() => resolveCheckAnchors(gh, { runId: '30', eventName: 'schedule', now })).toThrow(
+      'api down',
+    );
+    expect(resolveCheckAnchors(gh, { runId: '30', eventName: 'workflow_dispatch', now })).toEqual({
+      checkAt: now,
+      previousCheckAt: null,
+    });
+  });
+
+  it('runWatchdogFromEnv wires GITHUB_RUN_ID / GITHUB_EVENT_NAME into the window', () => {
+    const watchdogRuns = [
+      watchdogRun(30, '2026-10-10T15:00:00Z', 'in_progress', null),
+      watchdogRun(29, '2026-10-10T07:00:00Z', 'completed', 'success'),
+    ];
+    const gh = (args: string[]) => {
+      const url = args[1] ?? '';
+      if (url.includes('credential-slot-watchdog.yml/runs'))
+        return JSON.stringify({ total_count: 2, workflow_runs: watchdogRuns });
+      if (url.includes('/artifacts')) return JSON.stringify({ artifacts: [] });
+      return JSON.stringify({ total_count: 0, workflow_runs: [] });
+    };
+    const verdicts = runWatchdogFromEnv({
+      workflowYamlText: REAL_WORKFLOW,
+      gh,
+      now,
+      env: { GITHUB_RUN_ID: '30', GITHUB_EVENT_NAME: 'schedule', WATCHDOG_GRACE_HOURS: '8' },
+    });
+    // Exactly the four fires in (10-09 23:00, 10-10 07:00] — not the 24 h lookback's twelve.
+    expect(verdicts).toHaveLength(4);
+  });
+});
+// ── An early-warning run never stands in for a credential run (round 2) ────
+//
+// Found by the jittered end-to-end replay above (seed 203): two late
+// early-warning runs vouched for each other. The 03:17 one, delayed past bun's
+// 05:47 fire, was heuristically placed on bun and counted as bun's "own
+// evidence"; that let the 04:47 one, delayed past node-webpack's 06:17 fire, be
+// credited to node-webpack — whose real credential run was missing. A run whose
+// own mode marker reads `early-warning` is certainly not a credential run, so it
+// is dropped before attribution. Only a run with NO readable mode marker falls
+// back to the timing heuristic.
+
+describe('a run marked early-warning is never attributed to a credential lane', () => {
+  it('attachExactLanes flags a run whose mode marker reads early-warning', () => {
+    const gh = () =>
+      JSON.stringify({
+        artifacts: [{ name: 'compat-lane-bun' }, { name: 'compat-mode-early-warning' }],
+      });
+    const [run] = attachExactLanes(gh, [
+      { id: 7, event: 'schedule', status: 'completed', created_at: 'x', run_started_at: null },
+    ]);
+    expect(run.exactLane).toBeNull();
+    expect(run.earlyWarning).toBe(true);
+  });
+
+  it('attachExactLanes does not flag a run whose mode marker is missing (it may be a credential run)', () => {
+    const gh = () => JSON.stringify({ artifacts: [{ name: 'compat-lane-bun' }] });
+    const [run] = attachExactLanes(gh, [
+      { id: 7, event: 'schedule', status: 'completed', created_at: 'x', run_started_at: null },
+    ]);
+    expect(run.earlyWarning).toBeUndefined();
+  });
+
+  it('the seed-203 shape: two late early-warning runs cannot cover a missing node-webpack run', () => {
+    const runs = [
+      fixtureRun(1, 'schedule', '2026-10-11T01:30:00Z', CRED('node')),
+      fixtureRun(2, 'schedule', '2026-10-11T06:00:00Z', EW('node')), // 03:17 + 2.7 h, after bun 05:47
+      fixtureRun(3, 'schedule', '2026-10-11T06:40:00Z', CRED('bun')),
+      fixtureRun(4, 'schedule', '2026-10-11T07:00:00Z', EW('bun')), // 04:47 + 2.2 h, after node-webpack 06:17
+      // node-webpack's 06:17 credential run is MISSING.
+      fixtureRun(5, 'schedule', '2026-10-10T23:50:00Z', CRED('bun-webpack')),
+    ];
+    const { gh } = simGh(runs);
+    const verdicts = evaluateWatchdog({
+      workflowYamlText: REAL_WORKFLOW,
+      gh,
+      now: new Date('2026-10-11T15:00:00Z'),
+      previousCheckAt: new Date('2026-10-11T07:00:00Z'),
+      graceHours: 8,
+    });
+    const nodeWebpack = verdicts.find((v) => v.lane === 'node-webpack');
+    expect(nodeWebpack?.slot).toBe('2026-10-11T06:17:00.000Z');
+    expect(nodeWebpack?.verdict).toBe('missing');
+  });
+});
+// ── A crashed watchdog run is never an anchor (PR #2013 round 3) ───────────
+//
+// Round 2 anchored the window on the previous run that concluded `success` OR
+// `failure`, because an ALERTING run exited 1. But a run that CRASHED before
+// evaluating its window (both run listings down, a job timeout) concludes
+// `failure` too, so the next run started its window at the crashed run's start
+// and the crashed run's fires were never checked. Round 3 separates the two:
+// the CLI exits 0 whenever it evaluated its window and reports the alert
+// through the `alert` job output, so `success` means "window evaluated" and is
+// the only conclusion that anchors.
+
+describe('a watchdog run that did not evaluate its window is never an anchor (round 3)', () => {
+  const run = (
+    id: number,
+    started: string,
+    status = 'completed',
+    conclusion: string | null = 'success',
+  ) => ({
+    id,
+    event: 'schedule',
+    status,
+    conclusion,
+    created_at: started,
+    run_started_at: started,
+    run_attempt: 1,
+    html_url: `https://x/${id}`,
+  });
+  const listing = (runs: unknown[]) => () =>
+    JSON.stringify({ total_count: runs.length, workflow_runs: runs });
+  const now = new Date('2026-10-10T15:00:30Z');
+  const anchorOf = (runs: unknown[], runId = '30', at = now) =>
+    resolveCheckAnchors(listing(runs), { runId, eventName: 'schedule', now: at });
+
+  it('a crashed previous run (failure) is skipped: the window widens back to the last success', () => {
+    const a = anchorOf([
+      run(30, '2026-10-10T15:00:00Z', 'in_progress', null),
+      run(29, '2026-10-10T06:30:00Z', 'completed', 'failure'),
+      run(28, '2026-10-09T23:10:00Z'),
+    ]);
+    expect(a.previousCheckAt?.toISOString()).toBe('2026-10-09T23:10:00.000Z');
+    // The crashed run would have checked (10-09 15:10, 10-09 22:30]; this
+    // window, (10-09 15:10, 10-10 07:00], contains all of it.
+    const w = watchdogWindow({ ...a, graceHours: 8 });
+    expect(w.start.toISOString()).toBe('2026-10-09T15:10:00.000Z');
+    expect(w.end.toISOString()).toBe('2026-10-10T07:00:00.000Z');
+    expect(w.gap).toBe(false);
+  });
+
+  it.each([
+    'cancelled',
+    'timed_out',
+  ])('a previous run that concluded %s (job timeout, runner loss) is skipped', (conclusion) => {
+    const a = anchorOf([
+      run(30, '2026-10-10T15:00:00Z', 'in_progress', null),
+      run(29, '2026-10-10T06:30:00Z', 'completed', conclusion),
+      run(28, '2026-10-09T23:10:00Z'),
+    ]);
+    expect(a.previousCheckAt?.toISOString()).toBe('2026-10-09T23:10:00.000Z');
+  });
+
+  it('a successful DISPATCH run is never an anchor (a dispatch never raises the alert)', () => {
+    const a = anchorOf([
+      run(30, '2026-10-10T15:00:00Z', 'in_progress', null),
+      { ...run(29, '2026-10-10T06:30:00Z'), event: 'workflow_dispatch' },
+      run(28, '2026-10-09T23:10:00Z'),
+    ]);
+    expect(a.previousCheckAt?.toISOString()).toBe('2026-10-09T23:10:00.000Z');
+  });
+
+  it('a previous run still in progress is skipped (it has not finished evaluating)', () => {
+    const a = anchorOf([
+      run(30, '2026-10-10T15:00:00Z', 'in_progress', null),
+      run(29, '2026-10-10T14:58:00Z', 'in_progress', null),
+      run(28, '2026-10-10T06:30:00Z'),
+    ]);
+    expect(a.previousCheckAt?.toISOString()).toBe('2026-10-10T06:30:00.000Z');
+  });
+
+  it('a crash followed by a successful run: the success re-checked the crashed window, and the next run anchors on it', () => {
+    const lanes = resolveCredentialLanes(REAL_WORKFLOW);
+    const green28 = run(28, '2026-10-09T23:10:00Z');
+    const crashed29 = run(29, '2026-10-10T06:30:00Z', 'completed', 'failure');
+    const green30 = run(30, '2026-10-10T15:00:00Z');
+    // Run 30, as it saw the listing: itself in progress, 29 crashed, 28 green.
+    const at30 = anchorOf(
+      [run(30, '2026-10-10T15:00:00Z', 'in_progress', null), crashed29, green28],
+      '30',
+    );
+    // Run 31, eight hours later: 30 finished green.
+    const at31 = anchorOf(
+      [run(31, '2026-10-10T23:05:00Z', 'in_progress', null), green30, crashed29, green28],
+      '31',
+      new Date('2026-10-10T23:05:30Z'),
+    );
+    expect(at31.previousCheckAt?.toISOString()).toBe('2026-10-10T15:00:00.000Z');
+    const fires = (a: { checkAt: Date; previousCheckAt: Date | null }) =>
+      dueFiresInWindow(lanes, watchdogWindow({ ...a, graceHours: 8 })).map(
+        (f) => `${f.lane}@${f.fire.toISOString()}`,
+      );
+    const crashedWindow = dueFiresInWindow(
+      lanes,
+      watchdogWindow({
+        checkAt: new Date('2026-10-10T06:30:00Z'),
+        previousCheckAt: new Date('2026-10-09T23:10:00Z'),
+        graceHours: 8,
+      }),
+    ).map((f) => `${f.lane}@${f.fire.toISOString()}`);
+    expect(crashedWindow.length).toBeGreaterThan(0);
+    for (const f of crashedWindow) expect(fires(at30)).toContain(f);
+    // Consecutive successful windows still meet exactly: nothing skipped, nothing repeated.
+    expect(fires(at31).filter((f) => fires(at30).includes(f))).toEqual([]);
+    expect(watchdogWindow({ ...at31, graceHours: 8 }).start.getTime()).toBe(
+      watchdogWindow({ ...at30, graceHours: 8 }).end.getTime(),
+    );
+  });
+
+  it('no successful run in view: the window reaches back past the oldest run it can see', () => {
+    // The very first watchdog run (lookback window) crashed. Its window was
+    // (start - grace - lookback, start - grace]; the next run must cover it.
+    const a = anchorOf([
+      run(30, '2026-10-10T15:00:00Z', 'in_progress', null),
+      run(29, '2026-10-10T06:30:00Z', 'completed', 'failure'),
+    ]);
+    const w = watchdogWindow({ ...a, graceHours: 8 });
+    expect(w.start.toISOString()).toBe(
+      new Date(
+        Date.parse('2026-10-10T06:30:00Z') - (8 + WATCHDOG_LOOKBACK_HOURS) * 3_600_000,
+      ).toISOString(),
+    );
+    expect(w.gap).toBe(false);
+  });
+
+  it('a full listing with no successful run is clamped to the maximum window and flagged as a gap', () => {
+    // 30 runs, every earlier one crashed, the oldest ten days back: the last
+    // success is out of view, so the fires before the 72 h maximum are not checked.
+    const runs = [run(30, '2026-10-20T15:00:00Z', 'in_progress', null)];
+    for (let i = 1; i < 30; i += 1) {
+      const t = new Date(Date.parse('2026-10-20T15:00:00Z') - i * 8 * 3_600_000).toISOString();
+      runs.push(run(30 - i, t, 'completed', 'failure'));
+    }
+    const a = anchorOf(runs, '30', new Date('2026-10-20T15:00:30Z'));
+    expect(watchdogWindow({ ...a, graceHours: 8 }).gap).toBe(true);
+  });
+});
+
+describe('the CLI reports its verdict through the `alert` output and exits 0 once it evaluated (round 3)', () => {
+  const watchdogRuns = [
+    {
+      id: 30,
+      event: 'schedule',
+      status: 'in_progress',
+      conclusion: null,
+      created_at: '2026-10-10T15:00:00Z',
+      run_started_at: '2026-10-10T15:00:00Z',
+      run_attempt: 1,
+      html_url: 'https://x/30',
+    },
+    {
+      id: 29,
+      event: 'schedule',
+      status: 'completed',
+      conclusion: 'success',
+      created_at: '2026-10-10T07:00:00Z',
+      run_started_at: '2026-10-10T07:00:00Z',
+      run_attempt: 1,
+      html_url: 'https://x/29',
+    },
+  ];
+  // (10-09 23:00, 10-10 07:00]: bun-webpack 23:47, node 01:17, bun 05:47, node-webpack 06:17.
+  const WINDOW = '(2026-10-09T23:00:00.000Z, 2026-10-10T07:00:00.000Z]';
+  const env = { GITHUB_RUN_ID: '30', GITHUB_EVENT_NAME: 'schedule', WATCHDOG_GRACE_HOURS: '8' };
+  const now = new Date('2026-10-10T15:00:30Z');
+  const ghWith = (e2eRuns: FixtureRun[] | 'down') => (args: string[]) => {
+    const url = args[1] ?? '';
+    if (url.includes('credential-slot-watchdog.yml/runs')) {
+      return JSON.stringify({ total_count: watchdogRuns.length, workflow_runs: watchdogRuns });
+    }
+    if (e2eRuns === 'down') throw new Error('api down');
+    return simGh(e2eRuns).gh(args);
+  };
+  const cli = (gh: (a: string[]) => string, withOutput = true) => {
+    const outputs: Record<string, string> = {};
+    const logs: string[] = [];
+    const errors: string[] = [];
+    const code = runCli({
+      workflowYamlText: REAL_WORKFLOW,
+      gh,
+      now,
+      env,
+      writeOutput: withOutput
+        ? (name: string, value: string) => {
+            outputs[name] = value;
+            return true;
+          }
+        : () => false,
+      log: (m: string) => logs.push(m),
+      error: (m: string) => errors.push(m),
+    });
+    return { code, outputs, logs, errors };
+  };
+  const everyFireHasItsRun = (): FixtureRun[] =>
+    (
+      [
+        ['bun-webpack', '2026-10-09T23:50:00Z'],
+        ['node', '2026-10-10T01:20:00Z'],
+        ['bun', '2026-10-10T05:50:00Z'],
+        ['node-webpack', '2026-10-10T06:20:00Z'],
+      ] as const
+    ).map(([lane, at], i) => fixtureRun(i + 1, 'schedule', at, CRED(lane)));
+
+  it('an alerting window exits 0 and reports alert=true and the window it checked', () => {
+    const r = cli(ghWith([]));
+    expect(r.code).toBe(0);
+    expect(r.outputs).toEqual({ window: WINDOW, alert: 'true' });
+    expect(r.errors.join('\n')).toContain('4 fire(s) need alerting');
+  });
+
+  it('a quiet window exits 0 and reports alert=false', () => {
+    const r = cli(ghWith(everyFireHasItsRun()));
+    expect(r.code).toBe(0);
+    expect(r.outputs).toEqual({ window: WINDOW, alert: 'false' });
+  });
+
+  it('a crash before evaluating (both run listings down) exits 1 and names the window it did not check', () => {
+    const r = cli(ghWith('down'));
+    expect(r.code).toBe(1);
+    expect(r.outputs.alert).toBeUndefined();
+    expect(r.outputs.window).toBe(WINDOW);
+    const msg = r.errors.join('\n');
+    expect(msg).toContain('::error::');
+    expect(msg).toContain(`did NOT check the credential fires in ${WINDOW}`);
+    expect(msg).toContain('api down');
+  });
+
+  it('an alert with nowhere to report it fails closed (exit 1), never a silent exit 0', () => {
+    const r = cli(ghWith([]), false);
+    expect(r.code).toBe(1);
+  });
+});
+
+describe('the alert job keys on the check job `alert` output, or a check that did not finish (round 3)', () => {
+  type Step = { id?: string; run?: string; env?: Record<string, string> };
+  type Job = { if?: string; outputs?: Record<string, string>; steps?: Step[] };
+  const doc = parseYaml(
+    readFileSync(
+      new URL('../.github/workflows/credential-slot-watchdog.yml', import.meta.url),
+      'utf8',
+    ),
+  ) as { jobs: Record<string, Job> };
+  const check = doc.jobs['check-credential-slots'] as Job;
+  const alertJob = doc.jobs['slot-watchdog-alert'] as Job;
+
+  /**
+   * Evaluate the alert job's `if:` for one scenario. Only the tokens below are
+   * substituted; anything else left over makes the evaluation THROW, so a
+   * condition this cannot read fails the test rather than passing it.
+   */
+  function fires(ctx: { event: string; result: string; alert: string }): boolean {
+    let js = String(alertJob.if)
+      .replace(/\balways\(\)/g, 'true')
+      .replace(/\bgithub\.event_name\b/g, JSON.stringify(ctx.event))
+      .replace(/\bneeds\.check-credential-slots\.result\b/g, JSON.stringify(ctx.result))
+      .replace(/\bneeds\.check-credential-slots\.outputs\.alert\b/g, JSON.stringify(ctx.alert));
+    js = js.replace(/!=/g, '!==').replace(/([^!=])==([^=])/g, '$1===$2');
+    const bare = js.replace(/'[^']*'|"[^"]*"/g, '');
+    if (/[^\s()&|!=]/.test(bare.replace(/\btrue\b/g, ''))) {
+      throw new Error(`unreadable alert condition: ${js}`);
+    }
+    return Function(`"use strict"; return (${js});`)() === true;
+  }
+
+  it('the check step exposes `alert` and `window` as job outputs', () => {
+    const step = (check.steps ?? []).find((s) =>
+      String(s.run ?? '').includes('scripts/credential-slot-watchdog.mjs'),
+    );
+    expect(step?.id).toBeTruthy();
+    expect(check.outputs?.alert).toBe(`\${{ steps.${step?.id}.outputs.alert }}`);
+    expect(check.outputs?.window).toBe(`\${{ steps.${step?.id}.outputs.window }}`);
+  });
+
+  it('fires on alert=true from a check that succeeded, and on a failed or cancelled check', () => {
+    expect(fires({ event: 'schedule', result: 'success', alert: 'true' })).toBe(true);
+    expect(fires({ event: 'schedule', result: 'failure', alert: '' })).toBe(true);
+    expect(fires({ event: 'schedule', result: 'cancelled', alert: '' })).toBe(true);
+  });
+
+  it('stays quiet on alert=false, and never fires for a dispatch', () => {
+    expect(fires({ event: 'schedule', result: 'success', alert: 'false' })).toBe(false);
+    expect(fires({ event: 'workflow_dispatch', result: 'success', alert: 'true' })).toBe(false);
+    expect(fires({ event: 'workflow_dispatch', result: 'failure', alert: '' })).toBe(false);
+  });
+
+  it('the issue body names the window a check that did not finish left unchecked', () => {
+    const step = (alertJob.steps ?? []).find((s) =>
+      String(s.run ?? '').includes('nightly-alert-issue.mjs'),
+    );
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: literal workflow text, not an interpolation
+    expect(step?.env?.WINDOW).toBe('${{ needs.check-credential-slots.outputs.window }}');
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: literal workflow text, not an interpolation
+    expect(step?.env?.CHECK_RESULT).toBe('${{ needs.check-credential-slots.result }}');
+    expect(step?.run).toContain('${WINDOW');
+    expect(step?.run).toContain('CHECK_RESULT');
+  });
+});
+
+// ── Round 4: a failed listing crashes; only a first-attempt success anchors ──
+//
+// Two more ways a run could anchor the next one although some fires before
+// the anchor were never checked:
+//   * a scheduled run whose own listing failed fell back to the 24 h lookback
+//     and SUCCEEDED, so after a crash streak the fires between the last
+//     success and the lookback were checked by nobody;
+//   * a "Re-run failed jobs" of only the alert job resets `run_started_at` to
+//     the re-run time and turns the run `success`, so the next run anchored on
+//     the re-run time and skipped every fire in between.
+describe('round 4: a failed listing crashes, and only a first-attempt success anchors', () => {
+  const H = 3_600_000;
+  const lanes = resolveCredentialLanes(REAL_WORKFLOW);
+  const run = (
+    id: number,
+    started: string,
+    status = 'completed',
+    conclusion: string | null = 'success',
+    { attempt = 1, created = started }: { attempt?: number; created?: string } = {},
+  ) => ({
+    id,
+    event: 'schedule',
+    status,
+    conclusion,
+    created_at: created,
+    run_started_at: started,
+    run_attempt: attempt,
+    html_url: `https://x/${id}`,
+  });
+  const listing = (runs: unknown[]) => () =>
+    JSON.stringify({ total_count: runs.length, workflow_runs: runs });
+  const firesIn = (a: { checkAt: Date; previousCheckAt: Date | null }) =>
+    dueFiresInWindow(lanes, watchdogWindow({ ...a, graceHours: 8 })).map(
+      (f) => `${f.lane}@${f.fire.toISOString()}`,
+    );
+  // (10-08 23:00, 10-09 07:00]: the window right after success A's.
+  const UNCHECKED = [
+    'bun-webpack@2026-10-08T23:47:00.000Z',
+    'node@2026-10-09T01:17:00.000Z',
+    'bun@2026-10-09T05:47:00.000Z',
+    'node-webpack@2026-10-09T06:17:00.000Z',
+  ];
+
+  it('the reproduction: a failed listing after three crashed runs crashes (exit 1), and the next run reaches back to the last success', () => {
+    const A = run(28, '2026-10-09T07:00:00Z');
+    const crashed = [
+      run(31, '2026-10-10T07:00:00Z', 'completed', 'failure'),
+      run(30, '2026-10-09T23:00:00Z', 'completed', 'failure'),
+      run(29, '2026-10-09T15:00:00Z', 'completed', 'failure'),
+    ];
+    // The lookback the old fallback checked does not reach those four fires.
+    const lookback = firesIn({ checkAt: new Date('2026-10-10T15:00:00Z'), previousCheckAt: null });
+    for (const f of UNCHECKED) expect(lookback).not.toContain(f);
+
+    // Run E (32): its listing of the watchdog's own runs fails.
+    const outputs: Record<string, string> = {};
+    const errors: string[] = [];
+    const ghE = (args: string[]) => {
+      if ((args[1] ?? '').includes('credential-slot-watchdog.yml/runs')) {
+        throw new Error('api down');
+      }
+      return simGh([]).gh(args);
+    };
+    const code = runCli({
+      workflowYamlText: REAL_WORKFLOW,
+      gh: ghE,
+      now: new Date('2026-10-10T15:00:30Z'),
+      env: { GITHUB_RUN_ID: '32', GITHUB_EVENT_NAME: 'schedule', WATCHDOG_GRACE_HOURS: '8' },
+      writeOutput: (name: string, value: string) => {
+        outputs[name] = value;
+        return true;
+      },
+      log: () => {},
+      error: (m: string) => errors.push(m),
+    });
+    expect(code).toBe(1);
+    expect(outputs.alert).toBeUndefined();
+    // The crash alert names the window it did not check.
+    expect(outputs.window).toBe(
+      '(the start of the last scheduled watchdog run that succeeded on its first attempt - 8 h, 2026-10-10T07:00:30.000Z]',
+    );
+    expect(errors.join('\n')).toContain(`did NOT check the credential fires in ${outputs.window}`);
+    expect(errors.join('\n')).toContain('api down');
+
+    // Run F (33), eight hours later, sees E as the code concluded it.
+    const E = run(32, '2026-10-10T15:00:00Z', 'completed', code === 0 ? 'success' : 'failure');
+    const atF = resolveCheckAnchors(
+      listing([run(33, '2026-10-10T23:00:00Z', 'in_progress', null), E, ...crashed, A]),
+      { runId: '33', eventName: 'schedule', now: new Date('2026-10-10T23:00:30Z') },
+    );
+    expect(atF.previousCheckAt?.toISOString()).toBe('2026-10-09T07:00:00.000Z');
+    expect(watchdogWindow({ ...atF, graceHours: 8 }).gap).toBe(false);
+    for (const f of UNCHECKED) expect(firesIn(atF)).toContain(f);
+  });
+
+  it.each([
+    ['an empty workflow_runs array', JSON.stringify({ total_count: 0, workflow_runs: [] })],
+    ['a malformed 200 body coerced to []', JSON.stringify({ message: 'oops' })],
+  ])('round 5: %s on a scheduled run crashes (exit 1, no anchor); the next run reaches back to the last success', (_name, body) => {
+    const A = run(28, '2026-10-09T07:00:00Z');
+    const crashed = [
+      run(31, '2026-10-10T07:00:00Z', 'completed', 'failure'),
+      run(30, '2026-10-09T23:00:00Z', 'completed', 'failure'),
+      run(29, '2026-10-09T15:00:00Z', 'completed', 'failure'),
+    ];
+    const outputs: Record<string, string> = {};
+    const errors: string[] = [];
+    const ghE = (args: string[]) => {
+      if ((args[1] ?? '').includes('credential-slot-watchdog.yml/runs')) return body;
+      return simGh([]).gh(args);
+    };
+    const code = runCli({
+      workflowYamlText: REAL_WORKFLOW,
+      gh: ghE,
+      now: new Date('2026-10-10T15:00:30Z'),
+      env: { GITHUB_RUN_ID: '32', GITHUB_EVENT_NAME: 'schedule', WATCHDOG_GRACE_HOURS: '8' },
+      writeOutput: (name: string, value: string) => {
+        outputs[name] = value;
+        return true;
+      },
+      log: () => {},
+      error: (m: string) => errors.push(m),
+    });
+    expect(code).toBe(1);
+    expect(outputs.alert).toBeUndefined();
+    expect(errors.join('\n')).toContain(`did NOT check the credential fires in ${outputs.window}`);
+    expect(errors.join('\n')).toContain('listing was empty');
+    // A dispatch never lists, so it keeps the lookback.
+    expect(
+      resolveCheckAnchors(ghE, {
+        runId: '32',
+        eventName: 'workflow_dispatch',
+        now: new Date('2026-10-10T15:00:30Z'),
+      }).previousCheckAt,
+    ).toBeNull();
+
+    const E = run(32, '2026-10-10T15:00:00Z', 'completed', 'failure');
+    const atF = resolveCheckAnchors(
+      listing([run(33, '2026-10-10T23:00:00Z', 'in_progress', null), E, ...crashed, A]),
+      { runId: '33', eventName: 'schedule', now: new Date('2026-10-10T23:00:30Z') },
+    );
+    expect(atF.previousCheckAt?.toISOString()).toBe('2026-10-09T07:00:00.000Z');
+    for (const f of UNCHECKED) expect(firesIn(atF)).toContain(f);
+  });
+
+  it('a partial re-run (attempt 2) is never an anchor: the next window reaches back to the last attempt-1 success', () => {
+    // 29 checked at 15:00 (window ending 07:00); its alert job failed, and a
+    // re-run of that job alone at 21:00 turned it `success`, attempt 2, with
+    // `run_started_at` reset to 21:00. Anchoring there checks (13:00, 15:00]
+    // and skips (07:00, 13:00]: bun-webpack 07:47 and node 09:17.
+    const rerun = run(29, '2026-10-10T21:00:00Z', 'completed', 'success', {
+      attempt: 2,
+      created: '2026-10-10T15:00:00Z',
+    });
+    const a = resolveCheckAnchors(
+      listing([
+        run(30, '2026-10-10T23:00:00Z', 'in_progress', null),
+        rerun,
+        run(28, '2026-10-10T07:00:00Z'),
+      ]),
+      { runId: '30', eventName: 'schedule', now: new Date('2026-10-10T23:00:30Z') },
+    );
+    expect(a.previousCheckAt?.toISOString()).toBe('2026-10-10T07:00:00.000Z');
+    const fires = firesIn(a);
+    expect(fires).toContain('bun-webpack@2026-10-10T07:47:00.000Z');
+    expect(fires).toContain('node@2026-10-10T09:17:00.000Z');
+    // Anchored on the re-run time, they would not have been.
+    const onRerun = firesIn({
+      checkAt: a.checkAt,
+      previousCheckAt: new Date('2026-10-10T21:00:00Z'),
+    });
+    expect(onRerun).not.toContain('bun-webpack@2026-10-10T07:47:00.000Z');
+    expect(onRerun).not.toContain('node@2026-10-10T09:17:00.000Z');
+  });
+
+  it('a run with no run_attempt is never an anchor (it cannot prove it is a first attempt)', () => {
+    const { run_attempt: _, ...noAttempt } = run(29, '2026-10-10T14:00:00Z');
+    const a = resolveCheckAnchors(
+      listing([
+        run(30, '2026-10-10T23:00:00Z', 'in_progress', null),
+        noAttempt,
+        run(28, '2026-10-10T07:00:00Z'),
+      ]),
+      { runId: '30', eventName: 'schedule', now: new Date('2026-10-10T23:00:30Z') },
+    );
+    expect(a.previousCheckAt?.toISOString()).toBe('2026-10-10T07:00:00.000Z');
+  });
+
+  it('with no first-attempt success in view, a re-run reaches back from when it was CREATED (its start was reset)', () => {
+    // 29 was created at 06:30 and crashed; its lookback window was
+    // (10-08 22:30, 10-09 22:30]. It is being re-run, so its `run_started_at`
+    // reads the re-run time — after this run's own start, or before it.
+    expect(WATCHDOG_LOOKBACK_HOURS).toBe(24);
+    const expectedStart = new Date(Date.parse('2026-10-10T06:30:00Z') - (8 + 24) * H);
+    for (const [status, conclusion, started] of [
+      ['in_progress', null, '2026-10-10T15:10:00Z'],
+      ['completed', 'success', '2026-10-10T10:00:00Z'],
+    ] as const) {
+      const a = resolveCheckAnchors(
+        listing([
+          run(30, '2026-10-10T15:00:00Z', 'in_progress', null),
+          run(29, started, status, conclusion, { attempt: 2, created: '2026-10-10T06:30:00Z' }),
+        ]),
+        { runId: '30', eventName: 'schedule', now: new Date('2026-10-10T15:00:30Z') },
+      );
+      expect(watchdogWindow({ ...a, graceHours: 8 }).start.toISOString()).toBe(
+        expectedStart.toISOString(),
+      );
+    }
   });
 });

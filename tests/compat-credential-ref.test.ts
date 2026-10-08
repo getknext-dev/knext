@@ -14,8 +14,8 @@ import {
 } from '../scripts/compat-credential-ref.mjs';
 import { buildLedger } from '../scripts/compat-run-ledger.mjs';
 import {
-  auditCredentialMatrix,
-  auditWindow,
+  auditCredentialMatrix as auditCredentialMatrixLive,
+  auditWindow as auditWindowLive,
   CREDENTIAL_CELLS,
   formatReport,
   gradeNight,
@@ -26,6 +26,29 @@ import {
 } from '../scripts/compat-window-audit.mjs';
 import { computeFingerprint } from '../scripts/compat-window-fingerprint.mjs';
 import { evaluate, exprBody } from './helpers/gha-expr';
+
+/**
+ * ADR-0056 Amendment 5 moved every credential cell from one scheduled run a
+ * day to three. The rules this file exercises (fingerprint continuity, reds,
+ * reruns, lanes, modes, rule 5, rule 7, the VOID grade, the once-a-day slot
+ * calendar) do not depend on how often a cell fires, and their fixtures sit
+ * one run per UTC day — so they are graded against the ONCE-A-DAY calendar the
+ * cells ran on before Amendment 5. The live three-a-day schedule, spacing and
+ * the multi-fire calendar are exercised in tests/compat-credential-runs.test.ts.
+ */
+const ONCE_A_DAY: Record<string, string> = {
+  node: '17 1 * * *',
+  bun: '47 5 * * *',
+  'node-webpack': '17 22 * * *',
+  'bun-webpack': '47 23 * * *',
+};
+const onceADay = (lane: string) => ONCE_A_DAY[lane] ?? null;
+// biome-ignore lint/suspicious/noExplicitAny: thin pass-through over the untyped .mjs API
+const auditWindow = (ledgers: any, opts: Record<string, unknown> = {}) =>
+  auditWindowLive(ledgers, { credentialCronForLane: onceADay, ...opts });
+// biome-ignore lint/suspicious/noExplicitAny: thin pass-through over the untyped .mjs API
+const auditCredentialMatrix = (ledgers: any, opts: Record<string, unknown> = {}) =>
+  auditCredentialMatrixLive(ledgers, { credentialCronForLane: onceADay, ...opts });
 
 /**
  * #850 / ADR-0056 — credential v1.0 against a FROZEN release-candidate tag, one
@@ -1002,7 +1025,7 @@ describe('early-warning alerts say they are non-credentialing', () => {
       const { title, note } = noteFor(runtime, 'credential', `${runtime}-webpack`);
       expect(title).toBe(`Compat CREDENTIAL RED (${runtime}-webpack, RC tag)`);
       expect(title).not.toBe(noteFor(runtime, 'credential').title);
-      expect(note).toMatch(new RegExp(`${runtime}-webpack CREDENTIAL night`));
+      expect(note).toMatch(new RegExp(`${runtime}-webpack CREDENTIAL run`));
     });
   }
 
@@ -1019,8 +1042,11 @@ describe('early-warning alerts say they are non-credentialing', () => {
     it(`${runtime} credential: names the RC night and the restart, under its own title`, () => {
       const { title, note } = noteFor(runtime, 'credential');
       expect(title).toBe(`Compat CREDENTIAL RED (${runtime}, RC tag)`);
-      expect(note).toMatch(/CREDENTIAL night/);
-      expect(note).toMatch(/RESTARTS this cell's v1\.0 14-night window/);
+      expect(note).toMatch(/CREDENTIAL run/);
+      // ADR-0056 Amendment 5: the window is 14 consecutive green runs.
+      expect(note).toMatch(
+        /RESTARTS this cell's v1\.0 14-run window \(14 consecutive green runs\)/,
+      );
     });
   }
 });

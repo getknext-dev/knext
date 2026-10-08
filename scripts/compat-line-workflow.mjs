@@ -74,15 +74,158 @@ function count(hay, needle) {
   return hay.split(needle).length - 1;
 }
 
+/** The pinned action lines the `nights` shape's cold-cache substitutions anchor on. */
+const CACHE_USES = '        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0';
+const SETUP_BUN_USES =
+  '        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0';
+const SETUP_NODE_USES =
+  '        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0';
+
 /**
- * The declared substitutions for `spec`, in application order. Each is
- * `{ id, from, to, count }`: `from` must occur EXACTLY `count` times in the
- * text it is applied to, and `to` must occur zero times there (which is what
- * makes the step exactly invertible).
+ * The SHAPES a tag's own `test-e2e-deploy.yml` can take, keyed by id. Each
+ * names, per cell, the v1.0 credential cron literal that tag schedules and how
+ * many times it occurs, plus the alert-prose substitutions that bring the
+ * line's text to "runs" wording.
+ *
+ *   * `nights` — every tag cut before ADR-0056 Amendment 5 (v1.3.0-rc.9
+ *     included): one credential fire per cell per day, "14-night" prose.
+ *   * `runs` — every tag cut after it: one cron literal per cell firing three
+ *     times a day, "14-run" prose.
+ *
+ * Exactly one shape must match a source (`sourceShapeOf`), and either shape
+ * derives to the SAME v1.3 crons (`spec.cronMap`, keyed by lane) and the same
+ * prose. That is how the v1.3 lane runs three times a day from the moment its
+ * workflow is regenerated, without waiting for its pin to reach a tag that
+ * carries the new schedule. Underiving tries each shape and keeps the one
+ * whose recovered source hashes to the header digest.
+ *
+ * FRESH CACHES (ADR-0056 Amendment 5, D11). A `runs` tag already skips every
+ * cache restore on a credential run (its actions/cache steps carry
+ * `if: env.KNEXT_COMPAT_MODE != 'credential'`, setup-bun `no-cache`,
+ * setup-node `package-manager-cache: false`, and the Prepare job does not warm
+ * Playwright). A `nights` tag predates that, so its `coldCaches` substitutions
+ * add exactly those lines — the v1.3 lane runs cold from the moment it is
+ * regenerated, like the v1.0 lane. tests/compat-credential-runs.test.ts scans
+ * the derived file for any cache restore on a credential run.
+ */
+export const SOURCE_SHAPES = Object.freeze({
+  nights: Object.freeze({
+    crons: Object.freeze({
+      node: Object.freeze(['17 1 * * *', 4]),
+      bun: Object.freeze(['47 5 * * *', 7]),
+      'node-webpack': Object.freeze(['17 22 * * *', 6]),
+      'bun-webpack': Object.freeze(['47 23 * * *', 8]),
+    }),
+    /** @param {string} v */
+    prose: (v) => [
+      {
+        id: 'run-prose-lane-note',
+        from: 'This is the **${KNEXT_LANE} CREDENTIAL night** — it ran against',
+        to: 'This is the **${KNEXT_LANE} CREDENTIAL run** — it ran against',
+        count: 1,
+      },
+      {
+        id: 'window-prose',
+        from: "A red here RESTARTS this cell's v1.0 14-night window;",
+        to: `A red here RESTARTS this cell's ${v} 14-run window (14 consecutive green runs);`,
+        count: 1,
+      },
+      {
+        id: 'window-prose-label',
+        from: `--description "A credential night restarted this cell's v1.0 14-night window"`,
+        to: `--description "A credential run restarted this cell's ${v} 14-run window"`,
+        count: 2,
+      },
+      {
+        id: 'run-prose-recovered',
+        from: '**Recovered.** This credential night ran green end to end',
+        to: '**Recovered.** This credential run went green end to end',
+        count: 1,
+      },
+    ],
+    coldCaches: Object.freeze([
+      {
+        id: 'cold-cache actions/cache',
+        from: `${CACHE_USES}\n`,
+        to: `        if: env.KNEXT_COMPAT_MODE != 'credential'\n${CACHE_USES}\n`,
+        count: 4,
+      },
+      {
+        id: 'cold-cache playwright warm-up',
+        from:
+          '      - name: Install Playwright chromium (warm the cache; retry + timeout, NON-FATAL)\n' +
+          "        if: steps.pw-cache.outputs.cache-hit != 'true'\n",
+        to:
+          '      - name: Install Playwright chromium (warm the cache; retry + timeout, NON-FATAL)\n' +
+          "        if: steps.pw-cache.outputs.cache-hit != 'true' && env.KNEXT_COMPAT_MODE != 'credential'\n",
+        count: 1,
+      },
+      {
+        id: 'cold-cache setup-bun',
+        from: `${SETUP_BUN_USES}\n        with:\n`,
+        to: `${SETUP_BUN_USES}\n        with:\n          no-cache: \${{ env.KNEXT_COMPAT_MODE == 'credential' }}\n`,
+        count: 3,
+      },
+      {
+        id: 'cold-cache setup-node',
+        from: `${SETUP_NODE_USES}\n        with:\n`,
+        to: `${SETUP_NODE_USES}\n        with:\n          package-manager-cache: false\n`,
+        count: 2,
+      },
+    ]),
+  }),
+  runs: Object.freeze({
+    crons: Object.freeze({
+      node: Object.freeze(['17 1,9,17 * * *', 4]),
+      bun: Object.freeze(['47 5,13,21 * * *', 7]),
+      'node-webpack': Object.freeze(['17 6,14,22 * * *', 6]),
+      'bun-webpack': Object.freeze(['47 7,15,23 * * *', 8]),
+    }),
+    /** @param {string} v */
+    prose: (v) => [
+      { id: 'window-prose', from: 'v1.0 14-run window', to: `${v} 14-run window`, count: 3 },
+    ],
+    coldCaches: Object.freeze([]),
+  }),
+});
+
+/**
+ * Which `SOURCE_SHAPES` entry a tag's `test-e2e-deploy.yml` has: the one whose
+ * every cell cron literal occurs in it. Throws unless exactly one matches — a
+ * source carrying neither (or both) is not one this derivation knows.
+ *
+ * @param {string} sourceText
+ * @returns {keyof typeof SOURCE_SHAPES}
+ */
+export function sourceShapeOf(sourceText) {
+  const matches = Object.entries(SOURCE_SHAPES)
+    .filter(([, shape]) =>
+      Object.values(shape.crons).every(([cron]) => count(sourceText, `'${cron}'`) > 0),
+    )
+    .map(([id]) => id);
+  if (matches.length !== 1) {
+    throw new Error(
+      `compat-line-workflow: the source workflow matches ${matches.length} known schedule shape(s) ` +
+        `(${matches.join(', ') || 'none'}) — expected exactly one of ${Object.keys(SOURCE_SHAPES).join(', ')}; ` +
+        'update SOURCE_SHAPES deliberately',
+    );
+  }
+  return /** @type {keyof typeof SOURCE_SHAPES} */ (matches[0]);
+}
+
+/**
+ * The declared substitutions for `spec` on a source of `shape`, in
+ * application order. Each is `{ id, from, to, count }`: `from` must occur
+ * EXACTLY `count` times in the text it is applied to, and `to` must occur zero
+ * times there (which is what makes the step exactly invertible).
  *
  * @param {ReturnType<typeof lineSpec>} spec
+ * @param {keyof typeof SOURCE_SHAPES} [shape] the source's shape (default: the
+ *   current one, `runs`)
  */
-export function lineSubstitutions(spec) {
+export function lineSubstitutions(spec, shape = 'runs') {
+  const sourceShape = SOURCE_SHAPES[shape];
+  if (!sourceShape) throw new Error(`compat-line-workflow: unknown source shape ${shape}`);
   const derivedPath = `.github/workflows/${spec.workflowFile}`;
   const v = spec.line;
   /** @type {{id: string, from: string, to: string, count: number}[]} */
@@ -94,17 +237,15 @@ export function lineSubstitutions(spec) {
       count: 1,
     },
   ];
-  // The four credential crons, moved to this line's offset slots. Every
-  // occurrence moves — the env expressions, the recovery job's inlined `if:`
-  // and the source's comments — so no expression can still name a v1.0 slot.
-  const cronCounts = {
-    '17 1 * * *': 4,
-    '47 5 * * *': 7,
-    '17 22 * * *': 6,
-    '47 23 * * *': 8,
-  };
-  for (const [from, to] of Object.entries(spec.cronMap)) {
-    subs.push({ id: `cron ${from}`, from: `'${from}'`, to: `'${to}'`, count: cronCounts[from] });
+  // The four credential crons, moved to this line's own slots (keyed by
+  // cell, so either source shape lands on the same grid). Every occurrence
+  // moves — the env expressions, the recovery job's inlined `if:` and the
+  // source's comments — so no expression can still name a v1.0 slot.
+  for (const [lane, to] of Object.entries(spec.cronMap)) {
+    const entry = sourceShape.crons[lane];
+    if (!entry) throw new Error(`compat-line-workflow: no ${shape} source cron for cell ${lane}`);
+    const [from, n] = entry;
+    subs.push({ id: `cron ${lane}`, from: `'${from}'`, to: `'${to}'`, count: n });
   }
   // The two v1.0 EARLY-WARNING crons test `main`; this line is credential-only,
   // so they are unscheduled (their env-expression branches become dead: a cron
@@ -177,12 +318,7 @@ export function lineSubstitutions(spec) {
       to: `This per-cell issue is labelled \\\`${spec.resetLabel}\\\`.`,
       count: 1,
     },
-    {
-      id: 'window-prose',
-      from: 'v1.0 14-night window',
-      to: `${v} 14-night window`,
-      count: 3,
-    },
+    ...sourceShape.prose(v),
     {
       id: 'pin-prose',
       from: 'pinned in \\`.github/compat-credential-ref.json\\`',
@@ -195,6 +331,7 @@ export function lineSubstitutions(spec) {
       to: `The single aggregate view for this line is the (unpinned) **${spec.trackerTitle}** issue, refreshed daily by \\\`${spec.trackerWorkflow}\\\`.`,
       count: 1,
     },
+    ...sourceShape.coldCaches,
   );
   return subs;
 }
@@ -387,7 +524,7 @@ export function deriveLineWorkflow(sourceText, { line, tag, repoRoot }) {
     throw new Error(`compat-line-workflow: ${JSON.stringify(tag)} is not a ${line} RC tag`);
   }
   let text = sourceText;
-  for (const s of lineSubstitutions(spec)) {
+  for (const s of lineSubstitutions(spec, sourceShapeOf(sourceText))) {
     const n = count(text, s.from);
     if (n !== s.count) {
       throw new Error(
@@ -446,17 +583,32 @@ export function parseDerivedHeader(derivedText, line = 'v1.3', repoRoot = REPO_R
 export function underiveLineWorkflow(derivedText, { line, repoRoot }) {
   const spec = lineSpec(line);
   const { tag, digest, guards, header } = parseDerivedHeader(derivedText, line, repoRoot);
-  let text = derivedText.slice(header.length);
-  for (const s of [...lineSubstitutions(spec)].reverse()) {
-    const n = count(text, s.to);
-    if (n !== s.count) {
-      throw new Error(
-        `compat-line-workflow: cannot invert "${s.id}": its replacement occurs ${n} time(s), expected ${s.count} — the derived file was hand-edited`,
-      );
+  // Both shapes derive to the same v1.3 crons and prose, so the shape is not
+  // readable from the derived text: invert with each, and keep the one whose
+  // recovered source hashes to the recorded digest.
+  const errors = [];
+  for (const shape of /** @type {(keyof typeof SOURCE_SHAPES)[]} */ (Object.keys(SOURCE_SHAPES))) {
+    let text = derivedText.slice(header.length);
+    try {
+      for (const s of [...lineSubstitutions(spec, shape)].reverse()) {
+        const n = count(text, s.to);
+        if (n !== s.count) {
+          throw new Error(
+            `compat-line-workflow: cannot invert "${s.id}" (${shape} shape): its replacement occurs ${n} time(s), expected ${s.count} — the derived file was hand-edited`,
+          );
+        }
+        text = text.split(s.to).join(s.from);
+      }
+    } catch (err) {
+      errors.push(err.message);
+      continue;
     }
-    text = text.split(s.to).join(s.from);
+    if (sha256(text) === digest) return { sourceText: text, tag, digest, guards, shape };
+    errors.push(
+      `compat-line-workflow: the ${shape}-shape inversion does not hash to the recorded digest`,
+    );
   }
-  return { sourceText: text, tag, digest, guards };
+  throw new Error(errors.join('; '));
 }
 
 /**

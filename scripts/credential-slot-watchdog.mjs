@@ -5,19 +5,31 @@
  * Thin fetch/attribution layer around `scripts/lib/credential-slot-watchdog.mjs`'s
  * pure decision function. READ-ONLY: it lists scheduled runs of
  * `test-e2e-deploy.yml` and their artifact-marker listings via the GitHub API
- * and never dispatches, cancels, or writes anything. Exits 1 when any
- * credential lane needs the standard pinned alert (`missing`,
- * `queued-too-long`, or `ambiguous` — see the lib module's header), so the
- * companion workflow job (`.github/workflows/credential-slot-watchdog.yml`)
- * can gate its alert step on this job's result — the same
- * `needs.<job>.result == 'failure'` pattern every other nightly alert in
- * this repo uses. Also exits 1 (via the generic handler below) when the
- * workflow's cron shape cannot be parsed at all — see
- * `resolveCredentialLanes`'s fail-closed contract in the lib module.
+ * and never dispatches, cancels, or writes anything.
+ *
+ * VERDICT VIA OUTPUT, NOT EXIT CODE (PR #2013 round 3). When any credential
+ * fire needs the standard pinned alert (`missing`, `queued-too-long`,
+ * `ambiguous`, `coverage-gap` — see the lib module's header) the script
+ * writes `alert=true` to `$GITHUB_OUTPUT` and still EXITS 0; the companion
+ * workflow's alert job (`.github/workflows/credential-slot-watchdog.yml`)
+ * keys on that output. Exit 0 therefore means "this run evaluated its
+ * window", which is what the next run anchors on (`resolveCheckAnchors`).
+ * It exits 1 only when it did NOT evaluate — a crash (both run listings
+ * down; on a scheduled run, its listing of its own runs down; a workflow
+ * whose cron shape cannot be parsed, per
+ * `resolveCredentialLanes`'s fail-closed contract) or an alert with no
+ * output to carry it — and the alert job fires on that `failure` too, naming
+ * the window that was not checked (`runCli`).
  *
  * Env:
  *   WATCHDOG_GRACE_HOURS  optional override for the grace-period hours
  *                         (default: DEFAULT_GRACE_HOURS, currently 8).
+ *   GITHUB_RUN_ID / GITHUB_EVENT_NAME  set by Actions. A SCHEDULED run checks
+ *                         every fire since the previous scheduled watchdog
+ *                         run that SUCCEEDED ON ITS FIRST ATTEMPT
+ *                         (`resolveCheckAnchors`); anything else
+ *                         checks the WATCHDOG_LOOKBACK_HOURS window.
+ *   GITHUB_OUTPUT         set by Actions; receives `window` and `alert`.
  *   GH_TOKEN / GITHUB_TOKEN  read by the `gh` CLI itself, not read directly
  *                            here.
  *
@@ -25,7 +37,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { appendFileSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { laneFromArtifacts, modeFromArtifacts } from './compat-window-audit.mjs';
@@ -34,13 +46,19 @@ import {
   computeExpectedSlots,
   DEFAULT_GRACE_HOURS,
   decideCredentialSlotVerdicts,
+  dueFiresInWindow,
   parseAllDeclaredSlots,
   resolveCredentialLanes,
+  WATCHDOG_LOOKBACK_HOURS,
+  WATCHDOG_MAX_WINDOW_HOURS,
+  watchdogWindow,
 } from './lib/credential-slot-watchdog.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 export const REPO = 'getknext-dev/knext';
 export const WORKFLOW_FILE = 'test-e2e-deploy.yml';
+/** This watchdog's own workflow — its previous run anchors the window. */
+export const WATCHDOG_WORKFLOW_FILE = 'credential-slot-watchdog.yml';
 const WORKFLOW_PATH = resolve(REPO_ROOT, '.github/workflows', WORKFLOW_FILE);
 
 function runGh(args) {
@@ -60,8 +78,11 @@ function mapRun(r) {
     id: r.id,
     event: r.event,
     status: r.status,
+    conclusion: r.conclusion,
     created_at: r.created_at,
     run_started_at: r.run_started_at ?? null,
+    // 1 on a first attempt, higher on a re-run, which resets `run_started_at`.
+    run_attempt: r.run_attempt,
     html_url: r.html_url,
   };
 }
@@ -168,7 +189,7 @@ export function fetchWindowRuns(gh, { since = null, ...rest } = {}) {
  * @param {(args: string[]) => string} gh
  * @param {T[]} runs
  * @param {{repo?: string}} [opts]
- * @returns {(T & {exactLane?: string|null})[]}
+ * @returns {(T & {exactLane?: string|null, earlyWarning?: boolean})[]}
  */
 export function attachExactLanes(gh, runs, { repo = REPO } = {}) {
   return runs.map((run) => {
@@ -184,25 +205,154 @@ export function attachExactLanes(gh, runs, { repo = REPO } = {}) {
     }
     const lane = laneFromArtifacts(artifacts);
     const mode = modeFromArtifacts(artifacts);
-    return { ...run, exactLane: lane && mode === 'credential' ? lane : null };
+    const out = { ...run, exactLane: lane && mode === 'credential' ? lane : null };
+    // A run that SAYS it is early-warning is certainly not a credential run:
+    // `attributeRunsToLanes` drops it instead of guessing from its timing (two
+    // late early-warning runs once vouched for each other and covered a
+    // missing credential run — PR #2013 round 2).
+    if (mode === 'early-warning') out.earlyWarning = true;
+    return out;
   });
 }
 
 /**
- * Run the full check: parse lanes, fetch runs, attribute, decide. Pure given
- * its inputs (`gh` and `now` are both injectable), so this is what the CLI
- * `main()` and the offline tests both call.
+ * This run's own start and the previous scheduled watchdog run's start — the
+ * two anchors of `watchdogWindow` (see the lib module header). READ-ONLY (one
+ * `gh api` GET of this workflow's scheduled runs).
  *
- * @param {{workflowYamlText: string, gh: (args: string[]) => string, now?: Date, graceHours?: number}} args
+ *   * Only a SCHEDULED run is anchored: a dispatch checks the lookback window
+ *     and never alerts anyway (the alert job is schedule-only).
+ *   * `checkAt` is this run's own `run_started_at` when the listing has it,
+ *     else `now`; the previous run's anchor is the same field, so consecutive
+ *     windows share their boundary.
+ *   * The previous run is the newest scheduled run that started before this
+ *     one and completed `success` — and ONLY `success` (PR #2013 round 3).
+ *     The CLI exits 0 whenever it evaluated its window (an alert travels in
+ *     the `alert` job output, not the exit code), so `success` means "window
+ *     evaluated, and any alert delivered". `failure` (a crash before
+ *     evaluating, or an alert job that could not file its issue),
+ *     `cancelled`/`timed_out` (job timeout, runner loss) and a run still in
+ *     progress are all skipped: the window widens back to the last run that
+ *     did evaluate, so the skipped run's fires are checked now.
+ *   * ...and only on its FIRST attempt (`run_attempt === 1`, round 4). A
+ *     re-run resets `run_started_at` to the re-run time: a "Re-run failed
+ *     jobs" of only the alert job turns the run `success` with a start hours
+ *     after its check, and anchoring there skips every fire in between. A
+ *     re-run (or a run with no `run_attempt`) is skipped like a crash; its
+ *     fires are re-checked, never lost.
+ *   * Earlier runs in view but none anchoring: the window reaches back to the
+ *     OLDEST of them minus the lookback — where that run's own window would
+ *     have started had it had no anchor. "Earlier" and "oldest" read the
+ *     earlier of `created_at` and `run_started_at`, because a re-run's start
+ *     was reset and its creation was not. A full listing that old is beyond
+ *     WATCHDOG_MAX_WINDOW_HOURS, so `watchdogWindow` clamps it and raises
+ *     `coverage-gap`.
+ *   * An EMPTY listing on a scheduled run throws like a failed one (round 5): a
+ *     correct listing always holds the run itself, and the lookback it would
+ *     fall back to can skip a crash streak's fires.
+ *   * A listing that FAILS throws (round 4) — the CLI exits 1, the pinned
+ *     alert names the window it did not check, and the run is no anchor. It
+ *     must not fall back to the lookback: that reaches back 24 h, not to the
+ *     last successful run, so after a crash streak it would skip fires and
+ *     still succeed, anchoring the next run past them.
+ *
+ * @param {(args: string[]) => string} gh
+ * @param {{runId?: string|number|null, eventName?: string|null, now: Date}} opts
+ * @returns {{checkAt: Date, previousCheckAt: Date|null}}
  */
-export function evaluateWatchdog({ workflowYamlText, gh, now = new Date(), graceHours }) {
+export function resolveCheckAnchors(gh, { runId = null, eventName = null, now }) {
+  const fallback = { checkAt: now, previousCheckAt: null };
+  if (eventName !== 'schedule') return fallback;
+  let runs;
+  try {
+    runs = fetchScheduledRuns(gh, {
+      workflowFile: WATCHDOG_WORKFLOW_FILE,
+      perPage: 30,
+      maxPages: 1,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `cannot list this workflow's own scheduled runs to anchor the window: ${message}`,
+    );
+  }
+  // A correct `event=schedule` listing seen by a scheduled run always holds
+  // that run, so an EMPTY one is a bad read (a malformed 200 body is coerced to
+  // []), never a first run: treat it like a failed listing. A time-stale
+  // listing still holds earlier runs and never reaches this branch.
+  if (runs.length === 0) {
+    throw new Error(
+      "cannot list this workflow's own scheduled runs to anchor the window: the listing was empty",
+    );
+  }
+  const own = runs.find((r) => runId != null && String(r.id) === String(runId));
+  const ownStart = own?.run_started_at ? new Date(own.run_started_at) : null;
+  const checkAt = ownStart && Number.isFinite(ownStart.getTime()) ? ownStart : now;
+  let previous = null;
+  let oldestEarlier = null;
+  for (const r of runs) {
+    if (own && r.id === own.id) continue;
+    // A dispatch never raises the alert, so it can neither anchor nor stand in
+    // for a scheduled run — even if the server-side filter lets one through.
+    if (r.event && r.event !== 'schedule') continue;
+    const started = r.run_started_at ? new Date(r.run_started_at) : null;
+    const created = r.created_at ? new Date(r.created_at) : null;
+    // A re-run resets `run_started_at`, never `created_at`.
+    const first = [started, created]
+      .filter((d) => d && Number.isFinite(d.getTime()))
+      .sort((a, b) => a.getTime() - b.getTime())[0];
+    if (!first || first.getTime() >= checkAt.getTime()) continue;
+    if (!oldestEarlier || first.getTime() < oldestEarlier.getTime()) oldestEarlier = first;
+    if (r.status !== 'completed' || r.conclusion !== 'success') continue;
+    if (r.run_attempt !== 1) continue;
+    if (!started || !Number.isFinite(started.getTime())) continue;
+    if (started.getTime() >= checkAt.getTime()) continue;
+    if (!previous || started.getTime() > previous.getTime()) previous = started;
+  }
+  if (!previous && oldestEarlier) {
+    previous = new Date(oldestEarlier.getTime() - WATCHDOG_LOOKBACK_HOURS * 60 * 60 * 1000);
+  }
+  return { checkAt, previousCheckAt: previous };
+}
+
+/**
+ * Run the full check: parse lanes, fetch runs, attribute, decide — for EVERY
+ * credential fire in `watchdogWindow({checkAt, previousCheckAt})` (see the lib
+ * module header). Pure given its inputs (`gh`, `now`, `checkAt` and
+ * `previousCheckAt` are all injectable), so this is what the CLI and the
+ * offline tests both call.
+ *
+ * Each fire is decided in its own context — the lanes' slots taken at that
+ * fire — so attribution and the ambiguity rule see exactly what a check at
+ * `fire + grace` would have. Every verdict carries the fire it decided
+ * (`slot`). A window clamped to WATCHDOG_MAX_WINDOW_HOURS adds one
+ * `coverage-gap` verdict, which alerts.
+ *
+ * @param {{workflowYamlText: string, gh: (args: string[]) => string, now?: Date, graceHours?: number, checkAt?: Date|null, previousCheckAt?: Date|null}} args
+ */
+export function evaluateWatchdog({
+  workflowYamlText,
+  gh,
+  now = new Date(),
+  graceHours,
+  checkAt = null,
+  previousCheckAt = null,
+}) {
   const resolvedGraceHours =
     graceHours ?? (Number(process.env.WATCHDOG_GRACE_HOURS) || DEFAULT_GRACE_HOURS);
+  const nowDate = now instanceof Date ? now : new Date(now);
 
-  const lanes = computeExpectedSlots(
-    resolveCredentialLanes(workflowYamlText, { defaultGraceHours: resolvedGraceHours }),
-    now,
-  );
+  const laneDefs = resolveCredentialLanes(workflowYamlText, {
+    defaultGraceHours: resolvedGraceHours,
+  });
+  const window = watchdogWindow({
+    checkAt: checkAt ?? nowDate,
+    previousCheckAt,
+    graceHours: resolvedGraceHours,
+  });
+  const fireTimes = [
+    ...new Set(dueFiresInWindow(laneDefs, window).map((f) => f.fire.toISOString())),
+  ];
 
   let allSlots;
   try {
@@ -213,46 +363,183 @@ export function evaluateWatchdog({ workflowYamlText, gh, now = new Date(), grace
     // never reaches this line). This narrower fallback covers the case where
     // `resolveCredentialLanes` only needed the CREDENTIAL crons to parse
     // (and they did) but some OTHER declared cron in the `schedule:` block is
-    // not a simple once-daily shape `parseAllDeclaredSlots` requires.
-    // Degrading `allSlots` to just the lanes themselves is strictly safer
-    // than crashing the watchdog: it can only make an early-warning run look
-    // like it satisfies a credential lane in the fallback heuristic, never
-    // the reverse, and `detectAmbiguousAttribution` still runs on the result.
-    allSlots = lanes.map(({ cron, hour, minute }) => ({ cron, hour, minute }));
+    // not a simple daily shape `parseAllDeclaredSlots` requires. Degrading
+    // `allSlots` to just the lanes themselves is strictly safer than
+    // crashing the watchdog: it can only make an early-warning run look like
+    // it satisfies a credential lane in the fallback heuristic, never the
+    // reverse, and `detectAmbiguousAttribution` still runs on the result.
+    allSlots = laneDefs.flatMap(({ cron, hour, hours, minute }) =>
+      (hours ?? [hour]).map((h) => ({ cron, hour: h, minute })),
+    );
   }
 
-  const since = lanes.map((l) => l.expectedSlotTime).sort()[0];
+  const verdicts = [];
+  if (window.gap) {
+    verdicts.push({
+      lane: '*',
+      slot: window.start.toISOString(),
+      verdict: 'coverage-gap',
+      reason:
+        `the previous scheduled watchdog run is more than ${WATCHDOG_MAX_WINDOW_HOURS}h back — ` +
+        `fires before ${window.start.toISOString()} were never checked`,
+    });
+  }
+  if (fireTimes.length === 0) return verdicts;
+
+  // One context per fire: every lane's slot at that fire.
+  const contexts = fireTimes.map((iso) => ({
+    iso,
+    lanes: computeExpectedSlots(laneDefs, new Date(iso)),
+  }));
+  const since = contexts.flatMap((c) => c.lanes.map((l) => l.expectedSlotTime)).sort()[0];
   const rawRuns = fetchWindowRuns(gh, { since });
   const runsWithExactLane = attachExactLanes(gh, rawRuns);
-  const { attributed, ambiguousLanes } = attributeRunsToLanes(runsWithExactLane, lanes, allSlots);
-  return decideCredentialSlotVerdicts({ lanes, runs: attributed, now, ambiguousLanes });
+
+  for (const { iso, lanes } of contexts) {
+    const { attributed, ambiguousLanes } = attributeRunsToLanes(runsWithExactLane, lanes, allSlots);
+    verdicts.push(
+      ...decideCredentialSlotVerdicts({
+        lanes: lanes.filter((l) => l.expectedSlotTime === iso),
+        runs: attributed,
+        now: nowDate,
+        ambiguousLanes,
+      }),
+    );
+  }
+  return verdicts;
 }
 
-function main() {
-  const workflowYamlText = readFileSync(WORKFLOW_PATH, 'utf8');
-  const verdicts = evaluateWatchdog({ workflowYamlText, gh: runGh, now: new Date() });
+/**
+ * The CLI's whole check, from the Actions environment: anchors from
+ * `GITHUB_RUN_ID` / `GITHUB_EVENT_NAME`, grace from `WATCHDOG_GRACE_HOURS`.
+ *
+ * @param {{workflowYamlText: string, gh: (args: string[]) => string, now: Date, env?: Record<string, string|undefined>}} args
+ */
+export function runWatchdogFromEnv({ workflowYamlText, gh, now, env = process.env }) {
+  const graceHours = Number(env.WATCHDOG_GRACE_HOURS) || DEFAULT_GRACE_HOURS;
+  const { checkAt, previousCheckAt } = resolveCheckAnchors(gh, {
+    runId: env.GITHUB_RUN_ID ?? null,
+    eventName: env.GITHUB_EVENT_NAME ?? null,
+    now,
+  });
+  return evaluateWatchdog({ workflowYamlText, gh, now, graceHours, checkAt, previousCheckAt });
+}
 
-  for (const v of verdicts) {
-    console.log(`${v.lane}: ${v.verdict} — ${v.reason}`);
-  }
+/** `(start, end]`, the window's ISO bounds — as logged and as the `window` output. */
+export function formatWindow({ start, end }) {
+  return `(${start.toISOString()}, ${end.toISOString()}]`;
+}
 
-  const alerting = verdicts.filter((v) => v.verdict !== 'quiet');
-  if (alerting.length > 0) {
-    console.error(
-      `\n${alerting.length} lane(s) need alerting: ${alerting.map((v) => v.lane).join(', ')}`,
+/**
+ * Append one step output to `$GITHUB_OUTPUT`. Returns false when there is no
+ * output file (a local run); a write that fails throws.
+ *
+ * @param {Record<string, string|undefined>} env
+ */
+function githubOutputWriter(env) {
+  return (name, value) => {
+    if (!env.GITHUB_OUTPUT) return false;
+    appendFileSync(env.GITHUB_OUTPUT, `${name}=${value}\n`);
+    return true;
+  };
+}
+
+/**
+ * The CLI, injectable end to end. Returns the exit code.
+ *
+ * EXIT CODE = "did this run evaluate its window" (PR #2013 round 3), never
+ * "does it alert". The verdict travels in the `alert` output (`true`/`false`)
+ * and the alert job keys on it, so a run concludes `success` exactly when it
+ * checked its window — which is what `resolveCheckAnchors` anchors the NEXT
+ * run on. Exit 1 only when it did not:
+ *
+ *   * it crashed before evaluating (both run listings down, an unparseable
+ *     workflow, or — on a scheduled run — its listing of its own runs failed,
+ *     so it has no anchor; that window is named by its end, from the last
+ *     successful run): the log names the window it did not check, the alert job
+ *     raises the pinned alert on the job's `failure`, and the next scheduled
+ *     run, skipping this one as an anchor, checks the window instead;
+ *   * it has an alert and nowhere to report it (no `$GITHUB_OUTPUT`) — fail
+ *     closed, never a silent exit 0.
+ *
+ * The `window` output is written BEFORE evaluating, so the alert job can name
+ * it in the issue even when the evaluation crashes.
+ *
+ * @param {{
+ *   workflowYamlText: string,
+ *   gh: (args: string[]) => string,
+ *   now: Date,
+ *   env?: Record<string, string|undefined>,
+ *   writeOutput?: (name: string, value: string) => boolean,
+ *   log?: (msg: string) => void,
+ *   error?: (msg: string) => void,
+ * }} args
+ * @returns {number}
+ */
+export function runCli({
+  workflowYamlText,
+  gh,
+  now,
+  env = process.env,
+  writeOutput = githubOutputWriter(env),
+  log = console.log,
+  error = console.error,
+}) {
+  const graceHours = Number(env.WATCHDOG_GRACE_HOURS) || DEFAULT_GRACE_HOURS;
+  let window = null;
+  try {
+    let anchors;
+    try {
+      anchors = resolveCheckAnchors(gh, {
+        runId: env.GITHUB_RUN_ID ?? null,
+        eventName: env.GITHUB_EVENT_NAME ?? null,
+        now,
+      });
+    } catch (err) {
+      // No anchor, so no start bound: name what is unchecked by its end.
+      const end = new Date(now.getTime() - graceHours * 60 * 60 * 1000).toISOString();
+      window = `(the start of the last scheduled watchdog run that succeeded on its first attempt - ${graceHours} h, ${end}]`;
+      writeOutput('window', window);
+      throw err;
+    }
+    window = formatWindow(watchdogWindow({ ...anchors, graceHours }));
+    writeOutput('window', window);
+    log(`Checking every credential fire in ${window}.`);
+
+    const verdicts = evaluateWatchdog({ workflowYamlText, gh, now, graceHours, ...anchors });
+    if (verdicts.length === 0) log('No credential fire came due since the previous check.');
+    for (const v of verdicts) log(`${v.lane} @ ${v.slot}: ${v.verdict} — ${v.reason}`);
+
+    const alerting = verdicts.filter((v) => v.verdict !== 'quiet');
+    if (alerting.length > 0) {
+      error(
+        `\n${alerting.length} fire(s) need alerting: ${alerting.map((v) => `${v.lane} @ ${v.slot}`).join(', ')}`,
+      );
+    } else {
+      log('\nAll checked credential-lane fires are quiet.');
+    }
+    const reported = writeOutput('alert', alerting.length > 0 ? 'true' : 'false');
+    if (!reported && alerting.length > 0) {
+      error('::error::no $GITHUB_OUTPUT to report the alert through — failing closed.');
+      return 1;
+    }
+    return 0;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const where = window ?? 'its window (it stopped before computing it)';
+    error(
+      `::error::credential-slot-watchdog crashed and did NOT check the credential fires in ${where}: ${message}. ` +
+        'The next scheduled run anchors only on a run that evaluated its window, so it reaches back over these fires ' +
+        `to the last successful run (a gap over ${WATCHDOG_MAX_WINDOW_HOURS} h is clamped and alerts coverage-gap).`,
     );
-    process.exitCode = 1;
-  } else {
-    console.log('\nAll credential-lane slots are quiet.');
+    return 1;
   }
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  try {
-    main();
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    console.error(`::error::${message}`);
-    process.exit(1);
-  }
+  process.exitCode = runCli({
+    workflowYamlText: readFileSync(WORKFLOW_PATH, 'utf8'),
+    gh: runGh,
+    now: new Date(),
+  });
 }

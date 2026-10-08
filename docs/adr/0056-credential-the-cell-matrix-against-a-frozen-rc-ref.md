@@ -13,6 +13,10 @@
   highest jev score, #1553): a night may be graded VOID — bridged, not counted, not a reset — only
   when a knext-owned marker proves the failure happened before any knext code ran, at most one void
   night per open 14-night streak, recorded in the ledger so the audit can re-prove it.
+  **Amended** by Amendment 5 (2026-10-08, Accepted, founder decision): the credential is **14
+  consecutive green independent RUNS per cell**, not 14 nights — three scheduled runs per cell per
+  day on both release lines, each counted only if it started at least 2 h after the previous
+  counted run; every other rule unchanged.
 - **Amends** ADR-0039 (the frozen set is unchanged in scope — still tarball-inclusive, still not
   narrowed — but its *workflow* entry is now read from the commit that actually executed; see
   ADR-0039 Amendment 1). **Supersedes** the node-lane-only definition in `docs/V1_ROADMAP.md` §3.
@@ -744,3 +748,244 @@ infra-classified one) still prints.
       directly) that an UNPLANNED, genuine pre-knext failure — not the dispatch-only fault
       injection — produces a night the audit grades void-eligible, before ever relying on the grace
       on a credential cron.
+
+## Amendment 5 (2026-10-08): fourteen consecutive green RUNS per cell, not fourteen nights
+
+- **Status:** Accepted (2026-10-08, founder decision given to the lead in chat; jev 0.99 on the
+  decision itself). **Amends:** D1 and D2 (the unit is a run, not a night), Amendment 2 (the
+  calendar places every *fire* of a cell's cron, not one slot per day), Amendment 3 (a fire with no
+  run still resets — unchanged in kind) and Amendment 4 (one VOID bridge per open streak — unchanged,
+  now per open streak of runs).
+- **Applies to both release lines:** v1.0 (`test-e2e-deploy.yml`, pin
+  `.github/compat-credential-ref.json`) and the parallel v1.3 lane (`compat-credential-v1.3.yml`,
+  derived by `scripts/compat-line-workflow.mjs`, pin `.github/compat-credential-ref-v1.3.json`).
+- **Trigger-class:** ADR + credential window definition + CI capacity — flagged for the
+  sprint-close design review.
+
+### Context
+
+D1 made a credential *night* a scheduled run on a frozen RC tag, and D2 required fourteen
+consecutive qualifying nights per cell. Each cell ran once a day, so the shortest possible
+credential was fourteen calendar days per cell, and any reset (a red, a fingerprint move, a dropped
+slot) cost up to another fourteen. Release candidates were paced around that clock.
+
+The founder's decision of 2026-10-08 replaces the time rule: **the credential is fourteen
+consecutive green, independent, full-suite runs per cell, triggered per cycle.** Release candidates
+are cut per milestone (the one-rc-per-day rule is gone). The bar itself is not lowered — still
+fourteen, still the whole suite, still every integrity rule — but "consecutive" now counts runs.
+Independence is the price of that: two runs that shared a runner window or a warm cache are not two
+samples. The founder set three requirements: a minimum spacing of about two hours between counted
+runs of the same cell, fresh caches (no warm reuse that would mask flakiness), and a separate runner
+per run, within the shared pool's capacity (about three to four runs per cell per day, so about four
+to five days to fourteen).
+
+Measured before choosing anything (48 scheduled `test-e2e-deploy.yml` runs, 2026-10-01..08):
+
+| Measure | Value |
+| --- | --- |
+| GitHub schedule delay (creation − cron fire) | 139–441 min (2.3–7.4 h), median 355 min; fires 01:00–06:00 UTC saw 5.3–7.4 h, fires 22:00–00:00 saw 2.3–4.0 h |
+| Start − creation | 0 min on all 48 runs |
+| Run duration | 36–66 min, median 48 |
+| Pool | GitHub Free, 20 concurrent jobs; each run peaks at 8 shard jobs (`max-parallel: 8`) |
+| Cells | 8 (4 v1.0 + 4 v1.3), plus 2 v1.0 early-warning runs a day |
+
+### Decision
+
+#### D8 — The credential unit is a run
+
+A cell's window is met by **14 consecutive qualifying runs** (`WINDOW_REQUIRED_RUNS`). Every rule a
+night had to satisfy, a run has to satisfy: scheduled (a dispatch never counts), first attempt, an RC
+tag on the right line with the commit recorded, every shard green with the shard count matching,
+bytecode caching proven live, the fingerprint continuous. A red run resets the count; a fingerprint
+move restarts it. Docs still claim "verified" or "credentialed" only at 14/14.
+
+#### D9 — Three scheduled runs per cell per day, from one cron literal per cell
+
+Each credential cron is **one literal with a comma-listed hour field**, firing three times a day,
+eight hours apart. `github.event.schedule` is the literal as written, so every env expression that
+maps a cron to its lane, runtime, builder and mode keeps working unchanged, and a dispatch still can
+never produce a credential run.
+
+| Line | Cell | Cron (UTC) |
+| --- | --- | --- |
+| v1.0 | node × turbopack | `17 1,9,17 * * *` |
+| v1.0 | bun × turbopack | `47 5,13,21 * * *` |
+| v1.0 | node × webpack | `17 6,14,22 * * *` |
+| v1.0 | bun × webpack | `47 7,15,23 * * *` |
+| v1.3 | node × turbopack | `32 0,8,16 * * *` |
+| v1.3 | bun × turbopack | `32 2,10,18 * * *` |
+| v1.3 | node × webpack | `32 3,11,19 * * *` |
+| v1.3 | bun × webpack | `32 4,12,20 * * *` |
+
+Each v1.0 cell keeps its previous fire as one of the three. Together the two lines put exactly one
+credential fire in every clock hour (24 a day); the two v1.0 early-warning crons (03:17, 04:47) are
+unchanged. `:32` is a minute no other workflow uses.
+
+Why eight hours: the audit places a run on the latest fire of *its own* cron at or before the run's
+creation (D10), so the gap between a cell's fires must exceed GitHub's delay. The measured worst
+delay is 7.4 h. Eight hours also keeps two runs of a cell at least 8 − (7.4 − 2.3) = 2.9 h apart
+under the measured delay spread, above the two-hour spacing floor.
+
+#### D10 — The audit counts runs on a per-fire calendar, with a spacing floor
+
+- **Per-fire calendar (Amendment 2 generalised).** A run belongs to the latest fire of its cell's
+  cron at or before its `createdAt`. Every fire is its own slot; a multi-fire cron's slot is labelled
+  by fire time (`YYYY-MM-DDTHH:MMZ`), a once-a-day cron keeps its date label. A fire with no run once
+  its fire time plus `MISSING_NIGHT_GRACE_HOURS` (10 h) has passed is a `missing-night` stand-in that
+  restarts the count (Amendment 3, unchanged in kind: a dropped or deleted run cannot be bridged). Two
+  runs in one slot are both `duplicate-slot`.
+- **Delay longer than the fire gap fails closed.** A run delayed past its cell's next fire lands in
+  that later slot: the earlier slot reads missing and the later one holds two runs. The cell resets;
+  the streak is never stretched. A non-inflating repair (move the earlier of two runs back into an
+  empty preceding slot) was considered and rejected: it would also hide a dropped fire followed by a
+  GitHub double-fire.
+- **Rule 10, spacing.** A green run counts only if it *started* (GitHub's `run_started_at`, threaded
+  through `fetchLedgers` as `startedAt`, falling back to `createdAt`) at least
+  `MIN_RUN_SPACING_HOURS` (2 h) after the previous **counted** run of the same streak. A run that is
+  too close is **not counted and does not reset**: it is green, it is just not an independent sample.
+  A recorded start that cannot be read fails closed (not counted). An undated run (offline `--dir`
+  input) is counted but recorded in `spacingUnverified`, which holds `met` false — the same input
+  already fails rule 8.
+- **Every existing rule stands.** Wrong tag, dispatch, rerun, short ledger, bytecode not live, mode
+  missing, fingerprint change, lost ledger, the bounded VOID bridge (now one per open streak of runs).
+
+#### D11 — Independence: a separate runner and fresh caches for every counted run
+
+- **A separate runner per run:** every job runs on an ephemeral GitHub-hosted VM, and scheduled runs
+  get a concurrency group keyed on `run_id`, so no two runs share a runner or cancel each other.
+- **Fresh caches:** every credential run starts cold. On a credential run
+  (`KNEXT_COMPAT_MODE == 'credential'`, which only a credential cron can produce) every `actions/cache`
+  step is skipped, so it neither restores nor saves: the next.js harness's pnpm store and the
+  Playwright browsers are downloaded fresh. The Prepare job does not warm Playwright for a cache that
+  nothing will save, `oven-sh/setup-bun` runs with `no-cache`, and `actions/setup-node` with
+  `package-manager-cache: false`. Early-warning runs and dispatches keep the caches. The v1.3 lane
+  gets the same rule from its derivation: a tag cut before this amendment (`nights` shape, rc.9) has
+  the lines added by declared substitutions, and a later tag carries them itself.
+  `tests/compat-credential-runs.test.ts` scans every step of both credential workflows, classifies
+  each action by its cache behaviour, and fails on an unclassified action.
+- **Cost (measured, then estimated).** On the 2026-10-08 01:54 run, whose caches had been evicted,
+  the Prepare job's cold harness install took 27 s against 11-15 s warm, and the Playwright
+  download 22 s; across four cold runs (2026-10-03..08) the download took 21-24 s. A shard skips a
+  3-11 s cache restore and pays the same download and install, so each shard costs about 20-30 s more
+  and the Prepare job about the same as before. With 16 shards run 8 at a time that is about one
+  minute of wall clock and about seven job-minutes per run, against a median run of 48 minutes.
+- **Risk.** Each credential run now downloads Chromium once per shard (up to 8 at once) instead of
+  once per cache key. In an earlier throttled-network incident concurrent downloads timed out and
+  the browser-driving tests failed. The download step retries four times with a 15-minute limit per
+  attempt, and is non-fatal, so a CDN outage now reads as a red credential run, which resets the cell.
+  That is the price of fresh caches, accepted rather than hidden.
+
+#### D12 — The v1.3 lane gets the same schedule now, not at its next pin bump
+
+The v1.3 workflow is derived from the pinned tag's own `test-e2e-deploy.yml`. Its pin
+(`v1.3.0-rc.9`) predates this amendment, so the tag's own schedule still fires once a day. The
+derivation therefore sets the v1.3 crons **regardless of the tag's own crons**:
+`scripts/compat-line-workflow.mjs` declares the two known source shapes (`SOURCE_SHAPES`: `nights`
+for tags cut before this amendment, `runs` for tags cut after it), detects which one the tag has,
+and replaces that shape's cell crons with `CREDENTIAL_LINES['v1.3'].cronMap` (keyed by cell). Both
+shapes derive to the same v1.3 crons and the same "14-run" alert prose. Underiving tries each shape
+and keeps the one whose recovered source hashes to the recorded digest. The run-time `--check`
+against `v1.3.0-rc.9` passes byte for byte.
+
+#### D13 — The late-slot watchdog checks every fire that came due since its previous run
+
+With fires eight hours apart and an eight-hour grace, "the latest fire at or before now" is never
+past its grace, so a watchdog keyed on it could never alert. A fire is therefore checked only once it
+is due (at or before its start minus the grace).
+
+GitHub starts the watchdog late too, by a different amount each run (measured 4.9-6.6 h), so a
+watchdog that checks only each lane's latest due fire skips a fire whenever two consecutive runs'
+delays differ enough, and checks another twice. Each scheduled run (`25 1,9,17 * * *`) instead
+checks **every** fire in `(previous scheduled watchdog run's start − grace, this run's start − grace]`,
+both starts read from the Actions API. Consecutive windows meet exactly whatever the delays, so every
+fire is checked once and a missing run alerts once. Only a previous run that **evaluated its window**
+anchors: the check exits 0 whenever it evaluated and carries its verdict in an `alert` job output,
+which the alert job keys on, so a run concludes `success` exactly when its window was checked. A run
+that crashed before evaluating (`failure`), timed out (`cancelled`) or is still in progress is
+skipped, and the next window reaches back over its fires; the crash still raises the pinned alert,
+naming the window it did not check. Only a **first attempt** anchors (`run_attempt` 1): a re-run
+resets the run's start time, so a re-run of a failed alert job would anchor hours after its check.
+A scheduled run that cannot list its own previous runs crashes rather than fall back to the
+lookback, which after a crash streak would skip fires; so does an **empty** listing (a correct
+scheduled-event listing always contains the run itself, so zero runs is a bad read, never a first run). With no previous run at all the window is the last 24 hours: at least the
+watchdog period plus the worst measured delay (8 + 7.4 h), and one dropped watchdog run
+(2 × 8 + 7.4 h); it may repeat a check, never skip one. A previous run more than 72 hours back raises a
+`coverage-gap` alert. Each fire is judged in its own context (every lane's slot at that fire), so
+attribution and the ambiguity rule are unchanged per fire, and a run whose own mode marker reads
+early-warning is never credited to a credential lane. A seeded simulation over ten days, with the
+measured delays and with wider ones plus a dropped watchdog run, checks every fire exactly once and
+alerts exactly the dropped runs, once each; with crashed (including a streak of four), timed-out,
+in-progress, failed-listing and partially re-run watchdog runs injected, every fire is still checked
+at least once.
+
+### Options considered
+
+| Option | What it means | For | Against | Verdict |
+| --- | --- | --- | --- | --- |
+| Keep nights | One credential run per cell per day; 14 calendar days | Simple; no change | 14 days minimum per cell, a reset costs up to 14 more; release cadence bound to the calendar | rejected (founder) |
+| **Runs per cycle with spacing** | Several scheduled runs per cell per day, each counted only if it started ≥ 2 h after the previous counted one; every integrity rule kept | ~4.7 days to 14; still scheduled, unattended, first-attempt, on a frozen tag; independence enforced on actual start times | More pool use (≈ 21 run-hours a day); a delay longer than the fire gap resets the cell | **chosen** |
+| Back-to-back runs | Fire the next run as soon as the previous one ends | Fastest to 14 | Correlated flakiness (same runner window, same upstream state, same registry mirrors) reads as independence; warm caches; a burst can bank 14 in a day | rejected |
+
+Sub-decisions, each scored with `jev pick` on the measured numbers above:
+
+| Question | Options (score) | Chosen |
+| --- | --- | --- |
+| Runs per cell per day | 2 (0.06), **3 (0.94)**, 4 (0.00) | 3 — 4 puts the fire gap (6 h) below the measured worst delay (7.4 h) and spacing below 2 h |
+| Slot attribution | **one multi-hour literal per cell, attribute by time (0.88)**, one literal per fire + run-name (0.12), nearest fire of any cron (0.00) | multi-hour literal |
+| Slot grid | **keep each v1.0 fire, v1.3 fills free hours at :32 (0.93)**, strict alternation (0.06), line blocks (0.01) | keep v1.0 fires |
+| Delay past the next fire | **strict reset (0.77)**, repair by reassignment (0.23) | strict |
+| Caches | **disable on credential runs (0.97)**, keep and document (first scored 0.93 for keep, before the review held the founder's fresh-cache requirement) | disable on credential runs |
+| Watchdog window | **every due fire since the previous watchdog run (0.99)**, fixed lookback without de-duplication (0.01), latest due fire only (0.00; first chosen at 0.97, it skips fires under jittered starts) | every due fire since the previous run |
+| In-file cron stagger test | **relax to ≥ 30 min, drop the 08:30 rule (0.72)**, re-grid to keep ≥ 60 min (0.28) | relax |
+
+### Consequences
+
+- **Time to a credential:** fourteen runs at three a day is 4 days 16 hours per cell at the
+  earliest, against fourteen days.
+- **Capacity:** 24 credential runs plus 2 early-warning runs a day, about 21 pool run-hours. About
+  one full run is active every hour, using 8 of the 20 concurrent jobs. Overlap costs queueing, never
+  cancellation, but PR CI and the merge queue share the pool. The literal cron stagger (#1301) is
+  relaxed from 60 to 30 minutes inside `test-e2e-deploy.yml`, and the 08:30 UTC pile-up rule is
+  dropped: with a fire in nearly every hour neither can hold, and the measured 2.3–7.4 h delay plus
+  `max-parallel: 8` are what bound contention.
+- **Fresh caches** cost about one minute of wall clock and about seven job-minutes per credential run
+  (D11), and make a Playwright CDN outage a red credential run.
+- **The fetch horizon** doubles (`DEFAULT_FETCH_LIMIT` 100 → 200): the workflow now fires 14
+  scheduled runs a day.
+- **The v1.0 rc.6 window:** this amendment edits `test-e2e-deploy.yml`, whose executing-workflow
+  bytes are part of every v1.0 cell's fingerprint (D3), so the first credential run after the merge
+  starts a fresh streak in every v1.0 cell (`fingerprint-changed`). Measured at the time of writing,
+  the rc.6 window had banked **zero** credential runs: every credential run so far was on rc.5, and
+  the first rc.6 slot (22:17 UTC on 2026-10-08) had not yet started. The reset therefore costs at
+  most the rc.6 runs that complete before the merge. Older once-a-day history is graded against the
+  new three-a-day calendar and reads as missing fires; it predates the fingerprint move and changes
+  nothing.
+- **The v1.3 window:** regenerating `compat-credential-v1.3.yml` changes its bytes, so the v1.3
+  fingerprint moves too. No v1.3 credential run had completed (only one dispatch dry run), so the
+  reset costs nothing. Editing `compat-window-audit.mjs` also changes the v1.3 guard digests, which is
+  why the file had to be regenerated.
+- **Risk, stated:** a scheduled run delayed more than eight hours resets its cell. The measured worst
+  is 7.4 h, and it grew from 6.2 h in late September. **Revisit trigger:** two or more
+  delay-misattribution resets (a `missing-night` immediately followed by a `duplicate-slot`) in one
+  release cycle.
+
+### Action items
+
+- [x] Audit: per-fire calendar, `WINDOW_REQUIRED_RUNS`, rule 10 spacing on `startedAt`,
+      `spacingSkipped` / `spacingUnverified`, `fetchLedgers` threads `startedAt`, report wording in
+      runs. Tests: `tests/compat-credential-runs.test.ts`; the once-a-day rule suites run on a pinned
+      once-a-day calendar.
+- [x] v1.0 schedule: four multi-hour credential crons in `test-e2e-deploy.yml`; alert prose says
+      "14-run window". Fresh `rcBumpMarker` for the frozen files touched.
+- [x] v1.3: `cronMap` keyed by cell, `SOURCE_SHAPES` in `compat-line-workflow.mjs`, regenerated
+      workflow, `--check` against `v1.3.0-rc.9`.
+- [x] Watchdog: hours-aware slots, `25 1,9,17 * * *`, every due fire since the previous watchdog
+      run (seeded jittered simulation in `tests/credential-slot-watchdog.test.ts`).
+- [x] Fresh caches on credential runs, both lines; scanned by `tests/compat-credential-runs.test.ts`.
+- [x] Trackers: "run N of 14" and "14 consecutive green runs" wording, both lines.
+- [x] Mutation prover: `scripts/mutation-prove-compat-credential-runs.mjs`.
+- [ ] User docs pages that `release/prepare-v1.0.0` also edits (`README.md`, `stability`,
+      `compat-matrix`, `compat-suite`, `docs/RELEASING.md`, `docs/release/v1.0.0.md`) still say
+      nights; they are reworded after that branch merges, to avoid a conflicting edit (#2014).
+- [ ] Measure the actual spacing and delay distribution after the first full week on the new grid,
+      and revisit N if the pool is saturated or delays exceed eight hours.

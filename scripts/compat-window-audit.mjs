@@ -211,9 +211,33 @@
  *      `audit.voidNights`) with its marker, so the audit can re-prove which
  *      run was excused and why — never a silent gap.
  *
+ *  10. RUNS, NOT NIGHTS — AND EACH ONE INDEPENDENT (ADR-0056 Amendment 5,
+ *      founder decision 2026-10-08). The credential is 14 consecutive green
+ *      independent RUNS per cell. Each cell's credential cron fires several
+ *      times a day (`M H1,H2,H3 * * *`), and rule 8 places every run on the
+ *      latest fire of ITS cron at or before its creation: one fire is one slot,
+ *      a fire with no run is a missing run (reset), two runs in one slot are
+ *      both `duplicate-slot`. A run delayed past its cell's next fire lands in
+ *      that later slot, so the earlier one reads missing — an over-long delay
+ *      costs a reset and can never stretch a streak.
+ *
+ *      INDEPENDENCE. A green run counts only if it STARTED (GitHub's
+ *      `run_started_at`, threaded through by `fetchLedgers` as `startedAt`,
+ *      falling back to `createdAt`) at least MIN_RUN_SPACING_HOURS after the
+ *      previous COUNTED run of the same streak. A run that is too close is
+ *      NOT COUNTED and does NOT reset — it is green, just not a second
+ *      independent sample (`night.counted`, `night.notCountedReason`,
+ *      `audit.spacingSkipped`). Measured on actual start times, never on cron
+ *      times. A recorded start that cannot be read fails closed (not counted);
+ *      an undated run (`--dir` input) is counted but listed in
+ *      `audit.spacingUnverified`, which holds `met` false. Credential scope
+ *      only, like rule 8. The output keeps its historical field names
+ *      (`nights`, `requiredNights`, `missingNights`, `night.date`) — each now
+ *      counts or labels runs.
+ *
  * USAGE
  *   node scripts/compat-window-audit.mjs --dir <dir-of-ledger-json>
- *   node scripts/compat-window-audit.mjs --fetch --limit 100  # needs `gh`
+ *   node scripts/compat-window-audit.mjs --fetch --limit 200  # needs `gh`
  *   node scripts/compat-window-audit.mjs --fetch --lane bun --json
  *   node scripts/compat-window-audit.mjs --fetch --scope early-warning
  *   node scripts/compat-window-audit.mjs --fetch --matrix   # every supported cell
@@ -226,8 +250,29 @@ import { fileURLToPath } from 'node:url';
 import { COMPAT_MODES, isRcRef } from './compat-credential-ref.mjs';
 import { isShardBytecodeLive } from './e2e-bytecode-liveness.mjs';
 
-/** The v1.0 gate: fourteen consecutive qualifying nights. */
-export const WINDOW_REQUIRED_NIGHTS = 14;
+/**
+ * The credential bar: fourteen consecutive qualifying RUNS per cell (ADR-0056
+ * Amendment 5, founder decision 2026-10-08). It used to be fourteen calendar
+ * nights; a cell now runs several times a day, and every run is graded.
+ */
+export const WINDOW_REQUIRED_RUNS = 14;
+
+/**
+ * Legacy name for `WINDOW_REQUIRED_RUNS`. The audit's output keeps its
+ * historical field names (`requiredNights`, `streak.nights`, `missingNights`,
+ * `night.date`) so every consumer keeps parsing it; since Amendment 5 each of
+ * those counts RUNS, and `night.date` is the run's cron-slot label.
+ */
+export const WINDOW_REQUIRED_NIGHTS = WINDOW_REQUIRED_RUNS;
+
+/**
+ * Rule 10 (ADR-0056 Amendment 5): the minimum time between the ACTUAL START of
+ * two counted runs of the same streak. A run that started closer than this to
+ * the previous counted run is not counted — and does not reset the count — so
+ * two runs that shared a runner window cannot both bank. Measured on
+ * `startedAt` (GitHub's `run_started_at`), never on the cron time.
+ */
+export const MIN_RUN_SPACING_HOURS = 2;
 
 /** The default lane for a single-lane audit (the node × turbopack cell). */
 export const CREDENTIAL_LANE = 'node';
@@ -443,8 +488,14 @@ export const AUDIT_SCOPES = Object.freeze(['credential', 'early-warning']);
  * than it is. Sized for both lanes' full windows with headroom for pushes, PRs
  * and dispatches; `tests/compat-window-audit.test.ts` pins the relation rather
  * than the number.
+ *
+ * ADR-0056 Amendment 5: the workflow now fires 14 scheduled runs a day (four
+ * cells × three credential runs + two early-warning), and a 14-run window
+ * spans five days, so 100 no longer held one window. 200 holds two, plus
+ * dispatches; `tests/compat-credential-runs.test.ts` derives the floor from the
+ * live schedule.
  */
-export const DEFAULT_FETCH_LIMIT = 100;
+export const DEFAULT_FETCH_LIMIT = 200;
 
 /**
  * Prefix of the per-run artifact whose NAME carries the lane.
@@ -857,6 +908,9 @@ export function gradeNight(ledger, opts = {}) {
       eligible: false,
       unresolved: ledger.unresolved,
       date: ledger.calendarSlot ?? nightDateOf(ledger),
+      startedAt: null,
+      counted: false,
+      notCountedReason: null,
       // #1553: an unresolved night has nothing to prove a pre-knext failure
       // with — it stays disqualified, never void.
       preKnextShardIds: [],
@@ -1023,6 +1077,14 @@ export function gradeNight(ledger, opts = {}) {
     eligible: uniqueDisqualifiers.length === 0,
     unresolved: null,
     date: ledger.calendarSlot ?? nightDateOf(ledger),
+    // Rule 10 (ADR-0056 Amendment 5): the run's ACTUAL start — GitHub's
+    // `run_started_at`, threaded through by `fetchLedgers` — falling back to
+    // its creation time (equal on every one of 48 scheduled runs measured
+    // 2026-10-01..08). Never the cron time. `counted` is decided by
+    // `auditWindow`'s streak loop, the only place spacing can be judged.
+    startedAt: ledger?.startedAt ?? ledger?.scheduledAt ?? null,
+    counted: false,
+    notCountedReason: null,
     // #1553 (ADR-0056 Amendment 4). `preKnextShardIds`/`voidMarkerValid` are
     // the raw ingredients; `voidEligible` is the verdict computed from THIS
     // night's own disqualifiers. `auditWindow` recomputes `voidEligible` a
@@ -1360,7 +1422,7 @@ export function parseCredentialCronsFromWorkflow(workflowText, opts = {}) {
           `(${[...scheduled].join(', ')}) — stale mapping`,
       );
     }
-    cronTimeUTC(cron); // throws unless a daily `M H * * *`
+    cronFiresUTC(cron); // throws unless a daily `M H * * *` or `M H1,H2,… * * *`
     const lane = lanes.byCron.get(cron) ?? lanes.defaultLiteral;
     if (!lane) {
       throw new Error(
@@ -1425,8 +1487,15 @@ export function credentialCronForLane(lane, deps = {}) {
   return laneToCron.get(lane) ?? null;
 }
 
-/** `'m h * * *'` → `{hour, minute}` (UTC). Throws on anything but a daily cron. */
-function cronTimeUTC(cron) {
+/**
+ * `'m h * * *'` or `'m h1,h2,… * * *'` → `{minute, hours}` (UTC, `hours`
+ * ascending). One cron literal can fire several times a day (ADR-0056
+ * Amendment 5: three credential runs per cell); every fire is its own slot.
+ * Throws on anything else — a range, a step, a duplicate or out-of-range hour,
+ * or a non-daily day field — because the calendar check cannot place fires it
+ * cannot enumerate exactly.
+ */
+function cronFiresUTC(cron) {
   const parts = String(cron).trim().split(/\s+/);
   if (parts.length !== 5) {
     throw new Error(`compat-window-audit: '${cron}' is not a 5-field cron expression`);
@@ -1435,15 +1504,26 @@ function cronTimeUTC(cron) {
   if (dom !== '*' || month !== '*' || dow !== '*') {
     throw new Error(
       `compat-window-audit: '${cron}' is not a daily '* * *' cron — the calendar check assumes ` +
-        'exactly one expected credential run per UTC day',
+        'the same expected credential runs every UTC day',
     );
   }
-  const h = /^\d{1,2}$/.test(hour) ? Number(hour) : Number.NaN;
   const m = /^\d{1,2}$/.test(minute) ? Number(minute) : Number.NaN;
-  if (!Number.isInteger(h) || h < 0 || h > 23 || !Number.isInteger(m) || m < 0 || m > 59) {
-    throw new Error(`compat-window-audit: '${cron}' has a non-numeric or out-of-range hour/minute`);
+  const hours = hour.split(',').map((h) => (/^\d{1,2}$/.test(h) ? Number(h) : Number.NaN));
+  if (
+    !Number.isInteger(m) ||
+    m < 0 ||
+    m > 59 ||
+    hours.some((h) => !Number.isInteger(h) || h < 0 || h > 23)
+  ) {
+    throw new Error(
+      `compat-window-audit: '${cron}' has a non-numeric or out-of-range hour/minute (a comma ` +
+        'list of 0-23 hours is the only multi-fire form the calendar check reads)',
+    );
   }
-  return { hour: h, minute: m };
+  if (new Set(hours).size !== hours.length) {
+    throw new Error(`compat-window-audit: '${cron}' lists the same hour twice`);
+  }
+  return { minute: m, hours: [...hours].sort((a, b) => a - b) };
 }
 
 const pad2 = (n) => String(n).padStart(2, '0');
@@ -1458,19 +1538,6 @@ function addUTCDays(dateStr, days) {
   const d = new Date(`${dateStr}T00:00:00.000Z`);
   d.setUTCDate(d.getUTCDate() + days);
   return utcDateString(d);
-}
-
-/** Every UTC date from `from` to `to`, inclusive, one per day. */
-function datesInclusive(from, to) {
-  const out = [];
-  let cur = from;
-  // A guard, not a real limit: at one row/day this is ~27 years before it
-  // fires, so it can only mean `to` < `from` was passed by mistake.
-  for (let i = 0; cur <= to && i < 10000; i += 1) {
-    out.push(cur);
-    cur = addUTCDays(cur, 1);
-  }
-  return out;
 }
 
 /**
@@ -1491,41 +1558,85 @@ function datesInclusive(from, to) {
 export const MISSING_NIGHT_GRACE_HOURS = 10;
 
 /**
- * A lane's cron calendar: every run belongs to exactly one SLOT — the date of
- * the latest cron fire time ≤ its timestamp (#1612 round 2). `createdAt` is
- * the enqueue time, i.e. the fire time plus GitHub's scheduler delay, so a
- * 23:47 run enqueued at 00:05 belongs to the PREVIOUS date's slot; dating it
- * by wall clock would invent a gap behind it and a double ahead of it.
+ * A lane's cron calendar: every run belongs to exactly one SLOT — the latest
+ * cron FIRE at or before its timestamp (#1612 round 2). `createdAt` is the
+ * enqueue time, i.e. the fire time plus GitHub's scheduler delay, so a 23:47
+ * run enqueued at 00:05 belongs to the PREVIOUS date's slot; dating it by wall
+ * clock would invent a gap behind it and a double ahead of it.
  *
- * @param {string} cron a daily `M H * * *`
+ * ADR-0056 Amendment 5: a cron may fire several times a day (`M H1,H2,H3 * * *`),
+ * and every fire is its own slot. A run delayed past the NEXT fire of its own
+ * cron lands in that later slot — the earlier one then reads missing and the
+ * later one holds two runs (`duplicate-slot`), so an over-long delay costs a
+ * reset and can never stretch a streak. A once-a-day cron keeps its historical
+ * slot label (`YYYY-MM-DD`); a multi-fire cron's label is the fire time
+ * (`YYYY-MM-DDTHH:MMZ`). One cron per lane, so one label shape per window, and
+ * both shapes sort chronologically as strings.
+ *
+ * @param {string} cron a daily `M H * * *` or `M H1,H2,… * * *`
  */
 function cronCalendar(cron) {
-  const { hour, minute } = cronTimeUTC(cron);
-  const fireMs = (slot) => Date.parse(`${slot}T${pad2(hour)}:${pad2(minute)}:00.000Z`);
-  /** @param {number} ms */
-  const slotOfMs = (ms) => {
-    const d = utcDateString(new Date(ms));
-    return ms >= fireMs(d) ? d : addUTCDays(d, -1);
+  const { minute, hours } = cronFiresUTC(cron);
+  const fireOn = (date, hour) => Date.parse(`${date}T${pad2(hour)}:${pad2(minute)}:00.000Z`);
+  /** The latest fire at or before `ms`. */
+  const fireAtOrBefore = (ms) => {
+    const today = utcDateString(new Date(ms));
+    for (const day of [today, addUTCDays(today, -1)]) {
+      for (let i = hours.length - 1; i >= 0; i -= 1) {
+        const fire = fireOn(day, hours[i]);
+        if (fire <= ms) return fire;
+      }
+    }
+    // Unreachable: yesterday's last fire is always at or before `ms`.
+    throw new Error(`compat-window-audit: no fire of '${cron}' at or before ${ms}`);
+  };
+  /** The first fire strictly after `fire`. */
+  const nextFire = (fire) => {
+    const today = utcDateString(new Date(fire));
+    for (const day of [today, addUTCDays(today, 1)]) {
+      for (const hour of hours) {
+        const next = fireOn(day, hour);
+        if (next > fire) return next;
+      }
+    }
+    throw new Error(`compat-window-audit: no fire of '${cron}' after ${fire}`);
+  };
+  /** @param {number} fire */
+  const label = (fire) => {
+    const s = new Date(fire).toISOString();
+    return hours.length > 1 ? `${s.slice(0, 10)}T${s.slice(11, 16)}Z` : s.slice(0, 10);
+  };
+  /** @param {Record<string, any>} ledger @returns {number|null} */
+  const fireOf = (ledger) => {
+    const raw = ledger?.scheduledAt;
+    if (typeof raw !== 'string' || raw.length === 0) return null;
+    const t = Date.parse(raw);
+    return Number.isNaN(t) ? null : fireAtOrBefore(t);
   };
   return {
-    fireMs,
+    label,
+    fireOf,
     /** @param {Record<string, any>} ledger @returns {string|null} */
     slotOf(ledger) {
-      const raw = ledger?.scheduledAt;
-      if (typeof raw !== 'string' || raw.length === 0) return null;
-      const t = Date.parse(raw);
-      return Number.isNaN(t) ? null : slotOfMs(t);
+      const fire = fireOf(ledger);
+      return fire === null ? null : label(fire);
     },
     /**
-     * The latest slot REQUIRED to exist by `now`: its fire time plus the
+     * The latest fire REQUIRED to have a run by `now`: its fire time plus the
      * grace window has passed. Measured from the slot's own fire time, so a
-     * 23:47 slot is not due until 05:47 the next UTC day.
+     * 23:47 slot is not due until 09:47 the next UTC day.
      */
-    cutoffSlot(now) {
-      const graceMs = MISSING_NIGHT_GRACE_HOURS * 60 * 60 * 1000;
-      let slot = slotOfMs(now.getTime());
-      while (fireMs(slot) + graceMs > now.getTime()) slot = addUTCDays(slot, -1);
-      return slot;
+    cutoffFire(now) {
+      return fireAtOrBefore(now.getTime() - MISSING_NIGHT_GRACE_HOURS * 60 * 60 * 1000);
+    },
+    /** Every fire from `from` to `to` inclusive (both must be fires). */
+    firesBetween(from, to) {
+      const out = [];
+      // A guard, not a real limit: at 24 fires a day this is over a year.
+      for (let fire = from, i = 0; fire <= to && i < 10000; i += 1, fire = nextFire(fire)) {
+        out.push(fire);
+      }
+      return out;
     },
   };
 }
@@ -1565,8 +1676,8 @@ function calendarCheck(selected, lane, scope, now, findCron) {
   // can never meet the gate anyway).
   if (selected.length === 0)
     return { checked: true, reason: null, slotOf: calendar.slotOf, extra: [] };
-  const slots = selected.map((l) => calendar.slotOf(l));
-  const undated = slots.filter((s) => s === null).length;
+  const fires = selected.map((l) => calendar.fireOf(l));
+  const undated = fires.filter((f) => f === null).length;
   if (undated > 0) {
     return skip(
       `${undated} of ${selected.length} graded night(s) carry no scheduling date (offline --dir ` +
@@ -1574,19 +1685,19 @@ function calendarCheck(selected, lane, scope, now, findCron) {
         'can be banked',
     );
   }
-  const known = new Set(slots);
-  const first = slots.reduce((min, d) => (d < min ? d : min), slots[0]);
-  const cutoff = calendar.cutoffSlot(now);
-  const expected = first <= cutoff ? datesInclusive(first, cutoff) : [];
+  const known = new Set(fires);
+  const first = Math.min(...fires);
+  const cutoff = calendar.cutoffFire(now);
+  const expected = first <= cutoff ? calendar.firesBetween(first, cutoff) : [];
   const extra = expected
-    .filter((d) => !known.has(d))
-    .map((d) =>
+    .filter((fire) => !known.has(fire))
+    .map((fire) =>
       unresolvedNight(
-        `missing:${lane}:${d}`,
+        `missing:${lane}:${calendar.label(fire)}`,
         'missing-night',
         lane,
         'credential',
-        new Date(calendar.fireMs(d)).toISOString(),
+        new Date(fire).toISOString(),
       ),
     );
   return { checked: true, reason: null, slotOf: calendar.slotOf, extra };
@@ -1670,6 +1781,15 @@ export function auditWindow(ledgers, opts = {}) {
   // caused it. Without this a red night followed by a green one would report
   // "fingerprint-changed", blaming the wrong rule for the reset.
   let pendingCause = null;
+  // Rule 10: the start time of the open streak's last COUNTED run, and every
+  // green run that was not counted because it started too close to it.
+  let openLastStartMs = Number.NaN;
+  /** @type {string|null} the raw start of that run (`null` = undated) */
+  let openLastStart = null;
+  /** @type {string[]} runs counted without a start time to measure spacing on */
+  const spacingUnverified = [];
+  /** @type {Array<{runId: string, previousRunId: string, gapMinutes: number|null}>} */
+  const spacingSkipped = [];
   for (const night of nights) {
     if (!night.eligible) {
       // #1553 (ADR-0056 Amendment 4, rule 9) — a void-eligible night BRIDGES
@@ -1705,10 +1825,42 @@ export function auditWindow(ledgers, opts = {}) {
       open = null;
       continue;
     }
+    const startMs = Date.parse(String(night.startedAt ?? ''));
     if (open && open.fingerprint === night.fingerprint) {
+      // Rule 10 (ADR-0056 Amendment 5) — independence. A run that STARTED
+      // less than MIN_RUN_SPACING_HOURS after the previous COUNTED run of
+      // this streak is not counted. It is green, so it does not reset the
+      // count either: it is simply not a second independent sample. A run
+      // whose start (or whose predecessor's) is recorded but unreadable
+      // cannot prove its spacing, so it is not counted (fail closed). An
+      // UNDATED run (no start, no creation time: `--dir` input) is counted
+      // but recorded in `spacingUnverified`, which holds `met` false — the
+      // same way rule 8 treats an undated calendar, and for the same input.
+      // Credential scope only, like rule 8 — an early-warning streak makes no
+      // 14-run claim.
+      if (scope === 'credential' && (night.startedAt === null || openLastStart === null)) {
+        spacingUnverified.push(night.runId);
+      } else if (scope === 'credential') {
+        const gapMs = startMs - openLastStartMs;
+        if (!Number.isFinite(gapMs) || gapMs < MIN_RUN_SPACING_HOURS * 60 * 60 * 1000) {
+          night.notCountedReason = Number.isFinite(gapMs)
+            ? `spacing: started ${Math.round(gapMs / 60000)} min after the previous counted run ` +
+              `(${open.endRunId}); the minimum is ${MIN_RUN_SPACING_HOURS} h`
+            : `spacing: no readable start time to measure from the previous counted run (${open.endRunId})`;
+          spacingSkipped.push({
+            runId: night.runId,
+            previousRunId: open.endRunId,
+            gapMinutes: Number.isFinite(gapMs) ? Math.round(gapMs / 60000) : null,
+          });
+          continue;
+        }
+      }
+      night.counted = true;
       open.nights += 1;
       open.runIds.push(night.runId);
       open.endRunId = night.runId;
+      openLastStartMs = startMs;
+      openLastStart = night.startedAt;
       continue;
     }
     // The very first streak of the window was not "restarted" by anything.
@@ -1726,6 +1878,9 @@ export function auditWindow(ledgers, opts = {}) {
       voidUsed: false,
       voidNights: [],
     };
+    night.counted = true;
+    openLastStartMs = startMs;
+    openLastStart = night.startedAt;
     streaks.push(open);
   }
 
@@ -1781,8 +1936,16 @@ export function auditWindow(ledgers, opts = {}) {
   const longest = streaks.reduce((best, s) => (s.nights > best.nights ? s : best), empty);
   // "Current" is the streak that is still open — i.e. one that runs to the last
   // graded night. A streak broken by a later red is history, not the count.
+  // A trailing run that was green but not counted for spacing (rule 10) leaves
+  // the streak open — it neither extended nor broke it.
   const last = streaks.at(-1);
-  const current = last && last.endRunId === nights.at(-1)?.runId ? last : empty;
+  const lastNight = nights.at(-1);
+  const current =
+    last &&
+    (last.endRunId === lastNight?.runId ||
+      (open === last && lastNight?.eligible === true && lastNight?.counted === false))
+      ? last
+      : empty;
 
   // The two fields below deliberately read DIFFERENT streaks, and which one
   // each reads is the answer to a different question:
@@ -1839,13 +2002,21 @@ export function auditWindow(ledgers, opts = {}) {
     // consecutiveness beyond what `restartsByCause` already reports.
     calendarChecked: calendar.checked,
     calendarSkippedReason: calendar.reason,
+    // Rule 10 (ADR-0056 Amendment 5): green runs that were not counted because
+    // they started within MIN_RUN_SPACING_HOURS of the previous counted run.
+    spacingSkipped,
+    spacingUnverified,
     missingNights: extra.map((l) => ({ date: l.calendarSlot, lane, runId: l.runId })),
     // Only a CREDENTIAL window can meet the gate. An early-warning streak on
     // `main` is a forecast, however long it runs. And a credential window
     // whose calendar could not be verified can NEVER meet it (#1612 round 2,
     // fail closed): an unchecked calendar is exactly where a dropped night
     // hides.
-    met: scope === 'credential' && calendar.checked && longest.nights >= requiredNights,
+    met:
+      scope === 'credential' &&
+      calendar.checked &&
+      spacingUnverified.length === 0 &&
+      longest.nights >= requiredNights,
     verdict:
       scope !== 'credential'
         ? 'EARLY WARNING'
@@ -1867,7 +2038,7 @@ export function auditWindow(ledgers, opts = {}) {
  * holds `allMet` false rather than being left out of the question.
  *
  * @param {Array<Record<string, any>>} ledgers
- * @param {{cells?: string[], requiredNights?: number, now?: Date}} [opts]
+ * @param {{cells?: string[], requiredNights?: number, now?: Date, credentialCronForLane?: (lane: string) => string|null}} [opts]
  */
 export function auditCredentialMatrix(ledgers, opts = {}) {
   const cells = opts.cells ?? CREDENTIAL_CELLS.map((c) => c.lane);
@@ -1879,6 +2050,7 @@ export function auditCredentialMatrix(ledgers, opts = {}) {
       scope: 'credential',
       requiredNights: opts.requiredNights,
       now: opts.now,
+      credentialCronForLane: opts.credentialCronForLane,
     });
   }
   return {
@@ -1921,7 +2093,7 @@ export function formatMatrix(matrix) {
   lines.push(
     matrix.allMet
       ? 'v1.0 CREDENTIAL MET — every supported cell banked its window on an RC tag.'
-      : 'v1.0 credential NOT met — every supported cell needs its own 14 RC-tag nights on a verified calendar.',
+      : 'v1.0 credential NOT met — every supported cell needs its own 14 consecutive RC-tag runs on a verified calendar.',
   );
   return lines.join('\n');
 }
@@ -1932,7 +2104,7 @@ export function formatReport(audit) {
   lines.push(
     audit.scope === 'early-warning'
       ? `compat window — ${audit.lane} lane, EARLY WARNING scope (main nightlies — never a credential)`
-      : `compat window — ${audit.lane} lane, CREDENTIAL scope (RC-tag nights only), gate = ${audit.requiredNights} nights`,
+      : `compat window — ${audit.lane} lane, CREDENTIAL scope (scheduled RC-tag runs only), gate = ${audit.requiredNights} runs`,
   );
   lines.push('');
   lines.push('run          fingerprint  shards  passed/failed/notRun  verdict');
@@ -1940,7 +2112,9 @@ export function formatReport(audit) {
     const fp = (n.fingerprint ?? '(none)').replace(/^sha256:/, '').slice(0, 8);
     const shards = `${n.shardsSeen}/${n.shardsExpected ?? '?'}`;
     const verdict = n.eligible
-      ? 'counts'
+      ? n.counted === false && n.notCountedReason
+        ? `NOT COUNTED — ${n.notCountedReason} (green; does not reset the count)`
+        : 'counts'
       : n.bridgedVoid
         ? `VOID — bridged, not counted (#1553): ${n.disqualifiers.join('; ')}`
         : `NO — ${n.disqualifiers.join('; ')}`;
@@ -1956,7 +2130,7 @@ export function formatReport(audit) {
         ? ` [voided: ${s.voidNights.map((v) => v.runId).join(', ')}]`
         : '';
     lines.push(
-      `streak ${String(s.nights).padStart(2)} night(s)  fp=${String(s.fingerprint)
+      `streak ${String(s.nights).padStart(2)} run(s)  fp=${String(s.fingerprint)
         .replace(/^sha256:/, '')
         .slice(0, 8)}  ${s.startRunId} → ${s.endRunId}${cause}${voided}`,
     );
@@ -1972,10 +2146,10 @@ export function formatReport(audit) {
     .map(([k, v]) => `${v} ${k}`)
     .join(', ');
   lines.push(
-    `streak restarts: ${restartTotal}${byCause ? ` — ${byCause}` : ''}  (over ${audit.nights.length} graded night(s))`,
+    `streak restarts: ${restartTotal}${byCause ? ` — ${byCause}` : ''}  (over ${audit.nights.length} graded run(s))`,
   );
   lines.push(
-    `fingerprint moves: ${audit.fingerprintMoves.length} across ${audit.fingerprintsRecorded} night(s) carrying one; ${audit.distinctFingerprints} distinct fingerprint(s)`,
+    `fingerprint moves: ${audit.fingerprintMoves.length} across ${audit.fingerprintsRecorded} run(s) carrying one; ${audit.distinctFingerprints} distinct fingerprint(s)`,
   );
   if (audit.fingerprintMoves.length > 0) {
     const byComponent = Object.entries(audit.movesByComponent)
@@ -2001,7 +2175,7 @@ export function formatReport(audit) {
       `UNRESOLVED: ${audit.unresolvedNights.length} scheduled run(s) had no gradeable ledger and are`,
     );
     lines.push(
-      '            counted as disqualified nights, never skipped — a skipped night would merge',
+      '            counted as disqualified runs, never skipped — a skipped run would merge',
     );
     lines.push(
       '            the streaks either side of it and report a LONGER streak than reality.',
@@ -2014,7 +2188,7 @@ export function formatReport(audit) {
   if (audit.voidNights.length > 0) {
     lines.push('');
     lines.push(
-      `VOID (#1553): ${audit.voidNights.length} night(s) bridged — a knext-owned marker proved`,
+      `VOID (#1553): ${audit.voidNights.length} run(s) bridged — a knext-owned marker proved`,
     );
     lines.push(
       '       the failure happened before any knext code ran; at most one per open streak.',
@@ -2026,11 +2200,19 @@ export function formatReport(audit) {
     }
   }
 
+  if (audit.spacingSkipped?.length > 0) {
+    lines.push('');
+    lines.push(
+      `SPACING (rule 10): ${audit.spacingSkipped.length} green run(s) not counted — each started less than ` +
+        `${MIN_RUN_SPACING_HOURS} h after the previous counted run, so it is not an independent sample.`,
+    );
+  }
+
   lines.push('');
   lines.push(
     audit.calendarChecked
-      ? `calendar check (rule 8): verified — every cron slot has a graded night ` +
-          `(${audit.missingNights.length} missing night(s) found and disqualified)`
+      ? `calendar check (rule 8): verified — every cron slot has a graded run ` +
+          `(${audit.missingNights.length} missing run(s) found and disqualified)`
       : `calendar check (rule 8): UNVERIFIED — ${audit.calendarSkippedReason}`,
   );
 
@@ -2050,16 +2232,16 @@ export function formatReport(audit) {
     // Fail closed (#1612 round 2): an unverifiable calendar is never GATE MET,
     // however long the sequence streak reads.
     lines.push(
-      `CALENDAR UNVERIFIED — the gate is NOT met: the longest streak reads ${audit.longest.nights} / ${audit.requiredNights}, but no night can be banked until every one is placed on its cron slot (${audit.calendarSkippedReason}).`,
+      `CALENDAR UNVERIFIED — the gate is NOT met: the longest streak reads ${audit.longest.nights} / ${audit.requiredNights}, but no run can be banked until every one is placed on its cron slot (${audit.calendarSkippedReason}).`,
     );
     return lines.join('\n');
   }
   lines.push(
     audit.met
       ? audit.shortfall > 0
-        ? `GATE MET — a window of ${audit.longest.nights} qualifying nights completed (${audit.longest.startRunId} → ${audit.longest.endRunId}). The CURRENT streak is ${audit.current.nights} / ${audit.requiredNights}; re-earning it from here needs ${audit.shortfall} more.`
+        ? `GATE MET — a window of ${audit.longest.nights} consecutive qualifying runs completed (${audit.longest.startRunId} → ${audit.longest.endRunId}). The CURRENT streak is ${audit.current.nights} / ${audit.requiredNights}; re-earning it from here needs ${audit.shortfall} more.`
         : 'GATE MET — a window of the required length exists, and it is the streak still running.'
-      : `GATE NOT MET — ${audit.shortfall} more consecutive qualifying night(s) needed on the CURRENT fingerprint.`,
+      : `GATE NOT MET — ${audit.shortfall} more consecutive qualifying run(s) needed on the CURRENT fingerprint.`,
   );
   return lines.join('\n');
 }
@@ -2152,7 +2334,9 @@ export function fetchLedgers(limit, deps = {}) {
       // #1607 — `createdAt` is the run's scheduling timestamp, threaded through
       // as `scheduledAt` on every ledger and stand-in below so `auditWindow`'s
       // rule-8 calendar check can place this night on a UTC date.
-      'databaseId,status,event,createdAt',
+      // ADR-0056 Amendment 5 — `startedAt` (run_started_at) is the run's ACTUAL
+      // start, which rule 10's spacing is measured on.
+      'databaseId,status,event,createdAt,startedAt',
     ]),
   );
 
@@ -2248,7 +2432,8 @@ export function fetchLedgers(limit, deps = {}) {
       unresolved('ledger-unreadable');
       continue;
     }
-    for (const l of fetched) out.push({ ...l, scheduledAt });
+    const startedAt = typeof run.startedAt === 'string' ? run.startedAt : null;
+    for (const l of fetched) out.push({ ...l, scheduledAt, startedAt });
   }
   return out;
 }

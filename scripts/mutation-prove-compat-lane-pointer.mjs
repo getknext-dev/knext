@@ -188,8 +188,8 @@ prove(
 prove(
   'a retired node-cron schedule branch re-introduced into the lane-selection expression',
   COMPAT_YML,
-  "  KNEXT_RUNTIME: ${{ github.event.inputs.runtime || (github.event.schedule == '47 4 * * *' && 'bun') || (github.event.schedule == '47 5 * * *' && 'bun') || (github.event.schedule == '47 23 * * *' && 'bun') || 'node' }}",
-  "  KNEXT_RUNTIME: ${{ github.event.inputs.runtime || (github.event.schedule == '17 3 * * *' && 'node') || (github.event.schedule == '47 4 * * *' && 'bun') || (github.event.schedule == '47 5 * * *' && 'bun') || (github.event.schedule == '47 23 * * *' && 'bun') || 'node' }}",
+  "  KNEXT_RUNTIME: ${{ github.event.inputs.runtime || (github.event.schedule == '47 4 * * *' && 'bun') || (github.event.schedule == '47 5,13,21 * * *' && 'bun') || (github.event.schedule == '47 7,15,23 * * *' && 'bun') || 'node' }}",
+  "  KNEXT_RUNTIME: ${{ github.event.inputs.runtime || (github.event.schedule == '17 3 * * *' && 'node') || (github.event.schedule == '47 4 * * *' && 'bun') || (github.event.schedule == '47 5,13,21 * * *' && 'bun') || (github.event.schedule == '47 7,15,23 * * *' && 'bun') || 'node' }}",
 );
 
 console.log(`\n${pass} mutation(s) went red as required, ${fail} were survived by the guard.`);

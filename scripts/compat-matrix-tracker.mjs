@@ -99,7 +99,7 @@ export function formatCellRow(cell, entry) {
   const cause = entry.current?.restartCause ? ` (last restart: ${entry.current.restartCause})` : '';
   return (
     `| ${cell.runtime}×${cell.builder} | \`${cell.lane}\` | ${cell.wired ? 'wired' : 'unwired'} ` +
-    `| ${entry.current.nights}/${entry.requiredNights} | ${status}${cause} |`
+    `| run ${entry.current.nights} of ${entry.requiredNights} | ${status}${cause} |`
   );
 }
 
@@ -129,18 +129,20 @@ export function buildTrackerBody(matrix, opts = {}) {
     matrix.allMet && unverified.length === 0
       ? 'v1.0 CREDENTIAL MET — every supported cell banked its window on an RC tag.'
       : unverified.length > 0
-        ? `v1.0 credential NOT YET met — CALENDAR UNVERIFIED for ${unverified.join(', ')}: no night on an unverifiable calendar can be banked.`
-        : 'v1.0 credential NOT YET met — every supported cell needs its own 14 RC-tag nights.';
+        ? `v1.0 credential NOT YET met — CALENDAR UNVERIFIED for ${unverified.join(', ')}: no run on an unverifiable calendar can be banked.`
+        : 'v1.0 credential NOT YET met — every supported cell needs its own 14 consecutive green runs on an RC tag.';
   return `Daily matrix audit — generated ${generatedAt}${opts.runUrl ? ` by ${opts.runUrl}` : ''}.
 
 This is the **one pinned aggregate view** of every credentialing cell (ADR-0056
-D2: one independent 14-night window per runtime×builder cell). A per-cell red
+D2: one independent window per runtime×builder cell; since Amendment 5 a window
+is 14 consecutive green runs, three scheduled runs per cell per day, each
+starting at least 2 h after the previous counted one). A per-cell red
 opens or updates its own \`${CREDENTIAL_RESET_LABEL}\`-labelled issue with the
 full failure detail and restart cause; that issue is deliberately NOT pinned
 (GitHub's 3-pin cap, #1300) — this tracker is the single always-visible
-surface, refreshed once a day regardless of whether last night was red.
+surface, refreshed once a day regardless of whether the latest run was red.
 
-| Cell | Lane | Wired | Nights (current/required) | Status |
+| Cell | Lane | Wired | Consecutive green runs (current streak) | Status |
 | --- | --- | --- | --- | --- |
 ${rows.join('\n')}
 

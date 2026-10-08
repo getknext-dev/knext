@@ -59,8 +59,8 @@ type Cell = {
 };
 const cells = CREDENTIAL_CELLS as unknown as Cell[];
 
-const NODE_WEBPACK_CRON = '17 22 * * *';
-const BUN_WEBPACK_CRON = '47 23 * * *';
+const NODE_WEBPACK_CRON = '17 6,14,22 * * *';
+const BUN_WEBPACK_CRON = '47 7,15,23 * * *';
 const crons = wf.on.schedule.map((s) => s.cron);
 
 /** The GHA context for a schedule or a dispatch (one type, so both fit `allContexts`). */
@@ -103,9 +103,10 @@ function allContexts(): { label: string; ctx: Ctx }[] {
   return out;
 }
 
-function minuteOfDay(cron: string): number {
-  const [min, hour] = cron.split(/\s+/);
-  return Number(hour) * 60 + Number(min);
+/** Every fire of a daily cron, as minutes of the UTC day (one per listed hour). */
+function minutesOfDay(cron: string): number[] {
+  const [min, hours] = cron.split(/\s+/);
+  return hours.split(',').map((hour) => Number(hour) * 60 + Number(min));
 }
 
 function circularGap(a: number, b: number): number {
@@ -144,13 +145,13 @@ describe('webpack credential crons (#1245)', () => {
       lane: 'bun',
       mode: 'early-warning',
     });
-    expect(resolveAll(scheduleCtx('17 1 * * *'))).toEqual({
+    expect(resolveAll(scheduleCtx('17 1,9,17 * * *'))).toEqual({
       runtime: 'node',
       builder: 'turbopack',
       lane: 'node',
       mode: 'credential',
     });
-    expect(resolveAll(scheduleCtx('47 5 * * *'))).toEqual({
+    expect(resolveAll(scheduleCtx('47 5,13,21 * * *'))).toEqual({
       runtime: 'bun',
       builder: 'turbopack',
       lane: 'bun',
@@ -194,18 +195,24 @@ describe('webpack credential crons (#1245)', () => {
     expect(wiredHere.sort()).toEqual(['bun', 'bun-webpack', 'node', 'node-webpack']);
   });
 
-  it('staggers the new crons ≥60 min from every other cron in this workflow and clear of the ~08:30 UTC pile-up (#1301)', () => {
+  it('staggers every fire of the webpack crons >= 30 min from every other fire in this workflow (#1301, ADR-0056 Amendment 5)', () => {
+    // #1301 asked for >= 60 min between compat crons and >= 120 min from the
+    // ~08:30 UTC pile-up. ADR-0056 Amendment 5 schedules THREE credential
+    // runs per cell per day (14 fires a day in this file), so a fire lands
+    // in nearly every hour and neither bound can hold. What bounds contention
+    // now is measured, not literal: GitHub starts these schedules 2.3-7.4 h
+    // late (48 runs, 2026-10-01..08), which spreads actual starts far more
+    // than cron minutes do, and max-parallel 8 caps each run at 8 of the 20
+    // concurrent jobs (tests/ci-capacity-budget.test.ts). The literal floor
+    // kept here is that no two fires share a half hour.
     for (const mine of [NODE_WEBPACK_CRON, BUN_WEBPACK_CRON]) {
       for (const other of crons.filter((c) => c !== mine)) {
-        expect(
-          circularGap(minuteOfDay(mine), minuteOfDay(other)),
-          `${mine} vs ${other}: two ~19-job compat runs would contend for the 20-job cap`,
-        ).toBeGreaterThanOrEqual(60);
+        for (const a of minutesOfDay(mine)) {
+          for (const b of minutesOfDay(other)) {
+            expect(circularGap(a, b), `${mine} vs ${other}`).toBeGreaterThanOrEqual(30);
+          }
+        }
       }
-      expect(
-        circularGap(minuteOfDay(mine), 8 * 60 + 30),
-        `${mine} is inside the 08:30 pile-up`,
-      ).toBeGreaterThanOrEqual(120);
     }
   });
 

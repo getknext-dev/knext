@@ -9,8 +9,9 @@
  *   B. the v1.0 lane is unchanged and nothing collides with it: put a v1.3
  *      file into the v1.0 frozen set, move a v1.0 cron, point the v1.0 audit
  *      at the v1.3 workflow, or give the v1.3 lane a v1.0 name — RED.
- *   C. the v1.3 slots stay clear of v1.0's measured late-start tail (start
- *      >= 14:00 UTC, >= 90 min apart, tracker after the last slot's grace);
+ *   C. the v1.3 slot grid (ADR-0056 Amendment 5): three fires per cell 8 h
+ *      apart, one credential fire per clock hour across both lines, and the
+ *      tracker never reports a fire still inside its grace as missing;
  *   D. the main-side guard CLOSURE (resolver, derivation gate, tracker and
  *      everything they transitively import) is folded into the fingerprinted
  *      executing file, so editing any of it restarts the window — drop the
@@ -172,7 +173,8 @@ const MUTATIONS = [
     label: 'B: the v1.0 node credential night moves (v1.0 cron mapping changed)',
     expect: 'the v1.0 workflow still maps its OWN four credential crons to its cells',
     subject: 'v10workflow',
-    anchor: "  KNEXT_COMPAT_MODE: ${{ (github.event.schedule == '17 1 * * *' && 'credential') ||",
+    anchor:
+      "  KNEXT_COMPAT_MODE: ${{ (github.event.schedule == '17 1,9,17 * * *' && 'credential') ||",
     replacement:
       "  KNEXT_COMPAT_MODE: ${{ (github.event.schedule == '17 3 * * *' && 'credential') ||",
   },
@@ -192,11 +194,11 @@ const MUTATIONS = [
     replacement: 'name: Compat suite (official Next.js deploy harness)\n',
   },
   {
-    label: 'B: a v1.3 credential cron lands on a v1.0 slot',
-    expect: 'the v1.3 crons are disjoint from every v1.0 cron (offset, not shared slots)',
+    label: 'B: one fire of a v1.3 credential cron lands on a v1.0 fire (09:17)',
+    expect: 'the v1.3 crons share no FIRE with any v1.0 cron (offset slots, not shared ones)',
     subject: 'line',
-    anchor: "      '17 1 * * *': '17 14 * * *',",
-    replacement: "      '17 1 * * *': '17 3 * * *',",
+    anchor: "      node: '32 0,8,16 * * *', // node × turbopack",
+    replacement: "      node: '17 0,9,16 * * *', // node × turbopack",
   },
   {
     label: 'B: the v1.3 red alert reuses the v1.0 title',
@@ -220,27 +222,32 @@ const MUTATIONS = [
     replacement: "    trackerLabel: 'credential-matrix-tracker',",
   },
 
-  // ── C. the v1.3 slots stay clear of v1.0's measured late-start tail ──────
+  // ── C. the v1.3 slot grid (ADR-0056 Amendment 5) ──────────────────────
   {
-    label: 'C: a v1.3 credential cron moves back inside v1.0’s late-start tail (before 14:00 UTC)',
-    expect: 'the v1.3 crons start after v1.0’s measured late-start window and are spaced >= 90 min',
+    label: 'C: a v1.3 cell drops to two runs a day (fires 12 h apart)',
+    expect:
+      'THE SLOT GRID: each v1.3 cell fires 3x a day 8 h apart, and the two lines together put ONE credential fire in every clock hour',
     subject: 'line',
-    anchor: "      '17 1 * * *': '17 14 * * *',",
-    replacement: "      '17 1 * * *': '17 11 * * *',",
+    anchor: "      node: '32 0,8,16 * * *', // node × turbopack",
+    replacement: "      node: '32 0,12 * * *', // node × turbopack",
   },
   {
-    label: 'C: two v1.3 crons closer than 90 min (the bun slot 30 min after node)',
-    expect: 'the v1.3 crons start after v1.0’s measured late-start window and are spaced >= 90 min',
+    label: 'C: two v1.3 cells share clock hours with v1.0 cells (one fire per hour breaks)',
+    expect:
+      'THE SLOT GRID: each v1.3 cell fires 3x a day 8 h apart, and the two lines together put ONE credential fire in every clock hour',
     subject: 'line',
-    anchor: "      '47 5 * * *': '47 15 * * *',",
-    replacement: "      '47 5 * * *': '47 14 * * *',",
+    anchor: "      bun: '32 2,10,18 * * *', // bun × turbopack",
+    replacement: "      bun: '32 1,9,17 * * *', // bun × turbopack",
   },
   {
-    label: 'C: the v1.3 tracker runs before the last slot’s 10 h grace has elapsed',
-    expect: 'the tracker workflow audits the v1.3 line and runs after every v1.3 slot’s grace',
-    subject: 'trackerWorkflow',
-    anchor: "    - cron: '31 5 * * *'",
-    replacement: "    - cron: '53 1 * * *'",
+    label:
+      'C: the audit requires a fire before its grace has passed (the tracker reports in-flight runs missing)',
+    expect:
+      'the tracker workflow audits the v1.3 line, and at its cron time no fire still inside its grace reads missing',
+    subject: 'v10audit',
+    anchor:
+      '      return fireAtOrBefore(now.getTime() - MISSING_NIGHT_GRACE_HOURS * 60 * 60 * 1000);',
+    replacement: '      return fireAtOrBefore(now.getTime());',
   },
 
   // ── D. the guard CLOSURE is folded into the fingerprinted bytes ──────────

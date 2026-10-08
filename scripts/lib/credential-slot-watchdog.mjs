@@ -81,42 +81,142 @@
  * risk — not only the two webpack lanes a purely time-based heuristic would
  * suggest. The dangerous direction is a false "quiet", never a false alert,
  * so the fallback errs toward alerting whenever it cannot be sure.
+ *
+ * THREE FIRES A DAY (ADR-0056 Amendment 5). Each credential cron is one
+ * literal with a comma-listed hour field (`17 1,9,17 * * *`), so every lane
+ * fires three times a day, 8 h apart, and every fire is its own slot. Two
+ * consequences here:
+ *
+ *   * slot math is hours-aware: a lane's (and a run's) slot is the latest of
+ *     ITS fires at or before the reference time (`mostRecentFireAtOrBefore`);
+ *   * a fire is checked only once it is DUE (at or before `now - grace`) —
+ *     never "the latest fire at or before now", which with fires 8 h apart and
+ *     an 8 h grace is never due, so a watchdog keyed on it could never alert.
+ *
+ * EVERY DUE FIRE SINCE THE PREVIOUS WATCHDOG RUN (PR #2013 round 2). GitHub
+ * starts this watchdog late too, and by a different amount each run (measured
+ * 4.9-6.6 h; the credential runs it watches, 2.3-7.4 h). Checking only each
+ * lane's single latest due fire therefore skipped a fire whenever two
+ * consecutive runs' delays differed enough, and checked another twice — a
+ * false quiet. Each run now checks EVERY fire in
+ * `(previous run's start - grace, this run's start - grace]`
+ * (`watchdogWindow` + `dueFiresInWindow`). The windows of consecutive
+ * successful runs tile the time line exactly whatever the delays, so every
+ * fire is checked once and an alert for a missing fire is raised once, not on
+ * every later run.
+ *
+ *   * Both anchors are `run_started_at` of watchdog runs (the CLI reads them
+ *     from the Actions API), so two consecutive windows share their boundary
+ *     to the second.
+ *   * The previous run is the newest SCHEDULED run that completed `success`,
+ *     and only `success` (PR #2013 round 3). The CLI exits 0 whenever it
+ *     evaluated its window and carries the alert in a job output, so
+ *     `success` means "window evaluated (and any alert filed)". A run that
+ *     crashed before evaluating (`failure`), timed out or lost its runner
+ *     (`cancelled`), or is still in progress is skipped, and the window
+ *     reaches back to the last run that did evaluate — the skipped run's
+ *     fires are checked now, not lost. Only a FIRST attempt anchors
+ *     (`run_attempt === 1`, round 4): a re-run resets `run_started_at`, so a
+ *     re-run of a failed alert job would otherwise anchor hours after its
+ *     check and skip the fires in between. With earlier runs in view but none
+ *     anchoring, the window reaches back to the oldest of them (by creation,
+ *     which a re-run does not reset) minus the lookback.
+ *   * A scheduled run whose listing of its own runs FAILS crashes (round 4):
+ *     the lookback below reaches back 24 h, not to the last successful run,
+ *     so after a crash streak it would skip fires and still succeed.
+ *   * No previous run at all (the first run, a dispatch): the
+ *     window is `WATCHDOG_LOOKBACK_HOURS` (24 h). That is at least the
+ *     watchdog period (8 h) plus the worst measured scheduler delay (7.4 h),
+ *     and also covers one dropped watchdog run (2 x 8 h + 7.4 h = 23.4 h). It
+ *     can re-check a fire the previous run checked (a repeated alert), never
+ *     skip one.
+ *   * A previous run more than `WATCHDOG_MAX_WINDOW_HOURS` (72 h) back is
+ *     clamped to that window and alerts `coverage-gap`: the watchdog itself
+ *     stopped running, and the older fires are not checked.
+ *   * A run that crashed (API down) concludes `failure` and raises the pinned
+ *     alert naming the window it did not check; because it is no anchor, the
+ *     next run checks that window. Only when non-evaluating runs reach back
+ *     past the 72 h maximum are fires left unchecked, and that alerts
+ *     `coverage-gap`.
+ *   * The grace is assumed unchanged between two runs. Changing it moves the
+ *     boundary by the difference: lowering it leaves that many hours unchecked
+ *     once, raising it re-checks them.
+ *
+ * Each fire is decided in its OWN context: the lanes' slots are taken at that
+ * fire (`computeExpectedSlots(lanes, fire)`), which is exactly what a check at
+ * `fire + grace` would have seen, so attribution and the ambiguity rule are
+ * unchanged per fire.
  */
 
 /** Default grace period (hours) if no override is supplied. */
 export const DEFAULT_GRACE_HOURS = 8;
 
 /**
+ * Window (hours, ending at `start - grace`) checked when no previous watchdog
+ * run can be read: >= the 8 h watchdog period + the worst measured scheduler
+ * delay (7.4 h), and >= one dropped watchdog run (2 x 8 h + 7.4 h). See the
+ * module header.
+ */
+export const WATCHDOG_LOOKBACK_HOURS = 24;
+
+/** Longest window anchored on a previous run; older means a `coverage-gap` alert. */
+export const WATCHDOG_MAX_WINDOW_HOURS = 72;
+
+const HOUR_MS = 60 * 60 * 1000;
+
+/**
  * Static drift-detection fixture — NEVER consulted at runtime (see the
  * "FAILS CLOSED" section of the module header). Mirrors test-e2e-deploy.yml's
- * 4 credential crons as of #1640. `tests/credential-slot-watchdog.test.ts`
- * asserts live parsing of the real workflow file produces exactly this
- * table, so drift between the two is caught at PR time, not by a runtime
- * fallback silently masking it.
+ * 4 credential crons (three fires a day each since ADR-0056 Amendment 5).
+ * `tests/credential-slot-watchdog.test.ts` asserts live parsing of the real
+ * workflow file produces exactly this table, so drift between the two is
+ * caught at PR time, not by a runtime fallback silently masking it.
  */
 export const DEFAULT_CREDENTIAL_LANES = Object.freeze([
-  Object.freeze({ cron: '17 1 * * *', lane: 'node', hour: 1, minute: 17 }),
-  Object.freeze({ cron: '47 5 * * *', lane: 'bun', hour: 5, minute: 47 }),
-  Object.freeze({ cron: '17 22 * * *', lane: 'node-webpack', hour: 22, minute: 17 }),
-  Object.freeze({ cron: '47 23 * * *', lane: 'bun-webpack', hour: 23, minute: 47 }),
+  Object.freeze({ cron: '17 1,9,17 * * *', lane: 'node', hour: 1, hours: [1, 9, 17], minute: 17 }),
+  Object.freeze({ cron: '47 5,13,21 * * *', lane: 'bun', hour: 5, hours: [5, 13, 21], minute: 47 }),
+  Object.freeze({
+    cron: '17 6,14,22 * * *',
+    lane: 'node-webpack',
+    hour: 6,
+    hours: [6, 14, 22],
+    minute: 17,
+  }),
+  Object.freeze({
+    cron: '47 7,15,23 * * *',
+    lane: 'bun-webpack',
+    hour: 7,
+    hours: [7, 15, 23],
+    minute: 47,
+  }),
 ]);
 
-const SIMPLE_DAILY_CRON = /^(\d{1,2})\s+(\d{1,2})\s+\*\s+\*\s+\*$/;
+const SIMPLE_DAILY_CRON = /^(\d{1,2})\s+(\d{1,2}(?:,\d{1,2})*)\s+\*\s+\*\s+\*$/;
 
-/** Parse a simple "M H * * *" (once-daily UTC) cron string. */
+/**
+ * Parse a daily UTC cron: once a day (`M H * * *`) or several times a day with
+ * a comma-listed hour field (`M H1,H2,… * * *`, ADR-0056 Amendment 5).
+ * Returns `{ minute, hour, hours }` — `hours` ascending, `hour` its first
+ * entry (the once-a-day shape's single hour). A range, a step or a duplicate
+ * hour is refused: the watchdog could not enumerate the fires.
+ */
 export function parseSimpleDailyCron(cron) {
   const m = SIMPLE_DAILY_CRON.exec(String(cron).trim());
   if (!m) {
     throw new Error(
-      `credential-slot-watchdog: cron "${cron}" is not a supported once-daily "M H * * *" form`,
+      `credential-slot-watchdog: cron "${cron}" is not a supported daily "M H * * *" / "M H1,H2 * * *" form`,
     );
   }
   const minute = Number(m[1]);
-  const hour = Number(m[2]);
-  if (minute < 0 || minute > 59 || hour < 0 || hour > 23) {
+  const hours = m[2].split(',').map(Number);
+  if (minute < 0 || minute > 59 || hours.some((h) => h < 0 || h > 23)) {
     throw new Error(`credential-slot-watchdog: cron "${cron}" has an out-of-range minute/hour`);
   }
-  return { minute, hour };
+  if (new Set(hours).size !== hours.length) {
+    throw new Error(`credential-slot-watchdog: cron "${cron}" lists a duplicate hour`);
+  }
+  hours.sort((a, b) => a - b);
+  return { minute, hour: hours[0], hours };
 }
 
 /**
@@ -225,8 +325,8 @@ export function resolveCredentialLaneCrons(yamlText) {
           'but it is not declared under `schedule:`',
       );
     }
-    const { hour, minute } = parseSimpleDailyCron(cron);
-    return { cron, lane: laneMap.get(cron) ?? fallbackLane, hour, minute };
+    const { hour, hours, minute } = parseSimpleDailyCron(cron);
+    return { cron, lane: laneMap.get(cron) ?? fallbackLane, hour, hours, minute };
   });
 }
 
@@ -249,9 +349,15 @@ export function resolveCredentialLanes(yamlText, { defaultGraceHours = DEFAULT_G
   return lanes.map((l) => ({ ...l, graceHours: defaultGraceHours }));
 }
 
-/** Every declared schedule slot (credential and early-warning alike). */
+/**
+ * Every declared schedule slot (credential and early-warning alike) — one entry
+ * per FIRE, so a multi-fire cron contributes one slot per listed hour.
+ */
 export function parseAllDeclaredSlots(yamlText) {
-  return extractScheduleCrons(yamlText).map((cron) => ({ cron, ...parseSimpleDailyCron(cron) }));
+  return extractScheduleCrons(yamlText).flatMap((cron) => {
+    const { minute, hours } = parseSimpleDailyCron(cron);
+    return hours.map((hour) => ({ cron, hour, minute }));
+  });
 }
 
 /** The most recent UTC occurrence of `H:M` at or before `referenceDate`. */
@@ -266,12 +372,103 @@ export function mostRecentSlotAtOrBefore(hour, minute, referenceDate) {
   return slot;
 }
 
-/** Attach each lane's expected slot time (this cycle's occurrence) as of `now`. */
+/**
+ * The latest UTC fire of a cron firing at `minute` past each of `hours`, at or
+ * before `referenceDate` (ADR-0056 Amendment 5: one fire per listed hour).
+ *
+ * @param {number[]} hours at least one
+ * @param {number} minute
+ * @param {Date|string} referenceDate
+ * @returns {Date}
+ */
+export function mostRecentFireAtOrBefore(hours, minute, referenceDate) {
+  if (hours.length === 0) throw new Error('credential-slot-watchdog: a cron with no fire hour');
+  let best = mostRecentSlotAtOrBefore(hours[0], minute, referenceDate);
+  for (const hour of hours.slice(1)) {
+    const fire = mostRecentSlotAtOrBefore(hour, minute, referenceDate);
+    if (fire.getTime() > best.getTime()) best = fire;
+  }
+  return best;
+}
+
+/** The fire hours of a lane/slot definition (`hours` when present, else its single `hour`). */
+const firesOf = (l) => (Array.isArray(l.hours) && l.hours.length > 0 ? l.hours : [l.hour]);
+
+/**
+ * Attach each lane's expected slot time — its latest fire at or before `now`.
+ * The watchdog passes `now - grace` (`evaluateWatchdog`), so the slot checked
+ * is the latest DUE one (see the module header).
+ */
 export function computeExpectedSlots(lanes, now) {
   return lanes.map((l) => ({
     ...l,
-    expectedSlotTime: mostRecentSlotAtOrBefore(l.hour, l.minute, now).toISOString(),
+    expectedSlotTime: mostRecentFireAtOrBefore(firesOf(l), l.minute, now).toISOString(),
   }));
+}
+
+/**
+ * The window of fires one watchdog run checks: `(start, end]`, where `end` is
+ * this run's start minus the grace and `start` is the previous run's start
+ * minus the grace (`anchored`), or `end - WATCHDOG_LOOKBACK_HOURS` without a
+ * usable previous run. A previous run more than `WATCHDOG_MAX_WINDOW_HOURS`
+ * back is clamped to that and flagged `gap`. See the module header.
+ *
+ * @param {{checkAt: Date|string, previousCheckAt?: Date|string|null, graceHours?: number}} args
+ * @returns {{start: Date, end: Date, anchored: boolean, gap: boolean}}
+ */
+export function watchdogWindow({
+  checkAt,
+  previousCheckAt = null,
+  graceHours = DEFAULT_GRACE_HOURS,
+}) {
+  const graceMs = graceHours * HOUR_MS;
+  const checkMs = new Date(checkAt).getTime();
+  const end = checkMs - graceMs;
+  const prevMs = previousCheckAt == null ? Number.NaN : new Date(previousCheckAt).getTime();
+  if (!Number.isFinite(prevMs) || prevMs >= checkMs) {
+    return {
+      start: new Date(end - WATCHDOG_LOOKBACK_HOURS * HOUR_MS),
+      end: new Date(end),
+      anchored: false,
+      gap: false,
+    };
+  }
+  const earliest = end - WATCHDOG_MAX_WINDOW_HOURS * HOUR_MS;
+  const start = prevMs - graceMs;
+  return {
+    start: new Date(Math.max(start, earliest)),
+    end: new Date(end),
+    anchored: true,
+    gap: start < earliest,
+  };
+}
+
+/**
+ * Every fire of every lane in `(start, end]`, oldest first.
+ *
+ * @template {{lane: string, hour: number, hours?: number[], minute: number}} L
+ * @param {L[]} lanes
+ * @param {{start: Date, end: Date}} window
+ * @returns {{lane: string, laneDef: L, fire: Date}[]}
+ */
+export function dueFiresInWindow(lanes, { start, end }) {
+  const startMs = new Date(start).getTime();
+  const endMs = new Date(end).getTime();
+  const out = [];
+  const first = new Date(startMs);
+  for (
+    let day = Date.UTC(first.getUTCFullYear(), first.getUTCMonth(), first.getUTCDate());
+    day <= endMs;
+    day += 24 * HOUR_MS
+  ) {
+    for (const laneDef of lanes) {
+      for (const hour of firesOf(laneDef)) {
+        const t = day + hour * HOUR_MS + laneDef.minute * 60 * 1000;
+        if (t > startMs && t <= endMs) out.push({ lane: laneDef.lane, laneDef, fire: new Date(t) });
+      }
+    }
+  }
+  return out.sort((a, b) => a.fire.getTime() - b.fire.getTime() || a.lane.localeCompare(b.lane));
 }
 
 /**
@@ -287,7 +484,7 @@ function findPredecessorLane(laneDef, lanes) {
   let best = null;
   for (const other of lanes) {
     if (other.lane === laneDef.lane) continue;
-    const occurrence = mostRecentSlotAtOrBefore(other.hour, other.minute, justBeforeOwnSlot);
+    const occurrence = mostRecentFireAtOrBefore(firesOf(other), other.minute, justBeforeOwnSlot);
     if (!best || occurrence.getTime() > best.occurrence.getTime()) {
       best = { laneDef: other, occurrence };
     }
@@ -365,7 +562,10 @@ export function detectAmbiguousAttribution(heuristicRuns, lanes) {
  * as before — then passed through `detectAmbiguousAttribution` (see the
  * module header's "LANE ATTRIBUTION" section) before being trusted.
  *
- * @param {{event?: string, status: string, created_at: string, run_started_at: string|null, exactLane?: string|null}[]} runs
+ * A run flagged `earlyWarning` (its own mode marker reads early-warning) is
+ * skipped outright — it is certainly not a credential run.
+ *
+ * @param {{event?: string, status: string, created_at: string, run_started_at: string|null, exactLane?: string|null, earlyWarning?: boolean}[]} runs
  * @param {{lane: string, cron: string, hour: number, minute: number, expectedSlotTime: string, graceHours: number}[]} lanes already resolved for the CURRENT cycle (via `computeExpectedSlots`)
  * @param {{cron: string, hour: number, minute: number}[]} allSlots every declared cron (credential + early-warning)
  * @returns {{attributed: {lane: string, status: string, created_at: string, run_started_at: string|null}[], ambiguousLanes: Set<string>}}
@@ -380,11 +580,14 @@ export function attributeRunsToLanes(runs, lanes, allSlots) {
 
   for (const run of runs) {
     if (run.event && run.event !== 'schedule') continue;
+    // Its own mode marker says early-warning (`attachExactLanes`): never a
+    // credential run, so never evidence for one — not even heuristically.
+    if (run.earlyWarning) continue;
     const createdAt = new Date(run.created_at);
 
     if (run.exactLane && laneDefByName.has(run.exactLane)) {
       const laneDef = laneDefByName.get(run.exactLane);
-      const occurrence = mostRecentSlotAtOrBefore(laneDef.hour, laneDef.minute, createdAt);
+      const occurrence = mostRecentFireAtOrBefore(firesOf(laneDef), laneDef.minute, createdAt);
       if (occurrence.toISOString() === expectedByLane.get(run.exactLane)) {
         exact.push({
           lane: run.exactLane,
@@ -445,12 +648,15 @@ export function attributeRunsToLanes(runs, lanes, allSlots) {
  * - `quiet`            — started on time, already resolved, or still within grace.
  *
  * @param {{lanes: {lane: string, expectedSlotTime: string, graceHours: number}[], runs: {lane: string, status: string, created_at: string, run_started_at: string|null}[], now: Date|string, ambiguousLanes?: Set<string>}} args
- * @returns {{lane: string, verdict: 'missing'|'queued-too-long'|'ambiguous'|'quiet', reason: string}[]}
+ * @returns {{lane: string, slot: string, verdict: 'missing'|'queued-too-long'|'ambiguous'|'quiet', reason: string}[]}
  */
 export function decideCredentialSlotVerdicts({ lanes, runs, now, ambiguousLanes = new Set() }) {
   const nowTime = (now instanceof Date ? now : new Date(now)).getTime();
 
-  return lanes.map((laneDef) => {
+  return lanes.map((laneDef) => withSlot(laneDef, decideOne(laneDef)));
+
+  /** @param {{lane: string, expectedSlotTime: string, graceHours: number}} laneDef */
+  function decideOne(laneDef) {
     const slotTime = new Date(laneDef.expectedSlotTime).getTime();
     const deadline = slotTime + laneDef.graceHours * 60 * 60 * 1000;
     const graceElapsed = nowTime >= deadline;
@@ -499,7 +705,12 @@ export function decideCredentialSlotVerdicts({ lanes, runs, now, ambiguousLanes 
       verdict: 'quiet',
       reason: `a run exists (status: ${relevant.status}) and the ${laneDef.graceHours}h grace window has not elapsed yet`,
     };
-  });
+  }
+}
+
+/** Every verdict names the fire it decided (`slot`, ISO). */
+function withSlot(laneDef, verdict) {
+  return { ...verdict, slot: laneDef.expectedSlotTime };
 }
 
 /** True if any lane's verdict warrants the standard pinned alert. */
