@@ -310,6 +310,16 @@ const MUTATIONS = [
     replacement: "    if (r.status === 'completed' && r.conclusion !== 'success') continue;",
   },
   {
+    label: 'a successful dispatch run anchors the window (it never raised the alert)',
+    spec: WATCHDOG_SPEC,
+    expect: 'a successful DISPATCH run is never an anchor (a dispatch never raises the alert)',
+    subject: 'watchdog',
+    anchor:
+      "    // for a scheduled run — even if the server-side filter lets one through.\n    if (r.event && r.event !== 'schedule') continue;",
+    replacement:
+      '    // for a scheduled run — even if the server-side filter lets one through.\n    if (false) continue;',
+  },
+  {
     label: 'no successful run in view: fall back to the plain lookback, missing the crashed runs',
     spec: WATCHDOG_SPEC,
     expect: 'no successful run in view: the window reaches back past the oldest run it can see',
@@ -423,10 +433,10 @@ const MUTATIONS = [
   },
 ];
 
-declareMutations(36);
+declareMutations(37);
 
-if (MUTATIONS.length !== 36) {
-  console.error(`FATAL: declared 36 mutations, table has ${MUTATIONS.length}`);
+if (MUTATIONS.length !== 37) {
+  console.error(`FATAL: declared 37 mutations, table has ${MUTATIONS.length}`);
   process.exit(1);
 }
 

@@ -262,6 +262,9 @@ export function resolveCheckAnchors(gh, { runId = null, eventName = null, now })
   let oldestEarlier = null;
   for (const r of runs) {
     if (own && r.id === own.id) continue;
+    // A dispatch never raises the alert, so it can neither anchor nor stand in
+    // for a scheduled run — even if the server-side filter lets one through.
+    if (r.event && r.event !== 'schedule') continue;
     const started = r.run_started_at ? new Date(r.run_started_at) : null;
     if (!started || !Number.isFinite(started.getTime())) continue;
     if (started.getTime() >= checkAt.getTime()) continue;

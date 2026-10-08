@@ -2095,6 +2095,15 @@ describe('a watchdog run that did not evaluate its window is never an anchor (ro
     expect(a.previousCheckAt?.toISOString()).toBe('2026-10-09T23:10:00.000Z');
   });
 
+  it('a successful DISPATCH run is never an anchor (a dispatch never raises the alert)', () => {
+    const a = anchorOf([
+      run(30, '2026-10-10T15:00:00Z', 'in_progress', null),
+      { ...run(29, '2026-10-10T06:30:00Z'), event: 'workflow_dispatch' },
+      run(28, '2026-10-09T23:10:00Z'),
+    ]);
+    expect(a.previousCheckAt?.toISOString()).toBe('2026-10-09T23:10:00.000Z');
+  });
+
   it('a previous run still in progress is skipped (it has not finished evaluating)', () => {
     const a = anchorOf([
       run(30, '2026-10-10T15:00:00Z', 'in_progress', null),
