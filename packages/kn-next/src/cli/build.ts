@@ -325,6 +325,13 @@ export async function build(options: BuildOptions = {}) {
                 "No standalone output found — skipping bun-exports heal (is output:'standalone' set?)",
             );
         }
+        if (compileResult.adapterPathWorkaround) {
+            const { applied, reason, nextVersion } =
+                compileResult.adapterPathWorkaround;
+            // Quiet when there is nothing to say: a fixed Next logs nothing.
+            if (applied) log.info({ nextVersion }, reason);
+            else if (nextVersion === null) log.warn(reason);
+        }
         if (compileResult.compiled) {
             log.info(
                 { binary: compileResult.binaryPath },

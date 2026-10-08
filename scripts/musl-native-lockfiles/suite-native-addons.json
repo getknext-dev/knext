@@ -1,7 +1,7 @@
 {
   "$comment": "Every native addon the pinned Next.js deploy-tests suite can put into a deployed fixture's runtime tree, as the musl lookup spec (name + exact version) scripts/lib/musl-lockfile-lookup.sh's musl_lockfile_specs_for_root derives for it. In bun credential mode scripts/e2e-deploy.sh refuses any such spec with no committed lockfile under scripts/musl-native-lockfiles/, which is how sqlite3@5.1.7 redded the bun-webpack credential night while only sqlite3-5.0.2 was committed. tests/musl-lockfile-suite-native-addon-coverage.test.ts fails when nextVersion drifts from the credentialed Next.js ref, or when any runtimeAddons entry lacks a committed, frozen, git-tracked lockfile that pins exactly that version. Next.js's own sharp is recorded separately in next-sharp-resolution.json and is cross-checked here. On a Next.js bump: re-run scripts/scan-suite-native-addons.mjs against a checkout of the new vercel/next.js tag (real network, contributor-run, never CI), reclassify anything new, then generate any missing lockfile with scripts/generate-musl-native-lockfile.sh and list it in MUSL_NATIVE_LOCKFILE_FILES.",
-  "nextVersion": "16.3.6",
-  "scannedOn": "2026-10-01",
+  "nextVersion": "16.3.8",
+  "scannedOn": "2026-10-08",
   "runtimeAddons": [
     {
       "name": "sqlite3",

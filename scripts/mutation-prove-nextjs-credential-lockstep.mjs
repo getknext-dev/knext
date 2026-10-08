@@ -82,7 +82,7 @@ const MUTATIONS = [
     label: 'test-e2e-deploy.yml: bump the workflow_dispatch nextjsRef DEFAULT to a drifted value',
     subject: 'testE2eDeploy',
     anchor:
-      "        description: 'vercel/next.js git ref to test against (pinned tag ≥ v16.2.0; do NOT use canary)'\n        required: false\n        default: 'v16.3.6'",
+      "        description: 'vercel/next.js git ref to test against (pinned tag ≥ v16.2.0; do NOT use canary)'\n        required: false\n        default: 'v16.3.8'",
     replacement:
       "        description: 'vercel/next.js git ref to test against (pinned tag ≥ v16.2.0; do NOT use canary)'\n        required: false\n        default: 'v16.3.3'",
   },
@@ -108,13 +108,13 @@ const MUTATIONS = [
   {
     label: 'docs/compat-matrix.md: drift the cited vercel/next.js version from the manifest',
     subject: 'docsMatrixMd',
-    anchor: 'against `vercel/next.js` **v16.3.6**',
+    anchor: 'against `vercel/next.js` **v16.3.8**',
     replacement: 'against `vercel/next.js` **v16.3.3**',
   },
   {
     label: 'compat-matrix.mdx: drift the cited Next.js version from the manifest',
     subject: 'docsMatrixMdx',
-    anchor: 'The credential window now runs against Next.js v16.3.6.',
+    anchor: 'The credential window now runs against Next.js v16.3.8.',
     replacement: 'The credential window now runs against Next.js v16.3.3.',
   },
   {
@@ -130,7 +130,7 @@ const MUTATIONS = [
     label:
       'manifest: reintroduce a divergence (credentialedNextRef != shippedNextPin) with no explanation added to the docs',
     subject: 'manifest',
-    anchor: '"credentialedNextRef": "v16.3.6",',
+    anchor: '"credentialedNextRef": "v16.3.8",',
     replacement: '"credentialedNextRef": "v16.2.12",',
   },
 
@@ -169,12 +169,12 @@ const MUTATIONS = [
     edits: [
       {
         subject: 'scaffoldPkg',
-        anchor: '"next": "16.3.6",',
+        anchor: '"next": "16.3.8",',
         replacement: '"next": "16.4.0",',
       },
       {
         subject: 'manifest',
-        anchor: '"shippedNextPin": "16.3.6",',
+        anchor: '"shippedNextPin": "16.3.8",',
         replacement: '"shippedNextPin": "16.4.0",',
       },
     ],

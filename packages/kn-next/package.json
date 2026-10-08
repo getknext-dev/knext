@@ -61,6 +61,11 @@
       "import": "./dist/adapters/standalone-bun-exports.js",
       "default": "./dist/adapters/standalone-bun-exports.js"
     },
+    "./internal/standalone-adapter-path": {
+      "types": "./dist/adapters/standalone-adapter-path.d.ts",
+      "import": "./dist/adapters/standalone-adapter-path.js",
+      "default": "./dist/adapters/standalone-adapter-path.js"
+    },
     "./internal/next-adapter": {
       "types": "./dist/adapters/next-adapter.d.ts",
       "import": "./dist/adapters/next-adapter.js",
@@ -175,7 +180,7 @@
     "@types/node": "^25.3.0",
     "bun-types": "^1.3.9",
     "esbuild": "^0.28.0",
-    "next": "16.3.6",
+    "next": "16.3.8",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "vinext": "1.0.0-beta.12"

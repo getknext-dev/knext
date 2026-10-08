@@ -66,6 +66,22 @@ export default adapter;
 
 This is the same pattern that `knext create` scaffolds and the example apps in the knext repo use.
 
+## Known issue: Next.js before 16.4
+
+On Next.js releases before **16.4.0** (16.3.x included), a route with `dynamicParams = false` can
+answer a burst of concurrent prefetches for a parameter that is not in `generateStaticParams` with a
+**500** instead of a **404**, whenever an adapter is configured. Next.js fixed this in 16.4.0 and did
+not backport it.
+
+knext works around it for you. `knext build`, `knext deploy` and `knext preview` clear `adapterPath`
+from the standalone server's runtime configuration when the installed Next.js is older than 16.4.0.
+The adapter only does its work during `next build`, so nothing at runtime depends on it. Those
+requests then return a plain 404, exactly as a standalone server without an adapter does, and each one
+writes an `Error: Internal: NoFallbackError` line to the server log. On Next.js 16.4.0 or later knext
+changes nothing.
+
+If you assemble the standalone output without the knext CLI, upgrade to Next.js 16.4.0 or later.
+
 ## Verified against the official suite
 
 knext validates the adapter against the official Next.js compatibility suite: the
