@@ -95,10 +95,11 @@ describe("scaffolded next.config.ts pins the tracing root to the app dir", () =>
 });
 
 /**
- * knext expects the standalone server at the fixed path
- * `.next/standalone/server.js`, which only holds when the tracing root IS the
- * app directory. Advice to point the root at a repo root would nest the output
- * and trip the very error that tells the user to put the root back at the app.
+ * The DEFAULT guidance, for a single standalone app, keeps the tracing root at
+ * the app directory: advice to point it at a parent or repo root would nest the
+ * output for an app that never asked for that. The one case that wants a root
+ * above the app, a workspace monorepo, is documented on its own page, and the
+ * scaffold's pin plus the getting-started page only point there.
  */
 describe("no guidance pushes the tracing root above the app", () => {
     const here = import.meta.dirname;
@@ -132,8 +133,31 @@ describe("no guidance pushes the tracing root above the app", () => {
         expect(docs).not.toMatch(/repo(sitory)? root instead/i);
     });
 
-    it("the docs say plainly that a root above the app is not supported yet", () => {
+    it("the docs send a monorepo to its own page instead of calling it unsupported", () => {
         expect(docs).toMatch(/monorepo/i);
-        expect(docs).toMatch(/not (yet )?supported/i);
+        expect(docs).toContain("/docs/monorepo");
+        expect(docs).not.toMatch(/not (yet )?supported/i);
+    });
+
+    it("the monorepo page tells the user to set BOTH keys and says an inferred root is not enough", () => {
+        const page = readFileSync(
+            join(
+                here,
+                "..",
+                "..",
+                "..",
+                "..",
+                "apps",
+                "docs",
+                "content",
+                "docs",
+                "monorepo.mdx",
+            ),
+            "utf8",
+        );
+        expect(page).toContain("outputFileTracingRoot");
+        expect(page).toContain("turbopack");
+        expect(page).toMatch(/only an explicit/i);
+        expect(page).not.toMatch(/not (yet )?supported/i);
     });
 });

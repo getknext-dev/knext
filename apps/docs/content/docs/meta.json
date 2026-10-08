@@ -12,6 +12,7 @@
     "---Runtime---",
     "official-adapter",
     "build-pipeline",
+    "monorepo",
     "scale-to-zero",
     "warm-floors",
     "isr-caching",

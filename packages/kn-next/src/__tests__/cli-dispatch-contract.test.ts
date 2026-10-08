@@ -277,6 +277,10 @@ describe("usage mistakes are UsageErrors, so they render as messages", () => {
             // installed package failed to ship, not a user mistake.
             "vinext-node image template not found",
             "contains an unsubstituted",
+            // The monorepo rewrite's anchors against the shipped template: a
+            // count that drifted is a knext packaging defect (caught by
+            // runtime-image-nested.test.ts before release), never user input.
+            "cannot nest the standalone Dockerfile",
             // Internal invariant of an exported function (unreachable from
             // argv today: `validate.ts` rejects every `build` value except
             // `vinext` before a deploy/build ever reaches this selector, so

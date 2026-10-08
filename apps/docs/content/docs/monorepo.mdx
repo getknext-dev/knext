@@ -1,0 +1,92 @@
+---
+title: Deploy from a workspace monorepo
+description: Set the tracing root to your workspace root so knext packages an app that shares code with packages above it.
+---
+
+A workspace monorepo keeps shared packages beside the app (`packages/shared`) and installs
+everything from one root. For Next.js to trace those shared files into the standalone output, the
+app's **tracing root** has to be that workspace root, not the app's own directory. knext supports
+that layout when you set the root **on purpose**, and builds and deploys it with the same commands
+as any other app.
+
+## Set the root explicitly
+
+In the app's `next.config`, set both `outputFileTracingRoot` and `turbopack.root` to the workspace
+root, the directory that contains the app and the shared packages:
+
+```js title="apps/web/next.config.js"
+const path = require('node:path');
+
+module.exports = {
+  output: 'standalone',
+  // The workspace root: two levels above apps/web.
+  outputFileTracingRoot: path.join(__dirname, '..', '..'),
+  turbopack: { root: path.join(__dirname, '..', '..') },
+};
+```
+
+In `next.config.ts` the same value is `path.join(import.meta.dirname, '..', '..')`.
+
+knext reads these two values from the file; it does not run your config. Write each as a string
+literal, or as `path.join(...)` / `path.resolve(...)` of `__dirname` (or `import.meta.dirname`) with
+string arguments. Anything else, such as a value taken from a variable or an environment variable,
+is rejected with a message naming the setting, because guessing the root would build the image from
+the wrong tree.
+
+Then run the same commands, from the app directory:
+
+```bash
+cd apps/web
+knext build
+knext deploy
+```
+
+## What changes
+
+With the root above the app, Next.js writes the server at the app's path inside the standalone tree:
+
+```text
+apps/web/.next/standalone/
+  apps/web/server.js          <- the server, nested under the app's path
+  packages/shared/...         <- workspace files Next traced from outside the app
+  node_modules/...            <- hoisted dependencies
+```
+
+knext follows that layout everywhere it looks for the server: the build, the compiled Bun
+executable, the generated image, and the runtime. Three things are worth knowing:
+
+- **The Docker build context is the workspace root**, the same directory as the tracing root.
+  Everything under it is sent to `docker build`, so keep secrets and large scratch directories out
+  of the workspace, as you would for any monorepo image.
+- **`knext build` writes three small helper files at the workspace root** (the supervisor entry, the
+  compile-cache warm-up script and a compatibility shim, all copied into the image), and the
+  generated `Dockerfile.standalone` into the app directory.
+- **`@getknext/core` must be installed in the workspace**, at the root or in the app. The image
+  copies it from wherever the install put it. A package manager that links instead of copying
+  (pnpm's default layout) needs a real copy, for example with `node-linker=hoisted` in `.npmrc`.
+
+Files your server reads at runtime without importing them are traced only if Next knows about them.
+List them with `outputFileTracingIncludes`, relative to the app:
+
+```js title="apps/web/next.config.js"
+outputFileTracingIncludes: { '/': ['../../packages/shared/data.json'] },
+```
+
+The app needs a `public/` directory (it can hold a single file), because the image copies it.
+
+## A parent lockfile is not a monorepo root
+
+Next.js also infers a root by walking up to the outermost lockfile. If that lands above your app
+when you did not set the root, the server is written to a nested path nobody chose, and
+`knext build` stops with an error that names the inferred root and the lockfile responsible. That is
+deliberate: only an explicit `outputFileTracingRoot` or `turbopack.root` turns the nested layout on.
+A `workspaces` field or a `pnpm-workspace.yaml` alone does not.
+
+To fix it, either set the root explicitly as above, or set both keys to the app's own directory (or
+remove the stray lockfile) so the app is its own root.
+
+## Runtimes and image modes
+
+The default Bun image and the Node image are both tested with a monorepo root. The opt-in
+`selfContained` image is not covered with a workspace root yet; use the default image for a monorepo
+app.

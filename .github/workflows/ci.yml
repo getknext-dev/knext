@@ -572,7 +572,7 @@ jobs:
     # exists and invokes that file, so deleting the job reds that guard.
     name: SIGTERM drain (shipped standalone-on-bun image)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 35
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -670,6 +670,26 @@ jobs:
       # as a real fail-closed guarantee this step does not actually have.
       - name: Self-contained image (standalone-bun-self-contained) — build + boot + no-node_modules e2e
         run: node scripts/bun-test.mjs --no-skip packages/kn-next/src/__tests__/standalone-self-contained-image.docker-e2e.test.ts
+
+      # A REAL workspace monorepo (root package.json with workspaces, a shared
+      # package, an app that imports it) whose next.config sets the tracing root
+      # explicitly ABOVE the app, through the shipped `knext build`: the nested
+      # `.next/standalone/apps/web/server.js`, the traced workspace file outside
+      # the app dir, the compiled executable, and the supervisor on node and bun
+      # all serve the page. It also pins the other half with a real build: the
+      # same app WITHOUT the explicit root (Next infers it from the lockfile)
+      # still fails `knext build` with the real cause. Same no-skip contract;
+      # guarded by tests/standalone-drain-image-ci.test.ts.
+      - name: Monorepo root — knext build + nested server runs, accidental root still fails e2e
+        run: node scripts/bun-test.mjs --no-skip packages/kn-next/src/__tests__/monorepo-root.docker-e2e.test.ts
+
+      # The IMAGE for that layout: the Dockerfile.standalone `knext build` stages
+      # at the workspace root, built for standalone-bun and standalone-node and
+      # booted. The only proof the nested COPY paths, the executable's placement
+      # beside the nested server, the compile cache and the runtime cache link are
+      # right once Docker resolves them against a workspace-root build context.
+      - name: Monorepo root — standalone image (bun + node) builds and serves e2e
+        run: node scripts/bun-test.mjs --no-skip packages/kn-next/src/__tests__/monorepo-root-image.docker-e2e.test.ts
 
   # seam-alive gates: RETIRED (#885, stability sprint). The #352 defect class —
   # webpack layers duplicating @getknext/lib module state across the

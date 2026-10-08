@@ -22,7 +22,10 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { diagnoseNestedStandalone } from "../cli/standalone-layout";
+import {
+    diagnoseNestedStandalone,
+    resolveStandaloneLayout,
+} from "../cli/standalone-layout";
 
 /** Every throwaway tree made below, drained in one afterAll. */
 const tempRoots: string[] = [];
@@ -84,16 +87,44 @@ describe("diagnoseNestedStandalone", () => {
         expect(msg).not.toMatch(/check .*output: ?'standalone'/i);
     });
 
-    it("says a root deliberately ABOVE the app (a workspace monorepo) is not supported yet, rather than implying it works", () => {
+    it("an ACCIDENTAL parent root is not nested mode: the error points at the explicit setting that makes a monorepo root deliberate", () => {
         const base = tree({
             "package-lock.json": "{}",
             "app/.next/standalone/app/server.js": "// s\n",
         });
         const msg = diagnoseNestedStandalone(join(base, "app")) ?? "";
+        // Still an error, still the real cause.
+        expect(msg).toContain(join(base, "package-lock.json"));
+        // A monorepo root is supported now, and the message says how to opt in
+        // instead of claiming it cannot be done.
+        expect(msg).not.toMatch(/not (yet )?supported/i);
         expect(msg).toMatch(/monorepo/i);
-        expect(msg).toMatch(/not (yet )?supported/i);
-        // The only fix on offer puts the root AT the app, never above it.
-        expect(msg).not.toMatch(/repo(sitory)? root|\.\.\/\.\./i);
+        expect(msg).toMatch(/outputFileTracingRoot/);
+        expect(msg).toMatch(/turbopack\.root/);
+    });
+
+    it("an explicit root above the app whose server is NOT where that root implies names both paths", () => {
+        const base = tree({
+            "package.json": "{}",
+            "apps/web/next.config.js":
+                'const path = require("node:path");\nmodule.exports = { outputFileTracingRoot: path.join(__dirname, "..", ".."), output: "standalone" };\n',
+            // Next wrote the server at a different depth than the config implies.
+            "apps/web/.next/standalone/web/server.js": "// s\n",
+        });
+        const msg = diagnoseNestedStandalone(join(base, "apps", "web")) ?? "";
+        expect(msg).toContain(".next/standalone/apps/web/server.js");
+        expect(msg).toContain(".next/standalone/web/server.js");
+        expect(msg).toMatch(/turbopack\.root/);
+    });
+
+    it("an explicit root above the app with the server where it belongs -> no diagnosis", () => {
+        const base = tree({
+            "package.json": "{}",
+            "apps/web/next.config.js":
+                'const path = require("node:path");\nmodule.exports = { outputFileTracingRoot: path.join(__dirname, "..", ".."), output: "standalone" };\n',
+            "apps/web/.next/standalone/apps/web/server.js": "// s\n",
+        });
+        expect(diagnoseNestedStandalone(join(base, "apps", "web"))).toBeNull();
     });
 
     it("nested layout with NO lockfile found (root pinned some other way) -> still actionable", () => {

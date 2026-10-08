@@ -56,9 +56,9 @@ const nextConfig: NextConfig = {
     // (a parent where you ran `npm i @getknext/core`, or a monorepo) gets its
     // standalone server at `.next/standalone/<app>/server.js` and the build
     // fails. `knext deploy` reads this same value to choose the Docker build
-    // context. Keep it at this app's directory: knext expects the server at
-    // `.next/standalone/server.js`, so a root above the app (a workspace
-    // monorepo sharing dependencies) is not supported yet.
+    // context. Keep it at this app's directory for a standalone app like this
+    // one. (An app in a workspace monorepo sets it to the workspace root on
+    // purpose; see the "Deploy from a workspace monorepo" docs page.)
     // `turbopack.root` must agree with it, or Next.js warns.
     outputFileTracingRoot: import.meta.dirname,
     turbopack: { root: import.meta.dirname },
