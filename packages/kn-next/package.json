@@ -61,6 +61,11 @@
       "import": "./dist/adapters/standalone-bun-exports.js",
       "default": "./dist/adapters/standalone-bun-exports.js"
     },
+    "./internal/standalone-adapter-path": {
+      "types": "./dist/adapters/standalone-adapter-path.d.ts",
+      "import": "./dist/adapters/standalone-adapter-path.js",
+      "default": "./dist/adapters/standalone-adapter-path.js"
+    },
     "./internal/next-adapter": {
       "types": "./dist/adapters/next-adapter.d.ts",
       "import": "./dist/adapters/next-adapter.js",

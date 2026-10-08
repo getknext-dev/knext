@@ -232,6 +232,11 @@ EOF
   # export must not kill Node-lane deploys (the heal is only INVOKED on
   # RUNTIME=bun, post-build — see step 3).
   KNEXT_BUN_EXPORTS_HEAL="$(node -e 'process.stdout.write(require.resolve("@getknext/core/internal/standalone-bun-exports"))' 2>/dev/null || true)"
+  # The Next.js < 16.4.0 `adapterPath` workaround (blank adapterPath in the
+  # standalone runtime config), from the SAME installed package. Tolerant
+  # resolve: a tarball older than the export just runs without it, and the
+  # workaround itself is a no-op on a fixed Next.
+  KNEXT_ADAPTER_PATH_FIX="$(node -e 'process.stdout.write(require.resolve("@getknext/core/internal/standalone-adapter-path"))' 2>/dev/null || true)"
   # #188 path 2 — opt-in edge-sandbox fetch instrumentation preload (inert
   # unless KNEXT_SANDBOX_FETCH_DEBUG=1; only appended under that gate below).
   # Tolerant resolve: an older tarball without the export must not kill deploys.
@@ -252,6 +257,8 @@ else
   # The heal is TS source in-repo (not directly loadable); contract-test mode
   # never boots bun fixtures, so leave it unset — the bun branch warns+skips.
   KNEXT_BUN_EXPORTS_HEAL="${KNEXT_BUN_EXPORTS_HEAL:-}"
+  # Same: TS source in-repo, so the workaround is skipped (with a warning).
+  KNEXT_ADAPTER_PATH_FIX="${KNEXT_ADAPTER_PATH_FIX:-}"
 fi
 if [ ! -f "${KNEXT_CC_PRELOAD}" ]; then
   log "ERROR: cache-control normalization preload not found at ${KNEXT_CC_PRELOAD}"
@@ -436,6 +443,33 @@ if [ -d "${APP_DIR}/.next/static" ]; then
 fi
 if [ -d "${APP_DIR}/public" ]; then
   cp -R "${APP_DIR}/public" "${STANDALONE_APP_DIR}/public"
+fi
+
+# ── Next.js < 16.4.0: blank adapterPath in the standalone runtime config ──────
+# With `adapterPath` set, Next 16.3.x answers a `dynamicParams = false` miss
+# through render404() INSIDE the response cache, which throws "invariant: cache
+# entry required but not generated" and, under concurrent prefetches, 500s
+# (parallel-routes-root-param-dynamic-child). Fixed in 16.4.0, not backported.
+# The adapter's work is build-time only, so the standalone server does not need
+# it: blank it in the tree's runtime config, BEFORE the compile below so the
+# bun executable bundles the blanked config. Version-gated inside the module
+# (a no-op on Next >= 16.4.0); both runtimes boot this same tree.
+if [ -n "${KNEXT_ADAPTER_PATH_FIX:-}" ] && [ -f "${KNEXT_ADAPTER_PATH_FIX}" ]; then
+  log "adapterPath workaround for Next < 16.4.0 (module: ${KNEXT_ADAPTER_PATH_FIX})"
+  node --input-type=module -e '
+    const [fixPath, serverDir, projectDir] = process.argv.slice(1);
+    const { pathToFileURL } = await import("node:url");
+    const mod = await import(pathToFileURL(fixPath).href);
+    if (typeof mod.blankStandaloneAdapterPath !== "function") {
+      console.error("[e2e-deploy] adapterPath workaround: module exports no blankStandaloneAdapterPath");
+      process.exit(1);
+    }
+    const r = mod.blankStandaloneAdapterPath({ serverDir, projectDir, log: (m) => console.error(m) });
+    console.error(`[e2e-deploy] adapterPath workaround: applied=${r.applied} next=${r.nextVersion} (${r.reason})`);
+  ' "${KNEXT_ADAPTER_PATH_FIX}" "${STANDALONE_APP_DIR}" "${APP_DIR}" >&2 \
+    || { log "ERROR: adapterPath workaround failed — refusing to boot a tree that may 500 on dynamicParams=false misses"; exit 1; }
+else
+  log "WARNING: adapterPath workaround module unavailable (${KNEXT_ADAPTER_PATH_FIX:-unset}) — Next < 16.4.0 may 500 on dynamicParams=false misses under concurrent prefetches"
 fi
 
 # ── #188 round 3: heal Bun-condition export targets (bun lane only) ───────────
