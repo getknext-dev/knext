@@ -77,11 +77,11 @@ export default function HomePage() {
               <p>
                 The default build runs on the official Next.js Deployment Adapter API, packaged as a
                 bytecode-cached standalone executable. knext&apos;s compatibility record is public
-                and honest: Next.js&apos;s own deploy-mode e2e suite runs against it several times a day, and
-                its compatibility credential is <b>in progress</b> — not yet complete. An optional{' '}
-                <b>vinext</b> build (an open-source Vite-based Next.js implementation, compiled into
-                one binary) is also available as a Beta, with its measured suite results published.
-                Scope, exclusions, and what each claim covers:{' '}
+                and honest: Next.js&apos;s own deploy-mode e2e suite runs against it several times a
+                day, and its compatibility credential is <b>in progress</b> — not yet complete. An
+                optional <b>vinext</b> build (an open-source Vite-based Next.js implementation,
+                compiled into one binary) is also available as a Beta, with its measured suite
+                results published. Scope, exclusions, and what each claim covers:{' '}
                 <Link href="/docs/compat-suite">the compatibility credential</Link>.
               </p>
             </div>
