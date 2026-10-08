@@ -29,7 +29,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { appendFileSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { laneFromArtifacts, modeFromArtifacts } from './compat-window-audit.mjs';
@@ -41,6 +41,7 @@ import {
   dueFiresInWindow,
   parseAllDeclaredSlots,
   resolveCredentialLanes,
+  WATCHDOG_LOOKBACK_HOURS,
   WATCHDOG_MAX_WINDOW_HOURS,
   watchdogWindow,
 } from './lib/credential-slot-watchdog.mjs';
@@ -215,8 +216,19 @@ export function attachExactLanes(gh, runs, { repo = REPO } = {}) {
  *     else `now`; the previous run's anchor is the same field, so consecutive
  *     windows share their boundary.
  *   * The previous run is the newest scheduled run that started before this
- *     one and completed `success` or `failure`. `cancelled` (or anything
- *     else) is skipped: it may never have evaluated its window.
+ *     one and completed `success` — and ONLY `success` (PR #2013 round 3).
+ *     The CLI exits 0 whenever it evaluated its window (an alert travels in
+ *     the `alert` job output, not the exit code), so `success` means "window
+ *     evaluated, and any alert delivered". `failure` (a crash before
+ *     evaluating, or an alert job that could not file its issue),
+ *     `cancelled`/`timed_out` (job timeout, runner loss) and a run still in
+ *     progress are all skipped: the window widens back to the last run that
+ *     did evaluate, so the skipped run's fires are checked now.
+ *   * Earlier runs in view but none successful: the window reaches back to
+ *     the OLDEST of them minus the lookback — where that run's own window
+ *     would have started had it had no anchor. A full listing that old is
+ *     beyond WATCHDOG_MAX_WINDOW_HOURS, so `watchdogWindow` clamps it and
+ *     raises `coverage-gap`.
  *   * Any failure degrades to `previousCheckAt: null` — the lookback window,
  *     which can repeat a check but never skips one.
  *
@@ -241,13 +253,18 @@ export function resolveCheckAnchors(gh, { runId = null, eventName = null, now })
   const ownStart = own?.run_started_at ? new Date(own.run_started_at) : null;
   const checkAt = ownStart && Number.isFinite(ownStart.getTime()) ? ownStart : now;
   let previous = null;
+  let oldestEarlier = null;
   for (const r of runs) {
     if (own && r.id === own.id) continue;
-    if (r.status !== 'completed' || !['success', 'failure'].includes(r.conclusion)) continue;
     const started = r.run_started_at ? new Date(r.run_started_at) : null;
     if (!started || !Number.isFinite(started.getTime())) continue;
     if (started.getTime() >= checkAt.getTime()) continue;
+    if (!oldestEarlier || started.getTime() < oldestEarlier.getTime()) oldestEarlier = started;
+    if (r.status !== 'completed' || r.conclusion !== 'success') continue;
     if (!previous || started.getTime() > previous.getTime()) previous = started;
+  }
+  if (!previous && oldestEarlier) {
+    previous = new Date(oldestEarlier.getTime() - WATCHDOG_LOOKBACK_HOURS * 60 * 60 * 1000);
   }
   return { checkAt, previousCheckAt: previous };
 }
@@ -362,32 +379,110 @@ export function runWatchdogFromEnv({ workflowYamlText, gh, now, env = process.en
   return evaluateWatchdog({ workflowYamlText, gh, now, graceHours, checkAt, previousCheckAt });
 }
 
-function main() {
-  const workflowYamlText = readFileSync(WORKFLOW_PATH, 'utf8');
-  const verdicts = runWatchdogFromEnv({ workflowYamlText, gh: runGh, now: new Date() });
+/** `(start, end]`, the window's ISO bounds — as logged and as the `window` output. */
+export function formatWindow({ start, end }) {
+  return `(${start.toISOString()}, ${end.toISOString()}]`;
+}
 
-  if (verdicts.length === 0) console.log('No credential fire came due since the previous check.');
-  for (const v of verdicts) {
-    console.log(`${v.lane} @ ${v.slot}: ${v.verdict} — ${v.reason}`);
-  }
+/**
+ * Append one step output to `$GITHUB_OUTPUT`. Returns false when there is no
+ * output file (a local run); a write that fails throws.
+ *
+ * @param {Record<string, string|undefined>} env
+ */
+function githubOutputWriter(env) {
+  return (name, value) => {
+    if (!env.GITHUB_OUTPUT) return false;
+    appendFileSync(env.GITHUB_OUTPUT, `${name}=${value}\n`);
+    return true;
+  };
+}
 
-  const alerting = verdicts.filter((v) => v.verdict !== 'quiet');
-  if (alerting.length > 0) {
-    console.error(
-      `\n${alerting.length} fire(s) need alerting: ${alerting.map((v) => `${v.lane} @ ${v.slot}`).join(', ')}`,
+/**
+ * The CLI, injectable end to end. Returns the exit code.
+ *
+ * EXIT CODE = "did this run evaluate its window" (PR #2013 round 3), never
+ * "does it alert". The verdict travels in the `alert` output (`true`/`false`)
+ * and the alert job keys on it, so a run concludes `success` exactly when it
+ * checked its window — which is what `resolveCheckAnchors` anchors the NEXT
+ * run on. Exit 1 only when it did not:
+ *
+ *   * it crashed before evaluating (both run listings down, an unparseable
+ *     workflow): the log names the window it did not check, the alert job
+ *     raises the pinned alert on the job's `failure`, and the next scheduled
+ *     run, skipping this one as an anchor, checks the window instead;
+ *   * it has an alert and nowhere to report it (no `$GITHUB_OUTPUT`) — fail
+ *     closed, never a silent exit 0.
+ *
+ * The `window` output is written BEFORE evaluating, so the alert job can name
+ * it in the issue even when the evaluation crashes.
+ *
+ * @param {{
+ *   workflowYamlText: string,
+ *   gh: (args: string[]) => string,
+ *   now: Date,
+ *   env?: Record<string, string|undefined>,
+ *   writeOutput?: (name: string, value: string) => boolean,
+ *   log?: (msg: string) => void,
+ *   error?: (msg: string) => void,
+ * }} args
+ * @returns {number}
+ */
+export function runCli({
+  workflowYamlText,
+  gh,
+  now,
+  env = process.env,
+  writeOutput = githubOutputWriter(env),
+  log = console.log,
+  error = console.error,
+}) {
+  const graceHours = Number(env.WATCHDOG_GRACE_HOURS) || DEFAULT_GRACE_HOURS;
+  let window = null;
+  try {
+    const anchors = resolveCheckAnchors(gh, {
+      runId: env.GITHUB_RUN_ID ?? null,
+      eventName: env.GITHUB_EVENT_NAME ?? null,
+      now,
+    });
+    window = formatWindow(watchdogWindow({ ...anchors, graceHours }));
+    writeOutput('window', window);
+    log(`Checking every credential fire in ${window}.`);
+
+    const verdicts = evaluateWatchdog({ workflowYamlText, gh, now, graceHours, ...anchors });
+    if (verdicts.length === 0) log('No credential fire came due since the previous check.');
+    for (const v of verdicts) log(`${v.lane} @ ${v.slot}: ${v.verdict} — ${v.reason}`);
+
+    const alerting = verdicts.filter((v) => v.verdict !== 'quiet');
+    if (alerting.length > 0) {
+      error(
+        `\n${alerting.length} fire(s) need alerting: ${alerting.map((v) => `${v.lane} @ ${v.slot}`).join(', ')}`,
+      );
+    } else {
+      log('\nAll checked credential-lane fires are quiet.');
+    }
+    const reported = writeOutput('alert', alerting.length > 0 ? 'true' : 'false');
+    if (!reported && alerting.length > 0) {
+      error('::error::no $GITHUB_OUTPUT to report the alert through — failing closed.');
+      return 1;
+    }
+    return 0;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const where = window ?? 'its window (it stopped before computing it)';
+    error(
+      `::error::credential-slot-watchdog crashed and did NOT check the credential fires in ${where}: ${message}. ` +
+        'The next scheduled run anchors only on a run that evaluated its window, so it reaches back over these fires ' +
+        `(at most ${WATCHDOG_MAX_WINDOW_HOURS} h, which raises a coverage-gap alert; ${WATCHDOG_LOOKBACK_HOURS} h without a readable anchor).`,
     );
-    process.exitCode = 1;
-  } else {
-    console.log('\nAll checked credential-lane fires are quiet.');
+    return 1;
   }
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  try {
-    main();
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    console.error(`::error::${message}`);
-    process.exit(1);
-  }
+  process.exitCode = runCli({
+    workflowYamlText: readFileSync(WORKFLOW_PATH, 'utf8'),
+    gh: runGh,
+    now: new Date(),
+  });
 }
