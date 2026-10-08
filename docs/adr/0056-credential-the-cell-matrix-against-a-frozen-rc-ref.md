@@ -976,6 +976,6 @@ Sub-decisions, each scored with `jev pick` on the measured numbers above:
 - [x] Mutation prover: `scripts/mutation-prove-compat-credential-runs.mjs`.
 - [ ] User docs pages that `release/prepare-v1.0.0` also edits (`README.md`, `stability`,
       `compat-matrix`, `compat-suite`, `docs/RELEASING.md`, `docs/release/v1.0.0.md`) still say
-      nights; they are reworded after that branch merges, to avoid a conflicting edit (#ISSUE).
+      nights; they are reworded after that branch merges, to avoid a conflicting edit (#2014).
 - [ ] Measure the actual spacing and delay distribution after the first full week on the new grid,
       and revisit N if the pool is saturated or delays exceed eight hours.

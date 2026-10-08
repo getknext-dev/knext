@@ -178,7 +178,7 @@ export function fetchWindowRuns(gh, { since = null, ...rest } = {}) {
  * @param {(args: string[]) => string} gh
  * @param {T[]} runs
  * @param {{repo?: string}} [opts]
- * @returns {(T & {exactLane?: string|null})[]}
+ * @returns {(T & {exactLane?: string|null, earlyWarning?: boolean})[]}
  */
 export function attachExactLanes(gh, runs, { repo = REPO } = {}) {
   return runs.map((run) => {

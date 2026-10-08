@@ -262,8 +262,10 @@ const MUTATIONS = [
     expect:
       'skips a cancelled previous run (it may not have evaluated), reaching back to the one before',
     subject: 'watchdog',
-    anchor: "!['success', 'failure'].includes(r.conclusion)",
-    replacement: "!['success', 'failure', 'cancelled'].includes(r.conclusion)",
+    anchor:
+      "    if (r.status !== 'completed' || !['success', 'failure'].includes(r.conclusion)) continue;",
+    replacement:
+      "    if (r.status !== 'completed' || !['success', 'failure', 'cancelled'].includes(r.conclusion)) continue;",
   },
   {
     label: 'an early-warning run is credited to a credential lane again',

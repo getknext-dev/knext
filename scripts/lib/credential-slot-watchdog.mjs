@@ -120,6 +120,12 @@
  *   * A previous run more than `WATCHDOG_MAX_WINDOW_HOURS` (72 h) back is
  *     clamped to that window and alerts `coverage-gap`: the watchdog itself
  *     stopped running, and the older fires are not checked.
+ *   * A run that crashed (API down) concludes `failure` like an alerting run,
+ *     so the next run does not re-check its window. It is not silent — the
+ *     crash raised the same pinned alert — but those fires go unchecked.
+ *   * The grace is assumed unchanged between two runs. Changing it moves the
+ *     boundary by the difference: lowering it leaves that many hours unchecked
+ *     once, raising it re-checks them.
  *
  * Each fire is decided in its OWN context: the lanes' slots are taken at that
  * fire (`computeExpectedSlots(lanes, fire)`), which is exactly what a check at
