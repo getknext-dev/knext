@@ -504,7 +504,9 @@ The fixes bundled with vinext 1.0.1:
 - **In an app with both `app/` and `pages/`, a Pages route that returns `notFound`** (from
   `getStaticProps` or `getServerSideProps`, or a path a `fallback: false` page does not list)
   renders `app/not-found`, as in Next.js, instead of `pages/404`. The 404 response keeps the Pages
-  route's `Cache-Control`. This applies to production builds; the development server still shows `pages/404`.
+  route's `Cache-Control`. An app with no `app/not-found` of its own gets the built-in not-found page,
+  not `pages/404`, as in Next.js. This applies to production builds; the development server still
+  shows `pages/404`.
 
 ## Build the image on your own builder (Cloud Build / CI)
 
