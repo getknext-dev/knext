@@ -469,7 +469,31 @@ if [ -n "${KNEXT_ADAPTER_PATH_FIX:-}" ] && [ -f "${KNEXT_ADAPTER_PATH_FIX}" ]; t
   ' "${KNEXT_ADAPTER_PATH_FIX}" "${STANDALONE_APP_DIR}" "${APP_DIR}" >&2 \
     || { log "ERROR: adapterPath workaround failed — refusing to boot a tree that may 500 on dynamicParams=false misses"; exit 1; }
 else
-  log "WARNING: adapterPath workaround module unavailable (${KNEXT_ADAPTER_PATH_FIX:-unset}) — Next < 16.4.0 may 500 on dynamicParams=false misses under concurrent prefetches"
+  # No module to apply. That is only acceptable where there is nothing to apply:
+  # on an affected Next (< 16.4.0, pre-releases included) a missing module would
+  # boot a tree that 500s on dynamicParams=false misses and report a green night,
+  # so it is an ERROR there. A fixed or unreadable Next version only warns.
+  NEXT_AFFECTED="$(node -e '
+    const { createRequire } = require("node:module");
+    const { join } = require("node:path");
+    for (const dir of process.argv.slice(1)) {
+      try {
+        const v = require(createRequire(join(dir, "server.js")).resolve("next/package.json")).version;
+        const m = /^v?(\d+)\.(\d+)\.(\d+)(-[0-9A-Za-z.-]+)?/.exec(v);
+        if (!m) continue;
+        const [a, b, c] = [Number(m[1]), Number(m[2]), Number(m[3])];
+        const below = a !== 16 ? a < 16 : b !== 4 ? b < 4 : c !== 0 ? c < 0 : m[4] !== undefined;
+        process.stdout.write(below ? "affected" : "fixed");
+        process.exit(0);
+      } catch {}
+    }
+    process.stdout.write("unknown");
+  ' "${STANDALONE_APP_DIR}" "${APP_DIR}" 2>/dev/null || echo unknown)"
+  if [ "${NEXT_AFFECTED}" = "affected" ]; then
+    log "ERROR: adapterPath workaround module unavailable (${KNEXT_ADAPTER_PATH_FIX:-unset}) on a Next < 16.4.0 — refusing to boot a tree that 500s on dynamicParams=false misses under concurrent prefetches"
+    exit 1
+  fi
+  log "WARNING: adapterPath workaround module unavailable (${KNEXT_ADAPTER_PATH_FIX:-unset}); Next version is ${NEXT_AFFECTED}, so nothing is known to be at risk"
 fi
 
 # ── #188 round 3: heal Bun-condition export targets (bun lane only) ───────────

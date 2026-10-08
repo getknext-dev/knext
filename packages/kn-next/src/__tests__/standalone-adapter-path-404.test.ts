@@ -21,7 +21,10 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
-import { blankStandaloneAdapterPath } from "../adapters/standalone-adapter-path";
+import {
+    blankStandaloneAdapterPath,
+    nextCarriesAdapter404Bug,
+} from "../adapters/standalone-adapter-path";
 
 /**
  * A `dynamicParams = false` route 404s through the response cache, and with
@@ -268,6 +271,18 @@ describe("dynamicParams=false 404 under adapterPath: standalone, concurrent pref
         // The production workaround, on the tree Next just emitted.
         const result = blankStandaloneAdapterPath({ serverDir });
         const nextVersion = result.nextVersion ?? "unknown";
+        // The workaround must really have run on an affected Next: without this
+        // a silent `applied: false` (a version it could not read, a format it
+        // did not match) leaves the bug in place and only the load below, which
+        // is a race, would notice.
+        expect(
+            result.nextVersion,
+            `the installed Next.js version was unreadable: ${result.reason}`,
+        ).not.toBeNull();
+        expect(
+            result.applied,
+            `workaround not applied on Next ${nextVersion}: ${result.reason}`,
+        ).toBe(nextCarriesAdapter404Bug(nextVersion) === true);
 
         const port = await freePort();
         let log = "";

@@ -140,6 +140,21 @@ describe("compileArtifactForDeploy -- the adapterPath workaround", () => {
         if (runtime === "bun") expect(serverAtCompile).toBe(before);
     });
 
+    it.each([
+        "node",
+        "bun",
+    ] as const)("%s runtime: a config format the workaround cannot rewrite FAILS the build, compiling nothing", (runtime) => {
+        const dir = appWithStandalone("16.3.6");
+        writeFileSync(
+            join(dir, ".next", "standalone", "server.js"),
+            `const nextConfig = { adapterPath: '${ADAPTER}' }\n`,
+        );
+        expect(() => compileArtifactForDeploy(cfg({ runtime }), dir)).toThrow(
+            "adapterPath",
+        );
+        expect(buildStandaloneExecutable).not.toHaveBeenCalled();
+    });
+
     it("does not inspect a standalone dir that has no server.js", () => {
         const dir = mkdtempSync(join(tmpdir(), "knext-compile-adapterpath-"));
         tempRoots.push(dir);
