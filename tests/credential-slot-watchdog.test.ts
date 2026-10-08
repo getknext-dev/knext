@@ -1706,83 +1706,151 @@ describe('jittered watchdog starts — every fire is checked exactly once', () =
 
   // Round 3: some watchdog runs CRASH (conclude `failure` before evaluating),
   // TIME OUT (`cancelled`), or are still IN PROGRESS when the next run lists
-  // them. Every run resolves its anchor through the real `resolveCheckAnchors`
-  // over a fake Actions listing of the runs before it, as each one would have
-  // seen it. Only a run that evaluated checks anything, and every fire in range
-  // must still be checked at least once.
+  // them. Round 4 adds a run whose own listing FAILS (it must crash, not check
+  // the lookback), right after a crash streak of four, and a run whose alert
+  // job failed and was then re-run on its own (`success`, attempt 2, its
+  // `run_started_at` reset to the re-run time). Every run resolves its anchor
+  // through the real `resolveCheckAnchors` over a fake Actions listing of the
+  // runs before it, as each one would have seen it; a run's conclusion is what
+  // the code made of it. Only a run that evaluated checks anything, and every
+  // fire in range must still be checked at least once.
   it.each(
     Array.from({ length: 25 }, (_, i) => i + 301),
-  )('seed %i: crashed, timed-out and in-progress watchdog runs — every fire is still checked', (seed) => {
+  )('seed %i: crash streaks, failed listings, partial re-runs, timed-out and in-progress watchdog runs — every fire is still checked', (seed) => {
     const rand = prng(seed);
     const starts = jitteredStarts(rand, WATCHDOG_DELAY_HOURS);
     // `slow` / `slow-crash`: still in progress when the next run lists it,
-    // then concludes success / failure.
-    type Outcome = 'success' | 'failure' | 'cancelled' | 'slow' | 'slow-crash';
-    const evaluates = (o: Outcome) => o === 'success' || o === 'slow';
+    // then concludes success / failure. `listing-down`: this run's listing of
+    // its own workflow fails. `rerun`: the check evaluated, the alert job
+    // failed, and a re-run of the failed job turned the run `success` before
+    // the next run listed it.
+    type Outcome =
+      | 'success'
+      | 'failure'
+      | 'cancelled'
+      | 'slow'
+      | 'slow-crash'
+      | 'listing-down'
+      | 'rerun';
+    const anchors = (o: Outcome) => o === 'success' || o === 'slow';
+    const evaluates = (o: Outcome) => anchors(o) || o === 'rerun';
     const outcomes: Outcome[] = [];
     let streak = 0;
     starts.forEach((_, i) => {
       const r = rand();
       let o: Outcome =
-        r < 0.1
+        r < 0.08
           ? 'failure'
-          : r < 0.2
+          : r < 0.16
             ? 'cancelled'
-            : r < 0.3
+            : r < 0.24
               ? 'slow'
-              : r < 0.4
+              : r < 0.32
                 ? 'slow-crash'
-                : 'success';
-      // Keep a run of non-evaluating runs well inside the 72 h maximum window,
-      // and end on a run that evaluated (the range below ends at its due point).
-      if (!evaluates(o) && (streak >= 3 || i === starts.length - 1)) o = 'success';
+                : r < 0.38
+                  ? 'listing-down'
+                  : r < 0.44
+                    ? 'rerun'
+                    : 'success';
+      // Keep a run of runs that cannot anchor well inside the 72 h maximum
+      // window, and end on a run that evaluated (the range below ends at its
+      // due point).
+      if (!anchors(o) && (streak >= 3 || i === starts.length - 1)) o = 'success';
       // Every seed starts with each kind once: the very first run crashes (so
       // the next has no successful run in view), the second is still in
       // progress when the third lists it, the third times out, and the fourth
-      // is in progress when the fifth lists it and then crashes.
-      if (i < 4) o = (['failure', 'slow', 'cancelled', 'slow-crash'] as const)[i];
-      streak = evaluates(o) ? 0 : streak + 1;
+      // is in progress when the fifth lists it and then crashes. Then a
+      // success, a crash streak of four, a failed listing, a partial re-run,
+      // and a success: the last one reaches back seven runs.
+      const fixed = [
+        'failure',
+        'slow',
+        'cancelled',
+        'slow-crash',
+        'success',
+        'failure',
+        'cancelled',
+        'slow-crash',
+        'failure',
+        'listing-down',
+        'rerun',
+        'success',
+      ] as const;
+      if (i < fixed.length) o = fixed[i] as Outcome;
+      streak = anchors(o) ? 0 : streak + 1;
       outcomes.push(o);
     });
-    for (const kind of ['failure', 'cancelled', 'slow', 'slow-crash'] as const) {
+    for (const kind of [
+      'failure',
+      'cancelled',
+      'slow',
+      'slow-crash',
+      'listing-down',
+      'rerun',
+    ] as const) {
       expect(outcomes.filter((o) => o === kind).length).toBeGreaterThan(0);
     }
 
+    /** What each run concluded, as the code left it — set before the next run lists it. */
+    const concluded: string[] = [];
+    /** A partial re-run happens three quarters of the way to the next run's start. */
+    const rerunAt = (j: number) =>
+      new Date(
+        (starts[j] as Date).getTime() +
+          0.75 * ((starts[j + 1] as Date).getTime() - (starts[j] as Date).getTime()),
+      );
     /** Run j as run i's listing shows it: a slow run is still in progress for the next run. */
     const asSeenBy = (i: number, j: number) => {
       const iso = (starts[j] as Date).toISOString();
       const o = outcomes[j] as Outcome;
       const live = j === i || ((o === 'slow' || o === 'slow-crash') && j === i - 1);
+      const rerun = o === 'rerun' && j < i;
       return {
         id: 1000 + j,
         event: 'schedule',
         status: live ? 'in_progress' : 'completed',
-        conclusion: live ? null : o === 'slow' ? 'success' : o === 'slow-crash' ? 'failure' : o,
+        conclusion: live ? null : concluded[j],
         created_at: iso,
-        run_started_at: iso,
+        run_started_at: rerun ? rerunAt(j).toISOString() : iso,
+        run_attempt: rerun ? 2 : 1,
         html_url: `https://x/${1000 + j}`,
       };
     };
 
     const checked = new Map<string, number>();
     starts.forEach((checkAt, i) => {
+      const o = outcomes[i] as Outcome;
       const listingNewestFirst = Array.from({ length: i + 1 }, (_, k) => asSeenBy(i, i - k)).slice(
         0,
         30,
       );
-      const gh = () =>
-        JSON.stringify({
+      const gh = () => {
+        if (o === 'listing-down') throw new Error('api down');
+        return JSON.stringify({
           total_count: listingNewestFirst.length,
           workflow_runs: listingNewestFirst,
         });
-      const anchors = resolveCheckAnchors(gh, {
-        runId: String(1000 + i),
-        eventName: 'schedule',
-        now: new Date(checkAt.getTime() + 60_000),
-      });
-      expect(anchors.checkAt.getTime()).toBe(checkAt.getTime());
-      if (!evaluates(outcomes[i] as Outcome)) return; // crashed: evaluated nothing
-      const w = watchdogWindow({ ...anchors, graceHours: DEFAULT_GRACE_HOURS });
+      };
+      let resolved: ReturnType<typeof resolveCheckAnchors>;
+      try {
+        resolved = resolveCheckAnchors(gh, {
+          runId: String(1000 + i),
+          eventName: 'schedule',
+          now: new Date(checkAt.getTime() + 60_000),
+        });
+      } catch {
+        concluded[i] = 'failure'; // crashed before evaluating: exit 1
+        return;
+      }
+      if (o === 'listing-down') {
+        // It did not crash, so it checked whatever window it got and succeeded.
+        concluded[i] = 'success';
+      } else {
+        expect(resolved.checkAt.getTime()).toBe(checkAt.getTime());
+        concluded[i] = evaluates(o) ? 'success' : o === 'cancelled' ? 'cancelled' : 'failure';
+        if (!evaluates(o)) return; // crashed: evaluated nothing
+      }
+      const w = watchdogWindow({ ...resolved, graceHours: DEFAULT_GRACE_HOURS });
       expect(w.gap).toBe(false);
       for (const f of dueFiresInWindow(lanes, w)) {
         const key = `${f.lane}@${f.fire.toISOString()}`;
@@ -1907,6 +1975,7 @@ describe('resolveCheckAnchors — this run and the previous one, from the Action
     conclusion,
     created_at: started,
     run_started_at: started,
+    run_attempt: 1,
     html_url: `https://x/${id}`,
   });
   const listing = (runs: unknown[]) => {
@@ -1950,11 +2019,17 @@ describe('resolveCheckAnchors — this run and the previous one, from the Action
     expect(calls).toEqual([]);
   });
 
-  it('an unreadable listing degrades to the full lookback (may repeat a check, never skips one)', () => {
+  it('an unreadable listing THROWS on a scheduled run (the lookback can skip a crash streak)', () => {
+    // Round 4: the lookback reaches back 24 h, not to the last successful
+    // run, so after a crash streak it skips fires (the reproduction is in the
+    // round-4 block below). A dispatch never lists, so it keeps the lookback.
     const gh = () => {
       throw new Error('api down');
     };
-    expect(resolveCheckAnchors(gh, { runId: '30', eventName: 'schedule', now })).toEqual({
+    expect(() => resolveCheckAnchors(gh, { runId: '30', eventName: 'schedule', now })).toThrow(
+      'api down',
+    );
+    expect(resolveCheckAnchors(gh, { runId: '30', eventName: 'workflow_dispatch', now })).toEqual({
       checkAt: now,
       previousCheckAt: null,
     });
@@ -2060,6 +2135,7 @@ describe('a watchdog run that did not evaluate its window is never an anchor (ro
     conclusion,
     created_at: started,
     run_started_at: started,
+    run_attempt: 1,
     html_url: `https://x/${id}`,
   });
   const listing = (runs: unknown[]) => () =>
@@ -2189,6 +2265,7 @@ describe('the CLI reports its verdict through the `alert` output and exits 0 onc
       conclusion: null,
       created_at: '2026-10-10T15:00:00Z',
       run_started_at: '2026-10-10T15:00:00Z',
+      run_attempt: 1,
       html_url: 'https://x/30',
     },
     {
@@ -2198,6 +2275,7 @@ describe('the CLI reports its verdict through the `alert` output and exits 0 onc
       conclusion: 'success',
       created_at: '2026-10-10T07:00:00Z',
       run_started_at: '2026-10-10T07:00:00Z',
+      run_attempt: 1,
       html_url: 'https://x/29',
     },
   ];
@@ -2335,5 +2413,167 @@ describe('the alert job keys on the check job `alert` output, or a check that di
     expect(step?.env?.CHECK_RESULT).toBe('${{ needs.check-credential-slots.result }}');
     expect(step?.run).toContain('${WINDOW');
     expect(step?.run).toContain('CHECK_RESULT');
+  });
+});
+
+// ── Round 4: a failed listing crashes; only a first-attempt success anchors ──
+//
+// Two more ways a run could anchor the next one although some fires before
+// the anchor were never checked:
+//   * a scheduled run whose own listing failed fell back to the 24 h lookback
+//     and SUCCEEDED, so after a crash streak the fires between the last
+//     success and the lookback were checked by nobody;
+//   * a "Re-run failed jobs" of only the alert job resets `run_started_at` to
+//     the re-run time and turns the run `success`, so the next run anchored on
+//     the re-run time and skipped every fire in between.
+describe('round 4: a failed listing crashes, and only a first-attempt success anchors', () => {
+  const H = 3_600_000;
+  const lanes = resolveCredentialLanes(REAL_WORKFLOW);
+  const run = (
+    id: number,
+    started: string,
+    status = 'completed',
+    conclusion: string | null = 'success',
+    { attempt = 1, created = started }: { attempt?: number; created?: string } = {},
+  ) => ({
+    id,
+    event: 'schedule',
+    status,
+    conclusion,
+    created_at: created,
+    run_started_at: started,
+    run_attempt: attempt,
+    html_url: `https://x/${id}`,
+  });
+  const listing = (runs: unknown[]) => () =>
+    JSON.stringify({ total_count: runs.length, workflow_runs: runs });
+  const firesIn = (a: { checkAt: Date; previousCheckAt: Date | null }) =>
+    dueFiresInWindow(lanes, watchdogWindow({ ...a, graceHours: 8 })).map(
+      (f) => `${f.lane}@${f.fire.toISOString()}`,
+    );
+  // (10-08 23:00, 10-09 07:00]: the window right after success A's.
+  const UNCHECKED = [
+    'bun-webpack@2026-10-08T23:47:00.000Z',
+    'node@2026-10-09T01:17:00.000Z',
+    'bun@2026-10-09T05:47:00.000Z',
+    'node-webpack@2026-10-09T06:17:00.000Z',
+  ];
+
+  it('the reproduction: a failed listing after three crashed runs crashes (exit 1), and the next run reaches back to the last success', () => {
+    const A = run(28, '2026-10-09T07:00:00Z');
+    const crashed = [
+      run(31, '2026-10-10T07:00:00Z', 'completed', 'failure'),
+      run(30, '2026-10-09T23:00:00Z', 'completed', 'failure'),
+      run(29, '2026-10-09T15:00:00Z', 'completed', 'failure'),
+    ];
+    // The lookback the old fallback checked does not reach those four fires.
+    const lookback = firesIn({ checkAt: new Date('2026-10-10T15:00:00Z'), previousCheckAt: null });
+    for (const f of UNCHECKED) expect(lookback).not.toContain(f);
+
+    // Run E (32): its listing of the watchdog's own runs fails.
+    const outputs: Record<string, string> = {};
+    const errors: string[] = [];
+    const ghE = (args: string[]) => {
+      if ((args[1] ?? '').includes('credential-slot-watchdog.yml/runs')) {
+        throw new Error('api down');
+      }
+      return simGh([]).gh(args);
+    };
+    const code = runCli({
+      workflowYamlText: REAL_WORKFLOW,
+      gh: ghE,
+      now: new Date('2026-10-10T15:00:30Z'),
+      env: { GITHUB_RUN_ID: '32', GITHUB_EVENT_NAME: 'schedule', WATCHDOG_GRACE_HOURS: '8' },
+      writeOutput: (name: string, value: string) => {
+        outputs[name] = value;
+        return true;
+      },
+      log: () => {},
+      error: (m: string) => errors.push(m),
+    });
+    expect(code).toBe(1);
+    expect(outputs.alert).toBeUndefined();
+    // The crash alert names the window it did not check.
+    expect(outputs.window).toBe(
+      "(the last successful scheduled watchdog run's start - 8 h, 2026-10-10T07:00:30.000Z]",
+    );
+    expect(errors.join('\n')).toContain(`did NOT check the credential fires in ${outputs.window}`);
+    expect(errors.join('\n')).toContain('api down');
+
+    // Run F (33), eight hours later, sees E as the code concluded it.
+    const E = run(32, '2026-10-10T15:00:00Z', 'completed', code === 0 ? 'success' : 'failure');
+    const atF = resolveCheckAnchors(
+      listing([run(33, '2026-10-10T23:00:00Z', 'in_progress', null), E, ...crashed, A]),
+      { runId: '33', eventName: 'schedule', now: new Date('2026-10-10T23:00:30Z') },
+    );
+    expect(atF.previousCheckAt?.toISOString()).toBe('2026-10-09T07:00:00.000Z');
+    expect(watchdogWindow({ ...atF, graceHours: 8 }).gap).toBe(false);
+    for (const f of UNCHECKED) expect(firesIn(atF)).toContain(f);
+  });
+
+  it('a partial re-run (attempt 2) is never an anchor: the next window reaches back to the last attempt-1 success', () => {
+    // 29 checked at 15:00 (window ending 07:00); its alert job failed, and a
+    // re-run of that job alone at 21:00 turned it `success`, attempt 2, with
+    // `run_started_at` reset to 21:00. Anchoring there checks (13:00, 15:00]
+    // and skips (07:00, 13:00]: bun-webpack 07:47 and node 09:17.
+    const rerun = run(29, '2026-10-10T21:00:00Z', 'completed', 'success', {
+      attempt: 2,
+      created: '2026-10-10T15:00:00Z',
+    });
+    const a = resolveCheckAnchors(
+      listing([
+        run(30, '2026-10-10T23:00:00Z', 'in_progress', null),
+        rerun,
+        run(28, '2026-10-10T07:00:00Z'),
+      ]),
+      { runId: '30', eventName: 'schedule', now: new Date('2026-10-10T23:00:30Z') },
+    );
+    expect(a.previousCheckAt?.toISOString()).toBe('2026-10-10T07:00:00.000Z');
+    const fires = firesIn(a);
+    expect(fires).toContain('bun-webpack@2026-10-10T07:47:00.000Z');
+    expect(fires).toContain('node@2026-10-10T09:17:00.000Z');
+    // Anchored on the re-run time, they would not have been.
+    const onRerun = firesIn({
+      checkAt: a.checkAt,
+      previousCheckAt: new Date('2026-10-10T21:00:00Z'),
+    });
+    expect(onRerun).not.toContain('bun-webpack@2026-10-10T07:47:00.000Z');
+    expect(onRerun).not.toContain('node@2026-10-10T09:17:00.000Z');
+  });
+
+  it('a run with no run_attempt is never an anchor (it cannot prove it is a first attempt)', () => {
+    const { run_attempt: _, ...noAttempt } = run(29, '2026-10-10T14:00:00Z');
+    const a = resolveCheckAnchors(
+      listing([
+        run(30, '2026-10-10T23:00:00Z', 'in_progress', null),
+        noAttempt,
+        run(28, '2026-10-10T07:00:00Z'),
+      ]),
+      { runId: '30', eventName: 'schedule', now: new Date('2026-10-10T23:00:30Z') },
+    );
+    expect(a.previousCheckAt?.toISOString()).toBe('2026-10-10T07:00:00.000Z');
+  });
+
+  it('with no first-attempt success in view, a re-run reaches back from when it was CREATED (its start was reset)', () => {
+    // 29 was created at 06:30 and crashed; its lookback window was
+    // (10-08 22:30, 10-09 22:30]. It is being re-run, so its `run_started_at`
+    // reads the re-run time — after this run's own start, or before it.
+    expect(WATCHDOG_LOOKBACK_HOURS).toBe(24);
+    const expectedStart = new Date(Date.parse('2026-10-10T06:30:00Z') - (8 + 24) * H);
+    for (const [status, conclusion, started] of [
+      ['in_progress', null, '2026-10-10T15:10:00Z'],
+      ['completed', 'success', '2026-10-10T10:00:00Z'],
+    ] as const) {
+      const a = resolveCheckAnchors(
+        listing([
+          run(30, '2026-10-10T15:00:00Z', 'in_progress', null),
+          run(29, started, status, conclusion, { attempt: 2, created: '2026-10-10T06:30:00Z' }),
+        ]),
+        { runId: '30', eventName: 'schedule', now: new Date('2026-10-10T15:00:30Z') },
+      );
+      expect(watchdogWindow({ ...a, graceHours: 8 }).start.toISOString()).toBe(
+        expectedStart.toISOString(),
+      );
+    }
   });
 });

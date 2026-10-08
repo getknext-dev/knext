@@ -79,6 +79,8 @@ function mapRun(r) {
     conclusion: r.conclusion,
     created_at: r.created_at,
     run_started_at: r.run_started_at ?? null,
+    // 1 on a first attempt, higher on a re-run, which resets `run_started_at`.
+    run_attempt: r.run_attempt,
     html_url: r.html_url,
   };
 }
@@ -230,13 +232,24 @@ export function attachExactLanes(gh, runs, { repo = REPO } = {}) {
  *     `cancelled`/`timed_out` (job timeout, runner loss) and a run still in
  *     progress are all skipped: the window widens back to the last run that
  *     did evaluate, so the skipped run's fires are checked now.
- *   * Earlier runs in view but none successful: the window reaches back to
- *     the OLDEST of them minus the lookback — where that run's own window
- *     would have started had it had no anchor. A full listing that old is
- *     beyond WATCHDOG_MAX_WINDOW_HOURS, so `watchdogWindow` clamps it and
- *     raises `coverage-gap`.
- *   * Any failure degrades to `previousCheckAt: null` — the lookback window,
- *     which can repeat a check but never skips one.
+ *   * ...and only on its FIRST attempt (`run_attempt === 1`, round 4). A
+ *     re-run resets `run_started_at` to the re-run time: a "Re-run failed
+ *     jobs" of only the alert job turns the run `success` with a start hours
+ *     after its check, and anchoring there skips every fire in between. A
+ *     re-run (or a run with no `run_attempt`) is skipped like a crash; its
+ *     fires are re-checked, never lost.
+ *   * Earlier runs in view but none anchoring: the window reaches back to the
+ *     OLDEST of them minus the lookback — where that run's own window would
+ *     have started had it had no anchor. "Earlier" and "oldest" read the
+ *     earlier of `created_at` and `run_started_at`, because a re-run's start
+ *     was reset and its creation was not. A full listing that old is beyond
+ *     WATCHDOG_MAX_WINDOW_HOURS, so `watchdogWindow` clamps it and raises
+ *     `coverage-gap`.
+ *   * A listing that FAILS throws (round 4) — the CLI exits 1, the pinned
+ *     alert names the window it did not check, and the run is no anchor. It
+ *     must not fall back to the lookback: that reaches back 24 h, not to the
+ *     last successful run, so after a crash streak it would skip fires and
+ *     still succeed, anchoring the next run past them.
  *
  * @param {(args: string[]) => string} gh
  * @param {{runId?: string|number|null, eventName?: string|null, now: Date}} opts
@@ -252,8 +265,11 @@ export function resolveCheckAnchors(gh, { runId = null, eventName = null, now })
       perPage: 30,
       maxPages: 1,
     });
-  } catch {
-    return fallback;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `cannot list this workflow's own scheduled runs to anchor the window: ${message}`,
+    );
   }
   const own = runs.find((r) => runId != null && String(r.id) === String(runId));
   const ownStart = own?.run_started_at ? new Date(own.run_started_at) : null;
@@ -266,10 +282,17 @@ export function resolveCheckAnchors(gh, { runId = null, eventName = null, now })
     // for a scheduled run — even if the server-side filter lets one through.
     if (r.event && r.event !== 'schedule') continue;
     const started = r.run_started_at ? new Date(r.run_started_at) : null;
+    const created = r.created_at ? new Date(r.created_at) : null;
+    // A re-run resets `run_started_at`, never `created_at`.
+    const first = [started, created]
+      .filter((d) => d && Number.isFinite(d.getTime()))
+      .sort((a, b) => a.getTime() - b.getTime())[0];
+    if (!first || first.getTime() >= checkAt.getTime()) continue;
+    if (!oldestEarlier || first.getTime() < oldestEarlier.getTime()) oldestEarlier = first;
+    if (r.status !== 'completed' || r.conclusion !== 'success') continue;
+    if (r.run_attempt !== 1) continue;
     if (!started || !Number.isFinite(started.getTime())) continue;
     if (started.getTime() >= checkAt.getTime()) continue;
-    if (!oldestEarlier || started.getTime() < oldestEarlier.getTime()) oldestEarlier = started;
-    if (r.status !== 'completed' || r.conclusion !== 'success') continue;
     if (!previous || started.getTime() > previous.getTime()) previous = started;
   }
   if (!previous && oldestEarlier) {
@@ -417,7 +440,9 @@ function githubOutputWriter(env) {
  * run on. Exit 1 only when it did not:
  *
  *   * it crashed before evaluating (both run listings down, an unparseable
- *     workflow): the log names the window it did not check, the alert job
+ *     workflow, or — on a scheduled run — its listing of its own runs failed,
+ *     so it has no anchor; that window is named by its end, from the last
+ *     successful run): the log names the window it did not check, the alert job
  *     raises the pinned alert on the job's `failure`, and the next scheduled
  *     run, skipping this one as an anchor, checks the window instead;
  *   * it has an alert and nowhere to report it (no `$GITHUB_OUTPUT`) — fail
@@ -449,11 +474,20 @@ export function runCli({
   const graceHours = Number(env.WATCHDOG_GRACE_HOURS) || DEFAULT_GRACE_HOURS;
   let window = null;
   try {
-    const anchors = resolveCheckAnchors(gh, {
-      runId: env.GITHUB_RUN_ID ?? null,
-      eventName: env.GITHUB_EVENT_NAME ?? null,
-      now,
-    });
+    let anchors;
+    try {
+      anchors = resolveCheckAnchors(gh, {
+        runId: env.GITHUB_RUN_ID ?? null,
+        eventName: env.GITHUB_EVENT_NAME ?? null,
+        now,
+      });
+    } catch (err) {
+      // No anchor, so no start bound: name what is unchecked by its end.
+      const end = new Date(now.getTime() - graceHours * 60 * 60 * 1000).toISOString();
+      window = `(the last successful scheduled watchdog run's start - ${graceHours} h, ${end}]`;
+      writeOutput('window', window);
+      throw err;
+    }
     window = formatWindow(watchdogWindow({ ...anchors, graceHours }));
     writeOutput('window', window);
     log(`Checking every credential fire in ${window}.`);
