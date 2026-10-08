@@ -50,6 +50,10 @@ Each stable release is published to npm's `latest` tag. When a newer minor takes
 line stays installable: `npm install -D @getknext/core@1.0` resolves the newest `1.0.x`, and the
 `latest-1.0` dist-tag points at the same release.
 
+The three packages depend on each other with caret ranges, so an older `@getknext/core` can still
+resolve a newer `@getknext/lib` or `@getknext/db` once a later minor exists. If you stay on an older
+line, list all three packages in your own `package.json` at the same version.
+
 Not every feature is covered by this policy yet — see [Stability tiers](/docs/stability) for which
 features are Stable (covered above), Beta (may still change with notice), or Experimental
 (outside this policy entirely).

@@ -482,8 +482,10 @@ that touches that surface with neither a changeset nor an explicit opt-out.
 >
 > The `ga-tarball-diff` gate is unaffected: it keys on the release tags, finds `v1.0.0-rc.6` as the
 > highest `v1.0.0-rc.N`, and `rcTag` pins the same tag, so it runs (not ambiguous) and must be
-> green before `release` publishes. Everything from step 5 on applies unchanged, plus the
-> `latest-1.0` dist-tag step under [Dist-tags after GA](#dist-tags-after-ga).
+> green before `release` publishes. Steps 5–10 apply, **except that the operator release (step 7)
+> must happen BEFORE the merge in step 5** — see
+> [Operator first for 1.0.0](#operator-first-for-100-the-exact-order) — plus the `latest-1.0`
+> dist-tag step under [Dist-tags after GA](#dist-tags-after-ga).
 
 This is the exact sequence from "the credential window closed 14/14 green on all four cells" to
 "`1.0.0` is on npm `latest`". It assumes the credential window's own gate (14 consecutive nightly
@@ -493,6 +495,42 @@ closed successfully — this section does not re-derive that gate, only what hap
 Steps marked **[FOUNDER]** are not agent-doable: they require a click a human must make (an
 environment approval, a `git push` of a release tag, or a branch-protection setting) or a decision
 about whether to proceed that should not be automated.
+
+### Operator first for 1.0.0: the exact order
+
+`1.0.0` adds the optional CRD field `spec.security.writableCache`. The bundle users are told to
+install (`operator-latest`) predates it, no `operator-v*` release exists yet, and merging the
+Version PR publishes the CLI immediately (step 5). So the operator release must exist **before** the
+merge — "operator/CRD first, then CLI" ([Upgrade order](#upgrade-order)) applies to the release
+itself, not only to users.
+
+Verified on 2026-10-08: `git diff v1.0.0-rc.6 origin/main -- packages/kn-next-operator
+.github/workflows/operator-supply-chain.yml` is empty, so the operator at the `v1.0.0-rc.6` commit
+(`6c8151fe`) is byte-identical to `main`'s, and the tag's workflow is the same publisher.
+
+1. **[FOUNDER] Push the operator tag on the rc.6 commit:**
+   `git tag operator-v1.0.0 6c8151fe92bbe19da3b304467610475d994a4f87 && git push origin
+   operator-v1.0.0`. This triggers `operator-supply-chain.yml` (`push: tags: ['operator-v*']`):
+   `check-release-immutable.sh` → build → SBOM → Trivy HIGH/CRITICAL gate → push to GHCR → cosign
+   sign + `cosign verify` → `make build-installer` with the pushed digest pinned into
+   `dist/install.yaml` (`check-published-digest.sh`) → a GitHub Release `operator-v1.0.0` carrying
+   `install.yaml` → and, because `1.0.0` is a stable version (`hack/release-channel.sh` sets
+   `is_stable=true`), the same `install.yaml` re-published to `operator-latest`.
+2. **Verify the run is green and the asset is right** before going further:
+   ```sh
+   gh release download operator-v1.0.0 -p install.yaml -D /tmp/op-v1
+   grep -c writableCache /tmp/op-v1/install.yaml          # >= 1 (the CRD knows the field)
+   grep -E 'image: ghcr.io/getknext-dev/kn-next-operator' /tmp/op-v1/install.yaml   # must end in @sha256:<digest>
+   gh release download operator-latest -p install.yaml -D /tmp/op-latest
+   diff /tmp/op-v1/install.yaml /tmp/op-latest/install.yaml   # identical: operator-latest re-pointed
+   ```
+   Optionally `cosign verify` the digest exactly as the workflow's verify step does. If the run
+   reds (e.g. the Trivy gate), stop: do not merge the Version PR until a green `operator-v1.0.0`
+   release exists.
+3. **Only then merge the `1.0.0` Version PR** (step 5 — the publish).
+
+The release notes and the compatibility table point users at the **versioned**
+`releases/download/operator-v1.0.0/install.yaml`, which only exists after step 1.
 
 ### GA preconditions
 
@@ -556,11 +594,14 @@ Confirm every box before starting step 1 below:
    fields](#a-credentialed-ga-must-differ-from-its-last-rc-only-in-version-fields) above) — do not
    merge if that check is red; a red diff means the tarball about to publish is not the one the 14
    nights actually credentialed.
-5. **[FOUNDER] Approve the `npm-publish` environment deployment.** Merging the Version PR is a
-   second push to `main`; `release` starts and parks in `waiting` for the environment's
-   required-reviewer approval (see [Subsequent releases](#subsequent-releases) step 4). Check the
-   run's head SHA before approving — it must be the Version PR's merge commit, not a stale parked
-   run. `changeset publish` then ships `1.0.0` to all four packages on the `latest` dist-tag.
+5. **Merging the Version PR IS the publish.** Merging it is a second push to `main`; `release`
+   starts and — because the `npm-publish` environment has **no required reviewer today** (see
+   [The gate](#the-gate-two-lanes-one-approval); #1638 would add one) — publishes immediately once
+   `ga-tarball-diff` and `publish-preflight` are green. There is no approval pause to catch a
+   mistake: everything that must precede the publish (the operator release in step 7, for `1.0.0`)
+   must be done **before** the merge. `changeset publish` ships `1.0.0` to all four packages on the
+   `latest` dist-tag. If #1638 has landed by then, a pause exists: check the parked run's head SHA
+   is the Version PR's merge commit before approving.
 6. **[FOUNDER] Push the `v1.0.0` tag.** `git tag v1.0.0 <merge-commit-sha> && git push origin
    v1.0.0`. Verify it landed with `git ls-remote --tags origin v1.0.0` before moving on — a tag
    that silently failed to push leaves every step below pointed at nothing.
@@ -575,12 +616,12 @@ Confirm every box before starting step 1 below:
    ```
    Then confirm the resulting `operator-v1.0.0` release exists, its `install.yaml` resolves to a
    real signed image digest, and `operator-latest` now points at the same digest.
-   **Fallback, only if this tag push is skipped for some reason:** `operator-latest` keeps
-   republishing on every push to `main` regardless, so GA could ship against that rolling channel
-   instead — but then record which operator commit SHA / image digest it carries in the GA release
-   notes (there is no separate `v1.0.0`-tagged operator artifact in that case — `operator-latest`
-   IS the artifact), and do not hand-apply an unsigned or untagged image either way. The tagged
-   path above is preferred and should be the default.
+   **There is no fallback for `1.0.0`.** A push to `main` moves only `operator-edge`; nothing but a
+   stable `operator-vX.Y.Z` tag moves `operator-latest`. As of 2026-10-08 `operator-latest` still
+   carries a 2026-09-29 bundle whose CRD has **no `spec.security.writableCache`**, so an app that
+   sets that field through a `1.0.0` CLI is rejected with a strict-decoding error against it. For
+   `1.0.0` this step therefore runs
+   **before** step 5 — see [Operator first for 1.0.0](#operator-first-for-100-the-exact-order).
 8. **Stranger install + upgrade verification against the live registry.** From a clean environment
    with no local checkout state: `npm exec --package=@getknext/core@latest -- kn-next create` (the
    documented quickstart) must scaffold and `npx kn-next --help` must exit 0. Separately, on a
@@ -616,12 +657,29 @@ publish `1.3.0`, which takes `latest`. To keep the `1.0` line reachable by name 
   (`v1.0` is `>=1.0.0 <1.1.0-0`). `latest-1.0` does not. `lts` was rejected because the release
   policy makes no long-term-support promise.
 - A semver range needs no tag at all: `npm install @getknext/core@1.0` resolves the newest `1.0.x`
-  regardless of dist-tags. The tag is the named handle for `npx`/docs and for the patch flow below.
+  `@getknext/core` regardless of dist-tags. The tag is the named handle for `npx`/docs and for the
+  patch flow below.
+- **Known drift — the 1.0 line pins only its top package, not its siblings.** `1.0.0` ships the
+  fixed group's internal ranges as `^1.0.0` (`kn-next` → `@getknext/core`, core → `lib`/`db`, db
+  → `lib`), byte-identical to rc.6's `^1.0.0-rc.6`. Once a stable `1.3.0` is published, installing
+  `@getknext/core@1.0` (or `@latest-1.0`) still resolves `@getknext/lib`/`@getknext/db` to `1.3.x`,
+  and `kn-next@1.0` resolves `@getknext/core` to `1.3.x` — a mixed set. (Prereleases such as
+  `1.3.0-rc.9` do not satisfy `^1.0.0`, so nothing drifts until `1.3.0` itself publishes.) Users
+  who must stay on 1.0 should pin all three packages explicitly in their own `package.json`.
+  **Not fixed in `1.0.0` on purpose:** changing the ranges to `~1.0.0` would make the `1.0.0`
+  tarballs differ from rc.6 in a range the `ga-tarball-diff` gate rejects (it only allows the rc
+  range with the version substituted), breaking both the publish gate and the "same bytes as rc.6"
+  claim (jev `pick` 2026-10-08: keep `^` and disclose 0.81, change now 0.19). **Proposed fix for
+  the `release/1.0` patch branch:** before cutting `1.0.1`, rewrite the sibling ranges to
+  `~1.0.x` (e.g. a `workspace:~` spec, which `scripts/rewrite-workspace-ranges.mjs` must learn to
+  rewrite to `~<version>`), so every `1.0.x` resolves only `1.0.x` siblings. `1.0.1` has no rc tag,
+  so the GA diff gate skips it by design and does not block that change.
 - **Every later `1.0.x` publish must carry `--tag latest-1.0` once `1.3.0` holds `latest`** —
   otherwise npm moves `latest` back to the `1.0.x` patch. `release.yml` publishes from `main` only
   and passes no tag for a stable version today, so a `1.0.x` publish after `1.3.0` needs a
   branch-aware publish path first (see [Patch release runbook](#patch-release-runbook-101)).
-- The `rc` dist-tag stays on `1.0.0-rc.6` (the credentialed bytes); leave it.
+- The `rc` dist-tag stays on `1.0.0-rc.6` — the tag the credential nights run against (the
+  credential is still in progress, so those bytes are not "credentialed" yet); leave it.
 
 (Decision record: jev `pick`, 2026-10-08 — `latest-1.0` 0.63 vs no tag 0.29, `lts` 0.07, `v1.0`
 0.01.)
