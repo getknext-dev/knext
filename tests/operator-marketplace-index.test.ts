@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'bun:test';
+import { afterAll, describe, expect, it } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
@@ -185,8 +185,15 @@ function nestedOf(layoutDir: string): { mediaType: string; manifests: Desc[] } {
   return JSON.parse(readFileSync(join(layoutDir, 'blobs/sha256', hex), 'utf8'));
 }
 
+const tempRoots: string[] = [];
+afterAll(() => {
+  for (const r of tempRoots) rmSync(r, { recursive: true, force: true });
+});
+
 function scratch(): string {
-  return mkdtempSync(join(tmpdir(), 'mp-index-'));
+  const r = mkdtempSync(join(tmpdir(), 'mp-index-'));
+  tempRoots.push(r);
+  return r;
 }
 
 describe('marketplace-index-build.sh (#1954)', () => {

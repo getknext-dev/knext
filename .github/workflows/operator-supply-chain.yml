@@ -433,7 +433,7 @@ jobs:
       # so a failed run leaves no `-mp` release tag behind. The platform blobs
       # already exist in the repository, so this uploads one small index.
       - name: Push Marketplace index (version tags only, #1954)
-        if: steps.channel.outputs.is_version_tag == 'true' && steps.trivy.outcome == 'success'
+        if: steps.channel.outputs.publish == 'true' && steps.channel.outputs.is_version_tag == 'true' && steps.trivy.outcome == 'success'
         id: push_mp
         run: |
           set -euo pipefail
@@ -450,7 +450,7 @@ jobs:
       # attestation manifest and its platform manifests carry the SAME config +
       # layer digests as the gated, signed image. Fails the run otherwise.
       - name: Assert Marketplace index has no attestations and identical bits (#1954)
-        if: steps.channel.outputs.is_version_tag == 'true' && steps.trivy.outcome == 'success'
+        if: steps.channel.outputs.publish == 'true' && steps.channel.outputs.is_version_tag == 'true' && steps.trivy.outcome == 'success'
         env:
           GATED_DIGEST: ${{ steps.push.outputs.digest }}
           MP_DIGEST: ${{ steps.push_mp.outputs.digest }}
@@ -460,7 +460,7 @@ jobs:
       # it gets its own keyless signature (same OIDC identity as the gated image).
       # The platform manifests underneath are the already-signed gated ones.
       - name: Sign + verify Marketplace index (version tags only, #1954)
-        if: steps.channel.outputs.is_version_tag == 'true' && steps.trivy.outcome == 'success'
+        if: steps.channel.outputs.publish == 'true' && steps.channel.outputs.is_version_tag == 'true' && steps.trivy.outcome == 'success'
         env:
           COSIGN_EXPERIMENTAL: "1"
           IDENTITY_REGEXP: https://github.com/${{ github.repository }}/.*
@@ -471,7 +471,7 @@ jobs:
           bash packages/kn-next-operator/hack/cosign-verify.sh "${IMAGE}@${MP_DIGEST}"
 
       - name: Tag the Marketplace index (version tags only, #1954)
-        if: steps.channel.outputs.is_version_tag == 'true' && steps.trivy.outcome == 'success'
+        if: steps.channel.outputs.publish == 'true' && steps.channel.outputs.is_version_tag == 'true' && steps.trivy.outcome == 'success'
         env:
           GATED_DIGEST: ${{ steps.push.outputs.digest }}
           MP_DIGEST: ${{ steps.push_mp.outputs.digest }}
