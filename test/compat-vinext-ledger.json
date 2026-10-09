@@ -3,64 +3,6 @@
   "lane": "bun-vinext",
   "entries": [
     {
-      "test": "test/e2e/app-dir/worker/worker.test.ts",
-      "class": "unsupported",
-      "feature": "Deployment-id query on native-ESM worker chunk URLs (vinext keeps module identity, by design)",
-      "upstream": "https://github.com/cloudflare/vinext/issues/3437",
-      "cases": [
-        "should have access to NEXT_DEPLOYMENT_ID in web worker",
-        "should not bundle web workers with string specifiers",
-        "should support loading PNG files in web workers",
-        "should support loading WASM files in workers",
-        "should support module web workers with dynamic imports",
-        "should support shared workers",
-        "should support web workers with dynamic imports"
-      ],
-      "evidence": {
-        "fail": [
-          {
-            "run": "36255831920",
-            "cases": [
-              "should have access to NEXT_DEPLOYMENT_ID in web worker",
-              "should not bundle web workers with string specifiers",
-              "should support loading PNG files in web workers",
-              "should support loading WASM files in workers",
-              "should support module web workers with dynamic imports",
-              "should support shared workers",
-              "should support web workers with dynamic imports"
-            ]
-          },
-          {
-            "run": "36259994157",
-            "cases": [
-              "should have access to NEXT_DEPLOYMENT_ID in web worker",
-              "should not bundle web workers with string specifiers",
-              "should support loading PNG files in web workers",
-              "should support loading WASM files in workers",
-              "should support module web workers with dynamic imports",
-              "should support shared workers",
-              "should support web workers with dynamic imports"
-            ]
-          },
-          {
-            "run": "36262922089",
-            "cases": [
-              "should have access to NEXT_DEPLOYMENT_ID in web worker",
-              "should not bundle web workers with string specifiers",
-              "should support loading PNG files in web workers",
-              "should support loading WASM files in workers",
-              "should support module web workers with dynamic imports",
-              "should support shared workers",
-              "should support web workers with dynamic imports"
-            ]
-          }
-        ]
-      },
-      "added": "2026-09-26",
-      "expires": "2026-10-26",
-      "refreshed": "2026-09-26"
-    },
-    {
       "test": "test/e2e/app-dir/next-dynamic-csp-nonce/next-dynamic-csp-nonce.test.ts",
       "class": "unsupported",
       "feature": "next/dynamic JS chunk hints are rel=modulepreload (native ES modules), not rel=preload",

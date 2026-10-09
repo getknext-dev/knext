@@ -1,5 +1,5 @@
 {
-  "$comment": "vinext x bun STRUCTURAL-GAP ledger (founder decision 2026-10-09; ADR-0007 section g, Amendment). Files that fail ONLY because vinext does not implement the Next.js 16.3 client-router architecture. Separate from test/compat-vinext-ledger.json, whose bounds (15 files, 30-day expiry) are unchanged. Bounds, enforced by scripts/compat-vinext-structural-gaps.mjs: ONE shared gap record; reviewBy at most 92 days after recorded (past it the run reds); at most 49 files, frozen at the count first quarantined and only ever lowered (adding a file needs a new ADR-0007 amendment); every file a real manifest corpus member; vinext lane only. Files are RECLASSIFIED after the run at case granularity, never removed from the corpus: a new failing case in a ledgered file stays a real failure, and a file that passes reds as stale. `cases` is the intersection of the cases that failed in both evidence runs. vinext stays Beta; this ledger does not make the lane a credential.",
+  "$comment": "vinext x bun STRUCTURAL-GAP ledger (founder decision 2026-10-09; ADR-0007 section g, Amendment). Files that fail ONLY because vinext does not implement the Next.js 16.3 client-router architecture. Separate from test/compat-vinext-ledger.json, whose bounds (15 files, 30-day expiry) are unchanged. Bounds, enforced by scripts/compat-vinext-structural-gaps.mjs: ONE shared gap record; reviewBy at most 92 days after recorded (past it the run reds); at most 41 files, frozen at the count first quarantined and only ever lowered (49 originally, lowered after the vinext 1.1.0 measurement) (adding a file needs a new ADR-0007 amendment); every file a real manifest corpus member; vinext lane only. Files are RECLASSIFIED after the run at case granularity, never removed from the corpus: a new failing case in a ledgered file stays a real failure, and a file that passes reds as stale. `cases` is the intersection of the cases that failed in both evidence runs. vinext stays Beta; this ledger does not make the lane a credential.",
   "lane": "bun-vinext",
   "gap": {
     "id": "client-router-architecture",
@@ -27,25 +27,6 @@
         "keeps the navigation when the discarded action rejects",
         "runs an action dispatched during the navigation once it finishes"
       ]
-    },
-    {
-      "test": "test/e2e/app-dir/app-inline-css/index.test.ts",
-      "cases": [
-        "should have only one style tag when navigating from page with inlining to page without inlining",
-        "should not return rsc payload with inlined style as a dynamic client nav",
-        "should render page with correct styles"
-      ]
-    },
-    {
-      "test": "test/e2e/app-dir/app-prefetch/prefetching.test.ts",
-      "cases": [
-        "should have an auto priority for all other fetch operations",
-        "should prefetch links in viewport with low priority"
-      ]
-    },
-    {
-      "test": "test/e2e/app-dir/asset-prefix-absolute/asset-prefix-absolute.test.ts",
-      "cases": ["bundles should return 200 on served assetPrefix"]
     },
     {
       "test": "test/e2e/app-dir/concurrent-navigations/mismatching-prefetch.test.ts",
@@ -81,11 +62,6 @@
       ]
     },
     {
-      "test": "test/e2e/app-dir/navigation-focus/navigation-focus.test.ts",
-      "cases": ["navigation to a scrollable segment", "navigation to an interactive segment"],
-      "note": "Fixed on the integration/v1.3 line by the bundled scroll and focus patch (getknext-dev/knext#1995, from cloudflare/vinext#3768), merged after the evidence run. Expected to go stale on that line: remove this entry then."
-    },
-    {
       "test": "test/e2e/app-dir/next-dynamic-css/next-dynamic-css.test.ts",
       "cases": [
         "should have correct order of global styles between layout and pages",
@@ -93,14 +69,6 @@
         "should have correct order of styles on client component that is sharing styles with next/dynamic",
         "should have correct order of styles on next/dynamic loaded component"
       ]
-    },
-    {
-      "test": "test/e2e/app-dir/parallel-routes-scroll-owner/parallel-routes-scroll-owner.test.ts",
-      "cases": [
-        "consumes a missing hash without scrolling or blurring",
-        "preserves scroll when an empty intercepted modal is the only changed slot"
-      ],
-      "note": "Fixed on the integration/v1.3 line by the bundled scroll and focus patch (getknext-dev/knext#1995, from cloudflare/vinext#3768), merged after the evidence run. Expected to go stale on that line: remove this entry then."
     },
     {
       "test": "test/e2e/app-dir/partial-fallback-shell-upgrade/partial-fallback-shell-upgrade.test.ts",
@@ -139,15 +107,6 @@
       "cases": [
         "does not prefetch an ancestor link in a loop when the proxy injects a path segment"
       ]
-    },
-    {
-      "test": "test/e2e/app-dir/router-autoscroll/router-autoscroll.test.ts",
-      "cases": [
-        "should scroll to top even if React hoists children",
-        "should scroll when the page top is obscured by scroll padding (100px)",
-        "should scroll when the page top is obscured by scroll padding (50%)"
-      ],
-      "note": "Fixed on the integration/v1.3 line by the bundled scroll and focus patch (getknext-dev/knext#1995, from cloudflare/vinext#3768), merged after the evidence run. Expected to go stale on that line: remove this entry then."
     },
     {
       "test": "test/e2e/app-dir/rsc-basic/rsc-basic-blocking-ssr.test.ts",
@@ -199,12 +158,6 @@
     {
       "test": "test/e2e/app-dir/segment-cache/force-stale/force-stale.test.ts",
       "cases": ["during a \"full\" prefetch, read from bfcache before issuing new prefetch request"]
-    },
-    {
-      "test": "test/e2e/app-dir/segment-cache/headers-keyed-caches/headers-keyed-caches.test.ts",
-      "cases": [
-        "renders dynamic content on navigation even when the spawned runtime prerender populated the cache first"
-      ]
     },
     {
       "test": "test/e2e/app-dir/segment-cache/memory-pressure/segment-cache-memory-pressure.test.ts",
@@ -312,7 +265,6 @@
         "reuses prefetched page segment with in-page loading boundary across different params",
         "reuses prefetched segment when page does not access searchParams",
         "shares cached segment across all params when none accessed statically (runtime prefetch)",
-        "tracks metadata param access separately from body (runtime prefetch)",
         "tracks param access in generateMetadata"
       ]
     },
@@ -341,12 +293,6 @@
         "retries navigation after connectivity is restored",
         "shows offline indicator even without prefetch data",
         "updates offline indicator immediately on disconnect"
-      ]
-    },
-    {
-      "test": "test/e2e/app-document-import-order/app-document-import-order.test.ts",
-      "cases": [
-        "root components should be imported in order _document > _app > page to respect side effects"
       ]
     },
     {

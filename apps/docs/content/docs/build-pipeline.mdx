@@ -789,9 +789,9 @@ the compiled vinext executable. None of those cells is credentialed yet; see
 [the compatibility credential](/docs/compat-suite). The suite runs against the
 standalone server directly, so the result covers that output rather than the supervisor knext boots
 it with. The `vinext` build (Bun runtime) is **measured, not credentialed**: its latest run passed
-1000 of 1099 files. Of the rest, 49 are disclosed known-gap files (vinext does not implement the Next.js
-16.3 client-router architecture), 8 are individually quarantined and 42 fail. On the official suite minus
-those 49 known-gap files, 1000 of 1050 pass; vinext remains Beta. The **Node** runtime for the vinext target has not
+1016 of 1099 files. Of the rest, 41 are disclosed known-gap files (vinext does not implement the Next.js
+16.3 client-router architecture), 6 are individually quarantined and 36 fail. On the official suite minus
+those 41 known-gap files, 1016 of 1058 pass; vinext remains Beta. The **Node** runtime for the vinext target has not
 been run through this 778-test suite at all — it is proven to build, boot and serve a live
 request against the published package, but has no official-suite number yet. Read the per-feature
 status on the [compatibility matrix](/docs/compat-matrix) rather than assuming the standalone
