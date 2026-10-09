@@ -55,13 +55,38 @@ function environmentName(job: Job): string {
   return '';
 }
 
-/** Comment-free: the parsed job, serialised. A comment saying "NO NODE_AUTH_TOKEN" cannot trip it. */
+/** Every string key/value in the parsed job: unescaped and comment-free. */
+function stringValues(node: unknown, out: string[] = []): string[] {
+  if (typeof node === 'string') out.push(node);
+  else if (Array.isArray(node)) for (const v of node) stringValues(v, out);
+  else if (node && typeof node === 'object') {
+    for (const [k, v] of Object.entries(node)) {
+      out.push(k);
+      stringValues(v, out);
+    }
+  }
+  return out;
+}
+
+/**
+ * An `environment:` whose name is an expression (`${{ ... }}`), as a string or as
+ * `{ name: ${{ ... }} }`, can resolve to `npm-publish*` at run time, so it is
+ * treated as credential-bearing: it must name the guard in `needs` or be refused.
+ */
+function hasExpressionEnvironment(job: Job): boolean {
+  return environmentName(job).includes('${{');
+}
+
+/** Comment-free: a comment saying "NO NODE_AUTH_TOKEN" cannot trip it. */
 function holdsPublishCredential(job: Job): boolean {
-  const json = JSON.stringify(job);
+  const text = stringValues(job).join('\n');
   return (
-    json.includes('NODE_AUTH_TOKEN') ||
-    /secrets\.NPM_TOKEN/.test(json) ||
-    /^npm-publish/.test(environmentName(job))
+    text.includes('NODE_AUTH_TOKEN') ||
+    // dot AND bracket access, either quote style; GitHub contexts are case-insensitive
+    /secrets\s*\.\s*NPM_TOKEN/i.test(text) ||
+    /secrets\s*\[\s*['"]NPM_TOKEN['"]\s*\]/i.test(text) ||
+    /^npm-publish/.test(environmentName(job)) ||
+    hasExpressionEnvironment(job)
   );
 }
 

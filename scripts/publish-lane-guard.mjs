@@ -21,12 +21,20 @@
  *             sees what a Version PR would contain on a changesets run and what
  *             `changeset publish` would ship on a publish run.
  *
- * What it does NOT cover, stated so nobody reads more into it: a
- * `workflow_dispatch` runs the workflow file AT THE DISPATCHED REF. A stale branch
- * carries its own, older `release.yml` without this guard, so for refs that
- * predate it only the `npm-publish` environment's deployment-branch policy (a
- * repository setting) refuses the publish. This guard protects every ref cut
- * after it lands; the environment policy protects the rest.
+ * What it does NOT cover, stated so nobody reads more into it. The CURRENT
+ * exposure is wider than stale dispatches:
+ *   - a `workflow_dispatch` runs the workflow file AT THE DISPATCHED REF, so a
+ *     stale branch, `integration/v1.3` or a cut taken from it runs its own older,
+ *     unguarded `release.yml`;
+ *   - the `npm-publish` environment has NO deployment-branch policy today
+ *     (null), so ANY same-repo pull-request workflow that declares
+ *     `environment: npm-publish` gets NPM_TOKEN on `refs/pull/N/merge`;
+ *   - an environment branch policy matches by branch NAME only, so a lane name
+ *     that does not exist yet (`release/1.x`) can be created by anyone with push
+ *     at a stale marker SHA and dispatched.
+ * This guard protects every ref cut from guarded `main`; closing the rest takes
+ * repository settings (interim `main`-only policy, a ruleset over the lane
+ * names, lane names added to the policy only once they exist), not code.
  *
  * Usage:
  *   node scripts/publish-lane-guard.mjs ref   --ref <full ref>

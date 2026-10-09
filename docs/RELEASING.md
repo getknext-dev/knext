@@ -94,6 +94,14 @@ map; `release.yml` carries no lane literal of its own (a test asserts that).
   runs its own older `release.yml`, so for those refs the guard is not in the path — only the
   `npm-publish` environment's deployment-branch policy refuses them. Keep that policy in sync with
   the table above, and port the guard to each 1.x lane before relying on it there.
+- **Current exposure is wider than stale dispatches.** Until the repository settings are applied,
+  `npm-publish` has no deployment-branch policy, so any same-repo pull-request workflow that
+  declares `environment: npm-publish` receives `NPM_TOKEN` on `refs/pull/N/merge`. An environment
+  branch policy also matches by branch **name** only, so a lane name that does not exist yet can be
+  created at a stale SHA by anyone with push. The settings are: an interim `main`-only policy, a
+  ruleset that restricts creation, update and deletion of the lane names (founder-only bypass), and
+  lane names added to the policy only once the branch exists, was cut from guarded `main` and is
+  covered by that ruleset. `npm-publish-latest` gets the same per-cut add and remove steps.
 - Adding a lane, or opening release cuts for a new major, is a reviewed edit to the map in
   `scripts/publish-lane-guard.mjs` and to its pin in `tests/publish-lane-guard.test.ts`.
 

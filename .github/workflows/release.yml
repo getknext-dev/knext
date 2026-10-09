@@ -116,11 +116,24 @@ jobs:
   # │ a refused run never packs, never opens a Version PR, and never starts the │
   # │ job that holds NODE_AUTH_TOKEN. No step here is skippable or soft.        │
   # │                                                                           │
-  # │ LIMIT, stated so nobody reads more into it: a dispatch runs the workflow  │
-  # │ file AT THE DISPATCHED REF. A branch that predates this guard runs its    │
-  # │ own older `release.yml`, so for those refs only the `npm-publish`         │
-  # │ environment's deployment-branch policy (a repository setting) refuses the │
-  # │ publish. Guarded by tests/publish-lane-guard-workflow.test.ts and         │
+  # │ LIMIT, stated so nobody reads more into it. This guard is NOT the whole   │
+  # │ defence, and until the repository settings in the PR that added it are    │
+  # │ applied the CURRENT exposure is wider than stale dispatches:              │
+  # │   - a dispatch runs the workflow file AT THE DISPATCHED REF, so a branch  │
+  # │     that predates this guard (a stale marker branch, `integration/v1.3`,  │
+  # │     a cut taken from it) runs its own older, unguarded `release.yml`; AND │
+  # │   - the `npm-publish` environment has NO deployment-branch policy today   │
+  # │     (null), so ANY same-repo pull-request workflow that declares          │
+  # │     `environment: npm-publish` is handed NPM_TOKEN on                     │
+  # │     `refs/pull/N/merge`; AND                                              │
+  # │   - an environment branch policy matches by branch NAME only, so a lane   │
+  # │     name that does not exist yet (`release/1.x`) can be created by anyone │
+  # │     with push, at a stale marker SHA, and dispatched.                     │
+  # │ Closing it takes settings, not code: an interim `main`-only policy, a     │
+  # │ repository ruleset protecting the lane names, and lane names added to the │
+  # │ policy only once they exist and are covered (see the PR body, and         │
+  # │ docs/RELEASING.md). Guarded by                                            │
+  # │ tests/publish-lane-guard-workflow.test.ts and                             │
   # │ tests/publish-lane-guard.test.ts, mutation-proved by                      │
   # │ scripts/mutation-prove-publish-lane-guard.mjs.                            │
   # └───────────────────────────────────────────────────────────────────────────┘
