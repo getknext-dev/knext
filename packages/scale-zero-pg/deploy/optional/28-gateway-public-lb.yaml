@@ -11,18 +11,28 @@
 #   1. Restrict the source: replace the placeholder CIDR in
 #      `loadBalancerSourceRanges` with the networks that really need access.
 #      Never use 0.0.0.0/0.
-#   2. Require TLS: run `sh deploy/gen-tls.sh` (or provision a real CA /
-#      cert-manager cert into Secret `pggw-tls`) and connect with
-#      `sslmode=require` or, with a real CA, `sslmode=verify-full`. Never use
-#      `sslmode=disable` across the internet. The self-signed cert's SANs include
+#   2. Use TLS, knowing the server does NOT enforce it: the gateway still
+#      accepts plaintext (`sslmode=disable`) clients, and Secret `pggw-tls` is
+#      optional, so TLS is a client-side choice only. Run `sh deploy/gen-tls.sh`
+#      first (or provision a real CA / cert-manager cert into `pggw-tls`), and
+#      have clients use `sslmode=verify-full` against a real CA. `sslmode=require`
+#      encrypts but does not authenticate the server, so it does not stop a
+#      man-in-the-middle over the internet. The self-signed cert's SANs include
 #      `pggw-lb`.
 #   3. Prefer a private/internal load balancer where your cloud supports it
 #      (uncomment the annotation for your provider below).
 #   4. Do not rely on Postgres auth alone: keep the source ranges tight and
 #      rotate the credentials the gateway fronts.
 #
-# Only the Postgres wire ports are exposed. Metrics (9090) are deliberately
-# absent so they cannot be reached from outside the cluster.
+# The Service lists only the Postgres wire ports; metrics (9090) are deliberately
+# absent. CAVEAT: a LoadBalancer Service also allocates a NodePort on every node
+# for each port, and `loadBalancerSourceRanges` does NOT filter NodePort traffic.
+# Restrict node exposure too (cloud firewall / security lists / NSGs on the
+# nodes). Where your cloud allows, set `allocateLoadBalancerNodePorts: false`
+# (below) to stop the NodePorts being allocated; it only works for load
+# balancers that route straight to pods (e.g. AWS NLB with ip targets, GKE
+# container-native / NEG, Azure and similar) and breaks node-port-based LBs,
+# including the OCI classic load balancer used by default on OKE.
 #
 # To take the public front door down again, remove this Service by name
 # (pggw-lb in namespace scale-zero-pg).
@@ -38,6 +48,7 @@ metadata:
   #   networking.gke.io/load-balancer-type: "Internal"                  # GKE
 spec:
   type: LoadBalancer
+  # allocateLoadBalancerNodePorts: false   # only for pod-direct LB types, see header
   # REQUIRED edit: replace with your own CIDR(s). 192.0.2.0/24 is a
   # documentation-only range (RFC 5737) that matches no real client.
   loadBalancerSourceRanges:

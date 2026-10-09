@@ -100,12 +100,23 @@ describe('scale-zero-pg default apply path is not publicly exposed', () => {
     expect(() => parseDocs('kind: [unclosed\n', 'x')).toThrow(/unparseable/);
   });
 
-  it('no deploy script embeds a public Service (type: LoadBalancer|NodePort)', () => {
+  it('no deploy script creates a public Service (any spelling of LoadBalancer|NodePort)', () => {
+    // YAML `type: X`, flags `--type=X` / `--type X`, JSON `"type":"X"` (any spacing/quotes,
+    // incl. backslash-escaped), and `kubectl expose` (creates a Service; flagged on its own
+    // because the type may be assembled from a variable).
+    const T = '(?:LoadBalancer|NodePort)';
+    const patterns = [
+      new RegExp(`\\btype\\s*:\\s*["']?${T}\\b`),
+      new RegExp(`--type(?:=|\\s+)["']?${T}\\b`),
+      new RegExp(`\\\\*["']\\s*type\\s*\\\\*["']\\s*:\\s*\\\\*["']?${T}\\b`),
+      /\bkubectl\b[^\n]*\bexpose\b/,
+    ];
     const offenders = readdirSync(DEPLOY)
       .filter((n) => n.endsWith('.sh'))
-      .filter((n) =>
-        /type:\s*["']?(LoadBalancer|NodePort)\b/.test(readFileSync(join(DEPLOY, n), 'utf8')),
-      );
+      .filter((n) => {
+        const text = readFileSync(join(DEPLOY, n), 'utf8');
+        return patterns.some((re) => re.test(text));
+      });
     expect(offenders).toEqual([]);
   });
 });
