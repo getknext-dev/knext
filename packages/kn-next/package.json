@@ -1,6 +1,6 @@
 {
   "name": "@getknext/core",
-  "version": "1.3.0-rc.10",
+  "version": "1.3.0",
   "description": "Knative Next.js configuration and CLI",
   "type": "module",
   "main": "./dist/config.js",
@@ -192,8 +192,8 @@
   },
   "dependencies": {
     "@google-cloud/storage": "^7.18.0",
-    "@getknext/db": "workspace:^",
-    "@getknext/lib": "workspace:^",
+    "@getknext/db": "^1.3.0",
+    "@getknext/lib": "^1.3.0",
     "@opentelemetry/api": "^1.9.0",
     "acorn": "^8.18.0",
     "ioredis": "^5.9.2",

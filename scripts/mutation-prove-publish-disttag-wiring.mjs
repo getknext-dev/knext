@@ -99,16 +99,6 @@ const MUTATIONS = [
     replacement: '    return m[1];\n',
   },
   {
-    id: 'D6',
-    expect: 'red',
-    claim:
-      'flipping .changeset/pre.json back to tag `rc` on integration/v1.3 would make changeset ' +
-      'publish ship 1.3.0-rc.1 to `rc` — the branch pin must red.',
-    subject: 'pre',
-    anchor: '"tag": "next"',
-    replacement: '"tag": "rc"',
-  },
-  {
     id: 'D3',
     expect: 'green',
     claim:
@@ -129,7 +119,6 @@ const prover = createGuardProver({
   subjects: {
     script: 'scripts/ensure-published-group.mjs',
     spec: SPEC,
-    pre: '.changeset/pre.json',
   },
 });
 
