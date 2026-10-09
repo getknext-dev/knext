@@ -42,6 +42,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/yaml"
 
+	platformv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/api/platform/v1alpha1"
 	appsv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/api/v1alpha1"
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	servingv1beta1 "knative.dev/serving/pkg/apis/serving/v1beta1"
@@ -125,15 +126,19 @@ func stripYAMLComments(doc []byte) []byte {
 	return bytes.Join(out, []byte("\n"))
 }
 
-func goldenTestScheme(t *testing.T) *runtime.Scheme {
+func goldenTestScheme(t *testing.T, withPlatformKind bool) *runtime.Scheme {
 	t.Helper()
 	s := runtime.NewScheme()
-	for _, add := range []func(*runtime.Scheme) error{
+	adders := []func(*runtime.Scheme) error{
 		clientgoscheme.AddToScheme,
 		appsv1alpha1.AddToScheme,
 		servingv1.AddToScheme,
 		servingv1beta1.AddToScheme,
-	} {
+	}
+	if withPlatformKind {
+		adders = append(adders, platformv1alpha1.AddToScheme)
+	}
+	for _, add := range adders {
 		if err := add(s); err != nil {
 			t.Fatalf("scheme: %v", err)
 		}
@@ -146,11 +151,15 @@ func goldenTestScheme(t *testing.T) *runtime.Scheme {
 var renderedKinds = []string{"ServiceAccount", "Image", "Service", "NetworkPolicy", "DaemonSet"}
 
 // renderApp drives one Reconcile of app and returns the serialised children.
-// extraObjects are pre-existing cluster objects (a KnextPlatform in the platform
+// rc.objects are pre-existing cluster objects (a KnextPlatform in the platform
 // cases). A reconcile error is part of the golden (the reject-* entries).
-func renderApp(t *testing.T, scheme *runtime.Scheme, app *appsv1alpha1.NextApp, rc reconcilerCase, extraObjects ...client.Object) string {
+func renderApp(t *testing.T, app *appsv1alpha1.NextApp, rc reconcilerCase) string {
 	t.Helper()
-	objs := append([]client.Object{app.DeepCopy()}, extraObjects...)
+	scheme := goldenTestScheme(t, rc.platformKindRegistered)
+	objs := []client.Object{app.DeepCopy()}
+	for _, o := range rc.objects {
+		objs = append(objs, o.DeepCopyObject().(client.Object))
+	}
 	// Record every kind the operator CREATES, so an object type that starts
 	// being rendered but is missing from renderedKinds fails here instead of
 	// silently escaping the golden.
@@ -170,8 +179,12 @@ func renderApp(t *testing.T, scheme *runtime.Scheme, app *appsv1alpha1.NextApp, 
 			},
 		}).
 		Build()
-	r := &NextAppReconciler{Client: c, Scheme: scheme, Clock: func() time.Time { return goldenClock }}
-	rc.configure(r)
+	r := &NextAppReconciler{
+		Client:             c,
+		Scheme:             scheme,
+		Clock:              func() time.Time { return goldenClock },
+		PlatformCRDPresent: rc.crdPresent,
+	}
 
 	ctx := context.Background()
 	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: app.Name, Namespace: app.Namespace}}
@@ -297,26 +310,71 @@ func marshalNormalized(t *testing.T, scheme *runtime.Scheme, obj client.Object) 
 // reconcilerCase is one platform-state the corpus is rendered under.
 type reconcilerCase struct {
 	name string
-	// configure adjusts the reconciler (e.g. tells it whether the KnextPlatform
-	// CRD is installed).
-	configure func(r *NextAppReconciler)
+	// crdPresent is what start-up discovery would have reported.
+	crdPresent bool
+	// platformKindRegistered says whether the client's scheme knows the
+	// KnextPlatform kind at all (false models a CRD removed after start-up).
+	platformKindRegistered bool
+	// objects pre-exist in the cluster (a KnextPlatform).
+	objects []client.Object
 }
 
 func goldenPath(app *appsv1alpha1.NextApp) string {
 	return filepath.Join(goldenDir, app.Name+".golden.yaml")
 }
 
-// platformCases lists every platform state that must render identically.
-// TODO(#2034): extended with the CRD-present cases once the platform types
-// exist (see zero_diff_platform_cases_test.go).
+func platformNamed(mut func(*platformv1alpha1.KnextPlatform)) *platformv1alpha1.KnextPlatform {
+	p := &platformv1alpha1.KnextPlatform{ObjectMeta: metav1.ObjectMeta{
+		Name: platformv1alpha1.SingletonName, Generation: 7, UID: "platform-uid-sentinel",
+	}}
+	mut(p)
+	return p
+}
+
+// platformCases lists every platform state that must render the corpus
+// IDENTICALLY (ADR-0064 D3). The first four are the ADR's; the rest close the
+// gaps a real cluster can be in: a profile that sets nothing, a platform whose
+// only fields never reach a rendered object, and a CRD that vanished after the
+// operator started.
 func platformCases() []reconcilerCase {
 	return []reconcilerCase{
-		{name: "no-platform-layer", configure: func(*NextAppReconciler) {}},
+		// 1. The KnextPlatform CRD is not installed at all.
+		{name: "crd-absent"},
+		// 2. The CRD is installed, there is no object.
+		{name: "crd-present-no-cr", crdPresent: true, platformKindRegistered: true},
+		// 3. spec: {}
+		{name: "cr-empty-spec", crdPresent: true, platformKindRegistered: true,
+			objects: []client.Object{platformNamed(func(*platformv1alpha1.KnextPlatform) {})}},
+		// 4. profile: default
+		{name: "cr-profile-default", crdPresent: true, platformKindRegistered: true,
+			objects: []client.Object{platformNamed(func(p *platformv1alpha1.KnextPlatform) {
+				p.Spec.Profile = platformv1alpha1.ProfileDefault
+			})}},
+		// fastColdStart is accepted but sets no value in this release.
+		{name: "cr-profile-fastColdStart", crdPresent: true, platformKindRegistered: true,
+			objects: []client.Object{platformNamed(func(p *platformv1alpha1.KnextPlatform) {
+				p.Spec.Profile = platformv1alpha1.ProfileFastColdStart
+			})}},
+		// Fields that only pace or cap (never render): the objects must not move.
+		{name: "cr-only-pacing-fields", crdPresent: true, platformKindRegistered: true,
+			objects: []client.Object{platformNamed(func(p *platformv1alpha1.KnextPlatform) {
+				p.Spec.Rollout = &platformv1alpha1.PlatformRollout{MaxAppsPerMinute: 3}
+				p.Spec.Database = &platformv1alpha1.PlatformDatabase{ConnectionBudget: 80}
+			})}},
+		// The operator started with the CRD, then it was removed: the kind is
+		// unknown to the client. Must degrade to built-ins, not fail the app.
+		{name: "crd-vanished-after-start", crdPresent: true},
+		// An object named anything but "default" is never honoured.
+		{name: "cr-wrong-name-ignored", crdPresent: true, platformKindRegistered: true,
+			objects: []client.Object{platformNamed(func(p *platformv1alpha1.KnextPlatform) {
+				p.Name = "not-default"
+				p.Spec.Limits = &platformv1alpha1.PlatformLimits{TimeoutSeconds: 3000}
+				p.Spec.Resources = &platformv1alpha1.PlatformResources{Defaults: &platformv1alpha1.PlatformResourceDefaults{CPULimit: "8"}}
+			})}},
 	}
 }
 
 func TestZeroDiffGolden(t *testing.T) {
-	scheme := goldenTestScheme(t)
 	corpus := loadGoldenCorpus(t)
 	updating := os.Getenv(updateGoldenEnv) != ""
 	if updating && os.Getenv("CI") != "" {
@@ -334,7 +392,7 @@ func TestZeroDiffGolden(t *testing.T) {
 
 		for _, rc := range platformCases() {
 			t.Run(app.Name+"/"+rc.name, func(t *testing.T) {
-				got := renderApp(t, scheme, app, rc)
+				got := renderApp(t, app, rc)
 				if updating {
 					if rc.name != platformCases()[0].name {
 						return // the first case records; the rest must match it

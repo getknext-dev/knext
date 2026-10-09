@@ -33,6 +33,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
+	platformv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/api/platform/v1alpha1"
 	appsv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/api/v1alpha1"
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	servingv1beta1 "knative.dev/serving/pkg/apis/serving/v1beta1"
@@ -63,6 +64,11 @@ var _ = BeforeSuite(func() {
 
 	var err error
 	err = appsv1alpha1.AddToScheme(scheme.Scheme)
+	Expect(err).NotTo(HaveOccurred())
+
+	// The cluster-scoped platform config (ADR-0064). Registering the Go types does
+	// not need the CRD; the suite's CRD directory installs it.
+	err = platformv1alpha1.AddToScheme(scheme.Scheme)
 	Expect(err).NotTo(HaveOccurred())
 
 	// Register Knative Serving scheme so the reconciler can create/get ksvc objects.

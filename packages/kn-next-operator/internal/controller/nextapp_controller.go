@@ -49,8 +49,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	platformv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/api/platform/v1alpha1"
 	appsv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/api/v1alpha1"
-	"github.com/AhmedElBanna80/knext/packages/kn-next-operator/internal/defaults"
 	"github.com/AhmedElBanna80/knext/packages/kn-next-operator/internal/validation"
 	"knative.dev/pkg/apis"
 	"knative.dev/serving/pkg/apis/serving"
@@ -111,14 +111,6 @@ const ksvcNotReadyRequeueAfter = 30 * time.Second
 // optimisation is not, and the usual cause (missing DaemonSet RBAC) needs
 // operator action rather than fast polling.
 const imagePrewarmFailureRequeueAfter = 2 * time.Minute
-
-// defaultContainerConcurrency is the per-pod concurrent-request soft target
-// stamped on the generated Knative Service when spec.scaling.containerConcurrency
-// is unset (#377, ADR-0028). Lowered from 100 → 20: at 100 a single pod
-// absorbed 100 concurrent requests before Knative added a 2nd replica, making
-// reactive scale-to-N effectively inert. 20 is the documented high-traffic
-// interim; W1 (#376) refines it from the concurrency→latency curve.
-const defaultContainerConcurrency = defaults.ContainerConcurrency
 
 // Ingress-programming stall detection (#208). When the cluster's configured
 // ingress-class matches NO installed ingress controller (e.g. the short-form
@@ -273,6 +265,15 @@ type NextAppReconciler struct {
 	// exercise the scheduled warm-floor window evaluation (ADR-0030, #380)
 	// deterministically. nil => time.Now (production).
 	Clock func() time.Time
+	// PlatformCRDPresent reports whether the KnextPlatform CRD is installed. It is
+	// set once at start-up from discovery (SetupWithManager) and, when false, the
+	// reconciler never touches the platform kind at all: it renders the built-in
+	// defaults and reports PlatformDefaultsApplied=NoPlatformCRD (ADR-0064 D3).
+	// The zero value is "not installed", so a reconciler built without the platform
+	// layer behaves exactly as before it existed.
+	PlatformCRDPresent bool
+	// rollout paces platform-triggered re-renders (ADR-0064 F2). Zero value ready.
+	rollout rolloutLimiter
 }
 
 // now returns the reconciler's clock (test-injectable), defaulting to time.Now.
@@ -319,6 +320,11 @@ func (r *NextAppReconciler) emitEvent(obj runtime.Object, eventType, reason, mes
 // +kubebuilder:rbac:groups=apps.kn-next.dev,resources=nextapps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps.kn-next.dev,resources=nextapps/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=apps.kn-next.dev,resources=nextapps/finalizers,verbs=update
+// The cluster-scoped platform config (ADR-0064): READ-ONLY for the NextApp
+// reconciler, which only merges it. The status subresource is written by the
+// platform's own reconciler (platform_controller.go), never the spec.
+// +kubebuilder:rbac:groups=platform.kn-next.dev,resources=knextplatforms,verbs=get;list;watch
+// +kubebuilder:rbac:groups=platform.kn-next.dev,resources=knextplatforms/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=serving.knative.dev,resources=services,verbs=get;list;watch;create;update;patch;delete
 // Revisions: READ-ONLY — the reconciler GETs the spec.traffic.revisionName pin to
 // surface a GC'd revision as PinnedRevisionNotFound (ADR-0014). Never written.
@@ -409,7 +415,22 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 	// non-negative scaling, MinScale <= MaxScale, and recognized provider/queue
 	// enums. The webhook rejects these at write time; the reconciler stays
 	// fail-closed as defense-in-depth for CRs that predate the webhook.
-	if err := validation.ValidateNextAppSpec(&nextApp.Spec); err != nil {
+	//
+	// Platform layer (ADR-0064): load the singleton KnextPlatform and merge it UNDER
+	// the app's own fields and OVER the built-ins. With no platform this resolves to
+	// the built-in table and the whole block below is inert. The effective budget is
+	// the platform's database.connectionBudget when it set one.
+	snap, platErr := r.loadPlatform(ctx)
+	if platErr != nil {
+		return ctrl.Result{}, platErr
+	}
+	eff := resolveEffective(&nextApp, snap.active())
+	// A spec that is valid under the built-in budget but not under the platform's
+	// (or whose merged resources a pod would refuse) is the platform's doing, not
+	// the app's: hold the app's current Knative Service (F3) instead of failing it
+	// as an invalid spec. Anything else the app got wrong stays an InvalidSpec.
+	gate := platformEffectiveGate(&nextApp, snap, eff)
+	if err := validation.ValidateNextAppSpecWithBudget(&nextApp.Spec, eff.connectionBudget); err != nil && gate.hold == holdNone {
 		logger.Error(err, "Rejecting NextApp: spec failed validation")
 		r.emitEvent(&nextApp, corev1.EventTypeWarning, ReasonInvalidImage,
 			fmt.Sprintf("Spec rejected: %s", err.Error()))
@@ -516,16 +537,35 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 	// an operator-managed reserved env name on a GRANDFATHERED CR (admission
 	// rejects any new such collision).
 	var envMapCollision envMapCollisionReport
-	_, err = controllerutil.CreateOrUpdate(ctx, r.Client, ksvc, func() error {
-		var buildErr error
-		envMapCollision, buildErr = r.buildDesiredKsvc(&nextApp, ksvc)
-		return buildErr
-	})
-	if err != nil {
-		logger.Error(err, "Failed to reconcile Knative Service")
-		r.emitEvent(&nextApp, corev1.EventTypeWarning, ReasonReconcileFailed,
-			fmt.Sprintf("Failed to reconcile Knative Service: %s", err.Error()))
-		return ctrl.Result{}, err
+	// Rollout pacing (ADR-0064 F2): a platform change that WOULD alter this app's
+	// revision template waits for its slot behind rollout.maxAppsPerMinute. Inert
+	// (never even reads the Knative Service) when no platform stamp moved.
+	if gate.hold == holdNone {
+		var gateErr error
+		if gate, gateErr = r.gateRollout(ctx, &nextApp, snap, eff); gateErr != nil {
+			return ctrl.Result{}, gateErr
+		}
+	}
+	if gate.hold != holdNone {
+		// Hold-last-good: read the live Knative Service and leave it exactly as it
+		// is. The verdict reports why (PlatformDefaultsApplied) and, for a queued
+		// re-render, when to come back.
+		if getErr := r.Get(ctx, client.ObjectKeyFromObject(ksvc), ksvc); getErr != nil && !errors.IsNotFound(getErr) {
+			return ctrl.Result{}, getErr
+		}
+		_, _, envMapCollision = r.buildKsvcEnv(&nextApp)
+	} else {
+		_, err = controllerutil.CreateOrUpdate(ctx, r.Client, ksvc, func() error {
+			var buildErr error
+			envMapCollision, buildErr = r.buildDesiredKsvc(&nextApp, ksvc, eff)
+			return buildErr
+		})
+		if err != nil {
+			logger.Error(err, "Failed to reconcile Knative Service")
+			r.emitEvent(&nextApp, corev1.EventTypeWarning, ReasonReconcileFailed,
+				fmt.Sprintf("Failed to reconcile Knative Service: %s", err.Error()))
+			return ctrl.Result{}, err
+		}
 	}
 
 	// 4b. Reconcile the in-cluster-only NetworkPolicy (defense-in-depth for the
@@ -720,7 +760,14 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		np.verdict, np.evidence = r.detectNetworkPolicyEnforcement(ctx)
 	}
 
-	verdict := computeStatusVerdict(&nextApp, ksvc, db, revCheck, ic, np, envMapCollision, r.detectPrivateExposure(ctx, &nextApp), r.detectPodCreationBlocked(ctx, &nextApp, ksvc), time.Now())
+	// status.platform records what the platform contributed to the render that
+	// just happened. A held pass wrote nothing, so the previous record stands.
+	if gate.hold == holdNone {
+		nextApp.Status.Platform = platformStatusFor(snap, eff)
+	}
+
+	verdict := computeStatusVerdict(&nextApp, ksvc, db, revCheck, ic, np, envMapCollision, r.detectPrivateExposure(ctx, &nextApp), r.detectPodCreationBlocked(ctx, &nextApp, ksvc), time.Now(),
+		withPlatformDefaults(newPlatformDefaultsState(snap, eff, gate)))
 	if err := r.applyStatusVerdict(ctx, &nextApp, observedStatus, verdict); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -944,7 +991,11 @@ func buildWritableVolumes(nextApp *appsv1alpha1.NextApp, readOnlyRootFS bool, wr
 	return volumes, volumeMounts
 }
 
-func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc *servingv1.Service) (envMapCollisionReport, error) {
+// eff carries the MERGED defaults (app > platform > built-in, ADR-0064 D2) the
+// renderer stamps wherever the app left a field unset. With no KnextPlatform it
+// is exactly the built-in table, which is what keeps this function's output
+// byte-identical to its pre-platform self (zero_diff_golden_test.go).
+func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc *servingv1.Service, eff effectiveValues) (envMapCollisionReport, error) {
 	// Determine the SHALLOW readiness/liveness probe path (#338).
 	healthPath := readinessProbePath(nextApp)
 
@@ -1003,8 +1054,8 @@ func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc
 	// PASSED THROUGH — recorded in the override's single disposition list
 	// below (#770), the one enumeration of what preview forces, drops, and
 	// passes; do not restate the list here.
-	if nextApp.Spec.Scaling != nil && nextApp.Spec.Scaling.TargetBurstCapacity != nil {
-		annotations["autoscaling.knative.dev/target-burst-capacity"] = fmt.Sprintf("%d", *nextApp.Spec.Scaling.TargetBurstCapacity)
+	if eff.targetBurstCapacity != nil {
+		annotations["autoscaling.knative.dev/target-burst-capacity"] = fmt.Sprintf("%d", *eff.targetBurstCapacity)
 	}
 
 	// PanicWindowPercentage / PanicThresholdPercentage (#413, ADR-0033): how
@@ -1016,11 +1067,11 @@ func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc
 	// targetBurstCapacity. Its preview fate is PASSED THROUGH — recorded in
 	// the override's single disposition list below (#770); do not restate
 	// the list here.
-	if nextApp.Spec.Scaling != nil && nextApp.Spec.Scaling.PanicWindowPercentage != nil {
-		annotations["autoscaling.knative.dev/panic-window-percentage"] = fmt.Sprintf("%d", *nextApp.Spec.Scaling.PanicWindowPercentage)
+	if eff.panicWindowPercentage != nil {
+		annotations["autoscaling.knative.dev/panic-window-percentage"] = fmt.Sprintf("%d", *eff.panicWindowPercentage)
 	}
-	if nextApp.Spec.Scaling != nil && nextApp.Spec.Scaling.PanicThresholdPercentage != nil {
-		annotations["autoscaling.knative.dev/panic-threshold-percentage"] = fmt.Sprintf("%d", *nextApp.Spec.Scaling.PanicThresholdPercentage)
+	if eff.panicThresholdPercentage != nil {
+		annotations["autoscaling.knative.dev/panic-threshold-percentage"] = fmt.Sprintf("%d", *eff.panicThresholdPercentage)
 	}
 
 	// ScaleDownDelay (#762, ADR-0045): how long the last pod stays ROUTABLE
@@ -1036,8 +1087,8 @@ func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc
 	// min-scale/max-scale/targetBurstCapacity/the panic pair. UNLIKE those, it
 	// is DROPPED by the preview-env override below (#770) — read the
 	// disposition list there before assuming a stamped delay survives.
-	if nextApp.Spec.Scaling != nil && nextApp.Spec.Scaling.ScaleDownDelay != "" {
-		annotations["autoscaling.knative.dev/scale-down-delay"] = nextApp.Spec.Scaling.ScaleDownDelay
+	if eff.scaleDownDelay != "" {
+		annotations["autoscaling.knative.dev/scale-down-delay"] = eff.scaleDownDelay
 	}
 
 	// Observability annotations — aligned with CLI
@@ -1131,10 +1182,7 @@ func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc
 	// pods sooner, which raises DB connection pressure — the connection-wall
 	// invariant (maxScale × poolMax ≤ max_connections) is enforced in
 	// validation.ValidateNextAppSpec when a poolMax is declared.
-	cc := int64(defaultContainerConcurrency)
-	if nextApp.Spec.Scaling != nil && nextApp.Spec.Scaling.ContainerConcurrency > 0 {
-		cc = int64(nextApp.Spec.Scaling.ContainerConcurrency)
-	}
+	cc := eff.containerConcurrency
 
 	// Resource limits — aligned with CLI defaults.
 	//
@@ -1156,60 +1204,49 @@ func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc
 	// docs/operator/scaling-cold-start.md. #1788 tracks the operator not
 	// surfacing a LimitRange/quota FailedCreate in NextApp status, which is
 	// what would make any higher default detectable instead of silent.
+	//
+	// The four values are the MERGED ones (app > platform > built-in, ADR-0064).
+	// Every one is parsed with the BOUNDED parser whatever its source: an app value
+	// comes from a CR and a platform value from an admin-authored one, and the
+	// built-ins parse identically, so there is one path and no MustParse of
+	// anything but a literal (the #635 scan enforces that).
+	parseEffective := func(path string, v effectiveString) (resource.Quantity, error) {
+		q, err := validation.ParseQuantityBounded(v.value)
+		if err != nil {
+			if v.src == sourcePlatform {
+				return q, fmt.Errorf("KnextPlatform %s %q is not a valid Kubernetes quantity: %w", platformResourcePath(path), v.value, err)
+			}
+			return q, fmt.Errorf("%s %q is not a valid Kubernetes quantity: %w", path, v.value, err)
+		}
+		return q, nil
+	}
+	cpuRequestQ, err := parseEffective("spec.resources.cpuRequest", eff.cpuRequest)
+	if err != nil {
+		return envMapCollisionReport{}, err
+	}
+	memoryRequestQ, err := parseEffective("spec.resources.memoryRequest", eff.memoryRequest)
+	if err != nil {
+		return envMapCollisionReport{}, err
+	}
+	cpuLimitQ, err := parseEffective("spec.resources.cpuLimit", eff.cpuLimit)
+	if err != nil {
+		return envMapCollisionReport{}, err
+	}
+	memoryLimitQ, err := parseEffective("spec.resources.memoryLimit", eff.memoryLimit)
+	if err != nil {
+		return envMapCollisionReport{}, err
+	}
 	resourceRequests := corev1.ResourceList{
-		corev1.ResourceCPU:    resource.MustParse(defaults.CPURequest),
-		corev1.ResourceMemory: resource.MustParse(defaults.MemoryRequest),
+		corev1.ResourceCPU:    cpuRequestQ,
+		corev1.ResourceMemory: memoryRequestQ,
 	}
 	resourceLimits := corev1.ResourceList{
-		corev1.ResourceCPU:    resource.MustParse(defaults.CPULimit),
-		corev1.ResourceMemory: resource.MustParse(defaults.MemoryLimit),
-	}
-	if nextApp.Spec.Resources != nil {
-		// #435: never MustParse unvalidated CR input inside the SHARED reconcile
-		// loop — a malformed quantity ("500", "1GB", "0.5 CPU") would panic the
-		// whole controller and stop EVERY NextApp on the cluster from
-		// reconciling. Validation (validation.validateResources) rejects bad
-		// values upstream at admission / as a status condition; these
-		// error-returning parses are the defense-in-depth for stored CRs that
-		// predate that check.
-		// #635: BOUNDED parses — resource.ParseQuantity itself does not return
-		// on some user-typable values ("1e2147483648"), so an error-returning
-		// call that never comes back is no defense at all.
-		if v := nextApp.Spec.Resources.CPURequest; v != "" {
-			q, err := validation.ParseQuantityBounded(v)
-			if err != nil {
-				return envMapCollisionReport{}, fmt.Errorf("spec.resources.cpuRequest %q is not a valid Kubernetes quantity: %w", v, err)
-			}
-			resourceRequests[corev1.ResourceCPU] = q
-		}
-		if v := nextApp.Spec.Resources.MemoryRequest; v != "" {
-			q, err := validation.ParseQuantityBounded(v)
-			if err != nil {
-				return envMapCollisionReport{}, fmt.Errorf("spec.resources.memoryRequest %q is not a valid Kubernetes quantity: %w", v, err)
-			}
-			resourceRequests[corev1.ResourceMemory] = q
-		}
-		if v := nextApp.Spec.Resources.CPULimit; v != "" {
-			q, err := validation.ParseQuantityBounded(v)
-			if err != nil {
-				return envMapCollisionReport{}, fmt.Errorf("spec.resources.cpuLimit %q is not a valid Kubernetes quantity: %w", v, err)
-			}
-			resourceLimits[corev1.ResourceCPU] = q
-		}
-		if v := nextApp.Spec.Resources.MemoryLimit; v != "" {
-			q, err := validation.ParseQuantityBounded(v)
-			if err != nil {
-				return envMapCollisionReport{}, fmt.Errorf("spec.resources.memoryLimit %q is not a valid Kubernetes quantity: %w", v, err)
-			}
-			resourceLimits[corev1.ResourceMemory] = q
-		}
+		corev1.ResourceCPU:    cpuLimitQ,
+		corev1.ResourceMemory: memoryLimitQ,
 	}
 
 	// TimeoutSeconds: default 300s when unset (matches knative-manifest.ts hardcoded value)
-	timeoutSeconds := int64(defaults.TimeoutSeconds)
-	if nextApp.Spec.TimeoutSeconds > 0 {
-		timeoutSeconds = int64(nextApp.Spec.TimeoutSeconds)
-	}
+	timeoutSeconds := eff.timeoutSeconds
 
 	// Container command, by artifact shape (spec.build, spec.selfContained):
 	//   - "vinext": the app is ONE compiled executable and the image's own CMD
@@ -2133,5 +2170,44 @@ func (r *NextAppReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		b = b.Watches(&servingv1beta1.DomainMapping{},
 			handler.EnqueueRequestsFromMapFunc(r.domainMappingToNextAppRequests))
 	}
+	// The platform layer (ADR-0064 D3): the KnextPlatform watch is registered ONLY
+	// when discovery reports the CRD, the same precedent as the DomainMapping
+	// watch above. An operator upgraded onto a cluster where the CRD was not
+	// installed (a partial bundle apply, or a GitOps tool syncing CRDs separately)
+	// must start and behave exactly as before: built-in defaults, reported as
+	// PlatformDefaultsApplied=NoPlatformCRD. It never crash-loops on a missing
+	// kind. A CRD installed LATER is picked up on the next operator restart.
+	platformKind := platformv1alpha1.GroupVersion.WithKind("KnextPlatform")
+	if platformv1alpha1.CRDInstalled(mgr.GetRESTMapper()) && mgr.GetScheme().Recognizes(platformKind) {
+		r.PlatformCRDPresent = true
+		b = b.Watches(&platformv1alpha1.KnextPlatform{},
+			handler.EnqueueRequestsFromMapFunc(r.platformToNextAppRequests),
+			// Spec edits (generation) plus create/delete; the platform
+			// reconciler's own status writes must not re-render every app.
+			builder.WithPredicates(predicate.GenerationChangedPredicate{}))
+	} else {
+		logf.Log.WithName("setup").Info("KnextPlatform CRD not installed: built-in defaults apply to every NextApp " +
+			"(PlatformDefaultsApplied=NoPlatformCRD); install the CRD and restart the operator to enable the platform layer")
+	}
 	return b.Complete(r)
+}
+
+// platformToNextAppRequests re-enqueues EVERY NextApp when the KnextPlatform is
+// created, edited or deleted — each one's effective defaults may have moved. The
+// rollout limiter, not this fan-out, bounds how fast the changes reach the
+// cluster (ADR-0064 F2): an app whose re-render has to wait comes back at its
+// slot.
+func (r *NextAppReconciler) platformToNextAppRequests(ctx context.Context, _ client.Object) []reconcile.Request {
+	var apps appsv1alpha1.NextAppList
+	if err := r.List(ctx, &apps); err != nil {
+		logf.FromContext(ctx).Error(err, "listing NextApps after a KnextPlatform change; they will pick it up on their next reconcile")
+		return nil
+	}
+	reqs := make([]reconcile.Request, 0, len(apps.Items))
+	for i := range apps.Items {
+		reqs = append(reqs, reconcile.Request{NamespacedName: types.NamespacedName{
+			Namespace: apps.Items[i].Namespace, Name: apps.Items[i].Name,
+		}})
+	}
+	return reqs
 }

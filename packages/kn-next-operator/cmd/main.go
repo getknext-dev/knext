@@ -48,6 +48,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
+	platformv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/api/platform/v1alpha1"
 	appsv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/api/v1alpha1"
 	"github.com/AhmedElBanna80/knext/packages/kn-next-operator/internal/controller"
 	webhookv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/internal/webhook/v1alpha1"
@@ -65,6 +66,7 @@ func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
 	utilruntime.Must(appsv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(platformv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(servingv1.AddToScheme(scheme))
 	utilruntime.Must(servingv1beta1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
@@ -180,14 +182,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := (&controller.NextAppReconciler{
-		Client:    mgr.GetClient(),
-		Scheme:    mgr.GetScheme(),
-		APIReader: mgr.GetAPIReader(),
-		Recorder:  mgr.GetEventRecorderFor("nextapp-controller"),
-		Cleaner:   controller.NewDefaultCleaner(),
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "Failed to create controller", "controller", "NextApp")
+	// Registers the NextApp reconciler and, only when the KnextPlatform CRD is
+	// installed, the platform layer's status reconciler (ADR-0064 D3).
+	if err := controller.SetupControllers(mgr, controller.NewDefaultCleaner()); err != nil {
+		setupLog.Error(err, "Failed to create controllers")
 		os.Exit(1)
 	}
 

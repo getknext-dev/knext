@@ -112,7 +112,7 @@ func TestBuildDesiredKsvcCommandByArtifactShape(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Name: app.Name, Namespace: app.Namespace},
 			}
 
-			if _, err := r.buildDesiredKsvc(app, ksvc); err != nil {
+			if _, err := r.buildDesiredKsvc(app, ksvc, resolveEffective(app, nil)); err != nil {
 				t.Fatalf("buildDesiredKsvc returned an unexpected error: %v", err)
 			}
 
