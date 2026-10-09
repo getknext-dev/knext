@@ -247,7 +247,9 @@ describe('bun-version pins (#754) — scanned across every workflow', () => {
       // with bun (the same toolchain as the publish job) — a fourth step.
       // #1614/#1616: the new `pack` job (packs the fixed group ONCE) is a
       // fifth — it needs bun too, to `bun install` + build before packing.
-      'release.yml': 5,
+      // #2035/#2075: the `publish-lane-guard` job runs the real `changeset version`
+      // bump before its major check — a sixth.
+      'release.yml': 6,
       // NEW (#1596, kn-next-action Bun toolchain fix): the composite action never
       // installed Bun, so the default runtime's compiled-standalone build
       // (`bun run …`) failed with ENOENT on every stock ubuntu-24.04 runner —
