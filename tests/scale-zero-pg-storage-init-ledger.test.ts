@@ -84,15 +84,24 @@ describe('storage-init ledger dependency is explicit', () => {
 });
 
 describe('docs state the minimal install file set', () => {
-  const gettingStarted = readFileSync(join(SZPG, 'docs', 'getting-started.md'), 'utf8');
+  const doc = readFileSync(join(SZPG, 'docs', 'getting-started.md'), 'utf8');
+  // Only the dedicated section counts: a stray mention elsewhere in the page must not satisfy the guard.
+  const start = doc.indexOf('### Installing a subset');
+  const section = start < 0 ? '' : doc.slice(start).split(/\n#{1,3} /)[0];
 
-  it('getting-started lists the ledger ConfigMap manifest as required even without a standby', () => {
-    expect(gettingStarted).toContain('57-pageserver-standby.yaml');
-    expect(gettingStarted).toContain(LEDGER_CM);
-    expect(gettingStarted).toContain('seed-ledger.sh');
+  it('has a dedicated "Installing a subset" section', () => {
+    expect(start).toBeGreaterThanOrEqual(0);
   });
 
-  it('getting-started names the storage-plane files a partial install must keep', () => {
+  it('lists the ledger ConfigMap manifest as required even without a standby', () => {
+    const row = section.split('\n').find((l) => l.includes('57-pageserver-standby.yaml'));
+    expect(row).toBeDefined();
+    expect(row).toContain(LEDGER_CM);
+    expect(row).toContain('even if you run no standby');
+    expect(section).toContain('seed-ledger.sh');
+  });
+
+  it('names the storage-plane files a partial install must keep', () => {
     for (const f of [
       '00-namespace.yaml',
       '51-storage-broker.yaml',
@@ -101,7 +110,7 @@ describe('docs state the minimal install file set', () => {
       '55-storage-init.yaml',
       '20-compute.yaml',
     ]) {
-      expect(gettingStarted).toContain(f);
+      expect(section).toContain(f);
     }
   });
 });
