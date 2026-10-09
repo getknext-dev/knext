@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'bun:test';
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { afterAll, describe, expect, it } from 'bun:test';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -111,11 +111,16 @@ describe('no major changeset on a 1.x fixed group (#2036)', () => {
   });
 
   describe('detector self-checks (temp fixtures)', () => {
+    const tempRoots: string[] = [];
+    afterAll(() => {
+      for (const d of tempRoots) rmSync(d, { recursive: true, force: true });
+    });
     const fixture = (
       cs: Record<string, string>,
       config: unknown = { fixed: [['@getknext/core', '@getknext/lib']] },
     ) => {
       const r = mkdtempSync(join(tmpdir(), 'r1-'));
+      tempRoots.push(r);
       mkdirSync(join(r, '.changeset'));
       mkdirSync(join(r, 'packages/core'), { recursive: true });
       writeFileSync(join(r, '.changeset/config.json'), JSON.stringify(config));
