@@ -78,13 +78,13 @@ const isImageVar = (name: string): boolean =>
 
 const strip = (s: string): string => s.replace(/^["']|["']$/g, '');
 
-/** Images a shell script renders: heredoc `image:`, `--image=`, `*_IMG`/`*_IMAGE` assignments (incl. `${V:-default}`), `set image n=ref`. */
+/** Images a shell script renders: heredoc `image:`, `--image=`, `*_IMG`/`*_IMAGE` assignments (incl. `${V:-default}`), `set image n=ref`, `--image ref`. */
 function shellImages(file: string): string[] {
   const out: string[] = [];
   for (const line of readFileSync(file, 'utf8').split('\n')) {
     if (/^\s*#/.test(line)) continue;
     for (const m of line.matchAll(/^\s*-?\s*image:\s*(\S+)/g)) out.push(strip(m[1]));
-    for (const m of line.matchAll(/--image=(\S+)/g)) out.push(strip(m[1]));
+    for (const m of line.matchAll(/--image(?:=|\s+)(\S+)/g)) out.push(strip(m[1]));
     for (const m of line.matchAll(/\b([A-Z][A-Z0-9_]*)=\s*"?\$\{[A-Z0-9_]+:-([^}"]+)\}"?/g)) {
       if (isImageVar(m[1])) out.push(strip(m[2]));
     }
@@ -92,7 +92,7 @@ function shellImages(file: string): string[] {
       if (isImageVar(m[1])) out.push(strip(m[2]));
     }
     for (const m of line.matchAll(/\bset image\b.*$/g)) {
-      for (const r of m[0].matchAll(/\b[\w-]+="?([^\s"=]+\/[^\s"=]+)"?/g)) out.push(strip(r[1]));
+      for (const r of m[0].matchAll(/(?:^|\s)[\w-]+="?([^\s"=-][^\s"=]*)"?/g)) out.push(strip(r[1]));
     }
   }
   return out;
@@ -104,6 +104,8 @@ function goImages(file: string): string[] {
   const out: string[] = [];
   for (const m of src.matchAll(/\b\w*Image\w*:\s*"([^"]+)"/g)) out.push(m[1]);
   for (const m of src.matchAll(/env\("[A-Z_]*IMAGE[A-Z_]*",\s*"([^"]+)"/g)) out.push(m[1]);
+  // const/var/:= assignments to an image-named identifier (`defaultImg = "…"`).
+  for (const m of src.matchAll(/\b\w*(?:Img|Image|IMG|IMAGE)\w*\s*:?=\s*"([^"]+)"/g)) out.push(m[1]);
   return out;
 }
 

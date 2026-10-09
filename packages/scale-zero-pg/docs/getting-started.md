@@ -83,6 +83,7 @@ the smallest working single-database set is:
 |---|---|
 | `00-namespace.yaml` | the `scale-zero-pg` namespace everything else lives in |
 | `deploy/gen-secrets.sh` (a script, run first) | storage credentials, the `storage-objstore` config and the base admin credential |
+| `deploy/gen-peer-token.sh` and `deploy/gen-tls.sh` (scripts, run before the gateway) | the `pggw-peer-token` and `pggw-tls` Secrets; the gateway refuses to start without them |
 | `50-minio.yaml` (or an external S3 backend, see below) | the object store |
 | `51-storage-broker.yaml`, `52-safekeeper.yaml`, `53-pageserver.yaml` | the storage plane |
 | `54-compute-files.yaml` | the compute entrypoint scripts and `compute-config` |
@@ -95,8 +96,8 @@ the smallest working single-database set is:
 Without the `pageserver-generation` ConfigMap, `storage-init` cannot attach the
 tenant: it deliberately refuses to guess a generation, because attaching too low
 risks silent data loss. It polls for about two minutes, then exits with a message
-naming `57-pageserver-standby.yaml` and `seed-ledger.sh`, and Kubernetes retries the
-pod. Apply 57, run `deploy/seed-ledger.sh`, and the next retry succeeds. If you really
+naming `57-pageserver-standby.yaml` and `seed-ledger.sh`, and Kubernetes restarts the
+container. Apply 57, run `deploy/seed-ledger.sh`, and the next retry succeeds. If you really
 do not want the standby, create only the ledger ConfigMap
 (`kubectl -n scale-zero-pg create configmap pageserver-generation`) and then run
 `deploy/seed-ledger.sh`.
