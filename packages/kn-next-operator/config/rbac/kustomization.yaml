@@ -25,4 +25,8 @@ resources:
 - nextapp_admin_role.yaml
 - nextapp_editor_role.yaml
 - nextapp_viewer_role.yaml
+# The cluster-scoped platform config (ADR-0064) gets its OWN admin role. The
+# NextApp roles above never include it: an app developer must not be able to
+# change defaults for every app in the cluster.
+- knextplatform_admin_role.yaml
 

@@ -37,6 +37,28 @@ import (
 	"github.com/AhmedElBanna80/knext/packages/kn-next-operator/internal/defaults"
 )
 
+// validateScaleDownDelay checks a scale-down-delay value against Knative's OWN
+// annotation validator (see the long comment at the NextApp call site for why
+// the rule is delegated, not restated). field names the spec path in the error
+// so the same check serves the NextApp field and the KnextPlatform default
+// without a second copy of the rule. "" is unset and always valid.
+func validateScaleDownDelay(field, value string) error {
+	if value == "" {
+		return nil
+	}
+	anns := map[string]string{
+		autoscaling.ScaleDownDelayAnnotationKey: value,
+	}
+	if fe := autoscaling.ValidateAnnotations(context.Background(), &autoscalerconfig.Config{}, anns); fe != nil {
+		return fmt.Errorf(
+			"%s %q is not a value Knative accepts for %s "+
+				"(a duration from 0s to %s, at most second precision — validated against knative.dev/serving's own annotation validator, not a copy of its rules): %w",
+			field, value, autoscaling.ScaleDownDelayAnnotationKey, autoscaling.WindowMax, fe,
+		)
+	}
+	return nil
+}
+
 // validateCronExpr validates the 5-field (minute hour day-of-month month
 // day-of-week) cron syntax of a warmSchedule window start/end. It uses the same
 // robfig/cron ParseStandard parser the operator's reconcile-time window
@@ -303,17 +325,8 @@ func ValidateNextAppSpecWithBudget(spec *appsv1alpha1.NextAppSpec, budget int) e
 		// NOT expressiveness — it is that any marker would be a second copy of
 		// Knative's rule, free to drift from the vendored validator exactly as
 		// the hand-rolled version above did.
-		if s.ScaleDownDelay != "" {
-			anns := map[string]string{
-				autoscaling.ScaleDownDelayAnnotationKey: s.ScaleDownDelay,
-			}
-			if fe := autoscaling.ValidateAnnotations(context.Background(), &autoscalerconfig.Config{}, anns); fe != nil {
-				return fmt.Errorf(
-					"spec.scaling.scaleDownDelay %q is not a value Knative accepts for %s "+
-						"(a duration from 0s to %s, at most second precision — validated against knative.dev/serving's own annotation validator, not a copy of its rules): %w",
-					s.ScaleDownDelay, autoscaling.ScaleDownDelayAnnotationKey, autoscaling.WindowMax, fe,
-				)
-			}
+		if err := validateScaleDownDelay("spec.scaling.scaleDownDelay", s.ScaleDownDelay); err != nil {
+			return err
 		}
 
 		// Scheduled warm-floor windows (ADR-0030, W5/#380). Each window declares a
@@ -753,7 +766,14 @@ func EnvMapReservedCollisions(spec *appsv1alpha1.NextAppSpec) []string {
 // PLUS an unratcheted rejection of any spec.secrets.envMap name that collides
 // with an operator-managed reserved env name (#1391).
 func ValidateNextAppSpecCreate(spec *appsv1alpha1.NextAppSpec) error {
-	if err := ValidateNextAppSpec(spec); err != nil {
+	return ValidateNextAppSpecCreateWithBudget(spec, MaxAppConnections)
+}
+
+// ValidateNextAppSpecCreateWithBudget is ValidateNextAppSpecCreate with the
+// connection budget supplied by the caller (a KnextPlatform's
+// database.connectionBudget, ADR-0064). With MaxAppConnections it is identical.
+func ValidateNextAppSpecCreateWithBudget(spec *appsv1alpha1.NextAppSpec, budget int) error {
+	if err := ValidateNextAppSpecWithBudget(spec, budget); err != nil {
 		return err
 	}
 	if collisions := DatabaseEnvMapCollisions(spec); len(collisions) > 0 {
@@ -791,7 +811,13 @@ func isAre(n int) string {
 // resolves the carried-forward collision loudly (spec.database wins + Warning
 // event).
 func ValidateNextAppSpecUpdate(oldSpec, newSpec *appsv1alpha1.NextAppSpec) error {
-	if err := ValidateNextAppSpec(newSpec); err != nil {
+	return ValidateNextAppSpecUpdateWithBudget(oldSpec, newSpec, MaxAppConnections)
+}
+
+// ValidateNextAppSpecUpdateWithBudget is ValidateNextAppSpecUpdate with the
+// connection budget supplied by the caller. With MaxAppConnections it is identical.
+func ValidateNextAppSpecUpdateWithBudget(oldSpec, newSpec *appsv1alpha1.NextAppSpec, budget int) error {
+	if err := ValidateNextAppSpecWithBudget(newSpec, budget); err != nil {
 		return err
 	}
 	old := map[string]struct{}{}
