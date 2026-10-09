@@ -245,71 +245,130 @@ describe("#953 layer 2 — the adapter subpath the templates reference actually 
         exports: Record<string, unknown>;
     };
 
-    it("package.json maps the three ./internal/vinext-cache-adapter* subpaths straight to the cache-handler classes (no factory shim in between)", () => {
+    it("package.json maps ./internal/vinext-cache-adapter to the built module", () => {
         expect(pkg.exports["./internal/vinext-cache-adapter"]).toBe(
-            "./dist/adapters/cache-handler.js",
-        );
-        expect(pkg.exports["./internal/vinext-cache-adapter-node"]).toBe(
-            "./dist/adapters/cache-handler-node.js",
-        );
-        expect(pkg.exports["./internal/vinext-cache-adapter-bun"]).toBe(
-            "./dist/adapters/cache-handler-bun.js",
+            "./dist/adapters/vinext-cache-adapter.js",
         );
     });
 
-    it("tsup builds every mapped target, and no longer carries the retired factory entries", () => {
+    it("tsup builds it (a mapped subpath with no build entry 404s at publish)", () => {
         const tsup = readFileSync(join(PKG_ROOT, "tsup.config.ts"), "utf8");
-        for (const entry of [
-            "adapters/cache-handler",
-            "adapters/cache-handler-node",
-            "adapters/cache-handler-bun",
-        ]) {
-            expect(tsup).toContain(`'${entry}'`);
-        }
-        expect(tsup).not.toContain("vinext-cache-adapter");
+        expect(tsup).toContain("adapters/vinext-cache-adapter");
+        expect(tsup).toContain("src/adapters/vinext-cache-adapter.mjs");
     });
 
-    it("vinext 1.1.0 accepts the class directly: it is constructed with { env, options }, and the Next-style bare-options construction still works", async () => {
-        // vinext's generated registration used to call the default export as a
-        // factory, so a bare class threw "cannot be invoked without 'new'" and
-        // was silently replaced by the memory handler (row E). From 1.1.0
-        // `instantiateCacheAdapter` constructs a class export with
-        // `{ env, options }`; knext's class unwraps that and keeps accepting
-        // Next.js's bare options.
-        const { instantiateCacheAdapter } = (await import(
-            "vinext/shims/cache-adapter-instantiate"
+    it("the source module default-exports a FACTORY, not the class", async () => {
+        // vinext's generated registration calls `factory({ env, options })` —
+        // a bare class default (what `./adapters/cache-handler` exports for
+        // next.config consumers) throws "cannot be invoked without 'new'",
+        // which vinext catches, warns about, and silently replaces with the
+        // memory handler. That failure shape IS row E, so the factory contract
+        // is asserted directly.
+        const mod = (await import(
+            // @ts-expect-error — plain untyped ESM by design, same as the
+            // cache-handler.js it wraps (no .d.ts is emitted for either).
+            "../adapters/vinext-cache-adapter.mjs"
         )) as unknown as {
-            instantiateCacheAdapter: (
-                exported: unknown,
-                args: { env: unknown; options: unknown },
-                slot: "data" | "cdn",
-            ) => { get: unknown; set: unknown; revalidateTag: unknown } & {
-                options?: unknown;
-            };
+            default: (args?: { env?: unknown; options?: unknown }) => unknown;
         };
-        const mod = (await import("../adapters/cache-handler.js")) as {
-            default: new (arg?: unknown) => { options?: unknown };
+        expect(typeof mod.default).toBe("function");
+        const handler = mod.default({ env: undefined, options: undefined }) as {
+            get: unknown;
+            set: unknown;
+            revalidateTag: unknown;
         };
-        expect(
-            /^class\b/.test(Function.prototype.toString.call(mod.default)),
-        ).toBe(true);
-        const viaVinext = instantiateCacheAdapter(
-            mod.default,
-            { env: {}, options: { maxMemoryCacheSize: 7 } },
-            "data",
-        );
-        expect(viaVinext).toBeInstanceOf(mod.default);
-        expect(typeof viaVinext.get).toBe("function");
-        expect(viaVinext.options).toEqual({ maxMemoryCacheSize: 7 });
-        // vinext passes no options by default: { env, options: undefined }.
-        expect(
-            new mod.default({ env: undefined, options: undefined }).options,
-        ).toBeUndefined();
-        // Next.js constructs with its options bare.
-        expect(new mod.default({ maxMemoryCacheSize: 3 }).options).toEqual({
-            maxMemoryCacheSize: 3,
-        });
+        expect(typeof handler.get).toBe("function");
+        expect(typeof handler.set).toBe("function");
+        expect(typeof handler.revalidateTag).toBe("function");
     });
+});
+
+describe("#953 layer 2b — one factory serves vinext 1.0.x (plain call) and 1.1.0 (instantiateCacheAdapter)", () => {
+    const MODULES = [
+        "vinext-cache-adapter.mjs",
+        "vinext-cache-adapter-node.mjs",
+        "vinext-cache-adapter-bun.mjs",
+    ] as const;
+    type AdapterModule = {
+        default: (args?: { env?: unknown; options?: unknown }) => {
+            get: unknown;
+            set: unknown;
+            revalidateTag: unknown;
+            options?: unknown;
+        };
+        KnextCacheHandler: new (arg?: unknown) => object;
+    };
+    const load = async (file: string) =>
+        (await import(
+            join(PKG_ROOT, "src", "adapters", file)
+        )) as unknown as AdapterModule;
+
+    for (const file of MODULES) {
+        it(`${file}: the default export is a PLAIN function (vinext 1.0.1 calls it as factory({ env, options }), no 'new')`, async () => {
+            const mod = await load(file);
+            expect(typeof mod.default).toBe("function");
+            expect(
+                /^class\b/.test(Function.prototype.toString.call(mod.default)),
+            ).toBe(false);
+            // The 1.0.1 call shape: a bare call, never `new`.
+            const handler = mod.default({
+                env: undefined,
+                options: { maxMemoryCacheSize: 5 },
+            });
+            expect(handler).toBeInstanceOf(mod.KnextCacheHandler);
+            expect(typeof handler.get).toBe("function");
+            expect(typeof handler.set).toBe("function");
+            expect(typeof handler.revalidateTag).toBe("function");
+            expect(handler.options).toEqual({ maxMemoryCacheSize: 5 });
+        });
+
+        it(`${file}: vinext 1.1.0's instantiateCacheAdapter still calls it as a factory and gets a working handler`, async () => {
+            const { instantiateCacheAdapter } = (await import(
+                "vinext/shims/cache-adapter-instantiate"
+            )) as unknown as {
+                instantiateCacheAdapter: (
+                    exported: unknown,
+                    args: { env: unknown; options: unknown },
+                    slot: "data",
+                ) => object;
+            };
+            const mod = await load(file);
+            const handler = instantiateCacheAdapter(
+                mod.default,
+                { env: {}, options: undefined },
+                "data",
+            );
+            expect(handler).toBeInstanceOf(mod.KnextCacheHandler);
+        });
+
+        it(`${file}: the named class is what vinext 1.1.0 constructs directly with { env, options }`, async () => {
+            const { instantiateCacheAdapter } = (await import(
+                "vinext/shims/cache-adapter-instantiate"
+            )) as unknown as {
+                instantiateCacheAdapter: (
+                    exported: unknown,
+                    args: { env: unknown; options: unknown },
+                    slot: "data",
+                ) => { options?: unknown };
+            };
+            const mod = await load(file);
+            const handler = instantiateCacheAdapter(
+                mod.KnextCacheHandler,
+                { env: {}, options: { maxMemoryCacheSize: 7 } },
+                "data",
+            );
+            expect(handler).toBeInstanceOf(mod.KnextCacheHandler);
+            expect(handler.options).toEqual({ maxMemoryCacheSize: 7 });
+            // Next.js constructs with its options bare.
+            expect(
+                (
+                    new mod.KnextCacheHandler({ maxMemoryCacheSize: 3 }) as {
+                        options?: unknown;
+                    }
+                ).options,
+            ).toEqual({ maxMemoryCacheSize: 3 });
+        });
+    }
 });
 
 describe("#953 layer 3 — vinext's real registration + ISR path writes SET/EX to Redis, then serves HIT and STALE", () => {
@@ -374,12 +433,18 @@ describe("#953 layer 3 — vinext's real registration + ISR path writes SET/EX t
         // Generate the registration module EXACTLY as vinext's vite plugin
         // does for `vinext({ cache: { data: { adapter } } })` — same codegen
         // function, same shape. The descriptor points at the SOURCE twin of
-        // the module the published subpath maps to (layer 2 pins the mapping); a scaffolded app's vite build resolves
+        // the module the published subpath maps to (layer 2 pins that the two
+        // are the same file, built); a scaffolded app's vite build resolves
         // the published specifier instead and inlines it into the server
         // bundle.
         const generated = generateCacheAdaptersModule({
             data: {
-                adapter: join(PKG_ROOT, "src", "adapters", "cache-handler.js"),
+                adapter: join(
+                    PKG_ROOT,
+                    "src",
+                    "adapters",
+                    "vinext-cache-adapter.mjs",
+                ),
             },
         });
         const genPath = join(tmpDir, "vinext-cache-adapters.gen.mjs");
