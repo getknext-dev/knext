@@ -1144,11 +1144,31 @@ function seedNextCacheControl(key, entry, ctx) {
 
 // ─── CacheHandler Class ───
 
+/**
+ * vinext's generated registration constructs a class adapter with
+ * `{ env, options }` (`env` is the Workers binding object and is meaningless on
+ * the knext target); Next.js passes its handler options bare. Next's options
+ * never carry an `env` or `options` key, so their presence marks the vinext shape.
+ */
+function unwrapVinextAdapterArgs(arg) {
+  if (arg && typeof arg === 'object' && ('env' in arg || 'options' in arg)) {
+    return arg.options;
+  }
+  return arg;
+}
+
 class CacheHandler {
   /** The generic entry's client; the per-runtime entries override it. */
   static redisClient = RUNTIME_DETECTED;
 
-  constructor(options) {
+  /**
+   * @param {object} [arg] Next.js constructs this with its handler options. vinext
+   *   (1.1.0+) constructs a class default export of a `cache.data` adapter module
+   *   with `{ env, options }` instead; both are accepted, so the same class serves
+   *   `next.config`'s `cacheHandler` and `vinext({ cache: { data } })` directly.
+   */
+  constructor(arg) {
+    const options = unwrapVinextAdapterArgs(arg);
     this.options = options;
     // The entry Next loaded decides the Redis client (see `redisClient`).
     redisClient = new.target.redisClient;

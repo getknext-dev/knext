@@ -6,10 +6,11 @@
  * without ioredis and run from the in-memory store: ISR lost on every
  * scale-to-zero, with nothing saying why. Now:
  *
- *  - `vinext-cache-adapter-node` wraps the node handler, whose ioredis import
- *    is LITERAL (the tracer/bundler follows it);
- *  - `vinext-cache-adapter-bun` wraps the bun handler (Bun's built-in client,
- *    no ioredis anywhere in its graph, so `bun build --compile` stays clean);
+ *  - `vinext-cache-adapter-node` IS the node handler class, whose ioredis
+ *    import is LITERAL (the tracer/bundler follows it);
+ *  - `vinext-cache-adapter-bun` IS the bun handler class (Bun's built-in
+ *    client, no ioredis anywhere in its graph, so `bun build --compile` stays
+ *    clean); vinext 1.1.0 constructs either class directly with `{ env, options }`;
  *  - the scaffolded vite.config picks one from `knext.runtime`.
  */
 
@@ -30,8 +31,9 @@ afterAll(() => {
     for (const r of tempRoots) rmSync(r, { recursive: true, force: true });
 });
 
-type Factory = (a?: unknown) => {
-    constructor: { redisClient: { name: string } };
+type HandlerClass = {
+    redisClient: { name: string };
+    new (a?: unknown): { constructor: { redisClient: { name: string } } };
 };
 
 /** Bundle an entry for a target with ioredis external; return the output text. */
@@ -57,33 +59,33 @@ function bundle(entry: string, target: "node" | "bun", name: string): string {
 }
 
 describe("vinext adapter: node entry", () => {
-    const src = join(ADAPTERS, "vinext-cache-adapter-node.mjs");
+    const src = join(ADAPTERS, "cache-handler-node.js");
 
-    it("default-exports a factory returning the NODE handler (ioredis client)", async () => {
+    it("default-exports the NODE handler class, which vinext constructs with { env, options } (ioredis client)", async () => {
         expect(existsSync(src)).toBe(true);
-        const mod = (await import(src)) as { default: Factory };
-        const h = mod.default({ options: undefined });
+        const mod = (await import(src)) as { default: HandlerClass };
+        const h = new mod.default({ env: undefined, options: undefined });
         expect(h.constructor.redisClient.name).toBe("ioredis");
     });
 
     it("its bundle keeps a LITERAL import('ioredis') that nitro/vite tracing can follow", () => {
-        const out = bundle(src, "node", "vinext-cache-adapter-node");
+        const out = bundle(src, "node", "cache-handler-node");
         expect(out).toMatch(/import\(\s*["']ioredis["']\s*\)/);
     });
 });
 
 describe("vinext adapter: bun entry", () => {
-    const src = join(ADAPTERS, "vinext-cache-adapter-bun.mjs");
+    const src = join(ADAPTERS, "cache-handler-bun.js");
 
-    it("default-exports a factory returning the BUN handler (built-in client)", async () => {
+    it("default-exports the BUN handler class, which vinext constructs with { env, options } (built-in client)", async () => {
         expect(existsSync(src)).toBe(true);
-        const mod = (await import(src)) as { default: Factory };
-        const h = mod.default({ options: undefined });
+        const mod = (await import(src)) as { default: HandlerClass };
+        const h = new mod.default({ env: undefined, options: undefined });
         expect(h.constructor.redisClient.name).toBe("Bun native");
     });
 
     it("its bundle reaches no ioredis at all (the compiled exec cannot run it)", () => {
-        const out = bundle(src, "bun", "vinext-cache-adapter-bun");
+        const out = bundle(src, "bun", "cache-handler-bun");
         // No import form a bundler/compiler could follow. (The shared core
         // keeps a computed specifier for its generic path; `bun build
         // --compile` cannot follow it, which is the point.)
@@ -110,11 +112,9 @@ describe("wiring: package exports, tsup, vite configs", () => {
     for (const rt of ["node", "bun"]) {
         it(`${rt}: exported and built`, () => {
             expect(pkg.exports[`./internal/vinext-cache-adapter-${rt}`]).toBe(
-                `./dist/adapters/vinext-cache-adapter-${rt}.js`,
+                `./dist/adapters/cache-handler-${rt}.js`,
             );
-            expect(tsup).toContain(
-                `src/adapters/vinext-cache-adapter-${rt}.mjs`,
-            );
+            expect(tsup).toContain(`src/adapters/cache-handler-${rt}.js`);
         });
     }
 
@@ -157,7 +157,7 @@ describe("built output (what the app's vite/nitro build consumes)", () => {
     const LITERAL =
         /\bimport\s*\(\s*["']ioredis["']\s*\)|\bfrom\s+["']ioredis["']|\brequire\s*\(\s*["']ioredis["']\s*\)/;
     const built = (n: string) =>
-        join(PKG_ROOT, "dist", "adapters", `vinext-cache-adapter-${n}.js`);
+        join(PKG_ROOT, "dist", "adapters", `cache-handler-${n}.js`);
 
     it("the node adapter carries a literal ioredis import in its own file", () => {
         if (!existsSync(built("node"))) {
@@ -185,10 +185,10 @@ describe("a configured Redis whose client cannot load is reported loudly, once",
             [
                 "--input-type=module",
                 "-e",
-                `const { default: f } = await import(${JSON.stringify(
-                    join(ADAPTERS, "vinext-cache-adapter-bun.mjs"),
+                `const { default: C } = await import(${JSON.stringify(
+                    join(ADAPTERS, "cache-handler-bun.js"),
                 )});
-                 const h = f({});
+                 const h = new C({ env: undefined, options: undefined });
                  await h.get('k', {}); await h.get('k2', {});`,
             ],
             {
@@ -210,7 +210,7 @@ describe("nitro's bundle of the node adapter contains ioredis itself", () => {
             "bun",
             [
                 "build",
-                join(ADAPTERS, "vinext-cache-adapter-node.mjs"),
+                join(ADAPTERS, "cache-handler-node.js"),
                 "--target",
                 "node",
                 "--outdir",
@@ -219,10 +219,7 @@ describe("nitro's bundle of the node adapter contains ioredis itself", () => {
             { encoding: "utf8", cwd: PKG_ROOT },
         );
         expect(res.status).toBe(0);
-        const text = readFileSync(
-            join(out, "vinext-cache-adapter-node.js"),
-            "utf8",
-        );
+        const text = readFileSync(join(out, "cache-handler-node.js"), "utf8");
         expect(text).toContain("enableOfflineQueue");
         expect(text).toContain("cluster_state");
     });
