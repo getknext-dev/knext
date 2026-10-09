@@ -152,8 +152,8 @@ produced the accidental `2.0.0` computation from a stale pre-mode marker on 242 
   "no backport branches" stance of `docs/RELEASE_POLICY.md`, which stays true until 2.0 GA. After
   six months `release/1.x` is frozen and `latest-1` stops moving. jev: 6-month security-only 0.80,
   none 0.19, 12-month 0.01.
-- **v1.0 credentials retire at 2.0 GA.** The v1.0 credential lane stops; the four 2.0 cells take its
-  cron slots, and 1.x gets no new credential. Net slot count never exceeds today's.
+- **v1.0 credentials retire at 2.0 GA.** The v1.0 credential lane stops; the four 2.0 cells take the
+  v1.3 lane's cron slots, and 1.x gets no new credential. Net slot count never exceeds today's.
 - **Forward-merge discipline:** the newest 1.x line (later `release/1.x`) is merged into
   `integration/v2` before every 2.0 release candidate, so no 1.x fix is missing from 2.0.
 - **Publish allowlist:** a publish may run only from an exact, glob-free ref list (`main`,

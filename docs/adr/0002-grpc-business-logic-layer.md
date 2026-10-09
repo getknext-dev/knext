@@ -65,7 +65,7 @@ called from the Next.js zone, scale-to-zero, with Next.js still the HTTP gateway
 ### Decision
 
 1. **Option A's sequencing is superseded; the module itself is unchanged.** Design and a cold-start
-   spike run in the first v2 sprint; the **build starts in the second** (Q10; the plan scored
+   spike come first; the **build starts once the design amendment and the spike are accepted** (Q10; the plan scored
    "design and spike, then build" 0.48 against "wait for the credentials" 0.47, so this was a
    founder call, not a metric). It stays an opt-in module (`@getknext/grpc`) plus the `BackendService`
    CRD (ADR-0004), shipped at **Beta** in 2.0 (Q17: Beta 0.94). The "do not build before Phases 0–5"
@@ -103,8 +103,8 @@ called from the Next.js zone, scale-to-zero, with Next.js still the HTTP gateway
 
 ### Consequences
 
-- gRPC users no longer wait on maturity; they wait on the second v2 sprint and on the founder's
-  `CLAUDE.md` edit.
-- The Consequences and Action items above stand, except that "when scheduled" is now "from the
-  second v2 sprint", the generated-artifact location is governed by ADR-0052 D8, and `kn-next
+- gRPC users no longer wait on maturity; they wait on the accepted design amendment, the cold-start spike
+  and the founder's `CLAUDE.md` edit.
+- The Consequences and Action items above stand, except that "when scheduled" is now "once the
+  design amendment and the cold-start spike are accepted", the generated-artifact location is governed by ADR-0052 D8, and `kn-next
   generate` is the `knext generate` verb dispatched lazily by core.

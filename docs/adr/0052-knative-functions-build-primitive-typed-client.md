@@ -185,9 +185,9 @@ amendment.
 
 - **D9 (sequencing).** The sentence "design + ADR only; the typed-client/backend layer build is
   deferred until after Tier-A" is **superseded**. The build is **re-sequenced into v2**: design and
-  the cold-start spike in the first v2 sprint, build from the second, shipped at **Beta** in 2.0.
+  the cold-start spike come first, the build starts once both are accepted, shipped at **Beta** in 2.0.
   The Bun function runtime question in D9 is unchanged by this. The Action items header
-  ("post-Tier-A") now reads "from the second v2 sprint".
+  ("post-Tier-A") now reads "once the design amendment and the cold-start spike are accepted".
 - **D10 (languages).** **Rust is Connect-capable**: connect-rust 0.9.x (pinned, conformance-gated,
   `tonic` fallback — ADR-0003 amendment) puts Rust beside Go and TypeScript as a language with a
   first-party Connect server. D10's remark that Rust is "gRPC or partial-Connect today" is updated

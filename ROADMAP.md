@@ -53,7 +53,7 @@ GitHub org, landing page, **docs site (dogfooded on knext)**, examples, npm publ
 (`@getknext/*` — unblocks `npx kn-next` for outside users), Next.js-docs adapter listing.
 
 ## Optional module — gRPC business-logic layer
-**Zone functions: design and spike in the first v2 sprint, build from the second, shipped at Beta in
+**Zone functions: design and cold-start spike first, build once both are accepted, shipped at Beta in
 2.0.** Go and Rust functions as cluster-local scale-to-zero Knative services behind the Next.js zone
 that owns them (same-zone only, proto-only contracts, signed short-lived identity token). Opt-in via
 `@getknext/grpc`; not a general function platform. See the amendments to `docs/adr/0002-0004` and
