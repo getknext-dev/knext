@@ -119,10 +119,10 @@ const NEGATIVE = {
   expect: 'green',
   claim: 'a Notes-cell rewording must be free — the guard checks structure, not prose',
   subject: 'matrix',
-  anchor: '**Lane exists; NO NUMBER PUBLISHED YET — the first scheduled run produces one.**',
+  anchor: '**Lane exists; measured, never credentialed — vinext REMAINS BETA.**',
   replacement:
-    '**Lane exists; no number published yet (reworded by the negative control) — the first ' +
-    'scheduled run produces one.**',
+    '**Lane exists; measured, never credentialed (reworded by the negative control) — vinext ' +
+    'remains Beta.**',
 };
 
 const ALL = [...MUTATIONS, NEGATIVE];

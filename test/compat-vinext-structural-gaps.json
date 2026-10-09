@@ -1,0 +1,398 @@
+{
+  "$comment": "vinext x bun STRUCTURAL-GAP ledger (founder decision 2026-10-09; ADR-0007 section g, Amendment). Files that fail ONLY because vinext does not implement the Next.js 16.3 client-router architecture. Separate from test/compat-vinext-ledger.json, whose bounds (15 files, 30-day expiry) are unchanged. Bounds, enforced by scripts/compat-vinext-structural-gaps.mjs: ONE shared gap record; reviewBy at most 92 days after recorded (past it the run reds); at most 49 files, frozen at the count first quarantined and only ever lowered (adding a file needs a new ADR-0007 amendment); every file a real manifest corpus member; vinext lane only. Files are RECLASSIFIED after the run at case granularity, never removed from the corpus: a new failing case in a ledgered file stays a real failure, and a file that passes reds as stale. `cases` is the intersection of the cases that failed in both evidence runs. vinext stays Beta; this ledger does not make the lane a credential.",
+  "lane": "bun-vinext",
+  "gap": {
+    "id": "client-router-architecture",
+    "reason": "vinext does not implement the Next.js 16.3 client-router architecture",
+    "upstream": [
+      "https://github.com/cloudflare/vinext/issues/1614",
+      "https://github.com/cloudflare/vinext/pull/3768",
+      "https://github.com/getknext-dev/knext/issues/1148"
+    ],
+    "recorded": "2026-10-09",
+    "reviewBy": "2027-01-08",
+    "evidenceRuns": ["37123681030", "37663567284"]
+  },
+  "files": [
+    {
+      "test": "test/e2e/app-dir/action-forward-loop/action-forward-loop.test.ts",
+      "cases": [
+        "renders the action-not-found error when a rewrite sends the action POST to a route that does not bundle it"
+      ]
+    },
+    {
+      "test": "test/e2e/app-dir/actions-discarded-navigation-revert/actions-discarded-navigation-revert.test.ts",
+      "cases": [
+        "defers the refresh from a discarded revalidating action until the queue drains",
+        "keeps the navigation when the discarded action rejects",
+        "runs an action dispatched during the navigation once it finishes"
+      ]
+    },
+    {
+      "test": "test/e2e/app-dir/app-inline-css/index.test.ts",
+      "cases": [
+        "should have only one style tag when navigating from page with inlining to page without inlining",
+        "should not return rsc payload with inlined style as a dynamic client nav",
+        "should render page with correct styles"
+      ]
+    },
+    {
+      "test": "test/e2e/app-dir/app-prefetch/prefetching.test.ts",
+      "cases": [
+        "should have an auto priority for all other fetch operations",
+        "should prefetch links in viewport with low priority"
+      ]
+    },
+    {
+      "test": "test/e2e/app-dir/asset-prefix-absolute/asset-prefix-absolute.test.ts",
+      "cases": ["bundles should return 200 on served assetPrefix"]
+    },
+    {
+      "test": "test/e2e/app-dir/concurrent-navigations/mismatching-prefetch.test.ts",
+      "cases": [
+        "recovers when a navigation rewrites to a different route than the one that was prefetched"
+      ]
+    },
+    {
+      "test": "test/e2e/app-dir/instant-navigation-testing-api/instant-navigation-testing-api.test.ts",
+      "cases": [
+        "allows concurrent instant scopes across separate browser contexts",
+        "blocks out-of-band client fetch during instant scope (MPA)",
+        "blocks out-of-band client fetch during instant scope (SPA)",
+        "does not include cookie values in instant shell during page load",
+        "does not include search param values in instant shell during client navigation",
+        "does not include search param values in instant shell during page load",
+        "does not leak runtime data from a hover prefetch",
+        "during client navigation",
+        "during page load",
+        "excludes a cookie read after a param access from the instant shell during client navigation",
+        "keeps the committed layout and defers a deeper blocking segment under instant()",
+        "recovers from a stale instant cookie left by a prior scope",
+        "reload followed by MPA navigation, both block dynamic data",
+        "renders prefetched loading shell instantly during navigation",
+        "renders runtime-prefetched content instantly during navigation",
+        "renders shell on MPA navigation via plain anchor",
+        "renders shell on page reload",
+        "resolves the covered param from the static shell and the uncovered param from the runtime prefetch in a mixed route",
+        "restricts navigation to the shell even when a concrete-param entry is warm",
+        "sets cookie before first navigation when using baseURL",
+        "shows only the static param in the instant shell on a normal navigation to a mixed route",
+        "successive MPA navigations within instant scope"
+      ]
+    },
+    {
+      "test": "test/e2e/app-dir/navigation-focus/navigation-focus.test.ts",
+      "cases": ["navigation to a scrollable segment", "navigation to an interactive segment"],
+      "note": "Fixed on the integration/v1.3 line by the bundled scroll and focus patch (getknext-dev/knext#1995, from cloudflare/vinext#3768), merged after the evidence run. Expected to go stale on that line: remove this entry then."
+    },
+    {
+      "test": "test/e2e/app-dir/next-dynamic-css/next-dynamic-css.test.ts",
+      "cases": [
+        "should have correct order of global styles between layout and pages",
+        "should have correct order of styles between global and css modules",
+        "should have correct order of styles on client component that is sharing styles with next/dynamic",
+        "should have correct order of styles on next/dynamic loaded component"
+      ]
+    },
+    {
+      "test": "test/e2e/app-dir/parallel-routes-scroll-owner/parallel-routes-scroll-owner.test.ts",
+      "cases": [
+        "consumes a missing hash without scrolling or blurring",
+        "preserves scroll when an empty intercepted modal is the only changed slot"
+      ],
+      "note": "Fixed on the integration/v1.3 line by the bundled scroll and focus patch (getknext-dev/knext#1995, from cloudflare/vinext#3768), merged after the evidence run. Expected to go stale on that line: remove this entry then."
+    },
+    {
+      "test": "test/e2e/app-dir/partial-fallback-shell-upgrade/partial-fallback-shell-upgrade.test.ts",
+      "cases": [
+        "should let a segment prefetch trigger the background shell upgrade",
+        "should not keep upgrading once only fully dynamic params remain",
+        "should not specialize a generic shell into a more specific shell",
+        "should not upgrade the fallback shell to a route shell",
+        "should upgrade a generic shell into the most specific prerendered shell"
+      ]
+    },
+    {
+      "test": "test/e2e/app-dir/partial-prefetching-config/partial-prefetching-config.test.ts",
+      "cases": ["does not prefetch dynamic data, even when <Link prefetch={true}>"]
+    },
+    {
+      "test": "test/e2e/app-dir/partial-prefetching-deep-propagation/partial-prefetching-deep-propagation.test.ts",
+      "cases": [
+        "downgrades a prefetch={true} to a partial prefetch when a deeply nested segment opts in"
+      ]
+    },
+    {
+      "test": "test/e2e/app-dir/partial-prefetching-segment-config/partial-prefetching-segment-config.test.ts",
+      "cases": ["does not prefetch dynamic data for a route with prefetch = \"partial\""]
+    },
+    {
+      "test": "test/e2e/app-dir/prefetch-true-instant/prefetch-true-instant.test.ts",
+      "cases": [
+        "also disables full prefetch when instant is on a layout, not the page",
+        "does not downgrade the prefetch when the route only has instant, without a prefetch config",
+        "does not include dynamic content in the prefetch when the target route has instant"
+      ]
+    },
+    {
+      "test": "test/e2e/app-dir/proxy-prefix-rewrite-prefetch-loop/proxy-prefix-rewrite-prefetch-loop.test.ts",
+      "cases": [
+        "does not prefetch an ancestor link in a loop when the proxy injects a path segment"
+      ]
+    },
+    {
+      "test": "test/e2e/app-dir/router-autoscroll/router-autoscroll.test.ts",
+      "cases": [
+        "should scroll to top even if React hoists children",
+        "should scroll when the page top is obscured by scroll padding (100px)",
+        "should scroll when the page top is obscured by scroll padding (50%)"
+      ],
+      "note": "Fixed on the integration/v1.3 line by the bundled scroll and focus patch (getknext-dev/knext#1995, from cloudflare/vinext#3768), merged after the evidence run. Expected to go stale on that line: remove this entry then."
+    },
+    {
+      "test": "test/e2e/app-dir/rsc-basic/rsc-basic-blocking-ssr.test.ts",
+      "cases": ["should opt into the react@experimental channel when blockingSSR is enabled"]
+    },
+    {
+      "test": "test/e2e/app-dir/rsc-basic/rsc-basic-react-experimental.test.ts",
+      "cases": ["should opt into the react@experimental when enabling $flag"]
+    },
+    {
+      "test": "test/e2e/app-dir/segment-cache/basic/segment-cache-basic.test.ts",
+      "cases": [
+        "navigate before any data has loaded into the prefetch cache",
+        "navigate with prefetched data",
+        "refreshes page segments when navigating to the exact same URL as the current location",
+        "skips static layouts during partially static navigation"
+      ]
+    },
+    {
+      "test": "test/e2e/app-dir/segment-cache/cached-navigations/cached-navigations-global-runtime.test.ts",
+      "cases": ["runtime-caches a route that has no per-segment prefetch config"]
+    },
+    {
+      "test": "test/e2e/app-dir/segment-cache/cached-navigations/cached-navigations-partial-prefetching.test.ts",
+      "cases": ["runtime-caches a route that has no per-segment prefetch config"]
+    },
+    {
+      "test": "test/e2e/app-dir/segment-cache/cached-navigations/cached-navigations.test.ts",
+      "cases": [
+        "caches a fully static page from the initial HTML for subsequent navigations",
+        "caches a partially static page from the initial HTML for subsequent navigations",
+        "caches runtime-prefetchable content from a navigation for instant second visit",
+        "caches runtime-prefetchable content from the initial HTML for subsequent navigations",
+        "caches static segments when navigating to a known route without a prefetch",
+        "defers fallback params to the runtime stage",
+        "includes static params in the cached static stage",
+        "reuses cached page segment across different fallback params after initial HTML load",
+        "reuses cached page segment across different fallback params after navigation",
+        "runtime-caches a route with prefetch = \"partial\"",
+        "runtime-caches a route with prefetch = \"unstable_eager\"",
+        "serves a fully static page without any requests on the second navigation",
+        "serves cached static segments instantly on the second navigation"
+      ]
+    },
+    {
+      "test": "test/e2e/app-dir/segment-cache/dynamic-on-hover/dynamic-on-hover.test.ts",
+      "cases": ["prefetches the dynamic data for a Link on hover"]
+    },
+    {
+      "test": "test/e2e/app-dir/segment-cache/force-stale/force-stale.test.ts",
+      "cases": ["during a \"full\" prefetch, read from bfcache before issuing new prefetch request"]
+    },
+    {
+      "test": "test/e2e/app-dir/segment-cache/headers-keyed-caches/headers-keyed-caches.test.ts",
+      "cases": [
+        "renders dynamic content on navigation even when the spawned runtime prerender populated the cache first"
+      ]
+    },
+    {
+      "test": "test/e2e/app-dir/segment-cache/memory-pressure/segment-cache-memory-pressure.test.ts",
+      "cases": ["evicts least recently used prefetch data once cache size exceeds limit"]
+    },
+    {
+      "test": "test/e2e/app-dir/segment-cache/optimistic-routing-rewrite-detection-regression/optimistic-routing-rewrite-detection-regression.test.ts",
+      "cases": [
+        "does not predict from a rewrite that shortens the URL",
+        "does not predict from a rewrite to a static-sibling URL"
+      ]
+    },
+    {
+      "test": "test/e2e/app-dir/segment-cache/prefetch-app-shell/prefetch-app-shell.test.ts",
+      "cases": [
+        "excludes cached content with a short stale time from a runtime App Shell",
+        "excludes cached content with a short stale time from a static App Shell",
+        "extracts the App Shell from a fully-static prerender response",
+        "includes root params in a runtime App Shell",
+        "includes root params in a runtime App Shell when accessed via params object",
+        "includes root params in a static App Shell",
+        "includes root params in an App Shell when accessed via params object",
+        "reuses the app shell across different param values so navigation to an unprefetched route is instant",
+        "runtime-prefetches per-link content of a dynamic route whose static-attempt hint is unset",
+        "skips the per-link Speculative prefetch for a route with prefetch = \"partial\"",
+        "uses separate runtime App Shells for links with different root params",
+        "uses separate static App Shells for links with different root params"
+      ]
+    },
+    {
+      "test": "test/e2e/app-dir/segment-cache/prefetch-inlining/prefetch-inlining.test.ts",
+      "cases": [
+        "dynamic route: hints are based on concrete params, not fallback shell",
+        "independent head: param-dependent head rides along with the runtime prefetch",
+        "instant false passthrough: static parents inline through dynamic layout to static child",
+        "outlined: large segment breaks the inlining chain",
+        "restart: large segment in the middle creates two inlining groups",
+        "runtime parallel: pass-through only flows into one child slot",
+        "runtime passthrough: static parents inline through runtime layout to static child",
+        "runtime prefetch: layout inlines into a runtime-data-reading leaf; content arrives via the batched runtime prefetch"
+      ]
+    },
+    {
+      "test": "test/e2e/app-dir/segment-cache/prefetch-scheduling/prefetch-scheduling.test.ts",
+      "cases": [
+        "cancels a viewport-initiated prefetch if the link leaves the viewport before it finishes",
+        "increases the priority of a viewport-initiated prefetch on hover",
+        "prioritizes links nearest the top of the document when many enter the viewport at once",
+        "reschedules a link's prefetch when it re-enters the viewport",
+        "reserve special bandwidth for the most recently hovered link"
+      ]
+    },
+    {
+      "test": "test/e2e/app-dir/segment-cache/prefetch-static-shell/prefetch-static-shell.test.ts",
+      "cases": [
+        "does not fall back to a runtime shell prefetch for a partial segment whose holes are dynamic (connection)",
+        "goes straight to a runtime shell prefetch when the shell reads cookies (hint unset)",
+        "goes straight to a runtime shell prefetch when the shell reads searchParams (hint unset)",
+        "reuses the static App Shell across different param values of a dynamic route",
+        "speculative: goes straight to a runtime prefetch when the hint is unset",
+        "speculative: prefetch={true} with the hint set prefetches statically with no runtime request"
+      ]
+    },
+    {
+      "test": "test/e2e/app-dir/segment-cache/search-params/segment-cache-search-params-shared-loading-state.test.ts",
+      "cases": [
+        "if there's no matching prefetch entry for a page with particulular search params, optimistically reuse a prefetch entry with the same pathname and different search params"
+      ]
+    },
+    {
+      "test": "test/e2e/app-dir/segment-cache/search-params/segment-cache-search-params.test.ts",
+      "cases": ["stores prefetched data by its rewritten search params, not the original ones"]
+    },
+    {
+      "test": "test/e2e/app-dir/segment-cache/staleness/segment-cache-stale-time.test.ts",
+      "cases": ["caches omitted from the prerender should not affect when the prefetch is expired"]
+    },
+    {
+      "test": "test/e2e/app-dir/segment-cache/vary-params-base-dynamic/vary-params-base-dynamic.test.ts",
+      "cases": [
+        "keeps dynamic segment params valid after path-root-layout with in-view Link back/forward navigations",
+        "keeps dynamic segment params valid after path-team-layout with in-view Link back/forward navigations",
+        "keeps dynamic segment params valid after path-team-page with in-view Link back/forward navigations",
+        "keeps dynamic segment params valid after tag-layout-expireNow with in-view Link back/forward navigations",
+        "keeps dynamic segment params valid after tag-layout-legacy with in-view Link back/forward navigations",
+        "keeps dynamic segment params valid after tag-layout-max with in-view Link back/forward navigations",
+        "keeps dynamic segment params valid before and after time-based revalidation",
+        "keeps dynamic segment params valid when browser-triggered revalidation uses server-action-tag-layout-expireNow",
+        "keeps dynamic segment params valid when browser-triggered revalidation uses server-action-tag-layout-legacy",
+        "keeps dynamic segment params valid when browser-triggered revalidation uses server-action-tag-layout-max",
+        "keeps dynamic segment params valid when browser-triggered revalidation uses tag-layout-expireNow",
+        "keeps dynamic segment params valid when browser-triggered revalidation uses tag-layout-legacy",
+        "keeps dynamic segment params valid when browser-triggered revalidation uses tag-layout-max",
+        "keeps params valid for production route shape /[team]/[project]/settings/domains after tag-layout-expireNow",
+        "keeps params valid for production route shape /[team]/[project]/settings/domains after tag-layout-legacy"
+      ]
+    },
+    {
+      "test": "test/e2e/app-dir/segment-cache/vary-params/vary-params.test.ts",
+      "cases": [
+        "caches head segment when generateMetadata does not access params",
+        "renders cached loading state instantly during navigation",
+        "renders cached loading state instantly with runtime prefetching",
+        "reuses page segment when layout varies but page does not",
+        "reuses prefetched page segment with in-page loading boundary across different params",
+        "reuses prefetched segment when page does not access searchParams",
+        "shares cached segment across all params when none accessed statically (runtime prefetch)",
+        "tracks metadata param access separately from body (runtime prefetch)",
+        "tracks param access in generateMetadata"
+      ]
+    },
+    {
+      "test": "test/e2e/app-dir/service-worker-scopes/service-worker-scopes.test.ts",
+      "cases": ["serves one worker per scope at scope-derived file names"]
+    },
+    {
+      "test": "test/e2e/app-dir/service-worker/service-worker-register.test.ts",
+      "cases": [
+        "intercepts fetches within scope",
+        "preserves the options object passed to register()",
+        "registers the service worker and controls the page",
+        "serves the worker chunk as a revalidated, mutable asset"
+      ]
+    },
+    {
+      "test": "test/e2e/app-dir/use-cache-default-profile-expire-zero/use-cache-default-profile-expire-zero.test.ts",
+      "cases": [
+        "treats a short default cacheLife profile as a dynamic hole, not a nested-cache error"
+      ]
+    },
+    {
+      "test": "test/e2e/app-dir/use-offline/use-offline.test.ts",
+      "cases": [
+        "retries navigation after connectivity is restored",
+        "shows offline indicator even without prefetch data",
+        "updates offline indicator immediately on disconnect"
+      ]
+    },
+    {
+      "test": "test/e2e/app-document-import-order/app-document-import-order.test.ts",
+      "cases": [
+        "root components should be imported in order _document > _app > page to respect side effects"
+      ]
+    },
+    {
+      "test": "test/e2e/instrumentation-client-hook/instrumentation-client-hook.test.ts",
+      "cases": [
+        "isolates hook errors between injected modules",
+        "omits route groups from fromRoutes",
+        "reports a null prefetch intent for programmatic navigation",
+        "reports intercepted route patterns in fromRoutes",
+        "reports transition metadata, source routes, and prefetch intent",
+        "surfaces onRouterTransitionStart from every injected module",
+        "uses route patterns and puts the primary source route first"
+      ]
+    },
+    {
+      "test": "test/e2e/next-image-legacy/asset-prefix/asset-prefix.test.ts",
+      "cases": ["should use base64 data url with placeholder=blur during production"]
+    },
+    {
+      "test": "test/e2e/next-image-legacy/unicode/unicode.test.ts",
+      "cases": ["should load external image with space", "should load external unicode image"]
+    },
+    {
+      "test": "test/e2e/next-image-legacy/unoptimized/unoptimized.test.ts",
+      "cases": ["should not optimize any image"]
+    },
+    {
+      "test": "test/e2e/next-image-new/asset-prefix/asset-prefix.test.ts",
+      "cases": ["should use base64 data url with placeholder=blur during production"]
+    },
+    {
+      "test": "test/e2e/react-current-version/react-current-version.test.ts",
+      "cases": [
+        "flushes styled-jsx styles as the page renders",
+        "should contain dynamicIds in next data for dynamic imports",
+        "should not have the initial route announced",
+        "should only render once in SSR"
+      ]
+    },
+    {
+      "test": "test/e2e/service-worker-pages/service-worker-pages.test.ts",
+      "cases": [
+        "intercepts fetches within scope",
+        "registers the service worker and controls the page at scope \"/\"",
+        "serves the worker chunk as a revalidated, mutable asset"
+      ]
+    }
+  ]
+}

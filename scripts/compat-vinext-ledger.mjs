@@ -129,10 +129,20 @@
  * would close the gap — proposed here, NOT implemented; it needs its own
  * shard-count and cost tradeoff.
  *
+ * ## The structural-gap ledger (a SECOND ledger, beside this one)
+ * `apply` and `report` accept `--structural <json>`: the vinext STRUCTURAL-GAP
+ * ledger (`test/compat-vinext-structural-gaps.json`, `compat-vinext-structural-gaps.mjs`)
+ * for files that fail only because vinext does not implement the Next.js 16.3
+ * client-router architecture. It has its OWN bounds (49 files, frozen and only ever lowered; one shared record,
+ * `reviewBy` within 92 days) and does not touch ANY bound above: the 15-file cap
+ * and 30-day expiry are founder constraints on THIS ledger and stay as they are.
+ * A file may be in one ledger only. It is vinext-only: a summary whose `builder`
+ * is not `vinext` is refused.
+ *
  * CLI (dependency-free, plain Node):
- *   apply   --ledger <json> --summary <shard-summary.json>
- *           validates the ledger, rewrites the summary in place (exit 1 if invalid)
- *   report  --ledger <json> --summaries <dir> [--history-runs N]
+ *   apply   --ledger <json> [--structural <json>] --summary <shard-summary.json>
+ *           validates the ledger(s), rewrites the summary in place (exit 1 if invalid)
+ *   report  --ledger <json> [--structural <json>] --summaries <dir> [--history-runs N]
  *           validates, fails on stale entries (and, with --history-runs, a
  *           broken/stale flaky window), prints the published number
  *   refresh --ledger <json> --run <run-id>=<run-dir> --run <run-id>=<run-dir> [...]
@@ -164,6 +174,13 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  loadStructuralGaps,
+  overlapWithPerFile,
+  staleStructural,
+  structuralApplyRefusal,
+  structuralEntries,
+} from './compat-vinext-structural-gaps.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 /** The SAME manifest `tests/nextjs-credential-lockstep.test.ts` guards
@@ -1326,7 +1343,7 @@ function main(argv) {
   const [ledgerPath] = args(argv, 'ledger');
   if (!ledgerPath || !['apply', 'report', 'refresh', 'verify'].includes(cmd)) {
     console.error(
-      'usage: compat-vinext-ledger.mjs apply --ledger <json> --summary <file> | report --ledger <json> --summaries <dir> [--history-runs N] | refresh --ledger <json> --run <run-id>=<run-dir> --run <run-id>=<run-dir>… | verify --ledger <json>',
+      'usage: compat-vinext-ledger.mjs apply --ledger <json> [--structural <json>] --summary <file> | report --ledger <json> [--structural <json>] --summaries <dir> [--history-runs N] | refresh --ledger <json> --run <run-id>=<run-dir> --run <run-id>=<run-dir>… | verify --ledger <json>',
     );
     return 2;
   }
@@ -1356,6 +1373,29 @@ function main(argv) {
   if (errors.length) {
     for (const e of errors) console.error(`::error::vinext quarantine ledger — ${e}`);
     return 1;
+  }
+  // The structural-gap ledger (apply / report only). Validated BEFORE anything
+  // is rewritten, so an expired or over-cap one reds the shard, exactly like
+  // the per-file ledger above.
+  const [structuralPath] = args(argv, 'structural');
+  let structural = null;
+  if (structuralPath) {
+    const today = new Date().toISOString().slice(0, 10);
+    const loaded = loadStructuralGaps(structuralPath, today);
+    const problems = [
+      ...loaded.errors,
+      ...(loaded.errors.length
+        ? []
+        : overlapWithPerFile(loaded.ledger, ledger.entries).map(
+            (o) =>
+              `${o.test} is in both ledgers for case(s) ${o.cases.join(' | ')}; a case is quarantined by one mechanism only`,
+          )),
+    ];
+    if (problems.length) {
+      for (const e of problems) console.error(`::error::vinext structural-gap ledger — ${e}`);
+      return 1;
+    }
+    structural = loaded.ledger;
   }
   if (cmd === 'verify') {
     const repo = process.env.GITHUB_REPOSITORY;
@@ -1403,7 +1443,18 @@ function main(argv) {
   if (cmd === 'apply') {
     const [path] = args(argv, 'summary');
     const before = JSON.parse(readFileSync(path, 'utf8'));
-    const after = applyLedger(before, ledger.entries);
+    const refusal = structural ? structuralApplyRefusal(before) : null;
+    if (refusal) {
+      console.error(`::error::vinext structural-gap ledger — ${refusal}`);
+      return 1;
+    }
+    // Two passes, not one merged entry list: a file may be in both ledgers (with
+    // disjoint cases), and `applyLedger` keys entries by file. Each pass is pure
+    // and idempotent, and keeps its own `class` on the records it quarantines.
+    const afterPerFile = applyLedger(before, ledger.entries);
+    const after = structural
+      ? applyLedger(afterPerFile, structuralEntries(structural))
+      : afterPerFile;
     writeFileSync(path, `${JSON.stringify(after, null, 2)}\n`);
     if (after.ledgerSkipped)
       console.error(`::warning::vinext quarantine ledger — ${after.ledgerSkipped}`);
@@ -1424,17 +1475,47 @@ function main(argv) {
   }
   for (const w of skippedWarnings(summaries))
     console.error(`::warning::vinext quarantine ledger — ${w}`);
+  if (structural) {
+    const refused = summaries.map(structuralApplyRefusal).filter(Boolean);
+    if (refused.length) {
+      for (const r of refused) console.error(`::error::vinext structural-gap ledger — ${r}`);
+      return 1;
+    }
+  }
   const n = publishedNumber(summaries);
+  const structuralFiles = new Set(
+    summaries.flatMap((s) =>
+      (s.quarantined ?? []).filter((r) => r.class === 'structural').map((r) => r.file),
+    ),
+  );
   const line = `vinext × bun: ${n.passed} passed / ${n.failed} failed / ${n.quarantined} quarantined (of ${n.total})`;
+  const structuralLine = structural
+    ? `of the ${n.quarantined} quarantined, ${structuralFiles.size} are known structural gaps (${structural.gap.reason}; review by ${structural.gap.reviewBy})`
+    : null;
   console.log(line);
+  if (structuralLine) console.log(structuralLine);
   if (process.env.GITHUB_STEP_SUMMARY)
-    appendFileSync(process.env.GITHUB_STEP_SUMMARY, `\n### Quarantine ledger\n\n${line}\n`);
+    appendFileSync(
+      process.env.GITHUB_STEP_SUMMARY,
+      `\n### Quarantine ledger\n\n${line}\n${structuralLine ? `\n${structuralLine}\n` : ''}`,
+    );
   const stale = staleEntries(summaries, ledger.entries);
   for (const s of stale) {
     console.error(
       `::error::stale quarantine entry — ${s.test} (cases: ${s.cases.join(' | ')}) did not fail in this run; remove them from ${ledgerPath} or refresh the snapshot`,
     );
   }
+  const structuralStale = structural
+    ? staleStructural(summaries, structural)
+    : { stale: [], shrink: [] };
+  for (const s of structuralStale.stale)
+    console.error(
+      `::error::stale structural-gap entry — ${s.test} passed in this run; remove it from ${structuralPath}`,
+    );
+  for (const s of structuralStale.shrink)
+    console.error(
+      `::warning::structural-gap entry can shrink — ${s.test} no longer fails (cases: ${s.cases.join(' | ')}); drop them from the snapshot in ${structuralPath}`,
+    );
   const window = flakyHistory(argv, ledger, summaries);
   for (const b of window.broken)
     console.error(
@@ -1444,7 +1525,9 @@ function main(argv) {
     console.error(
       `::error::stale flaky entry — ${st.test} passed ${st.runs} consecutive informative runs; remove it from ${ledgerPath}`,
     );
-  return stale.length || window.broken.length || window.stale.length ? 1 : 0;
+  return stale.length || structuralStale.stale.length || window.broken.length || window.stale.length
+    ? 1
+    : 0;
 }
 
 /**

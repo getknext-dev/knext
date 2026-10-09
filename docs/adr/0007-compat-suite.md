@@ -714,6 +714,74 @@ as ongoing coverage. Upstream's mirrored `suites.failed` entry for the file is s
 removed, and must be restored when this entry retires. Upstream issue: vercel/next.js#99435. With
 this entry, the rc.2 credential carries six §h entries.
 
+## Amendment (2026-10-09): the vinext structural-gap ledger (quarantine bounds, §g)
+
+- Status: Accepted (founder decision, 2026-10-09). This is a real amendment of §g's
+  quarantine bounds, not a note: it adds a second ledger and records what may and may not
+  change about it.
+
+### Context
+
+The vinext × Bun lane (`compat-vinext.yml`, the compiled single executable) runs the
+official corpus (1099 files at Next.js v16.3.6). On 1.3.0-rc.7 (run 37663567284) it passed
+1000 and failed 91. Of the 91, **49 files** fail for one reason that no knext patch can
+remove: vinext does not implement the Next.js 16.3 client-router architecture (segment
+cache, prefetch scheduling, app shells, and the pieces built on them). The per-file
+ledger (`test/compat-vinext-ledger.json`) is the wrong tool for that: its bounds (**at most
+15 files, 30-day expiry**, per-entry evidence of two runs) are founder constraints and stay
+exactly as they are. Widening them to fit 49 files was rejected; a quarantine that can
+absorb a whole architectural gap by raising a number is not a quarantine.
+
+### Decision
+
+Add a **separate** ledger, `test/compat-vinext-structural-gaps.json`, validated by
+`scripts/compat-vinext-structural-gaps.mjs` and applied by the same
+`compat-vinext-ledger.mjs apply`/`report` steps (`--structural`). Its bounds:
+
+| Bound | Value |
+|---|---|
+| Records | **One** shared gap record (reason, upstream links, `recorded`, `reviewBy`); a file carries only its path and a case snapshot, so no per-file reason or date can drift |
+| Cap | **49 files, frozen at the number first quarantined. The cap only goes down.** Removing a file (it passes, or is fixed) is routine; **adding a file, or raising the cap, requires a new amendment to this ADR** before the change can merge |
+| Review | `reviewBy` at most **92 days** after `recorded` (quarterly). Past it the run reds, until the gap is reviewed and the ledger renewed or shrunk |
+| Membership | every file is a real manifest corpus member (include glob, not excluded, not already quarantined by the manifest) and shares no *case* with the per-file ledger |
+| Matching | case granularity: a new failing case in a ledgered file stays a real failure; a file-level (build or deploy) failure stays a real failure |
+| Staleness | a ledgered file that passes reds the run as stale; a partial improvement only warns, so one lucky pass of one timing-sensitive case cannot red the nightly |
+| Scope | **the vinext lane only.** `lane` must be `bun-vinext`; `apply` and `report` refuse any shard summary whose `builder` is not `vinext`; only `compat-vinext.yml` references the ledger; none of the four stable credential cells (node/bun × turbopack/webpack) freezes or reads it |
+
+The per-file ledger's 15-file cap and 30-day expiry are **unchanged** and are asserted
+unchanged by `tests/compat-vinext-structural-gaps.test.ts`. Each bound above is
+mutation-proved by exit code (`scripts/mutation-prove-compat-vinext-structural-gaps.mjs`).
+
+### Options considered
+
+| Option | Verdict |
+|---|---|
+| Raise the per-file ledger's cap to fit 49 files | Rejected: breaks a founder constraint; the next gap would raise it again |
+| Exclude the 49 files from the corpus | Rejected: shrinks the denominator; the lane's rule is that the corpus is unchanged and files are reclassified after the run |
+| Leave the lane red on 91 files | Rejected as the only state: it hides which failures are a known, bounded architectural gap and which are regressions |
+| **Separate, capped, quarterly-reviewed, vinext-only ledger** | **Chosen** |
+
+### Consequences
+
+- This is a **scope statement, not a credential**. vinext **remains Beta**. The 49 files are
+  disclosed as known gaps, not counted as passes: any published number reads "on the official
+  suite minus 49 disclosed known-gap files (client-router architecture); vinext remains Beta".
+  It does not change the credential bar for the four stable cells, and nothing here can.
+- The lane stays red by design for the files outside the ledger (42 on rc.7).
+- The scroll and focus files in the set (`navigation-focus`, `router-autoscroll`,
+  `parallel-routes-scroll-owner`) are already fixed on the 1.3 integration line by a bundled
+  patch that merged after the evidence run. They are expected to go **stale** there; removing
+  them is the intended path and lowers the count.
+- Renewal is a reviewed edit of one record. Unlike the per-file ledger, the re-dating is not
+  re-derived from git history by the advisory `verify` job; that is a known gap, bounded by
+  the cap (no file can be added) and by review of the diff.
+- The structural ledger's data file is not in the bun-vinext compat-window fingerprint's
+  declared files (declaring it means editing `compat-window-audit.mjs`, which is inside the
+  v1.3 workflow's guard closure and would restart every v1.3 cell window). Its script is
+  frozen transitively. Revisit at the next planned window restart.
+- Review trigger: at `reviewBy`, or when vinext ships a client-router implementation,
+  whichever comes first.
+
 ## Action items
 
 - **A3-1 (per-PR gate, this PR's deliverable):**

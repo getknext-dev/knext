@@ -191,8 +191,10 @@ The default cell — Turbopack build on the compiled Bun executable — passed t
 dispatched runs (792 passed, 0 failed at Next.js v16.2.12, and 1101 of 1101 at v16.3.8), with every
 deploy confirmed to boot the bytecode executable. It is not yet credentialed: see
 [the compatibility credential](/docs/compat-suite). The vinext
-build is a different artifact. It is measured, not credentialed: its latest run passed 728 of 778
-tests (38 failed, 12 quarantined). Read the per-feature status on the [compatibility matrix](/docs/compat-matrix) rather than
+build is a different artifact. It is measured, not credentialed: its latest run passed 1000 of 1099
+files (Next.js v16.3.6). Of the rest, 49 are disclosed known-gap files (vinext does not implement
+the Next.js 16.3 client-router architecture), 8 are individually quarantined and 42 fail. On the
+official suite minus those 49 disclosed known-gap files, 1000 of 1050 pass; vinext remains Beta. Read the per-feature status on the [compatibility matrix](/docs/compat-matrix) rather than
 assuming one number carries over.
 
 ## The standalone target on Bun is compiled too

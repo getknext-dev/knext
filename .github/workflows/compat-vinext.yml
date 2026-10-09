@@ -796,6 +796,12 @@ jobs:
             --builder vinext \
             --out "compat-suite-summary-${SAFE_SHARD}.json"
 
+      # The structural-gap ledger (`--structural`) rides the same step: files that
+      # fail only because vinext lacks the Next.js 16.3 client-router architecture,
+      # under their own bounds (49 files, frozen and only ever lowered; one shared record,
+      # review within 92 days).
+      # It is vinext-only; the script refuses any other cell's summary.
+      #
       # The quarantine ledger (#1321): RECLASSIFIES failures matching a live,
       # dated, bounded entry as `quarantined` in this shard's summary. It never
       # removes a test from the run and never touches passed/notRun/expectedTotal,
@@ -812,6 +818,7 @@ jobs:
           if [ -f "${SUMMARY}" ]; then
             node scripts/compat-vinext-ledger.mjs apply \
               --ledger test/compat-vinext-ledger.json \
+              --structural test/compat-vinext-structural-gaps.json \
               --summary "${SUMMARY}"
           fi
 
@@ -940,7 +947,7 @@ jobs:
         if: always()
         env:
           GH_TOKEN: ${{ github.token }}
-        run: node knext/scripts/compat-vinext-ledger.mjs report --ledger knext/test/compat-vinext-ledger.json --summaries summaries --history-runs 3
+        run: node knext/scripts/compat-vinext-ledger.mjs report --ledger knext/test/compat-vinext-ledger.json --structural knext/test/compat-vinext-structural-gaps.json --summaries summaries --history-runs 3
 
       - name: Upload the run ledger (vinext axis)
         if: always()
