@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package zonefn.v1;
+
+// A trivial function: echo plus who answered and how long its process has run.
+// uptime_ms lets the bench tell a fresh (cold) function process from a warm one.
+message PingRequest {
+  string msg = 1;
+}
+
+message PingResponse {
+  string msg = 1;
+  string lang = 2;
+  int64 uptime_ms = 3;
+  string proto = 4; // the HTTP protocol the function saw (e.g. "HTTP/2.0")
+}
+
+service PingService {
+  rpc Ping(PingRequest) returns (PingResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+}
