@@ -44,6 +44,29 @@ function plain(path: string): string {
   return readFileSync(path, 'utf8').replace(/[*`]/g, '').replace(/\s+/g, ' ');
 }
 
+/**
+ * The package-list section of a doc, delimited by a `published-packages:start` / `:end`
+ * marker (an HTML comment in .md, a JSX comment in .mdx). A missing, duplicated or reversed anchor
+ * THROWS, so the test fails rather than skipping. Returns the sorted, de-duplicated
+ * `@getknext/*` names inside the section, so a missing OR extra entry is a diff.
+ */
+function listedPackages(label: string, path: string): string[] {
+  const text = readFileSync(path, 'utf8');
+  const find = (kind: 'start' | 'end'): number[] => {
+    const re = new RegExp(`(?:<!--|\\{/\\*)\\s*published-packages:${kind}\\s*(?:-->|\\*/\\})`, 'g');
+    return [...text.matchAll(re)].map((m) => m.index as number);
+  };
+  const starts = find('start');
+  const ends = find('end');
+  if (starts.length !== 1 || ends.length !== 1 || ends[0] < starts[0]) {
+    throw new Error(
+      `${label}: need exactly one published-packages:start before one :end anchor (found ${starts.length}/${ends.length})`,
+    );
+  }
+  const section = text.slice(starts[0], ends[0]);
+  return [...new Set(section.match(/@getknext\/[a-z0-9-]+/g) ?? [])].sort();
+}
+
 const WINDOW = /security fixes only,? for (\w+) months?/i;
 
 describe('release claims are derived from the manifests', () => {
@@ -68,10 +91,9 @@ describe('release claims are derived from the manifests', () => {
   });
 
   for (const [label, path] of Object.entries(DOCS)) {
-    it(`${label} names every publishable package`, () => {
-      const text = plain(path);
-      const missing = packages.filter((p) => !text.includes(p));
-      expect(missing).toEqual([]);
+    it(`${label} package-list section lists exactly the publishable packages`, () => {
+      const listed = listedPackages(label, path);
+      expect(listed).toEqual(packages);
     });
   }
 

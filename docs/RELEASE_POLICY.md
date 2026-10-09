@@ -17,11 +17,15 @@ yet. Everything else describes what the repo actually does today.
 
 Three packages are published to the public npm registry, and they are published **as a set**:
 
+<!-- published-packages:start -->
+
 | Package          | Path               | Contains                                           |
 | ---------------- | ------------------ | -------------------------------------------------- |
 | `@getknext/core` | `packages/kn-next` | the `kn-next` CLI, the Next.js adapter, the runtime |
 | `@getknext/lib`  | `packages/lib`     | app-facing runtime helpers (clients, health, logs)  |
 | `@getknext/db`   | `packages/db`      | the Drizzle data SDK + migration runner             |
+
+<!-- published-packages:end -->
 
 `@getknext/core` depends on both of the others, and `@getknext/db` depends on `@getknext/lib`, so
 publishing a partial set 404s every consumer install — that is the #255/#256 incident, not a

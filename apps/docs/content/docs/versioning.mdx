@@ -9,9 +9,13 @@ knext gives you one number to pin, and a small set of rules about what that numb
 
 knext publishes three packages, and they are always released together at the **same version**:
 
+{/* published-packages:start */}
+
 - `@getknext/core` — the `knext` CLI, the Next.js adapter and the runtime
 - `@getknext/lib` — the app-facing helpers (clients, health, logging)
 - `@getknext/db` — the data SDK and migration runner
+
+{/* published-packages:end */}
 
 `@getknext/core` depends on the other two, so they are versioned in lockstep. Pin one and you have
 pinned all three:

@@ -36,9 +36,17 @@ in [`docs/RELEASE_POLICY.md`](docs/RELEASE_POLICY.md#support-window).
 
 ## Scope
 
-This policy covers the code in this repository: the `@getknext/core`, `@getknext/lib` and
-`@getknext/db` npm packages, the `knext`/`kn-next` CLI, and the Go operator
-(`packages/kn-next-operator`). It does not cover:
+This policy covers the code in this repository: the published npm packages
+
+<!-- published-packages:start -->
+
+- `@getknext/core`
+- `@getknext/lib`
+- `@getknext/db`
+
+<!-- published-packages:end -->
+
+the `knext`/`kn-next` CLI, and the Go operator (`packages/kn-next-operator`). It does not cover:
 
 - Vulnerabilities in a knext app's **own** code or dependencies — report those to the app's
   maintainers.
