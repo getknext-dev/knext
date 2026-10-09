@@ -28,8 +28,8 @@ func DefaultRenderConfig(ns string) RenderConfig {
 		PageserverHost: "pageserver",
 		PGVersion:      "17",
 		RolePrefix:     "app_",
-		ComputeImage:   "neondatabase/compute-node-v17:8464",
-		InitImage:      "neondatabase/neon:8464",
+		ComputeImage:   "docker.io/neondatabase/compute-node-v17:8464@sha256:13ab146d3e7bbabb25a8532f315ac443e7512351d1ede0bab586def5c70e26c3",
+		InitImage:      "docker.io/neondatabase/neon:8464@sha256:7a4f124917bb929964b2d696d710f19584f80bb9bd51b2af4a6e2425434c761f",
 	}
 }
 

@@ -94,7 +94,7 @@ spec:
               # shell-bearing + proven pullable on this cluster (used by the
               # other in-cluster drills). The KSM image is distroless (no shell),
               # so it can't run `exit 1` — the container would never fail cleanly.
-              image: curlimages/curl:8.11.1
+              image: docker.io/curlimages/curl:8.11.1
               command: ["sh", "-c", "exit 1"]
               resources:
                 requests: { cpu: 5m, memory: 8Mi, ephemeral-storage: 50Mi }

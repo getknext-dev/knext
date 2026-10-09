@@ -16,7 +16,7 @@ K="kubectl -n $NS"
 # to it with imagePullPolicy=Never intermittently hits ErrImageNeverPull (and its
 # 150s pod-wait then expires). postgres:17-alpine ships a v17 psql, is public +
 # ~80MB, and schedules on ANY node with a normal pull policy. Override via PSQL_IMG.
-PSQL_IMG="${PSQL_IMG:-postgres:17-alpine}"
+PSQL_IMG="${PSQL_IMG:-docker.io/library/postgres:17-alpine}"
 # Base cloud_admin credential (issue #168): read from the DATABASE_URL Secret
 # (gen-secrets.sh owns it; no longer the public default). Bare fallback only.
 CA_CRED=$(kubectl -n scale-zero-pg get secret myapp-database -o jsonpath='{.data.DATABASE_URL}' 2>/dev/null | base64 -d 2>/dev/null | sed -E 's#^postgres://(.*)@[^@]*#\1#'); [ -n "$CA_CRED" ] || CA_CRED="cloud_admin:cloud_admin"

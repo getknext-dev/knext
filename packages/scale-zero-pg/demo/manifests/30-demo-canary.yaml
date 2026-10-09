@@ -58,7 +58,7 @@ spec:
             seccompProfile: { type: RuntimeDefault }
           containers:
             - name: probe
-              image: curlimages/curl:8.11.1
+              image: docker.io/curlimages/curl:8.11.1
               imagePullPolicy: IfNotPresent
               securityContext:
                 allowPrivilegeEscalation: false

@@ -25,7 +25,7 @@ set -eu
 NS=scale-zero-pg
 APP="${APP:-pgdemo}"
 CYCLES="${CYCLES:-8}"
-PSQL_IMG="${PSQL_IMG:-postgres:17-alpine}"
+PSQL_IMG="${PSQL_IMG:-docker.io/library/postgres:17-alpine}"
 CT="${CT:-20}" # psql connect_timeout: must exceed wake + settle
 
 fail() { echo "FAIL: $*" >&2; exit 1; }

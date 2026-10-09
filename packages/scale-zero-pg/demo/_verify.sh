@@ -126,9 +126,9 @@ ensure_drivers() {
   # for them to be gone, so we never exec into a Terminating pod.
   kubectl -n "$NS_APP" delete pod "$HTTP_DRIVER" "$DB_DRIVER" \
     --ignore-not-found --grace-period=1 --wait=true >/dev/null 2>&1
-  kubectl -n "$NS_APP" run "$HTTP_DRIVER" --image=curlimages/curl:8.11.1 --restart=Never \
+  kubectl -n "$NS_APP" run "$HTTP_DRIVER" --image=docker.io/curlimages/curl:8.11.1 --restart=Never \
     --command -- sleep 100000 >/dev/null 2>&1
-  kubectl -n "$NS_APP" run "$DB_DRIVER" --image=postgres:17-alpine --restart=Never \
+  kubectl -n "$NS_APP" run "$DB_DRIVER" --image=docker.io/library/postgres:17-alpine --restart=Never \
     --command -- sleep 100000 >/dev/null 2>&1
   kubectl -n "$NS_APP" wait --for=condition=Ready pod/"$HTTP_DRIVER" --timeout=120s >/dev/null 2>&1
   kubectl -n "$NS_APP" wait --for=condition=Ready pod/"$DB_DRIVER"   --timeout=120s >/dev/null 2>&1

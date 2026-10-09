@@ -144,7 +144,7 @@ fi
 # toml, append one line). Called only for the initial OLD_TAG boot; the upgrade
 # rolls images with `kubectl set image`, the real in-place mechanism.
 render_plane() {
-  _TAG="$1"; _NEON="neondatabase/neon:${_TAG}"
+  _TAG="$1"; _NEON="docker.io/neondatabase/neon:${_TAG}"
   cat <<YAML
 apiVersion: v1
 kind: ConfigMap
@@ -292,7 +292,7 @@ spec:
       terminationGracePeriodSeconds: 10
       initContainers:
         - name: wait-timeline
-          image: neondatabase/neon:${_TAG}
+          image: docker.io/neondatabase/neon:${_TAG}
           envFrom: [ { configMapRef: { name: compute-config } } ]
           command: ["/bin/sh","-c"]
           args:
@@ -302,7 +302,7 @@ spec:
               until curl -sf "\${PS}/v1/tenant/\${TENANT_ID}/timeline" | grep -q "\${TIMELINE_ID}"; do echo waiting; sleep 0.5; done
       containers:
         - name: compute
-          image: neondatabase/compute-node-v17:${_TAG}
+          image: docker.io/neondatabase/compute-node-v17:${_TAG}
           imagePullPolicy: IfNotPresent
           command: ["/bin/sh","/compute-files/entrypoint.sh"]
           envFrom: [ { configMapRef: { name: compute-config } } ]
@@ -521,25 +521,25 @@ ok "compute at 0"
 
 info "STEP 7b: roll storage-broker -> $NEW_TAG"
 t0=$(now)
-$KD set image deploy/storage-broker storage-broker="neondatabase/neon:${NEW_TAG}" >/dev/null
+$KD set image deploy/storage-broker storage-broker="docker.io/neondatabase/neon:${NEW_TAG}" >/dev/null
 $KD rollout status deploy/storage-broker --timeout=420s >/dev/null || fail "broker did not roll to $NEW_TAG"
 BROKER_S=$(( $(now) - t0 )); ok "storage-broker on $NEW_TAG (${BROKER_S}s)"
 
 info "STEP 7c: roll safekeeper -> $NEW_TAG"
 t0=$(now)
-$KD set image statefulset/safekeeper safekeeper="neondatabase/neon:${NEW_TAG}" >/dev/null
+$KD set image statefulset/safekeeper safekeeper="docker.io/neondatabase/neon:${NEW_TAG}" >/dev/null
 $KD rollout status statefulset/safekeeper --timeout=420s >/dev/null || fail "safekeeper did not roll to $NEW_TAG"
 SK_S=$(( $(now) - t0 )); ok "safekeeper on $NEW_TAG (${SK_S}s)"
 
 info "STEP 7d: roll pageserver (seed-config + pageserver) -> $NEW_TAG"
 t0=$(now)
-$KD set image statefulset/pageserver seed-config="neondatabase/neon:${NEW_TAG}" pageserver="neondatabase/neon:${NEW_TAG}" >/dev/null
+$KD set image statefulset/pageserver seed-config="docker.io/neondatabase/neon:${NEW_TAG}" pageserver="docker.io/neondatabase/neon:${NEW_TAG}" >/dev/null
 $KD rollout status statefulset/pageserver --timeout=420s >/dev/null || fail "pageserver did not roll to $NEW_TAG (MANIFEST/FORMAT breakage? logs: $($KD logs sts/pageserver -c pageserver --tail=25 2>/dev/null))"
 PS_S=$(( $(now) - t0 )); ok "pageserver on $NEW_TAG (${PS_S}s)"
 
 info "STEP 7e: roll compute -> $NEW_TAG and scale back to 1 (DOWNTIME WINDOW CLOSES on first SQL)"
 t0=$(now)
-$KD set image deploy/compute wait-timeline="neondatabase/neon:${NEW_TAG}" compute="neondatabase/compute-node-v17:${NEW_TAG}" >/dev/null
+$KD set image deploy/compute wait-timeline="docker.io/neondatabase/neon:${NEW_TAG}" compute="docker.io/neondatabase/compute-node-v17:${NEW_TAG}" >/dev/null
 $KD scale deploy/compute --replicas=1 >/dev/null
 $KD rollout status deploy/compute --timeout=420s >/dev/null || fail "new-tag compute did not come up (logs: $($KD logs deploy/compute -c compute --tail=30 2>/dev/null))"
 q=0; until PSQL "select 1" >/dev/null 2>&1; do q=$((q+1)); [ $q -gt 60 ] && fail "new-tag compute never accepted SQL"; sleep 2; done

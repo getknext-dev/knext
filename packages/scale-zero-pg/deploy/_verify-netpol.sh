@@ -29,7 +29,7 @@ set -eu
 NS=scale-zero-pg
 K="kubectl -n $NS"
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-CLIENT_IMG="${PSQL_IMG:-postgres:17-alpine}"
+CLIENT_IMG="${PSQL_IMG:-docker.io/library/postgres:17-alpine}"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok() { echo "ok - $*"; }
@@ -124,7 +124,7 @@ if [ -n "$GWIP" ]; then
   SCRATCH=netpol-scratch-$$
   kubectl create namespace "$SCRATCH" >/dev/null 2>&1 || true
   P=np-detect-$$
-  kubectl -n "$SCRATCH" run "$P" --image=busybox:1.36 --image-pull-policy=IfNotPresent \
+  kubectl -n "$SCRATCH" run "$P" --image=docker.io/library/busybox:1.36 --image-pull-policy=IfNotPresent \
     --restart=Never --quiet --command -- \
     sh -c "nc -w 5 $GWIP 9090 </dev/null && echo REACHABLE || echo BLOCKED" >/dev/null 2>&1 || true
   kubectl -n "$SCRATCH" wait --for=jsonpath='{.status.phase}'=Succeeded pod/"$P" --timeout=90s >/dev/null 2>&1 || true

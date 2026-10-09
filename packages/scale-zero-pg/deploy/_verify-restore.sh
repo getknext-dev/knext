@@ -47,8 +47,8 @@ TIMELINE=f000f000f000f000f000f000f000f002
 # re-attach. (LEARNED: attaching at the same generation risks index overwrite;
 # see docs/operations.md.)
 DRILL_GEN=2
-IMG_NEON=neondatabase/neon:8464
-IMG_COMPUTE=neondatabase/compute-node-v17:8464
+IMG_NEON=docker.io/neondatabase/neon:8464
+IMG_COMPUTE=docker.io/neondatabase/compute-node-v17:8464
 IMG_MC=docker.io/bitnamilegacy/minio-client@sha256:00dcc4e58ada0df45bb7d9ee435af98295f96c27c3c68292ce78ec700a87b511  # #1403: quay.io/minio/mc is UNAUTHORIZED for anonymous pull repo-wide; Bitnami legacy mirror
 # Drill PVC sizes. The minio store must hold a full copy of the neon bucket
 # (pageserver layers + safekeeper WAL offload, several GB after write activity);

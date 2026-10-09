@@ -28,7 +28,7 @@ PROV="$HERE/provision-app.sh"
 # to it with imagePullPolicy=Never intermittently hits ErrImageNeverPull (and its
 # 150s pod-wait then expires). postgres:17-alpine ships a v17 psql, is public +
 # ~80MB, and schedules on ANY node with a normal pull policy. Override via PSQL_IMG.
-PSQL_IMG="${PSQL_IMG:-postgres:17-alpine}"
+PSQL_IMG="${PSQL_IMG:-docker.io/library/postgres:17-alpine}"
 N="${N:-30}"
 WAKE_SAMPLE="${WAKE_SAMPLE:-5}"
 WAKE_BUDGET_S="${WAKE_BUDGET_S:-240}"   # per-app cold-wake budget; slow boots are reported, not failed

@@ -19,7 +19,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 # to it with imagePullPolicy=Never intermittently hits ErrImageNeverPull (and its
 # 150s pod-wait then expires). postgres:17-alpine ships a v17 psql, is public +
 # ~80MB, and schedules on ANY node with a normal pull policy. Override via PSQL_IMG.
-PSQL_IMG="${PSQL_IMG:-postgres:17-alpine}"
+PSQL_IMG="${PSQL_IMG:-docker.io/library/postgres:17-alpine}"
 # cloud_admin/cloud_admin is the upstream spec's dev default: compute_ctl
 # reconciles roles from config.json on every boot, so ALTER USER does not
 # stick — change the encrypted_password in 54-compute-files.yaml instead.
@@ -68,7 +68,7 @@ CLIENT_RETRY() { # $1 tag  $2 sql  $3 attempts (default 5)
 # idle pod reports 0 and summing a gauge fabricates latency.
 METRIC() { # $1 tag  $2 field  $3 op: sum|max (default sum)
   IPS=$($K get pods -l app=pggw -o jsonpath='{.items[*].status.podIP}')
-  $K run metric-$$-$1 --image=curlimages/curl:8.11.1 --restart=Never --rm -i --quiet \
+  $K run metric-$$-$1 --image=docker.io/curlimages/curl:8.11.1 --restart=Never --rm -i --quiet \
     --command -- sh -c "t=0; for ip in $IPS; do
         v=\$(curl -s http://\$ip:9090/metrics.json | grep -o '\"$2\": *[0-9.]*' | head -1 | grep -o '[0-9.]*\$'); v=\${v%.*};
         if [ '${3:-sum}' = max ]; then [ \"\$v\" -gt \"\$t\" ] && t=\$v; else t=\$((t + v)); fi; done; echo \$t" 2>/dev/null

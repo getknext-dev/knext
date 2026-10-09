@@ -36,7 +36,7 @@ NS="${NS:-scale-zero-pg}"
 APP="${APP:-wgapp}"
 EXCESS="${EXCESS:-12}"
 MIN_REFUSALS="${MIN_REFUSALS:-4}"
-ATK_IMAGE="${ATK_IMAGE:-${PSQL_IMG:-postgres:17-alpine}}"
+ATK_IMAGE="${ATK_IMAGE:-${PSQL_IMG:-docker.io/library/postgres:17-alpine}}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PROV="$HERE/provision-app.sh"
 

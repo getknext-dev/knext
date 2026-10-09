@@ -50,7 +50,7 @@ spec:
         # the writer). Runs on the neon image (ships curl); the compute image
         # does not.
         - name: wait-timeline
-          image: neondatabase/neon:8464
+          image: docker.io/neondatabase/neon:8464@sha256:7a4f124917bb929964b2d696d710f19584f80bb9bd51b2af4a6e2425434c761f
           envFrom:
             - configMapRef: { name: compute-config }
           command: ["/bin/sh", "-c"]
@@ -66,7 +66,7 @@ spec:
         # (one curl); its output is ONLY read by entrypoint-ro.sh when
         # RO_MODE=Static, so it is a harmless no-op in the default Replica mode.
         - name: resolve-lsn
-          image: neondatabase/neon:8464
+          image: docker.io/neondatabase/neon:8464@sha256:7a4f124917bb929964b2d696d710f19584f80bb9bd51b2af4a6e2425434c761f
           envFrom:
             - configMapRef: { name: compute-config }
           command: ["/bin/sh", "-c"]
@@ -83,7 +83,7 @@ spec:
       containers:
         - name: compute
           # PINNED as a pair with the storage plane (see 20-compute.yaml).
-          image: neondatabase/compute-node-v17:8464
+          image: docker.io/neondatabase/compute-node-v17:8464@sha256:13ab146d3e7bbabb25a8532f315ac443e7512351d1ede0bab586def5c70e26c3
           imagePullPolicy: IfNotPresent
           command: ["/bin/sh", "/compute-files/entrypoint-ro.sh"]
           envFrom:

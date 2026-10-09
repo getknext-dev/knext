@@ -128,7 +128,7 @@ spec:
   restartPolicy: Never
   containers:
     - name: prune
-      image: curlimages/curl:8.11.1
+      image: docker.io/curlimages/curl:8.11.1
       command: ["sh", "-c", "sleep 3600"]
       envFrom:
         - configMapRef: { name: storage-objstore-deleted-by-drill }  # does NOT exist

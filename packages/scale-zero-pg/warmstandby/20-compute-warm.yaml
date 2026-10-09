@@ -32,7 +32,7 @@ spec:
       # Already satisfied here, so it passes immediately.
       initContainers:
         - name: wait-timeline
-          image: neondatabase/neon:8464
+          image: docker.io/neondatabase/neon:8464
           envFrom:
             - configMapRef:
                 name: compute-config
@@ -47,7 +47,7 @@ spec:
               echo "timeline ready"
       containers:
         - name: compute
-          image: neondatabase/compute-node-v17:8464
+          image: docker.io/neondatabase/compute-node-v17:8464
           imagePullPolicy: IfNotPresent
           # THE difference: gated entrypoint instead of /compute-files/entrypoint.sh
           command: ["/bin/sh", "/warm/entrypoint.sh"]
