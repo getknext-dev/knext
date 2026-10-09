@@ -49,10 +49,11 @@ publishes them publicly and CI attaches a signed provenance attestation (via the
 
 ## The gate (two lanes, one approval)
 
-`release.yml` runs on every push to `main` and on manual `workflow_dispatch`, as **six jobs**:
+`release.yml` runs on every push to `main` and on manual `workflow_dispatch`, as **seven jobs**:
 
 | job | environment | credential | what it does |
 | --- | --- | --- | --- |
+| `publish-lane-guard` | — | — | **the root every other job needs.** Refuses, fail-closed, a ref outside the publish-lane allowlist and a computed version whose major is not the lane's. See "Publish lanes" below. |
 | `pack` | — | — | packs the `@getknext/*` fixed group **once**, with `npm pack` (the real publish tool), and uploads it as the `release-tarballs` artifact. See "pack once" below. |
 | `audit` | — | — | npm supply-chain audit + SBOM. Publish-blocking. Packs its **own** `bun pm pack` (a stale-lock detector, not the same concern) and a second `npm pack` from its own build for the actual audit target — deliberately NOT the `pack` job's artifact; see below. |
 | `version-pr` | **none** | **none** | opens/updates the "Version Packages" PR. Passes no `publish-script`, so it *cannot* publish. |
@@ -66,6 +67,35 @@ rule** — the API returns an empty list, and `1.0.0-rc.1`/`1.0.0-rc.2` both pub
 reviewer click. Adding a required-reviewer rule (plus `v*` tag protection) is the founder action
 tracked by #1638; a release run does not pause for approval today, and the GA-cut runbook below
 should not be read as assuming one exists until #1638 lands.
+
+### Publish lanes: which refs may run the release workflow (#2035)
+
+`scripts/publish-lane-guard.mjs` holds the **only** copy of the allowlist and the lane-to-major
+map; `release.yml` carries no lane literal of its own (a test asserts that).
+
+| ref | expected major |
+| --- | --- |
+| `main` | 1 (flipped to 2 at 2.0 GA, before the first 2.x publish) |
+| `integration/v1.3`, `integration/v1.4`, `release/1.x` | 1 |
+| `integration/v2` | 2 |
+| `release/vX.Y.Z` or `release/vX.Y.Z-rc.N` (a release cut) | X, and the computed version must equal `X.Y.Z[-rc.N]` exactly. Cuts are open for major 1 only. |
+
+- The lane refs are compared to the **full** `github.ref` by string equality — no globs, so
+  `integration/v1-coldstart` (which still carries the old 1.0 major changeset marker) is refused.
+  A tag dispatch (`refs/tags/…`) is refused too.
+- The release-cut pattern is anchored: `release/v1.3-prepare-rc.2`, `release/v1.3-dist-tag-next`
+  and `release/prepare-v1.3.0` do not match. Name a cut after the exact version it publishes.
+- After `bun run changeset:version` in the runner (nothing is pushed), every member of the
+  changesets `fixed` group must carry the lane's major. A Version PR that would bump a 1.x lane to
+  2.0.0 is refused before the PR opens; a tree on the wrong major is refused before `release`
+  starts.
+- **Limit:** a `workflow_dispatch` runs the workflow file **at the dispatched ref**. A branch cut
+  before this guard landed (including `integration/v1.3` and every release cut taken from it)
+  runs its own older `release.yml`, so for those refs the guard is not in the path — only the
+  `npm-publish` environment's deployment-branch policy refuses them. Keep that policy in sync with
+  the table above, and port the guard to each 1.x lane before relying on it there.
+- Adding a lane, or opening release cuts for a new major, is a reviewed edit to the map in
+  `scripts/publish-lane-guard.mjs` and to its pin in `tests/publish-lane-guard.test.ts`.
 
 **Opening a Version PR does not wait for anything.** It used to: `version-pr` and `release` were one
 job that declared the environment, so every push to `main` asked for an approval — including pushes
