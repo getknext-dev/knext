@@ -1,0 +1,24 @@
+knext bundled fix for vinext 1.0.1 (dist output)
+Upstream: https://github.com/cloudflare/vinext/pull/2560
+What it fixes: Pages Router: the generated server entry imports _document, then _app, then the page modules (Next.js module evaluation order), instead of pages first.
+Retire: delete this file (and its manifest entry) when the pinned vinext is >= the first
+release that includes cloudflare/vinext#2560 (still open when this was bundled).
+Ported by hand from the upstream src change (entries/pages-server-entry.ts) to the published 1.0.1 dist file; the dev-server half of the PR is not bundled (dev only).
+Applied by `knext vinext-patches` (runs from the app's postinstall and before `knext build`).
+
+--- a/dist/entries/pages-server-entry.js
++++ b/dist/entries/pages-server-entry.js
+@@ -419,11 +419,10 @@
+   );
+ }
+ 
++${docImportCode}
++${appImportCode}
+ ${pageImports.join("\n")}
+ ${apiImports.join("\n")}
+-
+-${appImportCode}
+-${docImportCode}
+ ${errorImportCode}
+ 
+ export const pageRoutes = [

@@ -20,7 +20,10 @@ import { readFileSync, writeSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { DEFAULT_BUILDER_ID } from "../adapters/artifact-contract";
+import {
+    DEFAULT_BUILDER_ID,
+    DEFAULT_RUNTIME_ID,
+} from "../adapters/artifact-contract";
 import type { KnativeNextConfig } from "../config";
 import {
     getAssetPrefix,
@@ -32,6 +35,7 @@ import {
     verifyBuiltImageLockstep,
     verifyVinextStaticPrefix,
 } from "../utils/asset-upload";
+import { setLogDestination } from "../utils/log-destination";
 import { createLogger } from "../utils/logger";
 import {
     assertCompiledArtifactFresh,
@@ -43,6 +47,7 @@ import {
     KNEXT_BUILD_ID_ENV,
     NEXT_DEPLOYMENT_ID_ENV,
 } from "./build-id-env";
+import { resolveCompileToolchain } from "./bun-toolchain";
 import {
     renderNextAppCR,
     resolveDigest,
@@ -85,6 +90,8 @@ import {
     withKubeContext,
 } from "./shared";
 import { requireBuildContext } from "./tracing-root";
+import { assertVisibilityDowngradeIsExplicit } from "./visibility-guard";
+import { readImageCacheRouted, type WriteFreeFacts } from "./write-free";
 
 const log = createLogger({ module: "deploy" });
 
@@ -121,6 +128,34 @@ interface DeployOptions {
      * runtime (ADR-0011 lock-step). See the fail-fast block in `deploy()`.
      */
     image?: string;
+    /**
+     * #1865: deploy with the Knative Route cluster-local only (no public
+     * ingress) — equivalent to setting `networking: { visibility:
+     * "cluster-local" }` in `knext.config.ts`. Wins over the config when
+     * both are set (see `applyOverrides`). An app with mutating endpoints
+     * (uploads, deletes, admin) and no auth of its own can use this instead
+     * of an out-of-band `kubectl label`, which the operator's next
+     * reconcile would revert (ADR-0001).
+     *
+     * `--private` is a per-INVOCATION override, not a persistent setting —
+     * `knext.config.ts`'s `networking.visibility` is the persistent source
+     * of truth. See `--public` for why that distinction is load-bearing.
+     */
+    private: boolean;
+    /**
+     * #1865 (review round 2, fail-open fix): the ONLY way to move a
+     * currently cluster-local app back to public. Without this flag, a
+     * plain `knext deploy` (no `--private`, and a config that never set
+     * `networking.visibility`) renders a CR with no `spec.networking` at
+     * all — and because `kubectl apply` removes a field it previously
+     * applied when the new manifest omits it, that silently REVERTS a
+     * private app to public on the next ordinary redeploy. `assertVisibility
+     * DowngradeIsExplicit` (below) refuses that downgrade unless this flag
+     * is set, so going public is always a deliberate, named action — never
+     * an accident of forgetting a flag that was never persistent to begin
+     * with.
+     */
+    public: boolean;
 }
 
 /**
@@ -162,6 +197,8 @@ function parseCliArgs(): DeployOptions {
         "skip-image-lockstep-check"?: boolean;
         "dry-run"?: boolean;
         image?: string;
+        private?: boolean;
+        public?: boolean;
         help?: boolean;
         version?: boolean;
     };
@@ -182,6 +219,8 @@ function parseCliArgs(): DeployOptions {
                 },
                 "dry-run": { type: "boolean", default: false },
                 image: { type: "string" },
+                private: { type: "boolean", default: false },
+                public: { type: "boolean", default: false },
                 help: { type: "boolean", short: "h", default: false },
                 version: { type: "boolean", short: "v", default: false },
             },
@@ -232,6 +271,21 @@ function parseCliArgs(): DeployOptions {
         process.exit(1);
     }
 
+    // #1865: --private and --public are opposite, explicit intents — one
+    // flag settling it by precedence (as --registry/--bucket overrides do)
+    // would silently pick a winner for a combination that is really just a
+    // mistyped command.
+    if (values.private && values.public) {
+        throw new UsageError(
+            "--private and --public cannot both be set. --private deploys with " +
+                "the Knative Route cluster-local only; --public confirms deploying " +
+                "(or redeploying) it publicly. Pick one.",
+        );
+    }
+
+    // Under --dry-run stdout carries ONLY the rendered NextApp CR (so it pipes
+    // into `kubectl apply -f -`); route every log line to stderr.
+    if (values["dry-run"]) setLogDestination("stderr");
     return {
         registry: values.registry || process.env.KN_REGISTRY,
         bucket: values.bucket || process.env.KN_BUCKET,
@@ -243,6 +297,8 @@ function parseCliArgs(): DeployOptions {
         skipImageLockstepCheck: values["skip-image-lockstep-check"] ?? false,
         dryRun: values["dry-run"] ?? false,
         image: values.image || process.env.KN_IMAGE,
+        private: values.private ?? false,
+        public: values.public ?? false,
     };
 }
 
@@ -268,6 +324,25 @@ function applyOverrides(
             );
         }
         overridden.storage = { ...overridden.storage, bucket: options.bucket };
+    }
+
+    // #1865: --private / --public win over whatever knext.config.ts says,
+    // the same precedence --registry/--bucket already follow — a flag is
+    // the deployer's explicit, per-run intent. (parseCliArgs already
+    // rejects passing both.) --public is set EXPLICITLY to "public" rather
+    // than just deleting `networking`, so `effectiveVisibility` below reads
+    // this run's intent off the config it is about to render, not off the
+    // flag a second time.
+    if (options.private) {
+        overridden.networking = {
+            ...overridden.networking,
+            visibility: "cluster-local",
+        };
+    } else if (options.public) {
+        overridden.networking = {
+            ...overridden.networking,
+            visibility: "public",
+        };
     }
 
     if (process.env.KN_REDIS_URL && overridden.cache?.provider === "redis") {
@@ -375,6 +450,8 @@ async function runPrunePreflight(
     namespace: string,
     buildId: string,
     context?: string,
+    writeFreeFacts?: WriteFreeFacts,
+    prebuiltImage?: string,
 ): Promise<void> {
     const { writeFileSync, mkdirSync } = await import("node:fs");
     const crPath = join(process.cwd(), ".output", "nextapp-preflight-cr.yaml");
@@ -383,9 +460,14 @@ async function runPrunePreflight(
         crPath,
         renderNextAppCR(
             config,
-            preflightImageRef(`${config.registry}/${config.name}:preflight`),
+            preflightImageRef(
+                // `--image`: use the real ref; config.registry may be a placeholder.
+                prebuiltImage ?? `${config.registry}/${config.name}:preflight`,
+            ),
             namespace,
             buildId,
+            undefined,
+            writeFreeFacts,
         ),
         "utf-8",
     );
@@ -457,7 +539,9 @@ export async function deploy() {
     // legitimately rescues a placeholder file, and a placeholder typed AS the
     // override is still caught. Throws through the UsageError family, so the
     // dispatcher renders it as a plain message, never a FATAL dump.
-    assertNoPlaceholders(config);
+    // `--image` builds and pushes nothing, so a placeholder `registry` alone is
+    // not an error there; every other placeholder still is.
+    assertNoPlaceholders(config, { imageProvided: Boolean(options.image) });
 
     // #1063: a pre-built image is the SOURCE OF TRUTH for both the server and
     // the static assets baked into it. Its server serves `_next/static/<baked
@@ -560,7 +644,18 @@ export async function deploy() {
     // and on --skip-build the asset upload had already started, leaving the
     // orphaned `_next/static/<id>/` prefix T6 exists to avoid. Purely local: no
     // cluster call, so a dry run resolves it too (and thus reports it).
-    const buildContext = requireBuildContext(process.cwd());
+    //
+    // #1865: skipped entirely under `--image`. By this point `options.image`
+    // has already forced skipBuild/skipUpload above, and the ONLY consumer of
+    // `buildContext` is the docker-build task inside `if (!options.image)`
+    // below — `--image` means "there is nothing to build" (the image already
+    // exists), so requiring a lockfile here unconditionally made every
+    // `--image` deploy from a directory with no lockfile (the normal shape
+    // for a pre-built-image deploy, which brings no app source at all) fail
+    // before it ever reached that short-circuit.
+    const buildContext = options.image
+        ? undefined
+        : requireBuildContext(process.cwd());
 
     // #314 (T6): the prune preflight, BEFORE any side effect (see the block
     // comment on runPrunePreflight). A dry run makes no cluster calls at all.
@@ -570,6 +665,13 @@ export async function deploy() {
             options.namespace,
             buildId,
             options.context,
+            // The build has not run yet, so assume the image cache WILL be
+            // routed: the preflight CR then carries a superset of the applied
+            // CR's fields, and an operator CRD that predates
+            // the write-free field (security.writeFree) is reported here, before any side
+            // effect, rather than at the real apply.
+            { builtThisRun: !options.skipBuild, imageCacheRouted: true },
+            options.image,
         );
     }
 
@@ -610,6 +712,7 @@ export async function deploy() {
         runProjectBuild({
             requireEsm: isVinextBuild,
             builderId: resolvedBuild,
+            runtimeId: config.runtime ?? DEFAULT_RUNTIME_ID,
         });
         log.info(
             isVinextBuild
@@ -652,8 +755,15 @@ export async function deploy() {
         // tree the project build just produced and staleness cannot occur on
         // THIS path by construction. The `--skip-build` leg below instead
         // fails closed via `assertCompiledArtifactFresh`, since nothing
-        // rebuilds anything there.
-        compileArtifactForDeploy(config, process.cwd());
+        // rebuilds anything there. The opt-in patched Bun toolchain is
+        // resolved (downloaded + sha256-verified) first; the default config
+        // resolves to nothing and the call is exactly what it was.
+        const toolchain = await resolveCompileToolchain(config);
+        compileArtifactForDeploy(
+            config,
+            process.cwd(),
+            ...(toolchain.bin ? [{ toolchain }] : []),
+        );
     } else {
         // `--skip-build`: nothing above ran, so nothing recompiled the exec
         // either. Fail closed rather than silently shipping whatever happens
@@ -809,7 +919,13 @@ export async function deploy() {
                     // assumed an `apps/<name>` layout and pointed outside the
                     // project for a flat repo, which is what `knext create`
                     // produces. Nothing is inferred at this point.
-                    const repoRoot = buildContext;
+                    //
+                    // #1865: non-null by construction — this branch runs only
+                    // when `!options.image`, which is exactly when
+                    // `buildContext` was resolved (the `options.image` leg
+                    // left it `undefined` on purpose, since nothing is built
+                    // there at all).
+                    const repoRoot = buildContext as string;
                     // ADR-0055: select the runtime image by (build, runtime). The
                     // vinext shape uses the scaffolded single-stage Dockerfile
                     // (argv unchanged); the standalone shape (the default since
@@ -1027,11 +1143,24 @@ export async function deploy() {
     // `apps.kn-next.dev/build-id` revision label the asset GC resolves against.
     // The operator reconciles all cluster resources from this CR.
     // In dry-run mode imageRef is the mutable tag (acceptable for preview only).
+    //
+    // The write-free field, security.writeFree (no writable volume needed), is stated only
+    // for an image THIS run built; for a standalone build, whether the image
+    // cache is handler-routed is read back from this build's own output
+    // (see write-free.ts).
+    const writeFreeFacts: WriteFreeFacts | undefined = options.skipBuild
+        ? undefined
+        : {
+              builtThisRun: true,
+              imageCacheRouted: readImageCacheRouted(process.cwd(), buildId),
+          };
     const crYaml = renderNextAppCR(
         config,
         imageRef,
         options.namespace,
         buildId,
+        undefined,
+        writeFreeFacts,
     );
     const crPath = join(process.cwd(), ".output", "nextapp-cr.yaml");
 
@@ -1042,6 +1171,23 @@ export async function deploy() {
         log.info("Dry run complete — no cluster changes made");
         return;
     }
+
+    // #1865: refuse a silent public downgrade BEFORE the apply that would
+    // cause it — see visibility-guard.ts's doc comment (shared with
+    // preview.ts, which renders/applies the SAME NextApp CR kind). Skipped
+    // under --dry-run above: nothing is applied there, so there is nothing
+    // to protect against yet.
+    await assertVisibilityDowngradeIsExplicit({
+        namespace: options.namespace,
+        name: config.name,
+        context: options.context,
+        willBeClusterLocal: config.networking?.visibility === "cluster-local",
+        explicitPublic: options.public,
+        remediation:
+            "If that is what you want, re-run with --public to confirm. If it is not, " +
+            'add `networking: { visibility: "cluster-local" }` to knext.config.ts (the ' +
+            "persistent setting) or pass --private again.",
+    });
 
     // Write CR to .output/ and apply it — only CR apply, operator handles the rest.
     const { writeFileSync, mkdirSync } = await import("node:fs");
@@ -1233,6 +1379,10 @@ if (isEntrypoint(import.meta.url)) {
             // equivalent (init-ci --provider gitlab's .gitlab-ci.yml).
             const { ciPreflightMain } = await import("./ci/ci-preflight-cmd");
             process.exit(await ciPreflightMain(process.argv.slice(3)));
+        } else if (sub === "vinext-patches") {
+            // Bundled upstream vinext fixes; a vinext app's postinstall runs it.
+            const { vinextPatchesMain } = await import("./vinext-patches");
+            process.exit(await vinextPatchesMain(process.argv.slice(3)));
         } else if (sub === "doctor") {
             const { doctorMain } = await import("./doctor");
             process.exit(await doctorMain(process.argv.slice(3)));

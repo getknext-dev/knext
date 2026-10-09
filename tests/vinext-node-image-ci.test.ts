@@ -132,3 +132,50 @@ describe('the vinext-node custom-healthCheckPath bake e2e is wired into CI (#127
     );
   });
 });
+
+// #1864 — a `--runtime node` scaffold installed the way `knext create` itself
+// tells every user to install it (`npm install`, unconditionally) had no
+// readable lockfile for the sharp native-addon fetch fallback at all, so the
+// image build failed with sharp's own "Could not load the sharp module using
+// the linuxmusl-x64 runtime". Same no-skip wiring contract as the siblings
+// above — rides in the same job (same docker + bun + @getknext/core setup),
+// since npm ships with the job's existing Node setup.
+const NPM_INSTALL_E2E_PATH =
+  'packages/kn-next/src/__tests__/vinext-node-npm-install-image.docker-e2e.test.ts';
+
+describe('the vinext-node npm-install sharp e2e is wired into CI (#1864)', () => {
+  it('a `run:` in the job invokes it by its explicit path, as a blocking step', () => {
+    const runCommands = [...jobBlock().matchAll(/run:\s*([^\n]*)/g)].map((m) => m[1]).join('\n');
+    expect(runCommands, 'the job never runs the vinext-node npm-install docker e2e').toContain(
+      NPM_INSTALL_E2E_PATH,
+    );
+    const audit = auditBlockingGate({
+      workflowPath: CI_YML,
+      jobId: JOB_ID,
+      gateCommand: new RegExp(NPM_INSTALL_E2E_PATH.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')),
+    });
+    expect(audit.gateStepsSeen, 'the audit never found the step that runs the e2e').toBe(1);
+    expect(audit.problems, audit.problems.join('\n')).toEqual([]);
+  });
+
+  it('the file exists, is a container e2e, and imports bun:test', () => {
+    const full = resolve(REPO_ROOT, NPM_INSTALL_E2E_PATH);
+    expect(existsSync(full), `${NPM_INSTALL_E2E_PATH} does not exist`).toBe(true);
+    expect(NPM_INSTALL_E2E_PATH).toMatch(/\.docker-e2e\.test\.ts$/);
+    expect(readFileSync(full, 'utf8'), 'the e2e must import bun:test').toMatch(
+      /from ['"]bun:test['"]/,
+    );
+  });
+
+  it('the e2e installs with npm, not bun — the whole point of the suite', () => {
+    const full = resolve(REPO_ROOT, NPM_INSTALL_E2E_PATH);
+    const source = readFileSync(full, 'utf8');
+    expect(source, 'the e2e never runs `npm install`').toMatch(
+      /run\(\s*["']npm["'],\s*\["install"\]/,
+    );
+    expect(
+      source,
+      "the e2e must delete the fixture's committed bun.lock before installing",
+    ).toMatch(/rmSync\(join\(appDir, ["']bun\.lock["']\)/);
+  });
+});

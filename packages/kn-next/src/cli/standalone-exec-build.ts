@@ -29,6 +29,10 @@ import { packageRoot } from "./create";
 import { runQuiet } from "./exec";
 import { UsageError } from "./shared";
 import {
+    diagnoseNestedStandalone,
+    resolveStandaloneLayout,
+} from "./standalone-layout";
+import {
     bunCompileTarget,
     bunMeetsFloor,
     detectBunVersion,
@@ -129,6 +133,10 @@ export interface StandaloneExecBuildOptions {
 /**
  * Compile `.next/standalone/server.js` into the bytecode executable and prove
  * the result carries bytecode. Returns the executable's path.
+ *
+ * The traced tree is the confinement boundary for the module graph; the server
+ * is wherever Next put it in that tree, which is deeper than the tree root when
+ * the app sits under an explicit monorepo root.
  */
 export function buildStandaloneExecutable(
     opts: StandaloneExecBuildOptions,
@@ -142,9 +150,16 @@ export function buildStandaloneExecutable(
         );
     }
 
-    const root = join(opts.cwd, ".next", "standalone");
-    const server = join(root, "server.js");
+    const layout = resolveStandaloneLayout(opts.cwd);
+    const root = layout.standaloneDir;
+    const server = layout.serverPath;
     if (!existsSync(server)) {
+        const nested = diagnoseNestedStandalone(opts.cwd);
+        if (nested !== null) {
+            throw new UsageError(
+                `The standalone build finished but '${server}' is not there.\n\n${nested}`,
+            );
+        }
         throw new UsageError(
             `The standalone build finished but '${server}' is not there.\n\n` +
                 "That server is what gets compiled into the executable. Check that next.config sets output: 'standalone'.",

@@ -45,9 +45,16 @@ import {
     readdirSync,
     readFileSync,
     rmSync,
+    writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { rewriteVinextHarfbuzzAnchors } from "../adapters/entry-asset-anchor.mjs";
+import {
+    ogHarfbuzzWarning,
+    resolvePinnedHarfbuzzWasm,
+    vinextOgPackageJson,
+} from "../adapters/og-harfbuzz.mjs";
 import { packageRoot } from "./create";
 import { runQuiet } from "./exec";
 import {
@@ -136,6 +143,12 @@ export function compileArgv(
     arch: string,
     entry: string,
     outFile: string,
+    include: readonly string[] = [],
+    /**
+     * The opt-in knext-patched Bun (`compile.bun`, resolved + sha256-verified
+     * by bun-toolchain.ts). Absent: plain `bun` on PATH, argv unchanged.
+     */
+    compilerBin?: string,
 ): string[] {
     const target = bunCompileTarget(arch);
     // `bun run <script>`, not `bun build`. The compile needs BUILD PLUGINS and
@@ -152,7 +165,7 @@ export function compileArgv(
     // treatment knext's own reference app does rather than a second copy that
     // drifts.
     return [
-        "bun",
+        compilerBin ?? "bun",
         "run",
         compileScriptPath(),
         "--entry",
@@ -161,7 +174,20 @@ export function compileArgv(
         outFile,
         "--target",
         target,
+        // `compile.include` (knext.config.ts): appended only when set, so the
+        // default argv is exactly what it always was.
+        ...includeArgv(include),
+        // The patched toolchain embeds the SAME checked plan through its
+        // native `compile.include` (compile-embed.mjs nativeIncludePaths).
+        ...(compilerBin && include.length > 0 ? ["--include-native", "1"] : []),
     ];
+}
+
+/** `--include-json <json>` for the compile script, only when there are globs. */
+export function includeArgv(include: readonly string[] = []): string[] {
+    return include.length > 0
+        ? ["--include-json", JSON.stringify(include)]
+        : [];
 }
 
 /**
@@ -347,6 +373,34 @@ export interface VinextBuildOptions {
      * compile argv and the step order are exactly what they were.
      */
     readonly selfContained?: boolean;
+    /**
+     * #1814 round 3 — where to stage sharp's native tree, ABSOLUTE, defaulting
+     * to `<cwd>/native` (the dir the Dockerfile `COPY`s). The caller that sets
+     * this is `smokeCompiledBinary`'s host-arch TWIN compile: that twin is a
+     * SECOND `buildVinextExecutable` call for a DIFFERENT arch than the ship
+     * build, into the SAME `cwd`. Staging both into the shared `native/`
+     * clobbers whichever ran first — `stageSharpNative` clears its
+     * destination before writing, so the twin's glibc pair silently replaced
+     * the ship's musl pair in a real run (#1814, measured on a live glibc CI
+     * runner: the SHIPPED alpine image then failed to dlopen a glibc `.node`
+     * it never should have carried). Must sit under `cwd` in self-contained
+     * mode — `vinext-compile.mjs` refuses a `--native-dir` outside the app
+     * root — so the twin uses a cwd-nested sibling, never a dir rooted
+     * elsewhere.
+     */
+    readonly nativeDir?: string;
+    /**
+     * `compile.include` globs (knext.config.ts), relative to the app root:
+     * JS/TS modules embedded in the executable and loaded on their first
+     * import. Absent or empty: the compile argv is unchanged.
+     */
+    readonly include?: readonly string[];
+    /**
+     * The opt-in knext-patched Bun that runs the compile script
+     * (`compile.bun: 'knext-patched'`, resolved and sha256-verified by
+     * bun-toolchain.ts). Absent: stock `bun` on PATH.
+     */
+    readonly compilerBin?: string;
 }
 
 /**
@@ -371,11 +425,19 @@ export function buildVinextExecutable(opts: VinextBuildOptions): string {
     const run =
         opts.run ??
         ((argv: readonly string[]) =>
-            runQuiet(argv, { surfaceStdoutPrefix: COMPILE_LOG_PREFIX }));
+            runQuiet(argv, {
+                surfaceStdoutPrefix: COMPILE_LOG_PREFIX,
+                // The informational lines are a count unless `knext build
+                // --verbose` (KNEXT_VERBOSE=1) asks for them; WARNING lines
+                // (stderr) and failures are unaffected.
+                ...(process.env.KNEXT_VERBOSE === "1"
+                    ? {}
+                    : { summarizeSurfaced: true }),
+            }));
     const arch = opts.arch ?? "linux-x64";
     const outFile = opts.outFile ?? `knext-exec-${arch}`;
 
-    const version = opts.bunVersion ?? detectBunVersion(run);
+    const version = opts.bunVersion ?? detectBunVersion(run, opts.compilerBin);
     if (!bunMeetsFloor(version)) {
         throw new UsageError(
             `The vinext single-executable target requires Bun ${MIN_BUN_MAJOR}.${MIN_BUN_MINOR}.0 or newer; found '${version}'.\n\n` +
@@ -399,28 +461,41 @@ export function buildVinextExecutable(opts: VinextBuildOptions): string {
         );
     }
 
+    // #1814 round 3 — see VinextBuildOptions.nativeDir's doc: default to the
+    // ship path (`<cwd>/native`), honoured verbatim (relative or absolute) so
+    // a caller staging a SECOND arch into this same `cwd` (the post-compile
+    // smoke's host-arch twin) can point it somewhere that does not clobber
+    // the ship build's already-staged tree.
+    const nativeDirArg = opts.nativeDir ?? "native";
+
     if (opts.selfContained) {
         // Self-contained: stage sharp's native tree for the target arch FIRST
         // (the compile embeds it, and it is unpacked on the first image
         // request), then compile with it. Nothing is left for the image to
         // copy beside the binary.
-        stageSharpNative(opts.cwd, { arch });
+        stageSharpNative(opts.cwd, { arch, nativeDir: nativeDirArg });
         run([
-            ...compileArgv(arch, entry, outFile),
+            ...compileArgv(
+                arch,
+                entry,
+                outFile,
+                opts.include,
+                opts.compilerBin,
+            ),
             "--self-contained",
             "1",
             "--native-dir",
-            "native",
+            nativeDirArg,
         ]);
         return outFile;
     }
 
     // 2. compile + bytecode
-    run(compileArgv(arch, entry, outFile));
+    run(compileArgv(arch, entry, outFile, opts.include, opts.compilerBin));
 
     // 3. stage sharp's native module beside the binary — for the arch being
     // compiled, which is NOT necessarily the host's (#949).
-    stageSharpNative(opts.cwd, { arch });
+    stageSharpNative(opts.cwd, { arch, nativeDir: nativeDirArg });
 
     return outFile;
 }
@@ -440,6 +515,18 @@ export const SHARP_PLATFORM_IDS: Record<string, string> = {
     "linux-arm64": "linuxmusl-arm64",
     "darwin-arm64": "darwin-arm64",
     "darwin-x64": "darwin-x64",
+    // #1814 — the smoke-only glibc twin (`linux-x64-gnu` / `linux-arm64-gnu`,
+    // COMPILE_TARGETS' SMOKE_ONLY_ARCHES) DOES need a row, even though nothing
+    // SHIPS that binary: the compiled entry's sharp-addon-dlopen shim calls
+    // `process.dlopen` at the TOP LEVEL of sharp's module slot (measured — it
+    // is not deferred behind a `lazySharp()` wrapper outside `--self-contained`
+    // mode), so a Next.js route graph that merely INCLUDES the image-optimizer
+    // route evaluates it at boot, before any request — "it never hits
+    // next/image" was the wrong model; the smoke binary crashes loading sharp
+    // before it can even print its startup line if nothing is staged. sharp's
+    // own glibc (non-musl) package id has no `linuxmusl` prefix.
+    "linux-x64-gnu": "linux-x64",
+    "linux-arm64-gnu": "linux-arm64",
 };
 
 export interface StageSharpNativeOptions {
@@ -450,6 +537,18 @@ export interface StageSharpNativeOptions {
         pkg: { name: string; version: string; integrity: string | null },
         destDir: string,
     ) => void;
+    /**
+     * #1814 round 3 — staging destination, relative-to-`cwd` or absolute;
+     * defaults to `<cwd>/native` (the Dockerfile's `COPY native` source). A
+     * caller staging a SECOND arch into the same `cwd` (the post-compile
+     * smoke's host-arch twin, built alongside the ship binary) MUST pass a
+     * different directory here, or this function's own clear-before-write
+     * silently replaces whatever the ship build already staged — the exact
+     * clobber measured on a live glibc CI runner (the shipped image then
+     * carried a glibc `.node` it could never dlopen, where the ship's own
+     * musl pair used to be).
+     */
+    readonly nativeDir?: string;
 }
 
 /**
@@ -472,7 +571,8 @@ export interface StageSharpNativeOptions {
  * inherit a previous build's (possibly foreign-platform) addons.
  *
  * Whatever lands here is then PINNED — every staged `@img` package checked
- * against the app's `bun.lock` and every staged file hashed into
+ * against the app's lockfile (`bun.lock` or `package-lock.json`, #1864) and
+ * every staged file hashed into
  * `native/.integrity.json`, which the dlopen shim re-checks in the image. This
  * copy is otherwise an unguarded path from the install store to native-code
  * privilege, and the closure SBOM does not cover `/app/native`.
@@ -489,7 +589,9 @@ export function stageSharpNative(
         );
     }
 
-    const dest = join(cwd, "native");
+    const dest = opts.nativeDir
+        ? resolve(cwd, opts.nativeDir)
+        : join(cwd, "native");
     clearStagedNative(dest);
     mkdirSync(dest, { recursive: true });
 
@@ -542,8 +644,8 @@ export function stageSharpNative(
                 const name = `@img/${dir}`;
                 if (!lockfilePath || locked === undefined) {
                     throw new UsageError(
-                        `This app uses sharp, the image targets ${platformId}, and this host's install has no '${name}' — and there is no bun.lock to fetch a pinned version from.\n\n` +
-                            "Run `bun install --save-text-lockfile` in the app and rebuild.",
+                        `This app uses sharp, the image targets ${platformId}, and this host's install has no '${name}' — and there is no lockfile (bun.lock or package-lock.json) to fetch a pinned version from.\n\n` +
+                            "Run `npm install` (or `bun install --save-text-lockfile`) in the app and rebuild.",
                     );
                 }
                 const versions = locked.get(name);
@@ -552,8 +654,8 @@ export function stageSharpNative(
                         `The image targets ${platformId}, but neither this host's install nor ${lockfilePath} has '${name}' — the image would ship unable to load sharp.\n\n` +
                             "sharp resolves its native addons as optionalDependencies, so the lockfile\n" +
                             "normally pins every platform's package. Reinstall from a clean lockfile\n" +
-                            "(`bun install --save-text-lockfile`) with a sharp version that publishes\n" +
-                            `'${name}', and rebuild.`,
+                            "(`npm install`, or `bun install --save-text-lockfile`) with a sharp version\n" +
+                            `that publishes '${name}', and rebuild.`,
                     );
                 }
                 const entry = pickFetchVersion(
@@ -588,6 +690,140 @@ export function stageSharpNative(
         rmSync(join(dest, INTEGRITY_MANIFEST_NAME), { force: true });
         throw error;
     }
+}
+
+/** First line of the ESM shim prepended to nitro's externalized @vercel/og (idempotency marker). */
+const OG_NODE_SHIM_MARKER = "/* knext: next/og HarfBuzz node shim */";
+
+/**
+ * Gives @vercel/og 1.x's inlined Emscripten glue the two CommonJS globals it
+ * reads under Node: esbuild's `__require("fs")` (which throws "Dynamic require
+ * of \"fs\" is not supported" in plain ESM) and `__dirname` (where
+ * `locateFile("hb.wasm")` looks). Both resolve to the module's own location,
+ * so the staged `dist/hb.wasm` beside it is what gets read.
+ */
+const OG_NODE_SHIM = [
+    OG_NODE_SHIM_MARKER,
+    'import { createRequire as __knextCreateRequire } from "node:module";',
+    'import { fileURLToPath as __knextFileURLToPath } from "node:url";',
+    'import { dirname as __knextDirname } from "node:path";',
+    "const require = __knextCreateRequire(import.meta.url);",
+    "const __dirname = __knextDirname(__knextFileURLToPath(import.meta.url));",
+    "",
+].join("\n");
+
+/** Every .js/.mjs file under `dir`, skipping `node_modules`. */
+function serverOutputScripts(dir: string): string[] {
+    const out: string[] = [];
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        if (entry.name === "node_modules") continue;
+        const p = join(dir, entry.name);
+        if (entry.isDirectory()) out.push(...serverOutputScripts(p));
+        else if (/\.m?js$/.test(entry.name)) out.push(p);
+    }
+    return out;
+}
+
+/** Copy the binary (and harfbuzzjs's MIT licence beside it, as `<dest>.LICENSE`). */
+function stageHarfbuzzFile(
+    found: { path: string; license: string | undefined },
+    dest: string,
+): void {
+    cpSync(found.path, dest);
+    if (found.license !== undefined) cpSync(found.license, `${dest}.LICENSE`);
+}
+
+/**
+ * next/og on vinext × node (#1872). `.output/server` runs directly under
+ * Node, so the compiled-executable embed (vinext-compile.mjs) does not apply,
+ * and both places @vercel/og 1.x's HarfBuzz loader lands are broken there:
+ *
+ *   1. nitro's externalized copy (`.output/server/node_modules/@vercel/og`,
+ *      the pages router): its glue reads `locateFile("hb.wasm")` =
+ *      `__dirname + "/hb.wasm"` through `__require("fs")` — neither global
+ *      exists in Node ESM, and 1.0.3 ships no `dist/hb.wasm` anyway
+ *      (vercel/satori#801). Fixed by staging the binary into `dist/` and
+ *      prepending a two-global shim (`OG_NODE_SHIM`).
+ *   2. vinext's own loader in the server output (the app router, with the
+ *      bundled vinext #3424 fix): `new WebAssembly.Module(read(new URL(
+ *      "../../hb.wasm", import.meta.url)))` relative to an intermediate RSC dir
+ *      nitro never ships. Fixed by re-pointing exactly that loader (never a
+ *      user's own anchor — see `rewriteVinextHarfbuzzAnchors`) at a sibling
+ *      `hb.wasm` and staging it there.
+ *
+ * The binary is the version-pinned `harfbuzzjs/hb.wasm` (`resolvePinnedHarfbuzzWasm`),
+ * staged with its MIT licence. When a loader IS present but no binary matches
+ * its pins, nothing is staged and a warning is returned for the caller to
+ * print — the app still builds (one that never renders next/og is unaffected).
+ * No-op when the output has no HarfBuzz loader. Idempotent.
+ */
+export function stageOgHarfbuzzForVinextNode(cwd: string): {
+    staged: string[];
+    warnings: string[];
+} {
+    const serverDir = join(cwd, ".output", "server");
+    const staged: string[] = [];
+    const warnings = new Set<string>();
+    if (!existsSync(serverDir)) return { staged, warnings: [] };
+    const vinextOg = vinextOgPackageJson(cwd);
+
+    // 1. nitro's externalized @vercel/og
+    const ogRoot = join(serverDir, "node_modules", "@vercel", "og");
+    const ogEntry = join(ogRoot, "dist", "index.node.js");
+    if (existsSync(ogEntry)) {
+        const src = readFileSync(ogEntry, "utf8");
+        if (/\blocateFile\(\s*["']hb\.wasm["']\s*\)/.test(src)) {
+            const ogPkg = join(ogRoot, "package.json");
+            const found = resolvePinnedHarfbuzzWasm(ogPkg, [
+                ogPkg,
+                join(cwd, "package.json"),
+                ...(vinextOg === undefined ? [] : [vinextOg]),
+            ]);
+            if ("path" in found) {
+                const dest = join(ogRoot, "dist", "hb.wasm");
+                stageHarfbuzzFile(found, dest);
+                if (!src.startsWith(OG_NODE_SHIM_MARKER)) {
+                    writeFileSync(ogEntry, OG_NODE_SHIM + src);
+                }
+                staged.push(dest);
+            } else {
+                warnings.add(ogHarfbuzzWarning(found.reason));
+            }
+        }
+    }
+
+    // 2. vinext's own loader, inlined into the server output
+    for (const file of serverOutputScripts(serverDir)) {
+        const src = readFileSync(file, "utf8");
+        const { contents, count } = rewriteVinextHarfbuzzAnchors(
+            src,
+            'new URL("./hb.wasm", import.meta.url)',
+        );
+        if (count === 0) continue;
+        const found =
+            vinextOg === undefined
+                ? {
+                      reason: "vinext's @vercel/og is not resolvable from the app",
+                  }
+                : resolvePinnedHarfbuzzWasm(vinextOg, [vinextOg]);
+        if (!("path" in found)) {
+            warnings.add(ogHarfbuzzWarning(found.reason));
+            continue;
+        }
+        const dest = join(dirname(file), "hb.wasm");
+        stageHarfbuzzFile(found, dest);
+        if (contents !== src) writeFileSync(file, contents);
+        staged.push(dest);
+    }
+    // Strict requires: the same split the compiled build applies — a loader
+    // with no version-matched binary FAILS the build instead of warning.
+    if (
+        warnings.size > 0 &&
+        process.env.KNEXT_COMPILE_STRICT_REQUIRES === "1"
+    ) {
+        throw new UsageError([...warnings].join("\n"));
+    }
+    return { staged, warnings: [...warnings] };
 }
 
 export interface StageSharpForNodeOptions {
@@ -681,7 +917,7 @@ export function stageSharpForVinextNode(
                 "host to stage into the node image (checked node_modules/sharp and the " +
                 "bun isolated-store/workspace-root equivalents). The vinext node build " +
                 "itself requires a resolvable sharp to have traced this far, so this is " +
-                "unexpected — reinstall (`bun install`) and rebuild.",
+                "unexpected — reinstall (`npm install`, or `bun install`) and rebuild.",
         );
     }
     const sharpDest = join(nodeModulesDest, "sharp");
@@ -719,8 +955,8 @@ export function stageSharpForVinextNode(
         const name = `@img/${dir}`;
         if (!lockfilePath || locked === undefined) {
             throw new UsageError(
-                `This app uses sharp, the vinext-node image targets ${platformId}, and this host's install has no '${name}' — and there is no bun.lock to fetch a pinned version from.\n\n` +
-                    "Run `bun install --save-text-lockfile` in the app and rebuild.",
+                `This app uses sharp, the vinext-node image targets ${platformId}, and this host's install has no '${name}' — and there is no lockfile (bun.lock or package-lock.json) to fetch a pinned version from.\n\n` +
+                    "Run `npm install` (or `bun install --save-text-lockfile`) in the app and rebuild.",
             );
         }
         const versions = locked.get(name);
@@ -729,8 +965,8 @@ export function stageSharpForVinextNode(
                 `The vinext-node image targets ${platformId}, but neither this host's install nor ${lockfilePath} has '${name}' — the image would ship unable to load sharp.\n\n` +
                     "sharp resolves its native addons as optionalDependencies, so the lockfile\n" +
                     "normally pins every platform's package. Reinstall from a clean lockfile\n" +
-                    "(`bun install --save-text-lockfile`) with a sharp version that publishes\n" +
-                    `'${name}', and rebuild.`,
+                    "(`npm install`, or `bun install --save-text-lockfile`) with a sharp version\n" +
+                    `that publishes '${name}', and rebuild.`,
             );
         }
         const entry = pickFetchVersion(
@@ -863,14 +1099,15 @@ export function fetchImgPackage(
     destDir: string,
 ): void {
     // Refused BEFORE any network: an unverifiable fetch would ship whatever
-    // the registry answered, at native-code privilege. bun.lock records a
-    // sha512 for every registry package, so a missing one means the entry is
-    // not a registry resolution at all.
+    // the registry answered, at native-code privilege. Both lockfiles this
+    // module reads (bun.lock, npm's package-lock.json) record a sha512 for
+    // every registry package, so a missing one means the entry is not a
+    // registry resolution at all.
     if (!pkg.integrity?.startsWith("sha512-")) {
         throw new UsageError(
             `Refusing to fetch '${pkg.name}@${pkg.version}': its lockfile entry has no sha512 integrity to verify the download against.\n\n` +
-                "Reinstall from the registry (`bun install --save-text-lockfile`) so the\n" +
-                "lockfile carries one, and rebuild.",
+                "Reinstall from the registry (`npm install`, or `bun install\n" +
+                "--save-text-lockfile`) so the lockfile carries one, and rebuild.",
         );
     }
     const tmp = mkdtempSync(join(tmpdir(), "knext-img-fetch-"));
@@ -1057,7 +1294,8 @@ function pickFetchVersion(
         throw new UsageError(
             `The installed sharp@${resolvedSharp.version} pins '${name}' at ${pinned}, but ${lockfilePath} pins only ${formatLockedVersions([...versions])}.\n\n` +
                 "The store and the lockfile disagree about what is installed. Reinstall with\n" +
-                "`bun install --frozen-lockfile` and rebuild rather than shipping the difference.",
+                "`npm install` (or `bun install --frozen-lockfile`) and rebuild rather than\n" +
+                "shipping the difference.",
         );
     }
     process.stderr.write(
@@ -1080,13 +1318,14 @@ function pickFetchVersion(
  */
 export function detectBunVersion(
     run: (argv: readonly string[]) => void,
+    bin = "bun",
 ): string {
     // `runQuiet` does not capture stdout, so the version is read via
     // execFileSync directly. The unused seam parameter stays so the injection
     // point remains explicit rather than pretending.
     void run;
     try {
-        return execFileSync("bun", ["--version"], {
+        return execFileSync(bin, ["--version"], {
             encoding: "utf8",
             // stderr is CAPTURED, never inherited: a failing bun's own words
             // must land IN the error message below (which the docs promise),

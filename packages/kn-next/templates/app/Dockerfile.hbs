@@ -50,6 +50,12 @@ ARG BINARY
 # resolver classifies a compiled binary by basename, and those names make it
 # read the build tree's assets instead of the image's.
 COPY ${BINARY} /app/server
+
+# HarfBuzz (Old MIT) and harfbuzzjs (MIT) require their notice to travel with
+# the binary that embeds hb.wasm. `knext build` always writes the file beside the
+# binary (licence text when next/og's hb.wasm is embedded, a one-line statement
+# otherwise), so this exact-name COPY works on BuildKit and the legacy builder.
+COPY knext-third-party-notices.txt /app/
 COPY .output/public /app/.output/public
 
 # sharp's native module, if the app uses `next/image`.

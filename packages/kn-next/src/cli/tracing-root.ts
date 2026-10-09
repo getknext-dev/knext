@@ -292,6 +292,12 @@ function evaluateRootExpression(expr: string, appDir: string): string | null {
     const literal = stringLiteral(expr);
     if (literal !== null) return resolve(appDir, literal);
 
+    // A bare `__dirname` / `import.meta.dirname` IS the app directory: the form
+    // the scaffolded next.config.ts uses to pin the root to the app.
+    if (/^(__dirname|import\s*\.\s*meta\s*\.\s*dirname)$/.test(expr.trim())) {
+        return resolve(appDir);
+    }
+
     const call = expr.match(
         /^(?:path\s*\.\s*)?(join|resolve)\s*\(([\s\S]*)\)$/,
     );

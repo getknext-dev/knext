@@ -1,0 +1,68 @@
+knext bundled fix for vinext 1.0.1 (dist output)
+Upstream: https://github.com/cloudflare/vinext/pull/3741
+What it fixes: On a Nitro production build of a Pages Router app, `/_next/image` answered 404:
+the Pages request handler only serves it through a Workers ASSETS binding, and Nitro has none.
+So an image whose loader keeps the default optimizer (the built-in loader, or an
+`images.loaderFile` that returns `/_next/image/?url=...` URLs, as in the Next.js deploy test
+next-image-new/loader-config-default-loader-with-file) never loaded.
+When there is no ASSETS binding and Nitro's app is on globalThis.__nitro__.default, the handler
+now serves `/_next/image` through handleNitroImageOptimization (from the vinext-3741 patch, which
+MUST apply first), exactly as the App Router handler does there; a `url` that is itself the image
+optimizer is rejected with Next.js's 400. Any other path keeps returning false (Nitro serves it).
+This is the Pages Router half of the #3741 port; upstream #3741 covers the App Router only. It is
+a separate file so an install that already carries the App Router half still applies cleanly.
+Retire: delete this file (and its manifest entry) when the pinned vinext is >= the first
+release that includes cloudflare/vinext#3741 with the Pages Router path covered.
+Applied by `knext vinext-patches` (runs from the app's postinstall and before `knext build`).
+
+--- a/dist/server/pages-request-stage-entry.js
++++ b/dist/server/pages-request-stage-entry.js
+@@ -12,7 +12,7 @@
+ import { CACHEABILITY_REQUEST_STATE } from "../shims/cacheability-classification.js";
+ import { applyCdnResponseIdentityHeaders, captureCdnResponsePolicyOverrides, reconcileCdnResponseHeadersAfterOuterPolicy, validateCdnRequest } from "./cache-control.js";
+ import { registerLazyDataCacheHandler } from "../shims/cache-handler.js";
+-import { DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES, handleConfiguredImageOptimization, isImageOptimizationPath } from "./image-optimization.js";
++import { DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES, handleConfiguredImageOptimization, handleNitroImageOptimization, isImageOptimizationPath } from "./image-optimization.js";
+ import { traceFrameworkRequest } from "./request-tracing.js";
+ import { resolveResponseStageCachePolicy } from "./config-headers.js";
+ import { fetchWorkerFilesystemRoute, runPagesRequest, wrapMiddlewareWithBasePath } from "./pages-request-pipeline.js";
+@@ -60,6 +60,23 @@
+ 	contentDispositionType: vinextConfig.images.contentDispositionType,
+ 	contentSecurityPolicy: vinextConfig.images.contentSecurityPolicy
+ } : void 0;
++/**
++* The running Nitro app's in-process fetch, or undefined off Nitro. A Nitro
++* build has no ASSETS binding, so `/_next/image` sources are fetched through
++* the app itself (same as the App Router handler).
++*/
++function getNitroAppFetch() {
++	const app = globalThis.__nitro__?.default;
++	return typeof app?.fetch === "function" ? app.fetch.bind(app) : void 0;
++}
++/** Next.js rejects a `url` that is itself the image optimizer. */
++function isRecursiveImageSource(imageUrl) {
++	try {
++		return isImageOptimizationPath(new URL(imageUrl.searchParams.get("url") ?? "", "http://n").pathname);
++	} catch {
++		return false;
++	}
++}
+ /** Run the request-time stage with a host-owned response dispatcher. */
+ function handleRequestStage(request, env, ctx, dispatchResponseStage) {
+ 	const originalRequest = request;
+@@ -286,7 +303,14 @@
+ 				}) : dispatched;
+ 			},
+ 			serveFilesystemRoute: async (requestPathname, _stagedHeaders, phase, resolvedUrl) => {
+-				if (!assets) return false;
++				if (!assets) {
++					const nitroFetch = isImageOptimizationPath(requestPathname) ? getNitroAppFetch() : void 0;
++					if (!nitroFetch) return false;
++					const imageUrl = new URL(resolvedUrl, request.url);
++					if (isRecursiveImageSource(imageUrl)) return new Response("\"url\" parameter cannot be recursive", { status: 400 });
++					const allowedWidths = [...vinextConfig?.images?.deviceSizes ?? DEFAULT_DEVICE_SIZES, ...vinextConfig?.images?.imageSizes ?? DEFAULT_IMAGE_SIZES];
++					return handleNitroImageOptimization(new Request(imageUrl, request), nitroFetch, allowedWidths, imageConfig, basePath);
++				}
+ 				if (isImageOptimizationPath(requestPathname)) {
+ 					const imageUrl = new URL(resolvedUrl, request.url);
+ 					const imageRequest = new Request(imageUrl, request);

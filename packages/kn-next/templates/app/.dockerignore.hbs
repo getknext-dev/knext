@@ -62,6 +62,11 @@ knext-exec*
 knext-standalone-exec*
 server
 
+# `knext build`'s post-compile smoke's own scratch (#1814) — never a build
+# input and never COPYd; excluded so a build that failed to clean it up does
+# not widen the Docker build context.
+.knext-smoke-native
+
 # ── Test, coverage and editor noise ──────────────────────────────────────────
 coverage
 .nyc_output

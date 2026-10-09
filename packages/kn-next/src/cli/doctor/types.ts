@@ -39,7 +39,10 @@ export const SKIP_UNREACHABLE = "cluster unreachable — check skipped";
  * the dockerconfigjson Secret, attach it to the app ServiceAccount, redeploy.
  */
 export const PRIVATE_REGISTRY_DOCS_URL =
-    "https://knext.dev/docs/private-registries";
+    "https://knext-platform.dev/docs/private-registries";
+
+/** Pin / upgrade / roll back a specific operator version (#1947). */
+export const VERSIONING_DOCS_URL = "https://knext-platform.dev/docs/versioning";
 
 /**
  * Minimum kubectl CLIENT version for which `--validate=strict` is meaningful.
@@ -166,6 +169,14 @@ export interface DoctorDeps {
      * template's own marker value changing over time.
      */
     readNodeEntryTemplate?: () => string | undefined;
+    /**
+     * This CLI's own version, for the operator-version compatibility verdict
+     * (#1947). Set by `doctorMain`'s production defaults (read from the
+     * package manifest); deliberately NOT defaulted inside `runDoctor`, so the
+     * golden snapshots do not change on every release. Absent -> the row still
+     * reports the operator's version but renders no compatibility verdict.
+     */
+    cliVersion?: string;
 }
 
 /**
@@ -230,8 +241,13 @@ export interface DaemonSetRef {
 }
 
 export interface DeploymentJson {
-    metadata?: { name?: string };
-    spec?: { template?: { spec?: { containers?: { image?: string }[] } } };
+    metadata?: { name?: string; labels?: Record<string, string> };
+    spec?: {
+        template?: {
+            metadata?: { labels?: Record<string, string> };
+            spec?: { containers?: { image?: string }[] };
+        };
+    };
     status?: { readyReplicas?: number; replicas?: number };
 }
 
@@ -246,6 +262,12 @@ export interface CheckContext {
     kubectl: KubectlFn;
     skipAll: boolean;
     operatorImage?: string;
+    /**
+     * The operator manager Deployment the operator check resolved — consumed by
+     * the operator-version check (#1947), the same inter-check hand-off as
+     * `operatorImage`. Unset when the operator check found none.
+     */
+    operatorManager?: DeploymentJson;
     /**
      * `--verbose` (#1535): when false (the default), a check's `detail` is ONE
      * actionable sentence — no raw kubectl/API dump. When true, the raw

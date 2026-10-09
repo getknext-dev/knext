@@ -11,19 +11,27 @@
  * entries. JSON.stringify destroys these types, so we use custom serialization.
  *
  * Reference: https://nextjs.org/docs/app/api-reference/config/next-config-js/incrementalCacheHandlerPath
+ *
+ * This module is the GENERIC entry (`@getknext/core/adapters/cache-handler`)
+ * AND the shared core of the per-runtime entries `cache-handler-node.js` and
+ * `cache-handler-bun.js`, which subclass it to fix the Redis client (#1843; see
+ * `redisClient` below).
  */
 
 // In-flight write accounting (T13) lives in its own module because its state
 // must be anchored on `globalThis` — see the header of cache-write-registry.js.
-// This module imports `trackWrite` and re-exports NOTHING new: the
-// `@getknext/core/adapters/cache-handler` subpath stays default-only, because
-// it exists to be handed to Next's `cacheHandler` option by path, not called.
+// This module imports `trackWrite` and re-exports NOTHING new from it: the
+// handler subpaths stay default-only, because they exist to be handed to
+// Next's `cacheHandler` option by path, not called.
 import { trackWrite } from './cache-write-registry.js';
 // Slow-dependency discrimination (cold-start ledger row 3). Observation only:
 // it attaches two listeners to the connecting client and names which PHASE was
 // slow (TCP connect vs the ready-check INFO). No timer, no budget, no verdict —
 // see the header of slow-dep-log.js.
 import { instrumentConnectTiming } from './slow-dep-log.js';
+import { readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
+import { dirname, join } from 'node:path';
 
 // ─── Cache Event Logger ───
 
@@ -192,8 +200,8 @@ function __resetEnvForTests() {
   // The client is DROPPED, not closed. Every caller is a test holding a fake;
   // making this async to `quit()` a real one would put an await in every
   // `beforeEach` for a case that does not exist. Production must not call this.
-  Redis = undefined;
   redis = undefined;
+  clientLoad = null;
   connectPromise = undefined;
   useRedis = !!REDIS_URL;
   unhealthyUntil = 0;
@@ -221,10 +229,11 @@ function __setRedisClientForTests(client) {
   useRedis = !!client;
   unhealthyUntil = 0;
   connectPromise = null;
+  clientLoad = null;
 }
 
-let Redis;
 let redis;
+let clientLoad = null;
 let connectPromise;
 let useRedis = !!REDIS_URL;
 // While `Date.now() < unhealthyUntil` the breaker is OPEN: ensureConnected()
@@ -233,6 +242,60 @@ let unhealthyUntil = 0;
 
 // In-memory fallback
 const memoryCache = new Map();
+
+// ─── Optimized-image variants (write-free runtime) ───
+//
+// With `images.customCacheHandler: true` (the knext adapter sets it when the
+// app uses this handler), Next's image optimizer stores every optimized
+// variant HERE instead of writing `.next/cache/images`, so the app needs no
+// writable volume. On Redis they are shared and survive scale-to-zero like
+// every other entry. On the in-memory fallback they are per-pod, so they live
+// in their own map with a BYTE budget, evicting least-recently-used first: an
+// unbounded map would grow by one encoded image per distinct
+// (src, width, quality, format) a client asks for.
+const imageMemory = new Map();
+let imageMemoryBytes = 0;
+const DEFAULT_IMAGE_MEMORY_BYTES = 32 * 1024 * 1024;
+
+function imageMemoryBudget() {
+  const raw = Number(process.env.KNEXT_IMAGE_CACHE_MEMORY_BYTES);
+  return Number.isFinite(raw) && raw >= 0 ? raw : DEFAULT_IMAGE_MEMORY_BYTES;
+}
+
+function isImageValue(data) {
+  return !!data && data.kind === 'IMAGE' && Buffer.isBuffer(data.buffer);
+}
+
+function dropImageFromMemory(key) {
+  const entry = imageMemory.get(key);
+  if (!entry) return;
+  imageMemory.delete(key);
+  imageMemoryBytes -= entry.value.buffer.byteLength;
+}
+
+function storeImageInMemory(key, entry) {
+  dropImageFromMemory(key);
+  const size = entry.value.buffer.byteLength;
+  const budget = imageMemoryBudget();
+  // A variant bigger than the whole budget is not cached at all — storing it
+  // would evict everything else and then itself on the next write.
+  if (size > budget) return false;
+  while (imageMemoryBytes + size > budget && imageMemory.size > 0) {
+    dropImageFromMemory(imageMemory.keys().next().value);
+  }
+  imageMemory.set(key, entry);
+  imageMemoryBytes += size;
+  return true;
+}
+
+function readImageFromMemory(key) {
+  const entry = imageMemory.get(key);
+  if (!entry) return undefined;
+  // Map iteration order is insertion order: re-inserting marks it most recent.
+  imageMemory.delete(key);
+  imageMemory.set(key, entry);
+  return entry;
+}
 
 /**
  * Trip the breaker and drop the current client.
@@ -257,44 +320,129 @@ function markUnhealthy(reason) {
 }
 
 /**
- * Bun ships a native Redis client (`Bun.RedisClient`, 1.2.9+), and under the
- * ADR-0048 single-executable target that is the client we want:
+ * WHICH Redis client is a per-runtime decision, made by the ENTRY that Next
+ * loads — not by this module (#1843).
  *
- *   - ioredis reaches `@ioredis/commands` through a transitive dynamic
- *     `require`, which `bun build --compile` cannot resolve. The binary builds
- *     and then dies at boot with "Cannot find package 'ioredis'". Marking it
- *     external does not help — the handler initialises eagerly, so the import
- *     really is executed.
- *   - it is native, so it costs no JavaScript at startup, which is the whole
- *     point of a 61ms cold start.
+ *   - `cache-handler-node.js` (Node): ioredis, through a LITERAL
+ *     `import('ioredis')`, so Next's standalone file tracing copies it into the
+ *     node image.
+ *   - `cache-handler-bun.js` (Bun): Bun's native client (`Bun.RedisClient`,
+ *     1.2.9+), and no ioredis import anywhere. ioredis reaches
+ *     `@ioredis/commands` through a transitive dynamic `require` that
+ *     `bun build --compile` cannot resolve, so a compiled binary that executes
+ *     it dies at boot; the native client also costs no JavaScript at startup.
+ *   - this module's own default export (the generic subpath — vinext, `next
+ *     dev`, any `next build` knext did not drive, apps whose `cache-handler.js`
+ *     re-exports it): detects the runtime itself — see `RUNTIME_DETECTED`.
  *
- * The ioredis path stays for Node. Its specifier is deliberately NON-LITERAL
- * so a bundler cannot statically follow it into the graph; under Bun this
- * branch is never reached, and under Node the module is a direct dependency
- * that resolves normally at runtime.
+ * `knext build`/`deploy`/`preview` export the configured runtime to
+ * `next build`, and the knext adapter points `cacheHandler` at the matching
+ * entry. Each entry is a subclass of {@link CacheHandler} overriding the static
+ * `redisClient` — `{ name, load(url) }` — that the constructor installs as the
+ * client loader. `load` returns a ready-to-use client (see
+ * {@link nativeRedisClient} and {@link ioredisClient}) or throws.
+ */
+
+/**
+ * The generic entry's runtime detection: Bun's native client under Bun,
+ * ioredis under Node.
+ *
+ * The ioredis specifier here is deliberately NON-LITERAL, so this path never
+ * bundles ioredis into a compiled Bun executable. That also hides it from
+ * bundler tracing, which is why knext-driven builds do not come through here:
+ * standalone builds get `cache-handler-node.js`/`-bun.js`, and the vinext
+ * scaffold gets `vinext-cache-adapter-node`/`-bun`. What remains on this path
+ * is `next dev` and apps scaffolded before the per-runtime adapters.
+ *
+ * `KNEXT_CACHE_REDIS_CLIENT=ioredis` forces ioredis even on Bun: the same
+ * escape hatch `KNEXT_DB_DRIVER` provides for the Postgres driver, and the way
+ * a suite running under Bun keeps covering the ioredis client shape (it has
+ * `.on`/`.status`; Bun's has neither). Read on every call, deliberately:
+ * `__resetEnvForTests` re-reads its cached values, and another cached copy
+ * would be one more thing to keep in sync.
  */
 const IOREDIS_SPECIFIER = ['io', 'redis'].join('');
 
+function bunNativeAvailable() {
+  if (process.env.KNEXT_CACHE_REDIS_CLIENT === 'ioredis') return false;
+  const B = globalThis.Bun;
+  return !!B && typeof B.RedisClient === 'function';
+}
+
+const RUNTIME_DETECTED = {
+  get name() {
+    return bunNativeAvailable() ? 'Bun native' : 'ioredis';
+  },
+  async load(url) {
+    if (bunNativeAvailable()) return nativeRedisClient(globalThis.Bun, url);
+    const mod = await import(IOREDIS_SPECIFIER);
+    return ioredisClient(mod.default || mod, url);
+  },
+};
+
+let redisClient = RUNTIME_DETECTED;
+
 /**
- * Bun's native client, or null when not running under Bun — or when the ioredis
- * path is explicitly requested.
+ * Say so — loudly, once — when Redis is configured but its client cannot load.
  *
- * `KNEXT_CACHE_REDIS_CLIENT=ioredis` forces the ioredis branch even on Bun. Two
- * reasons it earns its place rather than being a test affordance:
+ * Before #1843 the standalone node image did not carry ioredis, and this case
+ * fell back to the in-memory store in silence. Every cache line still logged,
+ * just with a `(memory)` suffix, so the app looked healthy while ISR was
+ * neither shared between pods nor kept across a scale-to-zero.
  *
- *  - Operationally it is the same escape hatch `KNEXT_DB_DRIVER` provides for
- *    the Postgres driver: a way to fall back to the mature client without
- *    changing runtime, which is what you want at 3am when the native one is
- *    suspected and nothing else is.
- *  - The two clients have genuinely different SHAPES — Bun's has no `.on`, it
- *    uses `onclose` — so any behaviour asserted against one says nothing about
- *    the other. Without a way to select, a suite running under Bun silently
- *    stops covering the ioredis path that Node deployments still take.
- *
- * Reads the env on every call, deliberately: `__resetEnvForTests` re-reads its
- * cached values, and a third cached copy here would be one more thing to keep
- * in sync.
+ * Failing open is still right — a missing cache must not take the app down —
+ * but a configured Redis that is never used is a deployment defect, not a
+ * transient fault, so it is reported at error level rather than left for
+ * someone to infer from log suffixes. The constructor attempts the connection
+ * eagerly, so this lands at startup. Once per process without a flag: the load
+ * is single-flight (`clientLoad`), and `useRedis` is cleared alongside the
+ * report, so nothing retries it.
  */
+function reportRedisClientUnavailable(err) {
+  console.error(
+    `[CacheHandler] Redis client unavailable: REDIS_URL is set but the ` +
+      `${redisClient.name} Redis client could not be loaded ` +
+      `(${err?.message || err}). Falling back to an in-memory cache: ISR and ` +
+      'data-cache entries are NOT shared between pods and are lost on every ' +
+      'scale-to-zero.',
+  );
+}
+
+/**
+ * A ready-to-use Bun native client for `url`, budgeted and wired exactly as
+ * the handler needs it. `B` is the `Bun` global (passed in, so the entry that
+ * owns the runtime decision is the only place that reads it).
+ */
+function nativeRedisClient(B, url) {
+  // Budgeted ONCE, here — see `budgetNativeClient`. Everything downstream
+  // (including `nativeTxQueue`) must see one stable client identity.
+  const budgeted = budgetNativeClient(new B.RedisClient(url, __nativeClientOptions()));
+  budgeted.onclose = (err) => {
+    if (err) console.error('[CacheHandler] Redis error:', err.message);
+  };
+  return budgeted;
+}
+
+/** A ready-to-use ioredis client for `url`. `Redis` is the ioredis class. */
+function ioredisClient(Redis, url) {
+  const client = new Redis(url, {
+    lazyConnect: true,
+    maxRetriesPerRequest: 3,
+    retryStrategy: (times) => Math.min(times * 100, 5000),
+    connectTimeout: CONNECT_TIMEOUT_MS,
+    // A command must never outlive its budget — see the note above.
+    commandTimeout: COMMAND_TIMEOUT_MS,
+    // Do NOT buffer commands issued while disconnected. An offline queue is
+    // exactly the unbounded structure that turns a cache outage into a memory
+    // leak; the handler's contract is to fail open, not to remember.
+    enableOfflineQueue: false,
+  });
+  client.on('error', (err) => {
+    console.error('[CacheHandler] Redis error:', err.message);
+  });
+  return client;
+}
+
 /**
  * The options handed to `Bun.RedisClient`, as their own function so the value a
  * test asserts is the value production constructs.
@@ -421,52 +569,25 @@ function budgetNativeClient(client) {
   });
 }
 
-function bunRedisClient(url) {
-  if (process.env.KNEXT_CACHE_REDIS_CLIENT === 'ioredis') return null;
-  const B = globalThis.Bun;
-  if (!B || typeof B.RedisClient !== 'function') return null;
-  return new B.RedisClient(url, __nativeClientOptions());
-}
-
 async function getRedis() {
   if (!redis && REDIS_URL) {
-    const native = bunRedisClient(REDIS_URL);
-    if (native) {
-      // Budgeted ONCE, here — see `budgetNativeClient`. Everything downstream
-      // (including `nativeTxQueue`) must see one stable client identity.
-      const budgeted = budgetNativeClient(native);
-      budgeted.onclose = (err) => {
-        if (err) console.error('[CacheHandler] Redis error:', err.message);
-      };
-      redis = budgeted;
-      return redis;
+    // One load in flight at a time: the constructor's eager connect and the
+    // first request race here, and two loads would build two clients.
+    if (!clientLoad) {
+      clientLoad = (async () => {
+        try {
+          redis = await redisClient.load(REDIS_URL);
+        } catch (err) {
+          useRedis = false;
+          reportRedisClientUnavailable(err);
+        } finally {
+          clientLoad = null;
+        }
+      })();
     }
-    if (!Redis) {
-      try {
-        const mod = await import(IOREDIS_SPECIFIER);
-        Redis = mod.default || mod;
-      } catch {
-        useRedis = false;
-        return null;
-      }
-    }
-    redis = new Redis(REDIS_URL, {
-      lazyConnect: true,
-      maxRetriesPerRequest: 3,
-      retryStrategy: (times) => Math.min(times * 100, 5000),
-      connectTimeout: CONNECT_TIMEOUT_MS,
-      // A command must never outlive its budget — see the note above.
-      commandTimeout: COMMAND_TIMEOUT_MS,
-      // Do NOT buffer commands issued while disconnected. An offline queue is
-      // exactly the unbounded structure that turns a cache outage into a memory
-      // leak; the handler's contract is to fail open, not to remember.
-      enableOfflineQueue: false,
-    });
-    redis.on('error', (err) => {
-      console.error('[CacheHandler] Redis error:', err.message);
-    });
+    await clientLoad;
   }
-  return redis;
+  return redis || null;
 }
 
 /**
@@ -750,6 +871,13 @@ function serializeCacheValue(data) {
     serialized.rscData = data.rscData.toString('base64');
     serialized.__rscDataSerialized = true;
   }
+  // IMAGE buffer (an optimized variant): Buffer → base64 string. A plain
+  // JSON.stringify would write `{ type: 'Buffer', data: [...] }`, and Next
+  // sends `value.buffer` straight to the client on a hit.
+  if (isImageValue(data)) {
+    serialized.buffer = data.buffer.toString('base64');
+    serialized.__bufferSerialized = true;
+  }
   return serialized;
 }
 
@@ -768,6 +896,11 @@ function deserializeCacheValue(data) {
     value.rscData = Buffer.from(value.rscData, 'base64');
     value.__rscDataSerialized = undefined;
   }
+  // IMAGE buffer: base64 string → Buffer
+  if (value.__bufferSerialized && typeof value.buffer === 'string') {
+    value.buffer = Buffer.from(value.buffer, 'base64');
+    value.__bufferSerialized = undefined;
+  }
   return data;
 }
 
@@ -785,6 +918,9 @@ function cloneCacheValue(data) {
   // Clone Buffer to avoid shared memory
   if (Buffer.isBuffer(data.rscData)) {
     cloned.rscData = Buffer.from(data.rscData);
+  }
+  if (isImageValue(data)) {
+    cloned.buffer = Buffer.from(data.buffer);
   }
   return cloned;
 }
@@ -837,6 +973,9 @@ function writeCacheControl(ctx) {
   const cacheControl = {};
   if (typeof revalidate === 'number' && Number.isFinite(revalidate))
     cacheControl.revalidate = revalidate;
+  // `false` = never revalidate. Persisted so a woken process can hand it back
+  // to Next (see seedNextCacheControl); `withCacheState` treats it as fresh.
+  else if (ctx?.cacheControl?.revalidate === false) cacheControl.revalidate = false;
   const expire = cacheControlSeconds(ctx, 'expire');
   if (expire !== undefined) cacheControl.expire = expire;
   const stale = cacheControlSeconds(ctx, 'stale');
@@ -865,15 +1004,162 @@ function withCacheState(entry, now = Date.now()) {
   return entry;
 }
 
+// ─── Next's per-route revalidate window after a wake (#1888) ───
+//
+// On the Next standalone path freshness is NOT decided here. Next's
+// `IncrementalCache.get` (16.3.6 `dist/server/lib/incremental-cache/index.js`)
+// takes only `lastModified` + `value` from this handler and computes
+// `isStale` itself (:440-451), from a window `calculateRevalidate` (:154-163)
+// reads out of `SharedCacheControls` — a PROCESS-GLOBAL Map filled by
+// `IncrementalCache.set` (:537-538) or, failing that, the prerender manifest.
+// With neither it uses a 1-second window (:160).
+//
+// A path rendered at runtime (a dynamic route without generateStaticParams) is
+// in no manifest, so its window lived only in the process that rendered it.
+// After a scale-to-zero wake the Map is empty and every such entry older than
+// a second read STALE and regenerated, though this handler had persisted the
+// real window with the entry all along.
+//
+// So on a read, hand the persisted cacheControl back the only way Next accepts
+// it: seed the shared Map — and only when this process has learnt nothing for
+// the route itself, so a window from a write here (always the newest) wins.
+//
+// BUILD-SCOPED. Redis keys are scoped by app, not by build, so entries outlive
+// a redeploy. Before this seed, the new build read an old build's entry STALE
+// and regenerated it; seeding the old build's window would serve it FRESH for
+// that whole window (forever for `revalidate: false`) and ignore a changed
+// `revalidate`. So `set` records the writer's build id with the entry, and the
+// seed applies only when it equals this process's build id. An entry without
+// one (written before build ids were recorded) is never seeded.
+//
+// `shared-cache-controls.external` is the module Next keeps OUT of its route
+// bundles precisely so every copy shares one Map; it is resolved from `next`,
+// the same file the server and route chunks load. Do not count on the
+// standalone-on-Bun compile's disk-closure scan to see this require: the
+// package build renames `require` (tsup emits `require2(...)`), which the
+// scan's literal `require(` pattern does not match. The module stays on disk —
+// one instance — because Next's own `*.runtime.prod.js` requires it literally.
+// Fail-open: no `next`, or a shape this does not recognise, and the read
+// proceeds exactly as before — with one warning per process, so a Next release
+// that renames the module is visible rather than a silent return of #1888.
+let sharedCacheControlsMap;
+const SHARED_CACHE_CONTROLS_MODULE =
+  'next/dist/server/lib/incremental-cache/shared-cache-controls.external.js';
+function nextSharedCacheControls() {
+  if (sharedCacheControlsMap !== undefined) return sharedCacheControlsMap;
+  sharedCacheControlsMap = null;
+  let reason;
+  try {
+    const require = createRequire(import.meta.url);
+    const mod = require(SHARED_CACHE_CONTROLS_MODULE);
+    const map = mod?.SharedCacheControls?.cacheControls;
+    if (map instanceof Map) sharedCacheControlsMap = map;
+    else reason = 'SharedCacheControls.cacheControls is not a Map';
+  } catch (err) {
+    reason = err?.message || String(err);
+  }
+  if (reason) {
+    console.warn(
+      JSON.stringify({
+        level: 'warn',
+        source: 'knext-cache-handler',
+        event: 'next_cache_controls_unavailable',
+        module: SHARED_CACHE_CONTROLS_MODULE,
+        reason,
+        impact:
+          'ISR pages generated at request time may be served STALE on the first request after a cold start',
+      }),
+    );
+  }
+  return sharedCacheControlsMap;
+}
+
+/**
+ * This process's build id — `.next/BUILD_ID`, read from where Next reads it
+ * (`next-server.js`: `join(distDir, BUILD_ID_FILE)`, distDir being the parent
+ * of the `serverDistDir` Next hands every cache handler). On the self-contained
+ * compiled executable the same `fs` read is aliased to the embedded file.
+ * `undefined` when Next did not pass `serverDistDir` (vinext) or the file is
+ * unreadable — and then nothing is recorded and nothing is seeded.
+ *
+ * Next's CONSTANT id counts as no id. Next >= 16.2.11 writes the same
+ * `.next/BUILD_ID` for EVERY build whenever a deployment id is set, so two
+ * deploys would "match" and the previous build's window would be seeded after
+ * a redeploy (forever for `revalidate: false`). `knext deploy` refuses such a
+ * build, but `knext preview` and images built outside knext do not. This is
+ * the single point both sides go through: `set` records `currentBuildId` and
+ * the seed compares against it, so neither records nor seeds the constant.
+ *
+ * Duplicated from `NEXT_CONSTANT_BUILD_ID` in `src/cli/build-id-env.ts` — this
+ * plain-JS runtime module cannot import the CLI's TypeScript.
+ * `cache-handler-next-stale-after-wake.test.ts` asserts the two are equal.
+ */
+const NEXT_CONSTANT_BUILD_ID = 'build-TfctsWXpff2fKS';
+let currentBuildId;
+// Next constructs an IncrementalCache — and so this handler — PER REQUEST
+// (`route-module.js` `getIncrementalCache`), so the file is read once per
+// `serverDistDir`, not once per request.
+const buildIdByDistDir = new Map();
+function resolveBuildId(options) {
+  const serverDistDir = options?.serverDistDir;
+  if (typeof serverDistDir !== 'string' || serverDistDir.length === 0) return undefined;
+  if (buildIdByDistDir.has(serverDistDir)) return buildIdByDistDir.get(serverDistDir);
+  let id;
+  try {
+    id = readFileSync(join(dirname(serverDistDir), 'BUILD_ID'), 'utf8').trim() || undefined;
+  } catch {
+    id = undefined;
+  }
+  if (id === NEXT_CONSTANT_BUILD_ID) id = undefined;
+  buildIdByDistDir.set(serverDistDir, id);
+  return id;
+}
+
+/** Next's `toRoute` (`dist/server/lib/to-route.js`): `/a/index` → `/a`, `/index` → `/`. */
+function nextRoute(key) {
+  // Next >= 16.3.7 scopes every non-FETCH entry to its source route and keys
+  // BOTH the shared Map (`set`: storageKey) and this handler by the same
+  // `/route-cache/<kind>/<sha256>/$<path>` string — no toRoute normalisation,
+  // so the handler's key is already the Map key and must be used verbatim.
+  if (key.startsWith('/route-cache/')) return key;
+  return key.replace(/(?:\/index)?\/?$/, '') || '/';
+}
+
+function seedNextCacheControl(key, entry, ctx) {
+  if (typeof key !== 'string' || !key.startsWith('/')) return;
+  // Next never records a window for the data cache (`!ctx.fetchCache`, :537).
+  if (ctx?.kind === 'FETCH' || entry?.value?.kind === 'FETCH') return;
+  const revalidate = entry?.cacheControl?.revalidate;
+  if (!(revalidate === false || (typeof revalidate === 'number' && revalidate >= 0))) return;
+  // Only this build's own windows — see BUILD-SCOPED above.
+  if (currentBuildId === undefined || entry?.buildId !== currentBuildId) return;
+  const map = nextSharedCacheControls();
+  if (!map) return;
+  const route = nextRoute(key);
+  if (map.has(route)) return;
+  const cacheControl = { revalidate };
+  if (typeof entry.cacheControl.expire === 'number') cacheControl.expire = entry.cacheControl.expire;
+  map.set(route, cacheControl);
+}
+
 // ─── CacheHandler Class ───
 
 class CacheHandler {
+  /** The generic entry's client; the per-runtime entries override it. */
+  static redisClient = RUNTIME_DETECTED;
+
   constructor(options) {
     this.options = options;
+    // The entry Next loaded decides the Redis client (see `redisClient`).
+    redisClient = new.target.redisClient;
+    // Never UN-set it: a construction without `serverDistDir` must not drop
+    // the id a Next-constructed handler already resolved for this process.
+    const buildId = resolveBuildId(options);
+    if (buildId !== undefined) currentBuildId = buildId;
     ensureConnected().catch(() => {});
   }
 
-  async get(key) {
+  async get(key, ctx) {
     const startTime = Date.now();
     const client = await ensureConnected();
     const source = client ? 'redis' : 'memory';
@@ -888,6 +1174,7 @@ class CacheHandler {
             return null;
           }
           const parsed = withCacheState(deserializeCacheValue(JSON.parse(data)));
+          seedNextCacheControl(key, parsed, ctx);
           logCacheEvent(parsed?.cacheState === 'stale' ? 'STALE' : 'HIT', source, key, {
             durationMs: Date.now() - startTime,
           });
@@ -895,7 +1182,7 @@ class CacheHandler {
       }
 
       // In-memory fallback
-      const entry = memoryCache.get(key);
+      const entry = memoryCache.get(key) ?? readImageFromMemory(key);
       if (!entry) {
         logCacheEvent('MISS', source, key, {
           durationMs: Date.now() - startTime,
@@ -903,6 +1190,7 @@ class CacheHandler {
         return null;
       }
       const labelled = withCacheState(entry);
+      seedNextCacheControl(key, labelled, ctx);
       logCacheEvent(labelled?.cacheState === 'stale' ? 'STALE' : 'HIT', source, key, {
         durationMs: Date.now() - startTime,
       });
@@ -935,6 +1223,7 @@ class CacheHandler {
       if (data === null) {
         if (client) await client.del(cacheKey(key));
         memoryCache.delete(key);
+        dropImageFromMemory(key);
         logCacheEvent('DELETE', source, key, {
           durationMs: Date.now() - startTime,
         });
@@ -956,6 +1245,7 @@ class CacheHandler {
           lastModified: Date.now(),
           tags,
           cacheControl,
+          ...(currentBuildId !== undefined && { buildId: currentBuildId }),
         };
 
         // ─── ATOMICITY GUARD (T13) ───
@@ -1003,8 +1293,14 @@ class CacheHandler {
           lastModified: Date.now(),
           tags,
           cacheControl,
+          ...(currentBuildId !== undefined && { buildId: currentBuildId }),
         };
-        memoryCache.set(key, memEntry);
+        if (isImageValue(data)) {
+          // Byte-bounded, separately from ISR/data entries (see imageMemory).
+          storeImageInMemory(key, memEntry);
+        } else {
+          memoryCache.set(key, memEntry);
+        }
       }
 
       logCacheEvent('SET', source, key, {
@@ -1075,6 +1371,9 @@ class CacheHandler {
 }
 
 export default CacheHandler;
+// For the per-runtime entries (cache-handler-node.js, cache-handler-bun.js),
+// which subclass the handler and hand it their client.
+export { CacheHandler, ioredisClient, nativeRedisClient };
 // Test seams, same contract as `__resetEnvForTests`: named so a reader cannot
 // mistake them for API, exported so the value a test asserts is the value
 // production uses rather than a copy of it (#886).
@@ -1084,5 +1383,6 @@ export {
   budgetNativeClient as __budgetNativeClient,
   __redisTtlSeconds,
   execAtomic as __execAtomic,
+  NEXT_CONSTANT_BUILD_ID as __NEXT_CONSTANT_BUILD_ID,
   __setRedisClientForTests,
 };

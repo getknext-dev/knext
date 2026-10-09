@@ -176,7 +176,9 @@ describe("the announced-mode notice (condition 1)", () => {
         // away is unprotected without the bucket.
         expect(NO_STORAGE_MODE_NOTICE).toMatch(/skew/i);
         expect(NO_STORAGE_MODE_NOTICE).toContain(NO_STORAGE_DOCS_URL);
-        expect(NO_STORAGE_DOCS_URL).toMatch(/^https:\/\/knext\.dev\/docs\//);
+        expect(NO_STORAGE_DOCS_URL).toMatch(
+            /^https:\/\/knext-platform\.dev\/docs\//,
+        );
     });
 });
 

@@ -192,6 +192,13 @@ head — mirroring `compat-credential-freeze-guard.yml`'s own rule for `rcTag`/`
 PR cannot skip the check by clearing `rcTag` in the same diff that also changes published bytes; the
 window was still open at base, so the check still runs.
 
+The pin guards **one release line** — the one `main` carries. A PR whose base is an
+`integration/*` branch (for example `integration/v1.3`) is on a different line, whose published
+bytes are the next line's release candidate and so can never equal the pinned tag; measuring it
+would make the check red on every such PR. Those PRs are skipped with the visible reason
+"base integration/v1.3 is not the frozen line". `main`, stacked branches, and an unknown base ref
+stay guarded, and the guard applies to the 1.3 line's bytes again once it merges into `main`.
+
 An **intentional** rc.N+1 — real content is expected to differ from the currently-pinned rc — is
 authorized the same way `rcBumpMarker` authorizes touching the credential harness mid-window: add a
 dated, reviewed `publishedBytesBumpMarker: { date, expires, reason }` to the pin file in the same
@@ -621,8 +628,32 @@ Confirm every box before starting step 1 below:
    ```sh
    git tag operator-v1.0.0 <operator-main-sha-to-ship> && git push origin operator-v1.0.0
    ```
-   Then confirm the resulting `operator-v1.0.0` release exists, its `install.yaml` resolves to a
-   real signed image digest, and `operator-latest` now points at the same digest.
+   The operator's MAJOR.MINOR tracks the npm package set's (a `1.0.x` operator pairs with the
+   `1.0.x` packages; the patch is independent), per [COMPATIBILITY.md](COMPATIBILITY.md#operator-versions).
+   Then confirm the resulting `operator-v1.0.0` release exists, carries **both** `install.yaml`
+   and `install-v1.0.0.yaml` (same digest-pinned bytes), that the bundle's image is
+   `…kn-next-operator:v1.0.0@sha256:<digest>` with the `app.kubernetes.io/version: "1.0.0"` label,
+   that `crane manifest ghcr.io/getknext-dev/kn-next-operator:v1.0.0` resolves to that digest, and
+   that `operator-latest` now points at the same digest. Add the operator version to the
+   COMPATIBILITY.md row for the release. Only a stable tag does this; an `-rc.N` operator tag
+   never moves `operator-latest`.
+   **Marketplace-bound variant.** The same `operator-vX.Y.Z` run also publishes
+   `ghcr.io/getknext-dev/kn-next-operator:vX.Y.Z-mp`: an image index over the **same platform
+   manifests** (same config and layer digests) with the buildkit attestation manifests removed,
+   because AWS Marketplace rejects an index that carries them. The GHCR `vX.Y.Z` image is
+   untouched — it keeps its provenance, SBOM and cosign signature. The `-mp` index is derived from
+   the Trivy-gated build output (`hack/marketplace-index-build.sh`, no rebuild), and
+   `hack/marketplace-index-assert.sh` proves against the registry — before the index is signed or the
+   `-mp` tag applied — that it has no attestation manifests and that every platform manifest's
+   config and layer digests equal the gated image's. The index digest differs from the gated one, so it
+   carries its own cosign signature, but **no SBOM attestation**: `cosign verify-attestation` (and the
+   provenance) applies to the GHCR `vX.Y.Z` image only, while `cosign verify` works on both. Both release
+   tags (`vX.Y.Z-mp`, then `vX.Y.Z`) are applied last, after every Marketplace step has passed, so a
+   failed run leaves neither behind and a re-run cannot move an already-released tag. Confirm after a
+   release:
+   `crane manifest ghcr.io/getknext-dev/kn-next-operator:vX.Y.Z-mp | jq '.manifests | map(.platform)'`
+   lists only real platforms (no `unknown/unknown`). Nothing is pushed to a Marketplace registry by
+   this workflow; that copy is a separate, manual step that copies this digest.
    **There is no fallback for `1.0.0`.** A push to `main` moves only `operator-edge`; nothing but a
    stable `operator-vX.Y.Z` tag moves `operator-latest`. As of 2026-10-08 `operator-latest` still
    carries a 2026-09-29 bundle whose CRD has **no `spec.security.writableCache`**, so an app that

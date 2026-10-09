@@ -6,8 +6,9 @@ PASS  kubectl strict validation                   client v1.31.2 — the CR appl
 PASS  Static asset mode                           object storage configured (gcs: assets) — assets are offloaded to the bucket and retained across deploys
 SKIP  vinext-on-node entry freshness              this app does not build with build: 'vinext' + runtime: 'node' (or no knext.config.ts was found) — knext-node-entry.mjs, if scaffolded, is never run
 PASS  NextApp CRD                                 served version: v1alpha1
-PASS  NextApp CRD schema coverage                 all 72 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)
+PASS  NextApp CRD schema coverage                 all 76 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)
 PASS  Operator deployment                         kn-next-operator-controller-manager Ready in kn-next-operator-system
+WARN  Operator version                            no release version reported, image sha256:75be42bb6b4c… (a bundle from before the operator version line); compatibility with this CLI cannot be checked (hint: Move to a versioned operator (operator first, then CLI). Apply a specific release's digest-pinned bundle: \`kubectl apply --server-side -f https://github.com/getknext-dev/knext/releases/download/operator-v<X.Y.Z>/install-v<X.Y.Z>.yaml\` (see https://knext-platform.dev/docs/versioning).)
 PASS  cert-manager webhook                        cert-manager-webhook Ready
 PASS  Knative ingress-class                       ingress-class kourier.ingress.networking.knative.dev is served by net-kourier-controller
 PASS  Operator image pullable                     ghcr.io/getknext-dev/kn-next-operator@sha256:75be42bb6b4c6d03c902b4fc90b36b246cc6cacf2233926fa183a6051521a99d is anonymously pullable
@@ -51,7 +52,7 @@ exports[`doctor golden output (#1055 byte-identical pin) reachable — all check
     "title": "NextApp CRD",
   },
   {
-    "detail": "all 72 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)",
+    "detail": "all 76 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)",
     "id": "crd-schema",
     "status": "pass",
     "title": "NextApp CRD schema coverage",
@@ -61,6 +62,13 @@ exports[`doctor golden output (#1055 byte-identical pin) reachable — all check
     "id": "operator",
     "status": "pass",
     "title": "Operator deployment",
+  },
+  {
+    "detail": "no release version reported, image sha256:75be42bb6b4c… (a bundle from before the operator version line); compatibility with this CLI cannot be checked",
+    "hint": "Move to a versioned operator (operator first, then CLI). Apply a specific release's digest-pinned bundle: \`kubectl apply --server-side -f https://github.com/getknext-dev/knext/releases/download/operator-v<X.Y.Z>/install-v<X.Y.Z>.yaml\` (see https://knext-platform.dev/docs/versioning).",
+    "id": "operator-version",
+    "status": "warn",
+    "title": "Operator version",
   },
   {
     "detail": "cert-manager-webhook Ready",
@@ -117,6 +125,7 @@ SKIP  vinext-on-node entry freshness              this app does not build with b
 SKIP  NextApp CRD                                 cluster unreachable — check skipped
 SKIP  NextApp CRD schema coverage                 cluster unreachable — check skipped
 SKIP  Operator deployment                         cluster unreachable — check skipped
+SKIP  Operator version                            cluster unreachable — check skipped
 SKIP  cert-manager webhook                        cluster unreachable — check skipped
 SKIP  Knative ingress-class                       cluster unreachable — check skipped
 SKIP  Operator image pullable                     cluster unreachable — check skipped
@@ -175,6 +184,12 @@ exports[`doctor golden output (#1055 byte-identical pin) unreachable — reachab
   },
   {
     "detail": "cluster unreachable — check skipped",
+    "id": "operator-version",
+    "status": "skip",
+    "title": "Operator version",
+  },
+  {
+    "detail": "cluster unreachable — check skipped",
     "id": "cert-manager",
     "status": "skip",
     "title": "cert-manager webhook",
@@ -228,6 +243,7 @@ SKIP  vinext-on-node entry freshness              this app does not build with b
 SKIP  NextApp CRD                                 cluster unreachable — check skipped
 SKIP  NextApp CRD schema coverage                 cluster unreachable — check skipped
 SKIP  Operator deployment                         cluster unreachable — check skipped
+SKIP  Operator version                            cluster unreachable — check skipped
 SKIP  cert-manager webhook                        cluster unreachable — check skipped
 SKIP  Knative ingress-class                       cluster unreachable — check skipped
 SKIP  Operator image pullable                     cluster unreachable — check skipped
@@ -286,6 +302,12 @@ exports[`doctor golden output (#1055 byte-identical pin) auth-failure — the re
   },
   {
     "detail": "cluster unreachable — check skipped",
+    "id": "operator-version",
+    "status": "skip",
+    "title": "Operator version",
+  },
+  {
+    "detail": "cluster unreachable — check skipped",
     "id": "cert-manager",
     "status": "skip",
     "title": "cert-manager webhook",
@@ -339,6 +361,7 @@ SKIP  vinext-on-node entry freshness              this app does not build with b
 SKIP  NextApp CRD                                 cluster unreachable — check skipped
 SKIP  NextApp CRD schema coverage                 cluster unreachable — check skipped
 SKIP  Operator deployment                         cluster unreachable — check skipped
+SKIP  Operator version                            cluster unreachable — check skipped
 SKIP  cert-manager webhook                        cluster unreachable — check skipped
 SKIP  Knative ingress-class                       cluster unreachable — check skipped
 SKIP  Operator image pullable                     cluster unreachable — check skipped
@@ -397,6 +420,12 @@ exports[`doctor golden output (#1055 byte-identical pin) forbidden — the reach
   },
   {
     "detail": "cluster unreachable — check skipped",
+    "id": "operator-version",
+    "status": "skip",
+    "title": "Operator version",
+  },
+  {
+    "detail": "cluster unreachable — check skipped",
     "id": "cert-manager",
     "status": "skip",
     "title": "cert-manager webhook",
@@ -448,8 +477,9 @@ PASS  kubectl strict validation                   client v1.31.2 — the CR appl
 PASS  Static asset mode                           object storage configured (gcs: assets) — assets are offloaded to the bucket and retained across deploys
 SKIP  vinext-on-node entry freshness              this app does not build with build: 'vinext' + runtime: 'node' (or no knext.config.ts was found) — knext-node-entry.mjs, if scaffolded, is never run
 PASS  NextApp CRD                                 served version: v1alpha1
-PASS  NextApp CRD schema coverage                 all 72 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)
+PASS  NextApp CRD schema coverage                 all 76 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)
 PASS  Operator deployment                         kn-next-operator-controller-manager Ready in kn-next-operator-system
+WARN  Operator version                            no release version reported, image sha256:75be42bb6b4c… (a bundle from before the operator version line); compatibility with this CLI cannot be checked (hint: Move to a versioned operator (operator first, then CLI). Apply a specific release's digest-pinned bundle: \`kubectl apply --server-side -f https://github.com/getknext-dev/knext/releases/download/operator-v<X.Y.Z>/install-v<X.Y.Z>.yaml\` (see https://knext-platform.dev/docs/versioning).)
 PASS  cert-manager webhook                        cert-manager-webhook Ready
 PASS  Knative ingress-class                       ingress-class kourier.ingress.networking.knative.dev is served by net-kourier-controller
 PASS  Operator image pullable                     ghcr.io/getknext-dev/kn-next-operator@sha256:75be42bb6b4c6d03c902b4fc90b36b246cc6cacf2233926fa183a6051521a99d is anonymously pullable
@@ -493,7 +523,7 @@ exports[`doctor golden output (#1055 byte-identical pin) budget-exhausted — th
     "title": "NextApp CRD",
   },
   {
-    "detail": "all 72 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)",
+    "detail": "all 76 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)",
     "id": "crd-schema",
     "status": "pass",
     "title": "NextApp CRD schema coverage",
@@ -503,6 +533,13 @@ exports[`doctor golden output (#1055 byte-identical pin) budget-exhausted — th
     "id": "operator",
     "status": "pass",
     "title": "Operator deployment",
+  },
+  {
+    "detail": "no release version reported, image sha256:75be42bb6b4c… (a bundle from before the operator version line); compatibility with this CLI cannot be checked",
+    "hint": "Move to a versioned operator (operator first, then CLI). Apply a specific release's digest-pinned bundle: \`kubectl apply --server-side -f https://github.com/getknext-dev/knext/releases/download/operator-v<X.Y.Z>/install-v<X.Y.Z>.yaml\` (see https://knext-platform.dev/docs/versioning).",
+    "id": "operator-version",
+    "status": "warn",
+    "title": "Operator version",
   },
   {
     "detail": "cert-manager-webhook Ready",
@@ -557,8 +594,9 @@ PASS  kubectl strict validation                   client v1.31.2 — the CR appl
 PASS  Static asset mode                           object storage configured (gcs: assets) — assets are offloaded to the bucket and retained across deploys
 SKIP  vinext-on-node entry freshness              this app does not build with build: 'vinext' + runtime: 'node' (or no knext.config.ts was found) — knext-node-entry.mjs, if scaffolded, is never run
 PASS  NextApp CRD                                 served version: v1alpha1
-FAIL  NextApp CRD schema coverage                 operator behind CLI: the installed CRD is missing 1 field(s) this CLI emits — they would be dropped. Upgrade the operator first (operator, then CLI). (hint: upgrade the operator/CRD FIRST, then the CLI — see https://knext.dev/docs/upgrading)
+FAIL  NextApp CRD schema coverage                 operator behind CLI: the installed CRD is missing 1 field(s) this CLI emits — they would be dropped. Upgrade the operator first (operator, then CLI). (hint: upgrade the operator/CRD FIRST, then the CLI — see https://knext-platform.dev/docs/upgrading)
 PASS  Operator deployment                         kn-next-operator-controller-manager Ready in kn-next-operator-system
+WARN  Operator version                            no release version reported, image sha256:75be42bb6b4c… (a bundle from before the operator version line); compatibility with this CLI cannot be checked (hint: Move to a versioned operator (operator first, then CLI). Apply a specific release's digest-pinned bundle: \`kubectl apply --server-side -f https://github.com/getknext-dev/knext/releases/download/operator-v<X.Y.Z>/install-v<X.Y.Z>.yaml\` (see https://knext-platform.dev/docs/versioning).)
 PASS  cert-manager webhook                        cert-manager-webhook Ready
 PASS  Knative ingress-class                       ingress-class kourier.ingress.networking.knative.dev is served by net-kourier-controller
 PASS  Operator image pullable                     ghcr.io/getknext-dev/kn-next-operator@sha256:75be42bb6b4c6d03c902b4fc90b36b246cc6cacf2233926fa183a6051521a99d is anonymously pullable
@@ -603,7 +641,7 @@ exports[`doctor golden output (#1055 byte-identical pin) crd-schema — an insta
   },
   {
     "detail": "operator behind CLI: the installed CRD is missing 1 field(s) this CLI emits — they would be dropped. Upgrade the operator first (operator, then CLI).",
-    "hint": "upgrade the operator/CRD FIRST, then the CLI — see https://knext.dev/docs/upgrading",
+    "hint": "upgrade the operator/CRD FIRST, then the CLI — see https://knext-platform.dev/docs/upgrading",
     "id": "crd-schema",
     "status": "fail",
     "title": "NextApp CRD schema coverage",
@@ -613,6 +651,13 @@ exports[`doctor golden output (#1055 byte-identical pin) crd-schema — an insta
     "id": "operator",
     "status": "pass",
     "title": "Operator deployment",
+  },
+  {
+    "detail": "no release version reported, image sha256:75be42bb6b4c… (a bundle from before the operator version line); compatibility with this CLI cannot be checked",
+    "hint": "Move to a versioned operator (operator first, then CLI). Apply a specific release's digest-pinned bundle: \`kubectl apply --server-side -f https://github.com/getknext-dev/knext/releases/download/operator-v<X.Y.Z>/install-v<X.Y.Z>.yaml\` (see https://knext-platform.dev/docs/versioning).",
+    "id": "operator-version",
+    "status": "warn",
+    "title": "Operator version",
   },
   {
     "detail": "cert-manager-webhook Ready",

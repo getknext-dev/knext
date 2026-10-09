@@ -46,11 +46,33 @@
  * because nitro externalizes sharp: `import sharp from "sharp"` survives into
  * `.output/server/index.mjs`, so sharp only enters a module graph now.
  */
+import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import {
+    existsSync,
+    readdirSync,
+    readFileSync,
+    realpathSync,
+    rmSync,
+    statSync,
+    writeFileSync,
+} from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { assertBunBaseExe, sealBuild, sealCompile } from "./bun-base-exe.mjs";
+import {
+    HARFBUZZ_NOTICE_FILE,
+    harfbuzzNoticeText,
+    ogHarfbuzzWarning,
+    resolvePinnedHarfbuzzWasm,
+    vinextOgPackageJson,
+} from "./og-harfbuzz.mjs";
+import {
+    assetAnchorPackageRoot,
+    rewriteAssetAnchors,
+    rewriteEntryHarfbuzzAnchors,
+    rewriteImportMetaUses,
+} from "./entry-asset-anchor.mjs";
 import {
     BUNDLED_PREFIX,
     hasNativeAddon,
@@ -63,8 +85,14 @@ import {
     analyzeServerModule,
     wrapRequireBindings,
 } from "./entry-require-staticize.mjs";
-import { verifyBytecodeExec } from "./bytecode-exec-verify.mjs";
-import { embedBuildOptions, planEmbed } from "./compile-embed.mjs";
+import { verifyBytecodeExec, verifyBytecodeModules } from "./bytecode-exec-verify.mjs";
+import {
+    embedBuildOptions,
+    parseIncludeJson,
+    planEmbed,
+    embeddedPathsMissing,
+    planIncludes,
+} from "./compile-embed.mjs";
 
 /** `--flag value` pairs; no positional arguments. */
 function parseArgs(argv) {
@@ -109,15 +137,45 @@ if (!existsSync(ENTRY)) {
     process.exit(1);
 }
 
-// The Bun.serve keep-alive guard, injected as the FIRST import of the nitro
-// entry so it patches `globalThis.Bun.serve` BEFORE srvx/bun calls it (ESM
-// evaluates a module's imports depth-first in source order, so the first import
-// runs first). This is how the mitigation reaches the COMPILED binary: a
-// `bun --preload` cannot touch a compiled executable, so the guard has to be in
-// the bundle. See bun-serve-keepalive-guard.mjs for the root cause (#silent-reset,
-// the Bun.serve sibling of the node-lane #188 reset). Resolved beside THIS file:
-// shipped as `.js` in dist, `.mjs` in the source tree (dev/tests) — try both.
 const compileHere = dirname(fileURLToPath(import.meta.url));
+
+// The ARP/neighbour-table primer (#1760, #1863), injected as the VERY FIRST
+// import of the nitro entry — ahead of the keep-alive guard below (ESM
+// evaluates a module's imports depth-first in source order, so the first
+// import runs first; same mechanism the keep-alive guard's own comment relies
+// on). On a flannel-VXLAN node (OKE) a stale neighbour entry for a recycled
+// pod IP can black-hole a freshly-started pod for ~8.5s until it sends an
+// outbound packet of its own — see arp-primer.cjs's header for the mechanism
+// and the measurement. This stage has no supervisor in front of it the way
+// `node-server.ts` does for the standalone targets (it requires the primer as
+// its OWN first action instead — see its ENTRYPOINT comment), and
+// `standalone-compile.mjs` bakes the same primer in first for the compiled
+// standalone-on-Bun target — so this compiled vinext executable is the one
+// remaining place it has to be wired in explicitly. Resolved beside THIS
+// file, same extension in both dist and the source tree (tsup emits `.cjs`
+// for format:cjs under `"type": "module"` — no dist/src split to try both
+// extensions for, unlike the `.mjs`-sourced guards below).
+const ARP_PRIMER_FILE = join(compileHere, "arp-primer.cjs");
+if (!existsSync(ARP_PRIMER_FILE)) {
+    // Fail CLOSED, matching every other preload below: a binary built
+    // without it silently reintroduces the flannel cold-start stall this
+    // fix exists to remove, with no signal until someone measures a cluster.
+    console.error(
+        "[knext compile] the ARP/neighbour-table primer is missing beside vinext-compile " +
+            `(looked for arp-primer.cjs in ${compileHere}) — the installed @getknext/core is incomplete`,
+    );
+    process.exit(1);
+}
+
+// The Bun.serve keep-alive guard, injected as the nitro entry's SECOND import
+// (right after the ARP primer above) so it patches `globalThis.Bun.serve`
+// BEFORE srvx/bun calls it (ESM evaluates a module's imports depth-first in
+// source order, so an earlier import runs first). This is how the mitigation
+// reaches the COMPILED binary: a `bun --preload` cannot touch a compiled
+// executable, so the guard has to be in the bundle. See
+// bun-serve-keepalive-guard.mjs for the root cause (#silent-reset, the
+// Bun.serve sibling of the node-lane #188 reset). Resolved beside THIS file:
+// shipped as `.js` in dist, `.mjs` in the source tree (dev/tests) — try both.
 const GUARD_FILE = [
     join(compileHere, "bun-serve-keepalive-guard.js"),
     join(compileHere, "bun-serve-keepalive-guard.mjs"),
@@ -221,11 +279,19 @@ function listServerOutputModules(dir) {
  * Bun.build runs, because rolldown puts the `createRequire(import.meta.url)`
  * binding in one module and the `__require("<pkg>")` calls in others.
  *
- *  - `embed`: bare literals passed to calls anywhere in the output whose
- *    package nitro traced into `.output/server/node_modules` and that resolve.
+ *  - `embed`: bare literals passed to a RECOGNISED require binding (local, or
+ *    imported from the module that defines it) that resolve from the entry's
+ *    own directory — either nitro's traced `.output/server/node_modules`
+ *    sidecar (#1309/#1314: Node's upward node_modules walk from there reaches
+ *    the sidecar directly) OR, when nitro bundled the package directly instead
+ *    of leaving it external, the app's regular `node_modules` (cluster C11,
+ *    `streaming-ssr`'s edge-runtime pages: a require reached only through the
+ *    per-module-merge getter-indirection binding shape — see
+ *    entry-require-staticize.mjs's header — for a package Bun's own static
+ *    graph already bundled elsewhere, just not through THIS runtime call).
  *    Every require binding is wrapped to load these from the bundle.
- *  - `unresolved`: literals passed to a RECOGNISED require binding (local, or
- *    imported from the module that defines it) that are not embedded.
+ *  - `unresolved`: literals passed to a RECOGNISED require binding that do not
+ *    resolve at all (not embeddable, from anywhere).
  *  - `dynamic`: modules calling a recognised require binding with a
  *    non-literal specifier (`__require(name)`): what it loads is known only at
  *    runtime, so it cannot be embedded.
@@ -255,22 +321,6 @@ function planRuntimeRequires() {
     const name = (path) => relative(dirname(ENTRY), path);
 
     const embed = new Map();
-    for (const [path, analysis] of modules) {
-        for (const specs of analysis.literalCalls.values()) {
-            for (const spec of specs) {
-                if (!existsSync(join(SIDECAR_NODE_MODULES, packageNameOf(spec)))) continue;
-                try {
-                    Bun.resolveSync(spec, dirname(ENTRY));
-                } catch {
-                    continue;
-                }
-                const users = embed.get(spec) ?? new Set();
-                users.add(name(path));
-                embed.set(spec, users);
-            }
-        }
-    }
-
     const unresolved = new Map();
     const ambiguousUnresolved = new Map();
     const dynamic = [];
@@ -301,8 +351,38 @@ function planRuntimeRequires() {
                 (ambiguous ? ambiguousDynamic : dynamic).push(name(path));
             }
             for (const spec of analysis.literalCalls.get(callee) ?? []) {
-                if (embed.has(spec)) continue;
-                const target = ambiguous ? ambiguousUnresolved : unresolved;
+                if (embed.has(spec)) {
+                    embed.get(spec).add(name(path));
+                    continue;
+                }
+                // Resolvable from the entry's own directory covers BOTH cases
+                // a confirmed require binding can reach: the sidecar (nitro
+                // traced it to .output/server/node_modules, which Node's
+                // upward node_modules walk from dirname(ENTRY) finds directly
+                // — #1309/#1314) and, when nitro bundled the package directly
+                // instead (cluster C11), the app's regular node_modules, found
+                // the same way by walking further up. Either way this is a
+                // real, embeddable file — AS LONG AS that walk stayed inside
+                // the app's own workspace (`isWithinAppRoot`, round-2 review;
+                // the boundary is the nearest ancestor `package.json` with a
+                // `workspaces` field, or the app root itself when there is
+                // none — see `findWorkspaceRoot`): the SAME upward walk has
+                // no bound, so it can resolve a package that is not this
+                // app's (or its workspace's) dependency at all, on the build
+                // machine's own disk. A resolved-but-outside-root spec is
+                // treated the SAME as an ordinary unresolvable one (warn by
+                // default, fail only under KNEXT_COMPILE_STRICT_REQUIRES=1) —
+                // never embedded silently, never a special hard failure
+                // either: jev 0.99 picked consistency with the existing
+                // unresolved-package handling over a bespoke always-fail path.
+                let resolvable;
+                try {
+                    const resolved = Bun.resolveSync(spec, dirname(ENTRY));
+                    resolvable = Boolean(resolved) && isWithinAppRoot(resolved);
+                } catch {
+                    resolvable = false;
+                }
+                const target = resolvable ? embed : ambiguous ? ambiguousUnresolved : unresolved;
                 const users = target.get(spec) ?? new Set();
                 users.add(name(path));
                 target.set(spec, users);
@@ -342,6 +422,304 @@ function selfContainedEntryExprs(entryRelDir) {
     };
 }
 
+/** Hard cap on an embedded asset-anchor sibling's size — a build error, never a silent skip. */
+const ASSET_ANCHOR_MAX_BYTES = 16 * 1024 * 1024;
+
+/**
+ * A `new URL(<literal>, import.meta.url)` anchor that FEEDS A READ in the
+ * package module at `modulePath` resolves to a real on-disk sibling, or it
+ * does not (cluster C4 — see entry-asset-anchor.mjs's docstring for the full
+ * mechanism: nitro already staged the sibling next to the module that reads
+ * it, and a bundled module's `import.meta.url` under `--bytecode` is the
+ * BUILD machine's path, not a portable one). `rewriteAssetAnchors` already
+ * confines CALLS here to read anchors in a module inside some package
+ * (`assetAnchorPackageRoot` is defined) — this function's own job is the
+ * parts that need a real filesystem:
+ *
+ *   - existence: a literal that resolves to nothing is left untouched,
+ *     never an error (absent-and-unused is fine, same as sharp);
+ *   - CONTAINMENT: the candidate's REAL path (symlinks resolved) must stay
+ *     inside the module's own package's REAL root. A `../../../etc/x`
+ *     literal, or a symlink inside the package pointing outside it, is
+ *     refused — a raw string-prefix check on the un-resolved path would miss
+ *     the symlink case, which is why both sides are `realpathSync`'d before
+ *     comparing;
+ *   - SIZE: over `ASSET_ANCHOR_MAX_BYTES` fails the build with a named
+ *     reason, never a silent cap-and-truncate.
+ *
+ * Containment and size violations THROW (Bun.build's own `onLoad` failure
+ * path — the same convention `sharpAddonDlopen`/`selfContainedEmbed` use in
+ * this file — so they surface through `result.success === false` and the
+ * printed `result.logs`, not a bespoke `process.exit`).
+ */
+function resolveAssetAnchor(literal, modulePath) {
+    const packageRoot = assetAnchorPackageRoot(modulePath);
+    if (packageRoot === undefined) return undefined; // belt-and-suspenders; rewriteAssetAnchors already gates this
+    const abs = resolve(dirname(modulePath), literal);
+    if (!existsSync(abs)) return undefined;
+    let realAbs;
+    let realRoot;
+    try {
+        realAbs = realpathSync(abs);
+        realRoot = realpathSync(packageRoot);
+    } catch {
+        return undefined;
+    }
+    if (realAbs !== realRoot && !realAbs.startsWith(`${realRoot}${sep}`)) {
+        throw new Error(
+            `[knext compile] asset anchor ${JSON.stringify(literal)} in ${modulePath} resolves to ` +
+                `${realAbs}, outside its own package (${realRoot}) — refusing to embed a file that ` +
+                "escapes the package it was found in (a '..' literal, or a symlink pointing outside it)",
+        );
+    }
+    const size = statSync(realAbs).size;
+    if (size > ASSET_ANCHOR_MAX_BYTES) {
+        throw new Error(
+            `[knext compile] asset anchor ${JSON.stringify(literal)} in ${modulePath} is ${size} bytes, ` +
+                `over the ${ASSET_ANCHOR_MAX_BYTES}-byte asset-anchor cap (${realAbs}) — refusing to embed it`,
+        );
+    }
+    return realAbs;
+}
+
+/**
+ * Where an Emscripten `locateFile("<name>.wasm")` call in the `@vercel/og`
+ * module at `modulePath` should read from inside the compiled executable
+ * (#1872), or `undefined` to leave the call alone.
+ *
+ * 1. A real sibling of the module (an `@vercel/og` release that ships its
+ *    `hb.wasm`) — same containment + size rules as `resolveAssetAnchor`.
+ * 2. `hb.wasm` only: `@vercel/og` 1.x inlines harfbuzzjs's glue but 1.0.3 ships
+ *    no `dist/hb.wasm` (vercel/satori#801). nitro externalizes `@vercel/og`, so
+ *    vinext's own `vinext:og-harfbuzz` transform — which loads the binary from
+ *    `harfbuzzjs` — never runs on the copy this compile bundles. The matching
+ *    binary is the one in the exact-pinned chain the glue was built from:
+ *    `@vercel/og` → `satori` → `harfbuzzjs/hb.wasm` (the same chain vinext
+ *    resolves). nitro's staged copy carries no `satori`, so the chain is
+ *    resolved from the module's own location, then the app's install, then
+ *    vinext's (which depends on `@vercel/og`) — and ONLY accepted when every
+ *    link matches the EXACT pin of the link before it: `satori` at the staged
+ *    `@vercel/og`'s `dependencies.satori`, `harfbuzzjs` at that satori's
+ *    `dependencies.harfbuzzjs`. A glue/binary mismatch is never embedded.
+ */
+function resolveEmscriptenWasm(name, modulePath) {
+    const sibling = resolveAssetAnchor(`./${name}`, modulePath);
+    if (sibling !== undefined || name !== "hb.wasm") return sibling;
+    const packageRoot = assetAnchorPackageRoot(modulePath);
+    if (packageRoot === undefined) return undefined;
+    const ogPkg = join(packageRoot, "package.json");
+    const startPoints = [ogPkg, join(APP_ROOT, "package.json")];
+    const vinextOg = vinextOgPackageJson(APP_ROOT);
+    if (vinextOg !== undefined) startPoints.push(vinextOg);
+    return harfbuzzOrSignal(resolvePinnedHarfbuzzWasm(ogPkg, startPoints), modulePath);
+}
+
+const HARFBUZZ_WARNED = new Set();
+/** hb.wasm paths handed to the bundle: the notice is written iff this is non-empty. */
+const HARFBUZZ_EMBEDDED = new Set();
+
+/**
+ * A HarfBuzz resolution result -> the path to embed, or the build-time signal
+ * when the loader IS in the bundle but no version-matched binary exists
+ * (#1872): a loud warning by default — an app that never renders next/og is
+ * unaffected, and vinext ships the og shim either way — and a FAILED build
+ * under strict requires (`KNEXT_COMPILE_STRICT_REQUIRES=1` / self-contained),
+ * the same split this compile already applies to unbundlable requires.
+ */
+function harfbuzzOrSignal(result, where) {
+    if ("path" in result) {
+        HARFBUZZ_EMBEDDED.add(result.path);
+        return result.path;
+    }
+    const body = `${ogHarfbuzzWarning(result.reason)} (in ${where})`;
+    if (STRICT_REQUIRES) throw new Error(`[knext compile] ${body}`);
+    if (!HARFBUZZ_WARNED.has(body)) {
+        HARFBUZZ_WARNED.add(body);
+        console.warn(`[knext compile] ${body}`);
+    }
+    return undefined;
+}
+
+/** The asset-anchor pass's cost and yield, printed once after the build. */
+const ASSET_ANCHOR_STATS = { modules: 0, analysed: 0, ms: 0, embedded: new Set() };
+
+/**
+ * The asset-anchor consumer analysis (asset-anchor-analyze.mjs), run as its
+ * own `bun` process: it parses with acorn, a third-party package, and this
+ * script's import closure must stay node-builtins-only (it holds the Bun
+ * base-executable seal of bun-base-exe.mjs — see asset-anchor-analyze.mjs's
+ * header). Resolved beside THIS file: `.js` in dist, `.mjs` in the source
+ * tree. Fail CLOSED when absent:
+ * without it every package's sibling-asset read (next/og's wasm and font
+ * included) would silently ENOENT in the shipped binary.
+ */
+const ASSET_ANCHOR_ANALYZER = [
+    join(compileHere, "asset-anchor-analyze.js"),
+    join(compileHere, "asset-anchor-analyze.mjs"),
+].find((c) => existsSync(c));
+if (!ASSET_ANCHOR_ANALYZER) {
+    console.error(
+        "[knext compile] the asset-anchor analyzer is missing beside vinext-compile " +
+            `(looked for asset-anchor-analyze.{js,mjs} in ${compileHere}) — the installed @getknext/core is incomplete`,
+    );
+    process.exit(1);
+}
+
+/** How long one analyzer process may take before the build gives up on it. */
+const ASSET_ANCHOR_ANALYZER_TIMEOUT_MS = 120_000;
+
+/**
+ * `analyzeAssetAnchors(src)` for the module at `path`, in a child `bun`
+ * process (source on stdin, JSON on stdout).
+ *
+ * A failure of the CHILD — it crashed, was killed (incl. the timeout), could
+ * not load acorn, or printed something that is not an analysis — THROWS, which
+ * fails the build (Bun.build's onLoad failure path). That is a broken knext
+ * install, not a property of the app, and carrying on would silently drop
+ * every embedded sibling (next/og's wasm and font included) and ship a binary
+ * that ENOENTs. A module acorn cannot PARSE is different: the child reports it
+ * as `parseError` and exits 0, and the caller warns and leaves that one module
+ * as written.
+ *
+ * `--no-install`: with no `node_modules` above the analyzer, Bun would
+ * otherwise auto-install a missing `acorn` from the registry at build time.
+ */
+function analyzeOutOfProcess(src, path) {
+    ASSET_ANCHOR_STATS.analysed++;
+    const analysis = runAnalyzer(src, path, []);
+    const wellFormed =
+        Array.isArray(analysis.anchors) &&
+        analysis.anchors.every(
+            (a) =>
+                typeof a?.literal === "string" &&
+                Number.isInteger(a.start) &&
+                Number.isInteger(a.end) &&
+                ["read", "excluded", "unknown"].includes(a.consumer),
+        );
+    if (!wellFormed) analyzerFailed(path, "printed JSON that is not an analysis");
+    return analysis;
+}
+
+/** Throw the build-failing analyzer error (see `analyzeOutOfProcess`). */
+function analyzerFailed(path, what) {
+    throw new Error(
+        `[knext compile] the asset-anchor analyzer (${ASSET_ANCHOR_ANALYZER}) ${what} while ` +
+            `analysing ${path} — refusing to build a binary whose packages' sibling files ` +
+            "(next/og's wasm and font among them) would not be embedded. This is a broken " +
+            "@getknext/core install (is its `acorn` dependency present?); reinstall it.",
+    );
+}
+
+/**
+ * Run the analyzer child on `src` (with `flags`) and return its parsed JSON
+ * object; any failure of the child itself throws via `analyzerFailed`.
+ */
+function runAnalyzer(src, path, flags) {
+    const child = spawnSync(process.execPath, ["--no-install", ASSET_ANCHOR_ANALYZER, ...flags], {
+        input: src,
+        encoding: "utf8",
+        maxBuffer: 64 * 1024 * 1024,
+        timeout: ASSET_ANCHOR_ANALYZER_TIMEOUT_MS,
+    });
+    const fail = (what) => analyzerFailed(path, what);
+    if (child.error !== undefined || child.status !== 0) {
+        const how =
+            child.error?.code === "ETIMEDOUT"
+                ? `timed out after ${ASSET_ANCHOR_ANALYZER_TIMEOUT_MS} ms`
+                : child.status === null
+                  ? `was killed by ${child.signal ?? child.error}`
+                  : `exited ${child.status}`;
+        const stderr = String(child.stderr ?? "").trim();
+        fail(`${how}${stderr ? ` (${stderr.split("\n").slice(-3).join(" | ")})` : ""}`);
+    }
+    let analysis;
+    try {
+        analysis = JSON.parse(child.stdout);
+    } catch {
+        fail(`printed no JSON (${JSON.stringify(String(child.stdout).slice(0, 120))})`);
+    }
+    if (analysis === null || typeof analysis !== "object") {
+        fail(`printed JSON that is not an analysis (${String(child.stdout).slice(0, 120)})`);
+    }
+    return analysis;
+}
+
+/**
+ * The CODE-position `import.meta` uses of the compiled entry (acorn, out of
+ * process — see `findImportMetaUses`), so the bytecode rewrite never splices
+ * into a string that merely mentions `import.meta.url` (an MDX docs page's
+ * code sample compiles to exactly that). A child failure throws like any
+ * analyzer failure; an entry acorn cannot PARSE also fails the build (jev
+ * 0.98 over falling back to the old textual replace, which corrupts such
+ * strings) — Bun's own `--bytecode` step needs every use found, so a guess
+ * either way ships a broken binary.
+ */
+function entryImportMetaUses(src, path) {
+    const found = runAnalyzer(src, path, ["--import-meta"]);
+    if (found.parseError !== undefined) {
+        throw new Error(
+            `[knext compile] could not parse the server entry ${path} to locate its import.meta ` +
+                `uses (${found.parseError}) — refusing to rewrite it blind, since a textual rewrite ` +
+                "corrupts any string that mentions import.meta",
+        );
+    }
+    const wellFormed =
+        Array.isArray(found.uses) &&
+        found.uses.every(
+            (u) =>
+                Number.isInteger(u?.start) &&
+                Number.isInteger(u.end) &&
+                (u.prop === null || typeof u.prop === "string") &&
+                (u.alias === undefined || typeof u.alias === "boolean"),
+        );
+    if (!wellFormed) analyzerFailed(path, "printed JSON that is not an import.meta analysis");
+    return found.uses;
+}
+
+/**
+ * `rewriteAssetAnchors` for one non-entry module, timed and reported: every
+ * embedded sibling is logged once, every anchor left unembedded for a reason a
+ * user may care about (an unrecognised use, a missing file) gets one line, and
+ * a module the parser cannot read is a named warning (left as written — never
+ * guessed at). A failure of the analyzer PROCESS throws (see
+ * `analyzeOutOfProcess`).
+ */
+function rewriteModuleAssetAnchors(raw, path) {
+    const t0 = performance.now();
+    const rewrite = rewriteAssetAnchors(
+        raw,
+        path,
+        (literal) => resolveAssetAnchor(literal, path),
+        (name) => resolveEmscriptenWasm(name, path),
+        (src) => analyzeOutOfProcess(src, path),
+    );
+    ASSET_ANCHOR_STATS.ms += performance.now() - t0;
+    ASSET_ANCHOR_STATS.modules++;
+    if (rewrite.parseError !== undefined) {
+        console.warn(
+            `[knext compile] could not parse ${path} to analyse its asset anchors ` +
+                `(${rewrite.parseError}) — left as written; NONE of its new URL(..., import.meta.url) ` +
+                "sibling files were embedded, so a read of one fails once the binary leaves this machine",
+        );
+    }
+    for (const skip of rewrite.skipped) {
+        console.log(`[knext compile] did not embed ${skip.literal} for ${path}: ${skip.reason}`);
+    }
+    for (const asset of rewrite.assets) {
+        if (ASSET_ANCHOR_STATS.embedded.has(asset.absPath)) continue;
+        ASSET_ANCHOR_STATS.embedded.add(asset.absPath);
+        console.log(`[knext compile] embedded sibling asset ${asset.absPath} (read by ${path})`);
+    }
+    return rewrite;
+}
+
+/** `import <id> from <path> with { type: "file" };` lines, one per embedded asset. */
+function assetAnchorImports(assets) {
+    return assets
+        .map((a) => `import ${a.id} from ${JSON.stringify(a.absPath)} with { type: "file" };\n`)
+        .join("");
+}
+
 /**
  * Injects the keep-alive guard import into the nitro entry AND rewrites
  * `import.meta.*` so `--bytecode`'s CommonJS output can hold it. Both act on the
@@ -354,20 +732,66 @@ const importMetaToCjs = {
         build.onLoad({ filter: /\.m?js$/ }, async (args) => {
             const path = resolve(args.path);
             if (path !== ENTRY) {
-                // A chunk of the server output: wrap its require bindings only.
-                // Bun rewrites a bundled chunk's own `import.meta` itself; the
-                // guard imports and the import.meta rewrite below belong to the
+                // Any other module reaching the compile — a chunk of the server
+                // output, OR a server-external that stayed bundled because its
+                // entry is ESM (`@vercel/og`, cluster C4 — see
+                // entry-asset-anchor.mjs). The asset-anchor rewrite runs for
+                // BOTH, but only touches a module inside some package, and
+                // only an anchor that feeds a file read (`rewriteAssetAnchors`
+                // gates on `path` and on each anchor's consumer) — the entry is
+                // never inside a package, which is why this call is not
+                // duplicated below for the entry branch. The require-binding
+                // wrap stays confined to the server output proper (the only
+                // place `PLAN.modules` has an analysis) — Bun rewrites a
+                // bundled chunk's own `import.meta` itself; the guard imports
+                // and the entry's import.meta rewrite below belong to the
                 // entry alone.
-                const analysis = PLAN.modules.get(path);
-                if (!analysis || !isServerOutputModule(path)) return undefined;
                 const raw = await Bun.file(path).text();
-                const wrapped = wrapRequireBindings(raw, analysis.aliases, [...PLAN.embed.keys()]);
-                return wrapped.count > 0 ? { contents: wrapped.contents, loader: "js" } : undefined;
+                const assetRewrite = rewriteModuleAssetAnchors(raw, path);
+                let contents = assetRewrite.contents;
+                let changed = assetRewrite.assets.length > 0;
+                const analysis = PLAN.modules.get(path);
+                if (analysis && isServerOutputModule(path)) {
+                    const wrapped = wrapRequireBindings(contents, analysis.aliases, [...PLAN.embed.keys()]);
+                    contents = wrapped.contents;
+                    changed = changed || wrapped.count > 0;
+                }
+                if (!changed) return undefined;
+                return {
+                    contents: assetAnchorImports(assetRewrite.assets) + contents,
+                    loader: "js",
+                };
             }
-            const raw = await Bun.file(args.path).text();
-            // Prepend the guard imports FIRST, always — independent of whether the
-            // entry uses import.meta. `import "<abs>";` is bundled + evaluated
-            // before the rest of the entry's imports, patching Bun.serve in time.
+            // The entry is never inside a package (it is nitro's own generated
+            // `index.mjs`), so it never carries an asset anchor this rewrite
+            // would touch — no call to rewriteAssetAnchors here, by
+            // construction; see entry-asset-anchor.mjs's docstring on scope.
+            // The ONE exception is HarfBuzz's binary, below (#1872).
+            const rawEntry = await Bun.file(args.path).text();
+            // #1872 (app router / middleware): the vinext-rewritten HarfBuzz
+            // read nitro inlined here points at a file it never shipped —
+            // embed the version-matched binary instead (see
+            // rewriteEntryHarfbuzzAnchors). Only HarfBuzz's own anchor; nothing
+            // else in the entry is touched. Runs BEFORE the import.meta rewrite.
+            const hbRewrite = rewriteEntryHarfbuzzAnchors(rawEntry, () => {
+                const vinextOg = vinextOgPackageJson(APP_ROOT);
+                return harfbuzzOrSignal(
+                    vinextOg === undefined
+                        ? { reason: "vinext's @vercel/og is not resolvable from the app" }
+                        : resolvePinnedHarfbuzzWasm(vinextOg, [vinextOg]),
+                    ENTRY,
+                );
+            });
+            if (hbRewrite.assets.length > 0) {
+                console.log(
+                    `[knext compile] embedded HarfBuzz hb.wasm for next/og (${hbRewrite.assets[0].absPath})`,
+                );
+            }
+            const raw = assetAnchorImports(hbRewrite.assets) + hbRewrite.contents;
+            // Prepend the preload imports FIRST, always — independent of whether
+            // the entry uses import.meta. `import "<abs>";` is bundled + evaluated
+            // before the rest of the entry's imports, firing the ARP primer and
+            // patching Bun.serve in time.
             //
             // Then wrap the entry's `createRequire(import.meta.url)` bindings so
             // the EXTERNAL packages nitro reaches through them are bundled
@@ -382,7 +806,14 @@ const importMetaToCjs = {
             // resolve from, and a `node_modules` planted beside the binary must
             // not be able to answer a require), and `.output/public` embedded
             // through a generated module of file imports.
+            //
+            // ARP_PRIMER_FILE is FIRST of all — before the keep-alive guard,
+            // before the sidecar resolver, before the cache-control
+            // normalization, before `import.meta` even exists as a concept in
+            // this entry — because it is the earliest point anything in this
+            // compiled process can send the one outbound packet #1760 needs.
             const src =
+                `import ${JSON.stringify(ARP_PRIMER_FILE)};\n` +
                 `import ${JSON.stringify(GUARD_FILE)};\n` +
                 (SELF_CONTAINED ? "" : `import ${JSON.stringify(SIDECAR_INSTALL_FILE)};\n`) +
                 `import ${JSON.stringify(CACHE_CONTROL_FILE)};\n` +
@@ -392,11 +823,13 @@ const importMetaToCjs = {
                     : "") +
                 wrapped.contents;
             console.log(
-                "[knext compile] injected the Bun.serve keep-alive guard as the entry's first import",
+                "[knext compile] injected the ARP primer (#1760) and the Bun.serve keep-alive guard as the entry's first imports",
             );
-            const before = (src.match(/import\.meta\.(url|filename|dirname)/g) ?? [])
-                .length;
-            if (before === 0) return { contents: src, loader: "js" };
+            // Cheap pre-filter: no `import.meta` text at all means nothing to
+            // rewrite, so skip the out-of-process analyzer. Deliberately NOT
+            // `import.meta.(url|...)`: a bare `var t = import.meta` (rolldown's
+            // getter shape) carries no such member text but must be rewritten.
+            if (!src.includes("import.meta")) return { contents: src, loader: "js" };
             // These must reconstruct the ORIGINAL entry path
             // (<dirname(execPath)>/.output/server/index.mjs), NOT process.execPath
             // itself. nitro's bun preset resolves public assets as
@@ -418,22 +851,27 @@ const importMetaToCjs = {
             const exprs = SELF_CONTAINED
                 ? selfContainedEntryExprs(relative(APP_ROOT, ENTRY_DIR).split(sep).join("/"))
                 : { entryFileExpr, entryDirExpr, entryUrlExpr };
-            const out = src
-                .replaceAll("import.meta.filename", exprs.entryFileExpr)
-                .replaceAll("import.meta.dirname", exprs.entryDirExpr)
-                .replaceAll("import.meta.url", exprs.entryUrlExpr);
-            const after = (out.match(/import\.meta/g) ?? []).length;
-            if (after > 0) {
+            // CODE positions only (acorn, out of process): the text inside a
+            // string, template text or comment is data and stays as written.
+            const { contents: out, count, survived } = rewriteImportMetaUses(
+                src,
+                entryImportMetaUses(src, path),
+                {
+                    url: exprs.entryUrlExpr,
+                    filename: exprs.entryFileExpr,
+                    dirname: exprs.entryDirExpr,
+                },
+            );
+            if (survived.length > 0) {
                 // Bytecode would fail anyway; failing here says WHY, and names
                 // the form that was not handled.
-                const sample = out.match(/import\.meta\.\w+/)?.[0] ?? "import.meta";
                 throw new Error(
-                    `[knext compile] ${after} import.meta use(s) survived the rewrite ` +
-                        `(e.g. ${sample}); --bytecode cannot compile them`,
+                    `[knext compile] ${survived.length} import.meta use(s) survived the rewrite ` +
+                        `(e.g. ${survived[0]}); --bytecode cannot compile them`,
                 );
             }
             console.log(
-                `[knext compile] rewrote ${before} import.meta use(s) for bytecode`,
+                `[knext compile] rewrote ${count} import.meta use(s) for bytecode`,
             );
             return { contents: out, loader: "js" };
         });
@@ -555,6 +993,92 @@ const EMBEDDED_PREFIX = "knext-embedded:";
 // Unique per build, so a stale binary cannot pass the bytecode proof.
 const BYTECODE_MARKER = `knext-vinext-exec:${randomBytes(12).toString("hex")}`;
 const APP_ROOT = dirname(dirname(ENTRY_DIR));
+// Round-2 review (#1877): `planRuntimeRequires`'s embed computation resolves
+// a confirmed require's spec via `Bun.resolveSync(spec, dirname(ENTRY))` —
+// but Node's module resolution walks UPWARD through ancestor `node_modules`
+// directories with NO bound, so that alone can succeed by finding a package
+// that is not a dependency of this app at all (two directories above the app
+// root on the BUILD MACHINE's own disk, say). Embedding that would make the
+// binary's contents depend on the build machine's disk layout instead of the
+// app's own declared dependencies.
+//
+// The boundary is the WORKSPACE root, not `APP_ROOT` itself (measured: this
+// mattered on the real file-manager monorepo build). A workspace's own
+// package manager hoists dependencies to a SHARED root `node_modules`, often
+// reached from the app only through a symlink (bun: `apps/file-manager/
+// node_modules/minio -> ../../../node_modules/.bun/minio@.../node_modules/
+// minio`) — realpath-resolving that symlink (needed to be symlink-safe
+// against a REAL escape) lands outside `APP_ROOT`, so confining the check to
+// `APP_ROOT` alone rejected a real, declared, workspace-hoisted dependency as
+// if it were a stranger on the build machine's disk. A hoisted workspace
+// dependency is neither: every machine that `bun install`s the SAME
+// workspace gets the SAME package at the SAME relative position, which is
+// exactly the portability the ancestor-escape check exists to protect.
+// `findWorkspaceRoot` walks up from `APP_ROOT` for the nearest ancestor
+// `package.json` declaring a `workspaces` field (or a `pnpm-workspace.yaml`,
+// pnpm's own workspace declaration), falling back to `APP_ROOT`
+// itself (so a standalone, non-monorepo app keeps the tight original
+// boundary). `isWithinAppRoot` is the containment check: realpath-compared
+// (symlink-safe, same technique as sidecar-runtime.mjs's `isInside`), so a
+// resolved path outside that boundary is still refused.
+function findWorkspaceRoot(start) {
+    let dir = start;
+    for (;;) {
+        // pnpm declares its workspace in pnpm-workspace.yaml, not package.json.
+        if (existsSync(join(dir, "pnpm-workspace.yaml"))) return dir;
+        const pkgPath = join(dir, "package.json");
+        if (existsSync(pkgPath)) {
+            try {
+                if (JSON.parse(readFileSync(pkgPath, "utf8")).workspaces !== undefined) return dir;
+            } catch {
+                // Malformed package.json at this level — keep walking up.
+            }
+        }
+        const parent = dirname(dir);
+        if (parent === dir) return start; // filesystem root, no workspace found
+        dir = parent;
+    }
+}
+const CONTAINMENT_ROOT = findWorkspaceRoot(APP_ROOT);
+let containmentRootRealCache;
+function containmentRootReal() {
+    if (containmentRootRealCache === undefined) {
+        try {
+            containmentRootRealCache = realpathSync(CONTAINMENT_ROOT);
+        } catch {
+            containmentRootRealCache = null;
+        }
+    }
+    return containmentRootRealCache;
+}
+function isWithinAppRoot(resolvedPath) {
+    const root = containmentRootReal();
+    if (root === null) return false;
+    try {
+        const real = realpathSync(resolvedPath);
+        return real === root || real.startsWith(`${root}${sep}`);
+    } catch {
+        return false;
+    }
+}
+// knext.config.ts `compile.include` → `--include-json` (stock Bun): the matched
+// JS/TS modules ride along as EXTRA entrypoints (compile-embed.mjs), embedded
+// unexecuted at `$bunfs/root/<path relative to the app root>` and loaded on
+// their first import. Absent → null → the compile options are unchanged.
+let INCLUDE_PLAN = null;
+// `--include-native 1`: the CLI resolved the opt-in knext-patched Bun toolchain
+// (compile.bun: 'knext-patched'), which has `compile.include` — the SAME checked
+// plan is embedded through it instead of as extra entrypoints. A Bun without the
+// option ignores it silently; the embedded-path check below fails that build.
+// @upstream-shim bun-patched-toolchain
+const INCLUDE_NATIVE = args["include-native"] === "1";
+try {
+    const globs = parseIncludeJson(args["include-json"]);
+    if (globs.length > 0) INCLUDE_PLAN = planIncludes(APP_ROOT, globs);
+} catch (err) {
+    console.error(`[knext compile] ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+}
 const PUBLIC_DIR = join(APP_ROOT, ".output", "public");
 const EXTRACT_FILE = [
     join(compileHere, "sharp-native-extract.js"),
@@ -728,10 +1252,11 @@ if (
  * the wrapped require bindings above.
  */
 function selfContainedBuildOptions() {
-    const shape = embedBuildOptions(planEmbed({ root: APP_ROOT, include: [] }), {
+    const shape = embedBuildOptions(INCLUDE_PLAN ?? planEmbed({ root: APP_ROOT, include: [] }), {
         entry: ENTRY,
         outfile: OUTFILE,
-        includeSupported: false,
+        includeSupported: INCLUDE_NATIVE && INCLUDE_PLAN !== null,
+        cwd: process.cwd(),
         bytecode: true,
         minify: true,
         extra: {
@@ -748,11 +1273,38 @@ function selfContainedBuildOptions() {
     };
 }
 
+/**
+ * Disk mode with `compile.include`: the same options as below, plus the include
+ * plan's modules as extra entrypoints under `root` = the app root.
+ */
+function includeBuildOptions(plan) {
+    const shape = embedBuildOptions(plan, {
+        entry: ENTRY,
+        outfile: OUTFILE,
+        includeSupported: INCLUDE_NATIVE,
+        cwd: process.cwd(),
+        bytecode: true,
+        minify: true,
+        extra: {
+            plugins: [importMetaToCjs, sharpAddonDlopen, externalSidecar],
+            // Same bytecode-proof banner as self-contained mode: extra entrypoints
+            // change the build's shape, so the result is verified, not assumed.
+            banner: `globalThis.__knextVinextExecMarker=${JSON.stringify(BYTECODE_MARKER)};`,
+        },
+    });
+    return {
+        ...shape,
+        compile: sealCompile(shape.compile, TARGET ? { target: TARGET } : undefined),
+    };
+}
+
 const result = await Bun.build(
     sealBuild(
         SELF_CONTAINED
             ? selfContainedBuildOptions()
-            : {
+            : INCLUDE_PLAN
+              ? includeBuildOptions(INCLUDE_PLAN)
+              : {
                   entrypoints: [ENTRY],
                   target: "bun",
                   plugins: [importMetaToCjs, sharpAddonDlopen, externalSidecar],
@@ -771,6 +1323,26 @@ if (!result.success) {
     for (const log of result.logs) console.error(String(log));
     process.exit(1);
 }
+console.log(
+    `[knext compile] asset anchors: embedded ${ASSET_ANCHOR_STATS.embedded.size} sibling file(s); ` +
+        `parsed ${ASSET_ANCHOR_STATS.analysed} of ${ASSET_ANCHOR_STATS.modules} module(s); ` +
+        `${ASSET_ANCHOR_STATS.ms.toFixed(1)} ms`,
+);
+{
+    // HarfBuzz (Old MIT) + harfbuzzjs (MIT) require their notice to ship with
+    // the binary that embeds hb.wasm. The file is ALWAYS written beside the
+    // binary — the image recipes COPY it by exact name (a lone no-match glob
+    // fails the legacy docker builder) — and carries the licence text only
+    // when hb.wasm was actually embedded.
+    const noticePath = join(dirname(OUTFILE), HARFBUZZ_NOTICE_FILE);
+    writeFileSync(
+        noticePath,
+        HARFBUZZ_EMBEDDED.size > 0
+            ? harfbuzzNoticeText([...HARFBUZZ_EMBEDDED][0])
+            : "Third-party notices for this knext executable\n\nNo third-party components that require a notice are embedded.\n",
+    );
+    console.log(`[knext compile] wrote the third-party notices (${noticePath})`);
+}
 if (SELF_CONTAINED) {
     // Fail closed: a self-contained binary without bytecode boots and serves,
     // just slower — the regression nobody notices.
@@ -783,6 +1355,43 @@ if (SELF_CONTAINED) {
     console.log(
         "[knext compile] self-contained: nothing needs to sit beside the binary " +
             `(sharp: ${sharpFacaded ? "embedded, unpacked on first use" : "not used"}); bytecode verified`,
+    );
+}
+if (INCLUDE_PLAN) {
+    // Fail closed: every planned module must be IN the executable at its
+    // `$bunfs/root` path. Catches a Bun that silently ignored `compile.include`
+    // (native mode on a stock Bun) before the bytecode count would.
+    const missing = embeddedPathsMissing(readFileSync(OUTFILE), INCLUDE_PLAN.relpaths);
+    if (missing.length > 0) {
+        rmSync(OUTFILE, { force: true });
+        console.error(
+            `[knext compile] compile.include: not embedded in the executable: ${missing.join(", ")}` +
+                (INCLUDE_NATIVE ? " (this Bun did not honour compile.include)" : ""),
+        );
+        process.exit(1);
+    }
+}
+if (INCLUDE_PLAN && !SELF_CONTAINED) {
+    // Fail closed, as self-contained mode does: a binary without bytecode boots
+    // and serves, just slower — the regression nobody notices.
+    const verdict = verifyBytecodeModules(
+        readFileSync(OUTFILE),
+        BYTECODE_MARKER,
+        1 + INCLUDE_PLAN.relpaths.length,
+    );
+    if (!verdict.ok) {
+        rmSync(OUTFILE, { force: true });
+        console.error(`[knext compile] the executable failed the bytecode check: ${verdict.reason}`);
+        process.exit(1);
+    }
+}
+if (INCLUDE_PLAN) {
+    console.log(
+        `[knext compile] compile.include: embedded ${INCLUDE_PLAN.relpaths.length} module(s): ` +
+            INCLUDE_PLAN.relpaths.join(", "),
+    );
+    console.log(
+        `[knext compile] compile.include: via ${INCLUDE_NATIVE ? "native --include (knext-patched Bun)" : "extra entrypoints (stock Bun)"}`,
     );
 }
 if (PLAN.embed.size > 0) {

@@ -1,5 +1,73 @@
 # @getknext/db
 
+## 1.3.0
+
+### Patch Changes
+
+- Stable release of the 1.3 line. This is `1.3.0-rc.10` promoted to GA: the published files are identical to `1.3.0-rc.10` except for the version string. See `docs/release/v1.3.0.md` for the release notes.
+
+## 1.3.0-rc.10
+
+## 1.3.0-rc.9
+
+### Patch Changes
+
+- bf2abb8: Security: new apps now scaffold with Next.js 16.3.8. The default and vinext builder templates move from 16.3.6. Next.js 16.0.0 through 16.3.7 have a high-severity server-side request forgery in Image Optimization (GHSA-cjq9-62q9-8jv4), fixed in 16.3.8. If you scaffolded an app from an earlier release candidate, upgrade it with `npm install next@16.3.8` (or a later 16.3.x).
+  
+  The Next.js cache handler now follows Next 16.3.7+, which scopes cached entries to their source route (cache keys now start with `/route-cache/`): the revalidate window handed back to Next after a scale-to-zero wake is filed under that exact key, so ISR pages generated at request time still read fresh after a wake. After upgrading, cache entries written under the old key shape (before Next 16.3.7) stay unread in Redis until their TTL expires.
+- Updated dependencies [bf2abb8]
+  - @getknext/lib@1.3.0-rc.9
+
+## 1.3.0-rc.8
+
+### Patch Changes
+
+- @getknext/lib@1.3.0-rc.8
+
+## 1.3.0-rc.7
+
+### Patch Changes
+
+- @getknext/lib@1.3.0-rc.7
+
+## 1.3.0-rc.6
+
+### Patch Changes
+
+- @getknext/lib@1.3.0-rc.6
+
+## 1.3.0-rc.5
+
+### Patch Changes
+
+- @getknext/lib@1.3.0-rc.5
+
+## 1.3.0-rc.4
+
+### Patch Changes
+
+- @getknext/lib@1.3.0-rc.4
+
+## 1.3.0-rc.3
+
+### Patch Changes
+
+- @getknext/lib@1.3.0-rc.3
+
+## 1.3.0-rc.2
+
+### Patch Changes
+
+- @getknext/lib@1.3.0-rc.2
+
+## 1.3.0-rc.1
+
+### Patch Changes
+
+- 1aa6b8f: knext's public docs site moved from `knext.dev` to `knext-platform.dev` (`knext.dev` now resolves to an unrelated Cloudflare 403 page). Updates every user-facing `knext.dev` URL in the CLI — help text (`knext --help`), error-message hints (`knext doctor`, missing-config guidance), scaffolded `knext.config.ts` template comments, the asset-upload multi-cloud hint, and package READMEs (`@getknext/core`, `@getknext/lib`, `@getknext/db`, the `kn-next` alias package) — to `knext-platform.dev`. `@getknext/action`'s README is also updated but carries no changeset entry since that package is `private: true` and never publishes. Kubernetes label keys that happen to share the domain string (e.g. the CRD-adjacent `apps.knext.dev/build-id` label) are unaffected; they are not web links.
+- Updated dependencies [1aa6b8f]
+  - @getknext/lib@1.3.0-rc.1
+
 ## 1.0.0
 
 ### Patch Changes
@@ -28,6 +96,7 @@
   Next.js 16.3.7 and later scope every cached entry to its source route, so cache keys now start with `/route-cache/`. The knext cache handler treats every key as an opaque string, so it needs no change. After upgrading an existing app, entries written to Redis under the old key shape (by Next.js before 16.3.7) are never read again and stay in Redis until their TTL expires; the affected pages are regenerated on first request.
 - Updated dependencies [bbe455d]
   - @getknext/lib@1.0.0-rc.6
+
 
 ## 1.0.0-rc.5
 

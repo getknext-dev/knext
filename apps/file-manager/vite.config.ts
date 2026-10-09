@@ -31,6 +31,20 @@ import { nitro } from 'nitro/vite';
 import vinext from 'vinext';
 import { defineConfig } from 'vite';
 
+// #1812: vinext 1.0.1 (vs 1.0.0-beta.12) added unconditional standalone-bundle
+// emission (`vinext/dist/build/standalone.js`, `emitStandaloneOutput`) whenever
+// `next.config.ts`'s `output === 'standalone'` — it now expects a conventional
+// `vite build` to have produced `dist/{client,server}` and aborts the WHOLE
+// build with "No build output found in <root>/dist" when it hasn't, which is
+// always true here: this app's deployable artifact is the `nitro({ preset:
+// 'bun' })` output (`.output/server/index.mjs`), not vinext's own standalone
+// bundle. `output: 'standalone'` on next.config is meaningful ONLY to `next
+// build` (the separate webpack/Node target `package.json`'s `build` script
+// still runs) — it has no effect there. Flagging it off for this vite/vinext
+// process only, via an env var read in next.config.ts, keeps that other
+// target's config byte-for-byte unchanged.
+process.env.KNEXT_VINEXT_BUILD = '1';
+
 export default defineConfig({
   plugins: [
     // Tailwind 4 ships a first-class Vite plugin, and under Vite it is the
@@ -49,7 +63,7 @@ export default defineConfig({
       // registered data cache. Without it the app silently falls back to a
       // per-pod in-memory cache and the provisioned Redis stays empty.
       cache: {
-        data: { adapter: '@getknext/core/internal/vinext-cache-adapter' },
+        data: { adapter: '@getknext/core/internal/vinext-cache-adapter-bun' },
       },
     }),
     nitro({

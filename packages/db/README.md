@@ -45,13 +45,13 @@ const recent = await getDbRO().select().from(orders).where(eq(orders.userId, 'us
 | Node.js | ✓ | ✓ |
 | Bun     | ✓ | ✓ |
 
-See the [compatibility page](https://knext.dev/docs/compat-matrix) for supported Next.js versions and runtime/builder coverage.
+See the [compatibility page](https://knext-platform.dev/docs/compat-matrix) for supported Next.js versions and runtime/builder coverage.
 
 ## Learn more
 
-- [Documentation](https://knext.dev) — guides, schema definition, and migration recipes
-- [Compatibility](https://knext.dev/docs/compat-matrix) — supported runtimes and Next.js versions
-- [Security](https://knext.dev/docs/security) — threat model and hardening
+- [Documentation](https://knext-platform.dev) — guides, schema definition, and migration recipes
+- [Compatibility](https://knext-platform.dev/docs/compat-matrix) — supported runtimes and Next.js versions
+- [Security](https://knext-platform.dev/docs/security) — threat model and hardening
 - [Contributing](https://github.com/getknext-dev/knext/blob/main/CONTRIBUTING.md) — report issues and contribute
 
 ## License

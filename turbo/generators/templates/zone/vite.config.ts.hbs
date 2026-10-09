@@ -29,7 +29,7 @@ export default defineConfig({
       // provisioned Redis stays empty, which is exactly how the gap shipped
       // unnoticed once.
       cache: {
-        data: { adapter: '@getknext/core/internal/vinext-cache-adapter' },
+        data: { adapter: '@getknext/core/internal/vinext-cache-adapter-bun' },
       },
     }),
     nitro({

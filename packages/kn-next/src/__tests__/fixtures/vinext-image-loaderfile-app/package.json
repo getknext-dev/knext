@@ -1,0 +1,15 @@
+{
+  "name": "knext-vinext-image-loaderfile-fixture",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Minimal vinext + Nitro node app with next/image pages and an images.loaderFile custom loader that sends some images to a CDN and keeps the rest on the default /_next/image optimizer, used ONLY by vinext-image-loaderfile.test.ts. Exact pins match the repo vinext toolchain; the lockfile keeps the install reproducible.",
+  "dependencies": {
+    "next": "16.3.8",
+    "nitro": "3.0.260610-beta",
+    "react": "19.2.6",
+    "react-dom": "19.2.6",
+    "vinext": "1.0.1",
+    "vite": "8.2.2"
+  }
+}

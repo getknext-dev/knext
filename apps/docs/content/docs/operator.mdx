@@ -33,9 +33,14 @@ or `operator-vX.Y.Z-rc.N` for a release candidate), so you can pin the exact ver
 against instead of tracking whatever is newest:
 
 ```sh title="shell"
-OPERATOR_TAG=operator-v1.0.0   # any published operator-vX.Y.Z(-rc.N) release tag
-kubectl apply --server-side -f "https://github.com/getknext-dev/knext/releases/download/${OPERATOR_TAG}/install.yaml"
+OPERATOR_VERSION=1.2.3   # any published operator-vX.Y.Z(-rc.N) release
+kubectl apply --server-side -f "https://github.com/getknext-dev/knext/releases/download/operator-v${OPERATOR_VERSION}/install-v${OPERATOR_VERSION}.yaml"
 ```
+
+Each release carries the same digest-pinned bundle under two names: `install-vX.Y.Z.yaml`
+(self-describing — the version is in the file name) and `install.yaml`. See
+[Versioning & compatibility](/docs/versioning#pin-upgrade-and-roll-back-the-operator) to check
+which version you run, upgrade to a specific one, and roll back.
 
 - **`operator-latest`** — the newest stable release; moves only on a stable cut.
 - **`operator-vX.Y.Z`** (and pre-release tags like `operator-vX.Y.Z-rc.1`) — cut once and never
@@ -68,7 +73,7 @@ spec:
   scaling:
     minScale: 0
     maxScale: 20
-    containerConcurrency: 100
+    containerConcurrency: 20
   storage:
     provider: gcs
     bucket: acme-assets
@@ -217,7 +222,7 @@ URLs. `spec.env` values are stored verbatim in the CR and visible to anyone who 
 | Field | Notes |
 |---|---|
 | `url` | The resolved Knative Service URL. |
-| `conditions` | `Ready`, `Degraded`, `Reconciling`, `DatabaseReady`, `EnvMapCollision` — see below. |
+| `conditions` | `Ready`, `Degraded`, `Reconciling`, `DatabaseReady`, `EnvMapCollision`, `PodCreationBlocked` — see below. |
 | `currentTraffic` | Mirror of the ksvc traffic split. |
 
 The operator reports **honest readiness**: `Ready` mirrors the underlying Knative Service's own
@@ -232,7 +237,7 @@ binds a Secret, a successfully bound app shows `DatabaseReady: True` with reason
 knext binds an existing Secret, it does not provision or manage the database. When `spec.database`
 is empty the condition is not set.
 
-Two otherwise-silent failure modes get first-class diagnoses:
+Three otherwise-silent failure modes get first-class diagnoses:
 
 - **Ingress never programs.** If the Knative Service reports its ingress as not-yet-configured for
   more than two minutes, the operator flips `Ready` to `False` with reason `IngressNotProgrammed`
@@ -248,6 +253,17 @@ Two otherwise-silent failure modes get first-class diagnoses:
   `Degraded` with reason `PinnedRevisionNotFound`, plus a Warning event telling you to list the
   surviving revisions and re-pin (or clear `spec.traffic`). See
   [Rollback & traffic split](/docs/rollback).
+- **The namespace rejects the app's pods.** A `LimitRange` (for example a `max.cpu` ceiling or a
+  `maxLimitRequestRatio`) or a `ResourceQuota` can refuse to create the pod for a new revision. The
+  Knative Service then never becomes Ready, and the reason used to be visible only in
+  `kubectl get events`. The operator now sets `PodCreationBlocked: True` on the NextApp, with reason
+  `LimitRangeRejected` or `QuotaExceeded`, naming the revision and carrying the admission message,
+  plus a Warning event. Read it with
+  `kubectl get nextapp <name> -o jsonpath='{.status.conditions[?(@.type=="PodCreationBlocked")].message}'`.
+  The fix is on your side: lower `spec.resources.cpuLimit` / `cpuRequest` / memory to fit the
+  `LimitRange`, or raise the namespace limits (`kubectl describe limitrange,resourcequota -n <ns>`).
+  The condition clears by itself once pods can be created. Only these two kinds of rejection are
+  reported; other pod failures keep surfacing through `Ready`.
 
 ## ISR revalidation & the Kafka queue
 
@@ -291,6 +307,13 @@ The operator is also the policy boundary:
   only if it contains `@sha256:`.
 - **Mutating endpoints require auth.** App-level cache-invalidation routes require a signed bearer
   token; nothing mutating is open by default.
+- **No direct access to your Secrets.** The operator's ClusterRole grants no permission on
+  Kubernetes Secrets at all. `envFrom` / `envMap` / `spec.database` only write *references*
+  (Secret name and key) into your app's Pod spec; the kubelet resolves them when the pod starts.
+  This is not a complete barrier: because the operator can create workloads cluster-wide, a
+  compromised operator could still reach a Secret indirectly through a pod it creates. Install
+  the operator per namespace or add an admission policy to close that path. See
+  [Security](/docs/security#operator-permissions).
 - **Default-on NetworkPolicy.** `spec.security.networkPolicy` reconciles an internal-only network
   policy for the app.
 - **Cluster-local backends (design-stage).** The planned gRPC backend layer is `cluster-local`

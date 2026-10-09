@@ -1,0 +1,149 @@
+knext bundled fix for vinext 1.0.1 (dist output)
+Upstream: https://github.com/cloudflare/vinext/pull/3759 (issue https://github.com/cloudflare/vinext/issues/3756)
+What it fixes: a tsconfig `paths` entry with several targets (`"@lib/*": ["lib/a/*", "lib/b/*"]`) only
+used its first target, so an import that exists only under a later target failed to build
+(`Could not load .../lib/a/b-only`), and a `.d.ts` target was used as a module. Next.js tries each
+target in order and skips `.d.ts` targets (Next.js e2e `typescript-paths`). The alias resolver now
+tries the remaining targets when the first does not resolve, and `.d.ts` targets are dropped.
+Retire: delete this file (and its manifest entry) when the pinned vinext is >= the first
+release that includes cloudflare/vinext#3759.
+Ported by hand from the upstream src change to the published 1.0.1 dist files.
+Applied by `knext vinext-patches` (runs from the app's postinstall and before `knext build`).
+
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -419,6 +419,7 @@
+ }
+ function materializeTsconfigPathAliases(pathsConfig, baseUrl, projectRoot) {
+ 	const vite = {};
++	const viteFallbacks = {};
+ 	const sass = [];
+ 	for (const [find, rawTargets] of Object.entries(pathsConfig)) {
+ 		const targets = Array.isArray(rawTargets) ? rawTargets.filter((value) => typeof value === "string") : typeof rawTargets === "string" ? [rawTargets] : [];
+@@ -431,23 +432,35 @@
+ 				replacements
+ 			});
+ 		}
+-		const target = targets[0];
++		const scriptTargets = targets.filter((value) => !isTypeDeclarationPath(value));
++		const target = scriptTargets[0];
++		if (target === void 0) continue;
++		const fallbackTargets = scriptTargets.slice(1);
+ 		if (find.includes("*") || target.includes("*")) {
+-			if (!find.endsWith("/*") || !target.endsWith("/*")) continue;
+-			if (find.indexOf("*") !== find.length - 1 || target.indexOf("*") !== target.length - 1) continue;
++			if (!isTrailingWildcardPattern(find) || !isTrailingWildcardPattern(target)) continue;
+ 			const aliasKey = find.slice(0, -2);
+ 			const targetDir = target.slice(0, -2);
+ 			if (!aliasKey || !targetDir) continue;
+ 			vite[aliasKey] = toViteAliasReplacement(path.resolve(baseUrl, targetDir), projectRoot);
++			viteFallbacks[aliasKey] = fallbackTargets.filter((fallback) => isTrailingWildcardPattern(fallback) && fallback.length > 2).map((fallback) => toViteAliasReplacement(path.resolve(baseUrl, fallback.slice(0, -2)), projectRoot));
+ 			continue;
+ 		}
+ 		vite[find] = toViteAliasReplacement(path.resolve(baseUrl, target), projectRoot);
++		viteFallbacks[find] = fallbackTargets.filter((fallback) => !fallback.includes("*")).map((fallback) => toViteAliasReplacement(path.resolve(baseUrl, fallback), projectRoot));
+ 	}
+ 	return {
+ 		vite,
++		viteFallbacks,
+ 		sass
+ 	};
+ }
++/** A TypeScript declaration file (`.d.ts`, `.d.mts`, `.d.cts`) is never a module target. */
++function isTypeDeclarationPath(value) {
++	return /\.d\.[cm]?ts$/i.test(value);
++}
++function isTrailingWildcardPattern(value) {
++	return value.endsWith("/*") && value.indexOf("*") === value.length - 1;
++}
+ function toViteAliasReplacement(absolutePath, projectRoot) {
+ 	const normalizedPath = toSlash(absolutePath);
+ 	const rootCandidates = /* @__PURE__ */ new Set([projectRoot]);
+@@ -510,6 +523,10 @@
+ 					...aliases.vite,
+ 					...parent.vite
+ 				},
++				viteFallbacks: {
++					...aliases.viteFallbacks,
++					...parent.viteFallbacks
++				},
+ 				sass: mergeSassTsconfigPathAliases(aliases.sass, parent.sass)
+ 			};
+ 		}
+@@ -524,6 +541,10 @@
+ 			...aliases.vite,
+ 			...own.vite
+ 		},
++		viteFallbacks: {
++			...aliases.viteFallbacks,
++			...own.viteFallbacks
++		},
+ 		sass: mergeSassTsconfigPathAliases(aliases.sass, own.sass)
+ 	};
+ }
+@@ -575,6 +596,12 @@
+ }
+ const _tsconfigAliasCache = /* @__PURE__ */ new Map();
+ /**
++* knext port: the fallback targets of each resolved `vite` alias map, keyed by
++* that map object (upstream threads them through `buildResolveAliasEntries`'s
++* call site instead, which another bundled patch already rewrites).
++*/
++const _tsconfigAliasFallbacks = /* @__PURE__ */ new WeakMap();
++/**
+ * Order materialized tsconfig path aliases by descending prefix length.
+ *
+ * TypeScript (and Next.js) match `paths` patterns by longest matched prefix,
+@@ -601,6 +628,7 @@
+ 			vite: sortTsconfigAliasesBySpecificity(materialized.vite),
+ 			sass: materialized.sass
+ 		};
++		_tsconfigAliasFallbacks.set(aliases.vite, materialized.viteFallbacks ?? {});
+ 		break;
+ 	}
+ 	_tsconfigAliasCache.set(cacheKey, aliases);
+@@ -639,23 +667,36 @@
+ * glob/dynamic-import transforms — which require blind prefix replacement
+ * because their patterns never exist on disk — keep working.
+ */
+-const tsconfigAliasCustomResolver = async function(updatedId, importer, options) {
+-	if (isStylesheetImporter(importer)) return null;
+-	return await this.resolve(updatedId, importer, {
+-		...options,
+-		skipSelf: true
+-	}) ?? { id: updatedId };
+-};
++function createTsconfigAliasCustomResolver(replacement, fallbacks = []) {
++	return async function(updatedId, importer, options) {
++		if (isStylesheetImporter(importer)) return null;
++		const resolveOptions = {
++			...options,
++			skipSelf: true
++		};
++		const resolved = await this.resolve(updatedId, importer, resolveOptions);
++		if (resolved) return resolved;
++		if (fallbacks.length > 0 && updatedId.startsWith(replacement)) {
++			const rest = updatedId.slice(replacement.length);
++			for (const fallback of fallbacks) {
++				const fallbackResolved = await this.resolve(fallback + rest, importer, resolveOptions);
++				if (fallbackResolved) return fallbackResolved;
++			}
++		}
++		return { id: updatedId };
++	};
++}
+ /**
+ * Convert the merged alias map into Vite alias entries, attaching the
+ * stylesheet-scoping resolver to entries that came from tsconfig `paths`.
+ * Array order preserves the map's first-match ordering.
+ */
+ function buildResolveAliasEntries(aliasMap, tsconfigPathAliases, explicitAliases) {
++	const tsconfigPathAliasFallbacks = _tsconfigAliasFallbacks.get(tsconfigPathAliases) ?? {};
+ 	return Object.entries(aliasMap).map(([find, replacement]) => Object.hasOwn(tsconfigPathAliases, find) && !Object.hasOwn(explicitAliases, find) ? {
+ 		find,
+ 		replacement,
+-		customResolver: tsconfigAliasCustomResolver
++		customResolver: createTsconfigAliasCustomResolver(replacement, Object.hasOwn(tsconfigPathAliasFallbacks, find) ? tsconfigPathAliasFallbacks[find] : [])
+ 	} : {
+ 		find,
+ 		replacement

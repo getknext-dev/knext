@@ -52,7 +52,21 @@ const USAGE_OR_FAILURE: VerbExitCode = {
 export const CLI_CONTRACT: readonly VerbContract[] = [
     {
         verb: "create",
-        flags: ["--name", "--builder", "--force", "--dry-run", "-h", "--help"],
+        flags: [
+            "--name",
+            "--runtime",
+            "--builder",
+            "--cache",
+            "--storage",
+            "--react-compiler",
+            "--no-react-compiler",
+            "-y",
+            "--yes",
+            "--force",
+            "--dry-run",
+            "-h",
+            "--help",
+        ],
         exitCodes: [OK, USAGE_OR_FAILURE],
     },
     {
@@ -77,6 +91,18 @@ export const CLI_CONTRACT: readonly VerbContract[] = [
                 code: 1,
                 meaning:
                     "usage error, missing --namespace/kubeconfig, or the preflight failed",
+            },
+        ],
+    },
+    {
+        verb: "vinext-patches",
+        flags: ["--check", "-h", "--help"],
+        exitCodes: [
+            OK,
+            {
+                code: 1,
+                meaning:
+                    "usage error, a bundled vinext fix conflicts with the installed vinext, or --check found a fix not yet applied",
             },
         ],
     },
@@ -120,6 +146,8 @@ export const CLI_CONTRACT: readonly VerbContract[] = [
             "--skip-upload",
             "--skip-image-lockstep-check",
             "--dry-run",
+            "--private",
+            "--public",
             "-h",
             "--help",
             "-v",
@@ -133,6 +161,7 @@ export const CLI_CONTRACT: readonly VerbContract[] = [
             "--skip-next",
             "--skip-smoke",
             "--self-contained",
+            "--verbose",
             "-h",
             "--help",
         ],

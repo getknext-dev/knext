@@ -1,0 +1,31 @@
+knext bundled fix for vinext 1.0.1 (dist output)
+Upstream: https://github.com/cloudflare/vinext/pull/3763 (issue https://github.com/cloudflare/vinext/issues/3762)
+What it fixes: with `experimental.inlineCss: true`, a Nitro build (vinext() + nitro(), the knext
+scaffold on both the bun and node presets) still rendered `<link rel="stylesheet">` tags (Next.js
+deploy test `app-inline-css`). The `vinext:inline-css-manifest` plugin read the client CSS from a
+hard-coded `dist/client` and injected the manifest into a hard-coded `dist/server`, but Nitro
+writes the client to `.output/public` and the RSC entry under `node_modules/.nitro/vite/services/rsc`,
+so the manifest was empty and `globalThis.__VINEXT_INLINE_CSS__` was never set. Both directories
+now come from the resolved environment config (client `build.outDir`, top-level
+`environments.rsc.build.outDir`, then `rscOutDir`, then `dist/server` as before). The client
+`closeBundle` runs before Nitro bundles its server, so the manifest reaches
+`.output/server/index.mjs`. Applies on top of every earlier patch in manifest order.
+Retire: delete this file (and its manifest entry) when the pinned vinext is >= the first
+release that includes cloudflare/vinext#3763.
+Ported by hand from the upstream src change to the published 1.0.1 dist file.
+Applied by `knext vinext-patches` (runs from the app's postinstall and before `knext build`).
+
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -4100,9 +4100,9 @@
+ 					const envConfig = this.environment?.config;
+ 					if (!envConfig) return;
+ 					const buildRoot = envConfig.root ?? process.cwd();
+-					const clientDir = path.resolve(buildRoot, "dist", "client");
++					const clientDir = path.resolve(buildRoot, envConfig.build.outDir);
+ 					const manifest = collectInlineCssManifest(clientDir, nextConfig.assetPrefix);
+-					const rscOutDir = path.resolve(buildRoot, options.rscOutDir ?? path.join("dist", "server"));
++					const rscOutDir = path.resolve(buildRoot, this.environment.getTopLevelConfig().environments.rsc?.build.outDir ?? options.rscOutDir ?? path.join("dist", "server"));
+ 					for (const entryFile of ["index.js", "index.mjs"]) if (injectInlineCssManifestGlobal(path.join(rscOutDir, entryFile), manifest)) break;
+ 				}
+ 			}

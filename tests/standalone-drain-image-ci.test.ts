@@ -1474,6 +1474,54 @@ describe('assertCleanDrain cannot record its leg and skip the assertions that ea
   });
 });
 
+// A deliberate monorepo tracing root (workspace root above the app): the host
+// build/boot e2e and the image e2e ride in the same job (same docker + bun +
+// @getknext/core setup) with the same no-skip contract, so each needs the same
+// wiring guard as its siblings above.
+const MONOREPO_E2E_PATHS = [
+  'packages/kn-next/src/__tests__/monorepo-root.docker-e2e.test.ts',
+  'packages/kn-next/src/__tests__/monorepo-root-image.docker-e2e.test.ts',
+];
+
+describe('the monorepo-root e2es are wired into CI', () => {
+  for (const path of MONOREPO_E2E_PATHS) {
+    const name = path.replace(/^.*\//, '');
+
+    it(`a \`run:\` in the job invokes ${name} by its explicit path, as a blocking step`, () => {
+      const runCommands = [...jobBlock().matchAll(/run:\s*([^\n]*)/g)].map((m) => m[1]).join('\n');
+      expect(runCommands, `the job never runs ${path}`).toContain(path);
+      const audit = auditBlockingGate({
+        workflowPath: CI_YML,
+        jobId: 'standalone-drain-bun-image',
+        gateCommand: new RegExp(path.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')),
+      });
+      expect(audit.gateStepsSeen, 'the audit never found the step that runs the e2e').toBe(1);
+      expect(audit.problems, audit.problems.join('\n')).toEqual([]);
+    });
+
+    it(`the \`run:\` that invokes ${name} passes --no-skip, so a skipped test fails the step`, () => {
+      const run = [...jobBlock().matchAll(/run:\s*([^\n]*)/g)]
+        .map((m) => m[1])
+        .find((cmd) => cmd.includes(path));
+      expect(run, `no \`run:\` invokes ${path}`).toBeDefined();
+      expect(run, `the step for ${name} must run bun-test.mjs with --no-skip`).toMatch(
+        /bun-test\.mjs\s+--no-skip\b/,
+      );
+    });
+
+    it(`${name} exists, is a container e2e, imports bun:test, and has no skip path`, () => {
+      const full = resolve(REPO_ROOT, path);
+      expect(existsSync(full), `${path} does not exist`).toBe(true);
+      expect(path).toMatch(/\.docker-e2e\.test\.ts$/);
+      const text = readFileSync(full, 'utf8');
+      expect(text, 'the e2e must import bun:test').toMatch(/from ['"]bun:test['"]/);
+      expect(text, 'the e2e must not skip').not.toMatch(
+        /\b(?:it|test|describe)\.(?:skip|todo)\s*\(/,
+      );
+    });
+  }
+});
+
 describe('the CI path actually reaches the suite (both halves)', () => {
   it('the file the job names exists and is a container e2e', () => {
     const full = resolve(REPO_ROOT, E2E_PATH);

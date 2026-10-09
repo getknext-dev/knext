@@ -87,6 +87,8 @@ function makeDeps() {
         ),
         buildAndPush: mock(async (_name: string) => digestImage),
         preflight: () => {},
+        // #1865: not under test here — a no-op stub, same posture as preflight.
+        visibilityGuard: async () => {},
     };
 }
 
@@ -121,7 +123,7 @@ describe("preview without storage (ADR-0047 condition 1 — review F1)", () => {
         expect(notice).toMatch(/CDN/);
         expect(notice).toMatch(/retention/);
         expect(notice).toMatch(/skew/i);
-        expect(notice).toMatch(/https:\/\/knext\.dev\/docs\//);
+        expect(notice).toMatch(/https:\/\/knext-platform\.dev\/docs\//);
     });
 
     it("clears an inherited ASSET_PREFIX BEFORE buildAndPush runs", async () => {

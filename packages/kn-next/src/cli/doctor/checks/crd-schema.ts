@@ -15,7 +15,10 @@
  */
 
 import { DOCS_URL } from "../../help";
-import { unknownEmittedFields } from "../../schema/crd-schema";
+import {
+    partitionMissingFields,
+    unknownEmittedFields,
+} from "../../schema/crd-schema";
 import { EMITTED_CR_FIELD_PATHS } from "../../schema/emitted-fields.generated";
 import { readKnownCRDFields } from "../../schema/preflight";
 import { actionableDetail } from "../error-format";
@@ -61,6 +64,31 @@ export function crdSchemaCheck(ctx: CheckContext): CheckResult[] {
                 "NextApp CRD schema coverage",
                 "pass",
                 `all ${EMITTED_CR_FIELD_PATHS.length} field(s) this CLI emits are defined by the installed CRD (${read.detail})`,
+            ),
+        ];
+    }
+    const { required, conditional } = partitionMissingFields(missing);
+    if (required.length === 0) {
+        // Only conditionally-emitted fields are missing: `knext deploy` still
+        // applies unless the feature is in play (then its preflight refuses,
+        // naming the field), so this is a heads-up, not a failure.
+        const lines = conditional
+            .map(
+                (c) =>
+                    `${c.path} — ${c.feature}; upgrade the operator to use it`,
+            )
+            .join("; ");
+        return [
+            mk(
+                "crd-schema",
+                "NextApp CRD schema coverage",
+                "warn",
+                actionableDetail(
+                    `the installed CRD predates ${conditional.length} optional field(s): ${lines}`,
+                    `deploys that do not use these features are unaffected. Source: ${read.detail}`,
+                    ctx.verbose ?? false,
+                ),
+                `upgrade the operator/CRD FIRST, then the CLI, to use these features — see ${UPGRADE_ORDER_URL}`,
             ),
         ];
     }

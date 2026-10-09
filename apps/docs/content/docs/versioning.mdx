@@ -120,3 +120,100 @@ You do not need matching versions on the two sides. You need one ordering rule:
 An older CLI against a newer cluster is always fine. The reverse is not, and `knext deploy` stops
 before it changes anything when it detects it. See [Upgrading](/docs/upgrading) for what that looks
 like and how to fix it.
+
+### Operator versions
+
+Operator releases are tagged `operator-vX.Y.Z` and follow semantic versioning on their own line.
+The **major and minor track the package set** (an operator `1.3.x` pairs with `@getknext/core`
+`1.3.x`); the **patch is independent**, so an operator-only fix does not force a package release.
+The pairing rule is:
+
+| Operator vs. CLI | Result |
+| --- | --- |
+| Same major, operator minor **equal or newer** | Supported. Patch levels do not matter. |
+| Same major, operator minor **older** than the CLI | Not supported — upgrade the operator first. |
+| Different major | Not supported. |
+
+Pre-release suffixes (`-rc.N`) are ignored when pairing. `knext doctor` applies this rule for you
+(see below).
+
+## Pin, upgrade and roll back the operator
+
+Every operator release is published as a GitHub Release named after its tag, carrying two copies
+of the same **digest-pinned** bundle: `install-vX.Y.Z.yaml` (the version is in the file name, so a
+saved copy says what it is) and `install.yaml`. A release never changes after it is published.
+`operator-latest` keeps working and always carries the newest **stable** release's `install.yaml`;
+use it for a quick trial, not for a cluster you have to reproduce.
+
+### See which operator you run
+
+```sh title="shell"
+knext doctor
+```
+
+The **Operator version** row prints the installed release, where it was read from, and the image
+digest, then states whether it pairs with your CLI:
+
+```text
+PASS  Operator version  v1.3.0 (from label), image sha256:9f1c0a7d2b44…; compatible with CLI 1.3.0
+```
+
+It warns, without failing the preflight, when the operator is older than the CLI, when the major
+versions differ, when the operator is an unreleased build, or when it predates operator versions and
+reports none. The version is stamped on the manager Deployment, so you can also read it directly:
+
+```sh title="shell"
+kubectl get deploy kn-next-operator-controller-manager -n kn-next-operator-system \
+  -o jsonpath='{.metadata.labels.app\.kubernetes\.io/version}{"\n"}'
+```
+
+### Pin a version
+
+Apply the versioned bundle of the release you tested, instead of a moving address:
+
+```sh title="shell"
+VERSION=1.3.0   # an operator-vX.Y.Z release from the project's GitHub Releases page
+kubectl apply --server-side -f \
+  "https://github.com/getknext-dev/knext/releases/download/operator-v${VERSION}/install-v${VERSION}.yaml"
+```
+
+For GitOps, commit that exact file (or reference that exact URL) so the operator version moves only
+when you change it. The image in the bundle is referenced by digest and is signed; check the
+signature before you trust a bundle, as described under
+[Install](/docs/install#4--install-the-operator).
+
+### Upgrade to a specific version
+
+Apply the new version's bundle with the same command, then wait for the rollout and check the
+result:
+
+```sh title="shell"
+kubectl apply --server-side -f \
+  "https://github.com/getknext-dev/knext/releases/download/operator-v${NEW_VERSION}/install-v${NEW_VERSION}.yaml"
+kubectl rollout status deploy/kn-next-operator-controller-manager \
+  -n kn-next-operator-system --timeout=180s
+knext doctor
+```
+
+Applying the bundle also applies its `NextApp` CRD. Keep the order from above: operator first, then
+the CLI.
+
+### Roll back to a previous version
+
+Re-apply the previous version's bundle. It reverts the image and the CRD together:
+
+```sh title="shell"
+kubectl apply --server-side -f \
+  "https://github.com/getknext-dev/knext/releases/download/operator-v${PREVIOUS_VERSION}/install-v${PREVIOUS_VERSION}.yaml"
+kubectl rollout status deploy/kn-next-operator-controller-manager \
+  -n kn-next-operator-system --timeout=180s
+```
+
+Your running apps keep serving while the operator is rolled back. Before you roll back across a
+release that added a field to the `NextApp` resource, check that release's notes: the older CRD does
+not know the field, so a value set only through it is dropped the next time that resource is
+written. If the release added no field, nothing is lost.
+
+An operator installed before versions were published (or from the rolling `operator-edge`
+channel) reports no release version. Move it to a versioned release once, with the pin command
+above, and every later upgrade and rollback has a concrete target.

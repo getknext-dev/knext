@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -566,7 +566,71 @@ describe("main()'s publish closure — the derived distTag actually reaches npmP
     ).toContain(anchor);
   });
 
-  it('distTag itself is derived from prereleaseDistTag(targetVersion), never hard-coded', () => {
-    expect(source).toContain('const distTag = prereleaseDistTag(targetVersion);');
+  it('distTag itself is derived from prereleaseDistTag(targetVersion, readPreState()), never hard-coded', () => {
+    expect(source).toContain('const distTag = prereleaseDistTag(targetVersion, readPreState());');
+  });
+});
+
+// 1.3.0-rc.1 (integration/v1.3) publishes to dist-tag `next`, while the v1.0
+// line keeps `rc` at 1.0.0-rc.5. `changeset publish` takes its dist-tag from
+// `.changeset/pre.json`'s `tag` in pre mode — NOT from the version string — so
+// a heal that derived `rc` from `1.3.0-rc.1` would re-publish a straggler to
+// `rc` and move the tag the v1.0 credential reads. The heal must use the SAME
+// tag `changeset publish` used.
+describe('prereleaseDistTag — follows the changesets pre-mode tag when one is set', () => {
+  it('pre mode {tag: next} + 1.3.0-rc.1 -> next (never the version-derived rc)', () => {
+    expect(prereleaseDistTag('1.3.0-rc.1', { mode: 'pre', tag: 'next' })).toBe('next');
+  });
+
+  it('pre mode {tag: rc} + 1.0.0-rc.5 -> rc (the v1.0 line is unchanged)', () => {
+    expect(prereleaseDistTag('1.0.0-rc.5', { mode: 'pre', tag: 'rc' })).toBe('rc');
+  });
+
+  it('no pre state -> falls back to the version-derived id', () => {
+    expect(prereleaseDistTag('1.3.0-rc.1', null)).toBe('rc');
+  });
+
+  it('pre.json left in "exit" mode is not pre mode -> version-derived id', () => {
+    expect(prereleaseDistTag('1.3.0-rc.1', { mode: 'exit', tag: 'next' })).toBe('rc');
+  });
+
+  it('a stable version is still null even in pre mode — never ships a stable off latest', () => {
+    expect(prereleaseDistTag('1.3.0', { mode: 'pre', tag: 'next' })).toBeNull();
+  });
+});
+
+// integration/v1.3 ONLY. 1.3.0 is the GA cut: changesets pre mode has been exited, so the
+// fixed group is a stable version and publishes to `latest`. DELETE this block in the PR that
+// merges integration/v1.3 into main (main's own release decides its tag).
+describe('integration/v1.3 — 1.3.0 GA: pre mode exited, stable version', () => {
+  const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+  const coreVersion = JSON.parse(
+    readFileSync(resolve(repoRoot, 'packages/kn-next/package.json'), 'utf8'),
+  ).version;
+
+  it('.changeset/pre.json is gone (pre mode exited)', () => {
+    expect(existsSync(resolve(repoRoot, '.changeset/pre.json'))).toBe(false);
+  });
+
+  it('a stable tree version has no prerelease dist-tag (null -> latest)', () => {
+    expect(prereleaseDistTag(coreVersion, null)).toBeNull();
+  });
+
+  // Pin the exact number for every fixed-group member so a stray `changeset version` (or a
+  // missed member) reds here.
+  it('every fixed-group member is at exactly 1.3.0', () => {
+    const config = JSON.parse(readFileSync(resolve(repoRoot, '.changeset/config.json'), 'utf8'));
+    const dirs = {
+      '@getknext/core': 'packages/kn-next',
+      '@getknext/lib': 'packages/lib',
+      '@getknext/db': 'packages/db',
+      'kn-next': 'packages/kn-next-alias',
+    };
+    expect([...config.fixed[0]].sort()).toEqual(Object.keys(dirs).sort());
+    for (const [name, dir] of Object.entries(dirs)) {
+      const pkg = JSON.parse(readFileSync(resolve(repoRoot, dir, 'package.json'), 'utf8'));
+      expect(pkg.name).toBe(name);
+      expect(pkg.version).toBe('1.3.0');
+    }
   });
 });

@@ -88,8 +88,44 @@ recipe for the optional `--self-contained` single-executable build (see
 target never scaffolds that file, since `--self-contained` only applies to the vinext build. See
 [the adapter and the compiled build](/docs/official-adapter) for the trade-off between the two.
 
+### The questions `create` asks
+
+Run on a terminal with no flags, `create` asks five questions. Press Enter on each to take the
+default: the scaffold described above, with React Compiler turned on. At the end it prints the
+equivalent flags, so you can repeat the same scaffold in CI.
+
+| Question | Choices | Default | What changes |
+|---|---|---|---|
+| Runtime | `bun`, `node` | `bun` | `node` writes `runtime: "node"` to `knext.config.ts` and adds the Node Redis client, `ioredis`, to the app's dependencies. Bun has a Redis client built in, so a Bun app gets nothing extra. |
+| Builder | `turbopack`, `webpack`, `vinext` (Beta) | `turbopack` | `webpack` sets the `build` script to `next build --webpack` and writes `build: "webpack"`; `vinext` scaffolds the compiled single-executable shape. |
+| ISR / data cache | `none` (in memory, per pod), `redis` | `none` | `redis` writes a `cache` block that reads `REDIS_URL`. |
+| Object storage | `none`, `gcs`, `s3`, `minio`, `azure` | `none` | Writes a `storage` block for that provider, with `<placeholders>` for you to fill in. |
+| React Compiler | yes / no | **yes** | On `turbopack`/`webpack`: writes `reactCompiler: true` to `next.config.ts` and adds `babel-plugin-react-compiler` to `devDependencies`. On `vinext`: writes `react: { compiler: true }` to the vinext plugin in `vite.config.ts` and adds the four packages it needs. Answer `n`, or pass `--no-react-compiler`, to leave it off. See [React Compiler](/docs/react-compiler). |
+
+With a Redis cache, set `REDIS_URL` when you run `knext deploy`, and keep the value in a Kubernetes
+Secret or your CI secrets rather than in the file. `knext deploy` stops with an error while it is
+empty. `KN_REDIS_URL` works too, at `knext deploy` and `knext preview`, and overrides `cache.url`
+when both are set. With a storage provider, `knext deploy` names any placeholder you have not filled in.
+
+`create` never asks when it cannot expect an answer: with any flag, with `--yes`, when `CI` is set,
+or when stdin or stdout is not a terminal, it uses the default for every choice you did not pass.
+A pipe or a CI job never waits on a question.
+
+When it finishes, `create` prints the build target and runtime it chose, defaults included, and how
+to change them:
+
+```text title="output"
+Build target: turbopack (Next.js `next build` with Turbopack)
+Runtime: bun (compiled Bun executable)
+Pick others when scaffolding with --builder <turbopack|webpack|vinext> and
+--runtime <bun|node>, or later with `build` and `runtime` in knext.config.ts.
+```
+
 ```bash title="shell"
-knext create my-app                    # standalone target (default)
+knext create my-app                    # asks the questions on a terminal; defaults elsewhere
+knext create my-app --yes              # defaults, no questions
+knext create my-app --runtime node --cache redis   # Node + Redis, no questions
+knext create my-app --no-react-compiler            # without React Compiler
 knext create my-app --builder vinext   # compiled single-executable target
 knext create my-app --dry-run          # list the files it would write, write nothing
 ```
@@ -97,13 +133,19 @@ knext create my-app --dry-run          # list the files it would write, write no
 | Flag | Notes |
 |---|---|
 | `--name <name>` | App name. Defaults to the directory name. |
-| `--builder <default\|vinext>` | Target to scaffold. `default` is the standalone shape; `vinext` is the compiled single-executable shape. **Beta** — see [Stability tiers](/docs/stability). Any other value is an error. |
+| `--runtime <bun\|node>` | Server runtime. Default `bun`. |
+| `--builder <turbopack\|webpack\|vinext>` | Build target. Default `turbopack`, the standalone shape; `default` is accepted as `turbopack`. `vinext` is the compiled single-executable shape, **Beta** — see [Stability tiers](/docs/stability). |
+| `--cache <none\|redis>` | ISR / data cache. Default `none`. |
+| `--storage <none\|gcs\|s3\|minio\|azure>` | Object storage for static assets. Default `none`: assets are served from the container image. |
+| `--react-compiler`, `--no-react-compiler` | Turn React Compiler on or off. Default on, for every builder. Passing both is an error. |
+| `-y`, `--yes` | Ask nothing; use the defaults for every choice not given as a flag. |
 | `--force` | Overwrite existing files. |
 | `--dry-run` | List the files that would be written and write nothing. |
 | `-h`, `--help` | Show the usage help. |
 
 **Exit code:** `0` on success (including `--dry-run` and `--help`); `1` on a usage error (an
-unrecognized `--builder` value, an unexpected extra argument) or a scaffold failure (for example an
+unrecognized `--runtime`, `--builder`, `--cache` or `--storage` value, both `--react-compiler`
+and `--no-react-compiler`, an unexpected extra argument, or a cancelled question) or a scaffold failure (for example an
 invalid app name, or an existing file without `--force`).
 
 The generated `package.json` pins its `@getknext/*` dependencies at the **CLI's own version** — the
@@ -202,6 +244,42 @@ namespace "<ns>".` when the credential passes; `1` on a usage error (missing `--
 kubeconfig configured) or any refusal, printing the reason — never the kubeconfig's bytes — to
 stderr.
 
+## `knext vinext-patches`
+
+Applies the vinext fixes knext bundles ahead of upstream vinext releases to the vinext installed
+for this app, so you do not wait for those fixes to ship upstream. An app created with
+`knext create --builder vinext` runs it from its `postinstall` script, and `knext build` runs it
+again before the vinext build, so it is not typically run by hand.
+
+The fixes are tied to one exact vinext version (the one `knext create` pins). With any other vinext
+version installed it changes nothing and says so. Re-running it is safe: fixes that are already in
+place are left alone. If a fix neither applies cleanly nor is already present — vinext's files were
+modified some other way — it refuses rather than half-applying; reinstall your dependencies and run
+it again. Applying is all-or-nothing per fix: if writing any of a fix's files fails (for example a
+read-only `node_modules`), the files it already changed are restored and the command exits `1`.
+
+The `postinstall` script skips this step quietly when `@getknext/core` is not installed, as in a
+production-only install (`npm ci --omit=dev`), because it is a development dependency.
+
+To turn the bundled fixes off, for example because you patch vinext yourself, set
+`KNEXT_VINEXT_PATCHES=0`. Both the `postinstall` step and `knext build` then leave vinext untouched
+and print a line saying the fixes were not applied.
+
+```bash
+knext vinext-patches          # apply
+knext vinext-patches --check  # report only, change nothing
+```
+
+| Flag | Notes |
+|---|---|
+| `--check` | Report whether every fix is applied without changing any file; exit `1` when one is missing. |
+| `KNEXT_VINEXT_PATCHES=0` (env) | Skip the bundled fixes entirely, here and in `knext build`. |
+| `-h`, `--help` | Show the usage help. |
+
+**Exit code:** `0` (including `--help`, and when vinext is not installed or is a different version);
+`1` on a usage error, a fix that conflicts with the installed vinext, or `--check` finding a fix not
+yet applied.
+
 ## `knext deploy` (default)
 
 Loads and validates `knext.config.ts`, runs your build (`next build` with standalone output on the
@@ -239,7 +317,7 @@ run `npm install` instead of printing a crash.
 | `-t`, `--tag` | Image tag (default: timestamp; env fallback `KN_IMAGE_TAG`). The tag doubles as the Next.js `BUILD_ID` — see [Skew protection](/docs/skew-protection). |
 | `-n`, `--namespace` | Kubernetes namespace (default `default`; env fallback `KN_NAMESPACE`). |
 | `--context <ctx>` | kubectl context to target (default: your current-context; env fallback `KN_CONTEXT`). Every cluster call this deploy makes is sent to `<ctx>`, so it never lands on whichever cluster your kubeconfig happens to point at. |
-| `--image <ref>` | Deploy a **pre-built** image instead of building one. Applies a `NextApp` CR pointing at `<ref>` and does **no** docker build or push (env fallback `KN_IMAGE`). The ref must be **digest-pinned** (`registry/name@sha256:…`) — a tag-only ref is rejected, matching what the operator's admission accepts. Use it when you already have a published image or have no working `docker buildx`. A pre-built image is the source of truth for **both** its server and the static assets baked into it, so `--image` **implies `--skip-build` and `--skip-upload`**: knext does not re-run `next build` or upload assets, because it cannot know the image's baked `BUILD_ID` and any freshly-uploaded `_next/static/<id>/` prefix would not match what the deployed server serves (see [Skew protection](/docs/skew-protection)). `--registry` has no effect alongside it (the ref is already fully qualified) and is reported as ignored. |
+| `--image <ref>` | Deploy a **pre-built** image instead of building one. Applies a `NextApp` CR pointing at `<ref>` and does **no** docker build or push (env fallback `KN_IMAGE`). The ref must be **digest-pinned** (`registry/name@sha256:…`) — a tag-only ref is rejected, matching what the operator's admission accepts. Use it when you already have a published image or have no working `docker buildx`. A pre-built image is the source of truth for **both** its server and the static assets baked into it, so `--image` **implies `--skip-build` and `--skip-upload`**: knext does not re-run `next build` or upload assets, because it cannot know the image's baked `BUILD_ID` and any freshly-uploaded `_next/static/<id>/` prefix would not match what the deployed server serves (see [Skew protection](/docs/skew-protection)). `--registry` has no effect alongside it (the ref is already fully qualified) and is reported as ignored, and a placeholder `registry` in `knext.config.ts` does not block the deploy (other placeholders, such as the storage bucket, still do). |
 | `--skip-build` | Skip the `next build` step. |
 | `--skip-upload` | Skip the asset-upload step (also skips the post-deploy GC). |
 | `--skip-image-lockstep-check` | For a custom in-image-build Dockerfile only (see [Custom Dockerfiles that rebuild in-image](/docs/multi-cloud#custom-dockerfiles-that-rebuild-in-image)): skip the post-build check that the pushed image's server actually embeds `ASSET_PREFIX` and matches the deploy's build id, and the check that every client chunk the image's server references was uploaded (assets are still taken from the image). knext logs a warning every time this is used. Skipping it means a genuinely broken `ASSET_PREFIX`/build-id lock-step (see [Skew protection](/docs/skew-protection)) is no longer caught before the cluster write — use it only when the check misidentifies your Dockerfile's server layout. |
@@ -250,19 +328,16 @@ run `npm install` instead of printing a crash.
 flag, a stray positional), a missing `knext.config.ts`, or a deploy failure at any step (build,
 upload, image push, or the CR apply).
 
-<Callout type="warn">
-**Piping `--dry-run` to `kubectl apply -f -`.** On stdout, `--dry-run` currently interleaves its
-own log lines with the rendered `NextApp` YAML, so piping it straight into `kubectl apply -f -` or
-redirecting it to a file can fail with a YAML parse error. Set `LOG_LEVEL=silent` and stdout
-carries only the YAML document — this is the verified workaround for GitOps pipelines today:
+<Callout type="info">
+**Piping `--dry-run` to `kubectl apply -f -`.** Under `--dry-run`, stdout carries only the rendered
+`NextApp` YAML document; every log line goes to stderr. The output pipes or redirects cleanly:
 
 ```bash title="shell"
-LOG_LEVEL=silent knext deploy --dry-run | kubectl apply --dry-run=client -f -
+knext deploy --dry-run | kubectl apply -f -
+knext deploy --dry-run > nextapp.yaml 2> deploy.log
 ```
 
-`NO_COLOR=1` on its own does **not** fix this — the log lines (and their color codes) still land
-on stdout alongside the YAML. Use `LOG_LEVEL=silent` until a future release separates the two
-streams.
+`knext db bind --dry-run` follows the same rule for the patch it prints.
 </Callout>
 
 Config validation runs automatically when the config loads. [`knext validate`](#knext-validate) runs
@@ -302,6 +377,7 @@ underlying error — the two are never conflated. See [the Bun runtime](/docs/bu
 |---|---|
 | `--skip-next` | Reuse an existing `.next/` build instead of running it again. |
 | `--skip-smoke` | Do not boot the compiled executable. For CI that cannot execute it (a foreign-architecture runner). The build prints a loud warning and the artifact ships unverified. |
+| `--verbose` | List every compile and closure note. By default they are folded into one line, such as `[knext standalone-compile] 12 notes; rerun with --verbose for details`. Warnings and errors always print in full. |
 | `--self-contained` | Opt in to the self-contained single-executable mode, overriding `selfContained` in `knext.config.ts`. Experimental: on the vinext target the binary needs nothing beside it; the other targets do not use it yet, so there it only shows up in the build log and the build output is unchanged. |
 | `-h`, `--help` | Show the usage help. |
 
@@ -418,6 +494,11 @@ cluster wired up are each a single actionable line by default — no raw kubectl
   says so as `operator behind CLI: the installed CRD is missing N field(s) this CLI emits — they
   would be dropped. Upgrade the operator first (operator, then CLI).` — the full field list (for
   filing a ticket or debugging) is available with `--verbose`.
+- **CRD predates an optional feature.** If the only missing fields are ones the CLI emits just
+  for a specific feature, doctor warns instead of failing and names the feature — for example
+  `spec.security.writeFree — needed for write-free pods when `knext deploy` builds the image;
+  upgrade the operator to use it`, or `spec.networking — needed for private apps`. Deploys that
+  don't use those features are unaffected; one that does is refused before anything is uploaded.
 - **Registry auth failure.** When an app's image can't be pulled anonymously and no credential is
   attached, doctor names the missing Secret/`imagePullSecrets` fix directly in the check's line,
   with a pointer to [private registries](/docs/private-registries).

@@ -1,0 +1,235 @@
+knext bundled fix for vinext 1.0.1 (dist output)
+Upstream: https://github.com/cloudflare/vinext/pull/3768 (issues https://github.com/cloudflare/vinext/issues/2831 and https://github.com/cloudflare/vinext/issues/2810; builds on https://github.com/cloudflare/vinext/pull/2839)
+What it fixes: Next.js 16.3 made its new App Router scroll handler the default, and vinext still
+follows the legacy one, so three Next.js deploy-test files fail (navigation-focus, router-autoscroll,
+parallel-routes-scroll-owner). After a client navigation:
+  - focus is left alone (the legacy handler focused the navigated segment);
+  - the route content's highest client rect is measured against the root `scroll-padding-top`,
+    across the content's host siblings, so a fixed / sticky / display:none first child no longer
+    picks the target and a React-hoisted first resource in <head> no longer suppresses the scroll
+    to the top;
+  - an intercepted route hands the scroll to its parallel slot: the retained page neither scrolls
+    nor blurs, and the document-top fallback does not run on the slot's behalf. The navigation
+    controller passes `parallelSlotOwned` (the committed navigation is an interception) to
+    claimAppRouterScrollIntentForCommit, and the scroll target consumes the intent without scrolling.
+Hash targets still scroll from any segment. Parallel slots are not scroll targets themselves, and
+React 19 stable has no Fragment refs, so the route content is found with findDOMNode() plus its
+following siblings. The head-hoisted suppression state (`headElements`, `targetHoistedInHead`,
+markAppRouterScrollIntentHeadHoisted) existed only for the legacy handler and is removed.
+Applies on top of every earlier patch in manifest order.
+Retire: delete this file (and its manifest entry) when the pinned vinext is >= the first
+release that includes cloudflare/vinext#3768.
+Ported by hand from the upstream src change to the published 1.0.1 dist files.
+Applied by `knext vinext-patches` (runs from the app's postinstall and before `knext build`).
+--- a/dist/shims/app-router-scroll-state.js
++++ b/dist/shims/app-router-scroll-state.js
+@@ -14,9 +14,8 @@
+ 	const intent = {
+ 		commitId: null,
+ 		hash,
+-		headElements: typeof document === "undefined" ? null : new Set(document.head?.children ?? []),
+ 		id: store.nextId,
+-		targetHoistedInHead: false
++		parallelSlotOwned: false
+ 	};
+ 	store.pending = intent;
+ 	return intent;
+@@ -32,27 +31,17 @@
+ function isLatestAppRouterScrollIntent(expected) {
+ 	return expected !== null && expected !== void 0 && getScrollIntentStore().nextId === expected.id;
+ }
+-function claimAppRouterScrollIntentForCommit(expected, commitId) {
++function claimAppRouterScrollIntentForCommit(expected, commitId, options = {}) {
+ 	const store = getScrollIntentStore();
+ 	const intent = store.pending;
+ 	if (expected === null || expected === void 0 || intent === null) return;
+ 	if (intent.id !== expected.id) return;
+ 	store.pending = {
+ 		...intent,
+-		commitId
++		commitId,
++		parallelSlotOwned: options.parallelSlotOwned ?? false
+ 	};
+ }
+-function markAppRouterScrollIntentHeadHoisted(expected, commitId) {
+-	const store = getScrollIntentStore();
+-	const intent = store.pending;
+-	if (expected === null || expected === void 0 || intent === null) return;
+-	if (intent.id !== expected.id) return;
+-	if (intent.commitId !== commitId) return;
+-	store.pending = {
+-		...intent,
+-		targetHoistedInHead: true
+-	};
+-}
+ function consumeAppRouterScrollIntent(expected, commitId) {
+ 	if (expected === null || expected === void 0) return null;
+ 	const store = getScrollIntentStore();
+@@ -64,4 +53,4 @@
+ 	return intent;
+ }
+ //#endregion
+-export { beginAppRouterScrollIntent, claimAppRouterScrollIntentForCommit, clearAppRouterScrollIntent, consumeAppRouterScrollIntent, getPendingAppRouterScrollIntent, isLatestAppRouterScrollIntent, markAppRouterScrollIntentHeadHoisted };
++export { beginAppRouterScrollIntent, claimAppRouterScrollIntentForCommit, clearAppRouterScrollIntent, consumeAppRouterScrollIntent, getPendingAppRouterScrollIntent, isLatestAppRouterScrollIntent };
+--- a/dist/shims/app-router-scroll.js
++++ b/dist/shims/app-router-scroll.js
+@@ -1,22 +1,12 @@
+ "use client";
+ import { decodeHashFragment } from "./hash-scroll.js";
+-import { consumeAppRouterScrollIntent, getPendingAppRouterScrollIntent, markAppRouterScrollIntentHeadHoisted } from "./app-router-scroll-state.js";
++import { consumeAppRouterScrollIntent, getPendingAppRouterScrollIntent } from "./app-router-scroll-state.js";
+ import * as React$1 from "react";
+ import { jsx } from "react/jsx-runtime";
+ import * as ReactDOM from "react-dom";
+ //#region src/shims/app-router-scroll.tsx
+ const AppRouterScrollCommitContext = React$1.createContext(null);
+ const reactDomInternalsKey = "__DOM_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE";
+-const rectProperties = [
+-	"bottom",
+-	"height",
+-	"left",
+-	"right",
+-	"top",
+-	"width",
+-	"x",
+-	"y"
+-];
+ function readFindDOMNode() {
+ 	const internals = Reflect.get(ReactDOM, reactDomInternalsKey);
+ 	if (typeof internals !== "object" || internals === null) return null;
+@@ -30,18 +20,18 @@
+ 	const node = findDOMNodeImpl(instance);
+ 	return node instanceof Element || node instanceof Text ? node : null;
+ }
+-function shouldSkipElement(element) {
+-	const position = getComputedStyle(element).position;
+-	if (position === "fixed" || position === "sticky") return true;
+-	const rect = element.getBoundingClientRect();
+-	return rectProperties.every((property) => rect[property] === 0);
++function getScrollPaddingTopPx(element, viewportHeight) {
++	const scrollPaddingTop = getComputedStyle(element).scrollPaddingTop;
++	const value = Number.parseFloat(scrollPaddingTop);
++	if (!Number.isFinite(value) || value < 0) return 0;
++	if (scrollPaddingTop.endsWith("px")) return value;
++	if (scrollPaddingTop.endsWith("%")) return value / 100 * viewportHeight;
++	return 0;
+ }
+-function topOfElementInViewport(element, viewportHeight) {
+-	const rects = element.getClientRects();
+-	if (rects.length === 0) return false;
++function isTopInViewport(elements, viewportHeight, getCurrentScrollPaddingTop) {
+ 	let elementTop = Number.POSITIVE_INFINITY;
+-	for (const rect of rects) if (rect.top < elementTop) elementTop = rect.top;
+-	return elementTop >= 0 && elementTop <= viewportHeight;
++	for (const element of elements) for (const rect of element.getClientRects()) if (rect.top < elementTop) elementTop = rect.top;
++	return elementTop >= getCurrentScrollPaddingTop() && elementTop <= viewportHeight;
+ }
+ function getHashFragmentDomNode(hash) {
+ 	const fragment = decodeHashFragment(hash.startsWith("#") ? hash.slice(1) : hash);
+@@ -52,34 +42,34 @@
+ 	const head = node.ownerDocument?.head;
+ 	return head != null && head.contains(node);
+ }
+-function findNextScrollTarget(node) {
+-	if (!(node instanceof Element)) return null;
+-	if (isInDocumentHead(node)) return null;
+-	let target = node;
+-	while (!(target instanceof HTMLElement) || shouldSkipElement(target)) {
+-		if (target.nextElementSibling === null) return null;
+-		target = target.nextElementSibling;
+-	}
+-	return {
+-		kind: "element",
+-		element: target
+-	};
++function collectRouteContentElements(node) {
++	if (!(node instanceof Element) || isInDocumentHead(node)) return [];
++	const elements = [];
++	for (let sibling = node; sibling !== null; sibling = sibling.nextElementSibling) if (sibling instanceof HTMLElement) elements.push(sibling);
++	return elements;
+ }
+-function scrollToElement(target, hash) {
+-	if (hash !== null) {
+-		target.scrollIntoView({ behavior: "auto" });
+-		return;
+-	}
+-	const htmlElement = document.documentElement;
+-	const viewportHeight = htmlElement.clientHeight;
+-	if (topOfElementInViewport(target, viewportHeight)) return;
+-	htmlElement.scrollTop = 0;
+-	if (!topOfElementInViewport(target, viewportHeight)) target.scrollIntoView({
++function hasBox(elements) {
++	return elements.some((element) => element.getClientRects().length > 0);
++}
++function scrollFirstBoxIntoView(elements) {
++	elements.find((element) => element.getClientRects().length > 0)?.scrollIntoView({
+ 		behavior: "auto",
+ 		block: "start",
+ 		inline: "nearest"
+ 	});
+ }
++function scrollToRouteContent(elements) {
++	const htmlElement = document.documentElement;
++	const viewportHeight = htmlElement.clientHeight;
++	let scrollPaddingTop = null;
++	const getCurrentScrollPaddingTop = () => {
++		scrollPaddingTop ??= getScrollPaddingTopPx(htmlElement, viewportHeight);
++		return scrollPaddingTop;
++	};
++	if (isTopInViewport(elements, viewportHeight, getCurrentScrollPaddingTop)) return;
++	htmlElement.scrollTop = 0;
++	if (!isTopInViewport(elements, viewportHeight, getCurrentScrollPaddingTop)) scrollFirstBoxIntoView(elements);
++}
+ var AppRouterScrollTargetInner = class extends React$1.Component {
+ 	scheduledCommitId = null;
+ 	schedulePotentialScroll = () => {
+@@ -94,24 +84,23 @@
+ 		const intent = getPendingAppRouterScrollIntent();
+ 		if (intent === null) return;
+ 		if (this.props.commitId === null || intent.commitId !== this.props.commitId) return;
+-		let node;
+-		if (intent.hash !== null) node = getHashFragmentDomNode(intent.hash);
+-		else node = null;
+-		if (node === null) {
+-			node = findDOMNode(this);
+-			const headElement = node instanceof Element ? node : node?.parentElement;
+-			if (node !== null && headElement != null && isInDocumentHead(node) && !intent.headElements?.has(headElement)) {
+-				markAppRouterScrollIntentHeadHoisted(intent, this.props.commitId);
++		if (intent.hash !== null) {
++			const hashTarget = getHashFragmentDomNode(intent.hash);
++			if (hashTarget !== null) {
++				if (consumeAppRouterScrollIntent(intent, this.props.commitId) === null) return;
++				hashTarget.scrollIntoView({ behavior: "auto" });
+ 				return;
+ 			}
+ 		}
+-		const next = findNextScrollTarget(node);
+-		if (next === null) return;
+-		const target = next.element;
+-		const consumed = consumeAppRouterScrollIntent(intent, this.props.commitId);
+-		if (consumed === null) return;
+-		scrollToElement(target, consumed.hash);
+-		target.focus();
++		if (intent.parallelSlotOwned) {
++			consumeAppRouterScrollIntent(intent, this.props.commitId);
++			return;
++		}
++		const elements = collectRouteContentElements(findDOMNode(this));
++		if (!hasBox(elements)) return;
++		if (consumeAppRouterScrollIntent(intent, this.props.commitId) === null) return;
++		if (intent.hash !== null) scrollFirstBoxIntoView(elements);
++		else scrollToRouteContent(elements);
+ 	};
+ 	componentDidMount() {
+ 		this.schedulePotentialScroll();
+--- a/dist/server/app-browser-navigation-controller.js
++++ b/dist/server/app-browser-navigation-controller.js
+@@ -435,7 +435,7 @@
+ 				previousNextUrl: approvedCommit.previousNextUrl,
+ 				targetHistoryIndex: options.targetHistoryIndex
+ 			}));
+-			claimAppRouterScrollIntentForCommit(options.scrollIntent, renderId);
++			claimAppRouterScrollIntentForCommit(options.scrollIntent, renderId, { parallelSlotOwned: approvedCommit.interception !== null });
+ 			activateNavigationSnapshot();
+ 			snapshotActivated = true;
+ 			dispatchApprovedVisibleCommit(renderId, approvedCommit, options.pendingRouterState, shouldForceSynchronousCommit(options) ? "synchronous" : options.visibleCommitMode ?? "transition");

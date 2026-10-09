@@ -35,6 +35,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/record"
@@ -53,6 +54,7 @@ import (
 	"knative.dev/pkg/apis"
 	"knative.dev/serving/pkg/apis/serving"
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
+	servingv1beta1 "knative.dev/serving/pkg/apis/serving/v1beta1"
 	knativenetworking "knative.dev/serving/pkg/networking"
 )
 
@@ -254,6 +256,10 @@ func pinnedRevisionMissingStalled(revisionNotFound bool, ksvc *servingv1.Service
 type NextAppReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+	// APIReader is an uncached reader used for the rare per-DomainMapping Get of
+	// a core Service (PrivateExposure detection), so that does not start a
+	// cluster-wide Service informer. Falls back to the cached Client when nil.
+	APIReader client.Reader
 	// Recorder emits Kubernetes Events attached to the NextApp so operators can see
 	// reconcile transitions via `kubectl describe`. May be nil in unit tests.
 	Recorder record.EventRecorder
@@ -316,6 +322,12 @@ func (r *NextAppReconciler) emitEvent(obj runtime.Object, eventType, reason, mes
 // Revisions: READ-ONLY — the reconciler GETs the spec.traffic.revisionName pin to
 // surface a GC'd revision as PinnedRevisionNotFound (ADR-0014). Never written.
 // +kubebuilder:rbac:groups=serving.knative.dev,resources=revisions,verbs=get;list;watch
+// +kubebuilder:rbac:groups=serving.knative.dev,resources=domainmappings,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=services,verbs=get
+// +kubebuilder:rbac:groups=serving.knative.dev,resources=routes,verbs=get
+// Deployments: GET-only (uncached APIReader) to re-confirm an admission rejection is still
+// in force after Knative flips the revision reason to ProgressDeadlineExceeded (PodCreationBlocked).
+// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get
 // +kubebuilder:rbac:groups=apps,resources=daemonsets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=serviceaccounts,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=caching.internal.knative.dev,resources=images,verbs=get;list;watch;create;update;patch;delete
@@ -328,13 +340,13 @@ func (r *NextAppReconciler) emitEvent(obj runtime.Object, eventType, reason, mes
 // rbac roles/rolebindings) was replaced because an external writer raced the
 // operator and got reverted every reconcile.
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
-// Secrets: needed to MIRROR the delegated database DSN (app-db-<app>) into the
-// app's own namespace (ADR-0006 §3b). Cross-ns SecretKeyRef is impossible, so the
-// operator writes a same-ns copy ownerRef'd to the NextApp. The read of the SOURCE
-// Secret in the scale-zero-pg namespace is additionally granted by the scoped Role
-// there (config/rbac/appdb_driver.yaml); the appdatabases verbs live in that same
-// scoped Role (namespaced, NOT cluster-wide) — least privilege, no storage-plane access.
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
+// Secrets: NO grant, on purpose (least privilege). The operator never reads or
+// writes a core Secret: the managed-database mode that mirrored a DSN Secret was
+// removed (ADR-0025); spec.secrets.envFrom/envMap and image-pull secrets are only
+// NAME REFERENCES the kubelet resolves on the app pod's behalf; webhook/metrics
+// certs are mounted volumes. A cluster-wide Secrets rule would let a compromised
+// operator read every Secret in the cluster. rbac_secrets_guard_test.go fails if a
+// Secrets marker or role rule is reintroduced without a justified allowlist entry.
 // PersistentVolumeClaims: read-only. The controller-runtime cache watches
 // *v1.PersistentVolumeClaim (found live on EKS, #306/#1062); without a
 // cluster-scoped list/watch grant the manager's informer logs repeated
@@ -707,7 +719,7 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		np.verdict, np.evidence = r.detectNetworkPolicyEnforcement(ctx)
 	}
 
-	verdict := computeStatusVerdict(&nextApp, ksvc, db, revCheck, ic, np, envMapCollision, time.Now())
+	verdict := computeStatusVerdict(&nextApp, ksvc, db, revCheck, ic, np, envMapCollision, r.detectPrivateExposure(ctx, &nextApp), r.detectPodCreationBlocked(ctx, &nextApp, ksvc), time.Now())
 	if err := r.applyStatusVerdict(ctx, &nextApp, observedStatus, verdict); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -876,6 +888,12 @@ func isSelfContainedShape(nextApp *appsv1alpha1.NextApp) bool {
 //     original #1778 write-up described — storage does not remove this
 //     local write, it only adds a step that depends on it succeeding.
 //
+// `writeFree: true` (set by the CLI for an image it built and knows is
+// write-free — a vinext disk-mode binary, a self-contained standalone
+// executable, or a standalone build whose image cache is routed through the
+// knext cache handler) drops BOTH shape-inferred mounts above, so such an app
+// gets no emptyDir at all.
+//
 // `writableCache: true` additionally provisions both mounts unconditionally
 // (the pre-#1778 behaviour) for an app that wants guaranteed local writes
 // outside the two cases above — e.g. an app with no `cacheHandler` that
@@ -892,11 +910,16 @@ func buildWritableVolumes(nextApp *appsv1alpha1.NextApp, readOnlyRootFS bool, wr
 
 	selfContained := isSelfContainedShape(nextApp)
 	storageConfigured := nextApp.Spec.Storage != nil && nextApp.Spec.Storage.Provider != ""
+	// spec.security.writeFree: the CLI that built this image states its
+	// runtime writes nothing to local disk, so neither shape-inferred mount
+	// below is needed. writableCache (the user's escape hatch) still wins.
+	writeFree := nextApp.Spec.Security != nil && nextApp.Spec.Security.WriteFree != nil &&
+		*nextApp.Spec.Security.WriteFree
 
-	mountTmp := writableCache || selfContained
+	mountTmp := writableCache || (selfContained && !writeFree)
 	// `.next/cache` never applies to a self-contained image — it has no
 	// `.next/standalone` tree at all (see isSelfContainedShape).
-	mountNextCache := !selfContained && (writableCache || storageConfigured)
+	mountNextCache := !selfContained && (writableCache || (storageConfigured && !writeFree))
 
 	if !mountTmp && !mountNextCache {
 		return nil, nil
@@ -929,6 +952,23 @@ func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc
 	}
 	ksvc.Labels["app"] = nextApp.Name
 	ksvc.Labels["generated-by"] = "kn-next-operator"
+
+	// Visibility (#1865): spec.networking.visibility == "cluster-local" renders
+	// the Knative label that keeps this ksvc's Route off the external gateway —
+	// the platform way to satisfy "no unauthenticated mutating endpoints" for an
+	// app with no auth of its own. The operator is the label's sole writer
+	// (ADR-0001), so it is re-asserted on every reconcile; explicitly DELETED
+	// (not just left unset) so toggling visibility back to "public" on an
+	// existing app removes a previously-rendered label rather than leaving it
+	// stale. Unset/"public" => absent, byte-identical to every CR written
+	// before this field existed. Set before the preview override below (#770's
+	// disposition list), deliberately NOT special-cased there: a preview of a
+	// private app stays private, and vice versa.
+	if nextApp.Spec.Networking != nil && nextApp.Spec.Networking.Visibility == appsv1alpha1.VisibilityClusterLocal {
+		ksvc.Labels["networking.knative.dev/visibility"] = "cluster-local"
+	} else {
+		delete(ksvc.Labels, "networking.knative.dev/visibility")
+	}
 
 	annotations := map[string]string{
 		"autoscaling.knative.dev/min-scale": "0",
@@ -2056,7 +2096,7 @@ func (r *NextAppReconciler) revisionToNextAppRequests(_ context.Context, obj cli
 // Knative Service's /scale, and an external CronJob writer got reverted by the
 // operator every reconcile; single-writer is the correct model.)
 func (r *NextAppReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
+	b := ctrl.NewControllerManagedBy(mgr).
 		// GenerationChangedPredicate on the PRIMARY (For) watch only: a
 		// status-only write (metadata.generation is unchanged for status
 		// subresource updates) no longer re-enqueues, which — together with the
@@ -2080,6 +2120,17 @@ func (r *NextAppReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			&servingv1.Revision{},
 			handler.EnqueueRequestsFromMapFunc(r.revisionToNextAppRequests),
 		).
-		Named("nextapp").
-		Complete(r)
+		Named("nextapp")
+	// PrivateExposure: a newly created DomainMapping re-triggers reconcile of
+	// the NextApp it targets. The watch needs the DomainMapping CRD at start-up,
+	// so it is registered only when the kind resolves: a Knative install without
+	// domain-mapping must not stop the manager. (The condition itself is also
+	// re-evaluated on every reconcile, so a CRD installed later is picked up on
+	// the next reconcile or operator restart.)
+	if _, err := mgr.GetRESTMapper().RESTMapping(
+		schema.GroupKind{Group: "serving.knative.dev", Kind: "DomainMapping"}, "v1beta1"); err == nil {
+		b = b.Watches(&servingv1beta1.DomainMapping{},
+			handler.EnqueueRequestsFromMapFunc(r.domainMappingToNextAppRequests))
+	}
+	return b.Complete(r)
 }

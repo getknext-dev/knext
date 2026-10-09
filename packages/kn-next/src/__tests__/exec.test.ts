@@ -162,6 +162,91 @@ describe("runQuiet", () => {
             expect(printed).toEqual([["[marker] warned before failing"]]);
         });
 
+        describe("summarizeSurfaced", () => {
+            function capture(fn: () => void): unknown[][] {
+                const originalLog = console.log;
+                const printed: unknown[][] = [];
+                console.log = (...args: unknown[]) => {
+                    printed.push(args);
+                };
+                try {
+                    fn();
+                } catch {
+                    // a non-zero exit is asserted by the caller
+                } finally {
+                    console.log = originalLog;
+                }
+                return printed;
+            }
+
+            it("folds the matching lines into one count line pointing at --verbose", () => {
+                const printed = capture(() =>
+                    runQuiet(
+                        [
+                            NODE,
+                            "-e",
+                            "process.stdout.write('noise\\n[marker] a\\n[marker] b\\n[marker] c\\n')",
+                        ],
+                        {
+                            surfaceStdoutPrefix: "[marker]",
+                            summarizeSurfaced: true,
+                        },
+                    ),
+                );
+                expect(printed).toEqual([
+                    ["[marker] 3 notes; rerun with --verbose for details"],
+                ]);
+            });
+
+            it("says '1 note' for one line and prints nothing for none", () => {
+                expect(
+                    capture(() =>
+                        runQuiet(
+                            [
+                                NODE,
+                                "-e",
+                                "process.stdout.write('[marker] a\\n')",
+                            ],
+                            {
+                                surfaceStdoutPrefix: "[marker]",
+                                summarizeSurfaced: true,
+                            },
+                        ),
+                    ),
+                ).toEqual([
+                    ["[marker] 1 note; rerun with --verbose for details"],
+                ]);
+                expect(
+                    capture(() =>
+                        runQuiet(
+                            [NODE, "-e", "process.stdout.write('noise\\n')"],
+                            {
+                                surfaceStdoutPrefix: "[marker]",
+                                summarizeSurfaced: true,
+                            },
+                        ),
+                    ),
+                ).toEqual([]);
+            });
+
+            it("still prints every matching line when the command FAILS", () => {
+                const printed = capture(() =>
+                    runQuiet(
+                        [
+                            NODE,
+                            "-e",
+                            "process.stdout.write('[marker] a\\n[marker] b\\n'); process.exit(3)",
+                        ],
+                        {
+                            surfaceStdoutPrefix: "[marker]",
+                            summarizeSurfaced: true,
+                        },
+                    ),
+                );
+                expect(printed).toEqual([["[marker] a"], ["[marker] b"]]);
+            });
+        });
+
         it("throws on empty argv even with the option set", () => {
             expect(() =>
                 runQuiet([], { surfaceStdoutPrefix: "[marker]" }),

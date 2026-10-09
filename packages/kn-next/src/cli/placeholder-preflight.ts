@@ -169,8 +169,16 @@ export class PlaceholderConfigError extends UsageError {
  * file, and a placeholder typed as the override must still be caught),
  * BEFORE any build step, upload, or cluster access.
  */
-export function assertNoPlaceholders(config: KnativeNextConfig): void {
-    const findings = findPlaceholders(config);
+export function assertNoPlaceholders(
+    config: KnativeNextConfig,
+    opts: { imageProvided?: boolean } = {},
+): void {
+    // With a pre-built image (`deploy --image`) nothing is built or pushed, so
+    // the root `registry` field is never read: exempt that ONE path. Every
+    // other finding (bucket, domains, ...) still fails.
+    const findings = findPlaceholders(config).filter(
+        (f) => !(opts.imageProvided && f.path === "registry"),
+    );
     if (findings.length > 0) {
         throw new PlaceholderConfigError(findings);
     }

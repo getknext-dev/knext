@@ -45,6 +45,10 @@ set -euo pipefail
 
 APP_DIR="$(pwd)"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# The knext repo root this script lives in (scripts/.. ), so the vinext
+# version default below can be read from packages/kn-next/package.json
+# regardless of APP_DIR (the fixture's own temp dir, elsewhere entirely).
+REPO_ROOT="$(dirname "${SCRIPT_DIR}")"
 LOG_FILE="${APP_DIR}/.adapter-build.log"
 SERVER_LOG="${APP_DIR}/.adapter-server.log"
 BUILD_LOG="${APP_DIR}/.adapter-vite-build.log"
@@ -95,11 +99,31 @@ fi
 # (apps/file-manager/package.json). A floating install would make a red file
 # attributable to a vinext release rather than to knext, which is the same
 # mistake the bun lane made with `bun-version: latest` and had to undo.
-VINEXT_VERSION="${KNEXT_VINEXT_VERSION:-1.0.0-beta.12}"
+#
+# #1812: VINEXT_VERSION's default is READ FROM
+# packages/kn-next/package.json's devDependencies.vinext AT RUNTIME — never
+# hardcoded here. This used to be a bare literal (1.0.0-beta.12) that had
+# drifted behind @getknext/core's own published pin (already 1.0.1): every
+# fixture on this lane built and booted an OLD, unpatched vinext, and every
+# bundled fix §2b applies below measured "not working" in a compat run for
+# that reason alone — the fixes were never exercised at all.
+# tests/vinext-pin-lockstep.test.ts proves this default stays in lockstep
+# with the package.json pin by actually RUNNING this block, not by reading
+# a literal out of it.
+# BEGIN vinext-version-resolution
+VINEXT_PINNED_PKG="${REPO_ROOT}/packages/kn-next/package.json"
+VINEXT_PINNED_VERSION="$(node -e "process.stdout.write(require(process.argv[1]).devDependencies.vinext)" "${VINEXT_PINNED_PKG}")"
+if [ -z "${VINEXT_PINNED_VERSION}" ]; then
+  log "ERROR: could not read devDependencies.vinext from ${VINEXT_PINNED_PKG}"
+  exit 1
+fi
+VINEXT_VERSION="${KNEXT_VINEXT_VERSION:-${VINEXT_PINNED_VERSION}}"
+# END vinext-version-resolution
 VITE_VERSION="${KNEXT_VITE_VERSION:-8.2.2}"
 NITRO_VERSION="${KNEXT_NITRO_VERSION:-3.0.260610-beta}"
-# vinext@1.0.0-beta.12 declares `@vitejs/plugin-rsc@^0.5.34` as an (optional) peer.
-# (Unchanged from beta.9 — confirmed via `npm view vinext@1.0.0-beta.12 peerDependencies`.)
+# vinext declares `@vitejs/plugin-rsc@^0.5.34` as an (optional) peer.
+# (Unchanged from beta.9 through 1.0.1 — confirmed via `npm view vinext@<v>
+# peerDependencies`; re-verify with the same command on every future bump.)
 # Because the toolchain install pulls this package explicitly, npm enforces that
 # range even though the peer is optional — 0.5.26 does NOT satisfy `^0.5.34`, so
 # every fixture install still aborts with `npm ERESOLVE` (a SECOND conflict edge
@@ -107,8 +131,9 @@ NITRO_VERSION="${KNEXT_NITRO_VERSION:-3.0.260610-beta}"
 # edge at a time). Pinned at 0.5.34 the whole toolchain install resolves cleanly.
 PLUGIN_RSC_VERSION="${KNEXT_PLUGIN_RSC_VERSION:-0.5.34}"
 # The React family (react, react-dom, react-server-dom-webpack) is versioned in
-# lockstep upstream and MUST be pinned together here. vinext@1.0.0-beta.9 declares
-# a `react@^19.2.6` peer; the corpus fixtures otherwise pull react@19.2.4
+# lockstep upstream and MUST be pinned together here. vinext declares a
+# `react@^19.2.6` peer (unchanged from beta.9 through 1.0.1); the corpus
+# fixtures otherwise pull react@19.2.4
 # transitively via next@16.2, which does NOT satisfy that peer — every fixture
 # install then aborts with `npm ERESOLVE` before it can build, reddening the whole
 # axis for a reason that has nothing to do with the compiled artifact. Pinning the
@@ -229,6 +254,86 @@ ${NM_ENTRIES}
 EOF
   rm -rf "${NM_SNAP}"
 fi
+
+# ── 2b. apply knext's bundled vinext patches — the SAME artifact `knext build`
+# produces, through the SAME code path: `knext vinext-patches`, the verb the
+# installed CLI's dispatcher dynamically imports
+# (packages/kn-next/src/cli/vinext-patches.ts's `ensureVinextPatches` /
+# `applyVinextPatches`), which is also what project-build.ts calls right
+# before `vite build` on the vinext target. Until this fix to the compat
+# lane's vinext pin and patch step, this lane never ran this step at all, so
+# every bundled fix measured "not working" for a reason that had nothing to
+# do with the fix.
+#
+# `ensureVinextPatches` is DELIBERATELY non-fatal on a version mismatch for a
+# real app — a user who pinned a different vinext than knext's manifest gets
+# a printed notice, not a broken build (see vinext-patches.ts's
+# `EnsureResult`). That default is wrong for THIS lane, whose entire premise
+# is "the vinext installed here IS the manifest's validated target" — a
+# silent skip here would measure an unpatched build and report it as the
+# patched one. So the harness checks the versions itself, BEFORE calling the
+# CLI, and fails loudly instead of silently skipping.
+#
+# The SAME applies to `KNEXT_VINEXT_PATCHES` (vinext-patches.ts's own
+# `vinextPatchesDisabled`): set to `0`/`false`/`off`/`no`, `vinext-patches`
+# (and `--check`) both short-circuit to `{kind: "disabled"}` and exit 0
+# WITHOUT touching the version at all — the version-match check below would
+# still pass, the CLI calls would still exit 0, and the harness would log
+# "fully applied" having applied nothing. Refuse up front if it is set to a
+# disabling value, rather than let it defeat every check below silently.
+if [ -n "${KNEXT_VINEXT_PATCHES+x}" ]; then
+  KNEXT_VINEXT_PATCHES_NORMALIZED="$(printf '%s' "${KNEXT_VINEXT_PATCHES}" | tr '[:upper:]' '[:lower:]' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+  case "${KNEXT_VINEXT_PATCHES_NORMALIZED}" in
+    0 | false | off | no)
+      log "ERROR: KNEXT_VINEXT_PATCHES=${KNEXT_VINEXT_PATCHES} disables knext's bundled vinext patches (vinext-patches.ts's vinextPatchesDisabled) — refusing to boot a deliberately unpatched vinext build on this lane. Unset KNEXT_VINEXT_PATCHES, or set it to a non-disabling value, to run this lane."
+      exit 1
+      ;;
+  esac
+fi
+VINEXT_PATCH_MANIFEST="${APP_DIR}/node_modules/@getknext/core/templates/vinext-patches/manifest.json"
+VINEXT_INSTALLED_PKG="${APP_DIR}/node_modules/vinext/package.json"
+if [ ! -f "${VINEXT_PATCH_MANIFEST}" ]; then
+  log "ERROR: the installed @getknext/core ships no templates/vinext-patches/manifest.json (${VINEXT_PATCH_MANIFEST}) — the packed tarball is not the shipped shape"
+  exit 1
+fi
+if [ ! -f "${VINEXT_INSTALLED_PKG}" ]; then
+  log "ERROR: ${VINEXT_INSTALLED_PKG} is missing after the toolchain install — nothing to patch"
+  exit 1
+fi
+if ! node -e '
+  const fs = require("node:fs");
+  const installedPkg = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  const manifest = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+  if (installedPkg.version !== manifest.vinext) {
+    console.error(
+      "vinext " + installedPkg.version + " is installed but the bundled-patch " +
+      "manifest targets " + manifest.vinext + " only — refusing to silently " +
+      "skip the bundled fixes and measure an unpatched build. Bump the " +
+      "manifest (packages/kn-next/templates/vinext-patches/manifest.json) " +
+      "and re-validate every patch, or stop overriding KNEXT_VINEXT_VERSION " +
+      "away from the pinned default.",
+    );
+    process.exit(1);
+  }
+  console.log(
+    "vinext " + installedPkg.version + " matches the bundled-patch manifest " +
+    "— applying " + manifest.patches.length + " patch(es):",
+  );
+  for (const p of manifest.patches) console.log("  - " + p.file + " (" + p.upstream + ")");
+' "${VINEXT_INSTALLED_PKG}" "${VINEXT_PATCH_MANIFEST}" >&2; then
+  log "ERROR: knext's bundled vinext patches cannot be applied (see above) — refusing to boot an unpatched/mismatched vinext build"
+  exit 1
+fi
+log "running: node node_modules/@getknext/core/dist/cli/kn-next.js vinext-patches (same code path knext build's vinext target uses)"
+if ! node "${APP_DIR}/node_modules/@getknext/core/dist/cli/kn-next.js" vinext-patches 2>&1 | sed 's/^/[vinext-patches] /' >&2; then
+  log "ERROR: knext vinext-patches failed to apply the bundled vinext fixes — see the [vinext-patches] lines above"
+  exit 1
+fi
+if ! node "${APP_DIR}/node_modules/@getknext/core/dist/cli/kn-next.js" vinext-patches --check 2>&1 | sed 's/^/[vinext-patches] /' >&2; then
+  log "ERROR: knext vinext-patches --check still reports unapplied fixes immediately after applying them — refusing to boot a partially-patched vinext"
+  exit 1
+fi
+log "the bundled vinext fixes are fully applied"
 
 # ── 3. the vite config vinext builds through ──────────────────────────────────
 # Written only when the fixture has none: a fixture that ships its own vite
@@ -353,6 +458,12 @@ fi
 # BEFORE the build so the build and the runtime agree.
 DEPLOYMENT_ID="${NEXT_DEPLOYMENT_ID:-knext-vinext-$(date +%s)-$$}"
 export NEXT_DEPLOYMENT_ID="${DEPLOYMENT_ID}"
+
+# Next's deploy tests assert test-only client request metadata (e.g. the
+# next-test-fetch-priority header). vinext compiles that in only when
+# __NEXT_TEST_MODE is set at BUILD; the shard sets NEXT_TEST_MODE alone.
+# Same fix vinext's own deploy suite made (cloudflare/vinext#2875).
+export __NEXT_TEST_MODE=e2e
 
 # ── 4. vite build → the nitro bun-preset .output ──────────────────────────────
 log "running vite build (vinext → nitro bun preset; log → ${BUILD_LOG})"

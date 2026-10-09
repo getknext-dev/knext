@@ -22,12 +22,14 @@
  *
  * Out of scope: request routing, bun --compile, operator changes.
  */
-import { createReadStream, existsSync } from "node:fs";
+import { createReadStream, existsSync, readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import type { Readable } from "node:stream";
 import type { NextAdapter } from "next";
 // AdapterOutputs is not re-exported from the 'next' public barrel; import directly.
 import type { AdapterOutputs } from "next/dist/build/adapter/build-complete";
+import { KNEXT_RUNTIME_ENV } from "./runtime-env";
 import { healBunExportTargets } from "./standalone-bun-exports";
 
 /** The onBuildComplete ctx as typed by the installed next (16.2.x): carries `routing`. */
@@ -54,6 +56,112 @@ type Legacy160RoutesCtx = {
         dynamicRoutes?: unknown;
     };
 };
+
+/** The module specifier every knext scaffold's `cache-handler.js` re-exports. */
+const KNEXT_CACHE_HANDLER_SPECIFIER = "@getknext/core/adapters/cache-handler";
+
+/**
+ * Whether `cacheHandlerPath` is knext's own cache handler: the module itself
+ * (a path inside the published package or this source tree), or an app file
+ * that re-exports it — the one-liner every scaffold generates. Unreadable =
+ * not knext's: the caller then leaves Next's default alone.
+ */
+function isKnextCacheHandler(cacheHandlerPath: string): boolean {
+    const p = cacheHandlerPath.replaceAll("\\", "/");
+    if (
+        /\/@getknext\/core\/.*\/cache-handler(-node|-bun)?\.[cm]?js$/.test(p) ||
+        /\/kn-next\/(src|dist)\/adapters\/cache-handler(-node|-bun)?\.js$/.test(
+            p,
+        )
+    ) {
+        return true;
+    }
+    try {
+        // A re-export file is a few lines; never read a whole bundle.
+        const head = readFileSync(cacheHandlerPath, "utf-8").slice(0, 4096);
+        return head.includes(KNEXT_CACHE_HANDLER_SPECIFIER);
+    } catch {
+        return false;
+    }
+}
+
+/** The per-runtime cache handler entries, by runtime id (#1843). */
+const RUNTIME_CACHE_HANDLERS: Record<string, string> = {
+    node: "@getknext/core/internal/cache-handler-node",
+    bun: "@getknext/core/internal/cache-handler-bun",
+};
+
+/**
+ * Point a knext `cacheHandler` at the entry for the configured runtime (#1843).
+ *
+ * The generic handler picks its Redis client at runtime, and on Node it loads
+ * ioredis through a computed specifier that Next's standalone tracing cannot
+ * follow — so the node image shipped with no Redis client and the cache ran
+ * from memory in silence. The per-runtime entries pick statically: the node
+ * one imports ioredis LITERALLY (traced into `.next/standalone`), the bun one
+ * uses Bun's native client and imports no ioredis at all.
+ *
+ * Applied only when the CLI exported a known runtime and the app's handler is
+ * knext's; `next dev`, a plain `next build` and a user's own handler are left
+ * alone. Next records the chosen path relative to `distDir` and traces it as a
+ * root, so it lands in the standalone tree like any other handler.
+ */
+function runtimeCacheHandler(
+    config: Parameters<NonNullable<NextAdapter["modifyConfig"]>>[0],
+): { cacheHandler?: string } {
+    const runtime = process.env[KNEXT_RUNTIME_ENV];
+    const specifier =
+        runtime !== undefined && Object.hasOwn(RUNTIME_CACHE_HANDLERS, runtime)
+            ? RUNTIME_CACHE_HANDLERS[runtime]
+            : undefined;
+    if (specifier === undefined) return {};
+    const handler = config.cacheHandler;
+    if (typeof handler !== "string" || !isKnextCacheHandler(handler)) return {};
+    // Self-reference by package name: resolves through `exports` to this
+    // package's own dist, wherever the app's package manager put it.
+    return {
+        cacheHandler: createRequire(import.meta.url).resolve(specifier),
+    };
+}
+
+/**
+ * Write-free runtime: route Next's optimized-image cache through the knext
+ * cache handler instead of `.next/cache/images` on local disk.
+ *
+ * Next 16.2+ stores image-optimizer variants through `cacheHandler` when
+ * `images.customCacheHandler` is true (the official option); otherwise it
+ * writes them to the build's `.next/cache/images`, which on a read-only root
+ * filesystem needs a writable volume — and every such volume costs
+ * pod-sandbox setup time on each cold wake. knext's handler stores the
+ * variant's bytes in Redis (shared across pods and wakes) or a byte-bounded
+ * in-process map, so with it the app needs no writable path for images.
+ *
+ * Applied only when:
+ *  - the app's `cacheHandler` is knext's (a user handler may not round-trip
+ *    the entry's raw Buffer, and a broken entry serves a broken image);
+ *  - this Next has the option at all — `modifyConfig` sees the RESOLVED
+ *    config, so a supporting Next always carries it as a boolean;
+ *  - `KNEXT_IMAGE_CACHE_HANDLER` is not `0` at build time (opt-out: keep
+ *    Next's disk cache, and give the app a writable volume yourself).
+ *
+ * `knext deploy` reads the built `required-server-files.json` back to decide
+ * whether the image is write-free (`spec.security.writeFree`).
+ */
+function imageCacheThroughHandler(
+    config: Parameters<NonNullable<NextAdapter["modifyConfig"]>>[0],
+): { images?: typeof config.images } {
+    const images = config.images as
+        | (typeof config.images & { customCacheHandler?: unknown })
+        | undefined;
+    if (!images || typeof images.customCacheHandler !== "boolean") return {};
+    if (images.customCacheHandler) return {};
+    if (process.env.KNEXT_IMAGE_CACHE_HANDLER === "0") return {};
+    const handler = config.cacheHandler;
+    if (typeof handler !== "string" || !isKnextCacheHandler(handler)) {
+        return {};
+    }
+    return { images: { ...images, customCacheHandler: true } };
+}
 
 const adapter: NextAdapter = {
     name: "knext-adapter",
@@ -98,9 +206,16 @@ const adapter: NextAdapter = {
         // app on the webpack bundler. Pinned by `adapter-dev-edge-fence.test.ts`
         // (real dev server) and `adapter-edge-ignore-plugin.test.ts` (unit).
         const appWebpack = config.webpack;
-        return {
+        // #1843: the runtime's own cache handler first, so the image routing
+        // below judges the handler that will actually run.
+        const withRuntimeHandler = {
             ...config,
+            ...runtimeCacheHandler(config),
+        };
+        return {
+            ...withRuntimeHandler,
             ...(isProductionBuild ? { output: "standalone" as const } : {}),
+            ...imageCacheThroughHandler(withRuntimeHandler),
             webpack(webpackConfig, ctx) {
                 const cfg = appWebpack
                     ? appWebpack(webpackConfig, ctx)

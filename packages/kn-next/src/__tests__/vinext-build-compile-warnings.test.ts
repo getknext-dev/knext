@@ -76,4 +76,43 @@ describe("buildVinextExecutable's default run (#1385)", () => {
         expect(options?.surfaceStdoutPrefix).toBe(COMPILE_LOG_PREFIX);
         expect(COMPILE_LOG_PREFIX).toBe("[knext compile]");
     });
+
+    it("summarises the surfaced lines by default, and lists them under KNEXT_VERBOSE=1", () => {
+        const before = process.env.KNEXT_VERBOSE;
+        try {
+            delete process.env.KNEXT_VERBOSE;
+            buildVinextExecutable({
+                cwd: cwdWithOutput(),
+                bunVersion: "1.4.0",
+                skipViteBuild: true,
+            });
+            expect(
+                (
+                    runQuiet.mock.calls[0] as [
+                        string[],
+                        { summarizeSurfaced?: boolean },
+                    ]
+                )[1].summarizeSurfaced,
+            ).toBe(true);
+
+            runQuiet.mockClear();
+            process.env.KNEXT_VERBOSE = "1";
+            buildVinextExecutable({
+                cwd: cwdWithOutput(),
+                bunVersion: "1.4.0",
+                skipViteBuild: true,
+            });
+            expect(
+                (
+                    runQuiet.mock.calls[0] as [
+                        string[],
+                        { summarizeSurfaced?: boolean },
+                    ]
+                )[1].summarizeSurfaced,
+            ).toBeFalsy();
+        } finally {
+            if (before === undefined) delete process.env.KNEXT_VERBOSE;
+            else process.env.KNEXT_VERBOSE = before;
+        }
+    });
 });

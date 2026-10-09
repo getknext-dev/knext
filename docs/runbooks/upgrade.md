@@ -83,8 +83,26 @@ rather than replacing them):
 kubectl apply --server-side -f install-new.yaml
 ```
 
-> To pin an exact release instead of `latest`, use the versioned asset URL:
-> `.../releases/download/<tag>/install.yaml`.
+> **Pin an exact release, not `operator-latest`.** Every `operator-vX.Y.Z` release
+> publishes the same digest-pinned bundle as `install-vX.Y.Z.yaml` (self-describing) and
+> `install.yaml`: `.../releases/download/operator-vX.Y.Z/install-vX.Y.Z.yaml`. The release is
+> immutable. The concrete upgrade is therefore:
+>
+> ```sh
+> # BEFORE: record the version you run — it is your rollback target.
+> knext doctor | grep 'Operator version'
+> kubectl get deploy kn-next-operator-controller-manager -n kn-next-operator-system \
+>   -o jsonpath='{.metadata.labels.app\.kubernetes\.io/version}{"\n"}'
+>
+> NEW=X.Y.Z   # the operator-vX.Y.Z release you are moving to
+> kubectl apply --server-side -f \
+>   "https://github.com/getknext-dev/knext/releases/download/operator-v${NEW}/install-v${NEW}.yaml"
+> ```
+>
+> Version pairing (operator MAJOR.MINOR must be >= the CLI's; patch is independent) and the
+> `knext doctor` verdict are in [COMPATIBILITY.md](../COMPATIBILITY.md). A bundle from before the
+> version line has no label — `doctor` reports it as unversioned; record its image digest instead
+> (the `jsonpath` on `containers[0].image` below) as the rollback target.
 
 ### Watch the roll
 

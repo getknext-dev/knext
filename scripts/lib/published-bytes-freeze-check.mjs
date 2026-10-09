@@ -115,6 +115,26 @@ export const PIN_FILE = '.github/compat-credential-ref.json';
 /** The reviewed-PR override marker this check honours (see the file header). */
 export const OVERRIDE_MARKER_FIELD = 'publishedBytesBumpMarker';
 
+/**
+ * #2004 — the pin's `rcTag` names the credential tag of ONE release line (the
+ * one `main` carries). A PR into an `integration/*` branch is on a DIFFERENT
+ * line: its published bytes are the next line's rc, so diffing them against
+ * the pinned tag fails by construction, on every PR, and an always-red check
+ * guards nothing. Such PRs are not measured against this pin.
+ *
+ * Deliberately a base-ref test and nothing wider: `main` and any stacked
+ * feature branch (which merges toward `main`) stay guarded; an absent/unknown
+ * base ref stays guarded too (fail closed). The ref is the PR BASE, which the
+ * PR author cannot choose to be `integration/*` and still merge to `main`.
+ *
+ * @param {string | undefined | null} baseRef bare (`integration/v1.3`) or `refs/heads/`-qualified.
+ * @returns {boolean}
+ */
+export function isUnfrozenLineBaseRef(baseRef) {
+  if (typeof baseRef !== 'string') return false;
+  return baseRef.replace(/^refs\/heads\//, '').startsWith('integration/');
+}
+
 const MAX_OVERRIDE_MARKER_SPAN_DAYS = 14;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -288,7 +308,7 @@ export function overrideMarkerIntroducedByPr(mergeBasePin, headPin) {
  * freeze/unfrozen while `headPin` decides the marker, and why no separate
  * "pin-only diff" case is needed here the way the sibling guard needs one.
  *
- * @param {{ basePin: unknown, headPin: unknown, mergeBasePin?: unknown, changedFiles: string[], packageDirs: string[], rootInputFiles?: readonly string[], now: Date }} input
+ * @param {{ basePin: unknown, headPin: unknown, mergeBasePin?: unknown, changedFiles: string[], packageDirs: string[], rootInputFiles?: readonly string[], baseRef?: string, now: Date }} input
  * @returns {{ action: 'skip', reason: string } | { action: 'proceed', rcTag: string, reason: string, matchedFiles: string[] }}
  */
 export function decidePublishedBytesScope({
@@ -298,8 +318,16 @@ export function decidePublishedBytesScope({
   changedFiles,
   packageDirs,
   rootInputFiles = ROOT_BUILD_INPUT_FILES,
+  baseRef,
   now,
 }) {
+  if (isUnfrozenLineBaseRef(baseRef)) {
+    const line = String(baseRef).replace(/^refs\/heads\//, '');
+    return {
+      action: 'skip',
+      reason: `skipped: base ${line} is not the frozen line — ${PIN_FILE}'s rcTag guards the line \`main\` carries, not this one`,
+    };
+  }
   const rcTag =
     basePin && typeof basePin === 'object' ? /** @type {any} */ (basePin).rcTag : undefined;
   if (rcTag === null || rcTag === undefined) {

@@ -35,6 +35,8 @@
  * this function's.
  */
 
+import { readFileSync } from "node:fs";
+import YAML from "yaml";
 import {
     crdGetArgv,
     crdSchemaFromCrdObject,
@@ -42,6 +44,7 @@ import {
     flattenSchemaPaths,
     openApiV3Argv,
     parseUnknownFieldsFromError,
+    presentEmittedPaths,
     unknownEmittedFields,
 } from "./crd-schema";
 import { EMITTED_CR_FIELD_PATHS } from "./emitted-fields.generated";
@@ -174,6 +177,20 @@ function firstLine(s: string): string {
 }
 
 /**
+ * The field paths of the CR actually being applied (#1897). Falls back to the
+ * full static vocabulary only when the CR file cannot be read or parsed — a
+ * superset is the safe degradation there, never a silent empty list.
+ */
+function emittedPathsOfCR(crPath: string): readonly string[] {
+    try {
+        const cr = YAML.parse(readFileSync(crPath, "utf-8"));
+        return presentEmittedPaths(EMITTED_CR_FIELD_PATHS, cr);
+    } catch {
+        return EMITTED_CR_FIELD_PATHS;
+    }
+}
+
+/**
  * Run the preflight. NEVER throws: the caller decides what a non-`ok` verdict
  * costs (for `deploy` and `preview` it is a hard, pre-upload abort).
  */
@@ -236,7 +253,7 @@ export function preflightCRSchema(
     const read = readKnownCRDFields(deps.kubectl);
     if (read.known) {
         const missing = unknownEmittedFields(
-            EMITTED_CR_FIELD_PATHS,
+            emittedPathsOfCR(args.crPath),
             read.known,
         );
         if (missing.length > 0) {

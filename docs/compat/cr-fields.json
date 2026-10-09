@@ -28,6 +28,8 @@
     "spec.image",
     "spec.imagePullSecrets",
     "spec.imagePullSecrets.*.name",
+    "spec.networking",
+    "spec.networking.visibility",
     "spec.observability",
     "spec.observability.enabled",
     "spec.observability.rum",
@@ -70,6 +72,8 @@
     "spec.secrets.envMap",
     "spec.secrets.envMap.*.secretKey",
     "spec.secrets.envMap.*.secretName",
+    "spec.security",
+    "spec.security.writeFree",
     "spec.selfContained",
     "spec.storage",
     "spec.storage.bucket",
@@ -78,5 +82,5 @@
     "spec.storage.region"
   ],
   "notInBundledCRD": [],
-  "fieldCount": 72
+  "fieldCount": 76
 }
