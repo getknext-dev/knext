@@ -92,7 +92,8 @@ function shellImages(file: string): string[] {
       if (isImageVar(m[1])) out.push(strip(m[2]));
     }
     for (const m of line.matchAll(/\bset image\b.*$/g)) {
-      for (const r of m[0].matchAll(/(?:^|\s)[\w-]+="?([^\s"=-][^\s"=]*)"?/g)) out.push(strip(r[1]));
+      for (const r of m[0].matchAll(/(?:^|\s)[\w-]+="?([^\s"=-][^\s"=]*)"?/g))
+        out.push(strip(r[1]));
     }
   }
   return out;
@@ -105,7 +106,8 @@ function goImages(file: string): string[] {
   for (const m of src.matchAll(/\b\w*Image\w*:\s*"([^"]+)"/g)) out.push(m[1]);
   for (const m of src.matchAll(/env\("[A-Z_]*IMAGE[A-Z_]*",\s*"([^"]+)"/g)) out.push(m[1]);
   // const/var/:= assignments to an image-named identifier (`defaultImg = "…"`).
-  for (const m of src.matchAll(/\b\w*(?:Img|Image|IMG|IMAGE)\w*\s*:?=\s*"([^"]+)"/g)) out.push(m[1]);
+  for (const m of src.matchAll(/\b\w*(?:Img|Image|IMG|IMAGE)\w*\s*:?=\s*"([^"]+)"/g))
+    out.push(m[1]);
   return out;
 }
 
