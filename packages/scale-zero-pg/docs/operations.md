@@ -2072,6 +2072,37 @@ The gateway terminates TLS on the Postgres wire when `GW_TLS_CERT_FILE` +
 `pggw-tls`, mounted at `/etc/pggw-tls/`. This closes the "plaintext Postgres on an
 external LoadBalancer" review finding — clients connect with `sslmode=require`.
 
+### Network exposure: ClusterIP by default, public front door is opt-in
+
+The default install (`kubectl apply -f deploy/`) creates **no** public Service:
+`pggw` and `pggw-apps` are `ClusterIP`, so Postgres is reachable only inside the
+cluster. For ad-hoc access from your machine, port-forward instead of exposing it:
+
+```bash
+kubectl -n scale-zero-pg port-forward svc/pggw 55432:55432
+psql "postgres://…@localhost:55432/postgres?sslmode=require"
+```
+
+If you really need a public endpoint, apply the opt-in overlay by name (it lives in
+`deploy/optional/`, which the directory apply never reaches):
+
+```bash
+sh deploy/gen-tls.sh                                  # TLS on the wire first
+# edit loadBalancerSourceRanges in the file: replace the placeholder CIDR
+kubectl apply -f deploy/optional/28-gateway-public-lb.yaml
+```
+
+Treat this as exposing a database to a network:
+
+- **Restrict sources** with `loadBalancerSourceRanges` (never `0.0.0.0/0`).
+- **Require TLS** — `sslmode=require`, or `verify-full` once you front it with a real CA.
+- **Prefer an internal load balancer** where your cloud offers one (provider
+  annotations are in the overlay, commented).
+- Only the Postgres ports (55432, 55434) are exposed; metrics (9090) never are.
+
+A source-range restriction is enforced by the cloud load balancer, not by
+NetworkPolicy; on clusters whose CNI ignores NetworkPolicy it is your main control.
+
 **Generate it (once):** `sh deploy/gen-tls.sh`. Idempotent — it self-signs a cert
 (CN `pggw.scale-zero-pg.svc`; SANs cover `pggw`, `pggw-lb`, `localhost`, `127.0.0.1`)
 into Secret `pggw-tls` **only if absent**, so it never rotates silently. The pods

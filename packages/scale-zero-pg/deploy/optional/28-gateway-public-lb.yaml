@@ -1,0 +1,48 @@
+# OPT-IN: public front door for the scale-zero-pg Postgres gateway.
+#
+# NOT part of the default install. `kubectl apply -f deploy/` is non-recursive
+# and never reaches this directory; you must apply this file by name:
+#
+#   kubectl apply -f deploy/optional/28-gateway-public-lb.yaml
+#
+# Applying it asks your cloud for a load balancer in front of Postgres. Before
+# you do:
+#
+#   1. Restrict the source: replace the placeholder CIDR in
+#      `loadBalancerSourceRanges` with the networks that really need access.
+#      Never use 0.0.0.0/0.
+#   2. Require TLS: run `sh deploy/gen-tls.sh` (or provision a real CA /
+#      cert-manager cert into Secret `pggw-tls`) and connect with
+#      `sslmode=require` or, with a real CA, `sslmode=verify-full`. Never use
+#      `sslmode=disable` across the internet. The self-signed cert's SANs include
+#      `pggw-lb`.
+#   3. Prefer a private/internal load balancer where your cloud supports it
+#      (uncomment the annotation for your provider below).
+#   4. Do not rely on Postgres auth alone: keep the source ranges tight and
+#      rotate the credentials the gateway fronts.
+#
+# Only the Postgres wire ports are exposed. Metrics (9090) are deliberately
+# absent so they cannot be reached from outside the cluster.
+#
+# To take the public front door down again, remove this Service by name
+# (pggw-lb in namespace scale-zero-pg).
+apiVersion: v1
+kind: Service
+metadata:
+  name: pggw-lb
+  namespace: scale-zero-pg
+  labels: { app: pggw }
+  # annotations:
+  #   service.beta.kubernetes.io/oci-load-balancer-internal: "true"     # OKE
+  #   service.beta.kubernetes.io/aws-load-balancer-scheme: internal     # EKS
+  #   networking.gke.io/load-balancer-type: "Internal"                  # GKE
+spec:
+  type: LoadBalancer
+  # REQUIRED edit: replace with your own CIDR(s). 192.0.2.0/24 is a
+  # documentation-only range (RFC 5737) that matches no real client.
+  loadBalancerSourceRanges:
+    - 192.0.2.0/24
+  selector: { app: pggw }
+  ports:
+    - { name: pg, port: 55432, targetPort: pg }
+    - { name: ro-pg, port: 55434, targetPort: ro-pg } # DATABASE_URL_RO

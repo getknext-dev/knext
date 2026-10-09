@@ -175,6 +175,11 @@ spec:
 # Prometheus scraping metrics (pggw:9090), and deploy/_metrics.sh. ClusterIP on
 # purpose: metrics (9090) are reachable in-cluster but NEVER via an external
 # LoadBalancer (system-design-review finding #4 — metrics must not leak).
+#
+# There is deliberately NO public Service in this file. Postgres is not exposed
+# outside the cluster by default; for local access use
+# `kubectl -n scale-zero-pg port-forward svc/pggw 55432:55432`. A public front
+# door is an explicit opt-in: deploy/optional/28-gateway-public-lb.yaml.
 apiVersion: v1
 kind: Service
 metadata:
@@ -188,19 +193,3 @@ spec:
     - { name: pg, port: 55432, targetPort: pg }
     - { name: ro-pg, port: 55434, targetPort: ro-pg } # DATABASE_URL_RO (issue #66)
     - { name: metrics, port: 9090, targetPort: metrics }
----
-# External front door: exposes ONLY the Postgres wire port. 9090 is deliberately
-# absent so metrics cannot be reached from outside the cluster. OrbStack surfaces
-# this on localhost; in a real cluster front it with TLS termination.
-apiVersion: v1
-kind: Service
-metadata:
-  name: pggw-lb
-  namespace: scale-zero-pg
-  labels: { app: pggw }
-spec:
-  type: LoadBalancer
-  selector: { app: pggw }
-  ports:
-    - { name: pg, port: 55432, targetPort: pg }
-    - { name: ro-pg, port: 55434, targetPort: ro-pg } # DATABASE_URL_RO (issue #66)
