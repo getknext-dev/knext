@@ -6,6 +6,8 @@
   ADR is a separate, later decision — also run through `jev` — which scored 0.58. Trigger-class
   (ADR — a release-line branching decision, founder-delegated, 2026-10-03), reviewed per
   `.claude/rules/workflow.md`'s sprint-close process; not a merge gate.
+- **Amended:** 2026-10-09 — the v2 line, dist-tags, `release/1.x`, 1.x support window (see the
+  amendment at the end).
 - **Relates to:** `CLAUDE.md` §9 (as-built truths on publishing/versioning), ADR-0036 (two build
   targets — the 1.3 line carries vinext/Bun patch work that is separate from the v1.0 GA line),
   and the published-bytes-freeze invariant enforced by
@@ -112,3 +114,65 @@ that decision down as this ADR is itself a separate, later call — `jev` scored
    - [ ] Drop any expired `publishedBytesBumpMarker` overrides carried by the integration branch.
    - [ ] Keep every required CI check name byte-identical through the merge — verify in
      branch-protection settings before and after, not just by eye on the diff (#1824 precedent).
+
+## Amendment (2026-10-09) — the v2 line, dist-tags, `release/1.x` and the 1.x support window
+
+**Status of this amendment: Accepted.** It records founder decisions taken on 2026-10-09 (v2 plan
+Q3, Q4, Q5, Q7, Q8; jev scores below) after the architect and system-designer gates signed off the
+plan. The original decision (integration branches, not `main`, for pre-GA lines) stands unchanged;
+this extends the same pattern to the next major. Trigger-class (ADR); per the 2026-09-22 workflow
+amendment it is reviewed at sprint close, not as a merge gate.
+
+### Context
+
+`integration/v1.3` is the line that merges to `main` at 1.3 GA (the original action items). The v2
+plan adds a 1.4 line (platform layer plus deprecations), a 2.0 line (contract cleanup plus zone
+functions at Beta), and a promise to keep fixing 1.x after 2.0. Without a recorded model, the next
+person to cut a pre-release picks a tag and a branch by guesswork — the same failure mode that
+produced the accidental `2.0.0` computation from a stale pre-mode marker on 242 branches.
+
+### Decision
+
+**Lines and branches**
+
+| Line | Branch | Pre-release tag | GA tag |
+|---|---|---|---|
+| 1.3 (current GA) | `integration/v1.3`, merged to `main` (the original action items) | `next` | `latest` |
+| 1.4 (platform layer, deprecations) | `integration/v1.4` | `next-1.4` | `latest` until 2.0 GA, then `latest-1` |
+| 2.0 | `integration/v2`, cut from `main` after the 1.3 merge | `next` (once 1.3 vacates it) | `latest` |
+| 1.x maintenance | **`release/1.x`**, cut from the 1.x tip at 2.0 GA | none | `latest-1` |
+| 1.0 | frozen | `rc` | `latest-1.0` (a dist-tag a maintainer must add; none exists today) |
+
+- **Dist-tags:** `latest` (newest stable), `latest-1` (newest stable 1.x, after 2.0 GA), `next`
+  (the line currently in pre-release). `next-1.4` is the pre-release channel for the 1.4 line while
+  `next` still carries 1.3. None of these is a semver range, so npm accepts them.
+- **`release/1.x`** is a new publish lane, cut at 2.0 GA from the 1.x tip. It carries **security
+  and critical fixes only**; it never takes features.
+- **Support window: six months, security-only, for 1.x, counted from 2.0 GA.** It replaces the
+  "no backport branches" stance of `docs/RELEASE_POLICY.md`, which stays true until 2.0 GA. After
+  six months `release/1.x` is frozen and `latest-1` stops moving. jev: 6-month security-only 0.80,
+  none 0.19, 12-month 0.01.
+- **v1.0 credentials retire at 2.0 GA.** The v1.0 credential lane stops; the four 2.0 cells take its
+  cron slots, and 1.x gets no new credential. Net slot count never exceeds today's.
+- **Forward-merge discipline:** the newest 1.x line (later `release/1.x`) is merged into
+  `integration/v2` before every 2.0 release candidate, so no 1.x fix is missing from 2.0.
+- **Publish allowlist:** a publish may run only from an exact, glob-free ref list (`main`,
+  `integration/v1.3`, `integration/v1.4`, `integration/v2`, `release/1.x`), with a runtime check that
+  the computed major matches the lane's expected major. Adding a lane is a reviewed edit to that
+  list. Moving `latest` or `latest-1` needs a required reviewer on a separate environment.
+- **Ordering:** `2.0.0-rc.1` does not publish until 1.4.0 is released, so the deprecation notices
+  reach users in a release that still has the old behaviour (`RELEASE_POLICY.md` deprecation rule).
+
+### Consequences
+
+- Two more long-lived branches (`integration/v2`, `release/1.x`) and one more publish lane to
+  protect; the allowlist and the major check are what keep that safe.
+- The 1.x support promise is bounded and security-only; anything wider is a new decision.
+- `docs/RELEASE_POLICY.md`, `SECURITY.md` and the versioning docs page are updated to state the
+  window and the lane model; the ADR-0020 amendment of the same date covers the package set.
+
+### Action items
+
+- [ ] Cut `integration/v2` and enter changesets pre mode with tag `next` (after the 1.3 merge).
+- [ ] Create `release/1.x` and its publish lane at 2.0 GA; add `latest-1` to the rollback scripts.
+- [ ] Founder: add the `latest-1.0` dist-tag; run `npm deprecate kn-next@"<2"` at 2.0 GA.

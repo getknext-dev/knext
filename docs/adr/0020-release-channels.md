@@ -1,7 +1,9 @@
 # ADR-0020 — Release channels: npmjs `@getknext/*` canonical, GitHub Packages `@getknext-dev/*` interim
 
 - **Status:** Accepted (amended 2026-07-12: `@getknext/db` joins the package set;
-  amended 2026-07-28: upgrade order — operator/CRD first, then CLI)
+  amended 2026-07-28: upgrade order — operator/CRD first, then CLI; amended 2026-10-09: the operator
+  major is independent of the npm major, and `@getknext/grpc` joins the package set outside the
+  fixed group)
 - **Date:** 2026-07-10
 - **Relates to:** the E1 adoption workstream (issue #53 — first npm publish, the
   #1 adoption blocker), PR #226 (interim GitHub Packages channel), PR #227
@@ -187,3 +189,55 @@ not a channel.
       Unlike `scripts/install-smoke.mjs` (which packs from source and never touches a
       registry), this proves the *published channel* is installable. A single manual
       dispatch of `release-ghp.yml` retro-proves the already-published `0.2.0`.
+
+## Amendment (2026-10-09) — operator major is independent; `@getknext/grpc` joins the package set
+
+**Status of this amendment: Accepted** (founder decisions 2026-10-09, v2 plan Q5 and Q20; the
+architect and system-designer gates signed off the plan). Trigger-class (ADR); reviewed at sprint
+close, not as a merge gate.
+
+### Context
+
+The v2 plan cuts a major of the npm packages (contract cleanup plus zone functions at Beta). Two
+questions follow that this ADR and ADR-0017 §1 only half answered: does the operator get a 2.0 too,
+and how does the new opt-in `@getknext/grpc` module version against core?
+
+### Decision
+
+1. **The operator major is independent of the npm major. There is no operator 2.0.** The operator
+   moves to a new major only when the operator itself breaks (a CRD API version change that needs a
+   conversion path, or a removal the CRD cannot express additively). A major of `@getknext/core`
+   changes neither the operator tag line (`operator-vX.Y.Z`) nor the CRD `apiVersion`, which stays
+   `apps.kn-next.dev/v1alpha1` (ADR-0017). jev: independent 0.96, cross-major 0.04, lockstep 0.00.
+   The earlier wording that the operator's major and minor "track the package set" is withdrawn; a
+   pairing is by CRD version and the operator-first ordering rule (the 2026-07-28 amendment), not by
+   matching npm numbers.
+2. **`BackendService` ships in an operator minor**, additive in `v1alpha1` (ADR-0004), not in an
+   operator major.
+3. **`@getknext/grpc` is publishable, and the package set becomes {core, lib, db, grpc}.** It is
+   the opt-in zone-functions module (ADR-0052 D8). It is **versioned on its own and sits outside the
+   Changesets `fixed` group**, with a **peer-dependency range on `@getknext/core`**. Core's lazy
+   dispatcher checks the installed module's version against that range and fails with a message that
+   names both versions. jev: independent plus peer range 0.99, `fixed` group 0.01. The `fixed` group
+   stays {core, lib, db}; the `kn-next` alias package leaves it at 2.0 (it stops publishing).
+4. **Both channels and all gates apply to the new package:** published on npmjs with provenance,
+   covered by the published-package audit and SBOM, and added to the install smoke test. The
+   interim GitHub Packages channel is not extended to it.
+
+### Consequences
+
+- The "exactly the four policy packages" release-set guard and the release policy's "ships as one
+  set" wording are updated in the PR that makes `@getknext/grpc` publishable, not before; today the
+  package does not exist and the lockstep rule over core, lib and db is unchanged.
+- A core release does not force a `@getknext/grpc` release, and the reverse; the peer range is the
+  only coupling, so a core major needs a deliberate range bump in `@getknext/grpc`.
+- The versioning page's operator pairing rule must say the operator major moves only when the
+  operator breaks.
+
+### Action items
+
+- [ ] Make `@getknext/grpc` publishable (public access, provenance) outside the `fixed` group.
+- [ ] Add its audit and SBOM to the published-package gate and to the install smoke test.
+- [ ] Core lazy dispatcher: check the module's version against the peer range.
+- [ ] Extend the release-set and release-policy guards to the five-package reality (including the
+      alias until 2.0) in the same PR that adds the package.

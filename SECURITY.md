@@ -28,6 +28,12 @@ version you are actually running; if it predates the newest `1.x` release, the f
 usually be "upgrade and confirm." The `1.0.0-rc.*` release candidates are superseded by `1.0.0` and
 receive no further fixes, and neither does the `0.x` line.
 
+**From the day `@getknext/core` 2.0 is generally available**, the `2.x` line is the supported one
+and the final `1.x` minor moves to **security fixes only, for six months**, on a `release/1.x`
+branch published under the `latest-1` dist-tag. After the six months it receives nothing. Until 2.0
+is generally available this paragraph promises nothing beyond the one above. The full lane model is
+in [`docs/RELEASE_POLICY.md`](docs/RELEASE_POLICY.md#support-window).
+
 ## Scope
 
 This policy covers the code in this repository: the `@getknext/core`, `@getknext/lib` and

@@ -29,6 +29,11 @@ hypothetical. Everything else in the workspace (`@getknext/ui`, `apps/*`, `examp
 `packages/scale-zero-pg`) is `"private": true` and never reaches a registry. The Go operator is
 released as a **container image**, on its own version line — never via npm.
 
+**`@getknext/grpc` (the opt-in zone-functions module) will be a fourth published package but is not
+in the set above.** It is versioned on its own, outside the `fixed` group, with a peer-dependency
+range on `@getknext/core` ([ADR-0020](adr/0020-release-channels.md), 2026-10-09 amendment). Until
+it is published, the set is exactly the three below, and the guards keep saying so.
+
 **The three carry one version number.** This is enforced two ways, because the intent alone already
 decayed once: `packages/db/CHANGELOG.md` promised "all three bump together and ship as a set" while
 the tree drifted to core `0.3.0` / db `0.2.1` / lib `0.2.0`. So:
@@ -121,9 +126,22 @@ What that means in practice for someone operating knext:
   advisory list is currently **empty** (`gh api /repos/getknext-dev/knext/security-advisories` →
   `0`), so this is the intended channel, not an established practice.
 
-**(aspirational)** At 1.0, adopt a documented N-1 window: the current minor plus the previous one
-receive security fixes for a stated number of months. Do not write that into user-facing docs
-before someone is committed to doing the backports.
+### From 2.0 GA: six months of security-only 1.x
+
+Once `@getknext/core` 2.0 is generally available, the final 1.x minor keeps receiving
+**security fixes only**, for **six months from the 2.0 GA date**:
+
+- they land on a `release/1.x` branch cut from the 1.x tip at 2.0 GA and publish under the
+  `latest-1` dist-tag; features and non-security bug fixes never go there;
+- after the six months the branch is frozen and `latest-1` stops moving; the version stays
+  installable;
+- the window starts at 2.0 GA, not before — until then the paragraph above is the whole policy,
+  and nothing here promises a backport today;
+- the operator is not part of this: it is on its own line, and 1.x packages keep pairing with the
+  newest operator under the ordering rule (operator first).
+
+The lane model behind this (branches, dist-tags, publish allowlist) is recorded in
+[ADR-0063](adr/0063-release-line-integration-branches.md).
 
 ## Deprecation
 
@@ -137,18 +155,6 @@ Removing something is a two-release process, never a single one:
    the old behaviour.
 
 Applies to: public imports, CLI verbs and flags, and `knext.config.ts` keys.
-
-> **UNRESOLVED — needs an architect call, do not read this as settled.** Combine step 2 ("no earlier
-> than the next major") with the pre-1.0 caveat above ("knext does not use semver's 0.x allowance")
-> and the result is that **nothing public can be removed before 1.0** — on a CLI and config surface
-> that is still actively churning. That is a real constraint nobody has agreed to, and it was
-> reached by composing two reasonable-looking rules rather than by deciding it.
->
-> The three plausible resolutions, none chosen here: (a) accept the freeze and let the surface grow
-> until 1.0; (b) take semver's 0.x allowance explicitly — removals permitted in a `0.x` **minor**
-> after a deprecation minor — and say so loudly on the user-facing page; (c) reach 1.0 sooner so the
-> normal major cadence applies. Until this is decided, treat a proposed removal as an escalation,
-> not as something this document already permits or forbids.
 
 CRD fields are the exception, and deliberately so: within `v1alpha1` a field is **never removed**
 (additive-only), so the deprecation path for a CRD field is to make it inert and say so in the
