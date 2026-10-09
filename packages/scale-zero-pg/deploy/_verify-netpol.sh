@@ -3,8 +3,9 @@
 #
 # Implements two findings from docs/reviews/system-design-review.md #4
 # (network exposure):
-#   1. The external LoadBalancer must expose ONLY the Postgres wire port
-#      (55432) — never the metrics port (9090). Metrics stay ClusterIP-internal.
+#   1. The default install has NO LoadBalancer (ClusterIP-only) — that is a pass.
+#      If an operator opted in to a public front door, that LoadBalancer must
+#      never expose the metrics port (9090). Metrics stay ClusterIP-internal.
 #   2. A default-deny-ingress baseline plus per-component allow policies must
 #      exist, with compute:55433 reachable ONLY from the gateway pods.
 #
@@ -35,16 +36,18 @@ ok() { echo "ok - $*"; }
 warn() { echo "WARN: $*" >&2; }
 
 # --- 1. external LoadBalancer must NOT expose 9090 ------------------------------
-# Any Service of type LoadBalancer selecting the gateway must carry only 55432.
+# If any LoadBalancer exists (opt-in overlay), it must not carry 9090. None is fine.
 LB_SVCS=$($K get svc -o jsonpath='{range .items[?(@.spec.type=="LoadBalancer")]}{.metadata.name}{" "}{end}' 2>/dev/null)
-[ -n "$LB_SVCS" ] || fail "no LoadBalancer service found for the gateway front door"
+if [ -z "$LB_SVCS" ]; then
+  ok "no LoadBalancer Service (none, ClusterIP-only: the default, nothing public)"
+fi
 for s in $LB_SVCS; do
   PORTS=$($K get svc "$s" -o jsonpath='{.spec.ports[*].port}')
   case " $PORTS " in
     *" 9090 "*) fail "LoadBalancer service '$s' still exposes 9090 externally (metrics leak): ports=[$PORTS]" ;;
   esac
   case " $PORTS " in
-    *" 55432 "*) ok "LoadBalancer '$s' exposes 55432 only (no 9090): ports=[$PORTS]" ;;
+    *" 55432 "*) ok "LoadBalancer '$s' does not expose 9090: ports=[$PORTS]" ;;
   esac
 done
 

@@ -18,7 +18,7 @@
 # SANs cover every name a client might use:
 #   pggw, pggw.scale-zero-pg, pggw.scale-zero-pg.svc  (in-cluster Service)
 #   pggw-apps, pggw-apps.scale-zero-pg[.svc]          (multi-tenant front door, #113)
-#   pggw-lb                                            (external LoadBalancer)
+#   pggw-lb                                            (opt-in LoadBalancer, optional/28-*)
 #   localhost, 127.0.0.1                               (OrbStack port-forward)
 # The cert is SHARED by the primary (pggw) and apps (pggw-apps) gateways, so both
 # fronts serve TLS from one Secret. sslmode=require needs no SAN match; the extra

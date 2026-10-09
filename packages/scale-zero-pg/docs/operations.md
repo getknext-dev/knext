@@ -2102,6 +2102,52 @@ or your org CA); swap the Secret contents and clients can then verify.
 `deploy/10-gateway.yaml` and restart. `SSLRequest` then gets `N` again and only
 `sslmode=disable` clients connect.
 
+### Network exposure: ClusterIP by default, public front door is opt-in
+
+The default install (`kubectl apply -f deploy/`) creates **no** public Service:
+`pggw` and `pggw-apps` are `ClusterIP`, so Postgres is reachable only inside the
+cluster. For ad-hoc access from your machine, port-forward instead of exposing it:
+
+```bash
+kubectl -n scale-zero-pg port-forward svc/pggw 55432:55432
+psql "postgres://…@localhost:55432/postgres?sslmode=require"
+```
+
+`sslmode=require` needs the gateway TLS Secret from `gen-tls.sh`; on a fresh install
+without it the server offers no TLS, so use `sslmode=disable` over the port-forward
+(the tunnel itself stays inside the cluster API connection).
+
+If you really need a public endpoint, apply the opt-in overlay by name (it lives in
+`deploy/optional/`, which the directory apply never reaches):
+
+```bash
+sh deploy/gen-tls.sh                                  # TLS on the wire first
+# edit loadBalancerSourceRanges in the file: replace the placeholder CIDR
+kubectl apply -f deploy/optional/28-gateway-public-lb.yaml
+```
+
+Treat this as exposing a database to a network:
+
+- **Restrict sources** with `loadBalancerSourceRanges` (never `0.0.0.0/0`).
+- **TLS is client-side only.** The gateway still accepts plaintext
+  (`sslmode=disable`) and `pggw-tls` is optional, so nothing server-side forces
+  encryption. Run `sh deploy/gen-tls.sh` first, and have clients use
+  `sslmode=verify-full` against a real CA for real authentication over the
+  internet; `sslmode=require` encrypts but does not verify the server.
+- **Prefer an internal load balancer** where your cloud offers one (provider
+  annotations are in the overlay, commented).
+- The Service lists only the Postgres ports (55432, 55434); metrics (9090) are
+  never in it. But a LoadBalancer Service also allocates a **NodePort on every
+  node** for each port, and `loadBalancerSourceRanges` does not filter NodePort
+  traffic. Restrict node exposure too (cloud firewall / security lists). Where
+  supported, set `allocateLoadBalancerNodePorts: false` (commented in the overlay);
+  it requires a load balancer that routes directly to pods (e.g. AWS NLB with ip
+  targets, GKE container-native) and breaks node-port-based LBs such as the OCI
+  classic load balancer used by default on OKE.
+
+A source-range restriction is enforced by the cloud load balancer, not by
+NetworkPolicy; on clusters whose CNI ignores NetworkPolicy it is your main control.
+
 ### Gateway→compute mTLS — cert-manager prerequisite (the hop is mutually authenticated)
 
 The section above is the **front-door** (client→gateway) TLS. The **gateway→compute**
