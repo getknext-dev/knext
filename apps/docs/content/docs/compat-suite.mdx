@@ -10,10 +10,10 @@ in-progress credentialing window — including while that window has not yet com
 
 <Callout type="warn">
 **Status, stated plainly.** The v1.0 credentialing window is **in progress**, not complete. A cell
-only counts as credentialed once it has banked **14 consecutive scheduled nights**, each with
+only counts as credentialed once it has banked **14 consecutive scheduled runs**, each started at least two hours after the previous counted run and each with
 every shard reporting zero failed and zero not-run tests, run against one frozen release-candidate
 build. No cell has reached that bar yet. Treat every number on this page as current evidence for
-where a cell stands today — never as a finished, all-fourteen-nights-passing result. See
+where a cell stands today — never as a finished, all-fourteen-runs-passing result. See
 [the compatibility matrix](/docs/compat-matrix) for each cell's current status and the evidence
 behind it, which this page deliberately does not duplicate.
 </Callout>
@@ -51,7 +51,7 @@ v1.0 cells — see [what's out of scope](#whats-out-of-scope) below.
 </Callout>
 
 For the current evidence behind each of these four cells — run counts, pass/fail totals, and
-credential-night progress — see [the compatibility matrix](/docs/compat-matrix); this page
+credential-run progress — see [the compatibility matrix](/docs/compat-matrix); this page
 is the scope-and-methodology reference, not the scoreboard.
 
 ## The Next.js version under credential
@@ -64,32 +64,37 @@ version gap between what is credentialed and what a new app ships with.
 ## It runs against published release-candidate packages, not `main`
 
 A single green run — even a green nightly on the fast-moving `main` branch — is evidence, not a
-credential. The v1.0 bar requires every credential night to run against one **frozen
+credential. The v1.0 bar requires every credential run to execute against one **frozen
 release-candidate build**: a specific `@getknext/*` release-candidate tag, published to npm under
 the `rc` dist-tag, checked out at a fixed commit rather than re-resolved on each run. This keeps a
-14-night streak from being reset by unrelated day-to-day changes on `main` while it is banking —
+14-run streak from being reset by unrelated day-to-day changes on `main` while it is banking —
 and it means the credential is earned by the exact bytes an outside user installing
 `@getknext/core@rc` would get, not by a moving target.
 
 Nightly runs on `main` keep running as an early-warning signal — a red one still raises an alarm —
-but they can never advance a cell toward its 14-night credential. Only a scheduled run against the
+but they can never advance a cell toward its 14-run credential. Only a scheduled run against the
 pinned release-candidate build counts.
+
+Each cell is scheduled three times a day, eight hours apart. Every run starts with fresh caches,
+and a manually dispatched run never counts. A run counts toward the 14 only if it started at least
+two hours after the previous counted run and ran the same frozen build; a red run resets the
+streak.
 
 ### Stable releases and the credential
 
 A stable release can ship while its credential is still in progress. When it does, its packages are
 cut from the release candidate under credential with **only the version fields changed** — every
 other byte of every published tarball is identical, and the release pipeline checks that before it
-publishes. So the nights banking against the release candidate describe exactly the code a stable
+publishes. So the runs banking against the release candidate describe exactly the code a stable
 install runs. The stable release is still **not credentialed** until every cell reaches its 14
-consecutive nights; its release notes say so, and so does this page until then.
+consecutive runs; its release notes say so, and so does this page until then.
 
 <Callout type="warn">
-**The 14-night window is currently open, not complete.** A release-candidate build is pinned and
-the credential nights are running against it. As of today, no cell has yet accumulated 14
-consecutive qualifying nights against this build — the count is in progress. This page will be
+**The 14-run window is currently open, not complete.** A release-candidate build is pinned and
+the credential runs are executing against it. As of today, no cell has yet accumulated 14
+consecutive qualifying runs against this build — the count is in progress. This page will be
 updated with each cell's credentialed status once a streak actually completes; until then, no
-claim on this page should be read as a completed fourteen-night streak.
+claim on this page should be read as a completed fourteen-run streak.
 </Callout>
 
 ## The quarantine list — and why it exists
@@ -179,7 +184,7 @@ infer it from an absence:
 
 - **The compiled `vinext` executable.** knext also offers a separate, Vite-based build of Next.js,
   compiled into a single Bun executable. It is measured against the same test corpus and the
-  number is published, but it does not carry a 14-night credential window and is not one of the
+  number is published, but it does not carry a 14-run credential window and is not one of the
   four v1.0 cells above — see [Bun & the compiled executable](/docs/bun-runtime) for its own,
   separately-tracked status.
 - **Edge Middleware and Partial Prerendering / Cache Components.** Listed above as architectural

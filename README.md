@@ -9,10 +9,10 @@ a focused, Next.js-specific deployment tool.
 
 **The credential (in progress):** knext runs the official Next.js compatibility test suite
 across four runtime x build-system combinations (Node/Bun x Turbopack/Webpack). Its credential is
-14 consecutive green nightly runs of that suite per combination, against a frozen release
-reference — that window is **in progress, not complete**, and knext does not claim verified status
+14 consecutive green independent runs of that suite per combination (three scheduled runs a
+day, at least two hours apart), against a frozen release reference — that window is **in progress, not complete**, and knext does not claim verified status
 until it is. v1.0 is the semver-stable release; it ships ahead of the credential, from the same
-bytes the credential nights run against. See [`docs/compat-matrix.md`](docs/compat-matrix.md) for
+bytes the credential runs execute. See [`docs/compat-matrix.md`](docs/compat-matrix.md) for
 the current, evidence-gated status of each cell — do not rely on a number quoted here, which would
 go stale; that file is the live source of truth. See
 [`docs/release/v1.0.0.md`](docs/release/v1.0.0.md#the-compatibility-credential-in-progress) for

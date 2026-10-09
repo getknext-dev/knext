@@ -10,8 +10,9 @@
 >
 > **2026-10-02 refresh:** `@getknext/core` has been published to npm since 2026-07-26 — the old
 > "HELD on npm publish" framing above is stale, not current. The real remaining gate is the
-> **14-consecutive-night compat credential**, currently **night 1 of 14** on `v1.0.0-rc.5` /
-> Next.js `v16.3.6` (4/4 cells green that night — see getknext-dev/knext#1359). Do not submit until
+> **14-consecutive-run compat credential** (14 consecutive green independent runs per cell, three
+> scheduled runs per cell per day). The window restarted on `v1.0.0-rc.6` / Next.js `v16.3.8`; check
+> the current count on getknext-dev/knext#1359. Do not submit until
 > that gate closes, and re-verify every number below against the live matrix at submission time —
 > none of it is current enough to copy as-is.
 
@@ -22,15 +23,15 @@ parked here so it can be adapted quickly if the verified-tier path is chosen.
 
 - [x] **npm publish:** `@getknext/core` / `@getknext/lib` / `@getknext/db` are published; `npx knext`
       works for outside users.
-- [ ] **Compat credential — 14/14 on all four cells:** in progress, night 1 of 14 as of this pass
-      (node×turbopack, node×webpack, bun×turbopack, bun×webpack all green on night 1 at
-      `v1.0.0-rc.5`). **← the real remaining box.** Track via getknext-dev/knext#1359.
+- [ ] **Compat credential — 14/14 on all four cells:** in progress; the 14-run window restarted
+      on `v1.0.0-rc.6` (node×turbopack, node×webpack, bun×turbopack, bun×webpack). **← the real
+      remaining box.** Track via getknext-dev/knext#1359.
 - [ ] **Governance decision (#1565):** whether to pursue the verified tier at all, which requires
       org-hosting under `github.com/nextjs` for the adapter package — a separate ask from the
       compat-suite evidence itself. **Not yet decided.**
 - [ ] **Compatibility-matrix promotion:** re-confirm the "Official Next.js compatibility suite" row
       in [`docs/compat-matrix.md`](https://github.com/getknext-dev/knext/blob/main/docs/compat-matrix.md)
-      is ✅ at submission time — it is evidence-gated and reverts on any red nightly, so it must be
+      is ✅ at submission time — it is evidence-gated and reverts on any red credential run, so it must be
       re-checked fresh, not assumed from this draft.
 
 ## Draft entry (submit-ready once the box above is checked)
@@ -47,8 +48,8 @@ against the official Next.js compatibility suite.
 > knext runs Next.js on the official Next.js Deployment Adapter API with `output: 'standalone'`,
 > targeting Knative on any Kubernetes cluster (GKE, EKS, AKS, OKE, bare-metal). It runs against the
 > official Next.js compatibility test suite (Next.js v16.3.6, all four runtime×builder cells:
-> node/bun × turbopack/webpack) on a nightly/scheduled basis — `[FILL AT GA]` for the final
-> consecutive-night count and pass/fail totals once the 14-night credential window closes; do not
+> node/bun × turbopack/webpack) on a scheduled basis, three runs per cell per day — `[FILL AT GA]` for the final
+> consecutive-run count and pass/fail totals once the 14-run credential window closes; do not
 > cite a count here before then. It provides true scale-to-zero (idle services drop to zero
 > replicas and wake via the Knative activator), cached cold starts (`NODE_COMPILE_CACHE` on Node;
 > opt-in per-file bytecode compilation on the Bun runtime), and a Go operator that is the single
@@ -68,16 +69,16 @@ against the official Next.js compatibility suite.
 [compatibility matrix](https://knext-platform.dev/docs/compat-matrix): every claim cites the CI run that
 proves it, and the matrix row reverts on any unexplained red. Both runtimes (Node and Bun) and both
 builders (Turbopack and Webpack) run against the suite — `[FILL AT GA]` for per-cell run IDs and
-pass/fail counts once the 14-night credential window closes (tracked at
+pass/fail counts once the 14-run credential window closes (tracked at
 getknext-dev/knext#1359). Claims here are limited to what those four cells show; no vinext/compiled
 claim is made.
 
 ## Honesty rules for this listing (still binding)
 
 - Claims must match the live compat matrix at submission time — re-check the matrix the day of
-  submission; a red nightly revokes the ✅ and re-holds this draft.
+  submission; a red credential run revokes the ✅ and re-holds this draft.
 - Do not claim any officially recognized "verified adapter" *status/program membership* unless
   Next.js establishes such a program and knext is accepted — "validated against the official
-  compatibility suite, N/N nightly" is the claim the evidence supports.
+  compatibility suite, N/N on every scheduled run" is the claim the evidence supports.
 - The Bun lane stays out of the headline until its matrix row is ✅ under the same evidence
   contract.

@@ -18,7 +18,7 @@ It is **not** a general-purpose PaaS, and **not** "Coolify for Kubernetes." The 
 **Tested against the official suite — credential in progress.** knext v1.0 is a stable, semver
 release, and it ships ahead of its compatibility credential. knext runs the official Next.js
 deploy-mode e2e suite against all four default runtime x builder combinations (Node/Bun x
-Turbopack/Webpack). Its compatibility credential — 14 consecutive green nightly runs per
+Turbopack/Webpack). Its compatibility credential — 14 consecutive green independent runs per
 combination — is in progress, not complete; knext does not claim verified-adapter status until it
 is. The exact scope (including documented exclusions) is on
 [the compatibility credential](/docs/compat-suite); each cell's current credential status and
@@ -96,7 +96,7 @@ in-core-vs-recipe split, and never treat an unbuilt generator as shipping.
   blurs which claim covers which path. See
   [The adapter and the compiled build](/docs/official-adapter).
 - **Official-suite compatibility, credential in progress.** The official `vercel/next.js`
-  deploy-mode e2e suite runs against knext nightly; the 14-night credential is in progress. See
+  deploy-mode e2e suite runs against knext several times a day; the 14-run credential is in progress. See
   [the compatibility credential](/docs/compat-suite).
 - **True scale-to-zero.** Knative's autoscaler + activator take idle services to `0` replicas and
   wake them on the first request. See [Scale-to-zero & cold starts](/docs/scale-to-zero).

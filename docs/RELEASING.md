@@ -100,7 +100,7 @@ Three layers now assert the tarball can scaffold, form-at-PR-time / value-at-run
 ### A credentialed GA must differ from its last rc ONLY in version fields
 
 The v1.0 compatibility credential is measured against a specific `rc.N` git tag's tarballs — the
-ones the compat suite actually installed and exercised for 14 nights. Nothing else connects that
+ones the compat suite actually installed and exercised across the 14 credential runs. Nothing else connects that
 measurement to what `changeset publish` ships next. If the tarball published under the GA cut
 differs from that rc in anything beyond version fields, the credential does not cover the artifact
 users install.
@@ -176,7 +176,7 @@ forwarding them.
 
 ### PR-time: published bytes stay frozen for the whole life of a credential window
 
-The GA-vs-rc gate above catches a mismatch at the GA cut — 14 nights after the mismatch was actually
+The GA-vs-rc gate above catches a mismatch at the GA cut — 14 credential runs after the mismatch was actually
 introduced. `.github/workflows/published-bytes-freeze-guard.yml` catches it at PR time instead:
 while `.github/compat-credential-ref.json`'s `rcTag` is set, every PR that touches a path able to
 reach a published package (`scripts/lib/published-bytes-freeze-check.mjs`'s
@@ -220,22 +220,22 @@ checkout.
 ### The parallel v1.3 credential window (its own pin, workflow, ledger and tracker)
 
 The v1.3 line earns the same four-cell credential as v1.0 — node/bun × turbopack/webpack on the
-default standalone target, 16 shards per cell, 14 consecutive green nights per cell on one RC tag —
+default standalone target, 16 shards per cell, 14 consecutive green independent runs per cell on one RC tag (three scheduled runs a day per cell, at least 2 h apart) —
 **in parallel** with v1.0's window, not after v1.0 GA (founder decision 2026-10-08). vinext stays
-Beta on both lines and is not credentialed. The two windows share nothing a red night can cross:
+Beta on both lines and is not credentialed. The two windows share nothing a red run can cross:
 
 | | v1.0 | v1.3 |
 | --- | --- | --- |
 | pin | `.github/compat-credential-ref.json` | `.github/compat-credential-ref-v1.3.json` (`line: "v1.3"`) |
 | resolver | `scripts/compat-credential-ref.mjs` | `scripts/compat-credential-line.mjs --line v1.3` (refuses any tag that is not `v1.3.N-rc.M`) |
 | workflow | `test-e2e-deploy.yml` | `compat-credential-v1.3.yml` — **generated**, see below |
-| credential crons (UTC) | 01:17 node, 05:47 bun, 22:17 node-webpack, 23:47 bun-webpack | 14:17 node, 15:47 bun, 17:17 node-webpack, 18:47 bun-webpack |
+| credential crons (UTC, each fires 3x a day, 8 h apart) | `17 1,9,17` node, `47 5,13,21` bun, `17 6,14,22` node-webpack, `47 7,15,23` bun-webpack | `32 0,8,16` node, `32 2,10,18` bun, `32 3,11,19` node-webpack, `32 4,12,20` bun-webpack |
 | per-cell red issue | `Compat CREDENTIAL RED (<lane>, RC tag)`, label `credential-reset` | `Compat v1.3 CREDENTIAL RED (<lane>, RC tag)`, label `credential-reset-v1.3` |
 | tracker | `compat-matrix-tracker-nightly.yml` → the pinned v1.0 tracker | `compat-credential-v1.3-tracker.yml` → **Compat v1.3 credential matrix tracker** (unpinned) |
 
-A v1.3 night's ledger lives in a `compat-credential-v1.3.yml` run, which the v1.0 audit never lists,
+A v1.3 run's ledger lives in a `compat-credential-v1.3.yml` run, which the v1.0 audit never lists,
 and the v1.3 tracker (`scripts/compat-line-tracker.mjs`, which grades with the same `auditWindow` as
-v1.0) lists only that workflow and holds a cell unmet if any of its nights ran a tag off the v1.3 line. None of the v1.3 files is in the v1.0 freeze guard's
+v1.0) lists only that workflow and holds a cell unmet if any of its runs ran a tag off the v1.3 line. None of the v1.3 files is in the v1.0 freeze guard's
 frozen set, so landing or bumping the v1.3 lane never restarts a v1.0 window.
 
 **The v1.3 workflow is derived, not hand-written.** Scheduled workflows only run from `main`, so the
@@ -244,9 +244,9 @@ v1.3 lane needs a file on `main`; it must still run the v1.3 tag's own harness. 
 the substitutions declared in `scripts/compat-line-workflow.mjs` applied, plus a header recording the
 tag and the source's sha256. Every scripted step still runs the tag's own `scripts/` (checked out at
 the resolved sha), and `NEXTJS_REF` is whatever the tag's workflow declares (`v16.3.8` on rc.9). Every
-night, the credential-ref job fetches the resolved tag's `test-e2e-deploy.yml` and **refuses the
-night** unless the executing file is exactly that file derived — a stale or hand-edited workflow can
-never run a night. `tests/compat-credential-line.test.ts` checks the same thing at PR time without
+run, the credential-ref job fetches the resolved tag's `test-e2e-deploy.yml` and **refuses the
+run** unless the executing file is exactly that file derived — a stale or hand-edited workflow can
+never run. `tests/compat-credential-line.test.ts` checks the same thing at PR time without
 needing the tag.
 
 **Moving the v1.3 pin (rc.N → rc.N+1) restarts only the v1.3 window.** It is the v1.3 mirror of the
@@ -275,9 +275,9 @@ v1.0 pin PR (the rc.6 one was a pin-only diff of `.github/compat-credential-ref.
 **What protects the v1.3 harness mid-window.** There is no PR-time freeze guard for the v1.3 harness
 (the v1.0 one protects v1.0's files only), so protection is the fingerprint plus the PR-time spec:
 
-- The v1.3 night's fingerprint hashes the RC tag's checkout and the **executing workflow file**
+- The v1.3 run's fingerprint hashes the RC tag's checkout and the **executing workflow file**
   `compat-credential-v1.3.yml`. A PR that edits that file mid-window is not refused, but it restarts
-  the v1.3 windows (and the next night refuses it unless it is still exactly the derivation).
+  the v1.3 windows (and the next run refuses it unless it is still exactly the derivation).
 - The code that resolves and grades the line runs from `main`: the three entry scripts
   `scripts/compat-credential-line.mjs` (resolver, off-line refusal, cron map),
   `scripts/compat-line-workflow.mjs` (the byte-equality gate) and `scripts/compat-line-tracker.mjs`
@@ -296,23 +296,25 @@ v1.0 pin PR (the rc.6 one was a pin-only diff of `.github/compat-credential-ref.
   v1.3 windows too. That is the intended effect, because it changes how v1.3 is graded as well.
   This is mutation-proved in `scripts/mutation-prove-compat-credential-line.mjs`, which attributes
   each mutation to the one named test it must turn red.
-- Limits. Protection rests on the PR-time spec plus the next night's `--check`. If an edit reaches
-  `main` without the spec (an admin bypass), it is caught only when the next v1.3 night refuses, and
+- Limits. Protection rests on the PR-time spec plus the next run's `--check`. If an edit reaches
+  `main` without the spec (an admin bypass), it is caught only when the next v1.3 run refuses, and
   the tracker runs the edited code until then. The closure covers JavaScript imports only. It does
   not cover the tracker workflow file or the Node version the scripts run on.
 
-There is no late-slot watchdog for the v1.3 crons; a dropped v1.3 night shows up as a missing night
-in the v1.3 tracker.
+There is no late-slot watchdog for the v1.3 crons; a dropped v1.3 run shows up as a missing run
+in the v1.3 tracker. The watchdog (`credential-slot-watchdog.yml`) reads the credential crons of
+`test-e2e-deploy.yml` only, so it covers the v1.0 lanes and not `compat-credential-v1.3.yml`.
 
-**Capacity.** Eight credential cells now run per day (four per line), each 16 shards at up to 8 in
+**Capacity.** Eight credential cells now run three times a day each (four per line), each 16 shards at up to 8 in
 parallel. GitHub starts v1.0's scheduled runs hours late, every day: measured on 2026-10-07 and
 2026-10-08, the 22:17 slot started at about 01:30-01:55, the 01:17 slot at about 07:20-07:30, the two
-early-warning runs at about 10:20-12:40 and the 05:47 bun credential night at about 12:00-13:00 UTC;
-every v1.0 run of a day had finished by about 13:10 UTC. The v1.3 slots (14:17, 15:47, 17:17, 18:47)
-therefore start after that tail and 90 minutes apart. That is a measurement, not a guarantee: GitHub
-can delay any schedule in either line, so overlap remains possible. Overlap means **queueing** (a
-night starts late), never cancellation — the two workflows have different names, so their concurrency
-groups never collide. Because the v1.3 slots fall in the daytime, a running v1.3 night (16 shards, up
+early-warning runs at about 10:20-12:40 and the 05:47 bun credential run at about 12:00-13:00 UTC.
+That was measured when each v1.0 cell fired once a day; with three fires a day per cell in both
+lines, the v1.3 slots (`32 0,8,16`, `32 2,10,18`, `32 3,11,19`, `32 4,12,20`) are chosen at least 60
+minutes from every other compat cron, and overlap with a delayed v1.0 run is now routine rather than
+rare. Overlap means **queueing** (a
+run starts late), never cancellation — the two workflows have different names, so their concurrency
+groups never collide. Because the v1.3 slots fall in the daytime, a running v1.3 run (16 shards, up
 to 8 in parallel) can also slow daytime PR CI and the merge queue. If that bites, move the slots in
 `CREDENTIAL_LINES['v1.3'].cronMap`, regenerate the workflow, and expect the v1.3 windows to restart.
 
@@ -466,7 +468,7 @@ that touches that surface with neither a changeset nor an explicit opt-out.
 
 ## GA-cut runbook (rc → 1.0.0)
 
-> **Amended 2026-10-08 — founder decision (option A): `1.0.0` GA is DECOUPLED from the 14-night
+> **Amended 2026-10-08 — founder decision (option A): `1.0.0` GA is DECOUPLED from the 14-run
 > credential.** `1.0.0` = the semver-stable API, `knext.config.ts` schema and CLI; it ships from the
 > `v1.0.0-rc.6` bytes (version fields only — proven by the GA-vs-rc tarball diff) while the
 > credential windows keep running on `v1.0.0-rc.6` **after** GA. So for `1.0.0`:
@@ -488,7 +490,7 @@ that touches that surface with neither a changeset nor an explicit opt-out.
 > dist-tag step under [Dist-tags after GA](#dist-tags-after-ga).
 
 This is the exact sequence from "the credential window closed 14/14 green on all four cells" to
-"`1.0.0` is on npm `latest`". It assumes the credential window's own gate (14 consecutive nightly
+"`1.0.0` is on npm `latest`". It assumes the credential window's own gate (14 consecutive independent
 green runs on the pinned rc, across every credentialed runtime/builder combination) has already
 closed successfully — this section does not re-derive that gate, only what happens after it.
 
@@ -539,7 +541,7 @@ precedes the merge. The compatibility table names `operator-v1.0.0` as the 1.0.0
 
 Confirm every box before starting step 1 below:
 
-- [ ] 14/14 credentialed nights, all four runtime × builder cells, on the currently pinned `rcTag`.
+- [ ] 14/14 credentialed runs, all four runtime × builder cells, on the currently pinned `rcTag`.
 - [ ] The GA-vs-rc tarball diff (`ga-tarball-diff-gate.mjs`) is green — version-only — as a
       **pre-flight dry run** against the pinned rc, not first discovered mid-step-4 on the Version
       PR itself.
@@ -598,7 +600,7 @@ Confirm every box before starting step 1 below:
    `vX.Y.Z-rc.N` tag in history (see [A credentialed GA must differ from its last rc ONLY in version
    fields](#a-credentialed-ga-must-differ-from-its-last-rc-only-in-version-fields) above) — do not
    merge if that check is red; a red diff means the tarball about to publish is not the one the 14
-   nights actually credentialed.
+   runs actually credentialed.
 5. **Merging the Version PR IS the publish.** Merging it is a second push to `main`; `release`
    starts and — because the `npm-publish` environment has **no required reviewer today** (see
    [The gate](#the-gate-two-lanes-one-approval); #1638 would add one) — publishes immediately once
@@ -683,20 +685,20 @@ publish `1.3.0`, which takes `latest`. To keep the `1.0` line reachable by name 
   otherwise npm moves `latest` back to the `1.0.x` patch. `release.yml` publishes from `main` only
   and passes no tag for a stable version today, so a `1.0.x` publish after `1.3.0` needs a
   branch-aware publish path first (see [Patch release runbook](#patch-release-runbook-101)).
-- The `rc` dist-tag stays on `1.0.0-rc.6` — the tag the credential nights run against (the
+- The `rc` dist-tag stays on `1.0.0-rc.6` — the tag the credential runs execute against (the
   credential is still in progress, so those bytes are not "credentialed" yet); leave it.
 
 (Decision record: jev `pick`, 2026-10-08 — `latest-1.0` 0.63 vs no tag 0.29, `lts` 0.07, `v1.0`
 0.01.)
 
-### If a night reds between 14/14 and the cut
+### If a run reds between 14/14 and the cut
 
-**Do not re-run the reset night.** The credential is 14 *consecutive* green nights on the *same*
-pinned rc tarball; a red night after the window nominally closed but before GA is actually cut means
-the window is no longer 14/14 as of now — treat it exactly as a mid-window reset (see the VOID-night
-rule in the compat ledger for the one narrow exception: a night that failed before any knext code ran
-at all, proven by a knext-owned marker). **The window restarts from the next green night**, not from
-night 1's original calendar date and not from a manually-edited count. If the red points at a real
+**Do not re-run the reset run.** The credential is 14 *consecutive* green runs on the *same*
+pinned rc tarball; a red run after the window nominally closed but before GA is actually cut means
+the window is no longer 14/14 as of now — treat it exactly as a mid-window reset (see the VOID
+rule in the compat ledger for the one narrow exception: a run that failed before any knext code ran
+at all, proven by a knext-owned marker). **The window restarts from the next green run**, not from
+run 1's original calendar date and not from a manually-edited count. If the red points at a real
 defect in the pinned rc's tarball, fix forward on a new `rc.N+1` (a new prerelease is expected to
 differ from the last one — the freeze guard's `publishedBytesBumpMarker` override exists for exactly
 this) rather than patching the already-credentialed tag in place; the credential must always describe
@@ -731,7 +733,7 @@ Recovery here means *redirecting new installs away from the broken version*, not
 4. **Revert the docs deploy.** Redeploy the previous docs-site build so the live compatibility table
    and quickstart stop claiming `1.0.0` is current.
 5. **Fix forward as `1.0.1`.** Patch the actual defect and release it normally. `1.0.1` is not
-   credentialed by the 14-night rc process — the GA-vs-rc diff gate is designed to skip a GA version
+   credentialed by the 14-run rc process — the GA-vs-rc diff gate is designed to skip a GA version
    with no matching `rc.N` tag (see the table in [A credentialed GA must differ from its last rc
    ONLY in version fields](#a-credentialed-ga-must-differ-from-its-last-rc-only-in-version-fields))
    — and that is the correct, honest behaviour: a hotfix does not get to borrow the previous rc's
