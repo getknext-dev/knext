@@ -1,0 +1,29 @@
+{
+  "name": "z2-zone",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Z2 spike zone: a minimal Next.js app that calls Go/Rust Connect functions. Throwaway; built from a staged copy outside the repo by bench/stage-zone.sh.",
+  "scripts": {
+    "build": "next build",
+    "gen": "buf generate"
+  },
+  "dependencies": {
+    "@bufbuild/protobuf": "2.16.0",
+    "@connectrpc/connect": "2.2.0",
+    "@connectrpc/connect-node": "2.2.0",
+    "next": "16.3.8",
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
+    "server-only": "0.0.1"
+  },
+  "devDependencies": {
+    "@bufbuild/protoc-gen-es": "2.16.0",
+    "@types/node": "^22",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "typescript": "^5.9.3"
+  },
+  "overrides": {
+    "sharp": "^0.35.5"
+  }
+}
