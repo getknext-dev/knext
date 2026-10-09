@@ -11,10 +11,7 @@
     ],
     "recorded": "2026-10-09",
     "reviewBy": "2027-01-08",
-    "evidenceRuns": [
-      "37123681030",
-      "37663567284"
-    ]
+    "evidenceRuns": ["37123681030", "37663567284"]
   },
   "files": [
     {
@@ -48,9 +45,7 @@
     },
     {
       "test": "test/e2e/app-dir/asset-prefix-absolute/asset-prefix-absolute.test.ts",
-      "cases": [
-        "bundles should return 200 on served assetPrefix"
-      ]
+      "cases": ["bundles should return 200 on served assetPrefix"]
     },
     {
       "test": "test/e2e/app-dir/concurrent-navigations/mismatching-prefetch.test.ts",
@@ -87,10 +82,7 @@
     },
     {
       "test": "test/e2e/app-dir/navigation-focus/navigation-focus.test.ts",
-      "cases": [
-        "navigation to a scrollable segment",
-        "navigation to an interactive segment"
-      ],
+      "cases": ["navigation to a scrollable segment", "navigation to an interactive segment"],
       "note": "Fixed on the integration/v1.3 line by the bundled scroll and focus patch (getknext-dev/knext#1995, from cloudflare/vinext#3768), merged after the evidence run. Expected to go stale on that line: remove this entry then."
     },
     {
@@ -122,9 +114,7 @@
     },
     {
       "test": "test/e2e/app-dir/partial-prefetching-config/partial-prefetching-config.test.ts",
-      "cases": [
-        "does not prefetch dynamic data, even when <Link prefetch={true}>"
-      ]
+      "cases": ["does not prefetch dynamic data, even when <Link prefetch={true}>"]
     },
     {
       "test": "test/e2e/app-dir/partial-prefetching-deep-propagation/partial-prefetching-deep-propagation.test.ts",
@@ -134,9 +124,7 @@
     },
     {
       "test": "test/e2e/app-dir/partial-prefetching-segment-config/partial-prefetching-segment-config.test.ts",
-      "cases": [
-        "does not prefetch dynamic data for a route with prefetch = \"partial\""
-      ]
+      "cases": ["does not prefetch dynamic data for a route with prefetch = \"partial\""]
     },
     {
       "test": "test/e2e/app-dir/prefetch-true-instant/prefetch-true-instant.test.ts",
@@ -163,15 +151,11 @@
     },
     {
       "test": "test/e2e/app-dir/rsc-basic/rsc-basic-blocking-ssr.test.ts",
-      "cases": [
-        "should opt into the react@experimental channel when blockingSSR is enabled"
-      ]
+      "cases": ["should opt into the react@experimental channel when blockingSSR is enabled"]
     },
     {
       "test": "test/e2e/app-dir/rsc-basic/rsc-basic-react-experimental.test.ts",
-      "cases": [
-        "should opt into the react@experimental when enabling $flag"
-      ]
+      "cases": ["should opt into the react@experimental when enabling $flag"]
     },
     {
       "test": "test/e2e/app-dir/segment-cache/basic/segment-cache-basic.test.ts",
@@ -184,15 +168,11 @@
     },
     {
       "test": "test/e2e/app-dir/segment-cache/cached-navigations/cached-navigations-global-runtime.test.ts",
-      "cases": [
-        "runtime-caches a route that has no per-segment prefetch config"
-      ]
+      "cases": ["runtime-caches a route that has no per-segment prefetch config"]
     },
     {
       "test": "test/e2e/app-dir/segment-cache/cached-navigations/cached-navigations-partial-prefetching.test.ts",
-      "cases": [
-        "runtime-caches a route that has no per-segment prefetch config"
-      ]
+      "cases": ["runtime-caches a route that has no per-segment prefetch config"]
     },
     {
       "test": "test/e2e/app-dir/segment-cache/cached-navigations/cached-navigations.test.ts",
@@ -214,15 +194,11 @@
     },
     {
       "test": "test/e2e/app-dir/segment-cache/dynamic-on-hover/dynamic-on-hover.test.ts",
-      "cases": [
-        "prefetches the dynamic data for a Link on hover"
-      ]
+      "cases": ["prefetches the dynamic data for a Link on hover"]
     },
     {
       "test": "test/e2e/app-dir/segment-cache/force-stale/force-stale.test.ts",
-      "cases": [
-        "during a \"full\" prefetch, read from bfcache before issuing new prefetch request"
-      ]
+      "cases": ["during a \"full\" prefetch, read from bfcache before issuing new prefetch request"]
     },
     {
       "test": "test/e2e/app-dir/segment-cache/headers-keyed-caches/headers-keyed-caches.test.ts",
@@ -232,9 +208,7 @@
     },
     {
       "test": "test/e2e/app-dir/segment-cache/memory-pressure/segment-cache-memory-pressure.test.ts",
-      "cases": [
-        "evicts least recently used prefetch data once cache size exceeds limit"
-      ]
+      "cases": ["evicts least recently used prefetch data once cache size exceeds limit"]
     },
     {
       "test": "test/e2e/app-dir/segment-cache/optimistic-routing-rewrite-detection-regression/optimistic-routing-rewrite-detection-regression.test.ts",
@@ -302,15 +276,11 @@
     },
     {
       "test": "test/e2e/app-dir/segment-cache/search-params/segment-cache-search-params.test.ts",
-      "cases": [
-        "stores prefetched data by its rewritten search params, not the original ones"
-      ]
+      "cases": ["stores prefetched data by its rewritten search params, not the original ones"]
     },
     {
       "test": "test/e2e/app-dir/segment-cache/staleness/segment-cache-stale-time.test.ts",
-      "cases": [
-        "caches omitted from the prerender should not affect when the prefetch is expired"
-      ]
+      "cases": ["caches omitted from the prerender should not affect when the prefetch is expired"]
     },
     {
       "test": "test/e2e/app-dir/segment-cache/vary-params-base-dynamic/vary-params-base-dynamic.test.ts",
@@ -348,9 +318,7 @@
     },
     {
       "test": "test/e2e/app-dir/service-worker-scopes/service-worker-scopes.test.ts",
-      "cases": [
-        "serves one worker per scope at scope-derived file names"
-      ]
+      "cases": ["serves one worker per scope at scope-derived file names"]
     },
     {
       "test": "test/e2e/app-dir/service-worker/service-worker-register.test.ts",
@@ -395,28 +363,19 @@
     },
     {
       "test": "test/e2e/next-image-legacy/asset-prefix/asset-prefix.test.ts",
-      "cases": [
-        "should use base64 data url with placeholder=blur during production"
-      ]
+      "cases": ["should use base64 data url with placeholder=blur during production"]
     },
     {
       "test": "test/e2e/next-image-legacy/unicode/unicode.test.ts",
-      "cases": [
-        "should load external image with space",
-        "should load external unicode image"
-      ]
+      "cases": ["should load external image with space", "should load external unicode image"]
     },
     {
       "test": "test/e2e/next-image-legacy/unoptimized/unoptimized.test.ts",
-      "cases": [
-        "should not optimize any image"
-      ]
+      "cases": ["should not optimize any image"]
     },
     {
       "test": "test/e2e/next-image-new/asset-prefix/asset-prefix.test.ts",
-      "cases": [
-        "should use base64 data url with placeholder=blur during production"
-      ]
+      "cases": ["should use base64 data url with placeholder=blur during production"]
     },
     {
       "test": "test/e2e/react-current-version/react-current-version.test.ts",
