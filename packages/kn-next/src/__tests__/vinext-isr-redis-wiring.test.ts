@@ -283,6 +283,94 @@ describe("#953 layer 2 — the adapter subpath the templates reference actually 
     });
 });
 
+describe("#953 layer 2b — one factory serves vinext 1.0.x (plain call) and 1.1.0 (instantiateCacheAdapter)", () => {
+    const MODULES = [
+        "vinext-cache-adapter.mjs",
+        "vinext-cache-adapter-node.mjs",
+        "vinext-cache-adapter-bun.mjs",
+    ] as const;
+    type AdapterModule = {
+        default: (args?: { env?: unknown; options?: unknown }) => {
+            get: unknown;
+            set: unknown;
+            revalidateTag: unknown;
+            options?: unknown;
+        };
+        KnextCacheHandler: new (arg?: unknown) => object;
+    };
+    const load = async (file: string) =>
+        (await import(
+            join(PKG_ROOT, "src", "adapters", file)
+        )) as unknown as AdapterModule;
+
+    for (const file of MODULES) {
+        it(`${file}: the default export is a PLAIN function (vinext 1.0.1 calls it as factory({ env, options }), no 'new')`, async () => {
+            const mod = await load(file);
+            expect(typeof mod.default).toBe("function");
+            expect(
+                /^class\b/.test(Function.prototype.toString.call(mod.default)),
+            ).toBe(false);
+            // The 1.0.1 call shape: a bare call, never `new`.
+            const handler = mod.default({
+                env: undefined,
+                options: { maxMemoryCacheSize: 5 },
+            });
+            expect(handler).toBeInstanceOf(mod.KnextCacheHandler);
+            expect(typeof handler.get).toBe("function");
+            expect(typeof handler.set).toBe("function");
+            expect(typeof handler.revalidateTag).toBe("function");
+            expect(handler.options).toEqual({ maxMemoryCacheSize: 5 });
+        });
+
+        it(`${file}: vinext 1.1.0's instantiateCacheAdapter still calls it as a factory and gets a working handler`, async () => {
+            const { instantiateCacheAdapter } = (await import(
+                "vinext/shims/cache-adapter-instantiate"
+            )) as unknown as {
+                instantiateCacheAdapter: (
+                    exported: unknown,
+                    args: { env: unknown; options: unknown },
+                    slot: "data",
+                ) => object;
+            };
+            const mod = await load(file);
+            const handler = instantiateCacheAdapter(
+                mod.default,
+                { env: {}, options: undefined },
+                "data",
+            );
+            expect(handler).toBeInstanceOf(mod.KnextCacheHandler);
+        });
+
+        it(`${file}: the named class is what vinext 1.1.0 constructs directly with { env, options }`, async () => {
+            const { instantiateCacheAdapter } = (await import(
+                "vinext/shims/cache-adapter-instantiate"
+            )) as unknown as {
+                instantiateCacheAdapter: (
+                    exported: unknown,
+                    args: { env: unknown; options: unknown },
+                    slot: "data",
+                ) => { options?: unknown };
+            };
+            const mod = await load(file);
+            const handler = instantiateCacheAdapter(
+                mod.KnextCacheHandler,
+                { env: {}, options: { maxMemoryCacheSize: 7 } },
+                "data",
+            );
+            expect(handler).toBeInstanceOf(mod.KnextCacheHandler);
+            expect(handler.options).toEqual({ maxMemoryCacheSize: 7 });
+            // Next.js constructs with its options bare.
+            expect(
+                (
+                    new mod.KnextCacheHandler({ maxMemoryCacheSize: 3 }) as {
+                        options?: unknown;
+                    }
+                ).options,
+            ).toEqual({ maxMemoryCacheSize: 3 });
+        });
+    }
+});
+
 describe("#953 layer 3 — vinext's real registration + ISR path writes SET/EX to Redis, then serves HIT and STALE", () => {
     let fake: FakeRedis;
     /** Full argv of every SET the server received, captured at the socket. */

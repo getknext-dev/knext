@@ -1,25 +1,22 @@
 /**
- * vinext data-cache adapter FACTORY for the NODE runtime: ioredis through a
- * LITERAL import, which nitro/vite tracing follows into the image.
+ * vinext data-cache adapter for knext's Node cache handler (ioredis, imported literally so the build traces it).
  *
- * Same contract as `./vinext-cache-adapter.mjs` (vinext calls the default
- * export as `factory({ env, options })`); the only difference is that the
- * Redis client is fixed statically instead of being detected at runtime
- * through a specifier no bundler can follow. The scaffolded `vite.config.ts`
- * picks the entry that matches `runtime`.
+ * The default export is a plain FUNCTION on purpose: vinext 1.0.x calls the
+ * adapter module's default export as a factory
+ * (`factory({ env, options })`) and a bare class throws "cannot be invoked
+ * without 'new'", which vinext swallows by falling back to a per-pod memory
+ * cache. vinext 1.1.0+ also accepts a class, but still calls a non-class
+ * export as a factory, so one factory serves every vinext knext supports.
+ * The `{ env, options }` unwrap lives in the CacheHandler constructor; `env`
+ * is the Workers binding object and is meaningless on the knext target.
  *
- * The client definition mirrors `./cache-handler-node.js` rather than
- * importing it: importing it would make the package build hoist that entry's
- * literal `import('ioredis')` into a shared chunk, and the entry-level
- * guarantee ("the built node entry itself carries the literal import") would
- * stop holding. Both are covered by tests.
- *
- * It stays a lazy import (inside `load`, which runs only when REDIS_URL is
- * set). If the client cannot load while REDIS_URL is set, the core logs one
- * "Redis client unavailable" error at startup and serves from memory.
+ * The handler class itself is the named export.
  */
 import { CacheHandler, ioredisClient } from './cache-handler.js';
 
+// Defined here, with a LITERAL `import('ioredis')`, rather than imported from
+// cache-handler-node.js: the bundler splits shared code into chunks, and nitro's
+// tracer must see the literal specifier in this adapter's own file to ship ioredis.
 const ioredis = {
   name: 'ioredis',
   async load(url) {
@@ -28,14 +25,16 @@ const ioredis = {
   },
 };
 
-class KnextVinextNodeCacheHandler extends CacheHandler {
+class KnextNodeCacheHandler extends CacheHandler {
   static redisClient = ioredis;
 }
 
+export { KnextNodeCacheHandler as KnextCacheHandler };
+
 /**
  * @param {{ env?: unknown, options?: Record<string, unknown> }} [args]
- * @returns {import('./cache-handler.js').default}
+ * @returns one handler per isolate: vinext guards registration so this runs once.
  */
 export default function createKnextVinextDataCacheAdapter(args) {
-  return new KnextVinextNodeCacheHandler(args?.options);
+  return new KnextNodeCacheHandler(args);
 }

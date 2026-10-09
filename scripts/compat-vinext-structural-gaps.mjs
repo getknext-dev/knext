@@ -58,7 +58,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 /** Frozen at the count first quarantined (2026-10-09). Only ever lowered; raising it needs an ADR-0007 amendment. */
-export const STRUCTURAL_FILE_CAP = 49;
+export const STRUCTURAL_FILE_CAP = 41;
 /**
  * The ORIGINAL 49 files first quarantined (2026-10-09), pinned as a SET, not
  * just a count: a count alone lets one ledgered file be swapped for a different

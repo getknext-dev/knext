@@ -116,7 +116,7 @@ prove('the file cap is not enforced', GAPS, 'files.length > STRUCTURAL_FILE_CAP'
 prove(
   'the cap is raised above the original 49',
   GAPS,
-  'export const STRUCTURAL_FILE_CAP = 49;',
+  'export const STRUCTURAL_FILE_CAP = 41;',
   'export const STRUCTURAL_FILE_CAP = 60;',
 );
 
@@ -209,7 +209,7 @@ prove(
 prove(
   'a ledgered file is swapped for a different one (committed JSON)',
   DATA,
-  'test/e2e/app-dir/navigation-focus/navigation-focus.test.ts',
+  'test/e2e/app-dir/action-forward-loop/action-forward-loop.test.ts',
   'test/e2e/app-dir/catch-error/catch-error.test.ts',
 );
 

@@ -1,4 +1,4 @@
-knext bundled fix for vinext 1.0.1 (dist output)
+knext bundled fix for vinext 1.1.0 (dist output)
 Upstream: https://github.com/cloudflare/vinext/pull/3768 (issues https://github.com/cloudflare/vinext/issues/2831 and https://github.com/cloudflare/vinext/issues/2810; builds on https://github.com/cloudflare/vinext/pull/2839)
 What it fixes: Next.js 16.3 made its new App Router scroll handler the default, and vinext still
 follows the legacy one, so three Next.js deploy-test files fail (navigation-focus, router-autoscroll,
@@ -19,7 +19,7 @@ markAppRouterScrollIntentHeadHoisted) existed only for the legacy handler and is
 Applies on top of every earlier patch in manifest order.
 Retire: delete this file (and its manifest entry) when the pinned vinext is >= the first
 release that includes cloudflare/vinext#3768.
-Ported by hand from the upstream src change to the published 1.0.1 dist files.
+Ported by hand from the upstream src change to the published 1.1.0 dist files.
 Applied by `knext vinext-patches` (runs from the app's postinstall and before `knext build`).
 --- a/dist/shims/app-router-scroll-state.js
 +++ b/dist/shims/app-router-scroll-state.js
@@ -224,12 +224,12 @@ Applied by `knext vinext-patches` (runs from the app's postinstall and before `k
  		this.schedulePotentialScroll();
 --- a/dist/server/app-browser-navigation-controller.js
 +++ b/dist/server/app-browser-navigation-controller.js
-@@ -435,7 +435,7 @@
- 				previousNextUrl: approvedCommit.previousNextUrl,
- 				targetHistoryIndex: options.targetHistoryIndex
- 			}));
+@@ -513,7 +513,7 @@
+ 					releaseSnapshot: snapshotRenderIds.delete(renderId)
+ 				});
+ 			});
 -			claimAppRouterScrollIntentForCommit(options.scrollIntent, renderId);
 +			claimAppRouterScrollIntentForCommit(options.scrollIntent, renderId, { parallelSlotOwned: approvedCommit.interception !== null });
- 			activateNavigationSnapshot();
- 			snapshotActivated = true;
- 			dispatchApprovedVisibleCommit(renderId, approvedCommit, options.pendingRouterState, shouldForceSynchronousCommit(options) ? "synchronous" : options.visibleCommitMode ?? "transition");
+ 			if (!isRetiredNavigationUrl(options.navId, options.targetHref)) {
+ 				activateNavigationSnapshot();
+ 				snapshotRenderIds.add(renderId);

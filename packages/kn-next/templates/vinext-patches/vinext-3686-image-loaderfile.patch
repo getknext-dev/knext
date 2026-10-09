@@ -1,4 +1,4 @@
-knext bundled fix for vinext 1.0.1 (dist output)
+knext bundled fix for vinext 1.1.0 (dist output)
 Upstream: https://github.com/cloudflare/vinext/pull/3686
 What it fixes: `images.loaderFile` in next.config was silently ignored on the
 vinext target, so a custom image loader configured that way was never used
@@ -17,7 +17,7 @@ vinext-3686-image-trailingslash-loader-srcset.patch, which MUST apply first
 install that already carries the first half still applies cleanly.
 Retire: delete this file (and its manifest entry) when the pinned vinext is >= the first
 release that includes cloudflare/vinext#3686.
-Ported by hand from the upstream src change to the published 1.0.1 dist files.
+Ported by hand from the upstream src change to the published 1.1.0 dist files.
 Applied by `knext vinext-patches` (runs from the app's postinstall and before `knext build`).
 
 --- a/dist/build/client-build-config.js

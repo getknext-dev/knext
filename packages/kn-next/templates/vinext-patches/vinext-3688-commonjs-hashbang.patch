@@ -1,4 +1,4 @@
-knext bundled fix for vinext 1.0.1 (dist output)
+knext bundled fix for vinext 1.1.0 (dist output)
 Upstream: https://github.com/cloudflare/vinext/pull/3688
 What it fixes: A module that starts with a hashbang line (`#!/usr/bin/env node`) and also contains CommonJS
 syntax goes through vite-plugin-commonjs, which prepends a `module`/`exports` facade and so pushes
@@ -6,51 +6,40 @@ syntax goes through vite-plugin-commonjs, which prepends a `module`/`exports` fa
 This is the maintainer's version: the displaced hashbang is turned into a `//` line comment (same
 length, so source maps hold) both in vinext's CommonJS transform wrapper and in the client dependency
 optimizer (new dist/plugins/commonjs-hashbang.js). The upstream ESM-facade check it also precedes is
-not in 1.0.1, so it is not ported.
+is composed with: 1.1.0's own export-facade strip runs first, then the hashbang fix.
 Retire: delete this file (and its manifest entry) when the pinned vinext is >= the first
 release that includes cloudflare/vinext#3688.
-Ported by hand from the upstream src change to the published 1.0.1 dist files.
+Ported by hand from the upstream src change to the published 1.1.0 dist files.
 Applied by `knext vinext-patches` (runs from the app's postinstall and before `knext build`).
 
 --- a/dist/index.js
 +++ b/dist/index.js
-@@ -110,6 +110,7 @@
- import { createImportMetaUrlPlugin } from "./plugins/import-meta-url.js";
+@@ -113,6 +113,7 @@
  import { createWorkerImageImportsPlugin } from "./plugins/worker-image-imports.js";
  import { createRequireContextPlugin } from "./plugins/require-context.js";
+ import { commonJsEsmFacadeOptimizeDepsPlugin, stripEsmCommonJsExportFacade } from "./plugins/commonjs-esm-facade.js";
 +import { commentOutDisplacedHashbang, commonJsHashbangOptimizeDepsPlugin } from "./plugins/commonjs-hashbang.js";
  import { COMMONJS_SYNTAX_CODE_FILTER } from "./plugins/commonjs-syntax.js";
  import { createRequireConditionResolutionPlugin, isConditionalRequireScriptModuleId } from "./plugins/require-condition-resolution.js";
  import { createExtensionlessDynamicImportPlugin } from "./plugins/extensionless-dynamic-import.js";
-@@ -1161,12 +1162,21 @@
- 			const previous = transformBundledCommonJsDependencies;
- 			transformProjectLocalCommonJs = projectLocal && isDev;
- 			transformBundledCommonJsDependencies = bundledDependency;
-+			let result;
- 			try {
--				return commonJsTransform.call(this, code, id, ...args);
-+				result = commonJsTransform.call(this, code, id, ...args);
- 			} finally {
- 				transformProjectLocalCommonJs = previousProjectLocal;
- 				transformBundledCommonJsDependencies = previous;
- 			}
-+			return Promise.resolve(result).then((transformed) => {
-+				if (typeof transformed !== "object" || typeof transformed?.code !== "string") return transformed;
-+				const output = commentOutDisplacedHashbang(code, transformed.code);
+@@ -1173,8 +1174,9 @@
+ 			return Promise.resolve(result).then((transformed) => {
+ 				if (typeof transformed !== "object" || typeof transformed?.code !== "string") return transformed;
+ 				const stripped = stripEsmCommonJsExportFacade(transformed.code);
+-				return stripped === void 0 ? transformed : {
++				const output = commentOutDisplacedHashbang(code, stripped ?? transformed.code) ?? stripped;
 +				return output === void 0 ? transformed : {
-+					...transformed,
+ 					...transformed,
+-					code: stripped
 +					code: output
-+				};
-+			});
- 		};
- 		commonJsPlugin.transform = {
- 			filter: { code: { include: COMMONJS_SYNTAX_CODE_FILTER } },
-@@ -1695,7 +1705,7 @@
+ 				};
+ 			});
+@@ -1706,7 +1708,7 @@
  					...depOptimizeNodeEnvOptions,
  					rolldownOptions: {
  						...depOptimizeNodeEnvOptions.rolldownOptions,
--						plugins: [depOptimizeAliasPlugin]
-+						plugins: [depOptimizeAliasPlugin, commonJsHashbangOptimizeDepsPlugin]
+-						plugins: [depOptimizeAliasPlugin, commonJsEsmFacadeOptimizeDepsPlugin]
++						plugins: [depOptimizeAliasPlugin, commonJsEsmFacadeOptimizeDepsPlugin, commonJsHashbangOptimizeDepsPlugin]
  					}
  				};
  				pagesOptimizeEntries = !hasAppDir ? [...hasPagesDir ? [toRelativeFileEntry(root, pagesDir) + "/**/*.{tsx,ts,jsx,js}"] : [], ...[instrumentationPath, instrumentationClientPath].flatMap((entry) => entry ? [toRelativeFileEntry(root, entry)] : [])] : [];

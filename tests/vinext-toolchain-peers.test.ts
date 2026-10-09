@@ -68,20 +68,20 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const DEPLOY_SCRIPT = 'scripts/e2e-deploy-vinext.sh';
 
 /**
- * vinext@1.0.1's declared `peerDependencies` (from `npm view vinext@…`),
+ * vinext@1.1.0's declared `peerDependencies` (from `npm view vinext@…`),
  * restricted to the packages `e2e-deploy-vinext.sh` installs. When the repo's
  * vinext pin (packages/kn-next/package.json) bumps, re-run
  * `npm view vinext@<v> peerDependencies` and update BOTH the ranges and
  * PEER_VINEXT_VERSION below.
  *
- * Re-verified for beta.11 (#1309), beta.12 (#1324), and 1.0.1 (#1812): the
- * ranges below are UNCHANGED from beta.9 — `npm view vinext@1.0.1
+ * Re-verified for beta.11 (#1309), beta.12 (#1324), 1.0.1 (#1812), and 1.1.0: the
+ * ranges below are UNCHANGED from beta.9 — `npm view vinext@1.1.0
  * peerDependencies` returns the identical set for every package this lane
  * pins (vinext's manifest also declares `@mdx-js/rollup@^3.0.0` and
  * `@vitejs/plugin-react@^5.1.4 || ^6.0.0` as peers, but the lane does not pin
  * `@vitejs/plugin-react` explicitly, so it is out of scope for this guard).
  */
-const PEER_VINEXT_VERSION = '1.0.1';
+const PEER_VINEXT_VERSION = '1.1.0';
 const VINEXT_PEER_RANGES: Record<string, string> = {
   vite: '^8.0.0',
   react: '^19.2.6',

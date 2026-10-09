@@ -1,12 +1,7 @@
 {
   "$comment": "Fixes knext bundles for vinext ahead of upstream releases. `vinext` is the ONLY version these patches were validated against; `pristine` records the sha256 of each target file in that published tarball. Bumping the vinext pin without re-porting and re-validating every patch fails vinext-patches.test.ts.",
-  "vinext": "1.0.1",
+  "vinext": "1.1.0",
   "patches": [
-    {
-      "file": "vinext-3472-pages-data-request-url.patch",
-      "upstream": "https://github.com/cloudflare/vinext/pull/3472",
-      "summary": "Pages Router: a `/_next/data/...` request reaches getServerSideProps with the original data URL as `req.url` (Next.js parity), not the normalized page path. Merged upstream, not yet in a release after 1.0.1."
-    },
     {
       "file": "vinext-3423-require-condition-noexternal.patch",
       "upstream": "https://github.com/cloudflare/vinext/pull/3423",
@@ -28,19 +23,9 @@
       "summary": "Nitro builds: `outputFileTracingIncludes` / `outputFileTracingExcludes` from next.config are applied to the traced server dependencies, with Next.js route-key and glob semantics. Maintainer's version."
     },
     {
-      "file": "vinext-3681-lightningcss-custom-media-drafts.patch",
-      "upstream": "https://github.com/cloudflare/vinext/pull/3681",
-      "summary": "`experimental.lightningCssFeatures.include`'s `custom-media-queries` entry (after `exclude` is subtracted) also turns on lightningcss's `drafts.customMedia` parser flag, so `@custom-media` can parse at all. Merged upstream, not yet in a release after 1.0.1."
-    },
-    {
       "file": "vinext-3682-subresource-sec-fetch-dest-404.patch",
       "upstream": "https://github.com/cloudflare/vinext/pull/3682",
       "summary": "App Router: a GET/HEAD request for an unmatched path whose `Sec-Fetch-Dest` is a non-HTML subresource destination (image, font, script, ...) gets a plain-text 404 instead of the rendered not-found page."
-    },
-    {
-      "file": "vinext-3684-repeated-slash-redirect.patch",
-      "upstream": "https://github.com/cloudflare/vinext/pull/3684",
-      "summary": "A request path with a repeated slash or backslash (`//`, `/docs//`, `//evil.com`) gets Next.js's 308 to the collapsed path (query kept, same-origin Location) instead of a 404 or a thrown URL parse, so a bare `//` serves the index route; encoded `%2F`/`%5C` leading forms keep their 404. Maintainer's version (replaced the earlier bare-`//` change)."
     },
     {
       "file": "vinext-3686-image-trailingslash-loader-srcset.patch",
@@ -53,11 +38,6 @@
       "summary": "next/image: `images.loaderFile` in next.config is honoured (the vinext plugin aliases the loader slot to the file, `next/image` applies it to every image, and a missing file or an incompatible `images.loader` fails the build like Next.js); `images.loader: \"custom\"` without a loader throws Next.js's missing-loader error. Applies on top of the patch above."
     },
     {
-      "file": "vinext-3687-config-function-form-default-config.patch",
-      "upstream": "https://github.com/cloudflare/vinext/pull/3687",
-      "summary": "A function-form `next.config.js`/`.ts` is called with its real `defaultConfig.pageExtensions` (matching Next's own default), not an empty object — a config that reads `defaultConfig.pageExtensions` (Next's custom-page-extension e2e fixture) previously threw `defaultConfig.pageExtensions is not iterable`. Merged upstream, not yet in a release after 1.0.1."
-    },
-    {
       "file": "vinext-3688-commonjs-hashbang.patch",
       "upstream": "https://github.com/cloudflare/vinext/pull/3688",
       "summary": "A hashbang-prefixed module (`#!/usr/bin/env node`) that also uses CommonJS syntax no longer fails to build — the CJS interop transform's prepended runtime facade used to push `#!` out of byte position 0; the displaced hashbang is now commented out (transform wrapper and client dependency optimizer). Maintainer's version."
@@ -66,11 +46,6 @@
       "file": "vinext-3689-action-redirect-fetch-status.patch",
       "upstream": "https://github.com/cloudflare/vinext/pull/3689",
       "summary": "A server action's redirect, when invoked via fetch (the client-side router path), now always answers HTTP 200 like Next.js does — it previously fell back to 303 unless the action had already been forwarded, the target was an ancestor/stale-sibling route, or the target ran on a different runtime. Header-only redirects are marked config-headers-applied so finalization cannot repeat them. The no-JS, progressive-enhancement form-POST redirect path is unchanged and still answers 303."
-    },
-    {
-      "file": "vinext-3734-image-x-nextjs-cache.patch",
-      "upstream": "https://github.com/cloudflare/vinext/pull/3734",
-      "summary": "`/_next/image` responses now carry `x-nextjs-cache: MISS` like Next.js does (vinext has no image cache, so every successful response is a fresh optimization); error responses and a 304 carry no header. Maintainer's header-only version (image handler and the Node production server)."
     },
     {
       "file": "vinext-3741-nitro-image-optimizer.patch",
@@ -149,39 +124,31 @@
     }
   ],
   "pristine": {
-    "dist/entries/pages-server-entry.js": "52a3536059bd41fefe8b28551fa8d100baa171e7542671186e5a1d768df7fab2",
     "dist/build/client-build-config.js": "2d20d75032242188c751e310cb3b5c76be4bf17c37f5239c03a3e03c500d718c",
+    "dist/build/next-client-runtime-manifests.js": "790b80f96a3c00f64b61581d4df24667114a5db2b7a4e0d2be2c607ccbdbca12",
     "dist/check.js": "d408170d32517d2eb6f882f54c18c7f3417cd323dcdea3f4e1be2c794e672b50",
+    "dist/config/next-config.js": "30ce2b64f4c2d61310654e7b3e14105bc90fb869e8dbd0f8299a97209fbef170",
     "dist/entries/app-ssr-entry.js": "6b025a80f17e7904229cf26502f074bd4770599224047b826b7781c76cd673bf",
-    "dist/shims/public-shim-map.json.js": "46ffbbbacc08fc670e3d1998f91829842cb1abd3893854b2617ecd7ce9d9ea38",
-    "dist/config/next-config.js": "4bdf5a32040b293783c7893d34baafd67b5fde359308cbba84d393672abf7851",
-    "dist/index.js": "511ef30c3c0d758448caf8b683d1dba02ab2286646a8abf94183a9248fc0430e",
+    "dist/entries/pages-server-entry.js": "52a3536059bd41fefe8b28551fa8d100baa171e7542671186e5a1d768df7fab2",
+    "dist/index.js": "a82a82f7d42b704c514e036728e3b76821de027c3eb47b28d49cabbc6b650b35",
     "dist/plugins/require-condition-resolution.js": "f8776d98dfc63c228810a8f6d3691fb0f8f7c7b42f700e6ed40c3501607a8321",
-    "dist/server/pages-request-stage-entry.js": "dea2d42fbd269d1124e280e86648cc3bca831548e320b74d065ee6228698ca6a",
-    "dist/server/app-rsc-handler.js": "b4a18a7636263b24b06ecaf48f88c85a975853f1c83805beb88cdbf779d9a9da",
-    "dist/server/open-redirect.js": "4e62ca39cf91cdc92ec9cb4d269a1fb0c64f3c48c6a90e1f7b8bb5efeb5cf475",
-    "dist/shims/image.js": "f498afc199ba102be93b93ae2098f6ed79bcae261485f6a807438efbe134f0b3",
-    "dist/server/app-server-action-execution.js": "05fdfc733fdc48f805f6661d3e909a8d0a82693391439ead238d50fbef506c5e",
-    "dist/server/image-optimization.js": "1df1b64dfd46c463ec290b135c32cfbc66be88612ccf6310fc91e3d29f274f3c",
     "dist/plugins/transitive-externals.js": "e36108b7ae180fea1825a7b3492e77830127b001230e043a70e5e118aa1135fe",
-    "dist/routing/file-matcher.js": "9af495b4904bdf51c91b8e257412633f91c065b36925c49803fff7f1cd1dafdf",
+    "dist/routing/route-validation.js": "4b771688d4b83ab77368d9cff2d609c25cda9d57df201a438c255484f5285d12",
     "dist/server/app-action-forwarding.js": "4661de5d276be077b61de13ebdc41ed2be18fef494af49e46303ba9de5382594",
-    "dist/server/app-request-stage-independent-entry.js": "32a316dc47c6781bcf384eef2df0ad24ba474f3bf83c0bb3002a5e1709324c0e",
-    "dist/server/app-router-entry.js": "10b5684bf9b750b45d39c933b98546630e78321952c3e1853a5109389b02b494",
-    "dist/server/app-rsc-request-normalization.js": "3be8daa060019f663e36711f3bf44f886b2df7ad3e80ea5a5b592c8f6122350b",
-    "dist/server/app-ssr-entry.js": "db1e1d348fe418da332d940e13ab8d6c07ab78600b579f00430350cd40365470",
+    "dist/server/app-browser-navigation-controller.js": "597f2d14d12b79a90d7db54e815749eb03aa5b8967e9fa9bb45cdb7dfe1dbbff",
+    "dist/server/app-pages-bridge.js": "5a6a66420eb53e8813c0169b7fa92f0334fbdfbcf5f6c1b59259fb695e89aa2c",
+    "dist/server/app-rsc-handler.js": "ffada20e52191d59b0008c71c242a0f77e50854ca03ab4f2f2b06b3562f17e37",
+    "dist/server/app-server-action-execution.js": "743fd23e53bb8866e502019bd681e2b622be65ac7586a6f8695a735ef99f43c8",
+    "dist/server/image-optimization.js": "023b7dd21d3e10bdfbb81ade295bf874d7144d99d0bd021381639d6841291082",
     "dist/server/metadata-routes.js": "66d9479ae1dc2da3d3a52aa7c59985982d77352f4916cf131e5ee8bb294c4f55",
-    "dist/server/prod-server.js": "a024dcbc8d33d1ed77f889df6aec0fd74c38061bfcc40093f9cf7cd77766dfa2",
-    "dist/server/request-pipeline.js": "f50f66325cbbddd0c42fd47053d34ccfaa06e2969abf3106db886b3c8736afc7",
+    "dist/server/pages-page-handler.js": "51146ccf4e10c46e2a2e4d4b8ca4be6872adf7ebf6d2d74e90ab07c7300e3164",
+    "dist/server/pages-request-pipeline.js": "28e0b1a13966c2ccdcc43461927c7e49beb869fa9f70c2cca9cf2924ab8093ea",
+    "dist/server/pages-request-stage-entry.js": "5acbd631ce60a924b4d2d10f9b7950c9225488e74d70df8a25a345bbd0e531ae",
     "dist/server/worker-revalidation-context.js": "f28e0a44b8a49460a77db90594c23d118f33f9a740882faf061e1e4652fd46e7",
-    "dist/shims/dynamic.js": "66caec229001994c1db53882fb893dc442135494df0aba462226bbab749f3b34",
     "dist/shims/app-router-scroll-state.js": "1c31a7ccc19ac69ecc50f6f2d07fc718c7e7ec2f4600bb1cf2af18d50e02984e",
     "dist/shims/app-router-scroll.js": "0a43b02e382a6b4c3fcca38e8afb12e689b9b6a877e459b01bfd0a6f480053de",
-    "dist/server/app-browser-navigation-controller.js": "88d86bd6a56ca60617ca8607b3112b5d70bf6c5449d6b5be43a461050a9124a2",
-    "dist/server/pages-request-pipeline.js": "28e0b1a13966c2ccdcc43461927c7e49beb869fa9f70c2cca9cf2924ab8093ea",
-    "dist/server/app-pages-bridge.js": "5a6a66420eb53e8813c0169b7fa92f0334fbdfbcf5f6c1b59259fb695e89aa2c",
-    "dist/server/pages-page-handler.js": "bb70d235225807fe8357c1f3e055b47677c39666878e653eb07901d8cdcbbe17",
-    "dist/routing/route-validation.js": "4b771688d4b83ab77368d9cff2d609c25cda9d57df201a438c255484f5285d12",
-    "dist/build/next-client-runtime-manifests.js": "790b80f96a3c00f64b61581d4df24667114a5db2b7a4e0d2be2c607ccbdbca12"
+    "dist/shims/dynamic.js": "66caec229001994c1db53882fb893dc442135494df0aba462226bbab749f3b34",
+    "dist/shims/image.js": "f498afc199ba102be93b93ae2098f6ed79bcae261485f6a807438efbe134f0b3",
+    "dist/shims/public-shim-map.json.js": "46ffbbbacc08fc670e3d1998f91829842cb1abd3893854b2617ecd7ce9d9ea38"
   }
 }

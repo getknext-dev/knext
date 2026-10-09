@@ -1,4 +1,4 @@
-knext bundled fix for vinext 1.0.1 (dist output)
+knext bundled fix for vinext 1.1.0 (dist output)
 Upstream: https://github.com/cloudflare/vinext/pull/3686
 What it fixes: next/image's image optimizer path ignored `trailingSlash: true`
 (always emitted `/_next/image?...`, never `/_next/image/?...`), and a custom
@@ -15,7 +15,7 @@ this patch still applies the companion cleanly.
 Updated to the maintainer's head of the PR: a custom loader also applies to fill images (full device-size srcSet, sizes defaulting to 100vw), data:/blob:/empty sources skip the loader, overrideSrc wins, a caller srcSet is ignored, and src is emitted after srcSet/sizes.
 Retire: delete this file (and its manifest entry) when the pinned vinext is >= the first
 release that includes cloudflare/vinext#3686.
-Ported by hand from the upstream src change to the published 1.0.1 dist files.
+Ported by hand from the upstream src change to the published 1.1.0 dist files.
 Applied by `knext vinext-patches` (runs from the app's postinstall and before `knext build`).
 
 --- a/dist/shims/image.js

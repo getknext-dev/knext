@@ -408,6 +408,24 @@ describe("the bundled patches against the published tarball", () => {
         expect(index).not.toContain("createWorkerDeploymentIdDefinePlugin");
     });
 
+    it("vinext#3472 / #3681 / #3684 / #3687 / #3734: no longer bundled — vinext 1.1.0 ships them", () => {
+        // Each was a bundled fix on 1.0.1; the 1.1.0 release contains the merged
+        // upstream change (the behaviour tests below run against the patched copy
+        // and prove the shipped 1.1.0 dist behaves the same), so the patch files
+        // and manifest entries are retired.
+        const bundled = manifest.patches.map((p) => p.file);
+        for (const num of ["3472", "3681", "3684", "3687", "3734"]) {
+            expect(
+                bundled.filter((f) => f.startsWith(`vinext-${num}-`)),
+            ).toEqual([]);
+            expect(
+                readdirSync(PATCHES_DIR).filter((f) =>
+                    f.startsWith(`vinext-${num}-`),
+                ),
+            ).toEqual([]);
+        }
+    });
+
     it("vinext#3423: require targets are pre-resolved with a bundling resolver pair, and only packages Vite would just externalize are taken over", async () => {
         applyVinextPatches(patched);
         const mod = await importPatched<{
@@ -597,7 +615,7 @@ describe("the bundled patches against the published tarball", () => {
         expect(untouched).toEqual({});
     });
 
-    it("vinext#3424 / #3226 / #3472: the ported hunks are present in the patched dist", () => {
+    it("vinext#3424 / #3226 (and #3472, now upstream): the ported hunks are present in the patched dist", () => {
         applyVinextPatches(patched);
         const index = readFileSync(join(patched, "dist", "index.js"), "utf8");
         // #3424 (amended, R1) — the RSC environment fully bundles under
@@ -614,7 +632,8 @@ describe("the bundled patches against the published tarball", () => {
         expect(index).toContain(
             'hasNitroPlugin && name === "nitro" ? null : nextConfig.serverResolveExtensions',
         );
-        // #3472 — data requests carry the pre-normalization URL.
+        // #3472 — data requests carry the pre-normalization URL (upstream since
+        // 1.1.0; asserted here so a regression upstream is caught, not bundled).
         const stage = readFileSync(
             join(patched, "dist", "server", "pages-request-stage-entry.js"),
             "utf8",
@@ -625,7 +644,7 @@ describe("the bundled patches against the published tarball", () => {
         expect(stage).toContain("originalUrl: originalRenderUrl");
     });
 
-    it("vinext#3681: lightningCssFeatures.include('custom-media-queries') also turns on drafts.customMedia", () => {
+    it("vinext#3681 (upstream since 1.1.0, no longer bundled): lightningCssFeatures.include('custom-media-queries') also turns on drafts.customMedia", () => {
         applyVinextPatches(patched);
         const index = readFileSync(join(patched, "dist", "index.js"), "utf8");
         expect(index).toContain(
@@ -667,7 +686,7 @@ describe("the bundled patches against the published tarball", () => {
         expect(seg).not.toContain("The Edge Runtime is deprecated");
     });
 
-    it("vinext#3684: repeated slashes and backslashes get Next.js's 308 to the collapsed path; encoded and still-open-redirect shapes keep their 404", async () => {
+    it("vinext#3684 (upstream since 1.1.0, no longer bundled): repeated slashes and backslashes get Next.js's 308 to the collapsed path; encoded and still-open-redirect shapes keep their 404", async () => {
         applyVinextPatches(patched);
         const mod = await importPatched<{
             isOpenRedirectShaped: (rawPathname: string) => boolean;
@@ -886,7 +905,7 @@ describe("the bundled patches against the published tarball", () => {
         expect(props.src).not.toBe("/logo.png?wid=200&qual=75");
     });
 
-    it("vinext#3734: /_next/image success responses carry x-nextjs-cache: MISS, errors carry none", async () => {
+    it("vinext#3734 (upstream since 1.1.0, no longer bundled): /_next/image success responses carry x-nextjs-cache: MISS, errors carry none", async () => {
         applyVinextPatches(patched);
         const mod = await importPatched<{
             handleImageOptimization: (
@@ -1600,7 +1619,7 @@ describe("the bundled patches against the published tarball", () => {
         expect(keys.indexOf("src")).toBeGreaterThan(keys.indexOf("srcSet"));
     });
 
-    it("vinext#3687 (site A, resolveConfigValue): a CJS function-form next.config gets the real pageExtensions default, not an empty object", async () => {
+    it("vinext#3687 (upstream since 1.1.0, no longer bundled) (site A, resolveConfigValue): a CJS function-form next.config gets the real pageExtensions default, not an empty object", async () => {
         applyVinextPatches(patched);
         const mod = await importPatched<{
             loadNextConfig: (
@@ -1633,7 +1652,7 @@ describe("the bundled patches against the published tarball", () => {
         }
     });
 
-    it("vinext#3687 (site B, the virtual-module loader): a .ts function-form next.config gets the real pageExtensions default, not an empty object", async () => {
+    it("vinext#3687 (upstream since 1.1.0, no longer bundled) (site B, the virtual-module loader): a .ts function-form next.config gets the real pageExtensions default, not an empty object", async () => {
         applyVinextPatches(patched);
         const mod = await importPatched<{
             loadNextConfig: (

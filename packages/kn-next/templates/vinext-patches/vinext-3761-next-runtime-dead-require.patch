@@ -1,4 +1,4 @@
-knext bundled fix for vinext 1.0.1 (dist output)
+knext bundled fix for vinext 1.1.0 (dist output)
 Upstream: https://github.com/cloudflare/vinext/pull/3761 (issue https://github.com/cloudflare/vinext/issues/3758)
 What it fixes: a `require()` in a branch that `process.env.NEXT_RUNTIME` makes dead was still
 resolved, so `instrumentation.js` with `else { await require("this should fail") }` failed to
@@ -9,7 +9,7 @@ dist/plugins/next-runtime-dead-branches.js), keeping every offset, when the test
 NEXT_RUNTIME with string literals.
 Retire: delete this file (and its manifest entry) when the pinned vinext is >= the first
 release that includes cloudflare/vinext#3761.
-Ported by hand from the upstream src change to the published 1.0.1 dist files.
+Ported by hand from the upstream src change to the published 1.1.0 dist files.
 Applied by `knext vinext-patches` (runs from the app's postinstall and before `knext build`).
 
 --- a/dist/index.js
