@@ -169,6 +169,9 @@ describe('default-path manifests pin images by digest', () => {
   const DEFAULT_PATH = [
     // optional/ overlays are explicit opt-ins, not the default apply path
     ...walk(DEPLOY, /\.ya?ml$/).filter((f) => !f.startsWith(join(DEPLOY, 'optional'))),
+    // the warm-standby prototype and the demo manifests ship alongside as copy-pasteable examples
+    ...walk(join(SZPG, 'warmstandby'), /\.ya?ml$/),
+    ...walk(join(SZPG, 'demo', 'manifests'), /\.ya?ml$/),
     DATA_PLANE,
   ];
 

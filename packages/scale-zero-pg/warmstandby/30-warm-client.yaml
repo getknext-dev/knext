@@ -10,7 +10,7 @@ metadata:
 spec:
   containers:
     - name: client
-      image: docker.io/neondatabase/compute-node-v17:8464
+      image: docker.io/neondatabase/compute-node-v17:8464@sha256:13ab146d3e7bbabb25a8532f315ac443e7512351d1ede0bab586def5c70e26c3
       imagePullPolicy: IfNotPresent
       command: ["/bin/sh", "-c", "sleep infinity"]
       resources:
