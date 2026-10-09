@@ -34,6 +34,7 @@ import (
 	"knative.dev/serving/pkg/autoscaler/config/autoscalerconfig"
 
 	appsv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/api/v1alpha1"
+	"github.com/AhmedElBanna80/knext/packages/kn-next-operator/internal/defaults"
 )
 
 // validateCronExpr validates the 5-field (minute hour day-of-month month
@@ -71,7 +72,7 @@ const MaxConnections = 100
 // so a low ContainerConcurrency (which scales apps to more pods sooner) cannot
 // silently exhaust the gateway/DB. W3 (#378) owns breaking this wall (e.g. a
 // shared server-side pooler that decouples pod count from backend connections).
-const MaxAppConnections = 80
+const MaxAppConnections = defaults.ConnectionBudget
 
 // Recognized enum values for the provider/queue free-form string fields.
 // These mirror the providers the CLI + reconciler actually wire up. They are
@@ -159,7 +160,18 @@ func ValidateImageRef(image string) error {
 //     recognized enum values.
 //
 // This is the shared entry point used by both the webhook and the reconciler.
+// It enforces the BUILT-IN connection budget; a cluster whose KnextPlatform sets
+// database.connectionBudget is validated through ValidateNextAppSpecWithBudget.
 func ValidateNextAppSpec(spec *appsv1alpha1.NextAppSpec) error {
+	return ValidateNextAppSpecWithBudget(spec, MaxAppConnections)
+}
+
+// ValidateNextAppSpecWithBudget is ValidateNextAppSpec with the connection
+// budget the maxScale × poolMax wall is checked against supplied by the caller
+// (ADR-0064: database.connectionBudget turns the hardcoded cap into a
+// per-cluster value). With budget == MaxAppConnections it is byte-for-byte the
+// same check, error text included.
+func ValidateNextAppSpecWithBudget(spec *appsv1alpha1.NextAppSpec, budget int) error {
 	if spec == nil {
 		return fmt.Errorf("spec is required")
 	}
@@ -210,16 +222,26 @@ func ValidateNextAppSpec(spec *appsv1alpha1.NextAppSpec) error {
 					"spec.scaling.poolMax (%d) is declared with an unbounded maxScale (0): "+
 						"an unbounded pod fan-out cannot fit within the app connection budget (%d) — "+
 						"set a finite maxScale so maxScale × poolMax ≤ %d (ADR-0028)",
-					s.PoolMax, MaxAppConnections, MaxAppConnections,
+					s.PoolMax, budget, budget,
 				)
 			}
-			if int64(s.MaxScale)*int64(s.PoolMax) > int64(MaxAppConnections) {
+			if int64(s.MaxScale)*int64(s.PoolMax) > int64(budget) {
+				if budget != MaxAppConnections {
+					// A KnextPlatform moved the cap: the built-in derivation
+					// (gateway cap minus reserve) is not the explanation here.
+					return fmt.Errorf(
+						"spec.scaling: maxScale × poolMax (%d × %d = %d) exceeds the cluster connection budget (%d, set by the platform's database.connectionBudget): "+
+							"lower maxScale or poolMax so their product ≤ %d",
+						s.MaxScale, s.PoolMax, int64(s.MaxScale)*int64(s.PoolMax),
+						budget, budget,
+					)
+				}
 				return fmt.Errorf(
 					"spec.scaling: maxScale × poolMax (%d × %d = %d) exceeds the app connection budget (%d = GW_MAX_CONNS 90 − reserve; max_connections is %d): "+
 						"lower maxScale or poolMax so their product ≤ %d (ADR-0028 connection wall; "+
 						"W3/#378 owns breaking it)",
 					s.MaxScale, s.PoolMax, int64(s.MaxScale)*int64(s.PoolMax),
-					MaxAppConnections, MaxConnections, MaxAppConnections,
+					budget, MaxConnections, budget,
 				)
 			}
 		}

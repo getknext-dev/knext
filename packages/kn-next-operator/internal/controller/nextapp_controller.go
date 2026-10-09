@@ -50,6 +50,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	appsv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/api/v1alpha1"
+	"github.com/AhmedElBanna80/knext/packages/kn-next-operator/internal/defaults"
 	"github.com/AhmedElBanna80/knext/packages/kn-next-operator/internal/validation"
 	"knative.dev/pkg/apis"
 	"knative.dev/serving/pkg/apis/serving"
@@ -117,7 +118,7 @@ const imagePrewarmFailureRequeueAfter = 2 * time.Minute
 // absorbed 100 concurrent requests before Knative added a 2nd replica, making
 // reactive scale-to-N effectively inert. 20 is the documented high-traffic
 // interim; W1 (#376) refines it from the concurrency→latency curve.
-const defaultContainerConcurrency = 20
+const defaultContainerConcurrency = defaults.ContainerConcurrency
 
 // Ingress-programming stall detection (#208). When the cluster's configured
 // ingress-class matches NO installed ingress controller (e.g. the short-form
@@ -1156,12 +1157,12 @@ func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc
 	// surfacing a LimitRange/quota FailedCreate in NextApp status, which is
 	// what would make any higher default detectable instead of silent.
 	resourceRequests := corev1.ResourceList{
-		corev1.ResourceCPU:    resource.MustParse("250m"),
-		corev1.ResourceMemory: resource.MustParse("512Mi"),
+		corev1.ResourceCPU:    resource.MustParse(defaults.CPURequest),
+		corev1.ResourceMemory: resource.MustParse(defaults.MemoryRequest),
 	}
 	resourceLimits := corev1.ResourceList{
-		corev1.ResourceCPU:    resource.MustParse("1000m"),
-		corev1.ResourceMemory: resource.MustParse("1Gi"),
+		corev1.ResourceCPU:    resource.MustParse(defaults.CPULimit),
+		corev1.ResourceMemory: resource.MustParse(defaults.MemoryLimit),
 	}
 	if nextApp.Spec.Resources != nil {
 		// #435: never MustParse unvalidated CR input inside the SHARED reconcile
@@ -1205,7 +1206,7 @@ func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc
 	}
 
 	// TimeoutSeconds: default 300s when unset (matches knative-manifest.ts hardcoded value)
-	timeoutSeconds := int64(300)
+	timeoutSeconds := int64(defaults.TimeoutSeconds)
 	if nextApp.Spec.TimeoutSeconds > 0 {
 		timeoutSeconds = int64(nextApp.Spec.TimeoutSeconds)
 	}
