@@ -54,6 +54,7 @@ export function operatorCheck(ctx: CheckContext): CheckResult[] {
             (d.metadata?.name ?? "").includes("controller-manager"),
         ) ?? items[0];
     ctx.operatorImage = manager.spec?.template?.spec?.containers?.[0]?.image;
+    ctx.operatorManager = manager;
     if (isReady(manager)) {
         return [
             mk(

@@ -1,0 +1,296 @@
+name: vinext stable pin proof (#1812, both runtimes)
+
+# ── #1812 ───────────────────────────────────────────────────────────────────
+# A copy of rc5-vinext-beta-proof.yml, parameterised by VINEXT_VERSION instead
+# of RC_VERSION's template pin. It exists because #1812 bumps the SCAFFOLD
+# TEMPLATE's vinext pin (packages/kn-next/templates/app/package.json.vinext.hbs)
+# from 1.0.0-beta.12 to the first stable release, but the @getknext/* packages
+# that ship that template are not published yet at this version — so scaffolding
+# via `npx @getknext/core@<rc>` still gets the OLD (beta.12) template. This lane
+# scaffolds with the last published rc (whose CLI/build/boot machinery this
+# bump does not touch) and then overrides the scaffolded app's OWN `vinext`
+# dependency to VINEXT_VERSION before install — proving the bumped vinext
+# release builds and boots cleanly on both runtimes' bytecode mechanisms, ahead
+# of the template pin actually shipping in a published @getknext/core.
+#
+# `scripts/e2e-deploy-vinext.sh` (the compat-vinext.yml credential lane's own
+# deploy script) is NOT involved here and is NOT bumped by this PR — it is
+# inside the v1.0.0-rc.5 credential freeze window (frozenFileSet()) and stays
+# on 1.0.0-beta.12 until that window closes (see the #1812 note in
+# tests/vinext-pin-lockstep.test.ts).
+#
+# workflow_dispatch-only, no schedule, not a required check. It carried a
+# temporary `pull_request` trigger scoped to this file's own path (mirroring
+# the precedent in rc5-vinext-beta-proof.yml, PR #1813) to get one green run
+# on the PR that introduced it — both jobs passed (vinext-bun-stable,
+# vinext-node-stable, run 37040073176, PR #1817) — and that trigger is removed
+# here, leaving this workflow_dispatch-only for every run after.
+
+#
+# `bundled_vinext_patches` (v1.3): when true, each job also checks out THIS
+# ref and applies knext's bundled vinext fixes (packages/kn-next/templates/
+# vinext-patches/) to the scaffolded app's installed vinext with this ref's
+# `knext vinext-patches`, asserts `--check` reports them all applied, and only
+# then builds and boots — proving the patched vinext builds and serves on both
+# runtimes before those bytes ship in a published @getknext/core. Off by
+# default, so a plain dispatch still proves the unpatched pin.
+
+on:
+  workflow_dispatch:
+    inputs:
+      bundled_vinext_patches:
+        description: "Apply knext's bundled vinext fixes from this ref before building"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RC_VERSION: '1.0.0-rc.5'
+  VINEXT_VERSION: '1.0.1'
+
+jobs:
+  vinext-bun-stable:
+    name: vinext x bun — stable pin, compiled single executable
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Setup Bun (the compile + serving runtime)
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: '1.4.2'
+
+      - name: Scaffold with the PUBLISHED knext CLI (npx, no repo source)
+        run: |
+          set -euo pipefail
+          mkdir -p app
+          npx --yes "@getknext/core@${RC_VERSION}" create app --builder vinext --name vinext-stable-bun
+
+      - name: Pin the published @getknext/* packages + the bumped vinext
+        working-directory: app
+        run: |
+          set -euo pipefail
+          npm pkg set "devDependencies.@getknext/core=${RC_VERSION}"
+          npm pkg set "dependencies.@getknext/lib=${RC_VERSION}"
+          npm pkg set "dependencies.vinext=${VINEXT_VERSION}"
+          npm install
+          # `knext build`'s sharp-native-addon staging pins the IMAGE
+          # target's `@img/sharp-*` package from `bun.lock` — see
+          # rc5-vinext-beta-proof.yml for the full explanation.
+          bun install --save-text-lockfile
+          test -f bun.lock
+          node -e "
+            const p = require('./node_modules/@getknext/core/package.json');
+            const l = require('./node_modules/@getknext/lib/package.json');
+            const v = require('./node_modules/vinext/package.json');
+            if (p.version !== process.env.RC_VERSION || l.version !== process.env.RC_VERSION) {
+              console.error('installed @getknext/* versions do not match the pinned rc:', p.version, l.version);
+              process.exit(1);
+            }
+            if (v.version !== process.env.VINEXT_VERSION) {
+              console.error('installed vinext does not match the pinned bump:', v.version);
+              process.exit(1);
+            }
+            console.log('installed @getknext/core@' + p.version + ', @getknext/lib@' + l.version + ', vinext@' + v.version);
+          "
+
+      - name: Check out this ref (bundled vinext fixes + their applier)
+        if: ${{ inputs.bundled_vinext_patches }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: knext-src
+          persist-credentials: false
+
+      - name: Install this ref's workspace (the applier runs from source)
+        if: ${{ inputs.bundled_vinext_patches }}
+        working-directory: knext-src
+        run: bun install --frozen-lockfile
+
+      - name: Apply the bundled vinext fixes from this ref, and prove they took
+        if: ${{ inputs.bundled_vinext_patches }}
+        working-directory: app
+        run: |
+          set -euo pipefail
+          # Before: the published 1.0.1 is unpatched, so --check must fail.
+          if bun ../knext-src/packages/kn-next/src/cli/deploy.ts vinext-patches --check; then
+            echo "::error::--check passed BEFORE applying — the installed vinext already carries the fixes, so this run would prove nothing" >&2
+            exit 1
+          fi
+          bun ../knext-src/packages/kn-next/src/cli/deploy.ts vinext-patches
+          bun ../knext-src/packages/kn-next/src/cli/deploy.ts vinext-patches --check
+
+      - name: knext build --skip-smoke (vite build -> bun build --compile --bytecode)
+        working-directory: app
+        run: |
+          set -euo pipefail
+          node_modules/.bin/knext build --skip-smoke 2>&1 | tee build.log
+          grep -q '\[knext compile\] wrote .*(bytecode: on' build.log || {
+            echo "::error::build.log never reported 'bytecode: on' — the compiled executable was not proven to carry bytecode" >&2
+            exit 1
+          }
+          echo "bytecode evidence: $(grep '\[knext compile\] wrote' build.log)"
+          test -f Dockerfile
+          test -f knext-exec-linux-x64
+          test -d native
+
+      - name: docker build (the real shipped musl image) and assert a live 200
+        working-directory: app
+        run: |
+          set -euo pipefail
+          docker build -t vinext-stable-bun:proof . 2>&1 | tee docker-build.log
+          CID="$(docker run -d -p 8099:3000 vinext-stable-bun:proof)"
+          CODE=000
+          for _ in $(seq 1 30); do
+            CODE="$(curl -s -o /tmp/health.json -w '%{http_code}' http://127.0.0.1:8099/api/health || true)"
+            [ "${CODE}" = "200" ] && break
+            sleep 1
+          done
+          docker logs "${CID}" > /tmp/container.log 2>&1 || true
+          docker stop "${CID}" >/dev/null 2>&1 || true
+          echo "GET /api/health -> ${CODE}"
+          cat /tmp/health.json || true
+          if [ "${CODE}" != "200" ]; then
+            echo "::error::vinext x bun (stable pin) never served a 200 on /api/health" >&2
+            cat /tmp/container.log >&2 || true
+            exit 1
+          fi
+
+  vinext-node-stable:
+    name: vinext x node — stable pin, baked V8 compile cache
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Setup Bun (sharp native-addon lockfile only — build + boot stay on Node)
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: '1.4.2'
+
+      - name: Scaffold with the PUBLISHED knext CLI (npx, no repo source)
+        run: |
+          set -euo pipefail
+          mkdir -p app
+          npx --yes "@getknext/core@${RC_VERSION}" create app --builder vinext --name vinext-stable-node
+          node -e "
+            const fs = require('fs');
+            const path = 'app/knext.config.ts';
+            let s = fs.readFileSync(path, 'utf8');
+            if (!/build:\s*\"vinext\"/.test(s)) throw new Error('scaffold did not pin build: vinext');
+            s = s.replace(/build:\s*\"vinext\",/, 'build: \"vinext\",\n  runtime: \"node\",');
+            fs.writeFileSync(path, s);
+            console.log(s);
+          "
+
+      - name: Pin the published @getknext/* packages + the bumped vinext
+        working-directory: app
+        run: |
+          set -euo pipefail
+          npm pkg set "devDependencies.@getknext/core=${RC_VERSION}"
+          npm pkg set "dependencies.@getknext/lib=${RC_VERSION}"
+          npm pkg set "dependencies.vinext=${VINEXT_VERSION}"
+          npm install
+          bun install --save-text-lockfile
+          test -f bun.lock
+          node -e "
+            const p = require('./node_modules/@getknext/core/package.json');
+            const l = require('./node_modules/@getknext/lib/package.json');
+            const v = require('./node_modules/vinext/package.json');
+            if (p.version !== process.env.RC_VERSION || l.version !== process.env.RC_VERSION) {
+              console.error('installed @getknext/* versions do not match the pinned rc:', p.version, l.version);
+              process.exit(1);
+            }
+            if (v.version !== process.env.VINEXT_VERSION) {
+              console.error('installed vinext does not match the pinned bump:', v.version);
+              process.exit(1);
+            }
+            console.log('installed @getknext/core@' + p.version + ', @getknext/lib@' + l.version + ', vinext@' + v.version);
+          "
+
+      - name: Check out this ref (bundled vinext fixes + their applier)
+        if: ${{ inputs.bundled_vinext_patches }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: knext-src
+          persist-credentials: false
+
+      - name: Install this ref's workspace (the applier runs from source)
+        if: ${{ inputs.bundled_vinext_patches }}
+        working-directory: knext-src
+        run: bun install --frozen-lockfile
+
+      - name: Apply the bundled vinext fixes from this ref, and prove they took
+        if: ${{ inputs.bundled_vinext_patches }}
+        working-directory: app
+        run: |
+          set -euo pipefail
+          # Before: the published 1.0.1 is unpatched, so --check must fail.
+          if bun ../knext-src/packages/kn-next/src/cli/deploy.ts vinext-patches --check; then
+            echo "::error::--check passed BEFORE applying — the installed vinext already carries the fixes, so this run would prove nothing" >&2
+            exit 1
+          fi
+          bun ../knext-src/packages/kn-next/src/cli/deploy.ts vinext-patches
+          bun ../knext-src/packages/kn-next/src/cli/deploy.ts vinext-patches --check
+
+      - name: knext build (vite build -> nitro node preset; stages Dockerfile.vinext-node)
+        working-directory: app
+        run: |
+          set -euo pipefail
+          node_modules/.bin/knext build 2>&1 | tee build.log
+          test -f Dockerfile.vinext-node
+          test -f .output/server/index.mjs
+
+      - name: docker build (bakes the V8 compile cache; fails under the byte floor)
+        working-directory: app
+        run: |
+          set -euo pipefail
+          docker build -f Dockerfile.vinext-node -t vinext-stable-node:proof . 2>&1 | tee docker-build.log
+          grep -q 'compile cache baked: .* bytes' docker-build.log || {
+            echo "::error::docker-build.log never reported the compile-cache bake line" >&2
+            exit 1
+          }
+          echo "bytecode evidence: $(grep 'compile cache baked:' docker-build.log)"
+
+      - name: Run the image and assert a live 200, with COMPILE_CACHE boot evidence
+        run: |
+          set -euo pipefail
+          CID="$(docker run -d -p 8099:3000 -e NODE_DEBUG_NATIVE=COMPILE_CACHE vinext-stable-node:proof)"
+          CODE=000
+          for _ in $(seq 1 30); do
+            CODE="$(curl -s -o /tmp/health.json -w '%{http_code}' http://127.0.0.1:8099/api/health || true)"
+            [ "${CODE}" = "200" ] && break
+            sleep 1
+          done
+          docker logs "${CID}" > /tmp/container.log 2>&1 || true
+          docker stop "${CID}" >/dev/null 2>&1 || true
+          echo "GET /api/health -> ${CODE}"
+          cat /tmp/health.json || true
+          if [ "${CODE}" != "200" ]; then
+            echo "::error::vinext x node (stable pin) never served a 200 on /api/health" >&2
+            cat /tmp/container.log >&2 || true
+            exit 1
+          fi
+          grep -q '^COMPILE_CACHE:' /tmp/container.log || {
+            echo "::error::container log never reported the COMPILE_CACHE startup line" >&2
+            cat /tmp/container.log >&2
+            exit 1
+          }
+          grep -q 'was accepted' /tmp/container.log || {
+            echo "::error::container log never reported a compile-cache entry being accepted on boot" >&2
+            cat /tmp/container.log >&2
+            exit 1
+          }
+          echo "compile-cache boot evidence: $(grep -m1 '^COMPILE_CACHE:' /tmp/container.log), $(grep -c 'was accepted' /tmp/container.log) entries accepted"

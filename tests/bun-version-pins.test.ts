@@ -114,12 +114,26 @@ describe('bun-version pins (#754) — scanned across every workflow', () => {
     // step: its pnpm drives the next.js compat harness (next.js's own repo uses
     // pnpm), not knext's workspace, so it was left alone.
     expect(byFile).toEqual({
+      // NEW (#1812): a dispatch-only (+ temporary pull_request on its own
+      // path) proof lane for the stable vinext pin bump — two jobs
+      // (vinext-bun-stable, vinext-node-stable), each pinning its own
+      // setup-bun step (the node job needs bun only for the sharp
+      // native-addon lockfile, same pattern as rc5-vinext-beta-proof.yml).
+      '1812-vinext-stable-proof.yml': 2,
       // NEW (#1397 round 2): the actionlint gate now runs
       // tests/actionlint-workflow.test.ts for real (so its describe.skipIf
       // regression coverage cannot go silently inert), which needs the
       // workspace's bun to execute `bun test`. A count RISING is a
       // decision, per the rule above.
       'actionlint.yml': 1,
+      // NEW (#1822): the dispatch-only (+ workflow_call from
+      // bun-patched-release.yml) end-to-end proof of the opt-in patched Bun
+      // toolchain — stock bun for the workspace install + vite build; the
+      // compile step uses the patched toolchain knext downloads itself.
+      'bun-patched-e2e.yml': 1,
+      // NEW (compile.include): the dispatch-only end-to-end proof lane — one job,
+      // stock bun 1.4.2 for the workspace, the vite build AND the compile step.
+      'compile-include-e2e.yml': 1,
       // 11, was 13: two jobs (compat-smoke, compile-cache-bun-probe) each set up
       // bun TWICE — 1.4.0, then 1.3.14 underneath it — so the second step
       // silently took the first one away, and every install in those jobs ran on
@@ -163,6 +177,9 @@ describe('bun-version pins (#754) — scanned across every workflow', () => {
       // setup-bun step instead of one per caller.
       'file-manager-platform-e2e.yml': 1,
       'mutation-prover-nightly.yml': 1,
+      // NEW (#1843): the node-runtime Redis cache kind e2e — one "Setup bun"
+      // step (workspace install + building/packing the tarballs it deploys).
+      'runtime-redis-cache-kind-e2e.yml': 1,
       'operator-e2e-nightly.yml': 3,
       // NEW (#1668/#1671): the operator upgrade-under-load e2e's single job
       // installs the workspace with bun (`bun install --frozen-lockfile`,
@@ -224,6 +241,9 @@ describe('bun-version pins (#754) — scanned across every workflow', () => {
       // is what exposed the pnpm/bun mismatch (run 33883692192).
       'compat-vinext.yml': 2,
       'bun-sandbox-fetch-ab.yml': 1,
+      // The write-free runtime proof lane (dispatch-only): one setup-bun to
+      // build the workspace + compile the default bun runtime.
+      'write-free-runtime-kind-e2e.yml': 1,
       // NEW (#926): the npm publish lane installed with `pnpm install
       // --frozen-lockfile` against a repo with NO pnpm-lock.yaml, so every job
       // died at install. All three release.yml jobs now install with bun,

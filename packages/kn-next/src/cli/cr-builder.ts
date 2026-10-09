@@ -15,6 +15,9 @@ import {
     DEFAULT_RUNTIME_ID,
 } from "../adapters/artifact-contract";
 import type { KnativeNextConfig } from "../config";
+import type { WriteFreeFacts } from "./write-free";
+
+export type { WriteFreeFacts } from "./write-free";
 
 /**
  * PreviewInput is the optional per-PR preview descriptor (#91). When present,
@@ -56,6 +59,7 @@ export function buildNextAppCRObject(
     namespace: string,
     buildId?: string,
     preview?: PreviewInput,
+    writeFreeFacts?: WriteFreeFacts,
 ): Record<string, unknown> {
     // Scaling — preserve minScale:0 (scale-to-zero invariant)
     const minScale = config.scaling?.minScale ?? 0;
@@ -349,6 +353,33 @@ export function buildNextAppCRObject(
             ? true
             : undefined;
 
+    // spec.security.writeFree — the image this CLI just built writes nothing
+    // to local disk, so the operator can skip the emptyDir it would otherwise
+    // infer from the build shape (each one costs pod-sandbox setup on every
+    // cold wake). Emitted ONLY when the CLI built the image in this run
+    // (never for `--image` / `--skip-build`: it cannot vouch for an image it
+    // did not build) AND it changes the operator's decision — the operator
+    // mounts nothing for a no-storage standalone app already, so that CR
+    // (the default scaffold) stays byte-identical:
+    //   - vinext DISK-MODE binary: sharp loads from the image's read-only
+    //     `native/` tree. A self-contained vinext binary unpacks sharp into
+    //     $TMPDIR, so it never gets the field.
+    //   - standalone self-contained Bun executable: no native addons at all
+    //     (its planner refuses `.node` files), so nothing unpacks anywhere.
+    //   - standalone with spec.storage: only when the built config routes the
+    //     optimized-image cache through the knext cache handler
+    //     (`images.customCacheHandler`, read back from THIS build's output).
+    // #548 upgrade order: an operator CRD that predates the field rejects it
+    // under --validate=strict, and the deploy preflight reports it before the
+    // cluster is touched. Upgrade operator/CRD first, then CLI.
+    const writeFree =
+        writeFreeFacts?.builtThisRun === true &&
+        (resolvedBuild === "vinext"
+            ? !config.selfContained
+            : selfContained === true ||
+              (storage !== undefined &&
+                  writeFreeFacts.imageCacheRouted === true));
+
     // T2d — carry the deploy id into the POD's environment, not just into the
     // bundle. vinext resolves NEXT_DEPLOYMENT_ID at BUILD time (that is how the
     // `?dpl=` suffix and the `_next/static/<id>/` namespace get minted), so at
@@ -385,6 +416,20 @@ export function buildNextAppCRObject(
               }
             : undefined;
 
+    // spec.networking.visibility (#1865): the platform way to keep an app's
+    // Knative Route off the external gateway when it has mutating endpoints
+    // and no auth of its own. Emitted ONLY when explicitly "cluster-local" —
+    // never for "public"/absent, so a default config's CR stays
+    // byte-identical to every CR written before this field existed. #548
+    // upgrade order: an operator/CRD that predates this field rejects it
+    // under --validate=strict (every CLI apply passes that flag) and
+    // deploy's preflightCRSchema reports the unknown field before the
+    // cluster is touched. Upgrade operator/CRD first, then CLI.
+    const networking =
+        config.networking?.visibility === "cluster-local"
+            ? { visibility: "cluster-local" as const }
+            : undefined;
+
     const spec: Record<string, unknown> = {
         image,
         // #794/#952 private-registry pull secrets: config names Secrets, the CRD
@@ -417,6 +462,8 @@ export function buildNextAppCRObject(
         ...(runtime ? { runtime } : {}),
         ...(build ? { build } : {}),
         ...(selfContained ? { selfContained } : {}),
+        ...(writeFree ? { security: { writeFree: true } } : {}),
+        ...(networking ? { networking } : {}),
         // #93 skew protection: carry the deploy's BUILD_ID so the operator can stamp
         // the `apps.kn-next.dev/build-id` revision label the asset GC resolves against.
         ...(buildId ? { buildId } : {}),
@@ -455,6 +502,7 @@ export function renderNextAppCR(
     namespace: string,
     buildId?: string,
     preview?: PreviewInput,
+    writeFreeFacts?: WriteFreeFacts,
 ): string {
     const crObject = buildNextAppCRObject(
         config,
@@ -462,6 +510,7 @@ export function renderNextAppCR(
         namespace,
         buildId,
         preview,
+        writeFreeFacts,
     );
     return YAML.stringify(crObject);
 }

@@ -13,6 +13,7 @@ import {
     type RuntimeAdapter,
 } from "../adapters/artifact-contract";
 import type { KnativeNextConfig } from "../config";
+import { validateCompileConfig } from "./compile-config";
 
 // Storage providers with a real, tested upload/verify path in `asset-upload.ts`.
 // Kept in lock-step with the `StorageProvider` type (config.ts) and the
@@ -239,7 +240,15 @@ export function validateConfig(
     config: KnativeNextConfig,
     /** Test seam for the pairing check — see `checkPairing`. */
     contract: PairingContract = SHIPPED_CONTRACT,
+    /**
+     * `build` skips requirements that only matter at deploy time (the redis
+     * `cache.url`, which the scaffold supplies via REDIS_URL at deploy). The
+     * default is the strict `deploy` phase so every other caller keeps the
+     * full gate.
+     */
+    options: { phase?: "build" | "deploy" } = {},
 ): void {
+    const phase = options.phase ?? "deploy";
     const errors: string[] = [];
 
     // Removed keys first: if the author is working from a stale config, say so before
@@ -297,9 +306,15 @@ export function validateConfig(
                     `Omit 'cache' for the in-memory dev fallback.`,
             );
         }
-        if (cacheProvider === "redis" && !config.cache.url) {
+        if (
+            phase === "deploy" &&
+            cacheProvider === "redis" &&
+            !config.cache.url
+        ) {
             errors.push(
-                "'cache.url' is required when using Redis cache provider",
+                "'cache.url' is required when using Redis cache provider — " +
+                    "set REDIS_URL (or KN_REDIS_URL) in your environment when you run `knext deploy` " +
+                    "(it is not needed at build time)",
             );
         }
     }
@@ -349,6 +364,22 @@ export function validateConfig(
     ) {
         errors.push("'selfContained' must be a boolean (true or false)");
     }
+
+    // networking.visibility (#1865): must be exactly the enum value the CRD
+    // accepts — a typo here would otherwise surface only as a cluster-side
+    // admission rejection at deploy time instead of a local, fast config error.
+    if (
+        config.networking?.visibility !== undefined &&
+        config.networking.visibility !== "public" &&
+        config.networking.visibility !== "cluster-local"
+    ) {
+        errors.push(
+            `'networking.visibility' must be "public" or "cluster-local", got "${config.networking.visibility}"`,
+        );
+    }
+
+    // compile (extra files embedded in the compiled executable).
+    errors.push(...validateCompileConfig(config));
 
     // Runtime validation
     if (

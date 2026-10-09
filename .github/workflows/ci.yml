@@ -236,6 +236,11 @@ jobs:
       # file, in `coverage-bun/`, and it is the NUMERATOR of the coverage gate
       # below; `check-coverage.mjs` supplies the honest DENOMINATOR itself by
       # enumerating the source tree and folding untested files in at 0%.
+      # #1989: record the tree before the suite and fail if the suite leaves
+      # files in it (a test staging into the repo root instead of a temp dir).
+      - name: Snapshot working tree (before the suite)
+        run: node scripts/assert-tree-unchanged.mjs snapshot "$RUNNER_TEMP/tree-before.txt"
+
       - name: Run tests (bun — the suite)
         # Read-only default token, this step only: tests/upstream-retirement
         # verifies every cited upstream issue/PR against api.github.com and FAILS
@@ -243,6 +248,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: node scripts/bun-test.mjs --coverage
+
+      - name: Assert the suite left the working tree unchanged
+        run: node scripts/assert-tree-unchanged.mjs check "$RUNNER_TEMP/tree-before.txt"
 
       # The gate itself: merge the bun per-file lcov, add the 0% denominator, then
       # check the floors from scripts/lib/coverage-policy.mjs. It must run AFTER
@@ -572,7 +580,7 @@ jobs:
     # exists and invokes that file, so deleting the job reds that guard.
     name: SIGTERM drain (shipped standalone-on-bun image)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 35
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -670,6 +678,26 @@ jobs:
       # as a real fail-closed guarantee this step does not actually have.
       - name: Self-contained image (standalone-bun-self-contained) — build + boot + no-node_modules e2e
         run: node scripts/bun-test.mjs --no-skip packages/kn-next/src/__tests__/standalone-self-contained-image.docker-e2e.test.ts
+
+      # A REAL workspace monorepo (root package.json with workspaces, a shared
+      # package, an app that imports it) whose next.config sets the tracing root
+      # explicitly ABOVE the app, through the shipped `knext build`: the nested
+      # `.next/standalone/apps/web/server.js`, the traced workspace file outside
+      # the app dir, the compiled executable, and the supervisor on node and bun
+      # all serve the page. It also pins the other half with a real build: the
+      # same app WITHOUT the explicit root (Next infers it from the lockfile)
+      # still fails `knext build` with the real cause. Same no-skip contract;
+      # guarded by tests/standalone-drain-image-ci.test.ts.
+      - name: Monorepo root — knext build + nested server runs, accidental root still fails e2e
+        run: node scripts/bun-test.mjs --no-skip packages/kn-next/src/__tests__/monorepo-root.docker-e2e.test.ts
+
+      # The IMAGE for that layout: the Dockerfile.standalone `knext build` stages
+      # at the workspace root, built for standalone-bun and standalone-node and
+      # booted. The only proof the nested COPY paths, the executable's placement
+      # beside the nested server, the compile cache and the runtime cache link are
+      # right once Docker resolves them against a workspace-root build context.
+      - name: Monorepo root — standalone image (bun + node) builds and serves e2e
+        run: node scripts/bun-test.mjs --no-skip packages/kn-next/src/__tests__/monorepo-root-image.docker-e2e.test.ts
 
   # seam-alive gates: RETIRED (#885, stability sprint). The #352 defect class —
   # webpack layers duplicating @getknext/lib module state across the
@@ -1641,6 +1669,17 @@ jobs:
       # follow-up, in the sibling image.
       - name: vinext × node e2e — custom healthCheckPath build-arg (#1273)
         run: node scripts/bun-test.mjs packages/kn-next/src/__tests__/vinext-node-custom-health-path.docker-e2e.test.ts
+
+      # #1864 — the e2e above installs with `bun install --linker isolated`,
+      # which writes a bun.lock; `knext create`'s own documented install step
+      # is `npm install` (--runtime node included), and that path had no
+      # readable lockfile for the sharp native-addon fetch fallback at all
+      # before #1864's fix, so a `--runtime node` app following the
+      # documented steps failed the IMAGE BUILD ("Could not load the sharp
+      # module using the linuxmusl-x64 runtime"). npm ships with the Node
+      # setup above; no extra toolchain install needed.
+      - name: vinext × node e2e — npm install (not bun), sharp still loads (#1864)
+        run: node scripts/bun-test.mjs packages/kn-next/src/__tests__/vinext-node-npm-install-image.docker-e2e.test.ts
 
   # ---------------------------------------------------------------------------
   # The compile-cache diagnostic's Bun probe (#309).

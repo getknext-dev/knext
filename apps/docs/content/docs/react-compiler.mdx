@@ -1,11 +1,27 @@
 ---
 title: React Compiler
-description: An opt-in config change you make in your app — React Compiler optimizes client-side rendering memoization. It does not change server time, cold start, or any knext default.
+description: New knext apps have React Compiler on by default. It optimizes client-side rendering memoization and does not change server time or cold start. Here is what it writes, and how to turn it off.
 ---
 
 [React Compiler](https://react.dev/learn/react-compiler) is a build-time optimization for React
-itself. This page covers how to turn it on for a knext app, on every build target knext supports,
-and what it does and does not affect.
+itself. **Apps created with `knext create` have it on by default**, on every build target. This
+page covers what that scaffold writes, how to turn it off, how to add it to an app you created
+another way, and what it does and does not affect.
+
+## New apps: on by default
+
+`knext create` turns React Compiler on unless you say otherwise. On a terminal it asks
+"Enable React Compiler?", and Enter means yes. With `--yes`, in CI, or without a terminal, it is
+on.
+
+To create an app **without** it:
+
+```bash title="shell"
+knext create my-app --no-react-compiler
+```
+
+To turn it off in an app you already created, undo the two changes the scaffold made. The
+sections below list them for each target: delete the config line and uninstall the packages.
 
 ## What it does, and does not, affect
 
@@ -17,9 +33,9 @@ It does **not** change:
 - server response time — nothing it does runs on the server;
 - cold start — knext's cold start is dominated by pod scheduling and process boot, neither of
   which this touches (see [Scale to zero](/docs/scale-to-zero));
-- knext's build pipeline, runtime image, or any default. Enabling it is entirely a change inside
-  your app's own `next.config.ts` (or `vite.config.ts` on the vinext target) — knext's scaffold,
-  CLI, and CRD are unaware of it.
+- knext's build pipeline, runtime image, or deploy. It is entirely a setting inside your app's own
+  `next.config.ts` (or `vite.config.ts` on the vinext target). `knext create` writes that setting
+  for you, but the build, the runtime and the CRD do not depend on it either way.
 
 Verified working on every knext build target: the official adapter (`build: 'turbopack'` or
 `'webpack'`, either runtime) and the vinext target (either runtime) — six cells, each confirmed by
@@ -28,7 +44,8 @@ successful build.
 
 ## Official adapter target (`build: 'turbopack'` or `'webpack'`)
 
-Add `reactCompiler: true` to `next.config.ts`, and install the optional Babel plugin that
+A new app already has both of these. For an app you created another way, add
+`reactCompiler: true` to `next.config.ts`, and install the optional Babel plugin that
 performs the transform:
 
 ```ts title="next.config.ts"
@@ -52,7 +69,8 @@ Next's own documented behavior, not a knext limitation, and not something to wor
 
 ## vinext target (`build: 'vinext'`, Beta)
 
-On the [vinext build target](/docs/build-pipeline#the-vinext-pipeline), React Compiler is **not**
+A new vinext app already has the option and all four packages below. On the
+[vinext build target](/docs/build-pipeline#the-vinext-pipeline), React Compiler is **not**
 a `next.config.ts` key — vinext does not read `reactCompiler` from there. It is an option on
 vinext's own Vite plugin, in `vite.config.ts`:
 
@@ -77,8 +95,14 @@ Rolldown), and `@vitejs/plugin-react` 6.1's own required peer for the non-compil
 path it also uses:
 
 ```bash title="install"
-npm install -D @vitejs/plugin-react@^6.1.0 babel-plugin-react-compiler @rolldown/plugin-babel oxc-transform-react
+npm install -D @vitejs/plugin-react@6.1.2 babel-plugin-react-compiler @rolldown/plugin-babel oxc-transform-react@^0.152.0
 ```
+
+Keep `@vitejs/plugin-react` and `oxc-transform-react` in step. The plugin requires one specific
+`0.x` minor of `oxc-transform-react` and has changed which one in patch releases, so a range on
+the plugin can pull in a version whose requirement no longer matches, and `npm install` then fails
+with an `ERESOLVE` peer dependency error. New apps from `knext create --builder vinext` pin the
+plugin exactly for this reason. If an existing app hits that error, set both to the versions above.
 
 Leaving out `oxc-transform-react` fails the build outright (not a silent no-op): `@vitejs/plugin-react`
 errors with "React Compiler requires the optional `oxc-transform-react` package" the moment

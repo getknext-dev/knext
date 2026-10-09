@@ -429,6 +429,27 @@ export const REGISTRY: RetirementEntry[] = [
     },
   },
   {
+    id: 'bun-patched-toolchain',
+    upstream: 'oven-sh/bun#44059',
+    upstreamTitle: '--include embeds extra files',
+    issue: '#1822',
+    kind: 'shim',
+    shape: 'both',
+    against: 'bun',
+    // The opt-in `compile: { bun: 'knext-patched' }` toolchain exists ONLY
+    // because stock Bun has no `--compile --include`. Retire it — delete
+    // deploy/bun-patched/, packages/kn-next/src/cli/bun-toolchain.ts, the
+    // `compile.bun` option and this entry — once a stock Bun release ships
+    // oven-sh/bun#44059. Same oracle as `embed-extra-entrypoints` (with its
+    // controls), run against the stock Bun on PATH: red as soon as ANY landing
+    // shape embeds, so a CLI-only landing is not missed.
+    repro: async () => {
+      const detected = await detectCompileInclude();
+      if (!detected.conclusive) inconclusive('bun-patched-toolchain', detected.evidence);
+      return { stillBroken: !detected.landed, evidence: detected.evidence };
+    },
+  },
+  {
     id: 'bun-cjs-dirname-inlined',
     upstream: 'oven-sh/bun#44068',
     upstreamTitle: '__dirname/__filename in an included CommonJS entrypoint are inlined',

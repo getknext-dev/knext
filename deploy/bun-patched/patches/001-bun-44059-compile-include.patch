@@ -1,0 +1,1331 @@
+From 8b9ef8f4996ad4fea04677f249f7800f177d46a9 Mon Sep 17 00:00:00 2001
+From: Ahmed ElBanna <AhmedElBanna80@users.noreply.github.com>
+Date: Fri, 2 Oct 2026 00:00:00 +0000
+Subject: [PATCH] compile: --include embeds extra files as lazily loaded
+ modules
+
+Backport of oven-sh/bun#44059 (feat/compile-include, head 903936e16a6b) onto bun-v1.4.2
+(744846f844374847c902b5e7fd59b4342a51ef99). The 17 non-merge commits of the PR, cherry-picked
+in order with no conflicts and squashed into this one patch:
+
+  97fe149d2d6df58f8b6911e5d2ca6feb0a3fe523 feat(compile): --include embeds extra files as lazily loaded modules (#11732)
+  1792671ccbb1b9e64b154129f0a4304bbc1356f9 fix(compile): --include glob walk from its literal prefix, reject html-only browser target, fix bytecode test
+  9dd0172565ebd606514a43e62e3ef8ed93602057 feat(compile): Bun.build compile.include, bun-types, docs; make every include test discriminate
+  37b26813d5c4621a9a103633e80d2a7f0d3ef127 test(compile): delete the build directory before running so included modules must resolve from the executable
+  00d4c528af6f7822a9916bfc3c9b57defb76bf2b test(compile): resolve the bytecode case relative to the module, not import.meta.dirname
+  7714079e59feabfe2ea79ac13ddf668c726c337b compile --include: treat backslashes in a glob as separators on Windows
+  368dd293858a23d364fd1da5548c5517d223c16a fix(compile --include): normalize backslashes before metachar scan, reject absolute patterns
+  b0d0fbadce547222d2809ae21b0c73a12fa44710 compile --include: scope the drive-path check to Windows; restore test formatting, assert exact error text, gate Windows cases with skipIf
+  3dfa9390c83258791f2f0e0f9b96904b0e78c5af test(compile --include): run the executable in the colon-path case so it fails without the feature
+  1b1370d9afef5172321d87e108706caa792bc580 test(compile --include): cover the bare c:d pattern (relative off Windows, drive-relative rejected on Windows)
+  367b568bc8a53b163c2292fa26fdd89b0098f598 compile --include: normalize the pattern before validating so a doubled slash after ./ cannot resolve outside the cwd
+  6f9d4b2729911f9ea74477968771b04802b6949c compile --include: reject a pattern whose .. climbs above cwd, allow one that nets back inside it
+  d1922ce77c6627a645a00e1fec70d2c468555707 compile --include: reject --target browser regardless of entrypoint html-ness
+  29e410cae4cba16bbf60f6a247972421f92cb57a compile.include (JS API): require an explicit entrypoint
+  244922f76f087050e86fcd8503e9669992c24541 compile.include (JS API): fix two mistakes in the last two commits
+  9145b7a70d61d58ef5c711675f5e831b62f3edc5 compile.include (JS API): also reject an unset target when every entrypoint is .html
+  903936e16a6b766af3e6ee92860ce93c5e12b529 compile --include: drop unreachable CLI check, document target conflict in bun-types
+
+Upstream: oven-sh/bun#44059
+knext-shim: bun-patched-toolchain
+---
+ docs/bundler/executables.mdx         |  40 ++
+ packages/bun-types/bun.d.ts          |  31 ++
+ src/options_types/context.rs         |   6 +
+ src/runtime/api/JSBundler.rs         |  60 +++
+ src/runtime/cli/Arguments.rs         |  14 +
+ src/runtime/cli/build_command.rs     | 329 +++++++++++++
+ test/bundler/compile-include.test.ts | 710 +++++++++++++++++++++++++++
+ 7 files changed, 1190 insertions(+)
+ create mode 100644 test/bundler/compile-include.test.ts
+
+diff --git a/docs/bundler/executables.mdx b/docs/bundler/executables.mdx
+index 80d19ef7ea..2a844855e5 100644
+--- a/docs/bundler/executables.mdx
++++ b/docs/bundler/executables.mdx
+@@ -847,6 +847,46 @@ const html = await Bun.file(path.join(publicDir, "index.html")).text();
+ 
+ Pass `--asset` multiple times to embed several directories (for example `--asset ./client --asset ./prerendered` for a SvelteKit build). Bun embeds only regular files; it skips symlinks and empty subdirectories inside the tree.
+ 
++### Embed lazily loaded modules
++
++`--asset` embeds raw bytes. You read an embedded file with `fs` or `Bun.file()`, and Bun never runs it as code. Use `--include` to embed a file as a **module** instead. Bun transpiles it like any imported file (and compiles it to bytecode with `--bytecode`), so a *computed* `import()` or `require()` can load it at runtime, even though the bundler cannot see the specifier at build time.
++
++This matters for plugin-style code, where the module name is only known at runtime:
++
++```ts index.ts icon="/icons/typescript.svg"
++import { join } from "node:path";
++
++const pluginName = process.argv[2]; // not knowable at build time
++const plugin = await import(join(import.meta.dirname, "plugins", `${pluginName}.js`));
++```
++
++<CodeGroup>
++
++```bash terminal icon="terminal"
++bun build --compile ./index.ts --include ./plugins --outfile myapp
++```
++
++```ts build.ts icon="/icons/typescript.svg"
++await Bun.build({
++  entrypoints: ["./index.ts"],
++  compile: { outfile: "myapp", include: ["./plugins"] },
++});
++```
++
++</CodeGroup>
++
++Bun embeds an included file under its path relative to the current directory, unchanged. (`--asset` roots a directory at its own basename instead.) That is why `import.meta.dirname` plus a relative path finds it.
++
++- A directory includes every file below it.
++- An argument with `*`, `?`, `[`, or `{` is a glob. Bun walks only the directory named by the glob's literal leading segments. `./plugins/*.js` walks `plugins`, not the whole project. Bun skips `node_modules` and `.git`, and fails if the glob matches nothing.
++- Anything else is a single file.
++
++Pass `--include` more than once to mix files, directories, and globs.
++
++An included file does not run when the executable starts. It runs only when something imports it. If nothing imports it, its top-level code never runs.
++
++`--include` requires `--compile` and does not combine with `--target=browser`. It is independent of `--asset`: use `--asset` for data you read and `--include` for code you load on demand.
++
+ You can also embed individual files via the `with { type: "file" }` import attribute or, for files that use the `file` loader (images, fonts, and so on) as well as `.wasm` and `.node` files, by adding them as extra entry points. Bun renames imported assets according to `--asset-naming` (default `[name]-[hash].[ext]`):
+ 
+ ```ts
+diff --git a/packages/bun-types/bun.d.ts b/packages/bun-types/bun.d.ts
+index 0d36f8b3cf..3bdb573f52 100644
+--- a/packages/bun-types/bun.d.ts
++++ b/packages/bun-types/bun.d.ts
+@@ -3680,6 +3680,37 @@ declare module "bun" {
+      * Equivalent CLI flag: `--asset` (repeatable)
+      */
+     assets?: string[];
++    /**
++     * Files, directories, or globs to embed into the executable as lazily
++     * loaded modules. Unlike `assets`, which embeds raw bytes, an included file
++     * is transpiled like an entry point, so a computed `import()` at runtime
++     * can load it. It does not run until something imports it.
++     *
++     * - A directory includes every file below it.
++     * - A pattern containing `*`, `?`, `[` or `{` is a glob. It walks only the
++     *   directory named by the pattern's literal leading path segments, and
++     *   throws if it matches nothing.
++     * - Anything else is a single file.
++     *
++     * Paths are relative to the current working directory and keep their
++     * relative path under `$bunfs`, so `import(join(import.meta.dirname, "plugins/a.js"))`
++     * finds `plugins/a.js`.
++     *
++     * Requires `compile` and does not combine with `target: "browser"`. It is
++     * independent of `assets`: use `assets` for data you read and `include`
++     * for code you load on demand.
++     *
++     * Equivalent CLI flag: `--include` (repeatable)
++     *
++     * @example
++     * ```ts
++     * await Bun.build({
++     *   entrypoints: ["./index.ts"],
++     *   compile: { outfile: "app", include: ["./plugins", "./handlers/*.js"] },
++     * });
++     * ```
++     */
++    include?: string[];
+     /**
+      * Whether the standalone executable loads .env files when it runs
+      *
+diff --git a/src/options_types/context.rs b/src/options_types/context.rs
+index 76ed4c6a68..340d63850c 100644
+--- a/src/options_types/context.rs
++++ b/src/options_types/context.rs
+@@ -235,6 +235,11 @@ pub struct BundlerOptions {
+     pub compile_autoload_package_json: bool,
+     pub compile_executable_path: Option<Box<[u8]>>,
+     pub compile_assets: Vec<Box<[u8]>>,
++    /// `--include <path|glob>`: raw, unexpanded arguments. Expanded into extra
++    /// bundler entry points (directory recursion / glob matching happens against
++    /// the real filesystem, so it can't happen here in the pure CLI-parsing layer)
++    /// by `build_command::expand_compile_includes`.
++    pub compile_include: Vec<Box<[u8]>>,
+     pub windows: bundle_enums::WindowsOptions,
+     pub allow_unresolved: Option<Vec<Box<[u8]>>>,
+ }
+@@ -291,6 +296,7 @@ impl Default for BundlerOptions {
+             compile_autoload_package_json: false,
+             compile_executable_path: None,
+             compile_assets: Vec::new(),
++            compile_include: Vec::new(),
+             windows: bundle_enums::WindowsOptions::default(),
+             allow_unresolved: None,
+         }
+diff --git a/src/runtime/api/JSBundler.rs b/src/runtime/api/JSBundler.rs
+index a352831363..171dacf778 100644
+--- a/src/runtime/api/JSBundler.rs
++++ b/src/runtime/api/JSBundler.rs
+@@ -865,6 +865,66 @@ pub mod js_bundler {
+                 )));
+             }
+ 
++            // `compile.include`: expanded here, before the root directory is derived
++            // from the entry points below, so included files are ordinary entries.
++            if let Some(compile_value) = config.get_truthy(global_this, "compile")? {
++                if compile_value.is_object() {
++                    if let Some(include) = compile_value.get_own_array(global_this, "include")? {
++                        let mut patterns: Vec<Box<[u8]>> = Vec::new();
++                        let mut iter = include.array_iterator(global_this)?;
++                        while let Some(arg) = iter.next()? {
++                            let slice = arg.to_utf8(global_this)?;
++                            patterns.push(Box::from(slice.slice()));
++                        }
++                        if !patterns.is_empty() {
++                            // `include` is a Bun-executable feature (lazily-loaded modules
++                            // resolved by a runtime `import()`); it never produces a
++                            // standalone HTML build, regardless of what the entrypoints
++                            // happen to look like right now — checking only the
++                            // then-current entry points let a non-HTML entrypoint list
++                            // slip past this guard. `target` defaults to `Browser` when
++                            // unset, so this must gate on `did_set_target` too, or every
++                            // include build without an explicit `target` (the common case)
++                            // would be rejected. But an *unset* target still infers
++                            // `Browser` further down (`is_standalone_html`, below) whenever
++                            // every entrypoint happens to be `.html` — so that case must be
++                            // rejected too, or a no-target, all-HTML build with an `.html`
++                            // include silently becomes standalone HTML with the include
++                            // bundled eagerly instead of rejected.
++                            let all_html_entrypoints = 'brk: {
++                                if this.entry_points.count() == 0 {
++                                    break 'brk false;
++                                }
++                                for ep in this.entry_points.keys() {
++                                    if !ep.ends_with(b".html") {
++                                        break 'brk false;
++                                    }
++                                }
++                                true
++                            };
++                            if this.target == Target::Browser
++                                && (did_set_target || all_html_entrypoints)
++                            {
++                                return Err(global_this.throw_invalid_arguments(format_args!(
++                                    "Cannot use compile.include with target 'browser'"
++                                )));
++                            }
++                            match crate::cli::build_command::expand_compile_includes(&patterns) {
++                                Ok(extra) => {
++                                    for path in extra.iter() {
++                                        this.entry_points.insert(path)?;
++                                    }
++                                }
++                                Err(msg) => {
++                                    return Err(global_this
++                                        .throw_invalid_arguments(format_args!("{}", msg)));
++                                }
++                            }
++                        }
++                    }
++                }
++            }
++
+             // Parse the files option for in-memory files
+             if let Some(files_obj) = config.get_own_object(global_this, "files")? {
+                 this.files = file_map_from_js(global_this, JSValue::from_cell(files_obj))?;
+diff --git a/src/runtime/cli/Arguments.rs b/src/runtime/cli/Arguments.rs
+index 8ed18c929d..60e15544c7 100644
+--- a/src/runtime/cli/Arguments.rs
++++ b/src/runtime/cli/Arguments.rs
+@@ -429,6 +429,9 @@ pub(crate) const BUILD_ONLY_PARAMS: &[ParamType] = concat_params!(
+         parse_param!(
+             "--asset <STR>...                 Embed a file or directory into the compiled executable, preserving its relative path (requires --compile)"
+         ),
++        parse_param!(
++            "--include <STR>...               Embed a file, directory, or glob as a lazily loaded module in the compiled executable, preserving its relative path (requires --compile)"
++        ),
+         parse_param!("--bytecode                       Use a bytecode cache"),
+         parse_param!(
+             "--bytecode-depth <NUMBER>        How many levels of nested functions to compile to bytecode ahead of time. Defaults to all"
+@@ -2251,6 +2254,17 @@ fn parse_build_command_options(
+         }
+     }
+ 
++    {
++        let includes = args.options(b"--include");
++        if !includes.is_empty() {
++            if !ctx.bundler_options.compile {
++                Output::err_generic("--include requires --compile", ());
++                Global::crash();
++            }
++            ctx.bundler_options.compile_include = slice_to_owned(includes);
++        }
++    }
++
+     // Handle --compile-autoload-dotenv flags
+     {
+         let has_positive = args.flag(b"--compile-autoload-dotenv");
+diff --git a/src/runtime/cli/build_command.rs b/src/runtime/cli/build_command.rs
+index a175206c57..1a37f22551 100644
+--- a/src/runtime/cli/build_command.rs
++++ b/src/runtime/cli/build_command.rs
+@@ -140,6 +140,46 @@ impl BuildCommand {
+             this_transpiler.options.ignore_module_resolution_errors = true;
+         }
+ 
++        // `--include`: expand path/dir/glob arguments against the real filesystem
++        // and append the results to `entry_points`, *before* `first_entry_point`
++        // (below) is captured, so an included file can never become entry 0 (the
++        // module the executable runs at startup) and so root-dir / naming
++        // computed later from `entry_points` already accounts for them. This
++        // reuses the existing multiple-entry-point machinery end to end: each
++        // included file gets a normal `OutputKind::EntryPoint` chunk (parsed,
++        // resolved, bundled, optionally bytecode-compiled) that the standalone
++        // graph writer embeds under `$bunfs` with its path preserved — see
++        // `StandaloneModuleGraph::compile`, which picks exactly one file (the
++        // first `EntryPoint`-kind output) as `entry_point_id`, the module that
++        // actually runs when the executable starts. Every other embedded
++        // `EntryPoint`/`Chunk` output — additional user-specified entries today,
++        // included files with this change — sits in the graph unexecuted until
++        // something (e.g. a computed `import()`) resolves its path at runtime.
++        if ctx.bundler_options.compile && !ctx.bundler_options.compile_include.is_empty() {
++            // `--include` is a Bun-executable feature; it never produces a standalone
++            // HTML build. Reject on the requested target alone — gating on the
++            // then-current entrypoints (as before) let a non-HTML `--target=browser`
++            // entry slip past silently into a plain Bun-target compile below.
++            if user_requested_browser_target {
++                bun_core::pretty_errorln!(
++                    "<r><red>error<r><d>:<r> cannot use --compile --target browser with --include"
++                );
++                Global::exit(1);
++            }
++            match expand_compile_includes(&ctx.bundler_options.compile_include) {
++                Ok(mut extra) => {
++                    let existing = core::mem::take(&mut this_transpiler.options.entry_points);
++                    let mut entry_points: Vec<Box<[u8]>> = Vec::from(existing);
++                    entry_points.append(&mut extra);
++                    this_transpiler.options.entry_points = entry_points.into_boxed_slice();
++                }
++                Err(msg) => {
++                    bun_core::pretty_errorln!("<r><red>error<r><d>:<r> {}", msg);
++                    Global::exit(1);
++                }
++            }
++        }
++
+         // Note: clone the first entry point so `outfile` can borrow owned
+         // storage instead of `this_transpiler.options.entry_points[0]`, which
+         // would otherwise hold an immutable borrow of `this_transpiler` across
+@@ -293,6 +333,12 @@ impl BuildCommand {
+                     );
+                     Global::exit(1);
+                 }
++                // Note: no `--include` check is needed here. This branch only runs when
++                // `user_requested_browser_target` is true, but the guard above (around
++                // `user_requested_browser_target { ... Global::exit(1) }`, before
++                // `expand_compile_includes`) already exits whenever `--include` is
++                // non-empty and the user requested `--target=browser`, so
++                // `compile_include` is always empty by the time we get here.
+ 
+                 // This is not a bun executable compile - clear compile flags
+                 this_transpiler.options.compile_mode = options::CompileMode::StandaloneHtml;
+@@ -1270,6 +1316,289 @@ fn print_summary(
+     bun_core::prettyln!("  <green>bundle<r>  {} modules", reachable_file_count);
+ }
+ 
++/// `--include <path|glob>`: expand each raw argument into concrete file paths
++/// against the real filesystem (a directory expands recursively; an argument
++/// containing a glob metacharacter — `*`, `?`, `[`, `{` — is matched with
++/// `bun_glob` against every file under the cwd, same matcher `test_command.rs`
++/// and `pm_diff_command.rs` already use for CLI-supplied patterns; anything
++/// else is a literal path). The result is meant to be appended to the
++/// bundler's `entry_points`, *not* collected the way `collect_compile_assets`
++/// collects `--asset`: an include is a module (parsed, resolved, bundled,
++/// optionally bytecode-compiled — everything an entry point already gets),
++/// not raw bytes, and unlike an asset's dest path (which is rooted at the
++/// asset argument's own basename, discarding any parent directories) an
++/// include's path is preserved in full relative to the cwd, because that is
++/// what makes a computed `import(join(import.meta.dirname, "…"))` elsewhere
++/// in the included file's own directory tree resolve correctly.
++pub(crate) fn expand_compile_includes(includes: &[Box<[u8]>]) -> Result<Vec<Box<[u8]>>, String> {
++    use bun_sys::EntryKind;
++
++    #[cfg(not(windows))]
++    const GLOB_SKIP_DIRS: &[&bun_paths::OSPathSlice] = &[b"node_modules", b".git"];
++    #[cfg(windows)]
++    const GLOB_SKIP_DIRS: &[&bun_paths::OSPathSlice] =
++        &[bun_core::w!("node_modules"), bun_core::w!(".git")];
++
++    fn has_glob_metachar(p: &[u8]) -> bool {
++        p.iter()
++            .any(|&b| matches!(b, b'*' | b'?' | b'[' | b'{'))
++    }
++
++    fn trim_trailing_slashes(p: &[u8]) -> &[u8] {
++        let mut a = p;
++        while matches!(a.last(), Some(b'/') | Some(b'\\')) {
++            a = &a[..a.len() - 1];
++        }
++        a
++    }
++
++    let fail = |path: &[u8], err: bun_sys::Error| -> String {
++        format!(
++            "failed to read --include path {}: {}",
++            bun_fmt::quote(path),
++            err.with_path(path),
++        )
++    };
++
++    let cwd = Fd::cwd();
++    let mut out: Vec<Box<[u8]>> = Vec::new();
++    let mut zbuf = bun_paths::path_buffer_pool::get();
++
++    for include in includes {
++        let trimmed = trim_trailing_slashes(include);
++        if trimmed.is_empty() {
++            return Err("--include argument must not be empty".to_string());
++        }
++
++        // Normalize Windows backslashes to forward slashes before scanning for metacharacters
++        // so path separators aren't interpreted as escapes in the glob metachar detection.
++        #[cfg(windows)]
++        let normalized: Vec<u8> = trimmed
++            .iter()
++            .map(|&b| if b == b'\\' { b'/' } else { b })
++            .collect();
++        #[cfg(windows)]
++        let to_check: &[u8] = &normalized;
++        #[cfg(not(windows))]
++        let to_check: &[u8] = trimmed;
++
++        // Normalize before validating: collapse repeated slashes (`.//x` is `./x`) and drop
++        // leading `./` components, so every branch below sees the same cwd-relative path and
++        // a pattern that only looks relative (`.//tmp/*.js`) cannot turn absolute once its
++        // `./` prefix is removed.
++        let mut norm: Vec<u8> = Vec::with_capacity(to_check.len());
++        for &b in to_check {
++            if b == b'/' && norm.last() == Some(&b'/') {
++                continue;
++            }
++            norm.push(b);
++        }
++        while norm.len() > 2 && norm.starts_with(b"./") {
++            norm.drain(..2);
++        }
++        let norm: &[u8] = &norm;
++
++        // Patterns are relative to the cwd. `:` only makes a drive path on Windows.
++        #[cfg(windows)]
++        let is_absolute = norm.starts_with(b"/")
++            || (norm.len() > 1 && norm[0].is_ascii_alphabetic() && norm[1] == b':');
++        #[cfg(not(windows))]
++        let is_absolute = norm.starts_with(b"/");
++        if is_absolute {
++            return Err(format!(
++                "--include pattern {} must be relative to cwd",
++                bun_fmt::quote(trimmed),
++            ));
++        }
++
++        // `..` is allowed when it nets to a path inside the cwd (`a/../b.js` is just `b.js`),
++        // but rejected the moment it would climb above the cwd itself (`../x`, `a/../../x`) —
++        // that is exactly the "relative to cwd" contract this function documents, applied to
++        // `..` the same way it is already applied to a leading `/`. Track depth across the
++        // normalized components so this one check covers all three branches below: the literal
++        // path, the recursive directory, and the glob's literal prefix (a metachar component
++        // only ever increases depth, so it can't hide a later escape).
++        let mut depth: i32 = 0;
++        let mut escapes_cwd = false;
++        for part in norm.split(|&b| b == b'/') {
++            match part {
++                b".." => {
++                    if depth == 0 {
++                        escapes_cwd = true;
++                        break;
++                    }
++                    depth -= 1;
++                }
++                b"." | b"" => {}
++                _ => depth += 1,
++            }
++        }
++        if escapes_cwd {
++            return Err(format!(
++                "--include pattern {} must not escape cwd",
++                bun_fmt::quote(trimmed),
++            ));
++        }
++
++        if has_glob_metachar(norm) {
++            // Walk only the glob's literal leading directories (`./a/b/*.js` walks
++            // `a/b`, not the whole cwd); the normalized pattern has no leading `./`.
++            let pattern: &[u8] = norm;
++            let mut prefix_len = 0usize;
++            let mut pos = 0usize;
++            for part in pattern.split(|&c| c == b'/') {
++                if has_glob_metachar(part) || pos + part.len() >= pattern.len() {
++                    break;
++                }
++                pos += part.len() + 1;
++                prefix_len = pos;
++            }
++            let prefix = &pattern[..prefix_len.saturating_sub(1)];
++            let walk_dir = match bun_sys::open_dir_for_iteration(
++                cwd,
++                if prefix.is_empty() { b"." } else { prefix },
++            ) {
++                Ok(d) => d,
++                Err(e) => return Err(fail(trimmed, e)),
++            };
++            let _close = scopeguard::guard(walk_dir, |fd| fd.close());
++            let mut walker = match bun_sys::walker_skippable::walk(walk_dir, &[], GLOB_SKIP_DIRS) {
++                Ok(w) => w,
++                Err(_) => bun_core::out_of_memory(),
++            };
++            walker.resolve_unknown_entry_types = true;
++            let mut matched = 0usize;
++            loop {
++                let entry = match walker.next() {
++                    Ok(Some(e)) => e,
++                    Ok(None) => break,
++                    Err(e) => return Err(fail(trimmed, e)),
++                };
++                if entry.kind != EntryKind::File {
++                    continue;
++                }
++                #[cfg(windows)]
++                let rel: Vec<u8> = {
++                    let mut rel_buf = bun_paths::path_buffer_pool::get();
++                    let rel_z = bun_paths::string_paths::from_w_path(
++                        &mut rel_buf[..],
++                        entry.path.as_slice(),
++                    );
++                    let mut rel = rel_z.as_bytes().to_vec();
++                    for b in rel.iter_mut() {
++                        if *b == b'\\' {
++                            *b = b'/';
++                        }
++                    }
++                    rel
++                };
++                #[cfg(not(windows))]
++                let rel: Vec<u8> = entry.path.as_bytes().to_vec();
++
++                let full: Vec<u8> = if prefix.is_empty() {
++                    rel
++                } else {
++                    let mut f = Vec::with_capacity(prefix.len() + 1 + rel.len());
++                    f.extend_from_slice(prefix);
++                    f.push(b'/');
++                    f.extend_from_slice(&rel);
++                    f
++                };
++                if bun_glob::r#match(pattern, &full).matches() {
++                    out.push(full.into_boxed_slice());
++                    matched += 1;
++                }
++            }
++            if matched == 0 {
++                return Err(format!(
++                    "--include glob {} matched no files",
++                    bun_fmt::quote(trimmed),
++                ));
++            }
++            continue;
++        }
++
++        if norm.len() >= zbuf.len() {
++            return Err(fail(
++                trimmed,
++                bun_sys::Error::from_code(bun_sys::E::ENAMETOOLONG, bun_sys::Tag::open),
++            ));
++        }
++        let n = norm.len();
++        zbuf[..n].copy_from_slice(norm);
++        zbuf[n] = 0;
++        let trimmed_z = bun_core::ZStr::from_buf(&zbuf[..], n);
++
++        let st = match bun_sys::stat(trimmed_z) {
++            Ok(st) => st,
++            Err(e) => return Err(fail(trimmed, e)),
++        };
++
++        if bun_core::S::ISDIR(st.st_mode as _) {
++            let dir = match bun_sys::open_dir_for_iteration(cwd, norm) {
++                Ok(d) => d,
++                Err(e) => return Err(fail(trimmed, e)),
++            };
++            let _close = scopeguard::guard(dir, |fd| fd.close());
++            let mut walker = match bun_sys::walker_skippable::walk(dir, &[], &[]) {
++                Ok(w) => w,
++                Err(_) => bun_core::out_of_memory(),
++            };
++            walker.resolve_unknown_entry_types = true;
++            let mut any = false;
++            loop {
++                let entry = match walker.next() {
++                    Ok(Some(e)) => e,
++                    Ok(None) => break,
++                    Err(e) => return Err(fail(trimmed, e)),
++                };
++                if entry.kind != EntryKind::File {
++                    continue;
++                }
++                #[cfg(windows)]
++                let rel: Vec<u8> = {
++                    let mut rel_buf = bun_paths::path_buffer_pool::get();
++                    let rel_z = bun_paths::string_paths::from_w_path(
++                        &mut rel_buf[..],
++                        entry.path.as_slice(),
++                    );
++                    let mut rel = rel_z.as_bytes().to_vec();
++                    for b in rel.iter_mut() {
++                        if *b == b'\\' {
++                            *b = b'/';
++                        }
++                    }
++                    rel
++                };
++                #[cfg(not(windows))]
++                let rel: Vec<u8> = entry.path.as_bytes().to_vec();
++
++                let mut dest = Vec::with_capacity(norm.len() + 1 + rel.len());
++                dest.extend_from_slice(norm);
++                dest.push(b'/');
++                dest.extend_from_slice(&rel);
++                out.push(dest.into_boxed_slice());
++                any = true;
++            }
++            if !any {
++                return Err(format!(
++                    "--include directory {} contains no files",
++                    bun_fmt::quote(trimmed),
++                ));
++            }
++        } else if bun_core::S::ISREG(st.st_mode as _) {
++            out.push(norm.to_vec().into_boxed_slice());
++        } else {
++            return Err(format!(
++                "--include {} is not a regular file, directory, or glob",
++                bun_fmt::quote(trimmed),
++            ));
++        }
++    }
++
++    Ok(out)
++}
++
+ pub(crate) fn collect_compile_assets(
+     assets: &[Box<[u8]>],
+     outfile: &[u8],
+diff --git a/test/bundler/compile-include.test.ts b/test/bundler/compile-include.test.ts
+new file mode 100644
+index 0000000000..9c5c5fda2d
+--- /dev/null
++++ b/test/bundler/compile-include.test.ts
+@@ -0,0 +1,710 @@
++// https://github.com/oven-sh/bun/issues/11732
++//
++// `--include <path|glob>` / `Bun.build({ compile: { include } })` embed extra files in a
++// `--compile` executable as lazily loaded MODULES (transpiled, resolvable by a computed
++// `import()`), distinct from `--asset` (raw bytes, read via `fs`/`Bun.file`, tested in
++// compile-asset-bunfs.test.ts). See docs/bundler/executables.mdx.
++import { describe, expect, test } from "bun:test";
++import { readdirSync, rmSync } from "fs";
++import { bunEnv, bunExe, isWindows, tempDir } from "harness";
++import { join } from "path";
++
++// `bun build --compile` copies + rewrites the whole bun binary (~1GB under
++// debug+ASAN), which blows the 5s default.
++const TIMEOUT = 60_000;
++const exe = process.platform === "win32" ? ".exe" : "";
++
++type Via = "cli" | "api";
++const vias: Via[] = ["cli", "api"];
++
++async function spawnCapture(cmd: string[], cwd: string) {
++  await using proc = Bun.spawn({ cmd, cwd, env: bunEnv, stdout: "pipe", stderr: "pipe" });
++  const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
++  return { stdout, stderr, exitCode };
++}
++
++// Builds `entries` into ./app through the CLI flag or through Bun.build. Returns the
++// failure text (empty on success) so rejection tests and success tests share one path.
++// `opts.target` lets a caller pin a non-default compile target (F2: an explicit
++// non-browser target must keep `compile.include` working, same as no target at all).
++async function buildEntries(
++  dir: string,
++  via: Via,
++  entries: string[],
++  include: string[],
++  opts: { bytecode?: boolean; target?: string } = {},
++) {
++  if (via === "cli") {
++    const args = include.map(p => `--include=${p}`);
++    if (opts.bytecode) args.push("--bytecode");
++    if (opts.target) args.push(`--target=${opts.target}`);
++    const { stderr, exitCode } = await spawnCapture(
++      [bunExe(), "build", "--compile", ...entries, "--outfile", "app", ...args],
++      dir,
++    );
++    return { failed: exitCode !== 0, message: stderr };
++  }
++  const script = /* js */ `
++    try {
++      const r = await Bun.build({
++        entrypoints: ${JSON.stringify(entries)},
++        bytecode: ${!!opts.bytecode},
++        ${opts.target ? `target: ${JSON.stringify(opts.target)},` : ""}
++        compile: { outfile: "app", include: ${JSON.stringify(include)} },
++      });
++      console.log(JSON.stringify({ failed: !r.success, message: r.logs.map(String).join("\\n") }));
++    } catch (e) {
++      console.log(JSON.stringify({ failed: true, message: String(e?.message ?? e) + (e?.errors ?? []).map(String).join("\\n") }));
++    }
++  `;
++  const { stdout } = await spawnCapture([bunExe(), "-e", script], dir);
++  return JSON.parse(stdout.trim());
++}
++
++async function build(dir: string, via: Via, include: string[], opts: { bytecode?: boolean; target?: string } = {}) {
++  return buildEntries(dir, via, ["./index.ts"], include, opts);
++}
++
++async function run(dir: string) {
++  // Delete every source file: an included module must resolve from the executable,
++  // never from the build directory (bytecode builds record it as import.meta.dirname).
++  for (const name of readdirSync(dir)) {
++    if (name !== "app" + exe) rmSync(join(dir, name), { recursive: true, force: true });
++  }
++  // cwd outside the build dir so the binary cannot accidentally find real files on disk
++  // (that gap is #44053 — an --external/bare-specifier resolution issue, not this feature;
++  // an --include'd module must resolve purely from $bunfs).
++  return spawnCapture(
++    [join(dir, "app" + exe)],
++    process.platform === "win32" ? process.env.TEMP || "C:\\Windows\\Temp" : "/tmp",
++  );
++}
++
++describe.concurrent("compile include", () => {
++  describe.each(vias)("via %s", via => {
++    test(
++      "a computed import() of an included directory resolves from $bunfs, and its module does not run at startup",
++      async () => {
++        using dir = tempDir(`compile-include-basic-${via}`, {
++          "index.ts": /* ts */ `
++            import { join } from "path";
++            const name = "target";
++            // Built from a runtime string, so the bundler cannot follow it statically.
++            const mod = await import(join(import.meta.dirname, "plugins", name + ".js"));
++            console.log(JSON.stringify({ value: mod.default, sawMarker: globalThis.__marker === true }));
++          `,
++          "plugins/target.js": /* js */ `
++            globalThis.__marker = true;
++            export default "included-value";
++          `,
++        });
++
++        const built = await build(String(dir), via, ["./plugins"]);
++        expect(built).toEqual({ failed: false, message: expect.any(String) });
++        const { stdout, stderr, exitCode } = await run(String(dir));
++        expect(stderr.trim()).toBe("");
++        // The marker is observed after import() evaluated the module, so it only proves
++        // the module ran; "not at startup" is the next test.
++        expect(JSON.parse(stdout.trim())).toEqual({ value: "included-value", sawMarker: true });
++        expect(exitCode).toBe(0);
++      },
++      TIMEOUT,
++    );
++
++    test(
++      "an included module is not executed unless something imports it",
++      async () => {
++        using dir = tempDir(`compile-include-not-eager-${via}`, {
++          "index.ts": /* ts */ `
++            import { join } from "path";
++            // Nothing above this line imports plugins/*.
++            const before = globalThis.__marker === true;
++            await import(join(import.meta.dirname, "plugins", "target.js"));
++            console.log(JSON.stringify({ before, after: globalThis.__marker === true }));
++          `,
++          "plugins/target.js": `globalThis.__marker = true; export default 1;`,
++          "plugins/other.js": `throw new Error("other.js must not run");`,
++        });
++
++        expect((await build(String(dir), via, ["./plugins/*.js"])).failed).toBe(false);
++        const { stdout, stderr, exitCode } = await run(String(dir));
++        expect(stderr.trim()).toBe("");
++        expect(JSON.parse(stdout.trim())).toEqual({ before: false, after: true });
++        expect(exitCode).toBe(0);
++      },
++      TIMEOUT,
++    );
++
++    test(
++      "directories include recursively and a glob matches only its own files",
++      async () => {
++        using dir = tempDir(`compile-include-dir-glob-${via}`, {
++          "index.ts": /* ts */ `
++            import { join } from "path";
++            const results: Record<string, string> = {};
++            for (const rel of ["plugins/sub/nested.js", "handlers/get.js", "handlers/post.md.js", "handlers/deep/x.js"]) {
++              try {
++                results[rel] = (await import(join(import.meta.dirname, rel))).default;
++              } catch {
++                results[rel] = "missing";
++              }
++            }
++            console.log(JSON.stringify(results));
++          `,
++          "plugins/sub/nested.js": `export default "from-dir";`,
++          "handlers/get.js": `export default "from-glob";`,
++          "handlers/post.md.js": `export default "from-glob-too";`,
++          "handlers/deep/x.js": `export default "not-matched";`,
++        });
++
++        expect((await build(String(dir), via, ["./plugins", "./handlers/*.js"])).failed).toBe(false);
++        const { stdout, stderr, exitCode } = await run(String(dir));
++        expect(stderr.trim()).toBe("");
++        expect(JSON.parse(stdout.trim())).toEqual({
++          "plugins/sub/nested.js": "from-dir",
++          "handlers/get.js": "from-glob",
++          "handlers/post.md.js": "from-glob-too",
++          "handlers/deep/x.js": "missing",
++        });
++        expect(exitCode).toBe(0);
++      },
++      TIMEOUT,
++    );
++
++    test(
++      "a glob walks from its literal directory prefix and needs no leading ./",
++      async () => {
++        using dir = tempDir(`compile-include-glob-prefix-${via}`, {
++          "index.ts": /* ts */ `
++            import { join } from "path";
++            const results: Record<string, string> = {};
++            for (const rel of ["a/b/x.js", "a/b/c/y.js", "a/z.js", "other/w.js"]) {
++              try {
++                results[rel] = (await import(join(import.meta.dirname, rel))).default;
++              } catch {
++                results[rel] = "missing";
++              }
++            }
++            console.log(JSON.stringify(results));
++          `,
++          "a/b/x.js": `export default "x";`,
++          "a/b/c/y.js": `export default "y";`,
++          "a/z.js": `export default "z";`,
++          "other/w.js": `export default "w";`,
++        });
++
++        expect((await build(String(dir), via, ["a/b/*.js"])).failed).toBe(false);
++        const { stdout, stderr, exitCode } = await run(String(dir));
++        expect(stderr.trim()).toBe("");
++        expect(JSON.parse(stdout.trim())).toEqual({
++          "a/b/x.js": "x",
++          "a/b/c/y.js": "missing",
++          "a/z.js": "missing",
++          "other/w.js": "missing",
++        });
++        expect(exitCode).toBe(0);
++      },
++      TIMEOUT,
++    );
++
++    test(
++      "a computed import() of a file outside the include set still fails (negative control)",
++      async () => {
++        using dir = tempDir(`compile-include-negative-${via}`, {
++          "index.ts": /* ts */ `
++            import { join } from "path";
++            try {
++              await import(join(import.meta.dirname, "plugins", "target.js"));
++              console.log(JSON.stringify({ threw: false }));
++            } catch (e: any) {
++              const kept = (await import(join(import.meta.dirname, "other", "keep.js"))).default;
++              console.log(JSON.stringify({ threw: true, hasMessage: typeof e.message === "string", kept }));
++            }
++          `,
++          "plugins/target.js": `export default "not-included";`,
++          "other/keep.js": `export default "included";`,
++        });
++
++        expect((await build(String(dir), via, ["./other"])).failed).toBe(false);
++        const { stdout, stderr, exitCode } = await run(String(dir));
++        expect(stderr.trim()).toBe("");
++        expect(JSON.parse(stdout.trim())).toEqual({ threw: true, hasMessage: true, kept: "included" });
++        expect(exitCode).toBe(0);
++      },
++      TIMEOUT,
++    );
++
++    test(
++      "include works together with bytecode",
++      async () => {
++        using dir = tempDir(`compile-include-bytecode-${via}`, {
++          "index.ts": /* ts */ `
++            // bytecode emits CJS: no top-level await, and import.meta.dirname is the
++            // build directory, so resolve relative to the module instead.
++            async function main() {
++              const name = "target";
++              const mod = await import("./plugins/" + name + ".js");
++              console.log(JSON.stringify({ value: mod.default }));
++            }
++            main();
++          `,
++          "plugins/target.js": `export default "included-value";`,
++        });
++
++        expect((await build(String(dir), via, ["./plugins"], { bytecode: true })).failed).toBe(false);
++        const { stdout, stderr, exitCode } = await run(String(dir));
++        expect(stderr.trim()).toBe("");
++        expect(JSON.parse(stdout.trim())).toEqual({ value: "included-value" });
++        expect(exitCode).toBe(0);
++      },
++      TIMEOUT,
++    );
++
++    test.each([
++      ["./does-not-exist", "failed to read --include path"],
++      ["./plugins/*.md", "matched no files"],
++    ])(
++      "rejects %s",
++      async (pattern, expected) => {
++        using dir = tempDir(`compile-include-reject-${via}`, {
++          "index.ts": `console.log("x");`,
++          "plugins/target.js": `export default 1;`,
++        });
++        const built = await build(String(dir), via, [pattern]);
++        expect(built.message).toContain(expected);
++        expect(built.failed).toBe(true);
++      },
++      TIMEOUT,
++    );
++
++    // On Windows `\` separates path components, so the glob must match; elsewhere it
++    // escapes the `*`, so the pattern is the literal file name `plugins*.js` and matches nothing.
++    test(
++      "a backslash-separated glob follows the platform's separator rules",
++      async () => {
++        using dir = tempDir(`compile-include-backslash-${via}`, {
++          "index.ts": /* ts */ `
++            async function main() {
++              const mod = await import("./plugins/" + "target" + ".js");
++              console.log(JSON.stringify({ value: mod.default }));
++            }
++            main();
++          `,
++          "plugins/target.js": `export default "included-value";`,
++        });
++        const built = await build(String(dir), via, ["plugins\\*.js"]);
++        if (process.platform === "win32") {
++          expect(built.failed).toBe(false);
++          const { stdout, exitCode } = await run(String(dir));
++          expect(JSON.parse(stdout.trim())).toEqual({ value: "included-value" });
++          expect(exitCode).toBe(0);
++        } else {
++          expect(built.message).toContain("matched no files");
++          expect(built.failed).toBe(true);
++        }
++      },
++      TIMEOUT,
++    );
++
++    // `..` that climbs above the cwd is the same escape as a leading `/`, just spelled
++    // differently — reject it the same way, for a literal path, a directory, and a glob.
++    test(
++      "rejects a literal path that climbs above the cwd",
++      async () => {
++        using dir = tempDir(`compile-include-dotdot-literal-${via}`, {
++          "index.ts": `console.log("x");`,
++        });
++        const built = await build(String(dir), via, ["../etc/passwd"]);
++        expect(built.message).toContain('--include pattern "../etc/passwd" must not escape cwd');
++        expect(built.failed).toBe(true);
++      },
++      TIMEOUT,
++    );
++
++    test(
++      "rejects a directory that climbs above the cwd",
++      async () => {
++        using dir = tempDir(`compile-include-dotdot-dir-${via}`, {
++          "index.ts": `console.log("x");`,
++        });
++        const built = await build(String(dir), via, ["../../etc"]);
++        expect(built.message).toContain('--include pattern "../../etc" must not escape cwd');
++        expect(built.failed).toBe(true);
++      },
++      TIMEOUT,
++    );
++
++    test(
++      "rejects a glob that climbs above the cwd",
++      async () => {
++        using dir = tempDir(`compile-include-dotdot-glob-${via}`, {
++          "index.ts": `console.log("x");`,
++        });
++        const built = await build(String(dir), via, ["../*.js"]);
++        expect(built.message).toContain('--include pattern "../*.js" must not escape cwd');
++        expect(built.failed).toBe(true);
++      },
++      TIMEOUT,
++    );
++
++    // A `..` that nets back inside the cwd is not an escape — reject only what actually
++    // climbs above the cwd, not the token itself.
++    test(
++      "accepts a glob whose .. nets back inside the cwd",
++      async () => {
++        using dir = tempDir(`compile-include-dotdot-netzero-${via}`, {
++          "index.ts": /* ts */ `
++            const mod = await import("./plugins/" + "target" + ".js");
++            console.log(JSON.stringify({ value: mod.default }));
++          `,
++          "plugins/target.js": `export default "included-value";`,
++        });
++        const built = await build(String(dir), via, ["./plugins/../plugins/*.js"]);
++        expect(built).toEqual({ failed: false, message: expect.any(String) });
++        const { stdout, stderr, exitCode } = await run(String(dir));
++        expect(stderr.trim()).toBe("");
++        expect(JSON.parse(stdout.trim())).toEqual({ value: "included-value" });
++        expect(exitCode).toBe(0);
++      },
++      TIMEOUT,
++    );
++
++    // Patterns are relative to the cwd: an absolute path is rejected, glob or not.
++    test(
++      "rejects an absolute pattern",
++      async () => {
++        using dir = tempDir(`compile-include-absolute-${via}`, {
++          "index.ts": `console.log("x");`,
++          "plugins/target.js": `export default 1;`,
++        });
++        const built = await build(String(dir), via, ["/abs/*.js"]);
++        expect(built.message).toContain('--include pattern "/abs/*.js" must be relative to cwd');
++        expect(built.failed).toBe(true);
++      },
++      TIMEOUT,
++    );
++
++    // `.//x` is `./x`: a doubled slash after the `./` prefix must not turn the pattern
++    // absolute once the prefix is dropped. The prefix forms below all look relative.
++    test.each([".//", "././/", ".///", ".//./"])(
++      "a glob written as %s<outside dir>/*.js is not resolved outside the cwd",
++      async prefix => {
++        using outside = tempDir(`compile-include-outside-${via}`, { "leak.js": `export default "leaked";` });
++        using dir = tempDir(`compile-include-doubleslash-${via}`, { "index.ts": `console.log("x");` });
++        const rel = String(outside).replace(/^[/\\]+/, "");
++        const built = await build(String(dir), via, [`${prefix}${rel}/*.js`]);
++        expect(built.failed).toBe(true);
++        expect(built.message).toMatch(
++          isWindows ? /must be relative to cwd/ : /failed to read --include path/,
++        );
++      },
++      TIMEOUT,
++    );
++
++    test.skipIf(isWindows)(
++      "a glob with a doubled slash after ./ stays relative to the cwd",
++      async () => {
++        using dir = tempDir(`compile-include-doubleslash-ok-${via}`, {
++          "index.ts": /* ts */ `
++            const mod = await import("./plugins/" + "target" + ".js");
++            console.log(JSON.stringify({ value: mod.default }));
++          `,
++          "plugins/target.js": `export default "included-value";`,
++        });
++        const built = await build(String(dir), via, [".//plugins/*.js"]);
++        expect(built).toEqual({ failed: false, message: expect.any(String) });
++        const { stdout, stderr, exitCode } = await run(String(dir));
++        expect(stderr.trim()).toBe("");
++        expect(JSON.parse(stdout.trim())).toEqual({ value: "included-value" });
++        expect(exitCode).toBe(0);
++      },
++      TIMEOUT,
++    );
++
++    test.skipIf(!isWindows)(
++      "rejects a drive-letter pattern behind a .\\ prefix",
++      async () => {
++        using dir = tempDir(`compile-include-dotdrive-${via}`, { "index.ts": `console.log("x");` });
++        const built = await build(String(dir), via, [".\\C:\\x\\*.js"]);
++        expect(built.message).toContain("must be relative to cwd");
++        expect(built.failed).toBe(true);
++      },
++      TIMEOUT,
++    );
++
++    test.skipIf(!isWindows)(
++      "rejects an absolute drive-letter pattern",
++      async () => {
++        using dir = tempDir(`compile-include-drive-${via}`, {
++          "index.ts": `console.log("x");`,
++          "plugins/target.js": `export default 1;`,
++        });
++        const built = await build(String(dir), via, ["C:\\x\\*.js"]);
++        expect(built.message).toContain('must be relative to cwd');
++        expect(built.failed).toBe(true);
++      },
++      TIMEOUT,
++    );
++
++    // `:` is only a drive separator on Windows; a relative name containing one is valid elsewhere.
++    test.skipIf(isWindows)(
++      "accepts a relative path with a colon in its second character",
++      async () => {
++        using dir = tempDir(`compile-include-colon-${via}`, {
++          "index.ts": /* ts */ `
++            import { join } from "path";
++            const mod = await import(join(import.meta.dirname, "c:d", "target.js"));
++            console.log(JSON.stringify({ value: mod.default }));
++          `,
++          "c:d/target.js": `export default "included-value";`,
++        });
++        const built = await build(String(dir), via, ["./c:d"]);
++        expect(built).toEqual({ failed: false, message: expect.any(String) });
++        const { stdout, stderr, exitCode } = await run(String(dir));
++        expect(stderr.trim()).toBe("");
++        expect(JSON.parse(stdout.trim())).toEqual({ value: "included-value" });
++        expect(exitCode).toBe(0);
++      },
++      TIMEOUT,
++    );
++
++    // Same name without the `./`: still a relative path off Windows.
++    test.skipIf(isWindows)(
++      "accepts a bare relative path with a colon in its second character",
++      async () => {
++        using dir = tempDir(`compile-include-bare-colon-${via}`, {
++          "index.ts": /* ts */ `
++            import { join } from "path";
++            const mod = await import(join(import.meta.dirname, "c:d", "target.js"));
++            console.log(JSON.stringify({ value: mod.default }));
++          `,
++          "c:d/target.js": `export default "included-value";`,
++        });
++        const built = await build(String(dir), via, ["c:d"]);
++        expect(built).toEqual({ failed: false, message: expect.any(String) });
++        const { stdout, stderr, exitCode } = await run(String(dir));
++        expect(stderr.trim()).toBe("");
++        expect(JSON.parse(stdout.trim())).toEqual({ value: "included-value" });
++        expect(exitCode).toBe(0);
++      },
++      TIMEOUT,
++    );
++
++    // On Windows `c:d` is a drive-relative path, which is not relative to the cwd.
++    test.skipIf(!isWindows)(
++      "rejects a bare drive-relative pattern",
++      async () => {
++        using dir = tempDir(`compile-include-drive-relative-${via}`, {
++          "index.ts": `console.log("x");`,
++          "c/d.js": `export default 1;`,
++        });
++        const built = await build(String(dir), via, ["c:d"]);
++        expect(built.message).toContain('--include pattern "c:d" must be relative to cwd');
++        expect(built.failed).toBe(true);
++      },
++      TIMEOUT,
++    );
++
++    // Backslashes separate components on Windows, including next to a `./` prefix.
++    test.skipIf(!isWindows)(
++      "a glob mixing / and \\ separators matches",
++      async () => {
++        using dir = tempDir(`compile-include-mixed-${via}`, {
++          "index.ts": /* ts */ `
++            const mod = await import("./plugins/" + "target" + ".js");
++            console.log(JSON.stringify({ value: mod.default }));
++          `,
++          "plugins/target.js": `export default "included-value";`,
++        });
++        const built = await build(String(dir), via, [".\\plugins/*.js"]);
++        expect(built.failed).toBe(false);
++        const { stdout, exitCode } = await run(String(dir));
++        expect(JSON.parse(stdout.trim())).toEqual({ value: "included-value" });
++        expect(exitCode).toBe(0);
++      },
++      TIMEOUT,
++    );
++  });
++
++  test(
++    "the CLI rejects --include without --compile",
++    async () => {
++      using dir = tempDir("compile-include-no-compile", {
++        "index.ts": `console.log("x");`,
++        "plugins/target.js": `export default 1;`,
++      });
++      const { stderr, exitCode } = await spawnCapture(
++        [bunExe(), "build", "./index.ts", "--include", "./plugins"],
++        String(dir),
++      );
++      expect(stderr).toContain("--include requires --compile");
++      expect(exitCode).not.toBe(0);
++    },
++    TIMEOUT,
++  );
++
++  test(
++    "the CLI rejects --include with --compile --target=browser",
++    async () => {
++      using dir = tempDir("compile-include-browser-cli", {
++        "index.html": `<!doctype html>`,
++        "plugins/target.js": `export default 1;`,
++      });
++      const { stderr, exitCode } = await spawnCapture(
++        [bunExe(), "build", "--compile", "--target=browser", "./index.html", "--include", "./plugins/target.js"],
++        String(dir),
++      );
++      expect(stderr).toContain("cannot use --compile --target browser with --include");
++      expect(exitCode).not.toBe(0);
++    },
++    TIMEOUT,
++  );
++
++  test(
++    "Bun.build rejects compile.include with target 'browser' for standalone HTML",
++    async () => {
++      using dir = tempDir("compile-include-browser-api", {
++        "index.html": `<!doctype html>`,
++        "plugins/target.js": `export default 1;`,
++      });
++      const script = /* js */ `
++        try {
++          await Bun.build({ entrypoints: ["./index.html"], target: "browser", compile: { include: ["./plugins"] } });
++          console.log("no error");
++        } catch (e) { console.log(String(e.message)); }
++      `;
++      const { stdout } = await spawnCapture([bunExe(), "-e", script], String(dir));
++      expect(stdout.trim()).toContain("Cannot use compile.include with target 'browser'");
++    },
++    TIMEOUT,
++  );
++
++  test(
++    "the CLI rejects --include with --compile --target=browser and a non-HTML entrypoint",
++    async () => {
++      // Regression: the guard above only fired when every current entrypoint already
++      // ended in .html, so a non-HTML entry slipped past it.
++      using dir = tempDir("compile-include-browser-cli-nonhtml", {
++        "index.ts": `console.log(1);`,
++        "plugins/target.js": `export default 1;`,
++      });
++      const { stderr, exitCode } = await spawnCapture(
++        [bunExe(), "build", "--compile", "--target=browser", "./index.ts", "--include", "./plugins/target.js"],
++        String(dir),
++      );
++      expect(stderr).toContain("cannot use --compile --target browser with --include");
++      expect(exitCode).not.toBe(0);
++    },
++    TIMEOUT,
++  );
++
++  test(
++    "Bun.build rejects compile.include with target 'browser' and a non-HTML entrypoint",
++    async () => {
++      using dir = tempDir("compile-include-browser-api-nonhtml", {
++        "index.ts": `console.log(1);`,
++        "plugins/target.js": `export default 1;`,
++      });
++      const script = /* js */ `
++        try {
++          await Bun.build({ entrypoints: ["./index.ts"], target: "browser", compile: { include: ["./plugins"] } });
++          console.log("no error");
++        } catch (e) { console.log(String(e.message)); }
++      `;
++      const { stdout } = await spawnCapture([bunExe(), "-e", script], String(dir));
++      expect(stdout.trim()).toContain("Cannot use compile.include with target 'browser'");
++    },
++    TIMEOUT,
++  );
++
++  test(
++    "Bun.build rejects compile.include with no target, all-HTML entrypoints, and an .html include",
++    async () => {
++      // Regression (F1): `target` defaults to `Browser` when unset, and further down
++      // (`is_standalone_html`, below the include-parsing block) an all-HTML entrypoint
++      // list with no explicit target still infers a standalone-HTML build. Gating this
++      // guard on `did_set_target` alone let that exact case through: the entry list
++      // stayed all-HTML, so the build silently became standalone HTML with the `.html`
++      // include bundled eagerly instead of rejected as a lazily-loaded module.
++      using dir = tempDir("compile-include-notarget-allhtml", {
++        "index.html": `<!doctype html>`,
++        "extra.html": `<!doctype html>`,
++      });
++      const script = /* js */ `
++        try {
++          await Bun.build({ entrypoints: ["./index.html"], compile: { include: ["./extra.html"] } });
++          console.log("no error");
++        } catch (e) { console.log(String(e.message)); }
++      `;
++      const { stdout } = await spawnCapture([bunExe(), "-e", script], String(dir));
++      expect(stdout.trim()).toContain("Cannot use compile.include with target 'browser'");
++    },
++    TIMEOUT,
++  );
++
++  test(
++    "Bun.build allows compile.include with no target and a mixed HTML/non-HTML entrypoint list",
++    async () => {
++      // The no-target guard above must reject only when EVERY entrypoint is `.html`.
++      // A mixed list (one `.html` entry alongside a non-HTML one) still infers a plain
++      // Bun executable, not standalone HTML, so `compile.include` must keep working
++      // exactly as it does for an all-non-HTML entrypoint list — this is the boundary
++      // a buggy "any entrypoint is .html" check (instead of "every") would get wrong.
++      using dir = tempDir("compile-include-mixed-entries", {
++        "index.ts": /* ts */ `
++          const mod = await import("./plugins/" + "target" + ".js");
++          console.log(JSON.stringify({ value: mod.default }));
++        `,
++        "index.html": `<!doctype html>`,
++        "plugins/target.js": `export default "included-value";`,
++      });
++      const built = await buildEntries(String(dir), "api", ["./index.ts", "./index.html"], ["./plugins"]);
++      expect(built).toEqual({ failed: false, message: expect.any(String) });
++      const { stdout, exitCode } = await run(String(dir));
++      expect(JSON.parse(stdout.trim())).toEqual({ value: "included-value" });
++      expect(exitCode).toBe(0);
++    },
++    TIMEOUT,
++  );
++
++  test(
++    "Bun.build embeds compile.include lazily with an explicit non-browser target",
++    async () => {
++      // F2 (test gap / mutation survivor): the only existing negative test used an
++      // explicit `target: "browser"`, and the only positive test used the default
++      // target. Neither covers an explicit non-browser target, so the mutation
++      // `if (did_set_target) reject` (dropping the `target == Browser` comparison)
++      // stayed green while it would reject every explicitly-targeted include build.
++      using dir = tempDir("compile-include-explicit-bun-target", {
++        "index.ts": /* ts */ `
++          import { join } from "path";
++          const mod = await import(join(import.meta.dirname, "plugins", "target.js"));
++          console.log(JSON.stringify({ value: mod.default }));
++        `,
++        "plugins/target.js": `export default "included-value";`,
++      });
++      const built = await build(String(dir), "api", ["./plugins"], { target: "bun" });
++      expect(built).toEqual({ failed: false, message: expect.any(String) });
++      const { stdout, exitCode } = await run(String(dir));
++      expect(JSON.parse(stdout.trim())).toEqual({ value: "included-value" });
++      expect(exitCode).toBe(0);
++    },
++    TIMEOUT,
++  );
++
++  test(
++    "Bun.build accepts compile.include with an explicit cross-compile target",
++    async () => {
++      // Same F2 gap as above, for a cross-target build (`bun-linux-x64`). The produced
++      // executable is for a different platform than the build host, so this only
++      // checks that the build itself succeeds — it is never run.
++      using dir = tempDir("compile-include-cross-target", {
++        "index.ts": `console.log(1);`,
++        "plugins/target.js": `export default 1;`,
++      });
++      const built = await build(String(dir), "api", ["./plugins"], { target: "bun-linux-x64" });
++      expect(built).toEqual({ failed: false, message: expect.any(String) });
++    },
++    TIMEOUT,
++  );
++});

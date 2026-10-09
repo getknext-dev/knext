@@ -15,7 +15,7 @@ kn-next init-ci --namespace my-app
 That generates the workflow and the RBAC manifest that creates the credential it uses. Read the
 manifest, apply it, add four repository secrets, and push.
 
-Full walkthrough: <https://knext.dev/docs/github-action>
+Full walkthrough: <https://knext-platform.dev/docs/github-action>
 
 ## What the credential can do
 

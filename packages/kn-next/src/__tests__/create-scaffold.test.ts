@@ -590,7 +590,7 @@ describe("knext create — the CLI entry (createMain)", () => {
             },
         );
         try {
-            const code = await createMain(argv);
+            const code = await createMain(argv, { stdinIsTTY: false });
             return { code, out, err };
         } finally {
             outSpy.mockRestore();
@@ -673,6 +673,36 @@ describe("knext create — the CLI entry (createMain)", () => {
         expect(out).toContain("knext doctor");
         expect(out).toContain("knext deploy");
         expect(out).toContain("npm test");
+    });
+
+    it("names the chosen build target and runtime, and how to change them", async () => {
+        const appDir = join(root, "apps", "names-defaults");
+        mkdirSync(appDir, { recursive: true });
+        const { code, out } = await capture([appDir]);
+        expect(code).toBe(0);
+        expect(out).toContain("Build target: turbopack");
+        expect(out).toContain("Runtime: bun");
+        // how to change: the scaffold flags AND the config keys
+        expect(out).toContain("--builder");
+        expect(out).toContain("--runtime");
+        expect(out).toContain("`build`");
+        expect(out).toContain("`runtime`");
+        expect(out).toContain("knext.config.ts");
+    });
+
+    it("names the NON-default choices when they were given", async () => {
+        const appDir = join(root, "apps", "names-chosen");
+        mkdirSync(appDir, { recursive: true });
+        const { out } = await capture([
+            appDir,
+            "--builder",
+            "webpack",
+            "--runtime",
+            "node",
+        ]);
+        expect(out).toContain("Build target: webpack");
+        expect(out).toContain("Runtime: node");
+        expect(out).not.toContain("Build target: turbopack");
     });
 
     it("--dry-run reports the file list WITHOUT the parting next-steps line (nothing was written)", async () => {

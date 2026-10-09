@@ -124,12 +124,27 @@ export class GroupStillIncoherentError extends Error {}
  * release ships under a non-latest tag, and never the reason a prerelease
  * silently ships AS latest.
  *
+ * PRE MODE WINS (1.3.0-rc.1). In changesets pre mode, `changeset publish`
+ * tags with `.changeset/pre.json`'s `tag`, NOT with the version's prerelease
+ * id — so the heal must use the SAME tag, or a re-published straggler lands
+ * on a different dist-tag than its siblings. The live case: integration/v1.3
+ * publishes `1.3.0-rc.1` with pre tag `next`, while `rc` must stay on the
+ * v1.0 line's `1.0.0-rc.5`; deriving `rc` from the version there would move
+ * the tag the v1.0 credential reads. When `preState` is in pre mode with a
+ * tag, that tag is returned for a prerelease; otherwise the version-derived
+ * id as before. A stable version is `null` in every case.
+ *
  * @param {string} version
+ * @param {{ mode?: string, tag?: string } | null} [preState] parsed `.changeset/pre.json`
  * @returns {string | null}
  */
-export function prereleaseDistTag(version) {
+export function prereleaseDistTag(version, preState = null) {
   const m = /^v?\d+\.\d+\.\d+-([0-9A-Za-z-]+)(?:\.[0-9A-Za-z-]+)*$/.exec(String(version).trim());
-  return m ? m[1] : null;
+  if (!m) return null;
+  if (preState?.mode === 'pre' && typeof preState.tag === 'string' && preState.tag.length > 0) {
+    return preState.tag;
+  }
+  return m[1];
 }
 
 /**
@@ -443,6 +458,13 @@ function readChangesetConfig() {
   return JSON.parse(readFileSync(join(REPO_ROOT, '.changeset/config.json'), 'utf8'));
 }
 
+/** `.changeset/pre.json` (changesets pre mode), or `null` when not in pre mode. */
+function readPreState() {
+  const prePath = join(REPO_ROOT, '.changeset/pre.json');
+  if (!existsSync(prePath)) return null;
+  return JSON.parse(readFileSync(prePath, 'utf8'));
+}
+
 /**
  * `npm view <name>@<version> version` — TRUE iff npm exited 0 (branch on exit
  * code). Exported so a test can exercise the REAL spawnSync + exit-code
@@ -547,8 +569,9 @@ async function main() {
   // M1 (#1591 round 2): derive the dist-tag from targetVersion ITSELF, not
   // hard-coded — npm >= 11 refuses `npm publish` for a prerelease with no
   // `--tag`. `null` for a stable release, so the heal path keeps publishing
-  // to `latest` exactly as before.
-  const distTag = prereleaseDistTag(targetVersion);
+  // to `latest` exactly as before. In changesets pre mode the pre.json tag
+  // wins — the same tag `changeset publish` used (see prereleaseDistTag).
+  const distTag = prereleaseDistTag(targetVersion, readPreState());
   if (distTag) {
     console.log(
       `[ensure-published-group] target ${targetVersion} is a prerelease — any re-publish will ` +

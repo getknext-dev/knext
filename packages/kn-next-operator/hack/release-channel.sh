@@ -18,6 +18,9 @@
 #   release_tag=<tag>         — the GitHub Release tag to attach install.yaml to
 #                               ("" when publish=false)
 #   is_stable=true|false      — whether operator-latest should also be moved
+#   version=<X.Y.Z[-pre]>     — the bare semver of a version tag ("" otherwise);
+#                               what hack/stamp-release-version.sh writes into
+#                               the bundle and the install-v<version>.yaml name
 #   is_version_tag=true|false — whether release_tag is an operator-vX.Y.Z[-rc.N]
 #                               tag (immutability-guarded, see
 #                               hack/check-release-immutable.sh) as opposed to
@@ -51,16 +54,19 @@ if [[ "${REF}" == refs/tags/operator-v* ]]; then
   fi
   echo "publish=true"
   echo "release_tag=${REF_NAME}"
+  echo "version=${VERSION}"
   echo "is_stable=${IS_STABLE}"
   echo "is_version_tag=true"
 elif [[ "${REF}" == "refs/heads/main" ]]; then
   echo "publish=true"
   echo "release_tag=operator-edge"
+  echo "version="
   echo "is_stable=false"
   echo "is_version_tag=false"
 else
   echo "publish=false"
   echo "release_tag="
+  echo "version="
   echo "is_stable=false"
   echo "is_version_tag=false"
 fi

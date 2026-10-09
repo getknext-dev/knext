@@ -28,6 +28,7 @@ import {
     readFileSync,
     realpathSync,
     rmSync,
+    symlinkSync,
     writeFileSync,
 } from "node:fs";
 import { createRequire } from "node:module";
@@ -56,9 +57,11 @@ const LIVE = "KNEXT_1314_DEP_A_LIVE_SIDECAR_c91e";
 const MISSING = "knext-1314-not-installed";
 
 const temps: string[] = [];
+// Compiled executables are ~100MB each; removing many of them can exceed
+// bun's default 5s hook timeout on a slow CI disk.
 afterAll(() => {
     for (const d of temps) rmSync(d, { recursive: true, force: true });
-});
+}, 120_000);
 function temp(prefix: string): string {
     // realpath: macOS tmpdir is a /var -> /private/var symlink, and
     // vinext-compile matches server modules by resolved path.
@@ -576,4 +579,238 @@ describe(`vinext-compile bundles rolldown ${ROLLDOWN_VERSION}'s createRequire ex
             expect(build.stderr).not.toContain("possibly");
         }, 120_000);
     }
+});
+
+/**
+ * Cluster C11 (`streaming-ssr`): a THIRD require-binding shape, measured
+ * against a real `vite build` (vinext 1.0.1, nitro's bun preset, code
+ * splitting disabled) of the official `streaming-ssr` pages-router
+ * edge-runtime fixture. When rolldown merges several originally-separate
+ * modules into one chunk and more than one of them calls
+ * `createRequire(import.meta.url)`, a later module's own `import.meta.url`
+ * is hoisted into a per-module getter instead of surviving as a bare token:
+ *
+ *     var __require = createRequire({get value(){return t.url}}.value);
+ *
+ * The package reached this way (`react`, for the edge-runtime SSR path) was
+ * never traced into `.output/server/node_modules` — nitro bundled it
+ * directly elsewhere in the SAME output, so no sidecar copy exists at all —
+ * yet the dynamic require still only reaches it at RUNTIME, invisibly to
+ * `Bun.build`'s static graph. Before the fix: the binding shape was not
+ * recognized at all, so the call was invisible to the whole analysis (no
+ * warning, no error) and the compiled binary crashed every request with
+ * `Cannot find module 'react'` the moment it was reached. The fix recognizes
+ * the shape AND resolves the package from the entry's own directory even
+ * without a sidecar — covering the case where the require is reached only
+ * dynamically but the package itself is ordinarily resolvable.
+ */
+describe("vinext-compile bundles the getter-indirection require shape with no sidecar (cluster C11)", () => {
+    it("embeds and runs a package that exists ONLY in the app's regular node_modules, never traced to .output/server/node_modules", () => {
+        const work = temp("knext-c11-");
+        const server = join(work, ".output", "server");
+        // The package lives in the APP ROOT's regular node_modules — NOT
+        // under `.output/server/node_modules` (no sidecar at all exists for
+        // this test; `existsSync(join(server, "node_modules"))` is false
+        // throughout). Resolvable only by walking up from dirname(ENTRY).
+        cjsPackage(
+            join(work, "node_modules"),
+            "fake-react",
+            `module.exports = { marker: ${JSON.stringify(A)} };`,
+        );
+        write(
+            join(server, "index.mjs"),
+            'import { createRequire } from "node:module";\n' +
+                "var t = import.meta;\n" +
+                "var __require = createRequire({get value(){return t.url}}.value);\n" +
+                "var r = __require(`fake-react`);\n" +
+                'console.log("RESULT:" + r.marker);\n',
+        );
+        expect(existsSync(join(server, "node_modules"))).toBe(false);
+
+        const build = compile(work, server);
+        expect(build.status, `${build.stdout}\n${build.stderr}`).toBe(0);
+        expect(build.stdout).toContain("fake-react (index.mjs)");
+        expect(build.stderr).not.toContain("WARNING");
+
+        // Deployed with NO sidecar beside it at all (deployAndRun's default):
+        // the embedded copy is the only way this can possibly work.
+        const run = deployAndRun(work, build.exe);
+        expect(run.status, `${run.stdout}\n${run.stderr}`).toBe(0);
+        expect(run.stdout).toContain(`RESULT:${A}`);
+    }, 120_000);
+
+    it("does NOT embed a package resolved only outside the app root (round-2 review, #1877: ancestor node_modules containment)", () => {
+        // Node's upward node_modules walk from dirname(ENTRY) has no bound —
+        // Bun.resolveSync alone would find a package installed ABOVE the app
+        // root (here: one level above `work`, which is OUTSIDE the app
+        // entirely, standing in for an unrelated package elsewhere on the
+        // BUILD MACHINE's disk) just as readily as one inside it. Embedding
+        // that would make the binary's contents depend on the build
+        // machine's disk layout. The app root itself (`work/app`) has NO
+        // node_modules of its own at all, so the ONLY way this spec could
+        // resolve is by escaping it.
+        const base = temp("knext-c11-escape-base-");
+        const work = join(base, "app");
+        mkdirSync(work, { recursive: true });
+        const server = join(work, ".output", "server");
+        cjsPackage(
+            join(base, "node_modules"),
+            "escaping-pkg",
+            `module.exports = { marker: ${JSON.stringify(A)} };`,
+        );
+        write(
+            join(server, "index.mjs"),
+            'import { createRequire } from "node:module";\n' +
+                "var t = import.meta;\n" +
+                "var __require = createRequire({get value(){return t.url}}.value);\n" +
+                "var r = __require(`escaping-pkg`);\n" +
+                'console.log("RESULT:" + r.marker);\n',
+        );
+        expect(existsSync(join(work, "node_modules"))).toBe(false);
+
+        const build = compile(work, server);
+        expect(build.status, `${build.stdout}\n${build.stderr}`).toBe(0);
+        // Never silently embedded — and never silently dropped either: it is
+        // reported the same way an ordinary unresolvable package already is.
+        expect(build.stdout).not.toContain("escaping-pkg");
+        expect(build.stderr).toContain("escaping-pkg");
+
+        // Under strict mode, it fails the build — the SAME outcome an
+        // ordinary unresolvable package already gets (jev 0.99: consistency
+        // over a bespoke always-fail path for this specific case).
+        const strictBuild = compile(work, server, {
+            KNEXT_COMPILE_STRICT_REQUIRES: "1",
+        });
+        expect(
+            strictBuild.status,
+            `${strictBuild.stdout}\n${strictBuild.stderr}`,
+        ).not.toBe(0);
+        expect(strictBuild.stderr).toContain("escaping-pkg");
+    }, 120_000);
+
+    it("DOES embed a monorepo-hoisted dependency reached only through a workspace-root symlink (round-2 review, #1877: workspace containment boundary)", () => {
+        // Measured on the real file-manager monorepo build: bun hoists a
+        // shared dependency to the WORKSPACE root's own store and leaves only
+        // a SYMLINK in the app's local `node_modules`
+        // (`apps/file-manager/node_modules/minio -> ../../../node_modules/
+        // .bun/minio@8.0.6/node_modules/minio`). Realpath-resolving that
+        // symlink — required to stay symlink-safe against the real ancestor
+        // escape the previous test guards — lands outside the APP root, but
+        // it is still inside the WORKSPACE: a `package.json` with a
+        // `workspaces` field sits above the app directory, and that is the
+        // boundary `isWithinAppRoot` must honour. Rejecting this is the bug
+        // this test pins: it broke "Self-contained executable e2e
+        // (file-manager, webpack)" in CI.
+        const base = temp("knext-c11-workspace-base-");
+        write(
+            join(base, "package.json"),
+            JSON.stringify({ name: "workspace-root", workspaces: ["apps/*"] }),
+        );
+        const work = join(base, "apps", "app");
+        mkdirSync(work, { recursive: true });
+        const server = join(work, ".output", "server");
+        // The real package lives in the workspace root's own store — never
+        // under the app directory at all.
+        cjsPackage(
+            join(base, "node_modules", ".store"),
+            "hoisted-pkg",
+            `module.exports = { marker: ${JSON.stringify(A)} };`,
+        );
+        // The app's own node_modules holds only a SYMLINK to it, exactly the
+        // shape bun's workspace hoisting produces.
+        mkdirSync(join(work, "node_modules"), { recursive: true });
+        symlinkSync(
+            join(base, "node_modules", ".store", "hoisted-pkg"),
+            join(work, "node_modules", "hoisted-pkg"),
+            "dir",
+        );
+        write(
+            join(server, "index.mjs"),
+            'import { createRequire } from "node:module";\n' +
+                "var t = import.meta;\n" +
+                "var __require = createRequire({get value(){return t.url}}.value);\n" +
+                "var r = __require(`hoisted-pkg`);\n" +
+                'console.log("RESULT:" + r.marker);\n',
+        );
+
+        const build = compile(work, server);
+        expect(build.status, `${build.stdout}\n${build.stderr}`).toBe(0);
+        expect(build.stdout).toContain("hoisted-pkg (index.mjs)");
+        expect(build.stderr).not.toContain("WARNING");
+
+        // Strict mode must ALSO pass — this is a legitimate, resolvable
+        // dependency, not an ambiguous or missing one.
+        const strictBuild = compile(work, server, {
+            KNEXT_COMPILE_STRICT_REQUIRES: "1",
+        });
+        expect(
+            strictBuild.status,
+            `${strictBuild.stdout}\n${strictBuild.stderr}`,
+        ).toBe(0);
+
+        const run = deployAndRun(work, build.exe);
+        expect(run.status, `${run.stdout}\n${run.stderr}`).toBe(0);
+        expect(run.stdout).toContain(`RESULT:${A}`);
+    }, 120_000);
+
+    it("a pnpm workspace root (pnpm-workspace.yaml, no `workspaces` field) is the containment boundary too", () => {
+        // pnpm declares its workspace in pnpm-workspace.yaml, not package.json;
+        // without detecting it, a hoisted dependency reached through the app's
+        // symlink is refused as an ancestor escape (a warning, an error under
+        // strict mode) on every pnpm monorepo.
+        const base = temp("knext-c11-pnpm-base-");
+        write(
+            join(base, "package.json"),
+            JSON.stringify({ name: "pnpm-root" }),
+        );
+        write(join(base, "pnpm-workspace.yaml"), "packages:\n  - apps/*\n");
+        const work = join(base, "apps", "app");
+        mkdirSync(work, { recursive: true });
+        const server = join(work, ".output", "server");
+        cjsPackage(
+            join(base, "node_modules", ".pnpm"),
+            "hoisted-pkg",
+            `module.exports = { marker: ${JSON.stringify(A)} };`,
+        );
+        mkdirSync(join(work, "node_modules"), { recursive: true });
+        symlinkSync(
+            join(base, "node_modules", ".pnpm", "hoisted-pkg"),
+            join(work, "node_modules", "hoisted-pkg"),
+            "dir",
+        );
+        write(
+            join(server, "index.mjs"),
+            'import { createRequire } from "node:module";\n' +
+                "var __require = createRequire(import.meta.url);\n" +
+                "var r = __require(`hoisted-pkg`);\n" +
+                'console.log("RESULT:" + r.marker);\n',
+        );
+        const strictBuild = compile(work, server, {
+            KNEXT_COMPILE_STRICT_REQUIRES: "1",
+        });
+        expect(
+            strictBuild.status,
+            `${strictBuild.stdout}\n${strictBuild.stderr}`,
+        ).toBe(0);
+        expect(strictBuild.stdout).toContain("hoisted-pkg (index.mjs)");
+    }, 120_000);
+
+    it("a missing package reached only through the getter-indirection shape is still reported, never silently invisible", () => {
+        const work = temp("knext-c11-missing-");
+        const server = join(work, ".output", "server");
+        write(
+            join(server, "index.mjs"),
+            'import { createRequire } from "node:module";\n' +
+                "var t = import.meta;\n" +
+                "var __require = createRequire({get value(){return t.url}}.value);\n" +
+                `var f = () => { try { return __require(${JSON.stringify(MISSING)}); } catch { return "absent"; } };\n` +
+                'console.log("RESULT:" + f());\n',
+        );
+        const build = compile(work, server, {
+            KNEXT_COMPILE_STRICT_REQUIRES: "1",
+        });
+        expect(build.status, `${build.stdout}\n${build.stderr}`).not.toBe(0);
+        expect(build.stderr).toContain(MISSING);
+        expect(build.stderr).toContain("KNEXT_COMPILE_STRICT_REQUIRES=1");
+    }, 60_000);
 });

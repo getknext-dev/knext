@@ -1,0 +1,206 @@
+# End-to-end proof of the opt-in knext-patched Bun toolchain (`compile: { bun: 'knext-patched' }`):
+# a vinext × bun app, scaffolded and built with THIS commit's knext (packed with the real publish
+# tool), compiled with the patched toolchain knext downloads + sha256-verifies, shipped in the real
+# musl image, booted, a 200 — and evidence that an `--include`d module is embedded in the executable
+# and loaded LAZILY from it (not evaluated at startup, evaluated on the first `import()`, with no
+# copy of it on disk in the image).
+#
+# Dispatch-only, plus `workflow_call` from bun-patched-release.yml, which runs it as a GATE BEFORE
+# anything is signed or published, against the verified draft binary (seeded into knext's cache via
+# the `toolchain-artifact` input — knext's own embedded-sha256 check still decides whether to use
+# it). No schedule, not a required check. RETIREMENT: delete with deploy/bun-patched/.
+name: bun-patched-e2e
+
+on:
+  workflow_dispatch: {}
+  workflow_call:
+    inputs:
+      toolchain-artifact:
+        description: >-
+          Name of a workflow artifact holding the toolchain binaries (bun-patched-release.yml passes
+          its verified DRAFT binaries). Seeded into knext's cache, where knext's own embedded-sha256
+          check decides whether to use it — a rejected seed fails the build (the draft is not
+          downloadable). Empty: knext downloads the PUBLISHED release asset as a user would.
+        type: string
+        required: false
+        default: ''
+  # It carried a temporary `pull_request` trigger scoped to its own files (the 1812-vinext-stable-proof
+  # precedent) to get one green run on the PR that introduced it — run 37055710314: health 200, the
+  # included module loaded from /$bunfs/root/plugins/greet.js with before=0 / after=1, no copy on
+  # disk in the image, compiler 1.4.2+cc97fa834 vs shipped base 1.4.2+744846f84. Removed after.
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bun-patched-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  vinext-bun-patched:
+    name: vinext x bun — knext-patched toolchain, lazy --include
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Setup Bun (stock — the vite build and everything but the compile step)
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: '1.4.2'
+
+      - name: Fetch the toolchain artifact under test (release gate only)
+        if: ${{ inputs.toolchain-artifact != '' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ inputs.toolchain-artifact }}
+          path: ${{ runner.temp }}/toolchain-under-test
+
+      - name: Build + pack this commit's @getknext/* (the real publish tool)
+        run: |
+          set -euo pipefail
+          bun install --frozen-lockfile
+          bun run --filter "@getknext/lib" build
+          bun run --filter "@getknext/db" build
+          bun run --filter "@getknext/core" build
+          DEST="${RUNNER_TEMP}/knext-tarballs"
+          node scripts/pack-release-tarballs.mjs --dest "${DEST}" --dirs packages/lib,packages/db,packages/kn-next
+          echo "TARBALLS_DIR=${DEST}" >> "$GITHUB_ENV"
+
+      - name: knext's native-include tests on the binary under test (lane-backed, never skipped here)
+        if: ${{ inputs.toolchain-artifact != '' }}
+        env:
+          KNEXT_REQUIRE_PATCHED_BUN: '1'
+        run: |
+          set -euo pipefail
+          export KNEXT_TEST_PATCHED_BUN="$RUNNER_TEMP/toolchain-under-test/bun-linux-x64"
+          chmod +x "$KNEXT_TEST_PATCHED_BUN"
+          cd packages/kn-next
+          bun test src/__tests__/compile-include-patched.test.ts src/__tests__/vinext-compile-include.test.ts
+
+      - name: Scaffold a vinext app with an --include'd plugin module
+        run: |
+          set -euo pipefail
+          APP="${RUNNER_TEMP}/app"
+          node packages/kn-next/dist/cli/kn-next.js create "$APP" --builder vinext --name patched-proof
+          echo "APP=$APP" >> "$GITHUB_ENV"
+          cd "$APP"
+          LIB_TGZ="$(find "${TARBALLS_DIR}" -maxdepth 1 -name 'getknext-lib-*.tgz' | sort | tail -n1)"
+          DB_TGZ="$(find "${TARBALLS_DIR}" -maxdepth 1 -name 'getknext-db-*.tgz' | sort | tail -n1)"
+          CORE_TGZ="$(find "${TARBALLS_DIR}" -maxdepth 1 -name 'getknext-core-*.tgz' | sort | tail -n1)"
+          npm pkg set "devDependencies.@getknext/core=file:${CORE_TGZ}" "dependencies.@getknext/lib=file:${LIB_TGZ}" \
+            "overrides.@getknext/db=file:${DB_TGZ}" "overrides.@getknext/lib=file:${LIB_TGZ}"
+          # The module under test: a side effect on evaluation, so "loaded lazily" is observable.
+          mkdir -p plugins src/app/api/plugin
+          printf '%s\n' \
+            'globalThis.__knextPluginEvaluated = (globalThis.__knextPluginEvaluated ?? 0) + 1;' \
+            'export default "hello-from-included-module";' > plugins/greet.js
+          # A node_modules tree INSIDE the included directory: knext must not embed it.
+          mkdir -p plugins/node_modules/dep
+          printf '%s\n' 'export default "must-not-be-embedded-7c1e";' > plugins/node_modules/dep/index.js
+          cp "$GITHUB_WORKSPACE/.github/bun-patched-e2e/plugin-route.ts" src/app/api/plugin/route.ts
+          # Opt in: the patched toolchain + a DIRECTORY include (same option as the stock path).
+          node -e '
+            const fs = require("fs");
+            const p = "knext.config.ts";
+            const s = fs.readFileSync(p, "utf8");
+            const anchor = "  build: \"vinext\",";
+            if (s.split(anchor).length !== 2) { console.error("anchor not found exactly once"); process.exit(1); }
+            fs.writeFileSync(p, s.replace(anchor, anchor + "\n  compile: { bun: \"knext-patched\", include: [\"plugins\"] },"));
+          '
+          grep -n 'compile:' knext.config.ts
+          npm install --no-audit --no-fund
+          bun install --save-text-lockfile
+          test -f bun.lock
+
+      - name: Seed knext's cache with it (knext's own sha256 check still decides)
+        if: ${{ inputs.toolchain-artifact != '' }}
+        env:
+          KNEXT_CACHE_DIR: ${{ runner.temp }}/knext-cache
+        run: |
+          set -euo pipefail
+          tag="$(sed -n 's/^    tag: "\(bun-patched-[^"]*\)",$/\1/p' packages/kn-next/src/cli/bun-toolchain.ts)"
+          test "$(printf '%s\n' "$tag" | grep -c .)" = 1
+          mkdir -p "$KNEXT_CACHE_DIR/bun-patched/$tag"
+          install -m 0755 "$RUNNER_TEMP/toolchain-under-test/bun-linux-x64" "$KNEXT_CACHE_DIR/bun-patched/$tag/bun-linux-x64"
+          echo "SEEDED_TAG=$tag" >> "$GITHUB_ENV"
+
+      - name: knext build (vite build -> patched-Bun compile, bytecode)
+        working-directory: ${{ env.APP }}
+        env:
+          KNEXT_CACHE_DIR: ${{ runner.temp }}/knext-cache
+        run: |
+          set -euo pipefail
+          node_modules/.bin/knext build --skip-smoke 2>&1 | tee build.log
+          grep -q 'knext-patched Bun toolchain (sha256 verified)' build.log
+          grep -q '\[knext compile\] wrote .*(bytecode: on' build.log
+          # The SAME checked plan as the stock path, embedded through the patched Bun's native --include.
+          grep -q '\[knext compile\] compile.include: embedded 1 module(s): plugins/greet.js' build.log
+          grep -q '\[knext compile\] compile.include: via native --include (knext-patched Bun)' build.log
+          if grep -q 'must-not-be-embedded-7c1e' knext-exec-linux-x64; then
+            echo "::error::a node_modules file under the included directory was embedded"; exit 1
+          fi
+          if [ -n "${SEEDED_TAG:-}" ]; then
+            # Release gate: the binary knext used is the seeded draft binary it verified.
+            echo "compiled with the seeded release candidate for $SEEDED_TAG" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+          test -f knext-exec-linux-x64
+          PATCHED="$(find "$KNEXT_CACHE_DIR/bun-patched" -type f -name 'bun-linux-x64')"
+          "$PATCHED" --revision | tee patched-revision.txt
+          # The included module's text is IN the executable.
+          grep -c 'hello-from-included-module' knext-exec-linux-x64
+          # Which Bun the SHIPPED (musl) executable runs on: expected the stock 1.4.2 base Bun
+          # downloads for a cross-target, not the patched (glibc) compiler. Evidence, not a gate:
+          # BUN_BE_BUN makes a compiled executable act as its own Bun.
+          docker run --rm -v "$PWD:/w:ro" -e BUN_BE_BUN=1 \
+            alpine:3.23@sha256:85fe1e81d6758c208f3e1eed4338a1997e19d4be002d4dd32d3100c9a8c010a0 \
+            sh -c 'apk add --no-cache libstdc++ libgcc >/dev/null; timeout 20 /w/knext-exec-linux-x64 --revision' \
+            | tee shipped-revision.txt || true
+          echo "compiler: $(cat patched-revision.txt) / shipped base: $(cat shipped-revision.txt)" | tee -a "$GITHUB_STEP_SUMMARY"
+          # Compile step only: the shipped executable must run on STOCK 1.4.2 (744846f84), not on
+          # the patched compiler (measured on the first proof run: 1.4.2+744846f84 vs +cc97fa834).
+          grep -qx '1.4.2+744846f84' shipped-revision.txt
+          ! grep -qxF "$(cat shipped-revision.txt)" patched-revision.txt
+
+      - name: docker build (the shipped musl image), boot, 200, lazy include
+        working-directory: ${{ env.APP }}
+        run: |
+          set -euo pipefail
+          docker build -t patched-proof:e2e . 2>&1 | tail -n 20
+          # No copy of the plugin on disk in the image: it can only come from the executable.
+          CID0="$(docker create patched-proof:e2e)"
+          if docker export "$CID0" | tar -t | grep -E '(^|/)plugins/greet\.js$'; then
+            echo "::error::plugins/greet.js is on disk in the image — the proof would not discriminate"; exit 1
+          fi
+          docker rm "$CID0" >/dev/null
+          CID="$(docker run -d -p 8099:3000 patched-proof:e2e)"
+          CODE=000
+          for _ in $(seq 1 30); do
+            CODE="$(curl -s -o /tmp/health.json -w '%{http_code}' http://127.0.0.1:8099/api/health || true)"
+            [ "${CODE}" = "200" ] && break
+            sleep 1
+          done
+          echo "GET /api/health -> ${CODE}"
+          PCODE="$(curl -s -o /tmp/plugin.json -w '%{http_code}' http://127.0.0.1:8099/api/plugin || true)"
+          echo "GET /api/plugin -> ${PCODE}: $(cat /tmp/plugin.json)"
+          docker logs "${CID}" > /tmp/container.log 2>&1 || true
+          docker stop "${CID}" >/dev/null 2>&1 || true
+          if [ "${CODE}" != "200" ] || [ "${PCODE}" != "200" ]; then
+            cat /tmp/container.log >&2 || true
+            echo "::error::health ${CODE}, plugin ${PCODE}"; exit 1
+          fi
+          # Lazy: not evaluated before the first import (startup + the health request), once after.
+          node -e '
+            const r = JSON.parse(require("fs").readFileSync("/tmp/plugin.json", "utf8"));
+            if (r.before !== 0 || r.after !== 1 || r.value !== "hello-from-included-module") {
+              console.error("not a lazy load from the executable:", r); process.exit(1);
+            }
+            console.log("lazy include proven:", JSON.stringify(r));
+          ' | tee -a "$GITHUB_STEP_SUMMARY"

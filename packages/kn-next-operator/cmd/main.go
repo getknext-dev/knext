@@ -52,6 +52,7 @@ import (
 	"github.com/AhmedElBanna80/knext/packages/kn-next-operator/internal/controller"
 	webhookv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/internal/webhook/v1alpha1"
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
+	servingv1beta1 "knative.dev/serving/pkg/apis/serving/v1beta1"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -65,6 +66,7 @@ func init() {
 
 	utilruntime.Must(appsv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(servingv1.AddToScheme(scheme))
+	utilruntime.Must(servingv1beta1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
 }
 
@@ -179,10 +181,11 @@ func main() {
 	}
 
 	if err := (&controller.NextAppReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("nextapp-controller"),
-		Cleaner:  controller.NewDefaultCleaner(),
+		Client:    mgr.GetClient(),
+		Scheme:    mgr.GetScheme(),
+		APIReader: mgr.GetAPIReader(),
+		Recorder:  mgr.GetEventRecorderFor("nextapp-controller"),
+		Cleaner:   controller.NewDefaultCleaner(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "NextApp")
 		os.Exit(1)

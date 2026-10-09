@@ -1,0 +1,143 @@
+knext bundled fix for vinext 1.0.1 (dist output)
+Upstream: https://github.com/cloudflare/vinext/pull/3689
+What it fixes: a server action's redirect() answered with HTTP 303 whenever the action was invoked via fetch (the client-side JS router path) and the target route wasn't an already-forwarded action, an ancestor/stale-sibling route, or a different runtime from the current route -- handleServerActionRscRequest's shouldUseForwardedActionRedirectStatus() only chose 200 in those specific cases. Next.js' own action-handler.ts answers every fetch-invoked action's redirect with 200 unconditionally (vercel/next.js#96310) and reserves 303 for the no-JS, progressive-enhancement form-POST path (handleProgressiveServerActionRequest here, left untouched and still correctly 303). The client already treats a 303 RSC response as if it were 200 before decoding it (app-browser-server-action-client.js, the `fetchResponse.status === 303` rewrap) as a defensive skew-protection shim for an older, unpatched server -- this fix removes the need for that rewrap on a patched server, but keeps the shim itself in place. Security: this only changes which status code accompanies a response that already carries no Location header and whose redirect target already passed vinext's existing same-origin/basePath checks (resolveInternalActionRedirectTarget, dispatchActionRedirectTarget's same-origin guard on followed redirects) -- those checks are unmodified, so no open-redirect surface changes; an external redirect target still only reaches the browser via the ACTION_REDIRECT_HEADER value the client already validates, never via a Location header or an auto-followed 3xx.
+Includes the maintainer's follow-ups: a header-only fetch-action redirect is marked config-headers-applied (here and in app-action-forwarding.js) so finalization cannot apply the source headers a second time at 200.
+Retire: delete this file (and its manifest entry) when the pinned vinext is >= the first
+release that includes cloudflare/vinext#3689.
+Ported by hand from the upstream src change to the published 1.0.1 dist files.
+Applied by `knext vinext-patches` (runs from the app's postinstall and before `knext build`).
+
+--- a/dist/server/app-action-forwarding.js
++++ b/dist/server/app-action-forwarding.js
+@@ -4,6 +4,7 @@
+ import { RequestCookies, ResponseCookies } from "../shims/server.js";
+ import { attachRequestCfMetadata, processMiddlewareHeaders, validateCsrfOrigin } from "./request-pipeline.js";
+ import { mergeMiddlewareResponseHeaders } from "./middleware-response-headers.js";
++import { markAppRscResponseConfigHeadersApplied } from "./app-rsc-response-finalizer.js";
+ import { getSetCookieName } from "./cookie-utils.js";
+ import "../shims/internal/cookies.js";
+ import { createServerActionNotFoundResponse, getServerActionNotFoundMessage } from "./server-action-not-found.js";
+@@ -71,11 +72,13 @@
+ 	for (const [key, value] of response.headers) if (!ACTION_FORWARD_FORBIDDEN_HEADERS.has(key.toLowerCase())) headers.set(key, value);
+ 	for (const setCookie of response.headers.getSetCookie()) headers.append("set-cookie", setCookie);
+ 	const preserveResponseStatus = response.headers.get("x-nextjs-action-not-found") === "1" || response.headers.has("x-action-redirect");
+-	return new Response(response.body, {
++	const filteredResponse = new Response(response.body, {
+ 		headers,
+ 		status: preserveResponseStatus ? response.status : sourceMiddlewareStatus ?? response.status,
+ 		statusText: response.statusText
+ 	});
++	const isHeaderOnlyActionRedirect = response.headers.has("x-action-redirect") && !response.headers.get("content-type")?.startsWith("text/x-component");
++	return isHeaderOnlyActionRedirect ? markAppRscResponseConfigHeadersApplied(filteredResponse) : filteredResponse;
+ }
+ function emptyActionForwardResponse(middlewareContext) {
+ 	const headers = new Headers(middlewareContext.headers ?? void 0);
+--- a/dist/server/app-server-action-execution.js
++++ b/dist/server/app-server-action-execution.js
+@@ -2,8 +2,7 @@
+ import { buildRequestHeadersFromMiddlewareResponse } from "../utils/middleware-request-headers.js";
+ import { parseEdgeRequestCookieHeader } from "../utils/parse-cookie.js";
+ import { isExternalUrl } from "../utils/external-url.js";
+-import { splitPathSegments } from "../routing/utils.js";
+-import { addBasePathToPathname, hasBasePath, stripBasePath } from "../utils/base-path.js";
++import { addBasePathToPathname, hasBasePath } from "../utils/base-path.js";
+ import { NEXT_ROUTER_STATE_TREE_HEADER, VINEXT_RSC_VARY_HEADER } from "./app-rsc-vary.js";
+ import { ACTION_FORWARDED_HEADER, ACTION_REDIRECT_HEADER, ACTION_REDIRECT_STATUS_HEADER, ACTION_REDIRECT_TYPE_HEADER, ACTION_REVALIDATED_HEADER, VINEXT_RENDERED_PATH_AND_SEARCH_HEADER } from "./headers.js";
+ import { internalServerErrorResponse, payloadTooLargeResponse } from "./http-error-responses.js";
+@@ -273,6 +272,18 @@
+ 	nextHeaders.delete("Vary");
+ 	return nextHeaders;
+ }
++/**
++* A fetch-action redirect the client follows itself. `redirectHeaders` already
++* carries the source path's config headers, so mark them applied: at 200,
++* finalization would otherwise apply them again (duplicate Set-Cookie, or a
++* Flight Content-Type restored onto the empty body).
++*/
++function createHeaderOnlyActionRedirectResponse(redirectHeaders) {
++	return markAppRscResponseConfigHeadersApplied(new Response(null, {
++		status: 200,
++		headers: withoutRscBodyHeaders(redirectHeaders)
++	}));
++}
+ function isReadableStreamBody(body) {
+ 	return typeof ReadableStream !== "undefined" && body instanceof ReadableStream;
+ }
+@@ -449,29 +460,6 @@
+ 	} catch {
+ 		return null;
+ 	}
+-}
+-function isAncestorRouteRedirect(targetPathname, currentPathname) {
+-	return targetPathname !== "/" && currentPathname.startsWith(`${targetPathname}/`);
+-}
+-function isStaleChildSiblingRouteRedirect(targetPathname, currentPathname) {
+-	const targetSegments = splitPathSegments(targetPathname);
+-	const currentSegments = splitPathSegments(currentPathname);
+-	if (targetSegments.length === 0 || currentSegments.length <= targetSegments.length) return false;
+-	let commonPrefixLength = 0;
+-	const maxPrefixLength = Math.min(targetSegments.length, currentSegments.length);
+-	while (commonPrefixLength < maxPrefixLength && targetSegments[commonPrefixLength] === currentSegments[commonPrefixLength]) commonPrefixLength++;
+-	return commonPrefixLength > 0 && commonPrefixLength < targetSegments.length;
+-}
+-function normalizeRuntime(runtime) {
+-	if (runtime === "edge" || runtime === "experimental-edge") return "edge";
+-	return "nodejs";
+-}
+-function shouldUseForwardedActionRedirectStatus(options) {
+-	if (options.actionWasForwarded) return true;
+-	if (isAncestorRouteRedirect(options.targetPathname, options.currentPathname)) return true;
+-	if (isStaleChildSiblingRouteRedirect(options.targetPathname, options.currentPathname)) return true;
+-	if (!options.currentRoute || !options.targetRoute || !options.resolveRouteRuntime) return false;
+-	return normalizeRuntime(options.resolveRouteRuntime(options.currentRoute)) !== normalizeRuntime(options.resolveRouteRuntime(options.targetRoute));
+ }
+ function getActionHttpFallbackStatus(error) {
+ 	const digest = getNextErrorDigest(error);
+@@ -847,13 +835,15 @@
+ 			for (const cookie of actionPendingCookies) redirectHeaders.append("Set-Cookie", cookie);
+ 			if (actionDraftCookie) redirectHeaders.append("Set-Cookie", actionDraftCookie);
+ 			setActionRevalidatedHeader(redirectHeaders, actionRevalidationKind);
++			// Every fetch-action redirect below answers 200, never 303: the client
++			// router navigates from ACTION_REDIRECT_HEADER, and a body-carrying 303
++			// without a Location is mangled by some intermediaries. Only the no-JS
++			// form path (handleProgressiveServerActionRequest) answers 303. Ported
++			// from Next.js action-handler.ts (vercel/next.js#96310, v16.3.0).
+ 			const redirectTarget = resolveInternalActionRedirectTarget(actionRedirectUrl, options.request.url, options.basePath ?? "");
+ 			if (!redirectTarget) {
+ 				options.clearRequestContext();
+-				return new Response(null, {
+-					status: 303,
+-					headers: withoutRscBodyHeaders(redirectHeaders)
+-				});
++				return createHeaderOnlyActionRedirectResponse(redirectHeaders);
+ 			}
+ 			let targetResponse = null;
+ 			try {
+@@ -881,25 +871,11 @@
+ 			if (!targetResponse || !targetResponse.headers.get("content-type")?.startsWith("text/x-component") || !targetResponse.body) {
+ 				targetResponse?.body?.cancel().catch(() => {});
+ 				options.clearRequestContext();
+-				return new Response(null, {
+-					status: 303,
+-					headers: withoutRscBodyHeaders(redirectHeaders)
+-				});
++				return createHeaderOnlyActionRedirectResponse(redirectHeaders);
+ 			}
+ 			mergeActionRedirectTargetHeaders(redirectHeaders, targetResponse.headers);
+-			const targetPathname = stripBasePath(redirectTarget.pathname, options.basePath ?? "");
+-			const targetMatch = options.matchRoute(targetPathname);
+-			const currentMatch = options.currentRouteMatch;
+-			const redirectResponseStatus = shouldUseForwardedActionRedirectStatus({
+-				actionWasForwarded,
+-				currentPathname: options.cleanPathname,
+-				currentRoute: currentMatch?.route ?? null,
+-				resolveRouteRuntime: options.resolveRouteRuntime,
+-				targetPathname,
+-				targetRoute: targetMatch?.route ?? null
+-			}) ? 200 : 303;
+ 			return markAppRscResponseConfigHeadersApplied(createServerActionRscResponse(targetResponse.body, {
+-				status: redirectResponseStatus,
++				status: 200,
+ 				headers: redirectHeaders
+ 			}, options.clearRequestContext));
+ 		}

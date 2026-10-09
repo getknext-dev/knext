@@ -42,8 +42,17 @@ export default defineConfig({
       // app silently falls back to a per-pod in-memory cache and the
       // provisioned Redis stays empty, which is exactly how the gap shipped
       // unnoticed once.
+      //
+      // The adapter is chosen by runtime so the Redis client is resolved
+      // statically: on node a literal ioredis import that nitro's tracing
+      // ships; on bun the built-in client (ioredis cannot run in the compiled
+      // executable).
       cache: {
-        data: { adapter: '@getknext/core/internal/vinext-cache-adapter' },
+        data: {
+          adapter: onNode
+            ? '@getknext/core/internal/vinext-cache-adapter-node'
+            : '@getknext/core/internal/vinext-cache-adapter-bun',
+        },
       },
     }),
     nitro({

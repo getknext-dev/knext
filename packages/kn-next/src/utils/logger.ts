@@ -16,6 +16,7 @@
 
 import { createRequire } from "node:module";
 import type { Logger, LoggerOptions } from "pino";
+import { getLogDestination } from "./log-destination";
 
 /** The callable pino factory (its default export), typed for the lazy require. */
 type PinoFactory = (opts?: LoggerOptions) => Logger;
@@ -29,6 +30,8 @@ const requirePino = createRequire(import.meta.url);
 
 /** The lazily-instantiated root pino logger (created on first emit). */
 let rootLogger: Logger | undefined;
+/** The destination `rootLogger` was built for; a change forces a rebuild. */
+let rootDestination = getLogDestination();
 
 /**
  * Drop the memoised root logger and re-read the env it was built from (tests).
@@ -49,22 +52,39 @@ export function __resetLoggerForTests(): void {
 
 /** Instantiate (once) the root pino logger with the framework's exact config. */
 function getRoot(): Logger {
-    if (rootLogger === undefined) {
-        const pino = requirePino("pino") as PinoFactory;
-        rootLogger = pino({
-            name: "kn-next",
-            level: process.env.LOG_LEVEL ?? (isProduction ? "info" : "debug"),
-            transport: isProduction
-                ? undefined
-                : {
-                      target: "pino-pretty",
-                      options: {
-                          colorize: true,
-                          translateTime: "HH:MM:ss",
-                          ignore: "pid,hostname",
-                      },
-                  },
-        });
+    if (rootLogger === undefined || rootDestination !== getLogDestination()) {
+        rootDestination = getLogDestination();
+        const pino = requirePino("pino") as PinoFactory & {
+            destination: (fd: number) => unknown;
+        };
+        // stderr keeps stdout reserved for a command's real output
+        // (`deploy --dry-run` prints the NextApp CR there); see
+        // log-destination.ts. Default is unchanged: stdout.
+        const toStderr = rootDestination === "stderr";
+        const level =
+            process.env.LOG_LEVEL ?? (isProduction ? "info" : "debug");
+        if (isProduction) {
+            rootLogger = toStderr
+                ? (pino as unknown as (o: LoggerOptions, d: unknown) => Logger)(
+                      { name: "kn-next", level },
+                      pino.destination(2),
+                  )
+                : pino({ name: "kn-next", level });
+        } else {
+            rootLogger = pino({
+                name: "kn-next",
+                level,
+                transport: {
+                    target: "pino-pretty",
+                    options: {
+                        colorize: !toStderr || process.stderr.isTTY === true,
+                        translateTime: "HH:MM:ss",
+                        ignore: "pid,hostname",
+                        ...(toStderr ? { destination: 2 } : {}),
+                    },
+                },
+            });
+        }
     }
     return rootLogger;
 }
@@ -119,9 +139,12 @@ export const logger: Logger = lazyLogger(getRoot);
  */
 export function createLogger(bindings: Record<string, string>): Logger {
     let child: Logger | undefined;
+    let childOf: Logger | undefined;
     return lazyLogger(() => {
-        if (child === undefined) {
-            child = getRoot().child(bindings);
+        const root = getRoot();
+        if (child === undefined || childOf !== root) {
+            child = root.child(bindings);
+            childOf = root;
         }
         return child;
     });

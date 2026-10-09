@@ -18,6 +18,25 @@
  * throws `Cannot find module '<pkg>'` once `.output/server/node_modules` is not
  * beside it.
  *
+ * A THIRD shape (cluster C11, `streaming-ssr`'s pages-router edge-runtime
+ * pages): when rolldown merges several originally-separate modules into one
+ * chunk (nitro's `inlineDynamicImports`/no-code-splitting output) and more than
+ * one of them calls `createRequire(import.meta.url)`, each module's OWN
+ * `import.meta.url` cannot survive the merge as a bare token — it is hoisted
+ * into a per-module getter so each merged module keeps its own file identity:
+ *
+ *     var __require = e({ get value() { return t.url } }.value);
+ *
+ * (`t.url` stands in for that one module's `import.meta.url`). The binding
+ * created this way is just as real a `require` as the other two shapes — it is
+ * recognized as one, and its creation expression is wrapped the same way — but
+ * nothing about the PACKAGE it is later called with (`react`, bundled directly
+ * by nitro rather than traced to `.output/server/node_modules`, since nitro
+ * never left it external here) was ever staged beside the binary. See
+ * `planRuntimeRequires` in vinext-compile.mjs for the embed side of this: a
+ * spec reached through any of the three binding shapes is embeddable once it
+ * resolves from the entry's own directory, sidecar or not.
+ *
  * ## Why the BINDING is rewritten, not the call sites
  *
  * The calls live in other modules than the binding (the multi-chunk case), and
@@ -47,6 +66,15 @@ const IDENT = "[A-Za-z_$][\\w$]*";
  */
 const COMMENT = "/\\*[^*]*\\*+(?:[^*/][^*]*\\*+)*/";
 const GAP = `(?:\\s|${COMMENT})*`;
+
+/**
+ * A synthetic `requireBindings`/`literalCalls`/`nonLiteralCallees` key for a
+ * create-and-immediately-call site (`createRequire(getterShape)("spec")`,
+ * measured on the real file-manager build — no named binding at all exists
+ * to key on). NUL-prefixed: no real JS identifier can ever spell it, so it
+ * can never collide with a real callee name, however the module is minified.
+ */
+const DIRECT_CALL_MARKER = "\0knext-direct-require-call";
 
 function escapeRe(s) {
     return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -189,6 +217,115 @@ function isDefinitionHead(src, nameIndex, paren) {
     return close >= 0 && SAME_LINE_BRACE.test(src.slice(close + 1, close + 256));
 }
 
+/** The longest run of preceding sibling text `isDiscardedPosition` scans. */
+const MAX_SEQUENCE_SCAN = 4096;
+
+/**
+ * Whether the expression starting at `start` is in a position whose value is
+ * DISCARDED at statement level: an expression statement on its own, or an
+ * element of a statement-level comma sequence. Proven from the tokens before
+ * it, scanning backwards over preceding sequence siblings to the statement
+ * boundary:
+ *   - start of source, `;`, `{` (a block or arrow body — never `${`, a
+ *     template substitution whose value is used), or `}` ends the scan: the
+ *     expression starts a statement.
+ *   - `,` must be preceded by a plain call sibling `a.b(...)` (identifier
+ *     chain + balanced parens holding no string, template, regex or comment
+ *     — anything this scan cannot lex conservatively bails). Rolldown's real
+ *     per-chunk init is exactly this: `{init_a(),init_b(),createRequire(x),…}`.
+ *   - anything else — `return`, `=`, `:`, `(`, `[`, `?`, `=>`, a keyword, a
+ *     non-call sibling — is NOT provably discarded.
+ * Paired with a following `,`/`;`/`}`/end (the caller's `discardedRe`), an
+ * element that is NOT last is discarded by the comma operator and a last one
+ * is the value of an expression statement. Conservative by construction: a
+ * false "not discarded" only costs a warning (an error under strict mode);
+ * a false "discarded" would silently lose one.
+ *
+ * @param {string} src
+ * @param {number} start
+ * @returns {boolean}
+ */
+function isDiscardedPosition(src, start) {
+    const isWs = (c) => c === " " || c === "\t" || c === "\n" || c === "\r";
+    const isIdent = (c) => c !== undefined && /[\w$]/.test(c);
+    const floor = Math.max(0, start - MAX_SEQUENCE_SCAN);
+    let i = start - 1;
+    const skipWs = () => {
+        while (i >= floor && isWs(src[i])) i--;
+    };
+    for (;;) {
+        skipWs();
+        if (i < 0) return true;
+        if (i < floor) return false;
+        const c = src[i];
+        if (c === ";" || c === "}" || c === "{") {
+            // A `;`/`{`/`}` inside a `//` comment is not a
+            // boundary (`const r = // note;\n e(x)` hands the value on).
+            if (!isOutsideLineComment(src, i)) return false;
+            return c !== "{" || src[i - 1] !== "$";
+        }
+        if (c !== ",") return false;
+        // A `,`: the previous sibling must be a plain call `a.b(...)`.
+        i--;
+        skipWs();
+        if (src[i] !== ")") return false;
+        let depth = 0;
+        for (; i >= floor; i--) {
+            const ch = src[i];
+            if (ch === '"' || ch === "'" || ch === "`" || ch === "/") return false;
+            if (ch === ")" || ch === "]" || ch === "}") depth++;
+            else if (ch === "(" || ch === "[" || ch === "{") {
+                depth--;
+                if (depth === 0) break;
+            }
+        }
+        if (i < floor) return false;
+        i--; // past the call's `(`
+        skipWs();
+        // The callee: an identifier chain `a.b.c`.
+        let sawIdent = false;
+        for (;;) {
+            const end = i;
+            while (i >= floor && isIdent(src[i])) i--;
+            if (i === end) return false;
+            const word = src.slice(i + 1, end + 1);
+            if (/^\d/.test(word) || SEQUENCE_STOP_WORDS.has(word)) return false;
+            sawIdent = true;
+            skipWs();
+            if (src[i] !== ".") break;
+            if (src[i - 1] === ".") return false; // `...spread`
+            i--;
+            skipWs();
+        }
+        if (!sawIdent) return false;
+    }
+}
+
+/**
+ * Whether `src[at]` is provably NOT inside a `//` line comment: true only
+ * when no `//` appears on its line before it. A `//` anywhere earlier on the
+ * line — a real comment, or one inside a string or regex this cannot tell
+ * apart (a line may begin inside a multi-line template, so lexing from the
+ * line start is not reliable either) — answers false: cannot tell. Only line
+ * comments need this: a `/* *\/` comment ends in `/`, which the scan meets
+ * (and bails on) before any `;`/`{`/`}` inside it.
+ *
+ * @param {string} src
+ * @param {number} at
+ * @returns {boolean}
+ */
+function isOutsideLineComment(src, at) {
+    const lineStart = src.lastIndexOf("\n", at - 1) + 1;
+    return !src.slice(lineStart, at).includes("//");
+}
+
+/** Words that, as a "callee", mean the call is not a plain sequence sibling. */
+const SEQUENCE_STOP_WORDS = new Set([
+    "return", "throw", "typeof", "void", "delete", "new", "await", "yield",
+    "in", "of", "instanceof", "case", "if", "while", "for", "switch", "catch",
+    "with", "function", "else", "do",
+]);
+
 /**
  * Static facts about one server-output module.
  *
@@ -217,31 +354,127 @@ export function analyzeServerModule(src) {
         }
     }
 
-    // Bindings: `X = alias(import.meta.url)` and rolldown's
-    // `X = (() => alias(import.meta.url))()`, with optional comments.
+    // Bindings: `X = alias(import.meta.url)`, rolldown's
+    // `X = (() => alias(import.meta.url))()`, and the per-module-merge getter
+    // indirection (cluster C11 — see this file's header): `X =
+    // alias({get value(){return <ident>.url}}.value)`.
     const requireBindings = new Set();
-    let recognized = 0;
+    // The FULL span of every recognized `IDENT = <create-expr>` match
+    // (including the IIFE wrapper's own parens in that shape), so the
+    // classification loop below can tell "this occurrence is the one INSIDE
+    // a recognized assignment" apart from "this occurrence sits bare,
+    // without one" — a plain look at what comes right AFTER the bare
+    // create-expression cannot do that: the IIFE shape's create-expression
+    // is immediately followed by `)` (its own wrapper's close), the exact
+    // same character that follows a create-expression handed bare to an
+    // ENCLOSING call (`use(createRequire(x))`) — which must NOT be treated
+    // as recognized (#1877 round-2 review: that was flagged as recognized
+    // too, before this span check existed).
+    const bindingRanges = [];
+    // Populated here, before the general literal-call scan below, so a
+    // CREATE-AND-IMMEDIATELY-CALL site (no named binding at all — see
+    // DIRECT_CALL_MARKER below) lands in the SAME map the general scan adds
+    // to, under a marker no real identifier can ever spell.
+    const literalCalls = new Map();
+    const nonLiteralCallees = new Set();
     for (const alias of aliases) {
         const call = `${escapeRe(alias)}${GAP}\\(${GAP}import\\.meta\\.url${GAP}\\)`;
+        const getterCall =
+            `${escapeRe(alias)}${GAP}\\(${GAP}\\{${GAP}get${GAP}value${GAP}\\(${GAP}\\)` +
+            `${GAP}\\{${GAP}return${GAP}${IDENT}${GAP}\\.${GAP}url${GAP}\\}${GAP}\\}${GAP}\\.${GAP}value${GAP}\\)`;
         const bindingRe = new RegExp(
-            `(?<![\\w$.])(${IDENT})${GAP}=${GAP}(?:\\(${GAP}\\(${GAP}\\)${GAP}=>${GAP}${call}${GAP}\\)${GAP}\\(${GAP}\\)|${call})`,
+            `(?<![\\w$.])(${IDENT})${GAP}=${GAP}(?:\\(${GAP}\\(${GAP}\\)${GAP}=>${GAP}${call}${GAP}\\)${GAP}\\(${GAP}\\)|${call}|${getterCall})`,
             "g",
         );
         for (const m of src.matchAll(bindingRe)) {
             requireBindings.add(m[1]);
-            recognized++;
+            bindingRanges.push([m.index, m.index + m[0].length]);
         }
     }
-    // Any alias(import.meta.url) call the binding patterns did not account for
-    // is a shape this analysis cannot see through.
+    // Every `alias(import.meta.url)` / `alias(getter-indirection)` call NOT
+    // already inside a `bindingRanges` span, classified by what immediately
+    // follows it. Real rolldown output (measured against the real
+    // file-manager build) creates and uses the require function in the SAME
+    // expression, with no named binding at all:
+    //   - `createRequire(getterShape)(` SPEC `)`         — direct call
+    //   - `createRequire(getterShape).resolve(` SPEC `)` — direct resolve
+    //   - `createRequire(getterShape)` alone, discarded in a comma/sequence
+    //     expression or a block's last statement — rolldown's per-chunk
+    //     module-init boilerplate sets one up defensively whether or not
+    //     THIS chunk ends up calling it — inert, nothing to embed, not a gap
+    // A shape matching none of these — including one HANDED to an enclosing
+    // call this analysis cannot see into (`use(createRequire(x))`) — is the
+    // one case left unaccounted for, and THAT is what `unrecognizedBinding`
+    // must mean.
     let aliasCalls = 0;
+    let accountedFor = 0;
+    const literalArgRe = new RegExp(`^${GAP}(["'\`])([^"'\`$\\\\\\s]+)\\1${GAP}\\)`);
+    const invokeRe = new RegExp(`^${GAP}\\(`);
+    const resolveInvokeRe = new RegExp(`^${GAP}\\.${GAP}resolve${GAP}\\(`);
+    // Followed by `,`/`;`/`}` (or end of source) is NECESSARY for a discarded
+    // value but not sufficient: `return e(x);`, `use(e(x), 1)` and
+    // `{r: e(x)}` all hand the require on. `isDiscardedPosition` supplies the
+    // other half — see it. `)` and `]` never qualify: a bare create followed
+    // by either sits inside an enclosing call, group or array literal.
+    const discardedRe = new RegExp(`^(?:${GAP}[,;}]|$)`);
     for (const alias of aliases) {
-        const anyCall = new RegExp(
-            `(?<![\\w$.])${escapeRe(alias)}${GAP}\\(${GAP}import\\.meta\\.url${GAP}\\)`,
-            "g",
-        );
-        aliasCalls += [...src.matchAll(anyCall)].length;
+        const call = `${escapeRe(alias)}${GAP}\\(${GAP}import\\.meta\\.url${GAP}\\)`;
+        const getterCall =
+            `${escapeRe(alias)}${GAP}\\(${GAP}\\{${GAP}get${GAP}value${GAP}\\(${GAP}\\)` +
+            `${GAP}\\{${GAP}return${GAP}${IDENT}${GAP}\\.${GAP}url${GAP}\\}${GAP}\\}${GAP}\\.${GAP}value${GAP}\\)`;
+        const anyCall = new RegExp(`(?<![\\w$.])(?:${call}|${getterCall})`, "g");
+        for (const m of src.matchAll(anyCall)) {
+            aliasCalls++;
+            if (bindingRanges.some(([s, e]) => m.index >= s && m.index < e)) {
+                accountedFor++;
+                continue;
+            }
+            const after = src.slice(m.index + m[0].length);
+            const invoke = invokeRe.exec(after);
+            if (invoke) {
+                accountedFor++;
+                const argStart = invoke[0].length;
+                const lit = literalArgRe.exec(after.slice(argStart));
+                if (lit) {
+                    const spec = lit[2];
+                    if (isBareNonBuiltin(spec)) {
+                        requireBindings.add(DIRECT_CALL_MARKER);
+                        const set = literalCalls.get(DIRECT_CALL_MARKER) ?? new Set();
+                        set.add(spec);
+                        literalCalls.set(DIRECT_CALL_MARKER, set);
+                    }
+                } else {
+                    requireBindings.add(DIRECT_CALL_MARKER);
+                    nonLiteralCallees.add(DIRECT_CALL_MARKER);
+                }
+                continue;
+            }
+            // `.resolve(spec)` is an EXISTENCE PROBE, not a load: Node's own
+            // `require.resolve` idiom (`try { require.resolve(x) } catch {}`,
+            // measured verbatim in @getknext/lib's logger, probing for the
+            // optional, deliberately-production-absent `pino-pretty`) throws
+            // INSIDE the probe and is normally caught right there — unlike a
+            // bare call, the enclosing module does not crash merely because
+            // the target is missing. Treating it the same as a real call
+            // regressed the self-contained build (#1877 round 3): recognizing
+            // this shape at all made a correctly, intentionally unresolvable
+            // optional dependency's probe fail `--self-contained`/
+            // `KNEXT_COMPILE_STRICT_REQUIRES=1` the same way a REAL missing
+            // load would. So it is accounted for (never the unrecognized-
+            // binding error) but deliberately NOT fed into
+            // literalCalls/nonLiteralCallees: never embedded, never warned
+            // about, never strict-failed.
+            if (resolveInvokeRe.test(after)) {
+                accountedFor++;
+                continue;
+            }
+            if (discardedRe.test(after) && isDiscardedPosition(src, m.index)) {
+                accountedFor++;
+                continue;
+            }
+        }
     }
+    const recognized = accountedFor;
 
     // `export { a as b }` → a → [b]
     const exportsMap = new Map();
@@ -263,8 +496,8 @@ export function analyzeServerModule(src) {
         imports.push({ from: m[3], names: new Map(parseSpecifierList(m[1])) });
     }
 
-    // `callee(<literal bare spec>)` → callee → specs
-    const literalCalls = new Map();
+    // `callee(<literal bare spec>)` → callee → specs (merges into the map
+    // DIRECT_CALL_MARKER entries were already added to, above).
     const callRe = new RegExp(
         `(?<![\\w$.])(${IDENT})${GAP}\\(${GAP}(["'\`])([^"'\`$\\\\\\s]+)\\2${GAP}\\)`,
         "g",
@@ -283,17 +516,16 @@ export function analyzeServerModule(src) {
     // the require binding is a one-letter name that bundled libraries reuse for
     // their own functions and parameters, so a hit on such a name is NOT proof
     // of a dynamic require. declarationCounts below lets the caller tell the
-    // two apart.
-    const nonLiteralCallees = new Set();
+    // two apart. (merges into the set DIRECT_CALL_MARKER was already added to, above.)
     // Sticky, positioned at each call's `(`: no per-call copy of a multi-MB bundle.
-    const literalArgRe = new RegExp(`${GAP}(["'\`])([^"'\`$\\\\\\s]+)\\1${GAP}\\)`, "y");
+    const stickyLiteralArgRe = new RegExp(`${GAP}(["'\`])([^"'\`$\\\\\\s]+)\\1${GAP}\\)`, "y");
     // Not every `name(` is a call, but only a POSITIVELY identified definition
     // head is skipped (isDefinitionHead): anything else — `extends __require(n) {`,
     // `x = __require(n)`, a call followed by a block on the next line — is a call.
     for (const m of src.matchAll(new RegExp(`(?<![\\w$.])(${IDENT})${GAP}\\(`, "g"))) {
         if (isDefinitionHead(src, m.index, m.index + m[0].length - 1)) continue;
-        literalArgRe.lastIndex = m.index + m[0].length;
-        if (!literalArgRe.test(src)) nonLiteralCallees.add(m[1]);
+        stickyLiteralArgRe.lastIndex = m.index + m[0].length;
+        if (!stickyLiteralArgRe.test(src)) nonLiteralCallees.add(m[1]);
     }
 
     // How often each name is DECLARED in this module: var/let/const entries
@@ -343,8 +575,10 @@ export function analyzeServerModule(src) {
 }
 
 /**
- * Wrap every `<alias>(import.meta.url)` in a require that statically embeds
- * `embed` specifiers and forwards the rest to the original require.
+ * Wrap every `<alias>(import.meta.url)` — or its per-module-merge getter-
+ * indirection form (cluster C11), `<alias>({get value(){return <ident>.url}}.value)`
+ * — in a require that statically embeds `embed` specifiers and forwards the
+ * rest to the original require.
  *
  * @param {string} src
  * @param {string[]} aliases createRequire local names (analyzeServerModule)
@@ -360,10 +594,11 @@ export function wrapRequireBindings(src, aliases, embed) {
     let contents = src;
     let count = 0;
     for (const alias of aliases) {
-        const re = new RegExp(
-            `(?<![\\w$.])${escapeRe(alias)}${GAP}\\(${GAP}import\\.meta\\.url${GAP}\\)`,
-            "g",
-        );
+        const call = `${escapeRe(alias)}${GAP}\\(${GAP}import\\.meta\\.url${GAP}\\)`;
+        const getterCall =
+            `${escapeRe(alias)}${GAP}\\(${GAP}\\{${GAP}get${GAP}value${GAP}\\(${GAP}\\)` +
+            `${GAP}\\{${GAP}return${GAP}${IDENT}${GAP}\\.${GAP}url${GAP}\\}${GAP}\\}${GAP}\\.${GAP}value${GAP}\\)`;
+        const re = new RegExp(`(?<![\\w$.])(?:${call}|${getterCall})`, "g");
         contents = contents.replace(re, (whole) => {
             count++;
             return (

@@ -206,3 +206,15 @@ describe('actionlint has no complaints about this workflow', () => {
     expect(result.status).toBe(0);
   });
 });
+
+describe('base-ref scope wiring (#2004)', () => {
+  it('job env carries BASE_REF from merge_group OR pull_request, and the check receives it via a shell var', () => {
+    const { wf } = load();
+    const job = wf.jobs[JOB];
+    expect(job.env?.BASE_REF).toContain('github.event.merge_group.base_ref');
+    expect(job.env?.BASE_REF).toContain('github.event.pull_request.base.ref');
+    const step = job.steps.find((s) => /Run the published-bytes freeze check/.test(s.name ?? ''));
+    expect(String(step?.run)).toContain('--base-ref "${BASE_REF}"');
+    expect(String(step?.run)).not.toMatch(/\$\{\{/);
+  });
+});

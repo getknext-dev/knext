@@ -77,10 +77,15 @@ exactly the access a deploy already needs, so a restricted credential can still 
 
 ## Upgrading the operator
 
-Apply the operator release for the version you want, then confirm the CRD is in place:
+Apply the operator release for the version you want, then confirm the CRD is in place. Name the
+version rather than a moving address, so the same command is reproducible later and tells you
+what to roll back to (see [Pin, upgrade and roll back the operator](/docs/versioning#pin-upgrade-and-roll-back-the-operator)):
 
 ```bash
+kubectl apply --server-side -f \
+  https://github.com/getknext-dev/knext/releases/download/operator-vX.Y.Z/install-vX.Y.Z.yaml
 kubectl get crd nextapps.apps.kn-next.dev
+knext doctor   # the "Operator version" row confirms what is now running
 ```
 
 Once that reports the version you expect, upgrade the CLI:
@@ -88,6 +93,21 @@ Once that reports the version you expect, upgrade the CLI:
 ```bash
 npm install -D @getknext/core@latest
 ```
+
+## Which features need the 1.3 operator
+
+A 1.3 CLI against an older operator keeps working for everything the older operator already
+understands. Two features add a field to the resource only when you use them, so they are the ones
+that need the newer operator:
+
+| Feature | Field | When the CLI emits it |
+| --- | --- | --- |
+| Write-free pods | `spec.security.writeFree` | Only when `knext deploy` builds the image in that run (not with `--image` or `--skip-build`). |
+| Private apps | `spec.networking` | Only for an app configured as private. |
+
+`knext doctor` reports a CRD that lacks only these as a **warning** naming the feature. If you do
+use one, `knext deploy` refuses before building or uploading anything and names the field. Upgrade
+the operator first, then the CLI, as above.
 
 ## Version-specific step: upgrading a 0.4.x app to 1.0
 

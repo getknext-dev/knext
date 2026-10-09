@@ -33,7 +33,10 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
-import { DEFAULT_BUILDER_ID } from "../adapters/artifact-contract";
+import {
+    DEFAULT_BUILDER_ID,
+    DEFAULT_RUNTIME_ID,
+} from "../adapters/artifact-contract";
 import type { KnativeNextConfig } from "../config";
 import {
     getAssetPrefix,
@@ -43,6 +46,7 @@ import {
 import { createLogger } from "../utils/logger";
 import { compileArtifactForDeploy } from "./build-artifact";
 import { exportBuildIdEnv } from "./build-id-env";
+import { resolveCompileToolchain } from "./bun-toolchain";
 import {
     renderNextAppCR,
     resolveDigest,
@@ -69,6 +73,10 @@ import {
     withKubeContext,
 } from "./shared";
 import { requireBuildContext } from "./tracing-root";
+import {
+    assertVisibilityDowngradeIsExplicit,
+    type VisibilityDowngradeGuard,
+} from "./visibility-guard";
 
 const log = createLogger({ module: "preview" });
 
@@ -137,12 +145,25 @@ export type PreviewPreflight = (
     context?: string,
 ) => void;
 
+/**
+ * #1865 — the shared fail-open guard (visibility-guard.ts), under preview's
+ * own naming convention. REQUIRED, deliberately with no default: a preview
+ * applies the SAME NextApp CR kind, through the SAME `kubectl apply`
+ * semantics, as `deploy`, so it carries the identical hazard — a caller that
+ * constructs `PreviewDeployDeps` by hand must decide what to pass rather than
+ * silently inherit a cluster-touching default it never reasoned about. The
+ * real entrypoint (`preview()` below) passes the real
+ * `assertVisibilityDowngradeIsExplicit`.
+ */
+export type PreviewVisibilityGuard = VisibilityDowngradeGuard;
+
 export interface PreviewDeployDeps {
     apply: PreviewExec;
     capture: PreviewCapture;
     buildAndPush: PreviewBuildAndPush;
     /** Defaults to the real server-side dry-run preflight. */
     preflight?: PreviewPreflight;
+    visibilityGuard: PreviewVisibilityGuard;
 }
 
 /** The real preflight: server-side dry-run apply, hard failure (#314, T6). */
@@ -261,6 +282,35 @@ export async function runPreviewDeploy(
     const crPath = join(process.cwd(), ".output", "nextapp-preview-cr.yaml");
     mkdirSync(join(process.cwd(), ".output"), { recursive: true });
     writeFileSync(crPath, crYaml, "utf-8");
+
+    // #1865: refuse a silent public downgrade BEFORE the apply that would
+    // cause it — see visibility-guard.ts's doc comment. A preview reuses ONE
+    // CR name across every commit of the same PR (`derivePreviewName`), so a
+    // later commit whose config no longer sets `networking.visibility:
+    // "cluster-local"` would otherwise silently make a previously-private
+    // preview PUBLIC on its next redeploy. Previews have NO --public
+    // override (jev pick 0.97 vs adding one 0.03): a preview's visibility is
+    // driven entirely by the PR branch's committed config, never by an
+    // out-of-band flag, so the remediation text below only ever points at
+    // the config, not at a flag.
+    await deps.visibilityGuard({
+        namespace: options.namespace,
+        name: previewName,
+        context: options.context,
+        willBeClusterLocal:
+            previewConfig.networking?.visibility === "cluster-local",
+        // An EXPLICIT `visibility: "public"` in the branch config is the
+        // deliberate opt-out (a config change, not a flag); an omitted
+        // block/field is NOT — that is the accidental-drop case the guard
+        // exists for.
+        explicitPublic: previewConfig.networking?.visibility === "public",
+        remediation:
+            "Previews have no --public override — the fix is in knext.config.ts. " +
+            'To keep it private, add `networking: { visibility: "cluster-local" }` ' +
+            "back to this PR's branch. To make it public on purpose, set " +
+            '`networking: { visibility: "public" }` explicitly — omitting the ' +
+            "networking block is not enough. Then redeploy the preview.",
+    });
 
     // `--validate=strict` is asserted here for the same reason as on the prod
     // CR apply (see deploy.ts): a preview renders the SAME NextApp CR from the
@@ -396,6 +446,7 @@ export async function defaultBuildAndPush(
     runProjectBuild({
         requireEsm: (config.build ?? DEFAULT_BUILDER_ID) === "vinext",
         builderId: config.build ?? DEFAULT_BUILDER_ID,
+        runtimeId: config.runtime ?? DEFAULT_RUNTIME_ID,
     });
 
     // #1339 review finding #1 (jev 0.90, BLOCKER): the staged Dockerfile for
@@ -406,8 +457,15 @@ export async function defaultBuildAndPush(
     // stale binary already sitting in this checkout. Shares the EXACT compile
     // step `knext build` uses (build-artifact.ts) — preview has no
     // `--skip-build` flag, so this always runs fresh here, right after the
-    // project build that just produced what it compiles from.
-    compileArtifactForDeploy(config, process.cwd());
+    // project build that just produced what it compiles from. The opt-in
+    // patched Bun toolchain is resolved (downloaded + sha256-verified) first;
+    // the default config resolves to nothing and the call is unchanged.
+    const toolchain = await resolveCompileToolchain(config);
+    compileArtifactForDeploy(
+        config,
+        process.cwd(),
+        ...(toolchain.bin ? [{ toolchain }] : []),
+    );
 
     const taggedRef = `${config.registry}/${previewName}:${tag}`;
     const metadataFilePath = join(
@@ -531,6 +589,7 @@ async function preview() {
             apply: runInherit,
             capture: runCapture,
             buildAndPush: defaultBuildAndPush,
+            visibilityGuard: assertVisibilityDowngradeIsExplicit,
         },
     );
 

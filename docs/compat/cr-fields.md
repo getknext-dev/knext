@@ -47,6 +47,8 @@ Every field the CLI can emit is defined by the bundled CRD.
 | `spec.image` | yes |
 | `spec.imagePullSecrets` | yes |
 | `spec.imagePullSecrets.*.name` | yes |
+| `spec.networking` | yes |
+| `spec.networking.visibility` | yes |
 | `spec.observability` | yes |
 | `spec.observability.enabled` | yes |
 | `spec.observability.rum` | yes |
@@ -89,6 +91,8 @@ Every field the CLI can emit is defined by the bundled CRD.
 | `spec.secrets.envMap` | yes |
 | `spec.secrets.envMap.*.secretKey` | yes |
 | `spec.secrets.envMap.*.secretName` | yes |
+| `spec.security` | yes |
+| `spec.security.writeFree` | yes |
 | `spec.selfContained` | yes |
 | `spec.storage` | yes |
 | `spec.storage.bucket` | yes |

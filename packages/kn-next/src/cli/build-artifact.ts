@@ -26,7 +26,13 @@ import {
     readlinkSync,
     writeFileSync,
 } from "node:fs";
-import { join, relative, resolve as resolvePath } from "node:path";
+import {
+    basename,
+    dirname,
+    join,
+    relative,
+    resolve as resolvePath,
+} from "node:path";
 import { fileURLToPath } from "node:url";
 import {
     BUILDERS,
@@ -35,6 +41,7 @@ import {
     DEFAULT_BUILDER_ID,
     DEFAULT_RUNTIME_ID,
 } from "../adapters/artifact-contract";
+import { HARFBUZZ_NOTICE_FILE } from "../adapters/og-harfbuzz.mjs";
 import {
     type BlankAdapterPathResult,
     blankStandaloneAdapterPath,
@@ -44,12 +51,26 @@ import {
     healBunExportTargets,
 } from "../adapters/standalone-bun-exports";
 import type { KnativeNextConfig } from "../config";
+import {
+    type CompileToolchain,
+    compileIncludeGlobs,
+    wantsPatchedBun,
+} from "./compile-config";
 import { UsageError } from "./shared";
 import {
     buildStandaloneExecutable,
     standaloneExecFileName,
 } from "./standalone-exec-build";
-import { buildVinextExecutable } from "./vinext-build";
+import {
+    diagnoseNestedStandalone,
+    resolveStandaloneLayout,
+    type StandaloneLayout,
+} from "./standalone-layout";
+import {
+    buildVinextExecutable,
+    stageOgHarfbuzzForVinextNode,
+    stageSharpForVinextNode,
+} from "./vinext-build";
 
 export interface ResolvedBuild {
     readonly builder: BuilderAdapter;
@@ -58,6 +79,11 @@ export interface ResolvedBuild {
 
 /**
  * Resolve the builder and its artifact for this config.
+ *
+ * A standalone build nests its server under the app's path when the app's
+ * config sets a tracing root above it (a workspace monorepo); builders whose
+ * output does not nest ignore the layout, so it is only asked for where it
+ * applies.
  *
  * Throws on an unknown builder rather than falling back to the default. A
  * silent fallback would build one thing, look for another, and report success
@@ -83,9 +109,13 @@ export function resolveBuildArtifact(
     // The runtime is threaded through because vinext's shape depends on it
     // (#1260: the nitro preset IS the runtime choice). Builders whose shape
     // does not vary ignore it.
+    const layout =
+        builder.emits === "next-standalone"
+            ? { appRel: resolveStandaloneLayout(root).appRel }
+            : undefined;
     return {
         builder,
-        artifact: builder.describeArtifact(root, config.runtime),
+        artifact: builder.describeArtifact(root, config.runtime, layout),
     };
 }
 
@@ -131,6 +161,28 @@ export function resolveSelfContained(
     return override ?? config.selfContained ?? false;
 }
 
+/**
+ * The bun-condition export heal over a standalone tree, flat or nested.
+ *
+ * The heal only looks at `<dir>/node_modules`. Under a monorepo root the traced
+ * packages are split across TWO such directories: the hoisted one at the tree
+ * root (shared workspace dependencies) and the app's own under the nested
+ * directory. Healing only the first would leave the app's own packages with an
+ * exports map pointing at files the tree does not contain.
+ */
+function healStandaloneTree(cwd: string, layout: StandaloneLayout): HealResult {
+    const dirs = layout.nested
+        ? [layout.standaloneDir, layout.serverDir]
+        : [layout.standaloneDir];
+    const result: HealResult = { copied: [], skipped: [] };
+    for (const standaloneDir of dirs) {
+        const healed = healBunExportTargets({ projectDir: cwd, standaloneDir });
+        result.copied.push(...healed.copied);
+        result.skipped.push(...healed.skipped);
+    }
+    return result;
+}
+
 export interface CompileForDeployResult {
     /** Whether this config's target needed a compile step at all. */
     readonly compiled: boolean;
@@ -149,6 +201,15 @@ export interface CompileForDeployResult {
      * reason (a fixed Next, or nothing to blank).
      */
     readonly adapterPathWorkaround?: BlankAdapterPathResult;
+    /**
+     * vinext × node only: what staging the IMAGE platform's payload did.
+     * `knext build` logs it; `deploy`/`preview` get the staging for free,
+     * which they need because they run no `knext build` (see the call site).
+     */
+    readonly vinextNode?: {
+        readonly sharpStaged: boolean;
+        readonly og: ReturnType<typeof stageOgHarfbuzzForVinextNode>;
+    };
 }
 
 /**
@@ -166,6 +227,12 @@ export interface CompileForDeployResult {
  * such file) or, worse, silently shipped a STALE binary left over from an
  * earlier `knext build` run in the same checkout.
  *
+ * When the server is not where the app's config says it is but one sits
+ * somewhere else in the standalone tree, this fails on EVERY runtime with the
+ * real cause (an inferred root nobody chose, or two root settings that
+ * disagree), not only the runtime that compiles; otherwise the node leg would
+ * ship a tree with no server.
+ *
  * Called UNCONDITIONALLY whenever `deploy`/`preview` run a fresh project
  * build (i.e. NOT under `--skip-build`) — never gated on "does a binary
  * already exist", the same policy `knext build` itself follows, so
@@ -178,9 +245,23 @@ export interface CompileForDeployResult {
 export function compileArtifactForDeploy(
     config: KnativeNextConfig,
     cwd: string,
-    opts: { arch?: string; selfContained?: boolean } = {},
+    opts: {
+        arch?: string;
+        selfContained?: boolean;
+        /** From `resolveCompileToolchain(config)`; required when the config opts in. */
+        toolchain?: CompileToolchain;
+    } = {},
 ): CompileForDeployResult {
     const arch = opts.arch ?? DEPLOY_SHIP_ARCH;
+    // Fail closed: an opted-in config that reaches the compile without its
+    // resolved, verified toolchain must not quietly compile with stock Bun
+    // (the CLI resolves it in build/deploy/preview before calling this).
+    if (wantsPatchedBun(config) && !opts.toolchain?.bin) {
+        throw new UsageError(
+            "compile.bun: 'knext-patched' is set but the patched Bun toolchain was not resolved " +
+                "before the compile step — refusing to fall back to stock Bun.",
+        );
+    }
     // The single resolved value both compile paths receive, as an explicit
     // option. Spread ONLY when on, so with the flag off each path's options
     // are exactly the pre-flag shape.
@@ -188,22 +269,38 @@ export function compileArtifactForDeploy(
     const selfContainedOpt = selfContained ? { selfContained: true } : {};
     const { artifact, builder } = resolveBuildArtifact(config, cwd);
     const runtimeId = config.runtime ?? DEFAULT_RUNTIME_ID;
+    // Backstop for a bypassed validator: the patched toolchain runs ONLY the
+    // compiled vinext executable's compile. Any other target would silently
+    // ignore it and compile with stock Bun instead.
+    if (wantsPatchedBun(config) && artifact.shape !== "nitro-output-bun") {
+        throw new UsageError(
+            "compile.bun: 'knext-patched' is supported only on the compiled vinext executable " +
+                "(build: 'vinext', runtime: 'bun') — refusing to compile this target with stock Bun instead.",
+        );
+    }
 
     if (standaloneStepsApply(artifact)) {
-        const standaloneDir = join(cwd, ".next", "standalone");
+        const layout = resolveStandaloneLayout(cwd);
+        const { standaloneDir } = layout;
         // Heal is unconditional on the shape (build.ts step 2b) — additive
         // and version-checked, so it costs nothing on the node leg.
         const healed = existsSync(standaloneDir)
-            ? healBunExportTargets({ projectDir: cwd, standaloneDir })
+            ? healStandaloneTree(cwd, layout)
             : undefined;
+        if (!existsSync(layout.serverPath)) {
+            const nested = diagnoseNestedStandalone(cwd);
+            if (nested !== null) {
+                throw new UsageError(
+                    `The standalone build finished but '${layout.serverPath}' is not there.\n\n${nested}`,
+                );
+            }
+        }
         // The Next.js < 16.4.0 `adapterPath` workaround, BEFORE any compile so
         // the Bun executable bundles the already-blanked config. Both runtimes:
         // the node image ships this same tree. A no-op on Next >= 16.4.0.
-        const adapterPathWorkaround = existsSync(
-            join(standaloneDir, "server.js"),
-        )
+        const adapterPathWorkaround = existsSync(layout.serverPath)
             ? blankStandaloneAdapterPath({
-                  serverDir: standaloneDir,
+                  serverDir: layout.serverDir,
                   projectDir: cwd,
               })
             : undefined;
@@ -215,9 +312,9 @@ export function compileArtifactForDeploy(
         // BEFORE shelling out to `bun build`, not after, and it holds even
         // when a caller injects its own `buildStandaloneExecutable` (a test
         // double, say) that does not replicate that internal check.
-        if (!existsSync(join(standaloneDir, "server.js"))) {
+        if (!existsSync(layout.serverPath)) {
             throw new UsageError(
-                `No standalone server at ${join(standaloneDir, "server.js")} to compile.\n\n` +
+                `No standalone server at ${layout.serverPath} to compile.\n\n` +
                     "The standalone-on-Bun image runs a compiled executable of that server. " +
                     "Check that next.config sets output: 'standalone' and that the project build ran.",
             );
@@ -243,11 +340,16 @@ export function compileArtifactForDeploy(
         // skipViteBuild: the caller's OWN project build (runProjectBuild /
         // `npm run build`) already produced `.output` — mirrors build.ts's
         // step 2c comment exactly.
+        // `compile.include` (validated for this target only): spread only
+        // when set, so the default call is exactly what it was.
+        const include = compileIncludeGlobs(config);
         const binaryPath = buildVinextExecutable({
             cwd,
             arch,
             skipViteBuild: true,
             ...selfContainedOpt,
+            ...(include.length > 0 ? { include } : {}),
+            ...(opts.toolchain?.bin ? { compilerBin: opts.toolchain.bin } : {}),
         });
         // #1351/#1414 rev-2: same stamp, scoped to `.output/server` +
         // `.output/public` — never the whole `.output` root, which is also
@@ -259,6 +361,17 @@ export function compileArtifactForDeploy(
             runtimeId,
         });
         return { compiled: true, binaryPath };
+    }
+
+    // vinext × node: replace nitro's traced sharp (the BUILD HOST's addon,
+    // wrong platform for the alpine/musl image) with the image platform's, and
+    // stage next/og's wasm. This is shared by build/deploy/preview because
+    // only `knext build` used to do it, so a glibc or macOS host deploying
+    // shipped an image whose compile-cache bake dies loading sharp.
+    if (artifact.shape === "nitro-output-node") {
+        const sharpStaged = stageSharpForVinextNode(cwd).staged;
+        const og = stageOgHarfbuzzForVinextNode(cwd);
+        return { compiled: false, vinextNode: { sharpStaged, og } };
     }
 
     // node runtime (standalone), or vinext × node: nothing to compile —
@@ -310,7 +423,7 @@ export function compiledExecPathFor(
     if (standaloneStepsApply(artifact) && runtimeId === "bun") {
         return {
             execPath: join(cwd, standaloneExecFileName(arch)),
-            sourcePath: join(cwd, ".next", "standalone", "server.js"),
+            sourcePath: resolveStandaloneLayout(cwd).serverPath,
             sourceDirs: [join(cwd, ".next", "standalone")],
             builderId: builder.id,
             runtimeId,
@@ -526,6 +639,20 @@ export function assertCompiledArtifactFresh(
             `${target.execPath} is missing, and --skip-build means knext will not compile it.\n\n` +
                 "Drop --skip-build, or run `knext build` first to produce it.",
         );
+    }
+
+    // The vinext image recipes COPY the third-party notice by exact name; the
+    // compile writes it beside the binary. A binary from an older compile has
+    // none, and `--skip-build` would otherwise fail later as an opaque COPY
+    // error inside docker.
+    if (basename(target.execPath).startsWith("knext-exec-")) {
+        const notice = join(dirname(target.execPath), HARFBUZZ_NOTICE_FILE);
+        if (!existsSync(notice)) {
+            throw new UsageError(
+                `${notice} is missing — the compile writes it beside ${target.execPath} and the image copies it, and --skip-build means knext will not recompile.\n\n` +
+                    "Drop --skip-build, or run `knext build` to recompile and regenerate it.",
+            );
+        }
     }
 
     const stampPath = buildStampPathFor(target.execPath);

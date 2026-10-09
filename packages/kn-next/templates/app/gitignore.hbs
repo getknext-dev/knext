@@ -37,6 +37,13 @@ knext-exec*
 knext-standalone-exec*
 /server
 
+# `knext build`'s post-compile smoke stages its host-arch twin's own sharp
+# native pair here (#1814) — a cwd-nested sibling of `native/`, never that
+# directory itself. Build-scoped scratch, cleaned up after every build
+# (success or failure); this entry is defense in depth, not the primary
+# cleanup.
+.knext-smoke-native
+
 # ── Test, coverage and editor noise ──────────────────────────────────────────
 /coverage
 .nyc_output

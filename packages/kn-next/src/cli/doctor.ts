@@ -35,7 +35,9 @@
  * test suite import them from `./doctor`).
  */
 
-import { writeSync } from "node:fs";
+import { readFileSync, writeSync } from "node:fs";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { parseDoctorArgs } from "./doctor/args";
 import { appImageCheck } from "./doctor/checks/app-image";
 import { certManagerCheck } from "./doctor/checks/cert-manager";
@@ -51,6 +53,7 @@ import { networkPolicyCheck } from "./doctor/checks/network-policy";
 import { nodeEntryStalenessCheck } from "./doctor/checks/node-entry-staleness";
 import { operatorCheck } from "./doctor/checks/operator";
 import { operatorImageCheck } from "./doctor/checks/operator-image";
+import { operatorVersionCheck } from "./doctor/checks/operator-version";
 import { storageModeCheck } from "./doctor/checks/storage-mode";
 import { kubectlRunner, probeManifest } from "./doctor/kubectl";
 import { formatDoctorTable } from "./doctor/report";
@@ -127,7 +130,8 @@ export async function runDoctor(
     checks.push(...(await nodeEntryStalenessCheck(ctx)));
     checks.push(...crdCheck(ctx));
     checks.push(...crdSchemaCheck(ctx));
-    checks.push(...operatorCheck(ctx)); // sets ctx.operatorImage
+    checks.push(...operatorCheck(ctx)); // sets ctx.operatorImage + ctx.operatorManager
+    checks.push(...operatorVersionCheck(ctx)); // reads ctx.operatorManager (#1947)
     checks.push(...certManagerCheck(ctx));
     checks.push(...ingressCheck(ctx));
     checks.push(...(await operatorImageCheck(ctx))); // reads ctx.operatorImage
@@ -151,9 +155,31 @@ export async function runDoctor(
     return { checks, exitCode };
 }
 
+/**
+ * This CLI's own version from its package manifest (#1947). Works from both the
+ * source layout (`src/cli/doctor.ts`) and the bundled layout
+ * (`dist/cli/kn-next.js`): package.json sits three path segments up from the
+ * module file in both, mirroring `deploy.ts`'s `getCliVersion`. Returns
+ * undefined when unreadable, so the operator-version row degrades to "no
+ * compatibility verdict" rather than guessing.
+ */
+function readOwnVersion(): string | undefined {
+    try {
+        const here = fileURLToPath(import.meta.url);
+        const pkgPath = resolve(here, "..", "..", "..", "package.json");
+        const pkg = JSON.parse(readFileSync(pkgPath, "utf-8")) as {
+            version?: string;
+        };
+        return pkg.version;
+    } catch {
+        return undefined;
+    }
+}
+
 const DOCTOR_HELP = `knext doctor — cluster-prereq preflight (read-only)
 
-Checks: NextApp CRD, operator readiness, cert-manager webhook, Knative
+Checks: NextApp CRD, operator readiness, the installed operator's release
+version and whether it pairs with this CLI (WARN only), cert-manager webhook, Knative
 ingress-class vs its reconciler (#208), operator-image pullability (#198),
 app-image pullability vs the namespace's pull credentials (#952),
 Knative Serving, CNI NetworkPolicy enforcement (whether the cluster can\nenforce the operator's default-on policy — on flannel it cannot), and the\nlocal kubectl's --validate=strict support. Exit 1 on
@@ -186,7 +212,11 @@ Options:
  */
 export async function doctorMain(
     argv: readonly string[],
-    deps: DoctorDeps = { kubectl: kubectlRunner, probeImage: probeManifest },
+    deps: DoctorDeps = {
+        kubectl: kubectlRunner,
+        probeImage: probeManifest,
+        cliVersion: readOwnVersion(),
+    },
 ): Promise<number> {
     // parseDoctorArgs first, so an unknown flag is rejected before anything
     // runs (byte-identical to the pre-decomposition monolith). Then the

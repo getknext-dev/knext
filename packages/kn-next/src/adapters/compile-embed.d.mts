@@ -7,7 +7,15 @@ export type EmbedPlan = {
     report: { excluded: string[]; nonModule: string[]; unmatched: string[] };
 };
 
+export declare function parseIncludeJson(raw: string | undefined): string[];
+
+export declare function planIncludes(root: string, include: string[]): EmbedPlan;
+
 export declare function embeddedPath(rel: string): string;
+
+export declare function nativeIncludePaths(plan: EmbedPlan, cwd: string): string[];
+
+export declare function embeddedPathsMissing(binary: Uint8Array, relpaths: string[]): string[];
 
 export declare function planEmbed(input: { root: string; include: string[]; exclude?: string[] }): EmbedPlan;
 
@@ -17,6 +25,7 @@ export declare function embedBuildOptions(
         entry: string;
         outfile: string;
         includeSupported: boolean;
+        cwd?: string;
         format?: "esm" | "cjs";
         bytecode?: boolean;
         minify?: boolean;

@@ -145,6 +145,23 @@ describe("usage mistakes are UsageErrors, so they render as messages", () => {
      * different command line.
      */
     const NON_USAGE_ALLOWLIST: Record<string, readonly string[]> = {
+        // Parsing knext's OWN bundled vinext patch files. A malformed one is a
+        // knext packaging defect (caught by vinext-patches.test.ts before
+        // release), never something a user typed — a FATAL stack is right.
+        "vinext-patches.ts": [
+            "malformed patch:",
+            "malformed hunk header:",
+            "truncated hunk in patch",
+            "unexpected line in hunk",
+        ],
+        // `knext create`'s answers are applied as anchored edits of knext's
+        // OWN bundled templates; a missing anchor is a knext packaging defect,
+        // caught by create-options.test.ts before release — never something a
+        // user typed.
+        "create-options.ts": [
+            "knext create: expected a",
+            "copies of the anchor for",
+        ],
         // Injectable exec boundary. Empty argv is a programming error inside
         // knext, never something a user types.
         "exec.ts": [
@@ -186,6 +203,9 @@ describe("usage mistakes are UsageErrors, so they render as messages", () => {
             "knext scaffold templates not found",
             "unknown template variable",
             "unsubstituted template placeholder",
+            // #1843: the installed @getknext/core manifest lacks its own
+            // ioredis dependency — a packaging defect, never argv.
+            "declares no ioredis dependency",
         ],
         // Cluster/build state: schema preflight, BUILD_ID skew, CR apply.
         "deploy.ts": [
@@ -219,6 +239,17 @@ describe("usage mistakes are UsageErrors, so they render as messages", () => {
         // Derived name validity: composed from the config's app name + PR id.
         "preview.ts": ["exceeds the 63-char", "is not a valid DNS-1123 label"],
         "preflight.ts": ["formatPreflightFailure(outcome"],
+        // #1865 — assertVisibilityDowngradeIsExplicit's fail-closed reads of
+        // the LIVE NextApp before applying (shared by deploy.ts AND
+        // preview.ts, which both apply the same NextApp CR kind). A kubectl
+        // read failing for a reason other than NotFound (RBAC, network) or
+        // returning unparseable JSON is cluster/environment state, never
+        // something the user typed — same classification as status.ts's own
+        // "cluster unreachable" entry below.
+        "visibility-guard.ts": [
+            "Could not read the current NextApp",
+            "Could not parse kubectl's response for NextApp",
+        ],
         // Build-time source extraction over cr-builder.ts — an internal
         // invariant of the repo's own tooling.
         "extract-emitted-fields.ts": [
@@ -246,6 +277,10 @@ describe("usage mistakes are UsageErrors, so they render as messages", () => {
             // installed package failed to ship, not a user mistake.
             "vinext-node image template not found",
             "contains an unsubstituted",
+            // The monorepo rewrite's anchors against the shipped template: a
+            // count that drifted is a knext packaging defect (caught by
+            // runtime-image-nested.test.ts before release), never user input.
+            "cannot nest the standalone Dockerfile",
             // Internal invariant of an exported function (unreachable from
             // argv today: `validate.ts` rejects every `build` value except
             // `vinext` before a deploy/build ever reaches this selector, so
@@ -254,6 +289,11 @@ describe("usage mistakes are UsageErrors, so they render as messages", () => {
             // known builder id — not a different command line. cr-1181 #3.
             "unrecognised build id",
         ],
+        // `knext build` staging the image context: the cause is the
+        // environment (a read-only or unwritable cwd) or a template the
+        // installed package failed to ship. No different command line fixes
+        // it, so it is not a usage mistake.
+        "build.ts": ["Could not stage the docker build context"],
     };
 
     /** Every .ts under src/cli, including subdirectories (schema/). */

@@ -300,3 +300,53 @@ describe("deploy rejects placeholder config values before any work", () => {
         expect(renderNextAppCR).toHaveBeenCalled();
     });
 });
+
+const DIGEST_IMAGE = `reg.example.com/my-app@sha256:${"a".repeat(64)}`;
+
+describe("--image skips the registry placeholder only", () => {
+    it("a placeholder registry alone does not fail deploy --image", async () => {
+        setArgv(["deploy", "--tag", "deploytag", "--image", DIGEST_IMAGE]);
+        const deploy = await importDeploy();
+        await deploy();
+        expect(renderNextAppCR).toHaveBeenCalled();
+        // No downstream step may have built a ref from the placeholder.
+        for (const call of renderNextAppCR.mock.calls) {
+            expect(String(call[1])).not.toContain("<your-user>");
+        }
+    });
+
+    it("a placeholder storage.bucket still fails under --image", async () => {
+        loadConfig.mockResolvedValue({
+            ...placeholderConfig,
+            storage: { provider: "gcs", bucket: "<your-assets-bucket>" },
+        });
+        setArgv(["deploy", "--tag", "deploytag", "--image", DIGEST_IMAGE]);
+        const deploy = await importDeploy();
+        await expect(deploy()).rejects.toMatchObject({
+            code: USAGE_ERROR_CODE,
+            message: expect.stringContaining("storage.bucket"),
+        });
+        expect(renderNextAppCR).not.toHaveBeenCalled();
+    });
+
+    it("a placeholder domain still fails under --image", async () => {
+        loadConfig.mockResolvedValue({
+            ...cleanConfig,
+            domains: ["<your-domain>"],
+        } as KnativeNextConfig);
+        setArgv(["deploy", "--tag", "deploytag", "--image", DIGEST_IMAGE]);
+        const deploy = await importDeploy();
+        await expect(deploy()).rejects.toMatchObject({
+            code: USAGE_ERROR_CODE,
+        });
+    });
+
+    it("without --image a placeholder registry still fails", async () => {
+        setArgv(["deploy", "--tag", "deploytag"]);
+        const deploy = await importDeploy();
+        await expect(deploy()).rejects.toMatchObject({
+            code: USAGE_ERROR_CODE,
+            message: expect.stringContaining("registry"),
+        });
+    });
+});

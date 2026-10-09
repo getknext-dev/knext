@@ -16,6 +16,11 @@ metadata:
     control-plane: controller-manager
     app.kubernetes.io/name: kn-next-operator
     app.kubernetes.io/managed-by: kustomize
+    # The operator release version `knext doctor` reads back from the cluster.
+    # `unreleased` is the committed sentinel (source / operator-edge builds never
+    # claim a version); hack/stamp-release-version.sh rewrites it on an
+    # operator-vX.Y.Z tag publish. NEVER add this to the selector (immutable).
+    app.kubernetes.io/version: unreleased
 spec:
   selector:
     matchLabels:
@@ -31,6 +36,7 @@ spec:
       labels:
         control-plane: controller-manager
         app.kubernetes.io/name: kn-next-operator
+        app.kubernetes.io/version: unreleased
     spec:
       # SOFT pod anti-affinity (issue #307): prefer scheduling the 2 replicas on
       # distinct nodes so a single node loss can't take both out. It MUST stay

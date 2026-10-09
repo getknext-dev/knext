@@ -26,7 +26,7 @@
  * reconciles everything from the NextApp CR emitted by `deploy`.
  */
 
-import { existsSync, rmSync, writeSync } from "node:fs";
+import { existsSync, readdirSync, rmSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import {
     DEFAULT_BUILDER_ID,
@@ -44,21 +44,28 @@ import {
     resolveSelfContained,
     standaloneStepsApply,
 } from "./build-artifact";
+import { resolveCompileToolchain } from "./bun-toolchain";
+import { type CompileToolchain, compileIncludeGlobs } from "./compile-config";
 import { isEntrypoint } from "./exec";
 import { runPostCompileSmoke } from "./postcompile-smoke";
 import { runProjectBuild } from "./project-build";
-import { stageVinextNodeDockerfile } from "./runtime-image";
+import {
+    selectRuntimeImage,
+    stageStandaloneBuildContext,
+    stageVinextNodeDockerfile,
+} from "./runtime-image";
 import {
     handleConfigNotFound,
     handleUsageError,
     loadConfig,
     UsageError,
 } from "./shared";
+import { diagnoseNestedStandalone } from "./standalone-layout";
+import { requireBuildContext } from "./tracing-root";
 import {
     buildVinextExecutable,
     hostSmokeArch,
     smokeBinaryPlan,
-    stageSharpForVinextNode,
 } from "./vinext-build";
 import { assertNodePresetOutput } from "./vinext-node-build";
 
@@ -69,6 +76,41 @@ const log = createLogger({ module: "build" });
  * Dockerfile expects `knext-exec-linux-x64` in the build context.
  */
 const SHIP_ARCH = "linux-x64";
+
+/**
+ * #1814 — where the post-compile smoke's host-arch TWIN stages its own sharp
+ * native pair, a cwd-nested sibling of the ship's `native/` (never that
+ * directory itself — see `smokeCompiledBinary`'s doc comment for why).
+ * Leading-dot: not a Dockerfile `COPY` source, not matched by `.gitignore`'s
+ * `native` entry, and cleaned up in the same `finally` as the smoke binary.
+ */
+export const SMOKE_NATIVE_DIR_NAME = ".knext-smoke-native";
+
+/**
+ * The exact `.node` file a sharp-native stage wrote under `nativeDir`, or
+ * `undefined` if the app has no sharp (staged dir exists but holds nothing —
+ * `stageSharpNative`'s own no-op-for-no-sharp contract). Scans rather than
+ * assumes the platform id, so it matches whatever `stageSharpNative` ACTUALLY
+ * staged for the arch it was given — the SAME discipline the dlopen shim
+ * itself uses at runtime (`sharp-addon-dlopen.mjs`'s `addonPath()`), not a
+ * second, independently-typed guess at the directory name.
+ */
+export function findStagedSharpAddon(nativeDir: string): string | undefined {
+    if (!existsSync(nativeDir)) return undefined;
+    for (const entry of readdirSync(nativeDir)) {
+        if (!entry.startsWith("sharp-") || entry.startsWith("sharp-libvips-")) {
+            continue;
+        }
+        const libDir = join(nativeDir, entry, "lib");
+        if (!existsSync(libDir)) continue;
+        for (const file of readdirSync(libDir)) {
+            if (file.startsWith("sharp-") && file.endsWith(".node")) {
+                return join(libDir, file);
+            }
+        }
+    }
+    return undefined;
+}
 
 interface BuildOptions {
     skipNextBuild?: boolean;
@@ -112,11 +154,29 @@ interface BuildOptions {
  * That the SHIPPED binary boots — only that the entry compiled from this
  * `.output` honours the contract on this machine's arch. The alpine e2e is what
  * covers the cross-target half, and it is a separate gate on purpose.
+ *
+ * ## The host-arch twin's own sharp staging (#1814)
+ *
+ * An app depending on `sharp` needs its native addon staged for WHICHEVER
+ * binary is about to boot — the twin's dlopen shim calls `process.dlopen` at
+ * the top level of sharp's module slot outside `--self-contained` mode, so a
+ * route graph that merely includes the image-optimizer route evaluates it at
+ * boot, not lazily on request. The twin is staged into `SMOKE_NATIVE_DIR_NAME`
+ * (a `cwd`-nested sibling of the ship's `native/`), never into `native/`
+ * itself: `stageSharpNative` clears its destination before writing, so
+ * staging the twin's arch into the SAME directory the ship build already
+ * staged silently replaces the ship's pair with the twin's — measured on a
+ * live glibc CI runner, where the shipped alpine image then failed to dlopen
+ * a glibc `.node` it should never have carried. `KNEXT_SHARP_ADDON` points the
+ * twin's own dlopen shim at its isolated file; both the dir and the env var
+ * are scoped to this smoke run and cleaned up in the `finally` below.
  */
 async function smokeCompiledBinary(
     config: { healthCheckPath?: string },
     skipSmoke: boolean,
     selfContained: boolean,
+    include: readonly string[] = [],
+    toolchain: CompileToolchain = {},
 ): Promise<void> {
     if (skipSmoke) {
         // LOUD, and it names what is now unverified rather than merely saying a
@@ -130,24 +190,47 @@ async function smokeCompiledBinary(
     }
 
     const plan = smokeBinaryPlan(SHIP_ARCH, hostSmokeArch());
-    if (!plan.reuseShipBinary) {
-        log.info(
-            { arch: plan.arch },
-            "Compiling a host-arch binary for the post-compile smoke (the ship binary is linux-musl and cannot run here)...",
-        );
-        buildVinextExecutable({
-            cwd: process.cwd(),
-            arch: plan.arch,
-            outFile: plan.outFile,
-            skipViteBuild: true,
-            // The smoke must boot a binary built with the SAME mode as the
-            // shipped one, or it misses the one property the mode changes.
-            ...(selfContained ? { selfContained: true } : {}),
-        });
-    }
-
+    // #1814 — a cwd-nested sibling of the ship's `native/`, never that
+    // directory itself. See this function's doc comment: staging the twin's
+    // arch into the SAME dir the ship build staged clobbers it.
+    const smokeNativeDir = join(process.cwd(), SMOKE_NATIVE_DIR_NAME);
     const binaryPath = join(process.cwd(), plan.outFile);
     try {
+        let smokeSharpAddon: string | undefined;
+        if (!plan.reuseShipBinary) {
+            log.info(
+                { arch: plan.arch },
+                "Compiling a host-arch binary for the post-compile smoke (the ship binary is linux-musl and cannot run here)...",
+            );
+            // #1814 round 4 — INSIDE the try: a throw here (a bad compile, a
+            // failed sharp-addon fetch) must still hit the `finally` below, or
+            // a FAILING build leaves `smokeNativeDir` behind — exactly the
+            // retry-blocks-itself shape `stageSharpNative`'s own ownership
+            // refusal exists to catch for `native/`, reintroduced here for its
+            // cwd-nested sibling if this call sat outside the try.
+            buildVinextExecutable({
+                cwd: process.cwd(),
+                arch: plan.arch,
+                outFile: plan.outFile,
+                skipViteBuild: true,
+                nativeDir: SMOKE_NATIVE_DIR_NAME,
+                // The smoke must boot a binary built with the SAME mode as the
+                // shipped one, or it misses the one property the mode changes.
+                ...(selfContained ? { selfContained: true } : {}),
+                // ...and with the same embedded `compile.include` modules,
+                // compiled by the same toolchain.
+                ...(include.length > 0 ? { include } : {}),
+                ...(toolchain.bin ? { compilerBin: toolchain.bin } : {}),
+            });
+            // Self-contained mode embeds the staged tree at compile time and
+            // extracts it lazily at runtime — it never consults
+            // KNEXT_SHARP_ADDON, so finding a file for it here would be inert,
+            // not merely harmless.
+            if (!selfContained) {
+                smokeSharpAddon = findStagedSharpAddon(smokeNativeDir);
+            }
+        }
+
         log.info(
             "Smoking the compiled executable (health, metrics, SIGTERM)...",
         );
@@ -155,6 +238,9 @@ async function smokeCompiledBinary(
             binaryPath,
             cwd: process.cwd(),
             healthPath: config.healthCheckPath,
+            ...(smokeSharpAddon
+                ? { env: { KNEXT_SHARP_ADDON: smokeSharpAddon } }
+                : {}),
         });
         log.info(
             {
@@ -174,8 +260,54 @@ async function smokeCompiledBinary(
         // case where a developer runs the build repeatedly — cleans up too.
         if (!plan.reuseShipBinary) {
             rmSync(binaryPath, { force: true });
+            // The smoke-only native tree (#1814) — same reasoning, same
+            // lifecycle: it exists only for this run's boot check.
+            rmSync(smokeNativeDir, { recursive: true, force: true });
         }
     }
+}
+
+/**
+ * Stage the standalone docker build context (Dockerfile.standalone + entry
+ * shims) and tell the user where it is and how to build it. Reuses
+ * `stageStandaloneBuildContext` exactly as `deploy` does — no second copy.
+ */
+function stageImageContext(config: Parameters<typeof selectRuntimeImage>[0]) {
+    const selection = selectRuntimeImage(config, process.cwd());
+    if (selection.kind !== "standalone") return;
+    let buildContext: string;
+    try {
+        buildContext = requireBuildContext(process.cwd());
+    } catch (err) {
+        log.warn(
+            { reason: err instanceof Error ? err.message.split("\n")[0] : err },
+            "Not staging the docker build context (no lockfile to anchor it); `knext deploy` will require one",
+        );
+        return;
+    }
+    // A staging failure FAILS the build (not a warning): a user building the
+    // image on a remote builder relies on this context, and a silently
+    // missing/half-written one surfaces later as an opaque COPY error there.
+    let dockerfile: string;
+    try {
+        ({ dockerfile } = stageStandaloneBuildContext({
+            cwd: process.cwd(),
+            buildContext,
+        }));
+    } catch (err) {
+        throw new Error(
+            `Could not stage the docker build context: ${err instanceof Error ? err.message : String(err)}`,
+        );
+    }
+    log.info(
+        {
+            buildContext,
+            dockerfile,
+            // Template: substitute your registry/image ref; --push publishes it.
+            command: `docker buildx build --platform linux/amd64 --target ${selection.target} -f ${dockerfile} -t <image-ref> --push ${buildContext}`,
+        },
+        "Staged the docker build context — build the image on your own builder from it (replace <image-ref>)",
+    );
 }
 
 export async function build(options: BuildOptions = {}) {
@@ -183,7 +315,7 @@ export async function build(options: BuildOptions = {}) {
 
     // 1. Load config (validates at load time)
     log.info("Loading configuration...");
-    const config = await loadConfig();
+    const config = await loadConfig({ phase: "build" });
     log.info(
         {
             app: config.name,
@@ -221,6 +353,7 @@ export async function build(options: BuildOptions = {}) {
         runProjectBuild({
             requireEsm: (config.build ?? DEFAULT_BUILDER_ID) === "vinext",
             builderId: config.build ?? DEFAULT_BUILDER_ID,
+            runtimeId: config.runtime ?? DEFAULT_RUNTIME_ID,
         });
         log.info("Project build complete");
     }
@@ -258,6 +391,16 @@ export async function build(options: BuildOptions = {}) {
             // deploy time. UsageError (not a bare warn): this is a config
             // mistake the user can act on immediately, same family as
             // `resolveBuildArtifact`'s unknown-builder throw above.
+            // The commonest cause is not a missing `output: 'standalone'` but a
+            // parent lockfile that moved Next's workspace root, nesting the
+            // server one directory down. Say so, rather than blame a setting
+            // that is correctly set.
+            const nested = diagnoseNestedStandalone(process.cwd());
+            if (nested !== null) {
+                throw new UsageError(
+                    `The ${builder.id} build finished but '${artifact.entry}' is not there.\n\n${nested}`,
+                );
+            }
             throw new UsageError(
                 `The ${builder.id} build finished but '${artifact.entry}' is not there — the image ` +
                     "would start a server that does not exist. `build: 'turbopack'` requires this " +
@@ -305,9 +448,20 @@ export async function build(options: BuildOptions = {}) {
     //     binary the Dockerfile ships. `skipViteBuild: true` inside the shared
     //     step — step 2 above (the project's own `vite build`) already
     //     produced `.output`.
+    // The opt-in patched Bun toolchain (`compile.bun: 'knext-patched'`):
+    // downloaded and sha256-verified here, BEFORE any compile, failing the
+    // build closed on any mismatch. The default config resolves to `{}`.
+    const toolchain = await resolveCompileToolchain(config);
+    if (toolchain.bin) {
+        log.info(
+            { bun: toolchain.bin },
+            "Compile step uses the knext-patched Bun toolchain (sha256 verified)",
+        );
+    }
     const compileResult = compileArtifactForDeploy(config, process.cwd(), {
         arch: SHIP_ARCH,
         selfContained: options.selfContained,
+        ...(toolchain.bin ? { toolchain } : {}),
     });
 
     if (standaloneStepsApply(artifact)) {
@@ -367,6 +521,8 @@ export async function build(options: BuildOptions = {}) {
             config,
             options.skipSmoke === true,
             resolveSelfContained(config, options.selfContained),
+            compileIncludeGlobs(config),
+            toolchain,
         );
     }
 
@@ -390,16 +546,33 @@ export async function build(options: BuildOptions = {}) {
         );
         // #1298: nitro's own trace into `.output/server/node_modules` copies
         // the BUILD HOST's sharp addon (wrong platform for the alpine/musl
-        // image) and an incomplete JS package (missing the CJS entry sharp's
-        // own binding loader resolves to). Replace it with the real,
-        // complete, image-platform package before the assets/image build.
-        const sharpStaged = stageSharpForVinextNode(process.cwd());
-        if (sharpStaged.staged) {
+        // image). `compileArtifactForDeploy` above already replaced it with
+        // the image-platform package (and staged next/og's HarfBuzz binary),
+        // shared with deploy/preview; only the logging is here.
+        const sharpStaged = compileResult.vinextNode?.sharpStaged ?? false;
+        if (sharpStaged) {
             log.info(
                 "Staged sharp's linuxmusl-x64 package into the vinext-node image's .output/server/node_modules",
             );
         }
+        const og = compileResult.vinextNode?.og ?? { staged: [], warnings: [] };
+        if (og.staged.length > 0) {
+            log.info(
+                { staged: og.staged },
+                "Staged HarfBuzz's hb.wasm for next/og into .output/server",
+            );
+        }
+        for (const warning of og.warnings) log.warn(warning);
     }
+
+    // 2e. Stage the standalone docker build context — the SAME function
+    //     `knext deploy`/`preview` call right before their local docker build —
+    //     so the image can be built on any builder (Cloud Build, CI) from the
+    //     directory printed below. Standalone targets only: vinext uses its own
+    //     scaffolded Dockerfile (app-dockerfile), which deploy does not stage
+    //     either. Soft when no lockfile fixes a build context: `build` has
+    //     never required one, and `deploy` still does.
+    stageImageContext(config);
 
     // 3. Upload static assets — only when a storage block is configured.
     if (hasStorage(config)) {
@@ -441,6 +614,8 @@ Options:
                         route, metrics port, and SIGTERM drain. For CI that
                         cannot execute the binary (a foreign-arch runner). The
                         artifact ships UNVERIFIED and the build says so loudly.
+  --verbose             Print every compile/closure note instead of a one-line
+                        count. Real warnings and errors always print.
   --self-contained      Opt in to the self-contained single-executable mode
                         (overrides \`selfContained\` in knext.config.ts).
                         Experimental. Honoured by the standalone/node build
@@ -462,6 +637,7 @@ export const ACCEPTED_BUILD_FLAGS: ReadonlySet<string> = new Set([
     "--skip-next",
     "--skip-smoke",
     "--self-contained",
+    "--verbose",
 ]);
 
 /**
@@ -480,6 +656,9 @@ export async function buildMain(argv: readonly string[]): Promise<number> {
         writeSync(1, BUILD_HELP);
         return 0;
     }
+    // The compile steps are child processes (inherited env): this is how the
+    // flag reaches them, and how an already-set KNEXT_VERBOSE=1 does too.
+    if (argv.includes("--verbose")) process.env.KNEXT_VERBOSE = "1";
     const KNOWN = ACCEPTED_BUILD_FLAGS;
     for (const a of argv) {
         if (!KNOWN.has(a)) {

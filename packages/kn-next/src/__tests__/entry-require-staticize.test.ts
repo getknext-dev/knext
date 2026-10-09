@@ -253,12 +253,279 @@ describe("analyzeServerModule (unit)", () => {
         expect(a.unrecognizedBinding).toBe(true);
     });
 
+    // A create call is "discarded" (inert, not a gap) ONLY when its value is
+    // provably thrown away at statement level. A create HANDED ON — returned,
+    // passed as an argument, stored in a property, or the value of an
+    // enclosing expression — must stay unrecognized, or the strict-mode
+    // failure and the warning are silently lost (#1877 round 2 review).
+    describe("discarded vs handed-on create calls", () => {
+        const PRE = 'import{createRequire as e}from"node:module";';
+        const GETTER_PRE = PRE + "var t=import.meta;";
+        const G = "e({get value(){return t.url}}.value)";
+        it.each([
+            ["returned", "function f(){return e(import.meta.url);}"],
+            [
+                "returned, last statement (no semicolon)",
+                "function f(){return e(import.meta.url)}",
+            ],
+            ["passed as a non-last argument", "use(e(import.meta.url), 1);"],
+            [
+                "passed after a call argument",
+                "use(a(), e(import.meta.url), 1);",
+            ],
+            [
+                "stored in an object property",
+                "var o = {r: e(import.meta.url)};",
+            ],
+            [
+                "stored as the last object property",
+                "x({q: 1, r: e(import.meta.url)});",
+            ],
+            ["stored in an array", "var l = [a(), e(import.meta.url), 1];"],
+            [
+                "the value of a parenthesised sequence",
+                "var v = (a(), e(import.meta.url));",
+            ],
+            ["the value of an arrow body", "var f = () => e(import.meta.url);"],
+            [
+                "returned in a sequence",
+                "function f(){return a(), e(import.meta.url);}",
+            ],
+            [
+                "the argument of a conditional",
+                "var v = c ? e(import.meta.url) : 0;",
+            ],
+            ["inside template text", "var s = `${a(), e(import.meta.url)}`;"],
+        ])("a create %s stays unrecognized", (_label, code) => {
+            expect(analyzeServerModule(PRE + code).unrecognizedBinding).toBe(
+                true,
+            );
+        });
+        it("a getter-shape create returned stays unrecognized", () => {
+            expect(
+                analyzeServerModule(`${GETTER_PRE}function f(){return ${G};}`)
+                    .unrecognizedBinding,
+            ).toBe(true);
+        });
+        it.each([
+            ["a bare expression statement", "e(import.meta.url);"],
+            [
+                "a bare statement, last in a block (ASI)",
+                "function f(){e(import.meta.url)}",
+            ],
+            [
+                "the first element of a statement-level sequence",
+                "e(import.meta.url), a();",
+            ],
+            [
+                "a block-level sequence element after plain calls",
+                "function f(){a(),b.c(),e(import.meta.url),d=1}",
+            ],
+            ["after a closing brace", "function g(){}e(import.meta.url);"],
+        ])("a create as %s is discarded (recognized)", (_label, code) => {
+            expect(analyzeServerModule(PRE + code).unrecognizedBinding).toBe(
+                false,
+            );
+        });
+        // The EXACT shape measured in the real file-manager build: rolldown's
+        // per-chunk __esmMin init sets up a require it may never call.
+        // A `;`, `{` or `}` inside a `//` line comment is NOT a statement
+        // boundary: the create below is the value of `const r = ...`
+        // (#1877 round 3 review).
+        it.each([
+            ["`;`", "const r = // note;\n e(import.meta.url);"],
+            ["`{`", "const r = // note {\n e(import.meta.url);"],
+            ["`}`", "const r = // note }\n e(import.meta.url);"],
+            [
+                "`;` after a sibling",
+                "const r = // x;\n a(), e(import.meta.url);",
+            ],
+            [
+                "`;` with a quote before the comment",
+                "const r = '//'; const s = // x;\n e(import.meta.url);",
+            ],
+        ])("a %s inside a line comment is not a statement boundary", (_label, code) => {
+            expect(analyzeServerModule(PRE + code).unrecognizedBinding).toBe(
+                true,
+            );
+        });
+        // A comment BETWEEN the boundary and the call is not skipped; the
+        // scan cannot prove the position, so it stays unrecognized (loud).
+        it.each([
+            ["a line comment", "a(); // note\n e(import.meta.url);"],
+            ["a block comment", "a(); /* x */\n e(import.meta.url);"],
+            [
+                "a `//` in a string earlier on the line",
+                'var u = "https://x.dev"; e(import.meta.url);',
+            ],
+        ])("conservative: a create after %s stays unrecognized", (_label, code) => {
+            expect(analyzeServerModule(PRE + code).unrecognizedBinding).toBe(
+                true,
+            );
+        });
+        it.each([
+            ["a real `;` on the previous line", "a();\n e(import.meta.url);"],
+            [
+                "a real `}` on the previous line",
+                "function g(){}\n e(import.meta.url);",
+            ],
+
+            [
+                "a real `{` after a division",
+                "function g(){var q = a / b; e(import.meta.url)}",
+            ],
+        ])("control: %s stays discarded", (_label, code) => {
+            expect(analyzeServerModule(PRE + code).unrecognizedBinding).toBe(
+                false,
+            );
+        });
+        it("rolldown's real __esmMin init sequence (getter shape) is discarded", () => {
+            const src =
+                GETTER_PRE +
+                "var f$6,init_chunk_NWCAEW5Y=__esmMin((()=>{init_chunk_5MU5Z6L3()," +
+                `${G},f$6=fileURLToPath(t.url)}));`;
+            expect(analyzeServerModule(src).unrecognizedBinding).toBe(false);
+        });
+    });
+
     it("does not treat a createRequire anchored anywhere but import.meta.url as a require binding (sharp's own loader)", () => {
         const a = analyzeServerModule(
             'import{createRequire as e}from"node:module";let Rh=e(join(p,`x`));Rh(`sharp`);',
         );
         expect(a.requireBindings).toEqual([]);
         expect(a.unrecognizedBinding).toBe(false);
+    });
+
+    describe("the per-module-merge getter-indirection binding shape (cluster C11)", () => {
+        // The EXACT shape measured against a real `vite build` (vinext 1.0.1,
+        // nitro's bun preset, code-splitting disabled) of the `streaming-ssr`
+        // fixture: when rolldown merges several originally-separate modules
+        // into one chunk and more than one of them calls
+        // `createRequire(import.meta.url)`, a later module's own
+        // `import.meta.url` cannot survive the merge as a bare token, so
+        // rolldown hoists it into a per-module getter instead:
+        //   wT = n({get value(){return t.url}}.value)
+        // This is just as real a require binding as the other two shapes —
+        // recognizing it is what lets `wT('react')` reach `PLAN.embed`
+        // instead of silently resolving to nothing at runtime (the "Cannot
+        // find module 'react'" crash).
+        const GETTER_SRC =
+            'import{createRequire as n}from"node:module";' +
+            "var t=import.meta;" +
+            "var wT=n({get value(){return t.url}}.value);" +
+            "var r=wT(`react`);";
+
+        it("recognizes the getter-indirection binding and its literal call", () => {
+            const a = analyzeServerModule(GETTER_SRC);
+            expect(a.aliases).toEqual(["n"]);
+            expect(a.requireBindings).toEqual(["wT"]);
+            expect([...(a.literalCalls.get("wT") ?? [])]).toEqual(["react"]);
+            expect(a.unrecognizedBinding).toBe(false);
+        });
+
+        it("tolerates whitespace/comments between every token of the getter shape", () => {
+            const spaced =
+                'import{createRequire as n}from"node:module";' +
+                "var t=import.meta;" +
+                "var wT = n( { get value ( ) { return t /* anchor */ . url } } . value ) ;" +
+                "var r=wT(`react`);";
+            const a = analyzeServerModule(spaced);
+            expect(a.requireBindings).toEqual(["wT"]);
+        });
+
+        it("does not false-positive on an unrelated getter named value returning an unrelated .url", () => {
+            // The whole call must still be `<alias>(...)`; a getter object
+            // with the identical shape, passed to something else entirely,
+            // must not be recognized as a require binding.
+            const a = analyzeServerModule(
+                'import{createRequire as n}from"node:module";' +
+                    "var t={url:1};" +
+                    "var notARequire=unrelated({get value(){return t.url}}.value);",
+            );
+            expect(a.requireBindings).toEqual([]);
+        });
+
+        it("wrapRequireBindings wraps the WHOLE getter-indirection expression, call sites untouched", () => {
+            const out = wrapRequireBindings(GETTER_SRC, ["n"], ["react"]);
+            expect(out.count).toBe(1);
+            expect(out.contents).toContain(
+                'case "react":return require("react");',
+            );
+            // the call site is untouched: wT(`react`) keeps calling wT, which
+            // is now bound to the wrapped require function.
+            expect(out.contents).toContain("var r=wT(`react`);");
+            // the original getter-indirection expression is still the
+            // argument the IIFE wraps (the real createRequire call still
+            // executes; only its RESULT is intercepted).
+            expect(out.contents).toContain(
+                "(n({get value(){return t.url}}.value))",
+            );
+            expect(out.contents).toContain("return __knextBase(__knextSpec)");
+        });
+
+        it("wrapRequireBindings is a no-op when nothing matches the getter shape", () => {
+            const unrelated = "var x = n({get value(){return t.other}}.value);";
+            expect(wrapRequireBindings(unrelated, ["n"], ["react"]).count).toBe(
+                0,
+            );
+        });
+
+        // Measured verbatim against the real file-manager build (#1877 round
+        // 3): `@getknext/lib`'s logger does
+        // `createRequire(import.meta.url).resolve('pino-pretty')`, wrapped in
+        // try/catch, SPECIFICALLY to probe for an optional, deliberately
+        // production-absent dev dependency — it never loads it. rolldown
+        // merges this into the SAME no-named-binding direct-call shape as a
+        // real require: `createRequire(getterShape).resolve(` SPEC `)`, with
+        // no intermediate variable at all. Before this fix, recognizing the
+        // getter shape also made `.resolve()` fatal exactly like a real
+        // `require()` call, so a correctly-and-intentionally unresolvable
+        // probe failed `--self-contained`/`KNEXT_COMPILE_STRICT_REQUIRES=1`
+        // the same way a genuinely missing load would — regressing the
+        // "Self-contained executable e2e (file-manager, webpack)" CI job.
+        it("a direct (unnamed) createRequire(...).resolve(spec) call is an existence probe, never embedded (#1877 round 3)", () => {
+            const src =
+                'import{createRequire as n}from"node:module";' +
+                "var t=import.meta;" +
+                "try{n({get value(){return t.url}}.value).resolve(`pino-pretty`)}catch{}";
+            const a = analyzeServerModule(src);
+            // Accounted for (never the unrecognized-binding error)...
+            expect(a.unrecognizedBinding).toBe(false);
+            // ...and the getter-indirection call itself is never recognized
+            // as a require BINDING at all (it's a `.resolve()` probe, not a
+            // create-and-load), so nothing from it ever reaches
+            // `planRuntimeRequires`'s per-binding embed/warn/strict-fail walk,
+            // which only iterates `requireBindings`.
+            expect(a.requireBindings).toEqual([]);
+            // ...and specifically: never embedded, never a reported dynamic
+            // require either (both buckets `planRuntimeRequires` consults,
+            // keyed off `requireBindings`, are untouched by this probe).
+            expect(a.literalCalls.size).toBe(0);
+        });
+
+        it("a direct (unnamed) .resolve(spec) probe does not mask a REAL direct call to the same alias elsewhere", () => {
+            // The probe's exemption must not swallow an actual load sharing
+            // the same createRequire alias — only the specific call
+            // continuation `.resolve(` is exempt, not the whole binding.
+            const src =
+                'import{createRequire as n}from"node:module";' +
+                "var t=import.meta;" +
+                "try{n({get value(){return t.url}}.value).resolve(`pino-pretty`)}catch{}" +
+                // A SEPARATE, unnamed, direct call-and-invoke of the same
+                // getter-indirection shape — exactly the real create-and-
+                // immediately-call pattern (no intermediate binding), so it
+                // is classified by the SAME anyCall loop as the probe above,
+                // just via the `invokeRe` branch instead of `resolveInvokeRe`.
+                "n({get value(){return t.url}}.value)(`minio`);";
+            const a = analyzeServerModule(src);
+            expect(a.unrecognizedBinding).toBe(false);
+            // DIRECT_CALL_MARKER itself is a private key, not exported — the
+            // real "minio" call must still land in SOME literalCalls bucket.
+            const allSpecs = [...a.literalCalls.values()].flatMap((set) => [
+                ...set,
+            ]);
+            expect(allSpecs).toEqual(["minio"]);
+        });
     });
 });
 

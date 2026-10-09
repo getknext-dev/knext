@@ -1,6 +1,6 @@
 {
   "name": "@getknext/core",
-  "version": "1.0.0",
+  "version": "1.3.0",
   "description": "Knative Next.js configuration and CLI",
   "type": "module",
   "main": "./dist/config.js",
@@ -48,10 +48,15 @@
       "default": "./dist/validate-public.js"
     },
     "./internal/cache-drain": "./dist/adapters/cache-write-registry.js",
+    "./internal/cache-handler-node": "./dist/adapters/cache-handler-node.js",
+    "./internal/cache-handler-bun": "./dist/adapters/cache-handler-bun.js",
     "./internal/vinext-cache-adapter": "./dist/adapters/vinext-cache-adapter.js",
+    "./internal/vinext-cache-adapter-node": "./dist/adapters/vinext-cache-adapter-node.js",
+    "./internal/vinext-cache-adapter-bun": "./dist/adapters/vinext-cache-adapter-bun.js",
     "./internal/cache-control-normalize": "./dist/adapters/cache-control-normalize.cjs",
     "./internal/bun-keepalive-guard": "./dist/adapters/bun-keepalive-guard.cjs",
     "./internal/request-body-cap": "./dist/adapters/request-body-cap.cjs",
+    "./internal/arp-primer": "./dist/adapters/arp-primer.cjs",
     "./internal/bun-serve-keepalive-guard": "./dist/adapters/bun-serve-keepalive-guard.js",
     "./internal/response-cache-control": "./dist/adapters/response-cache-control.js",
     "./internal/sandbox-fetch-debug": "./dist/adapters/sandbox-fetch-debug.cjs",
@@ -183,13 +188,14 @@
     "next": "16.3.8",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "vinext": "1.0.0-beta.12"
+    "vinext": "1.0.1"
   },
   "dependencies": {
     "@google-cloud/storage": "^7.18.0",
     "@getknext/db": "workspace:^",
     "@getknext/lib": "workspace:^",
     "@opentelemetry/api": "^1.9.0",
+    "acorn": "^8.18.0",
     "ioredis": "^5.9.2",
     "kafkajs": "^2.2.4",
     "pino": "^9.6.0",

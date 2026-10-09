@@ -78,6 +78,11 @@ const EXEMPT: Record<string, string> = {
         "pinned to vinext@1.0.0-beta.4 (ADR-0042 A1 benchmark recipe), which " +
         "predates the plugin `cache` option, and it installs standalone — " +
         "@getknext/core is not resolvable from its vite build",
+    "packages/kn-next/src/__tests__/fixtures/vinext-bun-og-app/vite.config.ts":
+        "a test-only fixture for cluster C4 (the next/og wasm/font embedding " +
+        "fix, vinext-compile-og-exec.test.ts) — it has no ISR page, so there " +
+        "is nothing for the Redis data-cache wiring to serve, and it installs " +
+        "standalone like the bun-exec entry above (not @getknext/core-resolvable)",
 };
 
 const SKIP_DIRS = new Set([

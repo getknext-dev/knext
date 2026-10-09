@@ -1,0 +1,64 @@
+# knext opt-in patched Bun toolchain (`compile.bun: 'knext-patched'`): bun-v1.4.2 + oven-sh/bun#44059.
+#
+# One build per target, submitted with this directory as the source, so the artifacts are a function
+# of the committed files (UPSTREAM, patches/, fetch-pins.sha256, the three scripts):
+#   gcloud builds submit deploy/bun-patched --config deploy/bun-patched/cloudbuild.yaml \
+#     --project gsw-mcp --substitutions=_TARGET=x64 --async
+#   (and _TARGET=aarch64; the two run in parallel)
+#
+# Output: gs://gsw-mcp-bun-verify/bun-patched/<BUILD_ID>/
+#   bun-linux-<target> (+ .sha256)   the release binary
+#   bun-linux-<target>.cdx.json      CycloneDX SBOM (syft) of the binary (file digest + identified parts)
+#   bun-source-<target>.cdx.json     CycloneDX SBOM (syft) of the patched source tree
+#   manifest-<target>.json           tag, commit, patched HEAD, toolchain versions, build id
+#
+# NOT signed here: Cloud Build has no OIDC identity Fulcio accepts (measured for infra/bun-base, see
+# its cloudbuild.yaml). The binaries are published as GitHub release assets and signed keyless by
+# .github/workflows/bun-patched-release.yml, which first checks them against the checksums knext
+# embeds (packages/kn-next/src/cli/bun-toolchain.ts).
+#
+# Runs as the project's default build service account (the dedicated least-privilege account
+# infra/bun-base/README.md describes is not provisioned yet — a founder action).
+options:
+  machineType: E2_HIGHCPU_32
+  diskSizeGb: 300
+timeout: 7200s
+substitutions:
+  _TARGET: x64
+steps:
+  - id: sysroot
+    name: ubuntu:20.04@sha256:8feb4d8ca5354def3d8fce243717141ce31e2c428701f6682bd2fafe15388214
+    entrypoint: bash
+    args: [/workspace/sysroot.sh, $_TARGET]
+  - id: build
+    name: ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3
+    entrypoint: bash
+    args: [/workspace/build.sh, $_TARGET]
+    env: [BUILD_ID=$BUILD_ID]
+  # Runs the x64 binary on glibc 2.31 and proves lazy `--include` (aarch64 has no runner here: the
+  # build step's file/glibc checks are its only verification until the release workflow).
+  - id: smoke
+    name: ubuntu:20.04@sha256:8feb4d8ca5354def3d8fce243717141ce31e2c428701f6682bd2fafe15388214
+    entrypoint: bash
+    args: ['-c', 'if [ "$_TARGET" = x64 ]; then bash /workspace/smoke.sh; else echo "smoke: $_TARGET not executable on this host"; fi']
+  - id: sbom-source
+    name: anchore/syft:v1.52.0@sha256:500e2d872ac019436926e8322b4fc1f39441d94d21f6f4046c6ff29b30e8cb02
+    args: [scan, dir:/workspace/bun, --exclude, ./build, -o, cyclonedx-json=/workspace/out/bun-source-$_TARGET.cdx.json]
+  - id: sbom-binary
+    name: anchore/syft:v1.52.0@sha256:500e2d872ac019436926e8322b4fc1f39441d94d21f6f4046c6ff29b30e8cb02
+    env: [SYFT_FILE_METADATA_SELECTION=all, SYFT_FILE_METADATA_DIGESTS=sha256]
+    args: [scan, file:/workspace/out/bun-linux-$_TARGET, -o, cyclonedx-json=/workspace/out/bun-linux-$_TARGET.cdx.json]
+  - id: digests-and-upload
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim@sha256:cfca8415b7ce1abccf4c7a1a9c78b4da2c3718ac668806480a4471cb052e1ca9
+    entrypoint: bash
+    args:
+      - -euo
+      - pipefail
+      - -c
+      - |
+        cd /workspace/out
+        sha256sum "bun-linux-$_TARGET" > "bun-linux-$_TARGET.sha256"
+        sha256sum * | grep -v '\.sha256$' > "SHA256SUMS-$_TARGET"
+        cat "SHA256SUMS-$_TARGET"
+        gcloud storage cp /workspace/out/* "gs://gsw-mcp-bun-verify/bun-patched/$BUILD_ID/"
+        echo "uploaded to gs://gsw-mcp-bun-verify/bun-patched/$BUILD_ID/"

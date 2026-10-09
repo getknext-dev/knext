@@ -1,5 +1,136 @@
 # kn-next
 
+## 1.3.0
+
+### Patch Changes
+
+- Stable release of the 1.3 line. This is `1.3.0-rc.10` promoted to GA: the published files are identical to `1.3.0-rc.10` except for the version string. See `docs/release/v1.3.0.md` for the release notes.
+
+## 1.3.0-rc.10
+
+### Patch Changes
+
+- Updated dependencies [0c2a6bd]
+  - @getknext/core@1.3.0-rc.10
+
+## 1.3.0-rc.9
+
+### Patch Changes
+
+- bf2abb8: Security: new apps now scaffold with Next.js 16.3.8. The default and vinext builder templates move from 16.3.6. Next.js 16.0.0 through 16.3.7 have a high-severity server-side request forgery in Image Optimization (GHSA-cjq9-62q9-8jv4), fixed in 16.3.8. If you scaffolded an app from an earlier release candidate, upgrade it with `npm install next@16.3.8` (or a later 16.3.x).
+  
+  The Next.js cache handler now follows Next 16.3.7+, which scopes cached entries to their source route (cache keys now start with `/route-cache/`): the revalidate window handed back to Next after a scale-to-zero wake is filed under that exact key, so ISR pages generated at request time still read fresh after a wake. After upgrading, cache entries written under the old key shape (before Next 16.3.7) stay unread in Redis until their TTL expires.
+- Updated dependencies [5d904e5]
+- Updated dependencies [b4dc43d]
+- Updated dependencies [bf2abb8]
+- Updated dependencies [8da3bac]
+- Updated dependencies [565d906]
+- Updated dependencies [cb25f75]
+- Updated dependencies [35ae9c2]
+- Updated dependencies [7c7a06e]
+- Updated dependencies [b5d77d0]
+  - @getknext/core@1.3.0-rc.9
+
+## 1.3.0-rc.8
+
+### Patch Changes
+
+- Updated dependencies [2ae980cf]
+- Updated dependencies [9c15795d]
+- Updated dependencies [dee9c178]
+- Updated dependencies [217111fe]
+- Updated dependencies [c4d065c6]
+- Updated dependencies [98c011a8]
+  - @getknext/core@1.3.0-rc.8
+
+## 1.3.0-rc.7
+
+### Patch Changes
+
+- Updated dependencies [c45f0303]
+- Updated dependencies [5d4915b8]
+- Updated dependencies [ca6080c1]
+- Updated dependencies [d27e4b10]
+- Updated dependencies [8933ef3b]
+- Updated dependencies [3600300f]
+- Updated dependencies [fd84b65e]
+- Updated dependencies [2722d392]
+- Updated dependencies [8f967355]
+  - @getknext/core@1.3.0-rc.7
+
+## 1.3.0-rc.6
+
+### Patch Changes
+
+- Updated dependencies [17b268f]
+- Updated dependencies [313f897]
+- Updated dependencies [35f4d48]
+- Updated dependencies [546cad0]
+- Updated dependencies [622f728]
+- Updated dependencies [92c4896]
+  - @getknext/core@1.3.0-rc.6
+
+## 1.3.0-rc.5
+
+### Patch Changes
+
+- Updated dependencies [3a846a5]
+- Updated dependencies [c22b079]
+- Updated dependencies [4ef2382]
+- Updated dependencies [91f2150]
+- Updated dependencies [4f3712e]
+- Updated dependencies [81329bb]
+  - @getknext/core@1.3.0-rc.5
+
+## 1.3.0-rc.4
+
+### Patch Changes
+
+- Updated dependencies [3c2348f]
+- Updated dependencies [e1a5269]
+- Updated dependencies [e0238ad]
+  - @getknext/core@1.3.0-rc.4
+
+## 1.3.0-rc.3
+
+### Patch Changes
+
+- Updated dependencies [1d06599]
+- Updated dependencies [e46b37a]
+- Updated dependencies [b167fd4]
+- Updated dependencies [ee45ef3]
+- Updated dependencies [0cddde7]
+- Updated dependencies [598441e]
+- Updated dependencies [b679600]
+  - @getknext/core@1.3.0-rc.3
+
+## 1.3.0-rc.2
+
+### Patch Changes
+
+- Updated dependencies [3823881]
+- Updated dependencies [942ad38]
+- Updated dependencies [5b1717d]
+- Updated dependencies [5dece2e]
+- Updated dependencies [678d1da]
+- Updated dependencies [c0a664c]
+- Updated dependencies [70c5bbd]
+- Updated dependencies [24543bb]
+  - @getknext/core@1.3.0-rc.2
+
+## 1.3.0-rc.1
+
+### Patch Changes
+
+- 1aa6b8f: knext's public docs site moved from `knext.dev` to `knext-platform.dev` (`knext.dev` now resolves to an unrelated Cloudflare 403 page). Updates every user-facing `knext.dev` URL in the CLI — help text (`knext --help`), error-message hints (`knext doctor`, missing-config guidance), scaffolded `knext.config.ts` template comments, the asset-upload multi-cloud hint, and package READMEs (`@getknext/core`, `@getknext/lib`, `@getknext/db`, the `kn-next` alias package) — to `knext-platform.dev`. `@getknext/action`'s README is also updated but carries no changeset entry since that package is `private: true` and never publishes. Kubernetes label keys that happen to share the domain string (e.g. the CRD-adjacent `apps.knext.dev/build-id` label) are unaffected; they are not web links.
+- Updated dependencies [e5d94c6]
+- Updated dependencies [51fbd7e]
+- Updated dependencies [1aa6b8f]
+- Updated dependencies [4945b10]
+- Updated dependencies [02f24e3]
+- Updated dependencies [056432d]
+  - @getknext/core@1.3.0-rc.1
+
 ## 1.0.0
 
 ### Patch Changes
@@ -61,6 +192,7 @@
 - Updated dependencies [69a8060]
 - Updated dependencies [bbe455d]
   - @getknext/core@1.0.0-rc.6
+
 
 ## 1.0.0-rc.5
 
