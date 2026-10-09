@@ -61,7 +61,19 @@ function findViolations(root: string): string[] {
   const cs = join(root, '.changeset');
   const config = readJson(join(cs, 'config.json'));
   const fixed: string[] = (config.fixed ?? []).flat();
+  // Fail closed: a renamed/removed/empty `fixed` would otherwise let every major through.
+  if (!Array.isArray(config.fixed) || fixed.length === 0)
+    throw new Error(
+      '.changeset/config.json: `fixed` group is missing or empty; this guard cannot protect the 1.x line without it',
+    );
   const versions = packageVersions(root);
+  // Fail closed: every fixed member must resolve to a version.
+  for (const n of fixed) {
+    if (!versions.get(n))
+      throw new Error(
+        `.changeset/config.json: fixed member ${n} does not resolve to a packages/*/package.json version`,
+      );
+  }
   const files = readdirSync(cs);
   const bumps = new Map<string, Record<string, string>>();
   for (const f of files) {
@@ -82,7 +94,7 @@ function findViolations(root: string): string[] {
     for (const [pkg, level] of Object.entries(b)) {
       if (level !== 'major' || !fixed.includes(pkg)) continue;
       // fixed group shares one version; fall back to any group member's version
-      const v = versions.get(pkg) ?? fixed.map((n) => versions.get(n)).find(Boolean) ?? '';
+      const v = versions.get(pkg) as string;
       if (v.startsWith('1.')) {
         out.push(
           `.changeset/${file}: 'major' bump of fixed-group package ${pkg} while the group is on ${v}; this would compute 2.0.0 on the 1.x line. Use minor/patch.`,
@@ -99,13 +111,18 @@ describe('no major changeset on a 1.x fixed group (#2036)', () => {
   });
 
   describe('detector self-checks (temp fixtures)', () => {
-    const fixture = (cs: Record<string, string>) => {
+    const fixture = (
+      cs: Record<string, string>,
+      config: unknown = { fixed: [['@getknext/core', '@getknext/lib']] },
+    ) => {
       const r = mkdtempSync(join(tmpdir(), 'r1-'));
       mkdirSync(join(r, '.changeset'));
       mkdirSync(join(r, 'packages/core'), { recursive: true });
+      writeFileSync(join(r, '.changeset/config.json'), JSON.stringify(config));
+      mkdirSync(join(r, 'packages/lib'), { recursive: true });
       writeFileSync(
-        join(r, '.changeset/config.json'),
-        JSON.stringify({ fixed: [['@getknext/core', '@getknext/lib']] }),
+        join(r, 'packages/lib/package.json'),
+        JSON.stringify({ name: '@getknext/lib', version: '1.3.0' }),
       );
       writeFileSync(
         join(r, 'packages/core/package.json'),
@@ -131,6 +148,19 @@ describe('no major changeset on a 1.x fixed group (#2036)', () => {
     });
     it('ignores major on a non-fixed package', () => {
       expect(findViolations(fixture({ 'a.md': '---\n"other": major\n---\n' }))).toEqual([]);
+    });
+    it('fails closed when the fixed group is renamed, removed or empty', () => {
+      const cs = { 'a.md': '---\n"@getknext/core": major\n---\n' };
+      expect(() => findViolations(fixture(cs, { fixedX: [['@getknext/core']] }))).toThrow(/fixed/);
+      expect(() => findViolations(fixture(cs, {}))).toThrow(/fixed/);
+      expect(() => findViolations(fixture(cs, { fixed: [] }))).toThrow(/fixed/);
+      expect(() => findViolations(fixture(cs, { fixed: [[]] }))).toThrow(/fixed/);
+    });
+    it('fails closed when a fixed member does not resolve, naming it', () => {
+      const cs = { 'a.md': '---\n"@getknext/core": major\n---\n' };
+      expect(() =>
+        findViolations(fixture(cs, { fixed: [['@getknext/core', '@getknext/ghost']] })),
+      ).toThrow(/@getknext\/ghost/);
     });
     it('throws on malformed front-matter', () => {
       expect(() => findViolations(fixture({ 'a.md': 'no frontmatter' }))).toThrow();
