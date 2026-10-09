@@ -110,6 +110,7 @@ describe('scale-zero-pg default apply path is not publicly exposed', () => {
       new RegExp(`--type(?:=|\\s+)["']?${T}\\b`),
       new RegExp(`\\\\*["']\\s*type\\s*\\\\*["']\\s*:\\s*\\\\*["']?${T}\\b`),
       /\bkubectl\b[^\n]*\bexpose\b/,
+      /\bcreate\s+service\s+(?:loadbalancer|nodeport)\b/i,
     ];
     const offenders = readdirSync(DEPLOY)
       .filter((n) => n.endsWith('.sh'))

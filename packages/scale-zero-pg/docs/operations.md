@@ -2113,6 +2113,10 @@ kubectl -n scale-zero-pg port-forward svc/pggw 55432:55432
 psql "postgres://…@localhost:55432/postgres?sslmode=require"
 ```
 
+`sslmode=require` needs the gateway TLS Secret from `gen-tls.sh`; on a fresh install
+without it the server offers no TLS, so use `sslmode=disable` over the port-forward
+(the tunnel itself stays inside the cluster API connection).
+
 If you really need a public endpoint, apply the opt-in overlay by name (it lives in
 `deploy/optional/`, which the directory apply never reaches):
 
