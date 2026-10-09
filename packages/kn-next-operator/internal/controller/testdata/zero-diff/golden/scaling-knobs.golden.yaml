@@ -1,0 +1,139 @@
+---
+apiVersion: v1
+automountServiceAccountToken: false
+kind: ServiceAccount
+metadata:
+  name: scaling-knobs-sa
+  namespace: default
+  ownerReferences:
+  - apiVersion: apps.kn-next.dev/v1alpha1
+    blockOwnerDeletion: true
+    controller: true
+    kind: NextApp
+    name: scaling-knobs
+    uid: uid-scaling-knobs
+---
+apiVersion: caching.internal.knative.dev/v1alpha1
+kind: Image
+metadata:
+  labels:
+    app: scaling-knobs
+    generated-by: kn-next-operator
+  name: scaling-knobs-image-cache
+  namespace: default
+  ownerReferences:
+  - apiVersion: apps.kn-next.dev/v1alpha1
+    blockOwnerDeletion: true
+    controller: true
+    kind: NextApp
+    name: scaling-knobs
+    uid: uid-scaling-knobs
+spec:
+  image: registry.example.com/app:v1@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1
+---
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  labels:
+    app: scaling-knobs
+    generated-by: kn-next-operator
+  name: scaling-knobs
+  namespace: default
+  ownerReferences:
+  - apiVersion: apps.kn-next.dev/v1alpha1
+    blockOwnerDeletion: true
+    controller: true
+    kind: NextApp
+    name: scaling-knobs
+    uid: uid-scaling-knobs
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/max-scale: "20"
+        autoscaling.knative.dev/min-scale: "0"
+        autoscaling.knative.dev/panic-threshold-percentage: "150"
+        autoscaling.knative.dev/panic-window-percentage: "5"
+        autoscaling.knative.dev/scale-down-delay: 15m
+        autoscaling.knative.dev/target-burst-capacity: "-1"
+    spec:
+      containerConcurrency: 100
+      containers:
+      - env:
+        - name: HOSTNAME
+          value: 0.0.0.0
+        - name: NODE_ENV
+          value: production
+        image: registry.example.com/app:v1@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1
+        livenessProbe:
+          httpGet:
+            path: /api/health
+            port: 3000
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        name: ""
+        ports:
+        - containerPort: 3000
+        readinessProbe:
+          httpGet:
+            path: /api/health
+            port: 3000
+        resources:
+          limits:
+            cpu: "1"
+            memory: 1Gi
+          requests:
+            cpu: 250m
+            memory: 512Mi
+        securityContext:
+          readOnlyRootFilesystem: true
+      serviceAccountName: scaling-knobs-sa
+      timeoutSeconds: 300
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    app: scaling-knobs
+    generated-by: kn-next-operator
+  name: scaling-knobs-allow-ingress
+  namespace: default
+  ownerReferences:
+  - apiVersion: apps.kn-next.dev/v1alpha1
+    blockOwnerDeletion: true
+    controller: true
+    kind: NextApp
+    name: scaling-knobs
+    uid: uid-scaling-knobs
+spec:
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: In
+          values:
+          - knative-serving
+          - kourier-system
+    ports:
+    - port: 8012
+    - port: 8013
+    - port: 8112
+    - port: 9090
+    - port: 9464
+  - from:
+    - podSelector: {}
+    ports:
+    - port: 9090
+    - port: 9464
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          knext.dev/metrics-scrape: "true"
+    ports:
+    - port: 9464
+  podSelector:
+    matchLabels:
+      serving.knative.dev/service: scaling-knobs
+  policyTypes:
+  - Ingress

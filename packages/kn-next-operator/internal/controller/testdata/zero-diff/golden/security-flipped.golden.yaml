@@ -1,0 +1,87 @@
+---
+apiVersion: v1
+automountServiceAccountToken: false
+kind: ServiceAccount
+metadata:
+  name: security-flipped-sa
+  namespace: default
+  ownerReferences:
+  - apiVersion: apps.kn-next.dev/v1alpha1
+    blockOwnerDeletion: true
+    controller: true
+    kind: NextApp
+    name: security-flipped
+    uid: uid-security-flipped
+---
+apiVersion: caching.internal.knative.dev/v1alpha1
+kind: Image
+metadata:
+  labels:
+    app: security-flipped
+    generated-by: kn-next-operator
+  name: security-flipped-image-cache
+  namespace: default
+  ownerReferences:
+  - apiVersion: apps.kn-next.dev/v1alpha1
+    blockOwnerDeletion: true
+    controller: true
+    kind: NextApp
+    name: security-flipped
+    uid: uid-security-flipped
+spec:
+  image: registry.example.com/app:v1@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1
+---
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  labels:
+    app: security-flipped
+    generated-by: kn-next-operator
+  name: security-flipped
+  namespace: default
+  ownerReferences:
+  - apiVersion: apps.kn-next.dev/v1alpha1
+    blockOwnerDeletion: true
+    controller: true
+    kind: NextApp
+    name: security-flipped
+    uid: uid-security-flipped
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/max-scale: "10"
+        autoscaling.knative.dev/min-scale: "0"
+    spec:
+      containerConcurrency: 20
+      containers:
+      - env:
+        - name: HOSTNAME
+          value: 0.0.0.0
+        - name: NODE_ENV
+          value: production
+        image: registry.example.com/app:v1@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1
+        livenessProbe:
+          httpGet:
+            path: /api/health
+            port: 3000
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        name: ""
+        ports:
+        - containerPort: 3000
+        readinessProbe:
+          httpGet:
+            path: /api/health
+            port: 3000
+        resources:
+          limits:
+            cpu: "1"
+            memory: 1Gi
+          requests:
+            cpu: 250m
+            memory: 512Mi
+        securityContext:
+          readOnlyRootFilesystem: false
+      serviceAccountName: security-flipped-sa
+      timeoutSeconds: 300

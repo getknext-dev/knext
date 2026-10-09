@@ -1,0 +1,2 @@
+# reconcile error
+image "registry.example.com/app:latest" uses the :latest tag which is forbidden: use a digest-pinned ref (e.g. myapp:v1@sha256:<hash>)

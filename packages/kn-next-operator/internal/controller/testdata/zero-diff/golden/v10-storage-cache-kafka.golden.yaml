@@ -1,0 +1,176 @@
+---
+apiVersion: v1
+automountServiceAccountToken: false
+kind: ServiceAccount
+metadata:
+  name: v10-storage-cache-kafka-sa
+  namespace: default
+  ownerReferences:
+  - apiVersion: apps.kn-next.dev/v1alpha1
+    blockOwnerDeletion: true
+    controller: true
+    kind: NextApp
+    name: v10-storage-cache-kafka
+    uid: uid-v10-storage-cache-kafka
+---
+apiVersion: caching.internal.knative.dev/v1alpha1
+kind: Image
+metadata:
+  labels:
+    app: v10-storage-cache-kafka
+    generated-by: kn-next-operator
+  name: v10-storage-cache-kafka-image-cache
+  namespace: default
+  ownerReferences:
+  - apiVersion: apps.kn-next.dev/v1alpha1
+    blockOwnerDeletion: true
+    controller: true
+    kind: NextApp
+    name: v10-storage-cache-kafka
+    uid: uid-v10-storage-cache-kafka
+spec:
+  image: registry.example.com/app:v1@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1
+---
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  labels:
+    app: v10-storage-cache-kafka
+    generated-by: kn-next-operator
+  name: v10-storage-cache-kafka
+  namespace: default
+  ownerReferences:
+  - apiVersion: apps.kn-next.dev/v1alpha1
+    blockOwnerDeletion: true
+    controller: true
+    kind: NextApp
+    name: v10-storage-cache-kafka
+    uid: uid-v10-storage-cache-kafka
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/max-scale: "10"
+        autoscaling.knative.dev/min-scale: "0"
+    spec:
+      containerConcurrency: 20
+      containers:
+      - env:
+        - name: HOSTNAME
+          value: 0.0.0.0
+        - name: NODE_ENV
+          value: production
+        - name: STORAGE_PROVIDER
+          value: gcs
+        - name: GCS_BUCKET_NAME
+          value: my-bucket
+        - name: CACHE_BUCKET_REGION
+          value: us-central1
+        - name: CACHE_PROVIDER
+          value: redis
+        - name: REDIS_URL
+          value: redis://redis.default.svc:6379
+        - name: REDIS_KEY_PREFIX
+          value: v10
+        - name: KAFKA_BROKER_URL
+          value: kafka.default.svc:9092
+        - name: KAFKA_REVALIDATION_TOPIC
+          value: v10-storage-cache-kafka-revalidation
+        image: registry.example.com/app:v1@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1
+        livenessProbe:
+          httpGet:
+            path: /api/health
+            port: 3000
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        name: ""
+        ports:
+        - containerPort: 3000
+        readinessProbe:
+          httpGet:
+            path: /api/health
+            port: 3000
+        resources:
+          limits:
+            cpu: "1"
+            memory: 1Gi
+          requests:
+            cpu: 250m
+            memory: 512Mi
+        securityContext:
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - mountPath: /app/.next/standalone/.next/cache
+          name: knext-writable
+          subPath: next-cache
+      serviceAccountName: v10-storage-cache-kafka-sa
+      timeoutSeconds: 300
+      volumes:
+      - emptyDir: {}
+        name: knext-writable
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    app: v10-storage-cache-kafka
+    generated-by: kn-next-operator
+  name: v10-storage-cache-kafka-allow-ingress
+  namespace: default
+  ownerReferences:
+  - apiVersion: apps.kn-next.dev/v1alpha1
+    blockOwnerDeletion: true
+    controller: true
+    kind: NextApp
+    name: v10-storage-cache-kafka
+    uid: uid-v10-storage-cache-kafka
+spec:
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: In
+          values:
+          - knative-serving
+          - kourier-system
+    ports:
+    - port: 8012
+    - port: 8013
+    - port: 8112
+    - port: 9090
+    - port: 9464
+  - from:
+    - podSelector: {}
+    ports:
+    - port: 9090
+    - port: 9464
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          knext.dev/metrics-scrape: "true"
+    ports:
+    - port: 9464
+  podSelector:
+    matchLabels:
+      serving.knative.dev/service: v10-storage-cache-kafka
+  policyTypes:
+  - Ingress
+# KafkaSource (builder output; Reconcile does not create it)
+---
+apiVersion: sources.knative.dev/v1beta1
+kind: KafkaSource
+metadata:
+  name: v10-storage-cache-kafka-revalidation-source
+  namespace: default
+spec:
+  bootstrapServers:
+  - kafka.default.svc:9092
+  consumerGroup: v10-storage-cache-kafka-revalidation
+  sink:
+    ref:
+      apiVersion: serving.knative.dev/v1
+      kind: Service
+      name: v10-storage-cache-kafka-revalidator
+  topics:
+  - v10-storage-cache-kafka-revalidation
