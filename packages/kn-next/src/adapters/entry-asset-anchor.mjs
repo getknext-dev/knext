@@ -409,6 +409,7 @@ const LOCATE_FILE_PACKAGE = "@vercel/og";
  *   deliberate and not listed. `parseError`: the module did not parse, so no
  *   anchor in it was rewritten.
  */
+// @upstream-shim bun-new-url-asset
 export function rewriteAssetAnchors(src, modulePath, resolve, resolveLocateFile, analyze) {
     if (assetAnchorPackageRoot(modulePath) === undefined) {
         return { contents: src, assets: [], skipped: [] };

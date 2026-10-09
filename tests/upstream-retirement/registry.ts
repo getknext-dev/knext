@@ -804,4 +804,53 @@ export const REGISTRY: RetirementEntry[] = [
       }
     },
   },
+  {
+    id: 'bun-new-url-asset',
+    upstream: 'oven-sh/bun#44695',
+    upstreamTitle: 'is not embedded',
+    fixedBy: {
+      ref: 'oven-sh/bun#44702',
+      title: 'embed files referenced via new URL',
+    },
+    issue: '#1869',
+    kind: 'shim',
+    shape: 'vinext',
+    against: 'bun',
+    // `bun build --compile` does not embed a file that is read through
+    // `new URL("./x", import.meta.url)`, so the compiled binary fails with ENOENT
+    // once the sources are gone. entry-asset-anchor.mjs rewrites such anchors to
+    // an explicit `with { type: "file" }` binding at build time. CONTROL: the
+    // same read succeeds from the source tree on disk. PROBE: the compiled
+    // binary, run from an empty directory after the source tree is removed. Red
+    // (= retire) once the pinned Bun embeds the file itself.
+    repro: async () => {
+      const box = sandbox('44695');
+      try {
+        box.write({
+          'src/main.mjs':
+            'import { readFileSync } from "node:fs";\n' +
+            'import { fileURLToPath } from "node:url";\n' +
+            'try { console.log("RESULT ok " + readFileSync(fileURLToPath(new URL("./data.txt", import.meta.url)), "utf8").trim()); }\n' +
+            'catch (e) { console.log("RESULT fail " + (e.code || e.message)); }\n',
+          'src/data.txt': 'payload\n',
+          'empty/.keep': '',
+        });
+        const control = box.run([bunOnPath(), 'main.mjs'], join(box.dir, 'src')).result;
+        if (control !== 'ok payload') inconclusive('bun-new-url-asset', `on-disk read: ${control}`);
+        const built = box.compile(
+          'src',
+          '{ entrypoints: ["./main.mjs"], target: "bun", compile: { outfile: "../bin/app" } }',
+        );
+        if (built.status !== 'built') inconclusive('bun-new-url-asset', built.detail);
+        box.remove('src');
+        const probe = box.run([join(box.dir, 'bin/app')], join(box.dir, 'empty')).result;
+        return {
+          stillBroken: probe !== 'ok payload',
+          evidence: `on-disk read → ${control}; compiled binary, sources removed → ${probe}`,
+        };
+      } finally {
+        box.dispose();
+      }
+    },
+  },
 ];
