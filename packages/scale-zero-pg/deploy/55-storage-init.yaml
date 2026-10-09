@@ -67,13 +67,16 @@ spec:
       # deploy/57 and advanced by pswatcher) mounted READ-ONLY so the attach step reads
       # it (#1095). A ConfigMap volume costs no RBAC. optional:true so the pod schedules
       # even if the CM lags this Job on first apply (55 applies before 57); the script
-      # WAITS for /ledger/generation and FAILS CLOSED if it never appears.
+      # WAITS (bounded, ~2 min) for /ledger/generation and FAILS CLOSED if it never appears.
+      # Only 57-pageserver-standby.yaml creates that ConfigMap, so a partial install
+      # that skips 57 still needs it (the failure message says so); see the minimal
+      # file set in docs/getting-started.md.
       volumes:
         - name: gen-ledger
           configMap: { name: pageserver-generation, optional: true }
       containers:
         - name: init
-          image: neondatabase/neon:8464
+          image: docker.io/neondatabase/neon:8464@sha256:7a4f124917bb929964b2d696d710f19584f80bb9bd51b2af4a6e2425434c761f
           envFrom:
             - configMapRef: { name: compute-config } # TENANT_ID, TIMELINE_ID, PG_VERSION, PAGESERVER_HOST
           volumeMounts:
@@ -106,7 +109,7 @@ spec:
               # T1-LEDGER-READ-BEGIN (#1095)
               n=0
               until [ -s "${LEDGER_FILE:-/ledger/generation}" ]; do
-                n=$((n+1)); [ "$n" -gt "${LEDGER_WAIT_TRIES:-60}" ] && { echo "REFUSING to attach ${TENANT_ID}: pageserver-generation ledger not present at ${LEDGER_FILE:-/ledger/generation} (missing/unmounted ConfigMap; run deploy/seed-ledger.sh). Refusing to floor to a low generation (silent-loss risk); see operations.md." >&2; exit 1; }
+                n=$((n+1)); [ "$n" -gt "${LEDGER_WAIT_TRIES:-60}" ] && { echo "REFUSING to attach ${TENANT_ID}: pageserver-generation ledger not present at ${LEDGER_FILE:-/ledger/generation} (the pageserver-generation ConfigMap is missing, unmounted, or has no generation key: apply deploy/57-pageserver-standby.yaml, which creates that ConfigMap even if you run no standby, then run deploy/seed-ledger.sh). Refusing to floor to a low generation (silent-loss risk); see operations.md." >&2; exit 1; }
                 echo "waiting for the generation ledger at ${LEDGER_FILE:-/ledger/generation} ..."; sleep 2
               done
               LEDGER="$(cat "${LEDGER_FILE:-/ledger/generation}")"

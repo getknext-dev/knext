@@ -71,7 +71,7 @@ spec:
       # wait the primary compute uses.
       initContainers:
         - name: wait-timeline
-          image: neondatabase/neon:8464
+          image: docker.io/neondatabase/neon:8464@sha256:7a4f124917bb929964b2d696d710f19584f80bb9bd51b2af4a6e2425434c761f
           envFrom:
             - configMapRef: { name: compute-config-__APP__ }
           command: ["/bin/sh", "-c"]
@@ -85,7 +85,7 @@ spec:
               echo "timeline ready"
       containers:
         - name: compute
-          image: neondatabase/compute-node-v17:8464 # PINNED pair with storage (ops "Upgrades")
+          image: docker.io/neondatabase/compute-node-v17:8464@sha256:13ab146d3e7bbabb25a8532f315ac443e7512351d1ede0bab586def5c70e26c3 # PINNED pair with storage (ops "Upgrades")
           imagePullPolicy: IfNotPresent
           command: ["/bin/sh", "/compute-files/entrypoint.sh"]
           envFrom:

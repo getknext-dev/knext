@@ -60,8 +60,8 @@ TAG="${1:-${TAG:-17411840350}}"
 DRILL_NS=upgrade-drill
 TENANT=f000f000f000f000f000f000f000f001
 TIMELINE=f000f000f000f000f000f000f000f002
-IMG_NEON="neondatabase/neon:${TAG}"
-IMG_COMPUTE="neondatabase/compute-node-v17:${TAG}"
+IMG_NEON="docker.io/neondatabase/neon:${TAG}"
+IMG_COMPUTE="docker.io/neondatabase/compute-node-v17:${TAG}"
 
 K="$KUBECTL -n $DRILL_NS $RT"
 WORK="$(mktemp -d)"
@@ -105,8 +105,10 @@ echo "==================================================================="
 # and rebase the namespace. This is the whole point: the REAL manifests are what
 # gets exercised against the new image, so manifest/config breakage is caught.
 transform() {
-  sed -e "s#neondatabase/neon:8464#${IMG_NEON}#g" \
-      -e "s#neondatabase/compute-node-v17:8464#${IMG_COMPUTE}#g" \
+  # The shipped manifests pin `docker.io/neondatabase/<img>:8464@sha256:<digest>`; the
+  # rehearsal swaps the WHOLE reference (tag AND digest) for the new, unpinned tag.
+  sed -E -e "s#docker.io/neondatabase/neon:8464(@sha256:[0-9a-f]{64})?#${IMG_NEON}#g" \
+      -e "s#docker.io/neondatabase/compute-node-v17:8464(@sha256:[0-9a-f]{64})?#${IMG_COMPUTE}#g" \
       -e "s#namespace: scale-zero-pg#namespace: ${DRILL_NS}#g" "$1"
 }
 

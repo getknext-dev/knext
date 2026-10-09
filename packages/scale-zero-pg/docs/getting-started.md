@@ -73,6 +73,35 @@ This creates the `scale-zero-pg` namespace with:
 
 The compute starts at zero. That's correct — it wakes on the first connection.
 
+### Installing a subset: the minimal file set
+
+`kubectl apply -f deploy/` is the supported install. If you apply files one at a
+time instead (for example to skip MinIO, or to run without the standby pageserver),
+the smallest working single-database set is:
+
+| Files | Why |
+|---|---|
+| `00-namespace.yaml` | the `scale-zero-pg` namespace everything else lives in |
+| `deploy/gen-secrets.sh` (a script, run first) | storage credentials, the `storage-objstore` config and the base admin credential |
+| `deploy/gen-peer-token.sh` and `deploy/gen-tls.sh` (scripts, run before the gateway) | the `pggw-peer-token` and `pggw-tls` Secrets; the gateway refuses to start without them |
+| `50-minio.yaml` (or an external S3 backend, see below) | the object store |
+| `51-storage-broker.yaml`, `52-safekeeper.yaml`, `53-pageserver.yaml` | the storage plane |
+| `54-compute-files.yaml` | the compute entrypoint scripts and `compute-config` |
+| **`57-pageserver-standby.yaml`** | creates the **`pageserver-generation`** ConfigMap that `storage-init` reads; required **even if you run no standby** (the file also starts the standby pageserver) |
+| `deploy/seed-ledger.sh` (a script, run after 57) | seeds the ledger to generation 1 the first time |
+| `55-storage-init.yaml` | creates the tenant and timeline |
+| `10-gateway.yaml` (plus `11-mtls-certs.yaml` or `GW_COMPUTE_TLS=false`) | the wake-on-connect gateway |
+| `20-compute.yaml` | the compute itself |
+
+Without the `pageserver-generation` ConfigMap, `storage-init` cannot attach the
+tenant: it deliberately refuses to guess a generation, because attaching too low
+risks silent data loss. It polls for about two minutes, then exits with a message
+naming `57-pageserver-standby.yaml` and `seed-ledger.sh`, and Kubernetes restarts the
+container. Apply 57, run `deploy/seed-ledger.sh`, and the next retry succeeds. If you really
+do not want the standby, create only the ledger ConfigMap
+(`kubectl -n scale-zero-pg create configmap pageserver-generation`) and then run
+`deploy/seed-ledger.sh`.
+
 ### Choose your object storage (#105)
 
 The durable object store is a **configured S3 endpoint**, not bundled MinIO. Run

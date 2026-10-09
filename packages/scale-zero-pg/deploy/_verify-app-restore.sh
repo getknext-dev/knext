@@ -57,8 +57,8 @@ TEMPLATE_TL="${TEMPLATE_TL:-a0000000000000000000000000000010}"
 # apps tenant is attached at generation 1 by provision-app.sh (ensure_tenant), so
 # every apps-tenant index in the backup is gen 1; gen 2 reads it and writes forward.
 DRILL_GEN="${DRILL_GEN:-2}"
-IMG_NEON=neondatabase/neon:8464
-IMG_COMPUTE=neondatabase/compute-node-v17:8464
+IMG_NEON=docker.io/neondatabase/neon:8464
+IMG_COMPUTE=docker.io/neondatabase/compute-node-v17:8464
 IMG_MC=docker.io/bitnamilegacy/minio-client@sha256:00dcc4e58ada0df45bb7d9ee435af98295f96c27c3c68292ce78ec700a87b511  # #1403: quay.io/minio/mc is UNAUTHORIZED for anonymous pull repo-wide; Bitnami legacy mirror
 DRILL_MINIO_STORAGE="${DRILL_MINIO_STORAGE:-12Gi}"
 DRILL_STORAGE="${DRILL_STORAGE:-6Gi}"

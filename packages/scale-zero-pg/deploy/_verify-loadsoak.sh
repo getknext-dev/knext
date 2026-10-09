@@ -35,7 +35,7 @@
 #   RAMP_DOWN      drain (default 30s).
 #   P95_MS/P99_MS  latency thresholds in ms (default 1500 / 3000).
 #   MAX_ERR_RATE   error budget as a fraction (default 0.01 = 1%).
-#   K6_IMAGE       k6 image (default grafana/k6:0.49.0).
+#   K6_IMAGE       k6 image (default docker.io/grafana/k6:0.49.0).
 #   K6_CPU_REQUEST / K6_CPU_LIMIT     k6 pod CPU request / limit (default 500m / 2). On a
 #                  CPU-request-constrained cluster set K6_CPU_REQUEST=150m (and lower
 #                  RAMP_CEIL_VU) so the Job schedules; record the k6 CPU budget with the numbers.
@@ -78,7 +78,7 @@ RAMP_DOWN="${RAMP_DOWN:-30s}"
 P95_MS="${P95_MS:-1500}"
 P99_MS="${P99_MS:-3000}"
 MAX_ERR_RATE="${MAX_ERR_RATE:-0.01}"
-K6_IMAGE="${K6_IMAGE:-grafana/k6:0.49.0}"
+K6_IMAGE="${K6_IMAGE:-docker.io/grafana/k6:0.49.0}"
 # k6 pod resources are KNOBS (#376 follow-up): the live OKE cluster is CPU-REQUEST-
 # constrained (2 nodes, most allocatable reserved), so the default 500m request fails
 # to schedule (Insufficient cpu). Lower K6_CPU_REQUEST there (e.g. 150m) AND reduce

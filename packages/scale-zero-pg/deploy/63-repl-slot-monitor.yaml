@@ -178,7 +178,7 @@ spec:
             seccompProfile: { type: RuntimeDefault }
           containers:
             - name: monitor
-              image: alpine/k8s:1.30.2 # bundles kubectl + a shell; execs psql INSIDE the compute pod
+              image: docker.io/alpine/k8s:1.30.2@sha256:cd560fce90f76d2da46bce0624b65258c45ab3350f7073d6722fa74c7b3a3601 # bundles kubectl + a shell; execs psql INSIDE the compute pod
               securityContext:
                 allowPrivilegeEscalation: false
                 capabilities: { drop: ["ALL"] }
@@ -224,7 +224,7 @@ spec:
             seccompProfile: { type: RuntimeDefault }
           containers:
             - name: monitor
-              image: alpine/k8s:1.30.2
+              image: docker.io/alpine/k8s:1.30.2@sha256:cd560fce90f76d2da46bce0624b65258c45ab3350f7073d6722fa74c7b3a3601
               securityContext:
                 allowPrivilegeEscalation: false
                 capabilities: { drop: ["ALL"] }

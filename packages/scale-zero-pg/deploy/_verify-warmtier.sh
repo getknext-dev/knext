@@ -21,7 +21,7 @@ K="kubectl -n $NS"
 # to it with imagePullPolicy=Never intermittently hits ErrImageNeverPull (and its
 # 150s pod-wait then expires). postgres:17-alpine ships a v17 psql, is public +
 # ~80MB, and schedules on ANY node with a normal pull policy. Override via PSQL_IMG.
-PSQL_IMG="${PSQL_IMG:-postgres:17-alpine}"
+PSQL_IMG="${PSQL_IMG:-docker.io/library/postgres:17-alpine}"
 # Gateway image (issue #94): DERIVE from what actually ships so the drill never
 # drifts from the release again (the old hardcoded v0.3.1 default was 3 releases
 # stale). Order of truth:
@@ -76,7 +76,7 @@ MC=0
 WARM_METRIC() { # $1 field
   MC=$((MC + 1))
   IP=$($K get pods -l app=pggw-warm -o jsonpath='{.items[0].status.podIP}' 2>/dev/null)
-  $K run "wmetric-$$-$MC" --image=curlimages/curl:8.11.1 --restart=Never --rm -i --quiet \
+  $K run "wmetric-$$-$MC" --image=docker.io/curlimages/curl:8.11.1 --restart=Never --rm -i --quiet \
     --command -- sh -c "curl -s http://$IP:9090/metrics.json | grep -o '\"$1\": *[0-9.]*' | head -1 | grep -o '[0-9.]*\$'" 2>/dev/null | tr -d '\r'
 }
 

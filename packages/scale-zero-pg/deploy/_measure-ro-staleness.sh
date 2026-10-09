@@ -49,8 +49,8 @@ CYCLES="${CYCLES:-6}"
 # run, so NO measured cycle can pay an RO cold-wake and wall-clock lag_s equals real
 # replication (lag_s ~= polls*0.1). At the default 0, compute-ro scales 0<->N as normal.
 RO_MINREPLICAS="${RO_MINREPLICAS:-0}"
-MEAS_IMG="${MEAS_IMG:-postgres:17}"
-PSQL_IMG="${PSQL_IMG:-postgres:17-alpine}"
+MEAS_IMG="${MEAS_IMG:-docker.io/library/postgres:17}"
+PSQL_IMG="${PSQL_IMG:-docker.io/library/postgres:17-alpine}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PROV="$HERE/provision-app.sh"
 

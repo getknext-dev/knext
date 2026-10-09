@@ -82,7 +82,7 @@ spec:
       # so an init container seeds them from the ConfigMap onto the PVC.
       initContainers:
         - name: seed-config
-          image: neondatabase/neon:8464
+          image: docker.io/neondatabase/neon:8464@sha256:7a4f124917bb929964b2d696d710f19584f80bb9bd51b2af4a6e2425434c761f
           securityContext:
             allowPrivilegeEscalation: false
             capabilities: { drop: ["ALL"] }
@@ -105,7 +105,7 @@ spec:
             - { name: config, mountPath: /config }
       containers:
         - name: pageserver
-          image: neondatabase/neon:8464
+          image: docker.io/neondatabase/neon:8464@sha256:7a4f124917bb929964b2d696d710f19584f80bb9bd51b2af4a6e2425434c761f
           command: ["/usr/local/bin/pageserver", "-D", "/data/.neon"] # image default, made explicit
           securityContext:
             allowPrivilegeEscalation: false

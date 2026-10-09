@@ -134,7 +134,7 @@ spec:
           # the blast radius. The SA's Role no longer grants `secrets`.
           initContainers:
             - name: dump-config
-              image: alpine/k8s:1.30.2 # pinned; bundles kubectl + a shell (distroless kubectl has no /bin/sh)
+              image: docker.io/alpine/k8s:1.30.2@sha256:cd560fce90f76d2da46bce0624b65258c45ab3350f7073d6722fa74c7b3a3601 # pinned; bundles kubectl + a shell (distroless kubectl has no /bin/sh)
               securityContext:
                 allowPrivilegeEscalation: false
                 capabilities: { drop: ["ALL"] }
@@ -399,7 +399,7 @@ spec:
           # Fail-closed — a missing/zero rcl aborts the job before any deletion.
           initContainers:
             - name: resolve-horizon
-              image: alpine/k8s:1.30.2 # bundles curl + bash (hex arithmetic)
+              image: docker.io/alpine/k8s:1.30.2@sha256:cd560fce90f76d2da46bce0624b65258c45ab3350f7073d6722fa74c7b3a3601 # bundles curl + bash (hex arithmetic)
               securityContext:
                 allowPrivilegeEscalation: false
                 capabilities: { drop: ["ALL"] }
@@ -524,7 +524,7 @@ spec:
             # on today's slot-free plane this pass finds nothing and is a pure no-op
             # (identical janitor behaviour), so it can never regress the load-bearing prune.
             - name: resolve-slot-floors
-              image: alpine/k8s:1.30.2 # bundles kubectl + a shell; execs psql INSIDE the compute pod
+              image: docker.io/alpine/k8s:1.30.2@sha256:cd560fce90f76d2da46bce0624b65258c45ab3350f7073d6722fa74c7b3a3601 # bundles kubectl + a shell; execs psql INSIDE the compute pod
               securityContext:
                 allowPrivilegeEscalation: false
                 capabilities: { drop: ["ALL"] }
@@ -892,7 +892,7 @@ spec:
             seccompProfile: { type: RuntimeDefault }
           containers:
             - name: monitor
-              image: alpine/k8s:1.30.2 # bundles kubectl + curl + coreutils
+              image: docker.io/alpine/k8s:1.30.2@sha256:cd560fce90f76d2da46bce0624b65258c45ab3350f7073d6722fa74c7b3a3601 # bundles kubectl + curl + coreutils
               securityContext:
                 allowPrivilegeEscalation: false
                 capabilities: { drop: ["ALL"] }

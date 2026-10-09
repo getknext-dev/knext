@@ -163,7 +163,7 @@ APPS_GW=pggw-apps              # apps gateway (wakes per-app computes)
 
 DIR="$(dirname "$0")"
 # psql client image (public, always-pullable) — same rationale as _verify-tls.sh.
-PSQL_IMG="${PSQL_IMG:-postgres:17-alpine}"
+PSQL_IMG="${PSQL_IMG:-docker.io/library/postgres:17-alpine}"
 
 info() { echo ">> $*"; }
 ok()   { echo "ok - $*"; }

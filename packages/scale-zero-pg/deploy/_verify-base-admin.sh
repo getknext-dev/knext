@@ -21,7 +21,7 @@ K="kubectl -n $NS"
 # to it with imagePullPolicy=Never intermittently hits ErrImageNeverPull (and its
 # 150s pod-wait then expires). postgres:17-alpine ships a v17 psql, is public +
 # ~80MB, and schedules on ANY node with a normal pull policy. Override via PSQL_IMG.
-PSQL_IMG="${PSQL_IMG:-postgres:17-alpine}"
+PSQL_IMG="${PSQL_IMG:-docker.io/library/postgres:17-alpine}"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok() { echo "ok - $*"; }

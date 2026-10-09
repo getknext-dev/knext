@@ -81,7 +81,7 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: alertmanager
-          image: prom/alertmanager:v0.27.0 # pinned
+          image: docker.io/prom/alertmanager:v0.27.0@sha256:e13b6ed5cb929eeaee733479dce55e10eb3bc2e9c4586c705a4e8da41e5eacf5 # pinned
           args:
             - --config.file=/etc/alertmanager/alertmanager.yml
             - --storage.path=/alertmanager

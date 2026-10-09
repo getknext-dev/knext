@@ -11,6 +11,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: compute
+  namespace: scale-zero-pg # required: without it the Deployment lands in `default` and the gateway cannot find it
   # plane: compute is the stable "this is a compute that attaches to the pageserver"
   # label EVERY compute carries (base+warm writers, base+per-app RO readers, per-app
   # writers). Writer-only consumers (writer-autoscaler #103, slot-janitor, backup)
@@ -43,7 +44,7 @@ spec:
       # compute image does not. This is what lets the compute image stay stock.
       initContainers:
         - name: wait-timeline
-          image: neondatabase/neon:8464
+          image: docker.io/neondatabase/neon:8464@sha256:7a4f124917bb929964b2d696d710f19584f80bb9bd51b2af4a6e2425434c761f
           envFrom:
             - configMapRef:
                 name: compute-config # TENANT_ID, TIMELINE_ID, PAGESERVER_HOST
@@ -64,7 +65,7 @@ spec:
           # PINNED: the compute must stay wire/format-compatible with the
           # pinned storage plane (neondatabase/neon:8464) — upgrade them as a
           # PAIR (see docs/operations.md "Upgrades"). Never :latest here.
-          image: neondatabase/compute-node-v17:8464
+          image: docker.io/neondatabase/compute-node-v17:8464@sha256:13ab146d3e7bbabb25a8532f315ac443e7512351d1ede0bab586def5c70e26c3
           imagePullPolicy: IfNotPresent
           command: ["/bin/sh", "/compute-files/entrypoint.sh"]
           envFrom:

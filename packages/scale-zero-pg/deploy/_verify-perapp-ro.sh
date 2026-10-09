@@ -33,7 +33,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 PROV="$HERE/provision-app.sh"
 APPA="${APPA:-roa}"
 APPB="${APPB:-rob}"
-IMG="${PSQL_IMG:-postgres:17-alpine}"
+IMG="${PSQL_IMG:-docker.io/library/postgres:17-alpine}"
 
 K() { kubectl --context "$KCTX" -n "$NS" "$@"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
