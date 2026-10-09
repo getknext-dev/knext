@@ -59,6 +59,65 @@ import { resolve } from 'node:path';
 
 /** Frozen at the count first quarantined (2026-10-09). Only ever lowered; raising it needs an ADR-0007 amendment. */
 export const STRUCTURAL_FILE_CAP = 49;
+/**
+ * The ORIGINAL 49 files first quarantined (2026-10-09), pinned as a SET, not
+ * just a count: a count alone lets one ledgered file be swapped for a different
+ * failing one. The ledger's files must always be a subset of this list. Adding a
+ * path here needs a new ADR-0007 amendment; removing one (the file now passes) is fine.
+ */
+export const STRUCTURAL_CANONICAL_FILES = Object.freeze([
+  'test/e2e/app-dir/action-forward-loop/action-forward-loop.test.ts',
+  'test/e2e/app-dir/actions-discarded-navigation-revert/actions-discarded-navigation-revert.test.ts',
+  'test/e2e/app-dir/app-inline-css/index.test.ts',
+  'test/e2e/app-dir/app-prefetch/prefetching.test.ts',
+  'test/e2e/app-dir/asset-prefix-absolute/asset-prefix-absolute.test.ts',
+  'test/e2e/app-dir/concurrent-navigations/mismatching-prefetch.test.ts',
+  'test/e2e/app-dir/instant-navigation-testing-api/instant-navigation-testing-api.test.ts',
+  'test/e2e/app-dir/navigation-focus/navigation-focus.test.ts',
+  'test/e2e/app-dir/next-dynamic-css/next-dynamic-css.test.ts',
+  'test/e2e/app-dir/parallel-routes-scroll-owner/parallel-routes-scroll-owner.test.ts',
+  'test/e2e/app-dir/partial-fallback-shell-upgrade/partial-fallback-shell-upgrade.test.ts',
+  'test/e2e/app-dir/partial-prefetching-config/partial-prefetching-config.test.ts',
+  'test/e2e/app-dir/partial-prefetching-deep-propagation/partial-prefetching-deep-propagation.test.ts',
+  'test/e2e/app-dir/partial-prefetching-segment-config/partial-prefetching-segment-config.test.ts',
+  'test/e2e/app-dir/prefetch-true-instant/prefetch-true-instant.test.ts',
+  'test/e2e/app-dir/proxy-prefix-rewrite-prefetch-loop/proxy-prefix-rewrite-prefetch-loop.test.ts',
+  'test/e2e/app-dir/router-autoscroll/router-autoscroll.test.ts',
+  'test/e2e/app-dir/rsc-basic/rsc-basic-blocking-ssr.test.ts',
+  'test/e2e/app-dir/rsc-basic/rsc-basic-react-experimental.test.ts',
+  'test/e2e/app-dir/segment-cache/basic/segment-cache-basic.test.ts',
+  'test/e2e/app-dir/segment-cache/cached-navigations/cached-navigations-global-runtime.test.ts',
+  'test/e2e/app-dir/segment-cache/cached-navigations/cached-navigations-partial-prefetching.test.ts',
+  'test/e2e/app-dir/segment-cache/cached-navigations/cached-navigations.test.ts',
+  'test/e2e/app-dir/segment-cache/dynamic-on-hover/dynamic-on-hover.test.ts',
+  'test/e2e/app-dir/segment-cache/force-stale/force-stale.test.ts',
+  'test/e2e/app-dir/segment-cache/headers-keyed-caches/headers-keyed-caches.test.ts',
+  'test/e2e/app-dir/segment-cache/memory-pressure/segment-cache-memory-pressure.test.ts',
+  'test/e2e/app-dir/segment-cache/optimistic-routing-rewrite-detection-regression/optimistic-routing-rewrite-detection-regression.test.ts',
+  'test/e2e/app-dir/segment-cache/prefetch-app-shell/prefetch-app-shell.test.ts',
+  'test/e2e/app-dir/segment-cache/prefetch-inlining/prefetch-inlining.test.ts',
+  'test/e2e/app-dir/segment-cache/prefetch-scheduling/prefetch-scheduling.test.ts',
+  'test/e2e/app-dir/segment-cache/prefetch-static-shell/prefetch-static-shell.test.ts',
+  'test/e2e/app-dir/segment-cache/search-params/segment-cache-search-params-shared-loading-state.test.ts',
+  'test/e2e/app-dir/segment-cache/search-params/segment-cache-search-params.test.ts',
+  'test/e2e/app-dir/segment-cache/staleness/segment-cache-stale-time.test.ts',
+  'test/e2e/app-dir/segment-cache/vary-params-base-dynamic/vary-params-base-dynamic.test.ts',
+  'test/e2e/app-dir/segment-cache/vary-params/vary-params.test.ts',
+  'test/e2e/app-dir/service-worker-scopes/service-worker-scopes.test.ts',
+  'test/e2e/app-dir/service-worker/service-worker-register.test.ts',
+  'test/e2e/app-dir/use-cache-default-profile-expire-zero/use-cache-default-profile-expire-zero.test.ts',
+  'test/e2e/app-dir/use-offline/use-offline.test.ts',
+  'test/e2e/app-document-import-order/app-document-import-order.test.ts',
+  'test/e2e/instrumentation-client-hook/instrumentation-client-hook.test.ts',
+  'test/e2e/next-image-legacy/asset-prefix/asset-prefix.test.ts',
+  'test/e2e/next-image-legacy/unicode/unicode.test.ts',
+  'test/e2e/next-image-legacy/unoptimized/unoptimized.test.ts',
+  'test/e2e/next-image-new/asset-prefix/asset-prefix.test.ts',
+  'test/e2e/react-current-version/react-current-version.test.ts',
+  'test/e2e/service-worker-pages/service-worker-pages.test.ts',
+]);
+const CANONICAL_SET = new Set(STRUCTURAL_CANONICAL_FILES);
+
 export const STRUCTURAL_MAX_REVIEW_DAYS = 92;
 /** The only lane the ledger may name. Never a stable credential cell. */
 export const STRUCTURAL_LANES = ['bun-vinext'];
@@ -201,6 +260,10 @@ export function validateStructuralGaps(ledger, ctx) {
     if (typeof f.test !== 'string') {
       out.push(`${at}: test must be a path`);
     } else {
+      if (!CANONICAL_SET.has(f.test))
+        out.push(
+          `${at}: not one of the original ${STRUCTURAL_CANONICAL_FILES.length} quarantined files; adding or swapping a file needs a new ADR-0007 amendment`,
+        );
       if (seen.has(f.test)) out.push(`${at}: duplicate test`);
       seen.add(f.test);
       if (manifestExcludes(ctx.manifest, f.test))

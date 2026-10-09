@@ -50,6 +50,7 @@ import {
 import {
   manifestIncludes,
   overlapWithPerFile,
+  STRUCTURAL_CANONICAL_FILES,
   STRUCTURAL_CLASS,
   STRUCTURAL_FILE_CAP,
   STRUCTURAL_MAX_REVIEW_DAYS,
@@ -121,7 +122,10 @@ describe('validateStructuralGaps: the approved bounds', () => {
   it('CAP: exactly the cap is fine, one more file reds', () => {
     const many = (n: number) =>
       Array.from({ length: n }, (_, i) =>
-        file(`test/e2e/app-dir/segment-cache/gen-${i}/gen-${i}.test.ts`),
+        file(
+          STRUCTURAL_CANONICAL_FILES[i] ??
+            `test/e2e/app-dir/segment-cache/gen-${i}/gen-${i}.test.ts`,
+        ),
       );
     expect(errs(sg(many(STRUCTURAL_FILE_CAP)))).toEqual([]);
     expect(errs(sg(many(STRUCTURAL_FILE_CAP + 1))).join()).toMatch(
@@ -486,6 +490,26 @@ describe('CLI: apply / report with --structural', () => {
     });
   };
 
+  it('apply and report REFUSE (exit 1) a ledger whose file is outside the original 49', () => {
+    const swapped = live();
+    swapped.files[1] = file('test/e2e/app-dir/catch-error/catch-error.test.ts', ['p']);
+    const root = fixture(swapped);
+    try {
+      writeFileSync(join(root, 's.json'), JSON.stringify(shardSummary()));
+      mkdirSync(join(root, 'sums'));
+      writeFileSync(join(root, 'sums/s.json'), JSON.stringify(shardSummary()));
+      const common = ['--ledger', 'test/ledger.json', '--structural', 'test/structural.json'];
+      const a = run(root, ['apply', ...common, '--summary', 's.json']);
+      expect(a.status).toBe(1);
+      expect(a.stderr).toMatch(/ADR-0007 amendment/);
+      const r = run(root, ['report', ...common, '--summaries', 'sums']);
+      expect(r.status).toBe(1);
+      expect(r.stderr).toMatch(/ADR-0007 amendment/);
+    } finally {
+      cleanup();
+    }
+  });
+
   it('apply reclassifies the structural files and exits 0', () => {
     const root = fixture(live());
     try {
@@ -573,7 +597,7 @@ describe('CLI: apply / report with --structural', () => {
   });
 
   it('a file in BOTH ledgers with disjoint cases is reclassified by each, keeping both classes', () => {
-    const perFile = {
+    const perFile: Any = {
       lane: 'bun-vinext',
       entries: [
         {
@@ -767,6 +791,24 @@ describe('the real structural-gap ledger', () => {
     expect(real.files.length).toBeGreaterThan(0);
     expect(real.files.length).toBeLessThanOrEqual(STRUCTURAL_FILE_CAP);
     expect(real.gap.reason).toBe(STRUCTURAL_REASON);
+  });
+
+  it('FILE SET PINNED: the canonical list is the original 49 and the committed ledger is a subset of it', () => {
+    expect(STRUCTURAL_CANONICAL_FILES.length).toBe(ORIGINAL_QUARANTINED_COUNT);
+    expect(new Set(STRUCTURAL_CANONICAL_FILES).size).toBe(ORIGINAL_QUARANTINED_COUNT);
+    const canonical = new Set<string>(STRUCTURAL_CANONICAL_FILES);
+    const outside = real.files.map((f: Any) => f.test).filter((t: string) => !canonical.has(t));
+    expect(
+      outside,
+      'ledger holds a file outside the original 49 (needs an ADR-0007 amendment)',
+    ).toEqual([]);
+  });
+
+  it('FILE SET PINNED: swapping a ledgered file for a different corpus file reds, naming the amendment', () => {
+    const swapped = sg([file(A), file('test/e2e/app-dir/catch-error/catch-error.test.ts')]);
+    const e = errs(swapped).join('\n');
+    expect(e).toMatch(/catch-error.*not one of the original 49.*ADR-0007 amendment/s);
+    expect(errs(sg([file(A)]))).toEqual([]); // dropping a file stays legal
   });
 
   it('FROZEN CAP: files <= cap <= the original 49 — a file can be removed, never added', () => {

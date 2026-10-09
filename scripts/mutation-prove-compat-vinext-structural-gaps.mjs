@@ -21,6 +21,7 @@
  *     - use on a stable cell: report no longer refuses     (M10)
  *     - a file that starts PASSING is no longer stale      (M11, M12)
  *     - the workflow stops passing the ledger              (M13)
+ *     - the file SET is not pinned (swap / runtime check)  (M14, M15)
  *
  * Usage:  node scripts/mutation-prove-compat-vinext-structural-gaps.mjs
  */
@@ -39,7 +40,7 @@ const LEDGER_SCRIPT = resolve(REPO_ROOT, 'scripts/compat-vinext-ledger.mjs');
 const DATA = resolve(REPO_ROOT, 'test/compat-vinext-structural-gaps.json');
 const WORKFLOW = resolve(REPO_ROOT, '.github/workflows/compat-vinext.yml');
 
-declareMutations(13);
+declareMutations(15);
 
 const RUNNER = resolveSpecRunner(REPO_ROOT, SPEC);
 
@@ -201,6 +202,23 @@ prove(
   WORKFLOW,
   '--structural test/compat-vinext-structural-gaps.json \\',
   '',
+);
+
+// M14 — a ledgered file is SWAPPED for a different failing file (same count).
+// The committed JSON carries the swap; the count-only guards would stay green.
+prove(
+  'a ledgered file is swapped for a different one (committed JSON)',
+  DATA,
+  'test/e2e/app-dir/navigation-focus/navigation-focus.test.ts',
+  'test/e2e/app-dir/catch-error/catch-error.test.ts',
+);
+
+// M15 — the run-time set check is removed from the validator (apply/report).
+prove(
+  'the run-time canonical-set check is removed',
+  GAPS,
+  'if (!CANONICAL_SET.has(f.test))',
+  'if (false)',
 );
 
 console.log(`\n${pass} caught, ${fail} undetected.`);
