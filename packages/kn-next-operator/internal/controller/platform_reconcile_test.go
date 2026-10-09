@@ -705,6 +705,35 @@ func TestPlatform_AnEditRollsAppsAtTheConfiguredRateNotAllAtOnce(t *testing.T) {
 	}
 }
 
+// An app the platform edit does not touch has nothing to roll, so it must never
+// take a slot: queueing it would delay the apps that DO need to roll for no
+// reason, and report RolloutPending on an app whose Service will not change.
+func TestPlatform_UnaffectedAppsNeverQueueBehindTheLimiter(t *testing.T) {
+	setsEverything := func(a *appsv1alpha1.NextApp) {
+		a.Spec.Resources = &appsv1alpha1.ResourcesSpec{CPURequest: "300m", CPULimit: "1", MemoryRequest: "256Mi", MemoryLimit: "1Gi"}
+		a.Spec.TimeoutSeconds = 60
+	}
+	h := newPlatformHarness(t, appNamed("a", setsEverything), appNamed("b", setsEverything), appNamed("c", setsEverything))
+	for _, n := range []string{"a", "b", "c"} {
+		h.reconcile(n)
+	}
+	// A platform edit that every one of them overrides, at the slowest allowed pace.
+	h.setPlatform(func(s *platformv1alpha1.KnextPlatformSpec) {
+		s.Rollout = &platformv1alpha1.PlatformRollout{MaxAppsPerMinute: 1}
+		s.Resources = &platformv1alpha1.PlatformResources{Defaults: &platformv1alpha1.PlatformResourceDefaults{CPULimit: "8"}}
+		s.Limits = &platformv1alpha1.PlatformLimits{TimeoutSeconds: 900}
+	})
+	for _, n := range []string{"a", "b", "c"} {
+		res := h.reconcile(n)
+		if c := h.condition(n, ConditionPlatformDefaultsApplied); c.Reason == ReasonRolloutPending {
+			t.Errorf("%s was queued (requeue %v) although the edit changes nothing for it", n, res.RequeueAfter)
+		}
+		if got := h.app(n).Status.Platform; got == nil || got.ObservedGeneration != 1 {
+			t.Errorf("%s: status.platform = %+v, want it evaluated against generation 1 on the same pass", n, got)
+		}
+	}
+}
+
 // The user's own deploy must not queue behind a platform backlog: it rolls a new
 // revision anyway, and the platform values ride along in it.
 func TestPlatform_AnAppsOwnChangeBypassesTheRolloutQueue(t *testing.T) {
