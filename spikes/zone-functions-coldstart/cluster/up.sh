@@ -56,4 +56,8 @@ make deploy IMG="$IMG"
 kubectl rollout status deployment/kn-next-operator-controller-manager -n kn-next-operator-system --timeout=300s
 kubectl wait --for=condition=Ready --timeout=180s -n kn-next-operator-system certificate/kn-next-operator-serving-cert
 "$REPO_ROOT/scripts/kind-manifests/wait-for-webhook-ready.sh"
+# Namespace + the in-cluster client pod every timed request is issued from.
+kubectl create namespace z2 --dry-run=client -o yaml | kubectl apply -f -
+kubectl run z2-drv -n z2 --image=curlimages/curl:8.16.0 --restart=Always --command -- sleep infinity 2>/dev/null || true
+kubectl wait -n z2 --for=condition=Ready pod/z2-drv --timeout=180s
 echo "cluster $CLUSTER ready"

@@ -1,6 +1,6 @@
 import 'server-only';
 
-import { createClient, type Client } from '@connectrpc/connect';
+import { type Client, createClient } from '@connectrpc/connect';
 import { createConnectTransport } from '@connectrpc/connect-node';
 
 import { PingService } from '../gen/zonefn/v1/ping_pb';

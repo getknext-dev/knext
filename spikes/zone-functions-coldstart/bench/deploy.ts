@@ -15,7 +15,7 @@ import { applyJson, kubectl, NS } from './k';
 export const FNS = ['fn-go-h1', 'fn-go-h2', 'fn-rust-h1', 'fn-rust-h2'] as const;
 export const GATEWAYS = ['node', 'bun'] as const;
 
-function fnService(
+export function fnService(
   name: string,
   image: string,
   portName: 'http1' | 'h2c',

@@ -3,6 +3,8 @@
 import { spawnSync } from 'node:child_process';
 
 export const NS = 'z2';
+// In-cluster client pod (curlimages/curl, restartPolicy Always) that issues every timed request.
+export const DRIVER = process.env.Z2_DRIVER || 'z2-drv';
 export const CONTEXT = 'kind-knext-z2-coldstart';
 const KUBECONFIG = process.env.Z2_KUBECONFIG;
 if (!KUBECONFIG) throw new Error('set Z2_KUBECONFIG');
@@ -57,7 +59,7 @@ export function curl(url: string, maxTimeS = 90): { ms: number; code: number; bo
     'exec',
     '-n',
     NS,
-    'z2-driver',
+    DRIVER,
     '--',
     'curl',
     '-s',
@@ -78,4 +80,19 @@ export function curl(url: string, maxTimeS = 90): { ms: number; code: number; bo
 
 export function svcUrl(name: string, path = ''): string {
   return `http://${name}.${NS}.svc.cluster.local${path}`;
+}
+
+/** Pods backing a Knative Service in ANY state, Terminating included. */
+export function anyPodCount(svc: string): number {
+  const out = kubectl([
+    'get',
+    'pods',
+    '-n',
+    NS,
+    '-l',
+    `serving.knative.dev/service=${svc}`,
+    '-o',
+    'name',
+  ]);
+  return out.split('\n').filter(Boolean).length;
 }

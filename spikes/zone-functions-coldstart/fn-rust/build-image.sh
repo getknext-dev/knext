@@ -12,7 +12,7 @@ WORK="${Z2_WORK:?scratch dir}"
 mkdir -p "$WORK/rust-target" "$WORK/fn-rust-layer/app"
 docker run --rm --platform linux/amd64 \
   -v "$HERE":/src -v z2-cargo-home:/cargo -v "$WORK/rust-target":/target \
-  -e CARGO_HOME=/cargo -e CARGO_TARGET_DIR=/target -w /src \
+  -e CARGO_HOME=/cargo -e CARGO_TARGET_DIR=/target -e CARGO_HTTP_MULTIPLEXING=false -w /src \
   rust:1.90-alpine sh -c "apk add --no-cache musl-dev >/dev/null && cargo build --release"
 cp "$WORK/rust-target/release/fn-rust" "$WORK/fn-rust-layer/app/fn"
 tar -C "$WORK/fn-rust-layer" -cf "$WORK/fn-rust-layer.tar" app

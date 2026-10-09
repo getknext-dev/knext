@@ -3,7 +3,12 @@
 // needs, each as a median difference with a seeded bootstrap 95% CI and a
 // two-sided Mann-Whitney p (normal approximation, tie-corrected).
 //
-// Usage: bun analyze.ts <results.jsonl> [more.jsonl ...] > summary.md
+// Usage: bun analyze.ts <results.jsonl> [more.jsonl ...] [--node-c=<settled.jsonl>] > summary.md
+//
+// --node-c replaces every shape-C Node-zone sample of the other files with the
+// settled supplement's (run.ts c-node-settled): the main run's Node C cells
+// were confounded with the re-wake stall (see the report, §C). The main run's
+// raw file is left as it was recorded.
 import { readFileSync } from 'node:fs';
 
 type Rec = {
@@ -24,15 +29,31 @@ type Rec = {
   };
 };
 
-const files = process.argv.slice(2);
-const all: Rec[] = files.flatMap((f) =>
+const load = (f: string) =>
   readFileSync(f, 'utf8')
     .split('\n')
     .filter(Boolean)
-    .map((l) => JSON.parse(l) as Rec),
-);
-const ok = all.filter((r) => r.valid && r.code === 200 && r.body.ok);
-const bad = all.filter((r) => !(r.valid && r.code === 200 && r.body.ok));
+    .map((l) => JSON.parse(l) as Rec);
+const args = process.argv.slice(2);
+const nodeC = args.find((a) => a.startsWith('--node-c='))?.slice('--node-c='.length);
+const files = args.filter((a) => !a.startsWith('--'));
+const all: Rec[] = files.flatMap(load);
+if (nodeC) {
+  const keep = all.filter((r) => !(r.shape === 'C' && r.gw === 'node'));
+  all.length = 0;
+  all.push(...keep, ...load(nodeC));
+}
+// A cold-zone sample whose zone process had been up > STALL_MS before the
+// request reached its handler did not measure the chain: the request was held
+// in front of an already-Ready zone pod (the Node-zone re-wake stall, see the
+// report and stall-trace.ts). Those are reported separately, not pooled.
+const STALL_MS = 5000;
+const isStall = (r: Rec) =>
+  ['C', 'D', 'E'].includes(r.shape) && (r.body.zoneUptimeAtReqMs ?? 0) > STALL_MS;
+const passed = (r: Rec) => r.valid && r.code === 200 && r.body.ok;
+const ok = all.filter((r) => passed(r) && !isStall(r));
+const stalls = all.filter((r) => passed(r) && isStall(r));
+const bad = all.filter((r) => !passed(r));
 
 const q = (xs: number[], p: number) => {
   const s = [...xs].sort((a, b) => a - b);
@@ -130,7 +151,9 @@ const LANGS = ['go', 'rust'];
 const TRS = ['http1', 'h2c'];
 
 const out: string[] = [];
-out.push(`Samples: ${all.length} total, ${ok.length} valid, ${bad.length} excluded.\n`);
+out.push(
+  `Samples: ${all.length} total, ${ok.length} pooled, ${stalls.length} zone re-wake stalls reported separately, ${bad.length} failed or precondition-violated.\n`,
+);
 out.push('### Raw cells (ms): end-to-end median [IQR] · zone→fn call median [IQR]\n');
 out.push(
   '| shape | gateway | lang | transport | n | e2e median | e2e IQR | call median | call IQR |',
@@ -156,6 +179,19 @@ function cmp(label: string, a: Rec[], b: Rec[], metric: (rs: Rec[]) => number[] 
   const d = med(xa) - med(xb);
   const [lo, hi] = bootDiff(xa, xb);
   return `| ${label} | ${xa.length}/${xb.length} | ${r0(d)} | ${r0(lo)} … ${r0(hi)} | ${mannWhitneyP(xa, xb).toPrecision(2)} |`;
+}
+
+out.push('\n### Pooled over transport: end-to-end median (n) · zone→fn call median, ms\n');
+out.push('| shape | node/go | node/rust | bun/go | bun/rust |');
+out.push('|---|---:|---:|---:|---:|');
+for (const [s, label] of SHAPES) {
+  const cells = GWS.flatMap((gw) =>
+    LANGS.map((lang) => {
+      const rs = sel({ shape: s, gw, lang });
+      return rs.length ? `${r0(med(e2e(rs)))} (${rs.length}) · ${r0(med(call(rs)))}` : '–';
+    }),
+  );
+  out.push(`| ${s} ${label} | ${cells.join(' | ')} |`);
 }
 
 out.push('\n### Shape deltas, pooled over transport (end-to-end, ms)\n');
@@ -244,6 +280,18 @@ for (const s of ['C', 'D', 'E'])
         `| ${s} | ${gw} | ${xs.length} | ${r0(med(xs))} | ${r0(q(xs, 0.25))}–${r0(q(xs, 0.75))} |`,
       );
   }
+
+if (stalls.length) {
+  out.push(
+    `\n### Zone re-wake stalls (zone up > ${STALL_MS} ms before the request reached it; not pooled above)\n`,
+  );
+  out.push('| shape | gateway | fn | e2e | zone uptime at handler | call |');
+  out.push('|---|---|---|---:|---:|---:|');
+  for (const r of stalls)
+    out.push(
+      `| ${r.shape} | ${r.gw} | ${r.fn} | ${r0(r.e2eMs)} | ${r0(r.body.zoneUptimeAtReqMs ?? Number.NaN)} | ${r0(r.body.callMs ?? Number.NaN)} |`,
+    );
+}
 
 if (bad.length) {
   out.push('\n### Excluded samples\n');

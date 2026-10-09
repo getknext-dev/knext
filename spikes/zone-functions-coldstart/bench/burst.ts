@@ -4,20 +4,20 @@
 // and Connect errors. Not a latency benchmark.
 //
 // Usage: bun burst.ts <zone> <fn> [requests=200] [parallel=20]
-import { kubectl, NS, svcUrl } from './k';
+import { DRIVER, kubectl, NS, svcUrl } from './k';
 
 const [zone, fn, nArg, pArg] = process.argv.slice(2);
 const n = Number(nArg ?? 200);
 const p = Number(pArg ?? 20);
 const url = svcUrl(zone, `/api/chain?fn=${fn}`);
 // warm both first
-kubectl(['exec', '-n', NS, 'z2-driver', '--', 'curl', '-s', '-o', '/dev/null', '-m', '90', url]);
+kubectl(['exec', '-n', NS, DRIVER, '--', 'curl', '-s', '-o', '/dev/null', '-m', '90', url]);
 const urls = Array.from({ length: n }, () => url);
 const out = kubectl([
   'exec',
   '-n',
   NS,
-  'z2-driver',
+  DRIVER,
   '--',
   'curl',
   '-s',

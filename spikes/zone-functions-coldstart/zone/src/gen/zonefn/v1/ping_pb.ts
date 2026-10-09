@@ -2,15 +2,18 @@
 // @generated from file zonefn/v1/ping.proto (package zonefn.v1, syntax proto3)
 /* eslint-disable */
 
-import type { GenFile, GenMessage, GenService } from "@bufbuild/protobuf/codegenv2";
-import { fileDesc, messageDesc, serviceDesc } from "@bufbuild/protobuf/codegenv2";
-import type { Message } from "@bufbuild/protobuf";
+import type { Message } from '@bufbuild/protobuf';
+import type { GenFile, GenMessage, GenService } from '@bufbuild/protobuf/codegenv2';
+import { fileDesc, messageDesc, serviceDesc } from '@bufbuild/protobuf/codegenv2';
 
 /**
  * Describes the file zonefn/v1/ping.proto.
  */
-export const file_zonefn_v1_ping: GenFile = /*@__PURE__*/
-  fileDesc("ChR6b25lZm4vdjEvcGluZy5wcm90bxIJem9uZWZuLnYxIhoKC1BpbmdSZXF1ZXN0EgsKA21zZxgBIAEoCSJLCgxQaW5nUmVzcG9uc2USCwoDbXNnGAEgASgJEgwKBGxhbmcYAiABKAkSEQoJdXB0aW1lX21zGAMgASgDEg0KBXByb3RvGAQgASgJMksKC1BpbmdTZXJ2aWNlEjwKBFBpbmcSFi56b25lZm4udjEuUGluZ1JlcXVlc3QaFy56b25lZm4udjEuUGluZ1Jlc3BvbnNlIgOQAgFiBnByb3RvMw");
+export const file_zonefn_v1_ping: GenFile =
+  /*@__PURE__*/
+  fileDesc(
+    'ChR6b25lZm4vdjEvcGluZy5wcm90bxIJem9uZWZuLnYxIhoKC1BpbmdSZXF1ZXN0EgsKA21zZxgBIAEoCSJLCgxQaW5nUmVzcG9uc2USCwoDbXNnGAEgASgJEgwKBGxhbmcYAiABKAkSEQoJdXB0aW1lX21zGAMgASgDEg0KBXByb3RvGAQgASgJMksKC1BpbmdTZXJ2aWNlEjwKBFBpbmcSFi56b25lZm4udjEuUGluZ1JlcXVlc3QaFy56b25lZm4udjEuUGluZ1Jlc3BvbnNlIgOQAgFiBnByb3RvMw',
+  );
 
 /**
  * A trivial function: echo plus who answered and how long its process has run.
@@ -18,7 +21,7 @@ export const file_zonefn_v1_ping: GenFile = /*@__PURE__*/
  *
  * @generated from message zonefn.v1.PingRequest
  */
-export type PingRequest = Message<"zonefn.v1.PingRequest"> & {
+export type PingRequest = Message<'zonefn.v1.PingRequest'> & {
   /**
    * @generated from field: string msg = 1;
    */
@@ -29,13 +32,14 @@ export type PingRequest = Message<"zonefn.v1.PingRequest"> & {
  * Describes the message zonefn.v1.PingRequest.
  * Use `create(PingRequestSchema)` to create a new message.
  */
-export const PingRequestSchema: GenMessage<PingRequest> = /*@__PURE__*/
+export const PingRequestSchema: GenMessage<PingRequest> =
+  /*@__PURE__*/
   messageDesc(file_zonefn_v1_ping, 0);
 
 /**
  * @generated from message zonefn.v1.PingResponse
  */
-export type PingResponse = Message<"zonefn.v1.PingResponse"> & {
+export type PingResponse = Message<'zonefn.v1.PingResponse'> & {
   /**
    * @generated from field: string msg = 1;
    */
@@ -63,7 +67,8 @@ export type PingResponse = Message<"zonefn.v1.PingResponse"> & {
  * Describes the message zonefn.v1.PingResponse.
  * Use `create(PingResponseSchema)` to create a new message.
  */
-export const PingResponseSchema: GenMessage<PingResponse> = /*@__PURE__*/
+export const PingResponseSchema: GenMessage<PingResponse> =
+  /*@__PURE__*/
   messageDesc(file_zonefn_v1_ping, 1);
 
 /**
@@ -74,10 +79,8 @@ export const PingService: GenService<{
    * @generated from rpc zonefn.v1.PingService.Ping
    */
   ping: {
-    methodKind: "unary";
+    methodKind: 'unary';
     input: typeof PingRequestSchema;
     output: typeof PingResponseSchema;
-  },
-}> = /*@__PURE__*/
-  serviceDesc(file_zonefn_v1_ping, 0);
-
+  };
+}> = /*@__PURE__*/ serviceDesc(file_zonefn_v1_ping, 0);

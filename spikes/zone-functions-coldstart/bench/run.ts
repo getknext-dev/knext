@@ -15,10 +15,10 @@
 // Before each sample the precondition is ASSERTED (pod counts) and recorded;
 // a violated precondition marks the sample invalid instead of silently counting.
 //
-// Usage: bun run.ts <out.jsonl> [rounds=14]
+// Usage: bun run.ts <out.jsonl> [rounds=14] [c-node-settled]
 import { appendFileSync } from 'node:fs';
 import { FNS } from './deploy';
-import { allKnPods, curl, podCount, sleep, svcUrl } from './k';
+import { allKnPods, anyPodCount, curl, podCount, sleep, svcUrl } from './k';
 
 type Fn = (typeof FNS)[number];
 type Gw = 'node' | 'bun';
@@ -112,6 +112,20 @@ async function t2(cycle: number, j: number) {
     const gw: Gw = (i + j) % 2 === 0 ? 'node' : 'bun';
     sample(cycle, 'E', gw, `zone-${gw}-wa-${fn.replace('fn-', '')}`, fn);
   }
+}
+
+// Supplement (c-node-settled): shape C on zone-node only, each sample taken
+// after the zone's previous pod has fully terminated. Added after the main run
+// showed every back-to-back-T1 C sample on the Node zone hit the re-wake stall,
+// which confounded the Node C cells with transport (see the report).
+if (process.argv[4] === 'c-node-settled') {
+  for (let r = 0; r < rounds; r++)
+    for (const fn of FNS) {
+      while (anyPodCount('zone-node') > 0 || anyPodCount(fn) > 0) await sleep(2000);
+      sample(1000 + r, 'C', 'node', 'zone-node', fn as Fn);
+    }
+  log('done');
+  process.exit(0);
 }
 
 let cycle = 0;
