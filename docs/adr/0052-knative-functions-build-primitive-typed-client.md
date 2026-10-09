@@ -1,6 +1,6 @@
 # ADR-0052: Knative Functions as a build-only primitive; proto stays the typed-client source of truth
 
-Status: Accepted (design only) · Date: 2026-09 · Depends on: ADR-0001, ADR-0002, ADR-0003, ADR-0004, ADR-0035, ADR-0048 · Amends: ADR-0004
+Status: Accepted (design; build re-sequenced into v2 by the 2026-10-09 amendment) · Date: 2026-09 · Depends on: ADR-0001, ADR-0002, ADR-0003, ADR-0004, ADR-0035, ADR-0048 · Amends: ADR-0004
 
 > **Founder direction refined (2026-09):** support **all languages Knative Functions supports** (full
 > polyglot — this decisively confirms proto-first over signature-first), and add **Bun as a
@@ -170,3 +170,48 @@ only a *build* tool.
       languages with neither.
 - [ ] `func` emits image only; CLI renders/applies the `BackendService` CR (guard test: deploy path
       never shells `func deploy` / `kn service`). Fold codegen into `kn-next generate`, not a new path.
+
+## Amendment (2026-10-09) — D9 re-sequenced into v2; D10 Rust is Connect-capable; D3 the CLI may emit the CR
+
+**Status of this amendment: Accepted.** It encodes founder decisions of 2026-10-09 (v2 plan Q10,
+Q13, Q15, Q16, Q17; jev scores in the plan) that the architect and system-designer gates signed off
+as part of the plan. The base ADR's own status line is left as written. Trigger-class (ADR, CRD,
+security, core-vs-app boundary); per the 2026-09-22 workflow amendment it is reviewed at sprint
+close, not as a merge gate. **The build it unlocks does not start until the founder's `CLAUDE.md`
+sections 4, 5 and 6 edits are merged** — that is the exit criterion of the task that carries this
+amendment.
+
+### Decisions amended
+
+- **D9 (sequencing).** The sentence "design + ADR only; the typed-client/backend layer build is
+  deferred until after Tier-A" is **superseded**. The build is **re-sequenced into v2**: design and
+  the cold-start spike come first, the build starts once both are accepted, shipped at **Beta** in 2.0.
+  The Bun function runtime question in D9 is unchanged by this. The Action items header
+  ("post-Tier-A") now reads "once the design amendment and the cold-start spike are accepted".
+- **D10 (languages).** **Rust is Connect-capable**: connect-rust 0.9.x (pinned, conformance-gated,
+  `tonic` fallback — ADR-0003 amendment) puts Rust beside Go and TypeScript as a language with a
+  first-party Connect server. D10's remark that Rust is "gRPC or partial-Connect today" is updated
+  accordingly; Python and Java remain gRPC-only and are outside the 2.0 matrix. The preference for
+  Connect where a first-party library exists (D15c) now covers Rust.
+- **D3 (deployment path).** The `BackendService` CR is still the only deployment path and the
+  operator the only reconciler, but **the CLI may now emit and apply that CR** — through
+  `@getknext/grpc`, lazily dispatched from core `deploy`, exactly as it emits `NextApp`: built by the
+  package, applied with `--validate=strict` after the server-side-dry-run schema preflight. This is
+  the one added cluster-write kind (`NextApp` and `BackendService`); nothing else. **`func deploy`,
+  `kn service` and any `func`-initiated cluster write stay prohibited**, and the guard test D3
+  requires is now a scan that reds on any such spawn under `packages/kn-next/src/cli/` or
+  `@getknext/grpc`, mutation-proved. The project-level statement that the CLI writes only `NextApp`
+  is amended by the founder.
+- **D7 (clarified, not reversed).** "Pin the same proto module version" is replaced by the skew rule
+  **function proto version >= zone proto version**, with a **function-first rollout order**; a
+  function older than its zone is flagged as skew. `buf breaking` runs against the deployed baseline.
+- **D13 (strengthened).** The token a template verifies is the ADR-0004 amendment's per-zone JWT
+  (`iss`, `aud`, `method`, 60 s), and the interceptor is the authoritative control, shown by the
+  activator-path drill.
+
+### Consequences
+
+- The scope-drift warning in this ADR's Consequences is now a live build constraint, held by the
+  ADR-0002 amendment's fence and by `@getknext/grpc` isolation (D8).
+- A CLI cluster-write guard now has two allowed kinds; the scan must be updated in the same change
+  that adds the second.

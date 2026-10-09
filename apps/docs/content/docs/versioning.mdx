@@ -9,9 +9,13 @@ knext gives you one number to pin, and a small set of rules about what that numb
 
 knext publishes three packages, and they are always released together at the **same version**:
 
+{/* published-packages:start */}
+
 - `@getknext/core` — the `knext` CLI, the Next.js adapter and the runtime
 - `@getknext/lib` — the app-facing helpers (clients, health, logging)
 - `@getknext/db` — the data SDK and migration runner
+
+{/* published-packages:end */}
 
 `@getknext/core` depends on the other two, so they are versioned in lockstep. Pin one and you have
 pinned all three:
@@ -86,6 +90,11 @@ surface, that is a version bump and a redeploy.
 
 Security fixes are called out in the release notes for the release that carries them.
 
+**When a new major ships, the previous one gets a bounded window.** From the day `@getknext/core`
+2.0 is generally available, the final `1.x` minor receives **security fixes only, for six months**,
+published under the `latest-1` dist-tag (`npm install @getknext/core@latest-1`). After that it
+receives nothing. Before 2.0 is generally available, the paragraph above is the whole policy.
+
 ## The cluster side versions separately
 
 The operator that runs in your cluster, and the `NextApp` resource it reconciles, are **not** on the
@@ -110,6 +119,14 @@ kubectl describe nextapp my-app   # check the Events section after an upgrade
 ```
 
 It never turns into a rejected apply.
+
+### The operator's major moves only when the operator breaks
+
+The operator has its own version line, and a new major of `@getknext/core` does not give it one.
+Its major changes only when the operator itself makes a change that cannot be additive — a new API
+version of the resource that needs a conversion path, say. A `@getknext/core` 2.0 therefore pairs
+with the same operator line as 1.x; what you check is the resource's API version and the ordering
+rule below, not that two version numbers match.
 
 ### Keeping the two in step
 

@@ -1,6 +1,6 @@
 # ADR-0003: Transport & tooling — Connect + buf
 
-Status: Proposed · Date: 2026-06 · Depends on: ADR-0002
+Status: Proposed · Date: 2026-06 · Depends on: ADR-0002 · Amended 2026-10-09 (see the amendment at the end)
 
 ## Context
 The gRPC layer needs one contract to produce: (a) backend service stubs in multiple languages,
@@ -66,3 +66,64 @@ condition (reason `ConsumerNotProvisioned`); `Ready` stays `True`.
 
 Re-evaluate (build the consumer, Option A) once Tier-A correctness lands; until then this routing
 is design-now/build-later.
+
+## Amendment (2026-10-09) — Rust first wave, connect-go v2, read/write/stream split
+
+**Status of this amendment: Accepted.** It encodes founder decisions of 2026-10-09 (v2 plan Q10,
+Q13, Q15, Q16, Q17; jev scores in the plan) that the architect and system-designer gates signed off
+as part of the plan. The base ADR's own status line is left as written. Trigger-class (ADR, CRD,
+security, core-vs-app boundary); per the 2026-09-22 workflow amendment it is reviewed at sprint
+close, not as a merge gate. **The build it unlocks does not start until the founder's `CLAUDE.md`
+sections 4, 5 and 6 edits are merged** — that is the exit criterion of the task that carries this
+amendment.
+
+### Context
+
+The Decision named `connect-go` for backends and `connect-es` for the gateway client. Zone
+functions (ADR-0002 amendment) add Rust to the first wave beside Go, and the glue has to say what a
+read, a write and a stream become in a Next.js zone, which this ADR left open.
+
+### Decision
+
+1. **Rust is first-wave beside Go.** Rust functions use **connect-rust, pinned to the 0.9.x line**
+   with its protobuf runtime (buffa) via the `buf.build/connectrpc/rust` plugins. The library is
+   pre-1.0, so the pin is part of the decision, and **the Connect conformance suite runs in CI for
+   the Rust template** as a gate. If conformance cannot be held, the fallback is `tonic` (gRPC over
+   h2c), which ADR-0052 D10 already supports. connect-rust 1.0 is not required.
+2. **Go uses `connect-go` v2** (the new major), not v1.
+3. **Proto-only contracts.** One `.proto` produces every language's stubs; no OpenAPI import.
+4. **A read, a write and a stream are different generated shapes:**
+
+   | RPC | Generated as |
+   |---|---|
+   | Unary with `idempotency_level = NO_SIDE_EFFECTS` | a **server-only query function** using `'use cache'` with tags (cached server function) |
+   | Any other unary | a **`'use server'` action**, followed by `updateTag` for the affected tags |
+   | Server-streaming | an **RSC or route handler only** — never an action |
+
+   The generator **refuses** to emit an action for a streaming RPC, and refuses an RPC with no auth
+   option (ADR-0004). **A cached read keys on the verified user identity** (`sub`, produced by the
+   user's `authorize()` hook), never on the token; the token is minted *inside* the cached function
+   so two users never share a cache entry. This closes the cross-user cache leak that a wrong key
+   would open.
+5. **Generated client policy:** an explicit Connect deadline shorter than the gateway timeout;
+   **retry only `NO_SIDE_EFFECTS` methods**; mutating methods carry an idempotency key
+   (ADR-0052 D6). A missing `grpc-status` trailer is fail-closed and non-retryable (ADR-0052 D15).
+6. **Transport default is switchable and the cold-start spike decides it** (h2c against HTTP/1.1
+   with `connect-node`; Q11: switchable 0.70). The `createGrpcTransport` path stays available for
+   gRPC-only backends (ADR-0052 D10).
+
+### Consequences
+
+- The Rust template carries a pre-1.0 dependency risk, contained by the pin, the conformance gate
+  and the `tonic` fallback.
+- `buf breaking` runs against the **deployed baseline** (the proto version recorded in the live
+  `BackendService` status), not only the source (ADR-0052 D7).
+- The JSON-over-HTTP facade described above stays off by default; enabling it is an explicit opt-in
+  with the same auth requirement as an action (ADR-0052 D5).
+
+### Action items
+
+- [ ] `buf.gen.yaml` gains `connect-go` v2 and the connect-rust plugins; Rust template conformance
+      job in CI.
+- [ ] Generator: query function, action and streaming-handler shapes, and the refusal cases.
+- [ ] Two-user cache test: the same RPC read by two users never shares an entry (mutation-proved).
