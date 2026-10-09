@@ -81,7 +81,7 @@ middleware:
   binary rather than left behind on the machine that built it.
 - **Node.js:** `knext build` copies the same files into `.output/server`, which the image ships.
 
-This includes `@vercel/og` 1.0.3, the version `vinext` 1.0.1 installs. Its published package is
+This includes `@vercel/og` 1.0.3, the version `vinext` 1.1.0 installs. Its published package is
 missing the HarfBuzz text-shaping file (`hb.wasm`), so the build takes that file from the exact
 `satori` and `harfbuzzjs` versions `@vercel/og` was built against. On Node.js it is staged next to
 the `harfbuzzjs` MIT licence (`hb.wasm.LICENSE`). On the Bun single executable the file is embedded
@@ -451,10 +451,8 @@ target the exact vinext version `knext create` pins. With a different vinext ver
 are skipped, with a message saying so. Set `KNEXT_VINEXT_PATCHES=0` to turn them off, for example
 if you patch vinext yourself. Each fix is removed from knext once a vinext release includes it.
 
-The fixes bundled with vinext 1.0.1:
+The fixes bundled with vinext 1.1.0:
 
-- **Pages Router data requests:** `getServerSideProps` sees the original `/_next/data/…` URL as
-  `req.url`, as in Next.js, instead of the normalized page path.
 - **`require()` of CommonJS dependencies in server code** resolves the package's `require` export
   condition, even for a package Vite would otherwise leave external.
 - **`turbopack.resolveExtensions` without `.mjs`** no longer breaks the build by hiding the server
@@ -463,10 +461,6 @@ The fixes bundled with vinext 1.0.1:
   their dependencies are now bundled into the server build.
 - **`outputFileTracingIncludes` / `outputFileTracingExcludes`** in `next.config` are applied to the
   dependency files copied next to the server build.
-- **A `next.config.js`/`.ts` exported as a function** (`module.exports = (phase, { defaultConfig }) =>
-  ({...})`) now receives the real default page extensions in `defaultConfig.pageExtensions`, instead
-  of an empty object — a config that reads it (for example, to append a custom page extension) no
-  longer fails to build.
 - **A file that starts with a `#!` shebang line and also uses `module.exports`/`require()`** (for
   example, a CLI-style script imported by your app) no longer fails to build with an "Invalid
   Character" parse error.
@@ -476,9 +470,6 @@ The fixes bundled with vinext 1.0.1:
   response's own status code changes, so this only matters if your own code inspects
   `response.status` on a server action call. A no-JS `<form>` submission's redirect is unaffected
   and still answers `303`.
-- **Repeated slashes and backslashes in a request path** (`//`, `/docs//`, `//example.com`) are answered
-  with a `308` redirect to the collapsed path, as in Next.js, instead of a `404`; a bare `//` serves
-  the home page.
 - **`/_next/image` in a Nitro build** is served by the app itself with the Next.js image headers
   (including `x-nextjs-cache: MISS`) instead of a redirect to the source file. This covers Pages
   Router apps too, where the endpoint used to answer 404.

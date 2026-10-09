@@ -1,4 +1,4 @@
-knext bundled fix for vinext 1.0.1 (dist output)
+knext bundled fix for vinext 1.1.0 (dist output)
 Upstream: https://github.com/cloudflare/vinext/pull/3759 (issue https://github.com/cloudflare/vinext/issues/3756)
 What it fixes: a tsconfig `paths` entry with several targets (`"@lib/*": ["lib/a/*", "lib/b/*"]`) only
 used its first target, so an import that exists only under a later target failed to build
@@ -7,7 +7,7 @@ target in order and skips `.d.ts` targets (Next.js e2e `typescript-paths`). The 
 tries the remaining targets when the first does not resolve, and `.d.ts` targets are dropped.
 Retire: delete this file (and its manifest entry) when the pinned vinext is >= the first
 release that includes cloudflare/vinext#3759.
-Ported by hand from the upstream src change to the published 1.0.1 dist files.
+Ported by hand from the upstream src change to the published 1.1.0 dist files.
 Applied by `knext vinext-patches` (runs from the app's postinstall and before `knext build`).
 
 --- a/dist/index.js

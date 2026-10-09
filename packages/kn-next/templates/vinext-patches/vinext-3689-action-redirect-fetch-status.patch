@@ -1,10 +1,10 @@
-knext bundled fix for vinext 1.0.1 (dist output)
+knext bundled fix for vinext 1.1.0 (dist output)
 Upstream: https://github.com/cloudflare/vinext/pull/3689
 What it fixes: a server action's redirect() answered with HTTP 303 whenever the action was invoked via fetch (the client-side JS router path) and the target route wasn't an already-forwarded action, an ancestor/stale-sibling route, or a different runtime from the current route -- handleServerActionRscRequest's shouldUseForwardedActionRedirectStatus() only chose 200 in those specific cases. Next.js' own action-handler.ts answers every fetch-invoked action's redirect with 200 unconditionally (vercel/next.js#96310) and reserves 303 for the no-JS, progressive-enhancement form-POST path (handleProgressiveServerActionRequest here, left untouched and still correctly 303). The client already treats a 303 RSC response as if it were 200 before decoding it (app-browser-server-action-client.js, the `fetchResponse.status === 303` rewrap) as a defensive skew-protection shim for an older, unpatched server -- this fix removes the need for that rewrap on a patched server, but keeps the shim itself in place. Security: this only changes which status code accompanies a response that already carries no Location header and whose redirect target already passed vinext's existing same-origin/basePath checks (resolveInternalActionRedirectTarget, dispatchActionRedirectTarget's same-origin guard on followed redirects) -- those checks are unmodified, so no open-redirect surface changes; an external redirect target still only reaches the browser via the ACTION_REDIRECT_HEADER value the client already validates, never via a Location header or an auto-followed 3xx.
 Includes the maintainer's follow-ups: a header-only fetch-action redirect is marked config-headers-applied (here and in app-action-forwarding.js) so finalization cannot apply the source headers a second time at 200.
 Retire: delete this file (and its manifest entry) when the pinned vinext is >= the first
 release that includes cloudflare/vinext#3689.
-Ported by hand from the upstream src change to the published 1.0.1 dist files.
+Ported by hand from the upstream src change to the published 1.1.0 dist files.
 Applied by `knext vinext-patches` (runs from the app's postinstall and before `knext build`).
 
 --- a/dist/server/app-action-forwarding.js

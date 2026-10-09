@@ -1,4 +1,4 @@
-knext bundled fix for vinext 1.0.1 (dist output)
+knext bundled fix for vinext 1.1.0 (dist output)
 Upstream: https://github.com/cloudflare/vinext/pull/3760 (issue https://github.com/cloudflare/vinext/issues/3757)
 What it fixes: `import data from "../data" with { type: "json" }` on a file with no `.json`
 extension failed to build with a parse error, because Vite and Rolldown pick the JSON loader by
@@ -8,13 +8,13 @@ extension only. webpack and Turbopack honour the attribute (Next.js e2e `import-
 through Vite's JSON plugin.
 Retire: delete this file (and its manifest entry) when the pinned vinext is >= the first
 release that includes cloudflare/vinext#3760.
-Ported by hand from the upstream src change to the published 1.0.1 dist files.
+Ported by hand from the upstream src change to the published 1.1.0 dist files.
 Applied by `knext vinext-patches` (runs from the app's postinstall and before `knext build`).
 
 --- a/dist/index.js
 +++ b/dist/index.js
 @@ -119,6 +119,7 @@
- import { hasMdxFiles } from "./utils/mdx-scan.js";
+ import { hasMdxFiles, loadMdxEsmReader, pageExtensionsIncludeMdx } from "./utils/mdx-scan.js";
  import { publicFilePathVariants } from "./utils/public-file-path.js";
  import { scanPublicFileRoutes } from "./utils/public-routes.js";
 +import { createJsonImportAttributesPlugin } from "./plugins/json-import-attributes.js";

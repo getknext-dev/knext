@@ -1,4 +1,4 @@
-knext bundled fix for vinext 1.0.1 (dist output)
+knext bundled fix for vinext 1.1.0 (dist output)
 Upstream: https://github.com/cloudflare/vinext/pull/3741
 What it fixes: In a Nitro production build `/_next/image` never reached vinext's image handler: the App Router handler answered it with a 302 to the source asset, so the response a client sees came from Nitro's static handler and carried no Next.js image headers.
 When Nitro's app is on globalThis.__nitro__.default the handler now serves the image itself
@@ -24,7 +24,7 @@ Applied by `knext vinext-patches` (runs from the app's postinstall and before `k
  import { getRenderedConcreteUrlPathsForRoute } from "./pregenerated-concrete-paths.js";
  import { VINEXT_RSC_CACHE_BUSTING_SEARCH_PARAM, canonicalizeLoadingShellRscRequestHeaders, canonicalizePrewarmableRscRequestHeaders, createCanonicalRscRequestUrl, createRscRedirectLocation, createRscRequestUrl, hasRscCacheBustingSearchParam, resolveInvalidRscCacheBustingRequest, stripRscCacheBustingSearchParam, stripRscSuffix } from "./app-rsc-cache-busting.js";
 @@ -225,6 +225,10 @@
- 	}
+ 	unmatchedRouteResponses.add(markedResponse);
  	return markedResponse;
  }
 +function getNitroAppFetch() {
