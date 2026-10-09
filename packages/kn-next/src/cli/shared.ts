@@ -377,7 +377,7 @@ export function isAmbiguousNpxBinDispatch(
 }
 
 const DEPRECATED_KN_NEXT_NOTICE =
-    "`kn-next` is deprecated and will be removed in a future minor release — use `knext` instead (same command, same flags).\n";
+    "`kn-next` is deprecated and will be removed in 2.0 — use `knext` instead (same command, same flags).\n";
 
 /**
  * Print the one-line deprecation notice to stderr when invoked as `kn-next`
