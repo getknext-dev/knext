@@ -21,13 +21,12 @@ have with a maintainer.
 
 ## Supported versions
 
-knext has not reached a `1.0.0` release. Pre-1.0, there is **no long-term-support branch**. Two
-prerelease lines on the npm `@getknext/*` scope receive fixes, including security fixes: the latest
-published `1.0.0-rc.*` (npm dist-tag `rc`) and the latest published `1.3.0-rc.*` (npm dist-tag
-`next`). Report against the version you are actually running; if it predates the current release
-candidate on its line, the first response will usually be "upgrade and confirm."
-
-Once `1.0.0` ships, this section will name which major version lines receive security fixes.
+The **`1.x`** major line receives fixes, including security fixes, and they land on the **newest**
+published `1.x` release on the npm `@getknext/*` scope. There is **no long-term-support branch**:
+an older `1.x` minor stays installable, with no promise of backported fixes. Report against the
+version you are actually running; if it predates the newest `1.x` release, the first response will
+usually be "upgrade and confirm." The `1.0.0-rc.*` release candidates are superseded by `1.0.0` and
+receive no further fixes, and neither does the `0.x` line.
 
 ## Scope
 
@@ -42,5 +41,5 @@ This policy covers the code in this repository: the `@getknext/core`, `@getknext
 - Findings that require deployment-time misconfiguration that this project explicitly documents as
   the operator's responsibility to set correctly (for example, running a CNI with no
   `NetworkPolicy` support and then relying on network isolation — see
-  [the docs security page](https://knext.dev/docs/security#network-isolation) for what is and is
+  [the docs security page](https://knext-platform.dev/docs/security#network-isolation) for what is and is
   not enforced automatically).

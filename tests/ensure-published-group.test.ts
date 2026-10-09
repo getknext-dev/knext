@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -599,33 +599,26 @@ describe('prereleaseDistTag — follows the changesets pre-mode tag when one is 
   });
 });
 
-// integration/v1.3 ONLY. Pins the branch's publish tag so 1.3.x can never land
-// on `rc` (the v1.0 credential + nightlies read it) or `latest`. DELETE this
-// block in the PR that merges integration/v1.3 into main after 1.0.0 GA (main
-// exits pre mode then, and its own release decides its tag).
-describe('integration/v1.3 — the fixed group publishes to dist-tag `next`', () => {
+// integration/v1.3 ONLY. 1.3.0 is the GA cut: changesets pre mode has been exited, so the
+// fixed group is a stable version and publishes to `latest`. DELETE this block in the PR that
+// merges integration/v1.3 into main (main's own release decides its tag).
+describe('integration/v1.3 — 1.3.0 GA: pre mode exited, stable version', () => {
   const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-  const pre = JSON.parse(readFileSync(resolve(repoRoot, '.changeset/pre.json'), 'utf8'));
   const coreVersion = JSON.parse(
     readFileSync(resolve(repoRoot, 'packages/kn-next/package.json'), 'utf8'),
   ).version;
 
-  it('.changeset/pre.json is in pre mode with tag `next`', () => {
-    expect(pre.mode).toBe('pre');
-    expect(pre.tag).toBe('next');
+  it('.changeset/pre.json is gone (pre mode exited)', () => {
+    expect(existsSync(resolve(repoRoot, '.changeset/pre.json'))).toBe(false);
   });
 
-  it('the heal tag for the tree version is `next` — never rc, never latest', () => {
-    const tag = prereleaseDistTag(coreVersion, pre);
-    expect(tag).toBe('next');
-    expect(['rc', 'latest']).not.toContain(tag);
+  it('a stable tree version has no prerelease dist-tag (null -> latest)', () => {
+    expect(prereleaseDistTag(coreVersion, null)).toBeNull();
   });
 
-  // In pre mode the pre tag is ALSO the prerelease id `changeset version`
-  // computes (rc.5 + tag `next` -> 1.0.0-next.N), so the version is set by
-  // hand in the prepare PR. Pin the exact number for every fixed-group member
-  // so a stray `changeset version` (or a missed member) reds here.
-  it('every fixed-group member is at exactly 1.3.0-rc.10', () => {
+  // Pin the exact number for every fixed-group member so a stray `changeset version` (or a
+  // missed member) reds here.
+  it('every fixed-group member is at exactly 1.3.0', () => {
     const config = JSON.parse(readFileSync(resolve(repoRoot, '.changeset/config.json'), 'utf8'));
     const dirs = {
       '@getknext/core': 'packages/kn-next',
@@ -637,7 +630,7 @@ describe('integration/v1.3 — the fixed group publishes to dist-tag `next`', ()
     for (const [name, dir] of Object.entries(dirs)) {
       const pkg = JSON.parse(readFileSync(resolve(repoRoot, dir, 'package.json'), 'utf8'));
       expect(pkg.name).toBe(name);
-      expect(pkg.version).toBe('1.3.0-rc.10');
+      expect(pkg.version).toBe('1.3.0');
     }
   });
 });

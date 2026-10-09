@@ -1,5 +1,11 @@
 # @getknext/core
 
+## 1.3.0
+
+### Patch Changes
+
+- Stable release of the 1.3 line. This is `1.3.0-rc.10` promoted to GA: the published files are identical to `1.3.0-rc.10` except for the version string. See `docs/release/v1.3.0.md` for the release notes.
+
 ## 1.3.0-rc.10
 
 ### Patch Changes
