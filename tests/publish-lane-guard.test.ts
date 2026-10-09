@@ -3,6 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { MARKER_PATHS } from '../scripts/list-changeset-marker-branches.mjs';
 import {
   checkLaneMajor,
   fixedGroupNames,
@@ -12,7 +13,6 @@ import {
   RELEASE_CUT_REF,
   resolveLane,
 } from '../scripts/publish-lane-guard.mjs';
-import { MARKER_PATHS } from '../scripts/list-changeset-marker-branches.mjs';
 import { readWorkspaceManifests } from '../scripts/publish-preflight.mjs';
 
 /**
