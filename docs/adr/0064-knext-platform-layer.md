@@ -642,6 +642,51 @@ significant result:
 G2, G4 and the node-preference half of G9 would need Knative config writes; each needs its own ADR
 before any field ships (D7).
 
+## Phase 0 implementation notes (as built)
+
+Recorded so the sprint-close review reads the build, not the plan. Nothing here changes a
+decision above; each item is a place the build had to choose within it.
+
+- **Landed:** P0-1 (CRD + admission envtest), P0-2 (`internal/defaults`), P0-3 (zero-diff golden:
+  25 CLI-shaped specs x 8 platform states, golden recorded before any platform code existed),
+  P0-3b (start-up envtest without the CRD), P0-4, P0-5 except the admission warnings, P0-6
+  (operator `get/list/watch` plus `update/patch` on the platform's **status** only; the platform's
+  own reconciler writes `Accepted`, `DefaultsPropagated`, `Ready` and the rollout counts), P0-7.
+- **Deferred:** the two admission **warnings** in P0-5 (a `connectionBudget` below an existing app's
+  `maxScale x poolMax`; a default `containerConcurrency x 8 MiB` above the default memory limit).
+  They need a second validating webhook. The effect they warn about is already reported at
+  reconcile time (`EffectiveSpecInvalid`, a Warning event, last-good held). Tracked as sprint-close
+  tech debt.
+- **`status.platform`** carries two more fields than D2 lists, `specHash` and `effectiveHash`. The
+  hash of the platform's spec (not its generation) is the stamp that says "this app was rendered
+  against this configuration", so deleting and recreating an unchanged platform is not a change.
+  The hash of the merged values that reach the revision template is how the operator knows a
+  platform edit would roll **no** new revision for an app without diffing a live Knative Service,
+  whose Knative-defaulted fields differ from a fresh render on every pass.
+- **The rollout limiter is a reservation limiter**, not a token bucket: a held app is told when its
+  slot is and comes back then (two reconciles per app, not a poll loop). An app's **own** spec
+  change, an app with no Service yet, and an edit that changes nothing for the app all bypass it.
+  The pacing rate lives in the platform, so once the platform is deleted (F8) the built-in rate
+  governs the revert.
+- **A platform that fails the operator's own validation is ignored, not held** (built-in defaults,
+  `PlatformDefaultsApplied=False, reason=PlatformNotAccepted`, a Warning event). Hold-last-good (F3)
+  is reserved for a platform value that makes an *app's merged spec* invalid. jev: ignore 0.92 / hold
+  0.08.
+- **Added reasons on `PlatformDefaultsApplied`:** `NothingToInherit` (a platform is in force but
+  supplies no value the app leaves unset) and `RolloutPending` (`Unknown`; queued behind the
+  limiter). The ADR's `NoPlatform`, `NoPlatformCRD`, `Inherited`, `EffectiveSpecInvalid` and
+  `PlatformNotAccepted` are as written.
+- **The NextApp admission webhook reads the platform's `connectionBudget`** (one uncached GET, only
+  when the CRD is installed, built-in 80 on any read problem), so write-time and reconcile-time
+  agree. Without it a platform that raised the budget would be silently contradicted at
+  `kubectl apply`. jev: read 0.96 / stay at 80 0.04.
+- **`scaling.defaults` is in P0** because the schema sketch marks it P0 (jev: include 0.91). The
+  one built-in it moves is `containerConcurrency` 20.
+- **CLI.** The CLI no longer always emits `minScale`/`maxScale` (D2 consequence a): it omits
+  `spec.scaling` when nothing scaling-related is set, and keeps `maxScale` present in any block it
+  does emit, because the operator reads a present block's `maxScale` literally and 0 is Knative's
+  "unbounded". The resource back-fill (D2 consequence b, action P2-3) is **not** changed here.
+
 ## Appendix A — rules-file and ADR amendments, proposed for the founder to apply
 
 This PR edits none of these files. Exact proposed wording:

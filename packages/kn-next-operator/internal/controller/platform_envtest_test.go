@@ -249,7 +249,15 @@ func newStartupManager(cfg2 *rest.Config) (ctrl.Manager, *runtime.Scheme) {
 		HealthProbeBindAddress: "0",
 		// Several managers register a controller named "nextapp" in this one test
 		// process; production runs exactly one.
-		Controller: config.Controller{SkipNameValidation: ptr.To(true)},
+		//
+		// CacheSyncTimeout is shortened so a controller that is wired to a kind the
+		// cluster does not serve FAILS the manager within seconds. At the 2 minute
+		// default that failure would land after any sensible assertion window, and
+		// "the manager started" would pass for a manager that is about to crash-loop.
+		Controller: config.Controller{
+			SkipNameValidation: ptr.To(true),
+			CacheSyncTimeout:   3 * time.Second,
+		},
 	})
 	Expect(err).NotTo(HaveOccurred())
 	return mgr, s
@@ -282,9 +290,10 @@ var _ = Describe("operator start-up without the KnextPlatform CRD (ADR-0064 P0-3
 		By("registering the controllers exactly as cmd/main.go does")
 		Expect(SetupControllers(mgr, nil)).To(Succeed())
 
+		managerExit := make(chan error, 1)
 		go func() {
 			defer GinkgoRecover()
-			_ = mgr.Start(ctx)
+			managerExit <- mgr.Start(ctx)
 		}()
 		Expect(mgr.GetCache().WaitForCacheSync(ctx)).To(BeTrue(), "the manager's caches must sync without the platform kind")
 
@@ -310,6 +319,13 @@ var _ = Describe("operator start-up without the KnextPlatform CRD (ADR-0064 P0-3
 			g.Expect(cond.Reason).To(Equal(ReasonNoPlatformCRD))
 			g.Expect(got.Status.Platform).To(BeNil())
 		}, 30*time.Second, 200*time.Millisecond).Should(Succeed())
+
+		By("the manager keeps running: no controller is waiting on a kind the cluster does not serve")
+		// A controller registered for the missing kind cannot sync its cache; with
+		// the shortened timeout that ends mgr.Start with an error inside this window.
+		Consistently(managerExit, 8*time.Second, 250*time.Millisecond).ShouldNot(Receive(),
+			"the manager exited: something is registered for a kind that is not installed, which would "+
+				"crash-loop the operator on a cluster without the KnextPlatform CRD")
 	})
 })
 

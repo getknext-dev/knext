@@ -94,6 +94,11 @@ func computePlatformStatus(p *platformv1alpha1.KnextPlatform, apps []appsv1alpha
 	var rollout platformv1alpha1.PlatformRolloutStatus
 	for i := range apps {
 		app := &apps[i]
+		if !app.DeletionTimestamp.IsZero() || isInvalidSpec(app) {
+			// Cannot receive the configuration: counting it as pending would hold
+			// DefaultsPropagated at Progressing for the whole cluster.
+			continue
+		}
 		switch {
 		case isHeldByPlatform(app):
 			rollout.Held++
@@ -127,6 +132,13 @@ func computePlatformStatus(p *platformv1alpha1.KnextPlatform, apps []appsv1alpha
 		{Type: PlatformConditionReady, Status: metav1.ConditionTrue, Reason: "Ready", Message: "the platform is in force", ObservedGeneration: p.Generation},
 	}
 	return st
+}
+
+// isInvalidSpec reports whether the app failed its OWN spec validation, so it
+// never reaches the platform merge.
+func isInvalidSpec(app *appsv1alpha1.NextApp) bool {
+	c := apimeta.FindStatusCondition(app.Status.Conditions, ConditionReady)
+	return c != nil && c.Reason == "InvalidSpec"
 }
 
 // isHeldByPlatform reports whether the app's last verdict was a hold because of
@@ -181,7 +193,8 @@ func nextAppToPlatformRequests(context.Context, client.Object) []reconcile.Reque
 
 // platformRelevantNextAppChange fires only when something the platform status is
 // computed from moved: the app appeared or went away, its status.platform
-// changed, or its PlatformDefaultsApplied condition changed. Every other NextApp
+// changed, its PlatformDefaultsApplied condition changed, or it entered/left the
+// set of apps that can receive the configuration at all. Every other NextApp
 // status write (URL, traffic, ...) would otherwise re-run a list over every app.
 var platformRelevantNextAppChange = predicate.Funcs{
 	UpdateFunc: func(e event.UpdateEvent) bool {
@@ -195,7 +208,13 @@ var platformRelevantNextAppChange = predicate.Funcs{
 		}
 		oldC := apimeta.FindStatusCondition(oldApp.Status.Conditions, ConditionPlatformDefaultsApplied)
 		newC := apimeta.FindStatusCondition(newApp.Status.Conditions, ConditionPlatformDefaultsApplied)
-		return !apiequality.Semantic.DeepEqual(oldC, newC)
+		if !apiequality.Semantic.DeepEqual(oldC, newC) {
+			return true
+		}
+		// An app entering or leaving InvalidSpec, or starting to delete, changes
+		// whether it is counted at all.
+		return isInvalidSpec(oldApp) != isInvalidSpec(newApp) ||
+			oldApp.DeletionTimestamp.IsZero() != newApp.DeletionTimestamp.IsZero()
 	},
 }
 

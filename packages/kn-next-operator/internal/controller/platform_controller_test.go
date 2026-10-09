@@ -131,6 +131,28 @@ func TestComputePlatformStatus_RolloutCounts(t *testing.T) {
 	}
 }
 
+// An app that never reaches the platform stage cannot be "pending" forever: one
+// invalid app would otherwise hold DefaultsPropagated at Progressing for the
+// whole cluster, and a deleting app is on its way out.
+func TestComputePlatformStatus_AppsThatCannotReceiveTheConfigAreNotCounted(t *testing.T) {
+	p := platformObj(1, nil)
+	hash := platformSpecHash(&p.Spec)
+
+	invalid := appWithPlatform("invalid", "", &metav1.Condition{Type: ConditionReady, Status: metav1.ConditionFalse, Reason: "InvalidSpec"})
+	deleting := appWithPlatform("deleting", "old-hash", nil)
+	now := metav1.Now()
+	deleting.DeletionTimestamp = &now
+
+	st := computePlatformStatus(p, []appsv1alpha1.NextApp{appWithPlatform("ok", hash, nil), invalid, deleting})
+
+	if st.Rollout == nil || st.Rollout.Applied != 1 || st.Rollout.Pending != 0 || st.Rollout.Held != 0 {
+		t.Fatalf("rollout = %+v, want only the one reachable app counted (applied 1)", st.Rollout)
+	}
+	if c := cond(st.Conditions, "DefaultsPropagated"); c == nil || c.Status != metav1.ConditionTrue {
+		t.Errorf("DefaultsPropagated = %+v, want True: nothing reachable is waiting", c)
+	}
+}
+
 func TestComputePlatformStatus_PropagatedWhenEveryAppIsAtTheCurrentConfig(t *testing.T) {
 	p := platformObj(1, nil)
 	hash := platformSpecHash(&p.Spec)
