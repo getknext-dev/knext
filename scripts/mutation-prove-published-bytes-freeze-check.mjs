@@ -234,9 +234,21 @@ const MUTATIONS = [
   {
     label: 'select-script: a per-line pin absent at the base commit is not read from main',
     subject: 'select',
-    anchor:
-      'return file === PIN_FILE ? { rcTag: null } : parseJson(gitShow(repoRoot, mainRef, file));',
+    anchor: 'return parseJson(gitShow(repoRoot, mainRef, file), `${file} at ${mainRef}`);',
+    replacement: 'return null;',
+  },
+  {
+    label: 'select-script: an unparseable pin reads as no window instead of failing (fail-open)',
+    subject: 'select',
+    anchor: 'throw new Error(`${what} is present but is not valid JSON`);',
     replacement: 'return { rcTag: null };',
+  },
+  {
+    label:
+      'select-script: an unreadable pin blob reads as absent instead of failing (fall-through)',
+    subject: 'select',
+    anchor: 'throw new Error(`cannot read ${path} at ${rev}: ${err.message}`);',
+    replacement: 'return null;',
   },
   {
     label: 'workflow: stops passing --base-version to the check',
@@ -246,7 +258,7 @@ const MUTATIONS = [
   },
 ];
 
-declareMutations(24);
+declareMutations(26);
 
 const RUNNER = resolveSpecRunner(REPO_ROOT, SPECS[0]);
 
@@ -259,8 +271,8 @@ function specPasses() {
   return r.status === 0;
 }
 
-if (MUTATIONS.length !== 24) {
-  console.error(`FATAL: declared 24 mutations, table has ${MUTATIONS.length}`);
+if (MUTATIONS.length !== 26) {
+  console.error(`FATAL: declared 26 mutations, table has ${MUTATIONS.length}`);
   process.exit(1);
 }
 

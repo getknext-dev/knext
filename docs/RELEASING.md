@@ -240,7 +240,11 @@ from git objects at the PR's **base** commit by `scripts/published-bytes-select-
    The v1.0 pin (`.github/compat-credential-ref.json`) applies to a base on its own line. The v1.3
    pin (`.github/compat-credential-ref-v1.3.json`, which declares `"line": "v1.3"`) applies only to
    `integration/v1.3`, where its rc tags are cut — it is read from `main` when the integration
-   branch does not carry the file. `main` shares the 1.3 major.minor but ships nothing a credential
+   branch does not carry the file. **Caveat:** PRs into `integration/v1.3` run that branch's own
+   older workflow copy (#2004), so they stay unguarded until the line-scoped guard is ported there
+   (tracked in #2118). A pin file that exists but cannot be read or parsed fails the run (exit 2);
+   only a genuinely absent file means "no window", and an error never falls through to another
+   pin. `main` shares the 1.3 major.minor but ships nothing a credential
    run measures, so it is never compared against the v1.3 pin.
 2. **Line match.** If the selected pin's `rcTag` is on a different `major.minor` than the base, the
    check skips with the visible reason "the base is not the line whose bytes are credentialed" — no
