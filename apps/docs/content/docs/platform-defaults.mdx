@@ -144,10 +144,13 @@ for an app that declares a `poolMax`. The check at `kubectl apply` time and the 
 operator use the same number. It creates no database, pooler or connection of its own.
 
 <Callout type="warn">
-**Lowering the budget blocks every update to an app that is already over it.** There is no grace
-for an app that was valid before: once its `maxScale × poolMax` is above the new budget, the check
-at `kubectl apply` time rejects every update to that app, including a deploy that only changes
-the image. The running service keeps serving unchanged, and the rejection names the budget.
+**Lowering the budget does not roll out changes to an app that is already over it.** There is no
+grace for an app that was valid before: once its `maxScale × poolMax` is above the new budget,
+the operator holds every change to that app and keeps its running service as it is. The change
+to the app itself is still accepted at `kubectl apply` time, so deleting the app, editing its
+labels or annotations, and a deploy that only changes the image all go through, but a new image
+does not start serving until the app fits. An update that raises `maxScale × poolMax` above the
+budget is rejected, and the rejection names the budget.
 
 To get unstuck, do either of these:
 

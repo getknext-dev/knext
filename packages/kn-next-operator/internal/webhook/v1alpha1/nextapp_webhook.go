@@ -25,6 +25,7 @@ import (
 	"context"
 	"fmt"
 
+	"k8s.io/apimachinery/pkg/api/equality"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -115,6 +116,19 @@ func (v *NextAppCustomValidator) ValidateCreate(ctx context.Context, nextApp *ap
 // wins + a Warning event).
 func (v *NextAppCustomValidator) ValidateUpdate(ctx context.Context, oldApp, newApp *appsv1alpha1.NextApp) (admission.Warnings, error) {
 	nextAppLog.Info("Validating NextApp on update", "name", newApp.GetName())
+	// Deletion must always be able to make progress. The operator removes its
+	// finalizer with a metadata merge patch, which is an UPDATE through this
+	// webhook; a spec rule (the connection budget moves at runtime, so a stored
+	// app can be over it) must never reject that patch and wedge the object in
+	// Terminating. A terminating object's spec is no longer admitted anywhere.
+	if newApp.GetDeletionTimestamp() != nil {
+		return nil, nil
+	}
+	// A metadata-only update (labels, annotations, finalizers) changes no spec, so
+	// there is nothing for the spec rules to say about it.
+	if oldApp != nil && equality.Semantic.DeepEqual(oldApp.Spec, newApp.Spec) {
+		return nil, nil
+	}
 	var oldSpec *appsv1alpha1.NextAppSpec
 	if oldApp != nil {
 		oldSpec = &oldApp.Spec
