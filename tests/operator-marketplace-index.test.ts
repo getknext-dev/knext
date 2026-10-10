@@ -580,7 +580,12 @@ describe('operator-supply-chain.yml wires the Marketplace variant (#1954)', () =
     const jobPerms = text.match(/permissions:\n\s+contents: write[\s\S]*?id-token: write[^\n]*/);
     expect(jobPerms).not.toBeNull();
     const usesLines = text.split('\n').filter((l) => /^\s+(- )?uses:/.test(l));
-    for (const l of usesLines) expect(l).toMatch(/@[0-9a-f]{40} # v\d/);
+    // #2106: the repo's own mirror composite (first-party, audited by apply-safety-scan)
+    // is the only local action; everything else stays SHA-pinned.
+    const thirdParty = usesLines.filter(
+      (l) => !/uses:\s*\.\/\.github\/actions\/docker-hub-mirror\s*$/.test(l),
+    );
+    for (const l of thirdParty) expect(l).toMatch(/@[0-9a-f]{40} # v\d/);
     // the only secret is the built-in token
     const secrets = [...text.matchAll(/secrets\.([A-Z_]+)/g)].map((m) => m[1]);
     expect(new Set(secrets)).toEqual(new Set(['GITHUB_TOKEN']));

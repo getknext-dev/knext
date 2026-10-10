@@ -105,7 +105,15 @@ const WORKFLOW_SOURCES = () =>
  */
 let trackedShell: Set<string> | undefined;
 function sourceResolver(from: string): (p: string) => string | null {
-  const shell = SCRIPT_SOURCES();
+  // #2106: also the tracked LOCAL composite actions. The scanner follows a local
+  // `uses: ./.github/actions/<x>` into its action.yml and fails CLOSED when it
+  // cannot read it, so a resolver blind to action.yml reads every job that
+  // calls one as "might apply" and floods the fetch gate. Resolving it makes
+  // the composite get scanned on its merits (still fail-closed if it applies).
+  const shell = [
+    ...SCRIPT_SOURCES(),
+    ...WORKFLOW_SOURCES().filter((f) => f.startsWith('.github/actions/')),
+  ];
   trackedShell ??= new Set(shell);
   const tracked = trackedShell;
   return (p) => {

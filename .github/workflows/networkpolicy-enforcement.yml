@@ -38,6 +38,9 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Route Docker Hub pulls through mirror.gcr.io (anonymous rate limit)
+        id: docker-hub-mirror
+        uses: ./.github/actions/docker-hub-mirror
       # The drill renders the policy from the operator's own code
       # (cmd/policygen), so Go is required — a hand-copied YAML would drift.
       - name: Setup Go

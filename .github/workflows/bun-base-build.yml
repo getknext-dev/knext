@@ -55,6 +55,8 @@ jobs:
       BUCKET: gsw-mcp-bun-base
       TARGETS: ${{ inputs.targets || 'x64 aarch64' }}
       OIDC_ISSUER: https://token.actions.githubusercontent.com
+      # TODO(#2106): the smoke-test step pulls this from Docker Hub anonymously; route it
+      # through the mirror under a reviewed change to the pinned step order.
       ALPINE_IMAGE: alpine:3.23@sha256:85fe1e81d6758c208f3e1eed4338a1997e19d4be002d4dd32d3100c9a8c010a0
     steps:
       - name: Require the GCP federation variables (fail closed)
