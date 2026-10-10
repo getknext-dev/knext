@@ -64,11 +64,17 @@ describe("public-origin — allowlist parsing", () => {
         expect(po.parsePublicOrigins(undefined)).toEqual({
             origins: [],
             invalid: [],
+            repeated: [],
         });
-        expect(po.parsePublicOrigins("")).toEqual({ origins: [], invalid: [] });
+        expect(po.parsePublicOrigins("")).toEqual({
+            origins: [],
+            invalid: [],
+            repeated: [],
+        });
         expect(po.parsePublicOrigins(" , ")).toEqual({
             origins: [],
             invalid: [],
+            repeated: [],
         });
     });
 
@@ -84,6 +90,7 @@ describe("public-origin — allowlist parsing", () => {
                 "http://localhost:3000",
             ],
             invalid: [],
+            repeated: [],
         });
     });
 
@@ -93,6 +100,14 @@ describe("public-origin — allowlist parsing", () => {
                 "http://app.example.com,https://app.example.com,APP.example.com",
             ).origins,
         ).toEqual(["http://app.example.com"]);
+    });
+
+    it("names each dropped repeat in `repeated`, so the first-wins downgrade is not silent", () => {
+        const parsed = po.parsePublicOrigins(
+            "http://a.test,https://a.test, A.test ,b.test",
+        );
+        expect(parsed.origins).toEqual(["http://a.test", "https://b.test"]);
+        expect(parsed.repeated).toEqual(["https://a.test", "A.test"]);
     });
 
     it("drops anything that is not a plain host[:port] — and says which", () => {
@@ -725,6 +740,25 @@ for (const [name, bin] of RUNTIMES) {
                 }
                 expect(b.out()).not.toContain("PUBLIC_ORIGINS");
                 expect(b.err()).not.toContain("PUBLIC_ORIGINS");
+            } finally {
+                b.stop();
+            }
+        });
+
+        it("a repeated host is dropped with a warning naming the entry", async () => {
+            const b = await boot(bin, {
+                KNEXT_PUBLIC_ORIGINS: "http://a.test,https://a.test",
+            });
+            try {
+                expect(
+                    await locationOf(
+                        b.port,
+                        "setHeader",
+                        "http://0.0.0.0:8080/a",
+                    ),
+                ).toBe("http://a.test/a");
+                expect(b.err()).toContain("DUPLICATE");
+                expect(b.err()).toContain("https://a.test");
             } finally {
                 b.stop();
             }

@@ -92,12 +92,15 @@ narrow rewrite fixes the user-visible bug and touches nothing Next relies on int
 scored this mechanism highest: Location rewrite 0.82, listen patch 0.14, bind localhost 0.03,
 `trustHostHeader` 0.01.
 
-**4. Read the headers as they arrived.** Because of fact 1, the preload snapshots
-`X-Forwarded-Host` and `Host` when the request is emitted
-(`http.Server.prototype.emit('request')`, the hook `request-body-cap.cjs` already uses), before
-Next defaults them. It applies the rule to that snapshot at response time (jev 0.85). Without the
-snapshot the "no proxy header gives `https`" default never applies. The served-build test caught
-this on a real Next build.
+**4. Read the headers as they arrived.** The preload snapshots `X-Forwarded-Host` and `Host` when
+the request is emitted (`http.Server.prototype.emit('request')`, the hook `request-body-cap.cjs`
+already uses) and applies the rule to that snapshot at response time. With the scheme taken from the
+entry (Amendment 1) the snapshot is no longer needed for the scheme. Next's `x-forwarded-host ??= host`
+(base-server.js) yields the same host candidate as the snapshot, so the snapshot's remaining reason
+is the other writer: `resolve-routes.js` applies `x-middleware-request-*` to the live `req.headers`,
+so an app's middleware can overwrite `host` or `x-forwarded-host` before the route responds. The
+snapshot keeps the origin decision on what the client and proxy sent, not on what app code did to the
+live request. Dropping it was weighed (jev keep 1.00, drop 0.00) and rejected: any doubt keeps it.
 
 **5. Where it lives: a preload, `packages/kn-next/src/adapters/public-origin.cjs`.** It is
 dependency-free CommonJS, like `cache-control-normalize.cjs` and `request-body-cap.cjs`, and is
@@ -114,7 +117,8 @@ object, flat-array and pair-array forms). It runs Next's own server unmodified, 
 
 **6. Entry format.** Each entry is `[scheme://]host[:port]`. A trailing `/` is accepted and
 stripped. The scheme is kept and becomes the redirect's scheme (rule 2); a bare host means `https`.
-One entry per host: a repeat of a host is ignored, whatever its scheme. An entry with a path, userinfo, a wildcard, an out-of-range port, or a wildcard
+One entry per host: a repeat of a host is dropped, whatever its scheme, with a stderr warning naming
+the dropped entry. An entry with a path, userinfo, a wildcard, an out-of-range port, or a wildcard
 bind address is dropped with a stderr warning naming it. **Header scope (jev: Location only, 0.74):**
 `Refresh`, `Content-Location` and `Link` are not rewritten. Next's own `Refresh` on a 308 is only
 added on the router's redirect path, where middleware redirects are already made relative.

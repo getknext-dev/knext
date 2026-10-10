@@ -42,13 +42,17 @@
  * on both Node and Bun's `node:http`, with Next's own server unmodified. The
  * two request headers the rule reads are snapshotted when the request
  * ARRIVES (`http.Server.prototype.emit('request')`, the hook
- * `request-body-cap.cjs` uses), because Next defaults `x-forwarded-host` on
- * the live request before the handler runs.
+ * `request-body-cap.cjs` uses). The reason is not the scheme: it is that the
+ * live `req.headers` are not the request's own. Next defaults
+ * `x-forwarded-host ??= host`, and an app's middleware can overwrite `host` /
+ * `x-forwarded-host` on the live request (resolve-routes.js applies
+ * `x-middleware-request-*`) before the route handler responds. The snapshot
+ * keeps the origin decision on what the client and proxy actually sent.
  *
  * CONFIG: `KNEXT_PUBLIC_ORIGINS` — comma-separated `[scheme://]host[:port]`
  * entries; the scheme is `http://` or `https://` (a bare host means `https`)
  * and a trailing `/` is accepted and stripped. One entry per host: a repeat of
- * a host, whatever its scheme, is ignored. Anything else in an entry
+ * a host, whatever its scheme, is dropped with a warning. Anything else in an entry
  * (path, userinfo, wildcard, a wildcard bind address) drops that entry with a
  * warning. UNSET or empty → nothing is installed and behaviour is unchanged.
  * The effective allowlist is announced once at boot on stdout:
@@ -120,13 +124,15 @@ function mergeVary(existing) {
  * Parse the allowlist. Pure.
  *
  * @param {string | undefined} raw
- * @returns {{ origins: string[], invalid: string[] }} origins are `scheme://host[:port]`
+ * @returns {{ origins: string[], invalid: string[], repeated: string[] }} origins are
+ * `scheme://host[:port]`; `repeated` lists entries dropped because their host was already taken
  */
 function parsePublicOrigins(raw) {
   const origins = [];
   const seen = new Set();
   const invalid = [];
-  if (raw === undefined || raw === null) return { origins, invalid };
+  const repeated = [];
+  if (raw === undefined || raw === null) return { origins, invalid, repeated };
   for (const part of String(raw).split(',')) {
     const entry = part.trim();
     if (entry === '') continue;
@@ -144,9 +150,11 @@ function parsePublicOrigins(raw) {
     if (!seen.has(host)) {
       seen.add(host);
       origins.push(`${scheme}://${host}`);
+    } else {
+      repeated.push(entry);
     }
   }
-  return { origins, invalid };
+  return { origins, invalid, repeated };
 }
 
 /** First value of a (possibly repeated, possibly comma-joined) header, lower-cased. */
@@ -285,11 +293,17 @@ function install(opts) {
   const proto = http.ServerResponse.prototype;
   if (proto[INSTALLED]) return proto[INSTALLED];
 
-  const { origins, invalid } = parsePublicOrigins(env[PUBLIC_ORIGINS_ENV]);
+  const { origins, invalid, repeated } = parsePublicOrigins(env[PUBLIC_ORIGINS_ENV]);
   for (const entry of invalid) {
     warn(
       `PUBLIC_ORIGINS: INVALID — dropped ${PUBLIC_ORIGINS_ENV} entry ${JSON.stringify(entry)} ` +
         '(expected [http://|https://]host[:port]; a bare host means https)',
+    );
+  }
+  for (const entry of repeated) {
+    warn(
+      `PUBLIC_ORIGINS: DUPLICATE — dropped ${PUBLIC_ORIGINS_ENV} entry ${JSON.stringify(entry)} ` +
+        '(its host is already listed earlier; the first entry for a host wins, whatever its scheme)',
     );
   }
   const state = { origins };
