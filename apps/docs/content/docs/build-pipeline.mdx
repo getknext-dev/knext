@@ -453,7 +453,7 @@ is missing and how to fix it (install the pinned vinext version). Set `KNEXT_VIN
 to fail the build on that mismatch instead, and see [`knext doctor`](/docs/cli#knext-doctor) for the
 matching check. Set `KNEXT_VINEXT_PATCHES=0` to turn the fixes off, for example if you patch vinext
 yourself (`0`, `false`, `off` and `no` all turn them off). A misspelled value, such as `stric`, is
-treated as unset and the build prints a warning that names it. Each fix is removed from knext once a
+treated as unset and a vinext build prints a warning that names it. Each fix is removed from knext once a
 vinext release includes it.
 
 The fixes bundled with vinext 1.1.0:
