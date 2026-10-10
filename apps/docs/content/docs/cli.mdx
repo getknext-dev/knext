@@ -285,6 +285,11 @@ knext vinext-patches --check  # report only, change nothing
 | `KNEXT_VINEXT_PATCHES=strict` (env) | Fail, instead of warning, when the installed vinext is not the version the fixes were checked against. |
 | `-h`, `--help` | Show the usage help. |
 
+`KNEXT_VINEXT_PATCHES` accepts `0` (or `false`, `off`, `no`), `strict`, or unset; the value is not
+case-sensitive and surrounding spaces are ignored. Any other value, such as a misspelling like
+`stric`, is treated as unset: `knext build` and `knext vinext-patches` print a warning that names
+the value and lists the accepted ones, and the default warn behaviour applies.
+
 **Exit code:** `0` (including `--help`, when vinext is not installed, and when it is a different
 version unless `KNEXT_VINEXT_PATCHES=strict` is set); `1` on a usage error, a fix that conflicts
 with the installed vinext, a different vinext version under `KNEXT_VINEXT_PATCHES=strict`, or
