@@ -6,7 +6,9 @@ import { dirname, join, resolve } from 'node:path';
 import { MARKER_PATHS } from '../scripts/list-changeset-marker-branches.mjs';
 import {
   checkLaneMajor,
+  checkPreMode,
   fixedGroupNames,
+  PRE_MODE_TAGS,
   PUBLISH_LANES,
   parseSemver,
   RELEASE_CUT_MAJORS,
@@ -331,9 +333,25 @@ describe('CLI exit codes (the workflow branches on these, never on output)', () 
   });
 
   it('`major` exits 0 for the real tree on main', () => {
-    const result = runGuard(['major', '--ref', 'refs/heads/main', '--root', REPO_ROOT]);
-    expect(result.out).toContain('@getknext/core');
-    expect(result.status).toBe(0);
+    // The real tree's own `.changeset/pre.json` (present on integration/v2, absent on main) is
+    // judged by the lane-aware checks elsewhere; this asserts the MAJOR check on real manifests,
+    // so mirror the manifests and config into a root with no pre.json.
+    const dir = mkdtempSync(join(tmpdir(), 'r0-real-main-'));
+    try {
+      const copy = (rel: string) => {
+        mkdirSync(dirname(join(dir, rel)), { recursive: true });
+        writeFileSync(join(dir, rel), readFileSync(join(REPO_ROOT, rel)));
+      };
+      copy('.changeset/config.json');
+      for (const manifest of readWorkspaceManifests(REPO_ROOT)) {
+        copy(`${manifest.dir}/package.json`);
+      }
+      const result = runGuard(['major', '--ref', 'refs/heads/main', '--root', dir]);
+      expect(result.out).toContain('@getknext/core');
+      expect(result.status).toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('`major` re-checks the ref itself and refuses a disallowed one', () => {
@@ -419,4 +437,117 @@ describe('exit criterion: a lane computing the next major reds (real `changeset 
     expect(result.coreVersion).not.toBe(treeVersion);
     expect(result.status).toBe(0);
   }, 60_000);
+});
+describe('integration/v2 pre-mode lane (#2038, v2 task R3a)', () => {
+  const V2 = 'refs/heads/integration/v2';
+  const laneOf = (ref: string) => {
+    const resolved = resolveLane(ref);
+    if (!resolved.ok) throw new Error(`fixture lane ${ref} refused: ${resolved.reason}`);
+    return resolved;
+  };
+
+  it('the pre-mode tag map lives beside the lane map and only names mapped lanes', () => {
+    expect(Object.fromEntries(PRE_MODE_TAGS)).toEqual({ [V2]: 'next' });
+    for (const ref of PRE_MODE_TAGS.keys()) expect(PUBLISH_LANES.has(ref)).toBe(true);
+  });
+
+  it('admits integration/v2 on a 2.x group and refuses main on one (majors only on v2)', () => {
+    const FIXED = ['@getknext/core'];
+    const pkgs = [{ name: '@getknext/core', version: '2.0.0-next.0' }];
+    expect(checkLaneMajor({ lane: laneOf(V2), packages: pkgs, fixedNames: FIXED }).ok).toBe(true);
+    expect(
+      checkLaneMajor({ lane: laneOf('refs/heads/main'), packages: pkgs, fixedNames: FIXED }).ok,
+    ).toBe(false);
+  });
+
+  it('checkPreMode passes pre mode with tag next on integration/v2', () => {
+    expect(checkPreMode({ lane: laneOf(V2), pre: { mode: 'pre', tag: 'next' } })).toEqual([]);
+  });
+
+  it.each([
+    ['no pre.json', undefined],
+    ['pre.json that is not an object', 'pre'],
+    ['mode exit', { mode: 'exit', tag: 'next' }],
+    ['tag rc', { mode: 'pre', tag: 'rc' }],
+    ['no tag', { mode: 'pre' }],
+  ])('checkPreMode REDS integration/v2 with %s', (_label, pre) => {
+    expect(checkPreMode({ lane: laneOf(V2), pre }).length).toBeGreaterThan(0);
+  });
+
+  it('checkPreMode asks nothing of a stable lane with no pre.json', () => {
+    expect(checkPreMode({ lane: laneOf('refs/heads/main'), pre: undefined })).toEqual([]);
+  });
+
+  it.each([
+    'refs/heads/main',
+    'refs/heads/release/1.x',
+    'refs/heads/integration/v1.3',
+    'refs/heads/integration/v1.4',
+    'refs/heads/release/v1.3.0',
+  ])('checkPreMode REDS %s when pre.json exists, and says how to fix it', (ref) => {
+    const problems = checkPreMode({ lane: laneOf(ref), pre: { mode: 'pre', tag: 'next' } });
+    expect(problems.length).toBeGreaterThan(0);
+    expect(problems.join('\n')).toContain('changeset pre exit');
+  });
+
+  describe('CLI `major` on a scratch tree (exit code is the verdict)', () => {
+    function scratch(version: string, pre: unknown) {
+      const dir = mkdtempSync(join(tmpdir(), 'r3a-'));
+      mkdirSync(join(dir, '.changeset'), { recursive: true });
+      writeFileSync(
+        join(dir, '.changeset/config.json'),
+        JSON.stringify({ fixed: [['@getknext/core']] }),
+      );
+      if (pre !== undefined) writeFileSync(join(dir, '.changeset/pre.json'), JSON.stringify(pre));
+      mkdirSync(join(dir, 'packages/core'), { recursive: true });
+      writeFileSync(
+        join(dir, 'packages/core/package.json'),
+        JSON.stringify({ name: '@getknext/core', version }),
+      );
+      return dir;
+    }
+    const run = (version: string, pre: unknown) => {
+      const dir = scratch(version, pre);
+      try {
+        return runGuard(['major', '--ref', V2, '--root', dir]).status;
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    it('exits 0 for 2.0.0-next.0 in pre mode tag next', () => {
+      expect(run('2.0.0-next.0', { mode: 'pre', tag: 'next' })).toBe(0);
+    });
+    const runOn = (ref: string, version: string, pre: unknown) => {
+      const dir = scratch(version, pre);
+      try {
+        return runGuard(['major', '--ref', ref, '--root', dir]).status;
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    it('exits 1 on main when pre.json is present', () => {
+      expect(runOn('refs/heads/main', '1.4.0', { mode: 'pre', tag: 'next' })).toBe(1);
+    });
+    it('exits 1 on release/1.x when pre.json is present', () => {
+      expect(runOn('refs/heads/release/1.x', '1.4.0', { mode: 'pre', tag: 'next' })).toBe(1);
+    });
+    it('exits 1 on a 1.x release cut when pre.json is present (changesets would publish under next)', () => {
+      expect(runOn('refs/heads/release/v1.3.0', '1.3.0', { mode: 'pre', tag: 'next' })).toBe(1);
+    });
+    it('exits 0 on a 1.x release cut with no pre.json', () => {
+      expect(runOn('refs/heads/release/v1.3.0', '1.3.0', undefined)).toBe(0);
+    });
+    it('exits 0 on main with a stable version and no pre.json', () => {
+      expect(runOn('refs/heads/main', '1.4.0', undefined)).toBe(0);
+    });
+    it('exits 1 when pre.json is missing', () => {
+      expect(run('2.0.0-next.0', undefined)).toBe(1);
+    });
+    it('exits 1 when the tag is not next', () => {
+      expect(run('2.0.0-rc.0', { mode: 'pre', tag: 'rc' })).toBe(1);
+    });
+    it('exits 1 on the wrong major even in pre mode', () => {
+      expect(run('1.4.0', { mode: 'pre', tag: 'next' })).toBe(1);
+    });
+  });
 });
