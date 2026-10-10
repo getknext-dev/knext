@@ -1,7 +1,9 @@
-import { describe, expect, it } from 'bun:test';
+import { describe, expect, it, spyOn } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+// @ts-expect-error plain .mjs script, no declarations
+import { runSteps } from '../scripts/prepush.mjs';
 
 /**
  * `bun run prepush` must run exactly what CI's Lint & Test runs first. The
@@ -32,25 +34,49 @@ describe('prepush', () => {
   });
 
   it('behaviour: a failing gate does not short-circuit, and the exit code is 1', () => {
-    const steps = [
-      ['first (fails)', 'node', ['-e', 'process.exit(3)']],
-      ['second (must still run)', 'node', ['-e', 'console.log("RAN-SECOND")']],
-    ];
-    const r = spawnSync('node', [resolve(root, 'scripts/prepush.mjs')], {
-      encoding: 'utf8',
-      env: { ...process.env, PREPUSH_STEPS_JSON: JSON.stringify(steps) },
+    const logs: string[] = [];
+    const log = spyOn(console, 'log').mockImplementation((m: string) => {
+      logs.push(String(m));
     });
-    expect(r.status).toBe(1);
-    expect(r.stdout).toContain('RAN-SECOND');
-    expect(r.stderr).toContain('first (fails)');
+    const err = spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const code = runSteps([
+        ['first (fails)', 'node', ['-e', 'process.exit(3)']],
+        ['second (must still run)', 'node', ['-e', '0']],
+      ]);
+      expect(code).toBe(1);
+      expect(logs.join('\n')).toContain('second (must still run)');
+    } finally {
+      log.mockRestore();
+      err.mockRestore();
+    }
   });
 
   it('behaviour: all gates passing exits 0', () => {
-    const steps = [['ok', 'node', ['-e', '0']]];
-    const r = spawnSync('node', [resolve(root, 'scripts/prepush.mjs')], {
-      encoding: 'utf8',
-      env: { ...process.env, PREPUSH_STEPS_JSON: JSON.stringify(steps) },
-    });
+    const log = spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      expect(runSteps([['ok', 'node', ['-e', '0']]])).toBe(0);
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it('no env var can alter the gate list (source never reads process.env)', () => {
+    expect(prepush).not.toContain('process.env');
+    expect(prepush).not.toContain('PREPUSH_STEPS_JSON');
+  });
+
+  it('importing the module does not run the gates', () => {
+    const r = spawnSync(
+      'node',
+      [
+        '-e',
+        `import(${JSON.stringify(resolve(root, 'scripts/prepush.mjs'))}).then(()=>console.log('IMPORTED'))`,
+      ],
+      { encoding: 'utf8' },
+    );
     expect(r.status).toBe(0);
+    expect(r.stdout).toContain('IMPORTED');
+    expect(r.stdout).not.toContain('=== prepush');
   });
 });

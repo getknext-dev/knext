@@ -10,6 +10,8 @@
  *  3. root typecheck               (ci.yml "Typecheck root tests/")
  */
 import { spawnSync } from 'node:child_process';
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const DEFAULT_STEPS = [
   ['biome check (error level)', 'bunx', ['biome', 'check', '.', '--diagnostic-level=error']],
@@ -21,22 +23,23 @@ const DEFAULT_STEPS = [
   ['typecheck', 'bun', ['run', 'typecheck']],
 ];
 
-// Test seam: PREPUSH_STEPS_JSON=[[name, cmd, [args]], ...] replaces the gate list so
-// tests/prepush.test.ts can prove the no-short-circuit + exit-code behaviour.
-const STEPS = process.env.PREPUSH_STEPS_JSON
-  ? JSON.parse(process.env.PREPUSH_STEPS_JSON)
-  : DEFAULT_STEPS;
-
-const failed = [];
-for (const [name, cmd, args] of STEPS) {
-  console.log(`\n=== prepush: ${name} ===`);
-  const r = spawnSync(cmd, args, { stdio: 'inherit' });
-  if (r.status !== 0) failed.push(name);
+/** Runs every step (no short-circuit); returns the exit code (1 if any failed, else 0). */
+export function runSteps(steps) {
+  const failed = [];
+  for (const [name, cmd, args] of steps) {
+    console.log(`\n=== prepush: ${name} ===`);
+    const r = spawnSync(cmd, args, { stdio: 'inherit' });
+    if (r.status !== 0) failed.push(name);
+  }
+  if (failed.length > 0) {
+    console.error(`\nprepush FAILED: ${failed.join(', ')}`);
+    return 1;
+  }
+  console.log('\nprepush OK');
+  return 0;
 }
 
-if (failed.length > 0) {
-  console.error(`\nprepush FAILED: ${failed.join(', ')}`);
-  process.exit(1);
+// Only the CLI entry runs the fixed gate list. No env var may alter it.
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  process.exit(runSteps(DEFAULT_STEPS));
 }
-console.log('\nprepush OK');
-process.exit(0);
