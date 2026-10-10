@@ -15,6 +15,8 @@ export default _default;
  * FAIL-CLOSED: throws unless the harness sets KNEXT_TEST_SEAMS=1, and throws
  * unconditionally under NODE_ENV=production — the flag cannot re-enable it in a
  * production process, because nothing legitimate calls it there.
+ *
+ * @deprecated Removed in 2.0; test-only.
  */
 export declare function __resetEnvForTests(): void;
 
@@ -26,6 +28,8 @@ export declare function __resetEnvForTests(): void;
  * Under NODE_ENV=production it throws unconditionally — KNEXT_TEST_SEAMS=1 does
  * NOT re-open it, since an env var on a published subpath is settable by any
  * postinstall or transitive dependency in the app's process.
+ *
+ * @deprecated Removed in 2.0; test-only.
  */
 export declare function __setRedisClientForTests(client: unknown): void;
 
