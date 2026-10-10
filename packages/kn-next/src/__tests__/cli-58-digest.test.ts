@@ -341,7 +341,7 @@ describe("CR image field — digest-pinned ref (CLI-58 E2E invariant)", () => {
         );
     });
 
-    it("CR preserves minScale:0 (scale-to-zero invariant) with digest-pinned image", async () => {
+    it("CR preserves scale-to-zero (minScale absent or 0) with digest-pinned image", async () => {
         const readFileFn = mock().mockReturnValue(FAKE_METADATA_JSON);
         const pinnedRef = await resolveDigest(
             "registry.example.com/my-app:ts",
@@ -350,8 +350,11 @@ describe("CR image field — digest-pinned ref (CLI-58 E2E invariant)", () => {
             readFileFn,
         );
         const cr = buildNextAppCRObject(baseConfig, pinnedRef, "default");
+        // minScale 0 is the wire's unset: the CLI no longer writes it (so a
+        // KnextPlatform could default it), and absent means exactly 0.
         expect(
-            (cr.spec as { scaling: { minScale: number } }).scaling.minScale,
+            (cr.spec as { scaling?: { minScale?: number } }).scaling
+                ?.minScale ?? 0,
         ).toBe(0);
     });
 
