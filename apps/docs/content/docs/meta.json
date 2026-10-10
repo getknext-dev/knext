@@ -34,6 +34,7 @@
     "skew-protection",
     "---Platform---",
     "operator",
+    "platform-defaults",
     "multi-cloud",
     "private-registries",
     "custom-domains-tls",
