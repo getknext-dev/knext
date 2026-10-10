@@ -1180,16 +1180,34 @@ function seedNextCacheControl(key, entry, ctx) {
 // ─── CacheHandler Class ───
 
 /**
- * vinext's generated registration constructs a class adapter with
+ * vinext's generated registration constructs a class adapter with exactly
  * `{ env, options }` (`env` is the Workers binding object and is meaningless on
- * the knext target); Next.js passes its handler options bare. Next's options
- * never carry an `env` or `options` key, so their presence marks the vinext shape.
+ * the knext target); Next.js passes its handler options bare.
+ *
+ * The vinext shape is recognised POSITIVELY: the argument's own keys are
+ * precisely `env` and `options`, and `options` is absent or a plain object.
+ * Next's handler options always carry other keys (`serverDistDir`,
+ * `revalidatedTags`, ...), so even if a future Next adds an `env` or `options`
+ * key of its own the Next path still receives its options untouched, instead of
+ * silently getting `undefined`. (A vinext that grows a third key in the wrapper
+ * would stop being unwrapped; the vinext-isr-redis-wiring test constructs the
+ * wrapper through vinext's own `instantiateCacheAdapter` to catch that.)
  */
-function unwrapVinextAdapterArgs(arg) {
-  if (arg && typeof arg === 'object' && ('env' in arg || 'options' in arg)) {
-    return arg.options;
+function isVinextAdapterArgs(arg) {
+  if (!arg || typeof arg !== 'object') return false;
+  const keys = Object.keys(arg);
+  if (keys.length !== 2 || !keys.includes('env') || !keys.includes('options')) {
+    return false;
   }
-  return arg;
+  const { options } = arg;
+  if (options === undefined || options === null) return true;
+  if (typeof options !== 'object' || Array.isArray(options)) return false;
+  const proto = Object.getPrototypeOf(options);
+  return proto === Object.prototype || proto === null;
+}
+
+function unwrapVinextAdapterArgs(arg) {
+  return isVinextAdapterArgs(arg) ? arg.options : arg;
 }
 
 class CacheHandler {

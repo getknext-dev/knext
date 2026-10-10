@@ -177,6 +177,12 @@ export interface DoctorDeps {
      * reports the operator's version but renders no compatibility verdict.
      */
     cliVersion?: string;
+    /**
+     * The version of the vinext installed for the app in the CURRENT directory,
+     * or undefined when there is none -- feeds the vinext-patches drift check.
+     * Defaults to the real node_modules lookup; tests inject fixtures.
+     */
+    readInstalledVinext?: () => string | undefined;
 }
 
 /**
