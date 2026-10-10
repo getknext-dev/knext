@@ -274,6 +274,8 @@ type NextAppReconciler struct {
 	PlatformCRDPresent bool
 	// rollout paces platform-triggered re-renders (ADR-0064 F2). Zero value ready.
 	rollout rolloutLimiter
+	// held remembers which apps are held, for the fleet metrics. Zero value ready.
+	held heldTracker
 }
 
 // now returns the reconciler's clock (test-injectable), defaulting to time.Now.
@@ -380,6 +382,7 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 	var nextApp appsv1alpha1.NextApp
 	if err := r.Get(ctx, req.NamespacedName, &nextApp); err != nil {
 		if errors.IsNotFound(err) {
+			r.held.forget(req.NamespacedName)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
@@ -399,6 +402,11 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 	// has no ownerRef and would otherwise leak across deploy/delete cycles.
 	// In-cluster children (ksvc/SA) keep using ownerRef GC.
 	if deleting, err := r.reconcileFinalizers(ctx, &nextApp); err != nil || deleting {
+		if deleting {
+			// A terminating app is no longer held by anything; do not let a
+			// stale hold keep it on the held-apps gauge.
+			r.held.forget(req.NamespacedName)
+		}
 		// Nothing more to reconcile for a deleting object.
 		return ctrl.Result{}, err
 	}
@@ -546,6 +554,8 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 			return ctrl.Result{}, gateErr
 		}
 	}
+	// Fleet metrics observe the gate; they never decide it (platform_metrics.go).
+	r.held.observe(req.NamespacedName, gate)
 	if gate.hold != holdNone {
 		// Hold-last-good: read the live Knative Service and leave it exactly as it
 		// is. The verdict reports why (PlatformDefaultsApplied) and, for a queued

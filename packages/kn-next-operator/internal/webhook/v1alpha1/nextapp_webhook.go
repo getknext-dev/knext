@@ -26,6 +26,8 @@ import (
 	"fmt"
 
 	"k8s.io/apimachinery/pkg/api/equality"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -91,10 +93,22 @@ func (v *NextAppCustomValidator) connectionBudget(ctx context.Context) int {
 	}
 	p := &platformv1alpha1.KnextPlatform{}
 	if err := v.Platform.Get(ctx, client.ObjectKey{Name: platformv1alpha1.SingletonName}, p); err != nil {
+		// No platform object / CRD is the ordinary "no platform layer" case, not a
+		// fallback. Anything else means the platform's budget could not be read, and
+		// the user is not told: count it, so a webhook that has quietly stopped
+		// honouring the platform shows on /metrics.
+		if !apierrors.IsNotFound(err) && !apimeta.IsNoMatchError(err) {
+			budgetFallbackTotal.WithLabelValues(fallbackReadError).Inc()
+			nextAppLog.Error(err, "Reading the KnextPlatform failed; admitting against the built-in connection budget")
+		}
 		return validation.MaxAppConnections
 	}
-	if validation.ValidatePlatformSpec(&p.Spec) != nil || p.Spec.Database == nil || p.Spec.Database.ConnectionBudget <= 0 {
+	if validation.ValidatePlatformSpec(&p.Spec) != nil {
+		budgetFallbackTotal.WithLabelValues(fallbackPlatformInvalid).Inc()
 		return validation.MaxAppConnections
+	}
+	if p.Spec.Database == nil || p.Spec.Database.ConnectionBudget <= 0 {
+		return validation.MaxAppConnections // no budget set: the built-in is the answer, not a fallback
 	}
 	return int(p.Spec.Database.ConnectionBudget)
 }

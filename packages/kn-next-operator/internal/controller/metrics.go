@@ -71,10 +71,72 @@ var (
 				"the NextApp reconcile pass (the app stays Ready); they degrade ImageCacheReady.",
 		},
 	)
+
+	// --- Platform layer (ADR-0064) ------------------------------------------
+	//
+	// A held app is the platform layer's loudest silent failure: its live Knative
+	// Service keeps serving the old revision while a change is not applied. The
+	// status already says so per app (PlatformDefaultsApplied); these series are
+	// the FLEET view, so an alert can fire without listing every NextApp. They
+	// only OBSERVE decisions computeStatusVerdict and the limiter already made.
+	// Labelled by hold reason, never per object.
+
+	// platformHeldApps is how many apps are held RIGHT NOW, by hold reason
+	// (EffectiveSpecInvalid | RolloutPending).
+	platformHeldApps = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "knext_nextapp_platform_held_apps",
+			Help: "Number of NextApps whose Knative Service is held unchanged by the platform layer, " +
+				"labeled by reason (EffectiveSpecInvalid | RolloutPending).",
+		},
+		[]string{"reason"},
+	)
+
+	// platformHoldsTotal counts transitions INTO a hold, by reason. A hold that
+	// persists across many passes is one hold, so rate() reads as "how often is
+	// the platform holding apps", not as reconcile frequency.
+	platformHoldsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "knext_nextapp_platform_holds_total",
+			Help: "Total number of times a NextApp entered a platform hold, labeled by reason " +
+				"(EffectiveSpecInvalid | RolloutPending).",
+		},
+		[]string{"reason"},
+	)
+
+	// rolloutQueueDepth is the rollout limiter's backlog: re-renders holding a
+	// reservation behind rollout.maxAppsPerMinute. In-memory like the limiter
+	// itself, so it resets to 0 on an operator restart or leader failover.
+	rolloutQueueDepth = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "knext_platform_rollout_queue_depth",
+			Help: "Platform-triggered re-renders currently queued behind rollout.maxAppsPerMinute.",
+		},
+	)
+
+	// rolloutWaitSeconds observes how long a queued re-render was told to wait
+	// for its slot. Only queued re-renders are observed: a pass that goes
+	// straight through has no wait.
+	rolloutWaitSeconds = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "knext_platform_rollout_wait_seconds",
+			Help:    "Seconds a platform-triggered re-render was told to wait for its rollout slot.",
+			Buckets: []float64{1, 5, 15, 30, 60, 120, 300, 600},
+		},
+	)
 )
 
 func init() {
 	// Register with controller-runtime's global registry so the series are served on
 	// the existing /metrics endpoint alongside the built-in controller metrics.
-	metrics.Registry.MustRegister(reconcileTotal, reconcileDuration, reconcileErrors, imagePrewarmErrors)
+	metrics.Registry.MustRegister(reconcileTotal, reconcileDuration, reconcileErrors, imagePrewarmErrors,
+		platformHeldApps, platformHoldsTotal, rolloutQueueDepth, rolloutWaitSeconds)
+
+	// Publish every series at 0 up front, so an alert on a held app sees a real
+	// 0 rather than an absent series before the first hold ever happens.
+	for _, reason := range []string{ReasonEffectiveSpecInvalid, ReasonRolloutPending} {
+		platformHeldApps.WithLabelValues(reason).Set(0)
+		platformHoldsTotal.WithLabelValues(reason).Add(0)
+	}
+	rolloutQueueDepth.Set(0)
 }
