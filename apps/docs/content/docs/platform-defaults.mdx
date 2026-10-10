@@ -1,0 +1,182 @@
+---
+title: Platform defaults
+description: Cluster-wide defaults for resources, timeouts, concurrency and the database connection budget, set once by the cluster admin and inherited by every app that leaves the field unset.
+---
+
+A `KnextPlatform` is a single, cluster-wide configuration object. It lets the person who runs the
+cluster set the defaults that every app inherits, without editing each app. An app that sets a
+field itself always keeps its own value.
+
+<Callout type="info">
+**Absent means unchanged.** Until you create a `KnextPlatform`, nothing about your apps differs
+from a cluster that has never heard of it. The install bundle ships the custom resource
+definition but **no** `KnextPlatform` object, so upgrading the operator changes no app. An
+empty `KnextPlatform` (`spec: {}`) and `profile: default` change nothing either.
+</Callout>
+
+## What it sets today
+
+The platform can supply a default for these fields. Every field is optional, and a field you
+leave out keeps its built-in value.
+
+| Area | Field | Built-in value | Applies to an app that leaves this unset |
+|---|---|---|---|
+| Resources | `resources.defaults.cpuRequest` | `250m` | `spec.resources.cpuRequest` |
+| | `resources.defaults.cpuLimit` | `1000m` | `spec.resources.cpuLimit` |
+| | `resources.defaults.memoryRequest` | `512Mi` | `spec.resources.memoryRequest` |
+| | `resources.defaults.memoryLimit` | `1Gi` | `spec.resources.memoryLimit` |
+| Requests | `limits.timeoutSeconds` | `300` | `spec.timeoutSeconds` |
+| Scaling | `scaling.defaults.containerConcurrency` | `20` | `spec.scaling.containerConcurrency` |
+| | `scaling.defaults.scaleDownDelay` | Knative's own default | `spec.scaling.scaleDownDelay` |
+| | `scaling.defaults.targetBurstCapacity` | Knative's own default | `spec.scaling.targetBurstCapacity` |
+| | `scaling.defaults.panicWindowPercentage` | Knative's own default | `spec.scaling.panicWindowPercentage` |
+| | `scaling.defaults.panicThresholdPercentage` | Knative's own default | `spec.scaling.panicThresholdPercentage` |
+| Database | `database.connectionBudget` | `80` | the cap that `maxScale × poolMax` must fit within |
+| Rollout | `rollout.maxAppsPerMinute` | `10` | how fast a platform change reaches your apps |
+
+It does **not** choose your runtime (Node or Bun stays a per-app choice), change any Knative
+configuration, or create a database, cache or ingress.
+
+## Create one
+
+The object is cluster-scoped and **must be named `default`**. Any other name is rejected.
+
+```yaml title="platform.yaml"
+apiVersion: platform.kn-next.dev/v1alpha1
+kind: KnextPlatform
+metadata:
+  name: default
+spec:
+  resources:
+    defaults:
+      cpuLimit: "2"
+      memoryLimit: 2Gi
+  limits:
+    timeoutSeconds: 600
+```
+
+```bash
+kubectl apply -f platform.yaml
+```
+
+Apply it with `kubectl` or through GitOps. The `knext` CLI never writes it.
+
+## Who wins
+
+For every field, per app:
+
+1. the value on the app, if it set one;
+2. otherwise the platform's value, if it set one;
+3. otherwise the built-in value.
+
+The merge happens when the operator renders the app. Your `NextApp` is never rewritten, so GitOps
+diffs stay clean, and a platform edit reaches every app without touching any of them. Resources
+merge field by field: an app that sets `cpuLimit` still inherits the platform's `memoryLimit`.
+
+A preview deployment never keeps a scale-down delay, so it ignores `scaling.defaults.scaleDownDelay`
+just as it ignores its own.
+
+<Callout type="warn">
+**One caveat for resources.** If an app's `knext.config.ts` sets any one of `scaling.cpuRequest`,
+`scaling.cpuLimit`, `scaling.memoryRequest` or `scaling.memoryLimit`, the CLI fills in the other
+three with its own defaults, and those count as set by the app. To let the platform supply the
+rest, set none of the four in `knext.config.ts`.
+</Callout>
+
+## See what an app inherited
+
+```bash
+kubectl get nextapp my-app -o jsonpath='{.status.platform}'
+kubectl get nextapp my-app -o jsonpath='{.status.conditions[?(@.type=="PlatformDefaultsApplied")]}'
+```
+
+`status.platform` records the platform generation and profile the app was last rendered against
+and the exact fields it inherited, for example `spec.resources.memoryLimit`. It is absent while no
+platform is in force. The `PlatformDefaultsApplied` condition says what happened:
+
+| Reason | Meaning |
+|---|---|
+| `Inherited` | The platform supplied at least one value this app left unset. |
+| `NothingToInherit` | A platform is in force but supplies nothing this app leaves unset. |
+| `NoPlatform` | There is no `KnextPlatform` named `default`. Built-in values apply. |
+| `NoPlatformCRD` | The `KnextPlatform` definition is not installed. Built-in values apply. |
+| `PlatformNotAccepted` | The object failed the operator's own validation and is **ignored**. |
+| `EffectiveSpecInvalid` | The platform's value would make this app invalid. The app's current service is **held** (see below). |
+| `RolloutPending` | A platform change is queued for this app (see below). |
+
+The platform reports on itself too: `Accepted`, `DefaultsPropagated` and `Ready`, plus how many
+apps are applied, pending and held.
+
+```bash
+kubectl get knextplatform default -o yaml
+```
+
+## What happens when you change it
+
+**Only apps whose values actually change get a new revision.** Each changed service is a new
+revision, and a new revision starts a pod. An edit that changes nothing for an app, because it
+sets that field itself, creates no new revision for it.
+
+**Changes are paced.** The operator re-renders affected apps at `rollout.maxAppsPerMinute`
+(default 10), one every 60 ÷ N seconds, so one edit cannot start a pod for every app at once. A
+queued app shows `RolloutPending` until its turn. Your own deploy is never queued behind this: if
+you change the app itself, it rolls immediately with the platform's values included.
+
+**A value that would break an app is held, not applied.** If a platform change makes an app's
+combined settings invalid, for example a lowered connection budget that its `maxScale × poolMax`
+no longer fits, or a CPU request above the limit, the operator leaves that app's running service
+exactly as it is, reports `EffectiveSpecInvalid` naming the field, and raises a warning event.
+Fix the app or the platform and the next reconcile applies it. An app that is invalid on its own
+is rejected as it always was.
+
+If the change being held is one you made to the app, for example a new image, the old version
+keeps serving, so the app reports `Ready: False` with the same reason, and
+`kubectl wait --for=condition=Ready` does not succeed until the change is applied. A platform
+change on its own, with the app untouched, leaves `Ready` as the running service reports it.
+
+**Deleting the platform reverts every app** to the built-in values, at the built-in pace of 10
+apps per minute.
+
+## The connection budget
+
+`database.connectionBudget` replaces the built-in `80` that `maxScale × poolMax` must fit within
+for an app that declares a `poolMax`. The check at `kubectl apply` time and the check inside the
+operator use the same number. It creates no database, pooler or connection of its own.
+
+<Callout type="warn">
+**Lowering the budget blocks every update to an app that is already over it.** There is no grace
+for an app that was valid before: once its `maxScale × poolMax` is above the new budget, the check
+at `kubectl apply` time rejects every update to that app, including a deploy that only changes
+the image. The running service keeps serving unchanged, and the rejection names the budget.
+
+To get unstuck, do either of these:
+
+- raise `database.connectionBudget` back to a value the app fits within; or
+- lower the app's `maxScale` or `poolMax` in `knext.config.ts` until the product fits, then
+  deploy. That change is accepted because it fits.
+
+Before lowering the budget, list what would be over it:
+
+```bash
+kubectl get nextapp -A -o custom-columns='NAMESPACE:.metadata.namespace,NAME:.metadata.name,MAXSCALE:.spec.scaling.maxScale,POOLMAX:.spec.scaling.poolMax'
+```
+
+A blank column means that field is unset on the app.
+</Callout>
+
+## Profiles
+
+`spec.profile` accepts `default` or `fastColdStart`.
+
+- **`default`** sets nothing. It is the built-in values.
+- **`fastColdStart`** is accepted but **sets no value in this release**, and no claim is made
+  for it.
+
+## Upgrade order
+
+Operator and definition first, then the `KnextPlatform`, then the CLI. A `KnextPlatform` applied
+before its definition exists is rejected. An operator older than this feature ignores the object,
+and apps return to the built-in values.
+
+If the definition is missing, the operator still starts and behaves as it did before. Install the
+definition and restart the operator to switch the platform layer on.
