@@ -344,6 +344,19 @@ describe("held app change (Ready=False, EffectiveSpecInvalid)", () => {
         );
     });
 
+    it("Ready=True or a non-Ready condition with the InvalidSpec reason is not a failure", async () => {
+        for (const cond of [
+            { type: "Ready", status: "True", reason: "InvalidSpec" },
+            { type: "Degraded", status: "True", reason: "InvalidSpec" },
+        ]) {
+            const r = await waitForOperatorReconcile(
+                () => ({ ok: true, stdout: only(cond), stderr: "" }),
+                fakeClock(),
+            );
+            expect(r.held).toBeUndefined();
+        }
+    });
+
     it("a stale InvalidSpec from an older generation is not a failure", async () => {
         const r = await waitForOperatorReconcile(
             () => ({
