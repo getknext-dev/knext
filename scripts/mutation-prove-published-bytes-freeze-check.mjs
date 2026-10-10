@@ -51,6 +51,7 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SPECS = [
   'tests/published-bytes-freeze-check.test.ts',
   'tests/published-bytes-freeze-check-cli.test.ts',
+  'tests/published-bytes-select-pin.test.ts',
   'tests/dependabot-published-bytes-pause.test.ts',
   'tests/published-bytes-freeze-guard-workflow.test.ts',
 ];
@@ -61,6 +62,7 @@ const PROOF = {
     lib: 'scripts/lib/published-bytes-freeze-check.mjs',
     cli: 'scripts/published-bytes-freeze-check.mjs',
     dependabot: 'scripts/dependabot-published-bytes-pause.mjs',
+    select: 'scripts/published-bytes-select-pin.mjs',
     workflow: '.github/workflows/published-bytes-freeze-guard.yml',
   },
 };
@@ -194,34 +196,81 @@ const MUTATIONS = [
     replacement: '  const shouldClose = false;',
   },
 
-  // ── #2004: base-ref scope (1.3-line PRs skip; main-line PRs stay guarded) ──
+  // ── #2098: release-line scope (main on a different line skips; a base on the credentialed line stays guarded) ──
   {
-    label: 'base-ref: never skip an integration/* base (the always-red 1.3 job returns)',
+    label:
+      'line: never skip a base on a different line (the always-red main job returns, (a) goes red)',
     subject: 'lib',
-    anchor: '  if (isUnfrozenLineBaseRef(baseRef)) {',
+    anchor: '  if (baseLine !== null && pinLine !== null && baseLine !== pinLine) {',
     replacement: '  if (false) {',
   },
   {
-    label: 'base-ref: skip EVERY base (a main-base PR changing published bytes escapes the freeze)',
+    label:
+      'line: skip EVERY base once a line is known (a base on the credentialed line escapes the freeze, (b) goes red)',
     subject: 'lib',
-    anchor: ".startsWith('integration/');",
-    replacement: '.length >= 0;',
+    anchor: '  if (baseLine !== null && pinLine !== null && baseLine !== pinLine) {',
+    replacement: '  if (baseLine !== null && pinLine !== null) {',
   },
   {
-    label: 'base-ref: CLI stops passing baseRef to the decision',
+    label:
+      'select: a per-line pin ignores its integration-branch requirement (main would be compared to the v1.3 rc)',
+    subject: 'lib',
+    anchor:
+      "    if (typeof obj.line === 'string' && ref !== `integration/${obj.line}`) continue;\n",
+    replacement: '',
+  },
+  {
+    label: 'select: never choose a per-line pin (integration/v1.3 loses its freeze)',
+    subject: 'lib',
+    anchor: '    return file;\n',
+    replacement: '    continue;\n',
+  },
+  {
+    label: 'cli: stops passing baseVersion to the decision',
     subject: 'cli',
-    anchor: '    packageDirs,\n    baseRef,\n    now,\n  });',
+    anchor: '    packageDirs,\n    baseVersion,\n    now,\n  });',
     replacement: '    packageDirs,\n    now,\n  });',
   },
   {
-    label: 'base-ref: workflow stops passing --base-ref to the check',
+    label: 'select-script: a per-line pin absent at the base commit is not read from main',
+    subject: 'select',
+    anchor: 'return parseJson(gitShow(repoRoot, mainRef, file), `${file} at ${mainRef}`);',
+    replacement: 'return { rcTag: null };',
+  },
+  {
+    label: 'select-script: an unparseable pin reads as absent instead of failing the run (exit 2)',
+    subject: 'select',
+    anchor: '    throw new Error(`${what} is present but is not valid JSON`);',
+    replacement: '    return null;',
+  },
+  {
+    label:
+      'select-script: an unreadable pin blob reads as absent instead of failing (fall-through)',
+    subject: 'select',
+    anchor: 'throw new Error(`cannot read ${path} at ${rev}: ${err.message}`);',
+    replacement: 'return null;',
+  },
+  {
+    label: 'workflow: the head pin read no longer goes through the shared select-pin reader',
     subject: 'workflow',
-    anchor: ' \\\n            --base-ref "${BASE_REF}"',
+    anchor: '--read-pin-at "${HEAD_SHA}"',
+    replacement: '--read-pin-at-disabled "${HEAD_SHA}"',
+  },
+  {
+    label: 'workflow: the merge-base pin read no longer goes through the shared select-pin reader',
+    subject: 'workflow',
+    anchor: '--read-pin-at "${MERGE_BASE}"',
+    replacement: '--read-pin-at-disabled "${MERGE_BASE}"',
+  },
+  {
+    label: 'workflow: stops passing --base-version to the check',
+    subject: 'workflow',
+    anchor: ' \\\n            --base-version "${BASE_VERSION}"',
     replacement: '',
   },
 ];
 
-declareMutations(21);
+declareMutations(28);
 
 const RUNNER = resolveSpecRunner(REPO_ROOT, SPECS[0]);
 
@@ -234,8 +283,8 @@ function specPasses() {
   return r.status === 0;
 }
 
-if (MUTATIONS.length !== 21) {
-  console.error(`FATAL: declared 21 mutations, table has ${MUTATIONS.length}`);
+if (MUTATIONS.length !== 28) {
+  console.error(`FATAL: declared 28 mutations, table has ${MUTATIONS.length}`);
   process.exit(1);
 }
 

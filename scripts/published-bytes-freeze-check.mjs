@@ -48,7 +48,9 @@
  *     --base-pin-file <path> \
  *     --head-pin-file <path> \
  *     --merge-base-pin-file <path> \
- *     [--base-ref <PR base branch>]   (#2004: integration/* is skipped; absent = guarded)
+ *     [--base-version <base commit's @getknext/core version>]
+ *       (#2098: a base on a different major.minor than the pinned rcTag is skipped
+ *       with a stated reason; absent or unparseable = guarded, fail closed)
  */
 
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -159,8 +161,9 @@ const TITLE = 'Published-bytes freeze check';
  * @param {(argv: string[], opts?: { log?: typeof console.log, repoRoot?: string }) => number} [opts.runDiff]
  *   injectable so unit tests never spawn `git worktree`/`bun`/a child `node` process.
  * @param {string | undefined} [opts.summaryPath] `$GITHUB_STEP_SUMMARY`; unset locally.
- * @param {string | undefined} [opts.baseRef] the PR's base branch (#2004); `integration/*` is
- *   another release line and is skipped, anything else (incl. unset) stays guarded.
+ * @param {string | undefined} [opts.baseVersion] the PR base commit's `@getknext/core` version
+ *   (#2098); a different major.minor than the pinned rcTag is not the credentialed line and is
+ *   skipped, anything else (incl. unset or unparseable) stays guarded.
  * @returns {number} process exit code
  */
 export function main({
@@ -174,7 +177,7 @@ export function main({
   tagResolves = defaultTagResolves,
   runDiff = defaultRunDiff,
   summaryPath = process.env.GITHUB_STEP_SUMMARY,
-  baseRef,
+  baseVersion,
 }) {
   if (!Array.isArray(changedFiles)) {
     throw new Error('main() requires changedFiles: string[] — the files this PR touched');
@@ -200,7 +203,7 @@ export function main({
     mergeBasePin,
     changedFiles,
     packageDirs,
-    baseRef,
+    baseVersion,
     now,
   });
 
@@ -252,7 +255,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const basePinFile = arg('base-pin-file');
   const headPinFile = arg('head-pin-file');
   const mergeBasePinFile = arg('merge-base-pin-file');
-  const baseRef = arg('base-ref') ?? undefined;
+  const baseVersion = arg('base-version') || undefined;
   if (!changedFilesFile || !basePinFile || !headPinFile) {
     console.error(
       'published-bytes-freeze-check: --changed-files-file, --base-pin-file and --head-pin-file are all required',
@@ -295,7 +298,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const headPin = readPinFile(headPinFile, 'head pin file');
   const mergeBasePin = readPinFile(mergeBasePinFile, 'merge-base pin file');
   try {
-    process.exit(main({ changedFiles, basePin, headPin, mergeBasePin, baseRef }));
+    process.exit(main({ changedFiles, basePin, headPin, mergeBasePin, baseVersion }));
   } catch (err) {
     console.error(`[published-bytes-freeze-check] ERROR: ${err.message}`);
     process.exit(1);

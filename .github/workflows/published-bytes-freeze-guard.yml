@@ -22,6 +22,14 @@ name: Published-bytes freeze guard
 # rc.N+1 — exits in the "Run the published-bytes freeze check" step alone,
 # before any `bun install`/pack/build ever runs.
 #
+# SCOPED TO THE LINE BEING CREDENTIALED (#2098): credential runs pack from the
+# rc-tag checkout, never from `main`, so a base that is not the credentialed
+# line is guarded against nothing. `scripts/published-bytes-select-pin.mjs`
+# picks the pin from the base commit's @getknext/core major.minor (the v1.0 pin
+# for a base on its line; the v1.3 pin only for `integration/v1.3`), and the
+# check skips with a stated reason when the pinned rcTag's major.minor differs
+# from the base's. An unknown line stays guarded. See docs/RELEASING.md.
+#
 # THE FREEZE STATE (rcTag) IS READ AT THE PR'S BASE COMMIT, not its head —
 # round-2 fix (PR #1680 review), mirroring `compat-credential-freeze-guard.yml`
 # one-for-one (see that workflow's own comment of the same name). Reading a
@@ -84,10 +92,10 @@ jobs:
     env:
       BASE_SHA: ${{ github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.event.pull_request.base.sha }}
       HEAD_SHA: ${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}
-      # #2004 — the branch this PR merges INTO. The pin guards main's release
-      # line; a PR into integration/* is another line and is skipped (with a
-      # stated reason) by the check itself. merge_group carries it as a
-      # refs/heads/-qualified ref; the check normalises both shapes.
+      # The branch this PR merges INTO. Used (with the base commit's core version)
+      # to pick which pin credentials this base's release line (#2098): a
+      # per-line pin guards only its own integration branch. merge_group carries
+      # it as a refs/heads/-qualified ref; the selector normalises both shapes.
       BASE_REF: ${{ github.event_name == 'merge_group' && github.event.merge_group.base_ref || github.event.pull_request.base.ref }}
     steps:
       # fetch-depth: 0 + fetch-tags: true — the diff, when it runs, resolves
@@ -132,15 +140,19 @@ jobs:
 
       # Read the pin AS OF THE BASE COMMIT — the live-window state before
       # this PR. Decides freeze/unfrozen; see the file header ("THE FREEZE
-      # STATE"). Same shape as compat-credential-freeze-guard.yml's identical
-      # step.
-      - name: Read the pin file at the PR's base commit
+      # STATE"). #2098: WHICH pin file is chosen by the line the base commit
+      # carries (its @getknext/core major.minor) and the branch it targets —
+      # the guard protects the line whose bytes are credentialed, and credential
+      # runs pack from the rc tag, not from `main`. See
+      # scripts/published-bytes-select-pin.mjs. Exports PIN_FILE_SELECTED and
+      # BASE_VERSION for the steps below.
+      - name: Read the pin file at the PR's base commit (selected for the base's release line)
         run: |
           set -euo pipefail
-          if ! git show "${BASE_SHA}:.github/compat-credential-ref.json" > base-pin.json 2>/dev/null; then
-            echo "no pin file at the base commit — treating as unfrozen"
-            echo '{"rcTag": null}' > base-pin.json
-          fi
+          node scripts/published-bytes-select-pin.mjs \
+            --base-sha "${BASE_SHA}" \
+            --base-ref "${BASE_REF}" \
+            --base-pin-out base-pin.json >> "${GITHUB_ENV}"
           cat base-pin.json
 
       # Read the pin AS OF THIS PR'S HEAD — the only state a
@@ -148,10 +160,10 @@ jobs:
       - name: Read the pin file at the PR's head commit
         run: |
           set -euo pipefail
-          if ! git show "${HEAD_SHA}:.github/compat-credential-ref.json" > head-pin.json 2>/dev/null; then
-            echo "no pin file at head — treating as unfrozen"
-            echo '{"rcTag": null}' > head-pin.json
-          fi
+          # absent => {"rcTag": null}; listed-but-unreadable => exit 2 (fails the
+          # step). One implementation with the base read, not a bash copy.
+          node scripts/published-bytes-select-pin.mjs \
+            --read-pin-at "${HEAD_SHA}" --pin-file "${PIN_FILE_SELECTED}" --out head-pin.json
           cat head-pin.json
 
       # #1635-class rule, applied to publishedBytesBumpMarker: the pin AS OF
@@ -163,10 +175,8 @@ jobs:
         run: |
           set -euo pipefail
           MERGE_BASE="$(git merge-base "${BASE_SHA}" "${HEAD_SHA}")"
-          if ! git show "${MERGE_BASE}:.github/compat-credential-ref.json" > merge-base-pin.json 2>/dev/null; then
-            echo "no pin file at the merge base — treating as unfrozen"
-            echo '{"rcTag": null}' > merge-base-pin.json
-          fi
+          node scripts/published-bytes-select-pin.mjs \
+            --read-pin-at "${MERGE_BASE}" --pin-file "${PIN_FILE_SELECTED}" --out merge-base-pin.json
           cat merge-base-pin.json
 
       - name: Run the published-bytes freeze check
@@ -176,4 +186,4 @@ jobs:
             --base-pin-file base-pin.json \
             --head-pin-file head-pin.json \
             --merge-base-pin-file merge-base-pin.json \
-            --base-ref "${BASE_REF}"
+            --base-version "${BASE_VERSION}"

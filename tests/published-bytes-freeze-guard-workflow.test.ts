@@ -1,6 +1,16 @@
-import { describe, expect, it } from 'bun:test';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { afterEach, describe, expect, it } from 'bun:test';
+import { execFileSync, spawnSync } from 'node:child_process';
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { parse } from 'yaml';
 
 /**
@@ -97,9 +107,10 @@ describe('injection safety: PR-controlled values flow through env:, never inline
     expect(baseStep, 'base pin-read step not found').toBeTruthy();
     expect(headStep, 'head pin-read step not found').toBeTruthy();
     expect(mergeBaseStep, 'merge-base pin-read step not found').toBeTruthy();
-    expect(String(baseStep?.run)).toContain('"${BASE_SHA}:.github/compat-credential-ref.json"');
-    expect(String(headStep?.run)).toContain('"${HEAD_SHA}:.github/compat-credential-ref.json"');
+    expect(String(baseStep?.run)).toContain('--base-sha "${BASE_SHA}"');
+    expect(String(headStep?.run)).toContain('--read-pin-at "${HEAD_SHA}"');
     expect(String(mergeBaseStep?.run)).toContain('git merge-base "${BASE_SHA}" "${HEAD_SHA}"');
+    expect(String(mergeBaseStep?.run)).toContain('--read-pin-at "${MERGE_BASE}"');
     expect(String(baseStep?.run)).not.toMatch(/\$\{\{/);
     expect(String(headStep?.run)).not.toMatch(/\$\{\{/);
     expect(String(mergeBaseStep?.run)).not.toMatch(/\$\{\{/);
@@ -207,14 +218,131 @@ describe('actionlint has no complaints about this workflow', () => {
   });
 });
 
-describe('base-ref scope wiring (#2004)', () => {
-  it('job env carries BASE_REF from merge_group OR pull_request, and the check receives it via a shell var', () => {
+describe('release-line scope wiring (#2098)', () => {
+  it('job env carries BASE_REF from merge_group OR pull_request, and the base-pin step receives it via a shell var', () => {
     const { wf } = load();
     const job = wf.jobs[JOB];
     expect(job.env?.BASE_REF).toContain('github.event.merge_group.base_ref');
     expect(job.env?.BASE_REF).toContain('github.event.pull_request.base.ref');
-    const step = job.steps.find((s) => /Run the published-bytes freeze check/.test(s.name ?? ''));
+    const step = job.steps.find((s) =>
+      /Read the pin file at the PR's base commit/.test(s.name ?? ''),
+    );
+    expect(String(step?.run)).toContain('published-bytes-select-pin.mjs');
     expect(String(step?.run)).toContain('--base-ref "${BASE_REF}"');
+    expect(String(step?.run)).toContain('--base-pin-out base-pin.json');
+    expect(String(step?.run)).toContain('>> "${GITHUB_ENV}"');
     expect(String(step?.run)).not.toMatch(/\$\{\{/);
   });
+
+  it('the check receives the base commit version, so it can skip a base on another line', () => {
+    const { wf } = load();
+    const step = wf.jobs[JOB].steps.find((s) =>
+      /Run the published-bytes freeze check/.test(s.name ?? ''),
+    );
+    expect(String(step?.run)).toContain('--base-version "${BASE_VERSION}"');
+    expect(String(step?.run)).not.toMatch(/\$\{\{/);
+  });
+
+  it('the pin selection runs after dependency install (it imports the workspace helpers) and before the head/merge-base reads', () => {
+    const { wf } = load();
+    const steps = wf.jobs[JOB].steps;
+    const idx = (re: RegExp) => steps.findIndex((s) => re.test(`${s.name ?? ''}\n${s.run ?? ''}`));
+    const install = idx(/bun install --frozen-lockfile/);
+    const select = idx(/published-bytes-select-pin\.mjs/);
+    const head = idx(/Read the pin file at the PR's head commit/);
+    expect(install).toBeGreaterThanOrEqual(0);
+    expect(select).toBeGreaterThan(install);
+    expect(head).toBeGreaterThan(select);
+  });
+});
+
+describe('head/merge-base pin reads tolerate an absent pin file but not an unreadable one (#2118)', () => {
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+
+  const git = (cwd: string, ...args: string[]) =>
+    execFileSync('git', ['-c', 'commit.gpgsign=false', ...args], {
+      cwd,
+      encoding: 'utf8',
+    }).trim();
+
+  const PIN = '.github/compat-credential-ref.json';
+  type Case = 'absent' | 'present' | 'blob-missing';
+
+  /** A real repo (with the select-pin script copied in) whose HEAD carries the pin in the given state. */
+  function repo(c: Case): { root: string; sha: string } {
+    const root = mkdtempSync(join(tmpdir(), 'pb-wf-read-'));
+    dirs.push(root);
+    git(root, 'init', '-q', '-b', 'trunk');
+    git(root, 'config', 'user.email', 't@example.com');
+    git(root, 'config', 'user.name', 't');
+    writeFileSync(join(root, 'x.txt'), 'x');
+    if (c !== 'absent') {
+      mkdirSync(join(root, '.github'), { recursive: true });
+      writeFileSync(join(root, PIN), '{"rcTag":"v1.0.0-rc.6"}\n');
+    }
+    git(root, 'add', '-A');
+    git(root, 'commit', '-q', '-m', 'base');
+    const sha = git(root, 'rev-parse', 'HEAD');
+    if (c === 'blob-missing') {
+      const blob = git(root, 'rev-parse', `${sha}:${PIN}`);
+      rmSync(join(root, '.git', 'objects', blob.slice(0, 2), blob.slice(2)), { force: true });
+    }
+    // Copied AFTER the commit so they stay untracked, outside the tree under test.
+    mkdirSync(join(root, 'scripts'), { recursive: true });
+    cpSync(
+      resolve(REPO_ROOT, 'scripts/published-bytes-select-pin.mjs'),
+      join(root, 'scripts/published-bytes-select-pin.mjs'),
+    );
+    cpSync(resolve(REPO_ROOT, 'scripts/lib'), join(root, 'scripts/lib'), { recursive: true });
+    cpSync(
+      resolve(REPO_ROOT, 'scripts/publish-preflight.mjs'),
+      join(root, 'scripts/publish-preflight.mjs'),
+    );
+    return { root, sha };
+  }
+
+  /** Runs the workflow step's OWN `run:` script, verbatim, against `root`. */
+  function runStep(label: string, root: string, sha: string) {
+    const { wf } = load();
+    const step = wf.jobs[JOB].steps.find((s) =>
+      new RegExp(`Read the pin file at the PR's ${label}`).test(s.name ?? ''),
+    );
+    return spawnSync('bash', ['-c', String(step?.run)], {
+      cwd: root,
+      encoding: 'utf8',
+      // BASE_SHA = HEAD_SHA, so `git merge-base` resolves to the same commit
+      // and both steps read the one fixture.
+      env: { ...process.env, HEAD_SHA: sha, BASE_SHA: sha, PIN_FILE_SELECTED: PIN },
+    });
+  }
+
+  for (const [label, out] of [
+    ['head commit', 'head-pin.json'],
+    ['merge base', 'merge-base-pin.json'],
+  ] as const) {
+    it(`the ${label} read: pin absent from the tree => unfrozen {"rcTag": null}, step passes`, () => {
+      const { root, sha } = repo('absent');
+      const r = runStep(label, root, sha);
+      expect(r.status).toBe(0);
+      expect(JSON.parse(readFileSync(join(root, out), 'utf8'))).toEqual({ rcTag: null });
+    });
+
+    it(`the ${label} read: pin present => its real content`, () => {
+      const { root, sha } = repo('present');
+      const r = runStep(label, root, sha);
+      expect(r.status).toBe(0);
+      expect(JSON.parse(readFileSync(join(root, out), 'utf8'))).toEqual({ rcTag: 'v1.0.0-rc.6' });
+    });
+
+    it(`the ${label} read: pin listed but blob missing => the step FAILS, never reads as absent`, () => {
+      const { root, sha } = repo('blob-missing');
+      const r = runStep(label, root, sha);
+      expect(r.status).not.toBe(0);
+      const written = existsSync(join(root, out)) ? readFileSync(join(root, out), 'utf8') : '';
+      expect(written).not.toContain('"rcTag": null');
+    });
+  }
 });

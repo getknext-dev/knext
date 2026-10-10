@@ -192,12 +192,32 @@ head — mirroring `compat-credential-freeze-guard.yml`'s own rule for `rcTag`/`
 PR cannot skip the check by clearing `rcTag` in the same diff that also changes published bytes; the
 window was still open at base, so the check still runs.
 
-The pin guards **one release line** — the one `main` carries. A PR whose base is an
-`integration/*` branch (for example `integration/v1.3`) is on a different line, whose published
-bytes are the next line's release candidate and so can never equal the pinned tag; measuring it
-would make the check red on every such PR. Those PRs are skipped with the visible reason
-"base integration/v1.3 is not the frozen line". `main`, stacked branches, and an unknown base ref
-stay guarded, and the guard applies to the 1.3 line's bytes again once it merges into `main`.
+**The guard protects the line whose bytes are being credentialed, and nothing else.** Credential
+runs pack from the rc-tag checkout, never from `main`, so comparing a branch that is not that line
+against the pinned tag guards nothing and goes red on every core PR (it did, on `main`, once the 1.3
+line merged there: "GA 1.3.0 does not match rc base 1.0.0"). The scoping has two parts, both read
+from git objects at the PR's **base** commit by `scripts/published-bytes-select-pin.mjs`:
+
+1. **Which pin.** The base commit's `@getknext/core` version gives its release line (`major.minor`).
+   The v1.0 pin (`.github/compat-credential-ref.json`) applies to a base on its own line. The v1.3
+   pin (`.github/compat-credential-ref-v1.3.json`, which declares `"line": "v1.3"`) applies only to
+   `integration/v1.3`, where its rc tags are cut — it is read from `main` when the integration
+   branch does not carry the file. `main` shares the 1.3 major.minor but ships nothing a credential
+   run measures, so it is never compared against the v1.3 pin.
+2. **Line match.** If the selected pin's `rcTag` is on a different `major.minor` than the base, the
+   check skips with the visible reason "the base is not the line whose bytes are credentialed" — no
+   pack, no tag lookup, no marker. This is what lets a core change on `main` (1.3) merge while the
+   v1.0 window is open without a `publishedBytesBumpMarker`.
+
+A base on the credentialed line is unchanged: it still packs and diffs, and a change to its
+published bytes still fails red. An absent or unparseable base version stays **guarded** (fail
+closed). `scripts/mutation-prove-published-bytes-freeze-check.mjs` proves both directions by exit
+code. Two follow-ups are deliberately not done here: `dependabot-published-bytes-pause.yml` still
+reads only the v1.0 pin and is not line-scoped (it is a `pull_request_target` job, so widening it is
+its own reviewed change; today it is a no-op because no npm/bun Dependabot ecosystem is enabled),
+and a window on a *future* line needs its own per-line pin file added to the selector's candidate
+list. Once a line's integration branch merges into `main` and that pin is cleared at GA, the guard
+no longer applies there.
 
 An **intentional** rc.N+1 — real content is expected to differ from the currently-pinned rc — is
 authorized the same way `rcBumpMarker` authorizes touching the credential harness mid-window: add a
