@@ -27,7 +27,9 @@
  *   - anything else (some hunks present, a context missing or ambiguous) is a
  *     conflict and fails loudly — a stale patch must never half-apply;
  *   - a vinext version other than the manifest's is left untouched (the user
- *     moved off the pin; those fixes may already be upstream);
+ *     moved off the pin; those fixes may already be upstream) — with a loud
+ *     warning, because the build then lacks every fix; `KNEXT_VINEXT_PATCHES=
+ *     strict` turns that skip into a build error;
  *   - files are replaced (write a temp file, then rename), never written in
  *     place: bun hardlinks node_modules files to its global cache on Linux,
  *     and an in-place write would patch every project sharing that cache.
@@ -91,11 +93,19 @@ export type EnsureResult =
           dir: string;
           installed: string;
           expected: string;
+          /** How many bundled fixes were skipped (the manifest's patch count). */
+          skipped: number;
       }
     | { kind: "patched"; dir: string; results: PatchResult[] };
 
 /** A patch that neither applies cleanly nor is already present. */
 export class VinextPatchConflictError extends UsageError {}
+
+/**
+ * `KNEXT_VINEXT_PATCHES=strict` and the installed vinext is not the version the
+ * bundled fixes were validated against: the build must not go on without them.
+ */
+export class VinextVersionMismatchError extends UsageError {}
 
 /** Writing a patch's files failed; every file it touched was left as it was. */
 export class VinextPatchWriteError extends UsageError {}
@@ -122,6 +132,19 @@ export const VINEXT_PATCHES_DISABLE_VALUES = [
     "off",
     "no",
 ] as const;
+
+/** The value that makes a vinext version mismatch a build error, not a warning. */
+export const VINEXT_PATCHES_STRICT_VALUE = "strict";
+
+/** `KNEXT_VINEXT_PATCHES=strict` (case-insensitive): fail instead of skipping on a version mismatch. */
+export function vinextPatchesStrict(
+    env: Record<string, string | undefined> = process.env,
+): boolean {
+    return (
+        env[VINEXT_PATCHES_ENV]?.trim().toLowerCase() ===
+        VINEXT_PATCHES_STRICT_VALUE
+    );
+}
 
 /** `KNEXT_VINEXT_PATCHES=0` (or `false`/`off`/`no`) disables the bundled fixes. */
 export function vinextPatchesDisabled(
@@ -469,6 +492,33 @@ export function findVinextDir(cwd: string): string | undefined {
     }
 }
 
+/**
+ * The version of the vinext an app at `cwd` would load, or undefined when
+ * there is none (or its package.json is unreadable). Shared by `knext doctor`.
+ */
+export function readInstalledVinextVersion(cwd: string): string | undefined {
+    const dir = findVinextDir(cwd);
+    if (!dir) return undefined;
+    try {
+        const version = (
+            JSON.parse(readFileSync(join(dir, "package.json"), "utf8")) as {
+                version?: unknown;
+            }
+        ).version;
+        return typeof version === "string" ? version : undefined;
+    } catch {
+        return undefined;
+    }
+}
+
+/** What a version mismatch costs and how to fix it; shared by the warning and the strict error. */
+function mismatchFix(expected: string): string {
+    return (
+        `install the version they were validated against (\`npm install vinext@${expected}\`, or the bun/pnpm/yarn equivalent)` +
+        " and run `knext vinext-patches`"
+    );
+}
+
 /** Apply the bundled patches to the app's vinext when it is the validated version. */
 export function ensureVinextPatches(
     cwd: string,
@@ -488,11 +538,19 @@ export function ensureVinextPatches(
         }
     ).version;
     if (installed !== manifest.vinext) {
+        if (vinextPatchesStrict(opts.env)) {
+            throw new VinextVersionMismatchError(
+                `vinext ${String(installed)} is installed, but knext's ${manifest.patches.length} bundled vinext fixes were validated against ${manifest.vinext} only, and ${VINEXT_PATCHES_ENV}=strict does not allow building without them.\n\n` +
+                    `To fix: ${mismatchFix(manifest.vinext)}.\n` +
+                    `To build without the fixes anyway, unset ${VINEXT_PATCHES_ENV} (a warning is printed instead) or set ${VINEXT_PATCHES_ENV}=0.`,
+            );
+        }
         return {
             kind: "version-mismatch",
             dir,
             installed: String(installed),
             expected: manifest.vinext,
+            skipped: manifest.patches.length,
         };
     }
     return { kind: "patched", dir, results: applyVinextPatches(dir, opts) };
@@ -511,7 +569,10 @@ export function describeEnsureResult(
     }
     if (res.kind === "version-mismatch") {
         return [
-            `knext: vinext ${res.installed} is installed; knext's bundled vinext fixes target ${res.expected} only, so they were not applied.`,
+            `knext: WARNING — vinext ${res.installed} is installed; knext's ${res.skipped} bundled vinext fixes target ${res.expected} only, so none of them were applied.`,
+            "knext: this build lacks them (they include the Nitro image optimizer, 404s for unmatched asset requests, and the Pages route and inline-CSS manifests), unless your vinext release already includes them. The published compatibility results cover vinext " +
+                `${res.expected} only.`,
+            `knext: to fix, ${mismatchFix(res.expected)}. Set ${VINEXT_PATCHES_ENV}=strict to fail the build on this mismatch, or ${VINEXT_PATCHES_ENV}=0 to build without the fixes on purpose.`,
         ];
     }
     const applied = res.results.filter((r) => r.status === "applied").length;
@@ -529,7 +590,9 @@ const USAGE = `Usage: knext vinext-patches [--check]
 Apply the vinext fixes knext bundles ahead of upstream vinext releases to this
 app's installed vinext. Runs automatically from a knext app's postinstall and
 before \`knext build\`; safe to re-run. Set ${VINEXT_PATCHES_ENV}=0 to turn
-the bundled fixes off (both here and in \`knext build\`).
+the bundled fixes off (both here and in \`knext build\`), or
+${VINEXT_PATCHES_ENV}=strict to fail when the installed vinext is not the
+version the fixes were validated against (the default is a warning).
 
 Options:
   --check   report whether the fixes are applied, without changing files
@@ -541,6 +604,7 @@ export async function vinextPatchesMain(
     argv: string[],
     io: {
         cwd?: string;
+        env?: Record<string, string | undefined>;
         stdout?: (text: string) => void;
         stderr?: (text: string) => void;
     } = {},
@@ -573,6 +637,7 @@ export async function vinextPatchesMain(
     try {
         const res = ensureVinextPatches(io.cwd ?? process.cwd(), {
             check: values.check,
+            env: io.env,
         });
         for (const line of describeEnsureResult(res, {
             check: values.check,

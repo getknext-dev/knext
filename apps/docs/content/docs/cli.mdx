@@ -265,6 +265,14 @@ To turn the bundled fixes off, for example because you patch vinext yourself, se
 `KNEXT_VINEXT_PATCHES=0`. Both the `postinstall` step and `knext build` then leave vinext untouched
 and print a line saying the fixes were not applied.
 
+If your app has a vinext version other than the one the fixes were checked against, none of them
+are applied. By default `knext build` carries on and prints a warning that says how many fixes were
+skipped, what the build is missing, and how to fix it (install the expected vinext version and run
+`knext vinext-patches`). Set `KNEXT_VINEXT_PATCHES=strict` to make that mismatch an error instead:
+`knext build` and `knext vinext-patches` then stop with exit code `1` and the same fix. Use it in CI
+when you want a build with missing fixes to fail rather than ship. [`knext doctor`](#knext-doctor)
+reports the mismatch too.
+
 ```bash
 knext vinext-patches          # apply
 knext vinext-patches --check  # report only, change nothing
@@ -274,11 +282,13 @@ knext vinext-patches --check  # report only, change nothing
 |---|---|
 | `--check` | Report whether every fix is applied without changing any file; exit `1` when one is missing. |
 | `KNEXT_VINEXT_PATCHES=0` (env) | Skip the bundled fixes entirely, here and in `knext build`. |
+| `KNEXT_VINEXT_PATCHES=strict` (env) | Fail, instead of warning, when the installed vinext is not the version the fixes were checked against. |
 | `-h`, `--help` | Show the usage help. |
 
-**Exit code:** `0` (including `--help`, and when vinext is not installed or is a different version);
-`1` on a usage error, a fix that conflicts with the installed vinext, or `--check` finding a fix not
-yet applied.
+**Exit code:** `0` (including `--help`, when vinext is not installed, and when it is a different
+version unless `KNEXT_VINEXT_PATCHES=strict` is set); `1` on a usage error, a fix that conflicts
+with the installed vinext, a different vinext version under `KNEXT_VINEXT_PATCHES=strict`, or
+`--check` finding a fix not yet applied.
 
 ## `knext deploy` (default)
 
@@ -469,6 +479,14 @@ never touch the cluster, so they still run even when nothing above is reachable:
   throwaway directory with `knext create --force <scratch-dir>` and copy the fresh
   `knext-node-entry.mjs` over yours (diff first if you made local edits). Apps that don't use this
   runtime combination, or that aren't run from their own directory, report `SKIP`.
+- **vinext version** — knext bundles fixes for vinext that were checked against one exact vinext
+  version. If your app has a different vinext installed, `knext build` skips every one of those
+  fixes. This check compares the vinext in your `node_modules` with that version. An **older**
+  vinext is a `FAIL`, because the fixes are certainly missing (including the Nitro image optimizer
+  and the 404 for unmatched asset requests); a **newer** one is a `WARN`, because that release may
+  already include them. Both name the fix: install the version knext expects and run
+  `knext vinext-patches`. Apps without vinext get no row, and `KNEXT_VINEXT_PATCHES=0` reports
+  `SKIP`.
 
 ```bash
 knext doctor                                        # human-readable checklist
