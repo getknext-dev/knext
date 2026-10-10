@@ -11,6 +11,8 @@
 
 import { describe, expect, it } from "bun:test";
 import {
+    heldChangeMessage,
+    invalidSpecMessage,
     noReconcileMessage,
     operatorPodCheckCommand,
     RECONCILE_WAIT_MS_DEFAULT,
@@ -260,5 +262,197 @@ describe("waitForOperatorReconcile (#1535)", () => {
             { pollIntervalMs: 1_000, sleep: clock.sleep, now: clock.now },
         );
         expect(clock.now()).toBeGreaterThanOrEqual(RECONCILE_WAIT_MS_DEFAULT);
+    });
+});
+
+describe("held app change (Ready=False, EffectiveSpecInvalid)", () => {
+    const heldMsg =
+        "the change at generation 2 is NOT applied: the platform's defaults make this app's effective spec invalid (spec.scaling): maxScale 50 exceeds the budget. The previous Knative Service keeps serving unchanged";
+    const nextApp = (ready: Record<string, unknown>, gen: number, obs = 2) =>
+        JSON.stringify({
+            metadata: { generation: gen },
+            status: {
+                conditions: [
+                    {
+                        type: "PlatformDefaultsApplied",
+                        status: "False",
+                        observedGeneration: obs,
+                    },
+                    { type: "Ready", observedGeneration: obs, ...ready },
+                ],
+            },
+        });
+    const heldReady = {
+        status: "False",
+        reason: "EffectiveSpecInvalid",
+        message: heldMsg,
+    };
+
+    it("reports held with the operator message, not success", async () => {
+        const r = await waitForOperatorReconcile(
+            () => ({ ok: true, stdout: nextApp(heldReady, 2), stderr: "" }),
+            fakeClock(),
+        );
+        expect(r.held?.message).toBe(heldMsg);
+    });
+
+    it("heldChangeMessage names the field and the remedy", () => {
+        const m = heldChangeMessage(heldMsg);
+        expect(m).toContain("spec.scaling");
+        expect(m).toContain("Raise the platform budget");
+        expect(m).toContain("maxScale / poolMax");
+    });
+
+    it("InvalidSpec at the current generation is a failed deploy, with the spec remedy", async () => {
+        const detail =
+            "spec.scaling.maxScale: 500 exceeds the connection budget";
+        const stdout = JSON.stringify({
+            metadata: { generation: 2 },
+            status: {
+                conditions: [
+                    {
+                        type: "Degraded",
+                        status: "True",
+                        reason: "InvalidSpec",
+                        message: detail,
+                        observedGeneration: 2,
+                    },
+                    {
+                        type: "Ready",
+                        status: "False",
+                        reason: "InvalidSpec",
+                        message: "Spec does not meet validation requirements",
+                        observedGeneration: 2,
+                    },
+                ],
+            },
+        });
+        const r = await waitForOperatorReconcile(
+            () => ({ ok: true, stdout, stderr: "" }),
+            fakeClock(),
+        );
+        expect(r.held?.kind).toBe("spec");
+        expect(r.held?.message).toBe(detail);
+        const m = invalidSpecMessage(r.held?.message ?? "");
+        expect(m).toContain("spec.scaling.maxScale");
+        expect(m).toContain(
+            "Fix the spec in knext.config.ts and deploy again.",
+        );
+        expect(m).not.toContain("Raise the platform budget");
+        expect(heldChangeMessage(heldMsg)).toContain(
+            "Raise the platform budget",
+        );
+    });
+
+    it("Ready=True or a non-Ready condition with the InvalidSpec reason is not a failure", async () => {
+        for (const cond of [
+            { type: "Ready", status: "True", reason: "InvalidSpec" },
+            { type: "Degraded", status: "True", reason: "InvalidSpec" },
+            { type: "Degraded", status: "False", reason: "InvalidSpec" },
+        ]) {
+            const r = await waitForOperatorReconcile(
+                () => ({ ok: true, stdout: only(cond), stderr: "" }),
+                fakeClock(),
+            );
+            expect(r.held).toBeUndefined();
+        }
+    });
+
+    it("a stale InvalidSpec from an older generation is not a failure", async () => {
+        const r = await waitForOperatorReconcile(
+            () => ({
+                ok: true,
+                stdout: nextApp(
+                    { status: "False", reason: "InvalidSpec", message: "x" },
+                    3,
+                    2,
+                ),
+                stderr: "",
+            }),
+            { ...fakeClock(), waitMs: 3000 },
+        );
+        expect(r.held).toBeUndefined();
+    });
+
+    it("a normal Ready=True deploy is unchanged", async () => {
+        const r = await waitForOperatorReconcile(
+            () => ({
+                ok: true,
+                stdout: nextApp({ status: "True", reason: "Ready" }, 2),
+                stderr: "",
+            }),
+            fakeClock(),
+        );
+        expect(r.reconciled).toBe(true);
+        expect(r.held).toBeUndefined();
+    });
+
+    it("a hold observed at an older generation keeps waiting, then times out", async () => {
+        const r = await waitForOperatorReconcile(
+            () => ({ ok: true, stdout: nextApp(heldReady, 3, 2), stderr: "" }),
+            { ...fakeClock(), waitMs: 3000 },
+        );
+        expect(r.reconciled).toBe(false);
+        expect(r.held).toBeUndefined();
+    });
+
+    const only = (cond: Record<string, unknown>) =>
+        JSON.stringify({
+            metadata: { generation: 2 },
+            status: { conditions: [{ observedGeneration: 2, ...cond }] },
+        });
+
+    it("Ready=False with a different reason is reconciled, not held", async () => {
+        const r = await waitForOperatorReconcile(
+            () => ({
+                ok: true,
+                stdout: only({
+                    type: "Ready",
+                    status: "False",
+                    reason: "RevisionFailed",
+                    message: "revision failed",
+                }),
+                stderr: "",
+            }),
+            fakeClock(),
+        );
+        expect(r.held).toBeUndefined();
+        expect(r.reconciled).toBe(true);
+    });
+
+    it("a non-Ready condition with the held reason is not held", async () => {
+        const r = await waitForOperatorReconcile(
+            () => ({
+                ok: true,
+                stdout: only({
+                    type: "Degraded",
+                    status: "False",
+                    reason: "EffectiveSpecInvalid",
+                    message: "x",
+                }),
+                stderr: "",
+            }),
+            fakeClock(),
+        );
+        expect(r.held).toBeUndefined();
+        expect(r.reconciled).toBe(true);
+    });
+
+    it("Ready=True with the held reason is not held", async () => {
+        const r = await waitForOperatorReconcile(
+            () => ({
+                ok: true,
+                stdout: only({
+                    type: "Ready",
+                    status: "True",
+                    reason: "EffectiveSpecInvalid",
+                    message: "x",
+                }),
+                stderr: "",
+            }),
+            fakeClock(),
+        );
+        expect(r.held).toBeUndefined();
+        expect(r.reconciled).toBe(true);
     });
 });

@@ -173,6 +173,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Route Docker Hub pulls through mirror.gcr.io (anonymous rate limit)
+        id: docker-hub-mirror
+        uses: ./.github/actions/docker-hub-mirror
       # Determines the release channel from the triggering ref (#1667): a
       # stable version tag / an rc-or-other prerelease tag / a main push
       # (operator-edge) / anything else (no publish). Every publish-gated step
@@ -210,6 +213,9 @@ jobs:
       - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          # #2106: buildx's docker-container driver ignores the daemon mirror.
+          buildkitd-config: ${{ steps.docker-hub-mirror.outputs.buildkitd-config }}
 
       # Build into a LOCAL OCI-layout directory on every ref — never push here.
       # The Trivy gate below scans this exact layout; publication (main & release tags)

@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'bun:test';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
+  evaluateBranchPolicy,
   evaluateReviewerProtection,
   evaluateTagRulesetProtection,
+  fetchBranchPolicy,
   fetchReviewerProtection,
   fetchTagRulesetProtection,
   matchesVStarGlob,
@@ -414,6 +420,33 @@ describe('fetchTagRulesetProtection', () => {
 
 // ── runDriftCheck (combines both, names exactly which is missing) ───────────
 
+const GOOD_POLICY_ROUTES = {
+  'repos/getknext-dev/knext/environments/npm-publish/deployment-branch-policies?per_page=100&page=1':
+    {
+      status: 200,
+      body: { branch_policies: [{ name: 'main', type: 'branch' }] },
+    },
+};
+
+/** Wrap a fake api so the branch-policy axis reads healthy (tests of OTHER axes). */
+function withGoodPolicy(api: (p: string) => Promise<{ status: number; body: unknown }>) {
+  return async (path: string) => {
+    if (path in GOOD_POLICY_ROUTES)
+      return GOOD_POLICY_ROUTES[path as keyof typeof GOOD_POLICY_ROUTES];
+    const res = await api(path);
+    if (path === 'repos/getknext-dev/knext/environments/npm-publish' && res.status === 200) {
+      return {
+        status: 200,
+        body: {
+          ...(res.body as object),
+          deployment_branch_policy: { protected_branches: false, custom_branch_policies: true },
+        },
+      };
+    }
+    return res;
+  };
+}
+
 describe('runDriftCheck', () => {
   const args = { owner: 'getknext-dev', repo: 'knext', environment: 'npm-publish' };
 
@@ -435,8 +468,9 @@ describe('runDriftCheck', () => {
     });
     const report = await runDriftCheck({ ...args, api });
     expect(report.ok).toBe(false);
-    expect(report.findings).toHaveLength(1);
-    expect(report.findings[0].setting).toBe('v*-covering tag ruleset');
+    const tagFindings = report.findings.filter((f) => f.setting === 'v*-covering tag ruleset');
+    expect(tagFindings).toHaveLength(1);
+    expect(tagFindings[0].setting).toBe('v*-covering tag ruleset');
     expect((report.reviewer as { kind: string }).kind).toBe('missing');
   });
 
@@ -455,7 +489,7 @@ describe('runDriftCheck', () => {
         body: { enforcement: 'active', conditions: { ref_name: { include: ['refs/tags/v*'] } } },
       },
     });
-    const report = await runDriftCheck({ ...args, api });
+    const report = await runDriftCheck({ ...args, api: withGoodPolicy(api) });
     expect(report.ok).toBe(true);
     expect(report.findings).toHaveLength(0);
     expect((report.reviewer as { kind: string }).kind).toBe('missing');
@@ -477,8 +511,10 @@ describe('runDriftCheck', () => {
       },
     });
     const report = await runDriftCheck({ ...args, api });
-    expect(report.ok).toBe(true);
-    expect(report.findings).toHaveLength(0);
+    // The reviewer axis is never a finding; the SAME unreadable environment
+    // makes the branch-policy axis UNVERIFIED (#2109) -- the only finding.
+    expect(report.findings.map((f) => f.setting)).toEqual(['npm-publish deployment-branch policy']);
+    expect(report.findings[0].kind).toBe('permission-error');
     expect((report.reviewer as { kind: string }).kind).toBe('permission-error');
   });
 
@@ -494,11 +530,12 @@ describe('runDriftCheck', () => {
     });
     const report = await runDriftCheck({ ...args, api });
     expect(report.ok).toBe(false);
-    expect(report.findings).toHaveLength(1);
-    expect(report.findings[0].setting).toBe('v*-covering tag ruleset');
-    expect(report.findings[0].kind).toBe('permission-error');
-    expect(report.findings[0].message).toMatch(/UNVERIFIED/);
-    expect(report.findings[0].message).not.toMatch(/MISSING/);
+    const tagFindings = report.findings.filter((f) => f.setting === 'v*-covering tag ruleset');
+    expect(tagFindings).toHaveLength(1);
+    expect(tagFindings[0].setting).toBe('v*-covering tag ruleset');
+    expect(tagFindings[0].kind).toBe('permission-error');
+    expect(tagFindings[0].message).toMatch(/UNVERIFIED/);
+    expect(tagFindings[0].message).not.toMatch(/MISSING/);
   });
 
   it('names the tag ruleset when it is missing, with a MISSING-worded message', async () => {
@@ -514,9 +551,239 @@ describe('runDriftCheck', () => {
     });
     const report = await runDriftCheck({ ...args, api });
     expect(report.ok).toBe(false);
-    expect(report.findings).toHaveLength(1);
-    expect(report.findings[0].setting).toBe('v*-covering tag ruleset');
-    expect(report.findings[0].kind).toBe('missing');
-    expect(report.findings[0].message).toMatch(/MISSING/);
+    const tagFindings = report.findings.filter((f) => f.setting === 'v*-covering tag ruleset');
+    expect(tagFindings).toHaveLength(1);
+    expect(tagFindings[0].setting).toBe('v*-covering tag ruleset');
+    expect(tagFindings[0].kind).toBe('missing');
+    expect(tagFindings[0].message).toMatch(/MISSING/);
+  });
+});
+
+// ── #2109: deployment-branch policy ─────────────────────────────────────────
+
+describe('evaluateBranchPolicy', () => {
+  const custom = { protected_branches: false, custom_branch_policies: true };
+
+  it('fails on a null policy (the LIVE state: any branch gets NPM_TOKEN)', () => {
+    const r = evaluateBranchPolicy(null, undefined);
+    expect(r.ok).toBe(false);
+    expect((r as { reason: string }).reason).toMatch(/null/);
+  });
+
+  it('fails on protected_branches-only (not an exact allowlist)', () => {
+    const r = evaluateBranchPolicy({ protected_branches: true, custom_branch_policies: false }, [
+      { name: 'main', type: 'branch' },
+    ]);
+    expect(r.ok).toBe(false);
+  });
+
+  it('fails when custom policies are on but none are listed', () => {
+    expect(evaluateBranchPolicy(custom, []).ok).toBe(false);
+  });
+
+  it('passes the exact lane allowlist, taken from publish-lane-guard', () => {
+    const names = ['main', 'integration/v1.3', 'integration/v1.4', 'integration/v2', 'release/1.x'];
+    const r = evaluateBranchPolicy(
+      custom,
+      names.map((name) => ({ name, type: 'branch' })),
+    );
+    expect(r).toEqual({ ok: true });
+  });
+
+  it('passes an exact release-cut name', () => {
+    expect(evaluateBranchPolicy(custom, [{ name: 'release/v1.3.0-rc.2', type: 'branch' }]).ok).toBe(
+      true,
+    );
+  });
+
+  it('fails when a policy admits integration/v1-coldstart by name', () => {
+    const r = evaluateBranchPolicy(custom, [
+      { name: 'main', type: 'branch' },
+      { name: 'integration/v1-coldstart', type: 'branch' },
+    ]);
+    expect(r.ok).toBe(false);
+    expect((r as { reason: string }).reason).toMatch(/integration\/v1-coldstart/);
+  });
+
+  it('fails on wildcard policies (integration/v*, release/*, *)', () => {
+    for (const name of ['integration/v*', 'release/*', '*']) {
+      expect(evaluateBranchPolicy(custom, [{ name, type: 'branch' }]).ok).toBe(false);
+    }
+  });
+
+  it('fails on a tag-type policy', () => {
+    expect(evaluateBranchPolicy(custom, [{ name: 'main', type: 'tag' }]).ok).toBe(false);
+  });
+});
+
+describe('fetchBranchPolicy + runDriftCheck wiring', () => {
+  const args = { owner: 'getknext-dev', repo: 'knext', environment: 'npm-publish' };
+  const ENV = 'repos/getknext-dev/knext/environments/npm-publish';
+
+  it('null policy -> kind missing, and runDriftCheck is NOT ok', async () => {
+    const { api } = fakeApi({ [ENV]: { status: 200, body: { deployment_branch_policy: null } } });
+    expect((await fetchBranchPolicy({ ...args, api })).kind).toBe('missing');
+    const report = await runDriftCheck({
+      ...args,
+      api: fakeApiAll({ [ENV]: { status: 200, body: { deployment_branch_policy: null } } }),
+    });
+    expect(report.ok).toBe(false);
+    expect(report.findings.some((f) => f.setting.includes('deployment-branch policy'))).toBe(true);
+  });
+
+  it('correct policy -> ok', async () => {
+    const { api } = fakeApi({
+      [ENV]: {
+        status: 200,
+        body: {
+          deployment_branch_policy: { protected_branches: false, custom_branch_policies: true },
+        },
+      },
+      ...GOOD_POLICY_ROUTES,
+    });
+    expect(await fetchBranchPolicy({ ...args, api })).toEqual({ kind: 'ok' });
+  });
+
+  it('403 reads as permission-error, never as missing', async () => {
+    const { api } = fakeApi({ [ENV]: { status: 403, body: {} } });
+    expect((await fetchBranchPolicy({ ...args, api })).kind).toBe('permission-error');
+  });
+
+  it('follows pages: an off-allowlist entry only on page 2 is still caught', async () => {
+    const filler = Array.from({ length: 100 }, () => ({ name: 'main', type: 'branch' }));
+    const { api } = fakeApi({
+      [ENV]: {
+        status: 200,
+        body: {
+          deployment_branch_policy: { protected_branches: false, custom_branch_policies: true },
+        },
+      },
+      [`${ENV}/deployment-branch-policies?per_page=100&page=1`]: {
+        status: 200,
+        body: { total_count: 101, branch_policies: filler },
+      },
+      [`${ENV}/deployment-branch-policies?per_page=100&page=2`]: {
+        status: 200,
+        body: { total_count: 101, branch_policies: [{ name: 'evil', type: 'branch' }] },
+      },
+    });
+    const res = await fetchBranchPolicy({ ...args, api });
+    expect(res.kind).toBe('missing');
+    expect(JSON.stringify(res)).toContain('branch:evil');
+  });
+
+  it('fails closed when total_count exceeds what the pages returned', async () => {
+    const { api } = fakeApi({
+      [ENV]: {
+        status: 200,
+        body: {
+          deployment_branch_policy: { protected_branches: false, custom_branch_policies: true },
+        },
+      },
+      [`${ENV}/deployment-branch-policies?per_page=100&page=1`]: {
+        status: 200,
+        body: { total_count: 5, branch_policies: [{ name: 'main', type: 'branch' }] },
+      },
+      [`${ENV}/deployment-branch-policies?per_page=100&page=2`]: {
+        status: 200,
+        body: { total_count: 5, branch_policies: [] },
+      },
+    });
+    const res = await fetchBranchPolicy({ ...args, api });
+    expect(res.kind).toBe('api-error');
+  });
+});
+
+function fakeApiAll(routes: Record<string, { status: number; body: unknown }>) {
+  const empty = { status: 200, body: [] };
+  return async (path: string) => routes[path] ?? empty;
+}
+
+// Exit-code proof through the real CLI against fixture JSON (no network).
+describe('check-npm-publish-drift CLI exit codes (--fixture)', () => {
+  const ENV = 'repos/getknext-dev/knext/environments/npm-publish';
+  const tagRoutes = {
+    'repos/getknext-dev/knext/rulesets': {
+      status: 200,
+      body: [{ id: 3, name: 'v-tags', target: 'tag', enforcement: 'active' }],
+    },
+    'repos/getknext-dev/knext/rulesets/3': {
+      status: 200,
+      body: { enforcement: 'active', conditions: { ref_name: { include: ['refs/tags/v*'] } } },
+    },
+  };
+  function run(routes: object) {
+    const dir = mkdtempSync(join(tmpdir(), 'drift-fixture-'));
+    try {
+      const file = join(dir, 'fixture.json');
+      writeFileSync(file, JSON.stringify(routes));
+      return spawnSync('node', ['scripts/check-npm-publish-drift.mjs', '--fixture', file], {
+        encoding: 'utf8',
+      }).status;
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('null deployment_branch_policy exits 1', () => {
+    expect(
+      run({
+        ...tagRoutes,
+        [ENV]: { status: 200, body: { protection_rules: [], deployment_branch_policy: null } },
+      }),
+    ).toBe(1);
+  });
+
+  it('policy admitting integration/v1-coldstart exits 1', () => {
+    expect(
+      run({
+        ...tagRoutes,
+        [ENV]: {
+          status: 200,
+          body: {
+            deployment_branch_policy: { protected_branches: false, custom_branch_policies: true },
+          },
+        },
+        [`${ENV}/deployment-branch-policies?per_page=100&page=1`]: {
+          status: 200,
+          body: { branch_policies: [{ name: 'integration/v1-coldstart', type: 'branch' }] },
+        },
+      }),
+    ).toBe(1);
+  });
+
+  it('correct exact-allowlist policy exits 0', () => {
+    expect(
+      run({
+        ...tagRoutes,
+        [ENV]: {
+          status: 200,
+          body: {
+            deployment_branch_policy: { protected_branches: false, custom_branch_policies: true },
+          },
+        },
+        [`${ENV}/deployment-branch-policies?per_page=100&page=1`]: {
+          status: 200,
+          body: {
+            branch_policies: [
+              { name: 'main', type: 'branch' },
+              { name: 'integration/v1.3', type: 'branch' },
+            ],
+          },
+        },
+      }),
+    ).toBe(0);
+  });
+});
+
+// The nightly must read the LIVE API: a `--fixture` there would verify canned
+// JSON forever and stay green regardless of real drift.
+describe('nightly workflow never passes --fixture', () => {
+  it('npm-publish-drift-nightly.yml has no --fixture', () => {
+    const wf = readFileSync(
+      join(import.meta.dir, '..', '.github', 'workflows', 'npm-publish-drift-nightly.yml'),
+      'utf8',
+    );
+    expect(wf).not.toContain('--fixture');
   });
 });

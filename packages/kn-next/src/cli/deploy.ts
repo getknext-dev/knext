@@ -54,6 +54,8 @@ import {
     validateCRImageRef,
 } from "./cr-builder";
 import {
+    heldChangeMessage,
+    invalidSpecMessage,
     noReconcileMessage,
     RECONCILE_WAIT_MS_DEFAULT,
     waitForOperatorReconcile,
@@ -1273,6 +1275,16 @@ export async function deploy() {
             ),
         ),
     );
+    if (reconcileWait.held) {
+        const h = reconcileWait.held;
+        // A held change is the user's to fix (config or platform budget), so it
+        // renders as a message, not a FATAL stack dump.
+        throw new UsageError(
+            h.kind === "spec"
+                ? invalidSpecMessage(h.message)
+                : heldChangeMessage(h.message),
+        );
+    }
     if (reconcileWait.reconciled) {
         log.info(
             { url: reconcileWait.url },

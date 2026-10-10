@@ -32,6 +32,9 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Route Docker Hub pulls through mirror.gcr.io (anonymous rate limit)
+        id: docker-hub-mirror
+        uses: ./.github/actions/docker-hub-mirror
       # Project Node version (24 — matches ci.yml / release.yml). v1 is single-OS,
       # single-Node on purpose to keep it cheap; a Node matrix is later hardening.
       - name: Setup Node.js

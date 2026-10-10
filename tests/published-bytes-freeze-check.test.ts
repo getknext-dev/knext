@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'bun:test';
 import {
   decidePublishedBytesScope,
-  isUnfrozenLineBaseRef,
   OVERRIDE_MARKER_FIELD,
   overrideMarkerIntroducedByPr,
   overrideMarkerValidity,
+  PIN_FILE,
+  PIN_FILE_V13,
   ROOT_BUILD_INPUT_FILES,
+  releaseLine,
+  selectPinFile,
   touchesPublishableScope,
 } from '../scripts/lib/published-bytes-freeze-check.mjs';
 
@@ -356,8 +359,8 @@ describe('decidePublishedBytesScope', () => {
   });
 });
 
-describe('base-ref scope (#2004): the pin guards ONE line; PRs into another release line are not measured against it', () => {
-  const pinned = { rcTag: 'v1.0.0-rc.5' };
+describe('release-line scope (#2098): the pin guards the line whose bytes are credentialed, not whatever main carries', () => {
+  const pinned = { rcTag: 'v1.0.0-rc.6' };
   const args = {
     basePin: pinned,
     headPin: pinned,
@@ -366,28 +369,99 @@ describe('base-ref scope (#2004): the pin guards ONE line; PRs into another rele
     now: NOW,
   };
 
-  it('isUnfrozenLineBaseRef: integration/* (bare or refs/heads/-qualified) is another line; main and stacked feature branches are not', () => {
-    expect(isUnfrozenLineBaseRef('integration/v1.3')).toBe(true);
-    expect(isUnfrozenLineBaseRef('refs/heads/integration/v1.3')).toBe(true);
-    expect(isUnfrozenLineBaseRef('main')).toBe(false);
-    expect(isUnfrozenLineBaseRef('refs/heads/main')).toBe(false);
-    expect(isUnfrozenLineBaseRef('feat/stacked-on-main')).toBe(false);
-    expect(isUnfrozenLineBaseRef('not-integration/x')).toBe(false);
-    expect(isUnfrozenLineBaseRef(undefined)).toBe(false);
-    expect(isUnfrozenLineBaseRef('')).toBe(false);
+  it('releaseLine: major.minor of a version or an rc tag; null when unparseable', () => {
+    expect(releaseLine('1.3.0')).toBe('1.3');
+    expect(releaseLine('v1.3.0-rc.10')).toBe('1.3');
+    expect(releaseLine('1.0.0-rc.6')).toBe('1.0');
+    expect(releaseLine('v2.10.4')).toBe('2.10');
+    expect(releaseLine('not-a-version')).toBeNull();
+    expect(releaseLine('')).toBeNull();
+    expect(releaseLine(undefined)).toBeNull();
   });
 
-  it('SKIPS with a visible reason for a published-bytes change whose base is integration/v1.3', () => {
-    const d = decidePublishedBytesScope({ ...args, baseRef: 'integration/v1.3' });
+  it('(a) SKIPS with a visible reason when the base carries a different line than the pinned tag (main on 1.3, pin v1.0.0-rc.6)', () => {
+    const d = decidePublishedBytesScope({ ...args, baseVersion: '1.3.0' });
     expect(d.action).toBe('skip');
-    expect(d.reason).toMatch(/base integration\/v1\.3 is not the frozen line/);
+    expect(d.reason).toMatch(/line 1\.3/);
+    expect(d.reason).toMatch(/line 1\.0/);
+    expect(d.reason).toMatch(/not the line whose bytes are credentialed/);
   });
 
-  it('still PROCEEDS for the same change on a main base (the v1.0 protection is intact)', () => {
-    expect(decidePublishedBytesScope({ ...args, baseRef: 'main' }).action).toBe('proceed');
+  it('(b) still PROCEEDS when the base carries the SAME line as the pinned tag', () => {
+    const d = decidePublishedBytesScope({ ...args, baseVersion: '1.0.4' });
+    expect(d.action).toBe('proceed');
   });
 
-  it('still PROCEEDS when no baseRef is supplied (fail closed: unknown base is guarded)', () => {
+  it('(b) still PROCEEDS on the 1.3 line against a v1.3 rc pin', () => {
+    const v13 = { rcTag: 'v1.3.0-rc.10', line: 'v1.3' };
+    const d = decidePublishedBytesScope({
+      ...args,
+      basePin: v13,
+      headPin: v13,
+      baseVersion: '1.3.0',
+    });
+    expect(d.action).toBe('proceed');
+  });
+
+  it('the line skip comes before the scope check: a docs-only PR on a mismatched line reports the line reason', () => {
+    const d = decidePublishedBytesScope({
+      ...args,
+      baseVersion: '1.3.0',
+      changedFiles: ['docs/x.md'],
+    });
+    expect(d.action).toBe('skip');
+    expect(d.reason).toMatch(/not the line whose bytes are credentialed/);
+  });
+
+  it('still PROCEEDS when no baseVersion is supplied (fail closed: an unknown line is guarded)', () => {
     expect(decidePublishedBytesScope(args).action).toBe('proceed');
+  });
+
+  it('still PROCEEDS when the base version is unparseable (fail closed)', () => {
+    expect(decidePublishedBytesScope({ ...args, baseVersion: 'garbage' }).action).toBe('proceed');
+  });
+});
+
+describe('selectPinFile (#2098): pick the pin whose line this base is credentialing', () => {
+  const v10 = { file: PIN_FILE, pin: { rcTag: 'v1.0.0-rc.6' } };
+  const v13 = { file: PIN_FILE_V13, pin: { rcTag: 'v1.3.0-rc.10', line: 'v1.3' } };
+  const candidates = [v10, v13];
+
+  it('main on 1.3 does NOT select the v1.3 pin (credential runs pack from the rc tag cut on integration/v1.3, not main) — falls back to the primary pin', () => {
+    expect(selectPinFile({ baseVersion: '1.3.0', baseRef: 'main', candidates })).toBe(PIN_FILE);
+  });
+
+  it('integration/v1.3 on 1.3 selects the v1.3 pin (bare and refs/heads/-qualified)', () => {
+    expect(selectPinFile({ baseVersion: '1.3.0', baseRef: 'integration/v1.3', candidates })).toBe(
+      PIN_FILE_V13,
+    );
+    expect(
+      selectPinFile({ baseVersion: '1.3.0', baseRef: 'refs/heads/integration/v1.3', candidates }),
+    ).toBe(PIN_FILE_V13);
+  });
+
+  it('a base on the v1.0 line selects the primary pin regardless of its ref', () => {
+    expect(selectPinFile({ baseVersion: '1.0.4', baseRef: 'main', candidates })).toBe(PIN_FILE);
+    expect(selectPinFile({ baseVersion: '1.0.4', baseRef: 'release/1.x', candidates })).toBe(
+      PIN_FILE,
+    );
+  });
+
+  it('a v1.3 pin with a null rcTag (window closed) is never selected', () => {
+    const closed = { file: PIN_FILE_V13, pin: { rcTag: null, line: 'v1.3' } };
+    expect(
+      selectPinFile({
+        baseVersion: '1.3.0',
+        baseRef: 'integration/v1.3',
+        candidates: [v10, closed],
+      }),
+    ).toBe(PIN_FILE);
+  });
+
+  it('an unknown base ref or an unparseable version falls back to the primary pin (fail closed: guarded as before)', () => {
+    expect(selectPinFile({ baseVersion: 'garbage', baseRef: 'integration/v1.3', candidates })).toBe(
+      PIN_FILE,
+    );
+    expect(selectPinFile({ baseVersion: '1.3.0', baseRef: undefined, candidates })).toBe(PIN_FILE);
   });
 });
