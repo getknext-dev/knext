@@ -21,11 +21,7 @@ const SPECS = ['tests/publish-lane-guard.test.ts', 'tests/ensure-published-group
 
 /** @type {Array<[string, string, string]>} name, anchor, replacement */
 const MUTANTS = [
-  [
-    'drop the non-v2 pre.json rejection',
-    'if (pre !== undefined) {',
-    'if (false) {',
-  ],
+  ['drop the non-v2 pre.json rejection', 'if (pre !== undefined) {', 'if (false) {'],
   [
     'non-v2 rejection only for main',
     'if (pre !== undefined) {',
