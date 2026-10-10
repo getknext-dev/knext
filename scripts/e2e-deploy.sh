@@ -300,14 +300,35 @@ fi
 # flag and die at build ("To use 'use cache: remote', please enable the
 # feature flag"). Exported (not build-local) so the runtime server sees the
 # same feature surface the build was stamped with.
-if [ -n "${__NEXT_CACHE_COMPONENTS:-}" ]; then
-  export NEXT_PRIVATE_EXPERIMENTAL_CACHE_COMPONENTS="${__NEXT_CACHE_COMPONENTS}"
-fi
-if [ -n "${__NEXT_EXPERIMENTAL_CACHED_NAVIGATIONS:-}" ]; then
-  export NEXT_PRIVATE_EXPERIMENTAL_CACHED_NAVIGATIONS="${__NEXT_EXPERIMENTAL_CACHED_NAVIGATIONS}"
-fi
-if [ -n "${__NEXT_EXPERIMENTAL_APP_NEW_SCROLL_HANDLER:-}" ]; then
-  export NEXT_PRIVATE_EXPERIMENTAL_APP_NEW_SCROLL_HANDLER="${__NEXT_EXPERIMENTAL_APP_NEW_SCROLL_HANDLER}"
+#
+# #2085 — Next >= 16.4.0 BAKES these flags into the generated next.config at
+# harness time (getDeploymentTestEnvAssignments, vercel/next.js#99446) and the
+# NEXT_PRIVATE_EXPERIMENTAL_* alias is gone, so the mapping below is dead there.
+# Skip it only on a readable STABLE version >= 16.4.0. Anything else (<= 16.3.x,
+# an unreadable version, a 16.4.0 prerelease that may pre-date the change) keeps
+# the legacy mapping: exporting a dead alias is harmless, dropping a live one is not.
+NEXT_FLAGS_BAKED="$(node -e '
+  try {
+    const { join } = require("node:path");
+    const v = require(join(process.argv[1], "node_modules", "next", "package.json")).version;
+    const m = /^v?(\d+)\.(\d+)\.(\d+)(-[0-9A-Za-z.-]+)?$/.exec(v);
+    if (!m || m[4] !== undefined) process.exit(0);
+    const [a, b] = [Number(m[1]), Number(m[2])];
+    process.stdout.write(a > 16 || (a === 16 && b >= 4) ? "baked" : "");
+  } catch {}
+' "${APP_DIR}" 2>/dev/null || true)"
+if [ "${NEXT_FLAGS_BAKED}" = "baked" ]; then
+  log "Next >= 16.4.0: experimental flags are baked into the harness-generated next.config — not mapping __NEXT_* to NEXT_PRIVATE_EXPERIMENTAL_*"
+else
+  if [ -n "${__NEXT_CACHE_COMPONENTS:-}" ]; then
+    export NEXT_PRIVATE_EXPERIMENTAL_CACHE_COMPONENTS="${__NEXT_CACHE_COMPONENTS}"
+  fi
+  if [ -n "${__NEXT_EXPERIMENTAL_CACHED_NAVIGATIONS:-}" ]; then
+    export NEXT_PRIVATE_EXPERIMENTAL_CACHED_NAVIGATIONS="${__NEXT_EXPERIMENTAL_CACHED_NAVIGATIONS}"
+  fi
+  if [ -n "${__NEXT_EXPERIMENTAL_APP_NEW_SCROLL_HANDLER:-}" ]; then
+    export NEXT_PRIVATE_EXPERIMENTAL_APP_NEW_SCROLL_HANDLER="${__NEXT_EXPERIMENTAL_APP_NEW_SCROLL_HANDLER}"
+  fi
 fi
 
 # ── 2. build the fixture app through the knext adapter ────────────────────────

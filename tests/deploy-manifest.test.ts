@@ -199,11 +199,22 @@ describe('test/deploy-tests-manifest.knext.json — harness-compatible v2 select
     expect(included && !excluded, `${file} must be selected by the manifest`).toBe(true);
   });
 
+  it('#2085: the dead test/e2e/cache-components exclusion is gone and app-dir/cache-components stays in scope', () => {
+    // `test/e2e/cache-components/**/*` matched no directory at v16.3.8 or v16.4.0; the
+    // real suite lives under app-dir/ and already runs. Decided explicitly: it stays in scope.
+    expect(manifest.rules.exclude).not.toContain('test/e2e/cache-components/**/*');
+    expect(manifest.$knextExclusions.map((e) => e.test)).not.toContain(
+      'test/e2e/cache-components/**/*',
+    );
+    const real = 'test/e2e/app-dir/cache-components/cache-components.test.ts';
+    expect(manifest.rules.include.some((p) => globMatch(real, p))).toBe(true);
+    expect(manifest.rules.exclude.some((p) => globMatch(real, p))).toBe(false);
+  });
+
   it('knext architectural exclusions ARE filtered out by the live rules', () => {
     // The 4 architectural categories must be dropped by rules.exclude.
     const archSamples = [
       'test/e2e/middleware-general/index.test.ts',
-      'test/e2e/cache-components/cache-components.test.ts',
       'test/e2e/app-dir/ppr-full/ppr-full.test.ts',
       'test/e2e/app-dir/edge-runtime-module-errors/index.test.ts',
     ];
