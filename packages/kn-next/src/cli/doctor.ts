@@ -55,6 +55,7 @@ import { operatorCheck } from "./doctor/checks/operator";
 import { operatorImageCheck } from "./doctor/checks/operator-image";
 import { operatorVersionCheck } from "./doctor/checks/operator-version";
 import { storageModeCheck } from "./doctor/checks/storage-mode";
+import { cacheComponentsCheck } from "./doctor/checks/use-cache";
 import { kubectlRunner, probeManifest } from "./doctor/kubectl";
 import { formatDoctorTable } from "./doctor/report";
 import type {
@@ -128,6 +129,7 @@ export async function runDoctor(
     checks.push(...kubectlValidationCheck(ctx));
     checks.push(...(await storageModeCheck(ctx)));
     checks.push(...(await nodeEntryStalenessCheck(ctx)));
+    checks.push(...cacheComponentsCheck(ctx)); // local; no row unless cacheComponents (#2083)
     checks.push(...crdCheck(ctx));
     checks.push(...crdSchemaCheck(ctx));
     checks.push(...operatorCheck(ctx)); // sets ctx.operatorImage + ctx.operatorManager
