@@ -7,7 +7,8 @@
  * Two modes, one verdict (EXIT CODE: 0 contained, 1 NOT contained or unverifiable):
  *   --head <sha> --merge <sha> [--paths a,b] [--repo dir]   git-only core
  *   --pr <N> --merge <sha> [--gh-repo owner/name]           resolves the PR's
- *        final head + changed files through `gh`, fetches refs/pull/N/head.
+ *        branch tip (git ls-remote origin, NOT the API head, which can be stale)
+ *        + changed files (git diff base...tip) and fetches them.
  *
  * Containment is (1) head is an ancestor of the merge commit (merge / rebase
  * merges), else (2) for squash merges, where ancestry can never hold, every
@@ -71,10 +72,40 @@ function main() {
   let paths = a.paths ? a.paths.split(',').filter(Boolean) : [];
   if (a.pr) {
     const ghRepo = a['gh-repo'] ?? process.env.GITHUB_REPOSITORY;
-    const view = ghJson(['pr', 'view', a.pr, '--repo', ghRepo, '--json', 'headRefOid,files']);
-    head = view.headRefOid;
-    paths = view.files.map((f) => f.path);
-    git(repo, ['fetch', '-q', 'origin', `refs/pull/${a.pr}/head`]);
+    const view = ghJson([
+      'pr',
+      'view',
+      a.pr,
+      '--repo',
+      ghRepo,
+      '--json',
+      'headRefOid,headRefName,baseRefName',
+    ]);
+    // The API head (headRefOid, refs/pull/N/head) can be STALE: in the stale-head
+    // merge incident both read the pre-fix SHA while the branch tip held the fix.
+    // The authority is the remote branch tip at check time; the repo keeps merged
+    // branches (delete_branch_on_merge=false). Only if it is gone do we fall back.
+    const lr = git(repo, ['ls-remote', 'origin', `refs/heads/${view.headRefName}`]);
+    const tip = lr.ok ? lr.out.split(/\s+/)[0] : '';
+    if (tip) {
+      head = tip;
+      git(repo, ['fetch', '-q', 'origin', `refs/heads/${view.headRefName}`]);
+    } else {
+      console.error(
+        `WARNING: branch ${view.headRefName} is gone from origin; falling back to the PR head ${view.headRefOid}, which may be stale`,
+      );
+      head = view.headRefOid;
+      git(repo, ['fetch', '-q', 'origin', `refs/pull/${a.pr}/head`]);
+    }
+    git(repo, [
+      'fetch',
+      '-q',
+      'origin',
+      `+refs/heads/${view.baseRefName}:refs/remotes/origin/${view.baseRefName}`,
+    ]);
+    // git diff, not gh `files` (capped at 100 entries)
+    const d = git(repo, ['diff', '--name-only', `origin/${view.baseRefName}...${head}`]);
+    paths = d.ok ? d.out.split('\n').filter(Boolean) : [];
   }
   if (!head || !a.merge) {
     console.error('usage: merged-sha-check (--head <sha> | --pr <N>) --merge <sha> [--paths a,b]');

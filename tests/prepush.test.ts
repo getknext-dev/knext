@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'bun:test';
+import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
@@ -28,5 +29,28 @@ describe('prepush', () => {
     expect(ci).toContain('run: bun run lint');
     expect(ci).toContain('run: bun run typecheck');
     expect(pkg.scripts.lint).toBe('biome check .');
+  });
+
+  it('behaviour: a failing gate does not short-circuit, and the exit code is 1', () => {
+    const steps = [
+      ['first (fails)', 'node', ['-e', 'process.exit(3)']],
+      ['second (must still run)', 'node', ['-e', 'console.log("RAN-SECOND")']],
+    ];
+    const r = spawnSync('node', [resolve(root, 'scripts/prepush.mjs')], {
+      encoding: 'utf8',
+      env: { ...process.env, PREPUSH_STEPS_JSON: JSON.stringify(steps) },
+    });
+    expect(r.status).toBe(1);
+    expect(r.stdout).toContain('RAN-SECOND');
+    expect(r.stderr).toContain('first (fails)');
+  });
+
+  it('behaviour: all gates passing exits 0', () => {
+    const steps = [['ok', 'node', ['-e', '0']]];
+    const r = spawnSync('node', [resolve(root, 'scripts/prepush.mjs')], {
+      encoding: 'utf8',
+      env: { ...process.env, PREPUSH_STEPS_JSON: JSON.stringify(steps) },
+    });
+    expect(r.status).toBe(0);
   });
 });

@@ -11,7 +11,7 @@
  */
 import { spawnSync } from 'node:child_process';
 
-const STEPS = [
+const DEFAULT_STEPS = [
   ['biome check (error level)', 'bunx', ['biome', 'check', '.', '--diagnostic-level=error']],
   [
     'D9 temp-dir leak guard',
@@ -20,6 +20,12 @@ const STEPS = [
   ],
   ['typecheck', 'bun', ['run', 'typecheck']],
 ];
+
+// Test seam: PREPUSH_STEPS_JSON=[[name, cmd, [args]], ...] replaces the gate list so
+// tests/prepush.test.ts can prove the no-short-circuit + exit-code behaviour.
+const STEPS = process.env.PREPUSH_STEPS_JSON
+  ? JSON.parse(process.env.PREPUSH_STEPS_JSON)
+  : DEFAULT_STEPS;
 
 const failed = [];
 for (const [name, cmd, args] of STEPS) {

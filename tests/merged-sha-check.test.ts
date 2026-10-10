@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -98,5 +98,45 @@ describe('merged-sha-check', () => {
     withRepo((dir) => {
       expect(run(dir, '--head', 'f'.repeat(40), '--merge', 'e'.repeat(40)).status).toBe(1);
       expect(run(dir).status).toBe(1);
+    }));
+
+  it('--pr: the API head is STALE (older than the branch tip) => exit 1', () =>
+    withRepo((dir) => {
+      // origin = bare repo; the work repo publishes the base and the PR branch to it
+      const origin = mkdtempSync(join(tmpdir(), 'knext-merged-sha-origin-'));
+      const bin = mkdtempSync(join(tmpdir(), 'knext-merged-sha-bin-'));
+      try {
+        git(origin, 'init', '-q', '--bare', '-b', 'main');
+        git(dir, 'remote', 'add', 'origin', origin);
+        git(dir, 'switch', '-q', '-c', 'pr');
+        writeFileSync(join(dir, 'a.txt'), '2\n');
+        git(dir, 'commit', '-q', '-am', 'first');
+        const staleHead = git(dir, 'rev-parse', 'HEAD');
+        git(dir, 'switch', '-q', 'main');
+        git(dir, 'merge', '-q', '--no-ff', '-m', 'merge', 'pr');
+        const merge = git(dir, 'rev-parse', 'HEAD');
+        // the fix lands on the branch after the merge SHA was locked
+        git(dir, 'switch', '-q', 'pr');
+        writeFileSync(join(dir, 'a.txt'), '3\n');
+        git(dir, 'commit', '-q', '-am', 'fix');
+        git(dir, 'push', '-q', 'origin', 'refs/heads/main', 'refs/heads/pr');
+        // gh still reports the stale head, exactly as the API did in the incident
+        const view = JSON.stringify({
+          headRefOid: staleHead,
+          headRefName: 'pr',
+          baseRefName: 'main',
+        });
+        writeFileSync(join(bin, 'gh'), `#!/bin/sh\necho '${view}'\n`);
+        chmodSync(join(bin, 'gh'), 0o755);
+        const r = spawnSync(
+          'node',
+          [script, '--repo', dir, '--pr', '1', '--merge', merge, '--gh-repo', 'o/r'],
+          { encoding: 'utf8', env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } },
+        );
+        expect(r.status).toBe(1);
+      } finally {
+        rmSync(origin, { recursive: true, force: true });
+        rmSync(bin, { recursive: true, force: true });
+      }
     }));
 });
