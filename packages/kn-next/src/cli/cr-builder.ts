@@ -61,12 +61,23 @@ export function buildNextAppCRObject(
     preview?: PreviewInput,
     writeFreeFacts?: WriteFreeFacts,
 ): Record<string, unknown> {
-    // Scaling — preserve minScale:0 (scale-to-zero invariant)
-    const minScale = config.scaling?.minScale ?? 0;
-    const maxScale = config.scaling?.maxScale ?? 10;
-    const scaling = {
-        minScale,
-        maxScale,
+    // Scaling. `spec.scaling.minScale` / `maxScale` are emitted ONLY when the
+    // user set them (the platform layer: a value the CLI always writes is a value
+    // the cluster's KnextPlatform can never default, because the app "set" it).
+    //
+    // Two constraints keep the app's EFFECTIVE scaling unchanged:
+    //  - scale-to-zero: `minScale` 0 is the wire's unset (the CRD field is
+    //    omitempty), so leaving it out IS minScale 0. The invariant holds.
+    //  - the operator reads a PRESENT `spec.scaling` block's `maxScale`
+    //    literally, and `maxScale: 0` is Knative's "unbounded". A non-empty block
+    //    without a `maxScale` would therefore silently remove the app's cap. So
+    //    whenever a block is emitted at all it carries a `maxScale` (the user's,
+    //    else the CLI default 10), and when NOTHING scaling-related is set the
+    //    block is omitted entirely and the operator's own 10 applies.
+    // The upgrade window is safe both ways: an older operator reads the same
+    // wire values the same way.
+    const userMinScale = config.scaling?.minScale;
+    const scalingKnobs = {
         // #415 — the 6 ScalingSpec knobs the CRD already supports
         // (ADR-0028/0029/0030/0032/0033). Mapped ONLY when set on the
         // config so unset ⇒ omitted from the CR ⇒ the operator's own
@@ -119,6 +130,17 @@ export function buildNextAppCRObject(
         // <app>-imgcache DaemonSet); byte-identical back-compat when unused.
         ...(config.scaling?.imagePrewarm ? { imagePrewarm: true } : {}),
     };
+    const needsScalingBlock =
+        (userMinScale !== undefined && userMinScale !== 0) ||
+        config.scaling?.maxScale !== undefined ||
+        Object.keys(scalingKnobs).length > 0;
+    const scaling = needsScalingBlock
+        ? {
+              ...(userMinScale ? { minScale: userMinScale } : {}),
+              maxScale: config.scaling?.maxScale ?? 10,
+              ...scalingKnobs,
+          }
+        : undefined;
 
     // Resources — from config.scaling (legacy field names match ResourcesSpec)
     const resources =
@@ -443,7 +465,7 @@ export function buildNextAppCRObject(
                   })),
               }
             : {}),
-        scaling,
+        ...(scaling ? { scaling } : {}),
         ...(resources ? { resources } : {}),
         ...(storage ? { storage } : {}),
         ...(cache ? { cache } : {}),

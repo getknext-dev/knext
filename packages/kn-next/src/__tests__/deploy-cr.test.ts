@@ -82,12 +82,14 @@ describe("renderNextAppCR", () => {
         expect(cr.spec.buildId).toBeUndefined();
     });
 
-    it("CR preserves scale-to-zero (minScale: 0)", () => {
+    it("CR preserves scale-to-zero (minScale absent or 0)", () => {
         const yaml = renderNextAppCR(baseConfig, "img@sha256:abc", "default");
         const cr = YAML.parse(yaml) as {
-            spec: { scaling: { minScale: number } };
+            spec: { scaling?: { minScale?: number } };
         };
-        expect(cr.spec.scaling.minScale).toBe(0);
+        // minScale 0 is the wire's unset: the CLI does not write it, and absent
+        // means exactly 0 (scale-to-zero).
+        expect(cr.spec.scaling?.minScale ?? 0).toBe(0);
     });
 
     // The CR must carry NO code-cache fields. The V8 compile cache is baked into
@@ -236,9 +238,9 @@ describe("resolveDigest", () => {
         expect(cr.spec.image).toContain("@sha256:");
         // Invariants: minScale preserved
         const crScaling = YAML.parse(crYaml) as {
-            spec: { scaling: { minScale: number } };
+            spec: { scaling?: { minScale?: number } };
         };
-        expect(crScaling.spec.scaling.minScale).toBe(0);
+        expect(crScaling.spec.scaling?.minScale ?? 0).toBe(0);
         // Invariant: no code-cache fields leak into the CR (ADR-0035)
         const crCache = YAML.parse(crYaml) as {
             spec: { cache?: Record<string, unknown> };

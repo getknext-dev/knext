@@ -36,22 +36,39 @@ function scalingOf(config: KnativeNextConfig) {
     >;
 }
 
+/**
+ * The scaling block, or {} when the CLI emitted none. The CLI omits
+ * `spec.scaling` entirely when nothing scaling-related is configured (the
+ * operator's own min 0 / max 10 then apply), so "this knob is absent" must hold
+ * for a CR with no block at all as well as for one without the key.
+ */
+function scalingOrEmpty(config: KnativeNextConfig): Record<string, unknown> {
+    const cr = buildNextAppCRObject(config, IMG, "ns");
+    return ((cr.spec as Record<string, unknown>).scaling ?? {}) as Record<
+        string,
+        unknown
+    >;
+}
+
 describe("buildNextAppCRObject — scaling knobs (#415)", () => {
     it("omits all 6 new knobs when unset (back-compat, byte-identical shape)", () => {
         const scaling = scalingOf(baseConfig({ minScale: 0, maxScale: 10 }));
-        expect(scaling).toEqual({ minScale: 0, maxScale: 10 });
+        // minScale 0 is the wire's unset, so it is no longer written; maxScale
+        // stays because a present block's maxScale is read literally.
+        expect(scaling).toEqual({ maxScale: 10 });
         expect(scaling.containerConcurrency).toBeUndefined();
         expect(scaling.poolMax).toBeUndefined();
         expect(scaling.warmSchedule).toBeUndefined();
         expect(scaling.targetBurstCapacity).toBeUndefined();
         expect(scaling.panicWindowPercentage).toBeUndefined();
         expect(scaling.panicThresholdPercentage).toBeUndefined();
-        expect(Object.keys(scaling).sort()).toEqual(["maxScale", "minScale"]);
+        expect(Object.keys(scaling).sort()).toEqual(["maxScale"]);
     });
 
-    it("omits all 6 new knobs when scaling is entirely absent from config", () => {
-        const scaling = scalingOf(baseConfig(undefined));
-        expect(Object.keys(scaling).sort()).toEqual(["maxScale", "minScale"]);
+    it("omits all 6 new knobs (and the whole block) when scaling is entirely absent from config", () => {
+        const cr = buildNextAppCRObject(baseConfig(undefined), IMG, "ns");
+        expect("scaling" in (cr.spec as Record<string, unknown>)).toBe(false);
+        expect(Object.keys(scalingOrEmpty(baseConfig(undefined)))).toEqual([]);
     });
 
     it("maps containerConcurrency into spec.scaling when set (ADR-0028)", () => {
@@ -132,7 +149,7 @@ describe("buildNextAppCRObject — scaling knobs (#415)", () => {
             scalingOf(baseConfig({ minScale: 0, maxScale: 10 })).imagePrewarm,
         ).toBeUndefined();
         expect(
-            scalingOf(baseConfig({ imagePrewarm: false })).imagePrewarm,
+            scalingOrEmpty(baseConfig({ imagePrewarm: false })).imagePrewarm,
         ).toBeUndefined();
     });
 
@@ -199,11 +216,11 @@ describe("buildNextAppCRObject — scaleDownDelay (ADR-0045)", () => {
         // "" is the unset spelling on both sides (validate skips it, the CRD
         // field is omitempty) — it must not surface as an empty-string key.
         expect(
-            Object.keys(scalingOf(baseConfig({ scaleDownDelay: "" }))),
+            Object.keys(scalingOrEmpty(baseConfig({ scaleDownDelay: "" }))),
         ).not.toContain("scaleDownDelay");
-        expect(Object.keys(scalingOf(baseConfig(undefined)))).not.toContain(
-            "scaleDownDelay",
-        );
+        expect(
+            Object.keys(scalingOrEmpty(baseConfig(undefined))),
+        ).not.toContain("scaleDownDelay");
     });
 
     it("does not normalise or re-derive the duration (the operator webhook is the authority)", () => {
