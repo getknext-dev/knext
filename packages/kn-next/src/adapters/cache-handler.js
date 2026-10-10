@@ -1100,7 +1100,7 @@ let currentBuildId;
 // (`route-module.js` `getIncrementalCache`), so the file is read once per
 // `serverDistDir`, not once per request.
 const buildIdByDistDir = new Map();
-function resolveBuildId(options) {
+function fileBuildId(options) {
   const serverDistDir = options?.serverDistDir;
   if (typeof serverDistDir !== 'string' || serverDistDir.length === 0) return undefined;
   if (buildIdByDistDir.has(serverDistDir)) return buildIdByDistDir.get(serverDistDir);
@@ -1115,6 +1115,21 @@ function resolveBuildId(options) {
   return id;
 }
 
+// Fallback identity when `.next/BUILD_ID` gives none (vinext, Next's constant
+// id, unreadable file): the id knext injects per build, then the deployment id
+// (#1417). Read per call -- never cached with the file result.
+function envBuildId() {
+  for (const name of ['KNEXT_BUILD_ID', 'NEXT_DEPLOYMENT_ID']) {
+    const v = process.env[name]?.trim();
+    if (v && v !== NEXT_CONSTANT_BUILD_ID) return v;
+  }
+  return undefined;
+}
+
+function resolveBuildId(options) {
+  return fileBuildId(options) ?? envBuildId();
+}
+
 /** Next's `toRoute` (`dist/server/lib/to-route.js`): `/a/index` → `/a`, `/index` → `/`. */
 function nextRoute(key) {
   // Next >= 16.3.7 scopes every non-FETCH entry to its source route and keys
@@ -1123,6 +1138,26 @@ function nextRoute(key) {
   // so the handler's key is already the Map key and must be used verbatim.
   if (key.startsWith('/route-cache/')) return key;
   return key.replace(/(?:\/index)?\/?$/, '') || '/';
+}
+
+/**
+ * PPR resume state is BUILD-SCOPED (#2084). An APP_PAGE carrying `postponed`
+ * state is resumed by Next against the CURRENT build's code; resuming the state
+ * a previous build wrote (keys outlive a redeploy) against a changed shell makes
+ * React log "Expected the resume to render ..." and fall back to client
+ * rendering on every request. So such an entry is only usable by the build that
+ * wrote it: a different build id, or none recorded (written before build ids
+ * were), reads as a MISS and the route re-renders. Plain ISR HTML has no
+ * postponed state — it is only stale, never resumed — and stays shared.
+ * The id is `.next/BUILD_ID`, else `KNEXT_BUILD_ID`, else `NEXT_DEPLOYMENT_ID`.
+ * Only with none of the three is there nothing to compare against, and it
+ * fails open (the entry is served).
+ */
+function isForeignPostponedEntry(entry) {
+  if (currentBuildId === undefined) return false;
+  const value = entry?.value;
+  if (value?.kind !== 'APP_PAGE' || !value.postponed) return false;
+  return entry.buildId !== currentBuildId;
 }
 
 function seedNextCacheControl(key, entry, ctx) {
@@ -1174,6 +1209,13 @@ class CacheHandler {
             return null;
           }
           const parsed = withCacheState(deserializeCacheValue(JSON.parse(data)));
+          if (isForeignPostponedEntry(parsed)) {
+            logCacheEvent('MISS', source, key, {
+              durationMs: Date.now() - startTime,
+              details: 'postponed state from another build',
+            });
+            return null;
+          }
           seedNextCacheControl(key, parsed, ctx);
           logCacheEvent(parsed?.cacheState === 'stale' ? 'STALE' : 'HIT', source, key, {
             durationMs: Date.now() - startTime,
@@ -1186,6 +1228,13 @@ class CacheHandler {
       if (!entry) {
         logCacheEvent('MISS', source, key, {
           durationMs: Date.now() - startTime,
+        });
+        return null;
+      }
+      if (isForeignPostponedEntry(entry)) {
+        logCacheEvent('MISS', source, key, {
+          durationMs: Date.now() - startTime,
+          details: 'postponed state from another build',
         });
         return null;
       }
