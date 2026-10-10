@@ -425,6 +425,15 @@ describe("redirects built from request.url carry the public origin (real standal
                     "https://app.example.com/article/one?from=go",
                 );
 
+                // A redirect to another site is not the bind origin: untouched.
+                const away = await get(s.port, "/away", {
+                    Host: "www.example.com",
+                });
+                expect(away.status).toBe(307);
+                expect(away.headers.location).toBe(
+                    "https://other.example.org/landing?x=1",
+                );
+
                 // The effective allowlist is announced once at boot.
                 expect(s.log()).toContain(`PUBLIC_ORIGINS:${ORIGINS}`);
             } finally {
