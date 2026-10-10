@@ -64,6 +64,32 @@ function specPasses() {
 
 const MUTATIONS = [
   {
+    // #2109 -- the null policy must read as drift.
+    label: 'evaluateBranchPolicy: a null deployment_branch_policy no longer fails',
+    subject: 'lib',
+    anchor: '  if (deploymentBranchPolicy === null || deploymentBranchPolicy === undefined) {',
+    replacement: '  if (false) {',
+  },
+  {
+    label: 'evaluateBranchPolicy: the allowlist check is disarmed (any named branch passes)',
+    subject: 'lib',
+    anchor:
+      "    .filter((p) => !(p && p.type === 'branch' && resolveLane(`refs/heads/${p.name}`).ok))",
+    replacement: '    .filter(() => false)',
+  },
+  {
+    label: 'evaluateBranchPolicy: protected_branches-only is accepted as an allowlist',
+    subject: 'lib',
+    anchor: '    !deploymentBranchPolicy.custom_branch_policies',
+    replacement: '    false',
+  },
+  {
+    label: 'runDriftCheck: the branch-policy finding is never pushed (nightly stays green)',
+    subject: 'lib',
+    anchor: "  if (branchPolicy.kind !== 'ok') {",
+    replacement: '  if (false) {',
+  },
+  {
     label: 'evaluateReviewerProtection: the required_reviewers rule lookup always "finds" one',
     subject: 'lib',
     anchor: "  const rule = protectionRules.find((r) => r && r.type === 'required_reviewers');",
@@ -153,10 +179,10 @@ const MUTATIONS = [
   },
 ];
 
-declareMutations(12);
+declareMutations(16);
 
-if (MUTATIONS.length !== 12) {
-  console.error(`FATAL: declared 12 mutations, table has ${MUTATIONS.length}`);
+if (MUTATIONS.length !== 16) {
+  console.error(`FATAL: declared 16 mutations, table has ${MUTATIONS.length}`);
   process.exit(1);
 }
 

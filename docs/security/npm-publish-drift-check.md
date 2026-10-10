@@ -129,3 +129,16 @@ drift, and nobody could tell which one to fix.
   `action-pin-resolution-nightly.yml`: the answer lives in live repo settings,
   not in anything a PR's diff touches, so a PR-blocking version would fail
   every PR for a founder-only setting no PR can fix.
+
+## Deployment-branch policy (fails the nightly)
+
+The check also reads the `npm-publish` environment's `deployment_branch_policy`
+and **fails** when it is `null` (any branch can run a job that names the
+environment and receive `NPM_TOKEN`), when it only restricts to protected
+branches, or when it admits any ref outside the exact publish-lane allowlist in
+`scripts/publish-lane-guard.mjs` (wildcards never match). The allowlist is
+imported, not copied. Until the maintainer applies an exact-ref branch policy on
+the environment, the nightly is red by design: that red is the reminder.
+
+To exercise the exit code offline, pass `--fixture <json>`, a map of API path to
+`{status, body}`: `node scripts/check-npm-publish-drift.mjs --fixture f.json`.

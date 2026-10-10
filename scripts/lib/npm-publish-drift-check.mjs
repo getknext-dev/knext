@@ -63,6 +63,8 @@
  * permanent, intentional absence is not drift.
  */
 
+import { resolveLane } from '../publish-lane-guard.mjs';
+
 const GITHUB_API_BASE = 'https://api.github.com/';
 
 /** Every API status this module treats as "could not read this, not 'it's empty'". */
@@ -169,6 +171,53 @@ export function evaluateTagRulesetProtection(rulesetDetails) {
     return {
       ok: false,
       reason: 'a tag ruleset exists but none of its ref_name.include patterns cover v*-style tags',
+    };
+  }
+  return { ok: true };
+}
+
+// ── Pure decision: the npm-publish environment's deployment-branch policy ───
+// #2109. `NPM_TOKEN` is an environment secret; with `deployment_branch_policy:
+// null` ANY ref can run a job naming the environment and receive it. The
+// allowlist is NOT copied here: every policy name is judged by
+// `resolveLane` in `scripts/publish-lane-guard.mjs`, the one source for the
+// exact publish-lane list (and release-cut shape). A glob (`integration/v*`,
+// `release/*`) never resolves, so a wildcard policy fails too.
+
+/**
+ * @param {unknown} deploymentBranchPolicy the environment API's `deployment_branch_policy`
+ * @param {unknown} branchPolicies the `deployment-branch-policies` list's `branch_policies`
+ *   (only consulted when `custom_branch_policies` is true)
+ * @returns {{ ok: true } | { ok: false, reason: string }}
+ */
+export function evaluateBranchPolicy(deploymentBranchPolicy, branchPolicies) {
+  if (deploymentBranchPolicy === null || deploymentBranchPolicy === undefined) {
+    return {
+      ok: false,
+      reason:
+        'deployment_branch_policy is null: ANY branch can run a job that names the environment and receive NPM_TOKEN',
+    };
+  }
+  if (
+    typeof deploymentBranchPolicy !== 'object' ||
+    !deploymentBranchPolicy.custom_branch_policies
+  ) {
+    return {
+      ok: false,
+      reason:
+        'deployment_branch_policy does not use custom branch policies (protected_branches-only admits any branch that merely has protection, not the exact publish-lane allowlist)',
+    };
+  }
+  if (!Array.isArray(branchPolicies) || branchPolicies.length === 0) {
+    return { ok: false, reason: 'custom branch policies are enabled but none are listed' };
+  }
+  const offenders = branchPolicies
+    .filter((p) => !(p && p.type === 'branch' && resolveLane(`refs/heads/${p.name}`).ok))
+    .map((p) => `${p?.type ?? '?'}:${p?.name ?? '?'}`);
+  if (offenders.length > 0) {
+    return {
+      ok: false,
+      reason: `policy admits refs outside the publish-lane allowlist (scripts/publish-lane-guard.mjs): ${offenders.join(', ')}`,
     };
   }
   return { ok: true };
@@ -342,6 +391,45 @@ export async function fetchTagRulesetProtection({ owner, repo, api }) {
 }
 
 /**
+ * @param {{ owner: string, repo: string, environment: string, api: (path: string) => Promise<{status: number, body: unknown}> }} args
+ */
+export async function fetchBranchPolicy({ owner, repo, environment, api }) {
+  const base = `repos/${owner}/${repo}/environments/${encodeURIComponent(environment)}`;
+  const unreadable = (res, what) =>
+    PERMISSION_ERROR_STATUSES.has(res.status)
+      ? {
+          kind: 'permission-error',
+          status: res.status,
+          message: `GET ${what} returned ${res.status} — not a verified answer either way.`,
+        }
+      : {
+          kind: 'api-error',
+          status: res.status,
+          message: `unexpected status ${res.status} from ${what}`,
+        };
+  try {
+    const env = await api(base);
+    if (env.status !== 200) return unreadable(env, `environments/${environment}`);
+    const policy = /** @type {{deployment_branch_policy?: any}} */ (env.body)
+      ?.deployment_branch_policy;
+    let policies;
+    if (policy && typeof policy === 'object' && policy.custom_branch_policies) {
+      const list = await api(`${base}/deployment-branch-policies`);
+      if (list.status !== 200) return unreadable(list, 'deployment-branch-policies');
+      policies = /** @type {{branch_policies?: unknown}} */ (list.body)?.branch_policies;
+    }
+    const evaluated = evaluateBranchPolicy(policy, policies);
+    return evaluated.ok ? { kind: 'ok' } : { kind: 'missing', reason: evaluated.reason };
+  } catch (error) {
+    return {
+      kind: 'api-error',
+      status: 0,
+      message: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+/**
  * One human-readable finding for a setting that is not verified `ok`. Keeps
  * "could not verify" and "verified empty" in visibly different sentences —
  * the whole point of separating `permission-error` from `missing` above.
@@ -370,12 +458,13 @@ function describeFinding(setting, result) {
 
 /**
  * @param {{ owner: string, repo: string, environment: string, api: (path: string) => Promise<{status: number, body: unknown}> }} args
- * @returns {Promise<{ ok: boolean, findings: Array<{setting: string, kind: string, message: string}>, reviewer: unknown, tagRuleset: unknown }>}
+ * @returns {Promise<{ ok: boolean, findings: Array<{setting: string, kind: string, message: string}>, reviewer: unknown, tagRuleset: unknown, branchPolicy: unknown }>}
  */
 export async function runDriftCheck({ owner, repo, environment, api }) {
-  const [reviewer, tagRuleset] = await Promise.all([
+  const [reviewer, tagRuleset, branchPolicy] = await Promise.all([
     fetchReviewerProtection({ owner, repo, environment, api }),
     fetchTagRulesetProtection({ owner, repo, api }),
+    fetchBranchPolicy({ owner, repo, environment, api }),
   ]);
 
   // `reviewer` is fetched and returned for INFORMATIONAL logging only — it is
@@ -393,6 +482,9 @@ export async function runDriftCheck({ owner, repo, environment, api }) {
   if (tagRuleset.kind !== 'ok') {
     findings.push(describeFinding('v*-covering tag ruleset', tagRuleset));
   }
+  if (branchPolicy.kind !== 'ok') {
+    findings.push(describeFinding(`${environment} deployment-branch policy`, branchPolicy));
+  }
 
-  return { ok: findings.length === 0, findings, reviewer, tagRuleset };
+  return { ok: findings.length === 0, findings, reviewer, tagRuleset, branchPolicy };
 }
