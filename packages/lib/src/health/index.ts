@@ -71,6 +71,25 @@ const WAKE_ERROR_CODES_ARR = [
 const WAKE_ERROR_CODES = new Set(WAKE_ERROR_CODES_ARR);
 
 /**
+ * True when the DSN points at the scale-zero-pg gateway — the scale-to-zero
+ * database a `waking` Postgres state can legitimately describe. Matches the
+ * host label sequence `scale-zero-pg.svc` (e.g. `pggw.scale-zero-pg.svc.cluster.local.`),
+ * never a substring of the path or userinfo. There is no env marker for the
+ * binding today, so the gateway host is the only in-app signal; a
+ * bring-your-own database never matches it.
+ */
+export function isScaleToZeroDatabase(dsn: string | undefined): boolean {
+  if (!dsn) return false;
+  let host: string;
+  try {
+    host = new URL(dsn).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  return /(^|\.)scale-zero-pg\.svc(\.|$)/.test(host);
+}
+
+/**
  * Shallow liveness/readiness probe (#338).
  *
  * Returns healthy whenever this process/server is running, WITHOUT touching
@@ -189,11 +208,13 @@ export async function checkDeepHealth(): Promise<HealthStatus> {
           await pool.query('SELECT 1 as healthy');
           checks.postgres = 'up';
         } catch (error) {
-          if (isWakeSignal(error)) {
+          if (isWakeSignal(error) && isScaleToZeroDatabase(process.env.DATABASE_URL)) {
             // Scale-to-zero DB asleep/mid-wake: NORMAL, not a fault.
             logger.info({ err: error }, '[Health Check] Postgres waking (scale-to-zero)');
             checks.postgres = 'waking';
           } else {
+            // Bring-your-own Postgres (the default): a refused connection is an
+            // outage, not a wake — nothing is scheduled to come back on its own.
             logger.error({ err: error }, '[Health Check] Postgres connection failed');
             checks.postgres = 'down';
           }
@@ -245,7 +266,8 @@ export async function checkDeepHealth(): Promise<HealthStatus> {
 
   // Derive overall status from the dependency taxonomy (ADR-0023 + ADR-0026).
   // NOTE: this no longer gates readiness — it is observability-only (#338).
-  //  - waking:   scale-to-zero PG asleep/mid-wake (conn-refused or timeout).
+  //  - waking:   scale-to-zero PG asleep/mid-wake (refused on the scale-zero-pg
+  //              gateway, or timeout). A refused BYO database is `down`.
   //  - down:     PG reachable but erroring (genuine fault) — fails CLOSED.
   //  - degraded: soft/optional cache (Redis) blip — fails OPEN.
   let status: HealthStatus['status'] = 'ok';
