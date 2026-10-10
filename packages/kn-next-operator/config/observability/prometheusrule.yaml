@@ -282,18 +282,19 @@ spec:
       rules:
         # #348: SUSTAINED deep-health `waking` = a permanent connection-level DB
         # outage of the scale-to-zero database. checkDeepHealth
-        # (packages/lib/src/health/index.ts) classifies a connection-level
-        # failure (ECONNREFUSED / timeout / dead DNS / bad DATABASE_URL) as
-        # `waking` ONLY when DATABASE_URL points at the scale-zero-pg gateway
-        # host — CORRECT for a normal scale-to-zero wake, which is brief
-        # (~2-6s). But a GENUINELY-down scale-to-zero DB presents the SAME
-        # connection-level signature, so it sits at `waking` FOREVER and never
-        # becomes `down`. Alerts keyed on `down`/503 alone therefore never page
-        # on it. A refused connection to any OTHER host (bring-your-own
-        # Postgres) reads `down` straight away and is paged by
-        # KnextDeepHealthDown below. This rule closes the waking gap: the deep-health state gauge reporting overall
-        # waking=1 for LONGER than the wake budget is a stuck-waking real
-        # outage. `for: 2m` is far above the legitimate 2-6s wake, so a normal
+        # (packages/lib/src/health/index.ts) classifies a refused connection
+        # (ECONNREFUSED) as `waking` ONLY when DATABASE_URL points at the
+        # scale-zero-pg gateway host — CORRECT for a normal scale-to-zero wake,
+        # which is brief (~2-6s). A connect timeout or a dropped connection
+        # reads `waking` on any host. But a GENUINELY-down scale-to-zero DB
+        # presents the SAME connection-level signature, so it sits at `waking`
+        # FOREVER and never becomes `down`. Alerts keyed on `down`/503 alone
+        # therefore never fire on it. A refused connection to any OTHER host
+        # (bring-your-own Postgres) reads `down` straight away and is alerted on
+        # by KnextDeepHealthDown below, wherever this group is scraped. This
+        # rule closes the waking gap: the deep-health state gauge reporting
+        # overall waking=1 for LONGER than the wake budget is a stuck-waking
+        # real outage. `for: 2m` is far above the legitimate 2-6s wake, so a normal
         # wake never pages.
         - alert: KnextDeepHealthStuckWaking
           expr: >-
@@ -330,8 +331,8 @@ spec:
             summary: "knext app {{ $labels.app }} deep health DOWN (DB unreachable or erroring)"
             description: >-
               The deep health check has reported `down` for over 2m. Either the
-              database refused or timed out the connection and is not a
-              scale-to-zero database that could be waking (bring-your-own
+              database refused the connection and is not a scale-to-zero
+              database that could be waking (bring-your-own
               Postgres, a custom APPDB_GATEWAY_HOST, or a pooler in front of the
               scale-to-zero database), or it is reachable but erroring on the
               probe query. Check the database and the app's DATABASE_URL.
