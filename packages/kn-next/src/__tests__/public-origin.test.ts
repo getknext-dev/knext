@@ -91,6 +91,15 @@ describe("public-origin — allowlist parsing", () => {
             "0.0.0.0",
             "[::]",
             "-bad.example.com",
+            // other spellings of the same wildcard bind address
+            "[::0]",
+            "[0:0:0:0:0:0:0:0]",
+            "[0000::]:8080",
+            "https://[::0]",
+            "0",
+            "0x0",
+            "00.0.0.0",
+            "[::ffff:0.0.0.0]",
         ];
         const parsed = po.parsePublicOrigins(
             ["app.example.com", ...bad].join(","),
@@ -122,6 +131,23 @@ describe("public-origin — Location rewrite rule", () => {
 
     it("rewrites an IPv6 wildcard bind origin", () => {
         expect(rewrite("http://[::]:8080/x")).toBe("https://app.example.com/x");
+    });
+
+    it("rewrites every spelling of a wildcard bind origin", () => {
+        for (const origin of [
+            "http://[::0]:8080",
+            "http://[0:0:0:0:0:0:0:0]",
+            "http://[0000::]:80",
+            "http://0:3000",
+            "http://0x0:3000",
+            "http://00.0.0.0",
+            "http://[::ffff:0.0.0.0]:8080",
+        ]) {
+            expect({ origin, out: rewrite(`${origin}/a?b=1`) }).toEqual({
+                origin,
+                out: "https://app.example.com/a?b=1",
+            });
+        }
     });
 
     it("leaves every non-wildcard origin alone", () => {
@@ -306,6 +332,12 @@ const server = http.createServer((req, res) => {
     case 'writeHead': res.writeHead(302, { Location: loc }); return res.end();
     case 'writeHeadMsg': res.writeHead(302, 'Found', { location: loc }); return res.end();
     case 'writeHeadFlat': res.writeHead(302, ['Location', loc]); return res.end();
+    // A Location set through a path the preload's setHeader hook cannot see.
+    case 'bypass': http.OutgoingMessage.prototype.setHeader.call(res, 'Location', loc); res.writeHead(302); return res.end();
+    case 'varyBefore': res.setHeader('Vary', 'Accept-Encoding'); res.setHeader('Location', loc); res.writeHead(302); return res.end();
+    case 'varyAfter': res.setHeader('Location', loc); res.setHeader('Vary', 'Accept'); res.writeHead(302); return res.end();
+    case 'varyHead': res.setHeader('Vary', 'Accept'); res.writeHead(302, { Location: loc, Vary: 'Cookie' }); return res.end();
+    case 'varyStar': res.setHeader('Location', loc); res.setHeader('Vary', '*'); res.writeHead(302); return res.end();
     default: res.writeHead(200, { 'content-type': 'text/plain' }); return res.end('ok');
   }
 });
@@ -403,6 +435,31 @@ function locationOf(
     });
 }
 
+/** GET returning the raw response headers. */
+function headersOf(
+    port: number,
+    via: string,
+    loc: string,
+    headers: Record<string, string> = {},
+): Promise<Record<string, string | string[] | undefined>> {
+    return new Promise((done, fail) => {
+        const req = httpRequest(
+            {
+                host: "127.0.0.1",
+                port,
+                path: `/?via=${via}&loc=${encodeURIComponent(loc)}`,
+                headers,
+            },
+            (res) => {
+                res.resume();
+                res.on("end", () => done(res.headers));
+            },
+        );
+        req.on("error", fail);
+        req.end();
+    });
+}
+
 const RUNTIMES: Array<[string, string | undefined]> = [
     ["node", NODE_BIN],
     ["bun", BUN_BIN],
@@ -415,6 +472,7 @@ const VIAS = [
     "writeHead",
     "writeHeadMsg",
     "writeHeadFlat",
+    "bypass",
 ];
 
 for (const [name, bin] of RUNTIMES) {
@@ -445,6 +503,98 @@ for (const [name, bin] of RUNTIMES) {
                 expect(b.out()).toContain(
                     "PUBLIC_ORIGINS:app.example.com,www.example.com",
                 );
+            } finally {
+                b.stop();
+            }
+        });
+
+        it("rewrites a Location that bypassed setHeader, at writeHead", async () => {
+            const b = await boot(bin, {
+                KNEXT_PUBLIC_ORIGINS: "app.example.com",
+            });
+            try {
+                expect(
+                    await locationOf(b.port, "bypass", "http://0.0.0.0:8080/a"),
+                ).toBe("https://app.example.com/a");
+            } finally {
+                b.stop();
+            }
+        });
+
+        it("marks a rewritten redirect Vary on the headers the origin depends on, keeping any existing Vary", async () => {
+            const b = await boot(bin, {
+                KNEXT_PUBLIC_ORIGINS: "app.example.com",
+            });
+            const norm = (v: unknown) =>
+                String(v)
+                    .split(",")
+                    .map((t) => t.trim().toLowerCase())
+                    .sort();
+            const want = ["x-forwarded-host", "host", "x-forwarded-proto"];
+            try {
+                for (const via of [
+                    "setHeader",
+                    "appendHeader",
+                    "writeHead",
+                    "bypass",
+                ]) {
+                    const h = await headersOf(
+                        b.port,
+                        via,
+                        "http://0.0.0.0:8080/a",
+                    );
+                    expect({ via, vary: norm(h.vary) }).toEqual({
+                        via,
+                        vary: [...want].sort(),
+                    });
+                }
+                // Existing Vary is kept, whether set before, after, or via writeHead.
+                for (const [via, kept] of [
+                    ["varyBefore", ["accept-encoding"]],
+                    ["varyAfter", ["accept"]],
+                    ["varyHead", ["accept", "cookie"]],
+                ] as const) {
+                    const h = await headersOf(
+                        b.port,
+                        via,
+                        "http://0.0.0.0:8080/a",
+                    );
+                    expect({ via, vary: norm(h.vary) }).toEqual({
+                        via,
+                        vary: [...want, ...kept].sort(),
+                    });
+                }
+                // `Vary: *` already covers everything.
+                const star = await headersOf(
+                    b.port,
+                    "varyStar",
+                    "http://0.0.0.0:8080/a",
+                );
+                expect(star.vary).toBe("*");
+            } finally {
+                b.stop();
+            }
+        });
+
+        it("adds no Vary when the Location was not rewritten", async () => {
+            const b = await boot(bin, {
+                KNEXT_PUBLIC_ORIGINS: "app.example.com",
+            });
+            try {
+                for (const via of ["setHeader", "writeHead", "bypass"]) {
+                    const h = await headersOf(
+                        b.port,
+                        via,
+                        "https://other.example.org/a",
+                    );
+                    expect({ via, vary: h.vary }).toEqual({
+                        via,
+                        vary: undefined,
+                    });
+                }
+                expect(
+                    (await headersOf(b.port, "default", "x")).vary,
+                ).toBeUndefined();
             } finally {
                 b.stop();
             }

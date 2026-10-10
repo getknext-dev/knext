@@ -403,6 +403,10 @@ How the origin is chosen:
 A request header is only ever compared against your list. A value that isn't on it never appears in
 a redirect, so a forged `Host` or `X-Forwarded-Host` cannot send your users to another site.
 
+A redirect whose address was rewritten also carries `Vary: X-Forwarded-Host, Host,
+X-Forwarded-Proto`, added to any `Vary` your app already sets, so a CDN or browser cache keeps
+one cached redirect per hostname.
+
 Each entry is a hostname, optionally with a port (`localhost:3000`). An `https://` or `http://`
 prefix is accepted and ignored, because the scheme comes from the rule above. An entry with a path,
 a user name or a wildcard is dropped, and the pod log says which one.

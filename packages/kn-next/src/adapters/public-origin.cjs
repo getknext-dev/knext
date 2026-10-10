@@ -61,11 +61,56 @@ const INSTALLED = Symbol.for('knext.publicOrigin.installed');
  * port, ending where the authority ends. Anchored, so `0.0.0.0.evil.com` and
  * `user@0.0.0.0` never match.
  */
-const WILDCARD_ORIGIN = /^https?:\/\/(?:0\.0\.0\.0|\[::\])(?::\d+)?(?=[/?#]|$)/i;
+const ORIGIN_HOST = /^https?:\/\/(\[[^\]/?#]*\]|[^/?#:@[\]]+)(?::\d+)?(?=[/?#]|$)/i;
 
 const LABEL = '[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?';
 const HOST_ENTRY = new RegExp(`^(?:${LABEL}(?:\\.${LABEL})*|\\[[0-9a-f:.]+\\])(?::(\\d{1,5}))?$`);
-const WILDCARD_HOSTS = new Set(['0.0.0.0', '[::]']);
+
+/**
+ * Wildcard bind addresses in the form `new URL(...).hostname` yields, so every
+ * spelling (`[::0]`, `[0:0:0:0:0:0:0:0]`, `0`, `0x0`, `[::ffff:0.0.0.0]`)
+ * collapses onto one of these.
+ */
+const WILDCARD_HOSTS = new Set(['0.0.0.0', '[::]', '[::ffff:0:0]']);
+
+/** The URL-canonical hostname of a bare host (no scheme, no port); undefined if unparseable. */
+function canonicalHostname(host) {
+  try {
+    return new URL(`http://${host}`).hostname;
+  } catch {
+    return undefined;
+  }
+}
+
+function isWildcardHost(host) {
+  const canonical = canonicalHostname(host);
+  return canonical !== undefined && WILDCARD_HOSTS.has(canonical);
+}
+
+/** Length of the wildcard-bind origin at the start of `value`, or 0. */
+function wildcardOriginLength(value) {
+  const m = ORIGIN_HOST.exec(value);
+  return m && isWildcardHost(m[1]) ? m[0].length : 0;
+}
+
+const VARY_TOKENS = ['X-Forwarded-Host', 'Host', 'X-Forwarded-Proto'];
+
+/**
+ * Merge the headers the rewrite depends on into a Vary value, keeping what was
+ * there. Returns the existing value unchanged if it already covers them.
+ *
+ * @param {unknown} existing string | string[] | number | undefined
+ */
+function mergeVary(existing) {
+  const current = (Array.isArray(existing) ? existing : [existing])
+    .filter((v) => typeof v === 'string' && v.trim() !== '')
+    .join(', ');
+  const present = current.split(',').map((t) => t.trim().toLowerCase());
+  if (present.includes('*')) return current;
+  const missing = VARY_TOKENS.filter((t) => !present.includes(t.toLowerCase()));
+  if (missing.length === 0) return current;
+  return current === '' ? missing.join(', ') : `${current}, ${missing.join(', ')}`;
+}
 
 /**
  * Parse the allowlist. Pure.
@@ -87,7 +132,7 @@ function parsePublicOrigins(raw) {
     const m = HOST_ENTRY.exec(host);
     const port = m && m[1] !== undefined ? Number(m[1]) : undefined;
     const bare = m ? host.replace(/:\d+$/, '') : host;
-    if (!m || (port !== undefined && (port < 1 || port > 65535)) || WILDCARD_HOSTS.has(bare)) {
+    if (!m || (port !== undefined && (port < 1 || port > 65535)) || isWildcardHost(bare)) {
       invalid.push(entry);
       continue;
     }
@@ -144,9 +189,9 @@ function rewriteLocation(value, headers, hosts) {
   if (!hosts || hosts.length === 0) return value;
   if (Array.isArray(value)) return value.map((v) => rewriteLocation(v, headers, hosts));
   if (typeof value !== 'string') return value;
-  const m = WILDCARD_ORIGIN.exec(value);
-  if (!m) return value;
-  return resolvePublicOrigin(headers, hosts) + value.slice(m[0].length);
+  const len = wildcardOriginLength(value);
+  if (len === 0) return value;
+  return resolvePublicOrigin(headers, hosts) + value.slice(len);
 }
 
 const ARRIVAL = Symbol.for('knext.publicOrigin.arrivalHeaders');
@@ -180,31 +225,28 @@ function requestHeadersOf(res) {
   return req[ARRIVAL] || req.headers || {};
 }
 
-/** Rewrite the Location entries of a writeHead headers argument, copying on change. */
-function rewriteHeadHeaders(hdrs, reqHeaders, hosts) {
+/**
+ * Map the value of every `name` entry in a writeHead headers argument through
+ * `fn`, copying on change. Handles the object, [[k, v], ...] and flat
+ * [k, v, k, v] shapes.
+ */
+function mapHeadHeaders(hdrs, name, fn) {
+  const is = (k) => typeof k === 'string' && k.toLowerCase() === name;
   if (Array.isArray(hdrs)) {
     if (hdrs.length > 0 && Array.isArray(hdrs[0])) {
-      // [[name, value], ...]
-      return hdrs.map((pair) =>
-        Array.isArray(pair) && typeof pair[0] === 'string' && pair[0].toLowerCase() === 'location'
-          ? [pair[0], rewriteLocation(pair[1], reqHeaders, hosts)]
-          : pair,
-      );
+      return hdrs.map((pair) => (Array.isArray(pair) && is(pair[0]) ? [pair[0], fn(pair[1])] : pair));
     }
-    // [name, value, name, value, ...]
     const out = hdrs.slice();
     for (let i = 0; i + 1 < out.length; i += 2) {
-      if (typeof out[i] === 'string' && out[i].toLowerCase() === 'location') {
-        out[i + 1] = rewriteLocation(out[i + 1], reqHeaders, hosts);
-      }
+      if (is(out[i])) out[i + 1] = fn(out[i + 1]);
     }
     return out;
   }
   if (hdrs !== null && typeof hdrs === 'object') {
     let out = hdrs;
     for (const key of Object.keys(hdrs)) {
-      if (key.toLowerCase() !== 'location') continue;
-      const next = rewriteLocation(hdrs[key], reqHeaders, hosts);
+      if (!is(key)) continue;
+      const next = fn(hdrs[key]);
       if (next !== hdrs[key]) {
         if (out === hdrs) out = { ...hdrs };
         out[key] = next;
@@ -213,6 +255,13 @@ function rewriteHeadHeaders(hdrs, reqHeaders, hosts) {
     return out;
   }
   return hdrs;
+}
+
+const REWRITTEN = Symbol.for('knext.publicOrigin.rewritten');
+
+/** Whether a rewrite changed a Location value (string or string[]). */
+function differs(a, b) {
+  return Array.isArray(a) ? a.length !== b.length || a.some((v, i) => v !== b[i]) : a !== b;
 }
 
 /**
@@ -258,13 +307,17 @@ function install(opts) {
   };
 
   const originalSetHeader = proto.setHeader;
+
+  // Rewrite one Location value for `res`, remembering that it happened so the
+  // response can be marked `Vary` (the origin now depends on request headers).
+  function rewriteTracked(res, value) {
+    const next = rewriteLocation(value, requestHeadersOf(res), hosts);
+    if (differs(value, next)) res[REWRITTEN] = true;
+    return next;
+  }
   proto.setHeader = function setHeader(name, value) {
     if (typeof name === 'string' && name.toLowerCase() === 'location') {
-      return originalSetHeader.call(
-        this,
-        name,
-        rewriteLocation(value, requestHeadersOf(this), hosts),
-      );
+      return originalSetHeader.call(this, name, rewriteTracked(this, value));
     }
     return originalSetHeader.call(this, name, value);
   };
@@ -273,11 +326,7 @@ function install(opts) {
     const originalAppendHeader = proto.appendHeader;
     proto.appendHeader = function appendHeader(name, value) {
       if (typeof name === 'string' && name.toLowerCase() === 'location') {
-        return originalAppendHeader.call(
-          this,
-          name,
-          rewriteLocation(value, requestHeadersOf(this), hosts),
-        );
+        return originalAppendHeader.call(this, name, rewriteTracked(this, value));
       }
       return originalAppendHeader.call(this, name, value);
     };
@@ -285,20 +334,36 @@ function install(opts) {
 
   const originalWriteHead = proto.writeHead;
   proto.writeHead = function writeHead(_statusCode, statusMessage) {
-    const reqHeaders = requestHeadersOf(this);
     // A Location set earlier through a path this preload did not see.
     if (typeof this.getHeader === 'function' && !this.headersSent) {
       const current = this.getHeader('location');
       if (current !== undefined) {
-        const next = rewriteLocation(current, reqHeaders, hosts);
-        if (next !== current) originalSetHeader.call(this, 'location', next);
+        const next = rewriteTracked(this, current);
+        if (differs(current, next)) originalSetHeader.call(this, 'location', next);
       }
     }
     // Same arity as the caller: writeHead(status), (status, headers),
     // (status, message) or (status, message, headers).
     const args = Array.prototype.slice.call(arguments);
     const at = args.length >= 3 ? 2 : args.length === 2 && typeof statusMessage !== 'string' ? 1 : -1;
-    if (at !== -1) args[at] = rewriteHeadHeaders(args[at], reqHeaders, hosts);
+    if (at !== -1) {
+      args[at] = mapHeadHeaders(args[at], 'location', (v) => rewriteTracked(this, v));
+    }
+    // The Location now depends on Host / X-Forwarded-*: tell caches. Done here,
+    // at the last moment, so a Vary the app sets later cannot clobber it.
+    if (this[REWRITTEN] && !this.headersSent) {
+      const given = [];
+      if (at !== -1) {
+        mapHeadHeaders(args[at], 'vary', (v) => {
+          given.push(v);
+          return v;
+        });
+      }
+      const existing = typeof this.getHeader === 'function' ? this.getHeader('vary') : undefined;
+      const merged = mergeVary([existing, ...given].flat());
+      originalSetHeader.call(this, 'vary', merged);
+      if (at !== -1) args[at] = mapHeadHeaders(args[at], 'vary', () => merged);
+    }
     return originalWriteHead.apply(this, args);
   };
   return state;

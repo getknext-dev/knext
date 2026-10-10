@@ -17,7 +17,7 @@
 
 ## Context
 
-A route handler or middleware that redirects with an absolute URL built from `request.url` —
+A route handler that redirects with an absolute URL built from `request.url` —
 `NextResponse.redirect(new URL('/x', request.url))` — answers `Location: http://0.0.0.0:PORT/x`
 behind Knative. Released 1.x on Next 16.3.8 is affected, and so is 16.4.
 
@@ -74,6 +74,13 @@ it as a separate issue. Phase 2 must not change the runtime contract described h
 - Scheme: `X-Forwarded-Proto` when it is exactly `http` or `https`; otherwise `https`.
 - No allowlist (unset, empty, or every entry invalid) means nothing is installed. Behaviour is
   then byte-identical to today, and there is no boot log line.
+- A wildcard bind address is recognised by its canonical form (`new URL(...).hostname`), so `[::0]`,
+  `[0:0:0:0:0:0:0:0]`, `0` and `[::ffff:0.0.0.0]` count as wildcards both in a `Location` and as an
+  allowlist entry (dropped).
+- A response whose `Location` was rewritten also gets `Vary: X-Forwarded-Host, Host,
+  X-Forwarded-Proto`, merged into any existing `Vary` (jev: add it, 0.95), so a shared cache cannot
+  serve a redirect built for one allowlisted host to another. It is applied at `writeHead`, so a
+  `Vary` the app sets later cannot clobber it; a `Vary: *` is left as is.
 
 **3. Mechanism: rewrite the `Location` response header, not `request.url`.** Next computes the
 origin in two independent places: the router's `initURL`, and the middleware URL from
