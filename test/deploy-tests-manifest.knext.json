@@ -244,7 +244,11 @@
       "test/e2e/incremental-cache-path-traversal/index.test.ts",
       "test/e2e/app-dir/not-found-non-document/not-found-non-document.test.ts",
       "test/e2e/app-dir/expire-time/expire-time.test.ts",
-      "test/e2e/middleware-rewrites/test/index.test.ts"
+      "test/e2e/middleware-rewrites/test/index.test.ts",
+      "test/e2e/app-dir/empty-generate-static-params/empty-generate-static-params.test.ts",
+      "test/e2e/app-dir/use-cache-segment-configs/use-cache-segment-configs.test.ts",
+      "test/e2e/app-dir/cache-components-allow-otel-spans/cache-components-allow-otel-spans.test.ts",
+      "test/e2e/app-dir/segment-cache/cached-navigations/cached-navigations.test.ts"
     ]
   },
   "$knextQuarantines": [
@@ -365,6 +369,55 @@
       "evidence": "runs 36332946048 (node x webpack) / 36332959885 (bun x webpack), NEXTJS_REF=v16.3.5: FINAL 3/3 attempts, the case named in the shard 9/16 summary; runs 36430362513 (node x webpack) / 36430368139 (bun x webpack): FINAL 3/3 (1 failed, 2 skipped, 56 passed, 59 total). Turbopack cells 36332940411 / 36332951393 / 36430353283 / 36430358027: the file is skipped upstream (finished in 2.09 s with IS_TURBOPACK_TEST=1 and NEXT_ENABLE_ADAPTER=1), not passed. RE-AUDITED at v16.3.6 (rc.4 security bump, GHSA-vcvr-r3jv-pc5j) by source equivalence, not by a fresh run: The v16.3.5...v16.3.6 compare (3 commits: the version bump, a hardened next/og SVG serialization in packages/next/src/compiled/@vercel/og, and test/production/deterministic-build/deployment-id.test.ts) changes no file of this test or its fixture and no runtime file outside next/og. The failing assertion sits in the isNextDeploy branch and encodes Vercel-only routing behaviour that an og serialization change cannot reach, and the file is in rules.exclude, so it did not execute in the bump branch's dispatches (node x turbopack 36835179424 and bun x turbopack 36835175500, each 1099 passed / 0 failed, identical per-shard counts to the v16.3.5 baselines 36829124072 and 36638859599). No webpack cell was dispatched (two-dispatch budget). RE-AUDITED at v16.3.8 (rc.6 security bump, GHSA-cjq9-62q9-8jv4) by source equivalence, not by a fresh run of this file: the v16.3.6...v16.3.8 compare (10 commits, 192 files, summarised in .github/compat-credentialed-next-version.json) changes no file of this test or its fixture. The quarantined cases stay excluded or jest-deselected, so they do not execute in the credential dispatches either; this stamp does not claim the case passes or fails at v16.3.8. CAVEAT: unlike the og-only 16.3.6 bump, this compare does change routing and cache runtime code near this surface (case-sensitive /_next/data path matching in match-next-data-pathname.ts, response-cache keys scoped to the source route, the app-page and app-route build templates). The failing assertion still encodes an expectation only Vercel infrastructure produces, but that was NOT re-run at v16.3.8; un-exclude this file at v16.3.8 to confirm.",
       "provenance": "https://github.com/getknext-dev/knext/issues/1633 (triage: https://github.com/getknext-dev/knext/issues/1633#issuecomment-5895614465; founder decision 2026-09-29 to evidence-quarantine on the webpack cells for rc.2) + vercel/next.js#94905 (runApi keeps req.url as the original URL) + vercel/next.js#99435 (upstream issue asking for an adapter-neutral expectation). Retire when upstream changes the deploy-branch req.url expectation for non-Vercel adapters, then restore the mirrored suites.failed entry.",
       "reaudited": "v16.3.8"
+    },
+    {
+      "test": "test/e2e/app-dir/empty-generate-static-params/empty-generate-static-params.test.ts",
+      "nextjsRef": "v16.4.0",
+      "lane": "node",
+      "family": "vercel-infra-coupled",
+      "level": "file",
+      "cases": [
+        "points the literal empty array build error at the array",
+        "points the computed empty array build error at the declaration"
+      ],
+      "mechanism": "Both failing cases assert an inline snapshot of next.cliOutput in the isNextDeploy branch (`if (isTurbopack && isNextDeploy)` and `else if (isNextDeploy)`, test lines ~67-115 and ~145-199). The only diff is whitespace: knext replays the raw `next build` output, which keeps four leading spaces on the stack and code-frame lines, while the snapshot encodes Vercel's build log. The test's own comment says 'Vercel build logs omit leading indentation from stack and code frames'. The build error content matches; only indentation differs. File level: the file's other cases stop running as ongoing coverage.",
+      "evidence": "run 38040527044 (Next 16.4.0 smoke dispatch, NEXTJS_REF=v16.4.0, node x turbopack, shard 15): FINAL 3/3 attempts, both cases failing on the whitespace-only snapshot diff. ONE cell only: the four-cell dispatch was not run (ADR-0066 dispatch cap). At 16.3.x this file is skipDeployment, so it does not run on the current credential ref.",
+      "provenance": "https://github.com/getknext-dev/knext/issues/2128 (ADR-0007 section (h); precedent #1571 / #1624). Retire when upstream's isNextDeploy snapshot stops asserting Vercel's dedented build log for non-Vercel adapters, or at the first Next ref where knext's replayed build log matches the snapshot and the file is green on all four cells."
+    },
+    {
+      "test": "test/e2e/app-dir/use-cache-segment-configs/use-cache-segment-configs.test.ts",
+      "nextjsRef": "v16.4.0",
+      "lane": "node",
+      "family": "vercel-infra-coupled",
+      "level": "file",
+      "cases": ["it should error when using segment configs that aren't supported by useCache"],
+      "mechanism": "The failing assertion is an inline snapshot of the build output in the `if (isTurbopack && isNextDeploy)` branch (test line ~76-83). The diff is whitespace only, and the test's own comment says Vercel 'removes code-frame indentation and may omit blank log lines', while knext replays the raw `next build` output. File level: the file's only case is the one that is quarantined.",
+      "evidence": "run 38040527044 (Next 16.4.0 smoke dispatch, NEXTJS_REF=v16.4.0, node x turbopack, shard 16): FINAL 3/3 attempts on the whitespace-only snapshot diff. ONE cell only: the four-cell dispatch was not run (ADR-0066 dispatch cap). At 16.3.x this file is skipDeployment, so it does not run on the current credential ref.",
+      "provenance": "https://github.com/getknext-dev/knext/issues/2128 (ADR-0007 section (h); precedent #1571 / #1624). Retire when upstream's isNextDeploy snapshot stops asserting Vercel's code-frame stripping for non-Vercel adapters, or at the first Next ref where knext's build output matches and the file is green on all four cells."
+    },
+    {
+      "test": "test/e2e/app-dir/cache-components-allow-otel-spans/cache-components-allow-otel-spans.test.ts",
+      "nextjsRef": "v16.4.0",
+      "lane": "node",
+      "family": "vercel-infra-coupled",
+      "level": "file",
+      "cases": [
+        "should allow creating Spans during prerendering at runtime - inside a Cache Components"
+      ],
+      "mechanism": "The failing assertion is `expect(t7againValue).toEqual(t7value)` in the `if (isNextDeploy)` branch (test line ~346). That branch expects Vercel's behaviour: the second request to /novel/server returns the completed prerender that was saved in the background. knext's first response is the live render (`cache-control: private, no-cache, no-store`, different span ids); the saved prerender is served from the second request on, and the third equals the second. The test's non-deploy branch asserts the opposite (`not.toEqual`) for the same request pair, and its TODO describes knext's live-render-first behaviour. Upstream removed `jest.retryTimes(1)` between v16.3.8 and v16.4.0, so the case no longer passes on retry. File level: the file's other cases stop running as ongoing coverage.",
+      "evidence": "run 38040527044 (Next 16.4.0 smoke dispatch, NEXTJS_REF=v16.4.0, node x turbopack, shard 11): FINAL 3/3 on the t7 assertion. Local reproduction against the real v16.4.0 fixture, deployed through scripts/e2e-deploy.sh, and plain `next start` (issue #2129 triage, 2026-10-10): the same request sequence on both; the same behaviour at v16.3.8 (node x turbopack and node x webpack), where the file passed only because the harness retries once (test/lib/e2e-utils/index.ts:131). ONE cell dispatched; the four-cell run was not dispatched (ADR-0066 dispatch cap).",
+      "provenance": "https://github.com/getknext-dev/knext/issues/2129 (triage 2026-10-10: local reproduction, knext vs plain next start) + the upstream TODO in the test (a dynamic SSR response is served on the first request, and the prerender is saved in the background). Retire when upstream changes the isNextDeploy branch of this case for non-Vercel adapters, or at the first Next ref where that branch matches the live-render-first behaviour."
+    },
+    {
+      "test": "test/e2e/app-dir/segment-cache/cached-navigations/cached-navigations.test.ts",
+      "nextjsRef": "v16.4.0",
+      "lane": "node",
+      "family": "vercel-infra-coupled",
+      "level": "file",
+      "cases": ["caches a fully static on-demand param for repeated navigations"],
+      "mechanism": "The failing assertion is `act(navigate, 'no-requests')` in the `if (isNextDeploy)` branch (test line ~618). Its comment says 'The platform serves a completed static prerender', which is Vercel's behaviour. knext issues a `_rsc` request on every repeat navigation to /fully-static-params/t4, the same request log as plain `next start`, and the non-deploy branch asserts that live-navigation behaviour. The assertions after the failing one are a same-cause repeat and `#top` = 'Top: t4', which holds on knext in local runs. File level: the other 19 cases of this file stop running as ongoing coverage.",
+      "evidence": "run 38040527044 (Next 16.4.0 smoke dispatch, NEXTJS_REF=v16.4.0, node x turbopack, shard 12): FINAL, 1 of 20 cases failing ('Expected no network requests to be initiated'); the other 19 cases passed. Local reproduction at v16.4.0 with real Chromium: identical request log on plain `next start` and on knext (issue #2129 triage, 2026-10-10). ONE cell dispatched; the four-cell run was not dispatched (ADR-0066 dispatch cap).",
+      "provenance": "https://github.com/getknext-dev/knext/issues/2129 (triage 2026-10-10: local reproduction against plain next start) + the upstream comment in the isNextDeploy branch ('The platform serves a completed static prerender'). Retire when upstream changes that deploy branch for non-Vercel adapters, or at the first Next ref where it matches the live-render-first behaviour."
     }
   ],
   "$knextExclusions": [

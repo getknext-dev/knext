@@ -787,6 +787,8 @@ const VERCEL_COUPLED_FILE_QUARANTINES: Record<
   {
     childIssue: number;
     observedRuns: string[];
+    /** The NEXTJS_REF the entry was observed at. Defaults to v16.3.5 (the rc.2 cohort). */
+    observedRef?: string;
     stubRuns?: string[];
     upstreamRef?: string;
     upstreamIssue?: string;
@@ -823,6 +825,29 @@ const VERCEL_COUPLED_FILE_QUARANTINES: Record<
     upstreamRef: 'vercel/next.js#94905',
     upstreamIssue: 'vercel/next.js#99435',
   },
+  // #2128 / #2129 — Next 16.4.0 smoke dispatch (ONE cell, node x turbopack).
+  // Observed at v16.4.0, not the v16.3.5 cohort; the ref-stamp gate below still
+  // requires the default ref to reach v16.4.0 before these entries are admissible.
+  'test/e2e/app-dir/empty-generate-static-params/empty-generate-static-params.test.ts': {
+    childIssue: 2128,
+    observedRuns: ['38040527044'],
+    observedRef: 'v16.4.0',
+  },
+  'test/e2e/app-dir/use-cache-segment-configs/use-cache-segment-configs.test.ts': {
+    childIssue: 2128,
+    observedRuns: ['38040527044'],
+    observedRef: 'v16.4.0',
+  },
+  'test/e2e/app-dir/cache-components-allow-otel-spans/cache-components-allow-otel-spans.test.ts': {
+    childIssue: 2129,
+    observedRuns: ['38040527044'],
+    observedRef: 'v16.4.0',
+  },
+  'test/e2e/app-dir/segment-cache/cached-navigations/cached-navigations.test.ts': {
+    childIssue: 2129,
+    observedRuns: ['38040527044'],
+    observedRef: 'v16.4.0',
+  },
 };
 
 describe('deploy-tests-manifest — vercel-infra-coupled family (ADR-0007 §h, #1571)', () => {
@@ -846,12 +871,13 @@ describe('deploy-tests-manifest — vercel-infra-coupled family (ADR-0007 §h, #
   });
 
   it('every §h file has a complete level:"file" ledger record — mechanism, cases, run-cited evidence', () => {
-    for (const [file, { observedRuns, stubRuns }] of coupled) {
+    for (const [file, { observedRuns, stubRuns, observedRef }] of coupled) {
       const ledger = quarantines.find((q) => q.test === file);
       expect(ledger, `no $knextQuarantines ledger entry for §h file ${file}`).toBeTruthy();
       expect(ledger?.level, `${file}: §h quarantine must declare level:"file"`).toBe('file');
       expect(ledger?.family, `${file}: §h family`).toBe('vercel-infra-coupled');
-      expect(ledger?.nextjsRef, `${file}: observed at v16.3.5`).toBe('v16.3.5');
+      const expectedRef = observedRef ?? 'v16.3.5';
+      expect(ledger?.nextjsRef, `${file}: observed at ${expectedRef}`).toBe(expectedRef);
       expect((ledger?.cases ?? []).length, `${file}: failing cases preserved`).toBeGreaterThan(0);
       // The mechanism must name the deploy branch it rests on — the whole §h bar.
       expect(
