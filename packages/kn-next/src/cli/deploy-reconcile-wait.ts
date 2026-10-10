@@ -34,6 +34,25 @@ import { OPERATOR_NAMESPACE } from "./doctor/types";
 export interface ReconcileWaitResult {
     reconciled: boolean;
     url: string;
+    /**
+     * Set when the operator observed THIS generation and holds the change:
+     * `Ready=False`, reason `EffectiveSpecInvalid`. The previous Knative
+     * Service keeps serving, so "reconciled" would be a false success.
+     * `message` is the operator's own Ready message (it names the field).
+     */
+    held?: { message: string };
+}
+
+/** The Ready reason the operator writes when it holds an app change. */
+export const HELD_REASON = "EffectiveSpecInvalid";
+
+/**
+ * The actionable failure for a held app change: the operator's own message
+ * (which names the blamed field) plus the remedy. Exact text is
+ * mutation-proved (`deploy-reconcile-wait.test.ts`).
+ */
+export function heldChangeMessage(operatorMessage: string): string {
+    return `The operator is holding this change; the previous version is still serving. ${operatorMessage} Raise the platform budget (KnextPlatform), or lower maxScale / poolMax in knext.config.ts, then deploy again.`;
 }
 
 export interface KubectlGetResult {
@@ -110,6 +129,40 @@ function isReconciled(
 }
 
 /**
+ * The operator's Ready message when it holds this generation's change, else
+ * undefined. Only a Ready condition observed AT OR AFTER `generation` counts,
+ * so a stale hold from an earlier generation never fails a fixed redeploy.
+ */
+function heldMessage(
+    generation: number | undefined,
+    conditions: unknown[] | undefined,
+): string | undefined {
+    if (typeof generation !== "number" || !Array.isArray(conditions)) {
+        return undefined;
+    }
+    for (const c of conditions) {
+        if (typeof c !== "object" || c === null) continue;
+        const cond = c as {
+            type?: unknown;
+            status?: unknown;
+            reason?: unknown;
+            message?: unknown;
+            observedGeneration?: unknown;
+        };
+        if (
+            cond.type === "Ready" &&
+            cond.status === "False" &&
+            cond.reason === HELD_REASON &&
+            typeof cond.observedGeneration === "number" &&
+            cond.observedGeneration >= generation
+        ) {
+            return typeof cond.message === "string" ? cond.message : "";
+        }
+    }
+    return undefined;
+}
+
+/**
  * Poll `getNextApp` until the operator has written at least one status
  * condition, or `waitMs` elapses. Never throws — a kubectl failure mid-poll
  * (a transient apiserver blip) is treated the same as "not reconciled yet"
@@ -144,6 +197,10 @@ export async function waitForOperatorReconcile(
         const parsed = result.ok ? parseNextApp(result.stdout) : undefined;
         if (typeof parsed?.url === "string") {
             lastUrl = parsed.url;
+        }
+        const held = heldMessage(parsed?.generation, parsed?.conditions);
+        if (held !== undefined) {
+            return { reconciled: true, url: lastUrl, held: { message: held } };
         }
         if (isReconciled(parsed?.generation, parsed?.conditions)) {
             return { reconciled: true, url: lastUrl };

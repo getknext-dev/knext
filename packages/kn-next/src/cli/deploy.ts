@@ -54,6 +54,7 @@ import {
     validateCRImageRef,
 } from "./cr-builder";
 import {
+    heldChangeMessage,
     noReconcileMessage,
     RECONCILE_WAIT_MS_DEFAULT,
     waitForOperatorReconcile,
@@ -1273,6 +1274,9 @@ export async function deploy() {
             ),
         ),
     );
+    if (reconcileWait.held) {
+        throw new Error(heldChangeMessage(reconcileWait.held.message));
+    }
     if (reconcileWait.reconciled) {
         log.info(
             { url: reconcileWait.url },

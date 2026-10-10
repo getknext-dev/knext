@@ -11,6 +11,7 @@
 
 import { describe, expect, it } from "bun:test";
 import {
+    heldChangeMessage,
     noReconcileMessage,
     operatorPodCheckCommand,
     RECONCILE_WAIT_MS_DEFAULT,
@@ -260,5 +261,66 @@ describe("waitForOperatorReconcile (#1535)", () => {
             { pollIntervalMs: 1_000, sleep: clock.sleep, now: clock.now },
         );
         expect(clock.now()).toBeGreaterThanOrEqual(RECONCILE_WAIT_MS_DEFAULT);
+    });
+});
+
+describe("held app change (Ready=False, EffectiveSpecInvalid)", () => {
+    const heldMsg =
+        "the change at generation 2 is NOT applied: the platform's defaults make this app's effective spec invalid (spec.scaling): maxScale 50 exceeds the budget. The previous Knative Service keeps serving unchanged";
+    const nextApp = (ready: Record<string, unknown>, gen: number, obs = 2) =>
+        JSON.stringify({
+            metadata: { generation: gen },
+            status: {
+                conditions: [
+                    {
+                        type: "PlatformDefaultsApplied",
+                        status: "False",
+                        observedGeneration: obs,
+                    },
+                    { type: "Ready", observedGeneration: obs, ...ready },
+                ],
+            },
+        });
+    const heldReady = {
+        status: "False",
+        reason: "EffectiveSpecInvalid",
+        message: heldMsg,
+    };
+
+    it("reports held with the operator message, not success", async () => {
+        const r = await waitForOperatorReconcile(
+            () => ({ ok: true, stdout: nextApp(heldReady, 2), stderr: "" }),
+            fakeClock(),
+        );
+        expect(r.held?.message).toBe(heldMsg);
+    });
+
+    it("heldChangeMessage names the field and the remedy", () => {
+        const m = heldChangeMessage(heldMsg);
+        expect(m).toContain("spec.scaling");
+        expect(m).toContain("Raise the platform budget");
+        expect(m).toContain("maxScale / poolMax");
+    });
+
+    it("a normal Ready=True deploy is unchanged", async () => {
+        const r = await waitForOperatorReconcile(
+            () => ({
+                ok: true,
+                stdout: nextApp({ status: "True", reason: "Ready" }, 2),
+                stderr: "",
+            }),
+            fakeClock(),
+        );
+        expect(r.reconciled).toBe(true);
+        expect(r.held).toBeUndefined();
+    });
+
+    it("a hold observed at an older generation keeps waiting, then times out", async () => {
+        const r = await waitForOperatorReconcile(
+            () => ({ ok: true, stdout: nextApp(heldReady, 3, 2), stderr: "" }),
+            { ...fakeClock(), waitMs: 3000 },
+        );
+        expect(r.reconciled).toBe(false);
+        expect(r.held).toBeUndefined();
     });
 });
