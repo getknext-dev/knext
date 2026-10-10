@@ -1,7 +1,9 @@
 import { afterAll, describe, expect, it } from 'bun:test';
+import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { PUBLISH_LANES } from '../scripts/publish-lane-guard.mjs';
 
 /**
  * GUARD (#2036, v2 R1): no `major` changeset for a member of the `fixed` group
@@ -14,6 +16,29 @@ import { join, resolve } from 'node:path';
 
 const ROOT = resolve(import.meta.dir, '..');
 const LEVELS = new Set(['major', 'minor', 'patch']);
+
+/**
+ * The lane a run belongs to: the PR target (`GITHUB_BASE_REF`), else the pushed
+ * ref (`GITHUB_REF_NAME`), else the checked-out branch. A PR is judged by where it
+ * lands, not by its feature-branch name.
+ */
+function currentBranch(env: Record<string, string | undefined> = process.env): string {
+  if (env.GITHUB_BASE_REF) return env.GITHUB_BASE_REF;
+  if (env.GITHUB_REF_NAME) return env.GITHUB_REF_NAME;
+  const r = spawnSync('git', ['branch', '--show-current'], { cwd: ROOT, encoding: 'utf8' });
+  return r.status === 0 ? r.stdout.trim() : '';
+}
+
+/**
+ * Majors are legitimate only where the lane map says the lane publishes a major
+ * of 2 or more. The map is imported, never re-listed, so a lane is added in one
+ * place (`scripts/publish-lane-guard.mjs`). An unknown or empty branch is not a
+ * lane: the answer is no (fail closed).
+ */
+function majorsAllowedOn(branch: string): boolean {
+  const major = PUBLISH_LANES.get(`refs/heads/${branch}`);
+  return major !== undefined && major >= 2;
+}
 
 /** Parse changeset front-matter into {package: level}. Throws on anything malformed. */
 function parseFrontMatter(file: string, text: string): Record<string, string> {
@@ -57,7 +82,7 @@ function packageVersions(root: string): Map<string, string> {
 }
 
 /** Returns human-readable violations; throws on unparseable input. */
-function findViolations(root: string): string[] {
+function findViolations(root: string, branch = ''): string[] {
   const cs = join(root, '.changeset');
   const config = readJson(join(cs, 'config.json'));
   const fixed: string[] = (config.fixed ?? []).flat();
@@ -93,6 +118,7 @@ function findViolations(root: string): string[] {
   for (const [file, b] of bumps) {
     for (const [pkg, level] of Object.entries(b)) {
       if (level !== 'major' || !fixed.includes(pkg)) continue;
+      if (majorsAllowedOn(branch)) continue;
       // fixed group shares one version; fall back to any group member's version
       const v = versions.get(pkg) as string;
       if (v.startsWith('1.')) {
@@ -107,7 +133,7 @@ function findViolations(root: string): string[] {
 
 describe('no major changeset on a 1.x fixed group (#2036)', () => {
   it('the repository has no such changeset', () => {
-    expect(findViolations(ROOT)).toEqual([]);
+    expect(findViolations(ROOT, currentBranch())).toEqual([]);
   });
 
   describe('detector self-checks (temp fixtures)', () => {
@@ -150,6 +176,30 @@ describe('no major changeset on a 1.x fixed group (#2036)', () => {
           }),
         ),
       ).toEqual([]);
+    });
+    describe('majors are allowed on the v2 lane only (#2038, v2 R3a)', () => {
+      const major = { 'a.md': '---\n"@getknext/core": major\n---\n\nx\n' };
+      it('accepts a major when the branch is integration/v2', () => {
+        expect(findViolations(fixture(major), 'integration/v2')).toEqual([]);
+      });
+      it.each([
+        'main',
+        'integration/v1.3',
+        'integration/v1.4',
+        'release/1.x',
+        'integration/v1-coldstart',
+        'integration/v2.0',
+        'feat/integration/v2',
+        '',
+      ])('still flags a major when the branch is %p', (branch) => {
+        expect(findViolations(fixture(major), branch)).toHaveLength(1);
+      });
+      it('reads the lane from the PR target first, then the pushed ref, then git', () => {
+        expect(currentBranch({ GITHUB_BASE_REF: 'integration/v2', GITHUB_REF_NAME: 'x' })).toBe(
+          'integration/v2',
+        );
+        expect(currentBranch({ GITHUB_BASE_REF: '', GITHUB_REF_NAME: 'main' })).toBe('main');
+      });
     });
     it('ignores major on a non-fixed package', () => {
       expect(findViolations(fixture({ 'a.md': '---\n"other": major\n---\n' }))).toEqual([]);

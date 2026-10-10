@@ -72,6 +72,46 @@ export const PUBLISH_LANES = new Map([
 ]);
 
 /**
+ * Lanes that publish in changesets PRE MODE, and the dist-tag pre mode must
+ * carry (#2038, v2 R3a). Keyed by the same full refs as `PUBLISH_LANES`; a key
+ * here that is not a lane there is a bug (pinned in the spec).
+ *
+ * `integration/v2` is the only major-bumping lane: it is cut from `main`, enters
+ * `changeset pre enter next`, and its prereleases move the `next` dist-tag. A
+ * lane absent from this map is not asked about pre mode at all.
+ */
+export const PRE_MODE_TAGS = new Map([['refs/heads/integration/v2', 'next']]);
+
+/**
+ * @param {{lane: Lane | {ref: string}, pre: unknown}} input `pre` is the parsed
+ *   `.changeset/pre.json`, or `undefined` when the file is absent.
+ * @returns {string[]} problems; empty when the lane asks nothing or is satisfied
+ */
+export function checkPreMode({ lane, pre }) {
+  const tag = PRE_MODE_TAGS.get(lane.ref);
+  if (tag === undefined) return [];
+  if (pre === null || typeof pre !== 'object') {
+    return [
+      `${lane.ref} publishes in changesets pre mode (tag ${tag}) but .changeset/pre.json is absent or not an object`,
+    ];
+  }
+  const { mode, tag: actualTag } = /** @type {{mode?: unknown, tag?: unknown}} */ (pre);
+  /** @type {string[]} */
+  const problems = [];
+  if (mode !== 'pre') {
+    problems.push(
+      `${lane.ref}: .changeset/pre.json mode is ${JSON.stringify(mode)}, expected "pre"`,
+    );
+  }
+  if (actualTag !== tag) {
+    problems.push(
+      `${lane.ref}: .changeset/pre.json tag is ${JSON.stringify(actualTag)}, expected ${JSON.stringify(tag)} (the dist-tag this lane moves)`,
+    );
+  }
+  return problems;
+}
+
+/**
  * Release CUT branches: the 1.3 procedure publishes by cutting
  * `release/vX.Y.Z` or `release/vX.Y.Z-rc.N` at the merge SHA on the lane and
  * dispatching `release.yml` from it (1.3.0 shipped from `release/v1.3.0`,
@@ -309,6 +349,19 @@ export function main(argv) {
     packages: readWorkspaceManifests(args.root),
     fixedNames,
   });
+  /** @type {unknown} */
+  let pre;
+  try {
+    pre = JSON.parse(readFileSync(resolve(args.root, '.changeset/pre.json'), 'utf8'));
+  } catch (err) {
+    // Absent is a state the lane may or may not tolerate; unreadable is neither.
+    if (err?.code !== 'ENOENT') return refuse(`cannot read .changeset/pre.json: ${err.message}`);
+  }
+  const preProblems = checkPreMode({ lane, pre });
+  if (preProblems.length > 0) {
+    result.ok = false;
+    result.problems.push(...preProblems);
+  }
   for (const row of result.rows) {
     console.log(`[publish-lane-guard] ${row.name} ${row.version} (major ${row.major ?? '?'})`);
   }
