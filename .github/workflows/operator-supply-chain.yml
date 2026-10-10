@@ -624,16 +624,16 @@ jobs:
       # GitHub Release tagged with the CHANNEL — `operator-vX.Y.Z[-rc.N]` for a
       # version tag (a fresh tag every time, so this release is immutable: the
       # same tag is never re-pushed), or the rolling `operator-edge` channel for
-      # a plain `main` push. `make_latest: "false"` here — the repo's default
-      # view is decided by the operator-latest step below, only for stable tags.
+      # a plain `main` push. `make_latest: "false"` here AND on the
+      # operator-latest step below: an operator release must never take the
+      # repo's Latest badge from the knext (`vX.Y.Z`) release, whose Latest
+      # flag is decided by the release-notes job in release.yml.
       #
-      # `make_latest` on ANY release here does NOT make
-      # `/releases/latest/download/install.yaml` a dependable URL, and the docs
-      # must not use it. GitHub resolves /releases/latest/ to the most RECENTLY
-      # PUBLISHED release repo-wide — and this repo also cuts npm package
-      # releases (`@getknext/core@…`, `@getknext/db@…`). Each of those steals
-      # the pointer, and they carry no assets, so the URL returns 404 until the
-      # next operator publish. Docs address every asset by its OWN tag
+      # Neither does `make_latest` make `/releases/latest/download/install.yaml`
+      # a dependable URL, and the docs must not use it. GitHub resolves
+      # /releases/latest/ to the most RECENTLY PUBLISHED release repo-wide, and
+      # this repo also cuts knext releases that carry no install.yaml, so the URL
+      # would 404. Docs address every asset by its OWN tag
       # (`releases/download/<channel>/install.yaml`), which no other release
       # can steal.
       - name: Publish install.yaml to its channel release (#1667)
@@ -665,7 +665,7 @@ jobs:
         with:
           tag_name: operator-latest
           name: kn-next-operator (latest)
-          make_latest: "true"
+          make_latest: "false"
           files: packages/kn-next-operator/dist/install.yaml
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -144,6 +144,25 @@ describe('the github-release job', () => {
     expect(withBlock['fetch-tags']).toBe(true);
   });
 
+  it('the tag-creating command pins the tag to the published commit', () => {
+    const runs = stepsOf(NOTES_JOB)
+      .map((s) => String(s.run ?? ''))
+      .join('\n');
+    const create = runs.split('\n').filter((l) => /gh release create/.test(l));
+    expect(create.length, 'no `gh release create` line').toBeGreaterThan(0);
+    for (const l of create) expect(l).toContain('--target "${GITHUB_SHA}"');
+  });
+
+  it('never moves or deletes a tag', () => {
+    const runs = stepsOf(NOTES_JOB)
+      .map((s) => String(s.run ?? ''))
+      .join('\n');
+    expect(runs).not.toMatch(/git\s+push\b[^\n]*(--force|--delete|\s-f\b|--mirror|\s:refs\/)/);
+    expect(runs).not.toMatch(/git\s+tag\b[^\n]*(\s-f\b|--force|\s-d\b|--delete)/);
+    expect(runs).not.toMatch(/gh\s+release\s+delete/);
+    expect(runs).not.toMatch(/--cleanup-tag/);
+  });
+
   it('is not a second publisher: no npm publish / changeset publish in it', () => {
     expect(json).not.toMatch(/npm publish|changeset publish|bun run release|bun publish/);
   });

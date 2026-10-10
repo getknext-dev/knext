@@ -309,6 +309,35 @@ const MUTATIONS = [
     replacement: " && steps.trivy.outcome == 'success'\n        env:\n          RELEASE_TAG:",
     expect: 'red',
   },
+  // ── tag placement (round 2) ───────────────────────────────────────────────
+  {
+    id: 'T1',
+    claim: 'the release is created without --target, so the tag lands on the default branch tip',
+    subject: 'workflow',
+    spec: WORKFLOW_SPEC,
+    anchor: 'gh release create "${TAG}" --target "${GITHUB_SHA}" "${args[@]}"\n',
+    replacement: 'gh release create "${TAG}" "${args[@]}"\n',
+    expect: 'red',
+  },
+  {
+    id: 'T2',
+    claim: 'the notes job force-moves the tag after creating the release',
+    subject: 'workflow',
+    spec: WORKFLOW_SPEC,
+    anchor: 'gh release create "${TAG}" --target "${GITHUB_SHA}" "${args[@]}"\n',
+    replacement:
+      'gh release create "${TAG}" --target "${GITHUB_SHA}" "${args[@]}"\n            git push --force origin "${TAG}"\n',
+    expect: 'red',
+  },
+  {
+    id: 'O6',
+    claim: 'the operator-latest step takes the Latest badge from the knext release',
+    subject: 'operatorWorkflow',
+    spec: 'tests/operator-semver-release-workflow.test.ts',
+    anchor: '          name: kn-next-operator (latest)\n          make_latest: "false"\n',
+    replacement: '          name: kn-next-operator (latest)\n          make_latest: "true"\n',
+    expect: 'red',
+  },
   {
     id: 'NEG',
     claim: 'NEGATIVE CONTROL: a comment sentence is reworded (must stay GREEN)',
