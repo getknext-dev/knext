@@ -21,6 +21,8 @@ import (
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	appsv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/api/v1alpha1"
 )
 
 // A lowered connectionBudget must never wedge deletion: the operator's
@@ -59,6 +61,26 @@ func TestAdmission_MetadataOnlyUpdateOfAnOverBudgetAppPasses(t *testing.T) {
 	labelled.Finalizers = []string{"apps.kn-next.dev/external-cleanup"}
 	if _, err := v.ValidateUpdate(ctx, old, labelled); err != nil {
 		t.Errorf("a metadata-only update must pass, got %v", err)
+	}
+}
+
+// A metadata-only update changes no spec, so no spec rule applies to it at all:
+// an app stored with a spec that is invalid today (a rule that tightened since)
+// must still be able to have its finalizer removed or its labels edited.
+func TestAdmission_MetadataOnlyUpdateSkipsSpecRulesEntirely(t *testing.T) {
+	ctx := context.Background()
+	v := &NextAppCustomValidator{}
+
+	old := newNextApp(appsv1alpha1.NextAppSpec{Image: "registry.example.com/app:v1.2.3"}) // tag-only: invalid today
+	next := newNextApp(appsv1alpha1.NextAppSpec{Image: "registry.example.com/app:v1.2.3"})
+	next.Labels = map[string]string{"team": "a"}
+	if _, err := v.ValidateUpdate(ctx, old, next); err != nil {
+		t.Errorf("a metadata-only update must not re-run spec rules, got %v", err)
+	}
+
+	changed := newNextApp(appsv1alpha1.NextAppSpec{Image: "registry.example.com/app:v1.2.4"})
+	if _, err := v.ValidateUpdate(ctx, old, changed); err == nil {
+		t.Error("a real spec change must still be validated")
 	}
 }
 
