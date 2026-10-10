@@ -234,8 +234,7 @@ const MUTATIONS = [
   {
     label: 'select-script: a per-line pin absent at the base commit is not read from main',
     subject: 'select',
-    anchor:
-      'return parseJson(gitShow(repoRoot, mainRef, file), `${file} at ${mainRef}`);',
+    anchor: 'return parseJson(gitShow(repoRoot, mainRef, file), `${file} at ${mainRef}`);',
     replacement: 'return { rcTag: null };',
   },
   {
@@ -245,16 +244,23 @@ const MUTATIONS = [
     replacement: '    return null;',
   },
   {
-    label: 'workflow: the head pin read swallows every read failure as "absent"',
-    subject: 'workflow',
-    anchor: 'git cat-file -e "${HEAD_SHA}:${PIN_FILE_SELECTED}" 2>/dev/null',
-    replacement: 'git show "${HEAD_SHA}:${PIN_FILE_SELECTED}" >/dev/null 2>&1',
+    label:
+      'select-script: an unreadable pin blob reads as absent instead of failing (fall-through)',
+    subject: 'select',
+    anchor: 'throw new Error(`cannot read ${path} at ${rev}: ${err.message}`);',
+    replacement: 'return null;',
   },
   {
-    label: 'workflow: the merge-base pin read swallows every read failure as "absent"',
+    label: 'workflow: the head pin read no longer goes through the shared select-pin reader',
     subject: 'workflow',
-    anchor: 'git cat-file -e "${MERGE_BASE}:${PIN_FILE_SELECTED}" 2>/dev/null',
-    replacement: 'git show "${MERGE_BASE}:${PIN_FILE_SELECTED}" >/dev/null 2>&1',
+    anchor: '--read-pin-at "${HEAD_SHA}"',
+    replacement: '--read-pin-at-disabled "${HEAD_SHA}"',
+  },
+  {
+    label: 'workflow: the merge-base pin read no longer goes through the shared select-pin reader',
+    subject: 'workflow',
+    anchor: '--read-pin-at "${MERGE_BASE}"',
+    replacement: '--read-pin-at-disabled "${MERGE_BASE}"',
   },
   {
     label: 'workflow: stops passing --base-version to the check',
@@ -264,7 +270,7 @@ const MUTATIONS = [
   },
 ];
 
-declareMutations(27);
+declareMutations(28);
 
 const RUNNER = resolveSpecRunner(REPO_ROOT, SPECS[0]);
 
@@ -277,8 +283,8 @@ function specPasses() {
   return r.status === 0;
 }
 
-if (MUTATIONS.length !== 27) {
-  console.error(`FATAL: declared 27 mutations, table has ${MUTATIONS.length}`);
+if (MUTATIONS.length !== 28) {
+  console.error(`FATAL: declared 28 mutations, table has ${MUTATIONS.length}`);
   process.exit(1);
 }
 
