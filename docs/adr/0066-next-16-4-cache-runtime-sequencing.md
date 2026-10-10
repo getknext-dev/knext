@@ -5,7 +5,7 @@
 - **Date:** 2026-10-10
 - **Trigger class:** ADR + hard rule ("don't rewrite the runtime twice"; "gate every feature on the
   official compatibility suite") + public API (the `'use cache'` backend export and its adapter
-  wiring). Reviewed at sprint close per `.claude/rules/workflow.md` (2026-09-22 amendment: not a
+  wiring) + CRD (the `NextApp` fields that render the proto-version and wake-list variables, Z8 #2052). Reviewed at sprint close per `.claude/rules/workflow.md` (2026-09-22 amendment: not a
   merge gate).
 - **Relates to:** ADR-0007 (compat gating — this ADR names the runs that gate the 16.4 floor),
   ADR-0052 (zone functions — Z6 cached reads and Z9 wake-ahead), ADR-0063 (release lines on
@@ -251,7 +251,22 @@ false on `main`.
 | Build id | One resolver: `.next/BUILD_ID` → `KNEXT_BUILD_ID` → `NEXT_DEPLOYMENT_ID`, Next's constant id ignored (the #2100 chain, moved into the shared module) |
 | No build id | ISR: **fail open**, as #2100 does. `'use cache'`: governed by Next's own key, as above. In both cases a one-time warning names the three sources, and `kn-next doctor` reports it |
 | Function proto version (Z6) | **Part of every Z6 cached read's key.** Z6's generated `'use cache'` function takes the bound function's **served** proto version as an explicit argument, so the version lands in the `args` part of Next's key. The operator renders the value into the zone beside `<NAME>_SERVICE_URL`, from the served version Z8 records in `BackendService` status (ADR-0052 D7). The env var name is fixed in Z8's PR, as a CRD/public-API trigger |
-| TTL | Redis `EX` = min(entry `expire`, a configurable max, **default 24 h**). Z6's per-user cached functions use a generated `cacheLife` profile with `expire` ≤ **1 h**; the handler's 24 h cap is the backstop. The cap only bounds eviction: Next itself treats an entry past `expire` as a miss (`types.d.ts`, `CacheEntry.expire`) |
+| TTL | For `expire > 0`: Redis `EX` = min(entry `expire`, a configurable max, **default 24 h**). For `expire <= 0`: **skip the store** (next paragraph). Z6's per-user cached functions use a generated `cacheLife` profile with `expire` ≤ **1 h**; the handler's 24 h cap is the backstop. The cap only bounds eviction: Next itself treats an entry past `expire` as a miss (`types.d.ts`, `CacheEntry.expire`) |
+
+**`expire <= 0` is never sent to Redis.** Next 16.4 calls `set` with `expire: 0` for dynamic
+entries, and its built-in handler skips storing them in production: `if (!process.env.__NEXT_DEV_SERVER
+&& entry.expire === 0) { ...; return }` (`next@16.4.0`, `dist/server/lib/cache-handlers/default.js:120`).
+Redis rejects `SET ... EX 0`, and `redisCall()` (`cache-handler.js:802-808`) trips the shared breaker on
+any error, so an unguarded `min(expire, cap)` would turn every dynamic entry into a breaker trip and
+push ISR onto per-pod memory. The handler therefore:
+- skips the store when `expire <= 0`, **but still fully consumes the entry's value stream** (and
+  resolves the pending set), so Next is never left waiting on a half-read stream;
+- validates arguments before the Redis call, and a client-side validation error (bad TTL, bad key)
+  **never trips the outage breaker**. Only connection and timeout errors do, as today.
+
+jev, `expire: 0` handling: **skip the store, drain the stream, as Next's built-in handler does 0.91** /
+clamp to 1 s and store 0.09 / send `EX 0` and rely on the breaker 0.00 (confidence 0.86). The decision
+rests on the `default.js:120` line and the Redis `EX 0` rejection, not on the score.
 
 Why the proto version is required (#2050). ADR-0052 D7 makes functions roll out first. A function
 rollout changes none of the zone's build id, deployment id or code hash, so nothing in Next's key
@@ -355,7 +370,7 @@ state described a stamp key that does not exist.
   Miss/drop has no such store, so no entry can sit in a shared per-process fallback under the wrong
   key. ISR entries are prerendered pages and route responses shared across users. Its fallback risks
   staleness, not a cross-user leak, and changing a 1.x behaviour is out of this plan's scope.
-  Aligning ISR to miss/drop is filed as tech debt for the sprint-close review, not decided here.
+  Aligning ISR to miss/drop is filed as tech debt (#2122) for the sprint-close review, not decided here.
 - **Breaker: per process, one per process, shared by both handlers** through the shared module (one
   connection, one `unhealthyUntil`).
   - Why per process: a breaker shared across pods needs a store that is up while Redis is down. The
@@ -583,7 +598,7 @@ decisions rests on the code or package evidence cited in its D-section, not on t
 | | One delete-based index for both | 0.01 | Cannot express stale-then-expired; breaks `revalidateTag(tag, profile)`. Round 1's "one shared store 0.93" is withdrawn: it assumed a stamp key that does not exist |
 | Redis down **(r2)** | `'use cache'` miss/drop; ISR keeps its per-process fallback; stated | **0.69** | No per-user data in pod memory; the two handlers degrade differently |
 | | `'use cache'` also falls back per process | 0.27 | Per-user entries in pod memory, outside TTL and invalidation |
-| | Change ISR to miss/drop too | 0.04 | Changes a 1.x behaviour outside this plan; filed as tech debt |
+| | Change ISR to miss/drop too | 0.04 | Changes a 1.x behaviour outside this plan; filed as tech debt (#2122) |
 | Circuit breaker **(r2)** | Per process, shared by both handlers | **0.85** | No external store needed; both handlers agree on Redis state |
 | | Per process, one per handler | 0.14 | A page and its `'use cache'` reads can straddle states |
 | | Held in Redis | 0.01 | Fails exactly when needed |
@@ -643,7 +658,7 @@ decisions rests on the code or package evidence cited in its D-section, not on t
   the flag's intent.
 - **Two outage behaviours.** During a Redis outage ISR serves from per-pod memory and `'use cache'`
   recomputes. An operator reading metrics sees `source: 'memory'` for one and misses for the other.
-  Aligning ISR is tech debt, filed at sprint close.
+  Aligning ISR is tech debt, filed as #2122.
 - **Two tag mechanisms.** One `revalidateTag` reaches both through Next's fan-out. A future ISR
   move to timestamp semantics needs its own ADR and a three-step migration.
 - **No build id → ISR shared across builds.** Images built outside knext with none of the three
@@ -698,6 +713,11 @@ decisions rests on the code or package evidence cited in its D-section, not on t
      before refreshing;
    - with Redis down, a `set` then `get` in one process returns a miss: no per-process store exists;
    - the Redis TTL never exceeds the cap;
+   - `set` with `expire: 0` stores nothing, fully drains the value stream, and does **not** trip the
+     breaker: ISR still serves from Redis afterwards. Mutation-proved by removing the `expire <= 0`
+     guard (the test reds because the breaker opens);
+   - a client-side validation error in the `'use cache'` path leaves the breaker closed, while a
+     connection error opens it;
    - a `get` racing a pending `set` waits for it rather than missing.
 7. **#2089** through the shared module. Exit per its issue: `cache-handler-next-stale-after-wake`
    passes without the seed, and upstream `isr-cache-control-restart` passes in R6.
@@ -710,7 +730,10 @@ decisions rests on the code or package evidence cited in its D-section, not on t
      `updateTag` test.
 9. **ADR-0004 amendment** (with Z8): record `<NAME>_SERVICE_URL`'s name derivation, the wake-list
    variable and the served-proto-version variable as the operator↔runtime contract, with the shared
-   fixture tested in Go and TypeScript.
+   fixture tested in Go and TypeScript. **Scope and exit criteria of Z8 #2052 (a CRD trigger):**
+   rendering the served proto version and the wake list into the `NextApp` zone's env is part of
+   #2052, not left to #2050 or #2054; its exit test shows a bumped served version re-renders the
+   zone's env and rolls a new revision.
 10. **Primer list (Z9's first commit):**
     - move the ARP block into `PROCESS_START_PRIMERS`, consumed by `node-server.ts` and
       `standalone-compile.mjs`, with `abortPrimers()` on the `globalThis` anchor called first in
@@ -722,4 +745,4 @@ decisions rests on the code or package evidence cited in its D-section, not on t
 11. **Docs wording** for 16.4 stays "builds and serves; credential in progress" until the v2
     credential lanes (created per the v2 plan, after R5 and at 2.0 GA) complete their windows.
 12. **Tech debt for sprint close:** ISR's per-process outage fallback, and its delete-only handling of
-    `revalidateTag(tag, profile)`.
+    `revalidateTag(tag, profile)`. Filed as #2122 (milestone v2.0, `priority:P2`).
