@@ -348,6 +348,7 @@ describe("held app change (Ready=False, EffectiveSpecInvalid)", () => {
         for (const cond of [
             { type: "Ready", status: "True", reason: "InvalidSpec" },
             { type: "Degraded", status: "True", reason: "InvalidSpec" },
+            { type: "Degraded", status: "False", reason: "InvalidSpec" },
         ]) {
             const r = await waitForOperatorReconcile(
                 () => ({ ok: true, stdout: only(cond), stderr: "" }),
