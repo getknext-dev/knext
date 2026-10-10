@@ -40,11 +40,25 @@ export interface ReconcileWaitResult {
      * Service keeps serving, so "reconciled" would be a false success.
      * `message` is the operator's own Ready message (it names the field).
      */
-    held?: { message: string };
+    held?: { message: string; kind: "platform" | "spec" };
 }
 
 /** The Ready reason the operator writes when it holds an app change. */
 export const HELD_REASON = "EffectiveSpecInvalid";
+
+/**
+ * The reason the operator writes when the app's OWN spec is invalid
+ * (including a footprint over the built-in budget). The change is not
+ * applied either; the previous version keeps serving. The Ready message is
+ * generic ("Spec does not meet validation requirements"); the specific,
+ * field-naming message is on the Degraded condition with the same reason.
+ */
+export const INVALID_SPEC_REASON = "InvalidSpec";
+
+/** The actionable failure for an app whose own spec the operator rejected. */
+export function invalidSpecMessage(operatorMessage: string): string {
+    return `The operator rejected this spec; the previous version is still serving. ${operatorMessage} Fix the spec in knext.config.ts and deploy again.`;
+}
 
 /**
  * The actionable failure for a held app change: the operator's own message
@@ -128,6 +142,29 @@ function isReconciled(
     });
 }
 
+/** Prefer the Degraded/InvalidSpec message (names the field) over Ready's. */
+function invalidSpecDetail(
+    conditions: unknown[],
+    generation: number,
+    readyMessage: unknown,
+): string {
+    for (const c of conditions) {
+        if (typeof c !== "object" || c === null) continue;
+        const d = c as Record<string, unknown>;
+        if (
+            d.type === "Degraded" &&
+            d.status === "True" &&
+            d.reason === INVALID_SPEC_REASON &&
+            typeof d.observedGeneration === "number" &&
+            d.observedGeneration >= generation &&
+            typeof d.message === "string"
+        ) {
+            return d.message;
+        }
+    }
+    return typeof readyMessage === "string" ? readyMessage : "";
+}
+
 /**
  * The operator's Ready message when it holds this generation's change, else
  * undefined. Only a Ready condition observed AT OR AFTER `generation` counts,
@@ -136,10 +173,11 @@ function isReconciled(
 function heldMessage(
     generation: number | undefined,
     conditions: unknown[] | undefined,
-): string | undefined {
+): { message: string; kind: "platform" | "spec" } | undefined {
     if (typeof generation !== "number" || !Array.isArray(conditions)) {
         return undefined;
     }
+    const atGen = (o: unknown) => typeof o === "number" && o >= generation;
     for (const c of conditions) {
         if (typeof c !== "object" || c === null) continue;
         const cond = c as {
@@ -153,10 +191,27 @@ function heldMessage(
             cond.type === "Ready" &&
             cond.status === "False" &&
             cond.reason === HELD_REASON &&
-            typeof cond.observedGeneration === "number" &&
-            cond.observedGeneration >= generation
+            atGen(cond.observedGeneration)
         ) {
-            return typeof cond.message === "string" ? cond.message : "";
+            return {
+                message: typeof cond.message === "string" ? cond.message : "",
+                kind: "platform",
+            };
+        }
+        if (
+            cond.type === "Ready" &&
+            cond.status === "False" &&
+            cond.reason === INVALID_SPEC_REASON &&
+            atGen(cond.observedGeneration)
+        ) {
+            return {
+                message: invalidSpecDetail(
+                    conditions,
+                    generation,
+                    cond.message,
+                ),
+                kind: "spec",
+            };
         }
     }
     return undefined;
@@ -200,7 +255,7 @@ export async function waitForOperatorReconcile(
         }
         const held = heldMessage(parsed?.generation, parsed?.conditions);
         if (held !== undefined) {
-            return { reconciled: true, url: lastUrl, held: { message: held } };
+            return { reconciled: true, url: lastUrl, held };
         }
         if (isReconciled(parsed?.generation, parsed?.conditions)) {
             return { reconciled: true, url: lastUrl };

@@ -12,6 +12,7 @@
 import { describe, expect, it } from "bun:test";
 import {
     heldChangeMessage,
+    invalidSpecMessage,
     noReconcileMessage,
     operatorPodCheckCommand,
     RECONCILE_WAIT_MS_DEFAULT,
@@ -300,6 +301,63 @@ describe("held app change (Ready=False, EffectiveSpecInvalid)", () => {
         expect(m).toContain("spec.scaling");
         expect(m).toContain("Raise the platform budget");
         expect(m).toContain("maxScale / poolMax");
+    });
+
+    it("InvalidSpec at the current generation is a failed deploy, with the spec remedy", async () => {
+        const detail =
+            "spec.scaling.maxScale: 500 exceeds the connection budget";
+        const stdout = JSON.stringify({
+            metadata: { generation: 2 },
+            status: {
+                conditions: [
+                    {
+                        type: "Degraded",
+                        status: "True",
+                        reason: "InvalidSpec",
+                        message: detail,
+                        observedGeneration: 2,
+                    },
+                    {
+                        type: "Ready",
+                        status: "False",
+                        reason: "InvalidSpec",
+                        message: "Spec does not meet validation requirements",
+                        observedGeneration: 2,
+                    },
+                ],
+            },
+        });
+        const r = await waitForOperatorReconcile(
+            () => ({ ok: true, stdout, stderr: "" }),
+            fakeClock(),
+        );
+        expect(r.held?.kind).toBe("spec");
+        expect(r.held?.message).toBe(detail);
+        const m = invalidSpecMessage(r.held?.message ?? "");
+        expect(m).toContain("spec.scaling.maxScale");
+        expect(m).toContain(
+            "Fix the spec in knext.config.ts and deploy again.",
+        );
+        expect(m).not.toContain("Raise the platform budget");
+        expect(heldChangeMessage(heldMsg)).toContain(
+            "Raise the platform budget",
+        );
+    });
+
+    it("a stale InvalidSpec from an older generation is not a failure", async () => {
+        const r = await waitForOperatorReconcile(
+            () => ({
+                ok: true,
+                stdout: nextApp(
+                    { status: "False", reason: "InvalidSpec", message: "x" },
+                    3,
+                    2,
+                ),
+                stderr: "",
+            }),
+            { ...fakeClock(), waitMs: 3000 },
+        );
+        expect(r.held).toBeUndefined();
     });
 
     it("a normal Ready=True deploy is unchanged", async () => {

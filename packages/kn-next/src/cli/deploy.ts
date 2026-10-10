@@ -55,6 +55,7 @@ import {
 } from "./cr-builder";
 import {
     heldChangeMessage,
+    invalidSpecMessage,
     noReconcileMessage,
     RECONCILE_WAIT_MS_DEFAULT,
     waitForOperatorReconcile,
@@ -1275,7 +1276,12 @@ export async function deploy() {
         ),
     );
     if (reconcileWait.held) {
-        throw new Error(heldChangeMessage(reconcileWait.held.message));
+        const h = reconcileWait.held;
+        throw new Error(
+            h.kind === "spec"
+                ? invalidSpecMessage(h.message)
+                : heldChangeMessage(h.message),
+        );
     }
     if (reconcileWait.reconciled) {
         log.info(

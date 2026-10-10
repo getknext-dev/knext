@@ -308,6 +308,11 @@ exceeded), the previous version keeps serving and the app reports not Ready. Dep
 with the operator's message, which names the field, and the remedy: raise the platform budget, or
 lower `maxScale` / `poolMax` in `knext.config.ts`, then deploy again.
 
+The same applies when the operator rejects your own spec outright (for example a field that fails
+validation, or a footprint over the built-in budget): the previous version keeps serving, deploy exits
+`1` with the operator's message naming the field, and the remedy is to fix the spec in
+`knext.config.ts` and deploy again.
+
 **Placeholders fail fast.** Before any build step, deploy refuses config values still carrying a
 `<...>` placeholder from the scaffold (like `ghcr.io/<your-user>`), with a per-field explanation of
 what the value is for and what to put there — so an unfinished config never costs you a
