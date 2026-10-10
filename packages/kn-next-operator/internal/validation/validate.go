@@ -194,6 +194,23 @@ func ValidateNextAppSpec(spec *appsv1alpha1.NextAppSpec) error {
 // per-cluster value). With budget == MaxAppConnections it is byte-for-byte the
 // same check, error text included.
 func ValidateNextAppSpecWithBudget(spec *appsv1alpha1.NextAppSpec, budget int) error {
+	return validateNextAppSpec(spec, budget, 0)
+}
+
+// connectionFootprint is maxScale × poolMax, the number the budget rule checks.
+// It is 0 when the app declares no poolMax or an unbounded maxScale: those are
+// not a finite wall (an unbounded one is rejected outright, never grandfathered).
+func connectionFootprint(spec *appsv1alpha1.NextAppSpec) int64 {
+	if spec == nil || spec.Scaling == nil || spec.Scaling.PoolMax <= 0 || spec.Scaling.MaxScale <= 0 {
+		return 0
+	}
+	return int64(spec.Scaling.MaxScale) * int64(spec.Scaling.PoolMax)
+}
+
+// validateNextAppSpec is the shared spec check. grandfathered is the connection
+// footprint an UPDATE may carry forward over the budget (the previous spec's
+// maxScale × poolMax); 0 means no grace, which is what create and the reconciler use.
+func validateNextAppSpec(spec *appsv1alpha1.NextAppSpec, budget int, grandfathered int64) error {
 	if spec == nil {
 		return fmt.Errorf("spec is required")
 	}
@@ -247,7 +264,7 @@ func ValidateNextAppSpecWithBudget(spec *appsv1alpha1.NextAppSpec, budget int) e
 					s.PoolMax, budget, budget,
 				)
 			}
-			if int64(s.MaxScale)*int64(s.PoolMax) > int64(budget) {
+			if wall := int64(s.MaxScale) * int64(s.PoolMax); wall > int64(budget) && wall > grandfathered {
 				if budget != MaxAppConnections {
 					// A KnextPlatform moved the cap: the built-in derivation
 					// (gateway cap minus reserve) is not the explanation here.
@@ -816,8 +833,15 @@ func ValidateNextAppSpecUpdate(oldSpec, newSpec *appsv1alpha1.NextAppSpec) error
 
 // ValidateNextAppSpecUpdateWithBudget is ValidateNextAppSpecUpdate with the
 // connection budget supplied by the caller. With MaxAppConnections it is identical.
+//
+// The budget rule is RATCHETED like the collision rules below: an update is
+// rejected for the wall only when it RAISES maxScale × poolMax above the budget.
+// A platform that lowers database.connectionBudget must not brick an app that
+// was valid when it was admitted, so an image-only update (or one that lowers
+// the wall) is allowed even while the app is over the new budget; the reconciler
+// still reports it. Every other rule applies to the new spec unchanged.
 func ValidateNextAppSpecUpdateWithBudget(oldSpec, newSpec *appsv1alpha1.NextAppSpec, budget int) error {
-	if err := ValidateNextAppSpecWithBudget(newSpec, budget); err != nil {
+	if err := validateNextAppSpec(newSpec, budget, connectionFootprint(oldSpec)); err != nil {
 		return err
 	}
 	old := map[string]struct{}{}

@@ -42,6 +42,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
+	platformv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/api/platform/v1alpha1"
 	appsv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/api/v1alpha1"
 )
 
@@ -68,6 +69,7 @@ var _ = BeforeSuite(func() {
 	ctx, cancel = context.WithCancel(context.TODO())
 
 	Expect(appsv1alpha1.AddToScheme(scheme.Scheme)).To(Succeed())
+	Expect(platformv1alpha1.AddToScheme(scheme.Scheme)).To(Succeed())
 	Expect(admissionv1.AddToScheme(scheme.Scheme)).To(Succeed())
 
 	By("bootstrapping test environment with the validating webhook")

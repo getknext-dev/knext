@@ -166,18 +166,29 @@ describe('docs — platform defaults', () => {
     expect(page).toMatch(/fills in the other\s+three/);
   });
 
-  it('warns that lowering the budget blocks every update to an app over it, and says what to do', () => {
-    // The claim is only true while the update path has no ratchet for the budget:
-    // the new spec is checked against the budget before anything else, whatever the
-    // old spec was. If the operator ever adds a grace, this page must change too.
+  it('warns that lowering the budget does not roll out changes to an app over it, and says what to do', () => {
+    // The page claims an UPDATE of an over-budget app is accepted unless it raises
+    // maxScale x poolMax, and that deletion always goes through. Both are only true
+    // while the code ratchets the budget rule and short-circuits deletion.
     const validate = readFileSync(join(OPERATOR, 'internal/validation/validate.go'), 'utf-8');
     expect(validate).toMatch(
-      /func ValidateNextAppSpecUpdateWithBudget\([^)]*\) error \{\n\tif err := ValidateNextAppSpecWithBudget\(newSpec, budget\); err != nil \{\n\t\treturn err\n\t\}/,
+      /func ValidateNextAppSpecUpdateWithBudget\([^)]*\) error \{\n\tif err := validateNextAppSpec\(newSpec, budget, connectionFootprint\(oldSpec\)\); err != nil \{/,
     );
+    const webhook = readFileSync(
+      join(OPERATOR, 'internal/webhook/v1alpha1/nextapp_webhook.go'),
+      'utf-8',
+    );
+    expect(webhook).toMatch(/newApp\.GetDeletionTimestamp\(\) != nil \{\n\t\treturn nil, nil/);
     expect(page).toMatch(
-      /Lowering the budget blocks every update to an app that is already over it/,
+      /Lowering the budget does not roll out changes to an app that is already over it/,
     );
-    expect(page).toMatch(/including a deploy that only changes\s+the image/);
+    expect(page).not.toMatch(/rejects every update to that app/);
+    expect(page).toMatch(/deleting the app, editing its\s+labels or annotations/);
+    expect(page).toMatch(/a deploy that only changes the image all go through/);
+    expect(page).toMatch(/does not start serving until the app fits/);
+    expect(page).toMatch(
+      /An update that raises `maxScale × poolMax` above the\s+budget is rejected/,
+    );
     // Both ways out.
     expect(page).toMatch(/raise `database\.connectionBudget` back/);
     expect(page).toMatch(/lower the app's `maxScale` or `poolMax`/);
