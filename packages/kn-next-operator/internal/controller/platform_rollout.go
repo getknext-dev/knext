@@ -106,11 +106,20 @@ func (l *rolloutLimiter) reserve(app types.NamespacedName, now time.Time, perMin
 }
 
 // release drops app's outstanding reservation, if any, and refreshes the backlog
-// gauge. A deleted app never returns for its slot; without this its entry would
-// keep rollout_pending raised until an unrelated app next called reserve.
+// gauge. It is how a queued app hands its slot back when it stops being queued
+// without returning for it: deleted, rolled by its own spec change, held for a
+// different reason, or found already rendered (a pass that read a stale cache
+// can reserve for an app another pass has just rendered). Without this the
+// entry keeps rollout_pending raised until the stale bound sweeps it.
+//
+// A no-op for an app with no reservation, so it is safe, and cheap, to call on
+// every pass that does not queue.
 func (l *rolloutLimiter) release(app types.NamespacedName) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if _, held := l.slots[app]; !held {
+		return
+	}
 	delete(l.slots, app)
 	rolloutPending.Set(float64(len(l.slots)))
 }

@@ -555,6 +555,9 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		if gate, gateErr = r.gateRollout(ctx, &nextApp, snap, eff); gateErr != nil {
 			return ctrl.Result{}, gateErr
 		}
+	} else {
+		// Held for another reason (an invalid merged spec): not waiting for a slot.
+		r.rollout.release(req.NamespacedName)
 	}
 	// Fleet metrics observe the gate; they never decide it (platform_metrics.go).
 	r.held.observe(req.NamespacedName, gate)
