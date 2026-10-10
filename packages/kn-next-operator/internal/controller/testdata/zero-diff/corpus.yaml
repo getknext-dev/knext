@@ -39,7 +39,7 @@ spec:
     region: us-central1
   cache:
     provider: redis
-    url: redis://redis.default.svc:6379
+    url: redis://redis.default.svc.:6379
     keyPrefix: v10
   revalidation:
     queue: kafka

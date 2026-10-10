@@ -69,7 +69,7 @@ spec:
         - name: CACHE_PROVIDER
           value: redis
         - name: REDIS_URL
-          value: redis://redis.default.svc:6379
+          value: redis://redis.default.svc.:6379
         - name: REDIS_KEY_PREFIX
           value: v10
         - name: KAFKA_BROKER_URL

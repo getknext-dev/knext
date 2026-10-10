@@ -86,6 +86,11 @@ knext gets a **platform layer**: a new CRD, `KnextPlatform` (`platform.kn-next.d
 on `metadata.name`. It is the platform's own config, separate from the build CLI
 (`knext.config.ts`) and from the per-app `NextApp`.
 
+The declared platform CRD API version, machine-read by `tests/release-policy-matrix.test.ts` the
+way ADR-0017's anchor declares the `NextApp` one:
+
+<!-- PLATFORM_CRD_API_VERSION: platform.kn-next.dev/v1alpha1 -->
+
 The **operator reads it** and uses it in two ways:
 
 1. **Defaults:** when rendering an app, the operator fills **only the fields the app leaves unset**.
