@@ -6,6 +6,7 @@
     "build": "turbo run build",
     "dev": "turbo run dev",
     "lint": "biome check .",
+    "prepush": "node scripts/prepush.mjs",
     "lint:ts-imports": "node scripts/check-ts-import-extensions.mjs",
     "lint:mutation-residue": "node scripts/scan-mutation-residue.mjs",
     "verify:phase-gates": "node scripts/verify-phase-gates.mjs",

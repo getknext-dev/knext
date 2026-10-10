@@ -10,6 +10,19 @@
 - **Security vulnerability?** Do **not** open a public issue. See [SECURITY.md](SECURITY.md) for
   private reporting via GitHub Security Advisories.
 
+## Before you push: `bun run prepush`
+
+PRs kept going red on the same three local checks. One command runs exactly what CI's
+Lint & Test runs first, in order, without short-circuiting, and exits non-zero if any fail:
+
+```bash
+bun run prepush   # biome check --diagnostic-level=error, the D9 temp-dir guard, typecheck
+```
+
+Run it before every push (agents included). After a merge, `.github/workflows/merged-sha-check.yml`
+fails if the commit that landed on `main` or `integration/**` does not contain the PR's final head
+(`scripts/merged-sha-check.mjs`: ancestry, or for squash merges, per-file blob equality).
+
 ## Mutation-proving a guard
 
 Every new guard is mutation-proved (delete the behaviour it protects, watch it go RED, restore).
