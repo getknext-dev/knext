@@ -1277,7 +1277,9 @@ export async function deploy() {
     );
     if (reconcileWait.held) {
         const h = reconcileWait.held;
-        throw new Error(
+        // A held change is the user's to fix (config or platform budget), so it
+        // renders as a message, not a FATAL stack dump.
+        throw new UsageError(
             h.kind === "spec"
                 ? invalidSpecMessage(h.message)
                 : heldChangeMessage(h.message),
