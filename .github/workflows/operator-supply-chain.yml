@@ -593,6 +593,24 @@ jobs:
             echo "::error::dist/install-v${VERSION}.yaml does not carry the version label ${VERSION}"; exit 1; }
           echo "path=packages/kn-next-operator/dist/install-v${VERSION}.yaml" >> "$GITHUB_OUTPUT"
 
+      # Release body for version tags (#2153): generated FROM the attached
+      # install.yaml, so the image digest, CRD API version and cert-manager
+      # requirement it states are read from the asset beside it, never typed.
+      # Plain `node` (builtins only, no install step). Skipped for operator-edge,
+      # whose rolling release keeps whatever body it has.
+      - name: Generate the operator release body from install.yaml (version tags only, #2153)
+        id: release_body
+        if: steps.channel.outputs.publish == 'true' && steps.trivy.outcome == 'success' && steps.channel.outputs.is_version_tag == 'true'
+        env:
+          RELEASE_TAG: ${{ steps.channel.outputs.release_tag }}
+          REPO: ${{ github.repository }}
+        run: |
+          node scripts/operator-release-notes-body.mjs \
+            --tag "${RELEASE_TAG}" \
+            --repo "${REPO}" \
+            --install packages/kn-next-operator/dist/install.yaml \
+            --out "${RUNNER_TEMP}/operator-release-body.md"
+
       # Transient CI artifact (auth-gated) — handy for inspecting the exact bundle a
       # run produced, but NOT the user-facing install path.
       - name: Upload install.yaml artifact (main + release tags only)
@@ -625,6 +643,9 @@ jobs:
           tag_name: ${{ steps.channel.outputs.release_tag }}
           name: kn-next-operator ${{ steps.channel.outputs.release_tag }}
           make_latest: "false"
+          # Empty for operator-edge (the step above is skipped), which softprops
+          # ignores — the rolling release keeps its body.
+          body_path: ${{ steps.release_body.outputs.path }}
           # install.yaml (compat name) + install-vX.Y.Z.yaml (version tags only;
           # the blank line is the operator-edge case and is ignored).
           files: |
