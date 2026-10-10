@@ -70,9 +70,13 @@ describe("CacheHandler constructor argument shapes", () => {
     });
 
     it("passes Next's real handler options object through unchanged", () => {
-        // Every key Next declares, each holding a plain object, so that if Next
-        // ever adds `env` AND `options` the object is shaped like the wrapper
-        // and this test reds.
+        // Every key Next declares, each holding a plain object. This proves the
+        // real key set passes through unchanged; it does NOT by itself guard a
+        // colliding `env` + `options` pair. Next's argument always carries other
+        // keys (serverDistDir, revalidatedTags, ...), and the wrapper is only
+        // recognised when it has exactly those two keys, so a future Next adding
+        // both is caught by the "carrying BOTH `env` and `options` plus its own
+        // keys" test below, which is the real guard.
         const arg = Object.fromEntries(
             nextHandlerContextKeys().map((k) => [k, { sentinel: k }]),
         );

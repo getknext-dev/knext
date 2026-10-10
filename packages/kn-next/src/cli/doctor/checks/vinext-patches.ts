@@ -22,6 +22,7 @@ import {
     loadVinextPatchManifest,
     VINEXT_PATCHES_ENV,
     vinextPatchesDisabled,
+    vinextPatchesStrict,
 } from "../../vinext-patches";
 import { parseSemver, type Semver } from "../operator-version";
 import { mk } from "../report";
@@ -63,7 +64,11 @@ export function vinextPatchesCheck(ctx: CheckContext): CheckResult[] {
     const manifest = loadVinextPatchManifest();
     const expected = manifest.vinext;
     const count = manifest.patches.length;
-    const fix = `install vinext@${expected} and run \`knext vinext-patches\` (set ${VINEXT_PATCHES_ENV}=strict to make \`knext build\` fail on this mismatch)`;
+    // Suggest strict only when it is not already the active mode.
+    const strictHint = vinextPatchesStrict()
+        ? ""
+        : ` (set ${VINEXT_PATCHES_ENV}=strict to make \`knext build\` fail on this mismatch)`;
+    const fix = `install vinext@${expected} and run \`knext vinext-patches\`${strictHint}`;
 
     if (installed === expected) {
         return [
