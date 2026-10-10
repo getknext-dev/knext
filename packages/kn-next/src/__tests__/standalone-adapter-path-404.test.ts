@@ -352,5 +352,28 @@ describe("dynamicParams=false 404 under adapterPath: standalone, concurrent pref
             invariants,
             `server log carries the invariant -- ${summary}`,
         ).toBe(0);
+
+        // A closed matcher that rejects a path must let the request fall through
+        // to the less specific catch-all, not stop with the closed route's 404
+        // (vercel/next.js app-dir/dynamic-params-request-modes). With adapterPath
+        // set Next ends the request in render404(); unset, it throws
+        // NoFallbackError and its own router carries on.
+        const fetchText = async (path: string) => {
+            const res = await fetch(`http://127.0.0.1:${port}${path}`, {
+                signal: AbortSignal.timeout(30_000),
+            });
+            return { status: res.status, body: await res.text() };
+        };
+        const known = await fetchText("/overlap/known");
+        expect(known.status, summary).toBe(200);
+        expect(known.body).toContain('id="specific"');
+        const unlisted = await fetchText("/overlap/unlisted");
+        expect(
+            unlisted.status,
+            `/overlap/unlisted must fall through to the catch-all -- ${summary}`,
+        ).toBe(200);
+        expect(unlisted.body).toContain('id="catch-all">unlisted<');
+        // Still closed where nothing less specific matches.
+        expect((await fetchText("/es")).status).toBe(404);
     }, 420_000);
 });

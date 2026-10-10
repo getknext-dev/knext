@@ -195,10 +195,10 @@ export interface CompileForDeployResult {
      */
     readonly healed?: HealResult;
     /**
-     * What the Next.js < 16.4.0 `adapterPath` workaround did to the standalone
-     * config (see `adapters/standalone-adapter-path.ts`), present whenever a
-     * standalone server was there to inspect. `applied: false` carries the
-     * reason (a fixed Next, or nothing to blank).
+     * What the `adapterPath` workaround did to the standalone config (see
+     * `adapters/standalone-adapter-path.ts`), present whenever a standalone
+     * server was there to inspect. `applied: false` carries the reason
+     * (nothing to blank).
      */
     readonly adapterPathWorkaround?: BlankAdapterPathResult;
     /**
@@ -295,9 +295,9 @@ export function compileArtifactForDeploy(
                 );
             }
         }
-        // The Next.js < 16.4.0 `adapterPath` workaround, BEFORE any compile so
-        // the Bun executable bundles the already-blanked config. Both runtimes:
-        // the node image ships this same tree. A no-op on Next >= 16.4.0.
+        // The `adapterPath` workaround, BEFORE any compile so the Bun
+        // executable bundles the already-blanked config. Both runtimes: the
+        // node image ships this same tree. Applies on every Next version.
         const adapterPathWorkaround = existsSync(layout.serverPath)
             ? blankStandaloneAdapterPath({
                   serverDir: layout.serverDir,
