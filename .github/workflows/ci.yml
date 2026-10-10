@@ -1054,7 +1054,7 @@ jobs:
     timeout-minutes: 15
     services:
       postgres:
-        image: mirror.gcr.io/library/postgres:16
+        image: mirror.gcr.io/library/postgres:16@sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d
         env:
           POSTGRES_USER: knext
           POSTGRES_PASSWORD: knext-ci-throwaway

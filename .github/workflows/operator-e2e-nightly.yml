@@ -296,7 +296,7 @@ jobs:
         run: |
           set -euo pipefail
           reg=kind-registry
-          docker run -d --restart=always -p 127.0.0.1:5001:5000 --name "$reg" registry:2
+          docker run -d --restart=always -p 127.0.0.1:5001:5000 --name "$reg" mirror.gcr.io/library/registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
           # Join the kind network so the node can resolve the registry by name.
           docker network connect kind "$reg"
           # certs.d: the node rewrites `localhost:5001/...` (the ref the operator
