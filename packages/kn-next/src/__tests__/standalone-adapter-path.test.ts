@@ -252,64 +252,87 @@ describe("blankStandaloneAdapterPath -- what it rewrites", () => {
     });
 });
 
-describe("blankStandaloneAdapterPath -- strictly gated on the Next.js version", () => {
+describe("blankStandaloneAdapterPath -- applies on EVERY Next.js version", () => {
+    // Next >= 16.4.0 fixed the response-cache 500, but its adapterPath branch is
+    // still `return await render404()` where an unset one is `throw new
+    // NoFallbackError()`. render404 ends the request; NoFallbackError lets
+    // Next's own router try the next, less specific route. knext boots Next's own
+    // router (not an adapter routing layer), so it needs the fall-through on
+    // 16.4 too.
     it.each([
         "16.4.0",
         "16.4.1",
         "17.0.0",
-    ])("Next %s: leaves every byte alone", (nextVersion) => {
+    ])("Next %s: blanks adapterPath in both config files", (nextVersion) => {
         const { serverDir } = tree({ nextVersion });
-        const server = read(join(serverDir, "server.js"));
-        const manifest = read(
-            join(serverDir, ".next", "required-server-files.json"),
-        );
         const result = blankStandaloneAdapterPath({ serverDir });
-        expect(result.applied).toBe(false);
+        expect(result.applied).toBe(true);
         expect(result.nextVersion).toBe(nextVersion);
-        expect(result.reason).toContain("no workaround needed");
-        expect(read(join(serverDir, "server.js"))).toBe(server);
+        expect(result.files.sort()).toEqual(
+            [
+                join(serverDir, "server.js"),
+                join(serverDir, ".next", "required-server-files.json"),
+            ].sort(),
+        );
+        expect(read(join(serverDir, "server.js"))).toContain(
+            '"adapterPath":""',
+        );
+        expect(read(join(serverDir, "server.js"))).not.toContain(ADAPTER);
         expect(
-            read(join(serverDir, ".next", "required-server-files.json")),
-        ).toBe(manifest);
+            JSON.parse(
+                read(join(serverDir, ".next", "required-server-files.json")),
+            ).config.adapterPath,
+        ).toBe("");
     });
 
-    it("an explicit nextVersion overrides what is installed", () => {
+    it("Next 16.3.8 (the 1.x credential): the rewrite is byte-identical to what it always was", () => {
+        const { serverDir } = tree({ nextVersion: "16.3.8" });
+        const before = read(join(serverDir, "server.js"));
+        const result = blankStandaloneAdapterPath({ serverDir });
+        expect(result.applied).toBe(true);
+        expect(read(join(serverDir, "server.js"))).toBe(
+            before.replace(`"adapterPath":"${ADAPTER}"`, `"adapterPath":""`),
+        );
+    });
+
+    it("the reason names the fall-through on a fixed Next, and the 500 on an affected one", () => {
+        const fixed = blankStandaloneAdapterPath({
+            serverDir: tree({ nextVersion: "16.4.0" }).serverDir,
+        });
+        expect(fixed.reason).toContain("fall through");
+        const affected = blankStandaloneAdapterPath({
+            serverDir: tree({ nextVersion: "16.3.8" }).serverDir,
+        });
+        expect(affected.reason).toContain("500");
+    });
+
+    it("an explicit nextVersion changes the reason, never whether it applies", () => {
         const { serverDir } = tree({ nextVersion: "16.3.6" });
         const result = blankStandaloneAdapterPath({
             serverDir,
             nextVersion: "16.4.0",
         });
-        expect(result.applied).toBe(false);
-        expect(read(join(serverDir, "server.js"))).toContain(ADAPTER);
+        expect(result.applied).toBe(true);
+        expect(result.nextVersion).toBe("16.4.0");
+        expect(read(join(serverDir, "server.js"))).not.toContain(ADAPTER);
     });
 
-    it("an unreadable Next version is NOT treated as affected: nothing is rewritten, and it says so", () => {
+    it("an unreadable Next version still blanks: the runtime does not need the adapter, whatever Next it is", () => {
         const { serverDir } = tree({}); // no node_modules/next anywhere
-        const logs: string[] = [];
-        const result = blankStandaloneAdapterPath({
-            serverDir,
-            log: (m) => logs.push(m),
-        });
-        expect(result.applied).toBe(false);
+        const result = blankStandaloneAdapterPath({ serverDir });
+        expect(result.applied).toBe(true);
         expect(result.nextVersion).toBeNull();
-        expect(result.reason).toContain(
-            "could not read the installed Next.js version",
-        );
-        expect(logs.join("\n")).toContain(
-            "could not read the installed Next.js version",
-        );
-        expect(read(join(serverDir, "server.js"))).toContain(ADAPTER);
+        expect(read(join(serverDir, "server.js"))).not.toContain(ADAPTER);
     });
 
-    it("an unrecognisable version string is NOT treated as affected", () => {
+    it("an unrecognisable version string still blanks", () => {
         const { serverDir } = tree({});
         const result = blankStandaloneAdapterPath({
             serverDir,
             nextVersion: "canary",
         });
-        expect(result.applied).toBe(false);
-        expect(result.reason).toContain("not a recognisable version");
-        expect(read(join(serverDir, "server.js"))).toContain(ADAPTER);
+        expect(result.applied).toBe(true);
+        expect(read(join(serverDir, "server.js"))).not.toContain(ADAPTER);
     });
 });
 
@@ -359,11 +382,12 @@ describe("blankStandaloneAdapterPath -- fails loudly on serialisation drift", ()
         );
     });
 
-    it("does not throw on a fixed Next, whatever the format", () => {
+    it("throws on a fixed Next too: the adapter is live in the runtime config on every version", () => {
         const { serverDir } = tree({ nextVersion: "16.4.0" });
         drifted(serverDir);
-        const result = blankStandaloneAdapterPath({ serverDir });
-        expect(result.applied).toBe(false);
+        expect(() => blankStandaloneAdapterPath({ serverDir })).toThrow(
+            "adapterPath",
+        );
     });
 
     it("does not throw when adapterPath is already unset (blank or null)", () => {
