@@ -214,10 +214,13 @@ function rewriteLocation(value, headers, origins) {
 const ARRIVAL = Symbol.for('knext.publicOrigin.arrivalHeaders');
 
 /**
- * Snapshot the two headers the rule reads, AS THEY ARRIVED. Next defaults
- * `x-forwarded-host ??= host` on the live request before any handler runs
- * (base-server.js), so reading it at response time would see Next's
- * synthesized value instead of "no proxy said anything".
+ * Snapshot the two headers the rule reads, AS THEY ARRIVED. The live
+ * `req.headers` are not the request's own: Next defaults
+ * `x-forwarded-host ??= host` before any handler runs (base-server.js), and
+ * an app's middleware can overwrite `host` / `x-forwarded-host` on the live
+ * request (resolve-routes.js applies `x-middleware-request-*`). Reading them
+ * at response time would see those values instead of what the client and
+ * proxy actually sent.
  */
 function snapshotArrival(req) {
   if (!req || req[ARRIVAL]) return;

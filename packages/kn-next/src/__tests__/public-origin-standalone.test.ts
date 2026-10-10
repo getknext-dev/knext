@@ -473,6 +473,25 @@ describe("redirects built from request.url carry the public origin (real standal
         }
     }, 300_000);
 
+    it("a middleware that rewrites x-forwarded-host does not move the redirect: the origin is decided on the headers that arrived", async () => {
+        const s = await serve("node --require", ORIGINS);
+        try {
+            // proxy.js sets x-forwarded-host: www.example.com on the live request.
+            // Host is app.example.com and no proxy sent x-forwarded-host, so the
+            // arrival snapshot yields app.example.com. Reading live req.headers
+            // would yield www.example.com.
+            const res = await get(s.port, "/mw/go", {
+                Host: "app.example.com",
+            });
+            expect(res.status).toBe(307);
+            expect(res.headers.location).toBe(
+                "https://app.example.com/article/one?from=mw",
+            );
+        } finally {
+            s.stop();
+        }
+    }, 300_000);
+
     it("the Draft Mode entry route redirects to the app host, where the bypass cookie renders the draft", async () => {
         const s = await serve("node --require", ORIGINS);
         try {
