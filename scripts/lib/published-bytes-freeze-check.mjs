@@ -115,24 +115,55 @@ export const PIN_FILE = '.github/compat-credential-ref.json';
 /** The reviewed-PR override marker this check honours (see the file header). */
 export const OVERRIDE_MARKER_FIELD = 'publishedBytesBumpMarker';
 
+/** The v1.3 line's own pin (read from `main` by its credential workflow). */
+export const PIN_FILE_V13 = '.github/compat-credential-ref-v1.3.json';
+
 /**
- * #2004 — the pin's `rcTag` names the credential tag of ONE release line (the
- * one `main` carries). A PR into an `integration/*` branch is on a DIFFERENT
- * line: its published bytes are the next line's rc, so diffing them against
- * the pinned tag fails by construction, on every PR, and an always-red check
- * guards nothing. Such PRs are not measured against this pin.
+ * #2098 — `major.minor` of a version (`1.3.0`) or an rc tag (`v1.3.0-rc.10`);
+ * `null` when it is not parseable (callers treat that as "unknown line" and
+ * fail closed — keep guarding).
  *
- * Deliberately a base-ref test and nothing wider: `main` and any stacked
- * feature branch (which merges toward `main`) stay guarded; an absent/unknown
- * base ref stays guarded too (fail closed). The ref is the PR BASE, which the
- * PR author cannot choose to be `integration/*` and still merge to `main`.
- *
- * @param {string | undefined | null} baseRef bare (`integration/v1.3`) or `refs/heads/`-qualified.
- * @returns {boolean}
+ * @param {unknown} versionOrTag
+ * @returns {string | null}
  */
-export function isUnfrozenLineBaseRef(baseRef) {
-  if (typeof baseRef !== 'string') return false;
-  return baseRef.replace(/^refs\/heads\//, '').startsWith('integration/');
+export function releaseLine(versionOrTag) {
+  if (typeof versionOrTag !== 'string') return null;
+  const m = /^v?(\d+)\.(\d+)\.\d+/.exec(versionOrTag);
+  return m ? `${m[1]}.${m[2]}` : null;
+}
+
+/**
+ * #2098 — which pin file applies to a PR, given the line its BASE commit
+ * carries (`baseVersion`, the base's `@getknext/core` version) and the branch
+ * it targets (`baseRef`).
+ *
+ * The pin guards the line whose bytes are being CREDENTIALED, and credential
+ * runs pack from the rc-tag checkout, never from `main`. Two cases follow:
+ *   - the primary pin (`PIN_FILE`) guards any base on its own line — it was
+ *     the line `main` carried when the window opened;
+ *   - a per-line pin (`PIN_FILE_V13`, which declares `"line": "v1.3"`) guards
+ *     only that line's INTEGRATION branch, `integration/<line>`, because that
+ *     is where its rc tags are cut. `main` can carry the same major.minor
+ *     (it does since the 1.3 line merged) yet ships nothing a credential run
+ *     measures, so comparing it against that pin guards nothing and reds
+ *     every core PR.
+ * No candidate matching returns the primary pin: the decision then skips on
+ * the line mismatch with a stated reason, or fails closed for an unknown line.
+ *
+ * @param {{ baseVersion?: string, baseRef?: string, candidates: Array<{ file: string, pin: unknown }> }} input
+ * @returns {string}
+ */
+export function selectPinFile({ baseVersion, baseRef, candidates }) {
+  const baseLine = releaseLine(baseVersion);
+  if (baseLine === null) return PIN_FILE;
+  const ref = typeof baseRef === 'string' ? baseRef.replace(/^refs\/heads\//, '') : undefined;
+  for (const { file, pin } of candidates) {
+    const obj = pin && typeof pin === 'object' ? /** @type {any} */ (pin) : {};
+    if (typeof obj.rcTag !== 'string' || releaseLine(obj.rcTag) !== baseLine) continue;
+    if (typeof obj.line === 'string' && ref !== `integration/${obj.line}`) continue;
+    return file;
+  }
+  return PIN_FILE;
 }
 
 const MAX_OVERRIDE_MARKER_SPAN_DAYS = 14;
@@ -308,7 +339,7 @@ export function overrideMarkerIntroducedByPr(mergeBasePin, headPin) {
  * freeze/unfrozen while `headPin` decides the marker, and why no separate
  * "pin-only diff" case is needed here the way the sibling guard needs one.
  *
- * @param {{ basePin: unknown, headPin: unknown, mergeBasePin?: unknown, changedFiles: string[], packageDirs: string[], rootInputFiles?: readonly string[], baseRef?: string, now: Date }} input
+ * @param {{ basePin: unknown, headPin: unknown, mergeBasePin?: unknown, changedFiles: string[], packageDirs: string[], rootInputFiles?: readonly string[], baseVersion?: string, now: Date }} input
  * @returns {{ action: 'skip', reason: string } | { action: 'proceed', rcTag: string, reason: string, matchedFiles: string[] }}
  */
 export function decidePublishedBytesScope({
@@ -318,16 +349,9 @@ export function decidePublishedBytesScope({
   changedFiles,
   packageDirs,
   rootInputFiles = ROOT_BUILD_INPUT_FILES,
-  baseRef,
+  baseVersion,
   now,
 }) {
-  if (isUnfrozenLineBaseRef(baseRef)) {
-    const line = String(baseRef).replace(/^refs\/heads\//, '');
-    return {
-      action: 'skip',
-      reason: `skipped: base ${line} is not the frozen line — ${PIN_FILE}'s rcTag guards the line \`main\` carries, not this one`,
-    };
-  }
   const rcTag =
     basePin && typeof basePin === 'object' ? /** @type {any} */ (basePin).rcTag : undefined;
   if (rcTag === null || rcTag === undefined) {
@@ -340,6 +364,22 @@ export function decidePublishedBytesScope({
     return {
       action: 'skip',
       reason: `${PIN_FILE}'s rcTag at base is not a non-empty string (${JSON.stringify(rcTag)}) — nothing to diff against`,
+    };
+  }
+
+  // #2098 — the pin guards the line whose bytes are credentialed. A base that
+  // carries a different major.minor is not that line (credential runs pack from
+  // the rc tag, never from this branch), so there is nothing to protect. An
+  // absent or unparseable `baseVersion` stays guarded: fail closed.
+  const baseLine = releaseLine(baseVersion);
+  const pinLine = releaseLine(rcTag);
+  if (baseLine !== null && pinLine !== null && baseLine !== pinLine) {
+    return {
+      action: 'skip',
+      reason:
+        `skipped: this PR's base carries line ${baseLine} but the pinned rcTag ${JSON.stringify(rcTag)} ` +
+        `is on line ${pinLine} — the base is not the line whose bytes are credentialed ` +
+        '(credential runs pack from the rc tag, not from this branch)',
     };
   }
 

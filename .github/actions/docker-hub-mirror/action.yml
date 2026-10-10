@@ -1,0 +1,27 @@
+name: Route Docker Hub pulls through mirror.gcr.io
+description: >-
+  Points the docker daemon (and a buildkitd config for the buildx docker-container
+  driver) at mirror.gcr.io, a pull-through mirror of Docker Hub that serves the same
+  digests, so unauthenticated pulls stop hitting the Docker Hub rate limit. No secret.
+  Run it BEFORE the first step that pulls. Digest pins stay valid.
+outputs:
+  buildkitd-config:
+    description: Path of a buildkitd.toml for docker/setup-buildx-action's buildkitd-config input.
+    value: ${{ steps.mirror.outputs.buildkitd-config }}
+runs:
+  using: composite
+  steps:
+    - id: mirror
+      shell: bash
+      run: |
+        set -euo pipefail
+        cfg="${RUNNER_TEMP}/buildkitd-mirror.toml"
+        printf '[registry."docker.io"]\n  mirrors = ["mirror.gcr.io"]\n' > "$cfg"
+        echo "buildkitd-config=$cfg" >> "$GITHUB_OUTPUT"
+        # Merge, never clobber, an existing daemon.json.
+        existing='{}'
+        if [ -s /etc/docker/daemon.json ]; then existing="$(cat /etc/docker/daemon.json)"; fi
+        echo "$existing" | jq '. + {"registry-mirrors": ["https://mirror.gcr.io"]}' \
+          | sudo tee /etc/docker/daemon.json >/dev/null
+        sudo systemctl restart docker
+        docker info --format '{{json .RegistryConfig.Mirrors}}'

@@ -63,6 +63,9 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Route Docker Hub pulls through mirror.gcr.io (anonymous rate limit)
+        id: docker-hub-mirror
+        uses: ./.github/actions/docker-hub-mirror
       - name: Setup Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -111,6 +114,9 @@ jobs:
       # login at all — a pure build-and-discard, so a PR reds here instead.
       - name: Set up Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          # #2106: buildx's docker-container driver ignores the daemon mirror.
+          buildkitd-config: ${{ steps.docker-hub-mirror.outputs.buildkitd-config }}
 
       - name: Build the docs image (dry run, no push)
         env:
@@ -158,6 +164,9 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Route Docker Hub pulls through mirror.gcr.io (anonymous rate limit)
+        id: docker-hub-mirror
+        uses: ./.github/actions/docker-hub-mirror
       - name: Setup Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -204,6 +213,9 @@ jobs:
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          # #2106: buildx's docker-container driver ignores the daemon mirror.
+          buildkitd-config: ${{ steps.docker-hub-mirror.outputs.buildkitd-config }}
 
       - name: Log in to OCIR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0

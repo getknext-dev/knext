@@ -127,7 +127,9 @@ describe('ci.yml — the compat-smoke job supplies the real Redis (T4)', () => {
 
   it('runs a Redis service container, pinned by digest', () => {
     expect(job).toMatch(/services:/);
-    expect(job).toMatch(/image:\s*redis:[\w.-]+@sha256:[0-9a-f]{64}/);
+    expect(job).toMatch(
+      /image:\s*(?:mirror\.gcr\.io\/library\/)?redis:[\w.-]+@sha256:[0-9a-f]{64}/,
+    );
   });
 
   it('passes a real REDIS_URL into the smoke run', () => {

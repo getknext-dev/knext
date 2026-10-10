@@ -144,7 +144,6 @@
       "test/e2e/app-dir/edge-runtime-module-errors/**/*",
       "test/e2e/middleware-general/**/*",
       "test/e2e/app-dir/ppr-full/**/*",
-      "test/e2e/cache-components/**/*",
       "test/e2e/app-dir/non-ascii-cache-item-name/non-ascii-cache-item-name.test.ts",
       "test/e2e/app-dir/cache-components-prerender-matrix/cache-components-prerender-matrix.test.ts",
       "test/e2e/incremental-cache-path-traversal/index.test.ts",
@@ -288,11 +287,6 @@
       "test": "test/e2e/app-dir/ppr-full/**/*",
       "category": "ppr",
       "rationale": "Partial Prerendering (PPR) is not adapter-standardizable yet (CLAUDE.md §6 Tier C, upstream-gated); knext does not implement the PPR resume/stream contract. compat-matrix row: PPR ❌."
-    },
-    {
-      "test": "test/e2e/cache-components/**/*",
-      "category": "cache-components",
-      "rationale": "Cache Components ('use cache' / cacheLife) are an evolving upstream API not yet stabilized for adapters (CLAUDE.md §6 Tier C). knext's Redis cache-handler does not implement the Cache Components protocol. compat-matrix row: Cache Components ❌."
     }
   ]
 }

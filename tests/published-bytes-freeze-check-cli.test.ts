@@ -393,14 +393,14 @@ describe('defaultTagResolves — resolves against a REAL git tag, not a mock', (
   });
 });
 
-describe('main — base ref scope (#2004)', () => {
-  it('integration/v1.3 base: SKIP announced with the reason, no tag lookup, no diff', () => {
+describe('main — release-line scope (#2098)', () => {
+  it('(a) main on 1.3 against the v1.0 pin: SKIP announced with the reason, no tag lookup, no diff, no marker needed', () => {
     const root = buildFixtureRoot();
     let touched = false;
     const r = run(root, ['packages/kn-next/src/index.ts'], {
-      basePin: pin('v1.0.0-rc.5'),
-      headPin: pin('v1.0.0-rc.5'),
-      baseRef: 'integration/v1.3',
+      basePin: pin('v1.0.0-rc.6'),
+      headPin: pin('v1.0.0-rc.6'),
+      baseVersion: '1.3.0',
       tagResolves: () => {
         touched = true;
         return true;
@@ -413,18 +413,29 @@ describe('main — base ref scope (#2004)', () => {
     expect(r.code).toBe(0);
     expect(touched).toBe(false);
     expect(r.summary).toContain('SKIP');
-    expect(r.out).toContain('base integration/v1.3 is not the frozen line');
+    expect(r.out).toContain('not the line whose bytes are credentialed');
   });
 
-  it('main base: a published-bytes change with no marker still FAILS when the diff fails', () => {
+  it('(b) a base on the pinned line: a published-bytes change with no marker still FAILS when the diff fails', () => {
     const root = buildFixtureRoot();
     const r = run(root, ['packages/kn-next/src/index.ts'], {
-      basePin: pin('v1.0.0-rc.5'),
-      headPin: pin('v1.0.0-rc.5'),
-      baseRef: 'main',
+      basePin: pin('v1.0.0-rc.6'),
+      headPin: pin('v1.0.0-rc.6'),
+      baseVersion: '1.0.4',
       runDiff: () => 1,
     });
     expect(r.code).toBe(1);
     expect(r.summary).toContain('FAIL');
+  });
+
+  it('(b) a base on the pinned line with an unresolvable tag still fails closed', () => {
+    const root = buildFixtureRoot();
+    const r = run(root, ['packages/kn-next/src/index.ts'], {
+      basePin: pin('v1.0.0-rc.6'),
+      headPin: pin('v1.0.0-rc.6'),
+      baseVersion: '1.0.4',
+      tagResolves: () => false,
+    });
+    expect(r.code).toBe(1);
   });
 });

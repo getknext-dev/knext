@@ -109,6 +109,9 @@ jobs:
       # older (or newer) copy pinned to whatever rcTag happens to resolve to.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Route Docker Hub pulls through mirror.gcr.io (anonymous rate limit)
+        id: docker-hub-mirror
+        uses: ./.github/actions/docker-hub-mirror
       # A SECOND checkout, into rc-src/, used ONLY to build the operator image
       # and apply its CRD/manifests — those must match each other, and both
       # must match the rc ref under test. Nothing else reads from rc-src/.
