@@ -113,6 +113,65 @@ describe('selectPinFromGit (#2098)', () => {
     expect(r.pinFile).toBe(PIN_FILE);
   });
 
+  it('a corrupt base pin on a matching line FAILS (exit 2), never reads as "no window"', () => {
+    const { root, sha } = repoWith({
+      'packages/kn-next/package.json': CORE('1.0.3'),
+      [PIN_FILE]: '{not json',
+    });
+    expect(() =>
+      selectPinFromGit({ repoRoot: root, baseSha: sha, baseRef: 'release/1.x' }),
+    ).toThrow(/not valid JSON/);
+    const r = spawnSync(
+      process.execPath,
+      [SCRIPT, '--base-sha', sha, '--base-ref', 'release/1.x'],
+      {
+        cwd: root,
+        encoding: 'utf8',
+      },
+    );
+    expect(r.status).toBe(2);
+    expect(r.stdout).not.toContain('PIN_FILE_SELECTED');
+  });
+
+  it('an unreadable v1.3 pin on integration/v1.3 FAILS rather than falling back to the v1.0 pin', () => {
+    const { root, sha } = repoWith({
+      'packages/kn-next/package.json': CORE('1.3.0'),
+      [PIN_FILE]: V10_PIN,
+      [PIN_FILE_V13]: V13_PIN,
+    });
+    // Destroy the v1.3 pin's loose object: it is listed in the tree but unreadable.
+    const blob = git(root, 'rev-parse', `${sha}:${PIN_FILE_V13}`);
+    rmSync(join(root, '.git', 'objects', blob.slice(0, 2), blob.slice(2)), { force: true });
+    expect(() =>
+      selectPinFromGit({ repoRoot: root, baseSha: sha, baseRef: 'integration/v1.3' }),
+    ).toThrow(/cannot read/);
+    const r = spawnSync(
+      process.execPath,
+      [SCRIPT, '--base-sha', sha, '--base-ref', 'integration/v1.3'],
+      { cwd: root, encoding: 'utf8' },
+    );
+    expect(r.status).toBe(2);
+  });
+
+  it('a corrupt v1.3 pin read from main FAILS too', () => {
+    const { root, sha } = repoWith({
+      'packages/kn-next/package.json': CORE('1.3.0'),
+      [PIN_FILE]: V10_PIN,
+    });
+    git(root, 'checkout', '-q', '-b', 'mainline');
+    write(root, PIN_FILE_V13, '{broken');
+    git(root, 'add', '-A');
+    git(root, 'commit', '-q', '-m', 'corrupt v1.3 pin on main');
+    expect(() =>
+      selectPinFromGit({
+        repoRoot: root,
+        baseSha: sha,
+        baseRef: 'integration/v1.3',
+        mainRef: 'mainline',
+      }),
+    ).toThrow(/not valid JSON/);
+  });
+
   it('CLI: prints KEY=value lines and writes the base pin file', () => {
     const { root, sha } = repoWith({
       'packages/kn-next/package.json': CORE('1.3.0'),

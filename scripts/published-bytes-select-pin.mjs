@@ -39,29 +39,57 @@ const CORE_PACKAGE_JSON = 'packages/kn-next/package.json';
  * @returns {string | null} the blob's text, or null when absent at `rev`.
  */
 function gitShow(repoRoot, rev, path) {
-  try {
-    return execFileSync('git', ['show', `${rev}:${path}`], {
+  const run = (args) =>
+    execFileSync('git', args, {
       cwd: repoRoot,
       encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
+      stdio: ['ignore', 'pipe', 'pipe'],
     });
+  let listing;
+  try {
+    listing = run(['ls-tree', rev, '--', path]);
+  } catch (err) {
+    throw new Error(`cannot inspect ${path} at ${rev}: ${err.message}`);
+  }
+  // Genuinely absent (valid rev, no such path): the only "no window" case.
+  if (listing.trim() === '') return null;
+  try {
+    return run(['show', `${rev}:${path}`]);
+  } catch (err) {
+    // Present but unreadable must FAIL, never fall through to another pin.
+    throw new Error(`cannot read ${path} at ${rev}: ${err.message}`);
+  }
+}
+
+/**
+ * @param {string} repoRoot
+ * @param {string} ref
+ * @returns {boolean}
+ */
+function refResolves(repoRoot, ref) {
+  try {
+    execFileSync('git', ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`], {
+      cwd: repoRoot,
+      stdio: 'ignore',
+    });
+    return true;
   } catch {
-    return null;
+    return false;
   }
 }
 
 /**
  * @param {string | null} text
+ * @param {string} what
  * @returns {unknown}
  */
-function parseJson(text) {
+function parseJson(text, what) {
   if (text === null) return null;
   try {
     return JSON.parse(text);
   } catch {
-    // Unparseable is not "no window": surface it as an object the decision
-    // cannot read an rcTag from, never as `{rcTag: null}`.
-    return { rcTag: undefined };
+    // Unparseable is not "no window": fail the run (exit 2), as before #2098.
+    throw new Error(`${what} is present but is not valid JSON`);
   }
 }
 
@@ -84,10 +112,14 @@ export function selectPinFromGit({ repoRoot, baseSha, baseRef, mainRef = 'origin
 
   const readPin = (file) => {
     const atBase = gitShow(repoRoot, baseSha, file);
-    if (atBase !== null) return parseJson(atBase);
+    if (atBase !== null) return parseJson(atBase, `${file} at ${baseSha}`);
     // Only a per-line pin falls back to main; the primary pin absent at base
     // keeps meaning "no window open before this PR".
-    return file === PIN_FILE ? { rcTag: null } : parseJson(gitShow(repoRoot, mainRef, file));
+    if (file === PIN_FILE) return { rcTag: null };
+    // An unresolvable fallback ref (main never fetched) reads as absent; a
+    // file that exists on it but is broken throws.
+    if (!refResolves(repoRoot, mainRef)) return null;
+    return parseJson(gitShow(repoRoot, mainRef, file), `${file} at ${mainRef}`);
   };
 
   const candidates = [PIN_FILE, PIN_FILE_V13].map((file) => ({ file, pin: readPin(file) }));
@@ -108,12 +140,18 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     console.error('published-bytes-select-pin: --base-sha is required');
     process.exit(2);
   }
-  const r = selectPinFromGit({
-    repoRoot: process.cwd(),
-    baseSha,
-    baseRef: arg('base-ref') ?? undefined,
-    mainRef: arg('main-ref') ?? undefined,
-  });
+  let r;
+  try {
+    r = selectPinFromGit({
+      repoRoot: process.cwd(),
+      baseSha,
+      baseRef: arg('base-ref') ?? undefined,
+      mainRef: arg('main-ref') ?? undefined,
+    });
+  } catch (err) {
+    console.error(`published-bytes-select-pin: ${err.message}`);
+    process.exit(2);
+  }
   const out = arg('base-pin-out');
   if (out) writeFileSync(out, `${JSON.stringify(r.basePin, null, 2)}\n`);
   console.log(`PIN_FILE_SELECTED=${r.pinFile}`);
