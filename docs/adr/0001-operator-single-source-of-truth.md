@@ -42,6 +42,11 @@ creates or mutates Knative Services, PVCs, ServiceAccounts, KafkaSources, etc.
   (`internal/controller/leader_election_envtest_test.go`) proves the runtime behavior — exactly
   one active leader, with deterministic (cancellation-driven) hand-off to the standby on leader
   loss, observed via the `Lease` holder and the leadership callback.
+- **Platform layer (ADR-0064).** The operator also reads the cluster-scoped `KnextPlatform` and
+  merges its defaults at render time; it remains the only writer of Kubernetes state. Host-level
+  writes (the optional mirror's node agent) are made only by an operator-owned DaemonSet, bounded
+  to one drop-in per runtime and reverted on removal. Neither the CLI nor any other controller
+  writes `KnextPlatform`-derived state.
 
 ## Action items
 
