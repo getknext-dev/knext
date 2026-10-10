@@ -599,10 +599,10 @@ describe('prereleaseDistTag — follows the changesets pre-mode tag when one is 
   });
 });
 
-// integration/v1.3 ONLY. 1.3.0 is the GA cut: changesets pre mode has been exited, so the
+// integration/v1.3 ONLY. 1.3.x is the GA line (1.3.0, then 1.3.1): changesets pre mode has been exited, so the
 // fixed group is a stable version and publishes to `latest`. DELETE this block in the PR that
 // merges integration/v1.3 into main (main's own release decides its tag).
-describe('integration/v1.3 — 1.3.0 GA: pre mode exited, stable version', () => {
+describe('integration/v1.3 — 1.3.x GA: pre mode exited, stable version', () => {
   const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
   const coreVersion = JSON.parse(
     readFileSync(resolve(repoRoot, 'packages/kn-next/package.json'), 'utf8'),
@@ -618,7 +618,7 @@ describe('integration/v1.3 — 1.3.0 GA: pre mode exited, stable version', () =>
 
   // Pin the exact number for every fixed-group member so a stray `changeset version` (or a
   // missed member) reds here.
-  it('every fixed-group member is at exactly 1.3.0', () => {
+  it('every fixed-group member is at exactly 1.3.1', () => {
     const config = JSON.parse(readFileSync(resolve(repoRoot, '.changeset/config.json'), 'utf8'));
     const dirs = {
       '@getknext/core': 'packages/kn-next',
@@ -630,7 +630,7 @@ describe('integration/v1.3 — 1.3.0 GA: pre mode exited, stable version', () =>
     for (const [name, dir] of Object.entries(dirs)) {
       const pkg = JSON.parse(readFileSync(resolve(repoRoot, dir, 'package.json'), 'utf8'));
       expect(pkg.name).toBe(name);
-      expect(pkg.version).toBe('1.3.0');
+      expect(pkg.version).toBe('1.3.1');
     }
   });
 });
