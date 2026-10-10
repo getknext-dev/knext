@@ -21,19 +21,19 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
-import {
-    blankStandaloneAdapterPath,
-    nextCarriesAdapter404Bug,
-} from "../adapters/standalone-adapter-path";
+import { blankStandaloneAdapterPath } from "../adapters/standalone-adapter-path";
 
 /**
  * A `dynamicParams = false` route 404s through the response cache, and with
  * `adapterPath` set Next 16.3.x answers a burst of concurrent prefetches to the
  * non-listed params with a 500 (`invariant: cache entry required but not
- * generated`) instead of a 404. Fixed upstream in 16.4.0; not backported.
+ * generated`) instead of a 404. Fixed upstream in 16.4.0; not backported. On
+ * 16.4.0 the same setting makes a `dynamicParams = false` miss answer 404
+ * without falling through to the less specific route.
  *
  * The workaround blanks `adapterPath` in the standalone tree's runtime config
- * (`blankStandaloneAdapterPath`, gated on the Next version). This suite is its
+ * (`blankStandaloneAdapterPath`) on EVERY Next version, not only < 16.4.0. This
+ * suite asserts it is applied on whatever Next is installed, and is its
  * regression proof against the REAL pieces:
  *
  *   1. `next build --webpack` of the fixture shape (`dynamicParams = false` +
@@ -282,7 +282,7 @@ describe("dynamicParams=false 404 under adapterPath: standalone, concurrent pref
         expect(
             result.applied,
             `workaround not applied on Next ${nextVersion}: ${result.reason}`,
-        ).toBe(nextCarriesAdapter404Bug(nextVersion) === true);
+        ).toBe(true);
 
         const port = await freePort();
         let log = "";
@@ -352,5 +352,28 @@ describe("dynamicParams=false 404 under adapterPath: standalone, concurrent pref
             invariants,
             `server log carries the invariant -- ${summary}`,
         ).toBe(0);
+
+        // A closed matcher that rejects a path must let the request fall through
+        // to the less specific catch-all, not stop with the closed route's 404
+        // (vercel/next.js app-dir/dynamic-params-request-modes). With adapterPath
+        // set Next ends the request in render404(); unset, it throws
+        // NoFallbackError and its own router carries on.
+        const fetchText = async (path: string) => {
+            const res = await fetch(`http://127.0.0.1:${port}${path}`, {
+                signal: AbortSignal.timeout(30_000),
+            });
+            return { status: res.status, body: await res.text() };
+        };
+        const known = await fetchText("/overlap/known");
+        expect(known.status, summary).toBe(200);
+        expect(known.body).toContain('id="specific"');
+        const unlisted = await fetchText("/overlap/unlisted");
+        expect(
+            unlisted.status,
+            `/overlap/unlisted must fall through to the catch-all -- ${summary}`,
+        ).toBe(200);
+        expect(unlisted.body).toContain('id="catch-all">unlisted<');
+        // Still closed where nothing less specific matches.
+        expect((await fetchText("/es")).status).toBe(404);
     }, 420_000);
 });
