@@ -235,8 +235,26 @@ const MUTATIONS = [
     label: 'select-script: a per-line pin absent at the base commit is not read from main',
     subject: 'select',
     anchor:
-      'return file === PIN_FILE ? { rcTag: null } : parseJson(gitShow(repoRoot, mainRef, file));',
+      'return parseJson(gitShow(repoRoot, mainRef, file), `${file} at ${mainRef}`);',
     replacement: 'return { rcTag: null };',
+  },
+  {
+    label: 'select-script: an unparseable pin reads as absent instead of failing the run (exit 2)',
+    subject: 'select',
+    anchor: '    throw new Error(`${what} is present but is not valid JSON`);',
+    replacement: '    return null;',
+  },
+  {
+    label: 'workflow: the head pin read swallows every read failure as "absent"',
+    subject: 'workflow',
+    anchor: 'git cat-file -e "${HEAD_SHA}:${PIN_FILE_SELECTED}" 2>/dev/null',
+    replacement: 'git show "${HEAD_SHA}:${PIN_FILE_SELECTED}" >/dev/null 2>&1',
+  },
+  {
+    label: 'workflow: the merge-base pin read swallows every read failure as "absent"',
+    subject: 'workflow',
+    anchor: 'git cat-file -e "${MERGE_BASE}:${PIN_FILE_SELECTED}" 2>/dev/null',
+    replacement: 'git show "${MERGE_BASE}:${PIN_FILE_SELECTED}" >/dev/null 2>&1',
   },
   {
     label: 'workflow: stops passing --base-version to the check',
@@ -246,7 +264,7 @@ const MUTATIONS = [
   },
 ];
 
-declareMutations(24);
+declareMutations(27);
 
 const RUNNER = resolveSpecRunner(REPO_ROOT, SPECS[0]);
 
@@ -259,8 +277,8 @@ function specPasses() {
   return r.status === 0;
 }
 
-if (MUTATIONS.length !== 24) {
-  console.error(`FATAL: declared 24 mutations, table has ${MUTATIONS.length}`);
+if (MUTATIONS.length !== 27) {
+  console.error(`FATAL: declared 27 mutations, table has ${MUTATIONS.length}`);
   process.exit(1);
 }
 
