@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { existsSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -608,9 +608,10 @@ describe('integration/v1.3 — 1.3.0 GA: pre mode exited, stable version', () =>
     readFileSync(resolve(repoRoot, 'packages/kn-next/package.json'), 'utf8'),
   ).version;
 
-  it('.changeset/pre.json is gone (pre mode exited)', () => {
-    expect(existsSync(resolve(repoRoot, '.changeset/pre.json'))).toBe(false);
-  });
+  // integration/v2 (#2038) is the one lane that sits in pre mode: `.changeset/pre.json` exists
+  // there by design, pinned by tests/integration-v2-pre-mode.test.ts. The "pre mode exited"
+  // assertion that stood here is therefore removed on that branch ONLY; `main` and the 1.x
+  // lanes keep it by never receiving this change.
 
   it('a stable tree version has no prerelease dist-tag (null -> latest)', () => {
     expect(prereleaseDistTag(coreVersion, null)).toBeNull();
