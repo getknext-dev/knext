@@ -105,6 +105,16 @@ func (l *rolloutLimiter) reserve(app types.NamespacedName, now time.Time, perMin
 	return slot.Sub(now)
 }
 
+// release drops app's outstanding reservation, if any, and refreshes the backlog
+// gauge. A deleted app never returns for its slot; without this its entry would
+// keep rollout_pending raised until an unrelated app next called reserve.
+func (l *rolloutLimiter) release(app types.NamespacedName) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.slots, app)
+	rolloutPending.Set(float64(len(l.slots)))
+}
+
 // pending reports how many reservations are outstanding (tests, and the
 // stale-entry bound).
 func (l *rolloutLimiter) pending() int {

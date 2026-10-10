@@ -383,6 +383,7 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 	if err := r.Get(ctx, req.NamespacedName, &nextApp); err != nil {
 		if errors.IsNotFound(err) {
 			r.held.forget(req.NamespacedName)
+			r.rollout.release(req.NamespacedName)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
@@ -406,6 +407,7 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 			// A terminating app is no longer held by anything; do not let a
 			// stale hold keep it on the held-apps gauge.
 			r.held.forget(req.NamespacedName)
+			r.rollout.release(req.NamespacedName)
 		}
 		// Nothing more to reconcile for a deleting object.
 		return ctrl.Result{}, err
