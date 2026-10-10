@@ -26,6 +26,7 @@ knext ships three things that version on **separate** lines. Nothing forces them
 | `@getknext/core`, `@getknext/lib`, `@getknext/db` | npm packages | semver, **one shared number** across the three |
 | the operator | a container image + digest-pinned `install-vX.Y.Z.yaml` / `install.yaml` bundles | semver `operator-vX.Y.Z` tags — **MAJOR.MINOR tracks the package set, patch is independent**; see "Operator versions" below |
 | the `NextApp` CRD | inside the operator bundle | the Kubernetes ladder: `v1alpha1` → `v1beta1` → `v1` |
+| the `KnextPlatform` CRD (`platform.kn-next.dev`) | inside the operator bundle | the same ladder, `v1alpha1`, additive-only. **Not a column of the matrix:** the CLI neither reads nor writes it, so no package set depends on a particular version of it. The bundle ships the definition and no object (an absent or empty `KnextPlatform` changes nothing) |
 
 ## The matrix
 

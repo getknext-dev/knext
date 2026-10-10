@@ -936,11 +936,13 @@ type NextAppStatus struct {
 
 	// Platform records what the cluster-scoped KnextPlatform contributed to this
 	// app's last render (ADR-0064): the platform generation and profile observed
-	// and the spec fields the app inherited from it. Absent while there is no
-	// KnextPlatform (or its CRD is not installed), so a cluster that has not
-	// opted in sees no new status. This is observation only — platform identity
-	// is NEVER written into the Knative Service's revision template, so a
-	// platform edit that changes no effective value creates no new revision.
+	// and the spec fields the app inherited from it. Absent while no KnextPlatform
+	// is in force (none exists, its CRD is not installed, or it was not accepted),
+	// so a cluster that has not opted in carries no platform record; its only new
+	// status is the PlatformDefaultsApplied condition (reason NoPlatform or
+	// NoPlatformCRD). This is observation only — platform identity is NEVER
+	// written into the Knative Service's revision template, so a platform edit
+	// that changes no effective value creates no new revision.
 	// +optional
 	Platform *NextAppPlatformStatus `json:"platform,omitempty"`
 }
