@@ -1,0 +1,53 @@
+name: Merged-SHA check
+
+# After a PR lands on main or an integration branch, the commit that landed must
+# contain the PR's final head. A fix pushed after the merge SHA was locked lands
+# without that fix, and nothing else notices (the stacked-PR merge at a pre-fix
+# head that needed a follow-up PR). Fails loudly instead.
+#
+# Read-only token. The logic lives in scripts/merged-sha-check.mjs and is
+# covered by tests/merged-sha-check.test.ts (real git, exit-code verdicts).
+
+on:
+  push:
+    branches: [main, 'integration/**']
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  merged-sha:
+    name: Merged commit contains PR head
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Check every PR associated with the pushed commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          MERGE_SHA: ${{ github.sha }}
+        run: |
+          prs=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${MERGE_SHA}/pulls" \
+            --jq '.[] | select(.merged_at != null) | .number')
+          if [ -z "$prs" ]; then
+            echo "No merged PR is associated with ${MERGE_SHA} (direct push); nothing to check."
+            exit 0
+          fi
+          rc=0
+          for pr in $prs; do
+            echo "::group::PR #${pr}"
+            node scripts/merged-sha-check.mjs --pr "$pr" --merge "$MERGE_SHA" || rc=1
+            echo "::endgroup::"
+          done
+          exit $rc
