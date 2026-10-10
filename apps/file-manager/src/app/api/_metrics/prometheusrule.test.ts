@@ -149,6 +149,32 @@ describe('PrometheusRule manifest', () => {
     expect(stuck?.annotations?.runbook_url ?? stuck?.annotations?.runbook).toBeTruthy();
   });
 
+  // A refused connection to a bring-your-own Postgres reads `down`, not
+  // `waking`, so KnextDeepHealthStuckWaking no longer pages on it. Without its
+  // own alert a dead BYO database is silent.
+  it('alerts on sustained deep-health down, consistent with the waking rule', () => {
+    const { docs } = loadRule();
+    const rule = docs.find((d) => d?.kind === 'PrometheusRule');
+    const alerts: (Rule & { for?: string })[] = rule.spec.groups.flatMap(
+      (g: { rules: Rule[] }) => g.rules,
+    );
+    const waking = alerts.find((a) => a.alert === 'KnextDeepHealthStuckWaking');
+    const down = alerts.find((a) => a.alert === 'KnextDeepHealthDown');
+
+    expect(down, 'KnextDeepHealthDown alert must exist').toBeDefined();
+    expect(down?.expr).toContain('knext_deep_health_state');
+    expect(down?.expr).toMatch(/dependency="overall"/);
+    expect(down?.expr).toMatch(/state="down"/);
+    expect(down?.expr).not.toMatch(/state="waking"/);
+    // Same sustain window and severity as the waking rule: a transient blip
+    // never pages, a sustained outage does.
+    expect(down?.for).toBe(waking?.for);
+    expect(down?.labels?.severity).toBe(waking?.labels?.severity);
+    expect(down?.annotations?.runbook_url).toBeTruthy();
+    // The waking rule must no longer claim refused connections are `waking`.
+    expect(waking?.annotations?.description).toMatch(/scale-to-zero database/);
+  });
+
   // A failing image-prewarm reconcile used to return an error out of the
   // operator's Reconcile, so it incremented knext_nextapp_reconcile_errors_total
   // and fired the CRITICAL KnextOperatorReconcileErrors page. Decoupling it (so

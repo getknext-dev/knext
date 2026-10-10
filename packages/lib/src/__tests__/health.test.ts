@@ -160,8 +160,10 @@ describe('checkDeepHealth — hard vs soft dependency taxonomy (readiness contra
 
   // --- #338: wake-aware deep check + configurable timeout ------------------
 
-  it('#338 HARD dep (Postgres) connection-refused during a wake window ⇒ waking (NOT down)', async () => {
-    process.env.DATABASE_URL = 'postgres://u:p@h:5432/db';
+  it('#338 HARD dep (Postgres) connection-refused against the scale-to-zero gateway ⇒ waking (NOT down)', async () => {
+    // The scale-zero-pg gateway is the scale-to-zero database this app is bound to.
+    process.env.DATABASE_URL =
+      'postgres://u:p@pggw.scale-zero-pg.svc.cluster.local.:55432/postgres?sslmode=disable';
     // A scale-to-zero DB that is legitimately WAKING refuses the connection.
     pgQuery.mockRejectedValue(
       Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }),
@@ -173,6 +175,33 @@ describe('checkDeepHealth — hard vs soft dependency taxonomy (readiness contra
     // An asleep/waking scale-to-zero DB is NORMAL, not a fatal 'down'.
     expect(res.status).toBe('waking');
     expect(res.checks.postgres).toBe('waking');
+  });
+
+  it('bring-your-own Postgres connection-refused ⇒ down (NOT waking: nothing is waking)', async () => {
+    process.env.DATABASE_URL = 'postgres://u:p@db.example.com:5432/app';
+    pgQuery.mockRejectedValue(
+      Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }),
+    );
+
+    const { checkDeepHealth } = await import('../health');
+    const res = await checkDeepHealth();
+
+    // A refused connection to a BYO database is an outage, not a wake.
+    expect(res.status).toBe('down');
+    expect(res.checks.postgres).toBe('down');
+  });
+
+  it('bring-your-own Postgres whose DSN merely mentions scale-zero-pg ⇒ down (host, not substring)', async () => {
+    process.env.DATABASE_URL = 'postgres://u:p@db.example.com:5432/scale-zero-pg';
+    pgQuery.mockRejectedValue(
+      Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }),
+    );
+
+    const { checkDeepHealth } = await import('../health');
+    const res = await checkDeepHealth();
+
+    expect(res.checks.postgres).toBe('down');
+    expect(res.status).toBe('down');
   });
 
   it('#338 slow-but-alive Postgres exceeding the timeout ⇒ waking (wake-in-progress, NOT down)', async () => {

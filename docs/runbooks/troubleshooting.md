@@ -369,19 +369,29 @@ configuration fix, not a cluster change.
 deep-health state gauge `knext_deep_health_state{dependency="overall",
 state="waking"}` has been `1` for over 2 minutes.
 
-**Normal vs stuck.** The deep health check (`checkDeepHealth`, ADR-0026/#338)
-classifies a **connection-level** failure to Postgres — `ECONNREFUSED`, a
-connect timeout, dead DNS — as `waking`, NOT `down`. That is deliberate: a
-scale-to-zero database asleep behind the scale-zero-pg gateway shows exactly
-that signature while it wakes, and a legitimate wake is **brief (~2-6s)**. So a
-short blip of `waking` is normal and does **not** page.
+**Scrape requirement.** The rules in this section are in a metrics group that
+the default install does not scrape. They alert only where that group is
+scraped; see the deep-health alerting issue for the status.
 
-A **genuinely-down** DB (host gone, dead DNS, a bad/rotated `DATABASE_URL`)
+**Normal vs stuck.** The deep health check classifies a **refused** Postgres
+connection (`ECONNREFUSED`) as `waking` **only when the `DATABASE_URL` host is
+the scale-zero-pg gateway** (`*.scale-zero-pg.svc…`), and as `down` for any
+other host. A connect timeout or a silently dropped connection reads `waking` on
+any host. That is deliberate: a scale-to-zero database asleep behind the
+gateway shows exactly that signature while it wakes, and a legitimate wake is
+**brief (~2-6s)**. So a short blip of `waking` is normal and does **not** alert.
+
+A **genuinely-down** scale-to-zero DB (host gone, a bad/rotated `DATABASE_URL`)
 presents the *same* connection-level errors — so it sits at `waking`
-**forever** and never becomes `down` (only a *reachable-but-erroring* query
-yields `down`). An alert keyed on `down`/503 alone would therefore **never
-page** on a permanent connection-level outage. This alert closes that gap by
-paging on `waking` **sustained past the wake budget** (`for: 2m`).
+**forever** and never becomes `down`. An alert keyed on `down`/503 alone would
+therefore **never alert** on it. This alert closes that gap by alerting on
+`waking` **sustained past the wake budget** (`for: 2m`).
+
+A refused connection to a **bring-your-own** database reads `down` straight
+away, since nothing is waking it; `KnextDeepHealthDown` (below) alerts on that.
+A custom `APPDB_GATEWAY_HOST` override, or a pooler in front of the
+scale-to-zero database, does not match the gateway host, so a refused connection
+there also reads `down`, not `waking`.
 
 **What it means.** The app cannot reach its database at the connection level for
 minutes — this is a real outage, not a wake.
@@ -410,6 +420,27 @@ probed by the scrape, so its DB sleeps normally; the gauge just holds its
 last-known value. This is safe for the alert because a stuck-`waking` outage
 only matters when the app is actively trying to use the DB — which is exactly
 when the gate is open and the probe runs.
+
+### Deep-health DOWN (database unreachable or erroring) {#deep-health-down-database-unreachable-or-erroring}
+
+**Symptom.** `KnextDeepHealthDown` fires (severity: critical).
+`knext_deep_health_state{dependency="overall",state="down"}` has been `1` for
+over 2 minutes.
+
+**What it means.** Either the database refused the connection and is not a
+scale-to-zero database that could be waking (bring-your-own Postgres,
+a custom `APPDB_GATEWAY_HOST`, or a pooler in front of the scale-to-zero
+database), or it is reachable but erroring on the probe query.
+
+**Act.**
+
+1. Check the database itself is up and accepting connections from the app's
+   namespace.
+2. Verify the `DATABASE_URL` Secret resolves to a live host and port, and the
+   credentials are current.
+3. Check the NetworkPolicy to the DB host (§10).
+
+The alert resolves once a scrape observes the database healthy again.
 
 ## 10 — NetworkPolicy blocks the activator
 
