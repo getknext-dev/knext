@@ -1,0 +1,23 @@
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata:
+  name: z2080-nodei0
+  namespace: z2080-repro
+spec:
+  image: ghcr.io/getknext-dev/rc5-integration-node@sha256:1a4dae07c51501c05fd58f049a14f2155dbef49805ab817e88d9321e8f3d4f1d
+  healthCheckPath: /api/health
+  runtime: node
+  env: {KNEXT_ARP_PRIMER: "0"}
+  scaling: {minScale: 0, maxScale: 1}
+---
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata:
+  name: z2080-buni0
+  namespace: z2080-repro
+spec:
+  image: ghcr.io/getknext-dev/rc5-integration-bun@sha256:6d438be52221b318b68356ebcaf284f524d0ac5b775ddb20aa3588401ef635ed
+  healthCheckPath: /api/health
+  runtime: bun
+  env: {KNEXT_ARP_PRIMER: "0"}
+  scaling: {minScale: 0, maxScale: 1}

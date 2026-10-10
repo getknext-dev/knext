@@ -1,0 +1,40 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: z2080-repro
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: z2080-drv
+  namespace: z2080-repro
+spec:
+  restartPolicy: Always
+  containers:
+  - name: drv
+    image: node:22-alpine
+    imagePullPolicy: IfNotPresent
+    command: ["sleep","86400"]
+    resources: {requests: {cpu: 50m, memory: 64Mi}}
+---
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata:
+  name: z2080-node
+  namespace: z2080-repro
+spec:
+  image: ghcr.io/getknext-dev/rc5-rc4-node@sha256:7fa693ed4a521cb014cda68e43ed8c1e0fb5ac28d02deb888d28b6cd2b98ba76
+  healthCheckPath: /api/health
+  runtime: node
+  scaling: {minScale: 0, maxScale: 1}
+---
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata:
+  name: z2080-bun
+  namespace: z2080-repro
+spec:
+  image: ghcr.io/getknext-dev/rc5-rc4-bun@sha256:ea9730296f852666d47f3c458dee0320e404ac66a46c711fbe8d46468634b8f4
+  healthCheckPath: /api/health
+  runtime: bun
+  scaling: {minScale: 0, maxScale: 1}

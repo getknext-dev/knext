@@ -1,0 +1,159 @@
+node  recent   n=20 median=   9902 min=1655 max=11631  >5s: 16  blackhole-signature: 18
+node  settled  n= 7 median=   9889 min=9596 max=10669  >5s: 7  blackhole-signature: 7
+bun   recent   n=19 median=   9726 min=1465 max=10400  >5s: 18  blackhole-signature: 18
+bun   settled  n= 8 median=  10150 min=3457 max=18560  >5s: 7  blackhole-signature: 6
+nodei recent   n=20 median=   1726 min=1401 max=5519  >5s: 1  blackhole-signature: 3
+nodei settled  n= 8 median=   2110 min=1665 max=2664  >5s: 0  blackhole-signature: 0
+buni  recent   n=20 median=   1418 min=976 max=5017  >5s: 1  blackhole-signature: 0
+buni  settled  n= 8 median=   1830 min=1090 max=4375  >5s: 0  blackhole-signature: 0
+nodei0 recent   n=10 median=  10428 min=1780 max=10883  >5s: 9  blackhole-signature: 9
+nodei0 settled  n= 4 median=  11717 min=9700 max=12995  >5s: 4  blackhole-signature: 4
+buni0 recent   n= 9 median=   9597 min=1685 max=10693  >5s: 8  blackhole-signature: 8
+buni0 settled  n= 4 median=  10569 min=10012 max=11360  >5s: 4  blackhole-signature: 4
+
+bun recent off 4.4 ms 1465 bh 0 old True ['True'] newnode 10.0.1.118 probe {'10.244.0.90:3000': {'code': 200, 'ms': 17}}
+bun recent off 5.2 ms 9825 bh 27 old True ['True'] newnode 10.0.1.118 probe None
+bun recent off 6.9 ms 10103 bh 20 old False [] newnode 10.0.1.169 probe None
+bun recent off 8.0 ms 9726 bh 28 old True ['True'] newnode 10.0.1.118 probe None
+bun recent off 8.7 ms 9646 bh 27 old True ['True'] newnode 10.0.1.169 probe {'10.244.0.238:3000': {'code': 200, 'ms': 18}}
+bun recent off 9.5 ms 9417 bh 27 old True ['True'] newnode 10.0.1.169 probe None
+bun recent off 11.1 ms 9487 bh 26 old True ['True'] newnode 10.0.1.169 probe None
+bun recent off 11.6 ms 9799 bh 27 old True ['True'] newnode 10.0.1.118 probe {'10.244.0.102:3000': {'code': 200, 'ms': 16}}
+bun recent off 14.2 ms 9868 bh 27 old True ['True'] newnode 10.0.1.118 probe None
+bun recent off 16.6 ms 10400 bh 26 old True ['True'] newnode 10.0.1.169 probe {'10.244.0.236:3000': {'code': 200, 'ms': 14}}
+bun recent off 18.2 ms 9707 bh 28 old True ['True'] newnode 10.0.1.118 probe {'10.244.0.96:3000': {'code': 200, 'ms': 21}}
+bun recent off 20.1 ms 9475 bh 27 old True ['True'] newnode 10.0.1.169 probe None
+bun recent off 20.9 ms 10178 bh 28 old True ['True'] newnode 10.0.1.169 probe None
+bun recent off 23.1 ms 9814 bh 20 old True ['False'] newnode 10.0.1.118 probe None
+bun recent off 24.0 ms 9438 bh 20 old True ['False'] newnode 10.0.1.169 probe {'10.244.0.246:3000': {'code': 200, 'ms': 17}}
+bun recent off 26.0 ms 10010 bh 24 old True ['True'] newnode 10.0.1.118 probe {'10.244.0.92:3000': {'err': 'Error: timeout', 'ms': 2007}}
+bun recent off 26.3 ms 10117 bh 22 old True ['True'] newnode 10.0.1.169 probe None
+bun recent off 29.0 ms 9524 bh 20 old True ['False'] newnode 10.0.1.118 probe None
+bun recent off 35.3 ms 9592 bh 20 old True ['True'] newnode 10.0.1.169 probe None
+bun settled off None ms 9656 bh 19 old False [] newnode 10.0.1.118 probe None
+bun settled off None ms 10271 bh 20 old False [] newnode 10.0.1.169 probe None
+bun settled off None ms 10030 bh 19 old False [] newnode 10.0.1.169 probe None
+bun settled off None ms 9713 bh 20 old False [] newnode 10.0.1.118 probe None
+bun settled off None ms 11944 bh 20 old False [] newnode 10.0.1.118 probe None
+bun settled off None ms 3457 bh 1 old False [] newnode 10.0.1.118 probe None
+bun settled off None ms 18560 bh 0 old False [] newnode 10.0.1.118 probe None
+bun settled off None ms 13066 bh 0 old False [] newnode 10.0.1.118 probe None
+buni recent off 4.0 ms 1296 bh 0 old True ['True'] newnode 10.0.1.118 probe None
+buni recent off 5.6 ms 1334 bh 0 old True ['True'] newnode 10.0.1.118 probe {'10.244.0.109:3000': {'code': 200, 'ms': 18}}
+buni recent off 8.8 ms 1180 bh 0 old True ['True'] newnode 10.0.1.169 probe None
+buni recent off 11.3 ms 1150 bh 0 old True ['True'] newnode 10.0.1.169 probe {'10.244.0.138:3000': {'code': 200, 'ms': 17}}
+buni recent off 11.9 ms 2985 bh 0 old True ['True'] newnode 10.0.1.169 probe {'10.244.0.242:3000': {'code': 200, 'ms': 16}}
+buni recent off 12.5 ms 5017 bh 0 old True ['True'] newnode 10.0.1.169 probe None
+buni recent off 14.0 ms 1000 bh 0 old True ['True'] newnode 10.0.1.118 probe {'10.244.0.100:3000': {'code': 200, 'ms': 15}}
+buni recent off 14.3 ms 1179 bh 0 old True ['True'] newnode 10.0.1.118 probe None
+buni recent off 15.2 ms 1204 bh 0 old True ['True'] newnode 10.0.1.118 probe None
+buni recent off 18.0 ms 1865 bh 0 old True ['True'] newnode 10.0.1.169 probe {'10.244.0.254:3000': {'code': 200, 'ms': 17}}
+buni recent off 18.5 ms 1500 bh 0 old True ['True'] newnode 10.0.1.118 probe None
+buni recent off 20.0 ms 1518 bh 0 old True ['True'] newnode 10.0.1.169 probe {'10.244.0.249:3000': {'code': 200, 'ms': 14}}
+buni recent off 20.5 ms 976 bh 0 old True ['True'] newnode 10.0.1.118 probe None
+buni recent off 20.9 ms 2603 bh 0 old True ['True'] newnode 10.0.1.169 probe None
+buni recent off 23.2 ms 1892 bh 0 old True ['True'] newnode 10.0.1.169 probe None
+buni recent off 25.0 ms 2026 bh 0 old True ['True'] newnode 10.0.1.118 probe {'10.244.0.117:3000': {'code': 200, 'ms': 17}}
+buni recent off 26.3 ms 1559 bh 0 old True ['True'] newnode 10.0.1.118 probe None
+buni recent off 26.5 ms 1394 bh 0 old True ['True'] newnode 10.0.1.169 probe {'10.244.0.245:3000': {'err': 'Error: timeout', 'ms': 2007}}
+buni recent off 30.0 ms 1433 bh 0 old True ['True'] newnode 10.0.1.169 probe None
+buni recent off 31.0 ms 1403 bh 0 old True ['True'] newnode 10.0.1.118 probe {'10.244.0.113:3000': {'err': 'Error: timeout', 'ms': 2008}}
+buni settled off None ms 2069 bh 0 old False [] newnode 10.0.1.118 probe None
+buni settled off None ms 4375 bh 0 old False [] newnode 10.0.1.118 probe None
+buni settled off None ms 2564 bh 0 old False [] newnode 10.0.1.118 probe None
+buni settled off None ms 1592 bh 0 old False [] newnode 10.0.1.118 probe None
+buni settled off None ms 1256 bh 0 old False [] newnode 10.0.1.169 probe None
+buni settled off None ms 1408 bh 0 old False [] newnode 10.0.1.169 probe None
+buni settled off None ms 3328 bh 0 old False [] newnode 10.0.1.169 probe None
+buni settled off None ms 1090 bh 0 old False [] newnode 10.0.1.169 probe None
+buni0 recent off 8.1 ms 9831 bh 28 old True ['True'] newnode 10.0.1.169 probe None
+buni0 recent off 11.1 ms 9232 bh 27 old True ['True'] newnode 10.0.1.169 probe None
+buni0 recent off 13.2 ms 9392 bh 27 old True ['True'] newnode 10.0.1.118 probe None
+buni0 recent off 16.8 ms 10693 bh 20 old False [] newnode 10.0.1.169 probe None
+buni0 recent off 22.1 ms 9597 bh 27 old True ['True'] newnode 10.0.1.118 probe None
+buni0 recent off 23.4 ms 1685 bh 0 old True ['True'] newnode 10.0.1.118 probe None
+buni0 recent off 25.3 ms 9285 bh 26 old True ['True'] newnode 10.0.1.169 probe None
+buni0 recent off 28.0 ms 9920 bh 19 old True ['False'] newnode 10.0.1.118 probe None
+buni0 recent off 31.7 ms 10367 bh 20 old True ['False'] newnode 10.0.1.118 probe None
+buni0 settled off None ms 10895 bh 20 old False [] newnode 10.0.1.118 probe None
+buni0 settled off None ms 10012 bh 20 old False [] newnode 10.0.1.118 probe None
+buni0 settled off None ms 10243 bh 20 old False [] newnode 10.0.1.118 probe None
+buni0 settled off None ms 11360 bh 20 old False [] newnode 10.0.1.118 probe None
+node recent off 4.4 ms 10263 bh 27 old True ['True'] newnode 10.0.1.169 probe {'10.244.0.235:3000': {'code': 200, 'ms': 14}}
+node recent off 4.6 ms 9753 bh 28 old True ['True'] newnode 10.0.1.118 probe None
+node recent off 5.2 ms 9175 bh 27 old True ['True'] newnode 10.0.1.169 probe None
+node recent off 5.9 ms 11631 bh 28 old True ['True'] newnode 10.0.1.118 probe {'10.244.0.95:3000': {'code': 200, 'ms': 16}}
+node recent off 8.0 ms 9938 bh 27 old True ['True'] newnode 10.0.1.169 probe None
+node recent off 8.1 ms 2081 bh 1 old True ['True'] newnode 10.0.1.118 probe None
+node recent off 11.0 ms 9590 bh 26 old True ['True'] newnode 10.0.1.169 probe {'10.244.0.243:3000': {'code': 200, 'ms': 14}}
+node recent off 11.1 ms 10058 bh 28 old True ['True'] newnode 10.0.1.118 probe None
+node recent off 15.5 ms 10367 bh 28 old True ['True'] newnode 10.0.1.169 probe None
+node recent off 17.2 ms 1908 bh 0 old True ['True'] newnode 10.0.1.118 probe {'10.244.0.91:3000': {'code': 200, 'ms': 15}}
+node recent off 17.4 ms 9352 bh 28 old True ['True'] newnode 10.0.1.118 probe None
+node recent off 19.9 ms 10168 bh 26 old True ['True'] newnode 10.0.1.169 probe {'10.244.0.240:3000': {'code': 200, 'ms': 15}}
+node recent off 20.0 ms 10303 bh 28 old True ['True'] newnode 10.0.1.118 probe None
+node recent off 20.2 ms 3612 bh 0 old True ['True'] newnode 10.0.1.169 probe {'10.244.0.239:3000': {'code': 200, 'ms': 14}}
+node recent off 23.0 ms 1655 bh 1 old True ['False'] newnode 10.0.1.118 probe None
+node recent off 24.1 ms 10526 bh 21 old True ['True'] newnode 10.0.1.169 probe None
+node recent off 26.0 ms 9867 bh 25 old True ['True'] newnode 10.0.1.118 probe None
+node recent off 26.1 ms 10323 bh 19 old True ['True'] newnode 10.0.1.169 probe {'10.244.0.237:3000': {'err': 'Error: timeout', 'ms': 2008}}
+node recent off 29.2 ms 9807 bh 20 old True ['False'] newnode 10.0.1.169 probe None
+node recent off 29.8 ms 10359 bh 20 old True ['False'] newnode 10.0.1.118 probe {'10.244.0.97:3000': {'err': 'Error: timeout', 'ms': 2008}}
+node settled off None ms 10189 bh 19 old False [] newnode 10.0.1.169 probe None
+node settled off None ms 9596 bh 19 old False [] newnode 10.0.1.169 probe None
+node settled off None ms 10459 bh 20 old False [] newnode 10.0.1.118 probe None
+node settled off None ms 9788 bh 19 old False [] newnode 10.0.1.169 probe None
+node settled off None ms 9889 bh 20 old False [] newnode 10.0.1.169 probe None
+node settled off None ms 10669 bh 20 old False [] newnode 10.0.1.169 probe None
+node settled off None ms 9680 bh 19 old False [] newnode 10.0.1.169 probe None
+nodei recent off 4.1 ms 2009 bh 1 old True ['True'] newnode 10.0.1.118 probe {'10.244.0.98:3000': {'code': 200, 'ms': 18}}
+nodei recent off 7.9 ms 1666 bh 0 old True ['True'] newnode 10.0.1.118 probe None
+nodei recent off 8.7 ms 1435 bh 0 old True ['True'] newnode 10.0.1.169 probe None
+nodei recent off 8.8 ms 1561 bh 1 old True ['True'] newnode 10.0.1.169 probe {'10.244.0.248:3000': {'code': 200, 'ms': 16}}
+nodei recent off 8.9 ms 2191 bh 0 old True ['True'] newnode 10.0.1.118 probe None
+nodei recent off 9.3 ms 1411 bh 0 old True ['True'] newnode 10.0.1.169 probe {'10.244.0.252:3000': {'code': 200, 'ms': 15}}
+nodei recent off 11.4 ms 1401 bh 0 old True ['True'] newnode 10.0.1.118 probe {'10.244.0.114:3000': {'code': 200, 'ms': 16}}
+nodei recent off 14.9 ms 1665 bh 0 old True ['True'] newnode 10.0.1.169 probe {'10.244.0.244:3000': {'code': 200, 'ms': 15}}
+nodei recent off 16.1 ms 1936 bh 0 old True ['True'] newnode 10.0.1.118 probe None
+nodei recent off 17.0 ms 1490 bh 0 old True ['True'] newnode 10.0.1.169 probe None
+nodei recent off 17.4 ms 1728 bh 0 old True ['True'] newnode 10.0.1.118 probe {'10.244.0.111:3000': {'code': 200, 'ms': 14}}
+nodei recent off 17.5 ms 2585 bh 0 old True ['True'] newnode 10.0.1.169 probe None
+nodei recent off 19.9 ms 1724 bh 0 old True ['True'] newnode 10.0.1.118 probe {'10.244.0.107:3000': {'code': 200, 'ms': 17}}
+nodei recent off 21.9 ms 5519 bh 0 old True ['True'] newnode 10.0.1.169 probe None
+nodei recent off 23.0 ms 1895 bh 1 old True ['True'] newnode 10.0.1.169 probe {'10.244.0.139:3000': {'code': 200, 'ms': 14}}
+nodei recent off 23.1 ms 2046 bh 0 old True ['True'] newnode 10.0.1.118 probe None
+nodei recent off 26.6 ms 1854 bh 0 old True ['True'] newnode 10.0.1.118 probe {'10.244.0.104:3000': {'err': 'Error: timeout', 'ms': 2007}}
+nodei recent off 27.6 ms 2273 bh 0 old True ['False'] newnode 10.0.1.169 probe None
+nodei recent off 29.1 ms 1453 bh 0 old True ['True'] newnode 10.0.1.169 probe {'10.244.0.131:3000': {'err': 'Error: timeout', 'ms': 2007}}
+nodei recent off 29.2 ms 1424 bh 0 old True ['True'] newnode 10.0.1.118 probe None
+nodei settled off None ms 1665 bh 0 old False [] newnode 10.0.1.169 probe None
+nodei settled off None ms 2375 bh 0 old False [] newnode 10.0.1.169 probe None
+nodei settled off None ms 2207 bh 0 old False [] newnode 10.0.1.169 probe None
+nodei settled off None ms 2014 bh 0 old False [] newnode 10.0.1.169 probe None
+nodei settled off None ms 1956 bh 0 old False [] newnode 10.0.1.169 probe None
+nodei settled off None ms 2664 bh 0 old False [] newnode 10.0.1.118 probe None
+nodei settled off None ms 1747 bh 0 old False [] newnode 10.0.1.118 probe None
+nodei settled off None ms 2329 bh 0 old False [] newnode 10.0.1.118 probe None
+nodei0 recent off 10.0 ms 1780 bh 0 old True ['True'] newnode 10.0.1.118 probe None
+nodei0 recent off 11.7 ms 10696 bh 27 old True ['True'] newnode 10.0.1.169 probe None
+nodei0 recent off 13.1 ms 9432 bh 27 old True ['True'] newnode 10.0.1.169 probe None
+nodei0 recent off 17.5 ms 10347 bh 28 old True ['True'] newnode 10.0.1.118 probe None
+nodei0 recent off 17.5 ms 10883 bh 27 old True ['True'] newnode 10.0.1.118 probe None
+nodei0 recent off 21.7 ms 10508 bh 28 old True ['True'] newnode 10.0.1.169 probe None
+nodei0 recent off 22.1 ms 9505 bh 27 old True ['True'] newnode 10.0.1.169 probe None
+nodei0 recent off 25.3 ms 10703 bh 20 old True ['False'] newnode 10.0.1.118 probe None
+nodei0 recent off 30.0 ms 10061 bh 20 old True ['False'] newnode 10.0.1.169 probe None
+nodei0 recent off 31.5 ms 10515 bh 20 old True ['False'] newnode 10.0.1.169 probe None
+nodei0 settled off None ms 11003 bh 21 old False [] newnode 10.0.1.169 probe None
+nodei0 settled off None ms 9700 bh 20 old False [] newnode 10.0.1.169 probe None
+nodei0 settled off None ms 12995 bh 19 old False [] newnode 10.0.1.169 probe None
+nodei0 settled off None ms 12431 bh 20 old False [] newnode 10.0.1.169 probe None
+
+node vs bun recent: p=0.4 medians 9902 vs 9726
+nodei vs buni recent: p=0.027 medians 1726 vs 1418
+node vs nodei recent: p=2.2e-06 medians 9902 vs 1726
+bun vs buni recent: p=3.7e-07 medians 9726 vs 1418
+nodei vs nodei0 recent: p=6.2e-05 medians 1726 vs 10428
+buni vs buni0 recent: p=7.5e-05 medians 1418 vs 9597
+node recent vs settled (unprimed) 0.507
+bun recent vs settled (unprimed) 0.089

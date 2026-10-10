@@ -1,0 +1,7 @@
+Claim (kind): a Node zone re-woken while its previous pod is Terminating holds the request 13-28 s although the new pod is Ready in 2.8 s; Bun not affected; rarer ~10 s stall hits both runtimes.
+OKE measurements (flannel, Knative 1.16, max-scale 1, in-cluster client, n per arm 4-20):
+- Re-wake during the old pod's Terminating window (old pod still Ready=True per kubelet for ~28 s, exits at ~31 s, identical for Node and Bun): Node image WITH the ARP primer: 20 wakes, median 1726 ms, max 5519, none above 6 s. Bun with primer: 20 wakes, median 1418, max 5017. No 13-28 s hold in any of 118 wakes; slowest 18.6 s was after the old pod was gone.
+- In all 98 re-wakes the activator's backend set was already empty (0 backends) within 0-1.1 s of the old pod entering Terminating, before the request: the activator never selects the terminating pod.
+- Images WITHOUT the ARP primer (rc.4 build): Node 16/20 and Bun 18/19 re-wakes during Terminating took 9-11 s; the same rate after the old pod was fully gone (7/7 Node, 7/8 Bun). Activator logged ~20-28 failed probes of the new pod (context deadline exceeded). Node and Bun do not differ (p=0.4).
+- Same primer-bearing image with env KNEXT_ARP_PRIMER=0: stalls return (Node 9/10, Bun 8/9 during Terminating; 4/4 and 4/4 after) at 9-11 s; with the primer on: 0 of 40 above 6 s.
+- The primer ships in v1.0.0-rc.5 and later, so in v1.0.0 and v1.3.0.
