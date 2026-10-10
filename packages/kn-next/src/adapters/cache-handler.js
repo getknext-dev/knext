@@ -1201,7 +1201,6 @@ function isVinextAdapterArgs(arg) {
   }
   const { options } = arg;
   if (options === undefined || options === null) return true;
-  if (typeof options !== 'object' || Array.isArray(options)) return false;
   const proto = Object.getPrototypeOf(options);
   return proto === Object.prototype || proto === null;
 }
