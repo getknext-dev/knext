@@ -1100,7 +1100,7 @@ let currentBuildId;
 // (`route-module.js` `getIncrementalCache`), so the file is read once per
 // `serverDistDir`, not once per request.
 const buildIdByDistDir = new Map();
-function resolveBuildId(options) {
+function fileBuildId(options) {
   const serverDistDir = options?.serverDistDir;
   if (typeof serverDistDir !== 'string' || serverDistDir.length === 0) return undefined;
   if (buildIdByDistDir.has(serverDistDir)) return buildIdByDistDir.get(serverDistDir);
@@ -1113,6 +1113,21 @@ function resolveBuildId(options) {
   if (id === NEXT_CONSTANT_BUILD_ID) id = undefined;
   buildIdByDistDir.set(serverDistDir, id);
   return id;
+}
+
+// Fallback identity when `.next/BUILD_ID` gives none (vinext, Next's constant
+// id, unreadable file): the id knext injects per build, then the deployment id
+// (#1417). Read per call -- never cached with the file result.
+function envBuildId() {
+  for (const name of ['KNEXT_BUILD_ID', 'NEXT_DEPLOYMENT_ID']) {
+    const v = process.env[name]?.trim();
+    if (v && v !== NEXT_CONSTANT_BUILD_ID) return v;
+  }
+  return undefined;
+}
+
+function resolveBuildId(options) {
+  return fileBuildId(options) ?? envBuildId();
 }
 
 /** Next's `toRoute` (`dist/server/lib/to-route.js`): `/a/index` → `/a`, `/index` → `/`. */
@@ -1134,8 +1149,9 @@ function nextRoute(key) {
  * wrote it: a different build id, or none recorded (written before build ids
  * were), reads as a MISS and the route re-renders. Plain ISR HTML has no
  * postponed state — it is only stale, never resumed — and stays shared.
- * With no build id for THIS process (vinext, unreadable BUILD_ID, Next's
- * constant id) there is nothing to compare against, so it fails open.
+ * The id is `.next/BUILD_ID`, else `KNEXT_BUILD_ID`, else `NEXT_DEPLOYMENT_ID`.
+ * Only with none of the three is there nothing to compare against, and it
+ * fails open (the entry is served).
  */
 function isForeignPostponedEntry(entry) {
   if (currentBuildId === undefined) return false;

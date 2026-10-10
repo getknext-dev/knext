@@ -109,3 +109,137 @@ describe("PPR resume state is build-scoped (#2084)", () => {
         expect(got).not.toBeNull();
     });
 });
+/** A dist whose `.next/BUILD_ID` is Next's constant id (deployment id set). */
+const CONSTANT_ID = "build-TfctsWXpff2fKS";
+const DIST_CONSTANT = distWithBuildId(CONSTANT_ID);
+
+/** A dist with no readable BUILD_ID. */
+function distWithoutBuildId(): string {
+    const root = mkdtempSync(join(tmpdir(), "knext-2084-"));
+    tempRoots.push(root);
+    mkdirSync(join(root, ".next", "server"), { recursive: true });
+    return join(root, ".next", "server");
+}
+const DIST_NONE = distWithoutBuildId();
+
+/** A process whose handler is built with `options`, reading `raw` from Redis. */
+async function readsWith(options: unknown, raw: string) {
+    const mod = (await import(
+        `../adapters/cache-handler.js?ppr=${Math.random()}`
+    )) as {
+        default: new (
+            o: unknown,
+        ) => { get: (k: string, c: unknown) => Promise<unknown> };
+        __setRedisClientForTests: (c: unknown) => void;
+    };
+    const client = {
+        connected: true,
+        async connect() {},
+        async get() {
+            return raw;
+        },
+        async send() {
+            return "OK";
+        },
+    };
+    const handler = new mod.default(options);
+    mod.__setRedisClientForTests(client);
+    return handler.get("/dyn", { kind: "APP_PAGE" });
+}
+
+const ID_ENV = ["KNEXT_BUILD_ID", "NEXT_DEPLOYMENT_ID"] as const;
+
+describe("PPR build scope falls back to the env build id (#2084)", () => {
+    beforeEach(() => {
+        delete process.env.REDIS_URL;
+        for (const k of ID_ENV) delete process.env[k];
+    });
+    afterAll(() => {
+        for (const k of ID_ENV) delete process.env[k];
+    });
+
+    const foreign = () => stored({ buildId: BUILD_A, postponed: '{"x":1}' });
+
+    it("uses KNEXT_BUILD_ID when there is no serverDistDir (vinext)", async () => {
+        process.env.KNEXT_BUILD_ID = BUILD_B;
+        expect(await readsWith({}, foreign())).toBeNull();
+    });
+
+    it("uses KNEXT_BUILD_ID when BUILD_ID is unreadable", async () => {
+        process.env.KNEXT_BUILD_ID = BUILD_B;
+        expect(
+            await readsWith({ serverDistDir: DIST_NONE }, foreign()),
+        ).toBeNull();
+    });
+
+    it("uses the env id when BUILD_ID is Next's constant id", async () => {
+        process.env.KNEXT_BUILD_ID = BUILD_B;
+        expect(
+            await readsWith({ serverDistDir: DIST_CONSTANT }, foreign()),
+        ).toBeNull();
+    });
+
+    it("falls back to NEXT_DEPLOYMENT_ID when KNEXT_BUILD_ID is unset", async () => {
+        process.env.NEXT_DEPLOYMENT_ID = BUILD_B;
+        expect(
+            await readsWith({ serverDistDir: DIST_CONSTANT }, foreign()),
+        ).toBeNull();
+    });
+
+    it("still serves this build's own entry under the env id", async () => {
+        process.env.KNEXT_BUILD_ID = BUILD_B;
+        const got = await readsWith(
+            {},
+            stored({ buildId: BUILD_B, postponed: '{"x":1}' }),
+        );
+        expect(got).not.toBeNull();
+    });
+
+    it("ignores an env id equal to Next's constant id", async () => {
+        process.env.KNEXT_BUILD_ID = CONSTANT_ID;
+        expect(
+            await readsWith({ serverDistDir: DIST_NONE }, foreign()),
+        ).not.toBeNull();
+    });
+
+    it("FAILS OPEN with no id anywhere: the foreign entry is served (pinned)", async () => {
+        expect(
+            await readsWith({ serverDistDir: DIST_NONE }, foreign()),
+        ).not.toBeNull();
+        expect(await readsWith({}, foreign())).not.toBeNull();
+    });
+
+    it("applies on the in-memory get path too", async () => {
+        const mod = (await import(
+            `../adapters/cache-handler.js?ppr=${Math.random()}`
+        )) as {
+            default: new (
+                o: unknown,
+            ) => {
+                get: (k: string, c: unknown) => Promise<unknown>;
+                set: (k: string, d: unknown, c: unknown) => Promise<void>;
+            };
+        };
+        const page = {
+            kind: "APP_PAGE",
+            html: "<p>shell</p>",
+            headers: {},
+            status: 200,
+            postponed: '{"x":1}',
+        };
+        // Build A writes (no Redis -> memory); then the same entry is read by
+        // A (served) and by B (a miss).
+        process.env.KNEXT_BUILD_ID = BUILD_A;
+        await new mod.default({}).set("/dyn", page, {
+            revalidate: 3600,
+            tags: [],
+        });
+        expect(
+            await new mod.default({}).get("/dyn", { kind: "APP_PAGE" }),
+        ).not.toBeNull();
+        process.env.KNEXT_BUILD_ID = BUILD_B;
+        expect(
+            await new mod.default({}).get("/dyn", { kind: "APP_PAGE" }),
+        ).toBeNull();
+    });
+});
