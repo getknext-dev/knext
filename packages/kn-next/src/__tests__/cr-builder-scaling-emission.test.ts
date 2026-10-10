@@ -1,4 +1,6 @@
 import { describe, expect, it } from "bun:test";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { buildNextAppCRObject } from "../cli/cr-builder";
 import type { KnativeNextConfig } from "../config";
 
@@ -56,6 +58,45 @@ function previousEffective(config: KnativeNextConfig) {
         maxScale: config.scaling?.maxScale ?? OPERATOR_DEFAULT_MAX_SCALE,
     };
 }
+
+/**
+ * The matrix above reasons with a small MODEL of the operator (a present block's
+ * maxScale is literal, an absent block means 10). A model that drifted from the
+ * operator would make that matrix prove nothing, so pin it to the operator's own
+ * recorded output: the zero-diff golden renders exactly these two shapes.
+ */
+const OPERATOR_GOLDEN_DIR = resolve(
+    import.meta.dirname,
+    "../../../kn-next-operator/internal/controller/testdata/zero-diff/golden",
+);
+
+function operatorMaxScaleAnnotation(goldenName: string): string {
+    const text = readFileSync(
+        resolve(OPERATOR_GOLDEN_DIR, `${goldenName}.golden.yaml`),
+        "utf8",
+    );
+    const m = text.match(/autoscaling\.knative\.dev\/max-scale: "(\d+)"/);
+    if (!m) throw new Error(`no max-scale annotation in ${goldenName} golden`);
+    return m[1];
+}
+
+describe("the model of the operator used below matches the operator's recorded output", () => {
+    it("a CR with no spec.scaling renders max-scale 10", () => {
+        expect(operatorMaxScaleAnnotation("no-scaling-block")).toBe(
+            String(OPERATOR_DEFAULT_MAX_SCALE),
+        );
+        expect(operatorEffective(undefined).maxScale).toBe(
+            OPERATOR_DEFAULT_MAX_SCALE,
+        );
+    });
+
+    it("a present scaling block without maxScale renders max-scale 0 (unbounded)", () => {
+        expect(operatorMaxScaleAnnotation("scaling-without-maxscale")).toBe(
+            "0",
+        );
+        expect(operatorEffective({}).maxScale).toBe(0);
+    });
+});
 
 describe("buildNextAppCRObject — scaling pair is emitted only when set", () => {
     it("emits no spec.scaling at all when the config sets nothing scaling-related", () => {
