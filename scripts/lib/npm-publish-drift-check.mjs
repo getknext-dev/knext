@@ -69,6 +69,7 @@ const GITHUB_API_BASE = 'https://api.github.com/';
 
 /** Every API status this module treats as "could not read this, not 'it's empty'". */
 const PERMISSION_ERROR_STATUSES = new Set([403, 404]);
+const MAX_POLICY_PAGES = 20;
 
 // ── Pure decision: the npm-publish environment's required-reviewers rule ────
 
@@ -414,9 +415,28 @@ export async function fetchBranchPolicy({ owner, repo, environment, api }) {
       ?.deployment_branch_policy;
     let policies;
     if (policy && typeof policy === 'object' && policy.custom_branch_policies) {
-      const list = await api(`${base}/deployment-branch-policies`);
-      if (list.status !== 200) return unreadable(list, 'deployment-branch-policies');
-      policies = /** @type {{branch_policies?: unknown}} */ (list.body)?.branch_policies;
+      // Paginate (per_page=100) and FAIL CLOSED if the collected count does
+      // not reach `total_count`: reading only page 1 would silently drop
+      // policies, and a missing policy must never read as a verified answer.
+      const collected = [];
+      let total;
+      for (let page = 1; page <= MAX_POLICY_PAGES; page += 1) {
+        const list = await api(`${base}/deployment-branch-policies?per_page=100&page=${page}`);
+        if (list.status !== 200) return unreadable(list, 'deployment-branch-policies');
+        const body = /** @type {{branch_policies?: unknown, total_count?: unknown}} */ (list.body);
+        const items = Array.isArray(body?.branch_policies) ? body.branch_policies : [];
+        collected.push(...items);
+        if (typeof body?.total_count === 'number') total = body.total_count;
+        if (items.length < 100 || (total !== undefined && collected.length >= total)) break;
+      }
+      if (typeof total === 'number' && collected.length < total) {
+        return {
+          kind: 'api-error',
+          status: 0,
+          message: `deployment-branch-policies returned ${collected.length} of total_count ${total} — incomplete read, failing closed.`,
+        };
+      }
+      policies = collected;
     }
     const evaluated = evaluateBranchPolicy(policy, policies);
     return evaluated.ok ? { kind: 'ok' } : { kind: 'missing', reason: evaluated.reason };

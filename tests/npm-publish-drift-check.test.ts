@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -421,10 +421,11 @@ describe('fetchTagRulesetProtection', () => {
 // ── runDriftCheck (combines both, names exactly which is missing) ───────────
 
 const GOOD_POLICY_ROUTES = {
-  'repos/getknext-dev/knext/environments/npm-publish/deployment-branch-policies': {
-    status: 200,
-    body: { branch_policies: [{ name: 'main', type: 'branch' }] },
-  },
+  'repos/getknext-dev/knext/environments/npm-publish/deployment-branch-policies?per_page=100&page=1':
+    {
+      status: 200,
+      body: { branch_policies: [{ name: 'main', type: 'branch' }] },
+    },
 };
 
 /** Wrap a fake api so the branch-policy axis reads healthy (tests of OTHER axes). */
@@ -647,6 +648,50 @@ describe('fetchBranchPolicy + runDriftCheck wiring', () => {
     const { api } = fakeApi({ [ENV]: { status: 403, body: {} } });
     expect((await fetchBranchPolicy({ ...args, api })).kind).toBe('permission-error');
   });
+
+  it('follows pages: an off-allowlist entry only on page 2 is still caught', async () => {
+    const filler = Array.from({ length: 100 }, () => ({ name: 'main', type: 'branch' }));
+    const { api } = fakeApi({
+      [ENV]: {
+        status: 200,
+        body: {
+          deployment_branch_policy: { protected_branches: false, custom_branch_policies: true },
+        },
+      },
+      [`${ENV}/deployment-branch-policies?per_page=100&page=1`]: {
+        status: 200,
+        body: { total_count: 101, branch_policies: filler },
+      },
+      [`${ENV}/deployment-branch-policies?per_page=100&page=2`]: {
+        status: 200,
+        body: { total_count: 101, branch_policies: [{ name: 'evil', type: 'branch' }] },
+      },
+    });
+    const res = await fetchBranchPolicy({ ...args, api });
+    expect(res.kind).toBe('missing');
+    expect(JSON.stringify(res)).toContain('branch:evil');
+  });
+
+  it('fails closed when total_count exceeds what the pages returned', async () => {
+    const { api } = fakeApi({
+      [ENV]: {
+        status: 200,
+        body: {
+          deployment_branch_policy: { protected_branches: false, custom_branch_policies: true },
+        },
+      },
+      [`${ENV}/deployment-branch-policies?per_page=100&page=1`]: {
+        status: 200,
+        body: { total_count: 5, branch_policies: [{ name: 'main', type: 'branch' }] },
+      },
+      [`${ENV}/deployment-branch-policies?per_page=100&page=2`]: {
+        status: 200,
+        body: { total_count: 5, branch_policies: [] },
+      },
+    });
+    const res = await fetchBranchPolicy({ ...args, api });
+    expect(res.kind).toBe('api-error');
+  });
 });
 
 function fakeApiAll(routes: Record<string, { status: number; body: unknown }>) {
@@ -699,7 +744,7 @@ describe('check-npm-publish-drift CLI exit codes (--fixture)', () => {
             deployment_branch_policy: { protected_branches: false, custom_branch_policies: true },
           },
         },
-        [`${ENV}/deployment-branch-policies`]: {
+        [`${ENV}/deployment-branch-policies?per_page=100&page=1`]: {
           status: 200,
           body: { branch_policies: [{ name: 'integration/v1-coldstart', type: 'branch' }] },
         },
@@ -717,7 +762,7 @@ describe('check-npm-publish-drift CLI exit codes (--fixture)', () => {
             deployment_branch_policy: { protected_branches: false, custom_branch_policies: true },
           },
         },
-        [`${ENV}/deployment-branch-policies`]: {
+        [`${ENV}/deployment-branch-policies?per_page=100&page=1`]: {
           status: 200,
           body: {
             branch_policies: [
@@ -728,5 +773,17 @@ describe('check-npm-publish-drift CLI exit codes (--fixture)', () => {
         },
       }),
     ).toBe(0);
+  });
+});
+
+// The nightly must read the LIVE API: a `--fixture` there would verify canned
+// JSON forever and stay green regardless of real drift.
+describe('nightly workflow never passes --fixture', () => {
+  it('npm-publish-drift-nightly.yml has no --fixture', () => {
+    const wf = readFileSync(
+      join(import.meta.dir, '..', '.github', 'workflows', 'npm-publish-drift-nightly.yml'),
+      'utf8',
+    );
+    expect(wf).not.toContain('--fixture');
   });
 });
