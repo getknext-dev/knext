@@ -97,9 +97,10 @@ describe('injection safety: PR-controlled values flow through env:, never inline
     expect(baseStep, 'base pin-read step not found').toBeTruthy();
     expect(headStep, 'head pin-read step not found').toBeTruthy();
     expect(mergeBaseStep, 'merge-base pin-read step not found').toBeTruthy();
-    expect(String(baseStep?.run)).toContain('"${BASE_SHA}:.github/compat-credential-ref.json"');
-    expect(String(headStep?.run)).toContain('"${HEAD_SHA}:.github/compat-credential-ref.json"');
+    expect(String(baseStep?.run)).toContain('--base-sha "${BASE_SHA}"');
+    expect(String(headStep?.run)).toContain('"${HEAD_SHA}:${PIN_FILE_SELECTED}"');
     expect(String(mergeBaseStep?.run)).toContain('git merge-base "${BASE_SHA}" "${HEAD_SHA}"');
+    expect(String(mergeBaseStep?.run)).toContain('"${MERGE_BASE}:${PIN_FILE_SELECTED}"');
     expect(String(baseStep?.run)).not.toMatch(/\$\{\{/);
     expect(String(headStep?.run)).not.toMatch(/\$\{\{/);
     expect(String(mergeBaseStep?.run)).not.toMatch(/\$\{\{/);
@@ -207,14 +208,60 @@ describe('actionlint has no complaints about this workflow', () => {
   });
 });
 
-describe('base-ref scope wiring (#2004)', () => {
-  it('job env carries BASE_REF from merge_group OR pull_request, and the check receives it via a shell var', () => {
+describe('release-line scope wiring (#2098)', () => {
+  it('job env carries BASE_REF from merge_group OR pull_request, and the base-pin step receives it via a shell var', () => {
     const { wf } = load();
     const job = wf.jobs[JOB];
     expect(job.env?.BASE_REF).toContain('github.event.merge_group.base_ref');
     expect(job.env?.BASE_REF).toContain('github.event.pull_request.base.ref');
-    const step = job.steps.find((s) => /Run the published-bytes freeze check/.test(s.name ?? ''));
+    const step = job.steps.find((s) =>
+      /Read the pin file at the PR's base commit/.test(s.name ?? ''),
+    );
+    expect(String(step?.run)).toContain('published-bytes-select-pin.mjs');
     expect(String(step?.run)).toContain('--base-ref "${BASE_REF}"');
+    expect(String(step?.run)).toContain('--base-pin-out base-pin.json');
+    expect(String(step?.run)).toContain('>> "${GITHUB_ENV}"');
     expect(String(step?.run)).not.toMatch(/\$\{\{/);
   });
+
+  it('the check receives the base commit version, so it can skip a base on another line', () => {
+    const { wf } = load();
+    const step = wf.jobs[JOB].steps.find((s) =>
+      /Run the published-bytes freeze check/.test(s.name ?? ''),
+    );
+    expect(String(step?.run)).toContain('--base-version "${BASE_VERSION}"');
+    expect(String(step?.run)).not.toMatch(/\$\{\{/);
+  });
+
+  it('the pin selection runs after dependency install (it imports the workspace helpers) and before the head/merge-base reads', () => {
+    const { wf } = load();
+    const steps = wf.jobs[JOB].steps;
+    const idx = (re: RegExp) => steps.findIndex((s) => re.test(`${s.name ?? ''}\n${s.run ?? ''}`));
+    const install = idx(/bun install --frozen-lockfile/);
+    const select = idx(/published-bytes-select-pin\.mjs/);
+    const head = idx(/Read the pin file at the PR's head commit/);
+    expect(install).toBeGreaterThanOrEqual(0);
+    expect(select).toBeGreaterThan(install);
+    expect(head).toBeGreaterThan(select);
+  });
+});
+
+describe('head/merge-base pin reads tolerate an absent pin file but not an unreadable one (#2118)', () => {
+  for (const [label, ref, out] of [
+    ['head commit', 'HEAD_SHA', 'head-pin.json'],
+    ['merge base', 'MERGE_BASE', 'merge-base-pin.json'],
+  ] as const) {
+    it(`the ${label} read distinguishes absent (cat-file -e => unfrozen) from present (show under set -e)`, () => {
+      const { wf } = load();
+      const step = wf.jobs[JOB].steps.find((s) =>
+        new RegExp(`Read the pin file at the PR's ${label}`).test(s.name ?? ''),
+      );
+      const run = String(step?.run);
+      expect(run).toContain('set -euo pipefail');
+      expect(run).toContain(`git cat-file -e "\${${ref}}:\${PIN_FILE_SELECTED}"`);
+      expect(run).toContain(`echo '{"rcTag": null}' > ${out}`);
+      expect(run).toContain(`git show "\${${ref}}:\${PIN_FILE_SELECTED}" > ${out}`);
+      expect(run).not.toMatch(/git show [^\n]*2>\/dev\/null/);
+    });
+  }
 });
