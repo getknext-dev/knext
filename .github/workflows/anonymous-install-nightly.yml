@@ -81,6 +81,9 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Route Docker Hub pulls through mirror.gcr.io (anonymous rate limit)
+        id: docker-hub-mirror
+        uses: ./.github/actions/docker-hub-mirror
       # No setup-node and no install step: the script is dependency-free ESM on
       # the runner's built-in Node, so a check auditing the supply chain cannot
       # itself become part of it.

@@ -89,6 +89,18 @@ jobs:
         build: [turbopack, webpack]
         runtime: [node, bun]
     steps:
+      - name: Route Docker Hub pulls through mirror.gcr.io (anonymous rate limit)
+        id: docker-hub-mirror
+        run: |
+          set -euo pipefail
+          # Inline twin of .github/actions/docker-hub-mirror (this job runs before any checkout).
+          cfg="${RUNNER_TEMP}/buildkitd-mirror.toml"
+          printf '[registry."docker.io"]\n  mirrors = ["mirror.gcr.io"]\n' > "$cfg"
+          echo "buildkitd-config=$cfg" >> "$GITHUB_OUTPUT"
+          existing='{}'
+          if [ -s /etc/docker/daemon.json ]; then existing="$(cat /etc/docker/daemon.json)"; fi
+          echo "$existing" | jq '. + {"registry-mirrors": ["https://mirror.gcr.io"]}' | sudo tee /etc/docker/daemon.json >/dev/null
+          sudo systemctl restart docker
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -291,6 +303,18 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
+      - name: Route Docker Hub pulls through mirror.gcr.io (anonymous rate limit)
+        id: docker-hub-mirror
+        run: |
+          set -euo pipefail
+          # Inline twin of .github/actions/docker-hub-mirror (this job runs before any checkout).
+          cfg="${RUNNER_TEMP}/buildkitd-mirror.toml"
+          printf '[registry."docker.io"]\n  mirrors = ["mirror.gcr.io"]\n' > "$cfg"
+          echo "buildkitd-config=$cfg" >> "$GITHUB_OUTPUT"
+          existing='{}'
+          if [ -s /etc/docker/daemon.json ]; then existing="$(cat /etc/docker/daemon.json)"; fi
+          echo "$existing" | jq '. + {"registry-mirrors": ["https://mirror.gcr.io"]}' | sudo tee /etc/docker/daemon.json >/dev/null
+          sudo systemctl restart docker
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -454,6 +478,18 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
+      - name: Route Docker Hub pulls through mirror.gcr.io (anonymous rate limit)
+        id: docker-hub-mirror
+        run: |
+          set -euo pipefail
+          # Inline twin of .github/actions/docker-hub-mirror (this job runs before any checkout).
+          cfg="${RUNNER_TEMP}/buildkitd-mirror.toml"
+          printf '[registry."docker.io"]\n  mirrors = ["mirror.gcr.io"]\n' > "$cfg"
+          echo "buildkitd-config=$cfg" >> "$GITHUB_OUTPUT"
+          existing='{}'
+          if [ -s /etc/docker/daemon.json ]; then existing="$(cat /etc/docker/daemon.json)"; fi
+          echo "$existing" | jq '. + {"registry-mirrors": ["https://mirror.gcr.io"]}' | sudo tee /etc/docker/daemon.json >/dev/null
+          sudo systemctl restart docker
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:

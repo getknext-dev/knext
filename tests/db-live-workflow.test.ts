@@ -45,7 +45,7 @@ describe('ci.yml — db-live-integration job (live @getknext/db lane)', () => {
   it('runs a postgres:16 service container', () => {
     const job = dbLiveJobBlock();
     expect(job).toMatch(/services:/);
-    expect(job).toMatch(/image:\s*postgres:16/);
+    expect(job).toMatch(/image:\s*mirror\.gcr\.io\/library\/postgres:16\b/); // #2106: Docker Hub via the mirror
   });
 
   it('gates on pg_isready-style container health options', () => {

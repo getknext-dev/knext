@@ -82,6 +82,9 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Route Docker Hub pulls through mirror.gcr.io (anonymous rate limit)
+        id: docker-hub-mirror
+        uses: ./.github/actions/docker-hub-mirror
       # Node 22.18+ is required to run the published CLI directly from its
       # `.ts` entry points under plain Node (native type stripping) — the same
       # floor `docs/QUICKSTART.md` documents for consumers. Pinned rather than
