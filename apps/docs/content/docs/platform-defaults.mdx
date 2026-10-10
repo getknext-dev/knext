@@ -167,6 +167,41 @@ kubectl get nextapp -A -o custom-columns='NAMESPACE:.metadata.namespace,NAME:.me
 A blank column means that field is unset on the app.
 </Callout>
 
+## Observability
+
+A held app keeps serving its old version, so nothing about it looks broken from the outside. The
+operator exports fleet-level metrics for the platform layer on its existing metrics endpoint, so
+you can alert on it without listing every app.
+
+| Metric | Type | What it tells you |
+| --- | --- | --- |
+| `knext_nextapp_platform_held_apps` | gauge, label `reason` | How many apps are held right now. `reason` is `EffectiveSpecInvalid` or `RolloutPending`. |
+| `knext_nextapp_platform_holds_total` | counter, label `reason` | How many times an app entered a hold. A hold that lasts many reconciles counts once. |
+| `knext_platform_rollout_queue_depth` | gauge | Re-renders waiting for their turn behind `rollout.maxAppsPerMinute`. |
+| `knext_platform_rollout_wait_seconds` | histogram | How long a queued re-render was told to wait for its turn. Re-renders that go straight through are not observed. |
+| `knext_webhook_budget_fallback_total` | counter, label `reason` | Admissions that ignored the platform's `connectionBudget` and used the built-in `80`. `reason` is `read_error` (the platform could not be read) or `platform_invalid` (it exists but is not valid). |
+
+The fallback counter only counts the abnormal paths. A cluster with no `KnextPlatform`, or one
+that sets no `connectionBudget`, uses the built-in value by design and is not counted, so any
+increase is worth a look: the budget you set is not the one being enforced at `kubectl apply`.
+
+Two alerts that cover the quiet failures:
+
+```yaml
+# An app has been held for a while: a platform change is not reaching it.
+- alert: KnextPlatformAppsHeld
+  expr: max(knext_nextapp_platform_held_apps{reason="EffectiveSpecInvalid"}) > 0
+  for: 15m
+
+# The admission check stopped honouring the platform's budget.
+- alert: KnextBudgetWebhookFallback
+  expr: increase(knext_webhook_budget_fallback_total[15m]) > 0
+```
+
+The gauges and the queue reflect the operator process that is running now. After an operator
+restart they refill as each app is reconciled again, and a queue that was in progress is re-spaced
+from the start, still within `maxAppsPerMinute`.
+
 ## Profiles
 
 `spec.profile` accepts `default` or `fastColdStart`.

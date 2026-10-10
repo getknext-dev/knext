@@ -1,0 +1,106 @@
+name: Operator Platform-Layer E2E
+
+# The platform layer (ADR-0064: a cluster-scoped KnextPlatform supplying defaults
+# to every NextApp) has envtest coverage for its decisions, but envtest has no
+# Knative, no admission webhook and no real revision - so it cannot show what a
+# user relies on: that a bad platform edit leaves the OLD revision SERVING.
+# This lane runs the real install bundle on kind with real Knative and proves
+# (test/e2e/platform_e2e_test.go, build tag `e2e_platform`):
+#   - an EMPTY platform renders the Knative Service byte-identically (zero diff),
+#   - a platform value is inherited and the rollout limiter paces the apps,
+#   - lowering connectionBudget HOLDS apps: old revision keeps serving, Ready is
+#     False on a dropped change, and the held-apps metric moves,
+#   - an over-budget app deletes without hanging in Terminating,
+#   - restoring the budget recovers,
+#   - the budget webhook never silently fell back to the built-in budget.
+#
+# It runs on PRs that touch the operator (path-filtered, like the install-bundle
+# lane), on main, and on demand. It has no schedule on purpose: the capacity
+# budget is spent elsewhere, and every change that can break it is a change to
+# the paths below.
+#
+# Deliberately NO continue-on-error: every assertion is state-based (conditions,
+# stored templates, revision names, metric values), so a failure is signal.
+
+on:
+  pull_request:
+    paths:
+      - 'packages/kn-next-operator/**'
+      - '.github/workflows/operator-platform-e2e.yml'
+      - 'scripts/kind-manifests/**'
+  push:
+    branches: [main]
+    paths:
+      - 'packages/kn-next-operator/**'
+      - '.github/workflows/operator-platform-e2e.yml'
+      - 'scripts/kind-manifests/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: operator-platform-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  platform-e2e:
+    name: Platform layer hold / recover / metrics against kind (e2e_platform)
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: packages/kn-next-operator/go.mod
+          cache-dependency-path: packages/kn-next-operator/go.sum
+
+      - name: Install kind
+        uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
+        with:
+          install_only: true
+
+      - name: Create kind cluster
+        run: kind create cluster --name kn-next-operator-test-e2e --wait 120s
+
+      - name: Install cert-manager (operator webhook certs)
+        run: |
+          set -euo pipefail
+          scripts/kind-manifests/apply-cert-manager.sh
+          kubectl wait --for=condition=Available --timeout=300s \
+            -n cert-manager deployment/cert-manager deployment/cert-manager-webhook deployment/cert-manager-cainjector
+
+      - name: Install Knative Serving + Kourier
+        # Kourier is load-bearing: the suite's HTTP assertions route through the
+        # ksvc's cluster-local address, which needs a programmed ingress to prove
+        # WHICH revision answered while an app is held.
+        run: |
+          set -euo pipefail
+          KNATIVE_VERSION="knative-v1.16.0"
+          scripts/kind-manifests/apply-knative-kourier.sh "${KNATIVE_VERSION}"
+          kubectl patch configmap/config-network \
+            --namespace knative-serving \
+            --type merge \
+            --patch '{"data":{"ingress-class":"kourier.ingress.networking.knative.dev"}}'
+          kubectl wait --for=condition=Available --timeout=300s \
+            -n knative-serving deployment/controller deployment/webhook deployment/autoscaler
+          kubectl wait --for=condition=Available --timeout=300s \
+            -n knative-serving deployment/net-kourier-controller
+
+      - name: Run platform-layer e2e
+        working-directory: packages/kn-next-operator
+        env:
+          KIND_CLUSTER: kn-next-operator-test-e2e
+        run: make test-e2e-platform
+
+      - name: Dump operator logs on failure
+        if: failure()
+        run: |
+          kubectl -n kn-next-operator-system logs deploy/kn-next-operator-controller-manager --tail=300 || true
+          kubectl get knextplatform,nextapp -A -o yaml || true
+
+      - name: Tear down kind cluster
+        if: always()
+        run: kind delete cluster --name kn-next-operator-test-e2e || true
