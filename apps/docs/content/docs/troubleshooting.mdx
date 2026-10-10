@@ -278,12 +278,14 @@ more**. This is a client configuration fix, not a cluster change. See [Databases
 `knext_deep_health_state{dependency="overall",state="waking"}` has been `1` for over 2 minutes. This
 gauge belongs to the default standalone build's metric family.
 
-**Normal versus stuck.** The deep health check classifies a **connection-level** failure to Postgres —
-`ECONNREFUSED`, a connect timeout, dead DNS — as `waking`, not `down`, because a scale-to-zero database
-shows exactly that signature while it wakes. A real wake is brief, a few seconds, and does not page. A
-genuinely down database (host gone, dead DNS, a rotated `DATABASE_URL`) presents the *same* errors, so
-it sits at `waking` forever and never becomes `down`. The alert pages on `waking` sustained past the
-wake budget for this reason.
+**Normal versus stuck.** The deep health check reports a **connection-level** failure to Postgres —
+`ECONNREFUSED`, a connect timeout, dead DNS — as `waking` only when the app's `DATABASE_URL` points at
+the scale-zero-pg gateway (`*.scale-zero-pg.svc…`), because a scale-to-zero database shows exactly that
+signature while it wakes. A real wake is brief, a few seconds, and does not page. A refused connection to
+a bring-your-own database reads `down` straight away, since nothing is waking it. A scale-to-zero
+database that is genuinely down (host gone, dead DNS, a rotated `DATABASE_URL`) presents the *same*
+errors, so it sits at `waking` forever and never becomes `down`. The alert pages on `waking` sustained
+past the wake budget for this reason.
 
 **What it means.** The app cannot reach its database at the connection level for minutes. This is an
 outage, not a wake.
