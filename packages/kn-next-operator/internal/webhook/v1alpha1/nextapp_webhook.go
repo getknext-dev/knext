@@ -23,6 +23,7 @@ package v1alpha1
 
 import (
 	"context"
+	"fmt"
 
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -44,7 +45,13 @@ func SetupNextAppWebhookWithManager(mgr ctrl.Manager) error {
 	// The platform's connection budget is read at admission only when the
 	// KnextPlatform CRD is installed; otherwise the webhook is exactly what it was
 	// before the platform layer existed (ADR-0064 D3).
-	if platformv1alpha1.CRDInstalled(mgr.GetRESTMapper()) {
+	installed, err := platformv1alpha1.CRDInstalled(mgr.GetRESTMapper())
+	if err != nil {
+		// Unknown is not absent: failing here is what keeps a discovery blip from
+		// silently dropping the platform's budget from admission.
+		return fmt.Errorf("nextapp webhook: %w", err)
+	}
+	if installed {
 		v.Platform = mgr.GetAPIReader()
 	}
 	return ctrl.NewWebhookManagedBy(mgr, &appsv1alpha1.NextApp{}).

@@ -46,7 +46,13 @@ func SetupControllers(mgr ctrl.Manager, cleaner ExternalCleaner) error {
 		return fmt.Errorf("NextApp controller: %w", err)
 	}
 
-	if platformv1alpha1.CRDInstalled(mgr.GetRESTMapper()) {
+	installed, err := platformv1alpha1.CRDInstalled(mgr.GetRESTMapper())
+	if err != nil {
+		// Unknown is not absent: a discovery blip must stop start-up, not quietly
+		// turn the platform layer off.
+		return fmt.Errorf("KnextPlatform controller: %w", err)
+	}
+	if installed {
 		if err := (&KnextPlatformReconciler{
 			Client: mgr.GetClient(),
 			Scheme: mgr.GetScheme(),

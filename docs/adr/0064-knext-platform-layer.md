@@ -677,6 +677,19 @@ decision above; each item is a place the build had to choose within it.
   `PlatformDefaultsApplied=False, reason=PlatformNotAccepted`, a Warning event). Hold-last-good (F3)
   is reserved for a platform value that makes an *app's merged spec* invalid. jev: ignore 0.92 / hold
   0.08.
+- **Hold-last-good that drops the app's *own* change is not Ready (F3, round 2).** When the held
+  pass carries a generation the app itself moved (a new image), the live Service is Ready but is the
+  *old* one, so `Ready=True` would tell `kubectl wait --for=condition=Ready` that the deploy landed.
+  `computeStatusVerdict` instead reports `Ready=False` and `Degraded=True` (reason
+  `EffectiveSpecInvalid`, naming the field), `Reconciling=True` with its `observedGeneration` frozen at
+  the last generation actually reconciled (the signal `appTriggered` already reads, so the verdict is
+  sticky with no new status field), and `Ready`/`Degraded` at the new generation, since a False
+  verdict about it is an observation of it. A platform-only hold (the app unchanged) keeps the
+  Service's readiness as the truth. jev: Ready=False plus frozen Reconciling 0.99 / Ready=False
+  only 0.00 / freeze generation only 0.00 / freeze every condition 0.01.
+- **`CRDInstalled` distinguishes absent from unknown.** Only `meta.IsNoMatchError` means the CRD is
+  absent; any other discovery error fails start-up (the pod restart is the retry) rather than
+  silently switching the platform layer off.
 - **Added reasons on `PlatformDefaultsApplied`:** `NothingToInherit` (a platform is in force but
   supplies no value the app leaves unset) and `RolloutPending` (`Unknown`; queued behind the
   limiter). The ADR's `NoPlatform`, `NoPlatformCRD`, `Inherited`, `EffectiveSpecInvalid` and

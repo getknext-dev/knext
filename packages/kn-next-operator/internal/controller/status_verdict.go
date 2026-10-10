@@ -25,6 +25,7 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
+	"knative.dev/pkg/apis"
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 
 	appsv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/api/v1alpha1"
@@ -201,6 +202,64 @@ func platformDefaultsCondition(app *appsv1alpha1.NextApp, pd platformDefaultsSta
 	return c
 }
 
+// heldAppChangeDropped reports whether this pass is a hold-last-good
+// (EffectiveSpecInvalid) that is holding back a change the APP made, as opposed to
+// one only the platform moved.
+//
+// The distinction is the whole point. A platform-only hold leaves the live
+// Service exactly as the app asked for it, so the Service's own readiness is still
+// the truth about the app. But when the app's generation has moved past the last
+// one that was actually reconciled, the Service that is "Ready" is the OLD one: a
+// new image has not rolled out, and reporting Ready=True with the new generation
+// observed tells `kubectl wait --for=condition=Ready` — and every deploy that
+// waits on it — that it did.
+//
+// "Last reconciled generation" is the Reconciling condition's observedGeneration,
+// the same signal appTriggered already reads. This function and
+// heldReconcilingCondition keep it frozen while the change is held, so the verdict
+// is sticky across passes without a new status field.
+func heldAppChangeDropped(app *appsv1alpha1.NextApp, pd *platformDefaultsState) bool {
+	return pd != nil && pd.gate.hold == holdEffectiveSpecInvalid && appTriggered(app)
+}
+
+// heldReconcilingCondition is Reconciling for a held-and-dropped pass: True (the
+// change is not done) with observedGeneration left at the last generation that
+// WAS reconciled, never advanced to the one that was not.
+func heldReconcilingCondition(app *appsv1alpha1.NextApp, gate platformGate) metav1.Condition {
+	var lastReconciled int64
+	if prev := apimeta.FindStatusCondition(app.Status.Conditions, ConditionReconciling); prev != nil {
+		lastReconciled = prev.ObservedGeneration
+	}
+	return metav1.Condition{
+		Type:               ConditionReconciling,
+		Status:             metav1.ConditionTrue,
+		ObservedGeneration: lastReconciled,
+		Reason:             ReasonEffectiveSpecInvalid,
+		Message: fmt.Sprintf(
+			"the change at generation %d is held, not applied: %s: %s",
+			app.Generation, gate.field, gate.detail),
+	}
+}
+
+// heldReadyMessage is the Ready/Degraded message for a held-and-dropped pass. It
+// is static for a given (generation, platform state): no elapsed time, so a
+// converged object's status write stays a no-op (#98).
+func heldReadyMessage(app *appsv1alpha1.NextApp, gate platformGate, ksvcReady bool, ksvcReadyCond *apis.Condition) string {
+	msg := fmt.Sprintf(
+		"the change at generation %d is NOT applied: the platform's defaults make this app's effective spec "+
+			"invalid (%s): %s. The previous Knative Service keeps serving unchanged — fix the app's field "+
+			"or the platform value, and the next reconcile applies the change",
+		app.Generation, gate.field, gate.detail)
+	if !ksvcReady {
+		reason := "Pending"
+		if ksvcReadyCond != nil && ksvcReadyCond.Reason != "" {
+			reason = ksvcReadyCond.Reason
+		}
+		msg += fmt.Sprintf(" (the previous Knative Service is itself not Ready: %s)", reason)
+	}
+	return msg
+}
+
 // computeStatusVerdict is the single, pure seam for the NextApp status verdict:
 // the DatabaseReady composition (BYO bound, or none — managed provisioning was
 // removed, ADR-0025), the honest-Ready roll-up from the child ksvc's own Ready
@@ -259,15 +318,42 @@ func computeStatusVerdict(
 	ksvcReadyCond := ksvc.Status.GetCondition(servingv1.ServiceConditionReady)
 	ksvcReady := ksvcReadyCond.IsTrue()
 
-	v.conditions = append(v.conditions, metav1.Condition{
-		Type:               ConditionReconciling,
-		Status:             metav1.ConditionFalse,
-		ObservedGeneration: app.Generation,
-		Reason:             "ReconcileSuccess",
-		Message:            "Reconciliation complete",
-	})
+	// Hold-last-good that DROPS the app's own change (ADR-0064 F3): the live
+	// Service is Ready, but it is the OLD one, so none of the three roll-ups below
+	// may speak for the generation that was just written. See heldAppChangeDropped.
+	droppedHold := heldAppChangeDropped(app, extras.platform)
 
-	if ksvcReady {
+	if droppedHold {
+		v.conditions = append(v.conditions, heldReconcilingCondition(app, extras.platform.gate))
+	} else {
+		v.conditions = append(v.conditions, metav1.Condition{
+			Type:               ConditionReconciling,
+			Status:             metav1.ConditionFalse,
+			ObservedGeneration: app.Generation,
+			Reason:             "ReconcileSuccess",
+			Message:            "Reconciliation complete",
+		})
+	}
+
+	if droppedHold {
+		msg := heldReadyMessage(app, extras.platform.gate, ksvcReady, ksvcReadyCond)
+		v.conditions = append(v.conditions, metav1.Condition{
+			Type:               ConditionReady,
+			Status:             metav1.ConditionFalse,
+			ObservedGeneration: app.Generation,
+			Reason:             ReasonEffectiveSpecInvalid,
+			Message:            msg,
+		})
+		v.conditions = append(v.conditions, metav1.Condition{
+			Type:               ConditionDegraded,
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: app.Generation,
+			Reason:             ReasonEffectiveSpecInvalid,
+			Message:            msg,
+		})
+		// No requeue: the way out is a platform edit (the KnextPlatform watch
+		// re-enqueues every app) or an app edit (a new generation), never elapsed time.
+	} else if ksvcReady {
 		v.conditions = append(v.conditions, metav1.Condition{
 			Type:               ConditionReady,
 			Status:             metav1.ConditionTrue,
