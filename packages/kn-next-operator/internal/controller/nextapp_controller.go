@@ -2178,7 +2178,13 @@ func (r *NextAppReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// PlatformDefaultsApplied=NoPlatformCRD. It never crash-loops on a missing
 	// kind. A CRD installed LATER is picked up on the next operator restart.
 	platformKind := platformv1alpha1.GroupVersion.WithKind("KnextPlatform")
-	if platformv1alpha1.CRDInstalled(mgr.GetRESTMapper()) && mgr.GetScheme().Recognizes(platformKind) {
+	platformInstalled, discoverErr := platformv1alpha1.CRDInstalled(mgr.GetRESTMapper())
+	if discoverErr != nil {
+		// Unknown is not absent: a discovery blip must stop start-up rather than
+		// silently turn the platform layer off for the life of the process.
+		return fmt.Errorf("NextApp controller: %w", discoverErr)
+	}
+	if platformInstalled && mgr.GetScheme().Recognizes(platformKind) {
 		r.PlatformCRDPresent = true
 		b = b.Watches(&platformv1alpha1.KnextPlatform{},
 			handler.EnqueueRequestsFromMapFunc(r.platformToNextAppRequests),

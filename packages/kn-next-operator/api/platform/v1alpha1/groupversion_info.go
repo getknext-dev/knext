@@ -25,6 +25,8 @@ limitations under the License.
 package v1alpha1
 
 import (
+	"fmt"
+
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/scheme"
@@ -47,8 +49,23 @@ var (
 // is wired only when it does, so an operator on a cluster without the CRD starts
 // and behaves exactly as before the platform layer existed (ADR-0064 D3). A CRD
 // installed later is picked up on the next operator restart.
-func CRDInstalled(mapper meta.RESTMapper) bool {
+//
+// Only a definitive "no such kind" (meta.IsNoMatchError) means the CRD is absent.
+// Any OTHER error — a discovery timeout, a 5xx, an aggregated API that is down —
+// is an unknown, returned to the caller, because reading it as "absent" would
+// switch the whole platform layer off, silently, for the life of the process: a
+// platform whose defaults were in force would stop reaching every app and the
+// only trace would be a NoPlatformCRD condition on a cluster that has the CRD.
+// Callers fail start-up on the error; the pod restart is the retry.
+func CRDInstalled(mapper meta.RESTMapper) (bool, error) {
 	_, err := mapper.RESTMapping(
 		schema.GroupKind{Group: GroupVersion.Group, Kind: "KnextPlatform"}, GroupVersion.Version)
-	return err == nil
+	switch {
+	case err == nil:
+		return true, nil
+	case meta.IsNoMatchError(err):
+		return false, nil
+	default:
+		return false, fmt.Errorf("discovering whether the KnextPlatform CRD is installed: %w", err)
+	}
 }
