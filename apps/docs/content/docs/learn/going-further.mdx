@@ -7,7 +7,7 @@ description: What you built, how to take it down, and what to read next.
 
 - ACME, deployed to Knative on your own cluster, on a real URL
 - **Scaled to zero** — no pods, no container compute, when idle
-- A Postgres database bound by Secret, which knext neither created nor manages
+- A Postgres database bound by Secret. Chapter 7 used the Beta scale-to-zero Postgres, but any Postgres works
 - That database **also scaled to zero**, so idle ACME costs nothing at either tier
 - A CI pipeline that redeploys on every push, with **no cloud credentials in it**
 

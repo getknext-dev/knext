@@ -260,7 +260,7 @@ instrumented, so silence does not rule them out.
 **Symptom.** The first database query after both the app *and* its database have been idle fails or is
 very slow; logs show a connect timeout or `connection refused`, and `KnextHighErrorRate` may fire.
 
-**Cause.** knext binds Postgres through a Secret DSN and builds no database machinery. When the DSN
+**Cause.** knext binds Postgres through a Secret DSN. The optional scale-to-zero database (Beta) is a separate component. When the DSN
 points at a scale-to-zero database's wake-on-connect gateway, a cold database takes a few seconds to
 wake. Two client-side settings cause the timeout:
 
