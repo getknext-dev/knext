@@ -96,6 +96,8 @@ describe('file-manager platform e2e (reusable) - wiring', () => {
     const uses = [...text.matchAll(/^\s*-?\s*uses:\s*(\S+)(.*)$/gm)];
     expect(uses.length).toBeGreaterThan(3);
     for (const [, ref, rest] of uses) {
+      // #2106: the repo's own first-party mirror composite is the one local action.
+      if (ref === './.github/actions/docker-hub-mirror') continue;
       expect(ref).toMatch(/@[0-9a-f]{40}$/);
       expect(rest).toMatch(/#\s*v\d/);
     }

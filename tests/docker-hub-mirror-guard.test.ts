@@ -7,6 +7,7 @@ import {
   DEFERRED_DERIVED,
   DEFERRED_FROZEN,
   DEFERRED_PINNED,
+  EXEMPT_NO_DOCKER_PULL,
   findViolations,
   imageRefOk,
   MIRROR_ACTION,
@@ -54,6 +55,14 @@ describe('docker-hub-mirror-guard (fixtures)', () => {
     expect(findViolations(root)).toEqual([]);
   });
 
+  it('reds a mirrored ref in a run step that dropped its sha256 pin', () => {
+    const pinned = `mirror.gcr.io/library/registry:2@sha256:${'0'.repeat(64)}`;
+    const mk = (ref: string) =>
+      fixture(job(`      - uses: ${MIRROR_ACTION}\n      - run: docker run -d ${ref}\n`));
+    expect(findViolations(mk(pinned))).toEqual([]);
+    expect(findViolations(mk('mirror.gcr.io/library/registry:2')).length).toBe(1);
+  });
+
   it('reds when the mirror step comes AFTER the pull', () => {
     const root = fixture(job(`      - run: docker pull alpine\n      - uses: ${MIRROR_ACTION}\n`));
     expect(findViolations(root).length).toBe(1);
@@ -92,7 +101,7 @@ describe('docker-hub-mirror-guard (fixtures)', () => {
     const ok = fixture(
       job(
         '      - run: echo hi\n',
-        '    services:\n      r:\n        image: mirror.gcr.io/library/redis:7@sha256:aa\n',
+        '    services:\n      r:\n        image: mirror.gcr.io/library/redis:7@sha256:0000000000000000000000000000000000000000000000000000000000000000\n',
       ),
     );
     expect(findViolations(ok)).toEqual([]);
@@ -100,8 +109,11 @@ describe('docker-hub-mirror-guard (fixtures)', () => {
 
   it('imageRefOk: Docker Hub short refs fail; other registries and the mirror pass', () => {
     expect(imageRefOk('redis:7')).toBe(false);
-    expect(imageRefOk('oven/bun:1')).toBe(false);
-    expect(imageRefOk('mirror.gcr.io/library/redis:7')).toBe(true);
+    expect(imageRefOk('grafana/grafana:11')).toBe(false);
+    expect(imageRefOk(`mirror.gcr.io/library/redis:7@sha256:${'0'.repeat(64)}`)).toBe(true);
+    // the mirror is not a licence to drop the digest pin
+    expect(imageRefOk('mirror.gcr.io/library/redis:7')).toBe(false);
+    expect(imageRefOk('mirror.gcr.io/library/redis:7@sha256:aa')).toBe(false);
     expect(imageRefOk('ghcr.io/o/i:1')).toBe(true);
     expect(imageRefOk('us-central1-docker.pkg.dev/p/r/i@sha256:aa')).toBe(true);
   });
@@ -147,6 +159,15 @@ describe('docker-hub-mirror-guard (the real workflows)', () => {
       '.github/workflows/compat-vinext.yml',
       '.github/workflows/test-e2e-deploy.yml',
     ]);
+  });
+
+  it('the no-docker-pull exemption holds: the anonymous script never shells out', () => {
+    expect(EXEMPT_NO_DOCKER_PULL).toEqual(['.github/workflows/anonymous-install-nightly.yml']);
+    const script = readFileSync(join(REPO_ROOT, 'scripts/verify-anonymous-install.mjs'), 'utf8');
+    expect(script).not.toMatch(/child_process|execSync|execFileSync|spawnSync/);
+    // and the workflow still carries no mirror step (the credential audit forbids extra steps)
+    const wf = readFileSync(join(REPO_ROOT, EXEMPT_NO_DOCKER_PULL[0]), 'utf8');
+    expect(wf).not.toContain('docker-hub-mirror');
   });
 
   it('every DEFERRED_DERIVED file is still a generated derived copy', () => {

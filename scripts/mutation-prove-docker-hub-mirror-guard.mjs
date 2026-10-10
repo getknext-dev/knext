@@ -81,8 +81,20 @@ const MUTATIONS = [
   {
     label: 'real workflow: a services image reverts to an anonymous Docker Hub ref',
     subject: 'ci',
-    anchor: 'image: mirror.gcr.io/library/postgres:16\n',
-    replacement: 'image: postgres:16\n',
+    anchor: 'image: mirror.gcr.io/library/postgres:16@',
+    replacement: 'image: postgres:16@',
+  },
+  {
+    label: 'scanner: a mirrored ref no longer needs its digest',
+    subject: 'guard',
+    anchor: '  if (ref.startsWith(`${MIRROR_HOST}/`)) return /@sha256:[0-9a-f]{64}$/.test(ref);',
+    replacement: '  if (ref.startsWith(`${MIRROR_HOST}/`)) return true;',
+  },
+  {
+    label: 'scanner: a mirrored ref inside a run step no longer needs its pin',
+    subject: 'guard',
+    anchor: '          if (!/@sha256:[0-9a-f]{64}$/.test(m[0])) {',
+    replacement: '          if (false) {',
   },
   {
     label: 'composite action: the daemon registry-mirrors setting is dropped',

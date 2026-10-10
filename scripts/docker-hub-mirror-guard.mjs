@@ -51,10 +51,25 @@ export const DEFERRED_DERIVED = Object.freeze(['.github/workflows/compat-credent
  */
 export const DEFERRED_PINNED = Object.freeze(['.github/workflows/bun-base-build.yml']);
 
+/**
+ * `anonymous-install-nightly.yml` is audited to hold NO credential and NO extra action or
+ * step (`auditAnonymousWorkflowJob` allowlists exactly checkout + one run command), so a
+ * mirror step cannot be added without weakening that audit. It does not need one: its
+ * script talks to registries over `fetch` and never invokes docker (the only
+ * `docker pull` text in it is a doc comment). A test asserts the script imports no
+ * `child_process`, so this exemption cannot outlive that fact.
+ */
+export const EXEMPT_NO_DOCKER_PULL = Object.freeze([
+  '.github/workflows/anonymous-install-nightly.yml',
+]);
+
 export const DEFERRED_FROZEN = Object.freeze([
   '.github/workflows/test-e2e-deploy.yml',
   '.github/workflows/compat-vinext.yml',
 ]);
+
+/** A `mirror.gcr.io/<repo>[:tag][@sha256:...]` token inside shell text. */
+const MIRROR_REF_IN_TEXT = /mirror\.gcr\.io\/[\w./-]+(?::[\w.-]+)?(?:@sha256:[0-9a-f]{64})?/g;
 
 /** A command/action that makes the runner or buildkit pull from a registry. */
 const PULLING =
@@ -98,7 +113,9 @@ export function imageRefOk(ref) {
   if (typeof ref !== 'string') return true; // expression-only refs are judged by the author
   if (ref.startsWith('${{')) return true;
   const first = ref.split('/')[0];
-  if (ref.startsWith(`${MIRROR_HOST}/`)) return true;
+  // The mirror serves the same digests, so a mirrored ref keeps the digest pin: a bare tag
+  // through the mirror is still a mutable pull (security.md: pin images by digest).
+  if (ref.startsWith(`${MIRROR_HOST}/`)) return /@sha256:[0-9a-f]{64}$/.test(ref);
   // A registry host has a dot or colon, or is localhost. Otherwise it is Docker Hub.
   return ref.includes('/') && (/[.:]/.test(first) || first === 'localhost');
 }
@@ -110,7 +127,14 @@ export function imageRefOk(ref) {
  */
 export function findViolations(
   repoRoot = REPO_ROOT,
-  { deferred = [...DEFERRED_FROZEN, ...DEFERRED_DERIVED, ...DEFERRED_PINNED] } = {},
+  {
+    deferred = [
+      ...DEFERRED_FROZEN,
+      ...DEFERRED_DERIVED,
+      ...DEFERRED_PINNED,
+      ...EXEMPT_NO_DOCKER_PULL,
+    ],
+  } = {},
 ) {
   const dir = join(repoRoot, '.github', 'workflows');
   const out = [];
@@ -134,6 +158,18 @@ export function findViolations(
         }
       }
       const steps = Array.isArray(job.steps) ? job.steps : [];
+      // A mirrored image named in a run step (`docker run mirror.gcr.io/...`) keeps its pin.
+      for (const st of steps) {
+        for (const m of String(st.run ?? '').matchAll(MIRROR_REF_IN_TEXT)) {
+          if (!/@sha256:[0-9a-f]{64}$/.test(m[0])) {
+            out.push({
+              file: rel,
+              job: id,
+              reason: `mirrored image "${m[0]}" in a step has no @sha256 pin`,
+            });
+          }
+        }
+      }
       const first = firstPullIndex(steps, repoRoot);
       if (first < 0) continue;
       // The buildx docker-container driver ignores the daemon mirror: its setup
