@@ -483,6 +483,7 @@ describe('integration/v2 pre-mode lane (#2038, v2 task R3a)', () => {
     'refs/heads/release/1.x',
     'refs/heads/integration/v1.3',
     'refs/heads/integration/v1.4',
+    'refs/heads/release/v1.3.0',
   ])('checkPreMode REDS %s when pre.json exists, and says how to fix it', (ref) => {
     const problems = checkPreMode({ lane: laneOf(ref), pre: { mode: 'pre', tag: 'next' } });
     expect(problems.length).toBeGreaterThan(0);
@@ -529,6 +530,12 @@ describe('integration/v2 pre-mode lane (#2038, v2 task R3a)', () => {
     });
     it('exits 1 on release/1.x when pre.json is present', () => {
       expect(runOn('refs/heads/release/1.x', '1.4.0', { mode: 'pre', tag: 'next' })).toBe(1);
+    });
+    it('exits 1 on a 1.x release cut when pre.json is present (changesets would publish under next)', () => {
+      expect(runOn('refs/heads/release/v1.3.0', '1.3.0', { mode: 'pre', tag: 'next' })).toBe(1);
+    });
+    it('exits 0 on a 1.x release cut with no pre.json', () => {
+      expect(runOn('refs/heads/release/v1.3.0', '1.3.0', undefined)).toBe(0);
     });
     it('exits 0 on main with a stable version and no pre.json', () => {
       expect(runOn('refs/heads/main', '1.4.0', undefined)).toBe(0);

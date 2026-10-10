@@ -92,9 +92,11 @@ export function checkPreMode({ lane, pre }) {
   if (tag === undefined) {
     // A lane outside the pre-mode map must publish STABLE versions. A leftover
     // `pre.json` makes `changeset publish` emit prereleases on the `pre.tag`
-    // dist-tag instead of `latest`. Release cuts (`kind: 'cut'`) are not asked:
-    // they declare their own version (`-rc.N` included) in the ref.
-    if (pre !== undefined && /** @type {{kind?: string}} */ (lane).kind === 'lane') {
+    // dist-tag instead of `latest`. Release cuts are included: changesets takes the
+    // dist-tag from `pre.json` whenever it exists, so a 1.x cut would publish its
+    // stable version under `next`. When 2.x cuts open, give them a pre-mode tag
+    // here rather than exempting cuts.
+    if (pre !== undefined) {
       return [
         `${lane.ref} publishes stable versions but .changeset/pre.json exists: pre mode is only for ${[...PRE_MODE_TAGS.keys()].join(', ')}. Run \`changeset pre exit\` (and commit the result) before this lane publishes; the GA merge of integration/v2 into main does this first, which leaves main valid.`,
       ];

@@ -23,18 +23,23 @@ const SPECS = ['tests/publish-lane-guard.test.ts', 'tests/ensure-published-group
 const MUTANTS = [
   [
     'drop the non-v2 pre.json rejection',
-    "if (pre !== undefined && /** @type {{kind?: string}} */ (lane).kind === 'lane') {",
+    'if (pre !== undefined) {',
     'if (false) {',
   ],
   [
     'non-v2 rejection only for main',
-    "if (pre !== undefined && /** @type {{kind?: string}} */ (lane).kind === 'lane') {",
+    'if (pre !== undefined) {',
     "if (pre !== undefined && lane.ref === 'refs/heads/main') {",
   ],
   [
     'non-v2 rejection never fires for release/1.x',
-    "if (pre !== undefined && /** @type {{kind?: string}} */ (lane).kind === 'lane') {",
+    'if (pre !== undefined) {',
     "if (pre !== undefined && lane.ref !== 'refs/heads/release/1.x') {",
+  ],
+  [
+    'release cuts exempt from the pre.json rejection',
+    'if (pre !== undefined) {',
+    "if (pre !== undefined && /** @type {{kind?: string}} */ (lane).kind === 'lane') {",
   ],
   [
     'v2 no longer requires pre.json',
