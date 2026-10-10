@@ -348,6 +348,78 @@ extra objects. It is the supported long-term way to do HTTP-01 with Kourier, but
 verified on the reference cluster yet. Until it is enabled, a mapping reports
 `CertificateProvisioned: TLSNotEnabled` — that is expected when you supply the Secret yourself.
 
+## 5. Make redirects use your domain [#redirects-use-your-domain]
+
+Next.js builds `request.url` from the address its server listens on, not from the hostname the
+browser asked for. Inside a pod that address is `0.0.0.0`, so a redirect built from `request.url`:
+
+```ts title="app/login/route.ts"
+return NextResponse.redirect(new URL('/dashboard', request.url));
+```
+
+answers `Location: http://0.0.0.0:8080/dashboard`. The browser cannot reach that address, and any
+cookie the redirecting response set (a login session, the Draft Mode cookie) is never sent back,
+because the browser is now on a different host.
+
+Tell the app which hostnames it is served on with `KNEXT_PUBLIC_ORIGINS`. Put your primary domain
+first:
+
+```ts title="knext.config.ts"
+const config: KnativeNextConfig = {
+  name: 'acme',
+  env: {
+    KNEXT_PUBLIC_ORIGINS: 'app.example.com,www.example.com',
+  },
+};
+```
+
+or directly on the resource:
+
+```yaml
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+spec:
+  env:
+    KNEXT_PUBLIC_ORIGINS: "app.example.com,www.example.com"
+```
+
+The same redirect then answers `Location: https://app.example.com/dashboard`, or `http://` when the
+request reached the cluster over plain HTTP. The pod logs the active list once at startup as
+`PUBLIC_ORIGINS:app.example.com,www.example.com (env)`.
+
+How the origin is chosen:
+
+- **Only the listening address is replaced.** A `Location` whose origin is `0.0.0.0` or `[::]` is
+  rewritten. A redirect to any other host, or a relative redirect such as `redirect('/dashboard')`
+  from `next/navigation`, is left exactly as your code wrote it. The path, query string and
+  fragment are always kept.
+- **The hostname must be on your list.** The request's `X-Forwarded-Host`, then its `Host`, is
+  used if it matches an entry exactly. Case doesn't matter, but a port has to match too. If neither
+  header matches, the first entry is used. That covers ingresses that don't pass the original
+  hostname through, which is why the primary domain goes first.
+- **The scheme is `http` or `https`.** `X-Forwarded-Proto` is used when it is exactly `http` or
+  `https`. Any other value, or no header, gives `https`.
+
+A request header is only ever compared against your list. A value that isn't on it never appears in
+a redirect, so a forged `Host` or `X-Forwarded-Host` cannot send your users to another site.
+
+Each entry is a hostname, optionally with a port (`localhost:3000`). An `https://` or `http://`
+prefix is accepted and ignored, because the scheme comes from the rule above. An entry with a path,
+a user name or a wildcard is dropped, and the pod log says which one.
+
+<Callout type="info">
+**Without `KNEXT_PUBLIC_ORIGINS` nothing changes.** Redirects built from `request.url` keep the
+`0.0.0.0` origin, as they always have. Set the variable on every app that redirects with an absolute
+URL.
+</Callout>
+
+`request.url` itself still carries the listening address; only the redirect is fixed. If your code
+builds absolute URLs from `request.url` for anything else, such as an OAuth `redirect_uri` or a link
+in an email, build them from your domain instead.
+
+This applies to the standalone targets: Node, Bun and the compiled executable. The vinext target
+builds `request.url` from the request's `Host` header, so its redirects already carry your domain.
+
 ## Private apps
 
 A private app is one only reachable inside the cluster, such as an internal tool or a backend. Do not
