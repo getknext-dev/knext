@@ -359,6 +359,24 @@ var _ = Describe("platform layer against a live cluster (ADR-0064)", Ordered, fu
 		Expect(utils.WaitForWebhookReady(pfNamespace)).To(Succeed())
 	})
 
+	// A failed spec dumps what the operator was doing WHILE the cluster is still
+	// up. The workflow's own log step runs after the suite has torn everything
+	// down, so by then there is nothing left to read.
+	JustAfterEach(func() {
+		if !CurrentSpecReport().Failed() {
+			return
+		}
+		logs, _ := utils.Kubectl("logs", "-n", pfOperatorNamespace, "-l", "control-plane=controller-manager",
+			"--tail=400", "--prefix", "--all-containers")
+		_, _ = fmt.Fprintf(GinkgoWriter, "\n--- operator logs (both replicas) at failure ---\n%s\n", logs)
+		apps, _ := utils.Kubectl("get", "nextapp", "-n", pfNamespace, "-o",
+			"custom-columns=NAME:.metadata.name,SPEC:.status.platform.specHash,REASON:.status.conditions[?(@.type=='PlatformDefaultsApplied')].reason")
+		_, _ = fmt.Fprintf(GinkgoWriter, "\n--- apps at failure ---\n%s\n", apps)
+		lease, _ := utils.Kubectl("get", "lease", pfLeaseName, "-n", pfOperatorNamespace, "-o",
+			"jsonpath={.spec.holderIdentity}")
+		_, _ = fmt.Fprintf(GinkgoWriter, "\n--- lease holder at failure ---\n%s\n", lease)
+	})
+
 	AfterAll(func() {
 		// Remove the platform FIRST so any app still over a lowered budget is back
 		// under the built-in one before the namespace is torn down.
