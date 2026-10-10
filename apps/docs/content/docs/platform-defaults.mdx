@@ -129,6 +129,11 @@ exactly as it is, reports `EffectiveSpecInvalid` naming the field, and raises a 
 Fix the app or the platform and the next reconcile applies it. An app that is invalid on its own
 is rejected as it always was.
 
+If the change being held is one you made to the app, for example a new image, the old version
+keeps serving, so the app reports `Ready: False` with the same reason, and
+`kubectl wait --for=condition=Ready` does not succeed until the change is applied. A platform
+change on its own, with the app untouched, leaves `Ready` as the running service reports it.
+
 **Deleting the platform reverts every app** to the built-in values, at the built-in pace of 10
 apps per minute.
 
@@ -137,6 +142,27 @@ apps per minute.
 `database.connectionBudget` replaces the built-in `80` that `maxScale × poolMax` must fit within
 for an app that declares a `poolMax`. The check at `kubectl apply` time and the check inside the
 operator use the same number. It creates no database, pooler or connection of its own.
+
+<Callout type="warn">
+**Lowering the budget blocks every update to an app that is already over it.** There is no grace
+for an app that was valid before: once its `maxScale × poolMax` is above the new budget, the check
+at `kubectl apply` time rejects every update to that app, including a deploy that only changes
+the image. The running service keeps serving unchanged, and the rejection names the budget.
+
+To get unstuck, do either of these:
+
+- raise `database.connectionBudget` back to a value the app fits within; or
+- lower the app's `maxScale` or `poolMax` in `knext.config.ts` until the product fits, then
+  deploy. That change is accepted because it fits.
+
+Before lowering the budget, list what would be over it:
+
+```bash
+kubectl get nextapp -A -o custom-columns='NAMESPACE:.metadata.namespace,NAME:.metadata.name,MAXSCALE:.spec.scaling.maxScale,POOLMAX:.spec.scaling.poolMax'
+```
+
+A blank column means that field is unset on the app.
+</Callout>
 
 ## Profiles
 

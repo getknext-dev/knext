@@ -166,6 +166,28 @@ describe('docs — platform defaults', () => {
     expect(page).toMatch(/fills in the other\s+three/);
   });
 
+  it('warns that lowering the budget blocks every update to an app over it, and says what to do', () => {
+    // The claim is only true while the update path has no ratchet for the budget:
+    // the new spec is checked against the budget before anything else, whatever the
+    // old spec was. If the operator ever adds a grace, this page must change too.
+    const validate = readFileSync(join(OPERATOR, 'internal/validation/validate.go'), 'utf-8');
+    expect(validate).toMatch(
+      /func ValidateNextAppSpecUpdateWithBudget\([^)]*\) error \{\n\tif err := ValidateNextAppSpecWithBudget\(newSpec, budget\); err != nil \{\n\t\treturn err\n\t\}/,
+    );
+    expect(page).toMatch(
+      /Lowering the budget blocks every update to an app that is already over it/,
+    );
+    expect(page).toMatch(/including a deploy that only changes\s+the image/);
+    // Both ways out.
+    expect(page).toMatch(/raise `database\.connectionBudget` back/);
+    expect(page).toMatch(/lower the app's `maxScale` or `poolMax`/);
+  });
+
+  it('says a held change the app made reports Ready False, so a waiting deploy does not succeed', () => {
+    expect(page).toMatch(/reports `Ready: False` with the same reason/);
+    expect(page).toContain('kubectl wait --for=condition=Ready');
+  });
+
   it('says changes are paced, held on invalid, and that an own deploy is not queued', () => {
     expect(page).toMatch(/Changes are paced/);
     expect(page).toMatch(/held, not applied/);
