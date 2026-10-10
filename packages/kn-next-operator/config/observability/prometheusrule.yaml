@@ -281,14 +281,17 @@ spec:
     - name: knext.app.node-legacy
       rules:
         # #348: SUSTAINED deep-health `waking` = a permanent connection-level DB
-        # outage. checkDeepHealth (packages/lib/src/health/index.ts) classifies a
-        # connection-level failure (ECONNREFUSED / timeout / dead DNS / bad
-        # DATABASE_URL) as `waking` — CORRECT for a normal scale-to-zero wake,
-        # which is brief (~2-6s). But a GENUINELY-down DB presents the SAME
+        # outage of the scale-to-zero database. checkDeepHealth
+        # (packages/lib/src/health/index.ts) classifies a connection-level
+        # failure (ECONNREFUSED / timeout / dead DNS / bad DATABASE_URL) as
+        # `waking` ONLY when DATABASE_URL points at the scale-zero-pg gateway
+        # host — CORRECT for a normal scale-to-zero wake, which is brief
+        # (~2-6s). But a GENUINELY-down scale-to-zero DB presents the SAME
         # connection-level signature, so it sits at `waking` FOREVER and never
-        # becomes `down` (only a reachable-but-erroring query yields `down`).
-        # Alerts keyed on `down`/503 alone therefore never page on it. This rule
-        # closes that gap: the deep-health state gauge reporting overall
+        # becomes `down`. Alerts keyed on `down`/503 alone therefore never page
+        # on it. A refused connection to any OTHER host (bring-your-own
+        # Postgres) reads `down` straight away and is paged by
+        # KnextDeepHealthDown below. This rule closes the waking gap: the deep-health state gauge reporting overall
         # waking=1 for LONGER than the wake budget is a stuck-waking real
         # outage. `for: 2m` is far above the legitimate 2-6s wake, so a normal
         # wake never pages.
@@ -305,8 +308,31 @@ spec:
             description: >-
               The deep health check has reported `waking` for over 2m — far
               longer than a legitimate 2-6s scale-to-zero wake. A permanent
-              connection-level DB outage (host gone, dead DNS, bad DATABASE_URL)
-              presents as connection-level errors and sits at `waking` forever,
-              never `down`. Check the scale-zero-pg gateway / compute and the
-              app's DATABASE_URL.
+              connection-level outage of the scale-to-zero database (host gone,
+              dead DNS, bad DATABASE_URL) presents as connection-level errors
+              and sits at `waking` forever, never `down`. Check the
+              scale-zero-pg gateway / compute and the app's DATABASE_URL.
             runbook_url: "https://github.com/getknext-dev/knext/blob/main/docs/runbooks/troubleshooting.md#deep-health-stuck-waking-permanent-db-outage"
+        # Sustained deep-health `down`: the database is unreachable and nothing
+        # is waking it (a refused/timed-out connection to a bring-your-own
+        # Postgres, or a reachable database that errors on the probe query).
+        # Same gauge and labels as the waking rule; `for: 2m` matches it so a
+        # transient blip does not page.
+        - alert: KnextDeepHealthDown
+          expr: >-
+            max by (app) (
+              knext_deep_health_state{dependency="overall",state="down"}
+            ) == 1
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "knext app {{ $labels.app }} deep health DOWN (DB unreachable or erroring)"
+            description: >-
+              The deep health check has reported `down` for over 2m. Either the
+              database refused or timed out the connection and is not a
+              scale-to-zero database that could be waking (bring-your-own
+              Postgres, a custom APPDB_GATEWAY_HOST, or a pooler in front of the
+              scale-to-zero database), or it is reachable but erroring on the
+              probe query. Check the database and the app's DATABASE_URL.
+            runbook_url: "https://github.com/getknext-dev/knext/blob/main/docs/runbooks/troubleshooting.md#deep-health-down-database-unreachable-or-erroring"

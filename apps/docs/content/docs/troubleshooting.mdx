@@ -308,6 +308,24 @@ idle app is never probed, its database sleeps normally, and the gauge holds its 
 for the alert, because a stuck-`waking` outage only matters when the app is actively using the database
 — exactly when the gate is open.
 
+### Deep health down [#deep-health-down]
+
+**Symptom.** `KnextDeepHealthDown` fires (critical): the gauge
+`knext_deep_health_state{dependency="overall",state="down"}` has been `1` for over 2 minutes.
+
+**What it means.** The database refused or timed out the connection and is not a scale-to-zero database
+that could be waking (a bring-your-own Postgres, a custom `APPDB_GATEWAY_HOST`, or a pooler in front of
+the scale-to-zero database), or it is reachable but erroring on the probe query.
+
+**Act.**
+
+1. Check the database is up and accepting connections from the app's namespace.
+2. Verify the app's `DATABASE_URL` Secret resolves to a live host and port, and the credentials are
+   current — see [Secret missing](#secret-missing).
+3. Check the NetworkPolicy to the database host.
+
+The alert resolves on its own once a scrape sees the database healthy.
+
 ## NetworkPolicy blocks the activator [#networkpolicy-blocks-the-activator]
 
 **Symptom.** The pod is Running but unreachable. Scale-from-zero requests return 503 at the Knative
