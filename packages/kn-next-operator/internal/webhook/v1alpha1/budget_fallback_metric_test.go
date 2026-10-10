@@ -34,8 +34,8 @@ import (
 // so it is counted: an operator whose webhook has quietly stopped honouring the
 // platform's budget must be visible on /metrics.
 
-func fallbackCount(reason string) float64 {
-	return testutil.ToFloat64(budgetFallbackTotal.WithLabelValues(reason))
+func fallbackCount(cause string) float64 {
+	return testutil.ToFloat64(budgetFallbackTotal.WithLabelValues(cause))
 }
 
 func TestBudgetFallbackMetric_CountsAPIReadErrors(t *testing.T) {

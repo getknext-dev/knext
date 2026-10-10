@@ -78,7 +78,7 @@ func (l *rolloutLimiter) reserve(app types.NamespacedName, now time.Time, perMin
 	}
 
 	// The backlog gauge is refreshed on every exit, once the slot map has settled.
-	defer func() { rolloutQueueDepth.Set(float64(len(l.slots))) }()
+	defer func() { rolloutPending.Set(float64(len(l.slots))) }()
 
 	// Returning at (or after) a slot we handed out spends it.
 	if slot, held := l.slots[app]; held {

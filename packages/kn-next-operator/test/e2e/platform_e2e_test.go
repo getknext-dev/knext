@@ -23,37 +23,43 @@ limitations under the License.
 //
 //	The platform layer (a cluster-scoped KnextPlatform that supplies defaults to
 //	every NextApp) has envtest coverage for its decisions. Envtest has no
-//	Knative, no admission webhook and no real revision, so it cannot show the
-//	thing a user cares about: that a bad platform edit leaves the OLD revision
-//	SERVING. This suite runs the real operator bundle on kind with real Knative
-//	and asserts, in order:
+//	Knative, no admission webhook, no real revision and no second operator
+//	replica, so it cannot show what a user relies on: that a bad platform edit
+//	leaves the OLD revision SERVING, and that a paced rollout survives a leader
+//	change. This suite runs the real operator bundle (2 replicas, leader
+//	election) on kind with real Knative, five apps, and asserts in order:
 //
-//	  1. BASELINE — with no KnextPlatform, two apps are Ready and serve rev1.
+//	  1. BASELINE — with no KnextPlatform, five apps are Ready and serve rev1.
 //	  2. ZERO DIFF — creating an EMPTY platform renders the Knative Service
 //	     byte-identically: same template, same generation, no new revision.
-//	  3. EFFECTIVE VALUES — a platform timeout is inherited by apps that leave it
-//	     unset, rolls a new revision, and the rollout limiter paces the apps (the
-//	     wait is observed on the limiter metric).
-//	  4. HELD — lowering connectionBudget below the apps' footprint HOLDS them:
+//	  3. PACED ROLLOUT — a platform timeout is inherited by all five apps at
+//	     maxAppsPerMinute=2: the new revisions are spaced ~30s apart, every app
+//	     has exactly ONE new revision (nothing renders twice), and the limiter
+//	     metrics show the backlog and the waits.
+//	  4. LEADER FAILOVER MID-ROLLOUT — the lease holder is killed while apps are
+//	     still queued; the standby takes over, the rollout completes, and still no
+//	     app renders twice (the limiter's in-memory state is lost by design).
+//	  5. HELD — lowering connectionBudget below the apps' footprint HOLDS them:
 //	     PlatformDefaultsApplied=False/EffectiveSpecInvalid, the Knative Service is
 //	     untouched, the old revision keeps serving, and the held-apps metric and
 //	     holds counter move. A developer change made WHILE held reads Ready=False
 //	     (a false Ready=True would call a dropped deploy a success) and the old
 //	     image still serves.
-//	  5. DELETE WHILE OVER BUDGET — an over-budget app is deleted and leaves; it
+//	  6. DELETE WHILE OVER BUDGET — an over-budget app is deleted and leaves; it
 //	     must not wedge in Terminating (the finalizer-removal patch is an UPDATE
 //	     through the budget webhook).
-//	  6. RECOVERY — restoring the budget applies the held change and the held
-//	     gauge returns to 0.
-//	  7. NO SILENT FALLBACK — through all of the above the admission webhook never
-//	     fell back to the built-in budget (the fallback counters read 0).
+//	  7. RECOVERY — restoring the budget applies the held change (one new revision
+//	     for the app that changed, none for the others) and the held gauge returns
+//	     to 0.
+//	  8. NO SILENT FALLBACK — through all of the above the admission webhook never
+//	     fell back to the built-in budget (the fallback counter reads 0).
+//
+// METRICS ARE READ FROM EVERY OPERATOR POD AND SUMMED. Only the lease holder
+// reconciles, so the held-apps and limiter series live on the leader, while the
+// admission webhook (and so the fallback counter) runs on both replicas. A scrape
+// through the Service would land on either one.
 //
 // WHAT IT DELIBERATELY DOES NOT DO
-//
-//	It does not exercise limiter state across a leader failover. The limiter is
-//	in memory and documented to reset (it re-spaces from scratch, still bounded
-//	by maxAppsPerMinute); the queue-depth gauge resets with it. TODO(#2112):
-//	failover drill needs a 2-replica operator and is not part of this lane.
 //
 //	It is kind-ONLY: the KnextPlatform is a cluster-wide singleton, so running it
 //	against a shared cluster would change every app on that cluster.
@@ -64,6 +70,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -81,11 +88,9 @@ const (
 	pfOperatorNamespace = "kn-next-operator-system"
 	pfOperatorDeploy    = "kn-next-operator-controller-manager"
 	pfOperatorSA        = "kn-next-operator-controller-manager"
-	pfMetricsService    = "kn-next-operator-controller-manager-metrics-service"
+	pfOperatorLabel     = "control-plane=controller-manager"
+	pfLeaseName         = "2dd0b3e2.kn-next.dev"
 	pfMetricsBinding    = "kn-next-platform-e2e-metrics"
-
-	pfAppA = "platform-e2e-a"
-	pfAppB = "platform-e2e-b"
 
 	// pfAppImage is a REAL, SERVABLE, public, digest-pinned multi-arch image that
 	// answers "Hello ${TARGET}!" — the same pin the rollback suite uses.
@@ -97,14 +102,23 @@ const (
 	pfMaxScale = 8
 	pfPoolMax  = 10
 
-	pfHeld    = `knext_nextapp_platform_held_apps{reason="EffectiveSpecInvalid"}`
-	pfHolds   = `knext_nextapp_platform_holds_total{reason="EffectiveSpecInvalid"}`
-	pfWaitCnt = `knext_platform_rollout_wait_seconds_count`
-	pfQueue   = `knext_platform_rollout_queue_depth`
+	// maxAppsPerMinute=2 spaces slots 30s apart; five apps therefore take ~2 min
+	// to roll, a window wide enough to observe a backlog and to kill the leader in.
+	pfPerMinute   = 2
+	pfSlotSeconds = 60 / pfPerMinute
 
-	pfFallbackRead    = `knext_webhook_budget_fallback_total{reason="read_error"}`
-	pfFallbackInvalid = `knext_webhook_budget_fallback_total{reason="platform_invalid"}`
+	pfHeld    = `knext_platform_apps_held{reason="EffectiveSpecInvalid"}`
+	pfHolds   = `knext_platform_holds_total{reason="EffectiveSpecInvalid"}`
+	pfWaitCnt = `knext_platform_rollout_wait_seconds_count`
+	pfPending = `knext_platform_rollout_pending`
+
+	pfFallbackRead    = `knext_platform_budget_fallback_total{cause="read_error"}`
+	pfFallbackInvalid = `knext_platform_budget_fallback_total{cause="platform_invalid"}`
 )
+
+// pfApps are the five apps under one platform. pfApps[0] is the one a developer
+// changes while held; the last is the one deleted while over budget.
+var pfApps = []string{"platform-e2e-1", "platform-e2e-2", "platform-e2e-3", "platform-e2e-4", "platform-e2e-5"}
 
 var pfNamespace = func() string {
 	if v := strings.TrimSpace(os.Getenv("KNEXT_E2E_NAMESPACE")); v != "" {
@@ -139,12 +153,23 @@ spec:
 `, name, pfNamespace, pfAppImage, target, pfMaxScale, pfPoolMax)
 }
 
-// pfPlatform renders the singleton KnextPlatform with the given spec body
-// (already indented two spaces under `spec:`; empty means `spec: {}`).
-func pfPlatform(specBody string) string {
+// pfPlatform renders the singleton KnextPlatform. timeout and budget of 0 mean
+// "leave unset"; perMinute of 0 leaves the rollout block out. An all-zero call is
+// the EMPTY platform (`spec: {}`).
+func pfPlatform(timeout, perMinute, budget int) string {
+	var b strings.Builder
+	if timeout > 0 {
+		fmt.Fprintf(&b, "  limits:\n    timeoutSeconds: %d\n", timeout)
+	}
+	if perMinute > 0 {
+		fmt.Fprintf(&b, "  rollout:\n    maxAppsPerMinute: %d\n", perMinute)
+	}
+	if budget > 0 {
+		fmt.Fprintf(&b, "  database:\n    connectionBudget: %d\n", budget)
+	}
 	spec := "spec: {}\n"
-	if strings.TrimSpace(specBody) != "" {
-		spec = "spec:\n" + specBody
+	if b.Len() > 0 {
+		spec = "spec:\n" + b.String()
 	}
 	return "apiVersion: platform.kn-next.dev/v1alpha1\nkind: KnextPlatform\nmetadata:\n  name: default\n" + spec
 }
@@ -193,27 +218,88 @@ func pfWaitReady(app string) {
 		"NextApp %s not Ready", app)
 }
 
+// pfRevisions lists the app's Knative revisions.
+func pfRevisions(g Gomega, app string) []string {
+	out, err := utils.Kubectl("get", "revisions.serving.knative.dev", "-n", pfNamespace,
+		"-l", "serving.knative.dev/service="+app, "-o", "jsonpath={.items[*].metadata.name}")
+	g.Expect(err).NotTo(HaveOccurred(), out)
+	return strings.Fields(out)
+}
+
+// pfExpectRevisionCount asserts every named app has EXACTLY n revisions: the
+// strongest available statement that nothing rendered twice.
+func pfExpectRevisionCount(n int, apps ...string) {
+	GinkgoHelper()
+	Eventually(func(g Gomega) {
+		for _, app := range apps {
+			g.Expect(pfRevisions(g, app)).To(HaveLen(n), "%s: revisions %v", app, pfRevisions(g, app))
+		}
+	}, 3*time.Minute, 5*time.Second).Should(Succeed())
+}
+
+// pfLatestRevisionCreated is when the app's newest revision was created.
+func pfLatestRevisionCreated(g Gomega, app string) time.Time {
+	rev := pfKsvc(app, "{.status.latestCreatedRevisionName}")(g)
+	g.Expect(rev).NotTo(BeEmpty())
+	ts := pfJSONPath([]string{"get", "revisions.serving.knative.dev", rev, "-n", pfNamespace},
+		"{.metadata.creationTimestamp}")(g)
+	t, err := time.Parse(time.RFC3339, ts)
+	g.Expect(err).NotTo(HaveOccurred())
+	return t
+}
+
+// pfInheritedTimeout counts the apps whose Knative Service already carries the
+// platform timeout.
+func pfInheritedTimeout(timeout string) int {
+	n := 0
+	for _, app := range pfApps {
+		out, err := utils.Kubectl("get", "ksvc", app, "-n", pfNamespace,
+			"-o", "jsonpath={.spec.template.spec.timeoutSeconds}")
+		if err == nil && strings.TrimSpace(out) == timeout {
+			n++
+		}
+	}
+	return n
+}
+
+// pfOperatorPodIPs returns the IP of every Running operator pod.
+func pfOperatorPodIPs(g Gomega) []string {
+	out, err := utils.Kubectl("get", "pods", "-n", pfOperatorNamespace, "-l", pfOperatorLabel,
+		"--field-selector=status.phase=Running", "-o", `jsonpath={range .items[*]}{.status.podIP}{"\n"}{end}`)
+	g.Expect(err).NotTo(HaveOccurred(), out)
+	var ips []string
+	for _, ip := range strings.Fields(out) {
+		ips = append(ips, ip)
+	}
+	g.Expect(ips).NotTo(BeEmpty(), "no Running operator pod")
+	return ips
+}
+
 var pfScrapes int
 
-// pfMetric scrapes the operator's protected /metrics endpoint and returns one
-// series. A series that is absent fails the spec: absent is not zero.
+// pfMetric scrapes the operator's protected /metrics endpoint on EVERY operator
+// pod and sums the series (see the file header for why). A series that is absent
+// from a pod fails the spec: absent is not zero.
 func pfMetric(series string) float64 {
 	GinkgoHelper()
 	token, err := utils.Kubectl("create", "token", pfOperatorSA, "-n", pfOperatorNamespace, "--duration=30m")
 	Expect(err).NotTo(HaveOccurred(), "could not mint a metrics token")
 	token = strings.TrimSpace(token)
 
-	pfScrapes++
-	url := fmt.Sprintf("https://%s.%s.svc.cluster.local:8443/metrics", pfMetricsService, pfOperatorNamespace)
-	var value float64
+	var total float64
 	Eventually(func(g Gomega) {
-		out, err := utils.ScrapeWithBearer(pfNamespace, fmt.Sprintf("platform-e2e-scrape-%d", pfScrapes), url, token)
-		g.Expect(err).NotTo(HaveOccurred(), out)
-		v, ok := utils.MetricValue(out, series)
-		g.Expect(ok).To(BeTrue(), "series %s is not exported by the operator", series)
-		value = v
+		total = 0
+		for _, ip := range pfOperatorPodIPs(g) {
+			pfScrapes++
+			out, err := utils.ScrapeWithBearer(pfNamespace, fmt.Sprintf("platform-e2e-scrape-%d", pfScrapes),
+				fmt.Sprintf("https://%s:8443/metrics", ip), token)
+			g.Expect(err).NotTo(HaveOccurred(), out)
+			v, ok := utils.MetricValue(out, series)
+			g.Expect(ok).To(BeTrue(), "series %s is not exported by operator pod %s", series, ip)
+			total += v
+		}
 	}, 2*time.Minute, 5*time.Second).Should(Succeed())
-	return value
+	return total
 }
 
 var _ = Describe("platform layer against a live cluster (ADR-0064)", Ordered, func() {
@@ -221,6 +307,8 @@ var _ = Describe("platform layer against a live cluster (ADR-0064)", Ordered, fu
 	SetDefaultEventuallyPollingInterval(2 * time.Second)
 
 	var renderedBundle string
+	app1 := pfApps[0]
+	last := pfApps[len(pfApps)-1]
 
 	// Captured as the specs progress.
 	var baselineTemplate, baselineGeneration, baselineRevision string
@@ -294,145 +382,212 @@ var _ = Describe("platform layer against a live cluster (ADR-0064)", Ordered, fu
 		}
 	})
 
-	It("baseline: with NO platform two apps are Ready, report NoPlatform and serve rev1", func() {
-		for _, app := range []string{pfAppA, pfAppB} {
+	It("baseline: with NO platform five apps are Ready, report NoPlatform and serve rev1", func() {
+		for _, app := range pfApps {
 			Eventually(func(g Gomega) {
 				g.Expect(utils.ApplyManifest(pfNextApp(app, "rev1"))).To(Succeed())
 			}, 2*time.Minute, 10*time.Second).Should(Succeed())
 		}
-		for _, app := range []string{pfAppA, pfAppB} {
+		for _, app := range pfApps {
 			pfWaitReady(app)
 		}
-		Eventually(pfCondField(pfAppA, "PlatformDefaultsApplied", "reason")).Should(Equal("NoPlatform"))
-		pfExpectBody(pfAppA, "Hello rev1!")
+		Eventually(pfCondField(app1, "PlatformDefaultsApplied", "reason")).Should(Equal("NoPlatform"))
+		pfExpectBody(app1, "Hello rev1!")
+		pfExpectRevisionCount(1, pfApps...)
 
-		baselineTemplate = pfTemplate(pfAppA)
-		baselineGeneration = pfKsvc(pfAppA, "{.metadata.generation}")(Default)
-		baselineRevision = pfKsvc(pfAppA, "{.status.latestReadyRevisionName}")(Default)
+		baselineTemplate = pfTemplate(app1)
+		baselineGeneration = pfKsvc(app1, "{.metadata.generation}")(Default)
+		baselineRevision = pfKsvc(app1, "{.status.latestReadyRevisionName}")(Default)
 		Expect(baselineRevision).NotTo(BeEmpty())
 
-		By("the held-apps series is exported at 0 before anything is held")
+		By("the platform series are exported at 0 before anything is held or queued")
 		Expect(pfMetric(pfHeld)).To(Equal(0.0))
+		Expect(pfMetric(pfPending)).To(Equal(0.0))
 	})
 
 	It("zero diff: an EMPTY platform renders the Knative Service byte-identically", func() {
-		Expect(utils.ApplyManifest(pfPlatform(""))).To(Succeed())
+		Expect(utils.ApplyManifest(pfPlatform(0, 0, 0))).To(Succeed())
 
 		By("the operator accepts the platform and every app is re-evaluated against it")
 		Eventually(pfJSONPath([]string{"get", "knextplatform", "default"},
 			"{.status.conditions[?(@.type=='Accepted')].status}")).Should(Equal("True"))
-		Eventually(pfJSONPath([]string{"get", "nextapp", pfAppA, "-n", pfNamespace}, "{.status.platform.specHash}")).
-			ShouldNot(BeEmpty(), "the app was never reconciled against the platform")
-		Eventually(pfCondField(pfAppA, "PlatformDefaultsApplied", "reason")).ShouldNot(Equal("NoPlatform"))
+		for _, app := range pfApps {
+			Eventually(pfJSONPath([]string{"get", "nextapp", app, "-n", pfNamespace}, "{.status.platform.specHash}")).
+				ShouldNot(BeEmpty(), "%s was never reconciled against the platform", app)
+		}
+		Eventually(pfCondField(app1, "PlatformDefaultsApplied", "reason")).ShouldNot(Equal("NoPlatform"))
 
 		By("…and the Service is exactly what it was without a platform")
 		Consistently(func(g Gomega) {
-			g.Expect(pfKsvc(pfAppA, "{.spec.template}")(g)).To(Equal(baselineTemplate),
+			g.Expect(pfKsvc(app1, "{.spec.template}")(g)).To(Equal(baselineTemplate),
 				"an empty platform changed the rendered revision template")
-			g.Expect(pfKsvc(pfAppA, "{.metadata.generation}")(g)).To(Equal(baselineGeneration),
+			g.Expect(pfKsvc(app1, "{.metadata.generation}")(g)).To(Equal(baselineGeneration),
 				"an empty platform bumped the Service generation")
-			g.Expect(pfKsvc(pfAppA, "{.status.latestCreatedRevisionName}")(g)).To(Equal(baselineRevision),
+			g.Expect(pfKsvc(app1, "{.status.latestCreatedRevisionName}")(g)).To(Equal(baselineRevision),
 				"an empty platform rolled a new revision")
 		}, 15*time.Second, 3*time.Second).Should(Succeed())
-		pfExpectBody(pfAppA, "Hello rev1!")
+		pfExpectRevisionCount(1, pfApps...)
+		pfExpectBody(app1, "Hello rev1!")
 	})
 
-	It("effective values: a platform timeout is inherited, rolls a revision, and the limiter paces the apps", func() {
+	It("paced rollout: five apps inherit a platform value at 2/minute, spaced, each rendering exactly once", func() {
 		waitsBefore := pfMetric(pfWaitCnt)
 
-		// 6 per minute spaces the two apps ~10s apart, so the second one is queued.
-		Expect(utils.ApplyManifest(pfPlatform("  limits:\n    timeoutSeconds: 123\n  rollout:\n    maxAppsPerMinute: 6\n"))).
-			To(Succeed())
+		Expect(utils.ApplyManifest(pfPlatform(123, pfPerMinute, 0))).To(Succeed())
 
-		for _, app := range []string{pfAppA, pfAppB} {
-			Eventually(pfKsvc(app, "{.spec.template.spec.timeoutSeconds}"), 5*time.Minute, 3*time.Second).
+		By("the limiter has a backlog while the rollout is in progress")
+		Eventually(func() float64 { return pfMetric(pfPending) }, 3*time.Minute, 2*time.Second).
+			Should(BeNumerically(">=", 1), "the limiter never reported a queued re-render")
+
+		By("every app inherits the platform timeout, rolls a revision, and serves")
+		for _, app := range pfApps {
+			Eventually(pfKsvc(app, "{.spec.template.spec.timeoutSeconds}"), 10*time.Minute, 3*time.Second).
 				Should(Equal("123"), "%s never inherited the platform timeout", app)
 		}
-		Eventually(pfJSONPath([]string{"get", "nextapp", pfAppA, "-n", pfNamespace},
+		Eventually(pfJSONPath([]string{"get", "nextapp", app1, "-n", pfNamespace},
 			"{.status.platform.inheritedFields}")).Should(ContainSubstring("spec.timeoutSeconds"))
-
-		By("a new revision was rolled for the changed effective value, and it serves")
-		for _, app := range []string{pfAppA, pfAppB} {
+		for _, app := range pfApps {
 			pfWaitReady(app)
 		}
-		Eventually(pfKsvc(pfAppA, "{.status.latestReadyRevisionName}")).ShouldNot(Equal(baselineRevision))
-		pfExpectBody(pfAppA, "Hello rev1!")
+		pfExpectBody(app1, "Hello rev1!")
 
-		By("the limiter observed at least one queued re-render")
-		Expect(pfMetric(pfWaitCnt)).To(BeNumerically(">", waitsBefore),
-			"two apps re-rendered at 6/minute but the limiter never queued one")
-		Expect(pfMetric(pfQueue)).To(BeNumerically(">=", 0))
+		By("the new revisions were spaced by the slot interval, not created together")
+		var created []time.Time
+		Eventually(func(g Gomega) {
+			created = created[:0]
+			for _, app := range pfApps {
+				created = append(created, pfLatestRevisionCreated(g, app))
+			}
+		}).Should(Succeed())
+		sort.Slice(created, func(i, j int) bool { return created[i].Before(created[j]) })
+		for i := 1; i < len(created); i++ {
+			Expect(created[i].Sub(created[i-1])).To(BeNumerically(">=", (pfSlotSeconds-5)*time.Second),
+				"revisions %d and %d were created %v apart; maxAppsPerMinute=%d means >= %ds",
+				i-1, i, created[i].Sub(created[i-1]), pfPerMinute, pfSlotSeconds)
+		}
 
-		baselineTemplate = pfTemplate(pfAppA)
-		baselineRevision = pfKsvc(pfAppA, "{.status.latestReadyRevisionName}")(Default)
+		By("nothing rendered twice: baseline revision + exactly one new one, per app")
+		pfExpectRevisionCount(2, pfApps...)
+
+		By("the limiter observed the queued re-renders and drained")
+		Expect(pfMetric(pfWaitCnt)-waitsBefore).To(BeNumerically(">=", float64(len(pfApps)-1)),
+			"five apps at 2/minute: at least four had to wait for a slot")
+		Eventually(func() float64 { return pfMetric(pfPending) }, 3*time.Minute, 5*time.Second).Should(Equal(0.0))
+
+		baselineTemplate = pfTemplate(app1)
+		baselineRevision = pfKsvc(app1, "{.status.latestReadyRevisionName}")(Default)
+	})
+
+	It("leader failover mid-rollout: the standby takes over and the rollout completes without re-rendering", func() {
+		Expect(utils.ApplyManifest(pfPlatform(150, pfPerMinute, 0))).To(Succeed())
+
+		By("waiting until the rollout has started but is not finished")
+		Eventually(func() int { return pfInheritedTimeout("150") }, 3*time.Minute, time.Second).
+			Should(BeNumerically(">=", 1))
+		Expect(pfInheritedTimeout("150")).To(BeNumerically("<", len(pfApps)),
+			"the rollout finished before the leader could be killed: nothing was queued, so this proves nothing")
+
+		By("killing the lease holder")
+		holder, err := utils.Kubectl("get", "lease", pfLeaseName, "-n", pfOperatorNamespace,
+			"-o", "jsonpath={.spec.holderIdentity}")
+		Expect(err).NotTo(HaveOccurred(), holder)
+		leaderPod := strings.SplitN(strings.TrimSpace(holder), "_", 2)[0]
+		Expect(leaderPod).To(HavePrefix(pfOperatorDeploy), "unexpected lease holder %q", holder)
+		out, err := utils.Kubectl("delete", "pod", leaderPod, "-n", pfOperatorNamespace, "--wait=false")
+		Expect(err).NotTo(HaveOccurred(), out)
+
+		By("the operator recovers its replicas and the webhook serves again")
+		Eventually(pfJSONPath([]string{"get", "deployment", pfOperatorDeploy, "-n", pfOperatorNamespace},
+			"{.status.readyReplicas}"), 5*time.Minute, 3*time.Second).Should(Equal("2"))
+		Expect(utils.WaitForWebhookReady(pfNamespace)).To(Succeed())
+
+		By("the rollout completes under the new leader")
+		for _, app := range pfApps {
+			Eventually(pfKsvc(app, "{.spec.template.spec.timeoutSeconds}"), 10*time.Minute, 3*time.Second).
+				Should(Equal("150"), "%s was left behind by the failover", app)
+		}
+		for _, app := range pfApps {
+			pfWaitReady(app)
+		}
+
+		By("…and no app rendered twice despite the lost limiter state: baseline + 123 + 150")
+		pfExpectRevisionCount(3, pfApps...)
+		Eventually(func() float64 { return pfMetric(pfPending) }, 3*time.Minute, 5*time.Second).Should(Equal(0.0))
+
+		baselineTemplate = pfTemplate(app1)
+		baselineRevision = pfKsvc(app1, "{.status.latestReadyRevisionName}")(Default)
 	})
 
 	It("held: lowering connectionBudget below the footprint holds the apps and the old revision keeps serving", func() {
 		holdsBefore := pfMetric(pfHolds)
 
-		Expect(utils.ApplyManifest(pfPlatform(
-			"  limits:\n    timeoutSeconds: 123\n  rollout:\n    maxAppsPerMinute: 6\n  database:\n    connectionBudget: 40\n"))).
-			To(Succeed())
+		Expect(utils.ApplyManifest(pfPlatform(150, pfPerMinute, 40))).To(Succeed())
 
-		By("both apps are held: PlatformDefaultsApplied=False/EffectiveSpecInvalid")
-		for _, app := range []string{pfAppA, pfAppB} {
+		By("every app is held: PlatformDefaultsApplied=False/EffectiveSpecInvalid")
+		for _, app := range pfApps {
 			Eventually(pfCondField(app, "PlatformDefaultsApplied", "status")).Should(Equal("False"), app)
 			Eventually(pfCondField(app, "PlatformDefaultsApplied", "reason")).Should(Equal("EffectiveSpecInvalid"), app)
 		}
 
 		By("the Knative Service is untouched: same template, same latest-ready revision, still serving")
 		Consistently(func(g Gomega) {
-			g.Expect(pfKsvc(pfAppA, "{.spec.template}")(g)).To(Equal(baselineTemplate),
+			g.Expect(pfKsvc(app1, "{.spec.template}")(g)).To(Equal(baselineTemplate),
 				"a held app's Knative Service must be left exactly as it was")
-			g.Expect(pfKsvc(pfAppA, "{.status.latestReadyRevisionName}")(g)).To(Equal(baselineRevision))
+			g.Expect(pfKsvc(app1, "{.status.latestReadyRevisionName}")(g)).To(Equal(baselineRevision))
 		}, 15*time.Second, 3*time.Second).Should(Succeed())
-		pfExpectBody(pfAppA, "Hello rev1!")
+		pfExpectBody(app1, "Hello rev1!")
 
-		By("the held metric moved: two apps held now, two holds counted")
-		Eventually(func() float64 { return pfMetric(pfHeld) }, 2*time.Minute, 5*time.Second).Should(Equal(2.0))
-		Expect(pfMetric(pfHolds) - holdsBefore).To(BeNumerically(">=", 2))
+		By("the held metric moved: every app held now, every hold counted")
+		Eventually(func() float64 { return pfMetric(pfHeld) }, 2*time.Minute, 5*time.Second).
+			Should(Equal(float64(len(pfApps))))
+		Expect(pfMetric(pfHolds) - holdsBefore).To(BeNumerically(">=", float64(len(pfApps))))
 
 		By("the platform reports the hold")
-		Eventually(pfJSONPath([]string{"get", "knextplatform", "default"}, "{.status.rollout.held}")).Should(Equal("2"))
+		Eventually(pfJSONPath([]string{"get", "knextplatform", "default"}, "{.status.rollout.held}")).
+			Should(Equal(fmt.Sprint(len(pfApps))))
 
 		By("a developer change made WHILE held is not applied and reads Ready=False, never a false green")
 		// Footprint unchanged (still 80), so the ratcheted webhook admits the edit.
 		Eventually(func(g Gomega) {
-			g.Expect(utils.ApplyManifest(pfNextApp(pfAppA, "rev2"))).To(Succeed())
+			g.Expect(utils.ApplyManifest(pfNextApp(app1, "rev2"))).To(Succeed())
 		}, 2*time.Minute, 10*time.Second).Should(Succeed())
-		Eventually(pfCondField(pfAppA, "Ready", "status")).Should(Equal("False"))
-		Eventually(pfCondField(pfAppA, "Ready", "reason")).Should(Equal("EffectiveSpecInvalid"))
+		Eventually(pfCondField(app1, "Ready", "status")).Should(Equal("False"))
+		Eventually(pfCondField(app1, "Ready", "reason")).Should(Equal("EffectiveSpecInvalid"))
 		Consistently(func(g Gomega) {
-			g.Expect(pfKsvc(pfAppA, "{.spec.template}")(g)).To(Equal(baselineTemplate),
+			g.Expect(pfKsvc(app1, "{.spec.template}")(g)).To(Equal(baselineTemplate),
 				"the held change must not reach the Knative Service")
 		}, 10*time.Second, 3*time.Second).Should(Succeed())
-		pfExpectBody(pfAppA, "Hello rev1!")
+		pfExpectBody(app1, "Hello rev1!")
+		pfExpectRevisionCount(3, app1)
 	})
 
 	It("delete while over budget: the app leaves and does not hang in Terminating", func() {
-		_, err := utils.Kubectl("delete", "nextapp", pfAppB, "-n", pfNamespace, "--wait=false")
-		Expect(err).NotTo(HaveOccurred())
+		out, err := utils.Kubectl("delete", "nextapp", last, "-n", pfNamespace, "--wait=false")
+		Expect(err).NotTo(HaveOccurred(), out)
 
 		Eventually(func(g Gomega) {
-			out, err := utils.Kubectl("get", "nextapp", pfAppB, "-n", pfNamespace, "-o", "name")
+			out, err := utils.Kubectl("get", "nextapp", last, "-n", pfNamespace, "-o", "name")
 			g.Expect(err).To(HaveOccurred(), "the app is still there (Terminating?): %s", out)
 			g.Expect(err.Error()).To(ContainSubstring("NotFound"), "unexpected error reading the app: %s", out)
 		}, 2*time.Minute, 3*time.Second).Should(Succeed(),
 			"an over-budget app wedged in Terminating: the finalizer-removal update was rejected by the budget webhook")
 
 		By("it left the held gauge with it")
-		Eventually(func() float64 { return pfMetric(pfHeld) }, 2*time.Minute, 5*time.Second).Should(Equal(1.0))
+		Eventually(func() float64 { return pfMetric(pfHeld) }, 2*time.Minute, 5*time.Second).
+			Should(Equal(float64(len(pfApps) - 1)))
 	})
 
-	It("recovery: restoring the budget applies the held change and clears the hold", func() {
-		Expect(utils.ApplyManifest(pfPlatform(
-			"  limits:\n    timeoutSeconds: 123\n  rollout:\n    maxAppsPerMinute: 6\n  database:\n    connectionBudget: 100\n"))).
-			To(Succeed())
+	It("recovery: restoring the budget applies the held change and clears every hold", func() {
+		Expect(utils.ApplyManifest(pfPlatform(150, pfPerMinute, 100))).To(Succeed())
 
-		Eventually(pfCondField(pfAppA, "PlatformDefaultsApplied", "status"), 5*time.Minute, 3*time.Second).
+		Eventually(pfCondField(app1, "PlatformDefaultsApplied", "status"), 5*time.Minute, 3*time.Second).
 			Should(Equal("True"))
-		Eventually(pfCondField(pfAppA, "Ready", "status"), 10*time.Minute, 5*time.Second).Should(Equal("True"))
-		pfExpectBody(pfAppA, "Hello rev2!")
+		Eventually(pfCondField(app1, "Ready", "status"), 10*time.Minute, 5*time.Second).Should(Equal("True"))
+		pfExpectBody(app1, "Hello rev2!")
+
+		By("only the app that changed rendered: one new revision for it, none for the others")
+		pfExpectRevisionCount(4, app1)
+		pfExpectRevisionCount(3, pfApps[1:len(pfApps)-1]...)
 
 		Eventually(func() float64 { return pfMetric(pfHeld) }, 2*time.Minute, 5*time.Second).Should(Equal(0.0))
 		Eventually(pfJSONPath([]string{"get", "knextplatform", "default"}, "{.status.rollout.held}")).

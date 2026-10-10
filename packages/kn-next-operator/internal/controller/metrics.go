@@ -85,7 +85,7 @@ var (
 	// (EffectiveSpecInvalid | RolloutPending).
 	platformHeldApps = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Name: "knext_nextapp_platform_held_apps",
+			Name: "knext_platform_apps_held",
 			Help: "Number of NextApps whose Knative Service is held unchanged by the platform layer, " +
 				"labeled by reason (EffectiveSpecInvalid | RolloutPending).",
 		},
@@ -97,19 +97,19 @@ var (
 	// the platform holding apps", not as reconcile frequency.
 	platformHoldsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "knext_nextapp_platform_holds_total",
+			Name: "knext_platform_holds_total",
 			Help: "Total number of times a NextApp entered a platform hold, labeled by reason " +
 				"(EffectiveSpecInvalid | RolloutPending).",
 		},
 		[]string{"reason"},
 	)
 
-	// rolloutQueueDepth is the rollout limiter's backlog: re-renders holding a
+	// rolloutPending is the rollout limiter's backlog: re-renders holding a
 	// reservation behind rollout.maxAppsPerMinute. In-memory like the limiter
 	// itself, so it resets to 0 on an operator restart or leader failover.
-	rolloutQueueDepth = prometheus.NewGauge(
+	rolloutPending = prometheus.NewGauge(
 		prometheus.GaugeOpts{
-			Name: "knext_platform_rollout_queue_depth",
+			Name: "knext_platform_rollout_pending",
 			Help: "Platform-triggered re-renders currently queued behind rollout.maxAppsPerMinute.",
 		},
 	)
@@ -130,7 +130,7 @@ func init() {
 	// Register with controller-runtime's global registry so the series are served on
 	// the existing /metrics endpoint alongside the built-in controller metrics.
 	metrics.Registry.MustRegister(reconcileTotal, reconcileDuration, reconcileErrors, imagePrewarmErrors,
-		platformHeldApps, platformHoldsTotal, rolloutQueueDepth, rolloutWaitSeconds)
+		platformHeldApps, platformHoldsTotal, rolloutPending, rolloutWaitSeconds)
 
 	// Publish every series at 0 up front, so an alert on a held app sees a real
 	// 0 rather than an absent series before the first hold ever happens.
@@ -138,5 +138,5 @@ func init() {
 		platformHeldApps.WithLabelValues(reason).Set(0)
 		platformHoldsTotal.WithLabelValues(reason).Add(0)
 	}
-	rolloutQueueDepth.Set(0)
+	rolloutPending.Set(0)
 }

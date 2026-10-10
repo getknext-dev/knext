@@ -51,14 +51,14 @@ func histogramSampleCount(t *testing.T, name string) uint64 {
 func TestPlatformMetricsRegistered(t *testing.T) {
 	platformHeldApps.WithLabelValues(ReasonEffectiveSpecInvalid).Set(0)
 	platformHoldsTotal.WithLabelValues(ReasonEffectiveSpecInvalid).Add(0)
-	rolloutQueueDepth.Set(0)
+	rolloutPending.Set(0)
 	rolloutWaitSeconds.Observe(0)
 
 	families := gatheredMetricNames(t)
 	for _, want := range []string{
-		"knext_nextapp_platform_held_apps",
-		"knext_nextapp_platform_holds_total",
-		"knext_platform_rollout_queue_depth",
+		"knext_platform_apps_held",
+		"knext_platform_holds_total",
+		"knext_platform_rollout_pending",
 		"knext_platform_rollout_wait_seconds",
 	} {
 		if _, ok := families[want]; !ok {
@@ -124,7 +124,7 @@ func TestRolloutLimiter_ReportsBacklogAndWait(t *testing.T) {
 	if wait := l.reserve(a, now, 60); wait != 0 {
 		t.Fatalf("first app passes immediately, waited %v", wait)
 	}
-	if got := testutil.ToFloat64(rolloutQueueDepth); got != 0 {
+	if got := testutil.ToFloat64(rolloutPending); got != 0 {
 		t.Errorf("an app that passes is not queued, depth = %v", got)
 	}
 	if got := histogramSampleCount(t, "knext_platform_rollout_wait_seconds") - beforeObs; got != 0 {
@@ -137,7 +137,7 @@ func TestRolloutLimiter_ReportsBacklogAndWait(t *testing.T) {
 	if wait := l.reserve(c, now, 60); wait <= 0 {
 		t.Fatalf("third app must queue, wait = %v", wait)
 	}
-	if got := testutil.ToFloat64(rolloutQueueDepth); got != 2 {
+	if got := testutil.ToFloat64(rolloutPending); got != 2 {
 		t.Errorf("two queued apps, depth = %v", got)
 	}
 	if got := histogramSampleCount(t, "knext_platform_rollout_wait_seconds") - beforeObs; got != 2 {
@@ -148,7 +148,7 @@ func TestRolloutLimiter_ReportsBacklogAndWait(t *testing.T) {
 	if wait := l.reserve(b, now.Add(time.Second), 60); wait != 0 {
 		t.Fatalf("b at its slot passes, waited %v", wait)
 	}
-	if got := testutil.ToFloat64(rolloutQueueDepth); got != 1 {
+	if got := testutil.ToFloat64(rolloutPending); got != 1 {
 		t.Errorf("after b is spent one app remains queued, depth = %v", got)
 	}
 }

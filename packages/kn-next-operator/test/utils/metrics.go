@@ -24,7 +24,7 @@ import (
 
 // MetricValue returns the value of ONE exposition sample, addressed by its full
 // series name including any label set exactly as the exporter prints it, e.g.
-// `knext_nextapp_platform_held_apps{reason="EffectiveSpecInvalid"}` or
+// `knext_platform_apps_held{reason="EffectiveSpecInvalid"}` or
 // `knext_platform_rollout_wait_seconds_count`.
 //
 // It matches the series token exactly rather than by prefix: a prefix match

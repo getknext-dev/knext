@@ -37,22 +37,22 @@ const (
 // budgetFallbackTotal counts admissions that silently ignored the platform's
 // connection budget. The fallback is deliberate (the reconciler is the
 // authority), but it is invisible to the user who applied the change, so it has
-// to be visible to the operator. Labelled by reason only, never per object.
+// to be visible to the operator. Labelled by cause only, never per object.
 var budgetFallbackTotal = prometheus.NewCounterVec(
 	prometheus.CounterOpts{
-		Name: "knext_webhook_budget_fallback_total",
+		Name: "knext_platform_budget_fallback_total",
 		Help: "Total number of NextApp admissions that fell back to the built-in connection budget " +
-			"because the platform's budget could not be used, labeled by reason " +
+			"because the platform's budget could not be used, labeled by cause " +
 			"(read_error | platform_invalid).",
 	},
-	[]string{"reason"},
+	[]string{"cause"},
 )
 
 func init() {
 	// The webhook runs in the operator process, so this lands on the same
 	// /metrics endpoint as the controller's series.
 	metrics.Registry.MustRegister(budgetFallbackTotal)
-	for _, reason := range []string{fallbackReadError, fallbackPlatformInvalid} {
-		budgetFallbackTotal.WithLabelValues(reason).Add(0)
+	for _, cause := range []string{fallbackReadError, fallbackPlatformInvalid} {
+		budgetFallbackTotal.WithLabelValues(cause).Add(0)
 	}
 }
