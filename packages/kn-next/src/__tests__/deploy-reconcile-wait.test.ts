@@ -323,4 +323,64 @@ describe("held app change (Ready=False, EffectiveSpecInvalid)", () => {
         expect(r.reconciled).toBe(false);
         expect(r.held).toBeUndefined();
     });
+
+    const only = (cond: Record<string, unknown>) =>
+        JSON.stringify({
+            metadata: { generation: 2 },
+            status: { conditions: [{ observedGeneration: 2, ...cond }] },
+        });
+
+    it("Ready=False with a different reason is reconciled, not held", async () => {
+        const r = await waitForOperatorReconcile(
+            () => ({
+                ok: true,
+                stdout: only({
+                    type: "Ready",
+                    status: "False",
+                    reason: "RevisionFailed",
+                    message: "revision failed",
+                }),
+                stderr: "",
+            }),
+            fakeClock(),
+        );
+        expect(r.held).toBeUndefined();
+        expect(r.reconciled).toBe(true);
+    });
+
+    it("a non-Ready condition with the held reason is not held", async () => {
+        const r = await waitForOperatorReconcile(
+            () => ({
+                ok: true,
+                stdout: only({
+                    type: "Degraded",
+                    status: "False",
+                    reason: "EffectiveSpecInvalid",
+                    message: "x",
+                }),
+                stderr: "",
+            }),
+            fakeClock(),
+        );
+        expect(r.held).toBeUndefined();
+        expect(r.reconciled).toBe(true);
+    });
+
+    it("Ready=True with the held reason is not held", async () => {
+        const r = await waitForOperatorReconcile(
+            () => ({
+                ok: true,
+                stdout: only({
+                    type: "Ready",
+                    status: "True",
+                    reason: "EffectiveSpecInvalid",
+                    message: "x",
+                }),
+                stderr: "",
+            }),
+            fakeClock(),
+        );
+        expect(r.held).toBeUndefined();
+        expect(r.reconciled).toBe(true);
+    });
 });
