@@ -2,7 +2,6 @@ import { describe, expect, it, spyOn } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-// @ts-expect-error plain .mjs script, no declarations
 import { runSteps } from '../scripts/prepush.mjs';
 
 /**
