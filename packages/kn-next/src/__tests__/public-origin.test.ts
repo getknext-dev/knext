@@ -9,8 +9,8 @@
  *
  *   - host:   `X-Forwarded-Host`, then `Host`, ONLY when the value is on the
  *             allowlist exactly; otherwise the first allowlisted entry;
- *   - scheme: `X-Forwarded-Proto` ONLY when it is exactly `http` or `https`;
- *             otherwise `https`;
+ *   - scheme: the matched allowlist entry's own scheme (`https` when the entry
+ *             names none); `X-Forwarded-Proto` is never read;
  *   - any other origin (a real host, a relative path) is left alone;
  *   - with the env var unset the preload installs nothing at all.
  *
@@ -47,7 +47,13 @@ process.env.KNEXT_PUBLIC_ORIGIN_NO_AUTOINSTALL = "1";
 const po: any = require(PRELOAD);
 delete process.env.KNEXT_PUBLIC_ORIGIN_NO_AUTOINSTALL;
 
-const HOSTS = ["app.example.com", "www.example.com", "localhost:3000"];
+// The parsed allowlist: full origins, scheme taken from the entry (https when
+// the entry names none).
+const HOSTS = [
+    "https://app.example.com",
+    "https://www.example.com",
+    "http://localhost:3000",
+];
 
 describe("public-origin — allowlist parsing", () => {
     it("reads KNEXT_PUBLIC_ORIGINS", () => {
@@ -56,25 +62,52 @@ describe("public-origin — allowlist parsing", () => {
 
     it("unset or empty means no allowlist", () => {
         expect(po.parsePublicOrigins(undefined)).toEqual({
-            hosts: [],
+            origins: [],
             invalid: [],
+            repeated: [],
         });
-        expect(po.parsePublicOrigins("")).toEqual({ hosts: [], invalid: [] });
-        expect(po.parsePublicOrigins(" , ")).toEqual({
-            hosts: [],
+        expect(po.parsePublicOrigins("")).toEqual({
+            origins: [],
             invalid: [],
+            repeated: [],
+        });
+        expect(po.parsePublicOrigins(" , ")).toEqual({
+            origins: [],
+            invalid: [],
+            repeated: [],
         });
     });
 
-    it("accepts bare hosts and http(s) origins, lower-cased, scheme and trailing slash stripped", () => {
+    it("accepts bare hosts and http(s) origins, lower-cased, keeping each entry's scheme (https for a bare host)", () => {
         expect(
             po.parsePublicOrigins(
                 " App.Example.com ,https://www.example.com/, http://localhost:3000",
             ),
         ).toEqual({
-            hosts: ["app.example.com", "www.example.com", "localhost:3000"],
+            origins: [
+                "https://app.example.com",
+                "https://www.example.com",
+                "http://localhost:3000",
+            ],
             invalid: [],
+            repeated: [],
         });
+    });
+
+    it("one entry per host: a repeat of a host is ignored whatever its scheme", () => {
+        expect(
+            po.parsePublicOrigins(
+                "http://app.example.com,https://app.example.com,APP.example.com",
+            ).origins,
+        ).toEqual(["http://app.example.com"]);
+    });
+
+    it("names each dropped repeat in `repeated`, so the first-wins downgrade is not silent", () => {
+        const parsed = po.parsePublicOrigins(
+            "http://a.test,https://a.test, A.test ,b.test",
+        );
+        expect(parsed.origins).toEqual(["http://a.test", "https://b.test"]);
+        expect(parsed.repeated).toEqual(["https://a.test", "A.test"]);
     });
 
     it("drops anything that is not a plain host[:port] — and says which", () => {
@@ -104,13 +137,13 @@ describe("public-origin — allowlist parsing", () => {
         const parsed = po.parsePublicOrigins(
             ["app.example.com", ...bad].join(","),
         );
-        expect(parsed.hosts).toEqual(["app.example.com"]);
+        expect(parsed.origins).toEqual(["https://app.example.com"]);
         expect(parsed.invalid).toEqual(bad);
     });
 
     it("keeps a bracketed IPv6 literal with a port", () => {
-        expect(po.parsePublicOrigins("[2001:db8::1]:8443").hosts).toEqual([
-            "[2001:db8::1]:8443",
+        expect(po.parsePublicOrigins("[2001:db8::1]:8443").origins).toEqual([
+            "https://[2001:db8::1]:8443",
         ]);
     });
 });
@@ -189,7 +222,7 @@ describe("public-origin — Location rewrite rule", () => {
         ).toBe("https://www.example.com/x");
         expect(
             rewrite("http://0.0.0.0:8080/x", { host: "localhost:3000" }),
-        ).toBe("https://localhost:3000/x");
+        ).toBe("http://localhost:3000/x");
     });
 
     it("matches host names case-insensitively and emits the allowlisted spelling", () => {
@@ -233,34 +266,49 @@ describe("public-origin — Location rewrite rule", () => {
         ).toBe("https://www.example.com/x");
     });
 
-    it("honours X-Forwarded-Proto only when it is exactly http or https; anything else is https", () => {
-        expect(
-            rewrite("http://0.0.0.0:8080/x", { "x-forwarded-proto": "http" }),
-        ).toBe("http://app.example.com/x");
-        expect(
-            rewrite("http://0.0.0.0:8080/x", {
-                "x-forwarded-proto": " HTTPS ",
-            }),
-        ).toBe("https://app.example.com/x");
-        for (const bad of [
+    it("takes the scheme from the matched entry; a forged X-Forwarded-Proto never changes it", () => {
+        for (const proto of [
+            "http",
+            "https",
+            " HTTPS ",
             "javascript",
-            "ftp",
             "https, http",
-            "http, https",
-            "data",
-            "gopher",
             "",
+            undefined,
         ]) {
+            // an https entry stays https, a forged `http` does not downgrade it
             expect(
-                rewrite("http://0.0.0.0:8080/x", { "x-forwarded-proto": bad }),
+                rewrite("http://0.0.0.0:8080/x", {
+                    "x-forwarded-proto": proto,
+                }),
             ).toBe("https://app.example.com/x");
+            expect(
+                rewrite("http://0.0.0.0:8080/x", {
+                    "x-forwarded-proto": proto,
+                    "x-forwarded-host": "www.example.com",
+                }),
+            ).toBe("https://www.example.com/x");
+            // an http entry stays http, a forged `https` does not upgrade it
+            expect(
+                rewrite("http://0.0.0.0:8080/x", {
+                    "x-forwarded-proto": proto,
+                    host: "localhost:3000",
+                }),
+            ).toBe("http://localhost:3000/x");
         }
     });
 
-    it("no header outside the allowlist ever reaches the rewritten origin", () => {
-        const allowedOrigins = new Set(
-            HOSTS.flatMap((h) => [`http://${h}`, `https://${h}`]),
+    it("the first-entry fallback also takes that entry's scheme", () => {
+        const out = po.rewriteLocation(
+            "http://0.0.0.0:8080/x",
+            { host: "evil.com", "x-forwarded-proto": "https" },
+            ["http://first.example.com", "https://second.example.com"],
         );
+        expect(out).toBe("http://first.example.com/x");
+    });
+
+    it("no header outside the allowlist ever reaches the rewritten origin", () => {
+        const allowedOrigins = new Set(HOSTS);
         const hostValues = [
             "evil.com",
             "app.example.com:1",
@@ -501,7 +549,7 @@ for (const [name, bin] of RUNTIMES) {
                     });
                 }
                 expect(b.out()).toContain(
-                    "PUBLIC_ORIGINS:app.example.com,www.example.com",
+                    "PUBLIC_ORIGINS:https://app.example.com,https://www.example.com",
                 );
             } finally {
                 b.stop();
@@ -530,7 +578,7 @@ for (const [name, bin] of RUNTIMES) {
                     .split(",")
                     .map((t) => t.trim().toLowerCase())
                     .sort();
-            const want = ["x-forwarded-host", "host", "x-forwarded-proto"];
+            const want = ["x-forwarded-host", "host"];
             try {
                 for (const via of [
                     "setHeader",
@@ -622,9 +670,10 @@ for (const [name, bin] of RUNTIMES) {
             }
         });
 
-        it("uses an allowlisted forwarded host and proto from the request", async () => {
+        it("uses an allowlisted forwarded host; the scheme comes from the entry, never from X-Forwarded-Proto", async () => {
             const b = await boot(bin, {
-                KNEXT_PUBLIC_ORIGINS: "app.example.com,www.example.com",
+                KNEXT_PUBLIC_ORIGINS:
+                    "app.example.com,https://www.example.com,http://plain.example.com",
             });
             try {
                 expect(
@@ -637,7 +686,18 @@ for (const [name, bin] of RUNTIMES) {
                             "X-Forwarded-Proto": "http",
                         },
                     ),
-                ).toBe("http://www.example.com/a");
+                ).toBe("https://www.example.com/a");
+                expect(
+                    await locationOf(
+                        b.port,
+                        "setHeaderArray",
+                        "http://0.0.0.0:8080/a",
+                        {
+                            "X-Forwarded-Host": "plain.example.com",
+                            "X-Forwarded-Proto": "https",
+                        },
+                    ),
+                ).toBe("http://plain.example.com/a");
                 expect(
                     await locationOf(
                         b.port,
@@ -680,6 +740,25 @@ for (const [name, bin] of RUNTIMES) {
                 }
                 expect(b.out()).not.toContain("PUBLIC_ORIGINS");
                 expect(b.err()).not.toContain("PUBLIC_ORIGINS");
+            } finally {
+                b.stop();
+            }
+        });
+
+        it("a repeated host is dropped with a warning naming the entry", async () => {
+            const b = await boot(bin, {
+                KNEXT_PUBLIC_ORIGINS: "http://a.test,https://a.test",
+            });
+            try {
+                expect(
+                    await locationOf(
+                        b.port,
+                        "setHeader",
+                        "http://0.0.0.0:8080/a",
+                    ),
+                ).toBe("http://a.test/a");
+                expect(b.err()).toContain("DUPLICATE");
+                expect(b.err()).toContain("https://a.test");
             } finally {
                 b.stop();
             }
