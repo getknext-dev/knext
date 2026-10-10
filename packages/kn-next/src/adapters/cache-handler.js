@@ -1125,6 +1125,25 @@ function nextRoute(key) {
   return key.replace(/(?:\/index)?\/?$/, '') || '/';
 }
 
+/**
+ * PPR resume state is BUILD-SCOPED (#2084). An APP_PAGE carrying `postponed`
+ * state is resumed by Next against the CURRENT build's code; resuming the state
+ * a previous build wrote (keys outlive a redeploy) against a changed shell makes
+ * React log "Expected the resume to render ..." and fall back to client
+ * rendering on every request. So such an entry is only usable by the build that
+ * wrote it: a different build id, or none recorded (written before build ids
+ * were), reads as a MISS and the route re-renders. Plain ISR HTML has no
+ * postponed state — it is only stale, never resumed — and stays shared.
+ * With no build id for THIS process (vinext, unreadable BUILD_ID, Next's
+ * constant id) there is nothing to compare against, so it fails open.
+ */
+function isForeignPostponedEntry(entry) {
+  if (currentBuildId === undefined) return false;
+  const value = entry?.value;
+  if (value?.kind !== 'APP_PAGE' || !value.postponed) return false;
+  return entry.buildId !== currentBuildId;
+}
+
 function seedNextCacheControl(key, entry, ctx) {
   if (typeof key !== 'string' || !key.startsWith('/')) return;
   // Next never records a window for the data cache (`!ctx.fetchCache`, :537).
@@ -1194,6 +1213,13 @@ class CacheHandler {
             return null;
           }
           const parsed = withCacheState(deserializeCacheValue(JSON.parse(data)));
+          if (isForeignPostponedEntry(parsed)) {
+            logCacheEvent('MISS', source, key, {
+              durationMs: Date.now() - startTime,
+              details: 'postponed state from another build',
+            });
+            return null;
+          }
           seedNextCacheControl(key, parsed, ctx);
           logCacheEvent(parsed?.cacheState === 'stale' ? 'STALE' : 'HIT', source, key, {
             durationMs: Date.now() - startTime,
@@ -1206,6 +1232,13 @@ class CacheHandler {
       if (!entry) {
         logCacheEvent('MISS', source, key, {
           durationMs: Date.now() - startTime,
+        });
+        return null;
+      }
+      if (isForeignPostponedEntry(entry)) {
+        logCacheEvent('MISS', source, key, {
+          durationMs: Date.now() - startTime,
+          details: 'postponed state from another build',
         });
         return null;
       }
