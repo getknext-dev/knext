@@ -933,6 +933,51 @@ type NextAppStatus struct {
 	// distinguish a stale-but-serving app from a broken new push (#312).
 	// +optional
 	LastSuccessfulDeployTime *metav1.Time `json:"lastSuccessfulDeployTime,omitempty"`
+
+	// Platform records what the cluster-scoped KnextPlatform contributed to this
+	// app's last render (ADR-0064): the platform generation and profile observed
+	// and the spec fields the app inherited from it. Absent while no KnextPlatform
+	// is in force (none exists, its CRD is not installed, or it was not accepted),
+	// so a cluster that has not opted in carries no platform record; its only new
+	// status is the PlatformDefaultsApplied condition (reason NoPlatform or
+	// NoPlatformCRD). This is observation only — platform identity is NEVER
+	// written into the Knative Service's revision template, so a platform edit
+	// that changes no effective value creates no new revision.
+	// +optional
+	Platform *NextAppPlatformStatus `json:"platform,omitempty"`
+}
+
+// NextAppPlatformStatus is the per-app record of the platform merge (ADR-0064).
+type NextAppPlatformStatus struct {
+	// ObservedGeneration is the metadata.generation of the KnextPlatform this
+	// app was last rendered against.
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
+	// Profile is the platform profile in force at that render.
+	// +optional
+	Profile string `json:"profile,omitempty"`
+
+	// SpecHash identifies the platform configuration that render used. Unlike the
+	// generation it survives a delete-and-recreate of the KnextPlatform, so an
+	// unchanged platform never reads as a change.
+	// +optional
+	SpecHash string `json:"specHash,omitempty"`
+
+	// InheritedFields lists the NextApp spec fields whose effective value came
+	// from the platform because the app left them unset, e.g.
+	// "spec.resources.cpuLimit". Fields that fell back to the built-in value are
+	// not listed.
+	// +listType=set
+	// +optional
+	InheritedFields []string `json:"inheritedFields,omitempty"`
+
+	// EffectiveHash fingerprints the merged values that reached the rendered
+	// Knative Service at that render. The operator compares it to decide whether a
+	// platform change alters this app's revision template at all (and so whether it
+	// must wait behind the rollout limiter), without diffing a live Service.
+	// +optional
+	EffectiveHash string `json:"effectiveHash,omitempty"`
 }
 
 // TrafficStatus is one entry of the observed Knative traffic distribution.

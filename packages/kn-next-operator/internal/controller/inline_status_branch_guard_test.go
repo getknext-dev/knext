@@ -20,6 +20,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"strings"
 	"testing"
 )
 
@@ -61,7 +62,7 @@ func TestInlineStatusConditionBranchesStayExactlyOne(t *testing.T) {
 		}
 		found := false
 		ast.Inspect(ifStmt.Init, func(m ast.Node) bool {
-			if sel, ok := m.(*ast.SelectorExpr); ok && sel.Sel.Name == "ValidateNextAppSpec" {
+			if sel, ok := m.(*ast.SelectorExpr); ok && strings.HasPrefix(sel.Sel.Name, "ValidateNextAppSpec") {
 				found = true
 			}
 			return true

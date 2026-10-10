@@ -1,0 +1,195 @@
+---
+apiVersion: v1
+automountServiceAccountToken: false
+kind: ServiceAccount
+metadata:
+  name: cli13-full-sa
+  namespace: default
+  ownerReferences:
+  - apiVersion: apps.kn-next.dev/v1alpha1
+    blockOwnerDeletion: true
+    controller: true
+    kind: NextApp
+    name: cli13-full
+    uid: uid-cli13-full
+---
+apiVersion: caching.internal.knative.dev/v1alpha1
+kind: Image
+metadata:
+  labels:
+    app: cli13-full
+    generated-by: kn-next-operator
+  name: cli13-full-image-cache
+  namespace: default
+  ownerReferences:
+  - apiVersion: apps.kn-next.dev/v1alpha1
+    blockOwnerDeletion: true
+    controller: true
+    kind: NextApp
+    name: cli13-full
+    uid: uid-cli13-full
+spec:
+  image: registry.example.com/app:v1@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1
+---
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  labels:
+    app: cli13-full
+    generated-by: kn-next-operator
+  name: cli13-full
+  namespace: default
+  ownerReferences:
+  - apiVersion: apps.kn-next.dev/v1alpha1
+    blockOwnerDeletion: true
+    controller: true
+    kind: NextApp
+    name: cli13-full
+    uid: uid-cli13-full
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/max-scale: "8"
+        autoscaling.knative.dev/min-scale: "1"
+        autoscaling.knative.dev/panic-threshold-percentage: "200"
+        autoscaling.knative.dev/panic-window-percentage: "10"
+        autoscaling.knative.dev/scale-down-delay: 60s
+        autoscaling.knative.dev/target-burst-capacity: "0"
+        prometheus.io/path: /metrics
+        prometheus.io/port: "9464"
+        prometheus.io/scrape: "true"
+      labels:
+        apps.kn-next.dev/build-id: b-1
+    spec:
+      containerConcurrency: 50
+      containers:
+      - env:
+        - name: HOSTNAME
+          value: 0.0.0.0
+        - name: NODE_ENV
+          value: production
+        - name: KNEXT_DB_POOL_MAX
+          value: "10"
+        - name: STORAGE_PROVIDER
+          value: gcs
+        - name: GCS_BUCKET_NAME
+          value: b
+        - name: CACHE_BUCKET_REGION
+          value: us
+        - name: CACHE_PROVIDER
+          value: redis
+        - name: REDIS_URL
+          value: redis://r:6379
+        - name: REDIS_KEY_PREFIX
+          value: kp
+        - name: KAFKA_BROKER_URL
+          value: kafka:9092
+        - name: KAFKA_REVALIDATION_TOPIC
+          value: cli13-full-revalidation
+        - name: KN_APP_NAME
+          value: cli13-full
+        - name: OTEL_TRACING_ENABLED
+          value: "true"
+        - name: OTEL_TRACES_SAMPLER_ARG
+          value: "0.1"
+        - name: NEXT_DEPLOYMENT_ID
+          value: b-1
+        image: registry.example.com/app:v1@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 3000
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        name: ""
+        ports:
+        - containerPort: 3000
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 3000
+        resources:
+          limits:
+            cpu: "1"
+            memory: 2Gi
+          requests:
+            cpu: 500m
+            memory: 512Mi
+        securityContext:
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - mountPath: /app/.next/standalone/.next/cache
+          name: knext-writable
+          subPath: next-cache
+      serviceAccountName: cli13-full-sa
+      timeoutSeconds: 300
+      volumes:
+      - emptyDir: {}
+        name: knext-writable
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    app: cli13-full
+    generated-by: kn-next-operator
+  name: cli13-full-allow-ingress
+  namespace: default
+  ownerReferences:
+  - apiVersion: apps.kn-next.dev/v1alpha1
+    blockOwnerDeletion: true
+    controller: true
+    kind: NextApp
+    name: cli13-full
+    uid: uid-cli13-full
+spec:
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: In
+          values:
+          - knative-serving
+          - kourier-system
+    ports:
+    - port: 8012
+    - port: 8013
+    - port: 8112
+    - port: 9090
+    - port: 9464
+  - from:
+    - podSelector: {}
+    ports:
+    - port: 9090
+    - port: 9464
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          knext.dev/metrics-scrape: "true"
+    ports:
+    - port: 9464
+  podSelector:
+    matchLabels:
+      serving.knative.dev/service: cli13-full
+  policyTypes:
+  - Ingress
+# KafkaSource (builder output; Reconcile does not create it)
+---
+apiVersion: sources.knative.dev/v1beta1
+kind: KafkaSource
+metadata:
+  name: cli13-full-revalidation-source
+  namespace: default
+spec:
+  bootstrapServers:
+  - kafka:9092
+  consumerGroup: cli13-full-revalidation
+  sink:
+    ref:
+      apiVersion: serving.knative.dev/v1
+      kind: Service
+      name: cli13-full-revalidator
+  topics:
+  - cli13-full-revalidation

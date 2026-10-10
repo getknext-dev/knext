@@ -1025,6 +1025,52 @@ spec:
                   operator can trust is actually serving — surfaced so `kubectl get nextapp
                   -o wide` answers "which build is live?" without a Knative round-trip (#312).
                 type: string
+              platform:
+                description: |-
+                  Platform records what the cluster-scoped KnextPlatform contributed to this
+                  app's last render (ADR-0064): the platform generation and profile observed
+                  and the spec fields the app inherited from it. Absent while no KnextPlatform
+                  is in force (none exists, its CRD is not installed, or it was not accepted),
+                  so a cluster that has not opted in carries no platform record; its only new
+                  status is the PlatformDefaultsApplied condition (reason NoPlatform or
+                  NoPlatformCRD). This is observation only — platform identity is NEVER
+                  written into the Knative Service's revision template, so a platform edit
+                  that changes no effective value creates no new revision.
+                properties:
+                  effectiveHash:
+                    description: |-
+                      EffectiveHash fingerprints the merged values that reached the rendered
+                      Knative Service at that render. The operator compares it to decide whether a
+                      platform change alters this app's revision template at all (and so whether it
+                      must wait behind the rollout limiter), without diffing a live Service.
+                    type: string
+                  inheritedFields:
+                    description: |-
+                      InheritedFields lists the NextApp spec fields whose effective value came
+                      from the platform because the app left them unset, e.g.
+                      "spec.resources.cpuLimit". Fields that fell back to the built-in value are
+                      not listed.
+                    items:
+                      type: string
+                    type: array
+                    x-kubernetes-list-type: set
+                  observedGeneration:
+                    description: |-
+                      ObservedGeneration is the metadata.generation of the KnextPlatform this
+                      app was last rendered against.
+                    format: int64
+                    type: integer
+                  profile:
+                    description: Profile is the platform profile in force at that
+                      render.
+                    type: string
+                  specHash:
+                    description: |-
+                      SpecHash identifies the platform configuration that render used. Unlike the
+                      generation it survives a delete-and-recreate of the KnextPlatform, so an
+                      unchanged platform never reads as a change.
+                    type: string
+                type: object
               scaledToZero:
                 description: |-
                   ScaledToZero reports whether the app currently has no active compute: it is

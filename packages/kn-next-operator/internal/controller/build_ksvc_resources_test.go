@@ -66,7 +66,7 @@ func TestBuildDesiredKsvcRejectsMalformedResourceQuantity(t *testing.T) {
 						t.Fatalf("buildDesiredKsvc PANICKED on malformed %s (would crash the shared reconcile loop): %v", tc.field, rec)
 					}
 				}()
-				_, err = r.buildDesiredKsvc(app, ksvc)
+				_, err = r.buildDesiredKsvc(app, ksvc, resolveEffective(app, nil))
 			}()
 
 			if err == nil {
@@ -208,7 +208,7 @@ func TestBuildDesiredKsvcAppliesDefaultResources(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Name: app.Name, Namespace: app.Namespace},
 			}
 
-			if _, err := r.buildDesiredKsvc(app, ksvc); err != nil {
+			if _, err := r.buildDesiredKsvc(app, ksvc, resolveEffective(app, nil)); err != nil {
 				t.Fatalf("buildDesiredKsvc returned an unexpected error: %v", err)
 			}
 
@@ -271,7 +271,7 @@ func TestBuildDesiredKsvcDefaultCPULimitStaysAt1000m(t *testing.T) {
 		Spec:       appsv1alpha1.NextAppSpec{Image: "registry.example.com/app:v1@sha256:abc123"},
 	}
 	ksvc := &servingv1.Service{ObjectMeta: metav1.ObjectMeta{Name: app.Name, Namespace: app.Namespace}}
-	if _, err := r.buildDesiredKsvc(app, ksvc); err != nil {
+	if _, err := r.buildDesiredKsvc(app, ksvc, resolveEffective(app, nil)); err != nil {
 		t.Fatalf("buildDesiredKsvc returned an unexpected error: %v", err)
 	}
 

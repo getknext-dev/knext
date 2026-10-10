@@ -1,0 +1,437 @@
+# Zero-diff golden corpus: NextApp specs shaped like what real CLIs emit.
+#
+# Each document is a FROZEN snapshot. Do not "modernise" an entry to follow a
+# newer CLI: the point is that CRs already stored in a cluster by an older CLI
+# keep rendering byte-identically when the operator is upgraded. The entries
+# named cli13-* were dumped from the 1.3-line CLI's buildNextAppCRObject; the
+# entries named v10-* are hand-curated 1.0-line shapes (fields the 1.0 CRD
+# knew); the rest cover one operator rendering branch each.
+#
+# Every entry must pass validation.ValidateNextAppSpec except the ones named
+# reject-*, whose golden is the reconcile error text.
+---
+# 1.0-line minimal shape: image + the always-emitted scaling pair.
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata:
+  name: v10-minimal
+  namespace: default
+spec:
+  image: registry.example.com/app:v1@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1
+  scaling:
+    minScale: 0
+    maxScale: 10
+---
+# 1.0-line shape with the storage + redis cache + kafka revalidation trio.
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata:
+  name: v10-storage-cache-kafka
+  namespace: default
+spec:
+  image: registry.example.com/app:v1@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1
+  scaling:
+    minScale: 0
+    maxScale: 10
+  storage:
+    provider: gcs
+    bucket: my-bucket
+    region: us-central1
+  cache:
+    provider: redis
+    url: redis://redis.default.svc.:6379
+    keyPrefix: v10
+  revalidation:
+    queue: kafka
+    kafkaBrokerUrl: kafka.default.svc:9092
+---
+# 1.3-line default config (CLI dump).
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata:
+  name: cli13-default
+  namespace: default
+spec:
+  image: registry.example.com/app:v1@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1
+  scaling:
+    minScale: 0
+    maxScale: 10
+  runtime: bun
+  build: turbopack
+---
+# 1.3-line default config with a build id (CLI dump).
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata:
+  name: cli13-default-buildid
+  namespace: default
+spec:
+  image: registry.example.com/app:v1@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1
+  scaling:
+    minScale: 0
+    maxScale: 10
+  env:
+    NEXT_DEPLOYMENT_ID: build-abc123
+  runtime: bun
+  build: turbopack
+  buildId: build-abc123
+---
+# 1.3-line fully-configured app (CLI dump): all four resource fields (the CLI
+# back-fills the three the user left unset), the scaling knobs, observability.
+# maxScale 8 x poolMax 10 = 80 sits exactly on the connection budget.
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata:
+  name: cli13-full
+  namespace: default
+spec:
+  image: registry.example.com/app:v1@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1
+  scaling:
+    minScale: 1
+    maxScale: 8
+    containerConcurrency: 50
+    poolMax: 10
+    targetBurstCapacity: 0
+    panicWindowPercentage: 10
+    panicThresholdPercentage: 200
+    scaleDownDelay: 60s
+  resources:
+    cpuRequest: 500m
+    memoryRequest: 512Mi
+    cpuLimit: 1000m
+    memoryLimit: 2Gi
+  storage:
+    provider: gcs
+    bucket: b
+    region: us
+  cache:
+    provider: redis
+    url: redis://r:6379
+    keyPrefix: kp
+  revalidation:
+    queue: kafka
+    kafkaBrokerUrl: kafka:9092
+  env:
+    NEXT_DEPLOYMENT_ID: b-1
+  observability:
+    enabled: true
+    tracing:
+      enabled: true
+      sampleRate: "0.1"
+  healthCheckPath: /healthz
+  runtime: node
+  build: turbopack
+  buildId: b-1
+---
+# No spec.scaling block at all: the operator's own min-scale 0 / max-scale 10
+# annotation defaults. This is the shape a CLI that omits an unset scaling
+# pair emits.
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata:
+  name: no-scaling-block
+  namespace: default
+spec:
+  image: registry.example.com/app:v1@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1
+  runtime: bun
+  build: turbopack
+---
+# A scaling block WITHOUT maxScale: the operator reads the zero as "unbounded"
+# and stamps max-scale "0". Pinned on purpose: a CLI that stops emitting
+# maxScale must not leave a non-empty scaling block without one.
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata:
+  name: scaling-without-maxscale
+  namespace: default
+spec:
+  image: registry.example.com/app:v1@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1
+  scaling:
+    containerConcurrency: 30
+---
+# Only one resource field set: the operator fills the other three itself.
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata:
+  name: resources-partial
+  namespace: default
+spec:
+  image: registry.example.com/app:v1@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1
+  scaling:
+    minScale: 0
+    maxScale: 10
+  resources:
+    cpuLimit: 2000m
+---
+# Every scaling knob set, scale-down-delay included.
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata:
+  name: scaling-knobs
+  namespace: default
+spec:
+  image: registry.example.com/app:v1@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1
+  scaling:
+    minScale: 0
+    maxScale: 20
+    containerConcurrency: 100
+    targetBurstCapacity: -1
+    panicWindowPercentage: 5
+    panicThresholdPercentage: 150
+    scaleDownDelay: 15m
+---
+# Scheduled warm floor (evaluated against the fixed test clock).
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata:
+  name: warm-schedule
+  namespace: default
+spec:
+  image: registry.example.com/app:v1@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1
+  scaling:
+    minScale: 0
+    maxScale: 10
+    warmSchedule:
+      - start: "0 8 * * 1-5"
+        end: "0 20 * * 1-5"
+        replicas: 2
+        timezone: UTC
+---
+# Image prewarm DaemonSet.
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata:
+  name: image-prewarm
+  namespace: default
+spec:
+  image: registry.example.com/app:v1@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1
+  imagePullSecrets:
+    - name: ocir-pull
+  scaling:
+    minScale: 0
+    maxScale: 10
+    imagePrewarm: true
+---
+# Single-executable vinext shape.
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata:
+  name: vinext-single-exec
+  namespace: default
+spec:
+  image: registry.example.com/app:v1@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1
+  scaling:
+    minScale: 0
+    maxScale: 10
+  build: vinext
+  security:
+    writeFree: true
+---
+# Self-contained bun executable on the standalone axis.
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata:
+  name: self-contained-bun
+  namespace: default
+spec:
+  image: registry.example.com/app:v1@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1
+  scaling:
+    minScale: 0
+    maxScale: 10
+  runtime: bun
+  build: turbopack
+  selfContained: true
+---
+# Standalone + storage: the .next/cache emptyDir path.
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata:
+  name: storage-writable
+  namespace: default
+spec:
+  image: registry.example.com/app:v1@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1
+  scaling:
+    minScale: 0
+    maxScale: 10
+  storage:
+    provider: s3
+    bucket: assets
+    region: eu-west-1
+    endpoint: https://s3.example.com
+  security:
+    writableCache: true
+---
+# Security toggles all flipped from their defaults.
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata:
+  name: security-flipped
+  namespace: default
+spec:
+  image: registry.example.com/app:v1@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1
+  scaling:
+    minScale: 0
+    maxScale: 10
+  security:
+    networkPolicy: false
+    readOnlyRootFilesystem: false
+---
+# Observability with RUM + tracing, custom health path, custom timeout.
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata:
+  name: observability-timeout
+  namespace: default
+spec:
+  image: registry.example.com/app:v1@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1
+  scaling:
+    minScale: 0
+    maxScale: 10
+  timeoutSeconds: 120
+  healthCheckPath: /api/live
+  observability:
+    enabled: true
+    rum:
+      enabled: true
+      sampleRate: "0.5"
+    tracing:
+      enabled: true
+      endpoint: http://otel.default.svc:4318
+      sampleRate: "0.25"
+---
+# Secrets: envFrom + envMap, plus plain env.
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata:
+  name: secrets-env
+  namespace: default
+spec:
+  image: registry.example.com/app:v1@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1
+  scaling:
+    minScale: 0
+    maxScale: 10
+  secrets:
+    envFrom:
+      - app-secrets
+    envMap:
+      STRIPE_KEY:
+        secretName: stripe
+        secretKey: key
+  env:
+    FEATURE_FLAG: "on"
+---
+# BYO database binding with a read-only replica.
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata:
+  name: database-binding
+  namespace: default
+spec:
+  image: registry.example.com/app:v1@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1
+  scaling:
+    minScale: 0
+    maxScale: 4
+    poolMax: 10
+  database:
+    secretRef:
+      name: app-db
+      key: url
+    roSecretRef:
+      name: app-db-ro
+---
+# Cluster-local visibility.
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata:
+  name: cluster-local
+  namespace: default
+spec:
+  image: registry.example.com/app:v1@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1
+  scaling:
+    minScale: 0
+    maxScale: 10
+  networking:
+    visibility: cluster-local
+---
+# Pinned traffic with a canary split.
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata:
+  name: traffic-pinned
+  namespace: default
+spec:
+  image: registry.example.com/app:v1@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1
+  scaling:
+    minScale: 0
+    maxScale: 10
+  traffic:
+    revisionName: traffic-pinned-00002
+    canaryPercent: 20
+---
+# Per-PR preview: forces max-scale 1 and drops scale-down-delay.
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata:
+  name: preview-pr
+  namespace: default
+spec:
+  image: registry.example.com/app:v1@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1
+  scaling:
+    minScale: 0
+    maxScale: 10
+    scaleDownDelay: 10m
+    targetBurstCapacity: 100
+  preview:
+    enabled: true
+    branch: feat/x
+    prId: "42"
+---
+# maxScale 0 set explicitly (unbounded) alongside non-default knobs.
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata:
+  name: max-scale-unbounded
+  namespace: default
+spec:
+  image: registry.example.com/app:v1@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1
+  scaling:
+    minScale: 0
+    maxScale: 0
+---
+# Connection-budget boundary, accepted: maxScale 8 x poolMax 10 == 80.
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata:
+  name: budget-at-limit
+  namespace: default
+spec:
+  image: registry.example.com/app:v1@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1
+  scaling:
+    minScale: 0
+    maxScale: 8
+    poolMax: 10
+---
+# Connection-budget boundary, rejected: maxScale 9 x poolMax 9 == 81.
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata:
+  name: reject-budget-81
+  namespace: default
+spec:
+  image: registry.example.com/app:v1@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1
+  scaling:
+    minScale: 0
+    maxScale: 9
+    poolMax: 9
+---
+# Rejected: a tag-only image (digest pinning).
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata:
+  name: reject-latest
+  namespace: default
+spec:
+  image: registry.example.com/app:latest
+  scaling:
+    minScale: 0
+    maxScale: 10

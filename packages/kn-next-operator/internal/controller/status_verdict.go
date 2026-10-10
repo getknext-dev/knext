@@ -25,6 +25,7 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
+	"knative.dev/pkg/apis"
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 
 	appsv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/api/v1alpha1"
@@ -132,6 +133,133 @@ func provisionKafkaSourceRequested(app *appsv1alpha1.NextApp) bool {
 		ptr.Deref(app.Spec.Revalidation.ProvisionKafkaSource, false)
 }
 
+// verdictOption supplies an input to computeStatusVerdict without widening the
+// positional signature that every caller (and the characterisation tests) pass.
+// An input that is not supplied is "not evaluated" and contributes no condition,
+// which is what keeps every pre-existing caller's verdict unchanged.
+type verdictOption func(*verdictExtras)
+
+// verdictExtras are the optional verdict inputs.
+type verdictExtras struct {
+	platform *platformDefaultsState
+}
+
+// withPlatformDefaults supplies the platform-layer state (ADR-0064) the
+// PlatformDefaultsApplied condition is computed from.
+func withPlatformDefaults(st platformDefaultsState) verdictOption {
+	return func(x *verdictExtras) { x.platform = &st }
+}
+
+// platformDefaultsCondition computes the PlatformDefaultsApplied condition for
+// one pass. Messages are STATIC for a given (app, platform) state — no live
+// elapsed time, no wait duration — so a converged object's status write stays a
+// no-op (#98); the wait travels in the requeue, not in the message.
+func platformDefaultsCondition(app *appsv1alpha1.NextApp, pd platformDefaultsState) metav1.Condition {
+	c := metav1.Condition{Type: ConditionPlatformDefaultsApplied, ObservedGeneration: app.Generation}
+	switch {
+	case pd.gate.hold == holdEffectiveSpecInvalid:
+		c.Status = metav1.ConditionFalse
+		c.Reason = ReasonEffectiveSpecInvalid
+		c.Message = fmt.Sprintf(
+			"the platform's defaults make this app's effective spec invalid (%s): %s. "+
+				"The current Knative Service is held unchanged — fix the app's field or the "+
+				"platform value, and the next reconcile applies it",
+			pd.gate.field, pd.gate.detail)
+	case pd.gate.hold == holdRolloutPending:
+		c.Status = metav1.ConditionUnknown
+		c.Reason = ReasonRolloutPending
+		c.Message = fmt.Sprintf(
+			"a platform change is queued for this app: platform-triggered re-renders are paced at "+
+				"%d per minute (rollout.maxAppsPerMinute) and the current Knative Service is "+
+				"unchanged until this app's turn", pd.perMinute)
+	case pd.crdMissing:
+		c.Status = metav1.ConditionTrue
+		c.Reason = ReasonNoPlatformCRD
+		c.Message = "the KnextPlatform CRD is not installed: built-in defaults apply"
+	case !pd.present:
+		c.Status = metav1.ConditionTrue
+		c.Reason = ReasonNoPlatform
+		c.Message = "no KnextPlatform named default exists: built-in defaults apply"
+	case pd.notAccepted != "":
+		c.Status = metav1.ConditionFalse
+		c.Reason = ReasonPlatformNotAccepted
+		c.Message = fmt.Sprintf(
+			"the KnextPlatform named default was not accepted and is ignored — built-in defaults apply: %s",
+			pd.notAccepted)
+	case len(pd.inherited) > 0:
+		c.Status = metav1.ConditionTrue
+		c.Reason = ReasonInherited
+		c.Message = fmt.Sprintf(
+			"the platform (generation %d, profile %s) supplied %d field(s) this app leaves unset: %s",
+			pd.generation, pd.profile, len(pd.inherited), strings.Join(pd.inherited, ", "))
+	default:
+		c.Status = metav1.ConditionTrue
+		c.Reason = ReasonNothingToInherit
+		c.Message = fmt.Sprintf(
+			"the platform (generation %d, profile %s) is in force but supplies no value this app leaves unset",
+			pd.generation, pd.profile)
+	}
+	return c
+}
+
+// heldAppChangeDropped reports whether this pass is a hold-last-good
+// (EffectiveSpecInvalid) that is holding back a change the APP made, as opposed to
+// one only the platform moved.
+//
+// The distinction is the whole point. A platform-only hold leaves the live
+// Service exactly as the app asked for it, so the Service's own readiness is still
+// the truth about the app. But when the app's generation has moved past the last
+// one that was actually reconciled, the Service that is "Ready" is the OLD one: a
+// new image has not rolled out, and reporting Ready=True with the new generation
+// observed tells `kubectl wait --for=condition=Ready` — and every deploy that
+// waits on it — that it did.
+//
+// "Last reconciled generation" is the Reconciling condition's observedGeneration,
+// the same signal appTriggered already reads. This function and
+// heldReconcilingCondition keep it frozen while the change is held, so the verdict
+// is sticky across passes without a new status field.
+func heldAppChangeDropped(app *appsv1alpha1.NextApp, pd *platformDefaultsState) bool {
+	return pd != nil && pd.gate.hold == holdEffectiveSpecInvalid && appTriggered(app)
+}
+
+// heldReconcilingCondition is Reconciling for a held-and-dropped pass: True (the
+// change is not done) with observedGeneration left at the last generation that
+// WAS reconciled, never advanced to the one that was not.
+func heldReconcilingCondition(app *appsv1alpha1.NextApp, gate platformGate) metav1.Condition {
+	var lastReconciled int64
+	if prev := apimeta.FindStatusCondition(app.Status.Conditions, ConditionReconciling); prev != nil {
+		lastReconciled = prev.ObservedGeneration
+	}
+	return metav1.Condition{
+		Type:               ConditionReconciling,
+		Status:             metav1.ConditionTrue,
+		ObservedGeneration: lastReconciled,
+		Reason:             ReasonEffectiveSpecInvalid,
+		Message: fmt.Sprintf(
+			"the change at generation %d is held, not applied: %s: %s",
+			app.Generation, gate.field, gate.detail),
+	}
+}
+
+// heldReadyMessage is the Ready/Degraded message for a held-and-dropped pass. It
+// is static for a given (generation, platform state): no elapsed time, so a
+// converged object's status write stays a no-op (#98).
+func heldReadyMessage(app *appsv1alpha1.NextApp, gate platformGate, ksvcReady bool, ksvcReadyCond *apis.Condition) string {
+	msg := fmt.Sprintf(
+		"the change at generation %d is NOT applied: the platform's defaults make this app's effective spec "+
+			"invalid (%s): %s. The previous Knative Service keeps serving unchanged — fix the app's field "+
+			"or the platform value, and the next reconcile applies the change",
+		app.Generation, gate.field, gate.detail)
+	if !ksvcReady {
+		reason := "Pending"
+		if ksvcReadyCond != nil && ksvcReadyCond.Reason != "" {
+			reason = ksvcReadyCond.Reason
+		}
+		msg += fmt.Sprintf(" (the previous Knative Service is itself not Ready: %s)", reason)
+	}
+	return msg
+}
+
 // computeStatusVerdict is the single, pure seam for the NextApp status verdict:
 // the DatabaseReady composition (BYO bound, or none — managed provisioning was
 // removed, ADR-0025), the honest-Ready roll-up from the child ksvc's own Ready
@@ -149,8 +277,13 @@ func computeStatusVerdict(
 	pe privateExposureState,
 	pc podCreationState,
 	now time.Time,
+	opts ...verdictOption,
 ) statusVerdict {
 	var v statusVerdict
+	var extras verdictExtras
+	for _, opt := range opts {
+		opt(&extras)
+	}
 
 	// 0. BYO database binding (ADR-0019). Managed provisioning was removed
 	// (ADR-0025): the only database surface is a bound existing Secret, or none.
@@ -185,15 +318,42 @@ func computeStatusVerdict(
 	ksvcReadyCond := ksvc.Status.GetCondition(servingv1.ServiceConditionReady)
 	ksvcReady := ksvcReadyCond.IsTrue()
 
-	v.conditions = append(v.conditions, metav1.Condition{
-		Type:               ConditionReconciling,
-		Status:             metav1.ConditionFalse,
-		ObservedGeneration: app.Generation,
-		Reason:             "ReconcileSuccess",
-		Message:            "Reconciliation complete",
-	})
+	// Hold-last-good that DROPS the app's own change (ADR-0064 F3): the live
+	// Service is Ready, but it is the OLD one, so none of the three roll-ups below
+	// may speak for the generation that was just written. See heldAppChangeDropped.
+	droppedHold := heldAppChangeDropped(app, extras.platform)
 
-	if ksvcReady {
+	if droppedHold {
+		v.conditions = append(v.conditions, heldReconcilingCondition(app, extras.platform.gate))
+	} else {
+		v.conditions = append(v.conditions, metav1.Condition{
+			Type:               ConditionReconciling,
+			Status:             metav1.ConditionFalse,
+			ObservedGeneration: app.Generation,
+			Reason:             "ReconcileSuccess",
+			Message:            "Reconciliation complete",
+		})
+	}
+
+	if droppedHold {
+		msg := heldReadyMessage(app, extras.platform.gate, ksvcReady, ksvcReadyCond)
+		v.conditions = append(v.conditions, metav1.Condition{
+			Type:               ConditionReady,
+			Status:             metav1.ConditionFalse,
+			ObservedGeneration: app.Generation,
+			Reason:             ReasonEffectiveSpecInvalid,
+			Message:            msg,
+		})
+		v.conditions = append(v.conditions, metav1.Condition{
+			Type:               ConditionDegraded,
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: app.Generation,
+			Reason:             ReasonEffectiveSpecInvalid,
+			Message:            msg,
+		})
+		// No requeue: the way out is a platform edit (the KnextPlatform watch
+		// re-enqueues every app) or an app edit (a new generation), never elapsed time.
+	} else if ksvcReady {
 		v.conditions = append(v.conditions, metav1.Condition{
 			Type:               ConditionReady,
 			Status:             metav1.ConditionTrue,
@@ -715,5 +875,38 @@ func computeStatusVerdict(
 		v.removeConditions = append(v.removeConditions, ConditionPodCreationBlocked)
 	}
 
+	// PlatformDefaultsApplied (ADR-0064): whether the cluster platform's defaults
+	// reached this app. Appended LAST so every other condition's persisted order
+	// stays byte-identical (#98). Not evaluated (no option) => no condition, which
+	// is how every pre-platform caller keeps its verdict.
+	//
+	// Warning events fire on TRANSITION into the two failure reasons only — a
+	// hold that persists is not news every pass. A queued re-render requeues for
+	// its slot rather than polling.
+	if extras.platform != nil {
+		pd := *extras.platform
+		cond := platformDefaultsCondition(app, pd)
+		prev := apimeta.FindStatusCondition(app.Status.Conditions, ConditionPlatformDefaultsApplied)
+		switch cond.Reason {
+		case ReasonEffectiveSpecInvalid, ReasonPlatformNotAccepted:
+			if prev == nil || prev.Reason != cond.Reason || prev.Message != cond.Message {
+				v.events = append(v.events, verdictEvent{corev1.EventTypeWarning, cond.Reason, cond.Message})
+			}
+		}
+		v.conditions = append(v.conditions, cond)
+		if pd.gate.hold == holdRolloutPending {
+			// Come back at this app's slot (plus a beat, so the slot has passed by
+			// the time the timer fires), but never later than an earlier requeue.
+			wait := pd.gate.wait + rolloutSlotSlack
+			if v.requeueAfter == 0 || wait < v.requeueAfter {
+				v.requeueAfter = wait
+			}
+		}
+	}
+
 	return v
 }
+
+// rolloutSlotSlack is added to a queued re-render's requeue so the timer fires
+// after the slot, not a scheduling tick before it.
+const rolloutSlotSlack = 500 * time.Millisecond

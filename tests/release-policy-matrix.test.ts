@@ -45,6 +45,7 @@ const ADR_0017_PATH = resolve(
   REPO_ROOT,
   'docs/adr/0017-crd-stays-v1alpha1-conversion-webhook-deferred.md',
 );
+const ADR_0064_PATH = resolve(REPO_ROOT, 'docs/adr/0064-knext-platform-layer.md');
 const CRD_BASES_DIR = resolve(REPO_ROOT, 'packages/kn-next-operator/config/crd/bases');
 const OPERATOR_API_DIR = resolve(REPO_ROOT, 'packages/kn-next-operator/api');
 const DOCS_PAGE_PATH = resolve(REPO_ROOT, 'apps/docs/content/docs/versioning.mdx');
@@ -214,6 +215,22 @@ function declaredCrdApiVersion(): string {
 }
 
 /**
+ * The platform layer's CRD (`KnextPlatform`, its own API group) is a SECOND served
+ * CRD. It is declared by ADR-0064's own anchor, so a further group added without a
+ * declaration still reds this guard: the matrix describes the `NextApp` CRD the CLI
+ * emits, and every other served group must be named somewhere that can be read.
+ */
+function declaredPlatformCrdApiVersion(): string {
+  const adr = readFileSync(ADR_0064_PATH, 'utf8');
+  const matches = [...adr.matchAll(/<!--\s*PLATFORM_CRD_API_VERSION:\s*(\S+)\s*-->/g)];
+  expect(
+    matches.length,
+    `ADR-0064 must carry exactly ONE <!-- PLATFORM_CRD_API_VERSION: … --> anchor; found ${matches.length}`,
+  ).toBe(1);
+  return matches[0][1];
+}
+
+/**
  * Every `group/version` the operator's CRD manifests actually serve, scanned out of
  * the generated bases (all of them — a second CRD file must be swept in, not
  * ignored). `name:` at indent 4 is a `spec.versions[]` entry; printer-column names
@@ -371,21 +388,24 @@ describe('docs/COMPATIBILITY.md — the matrix agrees with the code', () => {
     ).toEqual(rows.map(() => `\`${declared}\``));
   });
 
-  it('the operator SERVES exactly that apiVersion (scanned from the CRD manifests)', () => {
-    const declared = declaredCrdApiVersion();
+  it('the operator SERVES exactly the declared apiVersions (scanned from the CRD manifests)', () => {
+    // The NextApp CRD the matrix rows describe, plus the platform layer's own CRD.
+    const declared = [declaredCrdApiVersion(), declaredPlatformCrdApiVersion()].sort();
     const served = servedApiVersions();
     expect(served.length).toBeGreaterThan(0);
     expect(
-      [...new Set(served)],
-      'the matrix would be wrong the moment the operator served a different version',
-    ).toEqual([declared]);
+      [...new Set(served)].sort(),
+      'the matrix would be wrong the moment the operator served a different version, or an undeclared group',
+    ).toEqual(declared);
+    // The rows describe the NextApp CRD, which stays the one the CLI emits.
+    expect(served).toContain(declaredCrdApiVersion());
   });
 
-  it("the operator's Go API package agrees too", () => {
-    const declared = declaredCrdApiVersion();
+  it("the operator's Go API packages agree too", () => {
+    const declared = [declaredCrdApiVersion(), declaredPlatformCrdApiVersion()].sort();
     const go = goGroupVersions();
     expect(go.length).toBeGreaterThan(0);
-    expect([...new Set(go)]).toEqual([declared]);
+    expect([...new Set(go)].sort()).toEqual(declared);
   });
 
   it('carries a row for the version currently in the tree', () => {

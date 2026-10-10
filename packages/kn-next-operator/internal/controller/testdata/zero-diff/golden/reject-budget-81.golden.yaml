@@ -1,0 +1,2 @@
+# reconcile error
+spec.scaling: maxScale × poolMax (9 × 9 = 81) exceeds the app connection budget (80 = GW_MAX_CONNS 90 − reserve; max_connections is 100): lower maxScale or poolMax so their product ≤ 80 (ADR-0028 connection wall; W3/#378 owns breaking it)
