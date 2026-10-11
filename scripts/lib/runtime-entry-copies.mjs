@@ -116,8 +116,12 @@ export const DIVERGENT = {
       'HASH UPDATED for #1313 (malformed-path rejection before h3, a non-throwing request-error ' +
       'handler) and #1269 (the warm-path body read is bounded by drainWarmBody): both landed on ' +
       'the template and this copy from the same hunks. The recorded divergence is still ONLY the ' +
-      'image intercept.',
-    sha256: '14f9d5cde99d666f7ef79c5ea42f0f917540cb8947a1798b4adc97fdc8e4166e',
+      'image intercept.\n\n' +
+      'HASH UPDATED for the deep-health bridge (renderScrape serves the allowlisted app family on ' +
+      ':9464): the entry now awaits renderScrape in the metrics listener. Applied to the template and ' +
+      'every copy from the same hunks by one script. The recorded divergence is still ONLY the image ' +
+      'intercept.',
+    sha256: '981ac3de1c469083569498740541e5a65ff27ad37c460883a580a825164d7684',
   },
   'examples/bun-exec/runtime-contract.mjs': {
     reason:
@@ -138,8 +142,11 @@ export const DIVERGENT = {
       '\n\nHASH UPDATED for #1460 (resolveAssetAnchor gains the `embedded` branch + isEmbeddedPath, so a ' +
       'self-contained binary serving its own embedded `.output/public` is not warned about): applied to ' +
       'the template and every copy from the same hunks by one script. The recorded divergence is still ' +
-      'ONLY the item-4 comment block.',
-    sha256: 'cf2994747553af507978356d3bb2eac02069ba454b58cc2c644a0a723856abe1',
+      'ONLY the item-4 comment block.' +
+      '\n\nHASH UPDATED for the deep-health bridge (APP_METRIC_FAMILIES, filterExposition, fetchAppMetrics, ' +
+      'renderScrape, and the async metricsRequestListener): applied to the template and every copy from ' +
+      'the same hunks by one script. The recorded divergence is still ONLY the item-4 comment block.',
+    sha256: '4af551f706a8e7fe4cd6df942a7153079c55edbb680bf80f344320aa7c827759',
   },
 };
 

@@ -10,6 +10,9 @@
 #                — rendered by the compiled runtime's :9464 endpoint
 #                (packages/kn-next/templates/app/runtime-contract.mjs.hbs,
 #                `renderMetrics`), which is what the shipped PodMonitor scrapes.
+#                That same endpoint also forwards ONE app-registry family,
+#                knext_deep_health_state (APP_METRIC_FAMILIES in the same file),
+#                present only when tracing is enabled.
 #   - condition: knext_nextapp_condition — a kube-state-metrics CRD metric
 #                exposing the NextApp .status.conditions. The KSM
 #                CustomResourceStateMetrics config now ships as an applyable
@@ -259,27 +262,25 @@ spec:
         # is down — is covered by KnextHighErrorRate above, since a failing deep
         # health check returns 5xx.
         #
-        # `KnextDeepHealthStuckWaking` (#348) moved to knext.app.node-legacy
-        # below: knext_deep_health_state is registered by the APP into a
-        # prom-client registry served on the app port, and the shipped
-        # PodMonitor scrapes :9464 only.
+        # DEEP-HEALTH ALERTS (below) are live in THIS group because the runtime
+        # contract forwards exactly one app-registry family onto :9464 —
+        # `knext_deep_health_state` (APP_METRIC_FAMILIES in runtime-contract.mjs).
+        # They used to sit in an opt-in `knext.app.node-legacy` group because the
+        # gauge was served on a loopback port the PodMonitor does not scrape.
+        # The condition that remains: the gauge is registered only when tracing
+        # is enabled (`spec.observability.tracing.enabled`), because registering
+        # it unconditionally would cost every cold start the ~0.9 s that gate
+        # saves. With tracing off there is no series and these two rules stay
+        # silent. That is a limit of the registration, not a scrape gap, and the
+        # reachability scan (alert-reachability.test.ts) deliberately does not
+        # pretend otherwise: it proves the PORT, not the registration.
+        # A dead dependency is also visible through KnextHighErrorRate, whose
+        # deep-health route returns 5xx while it is failing.
+        #
+        # Also: only an app that has used its database recently is probed (so an
+        # idle scale-to-zero database is never woken by the scrape), and an app
+        # at zero has no pod and therefore no series.
 
-    # ── Opt-in: apps that ALSO scrape their own /api/metrics ────────────────
-    #
-    # These rules are NOT live on a default knext deployment, and saying so is
-    # the point of a separate group. The series they query
-    # (packages/kn-next/src/adapters/metrics.ts, the `kn_next_*` registry in an
-    # app's own route) are real, but they are exported on the APP port through
-    # an application-level `/api/metrics` route. Before ADR-0048 the node-server
-    # supervisor merged them onto :9464; the compiled binary does not, and the
-    # shipped PodMonitor scrapes :9464 only.
-    #
-    # So: keep this group if you run the node-server path, or if you have added
-    # a scrape config for your app's /api/metrics. Otherwise it is inert — which
-    # is exactly what the knext.app.staleness guard above is for, and why these
-    # rules are not allowed to sit in `knext.app` pretending to be turnkey.
-    - name: knext.app.node-legacy
-      rules:
         # #348: SUSTAINED deep-health `waking` = a permanent connection-level DB
         # outage of the scale-to-zero database. checkDeepHealth
         # (packages/lib/src/health/index.ts) classifies a refused connection
@@ -291,7 +292,7 @@ spec:
         # FOREVER and never becomes `down`. Alerts keyed on `down`/503 alone
         # therefore never fire on it. A refused connection to any OTHER host
         # (bring-your-own Postgres) reads `down` straight away and is alerted on
-        # by KnextDeepHealthDown below, wherever this group is scraped. This
+        # by KnextDeepHealthDown below. This
         # rule closes the waking gap: the deep-health state gauge reporting
         # overall waking=1 for LONGER than the wake budget is a stuck-waking
         # real outage. `for: 2m` is far above the legitimate 2-6s wake, so a normal

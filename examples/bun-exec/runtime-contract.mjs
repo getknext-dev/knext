@@ -650,6 +650,88 @@ export function requestErrorResponse(err) {
   });
 }
 
+// ── (2b) The app's deep-health gauge, bridged onto :9464 ───────────────────
+// `knext_deep_health_state` is registered by the APP's instrumentation into a
+// prom-client registry that serves on a LOOPBACK port (KN_CHILD_METRICS_PORT,
+// default 9092; see startChildMetricsServer in adapters/metrics.ts). The shipped
+// PodMonitor scrapes :9464 only, so without this the series existed in the
+// process and on no port anything scrapes — and the alerts keyed on it
+// (KnextDeepHealthDown, KnextDeepHealthStuckWaking) could never fire.
+//
+// ONLY the families named here cross the bridge. That is the security half, not
+// a tidy-up: ADR-0044 grants cross-namespace scrapers :9464 and the threat model
+// lists the series it exposes as a closed set. The child registry also carries
+// `knext_http_*` (with a `method` label) and the cold-start / DB-wake families;
+// forwarding the whole registry would widen that disclosure silently. Adding a
+// family here is new disclosure and is pinned by observability-metric-contract.test.ts.
+//
+// Fail-open and bounded: a missing child (tracing off, not yet registered,
+// refused) yields the base exposition; a hung child is cut at
+// APP_METRICS_TIMEOUT_MS. The bound is the deep check's own 8 s budget plus
+// margin and stays under Prometheus' default 10 s scrape timeout, so a
+// connection-level DB outage still produces its sample instead of a timed-out
+// scrape.
+export const APP_METRIC_FAMILIES = ['knext_deep_health_state'];
+export const APP_METRICS_TIMEOUT_MS = 8500;
+const DEFAULT_APP_METRICS_PORT = 9092;
+
+/** @param {Record<string, string | undefined>} [env] */
+export function appMetricsPort(env = process.env) {
+  const n = Number.parseInt(env.KN_CHILD_METRICS_PORT ?? '', 10);
+  return Number.isInteger(n) && n > 0 && n < 65536 ? n : DEFAULT_APP_METRICS_PORT;
+}
+
+/**
+ * Keep only the HELP / TYPE / sample lines of the named families. Matches the
+ * family name exactly (followed by whitespace or `{`), so a lookalike such as
+ * `knext_deep_health_state_extra` does not slip through on a shared prefix.
+ *
+ * @param {string} body
+ * @param {readonly string[]} families
+ */
+export function filterExposition(body, families) {
+  const kept = [];
+  for (const line of body.split('\n')) {
+    const m = /^(?:# (?:HELP|TYPE) )?([a-zA-Z_:][a-zA-Z0-9_:]*)(?=[\s{]|$)/.exec(line);
+    if (m && families.includes(m[1])) kept.push(line);
+  }
+  return kept.length > 0 ? `${kept.join('\n')}\n` : '';
+}
+
+/**
+ * Best-effort loopback read of the app registry, filtered to the allowlist.
+ * Returns '' on ANY failure — the scrape must never fail because the app side
+ * is absent.
+ *
+ * @param {Record<string, string | undefined>} [env]
+ * @param {number} [timeoutMs]
+ */
+export async function fetchAppMetrics(env = process.env, timeoutMs = APP_METRICS_TIMEOUT_MS) {
+  try {
+    const res = await fetch(`http://127.0.0.1:${appMetricsPort(env)}/metrics`, {
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (res.status !== 200) {
+      await res.body?.cancel().catch(() => {});
+      return '';
+    }
+    return filterExposition(await res.text(), APP_METRIC_FAMILIES);
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * The full :9464 body: the runtime's own exposition plus the bridged app family.
+ *
+ * @param {ReturnType<typeof createMetricsState>} state
+ * @param {Record<string, string | undefined>} [env]
+ * @param {number} [timeoutMs]
+ */
+export async function renderScrape(state, env = process.env, timeoutMs = APP_METRICS_TIMEOUT_MS) {
+  return renderMetrics(state) + (await fetchAppMetrics(env, timeoutMs));
+}
+
 // The `:9464` metrics listener for a plain node:http server (the node entry;
 // the bun entry serves the same port through Bun.serve). node:http hands the
 // raw request target through, so it is compared as a string — never given to
@@ -657,7 +739,7 @@ export function requestErrorResponse(err) {
 // outside any framework error handling. The try/catch keeps any other failure
 // a 500 rather than an exited process.
 export function metricsRequestListener(state) {
-  return (req, res) => {
+  return async (req, res) => {
     try {
       if (Number(req.headers['content-length'] ?? 0) > METRICS_MAX_REQUEST_BYTES) {
         res.writeHead(413).end();
@@ -667,8 +749,11 @@ export function metricsRequestListener(state) {
       const queryAt = target.indexOf('?');
       const path = queryAt === -1 ? target : target.slice(0, queryAt);
       if (req.method === 'GET' && path === '/metrics') {
+        // Rendered BEFORE the head is written: the bridge awaits the app side, and
+        // a failure there must still be a 500, not a 200 with a truncated body.
+        const body = await renderScrape(state);
         res.writeHead(200, { 'content-type': METRICS_CONTENT_TYPE });
-        res.end(renderMetrics(state));
+        res.end(body);
         return;
       }
       res.writeHead(404).end('Not Found');

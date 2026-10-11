@@ -29,6 +29,7 @@ import { execFileSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { scanAppMetricFamilies } from "../adapters/alert-reachability";
 import {
     dashboardExprs,
     docTokenResolves,
@@ -151,6 +152,22 @@ for (const [name, type] of scanPromClientMetrics(
 const NODE_LEGACY = seriesNames(NODE_LEGACY_TYPES);
 
 /**
+ * The slice of the app's prom-client registry the runtime contract FORWARDS onto
+ * :9464 (`APP_METRIC_FAMILIES`), resolved against the registry that declares it.
+ * Derived by scanning both sides: a family named in the allowlist that no
+ * registry declares contributes nothing, so it cannot launder a dead name.
+ * This is a real :9464 emitter, so it is disclosure the threat model must list.
+ */
+const BRIDGED_FAMILIES = scanAppMetricFamilies(read(BUNEXEC_TEMPLATE)).filter(
+    (f) => NODE_LEGACY_TYPES.has(f),
+);
+const BRIDGED_APP = seriesNames(
+    new Map(
+        BRIDGED_FAMILIES.map((f) => [f, NODE_LEGACY_TYPES.get(f) as string]),
+    ),
+);
+
+/**
  * Series produced by exporters outside this repo. Nothing here can scan them,
  * so each carries the exporter it comes from — an entry without a reason is a
  * hole, and the shape of this map is asserted below.
@@ -174,6 +191,7 @@ const EMITTERS = {
     "standalone-self-contained": STANDALONE_SC,
     operator: OPERATOR_EMITTED,
     "node-legacy": NODE_LEGACY,
+    "bridged-app": BRIDGED_APP,
     external: EXTERNAL_SERIES,
 } as const;
 type EmitterId = keyof typeof EMITTERS;
@@ -211,13 +229,13 @@ const RULE_GROUPS: Record<
         why: "the meta-alerts: `up` plus the bun-exec series whose absence they detect",
     },
     "knext.app": {
-        emitters: ["bunexec", "external"],
-        why: "turnkey app alerts — MUST reference only what the shipped :9464 PodMonitor scrapes",
+        emitters: ["bunexec", "bridged-app", "external"],
+        why: "turnkey app alerts — MUST reference only what the shipped :9464 PodMonitor scrapes (the runtime's own series plus the allowlisted app family the contract forwards)",
     },
-    "knext.app.node-legacy": {
-        emitters: ["node-legacy", "external"],
-        why: "opt-in: applies only to apps that still serve a prom-client /api/metrics route and scrape it themselves",
-    },
+    // There is deliberately NO opt-in group any more. An alert that is "not live
+    // by default" is the defect (the deep-health alerts sat in one and paged
+    // nobody); a group of that name reappearing is unclassified and reds the
+    // classification test below.
 };
 
 /**
@@ -279,6 +297,25 @@ describe("emitted-metric scanners", () => {
             "kn_next_startup_duration_seconds_bucket",
         );
         expect(NODE_LEGACY).toContain("knext_deep_health_state");
+    });
+
+    it("scans the app family the runtime contract forwards onto :9464", () => {
+        const allowlist = scanAppMetricFamilies(read(BUNEXEC_TEMPLATE));
+        expect(allowlist).toContain("knext_deep_health_state");
+        // Every allowlisted family must be DECLARED by a real registry; a name
+        // that resolves to nothing would forward nothing and look configured.
+        for (const f of allowlist) {
+            expect(
+                NODE_LEGACY_TYPES.has(f),
+                `${f} is allowlisted but no registry declares it`,
+            ).toBe(true);
+        }
+        expect(BRIDGED_APP).toContain("knext_deep_health_state");
+        // Every checked-in copy forwards the SAME families (a copy that forwarded
+        // more would widen disclosure on exactly one shipped binary).
+        for (const copy of CONTRACT_COPIES) {
+            expect(scanAppMetricFamilies(read(copy)), copy).toEqual(allowlist);
+        }
     });
 
     it("gives every external series a named exporter", () => {
@@ -565,6 +602,7 @@ const ALL_EMITTED = allowed([
     "standalone-self-contained",
     "operator",
     "node-legacy",
+    "bridged-app",
     "external",
 ]);
 
@@ -654,10 +692,13 @@ describe("the threat model's :9464 disclosure list is the bunexec set (S5)", () 
             tokens.length,
             "the fenced section names no metrics at all",
         ).toBeGreaterThan(1);
-        const notOnPort = tokens.filter((t) => !docTokenResolves(t, BUNEXEC));
+        // :9464 serves the runtime's own series PLUS the allowlisted app family the
+        // contract forwards (APP_METRIC_FAMILIES). Both are real :9464 emitters.
+        const onPort = new Set([...BUNEXEC, ...BRIDGED_APP]);
+        const notOnPort = tokens.filter((t) => !docTokenResolves(t, onPort));
         expect(
             notOnPort,
-            "the threat model claims :9464 discloses series the bun-exec runtime does not emit:\n" +
+            "the threat model claims :9464 discloses series the runtime does not emit:\n" +
                 notOnPort.join("\n"),
         ).toEqual([]);
     });
@@ -685,6 +726,8 @@ describe("the threat model's :9464 disclosure list is the bunexec set (S5)", () 
         const documented = new Set(extractDocMetricTokens(section));
         const emittedFamilies = [
             ...scanBunexecMetrics(read(BUNEXEC_TEMPLATE)).keys(),
+            // The forwarded app family IS served on :9464, so it is disclosure.
+            ...BRIDGED_FAMILIES,
         ].sort();
 
         expect(
