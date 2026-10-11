@@ -111,6 +111,8 @@ const MUTATIONS = [
     spec: GUARD_SPEC,
     anchor: 'build OUTPUT: `knext\n# build`',
     replacement: 'build OUTPUT: `kn-next\n# build`',
+    // This template has no comment syntax of its own; it renders an ignore file.
+    options: { commentPrefix: '#' },
   },
   {
     label: 'matcher: a shell CONTINUATION (`kn-next \\` then the verb)',
