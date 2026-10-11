@@ -204,6 +204,106 @@ describe('checkDeepHealth — hard vs soft dependency taxonomy (readiness contra
     expect(res.status).toBe('down');
   });
 
+  // --- a refusal is known on the first attempt, not after the retry budget ----
+  //
+  // The real pool retries a failed connect for DB_WAKE_RETRY_BUDGET_MS (8 s by
+  // default) and the deep check gives up at HEALTH_DEEP_TIMEOUT_MS (8 s), so a
+  // rejection never reaches the classifier before the timeout. The retry layer
+  // therefore REPORTS each failed attempt, and the deep check acts on a refusal
+  // without waiting for the final rejection. (The un-mocked default-settings
+  // proof is `health-refused-defaults.test.ts`.)
+
+  const refused = () => Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' });
+
+  it('bring-your-own Postgres: a refusal reported while the probe is still retrying ⇒ down at once', async () => {
+    process.env.DATABASE_URL = 'postgres://u:p@db.example.com:5432/app';
+    // The probe never settles on its own: it is inside the pool's retry loop.
+    pgQuery.mockImplementation(() => new Promise(() => {}));
+
+    jest.useFakeTimers();
+    const { checkDeepHealth } = await import('../health');
+    const { reportAcquireFailure } = await import('../db/reachability');
+    const promise = checkDeepHealth();
+    await advanceTimersByTimeAsync(10);
+    reportAcquireFailure(refused());
+    // Far inside the 8 s deep window: the verdict does not wait for it.
+    await advanceTimersByTimeAsync(10);
+    let settled = false;
+    promise.then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(true);
+    const res = await promise;
+
+    expect(res.checks.postgres).toBe('down');
+    expect(res.status).toBe('down');
+  });
+
+  it('scale-to-zero gateway: a reported refusal is a wake, so it stays waking (never short-circuits to down)', async () => {
+    process.env.DATABASE_URL =
+      'postgres://u:p@pggw.scale-zero-pg.svc.cluster.local.:55432/postgres?sslmode=disable';
+    pgQuery.mockImplementation(() => new Promise(() => {}));
+
+    jest.useFakeTimers();
+    const { checkDeepHealth } = await import('../health');
+    const { reportAcquireFailure } = await import('../db/reachability');
+    const promise = checkDeepHealth();
+    await advanceTimersByTimeAsync(10);
+    reportAcquireFailure(refused());
+    await advanceTimersByTimeAsync(10);
+    let settled = false;
+    promise.then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    // Still waiting for the wake: nothing decided yet.
+    expect(settled).toBe(false);
+    await advanceTimersByTimeAsync(9000);
+    const res = await promise;
+
+    expect(res.checks.postgres).toBe('waking');
+    expect(res.status).toBe('waking');
+  });
+
+  it('bring-your-own Postgres: a non-refusal failure reported mid-probe does not decide the verdict', async () => {
+    process.env.DATABASE_URL = 'postgres://u:p@db.example.com:5432/app';
+    pgQuery.mockImplementation(() => new Promise(() => {}));
+
+    jest.useFakeTimers();
+    const { checkDeepHealth } = await import('../health');
+    const { reportAcquireFailure } = await import('../db/reachability');
+    const promise = checkDeepHealth();
+    await advanceTimersByTimeAsync(10);
+    // A reset / timeout is not a definitive refusal: a timed-out probe stays
+    // `waking` (the documented behaviour), so it must not flip to down early.
+    reportAcquireFailure(Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }));
+    reportAcquireFailure(Object.assign(new Error('timeout'), { code: 'ETIMEDOUT' }));
+    await advanceTimersByTimeAsync(10);
+    let settled = false;
+    promise.then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    await advanceTimersByTimeAsync(9000);
+    const res = await promise;
+
+    expect(res.checks.postgres).toBe('waking');
+  });
+
+  it('the failure observer is released when the check finishes (no listener leak per scrape)', async () => {
+    process.env.DATABASE_URL = 'postgres://u:p@db.example.com:5432/app';
+    pgQuery.mockResolvedValue({ rows: [{ healthy: 1 }] });
+
+    const { checkDeepHealth } = await import('../health');
+    const { acquireFailureObserverCount } = await import('../db/reachability');
+    const before = acquireFailureObserverCount();
+    await checkDeepHealth();
+    await checkDeepHealth();
+    expect(acquireFailureObserverCount()).toBe(before);
+  });
+
   it('#338 slow-but-alive Postgres exceeding the timeout ⇒ waking (wake-in-progress, NOT down)', async () => {
     process.env.DATABASE_URL = 'postgres://u:p@h:5432/db';
     pgQuery.mockImplementation(() => new Promise(() => {}));

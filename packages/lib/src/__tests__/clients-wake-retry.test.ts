@@ -168,6 +168,49 @@ describe('@getknext/lib/clients — wake-path retry/backoff (#310)', () => {
     expect(acquireCount).toBeLessThan(20);
   });
 
+  it('reports every failed attempt to the failure observers, and still retries to success', async () => {
+    jest.useFakeTimers();
+    const mod = await import('../clients');
+    const { observeAcquireFailures } = await import('../db/reachability');
+    const seen: unknown[] = [];
+    const stop = observeAcquireFailures((err) => seen.push(err));
+    try {
+      const pool = mod.getDbPool();
+      const first = TRANSIENT();
+      const second = TRANSIENT();
+      outcomes = [{ kind: 'err', err: first }, { kind: 'err', err: second }, { kind: 'ok' }];
+
+      const acquired = pool.connect();
+      await runAllTimersAsync();
+      expect(await acquired).toBeTruthy();
+
+      // Reported as they happen (the deep check acts on these before the pool's
+      // final verdict), and reporting changed nothing about the retry itself.
+      expect(seen).toEqual([first, second]);
+      expect(acquireCount).toBe(3);
+    } finally {
+      stop();
+    }
+  });
+
+  it('a throwing failure observer never breaks the retry path (fail-open)', async () => {
+    jest.useFakeTimers();
+    const mod = await import('../clients');
+    const { observeAcquireFailures } = await import('../db/reachability');
+    const stop = observeAcquireFailures(() => {
+      throw new Error('observer bug');
+    });
+    try {
+      const pool = mod.getDbPool();
+      outcomes = [{ kind: 'err', err: TRANSIENT() }, { kind: 'ok' }];
+      const acquired = pool.connect();
+      await runAllTimersAsync();
+      expect(await acquired).toBeTruthy();
+    } finally {
+      stop();
+    }
+  });
+
   it('stamps activity even while the wake path is retrying (preserves #361/#348)', async () => {
     jest.useFakeTimers();
     const mod = await import('../clients');

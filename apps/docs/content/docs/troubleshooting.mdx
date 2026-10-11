@@ -283,7 +283,7 @@ gauge belongs to the default standalone build's metric family.
 because a scale-to-zero database shows exactly that signature while it wakes. A refused connection to any
 other host reads `down`. A connect timeout or a silently dropped connection reads `waking` on any host.
 A real wake is brief, a few seconds, and does not alert. A refused connection to a bring-your-own database
-reads `down` straight away, since nothing is waking it. A scale-to-zero database that is genuinely down
+reads `down` straight away, since nothing is waking it, with default settings: the verdict does not wait out the connection retry window. The pool keeps retrying in the background, so a database that comes back reads `up` on the next check. A scale-to-zero database that is genuinely down
 (host gone, a rotated `DATABASE_URL`) presents the *same* errors, so it sits at `waking` forever and never
 becomes `down`. The alert fires on `waking` sustained past the wake budget for this reason. It fires only
 where this metrics group is scraped, and a default install does not scrape it.

@@ -388,7 +388,10 @@ therefore **never alert** on it. This alert closes that gap by alerting on
 `waking` **sustained past the wake budget** (`for: 2m`).
 
 A refused connection to a **bring-your-own** database reads `down` straight
-away, since nothing is waking it; `KnextDeepHealthDown` (below) alerts on that.
+away, since nothing is waking it, with default settings: the verdict does not
+wait out the connect-retry budget (`DB_WAKE_RETRY_BUDGET_MS`, 8 s). The pool
+keeps retrying in the background, so a database that comes back reads `up` on
+the next check; `KnextDeepHealthDown` (below) alerts on that.
 A custom `APPDB_GATEWAY_HOST` override, or a pooler in front of the
 scale-to-zero database, does not match the gateway host, so a refused connection
 there also reads `down`, not `waking`.
