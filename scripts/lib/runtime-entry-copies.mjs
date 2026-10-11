@@ -145,8 +145,11 @@ export const DIVERGENT = {
       'ONLY the item-4 comment block.' +
       '\n\nHASH UPDATED for the deep-health bridge (APP_METRIC_FAMILIES, filterExposition, fetchAppMetrics, ' +
       'renderScrape, and the async metricsRequestListener): applied to the template and every copy from ' +
-      'the same hunks by one script. The recorded divergence is still ONLY the item-4 comment block.',
-    sha256: '4af551f706a8e7fe4cd6df942a7153079c55edbb680bf80f344320aa7c827759',
+      'the same hunks by one script. The recorded divergence is still ONLY the item-4 comment block.' +
+      '\n\nHASH UPDATED for the bridge size cap (APP_METRICS_MAX_BYTES and the bounded read in ' +
+      'fetchAppMetrics): applied to the template and every copy from the same hunks by one script. The ' +
+      'recorded divergence is still ONLY the item-4 comment block.',
+    sha256: '0a8d23ae6dab5b320f61b8a678fff1b53580077e954f92c4ed5cfce24f4eeed3',
   },
 };
 

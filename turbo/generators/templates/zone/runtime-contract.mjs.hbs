@@ -682,6 +682,12 @@ export function requestErrorResponse(err) {
 // scrape.
 export const APP_METRIC_FAMILIES = ['knext_deep_health_state'];
 export const APP_METRICS_TIMEOUT_MS = 8500;
+// The child is the app's own loopback server, but the body is still read into
+// memory on a port other namespaces can drive, so it is bounded like the rest of
+// this listener (METRICS_MAX_REQUEST_BYTES). Past the cap the app side is dropped
+// (fail-open): the deep-health series is a handful of lines, so a body this large
+// is not it.
+export const APP_METRICS_MAX_BYTES = 256 * 1024;
 const DEFAULT_APP_METRICS_PORT = 9092;
 
 /** @param {Record<string, string | undefined>} [env] */
@@ -724,7 +730,29 @@ export async function fetchAppMetrics(env = process.env, timeoutMs = APP_METRICS
       await res.body?.cancel().catch(() => {});
       return '';
     }
-    return filterExposition(await res.text(), APP_METRIC_FAMILIES);
+    // Stream with a running byte count so an oversized body is never held whole.
+    const declared = Number(res.headers.get('content-length'));
+    if (declared > APP_METRICS_MAX_BYTES) {
+      await res.body?.cancel().catch(() => {});
+      return '';
+    }
+    const reader = res.body?.getReader();
+    if (!reader) return '';
+    const decoder = new TextDecoder();
+    let text = '';
+    let total = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > APP_METRICS_MAX_BYTES) {
+        await reader.cancel().catch(() => {});
+        return '';
+      }
+      text += decoder.decode(value, { stream: true });
+    }
+    text += decoder.decode();
+    return filterExposition(text, APP_METRIC_FAMILIES);
   } catch {
     return '';
   }

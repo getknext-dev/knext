@@ -1,6 +1,7 @@
 import type { GRPC as Cerbos } from '@cerbos/grpc';
 import type * as Minio from 'minio';
 import { Pool } from 'pg';
+import { isDbActivityUntracked } from './db/activity-scope';
 import { bunSqlAvailable, createBunSqlPool } from './db/bun-sql-pool';
 import { reportAcquireFailure } from './db/reachability';
 import { loadCerbosSdk, loadMinioSdk } from './lazy-sdk-loaders.mjs';
@@ -219,6 +220,10 @@ export const DB_ACTIVITY_BUDGET_MS = ((): number => {
 
 /** Record that the writer pool was just used (called by the activity wrapper). */
 const markDbActivity = (): void => {
+  // The deep-health probe runs in an untracked scope: observing the database is
+  // not the app using it, and counting it would let the probe keep itself (and
+  // so the scale-to-zero database) alive forever.
+  if (isDbActivityUntracked()) return;
   activityGlobal[DB_ACTIVITY_KEY] = Date.now();
 };
 

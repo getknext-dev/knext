@@ -151,6 +151,28 @@ describe.each(COPIES)("runtime contract bridge: %s", (copy) => {
         expect(body).not.toContain("knext_deep_health_state");
     });
 
+    it("fails open past the size cap: an oversized child body is dropped, not buffered", async () => {
+        const c = await load(copy);
+        expect(c.APP_METRICS_MAX_BYTES).toBe(256 * 1024);
+        // Streams a body larger than the cap; the deep-health family sits at the
+        // front, so a reader that merely truncated would still forward it.
+        const big = DEEP_HEALTH + "x".repeat(c.APP_METRICS_MAX_BYTES + 1024);
+        const port = await fakeChild(() => ({ status: 200, body: big }));
+        const body: string = await c.renderScrape(c.createMetricsState(), {
+            KN_CHILD_METRICS_PORT: String(port),
+        });
+        expect(body).toContain("knext_bunexec_process_uptime_seconds");
+        expect(body).not.toContain("knext_deep_health_state");
+
+        // ...and a body at the cap is still forwarded (the bound is not a trap).
+        const ok = DEEP_HEALTH + "# pad\n".repeat(100);
+        const okPort = await fakeChild(() => ({ status: 200, body: ok }));
+        const okBody: string = await c.renderScrape(c.createMetricsState(), {
+            KN_CHILD_METRICS_PORT: String(okPort),
+        });
+        expect(okBody).toContain("knext_deep_health_state{");
+    });
+
     it("serves the base exposition when the child answers non-200 or hangs", async () => {
         const c = await load(copy);
         const bad = await fakeChild(() => ({ status: 500, body: DEEP_HEALTH }));

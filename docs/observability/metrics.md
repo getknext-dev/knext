@@ -103,6 +103,13 @@ Conditions, stated exactly:
   scale-to-zero database is never woken by the scrape; the gauge holds its last
   value.
 - **Only while a pod is up.** At zero there is no pod and no series.
+- **The probe does not keep the database awake.** The probe's own query is not counted as the
+  app using the database, so scraping an idle app never re-opens the activity gate: once the
+  app has been idle past the budget, scrapes stop probing and the database can sleep.
+- **Bounded work per request.** `:9464` is readable cross-namespace, so concurrent scrapes share
+  one probe and a result is reused for 10 seconds (below the 30 second scrape interval, so a
+  normal scrape always probes fresh). The app-side body is read with a 256 KiB cap and dropped,
+  never buffered, past it.
 
 The forward is an allowlist, not the whole registry: the rest of the app's
 registry — `knext_http_*` (which carries a `method` label), `knext_coldstart_*`,

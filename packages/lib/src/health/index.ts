@@ -1,5 +1,6 @@
 import type RedisClient from 'ioredis';
 import { getDbPool } from '../clients';
+import { runWithoutDbActivity } from '../db/activity-scope';
 import {
   isConnectionRefused,
   isScaleToZeroDatabase,
@@ -204,7 +205,12 @@ export async function checkDeepHealth(): Promise<HealthStatus> {
         });
         try {
           const pool = getDbPool();
-          const probe = Promise.resolve(pool.query('SELECT 1 as healthy'));
+          // Untracked: this probe must not count as the app using the database, or
+          // the scrape that triggers it would keep the activity gate (and a
+          // scale-to-zero database) open forever.
+          const probe = Promise.resolve(
+            runWithoutDbActivity(() => pool.query('SELECT 1 as healthy')),
+          );
           // If the refusal wins, the probe keeps running inside the pool's retry
           // loop. The race below subscribed to it, so its late rejection is handled.
           const outcome = await Promise.race([probe.then(() => 'up' as const), refusedOnByoHost]);
