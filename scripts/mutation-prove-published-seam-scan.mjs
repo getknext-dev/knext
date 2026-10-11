@@ -257,8 +257,8 @@ const MUTATIONS = [
       '`const o = { __q }; export default o` is no longer resolved through the binding (#2188)',
     subject: 'lib',
     validate: jsStillParses,
-    anchor: '      return init ? valueMembers(init, prefix, depth + 1) : false;',
-    replacement: '      return false;',
+    anchor: '      if (init) return valueMembers(init, prefix, depth + 1);',
+    replacement: '      if (init) return false;',
   },
   {
     id: 'M23',
