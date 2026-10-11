@@ -289,9 +289,9 @@ spec:
                       type: string
                       x-kubernetes-validations:
                       - message: 'publicHosts entries must be lowercase DNS hostnames
-                          (RFC 1123 labels separated by dots): no scheme, port, path,
-                          userinfo, wildcard or comma'
-                        rule: self.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$')
+                          (RFC 1123 labels of at most 63 characters, separated by
+                          dots): no scheme, port, path, userinfo, wildcard or comma'
+                        rule: self.matches('^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$')
                       - message: publicHosts must not contain the wildcard bind address
                           0.0.0.0
                         rule: '!self.matches(''^0+(\\.0+){0,3}$'')'

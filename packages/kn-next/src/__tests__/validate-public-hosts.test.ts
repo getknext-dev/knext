@@ -1,4 +1,7 @@
 import { describe, expect, it } from "bun:test";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { ConfigValidationError, validateConfig } from "../cli/validate";
 import type { KnativeNextConfig } from "../config";
 
@@ -6,7 +9,28 @@ import type { KnativeNextConfig } from "../config";
  * networking.publicHosts is validated locally with the same shape the CRD's
  * CEL rule enforces, so a typo is a fast config error rather than a
  * cluster-side admission rejection after the image is already built.
+ *
+ * The boundary table is ONE shared fixture, also read by the operator's
+ * envtest (networking_public_hosts_test.go), which runs the same rows through
+ * the CRD's CEL rules in a real apiserver. A bound that exists in only one
+ * validator therefore reds one of the two suites.
  */
+
+interface Case {
+    name: string;
+    valid: boolean;
+    hosts: string[];
+}
+
+const CASES_FILE = join(
+    dirname(fileURLToPath(import.meta.url)),
+    "fixtures",
+    "public-hosts-validation-cases.json",
+);
+// Fail closed: an unreadable or empty table must red this suite, not skip it.
+const CASES = (
+    JSON.parse(readFileSync(CASES_FILE, "utf8")) as { cases: Case[] }
+).cases;
 
 function configWith(publicHosts: unknown): KnativeNextConfig {
     return {
@@ -17,13 +41,35 @@ function configWith(publicHosts: unknown): KnativeNextConfig {
     } as unknown as KnativeNextConfig;
 }
 
-describe("validateConfig networking.publicHosts", () => {
-    it("accepts plain lowercase DNS hostnames", () => {
-        expect(() =>
-            validateConfig(configWith(["www.example.com", "localhost"])),
-        ).not.toThrow();
+describe("shared publicHosts boundary table", () => {
+    it("has rows on both sides of the bounds (the table itself is not hollow)", () => {
+        expect(CASES.filter((c) => c.valid).length).toBeGreaterThanOrEqual(8);
+        expect(CASES.filter((c) => !c.valid).length).toBeGreaterThanOrEqual(20);
+        const lens = CASES.flatMap((c) => c.hosts.map((h) => h.length));
+        expect(lens).toContain(253);
+        expect(lens).toContain(254);
+        expect(CASES.map((c) => c.hosts.length)).toEqual(
+            expect.arrayContaining([32, 33]),
+        );
     });
 
+    for (const c of CASES) {
+        it(`${c.valid ? "accepts" : "rejects"}: ${c.name}`, () => {
+            if (c.valid) {
+                expect(() => validateConfig(configWith(c.hosts))).not.toThrow();
+            } else {
+                expect(() => validateConfig(configWith(c.hosts))).toThrow(
+                    ConfigValidationError,
+                );
+                expect(() => validateConfig(configWith(c.hosts))).toThrow(
+                    /networking\.publicHosts/,
+                );
+            }
+        });
+    }
+});
+
+describe("validateConfig networking.publicHosts", () => {
     it("accepts an empty list", () => {
         expect(() => validateConfig(configWith([]))).not.toThrow();
     });
@@ -34,32 +80,9 @@ describe("validateConfig networking.publicHosts", () => {
         );
     });
 
-    it.each([
-        ["a scheme", "https://example.com"],
-        ["a path", "example.com/x"],
-        ["a port", "example.com:8080"],
-        ["userinfo", "user@example.com"],
-        ["a wildcard", "*.example.com"],
-        ["whitespace", "exa mple.com"],
-        ["an empty string", ""],
-        ["a comma", "a.example.com,b.example.com"],
-        ["uppercase", "WWW.example.com"],
-        ["a label ending in a hyphen", "example-.com"],
-        ["the wildcard bind address", "0.0.0.0"],
-        ["a non-string entry", 42],
-    ])("rejects an entry with %s", (_name, entry) => {
-        expect(() => validateConfig(configWith([entry]))).toThrow(
+    it("rejects a non-string entry", () => {
+        expect(() => validateConfig(configWith([42]))).toThrow(
             ConfigValidationError,
-        );
-        expect(() => validateConfig(configWith([entry]))).toThrow(
-            /networking\.publicHosts/,
-        );
-    });
-
-    it("rejects more than 32 entries (the CRD maxItems)", () => {
-        const hosts = Array.from({ length: 33 }, (_, i) => `h${i}.example.com`);
-        expect(() => validateConfig(configWith(hosts))).toThrow(
-            /networking\.publicHosts/,
         );
     });
 });

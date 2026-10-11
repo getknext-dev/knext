@@ -457,7 +457,7 @@ type NetworkingSpec struct {
 	// +optional
 	// +kubebuilder:validation:MaxItems=32
 	// +kubebuilder:validation:items:MaxLength=253
-	// +kubebuilder:validation:items:XValidation:rule="self.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$')",message="publicHosts entries must be lowercase DNS hostnames (RFC 1123 labels separated by dots): no scheme, port, path, userinfo, wildcard or comma"
+	// +kubebuilder:validation:items:XValidation:rule="self.matches('^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\\\\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$')",message="publicHosts entries must be lowercase DNS hostnames (RFC 1123 labels of at most 63 characters, separated by dots): no scheme, port, path, userinfo, wildcard or comma"
 	// +kubebuilder:validation:items:XValidation:rule="!self.matches('^0+(\\\\.0+){0,3}$')",message="publicHosts must not contain the wildcard bind address 0.0.0.0"
 	PublicHosts []string `json:"publicHosts,omitempty"`
 }

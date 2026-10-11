@@ -391,8 +391,9 @@ The operator turns the list into the `KNEXT_PUBLIC_ORIGINS` environment variable
 over plain HTTP. The pod logs the active list once at startup as
 `PUBLIC_ORIGINS:app.example.com,www.example.com (env)`.
 
-Each entry is a lowercase hostname with no scheme, port, path, user name or wildcard, and at most 32
-are allowed. The cluster rejects anything else when you apply the resource, and `knext deploy`
+Each entry is a lowercase hostname with no scheme, port, path, user name or wildcard, at most 253
+characters with labels of at most 63, and at most 32 are allowed. Per-pull-request preview
+deployments do not inherit the list, so a preview's redirect never points at production. The cluster rejects anything else when you apply the resource, and `knext deploy`
 checks the same rules before it builds. An empty or missing list changes nothing: the operator adds
 no variable.
 
@@ -418,7 +419,10 @@ const config: KnativeNextConfig = {
 
 or on the resource, under `spec.env`. A value you set yourself, in `env` or from a Secret through
 `secrets.envMap`, **wins** over `publicHosts`: the list is then ignored, so an app that already sets
-the variable keeps behaving exactly as it did. Do not set both unless you mean it. The variable also
+the variable keeps behaving exactly as it did. Do not set both unless you mean it. A
+`KNEXT_PUBLIC_ORIGINS` key inside a Secret you inject whole with `secrets.envFrom` is the exception:
+it is **shadowed** by `publicHosts`, because Kubernetes applies a whole-Secret injection first and
+the operator's variable on top of it. Set the variable under `env` or `secrets.envMap` instead. The variable also
 accepts a port (`localhost:3000`) and an `https://` or `http://` prefix, which `publicHosts` does not.
 
 How the origin is chosen:

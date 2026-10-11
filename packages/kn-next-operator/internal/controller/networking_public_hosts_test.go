@@ -18,7 +18,9 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -141,20 +143,27 @@ var _ = Describe("NextApp spec.networking.publicHosts", func() {
 		Expect(got[0].Value).To(BeEmpty())
 	})
 
-	DescribeTable("CEL admission",
-		func(host string, accepted bool) {
-			// Per-iteration name: the table body runs once per Entry, and the
-			// objects are created in the shared envtest apiserver.
-			name := fmt.Sprintf("public-hosts-cel-%d", GinkgoParallelProcess()*1000+CurrentSpecReport().LeafNodeLocation.LineNumber)
+	// The boundary table is ONE shared fixture, also read by the CLI's
+	// validate-public-hosts.test.ts, so the CRD's CEL rules and the CLI's local
+	// validation cannot disagree about a bound. An unreadable or hollow table
+	// fails the suite (it must never silently become an empty one).
+	for i, c := range loadPublicHostsCases() {
+		c := c
+		verb := "rejects"
+		if c.Valid {
+			verb = "accepts"
+		}
+		It(fmt.Sprintf("CEL admission %s: %s", verb, c.Name), func() {
+			name := fmt.Sprintf("public-hosts-cel-%d", i)
 			app := &appsv1alpha1.NextApp{
 				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 				Spec: appsv1alpha1.NextAppSpec{
 					Image:      validImage,
-					Networking: &appsv1alpha1.NetworkingSpec{PublicHosts: []string{host}},
+					Networking: &appsv1alpha1.NetworkingSpec{PublicHosts: c.Hosts},
 				},
 			}
 			err := k8sClient.Create(ctx, app)
-			if accepted {
+			if c.Valid {
 				Expect(err).NotTo(HaveOccurred())
 				DeferCleanup(func() {
 					deleteAndFinalize(ctx, types.NamespacedName{Name: name, Namespace: namespace})
@@ -163,18 +172,40 @@ var _ = Describe("NextApp spec.networking.publicHosts", func() {
 			}
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("publicHosts"))
-		},
-		Entry("accepts a plain DNS name", "www.example.com", true),
-		Entry("accepts a single-label name", "localhost", true),
-		Entry("rejects a scheme prefix", "https://example.com", false),
-		Entry("rejects a path", "example.com/x", false),
-		Entry("rejects a port", "example.com:8080", false),
-		Entry("rejects userinfo", "user@example.com", false),
-		Entry("rejects a wildcard", "*.example.com", false),
-		Entry("rejects whitespace", "exa mple.com", false),
-		Entry("rejects an empty entry", "", false),
-		Entry("rejects a label ending in a hyphen", "example-.com", false),
-		Entry("rejects the wildcard bind address", "0.0.0.0", false),
-		Entry("rejects a comma smuggled into one entry", "a.example.com,b.example.com", false),
-	)
+		})
+	}
 })
+
+type publicHostsCase struct {
+	Name  string   `json:"name"`
+	Valid bool     `json:"valid"`
+	Hosts []string `json:"hosts"`
+}
+
+// loadPublicHostsCases reads the table shared with the CLI test. It panics on
+// any problem so a missing or hollow table reds the suite instead of passing
+// vacuously.
+func loadPublicHostsCases() []publicHostsCase {
+	raw, err := os.ReadFile("../../../kn-next/src/__tests__/fixtures/public-hosts-validation-cases.json")
+	if err != nil {
+		panic(fmt.Sprintf("shared publicHosts table unreadable: %v", err))
+	}
+	var doc struct {
+		Cases []publicHostsCase `json:"cases"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		panic(fmt.Sprintf("shared publicHosts table invalid: %v", err))
+	}
+	valid, invalid := 0, 0
+	for _, c := range doc.Cases {
+		if c.Valid {
+			valid++
+		} else {
+			invalid++
+		}
+	}
+	if valid < 8 || invalid < 20 {
+		panic(fmt.Sprintf("shared publicHosts table is hollow: %d valid, %d invalid rows", valid, invalid))
+	}
+	return doc.Cases
+}

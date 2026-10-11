@@ -242,7 +242,7 @@ const REMOVED_CONFIG_KEYS: Record<string, string> = {
  * of at most 253 characters, not the wildcard bind address, at most 32 entries.
  */
 const PUBLIC_HOST_PATTERN =
-    /^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$/;
+    /^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$/;
 const WILDCARD_BIND_PATTERN = /^0+(\.0+){0,3}$/;
 const PUBLIC_HOSTS_MAX_ITEMS = 32;
 
