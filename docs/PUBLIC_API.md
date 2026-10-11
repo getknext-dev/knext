@@ -204,7 +204,13 @@ export default {
 ```
 
 This module is plain JavaScript (no `.d.ts`); you reference it by path rather than
-calling it directly, so no type surface is exposed.
+calling it directly, so no type surface is exposed. It exports the handler class
+as the default export, plus the `CacheHandler`, `ioredisClient` and
+`nativeRedisClient` named exports the per-runtime entries build on, and nothing
+else: no `@getknext/*` package exports a `__`-prefixed name from a published
+subpath. The test-only helpers earlier releases exposed here
+(`__resetEnvForTests`, `__setRedisClientForTests`) are not part of the published
+package.
 
 ### `@getknext/core/validate`
 
