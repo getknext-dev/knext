@@ -239,7 +239,7 @@ spec:
               value: "9092"
             # A REAL Postgres in the same namespace, so the check reads `up`.
             - name: DATABASE_URL
-              value: postgres://app@e2e-postgres.deep-health-e2e.svc.:5432/app
+              value: postgres://app@e2e-postgres.deep-health-e2e.svc.cluster.local.:5432/app
           ports:
             - containerPort: 3000
             - containerPort: 9464

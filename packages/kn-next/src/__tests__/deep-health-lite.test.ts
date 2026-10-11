@@ -18,6 +18,8 @@
 
 import { afterEach, describe, expect, it, mock } from "bun:test";
 import type { AddressInfo } from "node:net";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { Registry } from "prom-client";
 
 import {
@@ -443,5 +445,68 @@ describe("the loopback server", () => {
         for (const bad of [undefined, "", "abc", "0", "-1", "65536"]) {
             expect(resolveLitePort({ KN_CHILD_METRICS_PORT: bad })).toBe(9092);
         }
+    });
+});
+
+describe("the runtime contract's bridge carries the lite exposition whole", () => {
+    // The reachability scan proves the contract forwards the family and that both
+    // listeners go through the bridge. This is the other half: what lite serves is
+    // exactly the allowlisted family, so the bridge drops nothing of it and lets
+    // nothing else through.
+    const CONTRACT = join(
+        dirname(fileURLToPath(import.meta.url)),
+        "../../../../apps/file-manager/runtime-contract.mjs",
+    );
+    // biome-ignore lint/suspicious/noExplicitAny: dynamic ESM import of an untyped .mjs
+    const load = async (): Promise<Record<string, any>> => import(CONTRACT);
+    const servers: Array<ReturnType<typeof startDeepHealthLite>> = [];
+    afterEach(async () => {
+        for (const sv of servers.splice(0)) {
+            await new Promise<void>((r) => sv.close(() => r()));
+        }
+    });
+
+    const serve = async (activity: () => number | undefined) => {
+        const server = startDeepHealthLite({
+            port: 0,
+            app: "test-app",
+            readActivityAt: activity,
+            loadHealth: async () => ({ checkDeepHealth: async () => DOWN }),
+            env: {},
+        });
+        servers.push(server);
+        await new Promise<void>((r) => server.once("listening", () => r()));
+        return (server.address() as AddressInfo).port;
+    };
+
+    it("filterExposition(lite body) is the lite body: every line survives the allowlist", async () => {
+        const c = await load();
+        const lite = createDeepHealthLite({
+            app: "test-app",
+            now: () => NOW,
+            readActivityAt: () => NOW,
+            loadHealth: async () => ({ checkDeepHealth: async () => DOWN }),
+            env: {},
+        });
+        const body = await lite.scrape();
+        expect(c.filterExposition(body, c.APP_METRIC_FAMILIES)).toBe(body);
+    });
+
+    it("fetchAppMetrics reads 12 series from a live lite server on the port the env names", async () => {
+        const c = await load();
+        const port = await serve(() => Date.now());
+        const out: string = await c.fetchAppMetrics({
+            KN_CHILD_METRICS_PORT: String(port),
+        });
+        expect(sampleLines(out)).toHaveLength(12);
+    });
+
+    it("and nothing while idle: the scraped port carries no deep-health series", async () => {
+        const c = await load();
+        const port = await serve(() => undefined);
+        const out: string = await c.fetchAppMetrics({
+            KN_CHILD_METRICS_PORT: String(port),
+        });
+        expect(out).toBe("");
     });
 });

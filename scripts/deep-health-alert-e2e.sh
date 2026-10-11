@@ -52,7 +52,10 @@ if [ ! -d "${ROOT}/packages/kn-next/dist" ] || [ ! -d "${ROOT}/packages/lib/dist
   exit 2
 fi
 
-if kind get clusters | grep -qx "${CLUSTER}"; then
+# Captured first: `grep -q` exits at the first match, and under `pipefail` the
+# upstream `kind` then dies of SIGPIPE and fails the whole condition at random.
+EXISTING_CLUSTERS="$(kind get clusters 2>/dev/null || true)"
+if grep -qx "${CLUSTER}" <<<"${EXISTING_CLUSTERS}"; then
   echo "reusing kind cluster ${CLUSTER}"
 else
   # The repo checkout is mounted into the node so the fixture pod runs the

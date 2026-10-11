@@ -138,6 +138,11 @@ function loopbackBody(arm) {
 }
 
 async function runArm(arm) {
+  // A previous run on a kept cluster may have left this fixture idle (the stop file
+  // is how an arm is idled). Start every arm ACTIVE, or the first wait below would
+  // time out on an app that is correctly serving no series.
+  kubectl(['exec', `deploy/${arm.app}`, '--', 'rm', '-f', '/tmp/stop-traffic']);
+
   // 1. The SHIPPED PodMonitor found the pod and scraped :9464. `job` and `app` are
   //    set by that manifest's relabelings, so seeing them proves the manifest, not
   //    just a scrape.
@@ -238,9 +243,6 @@ async function runArm(arm) {
       if (r.status !== 0) throw new Error(`kubectl logs: ${r.stderr.trim()}`);
       return r.stdout.split('\n').filter((l) => l.includes('[Health Check] Postgres')).length;
     };
-
-    // A previous run on a kept cluster may have left the fixture idle.
-    kubectl(['exec', `deploy/${arm.app}`, '--', 'rm', '-f', '/tmp/stop-traffic']);
 
     // Positive control: while the app is active the probe DOES run, so the log line
     // is a live signal and "no new lines" below means something.
