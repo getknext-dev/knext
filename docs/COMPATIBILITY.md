@@ -24,7 +24,7 @@ knext ships three things that version on **separate** lines. Nothing forces them
 | Thing | Ships as | Version line |
 | --- | --- | --- |
 | `@getknext/core`, `@getknext/lib`, `@getknext/db` | npm packages | semver, **one shared number** across the three |
-| the operator | a container image + digest-pinned `install-vX.Y.Z.yaml` / `install.yaml` bundles | semver `operator-vX.Y.Z` tags — **MAJOR.MINOR tracks the package set, patch is independent**; see "Operator versions" below |
+| the operator | a container image + digest-pinned `install-vX.Y.Z.yaml` / `install.yaml` bundles | semver `operator-vX.Y.Z` tags — **on 1.x the minor tracks the package set, patch is independent; the operator gets no new major from a package major**; see "Operator versions" below |
 | the `NextApp` CRD | inside the operator bundle | the Kubernetes ladder: `v1alpha1` → `v1beta1` → `v1` |
 | the `KnextPlatform` CRD (`platform.kn-next.dev`) | inside the operator bundle | the same ladder, `v1alpha1`, additive-only. **Not a column of the matrix:** the CLI neither reads nor writes it, so no package set depends on a particular version of it. The bundle ships the definition and no object (an absent or empty `KnextPlatform` changes nothing) |
 
@@ -93,11 +93,13 @@ The operator's `operator-vX.Y.Z` is stamped on the manager Deployment as the
 (`src/cli/doctor/operator-version.ts`, a WARN row — never a failure; the deploy-time schema
 preflight stays the authoritative gate):
 
-- operator MAJOR must equal the CLI's;
-- operator MINOR must be **>=** the CLI's (an older CLI against a newer operator is always valid);
+- the operator must serve the CRD API version the CLI emits (`apps.kn-next.dev/v1alpha1`) — the
+  pairing is by CRD version, not by package major;
+- on the 1.x line the operator MINOR must be **>=** the CLI's (an older CLI against a newer
+  operator is always valid);
 - patch is independent; `-rc.N` suffixes are ignored on both sides.
 
-Why MAJOR.MINOR tracks the package set rather than the operator versioning on its own: the CRD is
+Why the minor tracks the package set on 1.x rather than the operator versioning on its own: the CRD is
 additive within `v1alpha1`, so "does this operator know the field my CLI emits" is exactly "is the
 operator at least as new as the CLI's minor". A fully independent number would force every user to
 keep a lookup table; lockstep on every npm release would cut an operator for each of the many rc

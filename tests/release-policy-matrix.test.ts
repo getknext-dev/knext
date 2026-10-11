@@ -486,6 +486,7 @@ describe('support window and runtime floors agree across the docs and the manife
     ['versioning page', page],
     ['COMPATIBILITY.md', matrix],
     ['RELEASE_POLICY.md', policy],
+    ['SECURITY.md', readFileSync(resolve(REPO_ROOT, 'SECURITY.md'), 'utf8')],
   ] as const) {
     it(`${label} states the 1.x maintenance window: security only, six months, latest-1`, () => {
       const f = flat(text);
@@ -529,9 +530,52 @@ describe('support window and runtime floors agree across the docs and the manife
     expect(section).toMatch(/operator/i);
   });
 
-  it('all three anchor the window at 2.0 general availability', () => {
-    for (const text of [page, matrix, policy]) {
+  it('all four anchor the window at 2.0 general availability', () => {
+    for (const text of [
+      page,
+      matrix,
+      policy,
+      readFileSync(resolve(REPO_ROOT, 'SECURITY.md'), 'utf8'),
+    ]) {
       expect(flat(text)).toMatch(/2\.0[^.]*generally available|2\.0 GA/);
     }
+  });
+
+  it('the operator pairing rule is by CRD API version, in both docs, and no longer by package major', () => {
+    const crd = declaredCrdApiVersion();
+    // The declared version must be what the operator's Go types register (not re-typed here).
+    expect(goGroupVersions()).toContain(crd);
+    const pageRule = flat(section(page, '### Operator versions'));
+    const matrixRule = flat(section(matrix, '### Operator versions'));
+    for (const [label, rule] of [
+      ['versioning page', pageRule],
+      ['COMPATIBILITY.md', matrixRule],
+    ] as const) {
+      expect(rule, `${label}: pairing rule names the CRD apiVersion`).toContain(crd);
+      // Every apiVersion the rule names must be the declared one, so a single stale row cannot hide.
+      const named = [...rule.matchAll(/apps\.kn-next\.dev\/v\w+/g)].map((m) => m[0]);
+      expect(named.length, `${label}: pairing rule names the apiVersion`).toBeGreaterThan(0);
+      for (const n of named) expect(n, `${label}`).toBe(crd);
+      expect(rule, `${label}: still the "major must match" rule`).not.toMatch(
+        /Different major|operator MAJOR must equal|Same major/i,
+      );
+    }
+  });
+
+  it('nothing says the operator major or MAJOR.MINOR tracks the package set (2.0 leaves the operator on its line)', () => {
+    for (const [label, text] of [
+      ['versioning page', page],
+      ['COMPATIBILITY.md', matrix],
+    ] as const) {
+      expect(flat(text), label).not.toMatch(/MAJOR\.MINOR tracks|major and minor track/i);
+    }
+    expect(flat(page)).toMatch(/does not get a new major/);
+  });
+
+  it('the 2.0 section promises no announcement or prior deprecation that has not shipped', () => {
+    const f = flat(page);
+    const sec = f.slice(f.indexOf('## What 2.0 changes'), f.indexOf('## The cluster side'));
+    expect(sec.length).toBeGreaterThan(200);
+    expect(sec).not.toMatch(/announced in the changelog|deprecated in a 1\.x minor first/i);
   });
 });
