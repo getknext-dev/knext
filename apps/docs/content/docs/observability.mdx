@@ -74,6 +74,29 @@ time, so every start reads it — `knext_bunexec_startup_duration_seconds` measu
 directly.
 </Callout>
 
+### Existing apps: start the deep-health gauge [#deep-health-existing-apps]
+
+A new app starts the deep-health gauge with tracing off by itself. An app you created earlier gets it
+only after both of these: update `@getknext/core` to the release that ships it, and add the lines below
+to its own `src/instrumentation.ts` (or regenerate that file from the scaffold). Until then, with
+tracing off, the app serves no deep-health series and the two deep-health alerts stay silent.
+
+In `register()`, change the tracing-off branch (the one that returns before importing
+`./instrumentation-node`) to start the gauge before it returns:
+
+```ts
+  if (!resolveOtelOptions(process.env)) {
+    void import('@getknext/core/internal/deep-health-lite')
+      .then(({ startDeepHealthLite }) => startDeepHealthLite())
+      .catch(() => {});
+    return;
+  }
+```
+
+Keep it after the `NEXT_RUNTIME !== 'nodejs'` check, and do not `await` it, so it adds nothing to the
+start-up path. An app with tracing on needs no change. The shipped scrape forwards the series from your
+app's `runtime-contract.mjs`; if that file predates the deep-health forward, regenerate it as well.
+
 ## Dashboards
 
 knext ships three ready-made Grafana dashboards. You do **not** import them by hand — they are

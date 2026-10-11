@@ -176,9 +176,21 @@ async function runRegister(
         };
         await mod.register();
         // The lite gauge is started WITHOUT being awaited (it must add nothing to
-        // the boot path), so give a pending dynamic import time to land before
-        // reading the probe. A path that never loads it is unaffected.
-        await new Promise((r) => setTimeout(r, 100));
+        // the boot path), so on a path that should start it, poll (bounded) for the
+        // pending dynamic import to land. A path that must NOT start it cannot be
+        // polled for a non-event, so every path then gets one short settle.
+        const expectStart =
+            env.NEXT_RUNTIME === "nodejs" &&
+            env.OTEL_TRACING_ENABLED !== "true";
+        const deadline = Date.now() + 5_000;
+        while (
+            expectStart &&
+            (g[PROBE] as Probe).liteStarted === 0 &&
+            Date.now() < deadline
+        ) {
+            await new Promise((r) => setTimeout(r, 5));
+        }
+        await new Promise((r) => setTimeout(r, 50));
     } finally {
         for (const [k, v] of Object.entries(saved)) {
             if (v === undefined) delete process.env[k];
