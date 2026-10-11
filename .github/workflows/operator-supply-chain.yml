@@ -593,6 +593,25 @@ jobs:
             echo "::error::dist/install-v${VERSION}.yaml does not carry the version label ${VERSION}"; exit 1; }
           echo "path=packages/kn-next-operator/dist/install-v${VERSION}.yaml" >> "$GITHUB_OUTPUT"
 
+      # RELEASE-INTEGRITY GUARD (S3-O2): an `operator-vX.Y.Z` release must ship a
+      # bundle whose image tag is `vX.Y.Z` AND whose digest is the one THIS run
+      # pushed. operator-v1.0.0 shipped `:v0.1.0@…` under a 1.0.0 tag. Runs before
+      # the release body and the publish step, on both attached assets, and fails
+      # closed (unreadable file, no image line, missing digest). Plain `node`.
+      - name: Verify the bundle pins this release's image (version tags only, S3-O2)
+        if: steps.channel.outputs.is_version_tag == 'true' && steps.trivy.outcome == 'success'
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+          RELEASE_TAG: ${{ steps.channel.outputs.release_tag }}
+          VERSIONED_ASSET: ${{ steps.versioned_asset.outputs.path }}
+        run: |
+          set -euo pipefail
+          node scripts/verify-operator-bundle-image.mjs \
+            --tag "${RELEASE_TAG}" \
+            --digest "${DIGEST}" \
+            --install packages/kn-next-operator/dist/install.yaml \
+            --install "${VERSIONED_ASSET}"
+
       # Release body for version tags (#2153): generated FROM the attached
       # install.yaml, so the image digest, CRD API version and cert-manager
       # requirement it states are read from the asset beside it, never typed.
