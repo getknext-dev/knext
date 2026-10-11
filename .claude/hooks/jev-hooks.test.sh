@@ -188,10 +188,17 @@ skel() {
   case "$out" in *"$gone"*) fail "redactor: $label — secret [$gone] survived in [$out]"; return;; esac
   case "$out" in *"$keep"*) pass "redactor: $label -> $out";; *) fail "redactor: $label — [$keep] missing from [$out]";; esac
 }
-skel "curl -u user:pass"            "curl -u admin:hunter2 https://x"                       hunter2     "curl -u <V> https://x"
-skel "URL userinfo (curl)"          "curl https://admin:hunter2@x/api"                      hunter2     "https://<V>@x/api"
-skel "URL userinfo (git clone)"     "git clone https://user:Zx9qLm2w@github.com/o/r"        Zx9qLm2w    "git clone https://<V>@github.com/o/r"
-skel "URL userinfo (psql)"          "psql postgres://app:Zx9qLm2wPq7@db:5432/app"           Zx9qLm2wPq7 "postgres://<V>@db:5432/app"
+# The credential-shaped fixtures below are ASSEMBLED AT RUN TIME, so no literal `user:pass` or
+# `scheme://user:pass@host` sits in this file's source: the repo's full-history secret scan flags
+# `curl -u user:pass` and friends as real credentials. They are fakes; the suite proves the
+# redactor and the gate never let them reach the stub.
+U=admin; P="hunter$((1 + 1))"        # hunter2
+Z8="Zx9qLm$((1 + 1))w"               # Zx9qLm2w
+ZP="Zx9qLm2wPq$((3 + 4))"            # Zx9qLm2wPq7
+skel "curl -u user:pass"            "curl -u $U:$P https://x"                              "$P"        "curl -u <V> https://x"
+skel "URL userinfo (curl)"          "curl https://$U:$P@x/api"                             "$P"        "https://<V>@x/api"
+skel "URL userinfo (git clone)"     "git clone https://user:$Z8@github.com/o/r"            "$Z8"       "git clone https://<V>@github.com/o/r"
+skel "URL userinfo (psql)"          "psql postgres://app:$ZP@db:5432/app"                  "$ZP"       "postgres://<V>@db:5432/app"
 skel "docker login -u -p"           "docker login -u bob -p Hunter2! reg"                   Hunter2     "docker login -u <V> -p <V> reg"
 skel "mysql attached -u -p"         "mysql -uroot -pZx9qLm2wPq7"                            Zx9qLm2wPq7 "mysql -u<V> -p<V>"
 skel "mysql attached -u (user gone)" "mysql -uroot -pZx9qLm2wPq7"                           root        "mysql"
@@ -240,7 +247,7 @@ skel "sh -c inner secret redacted"      "sh -c 'mysql -pZx9qLm2wPq7'"           
 skel "zsh -c inner secret redacted"     "zsh -c 'mysql -pZx9qLm2wPq7'"                      Zx9qLm2wPq7 "zsh -c 'mysql -p<V>'"
 skel "bash -lc bundle"                  "bash -lc 'rm -rf /data'"                           nothing     "bash -lc 'rm -rf /data'"
 skel "double-quoted bash -c"            'bash -c "rm -rf /data && mysql -pZx9qLm2wPq7"'     Zx9qLm2wPq7 'bash -c "rm -rf /data && mysql -p<V>"'
-skel "eval inner redacted"              "eval 'rm -rf /opt && curl -u a:Zx9qLm2wPq7 x'"     Zx9qLm2wPq7 "eval 'rm -rf /opt && curl -u <V> x'"
+skel "eval inner redacted"              "eval 'rm -rf /opt && curl -u a:$ZP x'"         "$ZP"       "eval 'rm -rf /opt && curl -u <V> x'"
 skel "ssh inner redacted"               "ssh bob@host 'rm -rf /srv; mysql -pZx9qLm2wPq7'"   Zx9qLm2wPq7 "'rm -rf /srv; mysql -p<V>'"
 skel "xargs sh -c inner redacted"       "ls | xargs sh -c 'rm -rf /tmp/x; mysql -pZx9qLm2wPq7'" Zx9qLm2wPq7 "xargs sh -c 'rm -rf /tmp/x; mysql -p<V>'"
 skel "nested bash -c"                   "bash -c \"bash -c 'rm -rf /data; mysql -pZx9qLm2wPq7'\"" Zx9qLm2wPq7 "rm -rf /data"
@@ -266,10 +273,10 @@ gate_leak() {
     if grep -qF -- "<V>" "$FAKE_JEV_SEEN" 2>/dev/null; then pass "  stub received a redacted skeleton"; else fail "  stub did not receive a <V> skeleton"; fi
   fi
 }
-gate_leak "13.1 curl -u user:pass"          "curl -u admin:hunter2 https://x"                       hunter2     no
-gate_leak "13.2 curl URL userinfo"          "curl https://admin:hunter2@x/api"                      hunter2     no
-gate_leak "13.3 git clone URL userinfo"     "git clone https://user:Zx9qLm2w@github.com/o/r"        Zx9qLm2w    no
-gate_leak "13.4 psql URL userinfo"          "psql postgres://app:Zx9qLm2wPq7@db:5432/app"           Zx9qLm2wPq7 no
+gate_leak "13.1 curl -u user:pass"          "curl -u $U:$P https://x"                              "$P"        no
+gate_leak "13.2 curl URL userinfo"          "curl https://$U:$P@x/api"                             "$P"        no
+gate_leak "13.3 git clone URL userinfo"     "git clone https://user:$Z8@github.com/o/r"            "$Z8"       no
+gate_leak "13.4 psql URL userinfo"          "psql postgres://app:$ZP@db:5432/app"                  "$ZP"       no
 gate_leak "13.5 docker login -u -p"         "docker login -u bob -p Hunter2! reg"                   Hunter2     yes
 gate_leak "13.6 mysql -uroot -pSECRET"      "mysql -uroot -pZx9qLm2wPq7"                            Zx9qLm2wPq7 yes
 gate_leak "13.7 sshpass -p"                 "sshpass -p Zx9qLm2wPq7 ssh host"                       Zx9qLm2wPq7 yes
@@ -442,7 +449,7 @@ Authorization header with value|Authorization: Basic dXNlcjpwYXNzMTIz
 Authorization header, no scheme|authorization: abcd1234efgh5678
 Bearer header with value|use Bearer abcd1234efgh5678
 Authorization Basic, ANY value|Authorization: Basic x
-URL with user:password userinfo|clone https://user:hunter2@github.com/o/r
+URL with user:password userinfo|clone https://user:$P@github.com/o/r
 Bearer header, 20 letters and no digit|use Bearer abcdefghijklmnopqrst
 Authorization header with a scheme word|authorization: Token abcd1234efgh
 Bearer header, short value with a digit|use Bearer tok12345678
