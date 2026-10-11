@@ -33,7 +33,12 @@ const REPO_ROOT = join(
 const PKG = join(REPO_ROOT, "packages", "kn-next");
 
 /** A `kn-next` that is not part of a longer identifier, path or file name. */
-const BARE = String.raw`(?<![\w/@.\-])kn-next(?![\w.\-/@])`;
+/**
+ * `npm view kn-next ...` and friends name the npm PACKAGE (the forwarding alias),
+ * which is still called kn-next -- that is correct, not command guidance.
+ */
+const NPM_PACKAGE_ARG = String.raw`(?<!\bnpm\s+(?:view|info|install|i|add|publish|deprecate|dist-tag\s+add)\s+)`;
+const BARE = String.raw`${NPM_PACKAGE_ARG}(?<![\w/@.\-])kn-next(?![\w.\-/@])`;
 /** npx/bunx options: `--package <pkg>`, `--package=<pkg>`, `-p <pkg>`, then plain flags. */
 const RUNNER_OPTS = String.raw`(?:\s+(?:--package[= ]\S+|-p\s+\S+|-{1,2}[\w-]+))*`;
 export const COMMAND_FORM = new RegExp(
