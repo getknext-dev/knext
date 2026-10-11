@@ -134,8 +134,9 @@ lane-name ruleset.
 2. Move its entry from `PREPARED_LANES` to `PUBLISH_LANES` in `scripts/publish-lane-guard.mjs`,
    and update the pins in `tests/publish-lane-guard.test.ts` and the prepared-lane test.
 3. Route `--tag latest-1` for a stable publish from the lane in `release.yml` (see the
-   `TODO(#2035)` on the `latest`/`latest-1` publish step) and add `latest-1` to
-   `scripts/npm-dist-tag-rollback.mjs`.
+   `TODO(#2035)` on the `latest`/`latest-1` publish step). Rolling a bad 1.x patch back needs no
+   script change: `node scripts/npm-dist-tag-rollback.mjs --dist-tag latest-1 …` moves `latest-1`
+   and never `latest` (covered by `tests/npm-dist-tag-rollback.test.ts`).
 4. Founder: add the branch name to the `npm-publish` policy and to the lane-name ruleset.
 
 **Opening a Version PR does not wait for anything.** It used to: `version-pr` and `release` were one
