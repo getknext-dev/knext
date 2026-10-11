@@ -112,6 +112,25 @@ internally consistent — `@getknext/core@0.3.0` depends on `@getknext/lib@^0.2.
 `@getknext/db@^0.2.1`, both of which exist — so nothing is broken for a consumer; from the next
 release on, one number covers all three.
 
+## Support window and runtime floors
+
+<!-- runtime-floors:start -->
+- Node.js `>=22.18`
+- Next.js `>=16.0.0`
+<!-- runtime-floors:end -->
+
+These are the 1.x floors `@getknext/core` declares (`engines.node` and the `next` peer range); the
+test asserts they match the manifest and the user-facing page. They are expected to rise at 2.0.
+
+- **Which lines get fixes:** the latest line. From the day `@getknext/core` 2.0 is generally
+  available, the final 1.x minor gets **security fixes only for six months**, published under the
+  `latest-1` dist-tag; after that nothing. Before 2.0 there is no backport lane.
+- **The vinext / Bun single-executable build target is Beta** on every 1.x release; it never gates
+  a release.
+- **2.0 is not yet released.** Planned: the Node and Next floors rise, deprecated seams and the
+  `kn-next` alias are removed, the operator stays on its own line. The `NextApp` CRD version is
+  unchanged by a package major.
+
 ## Upgrade order
 
 **Upgrade the operator (and therefore the CRD) BEFORE the CLI: operator/CRD first, then CLI.**
