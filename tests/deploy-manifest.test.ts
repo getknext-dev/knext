@@ -826,48 +826,56 @@ const VERCEL_COUPLED_FILE_QUARANTINES: Record<
     upstreamRef: 'vercel/next.js#94905',
     upstreamIssue: 'vercel/next.js#99435',
   },
-  // #2128 / #2129 — Next 16.4.0 smoke dispatch (ONE cell, node x turbopack).
+  // #2128 / #2129 — Next 16.4.0 smoke dispatch (node x turbopack + node x webpack).
   // Observed at v16.4.0, not the v16.3.5 cohort; the ref-stamp gate below still
   // requires the default ref to reach v16.4.0 before these entries are admissible.
   'test/e2e/app-dir/empty-generate-static-params/empty-generate-static-params.test.ts': {
     childIssue: 2128,
-    observedRuns: ['38040527044'],
+    observedRuns: ['38040527044', '38161219571', '38174324666'],
     observedRef: 'v16.4.0',
   },
   'test/e2e/app-dir/use-cache-segment-configs/use-cache-segment-configs.test.ts': {
     childIssue: 2128,
-    observedRuns: ['38040527044'],
+    observedRuns: ['38040527044', '38161219571', '38174324666'],
     observedRef: 'v16.4.0',
   },
   'test/e2e/app-dir/cache-components-allow-otel-spans/cache-components-allow-otel-spans.test.ts': {
     childIssue: 2129,
-    observedRuns: ['38040527044'],
+    observedRuns: ['38040527044', '38161219571', '38174324666'],
     observedRef: 'v16.4.0',
   },
   'test/e2e/app-dir/segment-cache/cached-navigations/cached-navigations.test.ts': {
     childIssue: 2129,
-    observedRuns: ['38040527044'],
+    observedRuns: ['38040527044', '38161219571', '38174324666'],
     observedRef: 'v16.4.0',
   },
   'test/e2e/app-dir/partial-fallback-shell-upgrade/partial-fallback-shell-upgrade.test.ts': {
     childIssue: 2128,
-    observedRuns: ['38040527044'],
+    observedRuns: ['38040527044', '38161219571', '38174324666'],
     observedRef: 'v16.4.0',
   },
   'test/e2e/app-dir/metadata-streaming-parallel-routes/metadata-streaming-parallel-routes.test.ts':
     {
       childIssue: 2127,
-      observedRuns: ['38040527044'],
+      observedRuns: ['38040527044', '38161219571', '38174324666'],
       observedRef: 'v16.4.0',
     },
   'test/e2e/app-dir/segment-cache/metadata/segment-cache-metadata.test.ts': {
     childIssue: 2127,
-    observedRuns: ['38040527044'],
+    observedRuns: ['38040527044', '38161219571', '38174324666'],
+    observedRef: 'v16.4.0',
+  },
+  // #2162 (C2) — residual of the #2123 harness fix: the file now reaches its assertions and
+  // asserts Vercel's checkout path (`sourceFileUrl`, upstream test lines 43-55). Node x turbopack
+  // and node x webpack only; the bun cells are blocked by #2213.
+  'test/e2e/app-dir/non-root-project-monorepo/non-root-project-monorepo.test.ts': {
+    childIssue: 2128,
+    observedRuns: ['38161219571', '38174324666'],
     observedRef: 'v16.4.0',
   },
   'test/e2e/app-dir/prerender-encoding/prerender-encoding.test.ts': {
     childIssue: 2127,
-    observedRuns: ['38040527044'],
+    observedRuns: ['38040527044', '38161219571', '38174324666'],
     observedRef: 'v16.4.0',
   },
 };
