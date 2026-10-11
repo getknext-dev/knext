@@ -76,7 +76,7 @@ map; `release.yml` carries no lane literal of its own (a test asserts that).
 | ref | expected major |
 | --- | --- |
 | `main` | 1 (flipped to 2 at 2.0 GA, before the first 2.x publish) |
-| `integration/v1.3`, `integration/v1.4`, `release/1.x` | 1 |
+| `integration/v1.3`, `integration/v1.4` | 1 |
 | `integration/v2` | 2 |
 | `release/vX.Y.Z` or `release/vX.Y.Z-rc.N` (a release cut) | X, and the computed version must equal `X.Y.Z[-rc.N]` exactly. Cuts are open for major 1 only. |
 
@@ -104,6 +104,39 @@ map; `release.yml` carries no lane literal of its own (a test asserts that).
   covered by that ruleset. `npm-publish-latest` gets the same per-cut add and remove steps.
 - Adding a lane, or opening release cuts for a new major, is a reviewed edit to the map in
   `scripts/publish-lane-guard.mjs` and to its pin in `tests/publish-lane-guard.test.ts`.
+
+#### The `release/1.x` maintenance lane: prepared, not yet publishable (#2040)
+
+`release/1.x` is the 1.x maintenance line (ADR-0063 Amendment): cut from the 1.x tip at 2.0 GA,
+security fixes only for the six-month window, no pre-release tag, stable dist-tag **`latest-1`**.
+The branch does not exist yet. The guards already **recognise** it, so the day it is cut the major
+and dist-tag rules apply to it, but it is **not yet publishable** and must stay that way until R4:
+
+| | |
+| --- | --- |
+| Where it lives | `PREPARED_LANES` in `scripts/publish-lane-guard.mjs` — **not** `PUBLISH_LANES` |
+| Expected major | 1 (`checkLaneMajor` reds a computed 2.0.0 on it; the PR-time `no-major-changeset-on-1x` test covers the same tree) |
+| Stable dist-tag | `latest-1` (`preparedDistTag()`); never `latest` |
+| `release.yml` | refuses it: `publish-lane-guard.mjs ref` and `major` both exit 1 with "not yet publishable" |
+| `npm-publish` environment policy | the drift check reds a policy that already names `release/1.x` |
+| Marker-branch lister | counts it as a live lane — it is never a deletion candidate |
+
+Why it is held back: `npm-publish` still has **no deployment-branch policy** (founder-gated), and
+a policy matches by branch **name** only, so a name admitted before the branch exists lets anyone
+with push create it at a stale marker SHA and dispatch. The branch name goes into the environment
+policy only **after** the branch exists, was cut from guarded `main`, and is covered by the
+lane-name ruleset.
+
+**What R4 does to open it** (one reviewed PR, deliberately failing
+`tests/publish-lane-guard-prepared.test.ts` until the test is edited alongside):
+
+1. Cut `release/1.x` from the 1.x tip at 2.0 GA.
+2. Move its entry from `PREPARED_LANES` to `PUBLISH_LANES` in `scripts/publish-lane-guard.mjs`,
+   and update the pins in `tests/publish-lane-guard.test.ts` and the prepared-lane test.
+3. Route `--tag latest-1` for a stable publish from the lane in `release.yml` (see the
+   `TODO(#2035)` on the `latest`/`latest-1` publish step) and add `latest-1` to
+   `scripts/npm-dist-tag-rollback.mjs`.
+4. Founder: add the branch name to the `npm-publish` policy and to the lane-name ruleset.
 
 **Opening a Version PR does not wait for anything.** It used to: `version-pr` and `release` were one
 job that declared the environment, so every push to `main` asked for an approval — including pushes
