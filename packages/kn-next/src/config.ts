@@ -293,7 +293,9 @@ export interface NetworkingConfig {
      * The operator renders them as the `KNEXT_PUBLIC_ORIGINS` allowlist
      * (`https://<host>`), so a redirect built from `request.url`
      * (`NextResponse.redirect(new URL("/x", request.url))`) answers your public
-     * origin instead of the pod's bind address (`http://0.0.0.0:3000/x`).
+     * origin instead of the pod's bind address (`http://0.0.0.0:3000/x`). The
+     * scheme is always `https`, taken from the allowlist entry; no request
+     * header changes it.
      *
      * Bare lowercase hostnames only: no scheme, port, path, userinfo or
      * wildcard. The FIRST entry is the fallback origin; a request whose `Host`

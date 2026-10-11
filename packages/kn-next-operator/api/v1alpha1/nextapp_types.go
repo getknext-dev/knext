@@ -439,8 +439,9 @@ type NetworkingSpec struct {
 	// whose Host / X-Forwarded-Host equals another entry gets that entry. No
 	// header value outside this list can ever reach a Location.
 	//
-	// Bare hostnames only: no scheme, port, path, userinfo or wildcard (the
-	// scheme comes from the request's X-Forwarded-Proto, defaulting to https).
+	// Bare hostnames only: no scheme, port, path, userinfo or wildcard. The
+	// scheme is https: it comes from the `https://<host>` entry the operator
+	// renders, and no request header (X-Forwarded-Proto included) changes it.
 	// Unset or empty renders no variable at all, byte-identical to every
 	// NextApp CR written before this field existed.
 	//

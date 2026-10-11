@@ -88,42 +88,44 @@ pod_val="$(printf '%s' "$pod_env" | jq -r '.[] | select(.name=="KNEXT_PUBLIC_ORI
 [ "$pod_val" = "$want_env" ] || fail "pod $pod KNEXT_PUBLIC_ORIGINS is '$pod_val', want '$want_env'"
 echo "ok: pod $pod KNEXT_PUBLIC_ORIGINS = $pod_val"
 
-# 5. The redirect answers the public host, never the bind address. The scheme
-#    follows the ingress's X-Forwarded-Proto (Envoy sets `http` on a plain-HTTP
-#    listener), so only the host and path are fixed here; the scheme must be
-#    http or https.
+# 5. The redirect answers the public host over https, never the bind address.
+#    The scheme comes from the `https://<host>` entry the operator renders; no
+#    request header changes it. Kourier's plain-HTTP listener sets
+#    `X-Forwarded-Proto: http`, so these checks also prove the header is ignored.
 echo "GET /go (no forwarding headers) -> Location: $loc"
 case "$loc" in *0.0.0.0*) fail "Location still carries the bind address: $loc" ;; esac
-case "$loc" in
-  "http://${FIRST}/article/one?from=go" | "https://${FIRST}/article/one?from=go") ;;
-  *) fail "Location is '$loc', want <http|https>://${FIRST}/article/one?from=go (the first publicHosts entry)" ;;
-esac
+[ "$loc" = "https://${FIRST}/article/one?from=go" ] \
+  || fail "Location is '$loc', want https://${FIRST}/article/one?from=go (the first publicHosts entry, over https)"
 echo "ok: /go -> $loc"
+
+# A client cannot downgrade the scheme with its own X-Forwarded-Proto.
+loc_proto="$(location -H 'X-Forwarded-Proto: http')"
+echo "GET /go (X-Forwarded-Proto: http) -> Location: $loc_proto"
+[ "$loc_proto" = "https://${FIRST}/article/one?from=go" ] \
+  || fail "X-Forwarded-Proto: http gave '$loc_proto', want https://${FIRST}/article/one?from=go"
+echo "ok: X-Forwarded-Proto cannot downgrade the scheme"
 
 # An allowlisted X-Forwarded-Host selects that entry (when there is a second).
 if [ -n "$SECOND" ]; then
   loc2="$(location -H "X-Forwarded-Host: ${SECOND}")"
   echo "GET /go (X-Forwarded-Host: ${SECOND}) -> Location: $loc2"
-  case "$loc2" in
-    "http://${SECOND}/article/one?from=go" | "https://${SECOND}/article/one?from=go") ;;
-    *) fail "allowlisted X-Forwarded-Host gave '$loc2', want <http|https>://${SECOND}/article/one?from=go" ;;
-  esac
+  [ "$loc2" = "https://${SECOND}/article/one?from=go" ] \
+    || fail "allowlisted X-Forwarded-Host gave '$loc2', want https://${SECOND}/article/one?from=go"
   echo "ok: allowlisted X-Forwarded-Host picks its own entry"
 fi
 
 # A forged host is only ever a key into the list: it falls back to the first.
 loc3="$(location -H 'X-Forwarded-Host: evil.example.net')"
 echo "GET /go (X-Forwarded-Host: evil.example.net) -> Location: $loc3"
-case "$loc3" in
-  "http://${FIRST}/article/one?from=go" | "https://${FIRST}/article/one?from=go") ;;
-  *) fail "forged X-Forwarded-Host gave '$loc3', want the fallback <http|https>://${FIRST}/article/one?from=go" ;;
-esac
+[ "$loc3" = "https://${FIRST}/article/one?from=go" ] \
+  || fail "forged X-Forwarded-Host gave '$loc3', want the fallback https://${FIRST}/article/one?from=go"
 echo "ok: a forged X-Forwarded-Host never reaches Location"
 
 # 6. The preload announced its allowlist at boot.
 logs="$(kubectl -n "$NS" logs "$pod" -c user-container --tail=-1 2>&1 || true)"
-printf '%s\n' "$logs" | grep -q 'PUBLIC_ORIGINS:' \
-  || { printf '%s\n' "$logs" | tail -n 30 >&2; fail "pod log has no PUBLIC_ORIGINS: line"; }
-echo "ok: $(printf '%s\n' "$logs" | grep -m1 'PUBLIC_ORIGINS:')"
+want_log="PUBLIC_ORIGINS:${want_env} (env)"
+printf '%s\n' "$logs" | grep -qF "$want_log" \
+  || { printf '%s\n' "$logs" | tail -n 30 >&2; fail "pod log has no '${want_log}' line"; }
+echo "ok: ${want_log}"
 
 echo "public-hosts e2e: all assertions passed"
