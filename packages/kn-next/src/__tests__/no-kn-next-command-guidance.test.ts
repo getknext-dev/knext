@@ -171,7 +171,7 @@ const NOT_GUIDANCE: Array<[RegExp, string]> = [
         "generated data",
     ],
     [
-        /^ROADMAP\.md$|^SECURITY\.md$|^CLAUDE\.md$|^docs\/(RELEASING|ARCHITECTURE|MATURITY_PLAN|ROADMAP)\.md$/,
+        /^ROADMAP\.md$|^SECURITY\.md$|^CLAUDE\.md$|^docs\/(MATURITY_PLAN|ROADMAP)\.md$/,
         "maintainer and strategy docs",
     ],
     [

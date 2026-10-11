@@ -28,12 +28,12 @@ Publishing is driven by [Changesets](https://github.com/changesets/changesets) a
 | `@getknext/core` | `packages/kn-next`        | yes     | yes        |
 | `@getknext/lib`  | `packages/lib`            | yes     | yes        |
 | `@getknext/db`   | `packages/db`             | yes     | yes        |
-| `kn-next`        | `packages/kn-next-alias`  | yes     | yes        |
+| kn-next          | `packages/kn-next-alias`  | yes     | yes        |
 
 `@getknext/core` depends on **both** `@getknext/lib` and `@getknext/db` (and `@getknext/db` depends on
 `@getknext/lib`), so they must always ship as a set — publishing core without db is exactly
-the #255/#256 incident (every consumer install 404s on the missing member). `kn-next` is the alias
-package that makes the bare `npx kn-next` resolve; it forwards to `@getknext/core`'s CLI and joined
+the #255/#256 incident (every consumer install 404s on the missing member). the unscoped forwarding package named kn-next is the alias
+package that makes the bare `npx @getknext/core` resolve; it forwards to `@getknext/core`'s CLI and joined
 the `fixed` group in #820, so all four now move to the same version together.
 
 All four carry `"publishConfig": { "access": "public", "provenance": true }`, so `changeset publish`
@@ -119,7 +119,7 @@ rejected. Presence is not validity.
 ### The packed tarball must be able to scaffold
 
 A published `@getknext/core` whose tarball omits the `create` verb or the `templates/` directory is
-worse than a broken release — it publishes green and the front door (`npx kn-next create`) is dead
+worse than a broken release — it publishes green and the front door (`npx @getknext/core create`) is dead
 for every stranger, with nothing in the release lane objecting. That is exactly what shipped in
 `0.3.0`: its tarball carried no `dist/cli/create.js` and zero `templates/` entries.
 
@@ -133,7 +133,7 @@ Three layers now assert the tarball can scaffold, form-at-PR-time / value-at-run
 - **Run-time (packs + installs + scaffolds):** `scripts/install-smoke.mjs` scaffolds from the
   packed-and-installed package in a clean, Bun-free dir.
 - **Stranger, against the live registry:** the `verify-scaffold-install.mjs` nightly runs the
-  documented `npm exec --package=@getknext/core@latest -- kn-next create` quickstart.
+  documented `npm exec --package=@getknext/core@latest -- knext create` quickstart.
 
 ### A credentialed GA must differ from its last rc ONLY in version fields
 
@@ -145,7 +145,7 @@ users install.
 
 `scripts/ga-tarball-diff.mjs` (`scripts/lib/ga-tarball-diff.mjs` has the precise comparison rules)
 proves this: it packs both sides — `@getknext/core`, `@getknext/lib`, `@getknext/db` **and the
-unscoped `kn-next` npx alias** (same `fixed` group, ships at GA) — and fails on any delta that
+unscoped forwarding package named kn-next** (same `fixed` group, ships at GA) — and fails on any delta that
 isn't a version field, a co-versioned `@getknext/*` sibling range, or the exact version string
 substituted wherever it is embedded in a built file's bytes. `scripts/ga-tarball-diff-gate.mjs` is
 the `release.yml` wiring that decides *when* to run it, from the **git tags**, not from `rcTag` in
@@ -173,7 +173,7 @@ fails as ambiguous).
 The comparison packs with **`npm pack`**, matching the real publish tool (`changeset publish`
 shells to `npm publish` for a bun workspace) — never `bun pm pack`, which was measured (rehearsal,
 #1562) to emit `@getknext/core`'s `dist/cli/kn-next.js` as a duplicate tar entry (its `bin` field
-maps two command names, `knext` and `kn-next`, to that one file) and would have made this gate
+maps two command names to that one file, as it did in 1.x) and would have made this gate
 permanently, incorrectly red on every real GA cut.
 
 ### Pack once, not three times (#1614/#1616)
@@ -405,8 +405,8 @@ Two things to know before reading the steps below, which are kept as the record 
   depends on `@getknext/lib@^0.2.0` and `@getknext/db@^0.2.1`, both published), so no consumer is
   broken — but from the next release on the three are a Changesets **`fixed` group** and move
   together. See [`docs/COMPATIBILITY.md`](COMPATIBILITY.md).
-- **`npx kn-next` still does not resolve.** The bin is `kn-next`; the package is `@getknext/core`.
-  There is no npm package literally named `kn-next`, so the published invocation is
+- **`npx @getknext/core` still does not resolve.** The bin is `knext`; the package is `@getknext/core`.
+  There is no npm package literally named `knext`, so the published invocation is
   `npx @getknext/core <subcommand>`.
 
 ### Step 1 — the npm org (record; required for both auth paths)
@@ -453,7 +453,7 @@ npm view @getknext/core version   # → the version just released
 npm view @getknext/lib version    # → the same version (they are a `fixed` group)
 npm view @getknext/db version     # → the same version
 npm view kn-next version          # → the same version (the alias joined the group in #820)
-npx kn-next --help                # from a clean directory
+npx @getknext/core --help                # from a clean directory
 ```
 
 Or, from a checkout, ask the same question the release lane asks:
@@ -467,9 +467,8 @@ consumer install 404s or resolves the wrong pair — publish the stragglers befo
 else.
 
 > Note on invocation: the **npm package** carrying the code is `@getknext/core` and its **bin** is
-> `kn-next`. `npx kn-next` works via the `kn-next` alias package (`packages/kn-next-alias`), which
-> exists only to forward to that bin. Until the alias has been published at least once,
-> `npx kn-next` 404s and the published-package invocation is `npx @getknext/core <subcommand>`.
+> `knext`. `npx @getknext/core <subcommand>` resolves that single bin directly. The forwarding package
+> named kn-next (`packages/kn-next-alias`) only forwards to it and is retired separately.
 
 Also confirm each package shows a provenance / "Published via GitHub Actions" badge on npmjs.com.
 
@@ -742,8 +741,8 @@ Confirm every box before starting step 1 below:
    `1.0.0` this step therefore runs
    **before** step 5 — see [Operator first for 1.0.0](#operator-first-for-100-the-exact-order).
 8. **Stranger install + upgrade verification against the live registry.** From a clean environment
-   with no local checkout state: `npm exec --package=@getknext/core@latest -- kn-next create` (the
-   documented quickstart) must scaffold and `npx kn-next --help` must exit 0. Separately, on a
+   with no local checkout state: `npm exec --package=@getknext/core@latest -- knext create` (the
+   documented quickstart) must scaffold and `npx @getknext/core --help` must exit 0. Separately, on a
    cluster running the previous stable operator/CRD, apply the new `operator-v1.0.0` `install.yaml`
    and confirm an existing `NextApp` reconciles cleanly — the [Upgrade order](#upgrade-order)
    section's "operator/CRD first, then CLI" rule applies to this step itself.
@@ -779,7 +778,7 @@ publish `1.3.0`, which takes `latest`. To keep the `1.0` line reachable by name 
   `@getknext/core` regardless of dist-tags. The tag is the named handle for `npx`/docs and for the
   patch flow below.
 - **Known drift — the 1.0 line pins only its top package, not its siblings.** `1.0.0` ships the
-  fixed group's internal ranges as `^1.0.0` (`kn-next` → `@getknext/core`, core → `lib`/`db`, db
+  fixed group's internal ranges as `^1.0.0` (kn-next → `@getknext/core`, core → `lib`/`db`, db
   → `lib`), byte-identical to rc.6's `^1.0.0-rc.6`. Once a stable `1.3.0` is published, installing
   `@getknext/core@1.0` (or `@latest-1.0`) still resolves `@getknext/lib`/`@getknext/db` to `1.3.x`,
   and `kn-next@1.0` resolves `@getknext/core` to `1.3.x` — a mixed set. (Prereleases such as
@@ -829,7 +828,7 @@ that window it is the wrong tool here) — it does not undo the fact that people
 Recovery here means *redirecting new installs away from the broken version*, not erasing it.
 
 1. **Move `latest` back to `0.4.3` on all four publishable packages together** — `@getknext/core`,
-   `@getknext/lib`, `@getknext/db`, and `kn-next`. They are Changesets' `fixed` group and always ship
+   `@getknext/lib`, `@getknext/db`, and the forwarding package named kn-next. They are Changesets' `fixed` group and always ship
    (and now roll back) as a set; moving three of the four and forgetting the fourth reproduces the
    exact #255/#256 partial-group incident, just via a dist-tag move instead of a publish. Use
    `scripts/npm-dist-tag-rollback.mjs` for this — see below.
@@ -897,7 +896,7 @@ registry entries, with `rcTag` pinned at `v1.0.0-rc.5`:
    npm view @getknext/core dist-tags   # { latest: '0.4.3', rc: '1.0.0-rc.5' }
    npm view @getknext/lib dist-tags    # { latest: '0.4.3', rc: '1.0.0-rc.5' }
    npm view @getknext/db dist-tags     # { latest: '0.4.3', rc: '1.0.0-rc.5' }
-   npm view kn-next dist-tags          # { latest: '0.4.3', rc: '1.0.0-rc.5' }
+   npm view knext dist-tags          # { latest: '0.4.3', rc: '1.0.0-rc.5' }
    ```
 2. **Rollback plan dry run** (default mode — no `--execute`, so this only reads the registry via
    `npm view` to confirm the rollback target is published for all four packages, then prints the
@@ -910,7 +909,7 @@ registry entries, with `rcTag` pinned at `v1.0.0-rc.5`:
    published" guard was exercised on a real, valid target.
 3. **Previous-version install verification:** in a scratch directory, `npm install
    @getknext/core@1.0.0-rc.4 --no-save` succeeded (203 packages), and the installed binary ran
-   (`kn-next --help` printed the deprecation notice for the `kn-next` alias and the usage banner) —
+   (its help printed the usage banner and a deprecation notice for the old command name) —
    confirming a prior rc actually installs and runs, which is what "move `latest`/`rc` back" is
    buying.
 
@@ -950,7 +949,7 @@ below.
 
 ### Why
 
-`kn-next` emits a `NextApp` custom resource and applies it with an explicit `--validate=strict`
+`knext` emits a `NextApp` custom resource and applies it with an explicit `--validate=strict`
 (so the guarantee is knext's, not a property of whichever `kubectl` happens to be on `PATH`). A
 newer CLI can emit a spec field that an older CRD's schema does not contain, and with strict
 validation the apiserver **rejects** that apply rather than silently pruning the field:
@@ -960,8 +959,8 @@ Error from server (BadRequest): error when creating "…": NextApp in version "v
 handled as a NextApp: strict decoding error: unknown field "spec.…"
 ```
 
-If you see `strict decoding error: unknown field` on `kn-next deploy`, `kn-next preview`, or
-`kn-next db bind`, the most likely cause is that the CLI is newer than the installed CRD. Fix it by
+If you see `strict decoding error: unknown field` on `knext deploy`, `knext preview`, or
+`knext db bind`, the most likely cause is that the CLI is newer than the installed CRD. Fix it by
 upgrading the operator bundle first, then re-running:
 
 ```sh
@@ -985,13 +984,13 @@ cluster whose operator is ahead of every developer's CLI is a fine steady state.
 Stated plainly, because these are the reason the ordering rule matters rather than being a nicety:
 
 - **GitOps controllers do not assert strict validation.** If Argo CD or Flux applies your `NextApp`
-  CRs, the strict flag `kn-next` passes is not in play; an unknown field is pruned silently there,
+  CRs, the strict flag `knext` passes is not in play; an unknown field is pruned silently there,
   exactly as it was before. Ordering is your only protection on that path.
-- **A `kubectl` shim on `PATH` can defeat it.** `kn-next` passes `--validate=strict`, but a wrapper
+- **A `kubectl` shim on `PATH` can defeat it.** `knext` passes `--validate=strict`, but a wrapper
   that appends `--validate=ignore` wins, because pflag takes the **last** occurrence of a string
   flag.
-- **`kn-next doctor` on its own does not prove the CRD covers what this CLI emits.** The
-  schema-diff preflight that closes this now exists (`src/cli/schema/preflight.ts`): `kn-next
+- **`knext doctor` on its own does not prove the CRD covers what this CLI emits.** The
+  schema-diff preflight that closes this now exists (`src/cli/schema/preflight.ts`): `knext
   deploy` compares the fields this CLI emits against the CRD installed on the target cluster and
   refuses **before any side effect**, naming the missing field. It runs at deploy time against the
   cluster in front of it — it is not a substitute for upgrading in the right order, and it does not
