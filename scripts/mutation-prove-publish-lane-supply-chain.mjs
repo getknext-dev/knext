@@ -45,13 +45,14 @@ const WORKFLOW_DIR = resolve(REPO_ROOT, '.github/workflows');
 const WORKFLOW = resolve(WORKFLOW_DIR, 'release.yml');
 const ENGINE = resolve(REPO_ROOT, 'tests/helpers/publish-lane-supply-chain.ts');
 const SPEC = 'tests/publish-lane-supply-chain.test.ts';
+const SPEC_FILE = resolve(REPO_ROOT, SPEC);
 
 /**
  * The files mutated, keyed by the `subject` each mutation names. Spelled as a
  * `subjects:` map so `tests/mutation-prover-lane.test.ts` can resolve every
  * anchor below against its file at PR time.
  */
-const LANE = { subjects: { workflow: WORKFLOW, engine: ENGINE } };
+const LANE = { subjects: { workflow: WORKFLOW, engine: ENGINE, spec: SPEC_FILE } };
 
 const DIRECT_NEEDS =
   '    needs: [publish-lane-guard, audit, version-pr, publish-preflight, ga-tarball-diff, pack]\n';
@@ -62,8 +63,8 @@ const RELEASE_IF =
   "      && needs.publish-preflight.outputs.should_publish == 'true'\n";
 const AUDIT_RUN = '        run: node scripts/audit-published.mjs\n';
 
-const NEW_LANE = (publishStep) =>
-  `# ${MUTATION_MARKER}\nname: mutation-injected publish lane\non: workflow_dispatch\njobs:\n  ship:\n    runs-on: ubuntu-latest\n    steps:\n${publishStep}`;
+const NEW_LANE = (publishStep, jobExtra = '') =>
+  `# ${MUTATION_MARKER}\nname: mutation-injected publish lane\non: workflow_dispatch\njobs:\n  ship:\n    runs-on: ubuntu-latest\n${jobExtra}    steps:\n${publishStep}`;
 
 const MUTATIONS = [
   // ── 1. the real release.yml loses a gate ────────────────────────────────
@@ -203,8 +204,8 @@ const MUTATIONS = [
     id: 'M15',
     claim: 'discovery stops recognising a changesets/action publish input',
     subject: 'engine',
-    anchor: '    if (/^changesets\\/action(@|$)/.test(uses)) {\n',
-    replacement: '    if (/^changesets-disabled\\/action(@|$)/.test(uses)) {\n',
+    anchor: '    const changesets = /^changesets\\/action(@|$)/.test(uses);\n',
+    replacement: '    const changesets = /^changesets-disabled\\/action(@|$)/.test(uses);\n',
     expect: 'red',
   },
   {
@@ -220,9 +221,8 @@ const MUTATIONS = [
     id: 'M17',
     claim: 'a softened audit step (continue-on-error / `||`) still counts as a gate',
     subject: 'engine',
-    anchor:
-      "        neutralised ??= jobSoftened ? 'job has continue-on-error' : stepNeutralisation(step);\n",
-    replacement: '        void jobSoftened;\n',
+    anchor: '      runsAudit = true;\n',
+    replacement: '      runsAudit = true;\n      continue;\n',
     expect: 'red',
   },
   {
@@ -231,6 +231,178 @@ const MUTATIONS = [
     subject: 'engine',
     anchor: ".filter((f) => f.endsWith('.yml') || f.endsWith('.yaml'))\n",
     replacement: ".filter((f) => f.endsWith('.yml'))\n",
+    expect: 'red',
+  },
+
+  // ── 5. round 2: the inverted discovery and the tightened audit gate ──────
+  {
+    id: 'M19',
+    claim: 'the audit step runs under shell: bash {0} (no errexit)',
+    subject: 'workflow',
+    anchor: AUDIT_RUN,
+    replacement: `        shell: bash {0}\n${AUDIT_RUN}`,
+    expect: 'red',
+  },
+  {
+    id: 'M20',
+    claim: 'the audit invocation is followed by a CONTINUATION-split || true',
+    subject: 'workflow',
+    anchor: AUDIT_RUN,
+    replacement:
+      '        run: |\n          node scripts/audit-published.mjs \\\n            || true\n',
+    expect: 'red',
+  },
+  {
+    id: 'M21',
+    claim: 'the audit invocation carries --help (the script would exit 0 without auditing)',
+    subject: 'workflow',
+    anchor: AUDIT_RUN,
+    replacement: '        run: node scripts/audit-published.mjs --help\n',
+    expect: 'red',
+  },
+  {
+    id: 'M22',
+    claim: 'a trailing exit 0 follows the audit invocation',
+    subject: 'workflow',
+    anchor: AUDIT_RUN,
+    replacement: '        run: |\n          node scripts/audit-published.mjs\n          exit 0\n',
+    expect: 'red',
+  },
+  {
+    id: 'M23',
+    claim: 'a NEW workflow publishes from inside a for loop',
+    inject: {
+      name: 'zz-mutation-new-for-loop.yml',
+      content: NEW_LANE(
+        '      - run: |\n          for d in core lib db; do npm publish packages/$d; done\n',
+      ),
+    },
+    expect: 'red',
+  },
+  {
+    id: 'M24',
+    claim: 'a NEW workflow publishes through xargs',
+    inject: {
+      name: 'zz-mutation-new-xargs.yml',
+      content: NEW_LANE('      - run: echo pkgs | xargs npm publish\n'),
+    },
+    expect: 'red',
+  },
+  {
+    id: 'M25',
+    claim: 'a NEW workflow publishes through a third-party publish action',
+    inject: {
+      name: 'zz-mutation-new-publish-action.yml',
+      content: NEW_LANE('      - uses: JS-DevTools/npm-publish@v3\n'),
+    },
+    expect: 'red',
+  },
+  {
+    id: 'M26',
+    claim: 'a NEW workflow publishes through npx @changesets/cli with flags first',
+    inject: {
+      name: 'zz-mutation-new-npx-scoped.yml',
+      content: NEW_LANE('      - run: npx @changesets/cli publish\n'),
+    },
+    expect: 'red',
+  },
+  {
+    id: 'M27',
+    claim: 'a NEW credentialed job runs an opaque script that never says publish',
+    inject: {
+      name: 'zz-mutation-new-opaque.yml',
+      content: NEW_LANE('      - run: bash ./deploy.sh\n', '    environment: npm-publish\n'),
+    },
+    expect: 'red',
+  },
+  {
+    id: 'M28',
+    claim: 'discovery only recognises the literal `npm publish` (the round-1 shape)',
+    subject: 'engine',
+    anchor: 'const PUBLISH_WORD = /(?<![A-Za-z0-9])publish(?![A-Za-z0-9-])/i;\n',
+    replacement: 'const PUBLISH_WORD = /\\bnpm publish\\b/i;\n',
+    expect: 'red',
+  },
+  {
+    id: 'M29',
+    claim: 'the credential rule is switched off (opaque commands are invisible again)',
+    subject: 'engine',
+    anchor: '  if (candidate === null && holdsNpmCredential(job)) {\n',
+    replacement: '  if (false && candidate === null && holdsNpmCredential(job)) {\n',
+    expect: 'red',
+  },
+  {
+    id: 'M30',
+    claim: 'line continuations are no longer joined before scanning',
+    subject: 'engine',
+    anchor: "source.replace(/\\\\\\r?\\n[ \\t]*/g, ' ');\n",
+    replacement: 'source;\n',
+    expect: 'red',
+  },
+  {
+    id: 'M31',
+    claim: 'a stale allowlist entry no longer fails',
+    subject: 'engine',
+    anchor: '    if (!usedAllowlist.has(e)) {\n',
+    replacement: '    if (false) {\n',
+    expect: 'red',
+  },
+  {
+    id: 'M32',
+    claim: '--help becomes an allowed argument of the audit script',
+    subject: 'engine',
+    anchor: 'const AUDIT_ALLOWED_ARGS: readonly string[] = [];\n',
+    replacement:
+      "const AUDIT_ALLOWED_ARGS: readonly string[] = ['--help', '--version', '--dry-run'];\n",
+    expect: 'red',
+  },
+  {
+    id: 'M33',
+    claim: 'a later exit 0 / true no longer neutralises the audit',
+    subject: 'engine',
+    anchor: '  if (stmts.some((s) => /^(exit\\s+0|true|:)$/.test(s))) {\n',
+    replacement: '  if (false) {\n',
+    expect: 'red',
+  },
+  {
+    id: 'M34',
+    claim: 'the allowlist is keyed on the job id alone (any workflow can borrow an entry)',
+    subject: 'engine',
+    anchor: 'nonLanes.find((e) => e.file === file && e.job === id)',
+    replacement: 'nonLanes.find((e) => e.job === id)',
+    expect: 'red',
+  },
+  {
+    id: 'M35',
+    claim: 'a custom shell template (bash {0}) is treated as keeping errexit',
+    subject: 'engine',
+    anchor: "  shell.trim() === 'bash' || /^bash\\b.*\\s-[A-Za-z]*e/.test(shell.trim());\n",
+    replacement: "  shell.trim() === 'bash' || /^bash\\b/.test(shell.trim());\n",
+    expect: 'red',
+  },
+  {
+    id: 'M36',
+    claim: 'a heredoc fed to a shell is stripped as prose',
+    subject: 'engine',
+    anchor: '    if (!m || /\\|\\s*(sudo\\s+)?(ba|z|da)?sh\\b/.test(lines[i])) continue;\n',
+    replacement: '    if (!m) continue;\n',
+    expect: 'red',
+  },
+  {
+    id: 'M37',
+    claim: 'the spec allowlist gains an entry that matches no candidate (stale)',
+    subject: 'spec',
+    anchor: 'const NON_LANES: readonly NonLane[] = [\n',
+    replacement:
+      "const NON_LANES: readonly NonLane[] = [\n  { file: 'release.yml', job: 'no-such-job', reason: 'mutation: stale entry' },\n",
+    expect: 'red',
+  },
+  {
+    id: 'M38',
+    claim: 'the spec allowlist loses the entry for the lane guard (an unknown candidate)',
+    subject: 'spec',
+    anchor: "    job: 'publish-lane-guard',\n",
+    replacement: "    job: 'publish-lane-guard-renamed',\n",
     expect: 'red',
   },
 
@@ -261,6 +433,30 @@ const MUTATIONS = [
     inject: {
       name: 'zz-mutation-harmless.yml',
       content: NEW_LANE('      - run: echo nothing is published here\n'),
+    },
+    expect: 'green',
+  },
+  {
+    id: 'NEG4',
+    claim:
+      'NEGATIVE CONTROL: a NEW workflow with near-miss words (published, publish-lane-guard.mjs) — must stay GREEN',
+    inject: {
+      name: 'zz-mutation-near-miss.yml',
+      content: NEW_LANE(
+        '      - run: |\n          echo published\n          node scripts/publish-lane-guard.mjs ref\n',
+      ),
+    },
+    expect: 'green',
+  },
+  {
+    id: 'NEG5',
+    claim:
+      'NEGATIVE CONTROL: a NEW workflow with comment-only and cat-heredoc prose about publishing — must stay GREEN',
+    inject: {
+      name: 'zz-mutation-prose.yml',
+      content: NEW_LANE(
+        '      # npm publish is only described here\n      - run: |\n          cat > body.md <<EOF\n          npm publish credential\n          EOF\n',
+      ),
     },
     expect: 'green',
   },
