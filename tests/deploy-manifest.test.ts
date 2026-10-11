@@ -115,6 +115,7 @@ const KNOWN_UNSUPPORTED_CATEGORIES = new Set([
   'ppr',
   'cache-components',
   'image-optimization',
+  'static-export',
 ]);
 
 const manifest: Manifest = existsSync(MANIFEST_PATH)
@@ -845,6 +846,27 @@ const VERCEL_COUPLED_FILE_QUARANTINES: Record<
   },
   'test/e2e/app-dir/segment-cache/cached-navigations/cached-navigations.test.ts': {
     childIssue: 2129,
+    observedRuns: ['38040527044'],
+    observedRef: 'v16.4.0',
+  },
+  'test/e2e/app-dir/partial-fallback-shell-upgrade/partial-fallback-shell-upgrade.test.ts': {
+    childIssue: 2128,
+    observedRuns: ['38040527044'],
+    observedRef: 'v16.4.0',
+  },
+  'test/e2e/app-dir/metadata-streaming-parallel-routes/metadata-streaming-parallel-routes.test.ts':
+    {
+      childIssue: 2127,
+      observedRuns: ['38040527044'],
+      observedRef: 'v16.4.0',
+    },
+  'test/e2e/app-dir/segment-cache/metadata/segment-cache-metadata.test.ts': {
+    childIssue: 2127,
+    observedRuns: ['38040527044'],
+    observedRef: 'v16.4.0',
+  },
+  'test/e2e/app-dir/prerender-encoding/prerender-encoding.test.ts': {
+    childIssue: 2127,
     observedRuns: ['38040527044'],
     observedRef: 'v16.4.0',
   },

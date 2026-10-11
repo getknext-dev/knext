@@ -153,7 +153,12 @@
       "test/e2e/app-dir/empty-generate-static-params/empty-generate-static-params.test.ts",
       "test/e2e/app-dir/use-cache-segment-configs/use-cache-segment-configs.test.ts",
       "test/e2e/app-dir/cache-components-allow-otel-spans/cache-components-allow-otel-spans.test.ts",
-      "test/e2e/app-dir/segment-cache/cached-navigations/cached-navigations.test.ts"
+      "test/e2e/app-dir/segment-cache/cached-navigations/cached-navigations.test.ts",
+      "test/e2e/app-dir/partial-fallback-shell-upgrade/partial-fallback-shell-upgrade.test.ts",
+      "test/e2e/app-dir/metadata-streaming-parallel-routes/metadata-streaming-parallel-routes.test.ts",
+      "test/e2e/app-dir/segment-cache/metadata/segment-cache-metadata.test.ts",
+      "test/e2e/app-dir/prerender-encoding/prerender-encoding.test.ts",
+      "test/e2e/app-dir/interception-routes-output-export/interception-routes-output-export.test.ts"
     ]
   },
   "$knextQuarantines": [
@@ -323,6 +328,57 @@
       "mechanism": "The failing assertion is `act(navigate, 'no-requests')` in the `if (isNextDeploy)` branch (test line ~618). Its comment says 'The platform serves a completed static prerender', which is Vercel's behaviour. knext issues a `_rsc` request on every repeat navigation to /fully-static-params/t4, the same request log as plain `next start`, and the non-deploy branch asserts that live-navigation behaviour. The assertions after the failing one are a same-cause repeat and `#top` = 'Top: t4', which holds on knext in local runs. File level: the other 19 cases of this file stop running as ongoing coverage.",
       "evidence": "run 38040527044 (Next 16.4.0 smoke dispatch, NEXTJS_REF=v16.4.0, node x turbopack, shard 12): FINAL, 1 of 20 cases failing ('Expected no network requests to be initiated'); the other 19 cases passed. Local reproduction at v16.4.0 with real Chromium: identical request log on plain `next start` and on knext (issue #2129 triage, 2026-10-10). ONE cell dispatched; the four-cell run was not dispatched (ADR-0066 dispatch cap).",
       "provenance": "https://github.com/getknext-dev/knext/issues/2129 (triage 2026-10-10: local reproduction against plain next start) + the upstream comment in the isNextDeploy branch ('The platform serves a completed static prerender'). Retire when upstream changes that deploy branch for non-Vercel adapters, or at the first Next ref where it matches the live-render-first behaviour."
+    },
+    {
+      "test": "test/e2e/app-dir/partial-fallback-shell-upgrade/partial-fallback-shell-upgrade.test.ts",
+      "nextjsRef": "v16.4.0",
+      "lane": "node",
+      "family": "vercel-infra-coupled",
+      "level": "file",
+      "cases": [
+        "shares an on-demand shell across params without generateStaticParams",
+        "keeps params without generateStaticParams dynamic after explicit revalidation of an on-demand shell",
+        "reuses generated optional catch-all pages before and after explicit revalidation"
+      ],
+      "mechanism": "Three cases of the 'partialPrefetching disabled' describe assert `expect(headers.get('x-vercel-cache')).toBe('HIT')` inside `if (isNextDeploy)` blocks (test lines ~297-300, ~315-316, ~326-329, ~370-371, ~423-428). `x-vercel-cache` is the CDN's response header; knext serves no CDN header (`x-vercel-cache` is null). The other assertions of those cases (shell/dynamic split on the PPR sentinel, data-rendered-at equality, revalidation) are content checks that pass on knext. File level: the file's 10 other cases stop running as ongoing coverage; they pass at v16.4.0 on knext.",
+      "evidence": "run 38040527044 (Next 16.4.0 smoke dispatch, NEXTJS_REF=v16.4.0, node x turbopack, shard 2): FINAL 3/3 attempts for 3 of 13 cases, all `expect(headers.get('x-vercel-cache')).toBe('HIT')` Received: null. STUB RUN (local, no dispatch, 2026-10-11): the real v16.4.0 fixture `partial-prefetching-disabled` built with real Next 16.4.0 and deployed through scripts/e2e-deploy.sh; the three cases replayed with ONLY the x-vercel-cache assertions removed (every other assertion copied from the test) all PASS on knext, so the header assertion masks no content gap. ONE cell only: the four-cell dispatch was not run (ADR-0066 dispatch cap). At 16.3.8 the file passed because these cases did not exist.",
+      "provenance": "https://github.com/getknext-dev/knext/issues/2128 (ADR-0007 section (h); precedent #1571 / #1624 (x-vercel-cache)). Retire when upstream stops asserting x-vercel-cache for non-Vercel adapters in these cases, or at the first Next ref where the file is green on all four cells."
+    },
+    {
+      "test": "test/e2e/app-dir/metadata-streaming-parallel-routes/metadata-streaming-parallel-routes.test.ts",
+      "nextjsRef": "v16.4.0",
+      "lane": "node",
+      "family": "vercel-infra-coupled",
+      "level": "file",
+      "cases": ["should only bundle the selected metadata resolution implementation"],
+      "mechanism": "The case is gated `// @gate !deploy` (comment: 'The deploy harness does not expose the emitted server bundle.'); it runs for both `parallelRouteMetadata` false and true. The `deploy` gate condition compiles to isNextDeploy, so under knext's NEXT_TEST_MODE=deploy with NEXT_ENABLE_ADAPTER=1 the case is run as `.failing`; the body PASSES on knext, which the harness reports as \"Failing test passed even though it was supposed to fail\" (lib/gate/runtime.ts:503). The pragma is static source, so the inversion is deterministic by construction.",
+      "evidence": "run 38040527044 (Next 16.4.0 smoke dispatch, NEXTJS_REF=v16.4.0, node x turbopack, shard 5): FINAL 3/3, 2 cases (one per flag value), \"Failing test passed even though it was supposed to fail\". ONE cell only: the four-cell dispatch was not run (ADR-0066 dispatch cap). The file passed at 16.3.8; the gated cases are new in 16.4.0.",
+      "provenance": "https://github.com/getknext-dev/knext/issues/2127 (ADR-0007 section (h); precedent #1571 / #1624; ADR-0066 \"green\" = vercel-infra-coupled or @gate inversion). Retire when upstream removes or changes the pragma, or at the first Next ref where it no longer gates on deploy; expire on the first ref containing that change."
+    },
+    {
+      "test": "test/e2e/app-dir/segment-cache/metadata/segment-cache-metadata.test.ts",
+      "nextjsRef": "v16.4.0",
+      "lane": "node",
+      "family": "vercel-infra-coupled",
+      "level": "file",
+      "cases": ["requests only the head when the page segments are cached"],
+      "mechanism": "The case is gated `// @gate !deploy` (comment: on the platform a cold ISR path is served from a completed static prerender, so the head-only request is not observable). The `deploy` gate condition compiles to isNextDeploy, so under knext's NEXT_TEST_MODE=deploy with NEXT_ENABLE_ADAPTER=1 the case is run as `.failing`; the body PASSES on knext, which the harness reports as \"Failing test passed even though it was supposed to fail\" (lib/gate/runtime.ts:503). The pragma is static source, so the inversion is deterministic by construction.",
+      "evidence": "run 38040527044 (Next 16.4.0 smoke dispatch, NEXTJS_REF=v16.4.0, node x turbopack, shard 8): FINAL 3/3, 1 case, \"Failing test passed even though it was supposed to fail\". ONE cell only: the four-cell dispatch was not run (ADR-0066 dispatch cap). The file passed at 16.3.8; the gated case is new in 16.4.0.",
+      "provenance": "https://github.com/getknext-dev/knext/issues/2127 (ADR-0007 section (h); precedent #1571 / #1624; ADR-0066 \"green\" = vercel-infra-coupled or @gate inversion). Retire when upstream removes or changes the pragma, or at the first Next ref where it no longer gates on deploy; expire on the first ref containing that change."
+    },
+    {
+      "test": "test/e2e/app-dir/prerender-encoding/prerender-encoding.test.ts",
+      "nextjsRef": "v16.4.0",
+      "lane": "node",
+      "family": "vercel-infra-coupled",
+      "level": "file",
+      "cases": [
+        "should preserve an encoded slash in an exact closed catch-all path",
+        "should preserve an encoded slash in an open catch-all fallback"
+      ],
+      "mechanism": "The cases are gated `// @gate !deploy` and `// @gate !deploy || !adapter` (comment: the Vercel adapter deployment path decodes the captured slash before splitting catch-all values). The `deploy` gate condition compiles to isNextDeploy, so under knext's NEXT_TEST_MODE=deploy with NEXT_ENABLE_ADAPTER=1 the case is run as `.failing`; the body PASSES on knext, which the harness reports as \"Failing test passed even though it was supposed to fail\" (lib/gate/runtime.ts:503). The pragma is static source, so the inversion is deterministic by construction.",
+      "evidence": "run 38040527044 (Next 16.4.0 smoke dispatch, NEXTJS_REF=v16.4.0, node x turbopack, shard 9): FINAL 3/3, 2 cases, \"Failing test passed even though it was supposed to fail\". ONE cell only: the four-cell dispatch was not run (ADR-0066 dispatch cap). The file passed at 16.3.8; the gated cases are new in 16.4.0.",
+      "provenance": "https://github.com/getknext-dev/knext/issues/2127 (ADR-0007 section (h); precedent #1571 / #1624; ADR-0066 \"green\" = vercel-infra-coupled or @gate inversion). Retire when upstream removes or changes the pragma, or at the first Next ref where it no longer gates on deploy; expire on the first ref containing that change."
     }
   ],
   "$knextExclusions": [
@@ -340,6 +396,11 @@
       "test": "test/e2e/app-dir/ppr-full/**/*",
       "category": "ppr",
       "rationale": "Partial Prerendering (PPR) is not adapter-standardizable yet (CLAUDE.md §6 Tier C, upstream-gated); knext does not implement the PPR resume/stream contract. compat-matrix row: PPR ❌."
+    },
+    {
+      "test": "test/e2e/app-dir/interception-routes-output-export/interception-routes-output-export.test.ts",
+      "category": "static-export",
+      "rationale": "knext deploys a server (`output: 'standalone'`) and its adapter's modifyConfig overrides a user's `output: 'export'` (documented: the adapter forces standalone), so Next never sees `export` and its build-time validation never runs. This fixture is `{ output: 'export' }` plus an interception route and asserts `next.start()` rejects with 'Intercepting routes are not supported with static export.' (v16.4.0, test file above; smoke run 38040527044 shard 14, FAILED 3/3, 'Received promise resolved instead of rejected'). Not a Vercel-coupled assertion: Vercel's build rejects the config, knext's adapter masks it. HELD pending the API decision https://github.com/getknext-dev/knext/issues/2184 (respect output:'export' in modifyConfig?), evidence on https://github.com/getknext-dev/knext/issues/2126. If #2184 decides to respect `export`, REMOVE this entry and the rules.exclude line so the file runs and goes green."
     }
   ]
 }
