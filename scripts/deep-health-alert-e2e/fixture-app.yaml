@@ -1,0 +1,66 @@
+# The app whose database is dead, for scripts/deep-health-alert-e2e.sh.
+#
+# Labelled exactly as the operator labels every app pod it generates
+# (`generated-by: kn-next-operator`, `app: <name>`), because that label is the
+# selector of the shipped PodMonitor. The metrics port is declared as an UNNAMED
+# containerPort: the PodMonitor targets it by number (9464), the way a Knative
+# user-container's port appears in the pod spec.
+#
+# The container runs the repo checkout, mounted from the kind node, under the
+# same Bun the reference app builds with — no image build in the loop, so what
+# runs is the working tree under test.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: deep-health-e2e
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: e2e-app
+  namespace: deep-health-e2e
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: e2e-app
+  template:
+    metadata:
+      labels:
+        app: e2e-app
+        generated-by: kn-next-operator
+    spec:
+      containers:
+        - name: user-container
+          image: oven/bun:1.4.2-alpine@sha256:d888c0ae6c86d7866ff10c5aafdd9077b36aee6455b33dd270fb93c0dd5cef6f
+          workingDir: /workspace/apps/file-manager
+          command: ["bun", "e2e-support/deep-health-alert-fixture.ts"]
+          env:
+            - name: HOME
+              value: /tmp
+            - name: NODE_ENV
+              value: production
+            - name: KN_APP_NAME
+              value: e2e-app
+            # Tracing is what registers the deep-health gauge today.
+            - name: OTEL_TRACING_ENABLED
+              value: "true"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://127.0.0.1:4317
+            # A bring-your-own Postgres on a port nothing listens on: the connection
+            # is REFUSED, which the deep check reports as `down` (not `waking`,
+            # which is reserved for the scale-zero-pg gateway host).
+            - name: DATABASE_URL
+              value: postgres://app:app@127.0.0.1:1/app
+          ports:
+            - containerPort: 3000
+            - containerPort: 9464
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+              readOnly: true
+      volumes:
+        - name: workspace
+          hostPath:
+            path: /workspace
+            type: Directory
