@@ -48,6 +48,7 @@ Every field the CLI can emit is defined by the bundled CRD.
 | `spec.imagePullSecrets` | yes |
 | `spec.imagePullSecrets.*.name` | yes |
 | `spec.networking` | yes |
+| `spec.networking.publicHosts` | yes |
 | `spec.networking.visibility` | yes |
 | `spec.observability` | yes |
 | `spec.observability.enabled` | yes |

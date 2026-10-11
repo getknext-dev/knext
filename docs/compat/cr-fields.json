@@ -29,6 +29,7 @@
     "spec.imagePullSecrets",
     "spec.imagePullSecrets.*.name",
     "spec.networking",
+    "spec.networking.publicHosts",
     "spec.networking.visibility",
     "spec.observability",
     "spec.observability.enabled",
@@ -82,5 +83,5 @@
     "spec.storage.region"
   ],
   "notInBundledCRD": [],
-  "fieldCount": 76
+  "fieldCount": 77
 }

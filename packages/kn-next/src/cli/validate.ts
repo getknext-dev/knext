@@ -236,6 +236,44 @@ const REMOVED_CONFIG_KEYS: Record<string, string> = {
         "caching: the cache in your image is always active.)",
 };
 
+/**
+ * Mirrors the CRD's CEL rules on spec.networking.publicHosts[*] (kept in
+ * lockstep with api/v1alpha1/nextapp_types.go): a lowercase RFC 1123 hostname
+ * of at most 253 characters, not the wildcard bind address, at most 32 entries.
+ */
+const PUBLIC_HOST_PATTERN =
+    /^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$/;
+const WILDCARD_BIND_PATTERN = /^0+(\.0+){0,3}$/;
+const PUBLIC_HOSTS_MAX_ITEMS = 32;
+
+function validatePublicHosts(hosts: unknown): string[] {
+    if (hosts === undefined) return [];
+    if (!Array.isArray(hosts)) {
+        return [
+            "'networking.publicHosts' must be an array of hostnames, e.g. [\"www.example.com\"]",
+        ];
+    }
+    const errors: string[] = [];
+    if (hosts.length > PUBLIC_HOSTS_MAX_ITEMS) {
+        errors.push(
+            `'networking.publicHosts' lists ${hosts.length} hosts; the maximum is ${PUBLIC_HOSTS_MAX_ITEMS}`,
+        );
+    }
+    for (const host of hosts) {
+        if (
+            typeof host !== "string" ||
+            host.length > 253 ||
+            !PUBLIC_HOST_PATTERN.test(host) ||
+            WILDCARD_BIND_PATTERN.test(host)
+        ) {
+            errors.push(
+                `'networking.publicHosts' entries must be lowercase DNS hostnames with no scheme, port, path, userinfo, wildcard or comma, and not 0.0.0.0, got ${JSON.stringify(host)}`,
+            );
+        }
+    }
+    return errors;
+}
+
 export function validateConfig(
     config: KnativeNextConfig,
     /** Test seam for the pairing check — see `checkPairing`. */
@@ -377,6 +415,12 @@ export function validateConfig(
             `'networking.visibility' must be "public" or "cluster-local", got "${config.networking.visibility}"`,
         );
     }
+
+    // networking.publicHosts: the same shape the CRD's CEL rule enforces
+    // (lowercase RFC 1123 hostnames, <=32 entries, no wildcard bind address),
+    // so a typo is a local config error instead of an admission rejection
+    // after the image is built.
+    errors.push(...validatePublicHosts(config.networking?.publicHosts));
 
     // compile (extra files embedded in the compiled executable).
     errors.push(...validateCompileConfig(config));

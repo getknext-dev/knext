@@ -287,6 +287,26 @@ export interface NetworkingConfig {
      * `visibility: "cluster-local"`); the flag wins when both are set.
      */
     visibility?: "public" | "cluster-local";
+
+    /**
+     * The public hostnames this app is served on, e.g. `["www.example.com"]`.
+     * The operator renders them as the `KNEXT_PUBLIC_ORIGINS` allowlist
+     * (`https://<host>`), so a redirect built from `request.url`
+     * (`NextResponse.redirect(new URL("/x", request.url))`) answers your public
+     * origin instead of the pod's bind address (`http://0.0.0.0:3000/x`).
+     *
+     * Bare lowercase hostnames only: no scheme, port, path, userinfo or
+     * wildcard. The FIRST entry is the fallback origin; a request whose `Host`
+     * or `X-Forwarded-Host` matches another entry gets that one. Omitted or
+     * empty renders nothing, and the runtime behaves exactly as before.
+     *
+     * A `KNEXT_PUBLIC_ORIGINS` you set yourself under `env` takes precedence
+     * over this list, so setups that already set the variable keep working.
+     *
+     * Needs an operator that knows the field: upgrade the operator/CRD first,
+     * then the CLI.
+     */
+    publicHosts?: string[];
 }
 
 // Main Knative-Next config (subset of OpenNext we support)

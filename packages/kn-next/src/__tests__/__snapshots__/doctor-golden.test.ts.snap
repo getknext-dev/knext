@@ -6,7 +6,7 @@ PASS  kubectl strict validation                   client v1.31.2 — the CR appl
 PASS  Static asset mode                           object storage configured (gcs: assets) — assets are offloaded to the bucket and retained across deploys
 SKIP  vinext-on-node entry freshness              this app does not build with build: 'vinext' + runtime: 'node' (or no knext.config.ts was found) — knext-node-entry.mjs, if scaffolded, is never run
 PASS  NextApp CRD                                 served version: v1alpha1
-PASS  NextApp CRD schema coverage                 all 76 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)
+PASS  NextApp CRD schema coverage                 all 77 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)
 PASS  Operator deployment                         kn-next-operator-controller-manager Ready in kn-next-operator-system
 WARN  Operator version                            no release version reported, image sha256:75be42bb6b4c… (a bundle from before the operator version line); compatibility with this CLI cannot be checked (hint: Move to a versioned operator (operator first, then CLI). Apply a specific release's digest-pinned bundle: \`kubectl apply --server-side -f https://github.com/getknext-dev/knext/releases/download/operator-v<X.Y.Z>/install-v<X.Y.Z>.yaml\` (see https://knext-platform.dev/docs/versioning).)
 PASS  cert-manager webhook                        cert-manager-webhook Ready
@@ -52,7 +52,7 @@ exports[`doctor golden output (#1055 byte-identical pin) reachable — all check
     "title": "NextApp CRD",
   },
   {
-    "detail": "all 76 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)",
+    "detail": "all 77 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)",
     "id": "crd-schema",
     "status": "pass",
     "title": "NextApp CRD schema coverage",
@@ -477,7 +477,7 @@ PASS  kubectl strict validation                   client v1.31.2 — the CR appl
 PASS  Static asset mode                           object storage configured (gcs: assets) — assets are offloaded to the bucket and retained across deploys
 SKIP  vinext-on-node entry freshness              this app does not build with build: 'vinext' + runtime: 'node' (or no knext.config.ts was found) — knext-node-entry.mjs, if scaffolded, is never run
 PASS  NextApp CRD                                 served version: v1alpha1
-PASS  NextApp CRD schema coverage                 all 76 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)
+PASS  NextApp CRD schema coverage                 all 77 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)
 PASS  Operator deployment                         kn-next-operator-controller-manager Ready in kn-next-operator-system
 WARN  Operator version                            no release version reported, image sha256:75be42bb6b4c… (a bundle from before the operator version line); compatibility with this CLI cannot be checked (hint: Move to a versioned operator (operator first, then CLI). Apply a specific release's digest-pinned bundle: \`kubectl apply --server-side -f https://github.com/getknext-dev/knext/releases/download/operator-v<X.Y.Z>/install-v<X.Y.Z>.yaml\` (see https://knext-platform.dev/docs/versioning).)
 PASS  cert-manager webhook                        cert-manager-webhook Ready
@@ -523,7 +523,7 @@ exports[`doctor golden output (#1055 byte-identical pin) budget-exhausted — th
     "title": "NextApp CRD",
   },
   {
-    "detail": "all 76 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)",
+    "detail": "all 77 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)",
     "id": "crd-schema",
     "status": "pass",
     "title": "NextApp CRD schema coverage",

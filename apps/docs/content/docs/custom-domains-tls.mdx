@@ -361,14 +361,14 @@ answers `Location: http://0.0.0.0:8080/dashboard`. The browser cannot reach that
 cookie the redirecting response set (a login session, the Draft Mode cookie) is never sent back,
 because the browser is now on a different host.
 
-Tell the app which hostnames it is served on with `KNEXT_PUBLIC_ORIGINS`. Put your primary domain
+Tell the app which hostnames it is served on with `networking.publicHosts`. Put your primary domain
 first:
 
 ```ts title="knext.config.ts"
 const config: KnativeNextConfig = {
   name: 'acme',
-  env: {
-    KNEXT_PUBLIC_ORIGINS: 'app.example.com,www.example.com',
+  networking: {
+    publicHosts: ['app.example.com', 'www.example.com'],
   },
 };
 ```
@@ -379,13 +379,47 @@ or directly on the resource:
 apiVersion: apps.kn-next.dev/v1alpha1
 kind: NextApp
 spec:
-  env:
-    KNEXT_PUBLIC_ORIGINS: "app.example.com,www.example.com"
+  networking:
+    publicHosts:
+      - app.example.com
+      - www.example.com
 ```
 
-The same redirect then answers `Location: https://app.example.com/dashboard`, or `http://` when the
-request reached the cluster over plain HTTP. The pod logs the active list once at startup as
+The operator turns the list into the `KNEXT_PUBLIC_ORIGINS` environment variable on the app
+(`https://app.example.com,https://www.example.com`). The same redirect then answers
+`Location: https://app.example.com/dashboard`, or `http://` when the request reached the cluster
+over plain HTTP. The pod logs the active list once at startup as
 `PUBLIC_ORIGINS:app.example.com,www.example.com (env)`.
+
+Each entry is a lowercase hostname with no scheme, port, path, user name or wildcard, and at most 32
+are allowed. The cluster rejects anything else when you apply the resource, and `knext deploy`
+checks the same rules before it builds. An empty or missing list changes nothing: the operator adds
+no variable.
+
+<Callout type="warn">
+**Upgrade the operator first, then the CLI.** `publicHosts` is a new field on the `NextApp`
+resource. An operator that predates it rejects a resource that carries it, and `knext deploy` stops
+before touching the cluster and names the field. See [Operator upgrade](/docs/operator-upgrade).
+</Callout>
+
+### Setting the variable yourself
+
+You can still set `KNEXT_PUBLIC_ORIGINS` directly, and it is the route to use on an operator that
+does not have `publicHosts` yet:
+
+```ts title="knext.config.ts"
+const config: KnativeNextConfig = {
+  name: 'acme',
+  env: {
+    KNEXT_PUBLIC_ORIGINS: 'app.example.com,www.example.com',
+  },
+};
+```
+
+or on the resource, under `spec.env`. A value you set yourself, in `env` or from a Secret through
+`secrets.envMap`, **wins** over `publicHosts`: the list is then ignored, so an app that already sets
+the variable keeps behaving exactly as it did. Do not set both unless you mean it. The variable also
+accepts a port (`localhost:3000`) and an `https://` or `http://` prefix, which `publicHosts` does not.
 
 How the origin is chosen:
 
@@ -407,14 +441,14 @@ A redirect whose address was rewritten also carries `Vary: X-Forwarded-Host, Hos
 X-Forwarded-Proto`, added to any `Vary` your app already sets, so a CDN or browser cache keeps
 one cached redirect per hostname.
 
-Each entry is a hostname, optionally with a port (`localhost:3000`). An `https://` or `http://`
-prefix is accepted and ignored, because the scheme comes from the rule above. An entry with a path,
-a user name or a wildcard is dropped, and the pod log says which one.
+In the variable, each entry is a hostname, optionally with a port (`localhost:3000`). An `https://`
+or `http://` prefix is accepted and ignored, because the scheme comes from the rule above. An entry
+with a path, a user name or a wildcard is dropped, and the pod log says which one.
 
 <Callout type="info">
-**Without `KNEXT_PUBLIC_ORIGINS` nothing changes.** Redirects built from `request.url` keep the
-`0.0.0.0` origin, as they always have. Set the variable on every app that redirects with an absolute
-URL.
+**Without `publicHosts` or `KNEXT_PUBLIC_ORIGINS` nothing changes.** Redirects built from
+`request.url` keep the `0.0.0.0` origin, as they always have. Set one of them on every app that
+redirects with an absolute URL.
 </Callout>
 
 `request.url` itself still carries the listening address; only the redirect is fixed. If your code
