@@ -52,7 +52,9 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { guardManifests } from './lib/manifest-restore.mjs';
 import { npmPackOne, rewriteWorkspaceRanges } from './lib/pack-publishable-group.mjs';
+import { workspaceRoots } from './lib/workspace-globs.mjs';
 import { findWorkspaceProtocolDeps } from './lib/workspace-protocol.mjs';
 import { publishablePackages, readWorkspaceManifests } from './publish-preflight.mjs';
 
@@ -87,10 +89,13 @@ let dbDest;
 let coreDest;
 let aliasDest;
 let scaffoldRoot;
+/** Puts every workspace manifest back as it was; a no-op until armed (step 1). */
+let restoreManifests = () => {};
 
 /** Print a final summary line, clean up temp dirs, and exit with the matching code. */
 function finish(status, message) {
   console.log(`\n[install-smoke] ${status}: ${message}`);
+  restoreManifests();
   for (const dir of [workDir, libDest, dbDest, coreDest, aliasDest, scaffoldRoot]) {
     try {
       if (dir && existsSync(dir)) rmSync(dir, { recursive: true, force: true });
@@ -235,6 +240,10 @@ try {
   // `npm pack` (not `bun pm pack`) is safe to use below (#1614). Once, here —
   // not per-package — since it rewrites every publishable manifest in one
   // pass.
+  // The rewrite edits tracked files in place. Snapshot first and restore on every
+  // exit path (finish() -> process.exit skips `finally`, so it is also an exit
+  // hook), or a later `git commit -a` commits the literal versions.
+  restoreManifests = guardManifests(repoRoot, workspaceRoots());
   rewriteWorkspaceRanges(repoRoot);
 
   libDest = mkdtempSync(join(tmpdir(), 'knext-pack-lib-'));
