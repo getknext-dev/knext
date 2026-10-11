@@ -562,24 +562,29 @@ describe('support window and runtime floors agree across the docs and the manife
     }
   });
 
-  it('neither doc claims `knext doctor` checks CRD versions, and both describe what it does today', () => {
-    // Doctor compares the CLI's and the operator's major/minor and never reads the served CRD
-    // versions; until that changes, a doc saying otherwise is a false claim.
+  it('both docs say `knext doctor` checks the CRD-version pairing, and describe the operator-version row as informational', () => {
+    // Doctor reads the served versions of the installed NextApp CRD and fails when the
+    // apiVersion the CLI emits is not among them. The operator-version row is a secondary,
+    // informational note: it never decides the pairing, and a differing major is no warning.
     for (const [label, text] of [
       ['versioning page', section(page, '### Operator versions')],
       ['COMPATIBILITY.md', section(matrix, '### Operator versions')],
     ] as const) {
       const f = flat(text);
-      // The rule is stated, and doctor is described in its own words, separately.
-      expect(f, `${label}: states what doctor checks today`).toMatch(
-        /doctor[\s\S]{0,300}(warns|compares)[\s\S]{0,120}(major|minor)/i,
+      expect(f, `${label}: says doctor checks the CRD-version pairing`).toMatch(
+        /doctor[^.]*(checks|reads|compares)[^.]*(served|CRD)[^.]*(API )?versions?/i,
       );
-      expect(f, `${label}: says doctor is coarser than the rule`).toMatch(/coarser/i);
-      expect(f, `${label}: says doctor does not read CRD/API versions`).toMatch(
-        /does not read[^.]*(API|CRD) versions/i,
+      expect(f, `${label}: says doctor fails when the emitted version is not served`).toMatch(
+        /(fails|failing)[^.]*(not serve|does not serve|unserved)|(not serve|does not serve|unserved)[^.]*fail/i,
       );
-      expect(f, `${label}: must not say doctor applies the CRD-version rule`).not.toMatch(
-        /applied by `?knext doctor|doctor[^.]*(applies|enforces|reads|checks)[^.]*(CRD|served)/i,
+      expect(f, `${label}: says the operator-version row is informational`).toMatch(
+        /informational/i,
+      );
+      expect(f, `${label}: must no longer call doctor coarser than the rule`).not.toMatch(
+        /coarser/i,
+      );
+      expect(f, `${label}: must no longer say doctor does not read CRD/API versions`).not.toMatch(
+        /does not read[^.]*(API|CRD)[^.]*versions/i,
       );
     }
   });

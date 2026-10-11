@@ -192,10 +192,14 @@ CLI. The pairing rule is:
 
 Pre-release suffixes (`-rc.N`) are ignored when pairing.
 
-Today `knext doctor` is a coarser check than that rule: it compares the operator's and the CLI's
-major and minor versions and warns when the operator is older or the majors differ (see below). It
-does not read which API versions the cluster serves, so treat the rule above, not that warning, as
-the definition of a supported pair.
+`knext doctor` checks the first half of that rule against your cluster: its **NextApp CRD** row
+reads the API versions the installed CRD serves and compares them with the `apiVersion` your CLI
+emits. It passes when that version is served (a CRD that serves several versions is fine as long as
+one of them is yours) and fails when the CRD does not serve it. The message tells you which side to move: upgrade the
+operator first when the CRD only serves older versions than your CLI emits, or upgrade the CLI to
+match the operator when it only serves newer ones (a version marked deprecated still counts as
+served). If the CRD cannot be read, the row fails rather than guessing. The **Operator version** row, described
+below, is informational and does not decide the pairing.
 
 ## Pin, upgrade and roll back the operator
 
@@ -218,9 +222,11 @@ digest, then states whether it pairs with your CLI:
 PASS  Operator version  v1.3.0 (from label), image sha256:9f1c0a7d2b44…; compatible with CLI 1.3.0
 ```
 
-It warns, without failing the preflight, when the operator is older than the CLI, when the major
-versions differ, when the operator is an unreleased build, or when it predates operator versions and
-reports none. The version is stamped on the manager Deployment, so you can also read it directly:
+It warns, without failing the preflight, when the operator is older than the CLI on the same major
+version, when the operator is an unreleased build, or when it predates operator versions and reports
+none. A different major version is not a warning: the operator keeps its own version line when
+`@getknext/core` moves to 2.0, and the row says the pairing is decided by the CRD API version.
+The version is stamped on the manager Deployment, so you can also read it directly:
 
 ```sh title="shell"
 kubectl get deploy kn-next-operator-controller-manager -n kn-next-operator-system \
