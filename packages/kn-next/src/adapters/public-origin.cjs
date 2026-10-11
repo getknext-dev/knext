@@ -19,11 +19,14 @@
  *   - host:   the request's `X-Forwarded-Host`, then its `Host`, but only when
  *             the value matches an allowlist entry exactly (case-insensitive,
  *             port included); otherwise the FIRST allowlist entry;
- *   - scheme: `X-Forwarded-Proto` when it is exactly `http` or `https`;
- *             otherwise `https`.
- * No header value outside the allowlist can reach the Location: a header is
- * only ever used as a KEY into the allowlist, and the emitted host is the
- * allowlist's own spelling. Every other Location (a real host, a relative
+ *   - scheme: the matched (or first) allowlist entry's own scheme — `https://`
+ *             or `http://` as the operator wrote it, `https` for a bare host.
+ *             `X-Forwarded-Proto` is never read: a plain-HTTP ingress listener
+ *             sets it to `http` and a client can forge it, so it must not
+ *             decide the origin.
+ * No request header can reach the Location: a header is only ever used as a
+ * KEY into the allowlist, and the emitted origin is the allowlist's own
+ * spelling, scheme included. Every other Location (a real host, a relative
  * path) passes through untouched, and path/query/fragment are kept verbatim.
  *
  * WHY ONLY `Location` (not `request.url`): Next computes the request origin in
@@ -37,18 +40,23 @@
  * `writeHead` (object and array forms) — the same hook points as
  * `cache-control-normalize.cjs`, so it covers every server the process creates
  * on both Node and Bun's `node:http`, with Next's own server unmodified. The
- * three request headers the rule reads are snapshotted when the request
+ * two request headers the rule reads are snapshotted when the request
  * ARRIVES (`http.Server.prototype.emit('request')`, the hook
- * `request-body-cap.cjs` uses), because Next defaults `x-forwarded-host` and
- * `x-forwarded-proto` on the live request before the handler runs.
+ * `request-body-cap.cjs` uses). The reason is not the scheme: it is that the
+ * live `req.headers` are not the request's own. Next defaults
+ * `x-forwarded-host ??= host`, and an app's middleware can overwrite `host` /
+ * `x-forwarded-host` on the live request (resolve-routes.js applies
+ * `x-middleware-request-*`) before the route handler responds. The snapshot
+ * keeps the origin decision on what the client and proxy actually sent.
  *
- * CONFIG: `KNEXT_PUBLIC_ORIGINS` — comma-separated `host[:port]` entries; an
- * `http://` / `https://` prefix and a trailing `/` are accepted and stripped
- * (the scheme still comes from the rule above). Anything else in an entry
+ * CONFIG: `KNEXT_PUBLIC_ORIGINS` — comma-separated `[scheme://]host[:port]`
+ * entries; the scheme is `http://` or `https://` (a bare host means `https`)
+ * and a trailing `/` is accepted and stripped. One entry per host: a repeat of
+ * a host, whatever its scheme, is dropped with a warning. Anything else in an entry
  * (path, userinfo, wildcard, a wildcard bind address) drops that entry with a
  * warning. UNSET or empty → nothing is installed and behaviour is unchanged.
  * The effective allowlist is announced once at boot on stdout:
- * `PUBLIC_ORIGINS:<host,host,…> (env)`.
+ * `PUBLIC_ORIGINS:<origin,origin,…> (env)`.
  */
 
 'use strict';
@@ -93,7 +101,7 @@ function wildcardOriginLength(value) {
   return m && isWildcardHost(m[1]) ? m[0].length : 0;
 }
 
-const VARY_TOKENS = ['X-Forwarded-Host', 'Host', 'X-Forwarded-Proto'];
+const VARY_TOKENS = ['X-Forwarded-Host', 'Host'];
 
 /**
  * Merge the headers the rewrite depends on into a Vary value, keeping what was
@@ -116,19 +124,22 @@ function mergeVary(existing) {
  * Parse the allowlist. Pure.
  *
  * @param {string | undefined} raw
- * @returns {{ hosts: string[], invalid: string[] }}
+ * @returns {{ origins: string[], invalid: string[], repeated: string[] }} origins are
+ * `scheme://host[:port]`; `repeated` lists entries dropped because their host was already taken
  */
 function parsePublicOrigins(raw) {
-  const hosts = [];
+  const origins = [];
+  const seen = new Set();
   const invalid = [];
-  if (raw === undefined || raw === null) return { hosts, invalid };
+  const repeated = [];
+  if (raw === undefined || raw === null) return { origins, invalid, repeated };
   for (const part of String(raw).split(',')) {
     const entry = part.trim();
     if (entry === '') continue;
-    const host = entry
-      .toLowerCase()
-      .replace(/^https?:\/\//, '')
-      .replace(/\/$/, '');
+    const lowered = entry.toLowerCase();
+    // A bare host has no scheme of its own: it means https.
+    const scheme = lowered.startsWith('http://') ? 'http' : 'https';
+    const host = lowered.replace(/^https?:\/\//, '').replace(/\/$/, '');
     const m = HOST_ENTRY.exec(host);
     const port = m && m[1] !== undefined ? Number(m[1]) : undefined;
     const bare = m ? host.replace(/:\d+$/, '') : host;
@@ -136,9 +147,14 @@ function parsePublicOrigins(raw) {
       invalid.push(entry);
       continue;
     }
-    if (!hosts.includes(host)) hosts.push(host);
+    if (!seen.has(host)) {
+      seen.add(host);
+      origins.push(`${scheme}://${host}`);
+    } else {
+      repeated.push(entry);
+    }
   }
-  return { hosts, invalid };
+  return { origins, invalid, repeated };
 }
 
 /** First value of a (possibly repeated, possibly comma-joined) header, lower-cased. */
@@ -153,28 +169,29 @@ function headerOf(headers, name) {
   return headers && typeof headers === 'object' ? headers[name] : undefined;
 }
 
+/** The host[:port] of an allowlist origin (`https://app.example.com` -> `app.example.com`). */
+function hostOfOrigin(origin) {
+  return origin.slice(origin.indexOf('://') + 3);
+}
+
 /**
  * The public origin for one request. Header values are only ever used as keys
- * into `hosts`; what is returned is always an allowlist entry.
+ * into the allowlist's hosts; what is returned is always an allowlist entry,
+ * scheme included. No header supplies the scheme.
  *
  * @param {Record<string, string | string[] | undefined>} headers
- * @param {string[]} hosts non-empty allowlist
+ * @param {string[]} origins non-empty allowlist of `scheme://host[:port]`
  */
-function resolvePublicOrigin(headers, hosts) {
-  let host = hosts[0];
+function resolvePublicOrigin(headers, origins) {
   for (const candidate of [
     firstToken(headerOf(headers, 'x-forwarded-host')),
     firstToken(headerOf(headers, 'host')),
   ]) {
-    if (candidate !== undefined && hosts.includes(candidate)) {
-      host = candidate;
-      break;
-    }
+    if (candidate === undefined) continue;
+    const match = origins.find((o) => hostOfOrigin(o) === candidate);
+    if (match !== undefined) return match;
   }
-  const protoRaw = headerOf(headers, 'x-forwarded-proto');
-  const proto = typeof protoRaw === 'string' ? protoRaw.trim().toLowerCase() : undefined;
-  const scheme = proto === 'http' || proto === 'https' ? proto : 'https';
-  return `${scheme}://${host}`;
+  return origins[0];
 }
 
 /**
@@ -183,26 +200,27 @@ function resolvePublicOrigin(headers, hosts) {
  *
  * @param {unknown} value string or string[] (as `setHeader` accepts)
  * @param {Record<string, string | string[] | undefined>} headers request headers
- * @param {string[]} hosts the allowlist
+ * @param {string[]} origins the allowlist, `scheme://host[:port]` each
  */
-function rewriteLocation(value, headers, hosts) {
-  if (!hosts || hosts.length === 0) return value;
-  if (Array.isArray(value)) return value.map((v) => rewriteLocation(v, headers, hosts));
+function rewriteLocation(value, headers, origins) {
+  if (!origins || origins.length === 0) return value;
+  if (Array.isArray(value)) return value.map((v) => rewriteLocation(v, headers, origins));
   if (typeof value !== 'string') return value;
   const len = wildcardOriginLength(value);
   if (len === 0) return value;
-  return resolvePublicOrigin(headers, hosts) + value.slice(len);
+  return resolvePublicOrigin(headers, origins) + value.slice(len);
 }
 
 const ARRIVAL = Symbol.for('knext.publicOrigin.arrivalHeaders');
 
 /**
- * Snapshot the three headers the rule reads, AS THEY ARRIVED. Next defaults
- * them on the live request before any handler runs (base-server.js:
- * `x-forwarded-host ??= host`, `x-forwarded-proto ??= <socket TLS ? https :
- * http>`), so reading them at response time would see Next's synthesized
- * `http` instead of "no proxy said anything" — and the https default would
- * never apply.
+ * Snapshot the two headers the rule reads, AS THEY ARRIVED. The live
+ * `req.headers` are not the request's own: Next defaults
+ * `x-forwarded-host ??= host` before any handler runs (base-server.js), and
+ * an app's middleware can overwrite `host` / `x-forwarded-host` on the live
+ * request (resolve-routes.js applies `x-middleware-request-*`). Reading them
+ * at response time would see those values instead of what the client and
+ * proxy actually sent.
  */
 function snapshotArrival(req) {
   if (!req || req[ARRIVAL]) return;
@@ -210,7 +228,6 @@ function snapshotArrival(req) {
   req[ARRIVAL] = {
     'x-forwarded-host': h['x-forwarded-host'],
     host: h.host,
-    'x-forwarded-proto': h['x-forwarded-proto'],
   };
 }
 
@@ -269,7 +286,7 @@ function differs(a, b) {
  * nothing when the allowlist is empty.
  *
  * @param {{ env?: Record<string, string | undefined>, log?: (line: string) => void, warn?: (line: string) => void }} [opts]
- * @returns {{ hosts: string[] }}
+ * @returns {{ origins: string[] }}
  */
 function install(opts) {
   const env = (opts && opts.env) || process.env;
@@ -279,15 +296,21 @@ function install(opts) {
   const proto = http.ServerResponse.prototype;
   if (proto[INSTALLED]) return proto[INSTALLED];
 
-  const { hosts, invalid } = parsePublicOrigins(env[PUBLIC_ORIGINS_ENV]);
+  const { origins, invalid, repeated } = parsePublicOrigins(env[PUBLIC_ORIGINS_ENV]);
   for (const entry of invalid) {
     warn(
       `PUBLIC_ORIGINS: INVALID — dropped ${PUBLIC_ORIGINS_ENV} entry ${JSON.stringify(entry)} ` +
-        '(expected host[:port], optionally prefixed with http:// or https://)',
+        '(expected [http://|https://]host[:port]; a bare host means https)',
     );
   }
-  const state = { hosts };
-  if (hosts.length === 0) {
+  for (const entry of repeated) {
+    warn(
+      `PUBLIC_ORIGINS: DUPLICATE — dropped ${PUBLIC_ORIGINS_ENV} entry ${JSON.stringify(entry)} ` +
+        '(its host is already listed earlier; the first entry for a host wins, whatever its scheme)',
+    );
+  }
+  const state = { origins };
+  if (origins.length === 0) {
     if (invalid.length > 0) {
       warn(
         `PUBLIC_ORIGINS: ${PUBLIC_ORIGINS_ENV} has no valid entry — redirects keep the server's bind origin`,
@@ -296,7 +319,7 @@ function install(opts) {
     return state;
   }
   proto[INSTALLED] = state;
-  log(`PUBLIC_ORIGINS:${hosts.join(',')} (env)`);
+  log(`PUBLIC_ORIGINS:${origins.join(',')} (env)`);
 
   // Snapshot the request headers before any listener (Next) can default them.
   const serverProto = http.Server.prototype;
@@ -311,7 +334,7 @@ function install(opts) {
   // Rewrite one Location value for `res`, remembering that it happened so the
   // response can be marked `Vary` (the origin now depends on request headers).
   function rewriteTracked(res, value) {
-    const next = rewriteLocation(value, requestHeadersOf(res), hosts);
+    const next = rewriteLocation(value, requestHeadersOf(res), origins);
     if (differs(value, next)) res[REWRITTEN] = true;
     return next;
   }
@@ -349,7 +372,7 @@ function install(opts) {
     if (at !== -1) {
       args[at] = mapHeadHeaders(args[at], 'location', (v) => rewriteTracked(this, v));
     }
-    // The Location now depends on Host / X-Forwarded-*: tell caches. Done here,
+    // The Location now depends on Host / X-Forwarded-Host: tell caches. Done here,
     // at the last moment, so a Vary the app sets later cannot clobber it.
     if (this[REWRITTEN] && !this.headersSent) {
       const given = [];

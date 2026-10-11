@@ -1,0 +1,102 @@
+/**
+ * `waitForHttpOk` is how spawned-server tests decide a server is ready: poll
+ * until 200 or a bounded deadline, then fail with the last status and the
+ * server's output. A single probe flaked under CI load because a server that
+ * accepts connections can still answer non-200 while it warms up.
+ */
+
+import { afterEach, describe, expect, it } from "bun:test";
+import { waitForHttpOk } from "./helpers/wait-for-http-ok";
+
+const servers: { stop(force?: boolean): void }[] = [];
+afterEach(() => {
+    for (const s of servers.splice(0)) s.stop(true);
+});
+
+function listen(handler: () => Response) {
+    const s = Bun.serve({ port: 0, fetch: handler });
+    servers.push(s);
+    return `http://127.0.0.1:${s.port}/`;
+}
+
+const rejection = (p: Promise<unknown>) =>
+    p.then(
+        () => undefined,
+        (e: Error) => e,
+    );
+
+describe("waitForHttpOk", () => {
+    it("rides out a warming server that answers 503 before 200", async () => {
+        let n = 0;
+        const url = listen(() =>
+            ++n < 4
+                ? new Response("warming", { status: 503 })
+                : new Response("ok"),
+        );
+        const res = await waitForHttpOk(url, {
+            intervalMs: 10,
+            deadlineMs: 5000,
+        });
+        expect(res.status).toBe(200);
+        expect(await res.text()).toBe("ok");
+        expect(n).toBe(4);
+    });
+
+    it("rides out connection refused until the server comes up", async () => {
+        const probe = Bun.serve({ port: 0, fetch: () => new Response("x") });
+        const port = probe.port;
+        probe.stop(true);
+        setTimeout(() => {
+            servers.push(
+                Bun.serve({ port, fetch: () => new Response("late") }),
+            );
+        }, 200);
+        const res = await waitForHttpOk(`http://127.0.0.1:${port}/`, {
+            intervalMs: 20,
+            deadlineMs: 5000,
+        });
+        expect(await res.text()).toBe("late");
+    });
+
+    it("fails a genuinely broken (500) server at the deadline with last status and server log", async () => {
+        const url = listen(() => new Response("boom", { status: 500 }));
+        const t0 = Date.now();
+        const err = await rejection(
+            waitForHttpOk(url, {
+                intervalMs: 10,
+                deadlineMs: 400,
+                log: () => "Invalid hook call (server stderr)",
+            }),
+        );
+        expect(err).toBeInstanceOf(Error);
+        expect(err?.message).toContain("500");
+        expect(err?.message).toContain("Invalid hook call (server stderr)");
+        expect(Date.now() - t0).toBeLessThan(2000);
+    });
+
+    it("fails fast when the server process has already exited", async () => {
+        const t0 = Date.now();
+        const err = await rejection(
+            waitForHttpOk("http://127.0.0.1:1/", {
+                intervalMs: 10,
+                deadlineMs: 30_000,
+                exited: () => "code=1 signal=null",
+                log: () => "EADDRINUSE",
+            }),
+        );
+        expect(err?.message).toContain("exited");
+        expect(err?.message).toContain("code=1");
+        expect(err?.message).toContain("EADDRINUSE");
+        expect(Date.now() - t0).toBeLessThan(2000);
+    });
+
+    it("reports connection errors when the server never listens", async () => {
+        const err = await rejection(
+            waitForHttpOk("http://127.0.0.1:1/", {
+                intervalMs: 10,
+                deadlineMs: 200,
+            }),
+        );
+        expect(err?.message).toMatch(/no response/i);
+    });
+});

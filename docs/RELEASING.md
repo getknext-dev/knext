@@ -752,6 +752,16 @@ Confirm every box before starting step 1 below:
    that `operator-latest` now points at the same digest. Add the operator version to the
    COMPATIBILITY.md row for the release. Only a stable tag does this; an `-rc.N` operator tag
    never moves `operator-latest`.
+   **Bundle-integrity guard.** Before the release body is generated or anything is published, the
+   workflow runs `scripts/verify-operator-bundle-image.mjs` against **both** attached assets
+   (`install.yaml` and `install-vX.Y.Z.yaml`). It requires each bundle to contain exactly one
+   operator image reference of the form `<registry>/<repo>/kn-next-operator:vX.Y.Z@sha256:<digest>`
+   where the registry and repository are exactly the image this run pushed, the tag is the release
+   tag's `vX.Y.Z`, and the digest is the one this run pushed. A mismatch (a stale tag, a foreign
+   registry or repo, a different digest), a missing image line, or an unreadable file **fails the
+   release job before anything is published**, so no release, asset, or `operator-latest` move
+   happens. Fix the bundle (usually the version stamp) and cut a new tag; the guard never edits the
+   bundle itself.
    **Marketplace-bound variant.** The same `operator-vX.Y.Z` run also publishes
    `ghcr.io/getknext-dev/kn-next-operator:vX.Y.Z-mp`: an image index over the **same platform
    manifests** (same config and layer digests) with the buildkit attestation manifests removed,

@@ -397,14 +397,16 @@ describe("redirects built from request.url carry the public origin (real standal
                     "https://www.example.com/article/one?from=go",
                 );
 
-                // An allowlisted forwarded host and an http proto from the front proxy.
+                // An allowlisted forwarded host with `X-Forwarded-Proto: http` (what a
+                // plain-HTTP ingress listener sets, or a client forges): the scheme
+                // comes from the https allowlist entry, so it stays https.
                 const forwarded = await get(s.port, "/go", {
                     Host: "internal.svc.cluster.local",
                     "X-Forwarded-Host": "www.example.com",
                     "X-Forwarded-Proto": "http",
                 });
                 expect(forwarded.headers.location).toBe(
-                    "http://www.example.com/article/one?from=go",
+                    "https://www.example.com/article/one?from=go",
                 );
 
                 // An attacker's host and proto: the first allowlisted origin, https.
@@ -435,12 +437,60 @@ describe("redirects built from request.url carry the public origin (real standal
                 );
 
                 // The effective allowlist is announced once at boot.
-                expect(s.log()).toContain(`PUBLIC_ORIGINS:${ORIGINS}`);
+                expect(s.log()).toContain(
+                    "PUBLIC_ORIGINS:https://app.example.com,https://www.example.com",
+                );
             } finally {
                 s.stop();
             }
         }, 300_000);
     }
+
+    it("an http:// allowlist entry yields http:// and an https:// entry https://, whatever X-Forwarded-Proto says", async () => {
+        const s = await serve(
+            "node --require",
+            "http://app.example.com,https://www.example.com",
+        );
+        try {
+            for (const proto of ["http", "https", "javascript"]) {
+                const plain = await get(s.port, "/go", {
+                    Host: "app.example.com",
+                    "X-Forwarded-Proto": proto,
+                });
+                expect(plain.headers.location).toBe(
+                    "http://app.example.com/article/one?from=go",
+                );
+                const secure = await get(s.port, "/go", {
+                    Host: "www.example.com",
+                    "X-Forwarded-Proto": proto,
+                });
+                expect(secure.headers.location).toBe(
+                    "https://www.example.com/article/one?from=go",
+                );
+            }
+        } finally {
+            s.stop();
+        }
+    }, 300_000);
+
+    it("a middleware that rewrites x-forwarded-host does not move the redirect: the origin is decided on the headers that arrived", async () => {
+        const s = await serve("node --require", ORIGINS);
+        try {
+            // proxy.js sets x-forwarded-host: www.example.com on the live request.
+            // Host is app.example.com and no proxy sent x-forwarded-host, so the
+            // arrival snapshot yields app.example.com. Reading live req.headers
+            // would yield www.example.com.
+            const res = await get(s.port, "/mw/go", {
+                Host: "app.example.com",
+            });
+            expect(res.status).toBe(307);
+            expect(res.headers.location).toBe(
+                "https://app.example.com/article/one?from=mw",
+            );
+        } finally {
+            s.stop();
+        }
+    }, 300_000);
 
     it("the Draft Mode entry route redirects to the app host, where the bypass cookie renders the draft", async () => {
         const s = await serve("node --require", ORIGINS);
