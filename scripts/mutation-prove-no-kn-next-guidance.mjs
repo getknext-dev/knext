@@ -39,6 +39,8 @@ const PROOF = {
     gitignoreHbs: 'packages/kn-next/templates/app/gitignore.hbs',
     infraReadme: 'infra/bun-base/README.md',
     designMd: 'docs/design/drizzle-data-sdk.md',
+    architectureMd: 'docs/ARCHITECTURE.md',
+    releasingMd: 'docs/RELEASING.md',
   },
 };
 
@@ -141,6 +143,20 @@ const MUTATIONS = [
     spec: GUARD_SPEC,
     anchor: '└── ...                     # run knext from here',
     replacement: '└── ...                     # run kn-next from here',
+  },
+  {
+    label: 'scope: docs/ARCHITECTURE.md is scanned (no longer allowlisted)',
+    subject: 'architectureMd',
+    spec: GUARD_SPEC,
+    anchor: 'The `knext` CLI provides commands',
+    replacement: 'The `kn-next` CLI provides commands',
+  },
+  {
+    label: 'scope: docs/RELEASING.md is scanned (no longer allowlisted)',
+    subject: 'releasingMd',
+    spec: GUARD_SPEC,
+    anchor: '`knext` emits a `NextApp` custom resource',
+    replacement: '`kn-next deploy` emits a `NextApp` custom resource',
   },
   {
     label: 'package.json: the `kn-next` bin comes back',
