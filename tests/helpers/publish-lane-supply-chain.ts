@@ -270,7 +270,13 @@ interface HeredocOp {
   /** Everything after the delimiter word, to the end of the line. */
   after: string;
   delim: string;
+  /** `<<-`: leading TABS (only) are stripped from the terminator line. */
+  dash: boolean;
 }
+
+/** Does `line` end a heredoc body the way BASH does? `<<`: the whole line; `<<-`: after leading tabs. */
+const endsHeredoc = (line: string, op: { delim: string; dash: boolean }): boolean =>
+  (op.dash ? line.replace(/^\t+/, '') : line) === op.delim;
 
 /**
  * Unquoted `<<WORD` operators on ONE line, with the statement they belong to.
@@ -331,6 +337,7 @@ function heredocOps(line: string): HeredocOp[] {
         outer: frames.length > 0 ? frames[0].outer : undefined,
         after: line.slice(i + m[0].length),
         delim: m[1] ?? m[2] ?? m[3],
+        dash: m[0].startsWith('<<-'),
       });
       i += m[0].length - 1;
     }
@@ -415,26 +422,26 @@ function analyzeHeredocs(source: string): { text: string; keptBody: boolean[] } 
   const lines = source.split('\n');
   const out: string[] = [];
   const keptBody: boolean[] = [];
-  let pending: string[] = [];
+  let pending: HeredocOp[] = [];
   for (let i = 0; i < lines.length; i++) {
     out.push(lines[i]);
     if (pending.length > 0) {
       keptBody.push(true);
-      if (lines[i].trim() === pending[0]) pending.shift();
+      if (endsHeredoc(lines[i], pending[0])) pending.shift();
       continue;
     }
     keptBody.push(false);
     const ops = heredocOps(lines[i]);
     if (ops.length === 1 && isProseHeredoc(ops[0])) {
       let j = i + 1;
-      while (j < lines.length && lines[j].trim() !== ops[0].delim) j++;
+      while (j < lines.length && !endsHeredoc(lines[j], ops[0])) j++;
       if (j < lines.length) {
         i = j; // the terminator line is dropped with the body
         continue;
       }
       // unterminated: keep the body
     }
-    pending = ops.map((o) => o.delim);
+    pending = ops;
   }
   return { text: out.join('\n'), keptBody };
 }
@@ -599,8 +606,31 @@ const LEAD_KEYWORDS = new Set(['then', 'do', 'else', '{', '!', 'time']);
 /** `exit 1` / `exit "2"` / `exit $((1))`: a literal NON-ZERO status, i.e. an error branch. */
 const isNonZeroLiteral = (arg: string | undefined): boolean =>
   // `$((1))` is deliberately NOT accepted: the lexer reads arithmetic as a command
-  // substitution and drops its content, so the value cannot be checked.
-  arg !== undefined && /^[1-9][0-9]*$/.test(arg);
+  // substitution and drops its content, so the value cannot be checked. 1..255 only:
+  // exit statuses wrap modulo 256, so `exit 256` exits 0 (a masked audit failure).
+  arg !== undefined && /^[1-9][0-9]*$/.test(arg) && Number(arg) <= 255;
+
+/**
+ * `trap <handler> <signals…>`: can it replace the step's exit status? Only EXIT/ERR/0
+ * traps matter. A handler that exits non-zero or just echoes is harmless; one that
+ * runs `exit 0`/bare `exit`/`return`/`true`/`:` -- or that we cannot read (`$H`,
+ * backticks) -- fails closed.
+ */
+function trapOverridesStatus(args: string[]): boolean {
+  if (args.length < 2) return false; // `trap`, `trap -p`, `trap - EXIT`
+  const [handler, ...sigs] = args;
+  if (handler === '-' || handler === '') return false;
+  const hits = sigs.some((sg) => /^(SIG)?(EXIT|ERR)$|^0$/i.test(sg));
+  if (!hits) return false;
+  if (/[$`]/.test(handler)) return true;
+  return (
+    /\b(exit|return)\b(?!\s+(?:[1-9][0-9]?|1[0-9]{2}|2[0-4][0-9]|25[0-5])(?![0-9]))/.test(
+      handler,
+    ) ||
+    /\btrue\b/.test(handler) ||
+    /(^|[\s;&|]):($|[\s;&|])/.test(handler)
+  );
+}
 
 /** Why the run body's audit invocation can NOT be relied on to fail the step (null = it can). */
 function auditInvocationProblem(run: string): string | null {
@@ -640,6 +670,9 @@ function auditInvocationProblem(run: string): string | null {
     const head = cmd[0];
     if ((head === 'exit' || head === 'return') && !isNonZeroLiteral(cmd[1])) {
       return 'the step contains an `exit`/`return` whose status is zero or not a literal non-zero number, which can end it without the audit deciding';
+    }
+    if (head === 'trap' && trapOverridesStatus(cmd.slice(1))) {
+      return 'the step installs an EXIT/ERR trap that can override the exit status (`trap … EXIT` with `exit 0`/`true`/`:` or an unreadable handler)';
     }
     if (head === 'set') {
       const rest = cmd.slice(1);

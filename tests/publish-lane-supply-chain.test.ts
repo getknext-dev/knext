@@ -674,6 +674,92 @@ describe('publish-lane supply-chain guard: an audit that cannot fail the run is 
     expect(audit.problems.length).toBeGreaterThan(0);
   });
 
+  it('rejects exit literals that wrap to 0 modulo 256, accepts 1 and 255', () => {
+    for (const lit of ['256', '512', '0256', '1024']) {
+      for (const body of [
+        `node scripts/audit-published.mjs || exit ${lit}`,
+        `node scripts/audit-published.mjs\nexit ${lit}`,
+      ]) {
+        const audit = auditPublishLanes(
+          fixture({ 'a.yml': wf(`${auditJobWith(body)}${publishJob('audit')}`) }),
+        );
+        expect(audit.problems.length, body).toBeGreaterThan(0);
+      }
+    }
+    for (const lit of ['1', '255']) {
+      const body = `node scripts/audit-published.mjs || exit ${lit}`;
+      const audit = auditPublishLanes(
+        fixture({ 'a.yml': wf(`${auditJobWith(body)}${publishJob('audit')}`) }),
+      );
+      expect(audit.problems, body).toEqual([]);
+    }
+  });
+
+  it('heredoc terminators match bash exactly: indented terminator of a plain << does not end the body', () => {
+    // bash keeps reading: the "audit" line below is still heredoc text and never runs.
+    const body = 'cat > r.sh <<EOF\nx\n  EOF\nnode scripts/audit-published.mjs\nEOF';
+    const audit = auditPublishLanes(
+      fixture({ 'a.yml': wf(`${auditJobWith(body)}${publishJob('audit')}`) }),
+    );
+    expect(audit.problems.length).toBeGreaterThan(0);
+    const proseBody =
+      'cat <<EOF >> "$GITHUB_STEP_SUMMARY"\nx\n  EOF\nnode scripts/audit-published.mjs\nEOF';
+    const audit2 = auditPublishLanes(
+      fixture({ 'a.yml': wf(`${auditJobWith(proseBody)}${publishJob('audit')}`) }),
+    );
+    expect(audit2.problems.length).toBeGreaterThan(0);
+  });
+
+  it('<<- strips leading TABS only: a tab-indented terminator ends the body, a space-indented one does not', () => {
+    const tabbed =
+      'cat <<-EOF >> "$GITHUB_STEP_SUMMARY"\nx\n\tEOF\nnode scripts/audit-published.mjs';
+    const ok = auditPublishLanes(
+      fixture({ 'a.yml': wf(`${auditJobWith(tabbed)}${publishJob('audit')}`) }),
+    );
+    expect(ok.problems).toEqual([]);
+    const spaced =
+      'cat <<-EOF >> "$GITHUB_STEP_SUMMARY"\nx\n  EOF\nnode scripts/audit-published.mjs\nEOF';
+    const bad = auditPublishLanes(
+      fixture({ 'a.yml': wf(`${auditJobWith(spaced)}${publishJob('audit')}`) }),
+    );
+    expect(bad.problems.length).toBeGreaterThan(0);
+  });
+
+  it('an EXIT/ERR trap that can override the status neutralises the audit', () => {
+    for (const trap of [
+      "trap 'exit 0' EXIT",
+      "trap 'true' EXIT",
+      "trap ':' EXIT",
+      'trap "exit 0" EXIT',
+      "trap 'exit 0' ERR",
+      "trap 'exit 0' 0",
+      "trap 'exit 0' SIGEXIT INT EXIT",
+      'trap "$H" EXIT',
+      "trap 'echo x; exit 0' EXIT",
+    ]) {
+      const body = `${trap}\nnode scripts/audit-published.mjs`;
+      const audit = auditPublishLanes(
+        fixture({ 'a.yml': wf(`${auditJobWith(body)}${publishJob('audit')}`) }),
+      );
+      expect(audit.problems.length, body).toBeGreaterThan(0);
+    }
+  });
+
+  it('harmless traps do not neutralise the audit', () => {
+    for (const trap of [
+      "trap 'echo bye' EXIT",
+      "trap 'exit 1' EXIT",
+      "trap 'exit 0' INT",
+      'trap - EXIT',
+    ]) {
+      const body = `${trap}\nnode scripts/audit-published.mjs`;
+      const audit = auditPublishLanes(
+        fixture({ 'a.yml': wf(`${auditJobWith(body)}${publishJob('audit')}`) }),
+      );
+      expect(audit.problems, body).toEqual([]);
+    }
+  });
+
   it('accepts `|| exit <non-zero>` and a trailing `&& <cmd>` on the audit line', () => {
     for (const body of [
       'node scripts/audit-published.mjs || exit 1',
