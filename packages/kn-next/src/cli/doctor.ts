@@ -55,6 +55,8 @@ import { operatorCheck } from "./doctor/checks/operator";
 import { operatorImageCheck } from "./doctor/checks/operator-image";
 import { operatorVersionCheck } from "./doctor/checks/operator-version";
 import { storageModeCheck } from "./doctor/checks/storage-mode";
+import { cacheComponentsCheck } from "./doctor/checks/use-cache";
+import { vinextPatchesCheck } from "./doctor/checks/vinext-patches";
 import { kubectlRunner, probeManifest } from "./doctor/kubectl";
 import { formatDoctorTable } from "./doctor/report";
 import type {
@@ -63,6 +65,7 @@ import type {
     DoctorDeps,
     DoctorReport,
 } from "./doctor/types";
+import { readInstalledVinextVersion } from "./vinext-patches";
 
 export { type DoctorArgs, parseDoctorArgs } from "./doctor/args";
 export {
@@ -128,6 +131,7 @@ export async function runDoctor(
     checks.push(...kubectlValidationCheck(ctx));
     checks.push(...(await storageModeCheck(ctx)));
     checks.push(...(await nodeEntryStalenessCheck(ctx)));
+    checks.push(...cacheComponentsCheck(ctx)); // local; no row unless cacheComponents (#2083)
     checks.push(...crdCheck(ctx));
     checks.push(...crdSchemaCheck(ctx));
     checks.push(...operatorCheck(ctx)); // sets ctx.operatorImage + ctx.operatorManager
@@ -139,6 +143,10 @@ export async function runDoctor(
     checks.push(...knativeCheck(ctx));
     checks.push(...metricsCheck(ctx));
     checks.push(...networkPolicyCheck(ctx));
+    // Local (no cluster call), and NO row at all for an app without vinext, so
+    // every other app's report is unchanged: bundled vinext fixes vs the
+    // installed vinext version.
+    checks.push(...vinextPatchesCheck(ctx));
     // Opt-in (#1533): a LOCAL file read, not a cluster call, so it does not
     // participate in ctx.skipAll — and it contributes NO row at all when
     // --ci-kubeconfig was not passed, which is what keeps every other
@@ -182,7 +190,7 @@ Checks: NextApp CRD, operator readiness, the installed operator's release
 version and whether it pairs with this CLI (WARN only), cert-manager webhook, Knative
 ingress-class vs its reconciler (#208), operator-image pullability (#198),
 app-image pullability vs the namespace's pull credentials (#952),
-Knative Serving, CNI NetworkPolicy enforcement (whether the cluster can\nenforce the operator's default-on policy — on flannel it cannot), and the\nlocal kubectl's --validate=strict support. Exit 1 on
+Knative Serving, CNI NetworkPolicy enforcement (whether the cluster can\nenforce the operator's default-on policy — on flannel it cannot), and the\nlocal kubectl's --validate=strict support, plus (local, only for an app that has vinext)\nwhether the installed vinext is the version knext's bundled fixes were validated\nagainst (older = FAIL, newer = WARN). Exit 1 on
 hard FAILs and on probe ERRORs (a check's kubectl
 probe hit a network/TLS/credential/RBAC failure — the cluster state could not
 be verified); WARN/SKIP never fail; a fully unreachable cluster SKIPs (exit 0).
@@ -216,6 +224,7 @@ export async function doctorMain(
         kubectl: kubectlRunner,
         probeImage: probeManifest,
         cliVersion: readOwnVersion(),
+        readInstalledVinext: () => readInstalledVinextVersion(process.cwd()),
     },
 ): Promise<number> {
     // parseDoctorArgs first, so an unknown flag is rejected before anything

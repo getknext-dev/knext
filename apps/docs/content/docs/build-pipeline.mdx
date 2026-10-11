@@ -448,8 +448,13 @@ release. They are applied to the vinext installed for your app by `knext vinext-
 vinext app created by `knext create` runs from its `postinstall` script; `knext build` applies them
 again before building, so an app created before the script existed is covered too. The fixes
 target the exact vinext version `knext create` pins. With a different vinext version installed they
-are skipped, with a message saying so. Set `KNEXT_VINEXT_PATCHES=0` to turn them off, for example
-if you patch vinext yourself. Each fix is removed from knext once a vinext release includes it.
+are all skipped, and the build prints a warning that says how many fixes it skipped, what the build
+is missing and how to fix it (install the pinned vinext version). Set `KNEXT_VINEXT_PATCHES=strict`
+to fail the build on that mismatch instead, and see [`knext doctor`](/docs/cli#knext-doctor) for the
+matching check. Set `KNEXT_VINEXT_PATCHES=0` to turn the fixes off, for example if you patch vinext
+yourself (`0`, `false`, `off` and `no` all turn them off). A misspelled value, such as `stric`, is
+treated as unset and a vinext build prints a warning that names it. Each fix is removed from knext once a
+vinext release includes it.
 
 The fixes bundled with vinext 1.1.0:
 

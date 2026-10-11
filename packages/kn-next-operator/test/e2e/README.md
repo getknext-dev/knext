@@ -9,7 +9,7 @@ Everything below is checked against the code — file/line pointers are given so
 staleness is detectable. When you add or change a suite, update this file in the
 same PR.
 
-## Suite taxonomy (six build tags)
+## Suite taxonomy (seven build tags)
 
 Verified against the `//go:build` lines of each file.
 
@@ -19,6 +19,7 @@ Verified against the `//go:build` lines of each file.
 | `e2e_scale` | `scale_suite_test.go`, `suite_hooks_scale_test.go`, `scale_to_zero_cache_test.go` (#38), `scale_from_zero_test.go` (#39) | Scale-to-zero: bytecode-cache survival across scale-to-zero and cold-start activation, on a real Knative install. | `make test-e2e-scale` | kind only |
 | `e2e_bundle` | `install_bundle_test.go` (#117) | The client install artifact: applies `dist/install.yaml` (manager image overridden to a locally-built one), operator goes Available, reconciles a digest-pinned `NextApp` with **honest** Ready semantics (unpullable placeholder ⇒ `Ready=False/KnativeServiceNotReady`; set `BUNDLE_APP_IMAGE` to a real serving digest for the `Ready=True` path). | `make test-e2e-bundle` | kind only |
 | `e2e_cli` | `cli_e2e_test.go` | The REAL built `kn-next` CLI (plain Node, never Bun) runs `doctor` / `db bind` / `status` against a live operator; asserts exit codes and `--json` contracts. No app workload ever runs (deliberately unpullable image). | `make test-e2e-cli` | kind **or** existing-cluster |
+| `e2e_platform` | `platform_e2e_test.go` (#2112, ADR-0064) | The platform layer on real Knative: an EMPTY `KnextPlatform` renders the Knative Service byte-identically; a platform timeout is inherited and paced by the rollout limiter; a lowered `connectionBudget` HOLDS apps (old revision keeps serving, `Ready=False` on a dropped change, held-apps metric moves); an over-budget app deletes without hanging in Terminating; restoring the budget recovers; the budget webhook never silently fell back. CI: `operator-platform-e2e.yml`. | `make test-e2e-platform` | kind only (the platform is a cluster-wide singleton) |
 | `e2e_rollback` | `rollback_e2e_test.go` (#92, Tier-B "rollback demoed") | `kn-next rollback` pin / canary / clear on a servable app with two real revisions; the operator reconciles the ksvc traffic split and real HTTP routes to the pinned revision. | `make test-e2e-rollback` | kind **or** existing-cluster |
 | `e2e_gc` | `asset_gc_e2e_test.go` (plan P4/P5, ADR-0011) | The asset-GC live-set guarantee end-to-end: in-cluster MinIO, seeded ADR-0008 key layout, pinned-oldest revision survives `kn-next gc`, unpinned-old reaped, reserved `chunks/css/media` + bare `<app>/` untouched, fail-safe over-keep skip proven first. **v3-P5 lagging-status leg:** a real scale-to-zero of a pinned app drives `status.currentTraffic` to lag empty ⇒ `gc` SKIPS `[pinned-with-empty-status]` (zero deletions); restore ⇒ reconcile resumes ⇒ a normal `gc` reaps only the unpinned out-of-window build. That leg is **self-contained-kind ONLY** (it scales the app — a mutation beyond the suite's namespace-confined, cluster-read-only contract): it **SKIPS in existing-cluster mode**. Needs the `aws` CLI. | `make test-e2e-gc` | kind **or** existing-cluster (P5 leg: kind only) |
 

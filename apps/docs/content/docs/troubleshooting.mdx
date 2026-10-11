@@ -260,7 +260,7 @@ instrumented, so silence does not rule them out.
 **Symptom.** The first database query after both the app *and* its database have been idle fails or is
 very slow; logs show a connect timeout or `connection refused`, and `KnextHighErrorRate` may fire.
 
-**Cause.** knext binds Postgres through a Secret DSN and builds no database machinery. When the DSN
+**Cause.** knext binds Postgres through a Secret DSN. The optional scale-to-zero database (Beta) is a separate component. When the DSN
 points at a scale-to-zero database's wake-on-connect gateway, a cold database takes a few seconds to
 wake. Two client-side settings cause the timeout:
 
@@ -403,6 +403,17 @@ kubectl exec deploy/<your-scraper> -- wget -qO- http://<pod-ip>:9464/metrics | h
 ```
 
 See [Upgrading](/docs/upgrading) for the ordered steps.
+
+## A redirect goes to 0.0.0.0 [#redirect-goes-to-0000]
+
+A redirect sends the browser to `http://0.0.0.0:8080/...`, the page doesn't load, and a cookie the
+redirect should have carried (a login session, Draft Mode) is missing.
+
+The redirect was built from `request.url`, for example
+`NextResponse.redirect(new URL('/dashboard', request.url))`. Next.js builds `request.url` from the
+address the server listens on, which is `0.0.0.0` in a pod. Set `KNEXT_PUBLIC_ORIGINS` to your
+app's hostnames, primary domain first. The pod then rewrites that origin to one of them. See
+[Make redirects use your domain](/docs/custom-domains-tls#redirects-use-your-domain).
 
 ## When none of these match
 

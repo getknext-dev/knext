@@ -232,10 +232,10 @@ EOF
   # export must not kill Node-lane deploys (the heal is only INVOKED on
   # RUNTIME=bun, post-build — see step 3).
   KNEXT_BUN_EXPORTS_HEAL="$(node -e 'process.stdout.write(require.resolve("@getknext/core/internal/standalone-bun-exports"))' 2>/dev/null || true)"
-  # The Next.js < 16.4.0 `adapterPath` workaround (blank adapterPath in the
-  # standalone runtime config), from the SAME installed package. Tolerant
-  # resolve: a tarball older than the export just runs without it, and the
-  # workaround itself is a no-op on a fixed Next.
+  # The `adapterPath` workaround (blank adapterPath in the standalone runtime
+  # config, every Next version), from the SAME installed package. Tolerant
+  # resolve here; the use site below fails the deploy when it is missing on a
+  # readable Next version.
   KNEXT_ADAPTER_PATH_FIX="$(node -e 'process.stdout.write(require.resolve("@getknext/core/internal/standalone-adapter-path"))' 2>/dev/null || true)"
   # #188 path 2 — opt-in edge-sandbox fetch instrumentation preload (inert
   # unless KNEXT_SANDBOX_FETCH_DEBUG=1; only appended under that gate below).
@@ -258,8 +258,8 @@ else
   # never boots bun fixtures, so leave it unset — the bun branch warns+skips.
   KNEXT_BUN_EXPORTS_HEAL="${KNEXT_BUN_EXPORTS_HEAL:-}"
   # Same: TS source in-repo, so the module is unavailable here. The fallback
-  # below warns when the Next version is unknown or fixed (the contract tests'
-  # fake `next` has no version) and exits 1 on an affected Next < 16.4.0.
+  # below warns when the Next version is unknown (the contract tests' fake
+  # `next` has no version) and exits 1 on any readable Next version.
   KNEXT_ADAPTER_PATH_FIX="${KNEXT_ADAPTER_PATH_FIX:-}"
 fi
 if [ ! -f "${KNEXT_CC_PRELOAD}" ]; then
@@ -468,17 +468,23 @@ if [ -d "${APP_DIR}/public" ]; then
   cp -R "${APP_DIR}/public" "${STANDALONE_APP_DIR}/public"
 fi
 
-# ── Next.js < 16.4.0: blank adapterPath in the standalone runtime config ──────
-# With `adapterPath` set, Next 16.3.x answers a `dynamicParams = false` miss
-# through render404() INSIDE the response cache, which throws "invariant: cache
-# entry required but not generated" and, under concurrent prefetches, 500s
-# (parallel-routes-root-param-dynamic-child). Fixed in 16.4.0, not backported.
+# ── blank adapterPath in the standalone runtime config (EVERY Next version) ───
+# With `adapterPath` set, Next's `dynamicParams = false` miss is `render404()`,
+# not `throw new NoFallbackError()`. render404() ends the request, so a closed
+# matcher never falls through to a less specific route (16.4.0
+# dynamic-params-request-modes: /overlap/unlisted -> 404, wanted the catch-all).
+# That branch assumes an adapter router (@next/routing) already admitted the
+# request; this script boots Next's own standalone server, which has none.
+# On Next < 16.4.0 it is ALSO run INSIDE the response cache, which throws
+# "invariant: cache entry required but not generated" and, under concurrent
+# prefetches, 500s (parallel-routes-root-param-dynamic-child); fixed in 16.4.0.
 # The adapter's work is build-time only, so the standalone server does not need
 # it: blank it in the tree's runtime config, BEFORE the compile below so the
-# bun executable bundles the blanked config. Version-gated inside the module
-# (a no-op on Next >= 16.4.0); both runtimes boot this same tree.
+# bun executable bundles the blanked config. Not version-gated (the reference
+# nextjs/adapter-bun deletes adapterPath from its runtime config too); both
+# runtimes boot this same tree.
 if [ -n "${KNEXT_ADAPTER_PATH_FIX:-}" ] && [ -f "${KNEXT_ADAPTER_PATH_FIX}" ]; then
-  log "adapterPath workaround for Next < 16.4.0 (module: ${KNEXT_ADAPTER_PATH_FIX})"
+  log "adapterPath workaround (module: ${KNEXT_ADAPTER_PATH_FIX})"
   node --input-type=module -e '
     const [fixPath, serverDir, projectDir] = process.argv.slice(1);
     const { pathToFileURL } = await import("node:url");
@@ -490,12 +496,13 @@ if [ -n "${KNEXT_ADAPTER_PATH_FIX:-}" ] && [ -f "${KNEXT_ADAPTER_PATH_FIX}" ]; t
     const r = mod.blankStandaloneAdapterPath({ serverDir, projectDir, log: (m) => console.error(m) });
     console.error(`[e2e-deploy] adapterPath workaround: applied=${r.applied} next=${r.nextVersion} (${r.reason})`);
   ' "${KNEXT_ADAPTER_PATH_FIX}" "${STANDALONE_APP_DIR}" "${APP_DIR}" >&2 \
-    || { log "ERROR: adapterPath workaround failed — refusing to boot a tree that may 500 on dynamicParams=false misses"; exit 1; }
+    || { log "ERROR: adapterPath workaround failed — refusing to boot a tree whose dynamicParams=false misses 404 instead of falling through (and may 500 on Next < 16.4.0)"; exit 1; }
 else
   # No module to apply. That is only acceptable where there is nothing to apply:
-  # on an affected Next (< 16.4.0, pre-releases included) a missing module would
-  # boot a tree that 500s on dynamicParams=false misses and report a green night,
-  # so it is an ERROR there. A fixed or unreadable Next version only warns.
+  # on ANY readable Next version a missing module would boot a tree that stops at
+  # the closed route's 404 (and 500s on Next < 16.4.0) and report a green night,
+  # so it is an ERROR there. An unreadable Next version (the contract tests' fake
+  # `next`) only warns.
   NEXT_AFFECTED="$(node -e '
     const { createRequire } = require("node:module");
     const { join } = require("node:path");
@@ -504,16 +511,14 @@ else
         const v = require(createRequire(join(dir, "server.js")).resolve("next/package.json")).version;
         const m = /^v?(\d+)\.(\d+)\.(\d+)(-[0-9A-Za-z.-]+)?/.exec(v);
         if (!m) continue;
-        const [a, b, c] = [Number(m[1]), Number(m[2]), Number(m[3])];
-        const below = a !== 16 ? a < 16 : b !== 4 ? b < 4 : c !== 0 ? c < 0 : m[4] !== undefined;
-        process.stdout.write(below ? "affected" : "fixed");
+        process.stdout.write("readable");
         process.exit(0);
       } catch {}
     }
     process.stdout.write("unknown");
   ' "${STANDALONE_APP_DIR}" "${APP_DIR}" 2>/dev/null || echo unknown)"
-  if [ "${NEXT_AFFECTED}" = "affected" ]; then
-    log "ERROR: adapterPath workaround module unavailable (${KNEXT_ADAPTER_PATH_FIX:-unset}) on a Next < 16.4.0 — refusing to boot a tree that 500s on dynamicParams=false misses under concurrent prefetches"
+  if [ "${NEXT_AFFECTED}" = "readable" ]; then
+    log "ERROR: adapterPath workaround module unavailable (${KNEXT_ADAPTER_PATH_FIX:-unset}) — refusing to boot a tree whose dynamicParams=false misses 404 instead of falling through to the less specific route (and 500 under concurrent prefetches on Next < 16.4.0)"
     exit 1
   fi
   log "WARNING: adapterPath workaround module unavailable (${KNEXT_ADAPTER_PATH_FIX:-unset}); Next version is ${NEXT_AFFECTED}, so nothing is known to be at risk"
