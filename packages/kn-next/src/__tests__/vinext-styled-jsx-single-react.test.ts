@@ -18,11 +18,14 @@ import { cpSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { applyVinextPatches } from "../cli/vinext-patches";
+import { waitForHttpOk } from "./helpers/wait-for-http-ok";
 
 const tempRoots: string[] = [];
+// Explicit timeout: removing two node_modules trees under CPU contention
+// blows bun's default hook timeout.
 afterAll(() => {
     for (const r of tempRoots) rmSync(r, { recursive: true, force: true });
-});
+}, 120_000);
 
 const FIXTURE = join(import.meta.dir, "fixtures", "vinext-styled-jsx-app");
 
@@ -63,18 +66,21 @@ describe("vinext x nitro: <style jsx> keeps a single React", () => {
             srv.stderr.on("data", (d) => {
                 log += d;
             });
+            let exited: string | null = null;
+            srv.on("exit", (code, signal) => {
+                exited = `code=${code} signal=${signal}`;
+            });
             try {
-                let res: Response | undefined;
-                for (let i = 0; i < 40 && !res; i++) {
-                    try {
-                        res = await fetch(`http://127.0.0.1:${port}/`);
-                    } catch {
-                        await new Promise((r) => setTimeout(r, 250));
-                    }
-                }
+                // Bound the wait: a bound port can still answer non-200 while
+                // the server warms up, which flaked a single probe under load.
+                const res = await waitForHttpOk(`http://127.0.0.1:${port}/`, {
+                    deadlineMs: 90_000,
+                    log: () => log,
+                    exited: () => exited,
+                });
                 return {
-                    status: res?.status,
-                    body: (await res?.text()) ?? "",
+                    status: res.status,
+                    body: await res.text(),
                     log,
                 };
             } finally {
