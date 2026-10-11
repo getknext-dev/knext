@@ -10,11 +10,15 @@
 # :9464 is the runtime's own metrics endpoint. Since ADR-0048 that is the
 # compiled single executable's second Bun.serve listener (see `renderMetrics` in
 # packages/kn-next/templates/app/runtime-contract.mjs.hbs), which exports the
-# knext_bunexec_* process, RED and cold-start series. It is the ONLY endpoint
-# this PodMonitor scrapes, so anything an app registers into its own prom-client
-# registry and serves on the APP port (an `/api/metrics` route) is NOT collected
-# here — that path used to be merged in by the node-server supervisor and no
-# longer is. Every app pod the operator generates carries the label
+# knext_bunexec_* process, RED and cold-start series, plus ONE family forwarded
+# from the app's own registry: knext_deep_health_state (APP_METRIC_FAMILIES in
+# the same contract; present only when tracing is enabled). It is the ONLY
+# endpoint this PodMonitor scrapes, so anything else an app registers into its
+# own prom-client registry and serves on the APP port (an `/api/metrics` route)
+# is NOT collected here — that path used to be merged in by the node-server
+# supervisor and no longer is. The forward is an allowlist, not the registry:
+# :9464 is readable cross-namespace (ADR-0044), so a family added there is new
+# disclosure and is pinned by the threat model and a test. Every app pod the operator generates carries the label
 # `generated-by: kn-next-operator`, which is the selector below — one PodMonitor
 # covers all NextApps.
 #

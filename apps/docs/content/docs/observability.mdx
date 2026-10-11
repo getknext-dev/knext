@@ -61,7 +61,7 @@ The **default standalone build** exposes a different family, with an `app` label
 | `knext_http_inflight_requests` | Gauge | Current concurrency (saturation). |
 | `knext_coldstart_total`, `knext_coldstart_duration_seconds` | Counter, Histogram | Cold-start count and wake latency. |
 | `knext_db_wake_total`, `knext_db_wake_duration_seconds` | Counter, Histogram | Database wake count and latency, labelled `role`. |
-| `knext_deep_health_state` | Gauge | The deep-health verdict per dependency; the active state is `1`. |
+| `knext_deep_health_state` | Gauge | The deep-health verdict per dependency; the active state is `1`. Present only when tracing is enabled; the only series of this family the shipped scrape collects, and the one the deep-health alerts read. |
 
 Ready-made Grafana dashboards ship with knext (see [Dashboards](#dashboards) below). The request
 panels on the RED and load-testing dashboards query the vinext family (`knext_bunexec_*`), so on the

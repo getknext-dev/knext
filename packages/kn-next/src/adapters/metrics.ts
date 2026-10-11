@@ -297,7 +297,16 @@ export interface DeepHealthScrapeDeps {
      * app's scale-to-zero DB is never woken by the :9464 scrape (#348 gate fix).
      */
     readonly isRecentlyActive: () => boolean;
+    /** Clock, injectable for tests. Defaults to `Date.now`. */
+    readonly now?: () => number;
 }
+
+/**
+ * How long a probe's result is reused. Deliberately BELOW the 30 s scrape
+ * interval the shipped PodMonitor uses, so a normal scrape always probes fresh,
+ * while a burst of extra requests inside the window cannot multiply probes.
+ */
+export const DEEP_HEALTH_PROBE_TTL_MS = 10_000;
 
 /**
  * Build the :9464 scrape hook that refreshes the deep-health gauge — ACTIVITY-
@@ -307,27 +316,50 @@ export interface DeepHealthScrapeDeps {
  * the idle DB can sleep normally. This preserves BOTH the alert (a real in-use
  * DB stuck `waking` still pages) AND scale-to-zero (an idle app's DB sleeps).
  *
+ * AMPLIFICATION-BOUNDED. The gauge is served on :9464, which cross-namespace
+ * scrapers can read (ADR-0044), so the hook must not turn each request into a
+ * database plus cache probe that can hold the handler for the deep-check budget.
+ * It is SINGLE-FLIGHT (concurrent callers await one shared probe) and TTL-CACHED
+ * ({@link DEEP_HEALTH_PROBE_TTL_MS}, measured from when the last probe finished,
+ * success or failure so a failing dependency is not hammered either). A caller
+ * inside the TTL returns at once; the gauge already holds that probe's result.
+ *
  * Fail-open: a throwing deep check never rejects the scrape.
  */
 export function makeDeepHealthScrapeHook(
     metrics: KnextMetrics,
     deps: DeepHealthScrapeDeps,
 ): () => Promise<void> {
-    return async () => {
+    const now = deps.now ?? Date.now;
+    let inFlight: Promise<void> | undefined;
+    let lastFinishedAt = Number.NEGATIVE_INFINITY;
+    return () => {
+        // Concurrent callers share the running probe — and wait for its result, so
+        // the exposition they then serve carries it.
+        if (inFlight) return inFlight;
+        if (now() - lastFinishedAt < DEEP_HEALTH_PROBE_TTL_MS) {
+            return Promise.resolve();
+        }
         // ACTIVITY GATE: skip the DB dial entirely when the pool is idle. This is
         // the whole fix — no `SELECT 1` on scrape while idle ⇒ the gateway lets
         // the DB sleep. A stuck-`waking` outage only matters while the app is
         // actively using the DB, which is exactly when this gate is open.
         if (!deps.isRecentlyActive()) {
-            return;
+            return Promise.resolve();
         }
-        try {
-            const health = await deps.checkDeepHealth();
-            refreshDeepHealthGauge(metrics, health);
-        } catch {
-            // Fail-open: a failed deep check must never fail the scrape; leave the
-            // gauge at its last-known value.
-        }
+        inFlight = (async () => {
+            try {
+                const health = await deps.checkDeepHealth();
+                refreshDeepHealthGauge(metrics, health);
+            } catch {
+                // Fail-open: a failed deep check must never fail the scrape; leave
+                // the gauge at its last-known value.
+            } finally {
+                lastFinishedAt = now();
+                inFlight = undefined;
+            }
+        })();
+        return inFlight;
     };
 }
 
