@@ -63,6 +63,9 @@ const RELEASE_IF =
   "      && needs.publish-preflight.outputs.should_publish == 'true'\n";
 const AUDIT_RUN = '        run: node scripts/audit-published.mjs\n';
 
+const NEW_WF = (top, publishStep) =>
+  `# ${MUTATION_MARKER}\nname: mutation-injected\non: workflow_dispatch\n${top}jobs:\n  ship:\n    runs-on: ubuntu-latest\n    steps:\n${publishStep}`;
+
 const NEW_LANE = (publishStep, jobExtra = '') =>
   `# ${MUTATION_MARKER}\nname: mutation-injected publish lane\non: workflow_dispatch\njobs:\n  ship:\n    runs-on: ubuntu-latest\n${jobExtra}    steps:\n${publishStep}`;
 
@@ -404,6 +407,146 @@ const MUTATIONS = [
     subject: 'spec',
     anchor: "    job: 'publish-lane-guard',\n",
     replacement: "    job: 'publish-lane-guard-renamed',\n",
+    expect: 'red',
+  },
+
+  // ── 6. round 3: workflow env, heredoc content, shell defaults, rules ─────
+  {
+    id: 'M39',
+    claim:
+      'a NEW workflow carries the npm credential at WORKFLOW level (job runs an opaque script)',
+    inject: {
+      name: 'zz-mutation-wf-env-cred.yml',
+      content: NEW_WF(
+        'env:\n  NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}\n',
+        '      - run: bash ./r.sh\n',
+      ),
+    },
+    expect: 'red',
+  },
+  {
+    id: 'M40',
+    claim: 'a NEW workflow writes its publish into a heredoc FILE and runs it',
+    inject: {
+      name: 'zz-mutation-heredoc-file.yml',
+      content: NEW_LANE(
+        "      - run: |\n          cat > r.sh <<'EOF'\n          npm publish\n          EOF\n          bash r.sh\n",
+      ),
+    },
+    expect: 'red',
+  },
+  {
+    id: 'M41',
+    claim: 'a NEW workflow hides its publish behind a quoted <<EOF in an echo',
+    inject: {
+      name: 'zz-mutation-quoted-heredoc.yml',
+      content: NEW_LANE(
+        '      - run: |\n          echo "v $((1<<SHIFT))"\n          npm publish\n',
+      ),
+    },
+    expect: 'red',
+  },
+  {
+    id: 'M42',
+    claim: 'a NEW workflow publishes by OIDC (id-token: write, no token, no publish word)',
+    inject: {
+      name: 'zz-mutation-oidc.yml',
+      content: NEW_LANE(
+        '      - run: npm run deploy\n',
+        '    permissions:\n      id-token: write\n',
+      ),
+    },
+    expect: 'red',
+  },
+  {
+    id: 'M43',
+    claim: 'workflow-level defaults.run.shell is bash {0} for the audit step',
+    subject: 'workflow',
+    anchor: '\njobs:\n',
+    replacement: '\ndefaults:\n  run:\n    shell: bash {0}\n\njobs:\n',
+    expect: 'red',
+  },
+  {
+    id: 'M44',
+    claim: 'the audit step is followed by exit "0" (a spelling no regex listed)',
+    subject: 'workflow',
+    anchor: AUDIT_RUN,
+    replacement: '        run: |\n          node scripts/audit-published.mjs\n          exit "0"\n',
+    expect: 'red',
+  },
+  {
+    id: 'M45',
+    claim: 'the audit step runs under set +eu',
+    subject: 'workflow',
+    anchor: AUDIT_RUN,
+    replacement: '        run: |\n          set +eu\n          node scripts/audit-published.mjs\n',
+    expect: 'red',
+  },
+  {
+    id: 'M46',
+    claim: 'the SBOM upload step is skipped with if: false',
+    subject: 'workflow',
+    anchor: '          path: sbom/*.cdx.json\n',
+    replacement: '          path: sbom/*.cdx.json\n        if: false\n',
+    expect: 'red',
+  },
+  {
+    id: 'M47',
+    claim: 'the workflow-level env is no longer inherited by jobs',
+    subject: 'engine',
+    anchor: "  const text = allStrings([job, wf.env]).join('\\n');\n",
+    replacement: "  const text = allStrings([job]).join('\\n');\n",
+    expect: 'red',
+  },
+  {
+    id: 'M48',
+    claim: 'the id-token rule is switched off',
+    subject: 'engine',
+    anchor: '  if (candidate === null && grantsIdToken(job, ctx.wf) && runsNpmFamily(steps)) {\n',
+    replacement:
+      '  if (false && candidate === null && grantsIdToken(job, ctx.wf) && runsNpmFamily(steps)) {\n',
+    expect: 'red',
+  },
+  {
+    id: 'M49',
+    claim: 'an allowlisted job is excused even after it gains the credential or a real publish',
+    subject: 'engine',
+    anchor: '        if (f.excusal) {\n',
+    replacement: '        if (false) {\n',
+    expect: 'red',
+  },
+  {
+    id: 'M50',
+    claim: 'a quoted <<WORD is treated as a heredoc operator again',
+    subject: 'engine',
+    anchor: '    if (quote) {\n',
+    replacement: '    if (false) {\n',
+    expect: 'red',
+  },
+  {
+    id: 'M51',
+    claim: 'the workflow-level defaults.run.shell is no longer consulted',
+    subject: 'engine',
+    anchor:
+      "typeof step.shell === 'string' ? step.shell : (defaultShellOf(job) ?? ctx.wf.shell);\n",
+    replacement: "typeof step.shell === 'string' ? step.shell : undefined;\n",
+    expect: 'red',
+  },
+  {
+    id: 'M52',
+    claim: 'set +o errexit no longer neutralises the audit',
+    subject: 'engine',
+    anchor:
+      "      const offOption = rest.some((t, i) => t === '+o' && rest[i + 1] === 'errexit');\n",
+    replacement: '      const offOption = false;\n',
+    expect: 'red',
+  },
+  {
+    id: 'M53',
+    claim: 'an SBOM upload under continue-on-error / a conditional still counts',
+    subject: 'engine',
+    anchor: '      !softensFailure(step) &&\n',
+    replacement: '      true &&\n',
     expect: 'red',
   },
 
