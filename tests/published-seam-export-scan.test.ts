@@ -144,6 +144,32 @@ describe('values that merely look similar stay clean (#2188)', () => {
     clean({ 'dist/index.js': `export default class { static a = 1; __private = 2; }\n` });
     clean({ 'dist/index.js': `export default function f() {}\n` });
     clean({ 'dist/index.js': `export default 'x';\n` });
+    // round 2: provenance-proved symbol keys, ordinary post-hoc writes, `.d.ts` look-alikes
+    clean({
+      'dist/index.js': `import { kind } from './entity.js';\nexport class K { static [kind] = 'x'; static [Symbol.iterator] = 1; }\n`,
+      'dist/entity.js': `export const kind = Symbol.for('tag');\n`,
+    });
+    clean(
+      {
+        'dist/index.d.ts': `declare const k: unique symbol;\nexport declare class K { static [k]: number }\n`,
+      },
+      { exports: { '.': './dist/index.d.ts' } },
+    );
+    clean(
+      {
+        'dist/index.d.ts': `import { kind } from './e.js';\nexport declare class K { static [kind]: number }\n`,
+        'dist/e.d.ts': `export declare const kind: unique symbol;\n`,
+      },
+      { exports: { '.': './dist/index.d.ts' } },
+    );
+    clean({ 'dist/index.js': `class K {}\nK.a = 1;\nexport default K;\n` });
+    clean({ 'dist/index.js': `const o = {};\nObject.assign(o, { a: 1 });\nexport { o };\n` });
+    clean(
+      {
+        'dist/index.d.ts': `interface I { a: { b: number } }\ndeclare const o: I;\nexport { o };\nexport interface T { x: 1 }\nexport type U = { y: 2 };\n`,
+      },
+      { exports: { '.': './dist/index.d.ts' } },
+    );
     clean({
       'dist/index.js': `const tag = Symbol.for('t');\nexport class K { static [tag] = 'x'; static a = 1; }\n`,
     });
@@ -276,6 +302,87 @@ describe('every way a seam can be exported reds', () => {
       'a type-literal `export declare const ns: { __k: number }` (#2188)',
       { 'dist/index.d.ts': `export declare const ns: { __k: number };\n` },
       { exports: { '.': './dist/index.d.ts' } },
+    ],
+    [
+      'a static key imported from a module that defines it as a `__` string (round 2)',
+      {
+        'dist/index.js': `import { k } from './k.js';\nexport class K { static [k] = 1; }\n`,
+        'dist/k.js': `export const k = '__x';\n`,
+      },
+    ],
+    [
+      'a static key built by concatenation (round 2)',
+      { 'dist/index.js': `const k = '_' + '_x';\nexport class K { static [k] = 1; }\n` },
+    ],
+    [
+      'a static key read off an object (round 2)',
+      { 'dist/index.js': `const o = { a: '__x' };\nexport class K { static [o.a] = 1; }\n` },
+    ],
+    [
+      'a `.d.ts` `declare const o: {…}; export { o }` (round 2)',
+      { 'dist/index.d.ts': `declare const o: { __x: number };\nexport { o };\n` },
+      { exports: { '.': './dist/index.d.ts' } },
+    ],
+    [
+      'a `.d.ts` `declare const o: {…}; export default o` (round 2)',
+      { 'dist/index.d.ts': `declare const o: { __x: number };\nexport default o;\n` },
+      { exports: { '.': './dist/index.d.ts' } },
+    ],
+    [
+      'a `.d.ts` const typed by an interface (round 2)',
+      {
+        'dist/index.d.ts': `interface I { __x: number }\ndeclare const o: I;\nexport { o };\n`,
+      },
+      { exports: { '.': './dist/index.d.ts' } },
+    ],
+    [
+      'a `.d.ts` const typed by an interface that extends one (round 2)',
+      {
+        'dist/index.d.ts': `interface B { __x: number }\ninterface I extends B { a: 1 }\nexport declare const o: I;\n`,
+      },
+      { exports: { '.': './dist/index.d.ts' } },
+    ],
+    [
+      'a `.d.ts` nested type literal (round 2)',
+      { 'dist/index.d.ts': `export declare const o: { a: { __x: number } };\n` },
+      { exports: { '.': './dist/index.d.ts' } },
+    ],
+    [
+      'a `.d.ts` `export interface` member (round 2)',
+      { 'dist/index.d.ts': `export interface T { __x: number }\n` },
+      { exports: { '.': './dist/index.d.ts' } },
+    ],
+    [
+      'a `.d.ts` `export type` alias of a literal (round 2)',
+      { 'dist/index.d.ts': `export type T = { __x: number };\n` },
+      { exports: { '.': './dist/index.d.ts' } },
+    ],
+    [
+      'a CJS `exports.ns = require(...)` of a module holding a seam (round 2)',
+      {
+        'dist/index.cjs': `exports.ns = require('./o.cjs');\n`,
+        'dist/o.cjs': `module.exports = { __k: 1 };\n`,
+      },
+      { exports: { '.': './dist/index.cjs' } },
+    ],
+    [
+      'a seam attached with `K.__x = 1` after the class (round 2)',
+      { 'dist/index.js': `class K {}\nK.__x = 1;\nexport default K;\n` },
+    ],
+    [
+      'a seam attached with `Object.assign(o, {…})` (round 2)',
+      { 'dist/index.js': `const o = {};\nObject.assign(o, { __x: 1 });\nexport { o };\n` },
+    ],
+    [
+      'a seam attached with `Object.defineProperty(o, "__x")` (round 2)',
+      {
+        'dist/index.js': `export const o = {};\nObject.defineProperty(o, '__x', { value: 1 });\n`,
+      },
+    ],
+    [
+      'a CJS seam attached to `module.exports = K` after the fact (round 2)',
+      { 'dist/index.cjs': `class K {}\nK.__x = 1;\nmodule.exports = K;\n` },
+      { exports: { '.': './dist/index.cjs' } },
     ],
     [
       'a star cycle that still reaches a seam',
@@ -437,6 +544,34 @@ describe('every way a seam can be exported reds', () => {
 
 describe('FAIL CLOSED: what the scan cannot read is a finding, never a pass', () => {
   const cases: Array<[string, Files, object?]> = [
+    [
+      'an imported static key whose definition is not a Symbol (round 2)',
+      {
+        'dist/index.js': `import { k } from './k.js';\nexport class K { static [k] = 1; }\n`,
+        'dist/k.js': `export const k = Math.random() > 2 ? 'a' : 'b';\n`,
+      },
+    ],
+    [
+      'an unresolvable imported static key (round 2)',
+      {
+        'dist/index.js': `import { k } from 'no-such-package-anywhere';\nexport class K { static [k] = 1; }\n`,
+      },
+    ],
+    [
+      'a CJS `exports.ns = require(<gone>)` (round 2)',
+      { 'dist/index.cjs': `exports.ns = require('./gone.cjs');\n` },
+      { exports: { '.': './dist/index.cjs' } },
+    ],
+    [
+      'an `Object.assign` of a non-literal source onto an exported object (round 2)',
+      { 'dist/index.js': `const o = {};\nObject.assign(o, globalThis.extra);\nexport { o };\n` },
+    ],
+    [
+      'an `Object.defineProperty` with a computed key on an exported object (round 2)',
+      {
+        'dist/index.js': `const k = process.env.K;\nexport const o = {};\nObject.defineProperty(o, k, { value: 1 });\n`,
+      },
+    ],
     [
       'a default export of a call result (#2188)',
       {
