@@ -190,8 +190,12 @@ CLI. The pairing rule is:
 | Operator serves the CLI's `apps.kn-next.dev/v1alpha1`, release **older** than the CLI | Not supported — upgrade the operator first. |
 | Operator does not serve the API version the CLI emits | Not supported. |
 
-Pre-release suffixes (`-rc.N`) are ignored when pairing. `knext doctor` checks the installed operator against your CLI for you
-(see below).
+Pre-release suffixes (`-rc.N`) are ignored when pairing.
+
+Today `knext doctor` is a coarser check than that rule: it compares the operator's and the CLI's
+major and minor versions and warns when the operator is older or the majors differ (see below). It
+does not read which API versions the cluster serves, so treat the rule above, not that warning, as
+the definition of a supported pair.
 
 ## Pin, upgrade and roll back the operator
 

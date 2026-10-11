@@ -562,6 +562,28 @@ describe('support window and runtime floors agree across the docs and the manife
     }
   });
 
+  it('neither doc claims `knext doctor` checks CRD versions, and both describe what it does today', () => {
+    // Doctor compares the CLI's and the operator's major/minor and never reads the served CRD
+    // versions; until that changes, a doc saying otherwise is a false claim.
+    for (const [label, text] of [
+      ['versioning page', section(page, '### Operator versions')],
+      ['COMPATIBILITY.md', section(matrix, '### Operator versions')],
+    ] as const) {
+      const f = flat(text);
+      // The rule is stated, and doctor is described in its own words, separately.
+      expect(f, `${label}: states what doctor checks today`).toMatch(
+        /doctor[\s\S]{0,300}(warns|compares)[\s\S]{0,120}(major|minor)/i,
+      );
+      expect(f, `${label}: says doctor is coarser than the rule`).toMatch(/coarser/i);
+      expect(f, `${label}: says doctor does not read CRD/API versions`).toMatch(
+        /does not read[^.]*(API|CRD) versions/i,
+      );
+      expect(f, `${label}: must not say doctor applies the CRD-version rule`).not.toMatch(
+        /applied by `?knext doctor|doctor[^.]*(applies|enforces|reads|checks)[^.]*(CRD|served)/i,
+      );
+    }
+  });
+
   it('nothing says the operator major or MAJOR.MINOR tracks the package set (2.0 leaves the operator on its line)', () => {
     for (const [label, text] of [
       ['versioning page', page],

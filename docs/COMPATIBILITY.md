@@ -89,15 +89,18 @@ is additive-only, so no released package set has ever needed a *newer* CRD than 
 
 The operator's `operator-vX.Y.Z` is stamped on the manager Deployment as the
 `app.kubernetes.io/version` label and in the image tag (`…:vX.Y.Z@sha256:…`); a source or
-`operator-edge` build carries the sentinel `unreleased`. Pairing rule, applied by `knext doctor`
-(`src/cli/doctor/operator-version.ts`, a WARN row — never a failure; the deploy-time schema
-preflight stays the authoritative gate):
+`operator-edge` build carries the sentinel `unreleased`. The pairing rule:
 
 - the operator must serve the CRD API version the CLI emits (`apps.kn-next.dev/v1alpha1`) — the
   pairing is by CRD version, not by package major;
 - on the 1.x line the operator MINOR must be **>=** the CLI's (an older CLI against a newer
   operator is always valid);
 - patch is independent; `-rc.N` suffixes are ignored on both sides.
+
+What `knext doctor` does today is coarser than that rule (`src/cli/doctor/operator-version.ts`, a
+WARN row — never a failure): it warns when the operator's major differs from the CLI's, or its
+minor is older. It does not read the served CRD versions, so the rule above is the definition and
+the warning an approximation of it; the deploy-time schema preflight stays the authoritative gate.
 
 Why the minor tracks the package set on 1.x rather than the operator versioning on its own: the CRD is
 additive within `v1alpha1`, so "does this operator know the field my CLI emits" is exactly "is the
