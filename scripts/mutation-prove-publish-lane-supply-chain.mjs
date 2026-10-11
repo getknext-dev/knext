@@ -388,8 +388,8 @@ const MUTATIONS = [
     id: 'M36',
     claim: 'every single heredoc is stripped as prose (files and shells included)',
     subject: 'engine',
-    anchor: '    if (ops.length !== 1 || !isProseHeredoc(ops[0])) continue;\n',
-    replacement: '    if (ops.length !== 1) continue;\n',
+    anchor: '    if (ops.length === 1 && isProseHeredoc(ops[0])) {\n',
+    replacement: '    if (ops.length === 1) {\n',
     expect: 'red',
   },
   {
@@ -600,7 +600,7 @@ const MUTATIONS = [
     id: 'M59',
     claim: 'the structural (top-level simple command) check is switched off',
     subject: 'engine',
-    anchor: '  const structural = bareIdx.map((i) => structureProblem(joined, i));\n',
+    anchor: '  const structural = bareIdx.map((i) => structureProblem(joined, i, keptBody));\n',
     replacement: '  const structural = bareIdx.map(() => null);\n',
     expect: 'red',
   },
@@ -616,9 +616,8 @@ const MUTATIONS = [
     id: 'M61',
     claim: 'an audit inside a heredoc body is accepted again',
     subject: 'engine',
-    anchor:
-      "  if (heredocBodyLines(lines)[lineIdx]) return 'it sits inside a heredoc body, not as a command';\n",
-    replacement: '  void heredocBodyLines;\n',
+    anchor: "  if (keptBody[lineIdx]) return 'it sits inside a heredoc body, not as a command';\n",
+    replacement: '  void keptBody;\n',
     expect: 'red',
   },
   {
@@ -710,6 +709,60 @@ const MUTATIONS = [
         '      - run: |\n          bash -c "$(cat <<\'EOF\'\n          npm publish\n          EOF\n          )"\n',
       ),
     },
+    expect: 'red',
+  },
+
+  {
+    id: 'M72',
+    claim: '`|| exit <n>` accepts ANY status (so `|| exit 0` masks the audit)',
+    subject: 'engine',
+    anchor:
+      "      if (suffix.length !== 2 || suffix[0] !== 'exit' || !isNonZeroLiteral(suffix[1])) return null;\n",
+    replacement: "      if (suffix.length !== 2 || suffix[0] !== 'exit') return null;\n",
+    expect: 'red',
+  },
+  {
+    // Second edit of M72: the step-wide `exit <non-zero literal>` rule is a SECOND
+    // line of defence that also rejects `|| exit 0`, so the suffix rule is only
+    // provable once that backstop is removed too.
+    id: 'M72',
+    claim: '`|| exit <n>` accepts ANY status (so `|| exit 0` masks the audit)',
+    subject: 'engine',
+    anchor: "    if ((head === 'exit' || head === 'return') && !isNonZeroLiteral(cmd[1])) {\n",
+    replacement: '    if (false) {\n',
+    expect: 'red',
+  },
+  {
+    id: 'M73',
+    claim: 'an `&&` suffix may be a masking command (`&& true` / `&& :` / `&& exit 0`)',
+    subject: 'engine',
+    anchor: '        MASKING_AND_HEADS.has(head)\n',
+    replacement: '        false\n',
+    expect: 'red',
+  },
+  {
+    id: 'M74',
+    claim: 'an `&&` suffix is accepted even when later commands run past a failed audit',
+    subject: 'engine',
+    anchor: "(k !== null && (k !== 'and' || nothingAfter(i)) ? i : -1)",
+    replacement: "(k !== null && (k !== 'and' || true) ? i : -1)",
+    expect: 'red',
+  },
+  {
+    id: 'M75',
+    claim: 'the `|| exit <non-zero>` suffix stops being recognised (positive fixture goes red)',
+    subject: 'engine',
+    anchor: "    if (tokens[op] === '||') {\n",
+    replacement: '    if (false) {\n',
+    expect: 'red',
+  },
+  {
+    id: 'M76',
+    claim:
+      'a removed prose heredoc leaves its delimiter pending, so everything after it reads as a heredoc body (the false red)',
+    subject: 'engine',
+    anchor: '        i = j; // the terminator line is dropped with the body\n',
+    replacement: '        pending = ops.map((o) => o.delim);\n        i = j;\n',
     expect: 'red',
   },
 

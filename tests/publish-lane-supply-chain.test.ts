@@ -632,6 +632,62 @@ describe('publish-lane supply-chain guard: an audit that cannot fail the run is 
     expect(audit.problems.length).toBeGreaterThan(0);
   });
 
+  it('does not count `|| true`, `|| exit 0`, `|| :` / `|| exit` variants as the gate (precision fix keeps them red)', () => {
+    for (const body of [
+      'node scripts/audit-published.mjs || true',
+      'node scripts/audit-published.mjs || exit 0',
+      'node scripts/audit-published.mjs || exit',
+      'node scripts/audit-published.mjs || exit "0"',
+      'node scripts/audit-published.mjs || :',
+      'node scripts/audit-published.mjs; true',
+      'node scripts/audit-published.mjs && true',
+      'node scripts/audit-published.mjs && :',
+      'node scripts/audit-published.mjs && echo ok\nexit 0',
+      'node scripts/audit-published.mjs && echo ok\necho later',
+      'node scripts/audit-published.mjs && echo ok || true',
+      'node scripts/audit-published.mjs && echo ok; true',
+    ]) {
+      const audit = auditPublishLanes(
+        fixture({ 'a.yml': wf(`${auditJobWith(body)}${publishJob('audit')}`) }),
+      );
+      expect(audit.problems.length, body).toBeGreaterThan(0);
+    }
+  });
+
+  it('accepts a prose heredoc earlier in the audit step (heredoc spans computed on the original text)', () => {
+    for (const body of [
+      'cat <<EOF >> "$GITHUB_STEP_SUMMARY"\nauditing\nEOF\nnode scripts/audit-published.mjs',
+      'cat <<\'EOF\' >> "$GITHUB_STEP_SUMMARY"\n## Audit\nline two\nEOF\nnode scripts/audit-published.mjs',
+    ]) {
+      const audit = auditPublishLanes(
+        fixture({ 'a.yml': wf(`${auditJobWith(body)}${publishJob('audit')}`) }),
+      );
+      expect(audit.problems, body).toEqual([]);
+    }
+  });
+
+  it('still rejects the audit line inside an EXECUTABLE heredoc body', () => {
+    const body = 'cat > r.sh <<EOF\nnode scripts/audit-published.mjs\nEOF';
+    const audit = auditPublishLanes(
+      fixture({ 'a.yml': wf(`${auditJobWith(body)}${publishJob('audit')}`) }),
+    );
+    expect(audit.problems.length).toBeGreaterThan(0);
+  });
+
+  it('accepts `|| exit <non-zero>` and a trailing `&& <cmd>` on the audit line', () => {
+    for (const body of [
+      'node scripts/audit-published.mjs || exit 1',
+      'node scripts/audit-published.mjs || exit 2 # fail',
+      'node scripts/audit-published.mjs && echo ok',
+      'echo start\nnode scripts/audit-published.mjs || exit 1\necho after',
+    ]) {
+      const audit = auditPublishLanes(
+        fixture({ 'a.yml': wf(`${auditJobWith(body)}${publishJob('audit')}`) }),
+      );
+      expect(audit.problems, body).toEqual([]);
+    }
+  });
+
   it('the bare forms DO count: ./-prefixed, env-prefixed, node flags, trailing comment', () => {
     for (const body of [
       'node scripts/audit-published.mjs',
