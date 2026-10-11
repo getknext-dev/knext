@@ -5,7 +5,7 @@
  * apply a NextApp at all.
  */
 
-import { NEXTAPP_API_VERSION } from "../../cr-builder";
+import { NEXTAPP_API_VERSION } from "../../crd-api-version";
 import {
     type CrdDocument,
     type CrdPairing,

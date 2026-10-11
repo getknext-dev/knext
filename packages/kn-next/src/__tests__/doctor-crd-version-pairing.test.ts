@@ -9,7 +9,11 @@
  */
 
 import { describe, expect, it } from "bun:test";
+import { readdirSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { buildNextAppCRObject, NEXTAPP_API_VERSION } from "../cli/cr-builder";
+import { NEXTAPP_API_VERSION as CRD_API_VERSION } from "../cli/crd-api-version";
 import { crdCheck } from "../cli/doctor/checks/crd";
 import {
     classifyCrdPairing,
@@ -61,6 +65,35 @@ describe("the version the CLI emits is read from cr-builder, not re-typed", () =
         );
         expect(cr.apiVersion).toBe(NEXTAPP_API_VERSION);
         expect(NEXTAPP_API_VERSION).toBe(`apps.kn-next.dev/${EMITTED}`);
+    });
+});
+
+describe("doctor stays loadable when the deploy tests replace cr-builder", () => {
+    // The deploy tests `mock.module("../cli/cr-builder", ...)` with a partial
+    // object. A doctor module importing from cr-builder then fails to load, and
+    // `deploy`'s failure-path diagnostics (which dynamically import doctor) go
+    // silent. The constant therefore lives in its own module.
+    it("no file under cli/doctor imports cr-builder", () => {
+        const dir = join(
+            dirname(fileURLToPath(import.meta.url)),
+            "..",
+            "cli",
+            "doctor",
+        );
+        const files = (
+            readdirSync(dir, { recursive: true }) as string[]
+        ).filter((f) => f.endsWith(".ts"));
+        expect(files.length).toBeGreaterThan(10);
+        const offenders = files.filter((f) =>
+            /from\s+["'][^"']*cr-builder["']/.test(
+                readFileSync(join(dir, f), "utf8"),
+            ),
+        );
+        expect(offenders).toEqual([]);
+    });
+
+    it("the constant doctor reads is the one cr-builder re-exports", () => {
+        expect(CRD_API_VERSION).toBe(NEXTAPP_API_VERSION);
     });
 });
 
