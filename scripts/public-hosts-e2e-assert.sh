@@ -81,7 +81,8 @@ done
 [ -n "$loc" ] || fail "GET /go through Kourier returned no Location header"
 
 # 4. The pod that served it carries the variable.
-pod="$(kubectl -n "$NS" get pods -l "serving.knative.dev/service=${APP}" -o jsonpath='{.items[0].metadata.name}')"
+# The pod that is actually Running (an older, unready revision's pod may linger).
+pod="$(kubectl -n "$NS" get pods -l "serving.knative.dev/service=${APP}" --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')"
 [ -n "$pod" ] || fail "no pod for ksvc/$APP after the request"
 pod_env="$(kubectl -n "$NS" get pod "$pod" -o jsonpath='{.spec.containers[?(@.name=="user-container")].env}')"
 pod_val="$(printf '%s' "$pod_env" | jq -r '.[] | select(.name=="KNEXT_PUBLIC_ORIGINS") | .value')"
