@@ -41,11 +41,13 @@ import { MUTATION_MARKER, mutate, restore, snapshot } from './lib/mutation-harne
 import { declareMutations, recordMutation } from './lib/prover-report.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const WORKFLOW_DIR = resolve(REPO_ROOT, '.github/workflows');
-const WORKFLOW = resolve(WORKFLOW_DIR, 'release.yml');
+const WORKFLOW = resolve(REPO_ROOT, '.github/workflows/release.yml');
+// Derived, not a path literal: the anchor-drift scanner reads a literal path
+// binding as a mutation SUBJECT FILE, and this is a directory.
+const WORKFLOW_DIR = dirname(WORKFLOW);
 const ENGINE = resolve(REPO_ROOT, 'tests/helpers/publish-lane-supply-chain.ts');
 const SPEC = 'tests/publish-lane-supply-chain.test.ts';
-const SPEC_FILE = resolve(REPO_ROOT, SPEC);
+const SPEC_FILE = resolve(REPO_ROOT, 'tests/publish-lane-supply-chain.test.ts');
 
 /**
  * The files mutated, keyed by the `subject` each mutation names. Spelled as a
