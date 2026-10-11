@@ -66,7 +66,10 @@ screen_json() { # <P(instructs an agent)>
 # gate <label> <command> <want-rc> <want-calls>
 gate() {
   local label="$1" cmd="$2" want="$3" wantcalls="$4" out rc n
-  out=$(jq -n --arg c "$cmd" '{tool_name:"Bash",tool_input:{command:$c}}' |
+  # --rawfile, not --arg: Linux caps ONE argv string at 128 KiB (E2BIG, rc=126) and the
+  # 150 KB case below is larger. macOS has no such cap, which is how CI caught it.
+  printf '%s' "$cmd" >"$TMP/cmd.txt"
+  out=$(jq -n --rawfile c "$TMP/cmd.txt" '{tool_name:"Bash",tool_input:{command:$c}}' |
     JEV_BIN="${JEV_BIN_OVERRIDE:-$FAKE}" bash "$GATE" 2>&1)
   rc=$?
   n=$(calls)
