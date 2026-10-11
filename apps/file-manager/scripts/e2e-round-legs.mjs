@@ -35,7 +35,7 @@ export const LEGS = Object.freeze([
   }),
   Object.freeze({
     id: 'compile',
-    title: 'compile single-executable (kn-next build / vinext)',
+    title: 'compile single-executable (knext build / vinext)',
     local: true,
     ciJob: null, // compiled inside the compat-smoke job on CI
   }),

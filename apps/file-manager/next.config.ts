@@ -6,13 +6,13 @@ import type { NextConfig } from 'next';
  * Node 20+ cold-start optimisation: run server.js with NODE_COMPILE_CACHE.
  */
 const nextConfig: NextConfig = {
-  // Asset prefix is injected by kn-next deploy from knext.config.ts storage settings.
+  // Asset prefix is injected by knext deploy from knext.config.ts storage settings.
   // In dev mode (next dev), ASSET_PREFIX is unset → assets serve locally.
   assetPrefix: process.env.ASSET_PREFIX || '',
   // #93 skew protection (ADR-0011): pin every client to the build it loaded.
   // `deploymentId` makes Next append `?dpl=<id>` to asset + RSC requests and emit
   // a deployment-id mismatch signal, so a browser on build A keeps requesting
-  // build A's assets after the server rolls to B. kn-next deploy sets
+  // build A's assets after the server rolls to B. knext deploy sets
   // NEXT_DEPLOYMENT_ID = the deploy tag; unset in `next dev` → no pinning.
   deploymentId: process.env.NEXT_DEPLOYMENT_ID || undefined,
   // Defect-A fix (verified vs Next 16 source): `deploymentId` ONLY sets the

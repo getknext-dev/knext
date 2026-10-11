@@ -251,7 +251,7 @@ const VINEXT_ONLY_TEMPLATES: ReadonlySet<string> = new Set([
     "knext-bun-entry.mjs",
     "runtime-contract.mjs",
     // #1460 round 3 (was BLOCKING): a self-contained single-executable
-    // build only exists for the vinext target (`kn-next build
+    // build only exists for the vinext target (`knext build
     // --self-contained` compiles the vite/rolldown output). It shipped
     // into EVERY scaffold, default included, until this line — useless
     // dead reference material in a standalone-target app, which never

@@ -17,7 +17,7 @@ import type { Metric, Rating } from '../rum/validate';
 export const register = new client.Registry();
 client.collectDefaultMetrics({ register });
 
-// ----- Custom kn-next bytecode cache metrics -----
+// ----- Custom knext bytecode cache metrics -----
 
 export const appName = process.env.KN_APP_NAME ?? 'unknown';
 const cachePath = process.env.NODE_COMPILE_CACHE ?? '';

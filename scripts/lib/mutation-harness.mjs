@@ -105,7 +105,6 @@ export const COMMENT_PREFIX = {
   '.toml': '#',
   '.env': '#',
   '.md': '<!--',
-  '.mdx': '<!--',
   '.html': '<!--',
 };
 

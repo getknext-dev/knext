@@ -344,7 +344,7 @@ binary: exactly one compute held awake.
 **The on-demand alignment rule (knext #766 ruling) — an invariant, not
 advice.** Scheduled windows are the DB half of knext's *clock-triggered* warm
 floor. knext's *traffic-triggered* half (`NextApp.spec.scaling.scaleDownDelay`;
-ADR-0045 has `kn-next create` scaffold `5m` — knext#763, in review at this
+ADR-0045 has `knext create` scaffold `5m` — knext#763, in review at this
 writing) has NO per-app DB counterpart, deliberately: the DB's
 on-demand idle window is the apps-gateway's platform-wide `GW_IDLE_MS`, one
 manifest line the cluster operator owns. The invariant: **the gateway's idle

@@ -2,7 +2,7 @@
  * storage-mode-checks.mjs — assertion functions for the storage-mode leg of the
  * nightly platform e2e (#1292, follow-up to #1283/#1291).
  *
- * #1291 fixed `kn-next deploy`/`preview` to thread `ASSET_PREFIX` /
+ * #1291 fixed `knext deploy`/`preview` to thread `ASSET_PREFIX` /
  * `NEXT_DEPLOYMENT_ID` into a Dockerfile that rebuilds the app IN-IMAGE, and
  * added a pre-apply guard (`verifyBuiltImageLockstep`) proven against real
  * docker images. What it did NOT prove is that a LIVE, deployed app actually

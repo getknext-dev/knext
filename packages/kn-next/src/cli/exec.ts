@@ -23,7 +23,7 @@ import { fileURLToPath } from "node:url";
  * test). Node-correct replacement for Bun's `import.meta.main`.
  *
  * CRITICAL: npm installs the CLI bins as SYMLINKS — both node_modules/.bin/
- * knext AND node_modules/.bin/kn-next point at the SAME real file,
+ * knext AND node_modules/.bin/knext point at the SAME real file,
  * .../dist/cli/kn-next.js (#1369, rev-1380: a second dist file broke `npx
  * @getknext/core`'s bin auto-pick for every consumer). When run via either
  * symlink, `process.argv[1]` is the symlink path while `import.meta.url`
@@ -31,7 +31,7 @@ import { fileURLToPath } from "node:url";
  * realpathSync so the comparison holds for symlinked bins — without this,
  * the entry guard never fires and the CLI silently no-ops. (The deprecation
  * notice in shared.ts relies on the OPPOSITE fact — that `argv[1]` is the
- * symlink path, NOT yet realpath-resolved — to tell `knext` and `kn-next`
+ * symlink path, NOT yet realpath-resolved — to tell `knext` and `knext`
  * apart; it deliberately does not call this function.)
  */
 export function isEntrypoint(importMetaUrl: string): boolean {
@@ -92,7 +92,7 @@ export function runInherit(argv: readonly string[]): void {
 export interface RunQuietOptions {
     /**
      * #1385 — `runQuiet` discards stdout wholesale, so any diagnostic a
-     * child process prints THERE never reached `kn-next build` users, even
+     * child process prints THERE never reached `knext build` users, even
      * though `apps/docs/content/docs/build-pipeline.mdx` quotes some of them
      * verbatim. Precisely: the vinext compile step's `WARNING:` lines
      * (`console.warn`, stderr) were always visible — `runQuiet` already

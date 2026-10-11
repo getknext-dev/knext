@@ -95,7 +95,7 @@ export interface ImageCacheSyncOptions {
 }
 
 /**
- * Minimal logger surface satisfied by both `console` and the kn-next pino logger
+ * Minimal logger surface satisfied by both `console` and the knext pino logger
  * (which exposes `info`/`warn` but not `log`). Single-string calls only.
  */
 export interface SyncLogger {

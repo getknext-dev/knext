@@ -18,8 +18,8 @@
 
 import { describe, expect, it } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { readdirSync, readFileSync, statSync } from "node:fs";
-import { join, relative } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const REPO_ROOT = join(
@@ -34,16 +34,25 @@ const PKG = join(REPO_ROOT, "packages", "kn-next");
 
 /** A `kn-next` that is not part of a longer identifier, path or file name. */
 const BARE = String.raw`(?<![\w/@.\-])kn-next(?![\w.\-/@])`;
+/** npx/bunx options: `--package <pkg>`, `--package=<pkg>`, `-p <pkg>`, then plain flags. */
+const RUNNER_OPTS = String.raw`(?:\s+(?:--package[= ]\S+|-p\s+\S+|-{1,2}[\w-]+))*`;
 export const COMMAND_FORM = new RegExp(
     [
-        String.raw`\b(?:npx|bunx|pnpx|dlx|exec)(?:\s+(?:--?[\w-]+(?:=\S+)?))*\s+${BARE}`,
+        String.raw`\b(?:npx|bunx|pnpx|dlx|exec)${RUNNER_OPTS}\s+${BARE}`,
         String.raw`\.bin/kn-next\b`,
-        // argv-array form: command: ['kn-next', 'db', 'migrate']
-        String.raw`\[\s*['"]kn-next['"]\s*,`,
+        // argv arrays and compose/k8s `command:` lists:
+        //   ["kn-next", "db"]  ['kn-next','db']  command: kn-next
+        String.raw`[\[,]\s*['"]kn-next['"]\s*[,\]]`,
+        String.raw`\bcommand:\s*['"]?kn-next\b`,
+        // the command word named in code font: "installs the `kn-next` command"
+        "`kn-next`",
+        // imperative prose: "run kn-next from here"
+        String.raw`\b(?:run|runs|running|use|using|type|invoke|call)\s+${BARE}`,
         // `kn-next <verb>` / `kn-next --flag`, but not prose such as
-        // "kn-next is ..." -- see PROSE_VERB_STOPWORDS below.
+        // "kn-next is ..." -- see PROSE_STOPWORDS below.
         String.raw`${BARE}\s+(?:--?[a-z]|[a-z][\w-]*)`,
     ].join("|"),
+    "g",
 );
 const PROSE_STOPWORDS = new Set([
     "integrates",
@@ -91,50 +100,112 @@ const PROSE_STOPWORDS = new Set([
     "bin",
 ]);
 
-function commandHits(text: string): string[] {
+/**
+ * Join what a reader sees as ONE line: shell continuations, single newlines
+ * inside a paragraph / comment block / blockquote (dropping the leading comment
+ * or quote marker), and string-literal concatenation across lines. A blank line
+ * still ends a paragraph.
+ */
+export function logicalText(text: string): string {
+    return text
+        .replace(/\\\r?\n/g, " ")
+        .replace(/["'`][ \t]*\+[ \t]*\r?\n[ \t]*["'`]/g, "")
+        .replace(
+            /[ \t]*\r?\n(?![ \t]*\r?\n)[ \t]*(?:\/\*+|\/\/+|\*+(?!\/)|#+|>+)?[ \t]*/g,
+            " ",
+        );
+}
+
+export function commandHits(text: string): string[] {
     const hits: string[] = [];
-    for (const [i, line] of text.split("\n").entries()) {
-        const m = COMMAND_FORM.exec(line);
-        if (!m) continue;
+    const flat = logicalText(text);
+    for (const m of flat.matchAll(COMMAND_FORM)) {
         // Prose filter only applies to the bare `kn-next <word>` branch.
         const bare = /^kn-next\s+([a-z][\w-]*)/.exec(m[0]);
         if (bare && PROSE_STOPWORDS.has(bare[1])) continue;
-        hits.push(`${i + 1}: ${line.trim().slice(0, 140)}`);
+        const at = m.index ?? 0;
+        hits.push(flat.slice(Math.max(0, at - 40), at + 80).trim());
     }
     return hits;
 }
 
-function walk(dir: string, out: string[] = []): string[] {
-    for (const name of readdirSync(dir)) {
-        if (name === "node_modules" || name === "dist" || name === ".next")
-            continue;
-        const p = join(dir, name);
-        const st = statSync(p);
-        if (st.isDirectory()) walk(p, out);
-        else out.push(p);
-    }
-    return out;
-}
-
-/** Source lines that are not comments: strings the user can actually see. */
-function stripComments(text: string): string {
+/** `//` and block comments in real source are developer text, not output. */
+const CODE_EXT = /\.(ts|tsx|js|mjs|cjs|go)$/;
+function stripCodeComments(text: string): string {
     return text
-        .split("\n")
-        .filter((l) => !/^\s*(\/\/|\*|\/\*|#)/.test(l))
-        .join("\n");
+        .replace(/^[ \t]*\/\*[\s\S]*?\*\/[ \t]*$/gm, "")
+        .replace(/^[ \t]*\/\/.*$/gm, "");
 }
 
-const TEXT_EXT =
-    /\.(ts|tsx|js|mjs|cjs|json|ya?ml|md|mdx|sh|tmpl|txt|html)$|(^|\/)(Dockerfile|\.gitignore|\.env\.example)$/;
+/**
+ * Everything tracked is user-facing unless it is history, tooling or tests.
+ * The allowlist is reviewed: each entry says why a `kn-next` mention is fine.
+ */
+const NOT_GUIDANCE: Array<[RegExp, string]> = [
+    [
+        /^docs\/(adr|benchmarks|release|ux|verification|incidents|spikes|wayfinder|testing)\//,
+        "decision, measurement, release and incident history",
+    ],
+    [/^docs\/(SPRINT_1|SPRINT_2|V1_ROADMAP)\.md$/, "dated planning records"],
+    [
+        /^docs\/COMPATIBILITY\.md$/,
+        "names the kn-next npm package (the forwarding alias), not the command",
+    ],
+    [/(^|\/)CHANGELOG\.md$/, "changelog"],
+    [/^\.changeset\//, "changelog source"],
+    [/^\.(claude|agent|github)\//, "agent config and internal CI"],
+    [/^(tests|scripts|spikes)\//, "repo tooling, spikes and their fixtures"],
+    [/(^|\/)__tests__\//, "tests"],
+    [/\.(test|spec)\.[cm]?[jt]sx?$|_test\.go$|\/test\//, "tests"],
+    [
+        /^packages\/kn-next-alias\//,
+        "the forwarding package is itself the kn-next name",
+    ],
+    [
+        /^apps\/docs\/content\/docs\/(upgrading|versioning)\.mdx$/,
+        "documents that the command is gone",
+    ],
+    [/^apps\/docs\/_design-reference\//, "static design mock-up"],
+    [
+        /(^|\/)(bun\.lock|package-lock\.json)$|\.(jsonl|snap|lock|svg|png)$|^graphify-out\//,
+        "generated data",
+    ],
+    [
+        /^ROADMAP\.md$|^SECURITY\.md$|^CLAUDE\.md$|^docs\/(RELEASING|ARCHITECTURE|MATURITY_PLAN|ROADMAP)\.md$/,
+        "maintainer and strategy docs",
+    ],
+    [
+        /^packages\/scale-zero-pg\/(HANDOFF\.md|docs\/knext-research\.md)$/,
+        "research notes",
+    ],
+];
+const SCANNED_EXT =
+    /\.(ts|tsx|js|mjs|cjs|go|json|ya?ml|md|mdx|sh|hbs|tmpl|txt|html|toml|trivyscan)$|(^|\/)(Dockerfile[\w.-]*|\.gitignore|\.cursorrules|\.geminirules|Makefile)$/;
 
-function scan(files: string[], strip: boolean): string[] {
+function trackedUserFacing(): string[] {
+    const r = spawnSync("git", ["ls-files", "-z"], {
+        cwd: REPO_ROOT,
+        encoding: "utf8",
+        maxBuffer: 64 * 1024 * 1024,
+    });
+    expect(r.status).toBe(0);
+    return r.stdout
+        .split("\0")
+        .filter(Boolean)
+        .filter(
+            (f) =>
+                SCANNED_EXT.test(f) && !NOT_GUIDANCE.some(([re]) => re.test(f)),
+        );
+}
+
+function scanFiles(rels: string[]): string[] {
     const bad: string[] = [];
-    for (const f of files) {
-        if (!TEXT_EXT.test(f)) continue;
-        const raw = readFileSync(f, "utf8");
-        for (const h of commandHits(strip ? stripComments(raw) : raw)) {
-            bad.push(`${relative(REPO_ROOT, f)}:${h}`);
-        }
+    for (const rel of rels) {
+        const abs = join(REPO_ROOT, rel);
+        if (!existsSync(abs)) continue;
+        let raw = readFileSync(abs, "utf8");
+        if (CODE_EXT.test(rel)) raw = stripCodeComments(raw);
+        for (const h of commandHits(raw)) bad.push(`${rel}: ${h}`);
     }
     return bad;
 }
@@ -153,6 +224,32 @@ describe("the matcher itself", () => {
             expect(commandHits(s).length, s).toBe(1);
         }
     });
+    it("flags the wrapped, commented, --package and array forms", () => {
+        for (const s of [
+            // wrapped: the verb is on the next line
+            "run `npx --package @getknext/core kn-next\ndoctor` first",
+            // shell continuation
+            "npx --package @getknext/core kn-next \\\n  doctor",
+            // wrapped inside a markdown paragraph / blockquote
+            "> `npx --package @getknext/core kn-next\n> doctor`",
+            // commented command in a template / doc
+            "# run: kn-next build --self-contained",
+            "// then kn-next deploy",
+            " * Run `kn-next build` first",
+            // npx -p / --package=
+            "npx -p @getknext/core kn-next doctor",
+            "npx --package=@getknext/core kn-next doctor",
+            // JSON / YAML arrays
+            'command: ["kn-next", "db", "migrate"]',
+            'command: ["kn-next","db","migrate"]',
+            "args: ['kn-next', 'db']",
+            // backticked bare command word, and prose imperatives
+            "This installs the `kn-next` command",
+            "run kn-next from here",
+        ]) {
+            expect(commandHits(s).length, s).toBeGreaterThan(0);
+        }
+    });
     it("does not flag names, paths or prose", () => {
         for (const s of [
             "see kn-next.config.ts",
@@ -168,30 +265,18 @@ describe("the matcher itself", () => {
 });
 
 describe("no user-facing string tells the user to run `kn-next`", () => {
-    it("CLI + generator source (comments excluded)", () => {
-        const files = walk(join(PKG, "src")).filter(
-            (f) => !f.includes("__tests__") && !/\.test\./.test(f),
-        );
-        expect(scan(files, true)).toEqual([]);
-    });
-
-    it("scaffold templates", () => {
-        expect(scan(walk(join(PKG, "templates")), false)).toEqual([]);
-    });
-
-    it("the GitHub Action", () => {
-        expect(scan([join(REPO_ROOT, "action.yml")], true)).toEqual([]);
-    });
-
-    it("the published package README and the docs site content", () => {
-        const files = [
-            join(PKG, "README.md"),
-            join(REPO_ROOT, "README.md"),
-            ...walk(join(REPO_ROOT, "apps", "docs", "content")),
-            ...walk(join(REPO_ROOT, "docs", "guides")),
-            join(REPO_ROOT, "docs", "QUICKSTART.md"),
-        ];
-        expect(scan(files, false)).toEqual([]);
+    it("every tracked file that is not history, tooling or tests (scanned, not enumerated)", () => {
+        const files = trackedUserFacing();
+        // Non-vacuity: the scan must actually cover the surfaces that matter.
+        for (const must of [
+            "docs/QUICKSTART.md",
+            "action.yml",
+            "packages/kn-next/src/cli/help.ts",
+            "packages/kn-next/templates/app/Dockerfile.self-contained.hbs",
+        ]) {
+            expect(files, `${must} must be in the scanned set`).toContain(must);
+        }
+        expect(scanFiles(files)).toEqual([]);
     });
 
     it("the running CLI: --help and every verb's --help", () => {

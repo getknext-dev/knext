@@ -45,7 +45,7 @@ Service with `minScale: 0`.
 ## Step 0 — Preflight the cluster with `knext doctor`
 
 Before (and after) installing anything, let the CLI check the cluster for you.
-Once the CLI is available (Step 2 — or just `npx --package @getknext/core kn-next
+Once the CLI is available (Step 2 — or just `npx @getknext/core
 doctor` without installing), run:
 
 ```sh
@@ -110,9 +110,9 @@ the config types):
 npm install --save-dev @getknext/core
 ```
 
-This installs the `kn-next` command, runnable with `npx @getknext/core`. You can also
+This installs the `knext` command, runnable with `npx @getknext/core`. You can also
 install it globally (`npm install -g @getknext/core`) if you prefer a bare
-`kn-next` on your PATH. Sanity check:
+`knext` on your PATH. Sanity check:
 
 ```sh
 npx @getknext/core --help
@@ -134,12 +134,12 @@ my-app/                     # flat single-app repo (what `knext create` makes)
 ├── package-lock.json       # ← the lockfile: this directory is the context
 ├── Dockerfile
 ├── knext.config.ts
-└── ...                     # run kn-next from here
+└── ...                     # run knext from here
 
 my-repo/                    # monorepo
 ├── pnpm-lock.yaml          # ← the lockfile: this directory is the context
 └── apps/
-    └── hello-knext/        # run kn-next from here
+    └── hello-knext/        # run knext from here
         ├── Dockerfile
         ├── knext.config.ts
         ├── next.config.ts

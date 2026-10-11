@@ -493,7 +493,7 @@ function providerOps(
  * chunks/CSS, nested under the BUILD_ID) and leaves the app's `public/` dir in
  * place — it creates NO `.output/public` (that layout was the pre-migration
  * Nitro output and nothing writes it anymore). uploadAssets used to read
- * `.output/public` directly, so every real `kn-next deploy` without
+ * `.output/public` directly, so every real `knext deploy` without
  * `--skip-upload` crashed with ENOENT at the upload step.
  *
  * Staging (rather than teaching every provider two source roots) keeps the
@@ -1523,7 +1523,7 @@ function staticBuildDeleteUri(
  * own `<app>/_next/static/<buildId>/` prefix and NOTHING else — a single,
  * idempotent, scoped delete of one known prefix.
  *
- * Called by `kn-next deploy` on the confirmed upload-succeeded-then-push-failed
+ * Called by `knext deploy` on the confirmed upload-succeeded-then-push-failed
  * leg: the assets were already uploaded, but the deploy is aborting before
  * `kubectl apply`, so those assets would otherwise be orphaned forever (the
  * post-apply {@link pruneOldBuilds} never runs on the failure path, and it

@@ -18,7 +18,7 @@ This is the **overview**. It links to the existing detail docs rather than resta
 The operator is a Go controller (kubebuilder/controller-runtime) that turns one custom
 resource — **`NextApp`** (`apps.kn-next.dev/v1alpha1`) — into a running, scale-to-zero
 Next.js application on Knative. It is **the single source of truth for cluster state**
-(ADR-0001): the `kn-next` CLI builds and pushes an image and then writes a `NextApp`; it
+(ADR-0001): the `knext` CLI builds and pushes an image and then writes a `NextApp`; it
 never creates Knative objects itself. Every CLI cluster write targets the CR and nothing
 else.
 

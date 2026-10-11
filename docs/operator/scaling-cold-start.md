@@ -99,7 +99,7 @@ There is nothing to enable, and nothing to size. The previous opt-in — a
 - `bytecodeCache` in `knext.config.ts` is **rejected by `validateConfig`** with a
   message naming the replacement.
 - `spec.cache.enableBytecodeCache` / `bytecodeCacheSize` on a hand-written CR are
-  rejected by the **apiserver** — the fields are gone from the CRD and `kn-next`
+  rejected by the **apiserver** — the fields are gone from the CRD and `knext`
   applies with `--validate=strict`.
 
 Both refuse rather than ignore deliberately. A silently-dropped setting is

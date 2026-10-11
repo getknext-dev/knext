@@ -5,7 +5,7 @@
  *
  * The classification logic is NOT here. It lives in `@getknext/core`
  * (`cli/ci/credential-scope.ts`), beside the Role definition that
- * `kn-next init-ci` generates from — so what the client is told to apply,
+ * `knext init-ci` generates from — so what the client is told to apply,
  * what this refuses, and which hazards it probes cannot drift. This file is
  * the thin part: ask the cluster what the credential can do, hand the answer
  * over, print the verdict.

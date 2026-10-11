@@ -52,7 +52,7 @@ spawns it). Until this landed, `scripts/e2e-deploy.sh`'s bun lane still boot-tes
 sentence above pointed at directly.
 
 The bun lane now compiles the standalone server through the same `standalone-compile.mjs` script
-`kn-next build` runs (`standalone-exec-build.ts`), verifies the bytecode pragma at build time
+`knext build` runs (`standalone-exec-build.ts`), verifies the bytecode pragma at build time
 (fail-closed — a binary compiled without `--bytecode`, or a stale/foreign binary, deletes itself
 and fails the deploy rather than falling back), and boots that executable directly instead of
 `bun server.js`. This applies on **both** the early-warning and credential bun crons — the

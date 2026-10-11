@@ -23,7 +23,7 @@ Every line carries these load-bearing fields:
 | --- | --- | --- |
 | `level` | logger | string label (`debug`/`info`/`warn`/`error`/`fatal`), never a pino number |
 | `time` | logger | epoch millis |
-| `app` | `KN_APP_NAME` (fallback `kn-next`) | which app/service emitted it |
+| `app` | `KN_APP_NAME` (fallback `knext`) | which app/service emitted it |
 | `env` | `NODE_ENV` | deployment environment |
 | `msg` | call site | human message |
 | `correlation_id` | request context / active OTel span (§3) | present on every line emitted **during a request** (automatic when tracing is on) |

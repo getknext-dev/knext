@@ -73,11 +73,11 @@ import { flushCompileCache, getCompileCacheDir } from 'node:module';
 // own `process.cwd()` is `/app` in the shipped image, and node's module
 // resolution never walks INTO `.output/server/node_modules` from there — only
 // UP from wherever the importing module actually lives. A static import here
-// resolves it correctly (nitro bundles it, `kn-next build` re-stages the
+// resolves it correctly (nitro bundles it, `knext build` re-stages the
 // correct-platform addon into `.output/server/node_modules`, #1298) without
 // depending on cwd at all. If this app has no sharp installed, the import
 // itself fails the build — the same fail-loud contract `stageSharpForVinextNode`
-// applies at `kn-next build` time.
+// applies at `knext build` time.
 import sharp from 'sharp';
 import { handleImageRequest } from '@getknext/core/internal/vinext-image-optimizer';
 // The deployed Cache-Control rule (`public, max-age=0, must-revalidate` instead

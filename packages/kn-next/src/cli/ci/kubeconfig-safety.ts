@@ -8,7 +8,7 @@
  * generate-token`, `kubelogin`, …) with that cloud account's credentials in
  * scope. That is exactly the shape ADR-0061's tripwires forbid knext from
  * touching, and it is also just the wrong credential for CI: the
- * `knext-deployer` ServiceAccount token `kn-next init-ci` generates needs
+ * `knext-deployer` ServiceAccount token `knext init-ci` generates needs
  * nothing but the apiserver and a bearer token, on every cloud.
  *
  * This module is the ONE place that classifies a kubeconfig's shape, reused

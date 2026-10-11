@@ -37,15 +37,15 @@ export default defineConfig([
       // #30: k6 load-test entry (manual/nightly runbook, not a PR gate)
       'cli/loadtest': 'src/cli/loadtest.ts',
       // Workstream C: cluster-prereq preflight + BYO Postgres binding (ADR-0019).
-      // Reached via the bin's subcommand dispatch (`kn-next doctor` / `kn-next
+      // Reached via the bin's subcommand dispatch (`knext doctor` / `knext
       // db bind`); own entries so the dynamic imports resolve in dist.
       'cli/doctor': 'src/cli/doctor.ts',
       'cli/db-bind': 'src/cli/db-bind.ts',
       // #242 the one-shot writer-only migration runner (ADR-0021 §3), reached via
-      // `kn-next db migrate`'s subcommand dispatch; own entry so the dynamic
+      // `knext db migrate`'s subcommand dispatch; own entry so the dynamic
       // import resolves in dist.
       'cli/db-migrate': 'src/cli/db-migrate.ts',
-      // #407 `kn-next create` — bin-dispatched only (no self-entry block). Own
+      // #407 `knext create` — bin-dispatched only (no self-entry block). Own
       // entry for the same reason as its siblings: the dispatcher's dynamic
       // import resolves to a STABLE dist path instead of a hash-named split
       // chunk. (`create.ts` locates its templates by walking UP to the package
@@ -55,7 +55,7 @@ export default defineConfig([
       // CLI helpers exported as library subpaths (./cli/validate, ./cli/shared)
       'cli/validate': 'src/cli/validate.ts',
       'cli/shared': 'src/cli/shared.ts',
-      // `kn-next validate` — bin-dispatched only (no self-entry block, #263).
+      // `knext validate` — bin-dispatched only (no self-entry block, #263).
       // Own entry so the dispatcher's dynamic import resolves to a STABLE
       // dist path instead of a hash-named split chunk (same as create).
       'cli/validate-cmd': 'src/cli/validate-cmd.ts',
@@ -101,7 +101,7 @@ export default defineConfig([
       // the alias resolves to nothing.
       'adapters/sharp-addon-dlopen': 'src/adapters/sharp-addon-dlopen.mjs',
       // The vinext single-exec compile. Spawned as a SCRIPT (`bun run …`) by
-      // `kn-next build`, not imported, because it needs `Bun.build` plugins and
+      // `knext build`, not imported, because it needs `Bun.build` plugins and
       // the published CLI runs under node.
       'adapters/vinext-compile': 'src/adapters/vinext-compile.mjs',
       // The asset-anchor consumer analysis. vinext-compile SPAWNS it (`bun

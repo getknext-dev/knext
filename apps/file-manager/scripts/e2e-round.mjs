@@ -110,7 +110,7 @@ async function legCompile() {
     return;
   }
   if (!onPath('bun')) {
-    throw new Refuse('bun is required on PATH to compile the single executable (kn-next build).');
+    throw new Refuse('bun is required on PATH to compile the single executable (knext build).');
   }
   sh('bun', ['run', '--filter', 'file-manager', 'build:exec']);
 }

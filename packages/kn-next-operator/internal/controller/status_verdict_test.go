@@ -243,7 +243,7 @@ func TestComputeStatusVerdict_IngressStallVerdictAndTransitionEvent(t *testing.T
 const pinnedNotFoundMessage = "pinned revision \"shop-00007\" does not exist in namespace \"prod\" — it may have been " +
 	"garbage-collected, so the declared traffic pin can never resolve and Knative keeps " +
 	"serving the last-good route. Run `kubectl get revisions -n prod` to list surviving " +
-	"revisions, then re-pin via `kn-next rollback shop --to <existing-revision>` or clear " +
+	"revisions, then re-pin via `knext rollback shop --to <existing-revision>` or clear " +
 	"spec.traffic to return to latest-ready."
 
 func TestComputeStatusVerdict_PinnedRevisionNotFoundTakesPrecedence(t *testing.T) {

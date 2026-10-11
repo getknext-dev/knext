@@ -309,7 +309,7 @@ dropChunks(metrics, { olderThan: '30 days' });
 > **continuous aggregates** are **not** available here, and retention is
 > `dropChunks()` — **not** `add_retention_policy()`. Both of those rely on
 > *background policy jobs*, which cannot run on a compute that scales to zero
-> (scale-zero-pg `adr-0001`). Run `dropChunks()` from a CI cron / a `kn-next` job.
+> (scale-zero-pg `adr-0001`). Run `dropChunks()` from a CI cron / a `knext` job.
 
 ### 6b. pgvector (embeddings / semantic search) — #241
 

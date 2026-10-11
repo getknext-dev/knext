@@ -60,7 +60,7 @@ function isLive(buildId: string, liveBuildIds: readonly string[]): boolean {
 
 /**
  * The full reap/keep partition of the candidate set (#264 part 2 — the
- * `kn-next gc --dry-run` plan). Every candidate lands in EXACTLY one bucket;
+ * `knext gc --dry-run` plan). Every candidate lands in EXACTLY one bucket;
  * `selectBuildsToDelete` delegates here, so the printed plan and the actual
  * reap set share one implementation and cannot drift.
  */

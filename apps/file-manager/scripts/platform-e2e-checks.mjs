@@ -636,7 +636,7 @@ export const PUBLIC_FILES = Object.freeze([
  * #1284 used to quarantine the font reference here: the vinext build leaked
  * the build machine's absolute filesystem path into the font URL, so it
  * 404'd by construction and could never be a real asset check. Root cause:
- * `kn-next deploy`/`kn-next build` run the app's own `vite build` on the HOST
+ * `knext deploy`/`knext build` run the app's own `vite build` on the HOST
  * before the Docker build, which caches a self-hosted Google Font's CSS at
  * `.vinext/fonts/<hash>/style.css` with the HOST's absolute path baked in;
  * the repo-root `.dockerignore` (the file Docker actually reads for this

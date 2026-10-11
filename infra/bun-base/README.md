@@ -76,7 +76,7 @@ cosign verify-blob --bundle bun-base/SHA256SUMS.sigstore.json \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com bun-base/SHA256SUMS
 (cd bun-base && sha256sum -c SHA256SUMS)
 chmod +x bun-base/bun-linux-x64-musl
-KNEXT_BUN_BASE_EXE="$PWD/bun-base/bun-linux-x64-musl" kn-next build ...
+KNEXT_BUN_BASE_EXE="$PWD/bun-base/bun-linux-x64-musl" knext build ...
 ```
 
 The compile scripts check this themselves and exit 1 if the variable is set outside GitHub Actions,

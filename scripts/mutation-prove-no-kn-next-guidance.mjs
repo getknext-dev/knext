@@ -19,7 +19,7 @@ import { spawnSync } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveSpecRunner } from './lib/ci-blocking-gate-proof.mjs';
-import { mutate, restore, snapshot } from './lib/mutation-harness.mjs';
+import { MUTATION_MARKER, mutate, restore, snapshot } from './lib/mutation-harness.mjs';
 import { declareMutations, recordMutation } from './lib/prover-report.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -36,6 +36,9 @@ const PROOF = {
     quickstartMd: 'docs/QUICKSTART.md',
     cliMdx: 'apps/docs/content/docs/cli.mdx',
     packageJson: 'packages/kn-next/package.json',
+    gitignoreHbs: 'packages/kn-next/templates/app/gitignore.hbs',
+    infraReadme: 'infra/bun-base/README.md',
+    designMd: 'docs/design/drizzle-data-sdk.md',
   },
 };
 
@@ -83,15 +86,59 @@ const MUTATIONS = [
     subject: 'cliMdx',
     spec: GUARD_SPEC,
     anchor: 'knext gc --dry-run                # print the full reap/keep plan, delete nothing',
-    replacement:
-      'npx kn-next gc --dry-run          # print the full reap/keep plan, delete nothing',
+    // MDX has no `<!--` comment, so the residue marker is embedded as a JSX comment.
+    replacement: `npx kn-next gc --dry-run          # print the full reap/keep plan, delete nothing {/* ${MUTATION_MARKER} */}`,
+    options: { commentPrefix: '{/*' },
   },
   {
     label: 'docs site: the same stale command is also caught by the docs hygiene test',
     subject: 'cliMdx',
     spec: DOCS_SPEC,
     anchor: 'knext gc --dry-run                # print the full reap/keep plan, delete nothing',
-    replacement: 'kn-next gc --dry-run            # print the full reap/keep plan, delete nothing',
+    replacement: `kn-next gc --dry-run            # print the full reap/keep plan, delete nothing {/* ${MUTATION_MARKER} */}`,
+    options: { commentPrefix: '{/*' },
+  },
+  {
+    label: 'matcher: a WRAPPED `npx --package <pkg> kn-next` + verb on the next line (quickstart)',
+    subject: 'quickstartMd',
+    spec: GUARD_SPEC,
+    anchor: '`npx @getknext/core\ndoctor` without installing',
+    replacement: '`npx --package @getknext/core kn-next\ndoctor` without installing',
+  },
+  {
+    label: 'matcher: a COMMENTED, wrapped command in a scaffold template (gitignore)',
+    subject: 'gitignoreHbs',
+    spec: GUARD_SPEC,
+    anchor: 'build OUTPUT: `knext\n# build`',
+    replacement: 'build OUTPUT: `kn-next\n# build`',
+  },
+  {
+    label: 'matcher: a shell CONTINUATION (`kn-next \\` then the verb)',
+    subject: 'infraReadme',
+    spec: GUARD_SPEC,
+    anchor: 'knext build ...\n```',
+    replacement: 'kn-next \\\n  build ...\n```',
+  },
+  {
+    label: 'matcher: a JSON/YAML command ARRAY (`["kn-next","db","migrate"]`)',
+    subject: 'designMd',
+    spec: GUARD_SPEC,
+    anchor: 'command: ["knext","db","migrate"]',
+    replacement: 'command: ["kn-next","db","migrate"]',
+  },
+  {
+    label: 'matcher: the command word in code font (`` `kn-next` ``)',
+    subject: 'quickstartMd',
+    spec: GUARD_SPEC,
+    anchor: 'This installs the `knext` command',
+    replacement: 'This installs the `kn-next` command',
+  },
+  {
+    label: 'matcher: imperative prose (`run kn-next from here`)',
+    subject: 'quickstartMd',
+    spec: GUARD_SPEC,
+    anchor: '└── ...                     # run knext from here',
+    replacement: '└── ...                     # run kn-next from here',
   },
   {
     label: 'package.json: the `kn-next` bin comes back',
@@ -118,7 +165,7 @@ for (const m of MUTATIONS) {
   console.log(`── mutation: ${m.label}`);
   const snap = snapshot(resolve(REPO_ROOT, PROOF.subjects[m.subject]));
   try {
-    mutate(snap, m.anchor, m.replacement);
+    mutate(snap, m.anchor, m.replacement, m.options ?? {});
     if (specPasses(m.spec)) {
       console.log('   x DECORATION: the spec stayed GREEN with the behaviour removed');
       decorative.push(m.label);
