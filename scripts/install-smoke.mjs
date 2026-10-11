@@ -1109,8 +1109,8 @@ try {
 
   finish(
     PASS,
-    `packed ${publishable.join(' + ')} install on plain npm/Node; the CLI runs and so does the ` +
-      'the forwarding-package shim, ' +
+    `packed ${publishable.join(' + ')} install on plain npm/Node; the CLI runs (knext is its only bin) and so does the ` +
+      'forwarding-package shim, ' +
       'both `create` scaffolds (default standalone + --builder vinext) install and build, ' +
       'the default target boots a real .next/standalone/server.js and passes its own ' +
       '`npm test`, the vinext target builds into the image its own Dockerfile expects, ' +
