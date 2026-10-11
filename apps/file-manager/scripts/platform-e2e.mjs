@@ -210,40 +210,34 @@ async function main() {
     http.request(p, { headers });
 
   // ── B. platform: the control plane did its job ───────────────────────────
-  await check(
-    'B. platform',
-    'NextApp Ready=True, ksvc runs the digest knext deploy pushed',
-    () => {
-      const ready = kubectl([
-        'get',
-        'nextapp',
-        APP,
-        '-n',
-        ns,
-        '-o',
-        'jsonpath={.status.conditions[?(@.type=="Ready")].status}',
-      ]);
-      if (ready !== 'True') throw new Error(`NextApp Ready=${ready || '(absent)'}`);
-      const specImage = kubectl(['get', 'nextapp', APP, '-n', ns, '-o', 'jsonpath={.spec.image}']);
-      if (!/^localhost:5001\/file-manager(:[\w.-]+)?@sha256:[0-9a-f]{64}$/.test(specImage)) {
-        throw new Error(
-          `NextApp spec.image "${specImage}" is not the digest-pinned in-cluster push`,
-        );
-      }
-      const ksvcImage = kubectl([
-        'get',
-        'ksvc',
-        APP,
-        '-n',
-        ns,
-        '-o',
-        'jsonpath={.spec.template.spec.containers[0].image}',
-      ]);
-      if (ksvcImage !== specImage)
-        throw new Error(`ksvc image "${ksvcImage}" != NextApp spec.image "${specImage}"`);
-      return specImage;
-    },
-  );
+  await check('B. platform', 'NextApp Ready=True, ksvc runs the digest knext deploy pushed', () => {
+    const ready = kubectl([
+      'get',
+      'nextapp',
+      APP,
+      '-n',
+      ns,
+      '-o',
+      'jsonpath={.status.conditions[?(@.type=="Ready")].status}',
+    ]);
+    if (ready !== 'True') throw new Error(`NextApp Ready=${ready || '(absent)'}`);
+    const specImage = kubectl(['get', 'nextapp', APP, '-n', ns, '-o', 'jsonpath={.spec.image}']);
+    if (!/^localhost:5001\/file-manager(:[\w.-]+)?@sha256:[0-9a-f]{64}$/.test(specImage)) {
+      throw new Error(`NextApp spec.image "${specImage}" is not the digest-pinned in-cluster push`);
+    }
+    const ksvcImage = kubectl([
+      'get',
+      'ksvc',
+      APP,
+      '-n',
+      ns,
+      '-o',
+      'jsonpath={.spec.template.spec.containers[0].image}',
+    ]);
+    if (ksvcImage !== specImage)
+      throw new Error(`ksvc image "${ksvcImage}" != NextApp spec.image "${specImage}"`);
+    return specImage;
+  });
 
   await check(
     'B. platform',
@@ -885,9 +879,7 @@ async function main() {
           );
           const killer = setTimeout(() => {
             child.kill('SIGKILL');
-            reject(
-              new Error(`knext deploy --image did not finish within ${DEPLOY_TIMEOUT_MS}ms`),
-            );
+            reject(new Error(`knext deploy --image did not finish within ${DEPLOY_TIMEOUT_MS}ms`));
           }, DEPLOY_TIMEOUT_MS);
           child.on('error', reject);
           child.on('exit', (code) => {
