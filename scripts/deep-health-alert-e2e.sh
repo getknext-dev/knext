@@ -3,7 +3,8 @@
 #
 # Proves, with the manifests knext SHIPS applied unmodified, that an app whose
 # database refuses connections makes `KnextDeepHealthDown` go FIRING in a real
-# Prometheus:
+# Prometheus — on a default install (tracing off) and with tracing on — and that
+# the series is dropped, and the alert resolves, once the app goes idle:
 #
 #   shipped PodMonitor  ->  scrape of :9464  ->  knext_deep_health_state
 #   forwarded by the runtime contract  ->  shipped PrometheusRule  ->  alert
@@ -87,7 +88,12 @@ kubectl --context "${CTX}" apply -f "${ROOT}/packages/kn-next-operator/config/pr
 kubectl --context "${CTX}" -n system apply -f "${ROOT}/packages/kn-next-operator/config/observability/prometheusrule.yaml"
 
 kubectl --context "${CTX}" apply -f "${DIR}/fixture-app.yaml"
-kubectl --context "${CTX}" -n deep-health-e2e rollout status deployment/e2e-app --timeout=300s
+# Four app arms, one per state worth proving (see fixture-app.yaml): e2e-app has
+# tracing on, the other three are the default install (no OTEL_* variables at all).
+# assert-alert.mjs checks all four.
+for deploy in e2e-postgres e2e-app e2e-app-notracing e2e-app-waking e2e-app-up; do
+  kubectl --context "${CTX}" -n deep-health-e2e rollout status "deployment/${deploy}" --timeout=300s
+done
 kubectl --context "${CTX}" -n monitoring wait --for=condition=Ready pod/prometheus-e2e-0 --timeout=300s
 
 node "${DIR}/assert-alert.mjs" "${CTX}" "${ASSERT_TIMEOUT_SECONDS}"

@@ -4,8 +4,11 @@
 // alert pipeline is made of, in one process, exactly as the compiled runtime
 // does:
 //
-//   - the reference app's real instrumentation (`registerNode`), which registers
-//     `knext_deep_health_state` and serves it on the loopback child port;
+//   - the reference app's real `register()` (instrumentation.ts), which registers
+//     `knext_deep_health_state` and serves it on the loopback child port. Which
+//     path it takes is decided by the environment alone, exactly as in a real
+//     pod: with OTEL_TRACING_ENABLED=true it loads the full instrumentation; with
+//     the variable ABSENT (the default install) it starts the lite gauge;
 //   - the real runtime contract's `:9464` listener, which forwards that one
 //     family onto the metrics port;
 //   - the real `@getknext/lib` pool, pointed at a database that refuses
@@ -21,7 +24,7 @@ import { existsSync } from 'node:fs';
 import { createServer } from 'node:http';
 
 import { getDbPool } from '@getknext/lib/clients';
-import { registerNode } from '../src/instrumentation-node';
+import { register } from '../src/instrumentation';
 
 // The ports come from the pod spec (scripts/deep-health-alert-e2e/fixture-app.yaml): the
 // PodMonitor under test targets the metrics port by number, so it cannot be OS-assigned
@@ -36,7 +39,9 @@ const APP_PORT = portFromEnv('PORT');
 const METRICS_PORT = portFromEnv('METRICS_PORT');
 const TRAFFIC_EVERY_MS = Number(process.env.FIXTURE_TRAFFIC_EVERY_MS ?? 10_000);
 
-registerNode();
+// Next.js sets NEXT_RUNTIME in the server process; register() is a no-op without it.
+process.env.NEXT_RUNTIME ??= 'nodejs';
+await register();
 
 const contract = await import('../runtime-contract.mjs');
 const state = contract.createMetricsState();

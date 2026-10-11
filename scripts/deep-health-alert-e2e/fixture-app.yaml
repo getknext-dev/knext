@@ -1,4 +1,16 @@
-# The app whose database is dead, for scripts/deep-health-alert-e2e.sh.
+# The apps for scripts/deep-health-alert-e2e.sh, one per state worth proving:
+#
+#   e2e-app            tracing ON, dead database      -> overall `down`
+#   e2e-app-notracing  tracing OFF, dead database     -> overall `down`
+#   e2e-app-waking     tracing OFF, dead database declared scale-to-zero -> `waking`
+#   e2e-app-up         tracing OFF, a real Postgres   -> `ok` / postgres `up`
+#
+# "Tracing OFF" is the DEFAULT install: the OTEL_* variables are ABSENT, not set to
+# "false". The operator sets them only from the CR, so absence is what a default
+# install actually has.
+#
+# The arm is chosen by the environment alone: the fixture runs the reference app's
+# real register(), which takes the tracing-on or the tracing-off path by itself.
 #
 # Labelled exactly as the operator labels every app pod it generates
 # (`generated-by: kn-next-operator`, `app: <name>`), because that label is the
@@ -47,14 +59,18 @@ spec:
             # The shipped PodMonitor scrapes this port by number.
             - name: METRICS_PORT
               value: "9464"
-            # Tracing is what registers the deep-health gauge today.
+            # The loopback port the app's registry serves on, which the runtime
+            # contract bridges from. The pod spec owns it, so nothing in the lane
+            # hardcodes it.
+            - name: KN_CHILD_METRICS_PORT
+              value: "9092"
             - name: OTEL_TRACING_ENABLED
               value: "true"
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: http://127.0.0.1:4317
             # A bring-your-own Postgres on a port nothing listens on: the connection
             # is REFUSED, which the deep check reports as `down` (not `waking`,
-            # which is reserved for the scale-zero-pg gateway host).
+            # which is reserved for a database declared scale-to-zero).
             - name: DATABASE_URL
               value: postgres://app:app@127.0.0.1:1/app
           ports:
@@ -69,3 +85,216 @@ spec:
           hostPath:
             path: /workspace
             type: Directory
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: e2e-app-notracing
+  namespace: deep-health-e2e
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: e2e-app-notracing
+  template:
+    metadata:
+      labels:
+        app: e2e-app-notracing
+        generated-by: kn-next-operator
+    spec:
+      containers:
+        - name: user-container
+          image: oven/bun:1.4.2-alpine@sha256:d888c0ae6c86d7866ff10c5aafdd9077b36aee6455b33dd270fb93c0dd5cef6f
+          workingDir: /workspace/apps/file-manager
+          command: ["bun", "e2e-support/deep-health-alert-fixture.ts"]
+          env:
+            - name: HOME
+              value: /tmp
+            - name: NODE_ENV
+              value: production
+            - name: KN_APP_NAME
+              value: e2e-app-notracing
+            - name: PORT
+              value: "3000"
+            # The shipped PodMonitor scrapes this port by number.
+            - name: METRICS_PORT
+              value: "9464"
+            # The loopback port the app's registry serves on, which the runtime
+            # contract bridges from. The pod spec owns it, so nothing in the lane
+            # hardcodes it.
+            - name: KN_CHILD_METRICS_PORT
+              value: "9092"
+            # A bring-your-own Postgres on a port nothing listens on: the connection
+            # is REFUSED, which the deep check reports as `down` (not `waking`,
+            # which is reserved for a database declared scale-to-zero).
+            - name: DATABASE_URL
+              value: postgres://app:app@127.0.0.1:1/app
+          ports:
+            - containerPort: 3000
+            - containerPort: 9464
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+              readOnly: true
+      volumes:
+        - name: workspace
+          hostPath:
+            path: /workspace
+            type: Directory
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: e2e-app-waking
+  namespace: deep-health-e2e
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: e2e-app-waking
+  template:
+    metadata:
+      labels:
+        app: e2e-app-waking
+        generated-by: kn-next-operator
+    spec:
+      containers:
+        - name: user-container
+          image: oven/bun:1.4.2-alpine@sha256:d888c0ae6c86d7866ff10c5aafdd9077b36aee6455b33dd270fb93c0dd5cef6f
+          workingDir: /workspace/apps/file-manager
+          command: ["bun", "e2e-support/deep-health-alert-fixture.ts"]
+          env:
+            - name: HOME
+              value: /tmp
+            - name: NODE_ENV
+              value: production
+            - name: KN_APP_NAME
+              value: e2e-app-waking
+            - name: PORT
+              value: "3000"
+            # The shipped PodMonitor scrapes this port by number.
+            - name: METRICS_PORT
+              value: "9464"
+            # The loopback port the app's registry serves on, which the runtime
+            # contract bridges from. The pod spec owns it, so nothing in the lane
+            # hardcodes it.
+            - name: KN_CHILD_METRICS_PORT
+              value: "9092"
+            # The same refused connection, but the database is declared scale-to-zero:
+            # a refusal there is the wake itself, so the check reads `waking`.
+            - name: KNEXT_DB_SCALE_TO_ZERO
+              value: "true"
+            - name: DATABASE_URL
+              value: postgres://app:app@127.0.0.1:1/app
+          ports:
+            - containerPort: 3000
+            - containerPort: 9464
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+              readOnly: true
+      volumes:
+        - name: workspace
+          hostPath:
+            path: /workspace
+            type: Directory
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: e2e-app-up
+  namespace: deep-health-e2e
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: e2e-app-up
+  template:
+    metadata:
+      labels:
+        app: e2e-app-up
+        generated-by: kn-next-operator
+    spec:
+      containers:
+        - name: user-container
+          image: oven/bun:1.4.2-alpine@sha256:d888c0ae6c86d7866ff10c5aafdd9077b36aee6455b33dd270fb93c0dd5cef6f
+          workingDir: /workspace/apps/file-manager
+          command: ["bun", "e2e-support/deep-health-alert-fixture.ts"]
+          env:
+            - name: HOME
+              value: /tmp
+            - name: NODE_ENV
+              value: production
+            - name: KN_APP_NAME
+              value: e2e-app-up
+            - name: PORT
+              value: "3000"
+            # The shipped PodMonitor scrapes this port by number.
+            - name: METRICS_PORT
+              value: "9464"
+            # The loopback port the app's registry serves on, which the runtime
+            # contract bridges from. The pod spec owns it, so nothing in the lane
+            # hardcodes it.
+            - name: KN_CHILD_METRICS_PORT
+              value: "9092"
+            # A REAL Postgres in the same namespace, so the check reads `up`.
+            - name: DATABASE_URL
+              value: postgres://app@e2e-postgres.deep-health-e2e.svc.:5432/app
+          ports:
+            - containerPort: 3000
+            - containerPort: 9464
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+              readOnly: true
+      volumes:
+        - name: workspace
+          hostPath:
+            path: /workspace
+            type: Directory
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: e2e-postgres
+  namespace: deep-health-e2e
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: e2e-postgres
+  template:
+    metadata:
+      labels:
+        app: e2e-postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+          env:
+            - name: POSTGRES_USER
+              value: app
+            - name: POSTGRES_DB
+              value: app
+            # A throwaway database inside an ephemeral kind cluster: trust auth, so
+            # no credential exists to leak.
+            - name: POSTGRES_HOST_AUTH_METHOD
+              value: trust
+          ports:
+            - containerPort: 5432
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "app", "-d", "app"]
+            periodSeconds: 2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: e2e-postgres
+  namespace: deep-health-e2e
+spec:
+  selector:
+    app: e2e-postgres
+  ports:
+    - port: 5432
+      targetPort: 5432

@@ -316,7 +316,9 @@ spec:
               and sits at `waking` forever, never `down`. Check the
               scale-zero-pg gateway / compute and the app's DATABASE_URL. If
               the database is NOT scale-to-zero, set KNEXT_DB_SCALE_TO_ZERO=false
-              so a refused connection reads `down` instead.
+              so a refused connection reads `down` instead. This alert fires
+              only while the app is actively using its database: an idle app
+              serves no deep-health series, so it resolves at idle.
             runbook_url: "https://github.com/getknext-dev/knext/blob/main/docs/runbooks/troubleshooting.md#deep-health-stuck-waking-permanent-db-outage"
         # Sustained deep-health `down`: the database is unreachable and nothing
         # is waking it (a refused connection to a database that is not
@@ -341,5 +343,7 @@ spec:
               scale-to-zero but reached through a name knext does not recognise
               (an IP, a pooler or alias, a gateway in another namespace), set
               KNEXT_DB_SCALE_TO_ZERO=true on the app so a refusal reads `waking`
-              instead. Check the database and the app's DATABASE_URL.
+              instead. Check the database and the app's DATABASE_URL. This
+              alert fires only while the app is actively using its database: an
+              idle app serves no deep-health series, so it resolves at idle.
             runbook_url: "https://github.com/getknext-dev/knext/blob/main/docs/runbooks/troubleshooting.md#deep-health-down-database-unreachable-or-erroring"

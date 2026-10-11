@@ -36,6 +36,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const here = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(here, "../../../..");
 const OTEL_CONFIG_SRC = resolve(here, "../adapters/otel-config.ts");
+const NONE: Probe = { evaluated: 0, registered: 0, liteStarted: 0 };
 
 /** Every shipped copy of the edge-clean instrumentation half. */
 const COPIES = {
@@ -95,7 +96,7 @@ describe("instrumentation.ts imports nothing heavy at the top level (#1773)", ()
 // ---------------------------------------------------------------------------
 
 const PROBE = Symbol.for("knext.test.1773.instrumentationNode");
-type Probe = { evaluated: number; registered: number };
+type Probe = { evaluated: number; registered: number; liteStarted: number };
 const g = globalThis as unknown as Record<symbol, Probe | undefined>;
 
 const tmpRoots: string[] = [];
@@ -119,7 +120,7 @@ function scaffoldApp(templatePath: string): string {
         join(root, "src", "instrumentation-node.ts"),
         [
             `const k = Symbol.for("knext.test.1773.instrumentationNode");`,
-            `const p = ((globalThis as any)[k] ??= { evaluated: 0, registered: 0 });`,
+            `const p = ((globalThis as any)[k] ??= { evaluated: 0, registered: 0, liteStarted: 0 });`,
             "p.evaluated += 1;",
             "export function registerNode() { p.registered += 1; }",
             "",
@@ -134,12 +135,25 @@ function scaffoldApp(templatePath: string): string {
             type: "module",
             exports: {
                 "./adapters/otel-config": "./adapters/otel-config.ts",
+                "./internal/deep-health-lite": "./internal/deep-health-lite.ts",
             },
         }),
     );
     writeFileSync(
         join(pkg, "adapters", "otel-config.ts"),
         `export * from ${JSON.stringify(OTEL_CONFIG_SRC)};\n`,
+    );
+    // The tracing-off deep-health gauge: a probe that records being started, so
+    // the matrix below can say WHEN the lite module is loaded and started.
+    mkdirSync(join(pkg, "internal"), { recursive: true });
+    writeFileSync(
+        join(pkg, "internal", "deep-health-lite.ts"),
+        [
+            `const k = Symbol.for("knext.test.1773.instrumentationNode");`,
+            `const p = ((globalThis as any)[k] ??= { evaluated: 0, registered: 0, liteStarted: 0 });`,
+            "export function startDeepHealthLite() { p.liteStarted += 1; }",
+            "",
+        ].join("\n"),
     );
     return join(root, "src", "instrumentation.ts");
 }
@@ -149,7 +163,7 @@ async function runRegister(
     env: Record<string, string | undefined>,
 ): Promise<Probe> {
     const entry = scaffoldApp(templatePath);
-    g[PROBE] = { evaluated: 0, registered: 0 };
+    g[PROBE] = { ...NONE };
     const saved: Record<string, string | undefined> = {};
     for (const [k, v] of Object.entries(env)) {
         saved[k] = process.env[k];
@@ -161,6 +175,10 @@ async function runRegister(
             register: () => Promise<void>;
         };
         await mod.register();
+        // The lite gauge is started WITHOUT being awaited (it must add nothing to
+        // the boot path), so give a pending dynamic import time to land before
+        // reading the probe. A path that never loads it is unaffected.
+        await new Promise((r) => setTimeout(r, 100));
     } finally {
         for (const [k, v] of Object.entries(saved)) {
             if (v === undefined) delete process.env[k];
@@ -172,28 +190,28 @@ async function runRegister(
 
 describe("register() loads ./instrumentation-node only when tracing is on (#1773)", () => {
     for (const [label, path] of Object.entries(COPIES)) {
-        it(`${label}: tracing OFF (default, unset) — the Node body is never loaded`, async () => {
+        it(`${label}: tracing OFF (default, unset) — the Node body is never loaded; only the lite deep-health gauge starts`, async () => {
             const p = await runRegister(path, {
                 NEXT_RUNTIME: "nodejs",
                 OTEL_TRACING_ENABLED: undefined,
             });
-            expect(p).toEqual({ evaluated: 0, registered: 0 });
+            expect(p).toEqual({ evaluated: 0, registered: 0, liteStarted: 1 });
         });
 
-        it(`${label}: tracing ON — the Node body is loaded and registerNode() runs`, async () => {
+        it(`${label}: tracing ON — the Node body is loaded and registerNode() runs; lite is NOT started (it would race for the port)`, async () => {
             const p = await runRegister(path, {
                 NEXT_RUNTIME: "nodejs",
                 OTEL_TRACING_ENABLED: "true",
             });
-            expect(p).toEqual({ evaluated: 1, registered: 1 });
+            expect(p).toEqual({ evaluated: 1, registered: 1, liteStarted: 0 });
         });
 
-        it(`${label}: only the exact string "true" enables it (same gate as registerNode)`, async () => {
+        it(`${label}: only the exact string "true" enables tracing (same gate as registerNode)`, async () => {
             const p = await runRegister(path, {
                 NEXT_RUNTIME: "nodejs",
                 OTEL_TRACING_ENABLED: "1",
             });
-            expect(p).toEqual({ evaluated: 0, registered: 0 });
+            expect(p).toEqual({ evaluated: 0, registered: 0, liteStarted: 1 });
         });
 
         it(`${label}: edge runtime with tracing ON — still never loaded`, async () => {
@@ -201,7 +219,15 @@ describe("register() loads ./instrumentation-node only when tracing is on (#1773
                 NEXT_RUNTIME: "edge",
                 OTEL_TRACING_ENABLED: "true",
             });
-            expect(p).toEqual({ evaluated: 0, registered: 0 });
+            expect(p).toEqual(NONE);
+        });
+
+        it(`${label}: edge runtime with tracing OFF — the lite gauge is never started either`, async () => {
+            const p = await runRegister(path, {
+                NEXT_RUNTIME: "edge",
+                OTEL_TRACING_ENABLED: undefined,
+            });
+            expect(p).toEqual(NONE);
         });
     }
 });

@@ -34,9 +34,9 @@ label, and the scrape setup) is in [`metrics.md`](./metrics.md).
 
 **On the shipped scrape, with conditions.** `knext_deep_health_state` is
 registered by the app and forwarded onto `:9464` by the runtime contract, so the
-two deep-health alerts are in the live `knext.app` group. The gauge exists only
-when tracing is enabled, only while a pod is up, and is refreshed only while the
-app is using its database — see
+two deep-health alerts are in the live `knext.app` group. The gauge is served
+with tracing on or off, only while a pod is up, and only while the app has used
+its database within the activity budget (an idle app serves no series) — see
 [`metrics.md`](./metrics.md#one-app-registry-family-is-on-the-shipped-scrape-knext_deep_health_state).
 
 **Not on the shipped scrape.** `knext_http_*`, `knext_coldstart_*`,
