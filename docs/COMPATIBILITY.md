@@ -99,10 +99,13 @@ The operator's `operator-vX.Y.Z` is stamped on the manager Deployment as the
 
 `knext doctor` checks the first part of that rule directly: its **NextApp CRD** row reads the CRD's
 served API versions with `kubectl get crd` and compares them with the `apiVersion` this CLI emits.
-It passes when that version is served, and **fails** — with
-"upgrade the operator first" — when the CRD does not serve it, or when the CRD cannot be read (it
-fails closed rather than guessing). A CRD that serves several versions pairs as long as one of them
-is the CLI's.
+It passes when that version is served, and **fails** when the CRD does not serve it, or when the
+CRD cannot be read (it fails closed rather than guessing). The message says which side to move,
+using Kubernetes API version priority (`v1alpha1` < `v1beta1` < `v1`): a CRD that serves only
+older versions means "upgrade the operator first (operator, then CLI)"; one that serves only newer
+versions means "upgrade the CLI to match the operator"; served versions on both sides, or names
+that are not Kubernetes versions, say both. A CRD that serves several versions pairs as long as
+one of them is the CLI's, and a version marked deprecated still counts as served.
 
 The **Operator version** row (`src/cli/doctor/operator-version.ts`) is informational and never
 decides the pairing. It prints the installed release and warns only when, within one major line, the

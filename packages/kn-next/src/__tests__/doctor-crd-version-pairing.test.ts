@@ -98,7 +98,39 @@ describe("servedCrdVersions / classifyCrdPairing (pure)", () => {
             kind: "not-served",
             emitted: EMITTED,
             served: ["v1beta1"],
+            direction: "crd-newer",
         });
+    });
+
+    it("direction follows Kubernetes API version priority (alpha < beta < GA, then by number)", () => {
+        const dir = (emitted: string, served: string[]) => {
+            const p = classifyCrdPairing(`apps.kn-next.dev/${emitted}`, served);
+            return p.kind === "not-served" ? p.direction : p.kind;
+        };
+        // The CRD only serves versions ahead of the CLI: the CLI is behind.
+        expect(dir("v1alpha1", ["v1beta1"])).toBe("crd-newer");
+        expect(dir("v1alpha1", ["v1alpha2"])).toBe("crd-newer");
+        expect(dir("v1beta2", ["v1"])).toBe("crd-newer");
+        expect(dir("v1beta1", ["v1", "v2"])).toBe("crd-newer");
+        expect(dir("v1beta1", ["v2beta1"])).toBe("crd-newer");
+        // The CRD only serves versions behind the CLI: the operator is behind.
+        expect(dir("v1", ["v1beta1"])).toBe("crd-older");
+        expect(dir("v1", ["v2beta1"])).toBe("crd-older"); // stability outranks the major, as in the apiserver
+        expect(dir("v1beta1", ["v1alpha1", "v1alpha2"])).toBe("crd-older");
+        expect(dir("v2", ["v1", "v2beta1"])).toBe("crd-older");
+        expect(dir("v1beta2", ["v1beta1"])).toBe("crd-older");
+        // Served on both sides of the emitted version, or not a Kubernetes
+        // version name at all: no direction can be claimed.
+        expect(dir("v1beta1", ["v1alpha1", "v1"])).toBe("unknown");
+        expect(dir("v1alpha1", ["latest"])).toBe("unknown");
+        expect(dir("v1alpha1", ["v1beta1", "stable"])).toBe("unknown");
+        expect(dir("not-a-version", ["v1"])).toBe("unknown");
+    });
+
+    it("paired wins over direction: an older or newer sibling is irrelevant when the emitted version is served", () => {
+        expect(
+            classifyCrdPairing(NEXTAPP_API_VERSION, ["v1", "v1alpha1"]).kind,
+        ).toBe("paired");
     });
 
     it("not-served: a prefix/suffix of a served name does not count", () => {
@@ -148,7 +180,7 @@ describe("crdCheck pairs the emitted CRD version with the served versions", () =
         expect(row.detail).toContain("served version: v1, v1alpha1");
     });
 
-    it("FAIL: the CRD serves versions, but not the one the CLI emits -- upgrade the operator first", () => {
+    it("FAIL: a CRD serving only a NEWER version means the CLI is behind -- upgrade the CLI, not the operator", () => {
         const row = only(
             crdCheck(
                 ctxFor({
@@ -161,8 +193,95 @@ describe("crdCheck pairs the emitted CRD version with the served versions", () =
         expect(row.detail).toContain(NEXTAPP_API_VERSION);
         expect(row.detail).toContain("v1beta1");
         expect(row.detail).toMatch(/not serve/i);
-        expect(row.detail).toMatch(/upgrade the operator first/i);
-        expect(row.hint).toMatch(/operator.*first/i);
+        expect(row.detail).toMatch(/upgrade the CLI to match the operator/i);
+        expect(row.detail).not.toMatch(/upgrade the operator first/i);
+        expect(row.hint).toMatch(/upgrade the CLI/i);
+        expect(row.hint).not.toMatch(/operator.*FIRST/);
+    });
+
+    it("FAIL: a CRD serving only an OLDER version means the operator is behind -- upgrade the operator first", () => {
+        // The CLI's emitted version is a constant, so exercise the "CRD older" side by
+        // giving the check a newer emitted version than the CRD serves.
+        const row = only(
+            crdCheck(
+                ctxFor({
+                    ok: true,
+                    stdout: crdJson([{ name: "v1beta1", served: true }]),
+                }),
+                "apps.kn-next.dev/v1",
+            ),
+        );
+        expect(row.status).toBe("fail");
+        expect(row.detail).toContain("emits apps.kn-next.dev/v1,");
+        expect(row.detail).toMatch(
+            /upgrade the operator first \(operator, then CLI\)/i,
+        );
+        expect(row.detail).not.toMatch(/upgrade the CLI to match/i);
+        expect(row.hint).toMatch(/operator.*FIRST/);
+    });
+
+    it("FAIL: served versions on both sides of the emitted one, or incomparable names, say both directions", () => {
+        for (const versions of [
+            [
+                { name: "v1alpha1", served: false },
+                { name: "v1beta1", served: true },
+                { name: "stable", served: true },
+            ],
+            [{ name: "latest", served: true }],
+        ]) {
+            const row = only(
+                crdCheck(ctxFor({ ok: true, stdout: crdJson(versions) })),
+            );
+            expect(row.status).toBe("fail");
+            expect(row.detail).toMatch(/not serve/i);
+            expect(row.detail).toMatch(/upgrade the operator first/i);
+            expect(row.detail).toMatch(/upgrade the CLI/i);
+        }
+        const mixed = only(
+            crdCheck(
+                ctxFor({
+                    ok: true,
+                    stdout: crdJson([
+                        { name: "v1alpha1", served: true },
+                        { name: "v1", served: true },
+                    ]),
+                }),
+                "apps.kn-next.dev/v1beta1",
+            ),
+        );
+        expect(mixed.status).toBe("fail");
+        expect(mixed.detail).toMatch(/upgrade the operator first/i);
+        expect(mixed.detail).toMatch(/upgrade the CLI/i);
+    });
+
+    it("PASS: a deprecated but still served version pairs (deprecation is not an unserved version)", () => {
+        const row = only(
+            crdCheck(
+                ctxFor({
+                    ok: true,
+                    stdout: JSON.stringify({
+                        spec: {
+                            versions: [
+                                {
+                                    name: "v1beta1",
+                                    served: true,
+                                    storage: true,
+                                },
+                                {
+                                    name: EMITTED,
+                                    served: true,
+                                    storage: false,
+                                    deprecated: true,
+                                    deprecationWarning: "use v1beta1",
+                                },
+                            ],
+                        },
+                    }),
+                }),
+            ),
+        );
+        expect(row.status).toBe("pass");
+        expect(row.detail).toContain("v1beta1, v1alpha1");
     });
 
     it("FAIL: the emitted version is listed but no longer served", () => {

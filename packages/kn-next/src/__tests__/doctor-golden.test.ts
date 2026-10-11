@@ -301,7 +301,7 @@ describe("doctor golden output (#1055 byte-identical pin)", () => {
         pin(report);
     });
 
-    it("crd-version — a CRD that does not serve the emitted apiVersion FAILs: upgrade the operator first", async () => {
+    it("crd-version — a CRD that does not serve the emitted apiVersion FAILs: a newer-only CRD means upgrade the CLI", async () => {
         const stubs = healthyStubs();
         stubs["kubectl get crd nextapps.apps.kn-next.dev -o json"] = {
             ok: true,

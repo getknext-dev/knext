@@ -195,8 +195,10 @@ Pre-release suffixes (`-rc.N`) are ignored when pairing.
 `knext doctor` checks the first half of that rule against your cluster: its **NextApp CRD** row
 reads the API versions the installed CRD serves and compares them with the `apiVersion` your CLI
 emits. It passes when that version is served (a CRD that serves several versions is fine as long as
-one of them is yours) and fails, with a message to upgrade the operator first, when the CRD does not serve it. If
-the CRD cannot be read, the row fails rather than guessing. The **Operator version** row, described
+one of them is yours) and fails when the CRD does not serve it. The message tells you which side to move: upgrade the
+operator first when the CRD only serves older versions than your CLI emits, or upgrade the CLI to
+match the operator when it only serves newer ones (a version marked deprecated still counts as
+served). If the CRD cannot be read, the row fails rather than guessing. The **Operator version** row, described
 below, is informational and does not decide the pairing.
 
 ## Pin, upgrade and roll back the operator
