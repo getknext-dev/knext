@@ -446,6 +446,14 @@ scale-to-zero database that could be waking (bring-your-own Postgres,
 a custom `APPDB_GATEWAY_HOST`, or a pooler in front of the scale-to-zero
 database), or it is reachable but erroring on the probe query.
 
+**Default settings.** The DB connection retries a failed connect for
+`DB_WAKE_RETRY_BUDGET_MS` (default 8 s) before it fails, and the deep check
+gives up at `HEALTH_DEEP_TIMEOUT_MS` (default 8 s). With both at their defaults
+a refused connection can still read `waking`, and `KnextDeepHealthStuckWaking`
+fires instead of this alert. For a bring-your-own database, set
+`DB_WAKE_RETRY_BUDGET_MS` lower than the deep-check timeout (for example
+`1000`).
+
 **Act.**
 
 1. Check the database itself is up and accepting connections from the app's

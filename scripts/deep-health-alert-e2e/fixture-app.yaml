@@ -52,6 +52,17 @@ spec:
             # which is reserved for the scale-zero-pg gateway host).
             - name: DATABASE_URL
               value: postgres://app:app@127.0.0.1:1/app
+            # The pool retries a failed connect for DB_WAKE_RETRY_BUDGET_MS (default
+            # 8 s, the scale-to-zero wake budget) before the query fails — on any
+            # host. The deep check gives up at HEALTH_DEEP_TIMEOUT_MS (default 8 s),
+            # the same number, so by default the check loses that race and a
+            # refused connection reads `waking` rather than `down`. A bring-your-own
+            # database has no wake to wait for, so this fixture sets the budget below
+            # the deep-check timeout, which is what makes `down` reachable at all.
+            # That default collision is tracked as its own issue; this e2e proves
+            # the alert pipeline for the `down` state, not that default.
+            - name: DB_WAKE_RETRY_BUDGET_MS
+              value: "1000"
           ports:
             - containerPort: 3000
             - containerPort: 9464
