@@ -25,8 +25,13 @@ import { splitSourceIntoStatements } from './shell-statements';
  *
  *   1. the word `publish` (also `PUBLISH_CMD`-style variable names and
  *      `publish.sh`-style script names) appears in a `run` statement, after
- *      joining line continuations and dropping comments and `cat`/`tee`/`echo`
- *      heredoc prose;
+ *      joining line continuations and dropping comments and PROSE heredocs. A
+ *      heredoc is prose only when its command is `cat`/`tee`/`echo`/`printf` at
+ *      statement position AND it goes to stdout, `$GITHUB_STEP_SUMMARY`, or a pipe
+ *      into an issue-body command; one written to a file (`cat > r.sh <<EOF`),
+ *      fed to a shell, chained, unterminated, or sharing a line with another
+ *      heredoc is executable content and is scanned. `<<WORD` inside a quoted
+ *      string or `$((…))` is not a heredoc at all;
  *   2. it appears in a `uses:` name, a `with:` value, or an `env:` value (so a
  *      third-party publish action, `nick-fields/retry` with `command: npm
  *      publish`, and `env: CMD: npm publish` are all candidates);
@@ -35,10 +40,26 @@ import { splitSourceIntoStatements } from './shell-statements';
  *   5. a local composite action (`uses: ./...`) contains any of the above, or
  *      cannot be read;
  *   6. the job holds the npm credential (`NODE_AUTH_TOKEN`, `secrets.NPM_TOKEN`,
- *      an `npm-publish*` or expression `environment`). This is the sturdy rule:
+ *      an `npm-publish*` or expression `environment`) — in the job OR in the
+ *      workflow-level `env:`, which GitHub merges into every job (a workflow-level
+ *      `env:` value that says `publish` is likewise inherited by every job). This
+ *      is the sturdy rule:
  *      whatever a credentialed job runs — `$CMD`, `eval`, `bash x.sh`,
  *      `${{ inputs.cmd }}` — it is a candidate, so a form nobody listed cannot
- *      slip past it.
+ *      slip past it;
+ *   7. the job has `id-token: write` (its own `permissions:`, else the
+ *      workflow's; `write-all` counts) and runs npm, pnpm, yarn, npx, changeset or
+ *      lerna anywhere in a `run` statement — OIDC trusted publishing
+ *      (`npm publish --provenance` with no token) holds no credential to key on.
+ *
+ * ## The allowlist is keyed on the PROPERTY that excused a job
+ *
+ * An entry names a job, but a reviewer excuses it for a property ("opens an
+ * issue", "holds no credential"). An allowlisted job that NOW holds the npm
+ * credential (job or workflow level), uses a publish action or a
+ * changesets/action publish input, or runs a statement with `publish` as an
+ * argument (an `echo`/`printf` mention or an assignment is not one) is a
+ * PROBLEM regardless of the entry.
  *
  * Nothing names a workflow file or a job id except the allowlist, and the
  * allowlist can only REMOVE a job from the lane set, visibly, in review.
@@ -49,12 +70,16 @@ import { splitSourceIntoStatements } from './shell-statements';
  *     (`npm audit --omit=dev` over the packed production closure) as a bare,
  *     own-line, argument-free statement: after joining continuations it must not
  *     be preceded by anything on its line (a subshell, `a ||`, `!`), followed by
- *     `||`, `;`, `&` or a comment-less remainder, carry ANY argument (`--help`
- *     included; the script takes none), have a later `exit 0`/`true`/`:`, or sit
- *     under `set +e`, a non-bash `shell:`, a step `if`, or any
- *     `continue-on-error`.
+ *     `||`, `;`, `&` or a comment-less remainder, or carry ANY argument
+ *     (`--help` included; the script takes none). Neutralisers are a RULE, not a
+ *     list of spellings: ANY `exit`/`return` statement in the step, ANY
+ *     `set +<flags containing e>` or `set +o errexit`, a later `true`/`:`, a
+ *     step `if`, any `continue-on-error`, or an EFFECTIVE shell (step `shell:`,
+ *     else the job's, else the workflow's `defaults.run.shell`) that does not
+ *     keep errexit (`bash {0}`, `pwsh`, `python`…).
  *   - THE SBOM JOB — a job running that same script and uploading a
- *     `*.cdx.json` artifact. The script is the single source of truth for both
+ *     `*.cdx.json` artifact with an upload step that is itself reliable (no
+ *     `continue-on-error`, no non-trivial `if`). The script is the single source of truth for both
  *     the audit and the CycloneDX SBOM, so today one job is both; the guard
  *     requires the lane to reach at least one of each, not two distinct jobs.
  *
@@ -82,6 +107,14 @@ import { splitSourceIntoStatements } from './shell-statements';
  *     catches every one in a job that can authenticate to npm — but a
  *     publish done with a token that is not named `NODE_AUTH_TOKEN` /
  *     `NPM_TOKEN` and a command that never says `publish` is not seen.
+ *   - OIDC trusted publishing is caught only through rule 7 (a job with
+ *     `id-token: write` that runs an npm-family tool). It is not seen where the
+ *     publish goes through a tool outside that set, or through a reusable workflow.
+ *   - Shell quote-splitting (`npm pub""lish`, `npm "pub"lish`, `p=pub; npm ${p}lish`)
+ *     defeats the word rule; it is caught only by the credential and `id-token`
+ *     rules.
+ *   - A token not named `NODE_AUTH_TOKEN` / `NPM_TOKEN` (e.g.
+ *     `secrets.NPM_AUTOMATION_TOKEN`) is not recognised as the credential.
  *   - Hyphenated names (`publish-all`, `publish-packages`) are NOT matched by the
  *     word rule (they would also match `publish-lane-guard` / `publish-preflight`
  *     on every job here); they are caught by the credential rule or the alias
@@ -168,7 +201,8 @@ const RUNNERS = new Set(['node', 'nodejs', 'bun', 'deno', 'tsx', 'ts-node']);
 const joinContinuations = (source: string): string => source.replace(/\\\r?\n[ \t]*/g, ' ');
 
 function tokenize(statement: string): string[] {
-  const raw = statement.match(/"[^"]*"|'[^']*'|\S+/g) ?? [];
+  // A word is any run of unquoted chars and quoted strings (`body="a b c"` is ONE word).
+  const raw = statement.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) ?? [];
   return raw.map((t) => t.replace(/^(["'])(.*)\1$/s, '$2'));
 }
 
@@ -187,28 +221,132 @@ function commandTokens(tokens: string[]): string[] {
   return tokens.slice(i);
 }
 
+/** Sinks a heredoc may feed and still be PROSE: stdout-ish, never a file or a shell. */
+const PROSE_REDIRECT_TARGETS = new Set([
+  '$GITHUB_STEP_SUMMARY',
+  '"$GITHUB_STEP_SUMMARY"',
+  '${GITHUB_STEP_SUMMARY}',
+  '"${GITHUB_STEP_SUMMARY}"',
+  '/dev/stdout',
+  '/dev/stderr',
+  '/dev/null',
+  '&1',
+  '&2',
+]);
+/** Commands a heredoc may be PIPED to and still be prose (an issue body, a filter). */
+const PROSE_PIPE_SINKS = new Set(['gh', 'cat', 'grep', 'sed', 'jq', 'head', 'tail', 'wc', 'sort']);
+
+interface HeredocOp {
+  /** The command text before `<<` in its own statement. */
+  segment: string;
+  /** Everything after the delimiter word, to the end of the line. */
+  after: string;
+  delim: string;
+}
+
 /**
- * Removes the BODY of a heredoc whose command is a pure text sink (`cat`, `tee`,
- * `echo`, `printf`) — prose such as an issue body that says "npm publish". A
- * heredoc fed to a shell (`bash <<EOF`, `cat <<EOF | sh`) is code and is kept.
+ * Unquoted `<<WORD` operators on ONE line, with the statement they belong to.
+ * `<<` inside '…', "…", `$((…))` or after a comment `#` is not a heredoc (round 2
+ * treated `echo "v $((1<<SHIFT))"` as one and swallowed the rest of the script),
+ * and `<<<` is a here-string.
+ */
+function heredocOps(line: string): HeredocOp[] {
+  const ops: HeredocOp[] = [];
+  let quote: '"' | "'" | null = null;
+  let arith = 0;
+  let segStart = 0;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (quote) {
+      if (c === '\\' && quote === '"') i++;
+      else if (c === quote) quote = null;
+      continue;
+    }
+    if (arith > 0) {
+      if (c === '(') arith++;
+      else if (c === ')') arith--;
+      continue;
+    }
+    if (c === '\\') {
+      i++;
+    } else if (c === "'" || c === '"') {
+      quote = c;
+    } else if (c === '$' && line.startsWith('$((', i)) {
+      arith = 2;
+      i += 2;
+    } else if (c === '#' && (i === 0 || /\s/.test(line[i - 1]))) {
+      break;
+    } else if (c === ';' || c === '|' || c === '&' || c === '(' || c === '{') {
+      segStart = i + 1;
+    } else if (c === '<' && line[i + 1] === '<' && line[i + 2] !== '<') {
+      const m = /^<<-?\s*(?:'([^']*)'|"([^"]*)"|\\?([A-Za-z_][A-Za-z0-9_]*))/.exec(line.slice(i));
+      if (!m) continue;
+      ops.push({
+        segment: line.slice(segStart, i),
+        after: line.slice(i + m[0].length),
+        delim: m[1] ?? m[2] ?? m[3],
+      });
+      i += m[0].length - 1;
+    }
+  }
+  return ops;
+}
+
+/** Is this heredoc provably PROSE (stdout, the step summary, an issue body)? Unsure → false. */
+function isProseHeredoc(op: HeredocOp): boolean {
+  const seg = commandTokens(tokenize(op.segment));
+  const head = seg[0];
+  if (head === undefined || !['cat', 'echo', 'printf', 'tee'].includes(head)) return false;
+  // Redirections anywhere on the line: only stdout-ish targets.
+  const line = `${op.segment} ${op.after}`;
+  for (const m of line.matchAll(/(?:^|\s)(?:\d*|&)>>?\s*(\S+)/g)) {
+    if (!PROSE_REDIRECT_TARGETS.has(m[1])) return false;
+  }
+  // `tee FILE` writes a file; only the step summary is prose.
+  if (head === 'tee') {
+    const targets = seg.slice(1).filter((t) => !t.startsWith('-'));
+    if (targets.some((t) => !PROSE_REDIRECT_TARGETS.has(t))) return false;
+  }
+  // Anything chained after the heredoc on this line (`; bash x`, `&& node y`) is unknown.
+  const bare = op.after.replace(/"[^"]*"|'[^']*'/g, '');
+  if (/;|&&|\|\|/.test(bare)) return false;
+  // Pipes: every downstream command must be a known text sink.
+  const pipes = bare.split(/\|(?!\|)/).slice(1);
+  for (const p of pipes) {
+    const tokens = commandTokens(tokenize(p.trim()));
+    if (tokens[0] === undefined || !PROSE_PIPE_SINKS.has(tokens[0])) {
+      if (tokens[0] === 'tee') {
+        const t = tokens.slice(1).filter((x) => !x.startsWith('-'));
+        if (t.every((x) => PROSE_REDIRECT_TARGETS.has(x))) continue;
+      }
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Removes the BODY of a heredoc that is provably prose — `cat`/`echo`/`printf`/
+ * `tee` writing to stdout, the step summary, or piped to an issue-body command.
+ * Everything else is executable content and is KEPT for scanning: a heredoc
+ * written to a file (`cat > r.sh <<EOF`, `tee r.sh <<EOF`), fed to a shell or
+ * interpreter, chained into another command, unterminated, or sharing its line
+ * with a second heredoc. Unsure means kept (fail closed).
  */
 function stripProseHeredocs(source: string): string {
   const lines = source.split('\n');
   const out: string[] = [];
   for (let i = 0; i < lines.length; i++) {
     out.push(lines[i]);
-    const m = /^\s*(cat|tee|echo|printf)\b[^\n]*?<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\2/.exec(
-      lines[i],
-    );
-    if (!m || /\|\s*(sudo\s+)?(ba|z|da)?sh\b/.test(lines[i])) continue;
-    const delim = m[3];
+    const ops = heredocOps(lines[i]);
+    if (ops.length !== 1 || !isProseHeredoc(ops[0])) continue;
     let j = i + 1;
-    while (j < lines.length && lines[j].trim() !== delim) j++;
+    while (j < lines.length && lines[j].trim() !== ops[0].delim) j++;
+    if (j >= lines.length) continue; // unterminated: keep the body
     i = j; // the terminator line is dropped with the body
   }
   return out.join('\n');
 }
-
 /** The evidence that `source` (a `run` body) can publish, or null. */
 function runEvidence(source: string, scripts: Record<string, string>, depth = 0): string | null {
   if (depth > 5) return null;
@@ -282,15 +420,32 @@ function auditInvocationProblem(run: string): string | null {
   if (bare.length === 0) {
     return 'invocation is not a bare own-line `node scripts/audit-published.mjs` (a prefix, `||`, `;`, `&`, subshell, or any argument such as --help)';
   }
-  // After the invocation: nothing that swallows the exit status.
-  const first = lines.findIndex((l) => bare.includes(l));
-  const stmts = splitSourceIntoStatements(lines.slice(first + 1).join('\n')).map((s) =>
-    s.text.trim(),
-  );
-  if (stmts.some((s) => /^(exit\s+0|true|:)$/.test(s))) {
-    return 'a later `exit 0` / `true` / `:` swallows the exit status';
+  // A RULE, not a list of spellings (`exit 0`, `exit "0"`, `exit 00`, `exit $((0))`,
+  // `set +eu`, `set +o errexit` all slipped past the round-2 regexes):
+  //  - ANY `exit`/`return` statement in the step, before or after the audit, can end
+  //    the step with a status the audit did not decide;
+  //  - ANY `set +<flags containing e>` or `set +o errexit` turns errexit off;
+  //  - after the audit, a bare `true` / `:` is a no-op that only exists to mask it.
+  const statementHeads = (src: string) =>
+    splitSourceIntoStatements(src).map((s) => {
+      const tokens = tokenize(s.text.trim());
+      return { tokens, head: commandTokens(tokens)[0] };
+    });
+  for (const { tokens, head } of statementHeads(joined)) {
+    if (head === 'exit' || head === 'return') {
+      return 'the step contains an `exit`/`return`, which can end it with a status the audit did not decide';
+    }
+    if (head === 'set') {
+      const rest = tokens.slice(tokens.indexOf('set') + 1);
+      const offFlags = rest.some((t) => /^\+[A-Za-z]*e/.test(t));
+      const offOption = rest.some((t, i) => t === '+o' && rest[i + 1] === 'errexit');
+      if (offFlags || offOption) return 'the step turns errexit off (`set +e…` / `set +o errexit`)';
+    }
   }
-  if (/\bset\s+\+e\b/.test(joined)) return 'the script runs under `set +e`';
+  const first = lines.findIndex((l) => bare.includes(l));
+  for (const { head } of statementHeads(lines.slice(first + 1).join('\n'))) {
+    if (head === 'true' || head === ':') return 'a later `true` / `:` masks the exit status';
+  }
   return null;
 }
 
@@ -347,8 +502,9 @@ function environmentName(job: Job): string {
 }
 
 /** Can this job authenticate to npm? Comment-free (parsed), dot/bracket access, any case. */
-function holdsNpmCredential(job: Job): boolean {
-  const text = allStrings(job).join('\n');
+function holdsNpmCredential(job: Job, wf: WorkflowCtx): boolean {
+  // A workflow-level `env:` reaches every job, so it counts as the job's own.
+  const text = allStrings([job, wf.env]).join('\n');
   const env = environmentName(job);
   return (
     text.includes('NODE_AUTH_TOKEN') ||
@@ -365,7 +521,97 @@ function holdsNpmCredential(job: Job): boolean {
  * stop the step.
  */
 const keepsErrexit = (shell: string): boolean =>
-  shell.trim() === 'bash' || /^bash\b.*\s-[A-Za-z]*e/.test(shell.trim());
+  /^(ba)?sh$/.test(shell.trim()) || /^(ba)?sh\b.*\s-[A-Za-z]*e/.test(shell.trim());
+
+/** Workflow-level keys that GitHub merges into every job. */
+interface WorkflowCtx {
+  env: unknown;
+  /** `defaults.run.shell` */
+  shell: string | undefined;
+  permissions: unknown;
+}
+
+const defaultShellOf = (node: Record<string, unknown>): string | undefined => {
+  const shell = asRecord(asRecord(node.defaults)?.run)?.shell;
+  return typeof shell === 'string' ? shell : undefined;
+};
+
+/** `id-token: write` (or `write-all`) in the permissions that apply to the job. */
+function grantsIdToken(job: Job, wf: WorkflowCtx): boolean {
+  const perms = 'permissions' in job ? job.permissions : wf.permissions;
+  if (perms === 'write-all') return true;
+  return asRecord(perms)?.['id-token'] === 'write';
+}
+
+const NPM_FAMILY = new Set([
+  'npm',
+  'pnpm',
+  'yarn',
+  'npx',
+  'pnpx',
+  'changeset',
+  'changesets',
+  'lerna',
+]);
+
+/** Does any `run` statement in the steps name an npm-family tool (anywhere in the command)? */
+function runsNpmFamily(steps: Step[]): boolean {
+  for (const step of steps) {
+    const run = runOf(step);
+    if (!run) continue;
+    for (const { text } of splitSourceIntoStatements(stripProseHeredocs(joinContinuations(run)))) {
+      if (tokenize(text).some((t) => NPM_FAMILY.has(t.split('/').pop() ?? t))) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Why an ALLOWLISTED job must not stay excused (null = the excuse still holds).
+ * The allowlist is keyed on identity, but a reviewer excuses a job for a
+ * PROPERTY ("opens an issue", "holds no credential"); if that property stops
+ * holding, the entry must not keep the job green.
+ */
+function excusalProblem(job: Job, steps: Step[], wf: WorkflowCtx, ctx: Ctx): string | null {
+  if (holdsNpmCredential(job, wf)) return 'now holds the npm credential';
+  for (const step of steps) {
+    const uses = typeof step.uses === 'string' ? step.uses : '';
+    if (PUBLISH_WORD.test(uses)) return `now uses the publish action \`${uses}\``;
+    const withs = asRecord(step.with) ?? {};
+    if (/^changesets\/action(@|$)/.test(uses) && (withs['publish-script'] || withs.publish)) {
+      return 'now runs changesets/action with a publish input';
+    }
+    const run = runOf(step);
+    if (run && runsRealPublish(run, ctx.scripts)) return 'now runs a real publish command';
+  }
+  return null;
+}
+
+/** A statement that RUNS `publish` as an argument (not prose inside a quoted string or an assignment). */
+function runsRealPublish(source: string, scripts: Record<string, string>, depth = 0): boolean {
+  if (depth > 5) return false;
+  for (const { text } of splitSourceIntoStatements(stripProseHeredocs(joinContinuations(source)))) {
+    const cmd = commandTokens(tokenize(text));
+    const head = cmd[0];
+    if (head === undefined || head === 'echo' || head === 'printf') continue;
+    if (cmd.slice(1).some((t) => t === 'publish')) return true;
+    if (PACKAGE_MANAGERS.has(head)) {
+      const rest = cmd.slice(1);
+      const run = rest.findIndex((t) => t === 'run' || t === 'run-script');
+      const names =
+        run !== -1
+          ? rest.slice(run + 1)
+          : head === 'pnpm' || head === 'yarn'
+            ? rest.filter((t) => !t.startsWith('-')).slice(0, 1)
+            : [];
+      for (const name of names) {
+        const body = scripts[name];
+        if (typeof body === 'string' && runsRealPublish(body, scripts, depth + 1)) return true;
+      }
+    }
+  }
+  return false;
+}
 
 interface JobFacts {
   /** Why this job is a lane candidate, or null. */
@@ -374,9 +620,12 @@ interface JobFacts {
   /** Reason the audit can't gate, when it runs but is neutralised. */
   neutralised: string | null;
   uploadsSbom: boolean;
+  /** Why an allowlist entry for this job can no longer excuse it (null = it still can). */
+  excusal: string | null;
 }
 
 interface Ctx {
+  wf: WorkflowCtx;
   scripts: Record<string, string>;
   repoRoot: string;
   problems: string[];
@@ -450,21 +699,28 @@ function analyseJob(job: Job, ctx: Ctx): JobFacts {
 
   for (const step of steps) {
     const run = runOf(step);
+    const effectiveShell =
+      typeof step.shell === 'string' ? step.shell : (defaultShellOf(job) ?? ctx.wf.shell);
     if (run && runsAuditScript(run)) {
       runsAudit = true;
       neutralised ??= jobSoftened
         ? 'job has continue-on-error'
         : softensFailure(step)
           ? 'step has continue-on-error'
-          : 'if' in step && !/^(true|success\(\))$/.test(String(step.if).replace(/[\s${}]/g, ''))
+          : 'if' in step && !isTriviallyTrue(step.if)
             ? `step has a conditional \`if: ${step.if}\``
-            : step.shell !== undefined && !keepsErrexit(String(step.shell))
-              ? `step overrides \`shell: ${step.shell}\``
+            : effectiveShell !== undefined && !keepsErrexit(effectiveShell)
+              ? `the effective shell \`${effectiveShell}\` (step, job or workflow default) does not keep errexit`
               : auditInvocationProblem(run);
     }
     const uses = typeof step.uses === 'string' ? step.uses : '';
     const withs = asRecord(step.with) ?? {};
-    if (/^actions\/upload-artifact(@|$)/.test(uses) && SBOM_PATH.test(String(withs.path ?? ''))) {
+    if (
+      /^actions\/upload-artifact(@|$)/.test(uses) &&
+      SBOM_PATH.test(String(withs.path ?? '')) &&
+      !softensFailure(step) &&
+      !('if' in step && !isTriviallyTrue(step.if))
+    ) {
       uploadsSbom = true;
     }
   }
@@ -474,17 +730,29 @@ function analyseJob(job: Job, ctx: Ctx): JobFacts {
     candidate = `reusable workflow \`${job.uses}\``;
   }
   if (candidate === null) {
-    const hit = [...stringValues(job.env), ...stringValues(job.with)].find((s) =>
-      PUBLISH_WORD.test(s),
-    );
-    if (hit) candidate = `job env/with value \`${hit.trim().slice(0, 60)}\``;
+    // The workflow-level env reaches every job in the file.
+    const hit = [
+      ...stringValues(job.env),
+      ...stringValues(job.with),
+      ...stringValues(ctx.wf.env),
+    ].find((s) => PUBLISH_WORD.test(s));
+    if (hit) candidate = `job or workflow env/with value \`${hit.trim().slice(0, 60)}\``;
   }
-  if (candidate === null && holdsNpmCredential(job)) {
+  if (candidate === null && holdsNpmCredential(job, ctx.wf)) {
     candidate =
-      'the job holds the npm credential (NODE_AUTH_TOKEN / NPM_TOKEN / npm-publish environment)';
+      'the job holds the npm credential (NODE_AUTH_TOKEN / NPM_TOKEN / npm-publish environment, job or workflow level)';
   }
-  return { candidate, runsAudit, neutralised, uploadsSbom };
+  if (candidate === null && grantsIdToken(job, ctx.wf) && runsNpmFamily(steps)) {
+    candidate =
+      'the job has `id-token: write` and runs npm/pnpm/yarn/changeset (OIDC trusted publishing needs no token)';
+  }
+  const excusal = excusalProblem(job, steps, ctx.wf, ctx);
+  return { candidate, runsAudit, neutralised, uploadsSbom, excusal };
 }
+
+/** An `if:` that is provably the default (`true` / `success()`), so it cannot skip a step. */
+const isTriviallyTrue = (cond: unknown): boolean =>
+  /^(true|success\(\))$/.test(String(cond).replace(/[\s${}]/g, ''));
 
 /** Transitive `needs` closure; edges out of a status-bypassing job are dropped. */
 function closure(
@@ -558,7 +826,7 @@ export function auditPublishLanes(options: AuditOptions): PublishLaneAudit {
   }
 
   // Pass 1: read everything. A file we cannot see could hold an ungated lane.
-  const parsed: Array<{ file: string; jobs: Record<string, Job> }> = [];
+  const parsed: Array<{ file: string; jobs: Record<string, Job>; wf: WorkflowCtx }> = [];
   for (const file of names) {
     let doc: unknown;
     try {
@@ -576,15 +844,20 @@ export function auditPublishLanes(options: AuditOptions): PublishLaneAudit {
     }
     const clean: Record<string, Job> = {};
     for (const [id, job] of Object.entries(jobs)) clean[id] = asRecord(job) ?? {};
-    parsed.push({ file: basename(file), jobs: clean });
+    const top = asRecord(doc) ?? {};
+    parsed.push({
+      file: basename(file),
+      jobs: clean,
+      wf: { env: top.env, shell: defaultShellOf(top), permissions: top.permissions },
+    });
   }
 
   // Pass 2: per workflow, find gates and candidates, then walk each lane's `needs`.
   const usedAllowlist = new Set<NonLane>();
-  for (const { file, jobs } of parsed) {
+  for (const { file, jobs, wf } of parsed) {
     const facts = new Map<string, JobFacts>();
     for (const [id, job] of Object.entries(jobs)) {
-      facts.set(id, analyseJob(job, { scripts, repoRoot, problems, where: `${file}#${id}` }));
+      facts.set(id, analyseJob(job, { wf, scripts, repoRoot, problems, where: `${file}#${id}` }));
     }
 
     const audits = new Set<string>();
@@ -609,7 +882,15 @@ export function auditPublishLanes(options: AuditOptions): PublishLaneAudit {
       const allowed = nonLanes.find((e) => e.file === file && e.job === id);
       if (allowed) {
         usedAllowlist.add(allowed);
-        excused.push(`${file}#${id}`);
+        if (f.excusal) {
+          problems.push(
+            `allowlisted ${file}#${id} ${f.excusal}, so the allowlist reason ("${allowed.reason}") no longer holds and cannot excuse it — gate it behind the audit + SBOM jobs or take it off the allowlist`,
+          );
+        } else {
+          excused.push(`${file}#${id}`);
+          continue;
+        }
+        lanes.push({ file, jobId: id, why: `allowlisted but ${f.excusal}` });
         continue;
       }
       lanes.push({ file, jobId: id, why: f.candidate });

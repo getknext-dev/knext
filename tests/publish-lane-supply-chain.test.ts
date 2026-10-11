@@ -354,7 +354,7 @@ jobs:
     steps:
       # npm publish is described here only
       - run: |
-          cat > body.md <<EOF
+          cat <<EOF
           - release.yml holds a live npm publish credential.
           EOF
           echo done
@@ -646,6 +646,340 @@ describe('publish-lane supply-chain guard: an audit that cannot fail the run is 
       );
       expect(audit.problems, body).toEqual([]);
     }
+  });
+});
+
+/** A workflow with extra TOP-LEVEL keys (env, defaults, permissions) before `jobs:`. */
+const wfTop = (top: string, jobsYaml: string) => `name: t\non: push\n${top}\njobs:${jobsYaml}`;
+
+const stepJob = (stepYaml: string, jobExtra = '') => `
+  ship:
+    runs-on: ubuntu-latest
+${jobExtra}    steps:
+${stepYaml}
+`;
+
+describe('publish-lane supply-chain guard (round 3): workflow-level env / permissions are inherited', () => {
+  const OPAQUE = `      - run: |\n          bash ./r.sh\n`;
+
+  it('a top-level env carrying the npm credential makes every job a candidate', () => {
+    for (const env of [
+      'env:\n  NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}\n',
+      'env:\n  T: ${{ secrets.NPM_TOKEN }}\n',
+      "env:\n  T: ${{ secrets['NPM_TOKEN'] }}\n",
+    ]) {
+      const audit = auditPublishLanes(fixture({ 'a.yml': wfTop(env, stepJob(OPAQUE)) }));
+      expect(laneIds(audit)).toEqual(['a.yml#ship']);
+      expect(audit.problems.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('a top-level env value that says publish makes the jobs candidates', () => {
+    const audit = auditPublishLanes(
+      fixture({
+        'a.yml': wfTop('env:\n  CMD: npm publish\n', stepJob('      - run: |\n          $CMD\n')),
+      }),
+    );
+    expect(laneIds(audit)).toEqual(['a.yml#ship']);
+  });
+
+  it('id-token: write (job or workflow level) in a job that runs npm/pnpm/yarn/changeset is a candidate', () => {
+    const cases: Array<[string, string, string]> = [
+      ['job-level', '', '    permissions:\n      id-token: write\n'],
+      ['workflow-level', 'permissions:\n  id-token: write\n', ''],
+      ['write-all', 'permissions: write-all\n', ''],
+    ];
+    for (const [label, top, jobExtra] of cases) {
+      for (const run of ['npm run deploy', 'pnpm run deploy', 'yarn deploy', 'npx changeset-x']) {
+        const audit = auditPublishLanes(
+          fixture({
+            'a.yml': wfTop(top, stepJob(`      - run: ${run}\n`, jobExtra)),
+          }),
+        );
+        expect(laneIds(audit), `${label}: ${run}`).toEqual(['a.yml#ship']);
+      }
+    }
+  });
+
+  it('id-token: write alone (cosign, OIDC deploys) with no npm-family command is NOT a candidate', () => {
+    const audit = auditPublishLanes(
+      fixture({
+        'a.yml': wfTop(
+          'permissions:\n  id-token: write\n',
+          stepJob('      - run: cosign sign --yes "$IMG"\n'),
+        ),
+      }),
+    );
+    expect(audit.lanes).toEqual([]);
+  });
+
+  it('a job-level permissions block overrides the workflow-level id-token grant', () => {
+    const audit = auditPublishLanes(
+      fixture({
+        'a.yml': wfTop(
+          'permissions:\n  id-token: write\n',
+          stepJob('      - run: npm run deploy\n', '    permissions:\n      contents: read\n'),
+        ),
+      }),
+    );
+    expect(audit.lanes).toEqual([]);
+  });
+
+  it('quote-split commands (`npm pub""lish`) are the documented blind spot, caught only with a credential', () => {
+    const run = 'npm pub""lish';
+    const bare = auditPublishLanes(fixture({ 'a.yml': wf(publishJob('[]', run)) }));
+    expect(bare.lanes).toEqual([]);
+    const cred = auditPublishLanes(
+      fixture({ 'a.yml': wf(publishJob('[]', run, '    environment: npm-publish\n')) }),
+    );
+    expect(laneIds(cred)).toEqual(['a.yml#release']);
+  });
+});
+
+describe('publish-lane supply-chain guard (round 3): heredocs are code unless they provably go to prose', () => {
+  const lane = (run: string) => auditPublishLanes(fixture({ 'a.yml': wf(publishJob('[]', run)) }));
+
+  it('a heredoc WRITTEN TO A FILE is executable content, not prose', () => {
+    for (const run of [
+      "cat > r.sh <<'EOF'\nnpm publish\nEOF\nbash r.sh",
+      'cat >r.sh <<EOF\nnpm publish\nEOF\nbash r.sh',
+      'cat >> r.sh <<EOF\nnpm publish\nEOF\nbash r.sh',
+      "tee r.sh <<'EOF'\nnpm publish\nEOF\nbash r.sh",
+      'tee -a r.sh <<EOF >/dev/null\nnpm publish\nEOF\nbash r.sh',
+      'cat <<EOF > r.sh\nnpm publish\nEOF\nbash r.sh',
+      'cat <<EOF | tee r.sh\nnpm publish\nEOF\nbash r.sh',
+      'cat <<EOF | bash\nnpm publish\nEOF',
+      'cat <<EOF | node\nnpm publish\nEOF',
+    ]) {
+      expect(laneIds(lane(run)), run).toEqual(['a.yml#release']);
+    }
+  });
+
+  it('a heredoc to stdout / the step summary / an issue body is still prose', () => {
+    for (const run of [
+      'cat <<EOF\nnpm publish is documented\nEOF\necho done',
+      'cat <<EOF >> "$GITHUB_STEP_SUMMARY"\nnpm publish is documented\nEOF\necho done',
+      'cat <<EOF >> $GITHUB_STEP_SUMMARY\nnpm publish is documented\nEOF\necho done',
+      'cat <<EOF | gh issue create --title t --body-file -\nnpm publish is documented\nEOF\necho done',
+      'tee -a "$GITHUB_STEP_SUMMARY" <<EOF\nnpm publish is documented\nEOF\necho done',
+    ]) {
+      expect(lane(run).lanes, run).toEqual([]);
+    }
+  });
+
+  it('`<<WORD` inside a quoted echo/printf string or $((…)) does not swallow the rest of the script', () => {
+    for (const run of [
+      'echo "v $((1<<SHIFT))"\nnpm publish',
+      'printf "see <<EOF\\n"\nnpm publish',
+      "echo 'a <<EOF b'\nnpm publish",
+      'x=$((1<<EOF))\nnpm publish',
+    ]) {
+      expect(laneIds(lane(run)), run).toEqual(['a.yml#release']);
+    }
+  });
+
+  it('an unterminated heredoc keeps its body (fail closed)', () => {
+    expect(laneIds(lane('cat <<EOF\nnpm publish'))).toEqual(['a.yml#release']);
+  });
+
+  it('two heredocs on one line are not stripped (fail closed)', () => {
+    expect(laneIds(lane('cat <<A <<B\nx\nA\nnpm publish\nB')), 'both bodies stay visible').toEqual([
+      'a.yml#release',
+    ]);
+  });
+});
+
+describe('publish-lane supply-chain guard (round 3): audit neutralisers are a RULE, not a list', () => {
+  const NEUTRALISED: Array<[string, string]> = [
+    ['exit "0"', 'node scripts/audit-published.mjs\nexit "0"'],
+    ['exit 00', 'node scripts/audit-published.mjs\nexit 00'],
+    ['exit $((0))', 'node scripts/audit-published.mjs\nexit $((0))'],
+    ['exit $?', 'node scripts/audit-published.mjs\nexit $?'],
+    ['bare exit', 'node scripts/audit-published.mjs\nexit'],
+    ['exit 1 (any exit)', 'node scripts/audit-published.mjs\nexit 1'],
+    ['an exit BEFORE the audit', 'exit 0\nnode scripts/audit-published.mjs'],
+    ['set +eu', 'set +eu\nnode scripts/audit-published.mjs'],
+    ['set +ue', 'set +ue\nnode scripts/audit-published.mjs'],
+    ['set +o errexit', 'set +o errexit\nnode scripts/audit-published.mjs'],
+    ['set +e AFTER', 'node scripts/audit-published.mjs\nset +e'],
+    ['set +euo pipefail', 'set +euo pipefail\nnode scripts/audit-published.mjs'],
+    ['a trailing `:`', 'node scripts/audit-published.mjs\n:'],
+    ['a trailing `true`', 'node scripts/audit-published.mjs\ntrue'],
+    ['a trailing `return 0`', 'node scripts/audit-published.mjs\nreturn 0'],
+  ];
+  for (const [label, body] of NEUTRALISED) {
+    it(`${label} does not count as the audit gate`, () => {
+      const audit = auditPublishLanes(
+        fixture({ 'a.yml': wf(`${auditJobWith(body)}${publishJob('audit')}`) }),
+      );
+      expect(audit.problems.length).toBeGreaterThan(0);
+      expect(audit.auditJobs).toEqual([]);
+    });
+  }
+
+  it('benign shell around the audit still counts: set -euo pipefail, set +x, echo after', () => {
+    for (const body of [
+      'set -euo pipefail\nnode scripts/audit-published.mjs',
+      'set +x\nnode scripts/audit-published.mjs\necho done',
+      'set -x\nnode scripts/audit-published.mjs',
+      'node scripts/audit-published.mjs\necho "audit passed"',
+    ]) {
+      const audit = auditPublishLanes(
+        fixture({ 'a.yml': wf(`${auditJobWith(body)}${publishJob('audit')}`) }),
+      );
+      expect(audit.problems, body).toEqual([]);
+    }
+  });
+});
+
+describe('publish-lane supply-chain guard (round 3): defaults.run.shell is read', () => {
+  const run = (top: string, jobExtra: string, stepExtra = '') =>
+    auditPublishLanes(
+      fixture({
+        'a.yml': wfTop(
+          top,
+          `${AUDIT_JOB.replace(
+            '    runs-on: ubuntu-latest\n',
+            `    runs-on: ubuntu-latest\n${jobExtra}`,
+          ).replace(
+            '- run: node scripts/audit-published.mjs',
+            `- ${stepExtra}run: node scripts/audit-published.mjs`,
+          )}${publishJob('audit')}`,
+        ),
+      }),
+    );
+
+  it('a workflow-level or job-level shell without errexit neutralises the audit', () => {
+    for (const shell of ['bash {0}', 'pwsh', 'python', 'cmd', 'sh {0}']) {
+      const wfLevel = run(`defaults:\n  run:\n    shell: ${shell}\n`, '');
+      expect(wfLevel.problems.length, `workflow ${shell}`).toBeGreaterThan(0);
+      const jobLevel = run('', `    defaults:\n      run:\n        shell: ${shell}\n`);
+      expect(jobLevel.problems.length, `job ${shell}`).toBeGreaterThan(0);
+    }
+  });
+
+  it('shells that keep errexit count: bash, bash -e {0}, sh -e {0}', () => {
+    for (const shell of [
+      'bash',
+      'bash -e {0}',
+      'bash --noprofile --norc -eo pipefail {0}',
+      'sh -e {0}',
+    ]) {
+      const audit = run(`defaults:\n  run:\n    shell: ${shell}\n`, '');
+      expect(audit.problems, shell).toEqual([]);
+    }
+  });
+
+  it('a step-level shell overrides the default in both directions', () => {
+    const rescued = run('defaults:\n  run:\n    shell: bash {0}\n', '', 'shell: bash\n        ');
+    expect(rescued.problems).toEqual([]);
+    const broken = run('defaults:\n  run:\n    shell: bash\n', '', 'shell: bash {0}\n        ');
+    expect(broken.problems.length).toBeGreaterThan(0);
+  });
+});
+
+describe('publish-lane supply-chain guard (round 3): the allowlist is keyed on the property that excused it', () => {
+  const excuse = (job: string) => ({
+    ...fixture({ 'a.yml': wf(job) }),
+    nonLanes: [{ file: 'a.yml', job: 'release', reason: 'documented as holding no credential' }],
+  });
+
+  it('an excused job that gains the npm credential fails', () => {
+    for (const cred of [
+      '    environment: npm-publish\n',
+      '    env:\n      NODE_AUTH_TOKEN: ${{ secrets.X }}\n',
+      '    env:\n      T: ${{ secrets.NPM_TOKEN }}\n',
+    ]) {
+      const audit = auditPublishLanes(
+        excuse(publishJob('[]', 'echo "npm publish is documented elsewhere"', cred)),
+      );
+      expect(audit.problems.join('\n'), cred).toMatch(/allowlisted .* (holds|runs)/i);
+    }
+  });
+
+  it('an excused job inheriting a workflow-level credential fails', () => {
+    const f = fixture({
+      'a.yml': wfTop(
+        'env:\n  NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}\n',
+        publishJob('[]', 'echo "npm publish is documented elsewhere"'),
+      ),
+    });
+    const audit = auditPublishLanes({
+      ...f,
+      nonLanes: [{ file: 'a.yml', job: 'release', reason: 'documented as holding no credential' }],
+    });
+    expect(audit.problems.join('\n')).toMatch(/allowlisted .* (holds|runs)/i);
+  });
+
+  it('an excused job that runs a real publish command fails', () => {
+    for (const run of [
+      'npm publish',
+      'for d in a b; do npm publish $d; done',
+      'xargs npm publish',
+      'make publish',
+    ]) {
+      const audit = auditPublishLanes(excuse(publishJob('[]', run)));
+      expect(audit.problems.join('\n'), run).toMatch(/allowlisted .* (holds|runs)/i);
+    }
+  });
+
+  it('an excused job that uses a publish action, or a changesets/action publish input, fails', () => {
+    const action = wf(`
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: JS-DevTools/npm-publish@v3
+`);
+    const audit = auditPublishLanes({
+      ...fixture({ 'a.yml': action }),
+      nonLanes: [{ file: 'a.yml', job: 'release', reason: 'documented as holding no credential' }],
+    });
+    expect(audit.problems.join('\n')).toMatch(/allowlisted .* (holds|runs)/i);
+  });
+
+  it('prose-only excused jobs (assignments and echoes that mention publish) stay excused', () => {
+    const audit = auditPublishLanes(
+      excuse(publishJob('[]', 'body="the npm publish credential is described here"\necho "$body"')),
+    );
+    expect(audit.problems).toEqual([]);
+    expect(audit.excused).toEqual(['a.yml#release']);
+  });
+});
+
+describe('publish-lane supply-chain guard (round 3): the SBOM upload must itself be reliable', () => {
+  const sbomJob = (uploadExtra: string) => `
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - run: node scripts/audit-published.mjs
+      - ${uploadExtra}uses: actions/upload-artifact@v7
+        with:
+          name: npm-sbom
+          path: sbom/*.cdx.json
+`;
+
+  for (const [label, extra] of [
+    ['if: false', 'if: false\n        '],
+    ['if: always()', 'if: always()\n        '],
+    ["if: github.ref == 'refs/heads/never'", "if: github.ref == 'refs/heads/never'\n        "],
+    ['continue-on-error: true', 'continue-on-error: true\n        '],
+    ['continue-on-error: ${{ true }}', 'continue-on-error: ${{ true }}\n        '],
+  ] as const) {
+    it(`an SBOM upload step with ${label} does not count (the audit gate still does)`, () => {
+      const audit = auditPublishLanes(
+        fixture({ 'a.yml': wf(`${sbomJob(extra)}${publishJob('audit')}`) }),
+      );
+      expect(audit.sbomJobs).toEqual([]);
+      expect(audit.auditJobs.length).toBe(1);
+      expect(audit.problems.join('\n')).toMatch(/SBOM job/);
+    });
+  }
+
+  it('a trivially-true `if: success()` upload step still counts', () => {
+    const audit = auditPublishLanes(
+      fixture({ 'a.yml': wf(`${sbomJob('if: success()\n        ')}${publishJob('audit')}`) }),
+    );
+    expect(audit.problems).toEqual([]);
   });
 });
 

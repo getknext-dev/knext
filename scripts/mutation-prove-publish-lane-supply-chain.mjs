@@ -327,8 +327,8 @@ const MUTATIONS = [
     id: 'M29',
     claim: 'the credential rule is switched off (opaque commands are invisible again)',
     subject: 'engine',
-    anchor: '  if (candidate === null && holdsNpmCredential(job)) {\n',
-    replacement: '  if (false && candidate === null && holdsNpmCredential(job)) {\n',
+    anchor: '  if (candidate === null && holdsNpmCredential(job, ctx.wf)) {\n',
+    replacement: '  if (false && candidate === null && holdsNpmCredential(job, ctx.wf)) {\n',
     expect: 'red',
   },
   {
@@ -358,10 +358,10 @@ const MUTATIONS = [
   },
   {
     id: 'M33',
-    claim: 'a later exit 0 / true no longer neutralises the audit',
+    claim: 'any exit/return statement no longer neutralises the audit',
     subject: 'engine',
-    anchor: '  if (stmts.some((s) => /^(exit\\s+0|true|:)$/.test(s))) {\n',
-    replacement: '  if (false) {\n',
+    anchor: "    if (head === 'exit' || head === 'return') {\n",
+    replacement: '    if (false) {\n',
     expect: 'red',
   },
   {
@@ -376,16 +376,17 @@ const MUTATIONS = [
     id: 'M35',
     claim: 'a custom shell template (bash {0}) is treated as keeping errexit',
     subject: 'engine',
-    anchor: "  shell.trim() === 'bash' || /^bash\\b.*\\s-[A-Za-z]*e/.test(shell.trim());\n",
-    replacement: "  shell.trim() === 'bash' || /^bash\\b/.test(shell.trim());\n",
+    anchor:
+      '  /^(ba)?sh$/.test(shell.trim()) || /^(ba)?sh\\b.*\\s-[A-Za-z]*e/.test(shell.trim());\n',
+    replacement: '  /^(ba)?sh$/.test(shell.trim()) || /^(ba)?sh\\b/.test(shell.trim());\n',
     expect: 'red',
   },
   {
     id: 'M36',
-    claim: 'a heredoc fed to a shell is stripped as prose',
+    claim: 'every single heredoc is stripped as prose (files and shells included)',
     subject: 'engine',
-    anchor: '    if (!m || /\\|\\s*(sudo\\s+)?(ba|z|da)?sh\\b/.test(lines[i])) continue;\n',
-    replacement: '    if (!m) continue;\n',
+    anchor: '    if (ops.length !== 1 || !isProseHeredoc(ops[0])) continue;\n',
+    replacement: '    if (ops.length !== 1) continue;\n',
     expect: 'red',
   },
   {
