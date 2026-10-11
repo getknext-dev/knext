@@ -43,7 +43,7 @@ function run(args: string[]) {
 function check(tag: string, digest: string, content: string | null) {
   const file = join(tmp(), 'install.yaml');
   if (content !== null) writeFileSync(file, content);
-  return run(['--tag', tag, '--digest', digest, '--install', file]);
+  return run(['--tag', tag, '--digest', digest, '--image', IMG, '--install', file]);
 }
 
 describe('verify-operator-bundle-image', () => {
@@ -62,6 +62,8 @@ describe('verify-operator-bundle-image', () => {
       'operator-v1.0.0',
       '--digest',
       REAL_V100_DIGEST,
+      '--image',
+      IMG,
       '--install',
       REAL_V100,
     ]);
@@ -115,7 +117,9 @@ describe('verify-operator-bundle-image', () => {
   });
 
   it('fails when --install is a directory (read error, not a pass)', () => {
-    expect(run(['--tag', 'operator-v1.4.0', '--digest', D, '--install', tmp()]).code).toBe(1);
+    expect(
+      run(['--tag', 'operator-v1.4.0', '--digest', D, '--image', IMG, '--install', tmp()]).code,
+    ).toBe(1);
   });
 
   it('fails on a malformed release tag or digest', () => {
@@ -132,7 +136,18 @@ describe('verify-operator-bundle-image', () => {
     writeFileSync(good, bundle(`image: ${IMG}:v1.4.0@${D}`));
     writeFileSync(bad, bundle(`image: ${IMG}:v0.1.0@${D}`));
     expect(
-      run(['--tag', 'operator-v1.4.0', '--digest', D, '--install', good, '--install', bad]).code,
+      run([
+        '--tag',
+        'operator-v1.4.0',
+        '--digest',
+        D,
+        '--image',
+        IMG,
+        '--install',
+        good,
+        '--install',
+        bad,
+      ]).code,
     ).toBe(1);
   });
 
@@ -144,12 +159,67 @@ describe('verify-operator-bundle-image', () => {
     writeFileSync(file, bundle(`image: ${IMG}:v0.1.0@${D}`));
     const r = spawnSync(
       'node',
-      [link, '--tag', 'operator-v1.4.0', '--digest', D, '--install', file],
+      [link, '--tag', 'operator-v1.4.0', '--digest', D, '--image', IMG, '--install', file],
       {
         encoding: 'utf8',
       },
     );
     expect(r.status).toBe(1);
+  });
+
+  it('FAILS a foreign registry host with the right tag and digest', () => {
+    const r = check('operator-v1.4.0', D, bundle(`image: evil.io/x/kn-next-operator:v1.4.0@${D}`));
+    expect(r.code).toBe(1);
+    expect(r.out).toContain('evil.io/x/kn-next-operator');
+  });
+
+  it('FAILS a local registry with the right tag and digest', () => {
+    const r = check(
+      'operator-v1.4.0',
+      D,
+      bundle(`image: localhost:5000/kn-next-operator:v1.4.0@${D}`),
+    );
+    expect(r.code).toBe(1);
+  });
+
+  it('FAILS a foreign repository path on the right registry', () => {
+    const r = check(
+      'operator-v1.4.0',
+      D,
+      bundle(`image: ghcr.io/someone-else/kn-next-operator:v1.4.0@${D}`),
+    );
+    expect(r.code).toBe(1);
+    expect(r.out).toContain('someone-else');
+  });
+
+  it('fails closed when --image is missing (no silent skip of the comparison)', () => {
+    const file = join(tmp(), 'install.yaml');
+    writeFileSync(file, bundle(`image: ${IMG}:v1.4.0@${D}`));
+    const r = run(['--tag', 'operator-v1.4.0', '--digest', D, '--install', file]);
+    expect(r.code).not.toBe(0);
+    expect(r.out).toContain('--image');
+  });
+
+  it('fails closed when --image is malformed', () => {
+    const file = join(tmp(), 'install.yaml');
+    writeFileSync(file, bundle(`image: ${IMG}:v1.4.0@${D}`));
+    const r = run(['--tag', 'operator-v1.4.0', '--digest', D, '--image', '', '--install', file]);
+    expect(r.code).not.toBe(0);
+  });
+
+  it('runs main (fails closed) when the entry-point path cannot be resolved', () => {
+    // Injected read error: argv[1] points nowhere, so realpathSync throws. The guard must
+    // treat "cannot tell whether I was imported" as "run", never as "skip and exit 0".
+    const r = spawnSync(
+      'node',
+      [
+        '--input-type=module',
+        '-e',
+        `process.argv[1] = '/nonexistent/entry.mjs'; await import(${JSON.stringify(SCRIPT)});`,
+      ],
+      { encoding: 'utf8' },
+    );
+    expect(r.status).not.toBe(0);
   });
 
   it('exits 2 on usage errors', () => {
@@ -179,6 +249,7 @@ describe('operator-supply-chain.yml wiring', () => {
     expect(step).toContain('--tag "${RELEASE_TAG}"');
     expect(step).toContain('DIGEST: ${{ steps.push.outputs.digest }}');
     expect(step).toContain('--digest "${DIGEST}"');
+    expect(step).toContain('--image "${IMAGE}"');
     expect(step).toContain('--install packages/kn-next-operator/dist/install.yaml');
     expect(step).toContain('--install "${VERSIONED_ASSET}"');
   });

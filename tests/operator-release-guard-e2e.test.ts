@@ -104,6 +104,7 @@ function runGuardStep(root: string, version: string) {
     env: {
       ...process.env,
       DIGEST: BUILT,
+      IMAGE: IMG,
       RELEASE_TAG: `operator-v${version}`,
       VERSIONED_ASSET: `packages/kn-next-operator/dist/install-v${version}.yaml`,
     },
@@ -140,6 +141,7 @@ describe('operator release job (guard step), executed for real', () => {
       env: {
         ...process.env,
         DIGEST: `sha256:${'d'.repeat(64)}`,
+        IMAGE: IMG,
         RELEASE_TAG: 'operator-v1.4.0',
         VERSIONED_ASSET: 'packages/kn-next-operator/dist/install-v1.4.0.yaml',
       },

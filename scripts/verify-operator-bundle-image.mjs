@@ -12,6 +12,8 @@
  *   - each `--install` is readable and non-empty;
  *   - `--tag` is a well-formed `operator-vX.Y.Z[-pre]`;
  *   - `--digest` is a well-formed `sha256:<64 hex>`;
+ *   - `--image` is the registry/repository this run pushed (`ghcr.io/<owner>/kn-next-operator`,
+ *     no tag, no digest) and the bundle's image repository is EXACTLY it (host and path);
  *   - the bundle has exactly one distinct `…/kn-next-operator` image reference, written
  *     `<repo>:<tag>@sha256:<64 hex>` (a bare tag, or a bare digest with no tag recorded, fails);
  *   - that tag is `vX.Y.Z` of the release tag;
@@ -19,7 +21,7 @@
  *
  * Usage:
  *   node scripts/verify-operator-bundle-image.mjs --tag operator-vX.Y.Z \
- *        --digest sha256:<64 hex> --install <install.yaml> [--install <more>]
+ *        --digest sha256:<64 hex> --image <registry/repo> --install <install.yaml> [--install <more>]
  * Exit 0 = every bundle matches. Exit 1 = mismatch or anything unverifiable. Exit 2 = usage.
  *
  * Node builtins only (the publishing job has no install step).
@@ -32,14 +34,18 @@ const OPERATOR_TAG = /^operator-v(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$/;
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
 const IMAGE_LINE = /^\s*(?:-\s+)?image:\s*["']?([^\s"']+)["']?\s*(?:#.*)?$/;
 const OPERATOR_REF = /\/kn-next-operator(?:[:@]|$)/;
+const IMAGE_REPO = /^[a-z0-9][a-z0-9.-]*(?::\d+)?(?:\/[a-z0-9][a-z0-9._-]*)+$/;
 const PINNED = /^(.+\/kn-next-operator):([^@:\s]+)@(sha256:[0-9a-f]{64})$/;
 
 /** @returns {{ ok: true } | { ok: false, reason: string }} */
-export function verifyBundleImage({ tag, digest, text }) {
+export function verifyBundleImage({ tag, digest, image, text }) {
   const t = OPERATOR_TAG.exec(tag ?? '');
   if (!t) return { ok: false, reason: `'${tag}' is not an operator-vX.Y.Z[-pre] tag` };
   if (!DIGEST.test(digest ?? '')) {
     return { ok: false, reason: `'${digest}' is not a sha256:<64 hex> digest` };
+  }
+  if (!IMAGE_REPO.test(image ?? '') || !OPERATOR_REF.test(image)) {
+    return { ok: false, reason: `'${image}' is not a <registry>/<repo>/kn-next-operator image` };
   }
   if (typeof text !== 'string' || text.trim() === '') {
     return { ok: false, reason: 'install.yaml is empty' };
@@ -59,6 +65,12 @@ export function verifyBundleImage({ tag, digest, text }) {
     return {
       ok: false,
       reason: `'${ref}' is not <repo>:<tag>@sha256:<64 hex> (tag and digest both required)`,
+    };
+  }
+  if (p[1] !== image) {
+    return {
+      ok: false,
+      reason: `bundle pins repository '${p[1]}' but this run pushed '${image}'`,
     };
   }
   const want = `v${t[1]}`;
@@ -87,16 +99,16 @@ export function main(argv) {
   for (let i = 0; i < argv.length; i += 2) {
     const k = argv[i];
     const v = argv[i + 1];
-    if (!['--tag', '--digest', '--install'].includes(k) || v === undefined) {
+    if (!['--tag', '--digest', '--image', '--install'].includes(k) || v === undefined) {
       console.error(`unknown or incomplete argument: ${k}`);
       return 2;
     }
     if (k === '--install') opts.install.push(v);
     else opts[k.slice(2)] = v;
   }
-  if (!opts.tag || !opts.digest || opts.install.length === 0) {
+  if (!opts.tag || !opts.digest || !opts.image || opts.install.length === 0) {
     console.error(
-      'usage: --tag <operator-vX.Y.Z> --digest <sha256:…> --install <file> [--install <file>]',
+      'usage: --tag <operator-vX.Y.Z> --digest <sha256:…> --image <registry/repo> --install <file> [--install <file>]',
     );
     return 2;
   }
@@ -105,7 +117,7 @@ export function main(argv) {
     const r = readInstall(file);
     const res = r.error
       ? { ok: false, reason: r.error }
-      : verifyBundleImage({ tag: opts.tag, digest: opts.digest, text: r.text });
+      : verifyBundleImage({ tag: opts.tag, digest: opts.digest, image: opts.image, text: r.text });
     if (res.ok) {
       console.log(`OK ${file}: pins ${opts.tag} image @ ${opts.digest}`);
     } else {
@@ -116,11 +128,18 @@ export function main(argv) {
   return failed ? 1 : 0;
 }
 
-// Compare REAL paths: node resolves symlinks in import.meta.url but not in argv[1], and a
-// mismatch here would skip main() and exit 0 without checking anything (fail-open).
-if (
-  process.argv[1] &&
-  realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))
-) {
+// Fail-closed entry point: run main() UNLESS this module was positively imported by another
+// script. "Imported" means argv[1] resolves to a different file; if that cannot be established
+// (argv[1] missing/unresolvable) we run, never skip. Real paths are compared because node
+// resolves symlinks in import.meta.url but not in argv[1].
+function isImported() {
+  try {
+    return realpathSync(process.argv[1]) !== realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (!isImported()) {
   process.exit(main(process.argv.slice(2)));
 }

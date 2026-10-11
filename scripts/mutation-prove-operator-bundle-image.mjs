@@ -95,8 +95,37 @@ const MUTATIONS = [
     claim:
       'entry-point detection compares unresolved paths (symlinked run silently checks nothing)',
     subject: 'guard',
-    anchor: '  realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))',
-    replacement: '  process.argv[1] === fileURLToPath(import.meta.url)',
+    anchor:
+      '    return realpathSync(process.argv[1]) !== realpathSync(fileURLToPath(import.meta.url));',
+    replacement: '    return process.argv[1] !== fileURLToPath(import.meta.url);',
+  },
+  {
+    id: 'G9',
+    claim: "the bundle's registry/repository is no longer compared with the pushed image",
+    subject: 'guard',
+    anchor: '  if (p[1] !== image) {\n',
+    replacement: '  if (false) {\n',
+  },
+  {
+    id: 'G10',
+    claim: 'an unresolvable entry point is treated as imported (main skipped, exit 0: fail-open)',
+    subject: 'guard',
+    anchor: '  } catch {\n    return false;\n  }\n',
+    replacement: '  } catch {\n    return true;\n  }\n',
+  },
+  {
+    id: 'G11',
+    claim: 'a missing --image is tolerated (the repository comparison silently skipped)',
+    subject: 'guard',
+    anchor: 'if (!opts.tag || !opts.digest || !opts.image ||',
+    replacement: 'if (!opts.tag || !opts.digest ||',
+  },
+  {
+    id: 'W4',
+    claim: "the workflow stops passing this run's image to the guard",
+    subject: 'workflow',
+    anchor: '            --image "${IMAGE}" \\\n',
+    replacement: '            --image "evil.io/x/kn-next-operator" \\\n',
   },
   {
     id: 'W1',

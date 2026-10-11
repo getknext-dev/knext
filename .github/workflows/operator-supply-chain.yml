@@ -609,6 +609,7 @@ jobs:
           node scripts/verify-operator-bundle-image.mjs \
             --tag "${RELEASE_TAG}" \
             --digest "${DIGEST}" \
+            --image "${IMAGE}" \
             --install packages/kn-next-operator/dist/install.yaml \
             --install "${VERSIONED_ASSET}"
 
