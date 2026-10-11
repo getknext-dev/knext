@@ -599,7 +599,7 @@ const MUTATIONS = [
     inject: {
       name: 'zz-mutation-prose.yml',
       content: NEW_LANE(
-        '      # npm publish is only described here\n      - run: |\n          cat > body.md <<EOF\n          npm publish credential\n          EOF\n',
+        '      # npm publish is only described here\n      - run: |\n          cat <<EOF\n          npm publish credential\n          EOF\n',
       ),
     },
     expect: 'green',

@@ -773,6 +773,9 @@ describe('publish-lane supply-chain guard (round 3): heredocs are code unless th
       'printf "see <<EOF\\n"\nnpm publish',
       "echo 'a <<EOF b'\nnpm publish",
       'x=$((1<<EOF))\nnpm publish',
+      // a terminator-looking line later in the script must not let a quoted `<<EOF` swallow the publish
+      'printf "see <<EOF\\n"\nnpm publish\nEOF',
+      "echo 'a <<EOF b'\nnpm publish\nEOF\necho done",
     ]) {
       expect(laneIds(lane(run)), run).toEqual(['a.yml#release']);
     }
