@@ -595,7 +595,7 @@ describe('FAIL CLOSED: what the scan cannot read is a finding, never a pass', ()
     ],
     [
       'an exported class with a static block (#2188)',
-      { 'dist/index.js': `export class K { static { K.__x = 1; } }\n` },
+      { 'dist/index.js': `export class K { static { this.__x = 1; } }\n` },
     ],
     ['an entry that does not parse', { 'dist/index.js': `export const = ;\n` }],
     [

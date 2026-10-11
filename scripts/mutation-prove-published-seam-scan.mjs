@@ -274,7 +274,7 @@ const MUTATIONS = [
     id: 'M24',
     expect: 'red',
     claim:
-      '`static { K.__x = 1 }` assigns a seam the reader cannot see and it reads as clean (#2188)',
+      '`static { this.__x = 1 }` assigns a seam the reader cannot see and it reads as clean (#2188)',
     subject: 'lib',
     validate: jsStillParses,
     anchor: '      if (ts.isClassStaticBlockDeclaration(m)) {',
@@ -314,7 +314,7 @@ const MUTATIONS = [
     subject: 'lib',
     validate: jsStillParses,
     anchor: '            if (init) valueMembers(init, `${exported}.`);',
-    replacement: '            void init;',
+    replacement: '            if (init) void init;',
   },
   {
     id: 'M29',
