@@ -1,5 +1,10 @@
 import type RedisClient from 'ioredis';
 import { getDbPool } from '../clients';
+import {
+  isConnectionRefused,
+  isScaleToZeroDatabase,
+  observeAcquireFailures,
+} from '../db/reachability';
 import { logger } from '../logger';
 import { createRedisClient } from '../redis/client';
 import { ensureDialable } from '../redis/quiet';
@@ -184,19 +189,53 @@ export async function checkDeepHealth(): Promise<HealthStatus> {
   if (process.env.DATABASE_URL) {
     checkPromises.push(
       (async () => {
+        // A bring-your-own database has no wake to wait for, so a refusal is
+        // decisive on the FIRST attempt. The pool keeps retrying a failed connect
+        // for its whole budget (8 s by default — the same as this check's window),
+        // so waiting for its final rejection would lose the race and leave the
+        // state at its initial `waking`. Listen for the refusal instead. The
+        // scale-zero-pg gateway never short-circuits: a refusal there IS a wake.
+        let stopObserving = () => {};
+        const refusedOnByoHost = new Promise<'refused'>((resolve) => {
+          if (isScaleToZeroDatabase(process.env.DATABASE_URL)) return;
+          stopObserving = observeAcquireFailures((failure) => {
+            if (isConnectionRefused(failure)) resolve('refused');
+          });
+        });
         try {
           const pool = getDbPool();
-          await pool.query('SELECT 1 as healthy');
-          checks.postgres = 'up';
+          const probe = Promise.resolve(pool.query('SELECT 1 as healthy'));
+          // If the refusal wins, the probe keeps running inside the pool's retry
+          // loop. The race below subscribed to it, so its late rejection is handled.
+          const outcome = await Promise.race([probe.then(() => 'up' as const), refusedOnByoHost]);
+          if (outcome === 'refused') {
+            logger.error('[Health Check] Postgres connection refused (bring-your-own database)');
+            checks.postgres = 'down';
+          } else {
+            checks.postgres = 'up';
+          }
         } catch (error) {
-          if (isWakeSignal(error)) {
-            // Scale-to-zero DB asleep/mid-wake: NORMAL, not a fault.
-            logger.info({ err: error }, '[Health Check] Postgres waking (scale-to-zero)');
+          // Only a REFUSAL on a database that cannot be waking is an outage. A
+          // reset, a DNS blip or a timeout is ambiguous on any host, so it keeps
+          // the wake classification everywhere; and on a scale-to-zero database
+          // even a refusal is the wake itself.
+          if (
+            isWakeSignal(error) &&
+            (isScaleToZeroDatabase(process.env.DATABASE_URL) || !isConnectionRefused(error))
+          ) {
+            // Asleep/mid-wake (or ambiguous): NORMAL, not a fault.
+            logger.info({ err: error }, '[Health Check] Postgres waking');
             checks.postgres = 'waking';
           } else {
+            // Bring-your-own Postgres (the default): a refused connection is an
+            // outage, not a wake — nothing is scheduled to come back on its own.
+            // Anything that is not a connection-level failure at all (auth, a
+            // missing relation) is a real fault as well.
             logger.error({ err: error }, '[Health Check] Postgres connection failed');
             checks.postgres = 'down';
           }
+        } finally {
+          stopObserving();
         }
       })(),
     );
@@ -245,7 +284,8 @@ export async function checkDeepHealth(): Promise<HealthStatus> {
 
   // Derive overall status from the dependency taxonomy (ADR-0023 + ADR-0026).
   // NOTE: this no longer gates readiness — it is observability-only (#338).
-  //  - waking:   scale-to-zero PG asleep/mid-wake (conn-refused or timeout).
+  //  - waking:   scale-to-zero PG asleep/mid-wake (refused on the scale-zero-pg
+  //              gateway, or timeout). A refused BYO database is `down`.
   //  - down:     PG reachable but erroring (genuine fault) — fails CLOSED.
   //  - degraded: soft/optional cache (Redis) blip — fails OPEN.
   let status: HealthStatus['status'] = 'ok';

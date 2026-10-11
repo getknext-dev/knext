@@ -2,6 +2,7 @@ import type { GRPC as Cerbos } from '@cerbos/grpc';
 import type * as Minio from 'minio';
 import { Pool } from 'pg';
 import { bunSqlAvailable, createBunSqlPool } from './db/bun-sql-pool';
+import { reportAcquireFailure } from './db/reachability';
 import { loadCerbosSdk, loadMinioSdk } from './lazy-sdk-loaders.mjs';
 import { logSlowDep } from './slow-dep';
 
@@ -562,6 +563,9 @@ const retryWake = (pool: Pool): Pool => {
       pending.then(
         (value) => value,
         (err) => {
+          // Tell anyone listening (the deep health check) about this attempt NOW,
+          // not when the budget finally runs out: a refusal is known immediately.
+          reportAcquireFailure(err);
           if (isPermanentAcquireError(err) || Date.now() >= deadline) {
             throw err;
           }
