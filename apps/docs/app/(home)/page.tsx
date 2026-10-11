@@ -168,7 +168,7 @@ spec:
             <div className={styles.codetext}>
               <h2>Bring your own database.</h2>
               <p>
-                knext is <b>engine-agnostic</b>: it provisions{' '}
+                knext is <b>engine-agnostic</b>: by default it provisions{' '}
                 <span className={styles.signal}>nothing</span> and manages no database. You bring
                 your own Postgres — a CloudNativePG cluster in the same cluster, or a managed /
                 serverless provider — and knext <b>binds its DSN</b> from a Kubernetes Secret into
@@ -196,6 +196,12 @@ spec:
                   so scale-to-zero fan-out never storms the database
                 </li>
               </ul>
+              <p>
+                Want a database that sleeps too? knext&apos;s optional scale-to-zero Postgres is{' '}
+                <b>built on Neon&apos;s open-source storage</b>{' '}
+                <span className={styles.pill}>Beta</span>.{' '}
+                <Link href="/docs/learn/scale-to-zero-database">How it is built</Link>.
+              </p>
             </div>
             <pre className={styles.code}>
               <code>{`# bring your own Postgres — bind an existing Secret

@@ -258,6 +258,19 @@ func appTriggered(app *appsv1alpha1.NextApp) bool {
 // KnextPlatform: no stamp ever differs, so the limiter is never consulted and
 // the pass is exactly the pre-platform one.
 func (r *NextAppReconciler) gateRollout(ctx context.Context, app *appsv1alpha1.NextApp, snap platformSnapshot, eff effectiveValues) (platformGate, error) {
+	gate, err := r.decideRollout(ctx, app, snap, eff)
+	// Anything but "still queued" means the app is not waiting for a slot any
+	// more. Hand back one it may still hold: only a pass that reserves and is told
+	// to wait keeps a reservation. (An error keeps it: the next pass decides.)
+	if err == nil && gate.hold != holdRolloutPending {
+		r.rollout.release(types.NamespacedName{Namespace: app.Namespace, Name: app.Name})
+	}
+	return gate, err
+}
+
+// decideRollout is the gate's decision; gateRollout wraps it with the slot
+// bookkeeping so no early "go now" return can leave a reservation behind.
+func (r *NextAppReconciler) decideRollout(ctx context.Context, app *appsv1alpha1.NextApp, snap platformSnapshot, eff effectiveValues) (platformGate, error) {
 	wantSpecHash := snap.hash()
 	appliedSpecHash, appliedEffHash := "", effectiveHash(resolveEffective(app, nil))
 	if p := app.Status.Platform; p != nil {

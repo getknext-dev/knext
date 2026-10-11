@@ -170,6 +170,12 @@ export interface DoctorDeps {
      */
     readNodeEntryTemplate?: () => string | undefined;
     /**
+     * Reads the app's `next.config.*` text from the CURRENT directory, or
+     * undefined when there is none -- feeds the 'use cache' per-pod check
+     * (#2083). Defaults to the real cwd read; tests inject fixtures.
+     */
+    readNextConfigFile?: () => string | undefined;
+    /**
      * This CLI's own version, for the operator-version compatibility verdict
      * (#1947). Set by `doctorMain`'s production defaults (read from the
      * package manifest); deliberately NOT defaulted inside `runDoctor`, so the
@@ -177,6 +183,12 @@ export interface DoctorDeps {
      * reports the operator's version but renders no compatibility verdict.
      */
     cliVersion?: string;
+    /**
+     * The version of the vinext installed for the app in the CURRENT directory,
+     * or undefined when there is none -- feeds the vinext-patches drift check.
+     * Defaults to the real node_modules lookup; tests inject fixtures.
+     */
+    readInstalledVinext?: () => string | undefined;
 }
 
 /**

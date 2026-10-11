@@ -282,8 +282,8 @@ prove(
   'the version job gains a publish-script',
   WORKFLOW,
   LIVENESS_SPEC,
-  '          create-github-releases: false\n',
-  '          create-github-releases: false\n          publish-script: bun run release\n',
+  '          # the one readable release after a successful publish.\n          create-github-releases: false\n',
+  '          # the one readable release after a successful publish.\n          create-github-releases: false\n          publish-script: bun run release\n',
 );
 
 // ── The "decide before you start" half ───────────────────────────────────────
