@@ -455,14 +455,6 @@ reachable but erroring on the probe query. If the database IS scale-to-zero but
 reached through a name knext does not recognise (an IP, a pooler or alias, a
 gateway in another namespace), set `KNEXT_DB_SCALE_TO_ZERO=true` on the app.
 
-**Default settings.** The DB connection retries a failed connect for
-`DB_WAKE_RETRY_BUDGET_MS` (default 8 s) before it fails, and the deep check
-gives up at `HEALTH_DEEP_TIMEOUT_MS` (default 8 s). With both at their defaults
-a refused connection can still read `waking`, and `KnextDeepHealthStuckWaking`
-fires instead of this alert. For a bring-your-own database, set
-`DB_WAKE_RETRY_BUDGET_MS` lower than the deep-check timeout (for example
-`1000`).
-
 **Act.**
 
 1. Check the database itself is up and accepting connections from the app's

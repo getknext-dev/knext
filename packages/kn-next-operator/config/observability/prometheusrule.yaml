@@ -284,15 +284,16 @@ spec:
         # #348: SUSTAINED deep-health `waking` = a permanent connection-level DB
         # outage of the scale-to-zero database. checkDeepHealth
         # (packages/lib/src/health/index.ts) classifies a refused connection
-        # (ECONNREFUSED) as `waking` ONLY when DATABASE_URL points at the
-        # scale-zero-pg gateway host — CORRECT for a normal scale-to-zero wake,
+        # (ECONNREFUSED) as `waking` ONLY when the database is scale-to-zero —
+        # recognised by the scale-zero-pg gateway host, or declared with
+        # KNEXT_DB_SCALE_TO_ZERO=true — CORRECT for a normal scale-to-zero wake,
         # which is brief (~2-6s). A connect timeout or a dropped connection
         # reads `waking` on any host. But a GENUINELY-down scale-to-zero DB
         # presents the SAME connection-level signature, so it sits at `waking`
         # FOREVER and never becomes `down`. Alerts keyed on `down`/503 alone
-        # therefore never fire on it. A refused connection to any OTHER host
-        # (bring-your-own Postgres) reads `down` straight away and is alerted on
-        # by KnextDeepHealthDown below. This
+        # therefore never fire on it. A refused connection to a database that
+        # is NOT scale-to-zero (bring-your-own Postgres) reads `down` straight
+        # away and is alerted on by KnextDeepHealthDown below. This
         # rule closes the waking gap: the deep-health state gauge reporting
         # overall waking=1 for LONGER than the wake budget is a stuck-waking
         # real outage. `for: 2m` is far above the legitimate 2-6s wake, so a normal
@@ -313,11 +314,13 @@ spec:
               connection-level outage of the scale-to-zero database (host gone,
               dead DNS, bad DATABASE_URL) presents as connection-level errors
               and sits at `waking` forever, never `down`. Check the
-              scale-zero-pg gateway / compute and the app's DATABASE_URL.
+              scale-zero-pg gateway / compute and the app's DATABASE_URL. If
+              the database is NOT scale-to-zero, set KNEXT_DB_SCALE_TO_ZERO=false
+              so a refused connection reads `down` instead.
             runbook_url: "https://github.com/getknext-dev/knext/blob/main/docs/runbooks/troubleshooting.md#deep-health-stuck-waking-permanent-db-outage"
         # Sustained deep-health `down`: the database is unreachable and nothing
-        # is waking it (a refused/timed-out connection to a bring-your-own
-        # Postgres, or a reachable database that errors on the probe query).
+        # is waking it (a refused connection to a database that is not
+        # scale-to-zero, or a reachable database that errors on the probe query).
         # Same gauge and labels as the waking rule; `for: 2m` matches it so a
         # transient blip does not page.
         - alert: KnextDeepHealthDown
@@ -333,8 +336,10 @@ spec:
             description: >-
               The deep health check has reported `down` for over 2m. Either the
               database refused the connection and is not a scale-to-zero
-              database that could be waking (bring-your-own
-              Postgres, a custom APPDB_GATEWAY_HOST, or a pooler in front of the
-              scale-to-zero database), or it is reachable but erroring on the
-              probe query. Check the database and the app's DATABASE_URL.
+              database that could be waking (a bring-your-own Postgres), or it
+              is reachable but erroring on the probe query. If the database IS
+              scale-to-zero but reached through a name knext does not recognise
+              (an IP, a pooler or alias, a gateway in another namespace), set
+              KNEXT_DB_SCALE_TO_ZERO=true on the app so a refusal reads `waking`
+              instead. Check the database and the app's DATABASE_URL.
             runbook_url: "https://github.com/getknext-dev/knext/blob/main/docs/runbooks/troubleshooting.md#deep-health-down-database-unreachable-or-erroring"

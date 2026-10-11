@@ -325,8 +325,6 @@ that could be waking (a bring-your-own Postgres), or it is reachable but errorin
 database is in fact scale-to-zero but reached through a name knext does not recognise (an IP address, a
 pooler, an alias, a gateway in a different namespace), set `KNEXT_DB_SCALE_TO_ZERO=true` on the app.
 
-**Default settings.** The database connection retries a failed connect for `DB_WAKE_RETRY_BUDGET_MS` (default 8 seconds) before it fails, and the deep check gives up at `HEALTH_DEEP_TIMEOUT_MS` (default 8 seconds). With both at their defaults a refused connection can still read `waking`, and `KnextDeepHealthStuckWaking` fires instead of this alert. For a bring-your-own database, set `DB_WAKE_RETRY_BUDGET_MS` lower than the deep-check timeout (for example `1000`).
-
 **Act.**
 
 1. Check the database is up and accepting connections from the app's namespace.
