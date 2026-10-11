@@ -361,9 +361,9 @@ const MUTATIONS = [
   },
   {
     id: 'M33',
-    claim: 'any exit/return statement no longer neutralises the audit',
+    claim: 'an exit/return with a zero or unknown status no longer neutralises the audit',
     subject: 'engine',
-    anchor: "    if (head === 'exit' || head === 'return') {\n",
+    anchor: "    if ((head === 'exit' || head === 'return') && !isNonZeroLiteral(cmd[1])) {\n",
     replacement: '    if (false) {\n',
     expect: 'red',
   },

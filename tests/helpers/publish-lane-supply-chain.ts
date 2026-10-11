@@ -28,7 +28,8 @@ import { splitSourceIntoStatements } from './shell-statements';
  *      joining line continuations and dropping comments and PROSE heredocs. A
  *      heredoc is prose only when its command is `cat`/`tee`/`echo`/`printf` at
  *      statement position AND it goes to stdout, `$GITHUB_STEP_SUMMARY`, or a pipe
- *      into an issue-body command; one written to a file (`cat > r.sh <<EOF`),
+ *      into an issue-body command, or `gh issue|pr … -F - / --body-file -`, or
+ *      `gh issue|pr … --body "$(cat <<EOF …)"` / `echo "$(cat <<EOF …)"`; one written to a file (`cat > r.sh <<EOF`),
  *      fed to a shell, chained, unterminated, or sharing a line with another
  *      heredoc is executable content and is scanned. `<<WORD` inside a quoted
  *      string or `$((…))` is not a heredoc at all;
@@ -40,6 +41,7 @@ import { splitSourceIntoStatements } from './shell-statements';
  *   5. a local composite action (`uses: ./...`) contains any of the above, or
  *      cannot be read;
  *   6. the job holds the npm credential (`NODE_AUTH_TOKEN`, `secrets.NPM_TOKEN`,
+ *      any `_authToken` — an `.npmrc` auth line under whatever secret name —,
  *      an `npm-publish*` or expression `environment`) — in the job OR in the
  *      workflow-level `env:`, which GitHub merges into every job (a workflow-level
  *      `env:` value that says `publish` is likewise inherited by every job). This
@@ -71,8 +73,13 @@ import { splitSourceIntoStatements } from './shell-statements';
  *     own-line, argument-free statement: after joining continuations it must not
  *     be preceded by anything on its line (a subshell, `a ||`, `!`), followed by
  *     `||`, `;`, `&` or a comment-less remainder, or carry ANY argument
- *     (`--help` included; the script takes none). Neutralisers are a RULE, not a
- *     list of spellings: ANY `exit`/`return` statement in the step, ANY
+ *     (`--help` included; the script takes none). It must be a TOP-LEVEL simple
+ *     command of its step: inside `if`/`while`/`until`/`for`/`case`, a function
+ *     body, a `{ }` or `( )` group, after a dangling `&&`/`||`/`|`, or in a heredoc
+ *     body (`: <<X`) the step may never run it, and unbalanced structure (which
+ *     cannot be read) fails closed. Neutralisers are a RULE, not a list of
+ *     spellings: an `exit`/`return` whose status is not a literal NON-ZERO number
+ *     (a literal non-zero is an error branch and only ever fails the step), ANY
  *     `set +<flags containing e>` or `set +o errexit`, a later `true`/`:`, a
  *     step `if`, any `continue-on-error`, or an EFFECTIVE shell (step `shell:`,
  *     else the job's, else the workflow's `defaults.run.shell`) that does not
@@ -97,6 +104,20 @@ import { splitSourceIntoStatements } from './shell-statements';
  * so its outgoing edges are dropped from the closure (the lane's own `if`, or an
  * intermediate job's).
  *
+ * ## Stated non-claims (round 4: loud and safe, or by design)
+ *
+ *   - `gh release create --publish` and other prose that is not a heredoc match the
+ *     word rule: over-matching is loud, and the allowlist handles it.
+ *   - A cloud-deploy job with `id-token: write` that runs `pnpm install` /
+ *     `npm run build` becomes a candidate (rule 7 trades precision for catching
+ *     tokenless `--provenance` publishes); it needs an allowlist entry. A job that
+ *     only runs `cosign` is not affected.
+ *   - `secrets: inherit` callers (`jobs.<id>.uses` of a reusable workflow) are not
+ *     followed; the called workflow is scanned in its own file, where it fails on
+ *     its own for lacking the gates in-file (over-block, fails closed).
+ *   - `$((N))` as an `exit` status is not evaluated (the shell lexer drops
+ *     arithmetic), so it never counts as a literal non-zero exit.
+ *
  * ## Known blind spots (stated, not dressed up)
  *
  *   - ENV-INDIRECTED and SCRIPT-HIDDEN commands: `run: $CMD`, `eval "$X"`,
@@ -113,8 +134,10 @@ import { splitSourceIntoStatements } from './shell-statements';
  *   - Shell quote-splitting (`npm pub""lish`, `npm "pub"lish`, `p=pub; npm ${p}lish`)
  *     defeats the word rule; it is caught only by the credential and `id-token`
  *     rules.
- *   - A token not named `NODE_AUTH_TOKEN` / `NPM_TOKEN` (e.g.
- *     `secrets.NPM_AUTOMATION_TOKEN`) is not recognised as the credential.
+ *   - A token that is passed some way other than `NODE_AUTH_TOKEN`, `NPM_TOKEN` or
+ *     an `_authToken` line (e.g. `secrets.NPM_AUTOMATION_TOKEN` handed to a tool
+ *     that reads it from a differently-named variable) is not recognised as the
+ *     credential.
  *   - Hyphenated names (`publish-all`, `publish-packages`) are NOT matched by the
  *     word rule (they would also match `publish-lane-guard` / `publish-preflight`
  *     on every job here); they are caught by the credential rule or the alias
@@ -239,6 +262,11 @@ const PROSE_PIPE_SINKS = new Set(['gh', 'cat', 'grep', 'sed', 'jq', 'head', 'tai
 interface HeredocOp {
   /** The command text before `<<` in its own statement. */
   segment: string;
+  /**
+   * When the `<<` sits inside `"…$( … )…"`, the text of the enclosing statement
+   * before that `$(` (e.g. `gh issue create --body "`); undefined at top level.
+   */
+  outer?: string;
   /** Everything after the delimiter word, to the end of the line. */
   after: string;
   delim: string;
@@ -248,23 +276,37 @@ interface HeredocOp {
  * Unquoted `<<WORD` operators on ONE line, with the statement they belong to.
  * `<<` inside '…', "…", `$((…))` or after a comment `#` is not a heredoc (round 2
  * treated `echo "v $((1<<SHIFT))"` as one and swallowed the rest of the script),
- * and `<<<` is a here-string.
+ * and `<<<` is a here-string. A `$( … )` INSIDE a double-quoted string is a real
+ * command context again: `--body "$(cat <<'EOF'` does start a heredoc.
  */
 function heredocOps(line: string): HeredocOp[] {
   const ops: HeredocOp[] = [];
   let quote: '"' | "'" | null = null;
   let arith = 0;
   let segStart = 0;
+  const frames: Array<{ prevSegStart: number; outer: string; parens: number }> = [];
   for (let i = 0; i < line.length; i++) {
     const c = line[i];
     if (quote) {
       if (c === '\\' && quote === '"') i++;
-      else if (c === quote) quote = null;
+      else if (quote === '"' && c === '$' && line[i + 1] === '(' && line[i + 2] !== '(') {
+        frames.push({ prevSegStart: segStart, outer: line.slice(segStart, i), parens: 0 });
+        quote = null;
+        segStart = i + 2;
+        i++;
+      } else if (c === quote) quote = null;
       continue;
     }
     if (arith > 0) {
       if (c === '(') arith++;
       else if (c === ')') arith--;
+      continue;
+    }
+    const frame = frames[frames.length - 1];
+    if (frame && c === ')' && frame.parens === 0) {
+      frames.pop();
+      quote = '"';
+      segStart = frame.prevSegStart;
       continue;
     }
     if (c === '\\') {
@@ -277,12 +319,16 @@ function heredocOps(line: string): HeredocOp[] {
     } else if (c === '#' && (i === 0 || /\s/.test(line[i - 1]))) {
       break;
     } else if (c === ';' || c === '|' || c === '&' || c === '(' || c === '{') {
+      if (frame && c === '(') frame.parens++;
       segStart = i + 1;
+    } else if (frame && c === ')') {
+      frame.parens--;
     } else if (c === '<' && line[i + 1] === '<' && line[i + 2] !== '<') {
       const m = /^<<-?\s*(?:'([^']*)'|"([^"]*)"|\\?([A-Za-z_][A-Za-z0-9_]*))/.exec(line.slice(i));
       if (!m) continue;
       ops.push({
         segment: line.slice(segStart, i),
+        outer: frames.length > 0 ? frames[0].outer : undefined,
         after: line.slice(i + m[0].length),
         delim: m[1] ?? m[2] ?? m[3],
       });
@@ -292,11 +338,34 @@ function heredocOps(line: string): HeredocOp[] {
   return ops;
 }
 
+/** `gh issue|pr … -F - / --body-file -`: the heredoc IS the issue/PR body. */
+function ghReadsBodyFromStdin(tokens: string[]): boolean {
+  if (tokens[0] !== 'gh' || !['issue', 'pr'].includes(tokens[1] ?? '')) return false;
+  return tokens.some(
+    (t, k) =>
+      t === '--body-file=-' ||
+      ((t === '-F' || t === '--body-file') && tokens[k + 1] === '-') ||
+      t === '-F-',
+  );
+}
+
 /** Is this heredoc provably PROSE (stdout, the step summary, an issue body)? Unsure → false. */
 function isProseHeredoc(op: HeredocOp): boolean {
   const seg = commandTokens(tokenize(op.segment));
   const head = seg[0];
-  if (head === undefined || !['cat', 'echo', 'printf', 'tee'].includes(head)) return false;
+  if (op.outer !== undefined) {
+    // `--body "$(cat <<EOF`: the OUTER command decides what the text is for.
+    const outer = commandTokens(tokenize(op.outer));
+    const outerOk =
+      outer[0] === 'echo' ||
+      outer[0] === 'printf' ||
+      (outer[0] === 'gh' && ['issue', 'pr'].includes(outer[1] ?? ''));
+    if (!outerOk || head !== 'cat') return false;
+  } else if (head === 'gh') {
+    if (!ghReadsBodyFromStdin(seg)) return false;
+  } else if (head === undefined || !['cat', 'echo', 'printf', 'tee'].includes(head)) {
+    return false;
+  }
   // Redirections anywhere on the line: only stdout-ish targets.
   const line = `${op.segment} ${op.after}`;
   for (const m of line.matchAll(/(?:^|\s)(?:\d*|&)>>?\s*(\S+)/g)) {
@@ -324,7 +393,6 @@ function isProseHeredoc(op: HeredocOp): boolean {
   }
   return true;
 }
-
 /**
  * Removes the BODY of a heredoc that is provably prose — `cat`/`echo`/`printf`/
  * `tee` writing to stdout, the step summary, or piped to an issue-body command.
@@ -411,44 +479,123 @@ function isBareAuditLine(line: string): boolean {
   return args.every((a) => AUDIT_ALLOWED_ARGS.includes(a));
 }
 
+const OPENERS = new Set(['if', 'while', 'until', 'for', 'case', 'select', 'function']);
+const CLOSERS = new Set(['fi', 'done', 'esac']);
+
+/** Per line: is it inside the BODY of a (kept) heredoc? */
+function heredocBodyLines(lines: string[]): boolean[] {
+  const flags: boolean[] = lines.map(() => false);
+  let pending: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (pending.length > 0) {
+      flags[i] = true;
+      if (lines[i].trim() === pending[0]) pending.shift();
+      continue;
+    }
+    pending = heredocOps(lines[i]).map((o) => o.delim);
+  }
+  return flags;
+}
+
+/**
+ * Why the audit invocation on line `lineIdx` is NOT a top-level simple command of
+ * its step (null = it is). Accepted ONLY at the top level: any enclosing compound
+ * statement (`if`/`while`/`until`/`for`/`case`/`select`, a function body, a `{ }`
+ * or `( )` group), a dangling `&&`/`||`/`|` on the line before it, or a heredoc
+ * body disqualifies it, and unbalanced structure (which we cannot read) fails
+ * closed. Round 3 accepted `if [ "$SKIP" != 1 ]; then node … fi`, `while false`,
+ * an uncalled function, `cond &&⏎ node …` and `: <<'X'⏎ node …⏎X` as unskippable
+ * gates, though the step may never run the audit.
+ */
+function structureProblem(joined: string, lineIdx: number): string | null {
+  const lines = joined.split('\n');
+  if (heredocBodyLines(lines)[lineIdx]) return 'it sits inside a heredoc body, not as a command';
+  for (let k = lineIdx - 1; k >= 0; k--) {
+    const t = lines[k].trim();
+    if (t === '' || t.startsWith('#')) continue;
+    if (/(&&|\|\||\|)$/.test(t)) {
+      return 'it follows a dangling `&&` / `||` / `|`, so it only runs conditionally';
+    }
+    break;
+  }
+  let depth = 0;
+  for (const { text, line } of splitSourceIntoStatements(joined)) {
+    if (line >= lineIdx + 1) continue;
+    const t = text.trim();
+    const head = t.split(/\s+/)[0] ?? '';
+    if (
+      OPENERS.has(head) ||
+      head === '{' ||
+      /^[A-Za-z_][\w.-]*\s*\(\s*\)/.test(t) ||
+      (t.startsWith('(') && !t.includes(')'))
+    ) {
+      depth++;
+    } else if (CLOSERS.has(head) || head === '}' || t === ')' || t.startsWith(')')) {
+      depth--;
+      if (depth < 0) return 'the shell structure before it is unbalanced (cannot be read)';
+    }
+  }
+  if (depth !== 0) {
+    return 'it is enclosed in a compound statement (if/while/for/case, a function body, or a { } / ( ) group), so the step may never run it';
+  }
+  return null;
+}
+
+/** Leading shell keywords that precede the real command (`then exit 0`, `else set +e`). */
+const LEAD_KEYWORDS = new Set(['then', 'do', 'else', '{', '!', 'time']);
+
+/** `exit 1` / `exit "2"` / `exit $((1))`: a literal NON-ZERO status, i.e. an error branch. */
+const isNonZeroLiteral = (arg: string | undefined): boolean =>
+  // `$((1))` is deliberately NOT accepted: the lexer reads arithmetic as a command
+  // substitution and drops its content, so the value cannot be checked.
+  arg !== undefined && /^[1-9][0-9]*$/.test(arg);
+
 /** Why the run body's audit invocation can NOT be relied on to fail the step (null = it can). */
 function auditInvocationProblem(run: string): string | null {
   const joined = stripProseHeredocs(joinContinuations(run));
   const lines = joined.split('\n');
-  const mentioning = lines.filter((l) => /audit-published\.mjs/.test(l));
-  const bare = mentioning.filter((l) => !l.trim().startsWith('#') && isBareAuditLine(l));
-  if (bare.length === 0) {
+  const bareIdx = lines
+    .map((l, i) =>
+      !l.trim().startsWith('#') && /audit-published\.mjs/.test(l) && isBareAuditLine(l) ? i : -1,
+    )
+    .filter((i) => i >= 0);
+  if (bareIdx.length === 0) {
     return 'invocation is not a bare own-line `node scripts/audit-published.mjs` (a prefix, `||`, `;`, `&`, subshell, or any argument such as --help)';
   }
+  // At least ONE bare invocation must be a top-level simple command.
+  const structural = bareIdx.map((i) => structureProblem(joined, i));
+  const topLevel = bareIdx.filter((_, k) => structural[k] === null);
+  if (topLevel.length === 0) return structural[0];
   // A RULE, not a list of spellings (`exit 0`, `exit "0"`, `exit 00`, `exit $((0))`,
   // `set +eu`, `set +o errexit` all slipped past the round-2 regexes):
-  //  - ANY `exit`/`return` statement in the step, before or after the audit, can end
-  //    the step with a status the audit did not decide;
+  //  - an `exit`/`return` whose status is not a literal NON-ZERO number can end the
+  //    step with a status the audit did not decide (a literal non-zero is an error
+  //    branch and only ever FAILS the step, so it is allowed);
   //  - ANY `set +<flags containing e>` or `set +o errexit` turns errexit off;
   //  - after the audit, a bare `true` / `:` is a no-op that only exists to mask it.
-  const statementHeads = (src: string) =>
+  const statementCommands = (src: string) =>
     splitSourceIntoStatements(src).map((s) => {
-      const tokens = tokenize(s.text.trim());
-      return { tokens, head: commandTokens(tokens)[0] };
+      let cmd = commandTokens(tokenize(s.text.trim()));
+      while (cmd[0] !== undefined && LEAD_KEYWORDS.has(cmd[0])) cmd = commandTokens(cmd.slice(1));
+      return cmd;
     });
-  for (const { tokens, head } of statementHeads(joined)) {
-    if (head === 'exit' || head === 'return') {
-      return 'the step contains an `exit`/`return`, which can end it with a status the audit did not decide';
+  for (const cmd of statementCommands(joined)) {
+    const head = cmd[0];
+    if ((head === 'exit' || head === 'return') && !isNonZeroLiteral(cmd[1])) {
+      return 'the step contains an `exit`/`return` whose status is zero or not a literal non-zero number, which can end it without the audit deciding';
     }
     if (head === 'set') {
-      const rest = tokens.slice(tokens.indexOf('set') + 1);
+      const rest = cmd.slice(1);
       const offFlags = rest.some((t) => /^\+[A-Za-z]*e/.test(t));
       const offOption = rest.some((t, i) => t === '+o' && rest[i + 1] === 'errexit');
       if (offFlags || offOption) return 'the step turns errexit off (`set +e…` / `set +o errexit`)';
     }
   }
-  const first = lines.findIndex((l) => bare.includes(l));
-  for (const { head } of statementHeads(lines.slice(first + 1).join('\n'))) {
-    if (head === 'true' || head === ':') return 'a later `true` / `:` masks the exit status';
+  for (const cmd of statementCommands(lines.slice(topLevel[0] + 1).join('\n'))) {
+    if (cmd[0] === 'true' || cmd[0] === ':') return 'a later `true` / `:` masks the exit status';
   }
   return null;
 }
-
 // ── workflow reading ───────────────────────────────────────────────────────
 
 const asRecord = (v: unknown): Record<string, unknown> | null =>
@@ -508,6 +655,8 @@ function holdsNpmCredential(job: Job, wf: WorkflowCtx): boolean {
   const env = environmentName(job);
   return (
     text.includes('NODE_AUTH_TOKEN') ||
+    // an `.npmrc` auth line (`//registry.npmjs.org/:_authToken=…`) however the secret is named
+    text.includes('_authToken') ||
     /secrets\s*\.\s*NPM_TOKEN/i.test(text) ||
     /secrets\s*\[\s*['"]NPM_TOKEN['"]\s*\]/i.test(text) ||
     /^npm-publish/.test(env) ||

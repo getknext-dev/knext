@@ -799,7 +799,20 @@ describe('publish-lane supply-chain guard (round 3): audit neutralisers are a RU
     ['exit $((0))', 'node scripts/audit-published.mjs\nexit $((0))'],
     ['exit $?', 'node scripts/audit-published.mjs\nexit $?'],
     ['bare exit', 'node scripts/audit-published.mjs\nexit'],
-    ['exit 1 (any exit)', 'node scripts/audit-published.mjs\nexit 1'],
+    ['exit $code (unknown status)', 'node scripts/audit-published.mjs\nexit $code'],
+    ['exit ${CODE:-0}', 'node scripts/audit-published.mjs\nexit ${CODE:-0}'],
+    [
+      '`exit 0` in a branch',
+      'node scripts/audit-published.mjs\nif [ -n "$X" ]; then\n  exit 0\nfi',
+    ],
+    [
+      'a one-line `then exit 0`',
+      'node scripts/audit-published.mjs\nif [ -n "$X" ]; then exit 0; fi',
+    ],
+    [
+      'a one-line `then set +e`',
+      'if [ -n "$X" ]; then set +e; fi\nnode scripts/audit-published.mjs',
+    ],
     ['an exit BEFORE the audit', 'exit 0\nnode scripts/audit-published.mjs'],
     ['set +eu', 'set +eu\nnode scripts/audit-published.mjs'],
     ['set +ue', 'set +ue\nnode scripts/audit-published.mjs'],
@@ -983,6 +996,155 @@ describe('publish-lane supply-chain guard (round 3): the SBOM upload must itself
       fixture({ 'a.yml': wf(`${sbomJob('if: success()\n        ')}${publishJob('audit')}`) }),
     );
     expect(audit.problems).toEqual([]);
+  });
+});
+
+describe('publish-lane supply-chain guard (round 4): the audit must be a TOP-LEVEL simple command', () => {
+  const gate = (body: string) =>
+    auditPublishLanes(fixture({ 'a.yml': wf(`${auditJobWith(body)}${publishJob('audit')}`) }));
+
+  const NEVER_RUNS: Array<[string, string]> = [
+    ['inside if/then/fi', 'if [ "$SKIP" != 1 ]; then\n  node scripts/audit-published.mjs\nfi'],
+    [
+      'in the else branch',
+      'if [ -z "$X" ]; then\n  echo skipped\nelse\n  node scripts/audit-published.mjs\nfi',
+    ],
+    [
+      'in an elif branch',
+      'if [ -z "$X" ]; then\n  :\nelif [ -n "$Y" ]; then\n  node scripts/audit-published.mjs\nfi',
+    ],
+    ['inside while false', 'while false; do\n  node scripts/audit-published.mjs\ndone'],
+    ['inside until true', 'until true; do\n  node scripts/audit-published.mjs\ndone'],
+    ['inside a for over nothing', 'for f in; do\n  node scripts/audit-published.mjs\ndone'],
+    ['inside an uncalled function', 'run_audit() {\n  node scripts/audit-published.mjs\n}'],
+    [
+      'inside an uncalled `function` keyword',
+      'function run_audit {\n  node scripts/audit-published.mjs\n}',
+    ],
+    ['inside a case arm', 'case "$X" in\n  a)\n    node scripts/audit-published.mjs\n    ;;\nesac'],
+    ['inside a brace group', '{\n  node scripts/audit-published.mjs\n}'],
+    ['inside a multi-line subshell', '(\n  node scripts/audit-published.mjs\n)'],
+    ['after a dangling `&&`', '[ "$X" = 1 ] &&\nnode scripts/audit-published.mjs'],
+    ['after a dangling `||`', '[ "$X" = 1 ] ||\nnode scripts/audit-published.mjs'],
+    ['after a dangling `|`', 'echo hi |\nnode scripts/audit-published.mjs'],
+    ['inside a `: <<` comment heredoc', ": <<'X'\nnode scripts/audit-published.mjs\nX"],
+    [
+      'inside a `cat <<` heredoc written to a file',
+      'cat > x.sh <<EOF\nnode scripts/audit-published.mjs\nEOF',
+    ],
+    ['a one-line if', 'if true; then node scripts/audit-published.mjs; fi'],
+    ['unbalanced structure (a stray fi before it)', 'fi\nnode scripts/audit-published.mjs'],
+  ];
+  for (const [label, body] of NEVER_RUNS) {
+    it(`${label} does not count as the audit gate`, () => {
+      const audit = gate(body);
+      expect(audit.problems.length).toBeGreaterThan(0);
+      expect(audit.auditJobs).toEqual([]);
+    });
+  }
+
+  it('compound statements that do NOT enclose the audit leave it a gate', () => {
+    for (const body of [
+      'helper() {\n  echo hi\n}\nnode scripts/audit-published.mjs',
+      'if [ -n "$X" ]; then echo a; fi\nnode scripts/audit-published.mjs\nfor f in a b; do echo $f; done',
+      'for f in a b; do\n  echo $f\ndone\nnode scripts/audit-published.mjs',
+      'case "$X" in\n  a) echo a ;;\nesac\nnode scripts/audit-published.mjs',
+      'node scripts/audit-published.mjs\nif [ -f x ]; then\n  echo bad\n  exit 1\nfi',
+    ]) {
+      expect(gate(body).problems, body).toEqual([]);
+    }
+  });
+
+  it('a non-zero literal exit (an error branch) does NOT neutralise the audit', () => {
+    for (const code of ['1', '2', '"1"', "'3'", '127']) {
+      const body = `node scripts/audit-published.mjs\nif [ -f broken ]; then\n  echo error\n  exit ${code}\nfi`;
+      expect(gate(body).problems, code).toEqual([]);
+    }
+  });
+
+  it('an unconditional zero / unknown exit still neutralises it', () => {
+    for (const code of ['0', '"0"', '00', '$((0))', '$?', '$code', '', '-0']) {
+      const audit = gate(`node scripts/audit-published.mjs\nexit ${code}`);
+      expect(audit.problems.length, `exit ${code}`).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe('publish-lane supply-chain guard (round 4): prose heredocs, the issue-body forms', () => {
+  const lane = (run: string) => auditPublishLanes(fixture({ 'a.yml': wf(publishJob('[]', run)) }));
+
+  it('`gh issue create -F -` / `--body-file -` with a heredoc is prose', () => {
+    for (const run of [
+      "gh issue create --title t -F - <<'EOF'\nnpm publish is documented\nEOF\necho done",
+      'gh issue create --title t --body-file - <<EOF\nnpm publish is documented\nEOF',
+      'gh pr comment 3 --body-file - <<EOF\nnpm publish is documented\nEOF',
+    ]) {
+      expect(lane(run).lanes, run).toEqual([]);
+    }
+  });
+
+  it('`--body "$(cat <<EOF … EOF)"` is prose when the outer command is gh/echo/printf', () => {
+    for (const run of [
+      'gh issue create --title t --body "$(cat <<\'EOF\'\nnpm publish is documented\nEOF\n)"',
+      'gh pr comment 3 --body "$(cat <<EOF\nnpm publish is documented\nEOF\n)"',
+      'echo "$(cat <<EOF\nnpm publish is documented\nEOF\n)"',
+    ]) {
+      expect(lane(run).lanes, run).toEqual([]);
+    }
+  });
+
+  it('the same `$(cat <<EOF …)` under a shell, eval, an assignment or gh WITHOUT a stdin flag is code', () => {
+    for (const run of [
+      'bash -c "$(cat <<\'EOF\'\nnpm publish\nEOF\n)"',
+      'eval "$(cat <<EOF\nnpm publish\nEOF\n)"',
+      'x="$(cat <<EOF\nnpm publish\nEOF\n)"',
+      "gh issue create --title t <<'EOF'\nnpm publish\nEOF",
+      "gh issue create --title t -F body.md <<'EOF'\nnpm publish\nEOF",
+      'gh extension exec sh -F - <<EOF\nnpm publish\nEOF',
+    ]) {
+      expect(laneIds(lane(run)), run).toEqual(['a.yml#release']);
+    }
+  });
+
+  it('code AFTER a prose heredoc is still scanned (the operator must not swallow what follows)', () => {
+    for (const run of [
+      'cat <<EOF\nprose\nEOF\nnpm publish',
+      'cat <<EOF >> "$GITHUB_STEP_SUMMARY"\nprose\nEOF\nnpm publish',
+      "gh issue create --title t -F - <<'EOF'\nprose\nEOF\nnpm publish",
+      'gh issue create --body "$(cat <<EOF\nprose\nEOF\n)"\nnpm publish',
+    ]) {
+      expect(laneIds(lane(run)), run).toEqual(['a.yml#release']);
+    }
+  });
+});
+
+describe('publish-lane supply-chain guard (round 4): `_authToken` is a credential signal', () => {
+  it('a job that writes an npmrc auth token is a candidate even if nothing says publish', () => {
+    for (const run of [
+      'echo "//registry.npmjs.org/:_authToken=${NPM_AUTOMATION}" > .npmrc\npnpm -r ship',
+      'npm config set //registry.npmjs.org/:_authToken "$T"\nbash ./ship.sh',
+    ]) {
+      const audit = auditPublishLanes(fixture({ 'a.yml': wf(publishJob('[]', run)) }));
+      expect(laneIds(audit), run).toEqual(['a.yml#release']);
+    }
+  });
+
+  it('an env KEY or workflow-level env carrying _authToken counts too', () => {
+    const job = publishJob(
+      '[]',
+      'bash ./ship.sh',
+      '    env:\n      "//registry.npmjs.org/:_authToken": ${{ secrets.AUTOMATION }}\n',
+    );
+    expect(laneIds(auditPublishLanes(fixture({ 'a.yml': wf(job) })))).toEqual(['a.yml#release']);
+    const wfLevel = auditPublishLanes(
+      fixture({
+        'a.yml': wfTop(
+          'env:\n  NPM_CONFIG: "//registry.npmjs.org/:_authToken=${{ secrets.AUTOMATION }}"\n',
+          publishJob('[]', 'bash ./ship.sh'),
+        ),
+      }),
+    );
+    expect(laneIds(wfLevel)).toEqual(['a.yml#release']);
   });
 });
 
