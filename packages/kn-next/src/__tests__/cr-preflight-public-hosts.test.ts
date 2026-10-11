@@ -106,9 +106,12 @@ describe("preflight knows spec.networking.publicHosts", () => {
         expect(EMITTED_CR_FIELD_PATHS).toContain("spec.networking.publicHosts");
     });
 
-    it("reports nothing against the CRD this repo ships", () => {
+    it("blames no field against the CRD this repo ships, even when the apply is rejected for another reason", () => {
+        // reject:true forces the preflight to diff the CR against the CRD (an
+        // accepted dry-run returns early and never reads it), so this goes red
+        // if the shipped CRD stops defining spec.networking.publicHosts.
         expect(
-            run(WITH_HOSTS, { withoutPublicHosts: false, reject: false }),
+            run(WITH_HOSTS, { withoutPublicHosts: false, reject: true }),
         ).toEqual([]);
     });
 
