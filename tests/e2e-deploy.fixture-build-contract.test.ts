@@ -69,14 +69,14 @@ fs.writeFileSync(path.join(s, 'server.js'), ${JSON.stringify(server)});
 `;
 }
 
-function makeApp(): string {
+function makeApp(nextVersion = '16.4.0'): string {
   const app = mkdtempSync(join(tmpdir(), 'knext-fxbuild-'));
   dirs.push(app);
   mkdirSync(join(app, 'node_modules', '.bin'), { recursive: true });
   mkdirSync(join(app, 'node_modules', 'next'), { recursive: true });
   writeFileSync(
     join(app, 'node_modules', 'next', 'package.json'),
-    JSON.stringify({ name: 'next', version: '16.4.0' }),
+    JSON.stringify({ name: 'next', version: nextVersion }),
   );
   // Stub the < 16.4.0 adapterPath workaround module: it is not under test here.
   put(
@@ -271,5 +271,168 @@ ${emitScript(app, '.next', '')}
     expectOk(r);
     const buildPort = readFileSync(join(app, 'BUILD_PORT'), 'utf8');
     expect(r.stdout.trim().split(':').pop()).toBe(buildPort);
+  });
+});
+describe('e2e-deploy.sh round 2 contract (#2123 review)', () => {
+  it('script mode carries the native-TS config loader the `--experimental-next-config-strip-types` flag sets', () => {
+    // The flag is only an argv on `next build`; a wrapper script cannot take it, but
+    // next/dist/bin/next turns it into this env var, so export that instead.
+    for (const configPath of ['next.config.ts', 'apps/web/next.config.mts']) {
+      const app = makeApp();
+      put(app, 'node_modules/.bin/next', '#!/usr/bin/env node\nprocess.exit(1);\n', 0o755);
+      put(app, configPath, 'export default {}\n');
+      put(
+        app,
+        'emit.js',
+        `require('node:fs').writeFileSync(${JSON.stringify(join(app, 'SEEN_TS'))}, String(process.env.__NEXT_NODE_NATIVE_TS_LOADER_ENABLED));\n${emitScript(app, '.next', '')}`,
+      );
+      put(
+        app,
+        'package.json',
+        JSON.stringify({ name: 'ts', private: true, scripts: { build: 'node emit.js' } }),
+      );
+      expectOk(deploy(app));
+      expect(readFileSync(join(app, 'SEEN_TS'), 'utf8'), configPath).toBe('true');
+    }
+  });
+
+  it('script mode leaves the native-TS loader alone when no TS config exists', () => {
+    const app = makeApp();
+    put(app, 'node_modules/.bin/next', '#!/usr/bin/env node\nprocess.exit(1);\n', 0o755);
+    put(app, 'next.config.js', 'module.exports = {}\n');
+    put(
+      app,
+      'emit.js',
+      `require('node:fs').writeFileSync(${JSON.stringify(join(app, 'SEEN_TS'))}, String(process.env.__NEXT_NODE_NATIVE_TS_LOADER_ENABLED));\n${emitScript(app, '.next', '')}`,
+    );
+    put(
+      app,
+      'package.json',
+      JSON.stringify({ name: 'js', private: true, scripts: { build: 'node emit.js' } }),
+    );
+    expectOk(deploy(app));
+    expect(readFileSync(join(app, 'SEEN_TS'), 'utf8')).toBe('undefined');
+  });
+
+  it('plain `next build` fixtures run prebuild/postbuild on Next >= 16.4.0 only (16.3.x keeps the old path)', () => {
+    for (const [version, expected] of [
+      ['16.4.0', true],
+      ['16.3.8', false],
+    ] as const) {
+      const app = makeApp(version);
+      put(
+        app,
+        'node_modules/.bin/next',
+        `#!/usr/bin/env node\nif (process.argv[2] !== 'build') process.exit(0);\n${emitScript(app, '.next', '')}`,
+        0o755,
+      );
+      put(
+        app,
+        'package.json',
+        JSON.stringify({
+          name: 'hooks',
+          private: true,
+          scripts: {
+            prebuild: "node -e \"require('fs').writeFileSync('PRE','1')\"",
+            build: 'next build',
+            postbuild: "node -e \"require('fs').writeFileSync('POST','1')\"",
+          },
+        }),
+      );
+      expectOk(deploy(app));
+      expect(existsSync(join(app, 'PRE')), `prebuild @ ${version}`).toBe(expected);
+      expect(existsSync(join(app, 'POST')), `postbuild @ ${version}`).toBe(expected);
+    }
+  });
+
+  it('a failing prebuild hook fails the deploy before the build runs', () => {
+    const app = makeApp();
+    put(app, 'node_modules/.bin/next', '#!/usr/bin/env node\nprocess.exit(0);\n', 0o755);
+    put(app, 'emit.js', emitScript(app, '.next', ''));
+    put(
+      app,
+      'package.json',
+      JSON.stringify({
+        name: 'badpre',
+        private: true,
+        scripts: {
+          prebuild: 'node -e "process.exit(5)"',
+          build: "node emit.js && node -e \"require('fs').writeFileSync('BUILD_RAN','1')\"",
+        },
+      }),
+    );
+    const r = deploy(app);
+    expect(r.status).not.toBe(0);
+    expect(existsSync(join(app, 'BUILD_RAN'))).toBe(false);
+  });
+
+  it('an outputDirectory that is absolute or escapes the project is ignored; a normalisable one is used', () => {
+    const cases: [string, boolean][] = [
+      ['/etc/not-the-dist', false],
+      ['./../.next', false],
+      ['apps/../../x/.next', false],
+      ['apps/web/../web/.next', true],
+    ];
+    for (const [outputDirectory, honoured] of cases) {
+      const app = makeApp();
+      put(app, 'node_modules/.bin/next', '#!/usr/bin/env node\nprocess.exit(1);\n', 0o755);
+      put(app, 'vercel.json', JSON.stringify({ outputDirectory }));
+      put(
+        app,
+        'emit.js',
+        honoured ? emitScript(app, 'apps/web/.next', 'apps/web') : emitScript(app, '.next', ''),
+      );
+      put(
+        app,
+        'package.json',
+        JSON.stringify({ name: 'od', private: true, scripts: { build: 'node emit.js' } }),
+      );
+      const r = deploy(app);
+      expectOk(r);
+      expect(r.stderr.includes('vercel.json outputDirectory'), outputDirectory).toBe(honoured);
+    }
+  });
+
+  it('when the pre-picked port is taken during the build, the deploy re-picks and says so', () => {
+    const app = makeApp();
+    put(app, 'node_modules/.bin/next', '#!/usr/bin/env node\nprocess.exit(1);\n', 0o755);
+    const holder = join(app, 'HOLDER_PID');
+    put(
+      app,
+      'emit.js',
+      `
+const { spawn } = require('node:child_process'); const net = require('node:net'); const fs = require('node:fs');
+const child = spawn(process.execPath, ['-e', 'require("net").createServer().listen(Number(process.env.PORT), "0.0.0.0"); setTimeout(() => {}, 60000)'], { detached: true, stdio: 'ignore', env: process.env });
+child.unref();
+fs.writeFileSync(${JSON.stringify(holder)}, String(child.pid));
+fs.writeFileSync(${JSON.stringify(join(app, 'BUILD_PORT'))}, String(process.env.PORT));
+(async () => {
+  for (let i = 0; i < 100; i++) {
+    const up = await new Promise((res) => { const s = net.connect(Number(process.env.PORT), '127.0.0.1'); s.on('connect', () => { s.destroy(); res(true); }); s.on('error', () => res(false)); });
+    if (up) break;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+${emitScript(app, '.next', '')}
+})();
+`,
+    );
+    put(
+      app,
+      'package.json',
+      JSON.stringify({ name: 'taken', private: true, scripts: { build: 'node emit.js' } }),
+    );
+    try {
+      const r = deploy(app);
+      expectOk(r);
+      expect(r.stderr).toContain('was taken during the build');
+      const buildPort = readFileSync(join(app, 'BUILD_PORT'), 'utf8');
+      const served = r.stdout.trim().split(':').pop();
+      expect(served).not.toBe(buildPort);
+      expect(readFileSync(join(app, '.next', 'standalone', 'SERVER_PORT'), 'utf8')).toBe(served);
+    } finally {
+      try {
+        process.kill(Number(readFileSync(holder, 'utf8')));
+      } catch {}
+    }
   });
 });

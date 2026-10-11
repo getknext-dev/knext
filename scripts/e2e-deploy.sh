@@ -454,6 +454,27 @@ run_fixture_hook() {
   PATH="${APP_DIR}/node_modules/.bin:${PATH}" sh -c "$1"
 }
 
+# Lane scope of the hooks: a plain `next build` fixture on Next < 16.4.0 (or an
+# unreadable version) keeps the pre-#2123 path exactly — no fixture in the 16.3.x
+# manifests relies on a hook, and running one there would be a behaviour change
+# on the live credential lanes for no gain. A wrapper script (the fixture's own
+# contract) and Next >= 16.4.0 run them.
+if [ -z "${FIXTURE_SCRIPT_TO_RUN}" ] && [ "${NEXT_FLAGS_BAKED}" != "baked" ] \
+  && { [ -n "${FIXTURE_PREBUILD_SCRIPT}" ] || [ -n "${FIXTURE_POSTBUILD_SCRIPT}" ]; }; then
+  log "Next < 16.4.0 (or unreadable): not running the fixture's prebuild/postbuild hooks (unchanged legacy path)"
+  FIXTURE_PREBUILD_SCRIPT=""
+  FIXTURE_POSTBUILD_SCRIPT=""
+fi
+
+# A wrapper script cannot take `next build --experimental-next-config-strip-types`
+# (B2 #173); the flag only sets this env var in next/dist/bin/next, so set it
+# directly when the project, or a nested app, has a TS next config.
+if [ -n "${FIXTURE_SCRIPT_TO_RUN}" ] \
+  && [ -n "$(find "${APP_DIR}" -maxdepth 4 \( -name node_modules -o -name .next \) -prune -o \( -name 'next.config.ts' -o -name 'next.config.mts' \) -print 2>/dev/null | head -n1)" ]; then
+  export __NEXT_NODE_NATIVE_TS_LOADER_ENABLED=true
+  log "next.config.(m)ts detected — exporting __NEXT_NODE_NATIVE_TS_LOADER_ENABLED=true for the wrapper script (B2 #173)"
+fi
+
 : > "${BUILD_LOG}"
 if [ -n "${FIXTURE_PREBUILD_SCRIPT}" ]; then
   log "running the fixture prebuild hook: ${FIXTURE_PREBUILD_SCRIPT}"
@@ -1027,7 +1048,7 @@ fi
 # it at build time agrees with the server. Keep it; only if something grabbed it
 # during the build (the free_port TOCTOU window now spans the build) take a fresh
 # one, and say so — a config that baked the old port is then the one casualty.
-if ! node -e 'const s=require("net").createServer();s.on("error",()=>process.exit(1));s.listen(Number(process.argv[1]),()=>s.close(()=>process.exit(0)));' "${PORT}" 2>/dev/null; then
+if ! node -e 'const s=require("net").createServer();s.on("error",()=>process.exit(1));s.listen(Number(process.argv[1]),"0.0.0.0",()=>s.close(()=>process.exit(0)));' "${PORT}" 2>/dev/null; then
   log "WARNING: port ${PORT} (picked before the build) was taken during the build — picking a new one; a build-time read of PORT will disagree with the server"
   PORT="$(free_port)"
 fi
