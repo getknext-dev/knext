@@ -312,9 +312,10 @@ export const DEEP_HEALTH_PROBE_TTL_MS = 10_000;
  * Build the :9464 scrape hook that refreshes the deep-health gauge — ACTIVITY-
  * GATED (#348 gate fix). It runs `checkDeepHealth()` (which dials Postgres) ONLY
  * when `isRecentlyActive()` is true; when the app has been idle past the DB
- * activity budget it does NOTHING, leaving the gauge at its last-known value so
- * the idle DB can sleep normally. This preserves BOTH the alert (a real in-use
- * DB stuck `waking` still pages) AND scale-to-zero (an idle app's DB sleeps).
+ * activity budget it does not probe, so the idle DB can sleep normally, and it
+ * DROPS the series (`reset()`) so no stale reading keeps an alert firing for an
+ * app that is merely idle. This preserves BOTH the alert (a real in-use DB stuck
+ * `waking` still pages) AND scale-to-zero (an idle app's DB sleeps).
  *
  * AMPLIFICATION-BOUNDED. The gauge is served on :9464, which cross-namespace
  * scrapers can read (ADR-0044), so the hook must not turn each request into a
@@ -337,14 +338,25 @@ export function makeDeepHealthScrapeHook(
         // Concurrent callers share the running probe — and wait for its result, so
         // the exposition they then serve carries it.
         if (inFlight) return inFlight;
-        if (now() - lastFinishedAt < DEEP_HEALTH_PROBE_TTL_MS) {
-            return Promise.resolve();
-        }
         // ACTIVITY GATE: skip the DB dial entirely when the pool is idle. This is
         // the whole fix — no `SELECT 1` on scrape while idle ⇒ the gateway lets
         // the DB sleep. A stuck-`waking` outage only matters while the app is
         // actively using the DB, which is exactly when this gate is open.
+        //
+        // While the gate is closed nothing is being probed, so the exposition
+        // carries NO claim: the last reading is dropped rather than left to
+        // describe an app that is simply idle (a `waking`/`down` recorded just
+        // before idle would otherwise fire its alert indefinitely). Prometheus
+        // marks the series stale on the next scrape and a `for:` clause resets.
+        // This sits BEFORE the TTL so the claim cannot outlive the activity that
+        // justified it, and it clears the TTL so the first probe after traffic
+        // resumes is not suppressed by a reading taken before the idle period.
         if (!deps.isRecentlyActive()) {
+            metrics.deepHealthState.reset();
+            lastFinishedAt = Number.NEGATIVE_INFINITY;
+            return Promise.resolve();
+        }
+        if (now() - lastFinishedAt < DEEP_HEALTH_PROBE_TTL_MS) {
             return Promise.resolve();
         }
         inFlight = (async () => {

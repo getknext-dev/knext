@@ -162,6 +162,9 @@ export default defineConfig([
       'adapters/otel-config': 'src/adapters/otel-config.ts',
       'adapters/tracing': 'src/adapters/tracing.ts',
       'adapters/metrics': 'src/adapters/metrics.ts',
+      // The tracing-off deep-health gauge (`./internal/deep-health-lite`): a
+      // dependency-free module whose only static import is node:http.
+      'adapters/deep-health-lite': 'src/adapters/deep-health-lite.ts',
       'adapters/correlation-response': 'src/adapters/correlation-response.ts',
       'utils/logger': 'src/utils/logger.ts',
       // #1292 round 2: given its own entry so a plain-`node` script outside
@@ -204,6 +207,7 @@ export default defineConfig([
         'adapters/otel-config': 'src/adapters/otel-config.ts',
         'adapters/tracing': 'src/adapters/tracing.ts',
         'adapters/metrics': 'src/adapters/metrics.ts',
+        'adapters/deep-health-lite': 'src/adapters/deep-health-lite.ts',
         'adapters/correlation-response': 'src/adapters/correlation-response.ts',
         'utils/logger': 'src/utils/logger.ts',
         'utils/reserved-static-dirs': 'src/utils/reserved-static-dirs.ts',

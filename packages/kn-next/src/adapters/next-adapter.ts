@@ -237,8 +237,12 @@ const adapter: NextAdapter = {
                     cfg.plugins = cfg.plugins || [];
                     cfg.plugins.push(
                         new ctx.webpack.IgnorePlugin({
+                            // `deep-health-lite` is the tracing-off deep-health gauge
+                            // `instrumentation.ts` starts with a dynamic import; it
+                            // lazily reaches `@getknext/lib/health` (pg, ioredis), so
+                            // it is fenced from the edge bundle exactly like the body.
                             resourceRegExp:
-                                /instrumentation-node(\.[cm]?[jt]s)?$/,
+                                /(instrumentation-node|deep-health-lite)(\.[cm]?[jt]s)?$/,
                         }),
                     );
                 }

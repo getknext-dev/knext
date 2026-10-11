@@ -61,7 +61,7 @@ The **default standalone build** exposes a different family, with an `app` label
 | `knext_http_inflight_requests` | Gauge | Current concurrency (saturation). |
 | `knext_coldstart_total`, `knext_coldstart_duration_seconds` | Counter, Histogram | Cold-start count and wake latency. |
 | `knext_db_wake_total`, `knext_db_wake_duration_seconds` | Counter, Histogram | Database wake count and latency, labelled `role`. |
-| `knext_deep_health_state` | Gauge | The deep-health verdict per dependency; the active state is `1`. Present only when tracing is enabled; the only series of this family the shipped scrape collects, and the one the deep-health alerts read. |
+| `knext_deep_health_state` | Gauge | The deep-health verdict per dependency; the active state is `1`. Served with tracing on or off, and present only while the app has used its database in the last 45 seconds (an idle app serves no such series); the only series of this family the shipped scrape collects, and the one the deep-health alerts read. |
 
 Ready-made Grafana dashboards ship with knext (see [Dashboards](#dashboards) below). The request
 panels on the RED and load-testing dashboards query the vinext family (`knext_bunexec_*`), so on the
@@ -73,6 +73,29 @@ about: the [compiled executable](/docs/bun-runtime) bakes its bytecode into the 
 time, so every start reads it — `knext_bunexec_startup_duration_seconds` measures the result
 directly.
 </Callout>
+
+### Existing apps: start the deep-health gauge [#deep-health-existing-apps]
+
+A new app starts the deep-health gauge with tracing off by itself. An app you created earlier gets it
+only after both of these: update `@getknext/core` to the release that ships it, and add the lines below
+to its own `src/instrumentation.ts` (or regenerate that file from the scaffold). Until then, with
+tracing off, the app serves no deep-health series and the two deep-health alerts stay silent.
+
+In `register()`, change the tracing-off branch (the one that returns before importing
+`./instrumentation-node`) to start the gauge before it returns:
+
+```ts
+  if (!resolveOtelOptions(process.env)) {
+    void import('@getknext/core/internal/deep-health-lite')
+      .then(({ startDeepHealthLite }) => startDeepHealthLite())
+      .catch(() => {});
+    return;
+  }
+```
+
+Keep it after the `NEXT_RUNTIME !== 'nodejs'` check, and do not `await` it, so it adds nothing to the
+start-up path. An app with tracing on needs no change. The shipped scrape forwards the series from your
+app's `runtime-contract.mjs`; if that file predates the deep-health forward, regenerate it as well.
 
 ## Dashboards
 

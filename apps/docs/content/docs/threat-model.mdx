@@ -176,8 +176,8 @@ exporter's seven series families, enumerated:
   `knext_bunexec_http_inflight_requests`, `knext_bunexec_startup_duration_seconds`,
   `knext_bunexec_process_resident_memory_bytes` and `knext_bunexec_process_uptime_seconds`, plus
   `knext_deep_health_state`.
-- `knext_deep_health_state` is forwarded from your app's own registry and is present only when tracing is
-  enabled. It carries `app`, `dependency` and `state` labels with fixed values (twelve series per pod) —
+- `knext_deep_health_state` is forwarded from your app's own registry, with tracing on or off, and is present only
+  while the app has used its database in the last 45 seconds; an idle app serves no such series. It carries `app`, `dependency` and `state` labels with fixed values (twelve series per pod) —
   no host names, connection strings or error text — and tells an observer whether the app's database or
   cache is currently up. Nothing else from the app's registry is forwarded.
 - No route, path, query, payload or method labels. The request counter carries only a `status_class`

@@ -94,14 +94,22 @@ at `1`. The two deep-health alerts read it, in the live `knext.app` group.
 
 Conditions, stated exactly:
 
-- **Tracing must be enabled.** The gauge is registered by the app's
-  instrumentation, which is not even loaded when tracing is off (it costs about
-  0.9 s of every cold start). With tracing off there is no series and the alerts
-  cannot fire.
-- **Only while the app uses its database.** The scrape probes the database only
-  if the app used its writer pool within `DB_ACTIVITY_BUDGET_MS`, so an idle
-  scale-to-zero database is never woken by the scrape; the gauge holds its last
-  value.
+- **Tracing on or off.** With tracing on the gauge is registered by the app's
+  full instrumentation. With tracing off (the default) that instrumentation is
+  not loaded (it costs about 0.9 s of every cold start), so a small
+  dependency-free module (`@getknext/core/internal/deep-health-lite`) serves the
+  same family, byte for byte, on the same loopback port. It imports only
+  `node:http` statically, reads the DB-activity slot the lib already writes, and
+  imports the health check on the first scrape that needs it.
+- **Only while the app uses its database, and an idle app serves NO series.**
+  The scrape probes the database only if the app used its writer pool within
+  `DB_ACTIVITY_BUDGET_MS`, so an idle scale-to-zero database is never woken by
+  the scrape. While the gate is closed the series is dropped (not held at its
+  last value), so a `waking` or `down` recorded just before idle cannot keep an
+  alert firing for an app that is merely idle. The alerts resolve once the app
+  goes idle and, if the dependency is still broken, fire again after their
+  `for:` hold when the app is used again. `absent()` alerting is deliberately not
+  added: an idle app would page.
 - **Only while a pod is up.** At zero there is no pod and no series.
 - **The probe does not keep the database awake.** The probe's own query is not counted as the
   app using the database, so scraping an idle app never re-opens the activity gate: once the

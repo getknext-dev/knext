@@ -351,7 +351,7 @@ supervisor's prom-client registry (`adapters/metrics.ts`), which no longer serve
   `knext_bunexec_process_uptime_seconds`, and `knext_deep_health_state`. The list is pinned against the
   emitter by `observability-metric-contract.test.ts`, so it cannot drift from what the binary serves.
 - **The seventh, `knext_deep_health_state`, is forwarded from the app's own registry** by the runtime
-  contract's allowlist (`APP_METRIC_FAMILIES`), and is present only when tracing is enabled. It carries
+  contract's allowlist (`APP_METRIC_FAMILIES`), and is served with tracing on or off, present only while the app has used its database within the activity budget (45 s by default; an idle app serves no such series). It carries
   `app`, `dependency` (`overall`, `postgres`, `redis`) and `state` (`ok`, `degraded`, `down`, `waking`,
   `up`, `unconfigured`) — twelve fixed series per pod, no host names, connection strings or error text.
   It discloses whether an app's database or cache is currently up. The forward is an allowlist of exactly

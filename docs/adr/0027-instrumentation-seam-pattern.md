@@ -116,3 +116,40 @@ resurrecting #352.
 name. The rules file is the maintainer's to edit; the proposed amendment text is staged at
 `docs/adr/drafts/rules-amendment-architecture-s4.md` together with the ADR-0048 item-7
 official-adapter-default amendment, so both §4 edits land as one maintainer action.
+
+## Amendment (deep-health on a tracing-off install): a second READING seam on an existing key
+
+**Status: Accepted** (trigger-class: amends this ADR; flagged for the sprint-close design review rather than
+blocking the merge, per the 2026-09-22 workflow amendment). Issues #2178 and #2209.
+
+**The problem.** The deep-health gauge (`knext_deep_health_state`) was registered only by
+`instrumentation-node`, which the scaffolded `instrumentation.ts` does not load while tracing is off — loading it
+is ~0.9 s of every cold start. So on the default install the deep-health alerts could not fire. The gauge must
+not be gated on the activity of the database (it must never wake a scale-to-zero database), and "has the app used
+its database recently" is exactly what the lib already records.
+
+**Why direct-pass is impossible here.** This ADR prefers passing a collaborator directly. The collaborator is
+`isDbRecentlyActive`, and importing it means importing `@getknext/lib/clients` (pg, ioredis, cerbos, minio) —
+the cost the dependency-free gate exists to avoid.
+
+**Decision.** `@getknext/core/internal/deep-health-lite` is a non-lib module that READS
+`globalThis[Symbol.for('knext.lib.clients.lastDbActivityAt')]` by literal. This adds a second *reading* seam on a
+key the lib already writes and anchors on `globalThis`; it adds **no** mutable state of its own (its cached
+snapshot, single-flight promise and memoised health import live in a closure, never at module level), and it
+introduces no bare `let`. It is loaded only when tracing is off, so with tracing on the existing prom-client path
+binds the loopback port and the two cannot race.
+
+**Risk and mitigation.** The key string is duplicated. `deep-health-lite-guards.test.ts` fails if the lite
+literal and the lib's `DB_ACTIVITY_KEY` diverge (source scan on both sides plus a runtime check that a value
+written to the lib's slot opens lite's gate), and fails on any module-level `let`/`var` in the lite module. The
+retired build-artifact guard is not resurrected: its subject (webpack layer duplication) still cannot occur on the
+shipped build path, and the parity tests are the live protection for this seam. `@getknext/lib` stays bundled and
+is never added to `serverExternalPackages`; the same scan asserts neither the lite module nor any `@getknext`
+package is listed there.
+
+**Edge fence.** The lite module lazily reaches `@getknext/lib/health`, so the adapter's edge-only `IgnorePlugin`
+now matches `deep-health-lite` as well as `instrumentation-node` (one plugin, one alternation).
+
+**Idle semantics (#2209).** While the activity gate is closed, the gauge is dropped on both paths (lite renders an
+empty body; the prom-client scrape hook calls `reset()`). An idle app makes no claim, so a `waking`/`down`
+recorded just before idle cannot keep an alert firing, and `absent()` alerting is deliberately not added.
