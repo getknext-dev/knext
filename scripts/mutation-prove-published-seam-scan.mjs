@@ -267,8 +267,8 @@ const MUTATIONS = [
       '`static ["__" + k]` (a computed, non-reference key) reads as clean instead of unscannable (#2188)',
     subject: 'lib',
     validate: jsStillParses,
-    anchor: 'ts.isIdentifier(ke) || ts.isPropertyAccessExpression(ke)',
-    replacement: 'true',
+    anchor: 'else if (ts.isIdentifier(ke) || ts.isPropertyAccessExpression(ke)) {',
+    replacement: 'else if (true) {',
   },
   {
     id: 'M24',
