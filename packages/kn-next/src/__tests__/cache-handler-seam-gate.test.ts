@@ -1,12 +1,14 @@
 /**
- * The published mutating seams FAIL CLOSED (sprint-close design-gate block).
+ * The mutating seams FAIL CLOSED, even though they are no longer published.
  *
- * `@getknext/core/adapters/cache-handler` is a published subpath, and
- * `__setRedisClientForTests(undefined)` repoints — or disables — the
- * process-wide cache. Without this gate, any consumer (or any dependency of a
- * consumer) could call it in production and every request would silently fall
- * to the in-memory cache. The seam now throws unless a test harness opts in
- * with KNEXT_TEST_SEAMS=1.
+ * The seams used to be exported from `@getknext/core/adapters/cache-handler`,
+ * where `__setRedisClientForTests(undefined)` repointed — or disabled — the
+ * process-wide cache for any consumer. The published entry is now
+ * `cache-handler.public.js` and carries none of them (see
+ * `tests/published-seam-export-scan.test.ts`), but the implementation module is
+ * still importable by path inside a built tree, so the call-time gate stays as
+ * defence in depth: the seams throw unless a test harness opts in with
+ * KNEXT_TEST_SEAMS=1, and throw unconditionally under NODE_ENV=production.
  *
  * This file deliberately does NOT set the flag (the runner isolates one
  * process per file, so the opted-in cache-handler suites cannot leak it here)
@@ -138,9 +140,10 @@ describe("cache-handler published seams fail closed", () => {
         }
     });
 
-    // The .d.ts is the surface a TS consumer reads. A gate documented only in
-    // the .js is a gate the caller discovers at runtime, in production.
-    it("documents the production refusal on the PUBLISHED .d.ts", () => {
+    // The .d.ts is the surface a TS caller of the seams reads (the suites type-check
+    // against it; it is not shipped). A gate documented only in the .js is a gate
+    // the caller discovers at runtime.
+    it("documents the production refusal on the seams' .d.ts", () => {
         const dts = readFileSync(
             join(
                 dirname(import.meta.dirname),

@@ -204,6 +204,16 @@ jobs:
       - name: Guard — public API type-surface reports match source (#1669)
         run: node scripts/api-surface/check.mjs
 
+      # A `__`-prefixed export is a test seam by repo convention, and none may be
+      # reachable from a published entry of @getknext/{core,lib,db}: the scan
+      # starts at every file an `exports` map points at in the BUILT dist, follows
+      # re-exports, and FAILS on anything it cannot read. Runs after the builds
+      # because it reads what ships. Also exercised, with fixtures and injections
+      # into a copy of the real dist, by tests/published-seam-export-scan.test.ts;
+      # the release `audit` job repeats it over the installed tarballs.
+      - name: Guard — no test seam reachable from a published entry
+        run: node scripts/scan-published-seams.mjs
+
       - name: Typecheck kn-next (alias shim — node --check, no TS)
         run: bun run --filter kn-next typecheck
 
