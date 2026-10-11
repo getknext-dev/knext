@@ -642,7 +642,7 @@ const MUTATIONS = [
     claim:
       'exit 0 / unknown statuses are accepted as literal non-zero (an exit no longer neutralises)',
     subject: 'engine',
-    anchor: '  arg !== undefined && /^[1-9][0-9]*$/.test(arg);\n',
+    anchor: '  arg !== undefined && /^[1-9][0-9]*$/.test(arg) && Number(arg) <= 255;\n',
     replacement: '  arg !== undefined || arg === undefined;\n',
     expect: 'red',
   },
@@ -763,6 +763,31 @@ const MUTATIONS = [
     subject: 'engine',
     anchor: '        i = j; // the terminator line is dropped with the body\n',
     replacement: '        pending = ops.map((o) => o.delim);\n        i = j;\n',
+    expect: 'red',
+  },
+
+  {
+    id: 'M77',
+    claim: 'exit literals are no longer bounded to 1..255 (`exit 256` exits 0)',
+    subject: 'engine',
+    anchor: '  arg !== undefined && /^[1-9][0-9]*$/.test(arg) && Number(arg) <= 255;\n',
+    replacement: '  arg !== undefined && /^[1-9][0-9]*$/.test(arg);\n',
+    expect: 'red',
+  },
+  {
+    id: 'M78',
+    claim: 'a heredoc terminator is matched trimmed, not exactly as bash does',
+    subject: 'engine',
+    anchor: "  (op.dash ? line.replace(/^\\t+/, '') : line) === op.delim;\n",
+    replacement: "  (op.dash ? line.replace(/^\\t+/, '') : line).trim() === op.delim;\n",
+    expect: 'red',
+  },
+  {
+    id: 'M79',
+    claim: 'an EXIT/ERR trap that can override the exit status is no longer a neutraliser',
+    subject: 'engine',
+    anchor: "    if (head === 'trap' && trapOverridesStatus(cmd.slice(1))) {\n",
+    replacement: '    if (false) {\n',
     expect: 'red',
   },
 
