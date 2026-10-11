@@ -374,9 +374,13 @@ the default install does not scrape. They alert only where that group is
 scraped; see the deep-health alerting issue for the status.
 
 **Normal vs stuck.** The deep health check classifies a **refused** Postgres
-connection (`ECONNREFUSED`) as `waking` **only when the `DATABASE_URL` host is
-the scale-zero-pg gateway** (`*.scale-zero-pg.svc…`), and as `down` for any
-other host. A connect timeout or a silently dropped connection reads `waking` on
+connection (`ECONNREFUSED`) as `waking` **only when the database is
+scale-to-zero**, and as `down` otherwise. The gateway is recognised by host: any
+host with a `scale-zero-pg` label (`pggw-apps.scale-zero-pg.svc…`) or the bare
+`pggw` / `pggw-apps`. For a scale-to-zero database reached by another name (an
+IP, a pooler or ExternalName alias, a gateway in another namespace) set
+`KNEXT_DB_SCALE_TO_ZERO=true` on the app; `false` forces `down` even on a
+gateway host. A connect timeout or a silently dropped connection reads `waking` on
 any host. That is deliberate: a scale-to-zero database asleep behind the
 gateway shows exactly that signature while it wakes, and a legitimate wake is
 **brief (~2-6s)**. So a short blip of `waking` is normal and does **not** alert.
@@ -392,9 +396,10 @@ away, since nothing is waking it, with default settings: the verdict does not
 wait out the connect-retry budget (`DB_WAKE_RETRY_BUDGET_MS`, 8 s). The pool
 keeps retrying in the background, so a database that comes back reads `up` on
 the next check; `KnextDeepHealthDown` (below) alerts on that.
-A custom `APPDB_GATEWAY_HOST` override, or a pooler in front of the
-scale-to-zero database, does not match the gateway host, so a refused connection
-there also reads `down`, not `waking`.
+Only a refusal does this: a reset, a DNS blip or a timeout reads `waking` on any
+host. A pooler, an IP or an alias in front of the scale-to-zero database is not
+recognised by host, so declare it with `KNEXT_DB_SCALE_TO_ZERO=true` or a
+refusal there reads `down`, not `waking`.
 
 **What it means.** The app cannot reach its database at the connection level for
 minutes — this is a real outage, not a wake.
@@ -431,9 +436,10 @@ when the gate is open and the probe runs.
 over 2 minutes.
 
 **What it means.** Either the database refused the connection and is not a
-scale-to-zero database that could be waking (bring-your-own Postgres,
-a custom `APPDB_GATEWAY_HOST`, or a pooler in front of the scale-to-zero
-database), or it is reachable but erroring on the probe query.
+scale-to-zero database that could be waking (bring-your-own Postgres), or it is
+reachable but erroring on the probe query. If the database IS scale-to-zero but
+reached through a name knext does not recognise (an IP, a pooler or alias, a
+gateway in another namespace), set `KNEXT_DB_SCALE_TO_ZERO=true` on the app.
 
 **Act.**
 

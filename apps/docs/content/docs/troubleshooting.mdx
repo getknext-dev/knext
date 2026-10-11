@@ -279,9 +279,13 @@ more**. This is a client configuration fix, not a cluster change. See [Databases
 gauge belongs to the default standalone build's metric family.
 
 **Normal versus stuck.** The deep health check reports a refused Postgres connection (`ECONNREFUSED`) as
-`waking` only when the app's `DATABASE_URL` points at the scale-zero-pg gateway (`*.scale-zero-pg.svc…`),
-because a scale-to-zero database shows exactly that signature while it wakes. A refused connection to any
-other host reads `down`. A connect timeout or a silently dropped connection reads `waking` on any host.
+`waking` only when the app's database is a scale-to-zero database, because that database shows exactly
+that signature while it wakes. knext recognises the scale-zero-pg gateway by its host (any host with a
+`scale-zero-pg` label, such as `pggw-apps.scale-zero-pg.svc…`, or the bare `pggw` / `pggw-apps`). If your
+`DATABASE_URL` reaches a scale-to-zero database by another name (an IP address, a pooler, an alias, or a
+gateway in a different namespace), set `KNEXT_DB_SCALE_TO_ZERO=true` on the app so a refused connection
+reads `waking`. Set it to `false` to make a refused connection read `down` even on a gateway host. A refused
+connection to any other host reads `down`. A connect timeout or a silently dropped connection reads `waking` on any host.
 A real wake is brief, a few seconds, and does not alert. A refused connection to a bring-your-own database
 reads `down` straight away, since nothing is waking it, with default settings: the verdict does not wait out the connection retry window. The pool keeps retrying in the background, so a database that comes back reads `up` on the next check. A scale-to-zero database that is genuinely down
 (host gone, a rotated `DATABASE_URL`) presents the *same* errors, so it sits at `waking` forever and never
@@ -315,8 +319,9 @@ for the alert, because a stuck-`waking` outage only matters when the app is acti
 `knext_deep_health_state{dependency="overall",state="down"}` has been `1` for over 2 minutes.
 
 **What it means.** The database refused the connection and is not a scale-to-zero database
-that could be waking (a bring-your-own Postgres, a custom `APPDB_GATEWAY_HOST`, or a pooler in front of
-the scale-to-zero database), or it is reachable but erroring on the probe query.
+that could be waking (a bring-your-own Postgres), or it is reachable but erroring on the probe query. If the
+database is in fact scale-to-zero but reached through a name knext does not recognise (an IP address, a
+pooler, an alias, a gateway in a different namespace), set `KNEXT_DB_SCALE_TO_ZERO=true` on the app.
 
 **Act.**
 

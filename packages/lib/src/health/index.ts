@@ -215,13 +215,22 @@ export async function checkDeepHealth(): Promise<HealthStatus> {
             checks.postgres = 'up';
           }
         } catch (error) {
-          if (isWakeSignal(error) && isScaleToZeroDatabase(process.env.DATABASE_URL)) {
-            // Scale-to-zero DB asleep/mid-wake: NORMAL, not a fault.
-            logger.info({ err: error }, '[Health Check] Postgres waking (scale-to-zero)');
+          // Only a REFUSAL on a database that cannot be waking is an outage. A
+          // reset, a DNS blip or a timeout is ambiguous on any host, so it keeps
+          // the wake classification everywhere; and on a scale-to-zero database
+          // even a refusal is the wake itself.
+          if (
+            isWakeSignal(error) &&
+            (isScaleToZeroDatabase(process.env.DATABASE_URL) || !isConnectionRefused(error))
+          ) {
+            // Asleep/mid-wake (or ambiguous): NORMAL, not a fault.
+            logger.info({ err: error }, '[Health Check] Postgres waking');
             checks.postgres = 'waking';
           } else {
             // Bring-your-own Postgres (the default): a refused connection is an
             // outage, not a wake — nothing is scheduled to come back on its own.
+            // Anything that is not a connection-level failure at all (auth, a
+            // missing relation) is a real fault as well.
             logger.error({ err: error }, '[Health Check] Postgres connection failed');
             checks.postgres = 'down';
           }

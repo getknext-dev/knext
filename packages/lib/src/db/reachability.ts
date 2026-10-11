@@ -62,30 +62,58 @@ export function reportAcquireFailure(error: unknown): void {
   }
 }
 
-/**
- * True for a definitive "nothing is listening" failure: the TCP connect was
- * refused. Matches the node `pg` code, Bun.SQL's `ERR_POSTGRES_CONNECTION_REFUSED`,
- * and the message text either driver puts in it. Resets, DNS failures and
- * timeouts are deliberately NOT refusals — they are ambiguous, and a timed-out
- * probe stays `waking`.
- */
-export function isConnectionRefused(error: unknown): boolean {
-  const e = error as { code?: unknown; message?: unknown } | undefined | null;
-  const code = typeof e?.code === 'string' ? e.code.toUpperCase() : '';
-  if (code === 'ECONNREFUSED' || code === 'ERR_POSTGRES_CONNECTION_REFUSED') return true;
-  const message = typeof e?.message === 'string' ? e.message.toUpperCase() : '';
-  return message.includes('ECONNREFUSED') || message.includes('CONNECTION REFUSED');
-}
+const REFUSED_CODES = new Set(['ECONNREFUSED', 'ERR_POSTGRES_CONNECTION_REFUSED']);
 
 /**
- * True when the DSN points at the scale-zero-pg gateway — the scale-to-zero
- * database a `waking` Postgres state can legitimately describe. Matches the
- * host label sequence `scale-zero-pg.svc` (e.g. `pggw.scale-zero-pg.svc.cluster.local.`),
- * never a substring of the path or userinfo. There is no env marker for the
- * binding today, so the gateway host is the only in-app signal; a
- * bring-your-own database never matches it.
+ * True for a definitive "nothing is listening" failure: the TCP connect was
+ * refused. It is a CONNECT-phase verdict and nothing else.
+ *
+ * The observer is fed every failure of every query on the writer pool, so a
+ * message match would mistake an application query's error for the database
+ * being down — dblink / postgres_fdw report "could not connect to server:
+ * Connection refused" as a SQL error (SQLSTATE 08001) from a perfectly healthy
+ * database. So only a socket errno (`pg`) or the Bun.SQL connect code counts,
+ * and an error the SERVER sent (it carries a `severity`, and a five-character
+ * SQLSTATE as its `code`) never does. A node multi-address failure is an
+ * `AggregateError`; it is a refusal only if every address refused. Resets, DNS
+ * failures and timeouts are ambiguous and are NOT refusals.
  */
-export function isScaleToZeroDatabase(dsn: string | undefined): boolean {
+export function isConnectionRefused(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false;
+  const e = error as { code?: unknown; severity?: unknown; errors?: unknown };
+  if (e.severity !== undefined) return false;
+  if (typeof e.code === 'string' && REFUSED_CODES.has(e.code.toUpperCase())) return true;
+  if (Array.isArray(e.errors) && e.errors.length > 0) {
+    return e.errors.every((inner) => isConnectionRefused(inner));
+  }
+  return false;
+}
+
+/** The scale-to-zero service's own in-namespace names (`pggw`, `pggw-apps`). */
+const IN_NAMESPACE_SERVICE_NAMES = new Set(['pggw', 'pggw-apps']);
+
+/**
+ * Whether the app's Postgres is a scale-to-zero database — the only kind a
+ * `waking` state can truthfully describe, because it is the only kind that comes
+ * back on its own.
+ *
+ * `KNEXT_DB_SCALE_TO_ZERO` is the explicit declaration and always wins: `true`
+ * (also `1`, `yes`) or `false` (also `0`, `no`). It is the answer for a database
+ * the host cannot identify: an IP, a pooler or ExternalName alias in front of the
+ * scale-to-zero service, or one in a relocated namespace.
+ *
+ * Unset, fall back to the host in `dsn`: a host with a DNS label equal to
+ * `scale-zero-pg` (`pggw-apps.scale-zero-pg`, `….scale-zero-pg.svc.cluster.local.`,
+ * any cluster domain), or the bare in-namespace service name `pggw` / `pggw-apps`.
+ * Never a substring of the path or userinfo.
+ */
+export function isScaleToZeroDatabase(
+  dsn: string | undefined,
+  declared: string | undefined = process.env.KNEXT_DB_SCALE_TO_ZERO,
+): boolean {
+  const flag = declared?.trim().toLowerCase();
+  if (flag === 'true' || flag === '1' || flag === 'yes') return true;
+  if (flag === 'false' || flag === '0' || flag === 'no') return false;
   if (!dsn) return false;
   let host: string;
   try {
@@ -93,5 +121,7 @@ export function isScaleToZeroDatabase(dsn: string | undefined): boolean {
   } catch {
     return false;
   }
-  return /(^|\.)scale-zero-pg\.svc(\.|$)/.test(host);
+  const labels = host.split('.').filter(Boolean);
+  if (labels.includes('scale-zero-pg')) return true;
+  return labels.length === 1 && IN_NAMESPACE_SERVICE_NAMES.has(labels[0] as string);
 }

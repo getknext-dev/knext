@@ -51,12 +51,14 @@ describe('checkDeepHealth — hard vs soft dependency taxonomy (readiness contra
     redisPing.mockReset();
     delete process.env.DATABASE_URL;
     delete process.env.REDIS_URL;
+    delete process.env.KNEXT_DB_SCALE_TO_ZERO;
   });
 
   afterEach(() => {
     jest.useRealTimers();
     delete process.env.DATABASE_URL;
     delete process.env.REDIS_URL;
+    delete process.env.KNEXT_DB_SCALE_TO_ZERO;
   });
 
   it('all dependencies healthy ⇒ ok / up / up', async () => {
@@ -320,6 +322,123 @@ describe('checkDeepHealth — hard vs soft dependency taxonomy (readiness contra
     }
   });
 
+  // --- only a REFUSAL turns a non-scale-to-zero database `down` --------------
+  //
+  // Everything else that looks like a connection-level failure is ambiguous (a
+  // reset, a DNS blip, a timeout) and keeps its wake classification on EVERY host,
+  // including one the host heuristic cannot recognise.
+
+  for (const [label, err] of [
+    ['a connect timeout (ETIMEDOUT)', Object.assign(new Error('timeout'), { code: 'ETIMEDOUT' })],
+    ['a reset (ECONNRESET)', Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' })],
+    ['a DNS blip (EAI_AGAIN)', Object.assign(new Error('getaddrinfo'), { code: 'EAI_AGAIN' })],
+    ['a dropped connect', new Error('Connection terminated unexpectedly')],
+  ] as const) {
+    it(`bring-your-own Postgres: ${label} rejecting the probe ⇒ waking, not down`, async () => {
+      process.env.DATABASE_URL = 'postgres://u:p@db.example.com:5432/app';
+      pgQuery.mockRejectedValue(err);
+
+      const { checkDeepHealth } = await import('../health');
+      const res = await checkDeepHealth();
+
+      expect(res.checks.postgres).toBe('waking');
+      expect(res.status).toBe('waking');
+    });
+  }
+
+  it('KNEXT_DB_SCALE_TO_ZERO=true: a refused connection to an unrecognised host reads waking', async () => {
+    // A pooler / IP / ExternalName alias in front of the scale-to-zero database.
+    process.env.DATABASE_URL = 'postgres://u:p@10.0.0.7:5432/app';
+    process.env.KNEXT_DB_SCALE_TO_ZERO = 'true';
+    pgQuery.mockRejectedValue(refused());
+
+    const { checkDeepHealth } = await import('../health');
+    const res = await checkDeepHealth();
+
+    expect(res.checks.postgres).toBe('waking');
+  });
+
+  it('KNEXT_DB_SCALE_TO_ZERO=true: a refusal reported mid-probe never short-circuits to down', async () => {
+    process.env.DATABASE_URL = 'postgres://u:p@10.0.0.7:5432/app';
+    process.env.KNEXT_DB_SCALE_TO_ZERO = 'true';
+    pgQuery.mockImplementation(() => new Promise(() => {}));
+
+    jest.useFakeTimers();
+    const { checkDeepHealth } = await import('../health');
+    const { reportAcquireFailure } = await import('../db/reachability');
+    const promise = checkDeepHealth();
+    await advanceTimersByTimeAsync(10);
+    reportAcquireFailure(refused());
+    await advanceTimersByTimeAsync(10);
+    let settled = false;
+    promise.then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    await advanceTimersByTimeAsync(9000);
+    expect((await promise).checks.postgres).toBe('waking');
+  });
+
+  it('KNEXT_DB_SCALE_TO_ZERO=false: a refused connection to the gateway host reads down', async () => {
+    process.env.DATABASE_URL = 'postgres://u:p@pggw-apps.scale-zero-pg.svc:55432/app';
+    process.env.KNEXT_DB_SCALE_TO_ZERO = 'false';
+    pgQuery.mockRejectedValue(refused());
+
+    const { checkDeepHealth } = await import('../health');
+    const res = await checkDeepHealth();
+
+    expect(res.checks.postgres).toBe('down');
+  });
+
+  it('a short-form gateway host (no .svc) is still scale-to-zero ⇒ a refusal reads waking', async () => {
+    process.env.DATABASE_URL = 'postgres://u:p@pggw-apps.scale-zero-pg:55432/app';
+    pgQuery.mockRejectedValue(refused());
+
+    const { checkDeepHealth } = await import('../health');
+    expect((await checkDeepHealth()).checks.postgres).toBe('waking');
+  });
+
+  it('a server-side error that says "connection refused" (SQLSTATE 08001) never short-circuits', async () => {
+    process.env.DATABASE_URL = 'postgres://u:p@db.example.com:5432/app';
+    pgQuery.mockImplementation(() => new Promise(() => {}));
+
+    jest.useFakeTimers();
+    const { checkDeepHealth } = await import('../health');
+    const { reportAcquireFailure } = await import('../db/reachability');
+    const promise = checkDeepHealth();
+    await advanceTimersByTimeAsync(10);
+    // An application query on the same pool, run through dblink / postgres_fdw.
+    reportAcquireFailure(
+      Object.assign(new Error('could not connect to server: Connection refused'), {
+        code: '08001',
+        severity: 'ERROR',
+      }),
+    );
+    await advanceTimersByTimeAsync(10);
+    let settled = false;
+    promise.then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    await advanceTimersByTimeAsync(9000);
+    expect((await promise).checks.postgres).toBe('waking');
+  });
+
+  it('a refusal reported BEFORE the check began does not decide it (no stale verdict)', async () => {
+    process.env.DATABASE_URL = 'postgres://u:p@db.example.com:5432/app';
+    const { reportAcquireFailure } = await import('../db/reachability');
+    // The previous check's abandoned probe, still retrying, gives up late.
+    reportAcquireFailure(refused());
+    pgQuery.mockResolvedValue({ rows: [{ healthy: 1 }] });
+
+    const { checkDeepHealth } = await import('../health');
+    const res = await checkDeepHealth();
+
+    expect(res.checks.postgres).toBe('up');
+  });
+
   it('the failure observer is released when the check finishes (no listener leak per scrape)', async () => {
     process.env.DATABASE_URL = 'postgres://u:p@db.example.com:5432/app';
     pgQuery.mockResolvedValue({ rows: [{ healthy: 1 }] });
@@ -396,11 +515,13 @@ describe('checkShallowHealth — process-only readiness/liveness (#338)', () => 
     redisPing.mockReset();
     delete process.env.DATABASE_URL;
     delete process.env.REDIS_URL;
+    delete process.env.KNEXT_DB_SCALE_TO_ZERO;
   });
 
   afterEach(() => {
     delete process.env.DATABASE_URL;
     delete process.env.REDIS_URL;
+    delete process.env.KNEXT_DB_SCALE_TO_ZERO;
   });
 
   it('returns ok when the process is up, WITHOUT touching Postgres or Redis', async () => {
