@@ -791,6 +791,39 @@ const MUTATIONS = [
     expect: 'red',
   },
 
+  {
+    id: 'M80',
+    claim: '`trap -- <handler> EXIT` is read with `--` as the handler (the trap is missed)',
+    subject: 'engine',
+    anchor: '  const args = rawArgs.slice(first);\n',
+    replacement: '  const args = rawArgs;\n',
+    expect: 'red',
+  },
+  {
+    id: 'M81',
+    claim: '`eval` in the audit step is no longer refused',
+    subject: 'engine',
+    anchor: "      head === 'eval' ||\n",
+    replacement: '      false ||\n',
+    expect: 'red',
+  },
+  {
+    id: 'M82',
+    claim: 'a `function name { … }` definition in the audit step is no longer refused',
+    subject: 'engine',
+    anchor: "      head === 'function' ||\n",
+    replacement: '      false ||\n',
+    expect: 'red',
+  },
+  {
+    id: 'M83',
+    claim: 'a `name() { … }` definition in the audit step is no longer refused',
+    subject: 'engine',
+    anchor: '      /^(function\\s+)?[A-Za-z_][\\w.:-]*\\s*\\(\\s*\\)/.test(t)\n',
+    replacement: '      false\n',
+    expect: 'red',
+  },
+
   // ── 4. controls: these must stay GREEN ──────────────────────────────────
   {
     id: 'NEG1',
