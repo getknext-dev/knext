@@ -1,5 +1,21 @@
 # kn-next
 
+## 1.4.0
+
+### Patch Changes
+
+- Updated dependencies [3c8a2c2]
+- Updated dependencies [a667fa4]
+- Updated dependencies [3c75034]
+- Updated dependencies [38c9fba]
+- Updated dependencies [8e6c939]
+- Updated dependencies [2d1e43b]
+- Updated dependencies [f365147]
+- Updated dependencies [1f21fa5]
+- Updated dependencies [05990ab]
+- Updated dependencies [803a83f]
+  - @getknext/core@1.4.0
+
 ## 1.3.0
 
 ### Patch Changes

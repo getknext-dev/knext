@@ -1,5 +1,43 @@
 # @getknext/core
 
+## 1.4.0
+
+### Minor Changes
+
+- 3c8a2c2: Announcing what changes in 2.0, so you can prepare during 1.x.
+  
+  - **2.0 floors.** knext 2.0 will require Next.js 16.4.0 or newer (stable since 2026-10-06) and Node.js 24 or newer. Releases in the 1.x line keep their current floors.
+  - **The `kn-next` command is removed in 2.0.** Use `knext` instead; it takes the same command and flags. The deprecation notice `kn-next` prints now says it will be removed in 2.0.
+  - **Two cache-handler test helpers are deprecated.** `__resetEnvForTests` and `__setRedisClientForTests` on `@getknext/core/adapters/cache-handler` are marked `@deprecated`: they are removed in 2.0 and are test-only. Your editor now shows the strikethrough; nothing changes at runtime.
+- 8e6c939: `knext doctor` now warns when your `next.config` enables `cacheComponents`. Server-side `'use cache'` entries are per-pod on knext today: they are not shared across pods and do not survive scale-to-zero. The warning does not fail `doctor`. The ISR and caching docs describe the behaviour.
+- f365147: Redirects built from `request.url` can now use your app's domain. Next.js builds `request.url` from the address its server listens on, so in a pod a route handler's `NextResponse.redirect(new URL('/x', request.url))` sent the browser to `http://0.0.0.0:8080/x`, and any cookie set on that response was lost. Set `KNEXT_PUBLIC_ORIGINS` (in `knext.config.ts` `env` or the NextApp's `spec.env`) to your app's hostnames, primary domain first, for example `app.example.com,www.example.com`. A redirect to the listening address is then rewritten to one of those hosts. The request's `X-Forwarded-Host` or `Host` is used only when it is on the list; otherwise the first entry is used. The scheme comes from `X-Forwarded-Proto` when it is `http` or `https`, and is `https` otherwise. Any other redirect is left alone, and without the variable nothing changes. This covers the Node, Bun and compiled-executable standalone targets.
+
+### Patch Changes
+
+- a667fa4: On Next.js 16.4, a route with `dynamicParams = false` that rejects a path now lets the request fall through to a less specific route, instead of answering the closed route's 404. For example, with `app/overlap/[slug]` (only `known` generated) beside `app/overlap/[...rest]`, `/overlap/unlisted` now renders the catch-all. Paths that nothing else matches still 404.
+  
+  `knext build` and `knext deploy` already cleared the build-time adapter from the server's runtime config on Next.js 16.3 and earlier; they now do so on every Next.js version. Behaviour on 16.3 is unchanged.
+- 3c75034: The `NextApp` that `knext deploy` applies no longer always carries `spec.scaling.minScale` and `spec.scaling.maxScale`. A `minScale` of 0 (scale to zero) is the field's unset value, so it is now left out; `spec.scaling` is left out entirely when `knext.config.ts` sets nothing scaling-related, and the operator's own default of 10 maximum replicas applies. Whenever a `spec.scaling` block is written it still carries a `maxScale` (yours, else 10), because the operator reads a present block's `maxScale` literally and 0 means unbounded.
+  
+  Your app's effective minimum and maximum scale do not change, and an older operator reads the same values the same way; the `NextApp` object is simply smaller. Only what you set is written, so a cluster-wide default can never be shadowed by a value you did not choose.
+  
+  On the first deploy after upgrading, `kubectl apply` sees that the previously applied `spec.scaling` is no longer in the object and sends `scaling: null` for the fields the older CLI emitted. Effective scaling is unchanged, because the operator default is the same value. But when your `knext.config.ts` sets nothing scaling-related, that removes the whole `spec.scaling` block, including any fields you added to the live `NextApp` by hand with `kubectl`. Set those fields in `knext.config.ts` instead, so they are written on every deploy.
+- 38c9fba: `knext deploy` now fails when the operator holds your app change instead of reporting success. If the platform's defaults make the app's effective spec invalid (for example the connection budget is exceeded), the operator keeps the previous version serving and marks the app not Ready. Deploy now exits non-zero with the operator's message, which names the field, and tells you to raise the platform budget or lower `maxScale` / `poolMax`.
+- 2d1e43b: After a redeploy, a partially prerendered (PPR) page no longer resumes the previous build's saved state. The Redis cache handler now treats a PPR entry written by a different build as a miss, so the page re-renders instead of logging "Expected the resume to render ... fallback to client rendering" on every request. Regular ISR pages are still shared across builds.
+  
+  A build is identified by `.next/BUILD_ID`; where that is missing or is Next's constant id (vinext, `knext preview`, images built outside knext), the handler uses `KNEXT_BUILD_ID`, then `NEXT_DEPLOYMENT_ID`. Only when none of the three is available can it not tell builds apart, and a PPR entry is then served as before (the original symptom remains in that case).
+  
+  The handler already skipped cache-control windows recorded by another build, so the same rule now covers both the saved state and the cache window.
+- 1f21fa5: Apps created with `knext create --builder vinext` now pin `vinext` `1.1.0`, and the vinext fixes knext bundles are re-validated against it. Five bundled fixes are dropped because vinext 1.1.0 already includes them: `/_next/data/…` requests reaching `getServerSideProps` with the original URL, custom-media drafts in `lightningCssFeatures`, the `308` redirect for repeated slashes and backslashes, a function-form `next.config` receiving the real default `pageExtensions`, and `x-nextjs-cache: MISS` on `/_next/image` success responses. The remaining bundled fixes apply only to vinext `1.1.0`; an app that pins another vinext version skips them with a message saying so.
+  
+  The vinext cache adapters (`@getknext/core/internal/vinext-cache-adapter`, `-node`, `-bun`) keep a plain-function default export, so they work with both vinext 1.0.1 and 1.1.0 and existing apps keep sharing ISR through Redis. The cache handler also accepts vinext's `{ env, options }` argument, and each adapter module exports its handler class as `KnextCacheHandler` for vinext 1.1.0, which can construct a class directly.
+- 05990ab: A vinext version other than the one knext's bundled fixes were checked against no longer goes unnoticed. `knext doctor` now reports a row for it: an older vinext is a `FAIL` (the fixes are missing, including the Nitro image optimizer and the 404 for unmatched asset requests), a newer one is a `WARN`. The `knext build` message is now a warning that says how many fixes were skipped, what the build lacks and how to fix it. The default is unchanged (the build continues); set `KNEXT_VINEXT_PATCHES=strict` to make the mismatch a build error.
+  
+  The Redis cache handler also recognises vinext's `{ env, options }` constructor argument by its exact shape (those two keys, `options` a plain object), so a Next.js options object that happens to carry an `env` or `options` key is passed through untouched instead of silently losing its options.
+- 803a83f: `KNEXT_VINEXT_PATCHES` values that are not recognised (a misspelling such as `stric`) now print a warning that names the value and lists the accepted ones (`0`, `strict`, or unset), instead of falling back to the default warn mode silently. The default behaviour is otherwise unchanged. `knext doctor` no longer suggests setting `KNEXT_VINEXT_PATCHES=strict` when strict is already the active mode.
+- @getknext/db@1.4.0
+  - @getknext/lib@1.4.0
+
 ## 1.3.0
 
 ### Patch Changes
