@@ -428,7 +428,9 @@ ${emitScript(app, '.next', '')}
       const buildPort = readFileSync(join(app, 'BUILD_PORT'), 'utf8');
       const served = r.stdout.trim().split(':').pop();
       expect(served).not.toBe(buildPort);
-      expect(readFileSync(join(app, '.next', 'standalone', 'SERVER_PORT'), 'utf8')).toBe(served);
+      expect(readFileSync(join(app, '.next', 'standalone', 'SERVER_PORT'), 'utf8')).toBe(
+        String(served),
+      );
     } finally {
       try {
         process.kill(Number(readFileSync(holder, 'utf8')));
