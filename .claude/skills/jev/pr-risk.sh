@@ -9,6 +9,9 @@
 # not "safe" — say so in the report). A HIGH result means: reviewers at high effort + a
 # knext-tester pass (see recipes.md, L3).
 #
+# A diff that carries a LITERAL SECRET (same list as the injection screen, jev-hook-lib.sh) is
+# never sent: the result is "RISK unavailable (diff carries a literal secret)" and exit 3.
+#
 # WEIGHTS — one line, must sum to 1.0. Security dominates because it is the only axis where a
 # miss is not recoverable; tests next because they are what makes the other three catchable.
 W_SECURITY=${W_SECURITY:-0.40} W_COMPLEXITY=${W_COMPLEXITY:-0.20} W_DRIFT=${W_DRIFT:-0.15} W_TESTS=${W_TESTS:-0.25}
@@ -28,6 +31,16 @@ else
   git diff "$BASE"...HEAD 2>/dev/null | head -c "$MAX_BYTES" >"$tmp/diff.txt"
 fi
 if [ ! -s "$tmp/diff.txt" ]; then echo "RISK 0.00 normal (empty diff, jev not called)"; exit 0; fi
+
+# NOTHING LITERALLY SECRET LEAVES THE MACHINE. An unpushed branch can hold a real key that gitleaks
+# has not seen yet, and the diff goes to a third party. Same check, same list as the injection
+# screen (jev-hook-lib.sh); it runs on the exact bytes about to be sent. On a hit (or if the check
+# cannot run) the call is skipped and the result is "unavailable": no opinion, not "safe".
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LIB="$HERE/../../hooks/jev-hook-lib.sh"
+# shellcheck source=../../hooks/jev-hook-lib.sh
+. "$LIB" 2>/dev/null || { echo "RISK unavailable (secret check unavailable)"; exit 3; }
+if jev_has_literal_secret <"$tmp/diff.txt"; then echo "RISK unavailable (diff carries a literal secret)"; exit 3; fi
 
 "$JEV" ask --field "diff=@$tmp/diff.txt" \
   --score security 'How much SECURITY risk does the change in `diff` add (auth, secrets, injection, unauthenticated mutating endpoints, supply chain, cluster-write surface)?' none low medium high critical \

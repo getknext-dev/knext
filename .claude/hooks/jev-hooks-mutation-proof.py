@@ -28,11 +28,19 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 SKILL = HERE.parent / "skills" / "jev"
-# (source dir, file). pr-risk.sh is judged by its own suite, pr-risk.test.sh.
-FILES = [(HERE, f) for f in ["jev-result-screen.sh", "jev-hook-lib.sh", "jev-hooks.test.sh"]] + [
-    (SKILL, "pr-risk.sh"),
-    (SKILL, "pr-risk.test.sh"),
+# (source dir, file, path inside the temp copy). The temp copy keeps the repo layout because
+# pr-risk.sh sources ../../hooks/jev-hook-lib.sh. pr-risk.sh is judged by its own suite,
+# pr-risk.test.sh; the lib is shared, so a lib mutation must turn EITHER suite red.
+FILES = [(HERE, f, f"hooks/{f}") for f in ["jev-result-screen.sh", "jev-hook-lib.sh", "jev-hooks.test.sh"]] + [
+    (SKILL, "pr-risk.sh", "skills/jev/pr-risk.sh"),
+    (SKILL, "pr-risk.test.sh", "skills/jev/pr-risk.test.sh"),
 ]
+DEST = {f: dest for _, f, dest in FILES}
+SUITE = {
+    "hooks": ["hooks/jev-hooks.test.sh"],
+    "pr-risk": ["skills/jev/pr-risk.test.sh"],
+    "both": ["hooks/jev-hooks.test.sh", "skills/jev/pr-risk.test.sh"],
+}
 
 SCREEN = "jev-result-screen.sh"
 LIB = "jev-hook-lib.sh"
@@ -57,7 +65,7 @@ MUTATIONS = [
     ("screen: advisory context dropped", SCREEN, "additionalContext:", "ignoredKey:"),
     ("screen: becomes blocking (decision field)", SCREEN, "{hookSpecificOutput:{hookEventName", '{decision:"block",hookSpecificOutput:{hookEventName'),
     # --- the credential skip: literal formats only, never plain words ------------------------
-    ("screen: literal-secret skip removed", SCREEN, 'jev_has_literal_secret "$(cat "$tmp/text.txt")" && exit 0', ":"),
+    ("screen: literal-secret skip removed", SCREEN, 'jev_has_literal_secret <"$tmp/text.txt" && exit 0', ":"),
     (
         "lib: screen skips on plain WORDS again (an injection evades by saying 'token')",
         LIB,
@@ -65,10 +73,23 @@ MUTATIONS = [
         "JEV_LITERAL_RE='secret|token|password|passwd|api[_-]?key|private[_-]?key|cookie|-----BEGIN|",
     ),
     ("lib: literal match is case-sensitive", LIB, 'grep -Eiq -- "$JEV_LITERAL_RE"', 'grep -Eq -- "$JEV_LITERAL_RE"'),
-    ("lib: literal check never matches", LIB, 'printf \'%s\' "$1" | grep -Eiq -- "$JEV_LITERAL_RE"', "false"),
+    ("lib: literal check never matches", LIB, 'grep -Eiq -- "$JEV_LITERAL_RE" < <(printf \'%s\' "$stripped") && return 0', ":"),
+    ("lib: literal check goes back to a pipeline (SIGPIPE under pipefail sends the secret)", LIB, 'grep -Eiq -- "$JEV_LITERAL_RE" < <(printf \'%s\' "$stripped") && return 0', 'printf \'%s\' "$stripped" | grep -Eiq -- "$JEV_LITERAL_RE" && return 0'),
     ("lib: entropy run lengthened to 64", LIB, "{32,}", "{64,}"),
     ("lib: entropy run shortened to 16", LIB, "{32,}", "{16,}"),
-    ("lib: sk- loses its word boundary", LIB, "(^|[^a-z0-9])sk-[a-z0-9]", "sk-"),
+    ("lib: entropy rule no longer needs a digit (long identifiers skip the screen)", LIB, "grep -q '[0-9]' < <(", "grep -q . < <("),
+    ("lib: entropy rule counts '/' (a path becomes one long run)", LIB, "grep -Eio '[A-Za-z0-9+=]{32,}'", "grep -Eio '[A-Za-z0-9+/=]{32,}'"),
+    ("lib: data URIs no longer exempt", LIB, "data:[A-Za-z0-9.+/-]+;base64,[A-Za-z0-9+/=]*", "DATAURI_NEVER_MATCHES"),
+    ("lib: 40-hex git SHAs no longer exempt", LIB, "[0-9a-fA-F]{40}", "[0-9a-fA-F]{999}"),
+    ("lib: 64-hex sha256 digests no longer exempt", LIB, "[0-9a-fA-F]{64}", "[0-9a-fA-F]{999}"),
+    ("lib: the SHA exemption widens to any hex run of 40+", LIB, "[0-9a-fA-F]{40}", "[0-9a-fA-F]{40,}"),
+    ("lib: sk- loses its word boundary", LIB, "(^|[^a-z0-9])sk-", "sk-"),
+    ("lib: sk- loses its body length", LIB, "sk-[A-Za-z0-9_-]{20,}", "sk-"),
+    ("lib: gh[pousr]_ loses its body length", LIB, "gh[pousr]_[A-Za-z0-9]{36}", "gh[pousr]_"),
+    ("lib: github_pat_ loses its body length", LIB, "github_pat_[A-Za-z0-9_]{22,}", "github_pat_"),
+    ("lib: npm_ loses its body length", LIB, "npm_[A-Za-z0-9]{36}", "npm_"),
+    ("lib: xox[bp]- loses its body", LIB, "xox[bp]-[A-Za-z0-9-]{10,}", "xox[bp]-"),
+    ("lib: AKIA loses its body length", LIB, "AKIA[0-9A-Z]{16}", "AKIA"),
     ("lib: auth/bearer header-with-value rule removed", LIB, "|(authorization:[[:space:]]*|bearer[[:space:]]+)", "|(zzzz)"),
     ("lib: header value may be any word (no length/digit rule)", LIB, "([A-Za-z0-9._~+/=-]{16,}|[A-Za-z._~+/=-]*[0-9][A-Za-z0-9._~+/=-]{7,})", "[A-Za-z]+"),
     ("lib: header 16+ char value alternative removed", LIB, "([A-Za-z0-9._~+/=-]{16,}|", "("),
@@ -84,6 +105,8 @@ MUTATIONS = [
     ("pr-risk: diff not truncated", "pr-risk.sh", 'head -c "$MAX_BYTES" "$PR_RISK_DIFF_FILE"', 'cat "$PR_RISK_DIFF_FILE"'),
     ("pr-risk: jev failure no longer fails open", "pr-risk.sh", 'echo "RISK unavailable (jev call failed)"; exit 3', 'echo "RISK 0.00 normal"; exit 0'),
     ("pr-risk: unparseable scores accepted", "pr-risk.sh", "case \"$v\" in '' | *[!0-9.]* | *.*.*) echo \"RISK unavailable (unparseable scores)\"; exit 3 ;; esac", ":"),
+    ("pr-risk: the literal-secret check on the diff removed", "pr-risk.sh", 'if jev_has_literal_secret <"$tmp/diff.txt"; then echo "RISK unavailable (diff carries a literal secret)"; exit 3; fi', ":"),
+    ("pr-risk: a missing secret-check lib no longer stops the call", "pr-risk.sh", '. "$LIB" 2>/dev/null || { echo "RISK unavailable (secret check unavailable)"; exit 3; }', '. "$LIB" 2>/dev/null || :'),
     ("pr-risk: empty diff still calls jev", "pr-risk.sh", 'if [ ! -s "$tmp/diff.txt" ]; then', 'if false; then'),
 ]
 
@@ -91,17 +114,17 @@ MUTATIONS = [
 # AT A TIME. (label, anchor, replacement)
 for _label, _anchor, _repl in [
     ("PEM block", "-----BEGIN|", ""),
-    ("ghp_", "ghp_|", ""),
-    ("gho_", "gho_|", ""),
-    ("github_pat_", "github_pat_|", ""),
-    ("npm_", "npm_|", ""),
-    ("xox[bp]-", "|xox[bp]-", ""),
-    ("AKIA", "|AKIA", ""),
+    ("gh[pousr]_", "gh[pousr]_[A-Za-z0-9]{36}|", ""),
+    ("github_pat_", "github_pat_[A-Za-z0-9_]{22,}|", ""),
+    ("npm_", "npm_[A-Za-z0-9]{36}|", ""),
+    ("sk-", "|(^|[^a-z0-9])sk-[A-Za-z0-9_-]{20,}", ""),
+    ("xox[bp]-", "|xox[bp]-[A-Za-z0-9-]{10,}", ""),
+    ("AKIA", "|AKIA[0-9A-Z]{16}", ""),
 ]:
     MUTATIONS.append((f"lib: literal pattern removed: {_label}", LIB, _anchor, _repl))
 
 
-def run_suite(work: Path, test: str = "jev-hooks.test.sh") -> int:
+def run_suite(work: Path, test: str) -> int:
     return subprocess.run(
         ["bash", str(work / test)],
         stdout=subprocess.DEVNULL,
@@ -122,6 +145,10 @@ SMOKE = [
     "screen: jev error no longer fails open",
     "screen: 32 KiB cap removed",
     "pr-risk: threshold ignored",
+    "pr-risk: the literal-secret check",
+    "goes back to a pipeline (SIGPIPE",
+    "data URIs no longer exempt",
+    "40-hex git SHAs no longer exempt",
 ]
 
 
@@ -132,9 +159,10 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as td:
         base = Path(td) / "base"
         base.mkdir()
-        for d, f in FILES:
-            shutil.copy2(d / f, base / f)
-        for t in ("jev-hooks.test.sh", "pr-risk.test.sh"):
+        for d, f, dest in FILES:
+            (base / dest).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(d / f, base / dest)
+        for t in SUITE["both"]:
             rc = run_suite(base, t)
             if rc != 0:
                 print(f"ABORT: the UNMUTATED suite {t} is not green (exit {rc}); cannot prove anything")
@@ -145,15 +173,17 @@ def main() -> int:
             i, (label, fname, anchor, repl) = item
             work = Path(td) / f"m{i}"
             shutil.copytree(base, work)
-            src = (work / fname).read_text()
+            target = work / DEST[fname]
+            src = target.read_text()
             n = src.count(anchor)
             if n != 1:
                 return "ABORT", f"ABORT  {label}: anchor occurs {n}x in {fname}, expected exactly 1"
             out = src.replace(anchor, repl, 1)
             if out == src:
                 return "ABORT", f"ABORT  {label}: substitution produced no change"
-            (work / fname).write_text(out)
-            rc = run_suite(work, "pr-risk.test.sh" if fname == "pr-risk.sh" else "jev-hooks.test.sh")
+            target.write_text(out)
+            which = "pr-risk" if fname == "pr-risk.sh" else "both" if fname == LIB else "hooks"
+            rc = max(run_suite(work, t) for t in SUITE[which])
             if rc != 0:
                 return "RED", f"RED    {label} (suite exit {rc})"
             return "GREEN", f"GREEN  {label}  <-- SURVIVED, the guard is decoration"

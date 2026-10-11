@@ -56,5 +56,36 @@ sz=$(cat "$FAKE_SIZE")
 : >"$TMP/empty.diff"; : >"$FAKE_ARGS"
 OUT=$(PR_RISK_DIFF_FILE="$TMP/empty.diff" run); rc=$?
 [ "$rc" -eq 0 ] && check "empty diff is zero risk, no call" "RISK 0.00 normal" && [ ! -s "$FAKE_ARGS" ] && echo "ok    empty diff makes no jev call" || { echo "FAIL  empty diff (rc=$rc out=$OUT)"; fails=1; }
+
+# A diff that carries a literal secret must NEVER reach jev: an unpushed branch can hold a real
+# key that gitleaks has not seen yet. The token is assembled at run time (and is letters-only,
+# so only the prefix rule can catch it); the stub must not be called at all.
+L36=abcdefghijklmnopqrstuvwxyzabcdefghij
+printf 'diff --git a/x b/x\n+TOKEN=ghp_%s\n' "$L36" >"$TMP/secret.diff"
+fixture 4 4 4 4; : >"$FAKE_ARGS"
+OUT=$(PR_RISK_DIFF_FILE="$TMP/secret.diff" run); rc=$?
+check "a diff with a literal secret is not sent" "RISK unavailable (diff carries a literal secret)"
+[ "$rc" -eq 3 ] && echo "ok    secret diff exits 3 (same as unavailable)" || { echo "FAIL  secret diff must exit 3, got $rc"; fails=1; }
+[ ! -s "$FAKE_ARGS" ] && echo "ok    the stub was never called for a secret diff" || { echo "FAIL  the stub was called for a secret diff"; fails=1; }
+# ...but ordinary diff content (a 40-hex SHA, a data URI) is judged as usual.
+H40=a1b2c3d4e5a1b2c3d4e5a1b2c3d4e5a1b2c3d4e5
+printf 'diff --git a/x b/x\n+see https://github.com/o/r/commit/%s\n+npm_config_registry\n' "$H40" >"$TMP/benign.diff"
+fixture 0 0 0 0; : >"$FAKE_ARGS"
+OUT=$(PR_RISK_DIFF_FILE="$TMP/benign.diff" run); rc=$?
+[ "$rc" -eq 0 ] && [ -s "$FAKE_ARGS" ] && echo "ok    a diff with a git SHA and npm_config prose is still judged" || { echo "FAIL  benign diff (rc=$rc out=$OUT)"; fails=1; }
+# The check applies to the bytes that would be SENT: a secret past the 80000-byte cut is not sent.
+{ head -c 85000 /dev/zero | tr '\0' ' '; printf 'ghp_%s\n' "$L36"; } >"$TMP/late.diff"
+{ head -c 100 /dev/zero | tr '\0' ' '; printf 'ghp_%s\n' "$L36"; head -c 90000 /dev/zero | tr '\0' ' '; } >"$TMP/early.diff"
+fixture 0 0 0 0; : >"$FAKE_ARGS"
+OUT=$(PR_RISK_DIFF_FILE="$TMP/early.diff" run); rc=$?
+[ "$rc" -eq 3 ] && [ ! -s "$FAKE_ARGS" ] && echo "ok    a secret inside the sent window blocks the call" || { echo "FAIL  early secret (rc=$rc)"; fails=1; }
+fixture 0 0 0 0; : >"$FAKE_ARGS"
+OUT=$(PR_RISK_DIFF_FILE="$TMP/late.diff" run); rc=$?
+[ "$rc" -eq 0 ] && [ -s "$FAKE_ARGS" ] && echo "ok    a secret past the 80000-byte cut is never sent, so the call goes ahead" || { echo "FAIL  late secret (rc=$rc)"; fails=1; }
+# If the secret check cannot be loaded (the lib is not where it should be), NOTHING is sent.
+mkdir -p "$TMP/solo"; cp "$RISK" "$TMP/solo/pr-risk.sh"
+fixture 0 0 0 0; : >"$FAKE_ARGS"
+OUT=$(PR_RISK_DIFF_FILE="$DIFF" JEV_BIN="$FAKE" bash "$TMP/solo/pr-risk.sh" 2>&1); rc=$?
+[ "$rc" -eq 3 ] && [ ! -s "$FAKE_ARGS" ] && echo "$OUT" | grep -qF "secret check unavailable" && echo "ok    a missing secret-check lib stops the call (nothing sent)" || { echo "FAIL  missing lib (rc=$rc out=$OUT)"; fails=1; }
 [ "$fails" -eq 0 ] && echo ALL PASS || echo FAILURES
 exit "$fails"

@@ -59,23 +59,50 @@ jev_is_prob() {
 # jev_ge <x> <threshold> — x >= threshold, as floats.
 jev_ge() { awk -v x="$1" -v t="$2" 'BEGIN { exit !(x + 0 >= t + 0) }'; }
 
-# jev_has_literal_secret <text> — true if the text carries a LITERAL secret format. The screen
-# calls it BEFORE any jev call and, on a hit, skips the call (fail open, silent): the text would
-# otherwise leave the machine for TypeSafe. Case-insensitive.
+# jev_has_literal_secret — reads TEXT ON STDIN; true if it carries a LITERAL secret format. The
+# screen and pr-risk.sh call it BEFORE any jev call and, on a hit, skip the call (fail open,
+# silent): the text would otherwise leave the machine for TypeSafe. Case-insensitive.
 #
-# NARROW on purpose: literal formats only, never plain words. The screened text is public
-# GitHub/web content an ATTACKER writes, so a word-based skip would let any injection comment
-# evade the screen just by saying "token". A literal format (a key prefix, a PEM marker, a 32+
-# char base64/hex run, `scheme://user:pass@`, an Authorization/Bearer header with a value) is
-# something real leaked content has and ordinary prose does not.
-#   * `-` and `_` stay out of the entropy class so kebab/snake-case names do not trip it, but
-#     a long unbroken path segment can.
-#   * `sk-` needs a non-alphanumeric before it, else disk-/task- would match.
-#   * `Authorization: Basic <anything>` always counts. For any other scheme, a header value must
-#     be 16+ token characters, or 8+ with a digit in it, so "Authorization: ignore previous
-#     instructions" is not a header.
+# NARROW on purpose, in BOTH directions:
+#   * Literal formats only, never plain words. The screened text is public GitHub/web content an
+#     ATTACKER writes, so a word-based skip would let any injection comment evade the screen just
+#     by saying "token".
+#   * Real token SHAPES, not bare prefixes. Every `gh api .../comments` response carries a 40-hex
+#     `commit_id` and a commit URL; prose says `npm_config`; pages carry base64 data URIs. A rule
+#     loose enough to skip those blinds the screen to nearly all real GitHub output.
+#
+# What counts (each alternative is mutation-proved):
+#   * a PEM marker;
+#   * GitHub tokens: gh[pousr]_ + 36 alnum; github_pat_ + 22 or more [A-Za-z0-9_];
+#   * npm_ + 36 alnum; `sk-` + 20 or more (needs a non-alphanumeric before it, so disk-/task-
+#     never match); xox[bp]- + a body; AKIA + 16 [0-9A-Z];
+#   * scheme://user:pass@host;
+#   * `Authorization: Basic <anything>`; for any other scheme (and `Bearer`) a value of 16+ token
+#     characters, or 8+ with a digit, so "Authorization: ignore previous instructions" is not one;
+#   * a run of 32+ [A-Za-z0-9+=] characters that contains a digit. `/`, `-` and `_` are NOT in the
+#     class, so a path or a kebab/snake-case name never forms one long run, and a digit-free run
+#     (a long identifier) is not a token.
+# What is exempt BEFORE the checks above, because it is everywhere and is not secret:
+#   * a pure-hex run of exactly 40 or 64 characters (a git SHA, a sha256 digest);
+#   * a `data:...;base64,...` URI (an inline image or font).
 #   * RESIDUAL, accepted and stated: an attacker who knows this list can still evade the screen
-#     by pasting one fake literal (e.g. a 32-char run). Not closable with a skip; redacting the
-#     matched literals before sending would close it (follow-up).
-JEV_LITERAL_RE='-----BEGIN|ghp_|gho_|github_pat_|npm_|(^|[^a-z0-9])sk-[a-z0-9]|xox[bp]-|AKIA|[A-Za-z0-9+/=]{32,}|://[^/@[:space:]]+:[^/@[:space:]]+@|authorization:[[:space:]]*basic[[:space:]]+[^[:space:]]+|(authorization:[[:space:]]*|bearer[[:space:]]+)([A-Za-z]+[[:space:]]+)?([A-Za-z0-9._~+/=-]{16,}|[A-Za-z._~+/=-]*[0-9][A-Za-z0-9._~+/=-]{7,})'
-jev_has_literal_secret() { printf '%s' "$1" | grep -Eiq -- "$JEV_LITERAL_RE"; }
+#     by pasting one fake literal. Not closable with a skip; redacting the matched literals before
+#     sending would close it (follow-up). A real hex secret of exactly 40 or 64 characters is
+#     likewise let through.
+JEV_LITERAL_RE='-----BEGIN|gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{22,}|npm_[A-Za-z0-9]{36}|(^|[^a-z0-9])sk-[A-Za-z0-9_-]{20,}|xox[bp]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|://[^/@[:space:]]+:[^/@[:space:]]+@|authorization:[[:space:]]*basic[[:space:]]+[^[:space:]]+|(authorization:[[:space:]]*|bearer[[:space:]]+)([A-Za-z]+[[:space:]]+)?([A-Za-z0-9._~+/=-]{16,}|[A-Za-z._~+/=-]*[0-9][A-Za-z0-9._~+/=-]{7,})'
+jev_has_literal_secret() {
+  local stripped pass
+  stripped=$(sed -E -e 's#data:[A-Za-z0-9.+/-]+;base64,[A-Za-z0-9+/=]*#DATAURI#g')
+  # Two passes: two hashes sharing one separator ("<sha> <sha>") are both exempted.
+  for pass in 1 2; do
+    stripped=$(printf '%s' "$stripped" | sed -E \
+      -e 's#(^|[^A-Za-z0-9])[0-9a-fA-F]{64}([^A-Za-z0-9]|$)#\1SHA256\2#g' \
+      -e 's#(^|[^A-Za-z0-9])[0-9a-fA-F]{40}([^A-Za-z0-9]|$)#\1GITSHA\2#g')
+  done
+  # NO PIPELINES HERE: the callers run under `set -o pipefail`, and `grep -q` exits on the first
+  # match while `printf` is still writing a large text, so printf dies of SIGPIPE and pipefail turns
+  # a HIT into a failure: a big text with an early secret would be SENT. Process substitution
+  # reports only grep's own status.
+  grep -Eiq -- "$JEV_LITERAL_RE" < <(printf '%s' "$stripped") && return 0
+  grep -q '[0-9]' < <(grep -Eio '[A-Za-z0-9+=]{32,}' < <(printf '%s' "$stripped"))
+}

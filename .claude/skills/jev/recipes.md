@@ -74,6 +74,12 @@ and the composite is `sum(w * position / 4)`. Output ends in `RISK 0.xx HIGH|nor
 - **`>= 0.6` (HIGH): spawn both reviewers at high effort and add a knext-tester pass.**
 - The diff is truncated to 80,000 bytes (jev's ceiling is about 107,500 chars). Past that the
   tail is not judged, so a large PR is under-scored, not over-scored; say so in the report.
+- **Nothing literally secret is sent.** The diff goes to a third party, and an unpushed branch can
+  hold a real key that gitleaks has not seen yet. Before the call, the exact bytes to be sent are
+  checked for literal secret formats (real-shaped key tokens, a PEM marker, `user:pass@`, an
+  Authorization header with a value, a 32+ char alphanumeric run containing a digit; git SHAs and
+  data URIs are exempt). On a hit the script prints `RISK unavailable (diff carries a literal
+  secret)` and exits 3 without calling jev. Say so in the report; it means "no opinion", not "safe".
 - Offline test with a stubbed jev: `bash .claude/skills/jev/pr-risk.test.sh`.
 
 ## L5 — routing
