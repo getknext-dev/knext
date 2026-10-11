@@ -355,8 +355,8 @@ for (const { group, prover } of provers) {
     // The canary: if the harness cannot see red here, nothing below is worth reading.
     prover.proveCanSeeRed({
       subject: 'lite',
-      anchor: 'Symbol.for("knext.lib.clients.lastDbActivityAt")',
-      replacement: 'Symbol.for("knext.lib.clients.canary")',
+      anchor: '            if (!gateOpen()) {',
+      replacement: '            if (!gateOpen() && false) {',
     });
     first = false;
   }
