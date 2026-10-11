@@ -206,8 +206,7 @@ export async function checkDeepHealth(): Promise<HealthStatus> {
           const pool = getDbPool();
           const probe = Promise.resolve(pool.query('SELECT 1 as healthy'));
           // If the refusal wins, the probe keeps running inside the pool's retry
-          // loop; its eventual rejection must not surface as an unhandled one.
-          probe.catch(() => {});
+          // loop. The race below subscribed to it, so its late rejection is handled.
           const outcome = await Promise.race([probe.then(() => 'up' as const), refusedOnByoHost]);
           if (outcome === 'refused') {
             logger.error('[Health Check] Postgres connection refused (bring-your-own database)');

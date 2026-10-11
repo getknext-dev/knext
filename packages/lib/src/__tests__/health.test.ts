@@ -292,6 +292,34 @@ describe('checkDeepHealth — hard vs soft dependency taxonomy (readiness contra
     expect(res.checks.postgres).toBe('waking');
   });
 
+  it('bring-your-own Postgres: the probe rejecting AFTER the refusal decided is not an unhandled rejection', async () => {
+    process.env.DATABASE_URL = 'postgres://u:p@db.example.com:5432/app';
+    let rejectProbe: (e: unknown) => void = () => {};
+    pgQuery.mockImplementation(
+      () =>
+        new Promise((_, reject) => {
+          rejectProbe = reject;
+        }),
+    );
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const { checkDeepHealth } = await import('../health');
+      const { reportAcquireFailure } = await import('../db/reachability');
+      const promise = checkDeepHealth();
+      await new Promise((r) => setTimeout(r, 5));
+      reportAcquireFailure(refused());
+      expect((await promise).checks.postgres).toBe('down');
+      // The pool finally gives up, long after the verdict was returned.
+      rejectProbe(refused());
+      await new Promise((r) => setTimeout(r, 20));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
   it('the failure observer is released when the check finishes (no listener leak per scrape)', async () => {
     process.env.DATABASE_URL = 'postgres://u:p@db.example.com:5432/app';
     pgQuery.mockResolvedValue({ rows: [{ healthy: 1 }] });
