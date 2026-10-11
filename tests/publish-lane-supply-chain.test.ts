@@ -632,6 +632,187 @@ describe('publish-lane supply-chain guard: an audit that cannot fail the run is 
     expect(audit.problems.length).toBeGreaterThan(0);
   });
 
+  it('does not count `|| true`, `|| exit 0`, `|| :` / `|| exit` variants as the gate (precision fix keeps them red)', () => {
+    for (const body of [
+      'node scripts/audit-published.mjs || true',
+      'node scripts/audit-published.mjs || exit 0',
+      'node scripts/audit-published.mjs || exit',
+      'node scripts/audit-published.mjs || exit "0"',
+      'node scripts/audit-published.mjs || :',
+      'node scripts/audit-published.mjs; true',
+      'node scripts/audit-published.mjs && true',
+      'node scripts/audit-published.mjs && :',
+      'node scripts/audit-published.mjs && echo ok\nexit 0',
+      'node scripts/audit-published.mjs && echo ok\necho later',
+      'node scripts/audit-published.mjs && echo ok || true',
+      'node scripts/audit-published.mjs && echo ok; true',
+    ]) {
+      const audit = auditPublishLanes(
+        fixture({ 'a.yml': wf(`${auditJobWith(body)}${publishJob('audit')}`) }),
+      );
+      expect(audit.problems.length, body).toBeGreaterThan(0);
+    }
+  });
+
+  it('accepts a prose heredoc earlier in the audit step (heredoc spans computed on the original text)', () => {
+    for (const body of [
+      'cat <<EOF >> "$GITHUB_STEP_SUMMARY"\nauditing\nEOF\nnode scripts/audit-published.mjs',
+      'cat <<\'EOF\' >> "$GITHUB_STEP_SUMMARY"\n## Audit\nline two\nEOF\nnode scripts/audit-published.mjs',
+    ]) {
+      const audit = auditPublishLanes(
+        fixture({ 'a.yml': wf(`${auditJobWith(body)}${publishJob('audit')}`) }),
+      );
+      expect(audit.problems, body).toEqual([]);
+    }
+  });
+
+  it('still rejects the audit line inside an EXECUTABLE heredoc body', () => {
+    const body = 'cat > r.sh <<EOF\nnode scripts/audit-published.mjs\nEOF';
+    const audit = auditPublishLanes(
+      fixture({ 'a.yml': wf(`${auditJobWith(body)}${publishJob('audit')}`) }),
+    );
+    expect(audit.problems.length).toBeGreaterThan(0);
+  });
+
+  it('rejects exit literals that wrap to 0 modulo 256, accepts 1 and 255', () => {
+    for (const lit of ['256', '512', '0256', '1024']) {
+      for (const body of [
+        `node scripts/audit-published.mjs || exit ${lit}`,
+        `node scripts/audit-published.mjs\nexit ${lit}`,
+      ]) {
+        const audit = auditPublishLanes(
+          fixture({ 'a.yml': wf(`${auditJobWith(body)}${publishJob('audit')}`) }),
+        );
+        expect(audit.problems.length, body).toBeGreaterThan(0);
+      }
+    }
+    for (const lit of ['1', '255']) {
+      const body = `node scripts/audit-published.mjs || exit ${lit}`;
+      const audit = auditPublishLanes(
+        fixture({ 'a.yml': wf(`${auditJobWith(body)}${publishJob('audit')}`) }),
+      );
+      expect(audit.problems, body).toEqual([]);
+    }
+  });
+
+  it('heredoc terminators match bash exactly: indented terminator of a plain << does not end the body', () => {
+    // bash keeps reading: the "audit" line below is still heredoc text and never runs.
+    const body = 'cat > r.sh <<EOF\nx\n  EOF\nnode scripts/audit-published.mjs\nEOF';
+    const audit = auditPublishLanes(
+      fixture({ 'a.yml': wf(`${auditJobWith(body)}${publishJob('audit')}`) }),
+    );
+    expect(audit.problems.length).toBeGreaterThan(0);
+    const proseBody =
+      'cat <<EOF >> "$GITHUB_STEP_SUMMARY"\nx\n  EOF\nnode scripts/audit-published.mjs\nEOF';
+    const audit2 = auditPublishLanes(
+      fixture({ 'a.yml': wf(`${auditJobWith(proseBody)}${publishJob('audit')}`) }),
+    );
+    expect(audit2.problems.length).toBeGreaterThan(0);
+  });
+
+  it('<<- strips leading TABS only: a tab-indented terminator ends the body, a space-indented one does not', () => {
+    const tabbed =
+      'cat <<-EOF >> "$GITHUB_STEP_SUMMARY"\nx\n\tEOF\nnode scripts/audit-published.mjs';
+    const ok = auditPublishLanes(
+      fixture({ 'a.yml': wf(`${auditJobWith(tabbed)}${publishJob('audit')}`) }),
+    );
+    expect(ok.problems).toEqual([]);
+    const spaced =
+      'cat <<-EOF >> "$GITHUB_STEP_SUMMARY"\nx\n  EOF\nnode scripts/audit-published.mjs\nEOF';
+    const bad = auditPublishLanes(
+      fixture({ 'a.yml': wf(`${auditJobWith(spaced)}${publishJob('audit')}`) }),
+    );
+    expect(bad.problems.length).toBeGreaterThan(0);
+  });
+
+  it('an EXIT/ERR trap that can override the status neutralises the audit', () => {
+    for (const trap of [
+      "trap 'exit 0' EXIT",
+      "trap 'true' EXIT",
+      "trap ':' EXIT",
+      'trap "exit 0" EXIT',
+      "trap 'exit 0' ERR",
+      "trap 'exit 0' 0",
+      "trap 'exit 0' SIGEXIT INT EXIT",
+      'trap "$H" EXIT',
+      "trap 'echo x; exit 0' EXIT",
+    ]) {
+      const body = `${trap}\nnode scripts/audit-published.mjs`;
+      const audit = auditPublishLanes(
+        fixture({ 'a.yml': wf(`${auditJobWith(body)}${publishJob('audit')}`) }),
+      );
+      expect(audit.problems.length, body).toBeGreaterThan(0);
+    }
+  });
+
+  it('`trap --` / option flags before the handler do not hide the trap', () => {
+    for (const trap of [
+      "trap -- 'exit 0' EXIT",
+      'trap -- "exit 0" EXIT',
+      "trap -- 'exit 0' ERR",
+      "trap -- 'echo x; exit 0' EXIT",
+    ]) {
+      const body = `${trap}\nnode scripts/audit-published.mjs`;
+      const audit = auditPublishLanes(
+        fixture({ 'a.yml': wf(`${auditJobWith(body)}${publishJob('audit')}`) }),
+      );
+      expect(audit.problems.length, body).toBeGreaterThan(0);
+    }
+    const harmless = "trap -- 'exit 1' EXIT\nnode scripts/audit-published.mjs";
+    const ok = auditPublishLanes(
+      fixture({ 'a.yml': wf(`${auditJobWith(harmless)}${publishJob('audit')}`) }),
+    );
+    expect(ok.problems).toEqual([]);
+  });
+
+  it('eval or any function definition in the audit step makes it unprovable', () => {
+    for (const pre of [
+      "f() { trap 'exit 0' EXIT; }; f",
+      'f() { exit 0; }; f',
+      'function f { exit 0; }\nf',
+      'f () { :; }',
+      'eval "trap \'exit 0\' EXIT"',
+      'eval "exit 0"',
+      'eval "set +e"',
+      'FOO=1 eval "set +e"',
+    ]) {
+      const body = `${pre}\nnode scripts/audit-published.mjs`;
+      const audit = auditPublishLanes(
+        fixture({ 'a.yml': wf(`${auditJobWith(body)}${publishJob('audit')}`) }),
+      );
+      expect(audit.problems.join('\n'), body).toMatch(/eval|function/);
+    }
+  });
+
+  it('harmless traps do not neutralise the audit', () => {
+    for (const trap of [
+      "trap 'echo bye' EXIT",
+      "trap 'exit 1' EXIT",
+      "trap 'exit 0' INT",
+      'trap - EXIT',
+    ]) {
+      const body = `${trap}\nnode scripts/audit-published.mjs`;
+      const audit = auditPublishLanes(
+        fixture({ 'a.yml': wf(`${auditJobWith(body)}${publishJob('audit')}`) }),
+      );
+      expect(audit.problems, body).toEqual([]);
+    }
+  });
+
+  it('accepts `|| exit <non-zero>` and a trailing `&& <cmd>` on the audit line', () => {
+    for (const body of [
+      'node scripts/audit-published.mjs || exit 1',
+      'node scripts/audit-published.mjs || exit 2 # fail',
+      'node scripts/audit-published.mjs && echo ok',
+      'echo start\nnode scripts/audit-published.mjs || exit 1\necho after',
+    ]) {
+      const audit = auditPublishLanes(
+        fixture({ 'a.yml': wf(`${auditJobWith(body)}${publishJob('audit')}`) }),
+      );
+      expect(audit.problems, body).toEqual([]);
+    }
+  });
+
   it('the bare forms DO count: ./-prefixed, env-prefixed, node flags, trailing comment', () => {
     for (const body of [
       'node scripts/audit-published.mjs',
@@ -1045,7 +1226,8 @@ describe('publish-lane supply-chain guard (round 4): the audit must be a TOP-LEV
 
   it('compound statements that do NOT enclose the audit leave it a gate', () => {
     for (const body of [
-      'helper() {\n  echo hi\n}\nnode scripts/audit-published.mjs',
+      // (a function definition, even an unrelated one, is now refused outright:
+      // see "eval or any function definition" -- the static reading cannot see into it)
       'if [ -n "$X" ]; then echo a; fi\nnode scripts/audit-published.mjs\nfor f in a b; do echo $f; done',
       'for f in a b; do\n  echo $f\ndone\nnode scripts/audit-published.mjs',
       'case "$X" in\n  a) echo a ;;\nesac\nnode scripts/audit-published.mjs',

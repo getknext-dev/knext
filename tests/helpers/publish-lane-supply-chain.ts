@@ -270,7 +270,13 @@ interface HeredocOp {
   /** Everything after the delimiter word, to the end of the line. */
   after: string;
   delim: string;
+  /** `<<-`: leading TABS (only) are stripped from the terminator line. */
+  dash: boolean;
 }
+
+/** Does `line` end a heredoc body the way BASH does? `<<`: the whole line; `<<-`: after leading tabs. */
+const endsHeredoc = (line: string, op: { delim: string; dash: boolean }): boolean =>
+  (op.dash ? line.replace(/^\t+/, '') : line) === op.delim;
 
 /**
  * Unquoted `<<WORD` operators on ONE line, with the statement they belong to.
@@ -331,6 +337,7 @@ function heredocOps(line: string): HeredocOp[] {
         outer: frames.length > 0 ? frames[0].outer : undefined,
         after: line.slice(i + m[0].length),
         delim: m[1] ?? m[2] ?? m[3],
+        dash: m[0].startsWith('<<-'),
       });
       i += m[0].length - 1;
     }
@@ -402,18 +409,41 @@ function isProseHeredoc(op: HeredocOp): boolean {
  * with a second heredoc. Unsure means kept (fail closed).
  */
 function stripProseHeredocs(source: string): string {
+  return analyzeHeredocs(source).text;
+}
+/**
+ * The stripped text AND, per line of that text, whether it is inside the body of a
+ * KEPT (executable) heredoc. The spans are computed ONCE, on the ORIGINAL lines: the
+ * stripped text still carries the `cat <<EOF` operator line of a removed prose
+ * heredoc, so re-scanning it for heredocs would treat every later line as that
+ * (already removed) body (#2195).
+ */
+function analyzeHeredocs(source: string): { text: string; keptBody: boolean[] } {
   const lines = source.split('\n');
   const out: string[] = [];
+  const keptBody: boolean[] = [];
+  let pending: HeredocOp[] = [];
   for (let i = 0; i < lines.length; i++) {
     out.push(lines[i]);
+    if (pending.length > 0) {
+      keptBody.push(true);
+      if (endsHeredoc(lines[i], pending[0])) pending.shift();
+      continue;
+    }
+    keptBody.push(false);
     const ops = heredocOps(lines[i]);
-    if (ops.length !== 1 || !isProseHeredoc(ops[0])) continue;
-    let j = i + 1;
-    while (j < lines.length && lines[j].trim() !== ops[0].delim) j++;
-    if (j >= lines.length) continue; // unterminated: keep the body
-    i = j; // the terminator line is dropped with the body
+    if (ops.length === 1 && isProseHeredoc(ops[0])) {
+      let j = i + 1;
+      while (j < lines.length && !endsHeredoc(lines[j], ops[0])) j++;
+      if (j < lines.length) {
+        i = j; // the terminator line is dropped with the body
+        continue;
+      }
+      // unterminated: keep the body
+    }
+    pending = ops;
   }
-  return out.join('\n');
+  return { text: out.join('\n'), keptBody };
 }
 /** The evidence that `source` (a `run` body) can publish, or null. */
 function runEvidence(source: string, scripts: Record<string, string>, depth = 0): string | null {
@@ -459,43 +489,72 @@ function runsAuditScript(source: string): boolean {
   return false;
 }
 
-/** Strictly: `[VAR=x ...] <runner> [node flags] scripts/audit-published.mjs [allowed args] [# comment]`. */
-function isBareAuditLine(line: string): boolean {
+/** A word that is (or hides) shell structure: operators, groups, negation, substitution. */
+const isStructural = (t: string): boolean =>
+  /[|;&()`{}<>]/.test(t) || t === '!' || t.includes('$(');
+
+/** Commands that, chained with `&&` after the audit, mask or redirect its status. */
+const MASKING_AND_HEADS = new Set([
+  'true',
+  ':',
+  'false',
+  'exit',
+  'return',
+  'set',
+  'break',
+  'continue',
+]);
+
+/**
+ * Strictly: `[VAR=x ...] <runner> [node flags] scripts/audit-published.mjs [allowed args]
+ * [|| exit <non-zero literal> | && <simple cmd>] [# comment]`.
+ * Returns null when the line is not that, else which suffix it carries. An `&&` suffix
+ * only keeps the audit's status when it is the LAST thing the step runs (errexit ignores
+ * a failing non-final `&&` operand), which the caller enforces.
+ */
+function bareAuditLine(line: string): 'plain' | 'or-exit' | 'and' | null {
   const code = line.replace(/\s+#.*$/, '').trim();
-  const tokens = tokenize(code);
-  if (tokens.some((t) => /[|;&()`{}<>]/.test(t) || t === '!' || t.includes('$('))) return false;
+  let tokens = tokenize(code);
+  let kind: 'plain' | 'or-exit' | 'and' = 'plain';
+  const op = tokens.findIndex((t) => t === '&&' || t === '||');
+  if (op !== -1) {
+    const suffix = tokens.slice(op + 1);
+    if (tokens[op] === '||') {
+      // only an error branch: `|| exit <literal non-zero>`
+      if (suffix.length !== 2 || suffix[0] !== 'exit' || !isNonZeroLiteral(suffix[1])) return null;
+      kind = 'or-exit';
+    } else {
+      const head = commandTokens(suffix)[0];
+      if (
+        suffix.length === 0 ||
+        suffix.some(isStructural) ||
+        head === undefined ||
+        MASKING_AND_HEADS.has(head)
+      ) {
+        return null;
+      }
+      kind = 'and';
+    }
+    tokens = tokens.slice(0, op);
+  }
+  if (tokens.some(isStructural)) return null;
   const cmd = commandTokens(tokens);
   if (
     cmd.length === 0 ||
     tokens.slice(0, tokens.length - cmd.length).some((t) => !ASSIGNMENT.test(t))
   ) {
-    return false;
+    return null;
   }
-  if (!RUNNERS.has(cmd[0])) return false;
+  if (!RUNNERS.has(cmd[0])) return null;
   const at = cmd.findIndex((t) => AUDIT_PATH.test(t));
-  if (at === -1) return false;
-  if (cmd.slice(1, at).some((t) => !t.startsWith('-'))) return false; // something before the script
+  if (at === -1) return null;
+  if (cmd.slice(1, at).some((t) => !t.startsWith('-'))) return null; // something before the script
   const args = cmd.slice(at + 1);
-  return args.every((a) => AUDIT_ALLOWED_ARGS.includes(a));
+  return args.every((a) => AUDIT_ALLOWED_ARGS.includes(a)) ? kind : null;
 }
 
 const OPENERS = new Set(['if', 'while', 'until', 'for', 'case', 'select', 'function']);
 const CLOSERS = new Set(['fi', 'done', 'esac']);
-
-/** Per line: is it inside the BODY of a (kept) heredoc? */
-function heredocBodyLines(lines: string[]): boolean[] {
-  const flags: boolean[] = lines.map(() => false);
-  let pending: string[] = [];
-  for (let i = 0; i < lines.length; i++) {
-    if (pending.length > 0) {
-      flags[i] = true;
-      if (lines[i].trim() === pending[0]) pending.shift();
-      continue;
-    }
-    pending = heredocOps(lines[i]).map((o) => o.delim);
-  }
-  return flags;
-}
 
 /**
  * Why the audit invocation on line `lineIdx` is NOT a top-level simple command of
@@ -507,9 +566,9 @@ function heredocBodyLines(lines: string[]): boolean[] {
  * an uncalled function, `cond &&⏎ node …` and `: <<'X'⏎ node …⏎X` as unskippable
  * gates, though the step may never run the audit.
  */
-function structureProblem(joined: string, lineIdx: number): string | null {
+function structureProblem(joined: string, lineIdx: number, keptBody: boolean[]): string | null {
   const lines = joined.split('\n');
-  if (heredocBodyLines(lines)[lineIdx]) return 'it sits inside a heredoc body, not as a command';
+  if (keptBody[lineIdx]) return 'it sits inside a heredoc body, not as a command';
   for (let k = lineIdx - 1; k >= 0; k--) {
     const t = lines[k].trim();
     if (t === '' || t.startsWith('#')) continue;
@@ -547,23 +606,60 @@ const LEAD_KEYWORDS = new Set(['then', 'do', 'else', '{', '!', 'time']);
 /** `exit 1` / `exit "2"` / `exit $((1))`: a literal NON-ZERO status, i.e. an error branch. */
 const isNonZeroLiteral = (arg: string | undefined): boolean =>
   // `$((1))` is deliberately NOT accepted: the lexer reads arithmetic as a command
-  // substitution and drops its content, so the value cannot be checked.
-  arg !== undefined && /^[1-9][0-9]*$/.test(arg);
+  // substitution and drops its content, so the value cannot be checked. 1..255 only:
+  // exit statuses wrap modulo 256, so `exit 256` exits 0 (a masked audit failure).
+  arg !== undefined && /^[1-9][0-9]*$/.test(arg) && Number(arg) <= 255;
+
+/**
+ * `trap <handler> <signals…>`: can it replace the step's exit status? Only EXIT/ERR/0
+ * traps matter. A handler that exits non-zero or just echoes is harmless; one that
+ * runs `exit 0`/bare `exit`/`return`/`true`/`:` -- or that we cannot read (`$H`,
+ * backticks) -- fails closed.
+ */
+function trapOverridesStatus(rawArgs: string[]): boolean {
+  // `trap -- 'exit 0' EXIT` / `trap -p …`: option words come before the handler.
+  let first = 0;
+  while (
+    first < rawArgs.length &&
+    (rawArgs[first] === '--' || /^-[A-Za-z]+$/.test(rawArgs[first]))
+  ) {
+    first++;
+  }
+  const args = rawArgs.slice(first);
+  if (args.length < 2) return false; // `trap`, `trap -p`, `trap - EXIT`
+  const [handler, ...sigs] = args;
+  if (handler === '-' || handler === '') return false;
+  const hits = sigs.some((sg) => /^(SIG)?(EXIT|ERR)$|^0$/i.test(sg));
+  if (!hits) return false;
+  if (/[$`]/.test(handler)) return true;
+  return (
+    /\b(exit|return)\b(?!\s+(?:[1-9][0-9]?|1[0-9]{2}|2[0-4][0-9]|25[0-5])(?![0-9]))/.test(
+      handler,
+    ) ||
+    /\btrue\b/.test(handler) ||
+    /(^|[\s;&|]):($|[\s;&|])/.test(handler)
+  );
+}
 
 /** Why the run body's audit invocation can NOT be relied on to fail the step (null = it can). */
 function auditInvocationProblem(run: string): string | null {
-  const joined = stripProseHeredocs(joinContinuations(run));
+  const { text: joined, keptBody } = analyzeHeredocs(joinContinuations(run));
   const lines = joined.split('\n');
-  const bareIdx = lines
-    .map((l, i) =>
-      !l.trim().startsWith('#') && /audit-published\.mjs/.test(l) && isBareAuditLine(l) ? i : -1,
-    )
+  const kinds = lines.map((l) =>
+    !l.trim().startsWith('#') && /audit-published\.mjs/.test(l) ? bareAuditLine(l) : null,
+  );
+  // `cmd && other` is a non-final `&&` operand unless nothing follows it: errexit does
+  // not fire on it, so a later command would run past a failed audit.
+  const nothingAfter = (i: number) =>
+    lines.slice(i + 1).every((l) => l.trim() === '' || l.trim().startsWith('#'));
+  const bareIdx = kinds
+    .map((k, i) => (k !== null && (k !== 'and' || nothingAfter(i)) ? i : -1))
     .filter((i) => i >= 0);
   if (bareIdx.length === 0) {
-    return 'invocation is not a bare own-line `node scripts/audit-published.mjs` (a prefix, `||`, `;`, `&`, subshell, or any argument such as --help)';
+    return 'invocation is not a bare own-line `node scripts/audit-published.mjs` (a prefix, `|| true`, `;`, `&`, subshell, a non-final `&&`, or any argument such as --help)';
   }
   // At least ONE bare invocation must be a top-level simple command.
-  const structural = bareIdx.map((i) => structureProblem(joined, i));
+  const structural = bareIdx.map((i) => structureProblem(joined, i, keptBody));
   const topLevel = bareIdx.filter((_, k) => structural[k] === null);
   if (topLevel.length === 0) return structural[0];
   // A RULE, not a list of spellings (`exit 0`, `exit "0"`, `exit 00`, `exit $((0))`,
@@ -579,10 +675,27 @@ function auditInvocationProblem(run: string): string | null {
       while (cmd[0] !== undefined && LEAD_KEYWORDS.has(cmd[0])) cmd = commandTokens(cmd.slice(1));
       return cmd;
     });
+  // `eval` and function definitions hide commands from this static reading
+  // (`f() { exit 0; }; f`, `eval "set +e"`): do not interpret them, refuse the step.
+  for (const { text } of splitSourceIntoStatements(joined)) {
+    const cmd = commandTokens(tokenize(text.trim()));
+    const t = text.trim();
+    const head = cmd[0] === 'command' || cmd[0] === 'builtin' ? cmd[1] : cmd[0];
+    if (
+      head === 'eval' ||
+      head === 'function' ||
+      /^(function\s+)?[A-Za-z_][\w.:-]*\s*\(\s*\)/.test(t)
+    ) {
+      return 'audit step uses eval/function definitions; keep the audit step a plain script';
+    }
+  }
   for (const cmd of statementCommands(joined)) {
     const head = cmd[0];
     if ((head === 'exit' || head === 'return') && !isNonZeroLiteral(cmd[1])) {
       return 'the step contains an `exit`/`return` whose status is zero or not a literal non-zero number, which can end it without the audit deciding';
+    }
+    if (head === 'trap' && trapOverridesStatus(cmd.slice(1))) {
+      return 'the step installs an EXIT/ERR trap that can override the exit status (`trap … EXIT` with `exit 0`/`true`/`:` or an unreadable handler)';
     }
     if (head === 'set') {
       const rest = cmd.slice(1);
