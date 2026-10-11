@@ -258,6 +258,11 @@ describe('every way a seam can be exported reds', () => {
       { exports: { '.': './dist/index.cjs' } },
     ],
     [
+      'a CJS `module.exports = K` where K is a class with a static `__` member (#2188)',
+      { 'dist/index.cjs': `class K { static __x() {} }\nmodule.exports = K;\n` },
+      { exports: { '.': './dist/index.cjs' } },
+    ],
+    [
       'a CJS `exports.ns = { __k }` (#2188)',
       { 'dist/index.cjs': `exports.ns = { __k: 1 };\n` },
       { exports: { '.': './dist/index.cjs' } },
