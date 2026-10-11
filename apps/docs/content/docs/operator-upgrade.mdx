@@ -91,6 +91,15 @@ fields, new print columns) needs no migration: existing `NextApp` objects stay v
 `--server-side` — the `NextApp` schema is large and a client-side apply can exceed the last-applied
 annotation size limit.
 
+### New fields need the new operator first
+
+A field added to the `NextApp` resource only works once the cluster runs an operator release that
+defines it. `networking.publicHosts` is one: a CLI that sends it to an older operator is stopped
+by the deploy preflight (the cluster rejects the unknown field before anything is applied), and
+the app keeps running as it was. Install the operator release that carries the field, then upgrade
+the CLI. Without `publicHosts` set, an older operator is unaffected. See
+[Make redirects use your domain](/docs/custom-domains-tls#redirects-use-your-domain).
+
 ### CRD migration (breaking change)
 
 Because there is no conversion webhook, a breaking schema change cannot be auto-migrated. When the

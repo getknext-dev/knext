@@ -187,6 +187,7 @@ describe('bun-version pins (#754) — scanned across every workflow', () => {
       // setup-bun step. A count RISING is a decision, per the rule above.
       'operator-upgrade-e2e.yml': 1,
       'preview.yml': 2,
+      'public-hosts-kind-e2e.yml': 1,
       // NEW (#1734, G3): the nightly rc pack-parity check builds the
       // publishable group with the workspace's bun before comparing — one
       // pinned "Setup bun" step.
