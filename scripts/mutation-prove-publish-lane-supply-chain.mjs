@@ -550,6 +550,169 @@ const MUTATIONS = [
     expect: 'red',
   },
 
+  // ── 7. round 4: the audit must be a top-level simple command ─────────────
+  {
+    id: 'M54',
+    claim: 'the audit step wraps the audit in if [ -z "$SKIP_AUDIT" ]; then … fi',
+    subject: 'workflow',
+    anchor: AUDIT_RUN,
+    replacement:
+      '        run: |\n          if [ -z "$SKIP_AUDIT" ]; then\n            node scripts/audit-published.mjs\n          fi\n',
+    expect: 'red',
+  },
+  {
+    id: 'M55',
+    claim: 'the audit step puts the audit behind a dangling && line',
+    subject: 'workflow',
+    anchor: AUDIT_RUN,
+    replacement:
+      '        run: |\n          [ -z "$SKIP_AUDIT" ] &&\n          node scripts/audit-published.mjs\n',
+    expect: 'red',
+  },
+  {
+    id: 'M56',
+    claim: 'the audit step buries the audit in a : <<X comment heredoc',
+    subject: 'workflow',
+    anchor: AUDIT_RUN,
+    replacement:
+      "        run: |\n          : <<'X'\n          node scripts/audit-published.mjs\n          X\n",
+    expect: 'red',
+  },
+  {
+    id: 'M57',
+    claim: 'the audit step defines the audit as a function it never calls',
+    subject: 'workflow',
+    anchor: AUDIT_RUN,
+    replacement:
+      '        run: |\n          run_audit() {\n            node scripts/audit-published.mjs\n          }\n',
+    expect: 'red',
+  },
+  {
+    id: 'M58',
+    claim: 'the audit step runs the audit inside while false',
+    subject: 'workflow',
+    anchor: AUDIT_RUN,
+    replacement:
+      '        run: |\n          while false; do\n            node scripts/audit-published.mjs\n          done\n',
+    expect: 'red',
+  },
+  {
+    id: 'M59',
+    claim: 'the structural (top-level simple command) check is switched off',
+    subject: 'engine',
+    anchor: '  const structural = bareIdx.map((i) => structureProblem(joined, i));\n',
+    replacement: '  const structural = bareIdx.map(() => null);\n',
+    expect: 'red',
+  },
+  {
+    id: 'M60',
+    claim: 'a dangling && / || / | no longer disqualifies the audit',
+    subject: 'engine',
+    anchor: '    if (/(&&|\\|\\||\\|)$/.test(t)) {\n',
+    replacement: '    if (false) {\n',
+    expect: 'red',
+  },
+  {
+    id: 'M61',
+    claim: 'an audit inside a heredoc body is accepted again',
+    subject: 'engine',
+    anchor:
+      "  if (heredocBodyLines(lines)[lineIdx]) return 'it sits inside a heredoc body, not as a command';\n",
+    replacement: '  void heredocBodyLines;\n',
+    expect: 'red',
+  },
+  {
+    id: 'M62',
+    claim: 'an enclosing compound statement (depth != 0) no longer disqualifies the audit',
+    subject: 'engine',
+    anchor: '  if (depth !== 0) {\n',
+    replacement: '  if (false) {\n',
+    expect: 'red',
+  },
+  {
+    id: 'M63',
+    claim: 'if/while/until/for/case/select/function stop opening a compound statement',
+    subject: 'engine',
+    anchor:
+      "const OPENERS = new Set(['if', 'while', 'until', 'for', 'case', 'select', 'function']);\n",
+    replacement: 'const OPENERS = new Set<string>([]);\n',
+    expect: 'red',
+  },
+  {
+    id: 'M64',
+    claim:
+      'exit 0 / unknown statuses are accepted as literal non-zero (an exit no longer neutralises)',
+    subject: 'engine',
+    anchor: '  arg !== undefined && /^[1-9][0-9]*$/.test(arg);\n',
+    replacement: '  arg !== undefined || arg === undefined;\n',
+    expect: 'red',
+  },
+  {
+    id: 'M65',
+    claim: 'leading then/do/else keywords are no longer stripped (then exit 0 hides)',
+    subject: 'engine',
+    anchor: "const LEAD_KEYWORDS = new Set(['then', 'do', 'else', '{', '!', 'time']);\n",
+    replacement: 'const LEAD_KEYWORDS = new Set<string>([]);\n',
+    expect: 'red',
+  },
+  {
+    id: 'M66',
+    claim: 'gh issue create -F - heredocs stop counting as prose',
+    subject: 'engine',
+    anchor:
+      "  if (tokens[0] !== 'gh' || !['issue', 'pr'].includes(tokens[1] ?? '')) return false;\n",
+    replacement: "  if (tokens[0] !== 'gh') return false;\n  return false;\n",
+    expect: 'red',
+  },
+  {
+    id: 'M67',
+    claim: '$(cat <<EOF) inside a double-quoted string is no longer a command context',
+    subject: 'engine',
+    anchor:
+      "      else if (quote === '\"' && c === '$' && line[i + 1] === '(' && line[i + 2] !== '(') {\n",
+    replacement: '      else if (false) {\n',
+    expect: 'red',
+  },
+  {
+    id: 'M68',
+    claim:
+      'the outer command of $(cat <<EOF) is no longer checked (bash -c "$(cat <<EOF)" is prose)',
+    subject: 'engine',
+    anchor: "    if (!outerOk || head !== 'cat') return false;\n",
+    replacement: "    if (head !== 'cat') return false;\n",
+    expect: 'red',
+  },
+  {
+    id: 'M69',
+    claim: 'an _authToken line is no longer a credential signal',
+    subject: 'engine',
+    anchor: "    text.includes('_authToken') ||\n",
+    replacement: '    false ||\n',
+    expect: 'red',
+  },
+  {
+    id: 'M70',
+    claim: 'a NEW workflow writes an .npmrc _authToken and ships with an opaque command',
+    inject: {
+      name: 'zz-mutation-authtoken.yml',
+      content: NEW_LANE(
+        '      - run: |\n          echo "//registry.npmjs.org/:_authToken=$T" > .npmrc\n          pnpm -r ship\n',
+      ),
+    },
+    expect: 'red',
+  },
+  {
+    id: 'M71',
+    claim: 'a NEW workflow publishes inside bash -c "$(cat <<EOF …)"',
+    inject: {
+      name: 'zz-mutation-subst-heredoc.yml',
+      content: NEW_LANE(
+        '      - run: |\n          bash -c "$(cat <<\'EOF\'\n          npm publish\n          EOF\n          )"\n',
+      ),
+    },
+    expect: 'red',
+  },
+
   // ── 4. controls: these must stay GREEN ──────────────────────────────────
   {
     id: 'NEG1',
@@ -600,6 +763,40 @@ const MUTATIONS = [
       name: 'zz-mutation-prose.yml',
       content: NEW_LANE(
         '      # npm publish is only described here\n      - run: |\n          cat <<EOF\n          npm publish credential\n          EOF\n',
+      ),
+    },
+    expect: 'green',
+  },
+  {
+    id: 'NEG6',
+    claim:
+      'NEGATIVE CONTROL: the real audit step followed by an error branch with exit 1 — must stay GREEN',
+    subject: 'workflow',
+    anchor: AUDIT_RUN,
+    replacement:
+      '        run: |\n          node scripts/audit-published.mjs\n          if [ -f audit-error.log ]; then\n            echo "audit left errors"\n            exit 1\n          fi\n',
+    expect: 'green',
+  },
+  {
+    id: 'NEG7',
+    claim:
+      'NEGATIVE CONTROL: a NEW workflow whose issue body (gh issue create -F - heredoc) mentions npm publish — must stay GREEN',
+    inject: {
+      name: 'zz-mutation-gh-body.yml',
+      content: NEW_LANE(
+        "      - run: |\n          gh issue create --title t -F - <<'EOF'\n          npm publish is documented elsewhere\n          EOF\n",
+      ),
+    },
+    expect: 'green',
+  },
+  {
+    id: 'NEG8',
+    claim:
+      'NEGATIVE CONTROL: a NEW workflow with --body "$(cat <<EOF)" prose about npm publish — must stay GREEN',
+    inject: {
+      name: 'zz-mutation-gh-subst.yml',
+      content: NEW_LANE(
+        '      - run: |\n          gh issue create --title t --body "$(cat <<\'EOF\'\n          npm publish is documented elsewhere\n          EOF\n          )"\n',
       ),
     },
     expect: 'green',
