@@ -376,7 +376,7 @@ scraped; see the deep-health alerting issue for the status.
 **Normal vs stuck.** The deep health check classifies a **refused** Postgres
 connection (`ECONNREFUSED`) as `waking` **only when the database is
 scale-to-zero**, and as `down` otherwise. The gateway is recognised by host: any
-host with a `scale-zero-pg` label (`pggw-apps.scale-zero-pg.svc…`) or the bare
+host with a `scale-zero-pg` label (`pggw-apps.scale-zero-pg.svc.cluster.local.`) or the bare
 `pggw` / `pggw-apps`. For a scale-to-zero database reached by another name (an
 IP, a pooler or ExternalName alias, a gateway in another namespace) set
 `KNEXT_DB_SCALE_TO_ZERO=true` on the app; `false` forces `down` even on a

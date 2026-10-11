@@ -281,7 +281,7 @@ gauge belongs to the default standalone build's metric family.
 **Normal versus stuck.** The deep health check reports a refused Postgres connection (`ECONNREFUSED`) as
 `waking` only when the app's database is a scale-to-zero database, because that database shows exactly
 that signature while it wakes. knext recognises the scale-zero-pg gateway by its host (any host with a
-`scale-zero-pg` label, such as `pggw-apps.scale-zero-pg.svc…`, or the bare `pggw` / `pggw-apps`). If your
+`scale-zero-pg` label, such as `pggw-apps.scale-zero-pg.svc.cluster.local.`, or the bare `pggw` / `pggw-apps`). If your
 `DATABASE_URL` reaches a scale-to-zero database by another name (an IP address, a pooler, an alias, or a
 gateway in a different namespace), set `KNEXT_DB_SCALE_TO_ZERO=true` on the app so a refused connection
 reads `waking`. Set it to `false` to make a refused connection read `down` even on a gateway host. A refused
