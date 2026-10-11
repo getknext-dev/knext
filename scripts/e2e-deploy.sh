@@ -535,9 +535,19 @@ STANDALONE_APP_DIR="$(dirname "${SERVER_JS}")"
 log "standalone server: ${SERVER_JS}"
 
 # standalone does not copy .next/static or public/ — stage them (best-effort).
+# #2123: the server looks for them under ITS distDir, which Next embeds in
+# server.js relative to the standalone app dir — `./.next` normally, `./../.next`
+# for an upward distDir (upward-distdir). Default to `./.next` when unreadable.
+STANDALONE_DIST_REL="$(node -e '
+  try {
+    const m = require("node:fs").readFileSync(process.argv[1], "utf8").match(/"distDir":\s*"([^"]+)"/);
+    process.stdout.write(m ? m[1] : "./.next");
+  } catch (_) { process.stdout.write("./.next"); }
+' "${SERVER_JS}")"
+STANDALONE_DIST_DIR="$(cd "${STANDALONE_APP_DIR}" && node -e 'process.stdout.write(require("node:path").resolve(process.argv[1]))' "${STANDALONE_DIST_REL}")"
 if [ -d "${DIST_DIR}/static" ]; then
-  mkdir -p "${STANDALONE_APP_DIR}/.next"
-  cp -R "${DIST_DIR}/static" "${STANDALONE_APP_DIR}/.next/static"
+  mkdir -p "${STANDALONE_DIST_DIR}"
+  cp -R "${DIST_DIR}/static" "${STANDALONE_DIST_DIR}/static"
 fi
 if [ -d "${APP_DIR}/public" ]; then
   cp -R "${APP_DIR}/public" "${STANDALONE_APP_DIR}/public"

@@ -50,14 +50,22 @@ function put(root: string, rel: string, body: string, mode?: number) {
 }
 
 /** A build step in plain node that emits `<dist>/standalone/<appRel>/server.js` + BUILD_ID. */
-function emitScript(appDirAbs: string, distRel: string, appRel: string): string {
+function emitScript(
+  appDirAbs: string,
+  distRel: string,
+  appRel: string,
+  embeddedDistDir = './.next',
+): string {
+  // Next embeds the (standalone-relative) distDir in the generated server.js config.
+  const server = `const nextConfig = {"distDir":${JSON.stringify(embeddedDistDir)}}\n${FAKE_SERVER}`;
   return `
 const fs = require('node:fs'); const path = require('node:path');
 const dist = path.join(${JSON.stringify(appDirAbs)}, ${JSON.stringify(distRel)});
 const s = path.join(dist, 'standalone', ${JSON.stringify(appRel)});
 fs.mkdirSync(path.join(dist, 'static'), { recursive: true }); fs.mkdirSync(s, { recursive: true });
 fs.writeFileSync(path.join(dist, 'BUILD_ID'), 'b');
-fs.writeFileSync(path.join(s, 'server.js'), ${JSON.stringify(FAKE_SERVER)});
+fs.writeFileSync(path.join(dist, 'static', 'chunk.js'), 'x');
+fs.writeFileSync(path.join(s, 'server.js'), ${JSON.stringify(server)});
 `;
 }
 
@@ -183,6 +191,39 @@ describe('e2e-deploy.sh runs the fixture build script (#2123)', () => {
     expectOk(r);
     expect(r.stdout.trim()).toMatch(/^http:\/\/localhost:\d+$/);
     expect(r.stderr).toContain('apps/web/.next');
+    // The default layout: static assets are staged next to the server.
+    expect(existsSync(join(app, 'apps/web/.next/standalone/apps/web/.next/static/chunk.js'))).toBe(
+      true,
+    );
+  });
+
+  it('an upward distDir (apps/.next, server distDir ./../.next): static assets land where the server looks', () => {
+    const app = makeApp();
+    put(app, 'node_modules/.bin/next', '#!/usr/bin/env node\nprocess.exit(1);\n', 0o755);
+    put(app, 'vercel.json', JSON.stringify({ outputDirectory: 'apps/.next' }));
+    put(app, 'emit.js', emitScript(app, 'apps/.next', 'apps/web', './../.next'));
+    put(
+      app,
+      'package.json',
+      JSON.stringify({ name: 'up', private: true, scripts: { build: 'node emit.js' } }),
+    );
+    expectOk(deploy(app));
+    expect(existsSync(join(app, 'apps/.next/standalone/apps/.next/static/chunk.js'))).toBe(true);
+  });
+
+  it('a vercel.json outputDirectory that escapes the project is ignored', () => {
+    const app = makeApp();
+    put(app, 'node_modules/.bin/next', '#!/usr/bin/env node\nprocess.exit(1);\n', 0o755);
+    put(app, 'vercel.json', JSON.stringify({ outputDirectory: '../elsewhere/.next' }));
+    put(app, 'emit.js', emitScript(app, '.next', ''));
+    put(
+      app,
+      'package.json',
+      JSON.stringify({ name: 'esc', private: true, scripts: { build: 'node emit.js' } }),
+    );
+    const r = deploy(app);
+    expectOk(r);
+    expect(r.stderr).not.toContain('vercel.json outputDirectory');
   });
 });
 
