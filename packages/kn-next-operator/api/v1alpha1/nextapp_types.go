@@ -429,6 +429,37 @@ type NetworkingSpec struct {
 	// +optional
 	// +kubebuilder:validation:Enum=public;cluster-local
 	Visibility string `json:"visibility,omitempty"`
+
+	// PublicHosts lists the public hostnames this app is served on (for
+	// example "www.example.com"). The operator renders them as the
+	// KNEXT_PUBLIC_ORIGINS allowlist (`https://<host>`, comma-joined, in list
+	// order) that the knext runtime uses to rewrite a redirect Location whose
+	// origin is the pod's wildcard bind address (`http://0.0.0.0:PORT/...`)
+	// to a public origin. The FIRST entry is the fallback origin; a request
+	// whose Host / X-Forwarded-Host equals another entry gets that entry. No
+	// header value outside this list can ever reach a Location.
+	//
+	// Bare hostnames only: no scheme, port, path, userinfo or wildcard (the
+	// scheme comes from the request's X-Forwarded-Proto, defaulting to https).
+	// Unset or empty renders no variable at all, byte-identical to every
+	// NextApp CR written before this field existed.
+	//
+	// Precedence: a KNEXT_PUBLIC_ORIGINS set by the user in spec.env or
+	// spec.secrets.envMap WINS and this field is then ignored, so setups that
+	// set the variable by hand before this field existed keep working
+	// unchanged.
+	//
+	// Additive and optional (ADR-0017 discipline). Upgrade-order hazard as for
+	// every new field: an operator/CRD that predates it rejects a CR that sets
+	// it under --validate=strict, and the CLI's deploy preflight reports the
+	// unknown field before the cluster is touched. Upgrade the operator/CRD
+	// first, then the CLI.
+	// +optional
+	// +kubebuilder:validation:MaxItems=32
+	// +kubebuilder:validation:items:MaxLength=253
+	// +kubebuilder:validation:items:XValidation:rule="self.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$')",message="publicHosts entries must be lowercase DNS hostnames (RFC 1123 labels separated by dots): no scheme, port, path, userinfo, wildcard or comma"
+	// +kubebuilder:validation:items:XValidation:rule="!self.matches('^0+(\\\\.0+){0,3}$')",message="publicHosts must not contain the wildcard bind address 0.0.0.0"
+	PublicHosts []string `json:"publicHosts,omitempty"`
 }
 
 // DatabaseSpec is the author-facing surface of the app's database. knext is

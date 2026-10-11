@@ -1676,6 +1676,14 @@ func (r *NextAppReconciler) appendUserEnv(nextApp *appsv1alpha1.NextApp, envVars
 		}
 	}
 
+	// spec.networking.publicHosts -> KNEXT_PUBLIC_ORIGINS. Rendered AFTER the
+	// user's spec.env / envMap entries are in place so a user-set value of the
+	// same name wins (see publicOriginsEnv), with no ignored-env Warning and no
+	// duplicate entry.
+	if ev, ok := publicOriginsEnv(nextApp, envVars); ok {
+		envVars = append(envVars, ev)
+	}
+
 	return envVars
 }
 
