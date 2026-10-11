@@ -882,10 +882,12 @@ jobs:
           # open by design, so only a test can show the block branch and each fail-open
           # path still work. The suite stubs jev (no network, no key). The harness
           # mutates a temp COPY, requires the baseline green first, and aborts non-zero
-          # on a missed anchor.
+          # on a missed anchor. --smoke runs one mutation per guard family: the suite takes
+          # minutes on a hosted runner, so the full sweep (about 110 mutations) stays the
+          # local evidence tool rather than an hour-long CI step.
           bash .claude/hooks/jev-hooks.test.sh
           bash .claude/skills/jev/pr-risk.test.sh
-          python3 .claude/hooks/jev-hooks-mutation-proof.py
+          python3 .claude/hooks/jev-hooks-mutation-proof.py --smoke
 
   operator-codegen-check:
     name: Operator codegen is up-to-date (make generate + make manifests)

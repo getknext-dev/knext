@@ -138,12 +138,12 @@ secret (gh, --body)|gh secret set NPM_TOKEN --body abc
 secret (case-insensitive)|echo SeCrEt
 token|export MYTOKEN=abc
 _authToken|npm config set //registry.example.org/:_authToken abc
-authorization:|do-thing -H 'Authorization: Basic abc' host
+authorization:|do-thing -H 'Authorization: Custom abc' host
 bearer|do-thing -H 'X: Bearer abc' host
 bearer (case-insensitive)|do-thing -H 'X: bEaReR abc' host
 --password|mysql --password=abc
 password|mysql -u root -pPassword1
-passwd|echo pw | passwd bob
+passwd|echo x | passwd bob
 --from-literal|do-thing create x --from-literal=a=b
 api key (underscore)|export API_KEY=abc
 api key (dash)|do-thing --api-key abc
@@ -174,14 +174,166 @@ gate "disk-/task- are not sk- (word boundary)" "do-thing --task-id 4 --disk-size
 reset; gate_json 0.02 0.01
 gate "plain command reaches jev and is allowed" "npm install left-pad" 0 1
 
+echo "== redactor: every credential shape is reduced to a skeleton with no trace of the secret =="
+# The gate sends jev a REDACTED SKELETON (jev-redact.py), never the raw command, because no
+# denylist is complete. These run the redactor directly so they hold even for shapes the
+# denylist also catches. `redact CMD` prints the skeleton; the second form asserts on it.
+REDACT="$HERE/jev-redact.py"
+redact() { printf '%s' "$1" | python3 "$REDACT" 2>/dev/null; }
+# <label> <command> <secret-fragment-that-must-be-gone> <fragment-that-must-survive>
+skel() {
+  local label="$1" cmd="$2" gone="$3" keep="$4" out rc
+  out=$(redact "$cmd"); rc=$?
+  if [ "$rc" -ne 0 ]; then fail "redactor: $label (rc=$rc, no skeleton)"; return; fi
+  case "$out" in *"$gone"*) fail "redactor: $label — secret [$gone] survived in [$out]"; return;; esac
+  case "$out" in *"$keep"*) pass "redactor: $label -> $out";; *) fail "redactor: $label — [$keep] missing from [$out]";; esac
+}
+skel "curl -u user:pass"            "curl -u admin:hunter2 https://x"                       hunter2     "curl -u <V> https://x"
+skel "URL userinfo (curl)"          "curl https://admin:hunter2@x/api"                      hunter2     "https://<V>@x/api"
+skel "URL userinfo (git clone)"     "git clone https://user:Zx9qLm2w@github.com/o/r"        Zx9qLm2w    "git clone https://<V>@github.com/o/r"
+skel "URL userinfo (psql)"          "psql postgres://app:Zx9qLm2wPq7@db:5432/app"           Zx9qLm2wPq7 "postgres://<V>@db:5432/app"
+skel "docker login -u -p"           "docker login -u bob -p Hunter2! reg"                   Hunter2     "docker login -u <V> -p <V> reg"
+skel "mysql attached -u -p"         "mysql -uroot -pZx9qLm2wPq7"                            Zx9qLm2wPq7 "mysql -u<V> -p<V>"
+skel "mysql attached -u (user gone)" "mysql -uroot -pZx9qLm2wPq7"                           root        "mysql"
+skel "sshpass -p"                   "sshpass -p Zx9qLm2wPq7 ssh host"                       Zx9qLm2wPq7 "sshpass -p <V> ssh host"
+skel "redis-cli -a"                 "redis-cli -a Zx9qLm2wPq7 FLUSHALL"                     Zx9qLm2wPq7 "redis-cli -a <V> FLUSHALL"
+skel "helm --set k=v"               "helm upgrade x --set auth.pw=Zx9qLm2wPq7"              Zx9qLm2wPq7 "helm upgrade x --set"
+skel "--flag=value"                 "tool --token-file=Zx9qLm2wPq7 run"                     Zx9qLm2wPq7 "--token-file=<V> run"
+skel "export FOO=value"             "export FOO=Zx9qLm2wPq7"                                Zx9qLm2wPq7 "export FOO=<V>"
+skel "export DB_PASS=value"         "export DB_PASS=Zx9qLm2wPq7"                            Zx9qLm2wPq7 "export DB_PASS=<V>"
+skel "env assignment before cmd"    "DB_PASS=Zx9qLm2wPq7 ./run.sh"                          Zx9qLm2wPq7 "DB_PASS=<V> ./run.sh"
+skel "Cookie header"                "curl -H 'Cookie: session=Zx9qLm2wPq7' https://x"       Zx9qLm2wPq7 "curl -H <V> https://x"
+skel "double-quoted string"         'tool --msg "Zx9qLm2wPq7 inside"'                       Zx9qLm2wPq7 "tool --msg <V>"
+skel "20-char base64 literal"       "echo QUJDREVGR0hJSktMTU5P | base64 -d"                 QUJDREVGR0hJ "echo <V> | base64 -d"
+skel "long unquoted token in place" "tool run Zx9qLm2wPq7Zx9qLm2wPq7Zx9qLm2wPq7"            Zx9qLm2wPq7Zx "tool run <V>"
+skel "token inside a kept path"     "ls /srv/Zx9qLm2wPq7Zx9qLm2wPq7/data"                   Zx9qLm2wPq7Zx "/srv/<V>/data"
+skel "query value in URL"           "curl 'https://x/y?sig=Zx9qLm2wPq7&a=1'"                Zx9qLm2wPq7 "curl <V>"
+skel "query value, unquoted URL"    "curl https://x/y?sig=Zx9qLm2wPq7"                      Zx9qLm2wPq7 "https://x/y?sig=<V>"
+skel "comment is redacted"          "make build # password is Zx9qLm2wPq7"                  Zx9qLm2wPq7 "make build #<V>"
+skel "heredoc body is redacted"     "cat > f <<'EOT'
+password: Zx9qLm2wPq7
+EOT
+ls"                                                                                          Zx9qLm2wPq7 "<V>"
+skel "command substitution inside"  'echo $(mysql -pZx9qLm2wPq7 -e x)'                      Zx9qLm2wPq7 "echo \$(mysql -p<V>"
+skel "command substitution, backticks" 'echo `mysql -pZx9qLm2wPq7 -e x`'                   Zx9qLm2wPq7 'echo `mysql -p<V>'
+skel "URL fragment"                 "curl https://x/p#Zx9qLm2wPq7"                          Zx9qLm2wPq7 "https://x/p#<V>"
+skel "long flag takes a value"      "tool --user alice run"                                 alice       "tool --user <V> run"
+skel "mixed-case token, no digits"  "tool run ZxqLmwPqRtYuIoPaSd"                           ZxqLmwPq    "tool run <V>"
+skel "redirect target secret"       "cat x > out-Zx9qLm2wPq7"                               Zx9qLm2wPq7 "cat x > <V>"
+skel "bool short flag keeps next"   "rm -f stale.lock"                                      nothing     "rm -f stale.lock"
+skel "find primaries are not -p<V>" "find /tmp -type f -print0" nothing "find /tmp -type <V> -print0"
+skel "redirect target keeps a path" "make > /tmp/out.log 2>&1"                               nothing-to-hide "make > /tmp/out.log 2>&1"
+
+echo "== redactor: destructive intent survives intact =="
+skel "rm -rf /data"                 "rm -rf /data"                                          nothing     "rm -rf /data"
+skel "find . -delete"               "find . -delete"                                        nothing     "find . -delete"
+skel "find with name and -delete"   "find . -name '*.log' -delete"                          '*.log'     "find . -name <V> -delete"
+skel "bash -c 'rm -rf /data'"       "bash -c 'rm -rf /data'"                                nothing     "bash -c 'rm -rf /data'"
+skel "dd of=/dev/sda"               "dd if=/dev/zero of=/dev/sda"                           nothing     "dd if=/dev/zero of=/dev/sda"
+skel "git push --force origin main" "git push --force origin main"                          nothing     "git push --force origin main"
+skel "kubectl delete ns prod"       "kubectl delete ns prod"                                nothing     "kubectl delete ns prod"
+skel "sudo wrapper"                 "sudo rm -rf /var/lib/app"                              nothing     "sudo rm -rf /var/lib/app"
+
+echo "== redactor: recursion into bash -c / sh -c / zsh -c / eval / ssh / xargs sh -c =="
+skel "bash -c inner secret redacted"    "bash -c 'mysql -pZx9qLm2wPq7'"                     Zx9qLm2wPq7 "bash -c 'mysql -p<V>'"
+skel "sh -c inner secret redacted"      "sh -c 'mysql -pZx9qLm2wPq7'"                       Zx9qLm2wPq7 "sh -c 'mysql -p<V>'"
+skel "zsh -c inner secret redacted"     "zsh -c 'mysql -pZx9qLm2wPq7'"                      Zx9qLm2wPq7 "zsh -c 'mysql -p<V>'"
+skel "bash -lc bundle"                  "bash -lc 'rm -rf /data'"                           nothing     "bash -lc 'rm -rf /data'"
+skel "double-quoted bash -c"            'bash -c "rm -rf /data && mysql -pZx9qLm2wPq7"'     Zx9qLm2wPq7 'bash -c "rm -rf /data && mysql -p<V>"'
+skel "eval inner redacted"              "eval 'rm -rf /opt && curl -u a:Zx9qLm2wPq7 x'"     Zx9qLm2wPq7 "eval 'rm -rf /opt && curl -u <V> x'"
+skel "ssh inner redacted"               "ssh bob@host 'rm -rf /srv; mysql -pZx9qLm2wPq7'"   Zx9qLm2wPq7 "'rm -rf /srv; mysql -p<V>'"
+skel "xargs sh -c inner redacted"       "ls | xargs sh -c 'rm -rf /tmp/x; mysql -pZx9qLm2wPq7'" Zx9qLm2wPq7 "xargs sh -c 'rm -rf /tmp/x; mysql -p<V>'"
+skel "nested bash -c"                   "bash -c \"bash -c 'rm -rf /data; mysql -pZx9qLm2wPq7'\"" Zx9qLm2wPq7 "rm -rf /data"
+skel "git -c is NOT a shell"            "git -c user.name=Zx9qLm2wPq7 status"               Zx9qLm2wPq7 "git -c"
+
+echo "== redactor: unbuildable skeleton exits non-zero with no output =="
+for bad in "echo \"unterminated" "echo 'unterminated" 'echo $(unbalanced' 'echo `unbalanced' "cat <<EOT
+no terminator"; do
+  out=$(printf '%s' "$bad" | python3 "$REDACT" 2>/dev/null); rc=$?
+  if [ "$rc" -ne 0 ] && [ -z "$out" ]; then pass "redactor refuses: $(printf '%s' "$bad" | tr '\n' '~')"; else fail "redactor must refuse [$bad] (rc=$rc out=[$out])"; fi
+done
+
+echo "== bash gate: ONLY the skeleton reaches jev, never raw literals =="
+# Shapes the denylist also catches send nothing (calls=0); the rest must reach the stub redacted.
+# Either way the stub must never be handed the secret. <label> <command> <secret> <reaches-stub:yes|no>
+gate_leak() {
+  local label="$1" cmd="$2" secret="$3" reach="$4" want_calls=0
+  [ "$reach" = yes ] && want_calls=1
+  reset; gate_json 0.02 0.01
+  gate "$label" "$cmd" 0 "$want_calls"
+  if grep -qF -- "$secret" "$FAKE_JEV_SEEN" 2>/dev/null; then fail "  LEAK: stub was handed [$secret]"; else pass "  stub never saw [$secret]"; fi
+  if [ "$reach" = yes ]; then
+    if grep -qF -- "<V>" "$FAKE_JEV_SEEN" 2>/dev/null; then pass "  stub received a redacted skeleton"; else fail "  stub did not receive a <V> skeleton"; fi
+  fi
+}
+gate_leak "13.1 curl -u user:pass"          "curl -u admin:hunter2 https://x"                       hunter2     no
+gate_leak "13.2 curl URL userinfo"          "curl https://admin:hunter2@x/api"                      hunter2     no
+gate_leak "13.3 git clone URL userinfo"     "git clone https://user:Zx9qLm2w@github.com/o/r"        Zx9qLm2w    no
+gate_leak "13.4 psql URL userinfo"          "psql postgres://app:Zx9qLm2wPq7@db:5432/app"           Zx9qLm2wPq7 no
+gate_leak "13.5 docker login -u -p"         "docker login -u bob -p Hunter2! reg"                   Hunter2     yes
+gate_leak "13.6 mysql -uroot -pSECRET"      "mysql -uroot -pZx9qLm2wPq7"                            Zx9qLm2wPq7 yes
+gate_leak "13.7 sshpass -p"                 "sshpass -p Zx9qLm2wPq7 ssh host"                       Zx9qLm2wPq7 yes
+gate_leak "13.8 redis-cli -a"               "redis-cli -a Zx9qLm2wPq7 FLUSHALL"                     Zx9qLm2wPq7 yes
+gate_leak "13.9 helm --set auth.pw="        "helm upgrade x --set auth.pw=Zx9qLm2wPq7"              Zx9qLm2wPq7 no
+gate_leak "13.10 export FOO="               "export FOO=Zx9qLm2wPq7"                                Zx9qLm2wPq7 yes
+gate_leak "13.11 export DB_PASS="           "export DB_PASS=Zx9qLm2wPq7"                            Zx9qLm2wPq7 no
+gate_leak "13.12 Cookie header"             "curl -H 'Cookie: session=Zx9qLm2wPq7' https://x"       Zx9qLm2wPq7 no
+gate_leak "13.13 20-char base64 | base64 -d" "echo QUJDREVGR0hJSktMTU5P | base64 -d"                QUJDREVGR0hJ yes
+gate_leak "URL userinfo, token as the user" "git clone https://Zx9qLm2wPq7@github.com/o/r"       Zx9qLm2wPq7 no
+gate_leak "bash -c inner secret"           "bash -c 'mysql -pZx9qLm2wPq7'"                         Zx9qLm2wPq7 yes
+gate_leak "quoted secret in a flag"         "tool --msg 'Zx9qLm2wPq7 hi'"                           Zx9qLm2wPq7 yes
+gate_leak "positional digits word"          "tool run hunter2"                                      hunter2     yes
+
+echo "== bash gate: destructive intent reaches jev intact =="
+# <label> <command> <fragment that must be in what the stub received>
+gate_intent() {
+  local label="$1" cmd="$2" frag="$3"
+  reset; gate_json 0.99 0.99
+  gate "$label" "$cmd" 2 1
+  if grep -qF -- "$frag" "$FAKE_JEV_SEEN" 2>/dev/null; then pass "  stub received [$frag]"; else fail "  stub did not receive [$frag]: [$(cat "$FAKE_JEV_SEEN" 2>/dev/null)]"; fi
+}
+gate_intent "rm -rf /data"                  "rm -rf /data"                      "rm -rf /data"
+gate_intent "find . -delete"                "find . -delete"                    "find . -delete"
+gate_intent "bash -c 'rm -rf /data'"        "bash -c 'rm -rf /data'"            "bash -c 'rm -rf /data'"
+gate_intent "dd of=/dev/sda"                "dd if=/dev/zero of=/dev/sda"       "of=/dev/sda"
+gate_intent "git push --force origin main"  "git push --force origin main"      "git push --force origin main"
+
+echo "== bash gate: an unbuildable skeleton fails open and sends nothing =="
+for bad in "dd of=/dev/sda; echo \"unterminated" "rm -rf /data; echo 'unterminated" 'dd of=/dev/sda $(unbalanced'; do
+  reset; gate_json 0.99 0.99
+  gate "unbuildable: $bad" "$bad" 0 0; silent "fail-open is silent"
+done
+reset; gate_json 0.99 0.99
+# a PATH with everything the gate and the stub need EXCEPT python3
+mkdir -p "$TMP/nopy"; for t in jq awk tr grep head cat mktemp rm sleep kill date dirname env bash wc; do ln -sf "$(command -v "$t")" "$TMP/nopy/$t" 2>/dev/null; done
+out=$(jq -n '{tool_name:"Bash",tool_input:{command:"dd of=/dev/sda"}}' | PATH="$TMP/nopy" JEV_BIN="$FAKE" /bin/bash "$GATE" 2>&1); rc=$?
+[ "$rc" -eq 0 ] && [ -z "$out" ] && [ "$(calls)" = 0 ] && pass "gate: no python3 -> fail open, nothing sent" || fail "gate: no python3 (rc=$rc calls=$(calls) out=[$out])"
+
 echo "== bash gate: oversize command keeps its TAIL (head+tail, not head only) =="
 filler=$(yes 'hello world' | head -n 800 | tr '\n' ' ') # ~9600 chars, no credential signal
 reset; gate_json 0.99 0.99
-gate "9.6k filler then destructive tail still reaches jev" "HEADMARK $filler; dd of=/dev/sda #TAILMARK" 2 1
+gate "9.6k filler then destructive tail still reaches jev" "HEADMARK $filler; dd of=/dev/sda TAILMARK" 2 1
 seen=$(cat "$FAKE_JEV_SEEN" 2>/dev/null)
 case "$seen" in *TAILMARK*) pass "  jev received the tail";; *) fail "  jev did not receive the tail (head-only truncation)";; esac
 case "$seen" in *HEADMARK*) pass "  jev received the head";; *) fail "  jev did not receive the head";; esac
 [ "${#seen}" -le 8200 ] && pass "  text sent is bounded (${#seen} chars)" || fail "  text sent not bounded: ${#seen}"
+
+echo "== bash gate: large commands are fast (macOS /bin/bash 3.2 is pathological on big variables) =="
+# A 60 KB command used to run past 120 s on bash 3.2 (${cmd//[[:space:]]/} on the skeleton);
+# a payload over 64 KiB is not judged at all. Bounded by wall clock, so a regression is red
+# on any bash that has the problem.
+mid=$(yes 'lorem ipsum dolor' | head -c 60000 | tr '\n' ' ')
+reset; gate_json 0.99 0.99
+t0=$(date +%s)
+gate "60 KB command is judged and blocked" "echo $mid; dd of=/dev/sda" 2 1
+el=$(( $(date +%s) - t0 ))
+[ "$el" -le 15 ] && pass "  60 KB command took ${el}s" || fail "  60 KB command took ${el}s (bash 3.2 quadratic regression?)"
+huge=$(yes 'lorem ipsum dolor' | head -c 150000 | tr '\n' ' ')
+reset; gate_json 0.99 0.99
+t0=$(date +%s)
+gate "150 KB command is not judged (fail open, no call)" "echo $huge; dd of=/dev/sda" 0 0; silent "fail-open is silent"
+el=$(( $(date +%s) - t0 ))
+[ "$el" -le 15 ] && pass "  150 KB command took ${el}s" || fail "  150 KB command took ${el}s"
 
 echo "== bash gate: every fail-open path is exit 0 and silent =="
 reset; export FAKE_JEV_MODE=nokey
@@ -203,6 +355,17 @@ t0=$(date +%s)
 JEV_GATE_TIMEOUT=0.5 gate "jev hangs past the timeout" "dd of=/dev/sda" 0 1; silent "fail-open is silent"
 el=$(( $(date +%s) - t0 ))
 if [ "$el" -le 3 ]; then pass "  timeout enforced (${el}s elapsed, jev would sleep 5s)"; else fail "  timeout not enforced: ${el}s elapsed"; fi
+echo "== watchdog: no orphaned sleep is left behind =="
+# A fast jev with a LONG timeout: the watchdog's sleep must be killed with it, not left to run out
+# (CI showed dozens of orphaned sleeps). The duration is unique per run so a parallel run's sleep
+# can never match.
+T="7.$$"
+orphans() { pgrep -f "sleep $T" >/dev/null 2>&1; }
+reset; gate_json 0.02 0.01
+JEV_GATE_TIMEOUT=$T gate "gate: fast jev, long timeout" "dd of=/dev/sda" 0 1
+for _ in 1 2 3 4 5 6 7 8 9 10; do orphans || break; sleep 0.2; done
+if orphans; then fail "  gate left an orphaned sleep $T behind"; pkill -f "sleep $T" 2>/dev/null; else pass "  no orphaned sleep after the gate"; fi
+
 reset; gate_json 0.99 0.99
 JEV_BIN_OVERRIDE=/nonexistent/jev gate "jev binary missing" "dd of=/dev/sda" 0 0; silent "fail-open is silent"
 reset
@@ -222,7 +385,10 @@ fi
 # screen <label> <tool_name> <command-or-empty> <response-text> <want-calls> <want-context: yes|no>
 screen() {
   local label="$1" tool="$2" cmd="$3" resp="$4" wantcalls="$5" wantctx="$6" out rc n has
-  out=$(jq -n --arg t "$tool" --arg c "$cmd" --arg r "$resp" \
+  # --rawfile, not --arg: Linux caps ONE argv string at 128 KiB (E2BIG, rc=126), and the
+  # oversize-text case below is 200 KB. macOS has no such cap, which is how CI caught it.
+  printf '%s' "$resp" >"$TMP/resp.txt"
+  out=$(jq -n --arg t "$tool" --arg c "$cmd" --rawfile r "$TMP/resp.txt" \
     '{tool_name:$t,tool_input:(if $c=="" then {url:"https://example.com"} else {command:$c} end),
       tool_response:(if $t=="Bash" then {stdout:$r,stderr:"",interrupted:false} else {result:$r} end)}' |
     JEV_BIN="${JEV_BIN_OVERRIDE:-$FAKE}" bash "$SCREEN" 2>&1)
@@ -275,6 +441,10 @@ done <<EOF
 Authorization header with value|Authorization: Basic dXNlcjpwYXNzMTIz
 Authorization header, no scheme|authorization: abcd1234efgh5678
 Bearer header with value|use Bearer abcd1234efgh5678
+Authorization Basic, ANY value|Authorization: Basic x
+URL with user:password userinfo|clone https://user:hunter2@github.com/o/r
+Bearer header, 20 letters and no digit|use Bearer abcdefghijklmnopqrst
+Authorization header with a scheme word|authorization: Token abcd1234efgh
 Bearer header, short value with a digit|use Bearer tok12345678
 Authorization header, upper case|AUTHORIZATION: BASIC DXNLCJPWYXNZMTIZ
 AKIA, lower case|akiaabcdefgh
@@ -317,7 +487,11 @@ screen "plain text with no signal is still screened" Bash "gh pr view 12" "pleas
 echo "== result screen: cap and fail-open =="
 reset; screen_json 0.1
 big=$(yes 'lorem ipsum dolor' | head -c 200000) # words, not one run: a long run is a credential signal
+t0=$(date +%s)
 screen "oversize text is capped, still screened" Bash "gh pr view 12" "$big" 1 no
+el=$(( $(date +%s) - t0 ))
+# On bash 3.2 a ${var//pat/} over the full 200 KB text ran past 60 s; the cap must come first.
+[ "$el" -le 15 ] && pass "  200 KB text took ${el}s" || fail "  200 KB text took ${el}s (bash 3.2 quadratic regression?)"
 size=$(head -1 "$FAKE_JEV_SIZES" 2>/dev/null)
 if [ -n "${size:-}" ] && [ "$size" -le 32768 ]; then pass "  text sent to jev capped at 32 KiB ($size bytes of 200000)"; else fail "  text sent to jev not capped: ${size:-none}"; fi
 reset; export FAKE_JEV_MODE=nokey
@@ -333,6 +507,10 @@ t0=$(date +%s)
 JEV_GATE_TIMEOUT=0.5 screen "jev hangs past the timeout" Bash "gh pr view 12" "text" 1 no; silent "fail-open is silent"
 el=$(( $(date +%s) - t0 ))
 if [ "$el" -le 3 ]; then pass "  timeout enforced (${el}s)"; else fail "  timeout not enforced: ${el}s"; fi
+reset; screen_json 0.1
+JEV_GATE_TIMEOUT=$T screen "screen: fast jev, long timeout" Bash "gh pr view 12" "text" 1 no
+for _ in 1 2 3 4 5 6 7 8 9 10; do orphans || break; sleep 0.2; done
+if orphans; then fail "  screen left an orphaned sleep $T behind"; pkill -f "sleep $T" 2>/dev/null; else pass "  no orphaned sleep after the screen"; fi
 reset; screen_json 0.99
 JEV_BIN_OVERRIDE=/nonexistent/jev screen "jev binary missing" Bash "gh pr view 12" "text" 0 no; silent "fail-open is silent"
 out=$(printf 'not json' | JEV_BIN="$FAKE" bash "$SCREEN" 2>&1); rc=$?

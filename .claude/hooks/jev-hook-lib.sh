@@ -34,7 +34,13 @@ jev_run() {
   shift
   "${JEV_CMD[@]}" "$@" >"$out" 2>/dev/null </dev/null &
   pid=$!
-  ( sleep "${JEV_GATE_TIMEOUT:-3}"; kill "$pid" 2>/dev/null ) >/dev/null 2>&1 </dev/null &
+  # The watchdog runs its `sleep` in the background and traps TERM to kill it. Killing only the
+  # subshell leaves the `sleep` orphaned (re-parented to init) for the rest of the timeout, which
+  # piles up on a CI runner across hundreds of hook calls.
+  ( sleep "${JEV_GATE_TIMEOUT:-3}" & sp=$!
+    trap 'kill "$sp" 2>/dev/null; exit 0' TERM
+    wait "$sp"
+    kill "$pid" 2>/dev/null ) >/dev/null 2>&1 </dev/null &
   wd=$!
   wait "$pid" 2>/dev/null
   rc=$?
@@ -77,7 +83,7 @@ jev_ge() { awk -v x="$1" -v t="$2" 'BEGIN { exit !(x + 0 >= t + 0) }'; }
 #   * RESIDUAL, accepted and stated: an attacker who knows this list can still evade the screen
 #     by pasting one fake literal (e.g. a 32-char run). Not closable with a skip; redacting the
 #     matched literals before sending would close it (follow-up).
-JEV_WORDS_RE='secret|token|authorization:|bearer |--password|password|passwd|--from-literal|api[_-]?key|private[_-]?key'
-JEV_LITERAL_RE='-----BEGIN|ghp_|gho_|github_pat_|npm_|(^|[^a-z0-9])sk-[a-z0-9]|xox[bp]-|AKIA|[A-Za-z0-9+/=]{32,}|(authorization:[[:space:]]*|bearer[[:space:]]+)([A-Za-z]+[[:space:]]+)?([A-Za-z0-9._~+/=-]{16,}|[A-Za-z._~+/=-]*[0-9][A-Za-z0-9._~+/=-]{7,})'
+JEV_WORDS_RE='secret|token|authorization:|bearer |--password|password|passwd|--from-literal|api[_-]?key|private[_-]?key|://[^/@[:space:]]+@|(^|[[:space:]])-u[[:space:]]*[^[:space:]]+:[^[:space:]]+|(^|[^a-z])(pass|pw|pwd)([^a-z]|$)|cookie'
+JEV_LITERAL_RE='-----BEGIN|ghp_|gho_|github_pat_|npm_|(^|[^a-z0-9])sk-[a-z0-9]|xox[bp]-|AKIA|[A-Za-z0-9+/=]{32,}|://[^/@[:space:]]+:[^/@[:space:]]+@|authorization:[[:space:]]*basic[[:space:]]+[^[:space:]]+|(authorization:[[:space:]]*|bearer[[:space:]]+)([A-Za-z]+[[:space:]]+)?([A-Za-z0-9._~+/=-]{16,}|[A-Za-z._~+/=-]*[0-9][A-Za-z0-9._~+/=-]{7,})'
 jev_has_credential_signal() { printf '%s' "$1" | grep -Eiq -- "$JEV_WORDS_RE|$JEV_LITERAL_RE"; }
 jev_has_literal_secret() { printf '%s' "$1" | grep -Eiq -- "$JEV_LITERAL_RE"; }

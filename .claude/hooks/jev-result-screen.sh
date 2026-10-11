@@ -44,14 +44,17 @@ case "$tool" in
   *) exit 0 ;;
 esac
 
-# Every string anywhere in the result, so this does not depend on one tool's response shape.
-text=$(printf '%s' "$input" | jq -r '[.tool_response | .. | strings] | join("\n")' 2>/dev/null) || exit 0
-[ -z "${text//[[:space:]]/}" ] && exit 0
-
 jev_resolve || exit 0
 tmp=$(mktemp -d 2>/dev/null) || exit 0
 trap 'rm -rf "$tmp"' EXIT
-printf '%s' "$text" | head -c 32768 >"$tmp/text.txt"
+
+# Every string anywhere in the result, so this does not depend on one tool's response shape,
+# capped at 32 KiB by `head` BEFORE bash ever holds it in a variable. Deliberate: macOS /bin/bash
+# 3.2 is pathologically slow at `${var//pat/}` on a 200 KB variable (measured: over 60 s, the hook
+# spinning until killed), so no string operation may touch the full text. `|| true`: head closing
+# the pipe early makes jq die of SIGPIPE, which is not a failure here.
+printf '%s' "$input" | jq -r '[.tool_response | .. | strings] | join("\n")' 2>/dev/null | head -c 32768 >"$tmp/text.txt" || true
+grep -q '[^[:space:]]' "$tmp/text.txt" 2>/dev/null || exit 0
 # What is about to be sent must carry no credential signal; otherwise stay silent (fail open).
 # Checked on the capped text, i.e. exactly the bytes that would leave the machine.
 jev_has_literal_secret "$(cat "$tmp/text.txt")" && exit 0

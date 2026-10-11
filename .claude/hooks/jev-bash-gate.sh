@@ -24,14 +24,28 @@
 # / unparseable output / unparseable payload. An unreachable model must never wedge the
 # agent; the string hook is what fails closed.
 #
-# NOTHING CREDENTIAL-SHAPED IS SENT. A command is judged by a third party, so one that carries
-# a credential signal (secret, token, password, api key, PEM block, well-known key prefixes,
-# any 32+ char base64/hex run, ...; see jev_has_credential_signal) skips the call, silently,
-# and the deterministic hook alone applies. Hooks run in parallel, so that hook blocking the
-# command would not stop this one from sending it. Over-matching only costs a judgement.
+# WHAT IS SENT: A REDACTED SKELETON, NEVER THE RAW COMMAND. The command is judged by a third
+# party, so jev-redact.py first reduces it: command names, subcommands, bare flags, paths and
+# operators survive; every literal value (quoted strings, the value after `=`, the argument of
+# a value-taking flag, `-pXXX` attached values, URL userinfo, comments, heredoc bodies, long
+# mixed alphanumeric runs) becomes <V>. The inner string of `bash -c '...'`, `eval`, `ssh host
+# '...'` is redacted recursively, so `bash -c 'rm -rf /data'` stays readable to the model while
+# `bash -c 'mysql -pSECRET'` becomes `bash -c 'mysql -p<V>'`. If no skeleton can be built
+# (unbalanced quote, parse failure, no python3) NOTHING is sent: fail open.
+#
+# REDACTION IS BEST EFFORT, AND THE DENYLIST IS THE BACKSTOP. Hooks run in parallel, so the
+# deterministic hook blocking a command does not stop this one from sending it, and no
+# redaction is a proof. So a command that carries a credential signal (secret, token,
+# password, pass/pw words, cookie, api key, URL userinfo, `-u user:pass`, PEM block, well-known
+# key prefixes, any 32+ char base64/hex run; see jev_has_credential_signal) skips the call
+# entirely, silently, BEFORE redaction runs. Over-matching only costs one judgement; the
+# deterministic hook still applies. RESIDUAL, stated: a letters-only secret that follows no flag
+# and no signal word (`echo correcthorse | sudo -S ...`) is kept as a plain word, and a flag
+# the redactor believes is boolean leaves a plain-word argument visible.
 #
 # COST. Every command that is not read-only pays one network round trip (about 0.6-1 s) per
-# Bash call; the pre-filter and the credential skip are the only calls it saves.
+# Bash call; the pre-filter, the credential skip and an unbuildable skeleton are the only
+# calls it saves.
 #
 # PRE-FILTER. Obviously read-only commands (git status|log|diff|show, ls, cat, grep, rg,
 # gh pr view|checks, ...) skip the call: no latency, no cost. It is deliberately strict —
@@ -45,8 +59,12 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 for _t in jq awk tr grep; do command -v "$_t" >/dev/null 2>&1 || exit 0; done
 
 input=$(cat)
+# A payload over 64 KiB is not judged (fail open, nothing sent): macOS /bin/bash 3.2 is
+# pathologically slow at pattern substitution on large variables (a 150 KB command ran past
+# 120 s), and the hook would just be killed by its timeout. The deterministic hook still applies.
+[ "$(printf '%s' "$input" | wc -c)" -gt 65536 ] && exit 0
 cmd=$(printf '%s' "$input" | jq -r '.tool_input.command // ""' 2>/dev/null) || exit 0
-[ -z "$cmd" ] && exit 0
+# (An empty command needs no guard here: it yields an empty skeleton below, which exits 0.)
 
 # Each pipeline/list segment must START with one of these. `find`, `sed`, `xargs`, `awk`,
 # `echo` and friends are absent on purpose (-delete, -exec, -i, redirects).
@@ -71,6 +89,14 @@ is_readonly "$cmd" && exit 0
 # Nothing that could be a credential leaves the machine. Skip the call, fail open, silent:
 # the deterministic hook still applies to this command (see jev-hook-lib.sh).
 jev_has_credential_signal "$cmd" && exit 0
+
+# Second line of defence, and the one that matters: jev is sent a REDACTED SKELETON, never the
+# raw command. A denylist cannot be complete (`mysql -uroot -pXXXX`, `redis-cli -a XXXX` carry
+# no signal word), so every literal value is replaced by <V> and only command names, flags,
+# paths and operators survive. If no skeleton can be built (unbalanced quote, parse failure,
+# no python3: the substitution fails) nothing is sent: fail open.
+cmd=$(printf '%s' "$cmd" | python3 "$HERE/jev-redact.py" 2>/dev/null) || exit 0
+case "$cmd" in *[![:space:]]*) ;; *) exit 0 ;; esac # blank skeleton -> nothing to judge (a glob stops at the first hit; `${cmd//[[:space:]]/}` takes minutes on bash 3.2)
 
 jev_resolve || exit 0
 tmp=$(mktemp -d 2>/dev/null) || exit 0
