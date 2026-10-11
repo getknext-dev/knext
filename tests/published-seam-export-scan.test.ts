@@ -136,6 +136,47 @@ describe('clean packages pass (so a red below is the scan seeing something)', ()
   });
 });
 
+describe('values that merely look similar stay clean (#2188)', () => {
+  it('non-seam object keys, class statics and inert defaults are clean', () => {
+    const clean = (files: Files, pkg?: object) => expect(exitFor(files, pkg)).toBe(CLEAN);
+    clean({ 'dist/index.js': `const o = { a: 1, b: { c: 2 } };\nexport default o;\n` });
+    clean({ 'dist/index.js': `export const ns = Object.freeze({ a: 1 });\n` });
+    clean({ 'dist/index.js': `export default class { static a = 1; __private = 2; }\n` });
+    clean({ 'dist/index.js': `export default function f() {}\n` });
+    clean({ 'dist/index.js': `export default 'x';\n` });
+    // round 2: provenance-proved symbol keys, ordinary post-hoc writes, `.d.ts` look-alikes
+    clean({
+      'dist/index.js': `import { kind } from './entity.js';\nexport class K { static [kind] = 'x'; static [Symbol.iterator] = 1; }\n`,
+      'dist/entity.js': `export const kind = Symbol.for('tag');\n`,
+    });
+    clean(
+      {
+        'dist/index.d.ts': `declare const k: unique symbol;\nexport declare class K { static [k]: number }\n`,
+      },
+      { exports: { '.': './dist/index.d.ts' } },
+    );
+    clean(
+      {
+        'dist/index.d.ts': `import { kind } from './e.js';\nexport declare class K { static [kind]: number }\n`,
+        'dist/e.d.ts': `export declare const kind: unique symbol;\n`,
+      },
+      { exports: { '.': './dist/index.d.ts' } },
+    );
+    clean({ 'dist/index.js': `class K {}\nK.a = 1;\nexport default K;\n` });
+    clean({ 'dist/index.js': `const o = {};\nObject.assign(o, { a: 1 });\nexport { o };\n` });
+    clean(
+      {
+        'dist/index.d.ts': `interface I { a: { b: number } }\ndeclare const o: I;\nexport { o };\nexport interface T { x: 1 }\nexport type U = { y: 2 };\n`,
+      },
+      { exports: { '.': './dist/index.d.ts' } },
+    );
+    clean({
+      'dist/index.js': `const tag = Symbol.for('t');\nexport class K { static [tag] = 'x'; static a = 1; }\n`,
+    });
+    clean({ 'dist/index.js': `const o = { a: 1 };\nexport { o };\n` });
+  });
+});
+
 describe('every way a seam can be exported reds', () => {
   const cases: Array<[string, Files, object?]> = [
     ['a direct `export function __x`', { 'dist/index.js': `export function __x() {}\n` }],
@@ -200,6 +241,148 @@ describe('every way a seam can be exported reds', () => {
     [
       'an object-literal default export with a `__` key',
       { 'dist/index.js': `export default { ok: 1, __seam() {} };\n` },
+    ],
+    [
+      'a seam key in an object bound to an identifier that is default-exported (#2188)',
+      { 'dist/index.js': `const __q = 1;\nconst o = { __q };\nexport default o;\n` },
+    ],
+    [
+      'a seam key in an exported const object (#2188)',
+      { 'dist/index.js': `const __k = 1;\nexport const ns = { __k };\n` },
+    ],
+    [
+      'a seam key nested one level down in an exported object (#2188)',
+      { 'dist/index.js': `export const ns = { inner: { __k: 1 } };\n` },
+    ],
+    [
+      'a seam key in an object exported through `export { o as p }` (#2188)',
+      { 'dist/index.js': `const o = { __k: 1 };\nexport { o as p };\n` },
+    ],
+    [
+      'a seam key in an `Object.freeze`d exported object (#2188)',
+      { 'dist/index.js': `export const ns = Object.freeze({ __k: 1 });\n` },
+    ],
+    [
+      'a static `__` member on a default-exported class (#2188)',
+      { 'dist/index.js': `class K { static __reset() {} }\nexport default K;\n` },
+    ],
+    [
+      'a static `__` property on an inline default-exported class (#2188)',
+      { 'dist/index.js': `export default class { static __x = 1; }\n` },
+    ],
+    [
+      'a static `__` member on a named exported class (#2188)',
+      { 'dist/index.js': `export class K { static get __x() { return 1; } }\n` },
+    ],
+    [
+      'a static member keyed by a const bound to a `__` string (#2188)',
+      { 'dist/index.js': `const k = '__x';\nexport class K { static [k] = 1; }\n` },
+    ],
+    [
+      'a CJS `module.exports = o` where o holds a nested `__` key (#2188)',
+      { 'dist/index.cjs': `const o = { api: { __x: 1 } };\nmodule.exports = o;\n` },
+      { exports: { '.': './dist/index.cjs' } },
+    ],
+    [
+      'a CJS `module.exports = K` where K is a class with a static `__` member (#2188)',
+      { 'dist/index.cjs': `class K { static __x() {} }\nmodule.exports = K;\n` },
+      { exports: { '.': './dist/index.cjs' } },
+    ],
+    [
+      'a CJS `exports.ns = { __k }` (#2188)',
+      { 'dist/index.cjs': `exports.ns = { __k: 1 };\n` },
+      { exports: { '.': './dist/index.cjs' } },
+    ],
+    [
+      'a CJS `module.exports = class { static __x }` (#2188)',
+      { 'dist/index.cjs': `module.exports = class { static __x() {} };\n` },
+      { exports: { '.': './dist/index.cjs' } },
+    ],
+    [
+      'a type-literal `export declare const ns: { __k: number }` (#2188)',
+      { 'dist/index.d.ts': `export declare const ns: { __k: number };\n` },
+      { exports: { '.': './dist/index.d.ts' } },
+    ],
+    [
+      'a static key imported from a module that defines it as a `__` string (round 2)',
+      {
+        'dist/index.js': `import { k } from './k.js';\nexport class K { static [k] = 1; }\n`,
+        'dist/k.js': `export const k = '__x';\n`,
+      },
+    ],
+    [
+      'a static key built by concatenation (round 2)',
+      { 'dist/index.js': `const k = '_' + '_x';\nexport class K { static [k] = 1; }\n` },
+    ],
+    [
+      'a static key read off an object (round 2)',
+      { 'dist/index.js': `const o = { a: '__x' };\nexport class K { static [o.a] = 1; }\n` },
+    ],
+    [
+      'a `.d.ts` `declare const o: {…}; export { o }` (round 2)',
+      { 'dist/index.d.ts': `declare const o: { __x: number };\nexport { o };\n` },
+      { exports: { '.': './dist/index.d.ts' } },
+    ],
+    [
+      'a `.d.ts` `declare const o: {…}; export default o` (round 2)',
+      { 'dist/index.d.ts': `declare const o: { __x: number };\nexport default o;\n` },
+      { exports: { '.': './dist/index.d.ts' } },
+    ],
+    [
+      'a `.d.ts` const typed by an interface (round 2)',
+      {
+        'dist/index.d.ts': `interface I { __x: number }\ndeclare const o: I;\nexport { o };\n`,
+      },
+      { exports: { '.': './dist/index.d.ts' } },
+    ],
+    [
+      'a `.d.ts` const typed by an interface that extends one (round 2)',
+      {
+        'dist/index.d.ts': `interface B { __x: number }\ninterface I extends B { a: 1 }\nexport declare const o: I;\n`,
+      },
+      { exports: { '.': './dist/index.d.ts' } },
+    ],
+    [
+      'a `.d.ts` nested type literal (round 2)',
+      { 'dist/index.d.ts': `export declare const o: { a: { __x: number } };\n` },
+      { exports: { '.': './dist/index.d.ts' } },
+    ],
+    [
+      'a `.d.ts` `export interface` member (round 2)',
+      { 'dist/index.d.ts': `export interface T { __x: number }\n` },
+      { exports: { '.': './dist/index.d.ts' } },
+    ],
+    [
+      'a `.d.ts` `export type` alias of a literal (round 2)',
+      { 'dist/index.d.ts': `export type T = { __x: number };\n` },
+      { exports: { '.': './dist/index.d.ts' } },
+    ],
+    [
+      'a CJS `exports.ns = require(...)` of a module holding a seam (round 2)',
+      {
+        'dist/index.cjs': `exports.ns = require('./o.cjs');\n`,
+        'dist/o.cjs': `module.exports = { __k: 1 };\n`,
+      },
+      { exports: { '.': './dist/index.cjs' } },
+    ],
+    [
+      'a seam attached with `K.__x = 1` after the class (round 2)',
+      { 'dist/index.js': `class K {}\nK.__x = 1;\nexport default K;\n` },
+    ],
+    [
+      'a seam attached with `Object.assign(o, {…})` (round 2)',
+      { 'dist/index.js': `const o = {};\nObject.assign(o, { __x: 1 });\nexport { o };\n` },
+    ],
+    [
+      'a seam attached with `Object.defineProperty(o, "__x")` (round 2)',
+      {
+        'dist/index.js': `export const o = {};\nObject.defineProperty(o, '__x', { value: 1 });\n`,
+      },
+    ],
+    [
+      'a CJS seam attached to `module.exports = K` after the fact (round 2)',
+      { 'dist/index.cjs': `class K {}\nK.__x = 1;\nmodule.exports = K;\n` },
+      { exports: { '.': './dist/index.cjs' } },
     ],
     [
       'a star cycle that still reaches a seam',
@@ -361,6 +544,59 @@ describe('every way a seam can be exported reds', () => {
 
 describe('FAIL CLOSED: what the scan cannot read is a finding, never a pass', () => {
   const cases: Array<[string, Files, object?]> = [
+    [
+      'an imported static key whose definition is not a Symbol (round 2)',
+      {
+        'dist/index.js': `import { k } from './k.js';\nexport class K { static [k] = 1; }\n`,
+        'dist/k.js': `export const k = Math.random() > 2 ? 'a' : 'b';\n`,
+      },
+    ],
+    [
+      'an unresolvable imported static key (round 2)',
+      {
+        'dist/index.js': `import { k } from 'no-such-package-anywhere';\nexport class K { static [k] = 1; }\n`,
+      },
+    ],
+    [
+      'a CJS `exports.ns = require(<gone>)` (round 2)',
+      { 'dist/index.cjs': `exports.ns = require('./gone.cjs');\n` },
+      { exports: { '.': './dist/index.cjs' } },
+    ],
+    [
+      'an `Object.assign` of a non-literal source onto an exported object (round 2)',
+      { 'dist/index.js': `const o = {};\nObject.assign(o, globalThis.extra);\nexport { o };\n` },
+    ],
+    [
+      'an `Object.defineProperty` with a computed key on an exported object (round 2)',
+      {
+        'dist/index.js': `const k = process.env.K;\nexport const o = {};\nObject.defineProperty(o, k, { value: 1 });\n`,
+      },
+    ],
+    [
+      'a default export of a call result (#2188)',
+      {
+        'dist/index.js': `export default makeApi();\nfunction makeApi() { return { __x: 1 }; }\n`,
+      },
+    ],
+    [
+      'a default export of an imported binding (#2188)',
+      {
+        'dist/index.js': `import api from './api.js';\nexport default api;\n`,
+        'dist/api.js': 'export default {};\n',
+      },
+    ],
+    [
+      'a default-exported object with a computed key (#2188)',
+      { 'dist/index.js': `const k = process.env.K;\nconst o = { [k]: 1 };\nexport default o;\n` },
+    ],
+    [
+      'an exported class with a computed static member (#2188)',
+      { 'dist/index.js': `const k = process.env.K;\nexport class K { static ['__' + k] = 1; }\n` },
+    ],
+    [
+      'an exported class with a static block (#2188)',
+      { 'dist/index.js': `export class K { static { this.__x = 1; } }\n` },
+    ],
     ['an entry that does not parse', { 'dist/index.js': `export const = ;\n` }],
     [
       'a chunk reached through `export *` that does not parse',

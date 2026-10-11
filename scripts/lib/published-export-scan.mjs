@@ -39,9 +39,27 @@
  * loosening this.
  *
  * WHAT THIS DOES NOT CLAIM. It reads export NAMES and the static re-export graph.
- * It does not follow `const y = __x; export { y }` (a value alias) or the
- * contents of a default-exported object held in a variable. The convention it
- * enforces is about the names a consumer can write.
+ * It does not follow `const y = __x; export { y }` (a value alias). The
+ * convention it enforces is about the names a consumer can write.
+ *
+ * EXPORTED VALUES ARE OPENED (#2188). The keys of an exported object literal
+ * (also one bound to an identifier that is then exported, nested objects, and
+ * `Object.freeze({…})`), the static members of an exported class, and the same
+ * for CommonJS (`module.exports = o`, `exports.ns = {…}`) are names a consumer
+ * reaches as `ns.__k`, so they are findings. A default export whose value cannot
+ * be resolved (a call, an imported binding) is unscannable, never clean.
+ * A computed static key passes only when PROVABLY a symbol: a same-file
+ * `Symbol(…)` / `Symbol.for(…)` / `Symbol.x` binding, `declare const k: unique
+ * symbol`, or an import followed to such a definition (drizzle's `entityKind`).
+ * A key bound to a string literal is read; anything else is unscannable.
+ * Declaration files: type-literal / interface / alias members are read for
+ * `export declare const`, `declare const o: T; export { o }`, `export interface`,
+ * `export type`, nested literals and local `extends`. A type reference that
+ * does not resolve to a local declaration (an import, a generic) is not followed.
+ * Post-hoc attachment is read when it happens in the same file on an exported
+ * binding: `K.__x = 1`, `Object.assign` / `defineProperty` / `defineProperties`.
+ * Not followed: attachment through an import chain, and objects exported from an
+ * imported binding (`import { o } from './x'; export { o }`).
  */
 
 import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
@@ -340,6 +358,87 @@ function requireSpecifier(node) {
   return undefined;
 }
 
+/** `unique symbol` / `symbol` in a declaration file. */
+function isSymbolType(t) {
+  return (
+    !!t &&
+    (t.kind === ts.SyntaxKind.SymbolKeyword ||
+      (ts.isTypeOperatorNode(t) &&
+        t.operator === ts.SyntaxKind.UniqueKeyword &&
+        t.type.kind === ts.SyntaxKind.SymbolKeyword))
+  );
+}
+
+/** `Symbol(...)`, `Symbol.for(...)` or a well-known `Symbol.x`: provably not a string key. */
+function isSymbolExpr(e, local, depth = 0) {
+  if (depth > 4) return false;
+  if (ts.isParenthesizedExpression(e) || ts.isAsExpression(e) || ts.isNonNullExpression(e))
+    return isSymbolExpr(e.expression, local, depth + 1);
+  if (ts.isIdentifier(e)) {
+    const init = local?.get(e.text);
+    return init ? isSymbolExpr(init, local, depth + 1) : false;
+  }
+  if (ts.isPropertyAccessExpression(e)) return isIdent(e.expression, 'Symbol');
+  if (ts.isCallExpression(e)) {
+    const c = e.expression;
+    return (
+      isIdent(c, 'Symbol') ||
+      (ts.isPropertyAccessExpression(c) && isIdent(c.expression, 'Symbol') && c.name.text === 'for')
+    );
+  }
+  return false;
+}
+
+/**
+ * Does `file` export `name` as a Symbol (`export const name = Symbol.for(…)`, possibly
+ * via an export list or an `export { name } from` chain)? This is the provenance
+ * that lets `static [entityKind]` pass: the key is a symbol, not a string a
+ * consumer can write. Anything not provable is `false` (the caller fails closed).
+ */
+function definesSymbol(ctx, file, name, depth = 0) {
+  if (depth > 4 || !SCANNABLE_RE.test(file)) return false;
+  let sf;
+  try {
+    sf = ts.createSourceFile(
+      file,
+      readFileSync(file, 'utf8'),
+      ts.ScriptTarget.Latest,
+      true,
+      DTS_RE.test(file) ? ts.ScriptKind.TS : ts.ScriptKind.JS,
+    );
+  } catch {
+    return false;
+  }
+  const local = new Map();
+  for (const st of sf.statements) {
+    if (ts.isVariableStatement(st)) {
+      for (const d of st.declarationList.declarations)
+        if (ts.isIdentifier(d.name) && d.initializer) local.set(d.name.text, d.initializer);
+    }
+  }
+  for (const st of sf.statements) {
+    if (ts.isVariableStatement(st) && hasExport(st)) {
+      for (const d of st.declarationList.declarations) {
+        if (ts.isIdentifier(d.name) && d.name.text === name)
+          return d.initializer ? isSymbolExpr(d.initializer, local) : isSymbolType(d.type);
+      }
+    }
+    if (ts.isExportDeclaration(st) && st.exportClause && ts.isNamedExports(st.exportClause)) {
+      for (const el of st.exportClause.elements) {
+        if (el.name.text !== name) continue;
+        const l = (el.propertyName ?? el.name).text;
+        if (st.moduleSpecifier && ts.isStringLiteralLike(st.moduleSpecifier)) {
+          const r = resolveSpecifier(ctx, file, st.moduleSpecifier.text);
+          return 'file' in r ? definesSymbol(ctx, r.file, l, depth + 1) : false;
+        }
+        const init = local.get(l);
+        return init ? isSymbolExpr(init, local) : false;
+      }
+    }
+  }
+  return false;
+}
+
 /**
  * Read the names `file` exports, following static re-export edges.
  *
@@ -413,6 +512,14 @@ export function readExports(ctx, file) {
   const aliases = new Map();
   /** @type {Map<string, any>} top-level `const x = <init>` / function / class, for CJS resolution */
   const topLevel = new Map();
+  /** @type {Map<string, {spec: string, name: string}>} local -> where a named import comes from */
+  const namedImports = new Map();
+  /** @type {Map<string, any>} top-level `declare const x: T` (no initializer) -> its type node */
+  const topTypes = new Map();
+  /** @type {Map<string, any>} top-level interface / type alias */
+  const typeDecls = new Map();
+  /** Local bindings a consumer can reach (exported by any form): post-hoc writes to them count. */
+  const exportedLocals = new Set();
   for (const st of sf.statements) {
     if (
       ts.isImportDeclaration(st) &&
@@ -423,13 +530,21 @@ export function readExports(ctx, file) {
       if (bindings && ts.isNamespaceImport(bindings))
         nsImports.set(bindings.name.text, st.moduleSpecifier.text);
       if (bindings && ts.isNamedImports(bindings)) {
-        for (const el of bindings.elements)
+        for (const el of bindings.elements) {
           aliases.set(el.name.text, (el.propertyName ?? el.name).text);
+          namedImports.set(el.name.text, {
+            spec: /** @type {any} */ (st.moduleSpecifier).text,
+            name: (el.propertyName ?? el.name).text,
+          });
+        }
       }
     }
+    if (ts.isInterfaceDeclaration(st) || ts.isTypeAliasDeclaration(st))
+      typeDecls.set(st.name.text, st);
     if (ts.isVariableStatement(st)) {
       for (const d of st.declarationList.declarations) {
         if (ts.isIdentifier(d.name) && d.initializer) topLevel.set(d.name.text, d.initializer);
+        else if (ts.isIdentifier(d.name) && d.type) topTypes.set(d.name.text, d.type);
       }
     }
     if ((ts.isFunctionDeclaration(st) || ts.isClassDeclaration(st)) && st.name)
@@ -437,18 +552,18 @@ export function readExports(ctx, file) {
   }
 
   /** Keys of an object literal as exports; `false` when it contains something unreadable. */
-  const objectKeys = (obj, depth = 0) => {
+  const objectKeys = (obj, depth = 0, prefix = '') => {
     for (const prop of obj.properties) {
       if (ts.isSpreadAssignment(prop)) {
         const spec = requireSpecifier(prop.expression);
         if (spec !== undefined) {
-          merge(spec, '', true);
+          merge(spec, prefix, true);
           continue;
         }
         if (ts.isIdentifier(prop.expression) && depth < 4) {
           const init = topLevel.get(prop.expression.text);
           if (init && ts.isObjectLiteralExpression(init)) {
-            objectKeys(init, depth + 1);
+            objectKeys(init, depth + 1, prefix);
             continue;
           }
         }
@@ -461,16 +576,165 @@ export function readExports(ctx, file) {
       }
       const key = prop.name;
       if (key && ts.isComputedPropertyName(key)) {
-        if (ts.isStringLiteralLike(key.expression)) add(key.expression.text);
+        if (ts.isStringLiteralLike(key.expression)) add(`${prefix}${key.expression.text}`);
         else fail(ctx, file, `computed export key ${key.getText(sf)} cannot be read statically`);
         continue;
       }
       const n = nameOf(key);
-      if (n === undefined)
+      if (n === undefined) {
         fail(ctx, file, `unreadable export key ${key ? key.getText(sf) : '<none>'}`);
-      else add(n);
+        continue;
+      }
+      add(`${prefix}${n}`);
+      // `{ ns: { __k } }` — a seam one level down is still reachable as `x.ns.__k`.
+      if (ts.isPropertyAssignment(prop))
+        valueMembers(prop.initializer, `${prefix}${n}.`, depth + 1);
     }
   };
+
+  /** Static members of a class are properties of the exported constructor. */
+  const classStatics = (cls, prefix) => {
+    for (const m of cls.members) {
+      if (ts.isClassStaticBlockDeclaration(m)) {
+        fail(ctx, file, 'a class static block — what it assigns cannot be read statically');
+        continue;
+      }
+      const isStatic = (ts.getModifiers(m) ?? []).some(
+        (x) => x.kind === ts.SyntaxKind.StaticKeyword,
+      );
+      if (!isStatic || !m.name) continue;
+      if (ts.isComputedPropertyName(m.name)) {
+        const ke = m.name.expression;
+        const unprovable = () =>
+          fail(
+            ctx,
+            file,
+            `computed static member ${m.name.getText(sf)} is not provably a Symbol — its name cannot be read statically`,
+          );
+        if (ts.isStringLiteralLike(ke)) add(`${prefix}${ke.text}`);
+        else if (ts.isPropertyAccessExpression(ke)) {
+          // only a well-known `Symbol.iterator`-style key is provably a symbol
+          if (!isIdent(ke.expression, 'Symbol')) unprovable();
+        } else if (ts.isIdentifier(ke)) {
+          // PROVENANCE: a symbol key (drizzle's `entityKind`) is not a string a
+          // consumer writes. It must be PROVEN: a same-file `Symbol(…)` binding, or
+          // an import followed to such a definition. A string binding is read.
+          const bound = topLevel.get(ke.text);
+          const imp = namedImports.get(ke.text);
+          if (bound && ts.isStringLiteralLike(bound)) add(`${prefix}${bound.text}`);
+          else if (!bound && isSymbolType(topTypes.get(ke.text))) {
+            /* a declared unique symbol */
+          } else if (bound && isSymbolExpr(bound, topLevel)) {
+            /* a symbol */
+          } else if (!bound && imp) {
+            const r = resolveSpecifier(ctx, file, imp.spec);
+            if (!('file' in r) || !definesSymbol(ctx, r.file, imp.name)) unprovable();
+          } else unprovable();
+        } else unprovable();
+        continue;
+      }
+      const n = nameOf(m.name);
+      if (n !== undefined) add(`${prefix}${n}`);
+    }
+  };
+
+  /**
+   * The members reachable from an exported VALUE: object-literal keys (also when
+   * the literal is bound to a top-level identifier) and class static members.
+   * Returns whether the value was resolved to something readable; a caller that
+   * requires an answer (a default export) fails closed on `false`.
+   */
+  const valueMembers = (expr, prefix, depth = 0) => {
+    if (depth > 6) return false;
+    if (
+      ts.isParenthesizedExpression(expr) ||
+      ts.isAsExpression(expr) ||
+      ts.isSatisfiesExpression(expr) ||
+      ts.isNonNullExpression(expr)
+    )
+      return valueMembers(expr.expression, prefix, depth + 1);
+    if (
+      ts.isCallExpression(expr) &&
+      ts.isPropertyAccessExpression(expr.expression) &&
+      isIdent(expr.expression.expression, 'Object') &&
+      ['freeze', 'seal'].includes(expr.expression.name.text) &&
+      expr.arguments.length === 1 &&
+      expr.arguments[0]
+    )
+      return valueMembers(expr.arguments[0], prefix, depth + 1);
+    const req = requireSpecifier(expr);
+    if (req !== undefined) {
+      merge(req, prefix, true);
+      return true;
+    }
+    if (ts.isObjectLiteralExpression(expr)) {
+      objectKeys(expr, depth, prefix);
+      return true;
+    }
+    if (ts.isClassExpression(expr) || ts.isClassDeclaration(expr)) {
+      classStatics(expr, prefix);
+      return true;
+    }
+    if (ts.isIdentifier(expr)) {
+      const init = topLevel.get(expr.text);
+      if (init) return valueMembers(init, prefix, depth + 1);
+      const ty = topTypes.get(expr.text);
+      if (ty) {
+        typeMembers(ty, prefix, depth + 1);
+        return true;
+      }
+    }
+    return false;
+  };
+
+  /** Members of a declared type: literal, local interface / alias (with `extends`), unions. */
+  const membersOf = (members, prefix, depth) => {
+    for (const m of members) {
+      let n;
+      if (m.name && ts.isComputedPropertyName(m.name)) {
+        n = ts.isStringLiteralLike(m.name.expression) ? m.name.expression.text : undefined;
+      } else n = m.name && nameOf(m.name);
+      if (n === undefined) continue;
+      add(`${prefix}${n}`);
+      if (ts.isPropertySignature(m) && m.type) typeMembers(m.type, `${prefix}${n}.`, depth + 1);
+    }
+  };
+  const typeMembers = (type, prefix, depth = 0) => {
+    if (!type || depth > 6) return;
+    if (ts.isParenthesizedTypeNode(type)) return typeMembers(type.type, prefix, depth + 1);
+    if (ts.isTypeLiteralNode(type)) return membersOf(type.members, prefix, depth);
+    if (ts.isIntersectionTypeNode(type) || ts.isUnionTypeNode(type)) {
+      for (const t of type.types) typeMembers(t, prefix, depth + 1);
+      return;
+    }
+    if (ts.isTypeReferenceNode(type) && ts.isIdentifier(type.typeName)) {
+      const decl = typeDecls.get(type.typeName.text);
+      if (!decl) return;
+      if (ts.isTypeAliasDeclaration(decl)) return typeMembers(decl.type, prefix, depth + 1);
+      membersOf(decl.members, prefix, depth);
+      for (const h of decl.heritageClauses ?? []) {
+        for (const t of h.types) {
+          if (ts.isIdentifier(t.expression)) {
+            const base = typeDecls.get(t.expression.text);
+            if (base && ts.isInterfaceDeclaration(base))
+              typeMembers(ts.factory.createTypeReferenceNode(t.expression.text), prefix, depth + 1);
+          }
+        }
+      }
+    }
+  };
+
+  /** Values that carry no keys a consumer could name. */
+  const isInertValue = (expr) =>
+    ts.isFunctionExpression(expr) ||
+    ts.isArrowFunction(expr) ||
+    ts.isFunctionDeclaration(expr) ||
+    ts.isLiteralExpression(expr) ||
+    ts.isTemplateExpression(expr) ||
+    ts.isArrayLiteralExpression(expr) ||
+    expr.kind === ts.SyntaxKind.TrueKeyword ||
+    expr.kind === ts.SyntaxKind.FalseKeyword ||
+    expr.kind === ts.SyntaxKind.NullKeyword;
 
   /** A name seen on an `exports` root: `exports.x`, `module.exports['x']`. */
   const exportsMember = (target) => {
@@ -486,20 +750,22 @@ export function readExports(ctx, file) {
   const moduleExportsValue = (rhs, depth = 0) => {
     if (ts.isParenthesizedExpression(rhs)) return moduleExportsValue(rhs.expression, depth);
     if (ts.isObjectLiteralExpression(rhs)) return objectKeys(rhs);
+    if (ts.isClassExpression(rhs)) return classStatics(rhs, '');
     const spec = requireSpecifier(rhs);
     if (spec !== undefined) return merge(spec, '', true);
     if (
       ts.isFunctionExpression(rhs) ||
       ts.isArrowFunction(rhs) ||
-      ts.isClassExpression(rhs) ||
       ts.isStringLiteralLike(rhs) ||
       ts.isNumericLiteral(rhs)
     ) {
       return;
     }
     if (ts.isIdentifier(rhs) && depth < 4) {
+      exportedLocals.add(rhs.text);
       const init = topLevel.get(rhs.text);
-      if (init && (ts.isFunctionDeclaration(init) || ts.isClassDeclaration(init))) return;
+      if (init && ts.isFunctionDeclaration(init)) return;
+      if (init && ts.isClassDeclaration(init)) return classStatics(init, '');
       if (init) return moduleExportsValue(init, depth + 1);
     }
     fail(
@@ -519,7 +785,10 @@ export function readExports(ctx, file) {
         isExportsRoot(left.expression)
       ) {
         const n = exportsMember(left);
-        if (n !== undefined) add(n);
+        if (n !== undefined) {
+          add(n);
+          valueMembers(node.right, `${n}.`);
+        }
       }
     } else if (ts.isCallExpression(node)) {
       const callee = node.expression;
@@ -587,6 +856,14 @@ export function readExports(ctx, file) {
       const names = [];
       for (const d of st.declarationList.declarations) bindingNames(d.name, names);
       for (const n of names) add(`${prefix}${n}`);
+      if (!ambient) for (const n of names) exportedLocals.add(n);
+      if (!ambient) {
+        for (const d of st.declarationList.declarations) {
+          if (!ts.isIdentifier(d.name)) continue;
+          if (d.initializer) valueMembers(d.initializer, `${prefix}${d.name.text}.`);
+          if (d.type) typeMembers(d.type, `${prefix}${d.name.text}.`);
+        }
+      }
       return;
     }
     if (
@@ -599,9 +876,14 @@ export function readExports(ctx, file) {
       if (!ambient && !hasExport(st)) return;
       if (!ambient && hasDefault(st)) {
         add('default');
+        if (ts.isClassDeclaration(st)) classStatics(st, 'default.');
         return;
       }
       if (st.name) add(`${prefix}${st.name.text}`);
+      if (!ambient && ts.isClassDeclaration(st) && st.name) classStatics(st, `${st.name.text}.`);
+      if (!ambient && st.name) exportedLocals.add(st.name.text);
+      if (!ambient && st.name && (ts.isInterfaceDeclaration(st) || ts.isTypeAliasDeclaration(st)))
+        typeMembers(ts.factory.createTypeReferenceNode(st.name.text), `${st.name.text}.`);
       return;
     }
     if (ts.isModuleDeclaration(st)) {
@@ -643,6 +925,12 @@ export function readExports(ctx, file) {
             continue;
           }
           add(exported, spec === undefined ? (aliases.get(local) ?? local) : local);
+          if (spec === undefined) {
+            exportedLocals.add(local);
+            const init = topLevel.get(local);
+            if (init) valueMembers(init, `${exported}.`);
+            else if (topTypes.has(local)) typeMembers(topTypes.get(local), `${exported}.`);
+          }
         }
       }
     } else if (ts.isExportAssignment(st)) {
@@ -650,9 +938,18 @@ export function readExports(ctx, file) {
         moduleExportsValue(st.expression);
       } else {
         add('default');
-        if (ts.isObjectLiteralExpression(st.expression)) objectKeys(st.expression);
-        else if (ts.isIdentifier(st.expression) && nsImports.has(st.expression.text)) {
-          merge(/** @type {string} */ (nsImports.get(st.expression.text)), 'default.', true);
+        const expr = st.expression;
+        if (ts.isIdentifier(expr)) exportedLocals.add(expr.text);
+        if (ts.isIdentifier(expr) && nsImports.has(expr.text)) {
+          merge(/** @type {string} */ (nsImports.get(expr.text)), 'default.', true);
+        } else if (!valueMembers(expr, 'default.') && !isInertValue(expr)) {
+          // `export default someCall()` / an imported binding: the value's keys
+          // are a consumer's to name and this reader cannot see them.
+          fail(
+            ctx,
+            file,
+            `export default ${expr.getText(sf).slice(0, 60)} — its keys cannot be read statically`,
+          );
         }
       }
     } else if (ts.isNamespaceExportDeclaration(st)) {
@@ -661,6 +958,49 @@ export function readExports(ctx, file) {
   }
 
   visitExportsUse(sf);
+
+  /**
+   * POST-HOC ATTACHMENT: `K.__x = 1`, `Object.assign(o, { __x })`,
+   * `Object.defineProperty(o, '__x', …)` on a binding this file exports add a
+   * member the declaration never showed. Same-file only; an import chain is not followed.
+   */
+  const postHoc = (node) => {
+    if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+      const l = node.left;
+      if (
+        (ts.isPropertyAccessExpression(l) || ts.isElementAccessExpression(l)) &&
+        ts.isIdentifier(l.expression) &&
+        exportedLocals.has(l.expression.text)
+      ) {
+        const n = exportsMember(l);
+        if (n !== undefined) add(`${l.expression.text}.${n}`);
+      }
+    } else if (
+      ts.isCallExpression(node) &&
+      ts.isPropertyAccessExpression(node.expression) &&
+      isIdent(node.expression.expression, 'Object') &&
+      ['assign', 'defineProperty', 'defineProperties'].includes(node.expression.name.text) &&
+      node.arguments[0] &&
+      ts.isIdentifier(node.arguments[0]) &&
+      exportedLocals.has(node.arguments[0].text)
+    ) {
+      const root = node.arguments[0].text;
+      const how = node.expression.name.text;
+      const rest = node.arguments.slice(1);
+      if (how === 'defineProperty') {
+        const key = rest[0];
+        if (key && ts.isStringLiteralLike(key)) add(`${root}.${key.text}`);
+        else fail(ctx, file, `Object.defineProperty on exported ${root} with a non-literal key`);
+      } else {
+        for (const a of how === 'assign' ? rest : rest.slice(0, 1)) {
+          if (ts.isObjectLiteralExpression(a)) objectKeys(a, 0, `${root}.`);
+          else fail(ctx, file, `Object.${how} on exported ${root} with a non-literal source`);
+        }
+      }
+    }
+    ts.forEachChild(node, postHoc);
+  };
+  postHoc(sf);
 
   ctx.memo.set(file, out);
   return out;
