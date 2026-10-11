@@ -152,7 +152,7 @@ jobs:
           sparse-checkout-cone-mode: false
 
       - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24'
 
@@ -300,7 +300,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload the compat-window fingerprint
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: compat-vinext-window-fingerprint
           path: compat-window-fingerprint.json
@@ -416,7 +416,7 @@ jobs:
           ls -la "${RUNNER_TEMP}/compat-workspace.tgz"
 
       - name: Upload workspace
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: compat-vinext-workspace
           path: ${{ runner.temp }}/compat-workspace.tgz
@@ -447,7 +447,7 @@ jobs:
           ]
     steps:
       - name: Download workspace
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: compat-vinext-workspace
 
@@ -464,7 +464,7 @@ jobs:
           fi
 
       - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24'
 
@@ -891,7 +891,7 @@ jobs:
 
       - name: Upload summary artifact (vinext axis)
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: compat-vinext-summary-${{ strategy.job-index }}
           path: knext/compat-suite-summary-*.json
@@ -981,14 +981,14 @@ jobs:
           path: knext
 
       - name: Download every shard summary
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: compat-vinext-summary-*
           merge-multiple: true
           path: summaries
 
       - name: Download the compat-window fingerprint
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: compat-vinext-window-fingerprint
           path: fingerprint
@@ -1018,7 +1018,7 @@ jobs:
 
       - name: Upload the run ledger (vinext axis)
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: compat-vinext-run-ledger
           path: compat-run-ledger.json
