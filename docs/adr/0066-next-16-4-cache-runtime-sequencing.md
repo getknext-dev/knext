@@ -1,7 +1,9 @@
 # ADR-0066: Next 16.4 cache surface and runtime-supervisor changes — one sequenced plan
 
-- **Status:** **Proposed (2026-10-10; revised in review round 2 the same day).** Exit: Accepted at
-  the next sprint-close design review (#2103). Design and sequencing only; no code lands with this ADR.
+- **Status:** **Accepted with Amendment 1 (2026-10-11).** Proposed 2026-10-10 and revised in review
+  round 2 the same day; accepted at the Sprint 2 close design review (jev 0.98). D1–D5 stand as
+  written, except where Amendment 1 (end of this file) supersedes a line. Design and sequencing only;
+  no code lands with this ADR.
 - **Date:** 2026-10-10
 - **Trigger class:** ADR + hard rule ("don't rewrite the runtime twice"; "gate every feature on the
   official compatibility suite") + public API (the `'use cache'` backend export and its adapter
@@ -41,7 +43,7 @@ orders, each against a different assumption about the Next floor. jev rated the 
 |---|---|---|
 | #2084 / PR #2100 | Treat a PPR `APP_PAGE` entry written by another build as a miss | `cache-handler.js` read path |
 | #2085 | Compat harness for 16.4 (flag path, `@gate`, dead exclusion), then a smoke dispatch | CI only |
-| K4 #2066 | Next peer floor `>=16.4.0`; delete `standalone-adapter-path.ts` and the 16.0.x ctx branch | `package.json`, `next-adapter.ts`, `cli/build-artifact.ts`, `tsup.config.ts` |
+| K4 #2066 | Next peer floor `>=16.4.0`; delete the 16.0.x ctx branch (**Amendment 1: `standalone-adapter-path.ts` is NOT deleted**) | `package.json`, `next-adapter.ts`, `cli/build-artifact.ts`, `tsup.config.ts` |
 | #2083 | Shared Redis `cacheHandlers` (`'use cache'`) backend, wired by the adapter | new handler, `next-adapter.ts`, `cache-handler.js` (shared key/tag code) |
 | #2089 | Return build-scoped `cacheControl` from `get()` (Next #99289); delete the #1888 private seed | `cache-handler.js` |
 | Z6 #2050 | Generated `'use cache'` query functions for zone functions | generator; needs a real shared cache to test against |
@@ -552,7 +554,7 @@ stands. Only its budget and its credential wording change.
 | **1.3.x patch** (`integration/v1.3`) | #2084 / PR #2100 only | Internal correctness, no public surface, patch changeset |
 | **Docs site** (deploys from `main`) | The #2083 interim docs page | Describes released 1.3.x; not an npm release, so not held by #2102 |
 | **1.4.0** (`main`), **held by gate #2102** | #2100 (already on `main`); the #2083 interim `doctor` finding; #2085's harness PR (CI only, no package content); #2090's 1.x opt-in, only after the `doctor` finding | A new `doctor` finding is user-visible output, so a minor, not a patch. 1.4.0 itself ships only when every #2102 item holds: ADR-0064 accepted with Appendix A applied by the founder, #2099 (PR #2101), #2098 (PR #2110), #2108 (PR #2120), and #2112's kind e2e green |
-| **2.0** (`integration/v2`) | K1 then K4 floor + shim deletion; #2083 backend; #2089; Z6; Z9; #2090 default-on | Each depends on the `>=16.4.0` floor or on the backend |
+| **2.0** (`integration/v2`) | K1 then K4 floor (the `adapterPath` shim stays, Amendment 1); #2083 backend; #2089; Z6; Z9; #2090 default-on | Each depends on the `>=16.4.0` floor or on the backend |
 
 A 1.4 backend behind Next-version detection was rejected for two reasons:
 - it would ship a `<16.4` / `>=16.4` split that 2.0 then deletes, which is the runtime written twice;
@@ -698,8 +700,8 @@ decisions rests on the code or package evidence cited in its D-section, not on t
      matching an app with `'use cache'` and no `cacheHandlers`.
 4. **#2085:** the harness PR, then R1. File R2–R4, the triage re-dispatch allowance and R6 as one
    tracked item, with the ≤ 10 budget, the serialization rule and the 2-per-agent cap written into it.
-5. **K4** on `integration/v2`, after K1 and R1–R4: floor `>=16.4.0`; delete `standalone-adapter-path.ts`
-   and the 16.0.x ctx branch. The v2 credential lanes are **not** started here (D4, part 2).
+5. **K4** on `integration/v2`, after K1 and R1–R4: floor `>=16.4.0`; delete the 16.0.x ctx branch
+   (Amendment 1: `standalone-adapter-path.ts` is kept). The v2 credential lanes are **not** started here (D4, part 2).
 6. **#2083 backend:**
    - extract the shared prefix/build-id/connection-and-breaker module from `cache-handler.js`;
    - add the `cacheHandlers` handler, implementing D2's tag store, TTL cap, miss/drop outage mode and
@@ -746,3 +748,78 @@ decisions rests on the code or package evidence cited in its D-section, not on t
     credential lanes (created per the v2 plan, after R5 and at 2.0 GA) complete their windows.
 12. **Tech debt for sprint close:** ISR's per-process outage fallback, and its delete-only handling of
     `revalidateTag(tag, profile)`. Filed as #2122 (milestone v2.0, `priority:P2`).
+
+## Amendment 1 (2026-10-11): K4 keeps the `adapterPath` shim; the gate is the D4 smoke runs
+
+**Status of this amendment: Accepted** (Sprint 2 close design review, jev 0.98; keep-Proposed 0.01).
+It corrects one design premise that a measurement invalidated, and one piece of wording. Trigger-class
+(ADR, hard rule "gate every feature on the official compatibility suite", public API via the peer
+floor); per the 2026-09-22 workflow amendment it is not a merge gate. It must merge before K4 (#2066)
+starts. D1, D2 and D4 are otherwise unchanged.
+
+### What changed
+
+1. **`standalone-adapter-path.ts` does not retire at K4.** This ADR's Context table, D5 and action 5
+   said K4 deletes the module, on the premise that Next 16.4.0 fixes the bug it works around
+   (vercel/next.js#98964). #98964 fixes only half of it. The module now blanks `adapterPath` in the
+   standalone runtime config **unconditionally, on every Next version** (#2124, PR #2132):
+   - with `adapterPath` set, Next 16.4.0's app-page runtime answers a `dynamicParams = false` miss
+     with `render404()` instead of throwing `NoFallbackError`, which is what lets Next's own router
+     fall through to the next, less specific route (a catch-all behind a closed `[slug]`);
+   - the adapter branch is written for a platform that routes with `@next/routing` over the `routing`
+     output of `onBuildComplete`. knext does not: it boots Next's own standalone `server.js`, so the
+     fall-through has to come from Next's router, which needs the branch unset;
+   - the official reference adapter does the same (`delete configRecord.adapterPath` before writing
+     the runtime config);
+   - below 16.4.0 the same blanking also removes the racy 500 that #98964 fixed. That is now the
+     lesser reason, and the version only chooses which reason is logged.
+
+   The module and its call sites (`compileArtifactForDeploy` in `cli/build-artifact.ts`,
+   `scripts/e2e-deploy.sh`, the `./internal/standalone-adapter-path` export) stay.
+
+2. **K4 shrinks** to the `>=16.4.0` peer floor plus deleting the 16.0.x ctx branch. K4 must not
+   delete `standalone-adapter-path.ts`, and the `cache-components-allow-otel-spans` comparison (#2129)
+   is run with the shim in place, so its absence is no longer a hypothesis for that change.
+
+3. **Retirement probe.** The shim retires only when one of these holds, and the first to hold owns the
+   deletion PR:
+   - knext routes through `@next/routing` instead of Next's own router (a verified-adapter design
+     question, tracked as tech debt TD-6, not Sprint 3 work); or
+   - an upstream Next release whose adapter branch falls through to `NoFallbackError` on its own.
+
+   The probe for the second is the `dynamic-params-request-modes` case: with `adapterPath` left set
+   in a built standalone tree, a closed `dynamicParams = false` route must fall through to the less
+   specific route. When that passes unblanked on a stable Next release, the shim is deletable.
+   Raising the Next floor never retires it.
+
+4. **K4's gate is the D4 smoke runs, not a credential bump.** K4 raises the floor only when R1–R4
+   (D4, Part 1: the four stable cells at `v16.4.0`) are green, meaning every red file triaged and
+   zero open knext gaps. Otherwise the floor stays `>=16.3.8`. The 1.x credential stays on Next
+   16.3.8, and **no v2 credential lane exists until 2.0 GA** (D4, Part 2). Wording elsewhere that
+   gates K4 on "the 16.4 credential bump" (issue bodies and sprint outputs) is wrong: gating a
+   floor on a credential that cannot exist before the floor would be circular. This ADR's own text
+   already said smoke (D4); the correction is to #2066, #2089 and #2149. R2–R4 also supply the
+   four-cell evidence the ADR-0007 section (h) quarantine needs.
+
+5. **#2089 is rescoped.** It no longer retires the shim. It keeps only replacing the private
+   `shared-cache-controls` seed (#1888 workaround) with the build-scoped `cacheControl` returned from
+   `cacheHandler.get()`. Its exit criterion drops "no callers of `standalone-adapter-path.ts` remain".
+
+6. **Supervisor preload inventory.** D3 says the primer list is the only supervisor edit and that
+   `PRELOAD_NAMES` is arp-primer first. #2142 added `public-origin.cjs` as a preload outside this
+   ADR's sequence (`standalone-compile.mjs` `PRELOAD_NAMES`: `arp-primer.cjs`,
+   `cache-control-normalize.cjs`, `bun-keepalive-guard.cjs`, `public-origin.cjs`,
+   `request-body-cap.cjs`, plus the self-contained supervisor behind its flag; `node-server.ts` loads
+   `public-origin.cjs` by path). The inventory D3's primer list absorbs is therefore these five
+   preloads, not the ARP primer alone. `public-origin.cjs` is a request-time shim, not a process-start
+   primer, so it stays outside `PROCESS_START_PRIMERS`; Z9 must keep the primers first and must not
+   reorder the others. The "runtime twice" rule is held narrowly here, and Z9's first commit
+   inventories the preloads before touching either entry point.
+
+### Consequences
+
+- K4 is smaller and no longer blocked on the shim; Z9 and #2083 are unaffected.
+- The shim is permanent for now. That is a cost, accepted: deleting it ships the `dynamicParams =
+  false` fall-through bug on every app with a catch-all behind a closed segment.
+- Dependency edges: K4 (#2066) needs K1 (#2065), this amendment, R1–R4 green and #2126. #2089 needs
+  #2083 and K4, but no longer waits on the shim.
