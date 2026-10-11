@@ -107,4 +107,96 @@ await waitFor('KnextDeepHealthDown is FIRING', () => {
     'PASS  KnextDeepHealthStuckWaking stays quiet (refused BYO database is down, not waking)',
   );
 }
+// 6. THE SCALE-TO-ZERO PROMISE: scraping must not keep the database awake.
+//    The probe only runs while the app has used its database recently (45 s). The
+//    probe's own query must not count as that use, or every scrape re-arms the
+//    gate and the database never sleeps while the pod is up. Observable here as
+//    the probe's own log line (one per probe): it must STOP once the app is idle,
+//    while Prometheus keeps scraping.
+{
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const probeLines = () => {
+    const r = spawnSync(
+      'kubectl',
+      ['--context', ctx, '-n', 'deep-health-e2e', 'logs', 'deploy/e2e-app', '--tail=-1'],
+      { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 },
+    );
+    if (r.status !== 0) throw new Error(`kubectl logs: ${r.stderr.trim()}`);
+    return r.stdout.split('\n').filter((l) => l.includes('[Health Check] Postgres')).length;
+  };
+
+  // A previous run on a kept cluster may have left the fixture idle.
+  spawnSync(
+    'kubectl',
+    [
+      '--context',
+      ctx,
+      '-n',
+      'deep-health-e2e',
+      'exec',
+      'deploy/e2e-app',
+      '--',
+      'rm',
+      '-f',
+      '/tmp/stop-traffic',
+    ],
+    { encoding: 'utf8' },
+  );
+
+  // Positive control: while the app is active the probe DOES run, so the log line
+  // is a live signal and "no new lines" below means something.
+  const active0 = probeLines();
+  await waitFor('probes are logged while the app is active (control)', () => {
+    const n = probeLines();
+    return { ok: n > active0, detail: `${active0} -> ${n} probe lines` };
+  });
+
+  const stop = spawnSync(
+    'kubectl',
+    [
+      '--context',
+      ctx,
+      '-n',
+      'deep-health-e2e',
+      'exec',
+      'deploy/e2e-app',
+      '--',
+      'touch',
+      '/tmp/stop-traffic',
+    ],
+    { encoding: 'utf8' },
+  );
+  if (stop.status !== 0) {
+    console.error(`FAIL  could not idle the fixture: ${stop.stderr.trim()}`);
+    process.exit(1);
+  }
+  // Let the 45 s activity budget lapse (+ one scrape + the probe TTL), then watch.
+  await sleep(100_000);
+  const idle1 = probeLines();
+  const scrapes1 = Number(
+    query('timestamp(up{job="knext-nextapp",app="e2e-app"})')[0]?.value[1] ?? 0,
+  );
+  await sleep(130_000); // four-plus 30 s scrape intervals with the app idle
+  const idle2 = probeLines();
+  const scrapes2 = Number(
+    query('timestamp(up{job="knext-nextapp",app="e2e-app"})')[0]?.value[1] ?? 0,
+  );
+
+  if (scrapes2 <= scrapes1) {
+    console.error(
+      `FAIL  Prometheus stopped scraping (last scrape at ${scrapes1} -> ${scrapes2}); the idle check proves nothing`,
+    );
+    process.exit(1);
+  }
+  if (idle2 !== idle1) {
+    console.error(
+      `FAIL  the idle app was still probed on scrape: ${idle1} -> ${idle2} probe lines over ${Math.round((scrapes2 - scrapes1) / 30)} scrapes. ` +
+        'The probe is keeping the scale-to-zero database awake.',
+    );
+    process.exit(1);
+  }
+  console.log(
+    `PASS  idle app: ${Math.round((scrapes2 - scrapes1) / 30)} more scrapes, 0 more database probes (${idle1} -> ${idle2})`,
+  );
+}
 console.log('deep-health alert e2e: OK');

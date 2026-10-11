@@ -17,6 +17,7 @@
 //
 // Run from apps/file-manager so bare imports resolve against its node_modules.
 
+import { existsSync } from 'node:fs';
 import { createServer } from 'node:http';
 
 import { getDbPool } from '@getknext/lib/clients';
@@ -37,7 +38,13 @@ createServer((_req, res) => {
 }).listen(APP_PORT, '0.0.0.0');
 contract.recordStartupComplete(state);
 
+// The e2e makes the app go idle by creating this file; from then on there is no
+// application traffic, and the only thing that can still reach the database is
+// the deep-health probe the scrape triggers.
+const STOP_FILE = process.env.FIXTURE_STOP_TRAFFIC_FILE ?? '/tmp/stop-traffic';
+
 const touchDatabase = () => {
+  if (existsSync(STOP_FILE)) return;
   // Rejects (ECONNREFUSED) by design; the call itself is what stamps activity.
   getDbPool()
     .query('SELECT 1')
