@@ -1,18 +1,25 @@
 ---
 title: Databases (bring your own Postgres)
-description: knext is engine-agnostic — you bring your own Postgres and bind its DSN from a Kubernetes Secret. knext does not provision or manage databases.
+description: Bring your own Postgres and bind its DSN from a Kubernetes Secret. An optional, Beta scale-to-zero Postgres built on Neon's open-source storage is also available.
 ---
 
-knext is **engine-agnostic about databases**. It does **not** provision, host, or manage a
-database for you — **you bring your own Postgres**. knext's only database surface is a thin,
-secure **binding**: point the app at an existing Postgres by supplying a `DATABASE_URL` from a
-Kubernetes Secret, and the operator injects it into your pods.
+knext is **engine-agnostic about databases**. **You bring your own Postgres.** knext's core database
+surface is a thin, secure **binding**: point the app at an existing Postgres by supplying a
+`DATABASE_URL` from a Kubernetes Secret, and the operator injects it into your pods.
 
 <Callout type="info">
-**knext does not run your database.** There is no managed mode, no per-app provisioning, and no
-"branch-per-app" database. Any Postgres your app can reach over the network works — a
-CloudNativePG cluster you run in the same cluster, or a managed/serverless provider.
+**knext does not run your database by default.** Any Postgres your app can reach over the network
+works: a CloudNativePG cluster you run in the same cluster, or a managed or serverless provider.
 </Callout>
+
+## Scale-to-zero Postgres (Beta)
+
+If you want a database that also sleeps when idle, knext has an optional scale-to-zero Postgres.
+It is **Beta**. It runs Postgres on [Neon's open-source storage and compute](https://github.com/neondatabase/neon)
+(Apache-2.0), with knext's wake-on-connect gateway and per-app databases on top. It is not
+covered by the stability promise. Read [Scale-to-zero database](/docs/learn/scale-to-zero-database)
+for how it is built, what knext adds, and its trade-offs. Its databases bind through the same
+`DATABASE_URL` Secret as any other Postgres.
 
 ## Bind an existing Postgres
 
@@ -123,7 +130,8 @@ a fresh wake — and adds nothing to the warm path once the database is up.
 </Callout>
 
 <Callout type="info">
-**A request arriving mid-wake gets bounded latency, not a 5xx.** During the ~2.5s cold wake the
+**A request arriving mid-wake gets bounded latency, not a 5xx.** During the cold wake (a few seconds
+on the scale-to-zero database, see [its measured numbers](/docs/learn/scale-to-zero-database#what-that-cost)) the
 gateway's socket-accept briefly races the database's readiness, so a connect can see a transient
 error (`ECONNREFUSED`/`ECONNRESET`/"Connection terminated") a moment before the database is truly
 up. The pool absorbs that: a **transient acquire failure during the wake window is retried with

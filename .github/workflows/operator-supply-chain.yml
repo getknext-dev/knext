@@ -593,6 +593,24 @@ jobs:
             echo "::error::dist/install-v${VERSION}.yaml does not carry the version label ${VERSION}"; exit 1; }
           echo "path=packages/kn-next-operator/dist/install-v${VERSION}.yaml" >> "$GITHUB_OUTPUT"
 
+      # Release body for version tags (#2153): generated FROM the attached
+      # install.yaml, so the image digest, CRD API version and cert-manager
+      # requirement it states are read from the asset beside it, never typed.
+      # Plain `node` (builtins only, no install step). Skipped for operator-edge,
+      # whose rolling release keeps whatever body it has.
+      - name: Generate the operator release body from install.yaml (version tags only, #2153)
+        id: release_body
+        if: steps.channel.outputs.publish == 'true' && steps.trivy.outcome == 'success' && steps.channel.outputs.is_version_tag == 'true'
+        env:
+          RELEASE_TAG: ${{ steps.channel.outputs.release_tag }}
+          REPO: ${{ github.repository }}
+        run: |
+          node scripts/operator-release-notes-body.mjs \
+            --tag "${RELEASE_TAG}" \
+            --repo "${REPO}" \
+            --install packages/kn-next-operator/dist/install.yaml \
+            --out "${RUNNER_TEMP}/operator-release-body.md"
+
       # Transient CI artifact (auth-gated) — handy for inspecting the exact bundle a
       # run produced, but NOT the user-facing install path.
       - name: Upload install.yaml artifact (main + release tags only)
@@ -606,16 +624,16 @@ jobs:
       # GitHub Release tagged with the CHANNEL — `operator-vX.Y.Z[-rc.N]` for a
       # version tag (a fresh tag every time, so this release is immutable: the
       # same tag is never re-pushed), or the rolling `operator-edge` channel for
-      # a plain `main` push. `make_latest: "false"` here — the repo's default
-      # view is decided by the operator-latest step below, only for stable tags.
+      # a plain `main` push. `make_latest: "false"` here AND on the
+      # operator-latest step below: an operator release must never take the
+      # repo's Latest badge from the knext (`vX.Y.Z`) release, whose Latest
+      # flag is decided by the release-notes job in release.yml.
       #
-      # `make_latest` on ANY release here does NOT make
-      # `/releases/latest/download/install.yaml` a dependable URL, and the docs
-      # must not use it. GitHub resolves /releases/latest/ to the most RECENTLY
-      # PUBLISHED release repo-wide — and this repo also cuts npm package
-      # releases (`@getknext/core@…`, `@getknext/db@…`). Each of those steals
-      # the pointer, and they carry no assets, so the URL returns 404 until the
-      # next operator publish. Docs address every asset by its OWN tag
+      # Neither does `make_latest` make `/releases/latest/download/install.yaml`
+      # a dependable URL, and the docs must not use it. GitHub resolves
+      # /releases/latest/ to the most RECENTLY PUBLISHED release repo-wide, and
+      # this repo also cuts knext releases that carry no install.yaml, so the URL
+      # would 404. Docs address every asset by its OWN tag
       # (`releases/download/<channel>/install.yaml`), which no other release
       # can steal.
       - name: Publish install.yaml to its channel release (#1667)
@@ -625,6 +643,9 @@ jobs:
           tag_name: ${{ steps.channel.outputs.release_tag }}
           name: kn-next-operator ${{ steps.channel.outputs.release_tag }}
           make_latest: "false"
+          # Empty for operator-edge (the step above is skipped), which softprops
+          # ignores — the rolling release keeps its body.
+          body_path: ${{ steps.release_body.outputs.path }}
           # install.yaml (compat name) + install-vX.Y.Z.yaml (version tags only;
           # the blank line is the operator-edge case and is ignored).
           files: |
@@ -644,7 +665,7 @@ jobs:
         with:
           tag_name: operator-latest
           name: kn-next-operator (latest)
-          make_latest: "true"
+          make_latest: "false"
           files: packages/kn-next-operator/dist/install.yaml
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

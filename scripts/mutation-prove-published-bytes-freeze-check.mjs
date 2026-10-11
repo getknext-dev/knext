@@ -251,6 +251,18 @@ const MUTATIONS = [
     replacement: 'return null;',
   },
   {
+    label: 'workflow: the head pin read no longer goes through the shared select-pin reader',
+    subject: 'workflow',
+    anchor: '--read-pin-at "${HEAD_SHA}"',
+    replacement: '--read-pin-at-disabled "${HEAD_SHA}"',
+  },
+  {
+    label: 'workflow: the merge-base pin read no longer goes through the shared select-pin reader',
+    subject: 'workflow',
+    anchor: '--read-pin-at "${MERGE_BASE}"',
+    replacement: '--read-pin-at-disabled "${MERGE_BASE}"',
+  },
+  {
     label: 'workflow: stops passing --base-version to the check',
     subject: 'workflow',
     anchor: ' \\\n            --base-version "${BASE_VERSION}"',
@@ -258,7 +270,7 @@ const MUTATIONS = [
   },
 ];
 
-declareMutations(26);
+declareMutations(28);
 
 const RUNNER = resolveSpecRunner(REPO_ROOT, SPECS[0]);
 
@@ -271,8 +283,8 @@ function specPasses() {
   return r.status === 0;
 }
 
-if (MUTATIONS.length !== 26) {
-  console.error(`FATAL: declared 26 mutations, table has ${MUTATIONS.length}`);
+if (MUTATIONS.length !== 28) {
+  console.error(`FATAL: declared 28 mutations, table has ${MUTATIONS.length}`);
   process.exit(1);
 }
 

@@ -233,7 +233,7 @@ the change, but the same line is correct for them too. See [Skew protection](/do
 
 ## The scale-to-zero database: roll the failover controller before its new config
 
-The scale-to-zero database ships its own **failover controller** — a small component that watches
+The scale-to-zero database (Beta) ships its own **failover controller** — a small component that watches
 the primary pageserver and promotes the warm standby if it dies. It reads its behaviour from
 environment configuration set on its manifests, and it follows the same ordering rule as the
 operator and CLI, for the same reason: **the piece that *reads* a contract upgrades before the

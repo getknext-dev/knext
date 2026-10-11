@@ -1,18 +1,62 @@
 ---
 title: "7 · A database that sleeps"
-description: Deploy scale-zero-pg so ACME's Postgres consumes zero compute while idle and wakes on the first connection.
+description: Deploy knext's Beta scale-to-zero Postgres, built on Neon's open-source storage and compute, so ACME's database consumes zero compute while idle and wakes on the first connection.
 ---
 
 An app that sleeps behind a database that never does is only half the saving. This chapter closes
 the other half.
 
-## What scale-zero-pg is
+<Callout type="warn">
+**Beta.** The scale-to-zero database is shipped and usable, but it is not part of knext's stability
+promise. Bringing your own Postgres is the default. See [Stability](/docs/stability).
+</Callout>
+
+## What the scale-to-zero database is
 
 **Native PostgreSQL that consumes zero compute while idle and wakes on the first client connection.**
 
-It is Postgres 17 on Neon's open-source storage stack (Apache-2.0). The only bespoke piece is a small
-Go gateway that holds a connection while the database wakes. It ships in the knext repository under
+It runs Postgres 17 on [Neon's open-source storage and compute](https://github.com/neondatabase/neon),
+licensed Apache-2.0. knext adds the Kubernetes layer around it. It ships in the knext repository under
 `packages/scale-zero-pg`.
+
+<Callout type="info">
+knext is **not affiliated with or endorsed by Neon**. knext runs Neon's open-source components
+itself, and knext alone maintains this deployment. That is one reason it ships as Beta.
+</Callout>
+
+### How it's built
+
+- **Storage (Neon open source).** Safekeepers hold the durable write-ahead log. A pageserver serves
+  pages and offloads them to object storage (MinIO by default, or any S3-compatible store). The
+  storage plane never scales to zero.
+- **Compute (Neon open source).** Standard Postgres 17 processes with Neon's extension. A compute
+  holds no data. It starts, attaches to its timeline, and fetches pages lazily. When idle, it stops.
+- **Wake path (knext).** A gateway speaks the Postgres wire protocol, so a database connection wakes
+  the compute. Knative's activator only handles HTTP, so it cannot do this.
+
+### What knext adds
+
+| Addition | What it does |
+| --- | --- |
+| Wake-on-connect gateway | A client connection wakes a sleeping compute. The gateway holds the connection, replays the startup, and puts the compute back to sleep after an idle window. |
+| AppDatabase operator | Provisions a database, or a branch per app, and delivers its `DATABASE_URL` as a Kubernetes Secret that the app binds. |
+| Zone operator | Replicates data between zone databases with eventual consistency, for multi-zone setups. |
+| Read pools | Scales read-only replicas from zero to N and exposes them as `DATABASE_URL_RO`. |
+| Failover | A standby pageserver and a failover controller promote the standby if the primary pageserver fails. |
+| Scheduled warm windows | `warmSchedule` on an AppDatabase keeps the database awake during set hours. Its effect on wake latency has not been measured on a cluster yet. |
+| Self-enabled extensions | Apps enable TimescaleDB and pgvector over their own `DATABASE_URL`. Compression and continuous aggregates are not supported. |
+| SCRAM auth and TLS | Every per-app role uses SCRAM-SHA-256 from boot. The internal hop to the compute is TLS, and mutually authenticated for per-app databases. |
+| Backup and restore drills | A scheduled backup job copies the storage bucket to a second object store. The restore runbook is drilled. |
+| Alerting | Prometheus and Alertmanager rules cover the wake path, the storage plane, and the backup jobs. |
+
+### Status and choices
+
+- **Beta.** Expect changes with notice. It is not covered by the stability promise.
+- **Recommended default: bring your own Postgres.** Use a CloudNativePG cluster in the same cluster,
+  or any managed Postgres, and bind its DSN with `DATABASE_URL`.
+- **Prefer not to run the storage layer yourself?** Any managed Postgres works through
+  `DATABASE_URL`, including providers that offer serverless or scale-to-zero plans. Nothing else in
+  knext changes.
 
 ## Deploy it
 
@@ -67,8 +111,14 @@ connection, the gateway holds it while the compute scales 0→1, and the query r
 
 ## What that cost
 
-Measured on the project's own clusters: the database's cold wake is **~2.5s**, or **~0.4s** on the
-opt-in warm tier.
+Measured in the project's benchmarks:
+
+- **Cold wake** (first connection after full idle): **p50 3.72 s, p95 4.14 s** over 20 runs on Oracle
+  OKE (July 2026). On a single-node local cluster, the same wake measured 2.4 to 2.6 s.
+- **Warm tier** (an opt-in pod kept parked): **413 ms p50, 558 ms p95** over 20 runs on the local
+  cluster. The OKE drill checks that a warm wake finishes under 1.5 s.
+
+These are the database's own wake times, not end-to-end request times.
 
 **That is on top of ACME's own cold start.** A first request after full idle pays both. Decide
 whether idle cost matters more than tail latency for your app — and note you can make that choice

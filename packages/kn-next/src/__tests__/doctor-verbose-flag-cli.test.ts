@@ -53,6 +53,9 @@ function runDoctor(flags: string[]) {
     try {
         const r = spawnSync(bun, [entry, "doctor", ...flags], {
             encoding: "utf8",
+            // An empty directory: doctor's local checks (the vinext version
+            // row among them) must not read whatever app this suite runs in.
+            cwd: kubeconfigDir,
             env: {
                 ...process.env,
                 NO_COLOR: "1",

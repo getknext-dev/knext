@@ -414,7 +414,8 @@ jobs:
           version-script: bun run changeset:version
           commit-message: 'chore: version packages'
           pr-title: 'chore: version packages'
-          # Releases are created by the publish job, from the published set.
+          # No releases from this job; the `github-release` job (#2153) publishes
+          # the one readable release after a successful publish.
           create-github-releases: false
           # v2 requires the token as an INPUT. Its release notes are explicit that
           # "the GITHUB_TOKEN environment variable and credentials configured by
@@ -715,6 +716,15 @@ jobs:
           node scripts/verify-published-group.mjs --pre
           --compare-dir "${{ github.workspace }}/release-tarballs-compare"
 
+      # #2153 — the GitHub release body IS `docs/release/vX.Y.Z.md`. Refuse HERE,
+      # before anything irreversible, if it is missing: the `github-release` job
+      # runs after the publish, and by then a missing file cannot be fixed by a
+      # re-run (the fix is a new commit, and `publish-preflight` would then find
+      # nothing to publish and skip this whole job). No `env:` on purpose — this
+      # step never sees the npm credential.
+      - name: Require release notes for this version (before publishing)
+        run: node scripts/release-notes-body.mjs --check
+
       # Gate the publish command WITHOUT referencing `secrets` inside the action's
       # `with:` input (that expression caused GitHub startup-failure runs).
       #
@@ -752,10 +762,12 @@ jobs:
           publish-script: ${{ steps.gate.outputs.publish }}
           commit-message: 'chore: version packages'
           pr-title: 'chore: version packages'
-          # On publish, create one GitHub Release per published package, tagged
-          # `@getknext/<pkg>@x.y.z`. The hand-made `v0.1.0` release predates this and
-          # uses a different tag format, so there is no tag collision.
-          create-github-releases: true
+          # NO per-package GitHub Releases (#2153). changesets used to create
+          # four near-identical releases per version (`@getknext/core@X`, `lib`,
+          # `db`, `kn-next`), each with a one-line body. ONE readable release on
+          # `vX.Y.Z` is published by the `github-release` job below instead.
+          # `changeset publish` still pushes the `@getknext/<pkg>@X` git tags.
+          create-github-releases: false
           github-token: ${{ secrets.GITHUB_TOKEN }}
         env:
           # Still exported: `changeset publish` and the gate script read it, and
@@ -812,6 +824,78 @@ jobs:
       - name: Verify the whole group published coherently (post-publish)
         if: ${{ !cancelled() && steps.gate.outcome == 'success' }}
         run: node scripts/verify-published-group.mjs --post
+
+  # ┌─ ONE READABLE GITHUB RELEASE PER VERSION (#2153) ──────────────────────────┐
+  # │ Runs only after `release` SUCCEEDED (default `success()`; the job-level    │
+  # │ `if:` must never gain always()/failure()/cancelled(), which would start    │
+  # │ it after a failed publish). Creates, or updates on a re-run, the release   │
+  # │ on tag `vX.Y.Z` (creating the tag at this commit if nobody pushed it).     │
+  # │ Body = docs/release/vX.Y.Z.md + a Packages table, built by                 │
+  # │ scripts/release-notes-body.mjs; `--latest` only for the highest stable     │
+  # │ version, `--prerelease` for a prerelease.                                  │
+  # │                                                                            │
+  # │ PRIVILEGE: `contents: write` and nothing else (a job-level `permissions:`  │
+  # │ REPLACES the workflow-level grant, so no id-token, no pull-requests), NO   │
+  # │ `environment:`, and the npm credential is not in this job at all — it is   │
+  # │ a separate job precisely so it cannot be. `gh` CLI only, no new action.    │
+  # │ Guarded by tests/release-github-release-workflow.test.ts.                  │
+  # └────────────────────────────────────────────────────────────────────────────┘
+  github-release:
+    name: Publish the readable GitHub release (vX.Y.Z)
+    runs-on: ubuntu-latest
+    needs: [publish-lane-guard, release]
+    if: >-
+      github.repository == 'getknext-dev/knext'
+      && needs.release.result == 'success'
+    permissions:
+      contents: write
+    concurrency:
+      group: github-release-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - name: Checkout code (every tag, to decide which stable version is the latest)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      # No install step: scripts/release-notes-body.mjs reaches only node:
+      # builtins (tests/workflow-script-install-guard.test.ts scans this file).
+      - name: Build the release body from the version's notes file
+        id: notes
+        env:
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          git tag --list 'v[0-9]*' > "${RUNNER_TEMP}/release-tags.txt"
+          node scripts/release-notes-body.mjs \
+            --repo "${REPO}" \
+            --out "${RUNNER_TEMP}/release-body.md" \
+            --tags-file "${RUNNER_TEMP}/release-tags.txt"
+
+      - name: Create or update the GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.notes.outputs.tag }}
+          TITLE: ${{ steps.notes.outputs.title }}
+          PRERELEASE: ${{ steps.notes.outputs.prerelease }}
+          LATEST: ${{ steps.notes.outputs.latest }}
+        run: |
+          set -euo pipefail
+          args=(--title "${TITLE}" --notes-file "${RUNNER_TEMP}/release-body.md" "--prerelease=${PRERELEASE}" "--latest=${LATEST}")
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release edit "${TAG}" "${args[@]}"
+          else
+            # Creates the tag at this commit when nobody has pushed it yet; an
+            # existing tag is used as-is (--target is ignored for it).
+            gh release create "${TAG}" --target "${GITHUB_SHA}" "${args[@]}"
+          fi
 
   # #1639(c) — nothing previously alerted when a version bump landed on `main`
   # and did NOT end up published, for ANY reason: a crash (the #1622 class),

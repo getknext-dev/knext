@@ -66,21 +66,24 @@ export default adapter;
 
 This is the same pattern that `knext create` scaffolds and the example apps in the knext repo use.
 
-## Known issue: Next.js before 16.4
+## Known issue: dynamic routes and `adapterPath`
 
-On Next.js releases before **16.4.0** (16.3.x included), a route with `dynamicParams = false` can
-answer a burst of concurrent prefetches for a parameter that is not in `generateStaticParams` with a
-**500** instead of a **404**, whenever an adapter is configured. Next.js fixed this in 16.4.0 and did
-not backport it.
+With `adapterPath` set, a route with `dynamicParams = false` that receives a parameter not listed in
+`generateStaticParams` answers with a 404 straight away. It does not fall through to a less specific
+route (for example a catch-all that would have matched). On Next.js releases before **16.4.0**
+(16.3.x included) the same request can also fail with a **500** instead of a **404** when a burst of
+concurrent prefetches arrives. Both come from the adapter being configured on a server that has no
+adapter router in front of it, which is how the standalone server runs.
 
-knext works around it for you. `knext build`, `knext deploy` and `knext preview` clear `adapterPath`
-from the standalone server's runtime configuration when the installed Next.js is older than 16.4.0.
-The adapter only does its work during `next build`, so nothing at runtime depends on it. Those
-requests then return a plain 404, exactly as a standalone server without an adapter does, and each one
-writes an `Error: Internal: NoFallbackError` line to the server log. On Next.js 16.4.0 or later knext
-changes nothing.
+knext works around it for you, on every Next.js version. `knext build`, `knext deploy` and
+`knext preview` clear `adapterPath` from the standalone server's runtime configuration. The adapter
+only does its work during `next build`, so nothing at runtime depends on it. Unlisted parameters then
+fall through to the less specific route exactly as they do on a standalone server without an adapter,
+and a request that matches nothing returns a plain 404. Each such request writes an
+`Error: Internal: NoFallbackError` line to the server log.
 
-If you assemble the standalone output without the knext CLI, upgrade to Next.js 16.4.0 or later.
+If you assemble the standalone output without the knext CLI, remove `adapterPath` from the runtime
+configuration in the standalone output yourself.
 
 ## Tested against the official suite
 

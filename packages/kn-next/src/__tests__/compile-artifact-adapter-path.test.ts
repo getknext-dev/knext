@@ -130,14 +130,17 @@ describe("compileArtifactForDeploy -- the adapterPath workaround", () => {
     it.each([
         "node",
         "bun",
-    ] as const)("%s runtime: Next 16.4.0 is left byte-for-byte alone", (runtime) => {
+    ] as const)("%s runtime: Next 16.4.0 is blanked too, so a closed-matcher miss falls through", (runtime) => {
         const dir = appWithStandalone("16.4.0");
-        const before = serverJs(dir);
         const result = compileArtifactForDeploy(cfg({ runtime }), dir);
 
-        expect(result.adapterPathWorkaround?.applied).toBe(false);
-        expect(serverJs(dir)).toBe(before);
-        if (runtime === "bun") expect(serverAtCompile).toBe(before);
+        expect(result.adapterPathWorkaround?.applied).toBe(true);
+        expect(serverJs(dir)).toContain('"adapterPath":""');
+        expect(serverJs(dir)).not.toContain(ADAPTER);
+        if (runtime === "bun") {
+            expect(serverAtCompile).toContain('"adapterPath":""');
+            expect(serverAtCompile).not.toContain(ADAPTER);
+        }
     });
 
     it.each([

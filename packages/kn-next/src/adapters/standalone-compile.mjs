@@ -61,10 +61,12 @@
  * ## Baked-in preloads
  *
  * The uncompiled cell runs `bun --require cache-control-normalize.cjs
- * --require request-body-cap.cjs --require bun-keepalive-guard.cjs server.js`.
+ * --require request-body-cap.cjs --require public-origin.cjs
+ * --require bun-keepalive-guard.cjs server.js`.
  * A compiled executable takes no `--require`, so the preloads are the entry's
  * first statements instead: the compiled cell serves the same Cache-Control
- * shape the compat suite gates, and caps request bodies the same way.
+ * shape the compat suite gates, caps request bodies the same way, and rewrites
+ * a wildcard-bind redirect Location to the allowlisted public origin.
  * `arp-primer.cjs` (#1760) is baked in FIRST of all — this is the earliest
  * point anything in this process can fire its one best-effort outbound UDP
  * datagram, since this stage ships with no supervisor to do it any sooner.
@@ -181,6 +183,7 @@ const PRELOAD_NAMES = [
   "arp-primer.cjs",
   "cache-control-normalize.cjs",
   "bun-keepalive-guard.cjs",
+  "public-origin.cjs",
   "request-body-cap.cjs",
 ];
 if (SELF_CONTAINED) PRELOAD_NAMES.push("standalone-self-contained-supervisor.cjs");

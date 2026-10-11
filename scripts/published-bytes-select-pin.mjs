@@ -22,6 +22,8 @@
  * resolved base pin to `--base-pin-out`.
  *
  * Usage:
+ *   node scripts/published-bytes-select-pin.mjs --read-pin-at <rev> --pin-file <path> --out <file>
+ *     (head / merge-base reads: absent => {"rcTag": null}; unreadable => exit 2)
  *   node scripts/published-bytes-select-pin.mjs \
  *     --base-sha <sha> --base-ref <branch> --base-pin-out <path> [--main-ref origin/main]
  */
@@ -59,6 +61,21 @@ function gitShow(repoRoot, rev, path) {
     // Present but unreadable must FAIL, never fall through to another pin.
     throw new Error(`cannot read ${path} at ${rev}: ${err.message}`);
   }
+}
+
+/**
+ * Read a pin file at `rev` for the head / merge-base steps of the workflow.
+ * Absent (path not in the tree) reads as the unfrozen pin; listed but
+ * unreadable THROWS - never "absent". One implementation shared with the
+ * base-commit read above (`gitShow`), so the workflow cannot drift from it.
+ *
+ * @param {string} repoRoot
+ * @param {string} rev
+ * @param {string} path
+ * @returns {string} the pin file's text, or `{"rcTag": null}` when absent.
+ */
+export function readPinTextAt(repoRoot, rev, path) {
+  return gitShow(repoRoot, rev, path) ?? '{"rcTag": null}\n';
 }
 
 /**
@@ -135,6 +152,22 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     const i = args.indexOf(`--${name}`);
     return i === -1 ? null : args[i + 1];
   };
+  const readAt = arg('read-pin-at');
+  if (readAt) {
+    const file = arg('pin-file');
+    const out = arg('out');
+    if (!file || !out) {
+      console.error('published-bytes-select-pin: --read-pin-at needs --pin-file and --out');
+      process.exit(2);
+    }
+    try {
+      writeFileSync(out, readPinTextAt(process.cwd(), readAt, file));
+    } catch (err) {
+      console.error(`published-bytes-select-pin: ${err.message}`);
+      process.exit(2);
+    }
+    process.exit(0);
+  }
   const baseSha = arg('base-sha');
   if (!baseSha) {
     console.error('published-bytes-select-pin: --base-sha is required');

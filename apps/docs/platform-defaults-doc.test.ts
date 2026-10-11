@@ -199,6 +199,37 @@ describe('docs — platform defaults', () => {
     expect(page).toContain('kubectl wait --for=condition=Ready');
   });
 
+  it('names exactly the platform metrics the operator registers, in both directions', () => {
+    const names = (file: string) =>
+      [...readFileSync(join(OPERATOR, file), 'utf-8').matchAll(/Name:\s+"(knext_[a-z_]+)"/g)].map(
+        (m) => m[1],
+      );
+    // The platform series are the ones outside the long-standing reconcile family.
+    const emitted = [
+      ...names('internal/controller/metrics.go').filter((n) => /platform/.test(n)),
+      ...names('internal/webhook/v1alpha1/budget_fallback_metric.go'),
+    ].sort();
+    // A parser that found nothing would make the comparison below vacuous.
+    expect(emitted.length).toBeGreaterThanOrEqual(5);
+    const documented = tableCode(1, /^knext_[a-z_]+$/).sort();
+    expect(documented).toEqual(emitted);
+  });
+
+  it('documents the metric labels the operator actually uses, and no others', () => {
+    const src = readFileSync(
+      join(OPERATOR, 'internal/webhook/v1alpha1/budget_fallback_metric.go'),
+      'utf-8',
+    );
+    for (const reason of [...src.matchAll(/=\s+"([a-z_]+)"\s*$/gm)].map((m) => m[1])) {
+      expect(page).toContain(`\`${reason}\``);
+    }
+    const state = readFileSync(join(OPERATOR, 'internal/controller/platform_state.go'), 'utf-8');
+    for (const reason of ['EffectiveSpecInvalid', 'RolloutPending']) {
+      expect(state).toContain(`"${reason}"`);
+      expect(page).toMatch(new RegExp(`reason="?${reason}|\`${reason}\``));
+    }
+  });
+
   it('says changes are paced, held on invalid, and that an own deploy is not queued', () => {
     expect(page).toMatch(/Changes are paced/);
     expect(page).toMatch(/held, not applied/);

@@ -106,9 +106,27 @@ const STANDALONE_SC = seriesNames(
     scanStandaloneSelfContainedMetrics(read(STANDALONE_SC_SUPERVISOR)),
 );
 
-/** The Go controller's own /metrics. */
+/**
+ * The Go operator process's own /metrics: the controller's registry AND every
+ * collector the admission webhook registers (it runs in the same process and
+ * lands on the same endpoint, e.g. knext_platform_budget_fallback_total).
+ *
+ * The webhook directory is SCANNED, not enumerated: a second webhook metric
+ * file added later is picked up without anyone remembering to list it here.
+ */
+const OPERATOR_WEBHOOK_DIR = join(OPERATOR, "internal/webhook/v1alpha1");
+const OPERATOR_METRIC_SOURCES = [
+    join(OPERATOR, "internal/controller/metrics.go"),
+    ...readdirSync(OPERATOR_WEBHOOK_DIR)
+        .filter((f) => f.endsWith(".go") && !f.endsWith("_test.go"))
+        .map((f) => join(OPERATOR_WEBHOOK_DIR, f)),
+];
 const OPERATOR_EMITTED = seriesNames(
-    scanOperatorMetrics(read(join(OPERATOR, "internal/controller/metrics.go"))),
+    new Map(
+        OPERATOR_METRIC_SOURCES.flatMap((p) => [
+            ...scanOperatorMetrics(read(p)),
+        ]),
+    ),
 );
 
 /**
@@ -247,6 +265,12 @@ describe("emitted-metric scanners", () => {
         // a histogram must contribute its derived series
         expect(OPERATOR_EMITTED).toContain(
             "knext_nextapp_reconcile_duration_seconds_bucket",
+        );
+    });
+
+    it("scans the webhook's collectors, which share the operator's /metrics", () => {
+        expect(OPERATOR_EMITTED).toContain(
+            "knext_platform_budget_fallback_total",
         );
     });
 

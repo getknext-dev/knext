@@ -1,23 +1,41 @@
 /**
- * Version-gated workaround: blank `adapterPath` in the standalone tree's
- * RUNTIME config on Next.js < 16.4.0.
+ * Blank `adapterPath` in the standalone tree's RUNTIME config, on every
+ * Next.js version.
  *
- * ## The upstream bug
+ * ## Why: `adapterPath` set means "an adapter router already admitted this"
  *
  * With `adapterPath` set, the App Router page template (`app-page-runtime`)
  * handles a `dynamicParams = false` miss with `if (nextConfig.adapterPath)
- * return await render404()` -- and it does so INSIDE the response-cache
+ * return await render404()`; unset, it throws `NoFallbackError`. The two are
+ * not equivalent. `NoFallbackError` makes Next's own router carry on to the next,
+ * less specific route (an `app/x/[...rest]` catch-all behind a closed
+ * `app/x/[slug]`). `render404()` ends the request. The adapter branch is written
+ * for a platform that routes with `@next/routing` over the `routing` output of
+ * `onBuildComplete`: that router has already tried the closed route's
+ * `__prerender_bypass`-gated `dynamicRoutes` entry and moved on, so by the time
+ * a request reaches the render the 404 is final. knext does not use that router.
+ * It boots Next's own standalone `server.js`, so the fall-through has to come
+ * from Next's own router, which means the branch must be the unset one.
+ *
+ * The official reference adapter (nextjs/adapter-bun, `createRuntimeNextConfig`)
+ * does the same: `delete configRecord.adapterPath` before writing the config its
+ * runtime reads.
+ *
+ * ## A second bug, below 16.4.0: the racy 500
+ *
+ * On Next.js < 16.4.0 the adapter branch ALSO runs INSIDE the response-cache
  * generator. `render404()` writes the 404 and returns `null`, so the cache layer
  * receives a null entry for a non-null cache key and throws `invariant: cache
  * entry required but not generated`. When the 404 is already committed the throw
  * is log noise; under a burst of concurrent requests (a page prefetching a
  * handful of 404 links at once) the throw lands first and the router answers
- * `500 Internal Server Error`. Without `adapterPath` the same branch throws
- * `NoFallbackError`, which the router turns into a clean 404.
+ * `500 Internal Server Error`.
  *
  * Fixed upstream in Next.js 16.4.0 (vercel/next.js#98964, "Preserve
  * closed-route admission across cache misses": the adapter 404 now renders
  * OUTSIDE the response cache). It was NOT backported: 16.3.x still carries it.
+ * That fix left the missing fall-through above in place, which is why this
+ * module no longer retires at 16.4.0.
  *
  * ## Why blanking `adapterPath` at runtime is safe
  *
@@ -26,13 +44,14 @@
  * config it reads is the one inlined into `server.js`
  * (`__NEXT_PRIVATE_STANDALONE_CONFIG`), and `loadConfig` short-circuits on it
  * before `applyModifyConfig`. Every runtime reader of `config.adapterPath` in
- * Next 16.3.5 / 16.3.6 is one of three `render404` branches (the app-page
- * template, the app-route template, the pages handler), each of which falls back
- * to `throw new NoFallbackError()` when it is unset -- the exact path a plain
- * `output: 'standalone'` server (no adapter) has always taken. The rest of the
- * occurrences are build-only (`build/index.js`, telemetry, config defaults and
+ * Next 16.3.5 / 16.3.6 / 16.3.8 / 16.4.0 is one of three `render404` branches
+ * (the app-page template, the app-route template, the pages handler), each of
+ * which falls back to `throw new NoFallbackError()` when it is unset -- the
+ * exact path a plain `output: 'standalone'` server (no adapter) has always
+ * taken. The rest of the occurrences are build-only (`build/index.js`,
+ * `build/adapter`, the export worker, telemetry, config defaults and
  * validation). So blanking it changes ONLY how a `dynamicParams = false` miss is
- * answered, from the racy `render404()` to the proven `NoFallbackError` 404.
+ * answered, from `render404()` to the proven `NoFallbackError` path.
  *
  * ## What is patched
  *
@@ -44,14 +63,13 @@
  *
  * ## Retirement
  *
- * Gated on the installed Next.js version, so it disappears on its own: at
- * `>= 16.4.0` this is a no-op. Once the compat pin and the supported peer range
- * both sit at `>= 16.4.0`, delete this module and its three call sites
- * (`compileArtifactForDeploy` in `cli/build-artifact.ts`, `scripts/e2e-deploy.sh`,
- * the `./internal/standalone-adapter-path` export) and
- * `__tests__/standalone-adapter-path*.test.ts`. A pre-release of 16.4.0 sorts
- * below 16.4.0 under semver and is therefore still blanked; that is safe (it is
- * the proven non-adapter path), merely redundant on a canary that has the fix.
+ * NOT retired by raising the Next.js floor. The only thing that retires this is
+ * knext routing through the adapter's `routing` output (`@next/routing`) instead
+ * of Next's own router, or a Next release whose adapter branch falls through
+ * without a router in front of it. Until then keep the module and its three call
+ * sites (`compileArtifactForDeploy` in `cli/build-artifact.ts`,
+ * `scripts/e2e-deploy.sh`, the `./internal/standalone-adapter-path` export).
+ * The version only picks which reason is logged (`nextCarriesAdapter404Bug`).
  */
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -156,10 +174,11 @@ function blankMembers(file: string): number {
     });
     if (out.replace(UNSET_ADAPTER_PATH_MEMBER, "").includes("adapterPath")) {
         throw new Error(
-            `[knext] ${file} sets adapterPath in a form the Next.js < ${ADAPTER_PATH_404_FIXED_IN} workaround does not recognise, so it was NOT blanked. ` +
+            `[knext] ${file} sets adapterPath in a form the adapterPath workaround does not recognise, so it was NOT blanked. ` +
                 `Expected a JSON member matching ${ADAPTER_PATH_MEMBER} (e.g. "adapterPath":"/path/adapter.mjs"). ` +
-                "Left as is, a dynamicParams=false 404 can answer a burst of concurrent prefetches with a 500. " +
-                `Upgrade Next.js to ${ADAPTER_PATH_404_FIXED_IN} or later, or update standalone-adapter-path.ts for the new serialisation.`,
+                "Left as is, a dynamicParams=false miss ends in the closed route's 404 instead of falling through to a less specific route, " +
+                `and on Next.js < ${ADAPTER_PATH_404_FIXED_IN} a burst of concurrent prefetches can answer it with a 500. ` +
+                "Update standalone-adapter-path.ts for the new serialisation.",
         );
     }
     if (count > 0) writeFileSync(file, out);
@@ -177,13 +196,11 @@ export interface BlankAdapterPathOptions {
 }
 
 /**
- * Blank `adapterPath` in the standalone tree's runtime config when (and only
- * when) the installed Next.js is below 16.4.0. See the module comment.
+ * Blank `adapterPath` in the standalone tree's runtime config, on every Next.js
+ * version. See the module comment.
  *
- * An unreadable version or a tree with no adapterPath is reported in the result,
- * not thrown: a deploy must not die on a workaround it cannot judge, and an
- * unreadable version is NOT treated as affected. But on an AFFECTED version
- * whose config sets adapterPath in a form this cannot rewrite, it THROWS (see
+ * A tree with no adapterPath is reported in the result, not thrown. A config
+ * that sets adapterPath in a form this cannot rewrite THROWS (see
  * `blankMembers`): a silent `applied: false` there would ship the bug.
  */
 export function blankStandaloneAdapterPath(
@@ -193,27 +210,6 @@ export function blankStandaloneAdapterPath(
     const nextVersion =
         opts.nextVersion ??
         resolveStandaloneNextVersion(opts.serverDir, opts.projectDir);
-
-    if (nextVersion === null) {
-        const reason =
-            "could not read the installed Next.js version, so the adapterPath workaround was not applied";
-        log(`[knext] ${reason}`);
-        return { applied: false, reason, nextVersion, files: [] };
-    }
-    const affected = nextCarriesAdapter404Bug(nextVersion);
-    if (affected === null) {
-        const reason = `Next.js version '${nextVersion}' is not a recognisable version, so the adapterPath workaround was not applied`;
-        log(`[knext] ${reason}`);
-        return { applied: false, reason, nextVersion, files: [] };
-    }
-    if (!affected) {
-        return {
-            applied: false,
-            reason: `Next.js ${nextVersion} >= ${ADAPTER_PATH_404_FIXED_IN} renders the adapter 404 outside the response cache; no workaround needed`,
-            nextVersion,
-            files: [],
-        };
-    }
 
     const files: string[] = [];
     for (const file of [
@@ -225,12 +221,19 @@ export function blankStandaloneAdapterPath(
     if (files.length === 0) {
         return {
             applied: false,
-            reason: `Next.js ${nextVersion} is affected, but the standalone config under ${opts.serverDir} sets no adapterPath (nothing to blank)`,
+            reason: `the standalone config under ${opts.serverDir} sets no adapterPath (nothing to blank)`,
             nextVersion,
             files,
         };
     }
-    const reason = `Next.js ${nextVersion} < ${ADAPTER_PATH_404_FIXED_IN}: blanked adapterPath in ${files.length} standalone config file(s) (a dynamicParams=false 404 would otherwise 500 under concurrent prefetches)`;
+    // The version only decides which consequence the log names. Whether to blank
+    // does not depend on it (see the module comment).
+    const label = nextVersion === null ? "unreadable" : nextVersion;
+    const consequence =
+        nextVersion !== null && nextCarriesAdapter404Bug(nextVersion) === true
+            ? `a dynamicParams=false 404 would otherwise 500 under concurrent prefetches (Next < ${ADAPTER_PATH_404_FIXED_IN}), and not fall through to a less specific route`
+            : "a closed dynamicParams=false matcher must fall through to a less specific route, which Next's own router only does without an adapter";
+    const reason = `Next.js ${label}: blanked adapterPath in ${files.length} standalone config file(s) (${consequence})`;
     log(`[knext] ${reason}`);
     return { applied: true, reason, nextVersion, files };
 }

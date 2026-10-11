@@ -55,6 +55,7 @@ var _ = Describe("hold-last-good that drops the app's own change is not Ready", 
 	nn := types.NamespacedName{Name: appName, Namespace: ns}
 
 	It("reports Ready=False and does not advance the reconciled generation; recovers when the hold lifts", func() {
+		holdsBefore := holdsCounter(ReasonEffectiveSpecInvalid)
 		DeferCleanup(func() { deletePlatformIfPresent(ctx, "default") })
 		Expect(k8sClient.Create(ctx, rawPlatform("default", map[string]interface{}{
 			// An active platform that sets no budget: the built-in 80 applies until it does.
@@ -121,6 +122,11 @@ var _ = Describe("hold-last-good that drops the app's own change is not Ready", 
 			"nothing of the app's own was dropped, so the live Service's readiness is still the truth")
 		Expect(apimeta.IsStatusConditionFalse(held.Status.Conditions, ConditionReconciling)).To(BeTrue())
 
+		By("the fleet metrics see the hold: the gauge counts the app and the counter counted the entry")
+		Expect(heldGauge(ReasonEffectiveSpecInvalid)).To(Equal(1.0))
+		Expect(holdsCounter(ReasonEffectiveSpecInvalid)-holdsBefore).To(Equal(1.0),
+			"a hold is counted once when it begins, not on every pass")
+
 		By("the developer deploys a new image while the hold is in force")
 		held.Spec.Image = imageV2
 		Expect(k8sClient.Update(ctx, held)).To(Succeed())
@@ -156,5 +162,7 @@ var _ = Describe("hold-last-good that drops the app's own change is not Ready", 
 		rec := apimeta.FindStatusCondition(done.Status.Conditions, ConditionReconciling)
 		Expect(rec.Status).To(Equal(metav1.ConditionFalse))
 		Expect(rec.ObservedGeneration).To(Equal(newGen))
+		Expect(heldGauge(ReasonEffectiveSpecInvalid)).To(Equal(0.0), "a recovered app leaves the held-apps gauge")
+		Expect(holdsCounter(ReasonEffectiveSpecInvalid)-holdsBefore).To(Equal(1.0), "recovery is not a new hold")
 	})
 })

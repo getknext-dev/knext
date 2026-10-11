@@ -78,7 +78,7 @@ vet: ## Run go vet against code.
 #
 # Keep this list in sync with the //go:build tags under test/e2e/. A tag that is not
 # listed here is a tag nothing compiles.
-E2E_BUILD_TAGS ?= e2e e2e_scale e2e_gc e2e_cli e2e_bundle e2e_rollback e2e_webhook_down
+E2E_BUILD_TAGS ?= e2e e2e_scale e2e_gc e2e_cli e2e_bundle e2e_rollback e2e_webhook_down e2e_platform
 
 .PHONY: vet-tags
 vet-tags: ## Compile-check EVERY build-tagged e2e suite (untagged vet cannot see them).
@@ -141,6 +141,12 @@ test-e2e-bundle: manifests generate fmt vet ## Run the install-BUNDLE e2e (#117)
 	# Explicit -timeout (>> Go's silent 600s default): a genuine assertion failure
 	# must surface as a Ginkgo failure, not a deadline goroutine-dump panic.
 	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e_bundle ./test/e2e/ -v -ginkgo.v -run TestBundleE2E -timeout 30m
+
+.PHONY: test-e2e-platform
+test-e2e-platform: manifests generate fmt vet ## Run the PLATFORM-LAYER e2e (ADR-0064): on a kind+cert-manager+Knative+Kourier cluster, installs the operator bundle (with the KnextPlatform CRD), proves an empty platform renders the Knative Service byte-identically, a platform timeout is inherited and paced by the rollout limiter, a lowered connectionBudget HOLDS apps (old revision keeps serving, Ready=False on a dropped change, held metric moves), an over-budget app deletes cleanly, and restoring the budget recovers. kind-only (the platform is cluster-wide).
+	# Explicit -timeout (>> Go's silent 600s default): a genuine assertion failure
+	# must surface as a Ginkgo failure, not a deadline goroutine-dump panic.
+	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e_platform ./test/e2e/ -v -ginkgo.v -run TestPlatformE2E -timeout 45m
 
 .PHONY: test-e2e-webhook-down
 test-e2e-webhook-down: setup-test-e2e manifests generate fmt vet ## Run the WEBHOOK-DOWN DEPLOY-FREEZE e2e (#314 / S11): scales the operator to zero, PROVES the validating webhook is actually unreachable (no ready endpoints + a server dry-run that hits the unreachability class), then asserts deploys FREEZE — CREATE persists nothing, an in-place image bump of a running app is rejected with its stored spec unchanged, DELETE still works (the freeze's exact scope) — and that a skew-shaped payload is still diagnosed as SKEW, not as a webhook outage, in that same frozen state. Ends by restoring the webhook and replaying the identical frozen apply, which must now succeed (in-band mutation proof). CLUSTER-WIDE DESTRUCTIVE while it runs (every NextApp write on the cluster is frozen) — kind-only; needs cert-manager and a `knative-serving` namespace (auto-created), NOT a Knative Serving install.

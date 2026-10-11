@@ -1,0 +1,5 @@
+---
+"@getknext/core": minor
+---
+
+Redirects built from `request.url` can now use your app's domain. Next.js builds `request.url` from the address its server listens on, so in a pod a route handler's `NextResponse.redirect(new URL('/x', request.url))` sent the browser to `http://0.0.0.0:8080/x`, and any cookie set on that response was lost. Set `KNEXT_PUBLIC_ORIGINS` (in `knext.config.ts` `env` or the NextApp's `spec.env`) to your app's hostnames, primary domain first, for example `app.example.com,www.example.com`. A redirect to the listening address is then rewritten to one of those hosts. The request's `X-Forwarded-Host` or `Host` is used only when it is on the list; otherwise the first entry is used. The scheme comes from `X-Forwarded-Proto` when it is `http` or `https`, and is `https` otherwise. Any other redirect is left alone, and without the variable nothing changes. This covers the Node, Bun and compiled-executable standalone targets.

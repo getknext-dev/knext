@@ -17,11 +17,15 @@ limitations under the License.
 package controller
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 // ADR-0064 failure mode F2: a platform edit can change the effective values of
@@ -156,5 +160,41 @@ func TestRolloutLimiter_StaleReservationsAreForgotten(t *testing.T) {
 	l.reserve(nn(1000), t0.Add(24*time.Hour), 10)
 	if n := l.pending(); n > 1 {
 		t.Errorf("%d reservations still held a day later; abandoned ones must be purged", n)
+	}
+}
+
+func TestRolloutLimiter_ReleaseDropsTheSlotAndRefreshesTheGauge(t *testing.T) {
+	var l rolloutLimiter
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	l.reserve(nn(0), t0, 10)
+	l.reserve(nn(1), t0, 10) // queued
+	if got := testutil.ToFloat64(rolloutPending); got != 1 {
+		t.Fatalf("rollout_pending = %v, want 1 after queueing one app", got)
+	}
+	l.release(nn(1))
+	if n := l.pending(); n != 0 {
+		t.Errorf("pending = %d after release, want 0", n)
+	}
+	if got := testutil.ToFloat64(rolloutPending); got != 0 {
+		t.Errorf("rollout_pending = %v after release, want 0", got)
+	}
+}
+
+// A deleted app that held a queued slot must not leave a phantom backlog: the
+// gauge only otherwise refreshes inside reserve, so an alert on it would
+// false-fire until some unrelated app next reserved.
+func TestReconcile_DeletedAppReleasesItsQueuedRolloutSlot(t *testing.T) {
+	r := &NextAppReconciler{Client: fake.NewClientBuilder().WithScheme(prewarmTestScheme(t)).Build()}
+	t0 := time.Now()
+	r.rollout.reserve(nn(0), t0, 10)
+	r.rollout.reserve(nn(1), t0, 10) // queued, then the app is deleted
+	if got := testutil.ToFloat64(rolloutPending); got != 1 {
+		t.Fatalf("rollout_pending = %v, want 1 before delete", got)
+	}
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: nn(1)}); err != nil {
+		t.Fatalf("reconcile of a deleted app: %v", err)
+	}
+	if got := testutil.ToFloat64(rolloutPending); got != 0 {
+		t.Errorf("rollout_pending = %v after the app was deleted, want 0", got)
 	}
 }

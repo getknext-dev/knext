@@ -263,6 +263,23 @@ if (existsSync(requestBodyCapPreload)) {
     );
 }
 
+// ── Allowlisted public origin for redirects ──────────────────────────────────
+// Next builds `request.url` from the bind address, and the child binds the
+// wildcard (HOSTNAME is sanitized to empty, see ./env), so a redirect built
+// from `request.url` would answer `Location: http://0.0.0.0:PORT/…`. This
+// preload rewrites ONLY a wildcard-bind Location, to a host drawn from the
+// KNEXT_PUBLIC_ORIGINS allowlist (a forwarded/Host header is used only when it
+// is on the list). Unset → it installs nothing. Loaded for BOTH runtimes.
+const publicOriginPreload = resolve(import.meta.dirname, "public-origin.cjs");
+if (existsSync(publicOriginPreload)) {
+    preloadArgs.push("--require", publicOriginPreload);
+} else {
+    log.warn(
+        { publicOriginPreload },
+        "public-origin preload not found; redirects built from request.url keep the bind origin",
+    );
+}
+
 // ── Bun ≤1.3.x keep-alive mitigation (#188) ──────────────────────────────────
 // Bun ≤1.3.14 resets a reused keep-alive socket when the next request arrives
 // immediately after the previous response completed (plain node:http repro;

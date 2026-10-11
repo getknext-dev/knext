@@ -275,6 +275,10 @@ export default defineConfig([
       // ADR-0044 Option C — the in-process request-body byte cap for the
       // standalone server (node AND bun; compiled into the standalone exec).
       'adapters/request-body-cap': 'src/adapters/request-body-cap.cjs',
+      // Allowlisted public origin for redirects: rewrites a wildcard-bind
+      // (0.0.0.0 / [::]) Location to a KNEXT_PUBLIC_ORIGINS host (node AND bun;
+      // compiled into the standalone exec). Inert when the env var is unset.
+      'adapters/public-origin': 'src/adapters/public-origin.cjs',
       // #1760 — the ARP/neighbour-table primer: one best-effort outbound UDP
       // datagram to the pod's default gateway, fired as early as possible at
       // process start (disk-mode: required directly by node-server.ts, before

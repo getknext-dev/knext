@@ -103,6 +103,27 @@ The connection details come from the environment — `REDIS_URL` and `REDIS_KEY_
 into your pods from the `cache` block of your deploy config (see
 [the operator reference](/docs/operator)); nothing about Redis is hardcoded in your app.
 
+## `'use cache'` is per-pod today
+
+The Redis cache above covers ISR and the response cache. It does **not** back Next's `'use cache'`
+directive (Cache Components). Today, on knext:
+
+- A server-side `'use cache'` entry is **per-pod**. It is not shared between pods and does not
+  survive scale-to-zero, so a fresh pod recomputes it.
+- The scaffolded `next.config.ts` sets `cacheMaxMemorySize: 0` and registers no `cacheHandlers`.
+  With that, `'use cache'` keeps nothing in production at all. Your code still runs and returns
+  correct results; it just is not cached.
+- `'use cache: remote'` has no shared store behind it either, so it behaves the same way.
+- Tag invalidation with `revalidateTag` still reaches ISR pages, but it cannot invalidate a
+  `'use cache'` entry held by another pod.
+
+Plan around that: treat `'use cache'` as a per-pod optimisation, not as a shared cache, and keep
+anything that must be shared (or must survive scale-to-zero) in ISR or your own data store.
+`knext doctor` warns when your `next.config` enables `cacheComponents`.
+
+A Redis-backed `'use cache'` store shared across pods is planned for a future release. Until it
+ships, the behaviour above is what you get.
+
 ## The Cache-Control header clients see
 
 Next.js marks cacheable pages with directives meant for a shared cache in front of the server, such
