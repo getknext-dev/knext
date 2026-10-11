@@ -9,19 +9,22 @@ Shell rule that bites every recipe: single-quote any instruction containing back
 runs them. Run `jev doctor` first if anything fails; with no key (`~/.config/typesafe/api_key`,
 never print it) say "jev unavailable" in the report and judge it yourself.
 
-The hooks in `.claude/hooks/` (`jev-bash-gate.sh`, `jev-result-screen.sh`; offline suite
-`jev-hooks.test.sh`) are the always-on half of Level 6 and need nothing from this file.
+The hook `.claude/hooks/jev-result-screen.sh` (offline suite `jev-hooks.test.sh`) is the
+always-on half of Level 6 and needs nothing from this file: it screens fetched PR/issue/web text
+for prompt injection and only ever adds a warning. The other half, a blocking jev gate for Bash
+commands, is **not shipped**; it is open design work in getknext-dev/knext#2222. The
+deterministic `block-dangerous-bash.sh` remains the only command gate.
 
 ## Where each level lands
 
 | Level | Pattern | Here |
 |---|---|---|
 | 1 | one typed decision | L1/L4 below |
-| 2 | fan-out, many questions in one `ask` | `jev-bash-gate.sh`, `pr-risk.sh` |
+| 2 | fan-out, many questions in one `ask` | `pr-risk.sh` |
 | 3 | composite score | `pr-risk.sh` |
 | 4 | confidence gating | L1/L4 below |
 | 5 | routing | `~/.claude/skills/jev/pick-route.sh` |
-| 6 | hooks as guardrails | `jev-bash-gate.sh` (blocking), `jev-result-screen.sh` (advisory) |
+| 6 | hooks as guardrails | `jev-result-screen.sh` (advisory, shipped); a blocking Bash gate is open design work, #2222 |
 | 7 | should I compact? | **does not apply**: Claude Code owns compaction, an agent cannot trigger it |
 | 8/9 | cheap reads, scouting | below |
 | 10 | CI triage, judge own diff | below |

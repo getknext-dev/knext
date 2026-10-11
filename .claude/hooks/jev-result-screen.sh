@@ -16,8 +16,11 @@
 # external content" — i.e. the model itself is unsure. A false block here would cut the agent
 # off from a legitimate PR comment; a false note costs one sentence of context. It only ever
 # adds context (no `decision` field, always exit 0), and it FAILS OPEN on a missing binary,
-# API error, timeout (JEV_GATE_TIMEOUT, default 3 s) or unparseable output. Do not turn it
+# API error, timeout (JEV_HOOK_TIMEOUT, default 3 s) or unparseable output. Do not turn it
 # into a gate without new evidence. The text sent is capped at 32 KiB.
+#
+# A blocking, semantic gate for Bash COMMANDS was prototyped alongside this screen and taken
+# out of this change: it is open design work (getknext-dev/knext#2222), not shipped here.
 #
 # Text that carries a LITERAL secret format (see jev_has_literal_secret: key prefixes, a PEM
 # marker, a 32+ char base64/hex run, an Authorization/Bearer header with a value) is NOT sent:

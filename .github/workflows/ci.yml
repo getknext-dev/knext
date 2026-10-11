@@ -878,13 +878,13 @@ jobs:
       - name: Run the jev hook suite (offline, stubbed jev) and mutation-prove it
         run: |
           set -euo pipefail
-          # The jev gate/screen are advisory layers ON TOP of the hook above; they fail
-          # open by design, so only a test can show the block branch and each fail-open
-          # path still work. The suite stubs jev (no network, no key). The harness
-          # mutates a temp COPY, requires the baseline green first, and aborts non-zero
-          # on a missed anchor. --smoke runs one mutation per guard family: the suite takes
-          # minutes on a hosted runner, so the full sweep (about 110 mutations) stays the
-          # local evidence tool rather than an hour-long CI step.
+          # The jev result screen is an advisory layer ON TOP of the hook above; it fails
+          # open by design, so only a test can show the flag branch, the literal-secret
+          # skip and each fail-open path still work. The suite stubs jev (no network, no
+          # key). The harness mutates a temp COPY, requires the baseline green first, and
+          # aborts non-zero on a missed anchor. --smoke runs one mutation per guard family
+          # (the suite takes minutes on a hosted runner); the full sweep stays the local
+          # evidence tool.
           bash .claude/hooks/jev-hooks.test.sh
           bash .claude/skills/jev/pr-risk.test.sh
           python3 .claude/hooks/jev-hooks-mutation-proof.py --smoke
