@@ -1,5 +1,10 @@
 import type RedisClient from 'ioredis';
 import { getDbPool } from '../clients';
+import {
+  isConnectionRefused,
+  isScaleToZeroDatabase,
+  observeAcquireFailures,
+} from '../db/reachability';
 import { logger } from '../logger';
 import { createRedisClient } from '../redis/client';
 import { ensureDialable } from '../redis/quiet';
@@ -69,25 +74,6 @@ const WAKE_ERROR_CODES_ARR = [
   'EAI_AGAIN',
 ];
 const WAKE_ERROR_CODES = new Set(WAKE_ERROR_CODES_ARR);
-
-/**
- * True when the DSN points at the scale-zero-pg gateway — the scale-to-zero
- * database a `waking` Postgres state can legitimately describe. Matches the
- * host label sequence `scale-zero-pg.svc` (e.g. `pggw.scale-zero-pg.svc.cluster.local.`),
- * never a substring of the path or userinfo. There is no env marker for the
- * binding today, so the gateway host is the only in-app signal; a
- * bring-your-own database never matches it.
- */
-export function isScaleToZeroDatabase(dsn: string | undefined): boolean {
-  if (!dsn) return false;
-  let host: string;
-  try {
-    host = new URL(dsn).hostname.toLowerCase();
-  } catch {
-    return false;
-  }
-  return /(^|\.)scale-zero-pg\.svc(\.|$)/.test(host);
-}
 
 /**
  * Shallow liveness/readiness probe (#338).
@@ -203,21 +189,53 @@ export async function checkDeepHealth(): Promise<HealthStatus> {
   if (process.env.DATABASE_URL) {
     checkPromises.push(
       (async () => {
+        // A bring-your-own database has no wake to wait for, so a refusal is
+        // decisive on the FIRST attempt. The pool keeps retrying a failed connect
+        // for its whole budget (8 s by default — the same as this check's window),
+        // so waiting for its final rejection would lose the race and leave the
+        // state at its initial `waking`. Listen for the refusal instead. The
+        // scale-zero-pg gateway never short-circuits: a refusal there IS a wake.
+        let stopObserving = () => {};
+        const refusedOnByoHost = new Promise<'refused'>((resolve) => {
+          if (isScaleToZeroDatabase(process.env.DATABASE_URL)) return;
+          stopObserving = observeAcquireFailures((failure) => {
+            if (isConnectionRefused(failure)) resolve('refused');
+          });
+        });
         try {
           const pool = getDbPool();
-          await pool.query('SELECT 1 as healthy');
-          checks.postgres = 'up';
+          const probe = Promise.resolve(pool.query('SELECT 1 as healthy'));
+          // If the refusal wins, the probe keeps running inside the pool's retry
+          // loop. The race below subscribed to it, so its late rejection is handled.
+          const outcome = await Promise.race([probe.then(() => 'up' as const), refusedOnByoHost]);
+          if (outcome === 'refused') {
+            logger.error('[Health Check] Postgres connection refused (bring-your-own database)');
+            checks.postgres = 'down';
+          } else {
+            checks.postgres = 'up';
+          }
         } catch (error) {
-          if (isWakeSignal(error) && isScaleToZeroDatabase(process.env.DATABASE_URL)) {
-            // Scale-to-zero DB asleep/mid-wake: NORMAL, not a fault.
-            logger.info({ err: error }, '[Health Check] Postgres waking (scale-to-zero)');
+          // Only a REFUSAL on a database that cannot be waking is an outage. A
+          // reset, a DNS blip or a timeout is ambiguous on any host, so it keeps
+          // the wake classification everywhere; and on a scale-to-zero database
+          // even a refusal is the wake itself.
+          if (
+            isWakeSignal(error) &&
+            (isScaleToZeroDatabase(process.env.DATABASE_URL) || !isConnectionRefused(error))
+          ) {
+            // Asleep/mid-wake (or ambiguous): NORMAL, not a fault.
+            logger.info({ err: error }, '[Health Check] Postgres waking');
             checks.postgres = 'waking';
           } else {
             // Bring-your-own Postgres (the default): a refused connection is an
             // outage, not a wake — nothing is scheduled to come back on its own.
+            // Anything that is not a connection-level failure at all (auth, a
+            // missing relation) is a real fault as well.
             logger.error({ err: error }, '[Health Check] Postgres connection failed');
             checks.postgres = 'down';
           }
+        } finally {
+          stopObserving();
         }
       })(),
     );

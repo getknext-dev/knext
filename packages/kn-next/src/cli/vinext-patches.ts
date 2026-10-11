@@ -157,6 +157,24 @@ export function vinextPatchesDisabled(
     );
 }
 
+/**
+ * The `KNEXT_VINEXT_PATCHES` value as typed (trimmed), when it is set to
+ * something neither the disabling values nor `strict` recognise. Unset and
+ * blank are not unrecognised. The unrecognised value keeps the default warn
+ * behaviour; this only exists so that it is not silent.
+ */
+export function unrecognisedVinextPatchesValue(
+    env: Record<string, string | undefined> = process.env,
+): string | undefined {
+    const raw = env[VINEXT_PATCHES_ENV]?.trim();
+    if (raw === undefined || raw === "") return undefined;
+    const known: readonly string[] = [
+        ...VINEXT_PATCHES_DISABLE_VALUES,
+        VINEXT_PATCHES_STRICT_VALUE,
+    ];
+    return known.includes(raw.toLowerCase()) ? undefined : raw;
+}
+
 /** Where the bundled patches live inside the installed @getknext/core. */
 export function vinextPatchesDir(): string {
     return join(packageRoot(), "templates", "vinext-patches");
@@ -559,16 +577,25 @@ export function ensureVinextPatches(
 /** One human line per outcome; shared by the verb and `knext build`. */
 export function describeEnsureResult(
     res: EnsureResult,
-    opts: { check?: boolean } = {},
+    opts: { check?: boolean; env?: Record<string, string | undefined> } = {},
 ): string[] {
-    if (res.kind === "no-vinext") return [];
+    const bad = unrecognisedVinextPatchesValue(opts.env);
+    const badLines =
+        bad === undefined
+            ? []
+            : [
+                  `knext: WARNING — ${VINEXT_PATCHES_ENV}=${bad} is not a recognised value, so it is treated as unset (warn on a vinext version mismatch). Accepted values: 0 (turn the bundled fixes off), strict (fail the build on a mismatch), or unset.`,
+              ];
+    if (res.kind === "no-vinext") return badLines;
     if (res.kind === "disabled") {
         return [
+            ...badLines,
             `knext: ${VINEXT_PATCHES_ENV}=0 is set — knext's bundled vinext fixes were NOT applied.`,
         ];
     }
     if (res.kind === "version-mismatch") {
         return [
+            ...badLines,
             `knext: WARNING — vinext ${res.installed} is installed; knext's ${res.skipped} bundled vinext fixes target ${res.expected} only, so none of them were applied.`,
             "knext: this build lacks them (they include the Nitro image optimizer, 404s for unmatched asset requests, and the Pages route and inline-CSS manifests), unless your vinext release already includes them. The published compatibility results cover vinext " +
                 `${res.expected} only.`,
@@ -577,6 +604,7 @@ export function describeEnsureResult(
     }
     const applied = res.results.filter((r) => r.status === "applied").length;
     return [
+        ...badLines,
         applied === 0
             ? `knext: bundled vinext fixes already applied (${res.results.length}).`
             : opts.check
@@ -641,6 +669,7 @@ export async function vinextPatchesMain(
         });
         for (const line of describeEnsureResult(res, {
             check: values.check,
+            env: io.env,
         })) {
             out(`${line}\n`);
         }

@@ -1,0 +1,1517 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: kn-next-operator
+    control-plane: controller-manager
+  name: kn-next-operator-system
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.1
+  name: nextapps.apps.kn-next.dev
+spec:
+  group: apps.kn-next.dev
+  names:
+    kind: NextApp
+    listKind: NextAppList
+    plural: nextapps
+    singular: nextapp
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.url
+      name: URL
+      type: string
+    - jsonPath: .status.conditions[?(@.type=='Ready')].status
+      name: Ready
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    - jsonPath: .status.observedRevision
+      name: Revision
+      priority: 1
+      type: string
+    - jsonPath: .status.scaledToZero
+      name: ScaledToZero
+      priority: 1
+      type: boolean
+    - jsonPath: .status.conditions[?(@.type=='Degraded')].status
+      name: Degraded
+      priority: 1
+      type: string
+    - jsonPath: .status.lastSuccessfulDeployTime
+      name: LastDeploy
+      priority: 1
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: NextApp is the Schema for the nextapps API
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec defines the desired state of NextApp
+            properties:
+              build:
+                description: |-
+                  Build selects the build system that produced the image.
+                  Valid values: "turbopack", "vinext", and "webpack" (ADR-0048, #1219).
+                  Maps from KnativeNextConfig.build.
+
+                  "vinext" is the compiled single-executable artifact — the app is one
+                  binary the image's own CMD runs. For that value the controller must NOT
+                  force a container command: there is no server.js in the image, and the
+                  old Runtime="bun" command would CrashLoop it. That controller branch and
+                  this enum widened in the SAME change, exactly as the previous version of
+                  this comment demanded ("never before" — the enum is the cluster-side
+                  contract, and publishing a value the controller cannot reconcile would
+                  let a GitOps controller, which does not assert strict validation, store
+                  a CR the operator then mis-runs with no condition, event, or refusal).
+
+                  "webpack" (#1219) is a SECOND spelling of the standalone shape, not a
+                  third code path: `next build --webpack` emits the identical
+                  `.next/standalone` tree as `next build` (turbopack). The controller
+                  branch above tests `!= "vinext"`, not `== "turbopack"`, so it already
+                  covers "webpack" with no change — the same reasoning that let the CLI
+                  artifact contract add it as a pure registry entry (see
+                  `artifact-contract.ts`).
+
+                  INDEPENDENT of Runtime. The two axes are connected by the artifact SHAPE a
+                  builder emits and a runtime must accept — never by a rule pairing the two
+                  names. Any value of Build is admissible with any value of Runtime; a
+                  builder/runtime pairing that cannot work is rejected by the CLI against
+                  the artifact contract, before a CR is ever emitted. (For "vinext" the
+                  runtime is baked into the binary, so Runtime does not affect how the
+                  container starts.)
+
+                  Deliberately NOT a CEL cross-field rule. ADR-0036 specified a fail-closed
+                  `bun => vinext` admission rule; it was never implemented, and encoding
+                  compatibility here would pin a policy into every cluster's CRD, where
+                  changing it later needs a CRD roll rather than a CLI release.
+
+                  Additive and optional at v1alpha1 (ADR-0017): absence means "turbopack",
+                  so every CR ever written keeps its exact meaning. The CLI's own default
+                  builder flipped from "vinext" to "turbopack" in #1183 (ADR-0058), which
+                  now coincides with the wire default — but the CLI still writes the
+                  resolved value EXPLICITLY either way (`cr-builder.ts`), never relying on
+                  that coincidence. Absence is permanently reserved for the standalone
+                  shape and cannot be re-read to mean anything else.
+
+                  Order matters for upgrades (#548): a cluster whose CRD predates "vinext"
+                  rejects such a CR under --validate=strict, which the CLI always passes —
+                  a loud stop, not a silent mis-run. Upgrade the operator/CRD first.
+                enum:
+                - turbopack
+                - vinext
+                - webpack
+                type: string
+              buildId:
+                description: |-
+                  BuildID is the deploy's Next.js BUILD_ID (issue #93 — skew protection).
+                  The CLI sets NEXT_DEPLOYMENT_ID == this value at build time, so the
+                  `_next/static/<BuildID>/` asset prefix in the object store is named by it.
+                  The operator stamps it onto the Knative Service's revision (pod) template
+                  as the label `apps.kn-next.dev/build-id`, which propagates to every
+                  Revision. The deploy-time asset GC then resolves a live revision back to
+                  its build-id via that label (read-only) so a live revision's assets are
+                  never reaped. Empty => no label stamped (back-compat).
+                type: string
+              cache:
+                description: Caching infrastructure
+                properties:
+                  keyPrefix:
+                    description: KeyPrefix is prepended to every cache key — maps
+                      from KnativeNextConfig.cache.keyPrefix
+                    type: string
+                  provider:
+                    type: string
+                  url:
+                    type: string
+                type: object
+              database:
+                description: |-
+                  Database binds an EXISTING database to the app (ADR-0019). knext is
+                  engine-agnostic and provisions NO database (the managed scale-to-zero-pg
+                  mode was removed — ADR-0025): set spec.database.secretRef to bind an
+                  existing same-namespace Secret's DSN as DATABASE_URL (+ roSecretRef ->
+                  DATABASE_URL_RO). Leave nil to wire a DB by hand via spec.secrets.envMap.
+                properties:
+                  roSecretRef:
+                    description: |-
+                      ROSecretRef optionally binds a read-only DSN as DATABASE_URL_RO (BYO
+                      mode). key defaults to "DATABASE_URL_RO", so a single Secret carrying
+                      both keys binds with roSecretRef: {name: <same>}. Requires secretRef.
+                    properties:
+                      key:
+                        description: |-
+                          Key inside the Secret holding the DSN. Defaults to "DATABASE_URL" for
+                          secretRef and "DATABASE_URL_RO" for roSecretRef.
+                        minLength: 1
+                        type: string
+                      name:
+                        description: Name of the Secret (DNS-1123 subdomain).
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  secretRef:
+                    description: |-
+                      SecretRef binds an EXISTING Secret in the app's namespace as the app's
+                      DATABASE_URL (BYO mode, ADR-0019). key defaults to "DATABASE_URL".
+                    properties:
+                      key:
+                        description: |-
+                          Key inside the Secret holding the DSN. Defaults to "DATABASE_URL" for
+                          secretRef and "DATABASE_URL_RO" for roSecretRef.
+                        minLength: 1
+                        type: string
+                      name:
+                        description: Name of the Secret (DNS-1123 subdomain).
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                        type: string
+                    required:
+                    - name
+                    type: object
+                type: object
+                x-kubernetes-validations:
+                - message: spec.database.roSecretRef requires spec.database.secretRef
+                  rule: '!has(self.roSecretRef) || has(self.secretRef)'
+              env:
+                additionalProperties:
+                  type: string
+                description: |-
+                  Env sets plain, NON-SECRET environment variables (name → value) on the
+                  app container — configuration flags like KNEXT_CACHE_CONTROL_NORMALIZE=0.
+                  Secrets do NOT belong here: values are stored verbatim in the CR (visible
+                  to anyone who can read it); use spec.secrets for anything sensitive.
+
+                  Names must be C_IDENTIFIERs. Reserved names are rejected at admission:
+                  HOSTNAME (operator-injected 0.0.0.0 bind fix — overriding it resurrects
+                  the pod-IP-bind outage, #178/#184) and PORT / K_SERVICE / K_REVISION /
+                  K_CONFIGURATION (Knative-reserved). Precedence: spec.env never overrides
+                  operator-injected system env or spec.secrets.envMap entries — colliding
+                  names are dropped (issue #186).
+                type: object
+                x-kubernetes-validations:
+                - message: env var names must be C_IDENTIFIERs ([A-Za-z_][A-Za-z0-9_]*)
+                  rule: self.all(k, k.matches('^[A-Za-z_][A-Za-z0-9_]*$'))
+                - message: env var name is reserved (HOSTNAME, PORT, K_SERVICE, K_REVISION,
+                    K_CONFIGURATION are operator/Knative-managed)
+                  rule: '!(''HOSTNAME'' in self) && !(''PORT'' in self) && !(''K_SERVICE''
+                    in self) && !(''K_REVISION'' in self) && !(''K_CONFIGURATION''
+                    in self)'
+              healthCheckPath:
+                description: 'Custom health check path (default: /api/health)'
+                type: string
+              image:
+                description: The OpenNext bundled Next.js image
+                type: string
+              imagePullSecrets:
+                description: |-
+                  ImagePullSecrets names Secrets in the app's namespace that hold registry
+                  pull credentials. The operator writes them onto the app's ServiceAccount
+                  (`<app>-sa`) and OWNS the field — drift is re-set on every reconcile
+                  (ADR-0001: the operator is the single source of truth). Without this a
+                  private-registry image (OCIR, private GHCR, ECR) is stuck in
+                  ImagePullBackOff, recoverable today only by an out-of-band `kubectl patch
+                  sa` the operator merely tolerates (#794, #952). Same shape as core
+                  PodSpec.ImagePullSecrets; the image-prewarm DaemonSet inherits these from
+                  the same SA (ADR-0037).
+                items:
+                  description: |-
+                    LocalObjectReference contains enough information to let you locate the
+                    referenced object inside the same namespace.
+                  properties:
+                    name:
+                      default: ""
+                      description: |-
+                        Name of the referent.
+                        This field is effectively required, but due to backwards compatibility is
+                        allowed to be empty. Instances of this type with an empty value here are
+                        almost certainly wrong.
+                        More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                      type: string
+                  type: object
+                  x-kubernetes-map-type: atomic
+                type: array
+              observability:
+                description: Observability — Prometheus metrics
+                properties:
+                  enabled:
+                    type: boolean
+                  rum:
+                    description: |-
+                      Rum (#94): self-hosted Web Vitals → Prometheus/Grafana. Default OFF.
+                      When enabled, the operator propagates NEXT_PUBLIC_RUM_ENABLED (and
+                      optionally NEXT_PUBLIC_RUM_SAMPLE_RATE) so the client beacon activates.
+                    properties:
+                      enabled:
+                        type: boolean
+                      sampleRate:
+                        description: SampleRate is the client-side sampling fraction
+                          (0..1). Empty → 1 (all).
+                        type: string
+                    type: object
+                  tracing:
+                    description: |-
+                      Tracing (#30): server-side OTel distributed tracing via OTLP/gRPC → a
+                      self-hostable backend (Tempo/Jaeger, ADR-0012). Default OFF. When enabled,
+                      the operator sets OTEL_TRACING_ENABLED (and optionally
+                      OTEL_EXPORTER_OTLP_ENDPOINT / OTEL_TRACES_SAMPLER_ARG) so the runtime
+                      instrumentation hook initializes the exporter.
+                    properties:
+                      enabled:
+                        type: boolean
+                      endpoint:
+                        description: |-
+                          Endpoint is the OTLP/gRPC collector endpoint. Empty → the runtime default
+                          (a cluster-local OTLP collector; never a SaaS endpoint — no lock-in).
+                        type: string
+                      sampleRate:
+                        description: SampleRate is the head-based trace sampling fraction
+                          (0..1). Empty → 1 (all).
+                        type: string
+                    type: object
+                type: object
+              preview:
+                description: GitOps Preview Environment configuration
+                properties:
+                  branch:
+                    type: string
+                  enabled:
+                    type: boolean
+                  prId:
+                    type: string
+                type: object
+              resources:
+                description: Container resource requests and limits
+                properties:
+                  cpuLimit:
+                    type: string
+                  cpuRequest:
+                    type: string
+                  memoryLimit:
+                    type: string
+                  memoryRequest:
+                    type: string
+                type: object
+              revalidation:
+                description: Revalidation options
+                properties:
+                  kafkaBrokerUrl:
+                    type: string
+                  provisionKafkaSource:
+                    description: |-
+                      ProvisionKafkaSource is INERT — the operator ignores it on every value
+                      (issue #475).
+
+                      It used to opt into provisioning a Knative KafkaSource for `queue: kafka`,
+                      on the premise that the user had deployed their own consumer. That
+                      bring-your-own path is WITHDRAWN: the sink contract (a Knative Service named
+                      `{app}-revalidator`, what CloudEvents it consumes, how it authenticates) was
+                      never specified or tested, so honouring the flag could only aim a source at
+                      a Service that may never exist.
+
+                      No KafkaSource is provisioned for any value. `queue: kafka` surfaces the
+                      non-fatal `RevalidationDeferred` status condition; setting this field
+                      additionally reports reason `ProvisionKafkaSourceInert` plus a Warning
+                      event. The field is deliberately still ACCEPTED — rejecting it would narrow
+                      v1alpha1 in place (ADR-0017 §2.1) and, since the same validator gates the
+                      fail-closed reconciler, would stop the whole app from reconciling. Manifests
+                      that applied before keep applying; only the behaviour changed.
+
+                      Kafka ISR revalidation returns when knext ships the `{app}-revalidator`
+                      consumer (the open ADR-0016 action item).
+                    type: boolean
+                  queue:
+                    type: string
+                type: object
+              runtime:
+                description: |-
+                  Runtime selects the process that executes the Next.js standalone server.js.
+                  Valid values: "bun" or "node" (default "node").
+                  Maps from KnativeNextConfig.runtime.
+                  Only meaningful for the standalone shape (Build absent / "turbopack" /
+                  "webpack" — #1219, both emit the same shape); for Build "vinext" the
+                  runtime is compiled into the executable and this field does not affect
+                  how the container starts.
+                  (Historical: images built by the retired per-file Bun bytecode pass were
+                  Bun-only and needed a rebuild to flip back to "node". ADR-0048 replaced
+                  that pass with the vinext single executable, where the question cannot
+                  arise.)
+                enum:
+                - bun
+                - node
+                type: string
+              scaling:
+                description: How many concurrent Next.js pods should be active
+                properties:
+                  containerConcurrency:
+                    format: int32
+                    type: integer
+                  imagePrewarm:
+                    description: |-
+                      ImagePrewarm opts the app into node-local image pre-pull (ADR-0037): when
+                      true the operator reconciles a DaemonSet `<app>-imgcache` that pulls and
+                      PINS the app's digest-pinned image (spec.image, the same digest the ksvc
+                      runs) on every schedulable node, so scale-from-zero never waits on the
+                      ~2 s image pull (OKE run 18 halved the uncached cold start). The DaemonSet
+                      never boots the app server: a running container references the app digest
+                      (so containerd GC cannot evict it) via a static helper binary, keeping the
+                      image resident without a shell — safe on distroless runtime images.
+
+                      COST (honest, ADR-0037): this places a copy of the image AND a tiny running
+                      pod on EVERY schedulable node — including nodes the app never serves from —
+                      so for an N-node cluster it is N×image-size of disk + N prewarmer pods, and
+                      with M prewarm-enabled apps it is M×N pods counting against each node's
+                      max-pods limit. It is therefore OPT-IN per app, never default. Unset/false
+                      => the operator deletes any previously-created `<app>-imgcache` DaemonSet.
+                    type: boolean
+                  maxScale:
+                    format: int32
+                    type: integer
+                  minScale:
+                    format: int32
+                    type: integer
+                  panicThresholdPercentage:
+                    description: |-
+                      PanicThresholdPercentage tunes the Knative
+                      `autoscaling.knative.dev/panic-threshold-percentage` annotation (#413,
+                      ADR-0033, amending ADR-0032): the concurrency/RPS level, as a
+                      percentage of the steady-state target, that trips the KPA into "panic
+                      mode" within PanicWindowPercentage's shorter window. A LOWER threshold
+                      (closer to the Knative minimum of 110%) makes the KPA panic — and
+                      therefore scale up fast without scaling back down mid-panic — on a
+                      smaller overshoot; the Knative default is 200% (double the target
+                      before panicking).
+
+                      Representation: a whole-percent *int32, matching PanicWindowPercentage
+                      and the TargetBurstCapacity pattern (ADR-0033).
+
+                      Unset (nil) => the annotation is NOT stamped and the Knative cluster
+                      default (200%) applies unmanaged (byte-identical back-compat).
+
+                      Connection-wall interlock / KPA-class caveat: see PanicWindowPercentage
+                      above — both apply identically here.
+                    format: int32
+                    minimum: 110
+                    type: integer
+                  panicWindowPercentage:
+                    description: |-
+                      PanicWindowPercentage tunes the Knative
+                      `autoscaling.knative.dev/panic-window-percentage` annotation (#413,
+                      ADR-0033, amending ADR-0032): how FAST the Knative Pod Autoscaler (KPA)
+                      reacts to an UNPREDICTED N→M traffic surge. TargetBurstCapacity (above)
+                      decides whether the activator BUFFERS a spike; ContainerConcurrency
+                      (ADR-0028) makes reactive scale-out FIRE; warmSchedule (ADR-0030)
+                      pre-warms KNOWN windows. None of them tune the KPA's own reaction
+                      speed — the panic-window/panic-threshold pair is that lever, and it is
+                      Knative's own mechanism, not a new control loop this operator runs.
+
+                      PanicWindowPercentage is expressed as a percentage of the KPA's stable
+                      window (e.g. 10 = a 10% panic window): a SMALLER value makes the KPA
+                      evaluate a shorter, more reactive window and enter "panic mode" (scale
+                      up fast, never scale down while panicking) sooner on a surge.
+
+                      Representation (mirrors TargetBurstCapacity's *int32 pattern; ADR-0033
+                      records the decision): a whole-percent *int32, NOT a float string or
+                      resource.Quantity. Knative accepts integer-valued percentages; any
+                      sub-integer precision is intentionally dropped to keep the CRD simple.
+
+                      Unset (nil) => the annotation is NOT stamped and the Knative cluster
+                      default (10%) applies unmanaged, exactly as before this field existed
+                      (byte-identical back-compat).
+
+                      Connection-wall interlock (ADR-0028/ADR-0029, restated in ADR-0033): a
+                      faster panic reaction changes the RATE pods are added, not the
+                      `maxScale × poolMax ≤ 80` ceiling enforced independently at admission.
+
+                      KPA-class caveat: this annotation is ignored under the HPA autoscaler
+                      class; knext defaults every ksvc to the KPA class, where it applies.
+                    format: int32
+                    maximum: 100
+                    minimum: 1
+                    type: integer
+                  poolMax:
+                    description: |-
+                      PoolMax is the per-pod DATABASE_URL connection-pool maximum. When >0 the
+                      operator enforces maxScale × poolMax ≤ 80 (the app connection budget,
+                      ADR-0028).
+                    format: int32
+                    type: integer
+                  scaleDownDelay:
+                    description: |-
+                      ScaleDownDelay tunes the Knative
+                      `autoscaling.knative.dev/scale-down-delay` annotation (#762, ADR-0045):
+                      how long the last pod stays ROUTABLE after traffic stops. The other
+                      scaling knobs address a spike that has already arrived —
+                      TargetBurstCapacity buffers it, the panic pair reacts faster to it,
+                      warmSchedule pre-warms KNOWN windows — but none of them help the
+                      request that arrives shortly after the previous one, while the app is
+                      scaling down. Measured on the file-manager spike (ADR-0045): a request
+                      landing on a still-routable pod is ~52 ms, a true cold start is
+                      2.1–2.7 s, and a request landing DURING the scale-down transition
+                      stalls 5.3–7.5 s in the routing layer — the worst user-visible mode
+                      observed. Inside the delay window there is no transition to stall in;
+                      after it, scale-to-zero proceeds exactly as before.
+
+                      Representation: a Go duration string with metav1.Duration semantics
+                      (e.g. "0s", "30s", "5m", "1h") — the same grammar the annotation itself
+                      takes, passed through verbatim. Checked ONCE, at admission and
+                      reconcile, through the shared validation.ValidateNextAppSpec branch
+                      (ADR-0040); never parsed at the stamping site.
+
+                      The accepted set is not restated here, because a restatement is a
+                      second source of truth that drifts: validation DELEGATES to
+                      knative.dev/serving's own annotation validator, so whatever the
+                      vendored Knative accepts for this annotation is exactly what knext
+                      accepts. Today that means a non-negative duration, no longer than
+                      Knative's window maximum, expressed with at most SECOND precision —
+                      "42.5s" is a valid Go duration and is NOT a valid value here.
+
+                      Unset ("") => the annotation is NOT stamped and the Knative cluster
+                      default applies unmanaged, exactly as before this field existed
+                      (byte-identical back-compat). There is no product default: `kn-next
+                      create` scaffolds a value into the user's own config instead
+                      (ADR-0045, ADR-0041 precedent), so no stored NextApp changes behaviour
+                      on upgrade.
+
+                      Connection-wall interlock (ADR-0028/ADR-0029): holding the last pod
+                      routable also holds ITS DB pool connections open past the point they
+                      would have been released at scale-to-zero. This does not raise the PEAK
+                      `maxScale × poolMax` fan-out the connection wall caps — that invariant
+                      is enforced at admission independently of this field — but it does
+                      raise IDLE connection occupancy against the shared budget, exactly as
+                      TargetBurstCapacity's godoc states for its own effect. The idle cost is
+                      real and belongs to the user who opted in: one pod, plus its
+                      connections, for the window after every burst.
+
+                      Cluster-feature caveat: validation runs against the Knative version
+                      this operator was BUILT with, while the annotation is honoured by the
+                      Knative INSTALLED on the cluster, and those are not the same thing. An
+                      older or differently-configured cluster can still clamp or ignore a
+                      value admission accepted. The webhook validates the value, the cluster
+                      decides the behaviour — `kn-next doctor` reports the installed Knative
+                      version, and the ~52 ms warm-hit promise holds only on a cluster that
+                      honours the annotation.
+
+                      WARM THE DATABASE TOO (#766 ruling; the on-demand sibling of
+                      warmSchedule's paragraph above): this delay keeps the POD routable; it
+                      does NOT keep a scale-to-zero database compute awake. Inside the window
+                      a DB-touching request can still pay the database wake (measured on the
+                      file-manager spike, #766: 290 ms with the compute awake vs ~2.3 s
+                      waking it — the wake figure is recorded in
+                      docs/benchmarks/fm-same-source-oke-ab-2026-08-18.md). The two windows are
+                      INDEPENDENT BY DESIGN (ADR-0030 addendum shape: declared per resource,
+                      each operator evaluating its own; divergence accepted, never
+                      reconciled). The DB idle window is the scale-zero-pg GATEWAY's
+                      platform-wide setting, not a per-app field — the alignment rule is:
+                      that window must be >= this delay, or the warm pod answers in ~52 ms
+                      and then blocks on a compute the gateway already reaped. For an app
+                      that needs its database held warm, declare it on that app's
+                      AppDatabase (apps.scale-zero-pg.dev) — `spec.tier: warm` for 24/7, or
+                      `spec.warmSchedule` for declared hours (#777) — knext's operator never
+                      reads or writes AppDatabase (ADR-0001 boundary).
+
+                      Previews ignore this field: the preview override drops the annotation, so
+                      preview pods keep the cluster's default scale-down behaviour.
+                    type: string
+                  targetBurstCapacity:
+                    description: |-
+                      TargetBurstCapacity tunes the Knative
+                      `autoscaling.knative.dev/target-burst-capacity` annotation (#411,
+                      ADR-0032, amending ADR-0028): whether the ACTIVATOR stays in the request
+                      path as a burst buffer, pacing an UNPREDICTED traffic spike into pods as
+                      they scale rather than letting the first Running pod absorb the whole
+                      burst directly. Neither the ADR-0028 ContainerConcurrency default (which
+                      makes reactive scale-out *fire*) nor ADR-0030's warmSchedule (which
+                      pre-warms *known* windows) buffers a spike nobody scheduled — this field
+                      is that missing lever.
+
+                      Semantics (mirrors upstream Knative):
+                        - -1  => always keep the activator in the path (max burst tolerance,
+                                 at the cost of an extra network hop on every request while
+                                 the KPA holds it there).
+                        - >=0 => the burst capacity in requests the activator will buffer
+                                 before Knative removes it from the path.
+                        - unset (nil) => the annotation is NOT stamped and the Knative
+                                 cluster default (200) applies unmanaged, exactly as before
+                                 this field existed (byte-identical back-compat).
+
+                      Connection-wall interlock (ADR-0028/ADR-0029): a buffered burst is
+                      eventually released into more pods, which raises PEAK backend DB
+                      connections just like any other fan-out. TargetBurstCapacity does not
+                      bypass the `maxScale × poolMax ≤ 80` invariant — that cap is enforced at
+                      admission independently of this field and composes cleanly with it (see
+                      ADR-0032).
+                    format: int32
+                    minimum: -1
+                    type: integer
+                  warmSchedule:
+                    description: |-
+                      WarmSchedule declares SCHEDULED warm-floor windows (ADR-0030, W5/#380):
+                      during each window the app is pre-warmed to a floor of `replicas` pods so
+                      a predictable traffic spike (a known daily peak, a scheduled campaign) does
+                      NOT pay a cold start on the first request. This is OWNER-AUTHORED
+                      scheduling, NOT learned prediction — the learned/heuristic controller
+                      (same-hour-last-week RPS percentile, #387) and the per-tenant warm-budget
+                      cap (#389) are DEFERRED follow-ups (see ADR-0030).
+
+                      WARM THE DATABASE TOO (shipped — ADR-0030 addendum "DB-compute lockstep
+                      pre-warm"): these windows warm PODS only. If the app's Postgres compute also
+                      scales to zero, the first request still pays the database wake unless you
+                      declare the SAME windows on that app's AppDatabase
+                      (apps.scale-zero-pg.dev) under `spec.warmSchedule` — identical cron/timezone
+                      shape, deliberately with NO `replicas` (a warm database is binary: exactly
+                      one compute held awake). Each operator evaluates the windows itself, so the
+                      pod floor and the database hold flip at the same boundaries. The database
+                      hold never gates serving: if it cannot be established the app falls back to
+                      the ordinary cold wake.
+
+                      MECHANISM (ADR-0030): the OPERATOR is the single writer of the ksvc
+                      min-scale annotation. On every reconcile it evaluates these windows against
+                      NOW (in each window's timezone) and sets the ksvc
+                      `autoscaling.knative.dev/min-scale` to max(spec.scaling.minScale, the active
+                      window's replicas). The Knative KPA reads that as its scale FLOOR and still
+                      scales ABOVE it reactively. The operator RequeueAfter's the next window
+                      boundary so the floor flips at start/end. Because the operator is the sole
+                      writer, the floor never reverts/thrashes (no CronJob, no KEDA — KEDA cannot
+                      scale a Knative Service; an external CronJob writer was reverted every
+                      reconcile). Outside every window the floor is spec.scaling.minScale (default
+                      0), so scale-to-zero is preserved. Empty/nil => no effect (byte-identical
+                      back-compat). NOTE: a min-scale CHANGE rolls a new Knative Revision (the
+                      template is Knative's source of truth) — acceptable for a twice-a-window
+                      flip; because that roll resets traffic to latest-ready, warmSchedule CANNOT
+                      be combined with a pinned traffic target (spec.traffic.revisionName). That
+                      combination is a HARD admission REJECTION (#393, ADR-0030), not just advice.
+                    items:
+                      description: |-
+                        WarmWindow is one scheduled warm-floor window (ADR-0030, W5/#380). Start/End
+                        are standard 5-field cron expressions (minute hour day month weekday) in the
+                        window's Timezone; Replicas is the warm floor enforced between Start and End.
+                      properties:
+                        end:
+                          description: |-
+                            End is the cron expression at which the warm floor ends (e.g. "0 20 * * 1-5"
+                            = 20:00 on weekdays). Between Start and End the floor of `replicas` pods is
+                            held. Standard 5-field cron; syntax-validated at admission.
+                          minLength: 1
+                          type: string
+                        replicas:
+                          description: |-
+                            Replicas is the warm-pod FLOOR held during the window (the min-scale the
+                            operator stamps on the ksvc while now is inside this window). Must be >= 1 —
+                            a window that floors at 0 warms nothing (use no window at all for
+                            scale-to-zero). The Knative KPA still scales ABOVE this floor on real
+                            traffic.
+                          format: int32
+                          minimum: 1
+                          type: integer
+                        start:
+                          description: |-
+                            Start is the cron expression at which the warm floor begins. Standard
+                            5-field cron (e.g. "0 8 * * 1-5" = 08:00 on weekdays); syntax-validated at
+                            admission.
+                          minLength: 1
+                          type: string
+                        timezone:
+                          description: |-
+                            Timezone is an IANA timezone (e.g. "UTC", "America/New_York") the cron
+                            schedules are evaluated in when the operator tests window membership.
+                            Defaults to "UTC" when unset.
+                          type: string
+                      required:
+                      - end
+                      - replicas
+                      - start
+                      type: object
+                    type: array
+                type: object
+              secrets:
+                description: External Secrets mapping
+                properties:
+                  envFrom:
+                    items:
+                      type: string
+                    type: array
+                  envMap:
+                    additionalProperties:
+                      description: EnvMapEntry maps an environment variable name to
+                        a specific key in a Kubernetes Secret
+                      properties:
+                        secretKey:
+                          type: string
+                        secretName:
+                          type: string
+                      required:
+                      - secretKey
+                      - secretName
+                      type: object
+                    type: object
+                type: object
+              security:
+                description: Security controls defense-in-depth network/auth hardening
+                  for the app.
+                properties:
+                  networkPolicy:
+                    description: |-
+                      NetworkPolicy toggles the operator-reconciled Kubernetes NetworkPolicy that
+                      restricts ingress to the app's pods to in-cluster sources only (the Knative
+                      serving system, the Kourier gateway, and the app's own namespace), denying
+                      arbitrary cross-namespace / external pod-direct traffic.
+
+                      This is L3/L4 (pod-level) network isolation, NOT L7: a NetworkPolicy cannot
+                      target a specific HTTP path, so it hardens the POD's network exposure as
+                      defense-in-depth for the (already Bearer-authed) mutating cache endpoints —
+                      it does not provide per-route isolation.
+
+                      Semantics: nil (unset) or true => the policy is reconciled (DEFAULT-ON);
+                      false => the policy is not reconciled and any previously-created one is deleted.
+                    type: boolean
+                  readOnlyRootFilesystem:
+                    description: |-
+                      ReadOnlyRootFilesystem toggles `readOnlyRootFilesystem: true` on the
+                      rendered APP (serving) container's SecurityContext — defense in depth
+                      against in-container tampering/persistence, matching the image-prewarm
+                      job container's existing posture (image_prewarm.go).
+
+                      DEFAULT (nil, or WritableCache unset/false, #1778/#1786): the emptyDir
+                      volume this used to ALWAYS mount is now mounted only for the write
+                      paths that are NOT optional — see `buildWritableVolumes`'s doc comment
+                      for the exact rule, summarized here:
+
+                        - /tmp is mounted whenever the app compiles to a self-contained
+                          single executable (`spec.build: vinext`, or `selfContained: true`
+                          on any other build) — that binary unpacks sharp's native
+                          libraries there on the first image-optimization request and
+                          `dlopen()`s them, unconditionally, regardless of this field.
+                        - `.next/standalone/.next/cache` (standalone shape only — a
+                          self-contained image has no such tree) is mounted whenever
+                          `spec.storage` is configured — Next's built-in image optimizer
+                          writes there BEFORE the object-store sync can run, and the sync's
+                          own restore/push also `mkdir`s inside it.
+                        - Otherwise (standalone, no storage, not self-contained): NO
+                          emptyDir is mounted at all. Provisioning the volume costs
+                          ~300-360ms of pod-sandbox setup on every cold wake regardless of
+                          whether anything is ever written to it (measured on OKE and GKE,
+                          `docs/benchmarks/cold-start-gke-runtime-and-minimisation-2026-10-01.md`),
+                          so it is skipped entirely rather than mounted-but-unwritten. The
+                          image optimizer re-computes variants on every request instead of
+                          caching them locally — a performance, not correctness, cost.
+
+                      See WritableCache below for the opt-in that restores the pre-#1778
+                      mounts unconditionally, for an app that needs guaranteed local writes
+                      outside the two always-on cases above. The V8/Node compile-cache
+                      directory baked into the standalone image needs no mount under any of
+                      this: Node's compile cache is fail-open on an unwritable directory
+                      (falls back to the baked, read-only entries).
+
+                      KNOWN RESIDUAL GAP: an app with no `cacheHandler` configured (every
+                      knext-scaffolded app and the file-manager reference app configure one
+                      unconditionally) ALSO has Next's default cache flush REVALIDATED page
+                      HTML onto `.next/standalone/.next/server/app/**` — a build-output path
+                      that cannot be mounted without shadowing the prebuilt pages every
+                      other route depends on, so it stays read-only-rejected even with
+                      WritableCache: true. That write therefore stays read-only-rejected;
+                      verified non-fatal on a live cluster (Next logs the failure and keeps
+                      serving from memory — ISR degrades to memory-only, it does not crash).
+                      Configure a `cacheHandler` to avoid it.
+
+                      Semantics: nil (unset) or true => read-only root is rendered
+                      (DEFAULT-ON); false => the container keeps a writable root filesystem
+                      (the pre-existing behavior), for an app with its own untracked runtime
+                      write path this default does not yet cover.
+                    type: boolean
+                  writableCache:
+                    description: |-
+                      WritableCache opts back into the pre-#1778 behaviour UNCONDITIONALLY:
+                      when the rendered container has `readOnlyRootFilesystem: true` (the
+                      default), the operator provisions an explicit emptyDir, mounted at
+                      /tmp and — for the standalone (node/bun-standalone) build shape only —
+                      at `/app/.next/standalone/.next/cache`, so Next's built-in image
+                      optimizer and scratch-file writes keep landing on disk instead of
+                      failing EROFS, regardless of `spec.build`/`selfContained`/`spec.storage`.
+
+                      You do NOT need this field for the two cases ReadOnlyRootFilesystem's
+                      doc comment already covers unconditionally: a self-contained compile
+                      (`/tmp` for sharp's native-library unpack) and a storage-configured
+                      standalone app (`.next/cache` for the image-optimizer write the
+                      object-store sync depends on) both get their required mount by
+                      DEFAULT, with this field left unset.
+
+                      Set this to true for an app that wants guaranteed local writes OUTSIDE
+                      those two cases — most commonly a standalone app with no `spec.storage`
+                      that still wants its optimized-image variants to persist locally
+                      across requests rather than re-optimizing every time, or one that has
+                      removed its `cacheHandler` and relies on Next's default on-disk
+                      ISR/fetch-cache fallback.
+
+                      Ignored (no volume provisioned either way) when ReadOnlyRootFilesystem
+                      is explicitly false — a writable root already has these paths.
+
+                      Semantics: nil (unset) or false => only the two always-on cases above
+                      get a mount (DEFAULT); true => the emptyDir + both mounts are
+                      provisioned unconditionally.
+                    type: boolean
+                type: object
+              selfContained:
+                default: false
+                description: |-
+                  SelfContained marks the standalone shape (Build absent / "turbopack" /
+                  "webpack") as a self-contained single executable (#1522, follow-up to
+                  N2 #1457): the image ships no `.next/standalone` tree and no
+                  `node_modules` at all — just the compiled executable, `public/` and
+                  `.next/static`. This is the SAME property `Build == "vinext"` already
+                  has (the image is one binary the image's own CMD runs), just reached by
+                  a different axis: Build says WHICH bundler produced the artifact,
+                  SelfContained says WHETHER that artifact was then compiled into a
+                  self-sufficient binary. The controller's containerCommand branch reads
+                  this field so it can leave Command nil for this shape too — see that
+                  branch's comment for the CrashLoop this prevents.
+
+                  Only meaningful when Runtime == "bun" (the only cell that currently
+                  produces this artifact, `cr-builder.ts`/`runtime-image.ts`); ignored
+                  otherwise, same as the CLI's own build-target selection ignores it on
+                  "node" (there is no compiled executable on that runtime to be
+                  self-contained). Meaningless for Build == "vinext" (already always a
+                  single executable regardless of this field).
+
+                  Additive and optional (ADR-0017 discipline, same as Build/Runtime):
+                  absence means false, so every CR written before this field existed
+                  keeps its exact meaning. #548 upgrade-order hazard is accepted and
+                  LOUD, not silent: a CRD that predates this field rejects a CR that sets
+                  it under --validate=strict (which every CLI apply passes), and
+                  deploy's preflightCRSchema reports the unknown field before the
+                  cluster is touched. Upgrade operator/CRD first, then CLI.
+                type: boolean
+              storage:
+                description: Storage bindings (GCS, S3, or Local)
+                properties:
+                  bucket:
+                    type: string
+                  endpoint:
+                    description: Endpoint overrides the default service endpoint —
+                      required for MinIO and S3-compatible stores
+                    type: string
+                  provider:
+                    type: string
+                  region:
+                    description: Region is used for S3 / S3-compatible providers (e.g.
+                      "us-east-1")
+                    type: string
+                type: object
+              timeoutSeconds:
+                description: |-
+                  TimeoutSeconds is the maximum number of seconds a request can take before
+                  the Knative Service times it out.  Defaults to 300 (5 min) when unset.
+                  Maps from the knative-manifest hardcoded timeoutSeconds=300.
+                format: int32
+                type: integer
+              traffic:
+                description: |-
+                  Traffic pins which Knative Revision serves traffic (issue #92 — rollback).
+                  nil => serve the latest-ready revision (DEFAULT, byte-identical back-compat).
+                properties:
+                  canaryPercent:
+                    description: |-
+                      CanaryPercent, when 1..99 and RevisionName is set, sends this percentage
+                      of traffic to the LATEST-ready revision and the remainder (100-p) to the
+                      pinned RevisionName — a canary back toward latest. 0 => 100% pinned.
+                    format: int32
+                    maximum: 100
+                    minimum: 0
+                    type: integer
+                  revisionName:
+                    description: |-
+                      RevisionName pins traffic to a specific prior Knative Revision (e.g.
+                      "my-app-00002"). Empty => latest-ready (no pin).
+                    type: string
+                type: object
+            required:
+            - image
+            type: object
+          status:
+            description: status defines the observed state of NextApp
+            properties:
+              conditions:
+                description: |-
+                  conditions represent the current state of the NextApp resource.
+                  Each condition has a unique type and reflects the status of a specific aspect of the resource.
+
+                  Standard condition types include:
+                  - "Available": the resource is fully functional
+                  - "Progressing": the resource is being created or updated
+                  - "Degraded": the resource failed to reach or maintain its desired state
+
+                  The status of each condition is one of True, False, or Unknown.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              currentTraffic:
+                description: |-
+                  CurrentTraffic reports the revision(s) currently serving traffic and their
+                  split, mirrored from the Knative Service status (issue #92).
+                items:
+                  description: TrafficStatus is one entry of the observed Knative
+                    traffic distribution.
+                  properties:
+                    latestRevision:
+                      type: boolean
+                    percent:
+                      format: int64
+                      type: integer
+                    revisionName:
+                      type: string
+                  type: object
+                type: array
+              databaseSecretName:
+                description: |-
+                  DatabaseSecretName is the name of the same-namespace Secret currently
+                  feeding DATABASE_URL(+_RO): the user-supplied Secret named by
+                  spec.database.secretRef (BINDING mode, ADR-0019). Cleared when
+                  spec.database is removed.
+                type: string
+              lastSuccessfulDeployTime:
+                description: |-
+                  LastSuccessfulDeployTime is the time the operator first observed the CURRENT
+                  observedRevision reach Ready — i.e. the last time a deploy actually went
+                  live. It is only advanced when a NEW revision becomes Ready; a subsequent
+                  failed rollout (ksvc Ready=False) leaves it pointing at the last good
+                  deploy, so operators can see "how long has this been the live build" and
+                  distinguish a stale-but-serving app from a broken new push (#312).
+                format: date-time
+                type: string
+              observedRevision:
+                description: |-
+                  ObservedRevision is the child Knative Service's latest-READY Revision
+                  (mirrored from ksvc.status.latestReadyRevisionName). It is the revision an
+                  operator can trust is actually serving — surfaced so `kubectl get nextapp
+                  -o wide` answers "which build is live?" without a Knative round-trip (#312).
+                type: string
+              scaledToZero:
+                description: |-
+                  ScaledToZero reports whether the app currently has no active compute: it is
+                  true when the observed (latest-ready) Revision's Knative "Active" condition
+                  is False — a Ready-but-Inactive revision, i.e. scaled to zero. nil means the
+                  activeness is unknown (the revision could not be read yet); the operator
+                  omits the field rather than guessing. Derived from the Revision the operator
+                  already reconciles — no replica-count bookkeeping is invented (#312).
+                type: boolean
+              url:
+                type: string
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: kn-next-operator
+  name: kn-next-operator-controller-manager
+  namespace: kn-next-operator-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: kn-next-operator
+  name: kn-next-operator-leader-election-role
+  namespace: kn-next-operator-system
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kn-next-operator-manager-role
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - ""
+  resources:
+  - persistentvolumeclaims
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  - serviceaccounts
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - apps
+  resources:
+  - daemonsets
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - apps.kn-next.dev
+  resources:
+  - nextapps
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - apps.kn-next.dev
+  resources:
+  - nextapps/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - apps.kn-next.dev
+  resources:
+  - nextapps/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - caching.internal.knative.dev
+  resources:
+  - images
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - networking.k8s.io
+  resources:
+  - networkpolicies
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - serving.knative.dev
+  resources:
+  - revisions
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - serving.knative.dev
+  resources:
+  - services
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - sources.knative.dev
+  resources:
+  - kafkasources
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kn-next-operator-metrics-auth-role
+rules:
+- apiGroups:
+  - authentication.k8s.io
+  resources:
+  - tokenreviews
+  verbs:
+  - create
+- apiGroups:
+  - authorization.k8s.io
+  resources:
+  - subjectaccessreviews
+  verbs:
+  - create
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kn-next-operator-metrics-reader
+rules:
+- nonResourceURLs:
+  - /metrics
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: kn-next-operator
+  name: kn-next-operator-nextapp-admin-role
+rules:
+- apiGroups:
+  - apps.kn-next.dev
+  resources:
+  - nextapps
+  verbs:
+  - '*'
+- apiGroups:
+  - apps.kn-next.dev
+  resources:
+  - nextapps/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: kn-next-operator
+  name: kn-next-operator-nextapp-editor-role
+rules:
+- apiGroups:
+  - apps.kn-next.dev
+  resources:
+  - nextapps
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - apps.kn-next.dev
+  resources:
+  - nextapps/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: kn-next-operator
+  name: kn-next-operator-nextapp-viewer-role
+rules:
+- apiGroups:
+  - apps.kn-next.dev
+  resources:
+  - nextapps
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - apps.kn-next.dev
+  resources:
+  - nextapps/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: kn-next-operator
+  name: kn-next-operator-leader-election-rolebinding
+  namespace: kn-next-operator-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kn-next-operator-leader-election-role
+subjects:
+- kind: ServiceAccount
+  name: kn-next-operator-controller-manager
+  namespace: kn-next-operator-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: kn-next-operator
+  name: kn-next-operator-manager-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kn-next-operator-manager-role
+subjects:
+- kind: ServiceAccount
+  name: kn-next-operator-controller-manager
+  namespace: kn-next-operator-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kn-next-operator-metrics-auth-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kn-next-operator-metrics-auth-role
+subjects:
+- kind: ServiceAccount
+  name: kn-next-operator-controller-manager
+  namespace: kn-next-operator-system
+---
+apiVersion: v1
+data:
+  ingress-class: kourier.ingress.networking.knative.dev
+kind: ConfigMap
+metadata:
+  labels:
+    app.kubernetes.io/component: networking
+    app.kubernetes.io/name: knative-serving
+  name: config-network
+  namespace: knative-serving
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: kn-next-operator
+    control-plane: controller-manager
+  name: kn-next-operator-controller-manager-metrics-service
+  namespace: kn-next-operator-system
+spec:
+  ports:
+  - name: https
+    port: 8443
+    protocol: TCP
+    targetPort: 8443
+  selector:
+    app.kubernetes.io/name: kn-next-operator
+    control-plane: controller-manager
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kn-next-operator-webhook-service
+  namespace: kn-next-operator-system
+spec:
+  ports:
+  - port: 443
+    protocol: TCP
+    targetPort: 9443
+  selector:
+    control-plane: controller-manager
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: kn-next-operator
+    control-plane: controller-manager
+  name: kn-next-operator-controller-manager
+  namespace: kn-next-operator-system
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kn-next-operator
+      control-plane: controller-manager
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/default-container: manager
+      labels:
+        app.kubernetes.io/name: kn-next-operator
+        control-plane: controller-manager
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - podAffinityTerm:
+              labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: kn-next-operator
+                  control-plane: controller-manager
+              topologyKey: kubernetes.io/hostname
+            weight: 100
+      containers:
+      - args:
+        - --metrics-bind-address=:8443
+        - --leader-elect
+        - --health-probe-bind-address=:8081
+        - --webhook-cert-path=/tmp/k8s-webhook-server/serving-certs
+        command:
+        - /manager
+        image: ghcr.io/getknext-dev/kn-next-operator:v0.1.0@sha256:3b35d33efcd68ef2799bf740452c0ad42d5ab20e42cef2b7dfeee65e518e29b9
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8081
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        name: manager
+        ports:
+        - containerPort: 9443
+          name: webhook-server
+          protocol: TCP
+        readinessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /readyz
+            port: 8081
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 5
+        resources:
+          limits:
+            cpu: 500m
+            memory: 128Mi
+          requests:
+            cpu: 10m
+            memory: 64Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - mountPath: /tmp/k8s-webhook-server/serving-certs
+          name: webhook-certs
+          readOnly: true
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      serviceAccountName: kn-next-operator-controller-manager
+      terminationGracePeriodSeconds: 10
+      volumes:
+      - name: webhook-certs
+        secret:
+          secretName: webhook-server-cert
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: kn-next-operator
+    control-plane: controller-manager
+  name: kn-next-operator-controller-manager
+  namespace: kn-next-operator-system
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kn-next-operator
+      control-plane: controller-manager
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: kn-next-operator
+  name: kn-next-operator-serving-cert
+  namespace: kn-next-operator-system
+spec:
+  dnsNames:
+  - kn-next-operator-webhook-service.kn-next-operator-system.svc
+  - kn-next-operator-webhook-service.kn-next-operator-system.svc.cluster.local
+  issuerRef:
+    kind: Issuer
+    name: kn-next-operator-selfsigned-issuer
+  secretName: webhook-server-cert
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: kn-next-operator
+  name: kn-next-operator-selfsigned-issuer
+  namespace: kn-next-operator-system
+spec:
+  selfSigned: {}
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  annotations:
+    cert-manager.io/inject-ca-from: kn-next-operator-system/kn-next-operator-serving-cert
+  name: kn-next-operator-validating-webhook-configuration
+webhooks:
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: kn-next-operator-webhook-service
+      namespace: kn-next-operator-system
+      path: /validate-apps-kn-next-dev-v1alpha1-nextapp
+  failurePolicy: Fail
+  name: vnextapp-v1alpha1.kb.io
+  rules:
+  - apiGroups:
+    - apps.kn-next.dev
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - nextapps
+  sideEffects: None

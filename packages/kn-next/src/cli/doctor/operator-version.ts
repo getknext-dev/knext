@@ -110,16 +110,21 @@ export function resolveOperatorVersion(dep: DeploymentJson): OperatorVersion {
     return { kind: "unknown", digest };
 }
 
-export type OperatorCompat = "ok" | "operator-older" | "major-mismatch";
+export type OperatorCompat = "ok" | "operator-older" | "different-line";
 
 /**
- * The pairing rule (COMPATIBILITY.md): operator MAJOR.MINOR tracks the npm
- * package set's MAJOR.MINOR; patch is independent.
+ * The staleness note on the operator-version row. It is INFORMATIONAL: the
+ * authoritative pairing verdict is the NextApp CRD row, which checks that the
+ * CRD apiVersion this CLI emits is served (COMPATIBILITY.md). The operator
+ * keeps its own major line when `@getknext/core` goes to 2.0, so a differing
+ * major is expected and never a warning.
  *
- *   - different MAJOR              -> "major-mismatch"
- *   - operator MINOR < CLI MINOR   -> "operator-older"  (upgrade the operator
- *                                     FIRST — a CLI ahead of its CRD may emit a
- *                                     field the CRD does not know)
+ *   - different MAJOR              -> "different-line" (no minor comparison:
+ *                                     the two numbers are on separate lines)
+ *   - operator MINOR < CLI MINOR   -> "operator-older"  (same line only;
+ *                                     upgrade the operator FIRST — a CLI ahead
+ *                                     of its CRD may emit a field the CRD does
+ *                                     not know)
  *   - otherwise                    -> "ok" (an older CLI against a newer
  *                                     operator is always valid)
  *
@@ -130,7 +135,7 @@ export function classifyOperatorCompat(
     cli: Semver,
 ): OperatorCompat {
     if (operator.major !== cli.major) {
-        return "major-mismatch";
+        return "different-line";
     }
     if (operator.minor < cli.minor) {
         return "operator-older";

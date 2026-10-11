@@ -439,3 +439,170 @@ describe('the user-facing versioning page exists and is reachable', () => {
     expect(meta.pages).toContain('versioning');
   });
 });
+/**
+ * The support window and the runtime floors, stated in three places (the user-facing
+ * page, the maintainer matrix, the policy) and checked against the source they
+ * describe. The floors are never typed here: they are read from the core manifest,
+ * and each doc carries them inside a marker block so a prose mention elsewhere
+ * cannot satisfy the check.
+ */
+describe('support window and runtime floors agree across the docs and the manifest', () => {
+  const page = readFileSync(DOCS_PAGE_PATH, 'utf8');
+  const core = JSON.parse(
+    readFileSync(resolve(REPO_ROOT, 'packages/kn-next/package.json'), 'utf8'),
+  ) as { engines?: { node?: string }; peerDependencies?: { next?: string } };
+
+  /** The text between exactly one pair of `runtime-floors` markers (mdx or html comments). */
+  function floorsBlock(text: string, label: string): string {
+    const starts = [...text.matchAll(/runtime-floors:start/g)];
+    const ends = [...text.matchAll(/runtime-floors:end/g)];
+    expect(starts.length, `${label}: exactly one runtime-floors:start marker`).toBe(1);
+    expect(ends.length, `${label}: exactly one runtime-floors:end marker`).toBe(1);
+    const s = starts[0].index as number;
+    const e = ends[0].index as number;
+    expect(e, `${label}: end marker after start`).toBeGreaterThan(s);
+    return text.slice(s, e);
+  }
+
+  /** The backticked range that follows a "Node.js" / "Next.js" label inside the block. */
+  function floor(block: string, label: 'Node.js' | 'Next.js'): string | undefined {
+    return block.match(new RegExp(`${label}[^\\n\`]*\`([^\`]+)\``))?.[1];
+  }
+
+  for (const [label, path] of [
+    ['versioning page', DOCS_PAGE_PATH],
+    ['COMPATIBILITY.md', MATRIX_PATH],
+  ] as const) {
+    it(`${label} states the Node and Next floors the 1.x manifest declares`, () => {
+      const block = floorsBlock(readFileSync(path, 'utf8'), label);
+      expect(core.engines?.node, 'manifest declares engines.node').toBeTruthy();
+      expect(core.peerDependencies?.next, 'manifest declares a next peer range').toBeTruthy();
+      expect(floor(block, 'Node.js')).toBe(core.engines?.node);
+      expect(floor(block, 'Next.js')).toBe(core.peerDependencies?.next);
+    });
+  }
+
+  for (const [label, text] of [
+    ['versioning page', page],
+    ['COMPATIBILITY.md', matrix],
+    ['RELEASE_POLICY.md', policy],
+    ['SECURITY.md', readFileSync(resolve(REPO_ROOT, 'SECURITY.md'), 'utf8')],
+  ] as const) {
+    it(`${label} states the 1.x maintenance window: security only, six months, latest-1`, () => {
+      const f = flat(text);
+      expect(f).toContain('latest-1');
+      // One claim, not two: "security-only" and "six months" must sit together, so a
+      // doc that drops the qualifier cannot be rescued by a heading elsewhere.
+      expect(f).toMatch(/(security fixes only|security-only)[\s\S]{0,80}six months/i);
+    });
+  }
+
+  /** The body of one `## heading` section, so a Beta mention in a table row elsewhere cannot satisfy it. */
+  function section(text: string, heading: string): string {
+    const lines = text.split('\n');
+    const start = lines.findIndex((l) => l.trim() === heading);
+    expect(start, `missing section "${heading}"`).toBeGreaterThan(-1);
+    const rest = lines.slice(start + 1);
+    const end = rest.findIndex((l) => /^## /.test(l));
+    return (end === -1 ? rest : rest.slice(0, end)).join('\n');
+  }
+
+  for (const [label, text] of [
+    ['versioning page', section(page, '## Supported runtimes on 1.x')],
+    ['COMPATIBILITY.md', section(matrix, '## Support window and runtime floors')],
+  ] as const) {
+    it(`${label} says the vinext / Bun single-executable target is Beta on 1.x`, () => {
+      const f = flat(text);
+      expect(f).toMatch(/vinext[^.]*Beta/i);
+      expect(f).toMatch(/Bun[^.]*single-exec/i);
+    });
+  }
+
+  it('the versioning page says what 2.0 changes, and marks it as not yet released', () => {
+    const f = flat(page);
+    const idx = f.indexOf('## What 2.0 changes');
+    expect(idx, 'missing "## What 2.0 changes" section').toBeGreaterThan(-1);
+    const section = f.slice(idx, idx + 2500);
+    expect(section).toMatch(/not yet released|not released yet|has not shipped/i);
+    expect(section).toMatch(/Node\.js/);
+    expect(section).toMatch(/Next\.js/);
+    expect(section).toMatch(/alias|second name/i);
+    expect(section).toMatch(/operator/i);
+  });
+
+  it('all four anchor the window at 2.0 general availability', () => {
+    for (const text of [
+      page,
+      matrix,
+      policy,
+      readFileSync(resolve(REPO_ROOT, 'SECURITY.md'), 'utf8'),
+    ]) {
+      expect(flat(text)).toMatch(/2\.0[^.]*generally available|2\.0 GA/);
+    }
+  });
+
+  it('the operator pairing rule is by CRD API version, in both docs, and no longer by package major', () => {
+    const crd = declaredCrdApiVersion();
+    // The declared version must be what the operator's Go types register (not re-typed here).
+    expect(goGroupVersions()).toContain(crd);
+    const pageRule = flat(section(page, '### Operator versions'));
+    const matrixRule = flat(section(matrix, '### Operator versions'));
+    for (const [label, rule] of [
+      ['versioning page', pageRule],
+      ['COMPATIBILITY.md', matrixRule],
+    ] as const) {
+      expect(rule, `${label}: pairing rule names the CRD apiVersion`).toContain(crd);
+      // Every apiVersion the rule names must be the declared one, so a single stale row cannot hide.
+      const named = [...rule.matchAll(/apps\.kn-next\.dev\/v\w+/g)].map((m) => m[0]);
+      expect(named.length, `${label}: pairing rule names the apiVersion`).toBeGreaterThan(0);
+      for (const n of named) expect(n, `${label}`).toBe(crd);
+      expect(rule, `${label}: still the "major must match" rule`).not.toMatch(
+        /Different major|operator MAJOR must equal|Same major/i,
+      );
+    }
+  });
+
+  it('both docs say `knext doctor` checks the CRD-version pairing, and describe the operator-version row as informational', () => {
+    // Doctor reads the served versions of the installed NextApp CRD and fails when the
+    // apiVersion the CLI emits is not among them. The operator-version row is a secondary,
+    // informational note: it never decides the pairing, and a differing major is no warning.
+    for (const [label, text] of [
+      ['versioning page', section(page, '### Operator versions')],
+      ['COMPATIBILITY.md', section(matrix, '### Operator versions')],
+    ] as const) {
+      const f = flat(text);
+      expect(f, `${label}: says doctor checks the CRD-version pairing`).toMatch(
+        /doctor[^.]*(checks|reads|compares)[^.]*(served|CRD)[^.]*(API )?versions?/i,
+      );
+      expect(f, `${label}: says doctor fails when the emitted version is not served`).toMatch(
+        /(fails|failing)[^.]*(not serve|does not serve|unserved)|(not serve|does not serve|unserved)[^.]*fail/i,
+      );
+      expect(f, `${label}: says the operator-version row is informational`).toMatch(
+        /informational/i,
+      );
+      expect(f, `${label}: must no longer call doctor coarser than the rule`).not.toMatch(
+        /coarser/i,
+      );
+      expect(f, `${label}: must no longer say doctor does not read CRD/API versions`).not.toMatch(
+        /does not read[^.]*(API|CRD)[^.]*versions/i,
+      );
+    }
+  });
+
+  it('nothing says the operator major or MAJOR.MINOR tracks the package set (2.0 leaves the operator on its line)', () => {
+    for (const [label, text] of [
+      ['versioning page', page],
+      ['COMPATIBILITY.md', matrix],
+    ] as const) {
+      expect(flat(text), label).not.toMatch(/MAJOR\.MINOR tracks|major and minor track/i);
+    }
+    expect(flat(page)).toMatch(/does not get a new major/);
+  });
+
+  it('the 2.0 section promises no announcement or prior deprecation that has not shipped', () => {
+    const f = flat(page);
+    const sec = f.slice(f.indexOf('## What 2.0 changes'), f.indexOf('## The cluster side'));
+    expect(sec.length).toBeGreaterThan(200);
+    expect(sec).not.toMatch(/announced in the changelog|deprecated in a 1\.x minor first/i);
+  });
+});
