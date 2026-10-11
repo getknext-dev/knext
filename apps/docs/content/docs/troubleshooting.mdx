@@ -412,7 +412,8 @@ redirect should have carried (a login session, Draft Mode) is missing.
 The redirect was built from `request.url`, for example
 `NextResponse.redirect(new URL('/dashboard', request.url))`. Next.js builds `request.url` from the
 address the server listens on, which is `0.0.0.0` in a pod. Set `KNEXT_PUBLIC_ORIGINS` to your
-app's hostnames, primary domain first. The pod then rewrites that origin to one of them. See
+app's hostnames, primary domain first. The pod then rewrites that origin to one of them, using the
+scheme you wrote on the entry (`https` when you wrote none). See
 [Make redirects use your domain](/docs/custom-domains-tls#redirects-use-your-domain).
 
 ## When none of these match

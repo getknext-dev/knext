@@ -71,14 +71,14 @@ it as a separate issue. Phase 2 must not change the runtime contract described h
   value equals an allowlist entry, compared case-insensitively and including the port. Otherwise
   the first entry is used. The emitted host is always the allowlist's own spelling: a header value
   is only ever used as a key into the list.
-- Scheme: `X-Forwarded-Proto` when it is exactly `http` or `https`; otherwise `https`.
+- Scheme: the matched (or first) allowlist entry's own scheme; a bare host means `https`.
+  `X-Forwarded-Proto` is not read. (Amended 2026-10-11, see Amendment 1.)
 - No allowlist (unset, empty, or every entry invalid) means nothing is installed. Behaviour is
   then byte-identical to today, and there is no boot log line.
 - A wildcard bind address is recognised by its canonical form (`new URL(...).hostname`), so `[::0]`,
   `[0:0:0:0:0:0:0:0]`, `0` and `[::ffff:0.0.0.0]` count as wildcards both in a `Location` and as an
   allowlist entry (dropped).
-- A response whose `Location` was rewritten also gets `Vary: X-Forwarded-Host, Host,
-  X-Forwarded-Proto`, merged into any existing `Vary` (jev: add it, 0.95), so a shared cache cannot
+- A response whose `Location` was rewritten also gets `Vary: X-Forwarded-Host, Host`, merged into any existing `Vary` (jev: add it, 0.95), so a shared cache cannot
   serve a redirect built for one allowlisted host to another. It is applied at `writeHead`, so a
   `Vary` the app sets later cannot clobber it; a `Vary: *` is left as is.
 
@@ -92,12 +92,15 @@ narrow rewrite fixes the user-visible bug and touches nothing Next relies on int
 scored this mechanism highest: Location rewrite 0.82, listen patch 0.14, bind localhost 0.03,
 `trustHostHeader` 0.01.
 
-**4. Read the headers as they arrived.** Because of fact 1, the preload snapshots
-`X-Forwarded-Host`, `Host` and `X-Forwarded-Proto` when the request is emitted
-(`http.Server.prototype.emit('request')`, the hook `request-body-cap.cjs` already uses), before
-Next defaults them. It applies the rule to that snapshot at response time (jev 0.85). Without the
-snapshot the "no proxy header gives `https`" default never applies. The served-build test caught
-this on a real Next build.
+**4. Read the headers as they arrived.** The preload snapshots `X-Forwarded-Host` and `Host` when
+the request is emitted (`http.Server.prototype.emit('request')`, the hook `request-body-cap.cjs`
+already uses) and applies the rule to that snapshot at response time. With the scheme taken from the
+entry (Amendment 1) the snapshot is no longer needed for the scheme. Next's `x-forwarded-host ??= host`
+(base-server.js) yields the same host candidate as the snapshot, so the snapshot's remaining reason
+is the other writer: `resolve-routes.js` applies `x-middleware-request-*` to the live `req.headers`,
+so an app's middleware can overwrite `host` or `x-forwarded-host` before the route responds. The
+snapshot keeps the origin decision on what the client and proxy sent, not on what app code did to the
+live request. Dropping it was weighed (jev keep 1.00, drop 0.00) and rejected: any doubt keeps it.
 
 **5. Where it lives: a preload, `packages/kn-next/src/adapters/public-origin.cjs`.** It is
 dependency-free CommonJS, like `cache-control-normalize.cjs` and `request-body-cap.cjs`, and is
@@ -112,9 +115,10 @@ object, flat-array and pair-array forms). It runs Next's own server unmodified, 
 | Compiled single executable | `standalone-compile.mjs` `PRELOAD_NAMES` bakes it into the entry | the compiled-executable mode (host-target compile of the same tree) |
 | vinext | **Out of scope, and not affected.** vinext's production server builds `request.url` from the `Host` header (`vinext/dist/server/proxy-trust.js` `resolveRequestHost`), honouring `X-Forwarded-Host` only through its own `VINEXT_TRUSTED_HOSTS` allowlist. It never uses the bind address, so knext does not load this preload there. | — |
 
-**6. Entry format (jev: accept both and ignore the scheme, 0.93).** Each entry is `host[:port]`. An
-`http://`/`https://` prefix and a trailing `/` are accepted and stripped, and the scheme still
-comes from rule 2. An entry with a path, userinfo, a wildcard, an out-of-range port, or a wildcard
+**6. Entry format.** Each entry is `[scheme://]host[:port]`. A trailing `/` is accepted and
+stripped. The scheme is kept and becomes the redirect's scheme (rule 2); a bare host means `https`.
+One entry per host: a repeat of a host is dropped, whatever its scheme, with a stderr warning naming
+the dropped entry. An entry with a path, userinfo, a wildcard, an out-of-range port, or a wildcard
 bind address is dropped with a stderr warning naming it. **Header scope (jev: Location only, 0.74):**
 `Refresh`, `Content-Location` and `Link` are not rewritten. Next's own `Refresh` on a 308 is only
 added on the router's redirect path, where middleware redirects are already made relative.
@@ -163,8 +167,8 @@ considered and rejected for the middleware/`initURL` disagreement in Decision 3.
 - **The compat harness does not set the variable**, so the upstream `adapter-rsc-query-leak` Draft
   Mode cases keep their quarantine. Their browser also runs against `localhost:<random port>`, which
   an allowlist entry would have to name exactly.
-- **An attacker can still choose among allowlisted hosts, and between `http` and `https`.** That is
-  bounded by design. A downgrade to `http` is answered by the user's edge if it enforces TLS.
+- **An attacker can still choose among allowlisted hosts.** That is bounded by design. The scheme is
+  not attacker-chosen (Amendment 1).
 - **Shipped bytes change.** A new file joins the standalone preload set and the dist build. The
   published-bytes and credential freeze guards will see it. The lead decides any marker; this ADR
   adds none.
@@ -188,3 +192,23 @@ considered and rejected for the middleware/`initURL` disagreement in Decision 3.
    the ingress's `X-Forwarded-Proto`, and that the pod log carries the `PUBLIC_ORIGINS:` line.
 3. **Docs:** user-facing section "Make redirects use your domain" in Custom domains & TLS, and a
    troubleshooting entry. Done with this change.
+
+## Amendment 1 (2026-10-11): the scheme comes from the allowlist entry
+
+Kind verification of the shipped rule (results on #2133) showed that taking the scheme from
+`X-Forwarded-Proto` is wrong in both directions. Kourier sets the header to `http` on a plain-HTTP
+listener, so redirects came out `http://app.example.test/...` for an `https` app; and it passes a
+client-supplied value through, so a client could choose the scheme. The host was never
+attacker-chosen, only the scheme.
+
+Rule 2's scheme line is replaced: the scheme is the matched entry's own (`https://` or `http://`,
+as the operator wrote it), on a host match and on the first-entry fallback alike. A bare host with
+no scheme defaults to `https`, which is what the rule gave when no proxy header was present, so
+existing bare-host configuration keeps its behaviour (jev scored the three options nearly level,
+0.39 / 0.39 / 0.22 with confidence 0.09; the backward-compatible default is chosen on that basis,
+not on the score). No request header now influences the redirect's origin: headers only select among
+entries. Because `X-Forwarded-Proto` no longer affects the result it is removed from the added
+`Vary`, which is now `X-Forwarded-Host, Host`. Everything else in rule 2 is unchanged.
+
+Action item 2's check "the scheme follows the ingress's `X-Forwarded-Proto`" is superseded: the
+scheme follows the allowlist entry.
