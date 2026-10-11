@@ -97,10 +97,18 @@ The operator's `operator-vX.Y.Z` is stamped on the manager Deployment as the
   operator is always valid);
 - patch is independent; `-rc.N` suffixes are ignored on both sides.
 
-What `knext doctor` does today is coarser than that rule (`src/cli/doctor/operator-version.ts`, a
-WARN row — never a failure): it warns when the operator's major differs from the CLI's, or its
-minor is older. It does not read the served CRD versions, so the rule above is the definition and
-the warning an approximation of it; the deploy-time schema preflight stays the authoritative gate.
+`knext doctor` checks the first part of that rule directly: its **NextApp CRD** row reads the CRD's
+served API versions with `kubectl get crd` and compares them with the `apiVersion` this CLI emits.
+It passes when that version is served, and **fails** — with
+"upgrade the operator first" — when the CRD does not serve it, or when the CRD cannot be read (it
+fails closed rather than guessing). A CRD that serves several versions pairs as long as one of them
+is the CLI's.
+
+The **Operator version** row (`src/cli/doctor/operator-version.ts`) is informational and never
+decides the pairing. It prints the installed release and warns only when, within one major line, the
+operator's minor is older than the CLI's. A differing major is not a warning: the operator keeps its
+own major when the packages move to 2.0, so the row notes that the pairing is decided by the CRD
+API version. The deploy-time schema preflight stays the authoritative gate.
 
 Why the minor tracks the package set on 1.x rather than the operator versioning on its own: the CRD is
 additive within `v1alpha1`, so "does this operator know the field my CLI emits" is exactly "is the
@@ -169,7 +177,8 @@ side effect** if the cluster cannot store one, naming the field.
 - **the operator version column is not machine-verified against a published release.** The
   operator now has a semver line (`operator-vX.Y.Z`), but no operator release has been cut from it
   yet, and the matrix cannot assert a "minimum operator version" for rows that predate it. The
-  pairing rule is enforced at runtime by `knext doctor` (unit-tested in
+  CRD-version pairing is checked at runtime by `knext doctor` (unit-tested in
+  `src/__tests__/doctor-crd-version-pairing.test.ts`, and the informational operator-version row in
   `src/__tests__/doctor-operator-version.test.ts`); the release workflow's stamping is
   text-guarded in `tests/operator-version-line.test.ts`. Neither proves what a given cluster runs
   — `doctor` against the cluster does. Operators installed before the version line report no

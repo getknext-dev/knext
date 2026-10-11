@@ -20,6 +20,13 @@ import type { WriteFreeFacts } from "./write-free";
 export type { WriteFreeFacts } from "./write-free";
 
 /**
+ * The CRD `apiVersion` every emitted NextApp carries. Exported so `knext
+ * doctor` pairs the CLI with the cluster against the value the CLI actually
+ * stamps, rather than a second copy that could drift.
+ */
+export const NEXTAPP_API_VERSION = "apps.kn-next.dev/v1alpha1";
+
+/**
  * PreviewInput is the optional per-PR preview descriptor (#91). When present,
  * the CR's spec.preview block is emitted as {enabled:true, prId, branch}, which
  * switches the operator into preview mode (max-scale=1, min-scale=0, 30s
@@ -504,7 +511,7 @@ export function buildNextAppCRObject(
     };
 
     return {
-        apiVersion: "apps.kn-next.dev/v1alpha1",
+        apiVersion: NEXTAPP_API_VERSION,
         kind: "NextApp",
         metadata: {
             name: config.name,

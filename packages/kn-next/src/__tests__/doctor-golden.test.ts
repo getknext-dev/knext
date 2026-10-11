@@ -300,4 +300,58 @@ describe("doctor golden output (#1055 byte-identical pin)", () => {
         });
         pin(report);
     });
+
+    it("crd-version — a CRD that does not serve the emitted apiVersion FAILs: upgrade the operator first", async () => {
+        const stubs = healthyStubs();
+        stubs["kubectl get crd nextapps.apps.kn-next.dev -o json"] = {
+            ok: true,
+            stdout: JSON.stringify({
+                spec: {
+                    versions: [
+                        { name: "v1beta1", served: true, storage: true },
+                    ],
+                },
+            }),
+        };
+        const report = await runDoctor({
+            kubectl: stubKubectl(stubs),
+            probeImage: okProbe,
+            inspectKubeconfig: () => ({ kind: "has-current-context" }),
+            loadAppConfig: async () => storageConfig,
+        });
+        pin(report);
+    });
+
+    it("cli-2.0 — a 2.0 CLI against an operator on its 1.x line PASSes: pairing is by CRD apiVersion", async () => {
+        const stubs = healthyStubs();
+        stubs["kubectl get deployments -n kn-next-operator-system -o json"] = {
+            ok: true,
+            stdout: JSON.stringify({
+                items: [
+                    {
+                        metadata: {
+                            name: "kn-next-operator-controller-manager",
+                            labels: { "app.kubernetes.io/version": "1.5.0" },
+                        },
+                        spec: {
+                            template: {
+                                spec: {
+                                    containers: [{ image: OPERATOR_IMAGE }],
+                                },
+                            },
+                        },
+                        status: { readyReplicas: 1, replicas: 1 },
+                    },
+                ],
+            }),
+        };
+        const report = await runDoctor({
+            kubectl: stubKubectl(stubs),
+            probeImage: okProbe,
+            inspectKubeconfig: () => ({ kind: "has-current-context" }),
+            loadAppConfig: async () => storageConfig,
+            cliVersion: "2.0.0",
+        });
+        pin(report);
+    });
 });
