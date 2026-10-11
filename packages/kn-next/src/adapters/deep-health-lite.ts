@@ -194,7 +194,8 @@ export function createDeepHealthLite(
             // The gate comes BEFORE the TTL: the claim must not outlive the activity
             // that justified it, and an idle app is not probed.
             if (!gateOpen()) {
-                current = undefined;
+                // Clearing the TTL forces a fresh probe when traffic resumes, which
+                // overwrites `current`; until then nothing is rendered.
                 lastFinishedAt = Number.NEGATIVE_INFINITY;
                 return "";
             }

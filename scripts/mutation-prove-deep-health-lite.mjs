@@ -96,8 +96,9 @@ const GROUPS = [
         claim:
           'idle no longer DROPS the cached reading (#2209 on the lite path) — a stale waking/down persists',
         subject: 'lite',
-        anchor: '            if (!gateOpen()) {\n                current = undefined;',
-        replacement: '            if (!gateOpen()) {\n                void 0;',
+        anchor: '                return "";\n            }\n            if (now() - lastFinishedAt',
+        replacement:
+          '                return current ? render(app, current) : "";\n            }\n            if (now() - lastFinishedAt',
       },
       {
         id: 'L8',
@@ -144,6 +145,11 @@ const GROUPS = [
         anchor: "Alert on overall state='waking' sustained past the wake budget.",
         replacement: "Alert on overall state='waking' sustained past the wake budget!",
       },
+    ],
+  },
+  {
+    spec: `${T}deep-health-lite-guards.test.ts`,
+    mutations: [
       {
         id: 'L13',
         expect: 'red',
@@ -153,11 +159,6 @@ const GROUPS = [
         anchor: 'Symbol.for("knext.lib.clients.lastDbActivityAt")',
         replacement: 'Symbol.for("knext.lib.clients.lastDbActivityAtX")',
       },
-    ],
-  },
-  {
-    spec: `${T}deep-health-lite-guards.test.ts`,
-    mutations: [
       {
         id: 'G1',
         expect: 'red',

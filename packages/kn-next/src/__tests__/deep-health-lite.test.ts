@@ -379,6 +379,23 @@ describe("the loopback server", () => {
         expect(res.status).toBe(200);
     });
 
+    it("serves 200 (empty) even when rendering a malformed health result throws", async () => {
+        const server = await listen({
+            port: 0,
+            app: "test-app",
+            readActivityAt: () => Date.now(),
+            // a health module that returns garbage: render() cannot read .checks
+            loadHealth: async () => ({
+                checkDeepHealth: async () => ({}) as never,
+            }),
+            env: {},
+        });
+        const { port } = server.address() as AddressInfo;
+        const res = await fetch(`http://127.0.0.1:${port}/metrics`);
+        expect(res.status).toBe(200);
+        expect(await res.text()).toBe("");
+    });
+
     it("only GET /metrics exists: other paths and methods are 404", async () => {
         const server = await listen({
             port: 0,
