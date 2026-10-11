@@ -15,10 +15,12 @@ Rules, all from workflow.md / the block-dangerous-bash harness:
   * Every anchor must occur EXACTLY once or the run ABORTS, non-zero. No silent no-ops.
   * Mutates a COPY in a temp directory; the in-repo hooks are never opened for writing.
 """
+import os
 import shutil
 import subprocess
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -68,6 +70,46 @@ MUTATIONS = [
 ]
 
 
+# The credential skip: remove the skip in each hook, then remove each pattern family from the
+# regex ONE AT A TIME. A pattern the suite does not need is a pattern nobody noticed breaking.
+MUTATIONS += [
+    ("gate: credential skip removed", "jev-bash-gate.sh", 'jev_has_credential_signal "$cmd" && exit 0', ":"),
+    ("screen: credential skip removed", "jev-result-screen.sh", 'jev_has_credential_signal "$(cat "$tmp/text.txt")" && exit 0', ":"),
+    ("lib: credential match is case-sensitive", "jev-hook-lib.sh", "grep -Eiq --", "grep -Eq --"),
+    ("lib: credential check never matches", "jev-hook-lib.sh", 'printf \'%s\' "$1" | grep -Eiq -- "$JEV_CRED_RE"', "false"),
+    ("lib: entropy run lengthened to 64", "jev-hook-lib.sh", "{32,}'", "{64,}'"),
+    ("lib: entropy run shortened to 16", "jev-hook-lib.sh", "{32,}'", "{16,}'"),
+    ("lib: sk- loses its word boundary", "jev-hook-lib.sh", "(^|[^a-z0-9])sk-[a-z0-9]", "sk-"),
+    (
+        "gate: oversize command truncated to head only",
+        "jev-bash-gate.sh",
+        "printf '%s\\n[... %d chars elided ...]\\n%s' \"${cmd:0:4000}\" \"$((${#cmd} - 8000))\" \"${cmd: -4000}\"",
+        "printf '%s' \"${cmd:0:8000}\"",
+    ),
+]
+# (label, anchor, replacement). Each alternative must be covered by its own case in the suite.
+# `--password` is a subset of `password`, so only the bare word is removable on its own.
+for _label, _anchor, _repl in [
+    ("secret", "secret|", ""),
+    ("token", "token|", ""),
+    ("authorization:", "authorization:|", ""),
+    ("bearer", "bearer |", ""),
+    ("password", "|password|passwd", "|passwd"),
+    ("passwd", "|passwd", ""),
+    ("--from-literal", "--from-literal|", ""),
+    ("api key", "api[_-]?key|", ""),
+    ("private key", "private[_-]?key|", ""),
+    ("PEM block", "-----BEGIN|", ""),
+    ("ghp_", "ghp_|", ""),
+    ("gho_", "gho_|", ""),
+    ("github_pat_", "github_pat_|", ""),
+    ("npm_", "npm_|", ""),
+    ("xox[bp]-", "|xox[bp]-", ""),
+    ("AKIA", "|AKIA", ""),
+]:
+    MUTATIONS.append((f"lib: credential pattern removed: {_label}", "jev-hook-lib.sh", _anchor, _repl))
+
+
 def run_suite(work: Path, test: str = "jev-hooks.test.sh") -> int:
     return subprocess.run(
         ["bash", str(work / test)],
@@ -90,28 +132,34 @@ def main() -> int:
                 print(f"ABORT: the UNMUTATED suite {t} is not green (exit {rc}); cannot prove anything")
                 return 2
         print("baseline: green (exit 0)")
-        for i, (label, fname, anchor, repl) in enumerate(MUTATIONS):
+        def prove(item):
+            i, (label, fname, anchor, repl) = item
             work = Path(td) / f"m{i}"
             shutil.copytree(base, work)
             src = (work / fname).read_text()
             n = src.count(anchor)
             if n != 1:
-                aborts.append(label)
-                print(f"ABORT  {label}: anchor occurs {n}x in {fname}, expected exactly 1")
-                continue
+                return "ABORT", f"ABORT  {label}: anchor occurs {n}x in {fname}, expected exactly 1"
             out = src.replace(anchor, repl, 1)
             if out == src:
-                aborts.append(label)
-                print(f"ABORT  {label}: substitution produced no change")
-                continue
+                return "ABORT", f"ABORT  {label}: substitution produced no change"
             (work / fname).write_text(out)
             rc = run_suite(work, "pr-risk.test.sh" if fname == "pr-risk.sh" else "jev-hooks.test.sh")
             if rc != 0:
-                killed += 1
-                print(f"RED    {label} (suite exit {rc})")
-            else:
-                survivors.append(label)
-                print(f"GREEN  {label}  <-- SURVIVED, the guard is decoration")
+                return "RED", f"RED    {label} (suite exit {rc})"
+            return "GREEN", f"GREEN  {label}  <-- SURVIVED, the guard is decoration"
+
+        # Independent temp copies, so mutations run in parallel (each suite keeps its own TMP).
+        # Results print in declaration order.
+        with ThreadPoolExecutor(max_workers=min(4, os.cpu_count() or 2)) as pool:
+            for status, line in pool.map(prove, enumerate(MUTATIONS)):
+                print(line)
+                if status == "RED":
+                    killed += 1
+                elif status == "GREEN":
+                    survivors.append(line)
+                else:
+                    aborts.append(line)
     print(f"\n{killed}/{len(MUTATIONS)} mutations killed; survivors={len(survivors)} aborts={len(aborts)}")
     return 0 if not survivors and not aborts else 1
 

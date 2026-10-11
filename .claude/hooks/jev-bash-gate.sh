@@ -24,6 +24,15 @@
 # / unparseable output / unparseable payload. An unreachable model must never wedge the
 # agent; the string hook is what fails closed.
 #
+# NOTHING CREDENTIAL-SHAPED IS SENT. A command is judged by a third party, so one that carries
+# a credential signal (secret, token, password, api key, PEM block, well-known key prefixes,
+# any 32+ char base64/hex run, ...; see jev_has_credential_signal) skips the call, silently,
+# and the deterministic hook alone applies. Hooks run in parallel, so that hook blocking the
+# command would not stop this one from sending it. Over-matching only costs a judgement.
+#
+# COST. Every command that is not read-only pays one network round trip (about 0.6-1 s) per
+# Bash call; the pre-filter and the credential skip are the only calls it saves.
+#
 # PRE-FILTER. Obviously read-only commands (git status|log|diff|show, ls, cat, grep, rg,
 # gh pr view|checks, ...) skip the call: no latency, no cost. It is deliberately strict —
 # every segment of a pipeline/list must be read-only, and any redirect, `$(`, backtick or
@@ -58,6 +67,10 @@ is_readonly() {
   [ "$any" = 1 ]
 }
 is_readonly "$cmd" && exit 0
+
+# Nothing that could be a credential leaves the machine. Skip the call, fail open, silent:
+# the deterministic hook still applies to this command (see jev-hook-lib.sh).
+jev_has_credential_signal "$cmd" && exit 0
 
 jev_resolve || exit 0
 tmp=$(mktemp -d 2>/dev/null) || exit 0

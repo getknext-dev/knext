@@ -52,3 +52,19 @@ jev_is_prob() {
 
 # jev_ge <x> <threshold> — x >= threshold, as floats.
 jev_ge() { awk -v x="$1" -v t="$2" 'BEGIN { exit !(x + 0 >= t + 0) }'; }
+
+# jev_has_credential_signal <text> — true if the text could carry a credential. Both hooks
+# call this BEFORE any jev call and, on a hit, skip the call (fail open, silent): the text
+# would otherwise leave the machine for TypeSafe. Hooks run in PARALLEL, so the deterministic
+# hook blocking a command does not stop this one from sending it, and block-secrets.sh only
+# covers Edit/Write. Measured: `gh secret set NPM_TOKEN --body <value>` was sent.
+#
+# OVER-MATCHING IS THE POINT. A false hit only means one command goes unjudged (the
+# deterministic hook still applies); a false miss ships a secret. So: case-insensitive, bare
+# words (`secret`, `token`, `password`), well-known prefixes, and any run of 32+ base64/hex
+# characters (entropy proxy; `-` and `_` stay out of the class so kebab/snake-case names do
+# not trip it, but a long unbroken path segment can). `sk-` needs a non-alphanumeric before
+# it, else disk-/task- would match. Cost on the screen: a PR comment that merely says
+# "token" is not screened.
+JEV_CRED_RE='secret|token|authorization:|bearer |--password|password|passwd|--from-literal|api[_-]?key|private[_-]?key|-----BEGIN|ghp_|gho_|github_pat_|npm_|(^|[^a-z0-9])sk-[a-z0-9]|xox[bp]-|AKIA|[A-Za-z0-9+/=]{32,}'
+jev_has_credential_signal() { printf '%s' "$1" | grep -Eiq -- "$JEV_CRED_RE"; }
