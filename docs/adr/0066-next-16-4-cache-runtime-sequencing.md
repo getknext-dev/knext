@@ -784,17 +784,23 @@ starts. D1, D2 and D4 are otherwise unchanged.
 3. **Retirement probe.** The shim retires only when one of these holds, and the first to hold owns the
    deletion PR:
    - knext routes through `@next/routing` instead of Next's own router (a verified-adapter design
-     question, tracked as tech debt TD-6, not Sprint 3 work); or
+     question, tracked as tech debt in #2172, not Sprint 3 work); or
    - an upstream Next release whose adapter branch falls through to `NoFallbackError` on its own.
 
-   The probe for the second is the `dynamic-params-request-modes` case: with `adapterPath` left set
-   in a built standalone tree, a closed `dynamicParams = false` route must fall through to the less
-   specific route. When that passes unblanked on a stable Next release, the shim is deletable.
-   Raising the Next floor never retires it.
+   The probe for the second is the in-repo served test
+   `packages/kn-next/src/__tests__/standalone-adapter-path-404.test.ts` on the fixture
+   `fixtures/dynamic-params-false-404`: `GET /overlap/unlisted` must answer 200 from the catch-all
+   (`app/overlap/[...rest]`, body containing `id="catch-all">unlisted<`) rather than 404 from the
+   closed `app/overlap/[slug]`. Today that test applies the blanking first. The probe is the same
+   assertion with the blanking step skipped (an unblanked variant, added with the deletion PR or
+   when #2172 is decided), run against the stable Next release in question. Mirrors upstream's
+   `dynamic-params-request-modes` case. When the unblanked variant passes on a stable Next release,
+   the shim is deletable. Raising the Next floor never retires it.
 
 4. **K4's gate is the D4 smoke runs, not a credential bump.** K4 raises the floor only when R1–R4
    (D4, Part 1: the four stable cells at `v16.4.0`) are green, meaning every red file triaged and
-   zero open knext gaps. Otherwise the floor stays `>=16.3.8`. The 1.x credential stays on Next
+   zero open knext gaps. Otherwise K4 does not raise the floor to `>=16.4.0` (today's peer floor is
+   `>=16.0.0`; plan rev4's fallback was `>=16.3.8`). The 1.x credential stays on Next
    16.3.8, and **no v2 credential lane exists until 2.0 GA** (D4, Part 2). Wording elsewhere that
    gates K4 on "the 16.4 credential bump" (issue bodies and sprint outputs) is wrong: gating a
    floor on a credential that cannot exist before the floor would be circular. This ADR's own text
@@ -810,8 +816,8 @@ starts. D1, D2 and D4 are otherwise unchanged.
    ADR's sequence (`standalone-compile.mjs` `PRELOAD_NAMES`: `arp-primer.cjs`,
    `cache-control-normalize.cjs`, `bun-keepalive-guard.cjs`, `public-origin.cjs`,
    `request-body-cap.cjs`, plus the self-contained supervisor behind its flag; `node-server.ts` loads
-   `public-origin.cjs` by path). The inventory D3's primer list absorbs is therefore these five
-   preloads, not the ARP primer alone. `public-origin.cjs` is a request-time shim, not a process-start
+   `public-origin.cjs` by path). The preload inventory is therefore these five preloads, not the ARP
+   primer alone; D3 itself carries no inventory, and Z9's first commit records it (below). `public-origin.cjs` is a request-time shim, not a process-start
    primer, so it stays outside `PROCESS_START_PRIMERS`; Z9 must keep the primers first and must not
    reorder the others. The "runtime twice" rule is held narrowly here, and Z9's first commit
    inventories the preloads before touching either entry point.
@@ -821,5 +827,7 @@ starts. D1, D2 and D4 are otherwise unchanged.
 - K4 is smaller and no longer blocked on the shim; Z9 and #2083 are unaffected.
 - The shim is permanent for now. That is a cost, accepted: deleting it ships the `dynamicParams =
   false` fall-through bug on every app with a catch-all behind a closed segment.
-- Dependency edges: K4 (#2066) needs K1 (#2065), this amendment, R1–R4 green and #2126. #2089 needs
-  #2083 and K4, but no longer waits on the shim.
+- Dependency edges: K4 (#2066) keeps D1 S4's dependencies unchanged (this ADR Accepted, K1 #2065,
+  S2, S3, R3a). S2 and S3 are the R1–R4 smoke runs; per item 4 they count as green only with every
+  red triaged and zero open knext gaps, which includes the smoke-triage gaps such as #2126. #2089
+  needs #2083 and K4, but no longer waits on the shim.
