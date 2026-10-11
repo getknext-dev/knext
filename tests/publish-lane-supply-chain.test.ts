@@ -745,6 +745,45 @@ describe('publish-lane supply-chain guard: an audit that cannot fail the run is 
     }
   });
 
+  it('`trap --` / option flags before the handler do not hide the trap', () => {
+    for (const trap of [
+      "trap -- 'exit 0' EXIT",
+      'trap -- "exit 0" EXIT',
+      "trap -- 'exit 0' ERR",
+      "trap -- 'echo x; exit 0' EXIT",
+    ]) {
+      const body = `${trap}\nnode scripts/audit-published.mjs`;
+      const audit = auditPublishLanes(
+        fixture({ 'a.yml': wf(`${auditJobWith(body)}${publishJob('audit')}`) }),
+      );
+      expect(audit.problems.length, body).toBeGreaterThan(0);
+    }
+    const harmless = "trap -- 'exit 1' EXIT\nnode scripts/audit-published.mjs";
+    const ok = auditPublishLanes(
+      fixture({ 'a.yml': wf(`${auditJobWith(harmless)}${publishJob('audit')}`) }),
+    );
+    expect(ok.problems).toEqual([]);
+  });
+
+  it('eval or any function definition in the audit step makes it unprovable', () => {
+    for (const pre of [
+      "f() { trap 'exit 0' EXIT; }; f",
+      'f() { exit 0; }; f',
+      'function f { exit 0; }\nf',
+      'f () { :; }',
+      'eval "trap \'exit 0\' EXIT"',
+      'eval "exit 0"',
+      'eval "set +e"',
+      'FOO=1 eval "set +e"',
+    ]) {
+      const body = `${pre}\nnode scripts/audit-published.mjs`;
+      const audit = auditPublishLanes(
+        fixture({ 'a.yml': wf(`${auditJobWith(body)}${publishJob('audit')}`) }),
+      );
+      expect(audit.problems.join('\n'), body).toMatch(/eval|function/);
+    }
+  });
+
   it('harmless traps do not neutralise the audit', () => {
     for (const trap of [
       "trap 'echo bye' EXIT",
@@ -1187,7 +1226,8 @@ describe('publish-lane supply-chain guard (round 4): the audit must be a TOP-LEV
 
   it('compound statements that do NOT enclose the audit leave it a gate', () => {
     for (const body of [
-      'helper() {\n  echo hi\n}\nnode scripts/audit-published.mjs',
+      // (a function definition, even an unrelated one, is now refused outright:
+      // see "eval or any function definition" -- the static reading cannot see into it)
       'if [ -n "$X" ]; then echo a; fi\nnode scripts/audit-published.mjs\nfor f in a b; do echo $f; done',
       'for f in a b; do\n  echo $f\ndone\nnode scripts/audit-published.mjs',
       'case "$X" in\n  a) echo a ;;\nesac\nnode scripts/audit-published.mjs',

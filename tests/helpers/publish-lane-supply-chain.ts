@@ -616,7 +616,16 @@ const isNonZeroLiteral = (arg: string | undefined): boolean =>
  * runs `exit 0`/bare `exit`/`return`/`true`/`:` -- or that we cannot read (`$H`,
  * backticks) -- fails closed.
  */
-function trapOverridesStatus(args: string[]): boolean {
+function trapOverridesStatus(rawArgs: string[]): boolean {
+  // `trap -- 'exit 0' EXIT` / `trap -p …`: option words come before the handler.
+  let first = 0;
+  while (
+    first < rawArgs.length &&
+    (rawArgs[first] === '--' || /^-[A-Za-z]+$/.test(rawArgs[first]))
+  ) {
+    first++;
+  }
+  const args = rawArgs.slice(first);
   if (args.length < 2) return false; // `trap`, `trap -p`, `trap - EXIT`
   const [handler, ...sigs] = args;
   if (handler === '-' || handler === '') return false;
@@ -666,6 +675,20 @@ function auditInvocationProblem(run: string): string | null {
       while (cmd[0] !== undefined && LEAD_KEYWORDS.has(cmd[0])) cmd = commandTokens(cmd.slice(1));
       return cmd;
     });
+  // `eval` and function definitions hide commands from this static reading
+  // (`f() { exit 0; }; f`, `eval "set +e"`): do not interpret them, refuse the step.
+  for (const { text } of splitSourceIntoStatements(joined)) {
+    const cmd = commandTokens(tokenize(text.trim()));
+    const t = text.trim();
+    const head = cmd[0] === 'command' || cmd[0] === 'builtin' ? cmd[1] : cmd[0];
+    if (
+      head === 'eval' ||
+      head === 'function' ||
+      /^(function\s+)?[A-Za-z_][\w.:-]*\s*\(\s*\)/.test(t)
+    ) {
+      return 'audit step uses eval/function definitions; keep the audit step a plain script';
+    }
+  }
   for (const cmd of statementCommands(joined)) {
     const head = cmd[0];
     if ((head === 'exit' || head === 'return') && !isNonZeroLiteral(cmd[1])) {
