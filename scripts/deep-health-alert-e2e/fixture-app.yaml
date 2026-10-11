@@ -3,7 +3,7 @@
 # Labelled exactly as the operator labels every app pod it generates
 # (`generated-by: kn-next-operator`, `app: <name>`), because that label is the
 # selector of the shipped PodMonitor. The metrics port is declared as an UNNAMED
-# containerPort: the PodMonitor targets it by number (9464), the way a Knative
+# containerPort: the PodMonitor targets it by number (9464), the way a serving-layer
 # user-container's port appears in the pod spec.
 #
 # The container runs the repo checkout, mounted from the kind node, under the
@@ -42,6 +42,11 @@ spec:
               value: production
             - name: KN_APP_NAME
               value: e2e-app
+            - name: PORT
+              value: "3000"
+            # The shipped PodMonitor scrapes this port by number.
+            - name: METRICS_PORT
+              value: "9464"
             # Tracing is what registers the deep-health gauge today.
             - name: OTEL_TRACING_ENABLED
               value: "true"

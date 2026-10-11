@@ -23,8 +23,17 @@ import { createServer } from 'node:http';
 import { getDbPool } from '@getknext/lib/clients';
 import { registerNode } from '../src/instrumentation-node';
 
-const APP_PORT = Number(process.env.PORT ?? 3000);
-const METRICS_PORT = Number(process.env.METRICS_PORT ?? 9464);
+// The ports come from the pod spec (scripts/deep-health-alert-e2e/fixture-app.yaml): the
+// PodMonitor under test targets the metrics port by number, so it cannot be OS-assigned
+// here, and the pod has its own network namespace so nothing on a runner can collide.
+// No in-code default: a missing value must fail loudly rather than bind a guess.
+const portFromEnv = (name: string): number => {
+  const n = Number(process.env[name]);
+  if (!Number.isInteger(n) || n <= 0) throw new Error(`${name} must be set to a port number`);
+  return n;
+};
+const APP_PORT = portFromEnv('PORT');
+const METRICS_PORT = portFromEnv('METRICS_PORT');
 const TRAFFIC_EVERY_MS = Number(process.env.FIXTURE_TRAFFIC_EVERY_MS ?? 10_000);
 
 registerNode();

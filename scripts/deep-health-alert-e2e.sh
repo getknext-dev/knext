@@ -14,7 +14,7 @@
 # :9464 listener; the @getknext/lib pool and deep health check.
 # What is not: the cluster is kind, and the app is a small fixture process
 # (apps/file-manager/e2e-support/deep-health-alert-fixture.ts) rather than a
-# Knative service, because the claim under test is the observability path, not the
+# serving-stack deployment, because the claim under test is the observability path, not the
 # serving path.
 #
 # Prerequisites on PATH: docker, kind, kubectl, node, bun, sha256sum, curl.

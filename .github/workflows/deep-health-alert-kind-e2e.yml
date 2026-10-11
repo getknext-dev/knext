@@ -14,8 +14,8 @@ name: Deep-health alert — kind e2e
 # stayed green; this lane is the end-to-end half of that fix.
 #
 # The app is a fixture process running the real instrumentation, the real runtime
-# contract listener and the real @getknext/lib deep health check — not a Knative
-# service, because the claim is about the observability path (scripts/
+# contract listener and the real @getknext/lib deep health check — not a full
+# serving-stack deployment, because the claim is about the observability path (scripts/
 # deep-health-alert-e2e.sh says exactly what is real and what is not).
 #
 # Runs on PRs that touch the pieces it exercises, plus on demand. Ephemeral kind
