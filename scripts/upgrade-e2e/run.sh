@@ -366,8 +366,8 @@ phase6_new_cli_redeploy() {
   if [[ -n "$NEW_CLI_VERSION" ]]; then
     local bin="$WORKDIR/new-cli"
     mkdir -p "$bin"
-    npm install --prefix "$bin" "@getknext/core@${NEW_CLI_VERSION}" "kn-next@${NEW_CLI_VERSION}"
-    new_knext="$bin/node_modules/.bin/kn-next"
+    npm install --prefix "$bin" "@getknext/core@${NEW_CLI_VERSION}"
+    new_knext="$bin/node_modules/.bin/knext"
   else
     # Build this tree's own CLI, same pattern the existing e2e_cli/e2e_rollback
     # suites use (utils.BuildCLI: `bun run --filter @getknext/core build`).

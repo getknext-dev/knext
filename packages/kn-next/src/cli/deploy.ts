@@ -86,7 +86,6 @@ import {
     handleConfigNotFound,
     handleUsageError,
     loadConfig,
-    printDeprecatedKnNextNoticeIfNeeded,
     resolveKubeContext,
     UsageError,
     withKubeContext,
@@ -1358,12 +1357,6 @@ export async function deploy() {
 // docs site tell users to run them, and until now `knext cleanup` fell
 // through to the DEPLOY path — a teardown command that deploys (UX ledger 1d).
 if (isEntrypoint(import.meta.url)) {
-    // #1369: one line to stderr when invoked via the `kn-next` bin symlink
-    // (see shared.ts — checked from argv[1]'s basename, not a build-time
-    // distinction, since both bins share one dist file). Runs before
-    // anything else so it is never lost behind other output on a failing
-    // invocation.
-    printDeprecatedKnNextNoticeIfNeeded();
     // ADR-0046: a bare `knext` and a flags-only `knext --skip-build` still
     // deploy (the advertised front door), but an unrecognised FIRST TOKEN is an
     // error rather than a silent deploy — `knext celanup` must not ship a

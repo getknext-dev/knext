@@ -9,7 +9,7 @@
  */
 
 import { existsSync, writeSync } from "node:fs";
-import { basename, dirname, resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import type { KnativeNextConfig } from "../config";
 import { DOCS_URL } from "./help";
 import { validateConfig } from "./validate";
@@ -308,95 +308,4 @@ export async function loadConfig(
     validateConfig(config, undefined, options);
 
     return config;
-}
-
-/**
- * `kn-next` → `knext` rename (#1369, rev-1380 round). `package.json` declares
- * BOTH `bin.knext` and `bin.kn-next` pointing at the SAME dist file
- * (`dist/cli/kn-next.js`) — a second file (even a thin runtime proxy) broke
- * `npx @getknext/core` for every consumer: npm's default-bin picker only
- * auto-resolves when every declared bin targets ONE file, proven against
- * real npm 11.12.1. Since there is only one file, `deploy.ts` cannot tell
- * `knext` and `kn-next` apart from ITS OWN `import.meta.url` (always the
- * same) or from an env marker set by a proxy (there is no proxy). It CAN
- * tell them apart from `process.argv[1]`: npm creates two differently-named
- * symlinks (`node_modules/.bin/knext`, `node_modules/.bin/kn-next`) to this
- * one file, and when Node is invoked through a symlink, `process.argv[1]` is
- * the symlink path AS INVOKED — the literal name the user (or their
- * `package.json` script) typed — NOT the realpath-resolved target (see
- * `isEntrypoint` in exec.ts, which relies on the same fact for the opposite
- * comparison). `basename(argv1)` is therefore checked BEFORE any realpath
- * resolution.
- *
- * `npx @getknext/core <verb>` with no bin name given IS observable, but not
- * as "neither alias" — rev-1380's round-2 review measured it against real
- * npm 11.9.0 and found the opposite of what an earlier round assumed: npm's
- * arborist creates BOTH `node_modules/.bin/kn-next` and `.../.bin/knext`
- * (alphabetical), and since the package's own unscoped name ("core") matches
- * NEITHER bin, npm's default-bin picker falls back to the first one
- * alphabetically — `kn-next`. So `argv[1]`'s basename for that invocation IS
- * `"kn-next"`, indistinguishable from a real deprecated-alias use by
- * `isDeprecatedAliasInvocation` alone. That made EVERY `npx @getknext/core`
- * user — the documented front door (cli.mdx) — see a false "you're using
- * the deprecated command" warning for a command they never typed.
- *
- * `isDeprecatedAliasInvocation` itself stays a PURE basename check (its
- * whole contract, unit-tested directly) — the npx-ambiguity carve-out lives
- * in {@link printDeprecatedKnNextNoticeIfNeeded} instead, via
- * {@link isAmbiguousNpxBinDispatch}.
- */
-export function isDeprecatedAliasInvocation(
-    argv1: string | undefined = process.argv[1],
-): boolean {
-    return argv1 !== undefined && basename(argv1) === "kn-next";
-}
-
-/**
- * Whether the current process was dispatched by `npx`/`npm exec` — the
- * ambiguous-bin-pick case {@link isDeprecatedAliasInvocation}'s docblock
- * describes. Measured against real npm 11.9.0 (`npx <pkg>`, `npm exec
- * <pkg>`, and explicit `npx <bin-name>` all set `npm_command=exec`; a
- * project's own `npm run <script>` that shells out to a bin directly sets
- * `npm_command=run`; running `node_modules/.bin/<name>` straight from a
- * shell sets neither — no npm process is involved at all). `npm_command` is
- * the more directly-documented of the two env vars npm sets for this
- * (`npm_lifecycle_event=npx` is the other, equally reliable in the same
- * measurement — `npm_command` was picked for being the more literal name).
- *
- * Accepted trade, not a full disambiguation: this ALSO suppresses the notice
- * for a user who types `npx kn-next` EXPLICITLY (naming the deprecated alias
- * on purpose) — npm sets the identical env vars for that case, and nothing
- * observable from inside the spawned process tells the two apart. That is a
- * strictly smaller, more forgivable loss than the false-positive on every
- * `npx @getknext/core` user this replaces.
- */
-export function isAmbiguousNpxBinDispatch(
-    env: Record<string, string | undefined> = process.env,
-): boolean {
-    return env.npm_command === "exec";
-}
-
-const DEPRECATED_KN_NEXT_NOTICE =
-    "`kn-next` is deprecated and will be removed in 2.0 — use `knext` instead (same command, same flags).\n";
-
-/**
- * Print the one-line deprecation notice to stderr when invoked as `kn-next`
- * (see {@link isDeprecatedAliasInvocation}) — UNLESS the dispatch is the
- * ambiguous `npx`/`npm exec` bin-pick case (see
- * {@link isAmbiguousNpxBinDispatch}), where `argv[1]`'s basename cannot be
- * trusted as a statement of user intent.
- *
- * Caveat this does NOT cover (doc-only, no code fix possible): pnpm's
- * `pnpm dlx`/`exec` and Windows `.cmd`/`.ps1` shims do not set these npm-only
- * env vars at all, so the notice never fires there either way — "always
- * warns on `kn-next`" is an npm/POSIX-shim claim, not a universal one.
- */
-export function printDeprecatedKnNextNoticeIfNeeded(
-    argv1: string | undefined = process.argv[1],
-    env: Record<string, string | undefined> = process.env,
-    write: (text: string) => void = (text) => writeSync(2, text),
-): void {
-    if (isDeprecatedAliasInvocation(argv1) && !isAmbiguousNpxBinDispatch(env)) {
-        write(DEPRECATED_KN_NEXT_NOTICE);
-    }
 }

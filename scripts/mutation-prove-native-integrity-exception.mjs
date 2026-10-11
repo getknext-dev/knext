@@ -144,9 +144,9 @@ const NEGATIVE = {
   claim: 'a refusal MESSAGE is reworded — the guard asserts behaviour, not prose',
   subject: 'shim',
   anchor:
-    "          '  integrity pinning; rebuild it with a current `kn-next build`, or unset the variable\\n' +",
+    "          '  integrity pinning; rebuild it with a current `knext build`, or unset the variable\\n' +",
   replacement:
-    "          '  integrity pinning (reworded by the negative control); rebuild it with a current `kn-next build`, or unset the variable\\n' +",
+    "          '  integrity pinning (reworded by the negative control); rebuild it with a current `knext build`, or unset the variable\\n' +",
 };
 
 const ALL = [...MUTATIONS, NEGATIVE];

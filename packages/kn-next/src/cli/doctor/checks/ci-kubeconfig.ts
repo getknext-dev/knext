@@ -47,7 +47,7 @@ export function ciKubeconfigCheck(
                 TITLE,
                 "fail",
                 verdict.reason ?? "refused",
-                "generate a scoped kubeconfig with `kn-next init-ci` instead — it prints the exact commands and never needs a cloud CLI",
+                "generate a scoped kubeconfig with `knext init-ci` instead — it prints the exact commands and never needs a cloud CLI",
             ),
         ];
     }

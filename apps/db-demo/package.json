@@ -8,7 +8,7 @@
     "build": "next build --webpack",
     "start": "node .next/standalone/apps/db-demo/server.js",
     "db:generate": "drizzle-kit generate",
-    "db:migrate": "kn-next db migrate",
+    "db:migrate": "knext db migrate",
     "typecheck": "../../node_modules/typescript-tsc7/bin/tsc --noEmit"
   },
   "dependencies": {

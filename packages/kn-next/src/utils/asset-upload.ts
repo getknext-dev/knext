@@ -513,7 +513,7 @@ function providerOps(
  *
  * This function used to READ `.next/BUILD_ID` off disk and mark whatever it
  * found. That is the exact over-delete #892 fixed on the vinext leg, un-fixed
- * here: under `kn-next build` (turbopack) no `NEXT_DEPLOYMENT_ID` is exported
+ * here: under `knext build` (turbopack) no `NEXT_DEPLOYMENT_ID` is exported
  * and no revision is created, so `.next/BUILD_ID` holds Next's own generated id
  * — a value no `apps.kn-next.dev/build-id` revision label can ever carry. A
  * marker keyed on it makes the prefix a prune CANDIDATE that is permanently
@@ -522,7 +522,7 @@ function providerOps(
  * So the marker is keyed on the caller's `buildId`, not on disk state — the
  * same contract {@link stageNitroPublicAssets} enforces on the vinext leg:
  *  - **no `buildId` ⇒ no marker** (over-kept forever, the safe direction, with
- *    a warning). This is `kn-next build`, which creates no revision.
+ *    a warning). This is `knext build`, which creates no revision.
  *  - a `buildId` is given ⇒ the write site ASSERTS `.next/BUILD_ID === buildId`
  *    rather than trusting the caller (marker key ≡ protection key ≡ image tag ≡
  *    CR `spec.buildId` by construction), and REFUSES a reserved segment. A
@@ -609,7 +609,7 @@ export function stageStandaloneAssets(
     //
     // #924: keyed on the caller's `buildId` (already asserted == .next/BUILD_ID
     // above), NOT on disk state. No `buildId` ⇒ no marker ⇒ over-kept, the safe
-    // direction — this is `kn-next build`, which creates no revision.
+    // direction — this is `knext build`, which creates no revision.
     if (buildId) {
         const markerDir = join(stagingDir, "_next", "static", buildId);
         mkdirSync(markerDir, { recursive: true });
@@ -618,7 +618,7 @@ export function stageStandaloneAssets(
         log.warn(
             "No deploy build id for this upload — no .knext-build marker " +
                 "staged, so these objects will be over-kept (never reaped) by " +
-                "`kn-next gc`. Expected for `kn-next build`, which creates no " +
+                "`knext gc`. Expected for `knext build`, which creates no " +
                 "revision: nothing could ever protect the prefix, so marking " +
                 "it would make it reapable but never protectable.",
         );
@@ -658,7 +658,7 @@ export function stageStandaloneAssets(
  * discovering it.** The write site enforces the equality; it does not trust the
  * caller to have enforced it. Two failures made that non-negotiable:
  *
- *  - `kn-next build` (`build.ts`) uploads assets while exporting NO deploy id
+ *  - `knext build` (`build.ts`) uploads assets while exporting NO deploy id
  *    and creating NO revision. A discovered id there is whatever vinext minted
  *    — a UUID no `apps.kn-next.dev/build-id` label can ever carry — so the
  *    marker would make the prefix a prune CANDIDATE that is permanently
@@ -684,7 +684,7 @@ export function stageNitroPublicAssets(
     if (!existsSync(sourceDir)) {
         throw new Error(
             `No .output/public directory found in ${cwd} — run the app's build ` +
-                "(`vite build`, or `kn-next build`) before deploying, or pass " +
+                "(`vite build`, or `knext build`) before deploying, or pass " +
                 "--skip-upload to skip the asset upload.",
         );
     }
@@ -747,7 +747,7 @@ export function stageNitroPublicAssets(
         log.warn(
             "No deploy build id for this upload — no .knext-build marker " +
                 "staged, so these objects will be over-kept (never reaped) by " +
-                "`kn-next gc`. Expected for `kn-next build`, which creates no " +
+                "`knext gc`. Expected for `knext build`, which creates no " +
                 "revision: nothing could ever protect the prefix, so marking " +
                 "it would make it reapable but never protectable.",
         );
@@ -1198,7 +1198,7 @@ export async function uploadAssetsFromImage(
 /**
  * @param buildId this deploy's id. Threaded from the caller rather than read
  *   back off disk — see {@link stageNitroPublicAssets}. Omitted by
- *   `kn-next build`, which creates no revision, so its upload is over-kept.
+ *   `knext build`, which creates no revision, so its upload is over-kept.
  */
 export async function uploadAssets(
     config: StorageBackedConfig,
@@ -1568,7 +1568,7 @@ export function reclaimBuildPrefix(
 }
 
 /**
- * What one {@link pruneOldBuilds} run did — returned so callers (`kn-next gc`)
+ * What one {@link pruneOldBuilds} run did — returned so callers (`knext gc`)
  * can report it SYNCHRONOUSLY on stdout (a command that deletes objects must
  * always say what it did, and what it refused to touch).
  */

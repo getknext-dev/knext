@@ -1,6 +1,6 @@
-# CR schema preflight — what `kn-next deploy` checks before it does anything
+# CR schema preflight — what `knext deploy` checks before it does anything
 
-`kn-next deploy` and `kn-next preview deploy` begin with a **schema preflight**:
+`knext deploy` and `knext preview deploy` begin with a **schema preflight**:
 a server-side dry-run apply of the exact `NextApp` CR they are about to submit.
 It runs **before the build, before the asset upload and before the image push**,
 so a cluster that would not store your CR intact costs you a round-trip rather
@@ -46,7 +46,7 @@ the OpenAPI v3 read succeeds.
 
 - A deploy either stores the CR intact or **fails**; it never proceeds with a
   field silently dropped.
-- On failure, `kn-next deploy` exits **non-zero** and **names the fields** it
+- On failure, `knext deploy` exits **non-zero** and **names the fields** it
   could not get past the installed CRD.
 - Nothing has been built, uploaded or applied when a preflight failure is
   reported.
@@ -64,10 +64,10 @@ the OpenAPI v3 read succeeds.
 
 ## Diagnosing without deploying
 
-`kn-next doctor` reports **schema coverage**, not merely CRD existence:
+`knext doctor` reports **schema coverage**, not merely CRD existence:
 
 ```
-$ kn-next doctor
+$ knext doctor
 FAIL  NextApp CRD schema coverage
       the installed NextApp CRD does not define 1 field(s) this CLI emits:
       spec.database.roSecretRef
