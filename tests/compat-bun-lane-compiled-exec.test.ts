@@ -122,6 +122,7 @@ function runCompileSection(
       'log() { echo "[t] $*" >&2; }',
       'RUNTIME=bun',
       `APP_DIR='${app}'`,
+      `DIST_DIR='${app}/.next'`,
       `SERVER_JS='${join(standaloneApp, 'server.js')}'`,
       `STANDALONE_APP_DIR='${standaloneApp}'`,
       `SCRIPT_DIR='${scriptDir}'`,
