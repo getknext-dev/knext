@@ -32,9 +32,9 @@ Publishing is driven by [Changesets](https://github.com/changesets/changesets) a
 
 `@getknext/core` depends on **both** `@getknext/lib` and `@getknext/db` (and `@getknext/db` depends on
 `@getknext/lib`), so they must always ship as a set — publishing core without db is exactly
-the #255/#256 incident (every consumer install 404s on the missing member). the unscoped forwarding package named kn-next is the alias
-package that makes the bare `npx @getknext/core` resolve; it forwards to `@getknext/core`'s CLI and joined
-the `fixed` group in #820, so all four now move to the same version together.
+the #255/#256 incident (every consumer install 404s on the missing member). The unscoped npm package
+named kn-next is a forwarding alias for `@getknext/core`'s CLI, kept until 2.0 GA retires it; it joined
+the `fixed` group in #820, so all four move to the same version together.
 
 All four carry `"publishConfig": { "access": "public", "provenance": true }`, so `changeset publish`
 publishes them publicly and CI attaches a signed provenance attestation (via the workflow's
@@ -896,7 +896,7 @@ registry entries, with `rcTag` pinned at `v1.0.0-rc.5`:
    npm view @getknext/core dist-tags   # { latest: '0.4.3', rc: '1.0.0-rc.5' }
    npm view @getknext/lib dist-tags    # { latest: '0.4.3', rc: '1.0.0-rc.5' }
    npm view @getknext/db dist-tags     # { latest: '0.4.3', rc: '1.0.0-rc.5' }
-   npm view knext dist-tags          # { latest: '0.4.3', rc: '1.0.0-rc.5' }
+   npm view kn-next dist-tags          # { latest: '0.4.3', rc: '1.0.0-rc.5' }
    ```
 2. **Rollback plan dry run** (default mode — no `--execute`, so this only reads the registry via
    `npm view` to confirm the rollback target is published for all four packages, then prints the

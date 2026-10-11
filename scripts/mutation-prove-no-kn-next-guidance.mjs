@@ -159,6 +159,13 @@ const MUTATIONS = [
     replacement: '`kn-next deploy` emits a `NextApp` custom resource',
   },
   {
+    label: 'package-name rule: `npm view knext dist-tags` (no such package; it is kn-next)',
+    subject: 'releasingMd',
+    spec: GUARD_SPEC,
+    anchor: 'npm view kn-next dist-tags ',
+    replacement: 'npm view knext dist-tags ',
+  },
+  {
     label: 'package.json: the `kn-next` bin comes back',
     subject: 'packageJson',
     spec: SURFACE_SPEC,

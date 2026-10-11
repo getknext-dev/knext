@@ -116,6 +116,14 @@ export function logicalText(text: string): string {
         );
 }
 
+/**
+ * The package NAME is `kn-next` (the forwarding alias) or `@getknext/core`; there is
+ * no npm package called `knext`, so telling a user to view, install or publish it
+ * is wrong. A rename of the command must not rename the package in these lines.
+ */
+export const PACKAGE_NAME_MISTAKE =
+    /\bnpm\s+(?:view|info|install|i|add|publish|dist-tag\s+add|deprecate)\s+knext\b/g;
+
 export function commandHits(text: string): string[] {
     const hits: string[] = [];
     const flat = logicalText(text);
@@ -123,6 +131,10 @@ export function commandHits(text: string): string[] {
         // Prose filter only applies to the bare `kn-next <word>` branch.
         const bare = /^kn-next\s+([a-z][\w-]*)/.exec(m[0]);
         if (bare && PROSE_STOPWORDS.has(bare[1])) continue;
+        const at = m.index ?? 0;
+        hits.push(flat.slice(Math.max(0, at - 40), at + 80).trim());
+    }
+    for (const m of flat.matchAll(PACKAGE_NAME_MISTAKE)) {
         const at = m.index ?? 0;
         hits.push(flat.slice(Math.max(0, at - 40), at + 80).trim());
     }
@@ -248,6 +260,22 @@ describe("the matcher itself", () => {
             "run kn-next from here",
         ]) {
             expect(commandHits(s).length, s).toBeGreaterThan(0);
+        }
+    });
+    it("flags a command rename that leaked into a package name", () => {
+        for (const x of [
+            "npm view knext dist-tags",
+            "npm install knext",
+            "npm i knext --save",
+            "npm dist-tag add knext@1.0.0 latest",
+        ]) {
+            expect(commandHits(x).length, x).toBeGreaterThan(0);
+        }
+        for (const ok of [
+            "npm view kn-next dist-tags",
+            "npm view @getknext/core version",
+        ]) {
+            expect(commandHits(ok), ok).toEqual([]);
         }
     });
     it("does not flag names, paths or prose", () => {
