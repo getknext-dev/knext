@@ -70,16 +70,44 @@ MUTATIONS = [
 ]
 
 
-# The credential skip: remove the skip in each hook, then remove each pattern family from the
-# regex ONE AT A TIME. A pattern the suite does not need is a pattern nobody noticed breaking.
+# The credential skips. Two predicates on purpose: the GATE skips on a broad list (words +
+# literal formats), the SCREEN only on literal formats (its text is attacker-written, so a
+# word-based skip would let an injection evade by saying "token"). Remove each skip, swap the
+# predicates, then remove each pattern ONE AT A TIME. A pattern the suite does not need is a
+# pattern nobody noticed breaking.
 MUTATIONS += [
     ("gate: credential skip removed", "jev-bash-gate.sh", 'jev_has_credential_signal "$cmd" && exit 0', ":"),
-    ("screen: credential skip removed", "jev-result-screen.sh", 'jev_has_credential_signal "$(cat "$tmp/text.txt")" && exit 0', ":"),
-    ("lib: credential match is case-sensitive", "jev-hook-lib.sh", "grep -Eiq --", "grep -Eq --"),
-    ("lib: credential check never matches", "jev-hook-lib.sh", 'printf \'%s\' "$1" | grep -Eiq -- "$JEV_CRED_RE"', "false"),
-    ("lib: entropy run lengthened to 64", "jev-hook-lib.sh", "{32,}'", "{64,}'"),
-    ("lib: entropy run shortened to 16", "jev-hook-lib.sh", "{32,}'", "{16,}'"),
+    ("screen: literal-secret skip removed", "jev-result-screen.sh", 'jev_has_literal_secret "$(cat "$tmp/text.txt")" && exit 0', ":"),
+    (
+        "screen: skips on the broad WORD list again (injection evades by saying 'token')",
+        "jev-result-screen.sh",
+        'jev_has_literal_secret "$(cat "$tmp/text.txt")" && exit 0',
+        'jev_has_credential_signal "$(cat "$tmp/text.txt")" && exit 0',
+    ),
+    (
+        "gate: broad list loses the literal formats",
+        "jev-hook-lib.sh",
+        '"$JEV_WORDS_RE|$JEV_LITERAL_RE"',
+        '"$JEV_WORDS_RE"',
+    ),
+    (
+        "gate: broad list loses the plain words",
+        "jev-hook-lib.sh",
+        '"$JEV_WORDS_RE|$JEV_LITERAL_RE"',
+        '"$JEV_LITERAL_RE"',
+    ),
+    ("lib: gate match is case-sensitive", "jev-hook-lib.sh", 'grep -Eiq -- "$JEV_WORDS_RE|$JEV_LITERAL_RE"', 'grep -Eq -- "$JEV_WORDS_RE|$JEV_LITERAL_RE"'),
+    ("lib: literal match is case-sensitive", "jev-hook-lib.sh", 'grep -Eiq -- "$JEV_LITERAL_RE"', 'grep -Eq -- "$JEV_LITERAL_RE"'),
+    ("lib: gate check never matches", "jev-hook-lib.sh", 'printf \'%s\' "$1" | grep -Eiq -- "$JEV_WORDS_RE|$JEV_LITERAL_RE"', "false"),
+    ("lib: literal check never matches", "jev-hook-lib.sh", 'printf \'%s\' "$1" | grep -Eiq -- "$JEV_LITERAL_RE"', "false"),
+    ("lib: entropy run lengthened to 64", "jev-hook-lib.sh", "{32,}", "{64,}"),
+    ("lib: entropy run shortened to 16", "jev-hook-lib.sh", "{32,}", "{16,}"),
     ("lib: sk- loses its word boundary", "jev-hook-lib.sh", "(^|[^a-z0-9])sk-[a-z0-9]", "sk-"),
+    ("lib: auth/bearer header-with-value rule removed", "jev-hook-lib.sh", "|(authorization:[[:space:]]*|bearer[[:space:]]+)", "|(zzzz)"),
+    ("lib: header value may be any word (no length/digit rule)", "jev-hook-lib.sh", "([A-Za-z0-9._~+/=-]{16,}|[A-Za-z._~+/=-]*[0-9][A-Za-z0-9._~+/=-]{7,})", "[A-Za-z]+"),
+    ("lib: header 16+ char value alternative removed", "jev-hook-lib.sh", "([A-Za-z0-9._~+/=-]{16,}|", "("),
+    ("lib: header short-value-with-digit alternative removed", "jev-hook-lib.sh", "|[A-Za-z._~+/=-]*[0-9][A-Za-z0-9._~+/=-]{7,})", ")"),
+    ("lib: header optional scheme word removed", "jev-hook-lib.sh", "([A-Za-z]+[[:space:]]+)?", ""),
     (
         "gate: oversize command truncated to head only",
         "jev-bash-gate.sh",
@@ -89,6 +117,7 @@ MUTATIONS += [
 ]
 # (label, anchor, replacement). Each alternative must be covered by its own case in the suite.
 # `--password` is a subset of `password`, so only the bare word is removable on its own.
+# The first group is the GATE's plain words; the second is the literal formats both lists share.
 for _label, _anchor, _repl in [
     ("secret", "secret|", ""),
     ("token", "token|", ""),
@@ -98,7 +127,7 @@ for _label, _anchor, _repl in [
     ("passwd", "|passwd", ""),
     ("--from-literal", "--from-literal|", ""),
     ("api key", "api[_-]?key|", ""),
-    ("private key", "private[_-]?key|", ""),
+    ("private key", "|private[_-]?key", ""),
     ("PEM block", "-----BEGIN|", ""),
     ("ghp_", "ghp_|", ""),
     ("gho_", "gho_|", ""),

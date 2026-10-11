@@ -53,18 +53,31 @@ jev_is_prob() {
 # jev_ge <x> <threshold> — x >= threshold, as floats.
 jev_ge() { awk -v x="$1" -v t="$2" 'BEGIN { exit !(x + 0 >= t + 0) }'; }
 
-# jev_has_credential_signal <text> — true if the text could carry a credential. Both hooks
-# call this BEFORE any jev call and, on a hit, skip the call (fail open, silent): the text
-# would otherwise leave the machine for TypeSafe. Hooks run in PARALLEL, so the deterministic
-# hook blocking a command does not stop this one from sending it, and block-secrets.sh only
-# covers Edit/Write. Measured: `gh secret set NPM_TOKEN --body <value>` was sent.
+# Two credential predicates, deliberately NOT the same list. Each hook calls its own BEFORE any
+# jev call and, on a hit, skips the call (fail open, silent): the text would otherwise leave
+# the machine for TypeSafe. Both are case-insensitive.
 #
-# OVER-MATCHING IS THE POINT. A false hit only means one command goes unjudged (the
-# deterministic hook still applies); a false miss ships a secret. So: case-insensitive, bare
-# words (`secret`, `token`, `password`), well-known prefixes, and any run of 32+ base64/hex
-# characters (entropy proxy; `-` and `_` stay out of the class so kebab/snake-case names do
-# not trip it, but a long unbroken path segment can). `sk-` needs a non-alphanumeric before
-# it, else disk-/task- would match. Cost on the screen: a PR comment that merely says
-# "token" is not screened.
-JEV_CRED_RE='secret|token|authorization:|bearer |--password|password|passwd|--from-literal|api[_-]?key|private[_-]?key|-----BEGIN|ghp_|gho_|github_pat_|npm_|(^|[^a-z0-9])sk-[a-z0-9]|xox[bp]-|AKIA|[A-Za-z0-9+/=]{32,}'
-jev_has_credential_signal() { printf '%s' "$1" | grep -Eiq -- "$JEV_CRED_RE"; }
+# jev_has_credential_signal <text> — the GATE's list, BROAD on purpose. The input is a command
+# the agent itself is about to run, so over-matching only means one command goes unjudged (the
+# deterministic hook still applies) while a false miss ships a secret. Hooks run in PARALLEL,
+# so that hook blocking a command does not stop this one from sending it, and block-secrets.sh
+# only covers Edit/Write. Measured: `gh secret set NPM_TOKEN --body <value>` was sent.
+# = plain words (`secret`, `token`, `password`, ...) + every literal format below.
+#
+# jev_has_literal_secret <text> — the SCREEN's list, NARROW on purpose: literal secret formats
+# only. The screened text is public GitHub/web content an ATTACKER writes, so a word-based skip
+# would let any injection comment evade the screen just by saying "token". A literal format
+# (a key prefix, a PEM marker, a 32+ char base64/hex run, an Authorization/Bearer header with a
+# value) is something real leaked content has and ordinary prose does not.
+#   * `-` and `_` stay out of the entropy class so kebab/snake-case names do not trip it, but
+#     a long unbroken path segment can.
+#   * `sk-` needs a non-alphanumeric before it, else disk-/task- would match.
+#   * A header value (after an optional scheme word) must be 16+ token characters, or 8+ with
+#     a digit in it, so "Authorization: ignore previous instructions" is not a header.
+#   * RESIDUAL, accepted and stated: an attacker who knows this list can still evade the screen
+#     by pasting one fake literal (e.g. a 32-char run). Not closable with a skip; redacting the
+#     matched literals before sending would close it (follow-up).
+JEV_WORDS_RE='secret|token|authorization:|bearer |--password|password|passwd|--from-literal|api[_-]?key|private[_-]?key'
+JEV_LITERAL_RE='-----BEGIN|ghp_|gho_|github_pat_|npm_|(^|[^a-z0-9])sk-[a-z0-9]|xox[bp]-|AKIA|[A-Za-z0-9+/=]{32,}|(authorization:[[:space:]]*|bearer[[:space:]]+)([A-Za-z]+[[:space:]]+)?([A-Za-z0-9._~+/=-]{16,}|[A-Za-z._~+/=-]*[0-9][A-Za-z0-9._~+/=-]{7,})'
+jev_has_credential_signal() { printf '%s' "$1" | grep -Eiq -- "$JEV_WORDS_RE|$JEV_LITERAL_RE"; }
+jev_has_literal_secret() { printf '%s' "$1" | grep -Eiq -- "$JEV_LITERAL_RE"; }
