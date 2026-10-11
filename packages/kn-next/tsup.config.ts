@@ -93,8 +93,11 @@ export default defineConfig([
       // Own dist entry so e2e-deploy.sh applies it to the standalone tree it
       // assembles BEFORE the compile; the CLI calls it in-process.
       'adapters/standalone-adapter-path': 'src/adapters/standalone-adapter-path.ts',
-      // cache-handler is plain JS (untyped) — bundled to dist, no .d.ts emitted
-      'adapters/cache-handler': 'src/adapters/cache-handler.js',
+      // cache-handler is plain JS (untyped) — bundled to dist, no .d.ts emitted.
+      // The entry is the thin `.public.js` re-export, NOT the implementation:
+      // `cache-handler.js` also exports the `__`-prefixed test seams, which must
+      // not be reachable from a published subpath (scripts/scan-published-seams.mjs).
+      'adapters/cache-handler': 'src/adapters/cache-handler.public.js',
       // #1843: the per-runtime cache handlers the knext adapter points
       // `cacheHandler` at, chosen by the configured runtime. Plain untyped ESM
       // like cache-handler, which they extend. The node one keeps its literal
@@ -163,7 +166,9 @@ export default defineConfig([
       'adapters/tracing': 'src/adapters/tracing.ts',
       'adapters/metrics': 'src/adapters/metrics.ts',
       'adapters/correlation-response': 'src/adapters/correlation-response.ts',
-      'utils/logger': 'src/utils/logger.ts',
+      // The thin `.public.ts` re-export, not `logger.ts`, which also exports the
+      // `__resetLoggerForTests` seam (scripts/scan-published-seams.mjs).
+      'utils/logger': 'src/utils/logger.public.ts',
       // #1292 round 2: given its own entry so a plain-`node` script outside
       // this build (a nightly CI check) can import the SAME
       // RESERVED_STATIC_DIRS asset-upload.ts uses, instead of re-declaring
@@ -205,7 +210,7 @@ export default defineConfig([
         'adapters/tracing': 'src/adapters/tracing.ts',
         'adapters/metrics': 'src/adapters/metrics.ts',
         'adapters/correlation-response': 'src/adapters/correlation-response.ts',
-        'utils/logger': 'src/utils/logger.ts',
+        'utils/logger': 'src/utils/logger.public.ts',
         'utils/reserved-static-dirs': 'src/utils/reserved-static-dirs.ts',
       },
     },

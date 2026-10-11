@@ -44,6 +44,10 @@ let rootDestination = getLogDestination();
  *
  * `isProduction` is a `let` for exactly this reason; it is never reassigned
  * outside this function.
+ *
+ * TEST-ONLY. This module is the implementation and the test-only entry; the
+ * published `@getknext/core/internal/logger` is `logger.public.ts`, which does
+ * not re-export this.
  */
 export function __resetLoggerForTests(): void {
     rootLogger = undefined;

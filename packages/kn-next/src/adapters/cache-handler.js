@@ -152,12 +152,17 @@ let RETRY_COOLDOWN_MS = envMs('REDIS_RETRY_COOLDOWN_MS', 5000);
  * of it moved onto `globalThis`.
  */
 /**
- * The two seams below MUTATE process-wide cache state and ship on a PUBLISHED
- * subpath (`@getknext/core/adapters/cache-handler`) — a consumer calling
- * `__setRedisClientForTests(undefined)` would silently disable every app's
- * cache. The design-gate verdict on the sprint that added them: a published
- * mutating seam must fail closed. They now require an explicit harness opt-in;
- * the pure `__`-helpers (options/budget/ttl/exec) stay ungated — they mutate
+ * The two seams below MUTATE process-wide cache state. They used to ship on the
+ * PUBLISHED subpath (`@getknext/core/adapters/cache-handler`), where a consumer
+ * calling `__setRedisClientForTests(undefined)` would silently disable every
+ * app's cache; the published entry is now `cache-handler.public.js`, which does
+ * not re-export them, and `scripts/scan-published-seams.mjs` reds if any `__`
+ * name becomes reachable from a published entry again.
+ *
+ * The gate stays anyway, as defence in depth: this module is still importable
+ * by path inside a built standalone tree, and a mutating seam should fail
+ * closed wherever it is reachable. They require an explicit harness opt-in; the
+ * pure `__`-helpers (options/budget/ttl/exec) stay ungated — they mutate
  * nothing.
  */
 function assertTestSeamEnabled(name) {
@@ -166,9 +171,7 @@ function assertTestSeamEnabled(name) {
   // app's process — an npm postinstall, a compromised transitive dep, a
   // Dockerfile `ENV` copied from a blog post — could otherwise re-enable a seam
   // that repoints the process-wide cache. There is no legitimate production
-  // caller of these two, so the flag has nothing to unlock here. The scan that
-  // moves the seams off the published subpath entirely is still the real fix;
-  // this is the half that costs nothing and closes the re-enable path today.
+  // caller of these two, so the flag has nothing to unlock here.
   if (process.env.NODE_ENV === 'production') {
     throw new Error(
       `knext: ${name} is a TEST-ONLY seam on a published module and is REFUSED under ` +
@@ -1463,6 +1466,12 @@ export { CacheHandler, ioredisClient, nativeRedisClient };
 // Test seams, same contract as `__resetEnvForTests`: named so a reader cannot
 // mistake them for API, exported so the value a test asserts is the value
 // production uses rather than a copy of it (#886).
+//
+// THIS MODULE IS THE TEST-ONLY ENTRY. It is not a tsup entry: the published
+// `@getknext/core/adapters/cache-handler` is `cache-handler.public.js`, which
+// re-exports the three names above and none of these. Suites import this file
+// by path (with a cache-busting query for a fresh instance), which is why the
+// seams are defined here and not in a facade that would bind to the singleton.
 export {
   __resetEnvForTests,
   __nativeClientOptions,
