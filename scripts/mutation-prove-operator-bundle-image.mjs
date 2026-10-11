@@ -24,7 +24,11 @@ import { mutate, restore, snapshot } from './lib/mutation-harness.mjs';
 import { declareMutations, recordMutation } from './lib/prover-report.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const SPEC = 'tests/verify-operator-bundle-image.test.ts';
+const SPECS = [
+  'tests/verify-operator-bundle-image.test.ts',
+  'tests/operator-release-guard-e2e.test.ts',
+];
+const SPEC = SPECS.join(' + ');
 
 const GUARD = resolve(REPO_ROOT, 'scripts/verify-operator-bundle-image.mjs');
 const WORKFLOW = resolve(REPO_ROOT, '.github/workflows/operator-supply-chain.yml');
@@ -87,6 +91,14 @@ const MUTATIONS = [
     replacement: '  return 0;\n',
   },
   {
+    id: 'G8',
+    claim:
+      'entry-point detection compares unresolved paths (symlinked run silently checks nothing)',
+    subject: 'guard',
+    anchor: '  realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))',
+    replacement: '  process.argv[1] === fileURLToPath(import.meta.url)',
+  },
+  {
     id: 'W1',
     claim: 'the workflow stops verifying the install-vX.Y.Z.yaml asset',
     subject: 'workflow',
@@ -131,7 +143,14 @@ function specExit(spec) {
   return result.status ?? 1;
 }
 
-const baseline = specExit(SPEC);
+/** Both specs; red if either is red. Still the exit code only. */
+function suiteExit() {
+  let worst = 0;
+  for (const spec of SPECS) worst = specExit(spec) || worst;
+  return worst;
+}
+
+const baseline = suiteExit();
 console.log(`Baseline ${SPEC}: exit=${baseline}`);
 if (baseline !== 0) {
   console.error(`FATAL: ${SPEC} is not green before anything is mutated`);
@@ -151,7 +170,7 @@ for (const m of MUTATIONS) {
   let code;
   try {
     mutate(snap, m.anchor, m.replacement);
-    code = specExit(SPEC);
+    code = suiteExit();
   } finally {
     restore(snap);
   }
@@ -160,7 +179,7 @@ for (const m of MUTATIONS) {
   if (ok) pass += 1;
   else fail += 1;
   recordMutation();
-  const after = specExit(SPEC);
+  const after = suiteExit();
   if (after !== 0) {
     console.error(`FATAL: ${SPEC} exit=${after} after restoring ${m.id}`);
     process.exit(1);

@@ -25,8 +25,7 @@
  * Node builtins only (the publishing job has no install step).
  */
 
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { readFileSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 const OPERATOR_TAG = /^operator-v(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$/;
@@ -117,6 +116,11 @@ export function main(argv) {
   return failed ? 1 : 0;
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+// Compare REAL paths: node resolves symlinks in import.meta.url but not in argv[1], and a
+// mismatch here would skip main() and exit 0 without checking anything (fail-open).
+if (
+  process.argv[1] &&
+  realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))
+) {
   process.exit(main(process.argv.slice(2)));
 }

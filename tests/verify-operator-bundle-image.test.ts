@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, it } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -90,7 +90,9 @@ describe('verify-operator-bundle-image', () => {
   });
 
   it('fails when the bundle has no operator image line', () => {
-    expect(check('operator-v1.4.0', D, bundle(null)).code).toBe(1);
+    const r = check('operator-v1.4.0', D, bundle(null));
+    expect(r.code).toBe(1);
+    expect(r.out).toContain('no kn-next-operator image reference found');
   });
 
   it('fails when the bundle pins two different operator images', () => {
@@ -132,6 +134,22 @@ describe('verify-operator-bundle-image', () => {
     expect(
       run(['--tag', 'operator-v1.4.0', '--digest', D, '--install', good, '--install', bad]).code,
     ).toBe(1);
+  });
+
+  it('still runs (and fails a bad bundle) when invoked through a symlink', () => {
+    const dir = tmp();
+    const link = join(dir, 'linked-verify.mjs');
+    symlinkSync(SCRIPT, link);
+    const file = join(dir, 'install.yaml');
+    writeFileSync(file, bundle(`image: ${IMG}:v0.1.0@${D}`));
+    const r = spawnSync(
+      'node',
+      [link, '--tag', 'operator-v1.4.0', '--digest', D, '--install', file],
+      {
+        encoding: 'utf8',
+      },
+    );
+    expect(r.status).toBe(1);
   });
 
   it('exits 2 on usage errors', () => {
