@@ -92,5 +92,5 @@ signature-first/decorator points of comparison — and the reason ADR-0003 chose
 3. **Prototype after the ADR:** a vinext plugin modeled on `use-cache-callable.ts` +
    `action-owner-manifest.ts` + `emitFile`, plus the TS→proto deriver on a constrained subset, plus the
    kind-cluster activator check from `bun-func-runtime-spike.md`. vinext-only; not on the webpack/Turbopack path.
-4. **`kn-next generate`** remains the CLI home (ADR-0052 already reserves it); orchestration lives in
+4. **`knext generate`** remains the CLI home (ADR-0052 already reserves it); orchestration lives in
    the opt-in `@getknext/grpc` module, never core.

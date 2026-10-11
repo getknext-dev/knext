@@ -527,7 +527,7 @@ spec:
 
                       Unset ("") => the annotation is NOT stamped and the Knative cluster
                       default applies unmanaged, exactly as before this field existed
-                      (byte-identical back-compat). There is no product default: `kn-next
+                      (byte-identical back-compat). There is no product default: `knext
                       create` scaffolds a value into the user's own config instead
                       (ADR-0045, ADR-0041 precedent), so no stored NextApp changes behaviour
                       on upgrade.
@@ -547,7 +547,7 @@ spec:
                       Knative INSTALLED on the cluster, and those are not the same thing. An
                       older or differently-configured cluster can still clamp or ignore a
                       value admission accepted. The webhook validates the value, the cluster
-                      decides the behaviour — `kn-next doctor` reports the installed Knative
+                      decides the behaviour — `knext doctor` reports the installed Knative
                       version, and the ~52 ms warm-hit promise holds only on a cluster that
                       honours the annotation.
 

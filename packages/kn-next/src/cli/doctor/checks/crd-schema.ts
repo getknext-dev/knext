@@ -28,7 +28,7 @@ import { SKIP_UNREACHABLE } from "../types";
 
 /**
  * #1535 round 2 (N3): the previous hint cited `docs/RELEASING.md`, a repo
- * path — meaningless to a `kn-next doctor` user who does not have this repo
+ * path — meaningless to a `knext doctor` user who does not have this repo
  * checked out. Point at the actual docs page that explains the ordering.
  */
 const UPGRADE_ORDER_URL = `${DOCS_URL}/docs/upgrading`;

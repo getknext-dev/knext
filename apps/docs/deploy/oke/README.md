@@ -3,7 +3,7 @@
 The docs site is deployed **through knext itself**, the way a knext user deploys. A push to `main`
 that touches the docs (or the CLI/action it is built with) runs
 [`.github/workflows/docs-deploy-oke.yml`](../../../../.github/workflows/docs-deploy-oke.yml), which
-runs `kn-next deploy` through the in-repo GitHub Action (`packages/kn-next-action`). That builds the
+runs `knext deploy` through the in-repo GitHub Action (`packages/kn-next-action`). That builds the
 image from `apps/docs/Dockerfile`, pushes it to OCIR, and writes **one** object: the `knext-docs`
 `NextApp` in namespace `knext-docs`. The operator renders the Knative Service from it (ADR-0001),
 behind the existing Kourier ingress. There is no hand-applied Knative Service any more.
@@ -11,7 +11,7 @@ behind the existing Kourier ingress. There is no hand-applied Knative Service an
 | What | Where |
 |---|---|
 | Deploy config | `apps/docs/knext.config.ts`: name, registry, scale 0..5, resources |
-| Image | `apps/docs/Dockerfile`: vinext `.output` run under Bun, built by `kn-next deploy` |
+| Image | `apps/docs/Dockerfile`: vinext `.output` run under Bun, built by `knext deploy` |
 | Readiness | `apps/docs/app/api/health/route.ts`: the operator probes `/api/health` |
 | CI credential | `ci-rbac.yaml` + `mint-ci-kubeconfig.sh` (below) |
 | Custom domains | `domainmapping.yaml`: `knext-platform.dev` / `www.knext-platform.dev` → ksvc `knext-docs` |
@@ -19,7 +19,7 @@ behind the existing Kourier ingress. There is no hand-applied Knative Service an
 ## How a deploy runs
 
 - **Pull request:** the `dry-run` job builds the CLI from the PR, runs the closure audit, and runs
-  `kn-next deploy --dry-run`. It prints the `NextApp` it would apply. It references **no secrets**
+  `knext deploy --dry-run`. It prints the `NextApp` it would apply. It references **no secrets**
   and cannot reach the cluster.
 - **Push to `main` / manual dispatch on `main`:** the `deploy` job runs in the `docs-oke`
   environment, the only place the kubeconfig secret exists. It runs the closure audit (SBOM +
@@ -65,7 +65,7 @@ with the same manifests: a raw ksvc was adopted, the new revision went Ready, an
 
 ## The CI credential
 
-CI holds the `knext-deployer` ServiceAccount from `kn-next init-ci --namespace knext-docs`. It can
+CI holds the `knext-deployer` ServiceAccount from `knext init-ci --namespace knext-docs`. It can
 `get/list/create/patch/update` **`nextapps` in `knext-docs` and nothing else**: no Secrets, no
 Knative objects, no delete. The action's credential preflight refuses anything broader, so a
 cluster-admin kubeconfig cannot be substituted.
@@ -93,9 +93,9 @@ repository `me-abudhabi-1.ocir.io/axfqznklsd2t/knext-docs` is **public**, so the
 without an `imagePullSecret`. The config's `registry` is the namespace
 (`me-abudhabi-1.ocir.io/axfqznklsd2t`), and the CLI appends the app name.
 
-`doctor: false` in the workflow is deliberate. `kn-next doctor` reads cluster-scoped state (CRDs,
+`doctor: false` in the workflow is deliberate. `knext doctor` reads cluster-scoped state (CRDs,
 the operator's Deployment, Knative's ConfigMaps) that this credential is not allowed to read, so it
-would fail every run on RBAC probe errors. `kn-next deploy` still server-side dry-runs the `NextApp`
+would fail every run on RBAC probe errors. `knext deploy` still server-side dry-runs the `NextApp`
 against the live CRD schema before it applies.
 
 ## Retired files (#1488)

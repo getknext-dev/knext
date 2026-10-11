@@ -128,7 +128,7 @@ export interface DropChunksOptions {
  * runs it while the compute is awake. This is deliberately not
  * `add_retention_policy()`: that schedules a *background policy job*, which cannot
  * run on a compute that scales to zero (scale-zero-pg `adr-0001`). Run this on a
- * schedule you control (a CI cron / a `kn-next` job) instead.
+ * schedule you control (a CI cron / a `knext` job) instead.
  *
  * ```ts
  * // → SELECT drop_chunks('metrics', INTERVAL '30 days');

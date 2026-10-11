@@ -7,7 +7,7 @@ metadata:
   name: nextapp-sample
 spec:
   # Images MUST be digest-pinned — the operator rejects tag-only and :latest
-  # references (a human-readable tag alongside the digest is fine). `kn-next deploy`
+  # references (a human-readable tag alongside the digest is fine). `knext deploy`
   # resolves the digest for you; the placeholder below is illustrative.
   image: "registry.example.com/my-app:v1@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
   scaling:

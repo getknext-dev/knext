@@ -104,7 +104,7 @@ need() { command -v "$1" >/dev/null 2>&1 || die "missing required tool: $1"; }
 preflight() {
   for t in kind kubectl docker go; do need "$t"; done
   # kn-next CLI: prefer the built bin, fall back to `bun run` from source.
-  if command -v kn-next >/dev/null 2>&1; then KN_NEXT="kn-next";
+  if command -v knext >/dev/null 2>&1; then KN_NEXT="knext";
   elif [ -x "$REPO_ROOT/packages/kn-next/dist/cli/kn-next.js" ]; then KN_NEXT="node $REPO_ROOT/packages/kn-next/dist/cli/kn-next.js";
   else KN_NEXT="bun run $REPO_ROOT/packages/kn-next/src/cli/db-bind.ts"; fi
   log "kn-next: $KN_NEXT"

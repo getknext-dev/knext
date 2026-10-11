@@ -245,7 +245,7 @@ app on Node (the standalone server), so nothing is lost.
 adapter's `modifyConfig` injects it for every app wired through `adapterPath`
 (the template wires it by default), composed after any webpack hook the app
 still owns — app authors no longer hand-write the webpack hook. An app that
-does NOT use the knext adapter (e.g. an external app deployed with `kn-next
+does NOT use the knext adapter (e.g. an external app deployed with `knext
 deploy` and no `adapterPath` in its `next.config.ts`) must still hand-write the
 edge-scoped `IgnorePlugin` in its own `next.config.ts` exactly as
 `apps/file-manager` did pre-#356.

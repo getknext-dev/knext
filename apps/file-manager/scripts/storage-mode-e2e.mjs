@@ -2,7 +2,7 @@
 /**
  * storage-mode-e2e.mjs — the LIVE storage-mode leg (#1292).
  *
- * Runs AFTER `kn-next deploy` has shipped `file-manager-storage` (a second
+ * Runs AFTER `knext deploy` has shipped `file-manager-storage` (a second
  * NextApp, `storage` configured against the in-cluster MinIO) to the same
  * kind cluster the image-served leg (`platform-e2e.mjs`) already stood up.
  * Fetches the served HTML through the real ingress (same Kourier
@@ -25,7 +25,7 @@
  *   STORAGE_BUCKET_URL      the publicUrl configured in the storage profile,
  *                           as embedded in the served HTML (cluster-internal
  *                           DNS, e.g. http://minio.fm-e2e.svc.cluster.local:9000/<bucket>)
- *   STORAGE_TAG             the --tag kn-next deploy used for this app
+ *   STORAGE_TAG             the --tag knext deploy used for this app
  *   MINIO_LOCAL_ENDPOINT    port-forwarded MinIO the runner can reach, e.g.
  *                           http://127.0.0.1:9000 — object URLs are re-based
  *                           onto this host (same path) since the runner

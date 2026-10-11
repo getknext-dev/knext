@@ -30,7 +30,7 @@ inputs:
   kubeconfig:
     description: >-
       base64-encoded kubeconfig for a SCOPED ServiceAccount — the one
-      `kn-next init-ci` generates. An over-broad credential is REFUSED, not
+      `knext init-ci` generates. An over-broad credential is REFUSED, not
       used.
     required: false
   namespace:
@@ -45,7 +45,7 @@ inputs:
     default: 'false'
   doctor:
     description: >-
-      Run the read-only `kn-next doctor` preflight and fail on an unready
+      Run the read-only `knext doctor` preflight and fail on an unready
       cluster. Much cheaper to read here than halfway through a build.
     required: false
     default: 'true'
@@ -208,7 +208,7 @@ runs:
         bun-version: '1.4.2'
 
     # ── 3. Build, push, emit the CR, apply, wait ─────────────────────────────
-    # All of it is `kn-next deploy`. The action adds no deployment logic of its
+    # All of it is `knext deploy`. The action adds no deployment logic of its
     # own — if it did, the CLI and the action would drift, and the cluster would
     # get whichever one ran last.
     - name: Deploy

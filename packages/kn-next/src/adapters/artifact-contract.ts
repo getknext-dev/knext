@@ -288,7 +288,7 @@ export const webpackBuilder: BuilderAdapter = {
  * of the pipeline exist: `cli/vinext-build.ts` produces the executable and the
  * scaffolded Dockerfile ships it. (An earlier revision of this docstring said
  * `available: false` because vinext was not yet a dependency; that era ended
- * when the toolchain landed, and `kn-next build` now compiles the binary
+ * when the toolchain landed, and `knext build` now compiles the binary
  * itself for the nitro shape.)
  *
  * The shape depends on the runtime, because the nitro PRESET is the runtime
@@ -297,7 +297,7 @@ export const webpackBuilder: BuilderAdapter = {
  *   - bun (and an absent runtime — the default cell): nitro's **bun** preset.
  *     `.output/nitro.json` carries `"preset": "bun"` and the entry calls that
  *     runtime's global `serve()` at module top level, so it is executable by
- *     bun and NOT by node. `kn-next build` compiles it into the single
+ *     bun and NOT by node. `knext build` compiles it into the single
  *     executable.
  *   - node: nitro's **node** preset (`"preset": "node-server"`), entry
  *     `knext-node-entry.mjs`. Run uncompiled — `node .output/server/index.mjs`

@@ -110,7 +110,7 @@ describe('docs content — install & CLI story', () => {
 });
 
 describe('docs content — no stale `kn-next` command text', () => {
-  // `kn-next` was renamed to `knext` (the deprecated alias still runs, but
+  // `kn-next` was renamed to `knext` (the old name is removed, so
   // every USER-FACING command example must show the canonical name). Three
   // things are enforced, not one:
   //
@@ -133,15 +133,14 @@ describe('docs content — no stale `kn-next` command text', () => {
   //     package is already installed.
   //  3. The bare WORD `kn-next` — not part of `kn-next.config.ts`,
   //     `kn-next-operator`/`kn-next-action`, or a `packages/kn-next/...`
-  //     path (none of those name the COMMAND) — appears ONLY on the one
-  //     page that documents the deprecated alias: getting-started.mdx's own
-  //     callout, which explains the rename rather than telling a reader to
-  //     type `kn-next`. This is the rule the comment here used to CLAIM
+  //     path (none of those name the COMMAND) — appears ONLY on the pages
+  //     that document the removal (the upgrading and versioning pages), which
+  //     explain the rename rather than telling a reader to type `kn-next`. This is the rule the comment here used to CLAIM
   //     without a test backing it; it is enforced now, not just described.
   const staleVerbCommand = /\bkn-next\s+[a-z][\w-]*/;
   const staleNpxInvocation = /\bnpx\s+kn-next\b/;
   const bareKnNextWord = /(?<![\w/])kn-next(?![\w.\-/])/;
-  const DEPRECATION_CALLOUT_PAGE = 'getting-started.mdx';
+  const REMOVAL_PAGES = ['upgrading.mdx', 'versioning.mdx'];
 
   it('never shows `kn-next <verb>` as a command to run, anywhere in the docs', () => {
     expect(hits(staleVerbCommand)).toEqual([]);
@@ -151,9 +150,9 @@ describe('docs content — no stale `kn-next` command text', () => {
     expect(hits(staleNpxInvocation)).toEqual([]);
   });
 
-  it(`the bare word \`kn-next\` appears only in ${DEPRECATION_CALLOUT_PAGE}'s deprecation callout`, () => {
+  it(`the bare word \`kn-next\` appears only on the removal pages (${REMOVAL_PAGES.join(', ')})`, () => {
     const offPage = hits(bareKnNextWord).filter(
-      (hit) => !hit.startsWith(`${DEPRECATION_CALLOUT_PAGE}:`),
+      (hit) => !REMOVAL_PAGES.some((page) => hit.startsWith(`${page}:`)),
     );
     expect(offPage).toEqual([]);
   });

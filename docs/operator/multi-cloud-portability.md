@@ -2,7 +2,7 @@
 
 > **Status (issue #46):** knext is **portable by design** — it is a Knative/Kubernetes
 > adapter with no cloud-vendor SDK lock-in in the control plane. The **core operator/CLI
-> deploy path is now validated end-to-end on EKS** (a second real cloud): `kn-next deploy`
+> deploy path is now validated end-to-end on EKS** (a second real cloud): `knext deploy`
 > → NextApp CR → operator reconciles → Knative Service → live `200` route (see
 > [EKS: validated](#eks-validated) below and `docs/release/eks-306-validation.md`). End-to-end
 > deploys are **verified on GKE and OKE** (OKE is the project's standing verification cluster:
@@ -137,7 +137,7 @@ On clouds that hand out a **hostname** (EKS NLB) rather than an IP, configure
 
 ## 4. Build-host CLI prerequisites (per storage provider)
 
-`kn-next build` uploads static assets by **shelling out to the provider's CLI** (see
+`knext build` uploads static assets by **shelling out to the provider's CLI** (see
 `packages/kn-next/src/utils/asset-upload.ts`). The matching binary must be present and
 authenticated **on the build host / CI runner**:
 
@@ -163,7 +163,7 @@ operator built from `main` and running.
 
 **What was proven end-to-end:**
 
-1. `kn-next deploy` generates the **NextApp CR** (with `--registry` → ECR override).
+1. `knext deploy` generates the **NextApp CR** (with `--registry` → ECR override).
 2. The **operator reconciles the CR into a Knative Service** — ADR-0001 single-writer; the CLI
    never applies a raw ksvc.
 3. ksvc → revision → pod pulls the app image from ECR and boots the **full knext runtime**
@@ -173,7 +173,7 @@ operator built from `main` and running.
 5. Bumping the CR's `buildId` rolls a **new revision** (the operator, not the CLI, writes the
    ksvc) and traffic shifts to the fresh pod.
 6. The operator admission webhook **enforces digest-pinning** on EKS (a tag-only image ref is
-   rejected), and `kn-next doctor` runs its read-only checks against the cluster.
+   rejected), and `knext doctor` runs its read-only checks against the cluster.
 
 **EKS-specific prerequisites surfaced by the run** (fold into your install checklist):
 

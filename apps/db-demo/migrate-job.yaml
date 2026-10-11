@@ -23,7 +23,7 @@ spec:
         - name: migrate
           # Same image + digest as the db-demo deploy so the migrations match the code.
           image: registry.example/db-demo:<same-digest-as-the-deploy>
-          command: ['kn-next', 'db', 'migrate']
+          command: ['knext', 'db', 'migrate']
           env:
             # The WRITER DSN — the same Secret the operator injects into the app.
             # Writer only: never wire DATABASE_URL_RO here (the runner refuses it).

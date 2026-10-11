@@ -58,7 +58,7 @@
 >
 > **This does not touch the default build path.** knext's default and only
 > all-apps-verified target is still **node/turbopack** (`.next/standalone` +
-> the node supervisor). Nothing here is wired into `kn-next build`, the
+> the node supervisor). Nothing here is wired into `knext build`, the
 > operator, the CRD, or CI's main gates. It is a standalone proof that the
 > two-target pipeline is reproducible in-repo.
 

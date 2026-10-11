@@ -214,7 +214,7 @@ package.
 
 ### `@getknext/core/validate`
 
-Validates a `knext.config.ts` against the **exact same rules** the `kn-next`
+Validates a `knext.config.ts` against the **exact same rules** the `knext`
 deploy step applies. Use it as a config-quality gate in your own CI — call it in
 a test or a build script so a bad deploy config fails fast, before it reaches the
 cluster.
@@ -390,7 +390,7 @@ in any release, including patch releases.
 ### Generated-file-referenced internal subpaths
 
 Three internal subpaths are imported by **files knext generates into user
-projects** (`kn-next create` / `turbo gen zone`): `internal/vinext-cache-adapter`
+projects** (`knext create` / `turbo gen zone`): `internal/vinext-cache-adapter`
 (the scaffolded `vite.config.ts`), `internal/vinext-image-optimizer` (the
 scaffolded runtime entry), and `internal/node-server` (deploy wiring). The
 `/internal/` prefix still means "not an API you call" — but because already

@@ -2,7 +2,7 @@
  * `knext init-ci --provider gitlab` (#1534) — the GitLab CI/CD counterpart of
  * `renderWorkflow` (init-ci.ts, the GitHub Actions template). Same base as
  * ADR-0049 stage 1: knext hosts nothing, holds no credentials, and the
- * generated pipeline writes ONE kind of object to the cluster via `kn-next
+ * generated pipeline writes ONE kind of object to the cluster via `knext
  * deploy` — nothing here re-derives that.
  *
  * ## Same preflight, reused rather than re-derived
@@ -28,7 +28,7 @@
  *
  * ## Round 2 (#1588) fixes
  *
- *   - `deploy` now actually CAN build and push: `kn-next deploy` shells out to
+ *   - `deploy` now actually CAN build and push: `knext deploy` shells out to
  *     `docker buildx build … --push` (`deploy.ts`), and a plain `image: node:22`
  *     job has no docker daemon at all. This template pairs a docker-in-docker
  *     service with a docker-CLI-capable job image (`node:22-alpine` + `apk add
@@ -55,7 +55,7 @@
  *   - **`docker-cli` alone was not enough.** On Alpine, `docker-cli` ships only
  *     `/usr/bin/docker` — the `buildx` plugin is a SEPARATE package,
  *     `docker-cli-buildx` (no `install_if`, `docker-cli` does not depend on
- *     it). `kn-next deploy` runs `docker buildx build` (`runtime-image.ts`'s
+ *     it). `knext deploy` runs `docker buildx build` (`runtime-image.ts`'s
  *     `dockerBuildxArgs`, argv[0..1] = `["docker", "buildx"]`), so the `deploy`
  *     job now installs BOTH packages.
  *   - **`kubectl`'s sha256 is now embedded, not fetched.** The old two-`curl`
@@ -192,7 +192,7 @@ ${varDocs}
 # explicitly for GHCR, Docker Hub, or any other external registry.
 #
 # KNEXT_KUBECONFIG is a base64-encoded TEXT variable (type "Variable", not
-# "File") — the exact same value \`kn-next init-ci --push-secret\` and the
+# "File") — the exact same value \`knext init-ci --push-secret\` and the
 # mint recipe below produce for the GitHub template, decoded the same way.
 # The kubeconfig must belong to the ServiceAccount in knext-ci-rbac.yaml. The
 # preflight jobs below REFUSE an over-broad credential rather than using it,
@@ -235,7 +235,7 @@ variables:
     fi
 
 # The default runtime is bun (DEFAULT_RUNTIME_ID, adapters/artifact-contract.
-# ts), and \`kn-next deploy\` always compiles the standalone executable by
+# ts), and \`knext deploy\` always compiles the standalone executable by
 # shelling out to \`bun run …\` (standaloneCompileArgv()[0],
 # standalone-exec-build.ts) — a plain node:22-alpine image has no bun at all.
 # Installed the same way as kubectl above: download the exact release,
@@ -293,7 +293,7 @@ credential-preflight:
     - *knext_kubeconfig_cleanup
 
 # ── Deploy — build, push, apply ──────────────────────────────────────────────
-# \`kn-next deploy\` runs \`docker buildx build … --push\` (deploy.ts), so this
+# \`knext deploy\` runs \`docker buildx build … --push\` (deploy.ts), so this
 # job needs an actual docker daemon AND the buildx plugin — a plain
 # \`image: node:22\` has neither, and Alpine's \`docker-cli\` package alone ships
 # only \`/usr/bin/docker\`, not buildx (a separate package, \`docker-cli-buildx\`).

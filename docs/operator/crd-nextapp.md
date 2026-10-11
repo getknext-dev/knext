@@ -173,7 +173,7 @@ spec:
 > alive on a schedule.
 > **Unset (default) = the annotation is not stamped** and the Knative cluster default applies
 > unmanaged (byte-identical back-compat), so upgrading the operator changes nothing about an
-> existing `NextApp`. There is deliberately **no product default**: `kn-next create` scaffolds
+> existing `NextApp`. There is deliberately **no product default**: `knext create` scaffolds
 > `scaleDownDelay: '5m'` into your own generated config (ADR-0045), where it is visible and removed
 > by deleting a line.
 > **Idle cost:** the held pod is a real pod. It also holds **its DB pool connections** open past the
@@ -185,7 +185,7 @@ spec:
 > valid; `42.5s` is a valid Go duration but is **rejected**, because Knative itself rejects it.
 > Validation delegates to Knative's own annotation validator rather than restating its rules, so
 > what knext accepts is what the Knative it was built against accepts. The **installed** cluster is
-> a separate question: an older Knative may clamp or ignore a value admission accepted — `kn-next
+> a separate question: an older Knative may clamp or ignore a value admission accepted — `knext
 > doctor` reports the installed Knative version.
 > **Previews ignore this field (#770):** a preview deployment is ephemeral, so the preview override
 > drops the annotation along with forcing `max-scale=1` / `min-scale=0` / a 30s retention window —
@@ -218,7 +218,7 @@ spec:
 > v1alpha1 stability policy (ADR-0017) and are now deleted from the CRD.
 >
 > A CR that still sets either field is **rejected** by the apiserver when applied with
-> `--validate=strict` (which every `kn-next` apply passes) and silently **pruned**
+> `--validate=strict` (which every `knext` apply passes) and silently **pruned**
 > otherwise — notably by GitOps controllers, which do not assert strict validation. So
 > remove the fields rather than relying on them being ignored.
 >

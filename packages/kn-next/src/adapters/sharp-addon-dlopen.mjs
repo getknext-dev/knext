@@ -31,7 +31,7 @@
  * ## Integrity (C2)
  *
  * This is the last gate before native-code privilege, so it is where the
- * verification has to be. `kn-next build` writes `native/.integrity.json` — a
+ * verification has to be. `knext build` writes `native/.integrity.json` — a
  * sha256 per staged file, plus the `@img` versions its lockfile pinned — and
  * this shim re-checks every native payload the manifest lists before handing
  * anything to the OS loader. A mismatch or an unlisted payload is FATAL. An
@@ -130,7 +130,7 @@ function addonPath() {
           .join(' or ')}\n` +
         `  staged under ${nativeRoot}: ${sharpDirs.join(', ')}\n` +
         '  the native/ tree was staged for a different platform. Rebuild with a current\n' +
-        "  `kn-next build` (it stages the image target's addons regardless of the build\n" +
+        "  `knext build` (it stages the image target's addons regardless of the build\n" +
         '  host), or set KNEXT_SHARP_ADDON to the correct .node inside its @img tree.',
     );
   }
@@ -144,7 +144,7 @@ function addonPath() {
  * as `linuxmusl` — one word, a spelling this repo has already guessed wrong
  * once. On linux both libc flavours are returned, exact match first: libc
  * detection is a heuristic, and when only one flavour is staged (which is what
- * `kn-next build` produces) trying the other second turns a mis-detection into
+ * `knext build` produces) trying the other second turns a mis-detection into
  * a working load instead of a refusal.
  */
 function runtimePlatformIds() {
@@ -289,14 +289,14 @@ function verifyAgainstManifest(addon) {
       throw new Error(
         `knext: refusing to dlopen — no native integrity manifest beside ${addon}, and\n` +
           '  KNEXT_REQUIRE_NATIVE_INTEGRITY requires one. This image predates native-tree\n' +
-          '  integrity pinning; rebuild it with a current `kn-next build`, or unset the variable\n' +
+          '  integrity pinning; rebuild it with a current `knext build`, or unset the variable\n' +
           '  to accept an UNVERIFIED native tree.',
       );
     }
     console.warn(
       `knext: no native integrity manifest beside ${addon} — loading it UNVERIFIED.\n` +
         '  images built before native-tree integrity pinning have none; rebuild with a current\n' +
-        '  `kn-next build` to get one, after which a mismatch becomes a hard failure.\n' +
+        '  `knext build` to get one, after which a mismatch becomes a hard failure.\n' +
         '  set KNEXT_REQUIRE_NATIVE_INTEGRITY=1 to make this absence a hard failure instead.',
     );
     return;
@@ -323,7 +323,7 @@ function verifyAgainstManifest(addon) {
         `  manifest: ${manifestPath}\n` +
         `  found version: ${JSON.stringify(manifest?.version)}\n` +
         `  this shim understands version ${NATIVE_INTEGRITY_SCHEMA_VERSION}\n` +
-        '  the manifest was written by an incompatible `kn-next build`, or was altered. Rebuild the\n' +
+        '  the manifest was written by an incompatible `knext build`, or was altered. Rebuild the\n' +
         '  image with a matching knext; do not edit the manifest to satisfy this check.',
     );
   }
@@ -340,7 +340,7 @@ function verifyAgainstManifest(addon) {
       `knext: refusing to dlopen a native module the integrity manifest does not list\n` +
         `  file: ${addonKey} (${addon})\n` +
         `  manifest: ${manifestPath}\n` +
-        '  the manifest records every file `kn-next build` staged; one that is not in it was\n' +
+        '  the manifest records every file `knext build` staged; one that is not in it was\n' +
         '  added to the image afterwards.',
     );
   }
@@ -365,7 +365,7 @@ function verifyAgainstManifest(addon) {
           `  expected sha256 ${expected}\n` +
           `  actual   sha256 ${actual}\n` +
           `  manifest: ${manifestPath}\n` +
-          '  the native tree changed after `kn-next build` staged it. Rebuild the image; do not\n' +
+          '  the native tree changed after `knext build` staged it. Rebuild the image; do not\n' +
           '  work around this by editing the manifest.',
       );
     }

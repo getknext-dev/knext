@@ -16,7 +16,7 @@ import { Pool } from 'pg';
  *   it is absent, throws an ACTIONABLE named-peer error rather than letting a bare
  *   `ERR_MODULE_NOT_FOUND` surface downstream when drizzle-kit loads this config.
  * - `runMigrations()` / `resolveWriterDsn()` — the engine behind the one-shot
- *   `kn-next db migrate` runner + Job recipe (#242). Applies drizzle-kit-generated
+ *   `knext db migrate` runner + Job recipe (#242). Applies drizzle-kit-generated
  *   migrations against the **writer only**, once per deploy, out of the request
  *   path (ADR-0021 §3). This half is runtime code (drizzle-orm's migrator + `pg`);
  *   it needs drizzle-orm + `pg`, NOT drizzle-kit — so the `@getknext/db` main entry
@@ -54,7 +54,7 @@ function assertDrizzleKitPresent(resolve: () => string): void {
     throw new Error(
       'drizzle-kit is required for defineDrizzleConfig — install it as a devDependency ' +
         '(`npm i -D drizzle-kit`). It is an optional peer of @getknext/db (ADR-0021): the ' +
-        'main entry (@getknext/db) and the `kn-next db migrate` runner do not need it, but ' +
+        'main entry (@getknext/db) and the `knext db migrate` runner do not need it, but ' +
         'the drizzle.config.ts produced by defineDrizzleConfig is consumed by ' +
         '`drizzle-kit generate`/`migrate`, which must be installed.',
     );
@@ -129,7 +129,7 @@ export function defineDrizzleConfig(
   } satisfies Config;
 }
 
-// --- The one-shot migration runner (`kn-next db migrate`) --------------------
+// --- The one-shot migration runner (`knext db migrate`) --------------------
 
 /**
  * The scale-zero-pg **RO gateway** port (bounded-staleness reads, ~9s ceiling,
@@ -201,7 +201,7 @@ export function resolveWriterDsn(opts: Pick<RunMigrationsOptions, 'url' | 'roUrl
   const url = opts.url ?? process.env.DATABASE_URL;
   if (!url || url.trim() === '') {
     throw new Error(
-      'kn-next db migrate: DATABASE_URL (the writer DSN) is required. Migrations run ' +
+      'knext db migrate: DATABASE_URL (the writer DSN) is required. Migrations run ' +
         'against the primary/writer only (ADR-0021 §3) — set DATABASE_URL (the operator ' +
         'injects it) or pass --url. Never the read replica.',
     );
@@ -209,14 +209,14 @@ export function resolveWriterDsn(opts: Pick<RunMigrationsOptions, 'url' | 'roUrl
   const roUrl = opts.roUrl ?? process.env.DATABASE_URL_RO;
   if (roUrl && url === roUrl) {
     throw new Error(
-      'kn-next db migrate: refusing to migrate — the resolved DSN equals DATABASE_URL_RO ' +
+      'knext db migrate: refusing to migrate — the resolved DSN equals DATABASE_URL_RO ' +
         '(the read-only replica). Migrations are writer-only (ADR-0021 §3): the RO gateway is ' +
         'bounded-staleness and single-writer forbids writes there. Use the writer DATABASE_URL.',
     );
   }
   if (dsnTargetsRoPort(url)) {
     throw new Error(
-      `kn-next db migrate: refusing to migrate — the DSN targets the RO gateway port ` +
+      `knext db migrate: refusing to migrate — the DSN targets the RO gateway port ` +
         `${RO_GATEWAY_PORT} (bounded-staleness reads). Migrations are writer-only (ADR-0021 §3); ` +
         `point at the writer gateway (port 55432).`,
     );
@@ -250,7 +250,7 @@ export function defaultMigrateDeps(): RunMigrationsDeps {
 
 /**
  * Apply pending migrations against the **writer**, once. This is the engine
- * behind `kn-next db migrate` (ADR-0021 §3):
+ * behind `knext db migrate` (ADR-0021 §3):
  *
  * - **Writer-only** — resolves + guards the DSN via {@link resolveWriterDsn};
  *   refuses the RO replica before opening any connection.

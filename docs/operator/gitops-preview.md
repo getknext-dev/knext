@@ -45,11 +45,11 @@ no database, by default.**
 # Deploy / update a preview for PR #123 from branch feat/new-ui.
 # Builds + pushes a digest-pinned image, applies a NextApp CR named <app>-pr-123
 # carrying spec.preview, then prints the preview URL (status.url) to stdout.
-kn-next preview deploy --pr 123 --branch feat/new-ui -n previews
+knext preview deploy --pr 123 --branch feat/new-ui -n previews
 
 # Tear the preview down on PR close. Deletes ONLY the <app>-pr-123 NextApp CR
 # (--ignore-not-found); the operator finalizer reaps the name-scoped assets.
-kn-next preview destroy --pr 123 -n previews
+knext preview destroy --pr 123 -n previews
 ```
 
 The CLI obeys ADR-0001: it writes ONLY the `nextapp` resource (apply on deploy, delete on destroy)

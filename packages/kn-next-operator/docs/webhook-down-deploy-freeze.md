@@ -11,7 +11,7 @@ But the cluster stays frozen until the webhook answers again.
 
 ## The misdiagnosis this page exists to prevent
 
-A webhook outage and a **CLI/operator version skew** present identically at the CLI: `kn-next deploy`
+A webhook outage and a **CLI/operator version skew** present identically at the CLI: `knext deploy`
 fails on the apply. The failure modes are unrelated, and the wrong guess is expensive — someone who
 reads an outage as skew downgrades their CLI, waits for a release, and changes nothing, while the
 controller is still down.

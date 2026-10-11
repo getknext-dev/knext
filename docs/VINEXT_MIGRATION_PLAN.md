@@ -46,7 +46,7 @@ That path was superseded by the official adapter approach described above.
 *   **Replicate Aliases:** Move the Node.js module mocks (`pino-elasticsearch`, `thread-stream`) into Vite's `resolve.alias` configuration within `vite.config.ts`.
 *   **Package Scripts:** Update `dev`, `build`, and `start` scripts in `apps/file-manager/package.json` to use `vinext dev`, `vinext build`, and `vinext start`.
 
-## 3. Build Pipeline Updates (`kn-next` CLI)
+## 3. Build Pipeline Updates (`knext` CLI)
 The custom CLI (`packages/kn-next/src/cli/build.ts` & `deploy.ts`) requires significant pruning:
 *   **Remove OpenNext Steps:** Strip out the `npx open-next build` execution and the `generateOpenNextConfig` step.
 *   **Update Asset Paths:** Change the static asset upload source from `.open-next/assets` to Vinext's output directory (typically `.vite/client` or `.vinext`).

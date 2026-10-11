@@ -2,7 +2,7 @@
  * Compile a Next.js `output: 'standalone'` server into a Bun single executable,
  * WITH `--bytecode` — the build for the standalone-on-Bun runtime cell.
  *
- * Run under bun, by `kn-next build`:
+ * Run under bun, by `knext build`:
  *
  *   bun run standalone-compile.mjs --server <.next/standalone/…/server.js> \
  *                                  --outfile <path> [--root <.next/standalone>] \
@@ -205,7 +205,7 @@ const entry = join(dirname(SERVER), ".knext-standalone-exec-entry.cjs");
 writeFileSync(entry, entrySource);
 
 // The bytecode-proof marker: unique per build, so a stale binary cannot pass.
-// `kn-next build` passes its own (and re-verifies the artifact itself).
+// `knext build` passes its own (and re-verifies the artifact itself).
 const MARKER = args.marker ?? `knext-standalone-exec:${randomBytes(12).toString("hex")}`;
 if (!/^knext-standalone-exec:[0-9a-f]{24}$/.test(MARKER)) {
     fail(`--marker must be knext-standalone-exec:<24 hex chars>, got ${JSON.stringify(MARKER)}`);

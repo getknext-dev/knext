@@ -5,7 +5,7 @@ to zero when idle and cold-starts on the next request. It uses only published
 artifacts: the `kn-next-operator` install bundle and the `@getknext/core` CLI.
 
 **The flow:** install the operator once per cluster → install the CLI → add a
-small config to your Next.js app → `kn-next deploy` builds and pushes your image
+small config to your Next.js app → `knext deploy` builds and pushes your image
 and submits a `NextApp` resource → the operator reconciles it into a Knative
 Service with `minScale: 0`.
 
@@ -42,10 +42,10 @@ Service with `minScale: 0`.
   app's entire `public/` dir — is world-readable (standard Next.js semantics),
   so never put secrets in `public/`.
 
-## Step 0 — Preflight the cluster with `kn-next doctor`
+## Step 0 — Preflight the cluster with `knext doctor`
 
 Before (and after) installing anything, let the CLI check the cluster for you.
-Once the CLI is available (Step 2 — or just `npx --package @getknext/core kn-next
+Once the CLI is available (Step 2 — or just `npx @getknext/core
 doctor` without installing), run:
 
 ```sh
@@ -110,9 +110,9 @@ the config types):
 npm install --save-dev @getknext/core
 ```
 
-This installs the `kn-next` command, runnable with `npx @getknext/core`. You can also
+This installs the `knext` command, runnable with `npx @getknext/core`. You can also
 install it globally (`npm install -g @getknext/core`) if you prefer a bare
-`kn-next` on your PATH. Sanity check:
+`knext` on your PATH. Sanity check:
 
 ```sh
 npx @getknext/core --help
@@ -120,7 +120,7 @@ npx @getknext/core --help
 
 ## Step 3 — Prepare your Next.js app
 
-`kn-next deploy` runs the Docker build with your **project root as the build
+`knext deploy` runs the Docker build with your **project root as the build
 context** and the **`Dockerfile` in your app directory**. The project root is
 the outermost directory containing a lockfile (`pnpm-lock.yaml`,
 `package-lock.json`, `yarn.lock`, `bun.lock`/`bun.lockb`) — the same rule
@@ -130,16 +130,16 @@ context always contains what the build produced.
 Both layouts work, and you do **not** need to restructure an existing app:
 
 ```text
-my-app/                     # flat single-app repo (what `kn-next create` makes)
+my-app/                     # flat single-app repo (what `knext create` makes)
 ├── package-lock.json       # ← the lockfile: this directory is the context
 ├── Dockerfile
 ├── knext.config.ts
-└── ...                     # run kn-next from here
+└── ...                     # run knext from here
 
 my-repo/                    # monorepo
 ├── pnpm-lock.yaml          # ← the lockfile: this directory is the context
 └── apps/
-    └── hello-knext/        # run kn-next from here
+    └── hello-knext/        # run knext from here
         ├── Dockerfile
         ├── knext.config.ts
         ├── next.config.ts
@@ -147,7 +147,7 @@ my-repo/                    # monorepo
         └── src/ or app/ ...
 ```
 
-If there is no lockfile in the app directory or any parent, `kn-next deploy`
+If there is no lockfile in the app directory or any parent, `knext deploy`
 stops and says so rather than guessing a context: run your package manager's
 install in the project root, and commit the lockfile.
 
@@ -172,10 +172,10 @@ import type { NextConfig } from "next";
 const nextConfig: NextConfig = {
   // Required: self-contained server.js output for the container image.
   output: "standalone",
-  // kn-next sets ASSET_PREFIX so browsers load static assets from your bucket.
+  // knext sets ASSET_PREFIX so browsers load static assets from your bucket.
   // Unset in `next dev`, so local development is unaffected.
   assetPrefix: process.env.ASSET_PREFIX || "",
-  // kn-next sets KNEXT_BUILD_ID (the deploy tag). Pinning the build ID to it
+  // knext sets KNEXT_BUILD_ID (the deploy tag). Pinning the build ID to it
   // keeps the uploaded asset paths and the deployed build in lock-step. Do not
   // set deploymentId here: from Next 16.2.11 it makes next build ignore
   // generateBuildId and write a fixed build id.
@@ -186,7 +186,7 @@ export default nextConfig;
 ```
 
 > **Instrumentation — let the CLI scaffold it.** Run
-> `npx kn-next create apps/hello-knext` instead of hand-writing this wiring. It
+> `npx @getknext/core create apps/hello-knext` instead of hand-writing this wiring. It
 > emits the platform's guarded observability instrumentation: an edge-clean
 > `src/instrumentation.ts` + Node-only `src/instrumentation-node.ts`, the knext
 > adapter wired via `adapterPath` (whose `modifyConfig` injects the edge
@@ -216,7 +216,7 @@ export default nextConfig;
 > directory. Wire it into your CI: running that guard without a build is a *skip*,
 > not a pass.
 
-**3. A `Dockerfile`** in the app directory. `kn-next create` writes one for you,
+**3. A `Dockerfile`** in the app directory. `knext create` writes one for you,
 matched to your layout and to the rules the platform enforces: the base image is
 digest-pinned, the image drops to the non-root `node` user, and the `CMD` boots
 the knext runtime entry rather than `node server.js` directly — that entry is
@@ -226,7 +226,7 @@ bare `node server.js` silently drops requests on every scale-to-zero.
 Its build context is the directory your lockfile sits in (the same directory
 Next traces the standalone output from); the file says so at the top. For the
 `apps/<name>` layout above that is the repository root, which is also what
-`kn-next deploy` uses.
+`knext deploy` uses.
 
 If you write one by hand instead, a minimal version for the layout above
 (remember: `COPY` paths are relative to the **repository root**):
@@ -317,11 +317,11 @@ Useful flags: `--tag <t>` to name the image tag (default: a timestamp),
 re-submit without rebuilding or re-uploading, `--registry` / `--bucket` to
 override the config.
 
-## Step 6 — Check your app with `kn-next status`
+## Step 6 — Check your app with `knext status`
 
 The operator writes its honest verdict onto the `NextApp` resource — URL,
 `Ready` (with the reason and guidance when something is wrong, e.g. an ingress
-that never programs), `Degraded`, and the database binding. `kn-next status`
+that never programs), `Degraded`, and the database binding. `knext status`
 renders it without a `kubectl describe`:
 
 ```sh
@@ -333,11 +333,11 @@ you're outside the app directory. Useful flags:
 
 - `--watch` — poll every 5 s until the app is Ready (bounded at 10 minutes).
 - `--json` — emit the structured status for scripts.
-- The exit code is non-zero iff `Ready=False`, so `kn-next deploy &&
-  kn-next status --watch` works as a CI gate.
+- The exit code is non-zero iff `Ready=False`, so `knext deploy &&
+  knext status --watch` works as a CI gate.
 
 If the command reports the cluster as unreachable or the app as missing, run
-`kn-next doctor` — it checks the prerequisites the deploy depends on.
+`knext doctor` — it checks the prerequisites the deploy depends on.
 
 ## Step 7 — Watch it scale to zero (and back)
 

@@ -2,7 +2,7 @@
 /**
  * platform-e2e.mjs — the nightly file-manager PLATFORM e2e (#1282).
  *
- * Runs against file-manager AFTER `kn-next deploy` has shipped it to a live
+ * Runs against file-manager AFTER `knext deploy` has shipped it to a live
  * kind + Knative + knext-operator cluster
  * (.github/workflows/file-manager-platform-e2e-nightly.yml). Every HTTP request
  * goes through the real ingress (Kourier, then activator/queue-proxy) with the
@@ -210,40 +210,34 @@ async function main() {
     http.request(p, { headers });
 
   // ── B. platform: the control plane did its job ───────────────────────────
-  await check(
-    'B. platform',
-    'NextApp Ready=True, ksvc runs the digest kn-next deploy pushed',
-    () => {
-      const ready = kubectl([
-        'get',
-        'nextapp',
-        APP,
-        '-n',
-        ns,
-        '-o',
-        'jsonpath={.status.conditions[?(@.type=="Ready")].status}',
-      ]);
-      if (ready !== 'True') throw new Error(`NextApp Ready=${ready || '(absent)'}`);
-      const specImage = kubectl(['get', 'nextapp', APP, '-n', ns, '-o', 'jsonpath={.spec.image}']);
-      if (!/^localhost:5001\/file-manager(:[\w.-]+)?@sha256:[0-9a-f]{64}$/.test(specImage)) {
-        throw new Error(
-          `NextApp spec.image "${specImage}" is not the digest-pinned in-cluster push`,
-        );
-      }
-      const ksvcImage = kubectl([
-        'get',
-        'ksvc',
-        APP,
-        '-n',
-        ns,
-        '-o',
-        'jsonpath={.spec.template.spec.containers[0].image}',
-      ]);
-      if (ksvcImage !== specImage)
-        throw new Error(`ksvc image "${ksvcImage}" != NextApp spec.image "${specImage}"`);
-      return specImage;
-    },
-  );
+  await check('B. platform', 'NextApp Ready=True, ksvc runs the digest knext deploy pushed', () => {
+    const ready = kubectl([
+      'get',
+      'nextapp',
+      APP,
+      '-n',
+      ns,
+      '-o',
+      'jsonpath={.status.conditions[?(@.type=="Ready")].status}',
+    ]);
+    if (ready !== 'True') throw new Error(`NextApp Ready=${ready || '(absent)'}`);
+    const specImage = kubectl(['get', 'nextapp', APP, '-n', ns, '-o', 'jsonpath={.spec.image}']);
+    if (!/^localhost:5001\/file-manager(:[\w.-]+)?@sha256:[0-9a-f]{64}$/.test(specImage)) {
+      throw new Error(`NextApp spec.image "${specImage}" is not the digest-pinned in-cluster push`);
+    }
+    const ksvcImage = kubectl([
+      'get',
+      'ksvc',
+      APP,
+      '-n',
+      ns,
+      '-o',
+      'jsonpath={.spec.template.spec.containers[0].image}',
+    ]);
+    if (ksvcImage !== specImage)
+      throw new Error(`ksvc image "${ksvcImage}" != NextApp spec.image "${specImage}"`);
+    return specImage;
+  });
 
   await check(
     'B. platform',
@@ -845,7 +839,7 @@ async function main() {
   // ── B. platform: graceful rollout under load ─────────────────────────────
   await check(
     'B. platform',
-    'Graceful rollout: second `kn-next deploy --image` under load drops nothing',
+    'Graceful rollout: second `knext deploy --image` under load drops nothing',
     async () => {
       const before = kubectl([
         'get',
@@ -885,16 +879,14 @@ async function main() {
           );
           const killer = setTimeout(() => {
             child.kill('SIGKILL');
-            reject(
-              new Error(`kn-next deploy --image did not finish within ${DEPLOY_TIMEOUT_MS}ms`),
-            );
+            reject(new Error(`knext deploy --image did not finish within ${DEPLOY_TIMEOUT_MS}ms`));
           }, DEPLOY_TIMEOUT_MS);
           child.on('error', reject);
           child.on('exit', (code) => {
             clearTimeout(killer);
             return code === 0
               ? resolve(undefined)
-              : reject(new Error(`kn-next deploy --image exited ${code}`));
+              : reject(new Error(`knext deploy --image exited ${code}`));
           });
         });
         const t0 = Date.now();

@@ -68,7 +68,7 @@ The `@getknext/core` package provides pluggable adapters:
 ```text
 knext.config.ts           # User configuration
         ↓
-    kn-next build
+    knext build
         ↓
 ```
 
@@ -146,16 +146,16 @@ sequenceDiagram
 
 ## Deployment Pipeline
 
-`kn-next` builds an image and emits a **`NextApp` custom resource**; the operator
+`knext` builds an image and emits a **`NextApp` custom resource**; the operator
 reconciles the cluster from it. The CLI never applies raw Knative manifests — per
 **ADR-0001 the operator is the single source of truth** for cluster state
 (`deploy.ts` builds → pushes → applies the CR).
 
 ```mermaid
 flowchart LR
-    dev([Developer]) -->|kn-next build| img["Container image<br/>Next standalone + supervisor<br/>digest-pinned"]
+    dev([Developer]) -->|knext build| img["Container image<br/>Next standalone + supervisor<br/>digest-pinned"]
     img --> reg[(Registry<br/>OCIR / GAR / ECR)]
-    dev -->|kn-next deploy| cr["NextApp CR<br/>apps.kn-next.dev"]
+    dev -->|knext deploy| cr["NextApp CR<br/>apps.kn-next.dev"]
     cr -->|kubectl apply| api[[Kubernetes API]]
     api --> op["kn-next operator<br/>single source of truth · ADR-0001"]
     op -->|reconcile| ksvc["Knative Service<br/>scale-to-zero"]
@@ -526,7 +526,7 @@ operator injects none.
 
 ## CLI Reference
 
-The `kn-next` CLI provides commands for building and deploying Next.js applications to Knative.
+The `knext` CLI provides commands for building and deploying Next.js applications to Knative.
 
 ### Deploy Command
 

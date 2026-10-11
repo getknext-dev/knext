@@ -2,7 +2,7 @@
  * Compile a vinext bundle into a single executable, WITH `--bytecode`, and with
  * a working `sharp`.
  *
- * Run under bun, by `kn-next build` and by knext's own reference app:
+ * Run under bun, by `knext build` and by knext's own reference app:
  *
  *   bun run vinext-compile.mjs --entry <.output/server/index.mjs> \
  *                              --outfile <path> [--target <bun triple>]
@@ -112,7 +112,7 @@ const TARGET = args.target?.trim();
 // Opt-in (#1314): fail the build when a server module runtime-requires a
 // package that cannot be bundled. The default only warns, because an optional
 // dependency that is absent throws only if its code path actually runs.
-// Opt-in (#1460, `kn-next build --self-contained`): the binary carries the nitro
+// Opt-in (#1460, `knext build --self-contained`): the binary carries the nitro
 // runtime, `.output/public` and sharp's native tree INSIDE itself and needs
 // nothing beside it. Strict requires are FORCED on in this mode — a runtime
 // require the analysis cannot bundle has nowhere on disk to fall back to, so it
@@ -1129,7 +1129,7 @@ const selfContainedEmbed = {
                     throw new Error(
                         "[knext compile] self-contained: the server output uses sharp, but no staged " +
                             `native tree was passed (--native-dir${NATIVE_DIR ? ` ${NATIVE_DIR} is empty` : " is missing"}) ` +
-                            "— the binary would have no image backend. `kn-next build --self-contained` stages it first.",
+                            "— the binary would have no image backend. `knext build --self-contained` stages it first.",
                     );
                 }
                 console.log(

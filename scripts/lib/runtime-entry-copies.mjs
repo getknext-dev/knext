@@ -117,7 +117,7 @@ export const DIVERGENT = {
       'handler) and #1269 (the warm-path body read is bounded by drainWarmBody): both landed on ' +
       'the template and this copy from the same hunks. The recorded divergence is still ONLY the ' +
       'image intercept.',
-    sha256: '14f9d5cde99d666f7ef79c5ea42f0f917540cb8947a1798b4adc97fdc8e4166e',
+    sha256: 'e57859b57aa6ca497be4b0bd31921549908febee08abac4efca47c09924fb98a',
   },
   'examples/bun-exec/runtime-contract.mjs': {
     reason:
@@ -139,7 +139,7 @@ export const DIVERGENT = {
       'self-contained binary serving its own embedded `.output/public` is not warned about): applied to ' +
       'the template and every copy from the same hunks by one script. The recorded divergence is still ' +
       'ONLY the item-4 comment block.',
-    sha256: 'cf2994747553af507978356d3bb2eac02069ba454b58cc2c644a0a723856abe1',
+    sha256: 'f62d9f124199b736fd210f314b7c8f8b8a445a79dc269567476336252d3c2d76',
   },
 };
 

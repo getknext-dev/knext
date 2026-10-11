@@ -222,10 +222,10 @@ var _ = Describe("NextApp Degraded on unresolvable pinned revision (ADR-0014)", 
 			Expect(ready.Reason).To(Equal(ReasonPinnedRevisionNotFound),
 				"a ghost pin must surface its own reason, not the generic KnativeServiceNotReady")
 
-			By("Asserting the message is actionable: names the revision, kubectl get revisions, kn-next rollback / clear-the-pin")
+			By("Asserting the message is actionable: names the revision, kubectl get revisions, knext rollback / clear-the-pin")
 			Expect(ready.Message).To(ContainSubstring(ghost))
 			Expect(ready.Message).To(ContainSubstring(fmt.Sprintf("kubectl get revisions -n %s", namespace)))
-			Expect(ready.Message).To(ContainSubstring("kn-next rollback"))
+			Expect(ready.Message).To(ContainSubstring("knext rollback"))
 			Expect(ready.Message).To(ContainSubstring("clear"))
 
 			By("Asserting Degraded=True carries the same reason")

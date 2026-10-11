@@ -21,7 +21,7 @@ Three packages are published to the public npm registry, and they are published 
 
 | Package          | Path               | Contains                                           |
 | ---------------- | ------------------ | -------------------------------------------------- |
-| `@getknext/core` | `packages/kn-next` | the `kn-next` CLI, the Next.js adapter, the runtime |
+| `@getknext/core` | `packages/kn-next` | the `knext` CLI, the Next.js adapter, the runtime |
 | `@getknext/lib`  | `packages/lib`     | app-facing runtime helpers (clients, health, logs)  |
 | `@getknext/db`   | `packages/db`      | the Drizzle data SDK + migration runner             |
 
@@ -77,7 +77,7 @@ The three packages follow [semantic versioning](https://semver.org/) over the su
 - **major** is required to remove, rename, or change the signature of any public import;
 - **internal subpaths** (`@getknext/core/internal/*`, and any subpath not listed in
   `PUBLIC_API.md`) carry **no** guarantee and may change in a patch;
-- **the `kn-next` CLI** — its verbs, flags, and `knext.config.ts` schema — is covered by the same
+- **the `knext` CLI** — its verbs, flags, and `knext.config.ts` schema — is covered by the same
   rules: removing a flag or rejecting a previously-valid config key needs a major.
 
 Pre-1.0 caveat, stated rather than hidden: while the leading digit is `0`, semver itself allows

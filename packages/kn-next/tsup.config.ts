@@ -4,7 +4,7 @@ import { defineConfig } from 'tsup';
  * tsup build for the kn-next CLI AND the @getknext/core library surface (#68, #114).
  *
  * Produces runnable, Node-only JS for the CLI entries so an outside user with no
- * Bun installed can `npx kn-next`. The `bin.kn-next` in package.json points at
+ * Bun installed can `npx @getknext/core`. The `bin.knext` in package.json points at
  * the bundled `dist/cli/kn-next.js` (the deploy entry — unchanged behavior).
  *
  * PK1 (#114): the package also publishes a LIBRARY surface that apps import on
@@ -21,16 +21,9 @@ export default defineConfig([
   {
     entry: {
       // --- CLI entries -----------------------------------------------------
-      // dist/cli/kn-next.js — the dispatcher bin (deploy entry). #1369: BOTH
-      // `bin.knext` and `bin.kn-next` in package.json point at this SAME
-      // file (rev-1380: a second tsup entry — even a thin runtime proxy —
-      // broke `npx @getknext/core` for every consumer; npm's default-bin
-      // picker only resolves automatically when every declared bin points at
-      // one file, proven against real npm 11.12.1). The two bin NAMES still
-      // read differently at the shell (`knext` vs `kn-next`) because npm
-      // creates two differently-named symlinks to this one file — see
-      // `isDeprecatedAliasInvocation` in shared.ts for how the deprecation
-      // notice tells them apart post-hoc, from argv, not from a second build.
+      // dist/cli/kn-next.js — the dispatcher bin (deploy entry).
+      // `bin.knext` in package.json points at this file (the file keeps its
+      // historical name; the only bin is `knext`).
       'cli/kn-next': 'src/cli/deploy.ts',
       // also ship the DOCUMENTED directly-runnable build/cleanup entries
       // (docs-site cli.mdx "Directly runnable entries")
@@ -44,15 +37,15 @@ export default defineConfig([
       // #30: k6 load-test entry (manual/nightly runbook, not a PR gate)
       'cli/loadtest': 'src/cli/loadtest.ts',
       // Workstream C: cluster-prereq preflight + BYO Postgres binding (ADR-0019).
-      // Reached via the bin's subcommand dispatch (`kn-next doctor` / `kn-next
+      // Reached via the bin's subcommand dispatch (`knext doctor` / `knext
       // db bind`); own entries so the dynamic imports resolve in dist.
       'cli/doctor': 'src/cli/doctor.ts',
       'cli/db-bind': 'src/cli/db-bind.ts',
       // #242 the one-shot writer-only migration runner (ADR-0021 §3), reached via
-      // `kn-next db migrate`'s subcommand dispatch; own entry so the dynamic
+      // `knext db migrate`'s subcommand dispatch; own entry so the dynamic
       // import resolves in dist.
       'cli/db-migrate': 'src/cli/db-migrate.ts',
-      // #407 `kn-next create` — bin-dispatched only (no self-entry block). Own
+      // #407 `knext create` — bin-dispatched only (no self-entry block). Own
       // entry for the same reason as its siblings: the dispatcher's dynamic
       // import resolves to a STABLE dist path instead of a hash-named split
       // chunk. (`create.ts` locates its templates by walking UP to the package
@@ -62,7 +55,7 @@ export default defineConfig([
       // CLI helpers exported as library subpaths (./cli/validate, ./cli/shared)
       'cli/validate': 'src/cli/validate.ts',
       'cli/shared': 'src/cli/shared.ts',
-      // `kn-next validate` — bin-dispatched only (no self-entry block, #263).
+      // `knext validate` — bin-dispatched only (no self-entry block, #263).
       // Own entry so the dispatcher's dynamic import resolves to a STABLE
       // dist path instead of a hash-named split chunk (same as create).
       'cli/validate-cmd': 'src/cli/validate-cmd.ts',
@@ -111,7 +104,7 @@ export default defineConfig([
       // the alias resolves to nothing.
       'adapters/sharp-addon-dlopen': 'src/adapters/sharp-addon-dlopen.mjs',
       // The vinext single-exec compile. Spawned as a SCRIPT (`bun run …`) by
-      // `kn-next build`, not imported, because it needs `Bun.build` plugins and
+      // `knext build`, not imported, because it needs `Bun.build` plugins and
       // the published CLI runs under node.
       'adapters/vinext-compile': 'src/adapters/vinext-compile.mjs',
       // The asset-anchor consumer analysis. vinext-compile SPAWNS it (`bun

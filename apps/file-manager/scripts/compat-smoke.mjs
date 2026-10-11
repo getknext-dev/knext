@@ -406,7 +406,7 @@ function startServer() {
     throw new Error(
       `server not found at ${SERVER_PATH}. Build first:\n` +
         `  bun run --filter @getknext/lib build && bun run --filter file-manager build\n` +
-        `(single-executable target: kn-next build, then SERVER_CMD=SERVER_PATH=<binary>)`,
+        `(single-executable target: knext build, then SERVER_CMD=SERVER_PATH=<binary>)`,
     );
   }
   // `output:'standalone'` does NOT copy `.next/static` or `public/` into the standalone

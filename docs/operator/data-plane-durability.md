@@ -102,7 +102,7 @@ The asset store is the **artifact source of truth**, so it fails **LOUD at deplo
 
 - **RPO:** the durable store is the system of record for serving artifacts; with a multi-region or
   versioned bucket the practical RPO is **zero** (object versioning + cross-region replication).
-- **RTO on bucket/region loss:** bounded by **re-running a deploy** (`kn-next deploy`) against a
+- **RTO on bucket/region loss:** bounded by **re-running a deploy** (`knext deploy`) against a
   healthy bucket — the build output is reproducible from source, and the additive uploader will
   repopulate `<app>/...`. There is no bespoke restore tool; the deploy *is* the restore.
 - **What a node/AZ loss does to assets:** nothing — GCS/S3 are regional+ managed object stores with

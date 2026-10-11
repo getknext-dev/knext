@@ -422,7 +422,7 @@ func computeStatusVerdict(
 				"pinned revision %q does not exist in namespace %q — it may have been "+
 					"garbage-collected, so the declared traffic pin can never resolve and Knative keeps "+
 					"serving the last-good route. Run `kubectl get revisions -n %s` to list surviving "+
-					"revisions, then re-pin via `kn-next rollback %s --to <existing-revision>` or clear "+
+					"revisions, then re-pin via `knext rollback %s --to <existing-revision>` or clear "+
 					"spec.traffic to return to latest-ready.",
 				app.Spec.Traffic.RevisionName, app.Namespace, app.Namespace, app.Name)
 			ksvcMessage = readyMessage

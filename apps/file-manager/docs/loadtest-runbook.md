@@ -11,7 +11,7 @@ Generates a k6 `ConfigMap` (the test script) + a `Job` (runs `grafana/k6`) and a
 cluster, targeting a **Knative ksvc URL**. The Job self-cleans via `ttlSecondsAfterFinished`.
 
 Generators: `packages/kn-next/src/generators/loadtest-job.ts`
-CLI: `kn-next loadtest` (`packages/kn-next/src/cli/loadtest.ts`)
+CLI: `knext loadtest` (`packages/kn-next/src/cli/loadtest.ts`)
 Entrypoint: `scripts/load-test.sh`
 
 ## Scenarios

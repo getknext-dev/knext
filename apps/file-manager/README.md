@@ -147,10 +147,10 @@ own containerised CI jobs rather than as legs here.
 ### `build:exec` — the knext build + asset upload
 
 ```bash
-bun run build:exec   # kn-next build
+bun run build:exec   # knext build
 ```
 
-`kn-next build` (vinext is the only target since ADR-0048, so there is no
+`knext build` (vinext is the only target since ADR-0048, so there is no
 `--target` flag) runs the project build, compiles the single executable, and
 then **uploads the static assets to the configured `storage` bucket**. Because
 this app sets `storage: { provider: 'gcs' }`, `build:exec` performs a **real GCS
@@ -159,14 +159,14 @@ upload** and needs GCS credentials on the machine that runs it
 them the upload step fails, so `build:exec` is not a fully offline/local command
 today. To iterate on the build alone without an upload you currently need an app
 whose config carries no `storage` block (knext then skips the upload and serves
-assets from the image). A `kn-next build` upload-skip affordance is tracked
+assets from the image). A `knext build` upload-skip affordance is tracked
 separately — do not add a CLI flag here to work around it.
 
 ### The nightly platform e2e
 
 A separate nightly workflow (`.github/workflows/file-manager-platform-e2e-nightly.yml`, also
 runnable with `workflow_dispatch`) deploys this app **through the product** on an ephemeral kind
-cluster: `kn-next deploy` applies the `NextApp` CR and the operator (built from the same commit)
+cluster: `knext deploy` applies the `NextApp` CR and the operator (built from the same commit)
 reconciles the Knative Service. It never touches a real cluster. It then checks, over real HTTP
 through the ingress:
 

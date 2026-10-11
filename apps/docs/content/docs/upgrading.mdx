@@ -185,6 +185,28 @@ behaviour with nothing to change: apps with `spec.storage` configured keep a wri
 `.next/cache`, and single-executable builds (`build: 'vinext'` or `selfContained: true`) keep a
 writable `/tmp`. See [Read-only root filesystem](/docs/security#read-only-root-filesystem).
 
+## Version-specific step: the `kn-next` command is gone
+
+The CLI is run as **`knext`**. The old `kn-next` command name, which 1.x kept as a deprecated alias
+and warned about, is removed in 2.0: `@getknext/core` now installs exactly one command, `knext`. A
+script that still calls `kn-next` fails with `command not found` instead of running.
+
+Same command, same flags. Change the name wherever you call it:
+
+1. `package.json` scripts, Makefiles and shell scripts that call the old name.
+2. CI workflows, including a GitHub Action step or a Kubernetes Job whose `command:` names it.
+3. Docs and runbooks your team keeps.
+
+If you run the CLI without installing it, use the scoped package name, which resolves to the
+`knext` command:
+
+```bash
+npx @getknext/core deploy
+```
+
+`knext init-ci` and the scaffolds from `knext create` already generate the new name, so a project
+created by either needs no change.
+
 ## Version-specific step: the metrics port moved from 9091 to 9464
 
 Older releases served app metrics on `:9091` — a port Knative's queue-proxy binds inside every pod

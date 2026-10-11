@@ -9,7 +9,7 @@ Snippets are illustrative, not final.
 > `getDbRO()` (reader, with writer fallback + one-time warning), over a new
 > `@getknext/lib` read-only pool (`getDbPoolRO`/`closeDbPoolRO`). The re-exported
 > drizzle query surface (`§6`) is live. The `@getknext/db/migrate` runner (#242) has
-> landed: `runMigrations()` + the `kn-next db migrate` one-shot subcommand + the Job
+> landed: `runMigrations()` + the `knext db migrate` one-shot subcommand + the Job
 > recipe (writer-only, idempotent, fail-loud). **Still to land:** the TimescaleDB /
 > pgvector extension helpers (#240/#241).
 
@@ -158,7 +158,7 @@ Applied per-deploy by the one-shot runner:
 
 ```
 CI / pre-deploy step (once):        or a k8s Job (once):
-  kn-next db migrate                   image: <app>, command: ["kn-next","db","migrate"]
+  knext db migrate                   image: <app>, command: ["knext","db","migrate"]
      → connects DATABASE_URL (writer)  restartPolicy: Never, backoffLimit: small
      → drizzle-kit migrate             (waits for AppDatabase Ready; wakes compute once)
      → exits 0
@@ -173,7 +173,7 @@ request path** (never on pod boot). Composes with `AppDatabase`: provision → `
 AppDatabase (on scale-zero-pg, kubectl/CI) provisions branch (template schema, ~4s) ──▶ Ready
                           │   NextApp binds the minted Secret via spec.database.secretRef
                           ▼
-                          kn-next db migrate (CI/Job, writer, once)
+                          knext db migrate (CI/Job, writer, once)
                           │
                           ▼
                           app pods boot; getDb()/getDbRO() serve traffic
@@ -219,7 +219,7 @@ builder. The knext value-add is client selection + extensions + migrate.
   create_hypertable + drop_chunks. **pgvector integration is skipped until
   scale-zero-pg #178** enables the extension.
 - **E2E (proof):** the ported example app on cluster — provision `AppDatabase`,
-  `kn-next db migrate`, serve a query, both wake on one request.
+  `knext db migrate`, serve a query, both wake on one request.
 
 ## 8. Cross-repo dependencies
 
