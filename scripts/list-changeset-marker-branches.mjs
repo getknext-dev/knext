@@ -26,7 +26,7 @@
 import { execFileSync } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { PUBLISH_LANES } from './publish-lane-guard.mjs';
+import { PREPARED_LANES, PUBLISH_LANES } from './publish-lane-guard.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -55,6 +55,9 @@ export function parseLsRemote(text) {
     });
 }
 
+/** A publish lane OR a prepared lane: neither may ever be listed for deletion. */
+const isLiveLane = (ref) => PUBLISH_LANES.has(ref) || PREPARED_LANES.has(ref);
+
 /**
  * Split marker-carrying heads into the deletion list and the live lanes that
  * must never be deleted.
@@ -65,11 +68,11 @@ export function classify(heads) {
   const carrying = heads.filter((h) => h.carries);
   return {
     deletable: carrying
-      .filter((h) => !PUBLISH_LANES.has(h.ref))
+      .filter((h) => !isLiveLane(h.ref))
       .map((h) => h.branch)
       .sort(),
     liveLanes: carrying
-      .filter((h) => PUBLISH_LANES.has(h.ref))
+      .filter((h) => isLiveLane(h.ref))
       .map((h) => h.branch)
       .sort(),
   };

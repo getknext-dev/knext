@@ -345,11 +345,19 @@ supervisor's prom-client registry (`adapters/metrics.ts`), which no longer serve
      renaming it is a three-file change with no informational payoff. -->
 <!-- metric-contract:9091-disclosure start -->
 
-- **Six series, and no more.** `knext_bunexec_http_requests_total`,
+- **Seven series families, and no more.** `knext_bunexec_http_requests_total`,
   `knext_bunexec_http_request_duration_seconds`, `knext_bunexec_http_inflight_requests`,
   `knext_bunexec_startup_duration_seconds`, `knext_bunexec_process_resident_memory_bytes`,
-  `knext_bunexec_process_uptime_seconds`. The list is pinned against the emitter by
-  `observability-metric-contract.test.ts`, so it cannot drift from what the binary serves.
+  `knext_bunexec_process_uptime_seconds`, and `knext_deep_health_state`. The list is pinned against the
+  emitter by `observability-metric-contract.test.ts`, so it cannot drift from what the binary serves.
+- **The seventh, `knext_deep_health_state`, is forwarded from the app's own registry** by the runtime
+  contract's allowlist (`APP_METRIC_FAMILIES`), and is present only when tracing is enabled. It carries
+  `app`, `dependency` (`overall`, `postgres`, `redis`) and `state` (`ok`, `degraded`, `down`, `waking`,
+  `up`, `unconfigured`) — twelve fixed series per pod, no host names, connection strings or error text.
+  It discloses whether an app's database or cache is currently up. The forward is an allowlist of exactly
+  that one family: the rest of the app registry (its request-rate series, which do carry a `method` label,
+  and the cold-start and DB-wake families) is **not** forwarded, and a test fails if the allowlist grows without
+  this list growing with it.
 - **No route, path, query, payload — or even method — labels.** The request counter carries
   `status_class` alone, five fixed values; the duration histogram carries none. Individual status
   codes do not leak either. An earlier version of this section claimed route labels leak, and a
@@ -362,8 +370,8 @@ supervisor's prom-client registry (`adapters/metrics.ts`), which no longer serve
 
 <!-- metric-contract:9091-disclosure end -->
 
-**What is NOT on this port, contrary to earlier versions of this section:** cold-start, DB-wake and
-deep-health series, and the `nodejs_*`/`process_*` families `collectDefaultMetrics` registers. Those
+**What is NOT on this port, contrary to earlier versions of this section:** cold-start and DB-wake
+series, the rest of the app's request-metric registry, and the `nodejs_*`/`process_*` families `collectDefaultMetrics` registers. Those
 are prom-client metrics on an app's own `/api/metrics` route, which the shipped PodMonitor does not
 scrape — an app that publishes that route publishes them itself, and that is the app's decision to
 make, not this port's exposure.

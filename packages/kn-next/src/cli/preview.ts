@@ -211,10 +211,19 @@ export async function runPreviewDeploy(
         config.cache?.provider === "redis"
             ? { ...config.cache, keyPrefix: previewName }
             : config.cache;
+    // Production `networking.publicHosts` must not ride along: a preview is its
+    // own app on its own host, and its redirects that carry the pod's wildcard
+    // bind address fall back to the FIRST allowlisted host — a copied list
+    // would send a reviewer following a redirect on a preview to PRODUCTION.
+    // Dropped (no allowlist, runtime behaviour unchanged). `visibility` is a
+    // separate key and is kept.
+    const { publicHosts: _prodPublicHosts, ...previewNetworking } =
+        config.networking ?? {};
     const previewConfig: KnativeNextConfig = {
         ...config,
         name: previewName,
         cache: previewCache,
+        networking: config.networking ? previewNetworking : undefined,
     };
 
     if (!hasStorage(previewConfig)) {

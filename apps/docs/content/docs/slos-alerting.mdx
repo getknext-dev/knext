@@ -27,8 +27,10 @@ catalog and scrape setup see [Observability](/docs/observability); for logs see
 
 <Callout type="info">
 These are the series of the vinext build target. The default standalone build serves a different
-family (`knext_http_*`, `knext_coldstart_*`, `knext_db_wake_*`, `knext_deep_health_state`) that the
-shipped scrape does not reach unless you add your own — see [Observability](/docs/observability#metrics-prometheus).
+family (`knext_http_*`, `knext_coldstart_*`, `knext_db_wake_*`) that the shipped scrape does not reach
+unless you add your own — see [Observability](/docs/observability#metrics-prometheus). One series of
+that family, `knext_deep_health_state`, is forwarded onto the shipped scrape and backs the deep-health
+alerts, but only while tracing is enabled and the app is running.
 Alert rules written against a series nobody emits return an empty result: no error, no alert.
 </Callout>
 

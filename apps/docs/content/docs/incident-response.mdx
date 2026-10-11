@@ -26,6 +26,11 @@ Two facts shape every response below:
 | `KnextNextAppDegraded` | [Scale-to-zero stuck](#scale-to-zero-stuck) or [Bad release](#bad-release) |
 | `KnextAppMetricsTargetDown`, `KnextAppMetricsContractBroken` | Your monitoring is blind — fix the scrape before trusting any other alert (see [SLOs and alerting](/docs/slos-alerting#the-alerting-is-not-blind)) |
 | `KnextDeepHealthStuckWaking` | [Database unreachable](/docs/troubleshooting#database-wake-timeout) |
+| `KnextDeepHealthDown` | [Deep health down](/docs/troubleshooting#deep-health-down) |
+
+The two deep-health alerts ride the shipped app scrape, but the gauge they read exists only when
+tracing is enabled, and only while the app is scaled up and using its database. With tracing off
+(the default) they cannot fire; `KnextHighErrorRate` is the signal for a failing dependency then.
 
 ## Scale-to-zero stuck
 

@@ -170,11 +170,16 @@ This is namespace RBAC, **not** a per-app privilege boundary. The label is on a 
 Namespace object, so whoever holds `update namespaces` can grant it — on a platform with self-service
 namespaces a tenant can grant itself. Once labelled, *every* pod in that namespace can scrape `9464` on
 *every* knext app, which on a shared cluster is cross-tenant metric disclosure. What is exposed is the
-exporter's six series, enumerated:
+exporter's seven series families, enumerated:
 
 - `knext_bunexec_http_requests_total`, `knext_bunexec_http_request_duration_seconds`,
   `knext_bunexec_http_inflight_requests`, `knext_bunexec_startup_duration_seconds`,
-  `knext_bunexec_process_resident_memory_bytes` and `knext_bunexec_process_uptime_seconds`.
+  `knext_bunexec_process_resident_memory_bytes` and `knext_bunexec_process_uptime_seconds`, plus
+  `knext_deep_health_state`.
+- `knext_deep_health_state` is forwarded from your app's own registry and is present only when tracing is
+  enabled. It carries `app`, `dependency` and `state` labels with fixed values (twelve series per pod) —
+  no host names, connection strings or error text — and tells an observer whether the app's database or
+  cache is currently up. Nothing else from the app's registry is forwarded.
 - No route, path, query, payload or method labels. The request counter carries only a `status_class`
   with five fixed values.
 - From these an observer can infer request volume and error ratio, restart and scale-to-zero timing

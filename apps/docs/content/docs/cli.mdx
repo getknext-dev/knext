@@ -525,6 +525,15 @@ cluster wired up are each a single actionable line by default — no raw kubectl
   `knext doctor --verbose` shows which of the two states it was and where it looked.
 - **NextApp CRD not installed.** `NextApp CRD not found. Install the operator: kubectl apply
   --server-side -f <the published install manifest>.`
+- **CRD version not served.** Doctor pairs your CLI with the cluster by CRD API version: the
+  **NextApp CRD** row reads the versions the installed CRD serves and fails with `this CLI emits
+  apps.kn-next.dev/<version>, but the installed nextapps.apps.kn-next.dev does not serve <version>
+  … ` when yours is not among them, ending in `upgrade the operator first (operator, then CLI)`
+  when the CRD only serves older versions, or `upgrade the CLI to match the operator` when it only
+  serves newer ones (both when it is unclear which side is behind). A CRD that serves several
+  versions passes as long as one is yours, deprecated or not; a CRD doctor cannot read fails
+  rather than passing. The **Operator version** row is informational only — a different operator major
+  is not a warning. See [Versioning](/docs/versioning).
 - **Operator behind the CLI.** When the installed CRD is missing fields this CLI can emit, doctor
   says so as `operator behind CLI: the installed CRD is missing N field(s) this CLI emits — they
   would be dropped. Upgrade the operator first (operator, then CLI).` — the full field list (for

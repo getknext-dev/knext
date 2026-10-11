@@ -32,14 +32,20 @@ label, and the scrape setup) is in [`metrics.md`](./metrics.md).
 | `knext_nextapp_condition{type,status,namespace,name}` | kube-state-metrics, reading `NextApp.status.conditions` (Ready / Degraded / Reconciling) the reconciler populates — see "kube-state-metrics" below |
 | `up{job="knext-nextapp"}` | Prometheus itself — per-target scrape health, and the anchor for the staleness meta-alerts |
 
+**On the shipped scrape, with conditions.** `knext_deep_health_state` is
+registered by the app and forwarded onto `:9464` by the runtime contract, so the
+two deep-health alerts are in the live `knext.app` group. The gauge exists only
+when tracing is enabled, only while a pod is up, and is refreshed only while the
+app is using its database — see
+[`metrics.md`](./metrics.md#one-app-registry-family-is-on-the-shipped-scrape-knext_deep_health_state).
+
 **Not on the shipped scrape.** `knext_http_*`, `knext_coldstart_*`,
-`knext_db_wake_*`, `knext_deep_health_state` and every `kn_next_*` series are
-registered by an APP into a prom-client registry served on the app port through
-`/api/metrics`. Since ADR-0048 the runtime no longer merges those onto `:9464`,
-and the shipped `PodMonitor` scrapes `:9464` only — so an SLI written against
-one of them is empty unless you add your own scrape config. Those rules live in
-the separate `knext.app.node-legacy` group. See
-[`metrics.md`](./metrics.md#not-on-the-shipped-scrape-app-owned-registries).
+`knext_db_wake_*` and every `kn_next_*` series are registered by an APP into a
+prom-client registry served on the app port through `/api/metrics`. Since
+ADR-0048 the runtime no longer merges those onto `:9464`, and the shipped
+`PodMonitor` scrapes `:9464` only — so an SLI written against one of them is
+empty unless you add your own scrape config. No shipped alert reads one. See
+[`metrics.md`](./metrics.md#not-on-the-shipped-scrape-the-rest-of-the-app-owned-registries).
 
 Scale-to-zero caveat: when an app is scaled to zero it exports **no** app series
 and its Grafana panels go blank. Availability/latency SLIs are therefore
