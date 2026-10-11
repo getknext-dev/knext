@@ -24,7 +24,8 @@
  *   - `.d.ts` interfaces are not read;
  *   - only the first `exports` condition is scanned;
  *   - a package that exposes nothing, or an empty workspace, reads as clean;
- *   - the CLI exits 0 while holding findings.
+ *   - the CLI exits 0 while holding findings;
+ *   - the CI step or the publish-blocking audit step stops running it.
  *
  * The NEGATIVE control rewords a message the spec must not assert on: the spec
  * judges EXIT CODES, so a prose edit leaves it green, or every red above is
@@ -188,6 +189,27 @@ const MUTATIONS = [
     anchor: '          add(exported, spec === undefined ? (aliases.get(local) ?? local) : local);',
     replacement: '          add(exported, local);',
   },
+  {
+    id: 'M14',
+    expect: 'red',
+    claim:
+      'the CI step is neutered (still named, still green, scans nothing) — the guard then ' +
+      'exists on paper while the build it gates never runs it',
+    subject: 'ci',
+    anchor: '        run: node scripts/scan-published-seams.mjs',
+    replacement: "        run: 'true'",
+  },
+  {
+    id: 'M15',
+    expect: 'red',
+    claim:
+      'the publish-blocking audit stops dying on a non-zero scan — a seam in the INSTALLED ' +
+      'tarball bytes would then be reported and shipped anyway',
+    subject: 'audit',
+    validate: jsStillParses,
+    anchor: '  if (seamScan.status !== 0) {',
+    replacement: '  if (false) {',
+  },
 ];
 
 /**
@@ -197,7 +219,7 @@ const MUTATIONS = [
  */
 const NEGATIVES = [
   {
-    id: 'M14',
+    id: 'M16',
     expect: 'green',
     claim: 'the closing advice line is reworded — the guard asserts the exit code, not the prose',
     subject: 'cli',
@@ -207,7 +229,7 @@ const NEGATIVES = [
       "        'An unreadable construct is a failure, never a pass (reworded by the control).',",
   },
   {
-    id: 'M15',
+    id: 'M17',
     expect: 'green',
     claim: 'the `unscannable` label is renamed — findings are identified by kind, not by text',
     subject: 'lib',
@@ -225,6 +247,8 @@ const prover = createGuardProver({
   subjects: {
     lib: 'scripts/lib/published-export-scan.mjs',
     cli: 'scripts/scan-published-seams.mjs',
+    ci: '.github/workflows/ci.yml',
+    audit: 'scripts/audit-published.mjs',
   },
 });
 

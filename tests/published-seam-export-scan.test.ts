@@ -39,7 +39,9 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { parse } from 'yaml';
 import { createCtx, scanPackage } from '../scripts/lib/published-export-scan.mjs';
+import { continueOnErrorProblem, type Job } from './helpers/blocking-gate';
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
 const CLI = join(REPO_ROOT, 'scripts', 'scan-published-seams.mjs');
@@ -594,5 +596,35 @@ describe('injection into a copy of the real artifact', () => {
         return run(dir);
       }),
     ).toBe(RED);
+  });
+});
+
+describe('the scan is wired into the gates that stop a release', () => {
+  it('ci.yml runs it as a step that cannot be soft-failed', () => {
+    const wf = parse(readFileSync(join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8')) as {
+      jobs: Record<string, Job & { steps?: Array<Record<string, unknown>> }>;
+    };
+    const hits: Array<{ job: string; step: Record<string, unknown>; container: Job }> = [];
+    for (const [id, job] of Object.entries(wf.jobs)) {
+      for (const step of job.steps ?? []) {
+        if (typeof step.run === 'string' && step.run.includes('scripts/scan-published-seams.mjs')) {
+          hits.push({ job: id, step, container: job });
+        }
+      }
+    }
+    expect(hits.length, 'ci.yml no longer runs scripts/scan-published-seams.mjs').toBeGreaterThan(
+      0,
+    );
+    for (const { job, step, container } of hits) {
+      expect(continueOnErrorProblem(step as Job, `${job} step`)).toBeNull();
+      expect(continueOnErrorProblem(container, `${job}`)).toBeNull();
+      expect(step.if, `${job}: the scan step is conditional`).toBeUndefined();
+    }
+  });
+
+  it('the publish-blocking audit scans the installed tarballs and dies on a non-zero exit', () => {
+    const src = readFileSync(join(REPO_ROOT, 'scripts/audit-published.mjs'), 'utf8');
+    expect(src).toContain('scan-published-seams.mjs');
+    expect(src).toMatch(/if \(seamScan\.status !== 0\) \{\s*die\(/);
   });
 });

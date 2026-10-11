@@ -214,16 +214,17 @@ function pickExport(node, active) {
 }
 
 function findPackageDir(ctx, name, fromDir) {
-  const ws = ctx.workspace.get(name);
-  if (ws) return ws.dir;
+  // node_modules first: an INSTALLED tarball (`--resolve-from <consumer dir>`)
+  // must resolve its siblings to the installed bytes, not to the workspace copy.
   let dir = fromDir;
   for (;;) {
     const candidate = join(dir, 'node_modules', name);
     if (existsSync(join(candidate, 'package.json'))) return realpathSync(candidate);
     const parent = dirname(dir);
-    if (parent === dir) return undefined;
+    if (parent === dir) break;
     dir = parent;
   }
+  return ctx.workspace.get(name)?.dir;
 }
 
 /**
