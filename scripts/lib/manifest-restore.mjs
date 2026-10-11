@@ -9,6 +9,14 @@
  * Restore runs on: normal return, a thrown error, `process.exit()` (which skips
  * `finally`, hence the `exit` listener), SIGINT and SIGTERM. Restore is
  * synchronous and idempotent so it is safe in an `exit` listener.
+ *
+ * A restore write that FAILS is never silent: the failing manifests are named on
+ * stderr and the exit code is forced non-zero even if the run itself passed — a
+ * dirty tree behind a green exit is exactly the hazard this file exists to stop.
+ *
+ * NOT covered: SIGKILL (also OOM-kill, power loss). No in-process hook can run
+ * then. Manual recovery, from the repo root:
+ *   git checkout -- apps/*\/package.json packages/*\/package.json
  */
 
 import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -40,15 +48,23 @@ export function guardManifests(repoRoot, roots) {
   const saved = snapshot(repoRoot, roots);
   let restored = false;
   const restore = () => {
-    if (restored) return;
+    if (restored) return [];
     restored = true;
+    const failed = [];
     for (const [path, data] of saved) {
       try {
         writeFileSync(path, data);
-      } catch {
-        // keep restoring the rest
+      } catch (err) {
+        // keep restoring the rest, but never silently
+        failed.push(path);
+        process.stderr.write(
+          `[manifest-restore] FAILED to restore ${path}: ${err?.message ?? err}\n` +
+            "[manifest-restore] the working tree is DIRTY; run: git checkout -- '*/package.json'\n",
+        );
       }
     }
+    if (failed.length > 0) process.exitCode = 1;
+    return failed;
   };
   process.on('exit', restore);
   for (const [sig, code] of [
@@ -56,8 +72,8 @@ export function guardManifests(repoRoot, roots) {
     ['SIGTERM', 143],
   ]) {
     process.once(sig, () => {
-      restore();
-      process.exit(code);
+      const failed = restore();
+      process.exit(failed.length > 0 ? 1 : code);
     });
   }
   return restore;

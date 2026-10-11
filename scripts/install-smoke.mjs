@@ -89,13 +89,10 @@ let dbDest;
 let coreDest;
 let aliasDest;
 let scaffoldRoot;
-/** Puts every workspace manifest back as it was; a no-op until armed (step 1). */
-let restoreManifests = () => {};
 
 /** Print a final summary line, clean up temp dirs, and exit with the matching code. */
 function finish(status, message) {
   console.log(`\n[install-smoke] ${status}: ${message}`);
-  restoreManifests();
   for (const dir of [workDir, libDest, dbDest, coreDest, aliasDest, scaffoldRoot]) {
     try {
       if (dir && existsSync(dir)) rmSync(dir, { recursive: true, force: true });
@@ -241,9 +238,9 @@ try {
   // not per-package — since it rewrites every publishable manifest in one
   // pass.
   // The rewrite edits tracked files in place. Snapshot first and restore on every
-  // exit path (finish() -> process.exit skips `finally`, so it is also an exit
-  // hook), or a later `git commit -a` commits the literal versions.
-  restoreManifests = guardManifests(repoRoot, workspaceRoots());
+  // exit path (finish() -> process.exit skips `finally`, so the guard is an
+  // `exit` hook), or a later `git commit -a` commits the literal versions.
+  guardManifests(repoRoot, workspaceRoots());
   rewriteWorkspaceRanges(repoRoot);
 
   libDest = mkdtempSync(join(tmpdir(), 'knext-pack-lib-'));
