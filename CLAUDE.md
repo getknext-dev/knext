@@ -39,11 +39,14 @@
 
 ## 4. Control plane (ADR-0001)
 - The **Go operator is the single source of truth** for cluster state. CLI = build/publish + emit a
-  CR; operator reconciles.
+  CR; operator reconciles. The CLI emits two CR kinds and nothing else: `NextApp`, and — for zone
+  functions only, built by the opt-in `@getknext/grpc` and lazily dispatched from `deploy` —
+  `BackendService` (ADR-0052 D3, amended 2026-10-09). `func deploy` / `kn service` stay prohibited.
 - **(RESOLVED 2026-07-26, stale-doc fix)** The "CLI must stop generating raw Knative manifests —
   `deploy.ts` mutates the cluster directly and the manifest generator hardcodes
   `containerConcurrency: 100`" note is **done, not outstanding**, and the invariant holds in its
-  strong form: **every CLI cluster write targets the `NextApp` CR and nothing else** —
+  strong form: **every CLI cluster write targets the `NextApp` CR — and, once zone functions land,
+  the `BackendService` CR — and nothing else** —
   `deploy.ts:500` (apply), `preview.ts:175` (apply), `db-bind.ts:383` (`patch nextapp`). No raw
   Knative objects anywhere. `deploy.ts`'s header documents the removal of both the raw-ksvc apply
   (was :176) and the infrastructure-manifest apply (was :153); `packages/kn-next/src/generators/`
@@ -78,23 +81,34 @@
   maintainer, since `.claude/rules/` is not an agent's to edit.)
 
 ## 5. Backend / gRPC business-logic layer (opt-in module)
-- Run business logic as **separate, language-agnostic services**; **Next.js stays the HTTP
-  gateway**. **ADR-0002: design now, build post-maturity** (after the migration + Tier-A
-  correctness). **Protobuf = single source of truth** for contracts.
-- **ADR-0003: transport = Connect + buf.** **ADR-0004: a `BackendService` CRD** — cluster-local,
-  scale-to-zero Knative Services over **h2c, NO public ingress**; operator wires discovery into
-  the gateway. Templates: **Go + TS first**, Python/Rust fast-follow.
-- CLI-generated gateway glue: **server-only** Connect client wrappers (`import 'server-only'`),
-  **Server Actions** (`'use server'`) for mutations, **generated API routes** (JSON-over-HTTP
-  facade). Generated code runs under the **official adapter**, not Vinext.
+- Run business logic as **zone functions**: separate, language-agnostic services, each owned by
+  exactly one zone; **Next.js stays the HTTP gateway**. **ADR-0002 (amended 2026-10-09): design and
+  spike first, build once both are accepted, shipped at Beta in 2.0.** **Protobuf =
+  single source of truth** for contracts (proto-only; no OpenAPI import).
+- **ADR-0003: transport = Connect + buf.** Templates: **Go (connect-go v2) and Rust (connect-rust
+  0.9.x, pinned, conformance-gated, tonic fallback) first**; Python/Java later. **ADR-0004: a
+  `BackendService` CRD** — cluster-local, scale-to-zero Knative Services, **NO public ingress**;
+  the operator wires discovery into the owning zone. **Same-zone bindings only**, enforced by the
+  operator; a function may reference only its own zone's `db-bind` Secret.
+- Identity: a 60 s Ed25519 JWT (per-zone keypair, per-zone JWKS ConfigMap, `iss`/`aud`/method
+  claims) plus a required user `authorize()` hook. **The token is the authoritative control;
+  NetworkPolicy is defense-in-depth** (and not enforced on flannel).
+- CLI-generated gateway glue (server-only): reads with `NO_SIDE_EFFECTS` become **cached server
+  functions** (`'use cache'`, keyed on the verified user, never the token), writes become **Server
+  Actions** (`'use server'`), and **no stream goes through an action**. The JSON facade is off by
+  default. Zone functions wake ahead with their zone (per-function opt-out). Generated code runs
+  under the **official adapter**, not Vinext.
+- Scope fence: not a general function platform — no event/cron triggers, queues, standalone
+  "deploy a function" product, cross-zone calls, WASM or sidecars in 2.0.
 
 ## 6. Maturity roadmap (see `ROADMAP.md` for detail + exit criteria)
 Phase 0 official-adapter migration (largely done) → **Tier A correctness** (image optimization,
 graceful shutdown, control-plane consolidation, compat-suite gate) → **Tier B platform**
-(security/SBOM, endpoint auth, previews, rollback, skew protection, RUM) → **Tier C edge** (CDN,
-multi-region, WAF — **partly upstream-gated**: edge Middleware/Proxy, PPR/Cache Components are not
+(security/SBOM, endpoint auth, previews, rollback, skew protection, RUM) → **Tier C edge** (CDN —
+header + purge slice: ADR-0068, v2; provisioning and edge compute stay out — multi-region, WAF — **partly upstream-gated**: edge Middleware/Proxy, PPR/Cache Components are not
 yet adapter-standardizable) → **Track P** (GitHub org, landing page, docs site — **dogfood the
-docs site on knext**). gRPC layer = **design-now / build-later, after correctness.**
+docs site on knext**). Zone functions (gRPC layer) = **built in v2 (build starts once the
+design amendment and the cold-start spike are accepted), at Beta in 2.0.**
 
 ## 7. Security (non-negotiable, every phase)
 - **No unauthenticated mutating endpoints.** `POST /api/cache/invalidate` and
@@ -134,11 +148,16 @@ docs site on knext**). gRPC layer = **design-now / build-later, after correctnes
 
 ## 8. Vercel parity framing
 knext matches Vercel's **compute layer** (scale-to-zero ≈ Fluid Compute), **not** its global edge.
-Gaps: (1) architectural edge we can't easily close (global CDN, edge middleware/PPR — partly
-upstream-gated); (2) **buildable-but-unbuilt** — **image optimization** (biggest), endpoint auth,
+Gaps: (1) architectural edge we can't easily close (**edge compute, edge middleware/PPR at the
+edge** — partly upstream-gated, multi-region); (2) **buildable-but-unbuilt** — endpoint auth,
 previews, rollback, skew protection, RUM; (3) deliberate model differences (Prometheus/Grafana vs
-Web Analytics; multi-cloud / no lock-in). Fame phase: do bucket-2 cheap wins + security basics;
-defer bucket 1.
+Web Analytics; multi-cloud / no lock-in). **Exception, ADR-0068 (v2): CDN caching in the adapter's
+own terms is in scope** — knext emits cache-correct edge headers and `Cache-Tag`s and calls a
+provider's tag purge on `revalidateTag`/`revalidatePath`. **The user owns the CDN**: knext never
+provisions or configures one, the operator carries no cloud SDK, and the purge credential is a
+user-created Secret. Staleness is bounded by the edge TTL, never promised as instant. Recommended
+provider on OKE: Cloudflare (OCI has no CDN product). Fame phase: do bucket-2 cheap wins + security
+basics; defer the rest of bucket 1.
 
 ## 9. As-built truths & known issues (fix, don't propagate)
 - ISR/data cache is **Redis** (`cache-handler.js`), **not GCS** — `docs/ARCHITECTURE.md` is stale.
