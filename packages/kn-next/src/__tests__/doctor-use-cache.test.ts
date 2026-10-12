@@ -1,10 +1,11 @@
 /**
- * `knext doctor` -- 'use cache' per-pod warning (#2083, 1.x interim).
+ * `knext doctor` -- 'use cache' on knext (#2083).
  *
- * The scaffold sets cacheMaxMemorySize: 0 and wires no cacheHandlers, so a
- * server-side 'use cache' entry is per-pod and lost on scale-to-zero. Doctor
- * says so (WARN only) for an app that enables cacheComponents, and stays
- * silent -- no row at all -- for an app that does not.
+ * With knext's cacheHandler the adapter wires the shared Redis 'use cache'
+ * backend, so doctor reports it as shared (PASS). With no cacheHandler an app
+ * gets Next's built-in handler, which is per-pod and off under the scaffold's
+ * cacheMaxMemorySize: 0 -- doctor says so (WARN only). An app that sets its own
+ * cacheHandlers owns the choice, and an app without cacheComponents gets no row.
  */
 
 import { describe, expect, it } from "bun:test";
@@ -24,8 +25,19 @@ const run = (nextConfig: string | undefined) =>
         readNextConfigFile: () => nextConfig,
     });
 
+const scaffold =
+    "export default { cacheComponents: true, cacheHandler: new URL('./cache-handler.js', import.meta.url).pathname, cacheMaxMemorySize: 0 };";
+
 describe("doctor use-cache check (#2083)", () => {
-    it("warns for an app with cacheComponents: true", async () => {
+    it("passes for an app with cacheComponents and knext's cacheHandler: shared across pods", async () => {
+        const report = await run(scaffold);
+        const row = report.checks.find((c) => c.id === "use-cache");
+        expect(row?.status).toBe("pass");
+        expect(row?.detail).toMatch(/shared across pods/);
+        expect(row?.detail).toMatch(/REDIS_URL/);
+    });
+
+    it("warns for an app with cacheComponents and NO cacheHandler: per-pod", async () => {
         const report = await run(
             "export default { cacheComponents: true, output: 'standalone' };",
         );
@@ -33,16 +45,27 @@ describe("doctor use-cache check (#2083)", () => {
         expect(row?.status).toBe("warn");
         expect(row?.detail).toMatch(/per-pod/);
         expect(row?.detail).toMatch(/scale-to-zero/);
-        expect(row?.hint).toBeTruthy();
+        expect(row?.hint).toMatch(/cacheHandler/);
     });
 
-    it("is a warning, not a failure: it never changes the exit code", async () => {
-        const withIt = await run("export default { cacheComponents: true };");
+    it("has no row when the app sets its own cacheHandlers (their choice)", async () => {
+        const report = await run(
+            "export default { cacheComponents: true, cacheHandler: './h.js', cacheHandlers: { default: './uc.js' } };",
+        );
+        expect(report.checks.some((c) => c.id === "use-cache")).toBe(false);
+    });
+
+    it("never changes the exit code: PASS and WARN rows are not failures", async () => {
         const without = await run("export default {};");
-        expect(withIt.exitCode).toBe(without.exitCode);
+        for (const cfg of [
+            scaffold,
+            "export default { cacheComponents: true };",
+        ]) {
+            expect((await run(cfg)).exitCode).toBe(without.exitCode);
+        }
     });
 
-    it("is silent for an app without it", async () => {
+    it("is silent for an app without cacheComponents", async () => {
         for (const cfg of [
             "export default { output: 'standalone' };",
             "export default { cacheComponents: false };",

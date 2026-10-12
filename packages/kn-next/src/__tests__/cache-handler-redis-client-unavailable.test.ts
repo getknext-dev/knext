@@ -112,6 +112,7 @@ const HANDLER_FILES = [
     "cache-handler-node.js",
     "cache-handler-bun.js",
     "cache-write-registry.js",
+    "use-cache-handler.js",
     "slow-dep-log.js",
 ];
 

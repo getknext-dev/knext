@@ -24,6 +24,9 @@
 // handler subpaths stay default-only, because they exist to be handed to
 // Next's `cacheHandler` option by path, not called.
 import { trackWrite } from './cache-write-registry.js';
+// The `'use cache'` (`cacheHandlers`) backend. Pure logic over an injected `core`
+// (below), so it imports nothing from this module and stays testable alone.
+import { createUseCacheHandler } from './use-cache-handler.js';
 // Slow-dependency discrimination (cold-start ledger row 3). Observation only:
 // it attaches two listeners to the connecting client and names which PHASE was
 // slow (TCP connect vs the ready-check INFO). No timer, no budget, no verdict —
@@ -812,6 +815,31 @@ async function redisCall(fn) {
   }
 }
 
+/**
+ * Run one raw Redis command on whichever client is in play. The `'use cache'`
+ * backend needs hashes and scans the ISR handler never used, and the two clients
+ * name them differently (`hmget(key, ...)` vs `hmget(key, [...])`), so it goes
+ * through the one verb both share: ioredis `call`, the native client's `send`.
+ */
+async function redisCommand(client, name, args) {
+  if (typeof client.multi === 'function') return await client.call(name, ...args);
+  return await client.send(name, args.map(String));
+}
+
+/**
+ * What the `'use cache'` backend shares with this handler (ADR-0066 D2): the
+ * connection with its timeouts, the circuit breaker, the key prefix and the build
+ * id. Functions, not values, so a reset or a re-read is always seen.
+ */
+const USE_CACHE_CORE = {
+  ensureConnected: () => ensureConnected(),
+  redisCall: (fn) => redisCall(fn),
+  command: redisCommand,
+  keyPrefix: () => KEY_PREFIX,
+  buildId: () => currentBuildId,
+  redisConfigured: () => useRedis,
+};
+
 // ─── Key Builders ───
 
 function cacheKey(key) {
@@ -1216,6 +1244,21 @@ function unwrapVinextAdapterArgs(arg) {
 class CacheHandler {
   /** The generic entry's client; the per-runtime entries override it. */
   static redisClient = RUNTIME_DETECTED;
+
+  /**
+   * The `'use cache'` handler for Next's `cacheHandlers[kind]` (Next >= 16.4),
+   * bound to THIS entry's Redis client and to the same connection, breaker, prefix
+   * and build id as the ISR handler. Called once, at module load, by the
+   * per-runtime `use-cache-handler-*` entries the adapter points `cacheHandlers`
+   * at -- not by apps, and deliberately absent from the typings.
+   *
+   * @internal
+   * @param {'default' | 'remote'} kind
+   */
+  static forUseCache(kind) {
+    redisClient = this.redisClient;
+    return createUseCacheHandler({ kind, core: USE_CACHE_CORE });
+  }
 
   /**
    * @param {object} [arg] Next.js constructs this with its handler options. vinext

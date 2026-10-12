@@ -52,6 +52,11 @@ const nextConfig: NextConfig = {
     // Falls back to in-memory when REDIS_URL is not set.
     cacheHandler: new URL("./cache-handler.js", import.meta.url).pathname,
     // Per-pod memory caches diverge across pods — Redis is the one cache.
+    // This turns off Next's per-pod memory cache only. `'use cache'` is NOT
+    // left uncached by it: with the `cacheHandler` above, the knext adapter
+    // also wires the shared Redis `cacheHandlers` (`default` and `remote`), so
+    // `'use cache'` entries are shared across pods. Do not set `cacheHandlers`
+    // here unless you mean to replace that.
     cacheMaxMemorySize: 0,
     // next/image optimization via sharp (in deps + the runtime
     // image). remotePatterns is an EXPLICIT allowlist — empty means local
