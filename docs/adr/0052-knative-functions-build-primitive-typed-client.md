@@ -1,6 +1,6 @@
 # ADR-0052: Knative Functions as a build-only primitive; proto stays the typed-client source of truth
 
-Status: Accepted (design; build re-sequenced into v2 by the 2026-10-09 amendment) · Date: 2026-09 · Depends on: ADR-0001, ADR-0002, ADR-0003, ADR-0004, ADR-0035, ADR-0048 · Amends: ADR-0004
+Status: Accepted (design; build re-sequenced into v2 by the 2026-10-09 amendment, itself Accepted 2026-10-12 at the Z1 design gate) · Date: 2026-09 · Depends on: ADR-0001, ADR-0002, ADR-0003, ADR-0004, ADR-0035, ADR-0048 · Amends: ADR-0004
 
 > **Founder direction refined (2026-09):** support **all languages Knative Functions supports** (full
 > polyglot — this decisively confirms proto-first over signature-first), and add **Bun as a
@@ -173,9 +173,11 @@ only a *build* tool.
 
 ## Amendment (2026-10-09) — D9 re-sequenced into v2; D10 Rust is Connect-capable; D3 the CLI may emit the CR
 
-**Status of this amendment: Accepted.** It encodes founder decisions of 2026-10-09 (v2 plan Q10,
-Q13, Q15, Q16, Q17; jev scores in the plan) that the architect and system-designer gates signed off
-as part of the plan. The base ADR's own status line is left as written. Trigger-class (ADR, CRD,
+**Status of this amendment: Accepted (2026-10-12, Z1 design gate).** It encodes founder decisions
+of 2026-10-09 (v2 plan Q10, Q13, Q15, Q16, Q17; jev scores in the plan) that the architect and
+system-designer gates signed off as part of the plan. Both gates then reviewed this amendment's
+text (D3, D7, D9, D10, D13) at the Z1 design gate (#2045) and accepted it. The base ADR was
+already Accepted; its status line now records this amendment's acceptance too. Trigger-class (ADR, CRD,
 security, core-vs-app boundary); per the 2026-09-22 workflow amendment it is reviewed at sprint
 close, not as a merge gate. **The build it unlocks does not start until the founder's `CLAUDE.md`
 sections 4, 5 and 6 edits are merged** — that is the exit criterion of the task that carries this
@@ -205,6 +207,11 @@ amendment.
 - **D7 (clarified, not reversed).** "Pin the same proto module version" is replaced by the skew rule
   **function proto version >= zone proto version**, with a **function-first rollout order**; a
   function older than its zone is flagged as skew. `buf breaking` runs against the deployed baseline.
+  *Note (system designer, Z1 design gate, non-blocking):* the order is **flagged, not enforced**.
+  A function older than its zone raises the skew condition, but nothing holds the zone back, and
+  under GitOps (Argo CD, Flux) the controller applies both CRs in its own order, so function-first
+  is not guaranteed there at all. Having the operator hold the zone's rollout while the skew
+  condition is true is a possible later change; it is not decided by this amendment.
 - **D13 (strengthened).** The token a template verifies is the ADR-0004 amendment's per-zone JWT
   (`iss`, `aud`, `method`, 60 s), and the interceptor is the authoritative control, shown by the
   activator-path drill.

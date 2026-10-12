@@ -1,6 +1,6 @@
 # ADR-0002: Optional polyglot gRPC business-logic layer
 
-Status: Proposed (design only — not scheduled before core maturity) · Date: 2026-06 · Amended 2026-10-09: build re-sequenced into v2, scope fence (see the amendment at the end)
+Status: Accepted (2026-10-12, Z1 design gate) · previously Proposed (design only — not scheduled before core maturity) · Date: 2026-06 · Amended 2026-10-09: build re-sequenced into v2, scope fence (see the amendment at the end)
 
 ## Context
 Users want to run business logic as **language-agnostic backend services** while **Next.js stays
@@ -47,9 +47,11 @@ adapter. Recommendation: **build later**, module-shaped, behind a feature flag/C
 
 ## Amendment (2026-10-09) — build in v2; scope fence
 
-**Status of this amendment: Accepted.** It encodes founder decisions of 2026-10-09 (v2 plan Q10,
-Q13, Q15, Q16, Q17; jev scores in the plan) that the architect and system-designer gates signed off
-as part of the plan. The base ADR's own status line is left as written. Trigger-class (ADR, CRD,
+**Status of this amendment: Accepted (2026-10-12, Z1 design gate).** It encodes founder decisions
+of 2026-10-09 (v2 plan Q10, Q13, Q15, Q16, Q17; jev scores in the plan) that the architect and
+system-designer gates signed off as part of the plan. Both gates then reviewed this amendment's
+text at the Z1 design gate (#2045) and accepted it; the base ADR's status line moved from Proposed
+to Accepted at the same gate. Trigger-class (ADR, CRD,
 security, core-vs-app boundary); per the 2026-09-22 workflow amendment it is reviewed at sprint
 close, not as a merge gate. **The build it unlocks does not start until the founder's `CLAUDE.md`
 sections 4, 5 and 6 edits are merged** — that is the exit criterion of the task that carries this
