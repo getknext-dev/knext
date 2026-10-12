@@ -642,12 +642,25 @@ function ensureSeam() {
 // Build id + routing artifact discovery (runtime)
 // ---------------------------------------------------------------------------
 
-/** Directories that may hold `.next/knext-cdn-routing.json`, most specific first. */
+/**
+ * Directories that may hold `.next/knext-cdn-routing.json`, most specific first:
+ *
+ * - beside the entry script (`server.js` run with `--require`; in a compiled
+ *   self-contained executable the entry lives in the EMBEDDED filesystem, so this
+ *   is `$bunfs/root/<app>/.next` and the file is read from the binary itself);
+ * - the embed root the self-contained entry publishes;
+ * - the standalone directory a disk-mode compiled executable serves
+ *   (`KNEXT_STANDALONE_DIR`, else the directory the executable sits in);
+ * - the working directory (the standalone server chdirs to its own directory).
+ */
 function defaultDistDirs() {
   const dirs = [];
   const argv1 = process.argv && process.argv[1];
   if (typeof argv1 === 'string' && argv1) dirs.push(nodePath.join(nodePath.dirname(argv1), '.next'));
   if (typeof globalThis.__knextEmbedRoot === 'string') dirs.push(nodePath.join(globalThis.__knextEmbedRoot, '.next'));
+  const standalone = process.env.KNEXT_STANDALONE_DIR;
+  if (typeof standalone === 'string' && standalone) dirs.push(nodePath.join(standalone, '.next'));
+  if (process.execPath) dirs.push(nodePath.join(nodePath.dirname(process.execPath), '.next'));
   dirs.push(nodePath.join(process.cwd(), '.next'));
   return [...new Set(dirs)];
 }

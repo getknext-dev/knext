@@ -62,6 +62,7 @@ const PRELOAD = join(ADAPTERS, "cache-control-normalize.cjs");
 const RECORDER = join(here, "fixtures", "cdn-soundness-record-tags.cjs");
 const ADAPTER_SRC = join(ADAPTERS, "next-adapter.ts");
 const NEXT_BIN = join(PKG_ROOT, "node_modules", "next", "dist", "bin", "next");
+const COMPILE_SCRIPT = join(ADAPTERS, "standalone-compile.mjs");
 
 const tempRoots: string[] = [];
 const servers: ChildProcess[] = [];
@@ -126,6 +127,9 @@ const tail = (s: string, n = 30) =>
     s.split("\n").filter(Boolean).slice(-n).join("\n");
 
 interface Built {
+    root: string;
+    appDir: string;
+    standaloneDir: string;
     serverDir: string;
     serverJs: string;
     buildId: string;
@@ -189,7 +193,7 @@ function buildFixture(name: string, nextConfig: string): Promise<Built> {
             join(appDir, ".next", "BUILD_ID"),
             "utf8",
         ).trim();
-        return { serverDir, serverJs, buildId };
+        return { root, appDir, standaloneDir, serverDir, serverJs, buildId };
     })();
     built.set(name, p);
     return p;
@@ -424,4 +428,78 @@ describe("CDN soundness harness can see red", () => {
             writeFileSync(artifactPath, saved);
         }
     }, 300_000);
+});
+
+describe("the compiled executable (disk mode) runs the CDN preload and finds the staged artifact (D11)", () => {
+    it("a compiled binary bundles the preload's relative require and reads knext-cdn-routing.json", async () => {
+        const b = await buildFixture("cdn-soundness-app", `basePath: "/base",`);
+        const outfile = join(b.root, "knext-exec");
+        const compiled = await run(
+            BUN_BIN as string,
+            [
+                COMPILE_SCRIPT,
+                "--server",
+                b.serverJs,
+                "--root",
+                b.standaloneDir,
+                "--outfile",
+                outfile,
+            ],
+            b.root,
+        );
+        expect(
+            compiled.code,
+            `standalone compile failed (exit ${compiled.code}):\n${tail(compiled.out)}`,
+        ).toBe(0);
+        const port = await freePort();
+        const env: Record<string, string> = {};
+        for (const [k, v] of Object.entries(process.env)) {
+            if (v !== undefined && !k.startsWith("KNEXT_")) env[k] = v;
+        }
+        Object.assign(env, {
+            PORT: String(port),
+            HOSTNAME: "",
+            NODE_ENV: "production",
+            NEXT_TELEMETRY_DISABLED: "1",
+            // Disk mode: the executable serves the tree it was compiled from.
+            KNEXT_STANDALONE_DIR: b.serverDir,
+            KNEXT_CDN_PROVIDER: "cloudflare",
+            KNEXT_CDN_TAG_PREFIX: "abcdef012345",
+        });
+        let log = "";
+        const child = spawn(outfile, [], {
+            cwd: b.serverDir,
+            detached: true,
+            env: env as NodeJS.ProcessEnv,
+        });
+        servers.push(child);
+        child.stdout?.on("data", (d) => {
+            log += String(d);
+        });
+        child.stderr?.on("data", (d) => {
+            log += String(d);
+        });
+        try {
+            const deadline = Date.now() + 60_000;
+            for (;;) {
+                try {
+                    const r = await fetchRaw(port, "/base/open");
+                    if (r.status > 0) break;
+                } catch {
+                    // not listening yet
+                }
+                if (Date.now() > deadline) {
+                    throw new Error(`binary did not answer:\n${tail(log)}`);
+                }
+                await new Promise((r) => setTimeout(r, 200));
+            }
+            // The first response runs the decision, which loads the artifact lazily.
+            expect(log).toContain(
+                `CDN_EDGE: provider=cloudflare routing artifact loaded (${join(b.serverDir, ".next")})`,
+            );
+            expect(log).not.toContain("routing artifact missing");
+        } finally {
+            killTree(child);
+        }
+    }, 600_000);
 });

@@ -709,6 +709,20 @@ describe("decideEdge — the allowlist (D4.1)", () => {
                 ).toMatchObject({ reason: "rsc_not_query_keyed" });
             }
         });
+        it("_rsc is cached on every row that keys on the query string", () => {
+            for (const p of ["cloudflare", "google-cloud-cdn", "emulator"]) {
+                expect(
+                    decideEdge(
+                        base({
+                            cfg: cfg({}, p),
+                            rsc: rsc(true, false, true),
+                            contentType: "text/x-component",
+                        }),
+                    ).edge,
+                    p,
+                ).toBe(true);
+            }
+        });
         it("a plain HTML response is cached on every row", () => {
             for (const p of Object.keys(PROVIDER_ROWS)) {
                 expect(decideEdge(base({ cfg: cfg({}, p) })).edge).toBe(true);

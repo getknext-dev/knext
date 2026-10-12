@@ -7,6 +7,7 @@
  *   { cc, ct, tags: [{kind, tags}], setCookie, mode, status, rewriteUrl, hop, extra }
  *
  *   x-case: nostate  drop the preload's request snapshot before answering
+ *   x-case: poison   corrupt the snapshot so the edge decision throws
  *   mode: "write"     res.setHeader(...) then res.write() — the IMPLICIT header flush
  *         "end"       res.setHeader(...) then res.end(body) — implicit flush on end
  *         "writehead" res.writeHead(status, { 'Cache-Control': cc, ... }) — object form
@@ -47,6 +48,8 @@ const server = http.createServer(async (req, res) => {
   const spec = JSON.parse(req.headers['x-spec'] || '{}');
   // A request the preload never saw (no snapshot): the response must stay uncached.
   if (kase === 'nostate') delete req[STATE];
+  // A snapshot the decision cannot read: the preload must serve the response anyway.
+  if (kase === 'poison') req[STATE].own = null;
   if (spec.rewriteUrl) req.url = spec.rewriteUrl;
   if (spec.hop) await new Promise((r) => setTimeout(r, 5));
   const seam = globalThis[SEAM];

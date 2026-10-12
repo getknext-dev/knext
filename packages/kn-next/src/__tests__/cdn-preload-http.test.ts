@@ -162,6 +162,16 @@ for (const runtime of ["node", "bun"] as Runtime[]) {
             });
         }
 
+        it("a decision that throws never breaks serving: the response is answered, uncached", async () => {
+            const r = await get(srv.port, "/blog", isr, {}, "poison");
+            expect(r.status).toBe(200);
+            expect(r.body).toContain("bo"); // chunked: the body was written
+            expect(r.header("cloudflare-cdn-cache-control")).toBeUndefined();
+            expect(r.header("cache-tag")).toBeUndefined();
+            const m = await get(srv.port, "/", {}, {}, "metrics");
+            expect(m.body).toContain('reason="internal_error"');
+        });
+
         it("a request with no preload snapshot is answered, uncached", async () => {
             const r = await get(srv.port, "/blog", isr, {}, "nostate");
             expect(r.status).toBe(200);
