@@ -562,6 +562,96 @@ describe("ISR freshness survives a scale-to-zero wake on the Next path (#1888)",
         expect(hit?.cacheControl).toEqual({ revalidate: 30 });
     });
 
+    // Handler-level: call `get` directly (no IncrementalCache), so the withhold
+    // logic is proved on ANY installed Next, including the pinned 16.3.x that
+    // ignores a returned cacheControl.
+    describe("scopeWindowToBuild at the handler (Next-version independent)", () => {
+        async function handlerGet(
+            stored: string,
+            serverDistDir: string | null,
+        ) {
+            const mod = (await import(
+                `../adapters/cache-handler.js?scope=${Math.random()}`
+            )) as {
+                default: new (
+                    o: unknown,
+                ) => {
+                    get: (
+                        k: string,
+                        ctx?: unknown,
+                    ) => Promise<{ cacheControl?: unknown } | null>;
+                };
+                __setRedisClientForTests: (c: unknown) => void;
+            };
+            const handler = new mod.default(
+                serverDistDir === null ? {} : { serverDistDir },
+            );
+            mod.__setRedisClientForTests({
+                connected: true,
+                async connect() {},
+                async get() {
+                    return stored;
+                },
+                async send() {
+                    return "OK";
+                },
+            });
+            return handler.get("/isr/scope", { kind: "APP_PAGE" });
+        }
+        const WINDOW = { revalidate: 3600, expire: ONE_YEAR_S };
+
+        it("withholds a foreign build's window but still serves the body", async () => {
+            const hit = await handlerGet(
+                storedEntry(WINDOW, SEVEN_MINUTES_MS, OTHER_BUILD),
+                THIS_DIST,
+            );
+            expect(hit).not.toBeNull();
+            expect(hit?.cacheControl).toBeUndefined();
+        });
+        it("withholds a legacy entry with no build id", async () => {
+            const hit = await handlerGet(
+                storedEntry(WINDOW, SEVEN_MINUTES_MS, null),
+                THIS_DIST,
+            );
+            expect(hit).not.toBeNull();
+            expect(hit?.cacheControl).toBeUndefined();
+        });
+        it("withholds when this process has no build id, even for a legacy entry (undefined must not equal undefined)", async () => {
+            const hit = await handlerGet(
+                storedEntry(WINDOW, SEVEN_MINUTES_MS, null),
+                null,
+            );
+            expect(hit).not.toBeNull();
+            expect(hit?.cacheControl).toBeUndefined();
+        });
+        it("withholds when this process has no build id, for an entry that records one", async () => {
+            const hit = await handlerGet(
+                storedEntry(WINDOW, SEVEN_MINUTES_MS, THIS_BUILD),
+                null,
+            );
+            expect(hit?.cacheControl).toBeUndefined();
+        });
+        it("withholds under Next's CONSTANT build id on both sides", async () => {
+            const hit = await handlerGet(
+                storedEntry(
+                    WINDOW,
+                    SEVEN_MINUTES_MS,
+                    NEXT_CONSTANT_BUILD_ID,
+                ),
+                distWithBuildId(NEXT_CONSTANT_BUILD_ID),
+            );
+            expect(hit).not.toBeNull();
+            expect(hit?.cacheControl).toBeUndefined();
+        });
+        it("keeps an own-build entry's window", async () => {
+            const hit = await handlerGet(
+                storedEntry(WINDOW, SEVEN_MINUTES_MS, THIS_BUILD),
+                THIS_DIST,
+            );
+            expect(hit?.cacheControl).toEqual(WINDOW);
+        });
+    });
+
     it("leaves a ctx-less (vinext) read untouched: the window is vinext's to read, even from another build", async () => {
         const mod = (await import(
             `../adapters/cache-handler.js?wakevinext=${Math.random()}`
