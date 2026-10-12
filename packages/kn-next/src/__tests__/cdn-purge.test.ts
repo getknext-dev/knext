@@ -437,6 +437,22 @@ describe("missing credential is fail-closed and invisible to the request path (A
         expect(() => h.purger.enqueue(["a"])).not.toThrow();
         await expect(h.purger.flush()).resolves.toBeUndefined();
         expect(h.cdn.requests.length).toBe(1);
+
+        // And on the synchronous skip path, which counts before it returns.
+        const { env: noToken } = cloudflareEnv({
+            KNEXT_CDN_PURGE_TOKEN: undefined,
+        });
+        const skipped = await harness(noToken, {
+            metrics: {
+                inc: () => {
+                    throw new Error("registry down");
+                },
+            },
+        });
+        expect(skipped.purger.enqueue(["a"]).skipped).toBe("no_credential");
+        expect(skipped.logs.lines.some((l) => /credential/i.test(l))).toBe(
+            true,
+        );
     });
 
     it("a provider that accepts the connection and never answers is cut off at the request timeout", async () => {
