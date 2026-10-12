@@ -1001,8 +1001,13 @@ describe('$knextQuarantines ref stamps — re-audit on NEXTJS_REF bump (#181/#17
     return `v${pin.shippedNextPin}`;
   }
 
-  const quarantines: KnextQuarantine[] =
-    (manifest as unknown as { $knextQuarantines?: KnextQuarantine[] }).$knextQuarantines ?? [];
+  // The upstream-runtime-defect ledger (ADR-0007 amendment 2026-10-12) is stamped and
+  // re-audited exactly like a quarantine: a ref bump must not strand it on a stale ref.
+  const quarantines: KnextQuarantine[] = [
+    ...((manifest as unknown as { $knextQuarantines?: KnextQuarantine[] }).$knextQuarantines ?? []),
+    ...((manifest as unknown as { $knextUpstreamRuntimeDefects?: KnextQuarantine[] })
+      .$knextUpstreamRuntimeDefects ?? []),
+  ];
 
   it('has quarantine entries to stamp (sanity)', () => {
     expect(quarantines.length).toBeGreaterThan(0);

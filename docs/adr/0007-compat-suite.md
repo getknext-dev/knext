@@ -817,6 +817,9 @@ derived smoke manifest. It is a record, not a skip.
 | Removal condition | `removeWhen`, non-empty, and it names the upstream fix it waits for |
 | knext refusal | the build-time refusal that makes the red deliberate. The entry is admissible only once that refusal ships |
 | Evidence | cites a CI run id |
+| Test path | one concrete corpus file; a glob or wildcard is rejected |
+| Removal condition | non-empty **and** it references the entry's own upstream fix; a placeholder such as "TBD" is rejected |
+| Refusal | names a real guard: a repo path that exists, as `path` or `path#symbol` with the symbol present in that file. A free-text claim is rejected |
 | Cap | **5**, its own constant (`UPSTREAM_RUNTIME_DEFECT_CAP`). Raising it needs an amendment to this ADR, like the §h cap |
 | Not §h | no entry may also be in `$knextQuarantines`, so none counts toward `FAMILY_QUARANTINE_CAP` |
 | Keeps running | no entry may be dropped by `rules.exclude` or `$knextExclusions`: the file runs on every lane, so the cell keeps reporting the red |
@@ -839,6 +842,11 @@ the cell green: the cell stays red for that file by design, and any published fi
   `tests/compat-upstream-runtime-defects.ts`. An unreadable manifest throws; it never reads as
   an empty ledger. Each rule is mutation-proved by exit code in
   `scripts/mutation-prove-upstream-runtime-defects.mjs`.
+- The entries are stamped with the Next ref they were observed at and are re-audited on a
+  `NEXTJS_REF` bump exactly like a quarantine: the ref-stamp gate in
+  `tests/deploy-manifest.test.ts` iterates `$knextUpstreamRuntimeDefects` as well as
+  `$knextQuarantines`, so a bump cannot strand the ledger on a stale ref. (Low harm on its own, a
+  stale entry only records a red; it is closed because it is cheap and removes an expiry gap.)
 - Removal is routine: when the removal condition holds, delete the entry (and the knext
   refusal, which the entry records) in the same change and re-run the cell.
 - Not a credential and not a parity claim. It records why a red is expected, nothing more.

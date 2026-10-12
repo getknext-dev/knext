@@ -97,6 +97,32 @@ const MUTATIONS = [
   entryEdit('entry: evidence cites no CI run', MW, (b) =>
     b.replace(/"evidence": "[^\n]*",/, '"evidence": "it failed once locally",'),
   ),
+  entryEdit('entry: knext refusal is free text naming no file', MW, (b) =>
+    b.replace(/"knextRefusal": "[^\n]*",/, '"knextRefusal": "x",'),
+  ),
+  entryEdit('entry: knext refusal names a path that does not exist', CHUNK, (b) =>
+    b.replace(
+      'packages/kn-next/src/cli/turbopack-fragments-guard.ts#',
+      'packages/kn-next/src/cli/no-such-guard.ts#',
+    ),
+  ),
+  entryEdit('entry: knext refusal names a symbol absent from the guard file', MW, (b) =>
+    b.replace('#assertNoBunTurbopackFragments', '#assertNoSuchSymbolAnywhere'),
+  ),
+  entryEdit('entry: removal condition is a placeholder ("TBD")', CHUNK, (b) =>
+    b.replace(/"removeWhen": "[^\n]*",/, '"removeWhen": "TBD",'),
+  ),
+  entryEdit(
+    "entry: removal condition waits for a different upstream fix than the entry's own",
+    MW,
+    (b) => b.replace(/("removeWhen": "[^"\n]*)oven-sh\/bun#45010/, '$1oven-sh/bun#99999'),
+  ),
+  entryEdit('entry: test path is a glob, not one file', CHUNK, (b) =>
+    b.replace(
+      `"test": "${CHUNK}"`,
+      '"test": "test/e2e/app-dir/turbopack-tree-shaking-chunkgroup/*.test.ts"',
+    ),
+  ),
   // Data: the file must keep running and must not be a §h quarantine.
   textRow(
     'the file is added to rules.exclude (it would stop running on every lane)',
@@ -132,8 +158,8 @@ const MUTATIONS = [
   textRow(
     'validator: the removal-condition check is removed',
     'module',
-    'if (!nonEmpty(e.removeWhen)) out.push(',
-    'if (false) out.push(',
+    'if (!nonEmpty(e.removeWhen)) {',
+    'if (false) {',
   ),
   textRow(
     'validator: the lane check is removed',
@@ -176,6 +202,30 @@ const MUTATIONS = [
     'module',
     'if (seen.has(key)) out.push(',
     'if (false) out.push(',
+  ),
+  textRow(
+    'validator: the concrete-test-path check is removed',
+    'module',
+    'if (!nonEmpty(e.test) || !CONCRETE_TEST_PATH.test(e.test)) {',
+    'if (!nonEmpty(e.test)) {',
+  ),
+  textRow(
+    'validator: the removal-condition-references-own-fix check is removed',
+    'module',
+    '} else if (nonEmpty(e.upstream?.fix) && !e.removeWhen.includes(e.upstream.fix)) {',
+    '} else if (false) {',
+  ),
+  textRow(
+    'validator: the real-guard (path exists) check is removed',
+    'module',
+    '} else if (!namesRealGuard(e.knextRefusal, ctx)) {',
+    '} else if (false) {',
+  ),
+  textRow(
+    'validator: the guard-symbol-present check is removed',
+    'module',
+    'if (ctx.read(path)?.includes(symbol)) return true;',
+    'return true;',
   ),
   // Source: fail-closed on unreadable input (an injected read error reads as no ledger).
   textRow(

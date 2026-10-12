@@ -43,7 +43,26 @@ export interface UpstreamRuntimeDefect {
   /** What ends this entry. Must be a concrete, checkable condition. */
   removeWhen: string;
   provenance: string;
+  /** Optional re-audit stamp (a vX.Y.Z ref), same meaning as on a quarantine entry. */
+  reaudited?: string;
 }
+
+/**
+ * What the validator may look at in the repository. Injected so the module stays
+ * pure: the spec passes the real filesystem, unit tests pass fakes. An entry cannot
+ * be validated without it (a refusal that cannot be looked up is not a refusal).
+ */
+export interface LedgerContext {
+  /** True when a repo-relative path exists. */
+  exists: (repoPath: string) => boolean;
+  /** The text of a repo-relative file, or undefined when it cannot be read. */
+  read: (repoPath: string) => string | undefined;
+}
+
+/** `path/to/file.ts` or `path/to/file.ts#symbol`, anywhere in a free-text field. */
+const REFUSAL_REF = /([\w./-]+\.(?:ts|tsx|mjs|cjs|js))(?:#([A-Za-z_$][\w$]*))?/g;
+/** A corpus test path is one concrete file: no glob metacharacters at all. */
+const CONCRETE_TEST_PATH = /^test\/[\w./-]+\.test\.[jt]sx?$/;
 
 const nonEmpty = (v: unknown): v is string => typeof v === 'string' && v.trim().length > 0;
 
@@ -70,20 +89,35 @@ export function parseUpstreamRuntimeDefects(manifestText: string): UpstreamRunti
   return list as UpstreamRuntimeDefect[];
 }
 
+/** Does the free text name at least one existing repo file (and its symbol, when given)? */
+function namesRealGuard(text: string, ctx: LedgerContext): boolean {
+  for (const m of text.matchAll(REFUSAL_REF)) {
+    const [, path, symbol] = m;
+    if (!path || !ctx.exists(path)) continue;
+    if (symbol === undefined) return true;
+    if (ctx.read(path)?.includes(symbol)) return true;
+  }
+  return false;
+}
+
 /**
  * Everything wrong with ONE entry. Empty means admissible. Each rule is a guard the
  * mutation prover removes and must see go red.
  */
-export function entryProblems(e: Partial<UpstreamRuntimeDefect>): string[] {
+export function entryProblems(e: Partial<UpstreamRuntimeDefect>, ctx?: LedgerContext): string[] {
   const out: string[] = [];
   const who = e.test ?? '<no test>';
-  if (!nonEmpty(e.test) || !/^test\/.+\.test\.[jt]sx?$/.test(e.test)) {
-    out.push(`${who}: test must be a corpus test path`);
+  if (!nonEmpty(e.test) || !CONCRETE_TEST_PATH.test(e.test)) {
+    out.push(`${who}: test must be one concrete corpus test file (no glob or wildcard)`);
   }
   if (!nonEmpty(e.lane) || !LANE_PATTERN.test(e.lane)) {
     out.push(`${who}: lane must be <node|bun>/<turbopack|webpack>, got ${JSON.stringify(e.lane)}`);
   }
-  if (!nonEmpty(e.removeWhen)) out.push(`${who}: removeWhen must be a non-empty removal condition`);
+  if (!nonEmpty(e.removeWhen)) {
+    out.push(`${who}: removeWhen must be a non-empty removal condition`);
+  } else if (nonEmpty(e.upstream?.fix) && !e.removeWhen.includes(e.upstream.fix)) {
+    out.push(`${who}: removeWhen must reference the entry's own upstream fix (${e.upstream.fix})`);
+  }
   if (!e.upstream || !UPSTREAM_REF_PATTERN.test(e.upstream.issue ?? '')) {
     out.push(`${who}: upstream.issue must be an owner/repo#N reference outside getknext-dev`);
   }
@@ -92,6 +126,12 @@ export function entryProblems(e: Partial<UpstreamRuntimeDefect>): string[] {
   }
   if (!nonEmpty(e.knextRefusal)) {
     out.push(`${who}: knextRefusal must cite the build-time refusal that makes the red deliberate`);
+  } else if (!ctx) {
+    out.push(`${who}: knextRefusal cannot be verified without a repository context`);
+  } else if (!namesRealGuard(e.knextRefusal, ctx)) {
+    out.push(
+      `${who}: knextRefusal must name a real guard: a repo path that exists, as path or path#symbol with the symbol present in that file`,
+    );
   }
   if (!nonEmpty(e.mechanism)) out.push(`${who}: mechanism required`);
   if (!Array.isArray(e.cases) || e.cases.length === 0) out.push(`${who}: cases required`);
@@ -102,12 +142,15 @@ export function entryProblems(e: Partial<UpstreamRuntimeDefect>): string[] {
     out.push(`${who}: nextjsRef must be a vX.Y.Z ref`);
   }
   if (!nonEmpty(e.provenance)) out.push(`${who}: provenance required`);
+  if (e.reaudited !== undefined && !/^v\d+\.\d+\.\d+$/.test(e.reaudited)) {
+    out.push(`${who}: reaudited must be a vX.Y.Z ref when present`);
+  }
   return out;
 }
 
 /** Ledger-level problems: every entry, the cap, duplicates. */
-export function ledgerProblems(entries: UpstreamRuntimeDefect[]): string[] {
-  const out = entries.flatMap((e) => entryProblems(e));
+export function ledgerProblems(entries: UpstreamRuntimeDefect[], ctx?: LedgerContext): string[] {
+  const out = entries.flatMap((e) => entryProblems(e, ctx));
   if (entries.length > UPSTREAM_RUNTIME_DEFECT_CAP) {
     out.push(
       `ledger holds ${entries.length} entries, over its own cap of ${UPSTREAM_RUNTIME_DEFECT_CAP} (raising it needs an ADR-0007 amendment)`,

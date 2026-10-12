@@ -529,7 +529,7 @@
         "issue": "oven-sh/bun#45007",
         "fix": "oven-sh/bun#45010"
       },
-      "knextRefusal": "https://github.com/getknext-dev/knext/pull/2226 — knext refuses `experimental.turbopackModuleFragments` on the Bun runtime at build time (`next build` adapter and `doctor`), so a user cannot reach this state silently. The entry is admissible only once that refusal ships.",
+      "knextRefusal": "packages/kn-next/src/cli/turbopack-fragments-guard.ts#assertNoBunTurbopackFragments — knext refuses `experimental.turbopackModuleFragments` on the Bun runtime at build time (`next build` through the CLI, and `doctor`), so a user cannot reach this state silently (https://github.com/getknext-dev/knext/pull/2226).",
       "removeWhen": "a Bun release containing oven-sh/bun#45010 (assignment to a const becomes a runtime TypeError, not a load-time error); then delete this entry and the knext refusal in the same change, and re-run the bun x turbopack smoke cell.",
       "provenance": "https://github.com/getknext-dev/knext/issues/2225 (filed from C2 #2162) + https://github.com/getknext-dev/knext/issues/2227 (ledger decision) + oven-sh/bun#45007. ADR-0007 amendment 2026-10-12. These files are NOT in rules.exclude: they keep running on every lane, and are green on node x turbopack, node x webpack and bun x webpack."
     },
@@ -544,7 +544,7 @@
         "issue": "oven-sh/bun#45007",
         "fix": "oven-sh/bun#45010"
       },
-      "knextRefusal": "https://github.com/getknext-dev/knext/pull/2226 — knext refuses `experimental.turbopackModuleFragments` on the Bun runtime at build time (`next build` adapter and `doctor`), so a user cannot reach this state silently. The entry is admissible only once that refusal ships.",
+      "knextRefusal": "packages/kn-next/src/cli/turbopack-fragments-guard.ts#assertNoBunTurbopackFragments — knext refuses `experimental.turbopackModuleFragments` on the Bun runtime at build time (`next build` through the CLI, and `doctor`), so a user cannot reach this state silently (https://github.com/getknext-dev/knext/pull/2226).",
       "removeWhen": "a Bun release containing oven-sh/bun#45010 (assignment to a const becomes a runtime TypeError, not a load-time error); then delete this entry and the knext refusal in the same change, and re-run the bun x turbopack smoke cell.",
       "provenance": "https://github.com/getknext-dev/knext/issues/2225 (filed from C2 #2162) + https://github.com/getknext-dev/knext/issues/2227 (ledger decision) + oven-sh/bun#45007. ADR-0007 amendment 2026-10-12. These files are NOT in rules.exclude: they keep running on every lane, and are green on node x turbopack, node x webpack and bun x webpack."
     }
