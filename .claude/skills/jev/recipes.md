@@ -91,6 +91,10 @@ and the composite is `sum(w * position / 4)`. Output ends in `RISK 0.xx HIGH|nor
   the literal-secret check, which with no code rarely fires: a token in a file NAME or pasted into
   a PR body. On a hit the script prints `RISK unavailable (input carries a literal secret)` and
   exits 3 without calling jev. Say so in the report; it means "no opinion", not "safe".
+- **A git error is never an empty diff.** A base ref that does not resolve (a typo, a ref that was
+  not fetched), one that shares no history with `HEAD`, or a failing `git diff` prints
+  `RISK unavailable (...)` and exits 3. Only a genuinely empty `base...HEAD` prints
+  `RISK 0.00 normal`. Fetch the base first (`git fetch origin main`) if you see the former.
 - Offline test with a stubbed jev: `bash .claude/skills/jev/pr-risk.test.sh`.
 
 ## L5 — routing

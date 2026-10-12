@@ -21,8 +21,9 @@
 # Prints one line per axis (position 0..4 of a 5-level rubric), then
 #   RISK <0.00-1.00> HIGH|normal
 # Exit 0 = normal, 10 = HIGH (composite >= 0.6), 3 = unavailable (jev down, unparseable scores,
-# or the secret check fired or could not run: fail open, no opinion, NOT "safe" — say so in the
-# report). A HIGH result means: reviewers at high effort + a knext-tester pass (see recipes.md, L3).
+# the base ref does not resolve or shares no history with HEAD, a git call failed, or the secret
+# check fired or could not run: no opinion, NOT "safe" — say so in the report). A git error is
+# never read as an empty diff; only a genuinely empty `base...HEAD` prints "RISK 0.00 normal". A HIGH result means: reviewers at high effort + a knext-tester pass (see recipes.md, L3).
 #
 # WEIGHTS — one line, must sum to 1.0. Security dominates because it is the only axis where a
 # miss is not recoverable; tests next because they are what makes the other three catchable.
@@ -41,21 +42,34 @@ command -v jq >/dev/null 2>&1 && command -v awk >/dev/null 2>&1 || { echo "RISK 
 tmp=$(mktemp -d) || exit 3
 trap 'rm -rf "$tmp"' EXIT
 
-# --no-ext-diff / --no-color: nothing from a configured diff driver or a pager. None of these
-# four git invocations prints a hunk.
-{
-  echo "CHANGED FILES (status, path):"
-  git diff --no-ext-diff --no-color -M --name-status "$BASE"...HEAD 2>/dev/null
-  echo
-  echo "DIFFSTAT:"
-  git diff --no-ext-diff --no-color -M --stat=200 "$BASE"...HEAD 2>/dev/null
-  echo
-  echo "NUMSTAT (added, removed, path):"
-  git diff --no-ext-diff --no-color -M --numstat "$BASE"...HEAD 2>/dev/null
-} >"$tmp/change.full"
-if ! grep -q '^[A-Z][0-9]*[[:space:]]' "$tmp/change.full"; then
+# A git ERROR IS NEVER AN EMPTY DIFF. Scoring a broken run as "RISK 0.00 normal" would be the
+# worst possible failure of a risk tool, so the base must resolve to a commit that shares history
+# with HEAD before anything else, and every git call below is checked on its own exit status.
+git rev-parse --verify -q "$BASE^{commit}" >/dev/null 2>&1 && git merge-base "$BASE" HEAD >/dev/null 2>&1 ||
+  { echo "RISK unavailable (base ref '$BASE' does not resolve to a commit with a merge base)"; exit 3; }
+
+# --no-ext-diff / --no-color: nothing from a configured diff driver or a pager. None of the three
+# invocations prints a hunk.
+diff_part() { # <git diff output option> <outfile>
+  git diff --no-ext-diff --no-color -M "$1" "$BASE"...HEAD >"$2" 2>/dev/null ||
+    { echo "RISK unavailable (git diff failed)"; exit 3; }
+}
+diff_part --name-status "$tmp/names"
+diff_part --stat=200 "$tmp/stat"
+diff_part --numstat "$tmp/numstat"
+if ! grep -q '^[A-Z][0-9]*[[:space:]]' "$tmp/names"; then
   echo "RISK 0.00 normal (empty diff, jev not called)"; exit 0
 fi
+{
+  echo "CHANGED FILES (status, path):"
+  cat "$tmp/names"
+  echo
+  echo "DIFFSTAT:"
+  cat "$tmp/stat"
+  echo
+  echo "NUMSTAT (added, removed, path):"
+  cat "$tmp/numstat"
+} >"$tmp/change.full"
 
 if [ -n "$PR" ]; then
   # Optional context. A failing gh is not fatal: the stat is still scored.

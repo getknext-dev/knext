@@ -136,6 +136,38 @@ reset_stub; fixture 4 4 4 4
 OUT=$(run); rc=$?
 [ "$rc" -eq 3 ] && ! called && ok "a token in a changed PATH is not sent" || bad "path token (rc=$rc called=$(called && echo y || echo n))"
 
+echo "== a git error is NEVER an empty diff (that would score a broken run as safe) =="
+run_base() { # <base-ref>
+  ( cd "$REPO" && JEV_BIN="$FAKE" GH_BIN="$FAKE_GH" bash "$RISK" "$1" 2>&1 )
+}
+new_repo; change_small
+reset_stub; fixture 0 0 0 0
+OUT=$(run_base origin/doesnotexist); rc=$?
+[ "$rc" -eq 3 ] && ok "a nonexistent base exits 3" || bad "nonexistent base must exit 3, got $rc (out=$OUT)"
+check "...and says why (the base does not resolve)" "RISK unavailable (base ref"
+case "$OUT" in *"RISK 0.00"*) bad "a nonexistent base printed a zero risk: [$OUT]";; *) ok "...and never prints a risk";; esac
+called && bad "the stub was called for a nonexistent base" || ok "...and jev is not called"
+reset_stub
+OUT=$(cd "$TMP" && JEV_BIN="$FAKE" GH_BIN="$FAKE_GH" bash "$RISK" main 2>&1); rc=$?
+[ "$rc" -eq 3 ] && ! called && ok "outside a git repository: exits 3, no call" || bad "not a repo (rc=$rc out=$OUT)"
+# A base that resolves but shares no history with HEAD: no merge base, so no `base...HEAD`.
+git_in checkout -q --orphan unrelated; git_in rm -rfq . 2>/dev/null; echo y >"$REPO/y.txt"; git_in add -A; git_in commit -q -m unrelated
+reset_stub
+OUT=$(run_base feat); rc=$?
+[ "$rc" -eq 3 ] && ! called && echo "$OUT" | grep -qF "RISK unavailable (base ref" && ok "a base with no merge base exits 3, no call" || bad "no merge base (rc=$rc out=$OUT)"
+git_in checkout -q feat
+# A real base identical to HEAD is a genuinely empty diff: the empty-diff path, rc 0, no call.
+reset_stub; fixture 0 0 0 0
+OUT=$(run_base HEAD); rc=$?
+[ "$rc" -eq 0 ] && check "a real base identical to HEAD is the empty-diff path" "RISK 0.00 normal (empty diff, jev not called)" && ! called && ok "...with no jev call" || bad "identical base (rc=$rc out=$OUT)"
+# A failing `git diff` (bad object, killed process, repo error) must not read as "no changes".
+mkdir -p "$TMP/gitshim"; REAL_GIT=$(command -v git)
+printf '#!/usr/bin/env bash\nfor a; do [ "$a" = diff ] && exit 128; done\nexec "%s" "$@"\n' "$REAL_GIT" >"$TMP/gitshim/git"; chmod +x "$TMP/gitshim/git"
+reset_stub; fixture 0 0 0 0
+OUT=$(PATH="$TMP/gitshim:$PATH" run); rc=$?
+[ "$rc" -eq 3 ] && ! called && echo "$OUT" | grep -qF "RISK unavailable (git diff failed)" && ok "a failing git diff exits 3 with its own message, no call" || bad "git diff failure (rc=$rc out=$OUT)"
+case "$OUT" in *"RISK 0.00"*) bad "a git diff failure printed a zero risk";; *) ok "...and never prints a risk";; esac
+
 echo "== empty diff, truncation, SIGPIPE, missing lib =="
 new_repo # no changes on feat
 reset_stub; fixture 0 0 0 0
