@@ -7,7 +7,8 @@
  * — that requires the adapter to live in @getknext/core, not in one app.
  *
  * Hooks:
- *  - modifyConfig: force output:'standalone' on phase-production-build, and
+ *  - modifyConfig: default output to 'standalone' on phase-production-build
+ *    (an explicit output:'export' is left for Next to validate), and
  *    inject the edge-scoped webpack IgnorePlugin that excludes
  *    `instrumentation-node` from the EDGE bundle (#342/#356, ADR-0031) — the
  *    platform-owned half of the guarded-instrumentation fence, composed after
@@ -163,6 +164,23 @@ function imageCacheThroughHandler(
     return { images: { ...images, customCacheHandler: true } };
 }
 
+/**
+ * Whether the app explicitly asked for a static export (`output: 'export'`).
+ *
+ * `standalone` is only the DEFAULT. An explicit `export` is left untouched so
+ * Next sees it and runs its own export-time validation (for example the
+ * "Intercepting routes are not supported with static export" build error);
+ * forcing `standalone` over it hid every such check and silently deployed a
+ * server app the user did not ask for. knext deploys a Next.js server, so the
+ * CLI then refuses the resulting static export with an actionable message
+ * (`assertNotStaticExport`, run by `runProjectBuild`).
+ */
+function userAskedForStaticExport(
+    config: Parameters<NonNullable<NextAdapter["modifyConfig"]>>[0],
+): boolean {
+    return config.output === "export";
+}
+
 const adapter: NextAdapter = {
     name: "knext-adapter",
 
@@ -171,8 +189,9 @@ const adapter: NextAdapter = {
 
         console.log(`[knext-adapter] modifyConfig fired for ${phase}`);
 
-        // Ensure standalone output is set (already set in next.config.ts but we
-        // enforce it here so the adapter is self-contained in later phases).
+        // Default to standalone output (already set in next.config.ts but we
+        // set it here so the adapter is self-contained in later phases) —
+        // unless the app explicitly chose `output: 'export'`, which is left alone.
         // `output` stays PRODUCTION-BUILD-ONLY: `next dev` must not be told to
         // emit a standalone tree.
         //
@@ -214,7 +233,9 @@ const adapter: NextAdapter = {
         };
         return {
             ...withRuntimeHandler,
-            ...(isProductionBuild ? { output: "standalone" as const } : {}),
+            ...(isProductionBuild && !userAskedForStaticExport(config)
+                ? { output: "standalone" as const }
+                : {}),
             ...imageCacheThroughHandler(withRuntimeHandler),
             webpack(webpackConfig, ctx) {
                 const cfg = appWebpack
