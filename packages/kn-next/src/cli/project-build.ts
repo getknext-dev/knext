@@ -28,7 +28,10 @@ import { join } from "node:path";
 import { KNEXT_RUNTIME_ENV } from "../adapters/runtime-env";
 import { runQuiet } from "./exec";
 import { UsageError } from "./shared";
-import { assertNotStaticExport } from "./static-export-guard";
+import {
+    assertNotStaticExport,
+    assertVinextNotStaticExport,
+} from "./static-export-guard";
 import {
     assertNoBunTurbopackFragments,
     readNextConfigStrict,
@@ -300,6 +303,9 @@ export function runProjectBuild(opts: RunProjectBuildOptions): void {
 
     if (opts.requireEsm) {
         preflightEsmPackage(cwd);
+        // vinext never writes `export-detail.json`, so a static export is
+        // refused here from the config, before the slow build.
+        assertVinextNotStaticExport(cwd);
         // The vinext target: (re-)apply knext's bundled vinext fixes before
         // `vite build` sees vinext. The app's postinstall normally did this
         // already (then it is a no-op); this covers apps scaffolded before
