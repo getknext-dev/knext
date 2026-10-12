@@ -29,13 +29,12 @@ const MUTATIONS = [
   },
   {
     label: 'same-build keep broken (every window withheld)',
-    anchor: 'if (currentBuildId !== undefined && entry.buildId === currentBuildId) return entry;',
-    replacement:
-      'if (currentBuildId !== undefined && entry.buildId === currentBuildId && false) return entry;',
+    anchor: 'return !(currentBuildId !== undefined && entry.buildId === currentBuildId);',
+    replacement: 'return true;',
   },
   {
     label: 'Redis read path no longer scopes the window',
-    anchor: 'return scopeWindowToBuild(parsed, ctx);',
+    anchor: 'return scopeWindowToBuild(parsed, ctx, writerIsLive);',
     replacement: 'return parsed;',
   },
 ];
