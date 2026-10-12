@@ -94,20 +94,31 @@ jev_ge() { awk -v x="$1" -v t="$2" 'BEGIN { exit !(x + 0 >= t + 0) }'; }
 #     sending would close it (follow-up). A real hex secret of exactly 40 or 64 characters is
 #     likewise let through.
 JEV_LITERAL_RE='-----BEGIN|gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{22,}|npm_[A-Za-z0-9]{36}|(^|[^a-z0-9])sk-[A-Za-z0-9_-]{20,}|xox[bp]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|://[^/@[:space:]]+:[^/@[:space:]]+@|authorization:[[:space:]]*basic[[:space:]]+[^[:space:]]+|(authorization:[[:space:]]*|bearer[[:space:]]+)([A-Za-z]+[[:space:]]+)?([A-Za-z0-9._~+/=-]{16,}|[A-Za-z._~+/=-]*[0-9][A-Za-z0-9._~+/=-]{7,})'
-jev_has_literal_secret() {
+JEV_UNICODE_SPACES="$(printf '\302\240|\341\232\200|\342\200[\200-\212]|\342\200\257|\342\201\237|\343\200\200')"
+_jev_secret_check() { # <file>: the text, byte-exact
   # FAIL CLOSED. This check is the only thing between the text and the external jev API, so any
   # ERROR in it must read as "possibly a secret" (return 0 = skip the call), never "no secret".
   # Measured failure it closes: one non-UTF-8 byte made BSD sed (macOS) error ("illegal byte
   # sequence"), its output was empty, the entropy rule saw nothing, and the text was SENT.
   # Two layers: (1) LC_ALL=C so every byte is a valid character and invalid UTF-8 cannot error at
-  # all (the rules are ASCII-only, nothing is lost); (2) every command's status is checked -- grep
+  # all (the rules match ASCII bytes; Unicode spaces are normalised first, see below); (2) every command's status is checked -- grep
   # exits 0 match / 1 no match / 2+ error, sed 0 / non-zero -- and an error returns 0.
   # Deliberate consequence: a CLEAN text with an invalid byte is not an error under LC_ALL=C and
   # is screened normally; only a genuine failure of the check skips the call.
   local LC_ALL
   export LC_ALL=C # local yet exported: children see it, the caller's locale is restored on return
   local orig stripped runs pass rc
-  orig=$(cat) || return 0
+  # NUL: bash cannot hold a NUL in a variable and `$(...)` silently DROPS it, so `a<NUL>sk-...` would
+  # be checked as `ask-...` (the `sk-` word boundary is lost) while the file jev would be sent still
+  # has the NUL. A NUL anywhere is treated as "possible secret": skip.
+  local n_all n_nonul
+  n_all=$(wc -c <"$1") || return 0
+  n_nonul=$(tr -d '\000' <"$1" | wc -c) || return 0
+  [ "$((n_all))" -eq "$((n_nonul))" ] || return 0
+  # Unicode spaces -> ASCII space. [[:space:]] is ASCII-only under LC_ALL=C, so without this
+  # `Authorization:<NBSP>Bearer<NBSP><token>` would stop matching the header rule. U+00A0, U+1680,
+  # U+2000-200A, U+202F, U+205F, U+3000 (UTF-8 byte sequences).
+  orig=$(sed -E -e "s/$JEV_UNICODE_SPACES/ /g" "$1") || return 0
   # NO PIPELINES IN THE CHECKS: the callers run under `set -o pipefail`, and `grep -q` exits on the
   # first match while `printf` is still writing a large text, so printf dies of SIGPIPE and
   # pipefail turns a HIT into a failure: a big text with an early secret would be SENT. Here-strings
@@ -134,5 +145,20 @@ jev_has_literal_secret() {
   grep -q '[0-9]' <<<"$runs"
   rc=$?
   [ "$rc" -le 1 ] || return 0
+  return "$rc"
+}
+
+# jev_has_literal_secret — see above. Reads stdin into a temp file (byte-exact, NULs kept) and checks
+# that; any failure to do so is "possible secret".
+jev_has_literal_secret() {
+  local f rc
+  f=$(mktemp 2>/dev/null) || return 0
+  if cat >"$f"; then
+    _jev_secret_check "$f"
+    rc=$?
+  else
+    rc=0
+  fi
+  rm -f "$f"
   return "$rc"
 }
