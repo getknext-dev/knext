@@ -45,7 +45,7 @@
 // pinned by tests/runtime-image-node-env.test.ts).
 
 import { afterAll, describe, expect, it, setDefaultTimeout } from 'bun:test';
-import { type ChildProcess, spawn, spawnSync } from 'node:child_process';
+import { type ChildProcess, type ChildProcessByStdio, spawn, spawnSync } from 'node:child_process';
 import {
   existsSync,
   mkdtempSync,
@@ -56,6 +56,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import type { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { freePort } from '../apps/file-manager/e2e-support/child-ports';
 import { BUN_BIN, NODE_BIN } from './helpers/runtime-binaries';
@@ -234,7 +235,9 @@ async function bootAndTrace(runtime: 'node' | 'bun', nodeEnv: string): Promise<B
   };
   delete env.NODE_OPTIONS;
 
-  const proc = spawn(runtime === 'bun' ? BUN_BIN : NODE_BIN, args, {
+  const bin = runtime === 'bun' ? BUN_BIN : NODE_BIN;
+  if (bin === undefined) throw new Error(`no ${runtime} executable available to run the server`);
+  const proc: ChildProcessByStdio<null, Readable, Readable> = spawn(bin, args, {
     cwd: dirname(serverJs as string),
     env,
     stdio: ['ignore', 'pipe', 'pipe'],
