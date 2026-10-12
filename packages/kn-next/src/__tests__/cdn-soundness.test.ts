@@ -429,6 +429,10 @@ const RULES_CONFIG = `
   async rewrites() {
     return {
       beforeFiles: [
+        // Unconditional aliases that CHAIN into the cookie rule below (listed
+        // first: Next applies rewrites in order and keeps matching from there).
+        { source: "/alias2", destination: "/alias1" },
+        { source: "/alias1", destination: "/home" },
         { source: "/home", has: [{ type: "cookie", key: "vip" }], destination: "/dashboard" },
       ],
       afterFiles: [
@@ -486,6 +490,18 @@ async function variance(
     return { differing, cached };
 }
 
+/** An unconditional rewrite chain and NO conditional rule anywhere. */
+const CHAIN_CONTROL_CONFIG = `
+  async rewrites() {
+    return {
+      beforeFiles: [
+        { source: "/c1", destination: "/c2" },
+        { source: "/c2", destination: "/open" },
+      ],
+    };
+  },
+`;
+
 const PROXY_NO_MATCHER = `import { NextResponse } from 'next/server';
 export function proxy(request) {
   const res = NextResponse.next();
@@ -523,6 +539,10 @@ for (const runtime of ["node", "bun"] as const) {
                 const corpus: Array<[Probe, Probe]> = [
                     [{ target: "/home", ...vip }, { target: "/home" }],
                     [{ target: "/home/", ...vip }, { target: "/home/" }],
+                    // Chained rewrites: the alias itself has NO condition, but what it
+                    // reaches does.
+                    [{ target: "/alias1", ...vip }, { target: "/alias1" }],
+                    [{ target: "/alias2", ...vip }, { target: "/alias2" }],
                     [
                         { target: "/aa", headers: { "x-a": "1" } },
                         { target: "/aa" },
@@ -545,6 +565,8 @@ for (const runtime of ["node", "bun"] as const) {
                 expect(out.differing).toEqual(
                     expect.arrayContaining([
                         "/home",
+                        "/alias1",
+                        "/alias2",
                         "/aa",
                         "/fb/x?q=1",
                         "/old",
@@ -554,8 +576,44 @@ for (const runtime of ["node", "bun"] as const) {
                 expect(out.cached).toContain("/open");
                 expect(out.cached).toContain("/blog/a");
                 // The matched sources are never cached, for either visitor.
-                for (const bad of ["/home", "/home/", "/aa", "/old"]) {
+                for (const bad of [
+                    "/home",
+                    "/home/",
+                    "/alias1",
+                    "/alias2",
+                    "/aa",
+                    "/old",
+                ]) {
                     expect(out.cached, bad).not.toContain(bad);
+                }
+            } finally {
+                s.stop();
+            }
+        }, 300_000);
+    });
+
+    describe(`CDN soundness: an unconditional rewrite chain with no conditional rule (control), real Next (${runtime})`, () => {
+        it("stays edge-cacheable, and does rewrite", async () => {
+            const b = await buildFixture(
+                "cdn-soundness-app",
+                CHAIN_CONTROL_CONFIG,
+                {
+                    "proxy.js": null,
+                },
+            );
+            const recorded = JSON.parse(
+                readFileSync(
+                    join(b.serverDir, ".next", "knext-cdn-routing.json"),
+                    "utf8",
+                ),
+            );
+            expect(recorded.conditional).toEqual([]);
+            const s = await serve(b, runtime);
+            try {
+                for (const path of ["/c1", "/c2"]) {
+                    const r = await fetchRaw(s.port, path);
+                    expect(r.body, path).toContain('id="open"'); // the chain really rewrites to /open
+                    expect(isEdgeCached(r), path).toBe(true);
                 }
             } finally {
                 s.stop();

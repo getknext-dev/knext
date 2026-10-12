@@ -101,11 +101,52 @@ const ROUTING_GROUPS = [
 
 const nonEmpty = (v: unknown): boolean => Array.isArray(v) && v.length > 0;
 
+/** More conditional sources than this and the list is widened to match-all. */
+const CHAIN_CAP = 256;
+
+/** `https://api.example.com/x`: leaves the app, so it cannot reach the app's own rules. */
+const EXTERNAL_DESTINATION = /^[a-z][a-z0-9+.-]*:\/\//i;
+
+interface RoutingRule {
+    source?: unknown;
+    sourceRegex?: unknown;
+    destination?: unknown;
+    has?: unknown;
+    missing?: unknown;
+}
+
+const entryOf = (r: RoutingRule): CdnRoutingMatcher =>
+    typeof r.sourceRegex === "string"
+        ? {
+              ...(typeof r.source === "string" ? { source: r.source } : {}),
+              sourceRegex: r.sourceRegex,
+          }
+        : MATCH_ALL;
+
 /**
- * Every routing rule whose result depends on the request (`has` / `missing`).
- * `"unknown"` when the build supplied no routing output.
+ * Every routing rule whose result depends on the request, and every rewrite that
+ * can lead into one. `"unknown"` when the build supplied no routing output.
+ *
+ * Direct: a rule with a non-empty `has` / `missing` (cookie, header, query, host).
+ *
+ * Chains (Amendment 1): an UNCONDITIONAL rewrite is deterministic by URL, but if
+ * its destination can reach a conditional rule the answer depends on the request
+ * after all (`/alias -> /af`, with `/af` served differently by a cookie). So, to a
+ * fixpoint, a rewrite becomes conditional when
+ *   - its destination is static and matches a conditional source (any phase, any
+ *     number of hops), or
+ *   - its destination cannot be evaluated statically (it carries `$1` / `$name`
+ *     params) while ANY conditional rule exists, or
+ *   - a conditional source's regexp is unusable (it is assumed to be reachable).
+ * An external destination leaves the app and cannot reach its rules. Past
+ * `CHAIN_CAP` sources the list is widened to match-all. `dynamicRoutes` map a URL to
+ * a page file, not to another URL, so they are not chain edges; redirects (no
+ * `destination`) end the request.
  */
-function conditionalRoutes(routing: unknown): CdnRoutingMatcher[] | "unknown" {
+function conditionalRoutes(
+    routing: unknown,
+    basePath: string,
+): CdnRoutingMatcher[] | "unknown" {
     if (routing === null || typeof routing !== "object") return "unknown";
     const groups = routing as Record<string, unknown>;
     const names = [
@@ -116,43 +157,86 @@ function conditionalRoutes(routing: unknown): CdnRoutingMatcher[] | "unknown" {
     ];
     const out: CdnRoutingMatcher[] = [];
     const seen = new Set<string>();
+    const pending: RoutingRule[] = [];
+    const reach: RegExp[] = [];
+    let reachAll = false;
+
+    const add = (r: RoutingRule): void => {
+        const entry = entryOf(r);
+        const key = JSON.stringify(entry);
+        if (seen.has(key)) return;
+        seen.add(key);
+        out.push(entry);
+        if (typeof entry.sourceRegex !== "string" || entry === MATCH_ALL) {
+            reachAll = true;
+            return;
+        }
+        try {
+            reach.push(new RegExp(entry.sourceRegex, "i"));
+        } catch {
+            reachAll = true; // an unusable regexp is assumed reachable
+        }
+    };
+
     for (const name of names) {
         const rules = groups[name];
         if (!Array.isArray(rules)) continue;
         for (const rule of rules) {
             if (rule === null || typeof rule !== "object") continue;
-            const r = rule as {
-                source?: unknown;
-                sourceRegex?: unknown;
-                has?: unknown;
-                missing?: unknown;
-            };
-            if (!nonEmpty(r.has) && !nonEmpty(r.missing)) continue;
-            const entry: CdnRoutingMatcher =
-                typeof r.sourceRegex === "string"
-                    ? {
-                          ...(typeof r.source === "string"
-                              ? { source: r.source }
-                              : {}),
-                          sourceRegex: r.sourceRegex,
-                      }
-                    : MATCH_ALL;
-            const key = JSON.stringify(entry);
-            if (!seen.has(key)) {
-                seen.add(key);
-                out.push(entry);
+            const r = rule as RoutingRule;
+            if (nonEmpty(r.has) || nonEmpty(r.missing)) add(r);
+            else if (
+                name !== "dynamicRoutes" &&
+                typeof r.destination === "string"
+            ) {
+                pending.push(r);
             }
         }
     }
-    return out;
+
+    const reaches = (destination: string): boolean => {
+        if (EXTERNAL_DESTINATION.test(destination)) return false;
+        const path = destination.split(/[?#]/, 1)[0];
+        // Params ($1 / $name) make the target unknowable: assume the worst, but
+        // only when there is something to reach.
+        if (path.includes("$")) return out.length > 0;
+        if (reachAll) return true;
+        const variants = new Set([
+            path,
+            path.endsWith("/") ? path.slice(0, -1) : `${path}/`,
+        ]);
+        if (basePath) {
+            // The rule's regexp may or may not carry the basePath: test both forms.
+            if (path.startsWith(`${basePath}/`)) {
+                variants.add(path.slice(basePath.length));
+            } else if (path !== basePath) {
+                variants.add(`${basePath}${path}`);
+            }
+        }
+        for (const v of variants)
+            for (const re of reach) if (re.test(v)) return true;
+        return false;
+    };
+
+    for (let changed = true; changed && pending.length > 0; ) {
+        changed = false;
+        for (let k = pending.length - 1; k >= 0; k--) {
+            if (!reaches(pending[k].destination as string)) continue;
+            add(pending[k]);
+            pending.splice(k, 1);
+            changed = true;
+        }
+        if (out.length > CHAIN_CAP) return [MATCH_ALL];
+    }
+    return out.length > CHAIN_CAP ? [MATCH_ALL] : out;
 }
 
 export function buildCdnRoutingArtifact(
     ctx: CdnRoutingCtx,
 ): CdnRoutingArtifact {
-    const conditional = conditionalRoutes(ctx.routing);
     const basePath =
         typeof ctx.config.basePath === "string" ? ctx.config.basePath : "";
+    const conditional = conditionalRoutes(ctx.routing, basePath);
     const locales = ctx.config.i18n?.locales;
     const i18n = Array.isArray(locales)
         ? { locales: [...locales] }

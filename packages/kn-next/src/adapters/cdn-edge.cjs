@@ -372,6 +372,20 @@ function parseRoutingArtifact(text) {
   return { ok: true, basePath, i18n, none: false, matchers, matchAll };
 }
 
+/**
+ * The page path a pages-router data URL stands for, or `undefined` when the path
+ * is not one: `/_next/data/<id>/blog/post.json` -> `/blog/post`, `.../index.json`
+ * -> `/`, `.../blog/index.json` -> `/blog`. Whatever `<id>` is: the current build's,
+ * a stale one or a forged one (the id is never checked against the running build).
+ */
+function dataRoutePage(p) {
+  const m = /^\/_next\/data\/[^/]+\/(.*)\.json$/.exec(p);
+  if (!m) return undefined;
+  const page = '/' + m[1];
+  if (page === '/index') return '/';
+  return page.endsWith('/index') ? page.slice(0, -'/index'.length) : page;
+}
+
 /** Candidate pathnames Next might test a middleware matcher against. */
 function middlewareCandidates(raw, basePath) {
   const set = new Set();
@@ -391,15 +405,7 @@ function middlewareCandidates(raw, basePath) {
       else if (p.startsWith(basePath + '/')) add(p.slice(basePath.length));
     }
   }
-  for (const p of [...set]) {
-    const m = /^\/_next\/data\/[^/]+\/(.*)\.json$/.exec(p);
-    if (m) {
-      let page = '/' + m[1];
-      if (page === '/index') page = '/';
-      else if (page.endsWith('/index')) page = page.slice(0, -'/index'.length);
-      add(page);
-    }
-  }
+  for (const p of [...set]) add(dataRoutePage(p));
   for (const p of [...set]) {
     if (p.length > 1 && p.endsWith('/')) add(p.slice(0, -1));
     else if (p.length > 1) add(p + '/');
@@ -446,31 +452,35 @@ function sMaxAgeOf(tokens) {
 }
 
 /**
- * The paths an exclusion is tested against: the decoded path, and the same with
- * the basePath stripped, and with the locale prefix stripped too (segment-bounded;
- * the locale only when the app has i18n).
+ * The paths an exclusion is tested against. The decoded path, plus, in this order
+ * and each applied to everything found so far: the same with the basePath
+ * stripped; the page path a pages-router DATA URL stands for (`/_next/data/<id>/
+ * account.json` is the same content as `/account`); and the same with the locale
+ * prefix stripped (only when the app has i18n; segment-bounded).
  */
 function fenceCandidates(decoded, artifact) {
-  const out = [decoded];
-  if (!artifact) return out;
-  const bases = [decoded];
-  const bp = artifact.basePath;
-  if (bp && decoded.startsWith(bp + '/')) {
-    // (`/base` itself strips to `/`, which only a `/` prefix matches, and that
-    // already matches the raw path.)
-    const rest = decoded.slice(bp.length);
-    out.push(rest);
-    bases.push(rest);
-  }
-  const locales = artifact.i18n && Array.isArray(artifact.i18n.locales) ? artifact.i18n.locales : [];
-  if (locales.length > 0) {
-    const lower = locales.map((l) => String(l).toLowerCase());
-    for (const b of bases) {
-      const seg = /^\/([^/]+)(\/.*)?$/.exec(b);
-      if (seg && lower.includes(seg[1].toLowerCase())) out.push(seg[2] || '/');
+  const set = new Set([decoded]);
+  const bp = artifact ? artifact.basePath : '';
+  if (bp) {
+    for (const p of [...set]) {
+      // (`/base` itself strips to `/`, which only a `/` prefix matches, and that
+      // already matches the raw path.)
+      if (p.startsWith(bp + '/')) set.add(p.slice(bp.length));
     }
   }
-  return [...new Set(out)];
+  for (const p of [...set]) {
+    const page = dataRoutePage(p);
+    if (page !== undefined) set.add(page);
+  }
+  const locales = artifact && artifact.i18n && Array.isArray(artifact.i18n.locales) ? artifact.i18n.locales : [];
+  if (locales.length > 0) {
+    const lower = locales.map((l) => String(l).toLowerCase());
+    for (const b of [...set]) {
+      const seg = /^\/([^/]+)(\/.*)?$/.exec(b);
+      if (seg && lower.includes(seg[1].toLowerCase())) set.add(seg[2] || '/');
+    }
+  }
+  return [...set];
 }
 
 /**
