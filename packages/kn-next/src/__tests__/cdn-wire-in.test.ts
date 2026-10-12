@@ -415,6 +415,49 @@ describe("CDN wire-in of the cache handler (ADR-0068)", () => {
             expect(enqueued).toEqual([["x"]]);
         });
 
+        /** Redis configured, then the breaker opened by one faulting command. */
+        async function breakerOpen() {
+            process.env.REDIS_RETRY_COOLDOWN_MS = "60000";
+            let failGets = false;
+            await withRedis({
+                errorFor: (cmd: string) =>
+                    failGets && cmd === "get" ? "boom" : undefined,
+            });
+            const h = await handler();
+            await h.set("/p", page("x,_N_T_/p"), pageCtx);
+            failGets = true;
+            expect(await h.get("/p", { kind: "APP_PAGE" })).toBeNull();
+            failGets = false;
+            return h;
+        }
+
+        const warned = () =>
+            (
+                console.warn as unknown as { mock: { calls: unknown[][] } }
+            ).mock.calls
+                .map((c) => c.map(String).join(" "))
+                .filter((l) => l.includes("CDN purge skipped"));
+
+        it("Redis configured but the breaker open: no purge, and the skip is logged when CDN mode is on", async () => {
+            process.env.KNEXT_CDN_PROVIDER = "cloudflare";
+            const h = await breakerOpen();
+            const { enqueued } = installPurger();
+            await h.revalidateTag(["x", "_N_T_/p"]);
+            // The pod-local invalidation ran, but the shared store was not
+            // reached: other pods would refill the edge from stale Redis.
+            expect(enqueued).toEqual([]);
+            expect(warned()).toHaveLength(1);
+            expect(warned()[0]).toContain("tags=2");
+        });
+
+        it("breaker open with CDN mode off: no purge and no log line (inert)", async () => {
+            const h = await breakerOpen();
+            const { enqueued } = installPurger();
+            await h.revalidateTag("x");
+            expect(enqueued).toEqual([]);
+            expect(warned()).toEqual([]);
+        });
+
         it("the 'use cache' updateTags never purges: Next calls the singular handler for the same tags", async () => {
             await withRedis();
             const { enqueued } = installPurger();
@@ -562,6 +605,147 @@ describe("CDN wire-in of the cache handler (ADR-0068)", () => {
             const given = firstReady[0]?.redis as Any;
             const client = typeof given === "function" ? await given() : given;
             expect(client ?? null).toBeNull();
+            // Never retried: without Redis there is no first-ready purge (D7).
+            const mod = await load();
+            new mod.default({});
+            new mod.default({});
+            await settle();
+            expect(firstReady.length).toBe(1);
+        });
+
+        /**
+         * A purger stand-in with the real one's reply contract: it claims through
+         * the handler's client and reports `redis_error` on a fault, `no_redis`
+         * without a client, and a win or loss once Redis replied.
+         */
+        function claimingPurger() {
+            const attempts: string[] = [];
+            installPurger({
+                firstReady: async (buildId: string, redis: unknown) => {
+                    attempts.push(buildId);
+                    const c = (
+                        typeof redis === "function" ? await redis() : redis
+                    ) as Any;
+                    if (!c) return { purged: false, reason: "no_redis" };
+                    try {
+                        const r = await c.send("SET", [
+                            `knext:cdn:purged:p:${buildId}`,
+                            "1",
+                            "NX",
+                            "EX",
+                            "604800",
+                        ]);
+                        return r === "OK"
+                            ? { purged: true }
+                            : { purged: false, reason: "already_purged" };
+                    } catch {
+                        return { purged: false, reason: "redis_error" };
+                    }
+                },
+            });
+            return attempts;
+        }
+
+        const drain = async () => {
+            const registry = await import(
+                "../adapters/cache-write-registry.js"
+            );
+            await registry.drainCacheWrites(2000);
+            await settle();
+        };
+
+        it("a claim that faults is retried on a later construction, then never again once Redis replied", async () => {
+            process.env.REDIS_RETRY_COOLDOWN_MS = "50";
+            let fail = true;
+            const redis = await withRedis({
+                errorFor: (cmd: string, args: string[]) =>
+                    fail && cmd === "set" && args.includes("NX")
+                        ? "boom"
+                        : undefined,
+            });
+            process.env.KNEXT_BUILD_ID = "build-retry";
+            const attempts = claimingPurger();
+            const mod = await load();
+            new mod.default({});
+            await drain();
+            expect(attempts).toEqual(["build-retry"]);
+            expect(redis.strings.has("knext:cdn:purged:p:build-retry")).toBe(
+                false,
+            );
+
+            fail = false;
+            await new Promise((r) => setTimeout(r, 80)); // past the breaker cooldown
+            new mod.default({});
+            await drain();
+            expect(attempts).toEqual(["build-retry", "build-retry"]);
+            expect(redis.strings.get("knext:cdn:purged:p:build-retry")).toBe(
+                "1",
+            );
+
+            // Redis replied: done for this build in this process.
+            new mod.default({});
+            new mod.default({});
+            await drain();
+            expect(attempts).toHaveLength(2);
+        });
+
+        it("a lost claim (another pod won) is also final", async () => {
+            const redis = await withRedis();
+            redis.strings.set("knext:cdn:purged:p:build-lost", "1");
+            process.env.KNEXT_BUILD_ID = "build-lost";
+            const attempts = claimingPurger();
+            const mod = await load();
+            new mod.default({});
+            await drain();
+            new mod.default({});
+            await drain();
+            expect(attempts).toEqual(["build-lost"]);
+        });
+
+        it("never retries while the breaker is open (no hammering)", async () => {
+            process.env.REDIS_RETRY_COOLDOWN_MS = "60000";
+            await withRedis({
+                errorFor: (cmd: string, args: string[]) =>
+                    cmd === "set" && args.includes("NX") ? "boom" : undefined,
+            });
+            process.env.KNEXT_BUILD_ID = "build-open";
+            const attempts = claimingPurger();
+            const mod = await load();
+            new mod.default({});
+            await drain();
+            expect(attempts).toHaveLength(1);
+            for (let i = 0; i < 5; i++) new mod.default({});
+            await drain();
+            expect(attempts).toHaveLength(1);
+        });
+
+        it("one attempt in flight at a time: constructions during a pending claim do not start another", async () => {
+            await withRedis();
+            process.env.KNEXT_BUILD_ID = "build-inflight";
+            let release: (v: unknown) => void = () => {};
+            let calls = 0;
+            installPurger({
+                firstReady: () => {
+                    calls += 1;
+                    return new Promise((r) => {
+                        release = r;
+                    });
+                },
+            });
+            const mod = await load();
+            new mod.default({});
+            new mod.default({});
+            new mod.default({});
+            await settle();
+            expect(calls).toBe(1);
+            // A retryable outcome frees the slot for the NEXT construction.
+            release({ purged: false, reason: "redis_error" });
+            await settle();
+            new mod.default({});
+            await settle();
+            expect(calls).toBe(2);
+            release({ purged: true });
+            await settle();
         });
     });
 

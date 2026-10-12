@@ -1285,33 +1285,67 @@ function startCdnPurge(tags) {
   }
 }
 
-// Builds this process has started its first-ready purge for (D7: once per
-// process per build -- a pod-local flag alone would purge on every wake, which
-// is what the cluster-wide SET NX in `firstReadyPurge` prevents).
-const cdnFirstReadyBuilds = new Set();
+/**
+ * Say that an invalidation did not reach the shared store, so no edge purge was
+ * sent. Only in CDN mode: with no provider configured there is no purge to skip,
+ * and CDN-off must stay silent.
+ */
+function noteCdnPurgeSkipped(tagCount) {
+  if (!(process.env.KNEXT_CDN_PROVIDER ?? '').trim()) return;
+  console.warn(
+    `[CacheHandler] CDN purge skipped: Redis is configured but unreachable, so the invalidation did not reach the shared store; tags=${tagCount}; CDN pages stay stale until the edge TTL`,
+  );
+}
+
+// First-ready purge state per build id (D7: once per process per build -- a
+// pod-local flag alone would purge on every wake, which is what the cluster-wide
+// SET NX in `firstReadyPurge` prevents). `pending` while an attempt is in
+// flight, `done` once the attempt reached an outcome a retry cannot change: a
+// Redis reply (won or lost), no Redis configured, or a CDN configuration that
+// cannot purge. An attempt that faulted is forgotten, so a LATER construction
+// retries -- no timer: Next constructs this handler per request, so a pod that
+// is serving retries, and one that is idle is about to scale to zero anyway.
+const cdnFirstReady = new Map();
+
+/** Outcomes a later attempt could change: a Redis fault, or Redis configured but unreachable. */
+function cdnFirstReadyRetryable(result) {
+  const reason = result?.reason;
+  return reason === 'redis_error' || reason === 'error' || (reason === 'no_redis' && useRedis);
+}
 
 /**
- * Start the first-ready purge for the current build, once. Registered with the
- * drain registry because the claim is a Redis write; never awaited here.
+ * Start the first-ready purge for the current build. Registered with the drain
+ * registry because the claim is a Redis write; never awaited here.
  *
  * Redis is handed over as a GETTER, so with CDN mode off (or a build the
  * purger cannot purge for) the claim never touches Redis at all. The client it
  * yields routes the claim through this handler's connection and breaker, in
- * the one verb both client shapes share.
+ * the one verb both client shapes share. While the breaker is open nothing is
+ * attempted: the claim could only fail, and Redis is not to be hammered.
  */
 function startCdnFirstReady() {
   const buildId = currentBuildId;
-  if (buildId === undefined || cdnFirstReadyBuilds.has(buildId)) return;
-  cdnFirstReadyBuilds.add(buildId);
+  if (buildId === undefined || cdnFirstReady.has(buildId)) return;
+  if (useRedis && Date.now() < unhealthyUntil) return;
+  cdnFirstReady.set(buildId, 'pending');
   const redis = async () => {
     const client = await ensureConnected();
     if (!client) return null;
     return { send: (name, args) => redisCall(() => redisCommand(client, name, args)) };
   };
   try {
-    trackWrite(firstReadyPurge(buildId, { redis }).catch(() => {}));
+    const attempt = firstReadyPurge(buildId, { redis }).then(
+      (result) => {
+        if (cdnFirstReadyRetryable(result)) cdnFirstReady.delete(buildId);
+        else cdnFirstReady.set(buildId, 'done');
+      },
+      () => cdnFirstReady.delete(buildId),
+    );
+    trackWrite(attempt);
   } catch {
-    // Total by contract; a construction must never fail over the CDN.
+    // Total by contract; a construction must never fail over the CDN. A purge
+    // module that throws synchronously stays `pending`: retrying it on every
+    // request would only throw again.
   }
 }
 
@@ -1605,7 +1639,16 @@ class CacheHandler {
           return;
       }
 
-      // In-memory fallback: iterate and delete matching entries
+      // In-memory fallback: iterate and delete matching entries.
+      //
+      // Only with NO Redis configured is this the store every pod reads, so
+      // only then does it count for the edge purge (D6.7). With Redis
+      // configured but unreachable (breaker open, client unavailable) this
+      // clears one pod's memory while the SHARED entries survive: purging the
+      // edge now would let other pods refill it from stale Redis, so the purge
+      // is skipped and the edge TTL bounds the staleness (D8).
+      const reachedSharedStore = !useRedis;
+      if (!reachedSharedStore) noteCdnPurgeSkipped(tagList.length);
       for (const tag of tagList) {
         let count = 0;
         for (const [key, value] of memoryCache) {
@@ -1614,7 +1657,7 @@ class CacheHandler {
             count++;
           }
         }
-        invalidated.push(tag);
+        if (reachedSharedStore) invalidated.push(tag);
         logCacheEvent('INVALIDATE', source, `tag:${tag}`, {
           durationMs: Date.now() - startTime,
           details: `Invalidated ${count} keys`,
