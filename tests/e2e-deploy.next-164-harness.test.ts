@@ -56,7 +56,7 @@ function deploy(nextVersion: string | null, extraEnv: Record<string, string> = {
 const fs = require('node:fs');
 fs.writeFileSync(${JSON.stringify(seenServer)}, JSON.stringify({ origins: process.env.KNEXT_PUBLIC_ORIGINS ?? null }));
 const http = require('node:http');
-http.createServer((q, r) => r.end('ok')).listen(Number(process.env.PORT || 3000), process.env.HOSTNAME || '0.0.0.0');
+http.createServer((q, r) => r.end('ok')).listen(Number(process.env.PORT), process.env.HOSTNAME || '0.0.0.0');
 `;
   writeFileSync(
     join(app, 'package.json'),
