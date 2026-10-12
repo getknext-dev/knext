@@ -239,6 +239,46 @@ describe("CDN wire-in of the cache handler (ADR-0068)", () => {
             ]);
         });
 
+        it("get() of an entry stored without a tag list (an older writer) records its header tags", async () => {
+            const redis = await withRedis();
+            const h = await handler();
+            redis.strings.set(
+                "cdn-wire:cache:/legacy",
+                JSON.stringify({
+                    value: page("legacy,_N_T_/legacy"),
+                    lastModified: Date.now(),
+                }),
+            );
+            const calls = installSeam();
+            expect(await h.get("/legacy", { kind: "APP_PAGE" })).not.toBeNull();
+            expect(calls).toEqual([
+                { kind: "page", tags: ["legacy", "_N_T_/legacy"] },
+            ]);
+        });
+
+        it("with the seam absent the tag work is skipped entirely, not merely discarded", async () => {
+            const h = await handler();
+            const reads = { n: 0 };
+            const counted = () => {
+                const v = page("_N_T_/p");
+                const headers = v.headers;
+                return Object.defineProperty({ ...v }, "headers", {
+                    enumerable: true,
+                    get() {
+                        reads.n += 1;
+                        return headers;
+                    },
+                });
+            };
+            await h.set("/a", counted(), pageCtx);
+            const absent = reads.n;
+            reads.n = 0;
+            installSeam();
+            await h.set("/b", counted(), pageCtx);
+            // One more read of the entry's tags with the seam than without it.
+            expect(reads.n).toBe(absent + 1);
+        });
+
         it("get() miss records nothing", async () => {
             const calls = installSeam();
             const h = await handler();
@@ -483,6 +523,34 @@ describe("CDN wire-in of the cache handler (ADR-0068)", () => {
                 ]),
             ).toBeNull();
             expect(redis.ttls.get("knext:cdn:purged:p:build-4")).toBe(604800);
+        });
+
+        it("a claim that faults trips the handler's breaker, like any other Redis command", async () => {
+            await withRedis({
+                errorFor: (cmd: string, args: string[]) =>
+                    cmd === "set" && args.some((a) => a.toLowerCase() === "nx")
+                        ? "boom"
+                        : undefined,
+            });
+            process.env.KNEXT_BUILD_ID = "build-6";
+            const { firstReady } = installPurger();
+            const h = await handler();
+            await h.set("/p", page("_N_T_/p"), pageCtx);
+            expect(await h.get("/p", { kind: "APP_PAGE" })).not.toBeNull();
+            await settle();
+            const given = firstReady[0]?.redis as Any;
+            const client = typeof given === "function" ? await given() : given;
+            await expect(
+                client.send("SET", [
+                    "knext:cdn:purged:p:build-6",
+                    "1",
+                    "NX",
+                    "EX",
+                    "604800",
+                ]),
+            ).rejects.toThrow();
+            // Breaker open: the handler fails open to its (empty) memory store.
+            expect(await h.get("/p", { kind: "APP_PAGE" })).toBeNull();
         });
 
         it("hands the purger no client when Redis is not configured (no first-ready purge without Redis)", async () => {
