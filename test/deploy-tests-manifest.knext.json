@@ -516,5 +516,37 @@
       "category": "static-export",
       "rationale": "knext deploys a server (`output: 'standalone'`) and its adapter's modifyConfig overrides a user's `output: 'export'` (documented: the adapter forces standalone), so Next never sees `export` and its build-time validation never runs. This fixture is `{ output: 'export' }` plus an interception route and asserts `next.start()` rejects with 'Intercepting routes are not supported with static export.' (v16.4.0, test file above; smoke run 38040527044 shard 14, FAILED 3/3, 'Received promise resolved instead of rejected'). Not a Vercel-coupled assertion: Vercel's build rejects the config, knext's adapter masks it. HELD pending the API decision https://github.com/getknext-dev/knext/issues/2184 (respect output:'export' in modifyConfig?), evidence on https://github.com/getknext-dev/knext/issues/2126. If #2184 decides to respect `export`, REMOVE this entry and the rules.exclude line so the file runs and goes green."
     }
+  ],
+  "$knextUpstreamRuntimeDefects": [
+    {
+      "test": "test/e2e/app-dir/turbopack-tree-shaking-chunkgroup/turbopack-tree-shaking-chunkgroup.test.ts",
+      "lane": "bun/turbopack",
+      "nextjsRef": "v16.4.0",
+      "cases": ["builds an app-router app with tree-shaking enabled and renders"],
+      "mechanism": "The fixture sets `experimental.turbopackModuleFragments: true`. Turbopack's module-fragment chunks (here `server/chunks/ssr/node_modules_next_dist_esm_build_templates_app-page_*.js`) contain assignments to `const` bindings in code that never runs. The compiled Bun executable loads the chunk through Bun's own parser, which reports it as a parse-time error (`Cannot assign to \"e\" because it is a constant`, 12 errors), so the page fails with `ChunkLoadError`. Node defers the same assignment to a runtime TypeError that is never reached. Minimal repro: `if (process.argv[2]===\"x\") { const e = 1; e = 2 }` loads under node, exits 1 under bun 1.4.2.",
+      "evidence": "run 38181750458 (Next 16.4.0 smoke, NEXTJS_REF=v16.4.0, bun x turbopack, main f62b45eff, shard 14): FINAL 3/3, `expect($('h1').text()).toContain('tree shaking app')` Received '' (test line 10), server log `ChunkLoadError` caused by `AggregateError: 12 errors building`. Green on node x turbopack (run 38161219571), node x webpack (run 38174324666) and bun x webpack (run 38186195085).",
+      "upstream": {
+        "issue": "oven-sh/bun#45007",
+        "fix": "oven-sh/bun#45010"
+      },
+      "knextRefusal": "https://github.com/getknext-dev/knext/pull/2226 — knext refuses `experimental.turbopackModuleFragments` on the Bun runtime at build time (`next build` adapter and `doctor`), so a user cannot reach this state silently. The entry is admissible only once that refusal ships.",
+      "removeWhen": "a Bun release containing oven-sh/bun#45010 (assignment to a const becomes a runtime TypeError, not a load-time error); then delete this entry and the knext refusal in the same change, and re-run the bun x turbopack smoke cell.",
+      "provenance": "https://github.com/getknext-dev/knext/issues/2225 (filed from C2 #2162) + https://github.com/getknext-dev/knext/issues/2227 (ledger decision) + oven-sh/bun#45007. ADR-0007 amendment 2026-10-12. These files are NOT in rules.exclude: they keep running on every lane, and are green on node x turbopack, node x webpack and bun x webpack."
+    },
+    {
+      "test": "test/e2e/app-dir/treeshake-mw/mw.test.ts",
+      "lane": "bun/turbopack",
+      "nextjsRef": "v16.4.0",
+      "cases": ["builds and runs Node.js middleware importing via a star re-export"],
+      "mechanism": "Same mechanism as turbopack-tree-shaking-chunkgroup: the fixture sets `experimental.turbopackModuleFragments: true`, the Node.js-runtime middleware chunk contains a const assignment in dead code, and Bun's parser rejects it at load time (`Cannot assign to \"t\" because it is a constant`). The middleware never runs, so the `x-key` response header is absent.",
+      "evidence": "run 38181750458 (Next 16.4.0 smoke, NEXTJS_REF=v16.4.0, bun x turbopack, main f62b45eff): FINAL 3/3, `expect(res.headers.get('x-key')).toBe('k')` Received null (test line 23), server log `Cannot assign to \"t\" because it is a constant`. Green on node x turbopack (run 38161219571), node x webpack (run 38174324666) and bun x webpack (run 38186195085).",
+      "upstream": {
+        "issue": "oven-sh/bun#45007",
+        "fix": "oven-sh/bun#45010"
+      },
+      "knextRefusal": "https://github.com/getknext-dev/knext/pull/2226 — knext refuses `experimental.turbopackModuleFragments` on the Bun runtime at build time (`next build` adapter and `doctor`), so a user cannot reach this state silently. The entry is admissible only once that refusal ships.",
+      "removeWhen": "a Bun release containing oven-sh/bun#45010 (assignment to a const becomes a runtime TypeError, not a load-time error); then delete this entry and the knext refusal in the same change, and re-run the bun x turbopack smoke cell.",
+      "provenance": "https://github.com/getknext-dev/knext/issues/2225 (filed from C2 #2162) + https://github.com/getknext-dev/knext/issues/2227 (ledger decision) + oven-sh/bun#45007. ADR-0007 amendment 2026-10-12. These files are NOT in rules.exclude: they keep running on every lane, and are green on node x turbopack, node x webpack and bun x webpack."
+    }
   ]
 }

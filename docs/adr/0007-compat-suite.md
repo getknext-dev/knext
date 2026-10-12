@@ -782,6 +782,67 @@ mutation-proved by exit code (`scripts/mutation-prove-compat-vinext-structural-g
 - Review trigger: at `reviewBy`, or when vinext ships a client-router implementation,
   whichever comes first.
 
+## Amendment (2026-10-12): the upstream-runtime-defect category (a lane-scoped ledger beside §h)
+
+- Status: Accepted (lead decision, jev 0.99 against "leave an open gap" 0.01 and "raise the §h
+  cap" 0.00; tracked as #2227). Trigger-class (an ADR-0007 policy change); flagged for the
+  Sprint 3 close review.
+
+### Context
+
+The Next 16.4 smoke runs (#2162) left two files red on one cell only: `treeshake-mw` and
+`turbopack-tree-shaking-chunkgroup` on **bun x turbopack**. Both set
+`experimental.turbopackModuleFragments`. Bun's parser reports an assignment to a `const` in
+code that never runs as a load-time error, where Node defers it to a runtime TypeError
+(upstream issue oven-sh/bun#45007, fix oven-sh/bun#45010, unreleased). knext refuses that
+combination at build time (#2226).
+
+No existing category fits:
+
+| Category | Why it does not fit |
+|---|---|
+| `$knextExclusions` | Global (all lanes) and closed; a node-lane pass would be lost; no removal condition |
+| flaky quarantine | For non-deterministic failures; this one is deterministic |
+| §h vercel-infra-coupled | The cause is not Vercel's infrastructure, and the family is at its cap of 15 |
+
+### Decision
+
+Add a **separate** ledger, `$knextUpstreamRuntimeDefects`, in the credential manifest and its
+derived smoke manifest. It is a record, not a skip.
+
+| Rule | Value |
+|---|---|
+| Lane | `<node or bun>/<turbopack or webpack>`, exactly one cell. A runtime-wide lane is rejected |
+| Upstream | an issue **and** a fix, as `owner/repo#N` outside `getknext-dev` |
+| Removal condition | `removeWhen`, non-empty, and it names the upstream fix it waits for |
+| knext refusal | the build-time refusal that makes the red deliberate. The entry is admissible only once that refusal ships |
+| Evidence | cites a CI run id |
+| Cap | **5**, its own constant (`UPSTREAM_RUNTIME_DEFECT_CAP`). Raising it needs an amendment to this ADR, like the §h cap |
+| Not §h | no entry may also be in `$knextQuarantines`, so none counts toward `FAMILY_QUARANTINE_CAP` |
+| Keeps running | no entry may be dropped by `rules.exclude` or `$knextExclusions`: the file runs on every lane, so the cell keeps reporting the red |
+
+An entry counts as **triaged** under ADR-0066 D4, not as an open knext gap. It does not make
+the cell green: the cell stays red for that file by design, and any published figure says so.
+
+### Options considered
+
+| Option | Verdict |
+|---|---|
+| Raise the §h cap | Rejected: the cause is not Vercel, and a cap raised to fit one case is how a quarantine becomes a blanket skip |
+| Add to `$knextExclusions` | Rejected: global; would drop the files from the lanes where they pass |
+| Leave the gap open until the Bun release | Rejected as the only state: D4 cannot read "triaged, deliberate, has a removal condition" differently from "unexplained" |
+| **Separate, lane-scoped, capped ledger with a removal condition** | **Chosen** |
+
+### Consequences
+
+- The guards live in `tests/deploy-manifest-upstream-runtime-defects.test.ts` over
+  `tests/compat-upstream-runtime-defects.ts`. An unreadable manifest throws; it never reads as
+  an empty ledger. Each rule is mutation-proved by exit code in
+  `scripts/mutation-prove-upstream-runtime-defects.mjs`.
+- Removal is routine: when the removal condition holds, delete the entry (and the knext
+  refusal, which the entry records) in the same change and re-run the cell.
+- Not a credential and not a parity claim. It records why a red is expected, nothing more.
+
 ## Action items
 
 - **A3-1 (per-PR gate, this PR's deliverable):**
