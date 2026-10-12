@@ -52,6 +52,10 @@ import { rawRequest } from "./cdn-test-harness";
  * that changes how Next normalises a path (the Dependabot `next` PRs run this
  * file) reds here before it ships.
  *
+ * TODO(#2259): ADR-0068 also wants this run in each compat-matrix Next cell, not
+ * only at the pinned version. That is workflow wiring (a compat dispatch), left
+ * for the lead: it costs a dispatch from the compat budget.
+ *
  * NOTHING here skips: a missing precondition is a FAILURE, never a silent pass.
  */
 
