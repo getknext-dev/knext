@@ -311,6 +311,62 @@ export interface NetworkingConfig {
     publicHosts?: string[];
 }
 
+// CDN cache tier (ADR-0068): cache-correct edge headers and cache tags for a CDN
+// you run in front of the app. knext never creates or configures the CDN.
+export type CdnProvider =
+    | "cloudflare"
+    | "google-cloud-cdn"
+    | "cloudfront"
+    | "azure-front-door"
+    | "emulator";
+
+export interface CdnPurgeConfig {
+    /**
+     * The same-namespace Kubernetes Secret key holding the purge token (for
+     * Cloudflare: an API token scoped to Zone > Cache Purge on one zone). You
+     * create the Secret; knext only references it, so the token never appears in
+     * `knext.config.ts`, the NextApp or its status.
+     */
+    secretRef: { name: string; key: string };
+    /**
+     * The provider resource identifier as one opaque string (Cloudflare: the
+     * 32-hex zone id).
+     */
+    target: string;
+    /** Overrides the provider's default purge rate. 1..6000. */
+    requestsPerMinute?: number;
+}
+
+export interface CdnConfig {
+    provider: CdnProvider;
+    /**
+     * Upper bound, in seconds, on how long the edge holds an HTML, RSC or route
+     * response (1..3600, default 30). With `staleWhileRevalidateSeconds` it is
+     * also the staleness bound when a purge fails: stale HTML for at most this
+     * long, never "instant".
+     */
+    htmlTTLSeconds?: number;
+    /** Adds a stale-while-revalidate window (0..3600, default 0). */
+    staleWhileRevalidateSeconds?: number;
+    /** Path prefixes that are never edge-cached (segment-bounded). */
+    excludePaths?: string[];
+    /**
+     * Path prefixes that your middleware matches but that you want edge-cached
+     * anyway. By default a middleware-matched path is never edge-cached, since a
+     * CDN ignores cookies and would otherwise serve a protected page to anonymous
+     * visitors. LISTING A PATH HERE REMOVES THAT PROTECTION for it.
+     */
+    includePaths?: string[];
+    /** Tag purge on `revalidateTag`/`revalidatePath`. Absent means headers only. */
+    purge?: CdnPurgeConfig;
+    /**
+     * In-cluster base URL of the test-double CDN. Required with
+     * `provider: "emulator"` and not allowed otherwise; must be an http(s)
+     * `*.svc.cluster.local` URL with no path, userinfo or query.
+     */
+    emulatorEndpoint?: string;
+}
+
 // Main Knative-Next config (subset of OpenNext we support)
 export interface KnativeNextConfig {
     name: string;
@@ -460,4 +516,8 @@ export interface KnativeNextConfig {
     // an app with mutating endpoints and no auth of its own without an
     // out-of-band label the operator's next reconcile would revert.
     networking?: NetworkingConfig;
+    // CDN cache tier (ADR-0068). Omitted means no change at all: no env, no
+    // revision, the same compat-normalized headers as today. Needs an operator
+    // that knows the field: upgrade the operator/CRD first, then the CLI.
+    cdn?: CdnConfig;
 }

@@ -101,6 +101,7 @@ type NextAppSpec struct {
 	// +optional
 	// +kubebuilder:validation:XValidation:rule="self.all(k, k.matches('^[A-Za-z_][A-Za-z0-9_]*$'))",message="env var names must be C_IDENTIFIERs ([A-Za-z_][A-Za-z0-9_]*)"
 	// +kubebuilder:validation:XValidation:rule="!('HOSTNAME' in self) && !('PORT' in self) && !('K_SERVICE' in self) && !('K_REVISION' in self) && !('K_CONFIGURATION' in self)",message="env var name is reserved (HOSTNAME, PORT, K_SERVICE, K_REVISION, K_CONFIGURATION are operator/Knative-managed)"
+	// +kubebuilder:validation:XValidation:rule="!self.exists(k, k.startsWith('KNEXT_CDN_'))",message="env var names starting with KNEXT_CDN_ are reserved for the operator (set spec.cdn instead)"
 	Env map[string]string `json:"env,omitempty"`
 
 	// Observability — Prometheus metrics
@@ -230,6 +231,31 @@ type NextAppSpec struct {
 	// nil => serve the latest-ready revision (DEFAULT, byte-identical back-compat).
 	// +optional
 	Traffic *TrafficSpec `json:"traffic,omitempty"`
+
+	// CDN turns on cache-correct edge headers and cache tags for a CDN the USER
+	// runs in front of the app (ADR-0068). knext never creates, configures or
+	// reads the state of a CDN resource: the user points a CDN at the app's public
+	// hostname, and knext tells it what it may cache and under which tags.
+	//
+	// The operator renders this field as KNEXT_CDN_* environment variables and
+	// nothing else; the runtime does the rest. The tag prefix is derived by the
+	// operator from the app's namespace and name and is NOT a field, so a CR
+	// cannot choose another app's prefix. Every KNEXT_CDN_* name is reserved:
+	// spec.env and spec.secrets.envMap entries with that prefix are rejected at
+	// admission whether or not this field is set.
+	//
+	// Unset renders no variable at all, so the pod template is byte-identical to
+	// every NextApp written before this field existed and no revision is cut.
+	// Adding, changing or removing it does roll a revision. On build "vinext"
+	// (Beta) the operator renders nothing and reports an informational
+	// CDNAdvisory condition instead.
+	//
+	// Additive and optional (ADR-0017 discipline). Upgrade order is load-bearing:
+	// an operator/CRD that predates this field rejects a CR that sets it under
+	// --validate=strict, and reserves nothing under KNEXT_CDN_*, so the CLI and
+	// the runtime must come after it. Upgrade the operator/CRD first.
+	// +optional
+	CDN *CDNSpec `json:"cdn,omitempty"`
 
 	// BuildID is the deploy's Next.js BUILD_ID (issue #93 — skew protection).
 	// The CLI sets NEXT_DEPLOYMENT_ID == this value at build time, so the
@@ -462,6 +488,124 @@ type NetworkingSpec struct {
 	// +kubebuilder:validation:items:XValidation:rule="!self.matches('^0+(\\\\.0+){0,3}$')",message="publicHosts must not contain the wildcard bind address 0.0.0.0"
 	PublicHosts []string `json:"publicHosts,omitempty"`
 }
+
+// CDNSpec configures the CDN cache tier (ADR-0068).
+//
+// Two cross-field rules, both within this object (no rule may pair spec.cdn with
+// spec.build or spec.runtime):
+//   - emulatorEndpoint is allowed if and only if provider is "emulator";
+//   - when set it must be an http(s) URL of a *.svc.cluster.local host with an
+//     optional port and no path, userinfo or query, so a CR edit cannot point
+//     the runtime's purge client at an arbitrary host.
+//
+// +kubebuilder:validation:XValidation:rule="!has(self.emulatorEndpoint) || self.provider == 'emulator'",message="spec.cdn.emulatorEndpoint is only allowed with provider: emulator"
+// +kubebuilder:validation:XValidation:rule="self.provider != 'emulator' || has(self.emulatorEndpoint)",message="spec.cdn.provider: emulator requires spec.cdn.emulatorEndpoint"
+// +kubebuilder:validation:XValidation:rule="!has(self.emulatorEndpoint) || self.emulatorEndpoint.matches('^https?://[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*\\\\.svc\\\\.cluster\\\\.local(:[0-9]{1,5})?$')",message="spec.cdn.emulatorEndpoint must be http(s)://<host>.svc.cluster.local[:port] with no path, userinfo or query"
+type CDNSpec struct {
+	// Provider selects the CDN row the runtime applies: which edge-only
+	// directive header and tag header to emit, and which purge API (if any) to
+	// call. The operator treats it as an opaque value and carries no per-cloud
+	// logic. "emulator" is a Cloudflare-shaped in-cluster test double
+	// (emulatorEndpoint) and is not a product.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Enum=cloudflare;google-cloud-cdn;cloudfront;azure-front-door;emulator
+	Provider string `json:"provider"`
+
+	// HTMLTTLSeconds caps how long the edge may hold an HTML, RSC or route
+	// response: the edge max-age is min(Next's s-maxage, this value). It is also,
+	// with staleWhileRevalidateSeconds, the staleness bound when a purge fails or
+	// is rate limited: stale HTML for at most this long (plus the SWR window),
+	// never "instant". Default 30.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=3600
+	// +kubebuilder:default=30
+	HTMLTTLSeconds int32 `json:"htmlTTLSeconds,omitempty"`
+
+	// StaleWhileRevalidateSeconds adds a stale-while-revalidate window to the
+	// edge directive. It adds to the staleness bound, so it is off (0) by
+	// default.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=3600
+	StaleWhileRevalidateSeconds int32 `json:"staleWhileRevalidateSeconds,omitempty"`
+
+	// ExcludePaths lists path prefixes that are never edge-cached. A prefix
+	// covers its own path and everything below it at a segment boundary: /blog
+	// covers /blog and /blog/x, never /blogger.
+	// +optional
+	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:items:MaxLength=512
+	// +kubebuilder:validation:items:Pattern=`^/[^,\s]*$`
+	ExcludePaths []string `json:"excludePaths,omitempty"`
+
+	// IncludePaths opts path prefixes that the app's middleware matches back in
+	// to edge caching. By default a path the middleware/proxy matcher covers is
+	// never edge-cached, because a CDN ignores cookies and would otherwise serve a
+	// protected page to anonymous visitors. LISTING A PATH HERE REMOVES THAT
+	// PROTECTION for it: only list pages that are identical for every visitor.
+	// +optional
+	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:items:MaxLength=512
+	// +kubebuilder:validation:items:Pattern=`^/[^,\s]*$`
+	IncludePaths []string `json:"includePaths,omitempty"`
+
+	// Purge enables tag purge on revalidateTag/revalidatePath. Absent means
+	// headers only: staleness is then bounded by the edge TTL alone.
+	// +optional
+	Purge *CDNPurgeSpec `json:"purge,omitempty"`
+
+	// EmulatorEndpoint is the in-cluster base URL of the test-double CDN. Allowed
+	// only with provider: emulator (CEL, on this object).
+	// +optional
+	// +kubebuilder:validation:MaxLength=253
+	EmulatorEndpoint string `json:"emulatorEndpoint,omitempty"`
+}
+
+// CDNPurgeSpec configures the outbound tag-purge call. The credential is a
+// user-created, user-owned, data-plane Secret in the app's namespace; the CRD
+// holds only a reference to it (ADR-0068 D1).
+type CDNPurgeSpec struct {
+	// SecretRef names the same-namespace Secret key holding the purge token (for
+	// Cloudflare: an API token scoped to Zone > Cache Purge on one zone). The
+	// operator renders it as a secretKeyRef environment variable, so the value
+	// never appears in the CR, the revision template or the status.
+	// +kubebuilder:validation:Required
+	SecretRef CDNSecretRef `json:"secretRef"`
+
+	// Target is the provider resource identifier as one opaque string (for
+	// Cloudflare: the 32-hex zone id). The runtime row validates its format and
+	// fails closed.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9][A-Za-z0-9._:-]*$`
+	Target string `json:"target"`
+
+	// RequestsPerMinute overrides the provider row's default purge rate.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=6000
+	RequestsPerMinute int32 `json:"requestsPerMinute,omitempty"`
+}
+
+// CDNSecretRef points at one key of a Secret in the app's own namespace. There
+// is deliberately no namespace field: a cross-namespace secretKeyRef is
+// impossible in Kubernetes.
+type CDNSecretRef struct {
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	Name string `json:"name"`
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	Key string `json:"key"`
+}
+
+// CDNEnvPrefix is the reserved environment-variable prefix for the CDN runtime
+// contract (ADR-0068 D3). Every name starting with it is operator-managed.
+const CDNEnvPrefix = "KNEXT_CDN_"
 
 // DatabaseSpec is the author-facing surface of the app's database. knext is
 // engine-agnostic and provisions NO database (the managed scale-to-zero-Postgres
@@ -904,8 +1048,12 @@ type EnvMapEntry struct {
 }
 
 type SecretsSpec struct {
-	EnvFrom []string               `json:"envFrom,omitempty"`
-	EnvMap  map[string]EnvMapEntry `json:"envMap,omitempty"`
+	EnvFrom []string `json:"envFrom,omitempty"`
+	// EnvMap maps environment variable names to Secret keys. Names starting with
+	// KNEXT_CDN_ are reserved for the operator (ADR-0068) and rejected at
+	// admission, so a CR cannot supply its own CDN tag prefix, endpoint or token.
+	// +kubebuilder:validation:XValidation:rule="!self.exists(k, k.startsWith('KNEXT_CDN_'))",message="env var names starting with KNEXT_CDN_ are reserved for the operator (set spec.cdn instead)"
+	EnvMap map[string]EnvMapEntry `json:"envMap,omitempty"`
 }
 
 // NextAppStatus defines the observed state of NextApp.

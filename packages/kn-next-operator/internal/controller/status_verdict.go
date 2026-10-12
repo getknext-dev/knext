@@ -904,6 +904,23 @@ func computeStatusVerdict(
 		}
 	}
 
+	// CDNAdvisory (ADR-0068 D9/D11): informational only — Ready is untouched.
+	// Absent whenever there is nothing to say, and removed only if it was
+	// previously reported, so an app that never set spec.cdn keeps its persisted
+	// conditions byte-identical (#98).
+	prevCDN := apimeta.FindStatusCondition(app.Status.Conditions, ConditionCDNAdvisory)
+	if reason, message, ok := cdnAdvisory(app); ok {
+		v.conditions = append(v.conditions, metav1.Condition{
+			Type:               ConditionCDNAdvisory,
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: app.Generation,
+			Reason:             reason,
+			Message:            message,
+		})
+	} else if prevCDN != nil {
+		v.removeConditions = append(v.removeConditions, ConditionCDNAdvisory)
+	}
+
 	return v
 }
 

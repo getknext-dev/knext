@@ -141,6 +141,152 @@ spec:
                   url:
                     type: string
                 type: object
+              cdn:
+                description: |-
+                  CDN turns on cache-correct edge headers and cache tags for a CDN the USER
+                  runs in front of the app (ADR-0068). knext never creates, configures or
+                  reads the state of a CDN resource: the user points a CDN at the app's public
+                  hostname, and knext tells it what it may cache and under which tags.
+
+                  The operator renders this field as KNEXT_CDN_* environment variables and
+                  nothing else; the runtime does the rest. The tag prefix is derived by the
+                  operator from the app's namespace and name and is NOT a field, so a CR
+                  cannot choose another app's prefix. Every KNEXT_CDN_* name is reserved:
+                  spec.env and spec.secrets.envMap entries with that prefix are rejected at
+                  admission whether or not this field is set.
+
+                  Unset renders no variable at all, so the pod template is byte-identical to
+                  every NextApp written before this field existed and no revision is cut.
+                  Adding, changing or removing it does roll a revision. On build "vinext"
+                  (Beta) the operator renders nothing and reports an informational
+                  CDNAdvisory condition instead.
+
+                  Additive and optional (ADR-0017 discipline). Upgrade order is load-bearing:
+                  an operator/CRD that predates this field rejects a CR that sets it under
+                  --validate=strict, and reserves nothing under KNEXT_CDN_*, so the CLI and
+                  the runtime must come after it. Upgrade the operator/CRD first.
+                properties:
+                  emulatorEndpoint:
+                    description: |-
+                      EmulatorEndpoint is the in-cluster base URL of the test-double CDN. Allowed
+                      only with provider: emulator (CEL, on this object).
+                    maxLength: 253
+                    type: string
+                  excludePaths:
+                    description: |-
+                      ExcludePaths lists path prefixes that are never edge-cached. A prefix
+                      covers its own path and everything below it at a segment boundary: /blog
+                      covers /blog and /blog/x, never /blogger.
+                    items:
+                      maxLength: 512
+                      pattern: ^/[^,\s]*$
+                      type: string
+                    maxItems: 64
+                    type: array
+                  htmlTTLSeconds:
+                    default: 30
+                    description: |-
+                      HTMLTTLSeconds caps how long the edge may hold an HTML, RSC or route
+                      response: the edge max-age is min(Next's s-maxage, this value). It is also,
+                      with staleWhileRevalidateSeconds, the staleness bound when a purge fails or
+                      is rate limited: stale HTML for at most this long (plus the SWR window),
+                      never "instant". Default 30.
+                    format: int32
+                    maximum: 3600
+                    minimum: 1
+                    type: integer
+                  includePaths:
+                    description: |-
+                      IncludePaths opts path prefixes that the app's middleware matches back in
+                      to edge caching. By default a path the middleware/proxy matcher covers is
+                      never edge-cached, because a CDN ignores cookies and would otherwise serve a
+                      protected page to anonymous visitors. LISTING A PATH HERE REMOVES THAT
+                      PROTECTION for it: only list pages that are identical for every visitor.
+                    items:
+                      maxLength: 512
+                      pattern: ^/[^,\s]*$
+                      type: string
+                    maxItems: 64
+                    type: array
+                  provider:
+                    description: |-
+                      Provider selects the CDN row the runtime applies: which edge-only
+                      directive header and tag header to emit, and which purge API (if any) to
+                      call. The operator treats it as an opaque value and carries no per-cloud
+                      logic. "emulator" is a Cloudflare-shaped in-cluster test double
+                      (emulatorEndpoint) and is not a product.
+                    enum:
+                    - cloudflare
+                    - google-cloud-cdn
+                    - cloudfront
+                    - azure-front-door
+                    - emulator
+                    type: string
+                  purge:
+                    description: |-
+                      Purge enables tag purge on revalidateTag/revalidatePath. Absent means
+                      headers only: staleness is then bounded by the edge TTL alone.
+                    properties:
+                      requestsPerMinute:
+                        description: RequestsPerMinute overrides the provider row's
+                          default purge rate.
+                        format: int32
+                        maximum: 6000
+                        minimum: 1
+                        type: integer
+                      secretRef:
+                        description: |-
+                          SecretRef names the same-namespace Secret key holding the purge token (for
+                          Cloudflare: an API token scoped to Zone > Cache Purge on one zone). The
+                          operator renders it as a secretKeyRef environment variable, so the value
+                          never appears in the CR, the revision template or the status.
+                        properties:
+                          key:
+                            maxLength: 253
+                            minLength: 1
+                            type: string
+                          name:
+                            maxLength: 253
+                            minLength: 1
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
+                      target:
+                        description: |-
+                          Target is the provider resource identifier as one opaque string (for
+                          Cloudflare: the 32-hex zone id). The runtime row validates its format and
+                          fails closed.
+                        maxLength: 128
+                        minLength: 1
+                        pattern: ^[A-Za-z0-9][A-Za-z0-9._:-]*$
+                        type: string
+                    required:
+                    - secretRef
+                    - target
+                    type: object
+                  staleWhileRevalidateSeconds:
+                    description: |-
+                      StaleWhileRevalidateSeconds adds a stale-while-revalidate window to the
+                      edge directive. It adds to the staleness bound, so it is off (0) by
+                      default.
+                    format: int32
+                    maximum: 3600
+                    minimum: 0
+                    type: integer
+                required:
+                - provider
+                type: object
+                x-kubernetes-validations:
+                - message: 'spec.cdn.emulatorEndpoint is only allowed with provider:
+                    emulator'
+                  rule: '!has(self.emulatorEndpoint) || self.provider == ''emulator'''
+                - message: 'spec.cdn.provider: emulator requires spec.cdn.emulatorEndpoint'
+                  rule: self.provider != 'emulator' || has(self.emulatorEndpoint)
+                - message: spec.cdn.emulatorEndpoint must be http(s)://<host>.svc.cluster.local[:port]
+                    with no path, userinfo or query
+                  rule: '!has(self.emulatorEndpoint) || self.emulatorEndpoint.matches(''^https?://[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*\\.svc\\.cluster\\.local(:[0-9]{1,5})?$'')'
               database:
                 description: |-
                   Database binds an EXISTING database to the app (ADR-0019). knext is
@@ -218,6 +364,9 @@ spec:
                   rule: '!(''HOSTNAME'' in self) && !(''PORT'' in self) && !(''K_SERVICE''
                     in self) && !(''K_REVISION'' in self) && !(''K_CONFIGURATION''
                     in self)'
+                - message: env var names starting with KNEXT_CDN_ are reserved for
+                    the operator (set spec.cdn instead)
+                  rule: '!self.exists(k, k.startsWith(''KNEXT_CDN_''))'
               healthCheckPath:
                 description: 'Custom health check path (default: /api/health)'
                 type: string
@@ -743,7 +892,15 @@ spec:
                       - secretKey
                       - secretName
                       type: object
+                    description: |-
+                      EnvMap maps environment variable names to Secret keys. Names starting with
+                      KNEXT_CDN_ are reserved for the operator (ADR-0068) and rejected at
+                      admission, so a CR cannot supply its own CDN tag prefix, endpoint or token.
                     type: object
+                    x-kubernetes-validations:
+                    - message: env var names starting with KNEXT_CDN_ are reserved
+                        for the operator (set spec.cdn instead)
+                      rule: '!self.exists(k, k.startsWith(''KNEXT_CDN_''))'
                 type: object
               security:
                 description: Security controls defense-in-depth network/auth hardening

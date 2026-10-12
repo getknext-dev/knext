@@ -1,0 +1,594 @@
+{
+  "_comment": "Shared by the CLI validate-cdn test and the operator envtest (cdn_envtest_test.go): one boundary table, two validators, so a bound that exists in only one of them reds a suite.",
+  "cases": [
+    {
+      "name": "minimal cloudflare",
+      "valid": true,
+      "cdn": {
+        "provider": "cloudflare"
+      }
+    },
+    {
+      "name": "google-cloud-cdn",
+      "valid": true,
+      "cdn": {
+        "provider": "google-cloud-cdn"
+      }
+    },
+    {
+      "name": "cloudfront",
+      "valid": true,
+      "cdn": {
+        "provider": "cloudfront"
+      }
+    },
+    {
+      "name": "azure-front-door",
+      "valid": true,
+      "cdn": {
+        "provider": "azure-front-door"
+      }
+    },
+    {
+      "name": "unknown provider",
+      "valid": false,
+      "cdn": {
+        "provider": "fastly"
+      }
+    },
+    {
+      "name": "ttl lower bound 1",
+      "valid": true,
+      "cdn": {
+        "provider": "cloudflare",
+        "htmlTTLSeconds": 1
+      }
+    },
+    {
+      "name": "ttl upper bound 3600",
+      "valid": true,
+      "cdn": {
+        "provider": "cloudflare",
+        "htmlTTLSeconds": 3600
+      }
+    },
+    {
+      "name": "ttl over 3600",
+      "valid": false,
+      "cdn": {
+        "provider": "cloudflare",
+        "htmlTTLSeconds": 3601
+      }
+    },
+    {
+      "name": "ttl negative",
+      "valid": false,
+      "cdn": {
+        "provider": "cloudflare",
+        "htmlTTLSeconds": -1
+      }
+    },
+    {
+      "name": "swr zero",
+      "valid": true,
+      "cdn": {
+        "provider": "cloudflare",
+        "staleWhileRevalidateSeconds": 0
+      }
+    },
+    {
+      "name": "swr upper bound 3600",
+      "valid": true,
+      "cdn": {
+        "provider": "cloudflare",
+        "staleWhileRevalidateSeconds": 3600
+      }
+    },
+    {
+      "name": "swr over 3600",
+      "valid": false,
+      "cdn": {
+        "provider": "cloudflare",
+        "staleWhileRevalidateSeconds": 3601
+      }
+    },
+    {
+      "name": "excludePaths valid prefixes",
+      "valid": true,
+      "cdn": {
+        "provider": "cloudflare",
+        "excludePaths": [
+          "/account",
+          "/a/b",
+          "/"
+        ]
+      }
+    },
+    {
+      "name": "excludePaths without leading slash",
+      "valid": false,
+      "cdn": {
+        "provider": "cloudflare",
+        "excludePaths": [
+          "account"
+        ]
+      }
+    },
+    {
+      "name": "excludePaths with comma",
+      "valid": false,
+      "cdn": {
+        "provider": "cloudflare",
+        "excludePaths": [
+          "/a,/b"
+        ]
+      }
+    },
+    {
+      "name": "excludePaths with space",
+      "valid": false,
+      "cdn": {
+        "provider": "cloudflare",
+        "excludePaths": [
+          "/a b"
+        ]
+      }
+    },
+    {
+      "name": "excludePaths entry 512 chars",
+      "valid": true,
+      "cdn": {
+        "provider": "cloudflare",
+        "excludePaths": [
+          "/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ]
+      }
+    },
+    {
+      "name": "excludePaths entry 513 chars",
+      "valid": false,
+      "cdn": {
+        "provider": "cloudflare",
+        "excludePaths": [
+          "/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ]
+      }
+    },
+    {
+      "name": "excludePaths 64 entries",
+      "valid": true,
+      "cdn": {
+        "provider": "cloudflare",
+        "excludePaths": [
+          "/p0",
+          "/p1",
+          "/p2",
+          "/p3",
+          "/p4",
+          "/p5",
+          "/p6",
+          "/p7",
+          "/p8",
+          "/p9",
+          "/p10",
+          "/p11",
+          "/p12",
+          "/p13",
+          "/p14",
+          "/p15",
+          "/p16",
+          "/p17",
+          "/p18",
+          "/p19",
+          "/p20",
+          "/p21",
+          "/p22",
+          "/p23",
+          "/p24",
+          "/p25",
+          "/p26",
+          "/p27",
+          "/p28",
+          "/p29",
+          "/p30",
+          "/p31",
+          "/p32",
+          "/p33",
+          "/p34",
+          "/p35",
+          "/p36",
+          "/p37",
+          "/p38",
+          "/p39",
+          "/p40",
+          "/p41",
+          "/p42",
+          "/p43",
+          "/p44",
+          "/p45",
+          "/p46",
+          "/p47",
+          "/p48",
+          "/p49",
+          "/p50",
+          "/p51",
+          "/p52",
+          "/p53",
+          "/p54",
+          "/p55",
+          "/p56",
+          "/p57",
+          "/p58",
+          "/p59",
+          "/p60",
+          "/p61",
+          "/p62",
+          "/p63"
+        ]
+      }
+    },
+    {
+      "name": "excludePaths 65 entries",
+      "valid": false,
+      "cdn": {
+        "provider": "cloudflare",
+        "excludePaths": [
+          "/p0",
+          "/p1",
+          "/p2",
+          "/p3",
+          "/p4",
+          "/p5",
+          "/p6",
+          "/p7",
+          "/p8",
+          "/p9",
+          "/p10",
+          "/p11",
+          "/p12",
+          "/p13",
+          "/p14",
+          "/p15",
+          "/p16",
+          "/p17",
+          "/p18",
+          "/p19",
+          "/p20",
+          "/p21",
+          "/p22",
+          "/p23",
+          "/p24",
+          "/p25",
+          "/p26",
+          "/p27",
+          "/p28",
+          "/p29",
+          "/p30",
+          "/p31",
+          "/p32",
+          "/p33",
+          "/p34",
+          "/p35",
+          "/p36",
+          "/p37",
+          "/p38",
+          "/p39",
+          "/p40",
+          "/p41",
+          "/p42",
+          "/p43",
+          "/p44",
+          "/p45",
+          "/p46",
+          "/p47",
+          "/p48",
+          "/p49",
+          "/p50",
+          "/p51",
+          "/p52",
+          "/p53",
+          "/p54",
+          "/p55",
+          "/p56",
+          "/p57",
+          "/p58",
+          "/p59",
+          "/p60",
+          "/p61",
+          "/p62",
+          "/p63",
+          "/p64"
+        ]
+      }
+    },
+    {
+      "name": "includePaths valid",
+      "valid": true,
+      "cdn": {
+        "provider": "cloudflare",
+        "includePaths": [
+          "/blog"
+        ]
+      }
+    },
+    {
+      "name": "includePaths with comma",
+      "valid": false,
+      "cdn": {
+        "provider": "cloudflare",
+        "includePaths": [
+          "/a,/b"
+        ]
+      }
+    },
+    {
+      "name": "includePaths without leading slash",
+      "valid": false,
+      "cdn": {
+        "provider": "cloudflare",
+        "includePaths": [
+          "blog"
+        ]
+      }
+    },
+    {
+      "name": "purge valid",
+      "valid": true,
+      "cdn": {
+        "provider": "cloudflare",
+        "purge": {
+          "secretRef": {
+            "name": "cdn-purge",
+            "key": "token"
+          },
+          "target": "0123456789abcdef0123456789abcdef"
+        }
+      }
+    },
+    {
+      "name": "purge with requestsPerMinute 1",
+      "valid": true,
+      "cdn": {
+        "provider": "cloudflare",
+        "purge": {
+          "secretRef": {
+            "name": "cdn-purge",
+            "key": "token"
+          },
+          "target": "0123456789abcdef0123456789abcdef",
+          "requestsPerMinute": 1
+        }
+      }
+    },
+    {
+      "name": "purge with requestsPerMinute 6000",
+      "valid": true,
+      "cdn": {
+        "provider": "cloudflare",
+        "purge": {
+          "secretRef": {
+            "name": "cdn-purge",
+            "key": "token"
+          },
+          "target": "0123456789abcdef0123456789abcdef",
+          "requestsPerMinute": 6000
+        }
+      }
+    },
+    {
+      "name": "purge requestsPerMinute 6001",
+      "valid": false,
+      "cdn": {
+        "provider": "cloudflare",
+        "purge": {
+          "secretRef": {
+            "name": "cdn-purge",
+            "key": "token"
+          },
+          "target": "0123456789abcdef0123456789abcdef",
+          "requestsPerMinute": 6001
+        }
+      }
+    },
+    {
+      "name": "purge requestsPerMinute negative",
+      "valid": false,
+      "cdn": {
+        "provider": "cloudflare",
+        "purge": {
+          "secretRef": {
+            "name": "cdn-purge",
+            "key": "token"
+          },
+          "target": "0123456789abcdef0123456789abcdef",
+          "requestsPerMinute": -1
+        }
+      }
+    },
+    {
+      "name": "purge target with path traversal",
+      "valid": false,
+      "cdn": {
+        "provider": "cloudflare",
+        "purge": {
+          "secretRef": {
+            "name": "cdn-purge",
+            "key": "token"
+          },
+          "target": "a/../b"
+        }
+      }
+    },
+    {
+      "name": "purge target with space",
+      "valid": false,
+      "cdn": {
+        "provider": "cloudflare",
+        "purge": {
+          "secretRef": {
+            "name": "cdn-purge",
+            "key": "token"
+          },
+          "target": "a b"
+        }
+      }
+    },
+    {
+      "name": "purge target empty",
+      "valid": false,
+      "cdn": {
+        "provider": "cloudflare",
+        "purge": {
+          "secretRef": {
+            "name": "cdn-purge",
+            "key": "token"
+          },
+          "target": ""
+        }
+      }
+    },
+    {
+      "name": "purge target 128 chars",
+      "valid": true,
+      "cdn": {
+        "provider": "cloudflare",
+        "purge": {
+          "secretRef": {
+            "name": "cdn-purge",
+            "key": "token"
+          },
+          "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      }
+    },
+    {
+      "name": "purge target 129 chars",
+      "valid": false,
+      "cdn": {
+        "provider": "cloudflare",
+        "purge": {
+          "secretRef": {
+            "name": "cdn-purge",
+            "key": "token"
+          },
+          "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      }
+    },
+    {
+      "name": "purge secretRef name empty",
+      "valid": false,
+      "cdn": {
+        "provider": "cloudflare",
+        "purge": {
+          "secretRef": {
+            "name": "",
+            "key": "token"
+          },
+          "target": "0123456789abcdef0123456789abcdef"
+        }
+      }
+    },
+    {
+      "name": "purge secretRef key empty",
+      "valid": false,
+      "cdn": {
+        "provider": "cloudflare",
+        "purge": {
+          "secretRef": {
+            "name": "cdn-purge",
+            "key": ""
+          },
+          "target": "0123456789abcdef0123456789abcdef"
+        }
+      }
+    },
+    {
+      "name": "emulator with in-cluster endpoint",
+      "valid": true,
+      "cdn": {
+        "provider": "emulator",
+        "emulatorEndpoint": "http://cdn-emulator.e2e.svc.cluster.local:8080"
+      }
+    },
+    {
+      "name": "emulator https without port",
+      "valid": true,
+      "cdn": {
+        "provider": "emulator",
+        "emulatorEndpoint": "https://cdn-emulator.e2e.svc.cluster.local"
+      }
+    },
+    {
+      "name": "emulator without endpoint",
+      "valid": false,
+      "cdn": {
+        "provider": "emulator"
+      }
+    },
+    {
+      "name": "endpoint on a real provider",
+      "valid": false,
+      "cdn": {
+        "provider": "cloudflare",
+        "emulatorEndpoint": "http://cdn-emulator.e2e.svc.cluster.local:8080"
+      }
+    },
+    {
+      "name": "emulator endpoint external host",
+      "valid": false,
+      "cdn": {
+        "provider": "emulator",
+        "emulatorEndpoint": "http://example.com"
+      }
+    },
+    {
+      "name": "emulator endpoint with path",
+      "valid": false,
+      "cdn": {
+        "provider": "emulator",
+        "emulatorEndpoint": "http://cdn.e2e.svc.cluster.local/path"
+      }
+    },
+    {
+      "name": "emulator endpoint with userinfo",
+      "valid": false,
+      "cdn": {
+        "provider": "emulator",
+        "emulatorEndpoint": "http://user:pw@cdn.e2e.svc.cluster.local"
+      }
+    },
+    {
+      "name": "emulator endpoint with query",
+      "valid": false,
+      "cdn": {
+        "provider": "emulator",
+        "emulatorEndpoint": "http://cdn.e2e.svc.cluster.local?x=1"
+      }
+    },
+    {
+      "name": "emulator endpoint suffix attack",
+      "valid": false,
+      "cdn": {
+        "provider": "emulator",
+        "emulatorEndpoint": "http://cdn.e2e.svc.cluster.local.evil.com"
+      }
+    },
+    {
+      "name": "emulator endpoint wrong scheme",
+      "valid": false,
+      "cdn": {
+        "provider": "emulator",
+        "emulatorEndpoint": "ftp://cdn.e2e.svc.cluster.local"
+      }
+    },
+    {
+      "name": "emulator endpoint loopback ip",
+      "valid": false,
+      "cdn": {
+        "provider": "emulator",
+        "emulatorEndpoint": "http://127.0.0.1:8080"
+      }
+    }
+  ]
+}

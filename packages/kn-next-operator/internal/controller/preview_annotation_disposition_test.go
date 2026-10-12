@@ -292,6 +292,21 @@ func maximalWarmScheduleSpec() appsv1alpha1.NextAppSpec {
 			Visibility:  appsv1alpha1.VisibilityClusterLocal,
 			PublicHosts: []string{"www.example.com"},
 		},
+		// spec.cdn renders KNEXT_CDN_* container env, also outside both scans in
+		// this file, and likewise only needs non-zero values here.
+		CDN: &appsv1alpha1.CDNSpec{
+			Provider:                    "emulator",
+			HTMLTTLSeconds:              45,
+			StaleWhileRevalidateSeconds: 10,
+			ExcludePaths:                []string{"/account"},
+			IncludePaths:                []string{"/blog"},
+			Purge: &appsv1alpha1.CDNPurgeSpec{
+				SecretRef:         appsv1alpha1.CDNSecretRef{Name: "cdn-purge", Key: "token"},
+				Target:            "0123456789abcdef0123456789abcdef",
+				RequestsPerMinute: 20,
+			},
+			EmulatorEndpoint: "http://cdn-emulator.e2e.svc.cluster.local:8080",
+		},
 	}
 }
 
