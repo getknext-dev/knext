@@ -36,6 +36,21 @@ describe("cdn-purge tag encoding (ADR-0068 D5.2)", () => {
         );
     });
 
+    it("meets the vectors the CDN-1 header encoder pins, so the two sides cannot drift", async () => {
+        const t = await import(TAGS);
+        expect([
+            t.appTag(P),
+            t.buildTag(P, "build-xyz"),
+            t.nextTag(P, "_N_T_/blog"),
+            t.nextTag(P, "posts"),
+        ]).toEqual([
+            "kn-abcdef012345",
+            "kn-abcdef012345-bf1adbc6c3c0e",
+            "kn-abcdef012345-tf015a2ba450e9cbd",
+            "kn-abcdef012345-ta44f1b9751711635",
+        ]);
+    });
+
     it("every encoded tag is ASCII lowercase, comma-free, and within Google's 120 bytes", async () => {
         const t = await import(TAGS);
         const hostile = ["x".repeat(256), "a,b", "ü", "A B\n", ""];

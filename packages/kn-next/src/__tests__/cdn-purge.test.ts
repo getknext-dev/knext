@@ -421,8 +421,11 @@ describe("missing credential is fail-closed and invisible to the request path (A
         const h = await harness(env, {
             log: { info: boom, warn: boom, error: boom },
         });
-        expect(() => h.purger.enqueue(["a"])).not.toThrow();
+        // The skip is still reported as what it was ("error" would mean the
+        // logger's failure escaped the logging helper and was caught upstream).
+        expect(h.purger.enqueue(["a"]).skipped).toBe("no_credential");
         await expect(h.purger.flush()).resolves.toBeUndefined();
+        expect(h.count("cloudflare", "skipped_no_credential")).toBe(1);
     });
 
     it("a metrics sink that throws cannot reach the request path or stop the purge", async () => {
