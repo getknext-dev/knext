@@ -85,7 +85,7 @@ describe('next-minor matrix (#2286)', () => {
       (s) =>
         s.run?.includes('bun add') && Object.values(s.env ?? {}).includes('${{ matrix.next }}'),
     );
-    const run = steps.findIndex((s) => s.run?.includes('bun test'));
+    const run = steps.findIndex((s) => s.run?.includes('scripts/bun-test.mjs'));
     expect(install).toBeGreaterThan(-1);
     expect(run).toBeGreaterThan(install);
     for (const spec of SPECS) expect(steps[run].run).toContain(spec);

@@ -115,11 +115,12 @@ jobs:
           echo "installed next: ${installed} (wanted ${NEXT_VERSION})"
           test "${installed}" = "${NEXT_VERSION}"
 
+      # One bun process per file (scripts/bun-test.mjs): bun module mocks leak across
+      # files in a single process, and these specs were written to be isolated.
       - name: Cache-handler specs
-        working-directory: packages/kn-next
         run: >
-          bun test
-          src/__tests__/cache-handler-next-stale-after-wake.test.ts
-          src/__tests__/cache-handler-next-cache-controls-missing.test.ts
-          src/__tests__/cache-handler-ppr-build-scope.test.ts
-          src/__tests__/cache-handler-isr-staleness.test.ts
+          node scripts/bun-test.mjs
+          packages/kn-next/src/__tests__/cache-handler-next-stale-after-wake.test.ts
+          packages/kn-next/src/__tests__/cache-handler-next-cache-controls-missing.test.ts
+          packages/kn-next/src/__tests__/cache-handler-ppr-build-scope.test.ts
+          packages/kn-next/src/__tests__/cache-handler-isr-staleness.test.ts
