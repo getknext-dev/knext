@@ -1,0 +1,327 @@
+name: use cache — two-pod kind e2e (shared Redis cacheHandlers)
+
+# Proof lane for the shared `'use cache'` backend: two pods of ONE Knative
+# Service, behind ONE real Redis, share a `'use cache'` entry and its tag
+# invalidation. Next 16.4 runs `'use cache'` through `cacheHandlers` (plural), a
+# different option from the singular `cacheHandler` that serves ISR; before the
+# adapter wired it, `'use cache'` was a silent per-process no-op on every knext
+# app (the scaffold sets `cacheMaxMemorySize: 0`).
+#
+# Everything is the shipped path: the packed tarballs (the bytes `npm publish`
+# ships), the real `kn-next deploy`, and the operator built from this commit.
+# The fixture app (packages/kn-next/src/__tests__/fixtures/use-cache-kind-app) is
+# the shape of a stock scaffold with Cache Components on: the singular
+# `cacheHandler`, `cacheMaxMemorySize: 0`, the knext adapter, and NO
+# `cacheHandlers` — the adapter wires those itself.
+#
+# What scripts/use-cache-2pod-e2e-assert.sh asserts, every request pinned to ONE
+# pod through `kubectl port-forward pod/<name>` (never the load-balanced Service):
+#   1. pod A builds the cached value once and serves it twice;
+#   2. pod B serves POD A's entry (same nonce, built by A) and its own
+#      build counter does not move, i.e. no recompute;
+#   3. the entry sits in Redis under knext's `<prefix>:uc:default:*` namespace;
+#   4. `revalidateTag` through pod A makes pod B build fresh data, and pod A then
+#      reads pod B's regenerated entry without building;
+#   5. the mutating route answers 401 without the Bearer token.
+#
+# Teeth, proved by exit code in this lane (a guard that stays green when its
+# subject is removed is decoration):
+#   - variant `shared`: after the passing run, the same assertions run again with
+#     the shared store removed mid-run (UC_MUTATE_FLUSH=1: Redis flushed between
+#     A's fill and B's read) and MUST exit non-zero at the "pod B did not serve
+#     pod A's entry" assertion;
+#   - variant `no-handler` (expected red): the app is BUILT without the knext
+#     `cacheHandler` (the pre-fix wiring), so Next keeps its no-op `'use cache'`
+#     handler; the assertions MUST exit non-zero at "pod A recomputed".
+#
+# Triggers: path-filtered PR plus manual dispatch, like the other kind lanes that
+# guard one subsystem; the filters cover the handlers, the adapter wiring that
+# selects them, the fixture and this lane's own files. No schedule and no push
+# trigger. Non-required: nothing in branch protection names this job. Ephemeral
+# kind on the runner only — never OKE/GKE.
+
+on:
+  pull_request:
+    paths:
+      - 'packages/kn-next/src/adapters/use-cache-handler*.js'
+      - 'packages/kn-next/src/adapters/cache-handler*.js'
+      - 'packages/kn-next/src/adapters/next-adapter.ts'
+      - 'packages/kn-next/src/__tests__/fixtures/use-cache-kind-app/**'
+      - 'scripts/use-cache-2pod-e2e-assert.sh'
+      - '.github/workflows/use-cache-2pod-kind-e2e.yml'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  use-cache-2pod-e2e:
+    name: ${{ matrix.runtime }} (${{ matrix.variant }}) two pods share 'use cache' through kn-next deploy on kind
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runtime: node, variant: shared }
+          - { runtime: bun, variant: shared }
+          # Expected red: built without the knext cacheHandler (see header).
+          - { runtime: node, variant: no-handler }
+    env:
+      CLUSTER: use-cache-2pod
+      APP_NS: use-cache-2pod
+      APP_NAME: use-cache-2pod
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Route Docker Hub pulls through mirror.gcr.io (anonymous rate limit)
+        id: docker-hub-mirror
+        uses: ./.github/actions/docker-hub-mirror
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: packages/kn-next-operator/go.mod
+          cache-dependency-path: packages/kn-next-operator/go.sum
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+
+      - name: Setup bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
+
+      - name: Install kind
+        uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
+        with:
+          install_only: true
+
+      - name: Install workspace dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build the workspace packages + the kn-next CLI
+        run: |
+          set -euo pipefail
+          bun run --filter "@getknext/lib" build
+          bun run --filter "@getknext/db" build
+          bun run --filter "@getknext/core" build
+          test -f packages/kn-next/dist/cli/kn-next.js
+
+      # The same shared packer `release.yml`'s `pack` job uses: `npm pack`, the
+      # tool `changeset publish` shells to, so this lane installs the bytes that
+      # ship (and a published @getknext/core carries the `use-cache-handler-*`
+      # entries the adapter resolves).
+      - name: Pack knext tarballs (npm pack — the real publish tool)
+        run: |
+          set -euo pipefail
+          DEST="${RUNNER_TEMP}/knext-tarballs"
+          node scripts/pack-release-tarballs.mjs --dest "${DEST}" \
+            --dirs packages/lib,packages/db,packages/kn-next
+          ls -la "${DEST}"
+          echo "TARBALLS_DIR=${DEST}" >> "$GITHUB_ENV"
+
+      # Staged OUTSIDE the repo (a real app is its own project dir). The Docker
+      # build context IS this directory, and Dockerfile.standalone COPYs `public`
+      # and `node_modules/@getknext/core` unconditionally, so both are staged.
+      - name: Stage the fixture app outside the repo + install its own dependencies
+        run: |
+          set -euo pipefail
+          APP_DIR="${RUNNER_TEMP}/use-cache-app"
+          cp -R packages/kn-next/src/__tests__/fixtures/use-cache-kind-app "$APP_DIR"
+          cd "$APP_DIR"
+          cat > knext.config.ts <<EOF
+          const config = {
+            name: "${APP_NAME}",
+            runtime: "${{ matrix.runtime }}",
+            registry: "localhost:5001",
+            healthCheckPath: "/api/health",
+            // ONE real Redis for both pods: the CR carries it as the app's
+            // REDIS_URL, which knext's handler reads.
+            cache: {
+              provider: "redis",
+              url: "redis://redis.${APP_NS}.svc.cluster.local.:6379",
+            },
+            // Two pods up without traffic, so the test never races a scale-up.
+            scaling: { minScale: 2, maxScale: 2, memoryRequest: "256Mi", memoryLimit: "512Mi" },
+            secrets: { envFrom: ["${APP_NAME}-credentials"] },
+          };
+          export default config;
+          EOF
+          bun install
+          node -e "const v=require('./node_modules/next/package.json').version; if (v !== '16.4.0') { console.error('next is ' + v); process.exit(1) }"
+          mkdir -p public
+          LIB_TGZ="$(find "${TARBALLS_DIR}" -maxdepth 1 -name 'getknext-lib-*.tgz' | sort | tail -n1)"
+          DB_TGZ="$(find "${TARBALLS_DIR}" -maxdepth 1 -name 'getknext-db-*.tgz' | sort | tail -n1)"
+          CORE_TGZ="$(find "${TARBALLS_DIR}" -maxdepth 1 -name 'getknext-core-*.tgz' | sort | tail -n1)"
+          npm install --no-save --no-audit --no-fund "${LIB_TGZ}" "${DB_TGZ}" "${CORE_TGZ}"
+          test -d node_modules/@getknext/core
+          echo "APP_DIR=$APP_DIR" >> "$GITHUB_ENV"
+          echo "DEPLOY_TAG=uc${GITHUB_RUN_ID}-${{ matrix.runtime }}-${{ matrix.variant }}" >> "$GITHUB_ENV"
+
+      - name: Create kind cluster (registry certs.d config_path)
+        run: |
+          set -euo pipefail
+          cat <<'YAML' | kind create cluster --name "$CLUSTER" --wait 120s --config=-
+          kind: Cluster
+          apiVersion: kind.x-k8s.io/v1alpha4
+          containerdConfigPatches:
+          - |-
+            [plugins."io.containerd.grpc.v1.cri".registry]
+              config_path = "/etc/containerd/certs.d"
+          YAML
+
+      - name: Start in-cluster registry + wire the kind node to it
+        run: |
+          set -euo pipefail
+          reg=kind-registry
+          docker run -d --restart=always -p 127.0.0.1:5001:5000 --name "$reg" \
+            registry:2.8.3@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
+          docker network connect kind "$reg"
+          node="${CLUSTER}-control-plane"
+          docker exec "$node" mkdir -p /etc/containerd/certs.d/localhost:5001
+          printf '[host."http://%s:5000"]\n' "$reg" \
+            | docker exec -i "$node" cp /dev/stdin /etc/containerd/certs.d/localhost:5001/hosts.toml
+
+      - name: Install cert-manager
+        run: |
+          set -euo pipefail
+          scripts/kind-manifests/apply-cert-manager.sh
+          kubectl wait --for=condition=Available --timeout=300s \
+            -n cert-manager deployment/cert-manager deployment/cert-manager-webhook deployment/cert-manager-cainjector
+
+      - name: Install Knative Serving + Kourier
+        run: |
+          set -euo pipefail
+          V="knative-v1.16.0"
+          scripts/kind-manifests/apply-knative-kourier.sh "${V}"
+          kubectl patch configmap/config-network -n knative-serving --type merge \
+            --patch '{"data":{"ingress-class":"kourier.ingress.networking.knative.dev"}}'
+          kubectl wait --for=condition=Available --timeout=300s \
+            -n knative-serving deployment/controller deployment/webhook deployment/autoscaler deployment/net-kourier-controller
+
+      - name: Build + deploy the operator from this commit
+        working-directory: packages/kn-next-operator
+        run: |
+          set -euo pipefail
+          IMG=example.com/kn-next-operator:e2e
+          for attempt in 1 2 3; do
+            make docker-build IMG="$IMG" && break
+            [ "$attempt" = 3 ] && { echo "::error::operator image build failed 3x"; exit 1; }
+            echo "docker-build attempt $attempt failed; retrying"; sleep 10
+          done
+          kind load docker-image "$IMG" --name "$CLUSTER"
+          make install
+          make deploy IMG="$IMG"
+          kubectl rollout status deployment/kn-next-operator-controller-manager \
+            -n kn-next-operator-system --timeout=180s
+          # Ready deployment != a reachable admission webhook: close the window
+          # explicitly before the first NextApp apply (see the sibling lanes).
+          kubectl wait --for=condition=Ready --timeout=120s \
+            -n kn-next-operator-system certificate/kn-next-operator-serving-cert
+          kubectl wait --for=jsonpath='{.subsets[0].addresses[0]}' --timeout=120s \
+            -n kn-next-operator-system endpoints/kn-next-operator-webhook-service
+          "${GITHUB_WORKSPACE}/scripts/kind-manifests/wait-for-webhook-ready.sh"
+
+      # ONE Redis, shared by both pods through its Service, plus the Secret that
+      # carries the invalidation token (a Secret, never config or an image).
+      - name: Data plane (one Redis) + token Secret
+        run: |
+          set -euo pipefail
+          kubectl create namespace "$APP_NS"
+          CACHE_TOKEN="$(openssl rand -hex 16)"
+          echo "::add-mask::$CACHE_TOKEN"
+          kubectl -n "$APP_NS" create secret generic "${APP_NAME}-credentials" \
+            --from-literal=CACHE_INVALIDATE_TOKEN="$CACHE_TOKEN"
+          cat <<YAML | kubectl apply -f -
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata: { name: redis, namespace: $APP_NS }
+          spec:
+            replicas: 1
+            selector: { matchLabels: { app: redis } }
+            template:
+              metadata: { labels: { app: redis } }
+              spec:
+                containers:
+                  - name: redis
+                    image: redis:7-alpine@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2
+                    ports: [{ containerPort: 6379 }]
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata: { name: redis, namespace: $APP_NS }
+          spec:
+            selector: { app: redis }
+            ports: [{ port: 6379 }]
+          YAML
+          kubectl -n "$APP_NS" rollout status deploy/redis --timeout=180s
+
+      # Through the product. The `no-handler` variant builds without the knext
+      # cacheHandler (KNEXT_E2E_NO_USE_CACHE_HANDLER is read by the fixture's
+      # next.config.mjs at BUILD time).
+      - name: kn-next deploy (${{ matrix.runtime }}, ${{ matrix.variant }})
+        env:
+          KNEXT_E2E_NO_USE_CACHE_HANDLER: ${{ matrix.variant == 'no-handler' && '1' || '0' }}
+        run: |
+          set -euo pipefail
+          cd "$APP_DIR"
+          node "${GITHUB_WORKSPACE}/packages/kn-next/dist/cli/kn-next.js" deploy \
+            --registry localhost:5001 --namespace "$APP_NS" --tag "$DEPLOY_TAG"
+
+      - name: Wait for the NextApp to go Ready with two pods
+        run: |
+          set -euo pipefail
+          kubectl -n "$APP_NS" wait --for=condition=Ready --timeout=300s "nextapp/$APP_NAME" \
+            || (kubectl -n "$APP_NS" get nextapp,ksvc,pods -o wide; kubectl -n "$APP_NS" describe "nextapp/$APP_NAME"; exit 1)
+
+      - name: Assert the two pods share 'use cache' and its invalidation (shared variant)
+        if: matrix.variant == 'shared'
+        run: bash scripts/use-cache-2pod-e2e-assert.sh "$APP_NS" "$APP_NAME"
+
+      # Teeth: the same assertions, with the shared store removed mid-run. The
+      # exit code is the gate; the message check makes sure it went red at the
+      # intended assertion and not for an unrelated reason.
+      - name: Mutation — remove the shared store mid-run, the assertions must go red
+        if: matrix.variant == 'shared'
+        run: |
+          set -uo pipefail
+          UC_MUTATE_FLUSH=1 bash scripts/use-cache-2pod-e2e-assert.sh "$APP_NS" "$APP_NAME" >/tmp/uc-mutation-flush.log 2>&1
+          rc=$?
+          cat /tmp/uc-mutation-flush.log
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::the assertions PASSED with Redis flushed between the pods — the test cannot see red"; exit 1
+          fi
+          grep -F "pod B did not serve pod A's entry" /tmp/uc-mutation-flush.log >/dev/null \
+            || { echo "::error::the mutation went red (rc=$rc) but not at the cross-pod assertion"; exit 1; }
+          echo "mutation proved: exit $rc at the cross-pod assertion"
+
+      - name: Expected red — built without the knext cacheHandler, the pods must NOT share
+        if: matrix.variant == 'no-handler'
+        run: |
+          set -uo pipefail
+          bash scripts/use-cache-2pod-e2e-assert.sh "$APP_NS" "$APP_NAME" >/tmp/uc-no-handler.log 2>&1
+          rc=$?
+          cat /tmp/uc-no-handler.log
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::the assertions PASSED against an app with no knext cacheHandler — the test cannot see red"; exit 1
+          fi
+          grep -F "pod A recomputed on its second request" /tmp/uc-no-handler.log >/dev/null \
+            || { echo "::error::the no-handler build went red (rc=$rc) but not at the no-op assertion"; exit 1; }
+          echo "mutation proved: exit $rc, 'use cache' is a per-process no-op without the handler"
+
+      - name: Dump state on failure
+        if: failure()
+        run: |
+          kubectl -n "$APP_NS" get nextapp,ksvc,pods -o wide || true
+          kubectl -n "$APP_NS" get ksvc "$APP_NAME" -o yaml || true
+          kubectl -n "$APP_NS" logs -l "serving.knative.dev/service=${APP_NAME}" -c user-container --tail=100 --prefix || true
+          kubectl -n "$APP_NS" exec deploy/redis -- redis-cli --scan --pattern '*' || true
+          kubectl -n kn-next-operator-system logs deployment/kn-next-operator-controller-manager --tail=100 || true
+
+      - name: Tear down
+        if: always()
+        run: |
+          kind delete cluster --name "$CLUSTER" || true
+          docker rm -f kind-registry || true
