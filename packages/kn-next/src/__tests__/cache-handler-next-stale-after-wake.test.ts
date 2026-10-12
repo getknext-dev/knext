@@ -23,6 +23,14 @@
  * regenerated. knext's handler persisted `cacheControl.revalidate` with the
  * entry all along, but nothing handed it back to Next.
  *
+ * ## Next >= 16.4.0 (the peer floor)
+ *
+ * `IncrementalCache.get` now applies the `cacheControl` a handler returns
+ * DIRECTLY (`if (cacheData?.cacheControl) cacheControl = cacheData.cacheControl`)
+ * and files it in the shared Map itself. So the handler no longer seeds the Map
+ * (that workaround is deleted); it only has to WITHHOLD the stored window from
+ * an entry another build wrote, which is what the "does NOT" cases below pin.
+ *
  * ## What this asserts
  *
  * The REAL Next `IncrementalCache` (the version pinned here), with the shared
@@ -163,7 +171,9 @@ async function wokenPod(
         dev: false,
         minimalMode: false,
         requestHeaders: {},
-        getPrerenderManifest: emptyManifest,
+        // Next 16.4.0 takes the manifest and preview props directly.
+        prerenderManifest: emptyManifest(),
+        previewProps: emptyManifest().preview,
         CurCacheHandler: Handler,
         serverDistDir: serverDistDir ?? undefined,
     });
@@ -401,7 +411,7 @@ describe("ISR freshness survives a scale-to-zero wake on the Next path (#1888)",
         expect(mod.__NEXT_CONSTANT_BUILD_ID).toBe(NEXT_CONSTANT_BUILD_ID);
     });
 
-    it("does not override a window this process already knows", async () => {
+    it("prefers the window stored with a same-build entry over one the process already holds", async () => {
         SharedCacheControls.cacheControls.set(mapKey("/isr/c"), {
             revalidate: 10,
             expire: ONE_YEAR_S,
@@ -413,11 +423,13 @@ describe("ISR freshness survives a scale-to-zero wake on the Next path (#1888)",
             ),
         );
         const entry = await cache.get("/isr/c", PAGE);
-        expect(entry?.cacheControl?.revalidate).toBe(10);
-        expect(entry?.isStale).toBe(true);
+        // Next >= 16.4.0 applies the handler's stored window, so the newest
+        // write (which is what the entry carries) wins.
+        expect(entry?.cacheControl?.revalidate).toBe(3600);
+        expect(entry?.isStale).toBeFalsy();
     });
 
-    it("seeds the `/` route under the exact key Next files it under (its `/index` form)", async () => {
+    it("files a same-build window under the exact key Next uses for the `/` route", async () => {
         const cache = await wokenPod(
             storedEntry(
                 { revalidate: 3600, expire: ONE_YEAR_S },
@@ -429,14 +441,17 @@ describe("ISR freshness survives a scale-to-zero wake on the Next path (#1888)",
         expect(SharedCacheControls.cacheControls.has(mapKey("/"))).toBe(true);
     });
 
-    it("never seeds a window for a FETCH (data-cache) entry", async () => {
+    it("hands a FETCH (data-cache) entry back untouched, even from another build", async () => {
         const mod = (await import(
             `../adapters/cache-handler.js?wakefetch=${Math.random()}`
         )) as {
             default: new (
                 o: unknown,
             ) => {
-                get: (k: string, ctx?: unknown) => Promise<unknown>;
+                get: (
+                    k: string,
+                    ctx?: unknown,
+                ) => Promise<{ cacheControl?: unknown } | null>;
             };
             __setRedisClientForTests: (c: unknown) => void;
         };
@@ -446,7 +461,7 @@ describe("ISR freshness survives a scale-to-zero wake on the Next path (#1888)",
             async connect() {},
             async get() {
                 return JSON.stringify({
-                    buildId: THIS_BUILD,
+                    buildId: OTHER_BUILD,
                     value: { kind: "FETCH", data: {}, revalidate: 30 },
                     lastModified: Date.now(),
                     tags: [],
@@ -457,21 +472,21 @@ describe("ISR freshness survives a scale-to-zero wake on the Next path (#1888)",
                 return "OK";
             },
         });
-        // A slash-led key, so the kind guard (not the key shape) is what is tested.
-        await handler.get("/fetch-like", { kind: "FETCH" });
-        expect(SharedCacheControls.cacheControls.size).toBe(0);
+        const hit = await handler.get("fetch-key", { kind: "FETCH" });
+        expect(hit?.cacheControl).toEqual({ revalidate: 30 });
     });
 
-    it("seeds a pre-16.3.7 `/index` key under Next's toRoute form `/` (older-Next branch)", async () => {
-        // Peer floor is next >= 16.0.0: those Nexts hand the handler the bare
-        // `/index` key (no `/route-cache/` prefix) and file the window under `/`.
+    it("hands an entry whose VALUE is FETCH back untouched even when the ctx kind is not FETCH", async () => {
         const mod = (await import(
-            `../adapters/cache-handler.js?wakeold=${Math.random()}`
+            `../adapters/cache-handler.js?wakefetchval=${Math.random()}`
         )) as {
             default: new (
                 o: unknown,
             ) => {
-                get: (k: string, ctx?: unknown) => Promise<unknown>;
+                get: (
+                    k: string,
+                    ctx?: unknown,
+                ) => Promise<{ cacheControl?: unknown } | null>;
             };
             __setRedisClientForTests: (c: unknown) => void;
         };
@@ -480,18 +495,20 @@ describe("ISR freshness survives a scale-to-zero wake on the Next path (#1888)",
             connected: true,
             async connect() {},
             async get() {
-                return storedEntry(
-                    { revalidate: 3600, expire: ONE_YEAR_S },
-                    SEVEN_MINUTES_MS,
-                );
+                return JSON.stringify({
+                    buildId: OTHER_BUILD,
+                    value: { kind: "FETCH", data: {}, revalidate: 30 },
+                    lastModified: Date.now(),
+                    tags: [],
+                    cacheControl: { revalidate: 30 },
+                });
             },
             async send() {
                 return "OK";
             },
         });
-        await handler.get("/index", { kind: "APP_PAGE" });
-        expect(SharedCacheControls.cacheControls.has("/")).toBe(true);
-        expect(SharedCacheControls.cacheControls.has("/index")).toBe(false);
+        const hit = await handler.get("fetch-key", { kind: "APP_PAGE" });
+        expect(hit?.cacheControl).toEqual({ revalidate: 30 });
     });
 });
 
@@ -507,7 +524,8 @@ describe("the in-memory path (no REDIS_URL) gets the same treatment", () => {
                 dev: false,
                 minimalMode: false,
                 requestHeaders: {},
-                getPrerenderManifest: emptyManifest,
+                prerenderManifest: emptyManifest(),
+                previewProps: emptyManifest().preview,
                 CurCacheHandler: mod.default,
                 serverDistDir: THIS_DIST,
             }) as unknown as {

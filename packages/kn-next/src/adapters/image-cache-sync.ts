@@ -19,7 +19,7 @@
  *
  * ── Why a sync (and not a pluggable cache handler) ───────────────────────────
  * Next.js exposes a pluggable ISR/data cache via `next.config.cacheHandler`, but in
- * the pinned runtime (Next 16.0.3) the IMAGE optimizer cache is NOT pluggable: the
+ * a default Next the IMAGE optimizer cache is NOT pluggable: the
  * server hardcodes `new ImageOptimizerCache(...)` writing to `<distDir>/cache/images`
  * and does not route IMAGE-kind entries through `cacheHandler`. (Next 16.2+ DID make
  * the image disk cache overridable via the same `cacheHandler` option — see

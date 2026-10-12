@@ -10,10 +10,8 @@
  * once in-repo next moves to 16.2.x, adopt the typed ctx.routing and drop the
  * shim cast.
  *
- * What must stay true (runtime, NOT types): peerDependencies.next is >=16.0.0,
- * so a 16.0.x consumer still hands the adapter a ctx with `routes` and NO
- * `routing`. Only the TYPES modernize — the runtime shape tolerance lives on
- * in adapter-onbuildcomplete-shape.test.ts.
+ * The peer floor is now >=16.4.0, so the 16.0.x `ctx.routes` tolerance this
+ * once documented is gone (next-peer-floor.test.ts).
  */
 
 import { describe, expect, it } from "bun:test";
@@ -27,13 +25,13 @@ const adapterSource = readFileSync(
 );
 
 describe("in-repo next devDependency (#171 follow-up)", () => {
-    it("pins next 16.3.x so the typed ctx.routing exists locally", () => {
+    it("pins next 16.4.x so the typed ctx.routing exists locally", () => {
         const pkg = JSON.parse(
             readFileSync(join(pkgDir, "package.json"), "utf8"),
         );
-        expect(pkg.devDependencies.next).toMatch(/^16\.3\./);
-        // The public contract does NOT move: 16.0.x consumers stay supported.
-        expect(pkg.peerDependencies.next).toBe(">=16.0.0");
+        expect(pkg.devDependencies.next).toMatch(/^16\.4\./);
+        // The peer floor is 16.4.0 (see next-peer-floor.test.ts).
+        expect(pkg.peerDependencies.next).toBe(">=16.4.0");
     });
 });
 
@@ -41,8 +39,7 @@ describe("next-adapter uses the typed ctx.routing (no untyped ctx cast)", () => 
     it("does not launder ctx through `as unknown as`", () => {
         // The #171 shim cast: `const ctxAny = ctx as unknown as {...}`.
         // With next@16.2.x types, ctx.routing is officially typed — the whole-ctx
-        // unknown cast must be gone. (A narrow intersection cast documenting the
-        // LEGACY 16.0.x `routes` field is fine — it never goes through unknown.)
+        // unknown cast must be gone.
         expect(adapterSource).not.toContain("ctx as unknown as");
         expect(adapterSource).not.toContain("ctxAny");
     });

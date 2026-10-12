@@ -1,6 +1,7 @@
 /**
- * GUARD TEST (#147 A3-3 fix round 1 follow-up): onBuildComplete must tolerate
- * BOTH adapter-API ctx shapes.
+ * GUARD TEST (#147 A3-3 fix round 1 follow-up): onBuildComplete must never
+ * crash on a missing routing shape. The 16.0.x `ctx.routes` shape is no longer
+ * read (peer floor 16.4.0).
  *
  * Ground truth (probed against real `next build` runs):
  *  - next v16.0.3 passes `ctx.routes`   { headers, redirects, rewrites:{beforeFiles,
@@ -85,7 +86,7 @@ describe("next-adapter onBuildComplete — ctx shape tolerance (#147)", () => {
         expect(logged).toMatch(/onMatch\s*: 1/);
     });
 
-    it("still counts the v16.0.x shape (legacy ctx.routes present) — peerDep >=16.0.0", async () => {
+    it("no longer reads the v16.0.x ctx.routes shape (peer floor is 16.4.0)", async () => {
         const logSpy = spyOn(console, "log");
         const ctx = {
             ...baseCtx(),
@@ -101,8 +102,8 @@ describe("next-adapter onBuildComplete — ctx shape tolerance (#147)", () => {
             adapter.onBuildComplete?.(ctx as unknown as OnBuildCompleteCtx),
         ).resolves.toBeUndefined();
         const logged = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
-        expect(logged).toContain("routing counts (ctx.routes)");
-        expect(logged).toMatch(/redirects\s*: 1/);
+        expect(logged).not.toContain("ctx.routes");
+        expect(logged).toContain("routing counts (none present)");
     });
 
     it("does not throw even when NEITHER routes nor routing is present (diagnostics never kill a build)", async () => {

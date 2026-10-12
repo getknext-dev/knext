@@ -58,8 +58,7 @@ against the official Next.js compatibility suite.
 > vulnerability-scanned before push, SBOM-attested, cosign-signed, and carry SLSA provenance.
 > Object storage via GCS, S3, or MinIO. Apache-2.0.
 
-**Adapter wiring:** `adapterPath: '@getknext/core/adapter'` (top-level since Next.js 16.2;
-`experimental.adapterPath` on 16.0.x–16.1.x) — the `NextAdapter` shape.
+**Adapter wiring:** `adapterPath: '@getknext/core/adapter'` (top-level; Next.js 16.4.0 or newer) — the `NextAdapter` shape.
 
 **Repo:** https://github.com/getknext-dev/knext
 

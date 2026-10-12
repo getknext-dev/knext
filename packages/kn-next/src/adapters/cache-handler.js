@@ -30,7 +30,6 @@ import { trackWrite } from './cache-write-registry.js';
 // see the header of slow-dep-log.js.
 import { instrumentConnectTiming } from './slow-dep-log.js';
 import { readFileSync } from 'node:fs';
-import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 
 // ─── Cache Event Logger ───
@@ -977,7 +976,7 @@ function writeCacheControl(ctx) {
   if (typeof revalidate === 'number' && Number.isFinite(revalidate))
     cacheControl.revalidate = revalidate;
   // `false` = never revalidate. Persisted so a woken process can hand it back
-  // to Next (see seedNextCacheControl); `withCacheState` treats it as fresh.
+  // to Next (see scopeWindowToBuild); `withCacheState` treats it as fresh.
   else if (ctx?.cacheControl?.revalidate === false) cacheControl.revalidate = false;
   const expire = cacheControlSeconds(ctx, 'expire');
   if (expire !== undefined) cacheControl.expire = expire;
@@ -1007,91 +1006,21 @@ function withCacheState(entry, now = Date.now()) {
   return entry;
 }
 
-// ─── Next's per-route revalidate window after a wake (#1888) ───
-//
-// On the Next standalone path freshness is NOT decided here. Next's
-// `IncrementalCache.get` (16.3.6 `dist/server/lib/incremental-cache/index.js`)
-// takes only `lastModified` + `value` from this handler and computes
-// `isStale` itself (:440-451), from a window `calculateRevalidate` (:154-163)
-// reads out of `SharedCacheControls` — a PROCESS-GLOBAL Map filled by
-// `IncrementalCache.set` (:537-538) or, failing that, the prerender manifest.
-// With neither it uses a 1-second window (:160).
-//
-// A path rendered at runtime (a dynamic route without generateStaticParams) is
-// in no manifest, so its window lived only in the process that rendered it.
-// After a scale-to-zero wake the Map is empty and every such entry older than
-// a second read STALE and regenerated, though this handler had persisted the
-// real window with the entry all along.
-//
-// So on a read, hand the persisted cacheControl back the only way Next accepts
-// it: seed the shared Map — and only when this process has learnt nothing for
-// the route itself, so a window from a write here (always the newest) wins.
-//
-// BUILD-SCOPED. Redis keys are scoped by app, not by build, so entries outlive
-// a redeploy. Before this seed, the new build read an old build's entry STALE
-// and regenerated it; seeding the old build's window would serve it FRESH for
-// that whole window (forever for `revalidate: false`) and ignore a changed
-// `revalidate`. So `set` records the writer's build id with the entry, and the
-// seed applies only when it equals this process's build id. An entry without
-// one (written before build ids were recorded) is never seeded.
-//
-// `shared-cache-controls.external` is the module Next keeps OUT of its route
-// bundles precisely so every copy shares one Map; it is resolved from `next`,
-// the same file the server and route chunks load. Do not count on the
-// standalone-on-Bun compile's disk-closure scan to see this require: the
-// package build renames `require` (tsup emits `require2(...)`), which the
-// scan's literal `require(` pattern does not match. The module stays on disk —
-// one instance — because Next's own `*.runtime.prod.js` requires it literally.
-// Fail-open: no `next`, or a shape this does not recognise, and the read
-// proceeds exactly as before — with one warning per process, so a Next release
-// that renames the module is visible rather than a silent return of #1888.
-let sharedCacheControlsMap;
-const SHARED_CACHE_CONTROLS_MODULE =
-  'next/dist/server/lib/incremental-cache/shared-cache-controls.external.js';
-function nextSharedCacheControls() {
-  if (sharedCacheControlsMap !== undefined) return sharedCacheControlsMap;
-  sharedCacheControlsMap = null;
-  let reason;
-  try {
-    const require = createRequire(import.meta.url);
-    const mod = require(SHARED_CACHE_CONTROLS_MODULE);
-    const map = mod?.SharedCacheControls?.cacheControls;
-    if (map instanceof Map) sharedCacheControlsMap = map;
-    else reason = 'SharedCacheControls.cacheControls is not a Map';
-  } catch (err) {
-    reason = err?.message || String(err);
-  }
-  if (reason) {
-    console.warn(
-      JSON.stringify({
-        level: 'warn',
-        source: 'knext-cache-handler',
-        event: 'next_cache_controls_unavailable',
-        module: SHARED_CACHE_CONTROLS_MODULE,
-        reason,
-        impact:
-          'ISR pages generated at request time may be served STALE on the first request after a cold start',
-      }),
-    );
-  }
-  return sharedCacheControlsMap;
-}
-
 /**
  * This process's build id — `.next/BUILD_ID`, read from where Next reads it
  * (`next-server.js`: `join(distDir, BUILD_ID_FILE)`, distDir being the parent
  * of the `serverDistDir` Next hands every cache handler). On the self-contained
  * compiled executable the same `fs` read is aliased to the embedded file.
  * `undefined` when Next did not pass `serverDistDir` (vinext) or the file is
- * unreadable — and then nothing is recorded and nothing is seeded.
+ * unreadable — and then nothing is recorded and no window is handed back.
  *
  * Next's CONSTANT id counts as no id. Next >= 16.2.11 writes the same
  * `.next/BUILD_ID` for EVERY build whenever a deployment id is set, so two
- * deploys would "match" and the previous build's window would be seeded after
+ * deploys would "match" and the previous build's window would be handed back after
  * a redeploy (forever for `revalidate: false`). `knext deploy` refuses such a
  * build, but `knext preview` and images built outside knext do not. This is
  * the single point both sides go through: `set` records `currentBuildId` and
- * the seed compares against it, so neither records nor seeds the constant.
+ * `scopeWindowToBuild` compares against it, so neither records nor honours the constant.
  *
  * Duplicated from `NEXT_CONSTANT_BUILD_ID` in `src/cli/build-id-env.ts` — this
  * plain-JS runtime module cannot import the CLI's TypeScript.
@@ -1133,16 +1062,6 @@ function resolveBuildId(options) {
   return fileBuildId(options) ?? envBuildId();
 }
 
-/** Next's `toRoute` (`dist/server/lib/to-route.js`): `/a/index` → `/a`, `/index` → `/`. */
-function nextRoute(key) {
-  // Next >= 16.3.7 scopes every non-FETCH entry to its source route and keys
-  // BOTH the shared Map (`set`: storageKey) and this handler by the same
-  // `/route-cache/<kind>/<sha256>/$<path>` string — no toRoute normalisation,
-  // so the handler's key is already the Map key and must be used verbatim.
-  if (key.startsWith('/route-cache/')) return key;
-  return key.replace(/(?:\/index)?\/?$/, '') || '/';
-}
-
 /**
  * PPR resume state is BUILD-SCOPED (#2084). An APP_PAGE carrying `postponed`
  * state is resumed by Next against the CURRENT build's code; resuming the state
@@ -1163,21 +1082,27 @@ function isForeignPostponedEntry(entry) {
   return entry.buildId !== currentBuildId;
 }
 
-function seedNextCacheControl(key, entry, ctx) {
-  if (typeof key !== 'string' || !key.startsWith('/')) return;
-  // Next never records a window for the data cache (`!ctx.fetchCache`, :537).
-  if (ctx?.kind === 'FETCH' || entry?.value?.kind === 'FETCH') return;
-  const revalidate = entry?.cacheControl?.revalidate;
-  if (!(revalidate === false || (typeof revalidate === 'number' && revalidate >= 0))) return;
-  // Only this build's own windows — see BUILD-SCOPED above.
-  if (currentBuildId === undefined || entry?.buildId !== currentBuildId) return;
-  const map = nextSharedCacheControls();
-  if (!map) return;
-  const route = nextRoute(key);
-  if (map.has(route)) return;
-  const cacheControl = { revalidate };
-  if (typeof entry.cacheControl.expire === 'number') cacheControl.expire = entry.cacheControl.expire;
-  map.set(route, cacheControl);
+/**
+ * BUILD-SCOPED window (#1888). Redis keys are scoped by app, not by build, so an
+ * entry outlives a redeploy. Next >= 16.4.0 applies the `cacheControl` a handler
+ * returns DIRECTLY (`IncrementalCache.get`: `if (cacheData?.cacheControl)
+ * cacheControl = cacheData.cacheControl`), so a window recorded by a previous
+ * build would be honoured for its whole length after a deploy -- forever for
+ * `revalidate: false` -- and would ignore a changed `revalidate`. Only this
+ * build's own windows are handed back: for an entry another build wrote, one
+ * with no recorded build id (legacy), or while this process has none (or only
+ * Next's constant id), the stored window is withheld and Next treats the entry
+ * as stale and re-renders it. The body is still served meanwhile. The FETCH
+ * data cache never carries a route window, so it is left untouched.
+ */
+function scopeWindowToBuild(entry, ctx) {
+  if (!entry || typeof entry !== 'object' || entry.cacheControl === undefined) return entry;
+  // vinext reads without a ctx and reads the window itself: only Next's reads
+  // (which always carry a `kind`) are scoped.
+  if (typeof ctx?.kind !== 'string' || ctx.kind === 'FETCH' || entry.value?.kind === 'FETCH') return entry;
+  if (currentBuildId !== undefined && entry.buildId === currentBuildId) return entry;
+  const { cacheControl: _foreignWindow, ...rest } = entry;
+  return rest;
 }
 
 // ─── CacheHandler Class ───
@@ -1256,11 +1181,10 @@ class CacheHandler {
             });
             return null;
           }
-          seedNextCacheControl(key, parsed, ctx);
           logCacheEvent(parsed?.cacheState === 'stale' ? 'STALE' : 'HIT', source, key, {
             durationMs: Date.now() - startTime,
           });
-          return parsed;
+          return scopeWindowToBuild(parsed, ctx);
       }
 
       // In-memory fallback
@@ -1279,7 +1203,6 @@ class CacheHandler {
         return null;
       }
       const labelled = withCacheState(entry);
-      seedNextCacheControl(key, labelled, ctx);
       logCacheEvent(labelled?.cacheState === 'stale' ? 'STALE' : 'HIT', source, key, {
         durationMs: Date.now() - startTime,
       });
