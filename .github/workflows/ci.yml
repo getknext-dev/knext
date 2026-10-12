@@ -604,6 +604,7 @@ jobs:
           node scripts/bun-test.mjs
           apps/file-manager/sigterm-drain-e2e.test.ts
           apps/file-manager/sigterm-hardcap-e2e.test.ts
+          tests/standalone-no-dev-modules-e2e.test.ts
 
       # #1230 round 6: the ONLY thing that proves scripts/e2e-native-rebuild-musl.sh
       # actually fixes what it claims to (musl sharp/libvips siblings, the
