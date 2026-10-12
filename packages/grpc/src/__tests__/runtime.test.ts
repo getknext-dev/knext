@@ -223,8 +223,14 @@ describe('generated client runtime — idempotency key, deadline, contract versi
       },
     });
     await client.getOrder({ id: 'o-1' });
-    expect(seen.timeouts[0]).toBe(10000);
-    expect(seen.timeouts[1] as number).toBeLessThan(6000);
+    // The client's clock is injected; the transport converts each timeout back
+    // to a deadline on the REAL clock, so the handler may see a few ms less.
+    // First attempt: the whole 10 s. Second: 10 000 - (100 backoff + 4000
+    // spent) = 5900 ms at most — not a fresh 10 s.
+    expect(seen.timeouts[0] as number).toBeGreaterThan(9000);
+    expect(seen.timeouts[0] as number).toBeLessThanOrEqual(10000);
+    expect(seen.timeouts[1] as number).toBeGreaterThan(4900);
+    expect(seen.timeouts[1] as number).toBeLessThanOrEqual(5900);
   });
 
   it('refuses a deadline that is not shorter than the gateway timeout', () => {
