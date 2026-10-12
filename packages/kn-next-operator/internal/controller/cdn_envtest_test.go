@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -244,32 +245,133 @@ var _ = Describe("NextApp spec.cdn", func() {
 		Expect(err.Error()).To(ContainSubstring("tagPrefix"))
 	})
 
-	reservedCases := []string{"KNEXT_CDN_TAG_PREFIX", "KNEXT_CDN_EMULATOR_ENDPOINT", "KNEXT_CDN_PURGE_TOKEN", "KNEXT_CDN_ANYTHING"}
-	for i, name := range reservedCases {
-		name := name
+	// ---- the reservation: IGNORED at render and reported, not rejected at admission ----
+	//
+	// A CEL rule on spec.env / spec.secrets.envMap would be a new validation rule on
+	// an existing field, which ADR-0017 Amendment 2 forbids inside v1alpha1
+	// (additive-only). So the operator enforces the reservation: the entry is
+	// admitted, never reaches the container (whether or not spec.cdn is set), and a
+	// CDNReservedEnvIgnored condition names it. The condition never carries a value.
+
+	reservedCondition := func(name string) *metav1.Condition {
+		got := &appsv1alpha1.NextApp{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, got)).To(Succeed())
+		return apimeta.FindStatusCondition(got.Status.Conditions, ConditionCDNReservedEnvIgnored)
+	}
+	containerEnvNames := func(ksvc *servingv1.Service) map[string]corev1.EnvVar {
+		out := map[string]corev1.EnvVar{}
+		for _, ev := range ksvc.Spec.Template.Spec.Containers[0].Env {
+			out[ev.Name] = ev
+		}
+		return out
+	}
+
+	reservedCases := []string{"KNEXT_CDN_PROVIDER", "KNEXT_CDN_TAG_PREFIX", "KNEXT_CDN_EMULATOR_ENDPOINT", "KNEXT_CDN_PURGE_TOKEN", "KNEXT_CDN_ANYTHING"}
+	const secretValue = "do-not-echo-this-value"
+	for i, rname := range reservedCases {
+		rname := rname
 		i := i
-		It(fmt.Sprintf("rejects spec.env %s, with and without spec.cdn", name), func() {
-			rejects(fmt.Sprintf("cdn-env-%d", i),
-				appsv1alpha1.NextAppSpec{Env: map[string]string{name: "x"}}, "KNEXT_CDN_")
-			rejects(fmt.Sprintf("cdn-env-with-%d", i),
-				appsv1alpha1.NextAppSpec{
-					CDN: &appsv1alpha1.CDNSpec{Provider: "cloudflare"},
-					Env: map[string]string{name: "x"},
-				}, "KNEXT_CDN_")
+		It(fmt.Sprintf("admits spec.env %s, never renders it, and reports it by name only", rname), func() {
+			name := fmt.Sprintf("cdn-env-%d", i)
+			Expect(create(name, appsv1alpha1.NextAppSpec{Env: map[string]string{rname: secretValue, "KEEP_ME": "1"}})).To(Succeed())
+			ksvc, _ := reconcile1(name)
+			env := containerEnvNames(ksvc)
+			Expect(env).NotTo(HaveKey(rname))
+			Expect(env["KEEP_ME"].Value).To(Equal("1"))
+			c := reservedCondition(name)
+			Expect(c).NotTo(BeNil())
+			Expect(c.Status).To(Equal(metav1.ConditionTrue))
+			Expect(c.Reason).To(Equal(ReasonCDNReservedEnvIgnored))
+			Expect(c.Message).To(ContainSubstring("spec.env[" + rname + "]"))
+			Expect(c.Message).NotTo(ContainSubstring(secretValue))
 		})
-		It(fmt.Sprintf("rejects spec.secrets.envMap %s, with and without spec.cdn", name), func() {
-			sec := &appsv1alpha1.SecretsSpec{EnvMap: map[string]appsv1alpha1.EnvMapEntry{
-				name: {SecretName: "s", SecretKey: "k"},
-			}}
-			rejects(fmt.Sprintf("cdn-envmap-%d", i), appsv1alpha1.NextAppSpec{Secrets: sec}, "KNEXT_CDN_")
-			rejects(fmt.Sprintf("cdn-envmap-with-%d", i), appsv1alpha1.NextAppSpec{
-				CDN: &appsv1alpha1.CDNSpec{Provider: "cloudflare"}, Secrets: sec,
-			}, "KNEXT_CDN_")
+		It(fmt.Sprintf("with spec.cdn set, spec.env %s is admitted and the operator's rendered value still wins", rname), func() {
+			name := fmt.Sprintf("cdn-env-with-%d", i)
+			Expect(create(name, appsv1alpha1.NextAppSpec{
+				CDN: &appsv1alpha1.CDNSpec{Provider: "cloudflare"},
+				Env: map[string]string{rname: secretValue},
+			})).To(Succeed())
+			ksvc, _ := reconcile1(name)
+			for _, ev := range ksvc.Spec.Template.Spec.Containers[0].Env {
+				Expect(ev.Value).NotTo(Equal(secretValue), ev.Name)
+			}
+			Expect(cdnEnv(ksvc)["KNEXT_CDN_PROVIDER"].Value).To(Equal("cloudflare"))
+			Expect(reservedCondition(name)).NotTo(BeNil())
+		})
+		It(fmt.Sprintf("admits spec.secrets.envMap %s, never renders it, and reports it by name only", rname), func() {
+			name := fmt.Sprintf("cdn-envmap-%d", i)
+			Expect(create(name, appsv1alpha1.NextAppSpec{Secrets: &appsv1alpha1.SecretsSpec{
+				EnvMap: map[string]appsv1alpha1.EnvMapEntry{
+					rname:     {SecretName: "s", SecretKey: secretValue},
+					"KEEP_ME": {SecretName: "s", SecretKey: "k"},
+				},
+			}})).To(Succeed())
+			ksvc, _ := reconcile1(name)
+			env := containerEnvNames(ksvc)
+			Expect(env).NotTo(HaveKey(rname))
+			Expect(env).To(HaveKey("KEEP_ME"))
+			c := reservedCondition(name)
+			Expect(c).NotTo(BeNil())
+			Expect(c.Message).To(ContainSubstring("spec.secrets.envMap[" + rname + "]"))
+			Expect(c.Message).NotTo(ContainSubstring(secretValue))
 		})
 	}
-	It("still accepts names that merely resemble the prefix", func() {
-		Expect(create("cdn-env-lookalike", appsv1alpha1.NextAppSpec{
+
+	It("on build vinext (nothing rendered) a reserved name is still ignored and reported", func() {
+		Expect(create("cdn-env-vinext", appsv1alpha1.NextAppSpec{
+			Build: "vinext",
+			CDN:   &appsv1alpha1.CDNSpec{Provider: "cloudflare"},
+			Env:   map[string]string{"KNEXT_CDN_PROVIDER": secretValue},
+		})).To(Succeed())
+		ksvc, _ := reconcile1("cdn-env-vinext")
+		Expect(containerEnvNames(ksvc)).NotTo(HaveKey("KNEXT_CDN_PROVIDER"))
+		Expect(reservedCondition("cdn-env-vinext")).NotTo(BeNil())
+	})
+
+	It("lists every offending name, sorted, from both sources, and clears when they are removed", func() {
+		name := "cdn-env-many"
+		Expect(create(name, appsv1alpha1.NextAppSpec{
+			Env: map[string]string{"KNEXT_CDN_B": "1", "KNEXT_CDN_A": "2"},
+			Secrets: &appsv1alpha1.SecretsSpec{EnvMap: map[string]appsv1alpha1.EnvMapEntry{
+				"KNEXT_CDN_C": {SecretName: "s", SecretKey: "k"},
+			}},
+		})).To(Succeed())
+		reconcile1(name)
+		c := reservedCondition(name)
+		Expect(c).NotTo(BeNil())
+		a, b, cc := strings.Index(c.Message, "spec.env[KNEXT_CDN_A]"), strings.Index(c.Message, "spec.env[KNEXT_CDN_B]"), strings.Index(c.Message, "spec.secrets.envMap[KNEXT_CDN_C]")
+		Expect(a).To(BeNumerically(">=", 0))
+		Expect(b).To(BeNumerically(">", a))
+		Expect(cc).To(BeNumerically(">", b))
+
+		nn := types.NamespacedName{Name: name, Namespace: namespace}
+		cur := &appsv1alpha1.NextApp{}
+		Expect(k8sClient.Get(ctx, nn, cur)).To(Succeed())
+		cur.Spec.Env = nil
+		cur.Spec.Secrets = nil
+		Expect(k8sClient.Update(ctx, cur)).To(Succeed())
+		reconcile1(name)
+		Expect(reservedCondition(name)).To(BeNil())
+	})
+
+	It("a Warning event names the ignored entries (never their values) when the set changes", func() {
+		name := "cdn-env-event"
+		Expect(create(name, appsv1alpha1.NextAppSpec{Env: map[string]string{"KNEXT_CDN_PROVIDER": secretValue}})).To(Succeed())
+		_, rec := reconcile1(name)
+		events := strings.Join(drainEvents(rec), "\n")
+		Expect(events).To(ContainSubstring(ReasonCDNReservedEnvIgnored))
+		Expect(events).NotTo(ContainSubstring(secretValue))
+	})
+
+	It("names that merely resemble the prefix are kept and not reported", func() {
+		name := "cdn-env-lookalike"
+		Expect(create(name, appsv1alpha1.NextAppSpec{
 			Env: map[string]string{"KNEXT_CDNX": "1", "MY_KNEXT_CDN_X": "1"},
 		})).To(Succeed())
+		ksvc, _ := reconcile1(name)
+		env := containerEnvNames(ksvc)
+		Expect(env).To(HaveKey("KNEXT_CDNX"))
+		Expect(env).To(HaveKey("MY_KNEXT_CDN_X"))
+		Expect(reservedCondition(name)).To(BeNil())
 	})
 })

@@ -1601,8 +1601,8 @@ func (r *NextAppReconciler) buildKsvcEnv(nextApp *appsv1alpha1.NextApp) ([]corev
 				// admission rejects the entry, so reaching here means the CR predates
 				// that rule. The entry is dropped whether or not the operator renders
 				// that name for this app, so a CR cannot choose its own tag prefix,
-				// endpoint or token.
-				report.operatorWins = append(report.operatorWins, envName)
+				// endpoint or token. Reported by the CDNReservedEnvIgnored condition
+				// (computeStatusVerdict), not as an EnvMapCollision.
 				continue
 			}
 			if _, collides := reservedByOperator[envName]; collides {

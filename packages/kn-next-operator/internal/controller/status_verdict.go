@@ -921,6 +921,29 @@ func computeStatusVerdict(
 		v.removeConditions = append(v.removeConditions, ConditionCDNAdvisory)
 	}
 
+	// CDNReservedEnvIgnored (ADR-0068 D3): spec.env / spec.secrets.envMap entries in
+	// the reserved KNEXT_CDN_* namespace are ignored at render. Names only, never
+	// values. Informational (Ready untouched), computed from the spec alone, removed
+	// only if previously reported (#98), and the Warning event is transition-gated.
+	prevReserved := apimeta.FindStatusCondition(app.Status.Conditions, ConditionCDNReservedEnvIgnored)
+	if ignored := cdnReservedEnvIgnored(app); len(ignored) > 0 {
+		message := "these entries are in the operator-reserved KNEXT_CDN_* namespace and are IGNORED " +
+			"(never set on the container, whether or not spec.cdn is set): " + strings.Join(ignored, ", ") +
+			". Remove them; configure the CDN with spec.cdn."
+		v.conditions = append(v.conditions, metav1.Condition{
+			Type:               ConditionCDNReservedEnvIgnored,
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: app.Generation,
+			Reason:             ReasonCDNReservedEnvIgnored,
+			Message:            message,
+		})
+		if prevReserved == nil || prevReserved.Message != message {
+			v.events = append(v.events, verdictEvent{corev1.EventTypeWarning, ReasonCDNReservedEnvIgnored, message})
+		}
+	} else if prevReserved != nil {
+		v.removeConditions = append(v.removeConditions, ConditionCDNReservedEnvIgnored)
+	}
+
 	return v
 }
 

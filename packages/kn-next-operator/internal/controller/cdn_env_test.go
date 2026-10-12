@@ -195,8 +195,10 @@ func TestCDNEnv_EnvMapReservedNamesAreDroppedWithoutSpecCDN(t *testing.T) {
 	if !found {
 		t.Errorf("an unrelated envMap entry must be kept")
 	}
-	if len(report.operatorWins) != 1 || report.operatorWins[0] != "KNEXT_CDN_TAG_PREFIX" {
-		t.Errorf("drop must be reported, got %+v", report)
+	// Reported by the dedicated CDNReservedEnvIgnored condition (cdn_reserved_env_test.go),
+	// not as an EnvMapCollision: the name never collided with anything the operator renders.
+	if !report.empty() {
+		t.Errorf("the drop must not be an EnvMapCollision, got %+v", report)
 	}
 }
 

@@ -101,7 +101,6 @@ type NextAppSpec struct {
 	// +optional
 	// +kubebuilder:validation:XValidation:rule="self.all(k, k.matches('^[A-Za-z_][A-Za-z0-9_]*$'))",message="env var names must be C_IDENTIFIERs ([A-Za-z_][A-Za-z0-9_]*)"
 	// +kubebuilder:validation:XValidation:rule="!('HOSTNAME' in self) && !('PORT' in self) && !('K_SERVICE' in self) && !('K_REVISION' in self) && !('K_CONFIGURATION' in self)",message="env var name is reserved (HOSTNAME, PORT, K_SERVICE, K_REVISION, K_CONFIGURATION are operator/Knative-managed)"
-	// +kubebuilder:validation:XValidation:rule="!self.exists(k, k.startsWith('KNEXT_CDN_'))",message="env var names starting with KNEXT_CDN_ are reserved for the operator (set spec.cdn instead)"
 	Env map[string]string `json:"env,omitempty"`
 
 	// Observability — Prometheus metrics
@@ -242,15 +241,16 @@ type NextAppSpec struct {
 	// operator from the app's namespace and name and is NOT a field, so a CR
 	// cannot choose another app's prefix.
 	//
-	// KNEXT_CDN_* names in spec.env and spec.secrets.envMap are reserved and
-	// rejected at admission, whether or not this field is set. A Secret imported
-	// whole through spec.secrets.envFrom is not filtered, because the operator
-	// cannot read Secret keys: a KNEXT_CDN_* key inside it reaches the pod. The
-	// namespace is the trust boundary, since whoever can write that Secret already
-	// controls the app's environment. When this field is set the rendered values
-	// still win, because Kubernetes applies env entries after envFrom; without
-	// this field, or on build vinext, nothing is rendered and such a key is simply
-	// set.
+	// KNEXT_CDN_* names in spec.env and spec.secrets.envMap are reserved: the
+	// operator ignores such entries (they are never set on the container, whether
+	// or not this field is set) and reports their names, never their values, in a
+	// CDNReservedEnvIgnored condition. A Secret imported whole through
+	// spec.secrets.envFrom is not filtered, because the operator cannot read
+	// Secret keys: a KNEXT_CDN_* key inside it reaches the pod. The namespace is
+	// the trust boundary, since whoever can write that Secret already controls the
+	// app's environment. When this field is set the rendered values still win,
+	// because Kubernetes applies env entries after envFrom; without this field, or
+	// on build vinext, nothing is rendered and such a key is simply set.
 	//
 	// Unset renders no variable at all, so the pod template is byte-identical to
 	// every NextApp written before this field existed and no revision is cut.
@@ -1058,10 +1058,10 @@ type EnvMapEntry struct {
 type SecretsSpec struct {
 	EnvFrom []string `json:"envFrom,omitempty"`
 	// EnvMap maps environment variable names to Secret keys. Names starting with
-	// KNEXT_CDN_ are reserved for the operator (ADR-0068) and rejected at
-	// admission. A Secret imported whole through envFrom is not filtered; see
-	// spec.cdn for why the namespace is the trust boundary there.
-	// +kubebuilder:validation:XValidation:rule="!self.exists(k, k.startsWith('KNEXT_CDN_'))",message="env var names starting with KNEXT_CDN_ are reserved for the operator (set spec.cdn instead)"
+	// KNEXT_CDN_ are reserved for the operator (ADR-0068): such entries are ignored
+	// and reported by the CDNReservedEnvIgnored condition. A Secret imported whole
+	// through envFrom is not filtered; see spec.cdn for why the namespace is the
+	// trust boundary there.
 	EnvMap map[string]EnvMapEntry `json:"envMap,omitempty"`
 }
 
