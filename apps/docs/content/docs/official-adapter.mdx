@@ -37,7 +37,7 @@ export default adapter;
 
 - **`modifyConfig`** defaults `output` to `'standalone'` during the production build. An explicit
   `output: 'export'` is left untouched, so Next.js runs its own static-export validation, and the
-  knext CLI then refuses the build: a static export is not a server deployment, and knext deploys a
+  knext CLI then refuses the build (on the Next.js build path; the vinext target is unchanged): a static export is not a server deployment, and knext deploys a
   Next.js server. Remove `output: 'export'`, or host the `out/` folder on a static host.
 - **`onBuildComplete`** uploads the build's static artifacts to the configured object store, keyed
   by `buildId`.

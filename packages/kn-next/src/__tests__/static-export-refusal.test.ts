@@ -9,15 +9,24 @@
  * build, deploy and preview all share — checks after the project's build.
  */
 
-import { describe, expect, it, mock } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { afterEach, describe, expect, it, mock } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runProjectBuild } from "../cli/project-build";
 import { USAGE_ERROR_CODE } from "../cli/shared";
 
+const scratchDirs: string[] = [];
+
+afterEach(() => {
+    for (const dir of scratchDirs.splice(0)) {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
 function appDirWithExport(): string {
     const dir = mkdtempSync(join(tmpdir(), "knext-static-export-"));
+    scratchDirs.push(dir);
     mkdirSync(join(dir, ".next"), { recursive: true });
     writeFileSync(
         join(dir, ".next", "export-detail.json"),
@@ -52,6 +61,7 @@ describe("runProjectBuild static-export refusal", () => {
 
     it("does not interfere with a normal (non-export) build", () => {
         const dir = mkdtempSync(join(tmpdir(), "knext-no-export-"));
+        scratchDirs.push(dir);
         mkdirSync(join(dir, ".next"), { recursive: true });
         const run = mock();
         expect(() =>
