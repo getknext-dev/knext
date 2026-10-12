@@ -18,6 +18,7 @@ import {
  * values handed to `sleep` rather than by waiting.
  */
 const PURGE: string = "../adapters/cdn-purge/index.js";
+const REGISTRY: string = "../adapters/cache-write-registry.js";
 
 const servers: FakeCdn[] = [];
 afterEach(async () => {
@@ -748,7 +749,7 @@ describe("non-blocking and drain (ADR-0068 D6.3, D6.6)", () => {
     });
 
     it("the purge is tracked so the SIGTERM drain waits for it", async () => {
-        const reg: Any = await import("../adapters/cache-write-registry.js");
+        const reg: Any = await import(REGISTRY);
         const h = await harness(cloudflareEnv().env, { flushIntervalMs: 5 });
         h.cdn.reply(() => ({ hang: true }));
         const before = reg.inFlightCacheWriteCount();
@@ -771,7 +772,7 @@ describe("non-blocking and drain (ADR-0068 D6.3, D6.6)", () => {
     });
 
     it("the drain is bounded: a provider that never answers cannot hold shutdown past the cap", async () => {
-        const reg: Any = await import("../adapters/cache-write-registry.js");
+        const reg: Any = await import(REGISTRY);
         const h = await harness(cloudflareEnv().env, {
             flushIntervalMs: 5,
             requestTimeoutMs: 60_000,
@@ -787,7 +788,7 @@ describe("non-blocking and drain (ADR-0068 D6.3, D6.6)", () => {
     });
 
     it("a tag still waiting in the coalescing window is tracked too", async () => {
-        const reg: Any = await import("../adapters/cache-write-registry.js");
+        const reg: Any = await import(REGISTRY);
         const h = await harness(cloudflareEnv().env, { flushIntervalMs: 80 });
         h.purger.enqueue(["a"]);
         expect(h.cdn.requests.length).toBe(0);
