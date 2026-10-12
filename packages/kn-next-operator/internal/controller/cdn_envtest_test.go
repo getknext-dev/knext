@@ -84,6 +84,10 @@ var _ = Describe("NextApp spec.cdn", func() {
 			},
 		}})).To(Succeed())
 		ksvc, _ := reconcile1("cdn-render")
+		// The CRD default is applied by the apiserver: read the stored object back.
+		stored := &appsv1alpha1.NextApp{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "cdn-render", Namespace: namespace}, stored)).To(Succeed())
+		Expect(stored.Spec.CDN.HTMLTTLSeconds).To(Equal(int32(30)))
 		env := cdnEnv(ksvc)
 		Expect(env["KNEXT_CDN_PROVIDER"].Value).To(Equal("cloudflare"))
 		// The CRD default (30) was applied by the apiserver, not by the Go code.
