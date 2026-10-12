@@ -57,9 +57,10 @@ is the scope-and-methodology reference, not the scoreboard.
 ## The Next.js version under credential
 
 The credential runs against a **pinned Next.js release tag**, never `canary`, so an upstream
-regression is never mistaken for a knext defect. As of the current credentialing round the pinned
-tag is the same Next.js release that `knext create` scaffolds today — there is no deliberate
-version gap between what is credentialed and what a new app ships with.
+regression is never mistaken for a knext defect. Right now the pinned tag (`v16.3.8`) is one minor
+line behind the Next.js release that `knext create` scaffolds (`16.4.0`): the credential moves to
+the scaffolded release once it has been re-credentialed there, so the credential does not yet cover
+what a new app ships with.
 
 ## It runs against published release-candidate packages, not `main`
 

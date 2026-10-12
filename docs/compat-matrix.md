@@ -7,8 +7,9 @@
 > **Note (v2 line): `knext create` now scaffolds the 16.4.x line, a newer Next.js release than this credential window covers, until the credential ref moves.**
 >
 > **The compat credential window now runs against `vercel/next.js` **v16.3.8**** (rc.2's
-> re-credential, #1560, 2026-09-30) — the same tag `knext create` scaffolds today, closing the
-> deliberate v16.2.x/16.3.x divergence rc.1 opened. `NEXTJS_REF` in `test-e2e-deploy.yml` moved to
+> re-credential, #1560, 2026-09-30), which was the tag `knext create` scaffolded at the time,
+> closing the deliberate v16.2.x/16.3.x divergence rc.1 opened. The scaffold has since moved on
+> to 16.4.0 (see the note above). `NEXTJS_REF` in `test-e2e-deploy.yml` moved to
 > this ref in the same PR that re-audited the pre-existing quarantine ledger against it with real
 > dispatch evidence: all four cells (node/bun x turbopack/webpack), 16/16 shards each attempted
 > (runs 36638853381 / 36638856495 / 36638859599 / 36638862596). The two **bun** cells and the

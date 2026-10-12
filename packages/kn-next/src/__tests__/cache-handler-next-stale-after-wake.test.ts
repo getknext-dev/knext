@@ -475,6 +475,41 @@ describe("ISR freshness survives a scale-to-zero wake on the Next path (#1888)",
         const hit = await handler.get("fetch-key", { kind: "FETCH" });
         expect(hit?.cacheControl).toEqual({ revalidate: 30 });
     });
+
+    it("hands an entry whose VALUE is FETCH back untouched even when the ctx kind is not FETCH", async () => {
+        const mod = (await import(
+            `../adapters/cache-handler.js?wakefetchval=${Math.random()}`
+        )) as {
+            default: new (
+                o: unknown,
+            ) => {
+                get: (
+                    k: string,
+                    ctx?: unknown,
+                ) => Promise<{ cacheControl?: unknown } | null>;
+            };
+            __setRedisClientForTests: (c: unknown) => void;
+        };
+        const handler = new mod.default({ serverDistDir: THIS_DIST });
+        mod.__setRedisClientForTests({
+            connected: true,
+            async connect() {},
+            async get() {
+                return JSON.stringify({
+                    buildId: OTHER_BUILD,
+                    value: { kind: "FETCH", data: {}, revalidate: 30 },
+                    lastModified: Date.now(),
+                    tags: [],
+                    cacheControl: { revalidate: 30 },
+                });
+            },
+            async send() {
+                return "OK";
+            },
+        });
+        const hit = await handler.get("fetch-key", { kind: "APP_PAGE" });
+        expect(hit?.cacheControl).toEqual({ revalidate: 30 });
+    });
 });
 
 describe("the in-memory path (no REDIS_URL) gets the same treatment", () => {
