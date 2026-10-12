@@ -152,6 +152,17 @@ describe("excludePaths fences the data URL of an excluded page", () => {
         ).toBe(true);
     });
 
+    it("without the .json suffix it is not a data URL", () => {
+        expect(
+            decideEdge(
+                input(
+                    { rawTarget: "/_next/data/b1/account", artifact: art() },
+                    EXCLUDE,
+                ),
+            ).edge,
+        ).toBe(true);
+    });
+
     it("a data URL for an included page stays cacheable", () => {
         expect(
             decideEdge(

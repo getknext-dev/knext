@@ -124,6 +124,36 @@ describe("an unconditional rewrite that reaches a conditional rule becomes condi
     });
 });
 
+describe("the destination is tested in every form the rule's regexp might expect", () => {
+    const strict = (sourceRegex: string) => ({
+        source: "/af",
+        sourceRegex,
+        destination: "/o",
+        has: COOKIE,
+    });
+    it("a trailing-slash destination reaches a regexp that has none", () => {
+        expect(
+            sources({
+                beforeFiles: [rule("/x", "/af/"), strict("^/af$")],
+            }).sort(),
+        ).toEqual(["/af", "/x"]);
+    });
+    it("a destination without the slash reaches a regexp that requires it (trailingSlash apps)", () => {
+        expect(
+            sources({
+                beforeFiles: [rule("/x", "/af"), strict("^/af/$")],
+            }).sort(),
+        ).toEqual(["/af", "/x"]);
+    });
+    it("a plain destination reaches a regexp that carries the basePath", () => {
+        const s = sources(
+            { beforeFiles: [rule("/x", "/af"), strict("^/base/af$")] },
+            { basePath: "/base" },
+        );
+        expect(s.sort()).toEqual(["/af", "/x"]);
+    });
+});
+
 describe("a rewrite whose destination cannot be evaluated statically", () => {
     it("is conditional when ANY conditional rule exists (params / regex captures)", () => {
         const s = sources({
