@@ -736,6 +736,102 @@ describe("the token never leaves the request header (ADR-0068 D10)", () => {
     });
 });
 
+describe("outstanding work is bounded under sustained load (ADR-0068 D6.4, D8)", () => {
+    const tick = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    const COLLAPSED = `kn-${PREFIX}`;
+
+    it("3000 tags spread over 60 flush windows behind a stalled provider collapse to ONE app-tag purge", async () => {
+        const h = await harness(cloudflareEnv().env, { flushIntervalMs: 5 });
+        h.cdn.reply(() => ({ hang: true }));
+        for (let w = 0; w < 60; w++) {
+            h.purger.enqueue(
+                Array.from({ length: 50 }, (_, i) => `w${w}-t${i}`),
+            );
+            await tick(12);
+        }
+        // The backlog never exceeded the cap, whatever the window pattern.
+        expect(h.purger.status().pending).toBeLessThanOrEqual(1000);
+        h.cdn.release();
+        await h.purger.flush();
+
+        // One request was already in flight when the stall began; everything
+        // behind it collapsed into a single app-tag purge.
+        expect(h.cdn.requests.length).toBe(2);
+        expect(tagsOf(h.cdn, 1)).toEqual([COLLAPSED]);
+        // And draining it needs no long virtual wait: the staleness promise
+        // (bounded by the edge TTL) is not silently broken.
+        expect(h.clock.sleeps.reduce((a, b) => a + b, 0)).toBeLessThanOrEqual(
+            300_000,
+        );
+    });
+
+    it("small windows are coalesced into full batches while the provider is slow, not sent one by one", async () => {
+        const h = await harness(cloudflareEnv().env, { flushIntervalMs: 5 });
+        h.cdn.reply((_r, i) => (i === 0 ? { hang: true } : { status: 200 }));
+        for (let w = 0; w < 40; w++) {
+            h.purger.enqueue([`t${w}`]);
+            await tick(12);
+        }
+        h.cdn.release();
+        await h.purger.flush();
+        // 1 in flight + the 39 later single tags merged into one batch.
+        expect(h.cdn.requests.length).toBe(2);
+        expect(tagsOf(h.cdn, 1).length).toBe(39);
+    });
+
+    it("collapses when the projected time to drain at the current rate exceeds the bound", async () => {
+        const h = await harness(
+            cloudflareEnv({ KNEXT_CDN_PURGE_RPM: "1" }).env,
+        );
+        // Spend the whole bucket (25) so no token is in hand.
+        for (let i = 0; i < 25; i++) {
+            h.purger.enqueue([`d${i}`]);
+            await h.purger.flush();
+        }
+        expect(h.cdn.requests.length).toBe(25);
+        // 600 tags = 6 requests at 1/min = 6 virtual minutes: beyond the bound.
+        h.purger.enqueue(Array.from({ length: 600 }, (_, i) => `t${i}`));
+        await h.purger.flush();
+        expect(h.cdn.requests.length).toBe(26);
+        expect(tagsOf(h.cdn, 25)).toEqual([COLLAPSED]);
+    });
+
+    it("counts tokens that have refilled since the bucket was spent", async () => {
+        const h = await harness(
+            cloudflareEnv({ KNEXT_CDN_PURGE_RPM: "1" }).env,
+        );
+        for (let i = 0; i < 25; i++) {
+            h.purger.enqueue([`d${i}`]);
+            await h.purger.flush();
+        }
+        h.clock.advance(10 * 60_000);
+        // 6 requests against 10 refilled tokens: nothing to wait for, no collapse.
+        h.purger.enqueue(Array.from({ length: 600 }, (_, i) => `t${i}`));
+        await h.purger.flush();
+        expect(h.cdn.requests.length).toBe(31);
+        expect(h.clock.sleeps).toEqual([]);
+    });
+
+    it("does NOT collapse a backlog that still drains within the bound", async () => {
+        const h = await harness(
+            cloudflareEnv({ KNEXT_CDN_PURGE_RPM: "1" }).env,
+        );
+        for (let i = 0; i < 25; i++) {
+            h.purger.enqueue([`d${i}`]);
+            await h.purger.flush();
+        }
+        // 400 tags = 4 requests = 4 virtual minutes: inside the bound.
+        h.purger.enqueue(Array.from({ length: 400 }, (_, i) => `t${i}`));
+        await h.purger.flush();
+        expect(h.cdn.requests.length).toBe(29);
+        expect(
+            h.cdn.requests
+                .slice(25)
+                .every((r) => (r.json as Any).tags.length === 100),
+        ).toBe(true);
+    });
+});
+
 describe("non-blocking and drain (ADR-0068 D6.3, D6.6)", () => {
     it("enqueue returns before any network I/O: a hung provider cannot hold the caller", async () => {
         const h = await harness(cloudflareEnv().env, { flushIntervalMs: 5 });

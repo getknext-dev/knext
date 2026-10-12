@@ -196,6 +196,37 @@ describe("no Redis / bad Redis -> no first-ready purge, never a throw", () => {
         expect(r.purged).toBe(false);
     });
 
+    it("a Redis error does not use up the once-per-process attempt: a later call can still claim and purge", async () => {
+        const { cdn, mod, env } = await fixture();
+        const redis = fakeRedis();
+        const a = await pod(cdn, env, mod);
+        let calls = 0;
+        const flaky = {
+            async set(...args: unknown[]) {
+                calls += 1;
+                if (calls === 1) throw new Error("ECONNRESET");
+                return (redis.client as Any).set(...args);
+            },
+        };
+        const first = await a.purger.firstReady("b", flaky);
+        expect(first.purged).toBe(false);
+        const second = await a.purger.firstReady("b", flaky);
+        await a.purger.flush();
+        expect(second.purged).toBe(true);
+        expect(cdn.requests.length).toBe(1);
+    });
+
+    it("having LOST the claim also counts as attempted (the key exists; do not ask again)", async () => {
+        const { cdn, mod, env } = await fixture();
+        const redis = fakeRedis();
+        await (redis.client as Any).set(KEY("b"), "1", "NX");
+        const a = await pod(cdn, env, mod);
+        const first = await a.purger.firstReady("b", redis.client);
+        const again = await a.purger.firstReady("b", redis.client);
+        expect(first.reason).toBe("already_purged");
+        expect(again.reason).toBe("already_attempted");
+    });
+
     it("a missing build id never claims the key", async () => {
         const { cdn, mod, env } = await fixture();
         const redis = fakeRedis();

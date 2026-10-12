@@ -22,8 +22,12 @@
  *                   60 s. 5xx / network: back off 1 s then 2 s. Any other
  *                   4xx/3xx (bad token, bad zone, a redirect) is final: a retry
  *                   cannot fix it. Then give up and count it. Never unbounded.
- *   overflow        the queue holds at most 1000 pending tags. Past that the
- *                   backlog collapses into ONE purge of the app tag `kn-<p>`.
+ *   overflow        the backlog is ONE set, so it is bounded as a whole: more
+ *                   than 1000 tags, or more than 5 minutes of sending at the
+ *                   current rate, collapses it into ONE purge of the app tag
+ *                   `kn-<p>`. A burst spread over many flush windows is bounded
+ *                   exactly like a single burst. While a sender is running, tags
+ *                   that arrive merge into full batches behind it.
  *   drain           every pending/in-flight purge is enrolled in the SIGTERM
  *                   drain registry (`trackWrite`), so a scale-down waits for
  *                   it, up to the registry's own hard cap.
@@ -51,6 +55,13 @@ import { appTag, nextTag } from './tags.js';
 
 /** Pending tags the queue holds before collapsing to the app tag (D6.4). */
 const MAX_PENDING = 1000;
+/**
+ * Longest the backlog may take to drain at the current rate before it collapses
+ * into one app-tag purge. A purge that lands later than the edge TTL evicts
+ * nothing that was not already expiring, so past this point per-tag purging has
+ * stopped buying freshness (jev 0.61 for 5 minutes over 30 s, 60 s, 120 s).
+ */
+const MAX_DRAIN_MS = 300_000;
 /** Attempts per batch, the first one included (D6.4). */
 const MAX_ATTEMPTS = 3;
 /** Upper bound on any Retry-After we will sit through (D6.4). */
@@ -222,17 +233,24 @@ export function createCdnPurger(options = {}) {
   };
 
   // ── queue state ─────────────────────────────────────────────────────────────
-  /** @type {Set<string>} encoded tags waiting for the next flush */
+  /**
+   * Every encoded tag not yet handed to the sender: the ONLY backlog. There is
+   * no second queue behind it, so "outstanding work" and `pending.size` are the
+   * same number and the bounds below cannot be sidestepped by spreading a burst
+   * over several flush windows.
+   * @type {Set<string>}
+   */
   const pending = new Set();
+  /** True while the backlog has been replaced by one app-tag purge not yet sent. */
   let collapsed = false;
   let timer = null;
-  let inflight = 0;
-  let chain = Promise.resolve();
+  /** The single sender: takes <=batchSize tags at a time until the backlog is empty. */
+  let worker = null;
   /** The deferred registered with the SIGTERM drain while any purge work exists. */
   let idle = null;
 
   const settle = () => {
-    if (idle && pending.size === 0 && timer === null && inflight === 0) {
+    if (idle && pending.size === 0 && timer === null && worker === null) {
       const done = idle;
       idle = null;
       done.resolve();
@@ -251,6 +269,11 @@ export function createCdnPurger(options = {}) {
   // ── token bucket ────────────────────────────────────────────────────────────
   let tokens = null;
   let refilledAt = 0;
+  /** Tokens in hand right now, refill included, without taking one. */
+  function availableTokens(c) {
+    if (tokens === null) return c.bucket;
+    return Math.min(c.bucket, tokens + ((now() - refilledAt) * c.rpm) / 60_000);
+  }
   async function acquire(c) {
     if (tokens === null) {
       tokens = c.bucket;
@@ -321,55 +344,82 @@ export function createCdnPurger(options = {}) {
     say('warn', `purge gave up: provider=${c.provider} ${what} tags=${batch.length} attempts=${attempts}; stale until the edge TTL`);
   }
 
-  async function sendAll(c, tags) {
+  /** Take up to `size` tags off the backlog. */
+  function take(size) {
+    const batch = [];
+    for (const tag of pending) {
+      batch.push(tag);
+      pending.delete(tag);
+      if (batch.length >= size) break;
+    }
+    return batch;
+  }
+
+  async function runWorker(c) {
     try {
-      for (let i = 0; i < tags.length; i += c.batchSize) {
-        await sendBatch(c, tags.slice(i, i + c.batchSize));
+      while (pending.size > 0) {
+        const batch = take(c.batchSize);
+        if (collapsed && batch.includes(appTag(c.prefix))) collapsed = false;
+        await sendBatch(c, batch);
       }
     } catch {
-      // Nothing above throws; this keeps the shared chain alive if that ever changes.
+      // Nothing above throws; this keeps the worker's promise from rejecting.
     }
   }
 
-  /** Move everything pending into the serial send chain. Returns the chain. */
-  function startFlush() {
+  /** Start the sender if it is not running. Returns a promise for "backlog sent". */
+  function kick() {
     if (timer !== null) {
       clearTimeout(timer);
       timer = null;
     }
     const c = cfg();
-    if (pending.size > 0 && c.state === 'ready') {
-      const tags = [...pending];
-      pending.clear();
-      collapsed = false;
-      inflight += 1;
-      chain = chain.then(() => sendAll(c, tags)).finally(() => {
-        inflight -= 1;
-        settle();
+    if (worker === null && pending.size > 0 && c.state === 'ready') {
+      worker = runWorker(c).finally(() => {
+        worker = null;
+        // A tag that arrived between the loop's last check and here still needs a sender.
+        if (pending.size > 0) schedule(c);
+        else settle();
       });
     }
     settle();
-    return chain;
+    return worker ?? Promise.resolve();
   }
 
   function schedule(c) {
     track();
+    // A running sender picks up whatever arrives, in full batches.
+    if (worker !== null) return;
     if (pending.size >= c.batchSize) {
       if (timer !== null) clearTimeout(timer);
-      timer = setTimeout(startFlush, 0);
+      timer = setTimeout(kick, 0);
     } else if (timer === null) {
-      timer = setTimeout(startFlush, flushIntervalMs);
+      timer = setTimeout(kick, flushIntervalMs);
     }
+  }
+
+  /**
+   * Is the backlog past what we are willing to carry? Two bounds (D6.4, D8):
+   *   - count: more than MAX_PENDING tags outstanding;
+   *   - time: the requests needed to send it, minus the tokens in hand, take
+   *     longer than MAX_DRAIN_MS at the configured rate.
+   * Retry waits are not projected (they are bounded per batch by MAX_ATTEMPTS and
+   * the Retry-After cap); a long stall shows up as backlog and trips the count.
+   */
+  function overBudget(c) {
+    if (pending.size > MAX_PENDING) return true;
+    const requests = Math.ceil(pending.size / c.batchSize);
+    return (Math.max(0, requests - availableTokens(c)) * 60_000) / c.rpm > MAX_DRAIN_MS;
   }
 
   function add(c, encoded) {
     if (collapsed) return;
     pending.add(encoded);
-    if (pending.size > MAX_PENDING) {
+    if (overBudget(c)) {
       pending.clear();
       pending.add(appTag(c.prefix));
       collapsed = true;
-      sayOnce('overflow', 'warn', `purge queue exceeded ${MAX_PENDING} tags; collapsing the backlog into one purge of this app's tag`);
+      sayOnce('overflow', 'warn', "purge backlog exceeded its bound; collapsing it into one purge of this app's tag");
     }
   }
 
@@ -437,8 +487,9 @@ export function createCdnPurger(options = {}) {
         if (attempted.has(buildId)) return { purged: false, reason: 'already_attempted' };
         const client = typeof redis === 'function' ? await redis() : redis;
         if (!client) return { purged: false, reason: 'no_redis' };
-        attempted.add(buildId);
         const won = await claim(client, `knext:cdn:purged:${c.prefix}:${buildId}`);
+        // Only a reply (win OR lose) uses up the attempt: an error or a missing client must not.
+        attempted.add(buildId);
         if (!won) return { purged: false, reason: 'already_purged' };
         add(c, appTag(c.prefix));
         schedule(c);
@@ -451,7 +502,7 @@ export function createCdnPurger(options = {}) {
 
     /** Send everything queued now and resolve when every purge in flight has settled. */
     async flush() {
-      await startFlush();
+      await kick();
     },
 
     /** Non-secret state, for diagnostics. */
