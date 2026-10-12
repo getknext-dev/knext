@@ -53,7 +53,7 @@ framework, compiled into one executable — does not use this adapter; see
 
 - defaults `output` to `'standalone'`, so `next build` emits a self-contained server — you do not add
   this yourself. If you set `output: 'export'`, the adapter leaves it alone and the knext CLI refuses
-  the Next.js build, because a static export is not a server deployment: remove it, or host the `out/` folder
+  the build (Next.js or vinext target), because a static export is not a server deployment: remove it, or host the `out/` folder
   on a static host;
 - uploads your static assets after the build, keyed by build ID.
 

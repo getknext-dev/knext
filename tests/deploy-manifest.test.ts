@@ -115,6 +115,7 @@ const KNOWN_UNSUPPORTED_CATEGORIES = new Set([
   'ppr',
   'cache-components',
   'image-optimization',
+  'static-export',
 ]);
 
 const manifest: Manifest = existsSync(MANIFEST_PATH)
@@ -787,6 +788,8 @@ const VERCEL_COUPLED_FILE_QUARANTINES: Record<
   {
     childIssue: number;
     observedRuns: string[];
+    /** The NEXTJS_REF the entry was observed at. Defaults to v16.3.5 (the rc.2 cohort). */
+    observedRef?: string;
     stubRuns?: string[];
     upstreamRef?: string;
     upstreamIssue?: string;
@@ -823,6 +826,57 @@ const VERCEL_COUPLED_FILE_QUARANTINES: Record<
     upstreamRef: 'vercel/next.js#94905',
     upstreamIssue: 'vercel/next.js#99435',
   },
+  // #2128 / #2129 — Next 16.4.0 smoke dispatch (all four cells (node/bun x turbopack/webpack)).
+  // Observed at v16.4.0, not the v16.3.5 cohort; the ref-stamp gate below still
+  // requires the default ref to reach v16.4.0 before these entries are admissible.
+  'test/e2e/app-dir/empty-generate-static-params/empty-generate-static-params.test.ts': {
+    childIssue: 2128,
+    observedRuns: ['38040527044', '38161219571', '38174324666', '38181750458', '38186195085'],
+    observedRef: 'v16.4.0',
+  },
+  'test/e2e/app-dir/use-cache-segment-configs/use-cache-segment-configs.test.ts': {
+    childIssue: 2128,
+    observedRuns: ['38040527044', '38161219571', '38174324666', '38181750458', '38186195085'],
+    observedRef: 'v16.4.0',
+  },
+  'test/e2e/app-dir/cache-components-allow-otel-spans/cache-components-allow-otel-spans.test.ts': {
+    childIssue: 2129,
+    observedRuns: ['38040527044', '38161219571', '38174324666', '38181750458', '38186195085'],
+    observedRef: 'v16.4.0',
+  },
+  'test/e2e/app-dir/segment-cache/cached-navigations/cached-navigations.test.ts': {
+    childIssue: 2129,
+    observedRuns: ['38040527044', '38161219571', '38174324666', '38181750458', '38186195085'],
+    observedRef: 'v16.4.0',
+  },
+  'test/e2e/app-dir/partial-fallback-shell-upgrade/partial-fallback-shell-upgrade.test.ts': {
+    childIssue: 2128,
+    observedRuns: ['38040527044', '38161219571', '38174324666', '38181750458', '38186195085'],
+    observedRef: 'v16.4.0',
+  },
+  'test/e2e/app-dir/metadata-streaming-parallel-routes/metadata-streaming-parallel-routes.test.ts':
+    {
+      childIssue: 2127,
+      observedRuns: ['38040527044', '38161219571', '38174324666', '38181750458', '38186195085'],
+      observedRef: 'v16.4.0',
+    },
+  'test/e2e/app-dir/segment-cache/metadata/segment-cache-metadata.test.ts': {
+    childIssue: 2127,
+    observedRuns: ['38040527044', '38161219571', '38174324666', '38181750458', '38186195085'],
+    observedRef: 'v16.4.0',
+  },
+  // #2162 (C2) — residual of the #2123 harness fix: the file now reaches its assertions and
+  // asserts Vercel's checkout path (`sourceFileUrl`, upstream test lines 43-55). All four cells.
+  'test/e2e/app-dir/non-root-project-monorepo/non-root-project-monorepo.test.ts': {
+    childIssue: 2128,
+    observedRuns: ['38161219571', '38174324666', '38181750458', '38186195085'],
+    observedRef: 'v16.4.0',
+  },
+  'test/e2e/app-dir/prerender-encoding/prerender-encoding.test.ts': {
+    childIssue: 2127,
+    observedRuns: ['38040527044', '38161219571', '38174324666', '38181750458', '38186195085'],
+    observedRef: 'v16.4.0',
+  },
 };
 
 describe('deploy-tests-manifest — vercel-infra-coupled family (ADR-0007 §h, #1571)', () => {
@@ -846,12 +900,13 @@ describe('deploy-tests-manifest — vercel-infra-coupled family (ADR-0007 §h, #
   });
 
   it('every §h file has a complete level:"file" ledger record — mechanism, cases, run-cited evidence', () => {
-    for (const [file, { observedRuns, stubRuns }] of coupled) {
+    for (const [file, { observedRuns, stubRuns, observedRef }] of coupled) {
       const ledger = quarantines.find((q) => q.test === file);
       expect(ledger, `no $knextQuarantines ledger entry for §h file ${file}`).toBeTruthy();
       expect(ledger?.level, `${file}: §h quarantine must declare level:"file"`).toBe('file');
       expect(ledger?.family, `${file}: §h family`).toBe('vercel-infra-coupled');
-      expect(ledger?.nextjsRef, `${file}: observed at v16.3.5`).toBe('v16.3.5');
+      const expectedRef = observedRef ?? 'v16.3.5';
+      expect(ledger?.nextjsRef, `${file}: observed at ${expectedRef}`).toBe(expectedRef);
       expect((ledger?.cases ?? []).length, `${file}: failing cases preserved`).toBeGreaterThan(0);
       // The mechanism must name the deploy branch it rests on — the whole §h bar.
       expect(
@@ -946,8 +1001,13 @@ describe('$knextQuarantines ref stamps — re-audit on NEXTJS_REF bump (#181/#17
     return `v${pin.shippedNextPin}`;
   }
 
-  const quarantines: KnextQuarantine[] =
-    (manifest as unknown as { $knextQuarantines?: KnextQuarantine[] }).$knextQuarantines ?? [];
+  // The upstream-runtime-defect ledger (ADR-0007 amendment 2026-10-12) is stamped and
+  // re-audited exactly like a quarantine: a ref bump must not strand it on a stale ref.
+  const quarantines: KnextQuarantine[] = [
+    ...((manifest as unknown as { $knextQuarantines?: KnextQuarantine[] }).$knextQuarantines ?? []),
+    ...((manifest as unknown as { $knextUpstreamRuntimeDefects?: KnextQuarantine[] })
+      .$knextUpstreamRuntimeDefects ?? []),
+  ];
 
   it('has quarantine entries to stamp (sanity)', () => {
     expect(quarantines.length).toBeGreaterThan(0);

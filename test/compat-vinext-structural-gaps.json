@@ -71,16 +71,6 @@
       ]
     },
     {
-      "test": "test/e2e/app-dir/partial-fallback-shell-upgrade/partial-fallback-shell-upgrade.test.ts",
-      "cases": [
-        "should let a segment prefetch trigger the background shell upgrade",
-        "should not keep upgrading once only fully dynamic params remain",
-        "should not specialize a generic shell into a more specific shell",
-        "should not upgrade the fallback shell to a route shell",
-        "should upgrade a generic shell into the most specific prerendered shell"
-      ]
-    },
-    {
       "test": "test/e2e/app-dir/partial-prefetching-config/partial-prefetching-config.test.ts",
       "cases": ["does not prefetch dynamic data, even when <Link prefetch={true}>"]
     },
@@ -132,24 +122,6 @@
     {
       "test": "test/e2e/app-dir/segment-cache/cached-navigations/cached-navigations-partial-prefetching.test.ts",
       "cases": ["runtime-caches a route that has no per-segment prefetch config"]
-    },
-    {
-      "test": "test/e2e/app-dir/segment-cache/cached-navigations/cached-navigations.test.ts",
-      "cases": [
-        "caches a fully static page from the initial HTML for subsequent navigations",
-        "caches a partially static page from the initial HTML for subsequent navigations",
-        "caches runtime-prefetchable content from a navigation for instant second visit",
-        "caches runtime-prefetchable content from the initial HTML for subsequent navigations",
-        "caches static segments when navigating to a known route without a prefetch",
-        "defers fallback params to the runtime stage",
-        "includes static params in the cached static stage",
-        "reuses cached page segment across different fallback params after initial HTML load",
-        "reuses cached page segment across different fallback params after navigation",
-        "runtime-caches a route with prefetch = \"partial\"",
-        "runtime-caches a route with prefetch = \"unstable_eager\"",
-        "serves a fully static page without any requests on the second navigation",
-        "serves cached static segments instantly on the second navigation"
-      ]
     },
     {
       "test": "test/e2e/app-dir/segment-cache/dynamic-on-hover/dynamic-on-hover.test.ts",
