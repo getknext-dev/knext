@@ -261,6 +261,34 @@ Rules:
   (Kubernetes applies `envFrom` first, then explicit variables on top). Keeping
   `env` names and `envFrom` Secret keys disjoint is your responsibility.
 
+### `networking` (Optional)
+Controls the app's network exposure.
+```yaml
+spec:
+  networking:
+    visibility: cluster-local   # "public" (default) | "cluster-local"
+    publicHosts:                # optional; first entry is the fallback origin
+      - www.example.com
+      - app.example.org
+```
+- `visibility: cluster-local` renders the Knative `networking.knative.dev/visibility`
+  label so the Route is reachable only from inside the cluster.
+- `publicHosts` lists the public hostnames the app is served on. The operator
+  renders them as `KNEXT_PUBLIC_ORIGINS` (`https://<host>`, comma-joined, in
+  list order), the allowlist the runtime uses to rewrite a redirect `Location`
+  whose origin is the pod's wildcard bind address to a public origin. Each entry
+  must be a lowercase DNS hostname — no scheme, port, path, userinfo, wildcard
+  or comma, and not `0.0.0.0` — at most 32 entries; anything else is rejected
+  when you apply the resource. An empty or unset list renders no variable.
+- **Precedence:** a `KNEXT_PUBLIC_ORIGINS` set by hand in `spec.env` or
+  `spec.secrets.envMap` wins and `publicHosts` is then ignored (no duplicate
+  entry, no Warning), so setups that set the variable before this field existed
+  keep working. A `KNEXT_PUBLIC_ORIGINS` key inside a `secrets.envFrom` Secret is
+  shadowed by `publicHosts`, because Kubernetes applies `envFrom` first.
+- **Upgrade order:** `publicHosts` is a new field. An operator/CRD that predates
+  it rejects a resource that carries it, so upgrade the operator/CRD first, then
+  the CLI.
+
 ### `secrets` (Optional)
 Maps Kubernetes `Secret` resources directly into the Next.js environment variables.
 This is the CR's mechanism for **secret-backed** environment variables (plain

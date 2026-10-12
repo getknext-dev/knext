@@ -2,11 +2,14 @@
  * (b2) operator VERSION and its pairing with this CLI (#1947).
  *
  * Reads the version the operator bundle stamped on the manager Deployment
- * (`app.kubernetes.io/version`, falling back to a semver image tag) and applies
- * the documented pairing rule (see `classifyOperatorCompat`). Everything here
- * is a WARN at worst — the schema preflight (`preflightCRSchema`) is the
- * authoritative "can this cluster store what the CLI emits" gate; this row
- * tells the user WHICH release to pin or move to.
+ * (`app.kubernetes.io/version`, falling back to a semver image tag) and adds an
+ * informational staleness note (see `classifyOperatorCompat`). Everything here
+ * is a WARN at worst. The pairing verdict is NOT decided here: that is the
+ * NextApp CRD row (the CRD apiVersion this CLI emits must be served), because
+ * the operator keeps its own major line when the packages go to 2.0. The schema
+ * preflight (`preflightCRSchema`) is the authoritative "can this cluster store
+ * what the CLI emits" gate; this row tells the user WHICH release to pin or
+ * move to.
  */
 
 import {
@@ -119,11 +122,8 @@ export function operatorVersionCheck(ctx: CheckContext): CheckResult[] {
                 mk(
                     ID,
                     TITLE,
-                    "warn",
-                    `${base}; operator major ${v.parsed.major} differs from CLI major ${cli.major} (${ctx.deps.cliVersion}) — outside the supported pairing`,
-                    pinHint(
-                        `Use an operator release whose major is ${cli.major}, or the CLI release that matches this operator.`,
-                    ),
+                    "pass",
+                    `${base}; different major from CLI ${ctx.deps.cliVersion} (the operator keeps its own version line) — supported pairing is decided by the CRD API version, see the NextApp CRD row`,
                 ),
             ];
     }

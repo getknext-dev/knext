@@ -207,8 +207,8 @@ const MUTATIONS = [
     label: 'standalone-compile: dropped-specifier notes always printed (default build noisy again)',
     subject: 'standaloneCompileMjs',
     spec: DROP_SPEC,
-    anchor: '    if (VERBOSE) {\n        console.error(line);',
-    replacement: '    if (true) {\n        console.error(line);',
+    anchor: 'String(err)}`;\n    if (VERBOSE) {\n        console.error(line);',
+    replacement: 'String(err)}`;\n    if (true) {\n        console.error(line);',
   },
   {
     label: 'standalone-compile: a FAILED compile no longer prints the held notes',

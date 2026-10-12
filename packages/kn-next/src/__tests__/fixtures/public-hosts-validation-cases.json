@@ -1,0 +1,293 @@
+{
+  "$comment": "Shared by validate-public-hosts.test.ts (the CLI) and networking_public_hosts_test.go (the CRD's CEL rules, in a real apiserver). One table, so the two validators cannot disagree about a boundary. Generated once; edit by regenerating, keeping valid/invalid rows on both sides of every bound.",
+  "cases": [
+    {
+      "name": "plain DNS name",
+      "valid": true,
+      "hosts": [
+        "www.example.com"
+      ]
+    },
+    {
+      "name": "single label",
+      "valid": true,
+      "hosts": [
+        "localhost"
+      ]
+    },
+    {
+      "name": "two entries",
+      "valid": true,
+      "hosts": [
+        "www.example.com",
+        "app.example.org"
+      ]
+    },
+    {
+      "name": "digits and hyphens inside labels",
+      "valid": true,
+      "hosts": [
+        "a-1.b2-c.example.com"
+      ]
+    },
+    {
+      "name": "punycode xn-- label",
+      "valid": true,
+      "hosts": [
+        "xn--bcher-kva.example"
+      ]
+    },
+    {
+      "name": "label of exactly 63 characters",
+      "valid": true,
+      "hosts": [
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.example.com"
+      ]
+    },
+    {
+      "name": "name of exactly 253 characters",
+      "valid": true,
+      "hosts": [
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.ddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      ]
+    },
+    {
+      "name": "32 entries (the maximum)",
+      "valid": true,
+      "hosts": [
+        "h0.example.com",
+        "h1.example.com",
+        "h2.example.com",
+        "h3.example.com",
+        "h4.example.com",
+        "h5.example.com",
+        "h6.example.com",
+        "h7.example.com",
+        "h8.example.com",
+        "h9.example.com",
+        "h10.example.com",
+        "h11.example.com",
+        "h12.example.com",
+        "h13.example.com",
+        "h14.example.com",
+        "h15.example.com",
+        "h16.example.com",
+        "h17.example.com",
+        "h18.example.com",
+        "h19.example.com",
+        "h20.example.com",
+        "h21.example.com",
+        "h22.example.com",
+        "h23.example.com",
+        "h24.example.com",
+        "h25.example.com",
+        "h26.example.com",
+        "h27.example.com",
+        "h28.example.com",
+        "h29.example.com",
+        "h30.example.com",
+        "h31.example.com"
+      ]
+    },
+    {
+      "name": "name of 254 characters",
+      "valid": false,
+      "hosts": [
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      ]
+    },
+    {
+      "name": "label of 64 characters",
+      "valid": false,
+      "hosts": [
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.example.com"
+      ]
+    },
+    {
+      "name": "33 entries (over the maximum)",
+      "valid": false,
+      "hosts": [
+        "h0.example.com",
+        "h1.example.com",
+        "h2.example.com",
+        "h3.example.com",
+        "h4.example.com",
+        "h5.example.com",
+        "h6.example.com",
+        "h7.example.com",
+        "h8.example.com",
+        "h9.example.com",
+        "h10.example.com",
+        "h11.example.com",
+        "h12.example.com",
+        "h13.example.com",
+        "h14.example.com",
+        "h15.example.com",
+        "h16.example.com",
+        "h17.example.com",
+        "h18.example.com",
+        "h19.example.com",
+        "h20.example.com",
+        "h21.example.com",
+        "h22.example.com",
+        "h23.example.com",
+        "h24.example.com",
+        "h25.example.com",
+        "h26.example.com",
+        "h27.example.com",
+        "h28.example.com",
+        "h29.example.com",
+        "h30.example.com",
+        "h31.example.com",
+        "h32.example.com"
+      ]
+    },
+    {
+      "name": "uppercase",
+      "valid": false,
+      "hosts": [
+        "WWW.example.com"
+      ]
+    },
+    {
+      "name": "mixed case",
+      "valid": false,
+      "hosts": [
+        "www.Example.com"
+      ]
+    },
+    {
+      "name": "trailing dot",
+      "valid": false,
+      "hosts": [
+        "example.com."
+      ]
+    },
+    {
+      "name": "leading dot",
+      "valid": false,
+      "hosts": [
+        ".example.com"
+      ]
+    },
+    {
+      "name": "empty label (double dot)",
+      "valid": false,
+      "hosts": [
+        "example..com"
+      ]
+    },
+    {
+      "name": "IPv6 literal in brackets",
+      "valid": false,
+      "hosts": [
+        "[::1]"
+      ]
+    },
+    {
+      "name": "bare IPv6 literal",
+      "valid": false,
+      "hosts": [
+        "::1"
+      ]
+    },
+    {
+      "name": "scheme prefix",
+      "valid": false,
+      "hosts": [
+        "https://example.com"
+      ]
+    },
+    {
+      "name": "path",
+      "valid": false,
+      "hosts": [
+        "example.com/x"
+      ]
+    },
+    {
+      "name": "port",
+      "valid": false,
+      "hosts": [
+        "example.com:8080"
+      ]
+    },
+    {
+      "name": "userinfo",
+      "valid": false,
+      "hosts": [
+        "user@example.com"
+      ]
+    },
+    {
+      "name": "wildcard",
+      "valid": false,
+      "hosts": [
+        "*.example.com"
+      ]
+    },
+    {
+      "name": "whitespace",
+      "valid": false,
+      "hosts": [
+        "exa mple.com"
+      ]
+    },
+    {
+      "name": "empty entry",
+      "valid": false,
+      "hosts": [
+        ""
+      ]
+    },
+    {
+      "name": "label ending in a hyphen",
+      "valid": false,
+      "hosts": [
+        "example-.com"
+      ]
+    },
+    {
+      "name": "label starting with a hyphen",
+      "valid": false,
+      "hosts": [
+        "-example.com"
+      ]
+    },
+    {
+      "name": "underscore",
+      "valid": false,
+      "hosts": [
+        "ex_ample.com"
+      ]
+    },
+    {
+      "name": "unicode (not punycode)",
+      "valid": false,
+      "hosts": [
+        "bücher.example"
+      ]
+    },
+    {
+      "name": "comma smuggled into one entry",
+      "valid": false,
+      "hosts": [
+        "a.example.com,b.example.com"
+      ]
+    },
+    {
+      "name": "wildcard bind address 0.0.0.0",
+      "valid": false,
+      "hosts": [
+        "0.0.0.0"
+      ]
+    },
+    {
+      "name": "wildcard bind shorthand 0",
+      "valid": false,
+      "hosts": [
+        "0"
+      ]
+    }
+  ]
+}

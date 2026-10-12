@@ -67,6 +67,26 @@ updates:
     directories:
       - '/'
       - '/.github/actions/*'
+    # Workflows a bump must not rewrite while a credential window is live.
+    # FROZEN files (the harness a credential run hashes, plus the freeze
+    # guard's own files): .github/workflows/compat-credential-freeze-guard.yml
+    # refuses any PR that touches one while rcTag is non-null, and an inherited
+    # rcBumpMarker exempts nothing. DERIVED file: compat-credential-v1.3.yml is
+    # generated from the pinned tag's test-e2e-deploy.yml and checked byte for
+    # byte, so a bot edit breaks the derivation. Both went red on one grouped
+    # bump PR (#2205). Their pins move by hand, under a reviewed marker or a
+    # regeneration, never by the weekly bump.
+    #
+    # tests/dependabot-credential-excludes.test.ts derives this list from
+    # frozenFileSet() and CREDENTIAL_LINES, so it cannot drift from the freeze
+    # guard. Exact paths on purpose: a glob here could silence the channel.
+    # Schema: `exclude-paths` is a per-entry string array of repo-root-relative
+    # paths; spring-boot and dotnet/runtime use it on github-actions entries.
+    exclude-paths:
+      - '.github/workflows/compat-credential-freeze-guard.yml'
+      - '.github/workflows/compat-credential-v1.3.yml'
+      - '.github/workflows/compat-vinext.yml'
+      - '.github/workflows/test-e2e-deploy.yml'
     schedule:
       interval: 'weekly'
     # ~20 distinct actions are pinned across every workflow (#528). Ungrouped,

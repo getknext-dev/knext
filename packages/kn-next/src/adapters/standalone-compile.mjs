@@ -256,6 +256,38 @@ function isInside(path, root) {
     return path === root || path.startsWith(`${root}/`);
 }
 
+/** `./x`, `../x` — a path relative to the importer. */
+function isRelativeSpecifier(spec) {
+    return spec.startsWith("./") || spec.startsWith("../");
+}
+
+/**
+ * Next's own server code inside the traced tree. An unresolvable RELATIVE
+ * require from here is one the framework itself guards (Next 16.4's
+ * `router-server` requires `../../lib/upgrade/nudge` in a dev-only branch,
+ * and its tracer deliberately leaves `lib/upgrade/**` out of the standalone
+ * output), so the uncompiled server never reaches it either. The same miss
+ * from anywhere else — the user's own code, any other package — is a real
+ * defect and must keep failing the compile.
+ */
+const NEXT_OWN_CODE = /\/node_modules\/next\/dist\//;
+
+const NOTED_UNRESOLVED_RELATIVE = new Set();
+
+function noteUnresolvedRelative(spec, importer) {
+    const key = `${spec}\0${importer}`;
+    if (NOTED_UNRESOLVED_RELATIVE.has(key)) return;
+    NOTED_UNRESOLVED_RELATIVE.add(key);
+    // Held like the dropped-specifier notes: every Next 16.4 build hits this one,
+    // and a healthy build must not look broken. A failed compile prints it first.
+    const line = `[knext standalone-compile] left ${JSON.stringify(spec)} as a runtime require: not in the traced tree, required from Next's own ${relative(ROOT, importer)}`;
+    if (VERBOSE) {
+        console.error(line);
+    } else {
+        QUIET_NOTES.push(line);
+    }
+}
+
 const PRELOAD_SET = new Set(PRELOADS);
 
 /** `next`, `@swc/helpers/_/x` — not `./x`, `/abs`, or a builtin. */
@@ -718,6 +750,13 @@ const standaloneResolver = {
                 // at that require if it were ever reached; a runtime require
                 // keeps exactly that behaviour instead of failing the compile.
                 return { path: a.path, external: true };
+            }
+            if (isRelativeSpecifier(a.path)) {
+                const importer = realpathSafe(a.importer);
+                if (isInside(importer, ROOT) && NEXT_OWN_CODE.test(importer)) {
+                    noteUnresolvedRelative(a.path, importer);
+                    return { path: a.path, external: true };
+                }
             }
             return undefined;
         });

@@ -331,6 +331,24 @@ else
   fi
 fi
 
+# ── #2214 (upward-distdir): the staged project's repo root, stated explicitly.
+# Next >= 16.4's verifyDistDir resolves a fixture's `distDir` against `repoRoot`
+# (next/src/server/config.ts): NEXT_PRIVATE_OUTPUT_TRACE_ROOT when set, otherwise
+# the directory of the nearest lockfile. The staged project has no lockfile (the
+# adapter install is `--no-save`), so a fixture that builds one directory down
+# (`pnpm next build apps/x`) with an upward distDir (`../.next`) saw the APP dir as
+# its workspace root and died with InvalidDistDirError. Setting the env var is
+# what a deploying platform's builder does (Next's own root-detection tests say
+# "Vercel's builder sets NEXT_PRIVATE_OUTPUT_TRACE_ROOT"); a stub lockfile would
+# instead be read by every later npm/pnpm step. An explicit `outputFileTracingRoot`
+# / `turbopack.root` in a fixture still wins, and a fixture built AT the repo root
+# resolves to the same directory as before. Gated on the same stable >= 16.4.0
+# read as the flag forwarding above, so every older lane is untouched; a caller's
+# own value is kept.
+if [ "${NEXT_FLAGS_BAKED}" = "baked" ]; then
+  export NEXT_PRIVATE_OUTPUT_TRACE_ROOT="${NEXT_PRIVATE_OUTPUT_TRACE_ROOT:-${APP_DIR}}"
+fi
+
 # ── 2. build the fixture app through the knext adapter ────────────────────────
 # #147 A3-3 fix round 1, follow-up (branch run 28561839378): a bare `next build`
 # resolved NOTHING in the harness env — the fixture's node_modules/.bin is NOT on
@@ -356,6 +374,18 @@ fi
 # never skew apart.
 DEPLOYMENT_ID="${NEXT_DEPLOYMENT_ID:-knext-$(date +%s)-$$}"
 export NEXT_DEPLOYMENT_ID="${DEPLOYMENT_ID}"
+
+# ── #2123: pick the port BEFORE the build and export PORT to build AND run.
+# A fixture config may read `process.env.PORT` while `next build` evaluates it
+# (`serverActions.allowedOrigins: ['localhost:' + process.env.PORT]`, the
+# actions-allowed-origins fixture) and the standalone server bakes the result.
+# Picking the port only at boot made that `localhost:undefined`, so the forged
+# `x-forwarded-host` the page sends was rejected. `next start` with a forced
+# port gives the same fixture the same thing. Step 4 keeps this port unless
+# something took it during the build (then it logs and picks a new one: the
+# free_port TOCTOU window now spans the build).
+PORT="$(free_port)"
+export PORT
 
 # ── B4 (#147 round 2): persist the FULL `next build` output. Harness tests
 # assert on build warnings via fetchCliOutputs() → scripts/e2e-logs.sh, which
@@ -403,7 +433,25 @@ fi
 # binary. A build script that does not start with `next build` is logged and
 # ignored (the direct pinned-binary invocation stays authoritative).
 FIXTURE_BUILD_SCRIPT="$(node -e 'try{const s=((require(process.cwd()+"/package.json").scripts||{}).build)||"";process.stdout.write(String(s))}catch(_){}')"
-if [ -n "${FIXTURE_BUILD_SCRIPT}" ]; then
+# #2123: the fixture's own hooks. `npm run build` runs `prebuild`/`postbuild`
+# around `build`; the pinned-binary path skipped them, so a fixture whose
+# `prebuild` creates something its next.config reads (turbopack-additional-roots
+# symlinks `linked`) died in config load. They run in BOTH modes below.
+FIXTURE_PREBUILD_SCRIPT="$(node -e 'try{process.stdout.write(String(((require(process.cwd()+"/package.json").scripts||{}).prebuild)||""))}catch(_){}')"
+FIXTURE_POSTBUILD_SCRIPT="$(node -e 'try{process.stdout.write(String(((require(process.cwd()+"/package.json").scripts||{}).postbuild)||""))}catch(_){}')"
+# #2123: a build script that is NOT a plain `next build` (monorepo wrappers:
+# `pnpm run --dir apps/web build`, `nx run app:build`, `pnpm next build apps/x`)
+# is the fixture's contract, so it is RUN, not replaced by a bare `next build`
+# at the root (which finds no app directory). The harness's own
+# `&& pnpm post-build` tail is dropped: e2e-logs.sh already provides the ids it
+# prints, and a runner may have no pnpm for it.
+FIXTURE_SCRIPT_TO_RUN=""
+if [ -n "${FIXTURE_BUILD_SCRIPT}" ] && ! printf '%s' "${FIXTURE_BUILD_SCRIPT}" | grep -q '^next build'; then
+  FIXTURE_SCRIPT_TO_RUN="$(node -e '
+    process.stdout.write((process.argv[1] || "").replace(/\s*&&\s*pnpm post-build\s*$/, "").trim());
+  ' "${FIXTURE_BUILD_SCRIPT}")"
+  log "fixture build script does not start with 'next build' — running the script itself (harness post-build tail dropped): ${FIXTURE_SCRIPT_TO_RUN}"
+elif [ -n "${FIXTURE_BUILD_SCRIPT}" ]; then
   FIXTURE_BUILD_ARGS="$(node -e '
     const s = process.argv[1] || "";
     const first = s.split("&&")[0].trim();
@@ -413,11 +461,48 @@ if [ -n "${FIXTURE_BUILD_SCRIPT}" ]; then
   if [ -n "${FIXTURE_BUILD_ARGS}" ]; then
     log "forwarding fixture build-script args: ${FIXTURE_BUILD_ARGS}"
     NEXT_BUILD_ARGS="${NEXT_BUILD_ARGS} ${FIXTURE_BUILD_ARGS}"
-  elif ! printf '%s' "${FIXTURE_BUILD_SCRIPT}" | grep -q '^next build'; then
-    log "fixture build script does not start with 'next build' — running the pinned binary without its args: ${FIXTURE_BUILD_SCRIPT}"
   fi
 fi
 
+# #2123: run a fixture hook / build script the way `npm run` would — the
+# fixture's node_modules/.bin first on PATH (the pinned `next`, `nx`, ...), the
+# adapter env (NEXT_ADAPTER_PATH, NEXT_DEPLOYMENT_ID, PORT) already exported, cwd
+# the project root. A failing hook fails the deploy (pipefail + set -e).
+run_fixture_hook() {
+  PATH="${APP_DIR}/node_modules/.bin:${PATH}" sh -c "$1"
+}
+
+# Lane scope of the hooks: a plain `next build` fixture on Next < 16.4.0 (or an
+# unreadable version) keeps the pre-#2123 path exactly — no fixture in the 16.3.x
+# manifests relies on a hook, and running one there would be a behaviour change
+# on the live credential lanes for no gain. A wrapper script (the fixture's own
+# contract) and Next >= 16.4.0 run them.
+if [ -z "${FIXTURE_SCRIPT_TO_RUN}" ] && [ "${NEXT_FLAGS_BAKED}" != "baked" ] \
+  && { [ -n "${FIXTURE_PREBUILD_SCRIPT}" ] || [ -n "${FIXTURE_POSTBUILD_SCRIPT}" ]; }; then
+  log "Next < 16.4.0 (or unreadable): not running the fixture's prebuild/postbuild hooks (unchanged legacy path)"
+  FIXTURE_PREBUILD_SCRIPT=""
+  FIXTURE_POSTBUILD_SCRIPT=""
+fi
+
+# A wrapper script cannot take `next build --experimental-next-config-strip-types`
+# (B2 #173); the flag only sets this env var in next/dist/bin/next, so set it
+# directly when the project, or a nested app, has a TS next config.
+if [ -n "${FIXTURE_SCRIPT_TO_RUN}" ] \
+  && [ -n "$(find "${APP_DIR}" -maxdepth 4 \( -name node_modules -o -name .next \) -prune -o \( -name 'next.config.ts' -o -name 'next.config.mts' \) -print 2>/dev/null | head -n1)" ]; then
+  export __NEXT_NODE_NATIVE_TS_LOADER_ENABLED=true
+  log "next.config.(m)ts detected — exporting __NEXT_NODE_NATIVE_TS_LOADER_ENABLED=true for the wrapper script (B2 #173)"
+fi
+
+: > "${BUILD_LOG}"
+if [ -n "${FIXTURE_PREBUILD_SCRIPT}" ]; then
+  log "running the fixture prebuild hook: ${FIXTURE_PREBUILD_SCRIPT}"
+  { run_fixture_hook "${FIXTURE_PREBUILD_SCRIPT}" 2>&1 | tee -a "${BUILD_LOG}" >&2; }
+fi
+
+if [ -n "${FIXTURE_SCRIPT_TO_RUN}" ]; then
+  log "running the fixture build script (deployment=${DEPLOYMENT_ID}, build log → ${BUILD_LOG})"
+  { run_fixture_hook "${FIXTURE_SCRIPT_TO_RUN}" 2>&1 | tee -a "${BUILD_LOG}" >&2; }
+else
 log "running next build (output:'standalone') via ${NEXT_BIN} (deployment=${DEPLOYMENT_ID}, build log → ${BUILD_LOG})"
 # NEXT_BUILD_ARGS is deliberately unquoted: empty ⇒ no extra argv entry; the
 # harness joins buildArgs with spaces (base.ts), so space-splitting is the
@@ -426,8 +511,37 @@ log "running next build (output:'standalone') via ${NEXT_BIN} (deployment=${DEPL
 # would otherwise be layout-dependent.
 set -f
 # shellcheck disable=SC2086
-"${NEXT_BIN}" build ${NEXT_BUILD_ARGS} 2>&1 | tee "${BUILD_LOG}" >&2
+"${NEXT_BIN}" build ${NEXT_BUILD_ARGS} 2>&1 | tee -a "${BUILD_LOG}" >&2
 set +f
+fi
+
+if [ -n "${FIXTURE_POSTBUILD_SCRIPT}" ]; then
+  log "running the fixture postbuild hook: ${FIXTURE_POSTBUILD_SCRIPT}"
+  { run_fixture_hook "${FIXTURE_POSTBUILD_SCRIPT}" 2>&1 | tee -a "${BUILD_LOG}" >&2; }
+fi
+
+# ── #2123: where the build emitted its distDir. A monorepo fixture builds one
+# directory down (`apps/web/.next`) or with an upward distDir (`apps/.next`) and
+# says so in vercel.json `outputDirectory` — the same field Vercel reads. Default
+# `.next` at the project root. Only a path that stays INSIDE the project is
+# honoured (no absolute, no `..` escape); anything else keeps the default.
+DIST_DIR="${APP_DIR}/.next"
+if [ -f "${APP_DIR}/vercel.json" ]; then
+  VERCEL_OUTPUT_DIR="$(node -e '
+    try {
+      const path = require("node:path");
+      const od = JSON.parse(require("node:fs").readFileSync("vercel.json", "utf8")).outputDirectory;
+      if (typeof od === "string" && od && !path.isAbsolute(od)) {
+        const rel = path.relative(process.cwd(), path.resolve(od));
+        if (rel && !rel.startsWith("..") && !path.isAbsolute(rel)) process.stdout.write(rel);
+      }
+    } catch (_) {}
+  ')"
+  if [ -n "${VERCEL_OUTPUT_DIR}" ]; then
+    DIST_DIR="${APP_DIR}/${VERCEL_OUTPUT_DIR}"
+    log "vercel.json outputDirectory → distDir ${DIST_DIR}"
+  fi
+fi
 
 # ── #1245: a webpack credential cell PROVES its build was webpack ─────────────
 # The bundler is chosen by `next build` reading IS_WEBPACK_TEST from the env it
@@ -436,7 +550,7 @@ set +f
 # Turbopack and the webpack cell would bank nights for turbopack output. So on
 # KNEXT_BUILDER=webpack refuse a build without webpack's server runtime, which
 # Turbopack never emits. turbopack/unset: untouched.
-if [ "${KNEXT_BUILDER:-}" = "webpack" ] && [ ! -f "${APP_DIR}/.next/server/webpack-runtime.js" ]; then
+if [ "${KNEXT_BUILDER:-}" = "webpack" ] && [ ! -f "${DIST_DIR}/server/webpack-runtime.js" ]; then
   log "ERROR: KNEXT_BUILDER=webpack but the build emitted no .next/server/webpack-runtime.js — this is not a webpack build (did IS_WEBPACK_TEST reach next build?); refusing to deploy it on the webpack lane"
   exit 1
 fi
@@ -450,7 +564,7 @@ fi
 # a bare `find | head -n1` the pick followed directory order, and on a CI
 # runner a whole bun×webpack shard booted react-dom's server.js (every deploy
 # failed). Filtering node_modules + depth-sorting makes the pick deterministic.
-SERVER_JS="$(find "${APP_DIR}/.next/standalone" -maxdepth 4 -name server.js -not -path '*/node_modules/*' 2>/dev/null \
+SERVER_JS="$(find "${DIST_DIR}/standalone" -maxdepth 4 -name server.js -not -path '*/node_modules/*' 2>/dev/null \
   | awk -F/ '{ print NF "\t" $0 }' | sort -n -k1,1 | head -n1 | cut -f2- || true)"
 if [ -z "${SERVER_JS}" ]; then
   log "ERROR: standalone server.js not found under .next/standalone"
@@ -460,9 +574,19 @@ STANDALONE_APP_DIR="$(dirname "${SERVER_JS}")"
 log "standalone server: ${SERVER_JS}"
 
 # standalone does not copy .next/static or public/ — stage them (best-effort).
-if [ -d "${APP_DIR}/.next/static" ]; then
-  mkdir -p "${STANDALONE_APP_DIR}/.next"
-  cp -R "${APP_DIR}/.next/static" "${STANDALONE_APP_DIR}/.next/static"
+# #2123: the server looks for them under ITS distDir, which Next embeds in
+# server.js relative to the standalone app dir — `./.next` normally, `./../.next`
+# for an upward distDir (upward-distdir). Default to `./.next` when unreadable.
+STANDALONE_DIST_REL="$(node -e '
+  try {
+    const m = require("node:fs").readFileSync(process.argv[1], "utf8").match(/"distDir":\s*"([^"]+)"/);
+    process.stdout.write(m ? m[1] : "./.next");
+  } catch (_) { process.stdout.write("./.next"); }
+' "${SERVER_JS}")"
+STANDALONE_DIST_DIR="$(cd "${STANDALONE_APP_DIR}" && node -e 'process.stdout.write(require("node:path").resolve(process.argv[1]))' "${STANDALONE_DIST_REL}")"
+if [ -d "${DIST_DIR}/static" ]; then
+  mkdir -p "${STANDALONE_DIST_DIR}"
+  cp -R "${DIST_DIR}/static" "${STANDALONE_DIST_DIR}/static"
 fi
 if [ -d "${APP_DIR}/public" ]; then
   cp -R "${APP_DIR}/public" "${STANDALONE_APP_DIR}/public"
@@ -548,7 +672,7 @@ if [ "${RUNTIME}" = "bun" ]; then
       const r = mod.healBunExportTargets({ projectDir, standaloneDir, log: (m) => console.error(m) });
       console.error(`[e2e-deploy] bun-exports heal: ${r.copied.length} copied, ${r.skipped.length} skipped`);
       for (const s of r.skipped) console.error(`[e2e-deploy]   skipped: ${s}`);
-    ' "${KNEXT_BUN_EXPORTS_HEAL}" "${APP_DIR}" "${APP_DIR}/.next/standalone" >&2 \
+    ' "${KNEXT_BUN_EXPORTS_HEAL}" "${APP_DIR}" "${DIST_DIR}/standalone" >&2 \
       || log "WARNING: bun-exports heal failed (non-fatal) — bun-condition export targets not healed"
   else
     log "WARNING: bun-exports heal module unavailable (${KNEXT_BUN_EXPORTS_HEAL:-unset}) — bun-condition export targets not healed"
@@ -589,7 +713,7 @@ fi
 #     binary with no separate context.js to patch, so the two are mutually
 #     exclusive. The debug lane stays on the uncompiled script on purpose.
 STANDALONE_EXEC=""
-STANDALONE_ROOT="${APP_DIR}/.next/standalone"
+STANDALONE_ROOT="${DIST_DIR}/standalone"
 # The alpine base the compiled exec is booted inside — BYTE-IDENTICAL to
 # Dockerfile.standalone.hbs's `standalone-bun` stage FROM line (lockstep
 # guard: tests/compat-bun-lane-compiled-exec.test.ts). Booting it bare on the
@@ -748,8 +872,8 @@ if [ "${RUNTIME}" = "bun" ] && [ "${KNEXT_SANDBOX_FETCH_DEBUG:-0}" != "1" ]; the
         # an UNREADABLE/malformed manifest into a silent "" basePath — see
         # scripts/lib/e2e-read-base-path.mjs's header for why that is a real
         # defect, not a defensive fallback. Fail loud instead.
-        EMPTY_DIR_BASE_PATH="$(node "${ED__LIB_DIR}/e2e-read-base-path.mjs" "${APP_DIR}/.next/required-server-files.json")" || {
-          log "ERROR: KNEXT_SELF_CONTAINED=1 — could not resolve basePath from ${APP_DIR}/.next/required-server-files.json — refusing to probe with a silently-empty basePath (see above)"
+        EMPTY_DIR_BASE_PATH="$(node "${ED__LIB_DIR}/e2e-read-base-path.mjs" "${DIST_DIR}/required-server-files.json")" || {
+          log "ERROR: KNEXT_SELF_CONTAINED=1 — could not resolve basePath from ${DIST_DIR}/required-server-files.json — refusing to probe with a silently-empty basePath (see above)"
           rm -rf "${EMPTY_DIR}"
           exit 1
         }
@@ -938,8 +1062,33 @@ if [ "${RUNTIME}" != "bun" ]; then
 fi
 
 # ── 4. boot the standalone server on a free port ──────────────────────────────
-PORT="$(free_port)"
-BUILD_ID="$(cat "${APP_DIR}/.next/BUILD_ID" 2>/dev/null || echo "unknown")"
+# #2123: PORT was picked and exported BEFORE the build so that a config reading
+# it at build time agrees with the server. Keep it; only if something grabbed it
+# during the build (the free_port TOCTOU window now spans the build) take a fresh
+# one, and say so — a config that baked the old port is then the one casualty.
+if ! node -e 'const s=require("net").createServer();s.on("error",()=>process.exit(1));s.listen(Number(process.argv[1]),"0.0.0.0",()=>s.close(()=>process.exit(0)));' "${PORT}" 2>/dev/null; then
+  log "WARNING: port ${PORT} (picked before the build) was taken during the build — picking a new one; a build-time read of PORT will disagree with the server"
+  PORT="$(free_port)"
+fi
+export PORT
+# ── #2214 (adapter-rsc-query-leak): tell the deployed app the origin the tests use.
+# A route handler that redirects via `new URL('/x', request.url)` gets the server's
+# BIND address (0.0.0.0) — Next builds request.url from it, never from Host — so the
+# Location is unroutable. knext's public-origin preload (supervisor / compiled exec
+# both carry it) rewrites exactly that case to an entry of KNEXT_PUBLIC_ORIGINS, the
+# env the operator derives from spec.networking.publicHosts. The harness is the
+# "operator" here, and the URL it hands the tests is the last line of this script:
+# http://localhost:${PORT}. Set AFTER the final PORT is known (the pre-build pick can
+# be replaced above). Gated like the trace root, so <= 16.3.x lanes boot with the
+# environment they always had; the docker-booted exec gets it by name (-e forwards
+# the value, only when set).
+PUBLIC_ORIGIN_DOCKER_ARGS=()
+if [ "${NEXT_FLAGS_BAKED}" = "baked" ]; then
+  export KNEXT_PUBLIC_ORIGINS="http://localhost:${PORT}"
+  PUBLIC_ORIGIN_DOCKER_ARGS=(-e KNEXT_PUBLIC_ORIGINS)
+  log "Next >= 16.4.0: KNEXT_PUBLIC_ORIGINS=${KNEXT_PUBLIC_ORIGINS} (the deployment URL the tests use)"
+fi
+BUILD_ID="$(cat "${DIST_DIR}/BUILD_ID" 2>/dev/null || echo "unknown")"
 # DEPLOYMENT_ID identifies this deployment to the harness (asset versioning /
 # skew). Generated BEFORE the build (B5) — reused verbatim here.
 
@@ -1150,6 +1299,7 @@ fi
       --user "$(id -u):$(id -g)" \
       -e PORT="${PORT}" -e HOSTNAME="" -e NODE_ENV="production" \
       -e NEXT_DEPLOYMENT_ID="${DEPLOYMENT_ID}" \
+      ${PUBLIC_ORIGIN_DOCKER_ARGS[@]+"${PUBLIC_ORIGIN_DOCKER_ARGS[@]}"} \
       -v "${EMPTY_DIR}:${EMPTY_DIR}" \
       -w "${EMPTY_DIR}" \
       "${STANDALONE_BUN_IMAGE}" \
@@ -1162,6 +1312,7 @@ fi
       --user "$(id -u):$(id -g)" \
       -e PORT="${PORT}" -e HOSTNAME="" -e NODE_ENV="production" \
       -e NEXT_DEPLOYMENT_ID="${DEPLOYMENT_ID}" \
+      ${PUBLIC_ORIGIN_DOCKER_ARGS[@]+"${PUBLIC_ORIGIN_DOCKER_ARGS[@]}"} \
       -v "${STANDALONE_ROOT}:${CONTAINER_ROOT}" \
       -w "${CONTAINER_WORKDIR}" \
       "${STANDALONE_BUN_IMAGE}" \

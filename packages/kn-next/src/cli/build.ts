@@ -62,6 +62,7 @@ import {
 } from "./shared";
 import { diagnoseNestedStandalone } from "./standalone-layout";
 import { requireBuildContext } from "./tracing-root";
+import { assertNoBunTurbopackFragments } from "./turbopack-fragments-guard";
 import {
     buildVinextExecutable,
     hostSmokeArch,
@@ -328,6 +329,17 @@ export async function build(options: BuildOptions = {}) {
         },
         "Configuration loaded",
     );
+
+    // Bun cannot load the chunks `turbopackModuleFragments` makes Turbopack
+    // emit; refuse before any build work (#2225). See the guard for retirement.
+    // `runProjectBuild` runs the same guard, so this call covers only the path
+    // that skips it (--skip-next-build); otherwise the guard runs exactly once.
+    if (options.skipNextBuild) {
+        assertNoBunTurbopackFragments({
+            runtime: config.runtime ?? DEFAULT_RUNTIME_ID,
+            builder: config.build ?? DEFAULT_BUILDER_ID,
+        });
+    }
 
     if (!hasStorage(config)) {
         // ADR-0047 (review F3): the mode's guarantee is relative asset paths —

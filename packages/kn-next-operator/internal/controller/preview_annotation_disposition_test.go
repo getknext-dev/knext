@@ -286,7 +286,12 @@ func maximalWarmScheduleSpec() appsv1alpha1.NextAppSpec {
 		// autoscaling.knative.dev/* annotation or a RevisionSpec field, so it
 		// is outside both scans in this file by construction — it only needs
 		// to be non-zero here to satisfy the fixture-completeness leaf walk.
-		Networking: &appsv1alpha1.NetworkingSpec{Visibility: appsv1alpha1.VisibilityClusterLocal},
+		// PublicHosts renders a container env var (KNEXT_PUBLIC_ORIGINS), also
+		// outside both scans, and likewise only needs a non-zero value here.
+		Networking: &appsv1alpha1.NetworkingSpec{
+			Visibility:  appsv1alpha1.VisibilityClusterLocal,
+			PublicHosts: []string{"www.example.com"},
+		},
 	}
 }
 

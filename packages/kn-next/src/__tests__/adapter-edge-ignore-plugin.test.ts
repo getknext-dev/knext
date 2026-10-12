@@ -91,6 +91,23 @@ describe("knext-adapter modifyConfig — platform-owned edge IgnorePlugin fence 
         expect(re.test("instrumentation-nodex")).toBe(false);
     });
 
+    it("edge compile: the SAME plugin also ignores the tracing-off deep-health module", async () => {
+        // `instrumentation.ts` starts the lite gauge with a static-literal dynamic
+        // import, so webpack traces it into the edge bundle too. It imports
+        // `node:http` and lazily `@getknext/lib/health` (-> pg, ioredis, ...), none
+        // of which may reach the edge compile. One plugin, one alternation.
+        const out = await modify({});
+        const result = runWebpackHook(out.webpack as WebpackFn, "edge");
+        expect(result.plugins).toHaveLength(1);
+        const re = (result.plugins[0] as FakeIgnorePlugin).options
+            .resourceRegExp;
+        expect(re.test("@getknext/core/internal/deep-health-lite")).toBe(true);
+        expect(re.test("./deep-health-lite.js")).toBe(true);
+        expect(re.test("deep-health-lite-extra")).toBe(false);
+        // and it still fences the original target
+        expect(re.test("./instrumentation-node")).toBe(true);
+    });
+
     it("nodejs compile: leaves the config untouched (the real module must bundle there)", async () => {
         const out = await modify({});
         const result = runWebpackHook(out.webpack as WebpackFn, "nodejs");

@@ -15,9 +15,15 @@ import {
     DEFAULT_RUNTIME_ID,
 } from "../adapters/artifact-contract";
 import type { KnativeNextConfig } from "../config";
+import { NEXTAPP_API_VERSION } from "./crd-api-version";
 import type { WriteFreeFacts } from "./write-free";
 
 export type { WriteFreeFacts } from "./write-free";
+
+// The CRD `apiVersion` every emitted NextApp carries. Defined in its own module
+// so `knext doctor` pairs the CLI with the cluster against the value stamped
+// below without importing this renderer (see ./crd-api-version.ts).
+export { NEXTAPP_API_VERSION };
 
 /**
  * PreviewInput is the optional per-PR preview descriptor (#91). When present,
@@ -447,10 +453,23 @@ export function buildNextAppCRObject(
     // under --validate=strict (every CLI apply passes that flag) and
     // deploy's preflightCRSchema reports the unknown field before the
     // cluster is touched. Upgrade operator/CRD first, then CLI.
-    const networking =
-        config.networking?.visibility === "cluster-local"
+    //
+    // spec.networking.publicHosts: the typed way to fill the runtime's
+    // KNEXT_PUBLIC_ORIGINS allowlist (the operator renders the env). Emitted
+    // only when non-empty, for the same zero-diff reason, and the whole block
+    // is dropped when neither field is set. Same operator-first upgrade order.
+    const publicHosts = config.networking?.publicHosts?.length
+        ? [...config.networking.publicHosts]
+        : undefined;
+    const networkingBlock = {
+        ...(config.networking?.visibility === "cluster-local"
             ? { visibility: "cluster-local" as const }
-            : undefined;
+            : {}),
+        ...(publicHosts ? { publicHosts } : {}),
+    };
+    const networking = Object.keys(networkingBlock).length
+        ? networkingBlock
+        : undefined;
 
     const spec: Record<string, unknown> = {
         image,
@@ -504,7 +523,7 @@ export function buildNextAppCRObject(
     };
 
     return {
-        apiVersion: "apps.kn-next.dev/v1alpha1",
+        apiVersion: NEXTAPP_API_VERSION,
         kind: "NextApp",
         metadata: {
             name: config.name,
