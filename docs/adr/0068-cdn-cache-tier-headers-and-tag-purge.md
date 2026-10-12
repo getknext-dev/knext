@@ -4,6 +4,9 @@
   system designer) **before CDN-1 (#2259) or CDN-2 (#2260) start building.** This is the one Sprint 4
   task whose acceptance is a build gate, because it amends a `CLAUDE.md` stance (design before code).
   jev on the status: Proposed until the gate **0.83** / Accepted on merge 0.17.
+  **Revision 1 (2026-10-12)** applies design-gate round 1 on #2266: the system designer's block
+  (middleware auth bypass, now D4.1 condition 10) and required edits, and the architect's four
+  required edits. Each change is marked "(gate r1)" where it lands.
 - **Date:** 2026-10-12
 - **Trigger class:** ADR (amends the `CLAUDE.md` §8 "defer global CDN" stance for the header + purge
   slice) + CRD (`spec.cdn` on `NextApp`) + public API (`knext.config.ts` key, CR builder, preflight) +
@@ -79,6 +82,12 @@ gaps 7a and 7b.)
    the operator does **not** render passes straight through.
 8. **No CEL rule may pair `spec.build` with `spec.runtime`.** `tests/adr-state-claims.test.ts` reds on
    any CEL rule mentioning `self.build`, so "reject CDN on vinext" cannot be a CEL rule.
+9. **The middleware/proxy matcher is in the build output.** (gate r1) `next@16.4.0`
+   `dist/build/index.js:1639-1650` writes a Node-runtime middleware or `proxy` file's matchers to
+   `functions-config-manifest.json` under `functions['/_middleware'].matchers`, defaulting to
+   `[{ regexp: '^.*$' }]` (every path) when the file has no `config.matcher`. Edge-runtime middleware
+   writes its matchers to `middleware-manifest.json`. A matcher can also carry `has`/`missing`
+   conditions on headers, cookies and query.
 
 ### Provider facts (primary sources in the #2232 research)
 
@@ -143,9 +152,19 @@ purge batch size, and the default purge rate.
 There is **no OCI row**. OCI has no CDN product. On OKE, the recommended path is Cloudflare in front of
 the Kourier ingress (research pick: Cloudflare **1.00**).
 
+**What each row can claim (gate r1).** Only `cloudflare` gets a live run in this ADR (CDN-4). The
+`google-cloud-cdn`, `cloudfront` and `azure-front-door` header rows are unit- and emulator-tested only.
+The user docs and `docs/compat-matrix.md` make **no "verified" or parity claim for any row without a
+recorded live run**. A row's claim follows its evidence, row by row.
+
 A deferred purge row is still useful: its header mode ships, and staleness is bounded by the edge TTL
 (D8). A purge for a deferred row returns when a dependency-free signer is designed in its own ADR
-amendment. That amendment must show it is not the start of a cloud SDK. Setting `spec.cdn.purge` on a
+amendment (#2270). That amendment must show it is not the start of a cloud SDK, and ADR-0061 should
+then cross-reference that "signer ≠ SDK" bar.
+
+**The `emulator` row sends a fixed dummy token** and never resolves `spec.cdn.purge.secretRef`
+(gate r1, architect suggestion; jev yes **0.61**). Pointing a CR at an in-cluster listener then
+cannot get a real token sent there. Setting `spec.cdn.purge` on a
 deferred row is accepted by the CRD; the runtime makes no call, counts
 `result="skipped_unsupported"`, and logs one line at boot (jev: runtime skip **0.94**, CEL reject
 0.06). The operator stays provider-agnostic.
@@ -161,6 +180,7 @@ spec:
     htmlTTLSeconds: 30              # 1..3600, default 30 (D8)
     staleWhileRevalidateSeconds: 0  # 0..3600, default 0 (D8)
     excludePaths: ["/account"]      # optional path prefixes that are never edge-cached
+    includePaths: ["/blog"]         # optional; opts middleware-matched prefixes back in (D4.1 condition 10)
     purge:                          # optional; absent = headers only
       secretRef: {name: cdn-purge, key: token}   # same-namespace Secret, user-created
       target: "<zone id>"           # opaque provider resource id
@@ -171,7 +191,7 @@ spec:
 - **No `tagPrefix` field.** The prefix is derived by the operator (D5.3, A5).
 - **The operator renders env and nothing else.** `KNEXT_CDN_PROVIDER`, `KNEXT_CDN_TAG_PREFIX`,
   `KNEXT_CDN_HTML_TTL_SECONDS`, `KNEXT_CDN_SWR_SECONDS`, `KNEXT_CDN_EXCLUDE_PATHS`,
-  `KNEXT_CDN_PURGE_TARGET`, `KNEXT_CDN_PURGE_RPM`, `KNEXT_CDN_EMULATOR_ENDPOINT`, and
+  `KNEXT_CDN_INCLUDE_PATHS`, `KNEXT_CDN_PURGE_TARGET`, `KNEXT_CDN_PURGE_RPM`, `KNEXT_CDN_EMULATOR_ENDPOINT`, and
   `KNEXT_CDN_PURGE_TOKEN` as a `secretKeyRef` (the `DATABASE_URL` mechanism). jev: secretKeyRef env
   **0.99**, file mount 0.01. The build ID the tags use is the existing resolver
   (`.next/BUILD_ID` → `KNEXT_BUILD_ID` → `NEXT_DEPLOYMENT_ID`, ADR-0066 D2).
@@ -180,6 +200,10 @@ spec:
   set**. Fact 7 is why "whether or not" matters: a name the operator does not render would otherwise
   pass through, and a CR could pick its own tag prefix or emulator endpoint. The renderer also drops
   such a name with a Warning, as defence in depth for a CR that predates the rule.
+  **This guarantee needs a CDN-1+ operator (gate r1).** An older operator reserves nothing under
+  `KNEXT_CDN_*`, so a CDN-capable runtime running under it honours a user-set
+  `KNEXT_CDN_TAG_PREFIX`. "Unforgeable from the CR" therefore holds only when the operator/CRD is
+  upgraded first, before the CLI or runtime. That upgrade order is load-bearing here, not a convention.
 - **CEL, within `spec.cdn` only:** `emulatorEndpoint` is allowed if and only if
   `provider == 'emulator'`, and must match an `http(s)://<host>.svc.cluster.local[:port]` pattern with
   no path, userinfo or query. No rule mentions `spec.build` (fact 8).
@@ -213,16 +237,52 @@ Anything not positively allowed is not edge-cacheable:
 5. The response carries no `Set-Cookie`.
 6. The request carries no `Authorization` header and no draft-mode cookie (`__prerender_bypass`).
 7. The path is not under `/api/cache/` and not under any `spec.cdn.excludePaths` prefix.
-8. For a non-immutable response: tags were recorded for this request (D5.1), and they fit the row's
-   limits (D5.4).
+8. For a non-immutable response: the **request's own page or route entry tags were recorded,
+   including its implicit `_N_T_` path tag** (D5.1), and they fit the row's limits (D5.4). (gate r1:
+   fetch-kind tags alone are not enough. On an ISR miss they can be recorded before `writeHead` while
+   the page entry's `set`, which carries the path tag, lands after the first flush. Caching then would
+   store an entry `revalidatePath` cannot purge.)
 9. The RSC rule (D4.3) allows it.
+10. **The path is not matched by the app's middleware/`proxy` matcher, unless it is under a
+    `spec.cdn.includePaths` prefix** (gate r1, system-designer block). At boot the preload reads the
+    matchers from the build output (fact 9: `functions-config-manifest.json`
+    `functions['/_middleware']`, and `middleware-manifest.json` for edge middleware). With no
+    `config.matcher`, the matcher covers every path. `has`/`missing` conditions are ignored, so a
+    path whose regexp matches is treated as matched. That over-excludes, which is the safe direction.
+    If the manifests are missing or unparseable, or a matcher regexp does not compile, **nothing
+    non-immutable is edge-cached** (fail closed). An app whose manifests show no middleware is
+    unaffected.
 
-Every other edge-cacheable path is allowed by default once `spec.cdn` is set (jev: all eligible
-**0.62**, opt-in path list 0.38; confidence 0.24, low). The residual hazard is middleware that varies a
-response by cookie or header at one URL: it runs at the origin, behind the CDN, so the CDN serves one
-variant to everyone. `excludePaths` fences such routes (jev: add the field **0.90**). The user docs
-must name this hazard. If CDN-3a shows the default poisoning a realistic file-manager route, the
-choice reverses to an opt-in path list.
+**Why condition 10 exists.** Take a static or ISR page that session-cookie middleware protects. An
+authenticated request passes conditions 1–9: it has no `Authorization` header, no draft cookie, no
+`Set-Cookie`, and the status is 200. The CDN ignores the cookie and stores the page under the URL. The
+next anonymous request is then served the protected page without the middleware ever running. That is
+an auth bypass, not just a poisoning hazard (system designer: breaks the invariant **0.90**).
+
+**Choice of fix** (jev: condition 10 + `includePaths` **0.95**, flip every app to an opt-in path list
+0.05; confidence 0.90). Condition 10 makes middleware-matched paths opt-in, while apps without
+middleware keep the default. The earlier scope pick stands for every path condition 10 lets through:
+all eligible paths are edge-cacheable by default once `spec.cdn` is set (jev: all eligible **0.62**,
+opt-in list 0.38, confidence 0.24; architect with a falsifiable reversal **0.93**, opt-in 0.07).
+`excludePaths` (jev: add the field **0.90**) still fences paths that are cacheable for other reasons.
+
+**Reversal criterion, falsifiable (gate r1, architect).** CDN-3a runs two named cases against the
+`Vary`-ignoring emulator, using the default `spec.cdn` (no `includePaths`):
+
+- **`cookie-gated-static`**: a statically rendered page behind cookie-checking middleware. Request it
+  with the session cookie, then without one. **Pass** means the cookieless request never gets the
+  protected body from the edge.
+- **`middleware-cookie-variants`**: middleware rewrites one URL, by cookie, to two ISR variants that
+  both carry `s-maxage`. Request variant A's cookie, then variant B's. **Pass** means B never gets A's
+  body from the edge.
+
+Both pass under condition 10, because the middleware matcher covers those paths. Each case runs a
+second time with the path listed in `includePaths`. There the wrong variant is expected, which shows
+`includePaths` is a real opt-out of the protection and the docs must say so.
+
+**If either case fails in its default form, the ADR flips to an opt-in path list for every app**, and
+this section records it as reversed. If both pass, the default stands, and this paragraph is the record
+of why.
 
 Extending the allowlist with a general `Vary` condition was weighed and not taken: condition 3 already
 excludes the known `Vary` cases (jev: omit **0.62**, require 0.38; confidence 0.24).
@@ -236,13 +296,25 @@ never holds an entry longer than Next would. On Cloudflare the directive goes in
 edge-only header (CloudFront, Azure) the browser value becomes
 `public, max-age=0, s-maxage=N[, stale-while-revalidate=M]`. That is a deliberate deviation from the
 compat-normalized value, only on those opt-in rows; `must-revalidate` is dropped because it would
-disable SWR at the shared cache.
+disable SWR at the shared cache. **That browser value is outside the compat-verified configuration**
+(gate r1). The compat suite runs without `spec.cdn` and asserts the normalized value. No CloudFront or
+Azure configuration may be described as compat-verified, and no row gets a "verified" claim without a
+live run (D2).
 
 **D4.3 The RSC rule (A3; SD pick 0.57 vs never-cache 0.42, confidence 0.36).** Two halves:
 
 - **Hard rule, every row, every mode:** a request carrying `RSC: 1` or any `Next-Router-*` header
   **without** `_rsc` in the URL never gets an edge directive. Otherwise a `Vary`-ignoring CDN stores a
   flight payload under the HTML key and serves it to the next browser.
+- **Symmetric hard rule (gate r1, architect), every row, every mode:** a request with `_rsc` in the URL
+  but **without** `RSC: 1` never gets an edge directive. The response's `Content-Type` must also match
+  the key. Under an `_rsc` key it must be `text/x-component`; under a non-`_rsc` key it must **not** be.
+  The `_rsc` value is a deterministic hash. Without this rule, one crafted `?_rsc=<hash>` request with
+  no RSC header would store HTML under the flight key for up to the TTL, breaking client navigation to
+  that URL. jev scored the ADR as written 1.00 against adding the rule. The architect overrode that
+  because jev reads the ADR literally, while the vector is reachable with a crafted URL and closing it
+  costs one condition. Both halves, and the `Content-Type` check, are in the **mutation-proved** RSC
+  test set for CDN-1 and CDN-3a.
 - **With `_rsc` present**, the response may be edge-cached only on a row whose default cache key
   includes the query string (`cloudflare`, `google-cloud-cdn`, `emulator`). jev: on for those rows
   **0.57**, a per-row flag that ships off 0.43 (confidence 0.14, close to a coin flip). The SD
@@ -266,6 +338,22 @@ binding, and the standalone build-artifact guard must cover it. **No recorded ta
 edge-cacheable** (fail closed). That covers requests Next coalesces onto another request's render:
 they get no tags, so they get no edge directive, which is safe. Minimal mode was rejected because it
 changes Next's routing contract.
+
+Three requirements added at gate r1:
+
+- **Own-entry tags only.** The store records which entry each tag set came from. Only the tags of the
+  request's own page or route entry, including its `_N_T_` path tag, satisfy D4.1 condition 8.
+  Fetch-kind tags recorded on their own do not.
+- **`'use cache'` tags are a stated assumption, tested.** Tags that come only from a `'use cache'`
+  function (the plural handler) are purgeable only if Next copies them into the page entry's
+  `x-next-cache-tags`. That copying is relied on, not verified. CDN-3b tests it: a page whose only tag
+  comes from `'use cache'` must go HIT → `revalidateTag(thatTag)` → MISS. If that fails, such pages
+  fail condition 8 and are not edge-cached until it is fixed.
+- **Bun parity is proved, not assumed.** The seam depends on two things: an ALS context entered at
+  `request` emit, and `writeHead` interception, including the implicit header flush on first `write`
+  or `end` (`_implicitHeader`). Both must be shown to hold on **Bun's `node:http`**, not only on
+  Node. CDN-1's unit tests and CDN-3a run on both runtimes. A path where Bun skips the interception
+  must fail closed (no directive), never emit one.
 
 **D5.2 Encoding** (jev: hashed **0.81**, raw 0.19; confidence 0.62). Every emitted tag is ASCII,
 lowercase, comma-free and fixed-length:
@@ -389,12 +477,14 @@ adds to the staleness bound. A user who raises it accepts a longer bound.
   env can override it. Only the `emulator` row takes an endpoint, and it must be a
   `*.svc.cluster.local` host. CEL checks it at admission, and the runtime checks it again and fails
   closed. A CR edit cannot send the token to an arbitrary host.
-- **The token** comes only from the user's Secret, as a `secretKeyRef` env. It is never logged, never
+- **The token** comes only from the user's Secret, as a `secretKeyRef` env. The `emulator` row never
+  reads it and sends a fixed dummy token instead (D2). It is never logged, never
   echoed in an error, never written to status or events, and never sent anywhere but the row's
   endpoint. CDN-2 carries a scan test for this. Missing or empty token means no call, no throw, and
   `result="skipped_no_credential"`. Ask for the minimal scope (Cloudflare: Zone → Cache Purge, one
   zone).
-- **Poisoning.** D4 is the defence: allowlist, the RSC hard rule, no 3xx, fail-closed tags.
+- **Poisoning and auth bypass.** D4 is the defence: the allowlist, the middleware-matcher condition,
+  both RSC hard rules, no 3xx, and fail-closed tags.
   `Cache-Tag` carries only hashes.
 - **Isolation.** The prefix limit in D5.3 is the honest statement.
 
@@ -403,7 +493,7 @@ adds to the staleness bound. A user who raises it accepts a longer bound.
 The first cut covers the standalone server on **Node and Bun**: one `node:http` preload, one cache
 handler. On `build: vinext` (Beta) the operator renders no `KNEXT_CDN_*` env and reports an
 informational status condition. It is not a CEL reject (fact 8). vinext uses a different cache
-adapter and a `Bun.serve` seam; a follow-up issue ports D4–D7 there.
+adapter and a `Bun.serve` seam; #2271 ports D4–D7 there.
 
 ### D12. `KNEXT_CACHE_CONTROL_NORMALIZE` (jev: keep, deprecated **0.82**, keep as equal 0.15, remove 0.03)
 
@@ -417,12 +507,26 @@ notice.
   that keys on URL + query and **ignores `Vary`** (it models Cloudflare; default Varnish honours `Vary`
   and would pass a poisoning bug). It stores `Cache-Tag`, serves a Cloudflare-shaped `purge_cache`, and
   can return one 429. It lives in `e2e-support/`, never in a shipped package.
-- **CDN-3a (#2264)**, needs CDN-1 only: never-cache set, the RSC hard rule (an `RSC: 1` request without
-  `_rsc`, then a plain request, must return HTML), the `_rsc` case per D4.3, tag isolation between two
-  apps, zero diff without `spec.cdn`. No compat dispatch; it reuses the C-2 baseline.
-- **CDN-3b (#2261)**, needs the wire-in: HIT → `revalidateTag` → MISS-fresh; 429 once, then recovery;
-  first-ready purge deduped across two pods and a simulated wake; no old-build HTML after a rollout
-  beyond the TTL. One compat dispatch confirms the default path is unchanged.
+- **CDN-3a (#2264)**, needs CDN-1 only. No compat dispatch; it reuses the C-2 baseline. Cases:
+  - the never-cache set;
+  - the RSC hard rule: an `RSC: 1` request without `_rsc`, then a plain request, must return HTML;
+  - the symmetric rule (gate r1): a `?_rsc=<hash>` request without `RSC: 1`, then a real RSC
+    navigation to the same URL, must return `text/x-component`;
+  - the `_rsc` case per D4.3;
+  - the two D4.1 condition-10 cases, `cookie-gated-static` and `middleware-cookie-variants`, with the
+    pass/fail rule stated there (gate r1);
+  - a page entry whose `_N_T_` tag is missing at `writeHead` is not cached (gate r1);
+  - tag isolation between two apps;
+  - zero diff without `spec.cdn`.
+
+  The header cases run on **both Node and Bun** (gate r1, D5.1).
+- **CDN-3b (#2261)**, needs the wire-in. One compat dispatch confirms the default path is unchanged.
+  Cases:
+  - HIT → `revalidateTag` → MISS-fresh;
+  - a page tagged **only** through `'use cache'` goes HIT → `revalidateTag(thatTag)` → MISS (gate r1);
+  - a 429 once, then recovery;
+  - the first-ready purge deduped across two pods and a simulated wake;
+  - no old-build HTML after a rollout beyond the TTL.
 - **Live: one cloud, Cloudflare in front of a scratch NextApp on OKE (CDN-4, #2262),** after the operator
   that renders `spec.cdn` is rolled (O4, #2165). It records HIT → purge → fresh, checks that `Cache-Tag`
   is not leaked, checks the SWR mode and whether HTML needs a Cache Rule, and confirms the running
@@ -433,6 +537,13 @@ notice.
   no hand-built operator over the shared one. It is a verification path, not a supported user path.
   The reserved-name rule (D3) closes it once the new operator rolls. The run records which operator
   digest it ran against.
+  **Upgrade-order caveat, stated here (gate r1):** this bypass works only *because* the deployed
+  operator predates CDN-1 and reserves nothing under `KNEXT_CDN_*`. For the same reason, on that
+  operator the tag prefix is whatever the CR sets, so it is not unforgeable (D3). That is acceptable
+  for a scratch app holding its own token on its own Cloudflare zone. It is the reason operator/CRD
+  goes first for every real user. When the run ends, it **lists its scratch NextApp (and Secret) for
+  deletion** in its record. Deleting a cluster object is a founder action for agents, so the run
+  does not delete it itself.
 
 ## Options considered
 
@@ -444,7 +555,10 @@ notice.
 | Tag source | Request-scoped ALS seam | 0.99 | Minimal mode; path tags only | 0.01 / 0.00 | Minimal mode changes routing; path-only loses `revalidateTag` of data tags |
 | Tag encoding | Prefix + hash | 0.81 | Prefix + escaped raw tag | 0.19 | Raw tags break on commas and non-ASCII, overflow Google's 120 B, and leak names where tags are forwarded |
 | Tag overflow | Not edge-cacheable | 0.96 | Truncate | 0.04 | A truncated set stores entries some purge can never reach |
-| HTML scope | All eligible + `excludePaths` | 0.62 (+0.90) | Opt-in path list | 0.38 | Low confidence (0.24). Reverses if CDN-3a shows default poisoning |
+| HTML scope | All eligible + `excludePaths`, minus middleware-matched paths | 0.62 (+0.90) | Opt-in path list | 0.38 | Low confidence (0.24). Reverses on the falsifiable CDN-3a rule in D4.1 |
+| Middleware auth bypass (gate r1) | Condition 10 + `includePaths` | 0.95 | Opt-in path list for every app | 0.05 | Penalises apps without middleware for a hazard only middleware creates |
+| Symmetric RSC rule (gate r1) | Added (architect override) | — | As written | 1.00 | jev read the ADR literally; a crafted `?_rsc=` request is a reachable poisoning vector |
+| Emulator token (gate r1) | Fixed dummy token | 0.61 | Resolve `secretRef` | 0.39 | A CR could point the real token at an in-cluster listener |
 | `Vary` in the allowlist | Omit (3xx rule explicit) | 0.62 | Require | 0.38 | `s-maxage` condition already excludes known `Vary` cases |
 | RSC with `_rsc` | On for query-keyed rows, gated by CDN-3a | 0.57 | Per-row flag off | 0.43 | Near coin flip; CDN-3a evidence decides |
 | Purge originator (A1) | Origin pod | 0.81 | Every pod; Redis outbox | 0.10 / 0.09 | No fan-out exists on v2; outbox is over-engineering |
@@ -485,8 +599,13 @@ notice.
 - **Purge for CloudFront, Google and Azure is deferred.** Those rows get headers only until a signer is
   designed. The docs must not suggest otherwise.
 - **The tag prefix is not an isolation boundary against a token holder** (D5.3).
-- **Middleware that varies by cookie at one URL is a poisoning hazard** under the default scope.
-  `excludePaths` and the docs carry it, and CDN-3a checks it.
+- **Middleware-matched paths are not edge-cached unless listed in `includePaths`.** An app with a
+  catch-all middleware gets edge caching only on the paths it lists. Listing a path disables the
+  auth-bypass protection for it, and the docs must say that plainly. An app without middleware is
+  unaffected.
+- **`'use cache'`-only tags rely on Next copying them into the page entry.** This is tested in CDN-3b,
+  not verified from source.
+- **Only Cloudflare carries a live claim.** The other rows are unit- and emulator-tested only (D2).
 - **Rollback does not purge** if the build's key still exists (D7).
 - **Responses coalesced onto another request's render are not edge-cached** (D5.1). Under a burst on a
   cold key, a few responses miss the edge.
@@ -500,18 +619,25 @@ notice.
 1. **CDN-1 (#2259, T2):** `spec.cdn` types + CEL + the unconditional `KNEXT_CDN_*` reservation; operator
    render and the zero-diff golden guard; the canary/no-storage and vinext status conditions in
    `computeStatusVerdict`; `knext.config.ts` key, `cr-builder.ts` mapping, preflight schema; the
-   header-preload allowlist (D4), tag seam (D5.1, with build-artifact guard coverage), encoding and
-   overflow (D5.2–D5.4). Exit tests per the Sprint 4 plan, including a mutation-proved RSC hard rule
-   and an admission test showing a CR cannot set its own prefix.
+   header-preload allowlist (D4, including condition 10 and the manifest reader), tag seam (D5.1,
+   with build-artifact guard coverage, own-entry tags and Node + Bun parity), encoding and overflow
+   (D5.2–D5.4). Exit tests per the Sprint 4 plan, including:
+   - mutation-proved RSC rules (both directions and the `Content-Type` check);
+   - a mutation-proved condition 10 (middleware-matched path not cached; missing manifest caches
+     nothing);
+   - an admission test showing a CR cannot set its own prefix.
 2. **CDN-2 (#2260, T2 module; T1 makes the one-line wire-in after #2083):** `adapters/cdn-purge/` rows
    (Cloudflare, emulator; deferred rows as data), queue, bucket, retries, overflow collapse, metrics,
    drain enrolment, first-ready purge, the SSRF and token-scan tests, a no-cloud-SDK scan.
 3. **CDN-3a (#2264) and CDN-3b (#2261):** per D13, against the Vary-ignoring emulator.
 4. **CDN-4 (#2262):** Cloudflare on OKE after O4 (#2165), or the scratch bypass in D13.
 5. **CDN-5 (#2263):** user docs: one page per provider row (OCI page says "use Cloudflare"), the
-   staleness contract, the prefix limit, the middleware hazard, `excludePaths`, the asset-retention
-   dependency under canary, and the deprecation of `KNEXT_CACHE_CONTROL_NORMALIZE=0`.
-6. **Follow-ups to file:** vinext CDN seam (D11); a signer ADR amendment per deferred purge row (D2).
+   staleness contract, the prefix limit, and the middleware hazard, named as an auth-bypass risk:
+   `includePaths` re-exposes it for every path it lists. Also `excludePaths`, the asset-retention
+   dependency under canary, the deprecation of `KNEXT_CACHE_CONTROL_NORMALIZE=0`, and a per-row claim
+   that matches its evidence (no "verified" without a live run).
+6. **Follow-ups (filed):** #2270, the signer purge rows for CloudFront, Google and Azure (D2); #2271,
+   vinext CDN support (D11).
 7. **Founder:** the `CLAUDE.md` §8 edit in Appendix A. It is not blocking; this ADR governs meanwhile.
 
 ## Appendix A — proposed `CLAUDE.md` §8 amendment (founder-only edit)
@@ -540,8 +666,8 @@ stay out)". §1 needs no change: the fence in D1 is what keeps this inside "narr
 |---|---|---|
 | A1 purge originator + failure bound | D6.1, D6.3–D6.6, D8 | Origin pod; coalesced, ≤100 tags, row-sized bucket, `Retry-After`, ≤3 attempts; staleness = edge TTL; metric; drain |
 | A2 first-ready purge | D7 | `SET knext:cdn:purged:<p>:<buildId> NX`; no Redis → no first-ready purge |
-| A3 RSC/HTML key | D4.3, D4.4 | `RSC`/`Next-Router-*` without `_rsc` never cacheable; `_rsc` only on query-keyed rows, gated by CDN-3a; no 3xx |
-| A4 never-cache set | D4.1 | Allowlist of positive conditions covering every listed case |
+| A3 RSC/HTML key | D4.3, D4.4 | `RSC`/`Next-Router-*` without `_rsc` never cacheable; `_rsc` without `RSC: 1` never cacheable, and `Content-Type` must match the key (gate r1); `_rsc` only on query-keyed rows, gated by CDN-3a; no 3xx |
+| A4 never-cache set | D4.1 | Allowlist of positive conditions covering every listed case, plus condition 10: middleware-matched paths only through `includePaths` (gate r1) |
 | A5 tag prefix | D3, D5.3 | Operator-derived hash, `KNEXT_CDN_*` reserved; the token-holder limit stated |
 | A6 credential + SSRF | D10 | Hardcoded URLs; emulator `*.svc.cluster.local` only; token never logged; no inbound route |
 | A7 canary | D9 | Rejected CDN-off-during-canary; short TTL + build tags + deduped purge; asset-retention dependency + status condition |
