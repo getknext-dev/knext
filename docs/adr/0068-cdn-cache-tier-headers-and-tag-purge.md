@@ -7,6 +7,11 @@
   **Revision 1 (2026-10-12)** applies design-gate round 1 on #2266: the system designer's block
   (middleware auth bypass, now D4.1 condition 10) and required edits, and the architect's four
   required edits. Each change is marked "(gate r1)" where it lands.
+  **Revision 2 (2026-10-12)** applies gate round 3, one item from each gate, both in condition 10.
+  The architect's: the matchers now come from the official `onBuildComplete` outputs, through a
+  knext-owned artifact, instead of Next's internal manifests. The system designer's: the rule now says
+  which pathname is tested (raw and decoded, the data-route path, and a conservative i18n rule). Marked
+  "(gate r3)".
 - **Date:** 2026-10-12
 - **Trigger class:** ADR (amends the `CLAUDE.md` §8 "defer global CDN" stance for the header + purge
   slice) + CRD (`spec.cdn` on `NextApp`) + public API (`knext.config.ts` key, CR builder, preflight) +
@@ -82,12 +87,17 @@ gaps 7a and 7b.)
    the operator does **not** render passes straight through.
 8. **No CEL rule may pair `spec.build` with `spec.runtime`.** `tests/adr-state-claims.test.ts` reds on
    any CEL rule mentioning `self.build`, so "reject CDN on vinext" cannot be a CEL rule.
-9. **The middleware/proxy matcher is in the build output.** (gate r1) `next@16.4.0`
-   `dist/build/index.js:1639-1650` writes a Node-runtime middleware or `proxy` file's matchers to
-   `functions-config-manifest.json` under `functions['/_middleware'].matchers`, defaulting to
-   `[{ regexp: '^.*$' }]` (every path) when the file has no `config.matcher`. Edge-runtime middleware
-   writes its matchers to `middleware-manifest.json`. A matcher can also carry `has`/`missing`
-   conditions on headers, cookies and query.
+9. **The official adapter API hands knext the middleware matchers.** (gate r1, rewritten gate r3)
+   The `onBuildComplete` contract (`next@16.4.0` `dist/build/adapter/build-complete.d.ts:286-309`):
+   - `outputs.middleware` is present only when the app has a middleware/`proxy` file.
+   - Its `config.matchers` is an array of `{ source, sourceRegex, has, missing }`.
+   - The same `ctx` carries `ctx.config`, which includes `basePath` and `i18n`.
+
+   knext's adapter already receives all of this. Today it only counts it
+   (`packages/kn-next/src/adapters/next-adapter.ts:265`). A matcher can carry `has`/`missing`
+   conditions on headers, cookies and query. Next's internal build manifests
+   (`functions-config-manifest.json`, `middleware-manifest.json`) hold the same data, but they are not
+   a contract. Reading them would be reverse-engineering, which the official-adapter rule forbids.
 
 ### Provider facts (primary sources in the #2232 research)
 
@@ -236,7 +246,10 @@ Anything not positively allowed is not edge-cacheable:
 4. The origin `Cache-Control` has no `private`, `no-store` or `no-cache`.
 5. The response carries no `Set-Cookie`.
 6. The request carries no `Authorization` header and no draft-mode cookie (`__prerender_bypass`).
-7. The path is not under `/api/cache/` and not under any `spec.cdn.excludePaths` prefix.
+7. The path is not under `/api/cache/` and not under any `spec.cdn.excludePaths` prefix. Path prefixes
+   (`excludePaths`, `includePaths`, `/api/cache/`) are compared against the **decoded** pathname, at a
+   **segment boundary**: `/blog` covers `/blog` and `/blog/x`, never `/blogger`. A pathname that fails
+   to decode is treated as excluded (gate r3).
 8. For a non-immutable response: the **request's own page or route entry tags were recorded,
    including its implicit `_N_T_` path tag** (D5.1), and they fit the row's limits (D5.4). (gate r1:
    fetch-kind tags alone are not enough. On an ISR miss they can be recorded before `writeHead` while
@@ -244,14 +257,51 @@ Anything not positively allowed is not edge-cacheable:
    store an entry `revalidatePath` cannot purge.)
 9. The RSC rule (D4.3) allows it.
 10. **The path is not matched by the app's middleware/`proxy` matcher, unless it is under a
-    `spec.cdn.includePaths` prefix** (gate r1, system-designer block). At boot the preload reads the
-    matchers from the build output (fact 9: `functions-config-manifest.json`
-    `functions['/_middleware']`, and `middleware-manifest.json` for edge middleware). With no
-    `config.matcher`, the matcher covers every path. `has`/`missing` conditions are ignored, so a
-    path whose regexp matches is treated as matched. That over-excludes, which is the safe direction.
-    If the manifests are missing or unparseable, or a matcher regexp does not compile, **nothing
-    non-immutable is edge-cached** (fail closed). An app whose manifests show no middleware is
-    unaffected.
+    `spec.cdn.includePaths` prefix** (gate r1, system-designer block).
+
+    **Where the matchers come from (gate r3, architect; jev: adapter artifact **0.91**, Next's internal
+    manifests 0.09, confidence 0.82).** knext's `onBuildComplete` reads `outputs.middleware` and
+    `ctx.config` (fact 9). It writes a knext-owned artifact, `knext-cdn-routing.json`, that **always
+    exists**. The artifact records `basePath`, the `i18n` locales (or `null`), and either an explicit
+    `middleware: "none"` or the list of matchers.
+    - If middleware is present but has no `config.matchers`, the artifact records one match-all
+      matcher.
+    - The CDN-1 build step puts the artifact into the runtime image next to the standalone server. The
+      preload reads it at boot.
+    - **If the artifact is missing or unparseable, or a `sourceRegex` fails to compile, nothing
+      non-immutable is edge-cached** (fail closed).
+    - **Only an artifact that explicitly says `none`** makes paths eligible without `includePaths`.
+
+    The preload never reads Next's internal manifests.
+
+    **Which pathname is tested (gate r3, system designer; jev: the rule below **0.72**, reproduce Next
+    exactly 0.27, raw pathname only 0.01, confidence 0.58).** Next does not match middleware on the raw
+    `req.url`, so neither may the preload. A request counts as **matched if any candidate pathname
+    matches any matcher**. The candidates are:
+
+    - the raw pathname, `basePath` kept;
+    - the `decodeURIComponent` pathname. Next tests the decoded form too, so without it `/%64ashboard`
+      would skip a `/dashboard` matcher, which is web-cache deception. **If decoding fails, the request
+      counts as matched**;
+    - for a pages-router data request (`/_next/data/<buildId>/<path>.json`), the page path it
+      normalizes to, with `/index` mapped to `/`.
+
+    Two rules make the comparison over-match rather than under-match:
+
+    - Each `sourceRegex` is compiled **case-insensitively**.
+    - `has`/`missing` conditions are ignored, so a path whose regexp matches counts as matched.
+
+    **i18n uses the conservative rule.** When the artifact records an `i18n` config and **any** matcher
+    exists, **every path counts as matched**. Next inserts the detected or default locale before
+    matching. That locale can depend on the `Host` (i18n `domains`), the `NEXT_LOCALE` cookie and
+    `Accept-Language`. So a raw `/dashboard` can miss a raw-URL preload while Next's middleware ran on
+    `/en/dashboard`, and the protected page would be edge-cached for anonymous users. Reproducing
+    Next's locale detection would be a second implementation of Next's routing, the
+    reverse-engineering this ADR rejects for the manifests. The conservative rule costs i18n apps with
+    middleware only one thing: they opt paths in through `includePaths`. App Router apps do not use the
+    `i18n` config and are unaffected.
+
+    An app whose artifact says `middleware: "none"` is unaffected by condition 10.
 
 **Why condition 10 exists.** Take a static or ISR page that session-cookie middleware protects. An
 authenticated request passes conditions 1–9: it has no `Authorization` header, no draft cookie, no
@@ -276,8 +326,25 @@ opt-in list 0.38, confidence 0.24; architect with a falsifiable reversal **0.93*
   both carry `s-maxage`. Request variant A's cookie, then variant B's. **Pass** means B never gets A's
   body from the edge.
 
-Both pass under condition 10, because the middleware matcher covers those paths. Each case runs a
-second time with the path listed in `includePaths`. There the wrong variant is expected, which shows
+Two more named cases cover the pathname rule (gate r3, system designer):
+
+- **`i18n-default-locale`**: a pages-router app with `i18n` and a matcher written for the
+  locale-prefixed path. Request raw `/dashboard` (no locale) with the session cookie, then without it.
+  **Pass** means the cookieless request never gets the protected body.
+- **`encoded-path`**: request `/%64ashboard` with the session cookie, then `/dashboard` and
+  `/%64ashboard` without it. **Pass** means neither cookieless request gets the protected body. A
+  malformed escape such as `/%E0%A4%A` must also never be edge-cached.
+
+**Soundness test (gate r3).** A test middleware records every pathname it runs on. For a corpus of
+requests, the test asserts **"Next's middleware ran ⇒ the preload counted the request as matched"**.
+The corpus covers encoded, double-encoded and malformed paths, mixed case, `basePath`,
+trailing-slash, `/_next/data/…json`, and i18n requests with and without a locale, across two `Host`
+values when i18n `domains` is set. Over-matching is allowed; under-matching fails the test. This is
+the practical form of "the preload tests what Next tests". The reverse direction is not required,
+because over-matching only costs cache hits.
+
+All four cases and the soundness test are in the **mutation-proved** condition-10 set. All pass under
+condition 10. The two original cases each run a second time with the path listed in `includePaths`. There the wrong variant is expected, which shows
 `includePaths` is a real opt-out of the protection and the docs must say so.
 
 **If either case fails in its default form, the ADR flips to an opt-in path list for every app**, and
@@ -513,8 +580,10 @@ notice.
   - the symmetric rule (gate r1): a `?_rsc=<hash>` request without `RSC: 1`, then a real RSC
     navigation to the same URL, must return `text/x-component`;
   - the `_rsc` case per D4.3;
-  - the two D4.1 condition-10 cases, `cookie-gated-static` and `middleware-cookie-variants`, with the
+  - the D4.1 condition-10 cases `cookie-gated-static` and `middleware-cookie-variants`, with the
     pass/fail rule stated there (gate r1);
+  - the cases `i18n-default-locale` and `encoded-path`, plus the "Next ran ⇒ preload matched" soundness
+    test (gate r3);
   - a page entry whose `_N_T_` tag is missing at `writeHead` is not cached (gate r1);
   - tag isolation between two apps;
   - zero diff without `spec.cdn`.
@@ -557,6 +626,8 @@ notice.
 | Tag overflow | Not edge-cacheable | 0.96 | Truncate | 0.04 | A truncated set stores entries some purge can never reach |
 | HTML scope | All eligible + `excludePaths`, minus middleware-matched paths | 0.62 (+0.90) | Opt-in path list | 0.38 | Low confidence (0.24). Reverses on the falsifiable CDN-3a rule in D4.1 |
 | Middleware auth bypass (gate r1) | Condition 10 + `includePaths` | 0.95 | Opt-in path list for every app | 0.05 | Penalises apps without middleware for a hazard only middleware creates |
+| Matcher source (gate r3) | `onBuildComplete` `outputs.middleware` → knext artifact that always exists | 0.91 | Next's internal manifests | 0.09 | Not a contract; reverse-engineering under the official-adapter rule |
+| Tested pathname (gate r3) | Raw + decoded + data-route path; decode failure = matched; i18n with any matcher = every path matched | 0.72 | Reproduce Next's locale insertion exactly; raw only | 0.27 / 0.01 | Exact reproduction re-implements Host/cookie/Accept-Language locale detection; raw only enables `/%64ashboard` deception |
 | Symmetric RSC rule (gate r1) | Added (architect override) | — | As written | 1.00 | jev read the ADR literally; a crafted `?_rsc=` request is a reachable poisoning vector |
 | Emulator token (gate r1) | Fixed dummy token | 0.61 | Resolve `secretRef` | 0.39 | A CR could point the real token at an in-cluster listener |
 | `Vary` in the allowlist | Omit (3xx rule explicit) | 0.62 | Require | 0.38 | `s-maxage` condition already excludes known `Vary` cases |
@@ -602,7 +673,12 @@ notice.
 - **Middleware-matched paths are not edge-cached unless listed in `includePaths`.** An app with a
   catch-all middleware gets edge caching only on the paths it lists. Listing a path disables the
   auth-bypass protection for it, and the docs must say that plainly. An app without middleware is
-  unaffected.
+  unaffected. A pages-router app with `i18n` and any middleware gets **no** default edge HTML caching
+  at all, only `includePaths`, because of the conservative i18n rule (gate r3).
+- **Condition 10 depends on a knext build artifact.** A packaging slip that drops
+  `knext-cdn-routing.json` turns off edge HTML caching. That is safe, and it is not silent: the
+  `knext_cdn_edge_decision_total` metric counts it under `reason="routing_artifact_missing"`, the
+  preload logs one line at boot, and CDN-3a's HIT cases fail on an image without the artifact.
 - **`'use cache'`-only tags rely on Next copying them into the page entry.** This is tested in CDN-3b,
   not verified from source.
 - **Only Cloudflare carries a live claim.** The other rows are unit- and emulator-tested only (D2).
@@ -619,12 +695,20 @@ notice.
 1. **CDN-1 (#2259, T2):** `spec.cdn` types + CEL + the unconditional `KNEXT_CDN_*` reservation; operator
    render and the zero-diff golden guard; the canary/no-storage and vinext status conditions in
    `computeStatusVerdict`; `knext.config.ts` key, `cr-builder.ts` mapping, preflight schema; the
-   header-preload allowlist (D4, including condition 10 and the manifest reader), tag seam (D5.1,
-   with build-artifact guard coverage, own-entry tags and Node + Bun parity), encoding and overflow
-   (D5.2–D5.4). Exit tests per the Sprint 4 plan, including:
+   header-preload allowlist (D4, including condition 10). For condition 10, CDN-1 writes
+   `knext-cdn-routing.json` from `onBuildComplete` `outputs.middleware` + `ctx.config`, and gets it
+   into the runtime image; the preload then reads it. Also the tag seam (D5.1, with build-artifact
+   guard coverage, own-entry tags and Node + Bun parity) and tag encoding and overflow (D5.2–D5.4).
+   Exit tests per the Sprint 4 plan, including:
    - mutation-proved RSC rules (both directions and the `Content-Type` check);
-   - a mutation-proved condition 10 (middleware-matched path not cached; missing manifest caches
-     nothing);
+   - a mutation-proved condition 10, gate r3:
+     - delete the artifact → nothing non-immutable is cached;
+     - corrupt the artifact → nothing is cached;
+     - artifact says `middleware: "none"` → only then are paths eligible without `includePaths`;
+     - middleware present with no matchers → every path is matched;
+     - the `i18n-default-locale` and `encoded-path` cases, and the soundness test;
+     - prefix lists decoded and segment-bounded (`/blog` never covers `/blogger`);
+   - a scan proving the preload reads no Next internal manifest;
    - an admission test showing a CR cannot set its own prefix.
 2. **CDN-2 (#2260, T2 module; T1 makes the one-line wire-in after #2083):** `adapters/cdn-purge/` rows
    (Cloudflare, emulator; deferred rows as data), queue, bucket, retries, overflow collapse, metrics,
@@ -667,7 +751,7 @@ stay out)". §1 needs no change: the fence in D1 is what keeps this inside "narr
 | A1 purge originator + failure bound | D6.1, D6.3–D6.6, D8 | Origin pod; coalesced, ≤100 tags, row-sized bucket, `Retry-After`, ≤3 attempts; staleness = edge TTL; metric; drain |
 | A2 first-ready purge | D7 | `SET knext:cdn:purged:<p>:<buildId> NX`; no Redis → no first-ready purge |
 | A3 RSC/HTML key | D4.3, D4.4 | `RSC`/`Next-Router-*` without `_rsc` never cacheable; `_rsc` without `RSC: 1` never cacheable, and `Content-Type` must match the key (gate r1); `_rsc` only on query-keyed rows, gated by CDN-3a; no 3xx |
-| A4 never-cache set | D4.1 | Allowlist of positive conditions covering every listed case, plus condition 10: middleware-matched paths only through `includePaths` (gate r1) |
+| A4 never-cache set | D4.1 | Allowlist of positive conditions covering every listed case, plus condition 10: middleware-matched paths only through `includePaths` (gate r1). Matchers come from the official `onBuildComplete` outputs through a knext artifact; matching uses the raw and decoded pathname, with a conservative i18n rule (gate r3) |
 | A5 tag prefix | D3, D5.3 | Operator-derived hash, `KNEXT_CDN_*` reserved; the token-holder limit stated |
 | A6 credential + SSRF | D10 | Hardcoded URLs; emulator `*.svc.cluster.local` only; token never logged; no inbound route |
 | A7 canary | D9 | Rejected CDN-off-during-canary; short TTL + build tags + deduped purge; asset-retention dependency + status condition |
