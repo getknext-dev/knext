@@ -67,7 +67,7 @@ jobs:
         id: docker-hub-mirror
         uses: ./.github/actions/docker-hub-mirror
       - name: Setup Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24'
 
@@ -90,7 +90,7 @@ jobs:
       # Same audit the deploy job gates on, so a HIGH/CRITICAL in the docs
       # closure reds the pull request instead of the first deploy after merge.
       - name: Install syft
-        uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        uses: anchore/sbom-action/download-syft@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
 
       - name: Install grype
         id: grype
@@ -168,7 +168,7 @@ jobs:
         id: docker-hub-mirror
         uses: ./.github/actions/docker-hub-mirror
       - name: Setup Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24'
 
@@ -191,7 +191,7 @@ jobs:
       # see, so audit the app's pre-build closure (SBOM + HIGH/CRITICAL, dated
       # allowlist) BEFORE anything is built or pushed.
       - name: Install syft
-        uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        uses: anchore/sbom-action/download-syft@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
 
       - name: Install grype
         id: grype
@@ -205,7 +205,7 @@ jobs:
 
       - name: Upload the closure SBOM
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: docs-closure-sbom
           path: sbom/app-closure.cdx.json

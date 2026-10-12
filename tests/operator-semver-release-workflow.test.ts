@@ -144,7 +144,10 @@ describe('operator-supply-chain.yml: tag-triggered semver release line (#1667)',
       /if:\s*steps\.channel\.outputs\.is_stable\s*==\s*'true'/.test(latestMove ?? ''),
       'operator-latest must be moved ONLY on a stable channel (is_stable == true)',
     ).toBe(true);
-    expect(/make_latest:\s*["']?true["']?/.test(latestMove ?? '')).toBe(true);
+    expect(
+      /make_latest:\s*["']?false["']?/.test(latestMove ?? ''),
+      'operator-latest must never take the Latest badge from the knext release',
+    ).toBe(true);
   });
 
   it('the release-channel script exists and is executable shell', () => {

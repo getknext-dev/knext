@@ -582,7 +582,8 @@ describe('evaluateBranchPolicy', () => {
   });
 
   it('passes the exact lane allowlist, taken from publish-lane-guard', () => {
-    const names = ['main', 'integration/v1.3', 'integration/v1.4', 'integration/v2', 'release/1.x'];
+    // `release/1.x` is deliberately absent: it is a prepared lane, not yet publishable (R4p).
+    const names = ['main', 'integration/v1.3', 'integration/v1.4', 'integration/v2'];
     const r = evaluateBranchPolicy(
       custom,
       names.map((name) => ({ name, type: 'branch' })),

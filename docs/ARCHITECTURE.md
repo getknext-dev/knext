@@ -49,7 +49,7 @@ flowchart TB
 └── cache/               # Build-time pre-rendered pages
 ```
 
-The `next-adapter.ts` (`NextAdapter`) hooks into `modifyConfig` (enforce standalone) and
+The `next-adapter.ts` (`NextAdapter`) hooks into `modifyConfig` (default to standalone; an explicit `output: 'export'` is left alone) and
 `onBuildComplete` (upload static assets to object storage keyed by `buildId`).
 
 ### 2. kn-next Package

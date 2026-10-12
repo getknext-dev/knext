@@ -5,9 +5,12 @@
  * The operator publishes `operator-vX.Y.Z` bundles that stamp the version on
  * the manager Deployment (`app.kubernetes.io/version`) and in the image tag
  * (`…:vX.Y.Z@sha256:…`). Doctor reads it back — label first, image tag as the
- * fallback — and applies the documented pairing rule: operator MAJOR must equal
- * the CLI's, and operator MINOR must be >= the CLI's ("operator/CRD first, then
- * CLI"; an older CLI against a newer operator is always valid).
+ * fallback. The pairing verdict itself belongs to the NextApp CRD row (the CLI's
+ * emitted CRD apiVersion must be served); this row adds an INFORMATIONAL
+ * staleness note: within one major, an operator MINOR older than the CLI's
+ * warns ("operator/CRD first, then CLI"), while a different major is never a
+ * warning because the operator keeps its own major line when the packages go
+ * to 2.0.
  *
  * Every dep is injected; nothing here shells out to a real kubectl.
  */
@@ -178,8 +181,8 @@ describe("classifyOperatorCompat (operator/CRD first, then CLI)", () => {
         ["1.0.0", "1.3.0", "operator-older"], // CLI ahead of operator: unsupported
         ["1.0.0", "1.3.0-rc.7", "operator-older"], // the CLI prerelease counts as its core
         ["1.3.0-rc.1", "1.3.0-rc.7", "ok"], // operator prerelease counts as its core
-        ["2.0.0", "1.9.0", "major-mismatch"],
-        ["1.9.0", "2.0.0", "major-mismatch"],
+        ["1.5.0", "2.0.0", "different-line"], // a 2.0 CLI on the operator's 1.x line: not a warning
+        ["2.0.0", "1.9.0", "different-line"],
     ];
     for (const [op, cli, want] of cases) {
         it(`operator ${op} with CLI ${cli} -> ${want}`, () => {
@@ -215,10 +218,20 @@ describe("doctor operator-version row (#1947)", () => {
         expect(row.hint).toMatch(/operator.*first/i);
     });
 
-    it("WARN: a different MAJOR in either direction", async () => {
+    it("PASS with a note: a 2.0 CLI against an operator on its 1.x line is the supported pairing, not a warning", async () => {
+        const row = await versionRow(deployment({ label: "1.5.0" }), "2.0.0");
+        expect(row.status).toBe("pass");
+        expect(row.detail).toContain("v1.5.0");
+        expect(row.detail).toMatch(/different major/i);
+        expect(row.detail).toMatch(/CRD API version/i);
+        expect(row.detail).not.toMatch(/outside the supported pairing/i);
+    });
+
+    it("PASS with the same note when the operator's major is ahead of the CLI's", async () => {
         const row = await versionRow(deployment({ label: "2.0.0" }), "1.0.0");
-        expect(row.status).toBe("warn");
-        expect(row.detail).toMatch(/major/i);
+        expect(row.status).toBe("pass");
+        expect(row.detail).toMatch(/different major/i);
+        expect(row.detail).toMatch(/CRD API version/i);
     });
 
     it("WARN: an operator with no version label and a digest-only image is unversioned, with a pin hint", async () => {

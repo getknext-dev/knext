@@ -152,6 +152,7 @@ Tunables (env, sane defaults — no config needed for the common case):
 | `DB_WAKE_RETRY_BUDGET_MS` | `8000` | Total budget across all retries of one cold acquire (comfortably above the ~2.5s wake). |
 | `DB_WAKE_RETRY_BASE_MS` | `100` | First backoff; doubles each attempt. |
 | `DB_WAKE_RETRY_MAX_MS` | `1000` | Cap on any single backoff sleep. |
+| `KNEXT_DB_SCALE_TO_ZERO` | unset | Declares whether `DATABASE_URL` is a scale-to-zero database (`true` / `false`). Only affects health reporting: a refused connection reads `waking` for a scale-to-zero database and `down` otherwise. Unset, knext recognises the gateway by its host (a `scale-zero-pg` label, or `pggw` / `pggw-apps`); set it when you reach the database through an IP, a pooler or an alias. |
 
 **Warm-tier fallback for latency-sensitive apps.** The retry keeps a mid-wake request correct, but
 it still pays the cold-wake latency. If an app cannot tolerate that occasional first-request delay,

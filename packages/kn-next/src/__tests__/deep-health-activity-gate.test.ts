@@ -80,30 +80,61 @@ describe("#348 gate: makeDeepHealthScrapeHook activity-gates the DB dial", () =>
         await expect(hook()).resolves.toBeUndefined();
     });
 
-    it("an idle pool leaves the gauge at its LAST-KNOWN value (does not zero it out)", async () => {
+    it("an idle pool DROPS the series: no stale 'waking' or 'down' is left claiming a state nothing probed", async () => {
         let active = true;
+        const checkDeepHealth = mock(async () => ({
+            status: "waking" as const,
+            checks: {
+                postgres: "waking" as const,
+                redis: "unconfigured" as const,
+            },
+        }));
         const hook = makeDeepHealthScrapeHook(metrics, {
-            checkDeepHealth: async () => ({
-                status: "waking" as const,
-                checks: {
-                    postgres: "waking" as const,
-                    redis: "unconfigured" as const,
-                },
-            }),
+            checkDeepHealth,
             isRecentlyActive: () => active,
         });
 
         // First scrape while active: gauge records waking.
         await hook();
-        // App goes idle; a later scrape must NOT re-dial and must NOT clear the
-        // last-known state (so a genuinely-stuck-then-idle app keeps its reading).
+        expect(await scrape()).toContain(`${DEEP_HEALTH_STATE_METRIC}{`);
+
+        // The app goes idle. The next scrape must NOT re-dial, and it must not
+        // keep claiming the last reading either: nothing was probed, so the
+        // exposition carries no claim (Prometheus then marks the series stale
+        // and a `for:` clause resets).
         active = false;
         await hook();
 
+        expect(checkDeepHealth).toHaveBeenCalledTimes(1);
         const out = await scrape();
-        expect(out).toMatch(
+        expect(out).not.toMatch(
+            new RegExp(`^${DEEP_HEALTH_STATE_METRIC}\\{`, "m"),
+        );
+    });
+
+    it("the series comes back when the app is used again (reset is not a latch)", async () => {
+        let active = true;
+        let now = 0;
+        const hook = makeDeepHealthScrapeHook(metrics, {
+            checkDeepHealth: async () => ({
+                status: "down" as const,
+                checks: {
+                    postgres: "down" as const,
+                    redis: "unconfigured" as const,
+                },
+            }),
+            isRecentlyActive: () => active,
+            now: () => now,
+        });
+        await hook();
+        active = false;
+        await hook();
+        active = true;
+        now += 1_000; // inside the probe TTL of the first probe
+        await hook();
+        expect(await scrape()).toMatch(
             new RegExp(
-                `${DEEP_HEALTH_STATE_METRIC}\\{[^}]*dependency="overall"[^}]*state="waking"[^}]*\\} 1`,
+                `${DEEP_HEALTH_STATE_METRIC}\\{[^}]*dependency="overall"[^}]*state="down"[^}]*\\} 1`,
             ),
         );
     });

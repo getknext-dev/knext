@@ -55,6 +55,7 @@ import { operatorCheck } from "./doctor/checks/operator";
 import { operatorImageCheck } from "./doctor/checks/operator-image";
 import { operatorVersionCheck } from "./doctor/checks/operator-version";
 import { storageModeCheck } from "./doctor/checks/storage-mode";
+import { turbopackFragmentsCheck } from "./doctor/checks/turbopack-fragments";
 import { cacheComponentsCheck } from "./doctor/checks/use-cache";
 import { vinextPatchesCheck } from "./doctor/checks/vinext-patches";
 import { kubectlRunner, probeManifest } from "./doctor/kubectl";
@@ -132,6 +133,7 @@ export async function runDoctor(
     checks.push(...(await storageModeCheck(ctx)));
     checks.push(...(await nodeEntryStalenessCheck(ctx)));
     checks.push(...cacheComponentsCheck(ctx)); // local; no row unless cacheComponents (#2083)
+    checks.push(...(await turbopackFragmentsCheck(ctx))); // local; no row unless bun + turbopackModuleFragments (#2225)
     checks.push(...crdCheck(ctx));
     checks.push(...crdSchemaCheck(ctx));
     checks.push(...operatorCheck(ctx)); // sets ctx.operatorImage + ctx.operatorManager

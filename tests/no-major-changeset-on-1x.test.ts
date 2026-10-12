@@ -2,6 +2,7 @@ import { afterAll, describe, expect, it } from 'bun:test';
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { recognisedLane } from '../scripts/publish-lane-guard.mjs';
 
 /**
  * GUARD (#2036, v2 R1): no `major` changeset for a member of the `fixed` group
@@ -136,6 +137,16 @@ describe('no major changeset on a 1.x fixed group (#2036)', () => {
       for (const [k, v] of Object.entries(cs)) writeFileSync(join(r, '.changeset', k), v);
       return r;
     };
+    it('covers the release/1.x maintenance lane: the lane map says major 1, so a major changeset is flagged there (#2040)', () => {
+      // The detector keys on a `1.` fixed-group version. If the lane map ever
+      // stopped calling release/1.x a major-1 lane, this would red rather than
+      // let the PR-time guard silently stop applying to it.
+      const lane = recognisedLane('refs/heads/release/1.x');
+      expect(lane?.expectedMajor).toBe(1);
+      expect(
+        findViolations(fixture({ 'a.md': '---\n"@getknext/core": major\n---\n\nx\n' })),
+      ).toHaveLength(1);
+    });
     it('flags a major bump', () => {
       expect(
         findViolations(fixture({ 'a.md': '---\n"@getknext/core": major\n---\n\nx\n' })),

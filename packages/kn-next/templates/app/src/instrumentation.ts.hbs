@@ -46,6 +46,18 @@ export async function register() {
   // though `registerNode()` would return at once. `otel-config` is
   // dependency-free, so this static import is edge-clean.
   if (!resolveOtelOptions(process.env)) {
+    // Tracing off still owes the deep-health gauge: `KnextDeepHealthDown` and
+    // `KnextDeepHealthStuckWaking` key on `knext_deep_health_state`, and a
+    // default install has tracing off. The lite module is dependency-free (its
+    // only static import is `node:http`), reads the DB-activity slot the lib
+    // already writes, and imports the health check on its first scrape — so
+    // starting it adds none of the cost the gate above exists to avoid. It is
+    // NOT awaited (nothing on the boot path waits for it) and never throws:
+    // observability must not break boot. Its edge exclusion is the same
+    // adapter-injected `IgnorePlugin` that fences `./instrumentation-node`.
+    void import('@getknext/core/internal/deep-health-lite')
+      .then(({ startDeepHealthLite }) => startDeepHealthLite())
+      .catch(() => {});
     return;
   }
 

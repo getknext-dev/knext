@@ -68,7 +68,30 @@ export const PUBLISH_LANES = new Map([
   ['refs/heads/integration/v1.3', 1],
   ['refs/heads/integration/v1.4', 1],
   ['refs/heads/integration/v2', 2],
-  ['refs/heads/release/1.x', 1],
+]);
+
+/**
+ * PREPARED LANES (#2040, v2 task R4p) — lanes the guards RECOGNISE (major +
+ * stable dist-tag) but that are deliberately NOT on the publish allowlist.
+ *
+ * `release/1.x` is the 1.x maintenance lane (ADR-0063 Amendment): cut from
+ * the 1.x tip at 2.0 GA, security fixes only, stable dist-tag `latest-1`. It
+ * is prepared here and kept OFF `PUBLISH_LANES` because the `npm-publish`
+ * environment still has no deployment-branch policy, and a branch-NAME policy
+ * admits whatever is pushed under that name — a lane that does not exist yet
+ * could be created at a stale marker SHA and dispatched.
+ *
+ * R4 (the full task) makes it publishable by MOVING its entry from this map to
+ * `PUBLISH_LANES` in one reviewed edit; `tests/publish-lane-guard-prepared.test.ts`
+ * goes red on purpose the moment the two maps overlap or the entry vanishes.
+ * TODO(#2040): R4 — move to PUBLISH_LANES, route `--tag latest-1` in release.yml,
+ * add the name to the environment policy once the branch exists.
+ *
+ * `distTag` is the tag a STABLE publish from the lane carries. It must never
+ * be `latest`: a 1.x security patch landing there would regress newest-stable.
+ */
+export const PREPARED_LANES = new Map([
+  ['refs/heads/release/1.x', { major: 1, distTag: 'latest-1' }],
 ]);
 
 /**
@@ -113,7 +136,7 @@ export function parseSemver(version) {
 }
 
 /**
- * @typedef {{ok: true, ref: string, kind: 'lane' | 'cut', expectedMajor: number, expectedVersion: string | null}} Lane
+ * @typedef {{ok: true, ref: string, kind: 'lane' | 'cut' | 'prepared', expectedMajor: number, expectedVersion: string | null}} Lane
  * @typedef {{ok: false, ref: string, reason: string}} Refusal
  */
 
@@ -128,6 +151,14 @@ export function resolveLane(ref) {
   const expectedMajor = PUBLISH_LANES.get(ref);
   if (expectedMajor !== undefined) {
     return { ok: true, ref, kind: 'lane', expectedMajor, expectedVersion: null };
+  }
+  if (PREPARED_LANES.has(ref)) {
+    return {
+      ok: false,
+      ref,
+      reason:
+        'a prepared lane that is not yet publishable (it is recognised but not on the publish allowlist; see PREPARED_LANES)',
+    };
   }
   const cut = RELEASE_CUT_REF.exec(ref);
   if (cut) {
@@ -152,6 +183,46 @@ export function resolveLane(ref) {
     ref,
     reason: 'not a publish lane (exact allowlist) and not a release/vX.Y.Z[-rc.N] cut',
   };
+}
+
+/**
+ * Recognise a ref as ANY lane the guards know — live, release cut or prepared —
+ * without admitting it. Unlike `resolveLane`, a prepared lane comes back `ok`
+ * with `publishable: false`, so lane-aware checks (the major check) can apply
+ * to `release/1.x` before it may publish. Anything unreadable or unknown is
+ * `null`, never a default lane.
+ *
+ * @param {string} ref the FULL ref
+ * @returns {{ok: true, ref: string, kind: 'lane' | 'cut' | 'prepared', expectedMajor: number, expectedVersion: string | null, distTag: string | null, publishable: boolean} | null}
+ */
+export function recognisedLane(ref) {
+  if (typeof ref !== 'string') return null;
+  const prepared = PREPARED_LANES.get(ref);
+  if (prepared !== undefined) {
+    return {
+      ok: true,
+      ref,
+      kind: 'prepared',
+      expectedMajor: prepared.major,
+      expectedVersion: null,
+      distTag: prepared.distTag,
+      publishable: false,
+    };
+  }
+  const lane = resolveLane(ref);
+  return lane.ok ? { ...lane, distTag: null, publishable: true } : null;
+}
+
+/**
+ * The stable dist-tag a prepared lane publishes under, or null for any other
+ * (or unreadable) ref.
+ *
+ * @param {string} ref the FULL ref
+ * @returns {string | null}
+ */
+export function preparedDistTag(ref) {
+  if (typeof ref !== 'string') return null;
+  return PREPARED_LANES.get(ref)?.distTag ?? null;
 }
 
 /**

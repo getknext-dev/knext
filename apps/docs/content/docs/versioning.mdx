@@ -95,6 +95,42 @@ Security fixes are called out in the release notes for the release that carries 
 published under the `latest-1` dist-tag (`npm install @getknext/core@latest-1`). After that it
 receives nothing. Before 2.0 is generally available, the paragraph above is the whole policy.
 
+## Supported runtimes on 1.x
+
+The 1.x line runs on these runtimes:
+
+{/* runtime-floors:start */}
+
+- Node.js `>=22.18`
+- Next.js `>=16.0.0`
+
+{/* runtime-floors:end */}
+
+These are the floors the published `@getknext/core` declares (`engines` and the `next` peer
+dependency), so your package manager warns you when a project is below them. New apps scaffold
+with a recent Next.js release rather than the floor.
+
+The opt-in **vinext** build target, which compiles to a Bun single-executable, is **Beta** on every
+1.x release. It follows the same release policy as the rest of the package, but it may still change
+with notice and is not part of the stability promise above; see [Stability tiers](/docs/stability).
+
+## What 2.0 changes
+
+Version 2.0 is not yet released, so everything in this section describes what is planned, and
+the release notes of the day are the authority. A major is the one place the rules above allow
+breaking changes, and 2.0 is used to clear out what has been deprecated through 1.x:
+
+- **The Node.js and Next.js floors rise.** The new floors are stated in the 2.0 release notes;
+  nothing here promises them earlier.
+- **Deprecated imports and commands are removed.** That includes the deprecated second name for the
+  command; use `knext`. Removals follow the rule above: only something already deprecated, with a
+  replacement named, is removed.
+- **The operator does not get a new major.** It stays on its own line, and the `NextApp` resource
+  keeps its API version, so the ordering rule below still applies unchanged.
+
+Staying on 1.x is supported for the window described above; the `latest-1` dist-tag is the way to
+install it.
+
 ## The cluster side versions separately
 
 The operator that runs in your cluster, and the `NextApp` resource it reconciles, are **not** on the
@@ -141,18 +177,29 @@ like and how to fix it.
 ### Operator versions
 
 Operator releases are tagged `operator-vX.Y.Z` and follow semantic versioning on their own line.
-The **major and minor track the package set** (an operator `1.3.x` pairs with `@getknext/core`
-`1.3.x`); the **patch is independent**, so an operator-only fix does not force a package release.
-The pairing rule is:
+On the 1.x line the **minor tracks the package set** (an operator `1.3.x` pairs with
+`@getknext/core` `1.3.x`); the **patch is independent**, so an operator-only fix does not force a
+package release. A new major of the packages does not give the operator a new major. What decides
+whether a CLI and an operator pair is the `NextApp` API version they share
+(`apps.kn-next.dev/v1alpha1`), and, within it, the operator release being at least as new as the
+CLI. The pairing rule is:
 
 | Operator vs. CLI | Result |
 | --- | --- |
-| Same major, operator minor **equal or newer** | Supported. Patch levels do not matter. |
-| Same major, operator minor **older** than the CLI | Not supported — upgrade the operator first. |
-| Different major | Not supported. |
+| Operator serves the CLI's `apps.kn-next.dev/v1alpha1`, release **equal or newer** | Supported. Patch levels do not matter. |
+| Operator serves the CLI's `apps.kn-next.dev/v1alpha1`, release **older** than the CLI | Not supported — upgrade the operator first. |
+| Operator does not serve the API version the CLI emits | Not supported. |
 
-Pre-release suffixes (`-rc.N`) are ignored when pairing. `knext doctor` applies this rule for you
-(see below).
+Pre-release suffixes (`-rc.N`) are ignored when pairing.
+
+`knext doctor` checks the first half of that rule against your cluster: its **NextApp CRD** row
+reads the API versions the installed CRD serves and compares them with the `apiVersion` your CLI
+emits. It passes when that version is served (a CRD that serves several versions is fine as long as
+one of them is yours) and fails when the CRD does not serve it. The message tells you which side to move: upgrade the
+operator first when the CRD only serves older versions than your CLI emits, or upgrade the CLI to
+match the operator when it only serves newer ones (a version marked deprecated still counts as
+served). If the CRD cannot be read, the row fails rather than guessing. The **Operator version** row, described
+below, is informational and does not decide the pairing.
 
 ## Pin, upgrade and roll back the operator
 
@@ -175,9 +222,11 @@ digest, then states whether it pairs with your CLI:
 PASS  Operator version  v1.3.0 (from label), image sha256:9f1c0a7d2b44…; compatible with CLI 1.3.0
 ```
 
-It warns, without failing the preflight, when the operator is older than the CLI, when the major
-versions differ, when the operator is an unreleased build, or when it predates operator versions and
-reports none. The version is stamped on the manager Deployment, so you can also read it directly:
+It warns, without failing the preflight, when the operator is older than the CLI on the same major
+version, when the operator is an unreleased build, or when it predates operator versions and reports
+none. A different major version is not a warning: the operator keeps its own version line when
+`@getknext/core` moves to 2.0, and the row says the pairing is decided by the CRD API version.
+The version is stamped on the manager Deployment, so you can also read it directly:
 
 ```sh title="shell"
 kubectl get deploy kn-next-operator-controller-manager -n kn-next-operator-system \
