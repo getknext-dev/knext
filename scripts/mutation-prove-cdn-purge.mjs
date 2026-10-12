@@ -480,7 +480,8 @@ const MUTATIONS = [
     id: 'M52',
     spec: 'main',
     subject: 'purger',
-    claim: 'the drain-time bound is far too tight: a backlog that drains in time is collapsed anyway',
+    claim:
+      'the drain-time bound is far too tight: a backlog that drains in time is collapsed anyway',
     anchor: 'const MAX_DRAIN_MS = 300_000;',
     replacement: 'const MAX_DRAIN_MS = 30_000;',
   },
@@ -506,7 +507,8 @@ const MUTATIONS = [
     subject: 'purger',
     claim: 'a Redis error uses up the once-per-process first-ready attempt',
     anchor: 'const won = await claim(client, `knext:cdn:purged:${c.prefix}:${buildId}`);',
-    replacement: 'attempted.add(buildId);\n        const won = await claim(client, `knext:cdn:purged:${c.prefix}:${buildId}`);',
+    replacement:
+      'attempted.add(buildId);\n        const won = await claim(client, `knext:cdn:purged:${c.prefix}:${buildId}`);',
   },
 ];
 
