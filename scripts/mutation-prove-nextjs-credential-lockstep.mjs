@@ -178,13 +178,15 @@ const MUTATIONS = [
     ],
   },
   {
-    label: 'scaffold pin bumped to 16.4.1 with the manifest still documenting 16.4.0 (silent drift)',
+    label:
+      'scaffold pin bumped to 16.4.1 with the manifest still documenting 16.4.0 (silent drift)',
     subject: 'scaffoldPkg',
     anchor: '"next": "16.4.0",',
     replacement: '"next": "16.4.1",',
   },
   {
-    label: 'scaffold pin put back to 16.3.8 (below the peer floor) with the manifest still documenting 16.4.0',
+    label:
+      'scaffold pin put back to 16.3.8 (below the peer floor) with the manifest still documenting 16.4.0',
     subject: 'scaffoldPkg',
     anchor: '"next": "16.4.0",',
     replacement: '"next": "16.3.8",',
