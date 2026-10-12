@@ -22,9 +22,9 @@ const REGISTRY_KEY = Symbol.for('knext.core.cdn.metrics');
 
 /** The families this module declares up front, so HELP/TYPE exist before a sample. */
 export const PURGE_METRIC = 'knext_cdn_purge_total';
-const KNOWN = {
-  [PURGE_METRIC]: 'Purge outcomes of the CDN tag-purge module, one per purge batch or skipped call.',
-};
+const KNOWN = new Map([
+  [PURGE_METRIC, 'Purge outcomes of the CDN tag-purge module, one per purge batch or skipped call.'],
+]);
 
 const escapeLabel = (v) => String(v).replace(/\\/g, '\\\\').replace(/\n/g, '\\n').replace(/"/g, '\\"');
 
@@ -43,12 +43,12 @@ export function createMetricsRegistry() {
   const family = (name) => {
     let f = families.get(name);
     if (!f) {
-      f = { help: KNOWN[name] ?? name, series: new Map() };
+      f = { help: KNOWN.get(name) ?? name, series: new Map() };
       families.set(name, f);
     }
     return f;
   };
-  for (const name of Object.keys(KNOWN)) family(name);
+  for (const name of KNOWN.keys()) family(name);
 
   return {
     /** Increment a counter series by `by` (default 1). */
