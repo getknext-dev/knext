@@ -1206,7 +1206,7 @@ class CacheHandler {
       logCacheEvent(labelled?.cacheState === 'stale' ? 'STALE' : 'HIT', source, key, {
         durationMs: Date.now() - startTime,
       });
-      return scopeWindowToBuild(labelled, ctx);
+      return labelled;
     } catch (error) {
       logCacheEvent('MISS', source, key, {
         durationMs: Date.now() - startTime,
