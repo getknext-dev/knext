@@ -158,8 +158,7 @@
       "test/e2e/app-dir/metadata-streaming-parallel-routes/metadata-streaming-parallel-routes.test.ts",
       "test/e2e/app-dir/segment-cache/metadata/segment-cache-metadata.test.ts",
       "test/e2e/app-dir/non-root-project-monorepo/non-root-project-monorepo.test.ts",
-      "test/e2e/app-dir/prerender-encoding/prerender-encoding.test.ts",
-      "test/e2e/app-dir/interception-routes-output-export/interception-routes-output-export.test.ts"
+      "test/e2e/app-dir/prerender-encoding/prerender-encoding.test.ts"
     ]
   },
   "$knextQuarantines": [
@@ -415,11 +414,6 @@
       "test": "test/e2e/app-dir/ppr-full/**/*",
       "category": "ppr",
       "rationale": "Partial Prerendering (PPR) is not adapter-standardizable yet (CLAUDE.md §6 Tier C, upstream-gated); knext does not implement the PPR resume/stream contract. compat-matrix row: PPR ❌."
-    },
-    {
-      "test": "test/e2e/app-dir/interception-routes-output-export/interception-routes-output-export.test.ts",
-      "category": "static-export",
-      "rationale": "knext deploys a server (`output: 'standalone'`) and its adapter's modifyConfig overrides a user's `output: 'export'` (documented: the adapter forces standalone), so Next never sees `export` and its build-time validation never runs. This fixture is `{ output: 'export' }` plus an interception route and asserts `next.start()` rejects with 'Intercepting routes are not supported with static export.' (v16.4.0, test file above; smoke run 38040527044 shard 14, FAILED 3/3, 'Received promise resolved instead of rejected'). Not a Vercel-coupled assertion: Vercel's build rejects the config, knext's adapter masks it. HELD pending the API decision https://github.com/getknext-dev/knext/issues/2184 (respect output:'export' in modifyConfig?), evidence on https://github.com/getknext-dev/knext/issues/2126. If #2184 decides to respect `export`, REMOVE this entry and the rules.exclude line so the file runs and goes green."
     }
   ],
   "$knextUpstreamRuntimeDefects": [

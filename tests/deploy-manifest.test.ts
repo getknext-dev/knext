@@ -115,7 +115,6 @@ const KNOWN_UNSUPPORTED_CATEGORIES = new Set([
   'ppr',
   'cache-components',
   'image-optimization',
-  'static-export',
 ]);
 
 const manifest: Manifest = existsSync(MANIFEST_PATH)

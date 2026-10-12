@@ -101,8 +101,8 @@ const MUTATIONS = [
   textRow(
     'the file is added to rules.exclude (it would stop running on every lane)',
     'main',
-    '      "test/e2e/app-dir/prerender-encoding/prerender-encoding.test.ts",\n',
-    `      "test/e2e/app-dir/prerender-encoding/prerender-encoding.test.ts",\n      "${MW}",\n`,
+    '      "test/e2e/app-dir/segment-cache/metadata/segment-cache-metadata.test.ts",\n',
+    `      "test/e2e/app-dir/segment-cache/metadata/segment-cache-metadata.test.ts",\n      "${MW}",\n`,
   ),
   textRow(
     'the file is added to $knextQuarantines (it would count toward §h)',
