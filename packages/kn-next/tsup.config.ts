@@ -98,6 +98,17 @@ export default defineConfig([
       // standalone tracing copies the client into the node image.
       'adapters/cache-handler-node': 'src/adapters/cache-handler-node.js',
       'adapters/cache-handler-bun': 'src/adapters/cache-handler-bun.js',
+      // The `'use cache'` (`cacheHandlers`) backend the adapter wires beside
+      // `cacheHandler`: one tiny entry per (runtime, Next cache kind). They import
+      // the matching cache-handler-<runtime> entry, so tsup hoists the shared
+      // core into one chunk and the ISR and `'use cache'` handlers hold ONE
+      // Redis client and ONE circuit breaker.
+      'adapters/use-cache-handler-node': 'src/adapters/use-cache-handler-node.js',
+      'adapters/use-cache-handler-remote-node':
+        'src/adapters/use-cache-handler-remote-node.js',
+      'adapters/use-cache-handler-bun': 'src/adapters/use-cache-handler-bun.js',
+      'adapters/use-cache-handler-remote-bun':
+        'src/adapters/use-cache-handler-remote-bun.js',
       // The sharp addon shim. Plain untyped ESM, like cache-handler: it is
       // pulled in by a BUNDLER ALIAS (apps/*/vite.config.ts) rather than
       // imported by name, so it needs its own entry or it never reaches dist and

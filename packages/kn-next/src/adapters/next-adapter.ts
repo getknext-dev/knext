@@ -106,6 +106,65 @@ function runtimeCacheHandler(
 }
 
 /**
+ * The per-runtime `'use cache'` entries, by runtime id and Next cache kind.
+ * One module per (runtime, kind): Next uses a module's default export as the
+ * handler for a kind, and the Redis keys are namespaced by kind.
+ */
+const RUNTIME_USE_CACHE_HANDLERS: Record<
+    string,
+    { default: string; remote: string }
+> = {
+    node: {
+        default: "@getknext/core/internal/use-cache-handler-node",
+        remote: "@getknext/core/internal/use-cache-handler-remote-node",
+    },
+    bun: {
+        default: "@getknext/core/internal/use-cache-handler-bun",
+        remote: "@getknext/core/internal/use-cache-handler-remote-bun",
+    },
+};
+
+/**
+ * Wire the shared Redis `'use cache'` backend (`cacheHandlers`, Next >= 16.4).
+ *
+ * `'use cache'` runs through `cacheHandlers` (plural), a different option from the
+ * singular `cacheHandler` that serves ISR. With only the singular one wired and
+ * the scaffold's `cacheMaxMemorySize: 0`, Next's built-in `'use cache'` handler
+ * is a no-op in production: no error, no cache. Pointing both the `default` and
+ * the `remote` kind at knext's Redis handler makes an entry shared across pods
+ * and kept across scale-to-zero. Both kinds, because Next keeps its no-op
+ * built-in for any kind left unset.
+ *
+ * Applied under the same conditions as {@link runtimeCacheHandler}: a known
+ * runtime exported by the CLI and an app `cacheHandler` that is knext's (so
+ * `next dev`, a plain `next build` and a user's own handler are left alone).
+ * The app's own entry for a kind wins, per key, and any other kind it
+ * configured is kept.
+ */
+function runtimeUseCacheHandlers(
+    config: Parameters<NonNullable<NextAdapter["modifyConfig"]>>[0],
+): { cacheHandlers?: Record<string, string | undefined> } {
+    const runtime = process.env[KNEXT_RUNTIME_ENV];
+    const entries =
+        runtime !== undefined &&
+        Object.hasOwn(RUNTIME_USE_CACHE_HANDLERS, runtime)
+            ? RUNTIME_USE_CACHE_HANDLERS[runtime]
+            : undefined;
+    if (entries === undefined) return {};
+    const handler = config.cacheHandler;
+    if (typeof handler !== "string" || !isKnextCacheHandler(handler)) return {};
+    const require = createRequire(import.meta.url);
+    const own = config.cacheHandlers ?? {};
+    return {
+        cacheHandlers: {
+            ...own,
+            default: own.default ?? require.resolve(entries.default),
+            remote: own.remote ?? require.resolve(entries.remote),
+        },
+    };
+}
+
+/**
  * Write-free runtime: route Next's optimized-image cache through the knext
  * cache handler instead of `.next/cache/images` on local disk.
  *
@@ -210,6 +269,7 @@ const adapter: NextAdapter = {
         const withRuntimeHandler = {
             ...config,
             ...runtimeCacheHandler(config),
+            ...runtimeUseCacheHandlers(config),
         };
         return {
             ...withRuntimeHandler,
