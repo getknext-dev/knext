@@ -412,6 +412,42 @@ describe("missing credential is fail-closed and invisible to the request path (A
         await expect(h.purger.flush()).resolves.toBeUndefined();
         expect(h.count("cloudflare", "failed")).toBe(1);
     });
+
+    it("a logger that throws cannot reach the request path", async () => {
+        const boom = () => {
+            throw new Error("log sink down");
+        };
+        const { env } = cloudflareEnv({ KNEXT_CDN_PURGE_TOKEN: undefined });
+        const h = await harness(env, {
+            log: { info: boom, warn: boom, error: boom },
+        });
+        expect(() => h.purger.enqueue(["a"])).not.toThrow();
+        await expect(h.purger.flush()).resolves.toBeUndefined();
+    });
+
+    it("a metrics sink that throws cannot reach the request path or stop the purge", async () => {
+        const { env } = cloudflareEnv();
+        const h = await harness(env, {
+            metrics: {
+                inc: () => {
+                    throw new Error("registry down");
+                },
+            },
+        });
+        expect(() => h.purger.enqueue(["a"])).not.toThrow();
+        await expect(h.purger.flush()).resolves.toBeUndefined();
+        expect(h.cdn.requests.length).toBe(1);
+    });
+
+    it("a provider that accepts the connection and never answers is cut off at the request timeout", async () => {
+        const { env } = cloudflareEnv();
+        const h = await harness(env, { requestTimeoutMs: 50 });
+        h.cdn.reply(() => ({ hang: true }));
+        h.purger.enqueue(["a"]);
+        await h.purger.flush();
+        expect(h.cdn.requests.length).toBe(3);
+        expect(h.count("cloudflare", "failed")).toBe(1);
+    });
 });
 
 describe("deferred rows, bad targets and inert mode", () => {
