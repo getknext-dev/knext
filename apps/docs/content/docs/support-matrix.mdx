@@ -51,8 +51,9 @@ too, rather than left implied.
 
 ## Next.js
 
-- **Peer dependency floor: `next >=16.0.0`** — this is the minimum `@getknext/core` declares it
-  will work with.
+- **Peer dependency range: `next >=16.0.0 <16.5.0`** — the Next.js minors `@getknext/core`
+  declares it will work with. The upper bound is widened one minor at a time as compatibility
+  evidence lands; see [Versioning](/docs/versioning).
 - **The compatibility credential window currently runs against `v16.3.8`** — the same release new
   apps scaffold today. See [the compatibility credential](/docs/compat-suite) and the
   [Compatibility matrix](/docs/compat-matrix) for exactly which official-suite cells have

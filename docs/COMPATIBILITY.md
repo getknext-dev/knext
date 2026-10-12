@@ -132,11 +132,27 @@ release on, one number covers all three.
 
 <!-- runtime-floors:start -->
 - Node.js `>=22.18`
-- Next.js `>=16.0.0`
+- Next.js `>=16.0.0 <16.5.0`
 <!-- runtime-floors:end -->
 
 These are the 1.x floors `@getknext/core` declares (`engines.node` and the `next` peer range); the
 test asserts they match the manifest and the user-facing page. They are expected to rise at 2.0.
+
+### Next.js peer-range policy
+
+<!-- next-policy:start -->
+The `next` peer range is **bounded** to the minors with compatibility evidence
+(`>=16.0.0 <16.5.0`) and is widened one minor at a time as evidence lands, instead of being open
+and admitting every future minor unvetted. Within the range, the minors covered by the official
+Next.js compatibility credential are `16.3`; for an installed minor outside that list `knext doctor`
+warns (it never blocks an install or a build). The range and the list live in
+`packages/kn-next/src/next-compat.ts`, the single source the manifest, the scaffold pin, the doctor
+row and the docs tests read.
+<!-- next-policy:end -->
+
+Maintainer notes (not user docs): the 16.0-16.3 ISR build-scoping seed on 1.x retires when the 1.x
+floor reaches 16.4 or when 1.x reaches end of life (tracked in the tech-debt backlog and in `next-compat.ts`); until then 1.x carries both
+that seed and `scopeWindowToBuild` (16.4+).
 
 - **Which lines get fixes:** the latest line. From the day `@getknext/core` 2.0 is generally
   available, the final 1.x minor gets **security fixes only for six months**, published under the

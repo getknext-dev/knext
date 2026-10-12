@@ -176,7 +176,7 @@
     "provenance": true
   },
   "peerDependencies": {
-    "next": ">=16.0.0"
+    "next": ">=16.0.0 <16.5.0"
   },
   "peerDependenciesMeta": {
     "next": {
