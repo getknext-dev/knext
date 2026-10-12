@@ -13,6 +13,7 @@ import {
   parseSemver,
   RELEASE_CUT_MAJORS,
   RELEASE_CUT_REF,
+  recognisedLane,
   resolveLane,
 } from '../scripts/publish-lane-guard.mjs';
 import { readWorkspaceManifests } from '../scripts/publish-preflight.mjs';
@@ -443,8 +444,13 @@ describe('integration/v2 pre-mode lane (#2038, v2 task R3a)', () => {
   const V2 = 'refs/heads/integration/v2';
   const laneOf = (ref: string) => {
     const resolved = resolveLane(ref);
-    if (!resolved.ok) throw new Error(`fixture lane ${ref} refused: ${resolved.reason}`);
-    return resolved;
+    if (resolved.ok) return resolved;
+    // A PREPARED lane (release/1.x until R4) is recognised but not publishable, so resolveLane
+    // refuses it. checkPreMode only reads `lane.ref`, and a stray pre.json on a prepared 1.x
+    // lane must still red, so build the fixture through recognisedLane.
+    const prepared = recognisedLane(ref);
+    if (prepared?.kind === 'prepared') return prepared;
+    throw new Error(`fixture lane ${ref} refused: ${resolved.reason}`);
   };
 
   it('the pre-mode tag map lives beside the lane map and only names mapped lanes', () => {
