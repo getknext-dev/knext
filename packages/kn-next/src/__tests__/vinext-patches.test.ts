@@ -3242,7 +3242,13 @@ describe("delivery", () => {
                 "KNEXT_VINEXT_PATCHES=0 is set",
             );
             process.env.KNEXT_VINEXT_PATCHES = "0";
-            runProjectBuild({ requireEsm: true, cwd: app, run: () => {} });
+            runProjectBuild({
+                requireEsm: true,
+                runtimeId: "node",
+                builderId: "webpack",
+                cwd: app,
+                run: () => {},
+            });
             for (const [rel, hash] of Object.entries(manifest.pristine)) {
                 expect(sha256(join(app, "node_modules", "vinext", rel))).toBe(
                     hash,
@@ -3650,6 +3656,8 @@ describe("delivery", () => {
             let sawPatchedAtBuild = false;
             runProjectBuild({
                 requireEsm: true,
+                runtimeId: "node",
+                builderId: "webpack",
                 cwd: app,
                 run: () => {
                     sawPatchedAtBuild = readFileSync(
@@ -3674,7 +3682,13 @@ describe("delivery", () => {
     it("the official-adapter target (requireEsm false) does not touch vinext", () => {
         const app = fakeApp(manifest.vinext);
         try {
-            runProjectBuild({ requireEsm: false, cwd: app, run: () => {} });
+            runProjectBuild({
+                requireEsm: false,
+                runtimeId: "node",
+                builderId: "webpack",
+                cwd: app,
+                run: () => {},
+            });
             for (const [rel, hash] of Object.entries(manifest.pristine)) {
                 expect(sha256(join(app, "node_modules", "vinext", rel))).toBe(
                     hash,
