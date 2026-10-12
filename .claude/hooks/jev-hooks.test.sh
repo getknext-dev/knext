@@ -43,6 +43,12 @@ esac
 EOF
 chmod +x "$FAKE"
 
+# A generous watchdog for every case that is not ABOUT the timeout. Under CPU load (parallel
+# mutation runs, a busy runner) a 3 s default could kill the stub, and a killed jev is a silent
+# fail-open: it would make a case that expects silence pass for the wrong reason, so a mutation
+# of the code under test could go unnoticed. The timeout cases set their own value below.
+export JEV_HOOK_TIMEOUT=30
+
 fails=0
 pass() { printf 'ok    %s\n' "$1"; }
 fail() { printf 'FAIL  %s\n' "$1"; fails=1; }

@@ -79,6 +79,16 @@ OUT=$(PR_RISK_DIFF_FILE="$TMP/benign.diff" run); rc=$?
 fixture 0 0 0 0; : >"$FAKE_ARGS"
 OUT=$(PR_RISK_DIFF_FILE="$TMP/early.diff" run); rc=$?
 [ "$rc" -eq 3 ] && [ ! -s "$FAKE_ARGS" ] && echo "ok    a secret inside the sent window blocks the call" || { echo "FAIL  early secret (rc=$rc)"; fails=1; }
+# SIGPIPE under pipefail, made DETERMINISTIC: whether a real `grep -q` closes the pipe before
+# `printf` has finished writing is a race (it is lost on Linux, won on macOS). This shim judges only
+# the first KiB of stdin and then exits, so an 80 KB writer MUST die of SIGPIPE on every platform.
+# A pipeline-shaped check (`printf | grep -q`) then reports "no secret" and the diff would be SENT.
+mkdir -p "$TMP/shim"
+REAL_GREP=$(command -v grep)
+printf '#!/usr/bin/env bash\nhead -c 1024 | "%s" "$@"\n' "$REAL_GREP" >"$TMP/shim/grep"; chmod +x "$TMP/shim/grep"
+fixture 0 0 0 0; : >"$FAKE_ARGS"
+OUT=$(PATH="$TMP/shim:$PATH" PR_RISK_DIFF_FILE="$TMP/early.diff" run); rc=$?
+[ "$rc" -eq 3 ] && [ ! -s "$FAKE_ARGS" ] && echo "ok    an early-exiting reader (SIGPIPE to the writer) still blocks the call" || { echo "FAIL  SIGPIPE case (rc=$rc out=$OUT)"; fails=1; }
 fixture 0 0 0 0; : >"$FAKE_ARGS"
 OUT=$(PR_RISK_DIFF_FILE="$TMP/late.diff" run); rc=$?
 [ "$rc" -eq 0 ] && [ -s "$FAKE_ARGS" ] && echo "ok    a secret past the 80000-byte cut is never sent, so the call goes ahead" || { echo "FAIL  late secret (rc=$rc)"; fails=1; }
