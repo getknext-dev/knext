@@ -154,6 +154,7 @@ Authorization header, upper case|AUTHORIZATION: BASIC DXNLCJPWYXNZMTIZ
 AKIA, lower case|akia${UP16}
 PEM block|${D5}BEGIN a block
 ghp_ + 36|ghp_$L36
+ghp_ token right after a data: URI marker|data:x/y;base64,ghp_$L36
 gho_ + 36|gho_$L36
 ghu_ + 36|ghu_$L36
 ghs_ + 36|ghs_$L36

@@ -56,9 +56,22 @@ Rules:
 ## L3 — composite PR risk score
 
 ```bash
-.claude/skills/jev/pr-risk.sh            # judges git diff origin/main...HEAD
-.claude/skills/jev/pr-risk.sh origin/integration/v1.3
+.claude/skills/jev/pr-risk.sh                          # judges origin/main...HEAD
+.claude/skills/jev/pr-risk.sh origin/integration/v1.3  # another base
+.claude/skills/jev/pr-risk.sh origin/main 2211         # plus the title and body of PR 2211
 ```
+
+**The score is computed from stats and paths, never from code.** What jev is sent is the
+`git diff --stat` output, the changed file paths with their status, the per-file line counts, and,
+only when a PR number is given, the PR title and body. No hunk, no added or removed line, no file
+body leaves the machine. Why: this goes to a third party, and a secret-shape denylist over code is
+never complete (random AWS secret keys, Slack webhook URLs, Stripe `sk_live_` keys, hex HMAC
+secrets and `AIza...` keys all slipped past every list narrow enough to keep the injection screen
+useful). Removing the content removes the problem instead of racing it. The cost is accuracy: the
+four questions are worded for what is visible (which areas the paths touch, how many files and
+lines, whether test files moved), so the score is a judgement of the change's SHAPE. Read it that
+way: a small diff that edits one authentication line scores low, and only a human or a reviewer
+finds that.
 
 One `ask` call, four `--score` questions (security risk, complexity, convention drift, test
 inadequacy), each a position 0..4. Arithmetic is in code, not in the model: the weights live on
@@ -72,14 +85,12 @@ and the composite is `sum(w * position / 4)`. Output ends in `RISK 0.xx HIGH|nor
 0 = normal, 10 = HIGH, 3 = jev unavailable (no opinion, not "safe").
 
 - **`>= 0.6` (HIGH): spawn both reviewers at high effort and add a knext-tester pass.**
-- The diff is truncated to 80,000 bytes (jev's ceiling is about 107,500 chars). Past that the
-  tail is not judged, so a large PR is under-scored, not over-scored; say so in the report.
-- **Nothing literally secret is sent.** The diff goes to a third party, and an unpushed branch can
-  hold a real key that gitleaks has not seen yet. Before the call, the exact bytes to be sent are
-  checked for literal secret formats (real-shaped key tokens, a PEM marker, `user:pass@`, an
-  Authorization header with a value, a 32+ char alphanumeric run containing a digit; git SHAs and
-  data URIs are exempt). On a hit the script prints `RISK unavailable (diff carries a literal
-  secret)` and exits 3 without calling jev. Say so in the report; it means "no opinion", not "safe".
+- The input is capped at 80,000 bytes (jev's ceiling is about 107,500 chars) and a PR body at
+  20,000. A change with thousands of files is truncated; say so in the report.
+- **A backstop check remains.** The exact text to be sent (stat, paths, title, body) still passes
+  the literal-secret check, which with no code rarely fires: a token in a file NAME or pasted into
+  a PR body. On a hit the script prints `RISK unavailable (input carries a literal secret)` and
+  exits 3 without calling jev. Say so in the report; it means "no opinion", not "safe".
 - Offline test with a stubbed jev: `bash .claude/skills/jev/pr-risk.test.sh`.
 
 ## L5 — routing
@@ -89,6 +100,11 @@ Do not reinvent it: `~/.claude/skills/jev/pick-route.sh "<task description>"` pr
 `opus high`). `pick-skills.sh` picks the skills. Fails open to `sonnet medium`.
 
 ## L8/L9 — cheap reads and scouting
+
+**These recipes send file CONTENT to a third party.** Use them only on files that are already
+tracked and public in this repo. Never on `.env` files, kubeconfigs, key material, or unpushed
+work that might hold a secret (`pr-risk.sh` deliberately sends no content for this reason). A
+denylist check is not a safety net: it cannot recognise every key shape.
 
 Judge a file without putting it in context:
 
@@ -143,11 +159,13 @@ jev pick 'Why did this CI job fail?' \
 
 ```bash
 .claude/skills/jev/pr-risk.sh                       # risk, see L3
-git diff origin/main...HEAD | head -c 80000 >/tmp/diff.txt
-jev yes 'Does `diff` do what `claim` says, and nothing beyond it?' \
-  --field diff=@/tmp/diff.txt --field claim=@/tmp/pr-body.md
+{ git diff --name-status origin/main...HEAD; git diff --stat=200 origin/main...HEAD; } >/tmp/shape.txt
+jev yes 'Does the SET OF CHANGED FILES in `shape` match what `claim` says, and nothing beyond it?' \
+  --field shape=@/tmp/shape.txt --field claim=@/tmp/pr-body.md
 ```
 
-`P(yes) < 0.7` means re-read the diff against the PR body: either the body over-claims or the
-diff carries something the body does not mention. Fix whichever is wrong before pushing. A high
-score is not evidence the tests prove it; run them.
+This compares the PR body with the change's SHAPE (paths, statuses, line counts), not its content,
+for the same reason as L3: an unpushed diff can hold a secret no denylist would recognise.
+`P(yes) < 0.7` means re-read your diff against the PR body: either the body over-claims or the
+change touches files the body does not mention. Fix whichever is wrong before pushing. It does not
+see what the code does, and a high score is not evidence the tests prove anything; run them.
