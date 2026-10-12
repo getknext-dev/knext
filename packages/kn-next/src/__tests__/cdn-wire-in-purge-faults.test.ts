@@ -11,12 +11,21 @@ import { afterAll, describe, expect, it, mock, spyOn } from "bun:test";
  * (the runner gives each file one).
  */
 
+/** How the fake `firstReadyPurge` misbehaves, and how often it was called. */
+const fault = { firstReady: "throw" as "throw" | "reject-once", calls: 0 };
+
 mock.module("../adapters/cdn-purge/index.js", () => ({
     enqueuePurge() {
         throw new Error("enqueuePurge exploded");
     },
     firstReadyPurge() {
-        throw new Error("firstReadyPurge exploded");
+        fault.calls += 1;
+        if (fault.firstReady === "throw") {
+            throw new Error("firstReadyPurge exploded");
+        }
+        return fault.calls === 1
+            ? Promise.reject(new Error("firstReadyPurge rejected"))
+            : Promise.resolve({ purged: true });
     },
 }));
 
@@ -44,5 +53,21 @@ describe("CDN wire-in survives a purge module that throws", () => {
         expect(await h.get("/p", { kind: "APP_PAGE" })).not.toBeNull();
         await expect(h.revalidateTag("x")).resolves.toBeUndefined();
         expect(await h.get("/p", { kind: "APP_PAGE" })).toBeNull();
+    });
+
+    it("a first-ready attempt that rejects is forgotten, so a later construction retries it", async () => {
+        fault.firstReady = "reject-once";
+        fault.calls = 0;
+        delete process.env.REDIS_URL;
+        process.env.KNEXT_BUILD_ID = "build-reject-once";
+        const mod = await import("../adapters/cache-handler.js?faults=2");
+        const tick = () => new Promise((r) => setTimeout(r, 0));
+        new mod.default({});
+        await tick();
+        new mod.default({});
+        await tick();
+        new mod.default({});
+        await tick();
+        expect(fault.calls).toBe(2);
     });
 });

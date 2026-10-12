@@ -719,25 +719,16 @@ describe("CDN wire-in of the cache handler (ADR-0068)", () => {
             expect(attempts).toHaveLength(1);
         });
 
-        it("an attempt that rejects (a purge module breaking its contract) is retried, not wedged", async () => {
-            await withRedis();
-            process.env.KNEXT_BUILD_ID = "build-reject";
-            let calls = 0;
-            installPurger({
-                firstReady: async () => {
-                    calls += 1;
-                    if (calls === 1) throw new Error("rejected");
-                    return { purged: true };
-                },
-            });
+        it("no Redis configured: the no_redis outcome is final, never retried per request", async () => {
+            process.env.KNEXT_BUILD_ID = "build-noredis";
+            const attempts = claimingPurger();
             const mod = await load();
             new mod.default({});
-            await settle();
+            await drain();
             new mod.default({});
-            await settle();
             new mod.default({});
-            await settle();
-            expect(calls).toBe(2);
+            await drain();
+            expect(attempts).toEqual(["build-noredis"]);
         });
 
         it("one attempt in flight at a time: constructions during a pending claim do not start another", async () => {
