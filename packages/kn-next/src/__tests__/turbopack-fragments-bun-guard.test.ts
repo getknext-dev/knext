@@ -70,6 +70,7 @@ describe("assertNoBunTurbopackFragments", () => {
         try {
             assertNoBunTurbopackFragments({
                 runtime: "bun",
+                builder: "turbopack",
                 readNextConfig: () => ON,
             });
         } catch (e) {
@@ -84,6 +85,7 @@ describe("assertNoBunTurbopackFragments", () => {
         expect(() =>
             assertNoBunTurbopackFragments({
                 runtime: "node",
+                builder: "turbopack",
                 readNextConfig: () => ON,
             }),
         ).not.toThrow();
@@ -92,15 +94,28 @@ describe("assertNoBunTurbopackFragments", () => {
         expect(() =>
             assertNoBunTurbopackFragments({
                 runtime: "bun",
+                builder: "turbopack",
                 readNextConfig: () => OFF,
             }),
         ).not.toThrow();
         expect(() =>
             assertNoBunTurbopackFragments({
                 runtime: "bun",
+                builder: "turbopack",
                 readNextConfig: () => undefined,
             }),
         ).not.toThrow();
+    });
+    it("allows Bun + flag on for webpack and vinext builds (no Turbopack chunks)", () => {
+        for (const builder of ["webpack", "vinext"]) {
+            expect(() =>
+                assertNoBunTurbopackFragments({
+                    runtime: "bun",
+                    builder,
+                    readNextConfig: () => ON,
+                }),
+            ).not.toThrow();
+        }
     });
     it("fails closed when the next config exists but cannot be read (Bun)", () => {
         const boom = () => {
@@ -109,6 +124,7 @@ describe("assertNoBunTurbopackFragments", () => {
         expect(() =>
             assertNoBunTurbopackFragments({
                 runtime: "bun",
+                builder: "turbopack",
                 readNextConfig: boom,
             }),
         ).toThrow(/could not read/i);
@@ -116,6 +132,7 @@ describe("assertNoBunTurbopackFragments", () => {
         expect(() =>
             assertNoBunTurbopackFragments({
                 runtime: "node",
+                builder: "turbopack",
                 readNextConfig: boom,
             }),
         ).not.toThrow();
@@ -162,6 +179,15 @@ describe("build() wiring", () => {
             expect(String(e)).not.toMatch(/turbopackModuleFragments/);
         });
     });
+    it("does not refuse on bun for webpack or vinext builds", async () => {
+        writeFileSync(join(dir, "next.config.ts"), ON);
+        for (const b of ["webpack", "vinext"]) {
+            loadConfig.mockResolvedValue(cfg({ runtime: "bun", build: b }));
+            await build({ skipNextBuild: true }).catch((e) => {
+                expect(String(e)).not.toMatch(/turbopackModuleFragments/);
+            });
+        }
+    });
     it("fails closed on an unreadable next.config", async () => {
         const p = join(dir, "next.config.ts");
         writeFileSync(p, ON);
@@ -184,7 +210,7 @@ describe("doctor row", () => {
         stderr: "x",
     });
     const okProbe = async (): Promise<ProbeOutcome> => "ok";
-    const run = (text: string | undefined, runtime?: string) =>
+    const run = (text: string | undefined, runtime?: string, bld?: string) =>
         runDoctor({
             kubectl: noKubectl,
             probeImage: okProbe,
@@ -194,6 +220,7 @@ describe("doctor row", () => {
                     name: "a",
                     registry: "r",
                     ...(runtime ? { runtime } : {}),
+                    ...(bld ? { build: bld } : {}),
                 }) as never,
         });
     it("reports a failing row for bun + flag", async () => {
@@ -209,6 +236,14 @@ describe("doctor row", () => {
             (c) => c.id === "turbopack-fragments-bun",
         );
         expect(row?.status).toBe("fail");
+    });
+    it("is silent for webpack and vinext builds on bun", async () => {
+        for (const b of ["webpack", "vinext"]) {
+            const rep = await run(ON, "bun", b);
+            expect(
+                rep.checks.some((c) => c.id === "turbopack-fragments-bun"),
+            ).toBe(false);
+        }
     });
     it("is silent for node, flag off, or no config", async () => {
         for (const [t, r] of [

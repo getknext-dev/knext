@@ -238,10 +238,10 @@ server on Bun as described above — replaced it.
 
 ## Known limitation: `turbopackModuleFragments`
 
-Next's experimental `turbopackModuleFragments` flag is not supported on the Bun runtime. With it
-on, Turbopack emits chunks that assign to a `const` inside code that never runs. Node accepts
+Next's experimental `turbopackModuleFragments` flag is not supported on the Bun runtime with a
+Turbopack build. With it on, Turbopack emits chunks that assign to a `const` inside code that never runs. Node accepts
 that; Bun's parser rejects it when the chunk loads, so the app fails at runtime.
 
-`knext build` therefore refuses the combination up front, and `knext doctor` reports it. To
+`knext build` therefore refuses the combination (Bun, Turbopack build, flag on) up front, and `knext doctor` reports it. To
 proceed, either turn `experimental.turbopackModuleFragments` off in your `next.config`, or set
 `runtime: 'node'`. The restriction lifts once a Bun release fixes the parser.

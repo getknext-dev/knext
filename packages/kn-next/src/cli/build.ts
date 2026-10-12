@@ -334,6 +334,7 @@ export async function build(options: BuildOptions = {}) {
     // emit; refuse before any build work (#2225). See the guard for retirement.
     assertNoBunTurbopackFragments({
         runtime: config.runtime ?? DEFAULT_RUNTIME_ID,
+        builder: config.build ?? DEFAULT_BUILDER_ID,
     });
 
     if (!hasStorage(config)) {

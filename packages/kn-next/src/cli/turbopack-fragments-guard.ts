@@ -42,15 +42,17 @@ export function readNextConfigStrict(cwd = process.cwd()): string | undefined {
 }
 
 export const TURBOPACK_FRAGMENTS_BUN_DETAIL =
-    "experimental.turbopackModuleFragments is on and the runtime is Bun. Bun's parser rejects the chunks that flag makes Turbopack emit (they assign to a const in code that never runs), so the app fails when those chunks load. Node is not affected.";
+    "experimental.turbopackModuleFragments is on, the build is Turbopack and the runtime is Bun. Bun's parser rejects the chunks that flag makes Turbopack emit (they assign to a const in code that never runs), so the app fails when those chunks load. Node and non-Turbopack (webpack, vinext) builds are not affected.";
 export const TURBOPACK_FRAGMENTS_BUN_HINT =
     'turn experimental.turbopackModuleFragments off in your next.config, or set runtime: "node" in your knext config';
 
 export function assertNoBunTurbopackFragments(opts: {
     runtime: string;
+    /** Only the Turbopack builder emits fragment chunks; webpack/vinext never do. */
+    builder: string;
     readNextConfig?: () => string | undefined;
 }): void {
-    if (opts.runtime !== "bun") return;
+    if (opts.runtime !== "bun" || opts.builder !== "turbopack") return;
     let text: string | undefined;
     try {
         text = (opts.readNextConfig ?? readNextConfigStrict)();
