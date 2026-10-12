@@ -243,5 +243,5 @@ Turbopack build. With it on, Turbopack emits chunks that assign to a `const` ins
 that; Bun's parser rejects it when the chunk loads, so the app fails at runtime.
 
 `knext build` therefore refuses the combination (Bun, Turbopack build, flag on) up front, and `knext doctor` reports it. To
-proceed, either turn `experimental.turbopackModuleFragments` off in your `next.config`, or set
-`runtime: 'node'`. The restriction lifts once a Bun release fixes the parser.
+proceed, either turn `experimental.turbopackModuleFragments` off in your `next.config`, set
+`runtime: 'node'`, or use a webpack build, which does not emit those chunks. The restriction lifts once a Bun release fixes the parser.
