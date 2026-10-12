@@ -11,6 +11,7 @@
  */
 
 import {
+    afterAll,
     afterEach,
     beforeEach,
     describe,
@@ -31,6 +32,17 @@ import {
 
 requireIsolatedProcess("turbopack-fragments-bun-guard.test.ts");
 
+const __realExec = { ...(await import("../cli/exec")) };
+const __realShared = { ...(await import("../cli/shared")) };
+const __realAssets = { ...(await import("../utils/asset-upload")) };
+afterAll(() => {
+    // Restore: bun cannot unregister mock.module, and a leaked fake of
+    // ../cli/shared breaks any later test in the same process.
+    mock.module("../cli/exec", () => __realExec);
+    mock.module("../cli/shared", () => __realShared);
+    mock.module("../utils/asset-upload", () => __realAssets);
+});
+
 const runQuiet = (() => mock())();
 mock.module("../cli/exec", () => ({ runQuiet, isEntrypoint: () => false }));
 const loadConfig = (() => mock())();
@@ -39,8 +51,7 @@ mock.module("../cli/shared", () => ({
     UsageError: class UsageError extends Error {},
 }));
 const uploadAssets = (() => mock(async () => {}))();
-const __real = { ...(await import("../utils/asset-upload")) };
-mock.module("../utils/asset-upload", () => ({ ...__real, uploadAssets }));
+mock.module("../utils/asset-upload", () => ({ ...__realAssets, uploadAssets }));
 
 import { build } from "../cli/build";
 
