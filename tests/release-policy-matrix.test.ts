@@ -473,7 +473,7 @@ describe('support window and runtime floors agree across the docs and the manife
     ['versioning page', DOCS_PAGE_PATH],
     ['COMPATIBILITY.md', MATRIX_PATH],
   ] as const) {
-    it(`${label} states the Node and Next floors the 1.x manifest declares`, () => {
+    it(`${label} states the Node and Next floors the manifest declares`, () => {
       const block = floorsBlock(readFileSync(path, 'utf8'), label);
       expect(core.engines?.node, 'manifest declares engines.node').toBeTruthy();
       expect(core.peerDependencies?.next, 'manifest declares a next peer range').toBeTruthy();

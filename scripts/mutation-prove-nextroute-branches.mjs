@@ -1,9 +1,13 @@
 #!/usr/bin/env node
 /**
- * Mutation-prove both `nextRoute` branches in cache-handler.js by EXIT CODE,
- * on the shared mutation harness (exact-once anchors, marker, restore).
- *   1. older-Next branch: `key.replace(...) || '/'` -> `return key;`
- *   2. 16.3.7+ branch:    `if (key.startsWith('/route-cache/')) return key;` removed
+ * Mutation-prove the build-scoping of the window the cache handler hands Next
+ * (`scopeWindowToBuild`, Next >= 16.4.0 applies a handler's `cacheControl`
+ * directly) by EXIT CODE, on the shared mutation harness (exact-once anchors,
+ * marker, restore). (Formerly proved the `nextRoute` branches of the #1888
+ * seed, which Next 16.4.0 made redundant and which are deleted.)
+ *   1. the foreign-build strip is removed (a previous build's window is honoured)
+ *   2. the same-build keep is broken (every window is withheld)
+ *   3. the Redis read path stops calling `scopeWindowToBuild`
  * Exit 0 only when the baseline is green and every mutant turns the spec red.
  */
 import { spawnSync } from 'node:child_process';
@@ -19,18 +23,24 @@ const SPEC = 'packages/kn-next/src/__tests__/cache-handler-next-stale-after-wake
 
 const MUTATIONS = [
   {
-    label: 'older-Next toRoute branch -> return key',
-    anchor: "  return key.replace(/(?:\\/index)?\\/?$/, '') || '/';",
-    replacement: '  return key;',
+    label: 'foreign-build strip removed (cacheControl handed back unchanged)',
+    anchor: '  const { cacheControl: _foreignWindow, ...rest } = entry;\n  return rest;',
+    replacement: '  return entry;',
   },
   {
-    label: '/route-cache/ verbatim branch removed',
-    anchor: "  if (key.startsWith('/route-cache/')) return key;",
-    replacement: '',
+    label: 'same-build keep broken (every window withheld)',
+    anchor: 'if (currentBuildId !== undefined && entry.buildId === currentBuildId) return entry;',
+    replacement:
+      'if (currentBuildId !== undefined && entry.buildId === currentBuildId && false) return entry;',
+  },
+  {
+    label: 'Redis read path no longer scopes the window',
+    anchor: 'return scopeWindowToBuild(parsed, ctx);',
+    replacement: 'return parsed;',
   },
 ];
 
-declareMutations(2);
+declareMutations(3);
 
 const RUNNER = resolveSpecRunner(REPO_ROOT, SPEC);
 
@@ -43,8 +53,8 @@ function specPasses() {
   return r.status === 0;
 }
 
-if (MUTATIONS.length !== 2) {
-  console.error(`FATAL: declared 2 mutations, table has ${MUTATIONS.length}`);
+if (MUTATIONS.length !== 3) {
+  console.error(`FATAL: declared 3 mutations, table has ${MUTATIONS.length}`);
   process.exit(1);
 }
 
