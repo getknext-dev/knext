@@ -28,6 +28,12 @@ Two facts shape every response below:
 | `KnextDeepHealthStuckWaking` | [Database unreachable](/docs/troubleshooting#database-wake-timeout) |
 | `KnextDeepHealthDown` | [Deep health down](/docs/troubleshooting#deep-health-down) |
 
+The two deep-health alerts ride the shipped app scrape. The gauge they read is served with tracing on or
+off, but only while the app is scaled up and has used its database in the last 45 seconds. An idle app
+serves no deep-health series, so these alerts resolve once it goes idle and fire again, after their
+2-minute hold, if the dependency is still broken when the app is used again. `KnextHighErrorRate` is the
+signal for a failing dependency while the app is idle.
+
 ## Scale-to-zero stuck
 
 The app will not scale up from zero (a cold request hangs or returns 503), or the operator will not

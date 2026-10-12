@@ -61,7 +61,7 @@ const RELEASE_NEEDS =
   '    needs: [publish-lane-guard, audit, version-pr, publish-preflight, ga-tarball-diff, pack]\n';
 const NOTES_SETUP_NODE =
   '      - name: Setup Node.js\n' +
-  '        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0\n' +
+  '        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0\n' +
   "        with:\n          node-version: '24'\n\n" +
   '      # No install step: scripts/release-notes-body.mjs reaches only node:\n';
 const NOTES_GH_ENV =
@@ -146,7 +146,7 @@ const MUTATIONS = [
     spec: WORKFLOW_SPEC,
     anchor: NOTES_SETUP_NODE,
     replacement: NOTES_SETUP_NODE.replace(
-      'actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0',
+      'actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0',
       'softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3',
     ),
     expect: 'red',

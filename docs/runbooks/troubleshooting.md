@@ -369,9 +369,16 @@ configuration fix, not a cluster change.
 deep-health state gauge `knext_deep_health_state{dependency="overall",
 state="waking"}` has been `1` for over 2 minutes.
 
-**Scrape requirement.** The rules in this section are in a metrics group that
-the default install does not scrape. They alert only where that group is
-scraped; see the deep-health alerting issue for the status.
+**When it can fire.** The deep-health gauge is served on the app metrics port
+(`:9464`), the port the shipped PodMonitor scrapes, so the alert needs no extra
+scrape config. The gauge is served whether tracing is on or off (the default
+is off). It is silent while the app is scaled to zero (no pod, no series). The
+probe only runs while the app has used its database within the activity budget,
+and while the app is idle the series is dropped rather than held at its last
+value: the alert resolves once the app goes idle and fires again, after its
+`for:` hold, if the dependency is still broken when the app is used again.
+While the app is idle, `KnextHighErrorRate` is the signal for a failing
+dependency.
 
 **Normal vs stuck.** The deep health check classifies a **refused** Postgres
 connection (`ECONNREFUSED`) as `waking` **only when the database is
@@ -434,6 +441,17 @@ when the gate is open and the probe runs.
 **Symptom.** `KnextDeepHealthDown` fires (severity: critical).
 `knext_deep_health_state{dependency="overall",state="down"}` has been `1` for
 over 2 minutes.
+
+**When it can fire.** The deep-health gauge is served on the app metrics port
+(`:9464`), the port the shipped PodMonitor scrapes, so the alert needs no extra
+scrape config. The gauge is served whether tracing is on or off (the default
+is off). It is silent while the app is scaled to zero (no pod, no series). The
+probe only runs while the app has used its database within the activity budget,
+and while the app is idle the series is dropped rather than held at its last
+value: the alert resolves once the app goes idle and fires again, after its
+`for:` hold, if the dependency is still broken when the app is used again.
+While the app is idle, `KnextHighErrorRate` is the signal for a failing
+dependency.
 
 **What it means.** Either the database refused the connection and is not a
 scale-to-zero database that could be waking (bring-your-own Postgres), or it is

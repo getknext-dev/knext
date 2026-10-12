@@ -193,11 +193,14 @@ const DB_WAKE_DURATION_METRIC = "knext_db_wake_duration_seconds"
 
 const DB_WAKE_TOTAL_METRIC = "knext_db_wake_total"
 
+const DEEP_HEALTH_PROBE_TTL_MS = 10000
+
 const DEEP_HEALTH_STATE_METRIC = "knext_deep_health_state"
 
 interface DeepHealthScrapeDeps {
   checkDeepHealth(): Promise<DeepHealthSnapshot>
   isRecentlyActive(): boolean
+  now?: (() => number) | undefined
 }
 
 interface DeepHealthSnapshot {
