@@ -7,7 +7,7 @@
  */
 
 import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, posix } from 'node:path';
 import { DEFAULT_DEADLINE_MS, DEFAULT_GATEWAY_TIMEOUT_SECONDS } from './policy';
 
 export const CONFIG_FILE = 'knext.grpc.json';
@@ -46,16 +46,28 @@ export class GrpcUsageError extends Error {
 
 const KEYS = new Set(Object.keys(DEFAULT_CONFIG));
 
+/** Names a function may not take: `knext` would land in the options contract's package. */
+const RESERVED_NAMES = new Set(['knext']);
+
 /**
- * A function name is a lowercase DNS label (it names a Kubernetes object and
- * the `<NAME>_SERVICE_URL` binding). Returns the problem, or `undefined`.
+ * A function name names a Kubernetes object, the `<NAME>_SERVICE_URL`
+ * binding, and the proto package, directory and file `knext add function`
+ * writes (`user-profile` -> `user_profile.v1` in `user_profile/v1/user_profile.proto`).
+ * So it must be a DNS label AND map to a name buf lint accepts: lowercase
+ * letters and digits in segments joined by single hyphens, starting with a
+ * letter, at most 63 characters. A double hyphen is a valid DNS label but
+ * becomes `a__b`, which buf lint rejects as not lower_snake_case.
+ * Returns the problem, or `undefined`.
  */
 export function checkFunctionName(name: string): string | undefined {
-  if (!/^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$/.test(name)) {
+  if (name.length > 63 || !/^[a-z][a-z0-9]*(-[a-z0-9]+)*$/.test(name)) {
     return (
-      `"${name}" is not a valid function name: use lowercase letters, digits and '-', ` +
-      "starting with a letter and not ending with '-' (at most 63 characters)"
+      `"${name}" is not a valid function name: use lowercase letters and digits, ` +
+      "optionally in parts joined by single '-', starting with a letter (at most 63 characters)"
     );
+  }
+  if (RESERVED_NAMES.has(name)) {
+    return `"${name}" is reserved and cannot be a function name`;
   }
   return undefined;
 }
@@ -72,6 +84,25 @@ function relativeDir(key: string, value: unknown): string {
     );
   }
   return value;
+}
+
+/**
+ * The output directory is written to and cleaned by `knext generate`, so it
+ * must be a real subdirectory of the app: not the app root itself (`.`, `./`,
+ * `src/..`), nothing outside it, and nothing in or under `node_modules`.
+ */
+function outDir(value: unknown): string {
+  const problem = `${CONFIG_FILE}: "out" must be a subdirectory of the app, outside node_modules`;
+  if (typeof value !== 'string' || value.trim() === '' || value.includes('\\')) {
+    throw new GrpcUsageError(problem);
+  }
+  if (posix.isAbsolute(value)) throw new GrpcUsageError(problem);
+  const norm = posix.normalize(value).replace(/\/+$/, '');
+  if (norm === '' || norm === '.' || norm === '..' || norm.startsWith('../')) {
+    throw new GrpcUsageError(problem);
+  }
+  if (norm.split('/').includes('node_modules')) throw new GrpcUsageError(problem);
+  return norm;
 }
 
 /** Validate parsed JSON into a config, filling defaults. */
@@ -107,7 +138,7 @@ export function parseConfig(raw: unknown): GrpcConfig {
   };
   return {
     proto: relativeDir('proto', obj.proto ?? DEFAULT_CONFIG.proto),
-    out: relativeDir('out', obj.out ?? DEFAULT_CONFIG.out),
+    out: outDir(obj.out ?? DEFAULT_CONFIG.out),
     deadlineMs: num('deadlineMs'),
     gatewayTimeoutSeconds: num('gatewayTimeoutSeconds'),
     functions,

@@ -996,9 +996,12 @@ jobs:
         run: bun scripts/verified-buf.ts lint
 
       # The baseline is the commit this change is based on: the PR base, the
-      # merge-queue base, or the previous main commit on a push. The ONE case
-      # with nothing to compare is a base that predates the package; that is
-      # stated in the log, and every later change has a baseline.
+      # merge-queue base, or the previous main commit on a push. FAILS CLOSED:
+      # the one case that passes without comparing is a base commit that
+      # RESOLVES and has no packages/grpc (the change that introduced the
+      # package). An empty, all-zero or unresolvable base is an error, never
+      # "nothing to compare". Executed against a throwaway repo by
+      # tests/grpc-contracts-baseline-step.test.ts.
       - name: buf breaking (the knext options contract, against the base commit)
         working-directory: packages/grpc
         env:
@@ -1008,7 +1011,18 @@ jobs:
             echo "::error::no base commit to compare against"
             exit 1
           fi
-          if ! git cat-file -e "$BASE_SHA:packages/grpc/buf.yaml" 2>/dev/null; then
+          if ! git rev-parse --quiet --verify "$BASE_SHA^{commit}" >/dev/null; then
+            echo "::error::base commit $BASE_SHA does not resolve in this checkout"
+            exit 1
+          fi
+          # ls-tree exits non-zero on an error and prints nothing for an absent
+          # path. --full-tree: the path is from the repo root, not this step's
+          # working directory.
+          if ! listing="$(git ls-tree --full-tree --name-only "$BASE_SHA" -- packages/grpc/buf.yaml)"; then
+            echo "::error::could not read packages/grpc at $BASE_SHA"
+            exit 1
+          fi
+          if [ -z "$listing" ]; then
             echo "base commit $BASE_SHA predates packages/grpc: no baseline contract to compare yet"
             exit 0
           fi

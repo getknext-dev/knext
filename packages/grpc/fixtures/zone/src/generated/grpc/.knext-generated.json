@@ -1,0 +1,8 @@
+{
+  "generatedBy": "knext generate",
+  "files": [
+    "knext/v1/options_pb.ts",
+    "orders/v1/orders_knext.ts",
+    "orders/v1/orders_pb.ts"
+  ]
+}

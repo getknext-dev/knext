@@ -5,8 +5,18 @@
  * package) pulls the binary for the current platform from a per-platform
  * package. That pins the VERSION and, through the lockfile's integrity hash,
  * the tarball. This module adds the CHECKSUM half: the sha256 of every
- * supported platform's binary is recorded below and checked before buf runs,
- * so a binary swapped on disk after install is refused, never executed.
+ * supported platform's binary is recorded below and checked before buf first
+ * runs in a process, so a corrupted or substituted install is refused rather
+ * than executed.
+ *
+ * What the check does NOT cover, stated rather than implied: the verified
+ * result is cached per process, keyed on path + size + mtime, so a binary
+ * replaced by one of the same size with its mtime restored, during a single
+ * `knext generate` run, is not re-hashed. Re-hashing on every exec would cost
+ * ~40-130 ms per call (the binary is ~53 MB) and still leave a gap between the
+ * hash and the spawn. Either way the attacker needs write access to
+ * node_modules, where they could equally rewrite this file, so the checksum
+ * is an install-integrity check, not a defence against a live local attacker.
  *
  * The digests were taken from the npm tarballs and match the `sha256.txt` buf
  * publishes with the same GitHub release (v1.73.0). A version bump changes the
@@ -73,12 +83,20 @@ export function verifyBufBinary(path: string, expected: string): void {
   }
 }
 
-/** Verified paths, keyed by path + size + mtime, so a run hashes buf once. */
+/**
+ * Verified paths, keyed by path + size + mtime, so a run hashes buf once. See
+ * the module comment for what this cache does not catch.
+ */
 const verified = new Map<string, string>();
 
 export interface ResolveOptions {
   readonly platform?: string;
   readonly arch?: string;
+  /**
+   * The file module resolution starts from (default: this module). Tests point
+   * it at a throwaway install tree to exercise the real resolve-and-verify path.
+   */
+  readonly from?: string;
 }
 
 /**
@@ -95,7 +113,7 @@ export function resolveBufBinary(opts: ResolveOptions = {}): string {
     );
   }
   const { npmPackage, sha256 } = BUF_SHA256[platform];
-  const require = createRequire(import.meta.url);
+  const require = createRequire(opts.from ?? import.meta.url);
   let manifestPath: string;
   try {
     const bufManifest = require.resolve('@bufbuild/buf/package.json');
@@ -126,15 +144,21 @@ export interface RunBufOptions {
   readonly cwd: string;
   /** Bytes for buf's stdin, if any. */
   readonly input?: Buffer;
+  /** Where to resolve the binary from; see {@link ResolveOptions}. */
+  readonly resolve?: ResolveOptions;
 }
 
 export type BufResult = Pick<SpawnSyncReturns<Buffer>, 'status' | 'stdout'> & {
   readonly stderr: string;
 };
 
-/** Run the verified buf with `args`. stdout stays bytes (images are binary). */
+/**
+ * Run the verified buf with `args`: the binary is resolved and checked against
+ * the pin first, and a mismatch throws before anything is executed. stdout
+ * stays bytes (images are binary).
+ */
 export function runBuf(args: readonly string[], opts: RunBufOptions): BufResult {
-  const bin = resolveBufBinary();
+  const bin = resolveBufBinary(opts.resolve);
   const r = spawnSync(bin, [...args], {
     cwd: opts.cwd,
     input: opts.input,

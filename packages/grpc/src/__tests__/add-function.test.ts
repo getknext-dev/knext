@@ -96,13 +96,57 @@ describe('knext add function <name> --lang go|rust', () => {
     );
   });
 
-  it('rejects a name that is not a DNS label', () => {
-    for (const bad of ['Orders', '1orders', 'orders-', 'or_ders', 'a'.repeat(64), '']) {
+  it('rejects a name that is not a DNS label, or that buf lint would refuse', () => {
+    // `a--b` is a DNS label, but it maps to the proto package `a__b`, which
+    // buf lint rejects; `-orders` and `orders-` are not labels at all.
+    for (const bad of [
+      'Orders',
+      '1orders',
+      'orders-',
+      '-orders',
+      'or_ders',
+      'a--b',
+      'user--profile',
+      'a'.repeat(64),
+      '',
+    ]) {
       const c = capture();
       expect(addFunction({ cwd: emptyDir('add-bad'), name: bad, lang: 'go', io: c.io }), bad).toBe(
         1,
       );
       expect(c.err()).toContain('not a valid function name');
+    }
+  });
+
+  it('refuses the name `knext`, which would land in the knext options package', () => {
+    const c = capture();
+    expect(addFunction({ cwd: emptyDir('add-knext'), name: 'knext', lang: 'go', io: c.io })).toBe(
+      1,
+    );
+    expect(c.err()).toContain('reserved');
+  });
+
+  it('every name it accepts scaffolds a contract buf lint accepts', () => {
+    // The edges of the accepted grammar: one letter, digits after a letter,
+    // a digit-led segment after a hyphen, several segments, the 63-char limit.
+    const longest = `a${'-b1'.repeat(20)}x`;
+    expect(longest).toHaveLength(62);
+    for (const name of [
+      'a',
+      'a1',
+      'v1',
+      'user-2fa',
+      'orders-v2',
+      'a-b-c',
+      'ab-1',
+      longest,
+      `${longest}z`,
+    ]) {
+      const app = emptyDir('add-good');
+      const c = capture();
+      expect(addFunction({ cwd: app, name, lang: 'go', io: c.io }), `${name}: ${c.err()}`).toBe(0);
+      const lint = runBuf(['lint'], { cwd: app });
+      expect(lint.status, `${name}: ${lint.stdout.toString()}`).toBe(0);
     }
   });
 
