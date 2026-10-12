@@ -1,6 +1,6 @@
 # ADR-0004: `BackendService` CRD for polyglot backends
 
-Status: Proposed · Date: 2026-06 · Depends on: ADR-0001, ADR-0002 · Amended 2026-10-09 (see the amendment at the end)
+Status: Proposed · Date: 2026-06 · Depends on: ADR-0001, ADR-0002 · Amended 2026-10-09 (see the amendment at the end; revised 2026-10-12 with the Z1 design gate's required changes, and stays Proposed until both gates re-confirm)
 
 > **Amended by ADR-0065 (Proposed, 2026-10-07):** adds a `flavour: model` `BackendService`
 > (HTTP/1.1, loopback-bound model server behind an auth sidecar) and an `external` variant of
@@ -56,9 +56,15 @@ generated server-only Connect client reads this env var (same pattern as `getDbP
 
 ## Amendment (2026-10-09) — same-zone bindings, identity token, retention and wake-ahead
 
-**Status of this amendment: Accepted.** It encodes founder decisions of 2026-10-09 (v2 plan Q10,
-Q13, Q15, Q16, Q17; jev scores in the plan) that the architect and system-designer gates signed off
-as part of the plan. The base ADR's own status line is left as written. Trigger-class (ADR, CRD,
+**Status of this amendment: Proposed (revised 2026-10-12; was marked Accepted).** It encodes
+founder decisions of 2026-10-09 (v2 plan Q10, Q13, Q15, Q16, Q17; jev scores in the plan) that the
+architect and system-designer gates signed off as part of the plan. When both gates reviewed this
+amendment's text at the Z1 design gate (#2045), both returned **REQUIRE-CHANGES**. The changes
+they required are applied below, each marked *(Z1 gate)*: Decision 2 widens the Secret allowlist,
+Decisions 3, 4 and 5 record the cold-start spike's results and a function-agnostic wake seam, and
+Decision 12 drops the `PUBLIC_MUTATION` auth option. Their non-blocking notes are under *Notes from
+the Z1 design gate*. **This amendment and the base ADR's status line move to Accepted only after
+both gates re-confirm the revised text.** Trigger-class (ADR, CRD,
 security, core-vs-app boundary); per the 2026-09-22 workflow amendment it is reviewed at sprint
 close, not as a merge gate. **The build it unlocks does not start until the founder's `CLAUDE.md`
 sections 4, 5 and 6 edits are merged** — that is the exit criterion of the task that carries this
@@ -80,17 +86,50 @@ and flannel (OKE, OrbStack) does not enforce NetworkPolicy at all.
    `NextApp` in the same namespace.** Bindings are **same-zone only**; the operator **rejects
    cross-zone bindings**. The NetworkPolicy admitting only the owning zone stays as
    defense-in-depth.
-2. **Data sovereignty is an allowlist.** The **only** Secret a function may reference is its owning
-   zone's `db-bind` Secret, from any source — `secretKeyRef`, `envFrom`, a Secret volume or a
-   projected volume. Everything else is rejected, as is any environment value naming another zone's
-   database `-rw` or `-ro` host (`scs-zones.md`). Each rule has its own test, mutation-proved.
-3. **Retention:** a bound function's scale-down retention is longer than its zone's, so a warm zone
-   does not outlive the function it depends on. Retention keeps a function alive only after it was
-   called; it does not warm an uncalled one.
-4. **Wake-ahead:** on zone start the generated client makes a non-blocking Connect GET health call
-   to **each bound function**, with a **per-function opt-out**. Per-route targeting is later work.
-5. **Transport is switchable** between h2c and HTTP/1.1, chosen by the cold-start spike; the
-   default is not fixed by this ADR.
+2. **Data sovereignty is an allowlist.** A function may reference a Secret, from any source —
+   `secretKeyRef`, `envFrom`, a Secret volume or a projected volume — only if it is **(a)** its
+   owning zone's `db-bind` Secret, or **(b)** a Secret marked as belonging to the same zone: a
+   zone-owner label naming the owning zone, or an `ownerReference` to the same `NextApp`. That lets
+   a function hold its own third-party credentials (a payment-provider key, say) through the base
+   Design's `secrets`/`env` field. **An unmarked Secret is rejected.** **`imagePullSecrets` are
+   exempt**: a private registry (OCIR on OKE) needs them, and they expose no data store. Any
+   reference to **another zone's** `db-bind` Secret or to a Secret marked for another zone is
+   rejected, as is any environment value naming another zone's database `-rw` or `-ro` host
+   (`scs-zones.md`). Each rule has its own test, mutation-proved. *(Z1 gate: the first text allowed
+   only the `db-bind` Secret, which broke the base spec's `secrets`/`env` field and private-registry
+   pulls without serving data sovereignty.)*
+3. **Retention:** a bound function's scale-down retention is longer than its zone's, counted from
+   the function's own last call. So if the zone's last request called the function, the function
+   outlasts the zone. That is not a guarantee that a warm zone never meets a cold function: a zone
+   whose recent requests did not call the function can outlive it, and an uncalled function is not
+   warmed at all (Decision 4 covers that case). *(Z1 gate: softened from "a warm zone does not
+   outlive the function it depends on", which held only if every zone request called the
+   function.)*
+4. **Wake-ahead:** on zone start each **bound function** gets one non-blocking GET to its health
+   RPC (the one RPC Decision 10 exempts from the token), with a **per-function opt-out**.
+   Per-route targeting is later work. *(Z1 gate: the firing point and the seam below.)*
+   - **Measured, Z2 spike** (`docs/benchmarks/zone-functions-coldstart-kind-2026-10-09.md`): fired
+     from the generated client in `instrumentation.ts` `register()`, the wake is **too late**. It
+     fires only ~0.4 s (Node) or ~0.8 s (Bun) before the request reaches the handler, while a cold
+     function needs ~1.4 s to start. On a Node zone it had **no measurable effect**; on a Bun zone
+     it cut part of the chain and left 0.2–0.6 s against a warm function.
+   - **The core seam is generic; core knows nothing about functions.** Firing earlier means the
+     runtime supervisor at process start, and the supervisor is core (`packages/kn-next`), which the
+     ADR-0002 amendment's scope fence keeps free of function orchestration. So core gets only a
+     function-agnostic seam. The primary shape: the operator injects a list of warm URLs into the
+     zone (an env var such as `KNEXT_WARM_URLS`, built from the bound functions' health URLs minus
+     the opted-out ones), and the core supervisor sends one non-blocking GET to each at process
+     start — never awaited, never failing the boot. The acceptable alternative: a generic preload
+     extension point in core that `@getknext/grpc` registers on. Either way core never imports or
+     names gRPC, Connect or a function.
+   - **Where it fires is decided by measurement:** the wake-ahead task (Z9, #2054) measures the
+     firing point and picks the seam. Until then `register()` is the measured-too-late baseline,
+     not the design.
+5. **Transport: h2c by default, switchable per binding to HTTP/1.1.** The first text left the
+   default to the cold-start spike. The spike measured no unary latency difference, and h2c is the
+   default because it carries streaming and multiplexes; the ADR-0003 amendment's Decision 6
+   records the result and the server-streaming-over-Bun check still owed before the default is
+   final. *(Z1 gate.)*
 6. **Status** reports the served proto version (ADR-0052 D7). Honest status goes through
    `computeStatusVerdict`, with a finalizer. The CRD stays `apps.kn-next.dev/v1alpha1`, additive, and
    ships in an **operator minor** (ADR-0020 amendment).
@@ -121,14 +160,44 @@ and flannel (OKE, OrbStack) does not enforce NetworkPolicy at all.
     propagation is expected to fail, and a warm-pod rotation test proves it.
 12. **The `authorize()` hook** is a required, user-supplied function in the app: it maps a request
     to a verified user identity or rejects it. Generation **fails closed** without it. Each RPC
-    carries an auth option: `USER` (default), `PUBLIC` (only on `NO_SIDE_EFFECTS` methods), or
-    `PUBLIC_MUTATION` (no user token, but the service credential is still sent). The generator
-    refuses `PUBLIC` on a mutating RPC.
+    carries an auth option: `USER` (default) or `PUBLIC` (only on `NO_SIDE_EFFECTS` methods). The
+    generator refuses `PUBLIC` on a mutating RPC. **There is no `PUBLIC_MUTATION` option in 2.0.**
+    An anonymous write, such as sign-up or a contact form, is a `USER` RPC whose `authorize()`
+    returns an **explicit anonymous principal**, and only after the app's own fail-closed check
+    (CAPTCHA, rate limit or CSRF) has passed. So every generated mutating action still runs a
+    fail-closed end-user check (ADR-0052 D5). *(Z1 gate: the first text also offered
+    `PUBLIC_MUTATION`, "no user token, but the service credential is still sent". Because every
+    unary RPC without `NO_SIDE_EFFECTS` is generated as a `'use server'` action (ADR-0003 amendment
+    Decision 4), that option would have produced a public, state-changing endpoint with no end-user
+    check, which ADR-0052 D5 and the no-unauthenticated-mutating-endpoints rule forbid.)*
 13. **The token is the authoritative control; the NetworkPolicy is defense-in-depth.** A drill with
     Calico on the activator path proves a foreign request with no valid token is rejected by the
     function's interceptor even with the policy in place, and accepted if the interceptor is
     removed. Anything said about network isolation carries the CNI caveat (flannel does not enforce
     it).
+
+### Notes from the Z1 design gate (non-blocking)
+
+These came from the system designer as tech-debt or test items, not blockers. They bind the build.
+
+- **Re-read the JWKS on an unknown `kid`.** A verifier that sees a `kid` it does not hold re-reads
+  the mounted JWKS file before rejecting, instead of trusting a copy cached in memory; otherwise
+  step 2 of the rotation order (Decision 11) does nothing on a warm pod. The re-read is
+  rate-limited, so a flood of unknown `kid`s cannot become a file-read storm.
+- **Mint after the wake; allow small clock skew.** The zone mints the token at call time, after it
+  has woken, never ahead of a wake. Verifiers allow a small clock skew (seconds) on `exp`. The 60 s
+  life covers the worst cold chain the spike measured (the 13–28 s Node zone re-wake stall,
+  #2080), but a call the activator holds longer than 60 s on a saturated cluster fails with
+  `UNAUTHENTICATED`.
+- **Size the client deadline to cover a cold function.** The Connect deadline (ADR-0003 amendment
+  Decision 5) has to cover a function's cold start (~1.4 s measured on kind, more on a loaded
+  cluster) and still be shorter than the gateway timeout. The generator writes that budget down
+  with its default.
+- **Named untested failure mode, owned by the activator-path drill (Z11, #2056).** A JWKS rotation
+  where a warm function pod has cached the old key set, combined with one call held in the
+  activator for more than 60 s. The planned warm-pod rotation test does not cover it; Z11 must add
+  a cold-pod rotation case and a request held beyond 60 s. Until that drill is green, Decision 13's
+  claim that the token, not the NetworkPolicy, is the authoritative control is unproven.
 
 ### Consequences
 
@@ -141,7 +210,12 @@ and flannel (OKE, OrbStack) does not enforce NetworkPolicy at all.
 
 ### Action items
 
-- [ ] Types and reconciler: ownerRef, same-zone rejection, allowlist, retention, served version.
+- [ ] Types and reconciler: ownerRef, same-zone rejection, allowlist (owning zone's `db-bind`,
+      same-zone-marked Secrets, `imagePullSecrets` exempt), retention, served version.
+- [ ] Wake-ahead through a function-agnostic core seam; the firing point and seam chosen by Z9's
+      measurement (#2054).
 - [ ] Per-zone key Secret and JWKS ConfigMap; rotation in the order above.
-- [ ] Interceptors in the Go and Rust templates, fail-closed, mutation-proved.
+- [ ] Interceptors in the Go and Rust templates, fail-closed, mutation-proved; JWKS re-read on an
+      unknown `kid`; small `exp` clock skew.
+- [ ] Generator: auth options `USER` and `PUBLIC` only; a `PUBLIC_MUTATION` option is refused.
 - [ ] kind + Calico activator-path drill.
