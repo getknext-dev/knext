@@ -212,7 +212,11 @@ describe("scaffold guard: cacheMaxMemorySize: 0 never leaves 'use cache' a silen
             }
             const handler = file(
                 `scaffold-${name.replaceAll("/", "_")}.js`,
-                'export { default } from "@getknext/core/adapters/cache-handler";\n',
+                // The file the scaffolder really generates next to the config.
+                readFileSync(
+                    join(PKG_ROOT, "templates", "app", "cache-handler.js.hbs"),
+                    "utf8",
+                ),
             );
             const out = run("node", {
                 cacheHandler: handler,
