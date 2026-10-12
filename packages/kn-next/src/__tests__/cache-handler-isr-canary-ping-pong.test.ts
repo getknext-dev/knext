@@ -417,6 +417,20 @@ describe("ISR under a canary split does not ping-pong (#2254)", () => {
         expect(stale).toBe(true);
     });
 
+    it("looks a peer build up once per few seconds, not once per read", async () => {
+        const redis = sharedRedis();
+        const a = await pod(redis, BUILD_A);
+        const b = await pod(redis, BUILD_B);
+        await a.request("/isr/lookup");
+        clock().advance(2000);
+        redis.reads.length = 0;
+        for (let i = 0; i < 10; i++) await b.request("/isr/lookup");
+        expect(
+            redis.reads.filter((k) => k.endsWith(`:build-live:${BUILD_A}`)),
+        ).toHaveLength(1);
+        expect(b.regenerations).toBe(0);
+    });
+
     it("does not look up liveness for an entry this build wrote", async () => {
         const redis = sharedRedis();
         const a = await pod(redis, BUILD_A);

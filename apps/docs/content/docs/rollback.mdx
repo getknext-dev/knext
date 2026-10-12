@@ -109,6 +109,16 @@ pruned at all. Either way a rollback is safe for clients that already loaded the
 storage](/docs/multi-cloud#starting-without-object-storage).
 </Callout>
 
+## ISR caching during a split
+
+Both revisions of a canary share one ISR cache. While a split is active each revision honours the
+revalidate window of pages the other one rendered, as long as that revision is still serving
+traffic, so pages are not re-rendered on every request just because two builds are live. When the
+split ends and the replaced revision stops serving, its windows stop applying within about two
+minutes and its pages are revalidated against the revision that remains. See [ISR
+caching](/docs/isr-caching#what-the-runtime-guarantees) for the full behaviour, including the
+partial-prerendering exception.
+
 ## Related
 
 - [Operator & the NextApp CRD](/docs/operator) — the `traffic` spec field and `currentTraffic` status field.
