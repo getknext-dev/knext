@@ -24,7 +24,7 @@ knext ships three things that version on **separate** lines. Nothing forces them
 | Thing | Ships as | Version line |
 | --- | --- | --- |
 | `@getknext/core`, `@getknext/lib`, `@getknext/db` | npm packages | semver, **one shared number** across the three |
-| the operator | a container image + digest-pinned `install-vX.Y.Z.yaml` / `install.yaml` bundles | semver `operator-vX.Y.Z` tags — **MAJOR.MINOR tracks the package set, patch is independent**; see "Operator versions" below |
+| the operator | a container image + digest-pinned `install-vX.Y.Z.yaml` / `install.yaml` bundles | semver `operator-vX.Y.Z` tags — **on 1.x the minor tracks the package set, patch is independent; the operator gets no new major from a package major**; see "Operator versions" below |
 | the `NextApp` CRD | inside the operator bundle | the Kubernetes ladder: `v1alpha1` → `v1beta1` → `v1` |
 | the `KnextPlatform` CRD (`platform.kn-next.dev`) | inside the operator bundle | the same ladder, `v1alpha1`, additive-only. **Not a column of the matrix:** the CLI neither reads nor writes it, so no package set depends on a particular version of it. The bundle ships the definition and no object (an absent or empty `KnextPlatform` changes nothing) |
 
@@ -89,15 +89,31 @@ is additive-only, so no released package set has ever needed a *newer* CRD than 
 
 The operator's `operator-vX.Y.Z` is stamped on the manager Deployment as the
 `app.kubernetes.io/version` label and in the image tag (`…:vX.Y.Z@sha256:…`); a source or
-`operator-edge` build carries the sentinel `unreleased`. Pairing rule, applied by `knext doctor`
-(`src/cli/doctor/operator-version.ts`, a WARN row — never a failure; the deploy-time schema
-preflight stays the authoritative gate):
+`operator-edge` build carries the sentinel `unreleased`. The pairing rule:
 
-- operator MAJOR must equal the CLI's;
-- operator MINOR must be **>=** the CLI's (an older CLI against a newer operator is always valid);
+- the operator must serve the CRD API version the CLI emits (`apps.kn-next.dev/v1alpha1`) — the
+  pairing is by CRD version, not by package major;
+- on the 1.x line the operator MINOR must be **>=** the CLI's (an older CLI against a newer
+  operator is always valid);
 - patch is independent; `-rc.N` suffixes are ignored on both sides.
 
-Why MAJOR.MINOR tracks the package set rather than the operator versioning on its own: the CRD is
+`knext doctor` checks the first part of that rule directly: its **NextApp CRD** row reads the CRD's
+served API versions with `kubectl get crd` and compares them with the `apiVersion` this CLI emits.
+It passes when that version is served, and **fails** when the CRD does not serve it, or when the
+CRD cannot be read (it fails closed rather than guessing). The message says which side to move,
+using Kubernetes API version priority (`v1alpha1` < `v1beta1` < `v1`): a CRD that serves only
+older versions means "upgrade the operator first (operator, then CLI)"; one that serves only newer
+versions means "upgrade the CLI to match the operator"; served versions on both sides, or names
+that are not Kubernetes versions, say both. A CRD that serves several versions pairs as long as
+one of them is the CLI's, and a version marked deprecated still counts as served.
+
+The **Operator version** row (`src/cli/doctor/operator-version.ts`) is informational and never
+decides the pairing. It prints the installed release and warns only when, within one major line, the
+operator's minor is older than the CLI's. A differing major is not a warning: the operator keeps its
+own major when the packages move to 2.0, so the row notes that the pairing is decided by the CRD
+API version. The deploy-time schema preflight stays the authoritative gate.
+
+Why the minor tracks the package set on 1.x rather than the operator versioning on its own: the CRD is
 additive within `v1alpha1`, so "does this operator know the field my CLI emits" is exactly "is the
 operator at least as new as the CLI's minor". A fully independent number would force every user to
 keep a lookup table; lockstep on every npm release would cut an operator for each of the many rc
@@ -111,6 +127,25 @@ mechanical (a Changesets `fixed` group plus the guard) rather than a promise. Th
 internally consistent — `@getknext/core@0.3.0` depends on `@getknext/lib@^0.2.0` and
 `@getknext/db@^0.2.1`, both of which exist — so nothing is broken for a consumer; from the next
 release on, one number covers all three.
+
+## Support window and runtime floors
+
+<!-- runtime-floors:start -->
+- Node.js `>=22.18`
+- Next.js `>=16.0.0`
+<!-- runtime-floors:end -->
+
+These are the 1.x floors `@getknext/core` declares (`engines.node` and the `next` peer range); the
+test asserts they match the manifest and the user-facing page. They are expected to rise at 2.0.
+
+- **Which lines get fixes:** the latest line. From the day `@getknext/core` 2.0 is generally
+  available, the final 1.x minor gets **security fixes only for six months**, published under the
+  `latest-1` dist-tag; after that nothing. Before 2.0 there is no backport lane.
+- **The vinext / Bun single-executable build target is Beta** on every 1.x release; it never gates
+  a release.
+- **2.0 is not yet released.** Planned: the Node and Next floors rise, deprecated seams and the
+  `kn-next` alias are removed, the operator stays on its own line. The `NextApp` CRD version is
+  unchanged by a package major.
 
 ## Upgrade order
 
@@ -145,7 +180,8 @@ side effect** if the cluster cannot store one, naming the field.
 - **the operator version column is not machine-verified against a published release.** The
   operator now has a semver line (`operator-vX.Y.Z`), but no operator release has been cut from it
   yet, and the matrix cannot assert a "minimum operator version" for rows that predate it. The
-  pairing rule is enforced at runtime by `knext doctor` (unit-tested in
+  CRD-version pairing is checked at runtime by `knext doctor` (unit-tested in
+  `src/__tests__/doctor-crd-version-pairing.test.ts`, and the informational operator-version row in
   `src/__tests__/doctor-operator-version.test.ts`); the release workflow's stamping is
   text-guarded in `tests/operator-version-line.test.ts`. Neither proves what a given cluster runs
   — `doctor` against the cluster does. Operators installed before the version line report no

@@ -95,7 +95,7 @@ import {
   observeRequest,
   recordStartupComplete,
   rejectMalformedPath,
-  renderMetrics,
+  renderScrape,
   requestErrorResponse,
   resolveAssetAnchor,
   resolveBindHost,
@@ -277,10 +277,10 @@ const metricsServer = (() => {
       // ADR-0044's threat scope calls unbounded. Wiring REQUEST_CAP.bytes here would
       // let KNEXT_MAX_REQUEST_BYTES=0 re-open it.
       maxRequestBodySize: METRICS_MAX_REQUEST_BYTES,
-      fetch(req) {
+      async fetch(req) {
         const url = new URL(req.url);
         if (url.pathname === '/metrics' && req.method === 'GET') {
-          return new Response(renderMetrics(metrics), {
+          return new Response(await renderScrape(metrics), {
             status: 200,
             headers: { 'content-type': METRICS_CONTENT_TYPE },
           });

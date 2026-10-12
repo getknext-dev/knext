@@ -57,6 +57,16 @@
             "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/format-after-edit.sh"
           }
         ]
+      },
+      {
+        "matcher": "Bash|WebFetch|mcp__.*ctx_fetch_and_index",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/jev-result-screen.sh",
+            "timeout": 10
+          }
+        ]
       }
     ]
   }

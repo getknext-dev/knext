@@ -289,14 +289,14 @@ jobs:
         # id-token:write, so a mutable tag is a supply-chain hole. v0.24.0.
         # The oci-dir: source is passed verbatim to syft (verified against the
         # pinned action source) — the image no longer exists in the docker daemon.
-        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
           image: oci-dir:operator-oci-sbom
           format: spdx-json
           output-file: operator-sbom.spdx.json
 
       - name: Upload SBOM artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: operator-sbom-${{ github.sha }}
           path: operator-sbom.spdx.json
@@ -593,6 +593,26 @@ jobs:
             echo "::error::dist/install-v${VERSION}.yaml does not carry the version label ${VERSION}"; exit 1; }
           echo "path=packages/kn-next-operator/dist/install-v${VERSION}.yaml" >> "$GITHUB_OUTPUT"
 
+      # RELEASE-INTEGRITY GUARD (S3-O2): an `operator-vX.Y.Z` release must ship a
+      # bundle whose image tag is `vX.Y.Z` AND whose digest is the one THIS run
+      # pushed. operator-v1.0.0 shipped `:v0.1.0@…` under a 1.0.0 tag. Runs before
+      # the release body and the publish step, on both attached assets, and fails
+      # closed (unreadable file, no image line, missing digest). Plain `node`.
+      - name: Verify the bundle pins this release's image (version tags only, S3-O2)
+        if: steps.channel.outputs.is_version_tag == 'true' && steps.trivy.outcome == 'success'
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+          RELEASE_TAG: ${{ steps.channel.outputs.release_tag }}
+          VERSIONED_ASSET: ${{ steps.versioned_asset.outputs.path }}
+        run: |
+          set -euo pipefail
+          node scripts/verify-operator-bundle-image.mjs \
+            --tag "${RELEASE_TAG}" \
+            --digest "${DIGEST}" \
+            --image "${IMAGE}" \
+            --install packages/kn-next-operator/dist/install.yaml \
+            --install "${VERSIONED_ASSET}"
+
       # Release body for version tags (#2153): generated FROM the attached
       # install.yaml, so the image digest, CRD API version and cert-manager
       # requirement it states are read from the asset beside it, never typed.
@@ -615,7 +635,7 @@ jobs:
       # run produced, but NOT the user-facing install path.
       - name: Upload install.yaml artifact (main + release tags only)
         if: steps.channel.outputs.publish == 'true' && steps.trivy.outcome == 'success'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: operator-install-bundle-${{ github.sha }}
           path: packages/kn-next-operator/dist/install.yaml

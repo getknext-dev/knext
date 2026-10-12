@@ -68,7 +68,8 @@ describe('the lane map is the one place a lane major lives', () => {
       'refs/heads/integration/v1.3': 1,
       'refs/heads/integration/v1.4': 1,
       'refs/heads/integration/v2': 2,
-      'refs/heads/release/1.x': 1,
+      // `release/1.x` is a PREPARED lane (recognised, not publishable) until R4:
+      // see tests/publish-lane-guard-prepared.test.ts.
     });
   });
 

@@ -34,6 +34,8 @@ const WORKFLOW = resolve(REPO_ROOT, '.github/workflows/release.yml');
 const GUARD = resolve(REPO_ROOT, 'scripts/publish-lane-guard.mjs');
 const UNIT_SPEC = 'tests/publish-lane-guard.test.ts';
 const WORKFLOW_SPEC = 'tests/publish-lane-guard-workflow.test.ts';
+const PREPARED_SPEC = 'tests/publish-lane-guard-prepared.test.ts';
+const LISTER = resolve(REPO_ROOT, 'scripts/list-changeset-marker-branches.mjs');
 
 /**
  * The files mutated, keyed by the `subject` each mutation names. Spelled as a
@@ -41,7 +43,7 @@ const WORKFLOW_SPEC = 'tests/publish-lane-guard-workflow.test.ts';
  * anchor below against its file at PR time (an anchor that stops matching is a
  * PR-time red, not a nightly surprise).
  */
-const LANE = { subjects: { workflow: WORKFLOW, guard: GUARD } };
+const LANE = { subjects: { workflow: WORKFLOW, guard: GUARD, lister: LISTER } };
 
 const REF_STEP =
   '      - name: Refuse a ref outside the publish-lane allowlist (fail-closed)\n' +
@@ -199,6 +201,72 @@ const MUTATIONS = [
     expect: 'red',
   },
   {
+    id: 'M15',
+    claim: 'release/1.x is added to the publish allowlist (R4p: not yet publishable)',
+    subject: 'guard',
+    spec: PREPARED_SPEC,
+    anchor: "  ['refs/heads/integration/v2', 2],\n",
+    replacement: "  ['refs/heads/integration/v2', 2],\n  ['refs/heads/release/1.x', 1],\n",
+    expect: 'red',
+  },
+  {
+    id: 'M16',
+    claim:
+      'resolveLane stops refusing a prepared lane as such (the allowlist-miss path still refuses)',
+    subject: 'guard',
+    spec: PREPARED_SPEC,
+    anchor: '  if (PREPARED_LANES.has(ref)) {\n',
+    replacement: '  if (PREPARED_LANES.has(ref) && ref === null) {\n',
+    expect: 'red',
+  },
+  {
+    id: 'M17',
+    claim: 'the prepared 1.x lane is mapped onto the `latest` dist-tag',
+    subject: 'guard',
+    spec: PREPARED_SPEC,
+    anchor: "{ major: 1, distTag: 'latest-1' }",
+    replacement: "{ major: 1, distTag: 'latest' }",
+    expect: 'red',
+  },
+  {
+    id: 'M18',
+    claim: 'the prepared 1.x lane expects major 2 (a 2.0.0 compute would pass)',
+    subject: 'guard',
+    spec: PREPARED_SPEC,
+    anchor: "{ major: 1, distTag: 'latest-1' }",
+    replacement: "{ major: 2, distTag: 'latest-1' }",
+    expect: 'red',
+  },
+  {
+    id: 'M19',
+    claim: 'recognisedLane stops recognising prepared lanes (the major check would not apply)',
+    subject: 'guard',
+    spec: PREPARED_SPEC,
+    anchor:
+      '  const prepared = PREPARED_LANES.get(ref);\n  if (prepared !== undefined) {\n    return {\n      ok: true,',
+    replacement:
+      '  const prepared = PREPARED_LANES.get(ref);\n  if (prepared === null) {\n    return {\n      ok: true,',
+    expect: 'red',
+  },
+  {
+    id: 'M20',
+    claim: 'recognisedLane reports a prepared lane as publishable',
+    subject: 'guard',
+    spec: PREPARED_SPEC,
+    anchor: '      distTag: prepared.distTag,\n      publishable: false,\n',
+    replacement: '      distTag: prepared.distTag,\n      publishable: true,\n',
+    expect: 'red',
+  },
+  {
+    id: 'M21',
+    claim: 'the marker-branch lister forgets prepared lanes (a deletion candidate)',
+    subject: 'lister',
+    spec: PREPARED_SPEC,
+    anchor: 'PUBLISH_LANES.has(ref) || PREPARED_LANES.has(ref);\n',
+    replacement: 'PUBLISH_LANES.has(ref);\n',
+    expect: 'red',
+  },
+  {
     id: 'NEG',
     claim: 'NEGATIVE CONTROL: a doc-comment sentence is reworded (must stay GREEN)',
     subject: 'guard',
@@ -221,7 +289,7 @@ function specExit(spec) {
   return result.status ?? 1;
 }
 
-for (const spec of [UNIT_SPEC, WORKFLOW_SPEC]) {
+for (const spec of [UNIT_SPEC, WORKFLOW_SPEC, PREPARED_SPEC]) {
   const code = specExit(spec);
   console.log(`Baseline ${spec}: exit=${code}`);
   if (code !== 0) {
