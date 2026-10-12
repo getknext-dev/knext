@@ -63,6 +63,7 @@ describe("doctor next-minor row", () => {
         const [row] = nextMinorCheck(ctxFor("16.5.0"));
         expect(row?.status).toBe("warn");
         expect(row?.detail).toContain(NEXT_PEER_RANGE);
+        expect(row?.detail).toContain("outside the range");
     });
 
     it("warns on a version below the floor", () => {
