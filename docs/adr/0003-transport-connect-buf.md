@@ -1,6 +1,6 @@
 # ADR-0003: Transport & tooling — Connect + buf
 
-Status: Proposed · Date: 2026-06 · Depends on: ADR-0002 · Amended 2026-10-09 (see the amendment at the end)
+Status: Accepted (2026-10-12, Z1 design gate) · previously Proposed · Date: 2026-06 · Depends on: ADR-0002 · Amended 2026-10-09 (see the amendment at the end)
 
 ## Context
 The gRPC layer needs one contract to produce: (a) backend service stubs in multiple languages,
@@ -69,9 +69,11 @@ is design-now/build-later.
 
 ## Amendment (2026-10-09) — Rust first wave, connect-go v2, read/write/stream split
 
-**Status of this amendment: Accepted.** It encodes founder decisions of 2026-10-09 (v2 plan Q10,
-Q13, Q15, Q16, Q17; jev scores in the plan) that the architect and system-designer gates signed off
-as part of the plan. The base ADR's own status line is left as written. Trigger-class (ADR, CRD,
+**Status of this amendment: Accepted (2026-10-12, Z1 design gate).** It encodes founder decisions
+of 2026-10-09 (v2 plan Q10, Q13, Q15, Q16, Q17; jev scores in the plan) that the architect and
+system-designer gates signed off as part of the plan. Both gates then reviewed this amendment's
+text at the Z1 design gate (#2045) and accepted it; the base ADR's status line moved from Proposed
+to Accepted at the same gate. Trigger-class (ADR, CRD,
 security, core-vs-app boundary); per the 2026-09-22 workflow amendment it is reviewed at sprint
 close, not as a merge gate. **The build it unlocks does not start until the founder's `CLAUDE.md`
 sections 4, 5 and 6 edits are merged** — that is the exit criterion of the task that carries this
@@ -108,9 +110,20 @@ read, a write and a stream become in a Next.js zone, which this ADR left open.
 5. **Generated client policy:** an explicit Connect deadline shorter than the gateway timeout;
    **retry only `NO_SIDE_EFFECTS` methods**; mutating methods carry an idempotency key
    (ADR-0052 D6). A missing `grpc-status` trailer is fail-closed and non-retryable (ADR-0052 D15).
-6. **Transport default is switchable and the cold-start spike decides it** (h2c against HTTP/1.1
-   with `connect-node`; Q11: switchable 0.70). The `createGrpcTransport` path stays available for
-   gRPC-only backends (ADR-0052 D10).
+6. **Transport: h2c by default, switchable per binding to HTTP/1.1** — decided by the cold-start
+   spike (result below). As first written on 2026-10-09 this decision read "the transport default
+   is switchable and the cold-start spike decides it" (h2c against HTTP/1.1 with `connect-node`;
+   Q11: switchable 0.70). The `createGrpcTransport` path stays available for gRPC-only backends
+   (ADR-0052 D10).
+
+   **Result (Z2 spike, recorded at the Z1 design gate, 2026-10-12): h2c by default, switchable per
+   binding to HTTP/1.1.** The spike (`docs/benchmarks/zone-functions-coldstart-kind-2026-10-09.md`)
+   measured no latency difference between the two on the unary path, warm or cold, so latency did
+   not decide it. h2c is the default because it is the only one that carries bidi streaming, it
+   multiplexes under concurrency, and Bun's HTTP/2 client — the open risk — made unary calls
+   through Kourier and the activator with no errors. jev scored h2c-switchable 0.53 against
+   h2c-only 0.33. The per-binding switch stays because only unary calls were verified: the zone
+   functions e2e task (Z10) must pass a server-streaming case over Bun before the default is final.
 
 ### Consequences
 
