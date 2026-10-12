@@ -61,6 +61,15 @@ export interface FakeRedis {
     strings: Map<string, string>;
     /** Sets written by an applied SADD. */
     sets: Map<string, Set<string>>;
+    /** Hashes written by an applied HSET (the `'use cache'` tag-stamp store). */
+    hashes: Map<string, Map<string, string>>;
+    /**
+     * Seconds-to-live of a string key, as the last SET ... EX / PX asked for it.
+     * Not counted down: a test asserts the TTL the handler REQUESTED.
+     */
+    ttls: Map<string, number>;
+    /** Every full command (name + args) received, in arrival order. */
+    commands: Array<{ cmd: string; args: string[] }>;
     /** Every command received, in arrival order (`"multi"`, `"set"`, …). */
     received: string[];
     /** How many TCP connections have been ACCEPTED — the capacity signal. */
@@ -141,6 +150,9 @@ export async function startFakeRedis(
     const mode = options.mode ?? "normal";
     const strings = new Map<string, string>();
     const sets = new Map<string, Set<string>>();
+    const hashes = new Map<string, Map<string, string>>();
+    const ttls = new Map<string, number>();
+    const commands: Array<{ cmd: string; args: string[] }> = [];
     const received: string[] = [];
     const live = new Set<net.Socket>();
     let connections = 0;
@@ -157,9 +169,55 @@ export async function startFakeRedis(
                 const v = strings.get(args[0]);
                 return v === undefined ? bulk(null) : bulk(v);
             }
-            case "set":
+            case "set": {
                 strings.set(args[0], args[1]);
+                ttls.delete(args[0]);
+                for (let i = 2; i < args.length; i++) {
+                    const opt = args[i].toLowerCase();
+                    if (opt === "ex") ttls.set(args[0], Number(args[i + 1]));
+                    if (opt === "px")
+                        ttls.set(args[0], Number(args[i + 1]) / 1000);
+                }
                 return `+OK${CRLF}`;
+            }
+            case "hset": {
+                const h = hashes.get(args[0]) ?? new Map<string, string>();
+                let n = 0;
+                for (let i = 1; i + 1 < args.length; i += 2) {
+                    if (!h.has(args[i])) n++;
+                    h.set(args[i], args[i + 1]);
+                }
+                hashes.set(args[0], h);
+                return `:${n}${CRLF}`;
+            }
+            case "hmget": {
+                const h = hashes.get(args[0]);
+                const vals = args.slice(1).map((f) => h?.get(f) ?? null);
+                return `*${vals.length}${CRLF}${vals.map(bulk).join("")}`;
+            }
+            case "hdel": {
+                const h = hashes.get(args[0]);
+                let n = 0;
+                for (const f of args.slice(1)) if (h?.delete(f)) n++;
+                if (h && h.size === 0) hashes.delete(args[0]);
+                return `:${n}${CRLF}`;
+            }
+            case "hscan": {
+                // One page, cursor math simplified: COUNT is honoured as a page
+                // size over the insertion-ordered fields, cursor = next offset.
+                const h = hashes.get(args[0]);
+                const fields = h ? [...h.entries()] : [];
+                const start = Number(args[1]) || 0;
+                const countIdx = args.findIndex(
+                    (a) => a.toLowerCase() === "count",
+                );
+                const count =
+                    countIdx > 0 ? Number(args[countIdx + 1]) || 10 : 10;
+                const page = fields.slice(start, start + count);
+                const next = start + count >= fields.length ? 0 : start + count;
+                const flat = page.flatMap(([f, v]) => [f, v]);
+                return `*2${CRLF}${bulk(String(next))}*${flat.length}${CRLF}${flat.map(bulk).join("")}`;
+            }
             case "del": {
                 let n = 0;
                 for (const k of args) {
@@ -259,6 +317,7 @@ export async function startFakeRedis(
                 const cmd = (parts[0] ?? "").toLowerCase();
                 const args = parts.slice(1);
                 received.push(cmd);
+                commands.push({ cmd, args });
                 chain = chain.then(async () => {
                     if (socket.destroyed) return;
                     await options.onCommand?.(cmd, args, socket);
@@ -324,6 +383,9 @@ export async function startFakeRedis(
         url: `redis://127.0.0.1:${port}`,
         strings,
         sets,
+        hashes,
+        ttls,
+        commands,
         received,
         get connections() {
             return connections;
