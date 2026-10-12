@@ -190,6 +190,106 @@ for i in 1 2 3; do
 done
 unset big err
 
+echo "== literal-secret check: FAILS CLOSED (any error in the check means 'possible secret', no call) =="
+# Measured on macOS: one non-UTF-8 byte made BSD sed error, the entropy rule was skipped, and the
+# text was SENT. The caller's locale is forced to a UTF-8 one so the case is the real one; the
+# check itself pins LC_ALL=C. (GNU sed does not error on invalid bytes, so on Linux (a)/(c) pass
+# on the unmutated code too; the BSD-sed red is proven by the macOS mutation run.)
+BADB=$(printf '\377')
+UTF8=en_US.UTF-8
+# <label> <expected rc> <text>: run the lib check on a text, in a UTF-8 caller locale
+lib_check() {
+  local want="$2" rc err
+  err=$( (export LC_ALL=$UTF8; . "$HERE/jev-hook-lib.sh"; printf '%s' "$3" | jev_has_literal_secret) 2>&1 >/dev/null ); rc=$?
+  if [ "$rc" -eq "$want" ] && [ -z "$err" ]; then pass "$1 (rc=$rc)"; else fail "$1: rc=$rc want=$want stderr=[${err:0:120}]"; fi
+}
+lib_check "(a) invalid byte + entropy-rule secret: skip (has secret)" 0 "log ${BADB} then $H32 end"
+lib_check "(a') invalid byte right inside the long run: skip" 0 "${H32}${BADB}${H32}"
+lib_check "(c) invalid byte, clean text: not an error under LC_ALL=C, screened (no secret)" 1 "caf${BADB} says hello, nothing secret here"
+lib_check "(c') clean text, no invalid byte: screened" 1 "hello world"
+
+# (b) a forced error in the check: a sed / grep on PATH that exits 2 must NOT yield 'no secret'.
+# The mock fails exactly the Nth call of one tool (counter file) and runs the real tool otherwise,
+# so each command in the check is proven to propagate its OWN failure -- failing every call would
+# let an earlier guard mask a removed later one. Call order in jev_has_literal_secret:
+#   sed#1 Unicode-space normalise, grep#1 literal formats, sed#2 data-URI strip, sed#3/#4 hash-strip passes,
+#   grep#2 long-run extraction, grep#3 digit check.
+export REAL_GREP REAL_SED
+REAL_GREP=$(command -v grep); REAL_SED=$(command -v sed)
+MOCK="$TMP/mockbin"; mkdir -p "$MOCK"
+for t in grep sed; do
+  cat >"$MOCK/$t" <<EOF
+#!/bin/sh
+n=\$(cat "\$MOCK_COUNT_$t" 2>/dev/null || echo 0); n=\$((n + 1)); echo "\$n" >"\$MOCK_COUNT_$t"
+[ "\$n" = "\$MOCK_FAIL_$t" ] && exit 2
+# Locale probe: BSD sed errors on invalid UTF-8 under a UTF-8 locale, GNU sed does not, so on Linux
+# "LC_ALL=C dropped" would be invisible to (a). This shim makes it observable on both: with the
+# probe on, any call made outside LC_ALL=C fails.
+[ -n "\$MOCK_PROBE_LOCALE" ] && [ "\${LC_ALL:-}" != C ] && exit 2
+exec "\$REAL_$(printf '%s' "$t" | tr a-z A-Z)" "\$@"
+EOF
+  chmod +x "$MOCK/$t"
+done
+mock_check() { # <label> <tool> <Nth call to fail> <text>
+  local rc
+  rm -f "$TMP/cnt-grep" "$TMP/cnt-sed"
+  (PATH="$MOCK:$PATH"; export MOCK_COUNT_grep="$TMP/cnt-grep" MOCK_COUNT_sed="$TMP/cnt-sed"
+   if [ "$2" = grep ]; then export MOCK_FAIL_grep=$3; else export MOCK_FAIL_sed=$3; fi
+   . "$HERE/jev-hook-lib.sh"; printf '%s' "$4" | jev_has_literal_secret) >/dev/null 2>&1; rc=$?
+  if [ "$rc" -eq 0 ]; then pass "$1: fail closed (rc=0)"; else fail "$1: rc=$rc, an error read as 'no secret'"; fi
+}
+CLEAN="hello world, nothing secret"
+mock_check "(b) grep #1 (literal formats) exits 2" grep 1 "$CLEAN"
+mock_check "(b) sed #1 (Unicode-space normalise) exits 2" sed 1 "$CLEAN"
+mock_check "(b) sed #2 (data-URI strip) exits 2" sed 2 "$CLEAN"
+mock_check "(b) sed #3 (hash strip, pass 1) exits 2" sed 3 "$CLEAN"
+mock_check "(b) sed #4 (hash strip, pass 2) exits 2" sed 4 "$CLEAN"
+mock_check "(b) grep #2 (long-run extraction) exits 2" grep 2 "$CLEAN"
+mock_check "(b) grep #3 (digit check) exits 2" grep 3 "$CLEAN"
+mock_check "(b) grep #3 (digit check) exits 2 after a digit-free long run" grep 3 "${L36}${L36}"
+
+# Locale probe (works on GNU and BSD): every sed/grep must run under LC_ALL=C even though the
+# caller is UTF-8. A clean text must come back rc=1 (screened) -- a probe-failed call would read as
+# fail-closed rc=0, so this goes red the moment LC_ALL=C is dropped.
+probe_rc=$( (PATH="$MOCK:$PATH"; export MOCK_PROBE_LOCALE=1 LC_ALL=$UTF8 MOCK_COUNT_grep="$TMP/cnt-grep" MOCK_COUNT_sed="$TMP/cnt-sed"
+  . "$HERE/jev-hook-lib.sh"; printf '%s' "$CLEAN" | jev_has_literal_secret) >/dev/null 2>&1; echo $? )
+if [ "$probe_rc" -eq 1 ]; then pass "locale probe: every sed/grep ran under LC_ALL=C (rc=1)"; else fail "locale probe: rc=$probe_rc, a tool ran outside LC_ALL=C"; fi
+
+echo "== literal-secret check: NUL bytes, Unicode spaces, very large inputs =="
+# NUL: bash drops it from a variable, so `a<NUL>sk-...` used to be checked as `ask-...` (the sk-
+# word boundary lost) while the file sent to jev still had it. Now any NUL means skip.
+nul_check() { # <label> <printf format with \000> <arg>: NUL cannot travel through a bash variable
+  local rc
+  (export LC_ALL=$UTF8; . "$HERE/jev-hook-lib.sh"; printf "$2" "$3" | jev_has_literal_secret) >/dev/null 2>&1; rc=$?
+  if [ "$rc" -eq 0 ]; then pass "$1 (rc=0)"; else fail "$1: rc=$rc, a NUL-bearing text read as 'no secret'"; fi
+}
+nul_check "NUL-split sk- token: skip (has secret)" 'x a\000sk-%s y' "$L24"
+nul_check "NUL byte alone, clean text: skip (cannot be checked byte-exactly)" 'hello\000world%s' ""
+# NBSP and friends: [[:space:]] is ASCII-only under LC_ALL=C, so these are normalised first.
+NBSP=$(printf '\302\240'); EMSP=$(printf '\342\200\203'); IDSP=$(printf '\343\200\200')
+lib_check "Authorization:<NBSP>Bearer<NBSP>token: skip" 0 "Authorization:${NBSP}Bearer${NBSP}${UP16}"
+lib_check "Bearer<EM SPACE>token: skip" 0 "Bearer${EMSP}${UP16}"
+lib_check "Authorization:<IDEOGRAPHIC SPACE>Basic<IDEOGRAPHIC SPACE>x: skip" 0 "Authorization:${IDSP}Basic${IDSP}dXNlcjpwYXNz"
+lib_check "Unicode space in prose is still screened" 1 "hello${NBSP}world${NBSP}again"
+# Large: > 2 MB with the secret at the very end of one long newline-free line.
+BIGLINE="$(head -c 2100000 /dev/zero | tr '\0' 'a')"
+lib_check "2.1 MB single line, token at the very end: skip" 0 "${BIGLINE} ghp_${L36}"
+lib_check "2.1 MB single line, nothing secret: screened" 1 "${BIGLINE}"
+unset BIGLINE
+# A secret that ends exactly at the 32 KiB cap is still inside what would be sent -> no call.
+TOK="ghp_${L36}"
+PADN=$((32768 - ${#TOK}))
+reset; screen_json 0.99
+screen "token ending exactly at the 32 KiB cap: no jev call" Bash "gh pr view 12" "$(yes 'x ' | tr -d '\n' | head -c "$PADN")${TOK}" 0 no
+silent "no output"
+unset TOK PADN
+
+# ... and end to end through the screen: an erroring sed means NO call
+reset; screen_json 0.99
+mkdir -p "$TMP/mock-sed-e2e"; printf '#!/bin/sh\nexit 2\n' >"$TMP/mock-sed-e2e/sed"; chmod +x "$TMP/mock-sed-e2e/sed"
+PATH="$TMP/mock-sed-e2e:$PATH" screen "(b) screen: sed errors, clean text: no jev call" Bash "gh pr view 12" "perfectly ordinary comment text" 0 no
+silent "no output"
+
 echo "== result screen: benign GitHub content is still screened (it must not look like a secret) =="
 # Real-shaped fixtures. Each reaches the stub (calls=1) and, with a flagging score, is flagged.
 # Before the literal list was narrowed these were all skipped, i.e. the screen was blind to
