@@ -230,7 +230,7 @@ describe("what is NOT made conditional (the control cases stay cacheable)", () =
                 {
                     source: "/af/[x]",
                     sourceRegex: "^/af/[^/]+$",
-                    destination: "/af/[x]?nxtPx=$nxtPx",
+                    destination: "/af/[x]$2?nxtPx=$nxtPx",
                 },
             ],
             beforeFiles: [rule("/af", "/o", { has: COOKIE })],
