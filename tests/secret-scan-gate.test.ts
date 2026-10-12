@@ -213,6 +213,19 @@ describe('wrapper semantics — driven through the exported pure functions', () 
       ),
     ).toThrow(/must not expire/);
     expect(() => validateAllowlist(wrap(entry({ expires: 'soonish' })))).toThrow(/dated expiry/);
+    // a fingerprint listed twice (careless "keep both" merge) is rejected, named
+    const dupFp = 'dup-fixture:path/f.txt:rule-x:7';
+    expect(() =>
+      validateAllowlist({
+        entries: [entry({ fingerprint: dupFp }), entry({ fingerprint: dupFp })],
+      }),
+    ).toThrow(/duplicate fingerprint.*dup-fixture:path\/f\.txt:rule-x:7/);
+    // distinct fingerprints still pass
+    expect(() =>
+      validateAllowlist({
+        entries: [entry(), entry({ fingerprint: 'other:path/f.txt:rule-x:2' })],
+      }),
+    ).not.toThrow();
     // the real committed allowlist passes
     expect(() => validateAllowlist(allowlist)).not.toThrow();
   });
