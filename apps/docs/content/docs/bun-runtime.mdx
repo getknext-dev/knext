@@ -235,3 +235,13 @@ Earlier knext versions offered an optional per-file bytecode pass for the standa
 (537 req/s against Node's 630), because converting each module individually taxes every module
 boundary on every request. Whole-bundle compilation — of the vinext build, and of the standalone
 server on Bun as described above — replaced it.
+
+## Known limitation: `turbopackModuleFragments`
+
+Next's experimental `turbopackModuleFragments` flag is not supported on the Bun runtime. With it
+on, Turbopack emits chunks that assign to a `const` inside code that never runs. Node accepts
+that; Bun's parser rejects it when the chunk loads, so the app fails at runtime.
+
+`knext build` therefore refuses the combination up front, and `knext doctor` reports it. To
+proceed, either turn `experimental.turbopackModuleFragments` off in your `next.config`, or set
+`runtime: 'node'`. The restriction lifts once a Bun release fixes the parser.
