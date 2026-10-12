@@ -52,6 +52,12 @@ export interface FakeRedisOptions {
         args: string[],
         socket: net.Socket,
     ) => void | Promise<void>;
+    /**
+     * Answer a command with a Redis error reply (`-ERR <message>`) instead of
+     * applying it, when this returns a string. The connection stays up: this is
+     * a command that FAILS, not a server that dies.
+     */
+    errorFor?: (cmd: string, args: string[]) => string | undefined;
 }
 
 export interface FakeRedis {
@@ -170,6 +176,14 @@ export async function startFakeRedis(
                 return v === undefined ? bulk(null) : bulk(v);
             }
             case "set": {
+                // `SET … NX` only writes an absent key; a refused write
+                // answers a null bulk, as real Redis does.
+                if (
+                    args.slice(2).some((a) => a.toLowerCase() === "nx") &&
+                    strings.has(args[0])
+                ) {
+                    return bulk(null);
+                }
                 strings.set(args[0], args[1]);
                 ttls.delete(args[0]);
                 for (let i = 2; i < args.length; i++) {
@@ -359,6 +373,11 @@ export async function startFakeRedis(
                     if (queued !== null) {
                         queued.push([cmd, args]);
                         socket.write(`+QUEUED${CRLF}`);
+                        return;
+                    }
+                    const failure = options.errorFor?.(cmd, args);
+                    if (failure !== undefined) {
+                        socket.write(`-ERR ${failure}${CRLF}`);
                         return;
                     }
                     // Outside a transaction (i.e. a plain pipeline) the command

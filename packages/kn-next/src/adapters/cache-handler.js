@@ -24,6 +24,9 @@
 // handler subpaths stay default-only, because they exist to be handed to
 // Next's `cacheHandler` option by path, not called.
 import { trackWrite } from './cache-write-registry.js';
+// The CDN purge pipeline (ADR-0068 D6, D7). Inert unless KNEXT_CDN_PROVIDER is
+// set; both calls are total (never throw, never block). See "CDN wire-in" below.
+import { enqueuePurge, firstReadyPurge } from './cdn-purge/index.js';
 // The `'use cache'` (`cacheHandlers`) backend. Pure logic over an injected `core`
 // (below), so it imports nothing from this module and stays testable alone.
 import { createUseCacheHandler } from './use-cache-handler.js';
@@ -1209,6 +1212,109 @@ async function isBuildLive(client, buildId) {
   return live;
 }
 
+// ─── CDN wire-in (ADR-0068 D5.1, D6, D7) ───
+//
+// Three hooks, each a no-op unless CDN mode is on:
+//
+//  - TAGS. Next strips `x-next-cache-tags` from the response in non-minimal
+//    mode, so the CDN header preload cannot read a page's tags off it. This
+//    handler is the one place that sees them, so `get` (hit) and `set` (render)
+//    hand the entry's tags -- the implicit `_N_T_<path>` ones included -- to the
+//    request-scoped seam the preload opens. The seam is anchored on `globalThis`
+//    (ADR-0027) and exists only when the preload is in CDN mode; absent, the
+//    cost here is one property read. A seam failure never reaches the request.
+//    The `'use cache'` handler records nothing: Next copies a `'use cache'`
+//    function's tags into the page entry's `x-next-cache-tags`, which is what
+//    reaches the edge (D5.1).
+//  - PURGE. From the SINGULAR `revalidateTag` only (D6.2): Next calls the
+//    `'use cache'` handlers' `updateTags` for the same tags, so purging there
+//    too would double every purge. There is no per-pod invalidation fan-out to
+//    purge from either (D6.1): the pod that ran `revalidateTag` purges, once.
+//  - FIRST READY. Once per process per build, the cluster-wide SET NX claim in
+//    `firstReadyPurge` lets exactly one pod of a new build evict the app's edge
+//    entries (D7). Never awaited by anything on the request or readiness path.
+
+const CDN_REQUEST_TAGS = Symbol.for('knext.core.cdn.requestTags');
+
+/** The seam's `kind` for an entry kind: own page/route entries vs data (fetch). */
+function cdnSeamKind(entryKind) {
+  switch (entryKind) {
+    case 'APP_PAGE':
+    case 'PAGES':
+      return 'page';
+    case 'APP_ROUTE':
+      return 'route';
+    case 'FETCH':
+      return 'fetch';
+    default:
+      // IMAGE / REDIRECT: never edge-cached by tag.
+      return undefined;
+  }
+}
+
+/**
+ * Hand an entry's tags to the CDN request seam. `tagsOf` is only evaluated when
+ * the seam exists, so CDN-off pays one property read and nothing else.
+ */
+function recordCdnTags(entryKind, tagsOf) {
+  const seam = globalThis[CDN_REQUEST_TAGS];
+  if (seam == null) return;
+  try {
+    const kind = cdnSeamKind(entryKind);
+    if (kind === undefined) return;
+    const tags = tagsOf();
+    if (tags.length > 0) seam.record?.({ kind, tags });
+  } catch {
+    // The seam is an observer: it must never fail a cache read or write.
+  }
+}
+
+/** The tags a stored entry carries: the indexed list ∪ the header, de-duped. */
+function storedEntryTags(entry) {
+  const indexed = Array.isArray(entry?.tags) ? entry.tags : [];
+  return Array.from(new Set([...indexed, ...tagsFromCacheValueHeader(entry?.value)]));
+}
+
+/** Queue the CDN purge for tags whose invalidation completed. Never awaited, never throws. */
+function startCdnPurge(tags) {
+  if (tags.length === 0) return;
+  try {
+    enqueuePurge(tags);
+  } catch {
+    // enqueuePurge is total; this keeps the invalidation's caller safe regardless.
+  }
+}
+
+// Builds this process has started its first-ready purge for (D7: once per
+// process per build -- a pod-local flag alone would purge on every wake, which
+// is what the cluster-wide SET NX in `firstReadyPurge` prevents).
+const cdnFirstReadyBuilds = new Set();
+
+/**
+ * Start the first-ready purge for the current build, once. Registered with the
+ * drain registry because the claim is a Redis write; never awaited here.
+ *
+ * Redis is handed over as a GETTER, so with CDN mode off (or a build the
+ * purger cannot purge for) the claim never touches Redis at all. The client it
+ * yields routes the claim through this handler's connection and breaker, in
+ * the one verb both client shapes share.
+ */
+function startCdnFirstReady() {
+  const buildId = currentBuildId;
+  if (buildId === undefined || cdnFirstReadyBuilds.has(buildId)) return;
+  cdnFirstReadyBuilds.add(buildId);
+  const redis = async () => {
+    const client = await ensureConnected();
+    if (!client) return null;
+    return { send: (name, args) => redisCall(() => redisCommand(client, name, args)) };
+  };
+  try {
+    trackWrite(firstReadyPurge(buildId, { redis }).catch(() => {}));
+  } catch {
+    // Total by contract; a construction must never fail over the CDN.
+  }
+}
+
 // ─── CacheHandler Class ───
 
 /**
@@ -1276,6 +1382,7 @@ class CacheHandler {
     const buildId = resolveBuildId(options);
     if (buildId !== undefined) currentBuildId = buildId;
     ensureConnected().catch(() => {});
+    startCdnFirstReady();
   }
 
   async get(key, ctx) {
@@ -1303,6 +1410,7 @@ class CacheHandler {
           touchBuildLive(client);
           const foreign = windowIsForeign(parsed, ctx);
           const writerIsLive = foreign && (await isBuildLive(client, parsed.buildId));
+          recordCdnTags(parsed?.value?.kind ?? ctx?.kind, () => storedEntryTags(parsed));
           logCacheEvent(parsed?.cacheState === 'stale' ? 'STALE' : 'HIT', source, key, {
             durationMs: Date.now() - startTime,
             ...(foreign && {
@@ -1330,6 +1438,7 @@ class CacheHandler {
         return null;
       }
       const labelled = withCacheState(entry);
+      recordCdnTags(labelled?.value?.kind ?? ctx?.kind, () => storedEntryTags(labelled));
       logCacheEvent(labelled?.cacheState === 'stale' ? 'STALE' : 'HIT', source, key, {
         durationMs: Date.now() - startTime,
       });
@@ -1350,6 +1459,9 @@ class CacheHandler {
   // the `ShutdownDrain` declaration in adapters/shutdown.ts for the full scope.
   // Next may or may not await this call; the accounting must not depend on it.
   set(key, data, ctx) {
+    // Before the write's first await: on an ISR miss this set races the
+    // response's first flush, and tags recorded after it are too late (D4.1/8).
+    if (data != null) recordCdnTags(data.kind, () => resolveWriteTags(data, ctx));
     return trackWrite(this.#set(key, data, ctx));
   }
 
@@ -1463,6 +1575,10 @@ class CacheHandler {
     const tagList = Array.isArray(tags) ? tags : [tags];
     const client = await ensureConnected();
     const source = client ? 'redis' : 'memory';
+    // Tags whose invalidation completed: the only ones worth purging at the
+    // edge -- a purge ahead of a failed invalidation would let the edge refill
+    // from the entry that was meant to go (D6.3).
+    const invalidated = [];
 
     try {
       if (client) {
@@ -1479,6 +1595,7 @@ class CacheHandler {
               commands.push(['DEL', tKey]);
               await redisCall(() => execAtomic(client, commands));
             }
+            invalidated.push(tag);
             logCacheEvent('INVALIDATE', source, `tag:${tag}`, {
               durationMs: Date.now() - startTime,
               details: `Invalidated ${keys.length} keys`,
@@ -1497,6 +1614,7 @@ class CacheHandler {
             count++;
           }
         }
+        invalidated.push(tag);
         logCacheEvent('INVALIDATE', source, `tag:${tag}`, {
           durationMs: Date.now() - startTime,
           details: `Invalidated ${count} keys`,
@@ -1505,6 +1623,10 @@ class CacheHandler {
       }
     } catch (error) {
       console.error('[CacheHandler] Error revalidating tags:', tagList, error.message);
+    } finally {
+      // AFTER the invalidation, and not awaited: a rate-limited CDN must not
+      // hold a Server Action open (D6.3). The purger drains under SIGTERM itself.
+      startCdnPurge(invalidated);
     }
   }
 
