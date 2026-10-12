@@ -633,11 +633,7 @@ describe("ISR freshness survives a scale-to-zero wake on the Next path (#1888)",
         });
         it("withholds under Next's CONSTANT build id on both sides", async () => {
             const hit = await handlerGet(
-                storedEntry(
-                    WINDOW,
-                    SEVEN_MINUTES_MS,
-                    NEXT_CONSTANT_BUILD_ID,
-                ),
+                storedEntry(WINDOW, SEVEN_MINUTES_MS, NEXT_CONSTANT_BUILD_ID),
                 distWithBuildId(NEXT_CONSTANT_BUILD_ID),
             );
             expect(hit).not.toBeNull();
