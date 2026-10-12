@@ -45,7 +45,13 @@ describe("runProjectBuild static-export refusal", () => {
         const run = mock();
         let caught: unknown;
         try {
-            runProjectBuild({ requireEsm: false, cwd: dir, run });
+            runProjectBuild({
+                requireEsm: false,
+                runtimeId: "node",
+                builderId: "webpack",
+                cwd: dir,
+                run,
+            });
         } catch (err) {
             caught = err;
         }
@@ -65,7 +71,13 @@ describe("runProjectBuild static-export refusal", () => {
         mkdirSync(join(dir, ".next"), { recursive: true });
         const run = mock();
         expect(() =>
-            runProjectBuild({ requireEsm: false, cwd: dir, run }),
+            runProjectBuild({
+                requireEsm: false,
+                runtimeId: "node",
+                builderId: "webpack",
+                cwd: dir,
+                run,
+            }),
         ).not.toThrow();
     });
 });
