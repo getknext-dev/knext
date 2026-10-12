@@ -95,8 +95,19 @@ jev_ge() { awk -v x="$1" -v t="$2" 'BEGIN { exit !(x + 0 >= t + 0) }'; }
 #     likewise let through.
 JEV_LITERAL_RE='-----BEGIN|gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{22,}|npm_[A-Za-z0-9]{36}|(^|[^a-z0-9])sk-[A-Za-z0-9_-]{20,}|xox[bp]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|://[^/@[:space:]]+:[^/@[:space:]]+@|authorization:[[:space:]]*basic[[:space:]]+[^[:space:]]+|(authorization:[[:space:]]*|bearer[[:space:]]+)([A-Za-z]+[[:space:]]+)?([A-Za-z0-9._~+/=-]{16,}|[A-Za-z._~+/=-]*[0-9][A-Za-z0-9._~+/=-]{7,})'
 jev_has_literal_secret() {
-  local orig stripped pass
-  orig=$(cat)
+  # FAIL CLOSED. This check is the only thing between the text and the external jev API, so any
+  # ERROR in it must read as "possibly a secret" (return 0 = skip the call), never "no secret".
+  # Measured failure it closes: one non-UTF-8 byte made BSD sed (macOS) error ("illegal byte
+  # sequence"), its output was empty, the entropy rule saw nothing, and the text was SENT.
+  # Two layers: (1) LC_ALL=C so every byte is a valid character and invalid UTF-8 cannot error at
+  # all (the rules are ASCII-only, nothing is lost); (2) every command's status is checked -- grep
+  # exits 0 match / 1 no match / 2+ error, sed 0 / non-zero -- and an error returns 0.
+  # Deliberate consequence: a CLEAN text with an invalid byte is not an error under LC_ALL=C and
+  # is screened normally; only a genuine failure of the check skips the call.
+  local LC_ALL
+  export LC_ALL=C # local yet exported: children see it, the caller's locale is restored on return
+  local orig stripped runs pass rc
+  orig=$(cat) || return 0
   # NO PIPELINES IN THE CHECKS: the callers run under `set -o pipefail`, and `grep -q` exits on the
   # first match while `printf` is still writing a large text, so printf dies of SIGPIPE and
   # pipefail turns a HIT into a failure: a big text with an early secret would be SENT. Here-strings
@@ -106,14 +117,22 @@ jev_has_literal_secret() {
   #
   # 1. Token shapes, PEM, user:pass@, headers: on the ORIGINAL text. No exemption may run first: a
   #    token placed right after `data:x/y;base64,` must not be eaten by the data-URI strip.
-  grep -Eiq -- "$JEV_LITERAL_RE" <<<"$orig" && return 0
+  grep -Eiq -- "$JEV_LITERAL_RE" <<<"$orig"
+  rc=$?
+  [ "$rc" -eq 1 ] || return 0 # 1 = no match; 0 = hit, 2+ = error: both skip the call
   # 2. Exemptions (inline data URIs, 40/64-hex hashes), then the entropy rule on what is left.
-  stripped=$(printf '%s' "$orig" | sed -E -e 's#data:[A-Za-z0-9.+/-]+;base64,[A-Za-z0-9+/=]*#DATAURI#g')
+  stripped=$(sed -E -e 's#data:[A-Za-z0-9.+/-]+;base64,[A-Za-z0-9+/=]*#DATAURI#g' <<<"$orig") || return 0
   # Two passes: two hashes sharing one separator ("<sha> <sha>") are both exempted.
   for pass in 1 2; do
-    stripped=$(printf '%s' "$stripped" | sed -E \
+    stripped=$(sed -E \
       -e 's#(^|[^A-Za-z0-9])[0-9a-fA-F]{64}([^A-Za-z0-9]|$)#\1SHA256\2#g' \
-      -e 's#(^|[^A-Za-z0-9])[0-9a-fA-F]{40}([^A-Za-z0-9]|$)#\1GITSHA\2#g')
+      -e 's#(^|[^A-Za-z0-9])[0-9a-fA-F]{40}([^A-Za-z0-9]|$)#\1GITSHA\2#g' <<<"$stripped") || return 0
   done
-  grep -q '[0-9]' < <(grep -Eio '[A-Za-z0-9+=]{32,}' <<<"$stripped" 2>/dev/null)
+  runs=$(grep -Eio '[A-Za-z0-9+=]{32,}' <<<"$stripped")
+  rc=$?
+  [ "$rc" -le 1 ] || return 0 # 1 = no long run; 2+ = error: skip
+  grep -q '[0-9]' <<<"$runs"
+  rc=$?
+  [ "$rc" -le 1 ] || return 0
+  return "$rc"
 }

@@ -190,6 +190,64 @@ for i in 1 2 3; do
 done
 unset big err
 
+echo "== literal-secret check: FAILS CLOSED (any error in the check means 'possible secret', no call) =="
+# Measured on macOS: one non-UTF-8 byte made BSD sed error, the entropy rule was skipped, and the
+# text was SENT. The caller's locale is forced to a UTF-8 one so the case is the real one; the
+# check itself pins LC_ALL=C. (GNU sed does not error on invalid bytes, so on Linux (a)/(c) pass
+# on the unmutated code too; the BSD-sed red is proven by the macOS mutation run.)
+BADB=$(printf '\377')
+UTF8=en_US.UTF-8
+# <label> <expected rc> <text>: run the lib check on a text, in a UTF-8 caller locale
+lib_check() {
+  local want="$2" rc err
+  err=$( (export LC_ALL=$UTF8; . "$HERE/jev-hook-lib.sh"; printf '%s' "$3" | jev_has_literal_secret) 2>&1 >/dev/null ); rc=$?
+  if [ "$rc" -eq "$want" ] && [ -z "$err" ]; then pass "$1 (rc=$rc)"; else fail "$1: rc=$rc want=$want stderr=[${err:0:120}]"; fi
+}
+lib_check "(a) invalid byte + entropy-rule secret: skip (has secret)" 0 "log ${BADB} then $H32 end"
+lib_check "(a') invalid byte right inside the long run: skip" 0 "${H32}${BADB}${H32}"
+lib_check "(c) invalid byte, clean text: not an error under LC_ALL=C, screened (no secret)" 1 "caf${BADB} says hello, nothing secret here"
+lib_check "(c') clean text, no invalid byte: screened" 1 "hello world"
+
+# (b) a forced error in the check: a sed / grep on PATH that exits 2 must NOT yield 'no secret'.
+# The mock fails exactly the Nth call of one tool (counter file) and runs the real tool otherwise,
+# so each command in the check is proven to propagate its OWN failure -- failing every call would
+# let an earlier guard mask a removed later one. Call order in jev_has_literal_secret:
+#   grep#1 literal formats, sed#1 data-URI strip, sed#2/#3 hash-strip passes,
+#   grep#2 long-run extraction, grep#3 digit check.
+export REAL_GREP REAL_SED
+REAL_GREP=$(command -v grep); REAL_SED=$(command -v sed)
+MOCK="$TMP/mockbin"; mkdir -p "$MOCK"
+for t in grep sed; do
+  cat >"$MOCK/$t" <<EOF
+#!/bin/sh
+n=\$(cat "\$MOCK_COUNT_$t" 2>/dev/null || echo 0); n=\$((n + 1)); echo "\$n" >"\$MOCK_COUNT_$t"
+[ "\$n" = "\$MOCK_FAIL_$t" ] && exit 2
+exec "\$REAL_$(printf '%s' "$t" | tr a-z A-Z)" "\$@"
+EOF
+  chmod +x "$MOCK/$t"
+done
+mock_check() { # <label> <tool> <Nth call to fail> <text>
+  local rc
+  rm -f "$TMP/cnt-grep" "$TMP/cnt-sed"
+  (PATH="$MOCK:$PATH"; export MOCK_COUNT_grep="$TMP/cnt-grep" MOCK_COUNT_sed="$TMP/cnt-sed"
+   if [ "$2" = grep ]; then export MOCK_FAIL_grep=$3; else export MOCK_FAIL_sed=$3; fi
+   . "$HERE/jev-hook-lib.sh"; printf '%s' "$4" | jev_has_literal_secret) >/dev/null 2>&1; rc=$?
+  if [ "$rc" -eq 0 ]; then pass "$1: fail closed (rc=0)"; else fail "$1: rc=$rc, an error read as 'no secret'"; fi
+}
+CLEAN="hello world, nothing secret"
+mock_check "(b) grep #1 (literal formats) exits 2" grep 1 "$CLEAN"
+mock_check "(b) sed #1 (data-URI strip) exits 2" sed 1 "$CLEAN"
+mock_check "(b) sed #2 (hash strip, pass 1) exits 2" sed 2 "$CLEAN"
+mock_check "(b) sed #3 (hash strip, pass 2) exits 2" sed 3 "$CLEAN"
+mock_check "(b) grep #2 (long-run extraction) exits 2" grep 2 "$CLEAN"
+mock_check "(b) grep #3 (digit check) exits 2" grep 3 "$CLEAN"
+mock_check "(b) grep #3 (digit check) exits 2 after a digit-free long run" grep 3 "${L36}${L36}"
+# ... and end to end through the screen: an erroring sed means NO call
+reset; screen_json 0.99
+mkdir -p "$TMP/mock-sed-e2e"; printf '#!/bin/sh\nexit 2\n' >"$TMP/mock-sed-e2e/sed"; chmod +x "$TMP/mock-sed-e2e/sed"
+PATH="$TMP/mock-sed-e2e:$PATH" screen "(b) screen: sed errors, clean text: no jev call" Bash "gh pr view 12" "perfectly ordinary comment text" 0 no
+silent "no output"
+
 echo "== result screen: benign GitHub content is still screened (it must not look like a secret) =="
 # Real-shaped fixtures. Each reaches the stub (calls=1) and, with a flagging score, is flagged.
 # Before the literal list was narrowed these were all skipped, i.e. the screen was blind to
