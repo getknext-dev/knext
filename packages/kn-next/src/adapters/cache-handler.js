@@ -1255,7 +1255,7 @@ class CacheHandler {
    * @internal
    * @param {'default' | 'remote'} kind
    */
-  static useCacheHandler(kind) {
+  static forUseCache(kind) {
     redisClient = this.redisClient;
     return createUseCacheHandler({ kind, core: USE_CACHE_CORE });
   }

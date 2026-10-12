@@ -1,13 +1,17 @@
 /**
- * `'use cache'` is per-pod on knext today (#2083, 1.x interim) -- LOCAL and
- * read-only, so it runs even when the cluster is unreachable.
+ * `'use cache'` on knext: shared through Redis when the adapter wires it (#2083).
  *
- * The scaffold sets `cacheMaxMemorySize: 0` and wires no `cacheHandlers`, so a
- * server-side `'use cache'` entry is either off or held in one pod's memory and
- * lost on scale-to-zero; it is never shared across pods. Next requires
- * `cacheComponents` (or the older `experimental.useCache`) to be enabled for
- * `'use cache'` to be usable at all, so reading the app's `next.config` for
- * that flag is a cheap and sufficient detector.
+ * LOCAL and read-only, so it runs even when the cluster is unreachable. Next
+ * requires `cacheComponents` (or the older `experimental.useCache`) for
+ * `'use cache'` to be usable at all, so reading the app's `next.config` for that
+ * flag is a cheap and sufficient detector.
+ *
+ * The knext adapter points `cacheHandlers` (`default` and `remote`) at its Redis
+ * handler whenever the app uses knext's `cacheHandler`, so an app that sets
+ * `cacheHandler` has `'use cache'` shared across pods. An app with NO
+ * `cacheHandler` gets Next's built-in handler, which is per-pod and (with the
+ * scaffold's `cacheMaxMemorySize: 0`) off: that is the WARN. An app that sets
+ * its own `cacheHandlers` owns the choice, so no row.
  *
  * Contributes NO row when the flag is absent, which keeps every other app's
  * row set byte-identical (doctor-golden.test.ts). WARN only, never a failure.
@@ -53,16 +57,33 @@ function defaultReadNextConfig(): string | undefined {
     return undefined;
 }
 
+/** True iff the (comment-stripped) config sets the named top-level option. */
+function sets(configText: string, option: string): boolean {
+    return new RegExp(`\\b${option}\\s*:`).test(stripComments(configText));
+}
+
 export function cacheComponentsCheck(ctx: CheckContext): CheckResult[] {
     const text = (ctx.deps.readNextConfigFile ?? defaultReadNextConfig)();
     if (text === undefined || !enablesUseCache(text)) return [];
+    // The app chose its own 'use cache' backend: nothing for knext to claim.
+    if (sets(text, "cacheHandlers")) return [];
+    if (sets(text, "cacheHandler")) {
+        return [
+            mk(
+                "use-cache",
+                "'use cache' is shared across pods",
+                "pass",
+                "this app enables cacheComponents and uses knext's cacheHandler: the adapter also wires the Redis 'use cache' handler, so entries are shared across pods and kept across scale-to-zero (needs REDIS_URL; without Redis 'use cache' entries are not cached)",
+            ),
+        ];
+    }
     return [
         mk(
             "use-cache",
             "'use cache' is per-pod",
             "warn",
-            "this app enables cacheComponents: server-side 'use cache' entries are per-pod and are not shared across pods or kept across scale-to-zero (with the scaffold's cacheMaxMemorySize: 0 they are off)",
-            "treat 'use cache' as a per-pod optimisation, not a shared cache; see https://knext-platform.dev/docs/isr-caching",
+            "this app enables cacheComponents but sets no cacheHandler: server-side 'use cache' entries use Next's built-in handler, which is per-pod, not shared across pods and lost on scale-to-zero",
+            "set cacheHandler to knext's handler (the scaffold's cache-handler.js) so the adapter can wire the shared Redis 'use cache' backend; see https://knext-platform.dev/docs/isr-caching",
         ),
     ];
 }

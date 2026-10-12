@@ -148,9 +148,9 @@ describe.each([
         const mod = await import(`${CACHE_HANDLER}?ucpod=${clientKind}${gen}`);
         const useCache = (
             mod.CacheHandler as {
-                useCacheHandler(kind: string): UseCacheHandler;
+                forUseCache(kind: string): UseCacheHandler;
             }
-        ).useCacheHandler(kind);
+        ).forUseCache(kind);
         return { mod, useCache };
     }
 

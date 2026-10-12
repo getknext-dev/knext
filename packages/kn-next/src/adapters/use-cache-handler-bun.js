@@ -11,4 +11,4 @@
  */
 import KnextBunCacheHandler from './cache-handler-bun.js';
 
-export default KnextBunCacheHandler.useCacheHandler('default');
+export default KnextBunCacheHandler.forUseCache('default');

@@ -12,7 +12,7 @@
  * What it shares with the singular handler, and what it deliberately does not
  * (ADR-0066 D2). It SHARES the Redis connection, its timeouts, its circuit
  * breaker, the key prefix and the build id, through the `core` object
- * `CacheHandler.useCacheHandler()` injects. It does NOT share an entry format, a
+ * `CacheHandler.forUseCache()` injects. It does NOT share an entry format, a
  * tag store or an outage mode, because Next's two contracts differ on all three:
  *
  *  - Entry: `<prefix>:uc:<kind>:<cacheKey>` holds one JSON envelope (metadata +

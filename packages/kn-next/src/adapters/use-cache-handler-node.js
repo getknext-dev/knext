@@ -12,4 +12,4 @@
  */
 import KnextNodeCacheHandler from './cache-handler-node.js';
 
-export default KnextNodeCacheHandler.useCacheHandler('default');
+export default KnextNodeCacheHandler.forUseCache('default');

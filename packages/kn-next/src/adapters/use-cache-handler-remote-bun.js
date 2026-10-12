@@ -8,4 +8,4 @@
  */
 import KnextBunCacheHandler from './cache-handler-bun.js';
 
-export default KnextBunCacheHandler.useCacheHandler('remote');
+export default KnextBunCacheHandler.forUseCache('remote');

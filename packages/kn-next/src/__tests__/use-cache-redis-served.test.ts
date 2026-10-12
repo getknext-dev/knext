@@ -215,7 +215,9 @@ describe("'use cache' is shared across pods (real next@16.4.0, two processes, on
         // import it: this package itself, resolved from the app's own
         // node_modules (its BUILT dist, which is what ships). The workspace
         // `node_modules` link above does not carry the package's own name.
-        mkdirSync(join(appDir, "node_modules", "@getknext"), { recursive: true });
+        mkdirSync(join(appDir, "node_modules", "@getknext"), {
+            recursive: true,
+        });
         symlinkSync(
             PKG_ROOT,
             join(appDir, "node_modules", "@getknext", "core"),

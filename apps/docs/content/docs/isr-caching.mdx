@@ -114,26 +114,54 @@ The connection details come from the environment — `REDIS_URL` and `REDIS_KEY_
 into your pods from the `cache` block of your deploy config (see
 [the operator reference](/docs/operator)); nothing about Redis is hardcoded in your app.
 
-## `'use cache'` is per-pod today
+## `'use cache'` is shared across pods
 
-The Redis cache above covers ISR and the response cache. It does **not** back Next's `'use cache'`
-directive (Cache Components). Today, on knext:
+Next.js runs the `'use cache'` directive (Cache Components) through a different option from ISR:
+`cacheHandlers`, plural. On a knext app that uses knext's `cacheHandler` (the scaffold does), the
+build wires `cacheHandlers` to the same Redis for you, so you add nothing to `next.config.ts`:
 
-- A server-side `'use cache'` entry is **per-pod**. It is not shared between pods and does not
-  survive scale-to-zero, so a fresh pod recomputes it.
-- The scaffolded `next.config.ts` sets `cacheMaxMemorySize: 0` and registers no `cacheHandlers`.
-  With that, `'use cache'` keeps nothing in production at all. Your code still runs and returns
-  correct results; it just is not cached.
-- `'use cache: remote'` has no shared store behind it either, so it behaves the same way.
-- Tag invalidation with `revalidateTag` still reaches ISR pages, but it cannot invalidate a
-  `'use cache'` entry held by another pod.
+- A `'use cache'` entry written by one pod is a hit on every other pod behind the same Service,
+  and it survives scale-to-zero.
+- `'use cache: remote'` is backed by the same Redis, under its own key namespace.
+- `revalidateTag` (and `updateTag`) on one pod invalidates the entry on all of them.
+  `revalidateTag(tag, profile)` keeps its stale-while-revalidate behaviour: the entry is served
+  once more while a fresh one is produced.
+- The keys belong to your app (`REDIS_KEY_PREFIX`) and carry Next's own build identifier, so one
+  build never reads another build's entries.
+- Every entry gets a Redis expiry: the shorter of the `cacheLife` `expire` you set and **24 hours**
+  (Next's default `expire` is effectively unbounded). Lower the ceiling with
+  `KNEXT_USE_CACHE_MAX_TTL_SECONDS`. An entry that holds one user's data should use a short
+  `cacheLife` of its own, an hour or less.
+- An entry with `expire: 0` (a dynamic result) is never stored.
 
-Plan around that: treat `'use cache'` as a per-pod optimisation, not as a shared cache, and keep
-anything that must be shared (or must survive scale-to-zero) in ISR or your own data store.
-`knext doctor` warns when your `next.config` enables `cacheComponents`.
+The scaffold keeps `cacheMaxMemorySize: 0`. That setting only turns off Next's per-pod memory cache
+for ISR; it no longer turns `'use cache'` into a no-op, because the Redis handler replaces Next's
+built-in one.
 
-A Redis-backed `'use cache'` store shared across pods is planned for a future release. Until it
-ships, the behaviour above is what you get.
+You can still set your own entry for a kind (`cacheHandlers: { default: '…' }`), and yours wins for
+that kind. The wiring applies to builds made by `knext build` and `knext deploy`, for both the Node
+and the Bun runtime. A plain `next build` outside knext, and apps that bring their own
+`cacheHandler`, are left alone.
+
+**With Redis unavailable, `'use cache'` does not cache.** There is deliberately no per-pod fallback:
+a `'use cache'` entry can hold one user's results, and a copy in pod memory would outlive its
+expiry and never see another pod's invalidation. Reads become misses and your code runs as normal;
+writes are dropped; a `revalidateTag` issued during the outage is not replayed afterwards. The
+handler logs one warning per outage (and one when `REDIS_URL` is not set at all). ISR keeps its own
+per-pod fallback, as described above.
+
+**Redis memory.** Set `maxmemory` on the Redis you point knext at, with
+`maxmemory-policy volatile-lru`. Every cache entry carries an expiry, so it can be evicted; the tag
+index (ISR) and the tag timestamps (`'use cache'`) carry none, so they are never evicted, which
+matters because losing one would silently lose an invalidation. Do not use an `allkeys-*` policy.
+Under the Redis default (`noeviction`) writes fail once the limit is reached and the handlers fail
+open to rendering.
+
+**The vinext build** (`build: 'vinext'`) is unchanged: it has its own cache adapter and does not
+read `cacheHandlers`, so `'use cache'` there is not backed by this Redis store.
+
+`knext doctor` reports an app that enables `cacheComponents`: PASS when the shared store is wired,
+and a warning for an app with no `cacheHandler`, where Next's per-pod built-in handler applies.
 
 ## The Cache-Control header clients see
 

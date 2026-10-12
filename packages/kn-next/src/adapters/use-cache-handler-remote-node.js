@@ -8,4 +8,4 @@
  */
 import KnextNodeCacheHandler from './cache-handler-node.js';
 
-export default KnextNodeCacheHandler.useCacheHandler('remote');
+export default KnextNodeCacheHandler.forUseCache('remote');
