@@ -46,6 +46,7 @@ SCREEN = "jev-result-screen.sh"
 LIB = "jev-hook-lib.sh"
 
 # (label, file, anchor, replacement)
+Q = "'\"$JEV_Q\"'"  # the optional-quote splice as it appears in the lib source
 MUTATIONS = [
     # --- the watchdog and score parsing every call goes through -----------------------------
     ("lib: watchdog leaves its sleep orphaned", LIB, "trap 'kill \"$sp\" 2>/dev/null; exit 0' TERM", ":"),
@@ -97,13 +98,13 @@ MUTATIONS = [
     ("lib: npm_ loses its body length", LIB, "npm_[A-Za-z0-9]{36}", "npm_"),
     ("lib: xox[bp]- loses its body", LIB, "xox[bp]-[A-Za-z0-9-]{10,}", "xox[bp]-"),
     ("lib: AKIA loses its body length", LIB, "AKIA[0-9A-Z]{16}", "AKIA"),
-    ("lib: auth/bearer header-with-value rule removed", LIB, "|(authorization:[[:space:]]*|bearer[[:space:]]+)", "|(zzzz)"),
+    ("lib: auth/bearer header-with-value rule removed", LIB, "|(authorization%s?[[:space:]]*:[[:space:]]*%s?|bearer[[:space:]]+%s?)" % (Q, Q, Q), "|(zzzz)"),
     ("lib: header value may be any word (no length/digit rule)", LIB, "([A-Za-z0-9._~+/=-]{16,}|[A-Za-z._~+/=-]*[0-9][A-Za-z0-9._~+/=-]{7,})", "[A-Za-z]+"),
     ("lib: header 16+ char value alternative removed", LIB, "([A-Za-z0-9._~+/=-]{16,}|", "("),
     ("lib: header short-value-with-digit alternative removed", LIB, "|[A-Za-z._~+/=-]*[0-9][A-Za-z0-9._~+/=-]{7,})", ")"),
     ("lib: header optional scheme word removed", LIB, "([A-Za-z]+[[:space:]]+)?", ""),
-    ("lib: URL user:password@ not a literal secret", LIB, "|://[^/@[:space:]]+:[^/@[:space:]]+@", ""),
-    ("lib: Authorization: Basic <anything> not a literal secret", LIB, "|authorization:[[:space:]]*basic[[:space:]]+[^[:space:]]+", ""),
+    ("lib: URL user:password@ not a literal secret", LIB, "|://[^/@[:space:]]+:[^@[:space:]]+@", ""),
+    ("lib: Authorization: Basic <anything> not a literal secret", LIB, "|authorization%s?[[:space:]]*:[[:space:]]*%s?basic[[:space:]]+[^[:space:]]+" % (Q, Q), ""),
     # --- fail closed: an ERROR in the secret check must read as "possible secret" (no call) ----
     ("lib: LC_ALL=C dropped (invalid UTF-8 makes BSD sed error: the macOS leak)", LIB, "export LC_ALL=C # local yet exported", ": #"),
     ("lib: redaction runs outside LC_ALL=C", LIB, "export LC_ALL=C\n  local in=", ":\n  local in="),
@@ -123,7 +124,7 @@ MUTATIONS = [
     ("screen: a failed redaction no longer stops the call (sends the original)", SCREEN, 'jev_redact "$tmp/text.txt" "$tmp/redacted.txt" || exit 0', 'jev_redact "$tmp/text.txt" "$tmp/redacted.txt" || :'),
     ("screen: the redacted text is not the one sent", SCREEN, 'mv "$tmp/redacted.txt" "$tmp/text.txt" || exit 0', ":"),
     ("screen: a failed mv no longer stops the call (sends the original)", SCREEN, 'mv "$tmp/redacted.txt" "$tmp/text.txt" || exit 0', 'mv "$tmp/redacted.txt" "$tmp/text.txt" || :'),
-    ("lib: the placeholder is empty (literal deleted, nothing marks it)", LIB, 'out substr(line, 1, i - 1) "[REDACTED]"', 'out substr(line, 1, i - 1) ""'),
+    ("lib: the placeholder is empty (literal deleted, nothing marks it)", LIB, 'out = out substr(line, 1, i - 1) "[REDACTED]"; line = substr(line, i + l)', 'out = out substr(line, 1, i - 1) ""; line = substr(line, i + l)'),
     ("lib: pass 1 (token shapes, PEM, headers) not redacted", LIB, 'cur=$(_jev_replace_fixed "$w/pat1" "$w/t1") || return 1', "cur=$cur"),
     ("lib: pass 2 (entropy runs) not redacted", LIB, 'cur=$(_jev_replace_fixed "$w/pat2" "$w/t2") || return 1', "cur=$cur"),
     ("lib: pass 1 redacts with a different pattern than detection", LIB, 'grep -Eio -- "$JEV_LITERAL_RE" <<<"$cur" >"$w/pat1"', 'grep -Eio -- "ghp_[A-Za-z0-9]{36}" <<<"$cur" >"$w/pat1"'),
@@ -137,7 +138,27 @@ MUTATIONS = [
     ("lib: redaction entropy-run grep error ignored", LIB, '>"$w/runs"\n  rc=$?\n  [ "$rc" -le 1 ] || return 1', '>"$w/runs"\n  rc=$?'),
     ("lib: redaction digit-filter grep error ignored", LIB, '>"$w/pat2"\n  rc=$?\n  [ "$rc" -le 1 ] || return 1', '>"$w/pat2"\n  rc=$?'),
     ("lib: redaction pass-2 replace error ignored", LIB, 'cur=$(_jev_replace_fixed "$w/pat2" "$w/t2") || return 1', 'cur=$(_jev_replace_fixed "$w/pat2" "$w/t2") || :'),
-    ("lib: the replacer loops on an empty pattern line", LIB, "if (length($0) > 0) { n++; p[n] = $0 }", "{ n++; p[n] = $0 }"),
+    ("lib: the replacer loops on an empty pattern line", LIB, "if (length($0) > 0 && !($0 in seen)) {", "if (1) {"),
+    # --- round 2 (review of the redaction) ---------------------------------------------------------
+    ("lib: PEM blocks not redacted (only the BEGIN marker is: the body goes to jev in clear)", LIB, 'cur=$(_jev_redact_pem "$w/t0") || return 1', "cur=$cur"),
+    ("lib: PEM redaction error ignored", LIB, 'cur=$(_jev_redact_pem "$w/t0") || return 1', 'cur=$(_jev_redact_pem "$w/t0") || :'),
+    ("lib: PEM marker matched case-sensitively", LIB, "        low = tolower(line)\n", "        low = line\n"),
+    ("lib: PEM block with no END line is not redacted to the end of the text", LIB, 'if (i == 0) { line = ""; break }', "if (i == 0) { break }"),
+    ("lib: PEM redaction does not stop at the END line (swallows the text after it)", LIB, "          inpem = 0\n", "          inpem = 1\n"),
+    ("lib: PEM block leaves no placeholder", LIB, 'out = out substr(line, 1, i - 1) "[REDACTED]"\n          line = substr(line, i + 10)', 'out = out substr(line, 1, i - 1) ""\n          line = substr(line, i + 10)'),
+    ("lib: redaction replaces only the FIRST occurrence of a literal", LIB, "while ((i = index(line, s)) > 0) {", "if ((i = index(line, s)) > 0) {"),
+    ("lib: the digit filter on entropy runs removed (digit-free identifiers are redacted)", LIB, """grep '[0-9]' "$w/runs" >"$w/pat2\"""", """cp "$w/runs" "$w/pat2\""""),
+    ("lib: over-long ghp_ token keeps its tail", LIB, "gh[pousr]_[A-Za-z0-9]{36}[A-Za-z0-9_-]*", "gh[pousr]_[A-Za-z0-9]{36}"),
+    ("lib: over-long npm_ token keeps its tail", LIB, "npm_[A-Za-z0-9]{36}[A-Za-z0-9_-]*", "npm_[A-Za-z0-9]{36}"),
+    ("lib: over-long AKIA key keeps its tail", LIB, "AKIA[0-9A-Z]{16}[A-Za-z0-9_-]*", "AKIA[0-9A-Z]{16}"),
+    ("lib: Authorization: Basic loses the optional quote before the scheme", LIB, "[[:space:]]*%s?basic[[:space:]]+" % Q, "[[:space:]]*basic[[:space:]]+"),
+    ("lib: Authorization: Basic loses the space before the colon", LIB, "|authorization%s?[[:space:]]*:[[:space:]]*%s?basic" % (Q, Q), "|authorization%s?:[[:space:]]*%s?basic" % (Q, Q)),
+    ("lib: Authorization header loses the closing quote of the key (JSON form)", LIB, "|(authorization%s?[[:space:]]*:" % Q, "|(authorization[[:space:]]*:"),
+    ("lib: Authorization header loses the space before the colon", LIB, "(authorization%s?[[:space:]]*:[[:space:]]*%s?|bearer" % (Q, Q), "(authorization%s?:[[:space:]]*%s?|bearer" % (Q, Q)),
+    ("lib: Bearer loses the optional quote before the value", LIB, "|bearer[[:space:]]+%s?)" % Q, "|bearer[[:space:]]+)"),
+    ("lib: a user:pass@ password may not contain a slash", LIB, "+:[^@[:space:]]+@", "+:[^/@[:space:]]+@"),
+    ("screen: a NUL byte skips the screen again (not replaced)", SCREEN, """tr '\\000' ' ' <"$tmp/raw.txt" >"$tmp/text.txt" || exit 0""", """cp "$tmp/raw.txt" "$tmp/text.txt" || exit 0"""),
+    ("screen: the cut runs BEFORE redaction (a straddling token's prefix is sent)", SCREEN, "head -c 131072", "head -c 32768"),
     # --- pr-risk -----------------------------------------------------------------------------
     ("pr-risk: security weight dropped", "pr-risk.sh", ":-0.40}", ":-0.00}"),
     ("pr-risk: tests weight dropped", "pr-risk.sh", ":-0.25}", ":-0.00}"),
@@ -163,12 +184,12 @@ MUTATIONS = [
 # AT A TIME. (label, anchor, replacement)
 for _label, _anchor, _repl in [
     ("PEM block", "-----BEGIN|", ""),
-    ("gh[pousr]_", "gh[pousr]_[A-Za-z0-9]{36}|", ""),
+    ("gh[pousr]_", "gh[pousr]_[A-Za-z0-9]{36}[A-Za-z0-9_-]*|", ""),
     ("github_pat_", "github_pat_[A-Za-z0-9_]{22,}|", ""),
-    ("npm_", "npm_[A-Za-z0-9]{36}|", ""),
+    ("npm_", "npm_[A-Za-z0-9]{36}[A-Za-z0-9_-]*|", ""),
     ("sk-", "|(^|[^a-z0-9])sk-[A-Za-z0-9_-]{20,}", ""),
     ("xox[bp]-", "|xox[bp]-[A-Za-z0-9-]{10,}", ""),
-    ("AKIA", "|AKIA[0-9A-Z]{16}", ""),
+    ("AKIA", "|AKIA[0-9A-Z]{16}[A-Za-z0-9_-]*", ""),
 ]:
     MUTATIONS.append((f"lib: literal pattern removed: {_label}", LIB, _anchor, _repl))
 
@@ -201,6 +222,9 @@ SMOKE = [
     "a failing git diff is read",
     "BEFORE the token checks",
     "a literal skips the call again",
+    "PEM blocks not redacted",
+    "a NUL byte skips the screen again",
+    "the cut runs BEFORE redaction",
     "the redacted text is not the one sent",
     "the re-check of the redacted text removed",
     "redaction pass-1 grep error ignored",
