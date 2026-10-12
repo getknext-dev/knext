@@ -29,6 +29,10 @@ import { KNEXT_RUNTIME_ENV } from "../adapters/runtime-env";
 import { runQuiet } from "./exec";
 import { UsageError } from "./shared";
 import { assertNotStaticExport } from "./static-export-guard";
+import {
+    assertNoBunTurbopackFragments,
+    readNextConfigStrict,
+} from "./turbopack-fragments-guard";
 import { describeEnsureResult, ensureVinextPatches } from "./vinext-patches";
 
 /** Exit code every POSIX shell uses for "command not found". */
@@ -305,6 +309,18 @@ export function runProjectBuild(opts: RunProjectBuildOptions): void {
         for (const line of describeEnsureResult(ensureVinextPatches(cwd))) {
             process.stderr.write(`${line}\n`);
         }
+    }
+
+    // Bun cannot load the chunks `turbopackModuleFragments` makes Turbopack
+    // emit (#2225). Here, not in each caller, so build, deploy and preview all
+    // refuse before any build work. Skipped when a caller does not resolve
+    // both ids (the guard cannot decide without them).
+    if (opts.runtimeId !== undefined && opts.builderId !== undefined) {
+        assertNoBunTurbopackFragments({
+            runtime: opts.runtimeId,
+            builder: opts.builderId,
+            readNextConfig: () => readNextConfigStrict(cwd),
+        });
     }
 
     if (opts.builderId !== undefined) {
