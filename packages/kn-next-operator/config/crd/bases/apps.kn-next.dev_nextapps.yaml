@@ -151,9 +151,17 @@ spec:
                   The operator renders this field as KNEXT_CDN_* environment variables and
                   nothing else; the runtime does the rest. The tag prefix is derived by the
                   operator from the app's namespace and name and is NOT a field, so a CR
-                  cannot choose another app's prefix. Every KNEXT_CDN_* name is reserved:
-                  spec.env and spec.secrets.envMap entries with that prefix are rejected at
-                  admission whether or not this field is set.
+                  cannot choose another app's prefix.
+
+                  KNEXT_CDN_* names in spec.env and spec.secrets.envMap are reserved and
+                  rejected at admission, whether or not this field is set. A Secret imported
+                  whole through spec.secrets.envFrom is not filtered, because the operator
+                  cannot read Secret keys: a KNEXT_CDN_* key inside it reaches the pod. The
+                  namespace is the trust boundary, since whoever can write that Secret already
+                  controls the app's environment. When this field is set the rendered values
+                  still win, because Kubernetes applies env entries after envFrom; without
+                  this field, or on build vinext, nothing is rendered and such a key is simply
+                  set.
 
                   Unset renders no variable at all, so the pod template is byte-identical to
                   every NextApp written before this field existed and no revision is cut.
@@ -895,7 +903,8 @@ spec:
                     description: |-
                       EnvMap maps environment variable names to Secret keys. Names starting with
                       KNEXT_CDN_ are reserved for the operator (ADR-0068) and rejected at
-                      admission, so a CR cannot supply its own CDN tag prefix, endpoint or token.
+                      admission. A Secret imported whole through envFrom is not filtered; see
+                      spec.cdn for why the namespace is the trust boundary there.
                     type: object
                     x-kubernetes-validations:
                     - message: env var names starting with KNEXT_CDN_ are reserved

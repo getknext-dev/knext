@@ -312,9 +312,16 @@ spec:
   never appears in the resource, the revision template or the status.
 - The tag prefix is **derived** by the operator from the app's namespace and name.
   There is no field for it, so a resource cannot choose another app's prefix.
-- **Every `KNEXT_CDN_*` name is reserved**, whether or not `cdn` is set: a `spec.env`
-  or `spec.secrets.envMap` key with that prefix is rejected when you apply the
-  resource (and dropped with a Warning event on a resource stored before the rule).
+- **Reserved names.** `KNEXT_CDN_*` names in `spec.env` and `spec.secrets.envMap` are reserved and
+  rejected at admission, whether or not this field is set. A Secret imported whole
+  through `spec.secrets.envFrom` is not filtered, because the operator cannot read
+  Secret keys: a `KNEXT_CDN_*` key inside it reaches the pod. The namespace is the
+  trust boundary, since whoever can write that Secret already controls the app's
+  environment. When this field is set the rendered values still win, because Kubernetes
+  applies env entries after envFrom; without this field, or on build `vinext`, nothing is
+  rendered and such a key is simply set.
+  A `spec.env` or `spec.secrets.envMap` key with that prefix on a resource stored
+  before the rule is dropped with a Warning event instead of rejected.
 - `emulatorEndpoint` is allowed only with `provider: emulator`, and must be an
   `http(s)://<host>.svc.cluster.local[:port]` URL with no path, userinfo or query.
 - A path the app's middleware matches is never edge-cached unless it is listed in
