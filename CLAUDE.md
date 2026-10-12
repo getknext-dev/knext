@@ -105,7 +105,7 @@
 Phase 0 official-adapter migration (largely done) → **Tier A correctness** (image optimization,
 graceful shutdown, control-plane consolidation, compat-suite gate) → **Tier B platform**
 (security/SBOM, endpoint auth, previews, rollback, skew protection, RUM) → **Tier C edge** (CDN —
-header + purge slice: ADR-0068, v2; provisioning and edge compute stay out — multi-region, WAF — **partly upstream-gated**: edge Middleware/Proxy, PPR/Cache Components are not
+header + purge slice: ADR-0068, v2; provisioning and edge compute stay out; multi-region, WAF — **partly upstream-gated**: edge Middleware/Proxy, PPR/Cache Components are not
 yet adapter-standardizable) → **Track P** (GitHub org, landing page, docs site — **dogfood the
 docs site on knext**). Zone functions (gRPC layer) = **built in v2 (build starts once the
 design amendment and the cold-start spike are accepted), at Beta in 2.0.**
