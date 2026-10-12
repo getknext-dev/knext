@@ -218,6 +218,17 @@ function sharedRedis() {
 }
 type Redis = ReturnType<typeof sharedRedis>;
 
+type TaggedHandlerModule = {
+    default: new (
+        o: unknown,
+    ) => {
+        set: (k: string, d: unknown, c: unknown) => Promise<void>;
+        get: (k: string, c?: unknown) => Promise<unknown>;
+        revalidateTag: (t: string) => Promise<void>;
+    };
+    __setRedisClientForTests: (c: unknown) => void;
+};
+
 type HandlerModule = {
     default: new (o: unknown) => object;
     __setRedisClientForTests: (c: unknown) => void;
@@ -503,20 +514,12 @@ describe("ISR under a canary split does not ping-pong (#2254)", () => {
         const redis = sharedRedis();
         const modA = (await import(
             `../adapters/cache-handler.js?canarytag=a-${Math.random()}`
-        )) as HandlerModule & {
-            default: new (
-                o: unknown,
-            ) => {
-                set: (k: string, d: unknown, c: unknown) => Promise<void>;
-                get: (k: string, c?: unknown) => Promise<unknown>;
-                revalidateTag: (t: string) => Promise<void>;
-            };
-        };
+        )) as TaggedHandlerModule;
         modA.__setRedisClientForTests(redis.client);
         const handlerA = new modA.default({ serverDistDir: DIST[BUILD_A] });
         const modB = (await import(
             `../adapters/cache-handler.js?canarytag=b-${Math.random()}`
-        )) as typeof modA;
+        )) as TaggedHandlerModule;
         modB.__setRedisClientForTests(redis.client);
         const handlerB = new modB.default({ serverDistDir: DIST[BUILD_B] });
         const data = {
