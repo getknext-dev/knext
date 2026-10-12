@@ -257,6 +257,10 @@ describe("isCanonicalRawPath (condition 11)", () => {
         "/a%2",
         "http://h/blog",
         "*",
+        "/a b", // a character the WHATWG parser would encode
+        "/a{b}",
+        "/caf\u00e9", // raw non-ASCII on the wire
+        "/%E0%A4", // valid-looking escapes that do not decode
     ];
     for (const p of non) {
         it(`non-canonical: ${JSON.stringify(p)}`, () =>
@@ -440,6 +444,16 @@ describe("middlewareMatches (condition 10)", () => {
     });
     it("middleware without matchers matches everything", () => {
         expect(middlewareMatches(art([]), "/anything")).toBe(true);
+    });
+    it("tests the trailing-slash variant of a path as well", () => {
+        const a = art([{ sourceRegex: "^/dashboard$" }]);
+        expect(middlewareMatches(a, "/dashboard/")).toBe(true);
+        expect(
+            middlewareMatches(
+                art([{ sourceRegex: "^/dashboard/$" }]),
+                "/dashboard",
+            ),
+        ).toBe(true);
     });
     it("a matcher with no testable regex is treated as match-all", () => {
         expect(middlewareMatches(art([{ source: "/x" }]), "/anything")).toBe(

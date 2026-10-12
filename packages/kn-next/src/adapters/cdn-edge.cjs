@@ -60,7 +60,6 @@ const SEAM_KEY = Symbol.for('knext.core.cdn.requestTags');
 const DECISIONS_KEY = Symbol.for('knext.core.cdn.edgeDecisions');
 const STATE = Symbol.for('knext.core.cdn.requestState');
 const ORIGIN_CC = Symbol.for('knext.core.cdn.originCacheControl');
-const FINAL_CC = Symbol.for('knext.core.cdn.finalCacheControl');
 const TAG_PREFIX_RE = /^[0-9a-f]{12}$/;
 const NEXT_CONSTANT_BUILD_ID = 'build-TfctsWXpff2fKS';
 const MAX_RECORDED_TAGS = 4096;
@@ -772,7 +771,6 @@ module.exports = {
   DECISIONS_KEY,
   STATE,
   ORIGIN_CC,
-  FINAL_CC,
   PROVIDER_ROWS,
   loadCdnConfig,
   encodeTags,

@@ -131,7 +131,7 @@ function install(opts) {
     log: (opts && opts.log) || ((line) => process.stdout.write(`${line}\n`)),
     warn: (opts && opts.warn) || ((line) => process.stderr.write(`${line}\n`)),
   });
-  const { ORIGIN_CC, FINAL_CC, STATE } = cdnEdge;
+  const { ORIGIN_CC, STATE } = cdnEdge;
 
   if (cdn) {
     // Open a request-scoped store (and snapshot the request AS IT ARRIVED) before
@@ -154,18 +154,48 @@ function install(opts) {
   const originalSetHeader = proto.setHeader;
   proto.setHeader = function setHeader(name, value) {
     if (typeof name === 'string' && name.toLowerCase() === 'cache-control') {
-      if (cdn) {
-        // The value the CDN decision needs is the ORIGIN one, before it is
-        // normalised for the browser. A value this module set itself is final.
-        if (this[FINAL_CC] !== undefined && this[FINAL_CC] === value) {
-          return originalSetHeader.call(this, name, value);
-        }
-        this[ORIGIN_CC] = value;
-      }
+      // The value the CDN decision needs is the ORIGIN one, before it is
+      // normalised for the browser.
+      if (cdn) this[ORIGIN_CC] = value;
       return originalSetHeader.call(this, name, normalizeCacheControl(value, ctxOf(this)));
     }
     return originalSetHeader.call(this, name, value);
   };
+
+  /**
+   * Decide and, when the allowlist passes, add the edge directive and the tag
+   * header. Called from writeHead, which Node also reaches through the implicit
+   * header flush on the first write / end. Never throws: a fault here must not
+   * break serving, and a response that was not positively allowed gets nothing.
+   */
+  function applyEdge(res, statusCode, hdrs) {
+    try {
+      // A flat / pair-array headers argument is a shape this module does not
+      // interpret: no edge directive (fail closed).
+      const state = res.req && res.req[STATE];
+      if (Array.isArray(hdrs)) {
+        cdnEdge.countDecision('skipped', 'unsupported_headers_shape');
+        return;
+      }
+      if (!state) {
+        cdnEdge.countDecision('skipped', 'no_request_state');
+        return;
+      }
+      const decision = cdn.decide(state, res, Number(statusCode), hdrs || null);
+      if (!decision.edge) return;
+      for (const [name, value] of cdnEdge.edgeHeaders(cdn.cfg, decision)) {
+        if (hdrs) {
+          for (const k of Object.keys(hdrs)) if (k.toLowerCase() === name) delete hdrs[k];
+        }
+        // Straight to the original setter: the patched one would normalise an
+        // `s-maxage` value right back to the compat form.
+        originalSetHeader.call(res, name, value);
+      }
+    } catch (err) {
+      cdnEdge.countDecision('skipped', 'internal_error');
+      process.stderr.write(`CDN_EDGE: edge decision failed, response left uncached: ${err && err.message}\n`);
+    }
+  }
 
   const originalWriteHead = proto.writeHead;
   proto.writeHead = function writeHead(statusCode, statusMessage, headers) {
@@ -186,27 +216,7 @@ function install(opts) {
         hdrs[key] = normalizeCacheControl(hdrs[key], ctxOf(this, marker));
       }
     }
-    if (cdn) {
-      // A flat / pair-array headers argument is a shape this module does not
-      // interpret: no edge directive (fail closed).
-      const state = this.req && this.req[STATE];
-      if (Array.isArray(hdrs)) {
-        cdnEdge.countDecision('skipped', 'unsupported_headers_shape');
-      } else if (!state) {
-        cdnEdge.countDecision('skipped', 'no_request_state');
-      } else {
-        const decision = cdn.decide(state, this, Number(statusCode), hdrs || null);
-        if (decision.edge) {
-          for (const [name, value] of cdnEdge.edgeHeaders(cdn.cfg, decision)) {
-            if (hdrs) {
-              for (const k of Object.keys(hdrs)) if (k.toLowerCase() === name) delete hdrs[k];
-            }
-            if (name === 'cache-control') this[FINAL_CC] = value;
-            originalSetHeader.call(this, name, value);
-          }
-        }
-      }
-    }
+    if (cdn) applyEdge(this, statusCode, hdrs);
     if (msg === undefined) {
       return originalWriteHead.call(this, statusCode, hdrs);
     }

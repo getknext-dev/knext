@@ -151,6 +151,24 @@ for (const runtime of ["node", "bun"] as Runtime[]) {
             expect(r.header("cloudflare-cdn-cache-control")).toBeUndefined();
         });
 
+        for (const mode of ["writehead-pairs", "writehead-flat"] as const) {
+            it(`an array-form writeHead (${mode}) is a shape the preload does not interpret: no edge directive`, async () => {
+                const r = await get(srv.port, "/blog", { ...isr, mode });
+                expect(r.status).toBe(200);
+                expect(
+                    r.header("cloudflare-cdn-cache-control"),
+                ).toBeUndefined();
+                expect(r.header("cache-tag")).toBeUndefined();
+            });
+        }
+
+        it("a request with no preload snapshot is answered, uncached", async () => {
+            const r = await get(srv.port, "/blog", isr, {}, "nostate");
+            expect(r.status).toBe(200);
+            expect(r.header("cloudflare-cdn-cache-control")).toBeUndefined();
+            expect(r.header("cache-tag")).toBeUndefined();
+        });
+
         it("immutable build assets pass through untouched, untagged", async () => {
             const cc = "public, max-age=31536000, immutable";
             const r = await get(srv.port, "/_next/static/chunks/a.js", {

@@ -6,6 +6,7 @@
  *
  *   { cc, ct, tags: [{kind, tags}], setCookie, mode, status, rewriteUrl, hop, extra }
  *
+ *   x-case: nostate  drop the preload's request snapshot before answering
  *   mode: "write"     res.setHeader(...) then res.write() — the IMPLICIT header flush
  *         "end"       res.setHeader(...) then res.end(body) — implicit flush on end
  *         "writehead" res.writeHead(status, { 'Cache-Control': cc, ... }) — object form
@@ -44,6 +45,8 @@ const server = http.createServer(async (req, res) => {
     return;
   }
   const spec = JSON.parse(req.headers['x-spec'] || '{}');
+  // A request the preload never saw (no snapshot): the response must stay uncached.
+  if (kase === 'nostate') delete req[STATE];
   if (spec.rewriteUrl) req.url = spec.rewriteUrl;
   if (spec.hop) await new Promise((r) => setTimeout(r, 5));
   const seam = globalThis[SEAM];
@@ -59,6 +62,16 @@ const server = http.createServer(async (req, res) => {
   const mode = spec.mode || 'write';
   if (mode === 'writehead') {
     res.writeHead(status, headers);
+    res.end('body');
+    return;
+  }
+  if (mode === 'writehead-pairs') {
+    res.writeHead(status, Object.entries(headers));
+    res.end('body');
+    return;
+  }
+  if (mode === 'writehead-flat') {
+    res.writeHead(status, Object.entries(headers).flat());
     res.end('body');
     return;
   }
