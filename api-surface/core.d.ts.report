@@ -17,6 +17,24 @@ type CacheConfig {
 
 type CacheProvider = "redis"
 
+interface CdnConfig {
+  emulatorEndpoint?: string | undefined
+  excludePaths?: string[] | undefined
+  htmlTTLSeconds?: number | undefined
+  includePaths?: string[] | undefined
+  provider: CdnProvider
+  purge?: CdnPurgeConfig | undefined
+  staleWhileRevalidateSeconds?: number | undefined
+}
+
+type CdnProvider = "cloudflare" | "google-cloud-cdn" | "cloudfront" | "azure-front-door" | "emulator"
+
+interface CdnPurgeConfig {
+  requestsPerMinute?: number | undefined
+  secretRef: {    name: string;    key: string;}
+  target: string
+}
+
 interface CompileConfig {
   bun?: "stock" | "knext-patched" | undefined
   include?: string[] | undefined
@@ -48,6 +66,7 @@ interface KafkaQueueConfig {
 interface KnativeNextConfig {
   build?: "turbopack" | "vinext" | "webpack" | undefined
   cache?: RedisCacheConfig | undefined
+  cdn?: CdnConfig | undefined
   compile?: CompileConfig | undefined
   database?: DatabaseConfig | undefined
   env?: Record<string, string> | undefined

@@ -703,7 +703,38 @@ func ReservedOperatorEnvNames(spec *appsv1alpha1.NextAppSpec) map[string]struct{
 			}
 		}
 	}
+	if CDNRendersEnv(spec) {
+		for _, n := range []string{
+			"KNEXT_CDN_PROVIDER", "KNEXT_CDN_TAG_PREFIX", "KNEXT_CDN_HTML_TTL_SECONDS", "KNEXT_CDN_SWR_SECONDS",
+		} {
+			names[n] = struct{}{}
+		}
+		if len(spec.CDN.ExcludePaths) > 0 {
+			names["KNEXT_CDN_EXCLUDE_PATHS"] = struct{}{}
+		}
+		if len(spec.CDN.IncludePaths) > 0 {
+			names["KNEXT_CDN_INCLUDE_PATHS"] = struct{}{}
+		}
+		if spec.CDN.EmulatorEndpoint != "" {
+			names["KNEXT_CDN_EMULATOR_ENDPOINT"] = struct{}{}
+		}
+		if spec.CDN.Purge != nil {
+			names["KNEXT_CDN_PURGE_TARGET"] = struct{}{}
+			names["KNEXT_CDN_PURGE_TOKEN"] = struct{}{}
+			if spec.CDN.Purge.RequestsPerMinute > 0 {
+				names["KNEXT_CDN_PURGE_RPM"] = struct{}{}
+			}
+		}
+	}
 	return names
+}
+
+// CDNRendersEnv reports whether the operator renders spec.cdn as KNEXT_CDN_* env
+// for this spec: spec.cdn is set and the build is not vinext (ADR-0068 D11, where
+// the CDN tier is inert and reported through the CDNAdvisory condition instead).
+// The reconciler and ReservedOperatorEnvNames both gate on this one function.
+func CDNRendersEnv(spec *appsv1alpha1.NextAppSpec) bool {
+	return spec.CDN != nil && spec.Build != "vinext"
 }
 
 // OperatorAlwaysWinsEnvNames is the subset of ReservedOperatorEnvNames where

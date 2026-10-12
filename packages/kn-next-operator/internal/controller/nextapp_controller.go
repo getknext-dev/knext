@@ -1543,6 +1543,10 @@ func (r *NextAppReconciler) buildKsvcEnv(nextApp *appsv1alpha1.NextApp) ([]corev
 		}
 	}
 
+	// spec.cdn -> KNEXT_CDN_* (ADR-0068). Operator-managed like the rest of this
+	// block, so a spec.secrets.envMap entry of the same name can never replace it.
+	envVars = append(envVars, cdnEnvVars(nextApp)...)
+
 	var envFrom []corev1.EnvFromSource
 	if nextApp.Spec.Secrets != nil {
 		// envFrom: inject entire secrets as env vars
@@ -1591,6 +1595,15 @@ func (r *NextAppReconciler) buildKsvcEnv(nextApp *appsv1alpha1.NextApp) ([]corev
 						Key:                  entry.SecretKey,
 					},
 				},
+			}
+			if isReservedCDNEnvName(envName) {
+				// The KNEXT_CDN_* namespace is reserved unconditionally (ADR-0068 D3):
+				// admission rejects the entry, so reaching here means the CR predates
+				// that rule. The entry is dropped whether or not the operator renders
+				// that name for this app, so a CR cannot choose its own tag prefix,
+				// endpoint or token. Reported by the CDNReservedEnvIgnored condition
+				// (computeStatusVerdict), not as an EnvMapCollision.
+				continue
 			}
 			if _, collides := reservedByOperator[envName]; collides {
 				if _, operatorAlwaysWins := validation.OperatorAlwaysWinsEnvNames[envName]; operatorAlwaysWins {
@@ -1667,6 +1680,12 @@ func (r *NextAppReconciler) appendUserEnv(nextApp *appsv1alpha1.NextApp, envVars
 		}
 		sort.Strings(names)
 		for _, name := range names {
+			if isReservedCDNEnvName(name) {
+				r.emitEvent(nextApp, corev1.EventTypeWarning, ReasonEnvVarIgnored,
+					fmt.Sprintf("spec.env[%s] ignored: the %s* namespace is reserved by the operator (set spec.cdn instead)",
+						name, appsv1alpha1.CDNEnvPrefix))
+				continue
+			}
 			if source, exists := taken[name]; exists {
 				r.emitEvent(nextApp, corev1.EventTypeWarning, ReasonEnvVarIgnored,
 					fmt.Sprintf("spec.env[%s] ignored: name is reserved/managed by %s", name, source))

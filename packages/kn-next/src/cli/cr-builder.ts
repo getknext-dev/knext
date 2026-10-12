@@ -471,6 +471,54 @@ export function buildNextAppCRObject(
         ? networkingBlock
         : undefined;
 
+    // spec.cdn (ADR-0068): the CDN cache tier. Carried verbatim; the operator
+    // renders the KNEXT_CDN_* env and derives the tag prefix (the CLI never
+    // writes one), and the purge token is only ever a Secret REFERENCE. Emitted
+    // only when configured, so a config without it keeps a byte-identical CR.
+    // Empty lists are dropped. Upgrade order is load-bearing: an operator/CRD
+    // that predates the field rejects it under --validate=strict and reserves
+    // nothing under KNEXT_CDN_*, so upgrade the operator/CRD first, then the CLI.
+    const cdn = config.cdn
+        ? {
+              provider: config.cdn.provider,
+              ...(config.cdn.htmlTTLSeconds !== undefined
+                  ? { htmlTTLSeconds: config.cdn.htmlTTLSeconds }
+                  : {}),
+              ...(config.cdn.staleWhileRevalidateSeconds !== undefined
+                  ? {
+                        staleWhileRevalidateSeconds:
+                            config.cdn.staleWhileRevalidateSeconds,
+                    }
+                  : {}),
+              ...(config.cdn.excludePaths?.length
+                  ? { excludePaths: [...config.cdn.excludePaths] }
+                  : {}),
+              ...(config.cdn.includePaths?.length
+                  ? { includePaths: [...config.cdn.includePaths] }
+                  : {}),
+              ...(config.cdn.purge
+                  ? {
+                        purge: {
+                            secretRef: {
+                                name: config.cdn.purge.secretRef.name,
+                                key: config.cdn.purge.secretRef.key,
+                            },
+                            target: config.cdn.purge.target,
+                            ...(config.cdn.purge.requestsPerMinute !== undefined
+                                ? {
+                                      requestsPerMinute:
+                                          config.cdn.purge.requestsPerMinute,
+                                  }
+                                : {}),
+                        },
+                    }
+                  : {}),
+              ...(config.cdn.emulatorEndpoint
+                  ? { emulatorEndpoint: config.cdn.emulatorEndpoint }
+                  : {}),
+          }
+        : undefined;
+
     const spec: Record<string, unknown> = {
         image,
         // #794/#952 private-registry pull secrets: config names Secrets, the CRD
@@ -505,6 +553,7 @@ export function buildNextAppCRObject(
         ...(selfContained ? { selfContained } : {}),
         ...(writeFree ? { security: { writeFree: true } } : {}),
         ...(networking ? { networking } : {}),
+        ...(cdn ? { cdn } : {}),
         // #93 skew protection: carry the deploy's BUILD_ID so the operator can stamp
         // the `apps.kn-next.dev/build-id` revision label the asset GC resolves against.
         ...(buildId ? { buildId } : {}),

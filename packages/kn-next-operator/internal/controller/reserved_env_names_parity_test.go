@@ -201,6 +201,42 @@ func TestReservedEnvNamesParity(t *testing.T) {
 				Tracing: &appsv1alpha1.TracingSpec{Enabled: true, SampleRate: "0.1"},
 			},
 		}},
+		// ADR-0068 spec.cdn: each leaf gate pinned independently (present-but-empty
+		// as well as set), and the vinext inertness gate.
+		{"cdn: provider only", appsv1alpha1.NextAppSpec{
+			CDN: &appsv1alpha1.CDNSpec{Provider: "cloudflare"},
+		}},
+		{"cdn: excludePaths set", appsv1alpha1.NextAppSpec{
+			CDN: &appsv1alpha1.CDNSpec{Provider: "cloudflare", ExcludePaths: []string{"/a"}},
+		}},
+		{"cdn: excludePaths present but empty", appsv1alpha1.NextAppSpec{
+			CDN: &appsv1alpha1.CDNSpec{Provider: "cloudflare", ExcludePaths: []string{}},
+		}},
+		{"cdn: includePaths set", appsv1alpha1.NextAppSpec{
+			CDN: &appsv1alpha1.CDNSpec{Provider: "cloudflare", IncludePaths: []string{"/a"}},
+		}},
+		{"cdn: includePaths present but empty", appsv1alpha1.NextAppSpec{
+			CDN: &appsv1alpha1.CDNSpec{Provider: "cloudflare", IncludePaths: []string{}},
+		}},
+		{"cdn: emulatorEndpoint set", appsv1alpha1.NextAppSpec{
+			CDN: &appsv1alpha1.CDNSpec{Provider: "emulator", EmulatorEndpoint: "http://e.ns.svc.cluster.local"},
+		}},
+		{"cdn: purge without requestsPerMinute", appsv1alpha1.NextAppSpec{
+			CDN: &appsv1alpha1.CDNSpec{Provider: "cloudflare", Purge: &appsv1alpha1.CDNPurgeSpec{
+				SecretRef: appsv1alpha1.CDNSecretRef{Name: "s", Key: "k"}, Target: "t",
+			}},
+		}},
+		{"cdn: purge with requestsPerMinute", appsv1alpha1.NextAppSpec{
+			CDN: &appsv1alpha1.CDNSpec{Provider: "cloudflare", Purge: &appsv1alpha1.CDNPurgeSpec{
+				SecretRef: appsv1alpha1.CDNSecretRef{Name: "s", Key: "k"}, Target: "t", RequestsPerMinute: 7,
+			}},
+		}},
+		{"cdn: build vinext renders nothing", appsv1alpha1.NextAppSpec{
+			Build: "vinext",
+			CDN: &appsv1alpha1.CDNSpec{Provider: "cloudflare", ExcludePaths: []string{"/a"}, Purge: &appsv1alpha1.CDNPurgeSpec{
+				SecretRef: appsv1alpha1.CDNSecretRef{Name: "s", Key: "k"}, Target: "t", RequestsPerMinute: 7,
+			}},
+		}},
 		{"maximal (every conditional on)", appsv1alpha1.NextAppSpec{
 			Scaling:      &appsv1alpha1.ScalingSpec{PoolMax: 10},
 			Storage:      &appsv1alpha1.StorageSpec{Provider: "minio", Bucket: "b", Region: "us-east-1", Endpoint: "http://minio:9000"},

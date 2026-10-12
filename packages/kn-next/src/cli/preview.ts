@@ -219,8 +219,13 @@ export async function runPreviewDeploy(
     // separate key and is kept.
     const { publicHosts: _prodPublicHosts, ...previewNetworking } =
         config.networking ?? {};
+    // Production `cdn` must not ride along either: a preview is on its own host,
+    // not behind the production CDN, so it would otherwise emit edge directives
+    // and send purge calls against the production zone with the production
+    // credential. Dropped: the preview behaves as an app without `spec.cdn`.
+    const { cdn: _prodCdn, ...configWithoutCdn } = config;
     const previewConfig: KnativeNextConfig = {
-        ...config,
+        ...configWithoutCdn,
         name: previewName,
         cache: previewCache,
         networking: config.networking ? previewNetworking : undefined,

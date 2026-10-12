@@ -274,6 +274,189 @@ function validatePublicHosts(hosts: unknown): string[] {
     return errors;
 }
 
+/**
+ * Mirrors the CRD's schema + CEL on spec.cdn (kept in lockstep with
+ * api/v1alpha1/nextapp_types.go; the shared boundary table
+ * __tests__/fixtures/cdn-validation-cases.json is read by both validators).
+ */
+const CDN_PROVIDERS = [
+    "cloudflare",
+    "google-cloud-cdn",
+    "cloudfront",
+    "azure-front-door",
+    "emulator",
+] as const;
+const CDN_KEYS = [
+    "provider",
+    "htmlTTLSeconds",
+    "staleWhileRevalidateSeconds",
+    "excludePaths",
+    "includePaths",
+    "purge",
+    "emulatorEndpoint",
+];
+const CDN_PURGE_KEYS = ["secretRef", "target", "requestsPerMinute"];
+const CDN_PATH_RE = /^\/[^,\s]*$/;
+const CDN_TARGET_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
+const CDN_EMULATOR_ENDPOINT_RE =
+    /^https?:\/\/[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*\.svc\.cluster\.local(:[0-9]{1,5})?$/;
+/** The operator-reserved env namespace (ADR-0068 D3). */
+const CDN_ENV_PREFIX = "KNEXT_CDN_";
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+    return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+function intInRange(
+    value: unknown,
+    min: number,
+    max: number,
+    label: string,
+    errors: string[],
+): void {
+    if (
+        typeof value !== "number" ||
+        !Number.isInteger(value) ||
+        value < min ||
+        value > max
+    ) {
+        errors.push(
+            `'${label}' must be an integer from ${min} to ${max}, got ${JSON.stringify(value)}`,
+        );
+    }
+}
+
+function validatePathList(
+    value: unknown,
+    label: string,
+    errors: string[],
+): void {
+    if (!Array.isArray(value)) {
+        errors.push(`'${label}' must be an array of path prefixes`);
+        return;
+    }
+    if (value.length > 64) {
+        errors.push(
+            `'${label}' lists ${value.length} paths; the maximum is 64`,
+        );
+    }
+    for (const p of value) {
+        if (typeof p !== "string" || p.length > 512 || !CDN_PATH_RE.test(p)) {
+            errors.push(
+                `'${label}' entries must start with "/" and contain no comma or whitespace (max 512 characters), got ${JSON.stringify(p)}`,
+            );
+        }
+    }
+}
+
+function validateCdn(cdn: unknown): string[] {
+    if (cdn === undefined) return [];
+    if (!isPlainObject(cdn)) {
+        return ["'cdn' must be an object, e.g. { provider: \"cloudflare\" }"];
+    }
+    const errors: string[] = [];
+    for (const key of Object.keys(cdn)) {
+        if (!CDN_KEYS.includes(key)) {
+            errors.push(
+                `'cdn.${key}' is not a known key (known: ${CDN_KEYS.join(", ")}). The tag prefix is derived by the operator and cannot be set.`,
+            );
+        }
+    }
+    const provider = cdn.provider;
+    if (
+        typeof provider !== "string" ||
+        !(CDN_PROVIDERS as readonly string[]).includes(provider)
+    ) {
+        errors.push(
+            `'cdn.provider' must be one of ${CDN_PROVIDERS.join(", ")}, got ${JSON.stringify(provider)}`,
+        );
+    }
+    if (cdn.htmlTTLSeconds !== undefined) {
+        intInRange(cdn.htmlTTLSeconds, 1, 3600, "cdn.htmlTTLSeconds", errors);
+    }
+    if (cdn.staleWhileRevalidateSeconds !== undefined) {
+        intInRange(
+            cdn.staleWhileRevalidateSeconds,
+            0,
+            3600,
+            "cdn.staleWhileRevalidateSeconds",
+            errors,
+        );
+    }
+    if (cdn.excludePaths !== undefined) {
+        validatePathList(cdn.excludePaths, "cdn.excludePaths", errors);
+    }
+    if (cdn.includePaths !== undefined) {
+        validatePathList(cdn.includePaths, "cdn.includePaths", errors);
+    }
+    if (cdn.purge !== undefined) {
+        const purge = cdn.purge;
+        if (!isPlainObject(purge)) {
+            errors.push("'cdn.purge' must be an object");
+        } else {
+            for (const key of Object.keys(purge)) {
+                if (!CDN_PURGE_KEYS.includes(key)) {
+                    errors.push(`'cdn.purge.${key}' is not a known key`);
+                }
+            }
+            const ref = purge.secretRef;
+            if (
+                !isPlainObject(ref) ||
+                typeof ref.name !== "string" ||
+                ref.name.length < 1 ||
+                ref.name.length > 253 ||
+                typeof ref.key !== "string" ||
+                ref.key.length < 1 ||
+                ref.key.length > 253
+            ) {
+                errors.push(
+                    "'cdn.purge.secretRef' must be { name, key }: a Secret name and key (1-253 characters each) in the app's namespace",
+                );
+            }
+            if (
+                typeof purge.target !== "string" ||
+                purge.target.length > 128 ||
+                !CDN_TARGET_RE.test(purge.target)
+            ) {
+                errors.push(
+                    `'cdn.purge.target' must be 1-128 characters of letters, numerals and . _ : - (starting with a letter or numeral), got ${JSON.stringify(purge.target)}`,
+                );
+            }
+            if (purge.requestsPerMinute !== undefined) {
+                intInRange(
+                    purge.requestsPerMinute,
+                    1,
+                    6000,
+                    "cdn.purge.requestsPerMinute",
+                    errors,
+                );
+            }
+        }
+    }
+    const endpoint = cdn.emulatorEndpoint;
+    if (endpoint !== undefined && provider !== "emulator") {
+        errors.push(
+            "'cdn.emulatorEndpoint' is only allowed with provider \"emulator\"",
+        );
+    }
+    if (provider === "emulator" && endpoint === undefined) {
+        errors.push(
+            "'cdn.provider' \"emulator\" requires 'cdn.emulatorEndpoint'",
+        );
+    }
+    if (
+        endpoint !== undefined &&
+        (typeof endpoint !== "string" ||
+            endpoint.length > 253 ||
+            !CDN_EMULATOR_ENDPOINT_RE.test(endpoint))
+    ) {
+        errors.push(
+            `'cdn.emulatorEndpoint' must be http(s)://<host>.svc.cluster.local[:port] with no path, userinfo or query, got ${JSON.stringify(endpoint)}`,
+        );
+    }
+    return errors;
+}
+
 export function validateConfig(
     config: KnativeNextConfig,
     /** Test seam for the pairing check — see `checkPairing`. */
@@ -421,6 +604,9 @@ export function validateConfig(
     // so a typo is a local config error instead of an admission rejection
     // after the image is built.
     errors.push(...validatePublicHosts(config.networking?.publicHosts));
+
+    // cdn (ADR-0068): the same bounds the CRD enforces on spec.cdn.
+    errors.push(...validateCdn((config as { cdn?: unknown }).cdn));
 
     // compile (extra files embedded in the compiled executable).
     errors.push(...validateCompileConfig(config));
@@ -674,7 +860,13 @@ export function validateConfig(
     // only at `kubectl apply`.
     if (config.env) {
         for (const name of Object.keys(config.env)) {
-            if ((RESERVED_ENV_NAMES as readonly string[]).includes(name)) {
+            if (name.startsWith(CDN_ENV_PREFIX)) {
+                errors.push(
+                    `'env.${name}' is in the ${CDN_ENV_PREFIX}* namespace, which the operator reserves (set 'cdn' instead). The operator would ignore the entry and report it in a CDNReservedEnvIgnored condition.`,
+                );
+            } else if (
+                (RESERVED_ENV_NAMES as readonly string[]).includes(name)
+            ) {
                 errors.push(
                     `'env.${name}' is a reserved name (managed by the operator/Knative). ` +
                         `Reserved: ${RESERVED_ENV_NAMES.join(", ")}. The cluster would reject this at apply time.`,
@@ -685,6 +877,14 @@ export function validateConfig(
                         `(must match ${ENV_NAME_RE.source}). The cluster would reject this at apply time.`,
                 );
             }
+        }
+    }
+
+    for (const name of Object.keys(config.secrets?.envMap ?? {})) {
+        if (name.startsWith(CDN_ENV_PREFIX)) {
+            errors.push(
+                `'secrets.envMap.${name}' is in the ${CDN_ENV_PREFIX}* namespace, which the operator reserves (set 'cdn' instead). The operator would ignore the entry and report it in a CDNReservedEnvIgnored condition.`,
+            );
         }
     }
 

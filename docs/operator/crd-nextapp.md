@@ -289,6 +289,60 @@ spec:
   it rejects a resource that carries it, so upgrade the operator/CRD first, then
   the CLI.
 
+### `cdn` (Optional)
+Turns on cache-correct edge headers and cache tags for a CDN **you** run in front
+of the app. knext never creates or configures the CDN: you point it at the app's
+public hostname, and knext tells it what it may cache and under which tags.
+```yaml
+spec:
+  cdn:
+    provider: cloudflare            # cloudflare | google-cloud-cdn | cloudfront | azure-front-door | emulator
+    htmlTTLSeconds: 30              # 1..3600, default 30
+    staleWhileRevalidateSeconds: 0  # 0..3600, default 0
+    excludePaths: ["/account"]      # optional path prefixes that are never edge-cached
+    includePaths: ["/blog"]         # optional; see the middleware warning below
+    purge:                          # optional; absent means headers only
+      secretRef: {name: cdn-purge, key: token}   # same-namespace Secret you create
+      target: "<zone id>"           # opaque provider resource id
+      requestsPerMinute: 5          # optional; overrides the provider's default rate
+    emulatorEndpoint: http://cdn-emulator.e2e.svc.cluster.local:8080   # only with provider: emulator
+```
+- The operator renders this block as `KNEXT_CDN_*` environment variables and nothing
+  else; the runtime does the rest. The purge token is a `secretKeyRef`, so its value
+  never appears in the resource, the revision template or the status.
+- The tag prefix is **derived** by the operator from the app's namespace and name.
+  There is no field for it, so a resource cannot choose another app's prefix.
+- **Reserved names.** `KNEXT_CDN_*` names in `spec.env` and `spec.secrets.envMap` are reserved: the
+  operator ignores such entries (they are never set on the container, whether or not
+  this field is set) and reports their names, never their values, in a
+  `CDNReservedEnvIgnored` condition. A Secret imported whole through
+  `spec.secrets.envFrom` is not filtered, because the operator cannot read Secret
+  keys: a `KNEXT_CDN_*` key inside it reaches the pod. The namespace is the trust
+  boundary, since whoever can write that Secret already controls the app's
+  environment. When this field is set the rendered values still win, because
+  Kubernetes applies env entries after `envFrom`; without this field, or on build
+  `vinext`, nothing is rendered and such a key is simply set.
+  The reservation is enforced by the operator, not by an admission rule: the
+  resource is admitted, and `knext deploy` rejects such a key in `env` or
+  `secrets.envMap` before it builds.
+- `emulatorEndpoint` is allowed only with `provider: emulator`, and must be an
+  `http(s)://<host>.svc.cluster.local[:port]` URL with no path, userinfo or query.
+- A path the app's middleware matches is never edge-cached unless it is listed in
+  `includePaths`, because a CDN ignores cookies and would otherwise serve a
+  protected page to anonymous visitors. **Listing a path in `includePaths` removes
+  that protection for it.**
+- Staleness is bounded by `htmlTTLSeconds` plus `staleWhileRevalidateSeconds`, never
+  "instant", including when a purge fails.
+- Unset renders no variable at all, so the revision template is byte-identical to a
+  resource written before this field existed. Adding, changing or removing it rolls
+  a revision.
+- On `build: vinext` (Beta) nothing is rendered and an informational `CDNAdvisory`
+  condition says so. The same condition notes a canary split with no object storage,
+  where mixed-build HTML at the edge can request assets the serving pod does not have.
+- **Upgrade order is load-bearing:** an operator/CRD that predates `cdn` rejects a
+  resource that carries it and reserves nothing under `KNEXT_CDN_*`. Upgrade the
+  operator/CRD first, then the CLI.
+
 ### `secrets` (Optional)
 Maps Kubernetes `Secret` resources directly into the Next.js environment variables.
 This is the CR's mechanism for **secret-backed** environment variables (plain
