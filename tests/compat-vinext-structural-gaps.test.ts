@@ -120,12 +120,17 @@ describe('validateStructuralGaps: the approved bounds', () => {
   });
 
   it('CAP: exactly the cap is fine, one more file reds', () => {
+    // A synthetic ledger must stay valid against the REAL manifest, so draw only
+    // canonical files the manifest neither excludes nor quarantines (the shared
+    // manifest drops some from the corpus, e.g. the Next 16.4 section (h) files).
+    const blocked = new Set<string>([
+      ...manifest.rules.exclude,
+      ...manifest.$knextQuarantines.map((q: { test: string }) => q.test),
+    ]);
+    const usable = STRUCTURAL_CANONICAL_FILES.filter((f: string) => !blocked.has(f));
     const many = (n: number) =>
       Array.from({ length: n }, (_, i) =>
-        file(
-          STRUCTURAL_CANONICAL_FILES[i] ??
-            `test/e2e/app-dir/segment-cache/gen-${i}/gen-${i}.test.ts`,
-        ),
+        file(usable[i] ?? `test/e2e/app-dir/segment-cache/gen-${i}/gen-${i}.test.ts`),
       );
     expect(errs(sg(many(STRUCTURAL_FILE_CAP)))).toEqual([]);
     expect(errs(sg(many(STRUCTURAL_FILE_CAP + 1))).join()).toMatch(

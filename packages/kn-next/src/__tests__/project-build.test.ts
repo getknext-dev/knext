@@ -234,71 +234,53 @@ describe("runProjectBuild exports the configured runtime to the build (#1843)", 
             else process.env.KNEXT_RUNTIME = saved;
         }
     });
-
-    it("every CLI runProjectBuild( call passes runtimeId (scan, not enumeration)", async () => {
-        const { readFileSync, readdirSync } = await import("node:fs");
-        const { dirname, join, resolve } = await import("node:path");
-        const { fileURLToPath } = await import("node:url");
-        const cliDir = join(
-            resolve(dirname(fileURLToPath(import.meta.url)), ".."),
-            "cli",
-        );
-        const offenders: string[] = [];
-        let calls = 0;
-        for (const file of readdirSync(cliDir)) {
-            if (!file.endsWith(".ts") || file === "project-build.ts") {
-                continue;
-            }
-            const src = readFileSync(join(cliDir, file), "utf8");
-            // Up to the call's closing `})` — an argument like
-            // `(config.build ?? X) === "vinext"` carries its own `)`.
-            for (const m of src.matchAll(
-                /runProjectBuild\(\{([\s\S]*?)\}\)/g,
-            )) {
-                calls++;
-                if (!/runtimeId/.test(m[1])) {
-                    offenders.push(`${file}: ${m[0].slice(0, 40)}`);
-                }
-            }
-        }
-        // The scan sees the real callers (build, deploy, preview).
-        expect(calls).toBeGreaterThanOrEqual(3);
-        expect(
-            offenders,
-            "pass runtimeId: config.runtime ?? DEFAULT_RUNTIME_ID",
-        ).toEqual([]);
-    });
 });
 
-describe("every runProjectBuild caller computes requireEsm (scan, not enumeration)", () => {
-    it("no CLI runProjectBuild( call omits the requireEsm argument", async () => {
-        const { readFileSync, readdirSync } = await import("node:fs");
-        const { dirname, join, resolve } = await import("node:path");
-        const { fileURLToPath } = await import("node:url");
-        const cliDir = join(
-            resolve(dirname(fileURLToPath(import.meta.url)), ".."),
-            "cli",
-        );
-        const offenders: string[] = [];
-        for (const file of readdirSync(cliDir)) {
-            if (!file.endsWith(".ts") || file === "project-build.ts") {
-                continue;
-            }
-            const src = readFileSync(join(cliDir, file), "utf8");
-            // Match every runProjectBuild( invocation and its argument list up to
-            // the balancing close. A call with no `requireEsm` in it is an
-            // offender — a future caller cannot silently skip the target gate.
-            const calls = src.matchAll(/runProjectBuild\(([\s\S]*?)\)/g);
-            for (const m of calls) {
-                if (!/requireEsm/.test(m[1])) {
-                    offenders.push(`${file}: ${m[0].slice(0, 40)}`);
-                }
-            }
+describe("runProjectBuild requires its ids by type (the guard cannot be skipped by omission)", () => {
+    it("omitting builderId or runtimeId is a compile error, enforced by the core typecheck", () => {
+        const run = mock();
+        const dir = tmpAppDir(JSON.stringify({ type: "module" }));
+        try {
+            // @ts-expect-error builderId is required: omitting it would skip the guards
+            runProjectBuild({
+                requireEsm: false,
+                runtimeId: "node",
+                cwd: dir,
+                run,
+            });
+            // @ts-expect-error runtimeId is required: omitting it would skip the guards
+            runProjectBuild({
+                requireEsm: false,
+                builderId: "webpack",
+                cwd: dir,
+                run,
+            });
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
         }
-        expect(
-            offenders,
-            "pass requireEsm: (config.build ?? 'vinext') === 'vinext'",
-        ).toEqual([]);
+    });
+
+    it("always runs the Bun turbopack-fragments guard", () => {
+        const dir = tmpAppDir(JSON.stringify({ type: "module" }));
+        writeFileSync(
+            join(dir, "next.config.mjs"),
+            "export default { experimental: { turbopackModuleFragments: true } };",
+        );
+        const run = mock();
+        try {
+            expect(() =>
+                runProjectBuild({
+                    requireEsm: false,
+                    runtimeId: "bun",
+                    builderId: "turbopack",
+                    cwd: dir,
+                    run,
+                }),
+            ).toThrow(/turbopackModuleFragments/);
+            expect(run).not.toHaveBeenCalled();
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
     });
 });
 

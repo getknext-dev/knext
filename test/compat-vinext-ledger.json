@@ -191,44 +191,6 @@
       "refreshed": "2026-09-26"
     },
     {
-      "test": "test/e2e/app-dir/partial-fallback-shell-upgrade/partial-fallback-shell-upgrade.test.ts",
-      "class": "unsupported",
-      "feature": "Partial Prerendering fallback shells (build-time prerender)",
-      "upstream": "https://github.com/cloudflare/vinext/issues/1359",
-      "cases": [
-        "should not upgrade a route shell when no params were prerendered",
-        "should upgrade the fallback shell to a route shell"
-      ],
-      "evidence": {
-        "fail": [
-          {
-            "run": "36255831920",
-            "cases": [
-              "should not upgrade a route shell when no params were prerendered",
-              "should upgrade the fallback shell to a route shell"
-            ]
-          },
-          {
-            "run": "36259994157",
-            "cases": [
-              "should not upgrade a route shell when no params were prerendered",
-              "should upgrade the fallback shell to a route shell"
-            ]
-          },
-          {
-            "run": "36262922089",
-            "cases": [
-              "should not upgrade a route shell when no params were prerendered",
-              "should upgrade the fallback shell to a route shell"
-            ]
-          }
-        ]
-      },
-      "added": "2026-09-26",
-      "expires": "2026-10-26",
-      "refreshed": "2026-09-26"
-    },
-    {
       "test": "test/e2e/app-dir/resume-data-cache/resume-data-cache.test.ts",
       "class": "unsupported",
       "feature": "Partial Prerendering resume data cache (build-time prerender)",
@@ -285,44 +247,6 @@
           {
             "run": "36262922089",
             "cases": ["should prerender pages with inline server actions"]
-          }
-        ]
-      },
-      "added": "2026-09-26",
-      "expires": "2026-10-26",
-      "refreshed": "2026-09-26"
-    },
-    {
-      "test": "test/e2e/app-dir/cache-components-allow-otel-spans/cache-components-allow-otel-spans.test.ts",
-      "class": "unsupported",
-      "feature": "Cache Components build-time prerendering",
-      "upstream": "https://github.com/cloudflare/vinext/issues/3431",
-      "cases": [
-        "should allow creating Spans during prerendering during the build - inside a Cache Components",
-        "should allow creating Spans during resuming a fallback - inside a Cache Component"
-      ],
-      "evidence": {
-        "fail": [
-          {
-            "run": "36255831920",
-            "cases": [
-              "should allow creating Spans during prerendering during the build - inside a Cache Components",
-              "should allow creating Spans during resuming a fallback - inside a Cache Component"
-            ]
-          },
-          {
-            "run": "36259994157",
-            "cases": [
-              "should allow creating Spans during prerendering during the build - inside a Cache Components",
-              "should allow creating Spans during resuming a fallback - inside a Cache Component"
-            ]
-          },
-          {
-            "run": "36262922089",
-            "cases": [
-              "should allow creating Spans during prerendering during the build - inside a Cache Components",
-              "should allow creating Spans during resuming a fallback - inside a Cache Component"
-            ]
           }
         ]
       },
