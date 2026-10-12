@@ -189,6 +189,11 @@ export interface DoctorDeps {
      * Defaults to the real node_modules lookup; tests inject fixtures.
      */
     readInstalledVinext?: () => string | undefined;
+    /**
+     * The installed `next` version for the app in the current directory --
+     * feeds the next-minor row. Absent -> no row.
+     */
+    readInstalledNext?: () => string | undefined;
 }
 
 /**

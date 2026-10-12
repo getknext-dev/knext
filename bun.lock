@@ -195,7 +195,7 @@
         "vinext": "1.1.0",
       },
       "peerDependencies": {
-        "next": ">=16.0.0",
+        "next": ">=16.0.0 <16.5.0",
       },
       "optionalPeers": [
         "next",
