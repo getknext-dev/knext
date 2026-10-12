@@ -107,6 +107,32 @@ export const CLI_CONTRACT: readonly VerbContract[] = [
         ],
     },
     {
+        // Zone functions (Beta): routed by core to the optional gRPC package,
+        // which owns the flag parsing; `--help` is answered either way.
+        verb: "generate",
+        flags: ["--check", "--against", "-h", "--help"],
+        exitCodes: [
+            OK,
+            {
+                code: 1,
+                meaning:
+                    "usage error, the package is missing or does not match this CLI, a buf lint or breaking-change failure, or out-of-date generated code (--check)",
+            },
+        ],
+    },
+    {
+        verb: "add",
+        flags: ["--lang", "-h", "--help"],
+        exitCodes: [
+            OK,
+            {
+                code: 1,
+                meaning:
+                    "usage error, the package is missing or does not match this CLI, or the function already exists",
+            },
+        ],
+    },
+    {
         verb: "validate",
         flags: ["-h", "--help"],
         exitCodes: [

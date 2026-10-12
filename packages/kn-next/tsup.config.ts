@@ -59,6 +59,11 @@ export default defineConfig([
       // Own entry so the dispatcher's dynamic import resolves to a STABLE
       // dist path instead of a hash-named split chunk (same as create).
       'cli/validate-cmd': 'src/cli/validate-cmd.ts',
+      // `knext generate` / `knext add function` — the lazy dispatcher to the
+      // optional gRPC package (ADR-0052 D8). Own entry: a stable dist path
+      // for the dynamic import, and it reads ../../package.json relative to
+      // itself, which a hash-named chunk at dist/ would break.
+      'cli/grpc-dispatch': 'src/cli/grpc-dispatch.ts',
       // Public config-validation surface (`@getknext/core/validate`): a PURE
       // re-export of validateConfig + ConfigValidationError that a consumer
       // imports into their own build/test process. Own dist file so the public

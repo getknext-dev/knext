@@ -69,16 +69,30 @@ describe('integration/v2 is in changesets pre mode on the next tag (#2038)', () 
     expect(config.ignore).toContain('@getknext/ui');
   });
 
-  // Dormant until @getknext/grpc lands (Z-series). The package set is
-  // {core, lib, db, grpc} and grpc versions INDEPENDENTLY with a peer range on
-  // core (ADR-0020 amendment, Q20): publishable, but OUTSIDE the fixed group.
+  // @getknext/grpc landed with Z3 (#2047). The package set becomes {core, lib,
+  // db, grpc} and grpc versions INDEPENDENTLY with a peer range on core
+  // (ADR-0020 amendment, Q20): OUTSIDE the fixed group, and never ignored, so
+  // pre mode versions it.
+  //
+  // This guard used to assert "publishable once it exists". It now asserts
+  // "publishable only once the published-package audit covers it": ADR-0020's
+  // Consequences put publishability in the PR that extends the release gates,
+  // and `changeset publish` publishes any non-private package — so flipping
+  // `private` without adding the package to `audit-published.mjs` would publish
+  // it unaudited. Both directions are pinned: private while unaudited, and
+  // publishable the moment the audit lists it.
   const grpc = workspace().get('@getknext/grpc');
-  (grpc ? it : it.skip)(
-    '@getknext/grpc, once it exists, is publishable and outside the fixed group',
-    () => {
-      expect(grpc?.private).toBe(false);
-      expect(fixed).not.toContain('@getknext/grpc');
-      expect(config.ignore ?? []).not.toContain('@getknext/grpc');
-    },
+  const auditCoversGrpc = readFileSync(join(ROOT, 'scripts/audit-published.mjs'), 'utf8').includes(
+    "'@getknext/grpc'",
   );
+
+  it('@getknext/grpc exists, outside the fixed group, and is not changeset-ignored', () => {
+    expect(grpc, '@getknext/grpc must be a workspace package').toBeDefined();
+    expect(fixed).not.toContain('@getknext/grpc');
+    expect(config.ignore ?? []).not.toContain('@getknext/grpc');
+  });
+
+  it('@getknext/grpc is publishable exactly when the published-package audit covers it', () => {
+    expect(grpc?.private === false).toBe(auditCoversGrpc);
+  });
 });

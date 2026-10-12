@@ -1,0 +1,26 @@
+{
+  // Typecheck gate: unlike tsconfig.json (the build config, which excludes
+  // tests), this pulls the tests AND the fixture zone's generated code into
+  // strict scope, so a generator change that emits a client which does not
+  // type-check against the runtime reds here. `paths` points the generated
+  // import of the runtime at its source (no build needed), and
+  // fixtures/zone/server-only.d.ts stands in for Next.js's `server-only`.
+  // `types: ["bun"]` for the `bun:test` ambient module (TS7 does not
+  // auto-include @types/*); rootDir widened because nothing is emitted.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "types": ["bun"],
+    "rootDir": ".",
+    "paths": {
+      "@getknext/grpc/runtime": ["./src/runtime.ts"]
+    }
+  },
+  "include": [
+    "src/**/*",
+    "scripts/**/*",
+    "fixtures/zone/src/generated/**/*.ts",
+    "fixtures/zone/server-only.d.ts"
+  ],
+  "exclude": ["node_modules", "dist"]
+}

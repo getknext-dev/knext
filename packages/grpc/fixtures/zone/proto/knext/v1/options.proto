@@ -1,0 +1,25 @@
+// knext zone-function contract options.
+//
+// `knext add function` copies this file into an app's proto directory, so a
+// contract can name the function that serves it and the contract version it
+// is at. Field numbers are part of the contract: they never change, and a
+// removed option's number is reserved, never reused (`buf breaking` holds
+// this in CI).
+syntax = "proto3";
+
+package knext.v1;
+
+import "google/protobuf/descriptor.proto";
+
+extend google.protobuf.FileOptions {
+  // The zone function that serves this file's services. It names the binding
+  // the operator injects into the owning zone: `orders` reads its endpoint
+  // from ORDERS_SERVICE_URL. A lowercase DNS label (letters, digits, '-').
+  string function = 50701;
+
+  // The contract version of this file, as MAJOR.MINOR.PATCH. Raise it with
+  // every change to the file. A function must serve a contract version
+  // greater than or equal to the version its zone was generated against, so
+  // roll out the function first, then the zone.
+  string contract_version = 50702;
+}

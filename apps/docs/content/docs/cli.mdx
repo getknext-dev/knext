@@ -1,6 +1,6 @@
 ---
 title: CLI reference
-description: The knext CLI — create, init-ci, validate, deploy, build, doctor, status, rollback, cleanup, db bind, db migrate, gc.
+description: The knext CLI — create, init-ci, validate, deploy, build, doctor, status, rollback, cleanup, db bind, db migrate, gc, add function, generate.
 ---
 
 The `knext` binary ships in **`@getknext/core`** (`npm i @getknext/core`), so it is available as
@@ -27,9 +27,12 @@ knext cleanup        # remove the app from the cluster (deletes its NextApp CR)
 knext db bind        # bind an existing Postgres Secret to the CR
 knext db migrate     # apply pending migrations against the writer, once
 knext gc             # reap old _next/static/<build-id>/ asset prefixes
+knext add function   # add a Go or Rust function's contract to this zone (Beta)
+knext generate       # write the server-only clients for this zone's functions (Beta)
 ```
 
-`knext --help` lists exactly this set, `create` first.
+`knext --help` lists exactly this set, `create` first. The last two come from an optional
+package; see [`knext add function`](#knext-add-function).
 
 The command is `knext`. If a script still calls the older command name, see
 [Upgrading](/docs/upgrading#version-specific-step-the-kn-next-command-is-gone) for what to change.
@@ -696,6 +699,80 @@ prefixes, and the bare `<app>/` prefix is never a prune target. See
 **Exit code:** `0` once a run completes — including the no-storage notice above and every
 fail-safe skip (keeping assets too long is never treated as a failure); `1` on a usage error or a
 missing `knext.config.ts`.
+
+## `knext add function`
+
+<Callout type="warn">
+**Beta, and not published yet.** `knext add function` and `knext generate` are provided by the
+optional `@getknext/grpc` package, which is not on npm yet. Until it is installed in your app, both
+commands print how to install it and exit 1; `--help` still exits 0. Once installed, its version
+must match your `@getknext/core`, and a mismatched pair is refused with both versions named.
+</Callout>
+
+Adds a zone function's **contract** to your app: a Go or Rust backend function your Next.js zone
+calls over Connect, scale-to-zero like the zone itself. Writes files only; nothing is deployed.
+
+```bash
+knext add function orders --lang go
+```
+
+It writes `proto/orders/v1/orders.proto` (one read and one write RPC to start from), the knext
+options contract that file imports, a `buf.yaml` if the app has none, and the function's entry in
+`knext.grpc.json`. The name is a lowercase DNS label; the zone reads the function's address from
+`ORDERS_SERVICE_URL` at call time. The function's own server project is not scaffolded yet.
+
+Two options at the top of every contract matter:
+
+- `option (knext.v1.function) = "orders";` names the function that serves the file.
+- `option (knext.v1.contract_version) = "1.0.0";` is the contract version. Raise it with every
+  change to the file.
+
+**Roll out the function first, then the zone.** A function must serve a contract version greater
+than or equal to the one its zone was generated against: a newer function still answers every
+call an older zone makes, but an older function may not know an RPC or a field a newer zone sends.
+Every call carries the zone's contract version in a `knext-contract-version` header, so a function
+can tell when it is older than its caller.
+
+**Exit code:** `0` on success; `1` if the function already exists (nothing is changed) or on a
+usage error.
+
+## `knext generate`
+
+Writes the TypeScript a zone uses to call its functions, from the contracts in `proto/`:
+
+```bash
+knext generate                                        # lint, then write the generated code
+knext generate --check                                # fail if the committed code is out of date
+knext generate --check --against ".git#branch=main,subdir=proto"   # also fail on a breaking change
+```
+
+It runs `buf lint` first, and with `--against` it runs `buf breaking` against a baseline: a
+directory, an image file, or a git reference. A removed or renumbered field is a breaking change
+and fails the run. Run `knext generate --check` in CI so generated code can never drift from its
+contract. The output goes to `src/generated/grpc` (set `out` in `knext.grpc.json` to move it), and
+is the same bytes on every run; mark that directory as generated for your formatter.
+
+`buf` comes with the package as a pinned binary whose checksum is verified before it runs; nothing
+is downloaded at generate time.
+
+Each generated client is server-only (`import "server-only"`) and follows one policy:
+
+- **A deadline on every call**, shorter than the zone's request timeout. The defaults are a
+  10-second deadline inside a 300-second request timeout; set `deadlineMs` and
+  `gatewayTimeoutSeconds` in `knext.grpc.json` to match your app. A deadline that is not shorter
+  than the request timeout is refused.
+- **Only reads are retried.** An RPC marked `option idempotency_level = NO_SIDE_EFFECTS;` is a
+  read, and is retried up to three times if the function is unavailable, within the one deadline.
+  Every other RPC is a write and is never retried, since a retry across a cold start can apply a
+  write twice. `IDEMPOTENT` still counts as a write.
+- **Every write needs an idempotency key**, passed as `{ idempotencyKey }` and sent as the
+  `idempotency-key` header, so your function can recognise a write it has already applied. Reuse
+  the key when re-submitting the same write.
+- **The endpoint is read at call time** from `<NAME>_SERVICE_URL` (never baked into the code), over
+  HTTP/2 cleartext by default. Setting `ORDERS_SERVICE_HTTP_VERSION=1.1` switches that one function to HTTP/1.1.
+
+**Exit code:** `0` on success; `1` on a lint failure, a breaking change, out-of-date generated code
+(with `--check`), or a usage error.
 
 ## Directly runnable entries
 

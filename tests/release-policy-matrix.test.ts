@@ -607,16 +607,21 @@ describe('support window and runtime floors agree across the docs and the manife
   });
 });
 
-describe('the gRPC package is documented only as far as it exists', () => {
+describe('the gRPC package is documented only as far as it is publishable', () => {
   const page = readFileSync(DOCS_PAGE_PATH, 'utf8');
-  const exists = statSyncSafe(resolve(REPO_ROOT, 'packages/grpc/package.json'));
+  // Keyed on PUBLISHABLE, not on existence: the package landed private (Z3,
+  // #2047) and becomes publishable only in the PR that extends the release
+  // gates to it (ADR-0020 amendment, Consequences). Until then the docs must
+  // keep saying it is not published, with no peer range.
+  const exists = publishable(resolve(REPO_ROOT, 'packages/grpc/package.json'));
 
-  function statSyncSafe(path: string): boolean {
+  function publishable(path: string): boolean {
     try {
-      return statSync(path).isFile();
+      if (!statSync(path).isFile()) return false;
     } catch {
       return false;
     }
+    return (JSON.parse(readFileSync(path, 'utf8')) as { private?: boolean }).private !== true;
   }
 
   it('the versioning page says @getknext/grpc is not published yet, and states no peer range for it', () => {
@@ -631,7 +636,7 @@ describe('the gRPC package is documented only as far as it exists', () => {
     }
   });
 
-  it('@getknext/grpc is not in the lockstep published-packages list until it exists', () => {
+  it('@getknext/grpc is not in the lockstep published-packages list until it is publishable', () => {
     const block =
       page.split('published-packages:start')[1]?.split('published-packages:end')[0] ?? '';
     expect(block.includes('@getknext/grpc')).toBe(exists);
