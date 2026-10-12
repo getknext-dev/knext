@@ -286,9 +286,10 @@ jobs:
       - name: Mutation — remove the shared store mid-run, the assertions must go red
         if: matrix.variant == 'shared'
         run: |
+          # GitHub runs this with `bash -e`: a bare failing command would end the
+          # step before the exit code is read, so branch on it explicitly.
           set -uo pipefail
-          UC_MUTATE_FLUSH=1 bash scripts/use-cache-2pod-e2e-assert.sh "$APP_NS" "$APP_NAME" >/tmp/uc-mutation-flush.log 2>&1
-          rc=$?
+          if UC_MUTATE_FLUSH=1 bash scripts/use-cache-2pod-e2e-assert.sh "$APP_NS" "$APP_NAME" >/tmp/uc-mutation-flush.log 2>&1; then rc=0; else rc=$?; fi
           cat /tmp/uc-mutation-flush.log
           if [ "$rc" -eq 0 ]; then
             echo "::error::the assertions PASSED with Redis flushed between the pods — the test cannot see red"; exit 1
@@ -301,8 +302,7 @@ jobs:
         if: matrix.variant == 'no-handler'
         run: |
           set -uo pipefail
-          bash scripts/use-cache-2pod-e2e-assert.sh "$APP_NS" "$APP_NAME" >/tmp/uc-no-handler.log 2>&1
-          rc=$?
+          if bash scripts/use-cache-2pod-e2e-assert.sh "$APP_NS" "$APP_NAME" >/tmp/uc-no-handler.log 2>&1; then rc=0; else rc=$?; fi
           cat /tmp/uc-no-handler.log
           if [ "$rc" -eq 0 ]; then
             echo "::error::the assertions PASSED against an app with no knext cacheHandler — the test cannot see red"; exit 1
