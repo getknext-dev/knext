@@ -331,6 +331,24 @@ else
   fi
 fi
 
+# ── #2214 (upward-distdir): the staged project's repo root, stated explicitly.
+# Next >= 16.4's verifyDistDir resolves a fixture's `distDir` against `repoRoot`
+# (next/src/server/config.ts): NEXT_PRIVATE_OUTPUT_TRACE_ROOT when set, otherwise
+# the directory of the nearest lockfile. The staged project has no lockfile (the
+# adapter install is `--no-save`), so a fixture that builds one directory down
+# (`pnpm next build apps/x`) with an upward distDir (`../.next`) saw the APP dir as
+# its workspace root and died with InvalidDistDirError. Setting the env var is
+# what a deploying platform's builder does (Next's own root-detection tests say
+# "Vercel's builder sets NEXT_PRIVATE_OUTPUT_TRACE_ROOT"); a stub lockfile would
+# instead be read by every later npm/pnpm step. An explicit `outputFileTracingRoot`
+# / `turbopack.root` in a fixture still wins, and a fixture built AT the repo root
+# resolves to the same directory as before. Gated on the same stable >= 16.4.0
+# read as the flag forwarding above, so every older lane is untouched; a caller's
+# own value is kept.
+if [ "${NEXT_FLAGS_BAKED}" = "baked" ]; then
+  export NEXT_PRIVATE_OUTPUT_TRACE_ROOT="${NEXT_PRIVATE_OUTPUT_TRACE_ROOT:-${APP_DIR}}"
+fi
+
 # ── 2. build the fixture app through the knext adapter ────────────────────────
 # #147 A3-3 fix round 1, follow-up (branch run 28561839378): a bare `next build`
 # resolved NOTHING in the harness env — the fixture's node_modules/.bin is NOT on
@@ -1053,6 +1071,23 @@ if ! node -e 'const s=require("net").createServer();s.on("error",()=>process.exi
   PORT="$(free_port)"
 fi
 export PORT
+# ── #2214 (adapter-rsc-query-leak): tell the deployed app the origin the tests use.
+# A route handler that redirects via `new URL('/x', request.url)` gets the server's
+# BIND address (0.0.0.0) — Next builds request.url from it, never from Host — so the
+# Location is unroutable. knext's public-origin preload (supervisor / compiled exec
+# both carry it) rewrites exactly that case to an entry of KNEXT_PUBLIC_ORIGINS, the
+# env the operator derives from spec.networking.publicHosts. The harness is the
+# "operator" here, and the URL it hands the tests is the last line of this script:
+# http://localhost:${PORT}. Set AFTER the final PORT is known (the pre-build pick can
+# be replaced above). Gated like the trace root, so <= 16.3.x lanes boot with the
+# environment they always had; the docker-booted exec gets it by name (-e forwards
+# the value, only when set).
+PUBLIC_ORIGIN_DOCKER_ARGS=()
+if [ "${NEXT_FLAGS_BAKED}" = "baked" ]; then
+  export KNEXT_PUBLIC_ORIGINS="http://localhost:${PORT}"
+  PUBLIC_ORIGIN_DOCKER_ARGS=(-e KNEXT_PUBLIC_ORIGINS)
+  log "Next >= 16.4.0: KNEXT_PUBLIC_ORIGINS=${KNEXT_PUBLIC_ORIGINS} (the deployment URL the tests use)"
+fi
 BUILD_ID="$(cat "${DIST_DIR}/BUILD_ID" 2>/dev/null || echo "unknown")"
 # DEPLOYMENT_ID identifies this deployment to the harness (asset versioning /
 # skew). Generated BEFORE the build (B5) — reused verbatim here.
@@ -1264,6 +1299,7 @@ fi
       --user "$(id -u):$(id -g)" \
       -e PORT="${PORT}" -e HOSTNAME="" -e NODE_ENV="production" \
       -e NEXT_DEPLOYMENT_ID="${DEPLOYMENT_ID}" \
+      ${PUBLIC_ORIGIN_DOCKER_ARGS[@]+"${PUBLIC_ORIGIN_DOCKER_ARGS[@]}"} \
       -v "${EMPTY_DIR}:${EMPTY_DIR}" \
       -w "${EMPTY_DIR}" \
       "${STANDALONE_BUN_IMAGE}" \
@@ -1276,6 +1312,7 @@ fi
       --user "$(id -u):$(id -g)" \
       -e PORT="${PORT}" -e HOSTNAME="" -e NODE_ENV="production" \
       -e NEXT_DEPLOYMENT_ID="${DEPLOYMENT_ID}" \
+      ${PUBLIC_ORIGIN_DOCKER_ARGS[@]+"${PUBLIC_ORIGIN_DOCKER_ARGS[@]}"} \
       -v "${STANDALONE_ROOT}:${CONTAINER_ROOT}" \
       -w "${CONTAINER_WORKDIR}" \
       "${STANDALONE_BUN_IMAGE}" \
