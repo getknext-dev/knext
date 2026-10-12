@@ -87,7 +87,6 @@ export function classifyStaticExport(
             quote === undefined &&
             braces === 1 &&
             brackets === 0 &&
-            stack.lastIndexOf("{") === stack.length - 1 &&
             (prev === "{" || prev === ",");
         if (unconditional) return "unconditional";
         result = "conditional";
