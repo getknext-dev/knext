@@ -73,16 +73,20 @@ Redis, this block is the first thing to check.
   request after the app scales up from zero, for pages generated at request time as well as
   prerendered ones. Each entry carries its own revalidate window, so a freshly started pod does not
   need to have rendered the page to know it is still fresh. That applies only to entries written by
-  the same build; after a redeploy, entries from the previous build are revalidated as usual.
+  the same build. After a redeploy, entries from the previous build are revalidated as usual once
+  that build has stopped serving, plus about two minutes (see the canary and redeploy bullet below).
 - **Past the window** requests are served `STALE` from Redis while a background render replaces the
   entry — stale-while-revalidate, not a blocking re-render.
-- **While a canary split is active** (two builds serving the same app), each build keeps honouring
-  the revalidate window of entries the other build wrote, for as long as that build is still
-  serving requests. Pages therefore regenerate at their own cadence, not on every request. When a
-  rollout or rollback completes and the replaced build stops serving, its windows stop being
-  honoured within about two minutes and its entries are revalidated as usual. Pages that use
-  partial prerendering are the exception: their resume state is tied to the build that rendered
-  them, so under a split they are re-rendered whenever the other build wrote the entry last.
+- **While two builds are serving the same app** (a canary split, or the overlap of a plain
+  redeploy), each build keeps honouring the revalidate window of entries the other build wrote, for
+  as long as that build is still serving requests. Pages therefore regenerate at their own cadence,
+  not on every request during a long split. The same rule delays a plain redeploy: once the old
+  build has stopped serving, its windows stop being honoured within about two minutes, and until
+  then the new build can keep serving the old build's page without regenerating it. That includes
+  `revalidate: false` pages, which can show the old build's HTML for up to about two minutes after
+  the old pods drain. After that, its entries are revalidated as usual. Pages that use partial
+  prerendering are the exception: their resume state is tied to the build that rendered them, so
+  under a split they are re-rendered whenever the other build wrote the entry last.
 - The Redis entry's TTL is deliberately **longer than the revalidate window** (it is the route's
   expire time when one is declared, and a floor of one hour otherwise). If the entry expired
   exactly at the revalidate window there would be nothing left to serve stale.

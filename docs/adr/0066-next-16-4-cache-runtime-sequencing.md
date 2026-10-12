@@ -859,8 +859,10 @@ the accepted risk "entries ping-pong until the rollout completes" with the bound
 3. **What the guarantee becomes.** #1888 said a previous build's window is never honoured by the new
    build. It now says: **never once that build has stopped serving, plus the liveness TTL** (about two
    minutes after its last request). During a rollout, the old build is still serving until it drains,
-   so the new build honours its windows for that long. That is the deliberate weakening, and it is
-   the same bound the original text ("until the rollout completes") promised.
+   so the new build honours its windows for that long, and for the liveness TTL after it drains. That
+   applies to a plain redeploy as much as to a canary: a `revalidate: false` page can serve the old
+   build's HTML for about two minutes after the old fleet is gone. #1888 promised "never", so this is
+   a deliberate weakening of that guarantee, not a restatement of it.
 4. **Unchanged.** Key layout, tag index and `revalidateTag` (an entry is one key whichever build wrote
    it), TTLs, the FETCH/IMAGE kinds, vinext (no ctx), and the build-scoped miss for PPR `postponed`
    state (#2084).
