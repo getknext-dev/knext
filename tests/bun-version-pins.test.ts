@@ -213,6 +213,9 @@ describe('bun-version pins (#754) — scanned across every workflow', () => {
       // NEW (#1417): the default-builder standalone deploy kind e2e — one
       // "Setup bun" step (workspace install + the fixture's own `next build`).
       'standalone-deploy-kind-e2e.yml': 1,
+      // NEW (#2083): the `'use cache'` two-pod kind e2e — one "Setup bun" step
+      // (workspace install + building/packing the tarballs it deploys).
+      'use-cache-2pod-kind-e2e.yml': 1,
       // 2, was 1: #1722 added the `js-closure-fs-trivy` job — a second,
       // independent job that installs the workspace + builds the reference app
       // through `kn-next build`/`docker buildx`, so it needs its own pinned
