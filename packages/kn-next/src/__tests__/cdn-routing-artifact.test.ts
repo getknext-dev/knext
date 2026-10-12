@@ -45,12 +45,20 @@ afterAll(() => {
 
 describe("buildCdnRoutingArtifact", () => {
     it('no middleware output -> middleware "none"', () => {
-        expect(buildCdnRoutingArtifact({ config: {}, outputs: {} })).toEqual({
+        expect(
+            buildCdnRoutingArtifact({ config: {}, outputs: {}, routing: {} }),
+        ).toEqual({
             version: 1,
             basePath: "",
             i18n: null,
             middleware: "none",
+            conditional: [],
         });
+    });
+    it("no routing output at all is recorded as unknown, not as empty", () => {
+        expect(
+            buildCdnRoutingArtifact({ config: {}, outputs: {} }).conditional,
+        ).toBe("unknown");
     });
     it("middleware with matchers -> source + sourceRegex only (has/missing dropped)", () => {
         const a = buildCdnRoutingArtifact({
@@ -111,7 +119,11 @@ describe("buildCdnRoutingArtifact", () => {
     it("what it writes, the runtime reader accepts, and the verdicts agree", () => {
         const none = edge.parseRoutingArtifact(
             JSON.stringify(
-                buildCdnRoutingArtifact({ config: {}, outputs: {} }),
+                buildCdnRoutingArtifact({
+                    config: {},
+                    outputs: {},
+                    routing: {},
+                }),
             ),
         );
         expect(none).toMatchObject({ ok: true, none: true });
@@ -120,6 +132,7 @@ describe("buildCdnRoutingArtifact", () => {
                 buildCdnRoutingArtifact({
                     config: {},
                     outputs: { middleware: {} },
+                    routing: {},
                 }),
             ),
         );
@@ -129,6 +142,7 @@ describe("buildCdnRoutingArtifact", () => {
             JSON.stringify(
                 buildCdnRoutingArtifact({
                     config: {},
+                    routing: {},
                     outputs: {
                         middleware: {
                             config: {
@@ -246,6 +260,7 @@ describe("the compiled executable embeds it (D11)", () => {
         mkdirSync(join(src, ".next"), { recursive: true });
         writeCdnRoutingArtifact(join(src, ".next"), {
             config: {},
+            routing: {},
             outputs: {
                 middleware: {
                     config: {

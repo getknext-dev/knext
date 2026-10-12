@@ -323,13 +323,40 @@ function parseRoutingArtifact(text) {
   if (i18n !== null && (typeof i18n !== 'object' || Array.isArray(i18n) || !Array.isArray(i18n.locales))) {
     return { ok: false, reason: 'bad_i18n' };
   }
+  // Request-dependent routing rules (rewrites / redirects / headers with a `has`
+  // or `missing` condition) are matched exactly like middleware (Amendment 1).
+  // The field is REQUIRED: an artifact from a writer that did not know about
+  // them cannot say there are none, so it is rejected (fail closed).
+  const conditional = doc.conditional;
+  const matchers = [];
+  let matchAll = false;
+  let hasRules = false;
+  if (conditional === 'unknown') {
+    matchAll = true; // the build supplied no routing output: assume the worst
+    hasRules = true;
+  } else if (Array.isArray(conditional)) {
+    for (const rule of conditional) {
+      if (rule === null || typeof rule !== 'object') return { ok: false, reason: 'bad_conditional' };
+      hasRules = true;
+      if (typeof rule.sourceRegex !== 'string') {
+        matchAll = true; // a rule we cannot test is treated as matching everything
+        continue;
+      }
+      try {
+        matchers.push(new RegExp(rule.sourceRegex, 'i'));
+      } catch {
+        return { ok: false, reason: 'bad_regex' };
+      }
+    }
+  } else {
+    return { ok: false, reason: 'bad_conditional' };
+  }
   const mw = doc.middleware;
   if (mw === 'none') {
-    return { ok: true, basePath, i18n, none: true, matchers: [], matchAll: false };
+    return { ok: true, basePath, i18n, none: !hasRules, matchers, matchAll };
   }
   if (!Array.isArray(mw)) return { ok: false, reason: 'bad_middleware' };
-  const matchers = [];
-  let matchAll = mw.length === 0; // middleware present with no matchers = every path
+  if (mw.length === 0) matchAll = true; // middleware present with no matchers = every path
   for (const m of mw) {
     if (m === null || typeof m !== 'object') return { ok: false, reason: 'bad_matcher' };
     if (typeof m.sourceRegex !== 'string') {
@@ -419,6 +446,35 @@ function sMaxAgeOf(tokens) {
 }
 
 /**
+ * The paths an exclusion is tested against: the decoded path, and the same with
+ * the basePath stripped, and with the locale prefix stripped too (segment-bounded;
+ * the locale only when the app has i18n).
+ */
+function fenceCandidates(decoded, artifact) {
+  const out = [decoded];
+  if (!artifact) return out;
+  const bases = [decoded];
+  const bp = artifact.basePath;
+  if (bp) {
+    if (decoded === bp) out.push('/'), bases.push('/');
+    else if (decoded.startsWith(bp + '/')) {
+      const rest = decoded.slice(bp.length);
+      out.push(rest);
+      bases.push(rest);
+    }
+  }
+  const locales = artifact.i18n && Array.isArray(artifact.i18n.locales) ? artifact.i18n.locales : [];
+  if (locales.length > 0) {
+    const lower = locales.map((l) => String(l).toLowerCase());
+    for (const b of bases) {
+      const seg = /^\/([^/]+)(\/.*)?$/.exec(b);
+      if (seg && lower.includes(seg[1].toLowerCase())) out.push(seg[2] || '/');
+    }
+  }
+  return [...new Set(out)];
+}
+
+/**
  * Decide whether a response may be edge-cached. PURE: every input is passed in.
  *
  * @param {{
@@ -465,11 +521,17 @@ function decideEdge(i) {
   const raw = rawPathOf(i.rawTarget);
   if (raw === undefined || !isCanonicalRawPath(raw)) return skip('non_canonical_path');
 
-  // Condition 7: /api/cache/ and excludePaths, against the decoded pathname.
+  // Condition 7: /api/cache/ and excludePaths, against the decoded pathname. They
+  // are written against the app's own routes, but the wire path also carries the
+  // basePath and, with i18n, a locale prefix, so each is tested against the path
+  // with those stripped as well as against the raw path.
   const decoded = safeDecode(raw);
   if (decoded === null) return skip('excluded_path');
-  if (underPrefix(decoded, '/api/cache', true)) return skip('excluded_path');
-  for (const p of cfg.excludePaths) if (underPrefix(decoded, p, true)) return skip('excluded_path');
+  const fenced = fenceCandidates(decoded, i.artifact && i.artifact.ok ? i.artifact : null);
+  if (fenced.some((c) => underPrefix(c, '/api/cache', true))) return skip('excluded_path');
+  for (const p of cfg.excludePaths) {
+    if (fenced.some((c) => underPrefix(c, p, true))) return skip('excluded_path');
+  }
 
   // Condition 10: middleware-matched paths only through includePaths.
   if (!i.artifact || !i.artifact.ok) return skip('routing_artifact_missing');
@@ -488,6 +550,10 @@ function decideEdge(i) {
   } else if (isFlight) {
     return skip('rsc_content_type_mismatch');
   }
+
+  // An unresolved build id means no build tag: a tag set a build-scoped purge
+  // cannot reach. Not edge-cacheable.
+  if (!i.buildId) return skip('build_id_unresolved');
 
   // Condition 8: the request's OWN page/route entry tags, incl. `_N_T_`.
   if (!i.ownTags.some((t) => typeof t === 'string' && t.startsWith('_N_T_'))) return skip('tags_missing');
@@ -723,8 +789,12 @@ function createController(opts) {
   }
 
   let buildIdCache;
+  let buildIdFailedAt = -Infinity;
   function buildId() {
-    if (buildIdCache !== undefined) return buildIdCache || undefined;
+    if (buildIdCache) return buildIdCache;
+    // Resolved once; an unresolved id is retried (the embedded filesystem or the
+    // staged tree may not have been readable at the very first request).
+    if (now() - buildIdFailedAt < 5000) return undefined;
     let id;
     const dirs = artifactDir ? [artifactDir] : distDirs();
     const found = readFirst(fs, dirs, ['BUILD_ID', 'BUILD_ID.']);
@@ -739,7 +809,8 @@ function createController(opts) {
         }
       }
     }
-    buildIdCache = id || '';
+    if (id) buildIdCache = id;
+    else buildIdFailedAt = now();
     return id;
   }
 

@@ -21,6 +21,18 @@
  * - middleware with matchers         -> `source` + `sourceRegex` of each (`has` /
  *   `missing` are dropped: the runtime ignores them, so a regexp match counts)
  *
+ * Middleware is not the only thing that makes a response depend on the request.
+ * A `next.config` rewrite, redirect or headers rule with a `has` / `missing`
+ * condition (cookie, header, query, host) does too: with no middleware at all,
+ * `{ source: '/home', has: [{ type: 'cookie', key: 'vip' }], destination: '/dashboard' }`
+ * serves `/dashboard` to a visitor with the cookie and `/home` to one without,
+ * under one URL. The official `onBuildComplete` `routing` output lists every such
+ * rule with its compiled `sourceRegex`, so each is recorded under `conditional`
+ * and treated exactly like a middleware matcher (ADR-0068 D4.1 condition 10,
+ * Amendment 1). A conditional rule whose regexp is not exposed is widened to
+ * match-all, and a missing `routing` output is recorded as `"unknown"` (which the
+ * runtime reads as match-all): a request-dependent rule is never ignored.
+ *
  * It is written beside Next's other build output (`<distDir>/`), then staged into
  * the standalone tree (`<serverDir>/.next/`) by `stageCdnRoutingArtifact`, because
  * `onBuildComplete` runs before Next writes the standalone directory and Next
@@ -43,10 +55,17 @@ export interface CdnRoutingArtifact {
     basePath: string;
     i18n: { locales: string[] } | null;
     middleware: "none" | CdnRoutingMatcher[];
+    /**
+     * Routing rules (rewrites, redirects, headers) with a `has` / `missing`
+     * condition, or `"unknown"` when the build gave no routing output.
+     */
+    conditional: CdnRoutingMatcher[] | "unknown";
 }
 
 /** The slice of the `onBuildComplete` ctx this reads (structural: no `next` import). */
 export interface CdnRoutingCtx {
+    /** `ctx.routing`: groups of routes, each `{ source?, sourceRegex?, has?, missing?, … }`. */
+    routing?: unknown;
     config: {
         basePath?: string;
         i18n?: { locales?: readonly string[] } | null;
@@ -69,9 +88,69 @@ export interface CdnRoutingCtx {
 /** Every path, for middleware that declares no matcher (Next runs it on every request). */
 const MATCH_ALL: CdnRoutingMatcher = { source: "/:path*", sourceRegex: "^.*$" };
 
+/** The `ctx.routing` groups, in a fixed order (any other array-valued group follows). */
+const ROUTING_GROUPS = [
+    "beforeMiddleware",
+    "beforeFiles",
+    "afterFiles",
+    "dynamicRoutes",
+    "onMatch",
+    "fallback",
+    "middlewareMatchers",
+] as const;
+
+const nonEmpty = (v: unknown): boolean => Array.isArray(v) && v.length > 0;
+
+/**
+ * Every routing rule whose result depends on the request (`has` / `missing`).
+ * `"unknown"` when the build supplied no routing output.
+ */
+function conditionalRoutes(routing: unknown): CdnRoutingMatcher[] | "unknown" {
+    if (routing === null || typeof routing !== "object") return "unknown";
+    const groups = routing as Record<string, unknown>;
+    const names = [
+        ...ROUTING_GROUPS,
+        ...Object.keys(groups).filter(
+            (k) => !(ROUTING_GROUPS as readonly string[]).includes(k),
+        ),
+    ];
+    const out: CdnRoutingMatcher[] = [];
+    const seen = new Set<string>();
+    for (const name of names) {
+        const rules = groups[name];
+        if (!Array.isArray(rules)) continue;
+        for (const rule of rules) {
+            if (rule === null || typeof rule !== "object") continue;
+            const r = rule as {
+                source?: unknown;
+                sourceRegex?: unknown;
+                has?: unknown;
+                missing?: unknown;
+            };
+            if (!nonEmpty(r.has) && !nonEmpty(r.missing)) continue;
+            const entry: CdnRoutingMatcher =
+                typeof r.sourceRegex === "string"
+                    ? {
+                          ...(typeof r.source === "string"
+                              ? { source: r.source }
+                              : {}),
+                          sourceRegex: r.sourceRegex,
+                      }
+                    : MATCH_ALL;
+            const key = JSON.stringify(entry);
+            if (!seen.has(key)) {
+                seen.add(key);
+                out.push(entry);
+            }
+        }
+    }
+    return out;
+}
+
 export function buildCdnRoutingArtifact(
     ctx: CdnRoutingCtx,
 ): CdnRoutingArtifact {
+    const conditional = conditionalRoutes(ctx.routing);
     const basePath =
         typeof ctx.config.basePath === "string" ? ctx.config.basePath : "";
     const locales = ctx.config.i18n?.locales;
@@ -81,15 +160,23 @@ export function buildCdnRoutingArtifact(
           ? { locales: [] }
           : null;
     const mw = ctx.outputs.middleware;
-    if (!mw) return { version: 1, basePath, i18n, middleware: "none" };
+    if (!mw)
+        return { version: 1, basePath, i18n, middleware: "none", conditional };
     const matchers = mw.config?.matchers;
     if (!matchers || matchers.length === 0) {
-        return { version: 1, basePath, i18n, middleware: [MATCH_ALL] };
+        return {
+            version: 1,
+            basePath,
+            i18n,
+            middleware: [MATCH_ALL],
+            conditional,
+        };
     }
     return {
         version: 1,
         basePath,
         i18n,
+        conditional,
         middleware: matchers.map((m) =>
             typeof m.sourceRegex === "string"
                 ? {

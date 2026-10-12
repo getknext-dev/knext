@@ -8,7 +8,7 @@ import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { edge } from "./cdn-edge-untyped";
+import { edge, okArtifact } from "./cdn-edge-untyped";
 
 const {
     PROVIDER_ROWS,
@@ -34,9 +34,10 @@ function cfg(env: Record<string, string> = {}, provider = "cloudflare") {
     return c;
 }
 
-const NONE = parseRoutingArtifact(
+const NONE = okArtifact(
     JSON.stringify({
         version: 1,
+        conditional: [],
         basePath: "",
         i18n: null,
         middleware: "none",
@@ -290,7 +291,13 @@ describe("parseRoutingArtifact (condition 10)", () => {
     const doc = (o: unknown) => JSON.stringify(o);
     it('explicit middleware "none"', () => {
         const a = parseRoutingArtifact(
-            doc({ version: 1, basePath: "", i18n: null, middleware: "none" }),
+            doc({
+                version: 1,
+                conditional: [],
+                basePath: "",
+                i18n: null,
+                middleware: "none",
+            }),
         );
         expect(a).toMatchObject({ ok: true, none: true });
     });
@@ -298,6 +305,7 @@ describe("parseRoutingArtifact (condition 10)", () => {
         const a = parseRoutingArtifact(
             doc({
                 version: 1,
+                conditional: [],
                 basePath: "",
                 i18n: null,
                 middleware: [{ sourceRegex: "^/dash$" }],
@@ -307,7 +315,13 @@ describe("parseRoutingArtifact (condition 10)", () => {
     });
     it("middleware with no matchers matches every path", () => {
         const a = parseRoutingArtifact(
-            doc({ version: 1, basePath: "", i18n: null, middleware: [] }),
+            doc({
+                version: 1,
+                conditional: [],
+                basePath: "",
+                i18n: null,
+                middleware: [],
+            }),
         );
         expect(a).toMatchObject({ ok: true, none: false, matchAll: true });
     });
@@ -323,24 +337,49 @@ describe("parseRoutingArtifact (condition 10)", () => {
         ["no version", doc({ basePath: "", i18n: null, middleware: "none" })],
         [
             "bad basePath",
-            doc({ version: 1, basePath: "x", i18n: null, middleware: "none" }),
+            doc({
+                version: 1,
+                conditional: [],
+                basePath: "x",
+                i18n: null,
+                middleware: "none",
+            }),
         ],
         [
             "bad i18n",
-            doc({ version: 1, basePath: "", i18n: "en", middleware: "none" }),
+            doc({
+                version: 1,
+                conditional: [],
+                basePath: "",
+                i18n: "en",
+                middleware: "none",
+            }),
         ],
         [
             "bad middleware",
-            doc({ version: 1, basePath: "", i18n: null, middleware: "all" }),
+            doc({
+                version: 1,
+                conditional: [],
+                basePath: "",
+                i18n: null,
+                middleware: "all",
+            }),
         ],
         [
             "bad matcher",
-            doc({ version: 1, basePath: "", i18n: null, middleware: [null] }),
+            doc({
+                version: 1,
+                conditional: [],
+                basePath: "",
+                i18n: null,
+                middleware: [null],
+            }),
         ],
         [
             "bad regex",
             doc({
                 version: 1,
+                conditional: [],
                 basePath: "",
                 i18n: null,
                 middleware: [{ sourceRegex: "(" }],
@@ -357,6 +396,7 @@ describe("middlewareMatches (condition 10)", () => {
         const a = parseRoutingArtifact(
             JSON.stringify({
                 version: 1,
+                conditional: [],
                 basePath: "",
                 i18n: null,
                 middleware,
@@ -598,9 +638,10 @@ describe("decideEdge — the allowlist (D4.1)", () => {
     });
 
     describe("condition 10 — middleware", () => {
-        const withMatcher = parseRoutingArtifact(
+        const withMatcher = okArtifact(
             JSON.stringify({
                 version: 1,
+                conditional: [],
                 basePath: "",
                 i18n: null,
                 middleware: [{ sourceRegex: "^/blog(?:/.*)?$" }],
@@ -619,9 +660,10 @@ describe("decideEdge — the allowlist (D4.1)", () => {
         });
         it("includePaths is segment-bounded and case-sensitive", () => {
             const c = cfg({ KNEXT_CDN_INCLUDE_PATHS: "/blog" });
-            const art = parseRoutingArtifact(
+            const art = okArtifact(
                 JSON.stringify({
                     version: 1,
+                    conditional: [],
                     basePath: "",
                     i18n: null,
                     middleware: [{ sourceRegex: "^/blogger$" }],

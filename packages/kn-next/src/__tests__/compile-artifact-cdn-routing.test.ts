@@ -61,6 +61,7 @@ afterAll(() => {
 
 const ARTIFACT = JSON.stringify({
     version: 1,
+    conditional: [],
     basePath: "",
     i18n: null,
     middleware: "none",

@@ -4,6 +4,7 @@
  * loaded, and talk to it with RAW BYTES over a socket, so no HTTP client can
  * normalise the request-target before the preload sees it.
  */
+import { Buffer } from "node:buffer";
 import { type ChildProcess, spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { connect } from "node:net";
@@ -37,6 +38,7 @@ export function artifact(
         basePath: string;
         i18n: { locales: string[] } | null;
         middleware: "none" | Array<Record<string, unknown>>;
+        conditional: "unknown" | Array<Record<string, unknown>>;
     }> = {},
 ): string {
     return JSON.stringify({
@@ -44,6 +46,7 @@ export function artifact(
         basePath: "",
         i18n: null,
         middleware: "none",
+        conditional: [],
         ...over,
     });
 }
@@ -53,7 +56,8 @@ export interface ServerOptions {
     env?: Record<string, string>;
     /** Text of `.next/knext-cdn-routing.json`; `undefined` writes none. */
     artifact?: string;
-    buildId?: string;
+    /** Text of `.next/BUILD_ID`; `null` writes none. */
+    buildId?: string | null;
     preload?: string;
 }
 
@@ -81,7 +85,12 @@ export async function startServer(opts: ServerOptions): Promise<Running> {
             opts.artifact,
         );
     }
-    writeFileSync(join(dir, ".next", "BUILD_ID"), opts.buildId ?? "build-xyz");
+    if (opts.buildId !== null) {
+        writeFileSync(
+            join(dir, ".next", "BUILD_ID"),
+            opts.buildId ?? "build-xyz",
+        );
+    }
     const env: Record<string, string> = {
         PATH: process.env.PATH ?? "",
         CDN_FIXTURE_PRELOAD: opts.preload ?? PRELOAD,
@@ -121,7 +130,7 @@ export async function startServer(opts: ServerOptions): Promise<Running> {
         child.stderr?.on("data", (d: Buffer) => {
             buf += d.toString();
         });
-        child.on("exit", (code) => {
+        child.on("exit", (code: number | null) => {
             clearTimeout(timer);
             reject(new Error(`server exited ${code}: ${buf}`));
         });
@@ -151,7 +160,7 @@ export function rawRequest(port: number, bytes: string): Promise<RawResponse> {
     return new Promise((resolve, reject) => {
         const socket = connect(port, "127.0.0.1");
         const chunks: Buffer[] = [];
-        socket.on("data", (d) => chunks.push(Buffer.from(d)));
+        socket.on("data", (d: Buffer) => chunks.push(Buffer.from(d)));
         socket.on("error", reject);
         socket.on("close", () => {
             const text = Buffer.concat(chunks).toString("latin1");
@@ -162,10 +171,12 @@ export function rawRequest(port: number, bytes: string): Promise<RawResponse> {
             const status = Number(
                 /^HTTP\/1\.\d (\d{3})/.exec(lines[0] ?? "")?.[1] ?? 0,
             );
-            const headers: Array<[string, string]> = lines.slice(1).map((l) => {
-                const i = l.indexOf(":");
-                return [l.slice(0, i).toLowerCase(), l.slice(i + 1).trim()];
-            });
+            const headers: Array<[string, string]> = lines
+                .slice(1)
+                .map((l: string) => {
+                    const i = l.indexOf(":");
+                    return [l.slice(0, i).toLowerCase(), l.slice(i + 1).trim()];
+                });
             resolve({
                 status,
                 headers,

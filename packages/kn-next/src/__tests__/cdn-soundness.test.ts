@@ -141,8 +141,16 @@ interface Built {
 
 const built = new Map<string, Promise<Built>>();
 
-function buildFixture(name: string, nextConfig: string): Promise<Built> {
-    const existing = built.get(name);
+/** Files laid over a copy of the fixture: text writes the file, `null` deletes it. */
+type Overlay = Record<string, string | null>;
+
+function buildFixture(
+    name: string,
+    nextConfig: string,
+    overlay: Overlay = {},
+): Promise<Built> {
+    const key = `${name}|${nextConfig}|${JSON.stringify(overlay)}`;
+    const existing = built.get(key);
     if (existing) return existing;
     const p = (async () => {
         expect(
@@ -155,6 +163,10 @@ function buildFixture(name: string, nextConfig: string): Promise<Built> {
         const appDir = join(root, "app");
         symlinkSync(join(PKG_ROOT, "node_modules"), join(root, "node_modules"));
         cpSync(join(here, "fixtures", name), appDir, { recursive: true });
+        for (const [file, text] of Object.entries(overlay)) {
+            if (text === null) rmSync(join(appDir, file), { force: true });
+            else writeFileSync(join(appDir, file), text);
+        }
         writeFileSync(
             join(appDir, "package.json"),
             JSON.stringify({ name, private: true }),
@@ -199,7 +211,7 @@ function buildFixture(name: string, nextConfig: string): Promise<Built> {
         ).trim();
         return { root, appDir, standaloneDir, serverDir, serverJs, buildId };
     })();
-    built.set(name, p);
+    built.set(key, p);
     return p;
 }
 
@@ -259,10 +271,16 @@ async function serve(b: Built, runtime: "node" | "bun"): Promise<Served> {
     return { port, stop: () => killTree(child) };
 }
 
-async function fetchRaw(port: number, target: string, host = "example.com") {
+async function fetchRaw(
+    port: number,
+    target: string,
+    host = "example.com",
+    extra: Record<string, string> = {},
+) {
+    const more = Object.entries(extra).map(([k, v]) => `${k}: ${v}\r\n`);
     return await rawRequest(
         port,
-        `GET ${target} HTTP/1.1\r\nHost: ${host}\r\nConnection: close\r\n\r\n`,
+        `GET ${target} HTTP/1.1\r\nHost: ${host}\r\n${more.join("")}Connection: close\r\n\r\n`,
     );
 }
 
@@ -401,6 +419,216 @@ for (const runtime of ["node", "bun"] as const) {
     });
 }
 
+// ---------------------------------------------------------------------------
+// Amendment 1: request-dependent routing rules, and middleware shapes the first
+// corpus did not have (no matcher at all, a negative-lookahead matcher).
+// ---------------------------------------------------------------------------
+
+/** No middleware at all; request-dependent rules live in `next.config` only. */
+const RULES_CONFIG = `
+  async rewrites() {
+    return {
+      beforeFiles: [
+        { source: "/home", has: [{ type: "cookie", key: "vip" }], destination: "/dashboard" },
+      ],
+      afterFiles: [
+        { source: "/aa", missing: [{ type: "header", key: "x-a" }], destination: "/open" },
+      ],
+      fallback: [
+        { source: "/fb/:p*", has: [{ type: "query", key: "q" }], destination: "/open" },
+      ],
+    };
+  },
+  async redirects() {
+    return [
+      { source: "/old", has: [{ type: "host", value: "beta.example.com" }], destination: "/open", permanent: false },
+    ];
+  },
+  async headers() {
+    return [{ source: "/hdr", has: [{ type: "header", key: "x-h" }], headers: [{ key: "x-test", value: "1" }] }];
+  },
+`;
+
+interface Probe {
+    target: string;
+    host?: string;
+    headers?: Record<string, string>;
+}
+
+const isEdgeCached = (r: { header(name: string): string | undefined }) =>
+    r.header(EDGE) !== undefined || r.header("cache-tag") !== undefined;
+
+/**
+ * The cache-key soundness property for request-dependent content: when two
+ * visitors to the same path get DIFFERENT answers (a cookie, header, query or
+ * host decides), NEITHER answer may be edge-cached: a CDN keys on the URL and
+ * would hand the first one to everybody.
+ */
+async function variance(
+    port: number,
+    corpus: Array<[Probe, Probe]>,
+): Promise<{ differing: string[]; cached: string[] }> {
+    const differing: string[] = [];
+    const cached: string[] = [];
+    for (const [a, b] of corpus) {
+        const ra = await fetchRaw(port, a.target, a.host, a.headers);
+        const rb = await fetchRaw(port, b.target, b.host, b.headers);
+        if (isEdgeCached(ra)) cached.push(a.target);
+        if (isEdgeCached(rb)) cached.push(b.target);
+        if (ra.body !== rb.body || ra.status !== rb.status) {
+            differing.push(a.target);
+            expect(
+                isEdgeCached(ra) || isEdgeCached(rb),
+                `UNSOUND: ${a.target} answered different content to two visitors but the preload would edge-cache it`,
+            ).toBe(false);
+        }
+    }
+    return { differing, cached };
+}
+
+const PROXY_NO_MATCHER = `import { NextResponse } from 'next/server';
+export function proxy(request) {
+  const res = NextResponse.next();
+  res.headers.set('x-mw-ran', request.nextUrl.pathname);
+  return res;
+}
+`;
+
+const PROXY_LOOKAHEAD = `${PROXY_NO_MATCHER}export const config = {
+  matcher: ['/((?!api|_next/static|_next/image|favicon.ico|open).*)'],
+};
+`;
+
+for (const runtime of ["node", "bun"] as const) {
+    describe(`CDN soundness: next.config rules with has/missing and NO middleware, real Next (${runtime})`, () => {
+        it("a path whose content depends on a cookie, header, query or host is never edge-cached", async () => {
+            // The reported leak: with no middleware the artifact used to say
+            // `middleware: "none"`, yet `GET /home` serves /dashboard to a visitor
+            // with the `vip` cookie and /home to one without.
+            const b = await buildFixture("cdn-soundness-app", RULES_CONFIG, {
+                "proxy.js": null,
+            });
+            const recorded = JSON.parse(
+                readFileSync(
+                    join(b.serverDir, ".next", "knext-cdn-routing.json"),
+                    "utf8",
+                ),
+            );
+            expect(recorded.middleware).toBe("none");
+            expect(recorded.conditional.length).toBeGreaterThanOrEqual(5);
+
+            const s = await serve(b, runtime);
+            try {
+                const vip = { headers: { Cookie: "vip=1" } };
+                const corpus: Array<[Probe, Probe]> = [
+                    [{ target: "/home", ...vip }, { target: "/home" }],
+                    [{ target: "/home/", ...vip }, { target: "/home/" }],
+                    [
+                        { target: "/aa", headers: { "x-a": "1" } },
+                        { target: "/aa" },
+                    ],
+                    [{ target: "/fb/x?q=1" }, { target: "/fb/x" }],
+                    [
+                        { target: "/old", host: "beta.example.com" },
+                        { target: "/old" },
+                    ],
+                    [
+                        { target: "/hdr", headers: { "x-h": "1" } },
+                        { target: "/hdr" },
+                    ],
+                    // unconditional pages
+                    [{ target: "/open" }, { target: "/open" }],
+                    [{ target: "/blog/a" }, { target: "/blog/a" }],
+                ];
+                const out = await variance(s.port, corpus);
+                // Not vacuous: the rules really do change the answer...
+                expect(out.differing).toEqual(
+                    expect.arrayContaining([
+                        "/home",
+                        "/aa",
+                        "/fb/x?q=1",
+                        "/old",
+                    ]),
+                );
+                // ...and the pages no rule touches are still cached.
+                expect(out.cached).toContain("/open");
+                expect(out.cached).toContain("/blog/a");
+                // The matched sources are never cached, for either visitor.
+                for (const bad of ["/home", "/home/", "/aa", "/old"]) {
+                    expect(out.cached, bad).not.toContain(bad);
+                }
+            } finally {
+                s.stop();
+            }
+        }, 300_000);
+    });
+
+    describe(`CDN soundness: middleware with NO matcher (runs on every path), real Next (${runtime})`, () => {
+        it("nothing is edge-cached, and the middleware ran on everything", async () => {
+            const b = await buildFixture("cdn-soundness-app", "", {
+                "proxy.js": PROXY_NO_MATCHER,
+            });
+            const s = await serve(b, runtime);
+            try {
+                const paths = [
+                    "/open",
+                    "/blog/a",
+                    "/",
+                    "/home",
+                    "/dashboard",
+                    "/%6fpen",
+                ];
+                const out = await soundness(
+                    s.port,
+                    paths.map((t) => [t]),
+                );
+                expect(out.ran.length, `ran on: ${out.ran.join(" | ")}`).toBe(
+                    paths.length,
+                );
+                expect(out.cached).toEqual([]);
+            } finally {
+                s.stop();
+            }
+        }, 300_000);
+    });
+
+    describe(`CDN soundness: middleware with a negative-lookahead matcher, real Next (${runtime})`, () => {
+        it("Next's middleware ran => refused or matched; excluded paths stay cacheable", async () => {
+            const b = await buildFixture("cdn-soundness-app", "", {
+                "proxy.js": PROXY_LOOKAHEAD,
+            });
+            const s = await serve(b, runtime);
+            try {
+                const paths = [
+                    "/dashboard",
+                    "/dashboard/",
+                    "/blog/a",
+                    "/home",
+                    "/",
+                    "/%64ashboard",
+                    "/%6fpen", // the excluded word, percent-encoded
+                    "/OPEN",
+                    "/open",
+                    "/open/",
+                    "/api/x",
+                ];
+                const out = await soundness(
+                    s.port,
+                    paths.map((t) => [t]),
+                );
+                expect(
+                    out.ran.length,
+                    `ran on: ${out.ran.join(" | ")}`,
+                ).toBeGreaterThanOrEqual(5);
+                // The lookahead excludes /open from the middleware, so it is cacheable.
+                expect(out.cached).toContain("example.com /open");
+            } finally {
+                s.stop();
+            }
+        }, 300_000);
+    });
+}
+
 describe("CDN soundness harness can see red", () => {
     it("a request the middleware ran on and the preload would cache is flagged", async () => {
         // Run the app fixture WITHOUT the routing artifact being "none-ified": simulate
@@ -417,6 +645,7 @@ describe("CDN soundness harness can see red", () => {
             artifactPath,
             JSON.stringify({
                 version: 1,
+                conditional: [],
                 basePath: "/base",
                 i18n: null,
                 middleware: "none",
