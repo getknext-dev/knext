@@ -455,13 +455,12 @@ function fenceCandidates(decoded, artifact) {
   if (!artifact) return out;
   const bases = [decoded];
   const bp = artifact.basePath;
-  if (bp) {
-    if (decoded === bp) out.push('/'), bases.push('/');
-    else if (decoded.startsWith(bp + '/')) {
-      const rest = decoded.slice(bp.length);
-      out.push(rest);
-      bases.push(rest);
-    }
+  if (bp && decoded.startsWith(bp + '/')) {
+    // (`/base` itself strips to `/`, which only a `/` prefix matches, and that
+    // already matches the raw path.)
+    const rest = decoded.slice(bp.length);
+    out.push(rest);
+    bases.push(rest);
   }
   const locales = artifact.i18n && Array.isArray(artifact.i18n.locales) ? artifact.i18n.locales : [];
   if (locales.length > 0) {

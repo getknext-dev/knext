@@ -146,6 +146,21 @@ describe("buildCdnRoutingArtifact records request-dependent routing rules", () =
         expect(buildCdnRoutingArtifact(ctx(null)).conditional).toBe("unknown");
     });
 
+    it("lists the groups in a fixed order: fallback before middlewareMatchers, unknown groups last", () => {
+        const cond = [{ type: "cookie", key: "c" }];
+        const a = buildCdnRoutingArtifact(
+            ctx({
+                futureGroup: [{ source: "/z", sourceRegex: "^/z$", has: cond }],
+                middlewareMatchers: [
+                    { source: "/m", sourceRegex: "^/m$", has: cond },
+                ],
+                fallback: [{ source: "/f", sourceRegex: "^/f$", has: cond }],
+            }),
+        );
+        expect(
+            (a.conditional as Array<{ source: string }>).map((r) => r.source),
+        ).toEqual(["/f", "/m", "/z"]);
+    });
     it("also folds in routing.middlewareMatchers", () => {
         const a = buildCdnRoutingArtifact(
             ctx({
