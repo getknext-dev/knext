@@ -3,8 +3,8 @@ import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { FAMILY_QUARANTINE_CAP } from './compat-quarantine-bounds';
 import {
-  type LedgerContext,
   entryProblems,
+  type LedgerContext,
   ledgerProblems,
   parseUpstreamRuntimeDefects,
   UPSTREAM_RUNTIME_DEFECT_CAP,
