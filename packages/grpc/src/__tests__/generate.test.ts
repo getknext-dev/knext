@@ -9,8 +9,15 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
-import { generateFiles, runGenerate } from '../generate';
-import { capture, copyFixtureZone, FIXTURE_ZONE, readTree, removeScratchDirs } from './helpers';
+import { generateFiles, previouslyWritten, runGenerate } from '../generate';
+import {
+  capture,
+  copyFixtureZone,
+  emptyDir,
+  FIXTURE_ZONE,
+  readTree,
+  removeScratchDirs,
+} from './helpers';
 
 afterAll(removeScratchDirs);
 
@@ -179,6 +186,38 @@ describe('knext generate deletes only what it wrote', () => {
     writeFileSync(manifest, JSON.stringify(m));
     expect(await runGenerate({ cwd: zone, io: capture().io })).toBe(0);
     expect(existsSync(keep)).toBe(true);
+  });
+
+  it('the manifest reader keeps only entries confined to the output directory', () => {
+    const dir = emptyDir('own-reader');
+    writeFileSync(
+      join(dir, '.knext-generated.json'),
+      JSON.stringify({
+        files: [
+          'ok/a_pb.ts',
+          'b_knext.ts',
+          '../x_pb.ts',
+          'a/../../x_pb.ts',
+          'a/../c_pb.ts',
+          './d_pb.ts',
+          '/etc/hosts',
+          'e\\f_pb.ts',
+          '.knext-generated.json',
+          '',
+          7,
+        ],
+      }),
+    );
+    expect(previouslyWritten(dir)).toEqual(['b_knext.ts', 'ok/a_pb.ts']);
+  });
+
+  it('a missing or malformed manifest owns nothing', () => {
+    const dir = emptyDir('own-nomanifest');
+    expect(previouslyWritten(dir)).toEqual([]);
+    writeFileSync(join(dir, '.knext-generated.json'), '{ not json');
+    expect(previouslyWritten(dir)).toEqual([]);
+    writeFileSync(join(dir, '.knext-generated.json'), '{"files":"a.ts"}');
+    expect(previouslyWritten(dir)).toEqual([]);
   });
 
   it('a manifest entry that reaches outside through a symlink is never deleted', async () => {
