@@ -567,7 +567,10 @@ registry (`trackWrite`). A 429 must not hold a Server Action open for a minute.
   app tag `kn-<p>` (jev: collapse **0.73**, drop 0.27; confidence 0.46). That evicts all of this app's
   edge HTML, which is correct and costs one call.
 
-**D6.5 Observability.** `knext_cdn_purge_total{provider,result}` with
+**D6.5 Observability.** Both metrics below are **planned**, not yet emitted: the purge counter comes
+with CDN-2, the edge-decision counter with CDN-1. The docs metric-contract scan only checks a metric
+name that stands alone in backticks, so this ADR writes them with their label sets, or un-backticked,
+until they are emitted (see action items 1–2). `knext_cdn_purge_total{provider,result}` with
 `result ∈ {ok, ratelimited, failed, skipped_no_credential, skipped_unsupported, skipped_invalid_target}`,
 plus `knext_cdn_edge_decision_total{result,reason}` with a closed `reason` set (the D4.1 condition that
 failed, `tag_overflow`, `rsc_without_rsc_param`, `non_canonical_path`, `routing_artifact_missing`, …)
@@ -804,7 +807,8 @@ notice.
   next to the `reason="non_canonical_path"` metric.
 - **Condition 10 depends on a knext build artifact.** A packaging slip that drops
   `knext-cdn-routing.json` turns off edge HTML caching. That is safe, and it is not silent: the
-  `knext_cdn_edge_decision_total` metric counts it under `reason="routing_artifact_missing"`, the
+  knext_cdn_edge_decision_total metric (added by CDN-1) counts it under
+  `reason="routing_artifact_missing"`, the
   preload logs one line at boot, and CDN-3a's HIT cases fail on an image without the artifact.
 - **`'use cache'`-only tags rely on Next copying them into the page entry.** This is tested in CDN-3b,
   not verified from source.
@@ -855,6 +859,13 @@ notice.
 2. **CDN-2 (#2260, T2 module; T1 makes the one-line wire-in after #2083):** `adapters/cdn-purge/` rows
    (Cloudflare, emulator; deferred rows as data), queue, bucket, retries, overflow collapse, metrics,
    drain enrolment, first-ready purge, the SSRF and token-scan tests, a no-cloud-SDK scan.
+
+   **Metric names: CDN-1 and CDN-2.** In the PR that first emits each metric, restore its bare name
+   in this ADR as a stand-alone code span: knext_cdn_edge_decision_total in CDN-1, and
+   knext_cdn_purge_total in CDN-2, each wrapped in single backticks with nothing else inside them.
+   From then on the docs metric-contract test
+   (`observability-metric-contract.test.ts`, S5) guards those names against a rename. Until then the
+   ADR keeps them outside the scan's pattern on purpose. The test itself is not exempted or weakened.
 3. **CDN-3a (#2264) and CDN-3b (#2261):** per D13, against the Vary-ignoring emulator.
 4. **CDN-4 (#2262):** Cloudflare on OKE after O4 (#2165), or the scratch bypass in D13.
 5. **CDN-5 (#2263):** user docs: one page per provider row (OCI page says "use Cloudflare"), the
