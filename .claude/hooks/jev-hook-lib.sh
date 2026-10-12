@@ -99,12 +99,14 @@ jev_has_literal_secret() {
   orig=$(cat)
   # NO PIPELINES IN THE CHECKS: the callers run under `set -o pipefail`, and `grep -q` exits on the
   # first match while `printf` is still writing a large text, so printf dies of SIGPIPE and
-  # pipefail turns a HIT into a failure: a big text with an early secret would be SENT. Process
-  # substitution reports only grep's own status.
+  # pipefail turns a HIT into a failure: a big text with an early secret would be SENT. Here-strings
+  # feed grep with no writer process at all, so nothing can hit a closed pipe -- not even when the
+  # caller ignores SIGPIPE (GitHub's macOS runners do), where printf would print "Broken pipe" to
+  # the hook's stderr instead of dying quietly.
   #
   # 1. Token shapes, PEM, user:pass@, headers: on the ORIGINAL text. No exemption may run first: a
   #    token placed right after `data:x/y;base64,` must not be eaten by the data-URI strip.
-  grep -Eiq -- "$JEV_LITERAL_RE" < <(printf '%s' "$orig") && return 0
+  grep -Eiq -- "$JEV_LITERAL_RE" <<<"$orig" && return 0
   # 2. Exemptions (inline data URIs, 40/64-hex hashes), then the entropy rule on what is left.
   stripped=$(printf '%s' "$orig" | sed -E -e 's#data:[A-Za-z0-9.+/-]+;base64,[A-Za-z0-9+/=]*#DATAURI#g')
   # Two passes: two hashes sharing one separator ("<sha> <sha>") are both exempted.
@@ -113,5 +115,5 @@ jev_has_literal_secret() {
       -e 's#(^|[^A-Za-z0-9])[0-9a-fA-F]{64}([^A-Za-z0-9]|$)#\1SHA256\2#g' \
       -e 's#(^|[^A-Za-z0-9])[0-9a-fA-F]{40}([^A-Za-z0-9]|$)#\1GITSHA\2#g')
   done
-  grep -q '[0-9]' < <(grep -Eio '[A-Za-z0-9+=]{32,}' < <(printf '%s' "$stripped"))
+  grep -q '[0-9]' < <(grep -Eio '[A-Za-z0-9+=]{32,}' <<<"$stripped" 2>/dev/null)
 }
