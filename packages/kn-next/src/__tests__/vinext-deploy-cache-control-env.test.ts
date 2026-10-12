@@ -244,8 +244,23 @@ const READ_SAFE: Record<string, [RegExp, RegExp][]> = {
             /adapters\/bun-serve-cache-control\.mjs$/,
             new RegExp(`^return !\\(env && env\\.${NORM} === ["']0["']\\);$`),
         ],
+        // The Node preload: one read of the switch, and (ADR-0068 D12) the single
+        // log line that says CDN mode overrides it.
         [
             /adapters\/cache-control-normalize\.cjs$/,
+            new RegExp(
+                `^const normalizeOffRequested = process\\.env\\.${NORM} === ["']0["'];$`,
+            ),
+        ],
+        [
+            /adapters\/cache-control-normalize\.cjs$/,
+            new RegExp(
+                `^console\\.log\\(["']CDN_EDGE: ${NORM}=0 ignored \\(CDN mode is on\\)["']\\);$`,
+            ),
+        ],
+        // The frozen pre-CDN copy of that preload (the zero-diff oracle).
+        [
+            /__tests__\/fixtures\/cache-control-normalize\.pre-cdn\.cjs$/,
             new RegExp(`^if \\(process\\.env\\.${NORM} !== ["']0["']\\) \\{$`),
         ],
     ],
@@ -788,8 +803,15 @@ describe(`the opt-out switch ${NORM} is scanned like ${NAME}`, () => {
         ).toEqual([]);
         expect(
             findUnsafeMentions(
-                `if (process.env.${NORM} !== '0') {\n  x();\n}`,
+                `const normalizeOffRequested = process.env.${NORM} === '0';\nif (!normalizeOffRequested) {\n  x();\n}\nconsole.log('CDN_EDGE: ${NORM}=0 ignored (CDN mode is on)');`,
                 `${c}/cache-control-normalize.cjs`,
+            ),
+        ).toEqual([]);
+        // The frozen pre-CDN copy keeps the original read shape.
+        expect(
+            findUnsafeMentions(
+                `if (process.env.${NORM} !== '0') {\n  x();\n}`,
+                "packages/kn-next/src/__tests__/fixtures/cache-control-normalize.pre-cdn.cjs",
             ),
         ).toEqual([]);
         // ...but the same read shape in an arbitrary file is unknown, so red

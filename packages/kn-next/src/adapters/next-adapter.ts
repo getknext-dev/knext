@@ -30,6 +30,7 @@ import type { Readable } from "node:stream";
 import type { NextAdapter } from "next";
 // AdapterOutputs is not re-exported from the 'next' public barrel; import directly.
 import type { AdapterOutputs } from "next/dist/build/adapter/build-complete";
+import { writeCdnRoutingArtifact } from "./cdn-routing-artifact";
 import { KNEXT_RUNTIME_ENV } from "./runtime-env";
 import { healBunExportTargets } from "./standalone-bun-exports";
 
@@ -297,6 +298,24 @@ const adapter: NextAdapter = {
         );
         for (const [key, count] of Object.entries(routingCounts)) {
             console.log(`    ${key.padEnd(22)}: ${count}`);
+        }
+
+        // ── CDN routing artifact (ADR-0068 D4.1 condition 10) ───────────────────
+        // ALWAYS written, from the official adapter outputs: the CDN header
+        // preload must know which paths the app's middleware/proxy matcher covers
+        // (a CDN ignores cookies, so a middleware-protected page stored at the edge
+        // would be served to anonymous visitors). A failed write must not kill the
+        // build; the runtime then finds no artifact and edge-caches nothing
+        // (fail closed, counted as routing_artifact_missing).
+        try {
+            const artifactPath = writeCdnRoutingArtifact(distDir, ctx);
+            console.log(
+                `[knext-adapter] cdn routing artifact: ${artifactPath}`,
+            );
+        } catch (err) {
+            console.log(
+                `[knext-adapter] cdn routing artifact NOT written — CDN mode would edge-cache nothing: ${String(err)}`,
+            );
         }
 
         // ── Best-effort artifact upload ─────────────────────────────────────────
