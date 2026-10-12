@@ -10,6 +10,7 @@ import {
     cpSync,
     existsSync,
     mkdtempSync,
+    readdirSync,
     readFileSync,
     realpathSync,
     rmSync,
@@ -80,10 +81,12 @@ function killTree(child: ChildProcess): void {
     }
 }
 
+// Removing the built trees (several `next build` outputs) can outlast bun's default
+// 5 s hook timeout on a loaded machine: that must not fail a suite whose tests passed.
 afterAll(() => {
     for (const s of servers) killTree(s);
     for (const d of tempRoots) rmSync(d, { recursive: true, force: true });
-});
+}, 120_000);
 
 async function freePort(): Promise<number> {
     return await new Promise((res, rej) => {
@@ -462,6 +465,21 @@ interface Probe {
 const isEdgeCached = (r: { header(name: string): string | undefined }) =>
     r.header(EDGE) !== undefined || r.header("cache-tag") !== undefined;
 
+/** Where two answers first differ, and how Next served each (a stale ISR entry shows here). */
+function describeDifference(
+    a: { status: number; body: string; header(n: string): string | undefined },
+    b: { status: number; body: string; header(n: string): string | undefined },
+): string {
+    let k = 0;
+    while (k < a.body.length && a.body[k] === b.body[k]) k++;
+    const at = (r: typeof a) =>
+        JSON.stringify(r.body.slice(Math.max(0, k - 40), k + 80));
+    return (
+        `A: ${a.status} x-nextjs-cache=${a.header("x-nextjs-cache")} len=${a.body.length} ${at(a)}\n` +
+        `B: ${b.status} x-nextjs-cache=${b.header("x-nextjs-cache")} len=${b.body.length} ${at(b)}`
+    );
+}
+
 /**
  * The cache-key soundness property for request-dependent content: when two
  * visitors to the same path get DIFFERENT answers (a cookie, header, query or
@@ -483,7 +501,7 @@ async function variance(
             differing.push(a.target);
             expect(
                 isEdgeCached(ra) || isEdgeCached(rb),
-                `UNSOUND: ${a.target} answered different content to two visitors but the preload would edge-cache it`,
+                `UNSOUND: ${a.target} answered different content to two visitors but the preload would edge-cache it\n${describeDifference(ra, rb)}`,
             ).toBe(false);
         }
     }
@@ -686,6 +704,36 @@ for (const runtime of ["node", "bun"] as const) {
         }, 300_000);
     });
 }
+
+describe("the soundness fixtures are deterministic", () => {
+    // A page on a short ISR window goes STALE while the suite is still running (the
+    // build is made once and served minutes later), and the regenerated entry is not
+    // byte-identical to the build-time one (a render-height hint in the flight
+    // payload changes). Two visitors then "got different content" with no request
+    // dependence at all, which is noise for the property under test. The fixtures
+    // therefore use a window far longer than any run.
+    it("no fixture page revalidates in under ten minutes", () => {
+        const offenders: string[] = [];
+        const walk = (dir: string) => {
+            for (const e of readdirSync(dir, { withFileTypes: true })) {
+                const full = join(dir, e.name);
+                if (e.isDirectory()) walk(full);
+                else if (/\.(js|jsx|ts|tsx)$/.test(e.name)) {
+                    const text = readFileSync(full, "utf8");
+                    for (const m of text.matchAll(
+                        /revalidate(?:\s*=\s*|:\s*)(\d+)/g,
+                    )) {
+                        if (Number(m[1]) < 600)
+                            offenders.push(`${full}: revalidate ${m[1]}`);
+                    }
+                }
+            }
+        };
+        walk(join(here, "fixtures", "cdn-soundness-app"));
+        walk(join(here, "fixtures", "cdn-soundness-pages"));
+        expect(offenders).toEqual([]);
+    });
+});
 
 describe("CDN soundness harness can see red", () => {
     it("a request the middleware ran on and the preload would cache is flagged", async () => {
