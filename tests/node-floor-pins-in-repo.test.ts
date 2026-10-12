@@ -106,11 +106,17 @@ describe('engines.node', () => {
           m.json.private !== true && m.f.startsWith('packages/') && m.f.split('/').length === 3,
       );
     expect(publishable.length).toBeGreaterThanOrEqual(3);
-    // Every publishable package a user installs carries the floor, not just core.
-    const missing = publishable.filter(
-      (m) => m.json.engines?.node === undefined && /kn-next|core/.test(m.f),
-    );
-    expect(missing.map((m) => m.f)).toEqual([]);
+    // Explicit, not pattern-matched: the publishable packages that declare NO
+    // engines, and why. lib and db are libraries consumed only through
+    // @getknext/core (which declares the floor and refuses to start below it),
+    // so a package manager already warns at the core boundary. Any other
+    // publishable package without engines is a failure.
+    const DECLARES_NONE = ['packages/db/package.json', 'packages/lib/package.json'];
+    const missing = publishable
+      .filter((m) => m.json.engines?.node === undefined)
+      .map((m) => m.f)
+      .sort();
+    expect(missing).toEqual(DECLARES_NONE);
     expect(withEngines.map((m) => m.f)).toContain('packages/kn-next/package.json');
     expect(withEngines.map((m) => m.f)).toContain('packages/kn-next-alias/package.json');
   });
@@ -269,5 +275,63 @@ describe('base images', () => {
 
   it('found `image: node:` references (the scan is not vacuous)', () => {
     expect(imageRefs).toBeGreaterThanOrEqual(5);
+  });
+});
+describe('docs: copy-pasteable Node pins in user docs and repo markdown', () => {
+  // Historical records (what was true when written), not instructions to a reader.
+  const HISTORY = ['docs/benchmarks/', 'docs/adr/', 'docs/wayfinder/'];
+  const docs = tracked.filter(
+    (f) =>
+      /\.(md|mdx)$/.test(f) &&
+      !/(^|\/)CHANGELOG\.md$/.test(f) &&
+      !f.startsWith('.changeset/') &&
+      !f.startsWith('.claude/') &&
+      !HISTORY.some((h) => f.startsWith(h)),
+  );
+
+  it('scans the user docs (mdx) and repo markdown', () => {
+    expect(
+      docs.filter((f) => f.startsWith('apps/docs/content/') && f.endsWith('.mdx')).length,
+    ).toBeGreaterThan(20);
+    expect(docs).toContain('README.md');
+  });
+
+  it('the history exemption is real: those trees exist and record older Node pins', () => {
+    for (const h of HISTORY) {
+      expect(
+        tracked.some((f) => f.startsWith(h)),
+        `${h} has tracked files`,
+      ).toBe(true);
+    }
+    expect(tracked.some((f) => f.startsWith('docs/benchmarks/') && /node:22/.test(read(f)))).toBe(
+      true,
+    );
+  });
+
+  const PATTERNS: Array<[string, RegExp]> = [
+    ['node-version', /\bnode-version:\s*["']?([^\s"'},]+)/],
+    ['FROM node', /^\s*FROM\s+(?:--platform=\S+\s+)?node:([^\s"'@\\`]+)/i],
+    ['image: node', /\bimage:\s*["']?node:([^\s"'@\\`]+)/],
+  ];
+  let hits = 0;
+  for (const f of docs) {
+    read(f)
+      .split('\n')
+      .forEach((line, i) => {
+        for (const [label, re] of PATTERNS) {
+          const m = line.match(re);
+          if (!m) continue;
+          hits++;
+          it(`${f}:${i + 1} ${label} ${m[1]} is >=${FLOOR}`, () => {
+            const major = majorOf(m[1]);
+            expect(major, `unreadable ${label} ${m[1]}`).toBeDefined();
+            expect(major as number).toBeGreaterThanOrEqual(FLOOR);
+          });
+        }
+      });
+  }
+
+  it('found copy-pasteable pins (the scan is not vacuous)', () => {
+    expect(hits).toBeGreaterThanOrEqual(4);
   });
 });

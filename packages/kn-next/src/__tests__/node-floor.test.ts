@@ -31,6 +31,7 @@ import { spawnSync } from "node:child_process";
 import {
     existsSync,
     mkdtempSync,
+    readdirSync,
     readFileSync,
     rmSync,
     writeFileSync,
@@ -135,7 +136,7 @@ describe("the built bin", () => {
 
     // A preload that makes the running Node REPORT 22.12.0, so the real built
     // bin takes its real code path with no production-side seam.
-    function runAs22(args: string[]) {
+    function runAs22(args: string[], entry: string = distBin) {
         const dir = mkdtempSync(join(tmpdir(), "knext-node-floor-"));
         try {
             const stub = join(dir, "stub.mjs");
@@ -143,7 +144,7 @@ describe("the built bin", () => {
                 stub,
                 "Object.defineProperty(process.versions, 'node', { value: '22.12.0' });\n",
             );
-            return spawnSync(NODE_BIN, ["--import", stub, distBin, ...args], {
+            return spawnSync(NODE_BIN, ["--import", stub, entry, ...args], {
                 encoding: "utf8",
                 env: { ...process.env, NODE_OPTIONS: "", NO_COLOR: "1" },
                 timeout: 30_000,
@@ -156,6 +157,47 @@ describe("the built bin", () => {
     for (const args of [["--help"], ["doctor"], ["deploy", "--help"], []]) {
         it(`reporting Node 22: \`knext ${args.join(" ")}\` exits 1 with only the floor line`, () => {
             const r = runAs22(args);
+            expect(r.status).toBe(1);
+            expect(r.stderr.trim()).toBe(MESSAGE_FOR_22);
+            expect(r.stdout).toBe("");
+        });
+    }
+
+    // Every runnable entry, found by SCANNING dist/cli for the node shebang
+    // (the same rule the tsup hook uses), not by an enumerated list. cli.mdx
+    // documents several of these as directly runnable.
+    const cliDist = join(pkgRoot, "dist", "cli");
+    const runnable = existsSync(cliDist)
+        ? readdirSync(cliDist).filter(
+              (f) =>
+                  f.endsWith(".js") &&
+                  readFileSync(join(cliDist, f), "utf8").startsWith(
+                      "#!/usr/bin/env node\n",
+                  ),
+          )
+        : [];
+
+    it("finds the documented directly-runnable entries by scanning", () => {
+        for (const f of [
+            "kn-next.js",
+            "preview.js",
+            "loadtest.js",
+            "build.js",
+            "cleanup.js",
+            "doctor.js",
+        ]) {
+            expect(runnable).toContain(f);
+        }
+    });
+
+    for (const f of runnable) {
+        it(`${f}: the guard is the first import`, () => {
+            const src = readFileSync(join(cliDist, f), "utf8");
+            const first = src.match(/^import\s[^;\n]*?["']([^"']+)["'];?$/m);
+            expect(first?.[1]).toBe("./node-floor-guard.cjs");
+        });
+        it(`${f}: reporting Node 22 exits 1 with only the floor line`, () => {
+            const r = runAs22(["--help"], join(cliDist, f));
             expect(r.status).toBe(1);
             expect(r.stderr.trim()).toBe(MESSAGE_FOR_22);
             expect(r.stdout).toBe("");
@@ -199,6 +241,23 @@ describe("a REAL Node 22 binary", () => {
                 "KNEXT_NODE22_BIN must be set in the node-floor-real-22 job",
             ).toBeTruthy();
         }
+    });
+
+    it("`node@22 dist/cli/build.js` (a non-bin entry) exits non-zero naming the floor", () => {
+        if (!bin) {
+            return;
+        }
+        const r = spawnSync(
+            bin,
+            [join(pkgRoot, "dist", "cli", "build.js"), "--help"],
+            {
+                encoding: "utf8",
+                env: { ...process.env, NODE_OPTIONS: "" },
+                timeout: 30_000,
+            },
+        );
+        expect(r.status).not.toBe(0);
+        expect(r.stderr).toContain("knext requires Node.js 24 or later");
     });
 
     it("`node@22 knext --help` exits non-zero naming the floor", () => {
