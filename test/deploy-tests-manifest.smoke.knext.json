@@ -158,7 +158,8 @@
       "test/e2e/app-dir/metadata-streaming-parallel-routes/metadata-streaming-parallel-routes.test.ts",
       "test/e2e/app-dir/segment-cache/metadata/segment-cache-metadata.test.ts",
       "test/e2e/app-dir/non-root-project-monorepo/non-root-project-monorepo.test.ts",
-      "test/e2e/app-dir/prerender-encoding/prerender-encoding.test.ts"
+      "test/e2e/app-dir/prerender-encoding/prerender-encoding.test.ts",
+      "test/e2e/app-dir/use-cache-output-export/use-cache-output-export.test.ts"
     ]
   },
   "$knextQuarantines": [
@@ -414,6 +415,11 @@
       "test": "test/e2e/app-dir/ppr-full/**/*",
       "category": "ppr",
       "rationale": "Partial Prerendering (PPR) is not adapter-standardizable yet (CLAUDE.md §6 Tier C, upstream-gated); knext does not implement the PPR resume/stream contract. compat-matrix row: PPR ❌."
+    },
+    {
+      "test": "test/e2e/app-dir/use-cache-output-export/use-cache-output-export.test.ts",
+      "category": "static-export",
+      "rationale": "knext deploys a server (`output: 'standalone'`) only; a valid `output: 'export'` build emits `out/` and no `.next/standalone/server.js`, so there is nothing to boot. The adapter respects `output: 'export'` (it no longer overrides it) and the CLI refuses a static export with an actionable message (a static export is not a server deployment). The compat harness builds with `next build` directly and fails in e2e-deploy.sh with `standalone server.js not found`. This file is the VALID-export case, so it cannot pass here by design. Evidence: node x turbopack run 38205914958 and bun x turbopack run 38209847010, FINAL 3/3. Removal condition: knext gains a static-export serving path. `interception-routes-output-export` is deliberately NOT excluded: it passes through Next's own export validation (the build is rejected, which is what that test asserts) and stays a live positive test of the adapter behaviour."
     }
   ],
   "$knextUpstreamRuntimeDefects": [
@@ -423,7 +429,7 @@
       "nextjsRef": "v16.4.0",
       "cases": ["builds an app-router app with tree-shaking enabled and renders"],
       "mechanism": "The fixture sets `experimental.turbopackModuleFragments: true`. Turbopack's module-fragment chunks (here `server/chunks/ssr/node_modules_next_dist_esm_build_templates_app-page_*.js`) contain assignments to `const` bindings in code that never runs. The compiled Bun executable loads the chunk through Bun's own parser, which reports it as a parse-time error (`Cannot assign to \"e\" because it is a constant`, 12 errors), so the page fails with `ChunkLoadError`. Node defers the same assignment to a runtime TypeError that is never reached. Minimal repro: `if (process.argv[2]===\"x\") { const e = 1; e = 2 }` loads under node, exits 1 under bun 1.4.2.",
-      "evidence": "run 38181750458 (Next 16.4.0 smoke, NEXTJS_REF=v16.4.0, bun x turbopack, main f62b45eff, shard 14): FINAL 3/3, `expect($('h1').text()).toContain('tree shaking app')` Received '' (test line 10), server log `ChunkLoadError` caused by `AggregateError: 12 errors building`. Green on node x turbopack (run 38161219571), node x webpack (run 38174324666) and bun x webpack (run 38186195085).",
+      "evidence": "run 38181750458 (Next 16.4.0 smoke, NEXTJS_REF=v16.4.0, bun x turbopack, main f62b45eff, shard 14): FINAL 3/3, `expect($('h1').text()).toContain('tree shaking app')` Received '' (test line 10), server log `ChunkLoadError` caused by `AggregateError: 12 errors building`. Green on node x turbopack (run 38161219571), node x webpack (run 38174324666) and bun x webpack (run 38186195085). Re-confirmed after the #2226 guard and #2231 harness fixes landed: run 38209847010 (bun x turbopack, #2149 head fe06eed56): the same file FINAL 3/3. The compat harness builds with `next build` directly, not through the CLI, so the #2226 refusal is not on its path and the red is expected.",
       "upstream": {
         "issue": "oven-sh/bun#45007",
         "fix": "oven-sh/bun#45010"
@@ -438,7 +444,7 @@
       "nextjsRef": "v16.4.0",
       "cases": ["builds and runs Node.js middleware importing via a star re-export"],
       "mechanism": "Same mechanism as turbopack-tree-shaking-chunkgroup: the fixture sets `experimental.turbopackModuleFragments: true`, the Node.js-runtime middleware chunk contains a const assignment in dead code, and Bun's parser rejects it at load time (`Cannot assign to \"t\" because it is a constant`). The middleware never runs, so the `x-key` response header is absent.",
-      "evidence": "run 38181750458 (Next 16.4.0 smoke, NEXTJS_REF=v16.4.0, bun x turbopack, main f62b45eff): FINAL 3/3, `expect(res.headers.get('x-key')).toBe('k')` Received null (test line 23), server log `Cannot assign to \"t\" because it is a constant`. Green on node x turbopack (run 38161219571), node x webpack (run 38174324666) and bun x webpack (run 38186195085).",
+      "evidence": "run 38181750458 (Next 16.4.0 smoke, NEXTJS_REF=v16.4.0, bun x turbopack, main f62b45eff): FINAL 3/3, `expect(res.headers.get('x-key')).toBe('k')` Received null (test line 23), server log `Cannot assign to \"t\" because it is a constant`. Green on node x turbopack (run 38161219571), node x webpack (run 38174324666) and bun x webpack (run 38186195085). Re-confirmed after the #2226 guard and #2231 harness fixes landed: run 38209847010 (bun x turbopack, #2149 head fe06eed56): the same file FINAL 3/3. The compat harness builds with `next build` directly, not through the CLI, so the #2226 refusal is not on its path and the red is expected.",
       "upstream": {
         "issue": "oven-sh/bun#45007",
         "fix": "oven-sh/bun#45010"
