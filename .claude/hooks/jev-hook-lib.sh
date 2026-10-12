@@ -75,7 +75,8 @@ jev_ge() { awk -v x="$1" -v t="$2" 'BEGIN { exit !(x + 0 >= t + 0) }'; }
 #
 # What counts (each alternative is mutation-proved):
 #   * a PEM marker;
-#   * GitHub tokens: gh[pousr]_ + 36 alnum; github_pat_ + 22 or more [A-Za-z0-9_];
+#   * GitHub tokens: gh[pousr]_ + 36 alnum (and any further token characters: an over-long token is
+#     matched, and so redacted, in full); github_pat_ + 22 or more [A-Za-z0-9_];
 #   * npm_ + 36 alnum; `sk-` + 20 or more (needs a non-alphanumeric before it, so disk-/task-
 #     never match); xox[bp]- + a body; AKIA + 16 [0-9A-Z];
 #   * scheme://user:pass@host;
@@ -90,6 +91,10 @@ jev_ge() { awk -v x="$1" -v t="$2" 'BEGIN { exit !(x + 0 >= t + 0) }'; }
 #   * a pure-hex run of exactly 40 or 64 characters (a git SHA, a sha256 digest);
 #   * a `data:...;base64,...` URI (an inline image or font).
 #   * A real hex secret of exactly 40 or 64 characters is let through (accepted, stated).
+#   * KNOWN LIMIT, accepted: a token split across lines (`ghp_abc<newline>def...`) is matched per
+#     line and is not caught; so is `://host:port/path@x` read as userinfo (over-redacted, harmless).
+#   * PEM: redaction removes the whole block, BEGIN marker through its END line (to the end of the
+#     text when there is no END); the detection rule only needs the marker.
 #
 # The screen does NOT skip on a hit any more (a skip let an attacker evade it by pasting one fake
 # literal): jev_redact replaces every matched literal with a placeholder and the REDACTED text is
@@ -97,7 +102,8 @@ jev_ge() { awk -v x="$1" -v t="$2" 'BEGIN { exit !(x + 0 >= t + 0) }'; }
 # _jev_strip_exempt below are the single source) and re-runs detection on its own output; if
 # redaction errors or a literal survives it returns non-zero and the caller falls back to the old
 # skip. pr-risk.sh keeps the skip (it sends no diff content at all).
-JEV_LITERAL_RE='-----BEGIN|gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{22,}|npm_[A-Za-z0-9]{36}|(^|[^a-z0-9])sk-[A-Za-z0-9_-]{20,}|xox[bp]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|://[^/@[:space:]]+:[^/@[:space:]]+@|authorization:[[:space:]]*basic[[:space:]]+[^[:space:]]+|(authorization:[[:space:]]*|bearer[[:space:]]+)([A-Za-z]+[[:space:]]+)?([A-Za-z0-9._~+/=-]{16,}|[A-Za-z._~+/=-]*[0-9][A-Za-z0-9._~+/=-]{7,})'
+JEV_Q="[\"']" # an optional quote around a header value (JSON / shell)
+JEV_LITERAL_RE='-----BEGIN|gh[pousr]_[A-Za-z0-9]{36}[A-Za-z0-9_-]*|github_pat_[A-Za-z0-9_]{22,}|npm_[A-Za-z0-9]{36}[A-Za-z0-9_-]*|(^|[^a-z0-9])sk-[A-Za-z0-9_-]{20,}|xox[bp]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}[A-Za-z0-9_-]*|://[^/@[:space:]]+:[^@[:space:]]+@|authorization'"$JEV_Q"'?[[:space:]]*:[[:space:]]*'"$JEV_Q"'?basic[[:space:]]+[^[:space:]]+|(authorization'"$JEV_Q"'?[[:space:]]*:[[:space:]]*'"$JEV_Q"'?|bearer[[:space:]]+'"$JEV_Q"'?)([A-Za-z]+[[:space:]]+)?([A-Za-z0-9._~+/=-]{16,}|[A-Za-z._~+/=-]*[0-9][A-Za-z0-9._~+/=-]{7,})'
 JEV_ENTROPY_RUN_RE='[A-Za-z0-9+=]{32,}'
 JEV_UNICODE_SPACES="$(printf '\302\240|\341\232\200|\342\200[\200-\212]|\342\200\257|\342\201\237|\343\200\200')"
 # _jev_has_nul <file> — true (0) if the file holds a NUL byte OR the test itself failed.
@@ -188,7 +194,7 @@ jev_has_literal_secret() {
 # does not matter for safety: the caller re-runs detection on the result.
 _jev_replace_fixed() {
   awk '
-    FILENAME == ARGV[1] { if (length($0) > 0) { n++; p[n] = $0 } next }
+    FILENAME == ARGV[1] { if (length($0) > 0 && !($0 in seen)) { seen[$0] = 1; n++; p[n] = $0 } next }
     { line = $0
       for (k = 1; k <= n; k++) {
         s = p[k]; l = length(s); out = ""
@@ -196,6 +202,32 @@ _jev_replace_fixed() {
         line = out line
       }
       print line }' "$1" "$2"
+}
+
+# _jev_redact_pem <textfile> — print the text with every PEM block replaced by one placeholder:
+# from the BEGIN marker (case-insensitive, anywhere in a line) through the closing dashes of its
+# END line; with no END, through the end of the text. Text around the block on the same lines stays.
+_jev_redact_pem() {
+  awk '
+    { line = $0; out = ""
+      while (1) {
+        low = tolower(line)
+        if (inpem) {
+          i = index(low, "-----end")
+          if (i == 0) { line = ""; break }
+          rest = substr(line, i + 8); j = index(rest, "-----")
+          inpem = 0
+          if (j == 0) { line = ""; break }
+          line = substr(rest, j + 5)
+        } else {
+          i = index(low, "-----begin")
+          if (i == 0) break
+          out = out substr(line, 1, i - 1) "[REDACTED]"
+          line = substr(line, i + 10); inpem = 1
+        }
+      }
+      print out line
+    }' "$1"
 }
 
 # jev_redact <in> <out> — write <in> to <out> with every matched literal replaced by [REDACTED].
@@ -218,7 +250,11 @@ _jev_redact_into() { # <in> <out> <workdir>
   local in="$1" out="$2" w="$3" cur stripped rc
   # Unicode spaces normalised, exactly as detection does.
   cur=$(sed -E -e "s/$JEV_UNICODE_SPACES/ /g" "$in") || return 1
-  # Pass 1: token shapes, PEM, user:pass@, headers (on the original text, as in detection).
+  # PEM blocks first: the marker is only the first line of a secret; the body (short lines, lines
+  # with no digit) and the END line match no rule of their own, so the whole block goes.
+  printf '%s\n' "$cur" >"$w/t0" || return 1
+  cur=$(_jev_redact_pem "$w/t0") || return 1
+  # Pass 1: token shapes, user:pass@, headers (on the original text, as in detection).
   grep -Eio -- "$JEV_LITERAL_RE" <<<"$cur" >"$w/pat1"
   rc=$?
   [ "$rc" -le 1 ] || return 1
