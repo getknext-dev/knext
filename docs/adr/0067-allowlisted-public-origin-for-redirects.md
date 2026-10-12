@@ -1,6 +1,6 @@
 # ADR-0067: Allowlisted public origin for redirects built from `request.url`
 
-- **Status:** **Proposed (2026-10-10).** Exit: Accepted at the next sprint-close design review.
+- **Status:** **Accepted (2026-10-12, v2 Sprint 3 close design review).** Proposed 2026-10-10; exit was acceptance at the next sprint-close design review — the architect recommended acceptance and the system designer raised no objection (`.claude/plans/v2-sprint3-close-architect.md`, `v2-sprint3-close-systemdesigner.md`).
   Phase 1 (this ADR's runtime half) lands with it; phase 2 (the CRD field) is a separate issue.
 - **Date:** 2026-10-10
 - **Trigger class:** security (a response header derived from request headers) + runtime (a new
