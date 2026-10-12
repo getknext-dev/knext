@@ -1,9 +1,17 @@
 # ADR-0068: CDN cache tier — cache-correct edge headers and tag purge, no provisioning
 
-- **Status:** **Proposed (2026-10-12).** Exit: **Accepted at the Sprint 4 design gate** (architect +
-  system designer) **before CDN-1 (#2259) or CDN-2 (#2260) start building.** This is the one Sprint 4
-  task whose acceptance is a build gate, because it amends a `CLAUDE.md` stance (design before code).
-  jev on the status: Proposed until the gate **0.83** / Accepted on merge 0.17.
+- **Status:** **Accepted (2026-10-12)** at the Sprint 4 design gate, after two sign-offs on head
+  `23ebce9ae`:
+  - [architect, round 4](https://github.com/getknext-dev/knext/pull/2266#issuecomment-6127123256);
+  - [system designer, round 4](https://github.com/getknext-dev/knext/pull/2266#issuecomment-6127138494).
+
+  Their non-blocking notes are folded in as revision 4. CDN-1 (#2259) and CDN-2 (#2260) may now
+  build; acceptance was their build gate, because this ADR amends a `CLAUDE.md` stance (design before
+  code). **The `CLAUDE.md` §8/§6 edit in Appendix A is still a founder action.** This ADR governs
+  until it lands.
+
+  History: Proposed 2026-10-12. jev on keeping it Proposed until the gate: **0.83** (Accepted on merge
+  0.17).
   **Revision 1 (2026-10-12)** applies design-gate round 1 on #2266: the system designer's block
   (middleware auth bypass, now D4.1 condition 10) and required edits, and the architect's four
   required edits. Each change is marked "(gate r1)" where it lands.
@@ -17,6 +25,12 @@
   candidates stay in condition 10 as defence in depth. The soundness corpus is widened and the test
   runs on every Next bump. `_next/data` is normalised whatever the build ID. The architect's condition
   is D11's compiled single-exec paragraph. Marked "(gate r4)".
+  **Revision 4 (2026-10-12)** folds in both gates' non-blocking round-4 notes, marked "(gate r4 note)":
+  - the definition of "raw" and the refusal of targets that do not start with `/`;
+  - the `non_canonical_path` metric reason;
+  - the never-cached shapes listed in Consequences;
+  - the test for how raw is derived on Node and Bun;
+  - the embed-set note for the compiled single-exec.
 - **Date:** 2026-10-12
 - **Trigger class:** ADR (amends the `CLAUDE.md` §8 "defer global CDN" stance for the header + purge
   slice) + CRD (`spec.cdn` on `NextApp`) + public API (`knext.config.ts` key, CR builder, preflight) +
@@ -317,7 +331,15 @@ Anything not positively allowed is not edge-cacheable:
 
     An app whose artifact says `middleware: "none"` is unaffected by condition 10.
 11. **The request's raw pathname is canonical** (gate r4, system-designer block; closes the
-    path-normalisation *class*). A pathname is canonical only if **all** of these hold:
+    path-normalisation *class*).
+
+    **"Raw" means the wire request-target** (gate r4 note): `req.url` exactly as the HTTP parser
+    delivered it, cut at the first `?`. It is never a value that has been through a URL parser, since
+    a parser would already have normalised away what this condition checks. A request-target that does
+    not start with `/` is refused and never edge-cached. That covers absolute-form (`http://h/x`),
+    asterisk-form and an empty path.
+
+    A pathname is canonical only if **all** of these hold:
     - it equals its own WHATWG-normalised form, `new URL('http://n' + raw).pathname`, so it has no
       `/./` or `/../` segment and no `\`;
     - it contains no `//`;
@@ -327,7 +349,9 @@ Anything not positively allowed is not edge-cacheable:
     - it decodes without error, and the decoded form has no `.` or `..` segment.
 
     Percent-encoded non-ASCII (for example `/blog/caf%C3%A9`) stays canonical. **A non-canonical
-    request is never edge-cached, whatever the matchers, prefix lists or provider row say.**
+    request is never edge-cached, whatever the matchers, prefix lists or provider row say.** It is
+    counted as `knext_cdn_edge_decision_total{result="skipped",reason="non_canonical_path"}` (gate r4
+    note).
 
     Why this closes the class rather than the instance. Rounds 2, 3 and 4 each found one more way the
     path Next tests differs from the path on the wire: locale insertion, percent-decoding, dot-segment
@@ -546,7 +570,8 @@ registry (`trackWrite`). A 429 must not hold a Server Action open for a minute.
 **D6.5 Observability.** `knext_cdn_purge_total{provider,result}` with
 `result ∈ {ok, ratelimited, failed, skipped_no_credential, skipped_unsupported, skipped_invalid_target}`,
 plus `knext_cdn_edge_decision_total{result,reason}` with a closed `reason` set (the D4.1 condition that
-failed, `tag_overflow`, `rsc_without_rsc_param`, …) so "why isn't this page cached?" has an answer. A
+failed, `tag_overflow`, `rsc_without_rsc_param`, `non_canonical_path`, `routing_artifact_missing`, …)
+so "why isn't this page cached?" has an answer. A
 purge failure logs the provider, the status code and the tag count. It never logs the response body,
 the token or the request headers.
 
@@ -631,7 +656,10 @@ this target too, so `knext-cdn-routing.json` is produced. Two steps get it into 
 
 - **The artifact:** `standalone-compile.mjs` embeds it through the existing `standalone-embed.mjs`
   mechanism, the one that already embeds Next's `fs`-read JSON files. The preload reads it from the
-  embedded root.
+  embedded root. The embedder decides which `.next` files to embed by their extension (gate r4 note),
+  so CDN-1 does one of two things: write the artifact under the `.next` dist dir as a `.json` file the
+  embed set already takes, or add it to the embed set explicitly. CDN-1 then tests that the compiled
+  preload reads it from the embedded `$bunfs` root, **not** from a file on disk next to the binary.
 - **The preload:** the CDN header preload joins `PRELOAD_NAMES`, as `public-origin.cjs` did.
 
 The claim is evidence-gated. **No docs or status text says CDN mode works on the compiled target
@@ -763,6 +791,17 @@ notice.
   links do not produce them, so the cost is crafted or unusual URLs. The residual risk is a future Next
   normalisation that changes an already-canonical path. The soundness test runs on every Next bump to
   catch exactly that.
+
+  Some legitimate URLs are never edge-cached as a result (gate r4 note):
+  - slugs containing an encoded slash or percent sign (`%2F`, `%25`), for example a product ID or file
+    name that itself contains `/` or `%`;
+  - any path with an encoded unreserved character, such as `%7E` for `~` (Java's `URLEncoder` emits
+    this) or encoded ASCII letters and digits from other over-eager encoders;
+  - paths with `//`, a dot segment or a backslash;
+  - request-targets that do not start with `/`.
+
+  They are served correctly, from the origin. The docs list them under "why isn't this page cached?",
+  next to the `reason="non_canonical_path"` metric.
 - **Condition 10 depends on a knext build artifact.** A packaging slip that drops
   `knext-cdn-routing.json` turns off edge HTML caching. That is safe, and it is not silent: the
   `knext_cdn_edge_decision_total` metric counts it under `reason="routing_artifact_missing"`, the
@@ -790,6 +829,13 @@ notice.
    Exit tests per the Sprint 4 plan, including:
    - mutation-proved RSC rules (both directions and the `Content-Type` check);
    - mutation-proved conditions 10 and 11 (gates r3 and r4):
+     - a unit test pinning **how raw is derived, on Node and on Bun** (gate r4 note; this was the
+       failure mode no test covered yet). The preload's raw pathname must equal the wire
+       request-target cut at the first `?`, byte for byte. That includes `%2e`, `%2F`, `//`, a
+       backslash and an absolute-form target, sent as raw bytes over a socket, not through an HTTP
+       client that normalises. A runtime whose `req.url` is already normalised before the preload
+       sees it reds this test;
+     - a request-target not starting with `/` → never edge-cached;
      - delete the artifact → nothing non-immutable is cached;
      - corrupt the artifact → nothing is cached;
      - artifact says `middleware: "none"` → only then are paths eligible without `includePaths`;
@@ -801,7 +847,9 @@ notice.
    - the soundness test ("Next ran ⇒ preload refused or matched") over the widened corpus. It is wired
      to run on **every Next version bump**: Dependabot `next` PRs and each compat-matrix Next cell, not
      only at the pinned version (gate r4);
-   - the compiled single-exec embedding of the artifact and the CDN preload (D11);
+   - the compiled single-exec embedding of the artifact and the CDN preload (D11), with a test that
+     the compiled preload reads the artifact from the embedded `$bunfs` root, not from disk (gate r4
+     note);
    - a scan proving the preload reads no Next internal manifest;
    - an admission test showing a CR cannot set its own prefix.
 2. **CDN-2 (#2260, T2 module; T1 makes the one-line wire-in after #2083):** `adapters/cdn-purge/` rows
