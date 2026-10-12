@@ -25,7 +25,6 @@
 
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
-import { stripComments } from "./doctor/checks/use-cache";
 import { UsageError } from "./shared";
 import { readNextConfigStrict } from "./turbopack-fragments-guard";
 
@@ -41,7 +40,7 @@ or host the \`out/\` folder on a static host instead.`;
 
 /** The literal `distDir` in the config text, or undefined (default `.next`). */
 export function configuredDistDir(configText: string): string | undefined {
-    return stripComments(configText).match(
+    return stripCommentsStringAware(configText).match(
         /\bdistDir\s*:\s*(["'`])([^"'`\n]+)\1/,
     )?.[2];
 }
@@ -61,11 +60,11 @@ export type StaticExportDeclaration = "unconditional" | "conditional" | "none";
 export function classifyStaticExport(
     configText: string,
 ): StaticExportDeclaration {
-    const text = stripComments(configText);
+    const text = stripCommentsStringAware(configText);
     const re = /\boutput\s*:\s*(["'`])export\1/g;
     let result: StaticExportDeclaration = "none";
     for (let m = re.exec(text); m !== null; m = re.exec(text)) {
-        const stack: string[] = [];
+        const stack: { c: string; at: number }[] = [];
         let quote: string | undefined;
         let broken = false;
         for (let i = 0; i < m.index; i++) {
@@ -74,24 +73,86 @@ export function classifyStaticExport(
                 if (c === "\\") i++;
                 else if (c === quote) quote = undefined;
             } else if (c === '"' || c === "'" || c === "`") quote = c;
-            else if (c === "{" || c === "[" || c === "(") stack.push(c);
+            else if (c === "{" || c === "[" || c === "(")
+                stack.push({ c, at: i });
             else if (c === "}" || c === "]" || c === ")") {
                 if (stack.pop() === undefined) broken = true;
             }
         }
-        const braces = stack.filter((c) => c === "{").length;
-        const brackets = stack.filter((c) => c === "[").length;
+        const braces = stack.filter((s) => s.c === "{");
+        const brackets = stack.filter((s) => s.c === "[").length;
         const prev = text.slice(0, m.index).trimEnd().slice(-1);
-        const unconditional =
+        const topLevel =
             !broken &&
             quote === undefined &&
-            braces === 1 &&
+            braces.length === 1 &&
             brackets === 0 &&
             (prev === "{" || prev === ",");
-        if (unconditional) return "unconditional";
+        if (topLevel && isExportedObject(text, braces[0].at)) {
+            return "unconditional";
+        }
         result = "conditional";
     }
     return result;
+}
+
+const QUOTES = ["'", '"', "`"];
+
+/** Strip `//` and block comments, but never inside a string or template literal. */
+export function stripCommentsStringAware(src: string): string {
+    let out = "";
+    let quote: string | undefined;
+    for (let i = 0; i < src.length; i++) {
+        const c = src[i];
+        if (quote) {
+            out += c;
+            if (c === "\\") out += src[++i] ?? "";
+            else if (c === quote) quote = undefined;
+        } else if (QUOTES.includes(c)) {
+            quote = c;
+            out += c;
+        } else if (c === "/" && src[i + 1] === "/") {
+            while (i < src.length && src[i] !== "\n") i++;
+            i--;
+        } else if (c === "/" && src[i + 1] === "*") {
+            const end = src.indexOf("*/", i + 2);
+            i = end === -1 ? src.length : end + 1;
+        } else out += c;
+    }
+    return out;
+}
+
+/** Wrapper calls (`defineConfig(`, `withX(`) and an optional `(phase) => (` arrow. */
+const WRAPPERS =
+    "(?:async\\s*)?(?:[\\w$.]+\\s*\\(\\s*)*(?:(?:async\\s*)?(?:\\([^()]*\\)|[\\w$]+)\\s*=>\\s*\\(\\s*)?";
+const INLINE_EXPORT = new RegExp(
+    `(?:export\\s+default|module\\.exports\\s*=)\\s*${WRAPPERS}$`,
+);
+const BOUND_TO = new RegExp(
+    `(?:const|let|var)\\s+([\\w$]+)\\s*(?::[^=]+)?=\\s*${WRAPPERS}$`,
+);
+
+/** Whether the object literal opening at `open` is the one the file exports. */
+function isExportedObject(text: string, open: number): boolean {
+    const before = text.slice(0, open);
+    if (INLINE_EXPORT.test(before)) return true;
+    const id = before.match(BOUND_TO)?.[1];
+    return id !== undefined && isExportedIdentifier(text, id);
+}
+
+/** `export default <id>` / `module.exports = <id>` with nothing else in the expression. */
+function isExportedIdentifier(text: string, id: string): boolean {
+    const escaped = id.replace(/\$/g, "\\$");
+    const re = new RegExp(
+        `(?:export\\s+default|module\\.exports\\s*=)\\s*${escaped}(?![\\w$])([^\\n;]*)`,
+        "g",
+    );
+    for (let m = re.exec(text); m !== null; m = re.exec(text)) {
+        // Only `as X` / `satisfies X` may follow on the line; `?`, `&&`, a
+        // call or a member access make it a different expression.
+        if (/^\s*((as|satisfies)\s+[\w$.<>\s]+)?$/.test(m[1])) return true;
+    }
+    return false;
 }
 
 function readConfigOrRefuse(

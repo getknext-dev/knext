@@ -226,3 +226,57 @@ describe("vinext: a conditional or nested output: 'export' warns instead of refu
         expectRefusal(run(dir, true).caught);
     });
 });
+
+describe("vinext: only the object that is actually exported can be refused", () => {
+    const notExported: Record<string, string> = {
+        "a non-exported object, export is a ternary of two":
+            "const s = { output: 'export' }; const v = { output: 'standalone' }; export default process.env.STATIC ? s : v;",
+        "a non-exported object next to module.exports of another":
+            "const doc = { output: 'export' }; module.exports = { a: 1 };",
+        "a non-exported object next to an empty export default":
+            "const o = { output: 'export' }; export default {};",
+    };
+    for (const [name, config] of Object.entries(notExported)) {
+        it(`${name}: builds`, () => {
+            const dir = appDir({
+                "package.json": ESM_PKG,
+                "next.config.mjs": config,
+            });
+            const { runner, caught } = run(dir, true);
+            expect(caught).toBeUndefined();
+            expect(runner).toHaveBeenCalledTimes(1);
+        });
+    }
+
+    const exported: Record<string, string> = {
+        "export default <id> binding":
+            "const nextConfig = { output: 'export' };\nexport default nextConfig;",
+        "typed binding with satisfies":
+            "const nextConfig: NextConfig = { output: 'export' };\nexport default nextConfig satisfies NextConfig;",
+        "module.exports = <id> binding":
+            "const c = { output: 'export' };\nmodule.exports = c;",
+        "module.exports inline": "module.exports = { output: 'export' };",
+        "arrow returning the object":
+            "export default (phase) => ({ output: 'export' });",
+        "a string containing a comment opener before the export":
+            "export default { basePath: 'a/*b', output: 'export' }; /* c */",
+    };
+    for (const [name, config] of Object.entries(exported)) {
+        it(`${name}: refused`, () => {
+            const dir = appDir({
+                "package.json": ESM_PKG,
+                "next.config.mjs": config,
+            });
+            expectRefusal(run(dir, true).caught);
+        });
+    }
+
+    it("an identifier exported through a ternary is not a binding match", () => {
+        const dir = appDir({
+            "package.json": ESM_PKG,
+            "next.config.mjs":
+                "const s = { output: 'export' };\nexport default process.env.X ? s : {};",
+        });
+        expect(run(dir, true).caught).toBeUndefined();
+    });
+});
