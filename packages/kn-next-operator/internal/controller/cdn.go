@@ -19,6 +19,7 @@ package controller
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -50,6 +51,17 @@ const (
 	// no object storage: mixed-build HTML at the edge is only self-consistent if
 	// both builds' immutable assets stay served (ADR-0068 D9, ADR-0011).
 	ReasonCDNCanaryWithoutAssetRetention = "CDNCanaryWithoutAssetRetention"
+
+	// ConditionCDNReservedEnvIgnored is an informational, non-fatal condition: the
+	// spec carries spec.env / spec.secrets.envMap entries in the operator-reserved
+	// KNEXT_CDN_* namespace. They are IGNORED (never set on the container, whether or
+	// not spec.cdn is set) and named here, never with their values. The reservation
+	// is enforced by the operator rather than by CRD CEL because a new validation
+	// rule on an existing field is not additive (ADR-0017 Amendment 2).
+	ConditionCDNReservedEnvIgnored = "CDNReservedEnvIgnored"
+
+	// ReasonCDNReservedEnvIgnored is the reason (and the Warning event reason) for it.
+	ReasonCDNReservedEnvIgnored = "CDNReservedEnvIgnored"
 
 	// cdnDefaultHTMLTTLSeconds mirrors the CRD default for spec.cdn.htmlTTLSeconds
 	// (applied by the apiserver; a Go client that omits the field gets 0 here).
@@ -123,6 +135,29 @@ func cdnEnvVars(app *appsv1alpha1.NextApp) []corev1.EnvVar {
 // straight through and let a CR choose its own prefix or endpoint).
 func isReservedCDNEnvName(name string) bool {
 	return strings.HasPrefix(name, appsv1alpha1.CDNEnvPrefix)
+}
+
+// cdnReservedEnvIgnored lists the spec entries the operator ignores because their
+// name is in the reserved KNEXT_CDN_* namespace, as "spec.env[NAME]" /
+// "spec.secrets.envMap[NAME]", sorted (spec.env first). Names only: a value, a
+// Secret name or a Secret key is never included.
+func cdnReservedEnvIgnored(app *appsv1alpha1.NextApp) []string {
+	var env, envMap []string
+	for name := range app.Spec.Env {
+		if isReservedCDNEnvName(name) {
+			env = append(env, "spec.env["+name+"]")
+		}
+	}
+	if app.Spec.Secrets != nil {
+		for name := range app.Spec.Secrets.EnvMap {
+			if isReservedCDNEnvName(name) {
+				envMap = append(envMap, "spec.secrets.envMap["+name+"]")
+			}
+		}
+	}
+	sort.Strings(env)
+	sort.Strings(envMap)
+	return append(env, envMap...)
 }
 
 // cdnAdvisory returns the informational CDNAdvisory reason and message for an

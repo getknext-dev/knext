@@ -862,7 +862,7 @@ export function validateConfig(
         for (const name of Object.keys(config.env)) {
             if (name.startsWith(CDN_ENV_PREFIX)) {
                 errors.push(
-                    `'env.${name}' is in the ${CDN_ENV_PREFIX}* namespace, which the operator reserves (set 'cdn' instead). The cluster would reject this at apply time.`,
+                    `'env.${name}' is in the ${CDN_ENV_PREFIX}* namespace, which the operator reserves (set 'cdn' instead). The operator would ignore the entry and report it in a CDNReservedEnvIgnored condition.`,
                 );
             } else if (
                 (RESERVED_ENV_NAMES as readonly string[]).includes(name)
@@ -883,7 +883,7 @@ export function validateConfig(
     for (const name of Object.keys(config.secrets?.envMap ?? {})) {
         if (name.startsWith(CDN_ENV_PREFIX)) {
             errors.push(
-                `'secrets.envMap.${name}' is in the ${CDN_ENV_PREFIX}* namespace, which the operator reserves (set 'cdn' instead). The cluster would reject this at apply time.`,
+                `'secrets.envMap.${name}' is in the ${CDN_ENV_PREFIX}* namespace, which the operator reserves (set 'cdn' instead). The operator would ignore the entry and report it in a CDNReservedEnvIgnored condition.`,
             );
         }
     }
