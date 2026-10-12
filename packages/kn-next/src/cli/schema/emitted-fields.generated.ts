@@ -37,6 +37,7 @@ export const EMITTED_CR_FIELD_PATHS: readonly string[] = [
     "spec.imagePullSecrets",
     "spec.imagePullSecrets.*.name",
     "spec.networking",
+    "spec.networking.publicHosts",
     "spec.networking.visibility",
     "spec.observability",
     "spec.observability.enabled",

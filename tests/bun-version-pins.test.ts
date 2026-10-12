@@ -167,6 +167,9 @@ describe('bun-version pins (#754) — scanned across every workflow', () => {
       // workspace's bun to run scripts/compat-credential-freeze-guard.mjs — a
       // count RISING is a decision, per the rule above.
       'compat-credential-freeze-guard.yml': 1,
+      // NEW (deep-health alert kind e2e): the fixture runs the reference app's
+      // instrumentation under bun, so the lane installs the workspace with it.
+      'deep-health-alert-kind-e2e.yml': 1,
       'docs-closure-nightly.yml': 1,
       // NEW (#1481): the docs deploy — the PR dry-run job and the main deploy
       // job each install the workspace and build the CLI with bun.
@@ -187,6 +190,7 @@ describe('bun-version pins (#754) — scanned across every workflow', () => {
       // setup-bun step. A count RISING is a decision, per the rule above.
       'operator-upgrade-e2e.yml': 1,
       'preview.yml': 2,
+      'public-hosts-kind-e2e.yml': 1,
       // NEW (#1734, G3): the nightly rc pack-parity check builds the
       // publishable group with the workspace's bun before comparing — one
       // pinned "Setup bun" step.

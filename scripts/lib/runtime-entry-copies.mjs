@@ -116,8 +116,12 @@ export const DIVERGENT = {
       'HASH UPDATED for #1313 (malformed-path rejection before h3, a non-throwing request-error ' +
       'handler) and #1269 (the warm-path body read is bounded by drainWarmBody): both landed on ' +
       'the template and this copy from the same hunks. The recorded divergence is still ONLY the ' +
-      'image intercept.',
-    sha256: 'e57859b57aa6ca497be4b0bd31921549908febee08abac4efca47c09924fb98a',
+      'image intercept.\n\n' +
+      'HASH UPDATED for the deep-health bridge (renderScrape serves the allowlisted app family on ' +
+      ':9464): the entry now awaits renderScrape in the metrics listener. Applied to the template and ' +
+      'every copy from the same hunks by one script. The recorded divergence is still ONLY the image ' +
+      'intercept.',
+    sha256: '658f5bac0e46f0c9da42bb0908e60dc56ddfbaf391006b8e5f3798336cc71158',
   },
   'examples/bun-exec/runtime-contract.mjs': {
     reason:
@@ -138,8 +142,14 @@ export const DIVERGENT = {
       '\n\nHASH UPDATED for #1460 (resolveAssetAnchor gains the `embedded` branch + isEmbeddedPath, so a ' +
       'self-contained binary serving its own embedded `.output/public` is not warned about): applied to ' +
       'the template and every copy from the same hunks by one script. The recorded divergence is still ' +
-      'ONLY the item-4 comment block.',
-    sha256: 'f62d9f124199b736fd210f314b7c8f8b8a445a79dc269567476336252d3c2d76',
+      'ONLY the item-4 comment block.' +
+      '\n\nHASH UPDATED for the deep-health bridge (APP_METRIC_FAMILIES, filterExposition, fetchAppMetrics, ' +
+      'renderScrape, and the async metricsRequestListener): applied to the template and every copy from ' +
+      'the same hunks by one script. The recorded divergence is still ONLY the item-4 comment block.' +
+      '\n\nHASH UPDATED for the bridge size cap (APP_METRICS_MAX_BYTES and the bounded read in ' +
+      'fetchAppMetrics): applied to the template and every copy from the same hunks by one script. The ' +
+      'recorded divergence is still ONLY the item-4 comment block.',
+    sha256: '2277c0e1547fc3dc1bcf350f95b8f809cc586e000f16de7d7fdd03b87225bd5d',
   },
 };
 

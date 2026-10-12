@@ -117,6 +117,22 @@ describe('buildRollbackCommands — always the full group, never a subset', () =
     for (const cmd of distTagCmds) expect(cmd.argv).toContain('rc');
     expect(distTagCmds.every((c) => !c.argv.includes('latest'))).toBe(true);
   });
+
+  it('rolls back the 1.x maintenance lane on `latest-1` and never touches `latest` (#2040)', () => {
+    const cmds = buildRollbackCommands({
+      packageNames: PACKAGES,
+      target: '1.4.0',
+      broken: '1.4.1',
+      distTag: 'latest-1',
+      registry: 'https://registry.npmjs.org/',
+    });
+    const distTagCmds = cmds.filter((c) => c.kind === 'dist-tag');
+    expect(distTagCmds).toHaveLength(PACKAGES.length);
+    for (const cmd of distTagCmds) {
+      expect(cmd.argv[4]).toBe('latest-1');
+      expect(cmd.argv).not.toContain('latest');
+    }
+  });
 });
 
 describe('executeCommands — aborts at the first failure and reports the partial state', () => {

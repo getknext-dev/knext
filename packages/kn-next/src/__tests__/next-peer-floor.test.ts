@@ -67,10 +67,12 @@ describe("code that only served Next < 16.4.0 is deleted", () => {
         );
     });
 
-    it("the cache handler no longer normalises pre-16.3.7 bare route keys", () => {
-        expect(readPkg("src/adapters/cache-handler.js")).not.toContain(
-            "function nextRoute",
-        );
+    it("the cache handler no longer seeds Next's shared Map (Next applies the handler's cacheControl directly)", () => {
+        const src = readPkg("src/adapters/cache-handler.js");
+        expect(src).not.toContain("seedNextCacheControl");
+        expect(src).not.toContain("shared-cache-controls");
+        expect(src).not.toContain("function nextRoute");
+        expect(src).toContain("function scopeWindowToBuild");
     });
 
     it("no comment still describes the pinned runtime as Next 16.0.3", () => {

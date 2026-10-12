@@ -36,7 +36,12 @@ function tmpAppDir(pkgJson: string | null): string {
 describe("runProjectBuild", () => {
     it("runs the project's npm build script through the injected runner", () => {
         const run = mock();
-        runProjectBuild({ requireEsm: false, run });
+        runProjectBuild({
+            requireEsm: false,
+            runtimeId: "node",
+            builderId: "webpack",
+            run,
+        });
         expect(run).toHaveBeenCalledWith(["npm", "run", "build"]);
     });
 
@@ -46,7 +51,12 @@ describe("runProjectBuild", () => {
         });
         let caught: unknown;
         try {
-            runProjectBuild({ requireEsm: false, run });
+            runProjectBuild({
+                requireEsm: false,
+                runtimeId: "node",
+                builderId: "webpack",
+                run,
+            });
         } catch (err) {
             caught = err;
         }
@@ -79,9 +89,14 @@ describe("runProjectBuild", () => {
         const run = mock(() => {
             throw original;
         });
-        expect(() => runProjectBuild({ requireEsm: false, run })).toThrow(
-            original,
-        );
+        expect(() =>
+            runProjectBuild({
+                requireEsm: false,
+                runtimeId: "node",
+                builderId: "webpack",
+                run,
+            }),
+        ).toThrow(original);
         // and it is NOT dressed up as a usage error
         expect(handleUsageError(original, () => {})).toBe(false);
     });
@@ -94,7 +109,13 @@ describe("runProjectBuild ESM preflight (vinext target only)", () => {
         try {
             let caught: unknown;
             try {
-                runProjectBuild({ requireEsm: true, cwd: dir, run });
+                runProjectBuild({
+                    requireEsm: true,
+                    runtimeId: "node",
+                    builderId: "webpack",
+                    cwd: dir,
+                    run,
+                });
             } catch (err) {
                 caught = err;
             }
@@ -112,7 +133,13 @@ describe("runProjectBuild ESM preflight (vinext target only)", () => {
         const dir = tmpAppDir(JSON.stringify({ type: "commonjs" }));
         try {
             expect(() =>
-                runProjectBuild({ requireEsm: true, cwd: dir, run }),
+                runProjectBuild({
+                    requireEsm: true,
+                    runtimeId: "node",
+                    builderId: "webpack",
+                    cwd: dir,
+                    run,
+                }),
             ).toThrow(/"type": "module"/);
             expect(run).not.toHaveBeenCalledWith(["npm", "run", "build"]);
         } finally {
@@ -124,7 +151,13 @@ describe("runProjectBuild ESM preflight (vinext target only)", () => {
         const run = mock();
         const dir = tmpAppDir(JSON.stringify({ type: "module" }));
         try {
-            runProjectBuild({ requireEsm: true, cwd: dir, run });
+            runProjectBuild({
+                requireEsm: true,
+                runtimeId: "node",
+                builderId: "webpack",
+                cwd: dir,
+                run,
+            });
             expect(run).toHaveBeenCalledWith(["npm", "run", "build"]);
         } finally {
             rmSync(dir, { recursive: true, force: true });
@@ -135,7 +168,13 @@ describe("runProjectBuild ESM preflight (vinext target only)", () => {
         const run = mock();
         const dir = tmpAppDir(JSON.stringify({ type: "commonjs" }));
         try {
-            runProjectBuild({ requireEsm: false, cwd: dir, run });
+            runProjectBuild({
+                requireEsm: false,
+                runtimeId: "node",
+                builderId: "webpack",
+                cwd: dir,
+                run,
+            });
             expect(run).toHaveBeenCalledWith(["npm", "run", "build"]);
         } finally {
             rmSync(dir, { recursive: true, force: true });
@@ -148,7 +187,13 @@ describe("runProjectBuild ESM preflight (vinext target only)", () => {
         try {
             let caught: unknown;
             try {
-                runProjectBuild({ requireEsm: true, cwd: dir, run });
+                runProjectBuild({
+                    requireEsm: true,
+                    runtimeId: "node",
+                    builderId: "webpack",
+                    cwd: dir,
+                    run,
+                });
             } catch (err) {
                 caught = err;
             }
@@ -170,9 +215,19 @@ describe("runProjectBuild exports the configured runtime to the build (#1843)", 
             const run = mock(() => {
                 seen = process.env.KNEXT_RUNTIME;
             });
-            runProjectBuild({ requireEsm: false, runtimeId: "node", run });
+            runProjectBuild({
+                requireEsm: false,
+                runtimeId: "node",
+                builderId: "webpack",
+                run,
+            });
             expect(seen).toBe("node");
-            runProjectBuild({ requireEsm: false, runtimeId: "bun", run });
+            runProjectBuild({
+                requireEsm: false,
+                runtimeId: "bun",
+                builderId: "webpack",
+                run,
+            });
             expect(seen).toBe("bun");
         } finally {
             if (saved === undefined) delete process.env.KNEXT_RUNTIME;

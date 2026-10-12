@@ -5,8 +5,8 @@ exports[`doctor golden output (#1055 byte-identical pin) reachable — all check
 PASS  kubectl strict validation                   client v1.31.2 — the CR apply asserts --validate=strict (unknown fields are rejected, never silently pruned)
 PASS  Static asset mode                           object storage configured (gcs: assets) — assets are offloaded to the bucket and retained across deploys
 SKIP  vinext-on-node entry freshness              this app does not build with build: 'vinext' + runtime: 'node' (or no knext.config.ts was found) — knext-node-entry.mjs, if scaffolded, is never run
-PASS  NextApp CRD                                 served version: v1alpha1
-PASS  NextApp CRD schema coverage                 all 76 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)
+PASS  NextApp CRD                                 served version: v1alpha1; pairs with this CLI (apps.kn-next.dev/v1alpha1)
+PASS  NextApp CRD schema coverage                 all 77 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)
 PASS  Operator deployment                         kn-next-operator-controller-manager Ready in kn-next-operator-system
 WARN  Operator version                            no release version reported, image sha256:75be42bb6b4c… (a bundle from before the operator version line); compatibility with this CLI cannot be checked (hint: Move to a versioned operator (operator first, then CLI). Apply a specific release's digest-pinned bundle: \`kubectl apply --server-side -f https://github.com/getknext-dev/knext/releases/download/operator-v<X.Y.Z>/install-v<X.Y.Z>.yaml\` (see https://knext-platform.dev/docs/versioning).)
 PASS  cert-manager webhook                        cert-manager-webhook Ready
@@ -46,13 +46,13 @@ exports[`doctor golden output (#1055 byte-identical pin) reachable — all check
     "title": "vinext-on-node entry freshness",
   },
   {
-    "detail": "served version: v1alpha1",
+    "detail": "served version: v1alpha1; pairs with this CLI (apps.kn-next.dev/v1alpha1)",
     "id": "crd",
     "status": "pass",
     "title": "NextApp CRD",
   },
   {
-    "detail": "all 76 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)",
+    "detail": "all 77 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)",
     "id": "crd-schema",
     "status": "pass",
     "title": "NextApp CRD schema coverage",
@@ -476,8 +476,8 @@ exports[`doctor golden output (#1055 byte-identical pin) budget-exhausted — th
 PASS  kubectl strict validation                   client v1.31.2 — the CR apply asserts --validate=strict (unknown fields are rejected, never silently pruned)
 PASS  Static asset mode                           object storage configured (gcs: assets) — assets are offloaded to the bucket and retained across deploys
 SKIP  vinext-on-node entry freshness              this app does not build with build: 'vinext' + runtime: 'node' (or no knext.config.ts was found) — knext-node-entry.mjs, if scaffolded, is never run
-PASS  NextApp CRD                                 served version: v1alpha1
-PASS  NextApp CRD schema coverage                 all 76 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)
+PASS  NextApp CRD                                 served version: v1alpha1; pairs with this CLI (apps.kn-next.dev/v1alpha1)
+PASS  NextApp CRD schema coverage                 all 77 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)
 PASS  Operator deployment                         kn-next-operator-controller-manager Ready in kn-next-operator-system
 WARN  Operator version                            no release version reported, image sha256:75be42bb6b4c… (a bundle from before the operator version line); compatibility with this CLI cannot be checked (hint: Move to a versioned operator (operator first, then CLI). Apply a specific release's digest-pinned bundle: \`kubectl apply --server-side -f https://github.com/getknext-dev/knext/releases/download/operator-v<X.Y.Z>/install-v<X.Y.Z>.yaml\` (see https://knext-platform.dev/docs/versioning).)
 PASS  cert-manager webhook                        cert-manager-webhook Ready
@@ -517,13 +517,13 @@ exports[`doctor golden output (#1055 byte-identical pin) budget-exhausted — th
     "title": "vinext-on-node entry freshness",
   },
   {
-    "detail": "served version: v1alpha1",
+    "detail": "served version: v1alpha1; pairs with this CLI (apps.kn-next.dev/v1alpha1)",
     "id": "crd",
     "status": "pass",
     "title": "NextApp CRD",
   },
   {
-    "detail": "all 76 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)",
+    "detail": "all 77 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)",
     "id": "crd-schema",
     "status": "pass",
     "title": "NextApp CRD schema coverage",
@@ -593,7 +593,7 @@ exports[`doctor golden output (#1055 byte-identical pin) crd-schema — an insta
 PASS  kubectl strict validation                   client v1.31.2 — the CR apply asserts --validate=strict (unknown fields are rejected, never silently pruned)
 PASS  Static asset mode                           object storage configured (gcs: assets) — assets are offloaded to the bucket and retained across deploys
 SKIP  vinext-on-node entry freshness              this app does not build with build: 'vinext' + runtime: 'node' (or no knext.config.ts was found) — knext-node-entry.mjs, if scaffolded, is never run
-PASS  NextApp CRD                                 served version: v1alpha1
+PASS  NextApp CRD                                 served version: v1alpha1; pairs with this CLI (apps.kn-next.dev/v1alpha1)
 FAIL  NextApp CRD schema coverage                 operator behind CLI: the installed CRD is missing 1 field(s) this CLI emits — they would be dropped. Upgrade the operator first (operator, then CLI). (hint: upgrade the operator/CRD FIRST, then the CLI — see https://knext-platform.dev/docs/upgrading)
 PASS  Operator deployment                         kn-next-operator-controller-manager Ready in kn-next-operator-system
 WARN  Operator version                            no release version reported, image sha256:75be42bb6b4c… (a bundle from before the operator version line); compatibility with this CLI cannot be checked (hint: Move to a versioned operator (operator first, then CLI). Apply a specific release's digest-pinned bundle: \`kubectl apply --server-side -f https://github.com/getknext-dev/knext/releases/download/operator-v<X.Y.Z>/install-v<X.Y.Z>.yaml\` (see https://knext-platform.dev/docs/versioning).)
@@ -634,7 +634,7 @@ exports[`doctor golden output (#1055 byte-identical pin) crd-schema — an insta
     "title": "vinext-on-node entry freshness",
   },
   {
-    "detail": "served version: v1alpha1",
+    "detail": "served version: v1alpha1; pairs with this CLI (apps.kn-next.dev/v1alpha1)",
     "id": "crd",
     "status": "pass",
     "title": "NextApp CRD",
@@ -705,3 +705,237 @@ exports[`doctor golden output (#1055 byte-identical pin) crd-schema — an insta
 `;
 
 exports[`doctor golden output (#1055 byte-identical pin) crd-schema — an installed CRD missing an emitted field FAILs and names it: exitCode 1`] = `1`;
+
+exports[`doctor golden output (#1055 byte-identical pin) crd-version — a CRD that does not serve the emitted apiVersion FAILs: a newer-only CRD means upgrade the CLI: table 1`] = `
+"PASS  Cluster reachable                           apiserver responded
+PASS  kubectl strict validation                   client v1.31.2 — the CR apply asserts --validate=strict (unknown fields are rejected, never silently pruned)
+PASS  Static asset mode                           object storage configured (gcs: assets) — assets are offloaded to the bucket and retained across deploys
+SKIP  vinext-on-node entry freshness              this app does not build with build: 'vinext' + runtime: 'node' (or no knext.config.ts was found) — knext-node-entry.mjs, if scaffolded, is never run
+FAIL  NextApp CRD                                 this CLI emits apps.kn-next.dev/v1alpha1, but the installed nextapps.apps.kn-next.dev does not serve v1alpha1 (it serves: v1beta1) — upgrade the CLI to match the operator (hint: The installed CRD serves only newer versions than this CLI emits: upgrade the CLI (@getknext/core) to a release that emits one of v1beta1 — see https://knext-platform.dev/docs/versioning)
+PASS  NextApp CRD schema coverage                 all 77 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)
+PASS  Operator deployment                         kn-next-operator-controller-manager Ready in kn-next-operator-system
+WARN  Operator version                            no release version reported, image sha256:75be42bb6b4c… (a bundle from before the operator version line); compatibility with this CLI cannot be checked (hint: Move to a versioned operator (operator first, then CLI). Apply a specific release's digest-pinned bundle: \`kubectl apply --server-side -f https://github.com/getknext-dev/knext/releases/download/operator-v<X.Y.Z>/install-v<X.Y.Z>.yaml\` (see https://knext-platform.dev/docs/versioning).)
+PASS  cert-manager webhook                        cert-manager-webhook Ready
+PASS  Knative ingress-class                       ingress-class kourier.ingress.networking.knative.dev is served by net-kourier-controller
+PASS  Operator image pullable                     ghcr.io/getknext-dev/kn-next-operator@sha256:75be42bb6b4c6d03c902b4fc90b36b246cc6cacf2233926fa183a6051521a99d is anonymously pullable
+PASS  App image pullable                          demo/web (ghcr.io/getknext-dev/web@sha256:1111111111111111111111111111111111111111111111111111111111111111) anonymously pullable
+PASS  Knative Serving                             services.serving.knative.dev CRD present
+PASS  Metrics-port collision (queue-proxy :9091)  request-metrics-protocol is "none" — queue-proxy leaves :9091 unbound; no NextApp overrides METRICS_PORT onto a queue-proxy-owned port and current builds default to :9464. Caveat: apps running images built before the 9464 default bind :9091 with no visible override and cannot be detected here — an EADDRINUSE crash-loop on such a revision means: redeploy with a current build
+PASS  NetworkPolicy enforcement                   a NetworkPolicy-enforcing agent is running (Calico DaemonSet calico-node (kube-system)) — the operator's default-on NetworkPolicy objects should be enforced; per-CNI configuration can still exempt traffic, so verify directly if isolation is load-bearing
+"
+`;
+
+exports[`doctor golden output (#1055 byte-identical pin) crd-version — a CRD that does not serve the emitted apiVersion FAILs: a newer-only CRD means upgrade the CLI: rows 1`] = `
+[
+  {
+    "detail": "apiserver responded",
+    "id": "cluster",
+    "status": "pass",
+    "title": "Cluster reachable",
+  },
+  {
+    "detail": "client v1.31.2 — the CR apply asserts --validate=strict (unknown fields are rejected, never silently pruned)",
+    "id": "kubectl-validation",
+    "status": "pass",
+    "title": "kubectl strict validation",
+  },
+  {
+    "detail": "object storage configured (gcs: assets) — assets are offloaded to the bucket and retained across deploys",
+    "id": "storage-mode",
+    "status": "pass",
+    "title": "Static asset mode",
+  },
+  {
+    "detail": "this app does not build with build: 'vinext' + runtime: 'node' (or no knext.config.ts was found) — knext-node-entry.mjs, if scaffolded, is never run",
+    "id": "node-entry-staleness",
+    "status": "skip",
+    "title": "vinext-on-node entry freshness",
+  },
+  {
+    "detail": "this CLI emits apps.kn-next.dev/v1alpha1, but the installed nextapps.apps.kn-next.dev does not serve v1alpha1 (it serves: v1beta1) — upgrade the CLI to match the operator",
+    "hint": "The installed CRD serves only newer versions than this CLI emits: upgrade the CLI (@getknext/core) to a release that emits one of v1beta1 — see https://knext-platform.dev/docs/versioning",
+    "id": "crd",
+    "status": "fail",
+    "title": "NextApp CRD",
+  },
+  {
+    "detail": "all 77 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)",
+    "id": "crd-schema",
+    "status": "pass",
+    "title": "NextApp CRD schema coverage",
+  },
+  {
+    "detail": "kn-next-operator-controller-manager Ready in kn-next-operator-system",
+    "id": "operator",
+    "status": "pass",
+    "title": "Operator deployment",
+  },
+  {
+    "detail": "no release version reported, image sha256:75be42bb6b4c… (a bundle from before the operator version line); compatibility with this CLI cannot be checked",
+    "hint": "Move to a versioned operator (operator first, then CLI). Apply a specific release's digest-pinned bundle: \`kubectl apply --server-side -f https://github.com/getknext-dev/knext/releases/download/operator-v<X.Y.Z>/install-v<X.Y.Z>.yaml\` (see https://knext-platform.dev/docs/versioning).",
+    "id": "operator-version",
+    "status": "warn",
+    "title": "Operator version",
+  },
+  {
+    "detail": "cert-manager-webhook Ready",
+    "id": "cert-manager",
+    "status": "pass",
+    "title": "cert-manager webhook",
+  },
+  {
+    "detail": "ingress-class kourier.ingress.networking.knative.dev is served by net-kourier-controller",
+    "id": "ingress",
+    "status": "pass",
+    "title": "Knative ingress-class",
+  },
+  {
+    "detail": "ghcr.io/getknext-dev/kn-next-operator@sha256:75be42bb6b4c6d03c902b4fc90b36b246cc6cacf2233926fa183a6051521a99d is anonymously pullable",
+    "id": "image",
+    "status": "pass",
+    "title": "Operator image pullable",
+  },
+  {
+    "detail": "demo/web (ghcr.io/getknext-dev/web@sha256:1111111111111111111111111111111111111111111111111111111111111111) anonymously pullable",
+    "id": "app-image",
+    "status": "pass",
+    "title": "App image pullable",
+  },
+  {
+    "detail": "services.serving.knative.dev CRD present",
+    "id": "knative",
+    "status": "pass",
+    "title": "Knative Serving",
+  },
+  {
+    "detail": "request-metrics-protocol is "none" — queue-proxy leaves :9091 unbound; no NextApp overrides METRICS_PORT onto a queue-proxy-owned port and current builds default to :9464. Caveat: apps running images built before the 9464 default bind :9091 with no visible override and cannot be detected here — an EADDRINUSE crash-loop on such a revision means: redeploy with a current build",
+    "id": "metrics-port",
+    "status": "pass",
+    "title": "Metrics-port collision (queue-proxy :9091)",
+  },
+  {
+    "detail": "a NetworkPolicy-enforcing agent is running (Calico DaemonSet calico-node (kube-system)) — the operator's default-on NetworkPolicy objects should be enforced; per-CNI configuration can still exempt traffic, so verify directly if isolation is load-bearing",
+    "id": "netpol",
+    "status": "pass",
+    "title": "NetworkPolicy enforcement",
+  },
+]
+`;
+
+exports[`doctor golden output (#1055 byte-identical pin) crd-version — a CRD that does not serve the emitted apiVersion FAILs: a newer-only CRD means upgrade the CLI: exitCode 1`] = `1`;
+
+exports[`doctor golden output (#1055 byte-identical pin) cli-2.0 — a 2.0 CLI against an operator on its 1.x line PASSes: pairing is by CRD apiVersion: table 1`] = `
+"PASS  Cluster reachable                           apiserver responded
+PASS  kubectl strict validation                   client v1.31.2 — the CR apply asserts --validate=strict (unknown fields are rejected, never silently pruned)
+PASS  Static asset mode                           object storage configured (gcs: assets) — assets are offloaded to the bucket and retained across deploys
+SKIP  vinext-on-node entry freshness              this app does not build with build: 'vinext' + runtime: 'node' (or no knext.config.ts was found) — knext-node-entry.mjs, if scaffolded, is never run
+PASS  NextApp CRD                                 served version: v1alpha1; pairs with this CLI (apps.kn-next.dev/v1alpha1)
+PASS  NextApp CRD schema coverage                 all 77 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)
+PASS  Operator deployment                         kn-next-operator-controller-manager Ready in kn-next-operator-system
+PASS  Operator version                            v1.5.0 (from label), image sha256:75be42bb6b4c…; different major from CLI 2.0.0 (the operator keeps its own version line) — supported pairing is decided by the CRD API version, see the NextApp CRD row
+PASS  cert-manager webhook                        cert-manager-webhook Ready
+PASS  Knative ingress-class                       ingress-class kourier.ingress.networking.knative.dev is served by net-kourier-controller
+PASS  Operator image pullable                     ghcr.io/getknext-dev/kn-next-operator@sha256:75be42bb6b4c6d03c902b4fc90b36b246cc6cacf2233926fa183a6051521a99d is anonymously pullable
+PASS  App image pullable                          demo/web (ghcr.io/getknext-dev/web@sha256:1111111111111111111111111111111111111111111111111111111111111111) anonymously pullable
+PASS  Knative Serving                             services.serving.knative.dev CRD present
+PASS  Metrics-port collision (queue-proxy :9091)  request-metrics-protocol is "none" — queue-proxy leaves :9091 unbound; no NextApp overrides METRICS_PORT onto a queue-proxy-owned port and current builds default to :9464. Caveat: apps running images built before the 9464 default bind :9091 with no visible override and cannot be detected here — an EADDRINUSE crash-loop on such a revision means: redeploy with a current build
+PASS  NetworkPolicy enforcement                   a NetworkPolicy-enforcing agent is running (Calico DaemonSet calico-node (kube-system)) — the operator's default-on NetworkPolicy objects should be enforced; per-CNI configuration can still exempt traffic, so verify directly if isolation is load-bearing
+"
+`;
+
+exports[`doctor golden output (#1055 byte-identical pin) cli-2.0 — a 2.0 CLI against an operator on its 1.x line PASSes: pairing is by CRD apiVersion: rows 1`] = `
+[
+  {
+    "detail": "apiserver responded",
+    "id": "cluster",
+    "status": "pass",
+    "title": "Cluster reachable",
+  },
+  {
+    "detail": "client v1.31.2 — the CR apply asserts --validate=strict (unknown fields are rejected, never silently pruned)",
+    "id": "kubectl-validation",
+    "status": "pass",
+    "title": "kubectl strict validation",
+  },
+  {
+    "detail": "object storage configured (gcs: assets) — assets are offloaded to the bucket and retained across deploys",
+    "id": "storage-mode",
+    "status": "pass",
+    "title": "Static asset mode",
+  },
+  {
+    "detail": "this app does not build with build: 'vinext' + runtime: 'node' (or no knext.config.ts was found) — knext-node-entry.mjs, if scaffolded, is never run",
+    "id": "node-entry-staleness",
+    "status": "skip",
+    "title": "vinext-on-node entry freshness",
+  },
+  {
+    "detail": "served version: v1alpha1; pairs with this CLI (apps.kn-next.dev/v1alpha1)",
+    "id": "crd",
+    "status": "pass",
+    "title": "NextApp CRD",
+  },
+  {
+    "detail": "all 77 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)",
+    "id": "crd-schema",
+    "status": "pass",
+    "title": "NextApp CRD schema coverage",
+  },
+  {
+    "detail": "kn-next-operator-controller-manager Ready in kn-next-operator-system",
+    "id": "operator",
+    "status": "pass",
+    "title": "Operator deployment",
+  },
+  {
+    "detail": "v1.5.0 (from label), image sha256:75be42bb6b4c…; different major from CLI 2.0.0 (the operator keeps its own version line) — supported pairing is decided by the CRD API version, see the NextApp CRD row",
+    "id": "operator-version",
+    "status": "pass",
+    "title": "Operator version",
+  },
+  {
+    "detail": "cert-manager-webhook Ready",
+    "id": "cert-manager",
+    "status": "pass",
+    "title": "cert-manager webhook",
+  },
+  {
+    "detail": "ingress-class kourier.ingress.networking.knative.dev is served by net-kourier-controller",
+    "id": "ingress",
+    "status": "pass",
+    "title": "Knative ingress-class",
+  },
+  {
+    "detail": "ghcr.io/getknext-dev/kn-next-operator@sha256:75be42bb6b4c6d03c902b4fc90b36b246cc6cacf2233926fa183a6051521a99d is anonymously pullable",
+    "id": "image",
+    "status": "pass",
+    "title": "Operator image pullable",
+  },
+  {
+    "detail": "demo/web (ghcr.io/getknext-dev/web@sha256:1111111111111111111111111111111111111111111111111111111111111111) anonymously pullable",
+    "id": "app-image",
+    "status": "pass",
+    "title": "App image pullable",
+  },
+  {
+    "detail": "services.serving.knative.dev CRD present",
+    "id": "knative",
+    "status": "pass",
+    "title": "Knative Serving",
+  },
+  {
+    "detail": "request-metrics-protocol is "none" — queue-proxy leaves :9091 unbound; no NextApp overrides METRICS_PORT onto a queue-proxy-owned port and current builds default to :9464. Caveat: apps running images built before the 9464 default bind :9091 with no visible override and cannot be detected here — an EADDRINUSE crash-loop on such a revision means: redeploy with a current build",
+    "id": "metrics-port",
+    "status": "pass",
+    "title": "Metrics-port collision (queue-proxy :9091)",
+  },
+  {
+    "detail": "a NetworkPolicy-enforcing agent is running (Calico DaemonSet calico-node (kube-system)) — the operator's default-on NetworkPolicy objects should be enforced; per-CNI configuration can still exempt traffic, so verify directly if isolation is load-bearing",
+    "id": "netpol",
+    "status": "pass",
+    "title": "NetworkPolicy enforcement",
+  },
+]
+`;
+
+exports[`doctor golden output (#1055 byte-identical pin) cli-2.0 — a 2.0 CLI against an operator on its 1.x line PASSes: pairing is by CRD apiVersion: exitCode 1`] = `0`;

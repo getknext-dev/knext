@@ -136,6 +136,8 @@ describe("KNEXT_VINEXT_PATCHES=strict", () => {
         expect(() =>
             runProjectBuild({
                 requireEsm: true,
+                runtimeId: "node",
+                builderId: "webpack",
                 cwd: app,
                 run: () => {
                     built = true;
@@ -164,6 +166,8 @@ describe("KNEXT_VINEXT_PATCHES=strict", () => {
         let built = false;
         runProjectBuild({
             requireEsm: true,
+            runtimeId: "node",
+            builderId: "webpack",
             cwd: app,
             run: () => {
                 built = true;

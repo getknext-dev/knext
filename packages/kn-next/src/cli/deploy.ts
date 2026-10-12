@@ -712,6 +712,7 @@ export async function deploy() {
         // no longer means vinext (#1183, DEFAULT_BUILDER_ID is "turbopack").
         runProjectBuild({
             requireEsm: isVinextBuild,
+            builderId: resolvedBuild,
             runtimeId: config.runtime ?? DEFAULT_RUNTIME_ID,
         });
         log.info(

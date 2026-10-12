@@ -14,7 +14,7 @@ spans these counters mirror) · [structured logging + correlation IDs](./logging
 
 | Target | Process | Port / path | Series |
 | --- | --- | --- | --- |
-| **App runtime (default — compiled executable)** | the single-exec entry (`knext-bun-entry.mjs`) | `:9464/metrics` | `knext_bunexec_*`: http_requests_total{status_class} + duration histogram + in-flight + startup_duration + process RSS/uptime — the ONLY series on the shipped scrape path |
+| **App runtime (default — compiled executable)** | the single-exec entry (`knext-bun-entry.mjs`) | `:9464/metrics` | `knext_bunexec_*`: http_requests_total{status_class} + duration histogram + in-flight + startup_duration + process RSS/uptime — plus the one forwarded app family `knext_deep_health_state` (tracing on), and nothing else, on the shipped scrape path |
 | **App runtime (legacy standalone supervisor)** | `node-server.ts` | `:9464/metrics` | golden signals + cold-start + DB-wake (merged from the child) and the Node process metrics — this shape only |
 | **Operator** | the controller manager | its `/metrics` (HTTPS `:8443` by default) | reconcile count/duration/errors + `workqueue_depth` + controller-runtime + Go process metrics |
 
@@ -81,20 +81,64 @@ The `app` label every query uses is added by the scrape, not by the runtime: the
 `PodMonitor` relabels the pod's `app` label onto each series, and pins
 `job="knext-nextapp"` so the staleness meta-alerts can name their own targets.
 
-### NOT on the shipped scrape: app-owned registries
+### One app-registry family IS on the shipped scrape: `knext_deep_health_state`
 
-An app may register its own prom-client metrics — `knext_http_*`,
-`knext_coldstart_*`, `knext_db_wake_*`, `knext_deep_health_state`
-(`@getknext/core/adapters/metrics`), or the `kn_next_*` RED / RUM / bytecode
-series in `apps/file-manager/src/app/api/_metrics/registry.ts`. These are real,
-but they are served on the **app port** through an `/api/metrics` route. The
+An app registers its own prom-client metrics (`@getknext/core/adapters/metrics`)
+and serves them on a loopback-only port (`KN_CHILD_METRICS_PORT`, default 9092).
+The runtime contract forwards **exactly one** family from that registry onto
+`:9464`: `knext_deep_health_state` (the `APP_METRIC_FAMILIES` allowlist in
+`runtime-contract.mjs`). It is a gauge labelled `app`, `dependency`
+(`overall` / `postgres` / `redis`) and `state` (`ok` / `degraded` / `down` /
+`waking` / `up` / `unconfigured`): twelve fixed series per pod, the active state
+at `1`. The two deep-health alerts read it, in the live `knext.app` group.
+
+Conditions, stated exactly:
+
+- **Tracing on or off.** With tracing on the gauge is registered by the app's
+  full instrumentation. With tracing off (the default) that instrumentation is
+  not loaded (it costs about 0.9 s of every cold start), so a small
+  dependency-free module (`@getknext/core/internal/deep-health-lite`) serves the
+  same family, byte for byte, on the same loopback port. It imports only
+  `node:http` statically, reads the DB-activity slot the lib already writes, and
+  imports the health check on the first scrape that needs it.
+- **Only while the app uses its database, and an idle app serves NO series.**
+  The scrape probes the database only if the app used its writer pool within
+  `DB_ACTIVITY_BUDGET_MS`, so an idle scale-to-zero database is never woken by
+  the scrape. While the gate is closed the series is dropped (not held at its
+  last value), so a `waking` or `down` recorded just before idle cannot keep an
+  alert firing for an app that is merely idle. The alerts resolve once the app
+  goes idle and, if the dependency is still broken, fire again after their
+  `for:` hold when the app is used again. `absent()` alerting is deliberately not
+  added: an idle app would page.
+- **Only while a pod is up.** At zero there is no pod and no series.
+- **The probe does not keep the database awake.** The probe's own query is not counted as the
+  app using the database, so scraping an idle app never re-opens the activity gate: once the
+  app has been idle past the budget, scrapes stop probing and the database can sleep.
+- **Bounded work per request.** `:9464` is readable cross-namespace, so concurrent scrapes share
+  one probe and a result is reused for 10 seconds (below the 30 second scrape interval, so a
+  normal scrape always probes fresh). The app-side body is read with a 256 KiB cap and dropped,
+  never buffered, past it.
+
+The forward is an allowlist, not the whole registry: the rest of the app's
+registry — `knext_http_*` (which carries a `method` label), `knext_coldstart_*`,
+`knext_db_wake_*` — is **not** on `:9464`. `:9464` is readable cross-namespace,
+so every family added to the allowlist is new disclosure; the threat model's
+`:9464` list and a test pin it.
+
+### NOT on the shipped scrape: the rest of the app-owned registries
+
+The remaining prom-client metrics an app registers — `knext_http_*`,
+`knext_coldstart_*`, `knext_db_wake_*`, or the `kn_next_*` RED / RUM / bytecode
+series in `apps/file-manager/src/app/api/_metrics/registry.ts` — are real, but
+they are served on the **app port** through an `/api/metrics` route. The
 node-server supervisor used to merge them onto `:9464`; the compiled binary does
 not, and the shipped `PodMonitor` scrapes `:9464` only.
 
 So a query naming one of them is **empty on a default knext deployment** unless
-you add a scrape config for your app's `/api/metrics`. That is why the
-`knext.app.node-legacy` alert group is kept separate from `knext.app`, and why
-the DB-wake panels on the scale-to-zero dashboard say so in their descriptions.
+you add a scrape config for your app's `/api/metrics`. No shipped alert reads
+one: an alert-reachability test fails if a rule names a series that no scraped
+port serves. The DB-wake panels on the scale-to-zero dashboard say so in their
+descriptions.
 
 ### The contract is gated, because its failure is silent
 

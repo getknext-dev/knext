@@ -18,7 +18,7 @@ import { join } from "node:path";
 import { mk } from "../report";
 import type { CheckContext, CheckResult } from "../types";
 
-const NEXT_CONFIG_FILES = [
+export const NEXT_CONFIG_FILES = [
     "next.config.ts",
     "next.config.mjs",
     "next.config.js",
@@ -27,7 +27,7 @@ const NEXT_CONFIG_FILES = [
 ];
 
 /** Strip // and block comments so a commented-out flag does not count. */
-function stripComments(src: string): string {
+export function stripComments(src: string): string {
     return src
         .replace(/\/\*[\s\S]*?\*\//g, "")
         .replace(/(^|[^:])\/\/.*$/gm, "$1");

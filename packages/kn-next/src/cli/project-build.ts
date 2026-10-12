@@ -27,6 +27,11 @@ import { join } from "node:path";
 import { KNEXT_RUNTIME_ENV } from "../adapters/runtime-env";
 import { runQuiet } from "./exec";
 import { UsageError } from "./shared";
+import { assertNotStaticExport } from "./static-export-guard";
+import {
+    assertNoBunTurbopackFragments,
+    readNextConfigStrict,
+} from "./turbopack-fragments-guard";
 import { describeEnsureResult, ensureVinextPatches } from "./vinext-patches";
 
 /** Exit code every POSIX shell uses for "command not found". */
@@ -95,11 +100,15 @@ export interface RunProjectBuildOptions {
     /**
      * The app's configured runtime (`config.runtime ?? DEFAULT_RUNTIME_ID`),
      * exported to the build as `KNEXT_RUNTIME` so the knext adapter points
-     * `cacheHandler` at that runtime's entry (#1843). Optional in the type so
-     * unit tests need not pass it; every CLI caller must, which a scan in
-     * project-build.test.ts enforces.
+     * `cacheHandler` at that runtime's entry (#1843). REQUIRED, like
+     * `builderId`: the fragments guard cannot decide without both.
      */
-    readonly runtimeId?: string;
+    readonly runtimeId: string;
+    /**
+     * The resolved builder id (`config.build ?? DEFAULT_BUILDER_ID`), which the
+     * Bun turbopack-fragments guard needs (runtime bun AND builder turbopack).
+     */
+    readonly builderId: string;
 }
 
 /**
@@ -130,9 +139,16 @@ export function runProjectBuild(opts: RunProjectBuildOptions): void {
         }
     }
 
-    if (opts.runtimeId !== undefined) {
-        process.env[KNEXT_RUNTIME_ENV] = opts.runtimeId;
-    }
+    // Bun cannot load the chunks `turbopackModuleFragments` makes Turbopack
+    // emit (#2225). Here, not in each caller, so build, deploy and preview all
+    // refuse before any build work.
+    assertNoBunTurbopackFragments({
+        runtime: opts.runtimeId,
+        builder: opts.builderId,
+        readNextConfig: () => readNextConfigStrict(cwd),
+    });
+
+    process.env[KNEXT_RUNTIME_ENV] = opts.runtimeId;
 
     try {
         run(["npm", "run", "build"]);
@@ -146,4 +162,6 @@ export function runProjectBuild(opts: RunProjectBuildOptions): void {
         }
         throw err;
     }
+
+    assertNotStaticExport(cwd);
 }

@@ -1,7 +1,9 @@
 import type { GRPC as Cerbos } from '@cerbos/grpc';
 import type * as Minio from 'minio';
 import { Pool } from 'pg';
+import { isDbActivityUntracked } from './db/activity-scope';
 import { bunSqlAvailable, createBunSqlPool } from './db/bun-sql-pool';
+import { reportAcquireFailure } from './db/reachability';
 import { loadCerbosSdk, loadMinioSdk } from './lazy-sdk-loaders.mjs';
 import { logSlowDep } from './slow-dep';
 
@@ -218,6 +220,10 @@ export const DB_ACTIVITY_BUDGET_MS = ((): number => {
 
 /** Record that the writer pool was just used (called by the activity wrapper). */
 const markDbActivity = (): void => {
+  // The deep-health probe runs in an untracked scope: observing the database is
+  // not the app using it, and counting it would let the probe keep itself (and
+  // so the scale-to-zero database) alive forever.
+  if (isDbActivityUntracked()) return;
   activityGlobal[DB_ACTIVITY_KEY] = Date.now();
 };
 
@@ -562,6 +568,9 @@ const retryWake = (pool: Pool): Pool => {
       pending.then(
         (value) => value,
         (err) => {
+          // Tell anyone listening (the deep health check) about this attempt NOW,
+          // not when the budget finally runs out: a refusal is known immediately.
+          reportAcquireFailure(err);
           if (isPermanentAcquireError(err) || Date.now() >= deadline) {
             throw err;
           }

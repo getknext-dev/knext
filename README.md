@@ -117,7 +117,7 @@ flowchart LR
 
 ### What the Adapter Does
 
-1. **`modifyConfig`** → forces `output: 'standalone'` and injects the Redis `cacheHandler` at build time
+1. **`modifyConfig`** → defaults `output` to `'standalone'` (an explicit `output: 'export'` is left alone and the CLI refuses it — a static export is not a server deployment, and knext deploys a Next.js server) and injects the Redis `cacheHandler` at build time
 2. **`onBuildComplete`** → uploads `staticFiles` + `prerenders` to cloud storage, keyed by `buildId`
 3. **Standalone server** → `next build` emits a self-contained `server.js` that runs on plain **Node 20+** (and Bun via `node:http` compat) — no bundler-specific runtime
 4. **Cold-start bytecode caching** → `NODE_COMPILE_CACHE` persists the V8 code cache so scaled-from-zero pods skip re-compilation (the mechanism behind Vercel Fluid)

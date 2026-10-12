@@ -127,8 +127,10 @@ const MUTATIONS = [
       'overstating an exposure erodes a security document as surely as understating one, and ' +
       'this exact list already had to be corrected twice',
     subject: 'threatModel',
-    anchor: '  `knext_bunexec_process_uptime_seconds`. The list is pinned against the emitter by',
-    replacement: '  `knext_db_wake_total`. The list is pinned against the emitter by',
+    anchor:
+      '  `knext_bunexec_process_uptime_seconds`, and `knext_deep_health_state`. The list is pinned against the',
+    replacement:
+      '  `knext_db_wake_total`, and `knext_deep_health_state`. The list is pinned against the',
   },
   {
     id: 'M8',
