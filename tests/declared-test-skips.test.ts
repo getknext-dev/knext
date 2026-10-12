@@ -93,6 +93,14 @@ const DECLARED: Record<string, { skips: Record<string, number>; reason: string }
       'built `.next/standalone` mirror. LANE-BACKED (#932) by the sigterm-drain-shipped job, which ' +
       'runs both files with KNEXT_REQUIRE_STANDALONE=1 so a missing build fails rather than skips.',
   },
+  'tests/standalone-no-dev-modules-e2e.test.ts': {
+    skips: { 'describe.skipIf': 1 },
+    reason:
+      'Boots the real `.next/standalone/server.js` that a `next build` of apps/db-demo emitted. ' +
+      'LANE-BACKED: the sigterm-drain-shipped job builds db-demo and sets KNEXT_REQUIRE_STANDALONE=1 ' +
+      'beside this file, and the spec throws at load when the flag is set and the build is absent, ' +
+      'so a missing build FAILS the lane; off the flag (a local checkout) it skips.',
+  },
   'examples/bun-exec/test/request-byte-cap.test.ts': {
     skips: { 'describe.skipIf': 1 },
     reason:
@@ -207,6 +215,9 @@ const LANE_BACKED: Record<string, { flag: string }> = {
     flag: 'KNEXT_REQUIRE_STANDALONE',
   },
   'apps/file-manager/sigterm-hardcap-e2e.test.ts': {
+    flag: 'KNEXT_REQUIRE_STANDALONE',
+  },
+  'tests/standalone-no-dev-modules-e2e.test.ts': {
     flag: 'KNEXT_REQUIRE_STANDALONE',
   },
   'apps/file-manager/self-contained-e2e.test.ts': {
