@@ -110,9 +110,11 @@ read, a write and a stream become in a Next.js zone, which this ADR left open.
 5. **Generated client policy:** an explicit Connect deadline shorter than the gateway timeout;
    **retry only `NO_SIDE_EFFECTS` methods**; mutating methods carry an idempotency key
    (ADR-0052 D6). A missing `grpc-status` trailer is fail-closed and non-retryable (ADR-0052 D15).
-6. **Transport default is switchable and the cold-start spike decides it** (h2c against HTTP/1.1
-   with `connect-node`; Q11: switchable 0.70). The `createGrpcTransport` path stays available for
-   gRPC-only backends (ADR-0052 D10).
+6. **Transport: h2c by default, switchable per binding to HTTP/1.1** — decided by the cold-start
+   spike (result below). As first written on 2026-10-09 this decision read "the transport default
+   is switchable and the cold-start spike decides it" (h2c against HTTP/1.1 with `connect-node`;
+   Q11: switchable 0.70). The `createGrpcTransport` path stays available for gRPC-only backends
+   (ADR-0052 D10).
 
    **Result (Z2 spike, recorded at the Z1 design gate, 2026-10-12): h2c by default, switchable per
    binding to HTTP/1.1.** The spike (`docs/benchmarks/zone-functions-coldstart-kind-2026-10-09.md`)

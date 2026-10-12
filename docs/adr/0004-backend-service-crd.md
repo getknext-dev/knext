@@ -1,6 +1,6 @@
 # ADR-0004: `BackendService` CRD for polyglot backends
 
-Status: Proposed · Date: 2026-06 · Depends on: ADR-0001, ADR-0002 · Amended 2026-10-09 (see the amendment at the end; revised 2026-10-12 with the Z1 design gate's required changes, and stays Proposed until both gates re-confirm)
+Status: Accepted (2026-10-12, Z1 design gate — architect and system-designer re-confirmation: [architect](https://github.com/getknext-dev/knext/issues/2045#issuecomment-6128826009), [system designer](https://github.com/getknext-dev/knext/issues/2045#issuecomment-6128845685)) · previously Proposed · Date: 2026-06 · Depends on: ADR-0001, ADR-0002 · Amended 2026-10-09 (see the amendment at the end; revised 2026-10-12 with the Z1 design gate's required changes before the re-confirmation)
 
 > **Amended by ADR-0065 (Proposed, 2026-10-07):** adds a `flavour: model` `BackendService`
 > (HTTP/1.1, loopback-bound model server behind an auth sidecar) and an `external` variant of
@@ -56,15 +56,18 @@ generated server-only Connect client reads this env var (same pattern as `getDbP
 
 ## Amendment (2026-10-09) — same-zone bindings, identity token, retention and wake-ahead
 
-**Status of this amendment: Proposed (revised 2026-10-12; was marked Accepted).** It encodes
-founder decisions of 2026-10-09 (v2 plan Q10, Q13, Q15, Q16, Q17; jev scores in the plan) that the
-architect and system-designer gates signed off as part of the plan. When both gates reviewed this
-amendment's text at the Z1 design gate (#2045), both returned **REQUIRE-CHANGES**. The changes
-they required are applied below, each marked *(Z1 gate)*: Decision 2 widens the Secret allowlist,
-Decisions 3, 4 and 5 record the cold-start spike's results and a function-agnostic wake seam, and
-Decision 12 drops the `PUBLIC_MUTATION` auth option. Their non-blocking notes are under *Notes from
-the Z1 design gate*. **This amendment and the base ADR's status line move to Accepted only after
-both gates re-confirm the revised text.** Trigger-class (ADR, CRD,
+**Status of this amendment: Accepted (2026-10-12, Z1 design gate — architect and system-designer
+re-confirmation: [architect](https://github.com/getknext-dev/knext/issues/2045#issuecomment-6128826009), [system designer](https://github.com/getknext-dev/knext/issues/2045#issuecomment-6128845685)).** History: it was first marked
+Accepted on 2026-10-09, encoding founder decisions (v2 plan Q10, Q13, Q15, Q16, Q17; jev scores in
+the plan) that the architect and system-designer gates signed off as part of the plan. When both
+gates reviewed this amendment's text at the Z1 design gate (#2045), both returned
+**REQUIRE-CHANGES**, and it was held at Proposed while revised. The changes they required are
+applied below, each marked *(Z1 gate)*: Decision 2 widens the Secret allowlist, Decisions 3, 4
+and 5 record the cold-start spike's results and a function-agnostic wake seam, and Decision 12
+drops the `PUBLIC_MUTATION` auth option. At re-confirmation the architect accepted, and the system
+designer accepted on two further additions, marked *(Z1 re-confirmation)*: deny-rule precedence and
+the namespace trust boundary in Decision 2, and the bounds on the wake seam in Decision 4. The
+non-blocking notes are under *Notes from the Z1 design gate*. Trigger-class (ADR, CRD,
 security, core-vs-app boundary); per the 2026-09-22 workflow amendment it is reviewed at sprint
 close, not as a merge gate. **The build it unlocks does not start until the founder's `CLAUDE.md`
 sections 4, 5 and 6 edits are merged** — that is the exit criterion of the task that carries this
@@ -98,6 +101,15 @@ and flannel (OKE, OrbStack) does not enforce NetworkPolicy at all.
    (`scs-zones.md`). Each rule has its own test, mutation-proved. *(Z1 gate: the first text allowed
    only the `db-bind` Secret, which broke the base spec's `secrets`/`env` field and private-registry
    pulls without serving data sovereignty.)*
+   - **Deny rules win.** A Secret that is another zone's `db-bind` Secret is rejected even if it
+     carries this zone's label or `ownerReference`. The allow half and the deny half each get their
+     own mutation-proved test. *(Z1 re-confirmation.)*
+   - **The namespace is the trust boundary.** The same-zone marks stop only the confused-deputy
+     path: a `BackendService` author who cannot read a Secret getting the operator to mount it.
+     Anyone who can write Secrets in the namespace can set either mark, a label or an
+     `ownerReference`, so neither is stronger than the other. Zones whose owners do not trust each
+     other belong in separate namespaces. The host check covers environment literals only, not
+     what is inside a Secret. *(Z1 re-confirmation.)*
 3. **Retention:** a bound function's scale-down retention is longer than its zone's, counted from
    the function's own last call. So if the zone's last request called the function, the function
    outlasts the zone. That is not a guarantee that a warm zone never meets a cold function: a zone
@@ -122,9 +134,21 @@ and flannel (OKE, OrbStack) does not enforce NetworkPolicy at all.
      start — never awaited, never failing the boot. The acceptable alternative: a generic preload
      extension point in core that `@getknext/grpc` registers on. Either way core never imports or
      names gRPC, Connect or a function.
+   - **Bounds on the seam** *(Z1 re-confirmation)*. `KNEXT_WARM_URLS`, or whatever it ends up
+     named, is **operator-owned**: a user-set value in the `NextApp` env is overwritten or rejected.
+     It holds **only the bound functions' cluster-local health URLs** (`http` or `https`, host under
+     `*.svc.cluster.local`), and the supervisor ignores any entry that is not one. Each GET is
+     **plain, with no credentials or auth headers**; the health RPC is the only token-exempt RPC, so
+     nothing secret goes in the URL. Each GET has a **short per-request timeout**, because the
+     activator can otherwise hold a socket for minutes, and the URL count is **capped**. A failure
+     is logged, never thrown, and the warm GETs **never delay boot**. The list is not
+     request-triggered, so it is not an SSRF surface.
    - **Where it fires is decided by measurement:** the wake-ahead task (Z9, #2054) measures the
      firing point and picks the seam. Until then `register()` is the measured-too-late baseline,
      not the design.
+   - **Untested failure mode, a Z9 test item** *(Z1 re-confirmation)*: a zone cold-starts while a
+     bound function never answers the warm GET (for example, the activator queue is full). The test
+     proves the supervisor's GET times out, leaves no open sockets, and does not delay boot.
 5. **Transport: h2c by default, switchable per binding to HTTP/1.1.** The first text left the
    default to the cold-start spike. The spike measured no unary latency difference, and h2c is the
    default because it carries streaming and multiplexes; the ADR-0003 amendment's Decision 6
@@ -198,6 +222,12 @@ These came from the system designer as tech-debt or test items, not blockers. Th
   activator for more than 60 s. The planned warm-pod rotation test does not cover it; Z11 must add
   a cold-pod rotation case and a request held beyond 60 s. Until that drill is green, Decision 13's
   claim that the token, not the NetworkPolicy, is the authoritative control is unproven.
+- **Filed as #2276 (architect, at re-confirmation).** Make the anonymous principal enforceable in
+  generated code: a distinct branded type rather than a user-id string, rejected by a generated
+  action unless that RPC opts in through a proto option, mutation-proved. Until then, the rule that
+  the app's fail-closed check passes before `authorize()` returns the anonymous principal
+  (Decision 12) is documented, not enforced by generated code. The same issue tracks the
+  cluster-local-only `KNEXT_WARM_URLS` bound now written into Decision 4.
 
 ### Consequences
 
@@ -213,7 +243,9 @@ These came from the system designer as tech-debt or test items, not blockers. Th
 - [ ] Types and reconciler: ownerRef, same-zone rejection, allowlist (owning zone's `db-bind`,
       same-zone-marked Secrets, `imagePullSecrets` exempt), retention, served version.
 - [ ] Wake-ahead through a function-agnostic core seam; the firing point and seam chosen by Z9's
-      measurement (#2054).
+      measurement (#2054); the seam's bounds from Decision 4, with the never-answering-GET test.
+- [ ] Docs (D3, #2071): the namespace is the trust boundary; zones whose owners do not trust each
+      other go in separate namespaces.
 - [ ] Per-zone key Secret and JWKS ConfigMap; rotation in the order above.
 - [ ] Interceptors in the Go and Rust templates, fail-closed, mutation-proved; JWKS re-read on an
       unknown `kid`; small `exp` clock skew.
