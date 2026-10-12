@@ -12,6 +12,11 @@
   knext-owned artifact, instead of Next's internal manifests. The system designer's: the rule now says
   which pathname is tested (raw and decoded, the data-route path, and a conservative i18n rule). Marked
   "(gate r3)".
+  **Revision 3 (2026-10-12)** applies gate round 4. The system designer's block (dot segments) is
+  closed as a class by D4.1 condition 11: only canonical paths can be edge-cached. The WHATWG-normalised
+  candidates stay in condition 10 as defence in depth. The soundness corpus is widened and the test
+  runs on every Next bump. `_next/data` is normalised whatever the build ID. The architect's condition
+  is D11's compiled single-exec paragraph. Marked "(gate r4)".
 - **Date:** 2026-10-12
 - **Trigger class:** ADR (amends the `CLAUDE.md` §8 "defer global CDN" stance for the header + purge
   slice) + CRD (`spec.cdn` on `NextApp`) + public API (`knext.config.ts` key, CR builder, preflight) +
@@ -247,9 +252,11 @@ Anything not positively allowed is not edge-cacheable:
 5. The response carries no `Set-Cookie`.
 6. The request carries no `Authorization` header and no draft-mode cookie (`__prerender_bypass`).
 7. The path is not under `/api/cache/` and not under any `spec.cdn.excludePaths` prefix. Path prefixes
-   (`excludePaths`, `includePaths`, `/api/cache/`) are compared against the **decoded** pathname, at a
-   **segment boundary**: `/blog` covers `/blog` and `/blog/x`, never `/blogger`. A pathname that fails
-   to decode is treated as excluded (gate r3).
+   (`excludePaths`, `includePaths`, `/api/cache/`) are compared at a **segment boundary**: `/blog`
+   covers `/blog` and `/blog/x`, never `/blogger`. The comparison is made against the **decoded,
+   WHATWG-normalised** pathname. Condition 11 guarantees that this is the same path the request names
+   on the wire, so `/x/%2e%2e/api/cache/…` cannot slip past it (gate r4). A pathname that fails to
+   decode is treated as excluded (gate r3).
 8. For a non-immutable response: the **request's own page or route entry tags were recorded,
    including its implicit `_N_T_` path tag** (D5.1), and they fit the row's limits (D5.4). (gate r1:
    fetch-kind tags alone are not enough. On an ISR miss they can be recorded before `writeHead` while
@@ -283,8 +290,15 @@ Anything not positively allowed is not edge-cacheable:
     - the `decodeURIComponent` pathname. Next tests the decoded form too, so without it `/%64ashboard`
       would skip a `/dashboard` matcher, which is web-cache deception. **If decoding fails, the request
       counts as matched**;
-    - for a pages-router data request (`/_next/data/<buildId>/<path>.json`), the page path it
-      normalizes to, with `/index` mapped to `/`.
+    - the **WHATWG-normalised** pathname, `new URL('http://n' + raw).pathname`, raw and decoded (gate
+      r4). This is the parse Next itself uses (`resolve-routes.js:91` → `parse-relative-url.js:18`),
+      which removes `/./`, `/../`, `%2e` and `%2e%2e`. Under condition 11 this candidate equals the raw
+      one for every request that can reach the edge. It is kept as defence in depth, in case condition
+      11 is ever loosened;
+    - for a pages-router data request (`/_next/data/<id>/<path>.json`), the page path it normalizes
+      to, with `/index` mapped to `/`. This is done **whatever `<id>` is**: the current build ID, a
+      stale one or a forged one (gate r4). The preload never checks `<id>` against the running build
+      before normalising. A locale-prefixed data path is covered by the i18n rule below.
 
     Two rules make the comparison over-match rather than under-match:
 
@@ -302,6 +316,37 @@ Anything not positively allowed is not edge-cacheable:
     `i18n` config and are unaffected.
 
     An app whose artifact says `middleware: "none"` is unaffected by condition 10.
+11. **The request's raw pathname is canonical** (gate r4, system-designer block; closes the
+    path-normalisation *class*). A pathname is canonical only if **all** of these hold:
+    - it equals its own WHATWG-normalised form, `new URL('http://n' + raw).pathname`, so it has no
+      `/./` or `/../` segment and no `\`;
+    - it contains no `//`;
+    - it contains no percent-encoded `.`, `/`, `\` or `%` (`%2e`, `%2f`, `%5c`, `%25`, any case);
+    - it contains no percent-encoded unreserved character (`A–Z`, `a–z`, `0–9`, `-`, `_`, `~`). A
+      canonical URI never encodes those, so `/%64ashboard` is non-canonical;
+    - it decodes without error, and the decoded form has no `.` or `..` segment.
+
+    Percent-encoded non-ASCII (for example `/blog/caf%C3%A9`) stays canonical. **A non-canonical
+    request is never edge-cached, whatever the matchers, prefix lists or provider row say.**
+
+    Why this closes the class rather than the instance. Rounds 2, 3 and 4 each found one more way the
+    path Next tests differs from the path on the wire: locale insertion, percent-decoding, dot-segment
+    removal. Each candidate in condition 10 patches one known difference. Condition 11 instead makes
+    the edge cache only requests whose wire path *already is* the normalised path, so a normalisation
+    Next performs has nothing left to change. If a future Next adds a normalisation that condition 11
+    does not anticipate, either it is a no-op on canonical paths (no hole), or it changes a canonical
+    path. The second case is the one way this can still fail open. The soundness test catches it,
+    because that test runs on every Next version bump (below).
+
+    jev on the fix: canonical gate + the normalised candidates as defence in depth (C) **0.56**,
+    canonical gate alone (B) 0.42, add the normalised candidate alone (A) 0.02; confidence 0.34. A
+    lost because it is the third instance patch and fails open on the next normalisation. C over B,
+    because the candidates cost nothing and keep condition 10 correct even if condition 11 is ever
+    loosened.
+
+    The cost: a request with a non-canonical path always goes to the origin. Browsers and Next's own
+    `Link` never produce one, so the cost falls on crafted or unusual URLs. `//` and `\` already get a
+    308 from Next, and 3xx is never edge-cached (D4.4).
 
 **Why condition 10 exists.** Take a static or ISR page that session-cookie middleware protects. An
 authenticated request passes conditions 1–9: it has no `Authorization` header, no draft cookie, no
@@ -326,7 +371,8 @@ opt-in list 0.38, confidence 0.24; architect with a falsifiable reversal **0.93*
   both carry `s-maxage`. Request variant A's cookie, then variant B's. **Pass** means B never gets A's
   body from the edge.
 
-Two more named cases cover the pathname rule (gate r3, system designer):
+Three more named cases cover the pathname rules: two from gate r3, and `dot-segment` from gate r4
+(system designer):
 
 - **`i18n-default-locale`**: a pages-router app with `i18n` and a matcher written for the
   locale-prefixed path. Request raw `/dashboard` (no locale) with the session cookie, then without it.
@@ -334,16 +380,33 @@ Two more named cases cover the pathname rule (gate r3, system designer):
 - **`encoded-path`**: request `/%64ashboard` with the session cookie, then `/dashboard` and
   `/%64ashboard` without it. **Pass** means neither cookieless request gets the protected body. A
   malformed escape such as `/%E0%A4%A` must also never be edge-cached.
+- **`dot-segment`** (gate r4): request `/x/%2e%2e/dashboard`, `/x/../dashboard` and
+  `/./dashboard` with the session cookie, then the same URLs without it. **Pass** means no cookieless
+  request gets the protected body. The same shapes against an `excludePaths` entry and against
+  `/api/cache/` must never be edge-cached.
 
-**Soundness test (gate r3).** A test middleware records every pathname it runs on. For a corpus of
-requests, the test asserts **"Next's middleware ran ⇒ the preload counted the request as matched"**.
-The corpus covers encoded, double-encoded and malformed paths, mixed case, `basePath`,
-trailing-slash, `/_next/data/…json`, and i18n requests with and without a locale, across two `Host`
-values when i18n `domains` is set. Over-matching is allowed; under-matching fails the test. This is
-the practical form of "the preload tests what Next tests". The reverse direction is not required,
-because over-matching only costs cache hits.
+**Soundness test (gate r3, widened gate r4).** A test middleware records every pathname it runs on.
+For a corpus of requests, the test asserts **"Next's middleware ran ⇒ the preload refused to
+edge-cache the request, or counted it as matched"**. Over-matching and refusal are both allowed;
+under-matching fails the test. This is the practical form of "the preload tests what Next tests".
+The reverse direction is not required, because over-matching only costs cache hits.
 
-All four cases and the soundness test are in the **mutation-proved** condition-10 set. All pass under
+The corpus covers:
+- encoded, double-encoded and malformed paths;
+- mixed case, `basePath` and trailing slash;
+- `/_next/data/<id>/…json` with the current, a stale and a forged `<id>`;
+- i18n requests with and without a locale, across two `Host` values when i18n `domains` is set;
+- the dot-segment and separator shapes (gate r4): `/./`, `/../`, `%2e`, `%2E`, `%2e%2e`,
+  `%2F..%2F`, `//`, `\` and `%5c`, plus `/%64ashboard`.
+
+For `//` and `\` the test also pins Next's current 308.
+
+**When it runs** (gate r4, system designer: a miss otherwise rated "Will", 1.78/2). The test is not
+only a CDN-1 test at the pinned Next version. It runs on **every Next version bump**: the Dependabot
+`next` PRs and each compat-matrix Next cell. A bump that changes how Next normalises paths then reds
+before it ships. That is what makes condition 11's one fail-open case observable.
+
+All five cases and the soundness test are in the **mutation-proved** condition-10/11 set. All pass under
 condition 10. The two original cases each run a second time with the path listed in `includePaths`. There the wrong variant is expected, which shows
 `includePaths` is a real opt-out of the protection and the docs must say so.
 
@@ -562,6 +625,23 @@ handler. On `build: vinext` (Beta) the operator renders no `KNEXT_CDN_*` env and
 informational status condition. It is not a CEL reject (fact 8). vinext uses a different cache
 adapter and a `Bun.serve` seam; #2271 ports D4–D7 there.
 
+**Compiled Bun single executable of the standalone server** (gate r4, architect condition; jev: embed
+**0.73**, inert + status condition 0.27, confidence 0.46). `next build` runs the official adapter for
+this target too, so `knext-cdn-routing.json` is produced. Two steps get it into the binary:
+
+- **The artifact:** `standalone-compile.mjs` embeds it through the existing `standalone-embed.mjs`
+  mechanism, the one that already embeds Next's `fs`-read JSON files. The preload reads it from the
+  embedded root.
+- **The preload:** the CDN header preload joins `PRELOAD_NAMES`, as `public-origin.cjs` did.
+
+The claim is evidence-gated. **No docs or status text says CDN mode works on the compiled target
+until the CDN-3a HIT case has passed on a compiled single-exec image.** Until then, and on any build
+where embedding is missed, the artifact-missing rule in condition 10 applies: immutable assets only,
+`reason="routing_artifact_missing"` and a boot log line. That is fail closed and visible. Inert plus a
+status condition, as for vinext, was the alternative. It lost because the target is the same
+standalone server with the same adapter outputs, and the fail-closed path already covers a packaging
+slip.
+
 ### D12. `KNEXT_CACHE_CONTROL_NORMALIZE` (jev: keep, deprecated **0.82**, keep as equal 0.15, remove 0.03)
 
 The switch stays in v2.0, documented as deprecated in favour of `spec.cdn`. When `KNEXT_CDN_PROVIDER`
@@ -582,8 +662,10 @@ notice.
   - the `_rsc` case per D4.3;
   - the D4.1 condition-10 cases `cookie-gated-static` and `middleware-cookie-variants`, with the
     pass/fail rule stated there (gate r1);
-  - the cases `i18n-default-locale` and `encoded-path`, plus the "Next ran ⇒ preload matched" soundness
-    test (gate r3);
+  - the cases `i18n-default-locale`, `encoded-path` (gate r3) and `dot-segment` (gate r4), plus the
+    soundness test with the widened corpus (gate r4);
+  - the HIT case repeated on a compiled single-exec image before any CDN claim for that target (D11,
+    gate r4);
   - a page entry whose `_N_T_` tag is missing at `writeHead` is not cached (gate r1);
   - tag isolation between two apps;
   - zero diff without `spec.cdn`.
@@ -628,6 +710,8 @@ notice.
 | Middleware auth bypass (gate r1) | Condition 10 + `includePaths` | 0.95 | Opt-in path list for every app | 0.05 | Penalises apps without middleware for a hazard only middleware creates |
 | Matcher source (gate r3) | `onBuildComplete` `outputs.middleware` → knext artifact that always exists | 0.91 | Next's internal manifests | 0.09 | Not a contract; reverse-engineering under the official-adapter rule |
 | Tested pathname (gate r3) | Raw + decoded + data-route path; decode failure = matched; i18n with any matcher = every path matched | 0.72 | Reproduce Next's locale insertion exactly; raw only | 0.27 / 0.01 | Exact reproduction re-implements Host/cookie/Accept-Language locale detection; raw only enables `/%64ashboard` deception |
+| Path-normalisation class (gate r4) | (C) Canonical-only gate (condition 11) + WHATWG-normalised candidates | 0.56 | (B) canonical gate alone; (A) add the normalised candidate alone | 0.42 / 0.02 | A is the third instance patch and fails open on the next Next normalisation; B is sound, but C keeps condition 10 correct if 11 is ever loosened |
+| Compiled single-exec (gate r4) | Embed the artifact + preload; claim gated on a CDN-3a HIT run on that image | 0.73 | Inert + status condition | 0.27 | Same server and adapter outputs; the fail-closed missing-artifact path already covers a packaging slip |
 | Symmetric RSC rule (gate r1) | Added (architect override) | — | As written | 1.00 | jev read the ADR literally; a crafted `?_rsc=` request is a reachable poisoning vector |
 | Emulator token (gate r1) | Fixed dummy token | 0.61 | Resolve `secretRef` | 0.39 | A CR could point the real token at an in-cluster listener |
 | `Vary` in the allowlist | Omit (3xx rule explicit) | 0.62 | Require | 0.38 | `s-maxage` condition already excludes known `Vary` cases |
@@ -675,6 +759,10 @@ notice.
   auth-bypass protection for it, and the docs must say that plainly. An app without middleware is
   unaffected. A pages-router app with `i18n` and any middleware gets **no** default edge HTML caching
   at all, only `includePaths`, because of the conservative i18n rule (gate r3).
+- **Non-canonical request paths always go to the origin** (condition 11, gate r4). Browsers and Next's
+  links do not produce them, so the cost is crafted or unusual URLs. The residual risk is a future Next
+  normalisation that changes an already-canonical path. The soundness test runs on every Next bump to
+  catch exactly that.
 - **Condition 10 depends on a knext build artifact.** A packaging slip that drops
   `knext-cdn-routing.json` turns off edge HTML caching. That is safe, and it is not silent: the
   `knext_cdn_edge_decision_total` metric counts it under `reason="routing_artifact_missing"`, the
@@ -701,13 +789,19 @@ notice.
    guard coverage, own-entry tags and Node + Bun parity) and tag encoding and overflow (D5.2–D5.4).
    Exit tests per the Sprint 4 plan, including:
    - mutation-proved RSC rules (both directions and the `Content-Type` check);
-   - a mutation-proved condition 10, gate r3:
+   - mutation-proved conditions 10 and 11 (gates r3 and r4):
      - delete the artifact → nothing non-immutable is cached;
      - corrupt the artifact → nothing is cached;
      - artifact says `middleware: "none"` → only then are paths eligible without `includePaths`;
      - middleware present with no matchers → every path is matched;
-     - the `i18n-default-locale` and `encoded-path` cases, and the soundness test;
-     - prefix lists decoded and segment-bounded (`/blog` never covers `/blogger`);
+     - the `i18n-default-locale`, `encoded-path` and `dot-segment` cases;
+     - every shape listed under condition 11 → never edge-cached;
+     - `_next/data` normalised under a current, stale and forged `<id>`;
+     - prefix lists decoded, normalised and segment-bounded (`/blog` never covers `/blogger`);
+   - the soundness test ("Next ran ⇒ preload refused or matched") over the widened corpus. It is wired
+     to run on **every Next version bump**: Dependabot `next` PRs and each compat-matrix Next cell, not
+     only at the pinned version (gate r4);
+   - the compiled single-exec embedding of the artifact and the CDN preload (D11);
    - a scan proving the preload reads no Next internal manifest;
    - an admission test showing a CR cannot set its own prefix.
 2. **CDN-2 (#2260, T2 module; T1 makes the one-line wire-in after #2083):** `adapters/cdn-purge/` rows
@@ -751,7 +845,7 @@ stay out)". §1 needs no change: the fence in D1 is what keeps this inside "narr
 | A1 purge originator + failure bound | D6.1, D6.3–D6.6, D8 | Origin pod; coalesced, ≤100 tags, row-sized bucket, `Retry-After`, ≤3 attempts; staleness = edge TTL; metric; drain |
 | A2 first-ready purge | D7 | `SET knext:cdn:purged:<p>:<buildId> NX`; no Redis → no first-ready purge |
 | A3 RSC/HTML key | D4.3, D4.4 | `RSC`/`Next-Router-*` without `_rsc` never cacheable; `_rsc` without `RSC: 1` never cacheable, and `Content-Type` must match the key (gate r1); `_rsc` only on query-keyed rows, gated by CDN-3a; no 3xx |
-| A4 never-cache set | D4.1 | Allowlist of positive conditions covering every listed case, plus condition 10: middleware-matched paths only through `includePaths` (gate r1). Matchers come from the official `onBuildComplete` outputs through a knext artifact; matching uses the raw and decoded pathname, with a conservative i18n rule (gate r3) |
+| A4 never-cache set | D4.1 | Allowlist of positive conditions covering every listed case, plus condition 10: middleware-matched paths only through `includePaths` (gate r1). Matchers come from the official `onBuildComplete` outputs through a knext artifact; matching uses the raw and decoded pathname, with a conservative i18n rule (gate r3). Condition 11: only canonical request paths are edge-cacheable (gate r4) |
 | A5 tag prefix | D3, D5.3 | Operator-derived hash, `KNEXT_CDN_*` reserved; the token-holder limit stated |
 | A6 credential + SSRF | D10 | Hardcoded URLs; emulator `*.svc.cluster.local` only; token never logged; no inbound route |
 | A7 canary | D9 | Rejected CDN-off-during-canary; short TTL + build tags + deduped purge; asset-retention dependency + status condition |
