@@ -358,3 +358,50 @@ func TestCDNAdvisory_IsRemovedOnceItNoLongerApplies(t *testing.T) {
 		t.Errorf("a stale %s must be removed, removeConditions = %v", ConditionCDNAdvisory, v.removeConditions)
 	}
 }
+
+// Round 2: spec.secrets.envFrom imports a Secret's keys unfiltered (the operator
+// cannot read the Secret), so a KNEXT_CDN_* key inside it reaches the pod. The
+// namespace is the trust boundary (documented on spec.cdn and in the CRD
+// reference). What the operator DOES guarantee: with spec.cdn set, the rendered
+// KNEXT_CDN_TAG_PREFIX is a plain `value` env entry, and Kubernetes applies
+// `env` entries after `envFrom`, so the rendered value wins at runtime.
+func TestCDNEnv_RenderedPrefixIsAPlainValueThatEnvFromCannotOverride(t *testing.T) {
+	app := cdnApp(appsv1alpha1.NextAppSpec{
+		CDN:     &appsv1alpha1.CDNSpec{Provider: "cloudflare"},
+		Secrets: &appsv1alpha1.SecretsSpec{EnvFrom: []string{"leaky-secret"}},
+	})
+	r := &NextAppReconciler{}
+	env, envFrom, _ := r.buildKsvcEnv(app)
+
+	var prefix []corev1.EnvVar
+	for _, ev := range env {
+		if ev.Name == "KNEXT_CDN_TAG_PREFIX" {
+			prefix = append(prefix, ev)
+		}
+	}
+	if len(prefix) != 1 {
+		t.Fatalf("want exactly one KNEXT_CDN_TAG_PREFIX env entry, got %+v", prefix)
+	}
+	if prefix[0].ValueFrom != nil || prefix[0].Value != "24116dd4a062" {
+		t.Errorf("the rendered prefix must be a plain value entry, got %+v", prefix[0])
+	}
+	// envFrom is a separate list, applied by Kubernetes BEFORE env: the Secret is
+	// passed through untouched, and a same-named key inside it loses to the entry above.
+	if len(envFrom) != 1 || envFrom[0].SecretRef == nil || envFrom[0].SecretRef.Name != "leaky-secret" {
+		t.Errorf("envFrom must be passed through unfiltered, got %+v", envFrom)
+	}
+}
+
+func TestCDNEnv_EnvFromIsNotFilteredWithoutSpecCDN(t *testing.T) {
+	app := cdnApp(appsv1alpha1.NextAppSpec{
+		Secrets: &appsv1alpha1.SecretsSpec{EnvFrom: []string{"leaky-secret"}},
+	})
+	r := &NextAppReconciler{}
+	env, envFrom, _ := r.buildKsvcEnv(app)
+	if got := cdnEnvOf(env); len(got) != 0 {
+		t.Errorf("no spec.cdn must render no KNEXT_CDN_* env, got %v", got)
+	}
+	if len(envFrom) != 1 || envFrom[0].SecretRef == nil || envFrom[0].SecretRef.Name != "leaky-secret" {
+		t.Errorf("envFrom is the namespace's responsibility and must pass through, got %+v", envFrom)
+	}
+}
