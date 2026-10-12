@@ -1,0 +1,56 @@
+/**
+ * GUARD: the `next` peer floor is >=16.4.0 and the Next 16.0.x `ctx.routes`
+ * compatibility branch is gone from the adapter.
+ *
+ * Both halves are asserted: the floor (manifest) and the deletion (source),
+ * so neither can be reverted alone without a red test.
+ */
+
+import { describe, expect, it } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
+const pkgDir = join(__dirname, "..", "..");
+const repoRoot = join(pkgDir, "..", "..");
+const read = (p: string) => readFileSync(p, "utf8");
+
+const PUBLISHABLE = ["kn-next", "lib", "db"];
+
+describe("next peer floor", () => {
+    it("@getknext/core declares next >=16.4.0", () => {
+        const pkg = JSON.parse(read(join(pkgDir, "package.json")));
+        expect(pkg.peerDependencies.next).toBe(">=16.4.0");
+    });
+
+    it("no publishable package declares a lower next peer range", () => {
+        for (const dir of PUBLISHABLE) {
+            const pkg = JSON.parse(
+                read(join(repoRoot, "packages", dir, "package.json")),
+            );
+            const range = pkg.peerDependencies?.next;
+            if (range !== undefined) expect(range).toBe(">=16.4.0");
+        }
+    });
+
+    it("the support matrix page states the same floor", () => {
+        const page = read(
+            join(repoRoot, "apps/docs/content/docs/support-matrix.mdx"),
+        );
+        expect(page).toContain("`next >=16.4.0`");
+        expect(page).not.toContain("`next >=16.0.0`");
+    });
+});
+
+describe("Next 16.0.x ctx.routes branch is deleted", () => {
+    const src = read(join(pkgDir, "src", "adapters", "next-adapter.ts"));
+
+    it("next-adapter.ts has no legacy ctx.routes shape", () => {
+        expect(src).not.toContain("Legacy160RoutesCtx");
+        expect(src).not.toContain("legacyRoutes");
+        expect(src).not.toContain("ctx.routes");
+    });
+
+    it("still counts the typed ctx.routing", () => {
+        expect(src).toContain("ctx.routing");
+    });
+});

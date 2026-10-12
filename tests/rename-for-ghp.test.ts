@@ -103,7 +103,7 @@ function buildFixture(
       ioredis: '^5.0.0',
       ...(opts.coreExtraDep ?? {}),
     },
-    peerDependencies: { next: '>=16.0.0' },
+    peerDependencies: { next: '>=16.4.0' },
   });
   writeFileSync(
     join(coreDir, 'dist', 'adapters', 'node-server.js'),

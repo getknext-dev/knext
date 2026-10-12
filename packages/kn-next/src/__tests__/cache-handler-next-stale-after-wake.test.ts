@@ -463,7 +463,7 @@ describe("ISR freshness survives a scale-to-zero wake on the Next path (#1888)",
     });
 
     it("seeds a pre-16.3.7 `/index` key under Next's toRoute form `/` (older-Next branch)", async () => {
-        // Peer floor is next >= 16.0.0: those Nexts hand the handler the bare
+        // Nexts before 16.3.7 hand the handler the bare
         // `/index` key (no `/route-cache/` prefix) and file the window under `/`.
         const mod = (await import(
             `../adapters/cache-handler.js?wakeold=${Math.random()}`
