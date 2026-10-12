@@ -107,7 +107,11 @@ function namesRealGuard(text: string, ctx: LedgerContext): boolean {
 export function entryProblems(e: Partial<UpstreamRuntimeDefect>, ctx?: LedgerContext): string[] {
   const out: string[] = [];
   const who = e.test ?? '<no test>';
-  if (!nonEmpty(e.test) || !CONCRETE_TEST_PATH.test(e.test)) {
+  if (
+    !nonEmpty(e.test) ||
+    !CONCRETE_TEST_PATH.test(e.test) ||
+    e.test.split('/').some((seg) => seg === '..' || seg === '.')
+  ) {
     out.push(`${who}: test must be one concrete corpus test file (no glob or wildcard)`);
   }
   if (!nonEmpty(e.lane) || !LANE_PATTERN.test(e.lane)) {

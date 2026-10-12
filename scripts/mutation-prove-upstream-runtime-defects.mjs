@@ -123,6 +123,9 @@ const MUTATIONS = [
       '"test": "test/e2e/app-dir/turbopack-tree-shaking-chunkgroup/*.test.ts"',
     ),
   ),
+  entryEdit('entry: test path climbs out of the corpus with ..', MW, (b) =>
+    b.replace(`"test": "${MW}"`, '"test": "test/../../etc/x.test.ts"'),
+  ),
   // Data: the file must keep running and must not be a §h quarantine.
   textRow(
     'the file is added to rules.exclude (it would stop running on every lane)',
@@ -206,8 +209,8 @@ const MUTATIONS = [
   textRow(
     'validator: the concrete-test-path check is removed',
     'module',
-    'if (!nonEmpty(e.test) || !CONCRETE_TEST_PATH.test(e.test)) {',
-    'if (!nonEmpty(e.test)) {',
+    '    !CONCRETE_TEST_PATH.test(e.test) ||\n',
+    '    false ||\n',
   ),
   textRow(
     'validator: the removal-condition-references-own-fix check is removed',
@@ -226,6 +229,12 @@ const MUTATIONS = [
     'module',
     'if (ctx.read(path)?.includes(symbol)) return true;',
     'return true;',
+  ),
+  textRow(
+    'validator: the dot-segment (..) check is removed',
+    'module',
+    "e.test.split('/').some((seg) => seg === '..' || seg === '.')",
+    'false',
   ),
   // Source: fail-closed on unreadable input (an injected read error reads as no ledger).
   textRow(

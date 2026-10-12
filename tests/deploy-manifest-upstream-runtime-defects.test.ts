@@ -212,6 +212,8 @@ describe('upstream-runtime-defect ledger — the guards themselves', () => {
       'test/e2e/app-dir/x/*.test.ts',
       'test/e2e/{a,b}.test.ts',
       'test/e2e/a?.test.ts',
+      'test/../../etc/x.test.ts',
+      'test/e2e/./x/x.test.ts',
     ]) {
       expect(entryProblems({ ...valid, test }, fakeCtx).join(), test).toContain('concrete');
     }
