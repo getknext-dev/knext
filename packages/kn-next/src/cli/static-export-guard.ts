@@ -140,13 +140,19 @@ function isExportedObject(text: string, open: number): boolean {
     return id !== undefined && isExportedIdentifier(text, id);
 }
 
-/** `export default <id>` / `module.exports = <id>` with nothing else in the expression. */
+/** `export default <id>` (alone or as the first argument of a wrapper-call chain) / `module.exports = <id>`. */
 function isExportedIdentifier(text: string, id: string): boolean {
     const escaped = id.replace(/\$/g, "\\$");
     const re = new RegExp(
         `(?:export\\s+default|module\\.exports\\s*=)\\s*${escaped}(?![\\w$])([^\\n;]*)`,
         "g",
     );
+    // `export default withX(withY(<id>, { ...options }))`: the id is the first
+    // whole argument of a call chain that begins the exported expression.
+    const wrapped = new RegExp(
+        `(?:export\\s+default|module\\.exports\\s*=)\\s*(?:[\\w$.]+\\s*\\(\\s*)+${escaped}\\s*[,)]`,
+    );
+    if (wrapped.test(text)) return true;
     for (let m = re.exec(text); m !== null; m = re.exec(text)) {
         // Only `as X` / `satisfies X` may follow on the line; `?`, `&&`, a
         // call or a member access make it a different expression.

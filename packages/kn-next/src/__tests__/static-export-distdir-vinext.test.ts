@@ -280,3 +280,42 @@ describe("vinext: only the object that is actually exported can be refused", () 
         expect(run(dir, true).caught).toBeUndefined();
     });
 });
+
+describe("vinext: a bound config exported through wrapper calls is still refused", () => {
+    const base = "const nextConfig = { output: 'export' };\n";
+    const wrapped: Record<string, string> = {
+        "ESM single wrapper": `${base}export default withX(nextConfig);`,
+        "CJS single wrapper": `${base}module.exports = withBundleAnalyzer(nextConfig);`,
+        "nested wrappers": `${base}export default withA(withB(nextConfig));`,
+        "wrapper with an extra options argument": `${base}export default withSentryConfig(nextConfig, { silent: true, org: "o" });`,
+        "multi-line wrapper": `${base}export default withX(\n    nextConfig,\n);`,
+        "member-call wrapper": `${base}module.exports = plugins.withX(nextConfig);`,
+    };
+    for (const [name, config] of Object.entries(wrapped)) {
+        it(`${name}: refused`, () => {
+            const dir = appDir({
+                "package.json": ESM_PKG,
+                "next.config.mjs": config,
+            });
+            expectRefusal(run(dir, true).caught);
+        });
+    }
+
+    it("a wrapper around a DIFFERENT config builds (warns)", () => {
+        const dir = appDir({
+            "package.json": ESM_PKG,
+            "next.config.mjs": `${base}const otherConfig = { output: 'standalone' };\nexport default withX(otherConfig);`,
+        });
+        const { runner, caught } = run(dir, true);
+        expect(caught).toBeUndefined();
+        expect(runner).toHaveBeenCalledTimes(1);
+    });
+
+    it("the id inside a ternary branch of a wrapper call builds", () => {
+        const dir = appDir({
+            "package.json": ESM_PKG,
+            "next.config.mjs": `${base}export default process.env.X ? withX(nextConfig) : {};`,
+        });
+        expect(run(dir, true).caught).toBeUndefined();
+    });
+});
