@@ -28,11 +28,9 @@ import { declareMutations, recordMutation } from './lib/prover-report.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SPEC = 'tests/deploy-manifest-upstream-runtime-defects.test.ts';
-const FILES = {
-  main: 'test/deploy-tests-manifest.knext.json',
-  smoke: 'test/deploy-tests-manifest.smoke.knext.json',
-  module: 'tests/compat-upstream-runtime-defects.ts',
-};
+const MAIN = resolve(REPO_ROOT, 'test/deploy-tests-manifest.knext.json');
+const SMOKE = resolve(REPO_ROOT, 'test/deploy-tests-manifest.smoke.knext.json');
+const MODULE = resolve(REPO_ROOT, 'tests/compat-upstream-runtime-defects.ts');
 const CHUNK =
   'test/e2e/app-dir/turbopack-tree-shaking-chunkgroup/turbopack-tree-shaking-chunkgroup.test.ts';
 const MW = 'test/e2e/app-dir/treeshake-mw/mw.test.ts';
@@ -49,13 +47,13 @@ function entryBlock(text, testPath) {
   return text.slice(at, end + '\n    }'.length);
 }
 
-const mainText = () => readFileSync(resolve(REPO_ROOT, FILES.main), 'utf8');
+const mainText = () => readFileSync(MAIN, 'utf8');
 
 /** A row that edits one field of one ledger entry. */
 function entryEdit(label, testPath, edit) {
   return {
     label,
-    subject: 'main',
+    target: 'main',
     build: () => {
       const block = entryBlock(mainText(), testPath);
       const out = edit(block);
@@ -65,9 +63,9 @@ function entryEdit(label, testPath, edit) {
   };
 }
 
-const textRow = (label, subject, anchor, replacement) => ({
+const textRow = (label, target, anchor, replacement) => ({
   label,
-  subject,
+  target,
   build: () => ({ anchor, replacement }),
 });
 
@@ -148,7 +146,7 @@ const MUTATIONS = [
   // Data: the category's own cap (six entries against a cap of five).
   {
     label: 'ledger grows to six entries (over its own cap)',
-    subject: 'main',
+    target: 'main',
     build: () => {
       const block = entryBlock(mainText(), CHUNK);
       const extra = [1, 2, 3, 4]
@@ -274,10 +272,15 @@ console.log('   ok baseline green\n');
 const decorative = [];
 for (const m of MUTATIONS) {
   console.log(`── mutation: ${m.label}`);
-  const snap = snapshot(resolve(REPO_ROOT, FILES[m.subject]));
+  const snap =
+    m.target === 'main'
+      ? snapshot(MAIN)
+      : m.target === 'smoke'
+        ? snapshot(SMOKE)
+        : snapshot(MODULE);
   try {
     const { anchor, replacement } = m.build();
-    mutate(snap, anchor, replacement, m.subject === 'module' ? { commentPrefix: '//' } : {});
+    mutate(snap, anchor, replacement, m.target === 'module' ? { commentPrefix: '//' } : {});
     if (specPasses()) {
       console.log('   x DECORATION: the spec stayed GREEN with the behaviour removed');
       decorative.push(m.label);

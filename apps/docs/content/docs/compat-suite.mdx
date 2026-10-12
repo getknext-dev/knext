@@ -145,13 +145,19 @@ credentialed Next.js version moves. It currently holds two distinct families:
 
 <Callout type="info">
 **Counts, kept honest by a CI check.** As of the current manifest, `bun-edge-fetch` quarantines 2
-entries (3 test cases) and `vercel-infra-coupled` quarantines 6 entries (21 test cases). These
+entries (3 test cases) and `vercel-infra-coupled` quarantines 15 entries (39 test cases). These
 numbers are asserted against the manifest by a docs test, so this page cannot silently drift from
 the ledger it describes.
 </Callout>
 
 Neither ledger above is used to manufacture a green run — both exist to keep the nightly signal
-honest, and both shrink toward zero over time rather than growing pre-emptively.
+honest. Each is bounded by a hard cap, and every entry records its evidence and the condition
+under which it comes out.
+
+A third, separate record lists tests that fail on exactly one runtime-and-bundler cell because of a
+defect in that runtime, where knext refuses the affected configuration at build time and the fix
+is upstream and not yet released. Those tests keep running on every cell, so the cell keeps
+reporting them red; the record only states why, and names the release that removes the entry.
 
 ## The harness boot-path caveat
 
