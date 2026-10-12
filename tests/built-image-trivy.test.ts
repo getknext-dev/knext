@@ -9,7 +9,7 @@ import { parse } from 'yaml';
  * ## Why this exists
  *
  * #971 added `base-image-trivy`, which scans the pinned alpine BASE references
- * (`oven/bun:1.4.0-alpine`, `node:22-alpine`). oven-bun-pin-exempt: historical
+ * (`oven/bun:1.4.0-alpine`, `node:24-alpine`). oven-bun-pin-exempt: historical
  * — records the Bun THAT WAS PINNED when #971 landed, not the current pin.
  * It landed enforce-on-main and
  * immediately red-lined main, because the base-ref carries the very HIGH/CRITICAL
@@ -271,7 +271,7 @@ describe('#1718 — the knext DEFAULT standalone-bun runtime image is Trivy-scan
 });
 
 /**
- * #703 — the node:22-alpine base ships a bundled npm whose vendored
+ * #703 — the node:24-alpine base ships a bundled npm whose vendored
  * `node_modules` carry HIGH/CRITICAL CVEs (tar gzip-bomb, pacote, sigstore, …)
  * under `/usr/local/lib/node_modules/npm/node_modules/...`. These are JS library
  * packages, not apk packages, so the whole-base `apk upgrade --no-cache` above

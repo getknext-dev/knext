@@ -4,7 +4,7 @@
  * security.md ("Supply chain") requires "Pin images by digest; reject :latest."
  * The operator's *controller* image is already guarded by hack/check-no-latest.sh,
  * but the *base* images that determine the runtime CVE surface
- * (node:22-alpine, golang:1.25.x, gcr.io/distroless/static) were floating by tag.
+ * (node:24-alpine, golang:1.25.x, gcr.io/distroless/static) were floating by tag.
  *
  * scripts/check-base-images-pinned.sh is the deterministic CI guard (analogous to
  * hadolint DL3006/DL3007) that FAILS on any Dockerfile `FROM` line lacking an
@@ -51,7 +51,7 @@ describe("base-image digest-pin guard (security.md supply chain)", () => {
         const dir = mkdtempSync(join(tmpdir(), "knext-pin-guard-"));
         try {
             const bad = join(dir, "Dockerfile");
-            writeFileSync(bad, "FROM node:22-alpine AS builder\nRUN true\n");
+            writeFileSync(bad, "FROM node:24-alpine AS builder\nRUN true\n");
             const { code, out } = runGuard([bad]);
             expect(code).toBe(1);
             expect(out).toMatch(/floating base image/i);
@@ -67,7 +67,7 @@ describe("base-image digest-pin guard (security.md supply chain)", () => {
             writeFileSync(
                 good,
                 [
-                    "FROM node:22-alpine@sha256:" +
+                    "FROM node:24-alpine@sha256:" +
                         "a".repeat(64) +
                         " AS builder",
                     "FROM builder AS runner", // stage alias — exempt

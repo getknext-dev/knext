@@ -334,7 +334,7 @@ describe('buildkit provenance is restored without weakening the gate (#202)', ()
 //       fast-xml-parser 4.5.3 + 5.3.5, form-data 2.5.5, lodash 4.17.23,
 //       protobufjs 7.5.4 → fixed via pnpm overrides (same discipline as the
 //       operator CVE fix in #155: bump deps, don't suppress).
-//   (b) the node:22-alpine base image's BUNDLED npm ships sigstore 3.1.0
+//   (b) the node:24-alpine base image's BUNDLED npm ships sigstore 3.1.0
 //       (CVE-2026-48815) and picomatch 4.0.3 (CVE-2026-33671). The runtime
 //       never runs npm/corepack/yarn — strip them from the runner stage.
 

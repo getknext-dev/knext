@@ -16,6 +16,10 @@
  * The operator reconciles everything from the NextApp CR.
  */
 
+// MUST stay the first import: it exits non-zero on a Node below the floor
+// before any other module (or external dependency) is evaluated. Pinned by
+// __tests__/node-floor.test.ts on the source and on the built bin.
+import "./node-floor-guard.cjs";
 import { readFileSync, writeSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";

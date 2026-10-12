@@ -29,9 +29,9 @@
  * ## Round 2 (#1588) fixes
  *
  *   - `deploy` now actually CAN build and push: `knext deploy` shells out to
- *     `docker buildx build … --push` (`deploy.ts`), and a plain `image: node:22`
+ *     `docker buildx build … --push` (`deploy.ts`), and a plain `image: node:24`
  *     job has no docker daemon at all. This template pairs a docker-in-docker
- *     service with a docker-CLI-capable job image (`node:22-alpine` + `apk add
+ *     service with a docker-CLI-capable job image (`node:24-alpine` + `apk add
  *     docker-cli` — the same digest this repo's own Dockerfiles already pin),
  *     following GitLab's own docker-in-docker recipe
  *     (https://docs.gitlab.com/ci/docker/using_docker_build/),
@@ -69,7 +69,7 @@
  *   - **The `docker:27.3.1-dind` service is now digest-pinned**, matching the
  *     three job images (`security.md`: pin images by digest, reject mutable
  *     tags). Resolved with `crane digest docker:27.3.1-dind` — the manifest
- *     LIST digest (same convention as the `node:22-alpine` pin above: an OCI
+ *     LIST digest (same convention as the `node:24-alpine` pin above: an OCI
  *     index, not one platform's manifest), so Docker still selects the
  *     runner's actual architecture.
  *
@@ -122,7 +122,7 @@ const KUBECTL_SHA256_LINUX_AMD64 =
 
 /**
  * `docker:27.3.1-dind`'s manifest-LIST digest (an OCI image index, same
- * convention as the `node:22-alpine` pin below — not one platform's manifest
+ * convention as the `node:24-alpine` pin below — not one platform's manifest
  * digest, so Docker still resolves the runner's actual architecture),
  * resolved with `crane digest docker:27.3.1-dind` (2026-09-28). Digest-pinned
  * per `security.md` ("pin images by digest; reject `:latest`" — the same
@@ -149,7 +149,7 @@ export const BUN_VERSION = "1.4.2";
 
 /**
  * sha256 of the `linux-x64-musl` Bun release archive for {@link BUN_VERSION}
- * (Alpine's libc — matches the `node:22-alpine` job image), read directly
+ * (Alpine's libc — matches the `node:24-alpine` job image), read directly
  * from
  * `https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/SHASUMS256.txt`
  * (2026-09-28) and embedded here rather than fetched at pipeline run time —
@@ -237,11 +237,11 @@ variables:
 # The default runtime is bun (DEFAULT_RUNTIME_ID, adapters/artifact-contract.
 # ts), and \`knext deploy\` always compiles the standalone executable by
 # shelling out to \`bun run …\` (standaloneCompileArgv()[0],
-# standalone-exec-build.ts) — a plain node:22-alpine image has no bun at all.
+# standalone-exec-build.ts) — a plain node:24-alpine image has no bun at all.
 # Installed the same way as kubectl above: download the exact release,
 # verify its sha256 against an embedded literal (no second network fetch for
 # the checksum), no oven/bun docker image (this job's base image is already
-# node:22-alpine for npm/kubectl/docker-cli).
+# node:24-alpine for npm/kubectl/docker-cli).
 .knext_bun_install: &knext_bun_install
   - |
     if ! command -v bun >/dev/null 2>&1; then
@@ -260,7 +260,7 @@ variables:
 # \`allow_failure\`/\`when: manual\` on a shared job could.
 kubeconfig-check:
   stage: preflight
-  image: node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32
+  image: node:24-alpine@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1
   rules:
     - if: '$CI_COMMIT_BRANCH == "main"'
   script:
@@ -276,7 +276,7 @@ kubeconfig-check:
 # first kubectl call.
 credential-preflight:
   stage: preflight
-  image: node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32
+  image: node:24-alpine@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1
   needs:
     - kubeconfig-check
   rules:
@@ -295,7 +295,7 @@ credential-preflight:
 # ── Deploy — build, push, apply ──────────────────────────────────────────────
 # \`knext deploy\` runs \`docker buildx build … --push\` (deploy.ts), so this
 # job needs an actual docker daemon AND the buildx plugin — a plain
-# \`image: node:22\` has neither, and Alpine's \`docker-cli\` package alone ships
+# \`image: node:24\` has neither, and Alpine's \`docker-cli\` package alone ships
 # only \`/usr/bin/docker\`, not buildx (a separate package, \`docker-cli-buildx\`).
 # This pairs a docker-in-docker service with a docker-CLI-and-buildx-capable
 # job image, GitLab's own recipe for exactly this:
@@ -307,7 +307,7 @@ credential-preflight:
 # on \`main\` must not race two applies of the same NextApp.
 deploy:
   stage: deploy
-  image: node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32
+  image: node:24-alpine@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1
   services:
     - docker:27.3.1-dind@${DIND_DIGEST}
   variables:

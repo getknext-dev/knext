@@ -162,7 +162,7 @@ describe('bun-version pins (#754) — scanned across every workflow', () => {
       // to run `node scripts/crd-schema-diff.mjs` — its own pinned setup-bun,
       // same lockstep version as every other step here. A count RISING is a
       // decision, per the rule above.
-      'ci.yml': 14,
+      'ci.yml': 15,
       // NEW (#1302): the freeze guard's frozenFileSet() computation needs the
       // workspace's bun to run scripts/compat-credential-freeze-guard.mjs — a
       // count RISING is a decision, per the rule above.
@@ -526,7 +526,7 @@ const PINNED_EXEMPTIONS: Record<string, ExemptionRecord[]> = {
     {
       reason: 'historical',
       ref: ob('{OB}:1.4.0-alpine'),
-      line: ob('* (`{OB}:1.4.0-alpine`, `node:22-alpine`).'),
+      line: ob('* (`{OB}:1.4.0-alpine`, `node:24-alpine`).'),
     },
   ],
   'tests/bun-version-pins.test.ts': [
@@ -1010,7 +1010,7 @@ describe(`bun lockstep (#1310) — one Bun (${PINNED_BUN}) everywhere it is sele
 
   // #1588 round 4 — the generated GitLab CI template's `deploy` job installs
   // a raw Bun release binary (musl, no `oven/bun` docker image; the job
-  // image is already node:22-alpine), so neither scan above ever looks at
+  // image is already node:24-alpine), so neither scan above ever looks at
   // it. Registered here explicitly so a future Bun bump that misses this
   // site is caught, the same way the setup-bun/oven-bun-image scans catch
   // every other selection site.

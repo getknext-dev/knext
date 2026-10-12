@@ -24,7 +24,7 @@ spec:
   restartPolicy: Never
   containers:
     - name: agent
-      image: node:22-alpine
+      image: node:24-alpine
       command: [node, -e]
       args:
         - |
@@ -80,7 +80,7 @@ spec:
   restartPolicy: Never
   containers:
     - name: agent
-      image: node:22-alpine
+      image: node:24-alpine
       command: [node, -e]
       args:
         - |
@@ -137,7 +137,7 @@ spec:
   restartPolicy: Never
   containers:
     - name: agent
-      image: node:22-alpine
+      image: node:24-alpine
       command: [node, -e]
       args:
         - |

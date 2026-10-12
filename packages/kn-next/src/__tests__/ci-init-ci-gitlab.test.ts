@@ -260,7 +260,7 @@ describe("the generated GitLab pipeline — structure (#1534)", () => {
     // #1588 round 4 review, finding 1 — the default runtime is bun
     // (DEFAULT_RUNTIME_ID), and `kn-next deploy` always compiles the standalone
     // executable by shelling out to whatever standaloneCompileArgv()[0] names.
-    // node:22-alpine ships no bun at all, so a default-runtime app's first
+    // node:24-alpine ships no bun at all, so a default-runtime app's first
     // deploy failed with ENOENT before this fix. Tied to the REAL argv (like
     // the buildx test above ties to dockerBuildxArgs), not a hardcoded string.
     it("the deploy job installs the binary standaloneCompileArgv() actually invokes, before running $KNEXT_CLI deploy", () => {

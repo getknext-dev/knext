@@ -29,9 +29,9 @@ Service with `minScale: 0`.
     -n cert-manager deployment/cert-manager deployment/cert-manager-webhook deployment/cert-manager-cainjector
   ```
 - **kubectl** configured against that cluster.
-- **Node.js 22.18 or newer** (24 LTS recommended). The CLI runs on plain Node —
-  no Bun required — and loads your TypeScript config file with Node's built-in
-  TypeScript support, which needs ≥ 22.18.
+- **Node.js 24 or newer.** The CLI runs on plain Node — no Bun required — and
+  loads your TypeScript config file with Node's built-in TypeScript support. On
+  an older Node, `knext` stops at start-up with a message naming the floor.
 - **Docker with buildx** (or a compatible builder) and a **container registry
   you can push to** (for example `ghcr.io/<your-user>`), with `docker login`
   already done.
@@ -232,13 +232,13 @@ If you write one by hand instead, a minimal version for the layout above
 (remember: `COPY` paths are relative to the **repository root**):
 
 ```dockerfile
-FROM node:22-alpine AS builder
+FROM node:24-alpine AS builder
 WORKDIR /repo
 COPY . .
 WORKDIR /repo/apps/hello-knext
 RUN npm ci && npm run build
 
-FROM node:22-alpine AS runner
+FROM node:24-alpine AS runner
 ENV NODE_ENV=production
 # Knative injects PORT; the standalone server binds HOSTNAME:PORT.
 ENV HOSTNAME=0.0.0.0

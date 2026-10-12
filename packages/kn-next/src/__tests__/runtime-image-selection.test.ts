@@ -409,7 +409,7 @@ describe("stageStandaloneBuildContext — stages a BOOTABLE standalone build con
         expect(text).toMatch(/AS standalone-node\b/);
         // Digest-pinned bases (reused from the repo's pins).
         expect(text).toContain("oven/bun:1.4.2-alpine@sha256:"); // oven-bun-pin-exempt: prefix-only assertion, not a selection
-        expect(text).toContain("node:22-alpine@sha256:");
+        expect(text).toContain("node:24-alpine@sha256:");
         // The staged file is byte-identical to the source template.
         const template = readFileSync(
             join(runtimeStandaloneTemplateDir(), "Dockerfile.standalone.hbs"),
@@ -889,7 +889,7 @@ describe("Dockerfile.standalone.hbs — self-contained stage ships no node_modul
         );
         expect(bunStageStart).toBeGreaterThan(-1);
         const nodeStageStart = dockerfileText.indexOf(
-            "FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32 AS standalone-node",
+            "FROM node:24-alpine@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1 AS standalone-node",
         );
         expect(nodeStageStart).toBeGreaterThan(-1);
         const bunStage = dockerfileText.slice(

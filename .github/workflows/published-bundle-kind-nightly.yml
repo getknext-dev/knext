@@ -85,15 +85,15 @@ jobs:
       - name: Route Docker Hub pulls through mirror.gcr.io (anonymous rate limit)
         id: docker-hub-mirror
         uses: ./.github/actions/docker-hub-mirror
-      # Node 22.18+ is required to run the published CLI directly from its
-      # `.ts` entry points under plain Node (native type stripping) — the same
-      # floor `docs/QUICKSTART.md` documents for consumers. Pinned rather than
+      # Node 24+ is the floor of the published CLI (its start-up check refuses
+      # anything older) — the same floor `docs/QUICKSTART.md` documents for
+      # consumers. Pinned rather than
       # left to the runner's preinstalled default, which this workflow does
       # not control.
       - name: Set up Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: '22.18'
+          node-version: '24'
 
       - name: Install kind
         uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1

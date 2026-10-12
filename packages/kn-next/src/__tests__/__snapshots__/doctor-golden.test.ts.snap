@@ -2,6 +2,7 @@
 
 exports[`doctor golden output (#1055 byte-identical pin) reachable — all checks pass (storage configured, app anonymously pullable): table 1`] = `
 "PASS  Cluster reachable                           apiserver responded
+PASS  Node.js version                             Node.js 24.14.0 (floor: 24)
 PASS  kubectl strict validation                   client v1.31.2 — the CR apply asserts --validate=strict (unknown fields are rejected, never silently pruned)
 PASS  Static asset mode                           object storage configured (gcs: assets) — assets are offloaded to the bucket and retained across deploys
 SKIP  vinext-on-node entry freshness              this app does not build with build: 'vinext' + runtime: 'node' (or no knext.config.ts was found) — knext-node-entry.mjs, if scaffolded, is never run
@@ -26,6 +27,12 @@ exports[`doctor golden output (#1055 byte-identical pin) reachable — all check
     "id": "cluster",
     "status": "pass",
     "title": "Cluster reachable",
+  },
+  {
+    "detail": "Node.js 24.14.0 (floor: 24)",
+    "id": "node-version",
+    "status": "pass",
+    "title": "Node.js version",
   },
   {
     "detail": "client v1.31.2 — the CR apply asserts --validate=strict (unknown fields are rejected, never silently pruned)",
@@ -119,6 +126,7 @@ exports[`doctor golden output (#1055 byte-identical pin) reachable — all check
 
 exports[`doctor golden output (#1055 byte-identical pin) unreachable — reachability gate WARNs, every cluster check SKIPs, exit 0: table 1`] = `
 "WARN  Cluster reachable                           apiserver unreachable (The connection to the server 10.0.0.1:6443 was refused - did you specify the right host or port?) — all cluster checks skipped (hint: cluster connection flaked — check network/VPN and retry)
+PASS  Node.js version                             Node.js 24.14.0 (floor: 24)
 WARN  kubectl strict validation                   could not determine the kubectl client version — unable to confirm that the CR apply can be strictly validated (hint: run \`kubectl version --client\` and upgrade to >= v1.25 if older)
 SKIP  Static asset mode                           no knext.config.ts in this directory — run doctor from the app directory to see how its static assets will be served
 SKIP  vinext-on-node entry freshness              this app does not build with build: 'vinext' + runtime: 'node' (or no knext.config.ts was found) — knext-node-entry.mjs, if scaffolded, is never run
@@ -144,6 +152,12 @@ exports[`doctor golden output (#1055 byte-identical pin) unreachable — reachab
     "id": "cluster",
     "status": "warn",
     "title": "Cluster reachable",
+  },
+  {
+    "detail": "Node.js 24.14.0 (floor: 24)",
+    "id": "node-version",
+    "status": "pass",
+    "title": "Node.js version",
   },
   {
     "detail": "could not determine the kubectl client version — unable to confirm that the CR apply can be strictly validated",
@@ -237,6 +251,7 @@ exports[`doctor golden output (#1055 byte-identical pin) unreachable — reachab
 
 exports[`doctor golden output (#1055 byte-identical pin) auth-failure — the reachability gate reports a credentials failure: table 1`] = `
 "WARN  Cluster reachable                           apiserver unreachable (error: You must be logged in to the server (Unauthorized)) — all cluster checks skipped (hint: credentials failed — re-authenticate (refresh your kubeconfig token) and retry)
+PASS  Node.js version                             Node.js 24.14.0 (floor: 24)
 WARN  kubectl strict validation                   could not determine the kubectl client version — unable to confirm that the CR apply can be strictly validated (hint: run \`kubectl version --client\` and upgrade to >= v1.25 if older)
 SKIP  Static asset mode                           no knext.config.ts in this directory — run doctor from the app directory to see how its static assets will be served
 SKIP  vinext-on-node entry freshness              this app does not build with build: 'vinext' + runtime: 'node' (or no knext.config.ts was found) — knext-node-entry.mjs, if scaffolded, is never run
@@ -262,6 +277,12 @@ exports[`doctor golden output (#1055 byte-identical pin) auth-failure — the re
     "id": "cluster",
     "status": "warn",
     "title": "Cluster reachable",
+  },
+  {
+    "detail": "Node.js 24.14.0 (floor: 24)",
+    "id": "node-version",
+    "status": "pass",
+    "title": "Node.js version",
   },
   {
     "detail": "could not determine the kubectl client version — unable to confirm that the CR apply can be strictly validated",
@@ -355,6 +376,7 @@ exports[`doctor golden output (#1055 byte-identical pin) auth-failure — the re
 
 exports[`doctor golden output (#1055 byte-identical pin) forbidden — the reachability gate reports an RBAC denial: table 1`] = `
 "WARN  Cluster reachable                           apiserver unreachable (Error from server (Forbidden): nextapps.apps.kn-next.dev is forbidden: User "u" cannot get resource "nextapps") — all cluster checks skipped (hint: insufficient RBAC — ask a cluster admin for get/list on nextapps.apps.kn-next.dev)
+PASS  Node.js version                             Node.js 24.14.0 (floor: 24)
 WARN  kubectl strict validation                   could not determine the kubectl client version — unable to confirm that the CR apply can be strictly validated (hint: run \`kubectl version --client\` and upgrade to >= v1.25 if older)
 SKIP  Static asset mode                           no knext.config.ts in this directory — run doctor from the app directory to see how its static assets will be served
 SKIP  vinext-on-node entry freshness              this app does not build with build: 'vinext' + runtime: 'node' (or no knext.config.ts was found) — knext-node-entry.mjs, if scaffolded, is never run
@@ -380,6 +402,12 @@ exports[`doctor golden output (#1055 byte-identical pin) forbidden — the reach
     "id": "cluster",
     "status": "warn",
     "title": "Cluster reachable",
+  },
+  {
+    "detail": "Node.js 24.14.0 (floor: 24)",
+    "id": "node-version",
+    "status": "pass",
+    "title": "Node.js version",
   },
   {
     "detail": "could not determine the kubectl client version — unable to confirm that the CR apply can be strictly validated",
@@ -473,6 +501,7 @@ exports[`doctor golden output (#1055 byte-identical pin) forbidden — the reach
 
 exports[`doctor golden output (#1055 byte-identical pin) budget-exhausted — the app-image probe budget of 0 leaves images unverified: table 1`] = `
 "PASS  Cluster reachable                           apiserver responded
+PASS  Node.js version                             Node.js 24.14.0 (floor: 24)
 PASS  kubectl strict validation                   client v1.31.2 — the CR apply asserts --validate=strict (unknown fields are rejected, never silently pruned)
 PASS  Static asset mode                           object storage configured (gcs: assets) — assets are offloaded to the bucket and retained across deploys
 SKIP  vinext-on-node entry freshness              this app does not build with build: 'vinext' + runtime: 'node' (or no knext.config.ts was found) — knext-node-entry.mjs, if scaffolded, is never run
@@ -497,6 +526,12 @@ exports[`doctor golden output (#1055 byte-identical pin) budget-exhausted — th
     "id": "cluster",
     "status": "pass",
     "title": "Cluster reachable",
+  },
+  {
+    "detail": "Node.js 24.14.0 (floor: 24)",
+    "id": "node-version",
+    "status": "pass",
+    "title": "Node.js version",
   },
   {
     "detail": "client v1.31.2 — the CR apply asserts --validate=strict (unknown fields are rejected, never silently pruned)",
@@ -590,6 +625,7 @@ exports[`doctor golden output (#1055 byte-identical pin) budget-exhausted — th
 
 exports[`doctor golden output (#1055 byte-identical pin) crd-schema — an installed CRD missing an emitted field FAILs and names it: table 1`] = `
 "PASS  Cluster reachable                           apiserver responded
+PASS  Node.js version                             Node.js 24.14.0 (floor: 24)
 PASS  kubectl strict validation                   client v1.31.2 — the CR apply asserts --validate=strict (unknown fields are rejected, never silently pruned)
 PASS  Static asset mode                           object storage configured (gcs: assets) — assets are offloaded to the bucket and retained across deploys
 SKIP  vinext-on-node entry freshness              this app does not build with build: 'vinext' + runtime: 'node' (or no knext.config.ts was found) — knext-node-entry.mjs, if scaffolded, is never run
@@ -614,6 +650,12 @@ exports[`doctor golden output (#1055 byte-identical pin) crd-schema — an insta
     "id": "cluster",
     "status": "pass",
     "title": "Cluster reachable",
+  },
+  {
+    "detail": "Node.js 24.14.0 (floor: 24)",
+    "id": "node-version",
+    "status": "pass",
+    "title": "Node.js version",
   },
   {
     "detail": "client v1.31.2 — the CR apply asserts --validate=strict (unknown fields are rejected, never silently pruned)",
@@ -708,6 +750,7 @@ exports[`doctor golden output (#1055 byte-identical pin) crd-schema — an insta
 
 exports[`doctor golden output (#1055 byte-identical pin) crd-version — a CRD that does not serve the emitted apiVersion FAILs: a newer-only CRD means upgrade the CLI: table 1`] = `
 "PASS  Cluster reachable                           apiserver responded
+PASS  Node.js version                             Node.js 24.14.0 (floor: 24)
 PASS  kubectl strict validation                   client v1.31.2 — the CR apply asserts --validate=strict (unknown fields are rejected, never silently pruned)
 PASS  Static asset mode                           object storage configured (gcs: assets) — assets are offloaded to the bucket and retained across deploys
 SKIP  vinext-on-node entry freshness              this app does not build with build: 'vinext' + runtime: 'node' (or no knext.config.ts was found) — knext-node-entry.mjs, if scaffolded, is never run
@@ -732,6 +775,12 @@ exports[`doctor golden output (#1055 byte-identical pin) crd-version — a CRD t
     "id": "cluster",
     "status": "pass",
     "title": "Cluster reachable",
+  },
+  {
+    "detail": "Node.js 24.14.0 (floor: 24)",
+    "id": "node-version",
+    "status": "pass",
+    "title": "Node.js version",
   },
   {
     "detail": "client v1.31.2 — the CR apply asserts --validate=strict (unknown fields are rejected, never silently pruned)",
@@ -826,6 +875,7 @@ exports[`doctor golden output (#1055 byte-identical pin) crd-version — a CRD t
 
 exports[`doctor golden output (#1055 byte-identical pin) cli-2.0 — a 2.0 CLI against an operator on its 1.x line PASSes: pairing is by CRD apiVersion: table 1`] = `
 "PASS  Cluster reachable                           apiserver responded
+PASS  Node.js version                             Node.js 24.14.0 (floor: 24)
 PASS  kubectl strict validation                   client v1.31.2 — the CR apply asserts --validate=strict (unknown fields are rejected, never silently pruned)
 PASS  Static asset mode                           object storage configured (gcs: assets) — assets are offloaded to the bucket and retained across deploys
 SKIP  vinext-on-node entry freshness              this app does not build with build: 'vinext' + runtime: 'node' (or no knext.config.ts was found) — knext-node-entry.mjs, if scaffolded, is never run
@@ -850,6 +900,12 @@ exports[`doctor golden output (#1055 byte-identical pin) cli-2.0 — a 2.0 CLI a
     "id": "cluster",
     "status": "pass",
     "title": "Cluster reachable",
+  },
+  {
+    "detail": "Node.js 24.14.0 (floor: 24)",
+    "id": "node-version",
+    "status": "pass",
+    "title": "Node.js version",
   },
   {
     "detail": "client v1.31.2 — the CR apply asserts --validate=strict (unknown fields are rejected, never silently pruned)",

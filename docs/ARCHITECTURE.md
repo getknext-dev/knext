@@ -378,7 +378,7 @@ Knative scale-to-zero services incur a cold start cost each time a pod is create
 ```mermaid
 flowchart LR
     subgraph Stage1["Stage 1: Build"]
-        A["node:22 + pnpm"] --> B["next build<br/>output:standalone"]
+        A["node:24 + pnpm"] --> B["next build<br/>output:standalone"]
     end
 
     subgraph Stage2["Stage 2: Run"]

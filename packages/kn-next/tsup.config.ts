@@ -241,7 +241,33 @@ export default defineConfig([
       // that throws under ESM Node (the #948 dist guard); kept as a relative
       // import, it resolves to the shipped .cjs beside it.
       /\.\/cache-control-normalize\.cjs$/,
+      // The Node-floor guard (v2 K5): the bin's FIRST import, kept as a relative
+      // file beside it so it is evaluated before the bundle's other imports (an
+      // inlined copy would run after the hoisted external imports). Built by the
+      // CJS pass below.
+      /\.\/node-floor-guard\.cjs$/,
     ],
+    // esbuild's code splitting hoists every SHARED-chunk import above the entry's
+    // own imports, so the guard import written first in deploy.ts lands after
+    // them in the emitted bin — and those chunks (and their dependencies) would
+    // evaluate on an old Node before the guard could say anything. Move the
+    // guard to the very first import. Asserts the anchor, so a changed emit
+    // shape fails the build rather than silently shipping an unguarded bin.
+    async onSuccess() {
+      const { readFileSync, writeFileSync } = await import('node:fs');
+      const bin = 'dist/cli/kn-next.js';
+      const guard = 'import "./node-floor-guard.cjs";\n';
+      let text = readFileSync(bin, 'utf8');
+      if (text.split(guard).length !== 2) {
+        throw new Error(`${bin}: expected exactly one node-floor-guard import`);
+      }
+      text = text.replace(guard, '');
+      const shebang = '#!/usr/bin/env node\n';
+      if (!text.startsWith(shebang)) {
+        throw new Error(`${bin}: expected the node shebang on line 1`);
+      }
+      writeFileSync(bin, shebang + guard + text.slice(shebang.length));
+    },
   },
   // The deployed Cache-Control rule as an srvx middleware for vinext on Node
   // (`./internal/response-cache-control`, imported by knext-node-entry.mjs).
@@ -271,6 +297,7 @@ export default defineConfig([
   // ESM output above.
   {
     entry: {
+      'cli/node-floor-guard': 'src/cli/node-floor-guard.cjs',
       'adapters/cache-control-normalize': 'src/adapters/cache-control-normalize.cjs',
       // #188 — Bun ≤1.3.x keep-alive mitigation (bun lane only; Node-inert).
       'adapters/bun-keepalive-guard': 'src/adapters/bun-keepalive-guard.cjs',

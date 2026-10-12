@@ -104,14 +104,16 @@ The 1.x line runs on these runtimes:
 
 {/* runtime-floors:start */}
 
-- Node.js `>=22.18`
+- Node.js `>=24`
 - Next.js `>=16.4.0`
 
 {/* runtime-floors:end */}
 
 These are the floors the published `@getknext/core` declares (`engines` and the `next` peer
 dependency), so your package manager warns you when a project is below them. The 1.x releases keep
-the Next.js floor `>=16.0.0`. New apps scaffold with a recent Next.js release rather than the floor.
+the Next.js floor `>=16.0.0` and the Node.js floor `>=22.18`. New apps scaffold with a recent Next.js release rather than the floor.
+
+On a Node.js older than the floor, `knext` stops at start-up with one line naming the floor and exits non-zero, and `knext doctor` reports the running Node.js version against it.
 
 The opt-in **vinext** build target, which compiles to a Bun single-executable, is **Beta** on every
 1.x release. It follows the same release policy as the rest of the package, but it may still change
@@ -123,8 +125,8 @@ Version 2.0 is not yet released, so everything in this section describes what is
 the release notes of the day are the authority. A major is the one place the rules above allow
 breaking changes, and 2.0 is used to clear out what has been deprecated through 1.x:
 
-- **The Node.js and Next.js floors rise.** The new floors are stated in the 2.0 release notes;
-  nothing here promises them earlier.
+- **The Node.js and Next.js floors rise.** 2.0 requires Node.js 24 or later and Next.js 16.4.0 or
+  later. Releases in the 1.x line keep their current floors, so stay on 1.x until you have upgraded.
 - **Deprecated imports and commands are removed.** That includes the deprecated second name for the
   command; use `knext`. Removals follow the rule above: only something already deprecated, with a
   replacement named, is removed.

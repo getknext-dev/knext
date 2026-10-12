@@ -61,7 +61,7 @@ spec:
   restartPolicy: Never
   containers:
     - name: harness
-      image: node:22-alpine
+      image: node:24-alpine
       command: [sleep, "172800"]
       resources:
         requests: {cpu: 100m, memory: 128Mi}
@@ -78,7 +78,7 @@ spec:
   restartPolicy: Never
   containers:
     - name: clock
-      image: node:22-alpine
+      image: node:24-alpine
       command: [node, -e, "require('http').createServer((q,s)=>s.end(String(performance.timeOrigin+performance.now()))).listen(8080)"]
       resources:
         requests: {cpu: 10m, memory: 32Mi}
@@ -95,7 +95,7 @@ spec:
   restartPolicy: Never
   containers:
     - name: clock
-      image: node:22-alpine
+      image: node:24-alpine
       command: [node, -e, "require('http').createServer((q,s)=>s.end(String(performance.timeOrigin+performance.now()))).listen(8080)"]
       resources:
         requests: {cpu: 10m, memory: 32Mi}
@@ -112,7 +112,7 @@ spec:
   restartPolicy: Never
   containers:
     - name: clock
-      image: node:22-alpine
+      image: node:24-alpine
       command: [node, -e, "require('http').createServer((q,s)=>s.end(String(performance.timeOrigin+performance.now()))).listen(8080)"]
       resources:
         requests: {cpu: 10m, memory: 32Mi}
