@@ -39,6 +39,7 @@ import {
     fencedDocSection,
     parsePrometheusRules,
     scanBunexecMetrics,
+    scanCdnPurgeMetrics,
     scanNameConstants,
     scanOperatorMetrics,
     scanPromClientMetrics,
@@ -105,6 +106,17 @@ const STANDALONE_SC_SUPERVISOR = join(
 );
 const STANDALONE_SC = seriesNames(
     scanStandaloneSelfContainedMetrics(read(STANDALONE_SC_SUPERVISOR)),
+);
+
+/**
+ * The CDN purge module's counter (ADR-0068 D6.5). A real in-process series; it
+ * is deliberately NOT in any alert's or dashboard's allowed emitters, because it
+ * is not on the :9464 scrape path yet. Only the docs side (S5) may name it.
+ */
+const CDN_PURGE = seriesNames(
+    scanCdnPurgeMetrics(
+        read(join(PKG_ROOT, "src", "adapters", "cdn-purge", "metrics.js")),
+    ),
 );
 
 /**
@@ -193,6 +205,7 @@ const EMITTERS = {
     "node-legacy": NODE_LEGACY,
     "bridged-app": BRIDGED_APP,
     external: EXTERNAL_SERIES,
+    "cdn-purge": CDN_PURGE,
 } as const;
 type EmitterId = keyof typeof EMITTERS;
 
@@ -604,9 +617,14 @@ const ALL_EMITTED = allowed([
     "node-legacy",
     "bridged-app",
     "external",
+    "cdn-purge",
 ]);
 
 describe("every metric a DOC names is one something emits (S5)", () => {
+    it("the CDN purge emitter scan finds the counter (an empty scan would let a dead name through)", () => {
+        expect(CDN_PURGE.has("knext_cdn_purge_total")).toBe(true);
+    });
+
     it("finds doc files at all — a vacuous scan would pass everything", () => {
         expect(DOC_FILES.length).toBeGreaterThan(50);
         expect(DOC_FILES).toContain("apps/docs/content/docs/observability.mdx");

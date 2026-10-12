@@ -567,10 +567,11 @@ registry (`trackWrite`). A 429 must not hold a Server Action open for a minute.
   app tag `kn-<p>` (jev: collapse **0.73**, drop 0.27; confidence 0.46). That evicts all of this app's
   edge HTML, which is correct and costs one call.
 
-**D6.5 Observability.** Both metrics below are **planned**, not yet emitted: the purge counter comes
-with CDN-2, the edge-decision counter with CDN-1. The docs metric-contract scan only checks a metric
-name that stands alone in backticks, so this ADR writes them with their label sets, or un-backticked,
-until they are emitted (see action items 1–2). `knext_cdn_purge_total{provider,result}` with
+**D6.5 Observability.** The purge counter is emitted by CDN-2 and is named bare below, so the docs
+metric-contract scan guards it against a rename. The edge-decision counter comes with CDN-1 and is
+**planned, not yet emitted**: the scan only checks a metric name that stands alone in backticks, so
+this ADR writes that one with its label set until CDN-1 emits it (see action items 1–2).
+`knext_cdn_purge_total` carries the labels `provider` and `result`, with
 `result ∈ {ok, ratelimited, failed, skipped_no_credential, skipped_unsupported, skipped_invalid_target}`,
 plus `knext_cdn_edge_decision_total{result,reason}` with a closed `reason` set (the D4.1 condition that
 failed, `tag_overflow`, `rsc_without_rsc_param`, `non_canonical_path`, `routing_artifact_missing`, …)
@@ -861,8 +862,8 @@ notice.
    drain enrolment, first-ready purge, the SSRF and token-scan tests, a no-cloud-SDK scan.
 
    **Metric names: CDN-1 and CDN-2.** In the PR that first emits each metric, restore its bare name
-   in this ADR as a stand-alone code span: knext_cdn_edge_decision_total in CDN-1, and
-   knext_cdn_purge_total in CDN-2, each wrapped in single backticks with nothing else inside them.
+   in this ADR as a stand-alone code span: knext_cdn_edge_decision_total in CDN-1 (still to do), and
+   knext_cdn_purge_total in CDN-2 (done: D6.5), each wrapped in single backticks with nothing else inside them.
    From then on the docs metric-contract test
    (`observability-metric-contract.test.ts`, S5) guards those names against a rename. Until then the
    ADR keeps them outside the scan's pattern on purpose. The test itself is not exempted or weakened.

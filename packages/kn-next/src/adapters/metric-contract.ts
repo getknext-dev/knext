@@ -85,6 +85,30 @@ export function scanStandaloneSelfContainedMetrics(
 }
 
 /**
+ * Scan the CDN purge module's dependency-free counter registry
+ * (`adapters/cdn-purge/metrics.js`, ADR-0068 D6.5).
+ *
+ * The module names its metric through `export const <NAME>_METRIC = 'knext_...'`
+ * and renders every family as a `# TYPE ... counter`, so those exported constants
+ * are the authoritative declaration. This emitter is real but is NOT yet on the
+ * shipped :9464 scrape path: the module exposes `renderCdnPurgeMetrics()` for the
+ * runtime's `/metrics` surface to append, and that wiring is a separate step.
+ * A docs reference to the counter is therefore a reference to a series that
+ * exists in the process; an alert or dashboard must not depend on it until the
+ * scrape wiring lands (they classify their emitters explicitly and do not list
+ * this one).
+ */
+export function scanCdnPurgeMetrics(jsSource: string): Map<string, string> {
+    const out = new Map<string, string>();
+    for (const m of jsSource.matchAll(
+        /export\s+const\s+[A-Z][A-Z0-9_]*_METRIC\s*=\s*['"](knext_[a-z0-9_]+)['"]/g,
+    )) {
+        out.set(m[1] as string, "counter");
+    }
+    return out;
+}
+
+/**
  * Scan the operator's Go metric registry.
  *
  * Matches a `prometheus.New<Kind>[Vec](prometheus.<Kind>Opts{ … Name: "…" })`
