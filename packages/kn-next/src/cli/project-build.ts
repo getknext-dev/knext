@@ -99,21 +99,19 @@ export interface RunProjectBuildOptions {
      */
     readonly run?: (argv: readonly string[]) => void;
     /**
-     * The resolved builder id (`config.build ?? DEFAULT_BUILDER_ID`) — gates
-     * {@link checkTurbopackAdapterStandaloneRegression}. Optional (not
-     * REQUIRED like `requireEsm`) because some callers, e.g. the vinext single-
-     * executable path, do not resolve a `BuilderAdapter` at all; `undefined`
-     * skips the check rather than guessing.
+     * The resolved builder id (`config.build ?? DEFAULT_BUILDER_ID`) - gates the
+     * Bun turbopack-fragments guard and
+     * {@link checkTurbopackAdapterStandaloneRegression}. REQUIRED (not
+     * optional) so a caller cannot skip either guard by omission.
      */
-    readonly builderId?: string;
+    readonly builderId: string;
     /**
      * The app's configured runtime (`config.runtime ?? DEFAULT_RUNTIME_ID`),
      * exported to the build as `KNEXT_RUNTIME` so the knext adapter points
-     * `cacheHandler` at that runtime's entry (#1843). Optional in the type so
-     * unit tests need not pass it; every CLI caller must, which a scan in
-     * project-build.test.ts enforces.
+     * `cacheHandler` at that runtime's entry (#1843), and read by the Bun
+     * turbopack-fragments guard. REQUIRED for the same reason as `builderId`.
      */
-    readonly runtimeId?: string;
+    readonly runtimeId: string;
 }
 
 /**
@@ -313,23 +311,17 @@ export function runProjectBuild(opts: RunProjectBuildOptions): void {
 
     // Bun cannot load the chunks `turbopackModuleFragments` makes Turbopack
     // emit (#2225). Here, not in each caller, so build, deploy and preview all
-    // refuse before any build work. Skipped when a caller does not resolve
-    // both ids (the guard cannot decide without them).
-    if (opts.runtimeId !== undefined && opts.builderId !== undefined) {
-        assertNoBunTurbopackFragments({
-            runtime: opts.runtimeId,
-            builder: opts.builderId,
-            readNextConfig: () => readNextConfigStrict(cwd),
-        });
-    }
+    // refuse before any build work. Both ids are REQUIRED by the type, so the
+    // guard cannot be skipped by omission.
+    assertNoBunTurbopackFragments({
+        runtime: opts.runtimeId,
+        builder: opts.builderId,
+        readNextConfig: () => readNextConfigStrict(cwd),
+    });
 
-    if (opts.builderId !== undefined) {
-        checkTurbopackAdapterStandaloneRegression(cwd, opts.builderId);
-    }
+    checkTurbopackAdapterStandaloneRegression(cwd, opts.builderId);
 
-    if (opts.runtimeId !== undefined) {
-        process.env[KNEXT_RUNTIME_ENV] = opts.runtimeId;
-    }
+    process.env[KNEXT_RUNTIME_ENV] = opts.runtimeId;
 
     try {
         run(["npm", "run", "build"]);
