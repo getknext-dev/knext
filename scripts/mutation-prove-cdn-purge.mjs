@@ -33,11 +33,6 @@ const SPECS = {
   scan: `${TESTS}/cdn-purge-scan.test.ts`,
   tags: `${TESTS}/cdn-purge-tags.test.ts`,
 };
-const SUBJECTS = {
-  purger: 'packages/kn-next/src/adapters/cdn-purge/purger.js',
-  rows: 'packages/kn-next/src/adapters/cdn-purge/rows.js',
-  tags: 'packages/kn-next/src/adapters/cdn-purge/tags.js',
-};
 
 // Each anchor runs to the end of its line, so the harness's trailing residue
 // marker comments out nothing that matters.
@@ -466,11 +461,19 @@ const MUTATIONS = [
   },
 ];
 
+// The driver is bound to one spec, so one prover per spec over the same subjects.
+const makeProver = (spec) =>
+  createGuardProver({
+    repoRoot: REPO_ROOT,
+    spec,
+    subjects: {
+      purger: 'packages/kn-next/src/adapters/cdn-purge/purger.js',
+      rows: 'packages/kn-next/src/adapters/cdn-purge/rows.js',
+      tags: 'packages/kn-next/src/adapters/cdn-purge/tags.js',
+    },
+  });
 const provers = Object.fromEntries(
-  Object.entries(SPECS).map(([name, spec]) => [
-    name,
-    createGuardProver({ repoRoot: REPO_ROOT, spec, subjects: SUBJECTS }),
-  ]),
+  Object.entries(SPECS).map(([name, spec]) => [name, makeProver(spec)]),
 );
 
 console.log('=== mutation proof: CDN purge module (ADR-0068 D6/D7/D10) ===');
