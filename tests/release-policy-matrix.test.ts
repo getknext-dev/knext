@@ -508,7 +508,7 @@ describe('support window and runtime floors agree across the docs and the manife
   }
 
   for (const [label, text] of [
-    ['versioning page', section(page, '## Supported runtimes on 1.x')],
+    ['versioning page', section(page, '## Supported runtimes')],
     ['COMPATIBILITY.md', section(matrix, '## Support window and runtime floors')],
   ] as const) {
     it(`${label} says the vinext / Bun single-executable target is Beta on 1.x`, () => {
@@ -604,5 +604,36 @@ describe('support window and runtime floors agree across the docs and the manife
     const sec = f.slice(f.indexOf('## What 2.0 changes'), f.indexOf('## The cluster side'));
     expect(sec.length).toBeGreaterThan(200);
     expect(sec).not.toMatch(/announced in the changelog|deprecated in a 1\.x minor first/i);
+  });
+});
+
+describe('the gRPC package is documented only as far as it exists', () => {
+  const page = readFileSync(DOCS_PAGE_PATH, 'utf8');
+  const exists = statSyncSafe(resolve(REPO_ROOT, 'packages/grpc/package.json'));
+
+  function statSyncSafe(path: string): boolean {
+    try {
+      return statSync(path).isFile();
+    } catch {
+      return false;
+    }
+  }
+
+  it('the versioning page says @getknext/grpc is not published yet, and states no peer range for it', () => {
+    // The whole paragraph, not the first sentence: a range like `^2.0.0` contains dots.
+    const para = page.split(/\n\s*\n/).find((p) => p.includes('@getknext/grpc'));
+    const m = para ? [flat(para)] : null;
+    expect(m, 'versioning page must mention @getknext/grpc').toBeTruthy();
+    if (!exists) {
+      expect(m?.[0]).toMatch(/not (yet )?published|ships later|later release/i);
+      // No semver range may sit next to the package name until the package exists.
+      expect(m?.[0]).not.toMatch(/[\^~>=]\s*\d+\.\d+/);
+    }
+  });
+
+  it('@getknext/grpc is not in the lockstep published-packages list until it exists', () => {
+    const block =
+      page.split('published-packages:start')[1]?.split('published-packages:end')[0] ?? '';
+    expect(block.includes('@getknext/grpc')).toBe(exists);
   });
 });

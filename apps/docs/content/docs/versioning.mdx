@@ -98,9 +98,9 @@ Security fixes are called out in the release notes for the release that carries 
 published under the `latest-1` dist-tag (`npm install @getknext/core@latest-1`). After that it
 receives nothing. Before 2.0 is generally available, the paragraph above is the whole policy.
 
-## Supported runtimes on 1.x
+## Supported runtimes
 
-The 1.x line runs on these runtimes:
+This line runs on these runtimes:
 
 {/* runtime-floors:start */}
 
@@ -135,6 +135,13 @@ breaking changes, and 2.0 is used to clear out what has been deprecated through 
 
 Staying on 1.x is supported for the window described above; the `latest-1` dist-tag is the way to
 install it.
+
+### The gRPC package
+
+The package for calling Go and Rust backend services, `@getknext/grpc`, is not published yet and
+ships in a later release. It is not part of the three-package set above, and no peer range is
+documented for it until it exists; when it ships, this page will state the `@getknext/core` range
+it supports.
 
 ## The cluster side versions separately
 
