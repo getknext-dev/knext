@@ -20,8 +20,8 @@
 # context (the app's `.dockerignore` excludes it — the Bun image never needs it).
 #
 # Pinned by digest, never by tag. The tag it was resolved from:
-# node:22-alpine
-FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32
+# node:24-alpine
+FROM node:24-alpine@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1
 
 # Whole-base upgrade: pulls every base-layer package up to the branch's current
 # patch, so the next base-layer CVE clears without a bespoke edit. The digest

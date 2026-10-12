@@ -218,6 +218,7 @@ describe("doctor golden output (#1055 byte-identical pin)", () => {
         const report = await runDoctor({
             kubectl: stubKubectl(healthyStubs()),
             probeImage: okProbe,
+            nodeVersion: "24.14.0",
             inspectKubeconfig: () => ({ kind: "has-current-context" }),
             loadAppConfig: async () => storageConfig,
         });
@@ -233,6 +234,7 @@ describe("doctor golden output (#1055 byte-identical pin)", () => {
         const report = await runDoctor({
             kubectl,
             probeImage: okProbe,
+            nodeVersion: "24.14.0",
             inspectKubeconfig: () => ({ kind: "has-current-context" }),
             loadAppConfig: async () => undefined,
         });
@@ -248,6 +250,7 @@ describe("doctor golden output (#1055 byte-identical pin)", () => {
         const report = await runDoctor({
             kubectl,
             probeImage: okProbe,
+            nodeVersion: "24.14.0",
             inspectKubeconfig: () => ({ kind: "has-current-context" }),
             loadAppConfig: async () => undefined,
         });
@@ -263,6 +266,7 @@ describe("doctor golden output (#1055 byte-identical pin)", () => {
         const report = await runDoctor({
             kubectl,
             probeImage: okProbe,
+            nodeVersion: "24.14.0",
             inspectKubeconfig: () => ({ kind: "has-current-context" }),
             loadAppConfig: async () => undefined,
         });
@@ -273,6 +277,7 @@ describe("doctor golden output (#1055 byte-identical pin)", () => {
         const report = await runDoctor({
             kubectl: stubKubectl(healthyStubs()),
             probeImage: okProbe,
+            nodeVersion: "24.14.0",
             inspectKubeconfig: () => ({ kind: "has-current-context" }),
             loadAppConfig: async () => storageConfig,
             appImageProbeBudgetMs: 0,
@@ -295,6 +300,7 @@ describe("doctor golden output (#1055 byte-identical pin)", () => {
         const report = await runDoctor({
             kubectl: stubKubectl(healthyStubs(schema)),
             probeImage: okProbe,
+            nodeVersion: "24.14.0",
             inspectKubeconfig: () => ({ kind: "has-current-context" }),
             loadAppConfig: async () => storageConfig,
         });
@@ -316,6 +322,7 @@ describe("doctor golden output (#1055 byte-identical pin)", () => {
         const report = await runDoctor({
             kubectl: stubKubectl(stubs),
             probeImage: okProbe,
+            nodeVersion: "24.14.0",
             inspectKubeconfig: () => ({ kind: "has-current-context" }),
             loadAppConfig: async () => storageConfig,
         });
@@ -348,6 +355,7 @@ describe("doctor golden output (#1055 byte-identical pin)", () => {
         const report = await runDoctor({
             kubectl: stubKubectl(stubs),
             probeImage: okProbe,
+            nodeVersion: "24.14.0",
             inspectKubeconfig: () => ({ kind: "has-current-context" }),
             loadAppConfig: async () => storageConfig,
             cliVersion: "2.0.0",

@@ -189,6 +189,12 @@ export interface DoctorDeps {
      * Defaults to the real node_modules lookup; tests inject fixtures.
      */
     readInstalledVinext?: () => string | undefined;
+    /**
+     * The running Node.js version, for the Node-floor row. Defaults to
+     * `process.versions.node`; tests (and the golden snapshots) inject it so
+     * the report does not depend on the Node that runs the suite.
+     */
+    nodeVersion?: string;
 }
 
 /**

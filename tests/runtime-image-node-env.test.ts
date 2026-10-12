@@ -146,7 +146,7 @@ describe('every knext app runtime image sets NODE_ENV=production', () => {
     // image whose T6b refusal is inert — the exact defect this guard exists for,
     // wearing a different disguise.
     const builderOnly = [
-      'FROM node:22 AS builder',
+      'FROM node:24 AS builder',
       'ENV NODE_ENV=production',
       'RUN npm run build',
       '',

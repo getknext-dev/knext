@@ -236,6 +236,7 @@ describe("runDoctor — healthy cluster", () => {
         const ids = report.checks.map((c) => c.id);
         expect(ids).toEqual([
             "cluster",
+            "node-version",
             "kubectl-validation",
             "storage-mode",
             "node-entry-staleness",

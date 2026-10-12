@@ -851,7 +851,7 @@ export interface StageSharpForNodeOptions {
  *      traces is the BUILD HOST's platform (nitro says so out loud: "Ensure
  *      your production environment matches the builder OS and architecture
  *      ... to avoid native module issues") — not the deployed image's. The
- *      Dockerfile's base is `node:22-alpine`, i.e. `linuxmusl`; a build on
+ *      Dockerfile's base is `node:24-alpine`, i.e. `linuxmusl`; a build on
  *      any other host ships an addon the image cannot load.
  *
  * Either failure means `require('sharp')` throws inside

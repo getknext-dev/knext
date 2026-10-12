@@ -51,6 +51,7 @@ import { kubectlValidationCheck } from "./doctor/checks/kubectl-validation";
 import { metricsCheck } from "./doctor/checks/metrics";
 import { networkPolicyCheck } from "./doctor/checks/network-policy";
 import { nodeEntryStalenessCheck } from "./doctor/checks/node-entry-staleness";
+import { nodeFloorCheck } from "./doctor/checks/node-floor";
 import { operatorCheck } from "./doctor/checks/operator";
 import { operatorImageCheck } from "./doctor/checks/operator-image";
 import { operatorVersionCheck } from "./doctor/checks/operator-version";
@@ -129,6 +130,7 @@ export async function runDoctor(
         verbose,
     };
 
+    checks.push(...nodeFloorCheck(ctx)); // local; always a row (v2 K5)
     checks.push(...kubectlValidationCheck(ctx));
     checks.push(...(await storageModeCheck(ctx)));
     checks.push(...(await nodeEntryStalenessCheck(ctx)));

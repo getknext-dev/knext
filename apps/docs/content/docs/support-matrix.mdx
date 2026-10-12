@@ -64,8 +64,12 @@ too, rather than left implied.
 
 ## Node.js
 
+- **knext requires Node.js 24 or later.** On an older Node the CLI exits at start-up with a message
+  naming the floor, and `knext doctor` reports the running version against it. Releases in the 1.x
+  line keep their own floor; see [Versioning](/docs/versioning).
 - **CI builds and tests on Node.js 24.** The standalone (Node) runtime target and the CLI itself
-  (published with a `#!/usr/bin/env node` shebang) are exercised at this version.
+  (published with a `#!/usr/bin/env node` shebang) are exercised at this version, and the base
+  images the build produces are Node.js 24 images.
 
 ## Bun
 

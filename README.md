@@ -119,14 +119,14 @@ flowchart LR
 
 1. **`modifyConfig`** → defaults `output` to `'standalone'` (an explicit `output: 'export'` is left alone and the CLI refuses it — a static export is not a server deployment, and knext deploys a Next.js server) and injects the Redis `cacheHandler` at build time
 2. **`onBuildComplete`** → uploads `staticFiles` + `prerenders` to cloud storage, keyed by `buildId`
-3. **Standalone server** → `next build` emits a self-contained `server.js` that runs on plain **Node 20+** (and Bun via `node:http` compat) — no bundler-specific runtime
+3. **Standalone server** → `next build` emits a self-contained `server.js` that runs on plain **Node 24+** (and Bun via `node:http` compat) — no bundler-specific runtime
 4. **Cold-start bytecode caching** → `NODE_COMPILE_CACHE` persists the V8 code cache so scaled-from-zero pods skip re-compilation (the mechanism behind Vercel Fluid)
 
 ---
 
 ## Features
 
-- ✅ **Official Next.js Adapter API** – `next build` standalone, no fork, runs on Node 20+ and Bun
+- ✅ **Official Next.js Adapter API** – `next build` standalone, no fork, runs on Node 24+ and Bun
 - ✅ **V8 Bytecode Caching** – the compile cache is populated at build time and baked into the image (Vercel-Fluid-style), so it is present from the very first cold pod on a stock cluster. Nothing to enable, no volume, no storage class, and no limit on how wide the app scales
 - ✅ **Fluid Compute** – Scale-to-zero, high concurrency, auto-scaling
 - ✅ **Distributed Caching** – Redis-backed caching with automatic tag invalidation
@@ -212,7 +212,7 @@ Bytecode is compiled **into the binary** at build time, as one unit, so every po
 
 ### Prerequisites
 
-- Node.js 22.18+ (24 LTS recommended) or Bun 1.2+
+- Node.js 24+ or Bun 1.2+
 - Docker with buildx
 - kubectl configured for your cluster
 - Cloud storage bucket (GCS/S3/Azure/MinIO)

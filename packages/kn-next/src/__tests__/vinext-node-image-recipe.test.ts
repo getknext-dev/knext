@@ -40,7 +40,7 @@ describe("Dockerfile.vinext-node — the baked V8 compile cache (#1260, ADR-0035
     });
 
     it("pins the node base by digest (security.md)", () => {
-        expect(RECIPE).toMatch(/^FROM node:22-alpine@sha256:[0-9a-f]{64}/m);
+        expect(RECIPE).toMatch(/^FROM node:24-alpine@sha256:[0-9a-f]{64}/m);
     });
 
     it("points NODE_COMPILE_CACHE at the baked directory", () => {

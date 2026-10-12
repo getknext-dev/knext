@@ -241,7 +241,47 @@ export default defineConfig([
       // that throws under ESM Node (the #948 dist guard); kept as a relative
       // import, it resolves to the shipped .cjs beside it.
       /\.\/cache-control-normalize\.cjs$/,
+      // The Node-floor guard (v2 K5): the bin's FIRST import, kept as a relative
+      // file beside it so it is evaluated before the bundle's other imports (an
+      // inlined copy would run after the hoisted external imports). Built by the
+      // CJS pass below.
+      /\.\/node-floor-guard\.cjs$/,
     ],
+    // esbuild's code splitting hoists every SHARED-chunk import above the entry's
+    // own imports, so the guard import written first in deploy.ts lands after
+    // them in the emitted bin — and those chunks (and their dependencies) would
+    // evaluate on an old Node before the guard could say anything. Move the
+    // guard to the very first import of EVERY runnable entry (found by scanning for
+    // the shebang). The bin must carry the source import exactly once, so a changed
+    // emit shape fails the build rather than silently shipping an unguarded bin.
+    async onSuccess() {
+      const { readdirSync, readFileSync, writeFileSync } = await import('node:fs');
+      const guard = 'import "./node-floor-guard.cjs";\n';
+      const shebang = '#!/usr/bin/env node\n';
+      // SCAN dist/cli for every runnable entry (esbuild keeps the source
+      // shebang on entry outputs only; shared chunks never carry one), so a new
+      // runnable entry is guarded the moment it exists — no enumerated list.
+      const entries = readdirSync('dist/cli').filter((f) => {
+        if (!f.endsWith('.js')) return false;
+        return readFileSync(`dist/cli/${f}`, 'utf8').startsWith(shebang);
+      });
+      if (!entries.includes('kn-next.js')) {
+        throw new Error('dist/cli/kn-next.js (the bin) is not among the shebang entries');
+      }
+      for (const f of entries) {
+        const bin = `dist/cli/${f}`;
+        let text = readFileSync(bin, 'utf8');
+        const seen = text.split(guard).length - 1;
+        if (seen > 1) {
+          throw new Error(`${bin}: expected at most one node-floor-guard import, found ${seen}`);
+        }
+        if (f === 'kn-next.js' && seen !== 1) {
+          throw new Error(`${bin}: deploy.ts must import the guard exactly once, found ${seen}`);
+        }
+        text = text.replace(guard, '');
+        writeFileSync(bin, shebang + guard + text.slice(shebang.length));
+      }
+    },
   },
   // The deployed Cache-Control rule as an srvx middleware for vinext on Node
   // (`./internal/response-cache-control`, imported by knext-node-entry.mjs).
@@ -271,6 +311,7 @@ export default defineConfig([
   // ESM output above.
   {
     entry: {
+      'cli/node-floor-guard': 'src/cli/node-floor-guard.cjs',
       'adapters/cache-control-normalize': 'src/adapters/cache-control-normalize.cjs',
       // #188 — Bun ≤1.3.x keep-alive mitigation (bun lane only; Node-inert).
       'adapters/bun-keepalive-guard': 'src/adapters/bun-keepalive-guard.cjs',

@@ -3,14 +3,14 @@
 # output:'standalone' -> a self-contained server.js on a slim Node base.
 # Built --platform linux/amd64 (OKE nodes are amd64).
 
-FROM node:22-alpine AS builder
+FROM node:24-alpine@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1 AS builder
 WORKDIR /app
 COPY package.json ./
 RUN npm install --no-audit --no-fund
 COPY . .
 RUN npm run build
 
-FROM node:22-alpine AS runner
+FROM node:24-alpine@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1 AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 # Operator hardcodes containerPort 3000; standalone server honours PORT/HOSTNAME.

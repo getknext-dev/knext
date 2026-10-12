@@ -631,8 +631,8 @@ describe("the V8 compile cache is baked into the standalone-node image and LIVE 
                 `as a different uid than the runtime (the cache subdirectory is keyed by uid).\n${logs.slice(-3000)}`,
         ).toMatch(
             // server.js is spawned as `node server.js` (plain CLI arg), so it
-            // loads as CommonJS — the plain-path log form, never the ESM file:// form.
-            /cache for \/app\/\.next\/standalone\/server\.js was accepted/,
+            // loads as CommonJS — the "V8 code cache for CommonJS <path>" log form (Node 24), never the ESM file:// form.
+            /V8 code cache for CommonJS \/app\/\.next\/standalone\/server\.js was accepted/,
         );
     });
 
@@ -645,7 +645,7 @@ describe("the V8 compile cache is baked into the standalone-node image and LIVE 
         // as the entry, cache or not) would pass the previous assertion alone.
         const logs = logsOf(NODE_DEBUG_CONTAINER);
         expect(logs).toMatch(
-            /cache for \/app\/\.next\/standalone\/node_modules\/next\/dist\/[^\s]+ was accepted/,
+            /V8 code cache for CommonJS \/app\/\.next\/standalone\/node_modules\/next\/dist\/[^\s]+ was accepted/,
         );
     });
 

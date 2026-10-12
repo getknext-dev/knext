@@ -314,6 +314,54 @@ jobs:
       - name: Typecheck root tests/ (tsc --noEmit)
         run: bun run typecheck
 
+  # The Node.js floor, proved on a REAL Node 22 binary. The unit lane stubs
+  # `process.versions` (so it runs everywhere); this job runs the built bin under
+  # an actual Node 22 and asserts it exits non-zero naming the floor. The binary
+  # comes from the `node@22.12.0` npm package, NOT a second `setup-node`, so every
+  # `setup-node` in the repo can keep pinning >=24 (tests/node-floor-pins-in-repo).
+  # KNEXT_REQUIRE_NODE22=1 turns an absent binary into a failure, never a skip.
+  node-floor-real-22:
+    name: Node floor (real Node 22 refuses to start)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+
+      - name: Setup bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build @getknext/lib
+        run: bun run --filter @getknext/lib build
+
+      - name: Build @getknext/db
+        run: bun run --filter @getknext/db build
+
+      - name: Build @getknext/core
+        run: bun run --filter @getknext/core build
+
+      - name: Fetch a real Node 22 binary
+        run: |
+          NODE22="$(npm exec --yes --package=node@22.12.0 -- node -p 'process.execPath')"
+          test "$("$NODE22" -p 'process.versions.node.split(".")[0]')" = "22"
+          echo "KNEXT_NODE22_BIN=$NODE22" >> "$GITHUB_ENV"
+
+      - name: node@22 knext --help exits non-zero naming the floor
+        env:
+          KNEXT_REQUIRE_NODE22: '1'
+        run: bun test packages/kn-next/src/__tests__/node-floor.test.ts
+
   # Ratchet-floor guard (#1253) — mechanically enforced "raise it, never lower
   # it" for every `@ratchet-floor`-marked constant (coverage floors, prover
   # anchor-drift floors, the precompile-closure supply-chain floors, ...).
@@ -1275,7 +1323,7 @@ jobs:
 
       - name: Assert the Node target does NOT carry the bun entry
         if: steps.filter.outputs.docs == 'true' || github.event_name == 'merge_group'
-        # knext-bun-entry.mjs serves through Bun.serve; carried into a node:22
+        # knext-bun-entry.mjs serves through Bun.serve; carried into a node:24
         # image it builds cleanly and dies at runtime. This is the assertion that
         # guards the node preset against silently shipping a bun build, now that
         # Dockerfile.oke (the deploy this validated) is retired (#1488).

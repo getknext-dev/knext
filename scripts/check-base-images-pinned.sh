@@ -6,7 +6,7 @@
 # Why: security.md ("Supply chain") requires "Pin images by digest; reject
 # :latest." The operator's controller image is already digest-pinned and guarded
 # by hack/check-no-latest.sh, but the *base* images that actually determine the
-# runtime CVE surface (node:22-alpine, golang:1.25, gcr.io/distroless/static)
+# runtime CVE surface (node:24-alpine, golang:1.25, gcr.io/distroless/static)
 # were floating by tag. A floating base tag means an unreviewed upstream push can
 # silently change the CVE surface of an image we sign — defeating the supply-chain
 # guarantees. This guard closes that gap, analogous to hadolint DL3006/DL3007.
@@ -14,8 +14,8 @@
 # A `FROM` line is COMPLIANT iff its image reference contains `@sha256:`.
 # The human-readable tag MAY (and should) be kept as a FULL-LINE comment ABOVE
 # the FROM (Docker rejects trailing/inline comments on a FROM line), e.g.
-#     # node:22-alpine
-#     FROM node:22-alpine@sha256:<digest> AS builder
+#     # node:24-alpine
+#     FROM node:24-alpine@sha256:<digest> AS builder
 # Build-stage aliases (`FROM builder`, `FROM <stage> AS ...`) and the special
 # `FROM scratch` are exempt — they do not pull an external base image.
 #
@@ -151,7 +151,7 @@ if [[ "$VIOLATIONS" -gt 0 ]]; then
     echo ""
     echo "ERROR: $VIOLATIONS Dockerfile FROM line(s) use a floating base tag."
     echo "       Pin every base image by digest, e.g.:"
-    echo "         FROM node:22-alpine@sha256:<digest> AS builder  # node:22-alpine"
+    echo "         FROM node:24-alpine@sha256:<digest> AS builder  # node:24-alpine"
     echo "       Resolve a digest with: docker buildx imagetools inspect <image>"
     exit 1
 fi

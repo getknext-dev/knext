@@ -104,6 +104,10 @@ const MODELLED_TSUP_KEYS = new Set([
     "clean",
     "sourcemap",
     "external",
+    // A post-emit hook that rewrites ONLY dist/cli/kn-next.js (moves the Node
+    // floor guard to the bin's first import); it never touches the library
+    // bundle this guard inspects. node-floor.test.ts pins what it produces.
+    "onSuccess",
 ]);
 
 /**

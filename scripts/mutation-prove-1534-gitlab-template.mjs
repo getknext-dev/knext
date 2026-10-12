@@ -69,9 +69,9 @@ const MUTATIONS = [
     subject: 'initCiGitlabTs',
     spec: GITLAB_TEMPLATE_SPEC,
     anchor:
-      'credential-preflight:\n  stage: preflight\n  image: node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32\n  needs:\n    - kubeconfig-check\n',
+      'credential-preflight:\n  stage: preflight\n  image: node:24-alpine@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1\n  needs:\n    - kubeconfig-check\n',
     replacement:
-      'xcredential-preflight:\n  stage: preflight\n  image: node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32\n  needs:\n    - kubeconfig-check\n',
+      'xcredential-preflight:\n  stage: preflight\n  image: node:24-alpine@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1\n  needs:\n    - kubeconfig-check\n',
   },
 
   // ── Guard 2: allow_failure added to a preflight job (made skippable) ────
@@ -81,9 +81,9 @@ const MUTATIONS = [
     subject: 'initCiGitlabTs',
     spec: GITLAB_TEMPLATE_SPEC,
     anchor:
-      'credential-preflight:\n  stage: preflight\n  image: node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32\n  needs:\n    - kubeconfig-check\n',
+      'credential-preflight:\n  stage: preflight\n  image: node:24-alpine@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1\n  needs:\n    - kubeconfig-check\n',
     replacement:
-      'credential-preflight:\n  stage: preflight\n  image: node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32\n  allow_failure: true\n  needs:\n    - kubeconfig-check\n',
+      'credential-preflight:\n  stage: preflight\n  image: node:24-alpine@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1\n  allow_failure: true\n  needs:\n    - kubeconfig-check\n',
   },
 
   // ── Guard 3: the ordering guarantee is removed (order swapped/dropped) ──
@@ -191,7 +191,7 @@ const MUTATIONS = [
   // ── Guard 10 (#1588 round 4, finding 1): the deploy job never installs bun ─
   {
     label:
-      "the deploy job drops the bun install step — the default (bun) runtime's `kn-next deploy` shells out to `bun run …` and node:22-alpine has no bun at all",
+      "the deploy job drops the bun install step — the default (bun) runtime's `kn-next deploy` shells out to `bun run …` and node:24-alpine has no bun at all",
     subject: 'initCiGitlabTs',
     spec: GITLAB_TEMPLATE_SPEC,
     anchor: '    - *knext_kubectl_install\n    - *knext_bun_install\n',
