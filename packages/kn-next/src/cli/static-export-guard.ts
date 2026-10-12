@@ -46,9 +46,53 @@ export function configuredDistDir(configText: string): string | undefined {
     )?.[2];
 }
 
-/** True iff the config text sets `output` to the literal `'export'`. */
-export function declaresStaticExport(configText: string): boolean {
-    return /\boutput\s*:\s*(["'`])export\1/.test(stripComments(configText));
+/**
+ * How the config text declares `output: 'export'`:
+ *  - `unconditional`: a top-level property of the config object literal
+ *    (exactly one enclosing `{`, no `[`; wrapping calls like `defineConfig(`
+ *    are fine). The app really is a static export.
+ *  - `conditional`: the literal appears, but under a spread, ternary branch,
+ *    nested object, array or function body, or the structure cannot be
+ *    determined. A heuristic must never block a working app, so this only warns.
+ *  - `none`: the literal never appears.
+ */
+export type StaticExportDeclaration = "unconditional" | "conditional" | "none";
+
+export function classifyStaticExport(
+    configText: string,
+): StaticExportDeclaration {
+    const text = stripComments(configText);
+    const re = /\boutput\s*:\s*(["'`])export\1/g;
+    let result: StaticExportDeclaration = "none";
+    for (let m = re.exec(text); m !== null; m = re.exec(text)) {
+        const stack: string[] = [];
+        let quote: string | undefined;
+        let broken = false;
+        for (let i = 0; i < m.index; i++) {
+            const c = text[i];
+            if (quote) {
+                if (c === "\\") i++;
+                else if (c === quote) quote = undefined;
+            } else if (c === '"' || c === "'" || c === "`") quote = c;
+            else if (c === "{" || c === "[" || c === "(") stack.push(c);
+            else if (c === "}" || c === "]" || c === ")") {
+                if (stack.pop() === undefined) broken = true;
+            }
+        }
+        const braces = stack.filter((c) => c === "{").length;
+        const brackets = stack.filter((c) => c === "[").length;
+        const prev = text.slice(0, m.index).trimEnd().slice(-1);
+        const unconditional =
+            !broken &&
+            quote === undefined &&
+            braces === 1 &&
+            brackets === 0 &&
+            stack.lastIndexOf("{") === stack.length - 1 &&
+            (prev === "{" || prev === ",");
+        if (unconditional) return "unconditional";
+        result = "conditional";
+    }
+    return result;
 }
 
 function readConfigOrRefuse(
@@ -77,13 +121,21 @@ export function assertNotStaticExport(
     }
 }
 
-/** Before a vinext build: refuse an app whose config asks for a static export. */
+/** Before a vinext build: refuse an app whose config unconditionally asks for a static export. */
 export function assertVinextNotStaticExport(
     cwd: string,
     readNextConfig: () => string | undefined = () => readNextConfigStrict(cwd),
+    warn: (line: string) => void = (line) => {
+        process.stderr.write(`${line}\n`);
+    },
 ): void {
     const text = readConfigOrRefuse(readNextConfig);
-    if (text !== undefined && declaresStaticExport(text)) {
-        throw new UsageError(STATIC_EXPORT_MESSAGE);
+    if (text === undefined) return;
+    const kind = classifyStaticExport(text);
+    if (kind === "unconditional") throw new UsageError(STATIC_EXPORT_MESSAGE);
+    if (kind === "conditional") {
+        warn(
+            "warning: your next.config sets `output: 'export'` under a condition or inside a nested value; a static export is not a server deployment and knext deploys standalone only. Continuing the build.",
+        );
     }
 }

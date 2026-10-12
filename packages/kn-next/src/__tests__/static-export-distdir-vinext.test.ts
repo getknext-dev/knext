@@ -162,3 +162,67 @@ describe("vinext target refuses output: 'export'", () => {
         expect(runner).toHaveBeenCalledTimes(1);
     });
 });
+
+describe("vinext: a conditional or nested output: 'export' warns instead of refusing", () => {
+    function runCapturingStderr(dir: string) {
+        const writes: string[] = [];
+        const original = process.stderr.write;
+        process.stderr.write = ((chunk: string | Uint8Array) => {
+            writes.push(String(chunk));
+            return true;
+        }) as typeof process.stderr.write;
+        try {
+            return { ...run(dir, true), stderr: writes.join("") };
+        } finally {
+            process.stderr.write = original;
+        }
+    }
+
+    const cases: Record<string, string> = {
+        "conditional spread": `export default { ...(process.env.STATIC ? { output: "export" } : {}) };`,
+        "&& spread": `export default { ...(process.env.STATIC && { output: 'export' }) };`,
+        "nested in experimental": `export default { experimental: { output: 'export' } };`,
+        "inside a function body": `export default () => { return { output: 'export' }; };`,
+    };
+
+    for (const [name, config] of Object.entries(cases)) {
+        it(`${name}: builds and warns`, () => {
+            const dir = appDir({
+                "package.json": ESM_PKG,
+                "next.config.mjs": config,
+            });
+            const { runner, caught, stderr } = runCapturingStderr(dir);
+            expect(caught).toBeUndefined();
+            expect(runner).toHaveBeenCalledTimes(1);
+            expect(stderr).toContain("static export");
+            expect(stderr).toContain("standalone");
+        });
+    }
+
+    it("a ternary value is not a literal export, so it builds", () => {
+        const dir = appDir({
+            "package.json": ESM_PKG,
+            "next.config.mjs":
+                "export default { output: process.env.S ? 'export' : 'standalone' };",
+        });
+        expect(run(dir, true).caught).toBeUndefined();
+    });
+
+    it("an unconditional top-level property is still refused (wrapped in defineConfig too)", () => {
+        const dir = appDir({
+            "package.json": ESM_PKG,
+            "next.config.mjs":
+                "export default defineConfig({ reactStrictMode: true, output: 'export' });",
+        });
+        expectRefusal(run(dir, true).caught);
+    });
+
+    it("a string containing braces before the property does not confuse the depth", () => {
+        const dir = appDir({
+            "package.json": ESM_PKG,
+            "next.config.mjs":
+                "export default { basePath: '/{x', output: \"export\" };",
+        });
+        expectRefusal(run(dir, true).caught);
+    });
+});
