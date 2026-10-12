@@ -28,6 +28,7 @@ import { join } from "node:path";
 import { KNEXT_RUNTIME_ENV } from "../adapters/runtime-env";
 import { runQuiet } from "./exec";
 import { UsageError } from "./shared";
+import { assertNotStaticExport } from "./static-export-guard";
 import {
     assertNoBunTurbopackFragments,
     readNextConfigStrict,
@@ -342,4 +343,6 @@ export function runProjectBuild(opts: RunProjectBuildOptions): void {
         }
         throw err;
     }
+
+    assertNotStaticExport(cwd);
 }
