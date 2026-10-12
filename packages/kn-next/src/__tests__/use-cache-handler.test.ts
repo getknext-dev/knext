@@ -616,6 +616,11 @@ describe.each([
     it("a client-side validation error never trips the breaker", async () => {
         const f = await withRedis();
         const { useCache } = await pod();
+        const counters = () =>
+            ((globalThis as Record<symbol, unknown>)[
+                Symbol.for("knext.cache.useCache.counters")
+            ] ?? {}) as Record<string, number>;
+        const invalidBefore = counters().invalid ?? 0;
         // Invalid TTL source, invalid key, invalid timestamp.
         await useCache.set(
             "bad-expire",
@@ -629,6 +634,9 @@ describe.each([
         expect([...f.strings.keys()].filter((k) => k.includes(":uc:"))).toEqual(
             [],
         );
+        // Each was rejected as INVALID (a client-side fault), not silently
+        // treated as a dynamic `expire <= 0` entry.
+        expect((counters().invalid ?? 0) - invalidBefore).toBe(3);
         // The breaker is closed, so a valid write lands at once.
         await useCache.set("good", Promise.resolve(entryOf()));
         expect(f.strings.has(`${PREFIX}:uc:default:good`)).toBe(true);
@@ -641,6 +649,32 @@ describe.each([
         expect(await useCache.get("corrupt", [])).toBeUndefined();
         await useCache.set("ok", Promise.resolve(entryOf()));
         expect(f.strings.has(`${PREFIX}:uc:default:ok`)).toBe(true);
+    });
+
+    it("an envelope of another version, or one missing its body, is a miss too", async () => {
+        const f = await withRedis();
+        const good = {
+            v: 1,
+            timestamp: Date.now(),
+            stale: 1,
+            expire: 60,
+            revalidate: 30,
+            tags: [],
+            body: Buffer.from("x").toString("base64"),
+        };
+        f.strings.set(
+            `${PREFIX}:uc:default:future`,
+            JSON.stringify({ ...good, v: 99 }),
+        );
+        f.strings.set(
+            `${PREFIX}:uc:default:nobody`,
+            JSON.stringify({ ...good, body: undefined }),
+        );
+        f.strings.set(`${PREFIX}:uc:default:fine`, JSON.stringify(good));
+        const { useCache } = await pod();
+        expect(await useCache.get("future", [])).toBeUndefined();
+        expect(await useCache.get("nobody", [])).toBeUndefined();
+        expect(await useCache.get("fine", [])).toBeDefined();
     });
 
     // ── what it must never do ───────────────────────────────────────────────
