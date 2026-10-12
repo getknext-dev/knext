@@ -24,6 +24,8 @@
  *   2. Install all three tarballs together in a scratch dir OUTSIDE the repo with
  *      `--omit=dev` (auditing root devDeps — drizzle-kit, esbuild, vitest, biome,
  *      tsx — would be FALSE CONFIDENCE: none of it ships to consumers).
+ *      Then scan those INSTALLED packages with `scripts/scan-published-seams.mjs`:
+ *      no `__`-prefixed test seam may be reachable from a published entry (#936).
  *   3. `npm audit --omit=dev --audit-level=high --json` over that prod closure and
  *      FAIL on any HIGH/CRITICAL advisory (mirrors the Trivy HIGH/CRITICAL rule),
  *      minus advisories in the DATED + JUSTIFIED allowlist
@@ -377,6 +379,29 @@ function main() {
     { cwd: consumerDir, encoding: 'utf8', stdio: ['ignore', 'inherit', 'inherit'] },
   );
   if (install.status !== 0) die('installing the production closure failed');
+
+  // ── No `__` test seam may be reachable from a published entry (#936). ─────
+  // Read from the INSTALLED npm-packed bytes — what a consumer actually gets —
+  // not from the workspace, so a packing step that re-introduces a seam is seen
+  // here too. Exit non-zero (a seam exported, or a file the scan could not
+  // read) blocks the publish like any other finding in this job.
+  console.log('[audit-published] scanning the installed packages for reachable `__` seams…');
+  const seamScan = spawnSync(
+    process.execPath,
+    [
+      join(repoRoot, 'scripts', 'scan-published-seams.mjs'),
+      ...PUBLISHED.flatMap((pkg) => [
+        '--package',
+        join(consumerDir, 'node_modules', ...pkg.name.split('/')),
+      ]),
+      '--resolve-from',
+      consumerDir,
+    ],
+    { encoding: 'utf8', stdio: ['ignore', 'inherit', 'inherit'] },
+  );
+  if (seamScan.status !== 0) {
+    die('a `__`-prefixed test seam is reachable from a published entry (or could not be read)');
+  }
 
   // ── Audit the prod closure. Fail on HIGH/CRITICAL (minus allowlist). ──────
   console.log(`[audit-published] npm audit ${OMIT_DEV} ${AUDIT_LEVEL} over the prod closure…`);

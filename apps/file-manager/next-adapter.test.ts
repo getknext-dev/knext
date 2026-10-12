@@ -33,8 +33,6 @@ type OnBuildCompleteCtx = Parameters<NonNullable<AdapterModule['default']['onBui
 
 // Minimal 16.3-shaped `routing` block (16.3 added required `middlewareMatchers`) so fixtures satisfy the current ctx type
 // (16.2 dropped `routes` and made `routing` required). The legacy-`routes` counting
-// branch in the adapter takes precedence when a fixture also carries `routes`, so
-// the legacy-count assertions below still exercise the branch they always did.
 // `rsc` is a bundle of Next-internal header literal types the adapter never reads;
 // asserting an empty object keeps the fixture free of next-internal imports.
 const emptyRouting: OnBuildCompleteCtx['routing'] = {
@@ -109,13 +107,6 @@ describe('next-adapter (POC-ADAPTER-P0 spike)', () => {
       nextVersion: '16.0.3',
       config: { output: 'standalone', cacheMaxMemorySize: 0 } as any,
       routing: emptyRouting,
-      // legacy 16.0.x field — takes precedence in the adapter's counting branch
-      routes: {
-        headers: [],
-        redirects: [],
-        rewrites: { beforeFiles: [], afterFiles: [], fallback: [] },
-        dynamicRoutes: [],
-      },
       outputs: {
         pages: [],
         middleware: undefined,
@@ -140,7 +131,7 @@ describe('next-adapter (POC-ADAPTER-P0 spike)', () => {
     consoleSpy.mockRestore();
   });
 
-  it('onBuildComplete logs ctx.routes (routing) counts — headers, redirects, rewrites, dynamicRoutes', async () => {
+  it('onBuildComplete logs ctx.routing counts — beforeMiddleware, beforeFiles, dynamicRoutes, onMatch', async () => {
     const mod = await import(`./next-adapter.js?gen=${__adapterGen}`);
     const adapter = mod.default;
 
@@ -153,17 +144,12 @@ describe('next-adapter (POC-ADAPTER-P0 spike)', () => {
       repoRoot: '/tmp',
       nextVersion: '16.0.3',
       config: { output: 'standalone', cacheMaxMemorySize: 0 } as any,
-      routing: emptyRouting,
-      // legacy 16.0.x field — takes precedence in the adapter's counting branch
-      routes: {
-        headers: [{ source: '/api/*' } as any, { source: '/static/*' } as any],
-        redirects: [{ source: '/old', destination: '/new', statusCode: 301 } as any],
-        rewrites: {
-          beforeFiles: [{ source: '/a', destination: '/b' } as any],
-          afterFiles: [],
-          fallback: [],
-        },
+      routing: {
+        ...emptyRouting,
+        beforeMiddleware: [{ source: '/api/*' } as any, { source: '/static/*' } as any],
+        beforeFiles: [{ source: '/a', destination: '/b' } as any],
         dynamicRoutes: [{ source: '/blog/[slug]' } as any, { source: '/docs/[id]' } as any],
+        onMatch: [{ source: '/m' } as any],
       },
       outputs: {
         pages: [],
@@ -180,16 +166,13 @@ describe('next-adapter (POC-ADAPTER-P0 spike)', () => {
 
     const loggedText = consoleSpy.mock.calls.map((c) => c.join(' ')).join('\n');
 
-    // Must log routing section
-    expect(loggedText).toMatch(/routing|routes/i);
-    // headers: 2
-    expect(loggedText).toMatch(/headers.*2|2.*headers/i);
-    // redirects: 1
-    expect(loggedText).toMatch(/redirects.*1|1.*redirects/i);
-    // rewrites (beforeFiles: 1)
-    expect(loggedText).toMatch(/rewrite|1/i);
-    // dynamicRoutes: 2
-    expect(loggedText).toMatch(/dynamic.*2|2.*dynamic/i);
+    expect(loggedText).toContain('routing counts (ctx.routing)');
+    expect(loggedText).toMatch(/beforeMiddleware\s*: 2/);
+    expect(loggedText).toMatch(/beforeFiles\s*: 1/);
+    expect(loggedText).toMatch(/dynamicRoutes\s*: 2/);
+    expect(loggedText).toMatch(/onMatch\s*: 1/);
+    // the removed 16.0.x ctx.routes shape is never read
+    expect(loggedText).not.toContain('ctx.routes');
 
     consoleSpy.mockRestore();
   });

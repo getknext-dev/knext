@@ -97,11 +97,11 @@ describe('npm scope is @getknext (npm org `knext` was unavailable)', () => {
     }
   });
 
-  it('keeps the `kn-next` CLI bin name unchanged (npx kn-next must keep working)', () => {
+  it('declares `knext` as the only CLI bin (the `kn-next` bin is removed)', () => {
     const core = JSON.parse(
       readFileSync(join(repoRoot, 'packages/kn-next/package.json'), 'utf8'),
     ) as { bin?: Record<string, string> };
-    expect(Object.keys(core.bin ?? {})).toContain('kn-next');
+    expect(Object.keys(core.bin ?? {})).toEqual(['knext']);
   });
 
   it('the GitHub-Packages rename still maps the live scope onto @getknext-dev', async () => {

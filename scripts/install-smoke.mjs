@@ -4,8 +4,7 @@
  *
  * The OUTSIDE-CONSUMER gate. Proves knext works for a user on a fresh machine with
  * plain Node + npm, NO pnpm workspace, NO Bun — exercising BOTH ways a consumer uses
- * knext: (a) the CLI bin — `knext` (canonical, #1369) and its deprecated `kn-next`
- * alias, both shipped from @getknext/core — and (b) `import`ing the public app surface
+ * knext: (a) the CLI bin — `knext`, the only bin @getknext/core ships — and (b) `import`ing the public app surface
  * (`@getknext/core/adapter`, otel-config, cache-handler, the `KnativeNextConfig` type;
  * `@getknext/lib/clients`, `@getknext/lib/health`, `@getknext/lib/logger`). PK1/#114 declared
  * these exports; PK5/#116 froze the public set. This job CATCHES regressions in either
@@ -46,6 +45,7 @@ import {
   existsSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -365,77 +365,62 @@ try {
   );
   if (install.status !== 0) finish(FAIL, `npm install of tarballs exited ${install.status}`);
 
-  // --- 3a. CLI: bin present + `--help` runs under plain node ----------------
-  const binPath = join(workDir, 'node_modules', '.bin', 'kn-next');
-  if (!existsSync(binPath)) finish(FAIL, `installed bin not found at ${binPath}`);
-
-  console.log('[install-smoke] running `node <bin> --help` ...');
-  const help = run('node', [binPath, '--help'], { cwd: workDir });
-  const helpOut = `${help.stdout || ''}${help.stderr || ''}`;
-  console.log('----- kn-next --help (begin) -----');
-  console.log(helpOut.trim());
-  console.log('----- kn-next --help (end) -------');
-  if (help.status !== 0) finish(FAIL, `kn-next --help exited ${help.status} (expected 0)`);
-  if (!/kn-next|Usage|Options/i.test(helpOut)) {
-    finish(FAIL, "kn-next --help: exit 0 but output lacked 'kn-next'/'Usage'/'Options'");
-  }
-  // #1369: `kn-next` is now the DEPRECATED alias — a real installed consumer
-  // must see the one-line stderr notice, not just the pure-unit-test proxy
-  // fixture. `helpOut` above concatenates stdout+stderr, so this checks the
-  // stderr stream in isolation instead.
-  if (!/deprecated/i.test(help.stderr || '')) {
-    finish(
-      FAIL,
-      'kn-next --help: expected a deprecation notice on stderr (none found) — a real ' +
-        'installed consumer would not learn to switch to `knext`',
-    );
-  }
-
-  // --- 3a-knext. #1369: the CANONICAL `knext` bin, same package -------------
-  // @getknext/core ships BOTH bins (package.json `bin.knext` + `bin.kn-next`)
-  // — the bare npm name `knext` belongs to someone else, so there is no
-  // separate alias package for it the way there is for `kn-next` (3a-alias
-  // below); `npx knext` is not a thing this gate can prove, only "the
-  // installed @getknext/core package's own `knext` bin works and prints no
-  // deprecation notice".
+  // --- 3a. CLI: the `knext` bin is present + `--help` runs under plain node --
   const knextBinPath = join(workDir, 'node_modules', '.bin', 'knext');
-  if (!existsSync(knextBinPath)) {
-    finish(FAIL, `installed canonical bin not found at ${knextBinPath}`);
-  }
+  const binPath = knextBinPath;
+  if (!existsSync(knextBinPath)) finish(FAIL, `installed bin not found at ${knextBinPath}`);
+
   console.log('[install-smoke] running `node <knext bin> --help` ...');
   const knextHelp = run('node', [knextBinPath, '--help'], { cwd: workDir });
   const knextHelpOut = `${knextHelp.stdout || ''}${knextHelp.stderr || ''}`;
   console.log('----- knext --help (begin) -----');
   console.log(knextHelpOut.trim());
   console.log('----- knext --help (end) -------');
-  if (knextHelp.status !== 0) {
-    finish(FAIL, `knext --help exited ${knextHelp.status} (expected 0)`);
-  }
+  if (knextHelp.status !== 0) finish(FAIL, `knext --help exited ${knextHelp.status} (expected 0)`);
   if (!/knext|Usage|Options/i.test(knextHelpOut)) {
     finish(FAIL, "knext --help: exit 0 but output lacked 'knext'/'Usage'/'Options'");
   }
   if ((knextHelp.stderr || '').trim() !== '') {
-    finish(
-      FAIL,
-      `knext --help: expected NO stderr output (the canonical bin), got: ${knextHelp.stderr}`,
-    );
-  }
-  if (knextHelp.stdout !== help.stdout) {
-    finish(
-      FAIL,
-      'knext --help and kn-next --help produced DIFFERENT stdout — the alias must be ' +
-        'behaviorally identical, not just similarly named',
-    );
+    finish(FAIL, `knext --help: expected NO stderr output, got: ${knextHelp.stderr}`);
   }
 
-  // --- 3a-npx. rev-1380 blocker #1: `npx @getknext/core <cmd>` with NO bin
-  // name given — the historically-advertised front door (help.ts, README,
-  // the docs site). npm's default-bin picker only resolves automatically
-  // when every declared bin points at ONE file; a prior round shipped a
-  // SECOND file for `knext` (a thin runtime proxy) and broke this exact
-  // invocation for every consumer, proven against real npm 11.12.1. Both
-  // `bin.knext` and `bin.kn-next` now point at the same dist file — assert
-  // the front door actually works, not just that the two named bins do.
+  // --- 3a-nobin. @getknext/core ships NO `kn-next` bin ------------------------
+  // The deprecated alias bin is removed: `knext` is the only command the core
+  // package installs. Asserted two ways, because each alone can be fooled:
+  //   (1) the INSTALLED manifest declares exactly one bin, `knext` (what npm
+  //       actually unpacked, not what the working tree says);
+  //   (2) no `node_modules/.bin/kn-next` link resolves into @getknext/core.
+  //       The separate `kn-next` forwarding package (3a-alias below) may still
+  //       provide that link until it is retired, so the link's EXISTENCE is not
+  //       the assertion -- its provider is.
+  const installedCoreManifest = JSON.parse(
+    readFileSync(join(workDir, 'node_modules', '@getknext', 'core', 'package.json'), 'utf8'),
+  );
+  const installedBins = Object.keys(installedCoreManifest.bin ?? {});
+  if (installedBins.length !== 1 || installedBins[0] !== 'knext') {
+    finish(
+      FAIL,
+      `installed @getknext/core must declare exactly one bin, 'knext'; got ${JSON.stringify(installedBins)}`,
+    );
+  }
+  const knNextLink = join(workDir, 'node_modules', '.bin', 'kn-next');
+  if (existsSync(knNextLink)) {
+    const provider = realpathSync(knNextLink);
+    const coreRoot = realpathSync(join(workDir, 'node_modules', '@getknext', 'core'));
+    if (provider === coreRoot || provider.startsWith(`${coreRoot}/`)) {
+      finish(
+        FAIL,
+        `node_modules/.bin/kn-next resolves into @getknext/core (${provider}) -- the kn-next bin must be gone`,
+      );
+    }
+  }
+  console.log('[install-smoke] @getknext/core installs `knext` only (no kn-next bin)');
+
+  // --- 3a-npx. `npx @getknext/core <cmd>` with NO bin name given -----------
+  // The advertised front door (help.ts, README, the docs site). npm's
+  // default-bin picker only resolves automatically when every declared bin
+  // points at ONE file; `bin.knext` is the only bin -- assert the front door
+  // actually works, not just that the named bin does.
   console.log('[install-smoke] running `npx @getknext/core --help` (no bin name given) ...');
   const npxHelp = run('npx', ['--yes', '--offline', '@getknext/core', '--help'], {
     cwd: workDir,
@@ -454,42 +439,21 @@ try {
   if (!/knext|Usage|Options/i.test(npxHelpOut)) {
     finish(FAIL, "npx @getknext/core --help: exit 0 but output lacked 'knext'/'Usage'/'Options'");
   }
-  // rev-1380 round 2: `npx @getknext/core` resolves argv[1] through
-  // node_modules/.bin/kn-next (npm's default-bin picker falls back to the
-  // first bin key alphabetically, since neither `knext` nor `kn-next`
-  // matches the package's own unscoped name `core`) — proven against real
-  // npm 11.9.0. That used to make EVERY `npx @getknext/core` invocation
-  // print the `kn-next` deprecation notice, even though the user never typed
-  // `kn-next`. `printDeprecatedKnNextNoticeIfNeeded` now suppresses it when
-  // `npm_command=exec` (the npx/`npm exec` dispatch signature, also proven
-  // against real npm 11.9.0 — see shared.ts's `isAmbiguousNpxBinDispatch`).
-  // Assert stderr is EMPTY here, not just that stdout looks right — the
-  // notice writes to stderr, so a passing stdout check alone would not have
-  // caught this regression.
+  // Assert stderr is EMPTY here, not just that stdout looks right: a notice or
+  // warning would go to stderr, so a passing stdout check alone misses it.
   if ((npxHelp.stderr || '').length > 0) {
     finish(
       FAIL,
       `npx @getknext/core --help wrote to stderr (expected EMPTY): ${JSON.stringify(npxHelp.stderr)} — ` +
-        'the deprecated-alias notice is firing for a user who never typed kn-next',
+        'a front-door npx invocation must not write to stderr',
     );
   }
 
-  // --- 3a-alias. the alias's OWN shim, which step 3a never touches -----------
-  // The check above runs node_modules/.bin/kn-next. Both @getknext/core and the alias
-  // declare that bin name, and the first cut of this comment called the outcome npm's
-  // to decide. Review measured it instead, and it is DETERMINISTIC: `.bin/kn-next`
-  // resolves to `@getknext/core/dist/cli/kn-next.js` in every install shape tried,
-  // including the real `npx` one where the alias is installed alone and core arrives as
-  // its transitive dep. So step 3a never tested the alias at all — the gap was LARGER
-  // than 'might not have', not smaller.
-  //
-  // Two consequences worth stating plainly, because the obvious misreading is
-  // flattering in both directions. There is no coverage LOSS: core still owns the bin
-  // link, so 3a covers core's bin and this step covers the alias's shim — complementary,
-  // not duplicated. And this step does NOT prove that `npx kn-next` executes the shim,
-  // because it does not; it proves the shipped shim is present, intact, and forwards.
-  // Whether the shim should be on the `npx` path at all is a question about the alias
-  // package, not about this gate.
+  // --- 3a-alias. the separate `kn-next` forwarding package's shim ------------
+  // Core no longer ships a `kn-next` bin (3a-nobin), so the forwarding package is
+  // the only thing that can provide `.bin/kn-next`. It is a distinct published
+  // package, retired separately; until then its shim must stay intact and forward
+  // to core's `knext` bin rather than crash on the missing key.
   const aliasInstallDir = join(workDir, 'node_modules', 'kn-next');
   const aliasManifestPath = join(aliasInstallDir, 'package.json');
   if (!existsSync(aliasManifestPath)) {
@@ -1151,8 +1115,8 @@ try {
 
   finish(
     PASS,
-    `packed ${publishable.join(' + ')} install on plain npm/Node; the CLI runs and so does the ` +
-      '`npx kn-next` alias shim, ' +
+    `packed ${publishable.join(' + ')} install on plain npm/Node; the CLI runs (knext is its only bin) and so does the ` +
+      'forwarding-package shim, ' +
       'both `create` scaffolds (default standalone + --builder vinext) install and build, ' +
       'the default target boots a real .next/standalone/server.js and passes its own ' +
       '`npm test`, the vinext target builds into the image its own Dockerfile expects, ' +

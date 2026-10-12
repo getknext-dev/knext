@@ -1,5 +1,5 @@
 # CI deploy credential for the docs site — the output of
-#   kn-next init-ci --namespace knext-docs --app-dir apps/docs
+#   knext init-ci --namespace knext-docs --app-dir apps/docs
 # unchanged below the first `---`, plus one addition at the end: a
 # service-account-token Secret, so the kubeconfig CI holds does not expire
 # with a short-lived `kubectl create token`. The Secret manifest carries NO

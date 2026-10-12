@@ -551,7 +551,7 @@ and **rejects every mutating request** to `NextApp`.
 **Fix.**
 ```sh
 kubectl get deploy -n kn-next-operator-system            # controller-manager Ready?
-kubectl get validatingwebhookconfiguration | grep kn-next
+kubectl get validatingwebhookconfiguration | grep knext
 kubectl get deploy cert-manager-webhook -n cert-manager  # cert-manager up?
 knext doctor                                            # checks both prereqs
 ```

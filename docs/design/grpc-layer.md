@@ -14,7 +14,7 @@ flowchart TB
     subgraph Contract["proto/ (single source of truth)"]
       P[".proto files<br/>buf.yaml / buf.gen.yaml"]
     end
-    subgraph Codegen["kn-next generate (buf generate)"]
+    subgraph Codegen["knext generate (buf generate)"]
       G1["connect-go stubs<br/>→ backend service"]
       G2["connect-es client + types<br/>→ packages/lib/src/generated"]
       G3["Next.js glue generators"]
@@ -39,7 +39,7 @@ flowchart TB
 ## Contract & codegen model
 - `proto/<service>/v1/*.proto` is authoritative. `buf lint` + `buf breaking` in CI enforce style
   and back-compat (proto package versioning `service.v1`).
-- `kn-next generate` (new CLI command, mirrors `build.ts`/`deploy.ts`, reuses `shared.loadConfig`)
+- `knext generate` (new CLI command, mirrors `build.ts`/`deploy.ts`, reuses `shared.loadConfig`)
   runs `buf generate`. Outputs:
   - **Backend stubs** → into the scaffolded service (Go `connect-go`, TS `connect-es`).
   - **Client + message types** → `packages/lib/src/generated/` (gitignored, regenerated).
@@ -52,7 +52,7 @@ flowchart TB
        adding `revalidateTag(...)` (matches `apps/file-manager/src/app/actions.ts`).
     3. **JSON facade** — one catch-all `app/api/[service]/[...connect]/route.ts` mounting the
        Connect router (no per-route hand-rolling; browsers/3rd parties get JSON natively).
-- **Drift detection**: `kn-next generate --check` fails if generated output differs from committed
+- **Drift detection**: `knext generate --check` fails if generated output differs from committed
   contract (CI gate), analogous to BUILD_ID sync in the adapter.
 
 ## Control / data flow (request)
@@ -76,7 +76,7 @@ interceptor (operator-provisioned secret) + NetworkPolicy; Phase-2 mTLS via mesh
 
 ## Local dev
 `buf generate` (watch) + `next dev` for the gateway + backends run locally (or on kind via the
-operator). `kn-next generate` ergonomics: idempotent, `--check` for drift, scaffolds a runnable
+operator). `knext generate` ergonomics: idempotent, `--check` for drift, scaffolds a runnable
 service from `proto + --lang`.
 
 ## Versioning / back-compat

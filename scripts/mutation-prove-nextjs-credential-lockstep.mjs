@@ -119,16 +119,14 @@ const MUTATIONS = [
   },
   {
     label:
-      'compat-matrix.mdx: falsely claim a "newer Next.js release" while the manifest shows NO divergence (credentialedNextRef already equals shippedNextPin)',
+      'compat-matrix.mdx: drop the "newer Next.js release" explanation while the manifest DOES document a divergence (shipped 16.4.0 vs credential v16.3.8)',
     subject: 'docsMatrixMdx',
-    anchor:
-      'anything a self-hosted deploy can or should reproduce; those are documented and excluded the same\nway the architectural gaps below are, with their own evidence trail.\n</Callout>',
-    replacement:
-      'anything a self-hosted deploy can or should reproduce; those are documented and excluded the same\nway the architectural gaps below are, with their own evidence trail.\n\nNew apps pin a newer Next.js release than what is credentialed above.\n</Callout>',
+    anchor: 'New apps scaffold a newer Next.js release\n(the 16.4.x line',
+    replacement: 'New apps scaffold the same release\n(the 16.4.x line',
   },
   {
     label:
-      'manifest: reintroduce a divergence (credentialedNextRef != shippedNextPin) with no explanation added to the docs',
+      'manifest: move credentialedNextRef away from the value the workflows carry (v16.3.8 -> v16.2.12)',
     subject: 'manifest',
     anchor: '"credentialedNextRef": "v16.3.8",',
     replacement: '"credentialedNextRef": "v16.2.12",',
@@ -165,20 +163,35 @@ const MUTATIONS = [
   // ── must carry a reason ──────────────────────────────────────────────────
   {
     label:
-      'scaffold pin + manifest bumped TOGETHER to 16.4.0: the docs still cite 16.3.x -> the DERIVED check must catch it',
+      'scaffold pin + manifest moved TOGETHER to 16.5.0: the docs still cite 16.4.x -> the DERIVED check must catch it',
     edits: [
       {
         subject: 'scaffoldPkg',
-        anchor: '"next": "16.3.8",',
-        replacement: '"next": "16.4.0",',
+        anchor: '"next": "16.4.0",',
+        replacement: '"next": "16.5.0",',
       },
       {
         subject: 'manifest',
-        anchor: '"shippedNextPin": "16.3.8",',
-        replacement: '"shippedNextPin": "16.4.0",',
+        anchor: '"shippedNextPin": "16.4.0",',
+        replacement: '"shippedNextPin": "16.5.0",',
       },
     ],
   },
+  {
+    label:
+      'scaffold pin bumped to 16.4.1 with the manifest still documenting 16.4.0 (silent drift)',
+    subject: 'scaffoldPkg',
+    anchor: '"next": "16.4.0",',
+    replacement: '"next": "16.4.1",',
+  },
+  {
+    label:
+      'scaffold pin put back to 16.3.8 (below the peer floor) with the manifest still documenting 16.4.0',
+    subject: 'scaffoldPkg',
+    anchor: '"next": "16.4.0",',
+    replacement: '"next": "16.3.8",',
+  },
+
   {
     // #1382 review: the real lockstepExceptions array is now empty (the one
     // former entry, for compat-shipped-pin-early-warning.yml, excused a
@@ -233,7 +246,7 @@ const MUTATIONS = [
   },
 ];
 
-declareMutations(16);
+declareMutations(18);
 
 const RUNNER = resolveSpecRunner(REPO_ROOT, SPEC);
 
@@ -246,8 +259,8 @@ function specPasses() {
   return r.status === 0;
 }
 
-if (MUTATIONS.length !== 16) {
-  console.error(`FATAL: declared 16 mutations, table has ${MUTATIONS.length}`);
+if (MUTATIONS.length !== 18) {
+  console.error(`FATAL: declared 18 mutations, table has ${MUTATIONS.length}`);
   process.exit(1);
 }
 

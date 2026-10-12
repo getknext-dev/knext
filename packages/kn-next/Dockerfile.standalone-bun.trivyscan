@@ -6,7 +6,7 @@
 # for the OTHER (disk-mode, default) stage of the same source file.
 #
 # `Dockerfile.standalone.hbs`'s `standalone-bun` stage is the DEFAULT target —
-# the image `kn-next build`/`kn-next deploy` produces unless
+# the image `knext build`/`knext deploy` produces unless
 # `--self-contained`/`selfContained: true` is set — and it cannot be scanned
 # via the shared `IMAGES`/`runtimeFrom()` lockstep in
 # tests/built-image-trivy.test.ts (that helper takes the LAST `FROM` in a

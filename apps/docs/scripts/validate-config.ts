@@ -1,7 +1,7 @@
 /**
- * config:validate — run the REAL kn-next validator against this repo's
+ * config:validate — run the REAL knext validator against this repo's
  * knext.config.ts, so the dogfood config is checked with the same code path
- * `kn-next deploy` uses (packages/kn-next/src/cli/validate.ts).
+ * `knext deploy` uses (packages/kn-next/src/cli/validate.ts).
  *
  * Run: npm run config:validate
  */

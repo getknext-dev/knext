@@ -9,7 +9,7 @@ operator running in your cluster does everything after that.
 ## Quick start
 
 ```bash
-kn-next init-ci --namespace my-app
+knext init-ci --namespace my-app
 ```
 
 That generates the workflow and the RBAC manifest that creates the credential it uses. Read the
@@ -45,8 +45,8 @@ This is its own step (`kubeconfig-check.mjs`), and `skip-credential-preflight` d
 off: it reads only the kubeconfig file, so there is no cluster limitation to work around.
 
 knext holds no cloud-account credentials, ever. It accepts credentials that run nothing on the
-runner: a bearer token — the kind `kn-next init-ci` prints the commands to mint, and
-`kn-next init-ci --push-secret` can push straight to your repository as the `KNEXT_KUBECONFIG`
+runner: a bearer token — the kind `knext init-ci` prints the commands to mint, and
+`knext init-ci --push-secret` can push straight to your repository as the `KNEXT_KUBECONFIG`
 secret — or a client certificate and key. This is the same classifier
 `knext doctor --ci-kubeconfig <path>` uses, so you can check a kubeconfig FILE before it ever
 reaches CI. A file that is not valid YAML is refused with at most a line number — never its
@@ -107,7 +107,7 @@ only with a cluster-admin one.
 | `skip-credential-preflight` | no | `false` | read the section above first |
 | `cli` | no | `npx --yes @getknext/core` | the command that runs the CLI, split on whitespace. Leave it at the default unless you are dogfooding this action from its own checkout — point it at a locally built CLI (e.g. `node ./packages/kn-next/dist/cli/kn-next.js`) to deploy with that build instead of the published package |
 
-No outputs. The deployed URL comes from the cluster — `kn-next status`, or
+No outputs. The deployed URL comes from the cluster — `knext status`, or
 `kubectl get ksvc -n <namespace>`.
 
 ## What this deliberately does not do

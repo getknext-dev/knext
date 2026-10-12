@@ -715,7 +715,7 @@ type ScalingSpec struct {
 	//
 	// Unset ("") => the annotation is NOT stamped and the Knative cluster
 	// default applies unmanaged, exactly as before this field existed
-	// (byte-identical back-compat). There is no product default: `kn-next
+	// (byte-identical back-compat). There is no product default: `knext
 	// create` scaffolds a value into the user's own config instead
 	// (ADR-0045, ADR-0041 precedent), so no stored NextApp changes behaviour
 	// on upgrade.
@@ -735,7 +735,7 @@ type ScalingSpec struct {
 	// Knative INSTALLED on the cluster, and those are not the same thing. An
 	// older or differently-configured cluster can still clamp or ignore a
 	// value admission accepted. The webhook validates the value, the cluster
-	// decides the behaviour — `kn-next doctor` reports the installed Knative
+	// decides the behaviour — `knext doctor` reports the installed Knative
 	// version, and the ~52 ms warm-hit promise holds only on a cluster that
 	// honours the annotation.
 	//
@@ -819,7 +819,7 @@ type StorageSpec struct {
 // BUN_RUNTIME_TRANSPILER_CACHE_PATH.
 //
 // A stale CR still carrying either field is REJECTED by the apiserver when applied
-// with `--validate=strict` (which every kn-next apply passes, #547) and silently
+// with `--validate=strict` (which every knext apply passes, #547) and silently
 // PRUNED otherwise — notably by GitOps controllers, which do not assert strict
 // validation. Neither field can be rejected in ValidateNextAppSpec: once it is off
 // the struct its value never reaches Go code at all.

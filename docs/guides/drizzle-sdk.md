@@ -62,7 +62,7 @@ TimescaleDB and pgvector helpers (§6) slot in **on top of** this surface.
 
 ---
 
-## 3. Generate + apply migrations with `kn-next db migrate`
+## 3. Generate + apply migrations with `knext db migrate`
 
 Migrations answer *"who migrates a single-writer, scale-to-zero database?"* — a
 **one-shot, writer-only** runner, out of the request path (ADR-0021 §3).
@@ -98,12 +98,12 @@ npx drizzle-kit generate     # diff schema → ./drizzle/*.sql — commit these
 `drizzle-kit generate` needs no live database (an unset `DATABASE_URL` still
 generates SQL). **Commit `./drizzle`** — the generated SQL is your migration history.
 
-### 3c. Apply — `kn-next db migrate`
+### 3c. Apply — `knext db migrate`
 
 ```bash
-kn-next db migrate                       # apply ./drizzle against the writer DATABASE_URL
-kn-next db migrate --dir ./migrations    # custom migrations directory
-kn-next db migrate --url "$WRITER_DSN"   # explicit writer DSN override
+knext db migrate                       # apply ./drizzle against the writer DATABASE_URL
+knext db migrate --dir ./migrations    # custom migrations directory
+knext db migrate --url "$WRITER_DSN"   # explicit writer DSN override
 ```
 
 - **Writer-only.** It resolves `DATABASE_URL` and **refuses** a read-replica DSN —
@@ -129,7 +129,7 @@ pods serve:
 ```
 AppDatabase provisions branch (template schema, ~4s) ──▶ Ready
                                                             │
-        kn-next db migrate (CI / Job, writer, once) ◀───────┘
+        knext db migrate (CI / Job, writer, once) ◀───────┘
                                                             │
         app pods boot; getDb()/getDbRO() serve traffic ◀────┘
 ```
@@ -154,7 +154,7 @@ spec:
       containers:
         - name: migrate
           image: registry.example/db-demo:<same-digest-as-the-deploy>
-          command: ['kn-next', 'db', 'migrate']
+          command: ['knext', 'db', 'migrate']
           env:
             # The WRITER DSN — the SAME Secret the operator injects into the app.
             # Writer only: never wire DATABASE_URL_RO here (the runner refuses it).
@@ -309,7 +309,7 @@ dropChunks(metrics, { olderThan: '30 days' });
 > **continuous aggregates** are **not** available here, and retention is
 > `dropChunks()` — **not** `add_retention_policy()`. Both of those rely on
 > *background policy jobs*, which cannot run on a compute that scales to zero
-> (scale-zero-pg `adr-0001`). Run `dropChunks()` from a CI cron / a `kn-next` job.
+> (scale-zero-pg `adr-0001`). Run `dropChunks()` from a CI cron / a `knext` job.
 
 ### 6b. pgvector (embeddings / semantic search) — #241
 

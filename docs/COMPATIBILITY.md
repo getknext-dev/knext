@@ -132,11 +132,12 @@ release on, one number covers all three.
 
 <!-- runtime-floors:start -->
 - Node.js `>=22.18`
-- Next.js `>=16.0.0`
+- Next.js `>=16.4.0`
 <!-- runtime-floors:end -->
 
-These are the 1.x floors `@getknext/core` declares (`engines.node` and the `next` peer range); the
-test asserts they match the manifest and the user-facing page. They are expected to rise at 2.0.
+These are the floors the `@getknext/core` manifest on this line declares (`engines.node` and the
+`next` peer range); the test asserts they match the manifest and the user-facing page. The 1.x
+releases keep Next.js `>=16.0.0`; the Node floor is expected to rise again at 2.0.
 
 - **Which lines get fixes:** the latest line. From the day `@getknext/core` 2.0 is generally
   available, the final 1.x minor gets **security fixes only for six months**, published under the

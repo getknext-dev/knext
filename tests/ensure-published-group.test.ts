@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'bun:test';
+import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -12,6 +13,7 @@ import {
   prereleaseDistTag,
   RegistryUnreachableError,
 } from '../scripts/ensure-published-group.mjs';
+import { checkPreMode, PRE_MODE_TAGS, resolveLane } from '../scripts/publish-lane-guard.mjs';
 
 const SCRIPT_PATH = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -608,8 +610,24 @@ describe('integration/v1.3 — 1.3.0 GA: pre mode exited, stable version', () =>
     readFileSync(resolve(repoRoot, 'packages/kn-next/package.json'), 'utf8'),
   ).version;
 
-  it('.changeset/pre.json is gone (pre mode exited)', () => {
-    expect(existsSync(resolve(repoRoot, '.changeset/pre.json'))).toBe(false);
+  // Lane-aware: the guard owns the rule (`checkPreMode`); this asserts the REAL tree obeys it.
+  // On a pre-mode lane (integration/v2) pre.json must exist; on every other lane it must not.
+  // An unresolvable branch (a feature branch pushed with no PR base) is not asked.
+  it('.changeset/pre.json matches the lane: present on pre-mode lanes, absent elsewhere', () => {
+    const env = process.env;
+    const branch =
+      env.GITHUB_BASE_REF ||
+      env.GITHUB_REF_NAME ||
+      spawnSync('git', ['branch', '--show-current'], {
+        cwd: repoRoot,
+        encoding: 'utf8',
+      }).stdout.trim();
+    const lane = resolveLane(`refs/heads/${branch}`);
+    if (!lane.ok) return;
+    const prePath = resolve(repoRoot, '.changeset/pre.json');
+    const pre = existsSync(prePath) ? JSON.parse(readFileSync(prePath, 'utf8')) : undefined;
+    expect(checkPreMode({ lane, pre })).toEqual([]);
+    expect(pre !== undefined).toBe(PRE_MODE_TAGS.has(lane.ref));
   });
 
   it('a stable tree version has no prerelease dist-tag (null -> latest)', () => {

@@ -180,7 +180,7 @@ export interface ScalingConfig {
     //
     // ENFORCEMENT: the annotation's accepted range is the INSTALLED Knative's,
     // so a value can still be clamped or ignored by an older cluster
-    // (`kn-next doctor` reports the installed version). The operator's
+    // (`knext doctor` reports the installed version). The operator's
     // admission webhook is the authority for range validation — this config
     // layer only types and shape-checks the value.
     scaleDownDelay?: string;
@@ -338,7 +338,7 @@ export interface KnativeNextConfig {
     // (default 'bun', #1183/ADR-0058 — the compiled bytecode executable, the
     // actual ADR-0054 bun-standalone default cell; see DEFAULT_RUNTIME_ID in
     // artifact-contract.ts). It selects which standalone runtime image
-    // `kn-next` stages and boots (`--target standalone-bun`/`standalone-node`).
+    // `knext` stages and boots (`--target standalone-bun`/`standalone-node`).
     // Irrelevant to the vinext single executable, where the runtime is compiled
     // into the binary and this field is dropped from the emitted CR.
     runtime?: "bun" | "node";
@@ -355,7 +355,7 @@ export interface KnativeNextConfig {
      *
      * - `turbopack` (**default**) — Next's own `next build`, emitting
      *   `.next/standalone`, run by a small supervisor. Pair it with
-     *   `runtime: "bun"` (**default**) or `runtime: "node"` and `kn-next`
+     *   `runtime: "bun"` (**default**) or `runtime: "node"` and `knext`
      *   stages and boots the matching standalone runtime image. On
      *   `runtime: "bun"` the standalone server is compiled into a Bun single
      *   executable with bytecode (the build fails if the bytecode is

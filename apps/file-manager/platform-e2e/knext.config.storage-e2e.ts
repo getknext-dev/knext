@@ -6,7 +6,7 @@ import type { KnativeNextConfig } from '@getknext/core';
  *
  * The nightly copies this over `apps/file-manager/knext.config.ts` (same
  * mechanism `knext.config.e2e.ts` already uses) AFTER the image-served leg
- * has finished with it, then runs a SECOND real `kn-next deploy`. This
+ * has finished with it, then runs a SECOND real `knext deploy`. This
  * deploys a distinct NextApp (`file-manager-storage`) against the SAME
  * in-cluster MinIO the image-served leg's upload check already uses, with
  * `storage` configured — proving `ASSET_PREFIX`/`NEXT_DEPLOYMENT_ID`

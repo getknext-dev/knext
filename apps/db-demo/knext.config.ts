@@ -2,7 +2,7 @@ import type { KnativeNextConfig } from '@getknext/core';
 
 /**
  * Minimal NextApp config for db-demo. The database is NOT configured here —
- * it is bound at deploy time with `kn-next db bind` (ADR-0019), which sets
+ * it is bound at deploy time with `knext db bind` (ADR-0019), which sets
  * `spec.database.secretRef` (BYO) or `spec.database.enabled` (managed) so the
  * operator injects `DATABASE_URL` (+ optional `DATABASE_URL_RO`) into the app.
  * See README.md for the bind + migrate flow.

@@ -422,12 +422,10 @@ describe('docs-deploy-oke.yml — the closure audit gates the push', () => {
  * Reproduced locally from `apps/docs` after a real `bun install` + build:
  * unversioned `npx @getknext/core`, run inside a workspace member that
  * depends on it via `workspace:*`, resolves the LOCAL tree rather than
- * fetching the published package — but `packages/kn-next/package.json` now
- * declares two bins (`knext`, the new canonical name, and `kn-next`, kept as
- * a deprecated alias — see `deprecated-alias-invocation.test.ts`), and `bun
+ * fetching the published package — but `bun
  * install` only creates a `node_modules/.bin` entry for a bin whose target
  * file exists AT INSTALL TIME. The workflow's "Install the workspace" step
- * runs before the CLI is built, so neither bin gets linked, and npx's local
+ * runs before the CLI is built, so the `knext` bin does not get linked, and npx's local
  * resolution falls through to a bare, unlinked `knext` — exactly the
  * `sh: knext: command not found` this reproduces. The fix does not depend on
  * guessing that mechanism correctly in perpetuity: it stops going through

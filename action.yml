@@ -88,7 +88,7 @@ inputs:
 
   doctor:
     description: >
-      Run the read-only `kn-next doctor` preflight before deploying, and fail the
+      Run the read-only `knext doctor` preflight before deploying, and fail the
       job if the cluster is not ready. Catches the failures that are much cheaper
       to read here than halfway through a container build.
     required: false
@@ -124,13 +124,13 @@ runs:
         fi
         echo "KUBECONFIG=${HOME}/.kube/config" >> "${GITHUB_ENV}"
 
-    - name: Preflight (kn-next doctor)
+    - name: Preflight (knext doctor)
       if: inputs.doctor == 'true'
       shell: bash
       working-directory: ${{ inputs.working-directory }}
       run: |
         set -euo pipefail
-        npx --yes kn-next doctor
+        npx --yes @getknext/core doctor
 
     - name: Deploy
       id: deploy
@@ -150,7 +150,7 @@ runs:
         # `set -u` in bash 3.2, which is what macOS runners still ship. GitHub's
         # ubuntu images are bash 5 and would not notice. The `+` guard expands to
         # nothing when the array is empty, which is correct on both.
-        npx --yes kn-next ${args[@]+"${args[@]}"}
+        npx --yes @getknext/core ${args[@]+"${args[@]}"}
 
         # A dry run applies nothing, so there is no URL to report. Emitting an
         # empty output here is correct; emitting a stale or invented one is not.
@@ -159,7 +159,7 @@ runs:
           exit 0
         fi
 
-        url="$(npx --yes kn-next status --json 2>/dev/null | jq -r '.url // empty')"
+        url="$(npx --yes @getknext/core status --json 2>/dev/null | jq -r '.url // empty')"
         echo "url=${url}" >> "${GITHUB_OUTPUT}"
         if [ -n "${url}" ]; then
           echo "Deployed: ${url}" >> "${GITHUB_STEP_SUMMARY}"

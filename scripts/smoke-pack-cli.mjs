@@ -123,7 +123,7 @@ try {
     stdio: ['ignore', 'inherit', 'inherit'],
   });
 
-  const binPath = join(workDir, 'node_modules', '.bin', 'kn-next');
+  const binPath = join(workDir, 'node_modules', '.bin', 'knext');
   if (!existsSync(binPath)) {
     finish(FAIL, `installed bin not found at ${binPath}`);
   }

@@ -121,7 +121,7 @@ export const DIVERGENT = {
       ':9464): the entry now awaits renderScrape in the metrics listener. Applied to the template and ' +
       'every copy from the same hunks by one script. The recorded divergence is still ONLY the image ' +
       'intercept.',
-    sha256: '981ac3de1c469083569498740541e5a65ff27ad37c460883a580a825164d7684',
+    sha256: '658f5bac0e46f0c9da42bb0908e60dc56ddfbaf391006b8e5f3798336cc71158',
   },
   'examples/bun-exec/runtime-contract.mjs': {
     reason:
@@ -149,7 +149,7 @@ export const DIVERGENT = {
       '\n\nHASH UPDATED for the bridge size cap (APP_METRICS_MAX_BYTES and the bounded read in ' +
       'fetchAppMetrics): applied to the template and every copy from the same hunks by one script. The ' +
       'recorded divergence is still ONLY the item-4 comment block.',
-    sha256: '0a8d23ae6dab5b320f61b8a678fff1b53580077e954f92c4ed5cfce24f4eeed3',
+    sha256: '2277c0e1547fc3dc1bcf350f95b8f809cc586e000f16de7d7fdd03b87225bd5d',
   },
 };
 

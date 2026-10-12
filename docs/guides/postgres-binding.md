@@ -36,13 +36,13 @@ The defaults are chosen so a single Secret carrying both keys — the layout
 scale-zero-pg mints — binds with no `key` configuration at all. Set `key`
 explicitly when your Secret uses a different layout (e.g. `key: uri`).
 
-## One command: `kn-next db bind`
+## One command: `knext db bind`
 
 You don't have to hand-edit the CR. From your app directory (or with the app
 name as a positional):
 
 ```sh
-kn-next db bind --secret shop-db --ro-secret shop-db
+knext db bind --secret shop-db --ro-secret shop-db
 ```
 
 The CLI validates the whole rule matrix below **client-side** — DNS-1123 Secret
@@ -65,7 +65,7 @@ Useful flags:
 
 ```sh
 # Preview the patch and check a locally-minted Secret's DSN:
-kn-next db bind shop --secret shop-db --ro-secret shop-db \
+knext db bind shop --secret shop-db --ro-secret shop-db \
   --secret-file ./shop-db-secret.yaml --dry-run
 ```
 

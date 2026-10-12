@@ -46,10 +46,10 @@ RUN bun run --filter "@getknext/core" build
 
 WORKDIR /repo/apps/file-manager
 
-# This build runs INSIDE the image, so it never sees `kn-next deploy`'s HOST
+# This build runs INSIDE the image, so it never sees `knext deploy`'s HOST
 # process env — `NEXT_DEPLOYMENT_ID` (build-id/skew-protection lock-step,
 # ADR-0011) and `ASSET_PREFIX` (storage-mode asset URLs) must be threaded in
-# explicitly as build-args. `kn-next deploy`/`preview` pass both automatically
+# explicitly as build-args. `knext deploy`/`preview` pass both automatically
 # for any Dockerfile that rebuilds in-image (the `app-dockerfile` shape,
 # `dockerBuildxArgs` in `runtime-image.ts`); a manual `docker build` must pass
 # them too, or the served HTML references image-local relative assets and the
@@ -131,7 +131,7 @@ RUN set -eu; \
 # closure SBOM does not cover `/app/native` — a `.node` is an opaque blob, so an
 # SBOM that lists the package cannot see a swapped addon.
 #
-# This runs the SAME module `kn-next build`'s `stageSharpNative` calls, not a
+# This runs the SAME module `knext build`'s `stageSharpNative` calls, not a
 # shell reimplementation: two implementations of "hash the tree, check the
 # lockfile" would drift, and the one that drifts is the one nobody runs.
 RUN set -eu; \

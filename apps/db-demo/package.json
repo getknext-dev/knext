@@ -8,13 +8,13 @@
     "build": "next build --webpack",
     "start": "node .next/standalone/apps/db-demo/server.js",
     "db:generate": "drizzle-kit generate",
-    "db:migrate": "kn-next db migrate",
+    "db:migrate": "knext db migrate",
     "typecheck": "../../node_modules/typescript-tsc7/bin/tsc --noEmit"
   },
   "dependencies": {
     "@getknext/db": "workspace:*",
     "@getknext/lib": "workspace:*",
-    "next": "16.3.8",
+    "next": "16.4.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },

@@ -79,6 +79,9 @@ Removal always takes two releases:
 So there is always a version you can run that has both the warning and the old behaviour, which is
 your migration window.
 
+The `kn-next` command is the worked example: 1.x marked it deprecated and printed a notice, and 2.0
+removes it. The steps to move are in [Upgrading](/docs/upgrading#version-specific-step-the-kn-next-command-is-gone).
+
 ## Which releases get fixes
 
 **The latest release line is the supported one.** Fixes, including security fixes, land in the next
@@ -102,13 +105,13 @@ The 1.x line runs on these runtimes:
 {/* runtime-floors:start */}
 
 - Node.js `>=22.18`
-- Next.js `>=16.0.0`
+- Next.js `>=16.4.0`
 
 {/* runtime-floors:end */}
 
 These are the floors the published `@getknext/core` declares (`engines` and the `next` peer
-dependency), so your package manager warns you when a project is below them. New apps scaffold
-with a recent Next.js release rather than the floor.
+dependency), so your package manager warns you when a project is below them. The 1.x releases keep
+the Next.js floor `>=16.0.0`. New apps scaffold with a recent Next.js release rather than the floor.
 
 The opt-in **vinext** build target, which compiles to a Bun single-executable, is **Beta** on every
 1.x release. It follows the same release policy as the rest of the package, but it may still change

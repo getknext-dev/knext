@@ -210,7 +210,7 @@ function writeAtomic(target, bytes) {
 export function extractEmbeddedNative({ files, tmpRoot }) {
   if (!Array.isArray(files) || files.length === 0) {
     throw new Error(
-      'knext: this self-contained binary embeds no native tree for sharp — rebuild it with a current `kn-next build --self-contained`',
+      'knext: this self-contained binary embeds no native tree for sharp — rebuild it with a current `knext build --self-contained`',
     );
   }
   const envTmp = process.env.KNEXT_NATIVE_TMPDIR;

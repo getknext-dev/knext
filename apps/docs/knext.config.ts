@@ -1,10 +1,10 @@
 import type { KnativeNextConfig } from '@getknext/core';
 
 /**
- * kn-next deploy config for the knext docs site — the dogfood target.
+ * knext deploy config for the knext docs site — the dogfood target.
  *
  * CI (`.github/workflows/docs-deploy-oke.yml`) deploys this app to the OKE
- * cluster with `kn-next deploy` → NextApp CR → operator. Nothing else writes
+ * cluster with `knext deploy` → NextApp CR → operator. Nothing else writes
  * the cluster: the operator renders the Knative Service, named after `name`
  * below, which is what `deploy/oke/domainmapping.yaml` points at. Renaming
  * the app therefore orphans the custom domains — change both together.

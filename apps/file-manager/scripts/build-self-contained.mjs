@@ -2,7 +2,7 @@
 import { spawnSync } from 'node:child_process';
 /**
  * Build file-manager's SELF-CONTAINED vinext binary for the host (#1460): the
- * same compile `kn-next build --self-contained` runs, from this checkout's
+ * same compile `knext build --self-contained` runs, from this checkout's
  * source, so the e2e round can boot it from an empty directory.
  *
  *   bun scripts/build-self-contained.mjs [--skip-vite] [--out <path>]
@@ -18,7 +18,7 @@ import { spawnSync } from 'node:child_process';
  * UNVERIFIED (round-1 review of #1496 round 2). This script deliberately
  * skips the lockfile-provenance half (`writeNativeIntegrityManifest`'s
  * `packages` cross-check against `bun.lock`) — it is a CI/local host-build
- * helper for the e2e round, not the shipped `kn-next build` path that owns
+ * helper for the e2e round, not the shipped `knext build` path that owns
  * that supply-chain claim.
  * Prints the binary's path on the last line.
  */

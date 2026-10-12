@@ -69,7 +69,7 @@ not listed is internal and may change without a major bump.
 - **`DEFAULT_SCHEMA_PATH`** (`./src/db/schema.ts`) and **`DEFAULT_MIGRATIONS_DIR`**
   (`./drizzle`) — the conventional defaults.
 - **`runMigrations(options?, deps?): Promise<{ migrationsFolder }>`** — the one-shot,
-  **writer-only** migration runner behind `kn-next db migrate` (ADR-0021 §3). Resolves
+  **writer-only** migration runner behind `knext db migrate` (ADR-0021 §3). Resolves
   + guards the writer DSN (see below), applies drizzle-kit-generated migrations via
   drizzle-orm's migrator, always closes the connection, and **rejects on failure**
   (fail loud). Idempotent (drizzle tracks applied migrations). `deps`

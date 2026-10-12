@@ -1,5 +1,5 @@
 /**
- * `kn-next ci-preflight` — the same credential preflight
+ * `knext ci-preflight` — the same credential preflight
  * `packages/kn-next-action/preflight.mjs` runs, exposed as a CLI verb (#1534)
  * so a CI provider with no composite-action equivalent (GitLab, and any
  * future provider `init-ci` generates for) can run it by invoking the

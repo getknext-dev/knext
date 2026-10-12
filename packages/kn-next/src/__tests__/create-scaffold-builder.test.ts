@@ -75,11 +75,8 @@ describe("knext create — default target is standalone (#1342/ADR-0058)", () =>
         // in 16.3.5 (the scaffold's pin as of this bump, confirmed by a live
         // local repro of this exact config: `next build` exits 0 and writes
         // `.next/next-server.js.nft.json`), so the scaffold now matches the
-        // DEFAULT builder's own naming again. `knext build`/`deploy` still
-        // carry a pre-build guard
-        // (`checkTurbopackAdapterStandaloneRegression`, `project-build.ts`)
-        // for apps pinned to an Next version inside the confirmed-affected
-        // range — see `project-build.test.ts`'s boundary coverage.
+        // DEFAULT builder's own naming again. The peer floor (16.4.0) is
+        // past the affected window, so no pre-build guard remains.
         const { appDir } = scaffold("std-pkg");
         const pkg = JSON.parse(
             readFileSync(join(appDir, "package.json"), "utf8"),

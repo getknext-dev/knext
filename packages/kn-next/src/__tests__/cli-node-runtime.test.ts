@@ -12,16 +12,14 @@
  *     reintroduced Bun-ism would otherwise pass unit tests (vitest runs fine
  *     under Node with mocks) and only explode for `npx knext` users.
  *
- *  2. STATIC (built bin): dist/cli/kn-next.js — the ONE file both `bin.knext`
- *     and `bin.kn-next` point at (#1369, rev-1380: a second file broke `npx
- *     @getknext/core`'s bin auto-pick for every consumer) — carries the
+ *  2. STATIC (built bin): dist/cli/kn-next.js — the ONE file `bin.knext`
+ *     points at — carries the
  *     `#!/usr/bin/env node` shebang and no bun module imports. This is what
  *     npm actually installs; the bundle includes all transitive local code,
- *     so it catches Bun-isms the source walker's regexes might miss. The
- *     deprecated `kn-next` alias's one-line stderr notice is covered by its
- *     own describe block below, via REAL symlinks named `knext`/`kn-next` —
- *     the same layout npm's own `.bin/` directory produces — since the
- *     notice is told apart from `argv[1]`'s basename, not from a second file.
+ *     so it catches Bun-isms the source walker's regexes might miss. That
+ *     `knext` is the ONLY bin (no `kn-next`, no stderr notice) is covered by
+ *     its own describe block below, via a REAL symlink named `knext` — the
+ *     layout npm's own `.bin/` directory produces.
  *
  *  3. BEHAVIORAL: the built bin is spawned under plain `node` (--help,
  *     --version → exit 0, usage text) and, when bun is on PATH, under `bun`
@@ -59,10 +57,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const pkgRoot = resolve(__dirname, "..", "..");
 const srcDir = join(pkgRoot, "src");
 const cliSrcDir = join(srcDir, "cli");
-// #1369, rev-1380: `knext` and `kn-next` are two npm bin NAMES pointing at
-// the SAME dist file — a second file broke `npx @getknext/core`'s bin
-// auto-pick for every consumer (proven against real npm 11.12.1). This is
-// the one real file both aliases resolve to.
+// `knext` is the only npm bin name; this is the one real file it resolves to.
 const distBin = join(pkgRoot, "dist", "cli", "kn-next.js");
 
 /** A stack frame ("\n    at foo (/path/file.js:1:2)") or a bundler chunk path. */
@@ -226,14 +221,8 @@ describe("self-entry blocks exist ONLY in sanctioned entry modules (#263)", () =
     // load, hijacking every subcommand (observed live with gc.ts, PR #262).
     // The ONLY modules allowed to carry one are:
     //   - deploy.ts   — the published bin entry (the subcommand dispatcher).
-    //     #1369/rev-1380: `bin.knext` AND `bin.kn-next` both point at this
-    //     SAME dist file (dist/cli/kn-next.js) — an earlier round tried a
-    //     second file (even a thin runtime proxy) and broke `npx
-    //     @getknext/core`'s bin auto-pick for every consumer (npm requires
-    //     every declared bin to target ONE file to resolve automatically,
-    //     proven against real npm 11.12.1). The two bin NAMES are told apart
-    //     at runtime from `argv[1]`'s basename (shared.ts), not from a
-    //     second build.
+    //     `bin.knext` points at this dist file (dist/cli/kn-next.js), the
+    //     only bin.
     //   - build.ts / cleanup.ts / preview.ts / loadtest.ts — documented
     //     directly-runnable entries (docs-site cli.mdx "Directly runnable
     //     entries"; .github/workflows/preview.yml invokes dist/cli/preview.js
@@ -728,28 +717,20 @@ describe("runtime parity: the SAME built bin under bun", () => {
     });
 });
 
-describe("deprecated `kn-next` alias (#1369, rev-1380) — same file, told apart by argv[1]'s basename", () => {
-    // #1369/rev-1380: `knext` and `kn-next` are npm bin NAMES, not separate
-    // files — both `package.json` bin entries point at `distBin`. npm
-    // realizes that as two symlinks in `node_modules/.bin/`, one per name,
-    // both targeting the SAME real file. Reproduce that exact shape with
-    // real symlinks rather than asserting against two dist files (there is
-    // only one) — this is what actually proves the argv[1]-basename
-    // detection in shared.ts works, since it depends on the INVOKED PATH,
-    // which only a real symlink (not a literal dist path) produces.
+describe("`knext` is the ONLY bin (the `kn-next` alias is gone)", () => {
+    // npm realizes `bin.knext` as a symlink in `node_modules/.bin/`. Reproduce
+    // that shape with a real symlink, and prove the manifest declares no other
+    // bin name.
     let symlinkDir: string;
     let knextLink: string;
-    let knNextLink: string;
 
     beforeAll(() => {
         if (!existsSync(distBin)) {
             throw new Error(`${distBin} missing — build first (see above).`);
         }
-        symlinkDir = mkdtempSync(join(tmpdir(), "knext-alias-symlinks-"));
+        symlinkDir = mkdtempSync(join(tmpdir(), "knext-bin-symlink-"));
         knextLink = join(symlinkDir, "knext");
-        knNextLink = join(symlinkDir, "kn-next");
         symlinkSync(distBin, knextLink);
-        symlinkSync(distBin, knNextLink);
     });
 
     afterAll(() => {
@@ -758,51 +739,21 @@ describe("deprecated `kn-next` alias (#1369, rev-1380) — same file, told apart
         if (symlinkDir) rmSync(symlinkDir, { recursive: true, force: true });
     });
 
-    it("`kn-next --help` prints the ONE-LINE deprecation notice to stderr, mentioning `knext`", () => {
-        const r = run(NODE_BIN, [knNextLink, "--help"]);
-        expect(r.error).toBeUndefined();
-        expect(r.status).toBe(0);
-        // Exactly one line — not a multi-line dump.
-        expect(r.stderr.trim().split("\n").length).toBe(1);
-        expect(r.stderr).toContain("kn-next");
-        expect(r.stderr).toContain("deprecated");
-        expect(r.stderr).toContain("knext");
+    it("package.json declares exactly one bin, `knext`", () => {
+        const pkg = JSON.parse(
+            readFileSync(join(pkgRoot, "package.json"), "utf8"),
+        ) as { bin: Record<string, string> };
+        expect(Object.keys(pkg.bin)).toEqual(["knext"]);
     });
 
-    it("`knext --help` (the canonical alias) prints NO deprecation notice", () => {
+    it("`knext --help` through the bin symlink exits 0 and prints nothing to stderr", () => {
         const r = run(NODE_BIN, [knextLink, "--help"]);
         expect(r.error).toBeUndefined();
         expect(r.status).toBe(0);
         expect(r.stderr).toBe("");
     });
 
-    it("`kn-next --help` STDOUT is byte-identical to `knext --help` — same file, same output", () => {
-        const canonical = run(NODE_BIN, [knextLink, "--help"]);
-        const deprecated = run(NODE_BIN, [knNextLink, "--help"]);
-        expect(deprecated.status).toBe(canonical.status);
-        expect(deprecated.stdout).toBe(canonical.stdout);
-    });
-
-    it("`kn-next deploy` behaves identically to `knext deploy` (same exit code, same guidance) — the alias is not cosmetic", () => {
-        const dir = mkdtempSync(join(tmpdir(), "knext-alias-deploy-parity-"));
-        try {
-            const canonical = run(NODE_BIN, [knextLink, "deploy"], dir);
-            const deprecated = run(NODE_BIN, [knNextLink, "deploy"], dir);
-            expect(deprecated.status).toBe(canonical.status);
-            expect(deprecated.stdout).toBe(canonical.stdout);
-        } finally {
-            rmSync(dir, { recursive: true, force: true });
-        }
-    });
-
-    it("`kn-next --version` matches `knext --version`", () => {
-        const canonical = run(NODE_BIN, [knextLink, "--version"]);
-        const deprecated = run(NODE_BIN, [knNextLink, "--version"]);
-        expect(deprecated.status).toBe(0);
-        expect(deprecated.stdout).toBe(canonical.stdout);
-    });
-
-    it("running the dist file DIRECTLY (bypassing both symlinks) prints no notice — the notice is alias-specific, not default-on", () => {
+    it("running the dist file DIRECTLY prints no notice either", () => {
         const r = run(NODE_BIN, [distBin, "--help"]);
         expect(r.error).toBeUndefined();
         expect(r.status).toBe(0);

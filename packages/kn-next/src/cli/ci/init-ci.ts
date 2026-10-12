@@ -286,7 +286,7 @@ function pushSecretStep(namespace: string, provider: CiProvider): string {
             `  3. Add ${MINTED_KUBECONFIG_PATH}, base64-encoded, as the ` +
                 "KNEXT_KUBECONFIG CI/CD variable (Settings -> CI/CD -> " +
                 "Variables), marked BOTH Masked and Protected — or run:",
-            `       kn-next init-ci --provider gitlab --namespace ${namespace} ` +
+            `       knext init-ci --provider gitlab --namespace ${namespace} ` +
                 `--push-secret ${MINTED_KUBECONFIG_PATH}`,
             "     which reads that file and pushes it with `glab variable " +
                 "set` itself (the token is never printed).",
@@ -295,7 +295,7 @@ function pushSecretStep(namespace: string, provider: CiProvider): string {
     return [
         `  3. Add ${MINTED_KUBECONFIG_PATH}, base64-encoded, as the ` +
             "KNEXT_KUBECONFIG secret — or run:",
-        `       kn-next init-ci --namespace ${namespace} --push-secret ` +
+        `       knext init-ci --namespace ${namespace} --push-secret ` +
             `${MINTED_KUBECONFIG_PATH}`,
         "     which reads that file and pushes it with `gh secret set`" +
             " itself (the token is never printed).",

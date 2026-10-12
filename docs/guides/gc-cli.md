@@ -1,6 +1,6 @@
-# `kn-next gc` — asset retention GC & skip-reason tokens
+# `knext gc` — asset retention GC & skip-reason tokens
 
-`kn-next gc` runs the skew-protection asset retention GC (ADR-0011): it reaps
+`knext gc` runs the skew-protection asset retention GC (ADR-0011): it reaps
 old `_next/static/<build-id>/` prefixes from the object store while keeping the
 newest `storage.assetRetention` builds, every build currently serving traffic,
 and the build of any pinned (`spec.traffic.revisionName`) revision. It reads the

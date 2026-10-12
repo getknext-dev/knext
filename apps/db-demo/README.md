@@ -34,13 +34,13 @@ bun run --filter db-demo dev
 
 ## Deploy on knext (both wake on one request)
 
-1. **Bind a database** — either managed (`kn-next db bind --managed`) or BYO
-   (`kn-next db bind --secret db-demo-db`). The operator injects `DATABASE_URL`
+1. **Bind a database** — either managed (`knext db bind --managed`) or BYO
+   (`knext db bind --secret db-demo-db`). The operator injects `DATABASE_URL`
    (and optionally `DATABASE_URL_RO`) into the app container (ADR-0019).
 2. **Migrate once** — after the database is `Ready`, run the writer-only one-shot
    Job ([`migrate-job.yaml`](./migrate-job.yaml)) — `restartPolicy: Never`,
    sequenced with `kubectl wait`. See the guide's migrations section.
-3. **Deploy** — `kn-next deploy`. The app scales to zero; the first visitor request
+3. **Deploy** — `knext deploy`. The app scales to zero; the first visitor request
    wakes the app pod, and the pool's first connection wakes its scale-to-zero
    compute. App + database sleep and wake together on one request.
 

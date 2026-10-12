@@ -37,18 +37,6 @@ npx @getknext/core --version       # the CLI is on your PATH via node_modules/.b
   and runs someone else's code instead of this CLI.
 </Callout>
 
-<Callout type="info">
-  The CLI command was renamed from `kn-next` to `knext`. `kn-next` still works
-  as a deprecated alias — same command, same flags — and it does not print
-  the reminder on every invocation shape, so do not assume its absence means
-  you already switched. A locally installed `kn-next` run directly (on your
-  PATH, or from an `npm run` script naming it) prints a one-line reminder to
-  switch; `npx`/`npm exec` (including `npx @getknext/core ...`) does NOT,
-  since npm's own bin-resolution for that path is ambiguous between the two
-  names; pnpm's `dlx`/`exec` and Windows `.cmd`/`.ps1` shims don't either.
-  `kn-next` will be removed in 2.0. Update scripts/CI to `knext` before then.
-</Callout>
-
 Two optional packages complete the picture — add them only if you need them:
 
 ```bash title="shell"
@@ -100,23 +88,17 @@ at build time. If you set `output: 'export'` yourself, the adapter leaves it alo
 refuses the build on both the Next.js and vinext targets: a static export is not a server deployment, and knext deploys a Next.js server.
 Remove `output: 'export'`, or host the `out/` folder on a static host.
 
-```ts title="next.config.ts — Next.js 16.2+"
+```ts title="next.config.ts — Next.js 16.4+"
 import type { NextConfig } from 'next';
 
 const config: NextConfig = {
   // knext ships the official NextAdapter as a package export.
-  // adapterPath is top-level config on Next.js 16.2+.
+  // adapterPath is top-level config.
   adapterPath: '@getknext/core/adapter',
 };
 
 export default config;
 ```
-
-<Callout type="info">
-**Next.js 16.0.x–16.1.x:** the option lives under `experimental` on those versions
-(`experimental: { adapterPath: '@getknext/core/adapter' }`). Next.js 16.2+ auto-migrates the old
-`experimental` key with a warning; 16.0.x does **not** recognize the top-level form.
-</Callout>
 
 <Callout type="warn">
 **An app below a lockfile.** Next.js picks its file-tracing root by walking up to the outermost

@@ -2,7 +2,7 @@
  * Public config-validation entry — `@getknext/core/validate`.
  *
  * This is the SUPPORTED public surface for validating a `knext.config.ts`
- * against the exact same rules `kn-next deploy` applies. A consumer imports it
+ * against the exact same rules `knext deploy` applies. A consumer imports it
  * into their OWN build/test process (e.g. a config-quality CI gate), so this
  * module — and everything in its import graph — is PURE: no `process.exit`, no
  * kubectl, no I/O, no side effects at import time. It only re-exports the pure

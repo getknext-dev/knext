@@ -44,20 +44,13 @@ export default adapter;
 
 ## Wiring it into an app
 
-On Next.js **16.2 and later**, `adapterPath` is **top-level** configuration:
+`adapterPath` is **top-level** configuration (knext requires Next.js 16.4.0 or newer):
 
-```ts title="next.config.ts — Next.js 16.2+"
+```ts title="next.config.ts — Next.js 16.4+"
 export default {
   adapterPath: '@getknext/core/adapter',
 };
 ```
-
-<Callout type="info">
-**Version note.** On Next.js 16.0.x–16.1.x the option lives under `experimental` instead
-(`experimental: { adapterPath: '@getknext/core/adapter' }`). The 16.2+ config loader auto-migrates
-the old `experimental` key (with a warning), but 16.0.x does **not** recognize the top-level form
-— match the form to your Next.js version.
-</Callout>
 
 You can also point `adapterPath` at a thin local re-export file if you want the adapter contract
 visible at the app boundary:

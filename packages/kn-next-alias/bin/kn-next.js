@@ -32,7 +32,7 @@ try {
     dir = parent;
   }
   const corePkg = require(path.join(dir, 'package.json'));
-  const rel = typeof corePkg.bin === 'string' ? corePkg.bin : corePkg.bin['kn-next'];
+  const rel = typeof corePkg.bin === 'string' ? corePkg.bin : corePkg.bin.knext;
   binPath = path.join(dir, rel);
 } catch {
   process.stderr.write(

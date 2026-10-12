@@ -1,6 +1,8 @@
-// Minimal declaration for cache-handler.js — first TS import arrived with the
-// slow-dep tests; the runtime consumer (next.config cacheHandler) loads it
-// untyped. `unknown` default: the tests cast to the shape they exercise.
+// Minimal declaration for cache-handler.js — the IMPLEMENTATION module and the
+// test-only entry. NOT shipped: the published subpath
+// `@getknext/core/adapters/cache-handler` is cache-handler.public.js, which has
+// no `__` seams (scripts/scan-published-seams.mjs enforces that), and tsup emits
+// no .d.ts for it. `unknown` default: the tests cast to the shape they exercise.
 declare const _default: unknown;
 export default _default;
 
@@ -15,21 +17,17 @@ export default _default;
  * FAIL-CLOSED: throws unless the harness sets KNEXT_TEST_SEAMS=1, and throws
  * unconditionally under NODE_ENV=production — the flag cannot re-enable it in a
  * production process, because nothing legitimate calls it there.
- *
- * @deprecated Removed in 2.0; test-only.
  */
 export declare function __resetEnvForTests(): void;
 
 /**
  * Test-only: repoints (or, with `undefined`, disables) the process-wide Redis
- * client. FAIL-CLOSED on a published subpath: throws unless the harness sets
+ * client. FAIL-CLOSED: throws unless the harness sets
  * KNEXT_TEST_SEAMS=1 (sprint-close design-gate block — a consumer calling this
  * in production would silently drop every request to the in-memory fallback).
  * Under NODE_ENV=production it throws unconditionally — KNEXT_TEST_SEAMS=1 does
- * NOT re-open it, since an env var on a published subpath is settable by any
- * postinstall or transitive dependency in the app's process.
- *
- * @deprecated Removed in 2.0; test-only.
+ * NOT re-open it, since an env var is settable by any postinstall or transitive
+ * dependency in the app's process.
  */
 export declare function __setRedisClientForTests(client: unknown): void;
 
