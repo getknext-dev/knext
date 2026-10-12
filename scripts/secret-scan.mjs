@@ -38,12 +38,20 @@ export function validateAllowlist(raw) {
   if (!raw || !Array.isArray(raw.entries)) {
     throw new Error('allowlist invalid: top-level { entries: [...] } required');
   }
+  const seen = new Set();
   for (const e of raw.entries) {
     for (const k of REQUIRED_KEYS) {
       if (!e[k] || typeof e[k] !== 'string') {
         throw new Error(`allowlist invalid: entry missing "${k}": ${JSON.stringify(e)}`);
       }
     }
+    if (seen.has(e.fingerprint)) {
+      throw new Error(
+        `allowlist invalid: duplicate fingerprint (${e.fingerprint}) — ` +
+          'a "keep both" merge resolution lists the same entry twice',
+      );
+    }
+    seen.add(e.fingerprint);
     if (!CLASSES.has(e.class)) {
       throw new Error(`allowlist invalid: unknown class "${e.class}" (${e.fingerprint})`);
     }
