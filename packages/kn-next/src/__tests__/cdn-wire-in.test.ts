@@ -35,6 +35,24 @@ import { type FakeRedis, startFakeRedis } from "./helpers/fake-redis";
 const CACHE_HANDLER = "../adapters/cache-handler.js";
 const SEAM = Symbol.for("knext.core.cdn.requestTags");
 const PURGER = Symbol.for("knext.core.cdn.purger");
+
+/** The part of the drain registry (plain JS, no declarations) these tests use. */
+interface WriteRegistry {
+    drainCacheWrites(timeoutMs?: number): Promise<void>;
+    inFlightCacheWriteCount(): number;
+}
+/** The part of the purge module (plain JS, no declarations) these tests use. */
+interface PurgeModule {
+    getCdnPurger(): { status(): { state: string; pending: number } };
+}
+// Imported through `string`-typed specifiers and cast to the shape exercised,
+// as the other suites do for these untyped adapter modules.
+const REGISTRY: string = "../adapters/cache-write-registry.js";
+const PURGE_MODULE: string = "../adapters/cdn-purge/index.js";
+const loadRegistry = async () =>
+    (await import(REGISTRY)) as unknown as WriteRegistry;
+const loadPurgeModule = async () =>
+    (await import(PURGE_MODULE)) as unknown as PurgeModule;
 const here = dirname(fileURLToPath(import.meta.url));
 const ADAPTERS = resolve(here, "../adapters");
 
@@ -647,9 +665,7 @@ describe("CDN wire-in of the cache handler (ADR-0068)", () => {
         }
 
         const drain = async () => {
-            const registry = await import(
-                "../adapters/cache-write-registry.js"
-            );
+            const registry = await loadRegistry();
             await registry.drainCacheWrites(2000);
             await settle();
         };
@@ -768,10 +784,8 @@ describe("CDN wire-in of the cache handler (ADR-0068)", () => {
             process.env.KNEXT_BUILD_ID = "build-off";
             const fetchSpy = spyOn(globalThis, "fetch");
             const mod = await load();
-            const registry = await import(
-                "../adapters/cache-write-registry.js"
-            );
-            const purge = await import("../adapters/cdn-purge/index.js");
+            const registry = await loadRegistry();
+            const purge = await loadPurgeModule();
 
             const h = new mod.default({});
             await h.set("/p", page("x,_N_T_/p"), pageCtx);

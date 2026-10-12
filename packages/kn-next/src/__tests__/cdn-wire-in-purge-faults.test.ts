@@ -29,6 +29,21 @@ mock.module("../adapters/cdn-purge/index.js", () => ({
     },
 }));
 
+/** The handler surface these cases exercise (cache-handler.d.ts types the default as `unknown`). */
+interface Handler {
+    set(key: string, data: unknown, ctx: unknown): Promise<void>;
+    get(key: string, ctx: unknown): Promise<unknown>;
+    revalidateTag(tags: string | string[]): Promise<void>;
+}
+interface HandlerModule {
+    default: new (options: object) => Handler;
+}
+// A fresh module instance per case (query suffix), through a `string`-typed
+// specifier, cast to the shape exercised.
+const HANDLER: string = "../adapters/cache-handler.js";
+const loadHandler = async (instance: string) =>
+    (await import(`${HANDLER}?faults=${instance}`)) as unknown as HandlerModule;
+
 const original = { ...process.env };
 afterAll(() => {
     process.env = { ...original };
@@ -39,7 +54,7 @@ describe("CDN wire-in survives a purge module that throws", () => {
         spyOn(console, "error").mockImplementation(() => {});
         delete process.env.REDIS_URL;
         process.env.KNEXT_BUILD_ID = "build-faults";
-        const mod = await import("../adapters/cache-handler.js?faults=1");
+        const mod = await loadHandler("1");
         const h = new mod.default({});
         await h.set(
             "/p",
@@ -60,7 +75,7 @@ describe("CDN wire-in survives a purge module that throws", () => {
         fault.calls = 0;
         delete process.env.REDIS_URL;
         process.env.KNEXT_BUILD_ID = "build-reject-once";
-        const mod = await import("../adapters/cache-handler.js?faults=2");
+        const mod = await loadHandler("2");
         const tick = () => new Promise((r) => setTimeout(r, 0));
         new mod.default({});
         await tick();
