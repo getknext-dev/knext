@@ -207,6 +207,8 @@ function __resetEnvForTests() {
   connectPromise = undefined;
   useRedis = !!REDIS_URL;
   unhealthyUntil = 0;
+  buildLiveLookups.clear();
+  lastBuildLiveBeat = 0;
   CONNECT_TIMEOUT_MS = envMs('REDIS_CONNECT_TIMEOUT_MS', 5000);
   COMMAND_TIMEOUT_MS = envMs('REDIS_COMMAND_TIMEOUT_MS', 2000);
   RETRY_COOLDOWN_MS = envMs('REDIS_RETRY_COOLDOWN_MS', 5000);
@@ -820,6 +822,11 @@ function tagKey(tag) {
   return `${KEY_PREFIX}:tag:${tag}`;
 }
 
+// Liveness of one BUILD of this app (#2254): see `isBuildLive`.
+function buildLiveKey(buildId) {
+  return `${KEY_PREFIX}:build-live:${buildId}`;
+}
+
 // ─── Tag resolution (#1764) ───
 //
 // `ctx.tags` is NOT where an APP_PAGE/APP_ROUTE/PAGES write's tags live. Next
@@ -1094,15 +1101,84 @@ function isForeignPostponedEntry(entry) {
  * Next's constant id), the stored window is withheld and Next treats the entry
  * as stale and re-renders it. The body is still served meanwhile. The FETCH
  * data cache never carries a route window, so it is left untouched.
+ *
+ * ONE exception, for a build that is still SERVING (#2254): under a long-lived
+ * canary split two builds read and write the same keys, and withholding each
+ * other's window made every read regenerate (build A strips B's window and
+ * rewrites the entry as A, then B does the same to A). A window written by a
+ * build that is live right now (`isBuildLive`) is honoured, so the entry is
+ * regenerated at its own cadence. The guarantee above holds once the build that
+ * wrote the window stops serving, i.e. when the rollout or rollback completes.
  */
-function scopeWindowToBuild(entry, ctx) {
-  if (!entry || typeof entry !== 'object' || entry.cacheControl === undefined) return entry;
+function windowIsForeign(entry, ctx) {
+  if (!entry || typeof entry !== 'object' || entry.cacheControl === undefined) return false;
   // vinext reads without a ctx and reads the window itself: only Next's reads
   // (which always carry a `kind`) are scoped.
-  if (typeof ctx?.kind !== 'string' || ctx.kind === 'FETCH' || entry.value?.kind === 'FETCH') return entry;
-  if (currentBuildId !== undefined && entry.buildId === currentBuildId) return entry;
+  if (typeof ctx?.kind !== 'string' || ctx.kind === 'FETCH' || entry.value?.kind === 'FETCH') return false;
+  return !(currentBuildId !== undefined && entry.buildId === currentBuildId);
+}
+
+function scopeWindowToBuild(entry, ctx, writerIsLive = false) {
+  if (!windowIsForeign(entry, ctx) || writerIsLive) return entry;
   const { cacheControl: _foreignWindow, ...rest } = entry;
   return rest;
+}
+
+/**
+ * Is the build that wrote `entry` serving traffic right now?
+ *
+ * Each process refreshes `build-live:<its build id>` -- one tiny key per build,
+ * `BUILD_LIVE_TTL_SECONDS` long -- from its cache reads and writes, at most every
+ * `BUILD_LIVE_REFRESH_MS`. A key that exists means some pod of that build handled
+ * a request lately: it is a canary peer, whose window is as legitimate as ours.
+ * A key that has lapsed means that build was replaced (or rolled back from), and
+ * its windows must not outlive it.
+ *
+ * Fails CLOSED: no build id on either side, a lookup that faults, an absent or
+ * unexpected value all read as "not live", which is the withhold behaviour that
+ * predates this check. Only entries another build wrote pay a lookup, and the
+ * answer is remembered for `BUILD_LIVE_LOOKUP_MS`.
+ */
+const BUILD_LIVE_TTL_SECONDS = 90;
+const BUILD_LIVE_REFRESH_MS = 30_000;
+const BUILD_LIVE_LOOKUP_MS = 5_000;
+// A value other than this (a stray write to the key, a fake that answers every
+// key with an entry) is not a liveness record.
+const BUILD_LIVE_MARKER = '1';
+const buildLiveLookups = new Map();
+let lastBuildLiveBeat = 0;
+
+function touchBuildLive(client) {
+  if (currentBuildId === undefined) return;
+  const now = Date.now();
+  if (now - lastBuildLiveBeat < BUILD_LIVE_REFRESH_MS) return;
+  lastBuildLiveBeat = now;
+  redisCall(() =>
+    execBatch(client, [
+      ['SET', buildLiveKey(currentBuildId), BUILD_LIVE_MARKER, 'EX', String(BUILD_LIVE_TTL_SECONDS)],
+    ]),
+  ).catch(() => {
+    // Not published: try again on the next request instead of waiting out the interval.
+    lastBuildLiveBeat = 0;
+  });
+}
+
+async function isBuildLive(client, buildId) {
+  if (currentBuildId === undefined || typeof buildId !== 'string' || buildId.length === 0) {
+    return false;
+  }
+  const now = Date.now();
+  const known = buildLiveLookups.get(buildId);
+  if (known && now - known.at < BUILD_LIVE_LOOKUP_MS) return known.live;
+  let live;
+  try {
+    live = (await redisCall(() => client.get(buildLiveKey(buildId)))) === BUILD_LIVE_MARKER;
+  } catch {
+    return false;
+  }
+  if (buildLiveLookups.size >= 16) buildLiveLookups.clear();
+  buildLiveLookups.set(buildId, { live, at: now });
+  return live;
 }
 
 // ─── CacheHandler Class ───
@@ -1181,10 +1257,18 @@ class CacheHandler {
             });
             return null;
           }
+          touchBuildLive(client);
+          const foreign = windowIsForeign(parsed, ctx);
+          const writerIsLive = foreign && (await isBuildLive(client, parsed.buildId));
           logCacheEvent(parsed?.cacheState === 'stale' ? 'STALE' : 'HIT', source, key, {
             durationMs: Date.now() - startTime,
+            ...(foreign && {
+              details: writerIsLive
+                ? 'window kept: written by a live peer build'
+                : 'window withheld: written by another build',
+            }),
           });
-          return scopeWindowToBuild(parsed, ctx);
+          return scopeWindowToBuild(parsed, ctx, writerIsLive);
       }
 
       // In-memory fallback
@@ -1296,6 +1380,8 @@ class CacheHandler {
           }
         }
         await redisCall(() => execAtomic(client, commands));
+        // After the write, never before it: liveness must not delay the entry.
+        touchBuildLive(client);
       } else {
         // In-memory fallback path: store original data with Map/Buffer types preserved
         // Only used when Redis is NOT available, to avoid unbounded memory growth

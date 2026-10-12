@@ -1,6 +1,6 @@
 # ADR-0066: Next 16.4 cache surface and runtime-supervisor changes — one sequenced plan
 
-- **Status:** **Accepted with Amendment 1 (2026-10-11).** Proposed 2026-10-10 and revised in review
+- **Status:** **Accepted with Amendment 1 (2026-10-11); Amendment 2 (2026-10-12) Proposed.** Proposed 2026-10-10 and revised in review
   round 2 the same day; accepted at the Sprint 2 close design review (jev 0.98). D1–D5 stand as
   written, except where Amendment 1 (end of this file) supersedes a line. Design and sequencing only;
   no code lands with this ADR.
@@ -831,3 +831,63 @@ starts. D1, D2 and D4 are otherwise unchanged.
   S2, S3, R3a). S2 and S3 are the R1–R4 smoke runs; per item 4 they count as green only with every
   red triaged and zero open knext gaps, which includes the smoke-triage gaps such as #2126. #2089
   needs #2083 and K4, but no longer waits on the shim.
+
+## Amendment 2 (2026-10-12): a window written by a build that is still serving is honoured
+
+**Status of this amendment: Proposed.** Trigger-class (ADR, and the #1888/#2084 build-scoping
+guarantee it restates); per the 2026-09-22 workflow amendment it is not a merge gate, and it is
+reviewed at sprint close. It supersedes the "Build scoping, ISR" row of D2's key table, and replaces
+the accepted risk "entries ping-pong until the rollout completes" with the bounded behaviour below.
+
+### What changed
+
+1. **The defect.** The Next >= 16.4 read path withholds the stored `cacheControl` of any ISR entry
+   another build wrote (#1888), so Next treats it as stale and regenerates it; the regenerated entry is
+   written under its own build id. ISR keys are route paths shared by every revision. That is
+   harmless for one rollout, but `spec.traffic { revisionName, canaryPercent: 1..99 }` (`knext
+   rollback --to X --canary N`) keeps two builds serving the same keys for as long as the split is
+   left in place, typically during a rollback. Build A strips B's window and rewrites the entry as A;
+   build B strips A's and rewrites it as B. Regenerations then follow the request rate (at most about
+   one per second per key, the fallback window Next applies to a stripped entry), for `revalidate:
+   false` pages too. "Until the rollout completes" was an unbounded promise.
+2. **The rule.** A foreign entry's window is honoured **iff the build that wrote it is live**. Each
+   process publishes `<prefix>:build-live:<build id>` (value `1`, `EX 90`) from its cache reads and
+   writes, at most every 30 s, so a build with any recent traffic has a key. A reader that meets a
+   foreign entry looks the writer's key up (only then; memoised for 5 s). Present: the window is handed
+   back and the entry is regenerated at its own cadence. Absent, unreadable, no build id on either side,
+   or a legacy entry without one: the window is withheld exactly as before. The lookup **fails closed**.
+3. **What the guarantee becomes.** #1888 said a previous build's window is never honoured by the new
+   build. It now says: **never once that build has stopped serving, plus the liveness TTL** (about two
+   minutes after its last request). During a rollout, the old build is still serving until it drains,
+   so the new build honours its windows for that long, and for the liveness TTL after it drains. That
+   applies to a plain redeploy as much as to a canary: a `revalidate: false` page can serve the old
+   build's HTML for about two minutes after the old fleet is gone. #1888 promised "never", so this is
+   a deliberate weakening of that guarantee, not a restatement of it.
+4. **Unchanged.** Key layout, tag index and `revalidateTag` (an entry is one key whichever build wrote
+   it), TTLs, the FETCH/IMAGE kinds, vinext (no ctx), and the build-scoped miss for PPR `postponed`
+   state (#2084).
+
+### Options considered (jev, round 1: pick the design)
+
+| Option | jev | Why |
+|---|---|---|
+| **Honour a window written by a live build (chosen)** | **0.97** | No key change; ends the war while both builds serve; the #1888 bound returns on drain; fails closed |
+| Build id in the ISR key (issue option 1) | 0.01 | Cold, blocking render after every deploy; entries strand for their `expire` (a year by default); tag index must list per-build keys; vinext reads and writes must agree on the key |
+| Newer build wins a write (issue option 2) | 0.00 | Wrong for rollback: the build the operator deliberately promoted would be the older one and could never store its own entries |
+| Fixed peer grace window | 0.02 | Stateless, but a one-hour page regenerates every grace period for as long as the split lasts, and a replaced build's window is honoured for the grace after its last write rather than after its last request |
+| Document only | 0.00 | The cost lands during a rollback |
+
+### Accepted risks (replace the ISR ping-pong line in the Negative and residual risks list)
+
+- **A drained build's windows are honoured for about two minutes** after its last request, including
+  `revalidate: false` windows, so the new build may serve the old build's body without regenerating it
+  for that long. Bounded, and the body is served in either case; only the regeneration is deferred.
+- **A canary build with sparse traffic looks absent between requests** (its key lapses after 90 s
+  without one). The other build then strips its entries and regenerates them once per key; the
+  minority build honours the result on its next request. Cost bounded by that build's request rate,
+  not the majority's.
+- **A Redis fault on the liveness lookup withholds the window**, i.e. the pre-amendment behaviour.
+- **PPR entries still alternate under a split.** Resume state is build-specific (#2084), so each
+  build misses on an entry the other wrote last. A per-build key for `postponed` entries is the
+  remedy and is filed as follow-up work, not done here.
+- **One tiny Redis key per live build**, with a 90 s TTL, replaces unbounded growth: nothing is stranded.
