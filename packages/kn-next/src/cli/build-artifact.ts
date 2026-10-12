@@ -41,6 +41,7 @@ import {
     DEFAULT_BUILDER_ID,
     DEFAULT_RUNTIME_ID,
 } from "../adapters/artifact-contract";
+import { stageCdnRoutingArtifact } from "../adapters/cdn-routing-artifact";
 import { HARFBUZZ_NOTICE_FILE } from "../adapters/og-harfbuzz.mjs";
 import {
     type BlankAdapterPathResult,
@@ -304,6 +305,14 @@ export function compileArtifactForDeploy(
                   projectDir: cwd,
               })
             : undefined;
+        // The CDN routing artifact (ADR-0068 condition 10): `onBuildComplete` wrote
+        // it into the project's `.next`, but Next copies only the files it traced
+        // into the standalone tree, so stage it there BEFORE any compile (the
+        // executable embeds every `.json` under `.next`) and before the freshness
+        // stamp hashes the tree. Missing = an older adapter: the runtime fails closed.
+        if (existsSync(layout.serverDir)) {
+            stageCdnRoutingArtifact(join(cwd, ".next"), layout.serverDir);
+        }
         if (runtimeId !== "bun") {
             return { compiled: false, healed, adapterPathWorkaround };
         }

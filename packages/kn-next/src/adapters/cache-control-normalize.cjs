@@ -31,7 +31,11 @@
  *   5. Everything else passes through untouched.
  *
  * Fronting knext with your OWN shared cache/CDN that should honor s-maxage?
- * Disable with KNEXT_CACHE_CONTROL_NORMALIZE=0.
+ * Set `spec.cdn` (knext.config.ts `cdn`), which adds cache-correct edge
+ * directives and cache tags ON TOP of this normalisation (cdn-edge.cjs,
+ * ADR-0068). `KNEXT_CACHE_CONTROL_NORMALIZE=0` still turns normalisation off
+ * when CDN mode is NOT configured, but it is DEPRECATED in favour of
+ * `spec.cdn` and is ignored (with one log line) when `KNEXT_CDN_PROVIDER` is set.
  */
 
 'use strict';
@@ -39,6 +43,7 @@
 const DEPLOY_CACHE_CONTROL = 'public, max-age=0, must-revalidate';
 const FALLBACK_SHELL_PRIVATE = 'private, no-cache, no-store, max-age=0, must-revalidate';
 const INSTALLED = Symbol.for('knext.cacheControlNormalize.installed');
+const cdnEdge = require('./cdn-edge.cjs');
 
 /**
  * Pure normalization rule (mirrors nextjs/adapter-bun
@@ -108,21 +113,89 @@ function ctxOf(res, explicitMarker) {
  * setHeader() or writeHead(status[, msg], headers) — is normalized per
  * request. Idempotent.
  */
-function install() {
+function install(opts) {
   // Deliberately lazy so requiring this module for the pure function does not
   // touch node:http.
-  const { ServerResponse } = require('node:http');
+  const http = require('node:http');
+  const { ServerResponse } = http;
   const proto = ServerResponse.prototype;
   if (proto[INSTALLED]) return;
   proto[INSTALLED] = true;
 
+  // CDN mode (ADR-0068): null unless the operator rendered KNEXT_CDN_PROVIDER.
+  // With it null every branch below is skipped and the behaviour is exactly the
+  // pre-CDN one (zero-diff).
+  const env = (opts && opts.env) || process.env;
+  const cdn = cdnEdge.createController({
+    env,
+    log: (opts && opts.log) || ((line) => process.stdout.write(`${line}\n`)),
+    warn: (opts && opts.warn) || ((line) => process.stderr.write(`${line}\n`)),
+  });
+  const { ORIGIN_CC, STATE } = cdnEdge;
+
+  if (cdn) {
+    // Open a request-scoped store (and snapshot the request AS IT ARRIVED) before
+    // Next sees the request: the cache handler records tags into it (D5.1), and
+    // the decision at writeHead must not read a `req.url` Next has since rewritten.
+    const seam = cdnEdge.ensureSeam();
+    const serverProto = http.Server.prototype;
+    const originalEmit = serverProto.emit;
+    serverProto.emit = function cdnEmit(event, req, res) {
+      if (event === 'request' && req && res && !req[STATE]) {
+        const state = cdnEdge.captureRequest(req);
+        req[STATE] = state;
+        const args = arguments;
+        return seam.als.run(state, () => originalEmit.apply(this, args));
+      }
+      return originalEmit.apply(this, arguments);
+    };
+  }
+
   const originalSetHeader = proto.setHeader;
   proto.setHeader = function setHeader(name, value) {
     if (typeof name === 'string' && name.toLowerCase() === 'cache-control') {
+      // The value the CDN decision needs is the ORIGIN one, before it is
+      // normalised for the browser.
+      if (cdn) this[ORIGIN_CC] = value;
       return originalSetHeader.call(this, name, normalizeCacheControl(value, ctxOf(this)));
     }
     return originalSetHeader.call(this, name, value);
   };
+
+  /**
+   * Decide and, when the allowlist passes, add the edge directive and the tag
+   * header. Called from writeHead, which Node also reaches through the implicit
+   * header flush on the first write / end. Never throws: a fault here must not
+   * break serving, and a response that was not positively allowed gets nothing.
+   */
+  function applyEdge(res, statusCode, hdrs) {
+    try {
+      // A flat / pair-array headers argument is a shape this module does not
+      // interpret: no edge directive (fail closed).
+      const state = res.req && res.req[STATE];
+      if (Array.isArray(hdrs)) {
+        cdnEdge.countDecision('skipped', 'unsupported_headers_shape');
+        return;
+      }
+      if (!state) {
+        cdnEdge.countDecision('skipped', 'no_request_state');
+        return;
+      }
+      const decision = cdn.decide(state, res, Number(statusCode), hdrs || null);
+      if (!decision.edge) return;
+      for (const [name, value] of cdnEdge.edgeHeaders(cdn.cfg, decision)) {
+        if (hdrs) {
+          for (const k of Object.keys(hdrs)) if (k.toLowerCase() === name) delete hdrs[k];
+        }
+        // Straight to the original setter: the patched one would normalise an
+        // `s-maxage` value right back to the compat form.
+        originalSetHeader.call(res, name, value);
+      }
+    } catch (err) {
+      cdnEdge.countDecision('skipped', 'internal_error');
+      process.stderr.write(`CDN_EDGE: edge decision failed, response left uncached: ${err && err.message}\n`);
+    }
+  }
 
   const originalWriteHead = proto.writeHead;
   proto.writeHead = function writeHead(statusCode, statusMessage, headers) {
@@ -139,9 +212,11 @@ function install() {
         headerFrom(hdrs, 'x-nextjs-cache') ?? (this.getHeader && this.getHeader('x-nextjs-cache'));
       for (const key of Object.keys(hdrs)) {
         if (key.toLowerCase() !== 'cache-control') continue;
+        if (cdn) this[ORIGIN_CC] = hdrs[key];
         hdrs[key] = normalizeCacheControl(hdrs[key], ctxOf(this, marker));
       }
     }
+    if (cdn) applyEdge(this, statusCode, hdrs);
     if (msg === undefined) {
       return originalWriteHead.call(this, statusCode, hdrs);
     }
@@ -150,8 +225,15 @@ function install() {
 }
 
 // Preload side effect: `node --require <this file>` installs the patch unless
-// explicitly disabled (unit tests / bring-your-own-CDN deployments).
-if (process.env.KNEXT_CACHE_CONTROL_NORMALIZE !== '0') {
+// explicitly disabled (unit tests / bring-your-own-CDN deployments). CDN mode
+// wins over the deprecated off switch (ADR-0068 D12): with a valid
+// KNEXT_CDN_PROVIDER, `KNEXT_CACHE_CONTROL_NORMALIZE=0` is ignored.
+const normalizeOffRequested = process.env.KNEXT_CACHE_CONTROL_NORMALIZE === '0';
+const cdnConfigured = cdnEdge.loadCdnConfig(process.env) !== null;
+if (!normalizeOffRequested || cdnConfigured) {
+  if (normalizeOffRequested) {
+    console.log('CDN_EDGE: KNEXT_CACHE_CONTROL_NORMALIZE=0 ignored (CDN mode is on)');
+  }
   install();
 }
 
