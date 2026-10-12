@@ -38,7 +38,11 @@
 // ── Mutations (proved by exit code, see the PR) ──────────────────────────────
 //   M1 tracer requires `next/dist/server/dev/next-dev-server`
 //   M2 the server is launched under NODE_ENV=development
-// Both must turn this file red.
+//   M3 the tracer output gains a `*.runtime.dev.js` / React `*.development.js` path
+// M1 and M3 must turn this file red. M2 deliberately does NOT: the built page
+// chunk pins the production runtime and server.js hardcodes `dev: false`, so
+// NODE_ENV alone does not change which modules load (NODE_ENV in the images is
+// pinned by tests/runtime-image-node-env.test.ts).
 
 import { afterAll, describe, expect, it, setDefaultTimeout } from 'bun:test';
 import { type ChildProcess, spawn, spawnSync } from 'node:child_process';
@@ -102,7 +106,20 @@ if (process.env.KNEXT_REQUIRE_STANDALONE === '1' && skipReason !== null) {
  * next/dist/server/next.js and the dist tree). Matched against forward-slash
  * paths of every loaded module.
  */
-const DEV_ONLY: ReadonlyArray<{ pattern: string; reason: string }> = [
+const DEV_ONLY: ReadonlyArray<{ pattern: string | RegExp; reason: string }> = [
+  {
+    pattern: /next\/dist\/compiled\/.*\.runtime\.dev\.js$/,
+    reason:
+      "Next's module.compiled.js picks `*.runtime.dev.js` (which bundles React's dev build) " +
+      "when NODE_ENV === 'development'; production must load `*.runtime.prod.js`",
+  },
+  {
+    pattern:
+      /\/(react|react-dom|react-is|scheduler|react-server-dom-[\w-]+)\/cjs\/[^/]*\.development\.js$/,
+    reason:
+      "React's development builds (react, react-dom, scheduler, react-server-dom-*; plain or " +
+      'under next/dist/compiled) add warnings/validation and are a production-mode regression',
+  },
   {
     pattern: 'next/dist/server/dev/',
     reason: 'the dev server: next-dev-server, hot reloaders, HMR middleware, dev overlay state',
@@ -276,11 +293,15 @@ const SHARED_LEAVES = [
   'next/dist/server/dev/browser-logs/file-logger.js',
 ];
 
+function matches(file: string, pattern: string | RegExp): boolean {
+  return typeof pattern === 'string' ? file.includes(pattern) : pattern.test(file);
+}
+
 function assertNoDevModules(loaded: string[]): void {
   const offenders = DEV_ONLY.flatMap(({ pattern, reason }) =>
     loaded
-      .filter((f) => f.includes(pattern) && !SHARED_LEAVES.some((leaf) => f.endsWith(leaf)))
-      .map((f) => `${f}  [${pattern}: ${reason}]`),
+      .filter((f) => matches(f, pattern) && !SHARED_LEAVES.some((leaf) => f.endsWith(leaf)))
+      .map((f) => `${f}  [${String(pattern)}: ${reason}]`),
   );
   expect(offenders).toEqual([]);
 }
@@ -305,10 +326,12 @@ describe.skipIf(skipReason !== null)('standalone server loads no dev-only Next m
     // config), and each one is a leaf (else the exemption hides a dev module).
     expect(allowed.length).toBe(SHARED_LEAVES.length);
     for (const file of allowed) {
-      const requires = [...readFileSync(file, 'utf8').matchAll(/\brequire\("([^"]+)"\)/g)].map(
-        (m) => m[1],
-      );
-      expect(requires.filter((r) => r.startsWith('.'))).toEqual([]);
+      const requires = [
+        ...readFileSync(file, 'utf8').matchAll(/\brequire\(\s*["']([^"']+)["']\s*\)/g),
+      ].map((m) => m[1]);
+      // Relative requires would reach siblings; `next/dist/...` requires reach any
+      // Next module by package path. Only node builtins are allowed.
+      expect(requires.filter((r) => r.startsWith('.') || r.startsWith('next/'))).toEqual([]);
     }
   });
 
