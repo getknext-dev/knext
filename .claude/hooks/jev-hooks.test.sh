@@ -177,6 +177,19 @@ screen "ghp_ token first, then 30 KB of prose" Bash "gh pr view 12" "ghp_$L36 $(
 reset; screen_json 0.99
 screen "hex 32 first, then 30 KB of prose" Bash "gh pr view 12" "$H32 $(yes 'lorem ipsum dolor' | head -c 30000)" 0 no; silent "skip is silent"
 
+echo "== literal-secret check: no broken-pipe noise when SIGPIPE is ignored =="
+# GitHub's macOS runners start jobs with SIGPIPE ignored. grep -q then closes the pipe while printf is
+# still writing, printf gets EPIPE instead of dying, and bash prints "printf: write error: Broken
+# pipe" to stderr. The hook's stderr reaches the session, and the "skip is silent" cases above only
+# caught it intermittently. Ignore SIGPIPE here so the case is deterministic on every runner.
+big="ghp_$L36 $(yes 'lorem ipsum dolor' | head -c 2000000)"
+for i in 1 2 3; do
+  err=$( (trap '' PIPE; . "$HERE/jev-hook-lib.sh"; printf '%s' "$big" | jev_has_literal_secret) 2>&1 >/dev/null ); rc=$?
+  if [ "$rc" -eq 0 ] && [ -z "$err" ]; then pass "secret-first 2 MB text, SIGPIPE ignored (run $i): hit, silent"
+  else fail "secret-first 2 MB text, SIGPIPE ignored (run $i): rc=$rc stderr=[${err:0:120}]"; fi
+done
+unset big err
+
 echo "== result screen: benign GitHub content is still screened (it must not look like a secret) =="
 # Real-shaped fixtures. Each reaches the stub (calls=1) and, with a flagging score, is flagged.
 # Before the literal list was narrowed these were all skipped, i.e. the screen was blind to
