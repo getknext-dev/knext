@@ -42,7 +42,13 @@ function run(dir: string, requireEsm: boolean) {
     const runner = mock();
     let caught: unknown;
     try {
-        runProjectBuild({ requireEsm, cwd: dir, run: runner });
+        runProjectBuild({
+            requireEsm,
+            runtimeId: "node",
+            builderId: requireEsm ? "vinext" : "webpack",
+            cwd: dir,
+            run: runner,
+        });
     } catch (err) {
         caught = err;
     }
