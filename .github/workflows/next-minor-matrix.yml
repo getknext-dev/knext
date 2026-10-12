@@ -27,7 +27,11 @@ name: Next minor matrix (cache handler)
 on:
   pull_request:
     paths:
-      - 'packages/kn-next/src/adapters/cache-handler.js'
+      - 'packages/kn-next/src/adapters/cache-handler*.js'
+      - 'packages/kn-next/src/adapters/cache-write-registry.js'
+      - 'packages/kn-next/src/adapters/slow-dep-log.js'
+      - 'packages/kn-next/src/cli/build-id-env.ts'
+      - 'scripts/bun-test.mjs'
       - 'packages/kn-next/src/__tests__/cache-handler-*.test.ts'
       - 'packages/kn-next/src/next-compat.ts'
       - 'packages/kn-next/package.json'
@@ -36,7 +40,11 @@ on:
   push:
     branches: [main]
     paths:
-      - 'packages/kn-next/src/adapters/cache-handler.js'
+      - 'packages/kn-next/src/adapters/cache-handler*.js'
+      - 'packages/kn-next/src/adapters/cache-write-registry.js'
+      - 'packages/kn-next/src/adapters/slow-dep-log.js'
+      - 'packages/kn-next/src/cli/build-id-env.ts'
+      - 'scripts/bun-test.mjs'
       - 'packages/kn-next/src/__tests__/cache-handler-*.test.ts'
       - 'packages/kn-next/src/next-compat.ts'
       - 'packages/kn-next/package.json'

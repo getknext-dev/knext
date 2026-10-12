@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { dirname, relative, resolve } from 'node:path';
 import { parse } from 'yaml';
 import {
   CREDENTIALED_NEXT_MINORS,
@@ -99,7 +99,8 @@ describe('next-minor matrix (#2286)', () => {
   it('triggers on the cache-handler, its specs, next-compat and the package manifest', () => {
     const paths: string[] = wf.on.pull_request.paths;
     for (const p of [
-      'packages/kn-next/src/adapters/cache-handler.js',
+      'packages/kn-next/src/adapters/cache-handler*.js',
+      'scripts/bun-test.mjs',
       'packages/kn-next/src/next-compat.ts',
       'packages/kn-next/package.json',
       'scripts/next-minor-matrix.mjs',
@@ -110,5 +111,45 @@ describe('next-minor matrix (#2286)', () => {
     expect(paths).toContain('packages/kn-next/src/__tests__/cache-handler-*.test.ts');
     expect(wf.on.push.branches).toContain('main');
     expect(wf.on.schedule).toHaveLength(1);
+  });
+
+  it('both trigger lists are identical', () => {
+    expect(wf.on.push.paths).toEqual(wf.on.pull_request.paths);
+  });
+
+  it('every relative import of the handler and of the matrix specs is covered by a path filter', () => {
+    const globToRe = (g: string) =>
+      new RegExp(`^${g.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '[^/]*')}$`);
+    const filters = (wf.on.pull_request.paths as string[]).map(globToRe);
+    const covered = (p: string) => filters.some((re) => re.test(p));
+    const roots = [
+      'packages/kn-next/src/adapters/cache-handler.js',
+      'packages/kn-next/src/adapters/cache-handler-node.js',
+      'packages/kn-next/src/adapters/cache-handler-bun.js',
+      ...SPECS.map((s) => `packages/kn-next/src/__tests__/${s}.test.ts`),
+    ];
+    const spec = /(?:from\s+|require\(\s*|import\(\s*)[`'"](\.{1,2}\/[^`'"?]+)/g;
+    const seen: string[] = [];
+    for (const root of roots) {
+      const src = readFileSync(resolve(ROOT, root), 'utf8');
+      for (const m of src.matchAll(spec)) {
+        const base = resolve(ROOT, dirname(root), m[1]);
+        const hit = ['', '.ts', '.js', '.mjs'].map((e) => base + e).find((c) => existsSync(c));
+        expect(hit, `${root} imports ${m[1]}: unresolvable`).toBeDefined();
+        const rel = relative(ROOT, hit as string);
+        seen.push(rel);
+        expect(covered(rel), `${rel} (imported by ${root}) is not covered by a path filter`).toBe(
+          true,
+        );
+      }
+    }
+    // A scan that finds nothing passes vacuously: it must see the known dependencies.
+    for (const dep of [
+      'packages/kn-next/src/adapters/cache-write-registry.js',
+      'packages/kn-next/src/adapters/slow-dep-log.js',
+      'packages/kn-next/src/cli/build-id-env.ts',
+    ]) {
+      expect(seen).toContain(dep);
+    }
   });
 });
