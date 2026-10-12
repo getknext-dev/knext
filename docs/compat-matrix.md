@@ -4,6 +4,8 @@
 > real, on-disk evidence and a mechanical guard test (`tests/compat-matrix.test.ts`) fails CI if a
 > ✅ ("supported") row cannot be backed up. When in doubt we mark ⚠️, not ✅.
 >
+> **Note (v2 line): `knext create` now scaffolds the 16.4.x line, a newer Next.js release than this credential window covers, until the credential ref moves.**
+>
 > **The compat credential window now runs against `vercel/next.js` **v16.3.8**** (rc.2's
 > re-credential, #1560, 2026-09-30) — the same tag `knext create` scaffolds today, closing the
 > deliberate v16.2.x/16.3.x divergence rc.1 opened. `NEXTJS_REF` in `test-e2e-deploy.yml` moved to

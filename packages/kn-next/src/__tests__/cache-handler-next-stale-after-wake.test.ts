@@ -462,11 +462,9 @@ describe("ISR freshness survives a scale-to-zero wake on the Next path (#1888)",
         expect(SharedCacheControls.cacheControls.size).toBe(0);
     });
 
-    it("seeds a pre-16.3.7 `/index` key under Next's toRoute form `/` (older-Next branch)", async () => {
-        // Nexts before 16.3.7 hand the handler the bare
-        // `/index` key (no `/route-cache/` prefix) and file the window under `/`.
+    it("seeds nothing for a bare (non-route-cache) key: Next >= 16.4.0 never hands one for a page", async () => {
         const mod = (await import(
-            `../adapters/cache-handler.js?wakeold=${Math.random()}`
+            `../adapters/cache-handler.js?wakebare=${Math.random()}`
         )) as {
             default: new (
                 o: unknown,
@@ -490,7 +488,7 @@ describe("ISR freshness survives a scale-to-zero wake on the Next path (#1888)",
             },
         });
         await handler.get("/index", { kind: "APP_PAGE" });
-        expect(SharedCacheControls.cacheControls.has("/")).toBe(true);
+        expect(SharedCacheControls.cacheControls.has("/")).toBe(false);
         expect(SharedCacheControls.cacheControls.has("/index")).toBe(false);
     });
 });

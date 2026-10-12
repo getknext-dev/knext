@@ -347,8 +347,8 @@ async function uploadBuildArtifacts({
         return;
     }
 
-    // PRERENDER type in Next 16.0.3 doesn't have a top-level filePath;
-    // the fallback HTML path is nested under fallback.filePath (optional).
+    // A PRERENDER has no top-level filePath; the fallback HTML path is
+    // nested under fallback.filePath (optional).
     type StaticFile = AdapterOutputs["staticFiles"][number];
     type Prerender = AdapterOutputs["prerenders"][number];
     const artifacts = [

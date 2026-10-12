@@ -1133,16 +1133,6 @@ function resolveBuildId(options) {
   return fileBuildId(options) ?? envBuildId();
 }
 
-/** Next's `toRoute` (`dist/server/lib/to-route.js`): `/a/index` → `/a`, `/index` → `/`. */
-function nextRoute(key) {
-  // Next >= 16.3.7 scopes every non-FETCH entry to its source route and keys
-  // BOTH the shared Map (`set`: storageKey) and this handler by the same
-  // `/route-cache/<kind>/<sha256>/$<path>` string — no toRoute normalisation,
-  // so the handler's key is already the Map key and must be used verbatim.
-  if (key.startsWith('/route-cache/')) return key;
-  return key.replace(/(?:\/index)?\/?$/, '') || '/';
-}
-
 /**
  * PPR resume state is BUILD-SCOPED (#2084). An APP_PAGE carrying `postponed`
  * state is resumed by Next against the CURRENT build's code; resuming the state
@@ -1164,7 +1154,12 @@ function isForeignPostponedEntry(entry) {
 }
 
 function seedNextCacheControl(key, entry, ctx) {
-  if (typeof key !== 'string' || !key.startsWith('/')) return;
+  // Next >= 16.3.7 (the peer floor is 16.4.0) scopes every non-FETCH entry to
+  // its source route and keys BOTH the shared Map (`set`: storageKey) and this
+  // handler by the same `/route-cache/<kind>/<sha256>/$<path>` string, so the
+  // handler's key is already the Map key and is used verbatim. Any other key
+  // (FETCH hashes, IMAGE keys) has no window in that Map.
+  if (typeof key !== 'string' || !key.startsWith('/route-cache/')) return;
   // Next never records a window for the data cache (`!ctx.fetchCache`, :537).
   if (ctx?.kind === 'FETCH' || entry?.value?.kind === 'FETCH') return;
   const revalidate = entry?.cacheControl?.revalidate;
@@ -1173,11 +1168,10 @@ function seedNextCacheControl(key, entry, ctx) {
   if (currentBuildId === undefined || entry?.buildId !== currentBuildId) return;
   const map = nextSharedCacheControls();
   if (!map) return;
-  const route = nextRoute(key);
-  if (map.has(route)) return;
+  if (map.has(key)) return;
   const cacheControl = { revalidate };
   if (typeof entry.cacheControl.expire === 'number') cacheControl.expire = entry.cacheControl.expire;
-  map.set(route, cacheControl);
+  map.set(key, cacheControl);
 }
 
 // ─── CacheHandler Class ───

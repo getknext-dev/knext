@@ -445,7 +445,6 @@ export async function defaultBuildAndPush(
     // means vinext (#1183).
     runProjectBuild({
         requireEsm: (config.build ?? DEFAULT_BUILDER_ID) === "vinext",
-        builderId: config.build ?? DEFAULT_BUILDER_ID,
         runtimeId: config.runtime ?? DEFAULT_RUNTIME_ID,
     });
 

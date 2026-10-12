@@ -25,11 +25,11 @@ const adapterSource = readFileSync(
 );
 
 describe("in-repo next devDependency (#171 follow-up)", () => {
-    it("pins next 16.3.x so the typed ctx.routing exists locally", () => {
+    it("pins next 16.4.x so the typed ctx.routing exists locally", () => {
         const pkg = JSON.parse(
             readFileSync(join(pkgDir, "package.json"), "utf8"),
         );
-        expect(pkg.devDependencies.next).toMatch(/^16\.3\./);
+        expect(pkg.devDependencies.next).toMatch(/^16\.4\./);
         // The peer floor is 16.4.0 (see next-peer-floor.test.ts).
         expect(pkg.peerDependencies.next).toBe(">=16.4.0");
     });

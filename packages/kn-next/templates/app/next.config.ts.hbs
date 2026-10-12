@@ -18,20 +18,6 @@ import type { NextConfig } from "next";
  * what reports build completion back to `knext build`. Building with
  * `next build` and NOT wiring this adapter is a silent correctness gap, not a
  * build failure — don't delete it.
- *
- * A HISTORICAL NOTE, since it is easy to reintroduce by accident: combining
- * `adapterPath` with `output: 'standalone'` under Turbopack threw `ENOENT:
- * .next/next-server.js.nft.json` at `next build` time on stable Next 16.3.0
- * through 16.3.4 — a confirmed upstream regression, not a knext
- * defect and not a permanent Turbopack/adapter architecture gap. Fixed
- * upstream in 16.3.5 (pinned below), confirmed by a live local repro of
- * this exact config. See
- * https://github.com/getknext-dev/knext/issues/1372 for the full trace and
- * bisection. `knext build`/`deploy` still carry a pre-build guard for the
- * confirmed-affected range
- * (`checkTurbopackAdapterStandaloneRegression`, `project-build.ts`) — it
- * only fires below 16.3.5, so it does not gate this app's pinned version; it
- * exists for apps that pin an OLDER Next this scaffold did not generate.
  */
 const nextConfig: NextConfig = {
     // Asset prefix is injected by `knext deploy` from `knext.config.ts`

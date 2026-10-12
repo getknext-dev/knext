@@ -54,3 +54,29 @@ describe("Next 16.0.x ctx.routes branch is deleted", () => {
         expect(src).toContain("ctx.routing");
     });
 });
+
+describe("code that only served Next < 16.4.0 is deleted", () => {
+    const readPkg = (rel: string) => read(join(pkgDir, rel));
+
+    it("the turbopack+adapterPath nft pre-build guard (16.3.0-16.3.4 only) is gone", () => {
+        const src = readPkg("src/cli/project-build.ts");
+        expect(src).not.toContain("isAffectedNextVersion");
+        expect(src).not.toContain("checkTurbopackAdapterStandaloneRegression");
+        expect(readPkg("templates/app/next.config.ts.hbs")).not.toContain(
+            "checkTurbopackAdapterStandaloneRegression",
+        );
+    });
+
+    it("the cache handler no longer normalises pre-16.3.7 bare route keys", () => {
+        expect(readPkg("src/adapters/cache-handler.js")).not.toContain(
+            "function nextRoute",
+        );
+    });
+
+    it("no comment still describes the pinned runtime as Next 16.0.3", () => {
+        expect(readPkg("src/adapters/next-adapter.ts")).not.toContain("16.0.3");
+        expect(readPkg("src/adapters/image-cache-sync.ts")).not.toContain(
+            "16.0.3",
+        );
+    });
+});
