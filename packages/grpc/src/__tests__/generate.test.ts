@@ -1,5 +1,6 @@
 import { afterAll, describe, expect, it } from 'bun:test';
 import {
+  chmodSync,
   existsSync,
   linkSync,
   mkdirSync,
@@ -373,6 +374,26 @@ describe('knext generate never writes through a symlink', () => {
     expect(readdirSync(join(zone, OUT, 'orders/v1')).sort()).toEqual(
       readdirSync(join(FIXTURE_ZONE, OUT, 'orders/v1')).sort(),
     );
+  });
+
+  it('regenerating keeps an existing file mode (0600 stays 0600)', () => {
+    const dir = emptyDir('w-atomic-mode');
+    const target = join(dir, 'target.ts');
+    writeFileSync(target, 'old\n');
+    chmodSync(target, 0o600);
+    writeFileAtomic(target, 'export {};\n');
+    expect(readFileSync(target, 'utf8')).toBe('export {};\n');
+    expect(statSync(target).mode & 0o7777).toBe(0o600);
+  });
+
+  it('a read-only generated file is still replaced, and stays read-only', () => {
+    const dir = emptyDir('w-atomic-readonly');
+    const target = join(dir, 'target.ts');
+    writeFileSync(target, 'old\n');
+    chmodSync(target, 0o444);
+    writeFileAtomic(target, 'export {};\n');
+    expect(readFileSync(target, 'utf8')).toBe('export {};\n');
+    expect(statSync(target).mode & 0o7777).toBe(0o444);
   });
 
   it('a failed write leaves no temp file behind', () => {

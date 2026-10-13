@@ -27,6 +27,7 @@ import {
   closeSync,
   constants,
   existsSync,
+  fchmodSync,
   lstatSync,
   mkdirSync,
   openSync,
@@ -181,7 +182,9 @@ function isInside(path: string, root: string): boolean {
  * write never goes through the target's inode: a target that is a hardlink to
  * a file outside the output directory is replaced, and the outside twin keeps
  * its bytes. A symlink at the target is replaced too, never followed. The temp
- * file is opened O_EXCL | O_NOFOLLOW and removed if anything fails.
+ * file is opened O_EXCL | O_NOFOLLOW and removed if anything fails. The
+ * target's permission bits are carried over; its inode, ownership and extended
+ * attributes are not (the replacement is a new file owned by the caller).
  */
 export function writeFileAtomic(target: string, content: string): void {
   const temp = join(
@@ -196,6 +199,10 @@ export function writeFileAtomic(target: string, content: string): void {
   try {
     try {
       writeFileSync(fd, content);
+      // Keep an existing file's permission bits (0600 stays 0600, a read-only
+      // 0444 file is replaced and stays 0444). A new file keeps 0644 minus umask.
+      const existing = lstatSync(target, { throwIfNoEntry: false });
+      if (existing?.isFile()) fchmodSync(fd, existing.mode & 0o7777);
     } finally {
       closeSync(fd);
     }
