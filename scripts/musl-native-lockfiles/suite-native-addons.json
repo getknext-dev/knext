@@ -1,20 +1,8 @@
 {
-  "$comment": "Every native addon the pinned Next.js deploy-tests suite can put into a deployed fixture's runtime tree, as the musl lookup spec (name + exact version) scripts/lib/musl-lockfile-lookup.sh's musl_lockfile_specs_for_root derives for it. In bun credential mode scripts/e2e-deploy.sh refuses any such spec with no committed lockfile under scripts/musl-native-lockfiles/, which is how sqlite3@5.1.7 redded the bun-webpack credential night while only sqlite3-5.0.2 was committed. tests/musl-lockfile-suite-native-addon-coverage.test.ts fails when nextVersion drifts from the credentialed Next.js ref, or when any runtimeAddons entry lacks a committed, frozen, git-tracked lockfile that pins exactly that version. Next.js's own sharp is recorded separately in next-sharp-resolution.json and is cross-checked here. On a Next.js bump: re-run scripts/scan-suite-native-addons.mjs against a checkout of the new vercel/next.js tag (real network, contributor-run, never CI), reclassify anything new, then generate any missing lockfile with scripts/generate-musl-native-lockfile.sh and list it in MUSL_NATIVE_LOCKFILE_FILES.",
-  "nextVersion": "16.3.8",
-  "scannedOn": "2026-10-08",
+  "$comment": "Every native addon the pinned Next.js deploy-tests suite can put into a deployed fixture's runtime tree, as the musl lookup spec (name + exact version) scripts/lib/musl-lockfile-lookup.sh's musl_lockfile_specs_for_root derives for it. In bun credential mode scripts/e2e-deploy.sh refuses any such spec with no committed lockfile under scripts/musl-native-lockfiles/, which is how sqlite3@5.1.7 redded the bun-webpack credential night while only sqlite3-5.0.2 was committed. tests/musl-lockfile-suite-native-addon-coverage.test.ts fails when nextVersion drifts from the credentialed Next.js ref, or when any runtimeAddons entry lacks a committed, frozen, git-tracked lockfile that pins exactly that version. Next.js's own sharp is recorded separately in next-sharp-resolution.json and is cross-checked here. On a Next.js bump: re-run scripts/scan-suite-native-addons.mjs against a checkout of the new vercel/next.js tag (real network, contributor-run, never CI), reclassify anything new, then generate any missing lockfile with scripts/generate-musl-native-lockfile.sh and list it in MUSL_NATIVE_LOCKFILE_FILES. Next.js 16.4.0 re-scan (2026-10-13): prerender-native-module and turbopack-reports no longer declare sqlite3 (their sqlite3 entries were dropped; the sqlite3 lockfiles stay committed for the 1.x credential refs). Both now depend on a LOCAL fixture addon (file:native-addon, package native-addon@1.0.0, compiled by node-gyp at install time), which this scanner does not list because it is not an npm registry dependency and which scripts/generate-musl-native-lockfile.sh cannot pin. It is not recorded as a runtime addon here; it is tracked as a bun credential-mode gap at 16.4.0 in the issue tracker.",
+  "nextVersion": "16.4.0",
+  "scannedOn": "2026-10-13",
   "runtimeAddons": [
-    {
-      "name": "sqlite3",
-      "version": "5.0.2",
-      "declaredBy": "test/e2e/prerender-native-module.test.ts",
-      "spec": "5.0.2"
-    },
-    {
-      "name": "sqlite3",
-      "version": "5.1.7",
-      "declaredBy": "test/e2e/app-dir/turbopack-reports/turbopack-reports.test.ts",
-      "spec": "5.1.7"
-    },
     {
       "name": "@img/sharp-linuxmusl-x64",
       "version": "0.34.5",
@@ -94,6 +82,12 @@
       "version": "0.10.1",
       "declaredBy": "test/production/build-spinners/index.test.ts",
       "reason": "Drives the build CLI under a pseudo-terminal from the test process. Never part of the app."
+    },
+    {
+      "name": "node-pty",
+      "version": "1.2.0-beta.15",
+      "declaredBy": "test/e2e/agent-upgrade-terminal/agent-upgrade-terminal.test.ts",
+      "reason": "The test sets skipDeployment (it drives a local interactive CLI), so it never deploys and node-pty is never in a deployed runtime tree."
     }
   ]
 }

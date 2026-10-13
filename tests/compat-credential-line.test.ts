@@ -576,7 +576,6 @@ describe('the v1.3 workflow is DERIVED from the tag harness, provably', () => {
   it('runs the same 16-shard x 4-cell shape and the tag-declared NEXTJS_REF', () => {
     const { source } = derived();
     const wf = parse(committed) as any;
-    const v10 = parse(read(V10_WORKFLOW)) as any;
     expect(wf.env.COMPAT_SHARD_TOTAL).toBe('16');
     expect(wf.jobs['deploy-tests'].strategy.matrix.shard).toHaveLength(16);
     // NEXTJS_REF comes from the SOURCE (the tag's own YAML) untouched — no
@@ -584,7 +583,12 @@ describe('the v1.3 workflow is DERIVED from the tag harness, provably', () => {
     expect(
       lineSubstitutions(SPEC).some((s: { from: string }) => s.from.includes('NEXTJS_REF')),
     ).toBe(false);
-    expect(source.sourceText).toContain(`NEXTJS_REF: ${v10.env.NEXTJS_REF}`);
+    // #2296: compared against the COMMITTED lane's own NEXTJS_REF, not this
+    // branch's test-e2e-deploy.yml. The two were equal only while both lines
+    // tested the same Next; the 2.x harness now tests its own floor (v16.4.0)
+    // while the v1.3 tag keeps the 1.x ref.
+    expect(typeof wf.env.NEXTJS_REF).toBe('string');
+    expect(source.sourceText).toContain(`NEXTJS_REF: ${wf.env.NEXTJS_REF}`);
   });
 });
 

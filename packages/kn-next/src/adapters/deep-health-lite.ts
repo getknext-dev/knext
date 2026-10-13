@@ -58,6 +58,39 @@ const DEFAULT_DB_ACTIVITY_BUDGET_MS = 45_000;
 export const DEEP_HEALTH_LITE_TTL_MS = 10_000;
 
 const METRIC = "knext_deep_health_state";
+
+/**
+ * The CDN metrics seam the header preload publishes in CDN mode
+ * (`cdn-edge.cjs` `publishMetricsSeam`). Duplicated by literal on purpose, like
+ * `DB_ACTIVITY_KEY`: importing `cdn-edge.cjs` here would add a static import.
+ * `cdn-metrics-seam.test.ts` fails when the literals diverge.
+ */
+const CDN_METRICS_SEAM = Symbol.for("knext.core.cdn.renderMetrics");
+
+/**
+ * The CDN counters this process holds, in Prometheus text, or `""` when CDN
+ * mode is off (no seam) or the render throws. Fail-open: a scrape never fails
+ * because of it. Appended by the loopback listeners the supervisor merges onto
+ * the app's metrics port, so the counters reach it without a new port.
+ */
+export function readCdnMetrics(): string {
+    const render = (globalThis as Record<symbol, unknown>)[CDN_METRICS_SEAM];
+    if (typeof render !== "function") return "";
+    try {
+        const text = render();
+        return typeof text === "string" ? text : "";
+    } catch {
+        return "";
+    }
+}
+
+/** Join two exposition bodies, keeping exactly one newline at the seam. */
+export function appendExposition(body: string, extra: string): string {
+    if (extra.length === 0) return body;
+    if (body.length === 0) return extra;
+    return `${body.replace(/\n*$/, "\n")}${extra}`;
+}
+
 // Must match `createMetricsRegistry` in metrics.ts character for character; the
 // byte-parity test fails the moment either side is edited alone.
 const HELP =
@@ -250,6 +283,8 @@ export function startDeepHealthLite(
         } catch {
             body = "";
         }
+        // The CDN counters ride the same loopback listener (CDN mode only).
+        body = appendExposition(body, readCdnMetrics());
         res.writeHead(200, {
             "Content-Type": "text/plain; version=0.0.4; charset=utf-8",
         });

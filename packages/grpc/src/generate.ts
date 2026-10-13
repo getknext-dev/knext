@@ -22,19 +22,23 @@
  * `config.ts`: never the app root, never outside it, never in node_modules.)
  */
 
+import { randomBytes } from 'node:crypto';
 import {
   closeSync,
   constants,
   existsSync,
+  fchmodSync,
   lstatSync,
   mkdirSync,
   openSync,
   readFileSync,
   realpathSync,
+  renameSync,
+  rmSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname, isAbsolute, join, posix, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, posix, relative, resolve, sep } from 'node:path';
 import { create, fromBinary } from '@bufbuild/protobuf';
 import {
   CodeGeneratorRequestSchema,
@@ -173,13 +177,52 @@ function isInside(path: string, root: string): boolean {
 }
 
 /**
+ * Write `content` to `target` by creating a fresh temp file beside it and
+ * renaming it over the target. rename() replaces the directory entry, so the
+ * write never goes through the target's inode: a target that is a hardlink to
+ * a file outside the output directory is replaced, and the outside twin keeps
+ * its bytes. A symlink at the target is replaced too, never followed. The temp
+ * file is opened O_EXCL | O_NOFOLLOW and removed if anything fails. The
+ * target's permission bits are carried over (minus setuid/setgid); its inode, ownership and extended
+ * attributes are not (the replacement is a new file owned by the caller).
+ */
+export function writeFileAtomic(target: string, content: string): void {
+  const temp = join(
+    dirname(target),
+    `.${basename(target)}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`,
+  );
+  const fd = openSync(
+    temp,
+    constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+    0o644,
+  );
+  try {
+    try {
+      writeFileSync(fd, content);
+      // Keep an existing file's permission bits (0600 stays 0600, a read-only
+      // 0444 file is replaced and stays 0444). setuid/setgid are dropped, as the
+      // kernel did on the old in-place write (4755 becomes 0755); the sticky bit
+      // is kept. A new file keeps 0644 minus umask.
+      const existing = lstatSync(target, { throwIfNoEntry: false });
+      if (existing?.isFile()) fchmodSync(fd, existing.mode & 0o1777);
+    } finally {
+      closeSync(fd);
+    }
+    renameSync(temp, target);
+  } catch (err) {
+    rmSync(temp, { force: true });
+    throw err;
+  }
+}
+
+/**
  * Writes confined to the output directory. Generation never writes THROUGH a
  * symlink: not a symlinked file, not a symlinked directory on the way to it,
  * and not an output directory that is itself a symlink leading out of the app.
  * Every target is checked before any is written ({@link check}); the write
- * itself re-checks after creating parent directories and opens with
- * O_NOFOLLOW, so a symlink planted between the check and the write is refused
- * rather than followed.
+ * itself re-checks after creating parent directories, then replaces the target
+ * by rename ({@link writeFileAtomic}), so neither a symlink nor a hardlink
+ * planted at the target is ever written through.
  */
 class ConfinedWriter {
   private readonly realOut: string;
@@ -234,22 +277,10 @@ class ConfinedWriter {
     if (!isInside(realpathSync(dirname(target)), this.realOut)) {
       throw this.refuse(path, 'a directory on its path leads outside the output directory');
     }
-    let fd: number;
-    try {
-      fd = openSync(
-        target,
-        constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW,
-        0o644,
-      );
-    } catch (err) {
-      if ((err as { code?: string }).code === 'ELOOP') throw this.refuse(path, 'it is a symlink');
-      throw err;
+    if (lstatSync(target, { throwIfNoEntry: false })?.isSymbolicLink()) {
+      throw this.refuse(path, 'it is a symlink');
     }
-    try {
-      writeFileSync(fd, content);
-    } finally {
-      closeSync(fd);
-    }
+    writeFileAtomic(target, content);
   }
 }
 

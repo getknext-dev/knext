@@ -71,6 +71,10 @@ const ROUTING_ARTIFACT_NAME = 'knext-cdn-routing.json';
 const SEAM_KEY = Symbol.for('knext.core.cdn.requestTags');
 const DECISIONS_KEY = Symbol.for('knext.core.cdn.edgeDecisions');
 const STRIPS_KEY = Symbol.for('knext.core.cdn.foreignEdgeStrips');
+const CDN_METRICS_SEAM_KEY = Symbol.for('knext.core.cdn.renderMetrics');
+// Owned by `cdn-purge/metrics.js` (ESM, loaded through the cache handler); read
+// here so one render covers every CDN counter in this process.
+const PURGE_REGISTRY_KEY = Symbol.for('knext.core.cdn.metrics');
 const STATE = Symbol.for('knext.core.cdn.requestState');
 const ORIGIN_CC = Symbol.for('knext.core.cdn.originCacheControl');
 const TAG_PREFIX_RE = /^[0-9a-f]{12}$/;
@@ -776,6 +780,36 @@ function renderEdgeDecisionMetrics() {
   return `${lines.join('\n')}\n`;
 }
 
+/**
+ * Every CDN counter in this process, in Prometheus text: the decision and strip
+ * counters above, plus the purge counter once the purge module has created its
+ * registry (it does so the first time the cache handler builds a purger).
+ */
+function renderCdnMetrics() {
+  let text = renderEdgeDecisionMetrics();
+  const purge = globalThis[PURGE_REGISTRY_KEY];
+  if (purge && typeof purge.render === 'function') text += purge.render();
+  return text;
+}
+
+/**
+ * Publish `renderCdnMetrics` for the metrics listeners in this process.
+ *
+ * The counters live in the Next server process; on the standalone path the
+ * metrics port is served by the supervisor, a separate process that already
+ * merges this process's loopback metrics listener (deep-health-lite with
+ * tracing off, `startChildMetricsServer` with tracing on). Those listeners, and
+ * the compiled self-contained runtime's in-process metrics port, append what
+ * this renders. They are dependency-free and cannot import this module, so the
+ * seam is a function on `globalThis` under a namespaced `Symbol.for` key
+ * (ADR-0027), read by literal on their side (a test pins the literals equal).
+ * Called by the header preload only when CDN mode is on, so with CDN mode off
+ * nothing is published and every metrics body is unchanged.
+ */
+function publishMetricsSeam() {
+  globalThis[CDN_METRICS_SEAM_KEY] = renderCdnMetrics;
+}
+
 // ---------------------------------------------------------------------------
 // Request state + the tag seam (D5.1)
 // ---------------------------------------------------------------------------
@@ -1038,6 +1072,9 @@ module.exports = {
   stripForeignEdgeHeaders,
   edgeDecisionSnapshot,
   renderEdgeDecisionMetrics,
+  renderCdnMetrics,
+  publishMetricsSeam,
+  CDN_METRICS_SEAM_KEY,
   countForeignEdgeStrip,
   foreignEdgeStripCount,
   captureRequest,

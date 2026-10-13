@@ -82,7 +82,7 @@ const MUTATIONS = [
     label: 'test-e2e-deploy.yml: bump the workflow_dispatch nextjsRef DEFAULT to a drifted value',
     subject: 'testE2eDeploy',
     anchor:
-      "        description: 'vercel/next.js git ref to test against (pinned tag ≥ v16.2.0; do NOT use canary)'\n        required: false\n        default: 'v16.3.8'",
+      "        description: 'vercel/next.js git ref to test against (pinned tag ≥ v16.2.0; do NOT use canary)'\n        required: false\n        default: 'v16.4.0'",
     replacement:
       "        description: 'vercel/next.js git ref to test against (pinned tag ≥ v16.2.0; do NOT use canary)'\n        required: false\n        default: 'v16.3.3'",
   },
@@ -108,27 +108,29 @@ const MUTATIONS = [
   {
     label: 'docs/compat-matrix.md: drift the cited vercel/next.js version from the manifest',
     subject: 'docsMatrixMd',
-    anchor: 'against `vercel/next.js` **v16.3.8**',
+    anchor: 'against `vercel/next.js` **v16.4.0**',
     replacement: 'against `vercel/next.js` **v16.3.3**',
   },
   {
     label: 'compat-matrix.mdx: drift the cited Next.js version from the manifest',
     subject: 'docsMatrixMdx',
-    anchor: 'The credential window now runs against Next.js v16.3.8.',
-    replacement: 'The credential window now runs against Next.js v16.3.3.',
+    anchor: 'the official suite now runs against Next.js v16.4.0.',
+    replacement: 'the official suite now runs against Next.js v16.3.3.',
   },
   {
+    // #2296: the v2 harness moved to v16.4.0, so credentialedNextRef equals
+    // shippedNextPin again and the guard's CONVERGED branch is the live one.
     label:
-      'compat-matrix.mdx: drop the "newer Next.js release" explanation while the manifest DOES document a divergence (shipped 16.4.0 vs credential v16.3.8)',
+      'compat-matrix.mdx: claim a "newer Next.js release" while the manifest documents NO divergence (shipped 16.4.0 = credential v16.4.0)',
     subject: 'docsMatrixMdx',
-    anchor: 'New apps scaffold a newer Next.js release\n(the 16.4.x line',
-    replacement: 'New apps scaffold the same release\n(the 16.4.x line',
+    anchor: 'That is the release `knext create` scaffolds and the minimum knext 2.0 supports.',
+    replacement: 'New apps scaffold a newer Next.js release than the suite covers.',
   },
   {
     label:
-      'manifest: move credentialedNextRef away from the value the workflows carry (v16.3.8 -> v16.2.12)',
+      'manifest: move credentialedNextRef away from the value the workflows carry (v16.4.0 -> v16.2.12)',
     subject: 'manifest',
-    anchor: '"credentialedNextRef": "v16.3.8",',
+    anchor: '"credentialedNextRef": "v16.4.0",',
     replacement: '"credentialedNextRef": "v16.2.12",',
   },
 
@@ -201,10 +203,11 @@ const MUTATIONS = [
     // gutting an existing one — same guard, still exercised.
     label: 'manifest: add a lockstepExceptions entry with an empty reason',
     subject: 'manifest',
-    anchor:
-      '      "reason": "Same as the dispatch-default exception above (compat-vinext.yml) — the vinext lane\'s NEXTJS_REF env fallback mirrors its own dispatch default and is out of scope for the rc.1 node/bun credential rehearsal (#1570).",\n      "date": "2026-09-27"\n    }\n  ]',
+    // #2296: anchored on the closing of the array (the last entry is now the
+    // generated v1.3 lane's env-fallback exception).
+    anchor: '      "date": "2026-10-13"\n    }\n  ]',
     replacement:
-      '      "reason": "Same as the dispatch-default exception above (compat-vinext.yml) — the vinext lane\'s NEXTJS_REF env fallback mirrors its own dispatch default and is out of scope for the rc.1 node/bun credential rehearsal (#1570).",\n      "date": "2026-09-27"\n    },\n    {"file": "probe.yml", "kind": "export", "value": "v0.0.0", "reason": ""}\n  ]',
+      '      "date": "2026-10-13"\n    },\n    {"file": "probe.yml", "kind": "export", "value": "v0.0.0", "reason": ""}\n  ]',
   },
 
   // ── Round 3, second pass, finding 1: the ledger's THIRD copy of the ref ──

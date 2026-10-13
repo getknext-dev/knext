@@ -11,10 +11,19 @@
  * app dashboard queried `kn_next_*` / `knext_*` names while the binary emitted
  * four `knext_bunexec_*` series, with ZERO overlap.
  *
- * So the two sides are compared mechanically, and the emitted side is SCANNED
- * from the emitters' own source (metric-contract.ts) rather than enumerated
- * here. Renaming an emitted metric moves the set and reds every query that
- * still names the old one — which is the mutation proof for this whole file.
+ * So the two sides are compared mechanically, and the emitted side is taken
+ * from the emitters themselves rather than enumerated here. Renaming an emitted
+ * metric moves the set and reds every query that still names the old one —
+ * which is the mutation proof for this whole file.
+ *
+ * RENDERED, NOT REGEX-SCANNED (#2307). Every JS/TS emitter is loaded and asked
+ * to RENDER its exposition, and the text it renders is parsed
+ * (`parseExposition`): families from its `# TYPE` lines, and every sample line
+ * must belong to one of them or the parse throws. Scanning source text instead
+ * let a `# TYPE` string in a comment or dead code enter the accepted set, and
+ * could not see a sample line renamed apart from its `# TYPE` line. The Go
+ * operator is the one emitter still read from source (it needs a Go toolchain
+ * to render); its scan strips Go comments first.
  *
  * The classification below is an ALLOWLIST that FAILS CLOSED: every rule group
  * and every dashboard must be classified, so a new one reds this test until
@@ -24,12 +33,20 @@
  * blank on a default knext deployment, and it has to be made deliberately.
  */
 
-import { describe, expect, it } from "bun:test";
+import { afterAll, describe, expect, it } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { readdirSync, readFileSync } from "node:fs";
+import {
+    copyFileSync,
+    mkdtempSync,
+    readdirSync,
+    readFileSync,
+    rmSync,
+} from "node:fs";
+import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
-import { scanAppMetricFamilies } from "../adapters/alert-reachability";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { Registry } from "prom-client";
 import {
     dashboardExprs,
     docTokenResolves,
@@ -37,15 +54,12 @@ import {
     extractDocMetricTokens,
     extractMetricNames,
     fencedDocSection,
+    parseExposition,
     parsePrometheusRules,
-    scanBunexecMetrics,
-    scanCdnPurgeMetrics,
-    scanNameConstants,
     scanOperatorMetrics,
-    scanPromClientMetrics,
-    scanStandaloneSelfContainedMetrics,
     seriesNames,
 } from "../adapters/metric-contract";
+import { createMetricsRegistry as createKnextMetrics } from "../adapters/metrics";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(here, "../../../..");
@@ -87,16 +101,65 @@ const read = (p: string) => readFileSync(p, "utf8");
 
 // ── The emitted side ────────────────────────────────────────────────────────
 
+const requireCjs = createRequire(import.meta.url);
+
+/**
+ * The runtime-contract copies are loaded and RENDERED (#2307). The `.hbs` trees
+ * hold plain JS with no placeholders, so each copy is imported from a temporary
+ * `.mjs` copy of itself; a placeholder would fail the import, never pass it.
+ */
+const RENDER_DIR = mkdtempSync(join(tmpdir(), "knext-metric-contract-"));
+afterAll(() => {
+    rmSync(RENDER_DIR, { recursive: true, force: true });
+});
+
+interface ContractModule {
+    createMetricsState(): unknown;
+    recordStartupComplete(state: unknown, uptimeSeconds?: number): void;
+    observeRequest(state: unknown, status: number, seconds: number): void;
+    renderMetrics(state: unknown): string;
+    readonly APP_METRIC_FAMILIES: readonly string[];
+}
+
+// Every copy is written BEFORE the first import: Bun's resolver caches a
+// directory's entries on first use, so a file added after it is not found.
+const contractTargets = CONTRACT_COPIES.map((copy, i) => {
+    const target = join(RENDER_DIR, `runtime-contract-${i}.mjs`);
+    copyFileSync(copy, target);
+    return [copy, target] as const;
+});
+const CONTRACT_MODULES = new Map<string, ContractModule>();
+for (const [copy, target] of contractTargets) {
+    CONTRACT_MODULES.set(
+        copy,
+        (await import(pathToFileURL(target).href)) as ContractModule,
+    );
+}
+const contractOf = (copy: string) =>
+    CONTRACT_MODULES.get(copy) as ContractModule;
+
+/**
+ * What a contract copy serves on :9464 once it is up and has handled one
+ * request. The startup gauge is omitted until `recordStartupComplete` runs, so
+ * it is recorded here: the render covers every family the copy can emit.
+ */
+function renderContract(copy: string): string {
+    const mod = contractOf(copy);
+    const state = mod.createMetricsState();
+    mod.recordStartupComplete(state, 0.25);
+    mod.observeRequest(state, 200, 0.01);
+    return mod.renderMetrics(state);
+}
+
 /** The compiled single executable's :9464 exposition (the scraped emitter). */
-const BUNEXEC = seriesNames(scanBunexecMetrics(read(BUNEXEC_TEMPLATE)));
+const BUNEXEC_FAMILIES = parseExposition(renderContract(BUNEXEC_TEMPLATE));
+const BUNEXEC = seriesNames(BUNEXEC_FAMILIES);
 
 /**
  * The self-contained STANDALONE runtime's folded `:9464` exposition
  * (round-2 fix, M2/docs, #1457/#1519) — ADR-0055's fold decision, a different
  * target from `bunexec` above (ADR-0048's compiled vinext single executable).
- * Dependency-free (no prom-client), so its `# TYPE` lines are the only source
- * of truth for what it emits — same mechanism `scanBunexecMetrics` already
- * parses, reused through its own named export.
+ * Dependency-free (no prom-client); rendered by its own `metricsBody`.
  */
 const STANDALONE_SC_SUPERVISOR = join(
     PKG_ROOT,
@@ -104,36 +167,78 @@ const STANDALONE_SC_SUPERVISOR = join(
     "adapters",
     "standalone-self-contained-supervisor.cjs",
 );
-const STANDALONE_SC = seriesNames(
-    scanStandaloneSelfContainedMetrics(read(STANDALONE_SC_SUPERVISOR)),
-);
 
 /**
- * The CDN purge module's counter (ADR-0068 D6.5). A real in-process series; it
- * is deliberately NOT in any alert's or dashboard's allowed emitters, because it
- * is not on the :9464 scrape path yet. Only the docs side (S5) may name it.
+ * Requiring the supervisor runs its preload side effect (it wraps the real
+ * `http.createServer` and binds :9464 on the first server). Its own install
+ * guard is set for the require, so nothing is wrapped and nothing binds. The
+ * one effect left is `installExitNormalizer`, which wraps `process.exit` in a
+ * passthrough (it only rewrites 143/130 after a SIGTERM drain arms it).
  */
-const CDN_PURGE = seriesNames(
-    scanCdnPurgeMetrics(
-        read(join(PKG_ROOT, "src", "adapters", "cdn-purge", "metrics.js")),
+function requireSelfContainedInert(): {
+    metricsBody(state: { uptimeSeconds: number; draining: boolean }): string;
+} {
+    const http = requireCjs("node:http") as Record<symbol, unknown>;
+    const INSTALLED = Symbol.for("knext.selfContainedSupervisor.installed");
+    const was = http[INSTALLED];
+    http[INSTALLED] = true;
+    try {
+        return requireCjs(STANDALONE_SC_SUPERVISOR);
+    } finally {
+        if (was === undefined) delete http[INSTALLED];
+        else http[INSTALLED] = was;
+    }
+}
+const STANDALONE_SC = seriesNames(
+    parseExposition(
+        requireSelfContainedInert().metricsBody({
+            uptimeSeconds: 1,
+            draining: false,
+        }),
     ),
 );
 
 /**
- * The CDN edge-decision module's counters (ADR-0068 D6.5, Amendment 2): the
- * decision counter and the foreign-edge-strip counter. Like the purge counter,
- * real in-process series rendered by `renderEdgeDecisionMetrics()` but NOT on
- * the :9464 scrape path yet, so no alert or dashboard may list this emitter;
- * only the docs side (S5) may name them. Scanned from the `# TYPE` lines the
- * module renders, so a renamed family drops out of the set.
+ * The CDN purge module's counter (ADR-0068 D6.5), rendered by a fresh registry
+ * of the module itself after one counted purge, so the family has a sample line
+ * to check. On the standalone server it reaches the app's metrics port in CDN
+ * mode (the CDN metrics seam), but no alert or dashboard depends on it, so it is
+ * in no alert's or dashboard's allowed emitters. Only the docs side (S5) names it.
  */
-const CDN_EDGE = new Set<string>(
-    [
-        ...read(join(PKG_ROOT, "src", "adapters", "cdn-edge.cjs")).matchAll(
-            /# TYPE (knext_[a-z0-9_]+) counter/g,
-        ),
-    ].map((m) => m[1] as string),
-);
+const { createMetricsRegistry: createPurgeRegistry, PURGE_METRIC } =
+    await import("../adapters/cdn-purge/metrics.js");
+const purgeRegistry = createPurgeRegistry();
+purgeRegistry.inc(PURGE_METRIC, { provider: "cloudflare", result: "ok" });
+const CDN_PURGE = seriesNames(parseExposition(purgeRegistry.render()));
+
+/**
+ * The CDN edge-decision module's counters (ADR-0068 D6.5, Amendment 2): the
+ * decision counter and the foreign-edge-strip counter, rendered by
+ * `renderEdgeDecisionMetrics()` after one counted decision, so the decision
+ * family has a sample line to check. Like the purge counter they reach the
+ * metrics port in CDN mode and no alert or dashboard depends on them; only the
+ * docs side (S5) names them. The process-wide counters are restored after.
+ */
+const cdnEdge = requireCjs(join(PKG_ROOT, "src", "adapters", "cdn-edge.cjs"));
+function renderEdgeOnce(): string {
+    const g = globalThis as unknown as Record<symbol, unknown>;
+    const keys = [
+        cdnEdge.DECISIONS_KEY as symbol,
+        Symbol.for("knext.core.cdn.foreignEdgeStrips"),
+    ];
+    const saved = keys.map((k) => g[k]);
+    try {
+        for (const k of keys) delete g[k];
+        cdnEdge.countDecision("edge", "allowed");
+        return cdnEdge.renderEdgeDecisionMetrics() as string;
+    } finally {
+        keys.forEach((k, i) => {
+            if (saved[i] === undefined) delete g[k];
+            else g[k] = saved[i];
+        });
+    }
+}
+const CDN_EDGE = seriesNames(parseExposition(renderEdgeOnce()));
 
 /**
  * The Go operator process's own /metrics: the controller's registry AND every
@@ -162,21 +267,18 @@ const OPERATOR_EMITTED = seriesNames(
  * prom-client registries reachable only through an app-level `/api/metrics`
  * route. Real series; NOT on the shipped :9464 scrape path since ADR-0048.
  *
- * metrics.ts names its metrics through exported constants, so the scan reads
- * those constants out of the same file — the same source of truth as importing
- * them, without dragging the OpenTelemetry SDK into a source-scanning test.
- * file-manager's registry uses string literals.
+ * Both registries are built and RENDERED (#2307): knext's own set on a fresh
+ * registry, and file-manager's module registry as it loads (which includes the
+ * prom-client default process metrics it registers).
  */
-const METRICS_TS = read(join(PKG_ROOT, "src", "adapters", "metrics.ts"));
-const NODE_LEGACY_TYPES = scanPromClientMetrics(
-    METRICS_TS,
-    scanNameConstants(METRICS_TS),
+const knextLegacy = createKnextMetrics(new Registry(), "contract-test");
+const { register: fileManagerRegister } = await import(
+    "../../../../apps/file-manager/src/app/api/_metrics/registry"
 );
-for (const [name, type] of scanPromClientMetrics(
-    read(join(REPO_ROOT, "apps/file-manager/src/app/api/_metrics/registry.ts")),
-)) {
-    NODE_LEGACY_TYPES.set(name, type);
-}
+const NODE_LEGACY_TYPES = new Map([
+    ...parseExposition(await knextLegacy.registry.metrics()),
+    ...parseExposition(await fileManagerRegister.metrics()),
+]);
 const NODE_LEGACY = seriesNames(NODE_LEGACY_TYPES);
 
 /**
@@ -186,9 +288,9 @@ const NODE_LEGACY = seriesNames(NODE_LEGACY_TYPES);
  * registry declares contributes nothing, so it cannot launder a dead name.
  * This is a real :9464 emitter, so it is disclosure the threat model must list.
  */
-const BRIDGED_FAMILIES = scanAppMetricFamilies(read(BUNEXEC_TEMPLATE)).filter(
-    (f) => NODE_LEGACY_TYPES.has(f),
-);
+const BRIDGED_FAMILIES = contractOf(
+    BUNEXEC_TEMPLATE,
+).APP_METRIC_FAMILIES.filter((f) => NODE_LEGACY_TYPES.has(f));
 const BRIDGED_APP = seriesNames(
     new Map(
         BRIDGED_FAMILIES.map((f) => [f, NODE_LEGACY_TYPES.get(f) as string]),
@@ -330,7 +432,7 @@ describe("emitted-metric scanners", () => {
     });
 
     it("scans the app family the runtime contract forwards onto :9464", () => {
-        const allowlist = scanAppMetricFamilies(read(BUNEXEC_TEMPLATE));
+        const allowlist = contractOf(BUNEXEC_TEMPLATE).APP_METRIC_FAMILIES;
         expect(allowlist).toContain("knext_deep_health_state");
         // Every allowlisted family must be DECLARED by a real registry; a name
         // that resolves to nothing would forward nothing and look configured.
@@ -344,7 +446,9 @@ describe("emitted-metric scanners", () => {
         // Every checked-in copy forwards the SAME families (a copy that forwarded
         // more would widen disclosure on exactly one shipped binary).
         for (const copy of CONTRACT_COPIES) {
-            expect(scanAppMetricFamilies(read(copy)), copy).toEqual(allowlist);
+            expect(contractOf(copy).APP_METRIC_FAMILIES, copy).toEqual(
+                allowlist,
+            );
         }
     });
 
@@ -359,10 +463,15 @@ describe("emitted-metric scanners", () => {
 });
 
 describe("the shipped runtime emits an SLO-computable RED contract (#792 / D14)", () => {
-    const families = scanBunexecMetrics(read(BUNEXEC_TEMPLATE));
+    const families = BUNEXEC_FAMILIES;
+    /** The request counter's sample lines in the rendered exposition. */
+    const requestSamples = (body: string) =>
+        body
+            .split("\n")
+            .filter((l) => l.startsWith("knext_bunexec_http_requests_total"));
 
     it("labels the request counter by status_class so an error rate is computable", () => {
-        const body = read(BUNEXEC_TEMPLATE);
+        const body = renderContract(BUNEXEC_TEMPLATE);
         expect(families.get("knext_bunexec_http_requests_total")).toBe(
             "counter",
         );
@@ -374,10 +483,12 @@ describe("the shipped runtime emits an SLO-computable RED contract (#792 / D14)"
     });
 
     it("bounds status_class cardinality to the five HTTP classes", () => {
-        const body = read(BUNEXEC_TEMPLATE);
+        const body = renderContract(BUNEXEC_TEMPLATE);
         const classes = [
             ...new Set(
-                [...body.matchAll(/'([1-5]xx)'/g)].map((m) => m[1] as string),
+                requestSamples(body).map(
+                    (l) => /status_class="([^"]*)"/.exec(l)?.[1] ?? "",
+                ),
             ),
         ];
         expect(classes.sort()).toEqual(["1xx", "2xx", "3xx", "4xx", "5xx"]);
@@ -388,16 +499,15 @@ describe("the shipped runtime emits an SLO-computable RED contract (#792 / D14)"
         );
     });
 
-    /** The bucket boundaries a contract copy declares, in source order. */
+    /** The finite bucket boundaries a contract copy RENDERS, in exposition order. */
     const bucketsOf = (path: string): number[] =>
-        (
-            read(path).match(
-                /REQUEST_DURATION_BUCKETS\s*=\s*\[([^\]]*)\]/,
-            )?.[1] ?? ""
-        )
-            .split(",")
-            .map((s) => s.trim())
-            .filter((s) => s.length > 0)
+        [
+            ...renderContract(path).matchAll(
+                /^knext_bunexec_http_request_duration_seconds_bucket\{le="([^"]+)"\}/gm,
+            ),
+        ]
+            .map((m) => m[1] as string)
+            .filter((le) => le !== "+Inf")
             .map(Number);
 
     it("emits a duration histogram with sub-100ms resolution", () => {
@@ -448,7 +558,9 @@ describe("the shipped runtime emits an SLO-computable RED contract (#792 / D14)"
     it("keeps every checked-in copy of the contract on the same metric set", () => {
         const canonical = [...BUNEXEC].sort();
         for (const copy of CONTRACT_COPIES) {
-            const set = [...seriesNames(scanBunexecMetrics(read(copy)))].sort();
+            const set = [
+                ...seriesNames(parseExposition(renderContract(copy))),
+            ].sort();
             expect(
                 set,
                 `${copy} drifted from the template's metric set`,
@@ -542,6 +654,67 @@ describe("every dashboard panel queries a series something emits (#792)", () => 
             }
         }
         expect(dangling.join("\n")).toBe("");
+    });
+});
+
+describe("parseExposition reads what an emitter renders (#2307)", () => {
+    it("returns each declared family with its type", () => {
+        expect(
+            parseExposition(
+                [
+                    "# HELP a_total A.",
+                    "# TYPE a_total counter",
+                    'a_total{x="1"} 2',
+                    "# TYPE b_seconds histogram",
+                    'b_seconds_bucket{le="+Inf"} 1',
+                    "b_seconds_sum 0.1",
+                    "b_seconds_count 1",
+                    "",
+                ].join("\n"),
+            ),
+        ).toEqual(
+            new Map([
+                ["a_total", "counter"],
+                ["b_seconds", "histogram"],
+            ]),
+        );
+    });
+
+    it("throws on a sample line no # TYPE declares (a renamed sample line)", () => {
+        expect(() =>
+            parseExposition(
+                ["# TYPE a_total counter", "a_totl 1", ""].join("\n"),
+            ),
+        ).toThrow(/a_totl 1/);
+    });
+
+    it("only reads # TYPE from comment lines, never from a sample's text", () => {
+        // A label value is data, not a declaration.
+        expect(() => parseExposition('x{v="# TYPE x counter"} 1\n')).toThrow(
+            /no # TYPE declares/,
+        );
+    });
+
+    it("a family declared with no samples yet is still a family", () => {
+        expect(parseExposition("# TYPE a_total counter\n")).toEqual(
+            new Map([["a_total", "counter"]]),
+        );
+    });
+});
+
+describe("the Go operator scan ignores comments", () => {
+    // TODO(#2321): the operator is still read from source (rendering it needs a
+    // Go toolchain in the test job); stripping comments is the part of #2307
+    // that applies to it.
+    it("a NewCounter in a // or /* */ comment is not an emitted metric", () => {
+        const src = [
+            '// prometheus.NewCounter(prometheus.CounterOpts{Name: "knext_ghost_a_total"})',
+            '/* prometheus.NewGauge(prometheus.GaugeOpts{Name: "knext_ghost_b"}) */',
+            'var real = prometheus.NewCounter(prometheus.CounterOpts{Name: "knext_real_total", Help: "see http://x/y // not a comment"})',
+        ].join("\n");
+        expect([...scanOperatorMetrics(src).keys()]).toEqual([
+            "knext_real_total",
+        ]);
     });
 });
 
@@ -768,7 +941,7 @@ describe("the threat model's :9464 disclosure list is the bunexec set (S5)", () 
         const section = fencedDocSection(THREAT_MODEL, "9091-disclosure") ?? "";
         const documented = new Set(extractDocMetricTokens(section));
         const emittedFamilies = [
-            ...scanBunexecMetrics(read(BUNEXEC_TEMPLATE)).keys(),
+            ...BUNEXEC_FAMILIES.keys(),
             // The forwarded app family IS served on :9464, so it is disclosure.
             ...BRIDGED_FAMILIES,
         ].sort();

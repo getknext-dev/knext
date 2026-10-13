@@ -6,6 +6,7 @@
 
 import { describe, expect, it } from 'bun:test';
 import { existsSync, readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { join, resolve } from 'node:path';
 import { PURGE_ROWS } from '../../packages/kn-next/src/adapters/cdn-purge/rows.js';
 
@@ -56,6 +57,30 @@ describe('CDN docs', () => {
     for (const p of providers) expect(meta).toContain(`"cdn-${p}"`);
     expect(meta).toContain('"cdn"');
     expect(meta).toContain('"cdn-oci"');
+  });
+
+  it('the CDN metrics section names every CDN counter the server renders, and its limits', async () => {
+    const concepts = readFileSync(join(DOCS_DIR, 'cdn.mdx'), 'utf-8');
+    const start = concepts.indexOf('### CDN metrics');
+    expect(start).toBeGreaterThan(-1);
+    const end = concepts.indexOf('\n#', start + 1);
+    const section = concepts.slice(start, end === -1 ? undefined : end);
+    // The families come from what the server renders, never from a list here.
+    const edge = createRequire(import.meta.url)('../../packages/kn-next/src/adapters/cdn-edge.cjs');
+    const { createMetricsRegistry } = await import(
+      '../../packages/kn-next/src/adapters/cdn-purge/metrics.js'
+    );
+    const rendered = `${edge.renderEdgeDecisionMetrics()}${createMetricsRegistry().render()}`;
+    const families = [...rendered.matchAll(/^# TYPE (\S+) /gm)].map((m) => m[1]);
+    expect(families.length).toBe(3);
+    for (const f of families) expect(section).toContain(`\`${f}\``);
+    // Where they are served, how an app without the listener gets them, and
+    // the build target that has none.
+    expect(section).toContain('`9464`');
+    expect(section).toContain('/docs/observability#deep-health-existing-apps');
+    expect(section).toMatch(/`vinext` build target has no CDN support, so it serves no CDN series/);
+    // The stale claim is gone everywhere on the page.
+    expect(concepts).not.toContain('not yet exposed');
   });
 
   it('only the purge-capable rows are described as purging', () => {
