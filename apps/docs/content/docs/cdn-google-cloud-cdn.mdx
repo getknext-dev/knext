@@ -1,0 +1,56 @@
+---
+title: CDN with Google Cloud CDN
+description: Edge cache headers for a knext app behind Google Cloud CDN. Headers only, no automatic purge.
+---
+
+knext sets the edge headers Google Cloud CDN reads. **It does not purge Google Cloud CDN.** A purge
+there needs a signed OAuth call, which knext does not make. Read [CDN caching](/docs/cdn) first.
+
+## What you do
+
+- Put an external Application Load Balancer with Cloud CDN enabled in front of the app's public
+  hostname. You create and manage it.
+- Use a cache mode that honours the origin's directives, so the `CDN-Cache-Control` header knext
+  sends decides how long a page lives.
+
+## Configure knext
+
+```ts title="knext.config.ts"
+cdn: {
+  provider: 'google-cloud-cdn',
+  htmlTTLSeconds: 30,
+  excludePaths: ['/account'],
+},
+```
+
+Leave out `purge`. If you set it anyway, knext accepts it but makes no call, counts the skip, and
+logs one line at start-up.
+
+On pages that are safe to share, the app sends:
+
+- `CDN-Cache-Control: max-age=30`, an edge-only directive. The browser's `Cache-Control` is
+  unchanged.
+- `Cache-Tag: kn-…`, opaque hashed tags. Google forwards tags to clients, which is harmless since
+  they reveal nothing about your Next.js tags.
+
+Google refuses to cache a response with more than 50 tags, any tag over 120 bytes, or more than
+4 KiB of tags. knext applies the same limits: a response that would exceed them is not edge-cached
+at all.
+
+## Freshness without purge
+
+Because knext does not purge here, a revalidation reaches visitors only when the edge entry expires,
+within `htmlTTLSeconds` plus any `staleWhileRevalidateSeconds`. Keep the TTL short for content that
+must change quickly. A new deploy does not clear the edge either.
+
+You can purge yourself with your own tooling. The tags are `kn-<app>` for everything the app
+cached and `kn-<app>-b<build>` for one build, but they are hashes, so a tag for one Next.js tag is
+not guessable by hand.
+
+## Live verification
+
+**Live verification:** not recorded
+
+No recorded live run of this provider is on file. The header behaviour is covered by unit tests and
+an emulator only, so treat it as unverified against the real service until you have checked it with
+`curl -I` yourself.

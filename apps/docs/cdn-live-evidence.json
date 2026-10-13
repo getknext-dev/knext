@@ -1,0 +1,7 @@
+{
+  "_comment": "One entry per CDN provider row. verified is true only with a recorded live run: then set run to a reference to its record. The CDN docs pages derive their 'Live verification' line from this file (cdn-docs.test.ts).",
+  "cloudflare": { "verified": false },
+  "google-cloud-cdn": { "verified": false },
+  "cloudfront": { "verified": false },
+  "azure-front-door": { "verified": false }
+}
