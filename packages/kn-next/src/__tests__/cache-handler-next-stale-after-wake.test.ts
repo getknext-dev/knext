@@ -261,9 +261,11 @@ describe("ISR freshness survives a scale-to-zero wake on the Next path (#1888)",
             entry?.isStale,
             "the previous build's window must not apply",
         ).toBe(true);
+        // The previous build's window is not seeded: the only window Next
+        // learnt for the route is the expired one the handler handed back.
         expect(
-            SharedCacheControls.cacheControls.has(mapKey("/isr/redeploy")),
-        ).toBe(false);
+            SharedCacheControls.cacheControls.get(mapKey("/isr/redeploy")),
+        ).toEqual({ revalidate: 1, expire: ONE_YEAR_S });
     });
 
     it("does NOT seed another build's revalidate=false (it would be fresh forever)", async () => {
@@ -276,9 +278,11 @@ describe("ISR freshness survives a scale-to-zero wake on the Next path (#1888)",
         );
         const entry = await cache.get("/static/old", PAGE);
         expect(entry?.isStale).toBe(true);
+        // The previous build's window is not seeded: the only window Next
+        // learnt for the route is the expired one the handler handed back.
         expect(
-            SharedCacheControls.cacheControls.has(mapKey("/static/old")),
-        ).toBe(false);
+            SharedCacheControls.cacheControls.get(mapKey("/static/old")),
+        ).toEqual({ revalidate: 1, expire: ONE_YEAR_S });
     });
 
     it("does NOT seed a legacy entry that carries no build id", async () => {
@@ -291,9 +295,11 @@ describe("ISR freshness survives a scale-to-zero wake on the Next path (#1888)",
         );
         const entry = await cache.get("/isr/legacy", PAGE);
         expect(entry?.isStale).toBe(true);
+        // The previous build's window is not seeded: the only window Next
+        // learnt for the route is the expired one the handler handed back.
         expect(
-            SharedCacheControls.cacheControls.has(mapKey("/isr/legacy")),
-        ).toBe(false);
+            SharedCacheControls.cacheControls.get(mapKey("/isr/legacy")),
+        ).toEqual({ revalidate: 1, expire: ONE_YEAR_S });
     });
 
     it("does NOT seed when this process has no build id (no serverDistDir), even for a legacy entry", async () => {
