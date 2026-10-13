@@ -70,6 +70,7 @@ const nodePath = require('node:path');
 const ROUTING_ARTIFACT_NAME = 'knext-cdn-routing.json';
 const SEAM_KEY = Symbol.for('knext.core.cdn.requestTags');
 const DECISIONS_KEY = Symbol.for('knext.core.cdn.edgeDecisions');
+const STRIPS_KEY = Symbol.for('knext.core.cdn.foreignEdgeStrips');
 const STATE = Symbol.for('knext.core.cdn.requestState');
 const ORIGIN_CC = Symbol.for('knext.core.cdn.originCacheControl');
 const TAG_PREFIX_RE = /^[0-9a-f]{12}$/;
@@ -744,7 +745,21 @@ function edgeDecisionSnapshot() {
   });
 }
 
-/** Prometheus text exposition for `knext_cdn_edge_decision_total`. */
+/**
+ * Foreign edge directives stripped (Amendment 2), counted APART from the
+ * decision: a stripped response is still counted once in the decision counter
+ * under the reason it was refused for, so neither number loses information and
+ * no response is counted twice in either.
+ */
+function countForeignEdgeStrip() {
+  globalThis[STRIPS_KEY] = (globalThis[STRIPS_KEY] || 0) + 1;
+}
+
+function foreignEdgeStripCount() {
+  return globalThis[STRIPS_KEY] || 0;
+}
+
+/** Prometheus text exposition for the decision counter and the strip counter. */
 function renderEdgeDecisionMetrics() {
   const lines = [
     '# HELP knext_cdn_edge_decision_total Responses by CDN edge-cache decision and the reason.',
@@ -753,6 +768,11 @@ function renderEdgeDecisionMetrics() {
   for (const { result, reason, count } of edgeDecisionSnapshot()) {
     lines.push(`knext_cdn_edge_decision_total{result="${result}",reason="${reason}"} ${count}`);
   }
+  lines.push(
+    '# HELP knext_cdn_foreign_edge_strip_total Non-edge responses from which an edge directive or tag header set elsewhere was removed.',
+    '# TYPE knext_cdn_foreign_edge_strip_total counter',
+    `knext_cdn_foreign_edge_strip_total ${foreignEdgeStripCount()}`,
+  );
   return `${lines.join('\n')}\n`;
 }
 
@@ -1018,6 +1038,8 @@ module.exports = {
   stripForeignEdgeHeaders,
   edgeDecisionSnapshot,
   renderEdgeDecisionMetrics,
+  countForeignEdgeStrip,
+  foreignEdgeStripCount,
   captureRequest,
   ensureSeam,
   createController,
