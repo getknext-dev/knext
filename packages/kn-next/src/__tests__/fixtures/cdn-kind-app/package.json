@@ -1,0 +1,24 @@
+{
+  "name": "knext-cdn-kind-fixture",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Minimal Next 16.4 app used ONLY by the CDN cache-tier kind e2e (.github/workflows/cdn-headers-kind-e2e.yml). NOT a workspace member: the workflow stages a throwaway copy outside the repo and installs its dependencies there.",
+  "scripts": {
+    "build": "next build"
+  },
+  "dependencies": {
+    "next": "16.4.0",
+    "react": "19.2.0",
+    "react-dom": "19.2.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "@types/node": "^22",
+    "@types/react": "^19",
+    "@types/react-dom": "^19"
+  },
+  "overrides": {
+    "sharp": "^0.35.5"
+  }
+}

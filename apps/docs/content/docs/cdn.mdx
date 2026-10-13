@@ -52,6 +52,12 @@ alone, so a new kind of response is uncached until it has been shown safe.
 - Hashed build assets (`immutable`) keep Next.js's own long-lived header and are neither tagged nor
   purged.
 - Redirects (3xx) are never edge-cached.
+- A response that fails any rule above leaves your origin with no edge directive at all, even one
+  it picked up somewhere else. knext removes `Cloudflare-CDN-Cache-Control`, `CDN-Cache-Control` and
+  the provider's tag header, and on CloudFront and Azure Front Door any `s-maxage` in
+  `Cache-Control`. This matters for a middleware rewrite to an absolute URL on another origin:
+  Next.js fetches that URL and copies its response headers onto the rewritten response, so the
+  inner page's edge directive would otherwise reach the CDN on a path your middleware covers.
 
 Edge caching only starts once the cache handler records tags for the page. A server that has not
 recorded the page's tags serves it uncached from the edge's point of view; this fails closed.
@@ -90,6 +96,7 @@ to understand the rules rather than to alert on:
 | `rsc_*` | One of the React Server Components rules |
 | `build_id_unresolved`, `tags_missing`, `tag_overflow` | The page cannot be purged by tag, so it is not cached |
 | `zero_ttl` | The resulting edge lifetime would be zero |
+| `foreign_edge_header_stripped` | The response was not cacheable and already carried an edge directive or tags from elsewhere (for example a rewrite to another origin), which knext removed |
 
 Some legitimate URLs are never edge-cached by the canonical-path rule, and are served correctly from
 your origin instead: slugs that contain an encoded slash or percent sign, and any path where an

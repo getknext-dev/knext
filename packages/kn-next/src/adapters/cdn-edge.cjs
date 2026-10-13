@@ -16,7 +16,10 @@
  * cache it. ONLY a response that passes EVERY condition gets an edge directive and
  * a `Cache-Tag`; anything not positively allowed is left exactly as the compat
  * normaliser leaves it, which no CDN caches. The browser-facing `Cache-Control`
- * keeps the compat-normalised value on rows that have an edge-only header.
+ * keeps the compat-normalised value on rows that have an edge-only header. A
+ * response that is NOT allowed also loses any edge directive it picked up
+ * elsewhere (`stripForeignEdgeHeaders`, Amendment 2): a proxied rewrite copies
+ * the inner response's directive onto the outer one.
  *
  * ## The tag seam (D5.1) — the interface the cache handler calls
  *
@@ -593,6 +596,117 @@ function edgeHeaders(cfg, decision) {
 }
 
 // ---------------------------------------------------------------------------
+// Foreign edge directives (Amendment 2)
+// ---------------------------------------------------------------------------
+
+/**
+ * The edge-only directive headers of every row. A response the allowlist did
+ * not pass must carry none of them, whichever row is configured: the CDN in
+ * front may read either.
+ */
+const EDGE_ONLY_HEADERS = Object.freeze(['cloudflare-cdn-cache-control', 'cdn-cache-control']);
+
+/** `value` without its `s-maxage` token(s), or `null` when it has none. */
+function withoutSMaxAge(value) {
+  const raw = Array.isArray(value) ? value.join(', ') : String(value == null ? '' : value);
+  const parts = raw
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const kept = parts.filter((p) => !/^s-maxage\s*(=|$)/i.test(p));
+  return kept.length === parts.length ? null : kept.join(', ');
+}
+
+/**
+ * Remove every edge directive a response carries that the decision did not
+ * produce. Called for every response whose decision is NOT `edge`.
+ *
+ * `cdn-edge` only ever ADDS a directive, so without this a response could leave
+ * the origin edge-cacheable with a directive from somewhere else. The one known
+ * in-process way: a middleware/proxy rewrite to an absolute URL on a different
+ * origin is proxied by Next over HTTP, and Next copies the inner response's
+ * headers (edge directive and tags included) onto the outer response, whose path
+ * is middleware-matched (D4.1 condition 10). Another app behind an external
+ * rewrite may emit its own, too.
+ *
+ * Removed: both edge-only directive headers, the row's tag header, and, on the
+ * rows that carry the directive in `Cache-Control` itself (no edge-only header),
+ * any `s-maxage` token there. Looked for both in the headers already set on the
+ * response and in the `writeHead` headers argument (object, flat array or
+ * array of pairs; arrays are edited in place).
+ *
+ * @param {NonNullable<ReturnType<typeof loadCdnConfig>>} cfg
+ * @param {{ getHeader(n: string): unknown, removeHeader(n: string): void, setHeader(n: string, v: unknown): void }} res
+ *   header operations on the response; `setHeader` must not re-normalise
+ * @param {unknown} hdrs the `writeHead` headers argument, if any
+ * @returns {boolean} whether anything was removed
+ */
+function stripForeignEdgeHeaders(cfg, res, hdrs) {
+  const names = new Set(EDGE_ONLY_HEADERS);
+  if (cfg.row.tagHeader) names.add(cfg.row.tagHeader);
+  const ccRow = cfg.row.edgeHeader === null;
+  let stripped = false;
+
+  for (const name of names) {
+    if (res.getHeader(name) !== undefined) {
+      res.removeHeader(name);
+      stripped = true;
+    }
+  }
+  if (ccRow) {
+    const cc = res.getHeader('cache-control');
+    const next = cc === undefined ? null : withoutSMaxAge(cc);
+    if (next !== null) {
+      stripped = true;
+      if (next === '') res.removeHeader('cache-control');
+      else res.setHeader('cache-control', next);
+    }
+  }
+
+  /** `undefined` keeps the header, `null` drops it, a string replaces its value. */
+  const verdict = (name, value) => {
+    const n = String(name).toLowerCase();
+    if (names.has(n)) return null;
+    if (ccRow && n === 'cache-control') {
+      const next = withoutSMaxAge(value);
+      if (next !== null) return next === '' ? null : next;
+    }
+    return undefined;
+  };
+
+  if (Array.isArray(hdrs)) {
+    if (hdrs.length > 0 && Array.isArray(hdrs[0])) {
+      for (let k = hdrs.length - 1; k >= 0; k--) {
+        const pair = hdrs[k];
+        if (!Array.isArray(pair)) continue;
+        const v = verdict(pair[0], pair[1]);
+        if (v === undefined) continue;
+        stripped = true;
+        if (v === null) hdrs.splice(k, 1);
+        else pair[1] = v;
+      }
+    } else {
+      for (let k = hdrs.length - 2 + (hdrs.length % 2); k >= 0; k -= 2) {
+        const v = verdict(hdrs[k], hdrs[k + 1]);
+        if (v === undefined) continue;
+        stripped = true;
+        if (v === null) hdrs.splice(k, 2);
+        else hdrs[k + 1] = v;
+      }
+    }
+  } else if (hdrs !== null && typeof hdrs === 'object') {
+    for (const key of Object.keys(hdrs)) {
+      const v = verdict(key, hdrs[key]);
+      if (v === undefined) continue;
+      stripped = true;
+      if (v === null) delete hdrs[key];
+      else hdrs[key] = v;
+    }
+  }
+  return stripped;
+}
+
+// ---------------------------------------------------------------------------
 // Decision counters (knext_cdn_edge_decision_total{result,reason})
 // ---------------------------------------------------------------------------
 
@@ -823,34 +937,39 @@ function createController(opts) {
     return id;
   }
 
+  /** Decide for a response, without counting it. */
+  function judge(state, res, status, headersObj) {
+    const get = (name) => {
+      if (headersObj) {
+        for (const k of Object.keys(headersObj)) if (k.toLowerCase() === name) return headersObj[k];
+      }
+      return res.getHeader ? res.getHeader(name) : undefined;
+    };
+    return decideEdge({
+      cfg,
+      artifact: ensureArtifact(),
+      method: state.method,
+      status,
+      originCacheControl: res[ORIGIN_CC],
+      hasSetCookie: get('set-cookie') !== undefined,
+      hasAuthorization: state.hasAuthorization,
+      hasDraftCookie: state.hasDraftCookie,
+      rawTarget: state.rawTarget,
+      rsc: state.rsc,
+      contentType: String(get('content-type') || ''),
+      ownTags: state.own,
+      fetchTags: state.fetch,
+      buildId: buildId(),
+    });
+  }
+
   return {
     cfg,
     ensureArtifact,
+    judge,
     /** Decide for a response; counts the decision. */
     decide(state, res, status, headersObj) {
-      const get = (name) => {
-        if (headersObj) {
-          for (const k of Object.keys(headersObj)) if (k.toLowerCase() === name) return headersObj[k];
-        }
-        return res.getHeader ? res.getHeader(name) : undefined;
-      };
-      const artifact = ensureArtifact();
-      const decision = decideEdge({
-        cfg,
-        artifact,
-        method: state.method,
-        status,
-        originCacheControl: res[ORIGIN_CC],
-        hasSetCookie: get('set-cookie') !== undefined,
-        hasAuthorization: state.hasAuthorization,
-        hasDraftCookie: state.hasDraftCookie,
-        rawTarget: state.rawTarget,
-        rsc: state.rsc,
-        contentType: String(get('content-type') || ''),
-        ownTags: state.own,
-        fetchTags: state.fetch,
-        buildId: buildId(),
-      });
+      const decision = judge(state, res, status, headersObj);
       if (decision.edge) countDecision('edge', 'allowed');
       else countDecision(decision.result, decision.reason);
       return decision;
@@ -875,6 +994,8 @@ module.exports = {
   middlewareMatches,
   decideEdge,
   edgeHeaders,
+  EDGE_ONLY_HEADERS,
+  stripForeignEdgeHeaders,
   edgeDecisionSnapshot,
   renderEdgeDecisionMetrics,
   captureRequest,

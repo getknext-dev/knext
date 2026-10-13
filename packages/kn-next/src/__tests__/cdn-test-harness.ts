@@ -194,7 +194,15 @@ export interface Spec {
     ct?: string;
     tags?: Array<{ kind: string; tags: string[] }>;
     setCookie?: boolean;
-    mode?: "write" | "end" | "writehead" | "writehead-pairs" | "writehead-flat";
+    mode?:
+        | "write"
+        | "end"
+        | "writehead"
+        | "writehead-pairs"
+        | "writehead-flat"
+        | "append"
+        | "stream"
+        | "flush";
     status?: number;
     rewriteUrl?: string;
     hop?: boolean;
