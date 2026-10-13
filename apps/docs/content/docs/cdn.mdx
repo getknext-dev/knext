@@ -148,11 +148,13 @@ that gives up logs the provider, status and tag count, never the token or the re
 
 ### Limits to know
 
-- **No Redis, no purge.** The purge follows the cache invalidation. If Redis is configured but
-  unreachable, the invalidation only clears that pod's memory, so knext skips the purge and logs a
-  warning. The edge keeps serving the old page until its TTL ends. Without Redis configured at all,
-  other pods can refill the edge with old content, and the first-ready purge does not run; the TTL
-  bounds the staleness.
+- **Redis down: the purge waits.** The purge follows the cache invalidation. If Redis is configured
+  but unreachable, the invalidation only clears that pod's memory, so knext holds the purge back and
+  logs a warning. Once Redis answers again, that pod invalidates the remembered tags in Redis and
+  then purges them, or the whole app if more than 1,000 tags piled up. If the pod restarts or scales
+  to zero before then, the edge keeps serving the old page until its TTL ends. Without Redis
+  configured at all, other pods can refill the edge with old content, and the first-ready purge
+  does not run; the TTL bounds the staleness.
 - **A lost purge is bounded by the TTL.** A pod stopped after the shutdown drain deadline can lose a
   queued purge. The same TTL bound applies.
 - **Tag prefixes are not a security boundary.** Tags carry a per-app prefix so one app's purge does not

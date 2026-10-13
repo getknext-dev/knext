@@ -765,6 +765,15 @@ The rule (lead decision on the issue, option B; jev: B **0.60**, C 0.22, A 0.17,
 
 **The cost, stated honestly.** The issue framed it as "edge hit rate right after a deploy". It is longer for long-lived pages. A page the previous build rendered stays off the edge until the new build renders it again. That happens when its `revalidate` elapses, or on a `revalidateTag` / `revalidatePath`. With `revalidate = 3600` that is up to an hour per page. With `revalidate: false`, nothing regenerates the page until a revalidation does. Measured on Next 16.4.0: the new build kept answering `HIT` with the old body on every request. ADR-0066's "the stored window is withheld and Next treats the entry as stale and re-renders it" did **not** produce a regeneration. The root cause and the decision are in #2305; that is the other half of how quickly the edge recovers. Two alternatives keep the hit rate, and both are recorded on the issue. One tags the response with the **writing** build's tag. The other build-scopes ISR HTML keys while `spec.cdn` is set, which is an ADR-0066 amendment.
 
+
+### Amendment 3 (Proposed): a purge held back by a Redis outage is sent after the replay
+
+Found reviewing the purge wire-in (#2290); **Proposed**, flagged for the sprint-close design review, and implemented in #2292 meanwhile. ADR-0066 Amendment 4 carries the mechanism; this records what it changes here.
+
+- **D6.3 / D8, the outage case.** A `revalidateTag` that cannot reach a configured Redis (breaker open, or a fault part-way through) still sends no purge at that moment, because the edge would refill from the stale shared entry. That pod now remembers the tags (deduplicated, at most 1000) and, once its breaker closes, replays the Redis invalidation and **then** queues the purge for the tags whose invalidation completed. The order D6.3 requires is kept. Before this amendment the edge stayed stale until its TTL. Now it stays stale until Redis is back plus the purge latency. The TTL bound still applies if the pod restarts or scales to zero first, because the list is kept per process.
+- **D6.2, the hook point.** The replay belongs to the singular handler's own invalidation, deferred, so `updateTags` still never purges and a tag is still purged once.
+- **D6.4, the overflow.** Past 1000 remembered tags, the replay invalidates every ISR entry under the app's key prefix and queues **one** purge of the app tag `kn-<p>` through a new purger entry point, `enqueueApp()`. That is the same collapse the purge queue makes at the same size. jev: collapse **0.99**, log and drop 0.01, drop oldest 0.00.
+
 ## Options considered
 
 | Decision | Chosen | jev | Main alternative(s) | jev | Why the alternative lost |

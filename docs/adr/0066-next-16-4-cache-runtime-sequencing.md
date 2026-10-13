@@ -1,13 +1,14 @@
 # ADR-0066: Next 16.4 cache surface and runtime-supervisor changes — one sequenced plan
 
-- **Status:** **Accepted with Amendment 1 (2026-10-11); Amendment 2 (2026-10-12) Proposed; Amendment 3 (2026-10-13) Proposed.** Proposed 2026-10-10 and revised in review
+- **Status:** **Accepted with Amendment 1 (2026-10-11); Amendment 2 (2026-10-12) Proposed; Amendment 3 (2026-10-13) Proposed; Amendment 4 (2026-10-13) Proposed.** Proposed 2026-10-10 and revised in review
   round 2 the same day; accepted at the Sprint 2 close design review (jev 0.98). D1–D5 stand as
   written, except where an amendment (end of this file) supersedes a line: Amendment 1 (Accepted:
   K4 keeps the `adapterPath` shim), Amendment 2 (Proposed: a live build's window is honoured) and
   Amendment 3 (Proposed: a non-live build's page or route entry is handed back stale; it supersedes
   Amendment 2 §1's re-render sentence, §2's "withheld exactly as before" for page and route entries,
-  and Amendment 2's Redis-fault accepted risk). Design and sequencing only; no code lands with this
-  ADR.
+  and Amendment 2's Redis-fault accepted risk), and Amendment 4 (Proposed: ISR invalidations skipped
+  while the Redis breaker is open are replayed when it closes; it supersedes D2's ISR outage
+  residual). Design and sequencing only; no code lands with this ADR.
 - **Date:** 2026-10-10
 - **Trigger class:** ADR + hard rule ("don't rewrite the runtime twice"; "gate every feature on the
   official compatibility suite") + public API (the `'use cache'` backend export and its adapter
@@ -995,3 +996,72 @@ every entry stale 0.01).
 - **An entry younger than 1 s from a non-live writer is still fresh for that second.** Every write
   refreshes the writer's 90 s liveness record, so a non-live writer's entries are at least about 90 s
   old in practice.
+
+## Amendment 4 (2026-10-13): ISR invalidations skipped while the breaker is open are replayed
+
+**Status of this amendment: Proposed.** Trigger-class (ADR, and the cache runtime); per the
+2026-09-22 workflow amendment it is not a merge gate, and it is reviewed at sprint close. Implemented
+in #2292 meanwhile. It supersedes two lines of D2's outage residual for the **ISR** handler only:
+"ISR: a `revalidateTag` during the outage clears only the local map. Its Redis entries stay stale
+until their TTL" and "An in-process retry queue would be lost on scale-to-zero, which is the normal
+case, so neither handler adds one". The matching Consequences line ("ISR's outage invalidations
+clear only the local map, as today") is superseded the same way.
+
+### What changed
+
+1. **The residual was wider than stated.** Since ADR-0068's purge wire-in, a `revalidateTag` that
+   cannot reach Redis also skips the edge purge (a purge would let the edge refill from the stale
+   shared entry). So an outage invalidation left **both** the origin, on every pod, and the edge stale
+   until the entry's TTL, which for ISR is at least an hour (the TTL floor, D2).
+2. **The rule.** The ISR handler keeps the tags whose invalidation did not reach Redis (the breaker
+   was open, or Redis faulted part-way through the loop), per process, deduplicated, and replays
+   them once the breaker closes: the Redis invalidation first, then the edge purge for exactly the
+   tags whose invalidation completed (ADR-0068 D6.3's order).
+   - **Bound: 1000 distinct tags**, the CDN purge queue's own bound (ADR-0068 D6.4). One more and the
+     list collapses: the replay invalidates every ISR entry under the app's key prefix (cursor
+     `SCAN` + `DEL`; tag indexes are left alone, because deleting one could race a fresh write that
+     just indexed itself there) and queues one purge of the app tag `kn-<p>`. Wider than needed,
+     never stale.
+   - **Off the request path.** Started by the first connection that finds the breaker closed, or by
+     an unref'd probe timer set for the moment it closes, so a pod that receives no further requests
+     still replays while other pods serve the stale entries. Never awaited by a caller; enrolled in
+     the SIGTERM drain registry like any other cache write.
+   - **No storm.** One replay at a time, one tag at a time through the breaker-aware command wrapper:
+     the first fault re-trips the breaker and stops the run, and the rest waits for the next probe,
+     one attempt per cooldown, the breaker's own rate.
+3. **Why D2's objection no longer decides it.** "Lost on scale-to-zero" is true, and stays a known
+   limit (below). But the replay costs nothing when there was no outage, and the common outage is a
+   Redis restart or failover of seconds to minutes, during which the pod that ran the invalidation
+   is still serving. Losing the list on a restart leaves exactly D2's residual, so the replay is
+   never worse than before.
+
+### Unchanged
+
+- **`'use cache'`.** An `updateTags` dropped during the outage is still lost (D2). Next copies a
+  `'use cache'` function's tags into the page entry, so the replay re-renders the page, but the
+  function inside it can still return its own cached value until that entry's TTL. Replaying the
+  tag stamps too is follow-up work (#2331), not done here.
+- The breaker itself (per process, shared by both handlers), its cooldown, and the per-pod memory
+  fallback.
+
+### Options considered (jev)
+
+| Decision | Chosen | jev |
+|---|---|---|
+| Bound | 1000 tags (256 / 10000) | **0.80** (0.05 / 0.15) |
+| Overflow | collapse to a prefix-wide invalidation + one app purge (log and drop / drop oldest) | **0.99** (0.01 / 0.00) |
+| Trigger | probe timer at breaker close + any successful connection (request-driven only) | **0.60** (0.40) |
+| Replay shape | sequential, stop at first fault, single-flight, drained (one pipeline / 8 in parallel) | **0.94** (0.03 / 0.03) |
+| Scope | ISR handler only, `'use cache'` follow-up (both now) | **0.76** (0.24) |
+
+### Accepted risks
+
+- **Per process.** The list lives in the pod's memory. A pod that restarts or scales to zero before
+  Redis is back loses it, and those entries stay stale, at the origin and the edge, until their TTL.
+- **Over-invalidation.** A replay can delete an entry that was rendered after the invalidation it
+  replays (a fresh write between the outage and the replay). That costs one re-render, never a stale
+  page. The collapse deletes every ISR entry of the app, images included: a burst of origin renders
+  after a long outage with heavy invalidation traffic.
+- **One more Redis key pattern.** The collapse issues `SCAN ... MATCH <prefix>:cache:*`. A second app
+  whose key prefix is literally `<prefix>:cache` on the same Redis would be swept too; prefixes are
+  per app (`REDIS_KEY_PREFIX`), so this needs a deliberately colliding configuration.
