@@ -142,6 +142,37 @@ from) and honours a head marker only if **this PR introduced it**:
 A head marker identical to the merge base's, or differing only in `expires`
 or `paths`, is **inherited** and exempts nothing.
 
+**A marker that arrived through a merge is inherited too (#2325).** The merge
+base alone misses one shape: a merge PR (integration/v2 → main, or a feature
+branch that merged integration/v2) has a merge base older than the other
+branch's marker, so that marker read as introduced by the PR and exempted
+frozen files on a branch it was never reviewed for. The workflow's "Collect
+the pins at merged-in parents" step reads the pin at every **merged-in
+parent** — each non-first parent of each merge commit in `merge-base..head`
+— into `inherited-pins.json`, and the guard (`--inherited-pins-file`,
+required) treats a head marker with the same `date` and `reason` as any of
+them as inherited. What is left is the PR's own commits: a merge PR that
+needs an exemption adds its **own** marker (a new `date` or `reason`) on top
+of the merge.
+
+- On a `merge_group` run, the queue's own merge commits (HEAD's first-parent
+  chain back to the base) are skipped — their second parents are the queued
+  PR heads, i.e. the commits under test. Merges *inside* a queued PR are still
+  scanned. A squash or rebase queue leaves no merge commit to inspect, so it
+  falls back to the merge-base rule; the `pull_request` run on the PR itself
+  already applied this one.
+- The rule only sees markers that reached the merged-in branch **through a
+  merge commit**. A marker that landed on, say, integration/v2 by squash,
+  rebase or direct push is part of that branch's own first-parent history, so
+  a v2 → main PR still reads it as introduced. Today every pin change on
+  integration/v2 arrived by merge commit; keep it that way, or the hole
+  reopens for that marker.
+- Merging the PR's own base branch back in (`git merge main`) is harmless:
+  the base's pins carry no marker the PR wrote.
+- Ambiguity resolves closed: if a marker the PR wrote also comes back in
+  through a merged branch (e.g. a sibling branch cut from this one), it reads
+  as inherited. Change its `reason` to re-authorize.
+
 **Removing or narrowing a marker needs no marker.** The pin file is itself
 frozen, so before #1635 a PR that only deleted a marker could never pass (it
 needed a valid marker at its own head). A pin-only diff now passes with no
@@ -293,7 +324,15 @@ The #1635 attack cases are covered at both levels too: an inherited marker
 `expires` is merely extended is red; a marker added by the PR is green; a
 removal-only and a shorten-only pin diff are green with no marker of their
 own; an rcTag change or any other pin edit riding a removal is red; a
-path-scoped marker does not cover an unnamed frozen file. The #1641 rcTag
+path-scoped marker does not cover an unnamed frozen file. The #2325
+merged-in case is executed end to end against real git fixture repos — the
+workflow's own diff, pin-read and collection steps feed the real guard CLI:
+a merge PR whose only marker came with the merged branch is red (also when
+buried under a later own commit, and inside a queued PR on `merge_group`); a
+merge PR with its own fresh marker, a plain own-marker PR, an own-marker PR
+that merged its base back in, and the queue's own merge commit are green;
+`scripts/mutation-prove-inherited-rcbumpmarker.mjs` proves each of those
+guards red by exit code. The #1641 rcTag
 precheck is red for a missing tag, an unreachable tag, a non-RC name and a
 missing lookup, and green for an existing reachable tag; the workflow's
 resolution step is executed against a real local git remote for each case.

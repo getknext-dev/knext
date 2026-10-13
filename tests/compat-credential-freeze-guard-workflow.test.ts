@@ -431,6 +431,18 @@ describe('#1635 / #1641 — merge-base pin read and rcTag resolution are wired i
     expect(tag).toBeGreaterThan(mb);
     expect(runIdx).toBeGreaterThan(tag);
   });
+
+  it('#2325 — the merged-in-parent pins are collected before, and passed to, the guard', () => {
+    const { wf } = load();
+    const steps = wf.jobs['freeze-guard'].steps;
+    const collect = steps.findIndex((s) =>
+      /Collect the pins at merged-in parents/.test(s.name ?? ''),
+    );
+    const runIdx = steps.findIndex((s) => /Run the freeze guard/.test(s.name ?? ''));
+    expect(collect).toBeGreaterThanOrEqual(0);
+    expect(runIdx).toBeGreaterThan(collect);
+    expect(String(steps[runIdx]?.run)).toContain('--inherited-pins-file inherited-pins.json');
+  });
 });
 
 describe('#1641 — the rcTag resolution step, executed against a real git remote', () => {
@@ -524,5 +536,229 @@ describe('#1641 — the rcTag resolution step, executed against a real git remot
     expect(state.stdout).not.toContain('does not exist on the remote');
     expect(state.commit).toBeNull();
     expect(state.reachableFromMain).toBe(false);
+  }, 30_000);
+});
+/**
+ * #2325 — END TO END against real git: the workflow's own steps (diff, the
+ * three pin reads, and the merged-in-parent collection) run verbatim in a
+ * fixture repo, and their output files feed the real guard CLI. A marker that
+ * arrives with a merged-in branch (integration/v2 → main is the motivating
+ * shape) must not exempt frozen files; a marker the PR's own commits add must,
+ * including when the PR also merged its base branch, and including the merge
+ * queue's synthetic merge commit (first parent = base, second = the PR head).
+ */
+describe('#2325 — merged-in markers, executed against real git fixture repos', () => {
+  const GIT_ENV = {
+    ...process.env,
+    GIT_AUTHOR_NAME: 't',
+    GIT_AUTHOR_EMAIL: 't@example.com',
+    GIT_COMMITTER_NAME: 't',
+    GIT_COMMITTER_EMAIL: 't@example.com',
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_CONFIG_GLOBAL: '/dev/null',
+  };
+  const PIN = '.github/compat-credential-ref.json';
+  const FROZEN = 'scripts/e2e-deploy.sh';
+  const TAG = 'v1.0.0-rc.1';
+  const MERGED_IN = {
+    date: '2026-09-23',
+    expires: '2026-10-01',
+    reason: 'reviewed for the v2 line',
+  };
+  const OWN = { date: '2026-09-24', expires: '2026-10-01', reason: 'this PR, reviewed for main' };
+  const GUARD = resolve(REPO_ROOT, 'scripts/compat-credential-freeze-guard.mjs');
+  const STEP_NAMES = [
+    /Compute the files this PR changed/,
+    /Read the pin file at the PR's base commit/,
+    /Read the pin file at the PR's head commit/,
+    /Read the pin file at the PR's merge base/,
+    /Collect the pins at merged-in parents/,
+  ];
+
+  type Git = (...a: string[]) => string;
+  type Put = (path: string, content: string) => void;
+
+  function runScenario(
+    build: (git: Git, put: Put) => { base: string; head: string },
+    event: 'pull_request' | 'merge_group' = 'pull_request',
+  ): { status: number | null; stdout: string; inherited: unknown[] } {
+    const { wf } = load();
+    const steps = STEP_NAMES.map((re) => {
+      const s = wf.jobs['freeze-guard'].steps.find((st) => re.test(st.name ?? ''));
+      if (!s?.run) throw new Error(`workflow step ${re} not found`);
+      return s.run;
+    });
+    const dir = mkdtempSync(join(tmpdir(), 'knext-freeze-merge-'));
+    try {
+      const git: Git = (...a) =>
+        execFileSync('git', a, { cwd: dir, env: GIT_ENV, encoding: 'utf8' }).trim();
+      const put: Put = (path, content) => {
+        mkdirSync(join(dir, path, '..'), { recursive: true });
+        writeFileSync(join(dir, path), content);
+      };
+      git('init', '-q', '-b', 'main');
+      const { base, head } = build(git, put);
+      const env = { ...GIT_ENV, BASE_SHA: base, HEAD_SHA: head, GITHUB_EVENT_NAME: event };
+      for (const run of steps) {
+        execFileSync('bash', ['-c', run], {
+          cwd: dir,
+          env,
+          encoding: 'utf8',
+          timeout: EXEC_TIMEOUT_MS,
+        });
+      }
+      const inherited = JSON.parse(readFileSync(join(dir, 'inherited-pins.json'), 'utf8'));
+      const args = [
+        GUARD,
+        '--repo-root',
+        REPO_ROOT,
+        '--base-pin-file',
+        join(dir, 'base-pin.json'),
+        '--head-pin-file',
+        join(dir, 'head-pin.json'),
+        '--merge-base-pin-file',
+        join(dir, 'merge-base-pin.json'),
+        '--inherited-pins-file',
+        join(dir, 'inherited-pins.json'),
+        '--changed-files-file',
+        join(dir, 'changed-files.txt'),
+        '--now',
+        '2026-09-24T12:00:00Z',
+      ];
+      try {
+        const stdout = execFileSync(process.execPath, args, {
+          encoding: 'utf8',
+          timeout: EXEC_TIMEOUT_MS,
+        });
+        return { status: 0, stdout, inherited };
+      } catch (err) {
+        const e = err as { status: number | null; stdout?: string };
+        return { status: e.status, stdout: String(e.stdout ?? ''), inherited };
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  /** main: a live window (rcTag set, no marker) and a frozen harness file. */
+  function seedMain(git: Git, put: Put): void {
+    put(PIN, JSON.stringify({ rcTag: TAG }));
+    put(FROZEN, 'echo v0\n');
+    git('add', '-A');
+    git('commit', '-q', '-m', 'main: live window');
+  }
+  /** integration: its own reviewed marker plus a frozen-file change. */
+  function seedIntegration(git: Git, put: Put): void {
+    git('checkout', '-q', '-b', 'integration', 'main');
+    put(PIN, JSON.stringify({ rcTag: TAG, rcBumpMarker: MERGED_IN }));
+    put(FROZEN, 'echo v2\n');
+    git('add', '-A');
+    git('commit', '-q', '-m', 'integration: marker + harness change');
+  }
+  /** pr: branched from main, with integration merged in (a real merge commit). */
+  function mergeIntegrationIntoPr(git: Git): void {
+    git('checkout', '-q', '-b', 'pr', 'main');
+    git('merge', '-q', '--no-ff', '-m', 'merge integration', 'integration');
+  }
+  /** pr: branched from main, its OWN commit adds the marker and fixes the harness. */
+  function ownMarkerPr(git: Git, put: Put): void {
+    git('checkout', '-q', '-b', 'pr', 'main');
+    put(PIN, JSON.stringify({ rcTag: TAG, rcBumpMarker: OWN }));
+    put(FROZEN, 'echo fixed\n');
+    git('add', '-A');
+    git('commit', '-q', '-m', 'own marker + harness fix');
+  }
+  const tips = (git: Git, head: string) => ({
+    base: git('rev-parse', 'main'),
+    head: git('rev-parse', head),
+  });
+
+  it('RED: a merge PR whose only marker came in with the merged branch', () => {
+    const r = runScenario((git, put) => {
+      seedMain(git, put);
+      seedIntegration(git, put);
+      mergeIntegrationIntoPr(git);
+      return tips(git, 'pr');
+    });
+    expect(r.inherited).toEqual([{ rcBumpMarker: MERGED_IN }]);
+    expect(r.stdout).toMatch(/inherited from a branch merged into this PR/);
+    expect(r.status).toBe(1);
+  }, 30_000);
+
+  it('RED: the merge is buried under a later own commit that leaves the marker alone', () => {
+    const r = runScenario((git, put) => {
+      seedMain(git, put);
+      seedIntegration(git, put);
+      mergeIntegrationIntoPr(git);
+      put('README.md', 'unrelated\n');
+      git('add', '-A');
+      git('commit', '-q', '-m', 'own commit after the merge');
+      return tips(git, 'pr');
+    });
+    expect(r.status).toBe(1);
+  }, 30_000);
+
+  it('GREEN: a merge PR that adds its OWN fresh marker on top of the merge', () => {
+    const r = runScenario((git, put) => {
+      seedMain(git, put);
+      seedIntegration(git, put);
+      mergeIntegrationIntoPr(git);
+      put(PIN, JSON.stringify({ rcTag: TAG, rcBumpMarker: OWN }));
+      git('add', '-A');
+      git('commit', '-q', '-m', 'own marker for main');
+      return tips(git, 'pr');
+    });
+    expect(r.stdout).toMatch(/rcBumpMarker exempts it/);
+    expect(r.status).toBe(0);
+  }, 30_000);
+
+  it('GREEN: a plain PR whose own commit adds the marker (no merges in range)', () => {
+    const r = runScenario((git, put) => {
+      seedMain(git, put);
+      ownMarkerPr(git, put);
+      return tips(git, 'pr');
+    });
+    expect(r.inherited).toEqual([]);
+    expect(r.status).toBe(0);
+  }, 30_000);
+
+  it('GREEN: an own-marker PR that later merged its (advanced) base branch — no false red', () => {
+    const r = runScenario((git, put) => {
+      seedMain(git, put);
+      ownMarkerPr(git, put);
+      git('checkout', '-q', 'main');
+      put('README.md', 'main moved on\n');
+      git('add', '-A');
+      git('commit', '-q', '-m', 'main advances');
+      git('checkout', '-q', 'pr');
+      git('merge', '-q', '--no-ff', '-m', 'merge main into pr', 'main');
+      return tips(git, 'pr');
+    });
+    expect(r.status).toBe(0);
+  }, 30_000);
+
+  it("GREEN: merge_group — the queue's own merge (base + PR head) does not make the PR's marker inherited", () => {
+    const r = runScenario((git, put) => {
+      seedMain(git, put);
+      ownMarkerPr(git, put);
+      git('checkout', '-q', '-b', 'queue', 'main');
+      git('merge', '-q', '--no-ff', '-m', 'merge queue: pr', 'pr');
+      return tips(git, 'queue');
+    }, 'merge_group');
+    expect(r.inherited).toEqual([]);
+    expect(r.status).toBe(0);
+  }, 30_000);
+
+  it('RED: merge_group — a queued PR that merged integration still carries an inherited marker', () => {
+    const r = runScenario((git, put) => {
+      seedMain(git, put);
+      seedIntegration(git, put);
+      mergeIntegrationIntoPr(git);
+      git('checkout', '-q', '-b', 'queue', 'main');
+      git('merge', '-q', '--no-ff', '-m', 'merge queue: pr', 'pr');
+      return tips(git, 'queue');
+    }, 'merge_group');
+    expect(r.inherited).toEqual([{ rcBumpMarker: MERGED_IN }]);
+    expect(r.status).toBe(1);
   }, 30_000);
 });

@@ -827,6 +827,119 @@ describe('#1635 — a marker exempts only the PR that introduces it', () => {
   });
 });
 
+/**
+ * #2325 — a marker that arrived through a MERGE is not the PR's own.
+ *
+ * #1635 compared the head marker only against the merge base. A merge PR
+ * (integration/v2 → main, or a feature branch that merged integration/v2)
+ * has a merge base that predates the other branch's marker, so that marker
+ * read as "introduced by this PR" and exempted frozen files on a branch it
+ * was never reviewed for. The workflow now also hands in the pins found at
+ * every merged-in parent in the PR's range (`inheritedPins`); a head marker
+ * matching any of them by `date` + `reason` is inherited.
+ */
+describe('#2325 — a marker inherited through a merged-in branch exempts nothing', () => {
+  const NOW = new Date('2026-09-24T12:00:00Z');
+  const FROZEN_SET = new Set(['scripts/e2e-deploy.sh', PIN_FILE]);
+  const TAG = 'v1.0.0-rc.1';
+  const MERGED_IN = {
+    date: '2026-09-23',
+    expires: '2026-10-01',
+    reason: 'reviewed for integration/v2',
+  };
+  const OWN = { date: '2026-09-24', expires: '2026-10-01', reason: 'this merge PR' };
+
+  describe('markerIntroducedByPr with inheritedPins', () => {
+    it('head marker equal to a merged-in parent marker → inherited, even though the merge base has none', () => {
+      expect(
+        markerIntroducedByPr({ rcTag: TAG }, { rcTag: TAG, rcBumpMarker: MERGED_IN }, [
+          { rcBumpMarker: MERGED_IN },
+        ]),
+      ).toBe(false);
+    });
+    it('only expires/paths changed against the merged-in marker → still inherited', () => {
+      expect(
+        markerIntroducedByPr(
+          { rcTag: TAG },
+          { rcTag: TAG, rcBumpMarker: { ...MERGED_IN, expires: '2026-09-30', paths: ['x'] } },
+          [{ rcBumpMarker: MERGED_IN }],
+        ),
+      ).toBe(false);
+    });
+    it('a marker the PR wrote itself (new date or reason) on top of the merge → introduced', () => {
+      expect(
+        markerIntroducedByPr({ rcTag: TAG }, { rcTag: TAG, rcBumpMarker: OWN }, [
+          { rcBumpMarker: MERGED_IN },
+        ]),
+      ).toBe(true);
+      expect(
+        markerIntroducedByPr(
+          { rcTag: TAG },
+          { rcTag: TAG, rcBumpMarker: { ...MERGED_IN, reason: 're-reviewed for main' } },
+          [{ rcBumpMarker: MERGED_IN }],
+        ),
+      ).toBe(true);
+    });
+    it('a match against ANY merged-in parent is enough, not only the first', () => {
+      expect(
+        markerIntroducedByPr({ rcTag: TAG }, { rcTag: TAG, rcBumpMarker: MERGED_IN }, [
+          { rcBumpMarker: OWN },
+          { rcTag: TAG },
+          { rcBumpMarker: MERGED_IN },
+        ]),
+      ).toBe(false);
+    });
+    it('no merged-in parents → the #1635 merge-base rule alone (backwards compatible)', () => {
+      expect(markerIntroducedByPr({ rcTag: TAG }, { rcTag: TAG, rcBumpMarker: OWN }, [])).toBe(
+        true,
+      );
+      expect(markerIntroducedByPr({ rcTag: TAG }, { rcTag: TAG, rcBumpMarker: OWN })).toBe(true);
+    });
+  });
+
+  it('ATTACK — merge PR: a marker brought in from the merged branch is RED on a frozen file', () => {
+    const result = evaluateFreezeGuard({
+      basePin: { rcTag: TAG },
+      mergeBasePin: { rcTag: TAG },
+      headPin: { rcTag: TAG, rcBumpMarker: MERGED_IN },
+      inheritedPins: [{ rcTag: TAG, rcBumpMarker: MERGED_IN }],
+      touchedFiles: [PIN_FILE, 'scripts/e2e-deploy.sh'],
+      frozenSet: FROZEN_SET,
+      now: NOW,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/inherited from a branch merged into this PR/);
+  });
+
+  it('merge PR that carries its OWN fresh marker on top: GREEN', () => {
+    const result = evaluateFreezeGuard({
+      basePin: { rcTag: TAG },
+      mergeBasePin: { rcTag: TAG },
+      headPin: { rcTag: TAG, rcBumpMarker: OWN },
+      inheritedPins: [{ rcTag: TAG, rcBumpMarker: MERGED_IN }],
+      touchedFiles: [PIN_FILE, 'scripts/e2e-deploy.sh'],
+      frozenSet: FROZEN_SET,
+      now: NOW,
+    });
+    expect(result.ok).toBe(true);
+  });
+
+  it('an inherited-from-the-merge-base marker still reports the merge base, not a merge', () => {
+    const pin = { rcTag: TAG, rcBumpMarker: OWN };
+    const result = evaluateFreezeGuard({
+      basePin: pin,
+      mergeBasePin: pin,
+      headPin: pin,
+      inheritedPins: [],
+      touchedFiles: ['scripts/e2e-deploy.sh'],
+      frozenSet: FROZEN_SET,
+      now: NOW,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/inherited from the merge base/);
+  });
+});
+
 describe('#1641 — an rcTag change needs the tag on the remote, reachable from main', () => {
   const SHA = 'a'.repeat(40);
   const base = { rcTag: 'v1.0.0-rc.1' };
@@ -937,7 +1050,7 @@ describe('CLI subprocess — the four required scenarios, end to end (#1302)', (
     basePin: unknown,
     touchedFiles: string[],
     headPin: unknown = basePin,
-    extra: { mergeBasePin?: unknown; tagState?: unknown } = {},
+    extra: { mergeBasePin?: unknown; tagState?: unknown; inheritedPins?: unknown } = {},
   ): { status: number | null; stdout: string } {
     const dir = mkdtempSync(join(tmpdir(), 'knext-freeze-guard-'));
     try {
@@ -957,6 +1070,11 @@ describe('CLI subprocess — the four required scenarios, end to end (#1302)', (
       const mergeBaseFile = join(dir, 'merge-base-pin.json');
       writeFileSync(mergeBaseFile, JSON.stringify(mergeBasePinValue));
       extraArgs.push('--merge-base-pin-file', mergeBaseFile);
+      // #2325: --inherited-pins-file is REQUIRED too (fails closed). Default
+      // `[]` = a PR with no merges in its range.
+      const inheritedFile = join(dir, 'inherited-pins.json');
+      writeFileSync(inheritedFile, JSON.stringify(extra.inheritedPins ?? []));
+      extraArgs.push('--inherited-pins-file', inheritedFile);
       if (extra.tagState !== undefined) {
         const f = join(dir, 'rctag-state.json');
         writeFileSync(f, JSON.stringify(extra.tagState));
@@ -1236,6 +1354,92 @@ describe('CLI subprocess — the four required scenarios, end to end (#1302)', (
           },
         );
         expect(status).toBe(0);
+      },
+      CLI_TEST_TIMEOUT_MS,
+    );
+  });
+
+  // #2325: the pins at merged-in parents decide whether a head marker is the
+  // PR's own. A missing file would fail OPEN (every merged-in marker reads as
+  // introduced), so the flag is required, like --merge-base-pin-file.
+  describe('--inherited-pins-file is required and must be a JSON array (#2325)', () => {
+    function runRaw(inherited: string | null): { status: number | null; stderr: string } {
+      const dir = mkdtempSync(join(tmpdir(), 'knext-freeze-guard-'));
+      try {
+        const pinFile = join(dir, 'pin.json');
+        const changedFile = join(dir, 'changed-files.txt');
+        writeFileSync(pinFile, JSON.stringify({ rcTag: null }));
+        writeFileSync(changedFile, `${PIN_FILE}\n`);
+        const args = [
+          SCRIPT,
+          '--repo-root',
+          REPO_ROOT,
+          '--base-pin-file',
+          pinFile,
+          '--head-pin-file',
+          pinFile,
+          '--merge-base-pin-file',
+          pinFile,
+          '--changed-files-file',
+          changedFile,
+        ];
+        if (inherited !== null) {
+          const f = join(dir, 'inherited-pins.json');
+          writeFileSync(f, inherited);
+          args.push('--inherited-pins-file', f);
+        }
+        try {
+          execFileSync(process.execPath, args, { encoding: 'utf8', timeout: EXEC_TIMEOUT_MS });
+          return { status: 0, stderr: '' };
+        } catch (err) {
+          const e = err as { status: number | null; stderr?: string };
+          return { status: e.status, stderr: String(e.stderr ?? '') };
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+
+    it(
+      'RED (exit 2) when the flag is omitted, in a scenario that would otherwise exit 0',
+      () => {
+        const { status, stderr } = runRaw(null);
+        expect(status).toBe(2);
+        expect(stderr).toMatch(/--inherited-pins-file is required/);
+      },
+      CLI_TEST_TIMEOUT_MS,
+    );
+
+    it(
+      'RED (exit 2) when the file is not a JSON array',
+      () => {
+        const { status, stderr } = runRaw('{"rcBumpMarker": {}}');
+        expect(status).toBe(2);
+        expect(stderr).toMatch(/must be a JSON array/);
+      },
+      CLI_TEST_TIMEOUT_MS,
+    );
+
+    it(
+      'GREEN (exit 0) with an empty array, isolating the flag as what changed',
+      () => {
+        expect(runRaw('[]').status).toBe(0);
+      },
+      CLI_TEST_TIMEOUT_MS,
+    );
+
+    it(
+      'RED (exit 1): a merge PR whose only marker came in with the merged branch',
+      () => {
+        const marker = { date: '2026-09-23', expires: '2026-10-01', reason: 'integration/v2' };
+        const { status, stdout } = run(
+          { rcTag: 'v1.0.0-rc.1' },
+          [PIN_FILE, '.github/workflows/test-e2e-deploy.yml'],
+          { rcTag: 'v1.0.0-rc.1', rcBumpMarker: marker },
+          { inheritedPins: [{ rcTag: 'v1.0.0-rc.1', rcBumpMarker: marker }] },
+        );
+        expect(status).toBe(1);
+        expect(stdout).toMatch(/inherited from a branch merged into this PR/);
       },
       CLI_TEST_TIMEOUT_MS,
     );
