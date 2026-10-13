@@ -546,6 +546,43 @@ for (const client of CLIENTS) {
             await waitFor(() => sweepsStarted() >= 2 && appPurges.length >= 1);
             expect(fake?.strings.has("other-app:cache:/k0")).toBe(true);
         });
+
+        // Since the breaker closes the client on a trip, a Redis fault aborts
+        // the sweep, so the case above no longer reaches the generation check
+        // in `replayCollapsedBacklog`. A skip recorded WITHOUT a trip still
+        // does: a non-Redis exception in revalidateTag (here a tag that cannot
+        // be made into a key) lands in its catch, and the tags after it are
+        // recorded as skipped while the sweep has a page to go. No breaker
+        // trip, so the sweep runs to its end -- and only the generation check
+        // keeps the collapse for another sweep.
+        it("a skip recorded mid-sweep without a breaker trip keeps the collapse for another sweep", async () => {
+            const h = await handler();
+            const { appPurges } = installPurger();
+            for (let i = 0; i < 150; i++)
+                fake?.strings.set(`other-app:cache:/k${i}`, "{}");
+            await openBreaker(h);
+            await h.revalidateTag(
+                Array.from({ length: BOUND + 1 }, (_, i) => `t${i}`),
+            );
+            const scan = holdNext("scan");
+            await waitFor(scan.isHeld);
+            // A Symbol throws a TypeError when interpolated into the tag key,
+            // before any Redis command: z is never reached and is recorded.
+            await h.revalidateTag([Symbol("not-a-key"), "z"]);
+            scan.release();
+            // The breaker never tripped: z sent nothing, and the sweep ran on
+            // to its second page and to its end (one app purge).
+            await waitFor(() => appPurges.length >= 1);
+            expect(count("smembers", `${PREFIX}:tag:z`)).toBe(0);
+            expect(
+                (fake?.commands ?? []).some(
+                    (c) => c.cmd === "scan" && c.args[0] !== "0",
+                ),
+            ).toBe(true);
+            // The skip recorded during that sweep kept the collapse: a second
+            // sweep starts from the first page rather than z being forgotten.
+            await waitFor(() => sweepsStarted() >= 2 && appPurges.length >= 2);
+        });
     });
 }
 
