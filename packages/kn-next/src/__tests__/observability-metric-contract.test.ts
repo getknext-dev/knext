@@ -120,6 +120,22 @@ const CDN_PURGE = seriesNames(
 );
 
 /**
+ * The CDN edge-decision module's counters (ADR-0068 D6.5, Amendment 2): the
+ * decision counter and the foreign-edge-strip counter. Like the purge counter,
+ * real in-process series rendered by `renderEdgeDecisionMetrics()` but NOT on
+ * the :9464 scrape path yet, so no alert or dashboard may list this emitter;
+ * only the docs side (S5) may name them. Scanned from the `# TYPE` lines the
+ * module renders, so a renamed family drops out of the set.
+ */
+const CDN_EDGE = new Set<string>(
+    [
+        ...read(join(PKG_ROOT, "src", "adapters", "cdn-edge.cjs")).matchAll(
+            /# TYPE (knext_[a-z0-9_]+) counter/g,
+        ),
+    ].map((m) => m[1] as string),
+);
+
+/**
  * The Go operator process's own /metrics: the controller's registry AND every
  * collector the admission webhook registers (it runs in the same process and
  * lands on the same endpoint, e.g. knext_platform_budget_fallback_total).
@@ -206,6 +222,7 @@ const EMITTERS = {
     "bridged-app": BRIDGED_APP,
     external: EXTERNAL_SERIES,
     "cdn-purge": CDN_PURGE,
+    "cdn-edge": CDN_EDGE,
 } as const;
 type EmitterId = keyof typeof EMITTERS;
 
@@ -618,11 +635,19 @@ const ALL_EMITTED = allowed([
     "bridged-app",
     "external",
     "cdn-purge",
+    "cdn-edge",
 ]);
 
 describe("every metric a DOC names is one something emits (S5)", () => {
     it("the CDN purge emitter scan finds the counter (an empty scan would let a dead name through)", () => {
         expect(CDN_PURGE.has("knext_cdn_purge_total")).toBe(true);
+    });
+
+    it("the CDN edge emitter scan finds both counters (an empty scan would let a dead name through)", () => {
+        expect([...CDN_EDGE].sort()).toEqual([
+            "knext_cdn_edge_decision_total",
+            "knext_cdn_foreign_edge_strip_total",
+        ]);
     });
 
     it("finds doc files at all — a vacuous scan would pass everything", () => {

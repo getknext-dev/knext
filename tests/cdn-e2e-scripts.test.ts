@@ -66,6 +66,45 @@ describe('allowlist mutation (scripts/cdn-e2e-mutate-preload.mjs)', () => {
     expect(() => mutate(`${all}\n${MUTATIONS[0][1]}`)).toThrow(/method occurs 2 times/);
   });
 
+  it('the foreign-build set (the purge lane red leg) has one anchor, exactly once, and removes it', async () => {
+    const { FOREIGN_BUILD_MUTATIONS, FOREIGN_BUILD_MARKER, mutate } = await import(MUTATE);
+    const bundled = bundledForm(readFileSync(CDN_EDGE, 'utf8'));
+    const set = FOREIGN_BUILD_MUTATIONS as Array<[string, string, string]>;
+    expect(set.map(([n]) => n)).toEqual(['foreign_build_record']);
+    for (const [name, anchor] of set) {
+      expect({ name, count: bundled.split(anchor).length - 1 }).toEqual({ name, count: 1 });
+    }
+    const out: string = mutate(bundled, set, FOREIGN_BUILD_MARKER);
+    expect(out.startsWith(FOREIGN_BUILD_MARKER)).toBe(true);
+    expect(out.includes(set[0][1])).toBe(false);
+    // Only that line: the allowlist is untouched.
+    expect(out.includes('return skip("foreign_build_body")')).toBe(true);
+  });
+
+  it('the CLI applies --set foreign-build to a real copy of the preload, once', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cdn-mutate-fb-'));
+    const file = join(dir, 'cache-control-normalize.cjs');
+    writeFileSync(file, bundledForm(readFileSync(CDN_EDGE, 'utf8')));
+    try {
+      const r = spawnSync(process.execPath, [MUTATE, '--set', 'foreign-build', file], {
+        encoding: 'utf8',
+      });
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain('foreign_build_record');
+      expect(readFileSync(file, 'utf8')).not.toContain('s.foreignBuild = true;');
+      const again = spawnSync(process.execPath, [MUTATE, '--set', 'foreign-build', file], {
+        encoding: 'utf8',
+      });
+      expect(again.status).toBe(1);
+      const unknown = spawnSync(process.execPath, [MUTATE, '--set', 'nope', file], {
+        encoding: 'utf8',
+      });
+      expect(unknown.status).toBe(2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('the CLI writes nothing and exits non-zero on a source it cannot mutate', () => {
     const dir = mkdtempSync(join(tmpdir(), 'cdn-mutate-'));
     const file = join(dir, 'cache-control-normalize.cjs');
@@ -218,26 +257,82 @@ describe('expected-red helper (scripts/cdn-e2e-expect-red.sh)', () => {
 });
 
 /**
- * The KNOWN DEFECT (#2299) leg passes only when `rollout-no-old-html` fails at
- * its own message. A broken /tagged (5xx, 404, the emulator's 502) carries no
- * build mark, and must NOT read as "old-build HTML": that would keep the pinned
- * step green while the page under test is simply down. It must be a
- * precondition failure, which the expected-red helper rejects.
+ * `rollout-no-old-html` (the #2261 criterion as amended by ADR-0068 Amendment 2)
+ * gates what the edge owns: after the first-ready purge, no old-build HTML may
+ * be STORED at the edge or served FROM it, nor carry an edge directive or tag
+ * header, whatever the origin answers (the origin may still serve it for a
+ * while; tracked separately, #2305). The fake upstream stands in for the
+ * emulator, so each response carries the emulator's `x-emu-cache` /
+ * `x-emu-stored` verdict. A broken page (5xx, 404, the emulator's 502, a page
+ * with no build mark) is a precondition failure: it must never pass, nor read
+ * as the defect.
  */
-describe('rollout-no-old-html: only a real page counts as old-build HTML', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'cdn-rollout-'));
+describe('rollout-no-old-html: old-build HTML never reaches the edge', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'cdn-rollout-edge-'));
   afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
-  async function runAgainst(tagged: { status: number; type: string; body: string }) {
+  type Mode =
+    | 'refused'
+    | 'stored'
+    | 'stored-bare'
+    | 'hit-only'
+    | 'hit-bare'
+    | 'directive'
+    | 'new'
+    | 'broken'
+    | 'no-mark';
+
+  async function runAgainst(tagged: Mode, control: 'cached' | 'never' = 'cached') {
     const { createServer } = await import('node:http');
+    const seen = new Map<string, number>();
+    const html = (mark: string) => `<!DOCTYPE html><p id="build">${mark}</p>`;
     const server = createServer((req, res) => {
-      if (String(req.url).startsWith('/build-mark')) {
-        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-        res.end('<!DOCTYPE html><p id="build">v2</p>');
-        return;
+      const url = String(req.url);
+      const n = (seen.get(url) ?? 0) + 1;
+      seen.set(url, n);
+      const page = (mark: string, headers: Record<string, string>) => {
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', ...headers });
+        res.end(html(mark));
+      };
+      if (url.startsWith('/build-mark')) return page('v2', { 'x-emu-cache': 'BYPASS' });
+      if (url.startsWith('/variant-b')) {
+        if (control === 'never') return page('v2', { 'x-emu-cache': 'MISS' });
+        return n === 1
+          ? page('v2', { 'x-emu-cache': 'MISS', 'x-emu-stored': '3600' })
+          : page('v2', { 'x-emu-cache': 'HIT' });
       }
-      res.writeHead(tagged.status, { 'content-type': tagged.type });
-      res.end(tagged.body);
+      const tag = 'kn-77489686e9ad,kn-77489686e9ad-b222222222222';
+      switch (tagged) {
+        case 'refused': // the origin's old body, refused by the edge
+          return page('v1', { 'x-emu-cache': 'MISS' });
+        case 'stored': // the #2299 defect: stored under the new build's tag
+          return n === 1
+            ? page('v1', { 'x-emu-cache': 'MISS', 'x-emu-stored': '3600', 'cache-tag': tag })
+            : page('v1', { 'x-emu-cache': 'HIT', 'cache-tag': tag });
+        case 'stored-bare': // an edge that stores without a directive (store-all)
+          return page('v1', { 'x-emu-cache': 'MISS', 'x-emu-stored': '300' });
+        case 'hit-bare': // served from the edge, no edge headers passed through
+          return page('v1', { 'x-emu-cache': 'HIT' });
+        case 'hit-only': // stored by an earlier request this check did not see
+          return page('v1', { 'x-emu-cache': 'HIT', 'cache-tag': tag });
+        case 'directive': // edge-cacheable on the wire, whatever this emulator did
+          return page('v1', {
+            'x-emu-cache': 'MISS',
+            'cloudflare-cdn-cache-control': 'max-age=3600',
+            'cache-tag': tag,
+          });
+        case 'no-mark': // an error page: HTML, 200, no build mark
+          res.writeHead(200, { 'content-type': 'text/html' });
+          res.end('<!DOCTYPE html><p>error page</p>');
+          return;
+        case 'new':
+          return n === 1
+            ? page('v2', { 'x-emu-cache': 'MISS', 'x-emu-stored': '3600' })
+            : page('v2', { 'x-emu-cache': 'HIT' });
+        default:
+          res.writeHead(502, { 'content-type': 'application/json' });
+          res.end('{"error":"upstream failed"}');
+      }
     });
     await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
     try {
@@ -250,8 +345,9 @@ describe('rollout-no-old-html: only a real page counts as old-build HTML', () =>
       const { purgeChecks, purgeConfig } = await import(PURGE_ASSERT);
       const c = purgeConfig({ CDN_EMU_URL: `http://127.0.0.1:${port}`, CDN_STATE_FILE: stateFile });
       const check = purgeChecks(c).find((x: { id: string }) => x.id === 'rollout-no-old-html');
+      expect(check).toBeDefined();
       try {
-        return { ok: true, note: await check.run() };
+        return { ok: true, note: String(await check.run()) };
       } catch (err) {
         return { ok: false, note: String((err as Error).message) };
       }
@@ -260,43 +356,63 @@ describe('rollout-no-old-html: only a real page counts as old-build HTML', () =>
     }
   }
 
-  it('a 5xx /tagged is a precondition failure, not the pinned old-build FAIL', async () => {
-    const r = await runAgainst({
-      status: 502,
-      type: 'application/json',
-      body: '{"error":"upstream failed"}',
-    });
+  it('the origin serving the old body is fine while the edge refuses to store it (the #2299 fix)', async () => {
+    const r = await runAgainst('refused');
+    expect(r.ok).toBe(true);
+    expect(r.note).toContain(
+      '4 old-build response(s) from the origin, none edge-cacheable or stored',
+    );
+  });
+
+  it('old-build HTML stored at the edge under the new build tag is the failure', async () => {
+    const r = await runAgainst('stored');
+    expect(r.ok).toBe(false);
+    expect(r.note.startsWith('old-build HTML was stored at or served from the edge')).toBe(true);
+    expect(r.note).toContain('kn-77489686e9ad-b222222222222');
+  });
+
+  it('an old-build body carrying an edge directive or a tag header is the failure', async () => {
+    const r = await runAgainst('directive');
+    expect(r.ok).toBe(false);
+    expect(r.note.startsWith('old-build HTML was stored at or served from the edge')).toBe(true);
+    expect(r.note).toContain('cloudflare-cdn-cache-control: max-age=3600');
+    expect(r.note).toContain('cache-tag: ');
+  });
+
+  it('old-build HTML stored, or served as an edge HIT, with no edge headers on it is the failure', async () => {
+    const stored = await runAgainst('stored-bare');
+    expect(stored.ok).toBe(false);
+    expect(stored.note).toContain('stored for 300 s');
+    const hitBare = await runAgainst('hit-bare');
+    expect(hitBare.ok).toBe(false);
+    expect(hitBare.note).toContain('an edge HIT');
+  });
+
+  it('an edge HIT on old-build HTML is the failure too', async () => {
+    const r = await runAgainst('hit-only');
+    expect(r.ok).toBe(false);
+    expect(r.note.startsWith('old-build HTML was stored at or served from the edge')).toBe(true);
+  });
+
+  it('new-build HTML at the edge passes (the day the origin half is fixed too)', async () => {
+    const r = await runAgainst('new');
+    expect(r.ok).toBe(true);
+    expect(r.note).toContain('0 old-build response(s) from the origin');
+  });
+
+  it('a broken page is a precondition failure, never a pass or the defect', async () => {
+    for (const mode of ['broken', 'no-mark'] as const) {
+      const r = await runAgainst(mode);
+      expect({ mode, ok: r.ok }).toEqual({ mode, ok: false });
+      expect(r.note.startsWith('precondition:')).toBe(true);
+      expect(r.note).not.toContain('old-build HTML was');
+    }
+  });
+
+  it('not vacuous: an edge that caches nothing at all is a precondition failure', async () => {
+    const r = await runAgainst('refused', 'never');
     expect(r.ok).toBe(false);
     expect(r.note.startsWith('precondition:')).toBe(true);
-    expect(r.note).not.toContain('old-build HTML was served');
-  });
-
-  it('a 200 HTML page with no build mark is a precondition failure too', async () => {
-    const r = await runAgainst({
-      status: 200,
-      type: 'text/html',
-      body: '<!DOCTYPE html><p>error page</p>',
-    });
-    expect(r.ok).toBe(false);
-    expect(r.note.startsWith('precondition:')).toBe(true);
-  });
-
-  it('a 200 HTML page with the OLD build mark is the pinned failure', async () => {
-    const r = await runAgainst({
-      status: 200,
-      type: 'text/html',
-      body: '<!DOCTYPE html><p id="build">v1</p>',
-    });
-    expect(r.ok).toBe(false);
-    expect(r.note.startsWith('old-build HTML was served after the first-ready purge')).toBe(true);
-  });
-
-  it('a 200 HTML page with the NEW build mark passes', async () => {
-    const r = await runAgainst({
-      status: 200,
-      type: 'text/html',
-      body: '<!DOCTYPE html><p id="build">v2</p>',
-    });
-    expect(r).toEqual({ ok: true, note: 'every page served build v2' });
+    expect(r.note).toContain('/variant-b');
   });
 });

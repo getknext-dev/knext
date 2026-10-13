@@ -1,0 +1,5 @@
+# cdn-mut rolled to a build whose preload ignores the cache handler's
+# foreign-build record (scripts/cdn-e2e-mutate-preload.mjs --set foreign-build):
+# the new build serves the previous build's ISR body, and the edge must now
+# store it, so the edge half of the rollout criterion goes red.
+rollout-no-old-html|old-build HTML was stored at or served from the edge after the first-ready purge

@@ -9,7 +9,8 @@
  * `Cloudflare-CDN-Cache-Control`, no `CDN-Cache-Control` and no tag header, and
  * on the rows that carry the directive in `Cache-Control` itself (CloudFront,
  * Azure) no `s-maxage` the decision did not produce. Counted under
- * `reason="foreign_edge_header_stripped"`.
+ * the `knext_cdn_foreign_edge_strip_total` counter, apart from the decision,
+ * which keeps the reason the response was refused for.
  *
  * The pure half (`stripForeignEdgeHeaders`) is pinned first; then the preload over
  * real http on Node and Bun, through every way a header reaches the wire:
@@ -188,13 +189,23 @@ async function metrics(port: number): Promise<string> {
     return (await get(port, "/", {}, {}, "metrics")).body;
 }
 
+/** The strip counter, which is kept apart from the decision counter. */
 function strippedCount(text: string): number {
-    let n = 0;
-    for (const line of text.split("\n")) {
-        if (line.includes('reason="foreign_edge_header_stripped"'))
-            n += Number(line.trim().split(" ").pop());
-    }
-    return n;
+    const m = /^knext_cdn_foreign_edge_strip_total (\d+)$/m.exec(text);
+    if (!m) throw new Error(`no strip counter in:\n${text}`);
+    return Number(m[1]);
+}
+
+/** One decision counter sample, by result and reason. */
+function decisions(text: string, result: string, reason: string): number {
+    const line = text
+        .split("\n")
+        .find((l) =>
+            l.startsWith(
+                `knext_cdn_edge_decision_total{result="${result}",reason="${reason}"} `,
+            ),
+        );
+    return line ? Number(line.trim().split(" ").pop()) : 0;
 }
 
 const MODES = [
@@ -234,9 +245,17 @@ for (const runtime of ["node", "bun"] as Runtime[]) {
                             : "bo",
                     );
                 }
-                expect(strippedCount(await metrics(srv.port))).toBe(
-                    MODES.length,
+                const m = await metrics(srv.port);
+                expect(strippedCount(m)).toBe(MODES.length);
+                // The decision keeps WHY it was refused, once per response;
+                // the strip is counted apart, never as a decision reason.
+                expect(decisions(m, "skipped", "middleware_matched")).toBe(
+                    MODES.length - 2,
                 );
+                expect(
+                    decisions(m, "skipped", "unsupported_headers_shape"),
+                ).toBe(2);
+                expect(m).not.toContain("foreign_edge_header_stripped");
             } finally {
                 srv.stop();
             }
@@ -268,6 +287,9 @@ for (const runtime of ["node", "bun"] as Runtime[]) {
                 noForeign(untagged, "no tags");
                 const m = await metrics(srv.port);
                 expect(strippedCount(m)).toBe(3);
+                expect(decisions(m, "skipped", "no_request_state")).toBe(1);
+                expect(decisions(m, "skipped", "internal_error")).toBe(1);
+                expect(decisions(m, "skipped", "tags_missing")).toBe(1);
             } finally {
                 srv.stop();
             }

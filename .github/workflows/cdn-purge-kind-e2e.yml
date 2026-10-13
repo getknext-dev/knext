@@ -20,6 +20,8 @@ name: CDN purge — kind e2e (tag purge through the emulator)
 #   cdn-a     spec.cdn + purge            (built)
 #   cdn-b     spec.cdn + purge            (cdn-a's image, by digest)
 #   cdn-np    spec.cdn, NO purge          (the negative control for every purge check)
+#   cdn-mut   spec.cdn + purge            (cdn-a's image; rolled to a build whose
+#             preload ignores the foreign-build record: rollout-no-old-html's red leg)
 #   cdn-late  no spec.cdn until the churn step sets it
 #
 # scripts/cdn-e2e-purge-assert.mjs:
@@ -29,24 +31,27 @@ name: CDN purge — kind e2e (tag purge through the emulator)
 #   purge-429-recovery   one 429 with Retry-After, the purger's retry purges
 #   revisions-*          setting spec.cdn on cdn-late creates no new revision on
 #                        cdn-a, cdn-b or cdn-np
-#   rollout-*            after a rollout to a new build, the first-ready purge
+#   rollout-after        after a rollout to a new build, the first-ready purge
 #                        of the app tag arrives and no pre-rollout entry is
 #                        served from the edge (the D7 rule)
+#   rollout-no-old-html  ...and no previous-build HTML is stored at or served
+#                        from the edge afterwards, whatever the origin answers
+#                        (ADR-0068 D13 as amended by Amendment 2)
 # plus scripts/cdn-e2e-assert.mjs's never-set-cookie / never-authorization on
 # the purge-enabled app.
 #
-# KNOWN DEFECT, pinned rather than hidden: the #2261 criterion read literally
-# ("no old-build HTML is served after the first-ready purge") does NOT hold —
-# ISR HTML is shared across builds (ADR-0066), so the new build serves the
-# previous build's body and the edge stores it under the new build's tag
-# (#2299). `rollout-no-old-html` runs as EXPECTED RED with its own message; the
-# day #2299 is fixed that step reds because the check passes, and it must be
-# promoted to a plain assertion.
+# The rollout criterion is the EDGE's (ADR-0068 Amendment 2, #2299): ISR HTML
+# is shared across builds (ADR-0066), so for a while after a deploy the new
+# build's ORIGIN may still serve the previous build's page (tracked separately,
+# #2305). The edge must refuse to store it (reason foreign_build_body), and
+# `rollout-no-old-html` gates exactly that.
 #
 # Teeth — every check has a red leg through scripts/cdn-e2e-expect-red.sh (exit
 # code AND the FAIL line naming the intended check):
 #   cdn-np standing in for app A (no purge configured): purge-revalidate and
-#   rollout-after go red; app A standing in for app B: purge-isolation goes red;
+#   rollout-after go red; cdn-mut (foreign-build record disabled in its new
+#   build's preload): rollout-no-old-html goes red; app A standing in for app B:
+#   purge-isolation goes red;
 #   a 400 instead of a 429: purge-429-recovery goes red; cdn-late listed as
 #   "unrelated": revisions-after goes red; the store-all emulator: the
 #   never-cached checks go red.
@@ -358,9 +363,11 @@ jobs:
           node "$CLI" deploy --namespace "$APP_NS" --tag "$DEPLOY_TAG" --image "$IMAGE"
           "$WRITE_CONFIG" cdn-np nopurge
           node "$CLI" deploy --namespace "$APP_NS" --tag "$DEPLOY_TAG" --image "$IMAGE"
+          "$WRITE_CONFIG" cdn-mut purge
+          node "$CLI" deploy --namespace "$APP_NS" --tag "$DEPLOY_TAG" --image "$IMAGE"
           "$WRITE_CONFIG" cdn-late none
           node "$CLI" deploy --namespace "$APP_NS" --tag "$DEPLOY_TAG" --image "$IMAGE"
-          for app in cdn-a cdn-b cdn-np cdn-late; do
+          for app in cdn-a cdn-b cdn-np cdn-mut cdn-late; do
             kubectl -n "$APP_NS" wait --for=condition=Ready --timeout=300s "nextapp/$app" \
               || (kubectl -n "$APP_NS" get nextapp,ksvc,pods -o wide; kubectl -n "$APP_NS" describe "nextapp/$app"; exit 1)
           done
@@ -377,7 +384,7 @@ jobs:
             done
             curl -fsS "http://127.0.0.1:${port}/healthz" >/dev/null || { echo "::error::emulator admin :$port unreachable"; cat /tmp/pf-emu*.log; exit 1; }
           done
-          for app in cdn-a cdn-b cdn-np cdn-late; do
+          for app in cdn-a cdn-b cdn-np cdn-mut cdn-late; do
             curl -fsS -o /dev/null -H "Host: ${app}.${APP_NS}.svc.cluster.local" -H 'x-emu-bypass: 1' \
               --retry 10 --retry-all-errors --max-time 60 http://127.0.0.1:18080/api/health
           done
@@ -420,19 +427,21 @@ jobs:
           # Give the operator a reconcile window to (wrongly) touch other apps.
           sleep 30
           cd "$GITHUB_WORKSPACE"
-          CDN_CHURN_CHANGED=cdn-late CDN_CHURN_UNRELATED=cdn-a,cdn-b,cdn-np \
+          CDN_CHURN_CHANGED=cdn-late CDN_CHURN_UNRELATED=cdn-a,cdn-b,cdn-np,cdn-mut \
             node scripts/cdn-e2e-purge-assert.mjs --only revisions-after
           CDN_CHURN_CHANGED=cdn-late CDN_CHURN_UNRELATED=cdn-a,cdn-late \
             bash scripts/cdn-e2e-expect-red.sh churn-detector scripts/cdn-e2e-red/purge-churn.txt -- \
             node scripts/cdn-e2e-purge-assert.mjs --only revisions-after
 
-      - name: Store old-build pages at the edge, then roll cdn-a and cdn-np to a new build
+      - name: Store old-build pages at the edge, then roll cdn-a, cdn-np and cdn-mut to a new build
         run: |
           set -euo pipefail
           CDN_STATE_FILE="$CDN_STATE_DIR/rollout-a.json" node scripts/cdn-e2e-purge-assert.mjs --only rollout-before
           CDN_APP_A=cdn-np CDN_STATE_FILE="$CDN_STATE_DIR/rollout-np.json" node scripts/cdn-e2e-purge-assert.mjs --only rollout-before
+          CDN_APP_A=cdn-mut CDN_STATE_FILE="$CDN_STATE_DIR/rollout-mut.json" node scripts/cdn-e2e-purge-assert.mjs --only rollout-before
           old_a="$(kubectl -n "$APP_NS" get ksvc cdn-a -o jsonpath='{.status.latestReadyRevisionName}')"
           old_np="$(kubectl -n "$APP_NS" get ksvc cdn-np -o jsonpath='{.status.latestReadyRevisionName}')"
+          old_mut="$(kubectl -n "$APP_NS" get ksvc cdn-mut -o jsonpath='{.status.latestReadyRevisionName}')"
           cd "$APP_DIR"
           "$WRITE_CONFIG" cdn-a purge
           node "$CLI" deploy --registry localhost:5001 --namespace "$APP_NS" --tag "${DEPLOY_TAG}-v2"
@@ -440,8 +449,36 @@ jobs:
           [ "$IMAGE2" != "$IMAGE" ] || { echo "::error::the v2 build produced the same image"; exit 1; }
           "$WRITE_CONFIG" cdn-np nopurge
           node "$CLI" deploy --namespace "$APP_NS" --tag "${DEPLOY_TAG}-v2" --image "$IMAGE2"
+          # cdn-mut's new build: the same app, its preload mutated so the cache
+          # handler's foreign-build record is ignored (every anchor asserted
+          # exactly once), then restored. Its own build tag, so its own build id.
+          # Two copies carry the preload into an image: the app's installed core
+          # (the node image copies it) and the CLI's own dist, whose
+          # standalone-compile embeds its sibling preloads into the bun
+          # executable. Both are mutated, or the bun leg tests nothing.
+          PRELOADS=(
+            "$APP_DIR/node_modules/@getknext/core/dist/adapters/cache-control-normalize.cjs"
+            "${GITHUB_WORKSPACE}/packages/kn-next/dist/adapters/cache-control-normalize.cjs"
+          )
+          i=0
+          for p in "${PRELOADS[@]}"; do
+            cp "$p" "${RUNNER_TEMP}/preload.orig.$i.cjs"
+            node "${GITHUB_WORKSPACE}/scripts/cdn-e2e-mutate-preload.mjs" --set foreign-build "$p"
+            i=$((i + 1))
+          done
+          "$WRITE_CONFIG" cdn-mut purge
+          node "$CLI" deploy --registry localhost:5001 --namespace "$APP_NS" --tag "${DEPLOY_TAG}-v2mut"
+          i=0
+          for p in "${PRELOADS[@]}"; do
+            cp "${RUNNER_TEMP}/preload.orig.$i.cjs" "$p"
+            i=$((i + 1))
+          done
+          IMAGE_MUT="$(kubectl -n "$APP_NS" get nextapp cdn-mut -o jsonpath='{.spec.image}')"
+          if [ "$IMAGE_MUT" = "$IMAGE2" ] || [ "$IMAGE_MUT" = "$IMAGE" ]; then
+            echo "::error::the mutated build produced an existing image"; exit 1
+          fi
           # Ready on the NEW revision, with all traffic on it.
-          for pair in "cdn-a:$old_a" "cdn-np:$old_np"; do
+          for pair in "cdn-a:$old_a" "cdn-np:$old_np" "cdn-mut:$old_mut"; do
             app="${pair%%:*}"; old="${pair#*:}"
             for _ in $(seq 1 120); do
               ready="$(kubectl -n "$APP_NS" get ksvc "$app" -o jsonpath='{.status.latestReadyRevisionName}')"
@@ -464,17 +501,28 @@ jobs:
             bash scripts/cdn-e2e-expect-red.sh no-purge-rollout scripts/cdn-e2e-red/purge-rollout-no-purge.txt -- \
             node scripts/cdn-e2e-purge-assert.mjs --only rollout-after
 
-      - name: KNOWN DEFECT (#2299) — old-build HTML after the purge, expected red until fixed
+      # ADR-0068 D13 as amended (Amendment 2): after the first-ready purge, no
+      # previous-build HTML is stored at or served from the edge. The origin may
+      # still answer with it for a while after a deploy (#2305); the edge must
+      # refuse it. The red leg is cdn-mut, whose new build ignores the
+      # foreign-build record: its own pre-rollout entries are proved evicted
+      # first (rollout-after), so its red can only come from a refill.
+      - name: Assert the rollout — no previous-build HTML at the edge after the purge
         run: |
+          set -euo pipefail
           CDN_STATE_FILE="$CDN_STATE_DIR/rollout-a.json" \
-            bash scripts/cdn-e2e-expect-red.sh known-defect-2299 scripts/cdn-e2e-red/purge-known-defect-2299.txt -- \
+            node scripts/cdn-e2e-purge-assert.mjs --only rollout-no-old-html
+          CDN_APP_A=cdn-mut CDN_STATE_FILE="$CDN_STATE_DIR/rollout-mut.json" CDN_PURGE_WAIT_MS=60000 \
+            node scripts/cdn-e2e-purge-assert.mjs --only rollout-after
+          CDN_APP_A=cdn-mut CDN_STATE_FILE="$CDN_STATE_DIR/rollout-mut.json" \
+            bash scripts/cdn-e2e-expect-red.sh foreign-build-record scripts/cdn-e2e-red/purge-rollout-foreign-build.txt -- \
             node scripts/cdn-e2e-purge-assert.mjs --only rollout-no-old-html
 
       - name: Dump state on failure
         if: failure()
         run: |
           kubectl -n "$APP_NS" get nextapp,ksvc,revisions,pods -o wide || true
-          for app in cdn-a cdn-b cdn-np cdn-late; do
+          for app in cdn-a cdn-b cdn-np cdn-mut cdn-late; do
             kubectl -n "$APP_NS" logs -l "serving.knative.dev/service=${app}" -c user-container --tail=60 --prefix || true
           done
           kubectl -n "$APP_NS" logs deploy/cdn-emulator --tail=50 || true

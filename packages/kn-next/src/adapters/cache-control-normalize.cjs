@@ -209,9 +209,8 @@ function install(opts) {
           removeHeader: (n) => res.removeHeader(n),
           setHeader: (n, v) => originalSetHeader.call(res, n, v),
         };
-        if (cdnEdge.stripForeignEdgeHeaders(cdn.cfg, ops, hdrs)) {
-          outcome = [outcome[0], 'foreign_edge_header_stripped'];
-        }
+        // Counted apart: the decision keeps the reason it was refused for.
+        if (cdnEdge.stripForeignEdgeHeaders(cdn.cfg, ops, hdrs)) cdnEdge.countForeignEdgeStrip();
       } catch (err) {
         outcome = ['skipped', 'internal_error'];
         process.stderr.write(`CDN_EDGE: stripping a foreign edge directive failed: ${err && err.message}\n`);

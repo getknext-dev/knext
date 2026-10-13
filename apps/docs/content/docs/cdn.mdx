@@ -49,6 +49,10 @@ alone, so a new kind of response is uncached until it has been shown safe.
   default cache key includes the query string (Cloudflare and Google Cloud CDN).
 - The page's own cache entry was recorded with its tags (including its path tag), and the tags fit
   the provider's limits. Over the limit means not cached, never truncated.
+- The page's cache entry was written by the build that is serving it. Cached pages are shared across
+  builds, so for a while after a deploy your origin may keep serving a page the previous build
+  rendered. That response goes to the browser but is not edge-cached. Once the new build renders the
+  page itself, for example on `revalidatePath` or `revalidateTag`, it is edge-cached again.
 - Hashed build assets (`immutable`) keep Next.js's own long-lived header and are neither tagged nor
   purged.
 - Redirects (3xx) are never edge-cached.
@@ -96,7 +100,13 @@ to understand the rules rather than to alert on:
 | `rsc_*` | One of the React Server Components rules |
 | `build_id_unresolved`, `tags_missing`, `tag_overflow` | The page cannot be purged by tag, so it is not cached |
 | `zero_ttl` | The resulting edge lifetime would be zero |
-| `foreign_edge_header_stripped` | The response was not cacheable and already carried an edge directive or tags from elsewhere (for example a rewrite to another origin), which knext removed |
+| `foreign_build_body` | The page was rendered by a previous build and has not yet been rendered again by the build now serving it |
+
+When a response that is left alone already carried an edge directive or tags from elsewhere (for
+example after a rewrite to another origin), knext removes them. The response is still counted under
+the reason it was left alone for, and the removal is counted separately, in
+`knext_cdn_foreign_edge_strip_total`. Like the reasons above, it is not yet exposed on the app's
+metrics endpoint.
 
 Some legitimate URLs are never edge-cached by the canonical-path rule, and are served correctly from
 your origin instead: slugs that contain an encoded slash or percent sign, and any path where an
@@ -122,6 +132,14 @@ On Cloudflare, `revalidateTag` and `revalidatePath` purge the edge:
 the app's edge entries; a Redis key makes sure only one pod does it, however many start at once. Scaling
 from zero does not purge again. A rollback to a build that already purged does not purge, as long as that build's claim is still
 in Redis; the claim lasts 7 days.
+
+After that purge, the CDN refills only with pages the new build rendered itself. For a while after a
+deploy, your origin may keep serving a page the previous build rendered from the shared cache, but
+those responses are not edge-cached. So once the rollout completes, the CDN holds none of the
+previous build's HTML. While a canary split is still running, the edge can hold either build's
+HTML; see **Split deploys** under [Limits to know](#limits-to-know). A page stays off the CDN
+until the new build renders it again, so revalidating your important pages after a deploy brings
+them back to the edge sooner.
 
 Every purge outcome is counted in `knext_cdn_purge_total`, labelled by provider and result. A purge
 that gives up logs the provider, status and tag count, never the token or the response body.

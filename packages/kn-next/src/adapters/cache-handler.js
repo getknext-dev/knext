@@ -1253,20 +1253,44 @@ function cdnSeamKind(entryKind) {
 }
 
 /**
- * Hand an entry's tags to the CDN request seam. `tagsOf` is only evaluated when
- * the seam exists, so CDN-off pays one property read and nothing else.
+ * Hand an entry's tags to the CDN request seam. `tagsOf` (and `foreignOf`) are
+ * only evaluated when the seam exists, so CDN-off pays one property read and
+ * nothing else.
+ *
+ * `foreignOf`, given on a READ, says whether the entry being served was written
+ * by another build (`isForeignBuildEntry`). A page or route body from another
+ * build is recorded with `foreignBuild: true`, tags or not, and the CDN preload
+ * then refuses to edge-cache the response (ADR-0068 Amendment 2): ISR HTML is
+ * shared across builds (ADR-0066), so right after a rollout the new build serves
+ * the previous build's body, and the edge would otherwise store it under the new
+ * build's tag. A fault here records nothing, which is fail closed: no tags, no
+ * edge directive.
  */
-function recordCdnTags(entryKind, tagsOf) {
+function recordCdnTags(entryKind, tagsOf, foreignOf) {
   const seam = globalThis[CDN_REQUEST_TAGS];
   if (seam == null) return;
   try {
     const kind = cdnSeamKind(entryKind);
     if (kind === undefined) return;
+    const foreign = kind !== 'fetch' && typeof foreignOf === 'function' && foreignOf() === true;
     const tags = tagsOf();
-    if (tags.length > 0) seam.record?.({ kind, tags });
+    if (foreign) seam.record?.({ kind, tags, foreignBuild: true });
+    else if (tags.length > 0) seam.record?.({ kind, tags });
   } catch {
     // The seam is an observer: it must never fail a cache read or write.
   }
+}
+
+/**
+ * Was this stored entry written by a build other than this process's? The same
+ * build identity as the build-scoped revalidate window (`windowIsForeign`): a
+ * different build id, none recorded (written before build ids were), or none
+ * resolved here all count as foreign, because none of them proves the body is
+ * this build's. Liveness of the writer does not matter here: under a canary
+ * split each build's body is still the other build's HTML.
+ */
+function isForeignBuildEntry(entry) {
+  return !(currentBuildId !== undefined && entry?.buildId === currentBuildId);
 }
 
 /** The tags a stored entry carries: the indexed list ∪ the header, de-duped. */
@@ -1444,7 +1468,11 @@ class CacheHandler {
           touchBuildLive(client);
           const foreign = windowIsForeign(parsed, ctx);
           const writerIsLive = foreign && (await isBuildLive(client, parsed.buildId));
-          recordCdnTags(parsed?.value?.kind ?? ctx?.kind, () => storedEntryTags(parsed));
+          recordCdnTags(
+            parsed?.value?.kind ?? ctx?.kind,
+            () => storedEntryTags(parsed),
+            () => isForeignBuildEntry(parsed),
+          );
           logCacheEvent(parsed?.cacheState === 'stale' ? 'STALE' : 'HIT', source, key, {
             durationMs: Date.now() - startTime,
             ...(foreign && {
@@ -1472,7 +1500,11 @@ class CacheHandler {
         return null;
       }
       const labelled = withCacheState(entry);
-      recordCdnTags(labelled?.value?.kind ?? ctx?.kind, () => storedEntryTags(labelled));
+      recordCdnTags(
+        labelled?.value?.kind ?? ctx?.kind,
+        () => storedEntryTags(labelled),
+        () => isForeignBuildEntry(labelled),
+      );
       logCacheEvent(labelled?.cacheState === 'stale' ? 'STALE' : 'HIT', source, key, {
         durationMs: Date.now() - startTime,
       });

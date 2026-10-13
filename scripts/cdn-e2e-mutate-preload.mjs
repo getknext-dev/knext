@@ -6,7 +6,7 @@
  * Test-only: it edits a staged copy of a packed tarball inside a throwaway app
  * directory, never the repo's sources.
  *
- *   node scripts/cdn-e2e-mutate-preload.mjs <path/to/cache-control-normalize.cjs>
+ *   node scripts/cdn-e2e-mutate-preload.mjs [--set allowlist|foreign-build] <path/to/cache-control-normalize.cjs>
  *
  * Every anchor must occur EXACTLY ONCE, or the script exits non-zero and writes
  * nothing: a substitution that silently matched nothing would yield a "mutated"
@@ -16,6 +16,11 @@
  * Each removed line is one D4.1 condition, so each expected-red FAIL in the
  * workflow is attributable to the defence it names. The prefix mutation gives
  * every app the same tag prefix, which the prefix checks must catch.
+ *
+ * `--set foreign-build` (the purge lane) disables ONLY the seam's foreign-build
+ * record (ADR-0068 Amendment 2): the cache handler still reports that the body
+ * it served was written by another build, and the preload ignores it. A rollout
+ * to a build carrying it must red `rollout-no-old-html`.
  */
 
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -66,32 +71,54 @@ export const MUTATIONS = [
 
 export const MARKER = '/* KNEXT_E2E_MUTATED: cdn-edge allowlist gutted, test-only */';
 
+/** The purge lane's red leg: the seam drops the foreign-build mark. */
+export const FOREIGN_BUILD_MUTATIONS = [
+  ['foreign_build_record', 'if (ownEntry && rec.foreignBuild === true) s.foreignBuild = true;', ''],
+];
+export const FOREIGN_BUILD_MARKER =
+  '/* KNEXT_E2E_MUTATED: cdn-edge foreign-build record disabled, test-only */';
+
+const SETS = {
+  allowlist: [MUTATIONS, MARKER],
+  'foreign-build': [FOREIGN_BUILD_MUTATIONS, FOREIGN_BUILD_MARKER],
+};
+
 /** Apply every mutation to `source`; throws naming the anchor that did not occur exactly once. */
-export function mutate(source) {
+export function mutate(source, mutations = MUTATIONS, marker = MARKER) {
   let out = source;
-  for (const [name, anchor, replacement] of MUTATIONS) {
+  for (const [name, anchor, replacement] of mutations) {
     const count = out.split(anchor).length - 1;
     if (count !== 1)
       throw new Error(`anchor ${name} occurs ${count} times, want exactly 1: ${anchor}`);
     out = out.replace(anchor, () => replacement);
   }
-  return `${MARKER}\n${out}`;
+  return `${marker}\n${out}`;
 }
 
 function main(argv) {
-  const target = argv[0];
-  if (!target) {
-    console.error('usage: cdn-e2e-mutate-preload.mjs <cache-control-normalize.cjs>');
+  let setName = 'allowlist';
+  const args = [...argv];
+  if (args[0] === '--set') {
+    setName = args[1];
+    args.splice(0, 2);
+  }
+  const set = SETS[setName];
+  const target = args[0];
+  if (!set || !target) {
+    console.error(
+      'usage: cdn-e2e-mutate-preload.mjs [--set allowlist|foreign-build] <cache-control-normalize.cjs>',
+    );
     return 2;
   }
+  const [mutations, marker] = set;
   const source = readFileSync(target, 'utf8');
-  if (source.startsWith(MARKER)) {
+  if (source.startsWith(MARKER) || source.startsWith(FOREIGN_BUILD_MARKER)) {
     console.error(`::error::${target} is already mutated`);
     return 1;
   }
   let mutated;
   try {
-    mutated = mutate(source);
+    mutated = mutate(source, mutations, marker);
     // Syntax check only (the file is CommonJS; wrap it as a function body).
     new Script(`(function (exports, require, module, __filename, __dirname) {${mutated}\n})`, {
       filename: target,
@@ -101,7 +128,7 @@ function main(argv) {
     return 1;
   }
   writeFileSync(target, mutated);
-  console.log(`mutated ${target}: ${MUTATIONS.map(([n]) => n).join(', ')}`);
+  console.log(`mutated ${target}: ${mutations.map(([n]) => n).join(', ')}`);
   return 0;
 }
 
