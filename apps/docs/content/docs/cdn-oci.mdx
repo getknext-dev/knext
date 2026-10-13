@@ -4,7 +4,7 @@ description: OCI has no CDN product. Put Cloudflare in front of your OKE ingress
 ---
 
 Oracle Cloud has no CDN product that knext can target, so there is no `oci` value for
-`cdn.provider`. Its web application firewall can purge by path, but it has no tag purge, and knext
+`cdn.provider`. Its web application firewall can only purge by path. It has no tag purge, and knext
 does not drive it.
 
 On OKE, use a CDN that can sit in front of any origin. The recommended choice is **Cloudflare**:

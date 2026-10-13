@@ -11,8 +11,8 @@ invalidation need AWS request signing, which knext does not do. Read [CDN cachin
 - Create a CloudFront distribution whose origin is the app's public hostname.
 - Use a cache policy that honours the origin's `Cache-Control` (minimum TTL 0), and do not add the
   query string to the cache key unless you need it.
-- Optionally enable cache tags in the distribution and set the tag header name to `Cache-Tag`, so the
-  tags knext sends are recorded.
+- knext sends a `Cache-Tag` header. Check CloudFront's own documentation for whether and how a
+  distribution can use cache tags; knext does not depend on it.
 
 ## Configure knext
 

@@ -73,8 +73,9 @@ cached by default, and `excludePaths` fences off the ones you do not want.
 
 ### Why isn't this page cached?
 
-Every decision is counted in `knext_cdn_edge_decision_total{result,reason}` on the app's metrics
-endpoint. The `reason` label says why a response was left alone:
+knext classifies every response and records the reason a response was left alone. These reasons are
+counted inside the server; they are not yet exposed on the app's metrics endpoint, so today use them
+to understand the rules rather than to alert on:
 
 | Reason | Meaning |
 |---|---|
@@ -105,11 +106,15 @@ On Cloudflare, `revalidateTag` and `revalidatePath` purge the edge:
    requests per minute (the Cloudflare Free plan), configurable with `requestsPerMinute`. A rate-limit
    answer is retried after the time the CDN asks for (at most 60 seconds), and a failed batch is
    attempted at most three times.
-4. If more than 1000 tags pile up, they collapse into one purge of all of this app's pages.
+4. If the backlog grows too large, it collapses into one purge of all of this app's pages. That
+   happens when more than 1000 tags are waiting, or when sending the backlog at the configured
+   rate would take more than 5 minutes. On the Cloudflare Free plan's default rate, the time limit is
+   the likelier trigger.
 
 **A new deploy purges the old build once.** The first pod of a new build to become ready purges all of
 the app's edge entries; a Redis key makes sure only one pod does it, however many start at once. Scaling
-from zero does not purge again. A rollback to a build that already purged does not purge.
+from zero does not purge again. A rollback to a build that already purged does not purge, as long as that build's claim is still
+in Redis; the claim lasts 7 days.
 
 Every purge outcome is counted in `knext_cdn_purge_total`, labelled by provider and result. A purge
 that gives up logs the provider, status and tag count, never the token or the response body.
@@ -127,8 +132,10 @@ that gives up logs the provider, status and tag count, never the token or the re
   evict another's pages by accident on a shared zone. A purge token can purge any tag in its zone. For
   hard isolation between apps or tenants, use one CDN zone, or one token, per app.
 - **Split deploys.** During a canary split, the edge holds whichever build rendered a URL last for at
-  most the TTL. That mixed HTML only works if both builds' static assets are still served, which needs
-  [object storage](/docs/skew-protection). Without it, the operator reports a `CDNAdvisory` status
+  most the TTL. That mixed HTML only works if both builds' static assets are still served: edge-cached HTML can
+  reference the previous build's assets during and after a rollout or rollback, so you must retain
+  old builds' assets. With [object storage](/docs/skew-protection) knext retains them; without it, a
+  pod serves only its own build's assets and old HTML can request a missing chunk. Without storage, the operator reports a `CDNAdvisory` status
   condition on the app when a canary split and `cdn` are both set.
 - **Multi-region and split-region setups.** Each pod purges once for the revalidation it handled, over
   shared Redis. Regions with separate Redis instances are separate caches; purge and first-ready logic

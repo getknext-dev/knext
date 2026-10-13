@@ -77,9 +77,8 @@ What you should see:
 | `age` | Grows between requests, never above `htmlTTLSeconds` |
 
 If `cf-cache-status` is `DYNAMIC` on both requests, Cloudflare did not treat the page as cacheable:
-check your Cache Rule first, then ask knext why it left the page alone, using the
-`knext_cdn_edge_decision_total` metric's `reason` label (see
-[Why isn't this page cached?](/docs/cdn#why-isnt-this-page-cached)).
+check your Cache Rule first, then see
+[Why isn't this page cached?](/docs/cdn#why-isnt-this-page-cached) for the reasons knext leaves a page alone.
 
 To check purge, revalidate the page from your app (a route that calls `revalidateTag` or
 `revalidatePath`), then request it again. The first request after the purge should be `MISS` (or
