@@ -73,6 +73,28 @@ describe("enablesTurbopackModuleFragments", () => {
             ),
         ).toBe(false);
     });
+
+    it("reads past a glob string: '/img/**' before the key does not open a comment", () => {
+        // A regex comment strip treats the `/*` inside '/img/**' as a comment
+        // opener and swallows everything up to the later `*/`, flag included.
+        const globThenFlag = [
+            "export default {",
+            "  images: { remotePatterns: [{ pathname: '/img/**' }] },",
+            "  experimental: { turbopackModuleFragments: true },",
+            "  /** a later doc comment */",
+            "};",
+        ].join("\n");
+        expect(enablesTurbopackModuleFragments(globThenFlag)).toBe(true);
+        const globThenCommentedFlag = [
+            "export default {",
+            '  images: { remotePatterns: [{ pathname: "/img/**" }] },',
+            "  /** turbopackModuleFragments: true */",
+            "};",
+        ].join("\n");
+        expect(enablesTurbopackModuleFragments(globThenCommentedFlag)).toBe(
+            false,
+        );
+    });
 });
 
 describe("assertNoBunTurbopackFragments", () => {
