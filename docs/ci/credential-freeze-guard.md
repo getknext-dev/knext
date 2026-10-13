@@ -161,6 +161,12 @@ of the merge.
   scanned. A squash or rebase queue leaves no merge commit to inspect, so it
   falls back to the merge-base rule; the `pull_request` run on the PR itself
   already applied this one.
+- The rule only sees markers that reached the merged-in branch **through a
+  merge commit**. A marker that landed on, say, integration/v2 by squash,
+  rebase or direct push is part of that branch's own first-parent history, so
+  a v2 → main PR still reads it as introduced. Today every pin change on
+  integration/v2 arrived by merge commit; keep it that way, or the hole
+  reopens for that marker.
 - Merging the PR's own base branch back in (`git merge main`) is harmless:
   the base's pins carry no marker the PR wrote.
 - Ambiguity resolves closed: if a marker the PR wrote also comes back in
