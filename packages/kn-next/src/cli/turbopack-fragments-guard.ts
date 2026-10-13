@@ -19,13 +19,16 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { NEXT_CONFIG_FILES, stripComments } from "./doctor/checks/use-cache";
+import {
+    NEXT_CONFIG_FILES,
+    stripCodeComments,
+} from "./doctor/checks/use-cache";
 import { UsageError } from "./shared";
 
 /** True iff the config text switches the flag on (comments ignored). */
 export function enablesTurbopackModuleFragments(configText: string): boolean {
     return /\bturbopackModuleFragments\s*:\s*true\b/.test(
-        stripComments(configText),
+        stripCodeComments(configText),
     );
 }
 

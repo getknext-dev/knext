@@ -13,8 +13,10 @@
 
 import { afterAll, describe, expect, it } from "bun:test";
 import {
+    type Dirent,
     mkdirSync,
     mkdtempSync,
+    readdirSync,
     rmSync,
     symlinkSync,
     writeFileSync,
@@ -375,6 +377,49 @@ describe("scanUseCache (default source scanner)", () => {
         put(app, "app/public/page.tsx", DIRECTIVE);
         expect(scanUseCache(app).file).toBe(join("app", "public", "page.tsx"));
     }, 30000);
+
+    // Some filesystems report no entry type from readdir (DT_UNKNOWN): every
+    // Dirent type predicate is false. The walk must lstat those entries.
+    const unknownTyped = (dir: string): Dirent[] =>
+        readdirSync(dir, { withFileTypes: true }).map((d) => {
+            const fake = Object.create(d) as Dirent;
+            for (const k of [
+                "isFile",
+                "isDirectory",
+                "isSymbolicLink",
+                "isFIFO",
+                "isSocket",
+                "isBlockDevice",
+                "isCharacterDevice",
+            ] as const) {
+                Object.defineProperty(fake, k, { value: () => false });
+            }
+            return fake;
+        });
+
+    it("resolves unknown-type Dirents with lstat (files and directories)", () => {
+        const app = fresh();
+        put(app, "src/lib/data.ts", DIRECTIVE);
+        const io = { readdir: unknownTyped };
+        expect(scanUseCache(app, DEFAULT_SCAN_LIMITS, io)).toEqual({
+            file: join("src", "lib", "data.ts"),
+            truncated: false,
+        });
+    });
+
+    it("still skips node_modules and never follows a symlink when the type is unknown", () => {
+        const app = fresh();
+        const outside = fresh();
+        put(outside, "data.ts", DIRECTIVE);
+        symlinkSync(outside, join(app, "linked"));
+        symlinkSync(join(outside, "data.ts"), join(app, "file-link.ts"));
+        put(app, "node_modules/lib/index.ts", DIRECTIVE);
+        const io = { readdir: unknownTyped };
+        expect(scanUseCache(app, DEFAULT_SCAN_LIMITS, io)).toEqual({
+            file: undefined,
+            truncated: false,
+        });
+    });
 
     it("skips a source file over the size limit", () => {
         const app = fresh();
