@@ -479,9 +479,10 @@ mock_check "(b) sed #1 (Unicode-space normalise) exits 2" sed 1 "$CLEAN"
 mock_check "(b) sed #2 (data-URI strip) exits 2" sed 2 "$CLEAN"
 mock_check "(b) sed #3 (hash strip, pass 1) exits 2" sed 3 "$CLEAN"
 mock_check "(b) sed #4 (hash strip, pass 2) exits 2" sed 4 "$CLEAN"
-mock_check "(b) grep #2 (long-run extraction) exits 2" grep 2 "$CLEAN"
-mock_check "(b) grep #3 (digit check) exits 2" grep 3 "$CLEAN"
-mock_check "(b) grep #3 (digit check) exits 2 after a digit-free long run" grep 3 "${L36}${L36}"
+mock_check "(b) grep #2 (line-flattened PEM marker) exits 2" grep 2 "$CLEAN"
+mock_check "(b) grep #3 (long-run extraction) exits 2" grep 3 "$CLEAN"
+mock_check "(b) grep #4 (digit check) exits 2" grep 4 "$CLEAN"
+mock_check "(b) grep #4 (digit check) exits 2 after a digit-free long run" grep 4 "${L36}${L36}"
 
 # Locale probe (works on GNU and BSD): every sed/grep must run under LC_ALL=C even though the
 # caller is UTF-8. A clean text must come back rc=1 (screened) -- a probe-failed call would read as
@@ -532,7 +533,7 @@ silent "no output"
 #       detection:  sed#1 Unicode spaces, grep#3 literal hit (returns at once);
 #       redaction:  sed#2 Unicode spaces, grep#4 pass-1 -o, sed#3-#5 exempt-strip, grep#5 runs -o,
 #                   grep#6 digit filter; then the re-check of its own output:
-#                   sed#6, grep#7, sed#7-#9, grep#8, grep#9.
+#                   sed#6, grep#7, grep#8 (PEM marker, flattened), sed#7-#9, grep#9, grep#10.
 #     Failing each in turn proves every command in redaction propagates its OWN failure.
 mock_screen() { # <label> <tool> <Nth call to fail> [rtf: run the real tool, then fail]
   rm -f "$TMP/cnt-grep" "$TMP/cnt-sed" "$TMP/cnt-awk"
@@ -558,8 +559,9 @@ for rtf in "" 1; do
 done
 for n in 6 7 8 9; do mock_screen "re-check sed #$((n - 5)) errors" sed "$n"; done
 mock_screen "re-check grep (literal formats) errors" grep 7
-mock_screen "re-check grep (long-run extraction) errors" grep 8
-mock_screen "re-check grep (digit check) errors" grep 9
+mock_screen "re-check grep (line-flattened PEM marker) errors" grep 8
+mock_screen "re-check grep (long-run extraction) errors" grep 9
+mock_screen "re-check grep (digit check) errors" grep 10
 # mv of the redacted text over the original fails: the ORIGINAL (with the literal) must not be sent.
 mkdir -p "$TMP/mock-mv"; printf '#!/bin/sh\nexit 2\n' >"$TMP/mock-mv/mv"; chmod +x "$TMP/mock-mv/mv"
 reset; screen_json 0.99

@@ -103,7 +103,8 @@ jev_ge() { awk -v x="$1" -v t="$2" 'BEGIN { exit !(x + 0 >= t + 0) }'; }
 # redaction errors or a literal survives it returns non-zero and the caller falls back to the old
 # skip. pr-risk.sh keeps the skip (it sends no diff content at all).
 JEV_Q="[\"']" # an optional quote around a header value (JSON / shell)
-JEV_LITERAL_RE='---+[[:space:]]*BEGIN|gh[pousr]_[A-Za-z0-9]{36}[A-Za-z0-9_-]*|github_pat_[A-Za-z0-9_]{22,}|npm_[A-Za-z0-9]{36}[A-Za-z0-9_-]*|(^|[^a-z0-9])sk-[A-Za-z0-9_-]{20,}|xox[bp]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}[A-Za-z0-9_-]*|://[^/@[:space:]]+:[^@[:space:]]+@|authorization'"$JEV_Q"'?[[:space:]]*:[[:space:]]*'"$JEV_Q"'?basic[[:space:]]+[^[:space:]]+|(authorization'"$JEV_Q"'?[[:space:]]*:[[:space:]]*'"$JEV_Q"'?|bearer[[:space:]]+'"$JEV_Q"'?)([A-Za-z]+[[:space:]]+)?([A-Za-z0-9._~+/=-]{16,}|[A-Za-z._~+/=-]*[0-9][A-Za-z0-9._~+/=-]{7,})'
+JEV_PEM_RE='---+[[:space:]]*BEGIN' # also checked on the line-flattened text (a marker split by a line break)
+JEV_LITERAL_RE="$JEV_PEM_RE|"'gh[pousr]_[A-Za-z0-9]{36}[A-Za-z0-9_-]*|github_pat_[A-Za-z0-9_]{22,}|npm_[A-Za-z0-9]{36}[A-Za-z0-9_-]*|(^|[^a-z0-9])sk-[A-Za-z0-9_-]{20,}|xox[bp]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}[A-Za-z0-9_-]*|://[^/@[:space:]]+:[^@[:space:]]+@|authorization'"$JEV_Q"'?[[:space:]]*:[[:space:]]*'"$JEV_Q"'?basic[[:space:]]+[^[:space:]]+|(authorization'"$JEV_Q"'?[[:space:]]*:[[:space:]]*'"$JEV_Q"'?|bearer[[:space:]]+'"$JEV_Q"'?)([A-Za-z]+[[:space:]]+)?([A-Za-z0-9._~+/=-]{16,}|[A-Za-z._~+/=-]*[0-9][A-Za-z0-9._~+/=-]{7,})'
 JEV_ENTROPY_RUN_RE='[A-Za-z0-9+=]{32,}'
 JEV_UNICODE_SPACES="$(printf '\302\240|\341\232\200|\342\200[\200-\212]|\342\200\257|\342\201\237|\343\200\200')"
 # _jev_has_nul <file> — true (0) if the file holds a NUL byte OR the test itself failed.
@@ -141,7 +142,7 @@ _jev_secret_check() { # <file>: the text, byte-exact
   # is screened normally; only a genuine failure of the check skips the call.
   local LC_ALL
   export LC_ALL=C # local yet exported: children see it, the caller's locale is restored on return
-  local orig stripped runs rc
+  local orig flat stripped runs rc
   # NUL: bash cannot hold a NUL in a variable and `$(...)` silently DROPS it, so `a<NUL>sk-...` would
   # be checked as `ask-...` (the `sk-` word boundary is lost) while the file jev would be sent still
   # has the NUL. A NUL anywhere is treated as "possible secret": skip.
@@ -150,8 +151,6 @@ _jev_secret_check() { # <file>: the text, byte-exact
   # `Authorization:<NBSP>Bearer<NBSP><token>` would stop matching the header rule. U+00A0, U+1680,
   # U+2000-200A, U+202F, U+205F, U+3000 (UTF-8 byte sequences).
   orig=$(sed -E -e "s/$JEV_UNICODE_SPACES/ /g" "$1") || return 0
-  # CR and LF -> space, so a marker (or header) split across a line break matches like a spaced one.
-  orig=$(tr '\r\n' '  ' <<<"$orig") || return 0
   # NO PIPELINES IN THE CHECKS: the callers run under `set -o pipefail`, and `grep -q` exits on the
   # first match while `printf` is still writing a large text, so printf dies of SIGPIPE and
   # pipefail turns a HIT into a failure: a big text with an early secret would be SENT. Here-strings
@@ -164,6 +163,13 @@ _jev_secret_check() { # <file>: the text, byte-exact
   grep -Eiq -- "$JEV_LITERAL_RE" <<<"$orig"
   rc=$?
   [ "$rc" -eq 1 ] || return 0 # 1 = no match; 0 = hit, 2+ = error: both skip the call
+  # 1b. A PEM marker split by a line break (`-----<CR><LF>BEGIN`): per-line grep cannot see it, so look
+  #     for the marker alone on the text with CR and LF turned into spaces. Kept out of rule 1 so that
+  #     rule keeps its per-line early exit on big texts (the SIGPIPE cases above).
+  flat=$(tr '\r\n' '  ' <<<"$orig") || return 0
+  grep -Eiq -- "$JEV_PEM_RE" <<<"$flat"
+  rc=$?
+  [ "$rc" -ne 1 ] && return 0
   # 2. Exemptions (inline data URIs, 40/64-hex hashes), then the entropy rule on what is left.
   stripped=$(_jev_strip_exempt "$orig") || return 0
   runs=$(grep -Eio -- "$JEV_ENTROPY_RUN_RE" <<<"$stripped")
