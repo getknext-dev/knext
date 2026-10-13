@@ -339,9 +339,11 @@ jobs:
           EOF
           SH
           chmod +x "${RUNNER_TEMP}/write-config.sh"
-          echo "WRITE_CONFIG=${RUNNER_TEMP}/write-config.sh" >> "$GITHUB_ENV"
-          echo "RUNTIME=${{ matrix.runtime }}" >> "$GITHUB_ENV"
-          echo "CLI=${GITHUB_WORKSPACE}/packages/kn-next/dist/cli/kn-next.js" >> "$GITHUB_ENV"
+          {
+            echo "WRITE_CONFIG=${RUNNER_TEMP}/write-config.sh"
+            echo "RUNTIME=${{ matrix.runtime }}"
+            echo "CLI=${GITHUB_WORKSPACE}/packages/kn-next/dist/cli/kn-next.js"
+          } >> "$GITHUB_ENV"
 
       - name: kn-next deploy (${{ matrix.runtime }})
         run: |
@@ -447,8 +449,9 @@ jobs:
               [ -n "$ready" ] && [ "$ready" != "$old" ] && [ "$routed" = "$ready" ] && break
               sleep 2
             done
-            [ "$ready" != "$old" ] && [ "$routed" = "$ready" ] \
-              || { echo "::error::$app did not roll to a new revision ($old -> $ready, routed $routed)"; exit 1; }
+            if [ "$ready" = "$old" ] || [ "$routed" != "$ready" ]; then
+              echo "::error::$app did not roll to a new revision ($old -> $ready, routed $routed)"; exit 1
+            fi
             echo "ok: $app rolled $old -> $ready"
           done
 

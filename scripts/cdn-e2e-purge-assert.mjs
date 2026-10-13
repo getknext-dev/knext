@@ -242,7 +242,7 @@ export function purgeChecks(c) {
         );
         must(
           current && current !== s.mark,
-          `precondition: the running build is ${current ?? "unreadable (/build-mark)"}, the stored pages are ${s.mark} (no rollout happened?)`,
+          `precondition: the running build is ${current ?? 'unreadable (/build-mark)'}, the stored pages are ${s.mark} (no rollout happened?)`,
         );
         const purge = await waitForPurge(c, appTagOf(pA), s.t0);
         const left = JSON.parse(
@@ -285,7 +285,7 @@ export function purgeChecks(c) {
         );
         must(
           current && current !== s.mark,
-          `precondition: the running build is ${current ?? "unreadable (/build-mark)"}, the stored pages are ${s.mark} (no rollout happened?)`,
+          `precondition: the running build is ${current ?? 'unreadable (/build-mark)'}, the stored pages are ${s.mark} (no rollout happened?)`,
         );
         const old = [];
         for (const path of [s.paths[0], `/tagged?${k('ro-fresh')}`]) {
