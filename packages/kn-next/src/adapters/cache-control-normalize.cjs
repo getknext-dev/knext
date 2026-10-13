@@ -164,37 +164,60 @@ function install(opts) {
 
   /**
    * Decide and, when the allowlist passes, add the edge directive and the tag
-   * header. Called from writeHead, which Node also reaches through the implicit
-   * header flush on the first write / end. Never throws: a fault here must not
-   * break serving, and a response that was not positively allowed gets nothing.
+   * header. Called from writeHead, which Node and Bun also reach through the
+   * implicit header flush on the first write / end and through flushHeaders, so
+   * a body streamed later still passes through here first. Never throws: a fault
+   * here must not break serving, and a response that was not positively allowed
+   * gets nothing.
+   *
+   * @returns {[string, string]} the decision's `[result, reason]`
    */
+  function edgeOrNot(res, statusCode, hdrs) {
+    // A flat / pair-array headers argument is a shape this module does not
+    // interpret: no edge directive (fail closed).
+    if (Array.isArray(hdrs)) return ['skipped', 'unsupported_headers_shape'];
+    const state = res.req && res.req[STATE];
+    if (!state) return ['skipped', 'no_request_state'];
+    const decision = cdn.judge(state, res, Number(statusCode), hdrs || null);
+    if (!decision.edge) return [decision.result, decision.reason];
+    for (const [name, value] of cdnEdge.edgeHeaders(cdn.cfg, decision)) {
+      if (hdrs) {
+        for (const k of Object.keys(hdrs)) if (k.toLowerCase() === name) delete hdrs[k];
+      }
+      // Straight to the original setter: the patched one would normalise an
+      // `s-maxage` value right back to the compat form.
+      originalSetHeader.call(res, name, value);
+    }
+    return ['edge', 'allowed'];
+  }
+
   function applyEdge(res, statusCode, hdrs) {
+    let outcome;
     try {
-      // A flat / pair-array headers argument is a shape this module does not
-      // interpret: no edge directive (fail closed).
-      const state = res.req && res.req[STATE];
-      if (Array.isArray(hdrs)) {
-        cdnEdge.countDecision('skipped', 'unsupported_headers_shape');
-        return;
-      }
-      if (!state) {
-        cdnEdge.countDecision('skipped', 'no_request_state');
-        return;
-      }
-      const decision = cdn.decide(state, res, Number(statusCode), hdrs || null);
-      if (!decision.edge) return;
-      for (const [name, value] of cdnEdge.edgeHeaders(cdn.cfg, decision)) {
-        if (hdrs) {
-          for (const k of Object.keys(hdrs)) if (k.toLowerCase() === name) delete hdrs[k];
-        }
-        // Straight to the original setter: the patched one would normalise an
-        // `s-maxage` value right back to the compat form.
-        originalSetHeader.call(res, name, value);
-      }
+      outcome = edgeOrNot(res, statusCode, hdrs);
     } catch (err) {
-      cdnEdge.countDecision('skipped', 'internal_error');
+      outcome = ['skipped', 'internal_error'];
       process.stderr.write(`CDN_EDGE: edge decision failed, response left uncached: ${err && err.message}\n`);
     }
+    if (outcome[0] !== 'edge') {
+      // Not allowed, for whatever reason: the response must also not carry an
+      // edge directive from anywhere else (ADR-0068 Amendment 2). A proxied
+      // rewrite copies the inner response's directive and tags onto this one.
+      try {
+        const ops = {
+          getHeader: (n) => res.getHeader(n),
+          removeHeader: (n) => res.removeHeader(n),
+          setHeader: (n, v) => originalSetHeader.call(res, n, v),
+        };
+        if (cdnEdge.stripForeignEdgeHeaders(cdn.cfg, ops, hdrs)) {
+          outcome = [outcome[0], 'foreign_edge_header_stripped'];
+        }
+      } catch (err) {
+        outcome = ['skipped', 'internal_error'];
+        process.stderr.write(`CDN_EDGE: stripping a foreign edge directive failed: ${err && err.message}\n`);
+      }
+    }
+    cdnEdge.countDecision(outcome[0], outcome[1]);
   }
 
   const originalWriteHead = proto.writeHead;

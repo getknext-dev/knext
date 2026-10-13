@@ -11,6 +11,11 @@
  *   mode: "write"     res.setHeader(...) then res.write() — the IMPLICIT header flush
  *         "end"       res.setHeader(...) then res.end(body) — implicit flush on end
  *         "writehead" res.writeHead(status, { 'Cache-Control': cc, ... }) — object form
+ *         "append"    like "write", but the `extra` headers go through
+ *                     res.appendHeader() (bypasses the patched setHeader)
+ *         "stream"    res.setHeader(...), then chunks written across timers: the
+ *                     headers flush late, on the first write
+ *         "flush"     res.setHeader(...), res.flushHeaders(), then chunks later
  *   hop: await a timer before recording the tags (proves AsyncLocalStorage
  *        carries the store across an async boundary, as Next's render does)
  *   rewriteUrl: Next rewrites `req.url` while routing; the decision must not read it
@@ -79,8 +84,21 @@ const server = http.createServer(async (req, res) => {
     return;
   }
   res.statusCode = status;
-  for (const [k, v] of Object.entries(headers)) res.setHeader(k, v);
-  if (mode === 'write') {
+  const extra = spec.extra || {};
+  for (const [k, v] of Object.entries(headers)) {
+    if (mode === 'append' && Object.hasOwn(extra, k)) res.appendHeader(k, v);
+    else res.setHeader(k, v);
+  }
+  if (mode === 'stream' || mode === 'flush') {
+    const tick = () => new Promise((r) => setTimeout(r, 5));
+    if (mode === 'flush') res.flushHeaders();
+    await tick();
+    res.write('bo');
+    await tick();
+    res.end('dy');
+    return;
+  }
+  if (mode === 'write' || mode === 'append') {
     res.write('bo');
     res.end('dy');
   } else {
