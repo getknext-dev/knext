@@ -308,6 +308,37 @@ describe.each(
         ]);
     }, 30_000);
 
+    it("a process with no build id cannot prove a body is its own: fail closed, Redis or memory", async () => {
+        const w = await world();
+        for (const extra of [{}, { REDIS_URL: undefined }]) {
+            const out = await pod(runtime, w, "", [PAGE, READ], {
+                KNEXT_BUILD_ID: undefined,
+                ...extra,
+            });
+            expect(out.results.at(-1)).toEqual({
+                op: "get",
+                key: "/tagged",
+                hit: true,
+            });
+            // The write records plain tags; the READ of it is marked.
+            expect(out.recorded).toEqual([
+                { kind: "page", tags: ["_N_T_/tagged"] },
+                { kind: "page", tags: ["_N_T_/tagged"], foreignBuild: true },
+            ]);
+        }
+    }, 30_000);
+
+    it("the in-memory store (no Redis) marks nothing for this build's own entry", async () => {
+        const w = await world();
+        const out = await pod(runtime, w, "build-one", [PAGE, READ], {
+            REDIS_URL: undefined,
+        });
+        expect(out.recorded).toEqual([
+            { kind: "page", tags: ["_N_T_/tagged"] },
+            { kind: "page", tags: ["_N_T_/tagged"] },
+        ]);
+    }, 30_000);
+
     it("no seam (CDN off) means no change: the foreign entry is still served", async () => {
         const w = await world();
         await pod(runtime, w, "build-one", [PAGE]);
