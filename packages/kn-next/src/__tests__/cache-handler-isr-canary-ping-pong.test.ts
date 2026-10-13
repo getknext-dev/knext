@@ -274,15 +274,26 @@ async function pod(redis: Redis, build: typeof BUILD_A | typeof BUILD_B) {
          * One request: read, and (as Next does for a miss or a stale entry)
          * regenerate. Next's per-process window map is cleared first: each pod
          * has its own, and sharing it here would mask the handler's behaviour.
+         *
+         * `rearm` re-attaches the Redis client (and closes the breaker) before
+         * the read and before the re-render's write: a faulted Redis call trips
+         * the breaker and drops the client, which would otherwise send every
+         * later call to the in-memory fallback, past the logic under test.
          */
-        async request(path: string, window: number | false = 3600) {
+        async request(
+            path: string,
+            window: number | false = 3600,
+            rearm = false,
+        ) {
             reads++;
             SharedCacheControls.cacheControls.clear();
+            if (rearm) mod.__setRedisClientForTests(redis.client);
             const entry = await cache.get(path, PAGE);
             const stale = !entry || !!entry.isStale;
             if (stale) {
                 regenerations++;
                 SharedCacheControls.cacheControls.clear();
+                if (rearm) mod.__setRedisClientForTests(redis.client);
                 await cache.set(
                     path,
                     {
@@ -429,16 +440,25 @@ describe("ISR under a canary split does not ping-pong (#2254)", () => {
         clock().advance(5000);
         const b = await pod(redis, BUILD_B);
         redis.failReadsOf.push(":build-live:");
-        const { entry, stale } = await b.request("/isr/fault");
+        const { entry, stale } = await b.request("/isr/fault", 3600, true);
         expect(entry).not.toBeNull();
         expect(stale).toBe(true);
-        // The bound: one re-render per page per pod. The re-rendered entry is
-        // B's own, so later reads, with the lookup still faulting, are fresh.
+        // The bound: one re-render per page per pod, once the re-render reaches
+        // Redis. The faulted lookup tripped the breaker; `rearm` closes it
+        // again (the cooldown elapsing), so the re-render was written to Redis
+        // and the next five reads go through Redis with the lookup STILL
+        // faulting. Each one reads B's own entry, which is not foreign, so it
+        // pays no lookup and stays fresh.
         const time = clock();
+        redis.reads.length = 0;
         for (let i = 0; i < 5; i++) {
             time.advance(2000);
-            await b.request("/isr/fault");
+            await b.request("/isr/fault", 3600, true);
         }
+        expect(
+            redis.reads.filter((k) => k.includes(":cache:")),
+            "the five reads must reach Redis, not the in-memory fallback",
+        ).toHaveLength(5);
         expect(b.regenerations).toBe(1);
     });
 

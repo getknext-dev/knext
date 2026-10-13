@@ -4,8 +4,9 @@
   round 2 the same day; accepted at the Sprint 2 close design review (jev 0.98). D1–D5 stand as
   written, except where an amendment (end of this file) supersedes a line: Amendment 1 (Accepted:
   K4 keeps the `adapterPath` shim), Amendment 2 (Proposed: a live build's window is honoured) and
-  Amendment 3 (Proposed: a non-live build's page or route entry is handed back stale; it corrects
-  Amendment 2 §1 and one of its accepted risks). Design and sequencing only; no code lands with this
+  Amendment 3 (Proposed: a non-live build's page or route entry is handed back stale; it supersedes
+  Amendment 2 §1's re-render sentence, §2's "withheld exactly as before" for page and route entries,
+  and Amendment 2's Redis-fault accepted risk). Design and sequencing only; no code lands with this
   ADR.
 - **Date:** 2026-10-10
 - **Trigger class:** ADR + hard rule ("don't rewrite the runtime twice"; "gate every feature on the
@@ -864,6 +865,10 @@ the accepted risk "entries ping-pong until the rollout completes" with the bound
    foreign entry looks the writer's key up (only then; memoised for 5 s). Present: the window is handed
    back and the entry is regenerated at its own cadence. Absent, unreadable, no build id on either side,
    or a legacy entry without one: the window is withheld exactly as before. The lookup **fails closed**.
+   **[Superseded by Amendment 3** for page and route entries on Next's read: in those cases (absent,
+   unreadable, or a legacy entry, with this process holding a build id) the entry is now handed back
+   with an expired window, not withheld. Withholding still applies to other kinds, to vinext's reads,
+   and when this process has no build id.**]**
 3. **What the guarantee becomes.** #1888 said a previous build's window is never honoured by the new
    build. It now says: **never once that build has stopped serving, plus the liveness TTL** (about two
    minutes after its last request). During a rollout, the old build is still serving until it drains,
@@ -975,12 +980,18 @@ every entry stale 0.01).
 - **A Redis fault on the liveness lookup now forces the entry stale** (this replaces Amendment 2's
   "a fault withholds the window, i.e. the pre-amendment behaviour", which is no longer true).
   `isBuildLive` fails closed, so a lookup that faults reads as "not live", and a page or route entry
-  a live peer build wrote is handed back with the expired window and re-rendered once. Bound: one
-  background render per page per pod, the same bound as ordinary ISR staleness, and the body is
-  served meanwhile; the re-rendered entry is this build's own, so it is not re-checked. Under a
-  canary split with a lookup that keeps faulting, the two builds re-render each other's entries,
-  which is Amendment 2's ping-pong (at most about one render per second per key) for as long as the
-  fault lasts.
+  a live peer build wrote is handed back with the expired window: Next serves it and re-renders it
+  in the background. The faulted lookup is a Redis call, so it also trips the handler's Redis
+  breaker: that pod drops its client and serves (and writes) from its in-memory cache for
+  `REDIS_RETRY_COOLDOWN_MS` (5 s by default), as for any Redis fault. Bound: once the re-render's
+  entry reaches Redis it is this build's own, so it pays no lookup and stays fresh: one background
+  render per page per pod, the same bound as ordinary ISR staleness, and the body is served
+  meanwhile. If the re-render lands in memory because the breaker is still open, and the lookup is
+  still faulting when the breaker closes, the next read meets the peer's entry again: at most one
+  render per page per pod per cooldown while that fault lasts. Under a canary split the two builds
+  can then re-render each other's entries, Amendment 2's ping-pong, for as long as the fault lasts.
+  (`cache-handler-isr-canary-ping-pong.test.ts` pins the first bound with the breaker closed again
+  between calls; a mutation that re-checks the build's own entry reds it.)
 - **An entry younger than 1 s from a non-live writer is still fresh for that second.** Every write
   refreshes the writer's 90 s liveness record, so a non-live writer's entries are at least about 90 s
   old in practice.

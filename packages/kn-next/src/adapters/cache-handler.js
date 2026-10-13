@@ -1230,9 +1230,13 @@ function staleForeignBuildEntry(entry, ctx, writerIsLive = false) {
  * its windows must not outlive it.
  *
  * Fails CLOSED: no build id on either side, a lookup that faults, an absent or
- * unexpected value all read as "not live", which is the withhold behaviour that
- * predates this check. Only entries another build wrote pay a lookup, and the
- * answer is remembered for `BUILD_LIVE_LOOKUP_MS`.
+ * unexpected value all read as "not live". "Not live" means the writer's window
+ * is not honoured: a page or route entry on Next's read is handed back with an
+ * expired window (`staleForeignBuildEntry`, so it is served once and
+ * re-rendered), and any other entry has its window withheld
+ * (`scopeWindowToBuild`). A lookup that faults is a Redis call, so it also trips
+ * the breaker (`redisCall`). Only entries another build wrote pay a lookup, and
+ * the answer is remembered for `BUILD_LIVE_LOOKUP_MS`.
  */
 const BUILD_LIVE_TTL_SECONDS = 90;
 const BUILD_LIVE_REFRESH_MS = 30_000;
