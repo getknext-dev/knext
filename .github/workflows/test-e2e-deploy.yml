@@ -69,7 +69,7 @@ on:
       nextjsRef:
         description: 'vercel/next.js git ref to test against (pinned tag ≥ v16.2.0; do NOT use canary)'
         required: false
-        default: 'v16.3.8'
+        default: 'v16.4.0'
       # #147 item 4 — the Bun runtime axis as a SEPARATE lane, not a second
       # matrix dimension: doubling the 16-shard nightly every night would be
       # pure cost. On demand, dispatch with runtime=bun; the weekly schedule
@@ -290,8 +290,13 @@ concurrency:
 # v16.2.0 this suite tests NOTHING knext-related. (The in-repo-next alignment
 # yields to contract existence; the version-skew caveat is recorded in
 # ADR-0007.)
+#
+# #2296 — on the 2.x line both defaults (this fallback and the `nextjsRef`
+# dispatch default) are the Next floor `packages/kn-next/src/next-compat.ts`
+# declares (the lower bound of NEXT_PEER_RANGE). A floor bump that leaves them
+# behind reds tests/next-compat-e2e-deploy-ref.test.ts.
 env:
-  NEXTJS_REF: ${{ github.event.inputs.nextjsRef || 'v16.3.8' }}
+  NEXTJS_REF: ${{ github.event.inputs.nextjsRef || 'v16.4.0' }}
   # #695 — the DECLARED shard count, and the reason the ledger can no longer
   # record a clean sheet for a red night. Run 30790778590 concluded FAILURE on
   # shard 16/16; that job stopped executing steps, so its `if: always()`

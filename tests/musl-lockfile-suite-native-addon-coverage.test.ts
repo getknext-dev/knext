@@ -81,7 +81,9 @@ describe('the suite native-addon record tracks the credentialed Next.js version 
       expect(a.reason?.length ?? 0, `${a.name}@${a.version} needs a reason`).toBeGreaterThan(20);
     }
     for (const a of [...record.runtimeAddons, ...record.notRuntimeAddons]) {
-      expect(a.version, `${a.name}: exact version`).toMatch(/^\d+\.\d+\.\d+$/);
+      // An exact version, prerelease included (Next 16.4.0's suite declares
+      // node-pty@1.2.0-beta.15); a range never matches.
+      expect(a.version, `${a.name}: exact version`).toMatch(/^\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$/);
       expect(a.declaredBy.length, `${a.name}: declaredBy`).toBeGreaterThan(0);
     }
   });
