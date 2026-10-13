@@ -109,7 +109,15 @@ describe('purge-use-cache: the check sees a page the purge cannot reach', () => 
   const dir = mkdtempSync(join(tmpdir(), 'cdn-uc-check-'));
   afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
-  type Mode = 'tagged' | 'untagged' | 'no-purge' | 'stale' | 'not-stored' | 'no-app-tag' | 'deny';
+  type Mode =
+    | 'tagged'
+    | 'untagged'
+    | 'no-purge'
+    | 'expired'
+    | 'stale'
+    | 'not-stored'
+    | 'no-app-tag'
+    | 'deny';
 
   async function runAgainst(mode: Mode) {
     const tagsMod = await import(TAGS_MODULE);
@@ -139,7 +147,9 @@ describe('purge-use-cache: the check sees a page the purge cannot reach', () => 
           return res.end('{"error":"Unauthorized"}');
         }
         const tag = new URL(url, 'http://x').searchParams.get('tag') ?? '';
-        if (mode !== 'no-purge') {
+        // The entry leaves the edge (say its TTL ran out) with no purge sent.
+        if (mode === 'expired') store.clear();
+        else if (mode !== 'no-purge') {
           const t = tagsMod.nextTag(p, tag);
           let evicted = 0;
           for (const [key, e] of store) {
@@ -223,6 +233,12 @@ describe('purge-use-cache: the check sees a page the purge cannot reach', () => 
     expect(r.note.startsWith('precondition')).toBe(false);
     expect(r.note).toContain('the edge still served the page after revalidateTag');
     expect(r.note).not.toContain('Cache-Tag lacks');
+  });
+
+  it('a MISS that no purge caused (the entry merely left the edge) is the failure', async () => {
+    const r = await runAgainst('expired');
+    expect(r.ok).toBe(false);
+    expect(r.note).toBe(`no purge carrying the 'use cache' tag ${r.ucTag} reached the emulator`);
   });
 
   it('a MISS after the purge that serves the old stamp is the failure', async () => {
