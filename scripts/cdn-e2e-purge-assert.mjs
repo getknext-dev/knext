@@ -23,7 +23,12 @@
  *   revisions-after   after spec.cdn was set on CDN_CHURN_CHANGED: no OTHER app
  *                     (CDN_CHURN_UNRELATED) got a new revision
  *
+ * `purge-use-cache` (#2302) reads a second app, built from the Cache Components
+ * fixture packages/kn-next/src/__tests__/fixtures/cdn-use-cache-kind-app, whose
+ * page takes its only tag from a `'use cache'` function.
+ *
  * Environment, in addition to scripts/cdn-e2e-assert.mjs's:
+ *   CDN_APP_UC            the 'use cache' fixture app, spec.cdn + purge (cdn-uc)
  *   CDN_REVALIDATE_TOKEN  Bearer for the fixture's /api/revalidate (from the
  *                         app's Secret; never printed)
  *   CDN_STATE_FILE        state shared by the before/after halves
@@ -40,10 +45,25 @@ import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
-import { config, hit, isHtml, must, runChecks, send, stored } from './cdn-e2e-assert.mjs';
+import {
+  config,
+  derivePrefix,
+  hit,
+  isHtml,
+  must,
+  runChecks,
+  send,
+  stored,
+} from './cdn-e2e-assert.mjs';
 
 /** The Next tag the fixture's /tagged page carries through unstable_cache. */
 export const PAGE_TAG = 'cdn-e2e-page';
+/**
+ * The Next tag the 'use cache' fixture's page carries, set ONLY by `cacheTag`
+ * inside a `'use cache'` function (cdn-use-cache-kind-app, #2302).
+ */
+export const UC_TAG = 'cdn-e2e-uc';
+export const UC_PATH = '/uc-tagged';
 
 const hex = (s) => createHash('sha256').update(s, 'utf8').digest('hex');
 /** `kn-<p>-t<16 hex>` — ADR-0068 D5.2, computed independently of the runtime. */
@@ -56,6 +76,10 @@ const buildTagOf = (r) =>
   String(r.headers['cache-tag'] || '')
     .split(',')
     .find((t) => /^kn-[0-9a-f]{12}-b[0-9a-f]{12}$/.test(t));
+const cacheTagsOf = (r) =>
+  String(r.headers['cache-tag'] || '')
+    .split(',')
+    .filter(Boolean);
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 /** The headers that make a response edge-cacheable or purgeable (ADR-0068 D4.2/D5). */
 const EDGE_ONLY = ['cloudflare-cdn-cache-control', 'cdn-cache-control', 'cache-tag'];
@@ -71,10 +95,16 @@ export const ORIGIN_PAGES = ['/tagged', '/static-mark'];
 export function purgeConfig(env = process.env) {
   const c = config(env);
   const np = env.CDN_APP_NP || 'cdn-np';
+  const uc = env.CDN_APP_UC || 'cdn-uc';
   return {
     ...c,
-    names: { ...c.names, np },
-    hosts: { ...c.hosts, np: `${np}.${c.ns}.svc.cluster.local` },
+    names: { ...c.names, np, uc },
+    hosts: {
+      ...c.hosts,
+      np: `${np}.${c.ns}.svc.cluster.local`,
+      uc: `${uc}.${c.ns}.svc.cluster.local`,
+    },
+    prefixes: { ...c.prefixes, uc: derivePrefix(c.ns, uc) },
     token: env.CDN_REVALIDATE_TOKEN || '',
     stateFile: env.CDN_STATE_FILE || '/tmp/cdn-e2e-purge-state.json',
     waitMs: Number(env.CDN_PURGE_WAIT_MS || 20000),
@@ -102,11 +132,11 @@ async function waitForPurge(c, tag, since) {
   }
 }
 
-async function revalidate(c, host) {
+async function revalidate(c, host, tag = PAGE_TAG) {
   const r = await send(c.emu, {
     method: 'POST',
     host,
-    path: `/api/revalidate?tag=${PAGE_TAG}`,
+    path: `/api/revalidate?tag=${tag}`,
     headers: { authorization: `Bearer ${c.token}` },
   });
   must(
@@ -228,6 +258,49 @@ export function purgeChecks(c) {
           `the edge still served the page after a refused purge (${status}; recovered: ${purge ? 'yes' : 'no'})`,
         );
         return `${status} once, then the retry purged`;
+      },
+    },
+    {
+      // #2302, ADR-0068 D5.1: a page whose ONLY tag comes from a 'use cache'
+      // function is edge-cached WITH that tag, so revalidateTag purges it. The
+      // tag reaches the edge only through the page entry, where Next copies a
+      // 'use cache' function's tags (the 'use cache' handler records nothing,
+      // by design), so an edge HIT without its hash is the defect itself: the
+      // page would be edge-cached with no purgeable tag for an hour.
+      id: 'purge-use-cache',
+      async run() {
+        const host = c.hosts.uc;
+        const pUc = c.prefixes.uc;
+        const path = `${UC_PATH}?${k('uc')}`;
+        const before = await storeHit(c, host, path);
+        const held = await send(c.emu, { host, path });
+        must(hit(held), `precondition: ${host}${path} stopped being an edge HIT`);
+        const tags = cacheTagsOf(held);
+        // Not vacuous: the page is tagged at the edge at all, so a missing
+        // 'use cache' tag below is that tag's absence, not an untagged entry.
+        must(
+          tags.includes(appTagOf(pUc)),
+          `precondition: the edge HIT carries no app tag ${appTagOf(pUc)} (Cache-Tag: ${tags.join(',') || 'none'})`,
+        );
+        const tag = nextTagOf(pUc, UC_TAG);
+        const tagged = tags.includes(tag);
+        const t0 = Date.now();
+        await revalidate(c, host, UC_TAG);
+        const purge = await waitForPurge(c, tag, t0);
+        const after = await send(c.emu, { host, path });
+        const why = [];
+        if (!tagged) why.push(`the edge HIT's Cache-Tag lacks ${tag} (${tags.join(',')})`);
+        if (hit(after)) why.push('the edge still served the page after revalidateTag');
+        must(
+          why.length === 0,
+          `the 'use cache' tag did not make the page purgeable at the edge: ${why.join('; ')} (purge carrying ${tag} seen: ${purge ? 'yes' : 'no'})`,
+        );
+        must(purge !== null, `no purge carrying the 'use cache' tag ${tag} reached the emulator`);
+        must(
+          stampOf(after) !== undefined && stampOf(after) !== stampOf(before),
+          `the MISS after the 'use cache' purge served stale content (stamp ${stampOf(after)} == ${stampOf(before)})`,
+        );
+        return `HIT carrying ${tag} -> revalidateTag -> purge (evicted ${purge.evicted}) -> MISS with a fresh render`;
       },
     },
     {
