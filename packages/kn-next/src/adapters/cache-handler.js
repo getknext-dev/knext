@@ -213,6 +213,7 @@ function __resetEnvForTests() {
   connectPromise = undefined;
   useRedis = !!REDIS_URL;
   unhealthyUntil = 0;
+  closeFailureReported = false;
   resetInvalidationReplay();
   buildLiveLookups.clear();
   lastBuildLiveBeat = 0;
@@ -314,6 +315,13 @@ function readImageFromMemory(key) {
  * Dropping matters as much as the cooldown: ioredis's retryStrategy would
  * otherwise keep a doomed connection (and its pending commands) alive, so the
  * "one probe per cooldown" property would not hold.
+ *
+ * Dropping also means CLOSING. Both clients answer `disconnect()`: ioredis
+ * natively, Bun's native client through `budgetNativeClient`, which maps it to
+ * the native `close()`. Before that mapping the native client had no
+ * `disconnect`, the TypeError was swallowed here, and the dropped client stayed
+ * connected (with `autoReconnect`) while the next connect built another: one
+ * leaked connection per trip.
  */
 function markUnhealthy(reason) {
   unhealthyUntil = Date.now() + RETRY_COOLDOWN_MS;
@@ -323,11 +331,28 @@ function markUnhealthy(reason) {
   if (dying) {
     try {
       dying.disconnect();
-    } catch {
-      // Already gone.
+    } catch (err) {
+      reportCloseFailure(err);
     }
   }
   if (reason) console.error('[CacheHandler] Redis unhealthy, failing open:', reason);
+}
+
+/**
+ * A client the breaker could not close may keep its connection open, so the
+ * failure is reported rather than swallowed. Once per module instance: the
+ * breaker can trip every cooldown, and the message would not change.
+ */
+let closeFailureReported = false;
+
+function reportCloseFailure(err) {
+  if (closeFailureReported) return;
+  closeFailureReported = true;
+  console.error(
+    '[CacheHandler] could not close the Redis client after a breaker trip; ' +
+      'its connection may stay open (reported once):',
+    err instanceof Error ? `${err.name}: ${err.message}` : err,
+  );
 }
 
 /**
@@ -547,6 +572,17 @@ function budgetNativeClient(client) {
     get(target, prop) {
       if (prop === NATIVE_GATE) return gate;
       if (prop === NATIVE_TARGET) return target;
+      // `disconnect` is the one name the handler uses to close EITHER client
+      // (ioredis has it; Bun's native client calls it `close()`, measured on
+      // 1.4.2, and has no `disconnect`). Both map to the native `close()`,
+      // synchronously and OUTSIDE the gate: the breaker closes a client
+      // because its connection is dead or hung, so waiting for the gate would
+      // wait on exactly the command that faulted. A target with no `close` gets
+      // no `disconnect` either, so the caller sees the TypeError.
+      if (prop === 'disconnect' || prop === 'close') {
+        const close = Reflect.get(target, 'close', target);
+        return typeof close === 'function' ? () => close.call(target) : undefined;
+      }
       const value = Reflect.get(target, prop, target);
       if (typeof value !== 'function') return value;
       // EVERY method is re-bound to the real client, budgeted or not. Bun's
