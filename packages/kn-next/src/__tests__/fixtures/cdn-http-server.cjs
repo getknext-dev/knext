@@ -21,7 +21,8 @@
  *   rewriteUrl: Next rewrites `req.url` while routing; the decision must not read it
  *
  * Special routes: `x-case: raw` echoes the url the preload captured vs `req.url`;
- * `x-case: metrics` returns the decision counters in Prometheus text.
+ * `x-case: metrics` returns the decision counters in Prometheus text;
+ * `x-case: seam` returns `{ type, text }` for the CDN metrics render seam.
  *
  * argv: none. env: CDN_FIXTURE_PRELOAD (absolute path of the preload to load).
  * Prints `PORT <n>` once listening.
@@ -48,6 +49,13 @@ const server = http.createServer(async (req, res) => {
     const edge = require(require('node:path').join(require('node:path').dirname(preload), 'cdn-edge.cjs'));
     res.setHeader('content-type', 'text/plain');
     res.end(edge.renderEdgeDecisionMetrics());
+    return;
+  }
+  if (kase === 'seam') {
+    // What a metrics listener in this process would read off the seam.
+    const render = globalThis[Symbol.for('knext.core.cdn.renderMetrics')];
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify({ type: typeof render, text: typeof render === 'function' ? render() : '' }));
     return;
   }
   const spec = JSON.parse(req.headers['x-spec'] || '{}');

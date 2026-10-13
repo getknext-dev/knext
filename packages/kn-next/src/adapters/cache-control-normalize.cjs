@@ -138,6 +138,9 @@ function install(opts) {
     // Next sees the request: the cache handler records tags into it (D5.1), and
     // the decision at writeHead must not read a `req.url` Next has since rewritten.
     const seam = cdnEdge.ensureSeam();
+    // Let this process's metrics listeners serve the CDN counters (the app's
+    // metrics port). Published only in CDN mode: off, every body is unchanged.
+    cdnEdge.publishMetricsSeam();
     const serverProto = http.Server.prototype;
     const originalEmit = serverProto.emit;
     serverProto.emit = function cdnEmit(event, req, res) {

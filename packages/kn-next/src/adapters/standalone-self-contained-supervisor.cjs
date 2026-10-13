@@ -97,6 +97,25 @@ function metricsBody(state) {
 }
 
 /**
+ * The CDN counters this process holds (the header preload publishes a render
+ * function in CDN mode, `cdn-edge.cjs` `publishMetricsSeam`), or `''` when CDN
+ * mode is off or the render throws. The key is duplicated by literal, as this
+ * preload stays dependency-free; `cdn-metrics-seam.test.ts` pins it.
+ *
+ * @returns {string}
+ */
+function readCdnMetrics() {
+  const render = globalThis[Symbol.for('knext.core.cdn.renderMetrics')];
+  if (typeof render !== 'function') return '';
+  try {
+    const text = render();
+    return typeof text === 'string' ? text : '';
+  } catch {
+    return '';
+  }
+}
+
+/**
  * Start the dependency-free metrics HTTP server. Returns the server (for
  * shutdown/tests) or `undefined` when disabled via `KNEXT_SELF_CONTAINED_METRICS=0`.
  *
@@ -112,10 +131,12 @@ function startMetricsServer(opts = {}) {
       res.writeHead(404).end();
       return;
     }
-    const body = metricsBody({
-      uptimeSeconds: (Date.now() - start) / 1000,
-      draining: opts.isDraining(),
-    });
+    // metricsBody ends in '\n', so the CDN text (CDN mode only) appends cleanly.
+    const body =
+      metricsBody({
+        uptimeSeconds: (Date.now() - start) / 1000,
+        draining: opts.isDraining(),
+      }) + readCdnMetrics();
     res.writeHead(200, { 'Content-Type': 'text/plain; version=0.0.4' }).end(body);
   });
   // m1 (round-2): an EADDRINUSE (or any other bind failure) on :9464 must not

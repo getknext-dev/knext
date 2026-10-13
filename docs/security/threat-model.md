@@ -370,6 +370,13 @@ supervisor's prom-client registry (`adapters/metrics.ts`), which no longer serve
 
 <!-- metric-contract:9091-disclosure end -->
 
+**On the standalone server with CDN mode on** (`spec.cdn`; the vinext binary above has no CDN
+support), the same port also carries three CDN counters: `knext_cdn_edge_decision_total`
+(`result`, `reason`), `knext_cdn_foreign_edge_strip_total` (no labels) and `knext_cdn_purge_total`
+(`provider`, `result`). Every label is a closed set of values; none carries a path, URL, cache tag
+or token. They disclose how much of an app's traffic is edge-cacheable and why not, and how its
+purges fare. Without `spec.cdn` they do not exist.
+
 **What is NOT on this port, contrary to earlier versions of this section:** cold-start and DB-wake
 series, the rest of the app's request-metric registry, and the `nodejs_*`/`process_*` families `collectDefaultMetrics` registers. Those
 are prom-client metrics on an app's own `/api/metrics` route, which the shipped PodMonitor does not
