@@ -1,0 +1,62 @@
+import type { KnativeNextConfig } from "@getknext/core";
+
+// NextApp Operator declarative configuration — see the knext QUICKSTART Step 4.
+const config: KnativeNextConfig = {
+  // App name — becomes the NextApp resource and Knative Service name.
+  name: "b131",
+
+  // Registry to push the image to (the app name is appended).
+  registry: "ghcr.io/getknext-dev",
+  imagePullSecrets: ["ghcr-bench"],
+
+  // Runtime: Node.js. Without this line knext runs your server on Bun
+  // (a compiled executable).
+  runtime: "node",
+
+  // This scaffold builds with plain `next build` (Turbopack — see
+  // package.json's `build` script and next.config.ts's `output: 'standalone'`
+  // and `adapterPath`). `build` is left unset here: an absent `build` means
+  // the standalone (turbopack) target, the same runtime image `knext
+  // deploy` stages automatically. Scaffold with `knext create --builder
+  // vinext` instead for the compiled single-executable target
+  // (`build: 'vinext'`).
+
+  // Object storage for static assets — OPTIONAL. Without it, your app serves
+  // its own static files from the container image, just like `next start`.
+  // That is the simplest way to run, and the right starting point.
+  //
+  // Add this block later when you want faster static delivery from a
+  // bucket/CDN, and old builds' files kept through a deploy for visitors
+  // still mid-session on them:
+  // https://knext-platform.dev/docs/multi-cloud#starting-without-object-storage
+  //
+  // storage: {
+  //   provider: "gcs", // "gcs" | "s3" | "minio" | "azure"
+  //   bucket: "<your-assets-bucket>",
+  //   publicUrl: "https://storage.googleapis.com/<your-assets-bucket>",
+  // },
+
+  // Knative autoscaling. minScale: 0 (the default) keeps scale-to-zero on.
+  scaling: {
+    minScale: 0,
+    maxScale: 1,
+    containerConcurrency: 100,
+    imagePrewarm: true,
+    // containerConcurrency omitted => the operator's default of 20 applies
+    // (ADR-0028). That default is what the 8 MiB request-body cap (ADR-0044)
+    // is sized for; raising it without also raising the cap's memory headroom
+    // lets concurrent large uploads buffer enough bytes to OOM-kill a 1Gi pod.
+    // Keep the last pod routable for 5 minutes after traffic stops: requests in
+    // that window skip the cold start entirely (~50 ms vs seconds). Costs one
+    // idle pod (and its idle DB connections) for the window after every burst —
+    // delete this line to scale to zero immediately.
+  },
+
+  // Bring-your-own database binding (optional). knext provisions no database —
+  // this only binds an EXISTING Secret's DSN into the app as DATABASE_URL.
+  // database: {
+  //   secretRef: { name: "<your-db-secret>" },
+  // },
+};
+
+export default config;
