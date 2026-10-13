@@ -1,0 +1,248 @@
+---
+title: CDN caching
+description: Put a CDN you run in front of your app. knext sends the cache headers and purges by tag; it never creates the CDN.
+---
+
+knext can make your app safe to put behind a CDN. It does two things, and only two:
+
+1. **It emits edge cache headers** on the responses that are safe to share, plus a `Cache-Tag` header
+   so the CDN can group them.
+2. **It purges by tag.** When your code calls `revalidateTag` or `revalidatePath`, knext asks the CDN
+   to drop the matching pages. This is implemented for **Cloudflare**; the other providers get
+   headers only (see [Provider support](#provider-support)).
+
+**You own the CDN.** You create it, point it at the app's public hostname, set its cache rules, and
+create the purge credential. knext never provisions, configures or inspects a CDN, and it holds no
+cloud account credential.
+
+The browser-facing `Cache-Control` header does not change. On Cloudflare and Google Cloud CDN the
+edge directive travels in a separate, CDN-only header, so what browsers see (and what the Next.js
+compatibility suite checks) is the same with or without a `cdn` block.
+
+<Callout type="warn">
+Staleness is bounded, not zero. If a purge is skipped, rate limited or lost, visitors can see the old
+page until the edge TTL runs out (30 seconds by default, plus any stale-while-revalidate window you
+add). knext never promises an instant purge, and the CDN's own "purge accepted" answer means received,
+not evicted.
+</Callout>
+
+## What gets edge-cached
+
+A response is edge-cached **only if every one of these holds**. Anything not on the list is left
+alone, so a new kind of response is uncached until it has been shown safe.
+
+- It is a `GET` or `HEAD` request answered with status 200.
+- Next.js itself marked it shareable (an `s-maxage` directive), which is what ISR and static pages
+  get. Dynamic renders and the image optimizer do not, so they are never edge-cached.
+- It does not carry `private`, `no-store` or `no-cache`, and sets no cookie (`Set-Cookie`).
+- The request has no `Authorization` header and no draft-mode cookie.
+- The path is not under `/api/cache/` and not under one of your `excludePaths`.
+- No middleware (or `proxy` file) matches the path, unless you opt it in with `includePaths`.
+- No `rewrites`, `redirects` or `headers` rule in `next.config` that depends on a cookie, header,
+  query string or host matches the path, directly or through a chain of rewrites. These make the
+  answer depend on the visitor, and a CDN ignores cookies.
+- The request path is in canonical form. Paths with `//`, `.` or `..` segments, backslashes, or
+  percent-encoded `.`, `/`, `\`, `%` or letters and digits are always sent to your origin.
+- The React Server Components rules hold: a request carrying `RSC: 1` or `Next-Router-*` headers
+  without `_rsc` in the URL is never cached, nor is `_rsc` without the `RSC: 1` header, and the
+  response content type must match the cache key. RSC responses are cached only on providers whose
+  default cache key includes the query string (Cloudflare and Google Cloud CDN).
+- The page's own cache entry was recorded with its tags (including its path tag), and the tags fit
+  the provider's limits. Over the limit means not cached, never truncated.
+- Hashed build assets (`immutable`) keep Next.js's own long-lived header and are neither tagged nor
+  purged.
+- Redirects (3xx) are never edge-cached.
+
+Edge caching only starts once the cache handler records tags for the page. A server that has not
+recorded the page's tags serves it uncached from the edge's point of view; this fails closed.
+
+### Middleware and the auth-bypass risk
+
+Take a statically rendered page that your middleware protects with a session cookie. A CDN ignores
+cookies: if it stored the page for a signed-in visitor, it would serve it to the next anonymous
+visitor without your middleware ever running. That is an authentication bypass, so knext refuses to
+edge-cache any path your middleware matches.
+
+`includePaths` lifts that refusal for the prefixes you list. **Listing a path removes the
+protection for it.** Only list pages that are identical for every visitor. An app that uses
+`i18n` together with middleware gets no default edge caching at all, because the locale a request is
+routed to can depend on the host, a cookie or `Accept-Language`; use `includePaths` to opt paths in.
+
+An app with no middleware and no conditional routing rules is unaffected: every eligible path is
+cached by default, and `excludePaths` fences off the ones you do not want.
+
+### Why isn't this page cached?
+
+knext classifies every response and records the reason a response was left alone. These reasons are
+counted inside the server; they are not yet exposed on the app's metrics endpoint, so today use them
+to understand the rules rather than to alert on:
+
+| Reason | Meaning |
+|---|---|
+| `method`, `status` | Not a `GET`/`HEAD`, or not a 200 |
+| `no_shared_directive` | Next.js did not mark the response shareable (a dynamic render) |
+| `private_or_no_store` | The response is `private`, `no-store` or `no-cache` |
+| `set_cookie`, `auth_or_draft` | A cookie is set, or the request is authenticated or in draft mode |
+| `excluded_path` | `/api/cache/` or one of your `excludePaths` |
+| `middleware_matched` | Middleware or a conditional routing rule covers the path |
+| `routing_artifact_missing` | The build's routing file is missing or unreadable (only immutable assets are cached) |
+| `non_canonical_path` | The URL is not in canonical form (see above) |
+| `rsc_*` | One of the React Server Components rules |
+| `build_id_unresolved`, `tags_missing`, `tag_overflow` | The page cannot be purged by tag, so it is not cached |
+| `zero_ttl` | The resulting edge lifetime would be zero |
+
+Some legitimate URLs are never edge-cached by the canonical-path rule, and are served correctly from
+your origin instead: slugs that contain an encoded slash or percent sign, and any path where an
+over-eager encoder escaped a letter, digit, `-`, `_`, `.` or `~` (for example `%7E`).
+
+## How purge works
+
+On Cloudflare, `revalidateTag` and `revalidatePath` purge the edge:
+
+1. Your code revalidates. knext invalidates the cache entry first.
+2. Afterwards, the pod that handled the call queues a purge for the matching tags. It does not
+   delay your response.
+3. Tags are sent in batches of up to 100, coalesced for about a second, at a rate that defaults to 5
+   requests per minute (the Cloudflare Free plan), configurable with `requestsPerMinute`. A rate-limit
+   answer is retried after the time the CDN asks for (at most 60 seconds), and a failed batch is
+   attempted at most three times.
+4. If the backlog grows too large, it collapses into one purge of all of this app's pages. That
+   happens when more than 1000 tags are waiting, or when sending the backlog at the configured
+   rate would take more than 5 minutes. On the Cloudflare Free plan's default rate, the time limit is
+   the likelier trigger.
+
+**A new deploy purges the old build once.** The first pod of a new build to become ready purges all of
+the app's edge entries; a Redis key makes sure only one pod does it, however many start at once. Scaling
+from zero does not purge again. A rollback to a build that already purged does not purge, as long as that build's claim is still
+in Redis; the claim lasts 7 days.
+
+Every purge outcome is counted in `knext_cdn_purge_total`, labelled by provider and result. A purge
+that gives up logs the provider, status and tag count, never the token or the response body.
+
+### Limits to know
+
+- **No Redis, no purge.** The purge follows the cache invalidation. If Redis is configured but
+  unreachable, the invalidation only clears that pod's memory, so knext skips the purge and logs a
+  warning. The edge keeps serving the old page until its TTL ends. Without Redis configured at all,
+  other pods can refill the edge with old content, and the first-ready purge does not run; the TTL
+  bounds the staleness.
+- **A lost purge is bounded by the TTL.** A pod stopped after the shutdown drain deadline can lose a
+  queued purge. The same TTL bound applies.
+- **Tag prefixes are not a security boundary.** Tags carry a per-app prefix so one app's purge does not
+  evict another's pages by accident on a shared zone. A purge token can purge any tag in its zone. For
+  hard isolation between apps or tenants, use one CDN zone, or one token, per app.
+- **Split deploys.** During a canary split, the edge holds whichever build rendered a URL last for at
+  most the TTL. That mixed HTML only works if both builds' static assets are still served: edge-cached HTML can
+  reference the previous build's assets during and after a rollout or rollback, so you must retain
+  old builds' assets. With [object storage](/docs/skew-protection) knext retains them; without it, a
+  pod serves only its own build's assets and old HTML can request a missing chunk. Without storage, the operator reports a `CDNAdvisory` status
+  condition on the app when a canary split and `cdn` are both set.
+- **Multi-region and split-region setups.** Each pod purges once for the revalidation it handled, over
+  shared Redis. Regions with separate Redis instances are separate caches; purge and first-ready logic
+  do not span them.
+- **The vinext target is not supported.** On `build: 'vinext'` the operator renders no CDN settings and
+  reports a `CDNAdvisory` condition; use the default `turbopack` or `webpack` build. The compiled
+  executable of the standalone server is supported only once the header behaviour has been checked on
+  that image.
+- **Whole-Secret imports are not filtered.** `KNEXT_CDN_*` names in `env` and `secrets.envMap` are
+  reserved: the operator ignores them and reports their names in a `CDNReservedEnvIgnored` condition.
+  A Secret imported whole through `secrets.envFrom` is not filtered, because the operator cannot read
+  Secret keys, so a `KNEXT_CDN_*` key inside such a Secret reaches the pod.
+
+## Provider support
+
+| Provider (`cdn.provider`) | Edge headers | Tag purge | Page |
+|---|---|---|---|
+| `cloudflare` | Yes | **Yes** | [Cloudflare](/docs/cdn-cloudflare) |
+| `google-cloud-cdn` | Yes | No, headers only | [Google Cloud CDN](/docs/cdn-google-cloud-cdn) |
+| `cloudfront` | Yes | No, headers only | [CloudFront](/docs/cdn-cloudfront) |
+| `azure-front-door` | Yes | No, headers only | [Azure Front Door](/docs/cdn-azure-front-door) |
+| (none: OCI has no CDN product) | | | [OCI](/docs/cdn-oci) |
+
+For a provider without purge, setting `cdn.purge` is accepted but knext makes no call, counts it as
+skipped, and logs one line at start-up. Freshness is then bounded by the edge TTL alone.
+
+Each provider page ends with its live-verification status. A provider is marked verified only when a
+recorded live run backs it; the other rows are tested with unit tests and an emulator only.
+
+## Configure it
+
+Add a `cdn` block to `knext.config.ts`:
+
+```ts title="knext.config.ts"
+import type { KnativeNextConfig } from '@getknext/core';
+
+const config: KnativeNextConfig = {
+  name: 'my-app',
+  registry: 'ghcr.io/acme',
+  // ...storage, cache (Redis), etc.
+  cdn: {
+    provider: 'cloudflare',
+    htmlTTLSeconds: 30, // 1..3600, default 30
+    staleWhileRevalidateSeconds: 0, // 0..3600, default 0
+    excludePaths: ['/account'], // never edge-cached
+    includePaths: ['/blog'], // only if middleware matches /blog and it is the same for everyone
+    purge: {
+      secretRef: { name: 'cdn-purge', key: 'token' },
+      target: '0123456789abcdef0123456789abcdef', // Cloudflare zone id
+      requestsPerMinute: 5, // optional
+    },
+  },
+};
+
+export default config;
+```
+
+`knext deploy` writes this to the `NextApp` as `spec.cdn`:
+
+```yaml
+spec:
+  cdn:
+    provider: cloudflare
+    htmlTTLSeconds: 30
+    excludePaths: ["/account"]
+    purge:
+      secretRef: {name: cdn-purge, key: token}
+      target: "0123456789abcdef0123456789abcdef"
+```
+
+| Field | Meaning |
+|---|---|
+| `provider` | One of `cloudflare`, `google-cloud-cdn`, `cloudfront`, `azure-front-door`. |
+| `htmlTTLSeconds` | Longest the edge holds a page: the smaller of Next.js's `s-maxage` and this value. Also your staleness bound. Default 30. |
+| `staleWhileRevalidateSeconds` | Adds a stale-while-revalidate window. It adds to the staleness bound, so it is off by default. |
+| `excludePaths` | Path prefixes never edge-cached. A prefix covers its own path and everything below at a segment boundary: `/blog` covers `/blog/x`, never `/blogger`. |
+| `includePaths` | Prefixes that middleware matches but that you cache anyway. Removes the auth-bypass protection for them. |
+| `purge.secretRef` | A key of a Secret **in the app's namespace** that you create. The token never appears in `knext.config.ts`, the `NextApp` or its status. |
+| `purge.target` | The provider's resource id as one string. For Cloudflare, the 32-character hex zone id. A malformed id disables the purge and is counted. |
+| `purge.requestsPerMinute` | Overrides the provider's default purge rate (1..6000). |
+
+Create the Secret yourself, with the smallest scope the provider allows:
+
+```bash
+kubectl -n my-namespace create secret generic cdn-purge --from-literal=token="$CDN_PURGE_TOKEN"
+```
+
+Leaving `cdn` out changes nothing: no settings are rendered, the pod template is identical and no new
+revision is created. Adding, changing or removing the block does roll a revision.
+
+<Callout type="info">
+Upgrade order matters: upgrade the operator and its CRD first, then the CLI. An older CRD rejects a
+`NextApp` that sets `spec.cdn`, and an older operator does not reserve the `KNEXT_CDN_*` names.
+</Callout>
+
+## Replacing `KNEXT_CACHE_CONTROL_NORMALIZE=0`
+
+Setting `KNEXT_CACHE_CONTROL_NORMALIZE=0` (see [ISR caching](/docs/isr-caching)) was the old way to
+let a CDN see Next.js's raw `s-maxage`. It sends no tags, no purge and none of the refusals above, and
+it is deprecated in favour of the `cdn` block. When `cdn` is set, the `cdn` block wins and the switch
+is ignored with one log line.
+
+## Testing against an emulator
+
+`provider: 'emulator'` is a Cloudflare-shaped test double, not a product. It needs an
+`emulatorEndpoint` that is an `http(s)://<name>.svc.cluster.local[:port]` URL with no path, user
+information or query; any other value is rejected at admission. The emulator never reads your
+`secretRef` and sends a fixed placeholder token, so pointing a `NextApp` at an in-cluster listener
+cannot leak a real credential. knext does not ship an emulator: bring a stub that keys on URL plus
+query, ignores `Vary` the way Cloudflare does, and answers `purge_cache`.

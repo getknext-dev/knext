@@ -1,0 +1,134 @@
+# #2286 (item 1 of #2252 part B): run the cache-handler specs against EVERY
+# admitted Next minor, not only the one the workspace lockfile pins.
+#
+# WHY: the handler's Next-version-dependent behaviour (`scopeWindowToBuild`, the
+# build-scoped window it hands back on Next >= 16.4) is only exercised against
+# the Next the workspace lockfile pins. The matrix runs the specs on every
+# minor the peer range admits, so widening the range cannot merge a minor the
+# specs have never seen. On the 2.x line the range admits 16.4 only, so there
+# is one leg; the matrix grows one leg per minor as the bound is widened.
+#
+# SINGLE SOURCE: the version list is NEXT_MATRIX_VERSIONS in
+# packages/kn-next/src/next-compat.ts, printed by scripts/next-minor-matrix.mjs
+# and consumed via fromJSON below. Never write a version literal in this file;
+# tests/next-minor-matrix.test.ts fails if one appears.
+#
+# COST: PR runs are path-filtered to the handler, its specs, the compat policy
+# and the manifest; push-to-main has the same filter; plus one weekly run so a
+# newly published patch of an admitted minor (or an upstream change in the
+# private Next modules the handler reaches into) is seen without a code change.
+# Non-required by design: a path-filtered check cannot be a required status.
+# A red weekly run is visible in the Actions list; no alert issue is filed.
+name: Next minor matrix (cache handler)
+
+on:
+  pull_request:
+    paths:
+      - 'packages/kn-next/src/adapters/cache-handler*.js'
+      - 'packages/kn-next/src/adapters/use-cache-handler*.js'
+      - 'packages/kn-next/src/adapters/cdn-purge/**'
+      - 'packages/kn-next/src/adapters/cache-write-registry.js'
+      - 'packages/kn-next/src/adapters/slow-dep-log.js'
+      - 'packages/kn-next/src/cli/build-id-env.ts'
+      - 'scripts/bun-test.mjs'
+      - 'packages/kn-next/src/__tests__/cache-handler-*.test.ts'
+      - 'packages/kn-next/src/next-compat.ts'
+      - 'packages/kn-next/package.json'
+      - 'scripts/next-minor-matrix.mjs'
+      - '.github/workflows/next-minor-matrix.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'packages/kn-next/src/adapters/cache-handler*.js'
+      - 'packages/kn-next/src/adapters/use-cache-handler*.js'
+      - 'packages/kn-next/src/adapters/cdn-purge/**'
+      - 'packages/kn-next/src/adapters/cache-write-registry.js'
+      - 'packages/kn-next/src/adapters/slow-dep-log.js'
+      - 'packages/kn-next/src/cli/build-id-env.ts'
+      - 'scripts/bun-test.mjs'
+      - 'packages/kn-next/src/__tests__/cache-handler-*.test.ts'
+      - 'packages/kn-next/src/next-compat.ts'
+      - 'packages/kn-next/package.json'
+      - 'scripts/next-minor-matrix.mjs'
+      - '.github/workflows/next-minor-matrix.yml'
+  schedule:
+    # Sundays 08:43 UTC - clear of the compat credential crons and their ~1h tail.
+    - cron: '43 8 * * 0'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: next-minor-matrix-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  plan:
+    name: plan (versions from next-compat.ts)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
+
+      - name: Print the matrix from next-compat.ts
+        id: matrix
+        run: |
+          matrix="$(bun scripts/next-minor-matrix.mjs)"
+          echo "$matrix"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  matrix:
+    name: cache-handler specs on next ${{ matrix.minor }}
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # The specs `require('next/...')` from packages/kn-next, so the leg's Next
+      # must replace the one the lockfile resolved there. Throwaway workspace:
+      # the manifest edit is never committed.
+      - name: Install next at the matrix version
+        working-directory: packages/kn-next
+        env:
+          MATRIX_NEXT: ${{ matrix.next }}
+        run: bun add --dev "next@${MATRIX_NEXT}"
+
+      - name: Assert the leg really runs the requested next
+        working-directory: packages/kn-next
+        env:
+          MATRIX_NEXT: ${{ matrix.next }}
+        run: |
+          installed="$(node -p "require('next/package.json').version")"
+          echo "installed next: ${installed} (wanted ${MATRIX_NEXT})"
+          test "${installed}" = "${MATRIX_NEXT}"
+
+      # One bun process per file (scripts/bun-test.mjs): bun module mocks leak across
+      # files in a single process, and these specs were written to be isolated.
+      - name: Cache-handler specs
+        run: >
+          node scripts/bun-test.mjs
+          packages/kn-next/src/__tests__/cache-handler-next-stale-after-wake.test.ts
+          packages/kn-next/src/__tests__/cache-handler-ppr-build-scope.test.ts
+          packages/kn-next/src/__tests__/cache-handler-isr-staleness.test.ts

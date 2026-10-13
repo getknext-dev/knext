@@ -50,6 +50,10 @@ import { knativeCheck } from "./doctor/checks/knative";
 import { kubectlValidationCheck } from "./doctor/checks/kubectl-validation";
 import { metricsCheck } from "./doctor/checks/metrics";
 import { networkPolicyCheck } from "./doctor/checks/network-policy";
+import {
+    nextMinorCheck,
+    readInstalledNextVersion,
+} from "./doctor/checks/next-minor";
 import { nodeEntryStalenessCheck } from "./doctor/checks/node-entry-staleness";
 import { nodeFloorCheck } from "./doctor/checks/node-floor";
 import { operatorCheck } from "./doctor/checks/operator";
@@ -151,6 +155,8 @@ export async function runDoctor(
     // every other app's report is unchanged: bundled vinext fixes vs the
     // installed vinext version.
     checks.push(...vinextPatchesCheck(ctx));
+    // Local; no row unless an installed `next` is injected.
+    checks.push(...nextMinorCheck(ctx));
     // Opt-in (#1533): a LOCAL file read, not a cluster call, so it does not
     // participate in ctx.skipAll — and it contributes NO row at all when
     // --ci-kubeconfig was not passed, which is what keeps every other
@@ -229,6 +235,7 @@ export async function doctorMain(
         probeImage: probeManifest,
         cliVersion: readOwnVersion(),
         readInstalledVinext: () => readInstalledVinextVersion(process.cwd()),
+        readInstalledNext: () => readInstalledNextVersion(process.cwd()),
     },
 ): Promise<number> {
     // parseDoctorArgs first, so an unknown flag is rejected before anything

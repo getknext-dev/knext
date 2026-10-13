@@ -1,0 +1,103 @@
+---
+title: CDN with Cloudflare
+description: Edge caching and tag purge for a knext app behind Cloudflare.
+---
+
+Cloudflare is the one provider where knext both sets the edge headers and purges by tag. Read
+[CDN caching](/docs/cdn) first for what is and is not cached; this page is the setup.
+
+## What you do in Cloudflare
+
+knext does not touch your Cloudflare account. You set up:
+
+1. **A zone** for your domain, and a **proxied** DNS record (orange cloud) for the app's public
+   hostname, pointing at the app's ingress. This is a custom domain on your cluster; see
+   [Custom domains and TLS](/docs/custom-domains-tls).
+2. **A cache rule that makes HTML eligible for caching.** By default Cloudflare caches only static
+   file types, not HTML. Create a Cache Rule for the app's hostname with *Eligible for cache* and an
+   edge TTL that respects the origin's cache headers, so the `Cloudflare-CDN-Cache-Control` header
+   knext sends decides how long a page lives. Whether HTML is cached on origin headers alone or
+   needs this rule depends on your plan and zone settings; check the result with the curl steps
+   below.
+3. **An API token for purging.** Create a token with exactly one permission: **Zone, Cache Purge**,
+   scoped to the single zone. Nothing else is needed, and a broader token is a bigger blast radius
+   if it leaks.
+4. **The zone id** from the zone's overview page (32 hexadecimal characters).
+
+Store the token as a Secret in the app's namespace:
+
+```bash
+kubectl -n my-namespace create secret generic cdn-purge --from-literal=token="$CLOUDFLARE_PURGE_TOKEN"
+```
+
+## Configure knext
+
+```ts title="knext.config.ts"
+cdn: {
+  provider: 'cloudflare',
+  htmlTTLSeconds: 30,
+  excludePaths: ['/account'],
+  purge: {
+    secretRef: { name: 'cdn-purge', key: 'token' },
+    target: '0123456789abcdef0123456789abcdef', // your zone id
+  },
+},
+```
+
+Run `knext deploy`. The app now sends, on pages it is safe to share:
+
+- `Cloudflare-CDN-Cache-Control: max-age=30`, a directive for Cloudflare only. It uses `max-age`,
+  not `s-maxage`, because `s-maxage` turns stale-while-revalidate off on Cloudflare.
+- `Cache-Tag: kn-…`, a list of opaque lowercase tags (hashes of your Next.js tags). Cloudflare
+  removes this header before the response reaches the visitor.
+
+The browser's `Cache-Control` stays `public, max-age=0, must-revalidate`.
+
+Cloudflare's tag purge limits apply: up to 100 tags per request, and 5 purge requests per minute on
+the Free plan. knext assumes that conservative rate; raise `purge.requestsPerMinute` if your plan
+allows more. The limit is per account, so many pods can still exceed it, in which case knext retries
+and the TTL covers the gap.
+
+## Verify with curl
+
+Request a page twice and read the headers:
+
+```bash
+curl -sI https://www.example.com/blog/hello | grep -i -E 'cache-control|cf-cache-status|cache-tag|age'
+curl -sI https://www.example.com/blog/hello | grep -i -E 'cache-control|cf-cache-status|cache-tag|age'
+```
+
+What you should see:
+
+| Header | Expected |
+|---|---|
+| `cache-control` | `public, max-age=0, must-revalidate` (unchanged for browsers) |
+| `cf-cache-status` | `MISS` or `EXPIRED` on the first request, `HIT` on the second |
+| `cache-tag` | **Absent.** Cloudflare strips it; if you can see it, something other than Cloudflare answered |
+| `age` | Grows between requests, never above `htmlTTLSeconds` |
+
+If `cf-cache-status` is `DYNAMIC` on both requests, Cloudflare did not treat the page as cacheable:
+check your Cache Rule first, then see
+[Why isn't this page cached?](/docs/cdn#why-isnt-this-page-cached) for the reasons knext leaves a page alone.
+
+To check purge, revalidate the page from your app (a route that calls `revalidateTag` or
+`revalidatePath`), then request it again. The first request after the purge should be `MISS` (or
+`EXPIRED`) with fresh content, and the next a `HIT`. Cloudflare's purge answer means "received", so
+allow a moment, and remember that a purge that was skipped (for example because Redis was
+unreachable) is only corrected when the TTL ends. Watch `knext_cdn_purge_total` for results other
+than `ok`.
+
+## One zone per tenant
+
+The tag prefix keeps two knext apps on one zone from evicting each other by accident, but a Cache
+Purge token can purge any tag in its zone. If apps must not be able to purge each other, give each
+its own zone or its own token scope.
+
+## Live verification
+
+**Live verification:** not recorded
+
+No recorded live run of this provider is on file yet. The behaviour above is covered by unit tests
+and an in-cluster emulator, and details that depend on your Cloudflare plan, such as whether HTML
+needs an explicit Cache Rule and how stale-while-revalidate behaves inside the edge-only header, are
+the ones to confirm with the curl steps above.

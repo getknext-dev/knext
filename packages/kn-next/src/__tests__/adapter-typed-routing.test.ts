@@ -17,6 +17,7 @@
 import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { NEXT_PEER_RANGE } from "../next-compat";
 
 const pkgDir = join(__dirname, "..", "..");
 const adapterSource = readFileSync(
@@ -30,8 +31,8 @@ describe("in-repo next devDependency (#171 follow-up)", () => {
             readFileSync(join(pkgDir, "package.json"), "utf8"),
         );
         expect(pkg.devDependencies.next).toMatch(/^16\.4\./);
-        // The peer floor is 16.4.0 (see next-peer-floor.test.ts).
-        expect(pkg.peerDependencies.next).toBe(">=16.4.0");
+        // The peer range is the single policy range in next-compat.ts.
+        expect(pkg.peerDependencies.next).toBe(NEXT_PEER_RANGE);
     });
 });
 

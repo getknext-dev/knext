@@ -1,0 +1,25 @@
+---
+title: CDN on Oracle Cloud (OCI)
+description: OCI has no CDN product. Put Cloudflare in front of your OKE ingress.
+---
+
+Oracle Cloud has no CDN product that knext can target, so there is no `oci` value for
+`cdn.provider`. Its web application firewall can only purge by path. It has no tag purge, and knext
+does not drive it.
+
+On OKE, use a CDN that can sit in front of any origin. The recommended choice is **Cloudflare**:
+
+1. Put the app's public hostname on a Cloudflare zone, proxied, pointing at your cluster's ingress
+   load balancer.
+2. Follow [CDN with Cloudflare](/docs/cdn-cloudflare) for the cache rule, the purge token and the
+   `cdn` block (`provider: 'cloudflare'`).
+
+Any other CDN works as a headers-only setup through the matching provider page: see
+[CDN caching](/docs/cdn#provider-support).
+
+## Live verification
+
+**Live verification:** not recorded
+
+There is no provider row for OCI to verify; this page only points you to the Cloudflare setup, whose
+own status is on its page.
