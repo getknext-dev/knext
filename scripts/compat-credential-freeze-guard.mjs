@@ -67,6 +67,7 @@
  *     --head-pin-file head-pin.json \
  *     --changed-files-file changed-files.txt \
  *     --merge-base-pin-file merge-base-pin.json \
+ *     --inherited-pins-file inherited-pins.json \
  *     [--rc-tag-state-file rctag-state.json] \
  *     [--now 2026-09-24T00:00:00Z]
  *
@@ -79,6 +80,20 @@
  * carries no marker, or carries one with a different `date` or `reason` (a
  * new, reviewed authorization replacing a stale one). Changing only
  * `expires` or `paths` of an inherited marker is NOT an introduction.
+ *
+ * MERGED-IN MARKERS (#2325). The merge base alone misses a marker that
+ * arrives with a MERGED branch: a merge PR (integration/v2 -> main, or a
+ * branch that merged integration/v2) has a merge base older than the other
+ * branch's marker, so that marker read as introduced and exempted frozen files
+ * on a branch it was never reviewed for. The workflow therefore also collects
+ * the pin at every merged-in parent — each non-first parent of each merge
+ * commit in merge-base..head, skipping the merge queue's own merges on a
+ * `merge_group` run — into `--inherited-pins-file` (a JSON array, required).
+ * A head marker with the same `date` and `reason` as any of them is inherited.
+ * The PR's own commits are what is left: a marker counts only if the PR wrote
+ * it, so a merge PR that needs an exemption adds its own (new date or reason).
+ * Ambiguity resolves closed: a marker that also reached the PR through a
+ * merged-in branch is treated as inherited even if the PR wrote it first.
  *
  * NARROWING-ONLY PIN DIFFS (#1635). The pin file is itself frozen, so a PR
  * that only deletes or shortens a marker needed a valid marker to pass —
@@ -314,15 +329,36 @@ function sameJson(a, b) {
 }
 
 /**
- * Did THIS PR introduce the head marker (#1635)? See the file header.
+ * Did the head marker arrive through a merged-in branch (#2325)? True when
+ * any pin in `inheritedPins` carries a marker with the head marker's `date`
+ * and `reason` — the same identity #1635 uses against the merge base.
+ *
+ * @param {unknown} headPin
+ * @param {readonly unknown[]} inheritedPins
+ * @returns {boolean}
+ */
+export function markerArrivedViaMerge(headPin, inheritedPins) {
+  const head = markerOf(headPin);
+  if (!head) return false;
+  return inheritedPins.some((pin) => {
+    const m = markerOf(pin);
+    return !!m && m.date === head.date && m.reason === head.reason;
+  });
+}
+
+/**
+ * Did THIS PR introduce the head marker (#1635, #2325)? See the file header.
  *
  * @param {unknown} mergeBasePin the pin at the PR's merge base
  * @param {unknown} headPin
+ * @param {readonly unknown[]} [inheritedPins] the pins at every merged-in
+ *   parent in the PR's range (#2325); a marker matching one is inherited
  * @returns {boolean}
  */
-export function markerIntroducedByPr(mergeBasePin, headPin) {
+export function markerIntroducedByPr(mergeBasePin, headPin, inheritedPins = []) {
   const head = markerOf(headPin);
   if (!head) return false;
+  if (markerArrivedViaMerge(headPin, inheritedPins)) return false;
   const base = markerOf(mergeBasePin);
   if (!base) return true;
   return base.date !== head.date || base.reason !== head.reason;
@@ -483,13 +519,18 @@ export function frozenFileSet(repoRoot, deps = {}) {
  * whether the head marker was introduced by this PR and whether a pin-only
  * diff merely narrows a marker. It defaults to `basePin`.
  *
- * @param {{ basePin: unknown, headPin: unknown, mergeBasePin?: unknown, touchedFiles: string[], frozenSet: Set<string>, now: Date }} input
+ * `inheritedPins` (#2325) are the pins at every merged-in parent in the PR's
+ * range; a head marker matching one of them is not the PR's own. Defaults to
+ * `[]` here (the CLI requires the file).
+ *
+ * @param {{ basePin: unknown, headPin: unknown, mergeBasePin?: unknown, inheritedPins?: readonly unknown[], touchedFiles: string[], frozenSet: Set<string>, now: Date }} input
  * @returns {{ ok: boolean, reason: string, touchedFrozenFiles: string[] }}
  */
 export function evaluateFreezeGuard({
   basePin,
   headPin,
   mergeBasePin = basePin,
+  inheritedPins = [],
   touchedFiles,
   frozenSet,
   now,
@@ -528,14 +569,20 @@ export function evaluateFreezeGuard({
   }
 
   const validity = markerValidity(headPin, now);
-  const marker =
-    validity.valid && !markerIntroducedByPr(mergeBasePin, headPin)
-      ? {
-          valid: false,
-          reason:
-            'the rcBumpMarker at head was inherited from the merge base, not introduced by this PR — an inherited marker exempts nothing',
-        }
-      : validity;
+  let marker = validity;
+  if (validity.valid && markerArrivedViaMerge(headPin, inheritedPins)) {
+    marker = {
+      valid: false,
+      reason:
+        "the rcBumpMarker at head was inherited from a branch merged into this PR, not added by this PR's own commits — a merged-in marker exempts nothing; add a new marker (new date or reason) in this PR",
+    };
+  } else if (validity.valid && !markerIntroducedByPr(mergeBasePin, headPin, inheritedPins)) {
+    marker = {
+      valid: false,
+      reason:
+        'the rcBumpMarker at head was inherited from the merge base, not introduced by this PR — an inherited marker exempts nothing',
+    };
+  }
   if (marker.valid) {
     const scope = markerOf(headPin)?.paths;
     const uncovered = Array.isArray(scope)
@@ -579,6 +626,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const headPinFile = arg('head-pin-file', null);
   const changedFilesFile = arg('changed-files-file', null);
   const mergeBasePinFile = arg('merge-base-pin-file', null);
+  const inheritedPinsFile = arg('inherited-pins-file', null);
   const rcTagStateFile = arg('rc-tag-state-file', null);
   const nowArg = arg('now', null);
 
@@ -594,6 +642,12 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     );
     process.exit(2);
   }
+  if (!inheritedPinsFile) {
+    console.error(
+      'compat-credential-freeze-guard: --inherited-pins-file is required — without it this would fail OPEN, reading a marker brought in by a merged branch as introduced by this PR (#2325). Pass the JSON array the workflow collects from the merged-in parents in merge-base..head, even when it is `[]`.',
+    );
+    process.exit(2);
+  }
 
   const readPin = (file) => {
     try {
@@ -606,6 +660,13 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const basePin = readPin(basePinFile);
   const headPin = readPin(headPinFile);
   const mergeBasePin = readPin(mergeBasePinFile);
+  const inheritedPins = readPin(inheritedPinsFile);
+  if (!Array.isArray(inheritedPins)) {
+    console.error(
+      `compat-credential-freeze-guard: ${inheritedPinsFile} must be a JSON array of pins`,
+    );
+    process.exit(2);
+  }
   const tagState = rcTagStateFile ? readPin(rcTagStateFile) : null;
 
   const touchedFiles = readFileSync(changedFilesFile, 'utf8')
@@ -624,6 +685,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     basePin,
     headPin,
     mergeBasePin,
+    inheritedPins,
     touchedFiles,
     frozenSet,
     now,
