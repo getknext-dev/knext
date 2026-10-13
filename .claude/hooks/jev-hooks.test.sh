@@ -420,6 +420,34 @@ $INJ" 1 yes
 grep -qF 'ignore all previous instructions' "$FAKE_JEV_SEEN" && pass "  the payload after a real block reaches jev" || fail "  the payload after a real block was redacted"
 grep -qF -- "$PEMA" "$FAKE_JEV_SEEN" && fail "  the block body reached the stub" || pass "  the block body did not reach the stub"
 
+# --- round 5: real PEM labels carry hyphens, dots and digits (RSA-PSS, a dotted label, X25519)
+pem_leak "label with a hyphen: RSA-PSS PRIVATE KEY" \
+  "$INJ
+${D5}BEGIN RSA-PSS PRIVATE KEY${D5}
+$PEMA
+$PEMB
+${D5}END RSA-PSS PRIVATE KEY${D5}
+after: tail text" "$PEMA" "after: tail text"
+pem_leak "label with a dot: RSA.KEY" \
+  "$INJ
+${D5}BEGIN RSA.KEY${D5}
+$PEMA
+$PEMB
+${D5}END RSA.KEY${D5}
+after: tail text" "$PEMA" "after: tail text"
+pem_leak "label with digits: X25519 PRIVATE KEY" \
+  "$INJ
+${D5}BEGIN X25519 PRIVATE KEY${D5}
+$PEMA
+$PEMB
+${D5}END X25519 PRIVATE KEY${D5}
+after: tail text" "$PEMA" "after: tail text"
+pem_leak "label with a hyphen, no END line" \
+  "$INJ
+${D5}BEGIN RSA-PSS PRIVATE KEY${D5}
+$PEMA
+$PEMB" "$PEMB"
+
 # the 128 KiB read cap must not send the half of a token it cut. ~1300 long tokens first (each redacts
 # to 10 bytes, so the redacted text falls well under the 32 KiB cap), then a token that STARTS 29
 # bytes before the cap.
