@@ -26,7 +26,7 @@
 import { trackWrite } from './cache-write-registry.js';
 // The CDN purge pipeline (ADR-0068 D6, D7). Inert unless KNEXT_CDN_PROVIDER is
 // set; both calls are total (never throw, never block). See "CDN wire-in" below.
-import { enqueuePurge, firstReadyPurge } from './cdn-purge/index.js';
+import { enqueueAppPurge, enqueuePurge, firstReadyPurge } from './cdn-purge/index.js';
 // The `'use cache'` (`cacheHandlers`) backend. Pure logic over an injected `core`
 // (below), so it imports nothing from this module and stays testable alone.
 import { createUseCacheHandler } from './use-cache-handler.js';
@@ -213,6 +213,7 @@ function __resetEnvForTests() {
   connectPromise = undefined;
   useRedis = !!REDIS_URL;
   unhealthyUntil = 0;
+  resetInvalidationReplay();
   buildLiveLookups.clear();
   lastBuildLiveBeat = 0;
   CONNECT_TIMEOUT_MS = envMs('REDIS_CONNECT_TIMEOUT_MS', 5000);
@@ -775,7 +776,21 @@ async function execBatch(client, commands) {
   return undefined;
 }
 
+/**
+ * The connected client, or null (no Redis, breaker open, connect failed).
+ *
+ * A client handed out here means the breaker is closed, so it is also the one
+ * moment an invalidation skipped while it was open can be replayed: started,
+ * never awaited, so no caller waits on it (see "Invalidations skipped while the
+ * breaker is open").
+ */
 async function ensureConnected() {
+  const client = await connectClient();
+  if (client && replayPending()) startInvalidationReplay();
+  return client;
+}
+
+async function connectClient() {
   if (!useRedis) return null;
   // Breaker open — fail open to origin/memory without touching the socket.
   if (Date.now() < unhealthyUntil) return null;
@@ -1385,8 +1400,198 @@ function startCdnPurge(tags) {
 function noteCdnPurgeSkipped(tagCount) {
   if (!(process.env.KNEXT_CDN_PROVIDER ?? '').trim()) return;
   console.warn(
-    `[CacheHandler] CDN purge skipped: Redis is configured but unreachable, so the invalidation did not reach the shared store; tags=${tagCount}; CDN pages stay stale until the edge TTL`,
+    `[CacheHandler] CDN purge skipped for now: Redis is configured but unreachable, so the invalidation did not reach the shared store; tags=${tagCount}; it is replayed, then purged at the edge, once Redis is reachable again`,
   );
+}
+
+// ─── Invalidations skipped while the breaker is open ───
+//
+// With the breaker open (or Redis faulting mid-invalidation) `revalidateTag`
+// can only clear this pod's memory: the SHARED entries survive, every pod keeps
+// serving them, and the edge purge is held back because a purge now would let
+// the edge refill from them. Without a replay both stayed stale until the
+// entry's TTL. So the tags that did not reach Redis are kept here, deduplicated,
+// and replayed once the breaker closes: the Redis invalidation first, then the
+// edge purge for exactly the tags whose invalidation completed (the same order
+// as `revalidateTag`'s, D6.3).
+//
+//  - BOUNDED. At most REPLAY_MAX_TAGS distinct tags. One more and the list is
+//    dropped for a COLLAPSE: the replay invalidates every ISR entry under this
+//    app's key prefix (a cursor SCAN, DEL per page) and queues one purge of the
+//    app's edge tag -- wider than needed, never stale. The same collapse the
+//    CDN purge queue makes at the same size (D6.4).
+//  - OFF THE REQUEST PATH. Started by the first connection that finds the
+//    breaker closed, or by a probe timer set for the moment it closes (an idle
+//    pod would otherwise never replay while other pods serve the stale
+//    entries). Never awaited by a caller; enrolled in the SIGTERM drain.
+//  - NO STORM. One replay at a time, one tag at a time through `redisCall`: the
+//    first fault re-trips the breaker and stops the run, and the rest waits for
+//    the next probe -- one attempt per cooldown, the breaker's own rate.
+//  - PER PROCESS. The list lives in this process only: a pod that scales to
+//    zero or restarts before Redis is back loses it, and those entries stay
+//    stale until their TTL (a known limit). The `'use cache'` handler's tag
+//    stamps are not replayed here.
+const REPLAY_MAX_TAGS = 1000;
+const REPLAY_SCAN_COUNT = 100;
+// tag -> the generation it was last recorded at. A Map keeps first-insertion
+// order when a value is updated, and the generation lets a replay that raced a
+// fresh skip of the same tag keep it rather than forget it.
+const replayTags = new Map();
+let replayGeneration = 0;
+let replayCollapsed = false;
+let replayRun = null;
+let replayTimer = null;
+
+function replayPending() {
+  return replayCollapsed || replayTags.size > 0;
+}
+
+function resetInvalidationReplay() {
+  replayTags.clear();
+  replayGeneration = 0;
+  replayCollapsed = false;
+  replayRun = null;
+  if (replayTimer) clearTimeout(replayTimer);
+  replayTimer = null;
+}
+
+/** Remember tags whose invalidation did not reach Redis, and try to replay them. */
+function recordSkippedInvalidation(tags) {
+  const list = tags.filter((tag) => typeof tag === 'string' && tag.length > 0);
+  if (!useRedis || list.length === 0) return;
+  replayGeneration += 1;
+  if (!replayCollapsed) {
+    for (const tag of list) {
+      if (!replayTags.has(tag) && replayTags.size >= REPLAY_MAX_TAGS) {
+        replayTags.clear();
+        replayCollapsed = true;
+        console.warn(
+          `[CacheHandler] invalidation replay backlog passed ${REPLAY_MAX_TAGS} tags while Redis was unreachable; once it is back, every ISR entry of this app is invalidated and the whole app is purged at the edge`,
+        );
+        break;
+      }
+      replayTags.set(tag, replayGeneration);
+    }
+  }
+  // With the breaker open this finds no client and only sets the probe.
+  startInvalidationReplay();
+}
+
+/** Start the replay unless one is running. Never awaited, never throws. */
+function startInvalidationReplay() {
+  if (replayRun || !replayPending()) return;
+  replayRun = trackWrite(
+    runInvalidationReplay()
+      .catch((err) => {
+        console.error('[CacheHandler] Invalidation replay stopped:', err?.message);
+      })
+      .finally(() => {
+        replayRun = null;
+        scheduleReplayProbe();
+      }),
+  );
+}
+
+/**
+ * Probe again when the breaker closes, while anything is left to replay. One
+ * timer at a time, unref'd so it never holds the process open.
+ */
+function scheduleReplayProbe() {
+  if (!useRedis) {
+    // The client could not be loaded at all: memory is the only store now, and
+    // there is nothing a replay could reach.
+    resetInvalidationReplay();
+    return;
+  }
+  if (replayTimer || replayRun || !replayPending()) return;
+  const now = Date.now();
+  const wait = unhealthyUntil > now ? unhealthyUntil - now : RETRY_COOLDOWN_MS;
+  replayTimer = setTimeout(() => {
+    replayTimer = null;
+    startInvalidationReplay();
+  }, wait);
+  replayTimer.unref?.();
+}
+
+async function runInvalidationReplay() {
+  const replayClient = await ensureConnected();
+  if (!replayClient) return;
+  if (replayCollapsed) {
+    await replayCollapsedBacklog(replayClient);
+    return;
+  }
+  const replayed = [];
+  try {
+    for (const [tag, generation] of [...replayTags]) {
+      const count = await invalidateTagInRedis(replayClient, tag);
+      if (replayTags.get(tag) === generation) replayTags.delete(tag);
+      replayed.push(tag);
+      logCacheEvent('INVALIDATE', 'redis', `tag:${tag}`, {
+        details: `Replayed after Redis recovered: invalidated ${count} keys`,
+        tag,
+      });
+    }
+  } finally {
+    startCdnPurge(replayed);
+  }
+}
+
+/** A Redis glob matching `text` literally. */
+function escapeGlob(text) {
+  return text.replace(/[*?[\]\\]/g, '\\$&');
+}
+
+/**
+ * The collapse: invalidate every ISR entry under this app's prefix, then purge
+ * the whole app at the edge. Tag indexes are left alone: deleting one could race
+ * a fresh write that just indexed itself there, and an index pointing at a
+ * deleted key is harmless (the next invalidation deletes nothing).
+ */
+async function replayCollapsedBacklog(client) {
+  const generation = replayGeneration;
+  const pattern = `${escapeGlob(KEY_PREFIX)}:cache:*`;
+  let cursor = '0';
+  let deleted = 0;
+  do {
+    const reply = await redisCall(() =>
+      redisCommand(client, 'SCAN', [cursor, 'MATCH', pattern, 'COUNT', String(REPLAY_SCAN_COUNT)]),
+    );
+    cursor = String(reply?.[0] ?? '0');
+    const keys = Array.isArray(reply?.[1]) ? reply[1].map(String) : [];
+    if (keys.length > 0) {
+      await redisCall(() => redisCommand(client, 'DEL', keys));
+      deleted += keys.length;
+    }
+  } while (cursor !== '0');
+  // A skip recorded during the sweep may have missed it: keep the collapse.
+  if (replayGeneration === generation) replayCollapsed = false;
+  logCacheEvent('INVALIDATE', 'redis', `${KEY_PREFIX}:cache:*`, {
+    details: `Replayed after Redis recovered: backlog over ${REPLAY_MAX_TAGS} tags, invalidated all ${deleted} entries`,
+  });
+  try {
+    enqueueAppPurge();
+  } catch {
+    // Total by contract; the invalidation already happened.
+  }
+}
+
+/**
+ * Drop one tag's entries and its index in Redis, atomically. Returns how many
+ * entries the tag indexed. Throws (with the breaker tripped) on a Redis fault.
+ */
+async function invalidateTagInRedis(client, tag) {
+  const tKey = tagKey(tag);
+  const keys = await redisCall(() => client.smembers(tKey));
+  if (keys.length > 0) {
+    // Same atomicity guard as `set` (T13): dropping the entries and the tag
+    // index must be all-or-nothing, or a death mid-batch leaves the tag set
+    // pointing at keys that no longer exist (or, worse, entries that survive an
+    // invalidation that reported success).
+    const commands = keys.map((k) => ['DEL', cacheKey(k)]);
+    commands.push(['DEL', tKey]);
+    await redisCall(() => execAtomic(client, commands));
+  }
+  return keys.length;
 }
 
 // First-ready purge state per build id (D7: once per process per build -- a
@@ -1725,26 +1930,15 @@ class CacheHandler {
     try {
       if (client) {
         for (const tag of tagList) {
-            const tKey = tagKey(tag);
-            const keys = await redisCall(() => client.smembers(tKey));
-            if (keys.length > 0) {
-              // Same atomicity guard as `set` (T13): dropping the entries and
-              // the tag index must be all-or-nothing, or a death mid-batch
-              // leaves the tag set pointing at keys that no longer exist (or,
-              // worse, entries that survive an invalidation that reported
-              // success).
-              const commands = keys.map((k) => ['DEL', cacheKey(k)]);
-              commands.push(['DEL', tKey]);
-              await redisCall(() => execAtomic(client, commands));
-            }
-            invalidated.push(tag);
-            logCacheEvent('INVALIDATE', source, `tag:${tag}`, {
-              durationMs: Date.now() - startTime,
-              details: `Invalidated ${keys.length} keys`,
-              tag,
-            });
-          }
-          return;
+          const count = await invalidateTagInRedis(client, tag);
+          invalidated.push(tag);
+          logCacheEvent('INVALIDATE', source, `tag:${tag}`, {
+            durationMs: Date.now() - startTime,
+            details: `Invalidated ${count} keys`,
+            tag,
+          });
+        }
+        return;
       }
 
       // In-memory fallback: iterate and delete matching entries.
@@ -1754,7 +1948,8 @@ class CacheHandler {
       // configured but unreachable (breaker open, client unavailable) this
       // clears one pod's memory while the SHARED entries survive: purging the
       // edge now would let other pods refill it from stale Redis, so the purge
-      // is skipped and the edge TTL bounds the staleness (D8).
+      // is held back: the tags are replayed, Redis first and then the edge,
+      // once the breaker closes (see `recordSkippedInvalidation`).
       const reachedSharedStore = !useRedis;
       if (!reachedSharedStore) noteCdnPurgeSkipped(tagList.length);
       for (const tag of tagList) {
@@ -1775,6 +1970,9 @@ class CacheHandler {
     } catch (error) {
       console.error('[CacheHandler] Error revalidating tags:', tagList, error.message);
     } finally {
+      // Whatever did not reach Redis -- the breaker was open, or Redis faulted
+      // part-way through the loop above -- is replayed once the breaker closes.
+      if (useRedis) recordSkippedInvalidation(tagList.filter((tag) => !invalidated.includes(tag)));
       // AFTER the invalidation, and not awaited: a rate-limited CDN must not
       // hold a Server Action open (D6.3). The purger drains under SIGTERM itself.
       startCdnPurge(invalidated);

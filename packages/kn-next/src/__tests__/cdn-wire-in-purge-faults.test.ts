@@ -18,6 +18,9 @@ mock.module("../adapters/cdn-purge/index.js", () => ({
     enqueuePurge() {
         throw new Error("enqueuePurge exploded");
     },
+    enqueueAppPurge() {
+        throw new Error("enqueueAppPurge exploded");
+    },
     firstReadyPurge() {
         fault.calls += 1;
         if (fault.firstReady === "throw") {

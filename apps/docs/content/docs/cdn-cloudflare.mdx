@@ -83,9 +83,9 @@ check your Cache Rule first, then see
 To check purge, revalidate the page from your app (a route that calls `revalidateTag` or
 `revalidatePath`), then request it again. The first request after the purge should be `MISS` (or
 `EXPIRED`) with fresh content, and the next a `HIT`. Cloudflare's purge answer means "received", so
-allow a moment, and remember that a purge that was skipped (for example because Redis was
-unreachable) is only corrected when the TTL ends. Watch `knext_cdn_purge_total` for results other
-than `ok`.
+allow a moment. A purge held back because Redis was unreachable is sent once Redis is back; one
+that was lost (for example, the pod stopped first) is only corrected when the TTL ends. Watch
+`knext_cdn_purge_total` for results other than `ok`.
 
 ## One zone per tenant
 
