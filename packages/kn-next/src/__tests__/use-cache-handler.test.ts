@@ -801,9 +801,10 @@ describe.each([
         await sleep(20);
         const invalidator = await pod();
         await invalidator.useCache.updateTags(["t"]);
+        // A reader whose clock runs behind still sees the stamp as in the past.
         const reader = await pod();
         expect(
-            await reader.useCache.get("ahead", []),
+            await withSkew(-5_000, () => reader.useCache.get("ahead", [])),
             "written before the invalidation, so it is expired on every pod",
         ).toBeUndefined();
     });
@@ -834,17 +835,31 @@ describe.each([
                 Promise.resolve(entryOf({ tags: ["t"], timestamp: nextNow() })),
             ),
         );
+        // The reader's clock runs AHEAD: what it hands Next must be in ITS clock.
         const reader = await pod();
-        const hit = await reader.useCache.get("after", []);
+        const { hit, expiration, readerNow } = await withSkew(
+            5_000,
+            async () => ({
+                hit: await reader.useCache.get("after", []),
+                expiration: await reader.useCache.getExpiration(["t"]),
+                readerNow: nextNow(),
+            }),
+        );
         expect(
             hit,
             "newer than the invalidation, so it survives",
         ).toBeDefined();
-        // Next discards an entry whose timestamp <= getExpiration(its tags): the
-        // two must be in the same (the reader's) clock domain.
-        expect(hit?.timestamp ?? 0).toBeGreaterThan(
-            await reader.useCache.getExpiration(["t"]),
-        );
+        // Next discards an entry whose timestamp <= getExpiration(its tags), and
+        // ages it against its own clock: both must be in the reader's domain.
+        expect(hit?.timestamp ?? 0).toBeGreaterThan(expiration);
+        expect(
+            Math.abs(readerNow - (hit?.timestamp ?? 0)),
+            "the entry's timestamp, in the reader's clock",
+        ).toBeLessThan(1_000);
+        expect(
+            Math.abs(readerNow - expiration),
+            "the tag's expiry, in the reader's clock",
+        ).toBeLessThan(1_000);
     });
 
     it("reads the Redis clock once per process, not once per operation", async () => {
