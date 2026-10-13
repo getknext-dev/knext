@@ -196,6 +196,33 @@ ${NM_ENTRIES}
 EOF
   fi
 
+  # #2296 — the fixture's `file:` dependencies and where each resolves BEFORE
+  # the tarball install ("name<TAB>realpath", one per line). npm links a
+  # `file:` directory to its SOURCE, so the reify re-points an entry the
+  # harness installed inside node_modules (pnpm copies `file:` deps into its
+  # virtual store, as the platform does). A fixture that asserts the
+  # node_modules behaviour (transpile-packages-typescript-foreign at v16.4.0:
+  # an untranspiled TypeScript package must FAIL the build) then builds the
+  # source as app code instead. Restored after the install, below.
+  FILE_DEP_PATHS=""
+  if [ -n "${NM_SNAP}" ]; then
+    FILE_DEP_PATHS="$(node -e '
+      const fs = require("node:fs");
+      const path = require("node:path");
+      const app = process.argv[1];
+      let p = {};
+      try { p = JSON.parse(fs.readFileSync(path.join(app, "package.json"), "utf8")); } catch {}
+      const out = [];
+      for (const field of ["dependencies", "devDependencies", "optionalDependencies"]) {
+        for (const [name, spec] of Object.entries(p[field] || {})) {
+          if (typeof spec !== "string" || !spec.startsWith("file:")) continue;
+          try { out.push(name + "\t" + fs.realpathSync(path.join(app, "node_modules", name))); } catch {}
+        }
+      }
+      process.stdout.write(out.join("\n"));
+    ' "${APP_DIR}")"
+  fi
+
   log "installing adapter tarballs ${LIB_TGZ} + ${DB_TGZ} + ${CORE_TGZ}${TS_PIN:+ + ${TS_PIN}} into ${APP_DIR}"
   # ONE install with ALL tarballs (+ the TS pin when needed): npm resolves
   # @getknext/core's @getknext/lib + @getknext/db deps from the local tarballs instead of
@@ -240,6 +267,21 @@ EOF
       fi
     done <<EOF
 ${NM_ENTRIES}
+EOF
+    # #2296 — put back every fixture `file:` dependency the reify re-pointed
+    # (see FILE_DEP_PATHS above). Only `file:` specs the fixture itself
+    # declares are touched; packages npm placed for the knext tarballs are not.
+    while IFS="$(printf '\t')" read -r dep before; do
+      [ -n "${dep}" ] || continue
+      after="$(node -e 'try { process.stdout.write(require("node:fs").realpathSync(process.argv[1])) } catch {}' "${NM_DIR}/${dep}")"
+      if [ "${after}" != "${before}" ] && { [ -e "${NM_SNAP}/${dep}" ] || [ -L "${NM_SNAP}/${dep}" ]; }; then
+        log "restoring fixture file: dependency node_modules/${dep} (npm install re-pointed it from ${before} to ${after:-<missing>})"
+        rm -rf "${NM_DIR:?}/${dep}"
+        mkdir -p "${NM_DIR}/$(dirname "${dep}")"
+        cp -RP "${NM_SNAP}/${dep}" "${NM_DIR}/${dep}"
+      fi
+    done <<EOF
+${FILE_DEP_PATHS}
 EOF
     rm -rf "${NM_SNAP}"
   fi

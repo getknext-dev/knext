@@ -159,7 +159,9 @@
       "test/e2e/app-dir/segment-cache/metadata/segment-cache-metadata.test.ts",
       "test/e2e/app-dir/non-root-project-monorepo/non-root-project-monorepo.test.ts",
       "test/e2e/app-dir/prerender-encoding/prerender-encoding.test.ts",
-      "test/e2e/app-dir/use-cache-output-export/use-cache-output-export.test.ts"
+      "test/e2e/app-dir/use-cache-output-export/use-cache-output-export.test.ts",
+      "test/e2e/middleware-src-node/middleware-src-node.test.ts",
+      "test/e2e/middleware-src/middleware-src.test.ts"
     ]
   },
   "$knextQuarantines": [
@@ -420,6 +422,16 @@
       "test": "test/e2e/app-dir/use-cache-output-export/use-cache-output-export.test.ts",
       "category": "static-export",
       "rationale": "knext deploys a server (`output: 'standalone'`) only; a valid `output: 'export'` build emits `out/` and no `.next/standalone/server.js`, so there is nothing to boot. The adapter respects `output: 'export'` (it no longer overrides it) and the CLI refuses a static export with an actionable message (a static export is not a server deployment). The compat harness builds with `next build` directly and fails in e2e-deploy.sh with `standalone server.js not found`. This file is the VALID-export case, so it cannot pass here by design. Evidence: node x turbopack run 38205914958 and bun x turbopack run 38209847010, FINAL 3/3. Removal condition: knext gains a static-export serving path. `interception-routes-output-export` is deliberately NOT excluded: it passes through Next's own export validation (the build is rejected, which is what that test asserts) and stays a live positive test of the adapter behaviour."
+    },
+    {
+      "test": "test/e2e/middleware-src/middleware-src.test.ts",
+      "category": "static-export",
+      "rationale": "knext deploys a server (`output: 'standalone'`) only. At Next.js v16.4.0 this file's only deploy-mode case (`should warn about middleware on export`) builds with `output: 'export'` and calls `next.start()`, i.e. it deploys a static export, which a static host serves from `out/` and knext has no server to boot for (the CLI refuses a static export). At v16.3.x the file set `skipDeployment`, so it never ran here. Evidence: v2 node x turbopack run 38384745675 (NEXTJS_REF=v16.4.0), shard 2/16, FINAL 3/3 on that case. Removal condition: knext gains a static-export serving path (same as use-cache-output-export)."
+    },
+    {
+      "test": "test/e2e/middleware-src-node/middleware-src-node.test.ts",
+      "category": "static-export",
+      "rationale": "knext deploys a server (`output: 'standalone'`) only. At Next.js v16.4.0 this file's only deploy-mode case (`should warn about middleware on export`) builds with `output: 'export'` and calls `next.start()`, i.e. it deploys a static export, which a static host serves from `out/` and knext has no server to boot for (the CLI refuses a static export). At v16.3.x the file set `skipDeployment`, so it never ran here. Evidence: v2 node x turbopack run 38384745675 (NEXTJS_REF=v16.4.0), shard 1/16, FINAL 3/3 on that case. Removal condition: knext gains a static-export serving path (same as use-cache-output-export)."
     }
   ],
   "$knextUpstreamRuntimeDefects": [
