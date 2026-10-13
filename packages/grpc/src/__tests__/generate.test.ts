@@ -2,6 +2,7 @@ import { afterAll, describe, expect, it } from 'bun:test';
 import {
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   rmSync,
   symlinkSync,
@@ -313,6 +314,8 @@ describe('knext generate never writes through a symlink', () => {
     const c = capture();
     expect(await runGenerate({ cwd: zone, io: c.io })).toBe(1);
     expect(c.err()).toContain('outside');
+    // Not a file written, and not even an empty directory created out there.
+    expect(readdirSync(dir)).toEqual(['precious.ts']);
     expect(readTree(dir)).toEqual(new Map([['precious.ts', 'export const untouched = true;\n']]));
   });
 
