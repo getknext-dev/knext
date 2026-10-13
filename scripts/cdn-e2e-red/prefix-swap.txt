@@ -1,0 +1,3 @@
+# two-apps-prefix with the two expected prefixes swapped: every stored tag is
+# then outside its app's expected prefix (the check reads the real tags).
+two-apps-prefix|an app's stored entry carries a tag outside its own prefix
