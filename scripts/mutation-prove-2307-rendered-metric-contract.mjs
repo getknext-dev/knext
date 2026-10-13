@@ -280,7 +280,7 @@ const MUTATIONS = [
     edits: [
       {
         subject: 'lite',
-        anchor: '        body = appendExposition(body, readCdnMetrics());',
+        anchor: '        body = appendExposition(body, readSeamMetrics());',
         replacement: '        body = appendExposition(body, "");',
       },
     ],
@@ -306,7 +306,7 @@ const MUTATIONS = [
     edits: [
       {
         subject: 'metrics',
-        anchor: '                appendExposition(await registry.metrics(), readCdnMetrics()),',
+        anchor: '                appendExposition(await registry.metrics(), readSeamMetrics()),',
         replacement: '                appendExposition(await registry.metrics(), ""),',
       },
     ],
@@ -319,8 +319,8 @@ const MUTATIONS = [
     edits: [
       {
         subject: 'selfContained',
-        anchor: '      }) + readCdnMetrics();',
-        replacement: "      }) + '';",
+        anchor: "    readSeam(Symbol.for('knext.core.cdn.renderMetrics')) +",
+        replacement: "    '' +",
       },
     ],
   },

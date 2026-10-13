@@ -74,7 +74,35 @@ const CDN_METRICS_SEAM = Symbol.for("knext.core.cdn.renderMetrics");
  * the app's metrics port, so the counters reach it without a new port.
  */
 export function readCdnMetrics(): string {
-    const render = (globalThis as Record<symbol, unknown>)[CDN_METRICS_SEAM];
+    return readSeam(CDN_METRICS_SEAM);
+}
+
+/**
+ * The `'use cache'` metrics seam the use-cache handler publishes when it is
+ * built (`use-cache-handler.js`). Duplicated by literal for the same reason as
+ * the CDN key; `use-cache-metrics-seam.test.ts` fails when the literals diverge.
+ */
+const USE_CACHE_METRICS_SEAM = Symbol.for("knext.core.useCache.renderMetrics");
+
+/**
+ * The `'use cache'` counters this process holds, in Prometheus text, or `""`
+ * when no use-cache handler was built (no seam) or the render throws. Fail-open,
+ * like {@link readCdnMetrics}.
+ */
+export function readUseCacheMetrics(): string {
+    return readSeam(USE_CACHE_METRICS_SEAM);
+}
+
+/**
+ * Every seam-published family this process holds (CDN, then `'use cache'`),
+ * joined into one exposition: what the loopback listeners append.
+ */
+export function readSeamMetrics(): string {
+    return appendExposition(readCdnMetrics(), readUseCacheMetrics());
+}
+
+function readSeam(key: symbol): string {
+    const render = (globalThis as Record<symbol, unknown>)[key];
     if (typeof render !== "function") return "";
     try {
         const text = render();
@@ -283,8 +311,9 @@ export function startDeepHealthLite(
         } catch {
             body = "";
         }
-        // The CDN counters ride the same loopback listener (CDN mode only).
-        body = appendExposition(body, readCdnMetrics());
+        // The CDN counters (CDN mode only) and the `'use cache'` counters (when
+        // the handler is wired) ride the same loopback listener.
+        body = appendExposition(body, readSeamMetrics());
         res.writeHead(200, {
             "Content-Type": "text/plain; version=0.0.4; charset=utf-8",
         });

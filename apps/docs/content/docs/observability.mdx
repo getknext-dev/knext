@@ -63,6 +63,10 @@ The **default standalone build** exposes a different family, with an `app` label
 | `knext_db_wake_total`, `knext_db_wake_duration_seconds` | Counter, Histogram | Database wake count and latency, labelled `role`. |
 | `knext_deep_health_state` | Gauge | The deep-health verdict per dependency; the active state is `1`. Served with tracing on or off, and present only while the app has used its database in the last 45 seconds (an idle app serves no such series); the only series of this family the shipped scrape collects, and the one the deep-health alerts read. |
 
+The standalone build also serves the `'use cache'` store's counter, `knext_use_cache_events_total`
+(labelled `event`, no `app` label), described in
+[`'use cache'` metrics](/docs/isr-caching#use-cache-metrics).
+
 Ready-made Grafana dashboards ship with knext (see [Dashboards](#dashboards) below). The request
 panels on the RED and load-testing dashboards query the vinext family (`knext_bunexec_*`), so on the
 default standalone build point them at the `knext_http_*` series instead.

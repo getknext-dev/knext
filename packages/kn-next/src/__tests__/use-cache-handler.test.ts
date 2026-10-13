@@ -1088,6 +1088,86 @@ describe.each([
         expect(prunes.length).toBe(2);
     });
 
+    /**
+     * Run `fn` with `Date.now` moved forward by whatever `advance` adds, so one
+     * handler's 30 s prune throttle can elapse inside a test.
+     */
+    async function withClock<T>(
+        fn: (advance: (ms: number) => void) => Promise<T>,
+    ): Promise<T> {
+        const real = Date.now.bind(Date);
+        let skew = 0;
+        const spy = spyOn(Date, "now").mockImplementation(() => real() + skew);
+        try {
+            return await fn((ms) => {
+                skew += ms;
+            });
+        } finally {
+            spy.mockRestore();
+        }
+    }
+
+    it("a prune page with nothing dead does not re-arm the warning while the scan's cycle has a refused delete", async () => {
+        const f = await withRedis({
+            errorFor: (cmd) =>
+                cmd === "eval" ? "scripts disabled" : undefined,
+        });
+        const old = String(Date.now() - 3 * 86_400_000);
+        const live = String(Date.now() + 86_400_000);
+        // One dead stamp on the first HSCAN page, then a second page of live
+        // stamps only: the scan's second step sends no EVAL at all.
+        const hash = new Map([["e:ancient", old]]);
+        for (let i = 0; i < 150; i++) hash.set(`e:live${i}`, live);
+        f.hashes.set(`${PREFIX}:uc:tags`, hash);
+        const warn = console.warn as unknown as ReturnType<typeof jest.fn>;
+        const { useCache } = await pod();
+        await withClock(async (advance) => {
+            await useCache.updateTags(["x"]); // page 1: EVAL refused, warns
+            advance(31_000);
+            await useCache.updateTags(["y"]); // page 2: nothing dead, no EVAL
+            advance(31_000);
+            await useCache.updateTags(["z"]); // page 1 again: refused again
+        });
+        expect(
+            f.commands.filter((c) => c.cmd === "hscan").length,
+            "three prune steps ran",
+        ).toBe(3);
+        expect(f.commands.filter((c) => c.cmd === "eval").length).toBe(2);
+        const prunes = warn.mock.calls.filter((c) =>
+            /prun/i.test(String(c[0])),
+        );
+        expect(
+            prunes.length,
+            "still one warning: no cleanup ever succeeded",
+        ).toBe(1);
+    });
+
+    it("a scan cycle that finishes with nothing dead re-arms the warning", async () => {
+        const f = await withRedis({
+            errorFor: (cmd) =>
+                cmd === "eval" ? "scripts disabled" : undefined,
+        });
+        const old = String(Date.now() - 3 * 86_400_000);
+        const tags = `${PREFIX}:uc:tags`;
+        f.hashes.set(tags, new Map([["e:ancient", old]]));
+        const warn = console.warn as unknown as ReturnType<typeof jest.fn>;
+        const { useCache } = await pod();
+        await withClock(async (advance) => {
+            await useCache.updateTags(["x"]); // refused, warns
+            // Someone else cleaned the hash: the next full cycle finds nothing dead.
+            f.hashes.get(tags)?.delete("e:ancient");
+            advance(31_000);
+            await useCache.updateTags(["y"]); // one page, nothing dead: re-arms
+            f.hashes.get(tags)?.set("e:ancient2", old);
+            advance(31_000);
+            await useCache.updateTags(["z"]); // refused again, warns again
+        });
+        const prunes = warn.mock.calls.filter((c) =>
+            /prun/i.test(String(c[0])),
+        );
+        expect(prunes.length).toBe(2);
+    });
+
     it("corrects the Redis clock read by half the round trip", async () => {
         // The server's clock is 10 s ahead, and each leg of the TIME round trip
         // takes 200 ms. The server reads its clock mid-trip, so the right

@@ -241,6 +241,18 @@ function renderEdgeOnce(): string {
 const CDN_EDGE = seriesNames(parseExposition(renderEdgeOnce()));
 
 /**
+ * The `'use cache'` handler's counter (`use-cache-handler.js`), rendered by the
+ * module itself. Every event is rendered at 0 before anything is counted, so the
+ * family always has sample lines to check. It reaches the app's metrics port
+ * through the use-cache metrics seam on the standalone server; no alert or
+ * dashboard depends on it, so only the docs side (S5) names it.
+ */
+const { renderUseCacheMetrics } = await import(
+    "../adapters/use-cache-handler.js"
+);
+const USE_CACHE = seriesNames(parseExposition(renderUseCacheMetrics()));
+
+/**
  * The Go operator process's own /metrics: the controller's registry AND every
  * collector the admission webhook registers (it runs in the same process and
  * lands on the same endpoint, e.g. knext_platform_budget_fallback_total).
@@ -325,6 +337,7 @@ const EMITTERS = {
     external: EXTERNAL_SERIES,
     "cdn-purge": CDN_PURGE,
     "cdn-edge": CDN_EDGE,
+    "use-cache": USE_CACHE,
 } as const;
 type EmitterId = keyof typeof EMITTERS;
 
@@ -809,6 +822,7 @@ const ALL_EMITTED = allowed([
     "external",
     "cdn-purge",
     "cdn-edge",
+    "use-cache",
 ]);
 
 describe("every metric a DOC names is one something emits (S5)", () => {
@@ -821,6 +835,10 @@ describe("every metric a DOC names is one something emits (S5)", () => {
             "knext_cdn_edge_decision_total",
             "knext_cdn_foreign_edge_strip_total",
         ]);
+    });
+
+    it("the use-cache emitter render finds its counter (an empty render would let a dead name through)", () => {
+        expect([...USE_CACHE]).toEqual(["knext_use_cache_events_total"]);
     });
 
     it("finds doc files at all — a vacuous scan would pass everything", () => {
