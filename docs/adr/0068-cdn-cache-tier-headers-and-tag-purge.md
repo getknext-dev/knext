@@ -503,6 +503,16 @@ Three requirements added at gate r1:
   `x-next-cache-tags`. That copying is relied on, not verified. CDN-3b tests it: a page whose only tag
   comes from `'use cache'` must go HIT → `revalidateTag(thatTag)` → MISS. If that fails, such pages
   fail condition 8 and are not edge-cached until it is fixed.
+  **Verified (2026-10-13, #2302; no decision changed).** The copying holds on Next 16.4.0:
+  `propagateCacheLifeAndTagsToRevalidateStore` (`next/dist/server/use-cache/use-cache-wrapper.js`)
+  pushes the function's tags into the page's prerender store, and they land in the page entry's
+  `x-next-cache-tags` at build and on every runtime re-render. The CDN purge kind lane gates it on
+  Node and Bun with the check `purge-use-cache`: a Cache Components fixture page tagged only through
+  `'use cache'` is an edge HIT whose `Cache-Tag` carries that tag's hash, then `revalidateTag`, the
+  purge, and a MISS with a fresh render. Its red leg rebuilds the same page against a Next with that
+  push removed: the page is still edge-cached on its `_N_T_` tags, without the `'use cache'` tag, and
+  the check goes red. A Next bump that stops the copying therefore reds the lane, rather than leaving
+  such pages edge-cached with no purgeable tag.
 - **Bun parity is proved, not assumed.** The seam depends on two things: an ALS context entered at
   `request` emit, and `writeHead` interception, including the implicit header flush on first `write`
   or `end` (`_implicitHeader`). Both must be shown to hold on **Bun's `node:http`**, not only on
@@ -869,7 +879,8 @@ The rule (lead decision on the issue, option B; jev: B **0.60**, C 0.22, A 0.17,
   `reason="routing_artifact_missing"`, the
   preload logs one line at boot, and CDN-3a's HIT cases fail on an image without the artifact.
 - **`'use cache'`-only tags rely on Next copying them into the page entry.** This is tested in CDN-3b,
-  not verified from source.
+  not verified from source. **Verified (2026-10-13, #2302):** read in the Next 16.4.0 source and
+  gated by the CDN purge kind lane's `purge-use-cache` check and its red leg (see D5).
 - **Only Cloudflare carries a live claim.** The other rows are unit- and emulator-tested only (D2).
 - **Rollback does not purge** if the build's key still exists (D7).
 - **Responses coalesced onto another request's render are not edge-cached** (D5.1). Under a burst on a

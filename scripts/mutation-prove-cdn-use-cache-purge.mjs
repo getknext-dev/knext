@@ -172,12 +172,24 @@ const MUTATIONS = [
     anchor: 'CDN_APP_UC=cdn-uc-mut bash scripts/cdn-e2e-expect-red.sh use-cache-untagged',
     replacement: 'CDN_APP_UC=cdn-uc bash scripts/cdn-e2e-expect-red.sh use-cache-untagged',
   },
+  // The node's room. The apps run after every rollout check (guarded by the
+  // spec's ordering test; a step move is not a one-anchor substitution, so it
+  // has no row here) and with small requests, which these two rows remove.
   {
     id: 'M20',
     subject: 'workflow',
-    claim: "the 'use cache' apps stay, and the rollout's new revisions go Unschedulable",
-    anchor: 'kubectl -n "$APP_NS" delete nextapp cdn-uc cdn-uc-mut --wait=true --timeout=180s',
-    replacement: 'true',
+    claim: 'cdn-uc-mut is deployed at the default size, taking room on the one kind node',
+    anchor: '"$WRITE_CONFIG" cdn-uc-mut purge small',
+    replacement: '"$WRITE_CONFIG" cdn-uc-mut purge',
+  },
+  {
+    id: 'M21',
+    subject: 'workflow',
+    claim: "the helper's small size is the default size",
+    anchor:
+      'small) SCALING="scaling: { minScale: 1, maxScale: 1, cpuRequest: \\"50m\\", memoryRequest: \\"128Mi\\", memoryLimit: \\"512Mi\\" }," ;;',
+    replacement:
+      'small) SCALING="scaling: { minScale: 1, maxScale: 1, cpuRequest: \\"250m\\", memoryRequest: \\"256Mi\\", memoryLimit: \\"512Mi\\" }," ;;',
   },
 ];
 

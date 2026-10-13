@@ -363,15 +363,35 @@ describe('the purge kind lane wires the use-cache check (cdn-purge-kind-e2e.yml)
     expect(wf.indexOf('cp "$RUNNER_TEMP/wrapper.orig.$i.js" "$w"')).toBeGreaterThan(red);
   });
 
-  it("removes both 'use cache' apps after their check, before the churn and rollout steps need the node's room", () => {
-    const red = wf.indexOf('CDN_APP_UC=cdn-uc-mut bash scripts/cdn-e2e-expect-red.sh');
-    const removed = wf.indexOf(
-      'kubectl -n "$APP_NS" delete nextapp cdn-uc cdn-uc-mut --wait=true --timeout=180s',
+  // Measured on kind: deployed before the rollout at the default size, the two
+  // apps left the rollout's new revisions Unschedulable on the one node. They
+  // are never removed (a CR deletion is human-gated); they come last, small.
+  it("deploys the 'use cache' apps only after every rollout check, so they never take the rollout's room", () => {
+    const lastRollout = wf.indexOf(
+      "- name: Assert the rollout — the origin serves the new build's HTML once the revalidation settles",
     );
-    const churn = wf.indexOf('- name: Assert no revision churn on unrelated apps');
-    expect(red).toBeGreaterThan(0);
-    expect(removed).toBeGreaterThan(red);
-    expect(churn).toBeGreaterThan(removed);
+    const deploy = wf.indexOf("- name: kn-next deploy the 'use cache' apps");
+    const check = wf.indexOf("- name: Assert purge — a page tagged only through 'use cache'");
+    const dump = wf.indexOf('- name: Dump state on failure');
+    expect(lastRollout).toBeGreaterThan(0);
+    expect(deploy).toBeGreaterThan(lastRollout);
+    expect(check).toBeGreaterThan(deploy);
+    expect(dump).toBeGreaterThan(check);
+    // No step removes them: nothing deletes a NextApp in this lane.
+    expect(wf.includes('delete nextapp')).toBe(false);
+  });
+
+  it("gives both 'use cache' apps small requests through the config helper", () => {
+    expect(wf).toContain('"$WRITE_CONFIG" cdn-uc purge small\n');
+    expect(wf).toContain('"$WRITE_CONFIG" cdn-uc-mut purge small\n');
+    expect(wf).toContain(
+      'small) SCALING="scaling: { minScale: 1, maxScale: 1, cpuRequest: \\"50m\\", memoryRequest: \\"128Mi\\", memoryLimit: \\"512Mi\\" }," ;;',
+    );
+    // Every other app keeps the size it had before the 'use cache' apps came.
+    expect(wf).toContain(
+      '"") SCALING="scaling: { minScale: 1, maxScale: 1, memoryRequest: \\"256Mi\\", memoryLimit: \\"512Mi\\" }," ;;',
+    );
+    expect(wf).toMatch(/^ {12}\$\{SCALING\}$/m);
   });
 
   it('runs the green check on cdn-uc and the red leg on cdn-uc-mut through the helper', () => {
