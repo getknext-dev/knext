@@ -9,6 +9,7 @@
 import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { NEXT_PEER_RANGE } from "../next-compat";
 
 const pkgDir = join(__dirname, "..", "..");
 const repoRoot = join(pkgDir, "..", "..");
@@ -17,9 +18,10 @@ const read = (p: string) => readFileSync(p, "utf8");
 const PUBLISHABLE = ["kn-next", "lib", "db"];
 
 describe("next peer floor", () => {
-    it("@getknext/core declares next >=16.4.0", () => {
+    it("@getknext/core declares the bounded next range, floor 16.4.0", () => {
         const pkg = JSON.parse(read(join(pkgDir, "package.json")));
-        expect(pkg.peerDependencies.next).toBe(">=16.4.0");
+        expect(pkg.peerDependencies.next).toBe(NEXT_PEER_RANGE);
+        expect(NEXT_PEER_RANGE.startsWith(">=16.4.0 ")).toBe(true);
     });
 
     it("no publishable package declares a lower next peer range", () => {
@@ -28,7 +30,7 @@ describe("next peer floor", () => {
                 read(join(repoRoot, "packages", dir, "package.json")),
             );
             const range = pkg.peerDependencies?.next;
-            if (range !== undefined) expect(range).toBe(">=16.4.0");
+            if (range !== undefined) expect(range).toBe(NEXT_PEER_RANGE);
         }
     });
 
@@ -36,7 +38,7 @@ describe("next peer floor", () => {
         const page = read(
             join(repoRoot, "apps/docs/content/docs/support-matrix.mdx"),
         );
-        expect(page).toContain("`next >=16.4.0`");
+        expect(page).toContain(`\`next ${NEXT_PEER_RANGE}\``);
         expect(page).not.toContain("`next >=16.0.0`");
     });
 });

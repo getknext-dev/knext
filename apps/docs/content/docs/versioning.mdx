@@ -105,15 +105,30 @@ This line runs on these runtimes:
 {/* runtime-floors:start */}
 
 - Node.js `>=24`
-- Next.js `>=16.4.0`
+- Next.js `>=16.4.0 <16.5.0`
 
 {/* runtime-floors:end */}
 
-These are the floors the published `@getknext/core` declares (`engines` and the `next` peer
-dependency), so your package manager warns you when a project is below them. The 1.x releases keep
-the Next.js floor `>=16.0.0` and the Node.js floor `>=22.18`. New apps scaffold with a recent Next.js release rather than the floor.
+These are the floors and bound the published `@getknext/core` declares (`engines` and the `next`
+peer dependency), so your package manager warns you when a project is outside them. The 1.x releases keep the Next.js floor `>=16.0.0` and the Node.js floor `>=22.18`. New apps scaffold with a recent Next.js release rather than the floor.
 
 On a Node.js older than the floor, `knext` stops at start-up with one line naming the floor and exits non-zero, and `knext doctor` reports the running Node.js version against it.
+
+### Which Next.js versions are covered
+
+{/* next-policy:start */}
+
+The `next` peer range is **bounded**: it admits only the Next.js minors knext has compatibility
+evidence for (`>=16.4.0 <16.5.0`), and the upper bound is widened one minor at a time as evidence
+lands. A new Next.js minor therefore shows up as a peer-dependency warning in your package manager
+until a knext release admits it; nothing is installed or run differently.
+
+Inside that range, the minor covered by the compatibility evidence is `16.4`. When the range is
+widened, any newly admitted minor works but is not described by the compatibility results until it
+is added, and `knext doctor` prints a warning when your installed Next.js is not one of the covered
+minors.
+
+{/* next-policy:end */}
 
 The opt-in **vinext** build target, which compiles to a Bun single-executable, is **Beta** on every
 1.x release. It follows the same release policy as the rest of the package, but it may still change
