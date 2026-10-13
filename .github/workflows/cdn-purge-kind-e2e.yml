@@ -1,0 +1,489 @@
+name: CDN purge — kind e2e (tag purge through the emulator)
+
+# Proof lane for the CDN cache tier's purge (ADR-0068 D6/D7/D9, CDN-3b): real
+# apps deployed through `kn-next deploy` (packed tarballs, the operator built
+# from this commit, Knative + Kourier on kind), behind the same test-only,
+# Vary-ignoring, Cloudflare-shaped cache emulator as cdn-headers-kind-e2e.yml.
+# The emulator also serves the purge API the knext `emulator` provider row
+# calls (POST /client/v4/zones/<zone>/purge_cache {"tags":[…]}, Bearer the
+# row's fixed dummy token, read here from cdn-purge/rows.js). A small shim was
+# chosen over Varnish + vmod_xkey (jev: shim 0.97, Varnish 0.03): VCL cannot
+# parse the JSON purge body without extra vmods, so Varnish would need a shim
+# anyway; default Varnish honours Vary; and the open-source Varnish Cache
+# repository was archived in 2026-02 and renamed Vinyl Cache, while
+# varnish-modules (xkey, BSD-2-Clause, 0.29.0 on 2026-09-21) tracks Varnish
+# Software's line.
+#
+# Apps (one Redis, each its own key prefix), all from the fixture
+# packages/kn-next/src/__tests__/fixtures/cdn-kind-app (why not file-manager:
+# see cdn-headers-kind-e2e.yml), htmlTTLSeconds 3600 so only a purge evicts:
+#   cdn-a     spec.cdn + purge            (built)
+#   cdn-b     spec.cdn + purge            (cdn-a's image, by digest)
+#   cdn-np    spec.cdn, NO purge          (the negative control for every purge check)
+#   cdn-late  no spec.cdn until the churn step sets it
+#
+# scripts/cdn-e2e-purge-assert.mjs:
+#   purge-revalidate     HIT -> revalidateTag in the app -> purge of the page's
+#                        tag reaches the emulator -> MISS with a fresh render
+#   purge-isolation      purging app A's tag leaves app B's entry a HIT
+#   purge-429-recovery   one 429 with Retry-After, the purger's retry purges
+#   revisions-*          setting spec.cdn on cdn-late creates no new revision on
+#                        cdn-a, cdn-b or cdn-np
+#   rollout-*            after a rollout to a new build, the first-ready purge
+#                        of the app tag arrives and no pre-rollout entry is
+#                        served from the edge (the D7 rule)
+# plus scripts/cdn-e2e-assert.mjs's never-set-cookie / never-authorization on
+# the purge-enabled app.
+#
+# KNOWN DEFECT, pinned rather than hidden: the #2261 criterion read literally
+# ("no old-build HTML is served after the first-ready purge") does NOT hold —
+# ISR HTML is shared across builds (ADR-0066), so the new build serves the
+# previous build's body and the edge stores it under the new build's tag
+# (#2299). `rollout-no-old-html` runs as EXPECTED RED with its own message; the
+# day #2299 is fixed that step reds because the check passes, and it must be
+# promoted to a plain assertion.
+#
+# Teeth — every check has a red leg through scripts/cdn-e2e-expect-red.sh (exit
+# code AND the FAIL line naming the intended check):
+#   cdn-np standing in for app A (no purge configured): purge-revalidate and
+#   rollout-after go red; app A standing in for app B: purge-isolation goes red;
+#   a 400 instead of a 429: purge-429-recovery goes red; cdn-late listed as
+#   "unrelated": revisions-after goes red; the store-all emulator: the
+#   never-cached checks go red.
+#
+# Triggers: path-filtered PR plus manual dispatch, like the sibling kind lanes
+# (jev: 1.00). No schedule, no push. Non-required. Ephemeral kind only.
+
+on:
+  pull_request:
+    paths:
+      - 'packages/kn-next/src/adapters/cdn-edge.cjs'
+      - 'packages/kn-next/src/adapters/cache-control-normalize.cjs'
+      - 'packages/kn-next/src/adapters/cache-handler*.js'
+      - 'packages/kn-next/src/adapters/cdn-purge/**'
+      - 'packages/kn-next/src/adapters/cdn-routing-artifact.ts'
+      - 'packages/kn-next/src/adapters/next-adapter.ts'
+      - 'packages/kn-next/src/cli/cr-builder.ts'
+      - 'packages/kn-next-operator/internal/controller/cdn.go'
+      - 'packages/kn-next-operator/api/v1alpha1/nextapp_types.go'
+      - 'packages/kn-next/src/__tests__/fixtures/cdn-kind-app/**'
+      - 'packages/kn-next/src/__tests__/fixtures/cdn-emulator/**'
+      - 'scripts/cdn-e2e-*'
+      - 'scripts/cdn-e2e-red/**'
+      - '.github/workflows/cdn-purge-kind-e2e.yml'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  cdn-purge-e2e:
+    name: ${{ matrix.runtime }} CDN tag purge through the emulator on kind
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        runtime: [node, bun]
+    env:
+      CLUSTER: cdn-purge
+      APP_NS: cdn-e2e
+      PUBLIC_HOST_1: a.example.test
+      PUBLIC_HOST_2: b.example.test
+      NODE_IMAGE: node:24-alpine@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1
+      CDN_STATE_DIR: /tmp/cdn-e2e-state
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Route Docker Hub pulls through mirror.gcr.io (anonymous rate limit)
+        id: docker-hub-mirror
+        uses: ./.github/actions/docker-hub-mirror
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: packages/kn-next-operator/go.mod
+          cache-dependency-path: packages/kn-next-operator/go.sum
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+
+      - name: Setup bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
+
+      - name: Install kind
+        uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
+        with:
+          install_only: true
+
+      - name: Install workspace dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build the workspace packages + the kn-next CLI
+        run: |
+          set -euo pipefail
+          bun run --filter "@getknext/lib" build
+          bun run --filter "@getknext/db" build
+          bun run --filter "@getknext/core" build
+          test -f packages/kn-next/dist/cli/kn-next.js
+
+      - name: Pack knext tarballs (npm pack — the real publish tool)
+        run: |
+          set -euo pipefail
+          DEST="${RUNNER_TEMP}/knext-tarballs"
+          node scripts/pack-release-tarballs.mjs --dest "${DEST}" \
+            --dirs packages/lib,packages/db,packages/kn-next
+          echo "TARBALLS_DIR=${DEST}" >> "$GITHUB_ENV"
+
+      - name: Stage the fixture app outside the repo + install its dependencies
+        run: |
+          set -euo pipefail
+          APP_DIR="${RUNNER_TEMP}/cdn-app"
+          cp -R packages/kn-next/src/__tests__/fixtures/cdn-kind-app "$APP_DIR"
+          cd "$APP_DIR"
+          bun install
+          node -e "const v=require('./node_modules/next/package.json').version; if (v !== '16.4.0') { console.error('next is ' + v); process.exit(1) }"
+          mkdir -p public
+          LIB_TGZ="$(find "${TARBALLS_DIR}" -maxdepth 1 -name 'getknext-lib-*.tgz' | sort | tail -n1)"
+          DB_TGZ="$(find "${TARBALLS_DIR}" -maxdepth 1 -name 'getknext-db-*.tgz' | sort | tail -n1)"
+          CORE_TGZ="$(find "${TARBALLS_DIR}" -maxdepth 1 -name 'getknext-core-*.tgz' | sort | tail -n1)"
+          npm install --no-save --no-audit --no-fund "${LIB_TGZ}" "${DB_TGZ}" "${CORE_TGZ}"
+          test -d node_modules/@getknext/core
+          echo "APP_DIR=$APP_DIR" >> "$GITHUB_ENV"
+          echo "DEPLOY_TAG=cdnp${GITHUB_RUN_ID}-${{ matrix.runtime }}" >> "$GITHUB_ENV"
+          mkdir -p "$CDN_STATE_DIR"
+
+      - name: Create kind cluster (registry certs.d config_path)
+        run: |
+          set -euo pipefail
+          cat <<'YAML' | kind create cluster --name "$CLUSTER" --wait 120s --config=-
+          kind: Cluster
+          apiVersion: kind.x-k8s.io/v1alpha4
+          containerdConfigPatches:
+          - |-
+            [plugins."io.containerd.grpc.v1.cri".registry]
+              config_path = "/etc/containerd/certs.d"
+          YAML
+
+      - name: Start in-cluster registry + wire the kind node to it
+        run: |
+          set -euo pipefail
+          reg=kind-registry
+          docker run -d --restart=always -p 127.0.0.1:5001:5000 --name "$reg" \
+            registry:2.8.3@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
+          docker network connect kind "$reg"
+          node="${CLUSTER}-control-plane"
+          docker exec "$node" mkdir -p /etc/containerd/certs.d/localhost:5001
+          printf '[host."http://%s:5000"]\n' "$reg" \
+            | docker exec -i "$node" cp /dev/stdin /etc/containerd/certs.d/localhost:5001/hosts.toml
+
+      - name: Install cert-manager
+        run: |
+          set -euo pipefail
+          scripts/kind-manifests/apply-cert-manager.sh
+          kubectl wait --for=condition=Available --timeout=300s \
+            -n cert-manager deployment/cert-manager deployment/cert-manager-webhook deployment/cert-manager-cainjector
+
+      - name: Install Knative Serving + Kourier
+        run: |
+          set -euo pipefail
+          V="knative-v1.16.0"
+          scripts/kind-manifests/apply-knative-kourier.sh "${V}"
+          kubectl patch configmap/config-network -n knative-serving --type merge \
+            --patch '{"data":{"ingress-class":"kourier.ingress.networking.knative.dev"}}'
+          kubectl wait --for=condition=Available --timeout=300s \
+            -n knative-serving deployment/controller deployment/webhook deployment/autoscaler deployment/net-kourier-controller
+
+      - name: Build + deploy the operator from this commit
+        working-directory: packages/kn-next-operator
+        run: |
+          set -euo pipefail
+          IMG=example.com/kn-next-operator:e2e
+          for attempt in 1 2 3; do
+            make docker-build IMG="$IMG" && break
+            [ "$attempt" = 3 ] && { echo "::error::operator image build failed 3x"; exit 1; }
+            echo "docker-build attempt $attempt failed; retrying"; sleep 10
+          done
+          kind load docker-image "$IMG" --name "$CLUSTER"
+          make install
+          make deploy IMG="$IMG"
+          kubectl rollout status deployment/kn-next-operator-controller-manager \
+            -n kn-next-operator-system --timeout=180s
+          kubectl wait --for=condition=Ready --timeout=120s \
+            -n kn-next-operator-system certificate/kn-next-operator-serving-cert
+          kubectl wait --for=jsonpath='{.subsets[0].addresses[0]}' --timeout=120s \
+            -n kn-next-operator-system endpoints/kn-next-operator-webhook-service
+          "${GITHUB_WORKSPACE}/scripts/kind-manifests/wait-for-webhook-ready.sh"
+
+      # Secrets, never config: the revalidate route's Bearer token, and the purge
+      # Secret spec.cdn.purge.secretRef names (the emulator row never reads it —
+      # ADR-0068 D2 — but the pod's secretKeyRef needs it to exist).
+      - name: Data plane (Redis, Secrets) + the cache emulators
+        run: |
+          set -euo pipefail
+          kubectl create namespace "$APP_NS"
+          REVALIDATE_TOKEN="$(openssl rand -hex 16)"
+          echo "::add-mask::$REVALIDATE_TOKEN"
+          echo "CDN_REVALIDATE_TOKEN=$REVALIDATE_TOKEN" >> "$GITHUB_ENV"
+          kubectl -n "$APP_NS" create secret generic cdn-credentials \
+            --from-literal=CACHE_INVALIDATE_TOKEN="$REVALIDATE_TOKEN"
+          PURGE_SECRET="$(openssl rand -hex 16)"
+          echo "::add-mask::$PURGE_SECRET"
+          kubectl -n "$APP_NS" create secret generic cdn-purge --from-literal=token="$PURGE_SECRET"
+          # The token the emulator accepts is the knext emulator row's own, read
+          # from its one source rather than written into this file.
+          EMU_TOKEN="$(node --input-type=module -e "import { EMULATOR_DUMMY_TOKEN } from '${GITHUB_WORKSPACE}/packages/kn-next/src/adapters/cdn-purge/rows.js'; process.stdout.write(EMULATOR_DUMMY_TOKEN)")"
+          test -n "$EMU_TOKEN"
+          kubectl -n "$APP_NS" create secret generic cdn-emulator --from-literal=EMU_PURGE_TOKEN="$EMU_TOKEN"
+          kubectl -n "$APP_NS" create configmap cdn-emulator \
+            --from-file=cdn-emulator.mjs=packages/kn-next/src/__tests__/fixtures/cdn-emulator/cdn-emulator.mjs
+          emulator() { # <name> <mode>
+            cat <<YAML
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata: { name: $1, namespace: $APP_NS }
+          spec:
+            replicas: 1
+            selector: { matchLabels: { app: $1 } }
+            template:
+              metadata: { labels: { app: $1 } }
+              spec:
+                automountServiceAccountToken: false
+                containers:
+                  - name: emulator
+                    image: ${NODE_IMAGE}
+                    command: ["node", "/emu/cdn-emulator.mjs"]
+                    env:
+                      - { name: EMU_MODE, value: "$2" }
+                      - { name: EMU_UPSTREAM, value: "http://kourier-internal.kourier-system.svc.cluster.local" }
+                    envFrom: [{ secretRef: { name: cdn-emulator } }]
+                    ports: [{ containerPort: 8080 }, { containerPort: 8081 }]
+                    readinessProbe: { httpGet: { path: /healthz, port: 8081 }, periodSeconds: 2 }
+                    securityContext: { runAsNonRoot: true, runAsUser: 1000, allowPrivilegeEscalation: false }
+                    volumeMounts: [{ name: emu, mountPath: /emu, readOnly: true }]
+                volumes: [{ name: emu, configMap: { name: cdn-emulator } }]
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata: { name: $1, namespace: $APP_NS }
+          spec:
+            selector: { app: $1 }
+            ports: [{ name: cache, port: 8080 }, { name: admin, port: 8081 }]
+          ---
+          YAML
+          }
+          {
+            emulator cdn-emulator honour
+            emulator cdn-emulator-storeall store-all
+            cat <<YAML
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata: { name: redis, namespace: $APP_NS }
+          spec:
+            replicas: 1
+            selector: { matchLabels: { app: redis } }
+            template:
+              metadata: { labels: { app: redis } }
+              spec:
+                containers:
+                  - name: redis
+                    image: redis:7-alpine@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2
+                    ports: [{ containerPort: 6379 }]
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata: { name: redis, namespace: $APP_NS }
+          spec:
+            selector: { app: redis }
+            ports: [{ port: 6379 }]
+          YAML
+          } | kubectl apply -f -
+          for d in redis cdn-emulator cdn-emulator-storeall; do
+            kubectl -n "$APP_NS" rollout status "deploy/$d" --timeout=180s || {
+              kubectl -n "$APP_NS" describe pods -l "app=$d" | tail -40
+              kubectl -n "$APP_NS" logs -l "app=$d" --tail=50 --previous || kubectl -n "$APP_NS" logs -l "app=$d" --tail=50 || true
+              exit 1
+            }
+          done
+
+      # The config writer every deploy below uses, so a step never repeats it.
+      - name: Write the knext.config.ts helper
+        run: |
+          set -euo pipefail
+          cat > "${RUNNER_TEMP}/write-config.sh" <<'SH'
+          #!/usr/bin/env bash
+          # write-config.sh <name> <purge|nopurge|none> — knext.config.ts for one app
+          set -euo pipefail
+          case "$2" in
+            purge) CDN="cdn: { provider: \"emulator\", emulatorEndpoint: \"http://cdn-emulator.${APP_NS}.svc.cluster.local:8081\", htmlTTLSeconds: 3600, purge: { secretRef: { name: \"cdn-purge\", key: \"token\" }, target: \"e2e-zone\" } }," ;;
+            nopurge) CDN="cdn: { provider: \"emulator\", emulatorEndpoint: \"http://cdn-emulator.${APP_NS}.svc.cluster.local:8081\", htmlTTLSeconds: 3600 }," ;;
+            none) CDN="" ;;
+            *) echo "write-config.sh: unknown mode $2" >&2; exit 2 ;;
+          esac
+          cat > knext.config.ts <<EOF
+          const config = {
+            name: "$1",
+            runtime: "${RUNTIME}",
+            registry: "localhost:5001",
+            healthCheckPath: "/api/health",
+            cache: { provider: "redis", url: "redis://redis.${APP_NS}.svc.cluster.local.:6379", keyPrefix: "$1" },
+            scaling: { minScale: 1, maxScale: 1, memoryRequest: "256Mi", memoryLimit: "512Mi" },
+            networking: { publicHosts: ["${PUBLIC_HOST_1}", "${PUBLIC_HOST_2}"] },
+            secrets: { envFrom: ["cdn-credentials"] },
+            ${CDN}
+          };
+          export default config;
+          EOF
+          SH
+          chmod +x "${RUNNER_TEMP}/write-config.sh"
+          {
+            echo "WRITE_CONFIG=${RUNNER_TEMP}/write-config.sh"
+            echo "RUNTIME=${{ matrix.runtime }}"
+            echo "CLI=${GITHUB_WORKSPACE}/packages/kn-next/dist/cli/kn-next.js"
+          } >> "$GITHUB_ENV"
+
+      - name: kn-next deploy (${{ matrix.runtime }})
+        run: |
+          set -euo pipefail
+          cd "$APP_DIR"
+          "$WRITE_CONFIG" cdn-a purge
+          node "$CLI" deploy --registry localhost:5001 --namespace "$APP_NS" --tag "$DEPLOY_TAG"
+          IMAGE="$(kubectl -n "$APP_NS" get nextapp cdn-a -o jsonpath='{.spec.image}')"
+          case "$IMAGE" in *@sha256:*) ;; *) echo "::error::cdn-a image is not digest-pinned: $IMAGE"; exit 1 ;; esac
+          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
+          "$WRITE_CONFIG" cdn-b purge
+          node "$CLI" deploy --namespace "$APP_NS" --tag "$DEPLOY_TAG" --image "$IMAGE"
+          "$WRITE_CONFIG" cdn-np nopurge
+          node "$CLI" deploy --namespace "$APP_NS" --tag "$DEPLOY_TAG" --image "$IMAGE"
+          "$WRITE_CONFIG" cdn-late none
+          node "$CLI" deploy --namespace "$APP_NS" --tag "$DEPLOY_TAG" --image "$IMAGE"
+          for app in cdn-a cdn-b cdn-np cdn-late; do
+            kubectl -n "$APP_NS" wait --for=condition=Ready --timeout=300s "nextapp/$app" \
+              || (kubectl -n "$APP_NS" get nextapp,ksvc,pods -o wide; kubectl -n "$APP_NS" describe "nextapp/$app"; exit 1)
+          done
+
+      - name: Port-forward the emulators
+        run: |
+          set -euo pipefail
+          kubectl -n "$APP_NS" port-forward svc/cdn-emulator 18080:8080 18081:8081 >/tmp/pf-emu.log 2>&1 &
+          kubectl -n "$APP_NS" port-forward svc/cdn-emulator-storeall 18090:8080 18091:8081 >/tmp/pf-emu-all.log 2>&1 &
+          for port in 18081 18091; do
+            for _ in $(seq 1 60); do
+              curl -fsS "http://127.0.0.1:${port}/healthz" >/dev/null 2>&1 && break
+              sleep 1
+            done
+            curl -fsS "http://127.0.0.1:${port}/healthz" >/dev/null || { echo "::error::emulator admin :$port unreachable"; cat /tmp/pf-emu*.log; exit 1; }
+          done
+          for app in cdn-a cdn-b cdn-np cdn-late; do
+            curl -fsS -o /dev/null -H "Host: ${app}.${APP_NS}.svc.cluster.local" -H 'x-emu-bypass: 1' \
+              --retry 10 --retry-all-errors --max-time 60 http://127.0.0.1:18080/api/health
+          done
+          echo "purges so far (each pod's first-ready purge):"; curl -s http://127.0.0.1:18081/__emu/purges
+
+      - name: Assert purge — revalidateTag, isolation, 429 recovery; never-cached on the purge app
+        run: |
+          set -euo pipefail
+          node scripts/cdn-e2e-purge-assert.mjs --only purge-revalidate,purge-isolation,purge-429-recovery
+          node scripts/cdn-e2e-assert.mjs --only never-set-cookie,never-authorization
+
+      - name: Red legs — purge checks against the wrong subject, never-cached against store-all
+        run: |
+          set -euo pipefail
+          CDN_APP_A=cdn-np CDN_PURGE_WAIT_MS=8000 bash scripts/cdn-e2e-expect-red.sh no-purge scripts/cdn-e2e-red/purge-no-purge.txt -- \
+            node scripts/cdn-e2e-purge-assert.mjs --only purge-revalidate
+          CDN_APP_B=cdn-a bash scripts/cdn-e2e-expect-red.sh same-app scripts/cdn-e2e-red/purge-same-app.txt -- \
+            node scripts/cdn-e2e-purge-assert.mjs --only purge-isolation
+          CDN_FAIL_STATUS=400 CDN_PURGE_WAIT_MS=8000 bash scripts/cdn-e2e-expect-red.sh fatal-purge scripts/cdn-e2e-red/purge-fatal.txt -- \
+            node scripts/cdn-e2e-purge-assert.mjs --only purge-429-recovery
+          CDN_EMU_URL=http://127.0.0.1:18090 CDN_EMU_ADMIN_URL=http://127.0.0.1:18091 \
+            bash scripts/cdn-e2e-expect-red.sh store-all-auth scripts/cdn-e2e-red/purge-store-all.txt -- \
+            node scripts/cdn-e2e-assert.mjs --only never-set-cookie,never-authorization
+
+      # Setting spec.cdn on ONE CR (cdn-late) must roll only that app.
+      - name: Assert no revision churn on unrelated apps when spec.cdn is set on one CR
+        run: |
+          set -euo pipefail
+          export CDN_STATE_FILE="$CDN_STATE_DIR/revisions.json"
+          node scripts/cdn-e2e-purge-assert.mjs --only revisions-before
+          old="$(kubectl -n "$APP_NS" get ksvc cdn-late -o jsonpath='{.status.latestReadyRevisionName}')"
+          cd "$APP_DIR"
+          "$WRITE_CONFIG" cdn-late nopurge
+          node "$CLI" deploy --namespace "$APP_NS" --tag "$DEPLOY_TAG" --image "$IMAGE"
+          for _ in $(seq 1 90); do
+            now="$(kubectl -n "$APP_NS" get ksvc cdn-late -o jsonpath='{.status.latestReadyRevisionName}')"
+            [ -n "$now" ] && [ "$now" != "$old" ] && break
+            sleep 2
+          done
+          # Give the operator a reconcile window to (wrongly) touch other apps.
+          sleep 30
+          cd "$GITHUB_WORKSPACE"
+          CDN_CHURN_CHANGED=cdn-late CDN_CHURN_UNRELATED=cdn-a,cdn-b,cdn-np \
+            node scripts/cdn-e2e-purge-assert.mjs --only revisions-after
+          CDN_CHURN_CHANGED=cdn-late CDN_CHURN_UNRELATED=cdn-a,cdn-late \
+            bash scripts/cdn-e2e-expect-red.sh churn-detector scripts/cdn-e2e-red/purge-churn.txt -- \
+            node scripts/cdn-e2e-purge-assert.mjs --only revisions-after
+
+      - name: Store old-build pages at the edge, then roll cdn-a and cdn-np to a new build
+        run: |
+          set -euo pipefail
+          CDN_STATE_FILE="$CDN_STATE_DIR/rollout-a.json" node scripts/cdn-e2e-purge-assert.mjs --only rollout-before
+          CDN_APP_A=cdn-np CDN_STATE_FILE="$CDN_STATE_DIR/rollout-np.json" node scripts/cdn-e2e-purge-assert.mjs --only rollout-before
+          old_a="$(kubectl -n "$APP_NS" get ksvc cdn-a -o jsonpath='{.status.latestReadyRevisionName}')"
+          old_np="$(kubectl -n "$APP_NS" get ksvc cdn-np -o jsonpath='{.status.latestReadyRevisionName}')"
+          cd "$APP_DIR"
+          "$WRITE_CONFIG" cdn-a purge
+          node "$CLI" deploy --registry localhost:5001 --namespace "$APP_NS" --tag "${DEPLOY_TAG}-v2"
+          IMAGE2="$(kubectl -n "$APP_NS" get nextapp cdn-a -o jsonpath='{.spec.image}')"
+          [ "$IMAGE2" != "$IMAGE" ] || { echo "::error::the v2 build produced the same image"; exit 1; }
+          "$WRITE_CONFIG" cdn-np nopurge
+          node "$CLI" deploy --namespace "$APP_NS" --tag "${DEPLOY_TAG}-v2" --image "$IMAGE2"
+          # Ready on the NEW revision, with all traffic on it.
+          for pair in "cdn-a:$old_a" "cdn-np:$old_np"; do
+            app="${pair%%:*}"; old="${pair#*:}"
+            for _ in $(seq 1 120); do
+              ready="$(kubectl -n "$APP_NS" get ksvc "$app" -o jsonpath='{.status.latestReadyRevisionName}')"
+              routed="$(kubectl -n "$APP_NS" get ksvc "$app" -o jsonpath='{.status.traffic[0].revisionName}')"
+              [ -n "$ready" ] && [ "$ready" != "$old" ] && [ "$routed" = "$ready" ] && break
+              sleep 2
+            done
+            if [ "$ready" = "$old" ] || [ "$routed" != "$ready" ]; then
+              echo "::error::$app did not roll to a new revision ($old -> $ready, routed $routed)"; exit 1
+            fi
+            echo "ok: $app rolled $old -> $ready"
+          done
+
+      - name: Assert the rollout — the first-ready purge evicts every pre-rollout entry
+        run: |
+          set -euo pipefail
+          CDN_STATE_FILE="$CDN_STATE_DIR/rollout-a.json" CDN_PURGE_WAIT_MS=60000 \
+            node scripts/cdn-e2e-purge-assert.mjs --only rollout-after
+          CDN_APP_A=cdn-np CDN_STATE_FILE="$CDN_STATE_DIR/rollout-np.json" CDN_PURGE_WAIT_MS=8000 \
+            bash scripts/cdn-e2e-expect-red.sh no-purge-rollout scripts/cdn-e2e-red/purge-rollout-no-purge.txt -- \
+            node scripts/cdn-e2e-purge-assert.mjs --only rollout-after
+
+      - name: KNOWN DEFECT (#2299) — old-build HTML after the purge, expected red until fixed
+        run: |
+          CDN_STATE_FILE="$CDN_STATE_DIR/rollout-a.json" \
+            bash scripts/cdn-e2e-expect-red.sh known-defect-2299 scripts/cdn-e2e-red/purge-known-defect-2299.txt -- \
+            node scripts/cdn-e2e-purge-assert.mjs --only rollout-no-old-html
+
+      - name: Dump state on failure
+        if: failure()
+        run: |
+          kubectl -n "$APP_NS" get nextapp,ksvc,revisions,pods -o wide || true
+          for app in cdn-a cdn-b cdn-np cdn-late; do
+            kubectl -n "$APP_NS" logs -l "serving.knative.dev/service=${app}" -c user-container --tail=60 --prefix || true
+          done
+          kubectl -n "$APP_NS" logs deploy/cdn-emulator --tail=50 || true
+          curl -s http://127.0.0.1:18081/__emu/purges | head -c 4000 || true
+          curl -s http://127.0.0.1:18081/__emu/entries | head -c 4000 || true
+          kubectl -n kn-next-operator-system logs deployment/kn-next-operator-controller-manager --tail=100 || true
+
+      - name: Tear down
+        if: always()
+        run: |
+          kind delete cluster --name "$CLUSTER" || true
+          docker rm -f kind-registry || true

@@ -132,9 +132,9 @@ export function diffResponses(a, b) {
 
 const EDGE_HEADERS = ['cloudflare-cdn-cache-control', 'cdn-cache-control', 'cache-tag'];
 const isFlight = (r) => String(r.headers['content-type'] || '').startsWith('text/x-component');
-const isHtml = (r) => String(r.headers['content-type'] || '').startsWith('text/html');
-const stored = (r) => r.headers['x-emu-stored'] !== undefined;
-const hit = (r) => r.headers['x-emu-cache'] === 'HIT';
+export const isHtml = (r) => String(r.headers['content-type'] || '').startsWith('text/html');
+export const stored = (r) => r.headers['x-emu-stored'] !== undefined;
+export const hit = (r) => r.headers['x-emu-cache'] === 'HIT';
 const edgeDirective = (r) => EDGE_HEADERS.filter((h) => r.headers[h] !== undefined);
 
 export function config(env = process.env) {
@@ -166,8 +166,8 @@ export function config(env = process.env) {
   };
 }
 
-class CheckFailure extends Error {}
-const must = (cond, message) => {
+export class CheckFailure extends Error {}
+export const must = (cond, message) => {
   if (!cond) throw new CheckFailure(message);
 };
 
@@ -684,6 +684,15 @@ async function main(argv) {
     console.log(`\n${r.text.slice(0, 400)}`);
     return 0;
   }
+  return runChecks(checks(c), argv);
+}
+
+/**
+ * Run `all` (an array of `{ id, run }`) honouring `--only` / `--skip`: every
+ * selected check runs, each prints `ok [id] …` or `FAIL [id] …`, and the result
+ * is the exit code (1 if any failed, 2 for an unknown id).
+ */
+export async function runChecks(all, argv) {
   const pick = (flag) => {
     const at = argv.indexOf(flag);
     return at === -1
@@ -696,7 +705,6 @@ async function main(argv) {
   };
   const only = pick('--only');
   const skip = pick('--skip') ?? new Set();
-  const all = checks(c);
   for (const id of [...(only ?? []), ...skip]) {
     if (!all.some((x) => x.id === id)) {
       console.error(`::error::unknown check id ${id}`);

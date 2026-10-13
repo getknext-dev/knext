@@ -18,10 +18,14 @@ import { join, resolve } from 'node:path';
  */
 const ROOT = resolve(import.meta.dir, '..');
 const ASSERT = join(ROOT, 'scripts/cdn-e2e-assert.mjs');
+const PURGE_ASSERT = join(ROOT, 'scripts/cdn-e2e-purge-assert.mjs');
 const MUTATE = join(ROOT, 'scripts/cdn-e2e-mutate-preload.mjs');
 const HELPER = join(ROOT, 'scripts/cdn-e2e-expect-red.sh');
 const RED_DIR = join(ROOT, 'scripts/cdn-e2e-red');
-const WORKFLOW = join(ROOT, '.github/workflows/cdn-headers-kind-e2e.yml');
+const WORKFLOWS = [
+  join(ROOT, '.github/workflows/cdn-headers-kind-e2e.yml'),
+  join(ROOT, '.github/workflows/cdn-purge-kind-e2e.yml'),
+];
 const CDN_EDGE = join(ROOT, 'packages/kn-next/src/adapters/cdn-edge.cjs');
 
 /** cdn-edge.cjs as the bundler emits it into dist/adapters/cache-control-normalize.cjs. */
@@ -81,8 +85,11 @@ describe('expected-red specs (scripts/cdn-e2e-red)', () => {
 
   it('every line names a real check and a message that check prints', async () => {
     const { checks, config } = await import(ASSERT);
-    const ids = new Set((checks(config({})) as Array<{ id: string }>).map((c) => c.id));
-    const source = readFileSync(ASSERT, 'utf8');
+    const { purgeChecks, purgeConfig } = await import(PURGE_ASSERT);
+    const ids = new Set(
+      [...checks(config({})), ...purgeChecks(purgeConfig({}))].map((c: { id: string }) => c.id),
+    );
+    const source = readFileSync(ASSERT, 'utf8') + readFileSync(PURGE_ASSERT, 'utf8');
     expect(files.length).toBeGreaterThan(0);
     for (const file of files) {
       const lines = specLines(file);
@@ -108,7 +115,7 @@ describe('expected-red specs (scripts/cdn-e2e-red)', () => {
   });
 
   it('every spec file is used by the workflow, through the helper', () => {
-    const wf = readFileSync(WORKFLOW, 'utf8');
+    const wf = WORKFLOWS.map((w) => readFileSync(w, 'utf8')).join('\n');
     for (const file of files) {
       expect({
         file,
@@ -145,6 +152,15 @@ describe('zero-diff comparator', () => {
     expect(diffResponses(r(base), r([...base, 'Cache-Tag', 'kn-x']))).toEqual([
       'header #2: null != "cache-tag: kn-x"',
     ]);
+  });
+
+  it('the purge checks encode tags exactly as the runtime does (independent implementation, same bytes)', async () => {
+    const { appTagOf, nextTagOf, PAGE_TAG } = await import(PURGE_ASSERT);
+    const tags = await import(join(ROOT, 'packages/kn-next/src/adapters/cdn-purge/tags.js'));
+    for (const t of [PAGE_TAG, '_N_T_/tagged', 'with,comma', 'ünïcode']) {
+      expect(nextTagOf('77489686e9ad', t)).toBe(tags.nextTag('77489686e9ad', t));
+    }
+    expect(appTagOf('77489686e9ad')).toBe(tags.appTag('77489686e9ad'));
   });
 
   it('derives the per-app prefix exactly as the operator does: sha256("<ns>/<name>")[:12]', async () => {
@@ -198,5 +214,89 @@ describe('expected-red helper (scripts/cdn-e2e-expect-red.sh)', () => {
     );
     expect(r.status).toBe(1);
     expect(r.stdout).toContain('[alpha] did not fail with');
+  });
+});
+
+/**
+ * The KNOWN DEFECT (#2299) leg passes only when `rollout-no-old-html` fails at
+ * its own message. A broken /tagged (5xx, 404, the emulator's 502) carries no
+ * build mark, and must NOT read as "old-build HTML": that would keep the pinned
+ * step green while the page under test is simply down. It must be a
+ * precondition failure, which the expected-red helper rejects.
+ */
+describe('rollout-no-old-html: only a real page counts as old-build HTML', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'cdn-rollout-'));
+  afterAll(() => rmSync(dir, { recursive: true, force: true }));
+
+  async function runAgainst(tagged: { status: number; type: string; body: string }) {
+    const { createServer } = await import('node:http');
+    const server = createServer((req, res) => {
+      if (String(req.url).startsWith('/build-mark')) {
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+        res.end('<!DOCTYPE html><p id="build">v2</p>');
+        return;
+      }
+      res.writeHead(tagged.status, { 'content-type': tagged.type });
+      res.end(tagged.body);
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+    try {
+      const port = (server.address() as { port: number }).port;
+      const stateFile = join(dir, `state-${port}.json`);
+      writeFileSync(
+        stateFile,
+        JSON.stringify({ rollout: { paths: ['/tagged?k=1'], mark: 'v1', buildTag: 'kn-x-b0' } }),
+      );
+      const { purgeChecks, purgeConfig } = await import(PURGE_ASSERT);
+      const c = purgeConfig({ CDN_EMU_URL: `http://127.0.0.1:${port}`, CDN_STATE_FILE: stateFile });
+      const check = purgeChecks(c).find((x: { id: string }) => x.id === 'rollout-no-old-html');
+      try {
+        return { ok: true, note: await check.run() };
+      } catch (err) {
+        return { ok: false, note: String((err as Error).message) };
+      }
+    } finally {
+      await new Promise((r) => server.close(() => r(null)));
+    }
+  }
+
+  it('a 5xx /tagged is a precondition failure, not the pinned old-build FAIL', async () => {
+    const r = await runAgainst({
+      status: 502,
+      type: 'application/json',
+      body: '{"error":"upstream failed"}',
+    });
+    expect(r.ok).toBe(false);
+    expect(r.note.startsWith('precondition:')).toBe(true);
+    expect(r.note).not.toContain('old-build HTML was served');
+  });
+
+  it('a 200 HTML page with no build mark is a precondition failure too', async () => {
+    const r = await runAgainst({
+      status: 200,
+      type: 'text/html',
+      body: '<!DOCTYPE html><p>error page</p>',
+    });
+    expect(r.ok).toBe(false);
+    expect(r.note.startsWith('precondition:')).toBe(true);
+  });
+
+  it('a 200 HTML page with the OLD build mark is the pinned failure', async () => {
+    const r = await runAgainst({
+      status: 200,
+      type: 'text/html',
+      body: '<!DOCTYPE html><p id="build">v1</p>',
+    });
+    expect(r.ok).toBe(false);
+    expect(r.note.startsWith('old-build HTML was served after the first-ready purge')).toBe(true);
+  });
+
+  it('a 200 HTML page with the NEW build mark passes', async () => {
+    const r = await runAgainst({
+      status: 200,
+      type: 'text/html',
+      body: '<!DOCTYPE html><p id="build">v2</p>',
+    });
+    expect(r).toEqual({ ok: true, note: 'every page served build v2' });
   });
 });
