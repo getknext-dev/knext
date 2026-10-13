@@ -386,6 +386,16 @@ describe('knext generate never writes through a symlink', () => {
     expect(statSync(target).mode & 0o7777).toBe(0o600);
   });
 
+  it('regenerating clears setuid, as an in-place write did (4755 becomes 0755)', () => {
+    const dir = emptyDir('w-atomic-setuid');
+    const target = join(dir, 'target.ts');
+    writeFileSync(target, 'old\n');
+    chmodSync(target, 0o4755);
+    expect(statSync(target).mode & 0o7777).toBe(0o4755);
+    writeFileAtomic(target, 'export {};\n');
+    expect(statSync(target).mode & 0o7777).toBe(0o755);
+  });
+
   it('a read-only generated file is still replaced, and stays read-only', () => {
     const dir = emptyDir('w-atomic-readonly');
     const target = join(dir, 'target.ts');

@@ -183,7 +183,7 @@ function isInside(path: string, root: string): boolean {
  * a file outside the output directory is replaced, and the outside twin keeps
  * its bytes. A symlink at the target is replaced too, never followed. The temp
  * file is opened O_EXCL | O_NOFOLLOW and removed if anything fails. The
- * target's permission bits are carried over; its inode, ownership and extended
+ * target's permission bits are carried over (minus setuid/setgid); its inode, ownership and extended
  * attributes are not (the replacement is a new file owned by the caller).
  */
 export function writeFileAtomic(target: string, content: string): void {
@@ -200,9 +200,11 @@ export function writeFileAtomic(target: string, content: string): void {
     try {
       writeFileSync(fd, content);
       // Keep an existing file's permission bits (0600 stays 0600, a read-only
-      // 0444 file is replaced and stays 0444). A new file keeps 0644 minus umask.
+      // 0444 file is replaced and stays 0444). setuid/setgid are dropped, as the
+      // kernel did on the old in-place write (4755 becomes 0755); the sticky bit
+      // is kept. A new file keeps 0644 minus umask.
       const existing = lstatSync(target, { throwIfNoEntry: false });
-      if (existing?.isFile()) fchmodSync(fd, existing.mode & 0o7777);
+      if (existing?.isFile()) fchmodSync(fd, existing.mode & 0o1777);
     } finally {
       closeSync(fd);
     }
