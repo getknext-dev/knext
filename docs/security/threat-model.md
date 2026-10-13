@@ -377,6 +377,12 @@ support), the same port also carries three CDN counters: `knext_cdn_edge_decisio
 or token. They disclose how much of an app's traffic is edge-cacheable and why not, and how its
 purges fare. Without `spec.cdn` they do not exist.
 
+**On the standalone server with the `'use cache'` store wired** (Next with `cacheHandlers`, set by
+the knext build; the vinext binary above has its own cache adapter), the same port also carries
+`knext_use_cache_events_total` (`event`). The label is a closed set of fourteen values; none carries
+a cache key, tag, path or argument. It discloses the app's `'use cache'` hit ratio, write volume,
+oversize entries and Redis outages as seen by the cache.
+
 **What is NOT on this port, contrary to earlier versions of this section:** cold-start and DB-wake
 series, the rest of the app's request-metric registry, and the `nodejs_*`/`process_*` families `collectDefaultMetrics` registers. Those
 are prom-client metrics on an app's own `/api/metrics` route, which the shipped PodMonitor does not

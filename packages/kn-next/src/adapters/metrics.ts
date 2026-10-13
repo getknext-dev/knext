@@ -52,7 +52,7 @@ import {
     Histogram,
     type Registry,
 } from "prom-client";
-import { appendExposition, readCdnMetrics } from "./deep-health-lite";
+import { appendExposition, readSeamMetrics } from "./deep-health-lite";
 import type { KnextSpanProcessor } from "./tracing";
 
 // ── Metric names (exported so tests + docs reference one source of truth) ─────
@@ -568,11 +568,12 @@ export function startChildMetricsServer(
                 }
             }
             res.setHeader("Content-Type", registry.contentType);
-            // The CDN counters live in this (the server) process too; append
-            // them so the supervisor's merge carries them onto :9464 (CDN mode
-            // only — with no seam published this is the registry alone).
+            // The CDN and `'use cache'` counters live in this (the server)
+            // process too; append them so the supervisor's merge carries them
+            // onto :9464 (only when their seams are published — with none this
+            // is the registry alone).
             res.end(
-                appendExposition(await registry.metrics(), readCdnMetrics()),
+                appendExposition(await registry.metrics(), readSeamMetrics()),
             );
             return;
         }

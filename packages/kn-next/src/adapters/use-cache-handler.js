@@ -52,12 +52,72 @@
  */
 import { trackWrite } from './cache-write-registry.js';
 
-/** Process-wide counters, read by tests and any future exporter. */
+/** Process-wide counters, shared by every copy of this module in the process. */
 const COUNTERS_KEY = Symbol.for('knext.cache.useCache.counters');
 
 function count(name) {
   const bag = (globalThis[COUNTERS_KEY] ??= {});
   bag[name] = (bag[name] ?? 0) + 1;
+}
+
+/** The counter family the app's metrics port serves for this handler. */
+export const USE_CACHE_METRIC = 'knext_use_cache_events_total';
+
+/**
+ * Every counter the handler increments, and the `event` label it is served under.
+ * A test scans this file's counting calls against these keys in both
+ * directions, so a new counter cannot be counted and never served.
+ * `corrupt` and `expired` are also counted as `miss`; the others are disjoint.
+ */
+export const USE_CACHE_EVENTS = Object.freeze({
+  hit: 'hit',
+  miss: 'miss',
+  corrupt: 'corrupt',
+  expired: 'expired',
+  set: 'stored',
+  skipped: 'skipped',
+  invalid: 'invalid',
+  oversize: 'oversize',
+  aborted: 'aborted',
+  dropped: 'dropped',
+  tagsUpdated: 'tags_updated',
+  tagsDropped: 'tags_dropped',
+  pruneError: 'prune_error',
+  error: 'error',
+});
+
+/**
+ * The counters in Prometheus text: one family, one sample per event, each at 0
+ * until counted (so a rate over any event exists from the first scrape). The
+ * label values are the fixed set above; no key, tag or path is ever a label.
+ */
+export function renderUseCacheMetrics() {
+  const bag = globalThis[COUNTERS_KEY] ?? {};
+  const lines = [
+    `# HELP ${USE_CACHE_METRIC} 'use cache' handler outcomes by event (corrupt and expired are also counted as miss).`,
+    `# TYPE ${USE_CACHE_METRIC} counter`,
+  ];
+  for (const [name, event] of Object.entries(USE_CACHE_EVENTS)) {
+    const n = Number(bag[name]);
+    lines.push(`${USE_CACHE_METRIC}{event="${event}"} ${Number.isFinite(n) ? n : 0}`);
+  }
+  return `${lines.join('\n')}\n`;
+}
+
+/**
+ * The metrics seam. The counters live in the Next server process; the app's
+ * metrics port is served by the standalone supervisor (a separate process that
+ * merges this process's loopback metrics listener) or, on the self-contained
+ * runtime, in-process. Those listeners are dependency-free and cannot import
+ * this module, so the render function is published on `globalThis` under a
+ * namespaced `Symbol.for` key (ADR-0027), the same shape as the CDN seam, and
+ * read there by literal (a test pins the literals equal). Published when a
+ * handler is built, so an app without `cacheHandlers` serves nothing new.
+ */
+export const USE_CACHE_METRICS_SEAM_KEY = Symbol.for('knext.core.useCache.renderMetrics');
+
+function publishMetricsSeam() {
+  globalThis[USE_CACHE_METRICS_SEAM_KEY] = renderUseCacheMetrics;
 }
 
 const ENVELOPE_VERSION = 1;
@@ -282,7 +342,10 @@ export function createUseCacheHandler({ kind, core }) {
   const pendingSets = new Map();
   let lastPrune = 0;
   let pruneCursor = '0';
+  // Whether a delete was refused in the current HSCAN cycle (cursor 0 back to 0).
+  let pruneCycleFailed = false;
   const state = shared(core);
+  publishMetricsSeam();
 
   const entryKey = (cacheKey) => `${core.keyPrefix()}:uc:${kind}:${cacheKey}`;
   const tagsKey = () => `${core.keyPrefix()}:uc:tags`;
@@ -470,12 +533,16 @@ export function createUseCacheHandler({ kind, core }) {
    * routed through the breaker: the tag write just before it proved the
    * connection, and a failure here (a Redis that refuses scripts, say) must not
    * take ISR's cache offline every 30 s. Each command keeps its own timeout.
-   * Resolves true when a step ran to completion, false when it was not due.
+   * Resolves true when cleanup is known to work: this step's delete ran, or the
+   * scan finished a cycle with nothing dead and no refused delete. A page with
+   * nothing dead proves nothing about a Redis that refuses scripts, so on its
+   * own it does not count. False when not due, or when nothing was proved.
    */
   async function pruneStamps(client, now) {
     const tick = Date.now();
     if (tick - lastPrune < PRUNE_INTERVAL_MS) return false;
     lastPrune = tick;
+    if (pruneCursor === '0') pruneCycleFailed = false;
     const reply = await core.command(client, 'HSCAN', [tagsKey(), pruneCursor, 'COUNT', String(PRUNE_PAGE)]);
     pruneCursor = String(reply?.[0] ?? '0');
     const page = Array.isArray(reply?.[1]) ? reply[1] : [];
@@ -489,9 +556,15 @@ export function createUseCacheHandler({ kind, core }) {
     }
     // Conditional: a field re-stamped since the HSCAN is no longer below the cutoff.
     if (dead.length > 0) {
-      await core.command(client, 'EVAL', [PRUNE_STAMPS_SCRIPT, '1', tagsKey(), String(cutoff), ...dead]);
+      try {
+        await core.command(client, 'EVAL', [PRUNE_STAMPS_SCRIPT, '1', tagsKey(), String(cutoff), ...dead]);
+      } catch (err) {
+        pruneCycleFailed = true;
+        throw err;
+      }
+      return true;
     }
-    return true;
+    return pruneCursor === '0' && !pruneCycleFailed;
   }
 
   async function doUpdateTags(tags, durations) {

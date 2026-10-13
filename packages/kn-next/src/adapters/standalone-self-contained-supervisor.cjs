@@ -97,22 +97,40 @@ function metricsBody(state) {
 }
 
 /**
- * The CDN counters this process holds (the header preload publishes a render
- * function in CDN mode, `cdn-edge.cjs` `publishMetricsSeam`), or `''` when CDN
- * mode is off or the render throws. The key is duplicated by literal, as this
- * preload stays dependency-free; `cdn-metrics-seam.test.ts` pins it.
+ * What one metrics seam renders, or `''` when nothing is published under `key`
+ * or the render throws. Fail-open: a scrape never fails because of a seam. A
+ * non-empty text always ends in one newline, so the next one appends cleanly.
  *
+ * @param {symbol} key
  * @returns {string}
  */
-function readCdnMetrics() {
-  const render = globalThis[Symbol.for('knext.core.cdn.renderMetrics')];
+function readSeam(key) {
+  const render = globalThis[key];
   if (typeof render !== 'function') return '';
   try {
     const text = render();
-    return typeof text === 'string' ? text : '';
+    if (typeof text !== 'string' || text.length === 0) return '';
+    return text.endsWith('\n') ? text : `${text}\n`;
   } catch {
     return '';
   }
+}
+
+/**
+ * The counters other modules in this process publish for the metrics port:
+ * the CDN counters (the header preload publishes them in CDN mode,
+ * `cdn-edge.cjs` `publishMetricsSeam`), then the `'use cache'` counters (the
+ * use-cache handler publishes them when Next builds it). The keys are
+ * duplicated by literal, as this preload stays dependency-free;
+ * `cdn-metrics-seam.test.ts` and `use-cache-metrics-seam.test.ts` pin them.
+ *
+ * @returns {string}
+ */
+function readSeamMetrics() {
+  return (
+    readSeam(Symbol.for('knext.core.cdn.renderMetrics')) +
+    readSeam(Symbol.for('knext.core.useCache.renderMetrics'))
+  );
 }
 
 /**
@@ -131,12 +149,12 @@ function startMetricsServer(opts = {}) {
       res.writeHead(404).end();
       return;
     }
-    // metricsBody ends in '\n', so the CDN text (CDN mode only) appends cleanly.
+    // metricsBody ends in '\n', so the seam text (if any) appends cleanly.
     const body =
       metricsBody({
         uptimeSeconds: (Date.now() - start) / 1000,
         draining: opts.isDraining(),
-      }) + readCdnMetrics();
+      }) + readSeamMetrics();
     res.writeHead(200, { 'Content-Type': 'text/plain; version=0.0.4' }).end(body);
   });
   // m1 (round-2): an EADDRINUSE (or any other bind failure) on :9464 must not

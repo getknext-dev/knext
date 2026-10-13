@@ -46,3 +46,15 @@ export declare function createUseCacheHandler(args: {
     kind: "default" | "remote" | string;
     core: UseCacheCore;
 }): UseCacheHandler;
+
+/** The counter family the app's metrics port serves for this handler. */
+export declare const USE_CACHE_METRIC: "knext_use_cache_events_total";
+
+/** Each counter the handler increments, mapped to its `event` label value. */
+export declare const USE_CACHE_EVENTS: Readonly<Record<string, string>>;
+
+/** The counters in Prometheus text: one family, one sample per event. */
+export declare function renderUseCacheMetrics(): string;
+
+/** The `globalThis` key the render function is published under. */
+export declare const USE_CACHE_METRICS_SEAM_KEY: symbol;
