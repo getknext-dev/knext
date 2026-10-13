@@ -15,6 +15,10 @@
  *                     app tag arrived, and no pre-rollout entry is served
  *   rollout-no-old-html  ...and no previous-build HTML is stored at or served
  *                     from the edge, whatever the origin answers
+ *   rollout-origin-new-html  ...and, once the previous build stopped serving
+ *                     and a revalidation settled, the ORIGIN serves the new
+ *                     build's HTML (a revalidate = 3600 and a revalidate: false
+ *                     page the old build rendered before the rollout)
  *   revisions-before  snapshot every Knative Service's latest revision
  *   revisions-after   after spec.cdn was set on CDN_CHURN_CHANGED: no OTHER app
  *                     (CDN_CHURN_UNRELATED) got a new revision
@@ -24,6 +28,10 @@
  *                         app's Secret; never printed)
  *   CDN_STATE_FILE        state shared by the before/after halves
  *   CDN_PURGE_WAIT_MS     how long to wait for a purge to reach the emulator (20000)
+ *   CDN_ORIGIN_SETTLE_MS  how long rollout-origin-new-html waits for the origin
+ *                         to serve the new build's HTML (180000: the previous
+ *                         build counts as live for up to 90 s after its last
+ *                         cache access, plus a re-render)
  *   CDN_CHURN_CHANGED     the app whose CR gets spec.cdn          (cdn-late)
  *   CDN_CHURN_UNRELATED   the apps that must not roll, comma-separated
  */
@@ -51,6 +59,14 @@ const buildTagOf = (r) =>
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 /** The headers that make a response edge-cacheable or purgeable (ADR-0068 D4.2/D5). */
 const EDGE_ONLY = ['cloudflare-cdn-cache-control', 'cdn-cache-control', 'cache-tag'];
+/** Straight to the origin: the emulator forwards it with no lookup and no store. */
+const BYPASS = { 'x-emu-bypass': '1' };
+/**
+ * The fixture's ISR pages that print their build: `revalidate = 3600` and
+ * `revalidate: false`. Both are in the prerender manifest, which is the case
+ * where Next would apply the new build's window to the old build's entry.
+ */
+export const ORIGIN_PAGES = ['/tagged', '/static-mark'];
 
 export function purgeConfig(env = process.env) {
   const c = config(env);
@@ -62,6 +78,7 @@ export function purgeConfig(env = process.env) {
     token: env.CDN_REVALIDATE_TOKEN || '',
     stateFile: env.CDN_STATE_FILE || '/tmp/cdn-e2e-purge-state.json',
     waitMs: Number(env.CDN_PURGE_WAIT_MS || 20000),
+    originSettleMs: Number(env.CDN_ORIGIN_SETTLE_MS || 180000),
     churnChanged: env.CDN_CHURN_CHANGED || 'cdn-late',
     churnUnrelated: String(env.CDN_CHURN_UNRELATED || '')
       .split(',')
@@ -225,8 +242,21 @@ export function purgeChecks(c) {
           buildTag ??= buildTagOf(r);
         }
         must(buildTag !== undefined, 'precondition: the stored page carries no build tag');
-        writeState(c, { rollout: { paths, mark: marks[0], buildTag, t0: Date.now() } });
-        return `stored ${paths.length} old-build pages (build tag ${buildTag}, mark ${marks[0]})`;
+        // The origin half: the old build renders these into the shared Redis
+        // (asked twice, so the second answer proves the entry is stored).
+        for (const path of ORIGIN_PAGES) {
+          for (let attempt = 0; attempt < 2; attempt++) {
+            const r = await send(c.emu, { host: c.hosts.a, path, headers: BYPASS });
+            must(
+              r.status === 200 && isHtml(r) && buildMarkOf(r) === marks[0],
+              `precondition: ${path} at the origin answered ${r.status} with build ${buildMarkOf(r) ?? 'none'}, not the old build ${marks[0]}`,
+            );
+          }
+        }
+        writeState(c, {
+          rollout: { paths, originPaths: ORIGIN_PAGES, mark: marks[0], buildTag, t0: Date.now() },
+        });
+        return `stored ${paths.length} old-build pages (build tag ${buildTag}, mark ${marks[0]}); ${ORIGIN_PAGES.join(', ')} rendered at the origin`;
       },
     },
     {
@@ -274,11 +304,12 @@ export function purgeChecks(c) {
       // The #2261 / ADR-0068 D13 criterion, as amended (Amendment 2): after the
       // first-ready purge, no previous-build HTML is STORED at the edge or
       // served FROM it. An old-build body may still come from the ORIGIN: ISR
-      // HTML is shared across builds (ADR-0066), and the new build can serve
-      // the previous build's page for a while after a deploy (tracked
-      // separately). The edge must refuse it (reason foreign_build_body). Each
-      // page is asked twice, so an entry the first request stored would come
-      // back as a HIT.
+      // HTML is shared across builds (ADR-0066), so the new build serves the
+      // previous build's page once, as stale, while it re-renders it (and keeps
+      // its window while the previous build still counts as live). The edge
+      // must refuse it (reason foreign_build_body); rollout-origin-new-html
+      // gates the origin. Each page is asked twice, so an entry the first
+      // request stored would come back as a HIT.
       id: 'rollout-no-old-html',
       async run() {
         const s = readState(c).rollout;
@@ -334,6 +365,79 @@ export function purgeChecks(c) {
           `old-build HTML was stored at or served from the edge after the first-ready purge: ${bad.join('; ')}`,
         );
         return `build ${current}: ${fromOrigin} old-build response(s) from the origin, none edge-cacheable or stored; ${control} (new build) an edge HIT`;
+      },
+    },
+    {
+      // The origin half (ADR-0066, Amendment 3): a page the previous build
+      // rendered into the shared Redis is served by the new build at most as
+      // STALE while it re-renders, so once the previous build has stopped
+      // serving and that revalidation settled, the origin answers with the new
+      // build's HTML. Before the fix, Next applied the new build's manifest
+      // window to the old entry and answered HIT with the old body for an hour
+      // (revalidate = 3600), or forever (revalidate: false). Asked straight at
+      // the origin (the emulator's bypass), so the edge plays no part. Settled
+      // means two new-build answers in a row; the deadline covers the previous
+      // build's liveness (90 s after its last cache access) plus a re-render.
+      id: 'rollout-origin-new-html',
+      async run() {
+        const s = readState(c).rollout;
+        must(
+          Array.isArray(s?.originPaths) && s.originPaths.length > 0,
+          `precondition: no rollout-before origin pages in ${c.stateFile}`,
+        );
+        const current = buildMarkOf(
+          await send(c.emu, { host: c.hosts.a, path: '/build-mark', headers: BYPASS }),
+        );
+        must(
+          current && current !== s.mark,
+          `precondition: the running build is ${current ?? 'unreadable (/build-mark)'}, the origin pages are ${s.mark} (no rollout happened?)`,
+        );
+        const until = Date.now() + c.originSettleMs;
+        const stuck = [];
+        const settled = [];
+        let sawOld = false;
+        for (const path of s.originPaths) {
+          const trail = [];
+          let streak = 0;
+          for (let n = 0; ; n++) {
+            const r = await send(c.emu, {
+              host: c.hosts.a,
+              path: `${path}?${k(`origin-${n}`)}`,
+              headers: BYPASS,
+            });
+            const mark = buildMarkOf(r);
+            // A broken page carries no build mark: never a pass, never the defect.
+            must(
+              r.status === 200 && isHtml(r) && mark !== undefined,
+              `precondition: ${path} at the origin answered ${r.status} ${r.headers['content-type']} with no build mark (the page is broken, not old)`,
+            );
+            trail.push(
+              `${mark === current ? 'new' : mark === s.mark ? 'old' : mark}/${r.headers['x-nextjs-cache'] ?? '-'}`,
+            );
+            streak = mark === current ? streak + 1 : 0;
+            // Past the deadline, a first new answer still gets its confirming
+            // second request (bounded: the next answer ends the loop either way).
+            if (streak >= 2 || (streak === 0 && Date.now() > until)) break;
+            await sleep(streak > 0 ? 200 : 2000);
+          }
+          if (trail[0].startsWith('old/')) sawOld = true;
+          // The first answer, the last few, and how many there were.
+          const seen = `${path} [${trail.length} answers, first ${trail[0]}, last ${trail.slice(-3).join(' ')}]`;
+          if (streak >= 2) settled.push(seen);
+          else stuck.push(seen);
+        }
+        // Not vacuous: the shared cache really held the old build's pages after
+        // the rollout. /static-mark is asked here first, so its first answer is
+        // the old build's unless no old entry was shared at all.
+        must(
+          sawOld,
+          `precondition: no origin page answered with the previous build's HTML even once after the rollout (${settled.concat(stuck).join('; ')}): nothing old was shared, so this check would prove nothing`,
+        );
+        must(
+          stuck.length === 0,
+          `the origin still served the previous build's HTML after the revalidation settle (${Math.round(c.originSettleMs / 1000)} s): ${stuck.join('; ')}`,
+        );
+        return `build ${s.mark} -> ${current}: the origin serves the new build's HTML: ${settled.join('; ')}`;
       },
     },
     {

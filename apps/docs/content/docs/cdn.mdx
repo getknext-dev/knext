@@ -50,9 +50,10 @@ alone, so a new kind of response is uncached until it has been shown safe.
 - The page's own cache entry was recorded with its tags (including its path tag), and the tags fit
   the provider's limits. Over the limit means not cached, never truncated.
 - The page's cache entry was written by the build that is serving it. Cached pages are shared across
-  builds, so for a while after a deploy your origin may keep serving a page the previous build
-  rendered. That response goes to the browser but is not edge-cached. Once the new build renders the
-  page itself, for example on `revalidatePath` or `revalidateTag`, it is edge-cached again.
+  builds, so after a deploy your origin can keep serving a page the previous build rendered for about
+  two minutes after the previous build stops serving, and then once more while a fresh copy renders.
+  Those responses go to the browser but are not edge-cached. The fresh copy the new build renders is
+  edge-cached as usual.
 - Hashed build assets (`immutable`) keep Next.js's own long-lived header and are neither tagged nor
   purged.
 - Redirects (3xx) are never edge-cached.
@@ -133,13 +134,14 @@ the app's edge entries; a Redis key makes sure only one pod does it, however man
 from zero does not purge again. A rollback to a build that already purged does not purge, as long as that build's claim is still
 in Redis; the claim lasts 7 days.
 
-After that purge, the CDN refills only with pages the new build rendered itself. For a while after a
-deploy, your origin may keep serving a page the previous build rendered from the shared cache, but
-those responses are not edge-cached. So once the rollout completes, the CDN holds none of the
-previous build's HTML. While a canary split is still running, the edge can hold either build's
-HTML; see **Split deploys** under [Limits to know](#limits-to-know). A page stays off the CDN
-until the new build renders it again, so revalidating your important pages after a deploy brings
-them back to the edge sooner.
+After that purge, the CDN refills only with pages the new build rendered itself. The first request
+for a page after a deploy may get the previous page once, from the shared cache, while a fresh copy
+renders; that response is not edge-cached, and the fresh copy is. So once the rollout completes, the
+CDN holds none of the previous build's HTML. While a canary split is still running, the edge can
+hold either build's HTML; see **Split deploys** under [Limits to know](#limits-to-know). The old
+build's pages are only re-rendered once it has stopped serving, plus about two minutes, so a page
+can stay off the CDN for that long; revalidating your important pages after a deploy brings them
+back to the edge sooner.
 
 Every purge outcome is counted in `knext_cdn_purge_total`, labelled by provider and result. A purge
 that gives up logs the provider, status and tag count, never the token or the response body.

@@ -21,9 +21,24 @@
  * record (ADR-0068 Amendment 2): the cache handler still reports that the body
  * it served was written by another build, and the preload ignores it. A rollout
  * to a build carrying it must red `rollout-no-old-html`.
+ *
+ * `--set foreign-stale` (the purge lane's ORIGIN red leg) targets the cache
+ * handler instead: the built chunk that holds it reverts to handing another
+ * build's page entry back with its stored window withheld rather than as stale,
+ * so Next applies the new build's manifest window and keeps answering HIT with
+ * the previous build's HTML. A rollout to a build carrying it must red
+ * `rollout-origin-new-html`. The handler is bundled into a hashed chunk, so
+ * `--locate <dist dir>` prints the one file in the tree that holds the anchor
+ * (and exits non-zero unless exactly one does):
+ *
+ *   node scripts/cdn-e2e-mutate-preload.mjs --set foreign-stale --locate <dist>
+ *   node scripts/cdn-e2e-mutate-preload.mjs --set foreign-stale <that file>
  */
 
-import { readFileSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { Script } from 'node:vm';
 
@@ -78,10 +93,74 @@ export const FOREIGN_BUILD_MUTATIONS = [
 export const FOREIGN_BUILD_MARKER =
   '/* KNEXT_E2E_MUTATED: cdn-edge foreign-build record disabled, test-only */';
 
+/**
+ * The purge lane's origin red leg: the cache handler's read returns another
+ * build's page entry through `scopeWindowToBuild` (window withheld) instead of
+ * `staleForeignBuildEntry` (an expired window), which is the pre-fix behaviour.
+ */
+export const FOREIGN_STALE_MUTATIONS = [
+  [
+    'foreign_build_stale',
+    'return staleForeignBuildEntry(parsed, ctx, writerIsLive);',
+    'return scopeWindowToBuild(parsed, ctx, writerIsLive);',
+  ],
+];
+export const FOREIGN_STALE_MARKER =
+  '/* KNEXT_E2E_MUTATED: cache-handler foreign-build stale window removed, test-only */';
+
+/** name -> [mutations, marker, module syntax of the target]. */
 const SETS = {
-  allowlist: [MUTATIONS, MARKER],
-  'foreign-build': [FOREIGN_BUILD_MUTATIONS, FOREIGN_BUILD_MARKER],
+  allowlist: [MUTATIONS, MARKER, 'cjs'],
+  'foreign-build': [FOREIGN_BUILD_MUTATIONS, FOREIGN_BUILD_MARKER, 'cjs'],
+  'foreign-stale': [FOREIGN_STALE_MUTATIONS, FOREIGN_STALE_MARKER, 'esm'],
 };
+const MARKERS = [MARKER, FOREIGN_BUILD_MARKER, FOREIGN_STALE_MARKER];
+
+/** Every JavaScript file under `dir` (source maps excluded), recursively. */
+function jsFiles(dir) {
+  const out = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const p = join(dir, entry.name);
+    if (entry.isDirectory()) out.push(...jsFiles(p));
+    else if (/\.[cm]?js$/.test(entry.name)) out.push(p);
+  }
+  return out;
+}
+
+/**
+ * The ONE file under `dir` that holds the set's anchors. Throws unless exactly
+ * one file holds any of them, and holds each exactly once.
+ */
+export function locate(dir, mutations) {
+  const holders = jsFiles(dir).filter((f) => {
+    const src = readFileSync(f, 'utf8');
+    return mutations.some(([, anchor]) => src.includes(anchor));
+  });
+  if (holders.length !== 1)
+    throw new Error(
+      `${holders.length} files under ${dir} hold the anchors, want exactly 1: ${holders.join(', ')}`,
+    );
+  const src = readFileSync(holders[0], 'utf8');
+  for (const [name, anchor] of mutations) {
+    const count = src.split(anchor).length - 1;
+    if (count !== 1)
+      throw new Error(`anchor ${name} occurs ${count} times in ${holders[0]}, want exactly 1`);
+  }
+  return holders[0];
+}
+
+/** Syntax-check an ES module with `node --check` (vm.Script cannot parse `import`). */
+function checkEsm(source, label) {
+  const dir = mkdtempSync(join(tmpdir(), 'cdn-mutate-check-'));
+  try {
+    const file = join(dir, 'mutated.mjs');
+    writeFileSync(file, source);
+    const r = spawnSync('node', ['--check', file], { encoding: 'utf8' });
+    if (r.status !== 0) throw new Error(`${label} does not parse: ${r.stderr || r.error}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
 
 /** Apply every mutation to `source`; throws naming the anchor that did not occur exactly once. */
 export function mutate(source, mutations = MUTATIONS, marker = MARKER) {
@@ -102,27 +181,43 @@ function main(argv) {
     setName = args[1];
     args.splice(0, 2);
   }
-  const set = SETS[setName];
+  let locating = false;
+  if (args[0] === '--locate') {
+    locating = true;
+    args.shift();
+  }
+  const set = Object.hasOwn(SETS, setName) ? SETS[setName] : undefined;
   const target = args[0];
   if (!set || !target) {
     console.error(
-      'usage: cdn-e2e-mutate-preload.mjs [--set allowlist|foreign-build] <cache-control-normalize.cjs>',
+      'usage: cdn-e2e-mutate-preload.mjs [--set allowlist|foreign-build|foreign-stale] [--locate <dir>] <file>',
     );
     return 2;
   }
-  const [mutations, marker] = set;
+  const [mutations, marker, syntax] = set;
+  if (locating) {
+    try {
+      console.log(locate(target, mutations));
+      return 0;
+    } catch (err) {
+      console.error(`::error::${err.message}`);
+      return 1;
+    }
+  }
   const source = readFileSync(target, 'utf8');
-  if (source.startsWith(MARKER) || source.startsWith(FOREIGN_BUILD_MARKER)) {
+  if (MARKERS.some((m) => source.startsWith(m))) {
     console.error(`::error::${target} is already mutated`);
     return 1;
   }
   let mutated;
   try {
     mutated = mutate(source, mutations, marker);
-    // Syntax check only (the file is CommonJS; wrap it as a function body).
-    new Script(`(function (exports, require, module, __filename, __dirname) {${mutated}\n})`, {
-      filename: target,
-    });
+    // Syntax check only.
+    if (syntax === 'esm') checkEsm(mutated, target);
+    else
+      new Script(`(function (exports, require, module, __filename, __dirname) {${mutated}\n})`, {
+        filename: target,
+      });
   } catch (err) {
     console.error(`::error::refusing to write a mutated preload: ${err.message}`);
     return 1;

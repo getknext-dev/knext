@@ -45,10 +45,16 @@ import { type FakeRedis, startFakeRedis } from "./helpers/fake-redis";
  * rule as the build-scoped revalidate window: a different build id, none
  * recorded, or none resolved here). The preload then refuses the edge directive
  * with `reason="foreign_build_body"`. Once the entry is regenerated under the
- * current build (its `revalidate` elapses, or a `revalidateTag` /
- * `revalidatePath`), the page is edge-cached again. Cross-build ISR sharing is
+ * current build, the page is edge-cached again. Cross-build ISR sharing is
  * kept; what it costs is edge hit rate after a deploy, on the pages the new
  * build has not yet rendered itself.
+ *
+ * The origin half (#2305): once the previous build stops serving, the handler
+ * hands such an entry to Next with an expired window, so Next serves it once as
+ * `STALE` and re-renders it in the background, for `revalidate: false` pages
+ * too (section 4). Before that, Next applied the new build's prerender-manifest
+ * window to the old entry and kept answering `HIT` with the old body for the
+ * page's whole window.
  *
  * Four layers: the pure decision and seam; the REAL cache handler in separate
  * processes (one per build) on a shared real-TCP fake Redis; the preload in
@@ -472,9 +478,50 @@ function buildMark(r: RawResponse): string | undefined {
     return /<p id="build">([^<]*)<\/p>/.exec(r.body)?.[1];
 }
 
+/**
+ * Build 1 has stopped serving: its liveness record (a `build-live:<id>` key
+ * with a 90 s TTL, refreshed by its cache reads and writes) has lapsed. The
+ * fake Redis records TTLs but never expires a key, so the lapse is the key's
+ * removal. While the record is there build 1 counts as a live canary peer and
+ * its window is honoured (cache-handler-isr-canary-ping-pong.test.ts).
+ */
+function lapseLiveness(redis: FakeRedis, buildId: string): void {
+    const keys = [...redis.strings.keys()].filter((k) =>
+        k.endsWith(`:build-live:${buildId}`),
+    );
+    expect(keys, `build ${buildId} published no liveness record`).toHaveLength(
+        1,
+    );
+    redis.strings.delete(keys[0]);
+}
+
+/**
+ * Ask until build 2 answers with its OWN render. After a stale response Next
+ * re-renders in the background, so a request right behind it may still race
+ * that render. A bounded wait, never a skip: if build 2 keeps serving build 1's
+ * HTML, every response it gave is returned and the caller's assertion fails.
+ */
+async function untilOwnRender(
+    port: number,
+    path: string,
+    mark: string,
+): Promise<RawResponse[]> {
+    const seen: RawResponse[] = [];
+    const deadline = Date.now() + 20_000;
+    for (let k = 0; ; k++) {
+        const r = await getRaw(port, `${path}?settle=${k}`);
+        seen.push(r);
+        if (buildMark(r) === mark || Date.now() > deadline) return seen;
+        await new Promise((res) => setTimeout(res, 250));
+    }
+}
+
+const served = (r: RawResponse) =>
+    `${buildMark(r)} ${r.header("x-nextjs-cache")} edge=${r.header(EDGE) ?? "-"}`;
+
 for (const runtime of ["node", "bun"] as const) {
     describe(`after a rollout, real Next on a shared Redis (${runtime})`, () => {
-        it("the new build never edge-caches the previous build's ISR HTML, and edge-caches its own", async () => {
+        it("the new build serves the previous build's ISR HTML only as STALE and off the edge, then its own render (revalidate = 3600 and revalidate: false)", async () => {
             const redis = await startFakeRedis();
             cleanups.push(() => redis.close());
             const env = {
@@ -485,42 +532,84 @@ for (const runtime of ["node", "bun"] as const) {
                 buildKindApp("knext-build-one"),
                 buildKindApp("knext-build-two"),
             ]);
+            // /tagged is `revalidate = 3600`, /static-mark `revalidate: false`.
+            // Both are in the prerender manifest, so with no window from the
+            // handler Next applies the manifest's: an hour, or forever.
+            const PAGES = ["/tagged", "/static-mark"];
 
-            // Build 1 serves /tagged; its own HIT is edge-cached.
+            // Build 1 serves both pages; its own HIT is edge-cached.
             const s1 = await serveKindApp(b1, runtime, env);
-            let first: RawResponse | undefined;
             try {
-                await getRaw(s1.port, "/tagged");
-                first = await getRaw(s1.port, "/tagged");
-                expect(first.status, s1.log()).toBe(200);
-                expect(buildMark(first)).toBe("knext-build-one");
-                expect(first.header(EDGE), first.head).toBe("max-age=30");
-                expect(first.header("cache-tag"), first.head).toContain(
-                    `kn-${KIND_PREFIX}`,
-                );
+                for (const path of PAGES) {
+                    await getRaw(s1.port, path);
+                    const own = await getRaw(s1.port, path);
+                    expect(own.status, s1.log()).toBe(200);
+                    expect(buildMark(own), own.head).toBe("knext-build-one");
+                    expect(own.header("x-nextjs-cache"), own.head).toBe("HIT");
+                    expect(own.header(EDGE), own.head).toBe("max-age=30");
+                    expect(own.header("cache-tag"), own.head).toContain(
+                        `kn-${KIND_PREFIX}`,
+                    );
+                }
             } finally {
                 s1.stop();
             }
+            lapseLiveness(redis, "knext-build-one");
+            // A build whose liveness lapsed last wrote at least 90 s ago (every
+            // write refreshes it), so its entries are older than the 1 s window
+            // the handler hands back. The removed key skipped those 90 s; this
+            // keeps the entries' age realistic.
+            await new Promise((res) => setTimeout(res, 1500));
 
-            // Build 2 on the same Redis: the first request serves build 1's
-            // body (the precondition), and it must not be edge-cacheable.
+            // Build 2 on the same Redis.
             const s2 = await serveKindApp(b2, runtime, env);
             try {
-                const old = await getRaw(s2.port, "/tagged?any");
-                expect(old.status, s2.log()).toBe(200);
-                expect(buildMark(old), old.head).toBe("knext-build-one");
-                expect(old.header(EDGE), old.head).toBeUndefined();
-                expect(old.header("cache-tag"), old.head).toBeUndefined();
-
-                // Next keeps answering HIT with build 1's body until that entry's
-                // own revalidate (3600 s) elapses; every one of those responses
-                // stays off the edge.
-                for (let k = 0; k < 3; k++) {
-                    const again = await getRaw(s2.port, `/tagged?k=${k}`);
-                    expect(buildMark(again), again.head).toBe(
-                        "knext-build-one",
+                for (const path of PAGES) {
+                    // The first request still gets build 1's body (the
+                    // precondition: Redis holds it), served STALE, so Next
+                    // re-renders it in the background. Never a blocking miss,
+                    // never edge-cacheable.
+                    const old = await getRaw(s2.port, `${path}?any`);
+                    expect(old.status, s2.log()).toBe(200);
+                    expect(buildMark(old), old.head).toBe("knext-build-one");
+                    expect(old.header("x-nextjs-cache"), old.head).toBe(
+                        "STALE",
                     );
-                    expect(again.header(EDGE), again.head).toBeUndefined();
+                    expect(old.header(EDGE), old.head).toBeUndefined();
+                    expect(old.header("cache-tag"), old.head).toBeUndefined();
+
+                    // Build 2's own render follows. Before the fix Next kept
+                    // answering HIT with build 1's body for the page's whole
+                    // window (an hour for /tagged, forever for /static-mark).
+                    const seen = await untilOwnRender(
+                        s2.port,
+                        path,
+                        "knext-build-two",
+                    );
+                    const trail = seen.map(served);
+                    expect(
+                        buildMark(seen[seen.length - 1]),
+                        `${path}: build 2 kept serving build 1's HTML: ${trail.join(" | ")}`,
+                    ).toBe("knext-build-two");
+                    // Any build 1 body that raced the re-render was STALE and
+                    // off the edge, never a HIT.
+                    for (const r of seen.filter(
+                        (x) => buildMark(x) === "knext-build-one",
+                    )) {
+                        expect(served(r), trail.join(" | ")).toBe(
+                            "knext-build-one STALE edge=-",
+                        );
+                    }
+
+                    // From then on it is build 2's own HIT, edge-cached again
+                    // under its own tags.
+                    const after = await getRaw(s2.port, `${path}?after`);
+                    expect(served(after), after.head).toBe(
+                        "knext-build-two HIT edge=max-age=30",
+                    );
+                    expect(after.header("cache-tag"), after.head).toContain(
+                        `kn-${KIND_PREFIX}`,
+                    );
                 }
 
                 // Control on the same server: a page build 2 rendered itself is

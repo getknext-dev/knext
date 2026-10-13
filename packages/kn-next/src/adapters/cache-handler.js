@@ -1129,9 +1129,12 @@ function isForeignPostponedEntry(entry) {
  * `revalidate: false` -- and would ignore a changed `revalidate`. Only this
  * build's own windows are handed back: for an entry another build wrote, one
  * with no recorded build id (legacy), or while this process has none (or only
- * Next's constant id), the stored window is withheld and Next treats the entry
- * as stale and re-renders it. The body is still served meanwhile. The FETCH
- * data cache never carries a route window, so it is left untouched.
+ * Next's constant id), the stored window is withheld. Withholding alone does
+ * NOT make Next re-render a route in the prerender manifest (Next then applies
+ * the manifest's window from the entry's `lastModified`), so a page or route
+ * entry another build wrote is handed back with an expired window instead
+ * (`staleForeignBuildEntry`, #2305). The FETCH data cache never carries a route
+ * window, so it is left untouched.
  *
  * ONE exception, for a build that is still SERVING (#2254): under a long-lived
  * canary split two builds read and write the same keys, and withholding each
@@ -1156,6 +1159,67 @@ function scopeWindowToBuild(entry, ctx, writerIsLive = false) {
 }
 
 /**
+ * A page or route entry ANOTHER build wrote is handed to Next as STALE (#2305).
+ *
+ * Withholding the stored window (`scopeWindowToBuild`) is not enough on its
+ * own: with no `cacheControl` from the handler, Next 16.4's
+ * `IncrementalCache.get` falls back to THIS build's prerender-manifest window
+ * and computes `revalidateAfter = revalidate * 1000 + lastModified`. A
+ * prerendered `revalidate = 3600` page whose entry the previous build wrote a
+ * minute ago is then a fresh HIT for another ~59 minutes, and a
+ * `revalidate: false` page is never stale, so the new build kept serving the
+ * old build's HTML. Only a route missing from the manifest fell back to Next's
+ * default 1 s window.
+ *
+ * So the entry comes back with an EXPIRED window: `revalidate: 1` (the smallest
+ * value Next accepts on a response; 0 throws), measured from the entry's own
+ * `lastModified`. Next applies a handler's `cacheControl` directly, marks the
+ * entry stale, serves it once and regenerates it in the background
+ * (stale-while-revalidate: one render, not a stampede of misses), and the
+ * regenerated entry is written under this build. That holds for
+ * `revalidate: false` pages too, because the window is the handler's, not the
+ * manifest's. The writer's own `expire` is kept: past it Next re-renders before
+ * answering, as it would for that body on the build that wrote it. Keys stay
+ * shared across builds (ADR-0066).
+ *
+ * Exceptions, each keeping the behaviour that predates this:
+ *  - the writer is LIVE (a canary peer, #2254): its window is honoured;
+ *  - this process has no build id: it cannot tell another build's entry from
+ *    its own, and forcing every entry stale would re-render every page each
+ *    second, so the stored window is only withheld;
+ *  - not Next's read of a page or route (vinext's reads, the FETCH data cache,
+ *    images): left to `scopeWindowToBuild`.
+ */
+const FOREIGN_BUILD_STALE_SECONDS = 1;
+
+function isForeignBuildPageRead(entry, ctx) {
+  if (!entry || typeof entry !== 'object' || currentBuildId === undefined) return false;
+  // vinext reads without a ctx and reads the window itself.
+  if (typeof ctx?.kind !== 'string') return false;
+  // Decided by the STORED entry's kind: only page and route bodies are a
+  // build's HTML. This also excludes the FETCH data cache (its value kind maps
+  // to 'fetch'; Next rejects a FETCH ctx over a page value), images and
+  // redirects, so no separate ctx.kind check is needed.
+  const kind = cdnSeamKind(entry.value?.kind);
+  if (kind !== 'page' && kind !== 'route') return false;
+  return entry.buildId !== currentBuildId;
+}
+
+function staleForeignBuildEntry(entry, ctx, writerIsLive = false) {
+  if (writerIsLive || !isForeignBuildPageRead(entry, ctx)) {
+    return scopeWindowToBuild(entry, ctx, writerIsLive);
+  }
+  const expire = entry.cacheControl?.expire;
+  return {
+    ...entry,
+    cacheControl: {
+      revalidate: FOREIGN_BUILD_STALE_SECONDS,
+      ...(typeof expire === 'number' && Number.isFinite(expire) && { expire }),
+    },
+  };
+}
+
+/**
  * Is the build that wrote `entry` serving traffic right now?
  *
  * Each process refreshes `build-live:<its build id>` -- one tiny key per build,
@@ -1166,9 +1230,13 @@ function scopeWindowToBuild(entry, ctx, writerIsLive = false) {
  * its windows must not outlive it.
  *
  * Fails CLOSED: no build id on either side, a lookup that faults, an absent or
- * unexpected value all read as "not live", which is the withhold behaviour that
- * predates this check. Only entries another build wrote pay a lookup, and the
- * answer is remembered for `BUILD_LIVE_LOOKUP_MS`.
+ * unexpected value all read as "not live". "Not live" means the writer's window
+ * is not honoured: a page or route entry on Next's read is handed back with an
+ * expired window (`staleForeignBuildEntry`, so it is served once and
+ * re-rendered), and any other entry has its window withheld
+ * (`scopeWindowToBuild`). A lookup that faults is a Redis call, so it also trips
+ * the breaker (`redisCall`). Only entries another build wrote pay a lookup, and
+ * the answer is remembered for `BUILD_LIVE_LOOKUP_MS`.
  */
 const BUILD_LIVE_TTL_SECONDS = 90;
 const BUILD_LIVE_REFRESH_MS = 30_000;
@@ -1466,22 +1534,30 @@ class CacheHandler {
             return null;
           }
           touchBuildLive(client);
-          const foreign = windowIsForeign(parsed, ctx);
+          const foreign = windowIsForeign(parsed, ctx) || isForeignBuildPageRead(parsed, ctx);
           const writerIsLive = foreign && (await isBuildLive(client, parsed.buildId));
           recordCdnTags(
             parsed?.value?.kind ?? ctx?.kind,
             () => storedEntryTags(parsed),
             () => isForeignBuildEntry(parsed),
           );
-          logCacheEvent(parsed?.cacheState === 'stale' ? 'STALE' : 'HIT', source, key, {
-            durationMs: Date.now() - startTime,
-            ...(foreign && {
-              details: writerIsLive
-                ? 'window kept: written by a live peer build'
-                : 'window withheld: written by another build',
-            }),
-          });
-          return scopeWindowToBuild(parsed, ctx, writerIsLive);
+          const servedStale = foreign && !writerIsLive && isForeignBuildPageRead(parsed, ctx);
+          logCacheEvent(
+            servedStale || parsed?.cacheState === 'stale' ? 'STALE' : 'HIT',
+            source,
+            key,
+            {
+              durationMs: Date.now() - startTime,
+              ...(foreign && {
+                details: writerIsLive
+                  ? 'window kept: written by a live peer build'
+                  : servedStale
+                    ? 'served stale: written by another build, re-rendering'
+                    : 'window withheld: written by another build',
+              }),
+            },
+          );
+          return staleForeignBuildEntry(parsed, ctx, writerIsLive);
       }
 
       // In-memory fallback

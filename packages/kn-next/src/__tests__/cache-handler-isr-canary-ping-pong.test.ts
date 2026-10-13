@@ -5,9 +5,14 @@
  *
  * `scopeWindowToBuild` (#1888) withholds the stored revalidate window of an
  * entry ANOTHER build wrote, so a redeploy never honours the previous build's
- * window. Next then treats the entry as stale, serves the body and regenerates
- * it in the background, and the regenerated entry is written back under its OWN
- * build id. ISR keys are route paths shared by every revision of the app, so
+ * window. For a route the prerender manifest does not list (the case here: the
+ * manifest below is empty), Next then falls back to its 1 s window, so it treats
+ * the entry as stale, serves the body and regenerates it in the background, and
+ * the regenerated entry is written back under its OWN build id. (For a route
+ * the manifest DOES list, withholding alone left the entry a fresh HIT for the
+ * manifest's window; since #2305 the handler hands such an entry back with an
+ * expired window instead, see cache-handler-foreign-build-stale.test.ts.)
+ * ISR keys are route paths shared by every revision of the app, so
  * under `spec.traffic.canaryPercent` (two builds serving the same keys for as
  * long as the split lasts) build A strips B's window and rewrites the entry as A,
  * then B strips A's and rewrites it as B: a regeneration on nearly every read,
@@ -17,7 +22,8 @@
  * ## The fix under test
  *
  * A foreign entry's window is honoured while the build that wrote it is LIVE
- * (it refreshed a short-lived `build-live` key recently) and withheld otherwise.
+ * (it refreshed a short-lived `build-live` key recently); otherwise the entry
+ * is stale (since #2305 a page or route entry gets an expired window).
  * A canary peer is live, so nothing ping-pongs; a build that has been replaced
  * is not, so the #1888 guarantee holds once the rollout (or rollback) completes.
  *
@@ -268,15 +274,26 @@ async function pod(redis: Redis, build: typeof BUILD_A | typeof BUILD_B) {
          * One request: read, and (as Next does for a miss or a stale entry)
          * regenerate. Next's per-process window map is cleared first: each pod
          * has its own, and sharing it here would mask the handler's behaviour.
+         *
+         * `rearm` re-attaches the Redis client (and closes the breaker) before
+         * the read and before the re-render's write: a faulted Redis call trips
+         * the breaker and drops the client, which would otherwise send every
+         * later call to the in-memory fallback, past the logic under test.
          */
-        async request(path: string, window: number | false = 3600) {
+        async request(
+            path: string,
+            window: number | false = 3600,
+            rearm = false,
+        ) {
             reads++;
             SharedCacheControls.cacheControls.clear();
+            if (rearm) mod.__setRedisClientForTests(redis.client);
             const entry = await cache.get(path, PAGE);
             const stale = !entry || !!entry.isStale;
             if (stale) {
                 regenerations++;
                 SharedCacheControls.cacheControls.clear();
+                if (rearm) mod.__setRedisClientForTests(redis.client);
                 await cache.set(
                     path,
                     {
@@ -416,16 +433,33 @@ describe("ISR under a canary split does not ping-pong (#2254)", () => {
         expect((await b.request("/isr/bound", false)).stale).toBe(true);
     });
 
-    it("fails closed: a liveness lookup that faults withholds the window, as before the fix", async () => {
+    it("fails closed: a liveness lookup that faults reads as not live, so the entry is stale and re-rendered once", async () => {
         const redis = sharedRedis();
         const a = await pod(redis, BUILD_A);
         await a.request("/isr/fault");
         clock().advance(5000);
         const b = await pod(redis, BUILD_B);
         redis.failReadsOf.push(":build-live:");
-        const { entry, stale } = await b.request("/isr/fault");
+        const { entry, stale } = await b.request("/isr/fault", 3600, true);
         expect(entry).not.toBeNull();
         expect(stale).toBe(true);
+        // The bound: one re-render per page per pod, once the re-render reaches
+        // Redis. The faulted lookup tripped the breaker; `rearm` closes it
+        // again (the cooldown elapsing), so the re-render was written to Redis
+        // and the next five reads go through Redis with the lookup STILL
+        // faulting. Each one reads B's own entry, which is not foreign, so it
+        // pays no lookup and stays fresh.
+        const time = clock();
+        redis.reads.length = 0;
+        for (let i = 0; i < 5; i++) {
+            time.advance(2000);
+            await b.request("/isr/fault", 3600, true);
+        }
+        expect(
+            redis.reads.filter((k) => k.includes(":cache:")),
+            "the five reads must reach Redis, not the in-memory fallback",
+        ).toHaveLength(5);
+        expect(b.regenerations).toBe(1);
     });
 
     it("looks a peer build up once per few seconds, not once per read", async () => {

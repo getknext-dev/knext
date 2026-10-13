@@ -1,9 +1,13 @@
 # ADR-0066: Next 16.4 cache surface and runtime-supervisor changes — one sequenced plan
 
-- **Status:** **Accepted with Amendment 1 (2026-10-11); Amendment 2 (2026-10-12) Proposed.** Proposed 2026-10-10 and revised in review
+- **Status:** **Accepted with Amendment 1 (2026-10-11); Amendment 2 (2026-10-12) Proposed; Amendment 3 (2026-10-13) Proposed.** Proposed 2026-10-10 and revised in review
   round 2 the same day; accepted at the Sprint 2 close design review (jev 0.98). D1–D5 stand as
-  written, except where Amendment 1 (end of this file) supersedes a line. Design and sequencing only;
-  no code lands with this ADR.
+  written, except where an amendment (end of this file) supersedes a line: Amendment 1 (Accepted:
+  K4 keeps the `adapterPath` shim), Amendment 2 (Proposed: a live build's window is honoured) and
+  Amendment 3 (Proposed: a non-live build's page or route entry is handed back stale; it supersedes
+  Amendment 2 §1's re-render sentence, §2's "withheld exactly as before" for page and route entries,
+  and Amendment 2's Redis-fault accepted risk). Design and sequencing only; no code lands with this
+  ADR.
 - **Date:** 2026-10-10
 - **Trigger class:** ADR + hard rule ("don't rewrite the runtime twice"; "gate every feature on the
   official compatibility suite") + public API (the `'use cache'` backend export and its adapter
@@ -843,7 +847,12 @@ the accepted risk "entries ping-pong until the rollout completes" with the bound
 
 1. **The defect.** The Next >= 16.4 read path withholds the stored `cacheControl` of any ISR entry
    another build wrote (#1888), so Next treats it as stale and regenerates it; the regenerated entry is
-   written under its own build id. ISR keys are route paths shared by every revision. That is
+   written under its own build id. **[Superseded by Amendment 3.** This sentence is wrong for any
+   route in the prerender manifest: with the window withheld, Next applies the manifest's window
+   from the old entry's `lastModified`, so the entry stays a fresh `HIT` for that window (forever for
+   `revalidate: false`). It holds only for routes the manifest does not list, which is the case the
+   ping-pong below was observed on. Amendment 3 replaces the withhold with an expired window for a
+   non-live build's page and route entries.**]** ISR keys are route paths shared by every revision. That is
    harmless for one rollout, but `spec.traffic { revisionName, canaryPercent: 1..99 }` (`knext
    rollback --to X --canary N`) keeps two builds serving the same keys for as long as the split is
    left in place, typically during a rollback. Build A strips B's window and rewrites the entry as A;
@@ -856,6 +865,10 @@ the accepted risk "entries ping-pong until the rollout completes" with the bound
    foreign entry looks the writer's key up (only then; memoised for 5 s). Present: the window is handed
    back and the entry is regenerated at its own cadence. Absent, unreadable, no build id on either side,
    or a legacy entry without one: the window is withheld exactly as before. The lookup **fails closed**.
+   **[Superseded by Amendment 3** for page and route entries on Next's read: in those cases (absent,
+   unreadable, or a legacy entry, with this process holding a build id) the entry is now handed back
+   with an expired window, not withheld. Withholding still applies to other kinds, to vinext's reads,
+   and when this process has no build id.**]**
 3. **What the guarantee becomes.** #1888 said a previous build's window is never honoured by the new
    build. It now says: **never once that build has stopped serving, plus the liveness TTL** (about two
    minutes after its last request). During a rollout, the old build is still serving until it drains,
@@ -887,7 +900,98 @@ the accepted risk "entries ping-pong until the rollout completes" with the bound
   minority build honours the result on its next request. Cost bounded by that build's request rate,
   not the majority's.
 - **A Redis fault on the liveness lookup withholds the window**, i.e. the pre-amendment behaviour.
+  **[Superseded by Amendment 3:** for page and route entries a fault now forces the entry stale;
+  see Amendment 3's accepted risks.**]**
 - **PPR entries still alternate under a split.** Resume state is build-specific (#2084), so each
   build misses on an entry the other wrote last. A per-build key for `postponed` entries is the
   remedy and is filed as follow-up work, not done here.
 - **One tiny Redis key per live build**, with a 90 s TTL, replaces unbounded growth: nothing is stranded.
+
+## Amendment 3 (2026-10-13): a previous build's ISR entry is served once as stale, then re-rendered
+
+**Status of this amendment: Proposed.** Trigger-class (ADR, and the cache runtime); per the
+2026-09-22 workflow amendment it is not a merge gate, and it is reviewed at sprint close. Implemented
+in #2305 meanwhile. It corrects a factual claim that #1888, D2's "Build scoping, ISR" row and
+Amendment 2 §1 all rest on, and replaces the mechanism that claim described.
+
+### What changed
+
+1. **The claim was wrong.** #1888 and Amendment 2 §1 say that when the handler withholds the stored
+   `cacheControl` of an entry another build wrote, "Next treats it as stale and regenerates it". Read
+   from `next@16.4.0` (`dist/server/lib/incremental-cache/index.js`, `IncrementalCache.get` and
+   `calculateRevalidate`) and measured on two real `next build`s sharing one Redis: with no
+   `cacheControl` from the handler, Next falls back to **this** build's prerender-manifest window and
+   computes `revalidateAfter = revalidate * 1000 + lastModified` from the old entry. A prerendered
+   `revalidate = 3600` page whose entry the old build wrote a minute ago is a fresh `HIT` for another
+   ~59 minutes, and a `revalidate: false` page is never stale. Only a route **missing** from the
+   manifest falls back to Next's default 1 s window, which is the case #1888 and the canary tests
+   were verified on. So after a deploy the new build kept serving the old build's HTML as `HIT`.
+   (The same read on `next@16.3.5` ignores a handler's `cacheControl` entirely; that line is below
+   the `>=16.4.0` peer floor of this branch.)
+2. **The rule.** For a page or route entry (`APP_PAGE`, `PAGES`, `APP_ROUTE`) another build wrote,
+   on Next's read, once that build is **not live** (Amendment 2's liveness record), the handler
+   returns the entry with an **expired** window: `cacheControl: { revalidate: 1 }` plus the writer's
+   own `expire` when it recorded one. Next 16.4 applies a handler's `cacheControl` directly, so the
+   entry is stale: Next serves it once and regenerates it in the background (stale-while-revalidate),
+   and the regenerated entry is written under the current build. This holds for `revalidate: false`
+   pages too, because the window is the handler's, not the manifest's. `1` is the smallest value
+   Next accepts on a response (`0` throws), measured from the entry's own `lastModified`. Keeping the
+   writer's `expire` means a body past it is re-rendered before Next answers (`isStale = -1`), as it
+   would be on the build that wrote it; Redis already evicts the key at `expire`, so this only
+   matters at the boundary.
+3. **What the guarantee becomes.** After a rollout, once the previous build has stopped serving
+   (Amendment 2: its liveness lapses about 90 s after its last cache access), each page it rendered
+   is served from the new build's origin **at most once more per pod as stale** while the new build
+   re-renders it; concurrent requests during that render also get the stale body. The edge never
+   stores it (ADR-0068 Amendment 2, `foreign_build_body`).
+4. **Unchanged.** Keys stay shared across builds (no build-scoped ISR keys); a live peer build's window
+   is still honoured (Amendment 2); a process with **no** build id forces nothing stale (it cannot tell
+   another build's entry from its own, and forcing every entry stale would re-render every page each
+   second), so it keeps the withhold behaviour; vinext's reads (no `ctx`), the FETCH data cache and
+   images are untouched; PPR `postponed` entries keep their build-scoped miss (#2084). The FETCH data
+   cache does not have this defect: a data entry is upstream data, not build-specific HTML, and Next
+   judges it by the fetch's own `revalidate`. `'use cache'` entries do not either: Next's key carries
+   the build or deployment id (D2), so a new build misses them.
+
+### Options considered (jev, lead's pick on #2305)
+
+| Option | jev | Why |
+|---|---|---|
+| **Hand the foreign entry back with an expired window (chosen)** | **1.00** | One stale response per page, then the new build's own render; works for `revalidate: false`; keys stay shared |
+| Return a miss unless the writer is live | — | Every page a blocking render right after a deploy, all at once: a stampede on the origin |
+| Build-scoped ISR keys | — | Breaks the cross-build sharing D2 relies on; strands entries until `expire`; the tag index would have to list per-build keys |
+| Accept and document | — | The new build serves the old HTML for a page's whole window, forever for `revalidate: false` |
+
+Mechanism (jev, this amendment): `cacheControl.revalidate: 1` **0.97**, an aged `lastModified`
+0.02 (cannot make `revalidate: false` stale, and fires Next's tag-expiry checks), `lastModified: -1`
+0.01 (a blocking re-render, not stale-while-revalidate). Keep the writer's `expire` **0.98** (drop it
+0.01, a fixed one 0.01). No build id in this process: keep the withhold behaviour **0.99** (force
+every entry stale 0.01).
+
+### Accepted risks
+
+- **One stale response per page per pod after a rollout**, plus any requests that arrive during the
+  re-render. That is the stale-while-revalidate cost the old claim described; the difference is that
+  it now actually ends.
+- **Next files the expired window in its per-process route map** (`SharedCacheControls`) until the
+  re-render's `set` replaces it with the page's own window. If that re-render fails, the route keeps
+  the 1 s window in that process, and the next read retries the render, which is Next's ordinary
+  behaviour for a failed revalidation.
+- **A Redis fault on the liveness lookup now forces the entry stale** (this replaces Amendment 2's
+  "a fault withholds the window, i.e. the pre-amendment behaviour", which is no longer true).
+  `isBuildLive` fails closed, so a lookup that faults reads as "not live", and a page or route entry
+  a live peer build wrote is handed back with the expired window: Next serves it and re-renders it
+  in the background. The faulted lookup is a Redis call, so it also trips the handler's Redis
+  breaker: that pod drops its client and serves (and writes) from its in-memory cache for
+  `REDIS_RETRY_COOLDOWN_MS` (5 s by default), as for any Redis fault. Bound: once the re-render's
+  entry reaches Redis it is this build's own, so it pays no lookup and stays fresh: one background
+  render per page per pod, the same bound as ordinary ISR staleness, and the body is served
+  meanwhile. If the re-render lands in memory because the breaker is still open, and the lookup is
+  still faulting when the breaker closes, the next read meets the peer's entry again: at most one
+  render per page per pod per cooldown while that fault lasts. Under a canary split the two builds
+  can then re-render each other's entries, Amendment 2's ping-pong, for as long as the fault lasts.
+  (`cache-handler-isr-canary-ping-pong.test.ts` pins the first bound with the breaker closed again
+  between calls; a mutation that re-checks the build's own entry reds it.)
+- **An entry younger than 1 s from a non-live writer is still fresh for that second.** Every write
+  refreshes the writer's 90 s liveness record, so a non-live writer's entries are at least about 90 s
+  old in practice.
