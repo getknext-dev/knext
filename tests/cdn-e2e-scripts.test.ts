@@ -216,3 +216,87 @@ describe('expected-red helper (scripts/cdn-e2e-expect-red.sh)', () => {
     expect(r.stdout).toContain('[alpha] did not fail with');
   });
 });
+
+/**
+ * The KNOWN DEFECT (#2299) leg passes only when `rollout-no-old-html` fails at
+ * its own message. A broken /tagged (5xx, 404, the emulator's 502) carries no
+ * build mark, and must NOT read as "old-build HTML": that would keep the pinned
+ * step green while the page under test is simply down. It must be a
+ * precondition failure, which the expected-red helper rejects.
+ */
+describe('rollout-no-old-html: only a real page counts as old-build HTML', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'cdn-rollout-'));
+  afterAll(() => rmSync(dir, { recursive: true, force: true }));
+
+  async function runAgainst(tagged: { status: number; type: string; body: string }) {
+    const { createServer } = await import('node:http');
+    const server = createServer((req, res) => {
+      if (String(req.url).startsWith('/build-mark')) {
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+        res.end('<!DOCTYPE html><p id="build">v2</p>');
+        return;
+      }
+      res.writeHead(tagged.status, { 'content-type': tagged.type });
+      res.end(tagged.body);
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+    try {
+      const port = (server.address() as { port: number }).port;
+      const stateFile = join(dir, `state-${port}.json`);
+      writeFileSync(
+        stateFile,
+        JSON.stringify({ rollout: { paths: ['/tagged?k=1'], mark: 'v1', buildTag: 'kn-x-b0' } }),
+      );
+      const { purgeChecks, purgeConfig } = await import(PURGE_ASSERT);
+      const c = purgeConfig({ CDN_EMU_URL: `http://127.0.0.1:${port}`, CDN_STATE_FILE: stateFile });
+      const check = purgeChecks(c).find((x: { id: string }) => x.id === 'rollout-no-old-html');
+      try {
+        return { ok: true, note: await check.run() };
+      } catch (err) {
+        return { ok: false, note: String((err as Error).message) };
+      }
+    } finally {
+      await new Promise((r) => server.close(() => r(null)));
+    }
+  }
+
+  it('a 5xx /tagged is a precondition failure, not the pinned old-build FAIL', async () => {
+    const r = await runAgainst({
+      status: 502,
+      type: 'application/json',
+      body: '{"error":"upstream failed"}',
+    });
+    expect(r.ok).toBe(false);
+    expect(r.note.startsWith('precondition:')).toBe(true);
+    expect(r.note).not.toContain('old-build HTML was served');
+  });
+
+  it('a 200 HTML page with no build mark is a precondition failure too', async () => {
+    const r = await runAgainst({
+      status: 200,
+      type: 'text/html',
+      body: '<!DOCTYPE html><p>error page</p>',
+    });
+    expect(r.ok).toBe(false);
+    expect(r.note.startsWith('precondition:')).toBe(true);
+  });
+
+  it('a 200 HTML page with the OLD build mark is the pinned failure', async () => {
+    const r = await runAgainst({
+      status: 200,
+      type: 'text/html',
+      body: '<!DOCTYPE html><p id="build">v1</p>',
+    });
+    expect(r.ok).toBe(false);
+    expect(r.note.startsWith('old-build HTML was served after the first-ready purge')).toBe(true);
+  });
+
+  it('a 200 HTML page with the NEW build mark passes', async () => {
+    const r = await runAgainst({
+      status: 200,
+      type: 'text/html',
+      body: '<!DOCTYPE html><p id="build">v2</p>',
+    });
+    expect(r).toEqual({ ok: true, note: 'every page served build v2' });
+  });
+});

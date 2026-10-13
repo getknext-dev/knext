@@ -1,3 +1,4 @@
-# zero-diff, with the CDN app standing in for the no-CDN app, must report a
-# difference from the pre-CDN baseline (the comparator can see red).
-zero-diff|headers without spec.cdn differ from the pre-CDN baseline
+# zero-diff, with the CDN app standing in for the no-CDN app, must report the
+# edge headers specifically (not merely some difference) against the pre-CDN
+# baseline: the comparator sees the CDN half of the change.
+zero-diff|present without spec.cdn

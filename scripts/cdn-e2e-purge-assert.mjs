@@ -291,6 +291,13 @@ export function purgeChecks(c) {
         for (const path of [s.paths[0], `/tagged?${k('ro-fresh')}`]) {
           const r = await send(c.emu, { host: c.hosts.a, path });
           const mark = buildMarkOf(r);
+          // Only a real page can be old-build HTML: a 5xx, a 404, an error page
+          // or the emulator's 502 carries no build mark and is a broken page,
+          // which must never satisfy the pinned #2299 failure.
+          must(
+            r.status === 200 && isHtml(r) && mark !== undefined,
+            `precondition: ${path} answered ${r.status} ${r.headers['content-type']} with no build mark (the page is broken, not old)`,
+          );
           if (mark !== current)
             old.push(
               `${path} (build ${mark}, x-nextjs-cache=${r.headers['x-nextjs-cache']}, edge-stored=${stored(r) || hit(r)})`,
