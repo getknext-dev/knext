@@ -1,0 +1,12 @@
+steps:
+- name: node:22-bookworm
+  entrypoint: bash
+  args: ['/workspace/build-cells.sh']
+- name: gcr.io/cloud-builders/docker
+  entrypoint: bash
+  env: ['BUILD_ID=$BUILD_ID']
+  args: ['/workspace/image-cells.sh']
+timeout: 3600s
+options:
+  machineType: E2_HIGHCPU_8
+  logging: CLOUD_LOGGING_ONLY

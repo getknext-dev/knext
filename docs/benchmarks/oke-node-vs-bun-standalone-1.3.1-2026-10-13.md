@@ -109,7 +109,7 @@ deltas are identical across arms and match the rc.6 / 10-12 sittings: `maxScale:
 `containerConcurrency: 100`, `imagePrewarm: true`, `imagePullSecrets`, and the scaffold's
 `scaleDownDelay` removed so that each arm returns to zero. The arms differ **only** in `name` and
 `runtime` (`node` | `bun`). One `npm ci` from one lockfile fed both `knext build` runs on the same
-builder. The page, route, config and Cloud Build scripts are in `data/…/app/` and `data/…/build/`.
+builder. The page, route, config and Cloud Build scripts are in `data/…/app/` and `data/…/recipe/`.
 
 **Deploy through the product path.** `knext deploy --image <ghcr ref>@sha256:… --context knext-oke-sa
 -n bench-131-20261013` (the 1.3.1 CLI) applies only a `NextApp` CR, and the operator reconciled the
@@ -188,7 +188,7 @@ delete** (all created by this sitting):
   verdict.
 - `phases.md`: the per-phase tables, overall and per node.
 - `drive.out`, `run-start.txt`, `run-end.txt`: the driver log and sitting window.
-- `images.txt`, `build/` (Cloud Build config, scripts, version and bytecode evidence), and `app/`
+- `images.txt`, `recipe/` (Cloud Build config, scripts, version and bytecode evidence), and `app/`
   (the bench page, route and config).
 
 Reproduce: `NS=bench-131-20261013 python3 scripts/bench-cold-start-phases/analyze.py <data>/run.jsonl
