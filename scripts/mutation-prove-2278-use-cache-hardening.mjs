@@ -47,7 +47,7 @@ const MUTATIONS = [
     id: 'M02',
     subject: 'handler',
     claim: 'tag stamps use the invalidating pod clock again',
-    anchor: 'const now = Math.round(localNowMs()) + (await clockOffset(core, client));',
+    anchor: 'const now = Math.round(localNowMs()) + redisOffset;',
     replacement: 'const now = Math.round(localNowMs());',
   },
   {
@@ -154,6 +154,53 @@ const MUTATIONS = [
       "const reply = await core.command(client, 'HSCAN', [tagsKey(), pruneCursor, 'COUNT', String(PRUNE_PAGE)]);",
     replacement:
       "const reply = await core.redisCall(() => core.command(client, 'HSCAN', [tagsKey(), pruneCursor, 'COUNT', String(PRUNE_PAGE)]));",
+  },
+  // ── round 2 (review): guards the first sweep did not prove ────────────────
+  {
+    id: 'M17',
+    subject: 'handler',
+    claim:
+      'the prune DELETE (EVAL) goes through the shared breaker: a Redis refusing scripts opens it',
+    anchor:
+      "await core.command(client, 'EVAL', [PRUNE_STAMPS_SCRIPT, '1', tagsKey(), String(cutoff), ...dead]);",
+    replacement:
+      "await core.redisCall(() => core.command(client, 'EVAL', [PRUNE_STAMPS_SCRIPT, '1', tagsKey(), String(cutoff), ...dead]));",
+  },
+  {
+    id: 'M18',
+    subject: 'handler',
+    claim: 'the TIME read drops its half-round-trip correction (offset taken at the reply)',
+    anchor: 'clock.offset = Math.round(serverMs - (t0 + t1) / 2);',
+    replacement: 'clock.offset = Math.round(serverMs - t1);',
+  },
+  {
+    id: 'M19',
+    subject: 'handler',
+    claim: 'the computed Redis clock offset is 1 s wrong',
+    anchor: 'clock.offset = Math.round(serverMs - (t0 + t1) / 2);',
+    replacement: 'clock.offset = Math.round(serverMs - (t0 + t1) / 2 + 1000);',
+  },
+  {
+    id: 'M20',
+    subject: 'handler',
+    claim: "the stamp's clock is read BEFORE the first offset read, so it is a round trip early",
+    anchor:
+      'const redisOffset = await clockOffset(core, client);\n    const now = Math.round(localNowMs()) + redisOffset;',
+    replacement: 'const now = Math.round(localNowMs()) + (await clockOffset(core, client));',
+  },
+  {
+    id: 'M21',
+    subject: 'handler',
+    claim: 'a failing prune warns on every attempt (forever, on a Redis that refuses scripts)',
+    anchor: 'if (!state.pruneWarned) {',
+    replacement: 'if (true) {',
+  },
+  {
+    id: 'M22',
+    subject: 'handler',
+    claim: 'a successful prune no longer re-arms the prune warning',
+    anchor: 'if (await pruneStamps(client, now)) state.pruneWarned = false;',
+    replacement: 'await pruneStamps(client, now);',
   },
 ];
 

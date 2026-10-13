@@ -74,6 +74,12 @@ export interface FakeRedisOptions {
     >;
     /** Added to this server's `TIME` reply: a Redis whose clock is off. */
     timeOffsetMs?: number;
+    /**
+     * Hold a command's reply this long AFTER it is applied: the return leg of a
+     * slow link. With `onCommand` delaying the outbound leg, a reply is computed
+     * mid-round-trip, as on a real network.
+     */
+    replyDelayMs?: (cmd: string) => number;
 }
 
 export interface FakeRedis {
@@ -416,7 +422,13 @@ export async function startFakeRedis(
                     }
                     // Outside a transaction (i.e. a plain pipeline) the command
                     // is applied the moment it arrives — hence tearable.
-                    socket.write(apply(cmd, args));
+                    const reply = apply(cmd, args);
+                    const hold = options.replyDelayMs?.(cmd) ?? 0;
+                    if (hold > 0) {
+                        await new Promise((r) => setTimeout(r, hold));
+                        if (socket.destroyed) return;
+                    }
+                    socket.write(reply);
                 });
             }
         });

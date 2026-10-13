@@ -108,6 +108,7 @@ function shared(core) {
     state = {
       outageWarned: false,
       oversizeWarned: false,
+      pruneWarned: false,
       clock: { offset: undefined, sampledAt: 0, retryAt: 0, inflight: null },
     };
     SHARED.set(core, state);
@@ -469,10 +470,11 @@ export function createUseCacheHandler({ kind, core }) {
    * routed through the breaker: the tag write just before it proved the
    * connection, and a failure here (a Redis that refuses scripts, say) must not
    * take ISR's cache offline every 30 s. Each command keeps its own timeout.
+   * Resolves true when a step ran to completion, false when it was not due.
    */
   async function pruneStamps(client, now) {
     const tick = Date.now();
-    if (tick - lastPrune < PRUNE_INTERVAL_MS) return;
+    if (tick - lastPrune < PRUNE_INTERVAL_MS) return false;
     lastPrune = tick;
     const reply = await core.command(client, 'HSCAN', [tagsKey(), pruneCursor, 'COUNT', String(PRUNE_PAGE)]);
     pruneCursor = String(reply?.[0] ?? '0');
@@ -489,6 +491,7 @@ export function createUseCacheHandler({ kind, core }) {
     if (dead.length > 0) {
       await core.command(client, 'EVAL', [PRUNE_STAMPS_SCRIPT, '1', tagsKey(), String(cutoff), ...dead]);
     }
+    return true;
   }
 
   async function doUpdateTags(tags, durations) {
@@ -500,7 +503,10 @@ export function createUseCacheHandler({ kind, core }) {
       count('tagsDropped');
       return;
     }
-    const now = Math.round(localNowMs()) + (await clockOffset(core, client));
+    // Offset FIRST, then the clock: on a process's first call the offset read is a
+    // round trip, and a clock read taken before it would stamp that much early.
+    const redisOffset = await clockOffset(core, client);
+    const now = Math.round(localNowMs()) + redisOffset;
     const fields = [];
     for (const tag of list) {
       if (durations) {
@@ -524,11 +530,16 @@ export function createUseCacheHandler({ kind, core }) {
       return;
     }
     try {
-      await pruneStamps(client, now);
+      if (await pruneStamps(client, now)) state.pruneWarned = false;
     } catch (err) {
-      // The tags ARE updated; only the housekeeping failed, and the next step retries.
+      // The tags ARE updated; only the housekeeping failed, and the next step
+      // retries. Counted every time, logged once per process until a prune
+      // succeeds: a Redis that refuses scripts would otherwise log forever.
       count('pruneError');
-      console.warn("[CacheHandler] Pruning old 'use cache' tag stamps failed (the tags were updated):", err?.message);
+      if (!state.pruneWarned) {
+        state.pruneWarned = true;
+        console.warn("[CacheHandler] Pruning old 'use cache' tag stamps failed (the tags were updated):", err?.message);
+      }
     }
   }
 

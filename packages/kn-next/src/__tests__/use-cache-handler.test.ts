@@ -996,4 +996,120 @@ describe.each([
         await useCache.set("after-prune", Promise.resolve(entryOf()));
         expect(f.strings.has(`${PREFIX}:uc:default:after-prune`)).toBe(true);
     });
+
+    it("a refused prune DELETE (EVAL alone fails, after a good HSCAN) keeps the breaker closed", async () => {
+        const f = await withRedis({
+            // A Redis that refuses scripts: HSCAN works, EVAL does not.
+            errorFor: (cmd) =>
+                cmd === "eval" ? "scripts disabled" : undefined,
+        });
+        // A stamp past the cutoff, so the prune really sends its EVAL.
+        const old = String(Date.now() - 3 * 86_400_000);
+        f.hashes.set(`${PREFIX}:uc:tags`, new Map([["e:ancient", old]]));
+        const { useCache } = await pod();
+        await useCache.updateTags(["x"]);
+        expect(
+            f.commands.some((c) => c.cmd === "eval"),
+            "the delete step was sent",
+        ).toBe(true);
+        expect(f.hashes.get(`${PREFIX}:uc:tags`)?.has("e:x")).toBe(true);
+        await useCache.set("after-eval", Promise.resolve(entryOf()));
+        expect(
+            f.strings.has(`${PREFIX}:uc:default:after-eval`),
+            "the ISR-shared breaker is still closed",
+        ).toBe(true);
+    });
+
+    it("a prune that keeps failing warns once per process, not on every attempt or per kind", async () => {
+        const f = await withRedis({
+            errorFor: (cmd) =>
+                cmd === "eval" ? "scripts disabled" : undefined,
+        });
+        const old = String(Date.now() - 3 * 86_400_000);
+        f.hashes.set(
+            `${PREFIX}:uc:tags`,
+            new Map([
+                ["e:a", old],
+                ["e:b", old],
+            ]),
+        );
+        const warn = console.warn as unknown as ReturnType<typeof jest.fn>;
+        const { mod, useCache } = await pod("default");
+        const remote = (
+            mod.CacheHandler as {
+                forUseCache(kind: string): UseCacheHandler;
+            }
+        ).forUseCache("remote");
+        // Each kind runs its own prune step, and both fail.
+        await useCache.updateTags(["x"]);
+        await remote.updateTags(["y"]);
+        expect(
+            f.commands.filter((c) => c.cmd === "eval").length,
+            "both prune steps ran",
+        ).toBe(2);
+        const prunes = warn.mock.calls.filter((c) =>
+            /prun/i.test(String(c[0])),
+        );
+        expect(prunes.length, "one warning for the process").toBe(1);
+    });
+
+    it("a prune that succeeds re-arms the prune warning", async () => {
+        let refuse = true;
+        const f = await withRedis({
+            errorFor: (cmd) =>
+                cmd === "eval" && refuse ? "scripts disabled" : undefined,
+        });
+        const old = String(Date.now() - 3 * 86_400_000);
+        f.hashes.set(
+            `${PREFIX}:uc:tags`,
+            new Map([
+                ["e:a", old],
+                ["e:b", old],
+                ["e:c", old],
+            ]),
+        );
+        const warn = console.warn as unknown as ReturnType<typeof jest.fn>;
+        const { mod } = await pod();
+        // Three handlers on one process (one breaker, one warning state); each
+        // runs its own prune step.
+        const handler = () =>
+            (
+                mod.CacheHandler as {
+                    forUseCache(kind: string): UseCacheHandler;
+                }
+            ).forUseCache("default");
+        await handler().updateTags(["x"]); // fails, warns
+        refuse = false;
+        await handler().updateTags(["y"]); // succeeds, re-arms
+        refuse = true;
+        f.hashes.get(`${PREFIX}:uc:tags`)?.set("e:d", old);
+        await handler().updateTags(["z"]); // fails again, warns again
+        const prunes = warn.mock.calls.filter((c) =>
+            /prun/i.test(String(c[0])),
+        );
+        expect(prunes.length).toBe(2);
+    });
+
+    it("corrects the Redis clock read by half the round trip", async () => {
+        // The server's clock is 10 s ahead, and each leg of the TIME round trip
+        // takes 200 ms. The server reads its clock mid-trip, so the right
+        // offset is 10 s: ignoring the trip, or crediting all of it to one leg,
+        // is off by 200 ms.
+        const f = await withRedis({
+            timeOffsetMs: 10_000,
+            onCommand: async (cmd) => {
+                if (cmd === "time") await sleep(200);
+            },
+            replyDelayMs: (cmd) => (cmd === "time" ? 200 : 0),
+        });
+        const { useCache } = await pod();
+        await useCache.updateTags(["clock"]);
+        const after = Date.now();
+        const stamp = Number(f.hashes.get(`${PREFIX}:uc:tags`)?.get("e:clock"));
+        expect(f.commands.filter((c) => c.cmd === "time").length).toBe(1);
+        // The stamp is this pod's "now" in the server's clock: at most a few ms
+        // before `after` + 10 s, and never later.
+        expect(stamp).toBeLessThanOrEqual(after + 10_000 + 50);
+        expect(stamp).toBeGreaterThanOrEqual(after + 10_000 - 100);
+    });
 });
