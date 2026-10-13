@@ -1,6 +1,6 @@
 # ADR-0066: Next 16.4 cache surface and runtime-supervisor changes — one sequenced plan
 
-- **Status:** **Accepted with Amendment 1 (2026-10-11); Amendment 2 (2026-10-12) Proposed.** Proposed 2026-10-10 and revised in review
+- **Status:** **Accepted with Amendment 1 (2026-10-11); Amendment 2 (2026-10-12) Proposed; Amendment 3 (2026-10-13) Proposed.** Proposed 2026-10-10 and revised in review
   round 2 the same day; accepted at the Sprint 2 close design review (jev 0.98). D1–D5 stand as
   written, except where Amendment 1 (end of this file) supersedes a line. Design and sequencing only;
   no code lands with this ADR.
@@ -891,3 +891,77 @@ the accepted risk "entries ping-pong until the rollout completes" with the bound
   build misses on an entry the other wrote last. A per-build key for `postponed` entries is the
   remedy and is filed as follow-up work, not done here.
 - **One tiny Redis key per live build**, with a 90 s TTL, replaces unbounded growth: nothing is stranded.
+
+## Amendment 3 (2026-10-13): a previous build's ISR entry is served once as stale, then re-rendered
+
+**Status of this amendment: Proposed.** Trigger-class (ADR, and the cache runtime); per the
+2026-09-22 workflow amendment it is not a merge gate, and it is reviewed at sprint close. Implemented
+in #2305 meanwhile. It corrects a factual claim that #1888, D2's "Build scoping, ISR" row and
+Amendment 2 §1 all rest on, and replaces the mechanism that claim described.
+
+### What changed
+
+1. **The claim was wrong.** #1888 and Amendment 2 §1 say that when the handler withholds the stored
+   `cacheControl` of an entry another build wrote, "Next treats it as stale and regenerates it". Read
+   from `next@16.4.0` (`dist/server/lib/incremental-cache/index.js`, `IncrementalCache.get` and
+   `calculateRevalidate`) and measured on two real `next build`s sharing one Redis: with no
+   `cacheControl` from the handler, Next falls back to **this** build's prerender-manifest window and
+   computes `revalidateAfter = revalidate * 1000 + lastModified` from the old entry. A prerendered
+   `revalidate = 3600` page whose entry the old build wrote a minute ago is a fresh `HIT` for another
+   ~59 minutes, and a `revalidate: false` page is never stale. Only a route **missing** from the
+   manifest falls back to Next's default 1 s window, which is the case #1888 and the canary tests
+   were verified on. So after a deploy the new build kept serving the old build's HTML as `HIT`.
+   (The same read on `next@16.3.5` ignores a handler's `cacheControl` entirely; that line is below
+   the `>=16.4.0` peer floor of this branch.)
+2. **The rule.** For a page or route entry (`APP_PAGE`, `PAGES`, `APP_ROUTE`) another build wrote,
+   on Next's read, once that build is **not live** (Amendment 2's liveness record), the handler
+   returns the entry with an **expired** window: `cacheControl: { revalidate: 1 }` plus the writer's
+   own `expire` when it recorded one. Next 16.4 applies a handler's `cacheControl` directly, so the
+   entry is stale: Next serves it once and regenerates it in the background (stale-while-revalidate),
+   and the regenerated entry is written under the current build. This holds for `revalidate: false`
+   pages too, because the window is the handler's, not the manifest's. `1` is the smallest value
+   Next accepts on a response (`0` throws), measured from the entry's own `lastModified`. Keeping the
+   writer's `expire` means a body past it is re-rendered before Next answers (`isStale = -1`), as it
+   would be on the build that wrote it; Redis already evicts the key at `expire`, so this only
+   matters at the boundary.
+3. **What the guarantee becomes.** After a rollout, once the previous build has stopped serving
+   (Amendment 2: its liveness lapses about 90 s after its last cache access), each page it rendered
+   is served from the new build's origin **at most once more per pod as stale** while the new build
+   re-renders it; concurrent requests during that render also get the stale body. The edge never
+   stores it (ADR-0068 Amendment 2, `foreign_build_body`).
+4. **Unchanged.** Keys stay shared across builds (no build-scoped ISR keys); a live peer build's window
+   is still honoured (Amendment 2); a process with **no** build id forces nothing stale (it cannot tell
+   another build's entry from its own, and forcing every entry stale would re-render every page each
+   second), so it keeps the withhold behaviour; vinext's reads (no `ctx`), the FETCH data cache and
+   images are untouched; PPR `postponed` entries keep their build-scoped miss (#2084). The FETCH data
+   cache does not have this defect: a data entry is upstream data, not build-specific HTML, and Next
+   judges it by the fetch's own `revalidate`. `'use cache'` entries do not either: Next's key carries
+   the build or deployment id (D2), so a new build misses them.
+
+### Options considered (jev, lead's pick on #2305)
+
+| Option | jev | Why |
+|---|---|---|
+| **Hand the foreign entry back with an expired window (chosen)** | **1.00** | One stale response per page, then the new build's own render; works for `revalidate: false`; keys stay shared |
+| Return a miss unless the writer is live | — | Every page a blocking render right after a deploy, all at once: a stampede on the origin |
+| Build-scoped ISR keys | — | Breaks the cross-build sharing D2 relies on; strands entries until `expire`; the tag index would have to list per-build keys |
+| Accept and document | — | The new build serves the old HTML for a page's whole window, forever for `revalidate: false` |
+
+Mechanism (jev, this amendment): `cacheControl.revalidate: 1` **0.97**, an aged `lastModified`
+0.02 (cannot make `revalidate: false` stale, and fires Next's tag-expiry checks), `lastModified: -1`
+0.01 (a blocking re-render, not stale-while-revalidate). Keep the writer's `expire` **0.98** (drop it
+0.01, a fixed one 0.01). No build id in this process: keep the withhold behaviour **0.99** (force
+every entry stale 0.01).
+
+### Accepted risks
+
+- **One stale response per page per pod after a rollout**, plus any requests that arrive during the
+  re-render. That is the stale-while-revalidate cost the old claim described; the difference is that
+  it now actually ends.
+- **Next files the expired window in its per-process route map** (`SharedCacheControls`) until the
+  re-render's `set` replaces it with the page's own window. If that re-render fails, the route keeps
+  the 1 s window in that process, and the next read retries the render, which is Next's ordinary
+  behaviour for a failed revalidation.
+- **An entry younger than 1 s from a non-live writer is still fresh for that second.** Every write
+  refreshes the writer's 90 s liveness record, so a non-live writer's entries are at least about 90 s
+  old in practice.

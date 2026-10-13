@@ -73,8 +73,10 @@ Redis, this block is the first thing to check.
   request after the app scales up from zero, for pages generated at request time as well as
   prerendered ones. Each entry carries its own revalidate window, so a freshly started pod does not
   need to have rendered the page to know it is still fresh. That applies only to entries written by
-  the same build. After a redeploy, entries from the previous build are revalidated as usual once
-  that build has stopped serving, plus about two minutes (see the canary and redeploy bullet below).
+  the same build. After a redeploy, once the previous build has stopped serving (plus about two
+  minutes, see the canary and redeploy bullet below), the first request for a page that build
+  rendered may get the previous page once, as `STALE`, while a fresh copy renders in the background.
+  Later requests get the new build's page. This holds for `revalidate: false` pages too.
 - **Past the window** requests are served `STALE` from Redis while a background render replaces the
   entry — stale-while-revalidate, not a blocking re-render.
 - **While two builds are serving the same app** (a canary split, or the overlap of a plain
@@ -84,7 +86,8 @@ Redis, this block is the first thing to check.
   build has stopped serving, its windows stop being honoured within about two minutes, and until
   then the new build can keep serving the old build's page without regenerating it. That includes
   `revalidate: false` pages, which can show the old build's HTML for up to about two minutes after
-  the old pods drain. After that, its entries are revalidated as usual. Pages that use partial
+  the old pods drain. After that, the first request for each such page may get the previous page
+  once while a fresh copy renders. Pages that use partial
   prerendering are the exception: their resume state is tied to the build that rendered them, so
   under a split they are re-rendered whenever the other build wrote the entry last.
 - The Redis entry's TTL is deliberately **longer than the revalidate window** (it is the route's

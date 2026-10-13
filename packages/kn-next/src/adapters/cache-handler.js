@@ -1129,9 +1129,12 @@ function isForeignPostponedEntry(entry) {
  * `revalidate: false` -- and would ignore a changed `revalidate`. Only this
  * build's own windows are handed back: for an entry another build wrote, one
  * with no recorded build id (legacy), or while this process has none (or only
- * Next's constant id), the stored window is withheld and Next treats the entry
- * as stale and re-renders it. The body is still served meanwhile. The FETCH
- * data cache never carries a route window, so it is left untouched.
+ * Next's constant id), the stored window is withheld. Withholding alone does
+ * NOT make Next re-render a route in the prerender manifest (Next then applies
+ * the manifest's window from the entry's `lastModified`), so a page or route
+ * entry another build wrote is handed back with an expired window instead
+ * (`staleForeignBuildEntry`, #2305). The FETCH data cache never carries a route
+ * window, so it is left untouched.
  *
  * ONE exception, for a build that is still SERVING (#2254): under a long-lived
  * canary split two builds read and write the same keys, and withholding each
