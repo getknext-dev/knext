@@ -129,13 +129,22 @@ build wires `cacheHandlers` to the same Redis for you, so you add nothing to `ne
 - `revalidateTag` (and `updateTag`) on one pod invalidates the entry on all of them.
   `revalidateTag(tag, profile)` keeps its stale-while-revalidate behaviour: the entry is served
   once more while a fresh one is produced.
-- The keys belong to your app (`REDIS_KEY_PREFIX`) and carry Next's own build identifier, so one
-  build never reads another build's entries.
+- The keys belong to your app (`REDIS_KEY_PREFIX`) and, by default, carry Next's own build
+  identifier, so one build does not read another build's entries. If you turn on Next's
+  experimental durable cache entries, the key carries a hash of the cached function's code
+  instead, and a new build deliberately reuses the entries of every function whose code did not
+  change.
 - Every entry gets a Redis expiry: the shorter of the `cacheLife` `expire` you set and **24 hours**
   (Next's default `expire` is effectively unbounded). Lower the ceiling with
   `KNEXT_USE_CACHE_MAX_TTL_SECONDS`. An entry that holds one user's data should use a short
   `cacheLife` of its own, an hour or less.
 - An entry with `expire: 0` (a dynamic result) is never stored.
+- An entry larger than **2 MiB** is not stored: the function runs again on the next request, and
+  the handler logs one warning. Change the limit with `KNEXT_USE_CACHE_MAX_ENTRY_BYTES` (in bytes;
+  `0` removes it). The limit keeps one very large write from timing out and taking the ISR cache,
+  which shares the Redis connection, offline with it.
+- Invalidation times are taken from the Redis server's clock, so pods whose clocks disagree still
+  agree on whether an entry was written before or after a `revalidateTag`.
 
 The scaffold keeps `cacheMaxMemorySize: 0`. That setting only turns off Next's per-pod memory cache
 for ISR; it no longer turns `'use cache'` into a no-op, because the Redis handler replaces Next's
@@ -149,8 +158,8 @@ and the Bun runtime. A plain `next build` outside knext, and apps that bring the
 **With Redis unavailable, `'use cache'` does not cache.** There is deliberately no per-pod fallback:
 a `'use cache'` entry can hold one user's results, and a copy in pod memory would outlive its
 expiry and never see another pod's invalidation. Reads become misses and your code runs as normal;
-writes are dropped; a `revalidateTag` issued during the outage is not replayed afterwards. The
-handler logs one warning per outage (and one when `REDIS_URL` is not set at all). ISR keeps its own
+writes are dropped; a `revalidateTag` issued during the outage is not replayed afterwards. Each pod
+logs one warning per outage (and one when `REDIS_URL` is not set at all). ISR keeps its own
 per-pod fallback, as described above.
 
 **Redis memory.** Set `maxmemory` on the Redis you point knext at, with

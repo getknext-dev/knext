@@ -1,16 +1,19 @@
 import { afterAll, describe, expect, it } from 'bun:test';
 import {
+  chmodSync,
   existsSync,
+  linkSync,
   mkdirSync,
   readdirSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
-import { generateFiles, previouslyWritten, runGenerate } from '../generate';
+import { generateFiles, previouslyWritten, runGenerate, writeFileAtomic } from '../generate';
 import {
   capture,
   copyFixtureZone,
@@ -350,6 +353,66 @@ describe('knext generate never writes through a symlink', () => {
     symlinkSync(file, join(zone, OUT, 'orders/v1/orders_pb.ts'));
     expect(await runGenerate({ cwd: zone, io: capture().io })).toBe(1);
     expect(existsSync(join(zone, OUT, 'knext/v1/options_pb.ts'))).toBe(false);
+  });
+
+  it('replaces a hardlinked generated file instead of writing through its shared inode', async () => {
+    const zone = copyFixtureZone('w-hardlink');
+    const { file } = outsideDir();
+    const target = join(zone, OUT, 'orders/v1/orders_knext.ts');
+    unlinkSync(target);
+    linkSync(file, target);
+    expect(statSync(target).ino).toBe(statSync(file).ino);
+    const c = capture();
+    expect(await runGenerate({ cwd: zone, io: c.io }), c.err()).toBe(0);
+    // The outside twin keeps its bytes; the target now holds the generated code.
+    expect(readFileSync(file, 'utf8')).toBe('export const untouched = true;\n');
+    expect(readFileSync(target, 'utf8')).toBe(
+      readFileSync(join(FIXTURE_ZONE, OUT, 'orders/v1/orders_knext.ts'), 'utf8'),
+    );
+    expect(statSync(target).ino).not.toBe(statSync(file).ino);
+    // No temp file is left behind next to the target.
+    expect(readdirSync(join(zone, OUT, 'orders/v1')).sort()).toEqual(
+      readdirSync(join(FIXTURE_ZONE, OUT, 'orders/v1')).sort(),
+    );
+  });
+
+  it('regenerating keeps an existing file mode (0600 stays 0600)', () => {
+    const dir = emptyDir('w-atomic-mode');
+    const target = join(dir, 'target.ts');
+    writeFileSync(target, 'old\n');
+    chmodSync(target, 0o600);
+    writeFileAtomic(target, 'export {};\n');
+    expect(readFileSync(target, 'utf8')).toBe('export {};\n');
+    expect(statSync(target).mode & 0o7777).toBe(0o600);
+  });
+
+  it('regenerating clears setuid, as an in-place write did (4755 becomes 0755)', () => {
+    const dir = emptyDir('w-atomic-setuid');
+    const target = join(dir, 'target.ts');
+    writeFileSync(target, 'old\n');
+    chmodSync(target, 0o4755);
+    expect(statSync(target).mode & 0o7777).toBe(0o4755);
+    writeFileAtomic(target, 'export {};\n');
+    expect(statSync(target).mode & 0o7777).toBe(0o755);
+  });
+
+  it('a read-only generated file is still replaced, and stays read-only', () => {
+    const dir = emptyDir('w-atomic-readonly');
+    const target = join(dir, 'target.ts');
+    writeFileSync(target, 'old\n');
+    chmodSync(target, 0o444);
+    writeFileAtomic(target, 'export {};\n');
+    expect(readFileSync(target, 'utf8')).toBe('export {};\n');
+    expect(statSync(target).mode & 0o7777).toBe(0o444);
+  });
+
+  it('a failed write leaves no temp file behind', () => {
+    const dir = emptyDir('w-atomic-fail');
+    // rename() cannot replace a non-empty directory, so the write fails after
+    // the temp file was created.
+    mkdirSync(join(dir, 'target.ts', 'occupied'), { recursive: true });
+    expect(() => writeFileAtomic(join(dir, 'target.ts'), 'export {};\n')).toThrow();
+    expect(readdirSync(dir)).toEqual(['target.ts']);
   });
 
   it('still writes normally into a real directory, including new subdirectories', async () => {
