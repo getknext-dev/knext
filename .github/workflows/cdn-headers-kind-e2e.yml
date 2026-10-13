@@ -53,9 +53,14 @@ name: CDN headers — kind e2e (Vary-ignoring cache emulator)
 #     the no-CDN app (zero-diff must differ), the two prefixes swapped, and the
 #     opt-out run against app A.
 #
-# Ordering matters for zero-diff: it runs FIRST, on the freshly deployed no-CDN
-# apps, so both have served exactly the same requests (Next's not-found render
-# is cached, so a 404 body depends on the paths a pod has already served).
+# zero-diff compares what each APP sends, straight from its pod's user container
+# (port-forwarded): the ingress path is the same for both apps, and Knative's
+# queue-proxy can content-sniff a response with no Content-Type depending on how
+# its first bytes arrive, which is not the app's output. The same comparison
+# through the ingress is printed as evidence, not gated. Ordering matters: it
+# runs FIRST, on the freshly deployed no-CDN apps, so both have served exactly
+# the same requests (Next's not-found render is cached, so a 404 body depends on
+# the paths a pod has already served).
 # Maintenance: the baseline is a fixed pre-CDN commit. A deliberate, non-CDN
 # change to the default headers will red zero-diff with the probe that changed;
 # that is a reviewed decision, not a flake.
@@ -444,10 +449,45 @@ jobs:
               --retry 10 --retry-all-errors --max-time 60 http://127.0.0.1:18080/api/health
           done
 
-      # FIRST, on apps that have served nothing but their readiness probes.
+      # zero-diff compares what the APP sends, straight from each pod's user
+      # container: Kourier and the queue-proxy sit in front of both apps alike,
+      # and the queue-proxy (a Go reverse proxy) may content-sniff a response
+      # that carries no Content-Type, depending on how its first bytes arrive.
+      - name: Port-forward the zero-diff pods (user container, no ingress)
+        if: matrix.variant == 'honest'
+        run: |
+          set -euo pipefail
+          n=0
+          for app in cdn-off cdn-base cdn-a; do
+            n=$((n + 1))
+            pod="$(kubectl -n "$APP_NS" get pod -l "serving.knative.dev/service=$app" --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')"
+            port="$(kubectl -n "$APP_NS" get pod "$pod" -o jsonpath='{.spec.containers[?(@.name=="user-container")].ports[0].containerPort}')"
+            local_port=$((19000 + n))
+            kubectl -n "$APP_NS" port-forward "pod/$pod" "${local_port}:${port:-8080}" >"/tmp/pf-$app.log" 2>&1 &
+            for _ in $(seq 1 30); do
+              curl -fsS -o /dev/null "http://127.0.0.1:${local_port}/api/health" 2>/dev/null && break
+              sleep 1
+            done
+            curl -fsS -o /dev/null "http://127.0.0.1:${local_port}/api/health" \
+              || { echo "::error::$app pod $pod unreachable on :$local_port"; cat "/tmp/pf-$app.log"; exit 1; }
+            key="$(echo "${app#cdn-}" | tr '[:lower:]' '[:upper:]')"
+            echo "POD_URL_${key}=http://127.0.0.1:${local_port}" >> "$GITHUB_ENV"
+            echo "ok: $app pod $pod on :$local_port"
+          done
+
+      # FIRST, on apps that have served nothing but their readiness probes (and
+      # one /api/health each, identical on both).
       - name: Assert zero-diff without spec.cdn against the pre-CDN baseline
         if: matrix.variant == 'honest'
-        run: node scripts/cdn-e2e-assert.mjs --only zero-diff
+        run: |
+          set -euo pipefail
+          CDN_OFF_URL="$POD_URL_OFF" CDN_BASE_URL="$POD_URL_BASE" node scripts/cdn-e2e-assert.mjs --only zero-diff
+          # Evidence, not a gate: the same comparison through Kourier + the queue-proxy.
+          if node scripts/cdn-e2e-assert.mjs --only zero-diff >/tmp/zd-ingress.log 2>&1; then
+            echo "through the ingress too: byte-identical"
+          else
+            echo "through the ingress (informational, not gated):"; grep '^FAIL' /tmp/zd-ingress.log || cat /tmp/zd-ingress.log
+          fi
 
       - name: Assert the CDN edge headers (honest)
         if: matrix.variant == 'honest'
@@ -470,7 +510,8 @@ jobs:
           PB="$(printf '%s' "${APP_NS}/cdn-b" | sha256sum | cut -c1-12)"
           CDN_APP_A=cdn-off bash scripts/cdn-e2e-expect-red.sh no-cdn-as-a scripts/cdn-e2e-red/no-cdn-as-a.txt -- \
             node scripts/cdn-e2e-assert.mjs --only hit-tagged,rsc-param
-          CDN_APP_OFF=cdn-a bash scripts/cdn-e2e-expect-red.sh zero-diff scripts/cdn-e2e-red/zero-diff.txt -- \
+          CDN_APP_OFF=cdn-a CDN_OFF_URL="$POD_URL_A" CDN_BASE_URL="$POD_URL_BASE" \
+            bash scripts/cdn-e2e-expect-red.sh zero-diff scripts/cdn-e2e-red/zero-diff.txt -- \
             node scripts/cdn-e2e-assert.mjs --only zero-diff
           CDN_PREFIX_A="$PB" CDN_PREFIX_B="$PA" bash scripts/cdn-e2e-expect-red.sh prefix-swap scripts/cdn-e2e-red/prefix-swap.txt -- \
             node scripts/cdn-e2e-assert.mjs --only two-apps-prefix
@@ -482,6 +523,29 @@ jobs:
         run: |
           bash scripts/cdn-e2e-expect-red.sh gutted scripts/cdn-e2e-red/gutted.txt -- \
             node scripts/cdn-e2e-assert.mjs --skip zero-diff
+
+      # Where does a zero-diff difference come from? The same request, through
+      # the whole path and straight from each pod (no queue-proxy, no Kourier),
+      # with every header printed, framing included.
+      - name: Diagnose zero-diff on failure (raw responses, emulator path vs pod-direct)
+        if: failure() && matrix.variant == 'honest'
+        run: |
+          set -uo pipefail
+          probe() { CDN_PROBE_BODY="$3" node scripts/cdn-e2e-assert.mjs --probe "$1" "$2" /variant-a 'x-emu-bypass:1' 'content-type:text/plain' | head -20; }
+          for app in cdn-off cdn-base; do
+            echo "== $app through the emulator: POST, then GET"
+            probe "$app.${APP_NS}.svc.cluster.local" POST x
+            probe "$app.${APP_NS}.svc.cluster.local" GET ""
+            pod="$(kubectl -n "$APP_NS" get pod -l "serving.knative.dev/service=$app" -o jsonpath='{.items[0].metadata.name}')"
+            port="$(kubectl -n "$APP_NS" get pod "$pod" -o jsonpath='{.spec.containers[?(@.name=="user-container")].ports[0].containerPort}')"
+            kubectl -n "$APP_NS" port-forward "pod/$pod" "19100:${port:-8080}" >/tmp/pf-diag.log 2>&1 &
+            pf=$!
+            sleep 3
+            echo "== $app pod-direct ($pod:${port:-8080}): POST"
+            CDN_EMU_URL=http://127.0.0.1:19100 probe "$app.${APP_NS}.svc.cluster.local" POST x
+            kill "$pf" 2>/dev/null || true
+            sleep 1
+          done
 
       - name: Dump state on failure
         if: failure()

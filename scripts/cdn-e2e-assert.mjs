@@ -33,6 +33,8 @@
  *   CDN_APP_BASE         no spec.cdn, pre-CDN baseline    (cdn-base)
  *   CDN_PUBLIC_HOST_1/2  the apps' networking.publicHosts (a.example.test / b.example.test)
  *   CDN_RUN_ID           makes every cache key unique to this run (default: now)
+ *   CDN_OFF_URL / CDN_BASE_URL  zero-diff compares these pod-direct URLs
+ *                        (the user container, no ingress) instead of the emulator path
  *   CDN_PREFIX_A/_B      override the expected tag prefix (default: derived
  *                        exactly as the operator derives it, sha256("<ns>/<name>"))
  */
@@ -159,6 +161,8 @@ export function config(env = process.env) {
       env.CDN_PUBLIC_HOST_2 || 'b.example.test',
     ],
     run: env.CDN_RUN_ID || String(Date.now()),
+    // Pod-direct base URLs for zero-diff (bypassing Kourier and the queue-proxy).
+    direct: { off: env.CDN_OFF_URL || null, base: env.CDN_BASE_URL || null },
   };
 }
 
@@ -618,16 +622,16 @@ export function checks(c) {
       async run() {
         const diffs = [];
         for (const probe of zeroDiffProbes(c)) {
-          const off = await send(c.emu, {
-            ...probe,
-            host: c.hosts.off,
-            headers: { ...probe.headers, 'x-emu-bypass': '1' },
-          });
-          const base = await send(c.emu, {
-            ...probe,
-            host: c.hosts.base,
-            headers: { ...probe.headers, 'x-emu-bypass': '1' },
-          });
+          // Pod-direct when CDN_OFF_URL / CDN_BASE_URL are set (the workflow
+          // port-forwards each pod's user container), else through the emulator.
+          const via = (url) =>
+            url
+              ? { base: url, headers: probe.headers }
+              : { base: c.emu, headers: { ...probe.headers, 'x-emu-bypass': '1' } };
+          const o = via(c.direct.off);
+          const b = via(c.direct.base);
+          const off = await send(o.base, { ...probe, host: c.hosts.off, headers: o.headers });
+          const base = await send(b.base, { ...probe, host: c.hosts.base, headers: b.headers });
           const d = diffResponses(off, base);
           if (d.length) diffs.push(`${probe.method || 'GET'} ${probe.path}: ${d.join(' | ')}`);
           for (const h of EDGE_HEADERS)
@@ -671,9 +675,12 @@ async function main(argv) {
     const headers = Object.fromEntries(
       hs.map((h) => [h.slice(0, h.indexOf(':')), h.slice(h.indexOf(':') + 1)]),
     );
-    const r = await send(c.emu, { host: c.hosts[app] ?? app, method, path, headers });
+    // CDN_PROBE_BODY sends a request body; every header is printed, framing included.
+    const body = process.env.CDN_PROBE_BODY;
+    const r = await send(c.emu, { host: c.hosts[app] ?? app, method, path, headers, body });
     console.log(r.status);
-    for (const line of headerLines(r.rawHeaders)) console.log(line);
+    for (let i = 0; i < r.rawHeaders.length; i += 2)
+      console.log(`${r.rawHeaders[i]}: ${r.rawHeaders[i + 1]}`);
     console.log(`\n${r.text.slice(0, 400)}`);
     return 0;
   }

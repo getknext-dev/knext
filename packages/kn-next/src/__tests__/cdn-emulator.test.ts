@@ -367,7 +367,7 @@ describe("cache emulator (store-all negative control)", () => {
 
 describe("cache emulator: started as a program", () => {
     it("starts when run through a symlink, as a ConfigMap mount presents the file", async () => {
-        const { mkdtempSync, symlinkSync } = await import("node:fs");
+        const { mkdtempSync, rmSync, symlinkSync } = await import("node:fs");
         const { tmpdir } = await import("node:os");
         const { join, resolve } = await import("node:path");
         const { spawn } = await import("node:child_process");
@@ -406,6 +406,7 @@ describe("cache emulator: started as a program", () => {
             expect(started).toContain("cdn-emulator: mode=honour");
         } finally {
             child.kill();
+            rmSync(dir, { recursive: true, force: true });
         }
     });
 });

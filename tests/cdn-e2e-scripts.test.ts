@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'bun:test';
+import { afterAll, describe, expect, it } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -66,9 +66,13 @@ describe('allowlist mutation (scripts/cdn-e2e-mutate-preload.mjs)', () => {
     const dir = mkdtempSync(join(tmpdir(), 'cdn-mutate-'));
     const file = join(dir, 'cache-control-normalize.cjs');
     writeFileSync(file, 'module.exports = {};\n');
-    const r = spawnSync(process.execPath, [MUTATE, file], { encoding: 'utf8' });
-    expect(r.status).toBe(1);
-    expect(readFileSync(file, 'utf8')).toBe('module.exports = {};\n');
+    try {
+      const r = spawnSync(process.execPath, [MUTATE, file], { encoding: 'utf8' });
+      expect(r.status).toBe(1);
+      expect(readFileSync(file, 'utf8')).toBe('module.exports = {};\n');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -153,6 +157,7 @@ describe('zero-diff comparator', () => {
 
 describe('expected-red helper (scripts/cdn-e2e-expect-red.sh)', () => {
   const dir = mkdtempSync(join(tmpdir(), 'cdn-red-'));
+  afterAll(() => rmSync(dir, { recursive: true, force: true }));
   const spec = join(dir, 'spec.txt');
   writeFileSync(spec, '# c\nalpha|went wrong here\nbeta|also wrong\n');
   const run = (script: string) =>
