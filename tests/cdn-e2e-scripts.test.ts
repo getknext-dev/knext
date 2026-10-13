@@ -271,7 +271,16 @@ describe('rollout-no-old-html: old-build HTML never reaches the edge', () => {
   const dir = mkdtempSync(join(tmpdir(), 'cdn-rollout-edge-'));
   afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
-  type Mode = 'refused' | 'stored' | 'hit-only' | 'directive' | 'new' | 'broken' | 'no-mark';
+  type Mode =
+    | 'refused'
+    | 'stored'
+    | 'stored-bare'
+    | 'hit-only'
+    | 'hit-bare'
+    | 'directive'
+    | 'new'
+    | 'broken'
+    | 'no-mark';
 
   async function runAgainst(tagged: Mode, control: 'cached' | 'never' = 'cached') {
     const { createServer } = await import('node:http');
@@ -300,6 +309,10 @@ describe('rollout-no-old-html: old-build HTML never reaches the edge', () => {
           return n === 1
             ? page('v1', { 'x-emu-cache': 'MISS', 'x-emu-stored': '3600', 'cache-tag': tag })
             : page('v1', { 'x-emu-cache': 'HIT', 'cache-tag': tag });
+        case 'stored-bare': // an edge that stores without a directive (store-all)
+          return page('v1', { 'x-emu-cache': 'MISS', 'x-emu-stored': '300' });
+        case 'hit-bare': // served from the edge, no edge headers passed through
+          return page('v1', { 'x-emu-cache': 'HIT' });
         case 'hit-only': // stored by an earlier request this check did not see
           return page('v1', { 'x-emu-cache': 'HIT', 'cache-tag': tag });
         case 'directive': // edge-cacheable on the wire, whatever this emulator did
@@ -364,6 +377,15 @@ describe('rollout-no-old-html: old-build HTML never reaches the edge', () => {
     expect(r.note.startsWith('old-build HTML was stored at or served from the edge')).toBe(true);
     expect(r.note).toContain('cloudflare-cdn-cache-control: max-age=3600');
     expect(r.note).toContain('cache-tag: ');
+  });
+
+  it('old-build HTML stored, or served as an edge HIT, with no edge headers on it is the failure', async () => {
+    const stored = await runAgainst('stored-bare');
+    expect(stored.ok).toBe(false);
+    expect(stored.note).toContain('stored for 300 s');
+    const hitBare = await runAgainst('hit-bare');
+    expect(hitBare.ok).toBe(false);
+    expect(hitBare.note).toContain('an edge HIT');
   });
 
   it('an edge HIT on old-build HTML is the failure too', async () => {
