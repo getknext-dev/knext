@@ -1,0 +1,55 @@
+---
+title: CDN with Amazon CloudFront
+description: Edge cache headers for a knext app behind CloudFront. Headers only, no automatic purge.
+---
+
+knext sets headers CloudFront can use. **It does not purge CloudFront.** Both path and tag
+invalidation need AWS request signing, which knext does not do. Read [CDN caching](/docs/cdn) first.
+
+## What you do
+
+- Create a CloudFront distribution whose origin is the app's public hostname.
+- Use a cache policy that honours the origin's `Cache-Control` (minimum TTL 0), and do not add the
+  query string to the cache key unless you need it.
+- knext sends a `Cache-Tag` header. Check CloudFront's own documentation for whether and how a
+  distribution can use cache tags; knext does not depend on it.
+
+## Configure knext
+
+```ts title="knext.config.ts"
+cdn: {
+  provider: 'cloudfront',
+  htmlTTLSeconds: 30,
+  excludePaths: ['/account'],
+},
+```
+
+Leave out `purge`; if set, knext makes no call, counts the skip and logs once at start-up.
+
+CloudFront has no edge-only directive header, so on pages that are safe to share the directive rides
+in the browser-facing header:
+
+```
+Cache-Control: public, max-age=0, s-maxage=30
+Cache-Tag: kn-…
+```
+
+This differs from the value the Next.js compatibility suite checks (`must-revalidate` is dropped
+because it would disable stale-while-revalidate at the shared cache). **A CloudFront configuration is
+therefore outside the compat-verified setup.** Do not describe it as compatibility-verified.
+
+React Server Components responses carrying `_rsc` are not edge-cached on this provider, because the
+cache key depends on a policy knext cannot see. Navigations still work; they go to the origin.
+
+## Freshness without purge
+
+A revalidation reaches visitors when the edge entry expires: within `htmlTTLSeconds` plus any
+`staleWhileRevalidateSeconds`. A new deploy does not clear the edge. Use a short TTL for content that
+must change quickly, and run your own invalidation when needed.
+
+## Live verification
+
+**Live verification:** not recorded
+
+No recorded live run of this provider is on file. The header behaviour is covered by unit tests and
+an emulator only; check it against your distribution with `curl -I` before relying on it.
