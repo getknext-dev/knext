@@ -576,8 +576,9 @@ function budgetNativeClient(client) {
       // (ioredis has it; Bun's native client calls it `close()`, measured on
       // 1.4.2, and has no `disconnect`). Both map to the native `close()`,
       // synchronously and OUTSIDE the gate: the breaker closes a client
-      // because its connection is dead or hung, so waiting for the gate would
-      // wait on exactly the command that faulted. A target with no `close` gets
+      // because its connection is dead or hung, so taking the gate would put
+      // the close behind every command still queued on that connection, each
+      // allowed the full command budget. A target with no `close` gets
       // no `disconnect` either, so the caller sees the TypeError.
       if (prop === 'disconnect' || prop === 'close') {
         const close = Reflect.get(target, 'close', target);
