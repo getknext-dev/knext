@@ -387,10 +387,12 @@ for (const client of CLIENTS) {
  *   `revalidateTag` that faults can land in the same read as the replay's EXEC
  *   reply. On the native client the connection gate holds that command until
  *   the replay's transaction has resolved, so it can only land after.
- * - The native client keeps its connection when the breaker trips (it has no
- *   `disconnect()`), so a collapse sweep carries on past a fault queued behind
- *   one of its pages. On ioredis the trip closes the connection and the sweep
- *   aborts, which keeps the collapse whatever the generation says.
+ * - A fault queued behind one of a collapse sweep's pages trips the breaker,
+ *   which closes the client the sweep is using (on both clients since the
+ *   native one is closed with `close()`), so the sweep aborts and the collapse
+ *   is kept for the next probe. Before that fix the native client stayed
+ *   connected and the sweep ran on past the fault; this case then rested on
+ *   the generation check instead.
  */
 for (const client of CLIENTS) {
     const ioredis = client.selector === "ioredis";
@@ -475,6 +477,12 @@ for (const client of CLIENTS) {
             return { release: () => release(), isHeld: () => held };
         }
 
+        /** Collapse sweeps started: SCANs from cursor 0. */
+        const sweepsStarted = () =>
+            (fake?.commands ?? []).filter(
+                (c) => c.cmd === "scan" && c.args[0] === "0",
+            ).length;
+
         /** Fail the `nth` SMEMBERS of `tag` (1-based), once. */
         const failNthSmembers = (tag: string, nth: number) => {
             const key = `${PREFIX}:tag:${tag}`;
@@ -512,33 +520,32 @@ for (const client of CLIENTS) {
                 expect(enqueued).toEqual([["x"], ["x"]]);
             });
 
-        if (!ioredis)
-            it("a skip recorded during the collapse sweep keeps the collapse for another sweep", async () => {
-                const h = await handler();
-                const { appPurges } = installPurger();
-                // Another app's keys: enough for a second SCAN page.
-                for (let i = 0; i < 150; i++)
-                    fake?.strings.set(`other-app:cache:/k${i}`, "{}");
-                await openBreaker(h);
-                await h.revalidateTag(
-                    Array.from({ length: BOUND + 1 }, (_, i) => `t${i}`),
-                );
-                // The sweep's first SCAN page is held at the server. A
-                // revalidateTag("z") queues behind it and faults: a skip
-                // recorded while the sweep still has a page to go.
-                const scan = holdNext("scan");
-                failNthSmembers("z", 1);
-                await waitFor(scan.isHeld);
-                const late = h.revalidateTag("z");
-                await sleep(20);
-                scan.release();
-                await late;
-                expect(count("smembers", `${PREFIX}:tag:z`)).toBe(1);
-                // z's entries may predate the pages already swept: the collapse
-                // must run again rather than be cleared.
-                await waitFor(() => appPurges.length >= 2);
-                expect(fake?.strings.has("other-app:cache:/k0")).toBe(true);
-            });
+        it("a skip recorded during the collapse sweep keeps the collapse for another sweep", async () => {
+            const h = await handler();
+            const { appPurges } = installPurger();
+            // Another app's keys: enough for a second SCAN page.
+            for (let i = 0; i < 150; i++)
+                fake?.strings.set(`other-app:cache:/k${i}`, "{}");
+            await openBreaker(h);
+            await h.revalidateTag(
+                Array.from({ length: BOUND + 1 }, (_, i) => `t${i}`),
+            );
+            // The sweep's first SCAN page is held at the server. A
+            // revalidateTag("z") queues behind it and faults: a skip
+            // recorded while the sweep still has a page to go.
+            const scan = holdNext("scan");
+            failNthSmembers("z", 1);
+            await waitFor(scan.isHeld);
+            const late = h.revalidateTag("z");
+            await sleep(20);
+            scan.release();
+            await late;
+            expect(count("smembers", `${PREFIX}:tag:z`)).toBe(1);
+            // z's entries may predate the pages already swept: the collapse
+            // must run again, from the first page, rather than be cleared.
+            await waitFor(() => sweepsStarted() >= 2 && appPurges.length >= 1);
+            expect(fake?.strings.has("other-app:cache:/k0")).toBe(true);
+        });
     });
 }
 
