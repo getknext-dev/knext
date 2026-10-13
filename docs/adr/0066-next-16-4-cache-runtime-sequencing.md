@@ -390,9 +390,13 @@ state described a stamp key that does not exist.
     outage stay valid until their Redis TTL, which the cap now bounds at 24 h, or 1 h for per-user
     entries.
   - ISR: a `revalidateTag` during the outage clears only the local map. Its Redis entries stay stale
-    until their TTL, as they do today.
+    until their TTL, as they do today. **[Superseded by Amendment 4 for ISR:** the tags are kept per
+    process and replayed, Redis then the edge, once the breaker closes; they stay stale until their
+    TTL only if the pod restarts or scales to zero first.**]**
   - An in-process retry queue would be lost on scale-to-zero, which is the normal case, so neither
-    handler adds one.
+    handler adds one. **[Superseded by Amendment 4 for ISR:** the ISR handler now keeps a bounded,
+    deduplicated in-process replay list; losing it on scale-to-zero is an accepted limit. `'use cache'`
+    still adds none.**]**
 
 jev, outage: **the two handlers differ, stated 0.69** / `'use cache'` also falls back per process
 0.27 / change ISR to miss/drop too 0.04 (confidence 0.53). The confidence is medium, so the decision
@@ -673,6 +677,8 @@ decisions rests on the code or package evidence cited in its D-section, not on t
   confidence here was medium (0.66).
 - **Invalidations lost during a Redis outage** stay lost until entry TTL: at most 24 h for
   `'use cache'`, 1 h per-user. ISR's outage invalidations clear only the local map, as today.
+  **[Superseded by Amendment 4 for ISR:** they also clear Redis, then the edge, once the breaker
+  closes, unless the pod restarts or scales to zero first.**]**
 - **A function proto-version change re-rolls the zone** (an env change makes a new Knative revision
   on the same image). That is the price of putting the served version in the key.
 - **Clock skew.** `'use cache'` tag timestamps are pod wall clock, as Next's are. An NTP-bounded,

@@ -338,6 +338,207 @@ for (const client of CLIENTS) {
             expect(enqueued).toEqual([["x"]]);
             expect(fake?.strings.has(entry("/p"))).toBe(false);
         });
+
+        it("the probe timer is unref'd: a pod waiting out an outage is not held open by it", async () => {
+            // A cooldown no other timer here uses, so the probe is the one
+            // timer armed with a delay just under it.
+            const cooldown = 45_678;
+            process.env.REDIS_RETRY_COOLDOWN_MS = String(cooldown);
+            const h = await handler();
+            installPurger();
+            await openBreaker(h);
+            const realSetTimeout = globalThis.setTimeout;
+            const armed: { delay: number; timer: Any }[] = [];
+            const recording = ((
+                fn: () => void,
+                delay?: number,
+                ...rest: unknown[]
+            ) => {
+                const timer = realSetTimeout(fn, delay, ...rest);
+                armed.push({ delay: Number(delay), timer });
+                return timer;
+            }) as unknown as typeof setTimeout;
+            globalThis.setTimeout = recording;
+            try {
+                await h.revalidateTag("x");
+                // The probe is armed when the (breaker-blocked) replay attempt
+                // settles, a few microtasks after revalidateTag resolves.
+                await sleep(20);
+            } finally {
+                globalThis.setTimeout = realSetTimeout;
+            }
+            const probes = armed.filter(
+                (a) => a.delay > cooldown - 5000 && a.delay <= cooldown,
+            );
+            expect(probes).toHaveLength(1);
+            expect(probes[0].timer.hasRef()).toBe(false);
+            // Disarm it: this case does not wait out a 45 s cooldown.
+            clearTimeout(probes[0].timer);
+        });
+    });
+}
+
+/**
+ * The races a replay must survive: a fresh skip recorded while the replay is
+ * part-way through. Each is reachable through one client only, so each runs on
+ * that client.
+ *
+ * - ioredis pipelines a concurrent command on the same connection, so a newer
+ *   `revalidateTag` that faults can land in the same read as the replay's EXEC
+ *   reply. On the native client the connection gate holds that command until
+ *   the replay's transaction has resolved, so it can only land after.
+ * - The native client keeps its connection when the breaker trips (it has no
+ *   `disconnect()`), so a collapse sweep carries on past a fault queued behind
+ *   one of its pages. On ioredis the trip closes the connection and the sweep
+ *   aborts, which keeps the collapse whatever the generation says.
+ */
+for (const client of CLIENTS) {
+    const ioredis = client.selector === "ioredis";
+    describe(`breaker-open invalidation replay races (${client.name})`, () => {
+        const original = { ...process.env };
+        let fake: FakeRedis | undefined;
+        let gen = 0;
+        let failGets = false;
+        let errorFor: (cmd: string, args: string[]) => string | undefined =
+            () => undefined;
+        let onCommand: (cmd: string, args: string[]) => void | Promise<void> =
+            () => {};
+
+        beforeEach(() => {
+            gen += 1;
+            failGets = false;
+            errorFor = () => undefined;
+            onCommand = () => {};
+            delete g[PURGER];
+            delete process.env.KNEXT_CDN_PROVIDER;
+            delete process.env.KNEXT_BUILD_ID;
+            delete process.env.NEXT_DEPLOYMENT_ID;
+            process.env.REDIS_KEY_PREFIX = PREFIX;
+            process.env.REDIS_RETRY_COOLDOWN_MS = String(COOLDOWN_MS);
+            if (client.selector)
+                process.env.KNEXT_CACHE_REDIS_CLIENT = client.selector;
+            else delete process.env.KNEXT_CACHE_REDIS_CLIENT;
+            spyOn(console, "error").mockImplementation(() => {});
+            spyOn(console, "warn").mockImplementation(() => {});
+            spyOn(console, "log").mockImplementation(() => {});
+        });
+
+        afterEach(async () => {
+            await sleep(COOLDOWN_MS + 50);
+            delete g[PURGER];
+            await fake?.close();
+            fake = undefined;
+            process.env = { ...original };
+            jest.restoreAllMocks();
+        });
+
+        async function handler(): Promise<Any> {
+            fake = await startFakeRedis({
+                errorFor: (cmd, args) =>
+                    failGets && cmd === "get" ? "boom" : errorFor(cmd, args),
+                onCommand: (cmd, args) => onCommand(cmd, args),
+            });
+            process.env.REDIS_URL = fake.url;
+            const mod = await import(
+                `${CACHE_HANDLER}?replay-race=${client.name}-${gen}`
+            );
+            return new mod.default({});
+        }
+
+        async function openBreaker(h: Any) {
+            failGets = true;
+            expect(await h.get("/never", { kind: "APP_PAGE" })).toBeNull();
+            failGets = false;
+        }
+
+        const count = (cmd: string, arg0?: string) =>
+            (fake?.commands ?? []).filter(
+                (c) =>
+                    c.cmd === cmd && (arg0 === undefined || c.args[0] === arg0),
+            ).length;
+
+        /** Hold the next `cmd` at the server until released. */
+        function holdNext(cmd: string) {
+            let release: () => void = () => {};
+            let held = false;
+            const gate = new Promise<void>((r) => {
+                release = r;
+            });
+            const prev = onCommand;
+            onCommand = (c, args) => {
+                if (c === cmd && !held) {
+                    held = true;
+                    return gate;
+                }
+                return prev(c, args);
+            };
+            return { release: () => release(), isHeld: () => held };
+        }
+
+        /** Fail the `nth` SMEMBERS of `tag` (1-based), once. */
+        const failNthSmembers = (tag: string, nth: number) => {
+            const key = `${PREFIX}:tag:${tag}`;
+            errorFor = (cmd, args) =>
+                cmd === "smembers" &&
+                args[0] === key &&
+                count("smembers", key) === nth
+                    ? "boom"
+                    : undefined;
+        };
+
+        // Registered on the one client that can reach the window (see above).
+        if (ioredis)
+            it("a skip of the same tag recorded while that tag is being replayed is not forgotten", async () => {
+                const h = await handler();
+                const { enqueued } = installPurger();
+                await h.set("/p", page("x"), pageCtx);
+                await openBreaker(h);
+                await h.revalidateTag("x");
+                // The replay's EXEC for x is held at the server. A newer
+                // revalidateTag("x") is pipelined behind it and faults, so it
+                // is recorded in the same read as the replay's EXEC reply.
+                const exec = holdNext("exec");
+                const tagX = `${PREFIX}:tag:x`;
+                failNthSmembers("x", 2);
+                await waitFor(exec.isHeld);
+                const newer = h.revalidateTag("x");
+                await waitFor(() => count("smembers", tagX) === 2);
+                exec.release();
+                await newer;
+                // The first replay completed (one purge). The newer
+                // invalidation of x never reached Redis, so x is replayed again.
+                await waitFor(() => count("smembers", tagX) >= 3);
+                await waitFor(() => enqueued.length >= 2);
+                expect(enqueued).toEqual([["x"], ["x"]]);
+            });
+
+        if (!ioredis)
+            it("a skip recorded during the collapse sweep keeps the collapse for another sweep", async () => {
+                const h = await handler();
+                const { appPurges } = installPurger();
+                // Another app's keys: enough for a second SCAN page.
+                for (let i = 0; i < 150; i++)
+                    fake?.strings.set(`other-app:cache:/k${i}`, "{}");
+                await openBreaker(h);
+                await h.revalidateTag(
+                    Array.from({ length: BOUND + 1 }, (_, i) => `t${i}`),
+                );
+                // The sweep's first SCAN page is held at the server. A
+                // revalidateTag("z") queues behind it and faults: a skip
+                // recorded while the sweep still has a page to go.
+                const scan = holdNext("scan");
+                failNthSmembers("z", 1);
+                await waitFor(scan.isHeld);
+                const late = h.revalidateTag("z");
+                await sleep(20);
+                scan.release();
+                await late;
+                expect(count("smembers", `${PREFIX}:tag:z`)).toBe(1);
+                // z's entries may predate the pages already swept: the collapse
+                // must run again rather than be cleared.
+                await waitFor(() => appPurges.length >= 2);
+                expect(fake?.strings.has("other-app:cache:/k0")).toBe(true);
+            });
     });
 }
 
