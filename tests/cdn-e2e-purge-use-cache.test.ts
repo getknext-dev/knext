@@ -363,6 +363,17 @@ describe('the purge kind lane wires the use-cache check (cdn-purge-kind-e2e.yml)
     expect(wf.indexOf('cp "$RUNNER_TEMP/wrapper.orig.$i.js" "$w"')).toBeGreaterThan(red);
   });
 
+  it("removes both 'use cache' apps after their check, before the churn and rollout steps need the node's room", () => {
+    const red = wf.indexOf('CDN_APP_UC=cdn-uc-mut bash scripts/cdn-e2e-expect-red.sh');
+    const removed = wf.indexOf(
+      'kubectl -n "$APP_NS" delete nextapp cdn-uc cdn-uc-mut --wait=true --timeout=180s',
+    );
+    const churn = wf.indexOf('- name: Assert no revision churn on unrelated apps');
+    expect(red).toBeGreaterThan(0);
+    expect(removed).toBeGreaterThan(red);
+    expect(churn).toBeGreaterThan(removed);
+  });
+
   it('runs the green check on cdn-uc and the red leg on cdn-uc-mut through the helper', () => {
     expect(wf).toContain('node scripts/cdn-e2e-purge-assert.mjs --only purge-use-cache\n');
     expect(wf).toContain(

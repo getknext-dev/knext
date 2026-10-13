@@ -34,6 +34,8 @@ name: CDN purge — kind e2e (tag purge through the emulator)
 #   cdn-uc-mut spec.cdn + purge            (built against a Next whose 'use cache'
 #              wrapper no longer copies a function's tags into the page entry:
 #              the red leg of purge-use-cache)
+# Both are removed once purge-use-cache has run, so the rollout steps have room
+# on the one kind node.
 #
 # scripts/cdn-e2e-purge-assert.mjs:
 #   purge-revalidate     HIT -> revalidateTag in the app -> purge of the page's
@@ -506,6 +508,17 @@ jobs:
           node scripts/cdn-e2e-purge-assert.mjs --only purge-use-cache
           CDN_APP_UC=cdn-uc-mut bash scripts/cdn-e2e-expect-red.sh use-cache-untagged scripts/cdn-e2e-red/purge-use-cache-untagged.txt -- \
             node scripts/cdn-e2e-purge-assert.mjs --only purge-use-cache
+          # Nothing below reads these two apps, and the one kind node needs their
+          # room: the rollout steps start three new revisions while the old ones
+          # still run (with them left in place those went Unschedulable). Removed
+          # through their CRs; the operator tears the services down.
+          kubectl -n "$APP_NS" delete nextapp cdn-uc cdn-uc-mut --wait=true --timeout=180s
+          for _ in $(seq 1 90); do
+            left="$(kubectl -n "$APP_NS" get pods -l 'serving.knative.dev/service in (cdn-uc,cdn-uc-mut)' -o name)"
+            [ -z "$left" ] && break
+            sleep 2
+          done
+          if [ -n "$left" ]; then echo "::error::the 'use cache' apps' pods did not go: $left"; exit 1; fi
 
       # Setting spec.cdn on ONE CR (cdn-late) must roll only that app.
       - name: Assert no revision churn on unrelated apps when spec.cdn is set on one CR

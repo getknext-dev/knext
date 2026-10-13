@@ -172,6 +172,13 @@ const MUTATIONS = [
     anchor: 'CDN_APP_UC=cdn-uc-mut bash scripts/cdn-e2e-expect-red.sh use-cache-untagged',
     replacement: 'CDN_APP_UC=cdn-uc bash scripts/cdn-e2e-expect-red.sh use-cache-untagged',
   },
+  {
+    id: 'M20',
+    subject: 'workflow',
+    claim: "the 'use cache' apps stay, and the rollout's new revisions go Unschedulable",
+    anchor: 'kubectl -n "$APP_NS" delete nextapp cdn-uc cdn-uc-mut --wait=true --timeout=180s',
+    replacement: 'true',
+  },
 ];
 
 const prover = createGuardProver({
