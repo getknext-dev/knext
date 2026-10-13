@@ -7,7 +7,8 @@
  * seed, which Next 16.4.0 made redundant and which are deleted.)
  *   1. the foreign-build strip is removed (a previous build's window is honoured)
  *   2. the same-build keep is broken (every window is withheld)
- *   3. the Redis read path stops calling `scopeWindowToBuild`
+ *   3. the Redis read path stops calling `staleForeignBuildEntry` (which
+ *      defers to `scopeWindowToBuild`)
  * Exit 0 only when the baseline is green and every mutant turns the spec red.
  */
 import { spawnSync } from 'node:child_process';
@@ -34,7 +35,10 @@ const MUTATIONS = [
   },
   {
     label: 'Redis read path no longer scopes the window',
-    anchor: 'return scopeWindowToBuild(parsed, ctx, writerIsLive);',
+    // Since #2305 the read goes through `staleForeignBuildEntry`, which hands
+    // another build's page entry back with an expired window and defers every
+    // other case to `scopeWindowToBuild`.
+    anchor: 'return staleForeignBuildEntry(parsed, ctx, writerIsLive);',
     replacement: 'return parsed;',
   },
 ];
