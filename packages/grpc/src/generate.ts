@@ -23,8 +23,12 @@
  */
 
 import {
+  closeSync,
+  constants,
   existsSync,
+  lstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
   realpathSync,
   unlinkSync,
@@ -147,9 +151,106 @@ export function diffOutput(expected: Map<string, string>, outDir: string): Drift
     else if (readFileSync(onDisk, 'utf8') !== content) drift.push({ path, kind: 'changed' });
   }
   for (const path of previouslyWritten(outDir)) {
-    if (!expected.has(path) && existsSync(join(outDir, path))) drift.push({ path, kind: 'stale' });
+    // Only a regular file can be stale: a recorded name that is now a
+    // directory or a symlink is skipped, never unlinked.
+    if (!expected.has(path) && isRegularFile(join(outDir, path))) {
+      drift.push({ path, kind: 'stale' });
+    }
   }
   return drift;
+}
+
+function isRegularFile(path: string): boolean {
+  try {
+    return lstatSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function isInside(path: string, root: string): boolean {
+  return path === root || path.startsWith(root + sep);
+}
+
+/**
+ * Writes confined to the output directory. Generation never writes THROUGH a
+ * symlink: not a symlinked file, not a symlinked directory on the way to it,
+ * and not an output directory that is itself a symlink leading out of the app.
+ * Every target is checked before any is written ({@link check}); the write
+ * itself re-checks after creating parent directories and opens with
+ * O_NOFOLLOW, so a symlink planted between the check and the write is refused
+ * rather than followed.
+ */
+class ConfinedWriter {
+  private readonly realOut: string;
+
+  constructor(
+    cwd: string,
+    private readonly outDir: string,
+    private readonly outName: string,
+  ) {
+    const realApp = realpathSync(cwd);
+    const outside = (real: string) =>
+      this.refuse('', `the output directory resolves to ${real}, outside the app`);
+    // Before creating anything: the deepest part of out that exists must
+    // already be inside the app, or mkdir would create directories outside it.
+    let ancestor = outDir;
+    while (lstatSync(ancestor, { throwIfNoEntry: false }) === undefined)
+      ancestor = dirname(ancestor);
+    const realAncestor = realpathSync(ancestor);
+    if (!isInside(realAncestor, realApp)) throw outside(realAncestor);
+    mkdirSync(outDir, { recursive: true });
+    this.realOut = realpathSync(outDir);
+    if (!isInside(this.realOut, realApp) || this.realOut === realApp) throw outside(this.realOut);
+  }
+
+  private refuse(path: string, why: string): GrpcUsageError {
+    const where = path ? `${this.outName}/${path}` : this.outName;
+    return new GrpcUsageError(
+      `refusing to write ${where}: ${why}. Generated code is never written through a symlink; ` +
+        'replace it with a real file or directory, then run `knext generate` again.',
+    );
+  }
+
+  /** Throw unless `path` (relative to out) can be written without leaving out. */
+  check(path: string): void {
+    const target = join(this.outDir, path);
+    if (lstatSync(target, { throwIfNoEntry: false })?.isSymbolicLink()) {
+      throw this.refuse(path, 'it is a symlink');
+    }
+    // The deepest ancestor that exists must really be inside out.
+    let ancestor = dirname(target);
+    while (lstatSync(ancestor, { throwIfNoEntry: false }) === undefined)
+      ancestor = dirname(ancestor);
+    if (!isInside(realpathSync(ancestor), this.realOut)) {
+      throw this.refuse(path, 'a directory on its path leads outside the output directory');
+    }
+  }
+
+  write(path: string, content: string): void {
+    this.check(path);
+    const target = join(this.outDir, path);
+    mkdirSync(dirname(target), { recursive: true });
+    if (!isInside(realpathSync(dirname(target)), this.realOut)) {
+      throw this.refuse(path, 'a directory on its path leads outside the output directory');
+    }
+    let fd: number;
+    try {
+      fd = openSync(
+        target,
+        constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW,
+        0o644,
+      );
+    } catch (err) {
+      if ((err as { code?: string }).code === 'ELOOP') throw this.refuse(path, 'it is a symlink');
+      throw err;
+    }
+    try {
+      writeFileSync(fd, content);
+    } finally {
+      closeSync(fd);
+    }
+  }
 }
 
 export interface RunGenerateOptions {
@@ -202,6 +303,9 @@ export async function runGenerate(opts: RunGenerateOptions): Promise<number> {
       return 1;
     }
 
+    const writer = new ConfinedWriter(cwd, outDir, config.out);
+    // Check every target first, so a refused one leaves the directory as it was.
+    for (const d of drift) if (d.kind !== 'stale') writer.check(d.path);
     for (const d of drift) {
       const target = join(outDir, d.path);
       if (d.kind === 'stale') {
@@ -209,8 +313,7 @@ export async function runGenerate(opts: RunGenerateOptions): Promise<number> {
         // delete only if its REAL path is inside the real output directory.
         if (realpathSync(target).startsWith(realpathSync(outDir) + sep)) unlinkSync(target);
       } else {
-        mkdirSync(dirname(target), { recursive: true });
-        writeFileSync(target, expected.get(d.path) as string);
+        writer.write(d.path, expected.get(d.path) as string);
       }
     }
     io.stdout(

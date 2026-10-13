@@ -101,7 +101,11 @@ function outDir(value: unknown): string {
   if (norm === '' || norm === '.' || norm === '..' || norm.startsWith('../')) {
     throw new GrpcUsageError(problem);
   }
-  if (norm.split('/').includes('node_modules')) throw new GrpcUsageError(problem);
+  // Case-insensitive: on a case-insensitive filesystem (macOS, Windows)
+  // `NODE_MODULES` IS node_modules.
+  if (norm.split('/').some((s) => s.toLowerCase() === 'node_modules')) {
+    throw new GrpcUsageError(problem);
+  }
   return norm;
 }
 

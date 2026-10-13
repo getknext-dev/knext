@@ -255,12 +255,106 @@ describe('knext generate deletes only what it wrote', () => {
     '/tmp/gen',
     'node_modules/gen',
     'src/node_modules/gen',
+    'NODE_MODULES/gen',
+    'src/Node_Modules/gen',
   ])('refuses out: %p', async (out) => {
     const zone = copyFixtureZone('own-refuse');
     setConfig(zone, { out });
     const c = capture();
     expect(await runGenerate({ cwd: zone, io: c.io })).toBe(1);
     expect(c.err()).toContain('"out"');
+  });
+
+  it('a record entry naming a directory is skipped, not a crash', async () => {
+    const zone = copyFixtureZone('own-direntry');
+    const manifest = join(zone, OUT, '.knext-generated.json');
+    const m = JSON.parse(readFileSync(manifest, 'utf8'));
+    m.files.push('orders');
+    writeFileSync(manifest, JSON.stringify(m));
+    const check = capture();
+    // The record changed, so --check reports drift on it, but nothing crashes.
+    expect(await runGenerate({ cwd: zone, check: true, io: check.io })).toBe(1);
+    expect(check.err()).not.toMatch(/stale\s+orders\n/);
+    expect(check.err()).not.toMatch(/EPERM|EISDIR|\n\s+at\s/);
+    const c = capture();
+    expect(await runGenerate({ cwd: zone, io: c.io }), c.err()).toBe(0);
+    expect(existsSync(join(zone, OUT, 'orders/v1/orders_knext.ts'))).toBe(true);
+  });
+});
+
+describe('knext generate never writes through a symlink', () => {
+  /** A directory outside the fixture zone, holding one file. */
+  function outsideDir(): { dir: string; file: string } {
+    const dir = emptyDir('outside');
+    const file = join(dir, 'precious.ts');
+    writeFileSync(file, 'export const untouched = true;\n');
+    return { dir, file };
+  }
+
+  it('refuses a generated file that is a symlink to a file outside, and leaves it alone', async () => {
+    const zone = copyFixtureZone('w-filelink');
+    const { file } = outsideDir();
+    const target = join(zone, OUT, 'orders/v1/orders_knext.ts');
+    unlinkSync(target);
+    symlinkSync(file, target);
+    const c = capture();
+    expect(await runGenerate({ cwd: zone, io: c.io })).toBe(1);
+    expect(c.err()).toContain('symlink');
+    expect(c.err()).toContain('orders/v1/orders_knext.ts');
+    expect(c.err()).not.toMatch(/\n\s+at\s/);
+    expect(readFileSync(file, 'utf8')).toBe('export const untouched = true;\n');
+  });
+
+  it('refuses a directory symlink inside out that leads outside, writing nothing there', async () => {
+    const zone = copyFixtureZone('w-dirlink');
+    const { dir } = outsideDir();
+    rmSync(join(zone, OUT, 'orders'), { recursive: true });
+    symlinkSync(dir, join(zone, OUT, 'orders'));
+    const c = capture();
+    expect(await runGenerate({ cwd: zone, io: c.io })).toBe(1);
+    expect(c.err()).toContain('outside');
+    expect(readTree(dir)).toEqual(new Map([['precious.ts', 'export const untouched = true;\n']]));
+  });
+
+  it('refuses an out directory that is itself a symlink to somewhere outside the app', async () => {
+    const zone = copyFixtureZone('w-outlink');
+    const { dir } = outsideDir();
+    setConfig(zone, { out: 'gen' });
+    symlinkSync(dir, join(zone, 'gen'));
+    const c = capture();
+    expect(await runGenerate({ cwd: zone, io: c.io })).toBe(1);
+    expect(readTree(dir)).toEqual(new Map([['precious.ts', 'export const untouched = true;\n']]));
+  });
+
+  it('does not even create the output directory under a parent that leads outside', async () => {
+    const zone = copyFixtureZone('w-parentlink');
+    const { dir } = outsideDir();
+    setConfig(zone, { out: 'link/gen' });
+    symlinkSync(dir, join(zone, 'link'));
+    const c = capture();
+    expect(await runGenerate({ cwd: zone, io: c.io })).toBe(1);
+    expect(c.err()).toContain('outside the app');
+    expect(existsSync(join(dir, 'gen'))).toBe(false);
+  });
+
+  it('checks every target before writing any of them', async () => {
+    const zone = copyFixtureZone('w-allornothing');
+    const { file } = outsideDir();
+    rmSync(join(zone, OUT), { recursive: true });
+    mkdirSync(join(zone, OUT, 'orders/v1'), { recursive: true });
+    // orders_pb.ts sorts after the knext/ files, so a write-as-you-go loop
+    // would have written those first.
+    symlinkSync(file, join(zone, OUT, 'orders/v1/orders_pb.ts'));
+    expect(await runGenerate({ cwd: zone, io: capture().io })).toBe(1);
+    expect(existsSync(join(zone, OUT, 'knext/v1/options_pb.ts'))).toBe(false);
+  });
+
+  it('still writes normally into a real directory, including new subdirectories', async () => {
+    const zone = copyFixtureZone('w-normal');
+    rmSync(join(zone, OUT), { recursive: true });
+    const c = capture();
+    expect(await runGenerate({ cwd: zone, io: c.io }), c.err()).toBe(0);
+    expect(readTree(join(zone, OUT))).toEqual(readTree(join(FIXTURE_ZONE, OUT)));
   });
 });
 
