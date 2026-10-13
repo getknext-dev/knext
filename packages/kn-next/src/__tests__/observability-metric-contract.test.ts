@@ -171,7 +171,9 @@ const STANDALONE_SC_SUPERVISOR = join(
 /**
  * Requiring the supervisor runs its preload side effect (it wraps the real
  * `http.createServer` and binds :9464 on the first server). Its own install
- * guard is set for the require, so only its functions load.
+ * guard is set for the require, so nothing is wrapped and nothing binds. The
+ * one effect left is `installExitNormalizer`, which wraps `process.exit` in a
+ * passthrough (it only rewrites 143/130 after a SIGTERM drain arms it).
  */
 function requireSelfContainedInert(): {
     metricsBody(state: { uptimeSeconds: number; draining: boolean }): string;
@@ -701,7 +703,7 @@ describe("parseExposition reads what an emitter renders (#2307)", () => {
 });
 
 describe("the Go operator scan ignores comments", () => {
-    // TODO(#2307): the operator is still read from source (rendering it needs a
+    // TODO(#2321): the operator is still read from source (rendering it needs a
     // Go toolchain in the test job); stripping comments is the part of #2307
     // that applies to it.
     it("a NewCounter in a // or /* */ comment is not an emitted metric", () => {

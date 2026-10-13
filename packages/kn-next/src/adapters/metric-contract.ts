@@ -150,7 +150,7 @@ export function stripGoComments(src: string): string {
  * needs a Go toolchain the TS test job does not have, and a gathered registry
  * omits a `*Vec` with no children. Comments are stripped first, so a
  * construction in a comment does not count (#2307).
- * TODO(#2307): render the operator side too if a Go-side golden ever lands.
+ * TODO(#2321): render the operator side too if a Go-side golden ever lands.
  */
 export function scanOperatorMetrics(goSource: string): Map<string, string> {
     const out = new Map<string, string>();

@@ -33,7 +33,9 @@ const edge: any = require(join(ADAPTERS, "cdn-edge.cjs"));
  * Requiring the self-contained supervisor runs its preload side effect, which
  * wraps the REAL `http.createServer` and would bind 0.0.0.0:9464 on the first
  * server this test creates. Its own install guard is set for the require, so
- * only its functions load.
+ * nothing is wrapped and nothing binds. The one effect left is
+ * `installExitNormalizer`, which wraps `process.exit` in a passthrough (it only
+ * rewrites 143/130 after a SIGTERM drain arms it).
  */
 function requireSelfContainedInert() {
     // biome-ignore lint/suspicious/noExplicitAny: marking the real node:http module
