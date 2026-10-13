@@ -1,6 +1,7 @@
 import { afterAll, describe, expect, it } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -414,5 +415,241 @@ describe('rollout-no-old-html: old-build HTML never reaches the edge', () => {
     expect(r.ok).toBe(false);
     expect(r.note.startsWith('precondition:')).toBe(true);
     expect(r.note).toContain('/variant-b');
+  });
+});
+
+/**
+ * The origin red leg (`--set foreign-stale`) mutates the cache handler, which
+ * tsup bundles into a hashed chunk. Its anchor must exist exactly once in the
+ * source AND in the bundled form, and `--locate` must find the one file that
+ * holds it in a dist tree.
+ */
+describe('foreign-stale mutation (the cache handler, scripts/cdn-e2e-mutate-preload.mjs)', () => {
+  const HANDLER = join(ROOT, 'packages/kn-next/src/adapters/cache-handler.js');
+  const HANDLER_NODE = join(ROOT, 'packages/kn-next/src/adapters/cache-handler-node.js');
+
+  /** The handler as esbuild (tsup's bundler) emits it for the node entry. */
+  async function bundled(): Promise<string> {
+    const req = createRequire(join(ROOT, 'packages/kn-next/package.json'));
+    const { build } = req('esbuild') as typeof import('esbuild');
+    const out = await build({
+      entryPoints: [HANDLER_NODE],
+      bundle: true,
+      write: false,
+      format: 'esm',
+      platform: 'node',
+      target: 'node20',
+      packages: 'external',
+    });
+    return out.outputFiles[0].text;
+  }
+
+  it('the anchor occurs exactly once in the source and in the bundled form, and its replacement is the pre-fix call', async () => {
+    const { FOREIGN_STALE_MUTATIONS } = await import(MUTATE);
+    const set = FOREIGN_STALE_MUTATIONS as Array<[string, string, string]>;
+    expect(set.map(([n]) => n)).toEqual(['foreign_build_stale']);
+    const out = await bundled();
+    for (const src of [readFileSync(HANDLER, 'utf8'), out]) {
+      expect(src.split(set[0][1]).length - 1).toBe(1);
+      // The replacement calls a function the bundle still defines.
+      expect(src).toContain('function scopeWindowToBuild(');
+    }
+  });
+
+  it('--locate finds the one file in a dist tree; the CLI mutates it once and refuses twice', async () => {
+    const { FOREIGN_STALE_MUTATIONS, FOREIGN_STALE_MARKER } = await import(MUTATE);
+    const anchor = (FOREIGN_STALE_MUTATIONS as Array<[string, string, string]>)[0][1];
+    const dir = mkdtempSync(join(tmpdir(), 'cdn-mutate-fs-'));
+    try {
+      mkdirSync(join(dir, 'adapters'));
+      writeFileSync(join(dir, 'chunk-ABC123.js'), await bundled());
+      writeFileSync(join(dir, 'adapters', 'cache-handler-node.js'), 'export {};\n');
+      // A source map carries the source text too, and must not count.
+      writeFileSync(join(dir, 'chunk-ABC123.js.map'), JSON.stringify({ sourcesContent: [anchor] }));
+      const run = (...args: string[]) =>
+        spawnSync(process.execPath, [MUTATE, '--set', 'foreign-stale', ...args], {
+          encoding: 'utf8',
+        });
+      const located = run('--locate', dir);
+      expect(located.status).toBe(0);
+      expect(located.stdout.trim()).toBe(join(dir, 'chunk-ABC123.js'));
+      const mutated = run(located.stdout.trim());
+      expect(mutated.status, mutated.stderr).toBe(0);
+      const text = readFileSync(join(dir, 'chunk-ABC123.js'), 'utf8');
+      expect(text.startsWith(FOREIGN_STALE_MARKER)).toBe(true);
+      expect(text).not.toContain(anchor);
+      expect(text).toContain('return scopeWindowToBuild(parsed, ctx, writerIsLive);');
+      expect(run(join(dir, 'chunk-ABC123.js')).status).toBe(1);
+      // Mutated, the tree holds no anchor any more: --locate fails.
+      expect(run('--locate', dir).status).toBe(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('--locate fails when two files hold the anchor', async () => {
+    const { FOREIGN_STALE_MUTATIONS } = await import(MUTATE);
+    const anchor = (FOREIGN_STALE_MUTATIONS as Array<[string, string, string]>)[0][1];
+    const dir = mkdtempSync(join(tmpdir(), 'cdn-mutate-fs2-'));
+    try {
+      writeFileSync(join(dir, 'a.js'), `function f(){${anchor}}\n`);
+      writeFileSync(join(dir, 'b.js'), `function g(){${anchor}}\n`);
+      const r = spawnSync(process.execPath, [MUTATE, '--set', 'foreign-stale', '--locate', dir], {
+        encoding: 'utf8',
+      });
+      expect(r.status).toBe(1);
+      expect(r.stderr).toContain('2 files');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('writes nothing when the mutated module would not parse', async () => {
+    const { FOREIGN_STALE_MUTATIONS } = await import(MUTATE);
+    const anchor = (FOREIGN_STALE_MUTATIONS as Array<[string, string, string]>)[0][1];
+    const dir = mkdtempSync(join(tmpdir(), 'cdn-mutate-fs3-'));
+    try {
+      const file = join(dir, 'chunk.js');
+      // The anchor outside a function: the replacement is a top-level `return`.
+      const broken = `export const x = 1;\n${anchor}\n`;
+      writeFileSync(file, broken);
+      const r = spawnSync(process.execPath, [MUTATE, '--set', 'foreign-stale', file], {
+        encoding: 'utf8',
+      });
+      expect(r.status).toBe(1);
+      expect(readFileSync(file, 'utf8')).toBe(broken);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+/**
+ * `rollout-origin-new-html` gates the ORIGIN half of the rollout criterion: a
+ * page the previous build rendered into the shared Redis is served by the new
+ * build at most as stale while it re-renders, so the origin settles on the new
+ * build's HTML. The fake upstream answers only requests that carry the
+ * emulator's bypass header as the origin; anything else gets an "edge" mark,
+ * which can never pass.
+ */
+describe('rollout-origin-new-html: the origin settles on the new build', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'cdn-rollout-origin-'));
+  afterAll(() => rmSync(dir, { recursive: true, force: true }));
+
+  type Mode = 'settles' | 'stuck' | 'never-old' | 'broken' | 'flaps';
+
+  async function runAgainst(mode: Mode, state?: Record<string, unknown>) {
+    const { createServer } = await import('node:http');
+    const seen = new Map<string, number>();
+    const server = createServer((req, res) => {
+      const url = String(req.url);
+      const path = url.split('?')[0];
+      const n = (seen.get(path) ?? 0) + 1;
+      seen.set(path, n);
+      const page = (mark: string, cache: string) => {
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'x-nextjs-cache': cache });
+        res.end(`<!DOCTYPE html><p id="build">${mark}</p>`);
+      };
+      if (req.headers['x-emu-bypass'] !== '1') return page('edge', 'HIT');
+      if (path === '/build-mark') return page('v2', 'MISS');
+      switch (mode) {
+        case 'settles': // /static-mark: old once (stale), then new
+          return path === '/static-mark' && n === 1 ? page('v1', 'STALE') : page('v2', 'HIT');
+        case 'stuck': // the #2305 defect: the old body, a HIT, forever
+          return page('v1', 'HIT');
+        case 'never-old': // nothing old was ever shared
+          return page('v2', 'HIT');
+        case 'flaps': // old, new, old, new: never two new in a row
+          return n % 2 === 1 ? page('v1', 'HIT') : page('v2', 'HIT');
+        default:
+          res.writeHead(502, { 'content-type': 'application/json' });
+          res.end('{"error":"upstream failed"}');
+      }
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+    try {
+      const port = (server.address() as { port: number }).port;
+      const stateFile = join(dir, `state-${port}.json`);
+      writeFileSync(
+        stateFile,
+        JSON.stringify(
+          state ?? {
+            rollout: {
+              paths: ['/tagged?k=1'],
+              originPaths: ['/tagged', '/static-mark'],
+              mark: 'v1',
+              buildTag: 'kn-x-b0',
+            },
+          },
+        ),
+      );
+      const { purgeChecks, purgeConfig } = await import(PURGE_ASSERT);
+      const c = purgeConfig({
+        CDN_EMU_URL: `http://127.0.0.1:${port}`,
+        CDN_STATE_FILE: stateFile,
+        CDN_ORIGIN_SETTLE_MS: '1500',
+      });
+      const check = purgeChecks(c).find((x: { id: string }) => x.id === 'rollout-origin-new-html');
+      expect(check).toBeDefined();
+      try {
+        return { ok: true, note: String(await check.run()) };
+      } catch (err) {
+        return { ok: false, note: String((err as Error).message) };
+      }
+    } finally {
+      await new Promise((r) => server.close(() => r(null)));
+    }
+  }
+
+  it('the old page once (stale), then the new build twice in a row, passes', async () => {
+    const r = await runAgainst('settles');
+    expect(r.ok, r.note).toBe(true);
+    expect(r.note).toContain("the origin serves the new build's HTML");
+    expect(r.note).toContain('first old/STALE');
+  });
+
+  it("the origin still serving the old build's HTML (the defect) is the failure", async () => {
+    const r = await runAgainst('stuck');
+    expect(r.ok).toBe(false);
+    expect(
+      r.note.startsWith(
+        "the origin still served the previous build's HTML after the revalidation settle",
+      ),
+    ).toBe(true);
+    expect(r.note).toContain('/static-mark');
+  }, 20_000);
+
+  it('one new answer between old ones is not settled', async () => {
+    const r = await runAgainst('flaps');
+    expect(r.ok).toBe(false);
+    expect(r.note.startsWith("the origin still served the previous build's HTML")).toBe(true);
+  }, 20_000);
+
+  it('not vacuous: if no origin page was ever the old build, it is a precondition failure', async () => {
+    const r = await runAgainst('never-old');
+    expect(r.ok).toBe(false);
+    expect(r.note.startsWith('precondition:')).toBe(true);
+  });
+
+  it('a broken page, or no rollout-before state, is a precondition failure, never a pass or the defect', async () => {
+    const broken = await runAgainst('broken');
+    expect(broken.ok).toBe(false);
+    expect(broken.note.startsWith('precondition:')).toBe(true);
+    const noState = await runAgainst('settles', {
+      rollout: { paths: ['/tagged?k=1'], mark: 'v1', buildTag: 'kn-x-b0' },
+    });
+    expect(noState.ok).toBe(false);
+    expect(noState.note.startsWith('precondition:')).toBe(true);
+  });
+
+  it('asks the origin, not the edge: the pages it reads exist in the fixture with the windows it claims', async () => {
+    const { ORIGIN_PAGES } = await import(PURGE_ASSERT);
+    expect(ORIGIN_PAGES).toEqual(['/tagged', '/static-mark']);
+    const app = join(ROOT, 'packages/kn-next/src/__tests__/fixtures/cdn-kind-app/app');
+    const tagged = readFileSync(join(app, 'tagged/page.tsx'), 'utf8');
+    const staticMark = readFileSync(join(app, 'static-mark/page.tsx'), 'utf8');
+    expect(tagged).toContain('export const revalidate = 3600;');
+    expect(staticMark).toContain('export const revalidate = false;');
+    for (const src of [tagged, staticMark]) expect(src).toContain('<p id="build">');
   });
 });

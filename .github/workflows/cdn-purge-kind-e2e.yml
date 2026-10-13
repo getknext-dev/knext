@@ -21,7 +21,9 @@ name: CDN purge — kind e2e (tag purge through the emulator)
 #   cdn-b     spec.cdn + purge            (cdn-a's image, by digest)
 #   cdn-np    spec.cdn, NO purge          (the negative control for every purge check)
 #   cdn-mut   spec.cdn + purge            (cdn-a's image; rolled to a build whose
-#             preload ignores the foreign-build record: rollout-no-old-html's red leg)
+#             preload ignores the foreign-build record and whose cache handler
+#             hands a previous build's page back without the stale window: the
+#             red leg of rollout-no-old-html and rollout-origin-new-html)
 #   cdn-late  no spec.cdn until the churn step sets it
 #
 # scripts/cdn-e2e-purge-assert.mjs:
@@ -37,21 +39,28 @@ name: CDN purge — kind e2e (tag purge through the emulator)
 #   rollout-no-old-html  ...and no previous-build HTML is stored at or served
 #                        from the edge afterwards, whatever the origin answers
 #                        (ADR-0068 D13 as amended by Amendment 2)
+#   rollout-origin-new-html  ...and once the previous build stopped serving and
+#                        a revalidation settled, the ORIGIN serves the new
+#                        build's HTML for a revalidate = 3600 and a
+#                        revalidate: false page (ADR-0066 Amendment 3, #2305)
 # plus scripts/cdn-e2e-assert.mjs's never-set-cookie / never-authorization on
 # the purge-enabled app.
 #
-# The rollout criterion is the EDGE's (ADR-0068 Amendment 2, #2299): ISR HTML
-# is shared across builds (ADR-0066), so for a while after a deploy the new
-# build's ORIGIN may still serve the previous build's page (tracked separately,
-# #2305). The edge must refuse to store it (reason foreign_build_body), and
-# `rollout-no-old-html` gates exactly that.
+# The rollout criterion has two halves. The EDGE's (ADR-0068 Amendment 2,
+# #2299): ISR HTML is shared across builds (ADR-0066), so right after a deploy
+# the new build's origin may serve the previous build's page once, as stale,
+# while it re-renders it; the edge must refuse to store it (reason
+# foreign_build_body), and `rollout-no-old-html` gates exactly that. The
+# ORIGIN's (#2305): that re-render happens, so the origin settles on the new
+# build's HTML, and `rollout-origin-new-html` gates it.
 #
 # Teeth — every check has a red leg through scripts/cdn-e2e-expect-red.sh (exit
 # code AND the FAIL line naming the intended check):
 #   cdn-np standing in for app A (no purge configured): purge-revalidate and
 #   rollout-after go red; cdn-mut (foreign-build record disabled in its new
-#   build's preload): rollout-no-old-html goes red; app A standing in for app B:
-#   purge-isolation goes red;
+#   build's preload): rollout-no-old-html goes red; cdn-mut (stale window
+#   removed from its new build's cache handler): rollout-origin-new-html goes
+#   red; app A standing in for app B: purge-isolation goes red;
 #   a 400 instead of a 429: purge-429-recovery goes red; cdn-late listed as
 #   "unrelated": revisions-after goes red; the store-all emulator: the
 #   never-cached checks go red.
@@ -466,11 +475,32 @@ jobs:
             node "${GITHUB_WORKSPACE}/scripts/cdn-e2e-mutate-preload.mjs" --set foreign-build "$p"
             i=$((i + 1))
           done
+          # The same build's cache handler is mutated too, so it hands a previous
+          # build's page entry back without the stale window (the origin red leg,
+          # rollout-origin-new-html). The handler is bundled into a hashed chunk:
+          # --locate prints the one file in each tree that holds the anchor, and
+          # fails unless exactly one does. Same two trees as the preload.
+          HANDLERS=()
+          for d in "$APP_DIR/node_modules/@getknext/core/dist" "${GITHUB_WORKSPACE}/packages/kn-next/dist"; do
+            h="$(node "${GITHUB_WORKSPACE}/scripts/cdn-e2e-mutate-preload.mjs" --set foreign-stale --locate "$d")"
+            HANDLERS+=("$h")
+          done
+          i=0
+          for h in "${HANDLERS[@]}"; do
+            cp "$h" "${RUNNER_TEMP}/handler.orig.$i.js"
+            node "${GITHUB_WORKSPACE}/scripts/cdn-e2e-mutate-preload.mjs" --set foreign-stale "$h"
+            i=$((i + 1))
+          done
           "$WRITE_CONFIG" cdn-mut purge
           node "$CLI" deploy --registry localhost:5001 --namespace "$APP_NS" --tag "${DEPLOY_TAG}-v2mut"
           i=0
           for p in "${PRELOADS[@]}"; do
             cp "${RUNNER_TEMP}/preload.orig.$i.cjs" "$p"
+            i=$((i + 1))
+          done
+          i=0
+          for h in "${HANDLERS[@]}"; do
+            cp "${RUNNER_TEMP}/handler.orig.$i.js" "$h"
             i=$((i + 1))
           done
           IMAGE_MUT="$(kubectl -n "$APP_NS" get nextapp cdn-mut -o jsonpath='{.spec.image}')"
@@ -503,8 +533,8 @@ jobs:
 
       # ADR-0068 D13 as amended (Amendment 2): after the first-ready purge, no
       # previous-build HTML is stored at or served from the edge. The origin may
-      # still answer with it for a while after a deploy (#2305); the edge must
-      # refuse it. The red leg is cdn-mut, whose new build ignores the
+      # still answer with it once, as stale, while it re-renders (#2305); the
+      # edge must refuse it. The red leg is cdn-mut, whose new build ignores the
       # foreign-build record: its own pre-rollout entries are proved evicted
       # first (rollout-after), so its red can only come from a refill.
       - name: Assert the rollout — no previous-build HTML at the edge after the purge
@@ -517,6 +547,24 @@ jobs:
           CDN_APP_A=cdn-mut CDN_STATE_FILE="$CDN_STATE_DIR/rollout-mut.json" \
             bash scripts/cdn-e2e-expect-red.sh foreign-build-record scripts/cdn-e2e-red/purge-rollout-foreign-build.txt -- \
             node scripts/cdn-e2e-purge-assert.mjs --only rollout-no-old-html
+
+      # ADR-0066 Amendment 3 (#2305): the origin half. Once the previous build
+      # stopped serving (its liveness record lapses 90 s after its last cache
+      # access) and the background re-render settled, the origin answers with
+      # the new build's HTML for a revalidate = 3600 and a revalidate: false
+      # page the old build rendered. Asked at the origin (emulator bypass). The
+      # red leg is cdn-mut, whose new build's cache handler hands the old entry
+      # back without the stale window, so Next keeps answering HIT with the old
+      # HTML; it runs with the same deadline as the green leg, so that wait is
+      # what it proves insufficient without the fix.
+      - name: Assert the rollout — the origin serves the new build's HTML once the revalidation settles
+        run: |
+          set -euo pipefail
+          CDN_STATE_FILE="$CDN_STATE_DIR/rollout-a.json" \
+            node scripts/cdn-e2e-purge-assert.mjs --only rollout-origin-new-html
+          CDN_APP_A=cdn-mut CDN_STATE_FILE="$CDN_STATE_DIR/rollout-mut.json" \
+            bash scripts/cdn-e2e-expect-red.sh foreign-build-stale scripts/cdn-e2e-red/purge-rollout-origin-stale.txt -- \
+            node scripts/cdn-e2e-purge-assert.mjs --only rollout-origin-new-html
 
       - name: Dump state on failure
         if: failure()

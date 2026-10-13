@@ -1,0 +1,6 @@
+# cdn-mut rolled to a build whose cache handler hands the previous build's page
+# entries back with their window withheld instead of as stale
+# (scripts/cdn-e2e-mutate-preload.mjs --set foreign-stale): Next applies the
+# new build's manifest window to the old entry and keeps answering HIT with
+# the previous build's HTML, so the origin half of the rollout criterion goes red.
+rollout-origin-new-html|the origin still served the previous build's HTML after the revalidation settle
