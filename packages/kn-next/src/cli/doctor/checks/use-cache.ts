@@ -34,8 +34,12 @@ import {
     readFileSync,
 } from "node:fs";
 import { extname, join, relative } from "node:path";
+import { stripCodeComments } from "../../../utils/strip-code-comments";
 import { mk } from "../report";
 import type { CheckContext, CheckResult } from "../types";
+
+// Re-exported: the doctor check and its tests have always imported it from here.
+export { stripCodeComments };
 
 export const NEXT_CONFIG_FILES = [
     "next.config.ts",
@@ -99,47 +103,6 @@ export interface UseCacheScan {
 export interface ScanIO {
     /** `readdirSync(dir, { withFileTypes: true })` by default. */
     readdir?: (dir: string) => Dirent[];
-}
-
-/**
- * Remove // and block comments from source while leaving string and
- * template-literal contents untouched, so `'/api/*'` does not open a
- * "comment" that swallows the code after it. Block comments keep their
- * newlines, so the line structure the directive regex relies on survives.
- */
-export function stripCodeComments(src: string): string {
-    let out = "";
-    let i = 0;
-    const n = src.length;
-    while (i < n) {
-        const c = src[i];
-        if (c === '"' || c === "'" || c === "`") {
-            const start = i;
-            i++;
-            while (i < n && src[i] !== c) {
-                if (src[i] === "\\") i++;
-                else if (c !== "`" && src[i] === "\n") break;
-                i++;
-            }
-            i++;
-            out += src.slice(start, i);
-            continue;
-        }
-        if (c === "/" && src[i + 1] === "/") {
-            while (i < n && src[i] !== "\n") i++;
-            continue;
-        }
-        if (c === "/" && src[i + 1] === "*") {
-            const end = src.indexOf("*/", i + 2);
-            const stop = end === -1 ? n : end + 2;
-            out += src.slice(i, stop).replace(/[^\n]/g, "");
-            i = stop;
-            continue;
-        }
-        out += c;
-        i++;
-    }
-    return out;
 }
 
 /**
