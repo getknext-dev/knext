@@ -113,7 +113,13 @@ jev_ge() { awk -v x="$1" -v t="$2" 'BEGIN { exit !(x + 0 >= t + 0) }'; }
 # redaction errors or a literal survives it returns non-zero and the caller falls back to the old
 # skip. pr-risk.sh keeps the skip (it sends no diff content at all).
 JEV_Q="[\"']" # an optional quote around a header value (JSON / shell)
-JEV_PEM_RE='---+[ \t\r\n\v\f]*begin[ \t]+([^-\r\n]|--?[^-\r\n])+---+' # awk, passed with -v (the \t etc. become the characters)
+# JEV_PEM_RE is an awk regex, passed with -v (the \t etc. become the characters) and matched on the
+# lower-cased text. Written to run in LINEAR time on mawk and BSD awk, which both restart the match
+# at every position: `(^|[^-])` stops a match from starting inside a dash run (a 130K run of dashes
+# was quadratic: minutes), and the label's first character is not a blank, so the blanks after
+# BEGIN can be split between separator and label in only one way (130K blanks: minutes on mawk).
+# The match may start one character before the dashes; callers skip that character.
+JEV_PEM_RE='(^|[^-])---+[ \t\r\n\v\f]*begin[ \t]+([^- \t\r\n]|--?[^-\r\n])([^-\r\n]|--?[^-\r\n])*---+'
 JEV_LITERAL_RE='gh[pousr]_[A-Za-z0-9]{36}[A-Za-z0-9_-]*|github_pat_[A-Za-z0-9_]{22,}|npm_[A-Za-z0-9]{36}[A-Za-z0-9_-]*|(^|[^a-z0-9])sk-[A-Za-z0-9_-]{20,}|xox[bp]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}[A-Za-z0-9_-]*|://[^/@[:space:]]+:[^@[:space:]]+@|authorization'"$JEV_Q"'?[[:space:]]*:[[:space:]]*'"$JEV_Q"'?basic[[:space:]]+[^[:space:]]+|(authorization'"$JEV_Q"'?[[:space:]]*:[[:space:]]*'"$JEV_Q"'?|bearer[[:space:]]+'"$JEV_Q"'?)([A-Za-z]+[[:space:]]+)?([A-Za-z0-9._~+/=-]{16,}|[A-Za-z._~+/=-]*[0-9][A-Za-z0-9._~+/=-]{7,})'
 JEV_ENTROPY_RUN_RE='[A-Za-z0-9+=]{32,}'
 JEV_UNICODE_SPACES="$(printf '\302\240|\341\232\200|\342\200[\200-\212]|\342\200\257|\342\201\237|\343\200\200')"
@@ -248,8 +254,9 @@ _jev_pem_awk() {
       while (1) {
         low = tolower(rem)
         if (!match(low, re)) { out = out rem; break }
-        b = RSTART; off = b + RLENGTH; e = 0
-        while (match(substr(low, off), /---+[ \t\r\n]*end/)) { e = off + RSTART - 1; elen = RLENGTH; off = e + elen }
+        b = RSTART; off = RSTART + RLENGTH; e = 0
+        if (substr(low, b, 1) != "-") b++ # the match began one character before the dashes
+        while (match(substr(low, off), /(^|[^-])---+[ \t\r\n]*end/)) { e = off + RSTART - 1; elen = RLENGTH; off = e + elen }
         if (e == 0) { endpos = length(rem) }
         else {
           after = substr(low, e + elen)
