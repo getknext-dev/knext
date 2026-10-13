@@ -422,13 +422,23 @@ describe("a previous build's ISR entry is served once as STALE, then re-rendered
 
     it("a process with no build id forces nothing stale (it cannot tell a foreign entry from its own)", async () => {
         const redis = sharedRedis();
-        const p = await pod(redis, "none");
         const time = clock();
+        // Its own entry (no build id recorded) ...
+        const p = await pod(redis, "none");
         await p.render("/isr/noid", { revalidate: 3600 });
         time.advance(A_STOPPED_MS);
-        const entry = await p.read("/isr/noid");
-        expect(entry).not.toBeNull();
-        expect(entry?.isStale).toBeFalsy();
+        const own = await p.read("/isr/noid");
+        expect(own).not.toBeNull();
+        expect(own?.isStale).toBeFalsy();
+        // ... and one a build WITH an id wrote, long stopped: it cannot prove
+        // that entry is not its own, so the manifest window applies as before
+        // instead of every page re-rendering every second.
+        const a = await pod(redis, BUILD_A);
+        await a.render("/isr/noid", { revalidate: 3600 });
+        time.advance(A_STOPPED_MS);
+        const foreign = await (await pod(redis, "none")).read("/isr/noid");
+        expect(foreign?.value?.html).toBe(`<p>${BUILD_A}</p>`);
+        expect(foreign?.isStale).toBeFalsy();
     });
 });
 
