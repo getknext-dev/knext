@@ -16,15 +16,23 @@
  * tag store or an outage mode, because Next's two contracts differ on all three:
  *
  *  - Entry: `<prefix>:uc:<kind>:<cacheKey>` holds one JSON envelope (metadata +
- *    the body as base64). `<cacheKey>` is Next's own key, stored opaque. It
- *    already embeds `deploymentId || buildId`, so two builds never read each
- *    other's entries and no foreign-build check is needed (nor wanted: it would
- *    defeat the durable-entries flag). The ISR handler's window-withholding and
- *    liveness rules do not apply here: nothing is stripped or rewritten.
+ *    the body as base64). `<cacheKey>` is Next's own key, stored opaque. By
+ *    default it embeds `deploymentId || buildId`, so two builds do not read each
+ *    other's entries and no foreign-build check is needed. Under Next's
+ *    experimental durable-entries flag the key carries a code hash instead, and an
+ *    unchanged function's entry IS read by the next build -- that is the flag's
+ *    purpose, and a foreign-build check here would defeat it. The ISR handler's
+ *    window-withholding and liveness rules do not apply here: nothing is stripped
+ *    or rewritten. A body larger than `KNEXT_USE_CACHE_MAX_ENTRY_BYTES` (2 MiB by
+ *    default) is not stored.
  *  - Tags: Next's contract is TIMESTAMPS. One Redis hash, `<prefix>:uc:tags`,
- *    carries `s:<tag>` (stale at) and `e:<tag>` (expired at), epoch ms, written
- *    by a single HSET so two pods invalidating at once cannot lose each other's
- *    field. The semantics copy Next's built-in handler.
+ *    carries `s:<tag>` (stale at) and `e:<tag>` (expired at), epoch ms in the
+ *    REDIS server's clock (`TIME`, see `clockOffset`), written by a single HSET so
+ *    two pods invalidating at once cannot lose each other's field. An entry
+ *    records when it was made in that same clock, so pods whose clocks disagree
+ *    still agree on which came first. Stamps older than the TTL cap are pruned by
+ *    a compare-and-delete script, so a stamp re-written mid-prune survives. The
+ *    semantics copy Next's built-in handler.
  *  - Outage: Redis down means MISS and DROP. There is no per-process store of
  *    any kind -- not even Next's in-memory default -- because this is where
  *    per-user entries live and a pod-local copy would sit outside the TTL cap and
@@ -57,6 +65,63 @@ const DEFAULT_MAX_TTL_SECONDS = 86_400;
 // Stamps are pruned in a bounded step, at most this often per process.
 const PRUNE_INTERVAL_MS = 30_000;
 const PRUNE_PAGE = 100;
+/**
+ * Largest entry body stored, in bytes, unless `KNEXT_USE_CACHE_MAX_ENTRY_BYTES`
+ * says otherwise. 2 MiB is Next's own fetch-cache item limit. The SET shares a
+ * command timeout (2 s) and a circuit breaker with ISR, and Redis serves every
+ * client from one thread, so a multi-megabyte write is the one entry that can time
+ * out and take ISR's cache offline with it. A typical entry is kilobytes.
+ */
+const DEFAULT_MAX_ENTRY_BYTES = 2 * 1024 * 1024;
+// The Redis clock is re-read this often per process; a failed read is retried sooner.
+const CLOCK_RESYNC_MS = 60_000;
+const CLOCK_RETRY_MS = 5_000;
+
+/**
+ * Delete each stamp field (ARGV[2..]) only while its CURRENT value is still older
+ * than the cutoff (ARGV[1]). The fields come from an HSCAN page read moments
+ * earlier; an unconditional HDEL would also delete a stamp another pod re-wrote in
+ * between, losing that invalidation. Re-checked and deleted in one script, so no
+ * write can land between the check and the delete. One key, so cluster-safe.
+ */
+export const PRUNE_STAMPS_SCRIPT = [
+  'local cutoff = tonumber(ARGV[1])',
+  'local n = 0',
+  'for i = 2, #ARGV do',
+  "  local at = tonumber(redis.call('HGET', KEYS[1], ARGV[i]))",
+  "  if at and at < cutoff then n = n + redis.call('HDEL', KEYS[1], ARGV[i]) end",
+  'end',
+  'return n',
+].join('\n');
+
+/**
+ * State shared by the `default` and `remote` handlers of ONE process, keyed by the
+ * `core` they share (one per evaluation of `cache-handler.js`, like the breaker):
+ * the outage and size warnings fire once per process, not once per kind, and the
+ * Redis clock is read once for both.
+ */
+const SHARED = new WeakMap();
+
+function shared(core) {
+  let state = SHARED.get(core);
+  if (!state) {
+    state = {
+      outageWarned: false,
+      oversizeWarned: false,
+      clock: { offset: undefined, sampledAt: 0, retryAt: 0, inflight: null },
+    };
+    SHARED.set(core, state);
+  }
+  return state;
+}
+
+/** Entry-size ceiling in bytes; 0 = no ceiling. Read per call, like the TTL cap. */
+function maxEntryBytes() {
+  const raw = (process.env.KNEXT_USE_CACHE_MAX_ENTRY_BYTES ?? '').trim();
+  if (raw === '') return DEFAULT_MAX_ENTRY_BYTES;
+  const n = Number(raw);
+  return Number.isSafeInteger(n) && n >= 0 ? n : DEFAULT_MAX_ENTRY_BYTES;
+}
 
 /**
  * Upper bound on a Redis TTL. Next's default `cacheLife` sets `expire` to
@@ -69,24 +134,80 @@ function maxTtlSeconds() {
   return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_MAX_TTL_SECONDS;
 }
 
-/** Next's clock for tag stamps (`cache-handlers/default.js`). */
-function nowMs() {
-  return Math.round(performance.timeOrigin + performance.now());
+/**
+ * This pod's clock, the one Next stamps an entry's `timestamp` with
+ * (`performance.timeOrigin + performance.now()`).
+ */
+function localNowMs() {
+  return performance.timeOrigin + performance.now();
+}
+
+/**
+ * The offset from this pod's clock to the Redis server's (`TIME`), in ms.
+ *
+ * Every time that is compared ACROSS pods -- a tag stamp against the entry it may
+ * invalidate -- is kept in the Redis clock's domain, so skew between pods cannot
+ * let an entry outlive an invalidation (or lose a newer one). Times handed back to
+ * Next are translated into the reading pod's own clock, the one Next compares
+ * them against.
+ *
+ * One `TIME` round trip per process per minute, not per operation: the first use
+ * waits for it, later re-reads run in the background on the last known offset.
+ * Half the round trip is credited to the server. If it cannot be read the local
+ * clock stands in (offset 0) and the read is retried a few seconds later. Not
+ * routed through the breaker: the command that follows it is, and that is where a
+ * connection fault belongs.
+ */
+async function clockOffset(core, client) {
+  const clock = shared(core).clock;
+  const now = Date.now();
+  const due =
+    clock.offset === undefined ? now >= clock.retryAt : now - clock.sampledAt >= CLOCK_RESYNC_MS;
+  if (due && !clock.inflight) {
+    clock.inflight = (async () => {
+      try {
+        const t0 = localNowMs();
+        const reply = await core.command(client, 'TIME', []);
+        const t1 = localNowMs();
+        const serverMs = Number(reply?.[0]) * 1000 + Number(reply?.[1]) / 1000;
+        if (!Number.isFinite(serverMs)) throw new Error('unexpected TIME reply');
+        clock.offset = Math.round(serverMs - (t0 + t1) / 2);
+        clock.sampledAt = Date.now();
+      } catch {
+        clock.retryAt = Date.now() + CLOCK_RETRY_MS;
+      } finally {
+        clock.inflight = null;
+      }
+    })();
+  }
+  if (clock.offset === undefined && clock.inflight) await clock.inflight;
+  return clock.offset ?? 0;
 }
 
 /**
  * Read a stream to its end. `keep: false` still reads every chunk: a stream Next
  * handed us must be consumed, or its producer is left waiting on a reader that
- * never comes. Rejects if the stream errors; the caller decides what that means.
+ * never comes. Past `maxBytes` (0 = no limit) the chunks are no longer kept, but
+ * the stream is still read to its end; the result says it was oversize. Rejects if
+ * the stream errors; the caller decides what that means.
  */
-async function readStream(stream, keep) {
+async function readStream(stream, keep, maxBytes = 0) {
   const reader = stream.getReader();
   const chunks = [];
+  let size = 0;
+  let oversize = false;
   try {
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
-      if (keep && value) chunks.push(Buffer.from(value.buffer, value.byteOffset, value.byteLength));
+      if (!keep || !value || oversize) continue;
+      size += value.byteLength;
+      if (maxBytes > 0 && size > maxBytes) {
+        oversize = true;
+        chunks.length = 0;
+        continue;
+      }
+      chunks.push(Buffer.from(value.buffer, value.byteOffset, value.byteLength));
     }
   } finally {
     try {
@@ -95,7 +216,7 @@ async function readStream(stream, keep) {
       // Already released: nothing to give back.
     }
   }
-  return keep ? Buffer.concat(chunks) : undefined;
+  return keep ? { body: oversize ? undefined : Buffer.concat(chunks), oversize } : undefined;
 }
 
 function streamFromBuffer(buffer) {
@@ -160,15 +281,18 @@ export function createUseCacheHandler({ kind, core }) {
   const pendingSets = new Map();
   let lastPrune = 0;
   let pruneCursor = '0';
-  let outageWarned = false;
+  const state = shared(core);
 
   const entryKey = (cacheKey) => `${core.keyPrefix()}:uc:${kind}:${cacheKey}`;
   const tagsKey = () => `${core.keyPrefix()}:uc:tags`;
 
-  /** One warning per outage, never the cache key (it can carry per-user arguments). */
+  /**
+   * One warning per outage per process (both kinds share it), never the cache key
+   * (it can carry per-user arguments).
+   */
   function noteUnavailable() {
-    if (outageWarned) return;
-    outageWarned = true;
+    if (state.outageWarned) return;
+    state.outageWarned = true;
     console.warn(
       core.redisConfigured()
         ? "[CacheHandler] Redis unavailable: 'use cache' entries are not cached until it returns " +
@@ -178,7 +302,7 @@ export function createUseCacheHandler({ kind, core }) {
     );
   }
   const noteAvailable = () => {
-    outageWarned = false;
+    state.outageWarned = false;
   };
 
   async function doGet(cacheKey) {
@@ -211,6 +335,11 @@ export function createUseCacheHandler({ kind, core }) {
       return undefined;
     }
 
+    // When the entry was made, in the Redis clock (see `clockOffset`). An envelope
+    // written before that field existed only has the writer's own clock.
+    const offset = await clockOffset(core, client);
+    const madeAt = Number.isFinite(env.at) ? env.at : env.timestamp;
+
     // Next compares an entry against the tags it carries (its soft tags are
     // checked through `getExpiration`). Same rule as the built-in handler:
     // expired after the entry was made and not in the future = miss; stale after
@@ -227,16 +356,16 @@ export function createUseCacheHandler({ kind, core }) {
         count('error');
         return undefined;
       }
-      const now = nowMs();
+      const now = Math.round(localNowMs()) + offset;
       for (let i = 0; i < tags.length; i++) {
         const stale = Number(stamps?.[2 * i]);
         const expired = Number(stamps?.[2 * i + 1]);
-        if (stamps?.[2 * i + 1] != null && Number.isFinite(expired) && expired <= now && expired > env.timestamp) {
+        if (stamps?.[2 * i + 1] != null && Number.isFinite(expired) && expired <= now && expired > madeAt) {
           count('expired');
           count('miss');
           return undefined;
         }
-        if (stamps?.[2 * i] != null && Number.isFinite(stale) && stale > env.timestamp) revalidate = -1;
+        if (stamps?.[2 * i] != null && Number.isFinite(stale) && stale > madeAt) revalidate = -1;
       }
     }
 
@@ -245,7 +374,9 @@ export function createUseCacheHandler({ kind, core }) {
       value: streamFromBuffer(Buffer.from(env.body, 'base64')),
       tags: env.tags,
       stale: env.stale,
-      timestamp: env.timestamp,
+      // In THIS pod's clock: Next compares it with its own `now` and with what
+      // `getExpiration` returns, which is translated the same way.
+      timestamp: madeAt - offset,
       expire: env.expire,
       revalidate,
     };
@@ -278,8 +409,24 @@ export function createUseCacheHandler({ kind, core }) {
     }
 
     let body;
+    const maxBytes = maxEntryBytes();
     try {
-      body = await readStream(entry.value, true);
+      const read = await readStream(entry.value, true, maxBytes);
+      if (read.oversize) {
+        // Never sent: a multi-megabyte SET is the write that can outlast the
+        // command timeout and open the breaker ISR shares. A miss, not an error.
+        count('oversize');
+        if (!state.oversizeWarned) {
+          state.oversizeWarned = true;
+          console.warn(
+            `[CacheHandler] A 'use cache' entry larger than ${maxBytes} bytes was not stored ` +
+              '(KNEXT_USE_CACHE_MAX_ENTRY_BYTES sets the ceiling, 0 removes it). Further ones are ' +
+              'counted, not logged.',
+          );
+        }
+        return;
+      }
+      body = read.body;
     } catch {
       // A stream that errors part-way is an aborted render. Discard the partial entry.
       count('aborted');
@@ -292,10 +439,13 @@ export function createUseCacheHandler({ kind, core }) {
       count('dropped');
       return;
     }
+    const offset = await clockOffset(core, client);
     const buildId = core.buildId();
     const envelope = JSON.stringify({
       v: ENVELOPE_VERSION,
       timestamp: entry.timestamp,
+      // When the entry was made, in the Redis clock: what tag stamps are compared with.
+      at: Math.round(entry.timestamp + offset),
       stale: entry.stale,
       expire: entry.expire,
       revalidate: entry.revalidate,
@@ -314,13 +464,17 @@ export function createUseCacheHandler({ kind, core }) {
     }
   }
 
-  async function pruneStamps(client) {
-    const now = Date.now();
-    if (now - lastPrune < PRUNE_INTERVAL_MS) return;
-    lastPrune = now;
-    const reply = await core.redisCall(() =>
-      core.command(client, 'HSCAN', [tagsKey(), pruneCursor, 'COUNT', String(PRUNE_PAGE)]),
-    );
+  /**
+   * One bounded prune step. `now` is in the Redis clock, like the stamps. Not
+   * routed through the breaker: the tag write just before it proved the
+   * connection, and a failure here (a Redis that refuses scripts, say) must not
+   * take ISR's cache offline every 30 s. Each command keeps its own timeout.
+   */
+  async function pruneStamps(client, now) {
+    const tick = Date.now();
+    if (tick - lastPrune < PRUNE_INTERVAL_MS) return;
+    lastPrune = tick;
+    const reply = await core.command(client, 'HSCAN', [tagsKey(), pruneCursor, 'COUNT', String(PRUNE_PAGE)]);
     pruneCursor = String(reply?.[0] ?? '0');
     const page = Array.isArray(reply?.[1]) ? reply[1] : [];
     // A stamp older than the TTL cap cannot affect a live entry: every entry
@@ -331,7 +485,10 @@ export function createUseCacheHandler({ kind, core }) {
       const at = Number(page[i + 1]);
       if (Number.isFinite(at) && at < cutoff) dead.push(page[i]);
     }
-    if (dead.length > 0) await core.redisCall(() => core.command(client, 'HDEL', [tagsKey(), ...dead]));
+    // Conditional: a field re-stamped since the HSCAN is no longer below the cutoff.
+    if (dead.length > 0) {
+      await core.command(client, 'EVAL', [PRUNE_STAMPS_SCRIPT, '1', tagsKey(), String(cutoff), ...dead]);
+    }
   }
 
   async function doUpdateTags(tags, durations) {
@@ -343,7 +500,7 @@ export function createUseCacheHandler({ kind, core }) {
       count('tagsDropped');
       return;
     }
-    const now = nowMs();
+    const now = Math.round(localNowMs()) + (await clockOffset(core, client));
     const fields = [];
     for (const tag of list) {
       if (durations) {
@@ -359,12 +516,19 @@ export function createUseCacheHandler({ kind, core }) {
       await core.redisCall(() => core.command(client, 'HSET', [tagsKey(), ...fields]));
       noteAvailable();
       count('tagsUpdated');
-      await pruneStamps(client);
     } catch (err) {
       // An invalidation lost to an outage is lost (ADR-0066 D2); it must not
       // fail the request that asked for it.
       count('error');
       console.error("[CacheHandler] Error updating 'use cache' tags:", err?.message);
+      return;
+    }
+    try {
+      await pruneStamps(client, now);
+    } catch (err) {
+      // The tags ARE updated; only the housekeeping failed, and the next step retries.
+      count('pruneError');
+      console.warn("[CacheHandler] Pruning old 'use cache' tag stamps failed (the tags were updated):", err?.message);
     }
   }
 
@@ -385,7 +549,9 @@ export function createUseCacheHandler({ kind, core }) {
       const at = Number(v);
       if (v != null && Number.isFinite(at) && at > newest) newest = at;
     }
-    return newest;
+    // 0 means "never revalidated". Anything else goes back to Next in this pod's
+    // clock, the domain `get` returns an entry's timestamp in.
+    return newest === 0 ? 0 : newest - (await clockOffset(core, client));
   }
 
   return {
