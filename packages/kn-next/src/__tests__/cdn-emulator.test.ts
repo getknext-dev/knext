@@ -364,3 +364,48 @@ describe("cache emulator (store-all negative control)", () => {
         );
     });
 });
+
+describe("cache emulator: started as a program", () => {
+    it("starts when run through a symlink, as a ConfigMap mount presents the file", async () => {
+        const { mkdtempSync, symlinkSync } = await import("node:fs");
+        const { tmpdir } = await import("node:os");
+        const { join, resolve } = await import("node:path");
+        const { spawn } = await import("node:child_process");
+        // A ConfigMap volume mounts `<key>` as a symlink into `..data/`: Node
+        // resolves the symlink for import.meta.url but not for argv[1].
+        const dir = mkdtempSync(join(tmpdir(), "cdn-emu-link-"));
+        const link = join(dir, "cdn-emulator.mjs");
+        symlinkSync(resolve(import.meta.dir, EMU), link);
+        const child = spawn("node", [link], {
+            env: { ...process.env, EMU_PORT: "0", EMU_ADMIN_PORT: "0" },
+            stdio: ["ignore", "pipe", "pipe"],
+        });
+        try {
+            const started = await new Promise<string>((resolveLine, reject) => {
+                let out = "";
+                const timer = setTimeout(
+                    () => reject(new Error(`no startup line; output: ${out}`)),
+                    10_000,
+                );
+                child.stdout?.on("data", (d: Buffer) => {
+                    out += d.toString();
+                    if (out.includes("cdn-emulator: mode=")) {
+                        clearTimeout(timer);
+                        resolveLine(out);
+                    }
+                });
+                child.on("exit", (code) => {
+                    clearTimeout(timer);
+                    reject(
+                        new Error(
+                            `exited ${code} before listening; output: ${out}`,
+                        ),
+                    );
+                });
+            });
+            expect(started).toContain("cdn-emulator: mode=honour");
+        } finally {
+            child.kill();
+        }
+    });
+});

@@ -346,9 +346,13 @@ jobs:
             ports: [{ port: 6379 }]
           YAML
           } | kubectl apply -f -
-          kubectl -n "$APP_NS" rollout status deploy/redis --timeout=180s
-          kubectl -n "$APP_NS" rollout status deploy/cdn-emulator --timeout=180s
-          kubectl -n "$APP_NS" rollout status deploy/cdn-emulator-storeall --timeout=180s
+          for d in redis cdn-emulator cdn-emulator-storeall; do
+            kubectl -n "$APP_NS" rollout status "deploy/$d" --timeout=180s || {
+              kubectl -n "$APP_NS" describe pods -l "app=$d" | tail -40
+              kubectl -n "$APP_NS" logs -l "app=$d" --tail=50 --previous || kubectl -n "$APP_NS" logs -l "app=$d" --tail=50 || true
+              exit 1
+            }
+          done
 
       # Through the product. cdn-a is BUILT; cdn-b and cdn-off deploy the very
       # same image by digest (`--image`), so the only difference between them is
@@ -379,10 +383,10 @@ jobs:
           IMAGE="$(kubectl -n "$APP_NS" get nextapp cdn-a -o jsonpath='{.spec.image}')"
           case "$IMAGE" in *@sha256:*) ;; *) echo "::error::cdn-a image is not digest-pinned: $IMAGE"; exit 1 ;; esac
           write_config cdn-b "cdn: { provider: \"emulator\", emulatorEndpoint: \"${EMU_ENDPOINT}\", includePaths: [\"/protected\", \"/variant\"] },"
-          node "$CLI" deploy --namespace "$APP_NS" --image "$IMAGE"
+          node "$CLI" deploy --namespace "$APP_NS" --tag "$DEPLOY_TAG" --image "$IMAGE"
           if [ "${{ matrix.variant }}" = honest ]; then
             write_config cdn-off ""
-            node "$CLI" deploy --namespace "$APP_NS" --image "$IMAGE"
+            node "$CLI" deploy --namespace "$APP_NS" --tag "$DEPLOY_TAG" --image "$IMAGE"
             cd "$BASE_DIR"
             write_config cdn-base ""
             node "$CLI" deploy --registry localhost:5001 --namespace "$APP_NS" --tag "$DEPLOY_TAG"

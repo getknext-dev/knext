@@ -50,6 +50,7 @@
  *   POST /__emu/reset      drop every entry
  */
 
+import { realpathSync } from 'node:fs';
 import { createServer, request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { pathToFileURL } from 'node:url';
@@ -299,7 +300,9 @@ export async function startEmulator(env = process.env) {
   return emu;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+// Run as a program. Compared through realpath: in the cluster the file is a
+// ConfigMap mount, i.e. a symlink, and import.meta.url is the resolved path.
+if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
   startEmulator().catch((err) => {
     console.error(`cdn-emulator: failed to start: ${err && err.message}`);
     process.exit(1);
