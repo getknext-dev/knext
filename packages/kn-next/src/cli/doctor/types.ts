@@ -176,6 +176,12 @@ export interface DoctorDeps {
      */
     readNextConfigFile?: () => string | undefined;
     /**
+     * Scans the app's source for a `'use cache'` directive -- feeds the
+     * 'use cache' check (#2277). Defaults to a bounded, read-only scan of the
+     * current directory; tests inject a fixed answer.
+     */
+    scanUseCache?: () => { file: string | undefined; truncated: boolean };
+    /**
      * This CLI's own version, for the operator-version compatibility verdict
      * (#1947). Set by `doctorMain`'s production defaults (read from the
      * package manifest); deliberately NOT defaulted inside `runDoctor`, so the
