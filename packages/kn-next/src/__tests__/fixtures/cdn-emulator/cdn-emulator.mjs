@@ -47,7 +47,23 @@
  *   GET  /healthz          200 "ok"
  *   GET  /__emu/entries    the stored entries: key, host, url, method, status,
  *                          contentType, tags, ttl
- *   POST /__emu/reset      drop every entry
+ *   POST /__emu/reset      drop every entry and the purge log
+ *   GET  /__emu/purges     every purge request received: zone, tags, status,
+ *                          authorized, evicted, at (ms)
+ *   POST /__emu/fail-next?status=429&retryAfter=1
+ *                          answer the NEXT purge with that status (once)
+ *
+ * ## Tag purge (the API the knext `emulator` provider row calls)
+ *
+ *   POST /client/v4/zones/<zone>/purge_cache   {"tags": ["kn-…", …]}
+ *
+ * Cloudflare-shaped: `Authorization: Bearer <token>` must be EMU_PURGE_TOKEN,
+ * which the e2e sets to the emulator row's fixed dummy token, read from
+ * cdn-purge/rows.js (the row never sends the user's Secret); anything else,
+ * or no EMU_PURGE_TOKEN at all, is a 403 `{success:false}`. A tag purge evicts every stored entry, of ANY
+ * host, carrying any of the tags: a zone-wide purge, which is exactly why knext
+ * prefixes every tag per app. `files`, `prefixes` and `purge_everything` are
+ * not modelled and answer 400, as an empty tag list does.
  */
 
 import { realpathSync } from 'node:fs';
@@ -141,7 +157,7 @@ function json(res, status, value) {
  * `http.Server`s and the entry map); `startEmulator` listens on them.
  *
  * @param {{ mode?: 'honour' | 'store-all', upstream?: string, upstreamMap?: string,
- *           hostSuffix?: string, storeAllTtl?: number, now?: () => number }} [opts]
+ *           hostSuffix?: string, storeAllTtl?: number, purgeToken?: string, now?: () => number }} [opts]
  */
 export function createEmulator(opts = {}) {
   const mode = opts.mode ?? 'honour';
@@ -153,6 +169,57 @@ export function createEmulator(opts = {}) {
   const now = opts.now ?? Date.now;
   /** @type {Map<string, any>} */
   const store = new Map();
+  /** Every purge request received, in order. */
+  const purges = [];
+  /** A status to answer the next purge with, once (`fail-next`). */
+  let failNext = null;
+  // The bearer token a purge must carry: the knext emulator row's fixed dummy
+  // token, handed in (EMU_PURGE_TOKEN) rather than written here. Unset means
+  // every purge is refused (fail closed).
+  const purgeToken = opts.purgeToken || null;
+
+  /** POST /client/v4/zones/<zone>/purge_cache — see the header. */
+  async function purge(req, res, zone) {
+    const body = await readBody(req);
+    const record = { zone, tags: [], status: 0, authorized: false, evicted: 0, at: now() };
+    purges.push(record);
+    const answer = (status, value, headers = {}) => {
+      record.status = status;
+      const out = Buffer.from(`${JSON.stringify(value)}\n`);
+      res.writeHead(status, { 'content-type': 'application/json', 'content-length': out.length, ...headers });
+      res.end(out);
+    };
+    const cfError = (code, message) => ({ success: false, errors: [{ code, message }], messages: [], result: null });
+    record.authorized = purgeToken !== null && req.headers.authorization === `Bearer ${purgeToken}`;
+    if (!record.authorized) return answer(403, cfError(10000, 'Authentication error'));
+    if (failNext) {
+      const { status, retryAfter } = failNext;
+      failNext = null;
+      return answer(status, cfError(971, 'Please wait and consider throttling your request speed'), {
+        ...(retryAfter !== null ? { 'retry-after': String(retryAfter) } : {}),
+      });
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(body.toString('utf8'));
+    } catch {
+      return answer(400, cfError(1012, 'Request must contain one of "purge_everything", "files", "tags", "hosts" or "prefixes"'));
+    }
+    const tags = parsed && Array.isArray(parsed.tags) ? parsed.tags.filter((t) => typeof t === 'string') : [];
+    const extra = parsed && typeof parsed === 'object' ? Object.keys(parsed).filter((k) => k !== 'tags') : [];
+    if (tags.length === 0 || extra.length > 0) {
+      return answer(400, cfError(1012, 'the emulator models tag purge only: {"tags": [...]}'));
+    }
+    record.tags = tags;
+    const wanted = new Set(tags);
+    for (const [key, entry] of store) {
+      if (entry.tags.some((t) => wanted.has(t))) {
+        store.delete(key);
+        record.evicted += 1;
+      }
+    }
+    return answer(200, { success: true, errors: [], messages: [], result: { id: zone } });
+  }
 
   function forward(req, host, body) {
     const base = new URL(upstreamMap.get(host) ?? upstream);
@@ -272,15 +339,30 @@ export function createEmulator(opts = {}) {
         await readBody(req);
         const dropped = store.size;
         store.clear();
+        purges.length = 0;
         return json(res, 200, { dropped });
       }
+      if (req.method === 'GET' && path === '/__emu/purges') {
+        return json(res, 200, { purges });
+      }
+      if (req.method === 'POST' && path === '/__emu/fail-next') {
+        await readBody(req);
+        const q = new URL(String(req.url), 'http://emu').searchParams;
+        const status = Number(q.get('status') || 429);
+        const retryAfter = q.has('retryAfter') ? Number(q.get('retryAfter')) : null;
+        if (!Number.isInteger(status) || status < 400 || status > 599) return json(res, 400, { error: 'status' });
+        failNext = { status, retryAfter };
+        return json(res, 200, { failNext });
+      }
+      const zone = /^\/client\/v4\/zones\/([A-Za-z0-9_-]{1,64})\/purge_cache$/.exec(path);
+      if (req.method === 'POST' && zone) return purge(req, res, zone[1]);
       return json(res, 404, { error: 'not found' });
     } catch (err) {
       return json(res, 500, { error: String(err && err.message) });
     }
   });
 
-  return { cache, admin, store, mode };
+  return { cache, admin, store, purges, mode };
 }
 
 /** Start both listeners from the environment. */
@@ -291,6 +373,7 @@ export async function startEmulator(env = process.env) {
     upstreamMap: env.EMU_UPSTREAM_MAP || '',
     hostSuffix: env.EMU_HOST_SUFFIX || undefined,
     storeAllTtl: env.EMU_STORE_ALL_TTL ? Number(env.EMU_STORE_ALL_TTL) : undefined,
+    purgeToken: env.EMU_PURGE_TOKEN || undefined,
   });
   const port = Number(env.EMU_PORT || 8080);
   const adminPort = Number(env.EMU_ADMIN_PORT || 8081);

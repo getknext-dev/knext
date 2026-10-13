@@ -18,10 +18,14 @@ import { join, resolve } from 'node:path';
  */
 const ROOT = resolve(import.meta.dir, '..');
 const ASSERT = join(ROOT, 'scripts/cdn-e2e-assert.mjs');
+const PURGE_ASSERT = join(ROOT, 'scripts/cdn-e2e-purge-assert.mjs');
 const MUTATE = join(ROOT, 'scripts/cdn-e2e-mutate-preload.mjs');
 const HELPER = join(ROOT, 'scripts/cdn-e2e-expect-red.sh');
 const RED_DIR = join(ROOT, 'scripts/cdn-e2e-red');
-const WORKFLOW = join(ROOT, '.github/workflows/cdn-headers-kind-e2e.yml');
+const WORKFLOWS = [
+  join(ROOT, '.github/workflows/cdn-headers-kind-e2e.yml'),
+  join(ROOT, '.github/workflows/cdn-purge-kind-e2e.yml'),
+];
 const CDN_EDGE = join(ROOT, 'packages/kn-next/src/adapters/cdn-edge.cjs');
 
 /** cdn-edge.cjs as the bundler emits it into dist/adapters/cache-control-normalize.cjs. */
@@ -81,8 +85,11 @@ describe('expected-red specs (scripts/cdn-e2e-red)', () => {
 
   it('every line names a real check and a message that check prints', async () => {
     const { checks, config } = await import(ASSERT);
-    const ids = new Set((checks(config({})) as Array<{ id: string }>).map((c) => c.id));
-    const source = readFileSync(ASSERT, 'utf8');
+    const { purgeChecks, purgeConfig } = await import(PURGE_ASSERT);
+    const ids = new Set(
+      [...checks(config({})), ...purgeChecks(purgeConfig({}))].map((c: { id: string }) => c.id),
+    );
+    const source = readFileSync(ASSERT, 'utf8') + readFileSync(PURGE_ASSERT, 'utf8');
     expect(files.length).toBeGreaterThan(0);
     for (const file of files) {
       const lines = specLines(file);
@@ -108,7 +115,7 @@ describe('expected-red specs (scripts/cdn-e2e-red)', () => {
   });
 
   it('every spec file is used by the workflow, through the helper', () => {
-    const wf = readFileSync(WORKFLOW, 'utf8');
+    const wf = WORKFLOWS.map((w) => readFileSync(w, 'utf8')).join('\n');
     for (const file of files) {
       expect({
         file,
@@ -145,6 +152,15 @@ describe('zero-diff comparator', () => {
     expect(diffResponses(r(base), r([...base, 'Cache-Tag', 'kn-x']))).toEqual([
       'header #2: null != "cache-tag: kn-x"',
     ]);
+  });
+
+  it('the purge checks encode tags exactly as the runtime does (independent implementation, same bytes)', async () => {
+    const { appTagOf, nextTagOf, PAGE_TAG } = await import(PURGE_ASSERT);
+    const tags = await import(join(ROOT, 'packages/kn-next/src/adapters/cdn-purge/tags.js'));
+    for (const t of [PAGE_TAG, '_N_T_/tagged', 'with,comma', 'ünïcode']) {
+      expect(nextTagOf('77489686e9ad', t)).toBe(tags.nextTag('77489686e9ad', t));
+    }
+    expect(appTagOf('77489686e9ad')).toBe(tags.appTag('77489686e9ad'));
   });
 
   it('derives the per-app prefix exactly as the operator does: sha256("<ns>/<name>")[:12]', async () => {

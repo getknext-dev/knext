@@ -1,0 +1,3 @@
+# App A standing in for app B: A's own purge must evict the "other" entry,
+# which proves the isolation check reads a real eviction.
+purge-isolation|purging app A's tag evicted app B's entry

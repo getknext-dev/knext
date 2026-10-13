@@ -17,6 +17,7 @@ import type { AddressInfo } from "node:net";
  * nets, and its `store-all` mode stores everything (the negative control).
  */
 const EMU: string = "./fixtures/cdn-emulator/cdn-emulator.mjs";
+const ROWS: string = "../adapters/cdn-purge/rows.js";
 
 type Reply = {
     status?: number;
@@ -65,10 +66,13 @@ async function emulator(opts: {
     host?: string;
 }) {
     const { createEmulator } = await import(EMU);
+    // The token the real `emulator` provider row sends, from its one source.
+    const { EMULATOR_DUMMY_TOKEN } = await import(ROWS);
     const host = opts.host ?? "app.ns.svc.cluster.local";
     const emu: Emu = createEmulator({
         mode: opts.mode,
         upstreamMap: `${host}=http://127.0.0.1:${opts.originPort}`,
+        purgeToken: EMULATOR_DUMMY_TOKEN,
     });
     const port = await listen(emu.cache);
     const adminPort = await listen(emu.admin);
@@ -362,6 +366,207 @@ describe("cache emulator (store-all negative control)", () => {
         expect(() => createEmulator({ mode: "honor-vary" })).toThrow(
             /unknown EMU_MODE/,
         );
+    });
+});
+
+/**
+ * Tag purge (CDN-3b): the emulator speaks the purge API the knext `emulator`
+ * provider row calls (cdn-purge/rows.js: Cloudflare-shaped, with a fixed dummy
+ * token). Driven here by the REAL purger, routed to the emulator's admin port.
+ */
+describe("cache emulator: tag purge through the knext emulator provider", () => {
+    const PURGE: string = "../adapters/cdn-purge/index.js";
+    const prefix = "abcdef012345";
+    const env = {
+        KNEXT_CDN_PROVIDER: "emulator",
+        KNEXT_CDN_TAG_PREFIX: prefix,
+        KNEXT_CDN_PURGE_TARGET: "e2e-zone",
+        KNEXT_CDN_EMULATOR_ENDPOINT:
+            "http://cdn-emulator.cdn-e2e.svc.cluster.local:8081",
+    };
+    const routed = (adminPort: number) =>
+        ((input: unknown, init?: RequestInit) => {
+            const u = new URL(String(input));
+            return fetch(
+                `http://127.0.0.1:${adminPort}${u.pathname}${u.search}`,
+                init,
+            );
+        }) as typeof fetch;
+
+    async function taggedOrigin() {
+        const { nextTag, appTag } = await import(PURGE);
+        // /a and /b carry Next tag "t-a" / "t-b"; every entry carries the app tag.
+        return origin((req) => {
+            const t = req.url?.startsWith("/a") ? "t-a" : "t-b";
+            return {
+                headers: {
+                    "cloudflare-cdn-cache-control": "max-age=3600",
+                    "cache-tag": `${appTag(prefix)},${nextTag(prefix, t)}`,
+                },
+            };
+        });
+    }
+
+    it("a revalidateTag purge from the real purger evicts exactly the entries carrying that tag", async () => {
+        const { createCdnPurger } = await import(PURGE);
+        const o = await taggedOrigin();
+        const { port, adminPort, host } = await emulator({
+            originPort: o.port,
+        });
+        await send(port, { host, path: "/a?1" });
+        await send(port, { host, path: "/a?2" });
+        await send(port, { host, path: "/b" });
+        const purger = createCdnPurger({
+            env,
+            fetch: routed(adminPort),
+            log: { info() {}, warn() {}, error() {} },
+        });
+        expect(purger.enqueue(["t-a"])).toEqual({ queued: 1 });
+        await purger.flush();
+        expect(
+            (await send(port, { host, path: "/a?1" })).headers["x-emu-cache"],
+        ).toBe("MISS");
+        expect(
+            (await send(port, { host, path: "/a?2" })).headers["x-emu-cache"],
+        ).toBe("MISS");
+        expect(
+            (await send(port, { host, path: "/b" })).headers["x-emu-cache"],
+        ).toBe("HIT");
+        const log = JSON.parse(
+            (await send(adminPort, { host: "admin", path: "/__emu/purges" }))
+                .text,
+        );
+        expect(log.purges).toEqual([
+            expect.objectContaining({
+                zone: "e2e-zone",
+                status: 200,
+                authorized: true,
+                evicted: 2,
+            }),
+        ]);
+        expect(log.purges[0].tags).toHaveLength(1);
+    });
+
+    it("the first-ready purge of the app tag evicts every entry of the app", async () => {
+        const { createCdnPurger, appTag } = await import(PURGE);
+        const o = await taggedOrigin();
+        const { port, adminPort, host } = await emulator({
+            originPort: o.port,
+        });
+        await send(port, { host, path: "/a" });
+        await send(port, { host, path: "/b" });
+        const purger = createCdnPurger({
+            env,
+            fetch: routed(adminPort),
+            log: { info() {}, warn() {}, error() {} },
+        });
+        const strings = new Map<string, string>();
+        const redis = {
+            send: async (_name: string, args: string[]) => {
+                if (strings.has(args[0])) return null;
+                strings.set(args[0], args[1]);
+                return "OK";
+            },
+        };
+        expect(await purger.firstReady("build-1", redis)).toEqual(
+            expect.objectContaining({ purged: true }),
+        );
+        await purger.flush();
+        const log = JSON.parse(
+            (await send(adminPort, { host: "admin", path: "/__emu/purges" }))
+                .text,
+        );
+        expect(log.purges.at(-1).tags).toEqual([appTag(prefix)]);
+        expect(
+            (await send(port, { host, path: "/a" })).headers["x-emu-cache"],
+        ).toBe("MISS");
+        expect(
+            (await send(port, { host, path: "/b" })).headers["x-emu-cache"],
+        ).toBe("MISS");
+    });
+
+    it("refuses a purge without the emulator row's token, Cloudflare-shaped, and evicts nothing", async () => {
+        const o = await taggedOrigin();
+        const { port, adminPort, host } = await emulator({
+            originPort: o.port,
+        });
+        await send(port, { host, path: "/a" });
+        const r = await send(adminPort, {
+            method: "POST",
+            host: "admin",
+            path: "/client/v4/zones/e2e-zone/purge_cache",
+            headers: {
+                "content-type": "application/json",
+                authorization: "Bearer someone-elses-token",
+            },
+            body: JSON.stringify({ tags: [`kn-${prefix}`] }),
+        });
+        expect(r.status).toBe(403);
+        expect(JSON.parse(r.text)).toEqual(
+            expect.objectContaining({ success: false }),
+        );
+        expect(
+            (await send(port, { host, path: "/a" })).headers["x-emu-cache"],
+        ).toBe("HIT");
+    });
+
+    it("rejects a body that is not a tag purge (files / prefixes / everything are not modelled)", async () => {
+        const o = await taggedOrigin();
+        const { adminPort } = await emulator({ originPort: o.port });
+        for (const body of [
+            '{"purge_everything":true}',
+            '{"files":["/a"]}',
+            "not json",
+            '{"tags":[]}',
+        ]) {
+            const r = await send(adminPort, {
+                method: "POST",
+                host: "admin",
+                path: "/client/v4/zones/e2e-zone/purge_cache",
+                headers: {
+                    "content-type": "application/json",
+                    authorization: `Bearer ${(await import(ROWS)).EMULATOR_DUMMY_TOKEN}`,
+                },
+                body,
+            });
+            expect({ body, status: r.status }).toEqual({ body, status: 400 });
+        }
+    });
+
+    it("can answer the next purge with ONE 429 (Retry-After), and the purger recovers on its retry", async () => {
+        const { createCdnPurger } = await import(PURGE);
+        const o = await taggedOrigin();
+        const { port, adminPort, host } = await emulator({
+            originPort: o.port,
+        });
+        await send(port, { host, path: "/a" });
+        await send(adminPort, {
+            method: "POST",
+            host: "admin",
+            path: "/__emu/fail-next?status=429&retryAfter=1",
+        });
+        const waits: number[] = [];
+        const purger = createCdnPurger({
+            env,
+            fetch: routed(adminPort),
+            sleep: async (ms: number) => {
+                waits.push(ms);
+            },
+            log: { info() {}, warn() {}, error() {} },
+        });
+        purger.enqueue(["t-a"]);
+        await purger.flush();
+        const log = JSON.parse(
+            (await send(adminPort, { host: "admin", path: "/__emu/purges" }))
+                .text,
+        );
+        expect(log.purges.map((p: { status: number }) => p.status)).toEqual([
+            429, 200,
+        ]);
+        expect(waits).toContain(1000);
+        expect(
+            (await send(port, { host, path: "/a" })).headers["x-emu-cache"],
+        ).toBe("MISS");
     });
 });
 

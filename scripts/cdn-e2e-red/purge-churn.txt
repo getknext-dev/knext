@@ -1,0 +1,3 @@
+# cdn-late (the app whose CR got spec.cdn) listed as "unrelated": its own
+# new revision must be reported, which proves the detector sees a roll.
+revisions-after|created a new revision on
