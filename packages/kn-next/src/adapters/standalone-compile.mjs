@@ -712,6 +712,15 @@ const standaloneResolver = {
         build.onResolve({ filter: /.*/ }, (a) => {
             if (DEV_ONLY.some((p) => p.test(a.path))) return { path: EMPTY };
             if (!a.importer || PRELOAD_SET.has(a.path) || isBuiltin(a.path)) return undefined;
+            // A preload's own relative require is part of the preload: bundle it.
+            // The shipped preload is one tsup-bundled file, but the SOURCE preload
+            // (this script run from a checkout) pulls its `cdn-edge.cjs` in with a
+            // relative require. It sits outside the traced tree, which would leave
+            // it a runtime require the executable cannot satisfy (`Cannot find
+            // module './cdn-edge.cjs'` from `$bunfs`).
+            if (isRelativeSpecifier(a.path) && (PRELOAD_SET.has(a.importer) || PRELOAD_SET.has(realpathSafe(a.importer)))) {
+                return { path: resolve(dirname(a.importer), a.path) };
+            }
             if (a.path.startsWith("bun:") || a.path.startsWith("node:")) return undefined;
             if (SC && a.namespace !== DISK_NAMESPACE) {
                 const importerRel = SC.embeddedRel.get(realpathSafe(a.importer));
