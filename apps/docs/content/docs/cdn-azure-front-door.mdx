@@ -1,0 +1,51 @@
+---
+title: CDN with Azure Front Door
+description: Edge cache headers for a knext app behind Azure Front Door. Headers only, no automatic purge.
+---
+
+knext sets headers Azure Front Door can use. **It does not purge Front Door.** Front Door can purge
+only by path (or the whole endpoint), takes up to about ten minutes, and needs an Azure AD token,
+none of which knext does. It also has no tag purge. Read [CDN caching](/docs/cdn) first.
+
+## What you do
+
+- Create a Front Door profile whose origin is the app's public hostname, with a route that has
+  caching enabled.
+- Choose the caching behaviour that honours the origin's cache headers, so `s-maxage` decides how
+  long a page lives.
+
+## Configure knext
+
+```ts title="knext.config.ts"
+cdn: {
+  provider: 'azure-front-door',
+  htmlTTLSeconds: 30,
+  excludePaths: ['/account'],
+},
+```
+
+Leave out `purge`; if set, knext makes no call, counts the skip and logs once at start-up.
+
+Front Door has no edge-only directive header and no tag header, so on pages that are safe to share
+knext sends, and only on these:
+
+```
+Cache-Control: public, max-age=0, s-maxage=30
+```
+
+This differs from the value the Next.js compatibility suite checks, so **an Azure Front Door
+configuration is outside the compat-verified setup.** React Server Components responses carrying
+`_rsc` are not edge-cached on this provider.
+
+## Freshness without purge
+
+A revalidation reaches visitors when the edge entry expires: within `htmlTTLSeconds` plus any
+`staleWhileRevalidateSeconds`. A new deploy does not clear the edge. Use a short TTL for content
+that must change quickly, and purge paths yourself when needed.
+
+## Live verification
+
+**Live verification:** not recorded
+
+No recorded live run of this provider is on file. The header behaviour is covered by unit tests and
+an emulator only; check it against your profile with `curl -I` before relying on it.
