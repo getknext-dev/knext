@@ -58,6 +58,28 @@ export interface FakeRedisOptions {
      * a command that FAILS, not a server that dies.
      */
     errorFor?: (cmd: string, args: string[]) => string | undefined;
+    /**
+     * The Lua scripts this server can `EVAL`, keyed by their EXACT source. The
+     * fake has no Lua VM, so a test supplies a model of each script it expects;
+     * any other source is answered with an error reply, so a script that drifts
+     * from its model fails loudly instead of being acknowledged as `+OK`.
+     */
+    scripts?: Record<
+        string,
+        (
+            keys: string[],
+            argv: string[],
+            store: { hashes: Map<string, Map<string, string>> },
+        ) => string
+    >;
+    /** Added to this server's `TIME` reply: a Redis whose clock is off. */
+    timeOffsetMs?: number;
+    /**
+     * Hold a command's reply this long AFTER it is applied: the return leg of a
+     * slow link. With `onCommand` delaying the outbound leg, a reply is computed
+     * mid-round-trip, as on a real network.
+     */
+    replyDelayMs?: (cmd: string) => number;
 }
 
 export interface FakeRedis {
@@ -267,6 +289,24 @@ export async function startFakeRedis(
                 );
             case "ping":
                 return `+PONG${CRLF}`;
+            case "time": {
+                // Real Redis: [unix seconds, microseconds], both bulk strings.
+                // `Date.now`, not `performance`: a test skews a POD's clock by
+                // mocking `performance.now`, and the server's must not follow.
+                const us = (Date.now() + (options.timeOffsetMs ?? 0)) * 1000;
+                const sec = Math.floor(us / 1_000_000);
+                return `*2${CRLF}${bulk(String(sec))}${bulk(String(us - sec * 1_000_000))}`;
+            }
+            case "eval": {
+                const script = options.scripts?.[args[0]];
+                if (!script) return `-ERR fake-redis: unknown script${CRLF}`;
+                const numKeys = Number(args[1]) || 0;
+                return script(
+                    args.slice(2, 2 + numKeys),
+                    args.slice(2 + numKeys),
+                    { hashes },
+                );
+            }
             default:
                 return `+OK${CRLF}`;
         }
@@ -382,7 +422,13 @@ export async function startFakeRedis(
                     }
                     // Outside a transaction (i.e. a plain pipeline) the command
                     // is applied the moment it arrives — hence tearable.
-                    socket.write(apply(cmd, args));
+                    const reply = apply(cmd, args);
+                    const hold = options.replyDelayMs?.(cmd) ?? 0;
+                    if (hold > 0) {
+                        await new Promise((r) => setTimeout(r, hold));
+                        if (socket.destroyed) return;
+                    }
+                    socket.write(reply);
                 });
             }
         });

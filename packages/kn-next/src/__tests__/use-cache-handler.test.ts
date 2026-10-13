@@ -20,8 +20,10 @@ import {
     jest,
     spyOn,
 } from "bun:test";
+import { PRUNE_STAMPS_SCRIPT } from "../adapters/use-cache-handler.js";
 import {
     type FakeRedis,
+    type FakeRedisOptions,
     reservedClosedPort,
     startFakeRedis,
 } from "./helpers/fake-redis";
@@ -117,6 +119,46 @@ function entryOf(
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * The fake has no Lua VM. This is a model of the stamp-prune script, keyed by
+ * its exact source: HDEL a field only while its CURRENT value is still older than
+ * the cutoff (ARGV[1]); ARGV[2..] are the fields one HSCAN page proposed.
+ */
+const scripts: NonNullable<FakeRedisOptions["scripts"]> = {
+    [PRUNE_STAMPS_SCRIPT]: (keys, argv, { hashes }) => {
+        const h = hashes.get(keys[0]);
+        const cutoff = Number(argv[0]);
+        let n = 0;
+        for (const field of argv.slice(1)) {
+            const v = h?.get(field);
+            if (v !== undefined && Number(v) < cutoff && h?.delete(field)) n++;
+        }
+        if (h && h.size === 0) hashes.delete(keys[0]);
+        return `:${n}\r\n`;
+    },
+};
+
+/** Run `fn` with this process's `performance` clock off by `ms` (a skewed pod). */
+const realPerfNow = performance.now.bind(performance);
+async function withSkew<T>(ms: number, fn: () => Promise<T>): Promise<T> {
+    const spy = spyOn(performance, "now").mockImplementation(
+        () => realPerfNow() + ms,
+    );
+    try {
+        return await fn();
+    } finally {
+        spy.mockRestore();
+    }
+}
+
+/** Next's clock for an entry's `timestamp`, read through the (maybe skewed) pod clock. */
+const nextNow = () => Math.round(performance.timeOrigin + performance.now());
+
+const counters = () =>
+    ((globalThis as Record<symbol, unknown>)[
+        Symbol.for("knext.cache.useCache.counters")
+    ] ?? {}) as Record<string, number>;
+
 describe.each([
     ["ioredis", "ioredis"],
     ["Bun native", "native"],
@@ -154,8 +196,8 @@ describe.each([
         return { mod, useCache };
     }
 
-    async function withRedis() {
-        fake = await startFakeRedis();
+    async function withRedis(options: FakeRedisOptions = {}) {
+        fake = await startFakeRedis({ scripts, ...options });
         process.env.REDIS_URL = fake.url;
         return fake;
     }
@@ -710,5 +752,362 @@ describe.each([
         expect((after.miss ?? 0) - (before.miss ?? 0)).toBe(1);
         expect((after.set ?? 0) - (before.set ?? 0)).toBe(1);
         expect((after.hit ?? 0) - (before.hit ?? 0)).toBe(1);
+    });
+    // ── hardening: prune race, clock skew, payload ceiling, logging ─────────
+
+    it("a stamp re-written between the prune's HSCAN and its delete survives (conditional delete)", async () => {
+        const old = String(Date.now() - 3 * 86_400_000);
+        let fresh = "";
+        const f = await withRedis({
+            // Another pod's invalidation of the SAME tag lands in the window
+            // between this pod's HSCAN page and its delete.
+            onCommand: (cmd) => {
+                if (cmd === "hdel" || cmd === "eval") {
+                    fresh = String(Date.now());
+                    f.hashes.get(`${PREFIX}:uc:tags`)?.set("e:ancient", fresh);
+                }
+            },
+        });
+        f.hashes.set(
+            `${PREFIX}:uc:tags`,
+            new Map([
+                ["e:ancient", old],
+                ["s:ancient", old],
+            ]),
+        );
+        const { useCache } = await pod();
+        await useCache.updateTags(["x"]);
+        const h = f.hashes.get(`${PREFIX}:uc:tags`);
+        expect(fresh, "the delete step ran").not.toBe("");
+        expect(
+            h?.get("e:ancient"),
+            "the concurrent invalidation must not be deleted",
+        ).toBe(fresh);
+        // The field nobody touched is still pruned.
+        expect(h?.has("s:ancient")).toBe(false);
+    });
+
+    it("a writer whose clock runs AHEAD cannot outlive a later invalidation", async () => {
+        await withRedis();
+        const writer = await pod();
+        await withSkew(5_000, () =>
+            writer.useCache.set(
+                "ahead",
+                Promise.resolve(entryOf({ tags: ["t"], timestamp: nextNow() })),
+            ),
+        );
+        await sleep(20);
+        const invalidator = await pod();
+        await invalidator.useCache.updateTags(["t"]);
+        // A reader whose clock runs behind still sees the stamp as in the past.
+        const reader = await pod();
+        expect(
+            await withSkew(-5_000, () => reader.useCache.get("ahead", [])),
+            "written before the invalidation, so it is expired on every pod",
+        ).toBeUndefined();
+    });
+
+    it("an invalidator whose clock runs BEHIND still expires an earlier entry", async () => {
+        await withRedis();
+        const writer = await pod();
+        await writer.useCache.set(
+            "behind",
+            Promise.resolve(entryOf({ tags: ["t"], timestamp: nextNow() })),
+        );
+        await sleep(20);
+        const invalidator = await pod();
+        await withSkew(-5_000, () => invalidator.useCache.updateTags(["t"]));
+        const reader = await pod();
+        expect(await reader.useCache.get("behind", [])).toBeUndefined();
+    });
+
+    it("an entry written AFTER an invalidation by a pod whose clock runs behind is a hit, in the reader's clock", async () => {
+        await withRedis();
+        const invalidator = await pod();
+        await invalidator.useCache.updateTags(["t"]);
+        await sleep(20);
+        const writer = await pod();
+        await withSkew(-5_000, () =>
+            writer.useCache.set(
+                "after",
+                Promise.resolve(entryOf({ tags: ["t"], timestamp: nextNow() })),
+            ),
+        );
+        // The reader's clock runs AHEAD: what it hands Next must be in ITS clock.
+        const reader = await pod();
+        const { hit, expiration, readerNow } = await withSkew(
+            5_000,
+            async () => ({
+                hit: await reader.useCache.get("after", []),
+                expiration: await reader.useCache.getExpiration(["t"]),
+                readerNow: nextNow(),
+            }),
+        );
+        expect(
+            hit,
+            "newer than the invalidation, so it survives",
+        ).toBeDefined();
+        // Next discards an entry whose timestamp <= getExpiration(its tags), and
+        // ages it against its own clock: both must be in the reader's domain.
+        expect(hit?.timestamp ?? 0).toBeGreaterThan(expiration);
+        expect(
+            Math.abs(readerNow - (hit?.timestamp ?? 0)),
+            "the entry's timestamp, in the reader's clock",
+        ).toBeLessThan(1_000);
+        expect(
+            Math.abs(readerNow - expiration),
+            "the tag's expiry, in the reader's clock",
+        ).toBeLessThan(1_000);
+    });
+
+    it("reads the Redis clock once per process, not once per operation", async () => {
+        const f = await withRedis();
+        const { useCache } = await pod();
+        await useCache.set("c", Promise.resolve(entryOf({ tags: ["t"] })));
+        for (let i = 0; i < 5; i++) {
+            await useCache.get("c", []);
+            await useCache.updateTags([`t${i}`]);
+            await useCache.getExpiration(["t"]);
+        }
+        expect(f.commands.filter((c) => c.cmd === "time").length).toBe(1);
+    });
+
+    it("skips an entry above the 2 MiB default ceiling, counts it, drains it, and stores one at the ceiling", async () => {
+        const f = await withRedis();
+        const { useCache } = await pod();
+        const before = counters().oversize ?? 0;
+        // Chunks keep coming after the one that crosses the ceiling: those must
+        // be read too, not just the end-of-stream.
+        const { stream, seen } = spiedStream([
+            "x".repeat(1024 * 1024),
+            "x".repeat(1024 * 1024),
+            "x",
+            "after-1",
+            "after-2",
+        ]);
+        await useCache.set("big", Promise.resolve(entryOf({ value: stream })));
+        expect(f.strings.has(`${PREFIX}:uc:default:big`)).toBe(false);
+        expect(f.commands.filter((c) => c.cmd === "set")).toEqual([]);
+        expect((counters().oversize ?? 0) - before).toBe(1);
+        expect(
+            seen.drained,
+            "an oversize stream is still read to its end",
+        ).toBe(true);
+        await useCache.set(
+            "at-cap",
+            Promise.resolve(entryOf({ body: "x".repeat(2 * 1024 * 1024) })),
+        );
+        expect(f.strings.has(`${PREFIX}:uc:default:at-cap`)).toBe(true);
+    });
+
+    it("KNEXT_USE_CACHE_MAX_ENTRY_BYTES sets the ceiling, and 0 lifts it", async () => {
+        const f = await withRedis();
+        process.env.KNEXT_USE_CACHE_MAX_ENTRY_BYTES = "1024";
+        const { useCache } = await pod();
+        await useCache.set(
+            "over",
+            Promise.resolve(entryOf({ body: "y".repeat(1025) })),
+        );
+        await useCache.set(
+            "at",
+            Promise.resolve(entryOf({ body: "y".repeat(1024) })),
+        );
+        expect(f.strings.has(`${PREFIX}:uc:default:over`)).toBe(false);
+        expect(f.strings.has(`${PREFIX}:uc:default:at`)).toBe(true);
+        process.env.KNEXT_USE_CACHE_MAX_ENTRY_BYTES = "0";
+        await useCache.set(
+            "huge",
+            Promise.resolve(entryOf({ body: "z".repeat(3 * 1024 * 1024) })),
+        );
+        expect(f.strings.has(`${PREFIX}:uc:default:huge`)).toBe(true);
+    });
+
+    it("an oversize entry never reaches Redis, so a slow large write cannot open the breaker ISR shares", async () => {
+        process.env.REDIS_COMMAND_TIMEOUT_MS = "200";
+        const f = await withRedis({
+            // A large SET that takes longer than the command budget: a slow link
+            // or a Redis busy copying megabytes.
+            onCommand: async (cmd, args) => {
+                if (cmd === "set" && (args[1]?.length ?? 0) > 1_000_000)
+                    await sleep(800);
+            },
+        });
+        const { useCache, mod } = await pod();
+        await useCache.set(
+            "large",
+            Promise.resolve(entryOf({ body: "w".repeat(3 * 1024 * 1024) })),
+        );
+        const isr = new (
+            mod.default as new (
+                o: object,
+            ) => {
+                set(k: string, d: unknown, c: unknown): Promise<void>;
+            }
+        )({});
+        await isr.set(
+            "/after-large",
+            { kind: "APP_PAGE", html: "<p>x</p>", headers: {} },
+            { revalidate: 60 },
+        );
+        expect(
+            f.strings.has(`${PREFIX}:cache:/after-large`),
+            "the ISR write still lands in Redis: the breaker stayed closed",
+        ).toBe(true);
+    });
+
+    it("warns about a missing Redis once per process, not once per cache kind", async () => {
+        delete process.env.REDIS_URL;
+        const warn = console.warn as unknown as ReturnType<typeof jest.fn>;
+        const { mod, useCache } = await pod("default");
+        const remote = (
+            mod.CacheHandler as {
+                forUseCache(kind: string): UseCacheHandler;
+            }
+        ).forUseCache("remote");
+        await useCache.set("k", Promise.resolve(entryOf()));
+        await remote.set("k", Promise.resolve(entryOf()));
+        expect(await remote.get("k", [])).toBeUndefined();
+        const outage = warn.mock.calls.filter((c) =>
+            String(c[0]).includes("'use cache' entries are not cached"),
+        );
+        expect(outage.length, "one warning for the process").toBe(1);
+    });
+
+    it("a prune failure after a successful tag write is not reported as a tag-update error and keeps the breaker closed", async () => {
+        const f = await withRedis({
+            errorFor: (cmd) =>
+                cmd === "hscan" || cmd === "eval" ? "prune boom" : undefined,
+        });
+        const error = console.error as unknown as ReturnType<typeof jest.fn>;
+        const warn = console.warn as unknown as ReturnType<typeof jest.fn>;
+        const { useCache } = await pod();
+        await useCache.updateTags(["x"]);
+        expect(f.hashes.get(`${PREFIX}:uc:tags`)?.has("e:x")).toBe(true);
+        const logged = [...error.mock.calls, ...warn.mock.calls].map((c) =>
+            c.map(String).join(" "),
+        );
+        expect(
+            logged.filter((l) => l.includes("updating 'use cache' tags")),
+        ).toEqual([]);
+        expect(logged.some((l) => /prun/i.test(l))).toBe(true);
+        // The breaker the ISR handler shares is still closed.
+        await useCache.set("after-prune", Promise.resolve(entryOf()));
+        expect(f.strings.has(`${PREFIX}:uc:default:after-prune`)).toBe(true);
+    });
+
+    it("a refused prune DELETE (EVAL alone fails, after a good HSCAN) keeps the breaker closed", async () => {
+        const f = await withRedis({
+            // A Redis that refuses scripts: HSCAN works, EVAL does not.
+            errorFor: (cmd) =>
+                cmd === "eval" ? "scripts disabled" : undefined,
+        });
+        // A stamp past the cutoff, so the prune really sends its EVAL.
+        const old = String(Date.now() - 3 * 86_400_000);
+        f.hashes.set(`${PREFIX}:uc:tags`, new Map([["e:ancient", old]]));
+        const { useCache } = await pod();
+        await useCache.updateTags(["x"]);
+        expect(
+            f.commands.some((c) => c.cmd === "eval"),
+            "the delete step was sent",
+        ).toBe(true);
+        expect(f.hashes.get(`${PREFIX}:uc:tags`)?.has("e:x")).toBe(true);
+        await useCache.set("after-eval", Promise.resolve(entryOf()));
+        expect(
+            f.strings.has(`${PREFIX}:uc:default:after-eval`),
+            "the ISR-shared breaker is still closed",
+        ).toBe(true);
+    });
+
+    it("a prune that keeps failing warns once per process, not on every attempt or per kind", async () => {
+        const f = await withRedis({
+            errorFor: (cmd) =>
+                cmd === "eval" ? "scripts disabled" : undefined,
+        });
+        const old = String(Date.now() - 3 * 86_400_000);
+        f.hashes.set(
+            `${PREFIX}:uc:tags`,
+            new Map([
+                ["e:a", old],
+                ["e:b", old],
+            ]),
+        );
+        const warn = console.warn as unknown as ReturnType<typeof jest.fn>;
+        const { mod, useCache } = await pod("default");
+        const remote = (
+            mod.CacheHandler as {
+                forUseCache(kind: string): UseCacheHandler;
+            }
+        ).forUseCache("remote");
+        // Each kind runs its own prune step, and both fail.
+        await useCache.updateTags(["x"]);
+        await remote.updateTags(["y"]);
+        expect(
+            f.commands.filter((c) => c.cmd === "eval").length,
+            "both prune steps ran",
+        ).toBe(2);
+        const prunes = warn.mock.calls.filter((c) =>
+            /prun/i.test(String(c[0])),
+        );
+        expect(prunes.length, "one warning for the process").toBe(1);
+    });
+
+    it("a prune that succeeds re-arms the prune warning", async () => {
+        let refuse = true;
+        const f = await withRedis({
+            errorFor: (cmd) =>
+                cmd === "eval" && refuse ? "scripts disabled" : undefined,
+        });
+        const old = String(Date.now() - 3 * 86_400_000);
+        f.hashes.set(
+            `${PREFIX}:uc:tags`,
+            new Map([
+                ["e:a", old],
+                ["e:b", old],
+                ["e:c", old],
+            ]),
+        );
+        const warn = console.warn as unknown as ReturnType<typeof jest.fn>;
+        const { mod } = await pod();
+        // Three handlers on one process (one breaker, one warning state); each
+        // runs its own prune step.
+        const handler = () =>
+            (
+                mod.CacheHandler as {
+                    forUseCache(kind: string): UseCacheHandler;
+                }
+            ).forUseCache("default");
+        await handler().updateTags(["x"]); // fails, warns
+        refuse = false;
+        await handler().updateTags(["y"]); // succeeds, re-arms
+        refuse = true;
+        f.hashes.get(`${PREFIX}:uc:tags`)?.set("e:d", old);
+        await handler().updateTags(["z"]); // fails again, warns again
+        const prunes = warn.mock.calls.filter((c) =>
+            /prun/i.test(String(c[0])),
+        );
+        expect(prunes.length).toBe(2);
+    });
+
+    it("corrects the Redis clock read by half the round trip", async () => {
+        // The server's clock is 10 s ahead, and each leg of the TIME round trip
+        // takes 200 ms. The server reads its clock mid-trip, so the right
+        // offset is 10 s: ignoring the trip, or crediting all of it to one leg,
+        // is off by 200 ms.
+        const f = await withRedis({
+            timeOffsetMs: 10_000,
+            onCommand: async (cmd) => {
+                if (cmd === "time") await sleep(200);
+            },
+            replyDelayMs: (cmd) => (cmd === "time" ? 200 : 0),
+        });
+        const { useCache } = await pod();
+        await useCache.updateTags(["clock"]);
+        const after = Date.now();
+        const stamp = Number(f.hashes.get(`${PREFIX}:uc:tags`)?.get("e:clock"));
+        expect(f.commands.filter((c) => c.cmd === "time").length).toBe(1);
+        // The stamp is this pod's "now" in the server's clock: at most a few ms
+        // before `after` + 10 s, and never later.
+        expect(stamp).toBeLessThanOrEqual(after + 10_000 + 50);
+        expect(stamp).toBeGreaterThanOrEqual(after + 10_000 - 100);
     });
 });
