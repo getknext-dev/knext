@@ -29,10 +29,29 @@ const ADAPTERS = resolve(here, "../adapters");
 
 // biome-ignore lint/suspicious/noExplicitAny: untyped CJS runtime module
 const edge: any = require(join(ADAPTERS, "cdn-edge.cjs"));
+/**
+ * Requiring the self-contained supervisor runs its preload side effect, which
+ * wraps the REAL `http.createServer` and would bind 0.0.0.0:9464 on the first
+ * server this test creates. Its own install guard is set for the require, so
+ * only its functions load.
+ */
+function requireSelfContainedInert() {
+    // biome-ignore lint/suspicious/noExplicitAny: marking the real node:http module
+    const http: any = require("node:http");
+    const INSTALLED = Symbol.for("knext.selfContainedSupervisor.installed");
+    const was = http[INSTALLED];
+    http[INSTALLED] = true;
+    try {
+        return require(
+            join(ADAPTERS, "standalone-self-contained-supervisor.cjs"),
+        );
+    } finally {
+        if (was === undefined) delete http[INSTALLED];
+        else http[INSTALLED] = was;
+    }
+}
 // biome-ignore lint/suspicious/noExplicitAny: untyped CJS runtime module
-const selfContained: any = require(
-    join(ADAPTERS, "standalone-self-contained-supervisor.cjs"),
-);
+const selfContained: any = requireSelfContainedInert();
 
 const SEAM = Symbol.for("knext.core.cdn.renderMetrics");
 const PURGE_REGISTRY = Symbol.for("knext.core.cdn.metrics");

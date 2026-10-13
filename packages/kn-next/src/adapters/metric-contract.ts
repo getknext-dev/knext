@@ -68,42 +68,73 @@ export function scanBunexecMetrics(source: string): Map<string, string> {
 }
 
 /**
- * Scan the self-contained STANDALONE runtime's dependency-free `:9464`
- * exposition (`standalone-self-contained-supervisor.cjs`'s `metricsBody`,
- * ADR-0055's fold decision) — a DIFFERENT runtime target from `bunexec`
- * (ADR-0048's compiled vinext single executable), so it gets its own emitter
- * classification below even though a `# TYPE` exposition is comment-typed the
- * same way regardless of which runtime renders it, and `scanBunexecMetrics`'s
- * regex is exactly what parses it correctly. Kept as a distinct named export
- * (round-2 fix, M2/docs, #1457/#1519) so the two targets read as conceptually
- * separate call sites here, not because the underlying scan differs.
+ * Parse a RENDERED Prometheus text exposition into `family → type` (#2307).
+ *
+ * The contract test asks each JS/TS emitter to render its exposition and parses
+ * the result, rather than regex-scanning the emitter's source: a `# TYPE` string
+ * in a comment or dead code is not rendered, so it cannot enter the set.
+ * Families come from the `# TYPE` comment lines (the same pattern
+ * `scanBunexecMetrics` matches, applied to comment lines only, so a sample's
+ * label value can never declare a family). Every sample line must then belong
+ * to a declared family — its own name or a histogram/summary derived series —
+ * or this THROWS: a sample line renamed apart from its `# TYPE` line is an
+ * emitter publishing a series it never declared, and it fails loudly rather
+ * than dropping out of the set.
  */
-export function scanStandaloneSelfContainedMetrics(
-    source: string,
-): Map<string, string> {
-    return scanBunexecMetrics(source);
+export function parseExposition(text: string): Map<string, string> {
+    const lines = text.split("\n").map((l) => l.trim());
+    const families = scanBunexecMetrics(
+        lines.filter((l) => l.startsWith("#")).join("\n"),
+    );
+    const declared = seriesNames(families);
+    const orphans = lines.filter((l) => {
+        if (l.length === 0 || l.startsWith("#")) return false;
+        const name = /^[a-zA-Z_:][a-zA-Z0-9_:]*/.exec(l)?.[0];
+        return name === undefined || !declared.has(name);
+    });
+    if (orphans.length > 0) {
+        throw new Error(
+            `exposition has sample line(s) no # TYPE declares:\n${orphans.join("\n")}`,
+        );
+    }
+    return families;
 }
 
 /**
- * Scan the CDN purge module's dependency-free counter registry
- * (`adapters/cdn-purge/metrics.js`, ADR-0068 D6.5).
- *
- * The module names its metric through `export const <NAME>_METRIC = 'knext_...'`
- * and renders every family as a `# TYPE ... counter`, so those exported constants
- * are the authoritative declaration. This emitter is real but is NOT yet on the
- * shipped :9464 scrape path: the module exposes `renderCdnPurgeMetrics()` for the
- * runtime's `/metrics` surface to append, and that wiring is a separate step.
- * A docs reference to the counter is therefore a reference to a series that
- * exists in the process; an alert or dashboard must not depend on it until the
- * scrape wiring lands (they classify their emitters explicitly and do not list
- * this one).
+ * Go source with every comment blanked out, string and rune literals kept
+ * intact (a `//` inside `"http://…"` is not a comment). Newlines inside a block
+ * comment are kept so positions stay meaningful.
  */
-export function scanCdnPurgeMetrics(jsSource: string): Map<string, string> {
-    const out = new Map<string, string>();
-    for (const m of jsSource.matchAll(
-        /export\s+const\s+[A-Z][A-Z0-9_]*_METRIC\s*=\s*['"](knext_[a-z0-9_]+)['"]/g,
-    )) {
-        out.set(m[1] as string, "counter");
+export function stripGoComments(src: string): string {
+    let out = "";
+    let i = 0;
+    while (i < src.length) {
+        const c = src[i] as string;
+        const next = src[i + 1];
+        if (c === "/" && next === "/") {
+            while (i < src.length && src[i] !== "\n") i++;
+            continue;
+        }
+        if (c === "/" && next === "*") {
+            const end = src.indexOf("*/", i + 2);
+            const stop = end === -1 ? src.length : end + 2;
+            out += src.slice(i, stop).replace(/[^\n]/g, " ");
+            i = stop;
+            continue;
+        }
+        if (c === '"' || c === "'" || c === "`") {
+            let j = i + 1;
+            while (j < src.length && src[j] !== c) {
+                if (c !== "`" && src[j] === "\\") j++;
+                if (c !== "`" && src[j] === "\n") break;
+                j++;
+            }
+            out += src.slice(i, j + 1);
+            i = j + 1;
+            continue;
+        }
+        out += c;
+        i++;
     }
     return out;
 }
@@ -114,10 +145,16 @@ export function scanCdnPurgeMetrics(jsSource: string): Map<string, string> {
  * Matches a `prometheus.New<Kind>[Vec](prometheus.<Kind>Opts{ … Name: "…" })`
  * construction and pairs the kind with the name, so a histogram contributes its
  * `_bucket`/`_sum`/`_count` names too.
+ *
+ * The one emitter still read from SOURCE: rendering the operator's registry
+ * needs a Go toolchain the TS test job does not have, and a gathered registry
+ * omits a `*Vec` with no children. Comments are stripped first, so a
+ * construction in a comment does not count (#2307).
+ * TODO(#2307): render the operator side too if a Go-side golden ever lands.
  */
 export function scanOperatorMetrics(goSource: string): Map<string, string> {
     const out = new Map<string, string>();
-    for (const m of goSource.matchAll(
+    for (const m of stripGoComments(goSource).matchAll(
         /New(Counter|Gauge|Histogram|Summary)(?:Vec)?\s*\(\s*prometheus\.\w+\{([\s\S]{0,400}?)\}/g,
     )) {
         const kind = (m[1] as string).toLowerCase();
