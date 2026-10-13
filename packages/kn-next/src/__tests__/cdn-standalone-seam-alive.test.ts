@@ -58,6 +58,8 @@ const ROUTE_FETCH = join(here, "fixtures", "cdn-route-purge-fetch.cjs");
 const ADAPTER_SRC = join(ADAPTERS, "next-adapter.ts");
 const NEXT_BIN = join(PKG_ROOT, "node_modules", "next", "dist", "bin", "next");
 const DIST_HANDLER = join(PKG_ROOT, "dist", "adapters", "cache-handler.js");
+const DIST_LITE = join(PKG_ROOT, "dist", "adapters", "deep-health-lite.js");
+const DIST_SUPERVISOR = join(PKG_ROOT, "dist", "adapters", "node-server.js");
 
 const PREFIX = "abcdef012345";
 const hex = (s: string, n: number) =>
@@ -141,6 +143,12 @@ function buildApp(): Promise<Built> {
             existsSync(DIST_HANDLER),
             `${DIST_HANDLER} missing — run 'bun run build' in packages/kn-next first (CI builds @getknext/core before test)`,
         ).toBe(true);
+        for (const built of [DIST_LITE, DIST_SUPERVISOR]) {
+            expect(
+                existsSync(built),
+                `${built} missing — run 'bun run build' in packages/kn-next first`,
+            ).toBe(true);
+        }
         const made = mkdtempSync(join(tmpdir(), "knext-cdn-seam-alive-"));
         tempRoots.push(made);
         const root = realpathSync(made);
@@ -175,6 +183,23 @@ function buildApp(): Promise<Built> {
                 "",
             ].join("\n"),
         );
+        // What the scaffolded instrumentation does with tracing off: start the
+        // dependency-free loopback metrics listener from the BUILT package. The
+        // supervisor merges that listener onto the app's metrics port, and it is
+        // where the CDN counters ride (the metrics seam). Webpack bundles it into
+        // the instrumentation chunk, so the seam is read from a bundled copy, not
+        // the module the preload loaded: only a shared `Symbol.for` key works.
+        writeFileSync(
+            join(appDir, "instrumentation.ts"),
+            [
+                "export async function register() {",
+                "  if (process.env.NEXT_RUNTIME !== 'nodejs') return;",
+                `  const { startDeepHealthLite } = await import(${JSON.stringify(DIST_LITE)});`,
+                "  startDeepHealthLite();",
+                "}",
+                "",
+            ].join("\n"),
+        );
         const res = await run("node", [NEXT_BIN, "build", "--webpack"], appDir);
         expect(
             res.code,
@@ -202,13 +227,12 @@ function buildApp(): Promise<Built> {
     return builtOnce;
 }
 
-async function serve(
-    b: Built,
-    runtime: "node" | "bun",
-    cdn: FakeCdn,
-    token: string,
-) {
+/** The env a pod gets, minus anything KNEXT_ the test runner itself carries. */
+async function appEnv(extra: Record<string, string>) {
     const port = await freePort();
+    // The loopback metrics listener the instrumentation starts (default 9092):
+    // a free port, so parallel runs never collide.
+    const childMetricsPort = await freePort();
     const env: Record<string, string> = {};
     for (const [k, v] of Object.entries(process.env)) {
         if (v !== undefined && !k.startsWith("KNEXT_") && k !== "REDIS_URL")
@@ -219,6 +243,7 @@ async function serve(
         HOSTNAME: "",
         NODE_ENV: "production",
         NEXT_TELEMETRY_DISABLED: "1",
+        KN_CHILD_METRICS_PORT: String(childMetricsPort),
         // What the operator renders for spec.cdn on the emulator row.
         KNEXT_CDN_PROVIDER: "emulator",
         KNEXT_CDN_TAG_PREFIX: PREFIX,
@@ -226,16 +251,25 @@ async function serve(
         KNEXT_CDN_PURGE_TARGET: "zone-1",
         KNEXT_CDN_EMULATOR_ENDPOINT:
             "http://cdn-emulator.e2e.svc.cluster.local:8080",
-        SEAM_ALIVE_CDN_PORT: String(cdn.port),
-        SEAM_ALIVE_REVALIDATE_TOKEN: token,
+        ...extra,
     });
-    const cmd = runtime === "bun" ? (BUN_BIN as string) : NODE_BIN;
+    return { env, port, childMetricsPort };
+}
+
+/** Spawn `cmd args` in its own process group; resolve once `port` answers HTTP. */
+async function launch(
+    cmd: string,
+    args: string[],
+    cwd: string,
+    env: Record<string, string>,
+    port: number,
+) {
     let log = "";
-    const child = spawn(
-        cmd,
-        ["--require", ROUTE_FETCH, "--require", PRELOAD, b.serverJs],
-        { cwd: b.serverDir, detached: true, env: env as NodeJS.ProcessEnv },
-    );
+    const child = spawn(cmd, args, {
+        cwd,
+        detached: true,
+        env: env as NodeJS.ProcessEnv,
+    });
     children.push(child);
     child.stdout?.on("data", (d) => {
         log += String(d);
@@ -258,7 +292,61 @@ async function serve(
             throw new Error(`server did not come up:\n${tail(log)}`);
         await new Promise((r) => setTimeout(r, 200));
     }
-    return { port, log: () => log };
+    return () => log;
+}
+
+const runtimeBin = (runtime: "node" | "bun") =>
+    runtime === "bun" ? (BUN_BIN as string) : NODE_BIN;
+
+async function serve(
+    b: Built,
+    runtime: "node" | "bun",
+    cdn: FakeCdn,
+    token: string,
+) {
+    const { env, port } = await appEnv({
+        SEAM_ALIVE_CDN_PORT: String(cdn.port),
+        SEAM_ALIVE_REVALIDATE_TOKEN: token,
+    });
+    const log = await launch(
+        runtimeBin(runtime),
+        ["--require", ROUTE_FETCH, "--require", PRELOAD, b.serverJs],
+        b.serverDir,
+        env,
+        port,
+    );
+    return { port, log };
+}
+
+/**
+ * The shipped standalone shape: the BUILT supervisor (`dist/adapters/node-server.js`)
+ * on `runtime`, which spawns `server.js` on the same runtime with the built
+ * header preload and serves the app's metrics port, merging the server
+ * process's loopback listener into it.
+ */
+async function supervise(b: Built, runtime: "node" | "bun") {
+    const metricsPort = await freePort();
+    const { env, port, childMetricsPort } = await appEnv({
+        STANDALONE_SERVER_PATH: b.serverJs,
+        METRICS_PORT: String(metricsPort),
+    });
+    const log = await launch(
+        runtimeBin(runtime),
+        [DIST_SUPERVISOR],
+        b.serverDir,
+        env,
+        port,
+    );
+    return { port, metricsPort, childMetricsPort, log };
+}
+
+async function scrape(port: number): Promise<string> {
+    try {
+        const res = await fetch(`http://127.0.0.1:${port}/metrics`);
+        return res.ok ? await res.text() : "";
+    } catch {
+        return "";
+    }
 }
 
 const get = (port: number, path: string) =>
@@ -330,6 +418,78 @@ for (const runtime of ["node", "bun"] as const) {
             expect(cdn.requests[0]?.url).toBe(
                 "/client/v4/zones/zone-1/purge_cache",
             );
+        }, 300_000);
+    });
+}
+
+/** Decision samples with a non-zero count, as `result/reason` strings. */
+const decisions = (body: string) =>
+    [
+        ...body.matchAll(
+            /^knext_cdn_edge_decision_total\{result="([a-z_]+)",reason="([a-z_]+)"\} ([1-9]\d*)$/gm,
+        ),
+    ].map((m) => `${m[1]}/${m[2]}`);
+
+for (const runtime of ["node", "bun"] as const) {
+    describe(`CDN counters on the app's metrics port, built supervisor (${runtime})`, () => {
+        it("after an edge decision, the metrics port serves the decision and strip counters, merged from the server process's loopback listener", async () => {
+            const b = await buildApp();
+            const s = await supervise(b, runtime);
+
+            // Up to three requests: the ISR page is edge-cacheable by the
+            // second or third (see the seam test above).
+            for (let i = 0; i < 3; i++) {
+                const r = await get(s.port, "/tagged");
+                expect(r.status, tail(s.log())).toBe(200);
+                if (r.header(EDGE) !== undefined) break;
+            }
+
+            // The instrumentation starts the loopback listener asynchronously, so
+            // poll; the counters must appear well within the deadline.
+            const deadline = Date.now() + 20_000;
+            let child = "";
+            let port9464 = "";
+            while (Date.now() < deadline) {
+                child = await scrape(s.childMetricsPort);
+                port9464 = await scrape(s.metricsPort);
+                if (
+                    decisions(child).includes("edge/allowed") &&
+                    decisions(port9464).includes("edge/allowed")
+                )
+                    break;
+                await new Promise((r) => setTimeout(r, 250));
+            }
+
+            // The server process's loopback listener (what the seam feeds)...
+            expect(
+                decisions(child),
+                `no CDN decision on the loopback listener:\n${child}\n${tail(s.log())}`,
+            ).toContain("edge/allowed");
+            expect(child).toMatch(/^knext_cdn_foreign_edge_strip_total 0$/m);
+
+            // ...and the app's metrics port, served by the separate supervisor.
+            expect(
+                decisions(port9464),
+                `no CDN decision on the metrics port:\n${port9464}\n${tail(s.log())}`,
+            ).toContain("edge/allowed");
+            expect(port9464).toMatch(
+                /^# TYPE knext_cdn_edge_decision_total counter$/m,
+            );
+            expect(port9464).toMatch(/^knext_cdn_foreign_edge_strip_total 0$/m);
+            // One exposition: each CDN family is declared exactly once.
+            for (const family of [
+                "knext_cdn_edge_decision_total",
+                "knext_cdn_foreign_edge_strip_total",
+            ]) {
+                expect(
+                    port9464.match(new RegExp(`^# TYPE ${family} `, "gm"))
+                        ?.length,
+                    family,
+                ).toBe(1);
+            }
+            // The supervisor's own process metrics are still there: a merge, not
+            // a replacement.
+            expect(port9464).toMatch(/^# TYPE process_cpu_seconds_total /m);
         }, 300_000);
     });
 }
