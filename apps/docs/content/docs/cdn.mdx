@@ -104,7 +104,9 @@ to understand the rules rather than to alert on:
 
 When a response that is left alone already carried an edge directive or tags from elsewhere (for
 example after a rewrite to another origin), knext removes them. The response is still counted under
-the reason it was left alone for, and the removal is counted separately.
+the reason it was left alone for, and the removal is counted separately, in
+`knext_cdn_foreign_edge_strip_total`. Like the reasons above, it is not yet exposed on the app's
+metrics endpoint.
 
 Some legitimate URLs are never edge-cached by the canonical-path rule, and are served correctly from
 your origin instead: slugs that contain an encoded slash or percent sign, and any path where an
@@ -133,9 +135,11 @@ in Redis; the claim lasts 7 days.
 
 After that purge, the CDN refills only with pages the new build rendered itself. For a while after a
 deploy, your origin may keep serving a page the previous build rendered from the shared cache, but
-those responses are not edge-cached. So the CDN never holds the previous build's HTML after a deploy.
-A page stays off the CDN until the new build renders it again, so revalidating your important pages
-after a deploy brings them back to the edge sooner.
+those responses are not edge-cached. So once the rollout completes, the CDN holds none of the
+previous build's HTML. While a canary split is still running, the edge can hold either build's
+HTML; see **Split deploys** under [Limits to know](#limits-to-know). A page stays off the CDN
+until the new build renders it again, so revalidating your important pages after a deploy brings
+them back to the edge sooner.
 
 Every purge outcome is counted in `knext_cdn_purge_total`, labelled by provider and result. A purge
 that gives up logs the provider, status and tag count, never the token or the response body.
