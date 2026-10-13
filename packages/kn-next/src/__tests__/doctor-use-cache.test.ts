@@ -407,6 +407,31 @@ describe("scanUseCache (default source scanner)", () => {
         });
     });
 
+    it("skips an unknown-type Dirent that lstat cannot resolve, and keeps scanning", () => {
+        const app = fresh();
+        put(app, "b-real.ts", DIRECTIVE);
+        // An entry that vanished between readdir and lstat (or is unreadable):
+        // lstat throws ENOENT. It sorts BEFORE the real file, so the walk has
+        // to get past it to find the directive.
+        const io = {
+            readdir: (dir: string): Dirent[] => {
+                const real = unknownTyped(dir);
+                if (dir !== app) return real;
+                const template = real[0];
+                if (template === undefined) throw new Error("no template");
+                const missing = Object.create(template) as Dirent;
+                Object.defineProperty(missing, "name", {
+                    value: "a-missing.ts",
+                });
+                return [missing, ...real];
+            },
+        };
+        expect(scanUseCache(app, DEFAULT_SCAN_LIMITS, io)).toEqual({
+            file: "b-real.ts",
+            truncated: false,
+        });
+    });
+
     it("still skips node_modules and never follows a symlink when the type is unknown", () => {
         const app = fresh();
         const outside = fresh();

@@ -161,3 +161,57 @@ describe("no guidance pushes the tracing root above the app", () => {
         expect(page).not.toMatch(/not (yet )?supported/i);
     });
 });
+
+/**
+ * The config reader strips comments before looking for the root keys, and it
+ * must do so without treating comment-like text INSIDE a string as a comment.
+ * A glob such as `'/img/**'` opens a fake block comment for a regex stripper,
+ * which then swallows real configuration up to the next block-comment close.
+ */
+describe("configuredTracingRoot ignores comment-like text inside strings", () => {
+    function appWithConfig(source: string): string {
+        const base = realpathSync(mkdtempSync(join(tmpdir(), "knext-strip-")));
+        tempRoots.push(base);
+        const app = join(base, "my-app");
+        mkdirSync(app, { recursive: true });
+        writeFileSync(join(app, "next.config.ts"), source);
+        return app;
+    }
+
+    it("a glob string before the key does not hide outputFileTracingRoot", () => {
+        const app = appWithConfig(
+            [
+                "export default {",
+                "    images: { remotePatterns: [{ pathname: '/img/**' }] },",
+                '    outputFileTracingRoot: "./pinned",',
+                "    /* a real comment */",
+                "};",
+                "",
+            ].join("\n"),
+        );
+        expect(configuredTracingRoot(app)).toEqual({
+            root: join(app, "pinned"),
+            source: "next.config.ts:outputFileTracingRoot",
+        });
+    });
+
+    it("a ` //` inside a string on the same line does not truncate the key", () => {
+        const app = appWithConfig(
+            'export default { assetPrefix: "cdn //x", outputFileTracingRoot: "./pinned" };\n',
+        );
+        expect(configuredTracingRoot(app)?.root).toBe(join(app, "pinned"));
+    });
+
+    it("a commented-out key is still ignored", () => {
+        const app = appWithConfig(
+            [
+                "export default {",
+                '    // outputFileTracingRoot: "./line",',
+                '    /* outputFileTracingRoot: "./block", */',
+                "};",
+                "",
+            ].join("\n"),
+        );
+        expect(configuredTracingRoot(app)).toBeNull();
+    });
+});

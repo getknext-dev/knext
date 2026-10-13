@@ -32,6 +32,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { createLogger } from "../utils/logger";
+import { stripCodeComments } from "../utils/strip-code-comments";
 
 /**
  * EXACTLY the lockfiles next 16.2's `findRootDirAndLockFiles` considers.
@@ -238,13 +239,6 @@ export function shadowingConfigFor(
     return null;
 }
 
-/** Strip comments so a commented-out setting is not read as configuration. */
-function stripComments(source: string): string {
-    return source
-        .replace(/\/\*[\s\S]*?\*\//g, "")
-        .replace(/(^|\s)\/\/.*$/gm, "$1");
-}
-
 /**
  * The expression assigned to `key` in `source`, or null. Balanced enough for
  * the forms this file evaluates: it stops at the first `,` or `}` that is not
@@ -343,7 +337,9 @@ export function configuredTracingRoot(appDir: string): ConfiguredRoot | null {
     const app = resolve(appDir);
     const file = CONFIG_FILES.find((f) => existsSync(join(app, f)));
     if (!file) return null;
-    const source = stripComments(readFileSync(join(app, file), "utf8"));
+    // String-aware: a regex stripper treats a glob such as `'/img/**'` as the
+    // start of a block comment and drops real configuration after it.
+    const source = stripCodeComments(readFileSync(join(app, file), "utf8"));
 
     const turbopack = assignedExpression(source, "turbopack");
     const candidates: { key: string; expr: string }[] = [];
