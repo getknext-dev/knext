@@ -114,6 +114,12 @@ const HANDLER_FILES = [
     "cache-write-registry.js",
     "use-cache-handler.js",
     "slow-dep-log.js",
+    // The CDN purge module the handler wires in (ADR-0068 D6/D7).
+    "cdn-purge/index.js",
+    "cdn-purge/metrics.js",
+    "cdn-purge/purger.js",
+    "cdn-purge/rows.js",
+    "cdn-purge/tags.js",
 ];
 
 /**
@@ -123,7 +129,7 @@ const HANDLER_FILES = [
  */
 function stageIsolated(): string {
     const dir = join(work, "isolated", "adapters");
-    mkdirSync(dir, { recursive: true });
+    mkdirSync(join(dir, "cdn-purge"), { recursive: true });
     for (const f of HANDLER_FILES)
         copyFileSync(join(ADAPTERS, f), join(dir, f));
     // ESM — the package's own `"type": "module"` does not travel with the copy.
