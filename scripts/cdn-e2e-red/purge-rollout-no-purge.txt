@@ -1,0 +1,3 @@
+# cdn-np (no purge) rolled to a new build: with no first-ready purge its
+# pre-rollout entries must still be served from the edge.
+rollout-after|pre-rollout HTML was still served from the edge after the rollout

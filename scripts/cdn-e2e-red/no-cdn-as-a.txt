@@ -1,0 +1,4 @@
+# Negative control for the positive checks: point "app A" at the app WITHOUT
+# spec.cdn. Its tagged page and its _rsc flight must then NOT be edge HITs.
+hit-tagged|the tagged page was not an edge HIT
+rsc-param|a real RSC request with _rsc was not an edge HIT

@@ -1,0 +1,3 @@
+# cdn-np (spec.cdn WITHOUT purge) standing in for app A: revalidateTag then
+# cannot reach the edge, so the stored page must still be served.
+purge-revalidate|the edge still served the page after revalidateTag

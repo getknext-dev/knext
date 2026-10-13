@@ -1,0 +1,4 @@
+# The never-cached checks the purge lane runs, against the store-all
+# negative control (it stores everything): they must see it.
+never-set-cookie|a response carrying Set-Cookie was edge-cached
+never-authorization|a response to a request with Authorization was edge-cached

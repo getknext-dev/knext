@@ -220,6 +220,13 @@ describe('bun-version pins (#754) — scanned across every workflow', () => {
       // NEW (#2083): the `'use cache'` two-pod kind e2e — one "Setup bun" step
       // (workspace install + building/packing the tarballs it deploys).
       'use-cache-2pod-kind-e2e.yml': 1,
+      // NEW (#2264): the CDN edge-headers kind e2e — one "Setup bun" step
+      // (workspace install + building/packing the tarballs it deploys, and the
+      // pre-CDN baseline core it compares against).
+      'cdn-headers-kind-e2e.yml': 1,
+      // NEW (#2261): the CDN purge kind e2e — one "Setup bun" step (workspace
+      // install + building/packing the tarballs it deploys).
+      'cdn-purge-kind-e2e.yml': 1,
       // 2, was 1: #1722 added the `js-closure-fs-trivy` job — a second,
       // independent job that installs the workspace + builds the reference app
       // through `kn-next build`/`docker buildx`, so it needs its own pinned

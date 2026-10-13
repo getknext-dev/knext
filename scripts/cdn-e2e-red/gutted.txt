@@ -1,0 +1,15 @@
+# Expected red: app A and B built with the edge allowlist gutted
+# (scripts/cdn-e2e-mutate-preload.mjs). Each line is a defence knext owns: with
+# its condition removed, the check that guards it must fail at its own message.
+hit-tagged|a Cache-Tag on app A does not carry its operator-derived prefix
+rsc-symmetric|an RSC navigation was served HTML stored under the _rsc key
+never-set-cookie|a response carrying Set-Cookie was edge-cached
+never-private|a response carrying Cache-Control private was edge-cached
+never-no-store|a response carrying Cache-Control no-store was edge-cached
+never-authorization|a response to a request with Authorization was edge-cached
+never-draft-cookie|a response to a request with the draft-mode cookie was edge-cached
+never-3xx-static|a prerendered 3xx was edge-cached
+cookie-gated-static|a cookieless request got the protected body from the edge
+middleware-cookie-variants|variant B was served variant A's body from the edge
+dot-segment|a dot-segment path leaked the protected body or was edge-cached
+two-apps-prefix|an app's stored entry carries a tag outside its own prefix

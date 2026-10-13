@@ -1,0 +1,3 @@
+# A 400 instead of a 429: the purger treats it as final (no retry), so the
+# page must stay at the edge; proves the recovery check sees non-recovery.
+purge-429-recovery|the edge still served the page after a refused purge

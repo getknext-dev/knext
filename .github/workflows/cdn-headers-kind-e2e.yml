@@ -1,0 +1,565 @@
+name: CDN headers — kind e2e (Vary-ignoring cache emulator)
+
+# Proof lane for the CDN cache tier's response headers (ADR-0068 D4/D5, CDN-3a):
+# real apps, deployed through `kn-next deploy` (packed tarballs, the operator
+# built from this commit, Knative + Kourier on kind), behind a cache emulator
+# that keys on Host + URL + query ONLY and IGNORES `Vary`, as Cloudflare does.
+# A default Varnish honours `Vary` and would hide exactly the bugs this lane
+# exists to catch (a flight payload or one host's redirect stored under a key
+# another visitor reads). The emulator is test-only
+# (packages/kn-next/src/__tests__/fixtures/cdn-emulator) and deliberately has
+# none of a real CDN's own safety nets (Set-Cookie, Authorization, status): it
+# stores whatever the origin's directive allows, so every "never cached" result
+# here is knext's decision at the origin.
+#
+# Four apps share one emulator, all from the fixture
+# packages/kn-next/src/__tests__/fixtures/cdn-kind-app:
+#   cdn-a     spec.cdn (provider emulator)
+#   cdn-b     spec.cdn + includePaths (the documented opt-out)
+#   cdn-off   no spec.cdn, the same image as cdn-a (`kn-next deploy --image`)
+#   cdn-base  no spec.cdn, built from the PRE-CDN core (CDN_BASELINE_SHA, the
+#             integration/v2 commit just before the first CDN runtime merge), so
+#             "byte-identical to today's" is compared against real bytes
+# The fixture is used instead of the file-manager reference app on purpose:
+# file-manager needs Postgres, object storage and its auth stack to render, its
+# pages are database-backed, and it has none of the route shapes these cases
+# need (a Set-Cookie ISR page, private / no-store with s-maxage, a publicHosts
+# redirect, a prerendered redirect, cookie-gated and cookie-rewritten middleware
+# paths). Adding them to the reference app would widen it for test-only reasons.
+#
+# What scripts/cdn-e2e-assert.mjs asserts (each check is independent and names
+# itself in its FAIL line): a tagged ISR page is an edge HIT carrying only the
+# operator-derived per-app prefix; RSC poisoning (both directions of the D4.3
+# rule); never cached: Set-Cookie, private, no-store, a request Authorization,
+# the draft-mode cookie, POST, a 3xx with Vary: Host/X-Forwarded-Host, a
+# prerendered 3xx; the condition-10 cases (cookie-gated static page,
+# cookie-rewritten variants, encoded and dot-segment paths) and the
+# includePaths opt-out; two apps' tags stay under their own prefixes; and,
+# without spec.cdn, the status, header block (in order) and body of 14 request
+# shapes are byte-identical to the pre-CDN baseline.
+#
+# Teeth — every check has a red leg, proved by exit code AND by the FAIL line
+# naming the intended check (scripts/cdn-e2e-expect-red.sh; it fails a leg that
+# went red on a precondition):
+#   - variant `gutted` (expected red): the apps are built with the edge allowlist
+#     removed from the packed preload (scripts/cdn-e2e-mutate-preload.mjs, every
+#     anchor asserted to occur exactly once); scripts/cdn-e2e-red/gutted.txt;
+#   - a second emulator in `store-all` mode (a negative control that stores
+#     everything): every never-cached / RSC / condition-10 check must see it;
+#     this is the red leg for shapes Next 16.4 also keeps off the edge by itself
+#     (405 on POST, no s-maxage on a dynamic redirect, a 307 for RSC without
+#     _rsc); scripts/cdn-e2e-red/store-all.txt;
+#   - the no-CDN app standing in for app A (no HIT), the CDN app standing in for
+#     the no-CDN app (zero-diff must differ), the two prefixes swapped, and the
+#     opt-out run against app A.
+#
+# zero-diff compares what each APP sends, straight from its pod's user container
+# (port-forwarded): the ingress path is the same for both apps, and Knative's
+# queue-proxy can content-sniff a response with no Content-Type depending on how
+# its first bytes arrive, which is not the app's output. The same comparison
+# through the ingress is printed as evidence, not gated. Ordering matters: it
+# runs FIRST, on the freshly deployed no-CDN apps, so both have served exactly
+# the same requests (Next's not-found render is cached, so a 404 body depends on
+# the paths a pod has already served).
+# Maintenance: the baseline is a fixed pre-CDN commit. A deliberate, non-CDN
+# change to the default headers will red zero-diff with the probe that changed;
+# that is a reviewed decision, not a flake.
+#
+# Triggers: path-filtered PR plus manual dispatch, like the sibling kind lanes
+# (jev: 1.00 over adding push 0.00, a schedule 0.00, dispatch-only 0.00). No
+# schedule, no push. Non-required. Ephemeral kind on the runner only.
+
+on:
+  pull_request:
+    paths:
+      - 'packages/kn-next/src/adapters/cdn-edge.cjs'
+      - 'packages/kn-next/src/adapters/cache-control-normalize.cjs'
+      - 'packages/kn-next/src/adapters/public-origin.cjs'
+      - 'packages/kn-next/src/adapters/cache-handler*.js'
+      - 'packages/kn-next/src/adapters/cdn-purge/**'
+      - 'packages/kn-next/src/adapters/cdn-routing-artifact.ts'
+      - 'packages/kn-next/src/adapters/next-adapter.ts'
+      - 'packages/kn-next/src/adapters/standalone-compile.mjs'
+      - 'packages/kn-next/src/cli/build-artifact.ts'
+      - 'packages/kn-next/src/cli/cr-builder.ts'
+      - 'packages/kn-next-operator/internal/controller/cdn.go'
+      - 'packages/kn-next-operator/api/v1alpha1/nextapp_types.go'
+      - 'packages/kn-next/src/__tests__/fixtures/cdn-kind-app/**'
+      - 'packages/kn-next/src/__tests__/fixtures/cdn-emulator/**'
+      - 'scripts/cdn-e2e-*'
+      - 'scripts/cdn-e2e-red/**'
+      - '.github/workflows/cdn-headers-kind-e2e.yml'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  cdn-headers-e2e:
+    name: ${{ matrix.runtime }} (${{ matrix.variant }}) CDN edge headers behind a Vary-ignoring emulator on kind
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runtime: node, variant: honest }
+          - { runtime: bun, variant: honest }
+          # Expected red: the edge allowlist is gutted in the packed preload.
+          - { runtime: node, variant: gutted }
+    env:
+      CLUSTER: cdn-headers
+      APP_NS: cdn-e2e
+      PUBLIC_HOST_1: a.example.test
+      PUBLIC_HOST_2: b.example.test
+      # The integration/v2 commit just before the first CDN runtime merge (#2281).
+      CDN_BASELINE_SHA: b43e60ef3e9de4e0d0b3dcccf114036500b19857
+      NODE_IMAGE: node:24-alpine@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Route Docker Hub pulls through mirror.gcr.io (anonymous rate limit)
+        id: docker-hub-mirror
+        uses: ./.github/actions/docker-hub-mirror
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: packages/kn-next-operator/go.mod
+          cache-dependency-path: packages/kn-next-operator/go.sum
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+
+      - name: Setup bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
+
+      - name: Install kind
+        uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
+        with:
+          install_only: true
+
+      - name: Install workspace dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build the workspace packages + the kn-next CLI
+        run: |
+          set -euo pipefail
+          bun run --filter "@getknext/lib" build
+          bun run --filter "@getknext/db" build
+          bun run --filter "@getknext/core" build
+          test -f packages/kn-next/dist/cli/kn-next.js
+
+      - name: Pack knext tarballs (npm pack — the real publish tool)
+        run: |
+          set -euo pipefail
+          DEST="${RUNNER_TEMP}/knext-tarballs"
+          node scripts/pack-release-tarballs.mjs --dest "${DEST}" \
+            --dirs packages/lib,packages/db,packages/kn-next
+          echo "TARBALLS_DIR=${DEST}" >> "$GITHUB_ENV"
+
+      # The pre-CDN baseline: the same three packages at CDN_BASELINE_SHA, packed
+      # the same way. Its preload must carry no CDN code at all, or the zero-diff
+      # comparison would be against the thing it is meant to be independent of.
+      - name: Build + pack the pre-CDN baseline core
+        if: matrix.variant == 'honest'
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin "${CDN_BASELINE_SHA}"
+          BASE_SRC="${RUNNER_TEMP}/knext-baseline-src"
+          git worktree add --detach "$BASE_SRC" "${CDN_BASELINE_SHA}"
+          cd "$BASE_SRC"
+          bun install --frozen-lockfile
+          bun run --filter "@getknext/lib" build
+          bun run --filter "@getknext/db" build
+          bun run --filter "@getknext/core" build
+          if grep -q 'knext.core.cdn' packages/kn-next/dist/adapters/cache-control-normalize.cjs; then
+            echo "::error::the baseline preload carries CDN code — CDN_BASELINE_SHA is not pre-CDN"; exit 1
+          fi
+          DEST="${RUNNER_TEMP}/knext-baseline-tarballs"
+          node scripts/pack-release-tarballs.mjs --dest "${DEST}" \
+            --dirs packages/lib,packages/db,packages/kn-next
+          echo "BASE_TARBALLS_DIR=${DEST}" >> "$GITHUB_ENV"
+
+      # Staged OUTSIDE the repo (a real app is its own project dir). The Docker
+      # build context IS this directory, and Dockerfile.standalone COPYs `public`
+      # and `node_modules/@getknext/core` unconditionally, so both are staged.
+      - name: Stage the fixture app(s) outside the repo + install their dependencies
+        run: |
+          set -euo pipefail
+          stage() { # <dir> <tarballs-dir>
+            cp -R packages/kn-next/src/__tests__/fixtures/cdn-kind-app "$1"
+            ( cd "$1"
+              bun install
+              node -e "const v=require('./node_modules/next/package.json').version; if (v !== '16.4.0') { console.error('next is ' + v); process.exit(1) }"
+              mkdir -p public
+              LIB_TGZ="$(find "$2" -maxdepth 1 -name 'getknext-lib-*.tgz' | sort | tail -n1)"
+              DB_TGZ="$(find "$2" -maxdepth 1 -name 'getknext-db-*.tgz' | sort | tail -n1)"
+              CORE_TGZ="$(find "$2" -maxdepth 1 -name 'getknext-core-*.tgz' | sort | tail -n1)"
+              npm install --no-save --no-audit --no-fund "${LIB_TGZ}" "${DB_TGZ}" "${CORE_TGZ}"
+              test -d node_modules/@getknext/core )
+          }
+          APP_DIR="${RUNNER_TEMP}/cdn-app"
+          stage "$APP_DIR" "$TARBALLS_DIR"
+          echo "APP_DIR=$APP_DIR" >> "$GITHUB_ENV"
+          if [ "${{ matrix.variant }}" = honest ]; then
+            BASE_DIR="${RUNNER_TEMP}/cdn-app-baseline"
+            stage "$BASE_DIR" "$BASE_TARBALLS_DIR"
+            echo "BASE_DIR=$BASE_DIR" >> "$GITHUB_ENV"
+          fi
+          # One tag for every build: the build id (KNEXT_BUILD_ID) is the deploy
+          # tag, and zero-diff compares two builds of the same source.
+          echo "DEPLOY_TAG=cdn${GITHUB_RUN_ID}-${{ matrix.runtime }}" >> "$GITHUB_ENV"
+
+      - name: Mutation — gut the edge allowlist in the staged preload (gutted variant)
+        if: matrix.variant == 'gutted'
+        run: node scripts/cdn-e2e-mutate-preload.mjs "$APP_DIR/node_modules/@getknext/core/dist/adapters/cache-control-normalize.cjs"
+
+      - name: Create kind cluster (registry certs.d config_path)
+        run: |
+          set -euo pipefail
+          cat <<'YAML' | kind create cluster --name "$CLUSTER" --wait 120s --config=-
+          kind: Cluster
+          apiVersion: kind.x-k8s.io/v1alpha4
+          containerdConfigPatches:
+          - |-
+            [plugins."io.containerd.grpc.v1.cri".registry]
+              config_path = "/etc/containerd/certs.d"
+          YAML
+
+      - name: Start in-cluster registry + wire the kind node to it
+        run: |
+          set -euo pipefail
+          reg=kind-registry
+          docker run -d --restart=always -p 127.0.0.1:5001:5000 --name "$reg" \
+            registry:2.8.3@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
+          docker network connect kind "$reg"
+          node="${CLUSTER}-control-plane"
+          docker exec "$node" mkdir -p /etc/containerd/certs.d/localhost:5001
+          printf '[host."http://%s:5000"]\n' "$reg" \
+            | docker exec -i "$node" cp /dev/stdin /etc/containerd/certs.d/localhost:5001/hosts.toml
+
+      - name: Install cert-manager
+        run: |
+          set -euo pipefail
+          scripts/kind-manifests/apply-cert-manager.sh
+          kubectl wait --for=condition=Available --timeout=300s \
+            -n cert-manager deployment/cert-manager deployment/cert-manager-webhook deployment/cert-manager-cainjector
+
+      - name: Install Knative Serving + Kourier
+        run: |
+          set -euo pipefail
+          V="knative-v1.16.0"
+          scripts/kind-manifests/apply-knative-kourier.sh "${V}"
+          kubectl patch configmap/config-network -n knative-serving --type merge \
+            --patch '{"data":{"ingress-class":"kourier.ingress.networking.knative.dev"}}'
+          kubectl wait --for=condition=Available --timeout=300s \
+            -n knative-serving deployment/controller deployment/webhook deployment/autoscaler deployment/net-kourier-controller
+
+      - name: Build + deploy the operator from this commit
+        working-directory: packages/kn-next-operator
+        run: |
+          set -euo pipefail
+          IMG=example.com/kn-next-operator:e2e
+          for attempt in 1 2 3; do
+            make docker-build IMG="$IMG" && break
+            [ "$attempt" = 3 ] && { echo "::error::operator image build failed 3x"; exit 1; }
+            echo "docker-build attempt $attempt failed; retrying"; sleep 10
+          done
+          kind load docker-image "$IMG" --name "$CLUSTER"
+          make install
+          make deploy IMG="$IMG"
+          kubectl rollout status deployment/kn-next-operator-controller-manager \
+            -n kn-next-operator-system --timeout=180s
+          kubectl wait --for=condition=Ready --timeout=120s \
+            -n kn-next-operator-system certificate/kn-next-operator-serving-cert
+          kubectl wait --for=jsonpath='{.subsets[0].addresses[0]}' --timeout=120s \
+            -n kn-next-operator-system endpoints/kn-next-operator-webhook-service
+          "${GITHUB_WORKSPACE}/scripts/kind-manifests/wait-for-webhook-ready.sh"
+
+      # One Redis (each app keeps its own key prefix), and the emulator twice:
+      # `cdn-emulator` models the CDN, `cdn-emulator-storeall` is the negative
+      # control. Both run the test-only emulator from a ConfigMap on a stock,
+      # digest-pinned node image; upstream is Kourier's internal gateway, with
+      # the client's Host kept, so one emulator fronts every app.
+      - name: Data plane (Redis) + the cache emulators
+        run: |
+          set -euo pipefail
+          kubectl create namespace "$APP_NS"
+          kubectl -n "$APP_NS" create configmap cdn-emulator \
+            --from-file=cdn-emulator.mjs=packages/kn-next/src/__tests__/fixtures/cdn-emulator/cdn-emulator.mjs
+          emulator() { # <name> <mode>
+            cat <<YAML
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata: { name: $1, namespace: $APP_NS }
+          spec:
+            replicas: 1
+            selector: { matchLabels: { app: $1 } }
+            template:
+              metadata: { labels: { app: $1 } }
+              spec:
+                automountServiceAccountToken: false
+                containers:
+                  - name: emulator
+                    image: ${NODE_IMAGE}
+                    command: ["node", "/emu/cdn-emulator.mjs"]
+                    env:
+                      - { name: EMU_MODE, value: "$2" }
+                      - { name: EMU_UPSTREAM, value: "http://kourier-internal.kourier-system.svc.cluster.local" }
+                    ports: [{ containerPort: 8080 }, { containerPort: 8081 }]
+                    readinessProbe: { httpGet: { path: /healthz, port: 8081 }, periodSeconds: 2 }
+                    securityContext: { runAsNonRoot: true, runAsUser: 1000, allowPrivilegeEscalation: false }
+                    volumeMounts: [{ name: emu, mountPath: /emu, readOnly: true }]
+                volumes: [{ name: emu, configMap: { name: cdn-emulator } }]
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata: { name: $1, namespace: $APP_NS }
+          spec:
+            selector: { app: $1 }
+            ports: [{ name: cache, port: 8080 }, { name: admin, port: 8081 }]
+          ---
+          YAML
+          }
+          {
+            emulator cdn-emulator honour
+            emulator cdn-emulator-storeall store-all
+            cat <<YAML
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata: { name: redis, namespace: $APP_NS }
+          spec:
+            replicas: 1
+            selector: { matchLabels: { app: redis } }
+            template:
+              metadata: { labels: { app: redis } }
+              spec:
+                containers:
+                  - name: redis
+                    image: redis:7-alpine@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2
+                    ports: [{ containerPort: 6379 }]
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata: { name: redis, namespace: $APP_NS }
+          spec:
+            selector: { app: redis }
+            ports: [{ port: 6379 }]
+          YAML
+          } | kubectl apply -f -
+          for d in redis cdn-emulator cdn-emulator-storeall; do
+            kubectl -n "$APP_NS" rollout status "deploy/$d" --timeout=180s || {
+              kubectl -n "$APP_NS" describe pods -l "app=$d" | tail -40
+              kubectl -n "$APP_NS" logs -l "app=$d" --tail=50 --previous || kubectl -n "$APP_NS" logs -l "app=$d" --tail=50 || true
+              exit 1
+            }
+          done
+
+      # Through the product. cdn-a is BUILT; cdn-b and cdn-off deploy the very
+      # same image by digest (`--image`), so the only difference between them is
+      # the CR; cdn-base is built from the pre-CDN core with the same tag.
+      - name: kn-next deploy (${{ matrix.runtime }}, ${{ matrix.variant }})
+        run: |
+          set -euo pipefail
+          write_config() { # <name> <extra config lines>
+            cat > knext.config.ts <<EOF
+          const config = {
+            name: "$1",
+            runtime: "${{ matrix.runtime }}",
+            registry: "localhost:5001",
+            healthCheckPath: "/api/health",
+            cache: { provider: "redis", url: "redis://redis.${APP_NS}.svc.cluster.local.:6379", keyPrefix: "$1" },
+            scaling: { minScale: 1, maxScale: 1, memoryRequest: "256Mi", memoryLimit: "512Mi" },
+            networking: { publicHosts: ["${PUBLIC_HOST_1}", "${PUBLIC_HOST_2}"] },
+            $2
+          };
+          export default config;
+          EOF
+          }
+          CLI="${GITHUB_WORKSPACE}/packages/kn-next/dist/cli/kn-next.js"
+          EMU_ENDPOINT="http://cdn-emulator.${APP_NS}.svc.cluster.local:8081"
+          cd "$APP_DIR"
+          write_config cdn-a "cdn: { provider: \"emulator\", emulatorEndpoint: \"${EMU_ENDPOINT}\" },"
+          node "$CLI" deploy --registry localhost:5001 --namespace "$APP_NS" --tag "$DEPLOY_TAG"
+          IMAGE="$(kubectl -n "$APP_NS" get nextapp cdn-a -o jsonpath='{.spec.image}')"
+          case "$IMAGE" in *@sha256:*) ;; *) echo "::error::cdn-a image is not digest-pinned: $IMAGE"; exit 1 ;; esac
+          write_config cdn-b "cdn: { provider: \"emulator\", emulatorEndpoint: \"${EMU_ENDPOINT}\", includePaths: [\"/protected\", \"/variant\"] },"
+          node "$CLI" deploy --namespace "$APP_NS" --tag "$DEPLOY_TAG" --image "$IMAGE"
+          if [ "${{ matrix.variant }}" = honest ]; then
+            write_config cdn-off ""
+            node "$CLI" deploy --namespace "$APP_NS" --tag "$DEPLOY_TAG" --image "$IMAGE"
+            cd "$BASE_DIR"
+            write_config cdn-base ""
+            node "$CLI" deploy --registry localhost:5001 --namespace "$APP_NS" --tag "$DEPLOY_TAG"
+          fi
+
+      - name: Wait for the NextApps to go Ready
+        run: |
+          set -euo pipefail
+          apps="cdn-a cdn-b"
+          [ "${{ matrix.variant }}" = honest ] && apps="$apps cdn-off cdn-base"
+          for app in $apps; do
+            kubectl -n "$APP_NS" wait --for=condition=Ready --timeout=300s "nextapp/$app" \
+              || (kubectl -n "$APP_NS" get nextapp,ksvc,pods -o wide; kubectl -n "$APP_NS" describe "nextapp/$app"; exit 1)
+          done
+          echo "APPS=$apps" >> "$GITHUB_ENV"
+
+      # The operator's half of zero-diff and of the prefix rule, read off the
+      # Knative Services it rendered.
+      - name: Assert the rendered KNEXT_CDN_* env (prefix derived, none without spec.cdn)
+        run: |
+          set -euo pipefail
+          env_of() { kubectl -n "$APP_NS" get ksvc "$1" -o json | jq -r '.spec.template.spec.containers[0].env[]? | "\(.name)=\(.value // "<ref>")"'; }
+          for app in cdn-a cdn-b; do
+            want="$(printf '%s' "${APP_NS}/${app}" | sha256sum | cut -c1-12)"
+            got="$(env_of "$app" | sed -n 's/^KNEXT_CDN_TAG_PREFIX=//p')"
+            [ "$got" = "$want" ] || { echo "::error::ksvc/$app KNEXT_CDN_TAG_PREFIX='$got', want sha256(ns/name)[:12]='$want'"; exit 1; }
+            env_of "$app" | grep -qx 'KNEXT_CDN_PROVIDER=emulator' || { echo "::error::ksvc/$app has no KNEXT_CDN_PROVIDER=emulator"; exit 1; }
+            echo "ok: ksvc/$app prefix $got"
+          done
+          if [ "${{ matrix.variant }}" = honest ]; then
+            for app in cdn-off cdn-base; do
+              if env_of "$app" | grep -q '^KNEXT_CDN_'; then
+                echo "::error::ksvc/$app (no spec.cdn) carries KNEXT_CDN_* env:"; env_of "$app" | grep '^KNEXT_CDN_'; exit 1
+              fi
+              echo "ok: ksvc/$app renders no KNEXT_CDN_* env"
+            done
+          fi
+
+      - name: Port-forward the emulators
+        run: |
+          set -euo pipefail
+          kubectl -n "$APP_NS" port-forward svc/cdn-emulator 18080:8080 18081:8081 >/tmp/pf-emu.log 2>&1 &
+          kubectl -n "$APP_NS" port-forward svc/cdn-emulator-storeall 18090:8080 18091:8081 >/tmp/pf-emu-all.log 2>&1 &
+          for port in 18081 18091; do
+            for _ in $(seq 1 60); do
+              curl -fsS "http://127.0.0.1:${port}/healthz" >/dev/null 2>&1 && break
+              sleep 1
+            done
+            curl -fsS "http://127.0.0.1:${port}/healthz" >/dev/null || { echo "::error::emulator admin :$port unreachable"; cat /tmp/pf-emu*.log; exit 1; }
+          done
+          # Warm each app through the emulator's bypass (a cold first request is
+          # not what any check is about), without touching the zero-diff apps.
+          for app in cdn-a cdn-b; do
+            curl -fsS -o /dev/null -H "Host: ${app}.${APP_NS}.svc.cluster.local" -H 'x-emu-bypass: 1' \
+              --retry 10 --retry-all-errors --max-time 60 http://127.0.0.1:18080/api/health
+          done
+
+      # zero-diff compares what the APP sends, straight from each pod's user
+      # container: Kourier and the queue-proxy sit in front of both apps alike,
+      # and the queue-proxy (a Go reverse proxy) may content-sniff a response
+      # that carries no Content-Type, depending on how its first bytes arrive.
+      - name: Port-forward the zero-diff pods (user container, no ingress)
+        if: matrix.variant == 'honest'
+        run: |
+          set -euo pipefail
+          n=0
+          for app in cdn-off cdn-base cdn-a; do
+            n=$((n + 1))
+            pod="$(kubectl -n "$APP_NS" get pod -l "serving.knative.dev/service=$app" --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')"
+            port="$(kubectl -n "$APP_NS" get pod "$pod" -o jsonpath='{.spec.containers[?(@.name=="user-container")].ports[0].containerPort}')"
+            local_port=$((19000 + n))
+            kubectl -n "$APP_NS" port-forward "pod/$pod" "${local_port}:${port:-8080}" >"/tmp/pf-$app.log" 2>&1 &
+            for _ in $(seq 1 30); do
+              curl -fsS -o /dev/null "http://127.0.0.1:${local_port}/api/health" 2>/dev/null && break
+              sleep 1
+            done
+            curl -fsS -o /dev/null "http://127.0.0.1:${local_port}/api/health" \
+              || { echo "::error::$app pod $pod unreachable on :$local_port"; cat "/tmp/pf-$app.log"; exit 1; }
+            key="$(echo "${app#cdn-}" | tr '[:lower:]' '[:upper:]')"
+            echo "POD_URL_${key}=http://127.0.0.1:${local_port}" >> "$GITHUB_ENV"
+            echo "ok: $app pod $pod on :$local_port"
+          done
+
+      # FIRST, on apps that have served nothing but their readiness probes (and
+      # one /api/health each, identical on both).
+      - name: Assert zero-diff without spec.cdn against the pre-CDN baseline
+        if: matrix.variant == 'honest'
+        run: |
+          set -euo pipefail
+          CDN_OFF_URL="$POD_URL_OFF" CDN_BASE_URL="$POD_URL_BASE" node scripts/cdn-e2e-assert.mjs --only zero-diff
+          # Evidence, not a gate: the same comparison through Kourier + the queue-proxy.
+          if node scripts/cdn-e2e-assert.mjs --only zero-diff >/tmp/zd-ingress.log 2>&1; then
+            echo "through the ingress too: byte-identical"
+          else
+            echo "through the ingress (informational, not gated):"; grep '^FAIL' /tmp/zd-ingress.log || cat /tmp/zd-ingress.log
+          fi
+
+      - name: Assert the CDN edge headers (honest)
+        if: matrix.variant == 'honest'
+        run: node scripts/cdn-e2e-assert.mjs --skip zero-diff
+
+      - name: Red leg — store-all negative control, every never-cached check must see it
+        if: matrix.variant == 'honest'
+        env:
+          CDN_EMU_URL: http://127.0.0.1:18090
+          CDN_EMU_ADMIN_URL: http://127.0.0.1:18091
+        run: |
+          bash scripts/cdn-e2e-expect-red.sh store-all scripts/cdn-e2e-red/store-all.txt -- \
+            node scripts/cdn-e2e-assert.mjs --only "$(grep -v '^#' scripts/cdn-e2e-red/store-all.txt | grep . | cut -d'|' -f1 | paste -sd, -)"
+
+      - name: Red legs — positive checks and comparators against the wrong subject
+        if: matrix.variant == 'honest'
+        run: |
+          set -euo pipefail
+          PA="$(printf '%s' "${APP_NS}/cdn-a" | sha256sum | cut -c1-12)"
+          PB="$(printf '%s' "${APP_NS}/cdn-b" | sha256sum | cut -c1-12)"
+          CDN_APP_A=cdn-off bash scripts/cdn-e2e-expect-red.sh no-cdn-as-a scripts/cdn-e2e-red/no-cdn-as-a.txt -- \
+            node scripts/cdn-e2e-assert.mjs --only hit-tagged,rsc-param
+          CDN_APP_OFF=cdn-a CDN_OFF_URL="$POD_URL_A" CDN_BASE_URL="$POD_URL_BASE" \
+            bash scripts/cdn-e2e-expect-red.sh zero-diff scripts/cdn-e2e-red/zero-diff.txt -- \
+            node scripts/cdn-e2e-assert.mjs --only zero-diff
+          CDN_PREFIX_A="$PB" CDN_PREFIX_B="$PA" bash scripts/cdn-e2e-expect-red.sh prefix-swap scripts/cdn-e2e-red/prefix-swap.txt -- \
+            node scripts/cdn-e2e-assert.mjs --only two-apps-prefix
+          CDN_APP_B=cdn-a bash scripts/cdn-e2e-expect-red.sh opt-out scripts/cdn-e2e-red/opt-out.txt -- \
+            node scripts/cdn-e2e-assert.mjs --only include-paths-opt-out
+
+      - name: Expected red — the gutted allowlist must fail every check it removes
+        if: matrix.variant == 'gutted'
+        run: |
+          bash scripts/cdn-e2e-expect-red.sh gutted scripts/cdn-e2e-red/gutted.txt -- \
+            node scripts/cdn-e2e-assert.mjs --skip zero-diff
+
+      # Where does a zero-diff difference come from? The same request, through
+      # the whole path and straight from each pod (no queue-proxy, no Kourier),
+      # with every header printed, framing included.
+      - name: Diagnose zero-diff on failure (raw responses, emulator path vs pod-direct)
+        if: failure() && matrix.variant == 'honest'
+        run: |
+          set -uo pipefail
+          probe() { CDN_PROBE_BODY="$3" node scripts/cdn-e2e-assert.mjs --probe "$1" "$2" /variant-a 'x-emu-bypass:1' 'content-type:text/plain' | head -20; }
+          for app in cdn-off cdn-base; do
+            echo "== $app through the emulator: POST, then GET"
+            probe "$app.${APP_NS}.svc.cluster.local" POST x
+            probe "$app.${APP_NS}.svc.cluster.local" GET ""
+            pod="$(kubectl -n "$APP_NS" get pod -l "serving.knative.dev/service=$app" -o jsonpath='{.items[0].metadata.name}')"
+            port="$(kubectl -n "$APP_NS" get pod "$pod" -o jsonpath='{.spec.containers[?(@.name=="user-container")].ports[0].containerPort}')"
+            kubectl -n "$APP_NS" port-forward "pod/$pod" "19100:${port:-8080}" >/tmp/pf-diag.log 2>&1 &
+            pf=$!
+            sleep 3
+            echo "== $app pod-direct ($pod:${port:-8080}): POST"
+            CDN_EMU_URL=http://127.0.0.1:19100 probe "$app.${APP_NS}.svc.cluster.local" POST x
+            kill "$pf" 2>/dev/null || true
+            sleep 1
+          done
+
+      - name: Dump state on failure
+        if: failure()
+        run: |
+          kubectl -n "$APP_NS" get nextapp,ksvc,pods -o wide || true
+          for app in ${APPS:-cdn-a cdn-b cdn-off cdn-base}; do
+            kubectl -n "$APP_NS" logs -l "serving.knative.dev/service=${app}" -c user-container --tail=60 --prefix || true
+          done
+          kubectl -n "$APP_NS" logs deploy/cdn-emulator --tail=50 || true
+          curl -s http://127.0.0.1:18081/__emu/entries | head -c 4000 || true
+          kubectl -n kn-next-operator-system logs deployment/kn-next-operator-controller-manager --tail=100 || true
+
+      - name: Tear down
+        if: always()
+        run: |
+          kind delete cluster --name "$CLUSTER" || true
+          docker rm -f kind-registry || true

@@ -1,0 +1,3 @@
+# include-paths-opt-out run against app A, which has no includePaths: the
+# middleware-matched path must still be protected there.
+include-paths-opt-out|includePaths did not opt the middleware-matched path back in
