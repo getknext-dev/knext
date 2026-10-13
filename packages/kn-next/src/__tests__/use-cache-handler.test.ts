@@ -20,7 +20,7 @@ import {
     jest,
     spyOn,
 } from "bun:test";
-import * as useCacheModule from "../adapters/use-cache-handler.js";
+import { PRUNE_STAMPS_SCRIPT } from "../adapters/use-cache-handler.js";
 import {
     type FakeRedis,
     type FakeRedisOptions,
@@ -124,10 +124,8 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
  * its exact source: HDEL a field only while its CURRENT value is still older than
  * the cutoff (ARGV[1]); ARGV[2..] are the fields one HSCAN page proposed.
  */
-const PRUNE_SCRIPT = (useCacheModule as Record<string, unknown>)
-    .PRUNE_STAMPS_SCRIPT as string;
 const scripts: NonNullable<FakeRedisOptions["scripts"]> = {
-    [String(PRUNE_SCRIPT)]: (keys, argv, { hashes }) => {
+    [PRUNE_STAMPS_SCRIPT]: (keys, argv, { hashes }) => {
         const h = hashes.get(keys[0]);
         const cutoff = Number(argv[0]);
         let n = 0;
