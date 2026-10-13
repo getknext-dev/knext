@@ -123,9 +123,10 @@ evidence for (`>=16.4.0 <16.5.0`), and the upper bound is widened one minor at a
 lands. A new Next.js minor therefore shows up as a peer-dependency warning in your package manager
 until a knext release admits it; nothing is installed or run differently.
 
-Inside that range, the minors covered by the compatibility evidence are `16.4`. The
-other admitted minors work, but the compatibility results do not describe them, and `knext doctor`
-prints a warning when your installed Next.js is not one of the covered minors.
+Inside that range, the minor covered by the compatibility evidence is `16.4`. When the range is
+widened, any newly admitted minor works but is not described by the compatibility results until it
+is added, and `knext doctor` prints a warning when your installed Next.js is not one of the covered
+minors.
 
 {/* next-policy:end */}
 

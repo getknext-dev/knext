@@ -84,4 +84,15 @@ describe("doctor next-minor row", () => {
     it("warns on an unparseable version rather than guessing", () => {
         expect(nextMinorCheck(ctxFor("canary"))[0]?.status).toBe("warn");
     });
+
+    for (const range of ["^16.4.0", ">=16.4.0 <16.5.0 || >=17.0.0"]) {
+        it(`fails safe: an unparseable range (${range}) warns as outside the range, never passes`, () => {
+            const [row] = nextMinorCheck(ctxFor("16.4.0"), {
+                range,
+                minors: ["16.3"],
+            });
+            expect(row?.status).toBe("warn");
+            expect(row?.detail).toContain("outside the range");
+        });
+    }
 });

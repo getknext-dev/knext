@@ -13,7 +13,7 @@
  * the manifests, the scaffold pins and the docs agree with these values.
  */
 
-/** `peerDependencies.next` for every publishable package on the 1.x line. */
+/** `peerDependencies.next` for every publishable package on the 2.x line. */
 export const NEXT_PEER_RANGE = ">=16.4.0 <16.5.0";
 
 /** `major.minor` lines the compatibility credential covers. */
