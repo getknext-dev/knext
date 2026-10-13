@@ -194,6 +194,34 @@ describe("overflow collapses to ONE app-tag purge (ADR-0068 D6.4)", () => {
         expect(tagsOf(h.cdn, 0)).toEqual([`kn-${PREFIX}`]);
     });
 
+    it("enqueueApp() queues one purge of kn-<prefix>, coalesced with tags already waiting", async () => {
+        const h = await harness(cloudflareEnv().env);
+        h.purger.enqueue(["a"]);
+        expect(h.purger.enqueueApp()).toEqual({ queued: 1 });
+        await h.purger.flush();
+        expect(h.cdn.requests.length).toBe(1);
+        expect(tagsOf(h.cdn, 0)).toEqual([await nextTag("a"), `kn-${PREFIX}`]);
+    });
+
+    it("enqueueApp() is inert without KNEXT_CDN_PROVIDER, and the index wrapper is total", async () => {
+        const h = await harness({});
+        expect(h.purger.enqueueApp()).toEqual({
+            queued: 0,
+            skipped: "disabled",
+        });
+        await h.purger.flush();
+        expect(h.fetchShim.seen).toEqual([]);
+        const throwing = {
+            enqueueApp() {
+                throw new Error("boom");
+            },
+        };
+        expect(h.mod.enqueueAppPurge({ purger: throwing })).toEqual({
+            queued: 0,
+            skipped: "error",
+        });
+    });
+
     it("after the collapse is flushed, normal per-tag purging resumes", async () => {
         const h = await harness(cloudflareEnv().env);
         h.purger.enqueue(Array.from({ length: 1500 }, (_, i) => `t${i}`));

@@ -92,6 +92,21 @@ function bulk(value: string | null): string {
     return `$${Buffer.byteLength(value)}${CRLF}${value}${CRLF}`;
 }
 
+/** A Redis glob (`*`, `?`, `\x` escapes) as an anchored RegExp. */
+function globRegExp(pattern: string): RegExp {
+    let out = "";
+    for (let i = 0; i < pattern.length; i++) {
+        const ch = pattern[i];
+        if (ch === "\\" && i + 1 < pattern.length) {
+            i += 1;
+            out += pattern[i].replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        } else if (ch === "*") out += ".*";
+        else if (ch === "?") out += ".";
+        else out += ch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    }
+    return new RegExp(`^${out}$`, "s");
+}
+
 /** Incremental RESP2 array-of-bulk-strings parser. Returns whole commands only. */
 function parseCommands(buf: Buffer): { cmds: string[][]; rest: Buffer } {
     const cmds: string[][] = [];
@@ -215,6 +230,34 @@ export async function startFakeRedis(
                 for (const f of args.slice(1)) if (h?.delete(f)) n++;
                 if (h && h.size === 0) hashes.delete(args[0]);
                 return `:${n}${CRLF}`;
+            }
+            case "scan": {
+                // `SCAN cursor [MATCH pattern] [COUNT n]` over every key, in
+                // insertion order; cursor = next offset, as for HSCAN below.
+                // MATCH supports the glob subset the handler escapes for: `*`,
+                // `?` and backslash escapes.
+                const keys = [
+                    ...new Set([
+                        ...strings.keys(),
+                        ...sets.keys(),
+                        ...hashes.keys(),
+                    ]),
+                ];
+                const opt = (name: string) => {
+                    const i = args.findIndex((a) => a.toLowerCase() === name);
+                    return i > 0 ? args[i + 1] : undefined;
+                };
+                const pattern = opt("match");
+                const count = Number(opt("count")) || 10;
+                const matches =
+                    pattern === undefined ? null : globRegExp(pattern);
+                const start = Number(args[0]) || 0;
+                const page = keys.slice(start, start + count);
+                const next = start + count >= keys.length ? 0 : start + count;
+                const hits = matches
+                    ? page.filter((k) => matches.test(k))
+                    : page;
+                return `*2${CRLF}${bulk(String(next))}*${hits.length}${CRLF}${hits.map(bulk).join("")}`;
             }
             case "hscan": {
                 // One page, cursor math simplified: COUNT is honoured as a page

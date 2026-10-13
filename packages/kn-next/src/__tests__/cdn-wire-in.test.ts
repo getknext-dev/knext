@@ -510,7 +510,18 @@ describe("CDN wire-in of the cache handler (ADR-0068)", () => {
             const end = src.indexOf("resetRequestCache()", start);
             expect(start).toBeGreaterThan(0);
             expect(src.slice(start, end)).toMatch(/\bstartCdnPurge\(/);
-            expect(src.match(/\bstartCdnPurge\(/g)?.length).toBe(2); // definition + one call
+            // The only other call is the singular handler's own invalidation,
+            // replayed once the Redis breaker closes -- still never `updateTags`.
+            const replayStart = src.indexOf(
+                "async function runInvalidationReplay(",
+            );
+            const replayEnd = src.indexOf("\n}\n", replayStart);
+            expect(replayStart).toBeGreaterThan(0);
+            expect(src.slice(replayStart, replayEnd)).toMatch(
+                /\bstartCdnPurge\(/,
+            );
+            // definition + the two calls above
+            expect(src.match(/\bstartCdnPurge\(/g)?.length).toBe(3);
         });
     });
 

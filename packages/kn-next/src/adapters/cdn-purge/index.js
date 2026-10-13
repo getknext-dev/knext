@@ -64,6 +64,21 @@ export function enqueuePurge(tags, ctx = {}) {
 }
 
 /**
+ * Queue one purge of the whole app at the edge (its app tag). Used when a
+ * backlog of invalidations is too large to purge tag by tag.
+ *
+ * @param {{ purger?: ReturnType<typeof createCdnPurger> }} [ctx] explicit purger (tests); default: the process-wide one
+ * @returns {{ queued: number, skipped?: string }}
+ */
+export function enqueueAppPurge(ctx = {}) {
+  try {
+    return (ctx.purger ?? getCdnPurger()).enqueueApp();
+  } catch {
+    return { queued: 0, skipped: 'error' };
+  }
+}
+
+/**
  * Purge the app's edge presence once per build across the cluster.
  *
  * @param {string} buildId

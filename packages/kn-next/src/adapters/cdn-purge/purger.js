@@ -466,6 +466,27 @@ export function createCdnPurger(options = {}) {
     },
 
     /**
+     * Queue ONE purge of the app tag `kn-<p>`: every edge entry of this app,
+     * whichever build rendered it. For a backlog of invalidations too large to
+     * replay tag by tag (the cache handler's breaker-open replay overflowed), the
+     * same collapse the queue's own overflow makes. Synchronous and total.
+     *
+     * @returns {{ queued: number, skipped?: string }}
+     */
+    enqueueApp() {
+      try {
+        const c = cfg();
+        if (c.state === 'disabled') return { queued: 0, skipped: 'disabled' };
+        if (c.state !== 'ready') return { queued: 0, skipped: skip(c) };
+        add(c, appTag(c.prefix));
+        schedule(c);
+        return { queued: 1 };
+      } catch {
+        return { queued: 0, skipped: 'error' };
+      }
+    },
+
+    /**
      * Purge this app's whole edge presence once per build, across the cluster.
      *
      * `SET knext:cdn:purged:<p>:<buildId> 1 NX EX 604800` in the app's own
