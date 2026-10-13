@@ -31,7 +31,7 @@
  * across webpack layers):
  *
  *     const seam = globalThis[Symbol.for('knext.core.cdn.requestTags')];
- *     seam?.record({ kind: 'page' | 'route' | 'fetch', tags: string[] });
+ *     seam?.record({ kind: 'page' | 'route' | 'fetch', tags: string[], foreignBuild?: true });
  *
  * The cache handler calls it from `get` (hit) and `set` (render) with the entry's
  * resolved Next tags (the split `x-next-cache-tags`, including the implicit
@@ -44,6 +44,15 @@
  * HANDOFF (#2259): the call sites in `cache-handler.js` are owned by another team
  * this sprint; until they land, no tags are recorded and so NOTHING is
  * edge-cached (fail closed).
+ *
+ * `foreignBuild: true` (Amendment 2) says the page or route entry the handler
+ * SERVED was written by a different build than the running one. ISR HTML is
+ * shared across builds (ADR-0066), so right after a rollout the new build serves
+ * the previous build's body until it regenerates the entry. The mark is sticky
+ * for the request, needs no tags, and makes the response not edge-cacheable
+ * (`reason="foreign_build_body"`): otherwise the edge would refill with old-build
+ * HTML right after the first-ready purge, tagged with the NEW build's tag. A
+ * fetch (data) entry never marks: the page body is still this build's.
  *
  * ## Fail closed, everywhere
  *
@@ -503,6 +512,7 @@ function fenceCandidates(decoded, artifact) {
  *   contentType: string | undefined,
  *   ownTags: readonly string[],
  *   fetchTags: readonly string[],
+ *   foreignBuild?: boolean,
  *   buildId: string | undefined,
  * }} i
  * @returns {{ edge: false, result: 'skipped' | 'immutable', reason: string }
@@ -566,6 +576,11 @@ function decideEdge(i) {
   // An unresolved build id means no build tag: a tag set a build-scoped purge
   // cannot reach. Not edge-cacheable.
   if (!i.buildId) return skip('build_id_unresolved');
+
+  // The body was written by another build (ISR HTML is shared across builds):
+  // never edge-cache it, or the edge refills with old-build HTML right after the
+  // first-ready purge, under this build's tag (Amendment 2).
+  if (i.foreignBuild === true) return skip('foreign_build_body');
 
   // Condition 8: the request's OWN page/route entry tags, incl. `_N_T_`.
   if (!i.ownTags.some((t) => typeof t === 'string' && t.startsWith('_N_T_'))) return skip('tags_missing');
@@ -794,6 +809,7 @@ function captureRequest(req) {
     rsc: rscInfo(h, req.url),
     own: [],
     fetch: [],
+    foreignBuild: false,
   };
 }
 
@@ -809,14 +825,17 @@ function ensureSeam() {
   const seam = {
     als,
     /**
-     * @param {{ kind: 'page' | 'route' | 'fetch', tags: readonly string[] }} rec
+     * @param {{ kind: 'page' | 'route' | 'fetch', tags: readonly string[], foreignBuild?: boolean }} rec
      * @returns {boolean} whether a request store was active
      */
     record(rec) {
       const s = als.getStore();
       if (!s || !rec || !Array.isArray(rec.tags)) return false;
-      const bucket = rec.kind === 'page' || rec.kind === 'route' ? s.own : rec.kind === 'fetch' ? s.fetch : null;
+      const ownEntry = rec.kind === 'page' || rec.kind === 'route';
+      const bucket = ownEntry ? s.own : rec.kind === 'fetch' ? s.fetch : null;
       if (!bucket) return false;
+      // Sticky: one foreign-build page/route body taints the response.
+      if (ownEntry && rec.foreignBuild === true) s.foreignBuild = true;
       for (const t of rec.tags) {
         if (typeof t === 'string' && bucket.length < MAX_RECORDED_TAGS) bucket.push(t);
       }
@@ -959,6 +978,7 @@ function createController(opts) {
       contentType: String(get('content-type') || ''),
       ownTags: state.own,
       fetchTags: state.fetch,
+      foreignBuild: state.foreignBuild === true,
       buildId: buildId(),
     });
   }

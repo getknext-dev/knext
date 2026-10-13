@@ -49,6 +49,10 @@ alone, so a new kind of response is uncached until it has been shown safe.
   default cache key includes the query string (Cloudflare and Google Cloud CDN).
 - The page's own cache entry was recorded with its tags (including its path tag), and the tags fit
   the provider's limits. Over the limit means not cached, never truncated.
+- The page's cache entry was written by the build that is serving it. Cached pages are shared across
+  builds, so right after a deploy the new build can still serve a page the previous build rendered.
+  That response goes to the browser but not into the CDN, until the new build renders the page itself
+  (when its `revalidate` time passes, or on `revalidatePath` / `revalidateTag`).
 - Hashed build assets (`immutable`) keep Next.js's own long-lived header and are neither tagged nor
   purged.
 - Redirects (3xx) are never edge-cached.
@@ -96,6 +100,7 @@ to understand the rules rather than to alert on:
 | `rsc_*` | One of the React Server Components rules |
 | `build_id_unresolved`, `tags_missing`, `tag_overflow` | The page cannot be purged by tag, so it is not cached |
 | `zero_ttl` | The resulting edge lifetime would be zero |
+| `foreign_build_body` | The page was rendered by a previous build and has not yet been rendered again by the build now serving it |
 | `foreign_edge_header_stripped` | The response was not cacheable and already carried an edge directive or tags from elsewhere (for example a rewrite to another origin), which knext removed |
 
 Some legitimate URLs are never edge-cached by the canonical-path rule, and are served correctly from
@@ -122,6 +127,12 @@ On Cloudflare, `revalidateTag` and `revalidatePath` purge the edge:
 the app's edge entries; a Redis key makes sure only one pod does it, however many start at once. Scaling
 from zero does not purge again. A rollback to a build that already purged does not purge, as long as that build's claim is still
 in Redis; the claim lasts 7 days.
+
+After that purge, the CDN refills only with pages the new build rendered itself. A page the previous
+build rendered can still be served from the shared cache until its `revalidate` time passes, but
+those responses are not edge-cached. So after a deploy, the CDN never holds the previous build's
+HTML under the new build's tag, and a page with a long `revalidate` (or `revalidate = false`) stays
+off the CDN until it is rendered again or you revalidate it.
 
 Every purge outcome is counted in `knext_cdn_purge_total`, labelled by provider and result. A purge
 that gives up logs the provider, status and tag count, never the token or the response body.

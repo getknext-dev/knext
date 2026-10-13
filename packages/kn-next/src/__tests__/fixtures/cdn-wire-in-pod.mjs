@@ -32,7 +32,7 @@ const recorded = [];
 if (process.env.POD_SEAM === '1') {
   globalThis[Symbol.for('knext.core.cdn.requestTags')] = {
     record(r) {
-      recorded.push({ kind: r.kind, tags: [...r.tags] });
+      recorded.push({ kind: r.kind, tags: [...r.tags], ...(r.foreignBuild === true && { foreignBuild: true }) });
       return true;
     },
   };

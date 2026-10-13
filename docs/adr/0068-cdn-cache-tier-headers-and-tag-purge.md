@@ -752,6 +752,17 @@ They are removed from the headers already set on the response and from the `writ
 
 jev on where the real-Next repro gets its fixture: copy the CDN-3a fixture byte-identically **0.99** (stack on the CDN-3a PR 0.01).
 
+**Extended (#2299): a body another build wrote is not edge-cached.** Found while building the CDN-3b purge e2e. ISR HTML is shared across builds (ADR-0066: the Redis key is per app). After a rollout the new build's cache handler returns the previous build's entry, and Next answers `HIT` with the old body until that entry's own `revalidate` elapses. D4 then marked it edge-cacheable and tagged it with the **new** build's build tag (the preload knows the running build, not the writing one). So the first-ready purge (D7) was followed by an edge refill with old-build HTML. D13's CDN-3b criterion "no old-build HTML after a rollout" did not hold, and D9's hand purge of one build's tag missed old-build bodies served by the new build. Reproduced on Next 16.4.0 with two builds of the CDN-3a fixture on one Redis, on Node and Bun.
+
+The rule (lead decision on the issue, option B; jev: B **0.60**, C 0.22, A 0.17, D 0.01, confidence 0.47):
+
+- On a read, the cache handler records through the request seam whether the page or route entry it served was written by another build: `record({ kind, tags, foreignBuild: true })`. A build counts as "another" by the same identity as ADR-0066's build-scoped revalidate window: a different build id, none recorded on the entry (written before build ids were), or none resolved by this process. None of the three proves the body is this build's. The writer's liveness does not matter. Under a canary split each build's body is still the other build's HTML.
+- The mark is sticky for the request and needs no tags. A fetch (data) entry never marks, because the page body is still this build's.
+- The preload refuses the edge directive with `reason="foreign_build_body"`, a second new value in the closed set. The response is still served to the browser.
+- No seam means no change: with CDN off, nothing is recorded and the entry is served as before. A fault while recording records nothing, and that fails closed, because a response with no own tags is not edge-cacheable (condition 8).
+
+**The cost, stated honestly.** The issue framed it as "edge hit rate right after a deploy". It is longer for long-lived pages. A page the previous build rendered stays off the edge until the new build renders it again. That happens when its `revalidate` elapses, or on a `revalidateTag` / `revalidatePath`. With `revalidate = 3600` that is up to an hour per page. With `revalidate: false`, nothing regenerates the page until a revalidation does. Measured on Next 16.4.0: the new build kept answering `HIT` with the old body on every request. ADR-0066's "the stored window is withheld and Next treats the entry as stale and re-renders it" did **not** produce a regeneration within the test's requests. That is worth a look at sprint close, since it is the other half of how quickly the edge recovers. Two alternatives keep the hit rate, and both are recorded on the issue. One tags the response with the **writing** build's tag. The other build-scopes ISR HTML keys while `spec.cdn` is set, which is an ADR-0066 amendment.
+
 ## Options considered
 
 | Decision | Chosen | jev | Main alternative(s) | jev | Why the alternative lost |
