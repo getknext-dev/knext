@@ -74,7 +74,9 @@ jev_ge() { awk -v x="$1" -v t="$2" 'BEGIN { exit !(x + 0 >= t + 0) }'; }
 #     loose enough to skip those blinds the screen to nearly all real GitHub output.
 #
 # What counts (each alternative is mutation-proved):
-#   * a PEM marker (3+ dashes, optional whitespace, BEGIN; newlines and CRs between them count);
+#   * a PEM marker: 3+ dashes, optional whitespace, BEGIN, a LABEL (word characters and whitespace),
+#     3+ closing dashes. The label and closing dashes are required: a bare `---begin` or a markdown
+#     rule before prose starting "Begin" must not redact what follows (that would be an evasion);
 #   * GitHub tokens: gh[pousr]_ + 36 alnum (and any further token characters: an over-long token is
 #     matched, and so redacted, in full); github_pat_ + 22 or more [A-Za-z0-9_];
 #   * npm_ + 36 alnum; `sk-` + 20 or more (needs a non-alphanumeric before it, so disk-/task-
@@ -103,7 +105,7 @@ jev_ge() { awk -v x="$1" -v t="$2" 'BEGIN { exit !(x + 0 >= t + 0) }'; }
 # redaction errors or a literal survives it returns non-zero and the caller falls back to the old
 # skip. pr-risk.sh keeps the skip (it sends no diff content at all).
 JEV_Q="[\"']" # an optional quote around a header value (JSON / shell)
-JEV_PEM_RE='---+[[:space:]]*BEGIN' # also checked on the line-flattened text (a marker split by a line break)
+JEV_PEM_RE='---+[[:space:]]*BEGIN[[:space:]]+[A-Za-z0-9_[:space:]]+---+' # also checked on the line-flattened text (a marker split by a line break)
 JEV_LITERAL_RE="$JEV_PEM_RE|"'gh[pousr]_[A-Za-z0-9]{36}[A-Za-z0-9_-]*|github_pat_[A-Za-z0-9_]{22,}|npm_[A-Za-z0-9]{36}[A-Za-z0-9_-]*|(^|[^a-z0-9])sk-[A-Za-z0-9_-]{20,}|xox[bp]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}[A-Za-z0-9_-]*|://[^/@[:space:]]+:[^@[:space:]]+@|authorization'"$JEV_Q"'?[[:space:]]*:[[:space:]]*'"$JEV_Q"'?basic[[:space:]]+[^[:space:]]+|(authorization'"$JEV_Q"'?[[:space:]]*:[[:space:]]*'"$JEV_Q"'?|bearer[[:space:]]+'"$JEV_Q"'?)([A-Za-z]+[[:space:]]+)?([A-Za-z0-9._~+/=-]{16,}|[A-Za-z._~+/=-]*[0-9][A-Za-z0-9._~+/=-]{7,})'
 JEV_ENTROPY_RUN_RE='[A-Za-z0-9+=]{32,}'
 JEV_UNICODE_SPACES="$(printf '\302\240|\341\232\200|\342\200[\200-\212]|\342\200\257|\342\201\237|\343\200\200')"
@@ -227,7 +229,7 @@ _jev_redact_pem() {
       out = ""; rem = t
       while (1) {
         low = tolower(rem)
-        if (!match(low, /---+[ \t\r\n]*begin/)) { out = out rem; break }
+        if (!match(low, /---+[ \t\r\n]*begin[ \t\r\n]+[a-z0-9_ \t\r\n]+---+/)) { out = out rem; break }
         b = RSTART; off = b + RLENGTH; e = 0
         while (match(substr(low, off), /---+[ \t\r\n]*end/)) { e = off + RSTART - 1; elen = RLENGTH; off = e + elen }
         if (e == 0) { endpos = length(rem) }
