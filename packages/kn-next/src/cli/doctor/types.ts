@@ -176,12 +176,11 @@ export interface DoctorDeps {
      */
     readNextConfigFile?: () => string | undefined;
     /**
-     * The first app source file (relative path) that uses a `'use cache'`
-     * directive, or undefined -- feeds the 'use cache' check (#2277).
-     * Defaults to a bounded, read-only scan of the current directory; tests
-     * inject a fixed answer.
+     * Scans the app's source for a `'use cache'` directive -- feeds the
+     * 'use cache' check (#2277). Defaults to a bounded, read-only scan of the
+     * current directory; tests inject a fixed answer.
      */
-    findUseCacheFile?: () => string | undefined;
+    scanUseCache?: () => { file: string | undefined; truncated: boolean };
     /**
      * This CLI's own version, for the operator-version compatibility verdict
      * (#1947). Set by `doctorMain`'s production defaults (read from the

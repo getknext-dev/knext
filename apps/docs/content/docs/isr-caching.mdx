@@ -123,7 +123,9 @@ anything that must be shared (or must survive scale-to-zero) in ISR or your own 
 
 `knext doctor` warns when your source uses `'use cache'`. It names the first file it finds and
 tells you which case applies: a no-op when your `next.config` sets `cacheMaxMemorySize: 0`, or
-per-process otherwise. The warning never fails the check.
+per-process otherwise. Run it from your app directory, the one with `next.config`. It skips
+dependencies, build output and symlinks. In a directory with a very large number of files the
+scan stops early and says so instead of guessing. The warning never fails the check.
 
 A `'use cache'` store shared across pods is planned for a future major version. Until it ships, the
 behaviour above is what you get.

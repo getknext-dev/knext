@@ -16,10 +16,17 @@
  *
  * Contributes NO row when the app does not use the directive (or there is no
  * `next.config` in the current directory), which keeps every other app's row
- * set byte-identical (doctor-golden.test.ts). WARN only, never a failure.
+ * set byte-identical (doctor-golden.test.ts). WARN only, never a failure. When
+ * the bounded scan stops early without a hit, it says so in a WARN row rather
+ * than returning a silent "no row".
+ *
+ * ACCEPTED FALSE POSITIVES (the detector is line-based, not a parser, and the
+ * row is warn-only): a directive-shaped line inside a multi-line template
+ * literal, or a `'use cache'` string alone on its line as a call argument.
+ * A regex literal containing a quote can also confuse the comment stripper.
  */
 
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync } from "node:fs";
 import { extname, join, relative } from "node:path";
 import { mk } from "../report";
 import type { CheckContext, CheckResult } from "../types";
@@ -46,18 +53,31 @@ const SOURCE_EXTENSIONS = new Set([
     ".cts",
 ]);
 
-/** Dependency and build-output directories -- never the app's own source. */
-const SKIPPED_DIRS = new Set([
-    "node_modules",
-    "out",
-    "dist",
-    "build",
-    "coverage",
-]);
+/** Dependency directories, skipped at every depth. */
+const ALWAYS_SKIPPED_DIRS = new Set(["node_modules"]);
+
+/** Build output, skipped only at the app root (`app/build/` is source). */
+const ROOT_ONLY_SKIPPED_DIRS = new Set(["out", "dist", "build", "coverage"]);
+
+export interface ScanLimits {
+    /** Every directory entry counts, not only source files. */
+    maxEntries: number;
+    /** Larger source files are skipped (generated code, not hand-written). */
+    maxFileBytes: number;
+}
 
 /** Bounds so a pathological tree cannot stall the preflight. */
-const MAX_FILES = 5000;
-const MAX_FILE_BYTES = 1024 * 1024;
+export const DEFAULT_SCAN_LIMITS: ScanLimits = {
+    maxEntries: 20000,
+    maxFileBytes: 1024 * 1024,
+};
+
+export interface UseCacheScan {
+    /** The first source file (relative path) using the directive, if any. */
+    file: string | undefined;
+    /** True when the scan hit `maxEntries` before finding a file. */
+    truncated: boolean;
+}
 
 /** Strip // and block comments so a commented-out flag does not count. */
 export function stripComments(src: string): string {
@@ -67,33 +87,82 @@ export function stripComments(src: string): string {
 }
 
 /**
+ * Remove // and block comments from source while leaving string and
+ * template-literal contents untouched, so `'/api/*'` does not open a
+ * "comment" that swallows the code after it. Block comments keep their
+ * newlines, so the line structure the directive regex relies on survives.
+ */
+export function stripCodeComments(src: string): string {
+    let out = "";
+    let i = 0;
+    const n = src.length;
+    while (i < n) {
+        const c = src[i];
+        if (c === '"' || c === "'" || c === "`") {
+            const start = i;
+            i++;
+            while (i < n && src[i] !== c) {
+                if (src[i] === "\\") i++;
+                else if (c !== "`" && src[i] === "\n") break;
+                i++;
+            }
+            i++;
+            out += src.slice(start, i);
+            continue;
+        }
+        if (c === "/" && src[i + 1] === "/") {
+            while (i < n && src[i] !== "\n") i++;
+            continue;
+        }
+        if (c === "/" && src[i + 1] === "*") {
+            const end = src.indexOf("*/", i + 2);
+            const stop = end === -1 ? n : end + 2;
+            out += src.slice(i, stop).replace(/[^\n]/g, "");
+            i = stop;
+            continue;
+        }
+        out += c;
+        i++;
+    }
+    return out;
+}
+
+/**
  * True iff the source carries a `'use cache'` directive (incl. the
  * `'use cache: remote'` / `'use cache: private'` variants). A directive is a
- * string-literal statement on its own line -- at the top of a file or of a
- * function body -- so an ordinary string value or a comment does not count.
+ * string-literal statement at the start of a line or right after `{` (the
+ * one-line function-body form), ended by `;`, `}` or the end of the line --
+ * so an ordinary string value, an object key or a comment does not count.
  */
 export function hasUseCacheDirective(src: string): boolean {
-    return /^[ \t]*(["'])use cache(?::[ \t]*[\w-]+)?\1[ \t]*;?[ \t]*$/m.test(
-        stripComments(src),
+    return /(?:^|\{)[ \t]*(["'])use cache(?::[ \t]*[\w-]+)?\1[ \t]*(?:;|\}|$)/m.test(
+        stripCodeComments(src.replace(/^﻿/, "")),
     );
 }
 
-/** True iff the next.config text sets `cacheMaxMemorySize: 0`. */
+/** True iff the next.config text sets `cacheMaxMemorySize: 0` (quoted key too). */
 export function setsZeroCacheMemory(configText: string): boolean {
-    return /\bcacheMaxMemorySize\s*:\s*0(?![\w.])/.test(
+    return /(?:^|[^\w$])(["']?)cacheMaxMemorySize\1\s*:\s*0(?![\w.])/m.test(
         stripComments(configText),
     );
 }
 
 /**
- * The first app source file (relative to `root`, in sorted walk order) that
- * uses `'use cache'`, or undefined. Skips dependencies, build output and
- * dot-directories (`.next`, `.git`, ...). Never throws: an unreadable entry is
- * skipped, because doctor must not crash on the state it is diagnosing.
+ * Find the first app source file (relative to `root`, in sorted walk order)
+ * that uses `'use cache'`. Skips symlinks (no loops, no escaping the app),
+ * dot-directories (`.next`, `.git`, ...), `node_modules` at any depth and
+ * build output at the root. Every directory entry counts toward
+ * `limits.maxEntries`; hitting it sets `truncated`. Never throws: an
+ * unreadable entry is skipped, because doctor must not crash on the state it
+ * is diagnosing.
  */
-export function findUseCacheFile(root: string): string | undefined {
-    let seen = 0;
-    const walk = (dir: string): string | undefined => {
+export function scanUseCache(
+    root: string,
+    limits: ScanLimits = DEFAULT_SCAN_LIMITS,
+): UseCacheScan {
+    let entries = 0;
+    let truncated = false;
+    const walk = (dir: string, atRoot: boolean): string | undefined => {
         let names: string[];
         try {
             names = readdirSync(dir).sort();
@@ -101,24 +170,30 @@ export function findUseCacheFile(root: string): string | undefined {
             return undefined;
         }
         for (const name of names) {
-            if (seen >= MAX_FILES) return undefined;
+            if (entries >= limits.maxEntries) {
+                truncated = true;
+                return undefined;
+            }
+            entries++;
             if (name.startsWith(".")) continue;
             const full = join(dir, name);
-            let st: ReturnType<typeof statSync>;
+            // lstat, never stat: a symlink is then neither a directory nor a
+            // file below, so it is never followed (no loops, no escaping root).
+            let st: ReturnType<typeof lstatSync>;
             try {
-                st = statSync(full);
+                st = lstatSync(full);
             } catch {
                 continue;
             }
             if (st.isDirectory()) {
-                if (SKIPPED_DIRS.has(name)) continue;
-                const hit = walk(full);
-                if (hit !== undefined) return hit;
+                if (ALWAYS_SKIPPED_DIRS.has(name)) continue;
+                if (atRoot && ROOT_ONLY_SKIPPED_DIRS.has(name)) continue;
+                const hit = walk(full, false);
+                if (hit !== undefined || truncated) return hit;
                 continue;
             }
             if (!st.isFile() || !SOURCE_EXTENSIONS.has(extname(name))) continue;
-            seen++;
-            if (st.size > MAX_FILE_BYTES) continue;
+            if (st.size > limits.maxFileBytes) continue;
             try {
                 if (hasUseCacheDirective(readFileSync(full, "utf8"))) {
                     return relative(root, full);
@@ -129,7 +204,8 @@ export function findUseCacheFile(root: string): string | undefined {
         }
         return undefined;
     };
-    return walk(root);
+    const file = walk(root, true);
+    return { file, truncated: file === undefined && truncated };
 }
 
 function defaultReadNextConfig(): string | undefined {
@@ -148,10 +224,22 @@ function defaultReadNextConfig(): string | undefined {
 export function cacheDirectiveCheck(ctx: CheckContext): CheckResult[] {
     const config = (ctx.deps.readNextConfigFile ?? defaultReadNextConfig)();
     if (config === undefined) return [];
-    const file = (
-        ctx.deps.findUseCacheFile ?? (() => findUseCacheFile(process.cwd()))
+    const scan = (
+        ctx.deps.scanUseCache ?? (() => scanUseCache(process.cwd()))
     )();
-    if (file === undefined) return [];
+    const file = scan.file;
+    if (file === undefined) {
+        if (!scan.truncated) return [];
+        return [
+            mk(
+                "use-cache",
+                "'use cache' scan incomplete",
+                "warn",
+                "the source scan for 'use cache' stopped early because this directory holds too many files, so doctor could not tell whether the app uses it.",
+                `run doctor from the app directory (the one with next.config). If the app uses 'use cache', its entries are per-process on knext and are not shared across pods. See ${DOCS_URL}`,
+            ),
+        ];
+    }
     if (setsZeroCacheMemory(config)) {
         return [
             mk(
