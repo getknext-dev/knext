@@ -172,6 +172,10 @@ const realInputs = (): OneXInputs => ({
   v13WorkflowText: existsSync(resolve(ROOT, V13_WORKFLOW)) ? read(V13_WORKFLOW) : undefined,
   manifest: JSON.parse(read(MANIFEST)),
 });
+const realPinIsV1x = (): boolean => {
+  const rcTag = (realInputs().pin as { rcTag?: unknown }).rcTag;
+  return typeof rcTag === 'string' && rcTag.startsWith('v1.');
+};
 
 /** Replace `from` with `to`, refusing unless `from` occurs EXACTLY once. */
 function replaceOnce(text: string, from: string, to: string): string {
@@ -257,6 +261,7 @@ describe("#2317 — while rcTag is v1.x, main's credential NEXTJS_REF stays on t
   it('an EXTRA fallback anywhere in the file (job env, shell default) -> red (scan, not a list)', () => {
     for (const extra of [
       '    env:\n      NEXTJS_REF: v16.4.0',
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: a literal shell/GitHub Actions expression, not a JS template
       '      - run: NEXTJS_REF="${NEXTJS_REF:-v16.4.0}" ./x.sh',
       '      - run: echo "NEXTJS_REF=v16.4.0" >> "$GITHUB_ENV"',
     ]) {
@@ -272,6 +277,7 @@ describe("#2317 — while rcTag is v1.x, main's credential NEXTJS_REF stays on t
     const text = replaceOnce(
       lane(V1X_REF, V1X_REF),
       ENV_LINE(V1X_REF),
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: a literal shell/GitHub Actions expression, not a JS template
       '  NEXTJS_REF: ${{ inputs.other || github.event.inputs.nextjsRef }}',
     );
     const v = checkOneXCredentialRef(fixture({ e2eWorkflowText: text }));
@@ -327,26 +333,38 @@ describe("#2317 — while rcTag is v1.x, main's credential NEXTJS_REF stays on t
   it('THE REAL TREE: the guard applies to the committed pin and passes', () => {
     const inputs = realInputs();
     const v = checkOneXCredentialRef(inputs);
-    // Applies today (rcTag v1.0.0-rc.6). When rcTag moves to a v2+ tag this
-    // line is the one to revisit — never silently.
-    expect(v.applies).toBe(true);
-    expect(v.anchor).toMatch(REF_RE);
+    // Applies exactly while the committed rcTag is a v1.x tag (today
+    // v1.0.0-rc.6). Moving rcTag to a v2+ tag switches it off by design;
+    // the fixture tests above prove it is not vacuous for a v1.x pin.
+    const isV1 = realPinIsV1x();
+    expect(v.applies).toBe(isV1);
+    if (isV1) expect(v.anchor).toMatch(REF_RE);
     expect(v.violations).toEqual([]);
   });
 
-  it('THE REAL TREE, simulated #2314 merge: test-e2e-deploy.yml + credentialedNextRef at v16.4.0 -> red', () => {
-    const inputs = realInputs();
-    const anchor = checkOneXCredentialRef(inputs).anchor as string;
-    expect(anchor).toMatch(REF_RE);
+  it('THE REAL FILES, simulated #2314 merge under a v1.x pin: test-e2e-deploy.yml + credentialedNextRef at v16.4.0 -> red', () => {
+    // The real workflow and lane, with whatever the workflow's two defaults
+    // say today moved to v16.4.0, under a v1.x pin — the merged tree #2317
+    // describes. Pinned to v1.x explicitly so it keeps running after the
+    // committed rcTag moves on.
+    const inputs = { ...realInputs(), pin: { rcTag: 'v1.0.0-rc.6' } };
+    const env = envFallbackLiteral(inputs.e2eWorkflowText) as string;
+    const dispatch = dispatchDefault(inputs.e2eWorkflowText) as string;
+    expect(env).toMatch(REF_RE);
+    expect(dispatch).toMatch(REF_RE);
     let text = inputs.e2eWorkflowText;
-    text = replaceOnce(text, ENV_LINE(anchor), ENV_LINE(V2_REF));
-    text = replaceOnce(text, DISPATCH_LINE(anchor), DISPATCH_LINE(V2_REF));
+    text = replaceOnce(text, ENV_LINE(env), ENV_LINE(V2_REF));
+    text = replaceOnce(text, DISPATCH_LINE(dispatch), DISPATCH_LINE(V2_REF));
     const v = checkOneXCredentialRef({
       ...inputs,
       e2eWorkflowText: text,
       manifest: { ...(inputs.manifest as object), credentialedNextRef: V2_REF },
     });
-    expect(v.violations.length).toBeGreaterThanOrEqual(3);
+    expect(v.applies).toBe(true);
+    expect(v.anchor).not.toBe(V2_REF);
+    expect(v.violations.some((m) => m.includes('dispatch default'))).toBe(true);
+    expect(v.violations.some((m) => m.includes('env fallback'))).toBe(true);
+    expect(v.violations.some((m) => m.includes('credentialedNextRef'))).toBe(true);
   });
 
   it('REF_LITERAL_RE sees the refs this file compares (self-test)', () => {
