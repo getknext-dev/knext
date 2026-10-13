@@ -51,9 +51,10 @@ too, rather than left implied.
 
 ## Next.js
 
-- **Peer dependency floor: `next >=16.4.0`** — this is the minimum `@getknext/core` declares it
-  will work with. Next.js 16.0 through 16.3 are no longer supported from knext 2.0; stay on the
-  1.x line of knext to keep using them.
+- **Peer dependency range: `next >=16.4.0 <16.5.0`** — the Next.js minors `@getknext/core`
+  declares it will work with. Next.js 16.0 through 16.3 are no longer supported from knext 2.0; stay
+  on the 1.x line of knext to keep using them. The upper bound is widened one minor at a time as
+  compatibility evidence lands; see [Versioning](/docs/versioning).
 - **The compatibility credential window currently runs against `v16.3.8`**, while new apps
   scaffold `16.4.0`; the credential moves to the newer release once it has been re-credentialed
   there. See [the compatibility credential](/docs/compat-suite) and the

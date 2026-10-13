@@ -19,7 +19,7 @@ import { REPO_ROOT, WORKSPACE_DIRS, workspaceManifests } from './helpers/workspa
  *
  * Two deliberate exclusions, stated rather than left to be rediscovered:
  *
- *   - `peerDependencies`. `@getknext/core` declares `next: ">=16.0.0"` on purpose:
+ *   - `peerDependencies`. `@getknext/core` declares `next: ">=16.0.0 <16.5.0"` on purpose:
  *     it is a compatibility statement about what the adapter supports, not a
  *     statement about what we install. Raising it would drop support for every
  *     16.0/16.1 consumer over a CVE in *their* tree, which they fix by upgrading

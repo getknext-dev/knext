@@ -195,6 +195,11 @@ export interface DoctorDeps {
      * the report does not depend on the Node that runs the suite.
      */
     nodeVersion?: string;
+    /**
+     * The installed `next` version for the app in the current directory --
+     * feeds the next-minor row. Absent -> no row.
+     */
+    readInstalledNext?: () => string | undefined;
 }
 
 /**
