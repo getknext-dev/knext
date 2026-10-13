@@ -74,7 +74,7 @@ jev_ge() { awk -v x="$1" -v t="$2" 'BEGIN { exit !(x + 0 >= t + 0) }'; }
 #     loose enough to skip those blinds the screen to nearly all real GitHub output.
 #
 # What counts (each alternative is mutation-proved):
-#   * a PEM marker;
+#   * a PEM marker (3+ dashes, optional whitespace, BEGIN; newlines and CRs between them count);
 #   * GitHub tokens: gh[pousr]_ + 36 alnum (and any further token characters: an over-long token is
 #     matched, and so redacted, in full); github_pat_ + 22 or more [A-Za-z0-9_];
 #   * npm_ + 36 alnum; `sk-` + 20 or more (needs a non-alphanumeric before it, so disk-/task-
@@ -93,8 +93,8 @@ jev_ge() { awk -v x="$1" -v t="$2" 'BEGIN { exit !(x + 0 >= t + 0) }'; }
 #   * A real hex secret of exactly 40 or 64 characters is let through (accepted, stated).
 #   * KNOWN LIMIT, accepted: a token split across lines (`ghp_abc<newline>def...`) is matched per
 #     line and is not caught; so is `://host:port/path@x` read as userinfo (over-redacted, harmless).
-#   * PEM: redaction removes the whole block, BEGIN marker through its END line (to the end of the
-#     text when there is no END); the detection rule only needs the marker.
+#   * PEM: redaction removes BEGIN through the LAST END marker (to the end of the text when there is
+#     none, or when that END has no closing dashes); the detection rule only needs the marker.
 #
 # The screen does NOT skip on a hit any more (a skip let an attacker evade it by pasting one fake
 # literal): jev_redact replaces every matched literal with a placeholder and the REDACTED text is
@@ -103,7 +103,7 @@ jev_ge() { awk -v x="$1" -v t="$2" 'BEGIN { exit !(x + 0 >= t + 0) }'; }
 # redaction errors or a literal survives it returns non-zero and the caller falls back to the old
 # skip. pr-risk.sh keeps the skip (it sends no diff content at all).
 JEV_Q="[\"']" # an optional quote around a header value (JSON / shell)
-JEV_LITERAL_RE='-----BEGIN|gh[pousr]_[A-Za-z0-9]{36}[A-Za-z0-9_-]*|github_pat_[A-Za-z0-9_]{22,}|npm_[A-Za-z0-9]{36}[A-Za-z0-9_-]*|(^|[^a-z0-9])sk-[A-Za-z0-9_-]{20,}|xox[bp]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}[A-Za-z0-9_-]*|://[^/@[:space:]]+:[^@[:space:]]+@|authorization'"$JEV_Q"'?[[:space:]]*:[[:space:]]*'"$JEV_Q"'?basic[[:space:]]+[^[:space:]]+|(authorization'"$JEV_Q"'?[[:space:]]*:[[:space:]]*'"$JEV_Q"'?|bearer[[:space:]]+'"$JEV_Q"'?)([A-Za-z]+[[:space:]]+)?([A-Za-z0-9._~+/=-]{16,}|[A-Za-z._~+/=-]*[0-9][A-Za-z0-9._~+/=-]{7,})'
+JEV_LITERAL_RE='---+[[:space:]]*BEGIN|gh[pousr]_[A-Za-z0-9]{36}[A-Za-z0-9_-]*|github_pat_[A-Za-z0-9_]{22,}|npm_[A-Za-z0-9]{36}[A-Za-z0-9_-]*|(^|[^a-z0-9])sk-[A-Za-z0-9_-]{20,}|xox[bp]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}[A-Za-z0-9_-]*|://[^/@[:space:]]+:[^@[:space:]]+@|authorization'"$JEV_Q"'?[[:space:]]*:[[:space:]]*'"$JEV_Q"'?basic[[:space:]]+[^[:space:]]+|(authorization'"$JEV_Q"'?[[:space:]]*:[[:space:]]*'"$JEV_Q"'?|bearer[[:space:]]+'"$JEV_Q"'?)([A-Za-z]+[[:space:]]+)?([A-Za-z0-9._~+/=-]{16,}|[A-Za-z._~+/=-]*[0-9][A-Za-z0-9._~+/=-]{7,})'
 JEV_ENTROPY_RUN_RE='[A-Za-z0-9+=]{32,}'
 JEV_UNICODE_SPACES="$(printf '\302\240|\341\232\200|\342\200[\200-\212]|\342\200\257|\342\201\237|\343\200\200')"
 # _jev_has_nul <file> — true (0) if the file holds a NUL byte OR the test itself failed.
@@ -150,6 +150,8 @@ _jev_secret_check() { # <file>: the text, byte-exact
   # `Authorization:<NBSP>Bearer<NBSP><token>` would stop matching the header rule. U+00A0, U+1680,
   # U+2000-200A, U+202F, U+205F, U+3000 (UTF-8 byte sequences).
   orig=$(sed -E -e "s/$JEV_UNICODE_SPACES/ /g" "$1") || return 0
+  # CR and LF -> space, so a marker (or header) split across a line break matches like a spaced one.
+  orig=$(tr '\r\n' '  ' <<<"$orig") || return 0
   # NO PIPELINES IN THE CHECKS: the callers run under `set -o pipefail`, and `grep -q` exits on the
   # first match while `printf` is still writing a large text, so printf dies of SIGPIPE and
   # pipefail turns a HIT into a failure: a big text with an early secret would be SENT. Here-strings
@@ -204,29 +206,33 @@ _jev_replace_fixed() {
       print line }' "$1" "$2"
 }
 
-# _jev_redact_pem <textfile> — print the text with every PEM block replaced by one placeholder:
-# from the BEGIN marker (case-insensitive, anywhere in a line) through the closing dashes of its
-# END line; with no END, through the end of the text. Text around the block on the same lines stays.
+# _jev_redact_pem <textfile> — print the text with PEM blocks replaced by a placeholder. The marker
+# is loose on purpose (over-redaction is cheap): 3+ dashes, optional whitespace -- newlines and CRs
+# included -- then BEGIN, any case. From a BEGIN marker the redaction runs through the LAST END
+# marker's closing dashes anywhere after it, so a spoofed early END, a nested block or a second
+# block cannot end it early; if that last END has no closing dashes, or there is no END at all, it
+# runs to the end of the text. The whole text is read as ONE record (RS is a byte that is not in
+# text) so a marker split across lines still matches.
 _jev_redact_pem() {
   awk '
-    { line = $0; out = ""
+    BEGIN { RS = "\001" }
+    { t = (NR > 1 ? t "\001" : "") $0 }
+    END {
+      out = ""; rem = t
       while (1) {
-        low = tolower(line)
-        if (inpem) {
-          i = index(low, "-----end")
-          if (i == 0) { line = ""; break }
-          rest = substr(line, i + 8); j = index(rest, "-----")
-          inpem = 0
-          if (j == 0) { line = ""; break }
-          line = substr(rest, j + 5)
-        } else {
-          i = index(low, "-----begin")
-          if (i == 0) break
-          out = out substr(line, 1, i - 1) "[REDACTED]"
-          line = substr(line, i + 10); inpem = 1
+        low = tolower(rem)
+        if (!match(low, /---+[ \t\r\n]*begin/)) { out = out rem; break }
+        b = RSTART; off = b + RLENGTH; e = 0
+        while (match(substr(low, off), /---+[ \t\r\n]*end/)) { e = off + RSTART - 1; elen = RLENGTH; off = e + elen }
+        if (e == 0) { endpos = length(rem) }
+        else {
+          after = substr(low, e + elen)
+          if (match(after, /---+/)) { endpos = e + elen - 1 + RSTART + RLENGTH - 1 } else { endpos = length(rem) }
         }
+        out = out substr(rem, 1, b - 1) "[REDACTED]"
+        rem = substr(rem, endpos + 1)
       }
-      print out line
+      printf "%s", out
     }' "$1"
 }
 

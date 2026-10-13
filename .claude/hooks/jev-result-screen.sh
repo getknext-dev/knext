@@ -61,6 +61,13 @@ trap 'rm -rf "$tmp"' EXIT
 # spinning until killed), so no string operation may touch the full text. `|| true`: head closing
 # the pipe early makes jq die of SIGPIPE, which is not a failure here.
 printf '%s' "$input" | jq -r '[.tool_response | .. | strings] | join("\n")' 2>/dev/null | head -c 131072 >"$tmp/raw.txt" || true
+# The read cap can cut a token in half. Redaction would then shrink the text under the 32 KiB cap and
+# the half-token (no longer a match) would be sent. When the cap was hit, drop the trailing run of
+# non-space characters (the partial token / line tail) before anything else looks at the text.
+if [ "$(wc -c <"$tmp/raw.txt" | tr -d ' ')" -ge 131072 ]; then
+  sed -E '$ s/[^[:space:]]*$//' "$tmp/raw.txt" >"$tmp/raw2.txt" || exit 0
+  mv "$tmp/raw2.txt" "$tmp/raw.txt" || exit 0
+fi
 # A NUL cannot be redacted (bash drops it from a variable) and used to make the hook skip the screen:
 # one NUL byte in attacker text was an evasion. Replace it with a space -- the text is screened as
 # it will be sent, and `a<NUL>sk-...` then has its word boundary and is redacted.
