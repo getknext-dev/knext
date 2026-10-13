@@ -26,10 +26,25 @@ name: CDN purge — kind e2e (tag purge through the emulator)
 #             red leg of rollout-no-old-html and rollout-origin-new-html)
 #   cdn-late  no spec.cdn until the churn step sets it
 #
+# Two more from a second fixture, packages/kn-next/src/__tests__/fixtures/
+# cdn-use-cache-kind-app (Cache Components on, so it cannot share an app with
+# the classic ISR pages above), whose /uc-tagged page takes its ONLY tag from a
+# 'use cache' function (#2302):
+#   cdn-uc     spec.cdn + purge            (built)
+#   cdn-uc-mut spec.cdn + purge            (built against a Next whose 'use cache'
+#              wrapper no longer copies a function's tags into the page entry:
+#              the red leg of purge-use-cache)
+# Both are deployed at the END of the job, after the rollout checks, with small
+# resource requests: on the one kind node, deployed earlier at the default size
+# they left the rollout's new revisions Unschedulable.
+#
 # scripts/cdn-e2e-purge-assert.mjs:
 #   purge-revalidate     HIT -> revalidateTag in the app -> purge of the page's
 #                        tag reaches the emulator -> MISS with a fresh render
 #   purge-isolation      purging app A's tag leaves app B's entry a HIT
+#   purge-use-cache      on cdn-uc: an edge HIT whose Cache-Tag carries the
+#                        'use cache' tag's hash -> revalidateTag -> purge -> MISS
+#                        with a fresh render (ADR-0068 D5.1, #2302)
 #   purge-429-recovery   one 429 with Retry-After, the purger's retry purges
 #   revisions-*          setting spec.cdn on cdn-late creates no new revision on
 #                        cdn-a, cdn-b or cdn-np
@@ -61,6 +76,8 @@ name: CDN purge — kind e2e (tag purge through the emulator)
 #   build's preload): rollout-no-old-html goes red; cdn-mut (stale window
 #   removed from its new build's cache handler): rollout-origin-new-html goes
 #   red; app A standing in for app B: purge-isolation goes red;
+#   cdn-uc-mut (Next's 'use cache' tag propagation removed in its build):
+#   purge-use-cache goes red;
 #   a 400 instead of a 429: purge-429-recovery goes red; cdn-late listed as
 #   "unrelated": revisions-after goes red; the store-all emulator: the
 #   never-cached checks go red.
@@ -81,6 +98,7 @@ on:
       - 'packages/kn-next-operator/internal/controller/cdn.go'
       - 'packages/kn-next-operator/api/v1alpha1/nextapp_types.go'
       - 'packages/kn-next/src/__tests__/fixtures/cdn-kind-app/**'
+      - 'packages/kn-next/src/__tests__/fixtures/cdn-use-cache-kind-app/**'
       - 'packages/kn-next/src/__tests__/fixtures/cdn-emulator/**'
       - 'scripts/cdn-e2e-*'
       - 'scripts/cdn-e2e-red/**'
@@ -169,6 +187,26 @@ jobs:
           echo "APP_DIR=$APP_DIR" >> "$GITHUB_ENV"
           echo "DEPLOY_TAG=cdnp${GITHUB_RUN_ID}-${{ matrix.runtime }}" >> "$GITHUB_ENV"
           mkdir -p "$CDN_STATE_DIR"
+
+      # The 'use cache' fixture (#2302). Its dependencies are COPIED, never
+      # hardlinked (bun's Linux default) from bun's install cache: the red leg
+      # edits Next's own files here, and a hardlink would carry that edit into
+      # every other install of the same Next, cdn-kind-app's included.
+      - name: Stage the 'use cache' fixture app outside the repo + install its dependencies
+        run: |
+          set -euo pipefail
+          UC_APP_DIR="${RUNNER_TEMP}/cdn-uc-app"
+          cp -R packages/kn-next/src/__tests__/fixtures/cdn-use-cache-kind-app "$UC_APP_DIR"
+          cd "$UC_APP_DIR"
+          bun install --backend=copyfile
+          node -e "const v=require('./node_modules/next/package.json').version; if (v !== '16.4.0') { console.error('next is ' + v); process.exit(1) }"
+          mkdir -p public
+          LIB_TGZ="$(find "${TARBALLS_DIR}" -maxdepth 1 -name 'getknext-lib-*.tgz' | sort | tail -n1)"
+          DB_TGZ="$(find "${TARBALLS_DIR}" -maxdepth 1 -name 'getknext-db-*.tgz' | sort | tail -n1)"
+          CORE_TGZ="$(find "${TARBALLS_DIR}" -maxdepth 1 -name 'getknext-core-*.tgz' | sort | tail -n1)"
+          npm install --no-save --no-audit --no-fund "${LIB_TGZ}" "${DB_TGZ}" "${CORE_TGZ}"
+          test -d node_modules/@getknext/core
+          echo "UC_APP_DIR=$UC_APP_DIR" >> "$GITHUB_ENV"
 
       - name: Create kind cluster (registry certs.d config_path)
         run: |
@@ -329,8 +367,14 @@ jobs:
           set -euo pipefail
           cat > "${RUNNER_TEMP}/write-config.sh" <<'SH'
           #!/usr/bin/env bash
-          # write-config.sh <name> <purge|nopurge|none> — knext.config.ts for one app
+          # write-config.sh <name> <purge|nopurge|none> [small] — knext.config.ts for one app
+          # `small`: the 'use cache' apps' requests, so two more apps fit on the one node.
           set -euo pipefail
+          case "${3:-}" in
+            small) SCALING="scaling: { minScale: 1, maxScale: 1, cpuRequest: \"50m\", memoryRequest: \"128Mi\", memoryLimit: \"512Mi\" }," ;;
+            "") SCALING="scaling: { minScale: 1, maxScale: 1, memoryRequest: \"256Mi\", memoryLimit: \"512Mi\" }," ;;
+            *) echo "write-config.sh: unknown size $3" >&2; exit 2 ;;
+          esac
           case "$2" in
             purge) CDN="cdn: { provider: \"emulator\", emulatorEndpoint: \"http://cdn-emulator.${APP_NS}.svc.cluster.local:8081\", htmlTTLSeconds: 3600, purge: { secretRef: { name: \"cdn-purge\", key: \"token\" }, target: \"e2e-zone\" } }," ;;
             nopurge) CDN="cdn: { provider: \"emulator\", emulatorEndpoint: \"http://cdn-emulator.${APP_NS}.svc.cluster.local:8081\", htmlTTLSeconds: 3600 }," ;;
@@ -344,7 +388,7 @@ jobs:
             registry: "localhost:5001",
             healthCheckPath: "/api/health",
             cache: { provider: "redis", url: "redis://redis.${APP_NS}.svc.cluster.local.:6379", keyPrefix: "$1" },
-            scaling: { minScale: 1, maxScale: 1, memoryRequest: "256Mi", memoryLimit: "512Mi" },
+            ${SCALING}
             networking: { publicHosts: ["${PUBLIC_HOST_1}", "${PUBLIC_HOST_2}"] },
             secrets: { envFrom: ["cdn-credentials"] },
             ${CDN}
@@ -566,11 +610,69 @@ jobs:
             bash scripts/cdn-e2e-expect-red.sh foreign-build-stale scripts/cdn-e2e-red/purge-rollout-origin-stale.txt -- \
             node scripts/cdn-e2e-purge-assert.mjs --only rollout-origin-new-html
 
+      # #2302: cdn-uc from the 'use cache' fixture as is; cdn-uc-mut from the same
+      # fixture built against a Next whose 'use cache' wrapper keeps copying a
+      # function's cache life into the page entry but no longer its tags (both
+      # copies of the wrapper: the CommonJS one and the ESM one turbopack
+      # bundles; every anchor asserted exactly once), then restored. Each its own
+      # build tag, so its own build id and image. Last in the job, after the
+      # rollout checks, with small requests (write-config.sh `small`), so the two
+      # apps never take the room the rollout's new revisions need.
+      - name: kn-next deploy the 'use cache' apps (${{ matrix.runtime }})
+        run: |
+          set -euo pipefail
+          cd "$UC_APP_DIR"
+          "$WRITE_CONFIG" cdn-uc purge small
+          node "$CLI" deploy --registry localhost:5001 --namespace "$APP_NS" --tag "${DEPLOY_TAG}-uc"
+          IMAGE_UC="$(kubectl -n "$APP_NS" get nextapp cdn-uc -o jsonpath='{.spec.image}')"
+          case "$IMAGE_UC" in *@sha256:*) ;; *) echo "::error::cdn-uc image is not digest-pinned: $IMAGE_UC"; exit 1 ;; esac
+          WRAPPERS=(
+            "$UC_APP_DIR/node_modules/next/dist/server/use-cache/use-cache-wrapper.js"
+            "$UC_APP_DIR/node_modules/next/dist/esm/server/use-cache/use-cache-wrapper.js"
+          )
+          i=0
+          for w in "${WRAPPERS[@]}"; do
+            cp "$w" "$RUNNER_TEMP/wrapper.orig.$i.js"
+            node "${GITHUB_WORKSPACE}/scripts/cdn-e2e-mutate-preload.mjs" --set use-cache-tags "$w"
+            i=$((i + 1))
+          done
+          # No build cache from cdn-uc's build may stand in for the edited Next.
+          rm -rf "$UC_APP_DIR/.next"
+          "$WRITE_CONFIG" cdn-uc-mut purge small
+          node "$CLI" deploy --registry localhost:5001 --namespace "$APP_NS" --tag "${DEPLOY_TAG}-ucmut"
+          i=0
+          for w in "${WRAPPERS[@]}"; do
+            cp "$RUNNER_TEMP/wrapper.orig.$i.js" "$w"
+            i=$((i + 1))
+          done
+          IMAGE_UC_MUT="$(kubectl -n "$APP_NS" get nextapp cdn-uc-mut -o jsonpath='{.spec.image}')"
+          if [ "$IMAGE_UC_MUT" = "$IMAGE_UC" ]; then
+            echo "::error::the mutated 'use cache' build produced cdn-uc's image"; exit 1
+          fi
+          for app in cdn-uc cdn-uc-mut; do
+            kubectl -n "$APP_NS" wait --for=condition=Ready --timeout=300s "nextapp/$app" \
+              || (kubectl -n "$APP_NS" get nextapp,ksvc,pods -o wide; kubectl -n "$APP_NS" describe "nextapp/$app"; exit 1)
+            curl -fsS -o /dev/null -H "Host: ${app}.${APP_NS}.svc.cluster.local" -H 'x-emu-bypass: 1' \
+              --retry 10 --retry-all-errors --max-time 60 http://127.0.0.1:18080/api/health
+          done
+
+      # #2302 (ADR-0068 D5.1): a page tagged ONLY through 'use cache' is edge-cached
+      # with that tag and purged by revalidateTag. The red leg is cdn-uc-mut, built
+      # against a Next that does not copy 'use cache' tags into the page entry:
+      # its page is still edge-cached (its _N_T_ tags pass condition 8), without
+      # the 'use cache' tag, so the check must see the tag missing.
+      - name: Assert purge — a page tagged only through 'use cache'
+        run: |
+          set -euo pipefail
+          node scripts/cdn-e2e-purge-assert.mjs --only purge-use-cache
+          CDN_APP_UC=cdn-uc-mut bash scripts/cdn-e2e-expect-red.sh use-cache-untagged scripts/cdn-e2e-red/purge-use-cache-untagged.txt -- \
+            node scripts/cdn-e2e-purge-assert.mjs --only purge-use-cache
+
       - name: Dump state on failure
         if: failure()
         run: |
           kubectl -n "$APP_NS" get nextapp,ksvc,revisions,pods -o wide || true
-          for app in cdn-a cdn-b cdn-np cdn-mut cdn-late; do
+          for app in cdn-a cdn-b cdn-np cdn-mut cdn-late cdn-uc cdn-uc-mut; do
             kubectl -n "$APP_NS" logs -l "serving.knative.dev/service=${app}" -c user-container --tail=60 --prefix || true
           done
           kubectl -n "$APP_NS" logs deploy/cdn-emulator --tail=50 || true

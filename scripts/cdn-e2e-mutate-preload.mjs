@@ -33,10 +33,31 @@
  *
  *   node scripts/cdn-e2e-mutate-preload.mjs --set foreign-stale --locate <dist>
  *   node scripts/cdn-e2e-mutate-preload.mjs --set foreign-stale <that file>
+ *
+ * `--set use-cache-tags` (the purge lane's 'use cache' red leg, #2302) targets
+ * NEXT itself, in the staged 'use cache' fixture's own install: its 'use cache'
+ * wrapper (`dist/server/use-cache/use-cache-wrapper.js` and the ESM copy under
+ * `dist/esm/`) stops copying a 'use cache' function's tags into the enclosing
+ * page entry, while still copying its cache life. The page stays an ISR page
+ * with its `_N_T_` tags, so the edge still caches it, just without the
+ * 'use cache' tag: exactly the case ADR-0068 D5.1 assumes away. A build carrying
+ * it must red `purge-use-cache`.
+ *
+ * Every write replaces the file (a new inode, renamed into place) rather than
+ * rewriting it, so a file hardlinked from a shared install cache (bun's default
+ * on Linux) is never mutated through the link.
  */
 
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -108,13 +129,38 @@ export const FOREIGN_STALE_MUTATIONS = [
 export const FOREIGN_STALE_MARKER =
   '/* KNEXT_E2E_MUTATED: cache-handler foreign-build stale window removed, test-only */';
 
-/** name -> [mutations, marker, module syntax of the target]. */
+/**
+ * The purge lane's 'use cache' red leg: Next's
+ * `propagateCacheLifeAndTagsToRevalidateStore` keeps the cache life it copies
+ * into the enclosing page and drops the tags.
+ */
+export const USE_CACHE_TAGS_MUTATIONS = [
+  ['use_cache_tag_propagation', 'outerTags.push(tag);', '/* tag not propagated */'],
+];
+export const USE_CACHE_TAGS_MARKER =
+  "/* KNEXT_E2E_MUTATED: next 'use cache' tag propagation removed, test-only */";
+
+/**
+ * name -> [mutations, marker, module syntax of the target]. `by-path`: ESM when
+ * the file sits under a `dist/esm/` tree, CommonJS otherwise.
+ */
 const SETS = {
   allowlist: [MUTATIONS, MARKER, 'cjs'],
   'foreign-build': [FOREIGN_BUILD_MUTATIONS, FOREIGN_BUILD_MARKER, 'cjs'],
   'foreign-stale': [FOREIGN_STALE_MUTATIONS, FOREIGN_STALE_MARKER, 'esm'],
+  'use-cache-tags': [USE_CACHE_TAGS_MUTATIONS, USE_CACHE_TAGS_MARKER, 'by-path'],
 };
-const MARKERS = [MARKER, FOREIGN_BUILD_MARKER, FOREIGN_STALE_MARKER];
+const MARKERS = [MARKER, FOREIGN_BUILD_MARKER, FOREIGN_STALE_MARKER, USE_CACHE_TAGS_MARKER];
+
+/**
+ * Replace `target` with `content`: write a sibling, then rename it into place,
+ * so the target gets a new inode and any hardlink to the old one keeps its bytes.
+ */
+function replaceFile(target, content) {
+  const tmp = `${target}.knext-e2e-${process.pid}.tmp`;
+  writeFileSync(tmp, content, { mode: statSync(target).mode });
+  renameSync(tmp, target);
+}
 
 /** Every JavaScript file under `dir` (source maps excluded), recursively. */
 function jsFiles(dir) {
@@ -190,7 +236,7 @@ function main(argv) {
   const target = args[0];
   if (!set || !target) {
     console.error(
-      'usage: cdn-e2e-mutate-preload.mjs [--set allowlist|foreign-build|foreign-stale] [--locate <dir>] <file>',
+      'usage: cdn-e2e-mutate-preload.mjs [--set allowlist|foreign-build|foreign-stale|use-cache-tags] [--locate <dir>] <file>',
     );
     return 2;
   }
@@ -213,7 +259,8 @@ function main(argv) {
   try {
     mutated = mutate(source, mutations, marker);
     // Syntax check only.
-    if (syntax === 'esm') checkEsm(mutated, target);
+    const esm = syntax === 'esm' || (syntax === 'by-path' && /[\\/]dist[\\/]esm[\\/]/.test(target));
+    if (esm) checkEsm(mutated, target);
     else
       new Script(`(function (exports, require, module, __filename, __dirname) {${mutated}\n})`, {
         filename: target,
@@ -222,7 +269,7 @@ function main(argv) {
     console.error(`::error::refusing to write a mutated preload: ${err.message}`);
     return 1;
   }
-  writeFileSync(target, mutated);
+  replaceFile(target, mutated);
   console.log(`mutated ${target}: ${mutations.map(([n]) => n).join(', ')}`);
   return 0;
 }

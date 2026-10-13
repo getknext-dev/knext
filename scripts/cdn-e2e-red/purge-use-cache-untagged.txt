@@ -1,0 +1,8 @@
+# cdn-uc-mut: the 'use cache' fixture built against a Next whose 'use cache'
+# wrapper no longer copies a function's tags into the page entry
+# (scripts/cdn-e2e-mutate-preload.mjs --set use-cache-tags). Its page is still
+# edge-cached on its _N_T_ tags, without the 'use cache' tag, so revalidateTag
+# of that tag cannot purge it: the check must see the tag missing at the edge.
+purge-use-cache|the 'use cache' tag did not make the page purgeable at the edge
+purge-use-cache|the edge HIT's Cache-Tag lacks
+purge-use-cache|the edge still served the page after revalidateTag
