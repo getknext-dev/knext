@@ -430,8 +430,12 @@ describe('foreign-stale mutation (the cache handler, scripts/cdn-e2e-mutate-prel
 
   /** The handler as esbuild (tsup's bundler) emits it for the node entry. */
   async function bundled(): Promise<string> {
+    // esbuild is @getknext/core's dev dependency, not the root's: resolved from
+    // there, and typed locally (the root typecheck cannot see its types).
     const req = createRequire(join(ROOT, 'packages/kn-next/package.json'));
-    const { build } = req('esbuild') as typeof import('esbuild');
+    const { build } = req('esbuild') as {
+      build(options: Record<string, unknown>): Promise<{ outputFiles: { text: string }[] }>;
+    };
     const out = await build({
       entryPoints: [HANDLER_NODE],
       bundle: true,
