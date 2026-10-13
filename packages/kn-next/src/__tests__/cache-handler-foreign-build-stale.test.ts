@@ -448,11 +448,21 @@ describe("the stale window is for page and route entries only", () => {
         setSystemTime();
     });
 
-    async function foreignRead(kind: string, value: Record<string, unknown>) {
+    /** `readCtx: null` reads with no ctx at all, as vinext does. */
+    async function foreignRead(
+        kind: string,
+        value: Record<string, unknown>,
+        readCtx?: Record<string, unknown> | null,
+    ) {
         const redis = sharedRedis();
         const modA = await handlerModule(redis);
         const a = new modA.default({ serverDistDir: DIST[BUILD_A] });
-        const ctx = kind === "FETCH" ? { kind: "FETCH", tags: [] } : { kind };
+        const ctx =
+            readCtx !== undefined
+                ? readCtx
+                : kind === "FETCH"
+                  ? { kind: "FETCH", tags: [] }
+                  : { kind };
         await a.set(
             "/k",
             value,
@@ -464,7 +474,7 @@ describe("the stale window is for page and route entries only", () => {
         clock().advance(A_STOPPED_MS);
         const modB = await handlerModule(redis);
         const b = new modB.default({ serverDistDir: DIST[BUILD_B] });
-        return b.get("/k", ctx);
+        return ctx === null ? b.get("/k") : b.get("/k", ctx);
     }
 
     for (const [kind, value] of [
@@ -501,5 +511,42 @@ describe("the stale window is for page and route entries only", () => {
         });
         expect(got).not.toBeNull();
         expect(got?.cacheControl).toEqual({ revalidate: 60 });
+    });
+
+    // Not a build's HTML: another build's image variant or redirect keeps the
+    // withhold behaviour (no window handed back), never the expired one that
+    // would re-optimize every image after a deploy.
+    for (const [kind, value] of [
+        [
+            "IMAGE",
+            {
+                kind: "IMAGE",
+                etag: "e1",
+                buffer: Buffer.from("img"),
+                extension: "webp",
+                upstreamEtag: "u1",
+                revalidate: 60,
+            },
+        ],
+        ["REDIRECT", { kind: "REDIRECT", props: { destination: "/x" } }],
+    ] as const) {
+        it(`${kind} is untouched: the stored window is withheld, not replaced by an expired one`, async () => {
+            const got = await foreignRead(kind, value);
+            expect(got).not.toBeNull();
+            expect(got?.cacheControl).toBeUndefined();
+        });
+    }
+
+    it("a read with no ctx (vinext) is untouched: the stored window comes back as written", async () => {
+        const got = await foreignRead(
+            "APP_PAGE",
+            { kind: "APP_PAGE", html: "x", headers: {}, status: 200 },
+            null,
+        );
+        expect(got).not.toBeNull();
+        expect(got?.cacheControl).toEqual({
+            revalidate: 3600,
+            expire: ONE_YEAR_S,
+        });
     });
 });

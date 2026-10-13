@@ -1194,7 +1194,12 @@ const FOREIGN_BUILD_STALE_SECONDS = 1;
 
 function isForeignBuildPageRead(entry, ctx) {
   if (!entry || typeof entry !== 'object' || currentBuildId === undefined) return false;
-  if (typeof ctx?.kind !== 'string' || ctx.kind === 'FETCH') return false;
+  // vinext reads without a ctx and reads the window itself.
+  if (typeof ctx?.kind !== 'string') return false;
+  // Decided by the STORED entry's kind: only page and route bodies are a
+  // build's HTML. This also excludes the FETCH data cache (its value kind maps
+  // to 'fetch'; Next rejects a FETCH ctx over a page value), images and
+  // redirects, so no separate ctx.kind check is needed.
   const kind = cdnSeamKind(entry.value?.kind);
   if (kind !== 'page' && kind !== 'route') return false;
   return entry.buildId !== currentBuildId;

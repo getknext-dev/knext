@@ -50,9 +50,10 @@ alone, so a new kind of response is uncached until it has been shown safe.
 - The page's own cache entry was recorded with its tags (including its path tag), and the tags fit
   the provider's limits. Over the limit means not cached, never truncated.
 - The page's cache entry was written by the build that is serving it. Cached pages are shared across
-  builds, so the first request for a page after a deploy may get the previous page once while a
-  fresh copy renders. That response goes to the browser but is not edge-cached. The fresh copy the
-  new build renders is edge-cached as usual.
+  builds, so after a deploy your origin can keep serving a page the previous build rendered for about
+  two minutes after the previous build stops serving, and then once more while a fresh copy renders.
+  Those responses go to the browser but are not edge-cached. The fresh copy the new build renders is
+  edge-cached as usual.
 - Hashed build assets (`immutable`) keep Next.js's own long-lived header and are neither tagged nor
   purged.
 - Redirects (3xx) are never edge-cached.

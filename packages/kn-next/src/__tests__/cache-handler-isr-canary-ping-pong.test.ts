@@ -5,9 +5,14 @@
  *
  * `scopeWindowToBuild` (#1888) withholds the stored revalidate window of an
  * entry ANOTHER build wrote, so a redeploy never honours the previous build's
- * window. Next then treats the entry as stale, serves the body and regenerates
- * it in the background, and the regenerated entry is written back under its OWN
- * build id. ISR keys are route paths shared by every revision of the app, so
+ * window. For a route the prerender manifest does not list (the case here: the
+ * manifest below is empty), Next then falls back to its 1 s window, so it treats
+ * the entry as stale, serves the body and regenerates it in the background, and
+ * the regenerated entry is written back under its OWN build id. (For a route
+ * the manifest DOES list, withholding alone left the entry a fresh HIT for the
+ * manifest's window; since #2305 the handler hands such an entry back with an
+ * expired window instead, see cache-handler-foreign-build-stale.test.ts.)
+ * ISR keys are route paths shared by every revision of the app, so
  * under `spec.traffic.canaryPercent` (two builds serving the same keys for as
  * long as the split lasts) build A strips B's window and rewrites the entry as A,
  * then B strips A's and rewrites it as B: a regeneration on nearly every read,
@@ -17,7 +22,8 @@
  * ## The fix under test
  *
  * A foreign entry's window is honoured while the build that wrote it is LIVE
- * (it refreshed a short-lived `build-live` key recently) and withheld otherwise.
+ * (it refreshed a short-lived `build-live` key recently); otherwise the entry
+ * is stale (since #2305 a page or route entry gets an expired window).
  * A canary peer is live, so nothing ping-pongs; a build that has been replaced
  * is not, so the #1888 guarantee holds once the rollout (or rollback) completes.
  *
@@ -416,7 +422,7 @@ describe("ISR under a canary split does not ping-pong (#2254)", () => {
         expect((await b.request("/isr/bound", false)).stale).toBe(true);
     });
 
-    it("fails closed: a liveness lookup that faults withholds the window, as before the fix", async () => {
+    it("fails closed: a liveness lookup that faults reads as not live, so the entry is stale and re-rendered once", async () => {
         const redis = sharedRedis();
         const a = await pod(redis, BUILD_A);
         await a.request("/isr/fault");
@@ -426,6 +432,14 @@ describe("ISR under a canary split does not ping-pong (#2254)", () => {
         const { entry, stale } = await b.request("/isr/fault");
         expect(entry).not.toBeNull();
         expect(stale).toBe(true);
+        // The bound: one re-render per page per pod. The re-rendered entry is
+        // B's own, so later reads, with the lookup still faulting, are fresh.
+        const time = clock();
+        for (let i = 0; i < 5; i++) {
+            time.advance(2000);
+            await b.request("/isr/fault");
+        }
+        expect(b.regenerations).toBe(1);
     });
 
     it("looks a peer build up once per few seconds, not once per read", async () => {

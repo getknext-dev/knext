@@ -2,8 +2,11 @@
 
 - **Status:** **Accepted with Amendment 1 (2026-10-11); Amendment 2 (2026-10-12) Proposed; Amendment 3 (2026-10-13) Proposed.** Proposed 2026-10-10 and revised in review
   round 2 the same day; accepted at the Sprint 2 close design review (jev 0.98). D1–D5 stand as
-  written, except where Amendment 1 (end of this file) supersedes a line. Design and sequencing only;
-  no code lands with this ADR.
+  written, except where an amendment (end of this file) supersedes a line: Amendment 1 (Accepted:
+  K4 keeps the `adapterPath` shim), Amendment 2 (Proposed: a live build's window is honoured) and
+  Amendment 3 (Proposed: a non-live build's page or route entry is handed back stale; it corrects
+  Amendment 2 §1 and one of its accepted risks). Design and sequencing only; no code lands with this
+  ADR.
 - **Date:** 2026-10-10
 - **Trigger class:** ADR + hard rule ("don't rewrite the runtime twice"; "gate every feature on the
   official compatibility suite") + public API (the `'use cache'` backend export and its adapter
@@ -843,7 +846,12 @@ the accepted risk "entries ping-pong until the rollout completes" with the bound
 
 1. **The defect.** The Next >= 16.4 read path withholds the stored `cacheControl` of any ISR entry
    another build wrote (#1888), so Next treats it as stale and regenerates it; the regenerated entry is
-   written under its own build id. ISR keys are route paths shared by every revision. That is
+   written under its own build id. **[Superseded by Amendment 3.** This sentence is wrong for any
+   route in the prerender manifest: with the window withheld, Next applies the manifest's window
+   from the old entry's `lastModified`, so the entry stays a fresh `HIT` for that window (forever for
+   `revalidate: false`). It holds only for routes the manifest does not list, which is the case the
+   ping-pong below was observed on. Amendment 3 replaces the withhold with an expired window for a
+   non-live build's page and route entries.**]** ISR keys are route paths shared by every revision. That is
    harmless for one rollout, but `spec.traffic { revisionName, canaryPercent: 1..99 }` (`knext
    rollback --to X --canary N`) keeps two builds serving the same keys for as long as the split is
    left in place, typically during a rollback. Build A strips B's window and rewrites the entry as A;
@@ -887,6 +895,8 @@ the accepted risk "entries ping-pong until the rollout completes" with the bound
   minority build honours the result on its next request. Cost bounded by that build's request rate,
   not the majority's.
 - **A Redis fault on the liveness lookup withholds the window**, i.e. the pre-amendment behaviour.
+  **[Superseded by Amendment 3:** for page and route entries a fault now forces the entry stale;
+  see Amendment 3's accepted risks.**]**
 - **PPR entries still alternate under a split.** Resume state is build-specific (#2084), so each
   build misses on an entry the other wrote last. A per-build key for `postponed` entries is the
   remedy and is filed as follow-up work, not done here.
@@ -962,6 +972,15 @@ every entry stale 0.01).
   re-render's `set` replaces it with the page's own window. If that re-render fails, the route keeps
   the 1 s window in that process, and the next read retries the render, which is Next's ordinary
   behaviour for a failed revalidation.
+- **A Redis fault on the liveness lookup now forces the entry stale** (this replaces Amendment 2's
+  "a fault withholds the window, i.e. the pre-amendment behaviour", which is no longer true).
+  `isBuildLive` fails closed, so a lookup that faults reads as "not live", and a page or route entry
+  a live peer build wrote is handed back with the expired window and re-rendered once. Bound: one
+  background render per page per pod, the same bound as ordinary ISR staleness, and the body is
+  served meanwhile; the re-rendered entry is this build's own, so it is not re-checked. Under a
+  canary split with a lookup that keeps faulting, the two builds re-render each other's entries,
+  which is Amendment 2's ping-pong (at most about one render per second per key) for as long as the
+  fault lasts.
 - **An entry younger than 1 s from a non-live writer is still fresh for that second.** Every write
   refreshes the writer's 90 s liveness record, so a non-live writer's entries are at least about 90 s
   old in practice.
