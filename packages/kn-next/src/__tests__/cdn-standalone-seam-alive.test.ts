@@ -325,11 +325,16 @@ async function serve(
  * process's loopback listener into it.
  */
 async function supervise(b: Built, runtime: "node" | "bun") {
-    const metricsPort = await freePort();
+    // The supervisor binds its own default, exactly as in a pod: no override.
+    // So the port must be free; a taken one is a failure, never a skip.
+    expect(
+        await portIsFree(SHIPPED_METRICS_PORT),
+        `:${SHIPPED_METRICS_PORT} is already in use on this machine; the test needs the shipped metrics port`,
+    ).toBe(true);
     const { env, port, childMetricsPort } = await appEnv({
         STANDALONE_SERVER_PATH: b.serverJs,
-        METRICS_PORT: String(metricsPort),
     });
+    delete env.METRICS_PORT;
     const log = await launch(
         runtimeBin(runtime),
         [DIST_SUPERVISOR],
@@ -337,7 +342,38 @@ async function supervise(b: Built, runtime: "node" | "bun") {
         env,
         port,
     );
-    return { port, metricsPort, childMetricsPort, log };
+    const child = children[children.length - 1] as ChildProcess;
+    /** Kill the supervisor's process group and wait until the port is free again. */
+    const stop = async () => {
+        const exited = new Promise<void>((r) => {
+            if (child.exitCode !== null || child.signalCode !== null) r();
+            else child.once("exit", () => r());
+        });
+        killTree(child);
+        await exited;
+        for (let i = 0; i < 50; i++) {
+            if (await portIsFree(SHIPPED_METRICS_PORT)) return;
+            await new Promise((r) => setTimeout(r, 100));
+        }
+    };
+    return {
+        port,
+        metricsPort: SHIPPED_METRICS_PORT,
+        childMetricsPort,
+        log,
+        stop,
+    };
+}
+
+/** The metrics port the supervisor binds when `METRICS_PORT` is unset. */
+const SHIPPED_METRICS_PORT = 9464;
+
+function portIsFree(port: number): Promise<boolean> {
+    return new Promise((res) => {
+        const srv = createServer();
+        srv.once("error", () => res(false));
+        srv.listen(port, "0.0.0.0", () => srv.close(() => res(true)));
+    });
 }
 
 async function scrape(port: number): Promise<string> {
@@ -436,60 +472,69 @@ for (const runtime of ["node", "bun"] as const) {
             const b = await buildApp();
             const s = await supervise(b, runtime);
 
-            // Up to three requests: the ISR page is edge-cacheable by the
-            // second or third (see the seam test above).
-            for (let i = 0; i < 3; i++) {
-                const r = await get(s.port, "/tagged");
-                expect(r.status, tail(s.log())).toBe(200);
-                if (r.header(EDGE) !== undefined) break;
-            }
+            try {
+                // Up to three requests: the ISR page is edge-cacheable by the
+                // second or third (see the seam test above).
+                for (let i = 0; i < 3; i++) {
+                    const r = await get(s.port, "/tagged");
+                    expect(r.status, tail(s.log())).toBe(200);
+                    if (r.header(EDGE) !== undefined) break;
+                }
 
-            // The instrumentation starts the loopback listener asynchronously, so
-            // poll; the counters must appear well within the deadline.
-            const deadline = Date.now() + 20_000;
-            let child = "";
-            let port9464 = "";
-            while (Date.now() < deadline) {
-                child = await scrape(s.childMetricsPort);
-                port9464 = await scrape(s.metricsPort);
-                if (
-                    decisions(child).includes("edge/allowed") &&
-                    decisions(port9464).includes("edge/allowed")
-                )
-                    break;
-                await new Promise((r) => setTimeout(r, 250));
-            }
+                // The instrumentation starts the loopback listener asynchronously, so
+                // poll; the counters must appear well within the deadline.
+                const deadline = Date.now() + 20_000;
+                let child = "";
+                let port9464 = "";
+                while (Date.now() < deadline) {
+                    child = await scrape(s.childMetricsPort);
+                    port9464 = await scrape(s.metricsPort);
+                    if (
+                        decisions(child).includes("edge/allowed") &&
+                        decisions(port9464).includes("edge/allowed")
+                    )
+                        break;
+                    await new Promise((r) => setTimeout(r, 250));
+                }
 
-            // The server process's loopback listener (what the seam feeds)...
-            expect(
-                decisions(child),
-                `no CDN decision on the loopback listener:\n${child}\n${tail(s.log())}`,
-            ).toContain("edge/allowed");
-            expect(child).toMatch(/^knext_cdn_foreign_edge_strip_total 0$/m);
-
-            // ...and the app's metrics port, served by the separate supervisor.
-            expect(
-                decisions(port9464),
-                `no CDN decision on the metrics port:\n${port9464}\n${tail(s.log())}`,
-            ).toContain("edge/allowed");
-            expect(port9464).toMatch(
-                /^# TYPE knext_cdn_edge_decision_total counter$/m,
-            );
-            expect(port9464).toMatch(/^knext_cdn_foreign_edge_strip_total 0$/m);
-            // One exposition: each CDN family is declared exactly once.
-            for (const family of [
-                "knext_cdn_edge_decision_total",
-                "knext_cdn_foreign_edge_strip_total",
-            ]) {
+                // The server process's loopback listener (what the seam feeds)...
                 expect(
-                    port9464.match(new RegExp(`^# TYPE ${family} `, "gm"))
-                        ?.length,
-                    family,
-                ).toBe(1);
+                    decisions(child),
+                    `no CDN decision on the loopback listener:\n${child}\n${tail(s.log())}`,
+                ).toContain("edge/allowed");
+                expect(child).toMatch(
+                    /^knext_cdn_foreign_edge_strip_total 0$/m,
+                );
+
+                // ...and the app's metrics port, served by the separate supervisor.
+                expect(
+                    decisions(port9464),
+                    `no CDN decision on the metrics port:\n${port9464}\n${tail(s.log())}`,
+                ).toContain("edge/allowed");
+                expect(port9464).toMatch(
+                    /^# TYPE knext_cdn_edge_decision_total counter$/m,
+                );
+                expect(port9464).toMatch(
+                    /^knext_cdn_foreign_edge_strip_total 0$/m,
+                );
+                // One exposition: each CDN family is declared exactly once.
+                for (const family of [
+                    "knext_cdn_edge_decision_total",
+                    "knext_cdn_foreign_edge_strip_total",
+                ]) {
+                    expect(
+                        port9464.match(new RegExp(`^# TYPE ${family} `, "gm"))
+                            ?.length,
+                        family,
+                    ).toBe(1);
+                }
+                // The supervisor's own process metrics are still there: a merge, not
+                // a replacement.
+                expect(port9464).toMatch(/^# TYPE process_cpu_seconds_total /m);
+            } finally {
+                // Frees the shipped port for the next runtime's run.
+                await s.stop();
             }
-            // The supervisor's own process metrics are still there: a merge, not
-            // a replacement.
-            expect(port9464).toMatch(/^# TYPE process_cpu_seconds_total /m);
         }, 300_000);
     });
 }
