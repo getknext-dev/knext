@@ -474,8 +474,9 @@ jobs:
             i=$((i + 1))
           done
           IMAGE_MUT="$(kubectl -n "$APP_NS" get nextapp cdn-mut -o jsonpath='{.spec.image}')"
-          [ "$IMAGE_MUT" != "$IMAGE2" ] && [ "$IMAGE_MUT" != "$IMAGE" ] \
-            || { echo "::error::the mutated build produced an existing image"; exit 1; }
+          if [ "$IMAGE_MUT" = "$IMAGE2" ] || [ "$IMAGE_MUT" = "$IMAGE" ]; then
+            echo "::error::the mutated build produced an existing image"; exit 1
+          fi
           # Ready on the NEW revision, with all traffic on it.
           for pair in "cdn-a:$old_a" "cdn-np:$old_np" "cdn-mut:$old_mut"; do
             app="${pair%%:*}"; old="${pair#*:}"
