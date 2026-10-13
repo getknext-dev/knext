@@ -8,16 +8,21 @@
 > 2026-10-13), the floor `packages/kn-next/src/next-compat.ts` declares and the version
 > `knext create` scaffolds, so the harness and the scaffold agree again.
 > `tests/next-compat-e2e-deploy-ref.test.ts` reds if `test-e2e-deploy.yml`'s defaults drift from
-> that floor. **Evidence at v16.4.0 is one dispatched node × turbopack run, 38384745675: 1160 of
-> 1168 test files passed.** All eight reds are triaged in #2296:
+> that floor. **Evidence at v16.4.0 is two dispatched node × turbopack runs.** Run 38384745675
+> passed 1160 of 1168 test files, and all eight reds are triaged in #2296:
 > - Five files pin a React prerelease (`gssp-redirect`, `gssp-redirect-base-path`,
 >   `router-hash-navigation`, `rewrite-with-browser-history`, `scroll-back-restoration`), and npm
 >   refused the tarball install with ERESOLVE. This was a harness fault, fixed in `e2e-deploy.sh`
 >   with a retry that applies only on ERESOLVE.
-> - In `transpile-packages-typescript-foreign`, npm re-pointed a `file:` dependency at its
->   source. This was a harness fault, fixed in `e2e-deploy.sh`.
+> - `transpile-packages-typescript-foreign` is a harness gap, **still open as #2316**. In deploy
+>   mode the fixture expects the platform to run `pnpm install` (its `vercel.json`), which copies
+>   `file:` deps into `node_modules`. `e2e-deploy.sh`'s npm install symlinks them to the source
+>   instead.
 > - Two files deploy a static export (`middleware-src`, `middleware-src-node`), so they are
 >   excluded under the existing `static-export` category.
+>
+> **Confirm run 38392886692** ran on the PR branch with the ERESOLVE fix and the exclusions:
+> 1165 of 1166 passed. The one red is `transpile-packages-typescript-foreign` (#2316).
 >
 > No credential window runs at v16.4.0 yet, and the webpack and bun cells have not been dispatched
 > there. The v1.0 credential on `main` still runs v16.3.8 from the pinned rc tag. The eight

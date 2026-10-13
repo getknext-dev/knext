@@ -56,9 +56,9 @@ too, rather than left implied.
   on the 1.x line of knext to keep using them. The upper bound is widened one minor at a time as
   compatibility evidence lands; see [Versioning](/docs/versioning).
 - **The official compatibility suite runs against `v16.4.0`**, the same release new apps
-  scaffold. What is proven there so far is one dispatched run of the Turbopack build on the Node
-  runtime. Every failure in that run was traced to the test harness or to static export, which
-  knext does not serve. The other three cells have not yet been run at `v16.4.0`, and no cell has
+  scaffold. What is proven there so far is dispatched runs of the Turbopack build on the Node runtime.
+  The latest passed 1165 of 1166 test files, and the one failure is a test-setup gap, not a knext
+  defect. The other three cells have not yet been run at `v16.4.0`, and no cell has
   started its 14-consecutive-run credential there. See
   [the compatibility credential](/docs/compat-suite) and the
   [Compatibility matrix](/docs/compat-matrix) for the exact counts and for what each cell has passed.
