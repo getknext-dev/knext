@@ -878,10 +878,14 @@ describe.each([
         const f = await withRedis();
         const { useCache } = await pod();
         const before = counters().oversize ?? 0;
+        // Chunks keep coming after the one that crosses the ceiling: those must
+        // be read too, not just the end-of-stream.
         const { stream, seen } = spiedStream([
             "x".repeat(1024 * 1024),
             "x".repeat(1024 * 1024),
             "x",
+            "after-1",
+            "after-2",
         ]);
         await useCache.set("big", Promise.resolve(entryOf({ value: stream })));
         expect(f.strings.has(`${PREFIX}:uc:default:big`)).toBe(false);
