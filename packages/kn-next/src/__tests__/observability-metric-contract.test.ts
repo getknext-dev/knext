@@ -198,15 +198,16 @@ const STANDALONE_SC = seriesNames(
 
 /**
  * The CDN purge module's counter (ADR-0068 D6.5), rendered by a fresh registry
- * of the module itself. On the standalone server it reaches the app's metrics
- * port in CDN mode (the CDN metrics seam), but no alert or dashboard depends on
- * it, so it is in no alert's or dashboard's allowed emitters. Only the docs side
- * (S5) names it.
+ * of the module itself after one counted purge, so the family has a sample line
+ * to check. On the standalone server it reaches the app's metrics port in CDN
+ * mode (the CDN metrics seam), but no alert or dashboard depends on it, so it is
+ * in no alert's or dashboard's allowed emitters. Only the docs side (S5) names it.
  */
-const { createMetricsRegistry: createPurgeRegistry } = await import(
-    "../adapters/cdn-purge/metrics.js"
-);
-const CDN_PURGE = seriesNames(parseExposition(createPurgeRegistry().render()));
+const { createMetricsRegistry: createPurgeRegistry, PURGE_METRIC } =
+    await import("../adapters/cdn-purge/metrics.js");
+const purgeRegistry = createPurgeRegistry();
+purgeRegistry.inc(PURGE_METRIC, { provider: "cloudflare", result: "ok" });
+const CDN_PURGE = seriesNames(parseExposition(purgeRegistry.render()));
 
 /**
  * The CDN edge-decision module's counters (ADR-0068 D6.5, Amendment 2): the
