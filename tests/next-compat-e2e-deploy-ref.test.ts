@@ -59,7 +59,7 @@ describe("the compat harness tests this line's own Next floor (#2296)", () => {
   });
 
   it('self-test: the env-fallback parser needs exactly one trusted assignment', () => {
-    const line = "  NEXTJS_REF: ${{ github.event.inputs.nextjsRef || 'v9.9.9' }}\n";
+    const line = `  NEXTJS_REF: \${{ github.event.inputs.nextjsRef || 'v9.9.9' }}\n`;
     expect(envFallbackRef(line)).toBe('v9.9.9');
     expect(envFallbackRef(`${line}${line}`)).toBeUndefined();
     expect(envFallbackRef(`# ${line}`)).toBeUndefined();

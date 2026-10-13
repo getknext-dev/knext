@@ -55,11 +55,13 @@ too, rather than left implied.
   declares it will work with. Next.js 16.0 through 16.3 are no longer supported from knext 2.0; stay
   on the 1.x line of knext to keep using them. The upper bound is widened one minor at a time as
   compatibility evidence lands; see [Versioning](/docs/versioning).
-- **The compatibility credential window currently runs against `v16.3.8`**, while new apps
-  scaffold `16.4.0`; the credential moves to the newer release once it has been re-credentialed
-  there. See [the compatibility credential](/docs/compat-suite) and the
-  [Compatibility matrix](/docs/compat-matrix) for exactly which official-suite cells have
-  passed at that version and which are still accumulating the 14-consecutive-run credential.
+- **The official compatibility suite runs against `v16.4.0`**, the same release new apps
+  scaffold. What is proven there so far is one dispatched run of the Turbopack build on the Node
+  runtime. Every failure in that run was traced to the test harness or to static export, which
+  knext does not serve. The other three cells have not yet been run at `v16.4.0`, and no cell has
+  started its 14-consecutive-run credential there. See
+  [the compatibility credential](/docs/compat-suite) and the
+  [Compatibility matrix](/docs/compat-matrix) for the exact counts and for what each cell has passed.
 - A version between the peer floor and the credentialed release is expected to work — Next's own
   minor-version compatibility — but is not independently gated by knext's CI.
 

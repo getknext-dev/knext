@@ -4,13 +4,30 @@
 > real, on-disk evidence and a mechanical guard test (`tests/compat-matrix.test.ts`) fails CI if a
 > ✅ ("supported") row cannot be backed up. When in doubt we mark ⚠️, not ✅.
 >
-> **Note (v2 line): `knext create` now scaffolds the 16.4.x line, a newer Next.js release than this credential window covers, until the credential ref moves.**
+> **On the 2.x line the harness now runs against `vercel/next.js` **v16.4.0**** (#2296,
+> 2026-10-13), the floor `packages/kn-next/src/next-compat.ts` declares and the version
+> `knext create` scaffolds, so the harness and the scaffold agree again.
+> `tests/next-compat-e2e-deploy-ref.test.ts` reds if `test-e2e-deploy.yml`'s defaults drift from
+> that floor. **Evidence at v16.4.0 is one dispatched node × turbopack run, 38384745675: 1160 of
+> 1168 test files passed.** All eight reds are triaged in #2296:
+> - Five files pin a React prerelease (`gssp-redirect`, `gssp-redirect-base-path`,
+>   `router-hash-navigation`, `rewrite-with-browser-history`, `scroll-back-restoration`), and npm
+>   refused the tarball install with ERESOLVE. This was a harness fault, fixed in `e2e-deploy.sh`
+>   with a retry that applies only on ERESOLVE.
+> - In `transpile-packages-typescript-foreign`, npm re-pointed a `file:` dependency at its
+>   source. This was a harness fault, fixed in `e2e-deploy.sh`.
+> - Two files deploy a static export (`middleware-src`, `middleware-src-node`), so they are
+>   excluded under the existing `static-export` category.
 >
-> **The compat credential window now runs against `vercel/next.js` **v16.3.8**** (rc.2's
+> No credential window runs at v16.4.0 yet, and the webpack and bun cells have not been dispatched
+> there. The v1.0 credential on `main` still runs v16.3.8 from the pinned rc tag. The eight
+> quarantine entries stamped at v16.3.8 were re-audited at v16.4.0 by source equivalence, not by
+> re-running them.
+>
+> **History (1.x line): the compat credential window ran against v16.3.8** (rc.2's
 > re-credential, #1560, 2026-09-30), which was the tag `knext create` scaffolded at the time,
-> closing the deliberate v16.2.x/16.3.x divergence rc.1 opened. The scaffold has since moved on
-> to 16.4.0 (see the note above). `NEXTJS_REF` in `test-e2e-deploy.yml` moved to
-> this ref in the same PR that re-audited the pre-existing quarantine ledger against it with real
+> closing the deliberate v16.2.x/16.3.x divergence rc.1 opened. `NEXTJS_REF` in
+> `test-e2e-deploy.yml` moved to that ref in the same PR that re-audited the pre-existing quarantine ledger against it with real
 > dispatch evidence: all four cells (node/bun x turbopack/webpack), 16/16 shards each attempted
 > (runs 36638853381 / 36638856495 / 36638859599 / 36638862596). The two **bun** cells and the
 > ledger's test-content assertions on all four cells are clean. **The two node cells were NOT
