@@ -110,17 +110,17 @@ jobs:
       - name: Install next at the matrix version
         working-directory: packages/kn-next
         env:
-          NEXT_VERSION: ${{ matrix.next }}
-        run: bun add --dev "next@${NEXT_VERSION}"
+          MATRIX_NEXT: ${{ matrix.next }}
+        run: bun add --dev "next@${MATRIX_NEXT}"
 
       - name: Assert the leg really runs the requested next
         working-directory: packages/kn-next
         env:
-          NEXT_VERSION: ${{ matrix.next }}
+          MATRIX_NEXT: ${{ matrix.next }}
         run: |
           installed="$(node -p "require('next/package.json').version")"
-          echo "installed next: ${installed} (wanted ${NEXT_VERSION})"
-          test "${installed}" = "${NEXT_VERSION}"
+          echo "installed next: ${installed} (wanted ${MATRIX_NEXT})"
+          test "${installed}" = "${MATRIX_NEXT}"
 
       # One bun process per file (scripts/bun-test.mjs): bun module mocks leak across
       # files in a single process, and these specs were written to be isolated.
