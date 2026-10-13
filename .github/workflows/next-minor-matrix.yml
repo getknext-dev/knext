@@ -26,6 +26,7 @@ on:
     paths:
       - 'packages/kn-next/src/adapters/cache-handler*.js'
       - 'packages/kn-next/src/adapters/use-cache-handler*.js'
+      - 'packages/kn-next/src/adapters/cdn-purge/**'
       - 'packages/kn-next/src/adapters/cache-write-registry.js'
       - 'packages/kn-next/src/adapters/slow-dep-log.js'
       - 'packages/kn-next/src/cli/build-id-env.ts'
@@ -40,6 +41,7 @@ on:
     paths:
       - 'packages/kn-next/src/adapters/cache-handler*.js'
       - 'packages/kn-next/src/adapters/use-cache-handler*.js'
+      - 'packages/kn-next/src/adapters/cdn-purge/**'
       - 'packages/kn-next/src/adapters/cache-write-registry.js'
       - 'packages/kn-next/src/adapters/slow-dep-log.js'
       - 'packages/kn-next/src/cli/build-id-env.ts'
