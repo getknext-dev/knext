@@ -149,6 +149,12 @@ describe("doctor use-cache check: cacheMaxMemorySize: 0 variant", () => {
         }
     });
 
+    it("a glob string before the key does not hide cacheMaxMemorySize: 0", () => {
+        const cfg =
+            "export default {\n  images: { remotePatterns: [{ pathname: '/img/**' }] },\n  cacheMaxMemorySize: 0,\n  /** docs */\n};";
+        expect(setsZeroCacheMemory(cfg)).toBe(true);
+    });
+
     it("setsZeroCacheMemory reads the config text, quoted keys included", () => {
         expect(setsZeroCacheMemory("{ cacheMaxMemorySize: 0 }")).toBe(true);
         expect(setsZeroCacheMemory("{ cacheMaxMemorySize:0, x: 1 }")).toBe(
@@ -321,9 +327,9 @@ describe("scanUseCache (default source scanner)", () => {
         expect(Date.now() - t0).toBeLessThan(1000);
     }, 5000);
 
-    it("stops at the entry cap and says it was truncated (every entry counts, not just source)", () => {
+    it("stops at the cap and says it was truncated (source files and directories count)", () => {
         const app = fresh();
-        for (let i = 0; i < 10; i++) put(app, `public/img-${i}.png`, "x");
+        for (let i = 0; i < 10; i++) put(app, `lib/f-${i}.ts`, "export {};");
         put(app, "src/z.ts", DIRECTIVE);
         expect(
             scanUseCache(app, { ...DEFAULT_SCAN_LIMITS, maxEntries: 5 }),
@@ -333,6 +339,42 @@ describe("scanUseCache (default source scanner)", () => {
         });
         expect(scanUseCache(app).file).toBe(join("src", "z.ts"));
     });
+
+    it("non-source files do not use up the cap", () => {
+        const app = fresh();
+        for (let i = 0; i < 10; i++) put(app, `src/assets/img-${i}.png`, "x");
+        put(app, "src/z.ts", DIRECTIVE);
+        expect(
+            scanUseCache(app, { ...DEFAULT_SCAN_LIMITS, maxEntries: 5 }),
+        ).toEqual({ file: join("src", "z.ts"), truncated: false });
+    });
+
+    it("skips public/ at the root: a huge asset folder gives no row", async () => {
+        const app = fresh();
+        put(
+            app,
+            "app/page.tsx",
+            "export default function P() { return null; }",
+        );
+        const n = DEFAULT_SCAN_LIMITS.maxEntries + 500;
+        mkdirSync(join(app, "public"));
+        for (let i = 0; i < n; i++) {
+            writeFileSync(join(app, "public", `img-${i}.ts`), "");
+        }
+        expect(scanUseCache(app)).toEqual({
+            file: undefined,
+            truncated: false,
+        });
+        const report = await runDoctor({
+            kubectl: noKubectl,
+            probeImage: okProbe,
+            readNextConfigFile: () => "export default {};",
+            scanUseCache: () => scanUseCache(app),
+        });
+        expect(report.checks.some((c) => c.id === "use-cache")).toBe(false);
+        put(app, "app/public/page.tsx", DIRECTIVE);
+        expect(scanUseCache(app).file).toBe(join("app", "public", "page.tsx"));
+    }, 30000);
 
     it("skips a source file over the size limit", () => {
         const app = fresh();

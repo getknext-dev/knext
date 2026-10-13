@@ -26,7 +26,13 @@
  * A regex literal containing a quote can also confuse the comment stripper.
  */
 
-import { existsSync, lstatSync, readdirSync, readFileSync } from "node:fs";
+import {
+    type Dirent,
+    existsSync,
+    lstatSync,
+    readdirSync,
+    readFileSync,
+} from "node:fs";
 import { extname, join, relative } from "node:path";
 import { mk } from "../report";
 import type { CheckContext, CheckResult } from "../types";
@@ -56,11 +62,21 @@ const SOURCE_EXTENSIONS = new Set([
 /** Dependency directories, skipped at every depth. */
 const ALWAYS_SKIPPED_DIRS = new Set(["node_modules"]);
 
-/** Build output, skipped only at the app root (`app/build/` is source). */
-const ROOT_ONLY_SKIPPED_DIRS = new Set(["out", "dist", "build", "coverage"]);
+/**
+ * Build output and Next's static-asset folder, skipped only at the app root
+ * (`app/build/` is source). `public/` never holds a directive, and a large
+ * one would otherwise eat the cap and trigger a false "scan incomplete".
+ */
+const ROOT_ONLY_SKIPPED_DIRS = new Set([
+    "out",
+    "dist",
+    "build",
+    "coverage",
+    "public",
+]);
 
 export interface ScanLimits {
-    /** Every directory entry counts, not only source files. */
+    /** Directories and source files count; other files (assets) do not. */
     maxEntries: number;
     /** Larger source files are skipped (generated code, not hand-written). */
     maxFileBytes: number;
@@ -79,7 +95,11 @@ export interface UseCacheScan {
     truncated: boolean;
 }
 
-/** Strip // and block comments so a commented-out flag does not count. */
+/**
+ * Regex comment strip, kept ONLY for `turbopack-fragments-guard.ts`, which
+ * imports it. It is not string-aware (a `'/img/**'` glob opens a "comment"),
+ * so nothing in this module uses it -- see {@link stripCodeComments}.
+ */
 export function stripComments(src: string): string {
     return src
         .replace(/\/\*[\s\S]*?\*\//g, "")
@@ -136,14 +156,14 @@ export function stripCodeComments(src: string): string {
  */
 export function hasUseCacheDirective(src: string): boolean {
     return /(?:^|\{)[ \t]*(["'])use cache(?::[ \t]*[\w-]+)?\1[ \t]*(?:;|\}|$)/m.test(
-        stripCodeComments(src.replace(/^﻿/, "")),
+        stripCodeComments(src.replace(/^\uFEFF/, "")),
     );
 }
 
 /** True iff the next.config text sets `cacheMaxMemorySize: 0` (quoted key too). */
 export function setsZeroCacheMemory(configText: string): boolean {
     return /(?:^|[^\w$])(["']?)cacheMaxMemorySize\1\s*:\s*0(?![\w.])/m.test(
-        stripComments(configText),
+        stripCodeComments(configText),
     );
 }
 
@@ -151,8 +171,9 @@ export function setsZeroCacheMemory(configText: string): boolean {
  * Find the first app source file (relative to `root`, in sorted walk order)
  * that uses `'use cache'`. Skips symlinks (no loops, no escaping the app),
  * dot-directories (`.next`, `.git`, ...), `node_modules` at any depth and
- * build output at the root. Every directory entry counts toward
- * `limits.maxEntries`; hitting it sets `truncated`. Never throws: an
+ * build output and `public/` at the root. Directories and source files count
+ * toward `limits.maxEntries` (other files cost no syscall: the walk reads
+ * entry types from `readdir`); hitting the cap sets `truncated`. Never throws: an
  * unreadable entry is skipped, because doctor must not crash on the state it
  * is diagnosing.
  */
@@ -163,37 +184,46 @@ export function scanUseCache(
     let entries = 0;
     let truncated = false;
     const walk = (dir: string, atRoot: boolean): string | undefined => {
-        let names: string[];
+        let dirents: Dirent[];
         try {
-            names = readdirSync(dir).sort();
+            dirents = readdirSync(dir, { withFileTypes: true });
         } catch {
             return undefined;
         }
-        for (const name of names) {
+        dirents.sort((a, b) =>
+            a.name < b.name ? -1 : a.name > b.name ? 1 : 0,
+        );
+        for (const d of dirents) {
+            const name = d.name;
+            if (name.startsWith(".")) continue;
+            // Dirent types come from readdir without following links: a
+            // symlink is neither a directory nor a file here, so it is never
+            // followed (no loops, no escaping the app root).
+            const isDir = d.isDirectory();
+            if (isDir) {
+                if (ALWAYS_SKIPPED_DIRS.has(name)) continue;
+                if (atRoot && ROOT_ONLY_SKIPPED_DIRS.has(name)) continue;
+            } else if (!d.isFile() || !SOURCE_EXTENSIONS.has(extname(name))) {
+                continue;
+            }
             if (entries >= limits.maxEntries) {
                 truncated = true;
                 return undefined;
             }
             entries++;
-            if (name.startsWith(".")) continue;
             const full = join(dir, name);
-            // lstat, never stat: a symlink is then neither a directory nor a
-            // file below, so it is never followed (no loops, no escaping root).
-            let st: ReturnType<typeof lstatSync>;
-            try {
-                st = lstatSync(full);
-            } catch {
-                continue;
-            }
-            if (st.isDirectory()) {
-                if (ALWAYS_SKIPPED_DIRS.has(name)) continue;
-                if (atRoot && ROOT_ONLY_SKIPPED_DIRS.has(name)) continue;
+            if (isDir) {
                 const hit = walk(full, false);
                 if (hit !== undefined || truncated) return hit;
                 continue;
             }
-            if (!st.isFile() || !SOURCE_EXTENSIONS.has(extname(name))) continue;
-            if (st.size > limits.maxFileBytes) continue;
+            let size: number;
+            try {
+                size = lstatSync(full).size;
+            } catch {
+                continue;
+            }
+            if (size > limits.maxFileBytes) continue;
             try {
                 if (hasUseCacheDirective(readFileSync(full, "utf8"))) {
                     return relative(root, full);
