@@ -398,6 +398,13 @@ reset; screen_json 0.99
 screen "'----- BEGIN' with no label and no closing dashes, then a payload" Bash "gh pr view 12" "$D5 BEGIN
 $INJ" 1 yes
 grep -qF 'ignore all previous instructions' "$FAKE_JEV_SEEN" && pass "  the payload after an unlabelled marker reaches jev" || fail "  the payload after an unlabelled marker was redacted"
+# Detection gates redaction, so the PEM pass only runs when ANOTHER literal is present. It must not
+# swallow the payload after an unlabelled '---begin' then either.
+reset; screen_json 0.99
+screen "an unlabelled '---begin', a payload AND a real token: token redacted, payload screened" Bash "gh pr view 12" "---begin
+$INJ ghp_$L36" 1 yes
+grep -qF 'ignore all previous instructions' "$FAKE_JEV_SEEN" && pass "  the payload after '---begin' reaches jev (PEM pass ran)" || fail "  the PEM pass swallowed the payload after '---begin'"
+seen_has_no_literal "token beside an unlabelled marker" "ghp_$L36"
 reset; screen_json 0.99
 screen "a markdown rule followed by prose starting 'Begin'" Bash "gh pr view 12" "Release notes
 ---
