@@ -1420,6 +1420,14 @@ if (isEntrypoint(import.meta.url)) {
             // header there for why the verb entry is a separate file).
             const { validateMain } = await import("./validate-cmd");
             process.exit(await validateMain(process.argv.slice(3)));
+        } else if (sub === "generate") {
+            // Zone functions (ADR-0052 D8): the optional gRPC package owns
+            // these two verbs; core only loads it lazily (grpc-dispatch.ts).
+            const { generateMain } = await import("./grpc-dispatch");
+            process.exit(await generateMain(process.argv.slice(3)));
+        } else if (sub === "add") {
+            const { addMain } = await import("./grpc-dispatch");
+            process.exit(await addMain(process.argv.slice(3)));
         } else {
             await deploy();
         }

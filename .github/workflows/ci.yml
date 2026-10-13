@@ -223,6 +223,13 @@ jobs:
       - name: Typecheck @getknext/ui (tsc --noEmit)
         run: bun run --filter @getknext/ui typecheck
 
+      # @getknext/grpc (zone functions, Beta) — self-contained, no dist deps. Its
+      # typecheck config also pulls in the fixture zone's GENERATED clients, so a
+      # generator change that emits a client which does not type-check against
+      # the runtime reds here, not in a user's app.
+      - name: Typecheck @getknext/grpc (tsc --noEmit, tests + generated fixture in scope)
+        run: bun run --filter @getknext/grpc typecheck
+
       # apps/db-demo — dist-dependent on @getknext/db + @getknext/core (imports
       # @getknext/db and @getknext/db/schema), so it runs AFTER those builds above.
       - name: Typecheck db-demo (tsc --noEmit)
@@ -947,6 +954,83 @@ jobs:
           bash .claude/hooks/jev-hooks.test.sh
           bash .claude/skills/jev/pr-risk.test.sh
           python3 .claude/hooks/jev-hooks-mutation-proof.py --smoke
+
+  # Zone-function contracts (@getknext/grpc, Beta). Three checks, all red-on-fail:
+  #   1. buf lint over the knext options contract the package ships;
+  #   2. buf breaking over that contract against the commit this change is based
+  #      on — its option field numbers are a contract every app vendors;
+  #   3. `knext generate --check` over the fixture zone, so committed generated
+  #      code cannot drift from its contract or from the generators.
+  # buf is the lockfile's binary, verified against the sha256 pin in
+  # packages/grpc/src/buf.ts before it runs — never one from PATH or a network
+  # install. Read-only token, no secrets. The same three behaviours are also
+  # tested (and mutation-proved) in the bun suite: breaking.test.ts reds on a
+  # removed field, generate.test.ts on drift.
+  grpc-contracts:
+    name: gRPC contracts (buf lint, buf breaking, generate --check)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # buf breaking reads the baseline from this repository's own history.
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+
+      - name: Setup bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: buf lint (the knext options contract)
+        working-directory: packages/grpc
+        run: bun scripts/verified-buf.ts lint
+
+      # The baseline is the commit this change is based on: the PR base, the
+      # merge-queue base, or the previous main commit on a push. FAILS CLOSED:
+      # the one case that passes without comparing is a base commit that
+      # RESOLVES and has no packages/grpc (the change that introduced the
+      # package). An empty, all-zero or unresolvable base is an error, never
+      # "nothing to compare". Executed against a throwaway repo by
+      # tests/grpc-contracts-baseline-step.test.ts.
+      - name: buf breaking (the knext options contract, against the base commit)
+        working-directory: packages/grpc
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+        run: |
+          if [ -z "$BASE_SHA" ]; then
+            echo "::error::no base commit to compare against"
+            exit 1
+          fi
+          if ! git rev-parse --quiet --verify "$BASE_SHA^{commit}" >/dev/null; then
+            echo "::error::base commit $BASE_SHA does not resolve in this checkout"
+            exit 1
+          fi
+          # ls-tree exits non-zero on an error and prints nothing for an absent
+          # path. --full-tree: the path is from the repo root, not this step's
+          # working directory.
+          if ! listing="$(git ls-tree --full-tree --name-only "$BASE_SHA" -- packages/grpc/buf.yaml)"; then
+            echo "::error::could not read packages/grpc at $BASE_SHA"
+            exit 1
+          fi
+          if [ -z "$listing" ]; then
+            echo "base commit $BASE_SHA predates packages/grpc: no baseline contract to compare yet"
+            exit 0
+          fi
+          bun scripts/verified-buf.ts breaking --against "../../.git#ref=$BASE_SHA,subdir=packages/grpc"
+
+      - name: knext generate --check (fixture zone)
+        working-directory: packages/grpc/fixtures/zone
+        run: bun ../../scripts/knext-grpc.ts generate --check
 
   operator-codegen-check:
     name: Operator codegen is up-to-date (make generate + make manifests)

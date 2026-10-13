@@ -1,0 +1,59 @@
+{
+  "name": "@getknext/grpc",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Opt-in zone functions for knext (Beta): buf-driven codegen behind `knext generate` and `knext add function`, and the server-only Connect client runtime the generated code calls.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/getknext-dev/knext.git",
+    "directory": "packages/grpc"
+  },
+  "homepage": "https://github.com/getknext-dev/knext#readme",
+  "bugs": {
+    "url": "https://github.com/getknext-dev/knext/issues"
+  },
+  "type": "module",
+  "exports": {
+    "./cli": {
+      "types": "./dist/cli.d.ts",
+      "import": "./dist/cli.js",
+      "default": "./dist/cli.js"
+    },
+    "./runtime": {
+      "types": "./dist/runtime.d.ts",
+      "import": "./dist/runtime.js",
+      "default": "./dist/runtime.js"
+    },
+    "./skew": {
+      "types": "./dist/skew.d.ts",
+      "import": "./dist/skew.js",
+      "default": "./dist/skew.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "proto"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "../../node_modules/typescript-tsc7/bin/tsc -p tsconfig.typecheck.json"
+  },
+  "peerDependencies": {
+    "@getknext/core": ">=2.0.0-0 <3.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@getknext/core": {
+      "optional": true
+    }
+  },
+  "dependencies": {
+    "@bufbuild/buf": "1.73.0",
+    "@bufbuild/protobuf": "2.16.0",
+    "@bufbuild/protoc-gen-es": "2.16.0",
+    "@bufbuild/protoplugin": "2.16.0",
+    "@connectrpc/connect": "2.2.0",
+    "@connectrpc/connect-node": "2.2.0"
+  }
+}

@@ -1,0 +1,75 @@
+// Fixture contract for the @getknext/grpc tests and the CI drift check: one
+// read, two writes (one of them IDEMPOTENT, which is still a write) and a
+// server stream, so every generated-client shape is exercised.
+syntax = "proto3";
+
+package orders.v1;
+
+import "knext/v1/options.proto";
+
+option (knext.v1.function) = "orders";
+option (knext.v1.contract_version) = "1.2.0";
+
+// OrdersService is served by the `orders` function of this zone.
+service OrdersService {
+  // GetOrder reads one order. It has no side effects, so the client may retry it.
+  rpc GetOrder(GetOrderRequest) returns (GetOrderResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  // PlaceOrder creates an order. A write: never retried, and it carries an
+  // idempotency key.
+  rpc PlaceOrder(PlaceOrderRequest) returns (PlaceOrderResponse);
+
+  // CancelOrder is IDEMPOTENT but not side-effect free: still a write.
+  rpc CancelOrder(CancelOrderRequest) returns (CancelOrderResponse) {
+    option idempotency_level = IDEMPOTENT;
+  }
+
+  // WatchOrders streams order updates.
+  rpc WatchOrders(WatchOrdersRequest) returns (stream WatchOrdersResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+}
+
+// GetOrderRequest names the order to read.
+message GetOrderRequest {
+  string id = 1;
+}
+
+// GetOrderResponse is one order.
+message GetOrderResponse {
+  string id = 1;
+  string status = 2;
+  int64 total_cents = 3;
+}
+
+// PlaceOrderRequest is a new order.
+message PlaceOrderRequest {
+  string sku = 1;
+  int32 quantity = 2;
+}
+
+// PlaceOrderResponse names the order created.
+message PlaceOrderResponse {
+  string id = 1;
+}
+
+// CancelOrderRequest names the order to cancel.
+message CancelOrderRequest {
+  string id = 1;
+}
+
+// CancelOrderResponse is empty: cancelling twice is the same as once.
+message CancelOrderResponse {}
+
+// WatchOrdersRequest filters the stream.
+message WatchOrdersRequest {
+  string status = 1;
+}
+
+// WatchOrdersResponse is one update.
+message WatchOrdersResponse {
+  string id = 1;
+  string status = 2;
+}

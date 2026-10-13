@@ -148,6 +148,25 @@ export const COMMAND_GROUPS: readonly CliCommandGroup[] = [
         ],
     },
     {
+        // Provided by an optional package (Beta); core only routes the verbs
+        // (grpc-dispatch.ts), and answers --help even when it is missing.
+        heading: "Zone functions (Beta, optional package)",
+        commands: [
+            {
+                verb: "add",
+                display: "add function",
+                summary:
+                    "add a Go or Rust function's contract to this zone (writes files only)",
+            },
+            {
+                verb: "generate",
+                display: "generate",
+                summary:
+                    "write the server-only clients for this zone's functions (--check fails on drift)",
+            },
+        ],
+    },
+    {
         heading: "Internals",
         commands: [
             {

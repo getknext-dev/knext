@@ -19,6 +19,7 @@
       "!**/.cursor",
       "!**/_design-reference",
       "!**/bun.lockb",
+      "!packages/grpc/fixtures/zone/src/generated",
       "!packages/scale-zero-pg"
     ]
   },

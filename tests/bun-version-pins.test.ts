@@ -162,7 +162,10 @@ describe('bun-version pins (#754) — scanned across every workflow', () => {
       // to run `node scripts/crd-schema-diff.mjs` — its own pinned setup-bun,
       // same lockstep version as every other step here. A count RISING is a
       // decision, per the rule above.
-      'ci.yml': 15,
+      // 16, was 15 (#2047): the grpc-contracts job installs the workspace so
+      // it can run the lockfile's checksum-verified buf and `knext generate
+      // --check` from source — its own pinned setup-bun, same version.
+      'ci.yml': 16,
       // NEW (#1302): the freeze guard's frozenFileSet() computation needs the
       // workspace's bun to run scripts/compat-credential-freeze-guard.mjs — a
       // count RISING is a decision, per the rule above.
