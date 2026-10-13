@@ -449,15 +449,30 @@ jobs:
           [ "$IMAGE2" != "$IMAGE" ] || { echo "::error::the v2 build produced the same image"; exit 1; }
           "$WRITE_CONFIG" cdn-np nopurge
           node "$CLI" deploy --namespace "$APP_NS" --tag "${DEPLOY_TAG}-v2" --image "$IMAGE2"
-          # cdn-mut's new build: the same app, its staged preload mutated so the
-          # cache handler's foreign-build record is ignored (every anchor asserted
+          # cdn-mut's new build: the same app, its preload mutated so the cache
+          # handler's foreign-build record is ignored (every anchor asserted
           # exactly once), then restored. Its own build tag, so its own build id.
-          PRELOAD="$APP_DIR/node_modules/@getknext/core/dist/adapters/cache-control-normalize.cjs"
-          cp "$PRELOAD" "${RUNNER_TEMP}/preload.orig.cjs"
-          node "${GITHUB_WORKSPACE}/scripts/cdn-e2e-mutate-preload.mjs" --set foreign-build "$PRELOAD"
+          # Two copies carry the preload into an image: the app's installed core
+          # (the node image copies it) and the CLI's own dist, whose
+          # standalone-compile embeds its sibling preloads into the bun
+          # executable. Both are mutated, or the bun leg tests nothing.
+          PRELOADS=(
+            "$APP_DIR/node_modules/@getknext/core/dist/adapters/cache-control-normalize.cjs"
+            "${GITHUB_WORKSPACE}/packages/kn-next/dist/adapters/cache-control-normalize.cjs"
+          )
+          i=0
+          for p in "${PRELOADS[@]}"; do
+            cp "$p" "${RUNNER_TEMP}/preload.orig.$i.cjs"
+            node "${GITHUB_WORKSPACE}/scripts/cdn-e2e-mutate-preload.mjs" --set foreign-build "$p"
+            i=$((i + 1))
+          done
           "$WRITE_CONFIG" cdn-mut purge
           node "$CLI" deploy --registry localhost:5001 --namespace "$APP_NS" --tag "${DEPLOY_TAG}-v2mut"
-          cp "${RUNNER_TEMP}/preload.orig.cjs" "$PRELOAD"
+          i=0
+          for p in "${PRELOADS[@]}"; do
+            cp "${RUNNER_TEMP}/preload.orig.$i.cjs" "$p"
+            i=$((i + 1))
+          done
           IMAGE_MUT="$(kubectl -n "$APP_NS" get nextapp cdn-mut -o jsonpath='{.spec.image}')"
           [ "$IMAGE_MUT" != "$IMAGE2" ] && [ "$IMAGE_MUT" != "$IMAGE" ] \
             || { echo "::error::the mutated build produced an existing image"; exit 1; }
