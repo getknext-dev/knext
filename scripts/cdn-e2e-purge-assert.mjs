@@ -12,7 +12,9 @@
  * they come in halves that share a state file (CDN_STATE_FILE):
  *   rollout-before    store old-build pages at the edge, record their build
  *   rollout-after     after the new build is Ready: the first-ready purge of the
- *                     app tag arrived, and no old-build HTML is served
+ *                     app tag arrived, and no pre-rollout entry is served
+ *   rollout-no-old-html  ...and no previous-build HTML is stored at or served
+ *                     from the edge, whatever the origin answers
  *   revisions-before  snapshot every Knative Service's latest revision
  *   revisions-after   after spec.cdn was set on CDN_CHURN_CHANGED: no OTHER app
  *                     (CDN_CHURN_UNRELATED) got a new revision
@@ -47,6 +49,8 @@ const buildTagOf = (r) =>
     .split(',')
     .find((t) => /^kn-[0-9a-f]{12}-b[0-9a-f]{12}$/.test(t));
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+/** The headers that make a response edge-cacheable or purgeable (ADR-0068 D4.2/D5). */
+const EDGE_ONLY = ['cloudflare-cdn-cache-control', 'cdn-cache-control', 'cache-tag'];
 
 export function purgeConfig(env = process.env) {
   const c = config(env);
@@ -267,11 +271,14 @@ export function purgeChecks(c) {
       },
     },
     {
-      // The #2261 criterion read literally: after the first-ready purge, no
-      // OLD-BUILD HTML is served at all. KNOWN DEFECT #2299: ISR HTML is shared
-      // across builds (ADR-0066), so the new build serves the previous build's
-      // body as a HIT and the edge stores it under the new build's tag. The
-      // workflow runs this as expected-red until #2299 is fixed.
+      // The #2261 / ADR-0068 D13 criterion, as amended (Amendment 2): after the
+      // first-ready purge, no previous-build HTML is STORED at the edge or
+      // served FROM it. An old-build body may still come from the ORIGIN: ISR
+      // HTML is shared across builds (ADR-0066), and the new build can serve
+      // the previous build's page for a while after a deploy (tracked
+      // separately). The edge must refuse it (reason foreign_build_body). Each
+      // page is asked twice, so an entry the first request stored would come
+      // back as a HIT.
       id: 'rollout-no-old-html',
       async run() {
         const s = readState(c).rollout;
@@ -287,27 +294,46 @@ export function purgeChecks(c) {
           current && current !== s.mark,
           `precondition: the running build is ${current ?? 'unreadable (/build-mark)'}, the stored pages are ${s.mark} (no rollout happened?)`,
         );
-        const old = [];
+        // Not vacuous: a page the new build renders itself IS edge-cached, so a
+        // pass below means "refused", not "the edge stores nothing at all".
+        const control = `/variant-b?${k('ro-ctl')}`;
+        await send(c.emu, { host: c.hosts.a, path: control });
+        const ctl = await send(c.emu, { host: c.hosts.a, path: control });
+        must(
+          ctl.status === 200 && hit(ctl),
+          `precondition: ${control}, rendered by the new build, was not an edge HIT (x-emu-cache=${ctl.headers['x-emu-cache']}, status ${ctl.status}): the edge caches nothing, so this check would prove nothing`,
+        );
+        const bad = [];
+        let fromOrigin = 0;
         for (const path of [s.paths[0], `/tagged?${k('ro-fresh')}`]) {
-          const r = await send(c.emu, { host: c.hosts.a, path });
-          const mark = buildMarkOf(r);
-          // Only a real page can be old-build HTML: a 5xx, a 404, an error page
-          // or the emulator's 502 carries no build mark and is a broken page,
-          // which must never satisfy the pinned #2299 failure.
-          must(
-            r.status === 200 && isHtml(r) && mark !== undefined,
-            `precondition: ${path} answered ${r.status} ${r.headers['content-type']} with no build mark (the page is broken, not old)`,
-          );
-          if (mark !== current)
-            old.push(
-              `${path} (build ${mark}, x-nextjs-cache=${r.headers['x-nextjs-cache']}, edge-stored=${stored(r) || hit(r)})`,
+          for (let attempt = 0; attempt < 2; attempt++) {
+            const r = await send(c.emu, { host: c.hosts.a, path });
+            const mark = buildMarkOf(r);
+            // Only a real page can be old-build HTML: a 5xx, a 404, an error page
+            // or the emulator's 502 carries no build mark and is a broken page,
+            // which must never pass for (or fail as) old-build HTML.
+            must(
+              r.status === 200 && isHtml(r) && mark !== undefined,
+              `precondition: ${path} answered ${r.status} ${r.headers['content-type']} with no build mark (the page is broken, not old)`,
             );
+            if (mark === current) continue;
+            fromOrigin++;
+            const why = [];
+            if (hit(r)) why.push('an edge HIT');
+            if (stored(r)) why.push(`stored for ${r.headers['x-emu-stored']} s`);
+            for (const h of EDGE_ONLY)
+              if (r.headers[h] !== undefined) why.push(`${h}: ${r.headers[h]}`);
+            if (why.length > 0)
+              bad.push(
+                `${path} (build ${mark}, build tag ${buildTagOf(r) ?? 'none'}: ${why.join(', ')})`,
+              );
+          }
         }
         must(
-          old.length === 0,
-          `old-build HTML was served after the first-ready purge: ${old.join('; ')}`,
+          bad.length === 0,
+          `old-build HTML was stored at or served from the edge after the first-ready purge: ${bad.join('; ')}`,
         );
-        return `every page served build ${current}`;
+        return `build ${current}: ${fromOrigin} old-build response(s) from the origin, none edge-cacheable or stored; ${control} (new build) an edge HIT`;
       },
     },
     {

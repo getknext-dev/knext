@@ -1,5 +1,0 @@
-# KNOWN DEFECT #2299, pinned: after the first-ready purge the new build still
-# serves the previous build's ISR HTML (shared across builds, ADR-0066) and
-# the edge stores it under the new build's tag. When #2299 is fixed this
-# leg reds because the check PASSES: promote it to a plain assertion then.
-rollout-no-old-html|old-build HTML was served after the first-ready purge
