@@ -50,14 +50,11 @@ add_path() {
   if [ -n "${GITHUB_PATH:-}" ]; then echo "$1" >> "${GITHUB_PATH}"; fi
 }
 
-# fetch <url> <sha256> <out>: download, then verify; a mismatch deletes the file and fails.
+# fetch <url> <sha256> <out>: download, then verify; a mismatch fails the
+# script here (set -e + pipefail), before anything is extracted or run.
 fetch() {
   curl -fsSL --retry 3 -o "$3" "$1"
-  if ! echo "$2  $3" | sha256sum -c - >/dev/null; then
-    echo "install-ffi-toolchain: sha256 mismatch for $1" >&2
-    rm -f "$3"
-    exit 1
-  fi
+  echo "$2  $3" | sha256sum -c -
 }
 
 # --- rustup (the runner images normally ship it) -------------------------------

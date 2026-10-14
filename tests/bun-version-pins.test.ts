@@ -203,6 +203,10 @@ describe('bun-version pins (#754) — scanned across every workflow', () => {
       // round-trip, panic and leak checks against the fixture library) — one
       // pinned "Setup bun" step; no workspace install.
       'rust-crates.yml': 1,
+      // NEW (#2346): the in-process Rust e2e — one pinned "Setup bun" per job
+      // (musl-load: workspace install + staging + `bun build --compile`;
+      // kind-e2e: workspace install + building the CLI it deploys with).
+      'ffi-e2e.yml': 2,
       // NEW (#1663): the published-bytes freeze check's "run" decision packs
       // the publishable group with the workspace's bun (mirrors
       // ga-tarball-diff's own release.yml job) — one Setup bun step. The

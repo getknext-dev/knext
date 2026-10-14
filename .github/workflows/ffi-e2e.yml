@@ -109,7 +109,7 @@ env:
 
 jobs:
   musl-load:
-    name: musl load (${{ matrix.arch }}) — oven/bun:1.4.2-alpine, read-only root + TMPDIR
+    name: musl load (${{ matrix.arch }}) — Bun on Alpine, read-only root + TMPDIR
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     strategy:
@@ -286,7 +286,7 @@ jobs:
         run: |
           set -uo pipefail
           {
-            echo "### musl load — ${TRIPLE} (oven/bun:1.4.2-alpine, read-only root + TMPDIR)"
+            echo "### musl load — ${TRIPLE} (\`${BUN_IMAGE}\`, read-only root + TMPDIR)"
             echo
             echo "DT_NEEDED: \`$(tr '\n' ' ' < "${RUNNER_TEMP}/musl/needed" 2>/dev/null)\`"
             echo
@@ -477,6 +477,12 @@ jobs:
           echo "integrity manifest: ${got}; library: ${want}"
           [ "$got" = "$want" ] || { echo "::error::native/.integrity.json does not list the library's sha256"; exit 1; }
           test -f .next/server/server-reference-manifest.json
+          # Reported, not asserted: Next's file trace of this app copies the
+          # whole project into .next/standalone, so cargo's target/ rides
+          # along into the image when it exists at `next build` time.
+          if [ -d .next/standalone/rust/target ]; then
+            echo "::warning::.next/standalone/rust/target was traced into the image tree ($(du -sh .next/standalone/rust/target | cut -f1))"
+          fi
           echo "LIB_SHA256=$want" >> "$GITHUB_ENV"
 
       # The SAME runner and checks as ci.yml's compat-smoke job, red-on-fail,
