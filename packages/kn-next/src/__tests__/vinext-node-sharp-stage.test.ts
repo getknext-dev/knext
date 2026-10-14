@@ -415,7 +415,9 @@ describe("#1298 stageSharpForVinextNode", () => {
         ).toThrow(UsageError);
         expect(() =>
             stageSharpForVinextNode(cwd, { arch: "linux-x64" }),
-        ).toThrow(/no lockfile \(bun\.lock or package-lock\.json\)/);
+        ).toThrow(
+            /no lockfile \(bun\.lock, package-lock\.json, pnpm-lock\.yaml or yarn\.lock\)/,
+        );
     });
 
     it("fails loud when the lockfile has no entry for the target platform", () => {

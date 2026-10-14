@@ -699,6 +699,16 @@ jobs:
       - name: Monorepo root — standalone image (bun + node) builds and serves e2e
         run: node scripts/bun-test.mjs --no-skip packages/kn-next/src/__tests__/monorepo-root-image.docker-e2e.test.ts
 
+      # #2360: next/image must OPTIMIZE (a negotiated WebP, smaller than the
+      # source) on the compiled standalone executable's host-arch twin and in
+      # both shipped standalone images. A sharp that cannot load is not an
+      # error to Next — it serves the original PNG — so nothing else here would
+      # notice. Built through the shipped compileArtifactForDeploy, which stages
+      # the image platform's sharp into the traced tree. Same no-skip contract;
+      # guarded by tests/standalone-drain-image-ci.test.ts.
+      - name: next/image optimizes on the compiled exec twin + standalone-bun and standalone-node images e2e
+        run: node scripts/bun-test.mjs --no-skip packages/kn-next/src/__tests__/standalone-image-optimizer.docker-e2e.test.ts
+
   # seam-alive gates: RETIRED (#885, stability sprint). The #352 defect class —
   # webpack layers duplicating @getknext/lib module state across the
   # instrumentation and app-server chunks — cannot occur under the vinext
