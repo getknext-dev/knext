@@ -8,7 +8,9 @@
  * Two specs, each run one file per process:
  *
  *   - `packages/ffi/src/__tests__/supply-chain.test.ts` — the gates unit by
- *     unit (pin table, one wrong-version test per tool, zig, allowlist,
+ *     unit (pin table, one wrong-version test per tool, zig — re-extracted
+ *     from the verified archive into a private directory on every build, never
+ *     run from the cache, safe under concurrent builds, time-limited — allowlist,
  *     cargo-deny JSON replayed from the real tool, the .dep-v0 reader, SBOM);
  *   - `packages/ffi/src/__tests__/ffi-build.test.ts` — the same gates reached
  *     through `knext ffi build`: the advisory fixture fails the build, a dated
@@ -79,22 +81,22 @@ const UNIT = [
     id: 'Z02',
     subject: 'supply',
     claim: 'a downloaded zig archive whose sha256 differs from the pin is accepted',
-    anchor: '    if (got !== asset.sha256) {',
-    replacement: '    if (false) {',
+    anchor: '  if (got !== asset.sha256) {',
+    replacement: '  if (false) {',
   },
   {
     id: 'Z03',
     subject: 'supply',
     claim: 'a cached zig archive is trusted without re-hashing',
-    anchor: '  if (!(existsSync(archive) && sha256Hex(readFileSync(archive)) === asset.sha256)) {',
-    replacement: '  if (!existsSync(archive)) {',
+    anchor: '  if (bytes === undefined || sha256Hex(bytes) !== asset.sha256) {',
+    replacement: '  if (bytes === undefined) {',
   },
   {
     id: 'Z04',
     subject: 'supply',
     claim: 'a downloaded zig reporting another version is accepted',
-    anchor: '  if (got !== pin.version) {\n    rmSync(tree, { recursive: true, force: true });',
-    replacement: '  if (false) {\n    rmSync(tree, { recursive: true, force: true });',
+    anchor: '  if (got !== pin.version) {\n    rmSync(scratch, { recursive: true, force: true });',
+    replacement: '  if (false) {\n    rmSync(scratch, { recursive: true, force: true });',
   },
   {
     id: 'Z05',
@@ -103,6 +105,68 @@ const UNIT = [
     anchor:
       "  return { CARGO_ZIGBUILD_ZIG_COMMAND: zig.bin, CARGO_ZIGBUILD_ZIG_COMMAND_ARGS: '' };",
     replacement: '  return {};',
+  },
+  {
+    id: 'Z06',
+    subject: 'supply',
+    claim:
+      'a zig already extracted into the cache is run without re-extracting the verified archive',
+    anchor:
+      '  const bin = extractZig(run, cwd, bytes, asset.file, stem, pin.version, deps.scratchRoot);',
+    replacement:
+      '  const bin = existsSync(join(dir, stem, "zig")) ? join(dir, stem, "zig") : extractZig(run, cwd, bytes, asset.file, stem, pin.version, deps.scratchRoot);',
+  },
+  {
+    id: 'Z07',
+    subject: 'supply',
+    claim: 'tar reads an archive copy outside the private directory',
+    anchor: '    const copy = join(scratch, file);',
+    replacement: '    const copy = join(dirname(scratch), `${file}.${basename(scratch)}`);',
+  },
+  {
+    id: 'Z08',
+    subject: 'supply',
+    claim: "a build's private zig directory is never removed",
+    anchor: '  if (zig.scratch !== null) rmSync(zig.scratch, { recursive: true, force: true });',
+    replacement: '  void zig;',
+  },
+  {
+    id: 'Z09',
+    subject: 'supply',
+    claim: 'the zig cache directories are created with the default (world-readable) mode',
+    anchor: '    mkdirSync(dir, { recursive: true, mode: 0o700 });',
+    replacement: '    mkdirSync(dir, { recursive: true });',
+  },
+  {
+    id: 'Z10',
+    subject: 'supply',
+    claim: 'a failed extract leaves its directory behind',
+    anchor:
+      '    rmSync(scratch, { recursive: true, force: true });\n    if (err instanceof FfiUsageError) throw err;',
+    replacement: '    if (err instanceof FfiUsageError) throw err;',
+  },
+  {
+    id: 'Z11',
+    subject: 'supply',
+    claim: 'concurrent builds extract into one shared zig directory',
+    anchor: "    scratch = mkdtempSync(join(scratchRoot, 'knext-zig-'));",
+    replacement:
+      "    scratch = join(scratchRoot, 'knext-zig-shared');\n    mkdirSync(scratch, { recursive: true });",
+  },
+  {
+    id: 'Z12',
+    subject: 'supply',
+    claim: 'a cache that cannot be written fails with a raw fs error, not a usage error',
+    anchor: '  } catch (err) {\n    throw new FfiUsageError(\n      `could not cache zig',
+    replacement:
+      '  } catch (err) {\n    throw err;\n    throw new FfiUsageError(\n      `could not cache zig',
+  },
+  {
+    id: 'Z13',
+    subject: 'supply',
+    claim: 'the zig download timeout only signals abort, so a fetch that ignores it hangs',
+    anchor: '      controller.abort();\n      reject(',
+    replacement: '      controller.abort();\n      void (',
   },
   {
     id: 'G01',
@@ -190,8 +254,8 @@ const BUILD = [
     id: 'B01',
     subject: 'supply',
     claim: 'cargo deny check never runs (the advisory fixture builds)',
-    anchor: '  const accepted = runCargoDeny({',
-    replacement: '  const accepted: string[] = [];\n  void ({',
+    anchor: '    accepted = runCargoDeny({',
+    replacement: '    accepted = [];\n    void ({',
   },
   {
     id: 'B02',
@@ -249,6 +313,20 @@ const BUILD = [
     claim: 'provenance.json no longer records the tool versions and accepted advisories',
     anchor: '        ...supply.provenance,\n',
     replacement: '',
+  },
+  {
+    id: 'B11',
+    subject: 'build',
+    claim: 'knext ffi build never releases its private zig',
+    anchor: '    supply?.dispose();\n',
+    replacement: '',
+  },
+  {
+    id: 'B12',
+    subject: 'supply',
+    claim: 'a cargo deny failure after zig was extracted leaks the private zig',
+    anchor: '    releaseZig(zig);\n    throw err;',
+    replacement: '    throw err;',
   },
   {
     id: 'B10',
