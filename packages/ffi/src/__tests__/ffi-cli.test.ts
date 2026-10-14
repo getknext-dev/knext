@@ -16,6 +16,7 @@ import {
   run,
   SUBCOMMANDS,
 } from '../cli';
+import { CARGO_TOOL_PINS, DENY_FILE, SBOM_FILE, ZIG_PIN } from '../supply-chain';
 import { capture, emptyDir, PKG_DIR, removeScratchDirs } from './helpers';
 
 afterAll(removeScratchDirs);
@@ -59,6 +60,21 @@ describe('help', () => {
       expect(c.out()).toContain(`Usage: knext ffi ${sub}`);
     });
   }
+
+  it('knext ffi build --help names every pinned tool at its pinned version, and the SBOM', () => {
+    const h = helpText('build').replace(/\s+/g, ' ');
+    for (const pin of Object.values(CARGO_TOOL_PINS)) {
+      expect(h, pin.crate).toContain(`${pin.crate} ${pin.version}`);
+    }
+    expect(h).toContain(`zig ${ZIG_PIN.version}`);
+    expect(h).toContain('cargo deny check');
+    expect(h).toContain(SBOM_FILE);
+    expect(h).not.toContain('cargo-zigbuild and zig.');
+  });
+
+  it('knext ffi init --help names deny.toml among the files it writes', () => {
+    expect(helpText('init')).toContain(DENY_FILE);
+  });
 
   it('knext ffi --help and -h exit 0 with the group help', async () => {
     for (const flag of ['--help', '-h']) {
