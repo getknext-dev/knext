@@ -187,12 +187,14 @@ describe('scripts/check-ffi-crate-rev.mjs — crateRev must cover every merged c
     const { dir } = makeRepo();
     const { status, out } = runGuard(dir, { FFI_CRATE_REV_BASE_REF: 'origin/no-such-branch' });
     expect(status, out).toBe(2);
+    expect(out).toContain('base ref origin/no-such-branch does not resolve');
   });
 
   it('FAILS CLOSED (exit 2) with no base ref and no push event (never compares HEAD with itself)', () => {
     const { dir } = makeRepo();
     const { status, out } = runGuard(dir, {});
     expect(status, out).toBe(2);
+    expect(out).toMatch(/no base ref/);
   });
 
   it('fails a pin that is not a full 40-hex SHA', () => {
