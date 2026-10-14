@@ -475,6 +475,7 @@ jobs:
       # native/.integrity.json. KNEXT_BUILD_ID pins .next/BUILD_ID to the tag
       # the deploy below uses (the app's generateBuildId reads it).
       - name: knext build (turbopack x bun) — ffi build, next build, compile
+        id: build
         run: |
           set -euo pipefail
           cd "$APP_DIR"
@@ -495,52 +496,6 @@ jobs:
             echo "::warning::.next/standalone/rust/target was traced into the image tree ($(du -sh .next/standalone/rust/target | cut -f1))"
           fi
           echo "LIB_SHA256=$want" >> "$GITHUB_ENV"
-
-      # The SAME runner and checks as ci.yml's compat-smoke job, red-on-fail,
-      # against a host-arch twin of THIS build's standalone tree (the shipped
-      # executable is linux-musl; the kind deploy below runs that one). The
-      # tree is copied first so the build's freshness stamp is untouched; the
-      # copy is laid out as the image lays it out.
-      - name: compat-smoke on the opted-in build (bun lane, compiled standalone executable)
-        id: smoke
-        env:
-          REDIS_URL: redis://127.0.0.1:6379
-        run: packages/ffi/scripts/run-compat-smoke.sh "$GITHUB_WORKSPACE" "$APP_DIR" "${RUNNER_TEMP}/ffi-zone-smoke"
-
-      # Attribution, never a gate (the step above already failed the job): the
-      # SAME file-manager copy WITHOUT the opt-in, built and smoked the same
-      # way. A check that fails here too is the cell's, not in-process Rust's.
-      - name: 'Attribution: compat-smoke on the same copy WITHOUT the opt-in (only when the gate failed)'
-        if: failure() && steps.smoke.outcome == 'failure'
-        env:
-          REDIS_URL: redis://127.0.0.1:6379
-          FFI_E2E_OVERLAY: none
-          FFI_E2E_MUTATION: none
-        run: |
-          set +e -uo pipefail  # a report: the gate above is what fails the job
-          BASE="${RUNNER_TEMP}/baseline-zone"
-          packages/ffi/scripts/stage-ffi-zone.sh "$GITHUB_WORKSPACE" "$BASE" || exit 0
-          cp "${APP_DIR}/knext.config.ts" "${BASE}/knext.config.ts"
-          (
-            cd "$BASE" && bun install >/dev/null && \
-            npm install --no-save --no-audit --no-fund \
-              "$(find "${TARBALLS_DIR}" -maxdepth 1 -name 'getknext-lib-*.tgz' | tail -n1)" \
-              "$(find "${TARBALLS_DIR}" -maxdepth 1 -name 'getknext-db-*.tgz' | tail -n1)" \
-              "$(find "${TARBALLS_DIR}" -maxdepth 1 -name 'getknext-core-*.tgz' | tail -n1)" >/dev/null && \
-            node "$KNEXT" build > "${RUNNER_TEMP}/baseline-build.log" 2>&1
-          ) || { echo "::warning::baseline build failed"; grep -v -e "module" -e "^ *at " "${RUNNER_TEMP}/baseline-build.log" | tail -n 120; exit 0; }
-          packages/ffi/scripts/run-compat-smoke.sh "$GITHUB_WORKSPACE" "$BASE" "${RUNNER_TEMP}/baseline-smoke" \
-            > "${RUNNER_TEMP}/baseline-smoke.log" 2>&1
-          code=$?
-          grep -E '^(✓ PASS|✗ FAIL|PASS=)' "${RUNNER_TEMP}/baseline-smoke.log"
-          echo "::warning::baseline (no opt-in) compat-smoke exit ${code} — compare its FAIL lines with the gate's"
-          {
-            echo "### compat-smoke attribution: the same copy WITHOUT the opt-in (exit ${code})"
-            echo '```'
-            grep -E '^(✓ PASS|✗ FAIL|PASS=)' "${RUNNER_TEMP}/baseline-smoke.log"
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-          exit 0
 
       - name: Create kind cluster (registry certs.d config_path)
         run: |
@@ -607,7 +562,7 @@ jobs:
       - name: Namespace
         run: kubectl create namespace "$APP_NS"
 
-      - name: knext deploy --skip-build (the build compat-smoke just checked)
+      - name: knext deploy --skip-build (the build compat-smoke checks below)
         run: |
           set -euo pipefail
           cd "$APP_DIR"
@@ -661,6 +616,54 @@ jobs:
           kubectl -n "$APP_NS" logs "$pod" -c user-container > /tmp/app.log
           grep -q "panicked at" /tmp/app.log || { echo "::error::no Rust panic line in the pod's log: the panic path did not run in Rust"; exit 1; }
           grep -m1 "panicked at" -A1 /tmp/app.log
+
+      # The SAME runner and checks as ci.yml's compat-smoke job, red-on-fail,
+      # against a host-arch twin of THE build deployed above (the shipped
+      # executable is linux-musl; the kind deploy runs that one). The tree is
+      # copied first so the build's freshness stamp is untouched; the copy is
+      # laid out as the image lays it out. After the cluster assertions, and
+      # whether or not they passed, so one run reports both gates.
+      - name: compat-smoke on the opted-in build (bun lane, compiled standalone executable)
+        id: smoke
+        if: always() && steps.build.outcome == 'success'
+        env:
+          REDIS_URL: redis://127.0.0.1:6379
+        run: packages/ffi/scripts/run-compat-smoke.sh "$GITHUB_WORKSPACE" "$APP_DIR" "${RUNNER_TEMP}/ffi-zone-smoke"
+
+      # Attribution, never a gate (the step above already failed the job): the
+      # SAME file-manager copy WITHOUT the opt-in, built and smoked the same
+      # way. A check that fails here too is the cell's, not in-process Rust's.
+      - name: 'Attribution: compat-smoke on the same copy WITHOUT the opt-in (only when the gate failed)'
+        if: failure() && steps.smoke.outcome == 'failure'
+        env:
+          REDIS_URL: redis://127.0.0.1:6379
+          FFI_E2E_OVERLAY: none
+          FFI_E2E_MUTATION: none
+        run: |
+          set +e -uo pipefail  # a report: the gate above is what fails the job
+          BASE="${RUNNER_TEMP}/baseline-zone"
+          packages/ffi/scripts/stage-ffi-zone.sh "$GITHUB_WORKSPACE" "$BASE" || exit 0
+          cp "${APP_DIR}/knext.config.ts" "${BASE}/knext.config.ts"
+          (
+            cd "$BASE" && bun install >/dev/null && \
+            npm install --no-save --no-audit --no-fund \
+              "$(find "${TARBALLS_DIR}" -maxdepth 1 -name 'getknext-lib-*.tgz' | tail -n1)" \
+              "$(find "${TARBALLS_DIR}" -maxdepth 1 -name 'getknext-db-*.tgz' | tail -n1)" \
+              "$(find "${TARBALLS_DIR}" -maxdepth 1 -name 'getknext-core-*.tgz' | tail -n1)" >/dev/null && \
+            node "$KNEXT" build > "${RUNNER_TEMP}/baseline-build.log" 2>&1
+          ) || { echo "::warning::baseline build failed"; grep -v -e "module" -e "^ *at " "${RUNNER_TEMP}/baseline-build.log" | tail -n 120; exit 0; }
+          packages/ffi/scripts/run-compat-smoke.sh "$GITHUB_WORKSPACE" "$BASE" "${RUNNER_TEMP}/baseline-smoke" \
+            > "${RUNNER_TEMP}/baseline-smoke.log" 2>&1
+          code=$?
+          grep -E '^(✓ PASS|✗ FAIL|PASS=)' "${RUNNER_TEMP}/baseline-smoke.log"
+          echo "::warning::baseline (no opt-in) compat-smoke exit ${code} — compare its FAIL lines with the gate's"
+          {
+            echo "### compat-smoke attribution: the same copy WITHOUT the opt-in (exit ${code})"
+            echo '```'
+            grep -E '^(✓ PASS|✗ FAIL|PASS=)' "${RUNNER_TEMP}/baseline-smoke.log"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
 
       - name: Diagnostics on failure
         if: failure()
