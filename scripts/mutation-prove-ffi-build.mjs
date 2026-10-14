@@ -134,7 +134,7 @@ const PREFLIGHT = [
 const CALLERS = [
   {
     id: 'C01',
-    subject: 'build',
+    subject: 'coreBuild',
     claim:
       'knext build no longer calls the preflight (--skip-next ships a node/self-contained ffi app)',
     anchor:
@@ -162,7 +162,7 @@ const BUILD = [
   },
   {
     id: 'B02',
-    subject: 'build',
+    subject: 'ffiBuild',
     claim: 'staging clears the whole native/ dir, not only native/ffi/',
     anchor:
       "    const ffiDir = join(native, 'ffi');\n    rmSync(ffiDir, { recursive: true, force: true });",
@@ -171,14 +171,14 @@ const BUILD = [
   },
   {
     id: 'B03',
-    subject: 'build',
+    subject: 'ffiBuild',
     claim: 'the drift check never fails',
     anchor: '      if (drift.length > 0) {',
     replacement: '      if (drift.length < 0) {',
   },
   {
     id: 'B04',
-    subject: 'build',
+    subject: 'ffiBuild',
     claim: 'the cross-build links libc statically again (-crt-static not turned off)',
     anchor:
       "      RUSTFLAGS: [process.env.RUSTFLAGS, '-C target-feature=-crt-static'].filter(Boolean).join(' '),",
@@ -186,7 +186,7 @@ const BUILD = [
   },
   {
     id: 'B05',
-    subject: 'build',
+    subject: 'ffiBuild',
     claim: 'the cross-build is no longer --locked',
     anchor: "          '--release',\n          '--locked',",
     replacement: "          '--release',",
@@ -217,14 +217,14 @@ const callers = createGuardProver({
   repoRoot: REPO_ROOT,
   spec: CALLERS_SPEC,
   subjects: {
-    build: 'packages/kn-next/src/cli/build.ts',
+    coreBuild: 'packages/kn-next/src/cli/build.ts',
     preview: 'packages/kn-next/src/cli/preview.ts',
   },
 });
 const ffiBuild = createGuardProver({
   repoRoot: REPO_ROOT,
   spec: BUILD_SPEC,
-  subjects: { build: 'packages/ffi/src/build.ts', elf: 'packages/ffi/src/elf.ts' },
+  subjects: { ffiBuild: 'packages/ffi/src/build.ts', elf: 'packages/ffi/src/elf.ts' },
 });
 
 console.log('=== mutation proof: in-process Rust build and image (#2345) ===');
@@ -278,7 +278,7 @@ callers.finish(CALLERS.length);
 console.log('\n=== knext ffi build spec (libc check, staging scope, drift, cargo flags) ===');
 ffiBuild.baseline();
 ffiBuild.proveCanSeeRed({
-  subject: 'build',
+  subject: 'ffiBuild',
   anchor: "export const PROVENANCE_FILE = 'provenance.json';",
   replacement: "export const PROVENANCE_FILE = 'provenance.canary.json';",
 });
