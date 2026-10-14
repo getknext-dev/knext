@@ -185,9 +185,13 @@ describe('ffi-e2e.yml compat-smoke gates on the shipped image', () => {
 
   it('every smoke script flushes Redis before the runner (Next caches the optimized image there)', () => {
     for (const f of ['run-compat-smoke.sh', 'run-compat-smoke-image.sh']) {
-      const text = readFileSync(resolve(SCRIPTS_DIR, f), 'utf8');
-      const flush = text.indexOf('redis-flush.mjs');
-      const runner = text.indexOf('apps/file-manager/scripts/compat-smoke.mjs');
+      // Commands only: the headers name both scripts in prose.
+      const code = readFileSync(resolve(SCRIPTS_DIR, f), 'utf8')
+        .split('\n')
+        .filter((l) => !/^\s*#/.test(l))
+        .join('\n');
+      const flush = code.indexOf('node packages/ffi/scripts/redis-flush.mjs');
+      const runner = code.indexOf('node apps/file-manager/scripts/compat-smoke.mjs');
       expect(flush).toBeGreaterThan(0);
       expect(runner).toBeGreaterThan(flush);
     }
