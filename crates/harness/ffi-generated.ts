@@ -359,7 +359,9 @@ async function init(): Promise<void> {
 
   // generate: cargo builds the crate exactly as written (no patch, no path
   // override), fetching knext-ffi at the recorded revision.
-  same(await runGenerate({ cwd: dir, io }), 0, 'knext ffi generate exits 0');
+  const generated = await runGenerate({ cwd: dir, io });
+  same(generated, 0, 'knext ffi generate exits 0 (cargo built the crate as written)');
+  if (generated !== 0) return; // nothing below can run without the library
   const index = join(dir, 'src', 'generated', 'ffi', 'index.ts');
   check(existsSync(index), 'knext ffi generate wrote src/generated/ffi/index.ts');
   same(await runGenerate({ cwd: dir, io, check: true }), 0, 'knext ffi check passes');
