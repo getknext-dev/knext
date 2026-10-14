@@ -34,9 +34,11 @@
  *    a compare-and-delete script, so a stamp re-written mid-prune survives. The
  *    semantics copy Next's built-in handler.
  *  - Outage: Redis down means MISS and DROP. There is no per-process store of
- *    any kind -- not even Next's in-memory default -- because this is where
- *    per-user entries live and a pod-local copy would sit outside the TTL cap and
- *    never see another pod's invalidation.
+ *    entries of any kind -- not even Next's in-memory default -- because this is
+ *    where per-user entries live and a pod-local copy would sit outside the TTL
+ *    cap and never see another pod's invalidation. The one thing kept is the
+ *    list of tags whose stamps did not reach Redis, replayed once the breaker
+ *    closes (see "Tag stamps an outage kept from Redis").
  *
  * One `revalidateTag` already reaches both handlers: Next calls `updateTags` on
  * every configured `cacheHandlers` kind AND `revalidateTag` on the singular
@@ -82,6 +84,8 @@ export const USE_CACHE_EVENTS = Object.freeze({
   dropped: 'dropped',
   tagsUpdated: 'tags_updated',
   tagsDropped: 'tags_dropped',
+  tagsReplayed: 'tags_replayed',
+  tagsCollapsed: 'tags_collapsed',
   pruneError: 'prune_error',
   error: 'error',
 });
@@ -157,8 +161,9 @@ export const PRUNE_STAMPS_SCRIPT = [
 /**
  * State shared by the `default` and `remote` handlers of ONE process, keyed by the
  * `core` they share (one per evaluation of `cache-handler.js`, like the breaker):
- * the outage and size warnings fire once per process, not once per kind, and the
- * Redis clock is read once for both.
+ * the outage and size warnings fire once per process, not once per kind, the
+ * Redis clock is read once for both, and one backlog of dropped tag stamps serves
+ * both (Next calls `updateTags` on every kind with the same tags).
  */
 const SHARED = new WeakMap();
 
@@ -170,6 +175,7 @@ function shared(core) {
       oversizeWarned: false,
       pruneWarned: false,
       clock: { offset: undefined, sampledAt: 0, retryAt: 0, inflight: null },
+      replay: { tags: new Map(), generation: 0, collapsed: false, run: null, timer: null },
     };
     SHARED.set(core, state);
   }
@@ -328,13 +334,206 @@ function parseEnvelope(raw) {
   }
 }
 
+const tagsKeyOf = (core) => `${core.keyPrefix()}:uc:tags`;
+
+/**
+ * What one `updateTags` call writes for one tag, as a record a later call can be
+ * merged into: `stale` = write `s:<tag>`, `expireMs` = write `e:<tag>` that many
+ * ms after the write time (0 = expired now, null = leave the expiry alone).
+ * Merged in call order, as consecutive HSETs would overwrite each other.
+ */
+function mergeStamp(prev, durations, generation) {
+  const next = { generation, stale: prev?.stale ?? false, expireMs: prev?.expireMs ?? null };
+  if (durations) {
+    // Stale now; expired later when the profile says when. No `expire` leaves
+    // the existing expiry alone, as Next's handler does.
+    next.stale = true;
+    if (Number.isFinite(durations.expire)) next.expireMs = durations.expire * 1000;
+  } else {
+    next.expireMs = 0;
+  }
+  return next;
+}
+
+/** The HSET fields a stamp record writes at `now` (Redis clock, epoch ms). */
+function stampFields(tag, record, now) {
+  const fields = [];
+  if (record.stale) fields.push(`s:${tag}`, String(now));
+  if (record.expireMs !== null) fields.push(`e:${tag}`, String(now + record.expireMs));
+  return fields;
+}
+
+// ─── Tag stamps an outage kept from Redis ───
+//
+// With the breaker open (or Redis faulting under the write) an `updateTags`
+// cannot write its stamps, and every pod keeps serving the entries they would
+// have expired until the entry's TTL (24 h by default). So the tags are kept
+// here, per process, and their stamps written once the breaker closes. The same
+// shape as the ISR handler's replay of skipped invalidations (cache-handler.js),
+// which runs alongside it for the same `revalidateTag`:
+//
+//  - REPLAY TIME. The stamps are written with the time of the replay, as a late
+//    `updateTags` would be, so never older than the call they replay. Writing the
+//    original time instead could roll back a newer stamp another pod wrote in
+//    the meantime (an HSET overwrites), bringing back entries it had expired. The
+//    cost is an entry written between the call and the replay being expired once
+//    more: one re-render, never a stale read.
+//  - BOUNDED. At most REPLAY_MAX_TAGS distinct tags. One more and the list is
+//    dropped for a COLLAPSE: the replay deletes every `'use cache'` entry under
+//    this app's key prefix (a cursor SCAN, DEL per page; the stamp hash is kept).
+//    Wider than needed, never stale. The ISR replay's bound and collapse.
+//  - OFF THE REQUEST PATH. Started by the first connection this handler gets with
+//    the breaker closed, or by a probe timer set for the moment it closes (an
+//    idle pod would otherwise never replay while other pods serve the stale
+//    entries). Never awaited by a caller; enrolled in the SIGTERM drain.
+//  - NO STORM. One replay at a time, REPLAY_BATCH tags per HSET through
+//    `redisCall`: the first fault re-trips the breaker and stops the run, and the
+//    rest waits for the next probe, one attempt per cooldown.
+//  - PER PROCESS. A pod that restarts or scales to zero before Redis is back
+//    loses the list, and those entries stay valid until their TTL (a known limit).
+const REPLAY_MAX_TAGS = 1000;
+const REPLAY_BATCH = 100;
+const REPLAY_SCAN_COUNT = 100;
+// The probe delay when the core cannot say when its breaker closes.
+const REPLAY_PROBE_MS = 5_000;
+
+function replayPending(replay) {
+  return replay.collapsed || replay.tags.size > 0;
+}
+
+/** Forget the backlog and its probe. Also the test reset, through cache-handler.js. */
+export function resetUseCacheTagReplay(core) {
+  const replay = shared(core).replay;
+  replay.tags.clear();
+  replay.generation = 0;
+  replay.collapsed = false;
+  replay.run = null;
+  if (replay.timer) clearTimeout(replay.timer);
+  replay.timer = null;
+}
+
+/** Remember tags whose stamps did not reach Redis, and try to replay them. */
+function recordDroppedTags(core, list, durations) {
+  if (!core.redisConfigured()) return;
+  const replay = shared(core).replay;
+  replay.generation += 1;
+  if (!replay.collapsed) {
+    for (const tag of list) {
+      const prev = replay.tags.get(tag);
+      if (!prev && replay.tags.size >= REPLAY_MAX_TAGS) {
+        replay.tags.clear();
+        replay.collapsed = true;
+        console.warn(
+          `[CacheHandler] 'use cache' tag replay backlog passed ${REPLAY_MAX_TAGS} tags while Redis was ` +
+            "unreachable; once it is back, every 'use cache' entry of this app is deleted",
+        );
+        break;
+      }
+      replay.tags.set(tag, mergeStamp(prev, durations, replay.generation));
+    }
+  }
+  // With the breaker open this finds no client and only sets the probe.
+  startTagReplay(core);
+}
+
+/** Start the replay unless one is running. Never awaited, never throws. */
+function startTagReplay(core) {
+  const replay = shared(core).replay;
+  if (replay.run || !replayPending(replay)) return;
+  replay.run = trackWrite(
+    runTagReplay(core)
+      .catch((err) => {
+        console.error("[CacheHandler] 'use cache' tag replay stopped:", err?.message);
+      })
+      .finally(() => {
+        replay.run = null;
+        scheduleTagProbe(core);
+      }),
+  );
+}
+
+/**
+ * Probe again when the breaker closes, while anything is left to replay. One
+ * timer at a time, unref'd so it never holds the process open.
+ */
+function scheduleTagProbe(core) {
+  if (!core.redisConfigured()) {
+    // The client could not be loaded at all: there is nothing a replay could reach.
+    resetUseCacheTagReplay(core);
+    return;
+  }
+  const replay = shared(core).replay;
+  if (replay.timer || replay.run || !replayPending(replay)) return;
+  const wait = typeof core.retryInMs === 'function' ? core.retryInMs() : REPLAY_PROBE_MS;
+  replay.timer = setTimeout(() => {
+    replay.timer = null;
+    startTagReplay(core);
+  }, wait);
+  replay.timer.unref?.();
+}
+
+async function runTagReplay(core) {
+  const replay = shared(core).replay;
+  const client = await core.ensureConnected();
+  if (!client) return;
+  if (replay.collapsed) {
+    await replayCollapsedTags(core, client);
+    return;
+  }
+  const offset = await clockOffset(core, client);
+  const pending = [...replay.tags];
+  for (let i = 0; i < pending.length; i += REPLAY_BATCH) {
+    const batch = pending.slice(i, i + REPLAY_BATCH);
+    // Replay time, in the Redis clock: never older than the calls it replays.
+    const now = Math.round(localNowMs()) + offset;
+    const fields = batch.flatMap(([tag, record]) => stampFields(tag, record, now));
+    await core.redisCall(() => core.command(client, 'HSET', [tagsKeyOf(core), ...fields]));
+    for (const [tag, record] of batch) {
+      // A drop of the same tag recorded while this write was in flight is newer
+      // than what was written: keep it for the next run.
+      if (replay.tags.get(tag)?.generation === record.generation) replay.tags.delete(tag);
+      count('tagsReplayed');
+    }
+  }
+}
+
+/** A Redis glob matching `text` literally. */
+function escapeGlob(text) {
+  return text.replace(/[*?[\]\\]/g, '\\$&');
+}
+
+/**
+ * The collapse: delete every `'use cache'` entry under this app's prefix, of
+ * every kind. The stamp hash is kept: it is not an entry, and deleting it would
+ * lose every other invalidation still inside its window.
+ */
+async function replayCollapsedTags(core, client) {
+  const replay = shared(core).replay;
+  const generation = replay.generation;
+  const stamps = tagsKeyOf(core);
+  const pattern = `${escapeGlob(core.keyPrefix())}:uc:*`;
+  let cursor = '0';
+  do {
+    const reply = await core.redisCall(() =>
+      core.command(client, 'SCAN', [cursor, 'MATCH', pattern, 'COUNT', String(REPLAY_SCAN_COUNT)]),
+    );
+    cursor = String(reply?.[0] ?? '0');
+    const keys = (Array.isArray(reply?.[1]) ? reply[1].map(String) : []).filter((k) => k !== stamps);
+    if (keys.length > 0) await core.redisCall(() => core.command(client, 'DEL', keys));
+  } while (cursor !== '0');
+  // A drop recorded during the sweep may have missed it: keep the collapse.
+  if (replay.generation === generation) replay.collapsed = false;
+  count('tagsCollapsed');
+}
+
 /**
  * @param {object} args
  * @param {string} args.kind  Next's cache kind: `default` or `remote`.
  * @param {object} args.core  The collaborators `cache-handler.js` owns:
  *   `ensureConnected()` (client or null), `redisCall(fn)` (trips the shared
  *   breaker on a fault), `command(client, name, args)`, `keyPrefix()`,
- *   `buildId()` and `redisConfigured()`.
+ *   `buildId()`, `redisConfigured()` and, optionally, `retryInMs()` (how long
+ *   until the breaker closes, for the tag replay's probe).
  */
 export function createUseCacheHandler({ kind, core }) {
   // Handler-owned promises, one per in-flight set. They settle when the set
@@ -348,7 +547,17 @@ export function createUseCacheHandler({ kind, core }) {
   publishMetricsSeam();
 
   const entryKey = (cacheKey) => `${core.keyPrefix()}:uc:${kind}:${cacheKey}`;
-  const tagsKey = () => `${core.keyPrefix()}:uc:tags`;
+  const tagsKey = () => tagsKeyOf(core);
+
+  /**
+   * The connected client, or null. A client means the breaker is closed, so it
+   * is also the moment a tag replay can start: started, never awaited.
+   */
+  async function connected() {
+    const client = await core.ensureConnected();
+    if (client && replayPending(state.replay)) startTagReplay(core);
+    return client;
+  }
 
   /**
    * One warning per outage per process (both kinds share it), never the cache key
@@ -374,7 +583,7 @@ export function createUseCacheHandler({ kind, core }) {
     const pending = pendingSets.get(rkey);
     if (pending) await pending;
 
-    const client = await core.ensureConnected();
+    const client = await connected();
     if (!client) {
       noteUnavailable();
       count('miss');
@@ -497,7 +706,7 @@ export function createUseCacheHandler({ kind, core }) {
       return;
     }
 
-    const client = await core.ensureConnected();
+    const client = await connected();
     if (!client) {
       noteUnavailable();
       count('dropped');
@@ -570,36 +779,32 @@ export function createUseCacheHandler({ kind, core }) {
   async function doUpdateTags(tags, durations) {
     const list = (Array.isArray(tags) ? tags : [tags]).filter((t) => typeof t === 'string' && t.length > 0);
     if (list.length === 0) return;
-    const client = await core.ensureConnected();
+    const client = await connected();
     if (!client) {
+      // Kept and replayed once the breaker closes (see "Tag stamps an outage
+      // kept from Redis"); it must not fail the request that asked for it.
       noteUnavailable();
       count('tagsDropped');
+      recordDroppedTags(core, list, durations);
       return;
     }
     // Offset FIRST, then the clock: on a process's first call the offset read is a
     // round trip, and a clock read taken before it would stamp that much early.
     const redisOffset = await clockOffset(core, client);
     const now = Math.round(localNowMs()) + redisOffset;
-    const fields = [];
-    for (const tag of list) {
-      if (durations) {
-        // Stale now; expired later when the profile says when. No `expire` leaves
-        // the existing expiry alone, as Next's handler does.
-        fields.push(`s:${tag}`, String(now));
-        if (Number.isFinite(durations.expire)) fields.push(`e:${tag}`, String(now + durations.expire * 1000));
-      } else {
-        fields.push(`e:${tag}`, String(now));
-      }
-    }
+    const record = mergeStamp(undefined, durations, 0);
+    const fields = list.flatMap((tag) => stampFields(tag, record, now));
     try {
       await core.redisCall(() => core.command(client, 'HSET', [tagsKey(), ...fields]));
       noteAvailable();
       count('tagsUpdated');
     } catch (err) {
-      // An invalidation lost to an outage is lost (ADR-0066 D2); it must not
-      // fail the request that asked for it.
+      // The write faulted and tripped the breaker: replayed once it closes, like
+      // a call that found it open. It must not fail the request that asked for it.
       count('error');
+      count('tagsDropped');
       console.error("[CacheHandler] Error updating 'use cache' tags:", err?.message);
+      recordDroppedTags(core, list, durations);
       return;
     }
     try {
@@ -619,7 +824,7 @@ export function createUseCacheHandler({ kind, core }) {
   async function doGetExpiration(tags) {
     const list = (Array.isArray(tags) ? tags : []).filter((t) => typeof t === 'string' && t.length > 0);
     if (list.length === 0) return 0;
-    const client = await core.ensureConnected();
+    const client = await connected();
     if (!client) return 0;
     let stamps;
     try {

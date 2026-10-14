@@ -40,7 +40,12 @@ export interface UseCacheCore {
     keyPrefix(): string;
     buildId(): string | undefined;
     redisConfigured(): boolean;
+    /** How long until the breaker closes, for the tag replay's probe (5 s if absent). */
+    retryInMs?(): number;
 }
+
+/** Forget the process's backlog of dropped tag stamps and its probe timer. */
+export declare function resetUseCacheTagReplay(core: UseCacheCore): void;
 
 export declare function createUseCacheHandler(args: {
     kind: "default" | "remote" | string;

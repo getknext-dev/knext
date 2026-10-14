@@ -514,18 +514,29 @@ describe.each([
     });
 
     it("a tag invalidated on one pod expires the entry on another", async () => {
-        await withRedis();
+        const f = await withRedis();
         const a = await pod();
         const b = await pod();
+        // Next stamps an entry with the pod clock (`performance`), not
+        // `Date.now`: the two can drift apart by more than the gap below.
         await a.useCache.set(
             "x",
             Promise.resolve(
-                entryOf({ tags: ["shared-tag"], timestamp: Date.now() }),
+                entryOf({ tags: ["shared-tag"], timestamp: nextNow() }),
             ),
         );
         expect(await b.useCache.get("x", [])).toBeDefined();
         await sleep(5);
         await a.useCache.updateTags(["shared-tag"]);
+        // Each pod estimates its Redis-clock offset from one TIME round trip,
+        // so A's fresh stamp can still sit a millisecond or two in B's future,
+        // and an expiry in the future does not expire yet. Read once the
+        // server clock (the fake's TIME is Date.now) is clearly past it.
+        const stamped = Number(
+            f.hashes.get(`${PREFIX}:uc:tags`)?.get("e:shared-tag"),
+        );
+        expect(Number.isFinite(stamped)).toBe(true);
+        while (Date.now() <= stamped + 50) await sleep(10);
         expect(
             await b.useCache.get("x", []),
             "revalidateTag on pod A must invalidate pod B",

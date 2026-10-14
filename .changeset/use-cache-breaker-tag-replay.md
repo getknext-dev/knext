@@ -1,0 +1,5 @@
+---
+"@getknext/core": patch
+---
+
+Replay `'use cache'` invalidations that could not reach Redis. While Redis is unreachable, a `revalidateTag` or `revalidatePath` could not record its invalidation for `'use cache'` entries, so after Redis came back every pod kept returning those entries until they expired (up to 24 hours). The pod now remembers those tags (up to 1,000, deduplicated, shared by the `default` and `remote` kinds) and, as soon as Redis answers again, records the invalidation in the background, timed at that moment so it is never earlier than the call. If more than 1,000 tags pile up, it removes every `'use cache'` entry of the app instead. The list lives in the pod's memory, so a pod that restarts or scales to zero before Redis is back still leaves those entries in place until they expire. Two new `knext_use_cache_events_total` events, `tags_replayed` and `tags_collapsed`, count the replay; `tags_dropped` now also counts a tag write that failed part-way.
