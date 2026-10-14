@@ -14,6 +14,7 @@
  */
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -95,6 +96,60 @@ int32_t SYM_bad_point(uint64_t *out) {
   const char *j =
       "{\"id\":\"1\",\"x\":null,\"label\":\"\",\"tags\":[],\"inner\":null,\"color\":\"Red\"}";
   put(out, j, strlen(j));
+  return 0;
+}
+
+/* 64-bit integers as JSON numbers: the generated decoder must refuse them. */
+int32_t SYM_bad_id(uint64_t *out) {
+  const char *j =
+      "{\"id\":1,\"x\":0,\"label\":\"\",\"tags\":[],\"inner\":null,\"color\":\"Red\"}";
+  put(out, j, strlen(j));
+  return 0;
+}
+
+int32_t SYM_bad_tag(uint64_t *out) {
+  const char *j =
+      "{\"id\":\"1\",\"x\":0,\"label\":\"\",\"tags\":[\"2\",3],\"inner\":null,\"color\":\"Red\"}";
+  put(out, j, strlen(j));
+  return 0;
+}
+
+/* scale(r: f64) -> Point: a record whose x is 2r. */
+int32_t SYM_scale(double r, uint64_t *out) {
+  char j[192];
+  int n = snprintf(j, sizeof j,
+                   "{\"id\":\"7\",\"x\":%.17g,\"label\":\"scaled\",\"tags\":[],\"inner\":null,"
+                   "\"color\":\"Red\"}",
+                   r * 2);
+  put(out, j, (size_t)n);
+  return 0;
+}
+
+/* join(st, base, o0, n0, r: &str) -> Vec<String>: the five arguments, in order, as a JSON
+ * array (the test passes no character that needs escaping). */
+int32_t SYM_join(const uint8_t *a, size_t an, const uint8_t *b, size_t bn, const uint8_t *c,
+                 size_t cn, const uint8_t *d, size_t dn, const uint8_t *e, size_t en,
+                 uint64_t *out) {
+  const uint8_t *p[5] = {a, b, c, d, e};
+  size_t n[5] = {an, bn, cn, dn, en};
+  size_t total = 2;
+  for (int i = 0; i < 5; i++) {
+    if (p[i] == NULL && n[i] > 0) return fail(out, 3, "null with length");
+    total += n[i] + 3;
+  }
+  char *buf = malloc(total);
+  size_t at = 0;
+  buf[at++] = '[';
+  for (int i = 0; i < 5; i++) {
+    if (i) buf[at++] = ',';
+    buf[at++] = '"';
+    if (n[i]) memcpy(buf + at, p[i], n[i]);
+    at += n[i];
+    buf[at++] = '"';
+  }
+  buf[at++] = ']';
+  put(out, buf, at);
+  free(buf);
   return 0;
 }
 

@@ -167,8 +167,10 @@ describe('D6 golden rows — buffers, unit, JSON types', () => {
     const f = body(src, 'f');
     expect(f).toContain('export function f(s: string): string {');
     expect(f).toContain("$str('f', 's', s);");
-    expect(f).toContain('const o0 = $put(s);\n  const n0 = $last;\n  const base = $base();');
-    expect(f).toContain('$lib.knext_ffi_v1_f_0badc0de(n0 === 0 ? null : base + o0, n0, $outPtr)');
+    expect(f).toContain('const $o0 = $put(s);\n  const $n0 = $last;\n  const $scratch = $base();');
+    expect(f).toContain(
+      '$lib.knext_ffi_v1_f_0badc0de($n0 === 0 ? null : $scratch + $o0, $n0, $outPtr)',
+    );
     expect(f).toContain('return $takeString();');
     expect(src).toContain(
       "knext_ffi_v1_f_0badc0de: { args: ['ptr', 'usize', 'ptr'], returns: 'i32' }",
@@ -180,8 +182,10 @@ describe('D6 golden rows — buffers, unit, JSON types', () => {
     const f = body(src, 'f');
     expect(f).toContain('export function f(data: Uint8Array): Uint8Array {');
     expect(f).toContain("$bytes('f', 'data', data);");
-    expect(f).toContain('const o0 = $put(data);');
-    expect(f).toContain('$lib.knext_ffi_v1_f_0badc0de(n0 === 0 ? null : base + o0, n0, $outPtr)');
+    expect(f).toContain('const $o0 = $put(data);');
+    expect(f).toContain(
+      '$lib.knext_ffi_v1_f_0badc0de($n0 === 0 ? null : $scratch + $o0, $n0, $outPtr)',
+    );
     expect(f).toContain('return $takeBytes();');
     expect(f).not.toContain('ptr(');
   });
@@ -213,9 +217,9 @@ describe('D6 golden rows — buffers, unit, JSON types', () => {
     expect(src).toContain("/** A colour. */\nexport type C = 'Red' | 'Green';");
     const f = body(src, 'f');
     expect(f).toContain('export function f(p: P): C {');
-    expect(f).toContain('const o0 = $put(JSON.stringify($e_P(p)));');
-    expect(f).toContain('const r: unknown = JSON.parse($takeString());');
-    expect(f).toContain('return r as C;');
+    expect(f).toContain('const $o0 = $put(JSON.stringify($e_P(p)));');
+    expect(f).toContain('const $r: unknown = JSON.parse($takeString());');
+    expect(f).toContain('return $r as C;');
     expect(src).toContain('function $e_P(v: P): unknown {');
     expect(src).toContain('id: $s64(v.id)');
   });
@@ -233,9 +237,11 @@ describe('D6 golden rows — buffers, unit, JSON types', () => {
     ]);
     const f = body(src, 'f');
     expect(f).toContain('export function f(a: string | null, b: number[]): (number | null)[] {');
-    expect(f).toContain('const o0 = $put(JSON.stringify(a));');
-    expect(f).toContain('const o1 = $put(JSON.stringify(b));');
-    expect(f).toContain("$vec(r, 'result', (x0, at0) => $opt(x0, (x1) => $fin('f', at0, x1)))");
+    expect(f).toContain('const $o0 = $put(JSON.stringify(a));');
+    expect(f).toContain('const $o1 = $put(JSON.stringify(b));');
+    expect(f).toContain(
+      "$vec($r, 'result', ($x0, $at0) => $opt($x0, ($x1) => $fin('f', $at0, $x1)))",
+    );
   });
 
   it('a Vec<u8> inside a JSON type is number[] (raw bytes only cross at the top level)', () => {
@@ -257,17 +263,17 @@ describe('D6 golden rows — buffers, unit, JSON types', () => {
       record('P', [['xs', D.vec(D.opt(D.t('isize')))]]),
     ]);
     const f = body(src, 'f');
-    expect(f).toContain('JSON.stringify($opt(a, (x0) => $s64(x0)))');
-    expect(f).toContain('JSON.stringify(b.map((x0) => $s64(x0)))');
-    expect(f).toContain("return $opt(r, (x0) => $d64('f', 'result', x0));");
-    expect(src).toContain('xs: v.xs.map((x0) => $opt(x0, (x1) => $s64(x1)))');
+    expect(f).toContain('JSON.stringify($opt(a, ($x0) => $s64($x0)))');
+    expect(f).toContain('JSON.stringify(b.map(($x0) => $s64($x0)))');
+    expect(f).toContain("return $opt($r, ($x0) => $d64('f', 'result', $x0));");
+    expect(src).toContain('xs: v.xs.map(($x0) => $opt($x0, ($x1) => $s64($x1)))');
     expect(src).toContain('function $d64(fn: string, at: string, v: unknown): bigint {');
     expect(src).not.toContain('$d_P');
     const g = body(
       render([fn('g', [], D.rec('P')), record('P', [['xs', D.vec(D.opt(D.t('isize')))]])]),
       'g',
     );
-    expect(g).toContain("return $d_P('g', 'result', r);");
+    expect(g).toContain("return $d_P('g', 'result', $r);");
   });
 
   it('floats inside JSON must be finite: a null where the schema says f64 is a RustError naming the field', () => {
@@ -353,8 +359,8 @@ describe('D13 — the module contract', () => {
 
   it('type-checks without @types/bun: no Bun global, hashes with node:crypto createHash', () => {
     expect(code).not.toMatch(/\bBun\./);
-    expect(src).toContain("import { createHash } from 'node:crypto';");
-    expect(src).toContain("createHash('sha256')");
+    expect(src).toContain("import { createHash as $createHash } from 'node:crypto';");
+    expect(src).toContain("$createHash('sha256')");
   });
 
   it('the Node guard message of D15 step 2', () => {
@@ -376,7 +382,7 @@ describe('D13 — the module contract', () => {
   });
 
   it('path resolution: native/ffi/<triple> beside the executable first, dev fallback gated on NODE_ENV', () => {
-    expect(src).toContain("join(dirname(process.execPath), 'native')");
+    expect(src).toContain("$join($dirname(process.execPath), 'native')");
     expect(src).toContain("process.env['NODE_ENV'] !== 'production'");
     expect(src).toContain("const $LIB = 'zone';");
     expect(src).toContain("const $CRATE = 'rust';");
@@ -470,7 +476,9 @@ describe('D13 item 6 — the spike binding rules', () => {
     // Measured on Bun 1.4.2: an empty Uint8Array passed as a ptr argument
     // arrives NON-null; JavaScript null arrives as NULL.
     const f = body(src, 'sum');
-    expect(f).toContain('$lib.knext_ffi_v1_sum_0badc0de(n0 === 0 ? null : base + o0, n0, $outPtr)');
+    expect(f).toContain(
+      '$lib.knext_ffi_v1_sum_0badc0de($n0 === 0 ? null : $scratch + $o0, $n0, $outPtr)',
+    );
     expect(src).toContain('if (max === 0) return at;');
     expect(src).toContain('type $Arg = number | bigint | boolean | null;');
   });
@@ -479,14 +487,14 @@ describe('D13 item 6 — the spike binding rules', () => {
     for (const r of KITCHEN_SINK.filter((x) => x.kind === 'fn')) {
       const f = body(src, r.name as string);
       if (!f.includes('$put(')) continue;
-      expect(f.indexOf('const base = $base();'), r.name as string).toBeGreaterThan(
+      expect(f.indexOf('const $scratch = $base();'), r.name as string).toBeGreaterThan(
         f.lastIndexOf('$put('),
       );
-      expect(f.indexOf('const base = $base();')).toBeLessThan(f.indexOf('$lib.'));
+      expect(f.indexOf('const $scratch = $base();')).toBeLessThan(f.indexOf('$lib.'));
     }
     const concat = body(src, 'concat');
-    expect(concat).toContain('const o0 = $put(a);');
-    expect(concat).toContain('const o1 = $put(b);');
+    expect(concat).toContain('const $o0 = $put(a);');
+    expect(concat).toContain('const $o1 = $put(b);');
     // Offsets are 8-byte aligned; a grow copies the bytes so far and zeroes the old buffer.
     expect(src).toContain('const at = Math.ceil($used / 8) * 8;');
     expect(src).toContain('mem.set($mem.subarray(0, $used));\n  $mem.fill(0);');

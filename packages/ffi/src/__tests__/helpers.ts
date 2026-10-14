@@ -177,6 +177,26 @@ export const KITCHEN_SINK: Record<string, unknown>[] = [
   fn('strict', [['s', t('string'), '&str']], t('string'), { retRust: 'String' }),
   fn('sum', [['data', t('bytes'), '&[u8]']], t('u64')),
   fn('tiny', [['x', t('i8')]], t('i8')),
+  // Argument names the generated function body must not shadow or redeclare:
+  // each is (or was) a name the emitter itself declares inside an export, and
+  // `join` is (or was) an import of the generated module.
+  fn('scale', [['r', t('f64')]], rec('Point'), { retRust: 'Point' }),
+  fn(
+    'join',
+    [
+      ['st', t('string'), '&str'],
+      ['base', t('string'), '&str'],
+      ['o0', t('string'), '&str'],
+      ['n0', t('string'), '&str'],
+      ['r', t('string'), '&str'],
+    ],
+    vec(t('string')),
+    { retRust: 'Vec<String>' },
+  ),
+  // A library that sends a 64-bit integer as a JSON number, at the top of a
+  // record and inside a Vec in it: the decoder must refuse both, naming the path.
+  fn('bad_id', [], rec('Point'), { retRust: 'Point' }),
+  fn('bad_tag', [], rec('Point'), { retRust: 'Point' }),
   record(
     'Point',
     [

@@ -168,7 +168,7 @@ class Emitter {
       return { code: `$e_${d.name}(${expr})`, plain: false };
     }
     if (d.t === 'option' || d.t === 'vec') {
-      const x = `x${depth}`;
+      const x = `$x${depth}`;
       const inner = this.enc(d.of, x, depth + 1);
       if (inner.plain) return { code: expr, plain: true };
       if (d.t === 'vec') return { code: `${expr}.map((${x}) => ${inner.code})`, plain: false };
@@ -193,15 +193,15 @@ class Emitter {
       return { code: `$d_${d.name}(${fn}, ${at}, ${expr})`, plain: false };
     }
     if (d.t === 'option') {
-      const x = `x${depth}`;
+      const x = `$x${depth}`;
       const inner = this.dec(d.of, x, fn, at, depth + 1);
       if (inner.plain) return { code: `${expr} as ${tsType(d, true)}`, plain: true };
       this.used.add('$opt');
       return { code: `$opt(${expr}, (${x}) => ${inner.code})`, plain: false };
     }
     if (d.t === 'vec') {
-      const x = `x${depth}`;
-      const a = `at${depth}`;
+      const x = `$x${depth}`;
+      const a = `$at${depth}`;
       const inner = this.dec(d.of, x, fn, a, depth + 1);
       if (inner.plain) return { code: `${expr} as ${tsType(d, true)}`, plain: true };
       this.used.add('$vec');
@@ -292,17 +292,17 @@ class Emitter {
       }
       buffers++;
       const value = isJson(a.type) ? `JSON.stringify(${this.enc(a.type, a.name, 0).code})` : a.name;
-      lines.push(`  const o${i} = $put(${value});`);
-      lines.push(`  const n${i} = $last;`);
-      call.push(`n${i} === 0 ? null : base + o${i}`, `n${i}`);
+      lines.push(`  const $o${i} = $put(${value});`);
+      lines.push(`  const $n${i} = $last;`);
+      call.push(`$n${i} === 0 ? null : $scratch + $o${i}`, `$n${i}`);
     });
     if (buffers > 0) {
       this.used.add('$put');
-      lines.push('  const base = $base();');
+      lines.push('  const $scratch = $base();');
     }
     call.push('$outPtr');
-    lines.push(`  const st = $lib.${f.symbol}(${call.join(', ')});`);
-    lines.push(`  if (st !== 0) $fail(${name}, st);`);
+    lines.push(`  const $st = $lib.${f.symbol}(${call.join(', ')});`);
+    lines.push(`  if ($st !== 0) $fail(${name}, $st);`);
 
     // 3. Read the return.
     const rt = f.ret.type;
@@ -314,8 +314,8 @@ class Emitter {
       this.used.add('$takeBytes');
       lines.push('  return $takeBytes();');
     } else if (isJson(rt)) {
-      lines.push('  const r: unknown = JSON.parse($takeString());');
-      lines.push(`  return ${this.dec(rt, 'r', name, q('result'), 0).code};`);
+      lines.push('  const $r: unknown = JSON.parse($takeString());');
+      lines.push(`  return ${this.dec(rt, '$r', name, q('result'), 0).code};`);
     } else {
       lines.push(`  return ${READ[rt.t]};`);
     }
@@ -332,6 +332,13 @@ function docBlock(doc: string, extra: string[]): string {
   return ['/**', ...body.map((l) => (l === '' ? ' *' : ` * ${l}`)), ' */'].join('\n');
 }
 
+/** `a`, `a or b`, `a, b or c`. */
+function orList(items: string[]): string {
+  return items.length < 2
+    ? (items[0] ?? '')
+    : `${items.slice(0, -1).join(', ')} or ${items.at(-1)}`;
+}
+
 function fnDoc(f: FnRecord): string {
   const sig = `${f.name}(${f.args.map((a) => `${a.name}: ${a.rust}`).join(', ')}) -> ${f.ret.rust}`;
   const extra = [`Rust: \`${noClose(sig)}\``, ''];
@@ -340,8 +347,19 @@ function fnDoc(f: FnRecord): string {
       `@throws {RustError} when the Rust function returns \`Err\` (\`${noClose(f.err.rust)}\`).`,
     );
   }
-  if (f.args.length > 0) {
-    extra.push('@throws {TypeError} when an argument has the wrong type or is out of range.');
+  // Scalars, strings and bytes are checked before the call; JSON arguments are
+  // not, so a value Rust cannot decode comes back as status 3 ("invalid input").
+  const checked = f.args.filter((a) => !isJson(a.type)).map((a) => `\`${a.name}\``);
+  const unchecked = f.args.filter((a) => isJson(a.type)).map((a) => `\`${a.name}\``);
+  if (checked.length > 0) {
+    extra.push(
+      `@throws {TypeError} when ${orList(checked)} has the wrong type or is out of range.`,
+    );
+  }
+  if (unchecked.length > 0) {
+    extra.push(
+      `@throws {RustError} ("invalid input: …") when ${orList(unchecked)} is a value Rust cannot decode: record, enum, Option and Vec arguments are not checked in JavaScript.`,
+    );
   }
   extra.push(
     '@throws {RustPanicError} when the Rust function panics.',
@@ -515,40 +533,40 @@ function $musl(): boolean {
     // fall through to the file-system probe
   }
   try {
-    if (readdirSync('/lib').some((f) => f.startsWith('ld-musl-'))) return true;
+    if ($readdirSync('/lib').some((f) => f.startsWith('ld-musl-'))) return true;
   } catch {
     // no /lib
   }
-  return existsSync('/etc/alpine-release');
+  return $existsSync('/etc/alpine-release');
 }
 
 function $resolve(): string {
   const triple = $triple();
   const file = \`lib\${$LIB}.\${process.platform === 'darwin' ? 'dylib' : 'so'}\`;
-  const native = join(dirname(process.execPath), 'native');
-  const staged = join(native, 'ffi', triple, file);
+  const native = $join($dirname(process.execPath), 'native');
+  const staged = $join(native, 'ffi', triple, file);
   const tried = [staged];
-  if (existsSync(staged)) {
+  if ($existsSync(staged)) {
     $verify(native, \`ffi/\${triple}/\${file}\`, staged);
     return staged;
   }
   let others: string[] = [];
   try {
-    others = readdirSync(join(native, 'ffi')).filter((d) => d !== triple);
+    others = $readdirSync($join(native, 'ffi')).filter((d) => d !== triple);
   } catch {
     // no native/ffi beside the executable
   }
   if (others.length > 0) {
     throw new FfiLoadError(
-      \`knext ffi: \${join(native, 'ffi')} holds Rust libraries for \${others.join(', ')}, but this process runs on \${triple}. Build the image for the platform it runs on.\`,
+      \`knext ffi: \${$join(native, 'ffi')} holds Rust libraries for \${others.join(', ')}, but this process runs on \${triple}. Build the image for the platform it runs on.\`,
     );
   }
   if (process.env['NODE_ENV'] !== 'production') {
-    const dev = ['release', 'debug'].map((p) => join(process.cwd(), $CRATE, 'target', p, file));
+    const dev = ['release', 'debug'].map((p) => $join(process.cwd(), $CRATE, 'target', p, file));
     tried.push(...dev);
     const found = dev
-      .filter((p) => existsSync(p))
-      .sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs);
+      .filter((p) => $existsSync(p))
+      .sort((a, b) => $statSync(b).mtimeMs - $statSync(a).mtimeMs);
     if (found[0] !== undefined) {
       console.warn(
         \`knext ffi: loading the development build \${found[0]} without an integrity check (NODE_ENV is not "production").\`,
@@ -565,15 +583,15 @@ function $resolve(): string {
 
 /** Fail closed: the library must be listed in native/.integrity.json with a matching sha256. */
 function $verify(native: string, rel: string, path: string): void {
-  const manifest = join(native, '.integrity.json');
-  if (!existsSync(manifest)) {
+  const manifest = $join(native, '.integrity.json');
+  if (!$existsSync(manifest)) {
     throw new FfiLoadError(
       \`knext ffi: refusing to load \${path}: there is no integrity manifest at \${manifest}. Images built by \\\`knext build\\\` carry one.\`,
     );
   }
   let files: unknown;
   try {
-    const parsed = JSON.parse(readFileSync(manifest, 'utf8')) as { version?: unknown; files?: unknown };
+    const parsed = JSON.parse($readFileSync(manifest, 'utf8')) as { version?: unknown; files?: unknown };
     if (parsed.version !== 1) {
       throw new Error(\`unsupported version \${JSON.stringify(parsed.version)}\`);
     }
@@ -588,7 +606,7 @@ function $verify(native: string, rel: string, path: string): void {
   if (typeof expected !== 'string') {
     throw new FfiLoadError(\`knext ffi: refusing to load \${path}: \${rel} is not listed in \${manifest}.\`);
   }
-  const actual = createHash('sha256').update(readFileSync(path)).digest('hex');
+  const actual = $createHash('sha256').update($readFileSync(path)).digest('hex');
   if (actual !== expected) {
     throw new FfiLoadError(
       \`knext ffi: refusing to load \${path}: sha256 mismatch\\n  expected \${expected}\\n  actual   \${actual}\`,
@@ -693,7 +711,7 @@ function $base(): number {
     $bytes: `function $bytes(fn: string, arg: string, v: unknown): void {
   if (!(v instanceof Uint8Array)) throw new TypeError(\`\${fn}(): argument "\${arg}" must be a Uint8Array\`);
 }`,
-    $s64: `/** A 64-bit integer crosses JSON as a decimal string (D7). */
+    $s64: `/** A 64-bit integer crosses JSON as a decimal string. */
 function $s64(v: bigint): string {
   return v.toString();
 }`,
@@ -789,7 +807,7 @@ export function renderModule(manifest: Manifest, options: RenderOptions): string
     '}',
   ];
   const schemas = [
-    '/** [export, symbol, expected FNV-1a 64 of its transitive schema] (ADR-0069 D4). */',
+    '/** [export, symbol, expected FNV-1a 64 of its transitive schema]. */',
     'const $SCHEMAS: readonly (readonly [string, string, string])[] = [',
     ...manifest.fns.map(
       (f) =>
@@ -803,9 +821,14 @@ export function renderModule(manifest: Manifest, options: RenderOptions): string
     `// ${BETA_LINE}`,
     `// ABI: knext_ffi v1. Library: lib${options.libName} (crate ${options.crate}). From manifest sha256 ${manifestDigest(manifest)}.`,
     "import 'server-only';",
-    "import { createHash } from 'node:crypto';",
-    "import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';",
-    "import { dirname, join } from 'node:path';",
+    "import { createHash as $createHash } from 'node:crypto';",
+    'import {',
+    '  existsSync as $existsSync,',
+    '  readdirSync as $readdirSync,',
+    '  readFileSync as $readFileSync,',
+    '  statSync as $statSync,',
+    "} from 'node:fs';",
+    "import { dirname as $dirname, join as $join } from 'node:path';",
     '',
     ERROR_CLASSES,
     '',
