@@ -401,7 +401,12 @@ function scriptedCore(
     const everSeen: string[] = [];
     let held: { name: string; release: () => void } | undefined;
     let holdNext: string | undefined;
-    const state = { open: false, retryMs: opts.retryMs ?? 20 };
+    const state = {
+        open: false,
+        retryMs: opts.retryMs ?? 20,
+        configured: opts.redisConfigured ?? true,
+        failHset: (_args: string[]) => false,
+    };
     const clientToken = { scripted: true };
     const core: UseCacheCore & { retryInMs(): number } = {
         ensureConnected: async () => (state.open ? null : clientToken),
@@ -427,6 +432,9 @@ function scriptedCore(
                     return [String(Math.floor(us / 1e6)), String(us % 1e6)];
                 }
                 case "HSET":
+                    // A faulted command; the client stays usable, so only the
+                    // replay's own loop can be what stops the run.
+                    if (state.failHset(args)) throw new Error("boom");
                     for (let i = 1; i + 1 < args.length; i += 2)
                         hashes.set(args[i] as string, args[i + 1] as string);
                     return 1;
@@ -450,7 +458,7 @@ function scriptedCore(
         },
         keyPrefix: () => "p",
         buildId: () => undefined,
-        redisConfigured: () => opts.redisConfigured ?? true,
+        redisConfigured: () => state.configured,
         retryInMs: () => state.retryMs,
     };
     return {
@@ -597,10 +605,60 @@ describe("'use cache' tag replay races (scripted core)", () => {
         const h = createUseCacheHandler({ kind: "default", core: s.core });
         s.state.open = true;
         await h.updateTags(["x"]);
+        // Not even a backlog to overflow: no replay warning past the bound.
+        await h.updateTags(
+            Array.from({ length: BOUND + 1 }, (_, i) => `t${i}`),
+        );
+        const warned = (
+            console.warn as unknown as { mock: { calls: unknown[][] } }
+        ).mock.calls.filter((c) => String(c[0]).includes("replay"));
+        expect(warned).toEqual([]);
         s.state.open = false;
         await h.getExpiration(["y"]);
         await sleep(100);
         expect(s.count("HSET")).toBe(0);
+    });
+
+    it("a Redis client that can no longer be loaded at all drops the backlog: nothing left to replay into", async () => {
+        const s = scriptedCore();
+        const h = createUseCacheHandler({ kind: "default", core: s.core });
+        s.state.open = true;
+        await h.updateTags(["x"]);
+        // The pod falls back to no Redis before the probe fires.
+        s.state.configured = false;
+        await sleep(100);
+        s.state.configured = true;
+        s.state.open = false;
+        await h.getExpiration(["y"]);
+        await sleep(100);
+        expect(s.count("HSET")).toBe(0);
+    });
+
+    it("a fault part-way through the replay stops the run there, even with the client still usable", async () => {
+        const s = scriptedCore();
+        const h = createUseCacheHandler({ kind: "default", core: s.core });
+        s.state.open = true;
+        await h.updateTags(
+            Array.from({ length: 2 * BATCH + 50 }, (_, i) => `f${i}`),
+        );
+        let faults = 0;
+        s.state.failHset = (args) =>
+            args.includes(`e:f${BATCH}`) && faults++ === 0;
+        s.state.open = false;
+        // The fault trips the scripted breaker; close it again for the next run.
+        await waitFor(() => faults > 0);
+        s.state.open = false;
+        await waitFor(() => s.hashes.has(`e:f${2 * BATCH + 49}`));
+        const firsts = s.log
+            .filter((c) => c.name === "HSET")
+            .map((c) => c.args[1]);
+        // Batch 2 faulted: batch 3 waits for the next run, after batch 2.
+        expect(firsts).toEqual([
+            "e:f0",
+            `e:f${BATCH}`,
+            `e:f${BATCH}`,
+            `e:f${2 * BATCH}`,
+        ]);
     });
 
     it("drops of one tag merge in call order, as consecutive writes would", async () => {
