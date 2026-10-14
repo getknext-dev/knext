@@ -308,6 +308,9 @@ jobs:
             grep -h '^KNEXT_FFI_SUMMARY ' "${RUNNER_TEMP}/bun-leak-mutant.out" 2>/dev/null | cut -d' ' -f2- \
               | jq -r '.leak | "| \(.phase) | \(.growthMb) | \(.over) |"'
           } >> "$GITHUB_STEP_SUMMARY"
+          # A report, never a gate: a missing file on a failed run must not
+          # add a second red step to the one that matters.
+          exit 0
 
   kind-e2e:
     name: kind e2e — Server Action calling Rust on a Bun zone (turbopack x bun) + compat-smoke

@@ -90,5 +90,8 @@ mkdir -p "${tools}/zb"
 tar -xJf "${tools}/cargo-zigbuild.tar.xz" -C "${tools}/zb"
 install -m 0755 "$(find "${tools}/zb" -type f -name cargo-zigbuild | head -n1)" "${tools}/bin/cargo-zigbuild"
 add_path "${tools}/bin"
-(cd "${crate_dir}" && cargo zigbuild --version)
+# `cargo-zigbuild --version`, not `cargo zigbuild --version`: the subcommand
+# form rejects --version ("unexpected argument", measured on 0.23.4).
+test "$(cargo-zigbuild --version)" = "cargo-zigbuild ${CARGO_ZIGBUILD_VERSION}"
+(cd "${crate_dir}" && cargo zigbuild --help >/dev/null)
 echo "install-ffi-toolchain: zig ${ZIG_VERSION}, cargo-zigbuild ${CARGO_ZIGBUILD_VERSION}, targets: ${targets[*]:-none}"
