@@ -326,6 +326,27 @@ describe('D6 golden rows — buffers, unit, JSON types', () => {
     );
   });
 
+  it('documents the status-3 refusal of a JSON return that holds a float, and only then', () => {
+    const RET_THROWS =
+      '@throws {RustError} ("invalid input: knext-ffi: the return value cannot cross as JSON: …") when a number inside the returned value is NaN or Infinity (JSON cannot carry them): a fault in the return value, despite the "invalid input" prefix.';
+    const src = render([
+      fn('floaty', [], D.vec(D.t('f32')), { retRust: 'Vec<f32>' }),
+      fn('viaRecord', [], D.opt(D.rec('P')), { retRust: 'Option<P>' }),
+      fn('noFloat', [], D.vec(D.t('i32')), { retRust: 'Vec<i32>' }),
+      fn('raw', [], D.t('f64')),
+      record('P', [['x', D.t('f64')]]),
+    ]);
+    const doc = (name: string) => {
+      const at = src.indexOf(`export function ${name}(`);
+      return src.slice(src.lastIndexOf('/**', at), at);
+    };
+    expect(doc('floaty')).toContain(RET_THROWS);
+    expect(doc('viaRecord')).toContain(RET_THROWS);
+    // No float in the JSON, or a plain float that crosses raw: nothing to refuse.
+    expect(doc('noFloat')).not.toContain('the return value cannot cross');
+    expect(doc('raw')).not.toContain('the return value cannot cross');
+  });
+
   it('a JSON argument that reaches no float keeps its zero-cost encoding (no per-element check, no path)', () => {
     const src = render([
       fn(

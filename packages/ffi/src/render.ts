@@ -403,6 +403,13 @@ function fnDoc(f: FnRecord, e: Emitter): string {
       `@throws {TypeError} when a number inside ${orList(floaty)} is NaN or Infinity (JSON cannot carry them).`,
     );
   }
+  // Rust refuses to encode a non-finite float inside a JSON return; the shim
+  // reports that as status 3, so the message carries the "invalid input" prefix.
+  if (isJson(f.ret.type) && e.floaty(f.ret.type)) {
+    extra.push(
+      '@throws {RustError} ("invalid input: knext-ffi: the return value cannot cross as JSON: …") when a number inside the returned value is NaN or Infinity (JSON cannot carry them): a fault in the return value, despite the "invalid input" prefix.',
+    );
+  }
   extra.push(
     '@throws {RustPanicError} when the Rust function panics.',
     '@throws {FfiLoadError} when the Rust library cannot be loaded.',

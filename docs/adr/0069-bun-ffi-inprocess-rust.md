@@ -213,7 +213,13 @@ pub extern "C" fn knext_ffi_v1_<fn>_<h>(/* lowered args */, out: *mut [u64; 2]) 
   `(ptr, len)` argument, and the shim's `len == 0` rule does not depend on what Bun sends.)
 
 **Status** (the `i32` return): `0` OK, `1` `Err` from a `Result`, `2` panic, `3` invalid input (bad
-UTF-8 or JSON the shim could not decode). Any other value is a wrapper bug and is reported as one.
+UTF-8 or JSON the shim could not decode) **or a JSON return value that cannot be encoded** (a
+non-finite float anywhere inside it; the message names the path, e.g. `result.samples[2]`). Any
+other value is a wrapper bug and is reported as one. (Amendment: status 3 now covers both
+directions. The wrapper still prefixes every status-3 message with `invalid input:`, so the
+return-side case reads `invalid input: knext-ffi: the return value cannot cross as JSON: …`; the
+prefix was kept rather than adding a status or splitting it, to leave ABI v1 unchanged, and the
+generated TSDoc and the user docs say plainly that this one is an output fault.)
 
 **The out slot** is 16 bytes, 8-byte aligned, owned by the caller, written by the shim:
 
@@ -317,11 +323,14 @@ the docs recommend the borrowed forms.
   in, decimal string → `bigint` out); a TS `bigint` never meets `JSON.stringify` directly, and a
   JSON number where the schema says a 64-bit integer is refused with a `RustError` naming the
   path. Golden tests cover each position listed here, with values above 2^53 and `u64::MAX`.
-- **Floats inside JSON must be finite**, in both directions, because JSON has no NaN or Infinity.
-  JavaScript to Rust: `JSON.stringify` writes `null` and serde refuses it, so the call fails with a
-  `RustError` (measured). Rust to JavaScript: serde_json writes `null`, and the generated decoder
-  rejects a `null` where the schema says `f32`/`f64` with a `RustError` naming the field, rather
-  than handing out a `number`-typed `null`.
+- **Floats inside JSON must be finite**, in both directions and in every JSON position, `Option`
+  included, because JSON has no NaN or Infinity (an `Option` would otherwise read a `null` as
+  `None` and lose the value silently). JavaScript to Rust: the generated wrapper checks every float
+  inside a JSON argument before the call and throws a `TypeError` naming the path
+  (`argument "r.samples[1]"`). Rust to JavaScript: the wire codec refuses to serialize a non-finite
+  float and the shim returns status 3 naming the path (`result.samples[2]`, D4). A JSON number that
+  does not fit a finite `f32` is refused on decode (status 3). Plain top-level `f32`/`f64`
+  arguments and returns are unaffected: they cross raw, NaN and Infinity included.
 - A negative `bigint` for a `u64` field (or any out-of-range value) is refused the same way
   (measured).
 - Inside a JSON type, a `Vec<u8>` is a JSON array of numbers and is typed `number[]`; binary data
@@ -339,7 +348,9 @@ the docs recommend the borrowed forms.
 Three error classes, exported from the generated module:
 
 - `RustError` — the function returned `Err(e)`; `message` is `e.to_string()`, `fn` is the export
-  name. Also thrown for invalid input the shim could not decode (status 3), with a message saying so.
+  name. Also thrown for invalid input the shim could not decode (status 3), with a message saying so,
+  and for a JSON return value Rust could not encode (also status 3, same `invalid input:` prefix;
+  the message says `the return value cannot cross as JSON` and names the path).
 - `RustPanicError` — the function panicked; `message` is the panic payload (`&str`/`String`, else
   `"panic with a non-string payload"`). The process keeps running and the next call works (spike).
 - `FfiLoadError` — the library could not be loaded: not Bun (D15), not found (with every path

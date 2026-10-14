@@ -276,6 +276,46 @@ const rendered = renderModule(
   { libName: 'zone', crate: 'rust' },
 );
 
+/**
+ * A module rendered for a float inside a JSON argument and a JSON return: it
+ * carries the finite-number TypeError and the return-side TSDoc.
+ */
+const floatyRendered = renderModule(
+  {
+    fns: [
+      {
+        name: 'reading',
+        symbol: 'knext_ffi_v1_reading_00000000',
+        sig: 'reading(Reading)->Reading',
+        doc: '',
+        args: [{ name: 'r', type: { t: 'record', name: 'Reading' }, rust: 'Reading' }],
+        ret: { type: { t: 'record', name: 'Reading' }, rust: 'Reading' },
+        err: null,
+      },
+    ],
+    records: [
+      {
+        name: 'Reading',
+        doc: '',
+        fields: [{ name: 'samples', type: { t: 'vec', of: { t: 'f32' } }, rust: 'Vec<f32>' }],
+      },
+    ],
+    enums: [],
+  },
+  { libName: 'zone', crate: 'rust' },
+);
+
+const FFI_LIB = 'crates/knext-ffi/src/lib.rs';
+const WIRE = 'crates/knext-ffi/src/wire.rs';
+
+/** The crate's "argument could not be decoded" format string. */
+const decodeFormat = () =>
+  rustFormat(rustLiteral(FFI_LIB, /pub unsafe fn json_arg[\s\S]*?Invalid\(format!\(\s*/));
+
+/** The crate's "the return value cannot cross as JSON" format string. */
+const returnFormat = () =>
+  rustFormat(rustLiteral(FFI_LIB, /impl<T: Wire> Lower for Json<T>[\s\S]*?Invalid\(format!\(\s*/));
+
 /** The literal a rendered module carries for `$PRERENDER` (the build-time refusal). */
 function prerenderMessage(): string {
   const literal = /^const \$PRERENDER = '(.*)';$/m.exec(rendered)?.[1];
@@ -307,6 +347,16 @@ describe('docs — in-process Rust page', () => {
     expect(body).toContain('await connection()');
     expect(body).toMatch(/generateStaticParams/);
     expect(body).toMatch(/generateMetadata/);
+  });
+
+  it('says "cannot find the Rust library" is a request-time error that carries no prerender advice', () => {
+    const body = must(page, /dynamic contexts only/i);
+    expect(body).not.toMatch(/ends with the same advice/);
+    expect(body).toMatch(/"cannot find the Rust library" error appears only at request time/);
+    const at = only(rendered, /cannot find the Rust library/, 'the rendered module').index;
+    const thrower = rendered.slice(at, rendered.indexOf('\n}\n', at));
+    expect(thrower.length).toBeGreaterThan(0);
+    expect(thrower).not.toMatch(/prerender/i);
   });
 
   it('quotes the build-time Node refusal whole, and the runtime one as the module throws it', () => {
@@ -349,13 +399,7 @@ describe('docs — in-process Rust page', () => {
   it('quotes the "invalid input" error as the module and the crate build it', () => {
     const body = must(page, /records and enums/i);
     const prefix = templateAfter(rendered, /status === 3 \? `/);
-    const decode = rustFormat(
-      rustLiteral(
-        'crates/knext-ffi/src/lib.rs',
-        /pub unsafe fn json_arg[\s\S]*?Invalid\(format!\(\s*/,
-      ),
-    );
-    expectBlock(body, pattern(prefix, [pattern(decode)]), 'the invalid-input error');
+    expectBlock(body, pattern(prefix, [pattern(decodeFormat())]), 'the invalid-input error');
   });
 
   it('quotes the `char` compile error as the macro words it and the compiler prints it', () => {
@@ -366,13 +410,24 @@ describe('docs — in-process Rust page', () => {
       /pub fn reject\([^)]*\)[^{]*\{\s*Error::new\(\s*span\.span\(\),\s*format!\(\s*/,
     );
     const why = rustLiteral(types, /"char" => \{\s*return Err\(reject\(\s*ty,\s*ty,\s*/);
+    const hint = rustLiteral(types, /pub const TABLE_HINT: &str =\s*/);
     expect(fmt.split('{TABLE_HINT}')).toHaveLength(2);
-    const [head] = fmt.split('{TABLE_HINT}') as [string];
-    // The docs stop where the hint pointing at the crate's README begins.
-    const quoted = `error: ${head.replace('{}', 'char').replace('{why}', why)}`;
-    expect(codeBlocks(body)).toContain(`${quoted}…`);
+    const quoted = `error: ${fmt.replace('{}', 'char').replace('{why}', why).replace('{TABLE_HINT}', hint)}`;
+    expect(codeBlocks(body)).toContain(quoted);
     const compiler = repoFile('crates/knext-ffi/tests/ui/fail/char_arg.stderr').split('\n')[0];
-    expect(compiler?.startsWith(quoted), `char_arg.stderr: ${compiler}`).toBe(true);
+    expect(compiler, 'char_arg.stderr').toBe(quoted);
+  });
+
+  it("points every compile error at this page's type-mapping table, by its real slug", () => {
+    const hint = rustLiteral(
+      'crates/knext-ffi-macros/src/types.rs',
+      /pub const TABLE_HINT: &str =\s*/,
+    );
+    const url = /https:\/\/\S+/.exec(hint)?.[0] ?? '';
+    const heading = page.split('\n').find((l) => /^## type mapping$/i.test(l)) ?? '';
+    expect(heading, 'no "## Type mapping" heading').not.toBe('');
+    const slug = heading.slice(3).toLowerCase().replace(/\s+/g, '-');
+    expect(url).toBe(`https://knext-platform.dev/docs/rust-in-process#${slug}`);
   });
 
   it('lists every global and declared name a Rust function or argument may not take', () => {
@@ -433,15 +488,57 @@ describe('docs — in-process Rust page', () => {
     expect(body).toContain(`\`${zigCacheDir({}, '~', v)}\``);
   });
 
-  it('says what happens to a non-finite float in each JSON position', () => {
+  it('says a non-finite float crosses raw at the top level and is refused in every JSON position', () => {
     const body = must(page, /type mapping/i);
-    expect(body).not.toMatch(/must be finite/i);
     // A plain float argument or return crosses as a raw number.
     expect(body).toMatch(/`NaN`\s+and\s+`Infinity`\s+arrive\s+intact/);
-    // An Option position turns it into None/null without an error.
-    expect(body).toMatch(/silently becomes `None`[^.]*`null`/);
-    // Everywhere else in JSON it is refused, both ways.
-    expect(body).toMatch(/anywhere else[^.]*refused/i);
+    // Inside JSON, Option included, it is refused both ways and never becomes None/null.
+    expect(body).toMatch(
+      /refused in every JSON position,\s+`Option` included,\s+in both\s+directions/,
+    );
+    expect(body).toMatch(/never silently becomes `None` or `null`/);
+    expect(body).not.toMatch(/silently becomes `None` on the Rust side/);
+  });
+
+  it('quotes the finite-number TypeError as the module throws it', () => {
+    const body = must(page, /type mapping/i);
+    const efin = new RegExp(
+      `^${pattern(templateAfter(floatyRendered, /function \$efin\([^)]*\)[^{]*\{[^`]*`/))}$`,
+    );
+    expect(
+      inlineCode(body).some((span) => efin.test(span)),
+      `no inline code span is exactly ${efin}`,
+    ).toBe(true);
+  });
+
+  it('quotes the return-side refusal as the module and the crate build it, and owns up to its prefix', () => {
+    const body = must(page, /type mapping/i);
+    const prefix = templateAfter(rendered, /status === 3 \? `/);
+    const notFinite = rustFormat(
+      rustLiteral(WIRE, /macro_rules! finite_float[\s\S]*?S::Error::custom\(format_args!\(\s*/),
+    );
+    const message = pattern(returnFormat(), [`result${VALUE}: ${pattern(notFinite)}`]);
+    expectBlock(body, pattern(prefix, [message]), 'the return-side refusal');
+    // The prefix says "input"; the page must say the fault is in the return value.
+    expect(body).toMatch(/fault is in the value your Rust function returned/);
+    // The generated TSDoc quotes the same message head.
+    const [head] = returnFormat() as [string];
+    expect(floatyRendered).toContain(
+      `@throws {RustError} ("${prefix[0]}${head}…") when a number inside the returned value is NaN or Infinity`,
+    );
+  });
+
+  it('quotes the f32 overflow refusal as the crate builds it', () => {
+    const body = must(page, /type mapping/i);
+    const prefix = templateAfter(rendered, /status === 3 \? `/);
+    const overflow = rustFormat(
+      rustLiteral(WIRE, /macro_rules! finite_float[\s\S]*?D::Error::custom\(format_args!\(\s*/),
+    );
+    const message = pattern(decodeFormat(), [
+      VALUE,
+      `${pattern(overflow, ['f32'])} at line \\d+ column \\d+`,
+    ]);
+    expectBlock(body, pattern(prefix, [message]), 'the f32 overflow refusal');
   });
 
   it('states every per-call number with the hardware and Bun version it was measured on', () => {

@@ -89,6 +89,7 @@ export function add(a: number, b: number): number {
 /**
  * Rust: `bad_id() -> Point`
  *
+ * @throws {RustError} ("invalid input: knext-ffi: the return value cannot cross as JSON: …") when a number inside the returned value is NaN or Infinity (JSON cannot carry them): a fault in the return value, despite the "invalid input" prefix.
  * @throws {RustPanicError} when the Rust function panics.
  * @throws {FfiLoadError} when the Rust library cannot be loaded.
  */
@@ -103,6 +104,7 @@ export function bad_id(): Point {
 /**
  * Rust: `bad_point() -> Point`
  *
+ * @throws {RustError} ("invalid input: knext-ffi: the return value cannot cross as JSON: …") when a number inside the returned value is NaN or Infinity (JSON cannot carry them): a fault in the return value, despite the "invalid input" prefix.
  * @throws {RustPanicError} when the Rust function panics.
  * @throws {FfiLoadError} when the Rust library cannot be loaded.
  */
@@ -117,6 +119,7 @@ export function bad_point(): Point {
 /**
  * Rust: `bad_tag() -> Point`
  *
+ * @throws {RustError} ("invalid input: knext-ffi: the return value cannot cross as JSON: …") when a number inside the returned value is NaN or Infinity (JSON cannot carry them): a fault in the return value, despite the "invalid input" prefix.
  * @throws {RustPanicError} when the Rust function panics.
  * @throws {FfiLoadError} when the Rust library cannot be loaded.
  */
@@ -217,6 +220,7 @@ export function echo_bytes(data: Uint8Array): Uint8Array {
  *
  * @throws {RustError} ("invalid input: …") when `o` is a value Rust cannot decode: record, enum, Option and Vec arguments are not checked in JavaScript.
  * @throws {TypeError} when a number inside `o` is NaN or Infinity (JSON cannot carry them).
+ * @throws {RustError} ("invalid input: knext-ffi: the return value cannot cross as JSON: …") when a number inside the returned value is NaN or Infinity (JSON cannot carry them): a fault in the return value, despite the "invalid input" prefix.
  * @throws {RustPanicError} when the Rust function panics.
  * @throws {FfiLoadError} when the Rust library cannot be loaded.
  */
@@ -236,6 +240,7 @@ export function echo_odd(o: Odd): Odd {
  *
  * @throws {RustError} ("invalid input: …") when `p` is a value Rust cannot decode: record, enum, Option and Vec arguments are not checked in JavaScript.
  * @throws {TypeError} when a number inside `p` is NaN or Infinity (JSON cannot carry them).
+ * @throws {RustError} ("invalid input: knext-ffi: the return value cannot cross as JSON: …") when a number inside the returned value is NaN or Infinity (JSON cannot carry them): a fault in the return value, despite the "invalid input" prefix.
  * @throws {RustPanicError} when the Rust function panics.
  * @throws {FfiLoadError} when the Rust library cannot be loaded.
  */
@@ -270,6 +275,7 @@ export function flag(b: boolean): boolean {
  *
  * @throws {RustError} ("invalid input: …") when `xs` is a value Rust cannot decode: record, enum, Option and Vec arguments are not checked in JavaScript.
  * @throws {TypeError} when a number inside `xs` is NaN or Infinity (JSON cannot carry them).
+ * @throws {RustError} ("invalid input: knext-ffi: the return value cannot cross as JSON: …") when a number inside the returned value is NaN or Infinity (JSON cannot carry them): a fault in the return value, despite the "invalid input" prefix.
  * @throws {RustPanicError} when the Rust function panics.
  * @throws {FfiLoadError} when the Rust library cannot be loaded.
  */
@@ -405,6 +411,7 @@ export function nop(): void {
  *
  * @throws {RustError} ("invalid input: …") when `x` is a value Rust cannot decode: record, enum, Option and Vec arguments are not checked in JavaScript.
  * @throws {TypeError} when a number inside `x` is NaN or Infinity (JSON cannot carry them).
+ * @throws {RustError} ("invalid input: knext-ffi: the return value cannot cross as JSON: …") when a number inside the returned value is NaN or Infinity (JSON cannot carry them): a fault in the return value, despite the "invalid input" prefix.
  * @throws {RustPanicError} when the Rust function panics.
  * @throws {FfiLoadError} when the Rust library cannot be loaded.
  */
@@ -444,6 +451,7 @@ export function parse(s: string): number {
  * Rust: `scale(r: f64) -> Point`
  *
  * @throws {TypeError} when `r` has the wrong type or is out of range.
+ * @throws {RustError} ("invalid input: knext-ffi: the return value cannot cross as JSON: …") when a number inside the returned value is NaN or Infinity (JSON cannot carry them): a fault in the return value, despite the "invalid input" prefix.
  * @throws {RustPanicError} when the Rust function panics.
  * @throws {FfiLoadError} when the Rust library cannot be loaded.
  */
