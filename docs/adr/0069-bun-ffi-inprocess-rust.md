@@ -175,10 +175,14 @@ version fails `dlopen` by name instead of being called wrongly.
   symbol name must be a literal, so the check has two halves that together are "the signature
   hash":
   - `<h>` in the shim's name hashes `sig` (what the export macro sees);
-  - each `#[knext_ffi::record]` implements a hidden `KnextSchema` trait whose associated `const`
-    is the FNV-1a of its canonical form combined with the consts of the types it names, so the
-    export macro can emit `knext_ffi_v1_<fn>_<h>_schema() -> u64`, a const-evaluated FNV-1a
-    (64-bit) of the full canonical schema string. The generator builds the same string from the
+  - the export macro emits `knext_ffi_v1_<fn>_<h>_schema() -> u64`, which returns the FNV-1a
+    (64-bit: offset `0xcbf29ce484222325`, prime `0x100000001b3`) of the **full canonical schema
+    string**: `sig`, then every record and enum reachable from it (transitive closure,
+    de-duplicated by name, sorted by name byte-wise), concatenated with **no separator**. Records
+    contribute their canonical form through a hidden `KnextSchema` trait (`#[knext_ffi::record]`
+    implements it) so the string is assembled at compile time; the value is a hash of that one
+    string, **not** a hash of per-type hashes. This is the only definition (round 3; jev 0.93 for
+    keeping the flat string FFI-1 already implements over a Merkle hash-of-hashes). The generator builds the same string from the
     manifest's `fn`, `record` and `enum` records (it already resolves every name a function uses,
     D5) and writes the expected value into the wrapper; the loader calls every `_schema` symbol
     once, right after `dlopen`, and turns any mismatch into the same stale-wrapper `FfiLoadError`.
@@ -543,10 +547,15 @@ Rust toolchain, and `knext ffi check` (CI) and `knext ffi build` (image) fail on
 
 Then the normal build continues. Steps 1–5 and the D15 preflight must run for **every** command
 that builds an image, not only `knext build`: `knext deploy` and `knext preview` build through the
-same `runProjectBuild` (`project-build.ts`), which is where `assertNoBunTurbopackFragments`
-already lives for that reason. The preflight goes there; the dispatch runs in each of the three
-callers before `runProjectBuild` (it is async, `runProjectBuild` is not), and a test scans the
-three for it.
+same `runProjectBuild` (`project-build.ts`). **The D15 refusals do not go there** (round 3):
+`runProjectBuild` is skipped by `knext deploy --skip-build` and `knext build --skip-next-build`,
+and it never sees the resolved `selfContained` (that is resolved from config plus
+`--self-contained` inside `compileArtifactForDeploy`). Both refusals go in
+`compileArtifactForDeploy` (`build-artifact.ts`), which every image-building path runs and which
+already has `runtimeId` and the resolved `selfContained`. Tests cover `--skip-build` and
+`--skip-next-build` with an opted-in `runtime: 'node'` app and with `selfContained: true`, each
+refused before any image is built. The dispatch (steps 1–5) runs in each of the three callers
+before `runProjectBuild` (it is async, `runProjectBuild` is not), and a test scans the three for it.
 
 **The integrity manifest, per cell.** `writeNativeIntegrityManifest` hashes the whole `native/`
 tree with no change to the writer (Context fact 5), but it has to be **called**, and today it is
@@ -577,7 +586,12 @@ Image changes:
   asserting the anchor occurs exactly once in the `standalone-bun` stage and failing the build
   otherwise. The condition is the file, not the presence of `native/ffi/`, so a stale tree from an
   earlier opted-in build is never shipped by an app that has since opted out. Without the file the
-  staged Dockerfile is byte-identical to today's (D17). Both the manifest call above and this line
+  staged Dockerfile is byte-identical to today's (D17). **Nested (monorepo tracing-root) layout**
+  (round 3): the insertion happens **before** `nestStandaloneDockerfile` runs, and a new
+  `NEST_RULES` entry (`runtime-image.ts`) rewrites the inserted line's source and destination to
+  `COPY <prefix>native /app/.next/standalone/<prefix>native`, so `native/` stays beside the
+  nested `<prefix>knext-standalone-exec`. A test stages an opted-in app in the nested layout and
+  asserts the rewritten line, and a mutation that drops the rule turns it red. Both the manifest call above and this line
   are **#2345's scope**.
 - `selfContained: true` with `knext.ffi.json`: **refused** at build time in v1. That mode promises
   nothing beside the binary, and embedding needs a writable temp directory (Context fact 4).
@@ -591,7 +605,7 @@ a developer machine (D20).
 
 ### D15. Refusing Node, in two places (jev: build preflight and runtime guard **0.95**, build only 0.05, runtime only 0.00)
 
-1. **Build (core).** `knext build`'s preflight, next to `assertNoBunTurbopackFragments`: if
+1. **Build (core).** A preflight in `compileArtifactForDeploy`, which every image-building path runs, including `--skip-build` (D14, round 3): if
    `knext.ffi.json` exists and the resolved runtime is `node` (any builder), stop before any build
    work with:
 
@@ -777,7 +791,7 @@ FFI-5 (standalone gates) and an FFI-6 draft can run in parallel from day one.
 |---|---|---|
 | **#2343 FFI-1** | `crates/knext-ffi` + `crates/knext-ffi-macros`: D3, D4 (including the transitive `_schema` hash), D5, D6, D7 (64-bit as a decimal string in every JSON position), D8 (Rust half), D9; trybuild, panic and leak tests; `rust-crates.yml` CI | — |
 | **#2344 FFI-2** | `@getknext/ffi`: `knext ffi init/generate/check`, `knext.ffi.json`, scanner, emitter, generated loader (D11–D13, D15 runtime half), including the two-phase multi-argument marshalling (D13 item 6), the per-position 64-bit codec (D7), the `_schema` check at load (D4) and the prerendering `FfiLoadError` (D13 step 5); core `ffi-dispatch.ts` + help; D18 guard; D19 registry entry | — (its real-library test waits for #2343) |
-| **#2345 FFI-3** | `knext ffi build` (D14 steps 1–5) and core: Node and self-contained refusals (D15) in `runProjectBuild`, dispatch before the project build in `build`/`deploy`/`preview`, the standalone-path `writeNativeIntegrityManifest` call in `compileArtifactForDeploy` and the inserted `COPY native /app/.next/standalone/native` line in `stageStandaloneBuildContext` (D14), zero-diff test (D17) | #2344 (dispatch protocol, `renderModule`); #2343 for a real library in tests. Core-side work starts at once against a fake loader |
+| **#2345 FFI-3** | `knext ffi build` (D14 steps 1–5) and core: Node and self-contained refusals (D15) in `compileArtifactForDeploy` (round 3; tests for `--skip-build`/`--skip-next-build`), dispatch before the project build in `build`/`deploy`/`preview`, the standalone-path `writeNativeIntegrityManifest` call in `compileArtifactForDeploy` and the inserted `COPY native /app/.next/standalone/native` line in `stageStandaloneBuildContext`, inserted before nesting, plus its `NEST_RULES` entry and a nested-layout test (D14), zero-diff test (D17) | #2344 (dispatch protocol, `renderModule`); #2343 for a real library in tests. Core-side work starts at once against a fake loader |
 | **#2346 FFI-4** | musl load matrix on Alpine x64/arm64 with a read-only root; kind e2e of a Server Action calling Rust on a Bun zone; Node refusal asserted (D20); the same fixture passes the compat-smoke capability checks, red-on-fail (D17) | #2343, #2344, #2345 merged; fixture and workflow skeleton can be written in parallel |
 | **#2347 FFI-5** | supply chain: `cargo deny`, `cargo auditable` (prove it composes with zigbuild), CycloneDX SBOM, `deny.toml` template, and the build-tool pins (zig version + sha256, `cargo install --locked --version` for the four cargo tools) (D16) | #2345 for the one call site only |
 | **#2348 FFI-6** | user docs page (Beta), including the dynamic-contexts-only rule and the two ways to make a route dynamic (D13 step 5), and the `knext ffi` CLI reference | #2344, #2345 for the final surface; a draft can start now |
