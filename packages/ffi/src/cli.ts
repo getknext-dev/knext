@@ -94,10 +94,22 @@ failure, or on a usage error.`,
 
 Usage: knext ffi build --target <triple>... --native-dir <dir>
 
-Run by \`knext build\` when knext.ffi.json exists; not usually run by hand.
+Run by \`knext build\`, \`knext deploy\` and \`knext preview\` when knext.ffi.json
+exists; not usually run by hand. Cross-compiles the crate with cargo zigbuild
+(musl, release, --locked), refuses a library that links anything the Alpine
+image lacks (a glibc libc.so.6, say), stages it as
+<native-dir>/ffi/<triple>/lib<name>.so with a provenance.json, and fails if the
+committed wrapper is not what \`knext ffi generate\` renders from that library.
+Needs Rust (https://rustup.rs), cargo-zigbuild and zig.
 
 Options:
-  -h, --help   show this help`,
+  --target <triple>    x86_64-unknown-linux-musl or aarch64-unknown-linux-musl
+                       (repeatable)
+  --native-dir <dir>   the app's native/ directory; only its ffi/ is replaced
+  -h, --help           show this help
+
+Exit code: 0 on success; 1 on a missing tool, a build failure, a library the
+image cannot load, an out-of-date wrapper, or a usage error.`,
 };
 
 /** Help for `sub` (`''` or anything unknown: the group help). */
