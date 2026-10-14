@@ -550,11 +550,16 @@ that builds an image, not only `knext build`: `knext deploy` and `knext preview`
 same `runProjectBuild` (`project-build.ts`). **The D15 refusals do not go there** (round 3):
 `runProjectBuild` is skipped by `knext deploy --skip-build` and `knext build --skip-next-build`,
 and it never sees the resolved `selfContained` (that is resolved from config plus
-`--self-contained` inside `compileArtifactForDeploy`). Both refusals go in
-`compileArtifactForDeploy` (`build-artifact.ts`), which every image-building path runs and which
-already has `runtimeId` and the resolved `selfContained`. Tests cover `--skip-build` and
-`--skip-next-build` with an opted-in `runtime: 'node'` app and with `selfContained: true`, each
-refused before any image is built. The dispatch (steps 1–5) runs in each of the three callers
+`--self-contained` inside `compileArtifactForDeploy`). Nor do they go in
+`compileArtifactForDeploy` alone (round 4): `knext deploy --skip-build` never calls it (that leg
+calls `assertCompiledArtifactFresh` instead). Both refusals live in **one shared preflight**,
+`assertFfiTargetSupported`, which resolves the runtime and `selfContained` with the same resolver
+`compileArtifactForDeploy` uses and is called **first** in each of `knext build`, `knext deploy` and
+`knext preview`: before the ffi dispatch, before any `cargo` or Next build, and before the
+skip-build branch (jev 0.95). So it also stops before any build work for `selfContained`, not only
+for Node. Tests cover `knext deploy --skip-build` and `knext build --skip-next-build` with an
+opted-in `runtime: 'node'` app and with `selfContained: true`, each refused before any build or
+image step; a scan test asserts each of the three callers calls the preflight before anything else. The dispatch (steps 1–5) runs in each of the three callers
 before `runProjectBuild` (it is async, `runProjectBuild` is not), and a test scans the three for it.
 
 **The integrity manifest, per cell.** `writeNativeIntegrityManifest` hashes the whole `native/`
@@ -587,11 +592,15 @@ Image changes:
   otherwise. The condition is the file, not the presence of `native/ffi/`, so a stale tree from an
   earlier opted-in build is never shipped by an app that has since opted out. Without the file the
   staged Dockerfile is byte-identical to today's (D17). **Nested (monorepo tracing-root) layout**
-  (round 3): the insertion happens **before** `nestStandaloneDockerfile` runs, and a new
-  `NEST_RULES` entry (`runtime-image.ts`) rewrites the inserted line's source and destination to
+  (rounds 3–4): the insertion happens **before** `nestStandaloneDockerfile` runs, and the rule list
+  it applies is built **conditionally**: only when `knext.ffi.json` exists does it include a
+  `NEST_RULES` entry (`runtime-image.ts`, `count: 1`) that rewrites the inserted line to
   `COPY <prefix>native /app/.next/standalone/<prefix>native`, so `native/` stays beside the
-  nested `<prefix>knext-standalone-exec`. A test stages an opted-in app in the nested layout and
-  asserts the rewritten line, and a mutation that drops the rule turns it red. Both the manifest call above and this line
+  nested `<prefix>knext-standalone-exec`. Every rule keeps its exact count, and a non-ffi app's
+  rule list and nested Dockerfile are unchanged (jev 0.91 vs count 0-or-1 or reusing the exec
+  rule's append lines). The nested-layout test covers both: an opted-in app gets the rewritten line,
+  and a non-ffi app's nested Dockerfile is byte-identical to today's; a mutation that drops the
+  rule turns the first red. Both the manifest call above and this line
   are **#2345's scope**.
 - `selfContained: true` with `knext.ffi.json`: **refused** at build time in v1. That mode promises
   nothing beside the binary, and embedding needs a writable temp directory (Context fact 4).
@@ -605,7 +614,7 @@ a developer machine (D20).
 
 ### D15. Refusing Node, in two places (jev: build preflight and runtime guard **0.95**, build only 0.05, runtime only 0.00)
 
-1. **Build (core).** A preflight in `compileArtifactForDeploy`, which every image-building path runs, including `--skip-build` (D14, round 3): if
+1. **Build (core).** The shared preflight `assertFfiTargetSupported`, called first in `knext build`, `knext deploy` and `knext preview`, including their skip-build paths (D14, round 4): if
    `knext.ffi.json` exists and the resolved runtime is `node` (any builder), stop before any build
    work with:
 
@@ -791,7 +800,7 @@ FFI-5 (standalone gates) and an FFI-6 draft can run in parallel from day one.
 |---|---|---|
 | **#2343 FFI-1** | `crates/knext-ffi` + `crates/knext-ffi-macros`: D3, D4 (including the transitive `_schema` hash), D5, D6, D7 (64-bit as a decimal string in every JSON position), D8 (Rust half), D9; trybuild, panic and leak tests; `rust-crates.yml` CI | — |
 | **#2344 FFI-2** | `@getknext/ffi`: `knext ffi init/generate/check`, `knext.ffi.json`, scanner, emitter, generated loader (D11–D13, D15 runtime half), including the two-phase multi-argument marshalling (D13 item 6), the per-position 64-bit codec (D7), the `_schema` check at load (D4) and the prerendering `FfiLoadError` (D13 step 5); core `ffi-dispatch.ts` + help; D18 guard; D19 registry entry | — (its real-library test waits for #2343) |
-| **#2345 FFI-3** | `knext ffi build` (D14 steps 1–5) and core: Node and self-contained refusals (D15) in `compileArtifactForDeploy` (round 3; tests for `--skip-build`/`--skip-next-build`), dispatch before the project build in `build`/`deploy`/`preview`, the standalone-path `writeNativeIntegrityManifest` call in `compileArtifactForDeploy` and the inserted `COPY native /app/.next/standalone/native` line in `stageStandaloneBuildContext`, inserted before nesting, plus its `NEST_RULES` entry and a nested-layout test (D14), zero-diff test (D17) | #2344 (dispatch protocol, `renderModule`); #2343 for a real library in tests. Core-side work starts at once against a fake loader |
+| **#2345 FFI-3** | `knext ffi build` (D14 steps 1–5) and core: Node and self-contained refusals (D15) in the shared `assertFfiTargetSupported` preflight called first by build/deploy/preview (round 4; tests for `deploy --skip-build`/`build --skip-next-build`), dispatch before the project build in `build`/`deploy`/`preview`, the standalone-path `writeNativeIntegrityManifest` call in `compileArtifactForDeploy` and the inserted `COPY native /app/.next/standalone/native` line in `stageStandaloneBuildContext`, inserted before nesting, plus its conditional `NEST_RULES` entry and a nested-layout test covering opted-in and non-ffi apps (D14), zero-diff test (D17) | #2344 (dispatch protocol, `renderModule`); #2343 for a real library in tests. Core-side work starts at once against a fake loader |
 | **#2346 FFI-4** | musl load matrix on Alpine x64/arm64 with a read-only root; kind e2e of a Server Action calling Rust on a Bun zone; Node refusal asserted (D20); the same fixture passes the compat-smoke capability checks, red-on-fail (D17) | #2343, #2344, #2345 merged; fixture and workflow skeleton can be written in parallel |
 | **#2347 FFI-5** | supply chain: `cargo deny`, `cargo auditable` (prove it composes with zigbuild), CycloneDX SBOM, `deny.toml` template, and the build-tool pins (zig version + sha256, `cargo install --locked --version` for the four cargo tools) (D16) | #2345 for the one call site only |
 | **#2348 FFI-6** | user docs page (Beta), including the dynamic-contexts-only rule and the two ways to make a route dynamic (D13 step 5), and the `knext ffi` CLI reference | #2344, #2345 for the final surface; a draft can start now |
