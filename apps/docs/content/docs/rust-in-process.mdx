@@ -177,9 +177,15 @@ bun test --conditions=react-server
 - **64-bit integers are `bigint` everywhere**, including inside records, `Option` and `Vec`
   (`unit_cents: bigint`, `ids: bigint[]`), so values above 2^53 survive exactly. Inside JSON they
   travel as decimal strings; the generated code converts both ways and you never see the string.
-- **Floats inside JSON must be finite.** JSON has no `NaN` or `Infinity`: sending one makes the call
-  fail with a `RustError`, and a non-finite float coming back from Rust is refused with a
-  `RustError` that names the field.
+- **Non-finite floats.** A plain `f32`/`f64` argument or return crosses as a raw number, so `NaN`
+  and `Infinity` arrive intact. Inside JSON (records, `Option`, `Vec`) there is no `NaN` or
+  `Infinity`, and what happens depends on where the float sits:
+  - Directly inside an `Option` (`Option<f64>` as a field, an argument, a return or a `Vec`
+    element), a non-finite float silently becomes `None` on the Rust side, or `null` in
+    TypeScript. No error is raised, so check with `Number.isFinite` or `f64::is_finite` first if
+    that matters.
+  - Anywhere else in JSON it is refused: sending one fails the call with a `RustError` (`invalid
+    input: …`), and one coming back from Rust is refused with a `RustError` that names the field.
 - **Inside JSON, `Vec<u8>` is a `number[]`.** For binary data, use a `&[u8]`/`Vec<u8>` argument or
   return directly, which crosses as raw bytes.
 - **Empty values are fine.** An empty string or an empty `Uint8Array` can be passed and returned.
@@ -405,6 +411,8 @@ Nothing is loaded when the module is imported. On the first call, it looks in th
 
    ```
    knext ffi: refusing to load …/native/ffi/x86_64-unknown-linux-musl/libzone.so: sha256 mismatch
+     expected 6f1c…
+     actual   a93e…
    ```
 
 2. **The development build**, only when `NODE_ENV` is not `production`: `rust/target/release/` or
@@ -422,17 +430,18 @@ message naming both.
 A call is **synchronous**: it blocks the zone's JavaScript thread, and with it every other request
 on that pod, until it returns. Keep each call on the request path **under about a millisecond**.
 
-Measured per-call costs through the generated module, on an Apple M1 Pro (macOS) with Bun 1.4.2.
-The machine was shared during the run, so treat these as orders of magnitude (runs varied up to
-about 2x); Linux images will differ.
+Measured per-call costs through a prototype of the generated wrapper, built before this feature
+shipped, on an Apple M1 Pro (macOS) with Bun 1.4.2. The shipped module may differ. The machine was
+shared during the run, so treat these as orders of magnitude (runs varied up to about 2x); Linux
+images will differ too.
 
 | Call | Time per call |
 |---|---|
 | `add(i32, i32) -> i32` | 10–11 ns |
-| `sum(&[u8])`, 64 bytes | 118–126 ns |
+| `sum(Vec<u8>)`, 64 bytes (the argument is copied into a `Vec`) | 118–126 ns |
 | `greet(&str) -> String`, a short string | 330–460 ns |
 | `greet(&str) -> String`, 1 KiB | 0.84–1.96 µs |
-| a record in, a record out (JSON) | 0.95–3.2 µs |
+| `mid(Point, Point) -> Point`, two records in and one out (JSON) | 0.95–3.2 µs |
 | the first call in a compiled Bun executable, including the integrity check and loading the library | about 1.9 ms, once |
 
 Strings cost their UTF-8 encoding, and records cost their JSON; scalar calls are nearly free.
@@ -440,8 +449,12 @@ Strings cost their UTF-8 encoding, and records cost their JSON; scalar calls are
 **For work that takes longer, use a zone function**: it runs in its own pod and never blocks the
 zone.
 
-A Bun `Worker` can also call the generated module, off the main thread. Each Worker loads its own
-copy of the library and calls it independently:
+A Bun `Worker` can also call the generated module, off the main thread. Each Worker imports the
+module and opens the library itself, but opening the same file twice in one process returns the
+same loaded library, so the process holds one copy of the library. Its Rust statics (a `static`,
+a `OnceLock`, a `LazyLock`) are therefore shared by the main thread and every Worker, and calls from
+different Workers can run at the same time, so anything they share must be safe to use from
+several threads at once:
 
 ```ts title="stretch-worker.ts"
 import { stretch } from './generated/ffi';

@@ -73,6 +73,17 @@ const spawnRunner: Runner = (cmd, args, opts) => {
 };
 
 const RUSTUP = 'https://rustup.rs';
+
+/**
+ * The install commands the toolchain check prints. Exported so the docs page
+ * quotes the same strings (apps/docs/rust-in-process-doc.test.ts).
+ */
+export const INSTALL_HINTS = {
+  zigbuild: 'cargo install --locked cargo-zigbuild',
+  zigUrl: 'https://ziglang.org/download/',
+  zigPip: 'pip install ziglang',
+  rustupTarget: 'rustup target add',
+} as const;
 const notStarted = (r: RunResult) => r.error !== undefined;
 const firstLine = (s: string) => s.split('\n')[0]?.trim() ?? '';
 
@@ -91,13 +102,13 @@ function checkToolchain(
   const zb = run('cargo', ['zigbuild', '--version'], { cwd: crateDir });
   if (notStarted(zb) || zb.status !== 0) {
     throw new FfiUsageError(
-      'cargo-zigbuild is not installed; it cross-compiles the library for the musl image. Install it with: cargo install --locked cargo-zigbuild',
+      `cargo-zigbuild is not installed; it cross-compiles the library for the musl image. Install it with: ${INSTALL_HINTS.zigbuild}`,
     );
   }
   const zig = run('zig', ['version'], { cwd: crateDir });
   if (notStarted(zig) || zig.status !== 0) {
     throw new FfiUsageError(
-      'zig was not found on PATH; cargo-zigbuild links against the musl sysroot zig ships. Install zig from https://ziglang.org/download/ (or: pip install ziglang).',
+      `zig was not found on PATH; cargo-zigbuild links against the musl sysroot zig ships. Install zig from ${INSTALL_HINTS.zigUrl} (or: ${INSTALL_HINTS.zigPip}).`,
     );
   }
   const installed = run('rustup', ['target', 'list', '--installed'], { cwd: crateDir });
@@ -110,7 +121,7 @@ function checkToolchain(
   const missing = targets.filter((t) => !have.has(t));
   if (missing.length > 0) {
     throw new FfiUsageError(
-      `the Rust target ${missing.join(', ')} is not installed for this crate's toolchain. Install it with: rustup target add ${missing.join(' ')}`,
+      `the Rust target ${missing.join(', ')} is not installed for this crate's toolchain. Install it with: ${INSTALL_HINTS.rustupTarget} ${missing.join(' ')}`,
     );
   }
   const rustc = run('rustc', ['-V'], { cwd: crateDir });
