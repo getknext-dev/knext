@@ -20,6 +20,7 @@
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { coreVersion } from "./core-version";
 import { satisfiesRange } from "./grpc-dispatch";
 
 /** The package that provides `knext ffi`. */
@@ -160,31 +161,7 @@ export async function dispatchFfiVerb(
     }
 }
 
-/**
- * This core's version: the nearest `package.json` above this module that IS
- * `@getknext/core`. Walked, not a fixed `../../`: the bundler splits this
- * lazily-imported module into a chunk at `dist/` (one level above
- * `dist/cli/`), while the source sits at `src/cli/` — a fixed relative path is
- * right for one and wrong for the other (it read `0.0.0` from the bin, which
- * every peer range refuses).
- */
-export function coreVersion(from: string = import.meta.url): string {
-    const req = createRequire(from);
-    for (const rel of [
-        "../package.json",
-        "../../package.json",
-        "../../../package.json",
-    ]) {
-        try {
-            const pkg = req(rel) as { name?: string; version?: string };
-            if (pkg.name === "@getknext/core" && pkg.version)
-                return pkg.version;
-        } catch {
-            // not at this level
-        }
-    }
-    return "0.0.0";
-}
+export { coreVersion };
 
 /** `knext ffi` — bin entry. Answers `--help` itself when the package is missing. */
 export function ffiMain(argv: readonly string[]): Promise<number> {

@@ -21,6 +21,7 @@
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { coreVersion } from "./core-version";
 
 /** The package that provides the verbs below. */
 export const GRPC_PACKAGE = "@getknext/grpc";
@@ -239,20 +240,6 @@ export async function dispatchGrpcVerb(
     } catch (err) {
         stderr(`${typed} failed: ${(err as Error)?.message ?? String(err)}\n`);
         return 1;
-    }
-}
-
-function coreVersion(): string {
-    try {
-        // Same layout rule as deploy.ts's getCliVersion: src/cli/x.ts and
-        // dist/cli/kn-next.js are both three segments below package.json.
-        const req = createRequire(import.meta.url);
-        return (
-            (req("../../package.json") as { version?: string }).version ??
-            "0.0.0"
-        );
-    } catch {
-        return "0.0.0";
     }
 }
 
