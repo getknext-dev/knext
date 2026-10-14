@@ -25,6 +25,15 @@ case "${image}" in
     ;;
 esac
 
+# repo:tag@sha256:… -> repo@sha256:…, the form every docker verb resolves the
+# same way (the digest decides; a tag beside it is only a label). A registry
+# host:port is not a tag: only a colon in the last path segment is.
+name="${image%@*}"
+case "${name##*/}" in
+  *:*) name="${name%:*}" ;;
+esac
+image="${name}@${image##*@}"
+
 docker pull --quiet "${image}"
 exe="$(docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "${image}" \
   | sed -n 's/^STANDALONE_SERVER_EXEC=//p')"
