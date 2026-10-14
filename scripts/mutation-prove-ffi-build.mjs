@@ -269,8 +269,8 @@ const BUILD = [
     subject: 'ffiBuild',
     claim: 'the cross-build links libc statically again (-crt-static not turned off)',
     anchor:
-      "      RUSTFLAGS: [process.env.RUSTFLAGS, '-C target-feature=-crt-static'].filter(Boolean).join(' '),",
-    replacement: '      RUSTFLAGS: process.env.RUSTFLAGS,',
+      "      RUSTFLAGS: [baseEnv.RUSTFLAGS, '-C target-feature=-crt-static'].filter(Boolean).join(' '),",
+    replacement: '      RUSTFLAGS: baseEnv.RUSTFLAGS,',
   },
   {
     id: 'B05',
