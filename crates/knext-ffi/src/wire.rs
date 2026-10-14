@@ -79,6 +79,9 @@ impl<'de, T: Wire> Deserialize<'de> for De<T> {
     }
 }
 
+/// `None` is JSON `null`. The macros refuse an `Option` directly inside an
+/// `Option` (at any position) because `Some(None)` would also be `null` and
+/// could not survive the round trip; see `knext-ffi-macros` `types::classify`.
 impl<T: Wire> Wire for Option<T> {
     fn ser<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         match self {

@@ -357,6 +357,8 @@ function point(label: string) {
     raw: [0, 255],
     child: { name: 'kid', flag: false },
     ids: ['9007199254740993'],
+    count: '18446744073709551615' as string | null,
+    deltas: ['-9223372036854775808', null, '9007199254740993', '-1'] as (string | null)[],
   };
 }
 
@@ -385,6 +387,23 @@ function modeRoundtrip(path: string): number {
   eq(call('not', true), false, 'bool');
   eq(call('echo_f64', Math.PI), Math.PI, 'f64');
   eq(call('echo_point', point('p')), point('p'), 'record with 64-bit decimal strings');
+  eq(
+    call('echo_point', { ...point('n'), count: null, deltas: [] }),
+    { ...point('n'), count: null, deltas: [] },
+    'Option<usize> null and an empty Vec<Option<i64>> field',
+  );
+  throws(
+    () => call('echo_point', { ...point('q'), count: 5 }),
+    RustError,
+    'invalid input',
+    'JSON number in an Option<usize> field',
+  );
+  throws(
+    () => call('echo_point', { ...point('q'), deltas: [null, -5] }),
+    RustError,
+    'invalid input',
+    'JSON number in a Vec<Option<i64>> field',
+  );
   eq(call('echo_opt_u64', '18446744073709551615'), '18446744073709551615', 'Option<u64>');
   eq(call('echo_vec_i64', ['-9223372036854775808']), ['-9223372036854775808'], 'Vec<i64>');
   eq(call('next_color', 'Blue'), 'Red', 'enum');

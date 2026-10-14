@@ -114,14 +114,17 @@ with `knext_ffi_v1_free`, after copying it.
 | `()` (return) | `void` | — |
 | `#[knext_ffi::record] struct` | `interface` | JSON |
 | `#[knext_ffi::record] enum` (unit variants) | string-literal union | JSON |
-| `Option<T>`, `Vec<T>` (`T` ≠ `u8`) | `T \| null`, `T[]` | JSON |
+| `Option<T>` (`T` not itself an `Option`), `Vec<T>` (`T` ≠ `u8`) | `T \| null`, `T[]` | JSON |
 | `Result<T, E>` (return only), `E: Display` | `T`; `Err` throws `RustError` | status 1 |
 
 Anything else is a compile error that names the type and points at this table:
 generics and lifetime parameters, `char`, `i128`/`u128`, tuples, arrays, raw
 pointers, `impl Trait`, function pointers, `async fn`, methods, `unsafe fn`,
 references other than `&str`/`&[u8]` (and any returned reference),
-`Result` as an argument, data-carrying enums, generic or recursive records, and
+a nested `Option<Option<T>>` anywhere (argument, return, record field or
+inside a `Vec`: `None` and `Some(None)` are both JSON `null`, so the outer
+level would be lost; `Option<Vec<Option<T>>>` is fine), `Result` as an
+argument, data-carrying enums, generic or recursive records, and
 `#[serde(...)]` attributes on a record. A function that names a type which is
 not a `#[knext_ffi::record]` fails with "`T` is not a #[knext_ffi::record] type".
 Mutually recursive records fail with a const-evaluation cycle error.
@@ -174,6 +177,7 @@ Golden pairs (pinned by `knext-ffi-fixture/tests/abi.rs` and by the Bun harness)
 | `add(i32,i32)->i32` (FNV-1a 32) | `43c960c6` |
 | `add(i32,i32)->i32` (FNV-1a 64) | `0x29df491fa1e52ca6` |
 | `next_color(Color)->ColorColor[Red\|Green\|Blue]` (FNV-1a 64) | `0xa34dde499fdb102f` |
+| `echo_point(Point)->Point` + `Child{name:string,flag:bool}` + `Color[Red\|Green\|Blue]` + `Point{id:u64,delta:i64,size:usize,offset:isize,x:f64,y:f32,small:u8,label:string,tags:vec<string>,maybe:option<i64>,color:Color,raw:vec<u8>,child:option<Child>,ids:vec<u64>,count:option<usize>,deltas:vec<option<i64>>}`, concatenated with no separators (FNV-1a 64) | `0x4710769a1d4730de` |
 
 ## Tests and CI
 
@@ -192,7 +196,7 @@ bun harness/ffi-harness.ts roundtrip target/release/libknext_ffi_fixture.dylib
 bun harness/ffi-harness.ts panic     target/release/libknext_ffi_fixture.dylib
 bun harness/ffi-harness.ts leak      target/release/libknext_ffi_fixture.dylib            # exit 0
 bun harness/ffi-harness.ts leak      target/release/libknext_ffi_fixture.dylib --no-free  # exit 3
-node scripts/mutation-prove.mjs   # each key guard goes red when its behaviour is removed
+node ../scripts/mutation-prove-knext-ffi-crates.mjs   # each key guard goes red when its behaviour is removed
 ```
 
 | Test | What it proves |
@@ -202,3 +206,4 @@ node scripts/mutation-prove.mjs   # each key guard goes red when its behaviour i
 | `knext-ffi/tests/ui.rs` | `trybuild` compile-fail case per rejected type, each message naming the type and the table |
 | `knext-ffi/tests/panic_abort.rs` | the same fixture crate compiles with the default profile and fails with knext-ffi's message under `panic = "abort"` |
 | `harness/ffi-harness.ts` | from Bun: one manifest record per `#[export]`/`#[record]` in a stripped LTO build, symbols and `_schema` values match what the generator computes, round-trips, panic survival, RSS-bounded leak check that also proves it can see a leak |
+| `scripts/mutation-prove-knext-ffi-crates.mjs` (repo root) | each key guard above goes red when the behaviour it protects is removed; part of the repository's mutation-prover fleet, so it re-runs in the scheduled `mutation-prover-nightly.yml` lane with its anchors also audited statically on every pull request |

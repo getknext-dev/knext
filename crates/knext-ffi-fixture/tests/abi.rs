@@ -52,7 +52,8 @@ fn abi_version_is_1() {
 #[test]
 fn schema_values_are_golden() {
     // FNV-1a 64 of e.g. "mid(Point,Point)->Point" + "Child{name:string,flag:bool}"
-    // + "Color[Red|Green|Blue]" + "Point{id:u64,...,ids:vec<u64>}" (sorted by name).
+    // + "Color[Red|Green|Blue]" + "Point{id:u64,...,ids:vec<u64>,count:option<usize>,
+    // deltas:vec<option<i64>>}" (sorted by name).
     let cases: [(&str, unsafe extern "C" fn() -> u64, u64); 11] = [
         ("add", knext_ffi_v1_add_43c960c6_schema, 0x29df491fa1e52ca6),
         (
@@ -78,18 +79,18 @@ fn schema_values_are_golden() {
         (
             "echo_point",
             knext_ffi_v1_echo_point_8aec475d_schema,
-            0xd158fb4b9dff2d2f,
+            0x4710769a1d4730de,
         ),
-        ("mid", knext_ffi_v1_mid_c61bad57_schema, 0x0865ccb5df46187d),
+        ("mid", knext_ffi_v1_mid_c61bad57_schema, 0xe8fcf2e62f09f6d4),
         (
             "echo_vec_point",
             knext_ffi_v1_echo_vec_point_e1008be8_schema,
-            0x80d56f2971c495d2,
+            0x25b281e1bbeb177f,
         ),
         (
             "fallible_point",
             knext_ffi_v1_fallible_point_480ebe3f_schema,
-            0x558c7d961784d875,
+            0x0b7914bf29e338ec,
         ),
         (
             "next_color",
@@ -345,7 +346,15 @@ fn point(label: &str) -> Value {
         "color": "Blue",
         "raw": [0, 1, 255],
         "child": {"name": "kid", "flag": true},
-        "ids": ["0", "18446744073709551615"]
+        "ids": ["0", "18446744073709551615"],
+        "count": "18446744073709551615",
+        "deltas": [
+            "-9223372036854775808",
+            null,
+            "-9007199254740993",
+            "9007199254740993",
+            "9223372036854775807"
+        ]
     })
 }
 
@@ -363,8 +372,57 @@ fn record_round_trips_with_64_bit_fields_as_decimal_strings() {
     let mut q = point("q");
     q["maybe"] = Value::Null;
     q["child"] = Value::Null;
+    q["count"] = Value::Null;
+    q["deltas"] = json!([]);
     let (st, back) = call_json(knext_ffi_v1_echo_point_8aec475d, &q);
     assert_eq!((st, back), (OK, q), "Option fields as null");
+}
+
+#[test]
+fn option_usize_and_vec_option_i64_fields_round_trip_as_decimal_strings() {
+    // `count: Option<usize>` and `deltas: Vec<Option<i64>>`: a 64-bit integer
+    // inside an Option or a Vec inside a record field is a decimal string too.
+    for count in [
+        Value::Null,
+        json!("0"),
+        json!(usize::MAX.to_string()),
+        json!(((1u64 << 53) + 1).to_string()),
+    ] {
+        let mut p = point("c");
+        p["count"] = count.clone();
+        p["deltas"] = json!([
+            i64::MIN.to_string(),
+            null,
+            (-(1i64 << 53) - 1).to_string(),
+            "-1",
+            ((1i64 << 53) + 1).to_string(),
+            i64::MAX.to_string(),
+        ]);
+        let (st, back) = call_json(knext_ffi_v1_echo_point_8aec475d, &p);
+        assert_eq!(st, OK, "{back}");
+        assert_eq!(back, p, "count = {count}");
+        assert_eq!(back["count"], count, "exact, above 2^53 and at usize::MAX");
+        assert!(back["deltas"][0].is_string() && back["deltas"][1].is_null());
+    }
+    assert_eq!(usize::MAX as u64, u64::MAX, "ABI v1 is 64-bit");
+
+    // A JSON number in either field is refused (status 3), as is an
+    // out-of-range decimal string.
+    let bad: [(&str, Value); 6] = [
+        ("count", json!(5)),
+        ("count", json!(9_007_199_254_740_993u64)),
+        ("count", json!("-1")),
+        ("deltas", json!([1])),
+        ("deltas", json!([null, -5])),
+        ("deltas", json!(["9223372036854775808"])),
+    ];
+    for (field, v) in bad {
+        let mut p = point("bad");
+        p[field] = v.clone();
+        let (st, msg) = call_json(knext_ffi_v1_echo_point_8aec475d, &p);
+        assert_eq!(st, INVALID, "{field} = {v} -> {msg}");
+        assert!(msg.as_str().unwrap().contains("`p`"), "{msg}");
+    }
 }
 
 #[test]

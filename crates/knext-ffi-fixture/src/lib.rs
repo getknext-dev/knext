@@ -29,6 +29,10 @@ mod types {
         pub raw: Vec<u8>,
         pub child: Option<Child>,
         pub ids: Vec<u64>,
+        /// 64-bit inside an Option: a decimal string or null.
+        pub count: Option<usize>,
+        /// 64-bit inside an Option inside a Vec: decimal strings and nulls.
+        pub deltas: Vec<Option<i64>>,
     }
 
     /// A unit enum crosses as its variant name.

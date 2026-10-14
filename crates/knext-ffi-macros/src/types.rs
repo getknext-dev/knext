@@ -267,6 +267,15 @@ pub fn classify(ty: &Type, pos: Pos) -> Result<(Desc, Mode), Error> {
                 return Err(reject(ty, ty, "write `Option<T>` with exactly one type argument"));
             };
             let (d, _) = classify(inner, Pos::Json)?;
+            if matches!(d, Desc::Option(_)) {
+                // Both `None` and `Some(None)` are JSON `null`: the outer level
+                // cannot survive the round trip, so refuse it rather than lose it.
+                return Err(reject(
+                    ty,
+                    ty,
+                    "a nested `Option` cannot cross the boundary: `None` and `Some(None)` are both JSON `null`; use a #[knext_ffi::record] struct or unit enum that names the cases",
+                ));
+            }
             Ok((Desc::Option(Box::new(d)), Mode::Json))
         }
         "Result" => Err(reject(ty, ty, "`Result<T, E>` is only supported as the return type")),
@@ -497,6 +506,44 @@ mod tests {
             assert!(e.contains("D6"), "{src}: {e}");
         }
         assert!(tok("Vec<char>", Pos::Arg).contains("`char`"));
+    }
+
+    #[test]
+    fn a_nested_option_is_rejected_in_every_position() {
+        // `Some(None)` and `None` would both be JSON `null`: silent data loss.
+        for (src, pos, named) in [
+            ("Option<Option<i32>>", Pos::Arg, "Option<Option<i32>>"),
+            ("Option<Option<u64>>", Pos::Ret, "Option<Option<u64>>"),
+            ("Option<Option<bool>>", Pos::Json, "Option<Option<bool>>"),
+            ("Vec<Option<Option<i64>>>", Pos::Arg, "Option<Option<i64>>"),
+            (
+                "Option<Vec<Option<Option<String>>>>",
+                Pos::Ret,
+                "Option<Option<String>>",
+            ),
+            (
+                "Option<std::option::Option<u8>>",
+                Pos::Arg,
+                "Option<std::option::Option<u8>>",
+            ),
+            ("Option<(Option<i32>)>", Pos::Arg, "Option<(Option<i32>)>"),
+        ] {
+            let e = tok(src, pos);
+            assert!(
+                e.starts_with(&format!("ERR knext-ffi: `{named}` is not supported: ")),
+                "{src}: {e}"
+            );
+            assert!(
+                e.contains("nested `Option`") && e.contains("D6"),
+                "{src}: {e}"
+            );
+        }
+        // An Option separated from another by a Vec is unambiguous and stays.
+        assert_eq!(
+            tok("Option<Vec<Option<i32>>>", Pos::Arg),
+            "option<vec<option<i32>>>"
+        );
+        assert_eq!(tok("Vec<Option<i64>>", Pos::Json), "vec<option<i64>>");
     }
 
     #[test]

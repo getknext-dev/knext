@@ -20,7 +20,9 @@ mod nested {
 
     #[record]
     pub struct Deep {
-        pub v: Option<Option<i32>>,
+        // An Option nested through a Vec is unambiguous (a nested `Option`
+        // directly inside an `Option` is refused: tests/ui/fail/nested_option_*).
+        pub v: Option<Vec<Option<i32>>>,
     }
 }
 

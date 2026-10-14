@@ -54,7 +54,7 @@ fn raw(f: impl FnOnce(&mut Out) -> i32) -> (i32, Out) {
 fn every_returned_buffer_is_released_exactly_by_the_paired_free() {
     let name = "x".repeat(1000);
     let bytes: Vec<u8> = (0..1000u32).map(|i| i as u8).collect();
-    let point = br#"{"id":"1","delta":"-1","size":"2","offset":"-2","x":1.0,"y":2.0,"small":3,"label":"l","tags":["t"],"maybe":null,"color":"Red","raw":[1],"child":null,"ids":["9"]}"#;
+    let point = br#"{"id":"1","delta":"-1","size":"2","offset":"-2","x":1.0,"y":2.0,"small":3,"label":"l","tags":["t"],"maybe":null,"color":"Red","raw":[1],"child":null,"ids":["9"],"count":null,"deltas":["-1",null]}"#;
 
     let before = live();
     for _ in 0..2000 {
