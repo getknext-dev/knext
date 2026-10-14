@@ -2,7 +2,7 @@
  * The TS emitter (ADR-0069 D6, D7, D8, D13): golden snippets per type-mapping
  * row, the record/enum/Option/Vec JSON codecs, the error classes, the lazy
  * loader's shape, and the spike's binding rules. The behaviour of the emitted
- * code is proven by loader.test.ts against a real library; this file pins what
+ * code is proven by ffi-loader.test.ts against a real library; this file pins what
  * is emitted, and one full golden file pins all of it at once.
  */
 

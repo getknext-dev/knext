@@ -8,7 +8,7 @@
  * file) all produce byte-identical output from the same manifest.
  *
  * What the emitted module guarantees, each pinned by render.test.ts and proven
- * against a real library by loader.test.ts:
+ * against a real library by ffi-loader.test.ts:
  *
  * - `import 'server-only'` first; no `bun:ffi` import and no work at import
  *   time (a static `bun:ffi` import fails `next build` under Node). `bun:ffi`
