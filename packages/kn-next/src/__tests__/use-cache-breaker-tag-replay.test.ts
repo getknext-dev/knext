@@ -471,16 +471,37 @@ for (const client of CLIENTS) {
             const a = await pod();
             const b = await pod();
             await b.set("x", Promise.resolve(entryOf(["t"])));
+            const t0 = Date.now();
+            const old = t0 - 10_000;
+            const far = t0 + 10_000_000;
+            const ahead = t0 + 600_000;
+            // w: a pending expiry far out and a stale stamp ahead of now;
+            // h: an expiry long in effect.
+            fake?.hashes.set(
+                TAGS_KEY,
+                new Map([
+                    ["e:w", String(far)],
+                    ["s:w", String(ahead)],
+                    ["e:h", String(old)],
+                ]),
+            );
             await openBreaker(a);
-            await a.updateTags(["t", "u"], { expire: 3600 });
+            await a.updateTags(["t", "u", "w"], { expire: 3600 });
+            await a.updateTags(["h"]);
             await b.updateTags(["t"]);
             const hard = stamp("e:t") as number;
             await waitFor(() => stamp("s:u") !== undefined);
+            const at = stamp("s:u") as number;
             // Same rule as the script: the expiry in effect is kept, a tag
-            // with none gets the profile's window.
+            // with none gets the profile's window, a pending one is only
+            // brought forward, a stale stamp never moves back, and
+            // expire-now lands at the replay time.
             expect(stamp("e:t")).toBe(hard);
-            expect(stamp("s:t")).toBe(stamp("s:u") as number);
-            expect(stamp("e:u")).toBeGreaterThan(stamp("s:u") as number);
+            expect(stamp("s:t")).toBe(at);
+            expect(stamp("e:u")).toBe(at + 3_600_000);
+            expect(stamp("e:w")).toBe(at + 3_600_000);
+            expect(stamp("s:w")).toBe(ahead);
+            expect(stamp("e:h")).toBe(at);
             await pastServerTime(hard);
             expect(await b.get("x", [])).toBeUndefined();
             // The refused EVAL did not open pod A's breaker: a write right
