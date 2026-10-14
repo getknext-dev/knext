@@ -397,6 +397,53 @@ describe('path 1 — native/ffi/<triple> beside the executable, integrity requir
     expect(r.status).toBe(0);
   });
 
+  it('Rust argument names never collide with what the generated body declares (r, st, base, o0, n0), nor an export with an import (join)', () => {
+    const exe = image();
+    const r = inBun(
+      (m, _c, fixture) => ({
+        scale: m.scale(1.25),
+        join: m.join('a', 'bb', 'ccc', '', 'd-é'),
+        joinAgain: m.join('', '', '', '', ''),
+        live: fixture.fixture_live(),
+      }),
+      { FAKE_EXEC: exe, LIBPATH: join(exe, '..', 'native', 'ffi', TRIPLE, LIB) },
+    );
+    expect(r.stderr).not.toContain('SyntaxError');
+    expect(r.result, r.stderr).toEqual({
+      scale: { id: '7n', x: 2.5, label: 'scaled', tags: [], inner: null, color: 'Red' },
+      join: ['a', 'bb', 'ccc', '', 'd-é'],
+      joinAgain: ['', '', '', '', ''],
+      live: '0n',
+    });
+    expect(r.status).toBe(0);
+  });
+
+  it('a 64-bit integer that arrives as a JSON number is a RustError naming its path, and the buffer is still freed', () => {
+    const exe = image();
+    const r = inBun(
+      (m, c, fixture) => ({
+        id: c(() => m.bad_id()),
+        tag: c(() => m.bad_tag()),
+        live: fixture.fixture_live(),
+      }),
+      { FAKE_EXEC: exe, LIBPATH: join(exe, '..', 'native', 'ffi', TRIPLE, LIB) },
+    );
+    expect(r.result, r.stderr).toEqual({
+      id: {
+        cls: 'RustError',
+        message: 'result.id: expected a 64-bit integer as a decimal string, got 1',
+        fn: 'bad_id',
+      },
+      tag: {
+        cls: 'RustError',
+        message: 'result.tags[1]: expected a 64-bit integer as a decimal string, got 3',
+        fn: 'bad_tag',
+      },
+      live: '0n',
+    });
+    expect(r.status).toBe(0);
+  });
+
   const refused = (integrity: 'mismatch' | 'unlisted' | 'absent' | 'v2', expected: RegExp) => {
     for (const nodeEnv of ['production', 'development']) {
       const r = inBun((m, c) => [c(() => m.greet('x')), c(() => m.add(1, 2))], {

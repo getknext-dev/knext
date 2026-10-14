@@ -9,7 +9,8 @@
 import { describe, expect, it } from 'bun:test';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { fnv1a64, scanManifest, schemaString } from '../manifest';
+import ts from 'typescript';
+import { fnv1a64, type Manifest, RESERVED, scanManifest, schemaString } from '../manifest';
 import { renderModule } from '../render';
 import { blob, D, enumRecord, fn, KITCHEN_SINK, PKG_DIR, record } from './helpers';
 
@@ -167,8 +168,10 @@ describe('D6 golden rows — buffers, unit, JSON types', () => {
     const f = body(src, 'f');
     expect(f).toContain('export function f(s: string): string {');
     expect(f).toContain("$str('f', 's', s);");
-    expect(f).toContain('const o0 = $put(s);\n  const n0 = $last;\n  const base = $base();');
-    expect(f).toContain('$lib.knext_ffi_v1_f_0badc0de(n0 === 0 ? null : base + o0, n0, $outPtr)');
+    expect(f).toContain('const $o0 = $put(s);\n  const $n0 = $last;\n  const $scratch = $base();');
+    expect(f).toContain(
+      '$lib.knext_ffi_v1_f_0badc0de($n0 === 0 ? null : $scratch + $o0, $n0, $outPtr)',
+    );
     expect(f).toContain('return $takeString();');
     expect(src).toContain(
       "knext_ffi_v1_f_0badc0de: { args: ['ptr', 'usize', 'ptr'], returns: 'i32' }",
@@ -180,8 +183,10 @@ describe('D6 golden rows — buffers, unit, JSON types', () => {
     const f = body(src, 'f');
     expect(f).toContain('export function f(data: Uint8Array): Uint8Array {');
     expect(f).toContain("$bytes('f', 'data', data);");
-    expect(f).toContain('const o0 = $put(data);');
-    expect(f).toContain('$lib.knext_ffi_v1_f_0badc0de(n0 === 0 ? null : base + o0, n0, $outPtr)');
+    expect(f).toContain('const $o0 = $put(data);');
+    expect(f).toContain(
+      '$lib.knext_ffi_v1_f_0badc0de($n0 === 0 ? null : $scratch + $o0, $n0, $outPtr)',
+    );
     expect(f).toContain('return $takeBytes();');
     expect(f).not.toContain('ptr(');
   });
@@ -213,9 +218,9 @@ describe('D6 golden rows — buffers, unit, JSON types', () => {
     expect(src).toContain("/** A colour. */\nexport type C = 'Red' | 'Green';");
     const f = body(src, 'f');
     expect(f).toContain('export function f(p: P): C {');
-    expect(f).toContain('const o0 = $put(JSON.stringify($e_P(p)));');
-    expect(f).toContain('const r: unknown = JSON.parse($takeString());');
-    expect(f).toContain('return r as C;');
+    expect(f).toContain('const $o0 = $put(JSON.stringify($e_P(p)));');
+    expect(f).toContain('const $r: unknown = JSON.parse($takeString());');
+    expect(f).toContain('return $r as C;');
     expect(src).toContain('function $e_P(v: P): unknown {');
     expect(src).toContain('id: $s64(v.id)');
   });
@@ -233,9 +238,11 @@ describe('D6 golden rows — buffers, unit, JSON types', () => {
     ]);
     const f = body(src, 'f');
     expect(f).toContain('export function f(a: string | null, b: number[]): (number | null)[] {');
-    expect(f).toContain('const o0 = $put(JSON.stringify(a));');
-    expect(f).toContain('const o1 = $put(JSON.stringify(b));');
-    expect(f).toContain("$vec(r, 'result', (x0, at0) => $opt(x0, (x1) => $fin('f', at0, x1)))");
+    expect(f).toContain('const $o0 = $put(JSON.stringify(a));');
+    expect(f).toContain('const $o1 = $put(JSON.stringify(b));');
+    expect(f).toContain(
+      "$vec($r, 'result', ($x0, $at0) => $opt($x0, ($x1) => $fin('f', $at0, $x1)))",
+    );
   });
 
   it('a Vec<u8> inside a JSON type is number[] (raw bytes only cross at the top level)', () => {
@@ -257,17 +264,17 @@ describe('D6 golden rows — buffers, unit, JSON types', () => {
       record('P', [['xs', D.vec(D.opt(D.t('isize')))]]),
     ]);
     const f = body(src, 'f');
-    expect(f).toContain('JSON.stringify($opt(a, (x0) => $s64(x0)))');
-    expect(f).toContain('JSON.stringify(b.map((x0) => $s64(x0)))');
-    expect(f).toContain("return $opt(r, (x0) => $d64('f', 'result', x0));");
-    expect(src).toContain('xs: v.xs.map((x0) => $opt(x0, (x1) => $s64(x1)))');
+    expect(f).toContain('JSON.stringify($opt(a, ($x0) => $s64($x0)))');
+    expect(f).toContain('JSON.stringify(b.map(($x0) => $s64($x0)))');
+    expect(f).toContain("return $opt($r, ($x0) => $d64('f', 'result', $x0));");
+    expect(src).toContain('xs: v.xs.map(($x0) => $opt($x0, ($x1) => $s64($x1)))');
     expect(src).toContain('function $d64(fn: string, at: string, v: unknown): bigint {');
     expect(src).not.toContain('$d_P');
     const g = body(
       render([fn('g', [], D.rec('P')), record('P', [['xs', D.vec(D.opt(D.t('isize')))]])]),
       'g',
     );
-    expect(g).toContain("return $d_P('g', 'result', r);");
+    expect(g).toContain("return $d_P('g', 'result', $r);");
   });
 
   it('floats inside JSON must be finite: a null where the schema says f64 is a RustError naming the field', () => {
@@ -302,6 +309,216 @@ describe('D6 golden rows — buffers, unit, JSON types', () => {
     );
     expect(src).toContain(' * @throws {RustPanicError} when the Rust function panics.\n');
     expect(src).toContain(' * @throws {FfiLoadError} when the Rust library cannot be loaded.\n');
+  });
+});
+
+describe('TSDoc says what is checked in JavaScript and what is not', () => {
+  const src = render([
+    fn(
+      'f',
+      [
+        ['p', D.rec('P'), 'P'],
+        ['n', D.t('i32')],
+        ['c', D.en('C'), 'C'],
+        ['s', D.t('string'), '&str'],
+      ],
+      D.t('unit'),
+      { retRust: '()' },
+    ),
+    fn('g', [['p', D.rec('P'), 'P']], D.t('unit'), { retRust: '()' }),
+    record('P', [['id', D.t('u64')]]),
+    enumRecord('C', ['Red']),
+  ]);
+  const doc = (name: string) => {
+    const at = src.indexOf(`export function ${name}(`);
+    return src.slice(src.lastIndexOf('/**', at), at);
+  };
+
+  it('TypeError is promised only for the arguments the module checks, by name', () => {
+    expect(doc('f')).toContain(
+      ' * @throws {TypeError} when `n` or `s` has the wrong type or is out of range.\n',
+    );
+    expect(doc('g')).not.toContain('TypeError');
+    expect(src).not.toContain('when an argument has the wrong type');
+  });
+
+  it('record and enum arguments are documented as unchecked in JavaScript: Rust rejects them as invalid input', () => {
+    expect(doc('f')).toContain(
+      ' * @throws {RustError} ("invalid input: …") when `p` or `c` is a value Rust cannot decode: record, enum, Option and Vec arguments are not checked in JavaScript.\n',
+    );
+    expect(doc('g')).toContain(
+      ' * @throws {RustError} ("invalid input: …") when `p` is a value Rust cannot decode: record, enum, Option and Vec arguments are not checked in JavaScript.\n',
+    );
+  });
+});
+
+describe('generated names never collide with Rust names', () => {
+  /** Names a binding pattern declares. */
+  const bound = (n: ts.BindingName): string[] =>
+    ts.isIdentifier(n)
+      ? [n.text]
+      : n.elements.flatMap((e) => (ts.isOmittedExpression(e) ? [] : bound(e.name)));
+
+  /** An identifier that names a property or member, not a binding. */
+  const isPropertyName = (id: ts.Identifier): boolean => {
+    const p = id.parent;
+    return (
+      (ts.isPropertyAccessExpression(p) && p.name === id) ||
+      (ts.isQualifiedName(p) && p.right === id) ||
+      ((ts.isPropertyAssignment(p) ||
+        ts.isPropertySignature(p) ||
+        ts.isMethodSignature(p) ||
+        ts.isPropertyDeclaration(p) ||
+        ts.isMethodDeclaration(p)) &&
+        p.name === id) ||
+      (ts.isImportSpecifier(p) && p.propertyName === id)
+    );
+  };
+
+  /**
+   * Scan a rendered module with the TypeScript compiler (no lib, so anything
+   * not declared in the module itself resolves to nothing — a global):
+   * - `locals`: every binding an exported function's BODY declares (variables,
+   *   nested-function parameters), as `<export>: <name>`;
+   * - `moduleNames`: every module-scope name the generator declares itself
+   *   (imports, helpers, classes) — the manifest's own names excluded;
+   * - `globals`: every name the module references but does not declare.
+   * Nothing is enumerated by hand: a new local, helper or import is covered.
+   */
+  function scan(src: string, m: Manifest) {
+    const file = '/m.ts';
+    const sf = ts.createSourceFile(file, src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+    const host: ts.CompilerHost = {
+      getSourceFile: (f) => (f === file ? sf : undefined),
+      writeFile: () => {},
+      getDefaultLibFileName: () => '/lib.d.ts',
+      useCaseSensitiveFileNames: () => true,
+      getCanonicalFileName: (f) => f,
+      getCurrentDirectory: () => '/',
+      getNewLine: () => '\n',
+      fileExists: (f) => f === file,
+      readFile: (f) => (f === file ? src : undefined),
+    };
+    const checker = ts
+      .createProgram([file], { noLib: true, noResolve: true, types: [] }, host)
+      .getTypeChecker();
+
+    const userNames = new Set([
+      ...m.fns.map((f) => f.name),
+      ...m.records.map((r) => r.name),
+      ...m.enums.map((e) => e.name),
+    ]);
+    const exports = new Set(m.fns.map((f) => f.name));
+    const locals: string[] = [];
+    const moduleNames: string[] = [];
+    const globals = new Set<string>();
+
+    for (const st of sf.statements) {
+      if (ts.isImportDeclaration(st)) {
+        const c = st.importClause;
+        if (c?.name) moduleNames.push(c.name.text);
+        const nb = c?.namedBindings;
+        if (nb && ts.isNamespaceImport(nb)) moduleNames.push(nb.name.text);
+        if (nb && ts.isNamedImports(nb)) for (const e of nb.elements) moduleNames.push(e.name.text);
+      } else if (ts.isVariableStatement(st)) {
+        for (const d of st.declarationList.declarations) moduleNames.push(...bound(d.name));
+      } else if (
+        (ts.isFunctionDeclaration(st) ||
+          ts.isClassDeclaration(st) ||
+          ts.isInterfaceDeclaration(st) ||
+          ts.isTypeAliasDeclaration(st) ||
+          ts.isEnumDeclaration(st)) &&
+        st.name &&
+        !userNames.has(st.name.text)
+      ) {
+        moduleNames.push(st.name.text);
+      }
+
+      if (ts.isFunctionDeclaration(st) && st.name && exports.has(st.name.text) && st.body) {
+        const fn = st.name.text;
+        const visit = (n: ts.Node): void => {
+          if (ts.isVariableDeclaration(n) || ts.isParameter(n)) {
+            for (const name of bound(n.name)) locals.push(`${fn}: ${name}`);
+          } else if ((ts.isFunctionDeclaration(n) || ts.isClassDeclaration(n)) && n.name) {
+            locals.push(`${fn}: ${n.name.text}`);
+          }
+          ts.forEachChild(n, visit);
+        };
+        ts.forEachChild(st.body, visit);
+      }
+    }
+
+    const walk = (n: ts.Node): void => {
+      if (ts.isIdentifier(n) && !isPropertyName(n)) {
+        const sym = checker.getSymbolAtLocation(n);
+        const declaredHere = sym?.declarations?.some((d) => d.getSourceFile() === sf) ?? false;
+        if (!declaredHere) globals.add(n.text);
+      }
+      ts.forEachChild(n, walk);
+    };
+    walk(sf);
+    return { locals, moduleNames, globals: [...globals].sort() };
+  }
+
+  const SINK = scanManifest(blob(KITCHEN_SINK));
+  const SRC = renderModule(SINK, OPTS);
+  const scanned = scan(SRC, SINK);
+
+  it('the scan sees what it is meant to see (it is not vacuous)', () => {
+    expect(scanned.locals.length).toBeGreaterThan(10);
+    expect(scanned.locals.some((l) => l.startsWith('concat: '))).toBe(true);
+    expect(scanned.locals.some((l) => l.startsWith('ids: '))).toBe(true);
+    expect(scanned.moduleNames).toContain('RustError');
+    expect(scanned.globals).toContain('process');
+    expect(scanned.globals).toContain('JSON');
+  });
+
+  it("every local an export's body declares is $-prefixed: a Rust identifier cannot contain $", () => {
+    expect(scanned.locals.filter((l) => !l.split(': ')[1]?.startsWith('$'))).toEqual([]);
+  });
+
+  it('every module-scope name the generator declares is $-prefixed or one the scanner refuses as a Rust name', () => {
+    expect(scanned.moduleNames.filter((n) => !n.startsWith('$') && !RESERVED.has(n))).toEqual([]);
+  });
+
+  it('every global the module references is $-prefixed or one the scanner refuses as a Rust name', () => {
+    expect(scanned.globals.filter((n) => !n.startsWith('$') && !RESERVED.has(n))).toEqual([]);
+  });
+
+  it('a module whose arguments are named r, st, base, o0, n0 and whose export is named join parses', () => {
+    const transpiler = new Bun.Transpiler({ loader: 'ts' });
+    expect(() => transpiler.transformSync(SRC)).not.toThrow();
+    const only = render([
+      fn('scale', [['r', D.t('f64')]], D.rec('P'), { retRust: 'P' }),
+      fn(
+        'join',
+        ['st', 'base', 'o0', 'n0', 'x0', 'at0', 'r'].map(
+          (n): [string, Record<string, unknown>, string] => [n, D.t('string'), '&str'],
+        ),
+        D.vec(D.opt(D.t('i64'))),
+        { retRust: 'Vec<Option<i64>>' },
+      ),
+      record('P', [['id', D.t('u64')]]),
+    ]);
+    expect(() => transpiler.transformSync(only)).not.toThrow();
+  });
+
+  it('a Rust name the module needs for itself is refused at generate time, naming it', () => {
+    for (const name of scanned.globals.filter((n) => !n.startsWith('$'))) {
+      expect(() => render([fn(name, [], D.t('unit'))]), name).toThrow(
+        `"${name}" cannot be a generated function name`,
+      );
+    }
+  });
+});
+
+describe('generated output carries no internal references (it lands in user apps)', () => {
+  const src = render(KITCHEN_SINK);
+  it('no ADR, issue or PR numbers, design-decision labels or review-round labels', () => {
+    expect(src).not.toMatch(/ADR-\d/);
+    expect(src).not.toMatch(/#\d+/);
+    expect(src).not.toMatch(/\bD\d+\b/);
+    expect(src).not.toMatch(/\bround \d/i);
   });
 });
 
@@ -353,8 +570,8 @@ describe('D13 — the module contract', () => {
 
   it('type-checks without @types/bun: no Bun global, hashes with node:crypto createHash', () => {
     expect(code).not.toMatch(/\bBun\./);
-    expect(src).toContain("import { createHash } from 'node:crypto';");
-    expect(src).toContain("createHash('sha256')");
+    expect(src).toContain("import { createHash as $createHash } from 'node:crypto';");
+    expect(src).toContain("$createHash('sha256')");
   });
 
   it('the Node guard message of D15 step 2', () => {
@@ -376,7 +593,7 @@ describe('D13 — the module contract', () => {
   });
 
   it('path resolution: native/ffi/<triple> beside the executable first, dev fallback gated on NODE_ENV', () => {
-    expect(src).toContain("join(dirname(process.execPath), 'native')");
+    expect(src).toContain("$join($dirname(process.execPath), 'native')");
     expect(src).toContain("process.env['NODE_ENV'] !== 'production'");
     expect(src).toContain("const $LIB = 'zone';");
     expect(src).toContain("const $CRATE = 'rust';");
@@ -470,7 +687,9 @@ describe('D13 item 6 — the spike binding rules', () => {
     // Measured on Bun 1.4.2: an empty Uint8Array passed as a ptr argument
     // arrives NON-null; JavaScript null arrives as NULL.
     const f = body(src, 'sum');
-    expect(f).toContain('$lib.knext_ffi_v1_sum_0badc0de(n0 === 0 ? null : base + o0, n0, $outPtr)');
+    expect(f).toContain(
+      '$lib.knext_ffi_v1_sum_0badc0de($n0 === 0 ? null : $scratch + $o0, $n0, $outPtr)',
+    );
     expect(src).toContain('if (max === 0) return at;');
     expect(src).toContain('type $Arg = number | bigint | boolean | null;');
   });
@@ -479,14 +698,14 @@ describe('D13 item 6 — the spike binding rules', () => {
     for (const r of KITCHEN_SINK.filter((x) => x.kind === 'fn')) {
       const f = body(src, r.name as string);
       if (!f.includes('$put(')) continue;
-      expect(f.indexOf('const base = $base();'), r.name as string).toBeGreaterThan(
+      expect(f.indexOf('const $scratch = $base();'), r.name as string).toBeGreaterThan(
         f.lastIndexOf('$put('),
       );
-      expect(f.indexOf('const base = $base();')).toBeLessThan(f.indexOf('$lib.'));
+      expect(f.indexOf('const $scratch = $base();')).toBeLessThan(f.indexOf('$lib.'));
     }
     const concat = body(src, 'concat');
-    expect(concat).toContain('const o0 = $put(a);');
-    expect(concat).toContain('const o1 = $put(b);');
+    expect(concat).toContain('const $o0 = $put(a);');
+    expect(concat).toContain('const $o1 = $put(b);');
     // Offsets are 8-byte aligned; a grow copies the bytes so far and zeroes the old buffer.
     expect(src).toContain('const at = Math.ceil($used / 8) * 8;');
     expect(src).toContain('mem.set($mem.subarray(0, $used));\n  $mem.fill(0);');

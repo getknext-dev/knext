@@ -84,10 +84,14 @@ export class ManifestError extends Error {
 
 /**
  * Words a generated identifier may not be: JavaScript/TypeScript reserved
- * words (a function or parameter named `new` does not parse) and the names
- * the generated module declares itself.
+ * words (a function or parameter named `new` does not parse), the names the
+ * generated module declares itself without a `$` prefix, and the globals it
+ * references (an export named `process` would shadow the one the loader reads).
+ * Everything else the module declares is `$`-prefixed, which a Rust identifier
+ * cannot be. render.test.ts scans a rendered module for every name it declares
+ * or references, so this list cannot fall behind the emitter.
  */
-const RESERVED = new Set([
+export const RESERVED: ReadonlySet<string> = new Set([
   'break',
   'case',
   'catch',
@@ -142,6 +146,21 @@ const RESERVED = new Set([
   'RustError',
   'RustPanicError',
   'FfiLoadError',
+  // Globals the generated module references.
+  'ArrayBuffer',
+  'BigInt',
+  'DataView',
+  'Error',
+  'JSON',
+  'Math',
+  'Number',
+  'Record',
+  'String',
+  'TextEncoder',
+  'TypeError',
+  'Uint8Array',
+  'console',
+  'process',
 ]);
 
 const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
