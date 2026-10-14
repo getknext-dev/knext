@@ -23,10 +23,10 @@
  * environment problem must never read as "upstream fixed", or as "still
  * broken".
  */
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { detectCompileInclude } from '../../packages/kn-next/src/adapters/compile-embed.mjs';
-import { bunOnPath, pinnedVinext, REPO_ROOT, sandbox } from './probe-kit';
+import { bunOnPath, pinnedBunVersion, pinnedVinext, REPO_ROOT, sandbox } from './probe-kit';
 
 export type UpstreamRef = `${'oven-sh/bun' | 'cloudflare/vinext' | 'vercel/next.js'}#${number}`;
 
@@ -212,7 +212,72 @@ async function embeddedAddonSiblingRepro(id: string): Promise<Probe> {
   }
 }
 
+/** The sentence in Bun's own docs that keeps in-process Rust (`@getknext/ffi`) at Beta. */
+export const BUN_FFI_NOTICE = 'Do not rely on it in production';
+
+/**
+ * ADR-0069 D19: `bun:ffi` is still experimental while Bun's docs still say so —
+ * EITHER the "Do not rely on it in production" sentence OR the "`bun:ffi` is
+ * experimental" label. Only when both are gone has the graduation trigger fired.
+ */
+export function bunFfiNoticeVerdict(doc: string): Probe {
+  const sentence = doc.includes(BUN_FFI_NOTICE);
+  const label = /`?bun:ffi`?\s+is\s+\**experimental/i.test(doc);
+  return {
+    stillBroken: sentence || label,
+    evidence: `"${BUN_FFI_NOTICE}" ${sentence ? 'present' : 'absent'}; "bun:ffi is experimental" ${label ? 'present' : 'absent'}`,
+  };
+}
+
+/** The pinned bun-types' `docs/runtime/ffi.mdx` (bun-types comes with the root's @types/bun). */
+export function pinnedBunFfiDoc(): { version: string; path: string } {
+  const id = 'bun-ffi-experimental';
+  let dir: string;
+  try {
+    const typesBun = dirname(Bun.resolveSync('@types/bun/package.json', REPO_ROOT));
+    dir = dirname(Bun.resolveSync('bun-types/package.json', typesBun));
+  } catch (err) {
+    return inconclusive(id, `bun-types not installed: ${String((err as Error)?.message ?? err)}`);
+  }
+  const version = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')).version as string;
+  const path = join(dir, 'docs', 'runtime', 'ffi.mdx');
+  if (!existsSync(path)) inconclusive(id, `${path} does not exist (bun-types ${version})`);
+  return { version, path };
+}
+
 export const REGISTRY: RetirementEntry[] = [
+  {
+    id: 'bun-ffi-experimental',
+    upstream: 'oven-sh/bun#31534',
+    upstreamTitle: 'Incomplete API coverage and discrepancies in',
+    issue: '#2315',
+    kind: 'constraint',
+    shape: 'both',
+    against: 'bun',
+    // In-process Rust (`@getknext/ffi`, ADR-0069) is Beta because Bun's own
+    // docs call `bun:ffi` experimental ("Do not rely on it in production").
+    // No upstream issue tracks dropping that label; oven-sh/bun#31534 (the
+    // open bun:ffi API-completeness tracker) is the closest reference. The
+    // probe reads the docs themselves. CONTROL: the bun-types package that
+    // ships them is the pinned Bun's version. Red (= graduate) once a pinned
+    // Bun's docs drop the notice: amend ADR-0069 and remove the Beta label
+    // everywhere D2 lists, with knext's own ffi gates green on that Bun (D19).
+    repro: async () => {
+      const { version, path } = pinnedBunFfiDoc();
+      const pinned = pinnedBunVersion();
+      if (version !== pinned) {
+        inconclusive(
+          'bun-ffi-experimental',
+          `bun-types ${version} is not the pinned Bun ${pinned}`,
+        );
+      }
+      const verdict = bunFfiNoticeVerdict(readFileSync(path, 'utf8'));
+      return {
+        stillBroken: verdict.stillBroken,
+        evidence: `bun-types ${version}: ${verdict.evidence}`,
+      };
+    },
+  },
   {
     id: 'sidecar-cjs-resolve',
     upstream: 'oven-sh/bun#44053',

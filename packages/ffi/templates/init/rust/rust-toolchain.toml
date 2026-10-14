@@ -1,0 +1,5 @@
+# The Rust toolchain this crate builds with. The musl targets are the
+# Linux images knext builds (x86_64 and arm64).
+[toolchain]
+channel = "1.97.1"
+targets = ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"]

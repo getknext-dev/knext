@@ -230,6 +230,13 @@ jobs:
       - name: Typecheck @getknext/grpc (tsc --noEmit, tests + generated fixture in scope)
         run: bun run --filter @getknext/grpc typecheck
 
+      # @getknext/ffi (in-process Rust, Beta) — self-contained, no dist deps. Its
+      # typecheck also checks the GOLDEN generated module in an app tsconfig with
+      # Node types only (no @types/bun), so a generator change that emits a
+      # module a Next.js app cannot type-check reds here.
+      - name: Typecheck @getknext/ffi (tsc --noEmit, tests + generated golden in scope)
+        run: bun run --filter @getknext/ffi typecheck
+
       # apps/db-demo — dist-dependent on @getknext/db + @getknext/core (imports
       # @getknext/db and @getknext/db/schema), so it runs AFTER those builds above.
       - name: Typecheck db-demo (tsc --noEmit)

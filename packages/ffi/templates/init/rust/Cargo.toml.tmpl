@@ -1,0 +1,24 @@
+# The zone's in-process Rust library (Beta), called from TypeScript through
+# the generated module that `knext ffi generate` writes. It runs only on Bun.
+[package]
+name = "zone"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+# A C-ABI shared library: the generated module loads it through bun:ffi.
+crate-type = ["cdylib"]
+
+[dependencies]
+# Pinned by full commit (a tag is a movable ref). Every function marked
+# #[knext_ffi::export] gets a typed wrapper.
+knext-ffi = { git = "{{KNEXT_FFI_GIT}}", rev = "{{KNEXT_FFI_REV}}" }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+# Panics must unwind: each export catches them and throws RustPanicError in
+# JavaScript. knext-ffi refuses to build when panics abort.

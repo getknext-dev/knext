@@ -1428,6 +1428,11 @@ if (isEntrypoint(import.meta.url)) {
         } else if (sub === "add") {
             const { addMain } = await import("./grpc-dispatch");
             process.exit(await addMain(process.argv.slice(3)));
+        } else if (sub === "ffi") {
+            // In-process Rust (ADR-0069 D12, Beta): the optional ffi package
+            // owns `knext ffi …`; core only loads it lazily (ffi-dispatch.ts).
+            const { ffiMain } = await import("./ffi-dispatch");
+            process.exit(await ffiMain(process.argv.slice(3)));
         } else {
             await deploy();
         }

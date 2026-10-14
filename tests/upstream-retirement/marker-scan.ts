@@ -11,6 +11,13 @@ import { join, relative } from 'node:path';
 
 // Deliberately not prefixed with the retired npm scope ("@" + "knext"): tests/npm-scope-getknext.test.ts reds on that token in any tracked file.
 export const MARKER_TOKEN = '@upstream-shim';
+/**
+ * Every tree the marker scan covers, relative to the repo root: the runtime
+ * shims, and the in-process Rust package whose Beta label is a registered
+ * upstream constraint (ADR-0069 D19).
+ */
+export const MARKER_ROOTS = ['packages/kn-next/src/adapters', 'packages/ffi/src'] as const;
+
 /** The only accepted form: a whole line, `// @upstream-shim <kebab-id>`. */
 const MARKER_LINE = /^\s*\/\/ @upstream-shim ([a-z0-9]+(?:-[a-z0-9]+)*)\s*$/;
 const SOURCE = /\.(?:[cm]?[jt]s|tsx|jsx)$/;
