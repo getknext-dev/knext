@@ -37,77 +37,43 @@ import { declareMutations, recordMutation } from './lib/prover-report.mjs';
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const HYGIENE_SPEC = 'packages/ffi/src/__tests__/ffi-render-hygiene.test.ts';
 const LOADER_SPEC = 'packages/ffi/src/__tests__/ffi-loader.test.ts';
-const SUBJECTS = {
-  render: 'packages/ffi/src/render.ts',
-  manifest: 'packages/ffi/src/manifest.ts',
-};
-
-// Shared anchors: the same defect is proved against both specs.
-const BUFFER_LOCALS =
-  '      lines.push(`  const $o${i} = $put(${value});`);\n' +
-  '      lines.push(`  const $n${i} = $last;`);\n' +
-  '      call.push(`$n${i} === 0 ? null : $scratch + $o${i}`, `$n${i}`);';
-const BUFFER_LOCALS_ROUND1 =
-  '      lines.push(`  const o${i} = $put(${value});`);\n' +
-  '      lines.push(`  const n${i} = $last;`);\n' +
-  '      call.push(`n${i} === 0 ? null : $scratch + o${i}`, `n${i}`);';
-const SCRATCH =
-  '      call.push(`$n${i} === 0 ? null : $scratch + $o${i}`, `$n${i}`);\n' +
-  '    });\n' +
-  '    if (buffers > 0) {\n' +
-  "      this.used.add('$put');\n" +
-  "      lines.push('  const $scratch = $base();');";
-const SCRATCH_ROUND1 =
-  '      call.push(`$n${i} === 0 ? null : base + $o${i}`, `$n${i}`);\n' +
-  '    });\n' +
-  '    if (buffers > 0) {\n' +
-  "      this.used.add('$put');\n" +
-  "      lines.push('  const base = $base();');";
-const STATUS =
-  "    lines.push(`  const $st = $lib.${f.symbol}(${call.join(', ')});`);\n" +
-  '    lines.push(`  if ($st !== 0) $fail(${name}, $st);`);';
-const STATUS_ROUND1 =
-  "    lines.push(`  const st = $lib.${f.symbol}(${call.join(', ')});`);\n" +
-  '    lines.push(`  if (st !== 0) $fail(${name}, st);`);';
-const RESULT =
-  "      lines.push('  const $r: unknown = JSON.parse($takeString());');\n" +
-  "      lines.push(`  return ${this.dec(rt, '$r', name, q('result'), 0).code};`);";
-const RESULT_ROUND1 =
-  "      lines.push('  const r: unknown = JSON.parse($takeString());');\n" +
-  "      lines.push(`  return ${this.dec(rt, 'r', name, q('result'), 0).code};`);";
-const PATH_IMPORT = '    "import { dirname as $dirname, join as $join } from \'node:path\';",';
-const PATH_IMPORT_BARE =
-  '    "import { dirname as $dirname, join as $join, join } from \'node:path\';",';
-
 const HYGIENE = [
   // ── generated locals vs Rust argument names ─────────────────────────────
   {
     id: 'H01',
     subject: 'render',
     claim: 'the (ptr, len) offset/length locals lose their $ prefix (o0, n0)',
-    anchor: BUFFER_LOCALS,
-    replacement: BUFFER_LOCALS_ROUND1,
+    anchor:
+      '      lines.push(`  const $o${i} = $put(${value});`);\n      lines.push(`  const $n${i} = $last;`);\n      call.push(`$n${i} === 0 ? null : $scratch + $o${i}`, `$n${i}`);',
+    replacement:
+      '      lines.push(`  const o${i} = $put(${value});`);\n      lines.push(`  const n${i} = $last;`);\n      call.push(`n${i} === 0 ? null : $scratch + o${i}`, `n${i}`);',
   },
   {
     id: 'H02',
     subject: 'render',
     claim: 'the scratch-buffer base pointer is a bare `base` again',
-    anchor: SCRATCH,
-    replacement: SCRATCH_ROUND1,
+    anchor:
+      "      call.push(`$n${i} === 0 ? null : $scratch + $o${i}`, `$n${i}`);\n    });\n    if (buffers > 0) {\n      this.used.add('$put');\n      lines.push('  const $scratch = $base();');",
+    replacement:
+      "      call.push(`$n${i} === 0 ? null : base + $o${i}`, `$n${i}`);\n    });\n    if (buffers > 0) {\n      this.used.add('$put');\n      lines.push('  const base = $base();');",
   },
   {
     id: 'H03',
     subject: 'render',
     claim: 'the status local is a bare `st` again',
-    anchor: STATUS,
-    replacement: STATUS_ROUND1,
+    anchor:
+      "    lines.push(`  const $st = $lib.${f.symbol}(${call.join(', ')});`);\n    lines.push(`  if ($st !== 0) $fail(${name}, $st);`);",
+    replacement:
+      "    lines.push(`  const st = $lib.${f.symbol}(${call.join(', ')});`);\n    lines.push(`  if (st !== 0) $fail(${name}, st);`);",
   },
   {
     id: 'H04',
     subject: 'render',
     claim: 'the parsed-result local is a bare `r` again',
-    anchor: RESULT,
-    replacement: RESULT_ROUND1,
+    anchor:
+      "      lines.push('  const $r: unknown = JSON.parse($takeString());');\n      lines.push(`  return ${this.dec(rt, '$r', name, q('result'), 0).code};`);",
+    replacement:
+      "      lines.push('  const r: unknown = JSON.parse($takeString());');\n      lines.push(`  return ${this.dec(rt, 'r', name, q('result'), 0).code};`);",
   },
   {
     id: 'H05',
@@ -137,8 +103,8 @@ const HYGIENE = [
     id: 'H08',
     subject: 'render',
     claim: 'node:path `join` is imported under its own name again (an export `join` collides)',
-    anchor: PATH_IMPORT,
-    replacement: PATH_IMPORT_BARE,
+    anchor: '    "import { dirname as $dirname, join as $join } from \'node:path\';",',
+    replacement: '    "import { dirname as $dirname, join as $join, join } from \'node:path\';",',
   },
   {
     id: 'H09',
@@ -198,36 +164,44 @@ const LOADER = [
     id: 'L01',
     subject: 'render',
     claim: '`fn scale(r: f64) -> Point` redeclares `r`: the module no longer parses',
-    anchor: RESULT,
-    replacement: RESULT_ROUND1,
+    anchor:
+      "      lines.push('  const $r: unknown = JSON.parse($takeString());');\n      lines.push(`  return ${this.dec(rt, '$r', name, q('result'), 0).code};`);",
+    replacement:
+      "      lines.push('  const r: unknown = JSON.parse($takeString());');\n      lines.push(`  return ${this.dec(rt, 'r', name, q('result'), 0).code};`);",
   },
   {
     id: 'L02',
     subject: 'render',
     claim: 'an argument named `o0`/`n0` redeclares a buffer local',
-    anchor: BUFFER_LOCALS,
-    replacement: BUFFER_LOCALS_ROUND1,
+    anchor:
+      '      lines.push(`  const $o${i} = $put(${value});`);\n      lines.push(`  const $n${i} = $last;`);\n      call.push(`$n${i} === 0 ? null : $scratch + $o${i}`, `$n${i}`);',
+    replacement:
+      '      lines.push(`  const o${i} = $put(${value});`);\n      lines.push(`  const n${i} = $last;`);\n      call.push(`n${i} === 0 ? null : $scratch + o${i}`, `n${i}`);',
   },
   {
     id: 'L03',
     subject: 'render',
     claim: 'an argument named `base` redeclares the scratch base pointer',
-    anchor: SCRATCH,
-    replacement: SCRATCH_ROUND1,
+    anchor:
+      "      call.push(`$n${i} === 0 ? null : $scratch + $o${i}`, `$n${i}`);\n    });\n    if (buffers > 0) {\n      this.used.add('$put');\n      lines.push('  const $scratch = $base();');",
+    replacement:
+      "      call.push(`$n${i} === 0 ? null : base + $o${i}`, `$n${i}`);\n    });\n    if (buffers > 0) {\n      this.used.add('$put');\n      lines.push('  const base = $base();');",
   },
   {
     id: 'L04',
     subject: 'render',
     claim: 'an argument named `st` redeclares the status local',
-    anchor: STATUS,
-    replacement: STATUS_ROUND1,
+    anchor:
+      "    lines.push(`  const $st = $lib.${f.symbol}(${call.join(', ')});`);\n    lines.push(`  if ($st !== 0) $fail(${name}, $st);`);",
+    replacement:
+      "    lines.push(`  const st = $lib.${f.symbol}(${call.join(', ')});`);\n    lines.push(`  if (st !== 0) $fail(${name}, st);`);",
   },
   {
     id: 'L05',
     subject: 'render',
     claim: 'an export named `join` collides with the node:path import',
-    anchor: PATH_IMPORT,
-    replacement: PATH_IMPORT_BARE,
+    anchor: '    "import { dirname as $dirname, join as $join } from \'node:path\';",',
+    replacement: '    "import { dirname as $dirname, join as $join, join } from \'node:path\';",',
   },
   {
     id: 'L06',
@@ -255,8 +229,18 @@ const LOADER = [
   },
 ];
 
-const hygiene = createGuardProver({ repoRoot: REPO_ROOT, spec: HYGIENE_SPEC, subjects: SUBJECTS });
-const loader = createGuardProver({ repoRoot: REPO_ROOT, spec: LOADER_SPEC, subjects: SUBJECTS });
+// The subjects are inline literals, not a shared constant: the lane's
+// subject-existence audit reads them from the createGuardProver call.
+const hygiene = createGuardProver({
+  repoRoot: REPO_ROOT,
+  spec: HYGIENE_SPEC,
+  subjects: { render: 'packages/ffi/src/render.ts', manifest: 'packages/ffi/src/manifest.ts' },
+});
+const loader = createGuardProver({
+  repoRoot: REPO_ROOT,
+  spec: LOADER_SPEC,
+  subjects: { render: 'packages/ffi/src/render.ts', manifest: 'packages/ffi/src/manifest.ts' },
+});
 
 console.log('=== mutation proof: @getknext/ffi generator (#2344, PR #2351 round 2) ===');
 hygiene.preflight(HYGIENE);
