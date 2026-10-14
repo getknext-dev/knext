@@ -834,6 +834,14 @@ describe("the doc metric extractor skips the in-process Rust ABI names", () => {
         ]);
     });
 
+    it("skips the C symbols of any ABI version, not only v1 (the prefix is knext_ffi_v<N>_)", () => {
+        expect(
+            extractDocMetricTokens(
+                "`knext_ffi_v2_x` `knext_ffi_v10_free` `knext_requests_total`",
+            ),
+        ).toEqual(["knext_requests_total"]);
+    });
+
     it("still reads a metric that merely starts with knext_ffi_ (only the versioned ABI prefix is skipped)", () => {
         expect(extractDocMetricTokens("`knext_ffi_calls_total`")).toEqual([
             "knext_ffi_calls_total",

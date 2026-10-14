@@ -204,9 +204,13 @@ pub extern "C" fn knext_ffi_v1_<fn>_<h>(/* lowered args */, out: *mut [u64; 2]) 
 - integers, floats, `bool`: one argument of the same C type (64-bit ones are `bigint` on the
   JavaScript side; v1 targets are 64-bit only, so `usize`/`isize` are 64-bit);
 - `String`, `&str`, `Vec<u8>`, `&[u8]` and every JSON type (D7): two arguments, `(ptr: *const u8,
-  len: usize)`, UTF-8 for strings and JSON. **A null `ptr` is legal when `len == 0`**: `bun:ffi`
-  passes an empty typed array as NULL (and `ptr()` of an empty array throws), so the shim builds an
-  empty slice without calling `slice::from_raw_parts` on NULL, which would be undefined behaviour.
+  len: usize)`, UTF-8 for strings and JSON. **When `len == 0` the shim never reads `ptr`**, NULL
+  or not: it builds an empty slice without calling `slice::from_raw_parts`, which on NULL would be
+  undefined behaviour. (Correction, measured during FFI-2 on Bun 1.4.2, macOS arm64: an empty
+  `Uint8Array` passed directly as a `ptr` argument arrives **non-null**; only JavaScript `null` and
+  `0` arrive as NULL. The spike's "an empty typed array arrives as NULL" was wrong. `ptr()` of an
+  empty array still throws. So the generated wrapper passes `null` for **every** zero-length
+  `(ptr, len)` argument, and the shim's `len == 0` rule does not depend on what Bun sends.)
 
 **Status** (the `i32` return): `0` OK, `1` `Err` from a `Result`, `2` panic, `3` invalid input (bad
 UTF-8 or JSON the shim could not decode). Any other value is a wrapper bug and is reported as one.
@@ -283,12 +287,15 @@ and signature fail at link time, loudly.
 | `()` (return) | `void` | — |
 | `#[knext_ffi::record] struct` | a generated `interface` | JSON (D7) |
 | `#[knext_ffi::record] enum` (unit variants only) | a string-literal union | JSON (D7) |
-| `Option<T>`, `Vec<T>` (`T` ≠ `u8`) | `T \| null`, `T[]` | JSON (D7) |
+| `Option<T>` (`T` not itself an `Option`), `Vec<T>` (`T` ≠ `u8`) | `T \| null`, `T[]` | JSON (D7) |
 | `Result<T, E>` (return only), `E: Display` | `T`; `Err` throws `RustError` | D8 |
 
 Anything else (references other than `&str`/`&[u8]`, lifetimes on returns, generics, `impl Trait`,
-tuples, `char`, `i128`, raw pointers, `async fn`, methods) is a **compile error from the macro**
-naming the unsupported type and pointing at this table. Arguments of a JSON type are accepted by
+tuples, `char`, `i128`, raw pointers, `async fn`, methods, and a nested `Option<Option<T>>` in any
+position: argument, return, record field or inside a `Vec`) is a **compile error from the macro**
+naming the unsupported type and pointing at this table. `Option<Option<T>>` is rejected because
+`None` and `Some(None)` would both cross as JSON `null`, so the outer level would be lost
+(`Option<Vec<Option<T>>>` is fine: the `Vec` separates the two levels). Arguments of a JSON type are accepted by
 value only. An owned `String`/`Vec<u8>` argument costs Rust a copy that `&str`/`&[u8]` avoids, so
 the docs recommend the borrowed forms.
 
@@ -415,6 +422,19 @@ my-zone/
 | `knext ffi check` | the same, but compare and exit 1 on drift (CI) | yes |
 | `knext ffi build --target <triple>… --native-dir <dir>` | D14: cross-build, libc check, stage, and drift-check the committed wrapper against the **shipped** library | yes |
 
+- **Name refusals** (`generate`, `check`, and the `build` drift check, which render the same
+  module). A Rust name becomes a TypeScript identifier verbatim, so the generator refuses, naming
+  the clash and saying "rename it in Rust": a function or argument name that is a JavaScript
+  reserved word or shadows a name the generated module itself uses (the globals it references,
+  such as `process`, `JSON`, `Error`, `console`, `Record`, `TextEncoder`, and the names it declares,
+  `RustError`, `RustPanicError`, `FfiLoadError`); a record or enum name that is any of those or a
+  TypeScript built-in type name (`string`, `number`, `bigint`, …) or a type-operator keyword
+  (`keyof`, `infer`, …); and a record field named `__proto__`. The module's own imports and
+  internals are `$`-prefixed, which a Rust identifier cannot be, so they never collide. The list
+  is `RESERVED`/`RESERVED_TYPES` in `packages/ffi/src/manifest.ts`, and
+  `ffi-render-hygiene.test.ts` scans a rendered module for every name it declares or references so
+  the list cannot fall behind the emitter. There is no rename attribute in v1
+  (`#[knext_ffi::export]` takes no arguments).
 - Help group heading: **"In-process Rust (Beta, Bun only, optional package)"**. Every run prints one
   line naming the Beta status and the upstream `bun:ffi` status.
 
@@ -493,7 +513,8 @@ Rust toolchain, and `knext ffi check` (CI) and `knext ffi build` (image) fail on
       before the last grow, so none can point into a buffer a grow replaced.
 
    `Uint8Array` arguments are copied into the scratch buffer the same way (one rule for every
-   (ptr, len) pair); an empty one is passed directly as NULL (below) and takes no space. A
+   (ptr, len) pair); an empty one (of any kind: string, bytes or JSON) is passed as `null` (below)
+   and takes no space. A
    generator test calls a two-argument export with **two large string arguments** whose combined
    size forces at least one grow between the first and the second encode (the first fits the
    current buffer, the second does not), and asserts Rust received both strings byte-for-byte; a
@@ -505,8 +526,10 @@ Rust toolchain, and `knext ffi check` (CI) and `knext ffi build` (image) fail on
    - read returned `(pointer, length)` pairs as two `u32` halves, not through a `BigInt`;
    - decode returned strings with a length-bounded read (`new CString(ptr, 0, len)` was fastest and
      honours embedded NULs), copy returned bytes into a fresh `Uint8Array`, then free;
-   - pass an empty `Uint8Array` directly as the pointer argument (Bun sends NULL); never call
-     `ptr()` on it;
+   - pass JavaScript `null` as the pointer of every zero-length argument; never call `ptr()` on
+     an empty array (it throws), and never pass the empty array itself: on Bun 1.4.2 it arrives
+     **non-null** (measured during FFI-2; the spike's "arrives as NULL" was wrong). The shim
+     ignores the pointer when `len == 0` either way (D4);
    - **validate integer arguments** (jev: always **1.00**, development only 0.00, never 0.00):
      `bun:ffi` silently truncates a JavaScript number passed to an `i32`, so a non-integer or
      out-of-range `number`, or an out-of-range `bigint`, throws a `TypeError` naming the argument
@@ -548,7 +571,7 @@ Rust toolchain, and `knext ffi check` (CI) and `knext ffi build` (image) fail on
 Then the normal build continues. Steps 1–5 and the D15 preflight must run for **every** command
 that builds an image, not only `knext build`: `knext deploy` and `knext preview` build through the
 same `runProjectBuild` (`project-build.ts`). **The D15 refusals do not go there** (round 3):
-`runProjectBuild` is skipped by `knext deploy --skip-build` and `knext build --skip-next-build`,
+`runProjectBuild` is skipped by `knext deploy --skip-build` and `knext build --skip-next`,
 and it never sees the resolved `selfContained` (that is resolved from config plus
 `--self-contained` inside `compileArtifactForDeploy`). Nor do they go in
 `compileArtifactForDeploy` alone (round 4): `knext deploy --skip-build` never calls it (that leg
@@ -557,7 +580,7 @@ calls `assertCompiledArtifactFresh` instead). Both refusals live in **one shared
 `compileArtifactForDeploy` uses and is called **first** in each of `knext build`, `knext deploy` and
 `knext preview`: before the ffi dispatch, before any `cargo` or Next build, and before the
 skip-build branch (jev 0.95). So it also stops before any build work for `selfContained`, not only
-for Node. Tests cover `knext deploy --skip-build` and `knext build --skip-next-build` with an
+for Node. Tests cover `knext deploy --skip-build` and `knext build --skip-next` with an
 opted-in `runtime: 'node'` app and with `selfContained: true`, each refused before any build or
 image step; a scan test asserts each of the three callers calls the preflight before anything else. The dispatch (steps 1–5) runs in each of the three callers
 before `runProjectBuild` (it is async, `runProjectBuild` is not), and a test scans the three for it.
@@ -800,7 +823,7 @@ FFI-5 (standalone gates) and an FFI-6 draft can run in parallel from day one.
 |---|---|---|
 | **#2343 FFI-1** | `crates/knext-ffi` + `crates/knext-ffi-macros`: D3, D4 (including the transitive `_schema` hash), D5, D6, D7 (64-bit as a decimal string in every JSON position), D8 (Rust half), D9; trybuild, panic and leak tests; `rust-crates.yml` CI | — |
 | **#2344 FFI-2** | `@getknext/ffi`: `knext ffi init/generate/check`, `knext.ffi.json`, scanner, emitter, generated loader (D11–D13, D15 runtime half), including the two-phase multi-argument marshalling (D13 item 6), the per-position 64-bit codec (D7), the `_schema` check at load (D4) and the prerendering `FfiLoadError` (D13 step 5); core `ffi-dispatch.ts` + help; D18 guard; D19 registry entry | — (its real-library test waits for #2343) |
-| **#2345 FFI-3** | `knext ffi build` (D14 steps 1–5) and core: Node and self-contained refusals (D15) in the shared `assertFfiTargetSupported` preflight called first by build/deploy/preview (round 4; tests for `deploy --skip-build`/`build --skip-next-build`), dispatch before the project build in `build`/`deploy`/`preview`, the standalone-path `writeNativeIntegrityManifest` call in `compileArtifactForDeploy` and the inserted `COPY native /app/.next/standalone/native` line in `stageStandaloneBuildContext`, inserted before nesting, plus its conditional `NEST_RULES` entry and a nested-layout test covering opted-in and non-ffi apps (D14), zero-diff test (D17) | #2344 (dispatch protocol, `renderModule`); #2343 for a real library in tests. Core-side work starts at once against a fake loader |
+| **#2345 FFI-3** | `knext ffi build` (D14 steps 1–5) and core: Node and self-contained refusals (D15) in the shared `assertFfiTargetSupported` preflight called first by build/deploy/preview (round 4; tests for `deploy --skip-build`/`build --skip-next`), dispatch before the project build in `build`/`deploy`/`preview`, the standalone-path `writeNativeIntegrityManifest` call in `compileArtifactForDeploy` and the inserted `COPY native /app/.next/standalone/native` line in `stageStandaloneBuildContext`, inserted before nesting, plus its conditional `NEST_RULES` entry and a nested-layout test covering opted-in and non-ffi apps (D14), zero-diff test (D17) | #2344 (dispatch protocol, `renderModule`); #2343 for a real library in tests. Core-side work starts at once against a fake loader |
 | **#2346 FFI-4** | musl load matrix on Alpine x64/arm64 with a read-only root; kind e2e of a Server Action calling Rust on a Bun zone; Node refusal asserted (D20); the same fixture passes the compat-smoke capability checks, red-on-fail (D17) | #2343, #2344, #2345 merged; fixture and workflow skeleton can be written in parallel |
 | **#2347 FFI-5** | supply chain: `cargo deny`, `cargo auditable` (prove it composes with zigbuild), CycloneDX SBOM, `deny.toml` template, and the build-tool pins (zig version + sha256, `cargo install --locked --version` for the four cargo tools) (D16) | #2345 for the one call site only |
 | **#2348 FFI-6** | user docs page (Beta), including the dynamic-contexts-only rule and the two ways to make a route dynamic (D13 step 5), and the `knext ffi` CLI reference | #2344, #2345 for the final surface; a draft can start now |

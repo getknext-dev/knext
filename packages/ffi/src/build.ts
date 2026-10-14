@@ -39,7 +39,13 @@ import { generateFiles } from './generate';
 import { ManifestError } from './manifest';
 import { diffOutput } from './output';
 import { libNameOf } from './render';
-import { prepareSupplyChain, SBOM_FILE, type SupplyChain, type ZigDeps } from './supply-chain';
+import {
+  cargoInstallCommand,
+  prepareSupplyChain,
+  SBOM_FILE,
+  type SupplyChain,
+  type ZigDeps,
+} from './supply-chain';
 
 /** The image targets (D14 build matrix): musl x64 and arm64. */
 export const SUPPORTED_TARGETS = [
@@ -90,6 +96,20 @@ const spawnRunner: Runner = (cmd, args, opts) => {
 };
 
 const RUSTUP = 'https://rustup.rs';
+
+/**
+ * The install commands the toolchain checks print (the cargo tools' from
+ * {@link cargoInstallCommand}, the pinned versions in supply-chain.ts).
+ * Exported so the docs page quotes the same strings
+ * (apps/docs/rust-in-process-doc.test.ts).
+ */
+export const INSTALL_HINTS = {
+  zigbuild: cargoInstallCommand('zigbuild'),
+  deny: cargoInstallCommand('deny'),
+  auditable: cargoInstallCommand('auditable'),
+  cyclonedx: cargoInstallCommand('cyclonedx'),
+  rustupTarget: 'rustup target add',
+} as const;
 const notStarted = (r: RunResult) => r.error !== undefined;
 const firstLine = (s: string) => s.split('\n')[0]?.trim() ?? '';
 
@@ -119,7 +139,7 @@ function checkToolchain(
   const missing = targets.filter((t) => !have.has(t));
   if (missing.length > 0) {
     throw new FfiUsageError(
-      `the Rust target ${missing.join(', ')} is not installed for this crate's toolchain. Install it with: rustup target add ${missing.join(' ')}`,
+      `the Rust target ${missing.join(', ')} is not installed for this crate's toolchain. Install it with: ${INSTALL_HINTS.rustupTarget} ${missing.join(' ')}`,
     );
   }
   const rustc = run('rustc', ['-V'], { cwd: crateDir });

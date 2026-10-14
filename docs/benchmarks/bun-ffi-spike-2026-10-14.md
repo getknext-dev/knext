@@ -45,8 +45,10 @@ Two generator rules the spike found **[measured]**:
 
 `bun:ffi` facts **[measured]**: `process.getBuiltinModule('bun:ffi')` works on 1.4.2;
 `FFIType.usize` exists; `ptr(new Uint8Array(0))` throws ("A pointer to empty memory doesn't work"),
-but an empty typed array passed directly as a `ptr` argument arrives as NULL, so Rust must never
-call `slice::from_raw_parts(NULL, 0)`; `new CString(ptr, 0, len)` honours `len` across embedded
+and an empty typed array passed directly as a `ptr` argument was read here as arriving as NULL.
+**Corrected later (FFI-2, Bun 1.4.2, macOS arm64): it arrives non-null**; only JavaScript `null`
+and `0` arrive as NULL. So the generated wrapper passes `null` for every zero-length argument, and
+Rust must never call `slice::from_raw_parts` on the pointer of a zero-length argument, NULL or not; `new CString(ptr, 0, len)` honours `len` across embedded
 NULs; a JS number passed to an `i32` argument is **silently truncated** (no range check).
 
 ## A. Results
