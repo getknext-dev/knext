@@ -19,6 +19,10 @@
 # dependencies (@getknext/lib, @getknext/core, the unused @getknext/ui) are
 # removed from package.json; the caller installs the packed tarballs instead.
 #
+# FFI_E2E_OVERLAY=none stages the same copy WITHOUT the opt-in (no overlay,
+# no crate): the baseline the workflow smokes only when the opted-in build's
+# smoke fails, to say whether the failure is the opt-in's or the cell's.
+#
 # FFI_E2E_MUTATION=compat-check (workflow_dispatch mutation proof only) also
 # deletes the compat-smoke fixture route src/app/knext-smoke/stream, which
 # capability checks (i) and (j) assert, so the smoke step must go red.
@@ -33,7 +37,13 @@ fi
 mkdir -p "${dest}"
 
 git -C "${repo}" archive --format=tar HEAD:apps/file-manager | tar -x -C "${dest}"
-git -C "${repo}" archive --format=tar HEAD:packages/ffi/fixtures/ffi-zone | tar -x -C "${dest}"
+overlay="${FFI_E2E_OVERLAY:-ffi-zone}"
+if [ "${overlay}" = ffi-zone ]; then
+  git -C "${repo}" archive --format=tar HEAD:packages/ffi/fixtures/ffi-zone | tar -x -C "${dest}"
+elif [ "${overlay}" != none ]; then
+  echo "stage-ffi-zone: unknown FFI_E2E_OVERLAY '${overlay}'" >&2
+  exit 1
+fi
 
 cd "${dest}"
 # Test and tooling scaffolding (see the header).
@@ -44,18 +54,20 @@ for p in __fixtures__ e2e-support platform-e2e hack deploy docs scripts \
 done
 
 # The crate's path dependency -> this checkout's crates/knext-ffi.
-rel='path = "../../../../../crates/knext-ffi"'
-if [ "$(grep -cF "${rel}" rust/Cargo.toml)" != 1 ]; then
-  echo "stage-ffi-zone: expected exactly one '${rel}' in rust/Cargo.toml" >&2
-  exit 1
+if [ "${overlay}" = ffi-zone ]; then
+  rel='path = "../../../../../crates/knext-ffi"'
+  if [ "$(grep -cF "${rel}" rust/Cargo.toml)" != 1 ]; then
+    echo "stage-ffi-zone: expected exactly one '${rel}' in rust/Cargo.toml" >&2
+    exit 1
+  fi
+  abs="path = \"${repo}/crates/knext-ffi\""
+  node -e '
+    const fs = require("node:fs");
+    const [file, from, to] = process.argv.slice(1);
+    fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace(from, to));
+  ' rust/Cargo.toml "${rel}" "${abs}"
+  grep -qF "${abs}" rust/Cargo.toml
 fi
-abs="path = \"${repo}/crates/knext-ffi\""
-node -e '
-  const fs = require("node:fs");
-  const [file, from, to] = process.argv.slice(1);
-  fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace(from, to));
-' rust/Cargo.toml "${rel}" "${abs}"
-grep -qF "${abs}" rust/Cargo.toml
 
 # package.json: no workspace protocol outside the monorepo; `next build` is the
 # default builder's build script (the reference app builds with vinext).
@@ -90,7 +102,11 @@ case "${FFI_E2E_MUTATION:-none}" in
     ;;
 esac
 
-test -f knext.ffi.json
-test -f src/generated/ffi/index.ts
-test -f src/app/rust-ffi/actions.ts
-echo "stage-ffi-zone: staged apps/file-manager + the ffi-zone overlay at ${dest}"
+if [ "${overlay}" = ffi-zone ]; then
+  test -f knext.ffi.json
+  test -f src/generated/ffi/index.ts
+  test -f src/app/rust-ffi/actions.ts
+else
+  test ! -e knext.ffi.json
+fi
+echo "stage-ffi-zone: staged apps/file-manager (overlay: ${overlay}) at ${dest}"

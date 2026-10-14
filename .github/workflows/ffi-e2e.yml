@@ -319,18 +319,6 @@ jobs:
     name: kind e2e — Server Action calling Rust on a Bun zone (turbopack x bun) + compat-smoke
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    # compat-smoke check (k) asserts ISR against a REAL Redis (as ci.yml's
-    # compat-smoke job provides it). Digest-pinned.
-    services:
-      redis:
-        image: mirror.gcr.io/library/redis:7-alpine@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 10
     env:
       CLUSTER: ffi-e2e
       APP_NS: ffi-e2e
@@ -341,6 +329,21 @@ jobs:
 
       - name: Route Docker Hub pulls through mirror.gcr.io (anonymous rate limit)
         uses: ./.github/actions/docker-hub-mirror
+
+      # compat-smoke check (k) asserts ISR against a REAL Redis, as ci.yml's
+      # compat-smoke job provides it. Started here rather than as a job
+      # service: the mirror step above restarts the docker daemon, which
+      # stopped the service container (measured: ECONNREFUSED in check (k)).
+      - name: Start Redis for compat-smoke check (k)
+        run: |
+          set -euo pipefail
+          docker run -d --name ffi-redis -p 127.0.0.1:6379:6379 \
+            mirror.gcr.io/library/redis:7-alpine@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2
+          for _ in $(seq 1 30); do
+            if docker exec ffi-redis redis-cli ping 2>/dev/null | grep -q PONG; then exit 0; fi
+            sleep 1
+          done
+          echo "::error::redis did not answer PING"; exit 1
 
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -499,21 +502,45 @@ jobs:
       # tree is copied first so the build's freshness stamp is untouched; the
       # copy is laid out as the image lays it out.
       - name: compat-smoke on the opted-in build (bun lane, compiled standalone executable)
+        id: smoke
         env:
-          RUNTIME: bun
-          SMOKE_EXEC_TRANSPORT: node-http
           REDIS_URL: redis://127.0.0.1:6379
+        run: packages/ffi/scripts/run-compat-smoke.sh "$GITHUB_WORKSPACE" "$APP_DIR" "${RUNNER_TEMP}/ffi-zone-smoke"
+
+      # Attribution, never a gate (the step above already failed the job): the
+      # SAME file-manager copy WITHOUT the opt-in, built and smoked the same
+      # way. A check that fails here too is the cell's, not in-process Rust's.
+      - name: 'Attribution: compat-smoke on the same copy WITHOUT the opt-in (only when the gate failed)'
+        if: failure() && steps.smoke.outcome == 'failure'
+        env:
+          REDIS_URL: redis://127.0.0.1:6379
+          FFI_E2E_OVERLAY: none
+          FFI_E2E_MUTATION: none
         run: |
-          set -euo pipefail
-          SMOKE_APP="${RUNNER_TEMP}/ffi-zone-smoke"
-          mkdir -p "${SMOKE_APP}/.next"
-          cp -R "${APP_DIR}/.next/standalone" "${SMOKE_APP}/.next/standalone"
-          cp -R "${APP_DIR}/.next/static" "${SMOKE_APP}/.next/standalone/.next/static"
-          cp -R "${APP_DIR}/public" "${SMOKE_APP}/.next/standalone/public"
-          bun packages/ffi/scripts/compile-smoke-twin.ts "$SMOKE_APP" "${SMOKE_APP}/.next/standalone/knext-smoke-exec"
-          SERVER_CMD="${SMOKE_APP}/.next/standalone/knext-smoke-exec" \
-          SERVER_PATH="${SMOKE_APP}/.next/standalone/knext-smoke-exec" \
-            node apps/file-manager/scripts/compat-smoke.mjs
+          set +e -uo pipefail  # a report: the gate above is what fails the job
+          BASE="${RUNNER_TEMP}/baseline-zone"
+          packages/ffi/scripts/stage-ffi-zone.sh "$GITHUB_WORKSPACE" "$BASE" || exit 0
+          cp "${APP_DIR}/knext.config.ts" "${BASE}/knext.config.ts"
+          (
+            cd "$BASE" && bun install >/dev/null && \
+            npm install --no-save --no-audit --no-fund \
+              "$(find "${TARBALLS_DIR}" -maxdepth 1 -name 'getknext-lib-*.tgz' | tail -n1)" \
+              "$(find "${TARBALLS_DIR}" -maxdepth 1 -name 'getknext-db-*.tgz' | tail -n1)" \
+              "$(find "${TARBALLS_DIR}" -maxdepth 1 -name 'getknext-core-*.tgz' | tail -n1)" >/dev/null && \
+            node "$KNEXT" build > "${RUNNER_TEMP}/baseline-build.log" 2>&1
+          ) || { echo "::warning::baseline build failed"; tail -n 40 "${RUNNER_TEMP}/baseline-build.log"; exit 0; }
+          packages/ffi/scripts/run-compat-smoke.sh "$GITHUB_WORKSPACE" "$BASE" "${RUNNER_TEMP}/baseline-smoke" \
+            > "${RUNNER_TEMP}/baseline-smoke.log" 2>&1
+          code=$?
+          grep -E '^(✓ PASS|✗ FAIL|PASS=)' "${RUNNER_TEMP}/baseline-smoke.log"
+          echo "::warning::baseline (no opt-in) compat-smoke exit ${code} — compare its FAIL lines with the gate's"
+          {
+            echo "### compat-smoke attribution: the same copy WITHOUT the opt-in (exit ${code})"
+            echo '```'
+            grep -E '^(✓ PASS|✗ FAIL|PASS=)' "${RUNNER_TEMP}/baseline-smoke.log"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
 
       - name: Create kind cluster (registry certs.d config_path)
         run: |
