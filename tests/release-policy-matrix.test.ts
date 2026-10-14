@@ -648,6 +648,12 @@ describe('next peer policy is documented and matches the manifest', () => {
       expect(block).toContain(`\`${range}\``);
       for (const m of minors) expect(block).toContain(`\`${m}\``);
       expect(block).toMatch(/knext doctor/);
+      // Measured (npm 11, an optional peer with an upper bound, a root dep above it):
+      // npm refuses with ERESOLVE, pnpm installs and warns, bun installs silently.
+      // A block that calls the bound "a warning" for everyone misleads npm users.
+      expect(block).toContain('ERESOLVE');
+      expect(block).toMatch(/pnpm[^.]*warn/i);
+      expect(block).not.toMatch(/nothing is installed or run differently/i);
     });
   }
 });
