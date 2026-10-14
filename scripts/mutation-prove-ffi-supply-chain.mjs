@@ -112,9 +112,9 @@ const UNIT = [
     claim:
       'a zig already extracted into the cache is run without re-extracting the verified archive',
     anchor:
-      '  const bin = extractZig(run, cwd, bytes, asset.file, stem, pin.version, deps.scratchRoot);',
+      '  const bin = extractZig(run, cwd, bytes, asset.file, stem, pin.version, deps.tmpRoot);',
     replacement:
-      '  const bin = existsSync(join(dir, stem, "zig")) ? join(dir, stem, "zig") : extractZig(run, cwd, bytes, asset.file, stem, pin.version, deps.scratchRoot);',
+      '  const bin = existsSync(join(dir, stem, "zig")) ? join(dir, stem, "zig") : extractZig(run, cwd, bytes, asset.file, stem, pin.version, deps.tmpRoot);',
   },
   {
     id: 'Z07',
@@ -149,9 +149,9 @@ const UNIT = [
     id: 'Z11',
     subject: 'supply',
     claim: 'concurrent builds extract into one shared zig directory',
-    anchor: "    scratch = mkdtempSync(join(scratchRoot, 'knext-zig-'));",
+    anchor: "    scratch = mkdtempSync(join(tmpRoot, 'knext-zig-'));",
     replacement:
-      "    scratch = join(scratchRoot, 'knext-zig-shared');\n    mkdirSync(scratch, { recursive: true });",
+      "    scratch = join(tmpRoot, 'knext-zig-shared');\n    mkdirSync(scratch, { recursive: true });",
   },
   {
     id: 'Z12',

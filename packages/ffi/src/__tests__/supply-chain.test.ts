@@ -234,17 +234,17 @@ describe('zig (D16): the pinned version, verified', () => {
         };
       };
     const cacheDir = emptyDir('zig-cache');
-    const scratchRoot = emptyDir('zig-scratch');
+    const tmpRoot = emptyDir('zig-scratch');
     /** The deps every resolve in this rig shares. */
     const deps = (extra: Partial<ZigDeps> = {}): ZigDeps => ({
       host,
       pin: testPin,
       cacheDir,
-      scratchRoot,
+      tmpRoot,
       fetch: fetchWith(archive),
       ...extra,
     });
-    return { tc, run, calls, fetched, fetchWith, cacheDir, scratchRoot, tarInputs, deps };
+    return { tc, run, calls, fetched, fetchWith, cacheDir, tmpRoot, tarInputs, deps };
   }
 
   it('maps the three pinned build hosts', () => {
@@ -298,7 +298,7 @@ describe('zig (D16): the pinned version, verified', () => {
     expect(z.sha256).toBe(sha(archive));
     // Extracted into a fresh private directory, never into the shared cache.
     expect(z.scratch).not.toBeNull();
-    expect(dirname(z.scratch as string)).toBe(r.scratchRoot);
+    expect(dirname(z.scratch as string)).toBe(r.tmpRoot);
     expect(z.bin).toBe(join(z.scratch as string, stem, 'zig'));
     expect(mode(z.scratch as string)).toBe(0o700);
     expect(readFileSync(z.bin, 'utf8')).toBe(GENUINE_BIN);
@@ -323,7 +323,7 @@ describe('zig (D16): the pinned version, verified', () => {
     expect(again.sha256).toBe(sha(archive));
     releaseZig(z);
     releaseZig(again);
-    expect(readdirSync(r.scratchRoot)).toEqual([]);
+    expect(readdirSync(r.tmpRoot)).toEqual([]);
   });
 
   it('never runs a cached extracted zig: a tampered binary or lib/ file is not used', async () => {
@@ -412,7 +412,7 @@ describe('zig (D16): the pinned version, verified', () => {
       r.run,
       r.tc.cargoHome,
       r.tc.env,
-      r.deps({ scratchRoot: join(blocker, 'tmp') }),
+      r.deps({ tmpRoot: join(blocker, 'tmp') }),
     ).catch((e) => e);
     expect(scratch).toBeInstanceOf(FfiUsageError);
     expect(String(scratch)).toContain('could not extract zig 0.17.0');
@@ -424,7 +424,7 @@ describe('zig (D16): the pinned version, verified', () => {
     const err = await resolveZig(r.run, r.tc.cargoHome, r.tc.env, r.deps()).catch((e) => e);
     expect(err).toBeInstanceOf(FfiUsageError);
     expect(String(err)).toContain('tar must support xz (-J)');
-    expect(readdirSync(r.scratchRoot)).toEqual([]);
+    expect(readdirSync(r.tmpRoot)).toEqual([]);
   });
 
   it('refuses an archive whose sha256 differs from the pin, and installs nothing', async () => {
@@ -440,7 +440,7 @@ describe('zig (D16): the pinned version, verified', () => {
     expect(String(err)).toContain(`got      ${sha(Buffer.from('tampered'))}`);
     expect(existsSync(join(r.cacheDir, ARCHIVE_FILE))).toBe(false);
     expect(r.calls).toEqual([]);
-    expect(readdirSync(r.scratchRoot)).toEqual([]);
+    expect(readdirSync(r.tmpRoot)).toEqual([]);
   });
 
   it('never trusts a cached archive that no longer matches: it is fetched again', async () => {
@@ -457,7 +457,7 @@ describe('zig (D16): the pinned version, verified', () => {
     const r = downloadRig('0.16.0');
     const err = await resolveZig(r.run, r.tc.cargoHome, r.tc.env, r.deps()).catch((e) => e);
     expect(String(err)).toContain('reports 0.16.0, not the pinned 0.17.0');
-    expect(readdirSync(r.scratchRoot)).toEqual([]);
+    expect(readdirSync(r.tmpRoot)).toEqual([]);
   });
 
   it('refuses an HTTP failure, naming the PATH alternative, and a host with no pinned archive', async () => {

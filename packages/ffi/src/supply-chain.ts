@@ -296,7 +296,7 @@ export interface ZigDeps {
   readonly cacheDir?: string;
   readonly pin?: ZigPin;
   /** Where each build's private zig directory is created. Default: the OS temp dir. */
-  readonly scratchRoot?: string;
+  readonly tmpRoot?: string;
   /** Download timeout. Default: {@link ZIG_DOWNLOAD_TIMEOUT_MS}. */
   readonly timeoutMs?: number;
 }
@@ -390,7 +390,7 @@ export async function resolveZig(
     cacheArchive(dir, archive, asset.file, bytes, pin.version);
   }
 
-  const bin = extractZig(run, cwd, bytes, asset.file, stem, pin.version, deps.scratchRoot);
+  const bin = extractZig(run, cwd, bytes, asset.file, stem, pin.version, deps.tmpRoot);
   const scratch = dirname(dirname(bin));
   const got = zigVersionAt(run, bin, cwd);
   if (got !== pin.version) {
@@ -525,15 +525,15 @@ function extractZig(
   file: string,
   stem: string,
   version: string,
-  scratchRoot: string = tmpdir(),
+  tmpRoot: string = tmpdir(),
 ): string {
   const room = 'Point TMPDIR at a writable directory with room for zig (about 300 MB).';
   let scratch: string;
   try {
-    scratch = mkdtempSync(join(scratchRoot, 'knext-zig-'));
+    scratch = mkdtempSync(join(tmpRoot, 'knext-zig-'));
   } catch (err) {
     throw new FfiUsageError(
-      `could not extract zig ${version}: no private directory under ${scratchRoot} (${err instanceof Error ? err.message : String(err)}). ${room}`,
+      `could not extract zig ${version}: no private directory under ${tmpRoot} (${err instanceof Error ? err.message : String(err)}). ${room}`,
     );
   }
   try {

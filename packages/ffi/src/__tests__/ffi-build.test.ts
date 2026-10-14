@@ -509,8 +509,8 @@ describe('knext ffi build: the build-tool pins (D16)', () => {
 
 describe('knext ffi build: the downloaded zig is private to one build (D16)', () => {
   const zigArchive = Buffer.from('a pretend zig archive');
-  const zigDeps = (scratchRoot: string): Partial<ZigDeps> => ({
-    scratchRoot,
+  const zigDeps = (tmpRoot: string): Partial<ZigDeps> => ({
+    tmpRoot,
     pin: {
       version: '0.17.0',
       baseUrl: 'https://ziglang.org/download/0.17.0',
@@ -526,47 +526,47 @@ describe('knext ffi build: the downloaded zig is private to one build (D16)', ()
   });
 
   it('links with the zig extracted for this build, records the archive it came from, and removes it after', async () => {
-    const scratchRoot = emptyDir('build-zig-scratch');
-    const a = app({ toolchain: { zig: null }, zigFetch, zigDeps: zigDeps(scratchRoot) });
+    const tmpRoot = emptyDir('build-zig-scratch');
+    const a = app({ toolchain: { zig: null }, zigFetch, zigDeps: zigDeps(tmpRoot) });
     const r = await a.build(ARGV);
     expect(r.code, r.err).toBe(0);
     const zigUsed = cargoBuilds(a.calls)[0]?.zig as string;
-    expect(zigUsed.startsWith(scratchRoot)).toBe(true);
+    expect(zigUsed.startsWith(tmpRoot)).toBe(true);
     const prov = JSON.parse(readFileSync(join(a.native, 'ffi', X64, 'provenance.json'), 'utf8'));
     expect(prov.tools.zig).toEqual({
       version: '0.17.0',
       source: 'ziglang.org',
       sha256: sha(zigArchive),
     });
-    expect(readdirSync(scratchRoot)).toEqual([]);
+    expect(readdirSync(tmpRoot)).toEqual([]);
   });
 
   it('removes it when a later gate fails too', async () => {
-    const scratchRoot = emptyDir('build-zig-scratch');
+    const tmpRoot = emptyDir('build-zig-scratch');
     const a = app({
       toolchain: { zig: null },
       zigFetch,
-      zigDeps: zigDeps(scratchRoot),
+      zigDeps: zigDeps(tmpRoot),
       policyStatus: 1,
     });
     const r = await a.build(ARGV);
     expect(r.code).toBe(1);
     expect(a.calls.some((c) => c.cmd === 'tar')).toBe(true);
-    expect(readdirSync(scratchRoot)).toEqual([]);
+    expect(readdirSync(tmpRoot)).toEqual([]);
   });
 
   it('removes it when the cross-build fails', async () => {
-    const scratchRoot = emptyDir('build-zig-scratch');
+    const tmpRoot = emptyDir('build-zig-scratch');
     const a = app({
       toolchain: { zig: null },
       zigFetch,
-      zigDeps: zigDeps(scratchRoot),
+      zigDeps: zigDeps(tmpRoot),
       buildFails: true,
     });
     const r = await a.build(ARGV);
     expect(r.code).toBe(1);
     expect(cargoBuilds(a.calls)).toHaveLength(1);
-    expect(readdirSync(scratchRoot)).toEqual([]);
+    expect(readdirSync(tmpRoot)).toEqual([]);
   });
 });
 
