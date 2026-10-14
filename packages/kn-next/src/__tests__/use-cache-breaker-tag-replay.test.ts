@@ -553,6 +553,17 @@ describe("'use cache' tag replay races (scripted core)", () => {
         expect(s.hashes.has("e:x")).toBe(true);
     });
 
+    it("the first request that finds the breaker closed starts the replay, ahead of the probe", async () => {
+        // A probe a minute away: only the request can be what starts it.
+        const s = scriptedCore({ retryMs: 60_000 });
+        const h = createUseCacheHandler({ kind: "default", core: s.core });
+        s.state.open = true;
+        await h.updateTags(["x"]);
+        s.state.open = false;
+        await h.get("unrelated", []);
+        await waitFor(() => s.hashes.has("e:x"), 2000);
+    });
+
     it("the probe is armed for the moment the breaker closes, and unref'd", async () => {
         const retryMs = 45_678;
         const s = scriptedCore({ retryMs });
