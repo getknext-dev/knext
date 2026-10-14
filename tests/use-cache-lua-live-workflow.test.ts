@@ -78,6 +78,13 @@ describe(`ci.yml — ${JOB_ID} (the replay Lua on a real Redis)`, () => {
     expect(audit.problems, audit.problems.join('\n')).toEqual([]);
   });
 
+  it('runs the suite with --no-skip, so a skipped Lua case fails the job', () => {
+    const job = jobsOf(CI_YML)[JOB_ID] as Obj;
+    const [step] = stepsRunning(job, /use-cache-replay-script-live-redis\.test\.ts/);
+    expect(step, 'no step runs the live suite').toBeDefined();
+    expect(String((step as Obj).run)).toMatch(/scripts\/bun-test\.mjs\s+--no-skip\b/);
+  });
+
   it('runs a digest-pinned, health-gated Redis service', () => {
     expectPinnedHealthyRedis(redisService(jobsOf(CI_YML)[JOB_ID] as Obj, JOB_ID), JOB_ID);
   });

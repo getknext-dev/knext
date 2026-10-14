@@ -1332,9 +1332,11 @@ jobs:
         run: bun install --frozen-lockfile
 
       # The live script suite + the guard that keeps this job a blocking gate.
+      # --no-skip: a skipped test FAILS here, so a green run is proof the Lua
+      # cases ran on the service Redis rather than skipped past it.
       - name: Run the live replay-script suite
         run: >-
-          node scripts/bun-test.mjs
+          node scripts/bun-test.mjs --no-skip
           packages/kn-next/src/__tests__/use-cache-replay-script-live-redis.test.ts
           tests/use-cache-lua-live-workflow.test.ts
 
