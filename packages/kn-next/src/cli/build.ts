@@ -47,6 +47,7 @@ import {
 import { resolveCompileToolchain } from "./bun-toolchain";
 import { type CompileToolchain, compileIncludeGlobs } from "./compile-config";
 import { isEntrypoint } from "./exec";
+import { assertFfiTargetSupported, runFfiBuildStep } from "./ffi-preflight";
 import { runPostCompileSmoke } from "./postcompile-smoke";
 import { runProjectBuild } from "./project-build";
 import {
@@ -317,6 +318,12 @@ export async function build(options: BuildOptions = {}) {
     // 1. Load config (validates at load time)
     log.info("Loading configuration...");
     const config = await loadConfig({ phase: "build" });
+    // In-process Rust (ADR-0069 D15): refuse Node / self-contained for an app
+    // with knext.ffi.json before any build work and before the --skip-next
+    // branch. Inert without the file.
+    assertFfiTargetSupported(config, process.cwd(), {
+        selfContained: options.selfContained,
+    });
     log.info(
         {
             app: config.name,
@@ -352,6 +359,10 @@ export async function build(options: BuildOptions = {}) {
     // 2. Run `next build` via the project's build script.
     //    The app's next.config.ts must set output:'standalone'.
     if (!options.skipNextBuild) {
+        // ADR-0069 D14: cross-build and stage the zone's Rust library into
+        // native/ffi/ (and drift-check its committed wrapper) before the
+        // project build. A no-op without knext.ffi.json.
+        await runFfiBuildStep(process.cwd(), SHIP_ARCH);
         log.info(
             { builder: config.build ?? DEFAULT_BUILDER_ID },
             "Running the project build...",

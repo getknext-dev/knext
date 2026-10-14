@@ -51,6 +51,7 @@ import {
     KNEXT_BUILD_ID_ENV,
     NEXT_DEPLOYMENT_ID_ENV,
 } from "./build-id-env";
+import { DEPLOY_SHIP_ARCH } from "./build-target";
 import { resolveCompileToolchain } from "./bun-toolchain";
 import {
     renderNextAppCR,
@@ -70,6 +71,12 @@ import {
     resolveInvocation,
 } from "./dispatch";
 import { isEntrypoint, runCapture, runInherit } from "./exec";
+import {
+    assertFfiLibraryStaged,
+    assertFfiTargetSupported,
+    FFI_STAGED_REMEDY,
+    runFfiBuildStep,
+} from "./ffi-preflight";
 import { runAssetGC } from "./gc";
 import { CLI_HELP } from "./help";
 import { assertNoPlaceholders } from "./placeholder-preflight";
@@ -518,6 +525,11 @@ export async function deploy() {
     // async, so the banner lands last) — a confusing tail on an otherwise clean
     // message (UX ledger 1b).
     const baseConfig = await loadConfig();
+    // In-process Rust (ADR-0069 D15): refuse Node / self-contained for an app
+    // with knext.ffi.json before anything else — in particular before the
+    // --skip-build leg, which never reaches the compile step. Inert without
+    // the file. (No deploy flag changes the runtime or selfContained.)
+    assertFfiTargetSupported(baseConfig, process.cwd());
 
     log.info({ dryRun: options.dryRun }, "knext deploy");
 
@@ -714,6 +726,11 @@ export async function deploy() {
         // requireEsm gates the vinext ESM preflight (vinext target only).
         // Reads `resolvedBuild`, not a hardcoded fallback — an absent `build`
         // no longer means vinext (#1183, DEFAULT_BUILDER_ID is "turbopack").
+        //
+        // ADR-0069 D14 first: cross-build and stage the zone's Rust library
+        // into native/ffi/ before the project build. No-op without
+        // knext.ffi.json.
+        await runFfiBuildStep(process.cwd(), DEPLOY_SHIP_ARCH);
         runProjectBuild({
             requireEsm: isVinextBuild,
             builderId: resolvedBuild,
@@ -773,6 +790,21 @@ export async function deploy() {
         // `--skip-build`: nothing above ran, so nothing recompiled the exec
         // either. Fail closed rather than silently shipping whatever happens
         // to be sitting in the checkout — missing or stale, both loud.
+        //
+        // In-process Rust (ADR-0069 D14): `--skip-build` never runs `knext ffi
+        // build`, so an opted-in app's image would ship whatever is staged at
+        // native/ffi/<triple>/ — refuse when that is nothing. Not under
+        // `--image`: no image is built from this tree, and the pre-built one
+        // already carries its library (a clean CI deploy job has no
+        // native/ffi/). The runtime-target refusal above still applies there.
+        // A no-op without knext.ffi.json.
+        if (!options.image) {
+            assertFfiLibraryStaged(
+                process.cwd(),
+                DEPLOY_SHIP_ARCH,
+                FFI_STAGED_REMEDY.skipBuild,
+            );
+        }
         assertCompiledArtifactFresh(config, process.cwd());
     }
 

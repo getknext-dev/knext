@@ -42,6 +42,7 @@ import {
     DEFAULT_RUNTIME_ID,
 } from "../adapters/artifact-contract";
 import { packageRoot } from "./create";
+import { ffiOptedIn } from "./ffi-preflight";
 import { UsageError } from "./shared";
 import {
     resolveStandaloneLayout,
@@ -518,7 +519,11 @@ interface NestRule {
 
 const STANDALONE = "/app/.next/standalone";
 
-const NEST_RULES: readonly NestRule[] = [
+/**
+ * The rules every nested Dockerfile gets. An app with `knext.ffi.json` also
+ * gets {@link FFI_NEST_RULE} (see `nestStandaloneDockerfile`).
+ */
+const BASE_NEST_RULES: readonly NestRule[] = [
     // standalone-bun, standalone-node: the traced tree, then static and public
     // beside the nested server (Next serves both relative to its own directory).
     {
@@ -612,10 +617,64 @@ const NEST_RULES: readonly NestRule[] = [
 ];
 
 /**
+ * In-process Rust (ADR-0069 D14): the line that ships the app's `native/` tree
+ * (`native/ffi/<triple>/lib<name>.so` + `.integrity.json`) beside the
+ * `standalone-bun` executable, where the generated loader looks for it
+ * (`dirname(process.execPath)/native/ffi/…`). Inserted only for an app with
+ * `knext.ffi.json`; the template itself never carries it.
+ */
+export const FFI_NATIVE_COPY = `COPY native ${STANDALONE}/native`;
+
+/** The `standalone-bun` exec COPY the native line goes directly after. */
+const FFI_NATIVE_ANCHOR = `COPY knext-standalone-exec-linux-x64 ${STANDALONE}/knext-standalone-exec`;
+
+/** The nest rule for {@link FFI_NATIVE_COPY}, in the rule list only when opted in. */
+const FFI_NEST_RULE: NestRule = {
+    kind: "line",
+    from: FFI_NATIVE_COPY,
+    to: ({ prefix }) => `COPY ${prefix}native ${STANDALONE}/${prefix}native`,
+    count: 1,
+};
+
+/**
+ * Insert {@link FFI_NATIVE_COPY} directly after the `standalone-bun` stage's
+ * exec COPY. The anchor must occur exactly once as an instruction line, inside
+ * that stage; anything else means the template moved under this edit, and the
+ * staging fails rather than ship an image without its library.
+ */
+export function insertFfiNativeCopy(dockerfile: string): string {
+    const lines = dockerfile.split("\n");
+    const hits: number[] = [];
+    lines.forEach((line, i) => {
+        if (line.trim() === FFI_NATIVE_ANCHOR) hits.push(i);
+    });
+    if (hits.length !== 1) {
+        throw new Error(
+            `cannot add the in-process Rust native/ COPY: expected '${FFI_NATIVE_ANCHOR}' exactly once in the standalone Dockerfile, found ${hits.length}. The template changed under this edit (runtime-image.ts insertFfiNativeCopy).`,
+        );
+    }
+    const at = hits[0] as number;
+    let from: string | undefined;
+    for (let i = at; i >= 0 && from === undefined; i--) {
+        if (/^FROM\s/i.test(lines[i]?.trim() ?? "")) from = lines[i]?.trim();
+    }
+    if (!from || !/\sAS\s+standalone-bun$/i.test(from)) {
+        throw new Error(
+            `cannot add the in-process Rust native/ COPY: '${FFI_NATIVE_ANCHOR}' is not in the standalone-bun stage (found under '${from ?? "no FROM"}'). The template changed under this edit (runtime-image.ts insertFfiNativeCopy).`,
+        );
+    }
+    const indent = /^\s*/.exec(lines[at] as string)?.[0] ?? "";
+    lines.splice(at + 1, 0, `${indent}${FFI_NATIVE_COPY}`);
+    return lines.join("\n");
+}
+
+/**
  * Rewrite the standalone Dockerfile for an app that sits under an explicit
  * monorepo root. `contextPrefix` is the app's path under the build context
  * with a trailing slash (`apps/web/`); `coreSrc` is where the context holds
- * `@getknext/core`.
+ * `@getknext/core`. `ffi` (the app has `knext.ffi.json`, and the native COPY
+ * was inserted) adds the rule that nests that line; without it the rule list,
+ * and so the output, is exactly what it was before in-process Rust.
  *
  * The flat Dockerfile is never passed through here, so it stays byte-identical
  * to the template. Comment lines are left alone (they describe the flat
@@ -624,13 +683,16 @@ const NEST_RULES: readonly NestRule[] = [
  */
 export function nestStandaloneDockerfile(
     dockerfile: string,
-    opts: { contextPrefix: string; coreSrc: string },
+    opts: { contextPrefix: string; coreSrc: string; ffi?: boolean },
 ): string {
     if (/[\s"'\\]/.test(opts.contextPrefix) || /[\s"'\\]/.test(opts.coreSrc)) {
         throw new UsageError(
             `the app's path under the build context (${opts.contextPrefix}) ${UNQUOTABLE_PATH}`,
         );
     }
+    const NEST_RULES: readonly NestRule[] = opts.ffi
+        ? [...BASE_NEST_RULES, FFI_NEST_RULE]
+        : BASE_NEST_RULES;
     const counts = NEST_RULES.map(() => 0);
     const out: string[] = [];
     for (const line of dockerfile.split("\n")) {
@@ -775,6 +837,14 @@ export function stageStandaloneBuildContext(opts: {
     // A deliberate monorepo root: the build context IS the tracing root, and the
     // image places the app where Next put it inside that tree. Anything else is
     // the flat layout, left exactly as the template has it.
+    // In-process Rust (ADR-0069 D14): ship native/ beside the standalone-bun
+    // exec. The condition is the opt-in file, not the presence of native/ffi/,
+    // so a stale tree from an earlier opted-in build is never shipped by an
+    // app that has since opted out. Inserted BEFORE nesting, which then
+    // rewrites it like every other COPY. Without the file nothing changes (D17).
+    const ffi = ffiOptedIn(opts.cwd);
+    if (ffi) dockerfileText = insertFfiNativeCopy(dockerfileText);
+
     const layout = resolveStandaloneLayout(opts.cwd);
     if (layout.nested) {
         if (resolve(opts.buildContext) !== layout.root) {
@@ -785,6 +855,7 @@ export function stageStandaloneBuildContext(opts: {
         dockerfileText = nestStandaloneDockerfile(dockerfileText, {
             contextPrefix: layout.contextPrefix,
             coreSrc: coreSourceInContext(layout),
+            ...(ffi ? { ffi: true } : {}),
         });
     }
 

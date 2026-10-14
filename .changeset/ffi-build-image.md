@@ -1,0 +1,5 @@
+---
+"@getknext/core": minor
+---
+
+In-process Rust (Beta, Bun only): `knext build`, `knext deploy` and `knext preview` now build an app that has a `knext.ffi.json`. Before the project build they run `knext ffi build` from the optional `@getknext/ffi` package, which cross-compiles the app's Rust crate for the Linux musl image, refuses a library that links anything the Alpine image lacks, stages it under `native/ffi/` with a provenance record, and fails if the committed generated wrapper is out of date. On the default standalone Bun image, `native/` now ships beside the executable with a checksum manifest the loader verifies. Two configurations are refused before any build work, including under `--skip-next` and `--skip-build`: `runtime: 'node'` (Rust is called through `bun:ffi`, which exists only in Bun) and the self-contained mode. The vinext build's `native/` clean-up no longer deletes, or refuses to stage beside, an existing `native/ffi/`. An app without `knext.ffi.json` builds exactly as before.

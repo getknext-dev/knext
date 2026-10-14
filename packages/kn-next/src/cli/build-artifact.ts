@@ -52,11 +52,18 @@ import {
     healBunExportTargets,
 } from "../adapters/standalone-bun-exports";
 import type { KnativeNextConfig } from "../config";
+import { DEPLOY_SHIP_ARCH, resolveSelfContained } from "./build-target";
 import {
     type CompileToolchain,
     compileIncludeGlobs,
     wantsPatchedBun,
 } from "./compile-config";
+import {
+    assertFfiLibraryStaged,
+    FFI_STAGED_REMEDY,
+    ffiOptedIn,
+} from "./ffi-preflight";
+import { findLockfile, writeNativeIntegrityManifest } from "./native-integrity";
 import { UsageError } from "./shared";
 import {
     buildStandaloneExecutable,
@@ -132,12 +139,10 @@ export function standaloneStepsApply(artifact: BuildArtifact): boolean {
     return artifact.shape === "next-standalone";
 }
 
-/**
- * The target arch `knext deploy`/`preview` build images for — always
- * `linux/amd64` (`dockerBuildxArgs`'s `--platform`), regardless of the host.
- * Shared with `build.ts`'s own `SHIP_ARCH` so the two names never drift.
- */
-export const DEPLOY_SHIP_ARCH = "linux-x64";
+// `DEPLOY_SHIP_ARCH` and `resolveSelfContained` live in the leaf module
+// `build-target.ts` (so the in-process Rust preflight shares them without
+// importing this one) and are re-exported here unchanged.
+export { DEPLOY_SHIP_ARCH, resolveSelfContained };
 
 /**
  * The vinext build-output subdirectories the freshness stamp hashes —
@@ -148,18 +153,6 @@ export const DEPLOY_SHIP_ARCH = "linux-x64";
  */
 function vinextOutputSourceDirs(cwd: string): readonly string[] {
     return [join(cwd, ".output", "server"), join(cwd, ".output", "public")];
-}
-
-/**
- * Resolve the self-contained mode: an explicit caller value (the
- * `--self-contained` CLI flag) wins over the `selfContained` config key, which
- * defaults to off. Opt-in only — nothing infers it.
- */
-export function resolveSelfContained(
-    config: { selfContained?: boolean },
-    override?: boolean,
-): boolean {
-    return override ?? config.selfContained ?? false;
 }
 
 /**
@@ -333,6 +326,17 @@ export function compileArtifactForDeploy(
             arch,
             ...selfContainedOpt,
         });
+        // In-process Rust (ADR-0069 D14): `knext ffi build` staged
+        // native/ffi/<triple>/ before the project build, and the image ships
+        // native/ beside the exec. The loader refuses a library the manifest
+        // does not list (fail-closed), and nothing else writes one on this
+        // path (only vinext's sharp staging does), so write it here. Only
+        // when opted in: otherwise no native/ tree is created (D17).
+        if (ffiOptedIn(cwd)) {
+            const nativeDir = join(cwd, "native");
+            assertFfiLibraryStaged(cwd, arch, FFI_STAGED_REMEDY.compile);
+            writeNativeIntegrityManifest(nativeDir, findLockfile(cwd));
+        }
         // #1351/#1414: stamp the exec with a hash of the WHOLE standalone
         // tree it was JUST compiled from (not just server.js — see
         // `buildStampPathFor`'s doc comment), so a later `--skip-build`
@@ -360,6 +364,13 @@ export function compileArtifactForDeploy(
             ...(include.length > 0 ? { include } : {}),
             ...(opts.toolchain?.bin ? { compilerBin: opts.toolchain.bin } : {}),
         });
+        // In-process Rust (ADR-0069 D14), the same refusal as the standalone
+        // branch: the vinext image ships native/ whole, and its manifest (the
+        // sharp staging inside the compile) covers native/ffi/** — but only
+        // what is there. An opted-in `--skip-next` build with nothing staged
+        // would ship without its library. Before the stamp, so a refused
+        // build leaves nothing `deploy --skip-build` would accept.
+        assertFfiLibraryStaged(cwd, arch, FFI_STAGED_REMEDY.compile);
         // #1351/#1414 rev-2: same stamp, scoped to `.output/server` +
         // `.output/public` — never the whole `.output` root, which is also
         // where THIS CLI writes its own preflight/CR/buildx-metadata files
@@ -639,6 +650,10 @@ export function assertCompiledArtifactFresh(
     cwd: string,
     arch: string = DEPLOY_SHIP_ARCH,
 ): void {
+    // The in-process Rust staged-library check for `--skip-build` is NOT here:
+    // `deploy --image` also reaches this function, and a pre-built image
+    // already carries its library. deploy.ts calls it on the leg that builds
+    // the image from the local tree.
     const target = compiledExecPathFor(config, cwd, arch);
     if (!target) return;
     if (!existsSync(target.sourcePath)) return;
