@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'bun:test';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -235,6 +235,41 @@ describe('main — the reviewed override for an intentional rc.N+1', () => {
     expect(r.summary).toContain('RUN');
   });
 
+  it('#2342 — a marker that arrived with a MERGED-IN branch does not exempt, and the ignored marker is announced', () => {
+    const marker = { date: '2026-09-25', expires: '2026-10-02', reason: 'reviewed for v2' };
+    const root = buildFixtureRoot();
+    let runDiffCalled = false;
+    const r = run(root, ['packages/kn-next/src/index.ts'], {
+      basePin: pin('v1.0.0-rc.1'),
+      headPin: pin('v1.0.0-rc.1', marker),
+      mergeBasePin: pin('v1.0.0-rc.1'),
+      inheritedPins: [pin('v1.0.0-rc.1', marker)],
+      runDiff: () => {
+        runDiffCalled = true;
+        return 0;
+      },
+    });
+    expect(runDiffCalled).toBe(true);
+    expect(r.out).toMatch(/::warning title=Published-bytes freeze check::MARKER IGNORED/);
+    expect(r.summary).toMatch(/inherited from a branch merged into this PR/);
+    expect(r.summary).toContain('RUN');
+  });
+
+  it('#2342 — the ignored-marker warning precedes the fail-closed tag lookup, so it is never lost', () => {
+    const marker = { date: '2026-09-25', expires: '2026-10-02', reason: 'reviewed for v2' };
+    const root = buildFixtureRoot();
+    const r = run(root, ['packages/kn-next/src/index.ts'], {
+      basePin: pin('v1.0.0-rc.1'),
+      headPin: pin('v1.0.0-rc.1', marker),
+      mergeBasePin: pin('v1.0.0-rc.1'),
+      inheritedPins: [pin('v1.0.0-rc.1', marker)],
+      tagResolves: () => false,
+    });
+    expect(r.code).toBe(1);
+    expect(r.out).toMatch(/MARKER IGNORED[^\n]*merged into this PR/);
+    expect(r.out).toMatch(/does not resolve/);
+  });
+
   it('closing the window together with a published-bytes change still runs the diff (round 2)', () => {
     const root = buildFixtureRoot();
     let runDiffCalled = false;
@@ -319,6 +354,61 @@ describe('main — requires changedFiles/basePin/headPin to be provided explicit
         basePin: pin(null),
       } as unknown as Parameters<typeof main>[0]),
     ).toThrow(/headPin/);
+  });
+});
+
+// #2342: the pins at merged-in parents decide whether a head marker is the
+// PR's own. A missing file would fail OPEN (every merged-in marker reads as
+// introduced), so the CLI requires it, like --merge-base-pin-file.
+describe('CLI — --inherited-pins-file is required and must be a JSON array (#2342)', () => {
+  const SCRIPT = resolve(import.meta.dirname, '..', 'scripts/published-bytes-freeze-check.mjs');
+  const cliDirs: string[] = [];
+  afterEach(() => {
+    for (const dir of cliDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  function runCli(inherited: string | null): { status: number | null; out: string } {
+    const dir = mkdtempSync(join(tmpdir(), 'published-bytes-freeze-cli-'));
+    cliDirs.push(dir);
+    const pinFile = join(dir, 'pin.json');
+    const changedFile = join(dir, 'changed-files.txt');
+    writeFileSync(pinFile, JSON.stringify({ rcTag: null }));
+    writeFileSync(changedFile, 'docs/RELEASING.md\n');
+    const args = [
+      SCRIPT,
+      '--changed-files-file',
+      changedFile,
+      '--base-pin-file',
+      pinFile,
+      '--head-pin-file',
+      pinFile,
+      '--merge-base-pin-file',
+      pinFile,
+    ];
+    if (inherited !== null) {
+      const f = join(dir, 'inherited-pins.json');
+      writeFileSync(f, inherited);
+      args.push('--inherited-pins-file', f);
+    }
+    const { GITHUB_STEP_SUMMARY: _drop, ...env } = process.env;
+    const r = spawnSync(process.execPath, args, { encoding: 'utf8', env, timeout: 20_000 });
+    return { status: r.status, out: `${r.stdout}${r.stderr}` };
+  }
+
+  it('exit 2 when the flag is omitted, in a scenario that would otherwise exit 0', () => {
+    const r = runCli(null);
+    expect(r.status).toBe(2);
+    expect(r.out).toMatch(/--inherited-pins-file is required/);
+  });
+
+  it('exit 2 when the file is not a JSON array', () => {
+    const r = runCli('{"publishedBytesBumpMarker": {}}');
+    expect(r.status).toBe(2);
+    expect(r.out).toMatch(/must be a JSON array/);
+  });
+
+  it('exit 0 with an empty array, isolating the flag as what changed', () => {
+    expect(runCli('[]').status).toBe(0);
   });
 });
 

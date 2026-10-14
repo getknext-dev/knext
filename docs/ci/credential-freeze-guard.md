@@ -173,6 +173,15 @@ of the merge.
   through a merged branch (e.g. a sibling branch cut from this one), it reads
   as inherited. Change its `reason` to re-authorize.
 
+The published-bytes freeze guard applies the same rule to
+`publishedBytesBumpMarker` (#2342), through the shared
+`scripts/lib/merged-in-pins.mjs` (collection + `date`/`reason` match) and its
+CLI `scripts/collect-merged-in-pins.mjs`; see docs/RELEASING.md, "PR-time:
+published bytes stay frozen". This guard still runs its own inline copy of the
+collection in the workflow step above; moving it onto the shared module is
+tracked in #2370, kept out of #2342 so the two guards' frozen files did not
+move together.
+
 **Removing or narrowing a marker needs no marker.** The pin file is itself
 frozen, so before #1635 a PR that only deleted a marker could never pass (it
 needed a valid marker at its own head). A pin-only diff now passes with no

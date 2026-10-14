@@ -126,8 +126,10 @@ const MUTATIONS = [
   {
     label: 'decision: let a valid, PR-introduced override marker fall through to proceed anyway',
     subject: 'lib',
-    anchor: '  if (marker.valid && overrideMarkerIntroducedByPr(mergeBasePin, headPin)) {',
-    replacement: '  if (false) {',
+    // #2342 split the marker test into three branches (merged-in, inherited
+    // from the merge base, honoured); this is the honoured one.
+    anchor: '  } else if (marker.valid) {',
+    replacement: '  } else if (false) {',
   },
   {
     label:
@@ -142,8 +144,11 @@ const MUTATIONS = [
     label:
       'decision: honour ANY structurally-valid marker regardless of who introduced it (the #1635-class bypass)',
     subject: 'lib',
-    anchor: '  if (marker.valid && overrideMarkerIntroducedByPr(mergeBasePin, headPin)) {',
-    replacement: '  if (marker.valid) {',
+    // Removing the merge-base branch sends an inherited marker on to the
+    // honoured branch below it.
+    anchor:
+      '  } else if (marker.valid && !overrideMarkerIntroducedByPr(mergeBasePin, headPin, inheritedPins)) {',
+    replacement: '  } else if (false) {',
   },
   {
     label: 'decision: proceed even when the PR touches no publishable scope',

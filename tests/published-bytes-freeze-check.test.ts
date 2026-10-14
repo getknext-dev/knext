@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import {
   decidePublishedBytesScope,
   OVERRIDE_MARKER_FIELD,
+  overrideMarkerArrivedViaMerge,
   overrideMarkerIntroducedByPr,
   overrideMarkerValidity,
   PIN_FILE,
@@ -356,6 +357,146 @@ describe('decidePublishedBytesScope', () => {
     });
     expect(d.action).toBe('skip');
     expect(d.reason).toMatch(/rcTag is null at this PR's base/);
+  });
+});
+
+/**
+ * #2342 — a `publishedBytesBumpMarker` that arrived through a MERGE is not the
+ * PR's own. The merge base alone misses it: a merge PR (integration/v2 ->
+ * main) has a merge base older than the other branch's marker. The workflow
+ * hands in the pins at every merged-in parent (`inheritedPins`, collected by
+ * the shared `scripts/lib/merged-in-pins.mjs`, the same rule #2325 applies to
+ * `rcBumpMarker`); a head marker matching one by `date` + `reason` exempts
+ * nothing.
+ */
+describe('#2342 — a publishedBytesBumpMarker inherited through a merged-in branch exempts nothing', () => {
+  const TAG = 'v1.0.0-rc.1';
+  const MERGED_IN = { date: '2026-09-25', expires: '2026-10-02', reason: 'reviewed for v2' };
+  const OWN = { date: '2026-09-26', expires: '2026-10-02', reason: 'this merge PR' };
+  const withMarker = (m: unknown) => ({ rcTag: TAG, [OVERRIDE_MARKER_FIELD]: m });
+
+  describe('overrideMarkerArrivedViaMerge', () => {
+    it('true when a merged-in parent carries the same date + reason', () => {
+      expect(overrideMarkerArrivedViaMerge(withMarker(MERGED_IN), [withMarker(MERGED_IN)])).toBe(
+        true,
+      );
+    });
+    it('true when only expires changed against the merged-in marker', () => {
+      expect(
+        overrideMarkerArrivedViaMerge(withMarker({ ...MERGED_IN, expires: '2026-09-30' }), [
+          withMarker(MERGED_IN),
+        ]),
+      ).toBe(true);
+    });
+    it('a match against ANY merged-in parent counts, not only the first', () => {
+      expect(
+        overrideMarkerArrivedViaMerge(withMarker(MERGED_IN), [
+          withMarker(OWN),
+          { rcTag: TAG },
+          withMarker(MERGED_IN),
+        ]),
+      ).toBe(true);
+    });
+    it('false for a new date or a new reason (the PR re-authorized it)', () => {
+      expect(overrideMarkerArrivedViaMerge(withMarker(OWN), [withMarker(MERGED_IN)])).toBe(false);
+      expect(
+        overrideMarkerArrivedViaMerge(
+          withMarker({ ...MERGED_IN, reason: 're-reviewed for main' }),
+          [withMarker(MERGED_IN)],
+        ),
+      ).toBe(false);
+    });
+    it('field-specific: a merged-in rcBumpMarker with the same date + reason does not match', () => {
+      expect(
+        overrideMarkerArrivedViaMerge(withMarker(MERGED_IN), [
+          { rcTag: TAG, rcBumpMarker: MERGED_IN },
+        ]),
+      ).toBe(false);
+    });
+    it('false with no head marker or no merged-in parents', () => {
+      expect(overrideMarkerArrivedViaMerge({ rcTag: TAG }, [withMarker(MERGED_IN)])).toBe(false);
+      expect(overrideMarkerArrivedViaMerge(withMarker(MERGED_IN), [])).toBe(false);
+    });
+  });
+
+  it('overrideMarkerIntroducedByPr: a merged-in marker is not introduced, even with none at the merge base', () => {
+    expect(
+      overrideMarkerIntroducedByPr({ rcTag: TAG }, withMarker(MERGED_IN), [withMarker(MERGED_IN)]),
+    ).toBe(false);
+    expect(
+      overrideMarkerIntroducedByPr({ rcTag: TAG }, withMarker(OWN), [withMarker(MERGED_IN)]),
+    ).toBe(true);
+    // Backwards compatible: no inheritedPins argument = the merge-base rule alone.
+    expect(overrideMarkerIntroducedByPr({ rcTag: TAG }, withMarker(MERGED_IN))).toBe(true);
+  });
+
+  it('ATTACK — merge PR: a marker brought in from the merged branch PROCEEDS, and says why', () => {
+    const d = decidePublishedBytesScope({
+      basePin: { rcTag: TAG },
+      mergeBasePin: { rcTag: TAG },
+      headPin: withMarker(MERGED_IN),
+      inheritedPins: [withMarker(MERGED_IN)],
+      changedFiles: ['packages/kn-next/src/index.ts'],
+      packageDirs,
+      now: NOW,
+    });
+    expect(d.action).toBe('proceed');
+    expect(d.action === 'proceed' && d.markerNote).toMatch(
+      /inherited from a branch merged into this PR/,
+    );
+  });
+
+  it('merge PR that carries its OWN fresh marker on top: SKIP', () => {
+    const d = decidePublishedBytesScope({
+      basePin: { rcTag: TAG },
+      mergeBasePin: { rcTag: TAG },
+      headPin: withMarker(OWN),
+      inheritedPins: [withMarker(MERGED_IN)],
+      changedFiles: ['packages/kn-next/src/index.ts'],
+      packageDirs,
+      now: NOW,
+    });
+    expect(d.action).toBe('skip');
+  });
+
+  it('a marker inherited from the merge base still reports the merge base, not a merge', () => {
+    const d = decidePublishedBytesScope({
+      basePin: withMarker(OWN),
+      mergeBasePin: withMarker(OWN),
+      headPin: withMarker(OWN),
+      inheritedPins: [],
+      changedFiles: ['packages/kn-next/src/index.ts'],
+      packageDirs,
+      now: NOW,
+    });
+    expect(d.action).toBe('proceed');
+    expect(d.action === 'proceed' && d.markerNote).toMatch(/inherited from the merge base/);
+  });
+
+  it('no head marker: PROCEED carries no marker note', () => {
+    const d = decidePublishedBytesScope({
+      basePin: { rcTag: TAG },
+      headPin: { rcTag: TAG },
+      inheritedPins: [withMarker(MERGED_IN)],
+      changedFiles: ['packages/kn-next/src/index.ts'],
+      packageDirs,
+      now: NOW,
+    });
+    expect(d.action).toBe('proceed');
+    expect(d.action === 'proceed' && d.markerNote).toBeUndefined();
+  });
+
+  it('a merged-in marker on a docs-only PR still skips on scope (nothing published moved)', () => {
+    const d = decidePublishedBytesScope({
+      basePin: { rcTag: TAG },
+      headPin: withMarker(MERGED_IN),
+      inheritedPins: [withMarker(MERGED_IN)],
+      changedFiles: ['docs/RELEASING.md'],
+      packageDirs,
+      now: NOW,
+    });
+    expect(d.action).toBe('skip');
+    expect(d.reason).toMatch(/touches no path that can reach a published package/);
   });
 });
 
