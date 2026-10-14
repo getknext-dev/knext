@@ -275,8 +275,7 @@ function $resolve(): string {
   }
   throw new FfiLoadError(
     `knext ffi: cannot find the Rust library ${file} for ${triple}. Tried:\n${tried.map((p) => `  ${p}`).join('\n')}\n` +
-      'Images built by `knext build` stage it beside the server (knext ffi build); in development, run `knext ffi generate`. ' +
-      $PRERENDER,
+      'Images built by `knext build` stage it beside the server (knext ffi build); in development, run `knext ffi generate`.',
   );
 }
 
