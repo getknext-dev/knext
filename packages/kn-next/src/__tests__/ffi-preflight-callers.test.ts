@@ -13,7 +13,10 @@
  *
  * The vinext × bun cell is supported, so it is refused only when nothing is
  * staged at native/ffi/<triple>/ — after the compile on `build --skip-next`,
- * and in the freshness check on `deploy --skip-build`.
+ * and before the freshness check on `deploy --skip-build`. Never on
+ * `deploy --image <pre-built ref>`: that image already carries its library and
+ * nothing is built from the local tree (the runtime-target refusal still
+ * applies there).
  *
  * Every deploy() here runs through `runDeploy`, which always passes
  * `--dry-run`: with a regressed refusal, deploy() runs on, and a dry run makes
@@ -315,12 +318,11 @@ describe("vinext × bun with knext.ffi.json and nothing staged at native/ffi/<tr
         expect(buildVinextExecutable).toHaveBeenCalledTimes(1);
     });
 
-    it("knext deploy --skip-build --dry-run refuses in the freshness check, naming --skip-build", async () => {
+    it("knext deploy --skip-build --dry-run refuses before the freshness check, naming --skip-build", async () => {
         enterApp(true);
         loadConfig.mockResolvedValue(VINEXT_BUN);
-        assertCompiledArtifactFresh.mockImplementationOnce(
-            realArtifact.assertCompiledArtifactFresh as AnyFn,
-        );
+        // The freshness check stays the inert spy: the refusal is deploy()'s
+        // own, on the --skip-build leg, not something the check does.
         const err = await runDeploy("--skip-build").then(
             () => undefined,
             (e: Error) => e,
@@ -328,7 +330,7 @@ describe("vinext × bun with knext.ffi.json and nothing staged at native/ffi/<tr
         expect(err?.message).toMatch(NOTHING_STAGED);
         expect(err?.message).toContain("--skip-build");
         expect(err?.message).not.toContain("--skip-next");
-        expect(assertCompiledArtifactFresh).toHaveBeenCalledTimes(1);
+        expect(assertCompiledArtifactFresh).not.toHaveBeenCalled();
         expect(compileArtifactForDeploy).not.toHaveBeenCalled();
         expect(runProjectBuild).not.toHaveBeenCalled();
         expect(dispatchFfiVerb).not.toHaveBeenCalled();
@@ -348,6 +350,53 @@ describe("vinext × bun with knext.ffi.json and nothing staged at native/ffi/<tr
         }
         expect(message).not.toMatch(NOTHING_STAGED);
         expect(assertCompiledArtifactFresh).toHaveBeenCalledTimes(1);
+    });
+});
+
+// ---------------------------------------------------------------------------
+// deploy --image <pre-built ref>: the image already carries the library and
+// nothing is built or pushed, so local native/ffi/ is irrelevant. The runtime
+// target is not — a Node image still cannot load the library.
+// ---------------------------------------------------------------------------
+
+const PREBUILT = `ghcr.io/acme/zone@sha256:${"a".repeat(64)}`;
+
+describe("knext deploy --image <pre-built ref> with knext.ffi.json", () => {
+    it("is not refused for nothing staged at native/ffi/<triple> (a clean CI checkout)", async () => {
+        enterApp(true);
+        loadConfig.mockResolvedValue(VINEXT_BUN);
+        // The REAL freshness check, so the staged-library check cannot hide
+        // inside it either.
+        assertCompiledArtifactFresh.mockImplementationOnce(
+            realArtifact.assertCompiledArtifactFresh as AnyFn,
+        );
+        const err = await runDeploy("--image", PREBUILT).then(
+            () => undefined,
+            (e: Error) => e,
+        );
+        expect(err?.message ?? "").not.toMatch(NOTHING_STAGED);
+        expect(err).toBeUndefined();
+        expect(assertCompiledArtifactFresh).toHaveBeenCalledTimes(1);
+        expect(compileArtifactForDeploy).not.toHaveBeenCalled();
+        expect(runProjectBuild).not.toHaveBeenCalled();
+        expect(dispatchFfiVerb).not.toHaveBeenCalled();
+    });
+
+    it("runtime 'node' is still refused by the target preflight", async () => {
+        enterApp(true);
+        loadConfig.mockResolvedValue({ ...CONFIG, runtime: "node" });
+        await expectDeployRefused(FFI_NODE_REFUSAL, "--image", PREBUILT);
+    });
+
+    it("plain --skip-build (no --image) with nothing staged is still refused", async () => {
+        enterApp(true);
+        loadConfig.mockResolvedValue(VINEXT_BUN);
+        const err = await runDeploy("--skip-build").then(
+            () => undefined,
+            (e: Error) => e,
+        );
+        expect(err?.message).toMatch(NOTHING_STAGED);
+        expect(assertCompiledArtifactFresh).not.toHaveBeenCalled();
     });
 });
 

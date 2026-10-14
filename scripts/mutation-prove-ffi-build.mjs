@@ -11,10 +11,10 @@
  *     vinext's clean-up leaving native/ffi/ alone;
  *   - `ffi-preflight.test.ts` — the two refusals and the caller-order scan;
  *   - `ffi-preflight-callers.test.ts` — the refusals reached through
- *     `knext build --skip-next`, `knext deploy --skip-build` and
- *     `knext preview`, the vinext × bun "nothing staged" refusal on
- *     `build --skip-next` and `deploy --skip-build`, and the spec's own
- *     dry-run guard;
+ *     `knext build --skip-next`, `knext deploy --skip-build`,
+ *     `knext deploy --image` and `knext preview`, the vinext × bun "nothing
+ *     staged" refusal on `build --skip-next` and `deploy --skip-build` (and
+ *     its absence on `deploy --image`), and the spec's own dry-run guard;
  *   - `packages/ffi/src/__tests__/ffi-build.test.ts` — `knext ffi build`'s
  *     libc allowlist, staging scope, drift check and cargo flags.
  *
@@ -190,17 +190,35 @@ const CALLERS = [
   },
   {
     id: 'C05',
-    subject: 'artifact',
+    subject: 'deploy',
     claim: 'deploy --skip-build no longer refuses an opted-in app with nothing staged',
-    anchor: '    assertFfiLibraryStaged(cwd, arch, FFI_STAGED_REMEDY.skipBuild);',
+    anchor:
+      '        if (!options.image) {\n            assertFfiLibraryStaged(\n                process.cwd(),\n                DEPLOY_SHIP_ARCH,\n                FFI_STAGED_REMEDY.skipBuild,\n            );\n        }\n',
     replacement: '',
   },
   {
     id: 'C06',
-    subject: 'artifact',
+    subject: 'deploy',
     claim: 'the --skip-build refusal tells the user to drop --skip-next (a flag deploy lacks)',
-    anchor: '    assertFfiLibraryStaged(cwd, arch, FFI_STAGED_REMEDY.skipBuild);',
-    replacement: '    assertFfiLibraryStaged(cwd, arch, FFI_STAGED_REMEDY.compile);',
+    anchor: '                FFI_STAGED_REMEDY.skipBuild,',
+    replacement: '                FFI_STAGED_REMEDY.compile,',
+  },
+  {
+    id: 'C07',
+    subject: 'deploy',
+    claim: 'deploy --image <pre-built ref> is refused over a local native/ffi/ it never uses',
+    anchor: '        if (!options.image) {\n            assertFfiLibraryStaged(',
+    replacement:
+      '        if (options.image || !options.image) {\n            assertFfiLibraryStaged(',
+  },
+  {
+    id: 'C08',
+    subject: 'artifact',
+    claim:
+      'the staged-library check is back inside the freshness check, which --image also reaches',
+    anchor: '    // the image from the local tree.\n    const target',
+    replacement:
+      '    // the image from the local tree.\n    assertFfiLibraryStaged(cwd, DEPLOY_SHIP_ARCH, FFI_STAGED_REMEDY.skipBuild);\n    const target',
   },
   {
     id: 'G01',

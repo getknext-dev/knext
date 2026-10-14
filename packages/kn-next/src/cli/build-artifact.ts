@@ -650,11 +650,10 @@ export function assertCompiledArtifactFresh(
     cwd: string,
     arch: string = DEPLOY_SHIP_ARCH,
 ): void {
-    // In-process Rust (ADR-0069 D14): `--skip-build` never runs `knext ffi
-    // build`, so an opted-in app must already have its library staged for the
-    // image arch. First, before the early returns below — it holds whether or
-    // not a compiled exec is involved. A no-op without knext.ffi.json.
-    assertFfiLibraryStaged(cwd, arch, FFI_STAGED_REMEDY.skipBuild);
+    // The in-process Rust staged-library check for `--skip-build` is NOT here:
+    // `deploy --image` also reaches this function, and a pre-built image
+    // already carries its library. deploy.ts calls it on the leg that builds
+    // the image from the local tree.
     const target = compiledExecPathFor(config, cwd, arch);
     if (!target) return;
     if (!existsSync(target.sourcePath)) return;

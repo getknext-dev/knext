@@ -71,7 +71,12 @@ import {
     resolveInvocation,
 } from "./dispatch";
 import { isEntrypoint, runCapture, runInherit } from "./exec";
-import { assertFfiTargetSupported, runFfiBuildStep } from "./ffi-preflight";
+import {
+    assertFfiLibraryStaged,
+    assertFfiTargetSupported,
+    FFI_STAGED_REMEDY,
+    runFfiBuildStep,
+} from "./ffi-preflight";
 import { runAssetGC } from "./gc";
 import { CLI_HELP } from "./help";
 import { assertNoPlaceholders } from "./placeholder-preflight";
@@ -785,6 +790,21 @@ export async function deploy() {
         // `--skip-build`: nothing above ran, so nothing recompiled the exec
         // either. Fail closed rather than silently shipping whatever happens
         // to be sitting in the checkout — missing or stale, both loud.
+        //
+        // In-process Rust (ADR-0069 D14): `--skip-build` never runs `knext ffi
+        // build`, so an opted-in app's image would ship whatever is staged at
+        // native/ffi/<triple>/ — refuse when that is nothing. Not under
+        // `--image`: no image is built from this tree, and the pre-built one
+        // already carries its library (a clean CI deploy job has no
+        // native/ffi/). The runtime-target refusal above still applies there.
+        // A no-op without knext.ffi.json.
+        if (!options.image) {
+            assertFfiLibraryStaged(
+                process.cwd(),
+                DEPLOY_SHIP_ARCH,
+                FFI_STAGED_REMEDY.skipBuild,
+            );
+        }
         assertCompiledArtifactFresh(config, process.cwd());
     }
 
