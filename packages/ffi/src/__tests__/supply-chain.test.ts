@@ -75,25 +75,25 @@ describe('the pin table (D16): a bump is a deliberate change here', () => {
       'cargo-auditable': '0.7.7',
       'cargo-cyclonedx': '0.5.9',
     });
-    expect(ZIG_PIN.version).toBe('0.15.2');
+    expect(ZIG_PIN.version).toBe('0.17.0');
   });
 
   it('pins one zig archive per supported build host, by sha256, from ziglang.org', () => {
     expect(ZIG_PIN.assets).toEqual({
       'linux-x86_64': {
-        file: 'zig-x86_64-linux-0.15.2.tar.xz',
-        sha256: '02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239',
+        file: 'zig-x86_64-linux-0.17.0.tar.xz',
+        sha256: '1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026',
       },
       'linux-aarch64': {
-        file: 'zig-aarch64-linux-0.15.2.tar.xz',
-        sha256: '958ed7d1e00d0ea76590d27666efbf7a932281b3d7ba0c6b01b0ff26498f667f',
+        file: 'zig-aarch64-linux-0.17.0.tar.xz',
+        sha256: '9e8d11661d4ae3bd57702a3832781e23ad151dde5798e16a5ccd503f65234ff8',
       },
       'macos-aarch64': {
-        file: 'zig-aarch64-macos-0.15.2.tar.xz',
-        sha256: '3cc2bab367e185cdfb27501c4b30b1b0653c28d9f73df8dc91488e66ece5fa6b',
+        file: 'zig-aarch64-macos-0.17.0.tar.xz',
+        sha256: 'b607e9b9234790a008116ae5bdb71c6243b84b9fb42a53a9e70fde41c06c536a',
       },
     });
-    expect(ZIG_PIN.baseUrl).toBe('https://ziglang.org/download/0.15.2');
+    expect(ZIG_PIN.baseUrl).toBe('https://ziglang.org/download/0.17.0');
   });
 
   it('the install command is `cargo install --locked --version <pin> <crate>`', () => {
@@ -178,10 +178,10 @@ describe('zig (D16): the pinned version, verified', () => {
   const archive = Buffer.from('a pretend zig archive');
   const testPin: ZigPin = {
     version: ZIG_PIN.version,
-    baseUrl: 'https://ziglang.org/download/0.15.2',
-    assets: { 'macos-aarch64': { file: 'zig-aarch64-macos-0.15.2.tar.xz', sha256: sha(archive) } },
+    baseUrl: 'https://ziglang.org/download/0.17.0',
+    assets: { 'macos-aarch64': { file: 'zig-aarch64-macos-0.17.0.tar.xz', sha256: sha(archive) } },
   };
-  const stem = 'zig-aarch64-macos-0.15.2';
+  const stem = 'zig-aarch64-macos-0.17.0';
 
   /** A runner whose `tar` "extracts" a zig answering `version` with `extractedVersion`. */
   function downloadRig(extractedVersion = ZIG_PIN.version) {
@@ -224,9 +224,9 @@ describe('zig (D16): the pinned version, verified', () => {
   });
 
   it('caches under $KNEXT_CACHE_DIR, else $XDG_CACHE_HOME/knext, else ~/.cache/knext', () => {
-    expect(zigCacheDir({ KNEXT_CACHE_DIR: '/k' }, '/h', '0.15.2')).toBe('/k/zig/0.15.2');
-    expect(zigCacheDir({ XDG_CACHE_HOME: '/x' }, '/h', '0.15.2')).toBe('/x/knext/zig/0.15.2');
-    expect(zigCacheDir({}, '/h', '0.15.2')).toBe('/h/.cache/knext/zig/0.15.2');
+    expect(zigCacheDir({ KNEXT_CACHE_DIR: '/k' }, '/h', '0.17.0')).toBe('/k/zig/0.17.0');
+    expect(zigCacheDir({ XDG_CACHE_HOME: '/x' }, '/h', '0.17.0')).toBe('/x/knext/zig/0.17.0');
+    expect(zigCacheDir({}, '/h', '0.17.0')).toBe('/h/.cache/knext/zig/0.17.0');
   });
 
   it('uses a zig on PATH whose `zig version` equals the pin, without downloading', async () => {
@@ -238,7 +238,7 @@ describe('zig (D16): the pinned version, verified', () => {
     });
     expect(z).toEqual({
       bin: tc.zigBin as string,
-      version: '0.15.2',
+      version: '0.17.0',
       source: 'path',
       sha256: null,
     });
@@ -248,9 +248,9 @@ describe('zig (D16): the pinned version, verified', () => {
     const tc = fakeToolchain({ zig: '0.13.0' });
     const err = await resolveZig(runnerFor(tc), tc.cargoHome, tc.env, { host }).catch((e) => e);
     expect(String(err)).toContain(`zig 0.13.0 is on PATH (${tc.zigBin})`);
-    expect(String(err)).toContain('pins zig 0.15.2');
+    expect(String(err)).toContain('pins zig 0.17.0');
     expect(String(err)).toContain(
-      'https://ziglang.org/download/0.15.2/zig-aarch64-macos-0.15.2.tar.xz (sha256 3cc2bab367e185cdfb27501c4b30b1b0653c28d9f73df8dc91488e66ece5fa6b)',
+      'https://ziglang.org/download/0.17.0/zig-aarch64-macos-0.17.0.tar.xz (sha256 b607e9b9234790a008116ae5bdb71c6243b84b9fb42a53a9e70fde41c06c536a)',
     );
   });
 
@@ -262,14 +262,14 @@ describe('zig (D16): the pinned version, verified', () => {
       cacheDir: r.cacheDir,
       fetch: r.fetchWith(archive),
     });
-    expect(r.fetched).toEqual([`${testPin.baseUrl}/zig-aarch64-macos-0.15.2.tar.xz`]);
+    expect(r.fetched).toEqual([`${testPin.baseUrl}/zig-aarch64-macos-0.17.0.tar.xz`]);
     expect(z).toEqual({
       bin: join(r.cacheDir, stem, 'zig'),
-      version: '0.15.2',
+      version: '0.17.0',
       source: 'ziglang.org',
       sha256: sha(archive),
     });
-    expect(readFileSync(join(r.cacheDir, 'zig-aarch64-macos-0.15.2.tar.xz'))).toEqual(archive);
+    expect(readFileSync(join(r.cacheDir, 'zig-aarch64-macos-0.17.0.tar.xz'))).toEqual(archive);
 
     // The next build re-hashes the cached archive and reuses it: no download, no extract.
     r.calls.length = 0;
@@ -293,17 +293,17 @@ describe('zig (D16): the pinned version, verified', () => {
       cacheDir: r.cacheDir,
       fetch: r.fetchWith(Buffer.from('tampered')),
     }).catch((e) => e);
-    expect(String(err)).toContain('zig 0.15.2 failed verification: sha256 mismatch');
+    expect(String(err)).toContain('zig 0.17.0 failed verification: sha256 mismatch');
     expect(String(err)).toContain(`expected ${sha(archive)}`);
     expect(String(err)).toContain(`got      ${sha(Buffer.from('tampered'))}`);
-    expect(existsSync(join(r.cacheDir, 'zig-aarch64-macos-0.15.2.tar.xz'))).toBe(false);
+    expect(existsSync(join(r.cacheDir, 'zig-aarch64-macos-0.17.0.tar.xz'))).toBe(false);
     expect(r.calls).toEqual([]);
   });
 
   it('never trusts a cached archive that no longer matches: it is fetched again', async () => {
     const r = downloadRig();
     mkdirSync(r.cacheDir, { recursive: true });
-    writeFileSync(join(r.cacheDir, 'zig-aarch64-macos-0.15.2.tar.xz'), 'swapped');
+    writeFileSync(join(r.cacheDir, 'zig-aarch64-macos-0.17.0.tar.xz'), 'swapped');
     await resolveZig(r.run, r.tc.cargoHome, r.tc.env, {
       host,
       pin: testPin,
@@ -311,7 +311,7 @@ describe('zig (D16): the pinned version, verified', () => {
       fetch: r.fetchWith(archive),
     });
     expect(r.fetched).toHaveLength(1);
-    expect(readFileSync(join(r.cacheDir, 'zig-aarch64-macos-0.15.2.tar.xz'))).toEqual(archive);
+    expect(readFileSync(join(r.cacheDir, 'zig-aarch64-macos-0.17.0.tar.xz'))).toEqual(archive);
   });
 
   it('refuses a downloaded zig that reports another version', async () => {
@@ -322,7 +322,7 @@ describe('zig (D16): the pinned version, verified', () => {
       cacheDir: r.cacheDir,
       fetch: r.fetchWith(archive),
     }).catch((e) => e);
-    expect(String(err)).toContain('reports 0.16.0, not the pinned 0.15.2');
+    expect(String(err)).toContain('reports 0.16.0, not the pinned 0.17.0');
     expect(existsSync(join(r.cacheDir, stem))).toBe(false);
   });
 
@@ -338,12 +338,12 @@ describe('zig (D16): the pinned version, verified', () => {
     const win = await resolveZig(r.run, r.tc.cargoHome, r.tc.env, {
       host: { platform: 'win32', arch: 'x64' },
     }).catch((e) => e);
-    expect(String(win)).toContain('pins no zig 0.15.2 download for win32-x64');
+    expect(String(win)).toContain('pins no zig 0.17.0 download for win32-x64');
   });
 
   it('hands cargo-zigbuild exactly the verified zig (else it prefers `python3 -m ziglang`)', () => {
     expect(
-      zigbuildEnv({ bin: '/c/zig/zig', version: '0.15.2', source: 'ziglang.org', sha256: 'x' }),
+      zigbuildEnv({ bin: '/c/zig/zig', version: '0.17.0', source: 'ziglang.org', sha256: 'x' }),
     ).toEqual({ CARGO_ZIGBUILD_ZIG_COMMAND: '/c/zig/zig', CARGO_ZIGBUILD_ZIG_COMMAND_ARGS: '' });
   });
 });

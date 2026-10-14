@@ -349,7 +349,7 @@ describe('knext ffi build: staging (D14 step 4)', () => {
         knextFfiRev: '0123456789abcdef0123456789abcdef01234567',
         library: { file: 'libzone.so', sha256: sha(readFileSync(lib)) },
         tools: {
-          zig: { version: '0.15.2', source: 'path', sha256: null },
+          zig: { version: '0.17.0', source: 'path', sha256: null },
           'cargo-zigbuild': '0.23.4',
           'cargo-deny': '0.20.2',
           'cargo-auditable': '0.7.7',
@@ -470,7 +470,7 @@ describe('knext ffi build: the build-tool pins (D16)', () => {
     expect(r.code).toBe(1);
     expect(r.err).toContain('zig 0.13.0 is on PATH');
     expect(r.err).toContain(
-      'https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz (sha256 02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239)',
+      'https://ziglang.org/download/0.17.0/zig-x86_64-linux-0.17.0.tar.xz (sha256 1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026)',
     );
     expect(cargoBuilds(a.calls)).toEqual([]);
   });
@@ -486,9 +486,9 @@ describe('knext ffi build: the build-tool pins (D16)', () => {
     });
     const r = await a.build(ARGV);
     expect(r.code).toBe(1);
-    expect(r.err).toContain('zig 0.15.2 failed verification: sha256 mismatch');
+    expect(r.err).toContain('zig 0.17.0 failed verification: sha256 mismatch');
     expect(r.err).toContain(
-      'expected 02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239',
+      'expected 1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026',
     );
     expect(cargoBuilds(a.calls)).toEqual([]);
   });

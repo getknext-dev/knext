@@ -4,7 +4,9 @@ Used by `supply-chain.test.ts` and `ffi-build.test.ts` so the supply-chain gates
 are tested against what the pinned tools really print, without Rust, zig or the
 network. All were produced on macOS arm64 with the pinned versions from
 `src/supply-chain.ts` (cargo-zigbuild 0.23.4, cargo-deny 0.20.2,
-cargo-auditable 0.7.7, cargo-cyclonedx 0.5.9, zig 0.15.2) and rustc 1.97.1.
+cargo-auditable 0.7.7, cargo-cyclonedx 0.5.9) and rustc 1.97.1, with zig 0.15.2
+(the pin moved to 0.17.0 afterwards; none of these bytes depend on zig, and
+`cargo auditable zigbuild` with 0.17.0 was re-measured for both targets).
 
 | File | What it is |
 |---|---|
@@ -18,7 +20,7 @@ container per arch):
 
 ```sh
 # 1. In a crate named zone 0.3.1 with crate-type = ["cdylib"]:
-CARGO_ZIGBUILD_ZIG_COMMAND=/path/to/zig-0.15.2/zig RUSTFLAGS="-C target-feature=-crt-static" \
+CARGO_ZIGBUILD_ZIG_COMMAND=/path/to/zig-0.17.0/zig RUSTFLAGS="-C target-feature=-crt-static" \
   cargo auditable zigbuild --release --target <arch>-unknown-linux-musl
 # 2. Copy the section onto the small fixture:
 docker run --rm --platform linux/<amd64|arm64> -v "$PWD:/w" -w /w alpine:3.20 sh -c '

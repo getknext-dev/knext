@@ -4,7 +4,7 @@
  * subcommands (empty executables) plus the `.crates2.json` record `cargo
  * install` writes beside it, and a `zig` on a PATH directory. `answer` replies
  * to the version probes the way the real pinned releases do (measured:
- * cargo-zigbuild 0.23.4, cargo-deny 0.20.2, cargo-cyclonedx 0.5.9, zig 0.15.2;
+ * cargo-zigbuild 0.23.4, cargo-deny 0.20.2, cargo-cyclonedx 0.5.9, zig 0.17.0;
  * cargo-auditable 0.7.7 has no version flag at all).
  */
 

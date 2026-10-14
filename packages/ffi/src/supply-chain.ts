@@ -99,20 +99,20 @@ export interface ZigPin {
 
 /** The zig cargo-zigbuild links with. */
 export const ZIG_PIN: ZigPin = {
-  version: '0.15.2',
-  baseUrl: 'https://ziglang.org/download/0.15.2',
+  version: '0.17.0',
+  baseUrl: 'https://ziglang.org/download/0.17.0',
   assets: {
     'linux-x86_64': {
-      file: 'zig-x86_64-linux-0.15.2.tar.xz',
-      sha256: '02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239',
+      file: 'zig-x86_64-linux-0.17.0.tar.xz',
+      sha256: '1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026',
     },
     'linux-aarch64': {
-      file: 'zig-aarch64-linux-0.15.2.tar.xz',
-      sha256: '958ed7d1e00d0ea76590d27666efbf7a932281b3d7ba0c6b01b0ff26498f667f',
+      file: 'zig-aarch64-linux-0.17.0.tar.xz',
+      sha256: '9e8d11661d4ae3bd57702a3832781e23ad151dde5798e16a5ccd503f65234ff8',
     },
     'macos-aarch64': {
-      file: 'zig-aarch64-macos-0.15.2.tar.xz',
-      sha256: '3cc2bab367e185cdfb27501c4b30b1b0653c28d9f73df8dc91488e66ece5fa6b',
+      file: 'zig-aarch64-macos-0.17.0.tar.xz',
+      sha256: 'b607e9b9234790a008116ae5bdb71c6243b84b9fb42a53a9e70fde41c06c536a',
     },
   },
 };
@@ -431,8 +431,9 @@ export async function resolveZig(
 /**
  * The environment that makes cargo-zigbuild link with exactly this zig.
  * Without it, cargo-zigbuild 0.23.4 prefers `python3 -m ziglang` over the
- * `zig` on PATH (measured: with pip's ziglang 0.17.0 importable it linked with
- * that, not the verified 0.15.2), so the pin would not hold.
+ * `zig` on PATH (measured: with zig 0.15.2 on PATH and pip's ziglang 0.17.0
+ * importable by `python3`, it linked with the pip one), so the pin would not
+ * hold whenever a Python ziglang of another version is installed.
  */
 export function zigbuildEnv(zig: ResolvedZig): Record<string, string> {
   return { CARGO_ZIGBUILD_ZIG_COMMAND: zig.bin, CARGO_ZIGBUILD_ZIG_COMMAND_ARGS: '' };
