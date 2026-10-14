@@ -177,6 +177,11 @@ export interface DoctorDeps {
      * reports the operator's version but renders no compatibility verdict.
      */
     cliVersion?: string;
+    /**
+     * The installed `next` version for the app in the current directory --
+     * feeds the next-minor row. Absent -> no row.
+     */
+    readInstalledNext?: () => string | undefined;
 }
 
 /**

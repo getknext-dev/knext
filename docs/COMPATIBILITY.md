@@ -110,6 +110,30 @@ internally consistent — `@getknext/core@0.3.0` depends on `@getknext/lib@^0.2.
 `@getknext/db@^0.2.1`, both of which exist — so nothing is broken for a consumer; from the next
 release on, one number covers all three.
 
+## Next.js peer-range policy
+
+<!-- next-policy:start -->
+The `next` peer range is **bounded** to the minors with compatibility evidence
+(`>=16.0.0 <16.5.0`) and is widened one minor at a time as evidence lands, instead of being open
+and admitting every future minor unvetted. Within the range, the minors covered by the official
+Next.js compatibility credential are `16.3`; for an installed minor outside that list `knext doctor`
+warns (it never blocks an install or a build). The range and the list live in
+`packages/kn-next/src/next-compat.ts`, the single source the manifest, the scaffold pin, the doctor
+row and the docs tests read. A minor above the range is an npm `ERESOLVE` (pnpm warns, Bun is
+silent) until a release widens the bound.
+<!-- next-policy:end -->
+
+Evidence for an admitted minor the credential does not cover: the cache-handler spec matrix
+(`.github/workflows/next-minor-matrix.yml`) installs the credential pin and the newest patch of
+every further admitted minor from 16.3 up (`NEXT_MATRIX_VERSIONS` in `next-compat.ts`) and runs the
+version-dependent ISR scoping specs on each. Widening the range without adding the minor to that
+list fails CI.
+
+Maintainer notes (not user docs): 1.x carries two version-dependent ISR build-scoping mechanisms,
+the seed of Next's shared cache-control map for 16.0-16.3 and `scopeWindowToBuild` for 16.4+. The
+16.0-16.3 seed retires when the 1.x floor reaches 16.4 or when 1.x reaches end of life (tracked in
+the tech-debt backlog and in `next-compat.ts`); until then the matrix keeps both proven.
+
 ## Upgrade order
 
 **Upgrade the operator (and therefore the CRD) BEFORE the CLI: operator/CRD first, then CLI.**

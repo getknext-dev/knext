@@ -50,6 +50,10 @@ import { knativeCheck } from "./doctor/checks/knative";
 import { kubectlValidationCheck } from "./doctor/checks/kubectl-validation";
 import { metricsCheck } from "./doctor/checks/metrics";
 import { networkPolicyCheck } from "./doctor/checks/network-policy";
+import {
+    nextMinorCheck,
+    readInstalledNextVersion,
+} from "./doctor/checks/next-minor";
 import { nodeEntryStalenessCheck } from "./doctor/checks/node-entry-staleness";
 import { operatorCheck } from "./doctor/checks/operator";
 import { operatorImageCheck } from "./doctor/checks/operator-image";
@@ -139,6 +143,8 @@ export async function runDoctor(
     checks.push(...knativeCheck(ctx));
     checks.push(...metricsCheck(ctx));
     checks.push(...networkPolicyCheck(ctx));
+    // Local; no row unless an installed `next` is injected.
+    checks.push(...nextMinorCheck(ctx));
     // Opt-in (#1533): a LOCAL file read, not a cluster call, so it does not
     // participate in ctx.skipAll — and it contributes NO row at all when
     // --ci-kubeconfig was not passed, which is what keeps every other
@@ -216,6 +222,7 @@ export async function doctorMain(
         kubectl: kubectlRunner,
         probeImage: probeManifest,
         cliVersion: readOwnVersion(),
+        readInstalledNext: () => readInstalledNextVersion(process.cwd()),
     },
 ): Promise<number> {
     // parseDoctorArgs first, so an unknown flag is rejected before anything

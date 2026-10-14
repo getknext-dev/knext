@@ -419,3 +419,47 @@ describe('the user-facing versioning page exists and is reachable', () => {
     expect(meta.pages).toContain('versioning');
   });
 });
+/**
+ * The Next.js peer-range policy (bounded range + doctor warning on an
+ * uncredentialed minor). The range and the credentialed list live in ONE
+ * module; the manifest, the versioning page and the matrix are checked
+ * against it, each inside its own marker block.
+ */
+describe('next peer policy is documented and matches the manifest', () => {
+  const compat = readFileSync(resolve(REPO_ROOT, 'packages/kn-next/src/next-compat.ts'), 'utf8');
+  const range = compat.match(/NEXT_PEER_RANGE\s*=\s*['"]([^'"]+)['"]/)?.[1];
+  const minors = [
+    ...(compat.match(/CREDENTIALED_NEXT_MINORS[^=]*=\s*\[([^\]]*)\]/)?.[1] ?? '').matchAll(
+      /['"]([^'"]+)['"]/g,
+    ),
+  ].map((m) => m[1]);
+  const core = JSON.parse(
+    readFileSync(resolve(REPO_ROOT, 'packages/kn-next/package.json'), 'utf8'),
+  ) as { peerDependencies?: { next?: string } };
+
+  it('the policy module declares a range and at least one credentialed minor', () => {
+    expect(range).toBeTruthy();
+    expect(minors.length).toBeGreaterThan(0);
+  });
+
+  it('the core manifest peer range is the policy range', () => {
+    expect(core.peerDependencies?.next).toBe(range);
+  });
+
+  for (const [label, path] of [
+    ['versioning page', DOCS_PAGE_PATH],
+    ['COMPATIBILITY.md', MATRIX_PATH],
+  ] as const) {
+    it(`${label} states the range and every credentialed minor in its next-policy block`, () => {
+      const text = readFileSync(path, 'utf8');
+      const starts = [...text.matchAll(/next-policy:start/g)];
+      const ends = [...text.matchAll(/next-policy:end/g)];
+      expect(starts.length, 'exactly one next-policy:start').toBe(1);
+      expect(ends.length, 'exactly one next-policy:end').toBe(1);
+      const block = text.slice(starts[0].index as number, ends[0].index as number);
+      expect(block).toContain(`\`${range}\``);
+      for (const m of minors) expect(block).toContain(`\`${m}\``);
+      expect(block).toMatch(/knext doctor/);
+    });
+  }
+});
