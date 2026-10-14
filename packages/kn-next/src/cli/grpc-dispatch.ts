@@ -20,8 +20,8 @@
 
 import { createRequire } from "node:module";
 import { join } from "node:path";
-import { coreVersion } from "./core-version";
 import { pathToFileURL } from "node:url";
+import { coreVersion } from "./core-version";
 
 /** The package that provides the verbs below. */
 export const GRPC_PACKAGE = "@getknext/grpc";
@@ -242,7 +242,6 @@ export async function dispatchGrpcVerb(
         return 1;
     }
 }
-
 
 /** `knext generate` — bin entry. */
 export function generateMain(argv: readonly string[]): Promise<number> {
