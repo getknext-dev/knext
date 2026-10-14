@@ -49,6 +49,7 @@ mock.module("../cli/standalone-exec-build", () => ({
 mock.module("../cli/vinext-build", () => ({
     buildVinextExecutable: () => "",
     stageSharpForVinextNode: () => ({ staged: true }),
+    stageSharpForStandalone: () => ({ staged: [] }),
     stageOgHarfbuzzForVinextNode: () => ({ staged: [], warnings: [] }),
 }));
 
