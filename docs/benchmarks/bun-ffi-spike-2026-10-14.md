@@ -239,6 +239,11 @@ not run; (b) has no import for a bundler to handle **[inferred]**.
   verified on Bun. ⇒ ADR-0069 D13: the generated module type-checks without `@types/bun`.
 - Not run: a tampered manifest through the server (the code path exists; exercised only in part A's
   compiled-executable test).
+- **Which load path this exercised:** the server was `bun server.js`, not a compiled executable,
+  so `process.execPath` was Bun's install directory and the library was found through the spike
+  loader's `cwd/native` fallback (the standalone `server.js` changes directory to its own folder).
+  This run supports the generated wrapper inside Next, not ADR-0069 D13's path 1
+  (`dirname(process.execPath)/native`); path 1 is what part A's compiled-executable run supports.
 
 ## Not run (handed to the implementation tickets)
 

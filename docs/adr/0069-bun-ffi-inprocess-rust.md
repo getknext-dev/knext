@@ -91,7 +91,7 @@ a `cdylib` carrying its own manifest, a generator that scans the library, and th
 | Compiled executable | library in `native/` beside a `bun build --compile` binary, `TMPDIR` read-only: every call correct, nothing written to `TMPDIR`; tampered hash, absent manifest (when required) and missing library each refused with a clear message |
 | Workers | main thread + 4 Workers, 2e5 concurrent calls each, all correct (one module instance, `dlopen` and out slot per Worker) |
 | Manifest | records survive `lto = true` + `strip = true`; a link-only musl x86_64/aarch64 build carries all of them, and the generator emits the same wrapper from the ELF as from the macOS library |
-| Next.js | a Server Action on Bun calls Rust through `bun:ffi` and returns `"Hello, World!"` on Turbopack and webpack; the import form decides whether `next build` works (D13). The **generated** wrapper, built by Turbopack under Node and served by `bun .next/standalone/server.js` with integrity required, returned the Rust `String` and surfaced `Err` as a catchable `RustError`; RSS held flat over 2.4e6 calls (same envelope as a no-FFI control) |
+| Next.js | a Server Action on Bun calls Rust through `bun:ffi` and returns `"Hello, World!"` on Turbopack and webpack; the import form decides whether `next build` works (D13). The **generated** wrapper, built by Turbopack under Node and served by `bun .next/standalone/server.js` with integrity required, returned the Rust `String` and surfaced `Err` as a catchable `RustError`; RSS held flat over 2.4e6 calls (same envelope as a no-FFI control). That server was `bun server.js`, not a compiled executable, so `process.execPath` was Bun's install directory and the library resolved through the spike loader's `cwd/native` fallback (the standalone `server.js` changes directory to its own folder). This run supports the **generated wrapper** (types, marshalling, errors, leaks) inside Next; it does **not** exercise D13's path 1. Path 1 (`dirname(process.execPath)/native`, integrity required, read-only `TMPDIR`) is supported by the compiled-executable run (row above, spike Part A) |
 | Linux build | `cargo zigbuild` links the musl `.so` for x86_64 and aarch64 on macOS; `DT_NEEDED` is `libc.so` only; all manifest records present; same generated wrapper |
 | Not run | the musl `.so` on `oven/bun:1.4.2-alpine` (amd64/arm64), glibc, `readOnlyRootFilesystem` on a cluster: local Docker is out of disk. These are FFI-4's job (#2346) |
 
@@ -164,6 +164,28 @@ version fails `dlopen` by name instead of being called wrongly.
   With the signature in the name, a wrapper generated before a signature change fails `dlopen` with
   a missing symbol, which the loader reports as a stale wrapper (`FfiLoadError`, "run `knext ffi
   generate`"). That covers `next dev`, where the build-time drift check (D14) does not run.
+- **The signature hash covers the transitive record and enum schemas the function names**, not only
+  its own argument and return types: a record field that names another record, an
+  `Option<Record>`, a `Vec<Enum>`, at any depth. Adding, removing, renaming, reordering or retyping
+  a field or a variant anywhere the function can reach is a stale wrapper. (A JSON shape change is
+  not memory-unsafe, but serde would silently fill or drop fields: a wrong answer, not an error.)
+  The canonical schema string is the function's `sig` followed by each reachable record as
+  `Name{field:type,…}` (declaration order) and each enum as `Name[Variant|…]`, sorted by name.
+  A proc macro on a function cannot read another item's definition at expansion time, and a
+  symbol name must be a literal, so the check has two halves that together are "the signature
+  hash":
+  - `<h>` in the shim's name hashes `sig` (what the export macro sees);
+  - each `#[knext_ffi::record]` implements a hidden `KnextSchema` trait whose associated `const`
+    is the FNV-1a of its canonical form combined with the consts of the types it names, so the
+    export macro can emit `knext_ffi_v1_<fn>_<h>_schema() -> u64`, a const-evaluated FNV-1a
+    (64-bit) of the full canonical schema string. The generator builds the same string from the
+    manifest's `fn`, `record` and `enum` records (it already resolves every name a function uses,
+    D5) and writes the expected value into the wrapper; the loader calls every `_schema` symbol
+    once, right after `dlopen`, and turns any mismatch into the same stale-wrapper `FfiLoadError`.
+    One call per export, at load only.
+  The macro crate's tests change one nested field two records deep and assert the `_schema` value
+  changes; a golden test pins that the Rust `const fn` and the generator's TypeScript hash agree on
+  the same canonical string.
 - `knext_ffi_v1_free(ptr: *mut u8, len: usize)`, defined once in `knext-ffi`.
 
 **Shim signature.**
@@ -272,9 +294,18 @@ the docs recommend the borrowed forms.
   so the zone does not add serde itself) and embeds a schema record in the manifest (D5). The
   generator emits one TS `interface` per struct and one string-literal union per unit enum.
 - Field names cross verbatim (no case conversion), so the TS interface mirrors the Rust struct.
-- **64-bit integers inside JSON travel as decimal strings** (a precision-safe encoding the record
-  macro applies to every 64-bit field), and the generated decoder turns them into `bigint` using the
-  schema; the encoder does the reverse. A TS `bigint` never meets `JSON.stringify` directly.
+- **Every 64-bit integer (`i64`, `u64`, `isize`, `usize`) in any JSON position travels as a decimal
+  string** and is `bigint` in TypeScript (jev: string-encode every position **0.96**, compile error
+  outside record fields 0.04). "Any JSON position" means all of: a top-level `Option<u64>` or
+  `Vec<i64>` argument or return; a record field; an `Option`/`Vec` field inside a record
+  (`Option<u64>`, `Vec<usize>`, `Vec<Option<i64>>`); and any nesting of those. The encoding is
+  applied per position from the schema, not per record: the record macro applies it to fields, and
+  the export macro applies the same serde adapter to top-level JSON arguments and returns, so there
+  is no position where a 64-bit value crosses as a JSON number. The generated encoder and decoder
+  walk the type descriptor (D5) and convert at exactly those positions (`bigint` → decimal string
+  in, decimal string → `bigint` out); a TS `bigint` never meets `JSON.stringify` directly, and a
+  JSON number where the schema says a 64-bit integer is refused with a `RustError` naming the
+  path. Golden tests cover each position listed here, with values above 2^53 and `u64::MAX`.
 - **Floats inside JSON must be finite**, in both directions, because JSON has no NaN or Infinity.
   JavaScript to Rust: `JSON.stringify` writes `null` and serde refuses it, so the call fails with a
   `RustError` (measured). Rust to JavaScript: serde_json writes `null`, and the generated decoder
@@ -287,7 +318,10 @@ the docs recommend the borrowed forms.
 - Data-carrying enums, generics and recursive records are compile errors in v1.
 - JSON was chosen over a binary codec because a second hand-written decoder per format version is
   more code and more bugs than one sprint can carry, and the per-call cost is dominated by the work
-  for the intended payloads; the spike's record round-trip number is in the research note.
+  for the intended payloads. The measured cost is in the committed spike report
+  (`docs/benchmarks/bun-ffi-spike-2026-10-14.md`, "Per-call overhead"): the generated
+  `mid(Point, Point)` record round trip is **949–3245 ns** per call, of which 638–1054 ns is
+  JavaScript-side JSON (two stringify + encode, one parse).
 
 ### D8. Errors
 
@@ -425,10 +459,42 @@ Rust toolchain, and `knext ffi check` (CI) and `knext ffi build` (image) fail on
 
    There is no environment-variable override in v1: every production path is the integrity-checked
    one.
+
+   **Dynamic contexts only.** A call made while `next build` prerenders fails, by construction:
+   the build runs with `NODE_ENV=production` (so path 2 is off) and `process.execPath` is the
+   Node or Bun install directory, which has no `native/ffi/` beside it (so path 1 misses); under a
+   Node build the Bun check fails even earlier. v1 therefore supports calls from **dynamic
+   contexts only**: Server Actions, route handlers, and dynamically rendered pages and layouts. A
+   call reached from a statically prerendered page, `generateStaticParams`, `generateMetadata` of a
+   static route, or anything else evaluated at build time is unsupported. The loader detects the
+   build (`process.env.NEXT_PHASE === 'phase-production-build'`), checks it **before** the Bun
+   check so it is the message a developer sees, and throws an `FfiLoadError` that says, in one
+   message: the call happened during `next build` prerendering; in-process Rust runs only at
+   request time, not in prerendering, `generateStaticParams` or `generateMetadata` of a static
+   route; and how to make the route dynamic (`export const dynamic = 'force-dynamic'` in the
+   route segment, or `await connection()` from `next/server` before the call). The docs page
+   (#2348) states the same rule and the same two fixes. A loader test sets `NEXT_PHASE` and asserts
+   that message wins over the not-Bun and not-found messages.
 6. One preallocated 16-byte out slot and one growable UTF-8 scratch buffer per module instance
    (each Worker has its own), reused across calls; JavaScript is single-threaded per isolate and v1
-   has no re-entrancy (the spike ran 4 Workers concurrently). Binding rules from the spike, each
-   with a generator unit test:
+   has no re-entrancy (the spike ran 4 Workers concurrently). **Several string, bytes or JSON
+   arguments share that one scratch buffer** (jev: one buffer, pointers from final offsets
+   **0.99**, a buffer per argument 0.01), in two phases:
+   1. **Encode every argument first.** Each argument is written into the scratch buffer at the
+      next free offset (8-byte aligned), recording only its `(offset, length)`. When the next
+      argument does not fit, the buffer grows (a new, larger `ArrayBuffer`, the bytes so far copied
+      over), which moves every earlier argument's bytes.
+   2. **Then compute every pointer**, from the final buffer, as `ptr(finalBuffer) + offset`,
+      immediately before the call, with nothing allocated in between. No pointer is ever taken
+      before the last grow, so none can point into a buffer a grow replaced.
+
+   `Uint8Array` arguments are copied into the scratch buffer the same way (one rule for every
+   (ptr, len) pair); an empty one is passed directly as NULL (below) and takes no space. A
+   generator test calls a two-argument export with **two large string arguments** whose combined
+   size forces at least one grow between the first and the second encode (the first fits the
+   current buffer, the second does not), and asserts Rust received both strings byte-for-byte; a
+   mutation that takes the first pointer before encoding the second must turn it red. Binding
+   rules from the spike, each with a generator unit test:
    - **create the `ArrayBuffer` first and take `ptr()` of it** (`const b = new ArrayBuffer(16);
      const OUT_PTR = ptr(b)`), never `ptr()` of a small typed array whose `.buffer` is read later:
      JavaScriptCore moved that storage and Rust then wrote into freed memory;
@@ -475,13 +541,44 @@ Rust toolchain, and `knext ffi check` (CI) and `knext ffi build` (image) fail on
    the committed `<out>/index.ts`. A difference fails the build with "run `knext ffi generate`".
    The wrapper in the image is therefore always the one generated from the library in the image.
 
-Then the normal build continues; `writeNativeIntegrityManifest` hashes `native/ffi/**` with no
-change to the writer (Context fact 5). Image changes:
+Then the normal build continues. Steps 1–5 and the D15 preflight must run for **every** command
+that builds an image, not only `knext build`: `knext deploy` and `knext preview` build through the
+same `runProjectBuild` (`project-build.ts`), which is where `assertNoBunTurbopackFragments`
+already lives for that reason. The preflight goes there; the dispatch runs in each of the three
+callers before `runProjectBuild` (it is async, `runProjectBuild` is not), and a test scans the
+three for it.
+
+**The integrity manifest, per cell.** `writeNativeIntegrityManifest` hashes the whole `native/`
+tree with no change to the writer (Context fact 5), but it has to be **called**, and today it is
+called from one place only, `stageSharpNative` (`vinext-build.ts`, inside the vinext compile):
+
+- `vinext × bun`: covered. `stageSharpNative` runs after step 4 and writes the manifest over
+  `native/`, including `native/ffi/**`.
+- `turbopack|webpack × bun`, disk mode: **no call site exists**. `build.ts` has no `native/`
+  step, and the standalone compile stages nothing there. #2345 adds the call in
+  `compileArtifactForDeploy` (`build-artifact.ts`, the step `knext build`, `knext deploy` and
+  `knext preview` share), in the standalone branch, after `buildStandaloneExecutable` and before
+  `writeBuildStamp`, only when `knext.ffi.json` exists:
+  `writeNativeIntegrityManifest(join(cwd, "native"), lockfilePath)`. The tree then holds no
+  `@img` packages, so the writer's lockfile pin check has nothing to pin. A test asserts that an
+  opted-in standalone build leaves a `native/.integrity.json` listing `ffi/<triple>/lib<name>.so`
+  with the right sha256, and a mutation that removes the call turns it red.
+
+Image changes:
 
 - `vinext × bun`: none — `COPY native /app/native` already ships it beside `/app/server`.
-- `turbopack|webpack × bun`, disk mode: `Dockerfile.standalone.hbs` renders
-  `COPY native /app/.next/standalone/native` **only when `native/ffi/` exists**, so non-ffi apps
-  keep a byte-identical Dockerfile.
+- `turbopack|webpack × bun`, disk mode: the image needs
+  `COPY native /app/.next/standalone/native` in the `standalone-bun` stage, so the tree sits
+  beside `/app/.next/standalone/knext-standalone-exec` (D13 path 1). `Dockerfile.standalone.hbs`
+  is copied verbatim and `stageStandaloneBuildContext` (`runtime-image.ts`) refuses any `{{ }}` in
+  it, so this is not a template conditional: when `knext.ffi.json` exists,
+  `stageStandaloneBuildContext` inserts that one line directly after the stage's
+  `COPY knext-standalone-exec-linux-x64 /app/.next/standalone/knext-standalone-exec` line,
+  asserting the anchor occurs exactly once in the `standalone-bun` stage and failing the build
+  otherwise. The condition is the file, not the presence of `native/ffi/`, so a stale tree from an
+  earlier opted-in build is never shipped by an app that has since opted out. Without the file the
+  staged Dockerfile is byte-identical to today's (D17). Both the manifest call above and this line
+  are **#2345's scope**.
 - `selfContained: true` with `knext.ffi.json`: **refused** at build time in v1. That mode promises
   nothing beside the binary, and embedding needs a writable temp directory (Context fact 4).
 - vinext's `native/` clean-up (`vinext-build.ts`, "clear the previous build's staging out of
@@ -520,6 +617,21 @@ a developer machine (D20).
 ### D16. Supply chain (jev: full set **1.00**, `cargo audit` only 0.00, nothing 0.00)
 
 - `Cargo.lock` committed; every build `--locked`; toolchain pinned.
+- **The build tools are pinned too**, because each one runs with the build host's credentials and
+  writes bytes that ship:
+  - **zig**: an exact version, downloaded from `ziglang.org` by URL and verified against a
+    sha256 per host platform (`linux-x86_64`, `linux-aarch64`, `macos-aarch64`) recorded in
+    `@getknext/ffi`; a mismatch fails closed, the same way the patched Bun toolchain is verified.
+    A `zig` already on `PATH` is accepted only if its `zig version` equals the pin.
+  - **`cargo-zigbuild`, `cargo-deny`, `cargo-auditable`, `cargo-cyclonedx`**: installed with
+    `cargo install --locked --version <exact>` (the `--locked` makes `cargo install` use each
+    tool's own published `Cargo.lock`). The exact versions live in one table in
+    `@getknext/ffi`; the `UsageError` for a missing tool (D14 step 2) prints that exact command,
+    and `knext ffi build` refuses a tool whose `--version` differs from the pin.
+  - The four versions and the zig version/hashes are recorded in `provenance.json` (D14 step 4).
+  - Bumps are deliberate PRs that change the table and its test, not a floating `latest`.
+  This is **#2347's scope** (the pin table, the verification, the install command in the message,
+  and a test per tool that a wrong version is refused).
 - `knext ffi init` writes a `deny.toml`, and **`knext ffi build` runs `cargo deny check`** before
   compiling (advisories, licenses, bans, sources — git sources allowlisted to `getknext-dev/knext`
   only), so every image build is gated without touching core's CI generators. Any advisory not in
@@ -546,8 +658,25 @@ a developer machine (D20).
 - Every core change is **inert without `knext.ffi.json`**: the build preflight, the dispatch to
   `@getknext/ffi`, and the conditional `COPY` line. A test builds a fixture app without the file and
   asserts the staged Dockerfile and `native/` tree are byte-identical to today's.
-- The feature is **not** covered by the compatibility credential and says so in its docs. Its gate
-  is D20. No compat dispatch is spent on it (compat dispatches take the runner pool for an hour).
+- The feature is **not** covered by the compatibility credential and says so in its docs.
+- **An app that uses the feature still passes the Bun cells' checks** (#2315 asks for this; jev:
+  compat-smoke capability checks on the e2e fixture **0.89**, a full compat dispatch per change
+  0.08, no gate 0.03). The #2346 kind e2e's Bun fixture zone, the one whose Server Action calls a
+  Rust export, also runs the existing compat-smoke capability checks: the same runner
+  (`apps/file-manager/scripts/compat-smoke.mjs`) and checks the `compat-smoke` CI job runs,
+  red-on-fail, with no `skip()` and no `continue-on-error`. Those checks assert the reference
+  app's routes, so the fixture is `apps/file-manager` **copied into the e2e workspace** with the
+  opt-in added (`knext.ffi.json`, a `rust/` crate, one Server Action calling a Rust export); the
+  reference app itself is not changed. It is built by `knext build` on the default
+  `turbopack × bun` cell, and the runner is pointed at that build's executable through
+  `SERVER_CMD`/`SERVER_PATH`, as the CI job does, before the same build is deployed to kind for
+  the e2e assertions. A failing capability check fails the e2e job. So "opting in does not break
+  the Bun cell" is a red-on-fail check on an app that actually opts in, not an argument.
+- **Why not a full compatibility-suite dispatch:** a dispatch takes the whole runner pool for about
+  an hour, and the official suite builds **Next.js's own fixture apps**, not a knext zone, so it
+  would never load a Rust library: it would spend an hour proving nothing about this feature. The
+  credential cells are unaffected by construction (first bullet), and the smoke checks above run
+  on the app that is affected.
 
 ### D18. Core-vs-app boundary
 
@@ -591,6 +720,7 @@ lists). The registry's marker scan is extended to `packages/ffi/src` so the entr
 - **kind e2e on a Bun zone:** a fixture zone whose Server Action calls a Rust function, built by
   `knext build`, deployed with `knext deploy`, invoked over HTTP; asserts the result, a `RustError`
   and a `RustPanicError` path (pod not restarted), and that the Node runtime is refused at build.
+  The same fixture's build also passes the compat-smoke capability checks, red-on-fail (D17).
 - Docs: one Beta page (no issue, PR or ADR numbers; `content-hygiene.test.ts`).
 
 ## Options considered
@@ -645,15 +775,24 @@ FFI-5 (standalone gates) and an FFI-6 draft can run in parallel from day one.
 
 | Ticket | Scope | Depends on |
 |---|---|---|
-| **#2343 FFI-1** | `crates/knext-ffi` + `crates/knext-ffi-macros`: D3, D4, D5, D6, D7, D8 (Rust half), D9; trybuild, panic and leak tests; `rust-crates.yml` CI | — |
-| **#2344 FFI-2** | `@getknext/ffi`: `knext ffi init/generate/check`, `knext.ffi.json`, scanner, emitter, generated loader (D11–D13, D15 runtime half); core `ffi-dispatch.ts` + help; D18 guard; D19 registry entry | — (its real-library test waits for #2343) |
-| **#2345 FFI-3** | `knext ffi build` (D14 steps 1–5) and core: Node and self-contained refusals (D15), dispatch before the project build, conditional `COPY`, zero-diff test (D17) | #2344 (dispatch protocol, `renderModule`); #2343 for a real library in tests. Core-side work starts at once against a fake loader |
-| **#2346 FFI-4** | musl load matrix on Alpine x64/arm64 with a read-only root; kind e2e of a Server Action calling Rust on a Bun zone; Node refusal asserted (D20) | #2343, #2344, #2345 merged; fixture and workflow skeleton can be written in parallel |
-| **#2347 FFI-5** | supply chain: `cargo deny`, `cargo auditable` (prove it composes with zigbuild), CycloneDX SBOM, `deny.toml` template (D16) | #2345 for the one call site only |
-| **#2348 FFI-6** | user docs page (Beta) and the `knext ffi` CLI reference | #2344, #2345 for the final surface; a draft can start now |
+| **#2343 FFI-1** | `crates/knext-ffi` + `crates/knext-ffi-macros`: D3, D4 (including the transitive `_schema` hash), D5, D6, D7 (64-bit as a decimal string in every JSON position), D8 (Rust half), D9; trybuild, panic and leak tests; `rust-crates.yml` CI | — |
+| **#2344 FFI-2** | `@getknext/ffi`: `knext ffi init/generate/check`, `knext.ffi.json`, scanner, emitter, generated loader (D11–D13, D15 runtime half), including the two-phase multi-argument marshalling (D13 item 6), the per-position 64-bit codec (D7), the `_schema` check at load (D4) and the prerendering `FfiLoadError` (D13 step 5); core `ffi-dispatch.ts` + help; D18 guard; D19 registry entry | — (its real-library test waits for #2343) |
+| **#2345 FFI-3** | `knext ffi build` (D14 steps 1–5) and core: Node and self-contained refusals (D15) in `runProjectBuild`, dispatch before the project build in `build`/`deploy`/`preview`, the standalone-path `writeNativeIntegrityManifest` call in `compileArtifactForDeploy` and the inserted `COPY native /app/.next/standalone/native` line in `stageStandaloneBuildContext` (D14), zero-diff test (D17) | #2344 (dispatch protocol, `renderModule`); #2343 for a real library in tests. Core-side work starts at once against a fake loader |
+| **#2346 FFI-4** | musl load matrix on Alpine x64/arm64 with a read-only root; kind e2e of a Server Action calling Rust on a Bun zone; Node refusal asserted (D20); the same fixture passes the compat-smoke capability checks, red-on-fail (D17) | #2343, #2344, #2345 merged; fixture and workflow skeleton can be written in parallel |
+| **#2347 FFI-5** | supply chain: `cargo deny`, `cargo auditable` (prove it composes with zigbuild), CycloneDX SBOM, `deny.toml` template, and the build-tool pins (zig version + sha256, `cargo install --locked --version` for the four cargo tools) (D16) | #2345 for the one call site only |
+| **#2348 FFI-6** | user docs page (Beta), including the dynamic-contexts-only rule and the two ways to make a route dynamic (D13 step 5), and the `knext ffi` CLI reference | #2344, #2345 for the final surface; a draft can start now |
 
 Dependency edges: #2343 → #2344 (real-library test only) → #2345 (drift check) → #2346;
 #2343 → #2345 (test library); #2345 → #2347 (call site); #2344 + #2345 → #2348.
+
+Shared files, so disjoint ownership holds by section, not by file:
+
+- `apps/docs/content/docs/cli.mdx`: **#2345** owns the text it adds under the existing `knext build`
+  section (the opt-in behaviour and the Node and self-contained refusals); **#2348** owns the new
+  `knext ffi` section. Different sections of one file; whichever merges second rebases.
+- `packages/ffi/src/build.ts`: **#2347** shares exactly one line with **#2345** (the `cargo`
+  invocation that `knext ffi build` wraps with `cargo auditable`). Sequenced: #2347 adds it after
+  #2345 merges; the rest of #2347 lives in `supply-chain.ts`.
 
 Founder actions, not tickets: publishing `@getknext/ffi` to npm and the crates to crates.io, which
 also moves D3's git `rev` pin to a crates.io version.
