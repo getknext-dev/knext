@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /**
  * Mutation proof for the @getknext/ffi generator's name hygiene, 64-bit JSON
- * refusal, TSDoc accuracy and output hygiene (issue #2344, PR #2351 round 2).
+ * refusal, TSDoc accuracy, output hygiene, the type namespace and object keys
+ * (issue #2344, PR #2351 rounds 2-3).
  *
  * Two guards, two specs:
  *
@@ -157,6 +158,38 @@ const HYGIENE = [
     anchor: '  if (unchecked.length > 0) {',
     replacement: '  if (false) {',
   },
+  // ── type namespace and object keys (round 3) ────────────────────────────
+  {
+    id: 'H15',
+    subject: 'manifest',
+    claim:
+      'a record or enum named `string` is accepted (`export interface string` does not compile)',
+    anchor: "  'object',\n  'string',\n  'symbol',",
+    replacement: "  'object',\n  'symbol',",
+  },
+  {
+    id: 'H16',
+    subject: 'manifest',
+    claim:
+      'a type named `keyof` is accepted (`p: keyof` does not parse): caught only by type-checking every TypeScript keyword',
+    anchor: "  'keyof',",
+    replacement: '',
+  },
+  {
+    id: 'H17',
+    subject: 'manifest',
+    claim:
+      'a field named `__proto__` is accepted (an object literal sets the prototype and drops it)',
+    anchor: "  if (!FIELD.test(name) || name === '__proto__') {",
+    replacement: '  if (!FIELD.test(name)) {',
+  },
+  {
+    id: 'H18',
+    subject: 'manifest',
+    claim: 'record field names are not checked at all again',
+    anchor: '      checkField(fl.name);',
+    replacement: '',
+  },
 ];
 
 const LOADER = [
@@ -227,6 +260,14 @@ const LOADER = [
     anchor: '  return (v as unknown[]).map((x, i) => f(x, \\`\\${at}[\\${i}]\\`));',
     replacement: '  return (v as unknown[]).map((x, i) => f(x, at));',
   },
+  {
+    id: 'L09',
+    subject: 'manifest',
+    claim:
+      'field names are held to the identifier word list: `new`, `type` (Rust r#new, r#type) are refused, so keyword and Object.prototype-named fields stop round-tripping',
+    anchor: "  if (!FIELD.test(name) || name === '__proto__') {",
+    replacement: "  if (!FIELD.test(name) || name === '__proto__' || RESERVED.has(name)) {",
+  },
 ];
 
 // The subjects are inline literals, not a shared constant: the lane's
@@ -242,12 +283,14 @@ const loader = createGuardProver({
   subjects: { render: 'packages/ffi/src/render.ts', manifest: 'packages/ffi/src/manifest.ts' },
 });
 
-console.log('=== mutation proof: @getknext/ffi generator (#2344, PR #2351 round 2) ===');
+console.log('=== mutation proof: @getknext/ffi generator (#2344, PR #2351 rounds 2-3) ===');
 hygiene.preflight(HYGIENE);
 loader.preflight(LOADER);
 declareMutations(HYGIENE.length + LOADER.length);
 
-console.log('\n=== hygiene spec (scan, TSDoc, internal references) ===');
+console.log(
+  '\n=== hygiene spec (scan, full type-check, field keys, TSDoc, internal references) ===',
+);
 hygiene.baseline();
 hygiene.proveCanSeeRed({ subject: 'manifest', anchor: "  'Record',", replacement: '' });
 for (const m of HYGIENE) {

@@ -38,8 +38,8 @@ describe('scanManifest — record counts', () => {
   it('many records, sorted by name whatever their order in the file', () => {
     const m = scanManifest(blob([...KITCHEN_SINK].reverse()));
     expect(m.fns.map((f) => f.name)).toEqual([...m.fns.map((f) => f.name)].sort());
-    expect(m.fns).toHaveLength(22);
-    expect(m.records.map((r) => r.name)).toEqual(['Inner', 'Point']);
+    expect(m.fns).toHaveLength(23);
+    expect(m.records.map((r) => r.name)).toEqual(['Inner', 'Odd', 'Point']);
     expect(m.enums.map((e) => e.name)).toEqual(['Color']);
   });
 

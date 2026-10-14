@@ -13,10 +13,11 @@
  */
 
 import { describe, expect, it } from 'bun:test';
+import { join } from 'node:path';
 import ts from 'typescript';
 import { type Manifest, RESERVED, scanManifest } from '../manifest';
 import { renderModule } from '../render';
-import { blob, D, enumRecord, fn, KITCHEN_SINK, record } from './helpers';
+import { blob, D, enumRecord, fn, KITCHEN_SINK, PKG_DIR, record } from './helpers';
 
 const OPTS = { libName: 'zone', crate: 'rust' };
 const render = (records: Record<string, unknown>[]) =>
@@ -219,6 +220,244 @@ describe('generated names never collide with Rust names', () => {
         `"${name}" cannot be a generated function name`,
       );
     }
+  });
+});
+
+describe('whatever legal names Rust uses, the module type-checks with zero diagnostics', () => {
+  const APP = join(PKG_DIR, 'fixtures', 'app');
+
+  /**
+   * Type-check modules with the TypeScript compiler under the fixture app's
+   * own tsconfig (strict, Node types only, the dom + esnext libs, what a
+   * Next.js app has) and return every diagnostic, by module.
+   */
+  function typecheck(modules: Record<string, string>): string[] {
+    const cfg = ts.readConfigFile(join(APP, 'tsconfig.json'), ts.sys.readFile);
+    const parsed = ts.parseJsonConfigFileContent(cfg.config, ts.sys, APP);
+    const files = new Map(
+      Object.entries(modules).map(([n, src]) => [join(APP, 'src', 'adversarial', `${n}.ts`), src]),
+    );
+    const host = ts.createCompilerHost(parsed.options);
+    const getSourceFile = host.getSourceFile.bind(host);
+    const fileExists = host.fileExists.bind(host);
+    const readFile = host.readFile.bind(host);
+    host.getSourceFile = (f, lang, ...rest) => {
+      const src = files.get(f);
+      return src === undefined
+        ? getSourceFile(f, lang, ...rest)
+        : ts.createSourceFile(f, src, lang, true, ts.ScriptKind.TS);
+    };
+    host.fileExists = (f) => files.has(f) || fileExists(f);
+    host.readFile = (f) => files.get(f) ?? readFile(f);
+    const program = ts.createProgram(
+      [...files.keys(), join(APP, 'server-only.d.ts')],
+      parsed.options,
+      host,
+    );
+    return ts.getPreEmitDiagnostics(program).map((d) => {
+      const where = d.file ? `${d.file.fileName.split('/').at(-1)}: ` : '';
+      const line =
+        d.file && d.start !== undefined
+          ? `${d.file.text.split('\n')[d.file.getLineAndCharacterOfPosition(d.start).line]?.trim()} -> `
+          : '';
+      return `${where}${line}TS${d.code} ${ts.flattenDiagnosticMessageText(d.messageText, ' ')}`;
+    });
+  }
+
+  /**
+   * The names to try, none enumerated by hand: every TypeScript keyword (from
+   * the compiler's own token table), every name an object inherits from
+   * Object.prototype or a function from Function.prototype, and every
+   * identifier the generated module itself mentions (its helpers, parameters,
+   * imports, the globals and lib types it references, the properties it reads).
+   */
+  const candidates = (() => {
+    const names = new Set<string>();
+    for (let k = ts.SyntaxKind.FirstKeyword; k <= ts.SyntaxKind.LastKeyword; k++) {
+      const s = ts.tokenToString(k);
+      if (s) names.add(s);
+    }
+    for (const n of Object.getOwnPropertyNames(Object.prototype)) names.add(n);
+    for (const n of Object.getOwnPropertyNames(Function.prototype)) names.add(n);
+    for (const n of Object.getOwnPropertyNames(class {})) names.add(n); // + prototype
+    const sink = renderModule(scanManifest(blob(KITCHEN_SINK)), OPTS);
+    const sf = ts.createSourceFile('/m.ts', sink, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+    const walk = (n: ts.Node): void => {
+      if (ts.isIdentifier(n) && !n.text.startsWith('$')) names.add(n.text);
+      ts.forEachChild(n, walk);
+    };
+    walk(sf);
+    // The fixed names the role manifests below use themselves.
+    for (const n of ['Rec', 'Inner', 'Ev', 'p', 'q', 'A', 'B']) names.delete(n);
+    return [...names].sort();
+  })();
+
+  /** Does the scanner accept this manifest? Only a ManifestError counts as a refusal. */
+  const accepts = (records: Record<string, unknown>[]): boolean => {
+    try {
+      scanManifest(blob(records));
+      return true;
+    } catch (err) {
+      if ((err as Error).name !== 'ManifestError') throw err;
+      expect((err as Error).message).toContain('rename it in Rust');
+      return false;
+    }
+  };
+
+  const SCALAR_MIX = [
+    D.rec('Rec'),
+    D.t('string'),
+    D.t('i64'),
+    D.vec(D.t('u64')),
+    D.opt(D.rec('Rec')),
+    D.t('bytes'),
+    D.t('i32'),
+    D.t('f64'),
+    D.t('bool'),
+    D.en('Ev'),
+  ];
+  const mix = (i: number) => SCALAR_MIX[i % SCALAR_MIX.length] as Record<string, unknown>;
+  const BASE = [
+    record('Rec', [
+      ['id', D.t('u64')],
+      ['inner', D.opt(D.rec('Inner'))],
+    ]),
+    record('Inner', [['n', D.t('i64')]]),
+    enumRecord('Ev', ['A', 'B']),
+  ];
+
+  /** Per role, the one-name manifest that tries `n` there. */
+  const ROLES: Record<string, (n: string, i: number) => Record<string, unknown>[]> = {
+    function: (n, i) => [fn(n, [['p', mix(i)]], mix(i + 1)), ...BASE],
+    argument: (n, i) => [fn(`a${i}`, [[n, mix(i)]], mix(i + 3)), ...BASE],
+    record: (n, i) => [
+      fn(
+        `r${i}`,
+        [
+          ['p', D.rec(n)],
+          ['q', D.vec(D.rec(n))],
+        ],
+        D.opt(D.rec(n)),
+      ),
+      record(n, [
+        ['id', D.t('u64')],
+        ['tags', D.vec(D.t('i64'))],
+        ['inner', D.opt(D.rec('Inner'))],
+      ]),
+      ...BASE,
+    ],
+    enum: (n, i) => [
+      fn(`e${i}`, [['p', D.en(n)]], D.vec(D.en(n))),
+      enumRecord(n, ['A', 'B']),
+      ...BASE,
+    ],
+    field: (n, i) => [
+      fn('echo', [['p', D.rec(`F${i}`)]], D.rec(`F${i}`)),
+      record(`F${i}`, [[n, mix(i)]]),
+      ...BASE,
+    ],
+  };
+
+  /** Per role: the accepted names, rendered together in one module (all at once, so they also meet each other). */
+  const accepted: Record<string, string[]> = {};
+  const modules: Record<string, string> = {};
+  for (const [role, one] of Object.entries(ROLES)) {
+    const ok = candidates.filter((n, i) => accepts(one(n, i)));
+    accepted[role] = ok;
+    const all: Record<string, unknown>[] =
+      role === 'function'
+        ? ok.map((n, i) => fn(n, [['p', mix(i)]], mix(i + 1)))
+        : role === 'argument'
+          ? [
+              ...ok.map((n, i) => fn(`a${i}`, [[n, mix(i)]], mix(i + 3))),
+              fn(
+                'all',
+                ok.map((n, i): [string, Record<string, unknown>] => [n, mix(i)]),
+                D.t('unit'),
+              ),
+            ]
+          : role === 'record'
+            ? ok.flatMap((n, i) =>
+                (ROLES.record as (n: string, i: number) => Record<string, unknown>[])(n, i).slice(
+                  0,
+                  2,
+                ),
+              )
+            : role === 'enum'
+              ? ok.flatMap((n, i) => [
+                  fn(`e${i}`, [['p', D.en(n)]], D.vec(D.en(n))),
+                  enumRecord(n, ['A', 'B']),
+                ])
+              : [
+                  fn('echo', [['p', D.rec('Fld')]], D.rec('Fld')),
+                  record(
+                    'Fld',
+                    ok.map((n, i): [string, Record<string, unknown>] => [n, mix(i)]),
+                  ),
+                ];
+    modules[role] = renderModule(scanManifest(blob([...all, ...BASE])), OPTS);
+  }
+
+  it('the candidates and the acceptance are not vacuous', () => {
+    expect(candidates.length).toBeGreaterThan(150);
+    for (const n of ['string', 'type', 'constructor', 'toString', 'Uint8Array', 'getUint32', 'v']) {
+      expect(candidates).toContain(n);
+    }
+    // Keywords are legal property names and Rust raw identifiers (r#type) arrive bare.
+    for (const n of ['type', 'new', 'class', 'constructor', 'toString', 'prototype']) {
+      expect(accepted.field).toContain(n);
+    }
+    for (const role of ['function', 'argument', 'record', 'enum']) {
+      expect(accepted[role]?.length ?? 0, role).toBeGreaterThan(50);
+    }
+  });
+
+  it('the type-check can see red: a TypeScript built-in type name declared as an interface is a diagnostic', () => {
+    const diags = typecheck({ red: 'export interface string {\n  id: number;\n}\n' });
+    expect(diags.some((d) => d.includes('TS2427'))).toBe(true);
+  });
+
+  it('the committed golden (the kitchen sink) type-checks with zero diagnostics', () => {
+    expect(typecheck({ sink: renderModule(scanManifest(blob(KITCHEN_SINK)), OPTS) })).toEqual([]);
+  });
+
+  it('every accepted function, argument, record, enum and field name renders a module with zero diagnostics', () => {
+    expect(typecheck(modules)).toEqual([]);
+  }, 60_000);
+
+  it('a TypeScript built-in type name is refused as a record or enum name, naming it', () => {
+    for (const n of [
+      'string',
+      'number',
+      'boolean',
+      'bigint',
+      'symbol',
+      'object',
+      'unknown',
+      'never',
+      'any',
+    ]) {
+      expect(() => render([fn('f', [], D.t('unit')), record(n, [['id', D.t('u64')]])]), n).toThrow(
+        `"${n}" cannot be a generated type name: rename it in Rust`,
+      );
+      expect(() => render([fn('f', [], D.t('unit')), enumRecord(n, ['A'])]), n).toThrow(
+        `"${n}" cannot be a generated type name: rename it in Rust`,
+      );
+    }
+  });
+});
+
+describe('a record field always becomes an own property of the object', () => {
+  it('a field named __proto__ is refused at generate time (an object literal would set the prototype and drop the field)', () => {
+    expect(() =>
+      render([fn('f', [], D.t('unit')), record('P', [['__proto__', D.t('string')]])]),
+    ).toThrow('"__proto__" cannot be a generated field name: rename it in Rust');
+  });
+
+  it('a field name that is not an identifier is refused, naming it', () => {
+    expect(() => render([fn('f', [], D.t('unit')), record('P', [['a-b', D.t('string')]])])).toThrow(
+      '"a-b" cannot be a generated field name: rename it in Rust',
+    );
   });
 });
 
