@@ -83,7 +83,9 @@ a non-null pointer for an empty typed array; the generated wrapper passes NULL).
 **Status** (`i32`): `0` OK, `1` `Err` from a `Result` (message = `e.to_string()`),
 `2` panic (message = the panic payload, or `panic with a non-string payload`),
 `3` invalid input (bad UTF-8, or JSON that does not decode as the declared
-type; the message names the argument).
+type; the message names the argument), or a JSON return value that cannot be
+encoded (a non-finite float; the message names its path, e.g.
+`result.samples[2]`).
 
 **Out slot** (16 bytes, caller-owned): a scalar return at offset 0, little-endian,
 native width (`bool` is one byte, 0 or 1); a `String`/`Vec<u8>`/JSON return,
@@ -137,8 +139,13 @@ refused. Field and variant names cross verbatim. **Every 64-bit integer in any
 JSON position** (a record field, an `Option`/`Vec` element at any depth, a
 top-level `Option<u64>` or `Vec<i64>`) is a **decimal string**, and a JSON number
 there is refused (status 3). Inside JSON, `Vec<u8>` is an array of numbers.
-Floats must be finite (a non-finite float serializes as `null`, which the
-generated decoder refuses).
+Floats must be finite in **every** JSON position, `Option` included (JSON has
+no NaN or Infinity, and the `null` it would become reads back as `None`): the
+generated wrapper refuses one in an argument with a `TypeError` naming its path
+before the call, the shim refuses one in a return value with status 3 naming
+its path, and a number that does not fit a finite `f32` is refused on the way
+in (status 3). A plain top-level `f32`/`f64` argument or return is not JSON and
+crosses as a raw number, NaN and Infinity included.
 
 ## Embedded manifest (ADR-0069 D5)
 

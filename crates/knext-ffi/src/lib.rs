@@ -52,7 +52,9 @@ pub const STATUS_OK: i32 = 0;
 pub const STATUS_ERR: i32 = 1;
 /// Shim status: the function panicked; the out slot holds the panic message.
 pub const STATUS_PANIC: i32 = 2;
-/// Shim status: an argument could not be decoded (bad UTF-8 or JSON).
+/// Shim status: an argument could not be decoded (bad UTF-8 or JSON), or a
+/// JSON return value cannot be encoded (a non-finite float); the message names
+/// the argument or the path in the result.
 pub const STATUS_INVALID_INPUT: i32 = 3;
 
 /// Frees a buffer a shim returned in its out slot (`out[0]` = pointer,
@@ -89,19 +91,22 @@ pub mod __rt {
     /// An argument that could not be decoded: status 3.
     pub struct Invalid(pub String);
 
-    /// How a successful return value is written into the out slot.
+    /// How a successful return value is written into the out slot. `Err` is
+    /// a value that cannot cross (a non-finite float inside JSON): status 3,
+    /// with the out slot holding its message instead.
     pub trait Lower {
         /// # Safety
         /// `out` must point to a writable `[u64; 2]`.
-        unsafe fn lower(self, out: Out);
+        unsafe fn lower(self, out: Out) -> Result<(), Invalid>;
     }
 
     macro_rules! by_value {
         ($($t:ty),*) => {$(
             impl Lower for $t {
                 #[inline(always)]
-                unsafe fn lower(self, out: Out) {
+                unsafe fn lower(self, out: Out) -> Result<(), Invalid> {
                     unsafe { std::ptr::write_unaligned(out as *mut $t, self) };
+                    Ok(())
                 }
             }
         )*};
@@ -111,31 +116,41 @@ pub mod __rt {
 
     impl Lower for () {
         #[inline(always)]
-        unsafe fn lower(self, _out: Out) {}
+        unsafe fn lower(self, _out: Out) -> Result<(), Invalid> {
+            Ok(())
+        }
     }
     impl Lower for String {
         #[inline(always)]
-        unsafe fn lower(self, out: Out) {
+        unsafe fn lower(self, out: Out) -> Result<(), Invalid> {
             unsafe { write_buf(out, self.into_bytes()) };
+            Ok(())
         }
     }
     impl Lower for Vec<u8> {
         #[inline(always)]
-        unsafe fn lower(self, out: Out) {
+        unsafe fn lower(self, out: Out) -> Result<(), Invalid> {
             unsafe { write_buf(out, self) };
+            Ok(())
         }
     }
 
     /// A return value that crosses as JSON (records, enums, Option, Vec<T≠u8>).
     pub struct Json<T>(pub T);
     impl<T: Wire> Lower for Json<T> {
-        unsafe fn lower(self, out: Out) {
+        unsafe fn lower(self, out: Out) -> Result<(), Invalid> {
             let mut buf = Vec::new();
             let mut ser = serde_json::Serializer::new(&mut buf);
             self.0
                 .ser(&mut ser)
-                .expect("knext-ffi: serializing a return value to JSON failed");
+                .map_err(|e| crate::wire::at("result", e))
+                .map_err(|e| {
+                    Invalid(format!(
+                        "knext-ffi: the return value cannot cross as JSON: {e}"
+                    ))
+                })?;
             unsafe { write_buf(out, buf) };
+            Ok(())
         }
     }
 
@@ -223,10 +238,13 @@ pub mod __rt {
         F: FnOnce() -> Result<Result<R, String>, Invalid>,
     {
         let r = catch_unwind(AssertUnwindSafe(move || match f() {
-            Ok(Ok(v)) => {
-                unsafe { v.lower(out) };
-                STATUS_OK
-            }
+            Ok(Ok(v)) => match unsafe { v.lower(out) } {
+                Ok(()) => STATUS_OK,
+                Err(Invalid(msg)) => {
+                    unsafe { write_buf(out, msg.into_bytes()) };
+                    STATUS_INVALID_INPUT
+                }
+            },
             Ok(Err(msg)) => {
                 unsafe { write_buf(out, msg.into_bytes()) };
                 STATUS_ERR
@@ -264,7 +282,7 @@ pub mod __rt {
     #[diagnostic::on_unimplemented(
         message = "`{Self}` is not a #[knext_ffi::record] type",
         label = "an exported function can only name records and unit enums declared with #[knext_ffi::record]",
-        note = "add #[knext_ffi::record] to `{Self}`; supported types are listed in the knext-ffi type table (ADR-0069 D6, crates/README.md)"
+        note = "add #[knext_ffi::record] to `{Self}`; supported types are listed at https://knext-platform.dev/docs/rust-in-process#type-mapping"
     )]
     pub trait KnextSchema: Wire {
         const SCHEMA: &'static Schema;

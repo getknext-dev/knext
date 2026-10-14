@@ -1,4 +1,4 @@
-error: knext-ffi: `async fn f` is not supported: bun:ffi calls are synchronous; supported types are listed in the knext-ffi type table (ADR-0069 D6, crates/README.md)
+error: knext-ffi: `async fn f` is not supported: bun:ffi calls are synchronous; supported types are listed at https://knext-platform.dev/docs/rust-in-process#type-mapping
  --> tests/ui/fail/async_fn.rs:4:5
   |
 4 | pub async fn f() -> i32 {

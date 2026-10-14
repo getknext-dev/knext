@@ -9,7 +9,7 @@ help: the trait `knext_ffi::__rt::KnextSchema` is not implemented for `Plain`
   |
 3 | pub struct Plain {
   | ^^^^^^^^^^^^^^^^
-  = note: add #[knext_ffi::record] to `Plain`; supported types are listed in the knext-ffi type table (ADR-0069 D6, crates/README.md)
+  = note: add #[knext_ffi::record] to `Plain`; supported types are listed at https://knext-platform.dev/docs/rust-in-process#type-mapping
 
 error[E0277]: the trait bound `Plain: Wire` is not satisfied
  --> tests/ui/fail/not_a_record.rs:8:13

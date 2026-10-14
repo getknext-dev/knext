@@ -1,4 +1,4 @@
-error: knext-ffi: data-carrying enum variant `Shape::Circle` is not supported: only unit variants cross (as their name); supported types are listed in the knext-ffi type table (ADR-0069 D6, crates/README.md)
+error: knext-ffi: data-carrying enum variant `Shape::Circle` is not supported: only unit variants cross (as their name); supported types are listed at https://knext-platform.dev/docs/rust-in-process#type-mapping
  --> tests/ui/fail/data_enum.rs:5:5
   |
 5 |     Circle(f64),
@@ -15,7 +15,7 @@ help: the trait `knext_ffi::__rt::KnextSchema` is not implemented for `Shape`
    |
  4 | pub enum Shape {
    | ^^^^^^^^^^^^^^
-   = note: add #[knext_ffi::record] to `Shape`; supported types are listed in the knext-ffi type table (ADR-0069 D6, crates/README.md)
+   = note: add #[knext_ffi::record] to `Shape`; supported types are listed at https://knext-platform.dev/docs/rust-in-process#type-mapping
 
 error[E0277]: the trait bound `Shape: Wire` is not satisfied
   --> tests/ui/fail/data_enum.rs:10:13

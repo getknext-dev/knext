@@ -86,6 +86,8 @@ ECHO(SYM_echo_point)
 ECHO(SYM_echo_odd)
 ECHO(SYM_ids)
 ECHO(SYM_maybe)
+ECHO(SYM_opt_f)
+ECHO(SYM_floats)
 
 int32_t SYM_echo_bytes(const uint8_t *p, size_t n, uint64_t *out) {
   last_null = p == NULL;

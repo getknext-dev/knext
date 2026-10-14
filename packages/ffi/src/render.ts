@@ -25,9 +25,12 @@
  * - The spike's binding rules (D13 item 6): `ptr()` only of an explicit
  *   `ArrayBuffer`; (ptr, len) read as two u32 halves; every (ptr, len)
  *   argument encoded into one scratch buffer BEFORE any pointer is computed
- *   from it; an empty one passed as an empty `Uint8Array` (NULL); integer
- *   arguments range-checked; every returned buffer copied, then freed in a
- *   `finally`.
+ *   from it; an empty one passed as JavaScript `null` (NULL: Bun passes an
+ *   empty `Uint8Array` as a non-null pointer); integer arguments range-checked;
+ *   every returned buffer copied, then freed in a `finally`.
+ * - JSON carries no NaN or Infinity (`JSON.stringify` writes `null`, which
+ *   Rust would read as `None`), so a non-finite float anywhere inside a JSON
+ *   argument is a `TypeError` naming its path, before the call.
  */
 
 import {
@@ -157,21 +160,48 @@ class Emitter {
 
   constructor(private readonly records: Map<string, RecordType>) {}
 
-  /** TS value -> JSON-ready value (64-bit integers become decimal strings, D7). */
-  enc(d: TypeDesc, expr: string, depth: number): Expr {
+  /** Whether a JSON value of type `d` can hold a float, at any depth. */
+  floaty(d: TypeDesc, seen: Set<string> = new Set()): boolean {
+    if (d.t === 'f32' || d.t === 'f64') return true;
+    if (d.t === 'option' || d.t === 'vec') return this.floaty(d.of, seen);
+    if (d.t !== 'record' || seen.has(d.name)) return false;
+    seen.add(d.name);
+    return (this.records.get(d.name)?.fields ?? []).some((f) => this.floaty(f.type, seen));
+  }
+
+  /**
+   * TS value -> JSON-ready value (64-bit integers become decimal strings, D7;
+   * a non-finite float is a TypeError, as JSON would turn it into `null`).
+   * `fn`/`at` are code for the export's name and the value's path, used only
+   * on that error path (a container that holds no float gets neither).
+   */
+  enc(d: TypeDesc, expr: string, fn: string, at: string, depth: number): Expr {
     if (is64(d.t)) {
       this.used.add('$s64');
       return { code: `$s64(${expr})`, plain: false };
     }
+    if (d.t === 'f32' || d.t === 'f64') {
+      this.used.add('$efin');
+      return {
+        code: `(Number.isFinite(${expr}) ? ${expr} : $efin(${fn}, ${at}, ${expr}))`,
+        plain: false,
+      };
+    }
     if (d.t === 'record') {
       this.needEncoder(d.name);
-      return { code: `$e_${d.name}(${expr})`, plain: false };
+      const args = this.floaty(d) ? `${fn}, ${at}, ${expr}` : expr;
+      return { code: `$e_${d.name}(${args})`, plain: false };
     }
     if (d.t === 'option' || d.t === 'vec') {
       const x = `$x${depth}`;
-      const inner = this.enc(d.of, x, depth + 1);
+      const i = `$i${depth}`;
+      const indexed = d.t === 'vec' && this.floaty(d.of);
+      const inner = this.enc(d.of, x, fn, indexed ? `${at} + '[' + ${i} + ']'` : at, depth + 1);
       if (inner.plain) return { code: expr, plain: true };
-      if (d.t === 'vec') return { code: `${expr}.map((${x}) => ${inner.code})`, plain: false };
+      if (d.t === 'vec') {
+        const params = indexed ? `${x}, ${i}` : x;
+        return { code: `${expr}.map((${params}) => ${inner.code})`, plain: false };
+      }
       this.used.add('$opt');
       return { code: `$opt(${expr}, (${x}) => ${inner.code})`, plain: false };
     }
@@ -213,7 +243,7 @@ class Emitter {
   private needEncoder(name: string): void {
     if (this.encoders.has(name)) return;
     this.encoders.add(name);
-    for (const f of this.records.get(name)?.fields ?? []) this.enc(f.type, 'x', 0);
+    for (const f of this.records.get(name)?.fields ?? []) this.enc(f.type, 'x', 'fn', 'at', 0);
   }
 
   private needDecoder(name: string): void {
@@ -224,10 +254,12 @@ class Emitter {
 
   encoder(r: RecordType): string {
     const fields = r.fields.map(
-      (f) => `${key(f.name)}: ${this.enc(f.type, access('v', f.name), 0).code}`,
+      (f) =>
+        `${key(f.name)}: ${this.enc(f.type, access('v', f.name), 'fn', `at + ${q(`.${f.name}`)}`, 0).code}`,
     );
+    const params = this.floaty({ t: 'record', name: r.name }) ? 'fn: string, at: string, ' : '';
     return [
-      `function $e_${r.name}(v: ${r.name}): unknown {`,
+      `function $e_${r.name}(${params}v: ${r.name}): unknown {`,
       `  return { ${fields.join(', ')} };`,
       '}',
     ].join('\n');
@@ -291,7 +323,9 @@ class Emitter {
         return;
       }
       buffers++;
-      const value = isJson(a.type) ? `JSON.stringify(${this.enc(a.type, a.name, 0).code})` : a.name;
+      const value = isJson(a.type)
+        ? `JSON.stringify(${this.enc(a.type, a.name, name, q(a.name), 0).code})`
+        : a.name;
       lines.push(`  const $o${i} = $put(${value});`);
       lines.push(`  const $n${i} = $last;`);
       call.push(`$n${i} === 0 ? null : $scratch + $o${i}`, `$n${i}`);
@@ -339,7 +373,7 @@ function orList(items: string[]): string {
     : `${items.slice(0, -1).join(', ')} or ${items.at(-1)}`;
 }
 
-function fnDoc(f: FnRecord): string {
+function fnDoc(f: FnRecord, e: Emitter): string {
   const sig = `${f.name}(${f.args.map((a) => `${a.name}: ${a.rust}`).join(', ')}) -> ${f.ret.rust}`;
   const extra = [`Rust: \`${noClose(sig)}\``, ''];
   if (f.err) {
@@ -359,6 +393,14 @@ function fnDoc(f: FnRecord): string {
   if (unchecked.length > 0) {
     extra.push(
       `@throws {RustError} ("invalid input: …") when ${orList(unchecked)} is a value Rust cannot decode: record, enum, Option and Vec arguments are not checked in JavaScript.`,
+    );
+  }
+  const floaty = f.args
+    .filter((a) => isJson(a.type) && e.floaty(a.type))
+    .map((a) => `\`${a.name}\``);
+  if (floaty.length > 0) {
+    extra.push(
+      `@throws {TypeError} when a number inside ${orList(floaty)} is NaN or Infinity (JSON cannot carry them).`,
     );
   }
   extra.push(
@@ -576,8 +618,7 @@ function $resolve(): string {
   }
   throw new FfiLoadError(
     \`knext ffi: cannot find the Rust library \${file} for \${triple}. Tried:\\n\${tried.map((p) => \`  \${p}\`).join('\\n')}\\n\` +
-      'Images built by \`knext build\` stage it beside the server (knext ffi build); in development, run \`knext ffi generate\`. ' +
-      $PRERENDER,
+      'Images built by \`knext build\` stage it beside the server (knext ffi build); in development, run \`knext ffi generate\`.',
   );
 }
 
@@ -730,6 +771,13 @@ function $s64(v: bigint): string {
   }
   return v;
 }`,
+    $efin: `/** Called only for a value that is not a finite number: a NaN or Infinity cannot cross as JSON. */
+function $efin(fn: string, at: string, v: unknown): unknown {
+  if (typeof v === 'number') {
+    throw new TypeError(\`\${fn}(): argument "\${at}" must be a finite number (JSON has no NaN or Infinity), got \${String(v)}\`);
+  }
+  return v;
+}`,
     $opt: `function $opt<T, U>(v: T | null | undefined, f: (x: T) => U): U | null {
   return v === null || v === undefined ? null : f(v);
 }`,
@@ -761,7 +809,7 @@ export function renderModule(manifest: Manifest, options: RenderOptions): string
   const records = new Map(manifest.records.map((r) => [r.name, r]));
   const e = new Emitter(records);
 
-  const fnBlocks = manifest.fns.map((f) => `${fnDoc(f)}\n${e.fn(f)}`);
+  const fnBlocks = manifest.fns.map((f) => `${fnDoc(f, e)}\n${e.fn(f)}`);
   // Record codecs, in name order (the encoder/decoder sets grow transitively while emitting).
   const codecs: string[] = [];
   for (const r of manifest.records) {

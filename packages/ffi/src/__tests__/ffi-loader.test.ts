@@ -6,9 +6,11 @@
  * 64-bit values above 2^53, JSON records, errors, panics, frees).
  *
  * The library is fixtures/abi-v1/fixture.c — ABI v1 implemented in C and
- * built with the system `cc` — carrying the kitchen-sink manifest. The real
- * Rust library joins once the knext-ffi crates are in the tree:
- * TODO(#2344): scan and call a library built from a fixture crate (#2343).
+ * built with the system `cc` — carrying the kitchen-sink manifest. The same
+ * generated code is scanned from and called against a REAL Rust library (the
+ * crates/knext-ffi-fixture cdylib, and the crate `knext ffi init` writes) by
+ * crates/harness/ffi-generated.ts, in the Rust crates CI lane: that half needs
+ * cargo, which this suite's checkout does not provide.
  *
  * Each scenario runs in a fresh process — `bun --conditions=react-server`
  * (Next's server condition, so `import 'server-only'` resolves), or `node`
@@ -471,6 +473,47 @@ describe('path 1 — native/ffi/<triple> beside the executable, integrity requir
     expect(r.status).toBe(0);
   });
 
+  it('a NaN or ±Infinity in ANY JSON argument position (Option, Vec, record field) is a TypeError naming its path, never a silent null', () => {
+    const exe = image();
+    const r = inBun(
+      (m, c, fixture) => {
+        const p = {
+          id: BigInt(1),
+          x: 1.5,
+          label: 'p',
+          tags: [],
+          inner: null,
+          color: 'Red',
+        };
+        return {
+          ok: [m.opt_f(1.5), m.opt_f(null), m.floats([0.5, null, -2])],
+          optNaN: c(() => m.opt_f(Number.NaN)),
+          optInf: c(() => m.opt_f(Number.POSITIVE_INFINITY)),
+          vecNegInf: c(() => m.floats([1, null, Number.NEGATIVE_INFINITY])),
+          field: c(() => m.echo_point({ ...p, x: Number.POSITIVE_INFINITY })),
+          afterRefusals: m.opt_f(2.5),
+          live: fixture.fixture_live(),
+        };
+      },
+      { FAKE_EXEC: exe, LIBPATH: join(exe, '..', 'native', 'ffi', TRIPLE, LIB) },
+    );
+    const refused = (fn: string, at: string, got: string) => ({
+      cls: 'TypeError',
+      message: `${fn}(): argument "${at}" must be a finite number (JSON has no NaN or Infinity), got ${got}`,
+      fn: '<undefined>',
+    });
+    expect(r.result, r.stderr).toEqual({
+      ok: [1.5, null, [0.5, null, -2]],
+      optNaN: refused('opt_f', 'x', 'NaN'),
+      optInf: refused('opt_f', 'x', 'Infinity'),
+      vecNegInf: refused('floats', 'xs[2]', '-Infinity'),
+      field: refused('echo_point', 'p.x', 'Infinity'),
+      afterRefusals: 2.5,
+      live: '0n',
+    });
+    expect(r.status).toBe(0);
+  });
+
   it('a 64-bit integer that arrives as a JSON number is a RustError naming its path, and the buffer is still freed', () => {
     const exe = image();
     const r = inBun(
@@ -624,7 +667,9 @@ describe('path 2 — the development fallback, only when NODE_ENV !== production
     expect(out.message).toContain(join(exe, '..', 'native', 'ffi', TRIPLE, LIB));
     expect(out.message).not.toContain(join('rust', 'target'));
     expect(out.message).toContain('knext ffi build');
-    expect(out.message).toContain('force-dynamic');
+    // At request time the call is not prerendering: the message must not say it is.
+    expect(out.message).not.toContain('prerender');
+    expect(out.message).not.toContain('force-dynamic');
   });
 
   it('in development with no build at all, the error lists the staged path and both development paths', () => {
@@ -640,6 +685,18 @@ describe('path 2 — the development fallback, only when NODE_ENV !== production
 });
 
 describe('prerendering (ADR-0069 round 2): calls work in dynamic contexts only', () => {
+  it('during next build with no library anywhere, the error is the prerender one, not "cannot find the Rust library"', () => {
+    const r = inBun((m, c) => c(() => m.greet('x')), {
+      FAKE_EXEC: join(emptyDir('no-image'), 'server'),
+      NEXT_PHASE: 'phase-production-build',
+    });
+    const out = r.result as { cls: string; message: string };
+    expect(out.cls, r.stderr).toBe('FfiLoadError');
+    expect(out.message).toContain('This call happened while `next build` was prerendering');
+    expect(out.message).toContain('force-dynamic');
+    expect(out.message).not.toContain('cannot find the Rust library');
+  });
+
   it('NEXT_PHASE=phase-production-build wins over a perfectly good library', () => {
     const r = inBun((m, c) => c(() => m.greet('x')), {
       FAKE_EXEC: image(),
