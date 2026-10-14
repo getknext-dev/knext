@@ -1095,24 +1095,35 @@ once the breaker closes. Amendment 4's shape, applied to stamps:
   `<prefix>:uc:tags` is skipped). Wider than needed, never stale.
 - **Off the request path, no storm.** Started by the first connection the handler gets with the
   breaker closed, or by an unref'd probe timer at the moment it closes (the shared core now exposes
-  how long until then). One run at a time, 100 tags per `HSET` through the breaker-aware wrapper;
-  the first fault stops the run until the next probe. Enrolled in the SIGTERM drain.
+  how long until then). One run at a time, 100 tags per write; the first fault stops the run until
+  the next probe. Enrolled in the SIGTERM drain.
 - **Generation check.** A drop of the same tag recorded while its write is in flight is kept for
   the next run; a drop recorded during a collapse sweep keeps the collapse.
-- **Replay time, not call time.** A dropped call is replayed as a late `updateTags`: stamped with
-  the Redis-clock time of the replay, so never older than the call. Stamping the original time with
-  a plain `HSET` could roll back a newer stamp another pod wrote meanwhile (and bring back entries it
-  expired); a compare-and-set script would avoid that but would lose the replay on a Redis that
-  refuses scripts. Calls for one tag are merged in call order, as consecutive `HSET`s would be.
+- **Replay time, never over a newer stamp.** A dropped call is replayed as a late `updateTags`:
+  stamped with the Redis time of the replay (`TIME` inside the script), so never older than the
+  call. It is written by a compare-and-set script, not an `HSET`, because by replay time a NEWER
+  invalidation of the same tag can already be in Redis -- from another pod whose breaker closed
+  first, or from this pod while the replay was in flight -- and a plain overwrite would move its
+  expiry into the future, so an entry it expired would be served again after an `updateTag`. Per
+  field, against the current value, in one script: `s:<tag>` only moves forward; `e:<tag>` wants
+  `now + window`, but an expiry already in effect (`<= now`) is never moved into the future
+  (expire-now brings it up to `now`), and a pending one (`> now`) is never pushed later. The script
+  is sent outside the breaker-aware wrapper; on any error the batch is written by the same rule
+  from the client (`HMGET` then `HSET`, through the wrapper), so a Redis that refuses scripts still
+  gets the replay and does not open the breaker ISR shares, while a dead link still trips it.
+  Calls for one tag are merged in call order, as consecutive `updateTags` would be.
 
 ### Options considered (jev)
 
 | Decision | Chosen | jev |
 |---|---|---|
 | Where | the `'use cache'` handler's per-process state, own probe (a generic engine in the ISR handler) | **0.97** (0.03) |
-| Stamp time | replay time, plain `HSET` (call time via a max-merge script / call time via plain `HSET`) | **0.59** (0.27 / 0.14) |
+| Stamp time | replay time (call time via a max-merge script / call time via plain `HSET`) | **0.59** (0.27 / 0.14) |
+| Stamp write (revised in review: a plain `HSET` at replay time could undo a newer hard invalidation) | compare-and-set script: an expiry in effect is kept, a pending one only brought forward (keep the in-effect expiry only if it postdates the dropped call, by a clock estimate) | **1.00** (0.00) |
+| Script clock | the script's own `TIME` (the replay time computed by the client, passed in) | **0.90** (0.10) |
+| Script refused | fall back to the same rule by read-then-write, script outside the breaker (script through the breaker / plain `HSET`) | not scored: the model was unreachable |
 | Overflow | collapse to deleting every `'use cache'` entry (drop and count / a global stamp read on every hit) | **0.57** (0.30 / 0.13) |
-| Write shape | 100 tags per `HSET` (one `HSET` for the whole list / one per tag) | **0.53** (0.45 / 0.02) |
+| Write shape | 100 tags per write (one write for the whole list / one per tag) | **0.53** (0.45 / 0.02) |
 | This pod's reads consult the list before it lands | no, the probe fires at breaker close (yes) | **0.99** (0.01) |
 
 ### Accepted risks
@@ -1123,3 +1134,11 @@ once the breaker closes. Amendment 4's shape, applied to stamps:
   collapse deletes every `'use cache'` entry of the app, per-user entries included.
 - **Same-pod window.** Until the replay's write lands (milliseconds after the breaker closes), a read
   on any pod, this one included, can still be served the entry.
+- **A window replayed onto an expiry in effect.** A stale-with-window drop replayed onto a tag whose
+  expiry is already in effect marks that tag's entries stale (re-rendered on the next read) but does
+  not schedule the window's later expiry: the script cannot tell an expiry that predates the dropped
+  call from one that follows it, and keeping it is the side that never serves a hard-invalidated
+  entry.
+- **The fallback is not atomic.** On a Redis that refuses scripts, a stamp written between the
+  fallback's read and its write can be overwritten: a one-round-trip window, against the outage-long
+  window the plain `HSET` had.

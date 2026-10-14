@@ -31,8 +31,9 @@
  *    two pods invalidating at once cannot lose each other's field. An entry
  *    records when it was made in that same clock, so pods whose clocks disagree
  *    still agree on which came first. Stamps older than the TTL cap are pruned by
- *    a compare-and-delete script, so a stamp re-written mid-prune survives. The
- *    semantics copy Next's built-in handler.
+ *    a compare-and-delete script, so a stamp re-written mid-prune survives, and
+ *    a replay of stamps an outage dropped is a compare-and-set script, so it
+ *    never undoes a newer one. The semantics copy Next's built-in handler.
  *  - Outage: Redis down means MISS and DROP. There is no per-process store of
  *    entries of any kind -- not even Next's in-memory default -- because this is
  *    where per-user entries live and a pod-local copy would sit outside the TTL
@@ -159,6 +160,46 @@ export const PRUNE_STAMPS_SCRIPT = [
 ].join('\n');
 
 /**
+ * Write the stamps a tag replay carries (ARGV pairs: field, ms) as a late
+ * `updateTags` would, but never over a stamp that already landed. A replay
+ * writes long after the call it replays, so a plain HSET could undo a newer
+ * invalidation of the same tag -- from another pod, or from this pod while the
+ * replay was in flight -- and an entry that invalidation expired would be served
+ * again. Per field, against the CURRENT value, at the script's own `TIME` (the
+ * moment it runs, after any write that reached Redis first):
+ *  - `s:<tag>` moves forward to now, never back;
+ *  - `e:<tag>` wants now + ms. An expiry already in effect (<= now) is never moved
+ *    into the future; expire-now (ms = 0) brings it up to now. A pending expiry
+ *    (> now) is never pushed later, only brought forward.
+ * Checked and written in one script, so no write can land in between. One key,
+ * so cluster-safe. `TIME` before a write needs Redis 5 or later.
+ */
+export const REPLAY_STAMPS_SCRIPT = [
+  "local t = redis.call('TIME')",
+  'local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)',
+  'local n = 0',
+  'for i = 1, #ARGV - 1, 2 do',
+  '  local field = ARGV[i]',
+  "  local cur = tonumber(redis.call('HGET', KEYS[1], field))",
+  '  local v = nil',
+  "  if string.sub(field, 1, 2) == 's:' then",
+  '    if not cur or cur < now then v = now end',
+  '  else',
+  '    local want = now + tonumber(ARGV[i + 1])',
+  '    if not cur then v = want',
+  '    elseif cur <= now then',
+  '      if want <= now then v = now end',
+  '    elseif want < cur then v = want end',
+  '  end',
+  '  if v then',
+  "    redis.call('HSET', KEYS[1], field, string.format('%.0f', v))",
+  '    n = n + 1',
+  '  end',
+  'end',
+  'return n',
+].join('\n');
+
+/**
  * State shared by the `default` and `remote` handlers of ONE process, keyed by the
  * `core` they share (one per evaluation of `cache-handler.js`, like the breaker):
  * the outage and size warnings fire once per process, not once per kind, the
@@ -174,6 +215,7 @@ function shared(core) {
       outageWarned: false,
       oversizeWarned: false,
       pruneWarned: false,
+      replayScriptWarned: false,
       clock: { offset: undefined, sampledAt: 0, retryAt: 0, inflight: null },
       replay: { tags: new Map(), generation: 0, collapsed: false, run: null, timer: null },
     };
@@ -363,6 +405,14 @@ function stampFields(tag, record, now) {
   return fields;
 }
 
+/** The (field, ms) pairs REPLAY_STAMPS_SCRIPT takes for a stamp record. */
+function replayArgs(tag, record) {
+  const args = [];
+  if (record.stale) args.push(`s:${tag}`, '0');
+  if (record.expireMs !== null) args.push(`e:${tag}`, String(record.expireMs));
+  return args;
+}
+
 // ─── Tag stamps an outage kept from Redis ───
 //
 // With the breaker open (or Redis faulting under the write) an `updateTags`
@@ -372,12 +422,20 @@ function stampFields(tag, record, now) {
 // shape as the ISR handler's replay of skipped invalidations (cache-handler.js),
 // which runs alongside it for the same `revalidateTag`:
 //
-//  - REPLAY TIME. The stamps are written with the time of the replay, as a late
-//    `updateTags` would be, so never older than the call they replay. Writing the
-//    original time instead could roll back a newer stamp another pod wrote in
-//    the meantime (an HSET overwrites), bringing back entries it had expired. The
-//    cost is an entry written between the call and the replay being expired once
-//    more: one re-render, never a stale read.
+//  - REPLAY TIME, NEVER OVER A NEWER STAMP. The stamps are written with the time
+//    of the replay (the Redis `TIME` when the write runs), so never older than
+//    the call they replay. The cost is an entry written between the call and the
+//    replay being expired once more: one re-render, never a stale read. They are
+//    written by a compare-and-set script (REPLAY_STAMPS_SCRIPT), not an HSET:
+//    by replay time a NEWER invalidation of the same tag may already be in Redis
+//    -- from another pod whose breaker closed first, or from this pod while the
+//    replay was in flight -- and a plain overwrite could move its expiry into the
+//    future and serve again what it expired. So an expiry already in effect is
+//    never moved into the future, a pending one is never pushed later, and a
+//    stale stamp only moves forward. The one cost: a stale-with-window drop
+//    replayed onto a tag whose expiry is already in effect marks that tag's
+//    entries stale (re-rendered on the next read) but does not schedule the
+//    window's later expiry.
 //  - BOUNDED. At most REPLAY_MAX_TAGS distinct tags. One more and the list is
 //    dropped for a COLLAPSE: the replay deletes every `'use cache'` entry under
 //    this app's key prefix (a cursor SCAN, DEL per page; the stamp hash is kept).
@@ -386,7 +444,7 @@ function stampFields(tag, record, now) {
 //    the breaker closed, or by a probe timer set for the moment it closes (an
 //    idle pod would otherwise never replay while other pods serve the stale
 //    entries). Never awaited by a caller; enrolled in the SIGTERM drain.
-//  - NO STORM. One replay at a time, REPLAY_BATCH tags per HSET through
+//  - NO STORM. One replay at a time, REPLAY_BATCH tags per script call through
 //    `redisCall`: the first fault re-trips the breaker and stops the run, and the
 //    rest waits for the next probe, one attempt per cooldown.
 //  - PER PROCESS. A pod that restarts or scales to zero before Redis is back
@@ -480,21 +538,69 @@ async function runTagReplay(core) {
     await replayCollapsedTags(core, client);
     return;
   }
-  const offset = await clockOffset(core, client);
   const pending = [...replay.tags];
   for (let i = 0; i < pending.length; i += REPLAY_BATCH) {
     const batch = pending.slice(i, i + REPLAY_BATCH);
-    // Replay time, in the Redis clock: never older than the calls it replays.
-    const now = Math.round(localNowMs()) + offset;
-    const fields = batch.flatMap(([tag, record]) => stampFields(tag, record, now));
-    await core.redisCall(() => core.command(client, 'HSET', [tagsKeyOf(core), ...fields]));
+    await writeReplayBatch(core, client, batch.flatMap(([tag, record]) => replayArgs(tag, record)));
     for (const [tag, record] of batch) {
       // A drop of the same tag recorded while this write was in flight is newer
-      // than what was written: keep it for the next run.
-      if (replay.tags.get(tag)?.generation === record.generation) replay.tags.delete(tag);
+      // than what was written: keep it for the next run, and count it then.
+      if (replay.tags.get(tag)?.generation !== record.generation) continue;
+      replay.tags.delete(tag);
       count('tagsReplayed');
     }
   }
+}
+
+/**
+ * What REPLAY_STAMPS_SCRIPT writes to one field, or null to leave it: `cur` is
+ * its current value (null if absent), `now` the replay time. The script's rule,
+ * for the read-then-write fallback below.
+ */
+function replayStampValue(field, cur, ms, now) {
+  if (field.startsWith('s:')) return cur === null || cur < now ? now : null;
+  const want = now + ms;
+  if (cur === null) return want;
+  if (cur <= now) return want <= now ? now : null;
+  return want < cur ? want : null;
+}
+
+/**
+ * Write one batch of replayed stamps. The script is sent OUTSIDE `redisCall`: a
+ * Redis that refuses scripts answers every EVAL with an error, and through the
+ * breaker that would take ISR's cache offline once per cooldown, forever (the
+ * prune step avoids it the same way). On any EVAL error the batch is written by
+ * the same rule from the client -- HMGET the current stamps, HSET what the rule
+ * allows -- through `redisCall`, so a dead link still trips the breaker and stops
+ * the run there, and a refusal does not. That fallback is not atomic: a write
+ * landing in its one round trip is the window the script closes.
+ */
+async function writeReplayBatch(core, client, args) {
+  const key = tagsKeyOf(core);
+  try {
+    await core.command(client, 'EVAL', [REPLAY_STAMPS_SCRIPT, '1', key, ...args]);
+    return;
+  } catch (err) {
+    const state = shared(core);
+    if (!state.replayScriptWarned) {
+      state.replayScriptWarned = true;
+      console.warn(
+        "[CacheHandler] The 'use cache' tag replay script failed; replaying by read-then-write instead:",
+        err?.message,
+      );
+    }
+  }
+  const fields = args.filter((_, i) => i % 2 === 0);
+  const current = await core.redisCall(() => core.command(client, 'HMGET', [key, ...fields]));
+  const now = Math.round(localNowMs()) + (await clockOffset(core, client));
+  const writes = [];
+  for (let i = 0; i < fields.length; i++) {
+    const raw = current?.[i];
+    const cur = raw == null || !Number.isFinite(Number(raw)) ? null : Number(raw);
+    const v = replayStampValue(fields[i], cur, Number(args[2 * i + 1]), now);
+    if (v !== null) writes.push(fields[i], String(v));
+  }
+  if (writes.length > 0) await core.redisCall(() => core.command(client, 'HSET', [key, ...writes]));
 }
 
 /** A Redis glob matching `text` literally. */

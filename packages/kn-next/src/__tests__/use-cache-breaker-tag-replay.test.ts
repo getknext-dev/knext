@@ -9,6 +9,7 @@ import {
 } from "bun:test";
 import {
     createUseCacheHandler,
+    REPLAY_STAMPS_SCRIPT,
     type UseCacheCore,
 } from "../adapters/use-cache-handler.js";
 import { type FakeRedis, startFakeRedis } from "./helpers/fake-redis";
@@ -28,8 +29,10 @@ import { type FakeRedis, startFakeRedis } from "./helpers/fake-redis";
  * run at a time off the request path, a probe at the moment the breaker
  * closes, and a generation check so a drop recorded mid-replay is kept. The
  * stamps are written at REPLAY time, so they are never older than the call
- * they replay (a replay is a late `updateTags`, never one that rolls a newer
- * stamp from another pod back).
+ * they replay, and by a compare-and-set script, so a replay never undoes a
+ * stamp that landed first: an expiry already in effect is never moved into the
+ * future, a pending one is never pushed later, and a stale stamp only moves
+ * forward.
  *
  * Two layers: against a real RESP server through BOTH Redis clients (ioredis
  * and Bun's native client, which production uses on Bun), with each "pod" a
@@ -60,6 +63,41 @@ interface UseCacheHandler {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const enc = new TextEncoder();
+
+/**
+ * The fake has no Lua VM: this is a model of the replay's compare-and-set
+ * script, keyed by its exact source. `now` is the script's own `TIME`. ARGV
+ * pairs are (field, ms): `s:<tag>` moves forward to now, never back;
+ * `e:<tag>` wants now + ms, but an expiry already in effect (<= now) is never
+ * moved into the future and a pending one (> now) is never pushed later.
+ */
+function replayStampsModel(
+    h: Map<string, string>,
+    argv: string[],
+    now: number,
+): number {
+    let n = 0;
+    for (let i = 0; i + 1 < argv.length; i += 2) {
+        const field = argv[i] as string;
+        const raw = h.get(field);
+        const cur = raw === undefined ? undefined : Number(raw);
+        let v: number | undefined;
+        if (field.startsWith("s:")) {
+            if (cur === undefined || cur < now) v = now;
+        } else {
+            const want = now + Number(argv[i + 1]);
+            if (cur === undefined) v = want;
+            else if (cur <= now) {
+                if (want <= now) v = now;
+            } else if (want < cur) v = want;
+        }
+        if (v !== undefined) {
+            h.set(field, String(v));
+            n += 1;
+        }
+    }
+    return n;
+}
 
 async function waitFor(pred: () => boolean, timeoutMs = 4000) {
     const deadline = Date.now() + timeoutMs;
@@ -145,6 +183,15 @@ for (const client of CLIENTS) {
 
         async function withRedis() {
             fake = await startFakeRedis({
+                scripts: {
+                    [REPLAY_STAMPS_SCRIPT]: (keys, argv, { hashes }) => {
+                        const h =
+                            hashes.get(keys[0] as string) ??
+                            new Map<string, string>();
+                        hashes.set(keys[0] as string, h);
+                        return `:${replayStampsModel(h, argv, Date.now())}\r\n`;
+                    },
+                },
                 errorFor: (cmd, args) => {
                     if (failNextGet && cmd === "get") {
                         failNextGet = false;
@@ -196,9 +243,13 @@ for (const client of CLIENTS) {
             const v = fake?.hashes.get(TAGS_KEY)?.get(field);
             return v === undefined ? undefined : Number(v);
         };
-        const tagHsets = () =>
+        /** The replay's writes: one compare-and-set EVAL per batch. */
+        const replayWrites = () =>
             (fake?.commands ?? []).filter(
-                (c) => c.cmd === "hset" && c.args[0] === TAGS_KEY,
+                (c) =>
+                    c.cmd === "eval" &&
+                    c.args[0] === REPLAY_STAMPS_SCRIPT &&
+                    c.args[2] === TAGS_KEY,
             );
 
         it("breaker open during updateTags, then closed: another pod's read misses with no TTL wait and no further request", async () => {
@@ -227,7 +278,7 @@ for (const client of CLIENTS) {
             ).toBeUndefined();
             // Replayed once, then forgotten.
             await sleep(COOLDOWN_MS + 100);
-            expect(tagHsets()).toHaveLength(1);
+            expect(replayWrites()).toHaveLength(1);
         });
 
         it("never replays while the breaker is still open", async () => {
@@ -236,7 +287,7 @@ for (const client of CLIENTS) {
             await openBreaker(a);
             await a.updateTags(["t"]);
             await sleep(COOLDOWN_MS / 3);
-            expect(tagHsets()).toHaveLength(0);
+            expect(replayWrites()).toHaveLength(0);
             await waitFor(() => stamp("e:t") !== undefined);
         });
 
@@ -247,7 +298,7 @@ for (const client of CLIENTS) {
             await a.updateTags(["win"], { expire: 60 });
             await a.updateTags(["soft"], {});
             await a.updateTags(["hard"]);
-            await waitFor(() => tagHsets().length > 0);
+            await waitFor(() => replayWrites().length > 0);
             const s = stamp("s:win") as number;
             expect(s).toBeGreaterThan(0);
             expect(stamp("e:win")).toBe(s + 60_000);
@@ -269,10 +320,10 @@ for (const client of CLIENTS) {
                 await a.updateTags(["x", "y"]);
                 await remote.updateTags(["x", "y"]);
             }
-            await waitFor(() => tagHsets().length > 0);
+            await waitFor(() => replayWrites().length > 0);
             await sleep(50);
-            expect(tagHsets()).toHaveLength(1);
-            const fields = tagHsets()[0]?.args.slice(1) ?? [];
+            expect(replayWrites()).toHaveLength(1);
+            const fields = replayWrites()[0]?.args.slice(3) ?? [];
             expect(fields.filter((f) => f === "e:x")).toHaveLength(1);
             expect(fields.filter((f) => f === "e:y")).toHaveLength(1);
             expect((counters().tagsReplayed ?? 0) - before).toBe(2);
@@ -287,7 +338,7 @@ for (const client of CLIENTS) {
             await a.updateTags(tags);
             await waitFor(() => stamp(`e:t${BOUND - 1}`) !== undefined, 8000);
             expect(stamp("e:t0")).toBeDefined();
-            expect(tagHsets()).toHaveLength(BOUND / BATCH);
+            expect(replayWrites()).toHaveLength(BOUND / BATCH);
             expect((fake?.commands ?? []).some((c) => c.cmd === "scan")).toBe(
                 false,
             );
@@ -325,7 +376,7 @@ for (const client of CLIENTS) {
                 .filter((c) => c.cmd === "del")
                 .flatMap((c) => c.args);
             expect(deleted).not.toContain(TAGS_KEY);
-            expect(tagHsets()).toHaveLength(0);
+            expect(replayWrites()).toHaveLength(0);
             await sleep(COOLDOWN_MS + 100);
             expect((counters().tagsCollapsed ?? 0) - before).toBe(1);
         });
@@ -339,12 +390,14 @@ for (const client of CLIENTS) {
                 (_, i) => `f${i}`,
             );
             await a.updateTags(tags);
+            // Batch 2 faults as a dead link would: the script AND the
+            // read-then-write it falls back to.
             let faults = 0;
             errorFor = (cmd, args) => {
                 if (
-                    cmd === "hset" &&
+                    (cmd === "eval" || cmd === "hset") &&
                     args.includes(`e:f${BATCH}`) &&
-                    faults === 0
+                    faults < 2
                 ) {
                     faults += 1;
                     return "boom";
@@ -355,7 +408,7 @@ for (const client of CLIENTS) {
                 () => stamp(`e:f${2 * BATCH + 49}`) !== undefined,
                 6000,
             );
-            const firsts = tagHsets().map((c) => c.args[1]);
+            const firsts = replayWrites().map((c) => c.args[3]);
             // Batch 1 done, batch 2 faulted -> stop (batch 3 not tried); then 2, 3.
             expect(firsts).toEqual([
                 "e:f0",
@@ -384,6 +437,59 @@ for (const client of CLIENTS) {
             await pastServerTime(stamp("e:t") as number);
             expect(await b.get("x", [])).toBeUndefined();
         });
+
+        it("a hard updateTags another pod lands first is not undone by the late replay of an earlier stale-with-window drop", async () => {
+            await withRedis();
+            const a = await pod();
+            const b = await pod();
+            await b.set("x", Promise.resolve(entryOf(["t"])));
+            await openBreaker(a);
+            // Pod A drops a revalidateTag(t, profile) ...
+            await a.updateTags(["t"], { expire: 3600 });
+            expect(stamp("s:t")).toBeUndefined();
+            // ... then pod B, whose breaker never opened, expires t outright.
+            await b.updateTags(["t"]);
+            const hard = stamp("e:t") as number;
+            expect(hard).toBeGreaterThan(0);
+            // A's replay lands after B's write.
+            await waitFor(() => stamp("s:t") !== undefined);
+            expect(
+                stamp("e:t"),
+                "an expiry already in effect is never moved into the future",
+            ).toBe(hard);
+            await pastServerTime(hard);
+            expect(
+                await b.get("x", []),
+                "an entry made before the hard invalidation stays a miss",
+            ).toBeUndefined();
+        });
+
+        it("a Redis that refuses scripts: the replay lands by read-then-write under the same rule, and the refusal never trips the breaker", async () => {
+            await withRedis();
+            errorFor = (cmd) =>
+                cmd === "eval" ? "scripts disabled" : undefined;
+            const a = await pod();
+            const b = await pod();
+            await b.set("x", Promise.resolve(entryOf(["t"])));
+            await openBreaker(a);
+            await a.updateTags(["t", "u"], { expire: 3600 });
+            await b.updateTags(["t"]);
+            const hard = stamp("e:t") as number;
+            await waitFor(() => stamp("s:u") !== undefined);
+            // Same rule as the script: the expiry in effect is kept, a tag
+            // with none gets the profile's window.
+            expect(stamp("e:t")).toBe(hard);
+            expect(stamp("s:t")).toBe(stamp("s:u") as number);
+            expect(stamp("e:u")).toBeGreaterThan(stamp("s:u") as number);
+            await pastServerTime(hard);
+            expect(await b.get("x", [])).toBeUndefined();
+            // The refused EVAL did not open pod A's breaker: a write right
+            // after the replay reaches Redis.
+            await a.set("after", Promise.resolve(entryOf(["v"])));
+            expect(fake?.strings.has(`${PREFIX}:uc:default:after`)).toBe(true);
+            await sleep(COOLDOWN_MS + 100);
+            expect(replayWrites()).toHaveLength(1);
+        });
     });
 }
 
@@ -405,7 +511,7 @@ function scriptedCore(
         open: false,
         retryMs: opts.retryMs ?? 20,
         configured: opts.redisConfigured ?? true,
-        failHset: (_args: string[]) => false,
+        failWrite: (_args: string[]) => false,
     };
     const clientToken = { scripted: true };
     const core: UseCacheCore & { retryInMs(): number } = {
@@ -434,10 +540,18 @@ function scriptedCore(
                 case "HSET":
                     // A faulted command; the client stays usable, so only the
                     // replay's own loop can be what stops the run.
-                    if (state.failHset(args)) throw new Error("boom");
+                    if (state.failWrite(args)) throw new Error("boom");
                     for (let i = 1; i + 1 < args.length; i += 2)
                         hashes.set(args[i] as string, args[i + 1] as string);
                     return 1;
+                case "EVAL":
+                    if (args[0] !== REPLAY_STAMPS_SCRIPT)
+                        throw new Error("unknown script");
+                    if (state.failWrite(args)) throw new Error("boom");
+                    // The script's own TIME: when it RUNS, not when it was sent.
+                    return replayStampsModel(hashes, args.slice(3), Date.now());
+                case "HMGET":
+                    return args.slice(1).map((f) => hashes.get(f) ?? null);
                 case "SCAN": {
                     const cursor = Number(args[0]);
                     // A stable keyspace order, as a real SCAN cursor gives: a
@@ -493,9 +607,10 @@ describe("'use cache' tag replay races (scripted core)", () => {
     it("a drop of the same tag recorded while that tag's replay write is in flight is not forgotten", async () => {
         const s = scriptedCore();
         const h = createUseCacheHandler({ kind: "default", core: s.core });
+        const before = counters().tagsReplayed ?? 0;
         s.state.open = true;
         await h.updateTags(["x"]);
-        s.holdNext("HSET");
+        s.holdNext("EVAL");
         s.state.open = false;
         await waitFor(s.isHeld);
         // The replay's write of x is in flight. A newer updateTags(x) finds
@@ -505,9 +620,71 @@ describe("'use cache' tag replay races (scripted core)", () => {
         s.state.open = false;
         s.release();
         // The first write completed; the newer drop is replayed again.
-        await waitFor(() => s.count("HSET") >= 2);
+        await waitFor(() => s.count("EVAL") >= 2);
         await sleep(100);
-        expect(s.count("HSET")).toBe(2);
+        expect(s.count("EVAL")).toBe(2);
+        // Counted once, when it is finally forgotten, not once per write.
+        expect((counters().tagsReplayed ?? 0) - before).toBe(1);
+    });
+
+    it("the same pod's newer hard updateTags, landing while its replay is in flight, is not undone by that replay", async () => {
+        const s = scriptedCore();
+        const h = createUseCacheHandler({ kind: "default", core: s.core });
+        s.state.open = true;
+        await h.updateTags(["t"], { expire: 3600 });
+        s.holdNext("EVAL");
+        s.state.open = false;
+        await waitFor(s.isHeld);
+        await sleep(5);
+        // A live revalidate on this pod: the breaker is closed, so it writes.
+        await h.updateTags(["t"]);
+        const hard = Number(s.hashes.get("e:t"));
+        expect(hard).toBeGreaterThan(0);
+        s.release();
+        await waitFor(() => s.hashes.has("s:t"));
+        expect(Number(s.hashes.get("e:t"))).toBe(hard);
+    });
+
+    it("a replay never moves an expiry in effect into the future, never delays a pending one, and only moves a stale stamp forward", async () => {
+        const s = scriptedCore();
+        const h = createUseCacheHandler({ kind: "default", core: s.core });
+        const t0 = Date.now();
+        const old = t0 - 10_000;
+        const far = t0 + 10_000_000;
+        const soon = t0 + 2_000;
+        const ahead = t0 + 50_000;
+        for (const [f, v] of [
+            ["e:past", old],
+            ["e:far", far],
+            ["e:soon", soon],
+            ["e:hardPast", old],
+            ["e:hardFar", far],
+            ["s:ahead", ahead],
+        ] as const)
+            s.hashes.set(f, String(v));
+        s.state.open = true;
+        await h.updateTags(["past", "far", "soon", "fresh", "ahead"], {
+            expire: 60,
+        });
+        await h.updateTags(["hardPast", "hardFar"]);
+        s.state.open = false;
+        await h.getExpiration(["unrelated"]);
+        await waitFor(() => s.hashes.has("s:fresh"));
+        const at = Number(s.hashes.get("s:fresh"));
+        expect(at).toBeGreaterThanOrEqual(t0);
+        // In effect: kept (the entries it expired stay expired).
+        expect(Number(s.hashes.get("e:past"))).toBe(old);
+        expect(Number(s.hashes.get("s:past"))).toBe(at);
+        // Pending: the earlier of the two deadlines.
+        expect(Number(s.hashes.get("e:far"))).toBe(at + 60_000);
+        expect(Number(s.hashes.get("e:soon"))).toBe(soon);
+        // None yet: the profile's window.
+        expect(Number(s.hashes.get("e:fresh"))).toBe(at + 60_000);
+        // A stale stamp is never moved back.
+        expect(Number(s.hashes.get("s:ahead"))).toBe(ahead);
+        // Expire-now always lands at the replay time.
+        expect(Number(s.hashes.get("e:hardPast"))).toBe(at);
+        expect(Number(s.hashes.get("e:hardFar"))).toBe(at);
     });
 
     it("a drop recorded during the collapse sweep keeps the collapse for another sweep", async () => {
@@ -547,7 +724,7 @@ describe("'use cache' tag replay races (scripted core)", () => {
         const h = createUseCacheHandler({ kind: "default", core: s.core });
         s.state.open = true;
         await h.updateTags(["x"]);
-        s.holdNext("HSET");
+        s.holdNext("EVAL");
         s.state.open = false;
         // A request after the close starts the replay without waiting on it.
         const t0 = Date.now();
@@ -616,7 +793,7 @@ describe("'use cache' tag replay races (scripted core)", () => {
         s.state.open = false;
         await h.getExpiration(["y"]);
         await sleep(100);
-        expect(s.count("HSET")).toBe(0);
+        expect(s.count("HSET") + s.count("EVAL")).toBe(0);
     });
 
     it("a Redis client that can no longer be loaded at all drops the backlog: nothing left to replay into", async () => {
@@ -631,7 +808,7 @@ describe("'use cache' tag replay races (scripted core)", () => {
         s.state.open = false;
         await h.getExpiration(["y"]);
         await sleep(100);
-        expect(s.count("HSET")).toBe(0);
+        expect(s.count("HSET") + s.count("EVAL")).toBe(0);
     });
 
     it("a fault part-way through the replay stops the run there, even with the client still usable", async () => {
@@ -642,16 +819,18 @@ describe("'use cache' tag replay races (scripted core)", () => {
             Array.from({ length: 2 * BATCH + 50 }, (_, i) => `f${i}`),
         );
         let faults = 0;
-        s.state.failHset = (args) =>
-            args.includes(`e:f${BATCH}`) && faults++ === 0;
+        // Batch 2 faults as a dead link would: the script AND the
+        // read-then-write it falls back to.
+        s.state.failWrite = (args) =>
+            args.includes(`e:f${BATCH}`) && faults++ < 2;
         s.state.open = false;
         // The fault trips the scripted breaker; close it again for the next run.
-        await waitFor(() => faults > 0);
+        await waitFor(() => s.state.open);
         s.state.open = false;
         await waitFor(() => s.hashes.has(`e:f${2 * BATCH + 49}`));
         const firsts = s.log
-            .filter((c) => c.name === "HSET")
-            .map((c) => c.args[1]);
+            .filter((c) => c.name === "EVAL")
+            .map((c) => c.args[3]);
         // Batch 2 faulted: batch 3 waits for the next run, after batch 2.
         expect(firsts).toEqual([
             "e:f0",
@@ -673,7 +852,7 @@ describe("'use cache' tag replay races (scripted core)", () => {
         await h.updateTags(["b"]);
         s.state.open = false;
         await h.getExpiration(["unrelated"]);
-        await waitFor(() => s.count("HSET") >= 1);
+        await waitFor(() => s.count("EVAL") >= 1);
         const now = Number(s.hashes.get("s:a"));
         expect(Number(s.hashes.get("e:a"))).toBe(now + 30_000);
         expect(Number(s.hashes.get("s:b"))).toBe(now);
