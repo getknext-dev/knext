@@ -45,6 +45,7 @@ import {
     writeFileSync,
 } from "node:fs";
 import { basename, dirname, join, relative, sep } from "node:path";
+import { parseAllDocuments } from "yaml";
 import { UsageError } from "./shared";
 
 /** Lives inside the tree, so shipping the tree ships the manifest. */
@@ -128,8 +129,7 @@ export function writeNativeIntegrityManifest(
     if (staged.length > 0) {
         if (!lockfilePath || !existsSync(lockfilePath)) {
             throw new UsageError(
-                "knext staged native packages but found no lockfile (bun.lock or " +
-                    "package-lock.json) to pin them against.\n\n" +
+                `knext staged native packages but found no lockfile (${LOCKFILE_LIST}) to pin them against.\n\n` +
                     `  staged: ${staged.map((p) => `${p.name}@${p.version}`).join(", ")}\n\n` +
                     "Those packages are dlopened at native-code privilege in the image, so the build\n" +
                     "refuses to ship them unverified. Run `npm install` (or `bun install\n" +
@@ -200,11 +200,23 @@ export function writeNativeIntegrityManifest(
  * behaviour unchanged; `package-lock.json` is npm's — the installer
  * `knext create`'s own `partingLine()` tells every scaffold to run, `--runtime
  * node` included, so it must be a readable source of pins, not just bun's
- * (#1864).
+ * (#1864). `pnpm-lock.yaml` and `yarn.lock` follow (#2360): the standalone
+ * build fetches the image's sharp addon at the lockfile's pin when the build
+ * host lacks it, and a pnpm or yarn app built on a glibc host or a Mac has no
+ * other lockfile to read that pin from.
  */
-const LOCKFILE_BASENAMES = ["bun.lock", "package-lock.json"] as const;
+const LOCKFILE_BASENAMES = [
+    "bun.lock",
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+] as const;
 
-/** Nearest `bun.lock` or `package-lock.json` at or above `cwd`, or `undefined`. */
+/** The supported lockfiles, as a refusal message names them. */
+export const LOCKFILE_LIST =
+    "bun.lock, package-lock.json, pnpm-lock.yaml or yarn.lock";
+
+/** Nearest supported lockfile at or above `cwd`, or `undefined`. */
 export function findLockfile(cwd: string): string | undefined {
     let dir = cwd;
     for (;;) {
@@ -246,10 +258,16 @@ export function formatLockedVersions(versions: LockedPackage[]): string {
 export function readLockfilePackages(
     lockfilePath: string,
 ): Map<string, LockedPackage[]> {
-    if (basename(lockfilePath) === "package-lock.json") {
-        return readNpmLockfilePackages(lockfilePath);
+    switch (basename(lockfilePath)) {
+        case "package-lock.json":
+            return readNpmLockfilePackages(lockfilePath);
+        case "pnpm-lock.yaml":
+            return readPnpmLockfilePackages(lockfilePath);
+        case "yarn.lock":
+            return readYarnLockfilePackages(lockfilePath);
+        default:
+            return readBunLockfilePackages(lockfilePath);
     }
-    return readBunLockfilePackages(lockfilePath);
 }
 
 /**
@@ -389,6 +407,209 @@ function readNpmLockfilePackages(
         if (canonical) entries.unshift({ version, integrity });
         else entries.push({ version, integrity });
     }
+    return out;
+}
+
+/** Record a `name@version` pin, keeping every distinct version in file order. */
+function addLocked(
+    out: Map<string, LockedPackage[]>,
+    name: string,
+    version: string,
+    integrity: string | null,
+): void {
+    const entries = out.get(name) ?? [];
+    if (entries.length === 0) out.set(name, entries);
+    if (entries.some((e) => e.version === version)) return;
+    entries.push({ version, integrity });
+}
+
+/** `name` and `version` from a `name@version` descriptor (scope-aware). */
+function splitDescriptor(
+    descriptor: string,
+): { name: string; version: string } | undefined {
+    const at = descriptor.indexOf("@", 1);
+    if (at <= 0) return undefined;
+    return { name: descriptor.slice(0, at), version: descriptor.slice(at + 1) };
+}
+
+/** Every YAML document in `raw`, as plain data with every scalar kept as text. */
+function parseYamlDocuments(raw: string, lockfilePath: string): unknown[] {
+    try {
+        return parseAllDocuments(raw, { schema: "failsafe" }).map((doc) => {
+            if (doc.errors.length > 0) throw doc.errors[0];
+            return doc.toJS() as unknown;
+        });
+    } catch (error) {
+        throw new UsageError(
+            `Could not parse ${lockfilePath} while reading pinned package versions.\n` +
+                `  ${error instanceof Error ? error.message : String(error)}`,
+        );
+    }
+}
+
+/**
+ * `pnpm-lock.yaml`'s `packages` map (#2360) — the resolution record of every
+ * package, with `resolution.integrity` for each registry tarball. pnpm pins
+ * every platform of an `optionalDependencies` package whether or not this host
+ * downloaded it, so a Mac's lockfile holds the musl addon's pin, like npm's.
+ *
+ * Keys by lockfile format: v6 `/name@version`, v9 `name@version` (quoted when
+ * scoped), each optionally followed by a `(peer@x)` suffix that is not part of
+ * the version; the older v5 `/name/version` is read too. pnpm 10 can write a
+ * leading env document (`---`-separated) before the project's own, so every
+ * document's `packages` is read. Parsed with the failsafe schema: every scalar
+ * stays text, so a version like `1.0` is never coerced to a number. A
+ * non-registry resolution (`{directory: ...}`, or a tarball URL without an
+ * integrity) records no integrity rather than a guessed one. pnpm has no
+ * hoisted/canonical notion here, so versions keep file order.
+ */
+function readPnpmLockfilePackages(
+    lockfilePath: string,
+): Map<string, LockedPackage[]> {
+    const docs = parseYamlDocuments(
+        readFileSync(lockfilePath, "utf8"),
+        lockfilePath,
+    );
+    const out = new Map<string, LockedPackage[]>();
+    for (const doc of docs) {
+        const packages = (doc as { packages?: unknown } | null)?.packages;
+        if (packages === null || typeof packages !== "object") continue;
+        for (const [key, value] of Object.entries(packages)) {
+            const parsed = pnpmKeyToDescriptor(key);
+            if (!parsed) continue;
+            const resolution = (value as { resolution?: unknown } | null)
+                ?.resolution as { integrity?: unknown } | undefined;
+            const integrity =
+                typeof resolution?.integrity === "string"
+                    ? resolution.integrity
+                    : null;
+            addLocked(out, parsed.name, parsed.version, integrity);
+        }
+    }
+    return out;
+}
+
+/** A `pnpm-lock.yaml` `packages` key as `name` + `version` (any format). */
+function pnpmKeyToDescriptor(
+    key: string,
+): { name: string; version: string } | undefined {
+    // The peer suffix: `next@16.4.0(react@19.2.0)` -> `next@16.4.0`.
+    const paren = key.indexOf("(");
+    let k = paren === -1 ? key : key.slice(0, paren);
+    if (k.startsWith("/")) k = k.slice(1);
+    const parsed = splitDescriptor(k);
+    if (parsed && parsed.version.length > 0) return parsed;
+    // v5: `@img/sharp-linuxmusl-x64/0.33.5`, `sharp/0.33.5`.
+    const slash = k.lastIndexOf("/");
+    if (slash <= 0) return undefined;
+    const name = k.slice(0, slash);
+    const version = k.slice(slash + 1);
+    if (name.startsWith("@") && !name.includes("/")) return undefined;
+    return version.length > 0 ? { name, version } : undefined;
+}
+
+/**
+ * `yarn.lock` (#2360), either generation, detected by content: yarn 2+
+ * ("berry") writes YAML with a `__metadata` block, yarn classic (v1) its own
+ * indentation format.
+ *
+ * Berry records a `checksum` per package, but it is the hash of yarn's OWN
+ * cache archive, not of the registry tarball — comparing a downloaded tarball
+ * against it would always fail, with a message blaming the registry. So berry
+ * entries record NO integrity, and a fetch that needs one refuses (fail
+ * closed) rather than ship unverified bytes or misreport a mismatch.
+ */
+function readYarnLockfilePackages(
+    lockfilePath: string,
+): Map<string, LockedPackage[]> {
+    const raw = readFileSync(lockfilePath, "utf8");
+    return /^__metadata:/m.test(raw)
+        ? readYarnBerryPackages(raw, lockfilePath)
+        : readYarnClassicPackages(raw);
+}
+
+/**
+ * Yarn berry: each entry is keyed by one or more comma-joined descriptors
+ * (`"sharp@npm:^0.34.5, sharp@npm:~0.34.0"`) and carries `version` and
+ * `resolution` (`sharp@npm:0.34.5`); the name comes from the resolution.
+ */
+function readYarnBerryPackages(
+    raw: string,
+    lockfilePath: string,
+): Map<string, LockedPackage[]> {
+    const out = new Map<string, LockedPackage[]>();
+    for (const doc of parseYamlDocuments(raw, lockfilePath)) {
+        if (doc === null || typeof doc !== "object") continue;
+        for (const [key, value] of Object.entries(doc)) {
+            if (key === "__metadata") continue;
+            if (value === null || typeof value !== "object") continue;
+            const { version, resolution } = value as {
+                version?: unknown;
+                resolution?: unknown;
+            };
+            if (typeof version !== "string") continue;
+            const from =
+                typeof resolution === "string"
+                    ? resolution
+                    : (key.split(",")[0] ?? "").trim();
+            const parsed = splitDescriptor(from);
+            if (!parsed) continue;
+            addLocked(out, parsed.name, version, null);
+        }
+    }
+    return out;
+}
+
+/**
+ * Yarn classic (v1): an unindented header line lists the entry's descriptors
+ * (comma-separated, each optionally quoted) and ends in `:`; its two-space
+ * indented fields include `version "x"` and `integrity <sri>`. Deeper-indented
+ * lines belong to nested maps (`dependencies:`) and are skipped. An aliased
+ * descriptor (`"string-width-cjs@npm:string-width@^4"`) keys by the installed
+ * alias name. An `integrity` may hold several space-separated hashes; the
+ * sha512 one is kept, else the first (which a fetch then refuses).
+ */
+function readYarnClassicPackages(raw: string): Map<string, LockedPackage[]> {
+    const out = new Map<string, LockedPackage[]>();
+    let names: string[] = [];
+    let version: string | undefined;
+    let integrity: string | null = null;
+    const flush = () => {
+        if (version !== undefined) {
+            for (const name of names) addLocked(out, name, version, integrity);
+        }
+        names = [];
+        version = undefined;
+        integrity = null;
+    };
+    const unquote = (v: string) => v.trim().replace(/^"(.*)"$/, "$1");
+    for (const line of raw.split(/\r?\n/)) {
+        if (line.length === 0 || line.startsWith("#")) continue;
+        if (!line.startsWith(" ")) {
+            flush();
+            if (!line.endsWith(":")) continue;
+            const descriptors = line.slice(0, -1).split(",");
+            names = [
+                ...new Set(
+                    descriptors
+                        .map((d) => splitDescriptor(unquote(d))?.name)
+                        .filter((n): n is string => n !== undefined),
+                ),
+            ];
+            continue;
+        }
+        const field = line.match(/^ {2}(\w+) (.+)$/);
+        if (!field) continue;
+        if (field[1] === "version") version = unquote(field[2]);
+        else if (field[1] === "integrity") {
+            const hashes = unquote(field[2]).split(/\s+/);
+            integrity =
+                hashes.find((h) => h.startsWith("sha512-")) ??
+                hashes[0] ??
+                null;
+        }
+    }
+    flush();
     return out;
 }
 

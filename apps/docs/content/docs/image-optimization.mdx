@@ -76,13 +76,61 @@ Next traces into the image, and you do nothing extra. Two details are handled fo
   machine installed — a Linux (glibc) addon on a typical CI runner, a macOS one on a Mac — while the
   standalone images are Alpine (musl). `knext build`, `knext deploy` and `knext preview` add the
   image's addon (for example `@img/sharp-linuxmusl-x64` and its `libvips`) beside the traced sharp,
-  copied from your install when it has it and otherwise downloaded at the version your lockfile
-  pins and checked against its integrity hash. Your build machine's own addon stays, so the app
-  still runs where you built it. If neither your install nor your lockfile has the image's addon,
-  the build fails and names the missing package.
+  copied from your install when it has it at the exact version that sharp expects, and otherwise
+  downloaded at that version as pinned in your lockfile and checked against the lockfile's sha512
+  integrity hash. Your build machine's own addon stays, so the app still runs where you built it.
 - **The compiled Bun executable loads sharp from that tree**, not from inside the executable: the
   native addon finds `libvips` next to it on disk, which it cannot do from inside a compiled
   binary.
+
+If your `next.config` sets `images: { unoptimized: true }`, Next never runs its image optimizer, so
+none of this happens: the build adds no addon and needs no lockfile or registry access for it.
+
+### Lockfiles and when the build stops
+
+When your install does not already have the image's addon, the build reads its version and
+integrity hash from your lockfile. These lockfiles are supported:
+
+| Lockfile | Package manager | Can supply the addon |
+|---|---|---|
+| `bun.lock` | Bun (text lockfile) | Yes |
+| `package-lock.json` | npm | Yes |
+| `pnpm-lock.yaml` | pnpm (lockfile v6 and v9) | Yes |
+| `yarn.lock` | Yarn 1 (classic) | Yes |
+| `yarn.lock` | Yarn 2 and later | No — see below |
+
+The download is never trusted without a sha512 hash to check it against, so the build **stops with
+an error naming the lockfile and the package** — rather than ship an image that cannot optimize
+images — when:
+
+- there is no lockfile, or the lockfile does not pin the image's addon;
+- your install has the addon at a different version than sharp expects, and the lockfile does not
+  pin the expected one either;
+- the lockfile's entry has no sha512 hash. Yarn 2 and later always land here when the addon
+  has to be downloaded: their lockfile
+  records a checksum of Yarn's own cache archive, not of the package the registry serves, so it
+  cannot verify the download.
+
+To get past it, do one of these and rebuild:
+
+- **Install the addon on the build machine**, so the build copies it instead of downloading it.
+  With Yarn 2 and later, use `nodeLinker: node-modules` and add the image's platform to
+  `.yarnrc.yml`:
+
+  ```yaml
+  nodeLinker: node-modules
+  supportedArchitectures:
+    os: [current, linux]
+    cpu: [current, x64]
+    libc: [current, musl]
+  ```
+
+  Use `arm64` instead of `x64` for an arm64 image.
+- **Build on a Linux musl host**, for example inside an Alpine container, where your install
+  already holds the image's addon.
+- **Install with npm, pnpm, Bun or Yarn 1**, whose lockfiles record the sha512 hash the download is
+  checked against.
+- **Turn the optimizer off** with `images: { unoptimized: true }` if you do not need resized images.
 
 The rest of this section is about the vinext build.
 
@@ -99,8 +147,8 @@ The native library is platform-specific, and the platform that matters is the **
 (Linux/musl), not your laptop's. `knext build` stages the image's addon set regardless of where
 you build: when your local install already has it (a Linux host) it is copied, and when it does not
 (a macOS host holds only macOS addons) the build downloads the version your app's installed sharp
-resolves to, as pinned in your lockfile (`bun.lock` or npm's `package-lock.json` — either works),
-and verifies the download against the lockfile's integrity hash before staging it. If neither your
+resolves to, as pinned in your lockfile (any lockfile in the table above that can supply the
+addon), and verifies the download against the lockfile's integrity hash before staging it. If neither your
 install nor your lockfile has the image's addon, the build **fails and names the missing package**
 — it never ships an image that cannot load sharp.
 

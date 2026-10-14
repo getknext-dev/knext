@@ -49,7 +49,7 @@ import {
     writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve, sep } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { rewriteVinextHarfbuzzAnchors } from "../adapters/entry-asset-anchor.mjs";
 import {
     ogHarfbuzzWarning,
@@ -62,6 +62,7 @@ import {
     findLockfile,
     formatLockedVersions,
     INTEGRITY_MANIFEST_NAME,
+    LOCKFILE_LIST,
     type LockedPackage,
     readLockfilePackages,
     writeNativeIntegrityManifest,
@@ -611,9 +612,19 @@ export function stageSharpNative(
     const stagedThisRun: string[] = [];
     try {
         if (appUsesSharp(cwd, imgRoot, locked)) {
-            // Read once, used by the fetch path to disambiguate a lockfile
-            // that pins an @img package at two versions at once (#954).
-            const resolvedSharp = readResolvedSharpManifest(cwd);
+            const ctx: ImgStageContext = {
+                platformId,
+                imgRoot,
+                lockfilePath,
+                locked,
+                // Read once, used to check a host copy and to disambiguate a
+                // lockfile that pins an @img package at two versions (#954).
+                resolvedSharp: readResolvedSharpManifest(cwd),
+                fetchPackage: opts.fetchPackage ?? fetchImgPackage,
+                who: "This app uses sharp",
+                image: "image",
+                consequence: "",
+            };
             // The addon links libvips by RELATIVE rpath, so the pair ships
             // together in its original layout or `dlopen` fails resolving
             // `libvips-cpp` after finding the addon.
@@ -621,59 +632,11 @@ export function stageSharpNative(
                 `sharp-${platformId}`,
                 `sharp-libvips-${platformId}`,
             ]) {
-                const hostDir =
-                    imgRoot === undefined ? undefined : join(imgRoot, dir);
                 const destDir = join(dest, dir);
                 // Enrolled BEFORE the write, so even a half-finished copy or
                 // fetch is unwound.
                 stagedThisRun.push(destDir);
-                if (hostDir !== undefined && existsSync(hostDir)) {
-                    // `dereference` follows the symlinks a bun/pnpm isolated
-                    // store uses; copying the links would put dangling
-                    // pointers in the image.
-                    cpSync(hostDir, destDir, {
-                        recursive: true,
-                        dereference: true,
-                    });
-                    continue;
-                }
-                // The host install lacks the target's package — a macOS build
-                // host, or an install layout the candidate walk cannot see
-                // (pnpm's `.pnpm` store). Fetch the exact version the lockfile
-                // pins, or fail the build NAMING the missing addon; the one
-                // outcome that is never acceptable is an image that cannot
-                // load sharp (#949).
-                const name = `@img/${dir}`;
-                if (!lockfilePath || locked === undefined) {
-                    throw new UsageError(
-                        `This app uses sharp, the image targets ${platformId}, and this host's install has no '${name}' — and there is no lockfile (bun.lock or package-lock.json) to fetch a pinned version from.\n\n` +
-                            "Run `npm install` (or `bun install --save-text-lockfile`) in the app and rebuild.",
-                    );
-                }
-                const versions = locked.get(name);
-                if (!versions || versions.length === 0) {
-                    throw new UsageError(
-                        `The image targets ${platformId}, but neither this host's install nor ${lockfilePath} has '${name}' — the image would ship unable to load sharp.\n\n` +
-                            "sharp resolves its native addons as optionalDependencies, so the lockfile\n" +
-                            "normally pins every platform's package. Reinstall from a clean lockfile\n" +
-                            "(`npm install`, or `bun install --save-text-lockfile`) with a sharp version\n" +
-                            `that publishes '${name}', and rebuild.`,
-                    );
-                }
-                const entry = pickFetchVersion(
-                    name,
-                    versions,
-                    resolvedSharp,
-                    lockfilePath,
-                );
-                (opts.fetchPackage ?? fetchImgPackage)(
-                    {
-                        name,
-                        version: entry.version,
-                        integrity: entry.integrity,
-                    },
-                    destDir,
-                );
+                stageImgPackage(ctx, dir, destDir);
             }
         }
 
@@ -943,44 +906,23 @@ export function stageSharpForVinextNode(
             rmSync(join(imgDest, entry), { recursive: true, force: true });
         }
     }
-    const resolvedSharp = readResolvedSharpManifest(cwd);
+    const ctx: ImgStageContext = {
+        platformId,
+        imgRoot,
+        lockfilePath,
+        locked,
+        resolvedSharp: readResolvedSharpManifest(cwd),
+        fetchPackage: opts.fetchPackage ?? fetchImgPackage,
+        who: "This app uses sharp",
+        image: "vinext-node image",
+        consequence: "",
+    };
     for (const dir of [`sharp-${platformId}`, `sharp-libvips-${platformId}`]) {
-        const hostDir = imgRoot === undefined ? undefined : join(imgRoot, dir);
         const destDir = join(imgDest, dir);
         // Clear whatever nitro traced for this entry — the wrong platform's
         // addon, or nothing — before writing the right one.
         rmSync(destDir, { recursive: true, force: true });
-        if (hostDir !== undefined && existsSync(hostDir)) {
-            cpSync(hostDir, destDir, { recursive: true, dereference: true });
-            continue;
-        }
-        const name = `@img/${dir}`;
-        if (!lockfilePath || locked === undefined) {
-            throw new UsageError(
-                `This app uses sharp, the vinext-node image targets ${platformId}, and this host's install has no '${name}' — and there is no lockfile (bun.lock or package-lock.json) to fetch a pinned version from.\n\n` +
-                    "Run `npm install` (or `bun install --save-text-lockfile`) in the app and rebuild.",
-            );
-        }
-        const versions = locked.get(name);
-        if (!versions || versions.length === 0) {
-            throw new UsageError(
-                `The vinext-node image targets ${platformId}, but neither this host's install nor ${lockfilePath} has '${name}' — the image would ship unable to load sharp.\n\n` +
-                    "sharp resolves its native addons as optionalDependencies, so the lockfile\n" +
-                    "normally pins every platform's package. Reinstall from a clean lockfile\n" +
-                    "(`npm install`, or `bun install --save-text-lockfile`) with a sharp version\n" +
-                    `that publishes '${name}', and rebuild.`,
-            );
-        }
-        const entry = pickFetchVersion(
-            name,
-            versions,
-            resolvedSharp,
-            lockfilePath,
-        );
-        (opts.fetchPackage ?? fetchImgPackage)(
-            { name, version: entry.version, integrity: entry.integrity },
-            destDir,
-        );
+        stageImgPackage(ctx, dir, destDir);
     }
 
     return { staged: true };
@@ -1019,7 +961,10 @@ export interface StageSharpForStandaloneOptions {
  *
  * A pair Next already traced (a build host of the image's own platform) is
  * left as it is. No traced sharp (no sharp installed, so nothing for Next's
- * optimizer to load) is a no-op.
+ * optimizer to load) is a no-op, and so is an app whose resolved config has
+ * `images.unoptimized: true`: Next then never runs its image optimizer, so
+ * there is nothing for sharp to do, and such an app must not need a lockfile
+ * or registry access to build.
  */
 export function stageSharpForStandalone(
     cwd: string,
@@ -1034,62 +979,212 @@ export function stageSharpForStandalone(
     }
 
     const layout = resolveStandaloneLayout(cwd);
+    if (imagesUnoptimized(layout.appDir, layout.serverDir)) {
+        return { staged: [] };
+    }
     const tracedSharp = findTracedSharp(layout.standaloneDir, layout.serverDir);
     if (tracedSharp === undefined) return { staged: [] };
 
     const imgDest = join(dirname(tracedSharp), "@img");
-    const imgRoot = findImgPackages(cwd);
     const lockfilePath = findLockfile(cwd);
-    const locked = lockfilePath
-        ? readLockfilePackages(lockfilePath)
-        : undefined;
-    const resolvedSharp = readSharpManifest(tracedSharp);
+    const ctx: ImgStageContext = {
+        platformId,
+        imgRoot: findImgPackages(cwd),
+        lockfilePath,
+        locked: lockfilePath ? readLockfilePackages(lockfilePath) : undefined,
+        // The TRACED sharp's pins: the one Next's optimizer loads in the image.
+        resolvedSharp: readSharpManifest(tracedSharp),
+        fetchPackage: opts.fetchPackage ?? fetchImgPackage,
+        who: "This app's standalone build includes sharp",
+        image: "standalone image",
+        consequence:
+            "Without it the image cannot load sharp, and next/image serves unoptimized originals.\n",
+    };
 
     const staged: string[] = [];
     for (const dir of [`sharp-${platformId}`, `sharp-libvips-${platformId}`]) {
         const destDir = join(imgDest, dir);
         if (existsSync(join(destDir, "package.json"))) continue;
-        const name = `@img/${dir}`;
         rmSync(destDir, { recursive: true, force: true });
         mkdirSync(imgDest, { recursive: true });
-        const hostDir = imgRoot === undefined ? undefined : join(imgRoot, dir);
-        if (hostDir !== undefined && existsSync(hostDir)) {
-            // `dereference`: a bun/pnpm isolated store keeps the real package
-            // behind a symlink; copying the link would ship a dangling pointer.
-            cpSync(hostDir, destDir, { recursive: true, dereference: true });
-            staged.push(name);
-            continue;
-        }
-        if (!lockfilePath || locked === undefined) {
-            throw new UsageError(
-                `This app's standalone build includes sharp, the image targets ${platformId}, and this host's install has no '${name}' — and there is no lockfile (bun.lock or package-lock.json) to fetch a pinned version from.\n\n` +
-                    "Without it the image cannot load sharp, and next/image serves unoptimized originals.\n" +
-                    "Run `npm install` (or `bun install --save-text-lockfile`) in the app and rebuild.",
-            );
-        }
-        const versions = locked.get(name);
-        if (!versions || versions.length === 0) {
-            throw new UsageError(
-                `The standalone image targets ${platformId}, but neither this host's install nor ${lockfilePath} has '${name}' — the image would ship unable to load sharp, and next/image would serve unoptimized originals.\n\n` +
-                    "sharp resolves its native addons as optionalDependencies, so the lockfile\n" +
-                    "normally pins every platform's package. Reinstall from a clean lockfile\n" +
-                    "(`npm install`, or `bun install --save-text-lockfile`) with a sharp version\n" +
-                    `that publishes '${name}', and rebuild.`,
-            );
-        }
-        const entry = pickFetchVersion(
-            name,
-            versions,
-            resolvedSharp,
-            lockfilePath,
-        );
-        (opts.fetchPackage ?? fetchImgPackage)(
-            { name, version: entry.version, integrity: entry.integrity },
-            destDir,
-        );
-        staged.push(name);
+        stageImgPackage(ctx, dir, destDir);
+        staged.push(`@img/${dir}`);
     }
     return { staged };
+}
+
+/**
+ * Did `next build` resolve `images.unoptimized: true`? Read from the build's
+ * own `required-server-files.json`, which records the fully evaluated config —
+ * so a value computed in next.config counts, which a text scan would miss.
+ * Anything unreadable answers `false`: staging then runs and fails closed,
+ * never the other way round.
+ */
+function imagesUnoptimized(appDir: string, serverDir: string): boolean {
+    for (const dir of [appDir, serverDir]) {
+        const file = join(dir, ".next", "required-server-files.json");
+        if (!existsSync(file)) continue;
+        try {
+            const parsed = JSON.parse(readFileSync(file, "utf8")) as {
+                config?: { images?: { unoptimized?: unknown } };
+            };
+            return parsed.config?.images?.unoptimized === true;
+        } catch {
+            return false;
+        }
+    }
+    return false;
+}
+
+/** What {@link stageImgPackage} needs to know about the app and the image. */
+interface ImgStageContext {
+    readonly platformId: string;
+    /** The host install's `node_modules/@img`, if the candidate walk found one. */
+    readonly imgRoot: string | undefined;
+    readonly lockfilePath: string | undefined;
+    readonly locked: Map<string, LockedPackage[]> | undefined;
+    /** The sharp that loads the addon in the image: its version and `@img` pins. */
+    readonly resolvedSharp: SharpManifest | undefined;
+    readonly fetchPackage: (
+        pkg: { name: string; version: string; integrity: string | null },
+        destDir: string,
+    ) => void;
+    /** Refusal wording: who needs sharp, which image, and what breaks. */
+    readonly who: string;
+    readonly image: string;
+    readonly consequence: string;
+}
+
+type SharpManifest = { version: string; imgPins: Record<string, string> };
+
+/**
+ * Stage `@img/<dir>` for the image into `destDir` — shared by every sharp
+ * staging path (`stageSharpNative`, `stageSharpForVinextNode`,
+ * `stageSharpForStandalone`).
+ *
+ * The host install's copy is used when it is there AND is the version the
+ * resolved sharp pins for it (#2360): sharp's loader expects exactly its own
+ * pin, and a hoisted `@img` package can belong to a different sharp (an app's
+ * sharp beside next's own). With no pin to compare against, the host copy is
+ * used as before. Otherwise the package is fetched at the lockfile's pin —
+ * the resolved sharp's exact pin when the host copy was rejected, the usual
+ * {@link pickFetchVersion} choice when the host simply lacks it — and only
+ * with a sha512 integrity to verify the download against. Every way this can
+ * fail is a build failure that names the package: the one outcome that is
+ * never acceptable is an image that cannot load sharp (#949).
+ */
+function stageImgPackage(
+    ctx: ImgStageContext,
+    dir: string,
+    destDir: string,
+): void {
+    const name = `@img/${dir}`;
+    const hostDir =
+        ctx.imgRoot === undefined ? undefined : join(ctx.imgRoot, dir);
+    const pinned = ctx.resolvedSharp?.imgPins[name];
+    const hostPresent = hostDir !== undefined && existsSync(hostDir);
+    const hostVersion = hostPresent ? readPackageVersion(hostDir) : undefined;
+    if (hostPresent && (pinned === undefined || hostVersion === pinned)) {
+        // `dereference` follows the symlinks a bun/pnpm isolated store uses;
+        // copying the links would put dangling pointers in the image.
+        cpSync(hostDir, destDir, { recursive: true, dereference: true });
+        return;
+    }
+
+    const hostHas = hostPresent
+        ? `this host's install has '${name}' at ${hostVersion ?? "an unreadable version"}, not the ${pinned} that sharp@${ctx.resolvedSharp?.version} pins`
+        : `this host's install has no '${name}'`;
+    if (!ctx.lockfilePath || ctx.locked === undefined) {
+        throw new UsageError(
+            `${ctx.who}, the ${ctx.image} targets ${ctx.platformId}, and ${hostHas} — and there is no lockfile (${LOCKFILE_LIST}) to fetch a pinned version from.\n\n` +
+                ctx.consequence +
+                "Run `npm install` (or `bun install --save-text-lockfile`) in the app and rebuild.",
+        );
+    }
+    const versions = ctx.locked.get(name);
+    if (!versions || versions.length === 0) {
+        throw new UsageError(
+            `The ${ctx.image} targets ${ctx.platformId}, but ${
+                hostPresent
+                    ? `${hostHas}, and ${ctx.lockfilePath} pins no '${name}' at all`
+                    : `neither this host's install nor ${ctx.lockfilePath} has '${name}'`
+            } — the image would ship unable to load sharp.\n\n` +
+                ctx.consequence +
+                "sharp resolves its native addons as optionalDependencies, so the lockfile\n" +
+                "normally pins every platform's package. Reinstall from a clean lockfile\n" +
+                "(`npm install`, or `bun install --save-text-lockfile`) with a sharp version\n" +
+                `that publishes '${name}', and rebuild.`,
+        );
+    }
+    let entry: LockedPackage;
+    if (hostPresent && pinned !== undefined) {
+        const match = versions.find((v) => v.version === pinned);
+        if (!match) {
+            throw new UsageError(
+                `The ${ctx.image} targets ${ctx.platformId}, but ${hostHas}, and ${ctx.lockfilePath} pins '${name}' only at ${formatLockedVersions(versions)} — the image would ship an addon that sharp does not load.\n\n` +
+                    ctx.consequence +
+                    "The store and the lockfile disagree about what is installed. Reinstall with\n" +
+                    "`npm install` (or `bun install --frozen-lockfile`) and rebuild rather than\n" +
+                    "shipping the difference.",
+            );
+        }
+        entry = match;
+    } else {
+        entry = pickFetchVersion(
+            name,
+            versions,
+            ctx.resolvedSharp,
+            ctx.lockfilePath,
+        );
+    }
+    assertFetchableIntegrity(name, entry, ctx.lockfilePath, ctx.image);
+    ctx.fetchPackage(
+        { name, version: entry.version, integrity: entry.integrity },
+        destDir,
+    );
+}
+
+/**
+ * Fail closed before any network when the lockfile cannot verify a fetch:
+ * an unverifiable download would ship whatever the registry answered, at
+ * native-code privilege. Names the lockfile and the package, and — for a
+ * yarn 2+ lockfile, whose `checksum` hashes yarn's own cache archive rather
+ * than the registry tarball — says why that lockfile cannot serve.
+ */
+function assertFetchableIntegrity(
+    name: string,
+    entry: LockedPackage,
+    lockfilePath: string,
+    image: string,
+): void {
+    if (entry.integrity?.startsWith("sha512-")) return;
+    const yarnBerry =
+        basename(lockfilePath) === "yarn.lock" && entry.integrity === null;
+    throw new UsageError(
+        `Refusing to fetch '${name}@${entry.version}' for the ${image}: ${lockfilePath} records no sha512 integrity for it, so the download could not be verified.\n\n` +
+            (yarnBerry
+                ? "Yarn 2 and later record a checksum of yarn's own cache archive, not of the\n" +
+                  "registry tarball, so it cannot verify this download.\n"
+                : "") +
+            "Either install the package on this host so the build copies it instead of\n" +
+            "fetching it (with yarn, add the image's platform under `supportedArchitectures`\n" +
+            "in .yarnrc.yml, for example `libc: [current, musl]`, with `nodeLinker:\n" +
+            "node-modules`), build on a host of the image's platform, or install with a\n" +
+            "package manager whose lockfile records sha512 integrity (npm, pnpm, bun or\n" +
+            "yarn 1) and rebuild.",
+    );
+}
+
+/** The `version` a package directory's own manifest declares, if readable. */
+function readPackageVersion(dir: string): string | undefined {
+    try {
+        const parsed = JSON.parse(
+            readFileSync(join(dir, "package.json"), "utf8"),
+        ) as { version?: unknown };
+        return typeof parsed.version === "string" ? parsed.version : undefined;
+    } catch {
+        return undefined;
+    }
 }
 
 /**
@@ -1132,9 +1227,7 @@ function findPackageUp(
 }
 
 /** A traced sharp's own manifest: its version and its exact `@img/*` pins. */
-function readSharpManifest(
-    sharpDir: string,
-): { version: string; imgPins: Record<string, string> } | undefined {
+function readSharpManifest(sharpDir: string): SharpManifest | undefined {
     try {
         const parsed = JSON.parse(
             readFileSync(join(sharpDir, "package.json"), "utf8"),
@@ -1267,10 +1360,11 @@ export function fetchImgPackage(
     destDir: string,
 ): void {
     // Refused BEFORE any network: an unverifiable fetch would ship whatever
-    // the registry answered, at native-code privilege. Both lockfiles this
-    // module reads (bun.lock, npm's package-lock.json) record a sha512 for
-    // every registry package, so a missing one means the entry is not a
-    // registry resolution at all.
+    // the registry answered, at native-code privilege. bun.lock,
+    // package-lock.json, pnpm-lock.yaml and yarn 1's yarn.lock record a
+    // sha512 for every registry package; yarn 2+ records none usable (its
+    // checksum hashes yarn's cache archive), and the staging paths refuse
+    // that case first, naming the lockfile (`assertFetchableIntegrity`).
     if (!pkg.integrity?.startsWith("sha512-")) {
         throw new UsageError(
             `Refusing to fetch '${pkg.name}@${pkg.version}': its lockfile entry has no sha512 integrity to verify the download against.\n\n` +
@@ -1387,9 +1481,7 @@ function findSharpPackageDir(cwd: string): string | undefined {
  * other one would pass the integrity manifest (that version IS in the lock)
  * and fail only at dlopen, inside the image.
  */
-function readResolvedSharpManifest(
-    cwd: string,
-): { version: string; imgPins: Record<string, string> } | undefined {
+function readResolvedSharpManifest(cwd: string): SharpManifest | undefined {
     // The same candidate walk as `findImgPackages`: the app's own install,
     // bun's isolated store, then a workspace root above the app.
     const candidates = [
@@ -1449,9 +1541,7 @@ function readResolvedSharpManifest(
 function pickFetchVersion(
     name: string,
     versions: readonly LockedPackage[],
-    resolvedSharp:
-        | { version: string; imgPins: Record<string, string> }
-        | undefined,
+    resolvedSharp: SharpManifest | undefined,
     lockfilePath: string,
 ): LockedPackage {
     if (versions.length === 1) return versions[0];
