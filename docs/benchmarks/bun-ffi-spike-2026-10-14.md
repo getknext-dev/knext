@@ -247,10 +247,62 @@ not run; (b) has no import for a bundler to handle **[inferred]**.
   This run supports the generated wrapper inside Next, not ADR-0069 D13's path 1
   (`dirname(process.execPath)/native`); path 1 is what part A's compiled-executable run supports.
 
+## C. Linux: the musl load matrix (FFI-4, #2346) [measured]
+
+`.github/workflows/ffi-e2e.yml`, job `musl-load`, run 38511403415. `knext-ffi-fixture` is
+cross-built with `cargo zigbuild` (zig 0.17.0, cargo-zigbuild 0.23.4, Rust 1.97.1,
+`-C target-feature=-crt-static`) on an x64 (`ubuntu-latest`) and an arm64 (`ubuntu-24.04-arm`)
+runner. The wrapper comes from `@getknext/ffi`'s generator, and `native/` + `.integrity.json` from
+core's writer. The **generated wrapper** runs inside `oven/bun:1.4.2-alpine` with
+`docker run --read-only --network none` and `TMPDIR=/tmp`; the driver confirms both refuse a write
+(`EROFS`). It loads through the production path only (`NODE_ENV=production`, integrity-checked,
+`native/` beside `process.execPath`).
+
+- **The two inferred facts hold on both arches.**
+  - The zigbuild library's only `DT_NEEDED` is `libc.so`, and musl's loader resolves it.
+  - A panic unwinds through zig's statically linked unwinder into `catch_unwind`: 1000 panics in a
+    row each come back as `RustPanicError` (status 2), and the next call is correct. ADR-0069 D14's
+    container-build fallback is therefore **not** needed.
+- All 45 fixture exports are called, with every `Err` path. The driver's case table must equal the
+  module's exports. Both the uncompiled caller (`bun driver.ts`) and the `bun build --compile`
+  caller (`native/` beside the executable) pass.
+- Per-call overhead (ns, mean of 2e5 calls after 1e4 warm-up):
+
+  | arch / caller | `noop` | `add(i32,i32)` | `greet(String)` | `sum_bytes(1 KiB)` | `echo_point(record)` |
+  |---|---|---|---|---|---|
+  | x64 / `bun` | 12 | 23 | 373 | 207 | 8374 |
+  | x64 / compiled | 8 | 20 | 385 | 206 | 8331 |
+  | arm64 / `bun` | 10 | 19 | 376 | 204 | 9259 |
+  | arm64 / compiled | 10 | 17 | 419 | 202 | 9544 |
+
+- Leak check: RSS growth over 1e6 calls after a 1e6-call warm-up, after a full GC, one process
+  per phase, bound 48 MB:
+
+  | arch / caller | String (`make_string(256)`) | Vec<u8> (`make_bytes(256)`) | record (`echo_point`) |
+  |---|---|---|---|
+  | x64 / `bun` | +0.9 MB | +2.2 MB | +3.1 MB |
+  | x64 / compiled | +0.8 MB | +4.4 MB | +2.9 MB |
+  | arm64 / `bun` | −0.9 MB | +3.1 MB | +3.1 MB |
+  | arm64 / compiled | +2.2 MB | +3.7 MB | +4.4 MB |
+  | x64, wrapper with `knext_ffi_v1_free` removed | **+281.3 MB** | **+281.9 MB** | **+327.8 MB** |
+  | arm64, wrapper with `knext_ffi_v1_free` removed | **+281.3 MB** | **+283.4 MB** | **+328 MB** |
+
+  The warm-up matters. With every buffer freed, 1e6 short-lived string results drive RSS to a
+  plateau: about 125 MB on macOS, the same from 3e5 to 3e6 calls. A "growth since a 1e4-call
+  warm-up" check therefore false-positives on the String phase. The no-free rows are the proof that
+  the check can see a real native leak through the real wrapper; every run makes both arches flag
+  them.
+- Wrong platform: `native/ffi/` staged for the other triple is refused, in every run, with
+  `holds Rust libraries for <other>, but this process runs on <this>`.
+- `bun build --compile` inlines the **dotted** `process.env.NODE_ENV` as `"development"` (1.4.2,
+  measured). The generated wrapper reads `process.env['NODE_ENV']`, which stays a runtime read, so
+  its production-only path selection is correct in a compiled executable. Code that writes the
+  dotted form does not get the same guarantee.
+
 ## Not run (handed to the implementation tickets)
 
-- Loading the musl `.so` in `oven/bun:1.4.2-alpine` on amd64 and arm64, with a read-only root file
-  system: local Docker is out of disk and nothing was pruned → ADR-0069 FFI-4 (#2346).
+- ~~Loading the musl `.so` in `oven/bun:1.4.2-alpine` on amd64 and arm64, with a read-only root file
+  system~~ → done in CI, section C above (FFI-4, #2346).
 - glibc builds (out of v1 scope); `readOnlyRootFilesystem` on a real cluster → FFI-4.
 - Enums (only struct records were exercised); data-carrying enums are a compile error in v1.
 - knext's own `knext build` path end to end (it does not exist yet) → FFI-3 (#2345), FFI-4.

@@ -1,0 +1,36 @@
+# cargo-deny policy for this zone's Rust library. `knext ffi build` runs
+# `cargo deny check` with it before every image build, and fails the build on
+# any finding. Docs: https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+# The Linux images knext builds.
+targets = ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"]
+
+[advisories]
+# Every RustSec advisory fails the build. Upgrade the crate first
+# (cargo update -p <crate>). To accept one you cannot fix yet, add a dated,
+# justified entry to advisory-allowlist.json beside this file:
+#   { "allow": [{ "id": "RUSTSEC-YYYY-NNNN", "justification": "why it is safe here",
+#                 "added": "YYYY-MM-DD", "expires": "YYYY-MM-DD" }] }
+# An entry stops covering the advisory after its expiry date. `ignore` below
+# is not an allowlist: knext still refuses an advisory listed only there.
+yanked = "deny"
+ignore = []
+
+[licenses]
+confidence-threshold = 0.9
+# Add the licenses your dependencies use, after checking they suit you.
+allow = ["Apache-2.0", "MIT", "Unicode-3.0"]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+# crates.io, plus the knext-ffi crates by git. knext also refuses any other git
+# source from Cargo.lock, whatever this file says.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = ["https://github.com/getknext-dev/knext"]
