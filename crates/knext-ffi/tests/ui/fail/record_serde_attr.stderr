@@ -1,0 +1,22 @@
+error: knext-ffi: #[serde(...)] attributes are not allowed on a #[knext_ffi::record]: names cross verbatim and the embedded manifest must describe the wire format exactly
+ --> tests/ui/fail/record_serde_attr.rs:5:5
+  |
+5 |     #[serde(rename = "n")]
+  |     ^
+
+error: cannot find attribute `serde` in this scope
+ --> tests/ui/fail/record_serde_attr.rs:5:7
+  |
+5 |     #[serde(rename = "n")]
+  |       ^^^^^
+  |
+  = note: `serde` is an attribute that can be used by the derive macros `Deserialize` and `Serialize`, you might be missing a `derive` attribute
+  = note: `serde` is in scope, but it is a crate, not an attribute
+
+warning: unused import: `export`
+ --> tests/ui/fail/record_serde_attr.rs:1:17
+  |
+1 | use knext_ffi::{export, record};
+  |                 ^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

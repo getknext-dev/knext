@@ -1,0 +1,5 @@
+error: knext-ffi: `Result<i32, String>` is not supported: `Result<T, E>` is only supported as the return type; supported types are listed in the knext-ffi type table (ADR-0069 D6, crates/README.md)
+ --> tests/ui/fail/result_arg.rs:4:13
+  |
+4 | pub fn f(r: Result<i32, String>) -> i32 {
+  |             ^^^^^^

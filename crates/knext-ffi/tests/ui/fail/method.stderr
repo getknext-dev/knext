@@ -1,0 +1,5 @@
+error: knext-ffi: methods (`&self`) are not supported: export a free `pub fn`; supported types are listed in the knext-ffi type table (ADR-0069 D6, crates/README.md)
+ --> tests/ui/fail/method.rs:7:14
+  |
+7 |     pub fn m(&self) -> i32 {
+  |              ^

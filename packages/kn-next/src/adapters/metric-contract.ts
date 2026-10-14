@@ -239,11 +239,18 @@ export function seriesNames(families: Map<string, string>): Set<string> {
  *
  * A trailing `*` is kept: docs legitimately name a FAMILY (`knext_coldstart_*`),
  * and the caller resolves that as a prefix against at least one emitted series.
+ *
+ * The in-process Rust feature's names are not metrics and are skipped: the
+ * crate `knext_ffi` and its versioned C symbols (`knext_ffi_v1_*`). Only that
+ * exact crate name and the `_v1_` ABI prefix are skipped, so a real metric
+ * such as `knext_ffi_calls_total` is still checked.
  */
 export function extractDocMetricTokens(markdown: string): string[] {
     const out = new Set<string>();
     for (const m of markdown.matchAll(/`((?:knext|kn_next)_[a-z0-9_]*\*?)`/g)) {
-        out.add(m[1] as string);
+        const token = m[1] as string;
+        if (token === "knext_ffi" || /^knext_ffi_v\d+_/.test(token)) continue;
+        out.add(token);
     }
     return [...out].sort();
 }

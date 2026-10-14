@@ -825,6 +825,22 @@ const ALL_EMITTED = allowed([
     "use-cache",
 ]);
 
+describe("the doc metric extractor skips the in-process Rust ABI names", () => {
+    it("reads a real metric but not the FFI crate or its C symbols", () => {
+        const doc =
+            "`knext_use_cache_events_total` `knext_ffi` `knext_ffi_v1_free` `knext_ffi_v1_` `knext_ffi_v1_add_1a2b3c4d`";
+        expect(extractDocMetricTokens(doc)).toEqual([
+            "knext_use_cache_events_total",
+        ]);
+    });
+
+    it("still reads a metric that merely starts with knext_ffi_ (only the versioned ABI prefix is skipped)", () => {
+        expect(extractDocMetricTokens("`knext_ffi_calls_total`")).toEqual([
+            "knext_ffi_calls_total",
+        ]);
+    });
+});
+
 describe("every metric a DOC names is one something emits (S5)", () => {
     it("the CDN purge emitter scan finds the counter (an empty scan would let a dead name through)", () => {
         expect(CDN_PURGE.has("knext_cdn_purge_total")).toBe(true);

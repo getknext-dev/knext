@@ -1,0 +1,13 @@
+error: knext-ffi: `&'static str` is not supported: references cannot appear inside a record, Option or Vec; use `String` or `Vec<u8>`; supported types are listed in the knext-ffi type table (ADR-0069 D6, crates/README.md)
+ --> tests/ui/fail/record_str_ref_field.rs:5:15
+  |
+5 |     pub name: &'static str,
+  |               ^
+
+warning: unused import: `export`
+ --> tests/ui/fail/record_str_ref_field.rs:1:17
+  |
+1 | use knext_ffi::{export, record};
+  |                 ^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
