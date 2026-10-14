@@ -29,7 +29,7 @@ import { trackWrite } from './cache-write-registry.js';
 import { enqueueAppPurge, enqueuePurge, firstReadyPurge } from './cdn-purge/index.js';
 // The `'use cache'` (`cacheHandlers`) backend. Pure logic over an injected `core`
 // (below), so it imports nothing from this module and stays testable alone.
-import { createUseCacheHandler } from './use-cache-handler.js';
+import { createUseCacheHandler, resetUseCacheTagReplay } from './use-cache-handler.js';
 // Slow-dependency discrimination (cold-start ledger row 3). Observation only:
 // it attaches two listeners to the connecting client and names which PHASE was
 // slow (TCP connect vs the ready-check INFO). No timer, no budget, no verdict —
@@ -215,6 +215,7 @@ function __resetEnvForTests() {
   unhealthyUntil = 0;
   closeFailureReported = false;
   resetInvalidationReplay();
+  resetUseCacheTagReplay(USE_CACHE_CORE);
   buildLiveLookups.clear();
   lastBuildLiveBeat = 0;
   CONNECT_TIMEOUT_MS = envMs('REDIS_CONNECT_TIMEOUT_MS', 5000);
@@ -881,6 +882,12 @@ async function redisCommand(client, name, args) {
   return await client.send(name, args.map(String));
 }
 
+/** How long until the breaker closes (or one cooldown when it is closed). */
+function breakerRetryInMs() {
+  const now = Date.now();
+  return unhealthyUntil > now ? unhealthyUntil - now : RETRY_COOLDOWN_MS;
+}
+
 /**
  * What the `'use cache'` backend shares with this handler (ADR-0066 D2): the
  * connection with its timeouts, the circuit breaker, the key prefix and the build
@@ -893,6 +900,7 @@ const USE_CACHE_CORE = {
   keyPrefix: () => KEY_PREFIX,
   buildId: () => currentBuildId,
   redisConfigured: () => useRedis,
+  retryInMs: () => breakerRetryInMs(),
 };
 
 // ─── Key Builders ───
@@ -1467,7 +1475,8 @@ function noteCdnPurgeSkipped(tagCount) {
 //  - PER PROCESS. The list lives in this process only: a pod that scales to
 //    zero or restarts before Redis is back loses it, and those entries stay
 //    stale until their TTL (a known limit). The `'use cache'` handler's tag
-//    stamps are not replayed here.
+//    stamps are replayed by that handler, the same way, from its own list
+//    (use-cache-handler.js, "Tag stamps an outage kept from Redis").
 const REPLAY_MAX_TAGS = 1000;
 const REPLAY_SCAN_COUNT = 100;
 // tag -> the generation it was last recorded at. A Map keeps first-insertion
@@ -1541,8 +1550,7 @@ function scheduleReplayProbe() {
     return;
   }
   if (replayTimer || replayRun || !replayPending()) return;
-  const now = Date.now();
-  const wait = unhealthyUntil > now ? unhealthyUntil - now : RETRY_COOLDOWN_MS;
+  const wait = breakerRetryInMs();
   replayTimer = setTimeout(() => {
     replayTimer = null;
     startInvalidationReplay();

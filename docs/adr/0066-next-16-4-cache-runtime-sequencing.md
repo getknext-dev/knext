@@ -1,6 +1,6 @@
 # ADR-0066: Next 16.4 cache surface and runtime-supervisor changes — one sequenced plan
 
-- **Status:** **Accepted with Amendment 1 (2026-10-11); Amendment 2 (2026-10-12) Proposed; Amendment 3 (2026-10-13) Proposed; Amendment 4 (2026-10-13) Proposed.** Proposed 2026-10-10 and revised in review
+- **Status:** **Accepted with Amendment 1 (2026-10-11); Amendment 2 (2026-10-12) Proposed; Amendment 3 (2026-10-13) Proposed; Amendment 4 (2026-10-13) Proposed; Amendment 5 (2026-10-14) Proposed.** Proposed 2026-10-10 and revised in review
   round 2 the same day; accepted at the Sprint 2 close design review (jev 0.98). D1–D5 stand as
   written, except where an amendment (end of this file) supersedes a line: Amendment 1 (Accepted:
   K4 keeps the `adapterPath` shim), Amendment 2 (Proposed: a live build's window is honoured) and
@@ -8,7 +8,8 @@
   Amendment 2 §1's re-render sentence, §2's "withheld exactly as before" for page and route entries,
   and Amendment 2's Redis-fault accepted risk), and Amendment 4 (Proposed: ISR invalidations skipped
   while the Redis breaker is open are replayed when it closes; it supersedes D2's ISR outage
-  residual). Design and sequencing only; no code lands with this ADR.
+  residual), and Amendment 5 (Proposed: the same for `'use cache'` tag stamps; it supersedes D2's
+  `'use cache'` outage residual). Design and sequencing only; no code lands with this ADR.
 - **Date:** 2026-10-10
 - **Trigger class:** ADR + hard rule ("don't rewrite the runtime twice"; "gate every feature on the
   official compatibility suite") + public API (the `'use cache'` backend export and its adapter
@@ -388,7 +389,9 @@ state described a stamp key that does not exist.
 - **Residual, stated.**
   - `'use cache'`: an `updateTags` dropped during the outage is lost. Entries written before the
     outage stay valid until their Redis TTL, which the cap now bounds at 24 h, or 1 h for per-user
-    entries.
+    entries. **[Superseded by Amendment 5:** the tags are kept per process and their stamps written
+    once the breaker closes; the entries stay valid until their TTL only if the pod restarts or
+    scales to zero first.**]**
   - ISR: a `revalidateTag` during the outage clears only the local map. Its Redis entries stay stale
     until their TTL, as they do today. **[Superseded by Amendment 4 for ISR:** the tags are kept per
     process and replayed, Redis then the edge, once the breaker closes; they stay stale until their
@@ -396,7 +399,8 @@ state described a stamp key that does not exist.
   - An in-process retry queue would be lost on scale-to-zero, which is the normal case, so neither
     handler adds one. **[Superseded by Amendment 4 for ISR:** the ISR handler now keeps a bounded,
     deduplicated in-process replay list; losing it on scale-to-zero is an accepted limit. `'use cache'`
-    still adds none.**]**
+    still adds none.**]** **[Superseded by Amendment 5 for `'use cache'`:** it keeps a bounded,
+    deduplicated in-process list of dropped tag stamps.**]**
 
 jev, outage: **the two handlers differ, stated 0.69** / `'use cache'` also falls back per process
 0.27 / change ISR to miss/drop too 0.04 (confidence 0.53). The confidence is medium, so the decision
@@ -1046,7 +1050,7 @@ clear only the local map, as today") is superseded the same way.
 - **`'use cache'`.** An `updateTags` dropped during the outage is still lost (D2). Next copies a
   `'use cache'` function's tags into the page entry, so the replay re-renders the page, but the
   function inside it can still return its own cached value until that entry's TTL. Replaying the
-  tag stamps too is follow-up work (#2331), not done here.
+  tag stamps too is follow-up work (#2331), not done here. **[Superseded by Amendment 5.]**
 - The breaker itself (per process, shared by both handlers), its cooldown, and the per-pod memory
   fallback.
 
@@ -1071,3 +1075,70 @@ clear only the local map, as today") is superseded the same way.
 - **One more Redis key pattern.** The collapse issues `SCAN ... MATCH <prefix>:cache:*`. A second app
   whose key prefix is literally `<prefix>:cache` on the same Redis would be swept too; prefixes are
   per app (`REDIS_KEY_PREFIX`), so this needs a deliberately colliding configuration.
+
+## Amendment 5 (2026-10-14): `'use cache'` tag stamps dropped while the breaker is open are replayed
+
+**Status of this amendment: Proposed.** Trigger-class (ADR, and the cache runtime); per the
+2026-09-22 workflow amendment it is not a merge gate, and it is reviewed at sprint close. Implemented
+in #2331 meanwhile. It supersedes, for the **`'use cache'`** handler, D2's residual line "an
+`updateTags` dropped during the outage is lost", the "`'use cache'` still adds none" note under
+Amendment 4's D2 brackets, and Amendment 4's "Unchanged: `'use cache'`" bullet.
+
+### The rule
+
+The `'use cache'` handler keeps the tags whose stamps did not reach Redis (the breaker was open, or
+the `HSET` faulted), per process, shared by the `default` and `remote` kinds, and writes their stamps
+once the breaker closes. Amendment 4's shape, applied to stamps:
+
+- **Bound and collapse.** 1000 distinct tags. One more and the list collapses: the replay deletes
+  every `'use cache'` entry under `<prefix>:uc:*` (cursor `SCAN` + `DEL`; the stamp hash
+  `<prefix>:uc:tags` is skipped). Wider than needed, never stale.
+- **Off the request path, no storm.** Started by the first connection the handler gets with the
+  breaker closed, or by an unref'd probe timer at the moment it closes (the shared core now exposes
+  how long until then). One run at a time, 100 tags per write; the first fault stops the run until
+  the next probe. Enrolled in the SIGTERM drain.
+- **Generation check.** A drop of the same tag recorded while its write is in flight is kept for
+  the next run; a drop recorded during a collapse sweep keeps the collapse.
+- **Replay time, never over a newer stamp.** A dropped call is replayed as a late `updateTags`:
+  stamped with the Redis time of the replay (`TIME` inside the script), so never older than the
+  call. It is written by a compare-and-set script, not an `HSET`, because by replay time a NEWER
+  invalidation of the same tag can already be in Redis -- from another pod whose breaker closed
+  first, or from this pod while the replay was in flight -- and a plain overwrite would move its
+  expiry into the future, so an entry it expired would be served again after an `updateTag`. Per
+  field, against the current value, in one script: `s:<tag>` only moves forward; `e:<tag>` wants
+  `now + window`, but an expiry already in effect (`<= now`) is never moved into the future
+  (expire-now brings it up to `now`), and a pending one (`> now`) is never pushed later. The script
+  is sent outside the breaker-aware wrapper; on any error the batch is written by the same rule
+  from the client (`HMGET` then `HSET`, through the wrapper), so a Redis that refuses scripts still
+  gets the replay and does not open the breaker ISR shares, while a dead link still trips it.
+  Calls for one tag are merged in call order, as consecutive `updateTags` would be.
+
+### Options considered (jev)
+
+| Decision | Chosen | jev |
+|---|---|---|
+| Where | the `'use cache'` handler's per-process state, own probe (a generic engine in the ISR handler) | **0.97** (0.03) |
+| Stamp time | replay time (call time via a max-merge script / call time via plain `HSET`) | **0.59** (0.27 / 0.14) |
+| Stamp write (revised in review: a plain `HSET` at replay time could undo a newer hard invalidation) | compare-and-set script: an expiry in effect is kept, a pending one only brought forward (keep the in-effect expiry only if it postdates the dropped call, by a clock estimate) | **1.00** (0.00) |
+| Script clock | the script's own `TIME` (the replay time computed by the client, passed in) | **0.90** (0.10) |
+| Script refused | fall back to the same rule by read-then-write, script outside the breaker (script through the breaker / plain `HSET`) | not scored: the model was unreachable |
+| Overflow | collapse to deleting every `'use cache'` entry (drop and count / a global stamp read on every hit) | **0.57** (0.30 / 0.13) |
+| Write shape | 100 tags per write (one write for the whole list / one per tag) | **0.53** (0.45 / 0.02) |
+| This pod's reads consult the list before it lands | no, the probe fires at breaker close (yes) | **0.99** (0.01) |
+
+### Accepted risks
+
+- **Per process**, as Amendment 4: a pod that restarts or scales to zero before Redis is back loses
+  the list, and those entries are served until their TTL.
+- **Over-invalidation.** An entry written between the call and the replay is expired once more. The
+  collapse deletes every `'use cache'` entry of the app, per-user entries included.
+- **Same-pod window.** Until the replay's write lands (milliseconds after the breaker closes), a read
+  on any pod, this one included, can still be served the entry.
+- **A window replayed onto an expiry in effect.** A stale-with-window drop replayed onto a tag whose
+  expiry is already in effect marks that tag's entries stale (re-rendered on the next read) but does
+  not schedule the window's later expiry: the script cannot tell an expiry that predates the dropped
+  call from one that follows it, and keeping it is the side that never serves a hard-invalidated
+  entry.
+- **The fallback is not atomic.** On a Redis that refuses scripts, a stamp written between the
+  fallback's read and its write can be overwritten: a one-round-trip window, against the outage-long
+  window the plain `HSET` had.

@@ -10,6 +10,14 @@
  */
 export declare const PRUNE_STAMPS_SCRIPT: string;
 
+/**
+ * The Lua source of the tag replay's compare-and-set write: KEYS[1] is the
+ * stamp hash, ARGV pairs are (field, ms). At the script's own `TIME`, `s:` only
+ * moves forward; `e:` wants now + ms but an expiry already in effect is never
+ * moved into the future and a pending one is never pushed later.
+ */
+export declare const REPLAY_STAMPS_SCRIPT: string;
+
 /** One `'use cache'` entry, as Next 16.4's `cacheHandlers` contract passes it. */
 export interface UseCacheEntry {
     value: ReadableStream<Uint8Array>;
@@ -40,7 +48,12 @@ export interface UseCacheCore {
     keyPrefix(): string;
     buildId(): string | undefined;
     redisConfigured(): boolean;
+    /** How long until the breaker closes, for the tag replay's probe (5 s if absent). */
+    retryInMs?(): number;
 }
+
+/** Forget the process's backlog of dropped tag stamps and its probe timer. */
+export declare function resetUseCacheTagReplay(core: UseCacheCore): void;
 
 export declare function createUseCacheHandler(args: {
     kind: "default" | "remote" | string;
