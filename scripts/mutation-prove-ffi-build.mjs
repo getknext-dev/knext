@@ -19,8 +19,8 @@
  *     libc allowlist, staging scope, drift check and cargo flags.
  *
  * Each mutation puts back ONE defect and requires its spec to go red.
- * Removing the preflight from `deploy()` is proved twice: against the caller
- * scan (P03, never runs deploy.ts) AND executed against the callers spec (C03).
+ * Removing the preflight from `deploy()` (P03) is EXECUTED against the callers
+ * spec, not proved against a source scan.
  * Executing it is safe because every deploy() there passes `--dry-run` (a scan
  * in that spec enforces it), and deploy.ts skips the prune preflight, docker
  * build/push and the CR apply on a dry run — so with the refusal gone deploy()
@@ -137,13 +137,8 @@ const PREFLIGHT = [
     anchor: '    if (resolveSelfContained(config, opts.selfContained)) {',
     replacement: '    if (false && resolveSelfContained(config, opts.selfContained)) {',
   },
-  {
-    id: 'P03',
-    subject: 'deploy',
-    claim: 'deploy() no longer calls the preflight (scan only, never executed)',
-    anchor: '    assertFfiTargetSupported(baseConfig, process.cwd());',
-    replacement: '',
-  },
+  // P03 (deploy() without the preflight) is EXECUTED against the callers spec;
+  // see CALLERS below.
   {
     id: 'P04',
     subject: 'deploy',
@@ -178,7 +173,7 @@ const CALLERS = [
     replacement: '',
   },
   {
-    id: 'C03',
+    id: 'P03',
     subject: 'deploy',
     claim:
       'deploy() no longer calls the preflight (executed: --skip-build --dry-run reaches the freshness check)',
