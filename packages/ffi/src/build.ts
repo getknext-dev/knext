@@ -4,13 +4,18 @@
  * Run by `knext build` / `knext deploy` / `knext preview` (through core's
  * `ffi-dispatch.ts`) before the project build, when `knext.ffi.json` exists:
  *
- * 1. Check the toolchain: `cargo`, `cargo zigbuild`, `zig`, the rustup target.
- *    A missing one is a usage error naming its install command.
- * 2. `cargo zigbuild --release --locked --target <triple>` in the crate, with
- *    `-C target-feature=-crt-static` (a cdylib against the musl the image
- *    has, not a static libc).
- * 3. The libc check (elf.ts): only musl/libgcc `DT_NEEDED` entries.
- * 4. Stage `<native>/ffi/<triple>/lib<name>.so` + `provenance.json`, clearing
+ * 1. Check the toolchain: `cargo`, the rustup target. A missing one is a usage
+ *    error naming its install command. Then the supply-chain gates (D16,
+ *    supply-chain.ts): the git-source rule, the four pinned cargo tools, the
+ *    pinned zig, and `cargo deny check`.
+ * 2. `cargo auditable zigbuild --release --locked --target <triple>` in the
+ *    crate, with `-C target-feature=-crt-static` (a cdylib against the musl
+ *    the image has, not a static libc), linking with the verified zig.
+ * 3. The libc check (elf.ts): only musl/libgcc `DT_NEEDED` entries; the
+ *    library must carry cargo-auditable's crate list; `cargo cyclonedx`
+ *    writes the target's SBOM.
+ * 4. Stage `<native>/ffi/<triple>/lib<name>.so` + `provenance.json` +
+ *    `sbom.cdx.json`, clearing
  *    only `<native>/ffi/` (sharp's staging beside it is never touched). The
  *    integrity manifest over the whole `native/` tree is core's, written after
  *    the compile.
@@ -34,6 +39,13 @@ import { generateFiles } from './generate';
 import { ManifestError } from './manifest';
 import { diffOutput } from './output';
 import { libNameOf } from './render';
+import {
+  cargoInstallCommand,
+  prepareSupplyChain,
+  SBOM_FILE,
+  type SupplyChain,
+  type ZigDeps,
+} from './supply-chain';
 
 /** The image targets (D14 build matrix): musl x64 and arm64. */
 export const SUPPORTED_TARGETS = [
@@ -47,17 +59,23 @@ export const PROVENANCE_FILE = 'provenance.json';
 export interface RunResult {
   readonly status: number | null;
   readonly stdout: string;
+  /** Only when the run asked for `captureStderr` (cargo-deny's JSON goes there). */
+  readonly stderr?: string;
   readonly error?: NodeJS.ErrnoException | Error;
 }
 
 export type Runner = (
   cmd: string,
   args: readonly string[],
-  opts: { cwd: string; env?: NodeJS.ProcessEnv },
+  opts: { cwd: string; env?: NodeJS.ProcessEnv; captureStderr?: boolean },
 ) => RunResult;
 
 export interface BuildDeps {
   readonly run?: Runner;
+  /** The environment tools are found in and run with (default: `process.env`). */
+  readonly env?: NodeJS.ProcessEnv;
+  /** zig's download (D16): fetch, cache directory and host, for tests. */
+  readonly zig?: ZigDeps;
 }
 
 /** Cargo's diagnostics go to the user's terminal; stdout is captured. */
@@ -66,40 +84,49 @@ const spawnRunner: Runner = (cmd, args, opts) => {
     cwd: opts.cwd,
     env: opts.env ?? process.env,
     encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'inherit'],
+    stdio: ['ignore', 'pipe', opts.captureStderr ? 'pipe' : 'inherit'],
     maxBuffer: 256 * 1024 * 1024,
   });
-  return { status: r.status, stdout: r.stdout ?? '', ...(r.error ? { error: r.error } : {}) };
+  return {
+    status: r.status,
+    stdout: r.stdout ?? '',
+    ...(opts.captureStderr ? { stderr: r.stderr ?? '' } : {}),
+    ...(r.error ? { error: r.error } : {}),
+  };
 };
 
 const RUSTUP = 'https://rustup.rs';
+
+/**
+ * The install commands the toolchain checks print (the cargo tools' from
+ * {@link cargoInstallCommand}, the pinned versions in supply-chain.ts).
+ * Exported so the docs page quotes the same strings
+ * (apps/docs/rust-in-process-doc.test.ts).
+ */
+export const INSTALL_HINTS = {
+  zigbuild: cargoInstallCommand('zigbuild'),
+  deny: cargoInstallCommand('deny'),
+  auditable: cargoInstallCommand('auditable'),
+  cyclonedx: cargoInstallCommand('cyclonedx'),
+  rustupTarget: 'rustup target add',
+} as const;
 const notStarted = (r: RunResult) => r.error !== undefined;
 const firstLine = (s: string) => s.split('\n')[0]?.trim() ?? '';
 
-/** D14 step 2's preflight. Returns the versions recorded in provenance. */
+/**
+ * D14 step 2's preflight: cargo, rustup and the targets. cargo-zigbuild and
+ * zig are pinned, and checked with the other supply-chain tools (D16,
+ * supply-chain.ts). Returns `rustc -V` for provenance.
+ */
 function checkToolchain(
   run: Runner,
   crateDir: string,
   targets: readonly string[],
-): { rustc: string; zigbuild: string } {
+): { rustc: string } {
   const cargo = run('cargo', ['--version'], { cwd: crateDir });
   if (notStarted(cargo) || cargo.status !== 0) {
     throw new FfiUsageError(
       `cargo was not found on PATH. Install Rust from ${RUSTUP} (the crate's rust-toolchain.toml selects the version), then run this again.`,
-    );
-  }
-  // `cargo zigbuild --version` is not a valid invocation: the zigbuild
-  // subcommand rejects --version (exit 2). The binary answers it directly.
-  const zb = run('cargo-zigbuild', ['--version'], { cwd: crateDir });
-  if (notStarted(zb) || zb.status !== 0) {
-    throw new FfiUsageError(
-      'cargo-zigbuild is not installed; it cross-compiles the library for the musl image. Install it with: cargo install --locked cargo-zigbuild',
-    );
-  }
-  const zig = run('zig', ['version'], { cwd: crateDir });
-  if (notStarted(zig) || zig.status !== 0) {
-    throw new FfiUsageError(
-      'zig was not found on PATH; cargo-zigbuild links against the musl sysroot zig ships. Install zig from https://ziglang.org/download/ (or: pip install ziglang).',
     );
   }
   const installed = run('rustup', ['target', 'list', '--installed'], { cwd: crateDir });
@@ -112,14 +139,11 @@ function checkToolchain(
   const missing = targets.filter((t) => !have.has(t));
   if (missing.length > 0) {
     throw new FfiUsageError(
-      `the Rust target ${missing.join(', ')} is not installed for this crate's toolchain. Install it with: rustup target add ${missing.join(' ')}`,
+      `the Rust target ${missing.join(', ')} is not installed for this crate's toolchain. Install it with: ${INSTALL_HINTS.rustupTarget} ${missing.join(' ')}`,
     );
   }
   const rustc = run('rustc', ['-V'], { cwd: crateDir });
-  return {
-    rustc: rustc.status === 0 ? firstLine(rustc.stdout) : 'unknown',
-    zigbuild: firstLine(zb.stdout),
-  };
+  return { rustc: rustc.status === 0 ? firstLine(rustc.stdout) : 'unknown' };
 }
 
 /** `[package]` name and version from Cargo.toml (null when inherited from a workspace). */
@@ -156,6 +180,8 @@ interface Built {
   readonly library: string;
   readonly fileName: string;
   readonly bytes: Buffer;
+  /** CycloneDX SBOM of the crate graph for this target (D16). */
+  readonly sbom: Buffer;
 }
 
 function parseBuildArgs(argv: readonly string[]): { targets: string[]; nativeDir: string } {
@@ -197,6 +223,8 @@ export interface RunBuildOptions {
 export async function runBuild(opts: RunBuildOptions): Promise<number> {
   const { cwd, io } = opts;
   const run = opts.deps?.run ?? spawnRunner;
+  // Holds this build's private zig (when downloaded) until the build is over.
+  let supply: SupplyChain | undefined;
   try {
     const { targets, nativeDir: nativeArg } = parseBuildArgs(opts.argv);
     const config = loadConfig(cwd);
@@ -214,19 +242,34 @@ export async function runBuild(opts: RunBuildOptions): Promise<number> {
       );
     }
     const tools = checkToolchain(run, crateDir, targets);
+    const baseEnv = opts.deps?.env ?? process.env;
+    const lock = readFileSync(lockPath);
+    const identity = crateIdentity(cargoToml);
+    // D16: pinned tools, git sources and `cargo deny check`, before any build.
+    supply = await prepareSupplyChain({
+      run,
+      crateDir,
+      crateLabel: config.crate,
+      cargoLock: lock.toString('utf8'),
+      crateName: identity.name,
+      env: baseEnv,
+      note: io.stderr,
+      ...(opts.deps?.zig ? { zig: opts.deps.zig } : {}),
+    });
 
     // Steps 2–3 for every target before anything is staged: a failure leaves
     // native/ exactly as it was.
     const env = {
-      ...process.env,
-      RUSTFLAGS: [process.env.RUSTFLAGS, '-C target-feature=-crt-static'].filter(Boolean).join(' '),
+      ...baseEnv,
+      ...supply.env,
+      RUSTFLAGS: [baseEnv.RUSTFLAGS, '-C target-feature=-crt-static'].filter(Boolean).join(' '),
     };
     const built: Built[] = [];
     for (const triple of targets) {
       const r = run(
         'cargo',
         [
-          'zigbuild',
+          ...supply.cargoPrefix,
           '--release',
           '--locked',
           '--target',
@@ -247,15 +290,14 @@ export async function runBuild(opts: RunBuildOptions): Promise<number> {
       }
       const bytes = readFileSync(library);
       assertMuslLibrary(bytes, triple, `${fileName} (${triple})`);
-      built.push({ triple, library, fileName, bytes });
+      supply.verifyLibrary(bytes, `${fileName} (${triple})`);
+      built.push({ triple, library, fileName, bytes, sbom: supply.sbom(triple, env) });
     }
 
     // Step 4: stage, clearing only <native>/ffi/.
     const native = resolve(cwd, nativeArg);
     const ffiDir = join(native, 'ffi');
     rmSync(ffiDir, { recursive: true, force: true });
-    const lock = readFileSync(lockPath);
-    const identity = crateIdentity(cargoToml);
     const rev = knextFfiRev(lock.toString('utf8'));
     const staged: string[] = [];
     for (const b of built) {
@@ -263,16 +305,19 @@ export async function runBuild(opts: RunBuildOptions): Promise<number> {
       mkdirSync(dir, { recursive: true });
       const target = join(dir, b.fileName);
       copyFileSync(b.library, target);
+      writeFileSync(join(dir, SBOM_FILE), b.sbom);
       const provenance = {
         version: 1,
         crate: identity,
         cargoLockSha256: sha256(lock),
         rustc: tools.rustc,
-        zigbuild: tools.zigbuild,
+        zigbuild: supply.zigbuildVersion,
         target: b.triple,
         profile: 'release',
         knextFfiRev: rev,
         library: { file: b.fileName, sha256: sha256(b.bytes) },
+        ...supply.provenance,
+        sbom: { file: SBOM_FILE, sha256: sha256(b.sbom) },
       };
       writeFileSync(join(dir, PROVENANCE_FILE), `${JSON.stringify(provenance, null, 2)}\n`);
       staged.push(target);
@@ -306,5 +351,7 @@ export async function runBuild(opts: RunBuildOptions): Promise<number> {
       return 1;
     }
     throw err;
+  } finally {
+    supply?.dispose();
   }
 }

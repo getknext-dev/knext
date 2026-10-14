@@ -479,6 +479,60 @@ function computeDiskClosure(extraRoots = []) {
 }
 const DISK_CLOSURE = computeDiskClosure();
 
+// ── sharp stays on disk (#2360) ─────────────────────────────────────────────
+// Next's image optimizer `require('sharp')`s, and bundling sharp breaks it:
+// its loader's literal `require("@img/sharp-<platform>/sharp.node")` embeds the
+// addon, Bun extracts an embedded `.node` to a temp directory before dlopen,
+// and the addon finds libvips by a RELATIVE rpath — which from `/tmp` points
+// nowhere (measured: ENOENT on `/tmp/../../sharp-libvips-linux-x64/lib/…`,
+// then ERR_DLOPEN_FAILED). Next catches the failure and serves the original
+// image, so the symptom was `/_next/image` answering image/png, not an error.
+// Required from its real path in the tree instead, sharp loads the addon in
+// place, next to libvips, exactly as the uncompiled server does — and in the
+// image that tree carries the image platform's pair (`stageSharpForStandalone`).
+// Only the entry files join the closure: what sharp requires from there is
+// loaded by the runtime from disk anyway, and nothing else in the bundle
+// shares state with it. Disk mode only — self-contained mode has no tree on
+// disk to load from.
+//
+// Both export conditions are resolved, and the resolver hands each import KIND
+// its own entry (`sharpEntryFor`): the bundler's own resolution of a
+// `require('sharp')` can land on the ESM entry (measured), and requiring an ES
+// module returns its namespace — Next's `require('sharp').block(...)` would
+// then throw, and the optimizer would fall back to the original image again.
+function sharpEntryUnder(fromDir, isEsm) {
+    let resolved;
+    try {
+        resolved = realpathSync(Bun.resolveSync("sharp", fromDir, isEsm));
+    } catch {
+        return undefined;
+    }
+    return isInside(resolved, ROOT) ? resolved : undefined;
+}
+function sharpEntriesOnDisk() {
+    const next = findPackageDir("next", dirname(SERVER));
+    if (!next) return {};
+    const fromDir = join(next, "dist", "server");
+    return {
+        require: sharpEntryUnder(fromDir, false),
+        import: sharpEntryUnder(fromDir, true),
+    };
+}
+const SHARP_ENTRIES = SELF_CONTAINED ? {} : sharpEntriesOnDisk();
+const SHARP_ENTRY_SET = new Set(
+    [SHARP_ENTRIES.require, SHARP_ENTRIES.import].filter((f) => f !== undefined),
+);
+for (const f of SHARP_ENTRY_SET) DISK_CLOSURE.add(f);
+
+/** The on-disk sharp entry for this import kind, if `real` is a sharp entry. */
+function sharpEntryFor(real, kind) {
+    if (!SHARP_ENTRY_SET.has(real)) return undefined;
+    const wantsRequire = kind === "require-call" || kind === "require-resolve";
+    return wantsRequire
+        ? (SHARP_ENTRIES.require ?? SHARP_ENTRIES.import)
+        : (SHARP_ENTRIES.import ?? SHARP_ENTRIES.require);
+}
+
 // ── Self-contained mode (#1456) ─────────────────────────────────────────────
 // The executable carries the app's `.next` and every module the disk closure
 // holds, so it boots from a directory holding only itself, `public/`,
@@ -734,6 +788,8 @@ const standaloneResolver = {
             }
             if (resolved !== undefined) {
                 if (!isAbsolute(resolved)) return undefined;
+                const sharpEntry = sharpEntryFor(realpathSafe(resolved), a.kind);
+                if (sharpEntry !== undefined) return onDisk(sharpEntry);
                 const { real, where } = moduleDisposition(resolved, {
                     root: ROOT,
                     diskClosure: DISK_CLOSURE,

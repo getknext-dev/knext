@@ -13,6 +13,7 @@ import { createRequire } from 'node:module';
 import { parseArgs } from 'node:util';
 import { type GenerateDeps, type Io, runGenerate } from './generate';
 import { runInit } from './init';
+import { CARGO_TOOL_PINS, DENY_FILE, SBOM_FILE, ZIG_PIN } from './supply-chain';
 
 /** The shape of this module as core calls it. Bumped only on a breaking change to it. */
 export const DISPATCH_PROTOCOL = 1;
@@ -53,13 +54,19 @@ Commands:
 
 Run \`knext ffi <command> --help\` for a command's options.`;
 
+/** One `  cargo-zigbuild 0.23.4` line per pinned cargo tool, for the build help. */
+const TOOL_PINS = Object.values(CARGO_TOOL_PINS)
+  .map((p) => `  ${p.crate} ${p.version}`)
+  .join('\n');
+
 const HELP: Record<Sub, string> = {
   init: `knext ffi init — opt this zone into in-process Rust (Beta)
 
 Usage: knext ffi init
 
 Writes knext.ffi.json and a rust/ crate (Cargo.toml, src/lib.rs with a
-\`greet\` function, rust-toolchain.toml). Refuses to overwrite either.
+\`greet\` function, rust-toolchain.toml, and the ${DENY_FILE} policy
+\`knext ffi build\` checks dependencies with). Refuses to overwrite either.
 
 Options:
   -h, --help   show this help
@@ -95,12 +102,16 @@ failure, or on a usage error.`,
 Usage: knext ffi build --target <triple>... --native-dir <dir>
 
 Run by \`knext build\`, \`knext deploy\` and \`knext preview\` when knext.ffi.json
-exists; not usually run by hand. Cross-compiles the crate with cargo zigbuild
-(musl, release, --locked), refuses a library that links anything the Alpine
-image lacks (a glibc libc.so.6, say), stages it as
-<native-dir>/ffi/<triple>/lib<name>.so with a provenance.json, and fails if the
+exists; not usually run by hand. Runs \`cargo deny check\` on the crate's
+dependencies, cross-compiles it with cargo auditable zigbuild (musl, release,
+--locked), refuses a library that links anything the Alpine image lacks (a
+glibc libc.so.6, say), stages it as <native-dir>/ffi/<triple>/lib<name>.so
+with a provenance.json and a CycloneDX ${SBOM_FILE}, and fails if the
 committed wrapper is not what \`knext ffi generate\` renders from that library.
-Needs Rust (https://rustup.rs), cargo-zigbuild and zig.
+Needs Rust (https://rustup.rs) and these exact versions:
+${TOOL_PINS}
+  zig ${ZIG_PIN.version} (knext downloads and verifies it when no zig is on PATH)
+Install each cargo tool with: cargo install --locked --version <version> <crate>
 
 Options:
   --target <triple>    x86_64-unknown-linux-musl or aarch64-unknown-linux-musl
@@ -108,8 +119,9 @@ Options:
   --native-dir <dir>   the app's native/ directory; only its ffi/ is replaced
   -h, --help           show this help
 
-Exit code: 0 on success; 1 on a missing tool, a build failure, a library the
-image cannot load, an out-of-date wrapper, or a usage error.`,
+Exit code: 0 on success; 1 on a missing or wrong-version tool, a dependency
+the supply-chain checks refuse, a build failure, a library the image cannot
+load, an out-of-date wrapper, or a usage error.`,
 };
 
 /** Help for `sub` (`''` or anything unknown: the group help). */

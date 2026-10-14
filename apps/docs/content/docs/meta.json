@@ -21,6 +21,7 @@
     "pull-through-mirror",
     "bytecode",
     "bun-runtime",
+    "rust-in-process",
     "tuning-cold-start",
     "image-optimization",
     "react-compiler",
