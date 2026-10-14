@@ -65,7 +65,11 @@ function refusesWrite(dir: string): string | null {
 // ---- 1. the environment -------------------------------------------------------
 
 function checkEnvironment(): void {
-  if (process.env.NODE_ENV !== 'production') fail('NODE_ENV must be "production"');
+  // Bracket access, as the generated wrapper reads it: `bun build --compile`
+  // inlines the dotted `process.env.NODE_ENV` as "development" (measured on
+  // 1.4.2), so the dotted form would test the bundler, not the environment.
+  // biome-ignore lint/complexity/useLiteralKeys: the dotted form is inlined at compile time.
+  if (process.env['NODE_ENV'] !== 'production') fail('NODE_ENV must be "production"');
   const musl =
     existsSync('/etc/alpine-release') || readdirSync('/lib').some((f) => f.startsWith('ld-musl-'));
   if (!musl) fail('not a musl system');

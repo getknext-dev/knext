@@ -528,7 +528,7 @@ jobs:
               "$(find "${TARBALLS_DIR}" -maxdepth 1 -name 'getknext-db-*.tgz' | tail -n1)" \
               "$(find "${TARBALLS_DIR}" -maxdepth 1 -name 'getknext-core-*.tgz' | tail -n1)" >/dev/null && \
             node "$KNEXT" build > "${RUNNER_TEMP}/baseline-build.log" 2>&1
-          ) || { echo "::warning::baseline build failed"; tail -n 40 "${RUNNER_TEMP}/baseline-build.log"; exit 0; }
+          ) || { echo "::warning::baseline build failed"; grep -v -e "module" -e "^ *at " "${RUNNER_TEMP}/baseline-build.log" | tail -n 120; exit 0; }
           packages/ffi/scripts/run-compat-smoke.sh "$GITHUB_WORKSPACE" "$BASE" "${RUNNER_TEMP}/baseline-smoke" \
             > "${RUNNER_TEMP}/baseline-smoke.log" 2>&1
           code=$?
