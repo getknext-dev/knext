@@ -659,10 +659,9 @@ export function assertCompiledArtifactFresh(
     cwd: string,
     arch: string = DEPLOY_SHIP_ARCH,
 ): void {
-    // The in-process Rust staged-library check for `--skip-build` is NOT here:
-    // `deploy --image` also reaches this function, and a pre-built image
-    // already carries its library. deploy.ts calls it on the leg that builds
-    // the image from the local tree.
+    // The in-process Rust staged-library check for `--skip-build` is NOT here;
+    // deploy.ts calls both it and this function only on the leg that builds
+    // the image from the local tree (never under `deploy --image`, #2355).
     const target = compiledExecPathFor(config, cwd, arch);
     if (!target) return;
     if (!existsSync(target.sourcePath)) return;

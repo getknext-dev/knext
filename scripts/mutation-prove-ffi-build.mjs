@@ -193,8 +193,8 @@ const CALLERS = [
     subject: 'deploy',
     claim: 'deploy --skip-build no longer refuses an opted-in app with nothing staged',
     anchor:
-      '        if (!options.image) {\n            assertFfiLibraryStaged(\n                process.cwd(),\n                DEPLOY_SHIP_ARCH,\n                FFI_STAGED_REMEDY.skipBuild,\n            );\n        }\n',
-    replacement: '',
+      '        if (!options.image) {\n            assertFfiLibraryStaged(\n                process.cwd(),\n                DEPLOY_SHIP_ARCH,\n                FFI_STAGED_REMEDY.skipBuild,\n            );\n',
+    replacement: '        if (!options.image) {\n',
   },
   {
     id: 'C06',
@@ -212,13 +212,19 @@ const CALLERS = [
       '        if (options.image || !options.image) {\n            assertFfiLibraryStaged(',
   },
   {
+    // Was "the staged-library check is back inside the freshness check, which
+    // --image also reaches". Since #2355 --image no longer reaches the
+    // freshness check at all (its only caller is the non---image leg, where
+    // the staged check already ran), so that mutation became equivalent. The
+    // regression worth killing now is the freshness check escaping the guard.
     id: 'C08',
-    subject: 'artifact',
+    subject: 'deploy',
     claim:
-      'the staged-library check is back inside the freshness check, which --image also reaches',
-    anchor: '    // the image from the local tree.\n    const target',
+      'the local exec freshness check runs under deploy --image again, refusing a pre-built image over a stale local leftover',
+    anchor:
+      '            );\n            assertCompiledArtifactFresh(config, process.cwd());\n        }\n',
     replacement:
-      '    // the image from the local tree.\n    assertFfiLibraryStaged(cwd, DEPLOY_SHIP_ARCH, FFI_STAGED_REMEDY.skipBuild);\n    const target',
+      '            );\n        }\n        assertCompiledArtifactFresh(config, process.cwd());\n',
   },
   {
     id: 'G01',
