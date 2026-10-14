@@ -2,7 +2,8 @@
 /**
  * Mutation proof for the @getknext/ffi generator's name hygiene, 64-bit JSON
  * refusal, TSDoc accuracy, output hygiene, the type namespace and object keys
- * (issue #2344, PR #2351 rounds 2-3).
+ * (issue #2344, PR #2351 rounds 2-3), the non-finite float refusal in every JSON
+ * argument position and the request-time not-found message (#2357).
  *
  * Two guards, two specs:
  *
@@ -80,8 +81,8 @@ const HYGIENE = [
     id: 'H05',
     subject: 'render',
     claim: 'the encoder closure parameter is a bare `x0` again',
-    anchor: '      const x = `$x${depth}`;\n      const inner = this.enc(d.of, x, depth + 1);',
-    replacement: '      const x = `x${depth}`;\n      const inner = this.enc(d.of, x, depth + 1);',
+    anchor: '      const x = `$x${depth}`;\n      const i = `$i${depth}`;',
+    replacement: '      const x = `x${depth}`;\n      const i = `$i${depth}`;',
   },
   {
     id: 'H06',
@@ -267,6 +268,46 @@ const LOADER = [
       'field names are held to the identifier word list: `new`, `type` (Rust r#new, r#type) are refused, so keyword and Object.prototype-named fields stop round-tripping',
     anchor: "  if (!FIELD.test(name) || name === '__proto__') {",
     replacement: "  if (!FIELD.test(name) || name === '__proto__' || RESERVED.has(name)) {",
+  },
+  // ── non-finite floats in JSON arguments (#2357) ─────────────────────────
+  {
+    id: 'L10',
+    subject: 'render',
+    claim:
+      'a float inside a JSON argument is no longer checked: NaN/Infinity cross as null (None in Rust)',
+    anchor: "    if (d.t === 'f32' || d.t === 'f64') {\n      this.used.add('$efin');",
+    replacement: "    if (false) {\n      this.used.add('$efin');",
+  },
+  {
+    id: 'L11',
+    subject: 'render',
+    claim: '$efin lets a non-finite number through instead of throwing',
+    anchor: "  if (typeof v === 'number') {\n    throw new TypeError(",
+    replacement: '  if (false) {\n    throw new TypeError(',
+  },
+  {
+    id: 'L12',
+    subject: 'render',
+    claim: 'a refused Vec element no longer names its index',
+    anchor: "indexed ? `${at} + '[' + ${i} + ']'` : at",
+    replacement: 'at',
+  },
+  {
+    id: 'L13',
+    subject: 'render',
+    claim: 'a refused record field no longer names the field (path stays the argument)',
+    anchor: "this.enc(f.type, access('v', f.name), 'fn', `at + ${q(`.${f.name}`)}`, 0)",
+    replacement: "this.enc(f.type, access('v', f.name), 'fn', 'at', 0)",
+  },
+  // ── the not-found error at request time (#2357) ─────────────────────────
+  {
+    id: 'L14',
+    subject: 'render',
+    claim: 'the request-time "cannot find the Rust library" error claims prerendering again',
+    anchor:
+      "      'Images built by \\`knext build\\` stage it beside the server (knext ffi build); in development, run \\`knext ffi generate\\`.',",
+    replacement:
+      "      'Images built by \\`knext build\\` stage it beside the server (knext ffi build); in development, run \\`knext ffi generate\\`. ' + $PRERENDER,",
   },
 ];
 

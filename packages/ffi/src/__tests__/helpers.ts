@@ -169,6 +169,11 @@ export const KITCHEN_SINK: Record<string, unknown>[] = [
   fn('ids', [['v', vec(t('i64')), 'Vec<i64>']], vec(t('i64')), { retRust: 'Vec<i64>' }),
   fn('maybe', [['x', opt(t('u64')), 'Option<u64>']], opt(t('u64')), { retRust: 'Option<u64>' }),
   fn('nop', [], t('unit'), { retRust: '()' }),
+  // Floats inside JSON: a NaN or Infinity there must be refused, never sent as null.
+  fn('opt_f', [['x', opt(t('f64')), 'Option<f64>']], opt(t('f64')), { retRust: 'Option<f64>' }),
+  fn('floats', [['xs', vec(opt(t('f64'))), 'Vec<Option<f64>>']], vec(opt(t('f64'))), {
+    retRust: 'Vec<Option<f64>>',
+  }),
   fn('parse', [['s', t('string'), '&str']], t('i32'), {
     err: 'ParseIntError',
     retRust: 'Result<i32, ParseIntError>',

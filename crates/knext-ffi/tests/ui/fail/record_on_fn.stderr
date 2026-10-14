@@ -1,4 +1,4 @@
-error: knext-ffi: #[knext_ffi::record] goes on a struct with named fields or an enum with unit variants; supported types are listed in the knext-ffi type table (ADR-0069 D6, crates/README.md)
+error: knext-ffi: #[knext_ffi::record] goes on a struct with named fields or an enum with unit variants; supported types are listed at https://knext-platform.dev/docs/rust-in-process#type-mapping
  --> tests/ui/fail/record_on_fn.rs:3:1
   |
 3 | #[record]

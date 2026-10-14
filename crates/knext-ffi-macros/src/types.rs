@@ -6,9 +6,10 @@ use proc_macro2::TokenStream;
 use quote::{quote, ToTokens};
 use syn::{spanned::Spanned, Error, GenericArgument, PathArguments, Type};
 
-/// Appended to every rejection so the error points at the table.
+/// Appended to every rejection so the error points at the table: the public
+/// docs page a user can open, never an internal design record.
 pub const TABLE_HINT: &str =
-    "supported types are listed in the knext-ffi type table (ADR-0069 D6, crates/README.md)";
+    "supported types are listed at https://knext-platform.dev/docs/rust-in-process#type-mapping";
 
 /// Where a type appears. The same Rust type crosses differently by position:
 /// `Vec<u8>` is raw bytes at the top level and a JSON number array inside JSON.
@@ -503,7 +504,8 @@ mod tests {
         ] {
             let e = tok(src, pos);
             assert!(e.starts_with("ERR knext-ffi: `"), "{src}: {e}");
-            assert!(e.contains("D6"), "{src}: {e}");
+            assert!(e.contains("rust-in-process#type-mapping"), "{src}: {e}");
+            assert!(!e.contains("ADR"), "{src}: {e}");
         }
         assert!(tok("Vec<char>", Pos::Arg).contains("`char`"));
     }
@@ -534,7 +536,7 @@ mod tests {
                 "{src}: {e}"
             );
             assert!(
-                e.contains("nested `Option`") && e.contains("D6"),
+                e.contains("nested `Option`") && e.contains("rust-in-process#type-mapping"),
                 "{src}: {e}"
             );
         }

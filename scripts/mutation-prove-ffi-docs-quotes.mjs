@@ -6,7 +6,8 @@
  * The page quotes messages a user acts on: the runtime refusals the generated
  * module throws, the build-time refusals, the reserved-name error, the
  * toolchain install commands and tool pins, the supply-chain file names,
- * allowlist format and provenance fields, and two Rust messages. The guard's claim is that
+ * allowlist format and provenance fields, and the Rust messages (the compile
+ * error and its docs link, the decode error, the non-finite float refusals). The guard's claim is that
  * every one of them is bound to the code that prints it, compared WHOLE, so
  * changing any of those strings in the code reds the docs test until the page
  * is updated. Round 1 compared multi-line refusals on their first line only
@@ -89,6 +90,33 @@ const MUTATIONS = [
     subject: 'render',
     anchor: String.raw`status === 3 ? \`invalid input: \${message}\` : message);`,
     replacement: String.raw`status === 3 ? \`bad input: \${message}\` : message);`,
+  },
+  {
+    id: 'R7',
+    expect: 'red',
+    claim: 'the finite-number TypeError for a float inside a JSON argument is reworded',
+    subject: 'render',
+    anchor: String.raw`must be a finite number (JSON has no NaN or Infinity), got \${String(v)}\`);`,
+    replacement: String.raw`must be finite (JSON has no NaN or Infinity), got \${String(v)}\`);`,
+  },
+  {
+    id: 'R8',
+    expect: 'red',
+    claim: 'the generated TSDoc quotes a return-side message the crate does not print',
+    subject: 'render',
+    anchor: `'@throws {RustError} ("invalid input: knext-ffi: the return value cannot cross as JSON: …") when`,
+    replacement: `'@throws {RustError} ("invalid input: knext-ffi: the result cannot cross as JSON: …") when`,
+  },
+  {
+    id: 'R9',
+    expect: 'red',
+    claim:
+      'the request-time "cannot find the Rust library" error carries the prerender advice again',
+    subject: 'render',
+    anchor:
+      "      'Images built by \\`knext build\\` stage it beside the server (knext ffi build); in development, run \\`knext ffi generate\\`.',",
+    replacement:
+      "      'Images built by \\`knext build\\` stage it beside the server (knext ffi build); in development, run \\`knext ffi generate\\`. ' + $PRERENDER,",
   },
   // ── The toolchain install commands and pins (build.ts, supply-chain.ts) ─
   {
@@ -284,6 +312,38 @@ const MUTATIONS = [
     anchor: '"knext-ffi: argument `{name}` could not be decoded: {e}"',
     replacement: '"knext-ffi: argument `{name}` could not be parsed: {e}"',
   },
+  {
+    id: 'C4',
+    expect: 'red',
+    claim: 'the return-side refusal says "the result" instead of "the return value"',
+    subject: 'ffiLib',
+    anchor: '"knext-ffi: the return value cannot cross as JSON: {e}"',
+    replacement: '"knext-ffi: the result cannot cross as JSON: {e}"',
+  },
+  {
+    id: 'C5',
+    expect: 'red',
+    claim: 'the non-finite float refusal on the way out is reworded',
+    subject: 'wire',
+    anchor: '"{} {} is not finite (JSON has no NaN or Infinity)",',
+    replacement: '"{} {} is NaN or infinite (JSON has no NaN or Infinity)",',
+  },
+  {
+    id: 'C6',
+    expect: 'red',
+    claim: 'the f32 overflow refusal on the way in is reworded',
+    subject: 'wire',
+    anchor: '"the number does not fit a finite {}",',
+    replacement: '"the number overflows {}",',
+  },
+  {
+    id: 'C7',
+    expect: 'red',
+    claim: 'the compile errors link an anchor the page has no heading for',
+    subject: 'macroTypes',
+    anchor: 'rust-in-process#type-mapping";',
+    replacement: 'rust-in-process#types";',
+  },
 ];
 
 const prover = createGuardProver({
@@ -298,6 +358,7 @@ const prover = createGuardProver({
     manifest: 'packages/ffi/src/manifest.ts',
     macroTypes: 'crates/knext-ffi-macros/src/types.rs',
     ffiLib: 'crates/knext-ffi/src/lib.rs',
+    wire: 'crates/knext-ffi/src/wire.rs',
   },
 });
 

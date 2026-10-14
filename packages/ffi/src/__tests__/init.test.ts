@@ -90,17 +90,38 @@ describe('knext ffi init', () => {
 });
 
 describe('the knext-ffi revision this package records (package.json knextFfi.crateRev)', () => {
-  it('is null (no crates released yet) or a full 40-hex commit that contains crates/knext-ffi', () => {
-    // TODO(#2344): set this to the commit #2343 merges at, once it has; until
-    // then `knext ffi init` refuses with a clear message instead of writing a
-    // Cargo.toml cargo cannot resolve.
+  it('is recorded, as a full 40-hex commit, so `knext ffi init` writes a crate instead of refusing', () => {
+    // That cargo resolves knext-ffi at this commit and the written crate
+    // builds is proven in the Rust crates CI lane (crates/harness/ffi-generated.ts
+    // `init`), which builds the crate exactly as written, fetching the git
+    // dependency. Not here: this suite runs on a shallow checkout, which does
+    // not hold the commit.
     const rev = recordedCrateRev();
-    if (rev === null) return;
+    expect(rev).not.toBeNull();
     expect(rev).toMatch(/^[0-9a-f]{40}$/);
+    const c = capture();
+    const cwd = emptyDir('init-recorded');
+    expect(runInit({ cwd, io: c.io }), c.err()).toBe(0);
+    expect(readFileSync(join(cwd, 'rust', 'Cargo.toml'), 'utf8')).toContain(
+      `knext-ffi = { git = "${CRATE_GIT}", rev = "${rev}" }`,
+    );
+  });
+
+  it('is a commit that contains crates/knext-ffi, when this checkout holds it', () => {
+    // A full clone (a developer machine, the Rust crates lane) holds the
+    // commit; a shallow CI checkout may not, and then the lane's real build is
+    // the proof. Never a silent pass on a full clone: a missing object there
+    // fails.
+    const rev = recordedCrateRev() as string;
     const repo = resolve(PKG_DIR, '..', '..');
+    const shallow = spawnSync('git', ['rev-parse', '--is-shallow-repository'], {
+      cwd: repo,
+      encoding: 'utf8',
+    }).stdout.trim();
     const r = spawnSync('git', ['cat-file', '-e', `${rev}:crates/knext-ffi/Cargo.toml`], {
       cwd: repo,
     });
+    if (shallow === 'true' && r.status !== 0) return;
     expect(r.status, `${rev} has no crates/knext-ffi/Cargo.toml`).toBe(0);
   });
 });
