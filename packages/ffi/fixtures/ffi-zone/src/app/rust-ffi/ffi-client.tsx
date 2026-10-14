@@ -17,7 +17,10 @@ export function FfiClient() {
       <button type="button" onClick={async () => setResult(await checkedGreetAction(''))}>
         checked_greet (Err)
       </button>
-      <button type="button" onClick={async () => setResult(await explodeAction('from the browser'))}>
+      <button
+        type="button"
+        onClick={async () => setResult(await explodeAction('from the browser'))}
+      >
         explode (panic)
       </button>
       <pre data-knext-ffi-result>{result === null ? '' : JSON.stringify(result)}</pre>

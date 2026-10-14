@@ -584,8 +584,9 @@ jobs:
           listed="$(kubectl -n "$APP_NS" exec "$pod" -c user-container -- cat "${dir}/.integrity.json" | jq -r --arg k "$rel" '.files[$k]')"
           actual="$(kubectl -n "$APP_NS" exec "$pod" -c user-container -- sha256sum "${dir}/${rel}" | cut -d' ' -f1)"
           echo "listed=${listed} in-image=${actual} built=${LIB_SHA256}"
-          [ "$listed" = "$actual" ] && [ "$actual" = "$LIB_SHA256" ] || {
-            echo "::error::the image's native/.integrity.json does not list ${rel} with the library's sha256"; exit 1; }
+          if [ "$listed" != "$actual" ] || [ "$actual" != "$LIB_SHA256" ]; then
+            echo "::error::the image's native/.integrity.json does not list ${rel} with the library's sha256"; exit 1
+          fi
 
       - name: Server Actions call Rust over HTTP — result, RustError, RustPanicError; zero restarts
         run: |

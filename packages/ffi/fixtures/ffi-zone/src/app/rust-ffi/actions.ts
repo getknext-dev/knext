@@ -7,7 +7,14 @@
 // throwing, so the error CLASS the wrapper threw reaches the caller (a thrown
 // error's message is redacted in production). None of them changes state.
 
-import { checked_greet, explode, FfiLoadError, greet, RustError, RustPanicError } from '@/generated/ffi';
+import {
+  checked_greet,
+  explode,
+  FfiLoadError,
+  greet,
+  RustError,
+  RustPanicError,
+} from '@/generated/ffi';
 
 export type FfiResult =
   | { ok: true; value: string }
