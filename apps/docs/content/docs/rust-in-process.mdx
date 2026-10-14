@@ -1,0 +1,649 @@
+---
+title: In-process Rust (Beta)
+description: Call a Rust function from a Server Action or route handler inside the zone's own process, through Bun's bun:ffi, with a typed server-only wrapper generated from the library. Bun only.
+---
+
+<Callout type="warn">
+**Beta, and not published yet.** In-process Rust runs **only on Bun**: it calls Rust through
+`bun:ffi`, which Bun itself marks experimental ("Do not rely on it in production"). It is **not
+covered by knext's compatibility credential**. The `knext ffi` commands come from the optional
+`@getknext/ffi` package, which is not on npm yet: until it is installed in your app, `knext ffi`
+prints how to install it and exits 1 (`--help` still exits 0). The Rust crates it needs are not on
+crates.io either, so a zone depends on them by git commit from the knext repository.
+</Callout>
+
+A zone can ship **one** Rust library and call its functions from TypeScript **in the same
+process**: no network hop and no extra cold start. You mark Rust functions with
+`#[knext_ffi::export]`, run `knext ffi generate`, and get a typed, `server-only` TypeScript module
+with one function per export. A Rust `String` comes back as a TypeScript `string`, a `Result::Err`
+is thrown as a `RustError`, and a panic is thrown as a `RustPanicError` while the process keeps
+running.
+
+It is for hot, CPU-bound, stateless work measured in microseconds: parsing, validating, hashing,
+transforming. For anything else, use a [zone function](/docs/cli#knext-add-function).
+
+## When to use it, and when to use a zone function
+
+| | In-process Rust | Zone function |
+|---|---|---|
+| Where it runs | inside the zone's own process | its own service, called over the network |
+| Call cost | nanoseconds to microseconds (see [the measured costs](#blocking-and-workers)) | a network round trip, in milliseconds |
+| Cold start | none of its own; the library loads on the first call | its own scale-from-zero |
+| Scaling | scales with the zone | scales on its own, to zero |
+| If it crashes | the whole zone pod restarts (an abort, a segfault, a stack overflow) | only the function's pod |
+| Blocking | blocks the zone's JavaScript thread for the whole call | never blocks the zone |
+| Languages | Rust | Go and Rust |
+| Runtime | **Bun only** | Node and Bun |
+| Security boundary | none: same process, same memory | separate process, authenticated, cluster-local |
+| Use it for | short, CPU-bound, stateless functions | I/O, business logic, and anything that should scale, fail or deploy on its own |
+
+## Quick start
+
+### 1. Opt the zone in
+
+```bash title="shell"
+knext ffi init
+```
+
+This writes `knext.ffi.json` and a starter crate, and refuses to overwrite either if it exists:
+
+```json title="knext.ffi.json"
+{
+  "version": 1,
+  "crate": "rust",
+  "out": "src/generated/ffi"
+}
+```
+
+- `crate` is the Rust crate's directory and `out` is where the generated module goes. Both are
+  relative to the app and must be a subdirectory of it: the app root itself, anything outside it,
+  and anything under `node_modules` are refused. Unknown keys are refused too.
+- `rust/Cargo.toml` builds a C-ABI library (`crate-type = ["cdylib"]`) and depends on `knext-ffi`
+  by git, pinned to the full commit your installed `@getknext/ffi` records, so the Rust macros and
+  the generator always agree. If the installed copy records no commit, `init` says so and writes
+  nothing.
+- `rust/rust-toolchain.toml` pins the Rust version and lists the two Linux targets images are built
+  for.
+- `rust/src/lib.rs` holds one function to start from:
+
+```rust title="rust/src/lib.rs"
+/// Says hello.
+#[knext_ffi::export]
+pub fn greet(name: &str) -> String {
+    format!("Hello, {name}!")
+}
+```
+
+### 2. Generate the TypeScript
+
+Install Rust from [rustup.rs](https://rustup.rs), then:
+
+```bash title="shell"
+knext ffi generate
+```
+
+It builds the crate for your machine (`cargo build --release`), reads the list of exported functions
+from the built library itself, and writes `src/generated/ffi/index.ts` plus
+`src/generated/ffi/.knext-generated.json`, the record of what it wrote. **Commit both, and commit
+`rust/Cargo.lock`**: image builds use the lockfile as it is. The generated module is committed so
+that `next build` and type-checking work on a fresh checkout with no Rust installed.
+
+`knext ffi check` does the same build and fails if the committed module is out of date; run it in
+CI. It compares bytes, so keep the output directory out of your formatter and linter.
+
+### 3. Call it from a Server Action
+
+```ts title="src/app/actions.ts"
+'use server';
+
+import { greet } from '../generated/ffi';
+
+export async function sayHello(name: string): Promise<string> {
+  return greet(name);
+}
+```
+
+```tsx title="src/app/page.tsx"
+'use client';
+
+import { useState } from 'react';
+import { sayHello } from './actions';
+
+export default function Page() {
+  const [message, setMessage] = useState('');
+  return (
+    <main>
+      <button type="button" onClick={async () => setMessage(await sayHello('World'))}>
+        Say hello
+      </button>
+      <p>{message}</p>
+    </main>
+  );
+}
+```
+
+The generated module starts with `import 'server-only'`, so importing it into a Client Component
+fails the build. Route handlers and dynamically rendered pages can call it too (see
+[Dynamic contexts only](#dynamic-contexts-only)).
+
+### 4. Run it
+
+```bash title="shell"
+bun --bun next dev
+```
+
+In development the module loads the library `knext ffi generate` just built, from
+`rust/target/release/` (or `rust/target/debug/`, whichever is newer), and prints one line saying it
+skipped the integrity check:
+
+```
+knext ffi: loading the development build …/rust/target/release/libzone.dylib without an integrity check (NODE_ENV is not "production").
+```
+
+After changing the Rust code, run `knext ffi generate` again and restart the dev server: a process
+keeps the library it loaded first. Plain `next dev` runs on Node and is refused on the first call
+(see [Node is refused](#node-is-refused-and-why)).
+
+### 5. Build and deploy
+
+Nothing changes: `knext build`, `knext deploy` and `knext preview` notice `knext.ffi.json`,
+cross-compile the library for the image first, and ship it beside the server. The build machine
+needs a little more than Rust for that; see [Building images](#building-images).
+
+To test code that imports the generated module outside Next.js, run Bun with the server condition,
+or `server-only` throws on import:
+
+```bash title="shell"
+bun test --conditions=react-server
+```
+
+## Type mapping
+
+| Rust (argument or return) | TypeScript | Notes |
+|---|---|---|
+| `i8` `i16` `i32` `u8` `u16` `u32` | `number` | checked before the call: a non-integer or out-of-range value throws a `TypeError` |
+| `i64` `u64` `isize` `usize` | `bigint` | checked the same way; a `number` is refused |
+| `f32` `f64` | `number` | anything but a `number` throws a `TypeError` |
+| `bool` | `boolean` | anything but a `boolean` throws a `TypeError` |
+| `&str`, `String` | `string` | UTF-8. Prefer `&str` for arguments: an owned `String` costs Rust a copy |
+| `&[u8]`, `Vec<u8>` | `Uint8Array` | raw bytes, copied. Prefer `&[u8]` for arguments |
+| `()` (return only) | `void` | |
+| a `#[knext_ffi::record]` struct | an `interface` | crosses as JSON; see [Records and enums](#records-and-enums) |
+| a `#[knext_ffi::record]` enum with unit variants | a union of string literals | crosses as JSON, as the variant's name |
+| `Option<T>` | `T \| null` | crosses as JSON |
+| `Vec<T>` (`T` is not `u8`) | `T[]` | crosses as JSON |
+| `Result<T, E>` (return only, `E: Display`) | `T` | `Err(e)` throws a `RustError` whose `message` is `e.to_string()` |
+
+- **64-bit integers are `bigint` everywhere**, including inside records, `Option` and `Vec`
+  (`unit_cents: bigint`, `ids: bigint[]`), so values above 2^53 survive exactly. Inside JSON they
+  travel as decimal strings; the generated code converts both ways and you never see the string.
+- **Floats inside JSON must be finite.** JSON has no `NaN` or `Infinity`: sending one makes the call
+  fail with a `RustError`, and a non-finite float coming back from Rust is refused with a
+  `RustError` that names the field.
+- **Inside JSON, `Vec<u8>` is a `number[]`.** For binary data, use a `&[u8]`/`Vec<u8>` argument or
+  return directly, which crosses as raw bytes.
+- **Empty values are fine.** An empty string or an empty `Uint8Array` can be passed and returned.
+- **Not supported** (each is a compile error that names the type): generics and lifetime
+  parameters, `char`, `i128`/`u128`, tuples, fixed-size arrays, raw pointers, `impl Trait`,
+  function pointers, `async fn`, methods, `unsafe fn`, references other than `&str`/`&[u8]` (and
+  any returned reference), `Result` as an argument, a nested `Option<Option<T>>` anywhere (`None` and
+  `Some(None)` would both be `null`; `Option<Vec<Option<T>>>` is fine), data-carrying enums,
+  generic or recursive records, and `#[serde(...)]` attributes on a record. For example:
+
+```
+error: knext-ffi: `char` is not supported: `char` has no TypeScript equivalent; pass a `String` or a `u32` code point; …
+```
+
+## Records and enums
+
+Mark a struct with named fields, or an enum whose variants carry no data, with
+`#[knext_ffi::record]`. You do not add `serde` yourself; the attribute brings it in.
+
+```rust title="rust/src/lib.rs"
+use knext_ffi::{export, record};
+
+/// A currency the shop sells in.
+#[record]
+pub enum Currency {
+    Usd,
+    Eur,
+}
+
+#[record]
+pub struct LineItem {
+    pub sku: String,
+    pub quantity: u32,
+    pub unit_cents: u64,
+}
+
+#[record]
+pub struct Quote {
+    pub currency: Currency,
+    pub total_cents: u64,
+    pub note: Option<String>,
+}
+
+/// Prices a cart.
+#[export]
+pub fn quote(items: Vec<LineItem>, currency: Currency) -> Result<Quote, String> {
+    if items.is_empty() {
+        return Err("the cart is empty".to_string());
+    }
+    let mut total: u64 = 0;
+    for item in &items {
+        let line = item
+            .unit_cents
+            .checked_mul(u64::from(item.quantity))
+            .ok_or_else(|| format!("{}: line total overflows", item.sku))?;
+        total = total.checked_add(line).ok_or("cart total overflows")?;
+    }
+    let note = (items.len() > 10).then(|| "bulk order".to_string());
+    Ok(Quote { currency, total_cents: total, note })
+}
+```
+
+`knext ffi generate` turns that into:
+
+```ts title="src/generated/ffi/index.ts (excerpt)"
+export interface LineItem {
+  sku: string;
+  quantity: number;
+  unit_cents: bigint;
+}
+
+export interface Quote {
+  currency: Currency;
+  total_cents: bigint;
+  note: string | null;
+}
+
+/** A currency the shop sells in. */
+export type Currency = 'Usd' | 'Eur';
+
+/** Prices a cart. … */
+export function quote(items: LineItem[], currency: Currency): Quote;
+```
+
+Field and variant names cross **verbatim**: `unit_cents` stays `unit_cents`, and `Usd` stays
+`'Usd'`. Rust doc comments on functions, records and enums become TSDoc. Unknown fields are
+refused by Rust.
+
+A route handler calling it, turning a `RustError` into a 400:
+
+```ts title="src/app/api/quote/route.ts"
+import { type LineItem, quote, RustError } from '../../../generated/ffi';
+
+export async function POST(request: Request) {
+  const body = (await request.json()) as {
+    items: { sku: string; quantity: number; unit_cents: string }[];
+  };
+  const items: LineItem[] = body.items.map((item) => ({
+    sku: item.sku,
+    quantity: item.quantity,
+    unit_cents: BigInt(item.unit_cents),
+  }));
+  try {
+    const result = quote(items, 'Usd');
+    return Response.json({ ...result, total_cents: result.total_cents.toString() });
+  } catch (err) {
+    if (err instanceof RustError) {
+      return Response.json({ error: err.message }, { status: 400 });
+    }
+    throw err;
+  }
+}
+```
+
+`Response.json` cannot serialise a `bigint`, which is why the example converts `total_cents` to a
+string.
+
+Record, enum, `Option` and `Vec` arguments are **not** checked in JavaScript before the call. A
+value Rust cannot decode, such as an enum variant that does not exist, comes back as a `RustError`
+whose message starts with `invalid input:` and names the argument:
+
+```
+invalid input: knext-ffi: argument `currency` could not be decoded: unknown variant `Gbp`, expected `Usd` or `Eur` at line 1 column 5
+```
+
+## Errors and panics
+
+The generated module exports three error classes. All extend `Error`, work with `instanceof`, and
+carry no Rust memory.
+
+| What happened | What you get | The process |
+|---|---|---|
+| The function returned `Err(e)` | `RustError`; `message` is `e.to_string()`, `fn` is the function's name | keeps running |
+| An argument Rust could not decode | `RustError` whose message starts with `invalid input:` | keeps running |
+| The function panicked | `RustPanicError`; `message` is the panic message, `fn` is the function's name | keeps running; the next call works |
+| A number, `bigint`, `boolean`, string or `Uint8Array` argument of the wrong type or out of range | `TypeError`, before Rust is called, for example `greet(): argument "name" must be a string, got number` | keeps running |
+| The library could not be loaded | `FfiLoadError`, explaining why | keeps running, but **every later call in that process throws the same error**: fix the cause and restart |
+
+**A panic does not take the pod down.** Every exported function runs inside Rust's panic catcher,
+so this:
+
+```rust title="rust/src/lib.rs"
+/// Splits `key=value`.
+#[knext_ffi::export]
+pub fn split_pair(input: &str) -> String {
+    let (key, value) = input.split_once('=').expect("input has no '='");
+    format!("{key}:{value}")
+}
+```
+
+called as `split_pair('nope')` throws a `RustPanicError` whose message is `input has no '='`, and
+the next call works. Rust also writes the panic's location to standard error, so it shows up in the
+pod's logs:
+
+```
+thread '<unnamed>' (…) panicked at src/lib.rs:4:46:
+input has no '='
+```
+
+Do not set `panic = "abort"` in the crate's profile: `knext-ffi` refuses to compile with it,
+because a panic would then end the process instead of reaching JavaScript.
+
+**What does take the pod down:** an abort, a segfault, a stack overflow, or `std::process::exit`,
+in your Rust code or in anything it calls (including C libraries and `unsafe` code). These end the
+whole zone process and every request it is serving, and Kubernetes restarts the container. This is
+the cost of running in-process; a zone function is the tool when you need that isolation.
+
+**A stale module is refused rather than called wrongly.** Each function's signature, and the shape
+of every record and enum it uses, is checked when the library loads. If the Rust code changed and
+the module was not regenerated, the first call throws an `FfiLoadError` that says the module is
+stale and to run `knext ffi generate` and commit the result.
+
+## Dynamic contexts only
+
+In-process Rust runs **at request time only**: in Server Actions, route handlers, and dynamically
+rendered pages and layouts. It does not run while `next build` prerenders, so a call from a
+statically prerendered page, from `generateStaticParams`, or from `generateMetadata` of a static
+route fails the build with:
+
+```
+Error [FfiLoadError]: In-process Rust runs only at request time. This call happened while `next build` was prerendering: Rust functions cannot be called during prerendering, from generateStaticParams, or from generateMetadata of a static route. Make the route dynamic: add `export const dynamic = 'force-dynamic'` to the route segment, or `await connection()` (from 'next/server') before the call.
+```
+
+The build has no library to load: images get theirs when `knext build` stages it, and the build
+itself runs before that. Make the route dynamic in one of two ways.
+
+Mark the whole route segment dynamic:
+
+```tsx title="src/app/hello/page.tsx"
+import { greet } from '../../generated/ffi';
+
+export const dynamic = 'force-dynamic';
+
+export default function HelloPage() {
+  return <p>{greet('World')}</p>;
+}
+```
+
+Or wait for the request before the call:
+
+```tsx title="src/app/hello/page.tsx"
+import { connection } from 'next/server';
+import { greet } from '../../generated/ffi';
+
+export default async function HelloPage() {
+  await connection();
+  return <p>{greet('World')}</p>;
+}
+```
+
+The "cannot find the Rust library" error ends with the same advice, because during a build the two
+look alike. If you see it at request time instead, the library is missing from where the module
+looked; see [Where the library is loaded from](#where-the-library-is-loaded-from).
+
+## Where the library is loaded from
+
+Nothing is loaded when the module is imported. On the first call, it looks in this order:
+
+1. **Beside the server executable**: `native/ffi/<target>/lib<name>.so` next to the compiled Bun
+   server, which is where `knext build` puts it in every image. The library must be listed in
+   `native/.integrity.json` (written by the build) with a matching sha256. A missing manifest, an
+   unlisted library or a different hash is refused, and nothing is loaded:
+
+   ```
+   knext ffi: refusing to load …/native/ffi/x86_64-unknown-linux-musl/libzone.so: sha256 mismatch
+   ```
+
+2. **The development build**, only when `NODE_ENV` is not `production`: `rust/target/release/` or
+   `rust/target/debug/`, whichever is newer, with no integrity check and the one-line notice above.
+3. Otherwise the call throws an `FfiLoadError` listing every path it tried.
+
+There is no environment variable that points it somewhere else. One consequence: `bun --bun next
+start` after a plain `next build` is refused, because there is no `native/` beside the Bun binary
+and `NODE_ENV` is `production`. Use `bun --bun next dev` locally, and images built by `knext build`
+everywhere else. An image built for one CPU architecture and run on another is refused with a
+message naming both.
+
+## Blocking and Workers
+
+A call is **synchronous**: it blocks the zone's JavaScript thread, and with it every other request
+on that pod, until it returns. Keep each call on the request path **under about a millisecond**.
+
+Measured per-call costs through the generated module, on an Apple M1 Pro (macOS) with Bun 1.4.2.
+The machine was shared during the run, so treat these as orders of magnitude (runs varied up to
+about 2x); Linux images will differ.
+
+| Call | Time per call |
+|---|---|
+| `add(i32, i32) -> i32` | 10–11 ns |
+| `sum(&[u8])`, 64 bytes | 118–126 ns |
+| `greet(&str) -> String`, a short string | 330–460 ns |
+| `greet(&str) -> String`, 1 KiB | 0.84–1.96 µs |
+| a record in, a record out (JSON) | 0.95–3.2 µs |
+| the first call in a compiled Bun executable, including the integrity check and loading the library | about 1.9 ms, once |
+
+Strings cost their UTF-8 encoding, and records cost their JSON; scalar calls are nearly free.
+
+**For work that takes longer, use a zone function**: it runs in its own pod and never blocks the
+zone.
+
+A Bun `Worker` can also call the generated module, off the main thread. Each Worker loads its own
+copy of the library and calls it independently:
+
+```ts title="stretch-worker.ts"
+import { stretch } from './generated/ffi';
+
+declare const self: Worker;
+
+self.onmessage = (event: MessageEvent<{ data: Uint8Array; rounds: number }>) => {
+  const { data, rounds } = event.data;
+  self.postMessage(stretch(data, rounds));
+};
+```
+
+```ts title="main.ts"
+const worker = new Worker(new URL('./stretch-worker.ts', import.meta.url));
+
+// One call at a time, for brevity.
+function stretchOffThread(data: Uint8Array, rounds: number): Promise<Uint8Array> {
+  return new Promise((resolve, reject) => {
+    worker.onmessage = (event: MessageEvent<Uint8Array>) => resolve(event.data);
+    worker.onerror = (event) => reject(new Error(event.message));
+    worker.postMessage({ data, rounds });
+  });
+}
+```
+
+Run it with `bun --conditions=react-server main.ts`, for the same `server-only` reason as tests.
+**This works in Bun directly, not inside a Next.js app**: neither bundler produces a working
+server-side Worker. Turbopack copies the Worker's file into the build as a plain asset, so its
+imports do not resolve (in `next dev` and after `next build`), and a webpack build bundles it but
+then loads it from a URL that does not exist on the server. Both were checked with Next.js 16.3.5
+on Bun 1.4.2. Inside the
+zone, keep calls short or move the work to a zone function.
+
+## Building images
+
+When the app has `knext.ffi.json` and runs on Bun, `knext build` (and `knext deploy` and
+`knext preview`, which build the same way) runs `knext ffi build` **before** the project build:
+
+1. **Checks the toolchain** and stops with the install command for anything missing.
+2. **Cross-compiles** the crate for the image: `cargo zigbuild --release --locked --target <target>`
+   with `-C target-feature=-crt-static`, so the library links against the musl C library the
+   Alpine-based image has. `--locked` means `rust/Cargo.lock` must be committed.
+3. **Checks what the library links.** Only `libc.so`, musl's own `libc.musl-<arch>.so.1` and
+   `ld-musl-<arch>.so.1`, and `libgcc_s.so.1` are allowed. A glibc library (`libc.so.6`,
+   `ld-linux-*`) would crash on the image, so the build stops and names it.
+4. **Stages** the library as `native/ffi/<target>/lib<name>.so` with a `provenance.json` beside it,
+   replacing only `native/ffi/`.
+5. **Checks the committed module** against the library it just built. If they differ, the build
+   stops: run `knext ffi generate` and commit the result.
+
+Then the normal build runs, and the image ships `native/` beside the server executable with a
+checksum manifest (`native/.integrity.json`) that the module verifies before loading. This works on
+every Bun build target (Turbopack, webpack and vinext). An app without `knext.ffi.json` builds
+exactly as before.
+
+Images are built for `linux/amd64`, so the target is `x86_64-unknown-linux-musl`. `knext ffi build`
+also accepts `aarch64-unknown-linux-musl`. What knext checks today is that the library links for
+both targets with no glibc dependency; a load test on the Alpine runtime image (x64 and arm64, with
+a read-only root file system) is one of the conditions for [leaving Beta](#leaving-beta).
+
+`knext build --skip-next` and `knext deploy --skip-build` do not run `knext ffi build`: they reuse
+whatever is staged under `native/ffi/`, and stop with an error if nothing is staged for the image's
+architecture. `knext deploy --image` builds nothing from the checkout, so it needs nothing staged.
+
+**What the build machine needs**, including the CI runner that builds images:
+
+- **Rust**, from [rustup.rs](https://rustup.rs). The crate's `rust-toolchain.toml` selects the
+  version and lists the musl targets, so rustup installs them on first use. If a target is still
+  missing, the build names it:
+
+  ```bash title="shell"
+  rustup target add x86_64-unknown-linux-musl
+  ```
+
+- **cargo-zigbuild**, which cross-compiles against musl from macOS or any Linux:
+
+  ```bash title="shell"
+  cargo install --locked cargo-zigbuild
+  ```
+
+- **zig**, which supplies the musl C library to link against: from
+  [ziglang.org/download](https://ziglang.org/download/), or `pip install ziglang`.
+
+`knext ffi generate` and `knext ffi check` need only Rust.
+
+## Node is refused, and why
+
+`bun:ffi` exists only in Bun, so an app with `knext.ffi.json` cannot use the Node runtime. This
+does not change anything for apps that do not opt in; the Node runtime is still fully supported.
+
+At build time, `knext build`, `knext deploy` and `knext preview` refuse before doing any work,
+including with `--skip-next`, `--skip-build` and `--image`:
+
+```
+knext: in-process Rust (bun:ffi) needs the Bun runtime, but this app builds for Node.
+
+  knext.ffi.json opts this app into in-process Rust, and knext.config.ts resolves
+  runtime: 'node'. bun:ffi exists only in Bun, so the build stops here instead of
+  shipping an image whose Rust calls would fail on the first request.
+
+  Fix one of:
+    - use the Bun runtime: remove runtime: 'node' from knext.config.ts (Bun is the default);
+    - or move this code to a zone function (knext add function <name> --lang rust),
+      which runs on both runtimes.
+```
+
+At run time, a call made under Node (for example `next dev` without `--bun`) throws:
+
+```
+FfiLoadError: In-process Rust (bun:ffi) runs only on Bun; this process is Node v24.14.0. Run the app with Bun (bun --bun next dev), or call this code through a zone function.
+```
+
+Importing the module under Node is fine; only calling it fails. So a page that imports it still
+renders, and only the call throws.
+
+## Self-contained mode is not supported
+
+The [self-contained mode](/docs/build-pipeline) ships nothing beside the executable, but the Rust
+library has to sit on disk beside it. An app with `knext.ffi.json` and `selfContained: true` (or
+`--self-contained`) is refused before any build work:
+
+```
+knext: in-process Rust (bun:ffi) does not work in self-contained mode.
+
+  knext.ffi.json opts this app into in-process Rust, and this build is
+  self-contained (selfContained: true in knext.config.ts, or --self-contained).
+  That mode ships nothing beside the executable, but the Rust library has to be
+  loaded from disk beside it (native/ffi/), so the build stops here.
+
+  Fix one of:
+    - turn self-contained mode off: remove selfContained: true from knext.config.ts
+      and drop --self-contained;
+    - or move this code to a zone function (knext add function <name> --lang rust),
+      which runs on both runtimes.
+```
+
+## Supply chain
+
+What every image build does today:
+
+- **Locked dependencies.** The cross-compile is `--locked`, so `rust/Cargo.lock` must be committed
+  and is used as it is. The Rust version is pinned by `rust/rust-toolchain.toml`, and `knext-ffi` by
+  a full git commit, not a branch or tag.
+- **A provenance record** beside each library, `native/ffi/<target>/provenance.json`: the crate's
+  name and version, the sha256 of `Cargo.lock`, `rustc -V`, the `cargo zigbuild` version, the
+  target, the profile, the `knext-ffi` commit, and the library's own sha256. It ships in the image.
+- **An integrity check at load.** `native/.integrity.json` holds the sha256 of every file under
+  `native/`, written at build time; the module refuses to load a library that is not listed or does
+  not match.
+- **The module matches the library.** The build regenerates the module from the library it is about
+  to ship and stops on any difference, and the module itself checks the library's functions when it
+  loads.
+- **No glibc surprises.** The link check above refuses a library the image cannot load.
+
+Planned before this leaves Beta, and **not done by the build today**:
+
+- `cargo deny check` (advisories, licences, banned crates, allowed sources) before every image
+  build, with a `deny.toml` that `knext ffi init` writes;
+- building through `cargo auditable`, so image scanners can see the Rust dependency graph;
+- a CycloneDX SBOM of the crate graph shipped as `native/ffi/<target>/sbom.cdx.json`;
+- exact version pins, verified at build time, for zig, `cargo-zigbuild` and the other cargo tools.
+
+Until then, run `cargo deny` or `cargo audit` on `rust/` in your own CI if you need those checks.
+
+## Reserved names
+
+A Rust name becomes a TypeScript name verbatim, so `knext ffi generate` refuses names that would
+not work there, and says which:
+
+```
+"process" cannot be a generated function name: rename it in Rust (it must be an identifier that is not a JavaScript reserved word or a name the generated module declares)
+```
+
+- **Function and argument names** cannot be a JavaScript reserved word (`new`, `delete`, `class`,
+  `await`, `yield`, …), `undefined`, `NaN`, `Infinity`, `arguments` or `eval`, or a name the
+  generated module uses itself: `RustError`, `RustPanicError`, `FfiLoadError`, `ArrayBuffer`,
+  `BigInt`, `DataView`, `Error`, `JSON`, `Math`, `Number`, `Record`, `String`, `TextEncoder`,
+  `TypeError`, `Uint8Array`, `console` and `process`.
+- **Record and enum names** follow the same rule, and also cannot be a TypeScript built-in type
+  name (`any`, `bigint`, `boolean`, `never`, `number`, `object`, `string`, `symbol`, `unknown`) or
+  `as`, `infer`, `keyof`, `readonly` or `unique`.
+- **Record field names** can be anything Rust allows, keywords included (`r#type` becomes `type`),
+  except `__proto__`.
+
+The fix is to rename it in Rust. There is no attribute that gives a function a different
+TypeScript name.
+
+## Leaving Beta
+
+The feature stays Beta until **both** of these hold:
+
+1. Bun's documentation drops the experimental, "Do not rely on it in production" status of
+   `bun:ffi`, in a Bun release knext supports; and
+2. knext's own checks pass on that release: loading the library on the Alpine image for x64 and
+   arm64, and an end-to-end deploy of a Bun zone whose Server Action calls Rust.
+
+Until then it is opt-in, labelled Beta in the CLI, in every generated file and on this page, and
+not covered by the compatibility credential.
+
+## Related
+
+- [CLI reference: `knext ffi`](/docs/cli#knext-ffi) — every command and exit code.
+- [The Bun runtime](/docs/bun-runtime) — the runtime this feature needs.
+- [Zone functions](/docs/cli#knext-add-function) — out-of-process Go and Rust, on Node and Bun.
+- [Build pipeline](/docs/build-pipeline) — build targets and the self-contained mode.

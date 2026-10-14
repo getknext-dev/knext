@@ -1,6 +1,6 @@
 ---
 title: CLI reference
-description: The knext CLI — create, init-ci, validate, deploy, build, doctor, status, rollback, cleanup, db bind, db migrate, gc, add function, generate.
+description: The knext CLI — create, init-ci, validate, deploy, build, doctor, status, rollback, cleanup, db bind, db migrate, gc, add function, generate, ffi.
 ---
 
 The `knext` binary ships in **`@getknext/core`** (`npm i @getknext/core`), so it is available as
@@ -29,10 +29,14 @@ knext db migrate     # apply pending migrations against the writer, once
 knext gc             # reap old _next/static/<build-id>/ asset prefixes
 knext add function   # add a Go or Rust function's contract to this zone (Beta)
 knext generate       # write the server-only clients for this zone's functions (Beta)
+knext ffi init       # opt this zone into in-process Rust (Beta, Bun only)
+knext ffi generate   # build the zone's Rust crate and write its typed wrapper (Beta)
+knext ffi check      # fail if the committed Rust wrapper is out of date (Beta)
 ```
 
-`knext --help` lists exactly this set, `create` first. The last two come from an optional
-package; see [`knext add function`](#knext-add-function).
+`knext --help` lists exactly this set, `create` first. `add function` and `generate` come from one
+optional package, and the `ffi` commands from another; see
+[`knext add function`](#knext-add-function) and [`knext ffi`](#knext-ffi).
 
 The command is `knext`. If a script still calls the older command name, see
 [Upgrading](/docs/upgrading#version-specific-step-the-kn-next-command-is-gone) for what to change.
@@ -791,6 +795,71 @@ Each generated client is server-only (`import "server-only"`) and follows one po
 
 **Exit code:** `0` on success; `1` on a lint failure, a breaking change, out-of-date generated code
 (with `--check`), or a usage error.
+
+## `knext ffi`
+
+<Callout type="warn">
+**Beta, and not published yet.** `knext ffi` is provided by the optional `@getknext/ffi` package,
+which is not on npm yet. Until it is installed in your app, every `knext ffi` command prints how to
+install it and exits 1; `--help` still exits 0. Once installed, its version must match your
+`@getknext/core`, and a mismatched pair is refused with both versions named. In-process Rust runs
+only on Bun; see [In-process Rust](/docs/rust-in-process) for the whole feature.
+</Callout>
+
+Call Rust functions from a Server Action or route handler **in the zone's own process**, through
+Bun's `bun:ffi`, with a typed, server-only wrapper generated from the Rust library. Every run
+except `--help` first prints one line on standard error:
+
+```
+knext ffi: in-process Rust is Beta — it calls Rust through bun:ffi, which Bun marks experimental, and runs only on Bun.
+```
+
+```bash
+knext ffi init       # write knext.ffi.json and a starter rust/ crate
+knext ffi generate   # build the crate for this machine and write the typed wrapper
+knext ffi check      # the same, but fail if the committed wrapper is out of date (CI)
+knext ffi build --target x86_64-unknown-linux-musl --native-dir native   # run by knext build
+```
+
+**`knext ffi init`** writes `knext.ffi.json` (the Rust crate's directory, `crate`, defaults to
+`rust`; the generated module's directory, `out`, to `src/generated/ffi`) and a `rust/` crate:
+`Cargo.toml` (a `cdylib` that depends on the
+`knext-ffi` crate by git, pinned to the full commit the installed `@getknext/ffi` records),
+`rust-toolchain.toml`, and `src/lib.rs` with a `greet` function. It refuses to overwrite: if
+`knext.ffi.json` or `rust/` exists, nothing is written. It also writes nothing if the installed
+`@getknext/ffi` records no `knext-ffi` commit.
+
+**`knext ffi generate`** reads `knext.ffi.json`, builds the crate for this machine
+(`cargo build --release`), reads the exported functions from the built library, and writes
+`index.ts` and `.knext-generated.json` to `out`. Commit both. It needs Rust
+([rustup.rs](https://rustup.rs)). It refuses a Rust name that cannot be a TypeScript name, naming
+it (see [Reserved names](/docs/rust-in-process#reserved-names)). Like `knext generate`, it removes
+only files it recorded in `.knext-generated.json` and never writes through a symlink.
+
+**`knext ffi check`** does the same build and compares instead of writing. Run it in CI.
+
+**`knext ffi build`** is run for you by `knext build`, `knext deploy` and `knext preview` when
+`knext.ffi.json` exists; you do not usually run it by hand. It cross-compiles the crate for the
+image with `cargo zigbuild` (musl, release, `--locked`), refuses a library that links anything the
+Alpine image lacks (a glibc `libc.so.6`, say), stages it as
+`<native-dir>/ffi/<target>/lib<name>.so` with a `provenance.json`, and fails if the committed
+wrapper is not what `knext ffi generate` renders from that library. It needs Rust,
+`cargo-zigbuild` and `zig`, and a committed `Cargo.lock`. See
+[Building images](/docs/rust-in-process#building-images).
+
+| Flag | Notes |
+|---|---|
+| `--target <triple>` | `build` only, required, repeatable: `x86_64-unknown-linux-musl` or `aarch64-unknown-linux-musl`. |
+| `--native-dir <dir>` | `build` only, required: the app's `native/` directory. Only its `ffi/` subdirectory is replaced. |
+| `-h`, `--help` | Show the help for `knext ffi` or for one command. |
+
+`init`, `generate` and `check` take no other flags; an unknown flag is a usage error.
+
+**Exit code:** `0` on success, when `check` finds the wrapper up to date, and for `--help`; `1` on
+a usage error (an unknown command or flag, a missing or invalid `knext.ffi.json`), when `init` finds
+`knext.ffi.json` or `rust/` already there, when `check` finds the wrapper out of date, on a missing
+tool, on a failed Rust build, when `build` refuses the library or finds the wrapper out of date, and
+when the package is missing or does not match this `@getknext/core`.
 
 ## Directly runnable entries
 

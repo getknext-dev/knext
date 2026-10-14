@@ -423,6 +423,9 @@ describe("1.0 contract: the CLI reference documents every verb's exit codes", ()
         "db bind": "`knext db bind`",
         "db migrate": "`knext db migrate`",
         gc: "`knext gc`",
+        // Routed to an optional package, but documented (with its exit codes)
+        // in cli.mdx like every other verb `knext --help` lists.
+        ffi: "`knext ffi`",
     };
 
     for (const verb of Object.keys(headingFor)) {

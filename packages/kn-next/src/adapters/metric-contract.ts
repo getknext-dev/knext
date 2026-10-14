@@ -241,9 +241,10 @@ export function seriesNames(families: Map<string, string>): Set<string> {
  * and the caller resolves that as a prefix against at least one emitted series.
  *
  * The in-process Rust feature's names are not metrics and are skipped: the
- * crate `knext_ffi` and its versioned C symbols (`knext_ffi_v1_*`). Only that
- * exact crate name and the `_v1_` ABI prefix are skipped, so a real metric
- * such as `knext_ffi_calls_total` is still checked.
+ * crate `knext_ffi` and its versioned C symbols (`knext_ffi_v1_*` today, and
+ * any later ABI version). Only that exact crate name and a `knext_ffi_v<N>_`
+ * prefix (any version number) are skipped, so a real metric such as
+ * `knext_ffi_calls_total` is still checked.
  */
 export function extractDocMetricTokens(markdown: string): string[] {
     const out = new Set<string>();
