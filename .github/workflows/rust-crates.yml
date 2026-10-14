@@ -1,0 +1,120 @@
+# Rust crates CI — crates/knext-ffi + crates/knext-ffi-macros (in-process Rust, Beta).
+#
+# The crates are a Cargo workspace of their own under crates/ (not the repo
+# root), so this lane is path-filtered to crates/** and this file: a JS-only PR
+# never pays for it. What it gates (ADR-0069 D16/D20, #2343):
+#   - cargo fmt --check, cargo clippy -D warnings, cargo test (ABI round-trips
+#     for every type-table row, golden symbol and _schema values, ownership
+#     with a counting allocator, trybuild compile-fail cases, and the
+#     panic = "abort" refusal), all --locked against the committed Cargo.lock;
+#   - cargo deny check (advisories, licenses, bans, sources);
+#   - the Bun harness on Linux x64 against the release-profile fixture library
+#     (lto, strip, codegen-units = 1, opt-level 3): manifest records survive and
+#     match the symbols and _schema values, round-trips from Bun, 1000 panics
+#     without dying, and the leak check — which must pass with the paired free
+#     AND must see a deliberate leak (--no-free, exit 3 = all three phases over
+#     the bound), so the check is proven able to fail.
+# The toolchain comes from crates/rust-toolchain.toml (rustup on the runner).
+name: Rust crates (knext-ffi)
+
+on:
+  pull_request:
+    paths:
+      - 'crates/**'
+      - '.github/workflows/rust-crates.yml'
+  push:
+    branches: [main, integration/v2]
+    paths:
+      - 'crates/**'
+      - '.github/workflows/rust-crates.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-crates-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_DENY_VERSION: 0.20.2
+  # sha256 of cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz (the release's own .sha256)
+  CARGO_DENY_SHA256: 9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f
+
+jobs:
+  crates:
+    name: knext-ffi crates (fmt, clippy, test, deny, Bun harness)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: crates
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install the pinned Rust toolchain (crates/rust-toolchain.toml)
+        run: |
+          rustup toolchain install
+          rustc -V
+          cargo -V
+
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+
+      - name: cargo clippy -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace --locked
+
+      - name: Install cargo-deny (pinned release, sha256-verified)
+        run: |
+          set -euo pipefail
+          name="cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl"
+          gh release download "${CARGO_DENY_VERSION}" --repo EmbarkStudios/cargo-deny \
+            --pattern "${name}.tar.gz" --dir "${RUNNER_TEMP}"
+          echo "${CARGO_DENY_SHA256}  ${RUNNER_TEMP}/${name}.tar.gz" | sha256sum -c -
+          tar -xzf "${RUNNER_TEMP}/${name}.tar.gz" -C "${RUNNER_TEMP}"
+          install -m 0755 "${RUNNER_TEMP}/${name}/cargo-deny" "${HOME}/.cargo/bin/cargo-deny"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: cargo deny check
+        run: cargo deny check
+
+      - name: Setup bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
+
+      - name: Build the fixture library (release profile, lto + strip)
+        run: cargo build --release --locked -p knext-ffi-fixture
+
+      - name: Bun harness — manifest records, symbols, _schema values
+        run: bun harness/ffi-harness.ts manifest target/release/libknext_ffi_fixture.so
+
+      - name: Bun harness — round-trips from Bun
+        run: bun harness/ffi-harness.ts roundtrip target/release/libknext_ffi_fixture.so
+
+      - name: Bun harness — 1000 panics, process survives
+        # Rust's default panic hook prints one line per panic to stderr (kept on
+        # purpose: it is the only place the source location appears); keep the
+        # log readable by printing only its tail.
+        run: |
+          set -o pipefail
+          bun harness/ffi-harness.ts panic target/release/libknext_ffi_fixture.so 2> "${RUNNER_TEMP}/panic.stderr"
+          tail -n 3 "${RUNNER_TEMP}/panic.stderr"
+
+      - name: Bun harness — leak check (paired free must stay under the bound)
+        run: bun harness/ffi-harness.ts leak target/release/libknext_ffi_fixture.so
+
+      - name: Bun harness — leak check sees a deliberate leak (--no-free must exit 3)
+        run: |
+          set +e
+          bun harness/ffi-harness.ts leak target/release/libknext_ffi_fixture.so --no-free
+          code=$?
+          if [ "$code" -ne 3 ]; then
+            echo "::error::the leak check did not flag all three non-freeing phases (exit $code, want 3): it cannot be trusted to see a leak"
+            exit 1
+          fi

@@ -1,0 +1,16 @@
+# Test fixture: one export per row of the type table (README.md), built as a
+# cdylib for the Bun harness and as an rlib for the Rust ABI tests. Edition
+# 2024 on purpose: the macros' output must compile on both editions (knext-ffi
+# itself and its trybuild cases are edition 2021).
+[package]
+name = "knext-ffi-fixture"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+knext-ffi = { path = "../knext-ffi" }

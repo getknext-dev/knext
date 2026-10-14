@@ -1,0 +1,5 @@
+error: knext-ffi: `async fn f` is not supported: bun:ffi calls are synchronous; supported types are listed in the knext-ffi type table (ADR-0069 D6, crates/README.md)
+ --> tests/ui/fail/async_fn.rs:4:5
+  |
+4 | pub async fn f() -> i32 {
+  |     ^^^^^

@@ -1,0 +1,5 @@
+error: knext-ffi: `&mut str` is not supported: `&mut` references are not supported; only `&str` and `&[u8]` are; supported types are listed in the knext-ffi type table (ADR-0069 D6, crates/README.md)
+ --> tests/ui/fail/ref_mut_str.rs:4:13
+  |
+4 | pub fn f(v: &mut str) -> u64 {
+  |             ^
