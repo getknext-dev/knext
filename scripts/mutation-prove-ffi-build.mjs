@@ -11,16 +11,23 @@
  *     vinext's clean-up leaving native/ffi/ alone;
  *   - `ffi-preflight.test.ts` — the two refusals and the caller-order scan;
  *   - `ffi-preflight-callers.test.ts` — the refusals reached through
- *     `knext build --skip-next` and `knext preview`;
+ *     `knext build --skip-next`, `knext deploy --skip-build` and
+ *     `knext preview`, the vinext × bun "nothing staged" refusal on
+ *     `build --skip-next` and `deploy --skip-build`, and the spec's own
+ *     dry-run guard;
  *   - `packages/ffi/src/__tests__/ffi-build.test.ts` — `knext ffi build`'s
  *     libc allowlist, staging scope, drift check and cargo flags.
  *
  * Each mutation puts back ONE defect and requires its spec to go red.
- * Deliberately NOT executed: removing the preflight from `deploy()` against the
- * callers spec. With the refusal gone, deploy() runs on into the prune
- * preflight, whose kubectl calls are not mocked there and would reach the
- * ambient cluster context. That removal is proved against the source scan
- * (P03), which reads deploy.ts and never runs it.
+ * Removing the preflight from `deploy()` is proved twice: against the caller
+ * scan (P03, never runs deploy.ts) AND executed against the callers spec (C03).
+ * Executing it is safe because every deploy() there passes `--dry-run` (a scan
+ * in that spec enforces it), and deploy.ts skips the prune preflight, docker
+ * build/push and the CR apply on a dry run — so with the refusal gone deploy()
+ * reaches the (mocked) freshness check and the spec goes red there, with no
+ * cluster or docker call. The dry-run guard's own mutations (G01, G02) add a
+ * deploy() call or argv assignment that never executes; none removes
+ * `--dry-run`, which would run the prune preflight's kubectl calls.
  *
  * Verdicts are by EXIT CODE only (the shared driver,
  * `scripts/lib/guard-prover.mjs`, never parses output), every anchor must occur
@@ -81,15 +88,37 @@ const IMAGE = [
     id: 'I06',
     subject: 'vinext',
     claim: 'vinext clean-up counts native/ffi/ as foreign content (first opted-in build refused)',
-    anchor: '    const entries = readdirSync(dest).filter((e) => e !== FFI_STAGING_DIR);',
+    anchor: '    const entries = readdirSync(dest).filter((e) => !kept(e));',
     replacement: '    const entries = readdirSync(dest);',
   },
   {
     id: 'I07',
     subject: 'vinext',
     claim: 'vinext clean-up deletes native/ffi/ when the previous manifest lists ffi/**',
-    anchor: '            seg !== FFI_STAGING_DIR &&',
+    anchor: '            !kept(seg) &&',
     replacement: '',
+  },
+  {
+    id: 'I08',
+    subject: 'artifact',
+    claim: 'the standalone compile no longer refuses an opted-in app with nothing staged',
+    anchor:
+      '            assertFfiLibraryStaged(cwd, arch, FFI_STAGED_REMEDY.compile);\n            writeNativeIntegrityManifest',
+    replacement: '            writeNativeIntegrityManifest',
+  },
+  {
+    id: 'I09',
+    subject: 'vinext',
+    claim: 'vinext clean-up keeps native/ffi/ after the app opts out (stale library shipped)',
+    anchor: '    clearStagedNative(dest, { keepFfi: ffiOptedIn(cwd) });',
+    replacement: '    clearStagedNative(dest, { keepFfi: true });',
+  },
+  {
+    id: 'I10',
+    subject: 'vinext',
+    claim: 'vinext clean-up clears native/ffi/ even while the app opts in',
+    anchor: '    clearStagedNative(dest, { keepFfi: ffiOptedIn(cwd) });',
+    replacement: '    clearStagedNative(dest, { keepFfi: false });',
   },
 ];
 
@@ -147,6 +176,52 @@ const CALLERS = [
     claim: 'runPreviewDeploy no longer calls the preflight',
     anchor: '    assertFfiTargetSupported(config, process.cwd());',
     replacement: '',
+  },
+  {
+    id: 'C03',
+    subject: 'deploy',
+    claim:
+      'deploy() no longer calls the preflight (executed: --skip-build --dry-run reaches the freshness check)',
+    anchor: '    assertFfiTargetSupported(baseConfig, process.cwd());',
+    replacement: '',
+  },
+  {
+    id: 'C04',
+    subject: 'artifact',
+    claim: 'the vinext × bun compile no longer refuses an opted-in app with nothing staged',
+    anchor:
+      '        // build leaves nothing `deploy --skip-build` would accept.\n        assertFfiLibraryStaged(cwd, arch, FFI_STAGED_REMEDY.compile);',
+    replacement: '        // build leaves nothing `deploy --skip-build` would accept.',
+  },
+  {
+    id: 'C05',
+    subject: 'artifact',
+    claim: 'deploy --skip-build no longer refuses an opted-in app with nothing staged',
+    anchor: '    assertFfiLibraryStaged(cwd, arch, FFI_STAGED_REMEDY.skipBuild);',
+    replacement: '',
+  },
+  {
+    id: 'C06',
+    subject: 'artifact',
+    claim: 'the --skip-build refusal tells the user to drop --skip-next (a flag deploy lacks)',
+    anchor: '    assertFfiLibraryStaged(cwd, arch, FFI_STAGED_REMEDY.skipBuild);',
+    replacement: '    assertFfiLibraryStaged(cwd, arch, FFI_STAGED_REMEDY.compile);',
+  },
+  {
+    id: 'G01',
+    subject: 'callersSpec',
+    claim: 'a second deploy() call site appears outside runDeploy (never executed)',
+    anchor: '    return deploy();\n}',
+    replacement:
+      '    return deploy();\n}\n\nexport async function unguardedDeploy(): Promise<void> {\n    return deploy();\n}',
+  },
+  {
+    id: 'G02',
+    subject: 'callersSpec',
+    claim: 'a second argv assignment without --dry-run appears (never executed)',
+    anchor: 'const savedArgv = process.argv;',
+    replacement:
+      'const savedArgv = process.argv;\nif (savedArgv.length < 0) process.argv = ["node", "kn-next.js"];',
   },
 ];
 
@@ -219,6 +294,9 @@ const callers = createGuardProver({
   subjects: {
     coreBuild: 'packages/kn-next/src/cli/build.ts',
     preview: 'packages/kn-next/src/cli/preview.ts',
+    deploy: 'packages/kn-next/src/cli/deploy.ts',
+    artifact: 'packages/kn-next/src/cli/build-artifact.ts',
+    callersSpec: 'packages/kn-next/src/__tests__/ffi-preflight-callers.test.ts',
   },
 });
 const ffiBuild = createGuardProver({
@@ -262,7 +340,9 @@ for (const m of PREFLIGHT) {
 }
 preflight.finish(PREFLIGHT.length);
 
-console.log('\n=== callers spec (refusals through build --skip-next and preview) ===');
+console.log(
+  '\n=== callers spec (refusals through build --skip-next, deploy --skip-build --dry-run and preview) ===',
+);
 callers.baseline();
 callers.proveCanSeeRed({
   subject: 'preview',
