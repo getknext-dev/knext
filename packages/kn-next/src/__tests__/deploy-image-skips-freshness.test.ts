@@ -83,10 +83,9 @@ afterEach(() => {
 
 /** An app dir holding a compiled exec whose stamp does not match its source. */
 function enterAppWithStaleExec(): string {
-    const dir = realpathSync(
-        mkdtempSync(join(tmpdir(), "knext-image-freshness-")),
-    );
-    roots.push(dir);
+    const root = mkdtempSync(join(tmpdir(), "knext-image-freshness-"));
+    roots.push(root);
+    const dir = realpathSync(root);
     writeFileSync(
         join(dir, "package-lock.json"),
         '{ "lockfileVersion": 3, "packages": {} }\n',

@@ -193,8 +193,8 @@ const CALLERS = [
     subject: 'deploy',
     claim: 'deploy --skip-build no longer refuses an opted-in app with nothing staged',
     anchor:
-      '        if (!options.image) {\n            assertFfiLibraryStaged(\n                process.cwd(),\n                DEPLOY_SHIP_ARCH,\n                FFI_STAGED_REMEDY.skipBuild,\n            );\n        }\n',
-    replacement: '',
+      '        if (!options.image) {\n            assertFfiLibraryStaged(\n                process.cwd(),\n                DEPLOY_SHIP_ARCH,\n                FFI_STAGED_REMEDY.skipBuild,\n            );\n',
+    replacement: '        if (!options.image) {\n',
   },
   {
     id: 'C06',
@@ -216,9 +216,10 @@ const CALLERS = [
     subject: 'artifact',
     claim:
       'the staged-library check is back inside the freshness check, which --image also reaches',
-    anchor: '    // the image from the local tree.\n    const target',
+    anchor:
+      '    // the image from the local tree (never under `deploy --image`, #2355).\n    const target',
     replacement:
-      '    // the image from the local tree.\n    assertFfiLibraryStaged(cwd, DEPLOY_SHIP_ARCH, FFI_STAGED_REMEDY.skipBuild);\n    const target',
+      '    // the image from the local tree (never under `deploy --image`, #2355).\n    assertFfiLibraryStaged(cwd, DEPLOY_SHIP_ARCH, FFI_STAGED_REMEDY.skipBuild);\n    const target',
   },
   {
     id: 'G01',
