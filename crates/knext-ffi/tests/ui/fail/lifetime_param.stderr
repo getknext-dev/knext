@@ -1,0 +1,5 @@
+error: knext-ffi: `f<'a>`: generic parameters (including lifetimes) are not supported; supported types are listed in the knext-ffi type table (ADR-0069 D6, crates/README.md)
+ --> tests/ui/fail/lifetime_param.rs:4:9
+  |
+4 | pub fn f<'a>(x: &'a str) -> u64 {
+  |         ^

@@ -199,6 +199,10 @@ describe('bun-version pins (#754) — scanned across every workflow', () => {
       // publishable group with the workspace's bun before comparing — one
       // pinned "Setup bun" step.
       'rc-pack-parity-nightly.yml': 1,
+      // NEW (#2343): the knext-ffi crates lane runs its Bun harness (manifest,
+      // round-trip, panic and leak checks against the fixture library) — one
+      // pinned "Setup bun" step; no workspace install.
+      'rust-crates.yml': 1,
       // NEW (#1663): the published-bytes freeze check's "run" decision packs
       // the publishable group with the workspace's bun (mirrors
       // ga-tarball-diff's own release.yml job) — one Setup bun step. The

@@ -1,0 +1,13 @@
+error: knext-ffi: record `P` must have named fields (tuple and unit structs cannot cross as JSON objects); supported types are listed in the knext-ffi type table (ADR-0069 D6, crates/README.md)
+ --> tests/ui/fail/record_tuple_struct.rs:4:12
+  |
+4 | pub struct P(pub i32);
+  |            ^
+
+warning: unused import: `export`
+ --> tests/ui/fail/record_tuple_struct.rs:1:17
+  |
+1 | use knext_ffi::{export, record};
+  |                 ^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

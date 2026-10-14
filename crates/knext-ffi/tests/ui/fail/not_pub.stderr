@@ -1,0 +1,5 @@
+error: knext-ffi: `f`: #[knext_ffi::export] needs a `pub fn`
+ --> tests/ui/fail/not_pub.rs:4:4
+  |
+4 | fn f(v: i32) -> i32 {
+  |    ^
