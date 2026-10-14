@@ -222,7 +222,7 @@ jobs:
 
       - name: Proved red — the leak check flags a wrapper that never frees (every phase exit 3)
         run: |
-          set -uo pipefail
+          set +e -uo pipefail  # the default shell is bash -e; this step reads exit codes itself
           for phase in String 'Vec<u8>' record; do
             docker run --rm --read-only --network none \
               -e NODE_ENV=production -e TMPDIR=/tmp -e BUN_RUNTIME_TRANSPILER_CACHE_PATH=0 \
@@ -239,7 +239,7 @@ jobs:
 
       - name: Proved red — native/ffi/ staged for the other triple is refused
         run: |
-          set -uo pipefail
+          set +e -uo pipefail  # the default shell is bash -e; this step reads exit codes itself
           docker run --rm --read-only --network none \
             -e NODE_ENV=production -e TMPDIR=/tmp -e BUN_RUNTIME_TRANSPILER_CACHE_PATH=0 \
             -v "${RUNNER_TEMP}/musl-wrong/app:/work/app:ro" \
@@ -284,7 +284,7 @@ jobs:
       - name: Job summary (Linux numbers for the research note)
         if: always()
         run: |
-          set -uo pipefail
+          set +e -uo pipefail  # the default shell is bash -e; this step reads exit codes itself
           {
             echo "### musl load — ${TRIPLE} (\`${BUN_IMAGE}\`, read-only root + TMPDIR)"
             echo
@@ -418,15 +418,17 @@ jobs:
             echo "KNEXT=${GITHUB_WORKSPACE}/packages/kn-next/dist/cli/kn-next.js"
           } >> "$GITHUB_ENV"
 
-      - name: Install the Rust toolchain, zig and cargo-zigbuild (pinned, sha256-verified)
-        run: packages/ffi/scripts/install-ffi-toolchain.sh "${APP_DIR}/rust" "$TRIPLE"
+      # `knext ffi build` also runs (and pins) cargo-deny, cargo-auditable and
+      # cargo-cyclonedx (ADR-0069 D16), so the kind lane installs those too.
+      - name: Install the Rust toolchain, zig, cargo-zigbuild and the supply-chain tools (pinned)
+        run: packages/ffi/scripts/install-ffi-toolchain.sh "${APP_DIR}/rust" --supply-chain "$TRIPLE"
 
       # D15 / D14: an opted-in app is refused for runtime 'node' and for the
       # self-contained mode BEFORE any build work. Asserted on the real CLI,
       # with the exact text, and on the absence of every build output.
       - name: knext build REFUSES runtime 'node' and selfContained (before any build work)
         run: |
-          set -uo pipefail
+          set +e -uo pipefail  # the default shell is bash -e; this step reads exit codes itself
           cd "$APP_DIR"
           refuse() {
             local label="$1" want="$2" body="$3"

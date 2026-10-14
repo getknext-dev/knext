@@ -5,9 +5,13 @@
 #   - rustup (only when the runner image has none), then the crate's pinned
 #     toolchain from its rust-toolchain.toml, plus the musl targets asked for;
 #   - zig, the musl sysroot and linker cargo-zigbuild drives;
-#   - cargo-zigbuild, from its release binaries.
+#   - cargo-zigbuild, from its release binaries;
+#   - with --supply-chain, the tools `knext ffi build` also runs and pins
+#     (ADR-0069 D16): cargo-deny (release binary, sha256-verified),
+#     cargo-auditable and cargo-cyclonedx (`cargo install --locked --version`,
+#     which is also where knext reads cargo-auditable's version from).
 #
-#   install-ffi-toolchain.sh <crate-dir> [<rust-target>...]
+#   install-ffi-toolchain.sh <crate-dir> [--supply-chain] [<rust-target>...]
 #
 # The binary directories are appended to $GITHUB_PATH when it is set.
 #
@@ -18,10 +22,18 @@ set -euo pipefail
 
 ZIG_VERSION=0.17.0
 CARGO_ZIGBUILD_VERSION=0.23.4
+CARGO_DENY_VERSION=0.20.2
+CARGO_AUDITABLE_VERSION=0.7.7
+CARGO_CYCLONEDX_VERSION=0.5.9
 RUSTUP_VERSION=1.28.2
 
-crate_dir="${1:?usage: install-ffi-toolchain.sh <crate-dir> [<rust-target>...]}"
+crate_dir="${1:?usage: install-ffi-toolchain.sh <crate-dir> [--supply-chain] [<rust-target>...]}"
 shift
+supply_chain=0
+if [ "${1:-}" = --supply-chain ]; then
+  supply_chain=1
+  shift
+fi
 targets=("$@")
 
 case "$(uname -m)" in
@@ -30,12 +42,14 @@ case "$(uname -m)" in
     zig_sha256=1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026
     zigbuild_sha256=6b69963040818ca1ef573d8135a95aa902e17cf7f873c32c6426642dadfe7f59
     rustup_sha256=20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c
+    deny_sha256=9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f
     ;;
   aarch64 | arm64)
     arch=aarch64
     zig_sha256=9e8d11661d4ae3bd57702a3832781e23ad151dde5798e16a5ccd503f65234ff8
     zigbuild_sha256=25cf2cdc6cde848b33a761ff2cf46d1efe6ba7e1adfc4b6f3ee2d570cacb5419
     rustup_sha256=e3853c5a252fca15252d07cb23a1bdd9377a8c6f3efa01531109281ae47f841c
+    deny_sha256=995c82be0defc7a025cae49a2aa2644ce8245c9a3318fc4103907c6a285e8c7d
     ;;
   *)
     echo "install-ffi-toolchain: unsupported machine $(uname -m)" >&2
@@ -94,4 +108,23 @@ add_path "${tools}/bin"
 # form rejects --version ("unexpected argument", measured on 0.23.4).
 test "$(cargo-zigbuild --version)" = "cargo-zigbuild ${CARGO_ZIGBUILD_VERSION}"
 (cd "${crate_dir}" && cargo zigbuild --help >/dev/null)
-echo "install-ffi-toolchain: zig ${ZIG_VERSION}, cargo-zigbuild ${CARGO_ZIGBUILD_VERSION}, targets: ${targets[*]:-none}"
+
+# --- the supply-chain tools (--supply-chain) -----------------------------------
+if [ "${supply_chain}" = 1 ]; then
+  cargo_bin="${CARGO_HOME:-${HOME}/.cargo}/bin"
+  mkdir -p "${cargo_bin}"
+  deny_name="cargo-deny-${CARGO_DENY_VERSION}-${arch}-unknown-linux-musl"
+  fetch "https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/${deny_name}.tar.gz" \
+    "${deny_sha256}" "${tools}/cargo-deny.tar.gz"
+  tar -xzf "${tools}/cargo-deny.tar.gz" -C "${tools}"
+  install -m 0755 "${tools}/${deny_name}/cargo-deny" "${cargo_bin}/cargo-deny"
+  (
+    cd "${crate_dir}"
+    cargo install --locked --version "${CARGO_AUDITABLE_VERSION}" cargo-auditable
+    cargo install --locked --version "${CARGO_CYCLONEDX_VERSION}" cargo-cyclonedx
+    cargo deny --version
+    cargo cyclonedx --version
+  )
+fi
+
+echo "install-ffi-toolchain: zig ${ZIG_VERSION}, cargo-zigbuild ${CARGO_ZIGBUILD_VERSION}, targets: ${targets[*]:-none}, supply-chain tools: $([ "${supply_chain}" = 1 ] && echo "cargo-deny ${CARGO_DENY_VERSION}, cargo-auditable ${CARGO_AUDITABLE_VERSION}, cargo-cyclonedx ${CARGO_CYCLONEDX_VERSION}" || echo no)"
