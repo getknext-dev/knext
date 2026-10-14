@@ -636,7 +636,6 @@ jobs:
       - name: 'Attribution: compat-smoke on the same copy WITHOUT the opt-in (only when the gate failed)'
         if: failure() && steps.smoke.outcome == 'failure'
         env:
-          REDIS_URL: redis://127.0.0.1:6379
           FFI_E2E_OVERLAY: none
           FFI_E2E_MUTATION: none
         run: |
@@ -652,7 +651,10 @@ jobs:
               "$(find "${TARBALLS_DIR}" -maxdepth 1 -name 'getknext-core-*.tgz' | tail -n1)" >/dev/null && \
             node "$KNEXT" build > "${RUNNER_TEMP}/baseline-build.log" 2>&1
           ) || { echo "::warning::baseline build failed"; grep -v -e "module" -e "^ *at " "${RUNNER_TEMP}/baseline-build.log" | tail -n 120; exit 0; }
-          packages/ffi/scripts/run-compat-smoke.sh "$GITHUB_WORKSPACE" "$BASE" "${RUNNER_TEMP}/baseline-smoke" \
+          # REDIS_URL for the smoke only: set during `next build` it makes the
+          # app's cache-events route connect at page-data collection (measured).
+          REDIS_URL=redis://127.0.0.1:6379 \
+            packages/ffi/scripts/run-compat-smoke.sh "$GITHUB_WORKSPACE" "$BASE" "${RUNNER_TEMP}/baseline-smoke" \
             > "${RUNNER_TEMP}/baseline-smoke.log" 2>&1
           code=$?
           grep -E '^(✓ PASS|✗ FAIL|PASS=)' "${RUNNER_TEMP}/baseline-smoke.log"
