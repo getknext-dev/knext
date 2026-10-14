@@ -4,7 +4,7 @@
 
 Fix `next/image` serving unoptimized originals on the default standalone build. `/_next/image` answered with the source image instead of the negotiated format (for example `image/png` where the browser asked for `image/webp`); Next.js does not report this as an error, because when it cannot load `sharp` it serves the original file.
 
-Who was affected, on 1.0.0-rc.6, 1.3.0 and 1.3.1:
+Who was affected, on 1.0.0, 1.0.0-rc.6, 1.3.0 and 1.3.1 (and very likely earlier prereleases):
 
 - `build: 'turbopack'` or `'webpack'` with `runtime: 'bun'` (the default, disk mode) never optimized images, wherever it was built: the compiled executable bundled `sharp`, whose native addon could not find `libvips` from inside the executable. `sharp` now loads from the standalone tree beside the executable.
 - The same builds with `runtime: 'node'` lost image optimization whenever the build machine had no `@img/sharp-linuxmusl-*` package installed — npm on a glibc Linux host (a typical CI runner) or any macOS host — because the image is Alpine (musl) and the tree only carried the build machine's addon. `knext build`, `knext deploy` and `knext preview` now add the image's own addon (`@img/sharp-linuxmusl-x64` and its `libvips`) beside the traced `sharp`.
