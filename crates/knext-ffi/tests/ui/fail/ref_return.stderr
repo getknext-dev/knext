@@ -1,4 +1,4 @@
-error: knext-ffi: `&'static str` is not supported: returning a reference is not supported; return an owned `String` or `Vec<u8>`; supported types are listed in the knext-ffi type table (ADR-0069 D6, crates/README.md)
+error: knext-ffi: `&'static str` is not supported: returning a reference is not supported; return an owned `String` or `Vec<u8>`; supported types are listed at https://knext-platform.dev/docs/rust-in-process#type-mapping
  --> tests/ui/fail/ref_return.rs:4:15
   |
 4 | pub fn f() -> &'static str {

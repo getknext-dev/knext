@@ -46,6 +46,11 @@ const harness = (mode) => [
   ['cargo', 'build', '--release', '--locked', '-p', 'knext-ffi-fixture'],
   ['bun', 'harness/ffi-harness.ts', mode, LIB],
 ];
+// The @getknext/ffi generator against the real fixture library (#2357).
+const generated = (mode) => [
+  ['cargo', 'build', '--release', '--locked', '-p', 'knext-ffi-fixture'],
+  ['bun', 'harness/ffi-generated.ts', mode, LIB],
+];
 
 const MUTATIONS = [
   {
@@ -86,8 +91,57 @@ const MUTATIONS = [
   {
     guard: 'undecodable input is status 3',
     subject: 'runtime',
-    anchor: '                STATUS_INVALID_INPUT\n',
-    replacement: '                STATUS_ERR\n',
+    anchor:
+      '            Err(Invalid(msg)) => {\n                unsafe { write_buf(out, msg.into_bytes()) };\n                STATUS_INVALID_INPUT\n',
+    replacement:
+      '            Err(Invalid(msg)) => {\n                unsafe { write_buf(out, msg.into_bytes()) };\n                STATUS_ERR\n',
+    run: [cargoTest('-p', 'knext-ffi-fixture', '--test', 'abi')],
+  },
+  {
+    guard: 'a JSON return value that cannot be encoded is status 3, not OK (#2357)',
+    subject: 'runtime',
+    anchor:
+      '                Err(Invalid(msg)) => {\n                    unsafe { write_buf(out, msg.into_bytes()) };\n                    STATUS_INVALID_INPUT\n',
+    replacement:
+      '                Err(Invalid(msg)) => {\n                    unsafe { write_buf(out, msg.into_bytes()) };\n                    STATUS_OK\n',
+    run: [cargoTest('-p', 'knext-ffi-fixture', '--test', 'abi')],
+  },
+  {
+    guard: 'a non-finite float in any JSON position is refused, never serialized as null (#2357)',
+    subject: 'wire',
+    anchor: '                if self.is_finite() {',
+    replacement: '                if true {',
+    run: [
+      cargoTest('-p', 'knext-ffi', '--lib'),
+      cargoTest('-p', 'knext-ffi-fixture', '--test', 'abi'),
+    ],
+  },
+  {
+    guard: 'the same refusal seen from Bun through the generated wrapper (real library, #2357)',
+    subject: 'wire',
+    anchor: '                if self.is_finite() {',
+    replacement: '                if true {',
+    run: generated('wrapper'),
+  },
+  {
+    guard: 'a number that does not fit a finite f32 is refused on the way in (#2357)',
+    subject: 'wire',
+    anchor: '                if v.is_finite() {',
+    replacement: '                if true {',
+    run: [cargoTest('-p', 'knext-ffi-fixture', '--test', 'abi')],
+  },
+  {
+    guard: 'a refused Vec element names its index (#2357)',
+    subject: 'wire',
+    anchor: '                .map_err(|e| at(format_args!("[{i}]"), e))?;',
+    replacement: '?;',
+    run: [cargoTest('-p', 'knext-ffi', '--lib')],
+  },
+  {
+    guard: 'a refused record field names the field (#2357)',
+    subject: 'wire',
+    anchor: '            .map_err(|e| at(format_args!(".{}", self.0), e))',
+    replacement: '',
     run: [cargoTest('-p', 'knext-ffi-fixture', '--test', 'abi')],
   },
   {
@@ -117,6 +171,15 @@ const MUTATIONS = [
     subject: 'types',
     anchor: '"char" => {',
     replacement: '"__not_a_type" => {',
+    run: [cargoTest('-p', 'knext-ffi', '--test', 'ui')],
+  },
+  {
+    guard: 'compile errors point at the public docs page, not an internal design record (#2357)',
+    subject: 'types',
+    anchor:
+      '"supported types are listed at https://knext-platform.dev/docs/rust-in-process#type-mapping"',
+    replacement:
+      '"supported types are listed in the knext-ffi type table (ADR-0069 D6, crates/README.md)"',
     run: [cargoTest('-p', 'knext-ffi', '--test', 'ui')],
   },
   {

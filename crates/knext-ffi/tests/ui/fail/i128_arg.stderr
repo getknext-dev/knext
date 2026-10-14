@@ -1,4 +1,4 @@
-error: knext-ffi: `i128` is not supported: 128-bit integers are not supported; use `i64`/`u64` or a decimal `String`; supported types are listed in the knext-ffi type table (ADR-0069 D6, crates/README.md)
+error: knext-ffi: `i128` is not supported: 128-bit integers are not supported; use `i64`/`u64` or a decimal `String`; supported types are listed at https://knext-platform.dev/docs/rust-in-process#type-mapping
  --> tests/ui/fail/i128_arg.rs:4:13
   |
 4 | pub fn f(v: i128) -> i64 {

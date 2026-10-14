@@ -72,6 +72,10 @@ unsafe extern "C" {
     pub fn knext_ffi_v1_echo_vec_i64_aa288515(p: *const u8, l: usize, out: *mut Out) -> i32;
     pub fn knext_ffi_v1_echo_vec_usize_80167490(p: *const u8, l: usize, out: *mut Out) -> i32;
     pub fn knext_ffi_v1_echo_vec_string_4f1b32f7(p: *const u8, l: usize, out: *mut Out) -> i32;
+    pub fn knext_ffi_v1_echo_opt_f64_9c485b99(p: *const u8, l: usize, out: *mut Out) -> i32;
+    pub fn knext_ffi_v1_echo_reading_d3285823(p: *const u8, l: usize, out: *mut Out) -> i32;
+    pub fn knext_ffi_v1_non_finite_opt_6e51ec3c(which: u8, out: *mut Out) -> i32;
+    pub fn knext_ffi_v1_non_finite_reading_4c875def(out: *mut Out) -> i32;
 
     pub fn knext_ffi_v1_parse_i32_c4cfc8ac(p: *const u8, l: usize, out: *mut Out) -> i32;
     pub fn knext_ffi_v1_fallible_unit_bfc26025(fail: bool, out: *mut Out) -> i32;

@@ -1,4 +1,4 @@
-error: knext-ffi: `(i32, i32)` is not supported: tuples cannot cross the boundary; use a #[knext_ffi::record] struct; supported types are listed in the knext-ffi type table (ADR-0069 D6, crates/README.md)
+error: knext-ffi: `(i32, i32)` is not supported: tuples cannot cross the boundary; use a #[knext_ffi::record] struct; supported types are listed at https://knext-platform.dev/docs/rust-in-process#type-mapping
  --> tests/ui/fail/tuple_ret.rs:4:15
   |
 4 | pub fn f() -> (i32, i32) {

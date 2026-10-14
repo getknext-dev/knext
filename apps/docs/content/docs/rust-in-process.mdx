@@ -179,13 +179,24 @@ bun test --conditions=react-server
   travel as decimal strings; the generated code converts both ways and you never see the string.
 - **Non-finite floats.** A plain `f32`/`f64` argument or return crosses as a raw number, so `NaN`
   and `Infinity` arrive intact. Inside JSON (records, `Option`, `Vec`) there is no `NaN` or
-  `Infinity`, and what happens depends on where the float sits:
-  - Directly inside an `Option` (`Option<f64>` as a field, an argument, a return or a `Vec`
-    element), a non-finite float silently becomes `None` on the Rust side, or `null` in
-    TypeScript. No error is raised, so check with `Number.isFinite` or `f64::is_finite` first if
-    that matters.
-  - Anywhere else in JSON it is refused: sending one fails the call with a `RustError` (`invalid
-    input: …`), and one coming back from Rust is refused with a `RustError` that names the field.
+  `Infinity`, so a non-finite float is refused in every JSON position, `Option` included, in both
+  directions. It never silently becomes `None` or `null`.
+  - Sending one throws a `TypeError` before Rust is called, naming where the number sits, for
+    example `reading(): argument "r.samples[1]" must be a finite number (JSON has no NaN or Infinity), got -Infinity`.
+  - One coming back from Rust is refused with a `RustError` that names the path in the result:
+
+    ```
+    invalid input: knext-ffi: the return value cannot cross as JSON: result.samples[2]: f32 NaN is not finite (JSON has no NaN or Infinity)
+    ```
+
+    The message starts with `invalid input:` because it shares its status with decode failures,
+    but the fault is in the value your Rust function returned, not in what you passed.
+  - A JSON number too large for an `f32` field or argument is refused too, rather than becoming
+    `Infinity`:
+
+    ```
+    invalid input: knext-ffi: argument `r` could not be decoded: the number does not fit a finite f32 at line 1 column 25
+    ```
 - **Inside JSON, `Vec<u8>` is a `number[]`.** For binary data, use a `&[u8]`/`Vec<u8>` argument or
   return directly, which crosses as raw bytes.
 - **Empty values are fine.** An empty string or an empty `Uint8Array` can be passed and returned.
@@ -197,8 +208,10 @@ bun test --conditions=react-server
   generic or recursive records, and `#[serde(...)]` attributes on a record. For example:
 
 ```
-error: knext-ffi: `char` is not supported: `char` has no TypeScript equivalent; pass a `String` or a `u32` code point; …
+error: knext-ffi: `char` is not supported: `char` has no TypeScript equivalent; pass a `String` or a `u32` code point; supported types are listed at https://knext-platform.dev/docs/rust-in-process#type-mapping
 ```
+
+Every such error ends with that link to the table above.
 
 ## Records and enums
 
@@ -303,7 +316,8 @@ export async function POST(request: Request) {
 `Response.json` cannot serialise a `bigint`, which is why the example converts `total_cents` to a
 string.
 
-Record, enum, `Option` and `Vec` arguments are **not** checked in JavaScript before the call. A
+Record, enum, `Option` and `Vec` arguments are **not** checked in JavaScript before the call,
+except that every float inside them must be finite (see [Type mapping](#type-mapping)). A
 value Rust cannot decode, such as an enum variant that does not exist, comes back as a `RustError`
 whose message starts with `invalid input:` and names the argument:
 
@@ -319,9 +333,9 @@ carry no Rust memory.
 | What happened | What you get | The process |
 |---|---|---|
 | The function returned `Err(e)` | `RustError`; `message` is `e.to_string()`, `fn` is the function's name | keeps running |
-| An argument Rust could not decode | `RustError` whose message starts with `invalid input:` | keeps running |
+| An argument Rust could not decode, or a return value that cannot cross as JSON (a `NaN` or `Infinity` inside it) | `RustError` whose message starts with `invalid input:`; for a return value it goes on `knext-ffi: the return value cannot cross as JSON:`, and the fault is in what Rust returned | keeps running |
 | The function panicked | `RustPanicError`; `message` is the panic message, `fn` is the function's name | keeps running; the next call works |
-| A number, `bigint`, `boolean`, string or `Uint8Array` argument of the wrong type or out of range | `TypeError`, before Rust is called, for example `greet(): argument "name" must be a string, got number` | keeps running |
+| A number, `bigint`, `boolean`, string or `Uint8Array` argument of the wrong type or out of range, or a `NaN` or `Infinity` inside a record, `Option` or `Vec` argument | `TypeError`, before Rust is called, for example `greet(): argument "name" must be a string, got number` | keeps running |
 | The library could not be loaded | `FfiLoadError`, explaining why | keeps running, but **every later call in that process throws the same error**: fix the cause and restart |
 
 **A panic does not take the pod down.** Every exported function runs inside Rust's panic catcher,
@@ -396,9 +410,10 @@ export default async function HelloPage() {
 }
 ```
 
-The "cannot find the Rust library" error ends with the same advice, because during a build the two
-look alike. If you see it at request time instead, the library is missing from where the module
-looked; see [Where the library is loaded from](#where-the-library-is-loaded-from).
+During `next build` this is always the error you get, even though there is no library. The
+"cannot find the Rust library" error appears only at request time, and it means the library is
+missing from where the module looked; see
+[Where the library is loaded from](#where-the-library-is-loaded-from).
 
 ## Where the library is loaded from
 

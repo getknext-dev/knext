@@ -554,6 +554,83 @@ fn option_and_vec_top_level_json() {
     );
 }
 
+// ---- floats inside JSON: finite only, in every position --------------------------------
+
+fn message(out: Out) -> String {
+    String::from_utf8(take(out)).unwrap()
+}
+
+#[test]
+fn finite_floats_in_option_and_vec_positions_round_trip() {
+    for v in [json!(1.5), json!(-0.25), json!(null), json!(1e300)] {
+        assert_eq!(
+            call_json(knext_ffi_v1_echo_opt_f64_9c485b99, &v),
+            (OK, v.clone())
+        );
+    }
+    let r = json!({"value": 2.5, "samples": [0.5, null, -3.0]});
+    assert_eq!(
+        call_json(knext_ffi_v1_echo_reading_d3285823, &r),
+        (OK, r.clone())
+    );
+    let r = json!({"value": null, "samples": []});
+    assert_eq!(
+        call_json(knext_ffi_v1_echo_reading_d3285823, &r),
+        (OK, r.clone())
+    );
+}
+
+#[test]
+fn a_non_finite_float_in_an_option_return_is_status_3_naming_the_path_never_null() {
+    for (which, shown) in [(0u8, "NaN"), (1, "Infinity"), (2, "-Infinity")] {
+        let (st, out) = call!(knext_ffi_v1_non_finite_opt_6e51ec3c(which));
+        assert_eq!(
+            (st, message(out)),
+            (
+                INVALID,
+                format!(
+                    "knext-ffi: the return value cannot cross as JSON: result: f64 {shown} is not finite (JSON has no NaN or Infinity)"
+                )
+            )
+        );
+    }
+    let (st, out) = call!(knext_ffi_v1_non_finite_reading_4c875def());
+    assert_eq!(
+        (st, message(out)),
+        (
+            INVALID,
+            "knext-ffi: the return value cannot cross as JSON: result.samples[2]: f32 NaN is not finite (JSON has no NaN or Infinity)"
+                .to_string()
+        )
+    );
+    // The process is fine and the next call works.
+    let v = json!(0.5);
+    assert_eq!(
+        call_json(knext_ffi_v1_echo_opt_f64_9c485b99, &v),
+        (OK, v.clone())
+    );
+}
+
+#[test]
+fn a_float_argument_that_does_not_fit_is_status_3_never_infinity() {
+    // 1e300 is a finite f64 but overflows f32: refused, not read as +Infinity.
+    for r in [
+        json!({"value": null, "samples": [1e300]}),
+        json!({"value": null, "samples": [null, -1e300]}),
+    ] {
+        let (st, msg) = call_json(knext_ffi_v1_echo_reading_d3285823, &r);
+        assert_eq!(st, INVALID, "{r} -> {msg}");
+        let msg = msg.as_str().unwrap();
+        assert!(msg.contains("`r`"), "{msg}");
+        assert!(msg.contains("does not fit a finite f32"), "{msg}");
+    }
+    // JSON text cannot spell NaN or Infinity at all.
+    for bad in [&b"NaN"[..], b"Infinity", b"-Infinity", b"1e999"] {
+        let (st, _) = call_str(knext_ffi_v1_echo_opt_f64_9c485b99, bad);
+        assert_eq!(st, INVALID, "{}", String::from_utf8_lossy(bad));
+    }
+}
+
 // ---- Result ---------------------------------------------------------------------------
 
 #[test]

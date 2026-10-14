@@ -283,6 +283,92 @@ describe('D6 golden rows — buffers, unit, JSON types', () => {
     expect(src).toMatch(/throw new RustError\(\s*fn,\s*`\$\{at\}: expected a finite number/);
   });
 
+  it('floats in EVERY JSON argument position must be finite: NaN/±Infinity are refused before the call with a TypeError naming the path (JSON.stringify would turn them into null)', () => {
+    const src = render([
+      fn(
+        'f',
+        [
+          ['a', D.opt(D.t('f64')), 'Option<f64>'],
+          ['b', D.vec(D.opt(D.t('f32'))), 'Vec<Option<f32>>'],
+          ['p', D.rec('P'), 'P'],
+        ],
+        D.t('unit'),
+      ),
+      record('P', [
+        ['x', D.t('f64')],
+        ['q', D.opt(D.rec('Q'))],
+      ]),
+      record('Q', [['ys', D.vec(D.t('f64'))]]),
+    ]);
+    const f = body(src, 'f');
+    expect(f).toContain(
+      "JSON.stringify($opt(a, ($x0) => (Number.isFinite($x0) ? $x0 : $efin('f', 'a', $x0))))",
+    );
+    expect(f).toContain(
+      "JSON.stringify(b.map(($x0, $i0) => $opt($x0, ($x1) => (Number.isFinite($x1) ? $x1 : $efin('f', 'b' + '[' + $i0 + ']', $x1)))))",
+    );
+    expect(f).toContain("JSON.stringify($e_P('f', 'p', p))");
+    expect(src).toContain('function $e_P(fn: string, at: string, v: P): unknown {');
+    expect(src).toContain("x: (Number.isFinite(v.x) ? v.x : $efin(fn, at + '.x', v.x))");
+    expect(src).toContain("q: $opt(v.q, ($x0) => $e_Q(fn, at + '.q', $x0))");
+    expect(src).toContain(
+      "ys: v.ys.map(($x0, $i0) => (Number.isFinite($x0) ? $x0 : $efin(fn, at + '.ys' + '[' + $i0 + ']', $x0)))",
+    );
+    expect(src).toContain('function $efin(fn: string, at: string, v: unknown): unknown {');
+    expect(src).toContain(
+      'throw new TypeError(`$' +
+        '{fn}(): argument "$' +
+        '{at}" must be a finite number (JSON has no NaN or Infinity), got $' +
+        '{String(v)}`);',
+    );
+    expect(src).toContain(
+      '@throws {TypeError} when a number inside `a`, `b` or `p` is NaN or Infinity (JSON cannot carry them).',
+    );
+  });
+
+  it('documents the status-3 refusal of a JSON return that holds a float, and only then', () => {
+    const RET_THROWS =
+      '@throws {RustError} ("invalid input: knext-ffi: the return value cannot cross as JSON: …") when a number inside the returned value is NaN or Infinity (JSON cannot carry them): a fault in the return value, despite the "invalid input" prefix.';
+    const src = render([
+      fn('floaty', [], D.vec(D.t('f32')), { retRust: 'Vec<f32>' }),
+      fn('viaRecord', [], D.opt(D.rec('P')), { retRust: 'Option<P>' }),
+      fn('noFloat', [], D.vec(D.t('i32')), { retRust: 'Vec<i32>' }),
+      fn('raw', [], D.t('f64')),
+      record('P', [['x', D.t('f64')]]),
+    ]);
+    const doc = (name: string) => {
+      const at = src.indexOf(`export function ${name}(`);
+      return src.slice(src.lastIndexOf('/**', at), at);
+    };
+    expect(doc('floaty')).toContain(RET_THROWS);
+    expect(doc('viaRecord')).toContain(RET_THROWS);
+    // No float in the JSON, or a plain float that crosses raw: nothing to refuse.
+    expect(doc('noFloat')).not.toContain('the return value cannot cross');
+    expect(doc('raw')).not.toContain('the return value cannot cross');
+  });
+
+  it('a JSON argument that reaches no float keeps its zero-cost encoding (no per-element check, no path)', () => {
+    const src = render([
+      fn(
+        'f',
+        [
+          ['a', D.opt(D.t('i32'))],
+          ['b', D.vec(D.t('string'))],
+          ['p', D.rec('P')],
+        ],
+        D.t('unit'),
+      ),
+      record('P', [['n', D.t('u64')]]),
+    ]);
+    const f = body(src, 'f');
+    expect(f).toContain('const $o0 = $put(JSON.stringify(a));');
+    expect(f).toContain('const $o1 = $put(JSON.stringify(b));');
+    expect(f).toContain('JSON.stringify($e_P(p))');
+    expect(src).toContain('function $e_P(v: P): unknown {');
+    expect(src).not.toContain('$efin');
+    expect(src).not.toContain('is NaN or Infinity');
+  });
+
   it('Result<T, E> → T; Err throws RustError (documented in TSDoc)', () => {
     const src = render([
       fn('parse', [['s', D.t('string'), '&str']], D.t('i32'), {
@@ -389,9 +475,19 @@ describe('D13 — the module contract', () => {
     expect(src).not.toMatch(/process\.env\.KNEXT_/);
   });
 
-  it('a not-found library names prerendering and how to make the route dynamic (ADR-0069 round 2)', () => {
+  it('a not-found library at request time does not claim the call happened while prerendering (the build phase is refused earlier, by the prerender check)', () => {
     const notFound = src.slice(src.indexOf('function $resolve('), src.indexOf('function $verify('));
-    for (const s of ['$PRERENDER', 'knext ffi build', 'Tried:']) expect(notFound).toContain(s);
+    for (const s of ['knext ffi build', 'Tried:']) expect(notFound).toContain(s);
+    expect(notFound).not.toContain('$PRERENDER');
+    expect(notFound).not.toContain('prerender');
+    // The build phase never reaches $resolve: $open throws the prerender error first.
+    const open = src.slice(src.indexOf('function $open('), src.indexOf('function $triple('));
+    expect(open.indexOf("process.env['NEXT_PHASE'] === 'phase-production-build'")).toBeGreaterThan(
+      -1,
+    );
+    expect(open.indexOf('throw new FfiLoadError($PRERENDER);')).toBeLessThan(
+      open.indexOf('$resolve()'),
+    );
     for (const s of [
       'prerendering',
       'generateStaticParams',

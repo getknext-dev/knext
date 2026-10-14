@@ -7,16 +7,21 @@
 //! `bool` is a boolean, `String` a string, `Option<T>` is `T | null`,
 //! `Vec<T>` an array (a `Vec<u8>` inside JSON is an array of numbers),
 //! records are objects with their field names verbatim, unit enums are their
-//! variant name. A non-finite float serializes as `null` (JSON has no NaN);
-//! the generated decoder refuses it.
+//! variant name. Floats must be finite in EVERY position, `Option` included:
+//! JSON has no NaN or Infinity, and the `null` serde_json would write instead
+//! reads back as `None`. Serializing one is an error naming its path
+//! (`result.samples[2]: f32 NaN is not finite …`), which the shim returns as
+//! status 3; a number that does not fit a finite `f32` is refused on the way in.
 //!
-//! `#[knext_ffi::record]` applies [`serialize`]/[`deserialize`] to every field
-//! (`#[serde(with = "::knext_ffi::wire")]`), and the export macro applies the
-//! same [`Wire`] impls to top-level JSON arguments and returns, so the encoding
-//! is per position and identical everywhere.
+//! `#[knext_ffi::record]` serializes every field through [`Field`] (its
+//! [`Wire`] impl, with the field name on an error) and deserializes it with
+//! [`deserialize`], and the export macro applies the same [`Wire`] impls to
+//! top-level JSON arguments and returns, so the encoding is per position and
+//! identical everywhere.
 
 use serde::de::{Deserialize, Deserializer, Error as _};
-use serde::ser::{SerializeSeq, Serializer};
+use serde::ser::{Error as _, SerializeSeq, Serializer};
+use std::fmt::Display;
 
 /// A type that can cross the boundary inside JSON.
 pub trait Wire: Sized {
@@ -38,7 +43,74 @@ macro_rules! plain {
         }
     )*};
 }
-plain!(i8, i16, i32, u8, u16, u32, f32, f64, bool, String);
+plain!(i8, i16, i32, u8, u16, u32, bool, String);
+
+/// `NaN`, `Infinity`, `-Infinity`: the JavaScript spelling, as the caller sees it.
+fn non_finite(v: f64) -> &'static str {
+    if v.is_nan() {
+        "NaN"
+    } else if v > 0.0 {
+        "Infinity"
+    } else {
+        "-Infinity"
+    }
+}
+
+macro_rules! finite_float {
+    ($($t:ident),*) => {$(
+        impl Wire for $t {
+            #[inline]
+            fn ser<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+                if self.is_finite() {
+                    serde::Serialize::serialize(self, s)
+                } else {
+                    Err(S::Error::custom(format_args!(
+                        "{} {} is not finite (JSON has no NaN or Infinity)",
+                        stringify!($t),
+                        non_finite(f64::from(*self))
+                    )))
+                }
+            }
+            #[inline]
+            fn de<'de, D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+                let v = <$t as Deserialize<'de>>::deserialize(d)?;
+                if v.is_finite() {
+                    Ok(v)
+                } else {
+                    Err(D::Error::custom(format_args!(
+                        "the number does not fit a finite {}",
+                        stringify!($t)
+                    )))
+                }
+            }
+        }
+    )*};
+}
+finite_float!(f32, f64);
+
+/// Prefixes a serialization error with one path segment (`.field`, `[3]`,
+/// `result`), so the message of a refused value names where it is.
+#[doc(hidden)]
+pub fn at<E: serde::ser::Error>(segment: impl Display, e: E) -> E {
+    let rest = e.to_string();
+    if rest.starts_with('.') || rest.starts_with('[') {
+        E::custom(format_args!("{segment}{rest}"))
+    } else {
+        E::custom(format_args!("{segment}: {rest}"))
+    }
+}
+
+/// One record field, serialized through its [`Wire`] impl with its name on
+/// any error (what `#[knext_ffi::record]` emits for every field).
+#[doc(hidden)]
+pub struct Field<'a, T>(pub &'static str, pub &'a T);
+impl<T: Wire> serde::Serialize for Field<'_, T> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        self.1
+            .ser(s)
+            .map_err(|e| at(format_args!(".{}", self.0), e))
+    }
+}
 
 macro_rules! decimal_string {
     ($($t:ty),*) => {$(
@@ -97,8 +169,9 @@ impl<T: Wire> Wire for Option<T> {
 impl<T: Wire> Wire for Vec<T> {
     fn ser<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         let mut seq = s.serialize_seq(Some(self.len()))?;
-        for v in self {
-            seq.serialize_element(&Ser(v))?;
+        for (i, v) in self.iter().enumerate() {
+            seq.serialize_element(&Ser(v))
+                .map_err(|e| at(format_args!("[{i}]"), e))?;
         }
         seq.end()
     }
@@ -155,17 +228,56 @@ mod tests {
         );
     }
 
+    fn to_err(v: &impl Wire) -> String {
+        let mut buf = Vec::new();
+        v.ser(&mut serde_json::Serializer::new(&mut buf))
+            .expect_err("a non-finite float must not serialize")
+            .to_string()
+    }
+
     #[test]
     fn small_integers_floats_and_bytes_stay_numbers() {
         assert_eq!(to(&u32::MAX), "4294967295");
         assert_eq!(to(&vec![0u8, 255]), "[0,255]");
         assert_eq!(to(&1.5f64), "1.5");
-        assert_eq!(
-            to(&f64::NAN),
-            "null",
-            "serde_json writes null; the decoder refuses it"
-        );
+        assert_eq!(to(&Some(-0.25f32)), "-0.25");
+        assert_eq!(to(&vec![Some(0.5f64), None]), "[0.5,null]");
         assert!(from::<f64>("null").is_err());
+        assert_eq!(from::<Option<f64>>("null").unwrap(), None);
+        assert_eq!(from::<f32>("3.5").unwrap(), 3.5);
         assert!(from::<u8>("256").is_err());
+    }
+
+    #[test]
+    fn non_finite_floats_are_refused_in_every_position_naming_the_path() {
+        const WHY: &str = "is not finite (JSON has no NaN or Infinity)";
+        assert_eq!(to_err(&f64::NAN), format!("f64 NaN {WHY}"));
+        assert_eq!(to_err(&f32::INFINITY), format!("f32 Infinity {WHY}"));
+        // Inside an Option, where null would silently mean None.
+        assert_eq!(
+            to_err(&Some(f64::NEG_INFINITY)),
+            format!("f64 -Infinity {WHY}")
+        );
+        assert_eq!(
+            to_err(&vec![Some(1.0f32), None, Some(f32::NAN)]),
+            format!("[2]: f32 NaN {WHY}")
+        );
+        assert_eq!(
+            to_err(&Some(vec![vec![1.0f64], vec![2.0, f64::INFINITY]])),
+            format!("[1][1]: f64 Infinity {WHY}")
+        );
+    }
+
+    #[test]
+    fn a_float_that_does_not_fit_is_refused_on_the_way_in() {
+        // serde reads a JSON number into f32 with `as`, so 1e300 would be +Infinity.
+        for bad in ["1e300", "-1e300"] {
+            let e = from::<f32>(bad).unwrap_err().to_string();
+            assert!(e.contains("does not fit a finite f32"), "{e}");
+            assert!(from::<Option<f32>>(bad).is_err());
+            assert!(from::<Vec<Option<f32>>>(&format!("[{bad}]")).is_err());
+        }
+        assert!(from::<f64>("1e999").is_err());
+        assert_eq!(from::<f64>("1e300").unwrap(), 1e300);
     }
 }

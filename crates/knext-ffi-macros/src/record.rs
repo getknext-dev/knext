@@ -95,6 +95,7 @@ fn expand_struct(mut s: ItemStruct) -> Result<TokenStream, Error> {
         ));
     };
     let mut canon = format!("{name}{{");
+    let mut ser_fields = Vec::new();
     let mut deps: Vec<Type> = Vec::new();
     let mut pieces = Pieces::default();
     pieces.lit(&format!(
@@ -122,9 +123,21 @@ fn expand_struct(mut s: ItemStruct) -> Result<TokenStream, Error> {
         pieces.lit(&format!("{{\"name\":{},\"type\":", json_str(&fname)));
         desc.pieces(&mut pieces);
         pieces.lit(&format!(",\"rust\":{}}}", json_str(&pretty(&f.ty))));
-        f.attrs
-            .push(syn::parse_quote!(#[serde(with = "::knext_ffi::wire")]));
+        // Serialized by the hand-written impl below (so a refused value names
+        // its field); deserialized by serde's derive through the wire codec.
+        f.attrs.push(syn::parse_quote!(
+            #[serde(deserialize_with = "::knext_ffi::wire::deserialize")]
+        ));
+        let ident = f.ident.as_ref().expect("named field");
+        ser_fields.push(quote! {
+            ::knext_ffi::serde::ser::SerializeStruct::serialize_field(
+                &mut __knext_ffi_s,
+                #fname,
+                &::knext_ffi::wire::Field(#fname, &self.#ident),
+            )?;
+        });
     }
+    let field_count = ser_fields.len();
     canon.push('}');
     pieces.lit("]}\0");
 
@@ -134,9 +147,17 @@ fn expand_struct(mut s: ItemStruct) -> Result<TokenStream, Error> {
         .iter()
         .map(|t| quote!(<#t as ::knext_ffi::__rt::KnextSchema>::SCHEMA));
     Ok(quote! {
-        #[derive(::knext_ffi::serde::Serialize, ::knext_ffi::serde::Deserialize)]
+        #[derive(::knext_ffi::serde::Deserialize)]
         #[serde(crate = "::knext_ffi::serde", deny_unknown_fields)]
         #s
+
+        impl ::knext_ffi::serde::Serialize for #ident {
+            fn serialize<S: ::knext_ffi::serde::Serializer>(&self, s: S) -> ::core::result::Result<S::Ok, S::Error> {
+                let mut __knext_ffi_s = ::knext_ffi::serde::Serializer::serialize_struct(s, #name, #field_count)?;
+                #(#ser_fields)*
+                ::knext_ffi::serde::ser::SerializeStruct::end(__knext_ffi_s)
+            }
+        }
 
         impl ::knext_ffi::__rt::KnextSchema for #ident {
             const SCHEMA: &'static ::knext_ffi::__rt::Schema = &::knext_ffi::__rt::Schema {

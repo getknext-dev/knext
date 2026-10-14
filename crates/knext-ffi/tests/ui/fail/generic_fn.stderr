@@ -1,4 +1,4 @@
-error: knext-ffi: `f<T: Copy>`: generic parameters (including lifetimes) are not supported; supported types are listed in the knext-ffi type table (ADR-0069 D6, crates/README.md)
+error: knext-ffi: `f<T: Copy>`: generic parameters (including lifetimes) are not supported; supported types are listed at https://knext-platform.dev/docs/rust-in-process#type-mapping
  --> tests/ui/fail/generic_fn.rs:4:9
   |
 4 | pub fn f<T: Copy>(x: T) -> T {

@@ -50,6 +50,15 @@ mod types {
         pub name: String,
         pub flag: bool,
     }
+
+    /// Floats inside JSON, in an `Option` and inside a `Vec`: every one must
+    /// be finite (JSON has no NaN or Infinity, and `null` means `None`).
+    #[record]
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct Reading {
+        pub value: Option<f64>,
+        pub samples: Vec<Option<f32>>,
+    }
 }
 
 pub use types::*;
@@ -237,6 +246,32 @@ pub fn echo_vec_string(v: Vec<String>) -> Vec<String> {
 #[export]
 pub fn echo_opt_color(v: Option<Color>) -> Option<Color> {
     v
+}
+#[export]
+pub fn echo_opt_f64(v: Option<f64>) -> Option<f64> {
+    v
+}
+#[export]
+pub fn echo_reading(r: Reading) -> Reading {
+    r
+}
+/// A non-finite float in an `Option` return: 0 = NaN, 1 = Infinity, else
+/// -Infinity. It cannot cross as JSON, so the call is refused (status 3).
+#[export]
+pub fn non_finite_opt(which: u8) -> Option<f64> {
+    Some(match which {
+        0 => f64::NAN,
+        1 => f64::INFINITY,
+        _ => f64::NEG_INFINITY,
+    })
+}
+/// A NaN two levels inside a returned record: refused, naming its path.
+#[export]
+pub fn non_finite_reading() -> Reading {
+    Reading {
+        value: Some(1.5),
+        samples: vec![Some(0.5), None, Some(f32::NAN)],
+    }
 }
 
 // ---- Result, panics ----------------------------------------------------------
