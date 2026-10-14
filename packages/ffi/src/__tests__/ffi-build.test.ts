@@ -72,6 +72,8 @@ function app(
     toolchain?: FakeToolchainOptions;
     /** Injected zig download (only reached with no zig on PATH). */
     zigFetch?: ZigDeps['fetch'];
+    /** Overrides for the zig download (pin, scratch root). */
+    zigDeps?: Partial<ZigDeps>;
     /** cargo deny check advisories: its exit and JSON stream (default: clean). */
     advisories?: { status: number; stream: string };
     /** cargo deny check bans licenses sources exit (default 0). */
@@ -136,6 +138,16 @@ function app(
     });
     const probe = tc.answer(cmd, args);
     if (probe) return probe;
+    // A downloaded zig: `tar` "extracts" it, and it answers the pinned version.
+    if (cmd === 'tar') {
+      const dest = args[args.indexOf('-C') + 1] as string;
+      mkdirSync(join(dest, 'zig-x86_64-linux-0.17.0'), { recursive: true });
+      writeFileSync(join(dest, 'zig-x86_64-linux-0.17.0', 'zig'), '');
+      return { status: 0, stdout: '' };
+    }
+    if (cmd.endsWith('zig-x86_64-linux-0.17.0/zig') && args[0] === 'version') {
+      return { status: 0, stdout: '0.17.0\n' };
+    }
     const enoent = () => ({
       status: null,
       stdout: '',
@@ -213,6 +225,7 @@ function app(
             (() => {
               throw new Error('no zig download expected');
             }),
+          ...opts.zigDeps,
         },
       },
     });
@@ -491,6 +504,69 @@ describe('knext ffi build: the build-tool pins (D16)', () => {
       'expected 1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026',
     );
     expect(cargoBuilds(a.calls)).toEqual([]);
+  });
+});
+
+describe('knext ffi build: the downloaded zig is private to one build (D16)', () => {
+  const zigArchive = Buffer.from('a pretend zig archive');
+  const zigDeps = (scratchRoot: string): Partial<ZigDeps> => ({
+    scratchRoot,
+    pin: {
+      version: '0.17.0',
+      baseUrl: 'https://ziglang.org/download/0.17.0',
+      assets: {
+        'linux-x86_64': { file: 'zig-x86_64-linux-0.17.0.tar.xz', sha256: sha(zigArchive) },
+      },
+    },
+  });
+  const zigFetch: ZigDeps['fetch'] = async () => ({
+    ok: true,
+    status: 200,
+    arrayBuffer: async () => new Uint8Array(zigArchive).buffer as ArrayBuffer,
+  });
+
+  it('links with the zig extracted for this build, records the archive it came from, and removes it after', async () => {
+    const scratchRoot = emptyDir('build-zig-scratch');
+    const a = app({ toolchain: { zig: null }, zigFetch, zigDeps: zigDeps(scratchRoot) });
+    const r = await a.build(ARGV);
+    expect(r.code, r.err).toBe(0);
+    const zigUsed = cargoBuilds(a.calls)[0]?.zig as string;
+    expect(zigUsed.startsWith(scratchRoot)).toBe(true);
+    const prov = JSON.parse(readFileSync(join(a.native, 'ffi', X64, 'provenance.json'), 'utf8'));
+    expect(prov.tools.zig).toEqual({
+      version: '0.17.0',
+      source: 'ziglang.org',
+      sha256: sha(zigArchive),
+    });
+    expect(readdirSync(scratchRoot)).toEqual([]);
+  });
+
+  it('removes it when a later gate fails too', async () => {
+    const scratchRoot = emptyDir('build-zig-scratch');
+    const a = app({
+      toolchain: { zig: null },
+      zigFetch,
+      zigDeps: zigDeps(scratchRoot),
+      policyStatus: 1,
+    });
+    const r = await a.build(ARGV);
+    expect(r.code).toBe(1);
+    expect(a.calls.some((c) => c.cmd === 'tar')).toBe(true);
+    expect(readdirSync(scratchRoot)).toEqual([]);
+  });
+
+  it('removes it when the cross-build fails', async () => {
+    const scratchRoot = emptyDir('build-zig-scratch');
+    const a = app({
+      toolchain: { zig: null },
+      zigFetch,
+      zigDeps: zigDeps(scratchRoot),
+      buildFails: true,
+    });
+    const r = await a.build(ARGV);
+    expect(r.code).toBe(1);
+    expect(cargoBuilds(a.calls)).toHaveLength(1);
+    expect(readdirSync(scratchRoot)).toEqual([]);
   });
 });
 

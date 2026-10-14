@@ -17,9 +17,10 @@
 
 import { afterAll, describe, expect, it } from 'bun:test';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import type { Runner } from '../build';
+import { FfiUsageError } from '../config';
 import { runInit, TEMPLATE_DIR } from '../init';
 import {
   ADVISORY_ALLOWLIST_FILE,
@@ -35,11 +36,13 @@ import {
   loadAdvisoryAllowlist,
   parseDenyJson,
   readAuditData,
+  releaseZig,
   resolveCargoSubcommand,
   resolveZig,
   runCargoDeny,
   versionOf,
   ZIG_PIN,
+  type ZigDeps,
   type ZigPin,
   zigbuildEnv,
   zigCacheDir,
@@ -182,19 +185,36 @@ describe('zig (D16): the pinned version, verified', () => {
     assets: { 'macos-aarch64': { file: 'zig-aarch64-macos-0.17.0.tar.xz', sha256: sha(archive) } },
   };
   const stem = 'zig-aarch64-macos-0.17.0';
+  const ARCHIVE_FILE = 'zig-aarch64-macos-0.17.0.tar.xz';
+  /** What the fake `tar` writes: the genuine binary and one lib/ file. */
+  const GENUINE_BIN = 'genuine zig binary';
+  const GENUINE_LIB = 'genuine std.zig';
+  const LIB_REL = join('lib', 'std', 'std.zig');
+  const mode = (p: string) => statSync(p).mode & 0o777;
 
-  /** A runner whose `tar` "extracts" a zig answering `version` with `extractedVersion`. */
-  function downloadRig(extractedVersion = ZIG_PIN.version) {
+  /**
+   * A runner whose `tar` "extracts" a zig answering `version` with
+   * `extractedVersion`. Every `tar` records the sha256 of the archive file it
+   * was handed and where that file was; `onTar` runs before it extracts.
+   */
+  function downloadRig(
+    extractedVersion = ZIG_PIN.version,
+    hooks: { onTar?: () => void; tarStatus?: number } = {},
+  ) {
     const tc = fakeToolchain({ zig: null });
     const calls: string[] = [];
-    let extracted: string | undefined;
+    const tarInputs: { path: string; sha: string }[] = [];
     const run: Runner = (cmd, args) => {
       calls.push(`${cmd} ${args.join(' ')}`);
       if (cmd === 'tar') {
+        const input = args[args.indexOf('-xJf') + 1] as string;
+        tarInputs.push({ path: input, sha: sha(readFileSync(input)) });
+        hooks.onTar?.();
+        if (hooks.tarStatus !== undefined) return { status: hooks.tarStatus, stdout: '' };
         const dest = args[args.indexOf('-C') + 1] as string;
-        mkdirSync(join(dest, stem), { recursive: true });
-        extracted = join(dest, stem, 'zig');
-        writeFileSync(extracted, '');
+        mkdirSync(join(dest, stem, 'lib', 'std'), { recursive: true });
+        writeFileSync(join(dest, stem, 'zig'), GENUINE_BIN);
+        writeFileSync(join(dest, stem, LIB_REL), GENUINE_LIB);
         return { status: 0, stdout: '' };
       }
       if (cmd.endsWith(`${stem}/zig`) && args[0] === 'version') {
@@ -213,7 +233,18 @@ describe('zig (D16): the pinned version, verified', () => {
           arrayBuffer: async () => new Uint8Array(bytes).buffer as ArrayBuffer,
         };
       };
-    return { tc, run, calls, fetched, fetchWith, cacheDir: emptyDir('zig-cache') };
+    const cacheDir = emptyDir('zig-cache');
+    const scratchRoot = emptyDir('zig-scratch');
+    /** The deps every resolve in this rig shares. */
+    const deps = (extra: Partial<ZigDeps> = {}): ZigDeps => ({
+      host,
+      pin: testPin,
+      cacheDir,
+      scratchRoot,
+      fetch: fetchWith(archive),
+      ...extra,
+    });
+    return { tc, run, calls, fetched, fetchWith, cacheDir, scratchRoot, tarInputs, deps };
   }
 
   it('maps the three pinned build hosts', () => {
@@ -241,7 +272,11 @@ describe('zig (D16): the pinned version, verified', () => {
       version: '0.17.0',
       source: 'path',
       sha256: null,
+      scratch: null,
     });
+    // Nothing to release: knext never removes a zig it did not extract.
+    releaseZig(z);
+    expect(existsSync(tc.zigBin as string)).toBe(true);
   });
 
   it('refuses a zig on PATH at another version, naming the pinned download and its sha256', async () => {
@@ -254,100 +289,223 @@ describe('zig (D16): the pinned version, verified', () => {
     );
   });
 
-  it('with no zig on PATH, downloads the pinned archive, verifies it, extracts it and checks its version', async () => {
+  it('with no zig on PATH, downloads the pinned archive, verifies it, extracts it privately and checks its version', async () => {
     const r = downloadRig();
-    const z = await resolveZig(r.run, r.tc.cargoHome, r.tc.env, {
-      host,
-      pin: testPin,
-      cacheDir: r.cacheDir,
-      fetch: r.fetchWith(archive),
-    });
-    expect(r.fetched).toEqual([`${testPin.baseUrl}/zig-aarch64-macos-0.17.0.tar.xz`]);
-    expect(z).toEqual({
-      bin: join(r.cacheDir, stem, 'zig'),
-      version: '0.17.0',
-      source: 'ziglang.org',
-      sha256: sha(archive),
-    });
-    expect(readFileSync(join(r.cacheDir, 'zig-aarch64-macos-0.17.0.tar.xz'))).toEqual(archive);
+    const z = await resolveZig(r.run, r.tc.cargoHome, r.tc.env, r.deps());
+    expect(r.fetched).toEqual([`${testPin.baseUrl}/${ARCHIVE_FILE}`]);
+    expect(z.version).toBe('0.17.0');
+    expect(z.source).toBe('ziglang.org');
+    expect(z.sha256).toBe(sha(archive));
+    // Extracted into a fresh private directory, never into the shared cache.
+    expect(z.scratch).not.toBeNull();
+    expect(dirname(z.scratch as string)).toBe(r.scratchRoot);
+    expect(z.bin).toBe(join(z.scratch as string, stem, 'zig'));
+    expect(mode(z.scratch as string)).toBe(0o700);
+    expect(readFileSync(z.bin, 'utf8')).toBe(GENUINE_BIN);
+    expect(readFileSync(join(r.cacheDir, ARCHIVE_FILE))).toEqual(archive);
+    expect(existsSync(join(r.cacheDir, stem))).toBe(false);
 
-    // The next build re-hashes the cached archive and reuses it: no download, no extract.
+    // The next build re-hashes the cached archive (no download) and extracts
+    // it again into its own directory.
     r.calls.length = 0;
-    const again = await resolveZig(r.run, r.tc.cargoHome, r.tc.env, {
-      host,
-      pin: testPin,
-      cacheDir: r.cacheDir,
-      fetch: () => {
-        throw new Error('no download expected');
+    const again = await resolveZig(
+      r.run,
+      r.tc.cargoHome,
+      r.tc.env,
+      r.deps({
+        fetch: () => {
+          throw new Error('no download expected');
+        },
+      }),
+    );
+    expect(r.calls.filter((c) => c.startsWith('tar'))).toHaveLength(1);
+    expect(again.scratch).not.toBe(z.scratch);
+    expect(again.sha256).toBe(sha(archive));
+    releaseZig(z);
+    releaseZig(again);
+    expect(readdirSync(r.scratchRoot)).toEqual([]);
+  });
+
+  it('never runs a cached extracted zig: a tampered binary or lib/ file is not used', async () => {
+    const r = downloadRig();
+    const first = await resolveZig(r.run, r.tc.cargoHome, r.tc.env, r.deps());
+    // Tamper with every extracted tree an attacker (or a bad disk) could reach:
+    // the previous build's private tree, and a tree at the old shared cache path.
+    writeFileSync(first.bin, 'tampered binary');
+    writeFileSync(join(first.scratch as string, stem, LIB_REL), 'tampered lib');
+    const cachedTree = join(r.cacheDir, stem);
+    mkdirSync(join(cachedTree, 'lib', 'std'), { recursive: true });
+    writeFileSync(join(cachedTree, 'zig'), 'tampered binary');
+    writeFileSync(join(cachedTree, LIB_REL), 'tampered lib');
+
+    r.tarInputs.length = 0;
+    const z = await resolveZig(r.run, r.tc.cargoHome, r.tc.env, r.deps());
+    expect(z.bin).not.toBe(first.bin);
+    expect(z.bin.startsWith(r.cacheDir)).toBe(false);
+    expect(readFileSync(z.bin, 'utf8')).toBe(GENUINE_BIN);
+    expect(readFileSync(join(z.scratch as string, stem, LIB_REL), 'utf8')).toBe(GENUINE_LIB);
+    // tar was handed the verified bytes, from inside the private directory,
+    // not a path in the cache that could change after it was hashed.
+    expect(r.tarInputs).toHaveLength(1);
+    expect(r.tarInputs[0]?.sha).toBe(sha(archive));
+    expect(r.tarInputs[0]?.path.startsWith(z.scratch as string)).toBe(true);
+    // ...and that copy is gone before the zig is handed back.
+    expect(existsSync(r.tarInputs[0]?.path as string)).toBe(false);
+    releaseZig(first);
+    releaseZig(z);
+  });
+
+  it('creates the cache directories private (0700)', async () => {
+    const r = downloadRig();
+    const cacheDir = join(emptyDir('zig-cache-root'), 'knext', 'zig', '0.17.0');
+    const z = await resolveZig(r.run, r.tc.cargoHome, r.tc.env, r.deps({ cacheDir }));
+    expect(mode(cacheDir)).toBe(0o700);
+    expect(mode(dirname(cacheDir))).toBe(0o700);
+    releaseZig(z);
+  });
+
+  it('two concurrent cold-cache installs both get a working zig, neither removes the other', async () => {
+    const r = downloadRig();
+    const [a, b] = await Promise.all([
+      resolveZig(r.run, r.tc.cargoHome, r.tc.env, r.deps()),
+      resolveZig(r.run, r.tc.cargoHome, r.tc.env, r.deps()),
+    ]);
+    expect(r.fetched).toHaveLength(2);
+    expect(a.bin).not.toBe(b.bin);
+    expect(readFileSync(a.bin, 'utf8')).toBe(GENUINE_BIN);
+    expect(readFileSync(b.bin, 'utf8')).toBe(GENUINE_BIN);
+    expect(readFileSync(join(r.cacheDir, ARCHIVE_FILE))).toEqual(archive);
+    releaseZig(a);
+    expect(readFileSync(b.bin, 'utf8')).toBe(GENUINE_BIN);
+    releaseZig(b);
+  });
+
+  it('another install landing in the cache while this one extracts does not break it', async () => {
+    const r = downloadRig(ZIG_PIN.version, {
+      // Another process finishes its install while this one extracts.
+      onTar: () => {
+        mkdirSync(join(r.cacheDir, stem, 'lib'), { recursive: true });
+        writeFileSync(join(r.cacheDir, stem, 'zig'), 'the other install');
       },
     });
-    expect(again).toEqual(z);
-    expect(r.calls.some((c) => c.startsWith('tar'))).toBe(false);
+    const z = await resolveZig(r.run, r.tc.cargoHome, r.tc.env, r.deps());
+    expect(readFileSync(z.bin, 'utf8')).toBe(GENUINE_BIN);
+    expect(readFileSync(join(r.cacheDir, stem, 'zig'), 'utf8')).toBe('the other install');
+    releaseZig(z);
+  });
+
+  it('a cache or scratch directory that cannot be written is a usage error that says what to do', async () => {
+    const r = downloadRig();
+    const blocker = join(emptyDir('zig-blocked'), 'a-file');
+    writeFileSync(blocker, '');
+    const cache = await resolveZig(
+      r.run,
+      r.tc.cargoHome,
+      r.tc.env,
+      r.deps({ cacheDir: join(blocker, 'zig') }),
+    ).catch((e) => e);
+    expect(cache).toBeInstanceOf(FfiUsageError);
+    expect(String(cache)).toContain(`could not cache zig 0.17.0 in ${join(blocker, 'zig')}`);
+    expect(String(cache)).toContain('KNEXT_CACHE_DIR');
+
+    const scratch = await resolveZig(
+      r.run,
+      r.tc.cargoHome,
+      r.tc.env,
+      r.deps({ scratchRoot: join(blocker, 'tmp') }),
+    ).catch((e) => e);
+    expect(scratch).toBeInstanceOf(FfiUsageError);
+    expect(String(scratch)).toContain('could not extract zig 0.17.0');
+    expect(String(scratch)).toContain('TMPDIR');
+  });
+
+  it('a failed extract leaves nothing behind', async () => {
+    const r = downloadRig(ZIG_PIN.version, { tarStatus: 2 });
+    const err = await resolveZig(r.run, r.tc.cargoHome, r.tc.env, r.deps()).catch((e) => e);
+    expect(err).toBeInstanceOf(FfiUsageError);
+    expect(String(err)).toContain('tar must support xz (-J)');
+    expect(readdirSync(r.scratchRoot)).toEqual([]);
   });
 
   it('refuses an archive whose sha256 differs from the pin, and installs nothing', async () => {
     const r = downloadRig();
-    const err = await resolveZig(r.run, r.tc.cargoHome, r.tc.env, {
-      host,
-      pin: testPin,
-      cacheDir: r.cacheDir,
-      fetch: r.fetchWith(Buffer.from('tampered')),
-    }).catch((e) => e);
+    const err = await resolveZig(
+      r.run,
+      r.tc.cargoHome,
+      r.tc.env,
+      r.deps({ fetch: r.fetchWith(Buffer.from('tampered')) }),
+    ).catch((e) => e);
     expect(String(err)).toContain('zig 0.17.0 failed verification: sha256 mismatch');
     expect(String(err)).toContain(`expected ${sha(archive)}`);
     expect(String(err)).toContain(`got      ${sha(Buffer.from('tampered'))}`);
-    expect(existsSync(join(r.cacheDir, 'zig-aarch64-macos-0.17.0.tar.xz'))).toBe(false);
+    expect(existsSync(join(r.cacheDir, ARCHIVE_FILE))).toBe(false);
     expect(r.calls).toEqual([]);
+    expect(readdirSync(r.scratchRoot)).toEqual([]);
   });
 
   it('never trusts a cached archive that no longer matches: it is fetched again', async () => {
     const r = downloadRig();
-    mkdirSync(r.cacheDir, { recursive: true });
-    writeFileSync(join(r.cacheDir, 'zig-aarch64-macos-0.17.0.tar.xz'), 'swapped');
-    await resolveZig(r.run, r.tc.cargoHome, r.tc.env, {
-      host,
-      pin: testPin,
-      cacheDir: r.cacheDir,
-      fetch: r.fetchWith(archive),
-    });
+    writeFileSync(join(r.cacheDir, ARCHIVE_FILE), 'swapped');
+    const z = await resolveZig(r.run, r.tc.cargoHome, r.tc.env, r.deps());
     expect(r.fetched).toHaveLength(1);
-    expect(readFileSync(join(r.cacheDir, 'zig-aarch64-macos-0.17.0.tar.xz'))).toEqual(archive);
+    expect(readFileSync(join(r.cacheDir, ARCHIVE_FILE))).toEqual(archive);
+    expect(r.tarInputs.map((t) => t.sha)).toEqual([sha(archive)]);
+    releaseZig(z);
   });
 
-  it('refuses a downloaded zig that reports another version', async () => {
+  it('refuses a downloaded zig that reports another version, and discards it', async () => {
     const r = downloadRig('0.16.0');
-    const err = await resolveZig(r.run, r.tc.cargoHome, r.tc.env, {
-      host,
-      pin: testPin,
-      cacheDir: r.cacheDir,
-      fetch: r.fetchWith(archive),
-    }).catch((e) => e);
+    const err = await resolveZig(r.run, r.tc.cargoHome, r.tc.env, r.deps()).catch((e) => e);
     expect(String(err)).toContain('reports 0.16.0, not the pinned 0.17.0');
-    expect(existsSync(join(r.cacheDir, stem))).toBe(false);
+    expect(readdirSync(r.scratchRoot)).toEqual([]);
   });
 
-  it('refuses an HTTP failure, and a host with no pinned archive', async () => {
+  it('refuses an HTTP failure, naming the PATH alternative, and a host with no pinned archive', async () => {
     const r = downloadRig();
-    const http = await resolveZig(r.run, r.tc.cargoHome, r.tc.env, {
-      host,
-      pin: testPin,
-      cacheDir: r.cacheDir,
-      fetch: r.fetchWith(archive, 404),
-    }).catch((e) => e);
+    const http = await resolveZig(
+      r.run,
+      r.tc.cargoHome,
+      r.tc.env,
+      r.deps({ fetch: r.fetchWith(archive, 404) }),
+    ).catch((e) => e);
     expect(String(http)).toContain('HTTP 404');
+    expect(String(http)).toContain('install exactly zig 0.17.0 on PATH');
+    expect(String(http)).toContain('HTTPS_PROXY');
     const win = await resolveZig(r.run, r.tc.cargoHome, r.tc.env, {
       host: { platform: 'win32', arch: 'x64' },
     }).catch((e) => e);
     expect(String(win)).toContain('pins no zig 0.17.0 download for win32-x64');
   });
 
+  it('gives up on a download that does not finish in time', async () => {
+    const r = downloadRig();
+    const started = Date.now();
+    const err = await resolveZig(
+      r.run,
+      r.tc.cargoHome,
+      r.tc.env,
+      // A server that never answers, and a fetch that ignores the abort signal.
+      r.deps({ fetch: () => new Promise(() => {}), timeoutMs: 30 }),
+    ).catch((e) => e);
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(err).toBeInstanceOf(FfiUsageError);
+    expect(String(err)).toContain('timed out after');
+    expect(String(err)).toContain('install exactly zig 0.17.0 on PATH');
+    expect(existsSync(join(r.cacheDir, ARCHIVE_FILE))).toBe(false);
+  });
+
   it('hands cargo-zigbuild exactly the verified zig (else it prefers `python3 -m ziglang`)', () => {
     expect(
-      zigbuildEnv({ bin: '/c/zig/zig', version: '0.17.0', source: 'ziglang.org', sha256: 'x' }),
+      zigbuildEnv({
+        bin: '/c/zig/zig',
+        version: '0.17.0',
+        source: 'ziglang.org',
+        sha256: 'x',
+        scratch: '/c',
+      }),
     ).toEqual({ CARGO_ZIGBUILD_ZIG_COMMAND: '/c/zig/zig', CARGO_ZIGBUILD_ZIG_COMMAND_ARGS: '' });
   });
 });
-
 describe('git sources (D16): getknext-dev/knext only', () => {
   const lock = (source: string) =>
     `version = 4\n\n[[package]]\nname = "dep"\nversion = "1.0.0"\nsource = "${source}"\n`;

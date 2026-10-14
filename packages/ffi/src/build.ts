@@ -39,7 +39,7 @@ import { generateFiles } from './generate';
 import { ManifestError } from './manifest';
 import { diffOutput } from './output';
 import { libNameOf } from './render';
-import { prepareSupplyChain, SBOM_FILE, type ZigDeps } from './supply-chain';
+import { prepareSupplyChain, SBOM_FILE, type SupplyChain, type ZigDeps } from './supply-chain';
 
 /** The image targets (D14 build matrix): musl x64 and arm64. */
 export const SUPPORTED_TARGETS = [
@@ -203,6 +203,8 @@ export interface RunBuildOptions {
 export async function runBuild(opts: RunBuildOptions): Promise<number> {
   const { cwd, io } = opts;
   const run = opts.deps?.run ?? spawnRunner;
+  // Holds this build's private zig (when downloaded) until the build is over.
+  let supply: SupplyChain | undefined;
   try {
     const { targets, nativeDir: nativeArg } = parseBuildArgs(opts.argv);
     const config = loadConfig(cwd);
@@ -224,7 +226,7 @@ export async function runBuild(opts: RunBuildOptions): Promise<number> {
     const lock = readFileSync(lockPath);
     const identity = crateIdentity(cargoToml);
     // D16: pinned tools, git sources and `cargo deny check`, before any build.
-    const supply = await prepareSupplyChain({
+    supply = await prepareSupplyChain({
       run,
       crateDir,
       crateLabel: config.crate,
@@ -329,5 +331,7 @@ export async function runBuild(opts: RunBuildOptions): Promise<number> {
       return 1;
     }
     throw err;
+  } finally {
+    supply?.dispose();
   }
 }

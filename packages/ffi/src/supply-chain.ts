@@ -5,7 +5,9 @@
  * - **Pinned build tools.** zig is an exact version: a `zig` on PATH is used
  *   only if `zig version` equals the pin, otherwise none on PATH means knext
  *   downloads the pinned archive from ziglang.org and verifies its sha256 for
- *   this host (fail closed). The four cargo subcommands are pinned in
+ *   this host (fail closed). The archive is cached; the zig it holds is not:
+ *   every build re-hashes the archive and extracts those verified bytes into a
+ *   private directory of its own. The four cargo subcommands are pinned in
  *   {@link CARGO_TOOL_PINS}; a missing or different version is refused with
  *   the exact `cargo install --locked --version <pin> <crate>` command.
  * - **`cargo deny check`** before the build: bans, licenses and sources by its
@@ -29,13 +31,14 @@ import {
   constants,
   existsSync,
   mkdirSync,
+  mkdtempSync,
   readFileSync,
   renameSync,
   rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { basename, delimiter, dirname, join } from 'node:path';
 import { inflateSync } from 'node:zlib';
 import type { Runner, RunResult } from './build';
@@ -278,7 +281,10 @@ export function zigCacheDir(env: Env, home: string, version: string): string {
   return join(root, 'zig', version);
 }
 
-type FetchLike = (url: string) => Promise<{
+type FetchLike = (
+  url: string,
+  init?: { signal?: AbortSignal },
+) => Promise<{
   ok: boolean;
   status: number;
   arrayBuffer(): Promise<ArrayBuffer>;
@@ -289,6 +295,10 @@ export interface ZigDeps {
   readonly host?: HostPlatform;
   readonly cacheDir?: string;
   readonly pin?: ZigPin;
+  /** Where each build's private zig directory is created. Default: the OS temp dir. */
+  readonly scratchRoot?: string;
+  /** Download timeout. Default: {@link ZIG_DOWNLOAD_TIMEOUT_MS}. */
+  readonly timeoutMs?: number;
 }
 
 /** The verified zig, as recorded in provenance. */
@@ -298,8 +308,13 @@ export interface ResolvedZig {
   readonly version: string;
   /** `path`: a `zig` already on PATH at the pinned version; `ziglang.org`: downloaded and verified. */
   readonly source: 'path' | 'ziglang.org';
-  /** The verified archive's sha256 (download only). */
+  /**
+   * Download only: the sha256 of the archive `bin` was extracted from, in this
+   * build, after the archive's bytes were checked against the pin.
+   */
   readonly sha256: string | null;
+  /** Download only: this build's private directory holding `bin`; removed by {@link releaseZig}. */
+  readonly scratch: string | null;
 }
 
 function zigInstallHint(pin: ZigPin, host: HostPlatform): string {
@@ -319,8 +334,17 @@ function zigVersionAt(run: Runner, bin: string, cwd: string): string | null {
 /**
  * The pinned zig: the one on PATH when its `zig version` equals the pin (a
  * different one is refused, never silently replaced), otherwise the pinned
- * archive for this host, downloaded from ziglang.org into knext's cache and
- * verified by sha256 on every build.
+ * archive for this host, downloaded from ziglang.org into knext's cache.
+ *
+ * A downloaded zig is never run from the cache. On every build the cached
+ * archive is read once into memory and its sha256 checked against the pin;
+ * those same verified bytes are copied into a fresh private (0700) directory
+ * under the OS temp dir and extracted there, so the binary and `lib/` handed
+ * to cargo-zigbuild are exactly what the pinned archive holds, whatever has
+ * happened to the cache or to an earlier build's tree. The directory belongs
+ * to this build alone (concurrent builds never share or remove each other's
+ * zig); release it with {@link releaseZig}. A build killed before it can
+ * release leaves one `knext-zig-*` directory in the temp dir.
  */
 export async function resolveZig(
   run: Runner,
@@ -341,7 +365,7 @@ export async function resolveZig(
           `or install exactly ${pin.version}: ${zigInstallHint(pin, host)}`,
       );
     }
-    return { bin: onPathZig, version: got, source: 'path', sha256: null };
+    return { bin: onPathZig, version: got, source: 'path', sha256: null, scratch: null };
   }
 
   const key = zigHostKey(host);
@@ -356,76 +380,181 @@ export async function resolveZig(
   const dir = deps.cacheDir ?? zigCacheDir(env, homedir(), pin.version);
   const archive = join(dir, asset.file);
   const stem = asset.file.replace(/\.tar\.xz$/, '');
-  const tree = join(dir, stem);
   const url = `${pin.baseUrl}/${asset.file}`;
 
-  let fresh = false;
-  if (!(existsSync(archive) && sha256Hex(readFileSync(archive)) === asset.sha256)) {
-    // A cached archive that no longer matches is never trusted: drop it, and
-    // the tree extracted from it, and fetch again.
-    rmSync(archive, { force: true });
-    const fetchFn: FetchLike =
-      deps.fetch ?? ((u: string) => globalThis.fetch(u) as ReturnType<FetchLike>);
-    let bytes: Uint8Array;
-    try {
-      const res = await fetchFn(url);
-      if (!res.ok) {
-        throw new FfiUsageError(
-          `downloading zig ${pin.version} failed: HTTP ${res.status} for ${url}. Nothing was installed.`,
-        );
-      }
-      bytes = new Uint8Array(await res.arrayBuffer());
-    } catch (err) {
-      if (err instanceof FfiUsageError) throw err;
-      throw new FfiUsageError(
-        `downloading zig ${pin.version} failed for ${url}: ${err instanceof Error ? err.message : String(err)}. Nothing was installed.`,
-      );
-    }
-    const got = sha256Hex(bytes);
-    if (got !== asset.sha256) {
-      throw new FfiUsageError(
-        `zig ${pin.version} failed verification: sha256 mismatch for ${url}\n` +
-          `  expected ${asset.sha256} (pinned in @getknext/ffi)\n` +
-          `  got      ${got}\n` +
-          'The download was discarded and nothing was installed.',
-      );
-    }
-    mkdirSync(dir, { recursive: true });
-    const partial = join(dir, `.${asset.file}.${randomBytes(6).toString('hex')}.partial`);
-    try {
-      writeFileSync(partial, bytes);
-      renameSync(partial, archive);
-    } finally {
-      rmSync(partial, { force: true });
-    }
-    fresh = true;
+  // The bytes this build extracts: read once and hashed, never re-read from
+  // the cache (which could change between the check and the use).
+  let bytes: Uint8Array | undefined = readIfPresent(archive);
+  if (bytes === undefined || sha256Hex(bytes) !== asset.sha256) {
+    bytes = await downloadZig(pin, host, asset, url, deps);
+    cacheArchive(dir, archive, asset.file, bytes, pin.version);
   }
 
-  const bin = join(tree, 'zig');
-  if (fresh || !existsSync(bin)) {
-    rmSync(tree, { recursive: true, force: true });
-    const scratch = join(dir, `.extract-${randomBytes(6).toString('hex')}`);
-    mkdirSync(scratch, { recursive: true });
-    try {
-      const r = run('tar', ['-xJf', archive, '-C', scratch], { cwd });
-      if (notStarted(r) || r.status !== 0 || !existsSync(join(scratch, stem, 'zig'))) {
-        throw new FfiUsageError(
-          `extracting ${archive} failed (tar exit ${r.status ?? 'not started'}); tar must support xz (-J).`,
-        );
-      }
-      renameSync(join(scratch, stem), tree);
-    } finally {
-      rmSync(scratch, { recursive: true, force: true });
-    }
-  }
+  const bin = extractZig(run, cwd, bytes, asset.file, stem, pin.version, deps.scratchRoot);
+  const scratch = dirname(dirname(bin));
   const got = zigVersionAt(run, bin, cwd);
   if (got !== pin.version) {
-    rmSync(tree, { recursive: true, force: true });
+    rmSync(scratch, { recursive: true, force: true });
     throw new FfiUsageError(
-      `the downloaded zig at ${bin} reports ${got ?? '(version unreadable)'}, not the pinned ${pin.version}; it was removed. Run the build again.`,
+      `the zig extracted from the verified ${asset.file} reports ${got ?? '(version unreadable)'}, not the pinned ${pin.version}; it was discarded. ` +
+        `Install exactly zig ${pin.version} on PATH instead: ${zigInstallHint(pin, host)}`,
     );
   }
-  return { bin, version: got, source: 'ziglang.org', sha256: asset.sha256 };
+  return { bin, version: got, source: 'ziglang.org', sha256: asset.sha256, scratch };
+}
+
+/** Remove the private directory a downloaded zig was extracted into (nothing for a zig on PATH). */
+export function releaseZig(zig: ResolvedZig): void {
+  if (zig.scratch !== null) rmSync(zig.scratch, { recursive: true, force: true });
+}
+
+function readIfPresent(path: string): Buffer | undefined {
+  try {
+    return readFileSync(path);
+  } catch {
+    return undefined;
+  }
+}
+
+/** How long the zig download may take before it is abandoned (the archive is about 50 MB). */
+export const ZIG_DOWNLOAD_TIMEOUT_MS = 10 * 60 * 1000;
+
+/** The pinned archive from ziglang.org, verified against the pin, within the timeout. */
+async function downloadZig(
+  pin: ZigPin,
+  host: HostPlatform,
+  asset: ZigAsset,
+  url: string,
+  deps: ZigDeps,
+): Promise<Uint8Array> {
+  const fetchFn: FetchLike =
+    deps.fetch ?? ((u, init) => globalThis.fetch(u, init) as unknown as ReturnType<FetchLike>);
+  const timeoutMs = deps.timeoutMs ?? ZIG_DOWNLOAD_TIMEOUT_MS;
+  const instead =
+    ` Nothing was installed. Instead, install exactly zig ${pin.version} on PATH (knext uses it once \`zig version\` matches): ` +
+    `${zigInstallHint(pin, host)}. This download does not go through HTTPS_PROXY (Node's fetch ignores it), so behind a proxy put zig on PATH.`;
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  // Raced, not only signalled: a stalled body read is abandoned even if the
+  // fetch implementation does not honour the abort signal.
+  const timedOut = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(
+        new FfiUsageError(
+          `downloading zig ${pin.version} from ${url} timed out after ${Math.round(timeoutMs / 1000)}s.${instead}`,
+        ),
+      );
+    }, timeoutMs);
+  });
+  let bytes: Uint8Array;
+  try {
+    bytes = await Promise.race([
+      (async () => {
+        const res = await fetchFn(url, { signal: controller.signal });
+        if (!res.ok) {
+          throw new FfiUsageError(
+            `downloading zig ${pin.version} failed: HTTP ${res.status} for ${url}.${instead}`,
+          );
+        }
+        return new Uint8Array(await res.arrayBuffer());
+      })(),
+      timedOut,
+    ]);
+  } catch (err) {
+    if (err instanceof FfiUsageError) throw err;
+    throw new FfiUsageError(
+      `downloading zig ${pin.version} failed for ${url}: ${err instanceof Error ? err.message : String(err)}.${instead}`,
+    );
+  } finally {
+    clearTimeout(timer);
+  }
+  const got = sha256Hex(bytes);
+  if (got !== asset.sha256) {
+    throw new FfiUsageError(
+      `zig ${pin.version} failed verification: sha256 mismatch for ${url}\n` +
+        `  expected ${asset.sha256} (pinned in @getknext/ffi)\n` +
+        `  got      ${got}\n` +
+        'The download was discarded and nothing was installed.',
+    );
+  }
+  return bytes;
+}
+
+/**
+ * Store the verified archive in the cache (directories created 0700), so the
+ * next build skips the download. Written to a unique partial file and renamed
+ * over the archive: a rename replaces a file atomically, so concurrent builds
+ * caching the same verified bytes cannot corrupt or remove each other's.
+ */
+function cacheArchive(
+  dir: string,
+  archive: string,
+  file: string,
+  bytes: Uint8Array,
+  version: string,
+): void {
+  const partial = join(dir, `.${file}.${randomBytes(6).toString('hex')}.partial`);
+  try {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    writeFileSync(partial, bytes, { mode: 0o600 });
+    renameSync(partial, archive);
+  } catch (err) {
+    throw new FfiUsageError(
+      `could not cache zig ${version} in ${dir}: ${err instanceof Error ? err.message : String(err)}. ` +
+        'Make it writable, or point KNEXT_CACHE_DIR at a writable directory.',
+    );
+  } finally {
+    // Best effort: when the directory could not be created there is nothing to remove.
+    try {
+      rmSync(partial, { force: true });
+    } catch {}
+  }
+}
+
+/**
+ * Extract the verified bytes into a fresh private directory (mkdtemp: 0700):
+ * the bytes are written inside it, so `tar` reads exactly what was hashed,
+ * then extracted, and the copy removed. Returns the zig binary; on any
+ * failure nothing is left behind.
+ */
+function extractZig(
+  run: Runner,
+  cwd: string,
+  bytes: Uint8Array,
+  file: string,
+  stem: string,
+  version: string,
+  scratchRoot: string = tmpdir(),
+): string {
+  const room = 'Point TMPDIR at a writable directory with room for zig (about 300 MB).';
+  let scratch: string;
+  try {
+    scratch = mkdtempSync(join(scratchRoot, 'knext-zig-'));
+  } catch (err) {
+    throw new FfiUsageError(
+      `could not extract zig ${version}: no private directory under ${scratchRoot} (${err instanceof Error ? err.message : String(err)}). ${room}`,
+    );
+  }
+  try {
+    const copy = join(scratch, file);
+    writeFileSync(copy, bytes, { mode: 0o600 });
+    const r = run('tar', ['-xJf', copy, '-C', scratch], { cwd });
+    rmSync(copy, { force: true });
+    const bin = join(scratch, stem, 'zig');
+    if (notStarted(r) || r.status !== 0 || !existsSync(bin)) {
+      throw new FfiUsageError(
+        `extracting zig ${version} (${file}) failed (tar exit ${r.status ?? 'not started'}); tar must support xz (-J).`,
+      );
+    }
+    return bin;
+  } catch (err) {
+    rmSync(scratch, { recursive: true, force: true });
+    if (err instanceof FfiUsageError) throw err;
+    throw new FfiUsageError(
+      `could not extract zig ${version} into ${scratch}: ${err instanceof Error ? err.message : String(err)}. ${room}`,
+    );
+  }
 }
 
 /**
@@ -875,6 +1004,8 @@ export interface SupplyChain {
   verifyLibrary(bytes: Uint8Array, label: string): void;
   /** The validated CycloneDX SBOM bytes for one target. */
   sbom(triple: string, env: NodeJS.ProcessEnv): Buffer;
+  /** Remove this build's private zig (call once the cross-builds are done, pass or fail). */
+  dispose(): void;
 }
 
 /**
@@ -887,20 +1018,29 @@ export async function prepareSupplyChain(opts: SupplyChainOptions): Promise<Supp
   assertGitSources(opts.cargoLock, `${crateLabel}/Cargo.lock`);
   const versions = checkCargoTools(run, crateDir, env);
   const zig = await resolveZig(run, crateDir, env, opts.zig);
-  const accepted = runCargoDeny({
-    run,
-    crateDir,
-    crateLabel,
-    env,
-    today: opts.today ?? todayUtc(),
-    note: opts.note,
-  });
+  let accepted: string[];
+  try {
+    accepted = runCargoDeny({
+      run,
+      crateDir,
+      crateLabel,
+      env,
+      today: opts.today ?? todayUtc(),
+      note: opts.note,
+    });
+  } catch (err) {
+    releaseZig(zig);
+    throw err;
+  }
   return {
     cargoPrefix: ['auditable', 'zigbuild'],
     env: zigbuildEnv(zig),
     zigbuildVersion: `${CARGO_TOOL_PINS.zigbuild.crate} ${versions[CARGO_TOOL_PINS.zigbuild.crate]}`,
     provenance: {
       tools: {
+        // For a download, sha256 is the archive this build's zig was extracted
+        // from, in this build, after its bytes matched the pin. For a zig on
+        // PATH it is null: only its `zig version` was checked.
         zig: { version: zig.version, source: zig.source, sha256: zig.sha256 },
         ...versions,
       },
@@ -909,5 +1049,6 @@ export async function prepareSupplyChain(opts: SupplyChainOptions): Promise<Supp
     verifyLibrary: (bytes, label) => assertAuditable(bytes, opts.crateName, label),
     sbom: (triple, buildEnv) =>
       buildSbom({ run, crateDir, triple, crateName: opts.crateName, env: buildEnv }),
+    dispose: () => releaseZig(zig),
   };
 }
