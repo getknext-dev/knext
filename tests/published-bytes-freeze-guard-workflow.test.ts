@@ -347,3 +347,310 @@ describe('head/merge-base pin reads tolerate an absent pin file but not an unrea
     });
   }
 });
+describe('#2342 — merged-in-parent pins are collected before, and passed to, the check', () => {
+  it('ordering: merge-base pin -> merged-in collection -> check, and the check gets the file', () => {
+    const { wf } = load();
+    const steps = wf.jobs[JOB].steps;
+    const mergeBaseIdx = steps.findIndex((s) =>
+      /Read the pin file at the PR's merge base/.test(s.name ?? ''),
+    );
+    const collectIdx = steps.findIndex((s) =>
+      /Collect the pins at merged-in parents/.test(s.name ?? ''),
+    );
+    const checkIdx = steps.findIndex(
+      (s) => typeof s.run === 'string' && /published-bytes-freeze-check\.mjs/.test(s.run),
+    );
+    expect(mergeBaseIdx).toBeGreaterThanOrEqual(0);
+    expect(collectIdx).toBeGreaterThan(mergeBaseIdx);
+    expect(checkIdx).toBeGreaterThan(collectIdx);
+    expect(String(steps[checkIdx]?.run)).toContain('--inherited-pins-file inherited-pins.json');
+  });
+});
+
+/**
+ * #2342 — END TO END against real git: the workflow's own steps (diff, the
+ * base/head/merge-base pin reads, and the merged-in-parent collection) run
+ * verbatim in a fixture repo, and their output files feed the real check CLI.
+ * A `publishedBytesBumpMarker` that arrives with a merged-in branch
+ * (integration/v2 -> main is the motivating shape) must not exempt a
+ * published-bytes change; one the PR's own commits add must, including when
+ * the PR also merged its base back in, and including the merge queue's own
+ * merge commit (first parent = base, second = the PR head).
+ *
+ * The pinned rcTag is deliberately a tag that exists nowhere, so a PROCEED
+ * decision ends at the check's fail-closed tag lookup (exit 1, "does not
+ * resolve") instead of packing anything, while an honoured marker SKIPs
+ * (exit 0) before the lookup. The check reads the real clock (it has no
+ * --now flag), so the marker dates are derived from today.
+ */
+describe('#2342 — merged-in publishedBytesBumpMarker, executed against real git fixture repos', () => {
+  const GIT_ENV = {
+    ...process.env,
+    GIT_AUTHOR_NAME: 't',
+    GIT_AUTHOR_EMAIL: 't@example.com',
+    GIT_COMMITTER_NAME: 't',
+    GIT_COMMITTER_EMAIL: 't@example.com',
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_CONFIG_GLOBAL: '/dev/null',
+  };
+  const PIN = '.github/compat-credential-ref.json';
+  const CORE_MANIFEST = 'packages/kn-next/package.json';
+  const CORE_SRC = 'packages/kn-next/src/index.ts';
+  const TAG = 'v1.0.0-rc.9990';
+  const CHECK = resolve(REPO_ROOT, 'scripts/published-bytes-freeze-check.mjs');
+  const EXEC_TIMEOUT_MS = 20_000;
+  const day = (offset: number) =>
+    new Date(Date.now() + offset * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const MERGED_IN = { date: day(-2), expires: day(3), reason: 'reviewed for the v2 line' };
+  const OWN = { date: day(-1), expires: day(3), reason: 'this PR, reviewed for main' };
+  const STEP_NAMES = [
+    /Compute the files this PR changed/,
+    /Read the pin file at the PR's base commit/,
+    /Read the pin file at the PR's head commit/,
+    /Read the pin file at the PR's merge base/,
+    /Collect the pins at merged-in parents/,
+  ];
+
+  type Git = (...a: string[]) => string;
+  type Put = (path: string, content: string) => void;
+  const pinWith = (marker?: unknown) =>
+    JSON.stringify({ rcTag: TAG, ...(marker ? { publishedBytesBumpMarker: marker } : {}) });
+
+  function runScenario(
+    build: (git: Git, put: Put) => { base: string; head: string },
+    event: 'pull_request' | 'merge_group' = 'pull_request',
+  ): { status: number | null; stdout: string; inherited: unknown[] } {
+    const { wf } = load();
+    const steps = STEP_NAMES.map((re) => {
+      const s = wf.jobs[JOB].steps.find((st) => re.test(st.name ?? ''));
+      if (!s?.run) throw new Error(`workflow step ${re} not found`);
+      return s.run;
+    });
+    const dir = mkdtempSync(join(tmpdir(), 'pb-freeze-merge-'));
+    try {
+      const git: Git = (...a) =>
+        execFileSync('git', ['-c', 'commit.gpgsign=false', ...a], {
+          cwd: dir,
+          env: GIT_ENV,
+          encoding: 'utf8',
+        }).trim();
+      const put: Put = (path, content) => {
+        mkdirSync(join(dir, path, '..'), { recursive: true });
+        writeFileSync(join(dir, path), content);
+      };
+      git('init', '-q', '-b', 'main');
+      const { base, head } = build(git, put);
+      // The scripts the steps invoke, copied in AFTER the history is built so
+      // they stay untracked and outside every tree under test.
+      mkdirSync(join(dir, 'scripts'), { recursive: true });
+      for (const f of [
+        'scripts/published-bytes-select-pin.mjs',
+        'scripts/collect-merged-in-pins.mjs',
+        'scripts/publish-preflight.mjs',
+      ]) {
+        cpSync(resolve(REPO_ROOT, f), join(dir, f));
+      }
+      cpSync(resolve(REPO_ROOT, 'scripts/lib'), join(dir, 'scripts/lib'), { recursive: true });
+      const githubEnv = join(dir, 'github-env');
+      writeFileSync(githubEnv, '');
+      let env: Record<string, string | undefined> = {
+        ...GIT_ENV,
+        BASE_SHA: base,
+        HEAD_SHA: head,
+        BASE_REF: 'main',
+        GITHUB_EVENT_NAME: event,
+        GITHUB_ENV: githubEnv,
+      };
+      for (const run of steps) {
+        execFileSync('bash', ['-c', run], {
+          cwd: dir,
+          env,
+          encoding: 'utf8',
+          timeout: EXEC_TIMEOUT_MS,
+        });
+        // What a later step sees of $GITHUB_ENV (PIN_FILE_SELECTED, BASE_VERSION).
+        for (const line of readFileSync(githubEnv, 'utf8').split('\n')) {
+          const eq = line.indexOf('=');
+          if (eq > 0) env = { ...env, [line.slice(0, eq)]: line.slice(eq + 1) };
+        }
+      }
+      const inherited = JSON.parse(readFileSync(join(dir, 'inherited-pins.json'), 'utf8'));
+      const args = [
+        CHECK,
+        '--changed-files-file',
+        join(dir, 'changed-files.txt'),
+        '--base-pin-file',
+        join(dir, 'base-pin.json'),
+        '--head-pin-file',
+        join(dir, 'head-pin.json'),
+        '--merge-base-pin-file',
+        join(dir, 'merge-base-pin.json'),
+        '--inherited-pins-file',
+        join(dir, 'inherited-pins.json'),
+        '--base-version',
+        String(env.BASE_VERSION ?? ''),
+      ];
+      const { GITHUB_STEP_SUMMARY: _drop, ...checkEnv } = process.env;
+      const r = spawnSync(process.execPath, args, {
+        encoding: 'utf8',
+        env: checkEnv,
+        timeout: EXEC_TIMEOUT_MS,
+      });
+      return { status: r.status, stdout: `${r.stdout}${r.stderr}`, inherited };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  /** main: a live v1.0 window (rcTag set, no marker) and a published package. */
+  function seedMain(git: Git, put: Put): void {
+    put(PIN, pinWith());
+    put(CORE_MANIFEST, JSON.stringify({ name: '@getknext/core', version: '1.0.0' }));
+    put(CORE_SRC, 'export const v = 0;\n');
+    git('add', '-A');
+    git('commit', '-q', '-m', 'main: live window');
+  }
+  /** integration: its own reviewed marker plus a published-bytes change. */
+  function seedIntegration(git: Git, put: Put): void {
+    git('checkout', '-q', '-b', 'integration', 'main');
+    put(PIN, pinWith(MERGED_IN));
+    put(CORE_SRC, 'export const v = 2;\n');
+    git('add', '-A');
+    git('commit', '-q', '-m', 'integration: marker + core change');
+  }
+  /** pr: branched from main, with integration merged in (a real merge commit). */
+  function mergeIntegrationIntoPr(git: Git): void {
+    git('checkout', '-q', '-b', 'pr', 'main');
+    git('merge', '-q', '--no-ff', '-m', 'merge integration', 'integration');
+  }
+  /** pr: branched from main, its OWN commit adds the marker and changes core. */
+  function ownMarkerPr(git: Git, put: Put): void {
+    git('checkout', '-q', '-b', 'pr', 'main');
+    put(PIN, pinWith(OWN));
+    put(CORE_SRC, 'export const v = 1;\n');
+    git('add', '-A');
+    git('commit', '-q', '-m', 'own marker + core change');
+  }
+  const tips = (git: Git, head: string) => ({
+    base: git('rev-parse', 'main'),
+    head: git('rev-parse', head),
+  });
+  const MARKER_IGNORED_VIA_MERGE = /inherited from a branch merged into this PR/;
+  const PROCEEDED = /does not resolve to a git tag/;
+  const EXEMPTED = /introduced by this PR exempts it/;
+
+  it('RED: a merge PR whose only marker came in with the merged branch', () => {
+    const r = runScenario((git, put) => {
+      seedMain(git, put);
+      seedIntegration(git, put);
+      mergeIntegrationIntoPr(git);
+      return tips(git, 'pr');
+    });
+    expect(r.inherited).toEqual([{ publishedBytesBumpMarker: MERGED_IN }]);
+    expect(r.stdout).toMatch(MARKER_IGNORED_VIA_MERGE);
+    expect(r.stdout).toMatch(PROCEEDED);
+    expect(r.status).toBe(1);
+  }, 60_000);
+
+  it('RED: the merge is buried under a later own commit that leaves the marker alone', () => {
+    const r = runScenario((git, put) => {
+      seedMain(git, put);
+      seedIntegration(git, put);
+      mergeIntegrationIntoPr(git);
+      put('README.md', 'unrelated\n');
+      git('add', '-A');
+      git('commit', '-q', '-m', 'own commit after the merge');
+      return tips(git, 'pr');
+    });
+    expect(r.stdout).toMatch(PROCEEDED);
+    expect(r.status).toBe(1);
+  }, 60_000);
+
+  it('GREEN: a merge PR that adds its OWN fresh marker on top of the merge', () => {
+    const r = runScenario((git, put) => {
+      seedMain(git, put);
+      seedIntegration(git, put);
+      mergeIntegrationIntoPr(git);
+      put(PIN, pinWith(OWN));
+      git('add', '-A');
+      git('commit', '-q', '-m', 'own marker for main');
+      return tips(git, 'pr');
+    });
+    expect(r.stdout).toMatch(EXEMPTED);
+    expect(r.status).toBe(0);
+  }, 60_000);
+
+  it('GREEN: a plain PR whose own commit adds the marker (no merges in range)', () => {
+    const r = runScenario((git, put) => {
+      seedMain(git, put);
+      ownMarkerPr(git, put);
+      return tips(git, 'pr');
+    });
+    expect(r.inherited).toEqual([]);
+    expect(r.stdout).toMatch(EXEMPTED);
+    expect(r.status).toBe(0);
+  }, 60_000);
+
+  it('GREEN: an own-marker PR that later merged its (advanced) base branch — no false red', () => {
+    const r = runScenario((git, put) => {
+      seedMain(git, put);
+      ownMarkerPr(git, put);
+      git('checkout', '-q', 'main');
+      put('README.md', 'main moved on\n');
+      git('add', '-A');
+      git('commit', '-q', '-m', 'main advances');
+      git('checkout', '-q', 'pr');
+      git('merge', '-q', '--no-ff', '-m', 'merge main into pr', 'main');
+      return tips(git, 'pr');
+    });
+    expect(r.stdout).toMatch(EXEMPTED);
+    expect(r.status).toBe(0);
+  }, 60_000);
+
+  it("GREEN: merge_group — the queue's own merge (base + PR head) does not make the PR's marker inherited", () => {
+    const r = runScenario((git, put) => {
+      seedMain(git, put);
+      ownMarkerPr(git, put);
+      git('checkout', '-q', '-b', 'queue', 'main');
+      git('merge', '-q', '--no-ff', '-m', 'merge queue: pr', 'pr');
+      return tips(git, 'queue');
+    }, 'merge_group');
+    expect(r.inherited).toEqual([]);
+    expect(r.stdout).toMatch(EXEMPTED);
+    expect(r.status).toBe(0);
+  }, 60_000);
+
+  it('RED: merge_group — a queued PR that merged integration still carries an inherited marker', () => {
+    const r = runScenario((git, put) => {
+      seedMain(git, put);
+      seedIntegration(git, put);
+      mergeIntegrationIntoPr(git);
+      git('checkout', '-q', '-b', 'queue', 'main');
+      git('merge', '-q', '--no-ff', '-m', 'merge queue: pr', 'pr');
+      return tips(git, 'queue');
+    }, 'merge_group');
+    expect(r.inherited).toEqual([{ publishedBytesBumpMarker: MERGED_IN }]);
+    expect(r.stdout).toMatch(MARKER_IGNORED_VIA_MERGE);
+    expect(r.status).toBe(1);
+  }, 60_000);
+
+  it('field-specific: a merged-in rcBumpMarker is not a publishedBytesBumpMarker', () => {
+    const r = runScenario((git, put) => {
+      seedMain(git, put);
+      git('checkout', '-q', '-b', 'integration', 'main');
+      put(PIN, JSON.stringify({ rcTag: TAG, rcBumpMarker: OWN }));
+      git('add', '-A');
+      git('commit', '-q', '-m', 'integration: rc marker only');
+      git('checkout', '-q', '-b', 'pr', 'main');
+      git('merge', '-q', '--no-ff', '-m', 'merge integration', 'integration');
+      put(PIN, pinWith(OWN));
+      put(CORE_SRC, 'export const v = 1;\n');
+      git('add', '-A');
+      git('commit', '-q', '-m', 'own marker');
+      return tips(git, 'pr');
+    });
+    expect(r.inherited).toEqual([]);
+    expect(r.stdout).toMatch(EXEMPTED);
+    expect(r.status).toBe(0);
+  }, 60_000);
+});

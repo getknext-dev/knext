@@ -38,6 +38,14 @@
  * below, which duplicates `compat-credential-freeze-guard.mjs`'s
  * `markerIntroducedByPr` for `OVERRIDE_MARKER_FIELD` rather than importing it.
  *
+ * MERGED-IN MARKERS (#2342) are the exception, because they have a light,
+ * shared home: `./merged-in-pins.mjs` (node builtins only) holds the
+ * collection and the date + reason match for the rule #2325 added to the
+ * sibling guard. The workflow collects the pins at every merged-in parent in
+ * the PR's range into `--inherited-pins-file`; a head marker matching one of
+ * them arrived with a merged branch (integration/v2 -> main) and exempts
+ * nothing, even when the merge base has no marker at all.
+ *
  * WHICH PIN STATE (round-2 fix, PR #1680 review — mirrors the sibling guard's
  * OWN header section of the same name, one-for-one). `decidePublishedBytesScope`
  * used to read a SINGLE pin snapshot for both "is a window open" and "is
@@ -95,6 +103,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { publishablePackages, readWorkspaceManifests } from '../publish-preflight.mjs';
+import { markerArrivedViaMerge } from './merged-in-pins.mjs';
 
 /**
  * Root-level files that can change what a publishable package's build emits,
@@ -298,6 +307,18 @@ function overrideMarkerOf(pin) {
 }
 
 /**
+ * Did the head `OVERRIDE_MARKER_FIELD` marker arrive through a merged-in
+ * branch (#2342)? The shared `markerArrivedViaMerge`, bound to this field.
+ *
+ * @param {unknown} headPin
+ * @param {readonly unknown[]} inheritedPins
+ * @returns {boolean}
+ */
+export function overrideMarkerArrivedViaMerge(headPin, inheritedPins) {
+  return markerArrivedViaMerge(headPin, inheritedPins, OVERRIDE_MARKER_FIELD);
+}
+
+/**
  * Did THIS PR introduce the `headPin`'s `OVERRIDE_MARKER_FIELD` marker, rather
  * than inherit one already present at `mergeBasePin` (the point this PR's
  * diff is measured from)? Duplicates `compat-credential-freeze-guard.mjs`'s
@@ -307,13 +328,19 @@ function overrideMarkerOf(pin) {
  * different `date` or `reason` is a new, reviewed authorization replacing a
  * stale one, and counts as introduced.
  *
+ * #2342: a head marker that also sits at a merged-in parent (`inheritedPins`)
+ * arrived with a merged branch and is not introduced either.
+ *
  * @param {unknown} mergeBasePin
  * @param {unknown} headPin
+ * @param {readonly unknown[]} [inheritedPins] the pins at every merged-in
+ *   parent in the PR's range (#2342)
  * @returns {boolean}
  */
-export function overrideMarkerIntroducedByPr(mergeBasePin, headPin) {
+export function overrideMarkerIntroducedByPr(mergeBasePin, headPin, inheritedPins = []) {
   const head = overrideMarkerOf(headPin);
   if (!head) return false;
+  if (overrideMarkerArrivedViaMerge(headPin, inheritedPins)) return false;
   const base = overrideMarkerOf(mergeBasePin);
   if (!base) return true;
   return base.date !== head.date || base.reason !== head.reason;
@@ -339,13 +366,20 @@ export function overrideMarkerIntroducedByPr(mergeBasePin, headPin) {
  * freeze/unfrozen while `headPin` decides the marker, and why no separate
  * "pin-only diff" case is needed here the way the sibling guard needs one.
  *
- * @param {{ basePin: unknown, headPin: unknown, mergeBasePin?: unknown, changedFiles: string[], packageDirs: string[], rootInputFiles?: readonly string[], baseVersion?: string, now: Date }} input
- * @returns {{ action: 'skip', reason: string } | { action: 'proceed', rcTag: string, reason: string, matchedFiles: string[] }}
+ * `inheritedPins` (#2342) are the pins at every merged-in parent in the PR's
+ * range; a head marker matching one of them is not the PR's own. Defaults to
+ * `[]` here (the CLI requires the file). When a structurally valid head
+ * marker is NOT honoured, a `proceed` carries `markerNote` saying why, so the
+ * author is pointed at the right fix.
+ *
+ * @param {{ basePin: unknown, headPin: unknown, mergeBasePin?: unknown, inheritedPins?: readonly unknown[], changedFiles: string[], packageDirs: string[], rootInputFiles?: readonly string[], baseVersion?: string, now: Date }} input
+ * @returns {{ action: 'skip', reason: string } | { action: 'proceed', rcTag: string, reason: string, matchedFiles: string[], markerNote?: string }}
  */
 export function decidePublishedBytesScope({
   basePin,
   headPin,
   mergeBasePin = basePin,
+  inheritedPins = [],
   changedFiles,
   packageDirs,
   rootInputFiles = ROOT_BUILD_INPUT_FILES,
@@ -384,7 +418,13 @@ export function decidePublishedBytesScope({
   }
 
   const marker = overrideMarkerValidity(headPin, now);
-  if (marker.valid && overrideMarkerIntroducedByPr(mergeBasePin, headPin)) {
+  /** @type {string | undefined} */
+  let markerNote;
+  if (marker.valid && overrideMarkerArrivedViaMerge(headPin, inheritedPins)) {
+    markerNote = `the ${OVERRIDE_MARKER_FIELD} at head was inherited from a branch merged into this PR, not added by this PR's own commits — a merged-in marker exempts nothing; add a new marker (new date or reason) in this PR`;
+  } else if (marker.valid && !overrideMarkerIntroducedByPr(mergeBasePin, headPin, inheritedPins)) {
+    markerNote = `the ${OVERRIDE_MARKER_FIELD} at head was inherited from the merge base, not introduced by this PR — an inherited marker exempts nothing`;
+  } else if (marker.valid) {
     return {
       action: 'skip',
       reason: `a credential window is open (rcTag=${JSON.stringify(rcTag)}), but a valid ${OVERRIDE_MARKER_FIELD} introduced by this PR exempts it as an intentional rc bump (${marker.reason})`,
@@ -406,5 +446,6 @@ export function decidePublishedBytesScope({
       `a credential window is open (rcTag=${JSON.stringify(rcTag)}) and this PR touches ` +
       `[${scope.matched.join(', ')}] — packing and diffing against the pinned rc tag`,
     matchedFiles: scope.matched,
+    ...(markerNote ? { markerNote } : {}),
   };
 }

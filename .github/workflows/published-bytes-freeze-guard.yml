@@ -179,6 +179,28 @@ jobs:
             --read-pin-at "${MERGE_BASE}" --pin-file "${PIN_FILE_SELECTED}" --out merge-base-pin.json
           cat merge-base-pin.json
 
+      # #2342 — the merge base is not the only place a marker can come from.
+      # A merge PR (integration/v2 -> main, or a branch that merged it) has a
+      # merge base older than the other branch's marker, so that marker would
+      # read as "introduced by this PR". Collect the publishedBytesBumpMarker
+      # at every MERGED-IN parent (each non-first parent of each merge commit
+      # in merge-base..head) of the SELECTED pin file; the check treats a head
+      # marker equal to any of them (same date + reason) as inherited. On
+      # merge_group the queue's own merges are skipped (their second parents
+      # are the queued PR heads). Same rule the credential freeze guard applies
+      # to rcBumpMarker (#2325); the logic is scripts/lib/merged-in-pins.mjs.
+      - name: Collect the pins at merged-in parents in this PR's range
+        run: |
+          set -euo pipefail
+          node scripts/collect-merged-in-pins.mjs \
+            --base-sha "${BASE_SHA}" \
+            --head-sha "${HEAD_SHA}" \
+            --event-name "${GITHUB_EVENT_NAME}" \
+            --pin-file "${PIN_FILE_SELECTED}" \
+            --field publishedBytesBumpMarker \
+            --out inherited-pins.json
+          cat inherited-pins.json
+
       - name: Run the published-bytes freeze check
         run: |
           node scripts/published-bytes-freeze-check.mjs \
@@ -186,4 +208,5 @@ jobs:
             --base-pin-file base-pin.json \
             --head-pin-file head-pin.json \
             --merge-base-pin-file merge-base-pin.json \
+            --inherited-pins-file inherited-pins.json \
             --base-version "${BASE_VERSION}"
