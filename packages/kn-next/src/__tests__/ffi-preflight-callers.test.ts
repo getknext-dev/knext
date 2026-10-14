@@ -365,18 +365,15 @@ describe("knext deploy --image <pre-built ref> with knext.ffi.json", () => {
     it("is not refused for nothing staged at native/ffi/<triple> (a clean CI checkout)", async () => {
         enterApp(true);
         loadConfig.mockResolvedValue(VINEXT_BUN);
-        // The REAL freshness check, so the staged-library check cannot hide
-        // inside it either.
-        assertCompiledArtifactFresh.mockImplementationOnce(
-            realArtifact.assertCompiledArtifactFresh as AnyFn,
-        );
         const err = await runDeploy("--image", PREBUILT).then(
             () => undefined,
             (e: Error) => e,
         );
         expect(err?.message ?? "").not.toMatch(NOTHING_STAGED);
         expect(err).toBeUndefined();
-        expect(assertCompiledArtifactFresh).toHaveBeenCalledTimes(1);
+        // Nothing local ships under --image, so the local exec freshness
+        // check does not run either (deploy-image-skips-freshness.test.ts).
+        expect(assertCompiledArtifactFresh).not.toHaveBeenCalled();
         expect(compileArtifactForDeploy).not.toHaveBeenCalled();
         expect(runProjectBuild).not.toHaveBeenCalled();
         expect(dispatchFfiVerb).not.toHaveBeenCalled();

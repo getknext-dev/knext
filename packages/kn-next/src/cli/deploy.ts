@@ -798,14 +798,19 @@ export async function deploy() {
         // already carries its library (a clean CI deploy job has no
         // native/ffi/). The runtime-target refusal above still applies there.
         // A no-op without knext.ffi.json.
+        //
+        // The local exec freshness check is likewise not under `--image`
+        // (#2355): the pre-built image is shipped as-is, nothing COPYs the
+        // local exec, so a stale leftover from an older build in this checkout
+        // must not refuse the deploy. Plain `--skip-build` keeps it.
         if (!options.image) {
             assertFfiLibraryStaged(
                 process.cwd(),
                 DEPLOY_SHIP_ARCH,
                 FFI_STAGED_REMEDY.skipBuild,
             );
+            assertCompiledArtifactFresh(config, process.cwd());
         }
-        assertCompiledArtifactFresh(config, process.cwd());
     }
 
     // T2a — the SAME lock-step guarantee on the vinext leg, where the built id
