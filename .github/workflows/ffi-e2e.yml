@@ -199,7 +199,8 @@ jobs:
             -v "${RUNNER_TEMP}/musl/app:/work/app:ro" \
             -v "${RUNNER_TEMP}/musl/native:${BUN_DIR}/native:ro" \
             -w /work/app "$BUN_IMAGE" bun --conditions=react-server driver.ts all \
-            2> "${RUNNER_TEMP}/bun-all.stderr" | tee "${RUNNER_TEMP}/bun-all.out"
+            2> "${RUNNER_TEMP}/bun-all.stderr" | tee "${RUNNER_TEMP}/bun-all.out" \
+            || { tail -n 40 "${RUNNER_TEMP}/bun-all.stderr"; exit 1; }
           tail -n 2 "${RUNNER_TEMP}/bun-all.stderr"
           grep -q '^ffi-musl-driver: PASS$' "${RUNNER_TEMP}/bun-all.out"
 
@@ -274,7 +275,9 @@ jobs:
               -v "${RUNNER_TEMP}/musl/exe:/opt/caller:ro" --entrypoint /opt/caller/ffi-caller \
               "$BUN_IMAGE" "$@"
           }
-          run all 2> "${RUNNER_TEMP}/exe-all.stderr" | tee "${RUNNER_TEMP}/exe-all.out"
+          if ! run all 2> "${RUNNER_TEMP}/exe-all.stderr" | tee "${RUNNER_TEMP}/exe-all.out"; then
+            tail -n 40 "${RUNNER_TEMP}/exe-all.stderr"; exit 1
+          fi
           tail -n 2 "${RUNNER_TEMP}/exe-all.stderr"
           grep -q '^ffi-musl-driver: PASS$' "${RUNNER_TEMP}/exe-all.out"
           for phase in String 'Vec<u8>' record; do
