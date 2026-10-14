@@ -131,6 +131,18 @@ jobs:
           bun run --filter @getknext/db build
           bun run --filter @getknext/core build
 
+      # `mutation-prove-knext-ffi-crates.mjs` (#2343) grades `cargo test` targets
+      # and the Bun harness in `crates/`, so the lane needs the Rust toolchain
+      # that `crates/rust-toolchain.toml` pins (rustup is on the runner image).
+      # Without it that prover exits 2 at its first `cargo` spawn, which the
+      # runner reports as a failed prover — a red night, never a silent skip.
+      - name: Install the pinned Rust toolchain (crates/rust-toolchain.toml)
+        working-directory: crates
+        run: |
+          rustup toolchain install
+          rustc -V
+          cargo -V
+
       - name: Run every mutation prover (FAIL on exit code OR count mismatch)
         run: node scripts/run-mutation-provers.mjs
 

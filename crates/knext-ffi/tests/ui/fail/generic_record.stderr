@@ -1,0 +1,5 @@
+error: knext-ffi: generic record `Wrap<T>` is not supported; supported types are listed in the knext-ffi type table (ADR-0069 D6, crates/README.md)
+ --> tests/ui/fail/generic_record.rs:4:16
+  |
+4 | pub struct Wrap<T> {
+  |                ^

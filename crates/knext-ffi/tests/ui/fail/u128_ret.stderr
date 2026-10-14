@@ -1,0 +1,5 @@
+error: knext-ffi: `u128` is not supported: 128-bit integers are not supported; use `i64`/`u64` or a decimal `String`; supported types are listed in the knext-ffi type table (ADR-0069 D6, crates/README.md)
+ --> tests/ui/fail/u128_ret.rs:4:15
+  |
+4 | pub fn f() -> u128 {
+  |               ^^^^

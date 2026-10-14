@@ -1,0 +1,5 @@
+error: knext-ffi: `*const u8` is not supported: raw pointers are not supported; supported types are listed in the knext-ffi type table (ADR-0069 D6, crates/README.md)
+ --> tests/ui/fail/raw_pointer.rs:4:13
+  |
+4 | pub fn f(p: *const u8) -> u64 {
+  |             ^

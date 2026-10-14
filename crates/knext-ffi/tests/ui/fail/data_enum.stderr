@@ -1,0 +1,45 @@
+error: knext-ffi: data-carrying enum variant `Shape::Circle` is not supported: only unit variants cross (as their name); supported types are listed in the knext-ffi type table (ADR-0069 D6, crates/README.md)
+ --> tests/ui/fail/data_enum.rs:5:5
+  |
+5 |     Circle(f64),
+  |     ^^^^^^
+
+error[E0277]: `Shape` is not a #[knext_ffi::record] type
+  --> tests/ui/fail/data_enum.rs:10:13
+   |
+10 | pub fn f(s: Shape) -> i32 {
+   |             ^^^^^ an exported function can only name records and unit enums declared with #[knext_ffi::record]
+   |
+help: the trait `knext_ffi::__rt::KnextSchema` is not implemented for `Shape`
+  --> tests/ui/fail/data_enum.rs:4:1
+   |
+ 4 | pub enum Shape {
+   | ^^^^^^^^^^^^^^
+   = note: add #[knext_ffi::record] to `Shape`; supported types are listed in the knext-ffi type table (ADR-0069 D6, crates/README.md)
+
+error[E0277]: the trait bound `Shape: Wire` is not satisfied
+  --> tests/ui/fail/data_enum.rs:10:13
+   |
+10 | pub fn f(s: Shape) -> i32 {
+   |             ^^^^^ unsatisfied trait bound
+   |
+help: the trait `Wire` is not implemented for `Shape`
+  --> tests/ui/fail/data_enum.rs:4:1
+   |
+ 4 | pub enum Shape {
+   | ^^^^^^^^^^^^^^
+   = help: the following other types implement trait `Wire`:
+             Vec<T>
+             bool
+             f32
+             f64
+             i16
+             i32
+             i64
+             i8
+           and $N others
+note: required by a bound in `knext_ffi::__rt::json_arg`
+  --> src/lib.rs
+   |
+   |     pub unsafe fn json_arg<T: Wire>(ptr: *const u8, len: usize, name: &str) -> Result<T, Invalid> {
+   |                               ^^^^ required by this bound in `json_arg`

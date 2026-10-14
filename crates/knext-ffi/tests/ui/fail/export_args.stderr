@@ -1,0 +1,5 @@
+error: knext-ffi: #[knext_ffi::export] takes no arguments in ABI v1
+ --> tests/ui/fail/export_args.rs:3:10
+  |
+3 | #[export(name = "g")]
+  |          ^^^^

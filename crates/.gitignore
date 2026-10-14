@@ -1,0 +1,8 @@
+/target
+
+# The root .gitignore ignores `knext-*/` (test-temp scratch dirs a suite run
+# creates at the repository root); that unanchored pattern also matches the
+# crate directories here, so re-include them.
+!/knext-ffi/
+!/knext-ffi-macros/
+!/knext-ffi-fixture/

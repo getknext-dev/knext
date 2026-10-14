@@ -1,0 +1,5 @@
+error: knext-ffi: `f`: an exported fn must be safe; keep `unsafe` code inside a safe fn
+ --> tests/ui/fail/unsafe_fn.rs:4:15
+  |
+4 | pub unsafe fn f(v: i32) -> i32 {
+  |               ^

@@ -1,0 +1,5 @@
+error: knext-ffi: `HashMap<String, i32>` is not supported: generic types are not supported (only `Option<T>`, `Vec<T>` and a returned `Result<T, E>` take type arguments); supported types are listed in the knext-ffi type table (ADR-0069 D6, crates/README.md)
+ --> tests/ui/fail/hashmap.rs:6:13
+  |
+6 | pub fn f(m: HashMap<String, i32>) -> i32 {
+  |             ^^^^^^^
