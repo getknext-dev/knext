@@ -20,6 +20,7 @@
 
 import { createRequire } from "node:module";
 import { join } from "node:path";
+import { coreVersion } from "./core-version";
 import { pathToFileURL } from "node:url";
 
 /** The package that provides the verbs below. */
@@ -242,19 +243,6 @@ export async function dispatchGrpcVerb(
     }
 }
 
-function coreVersion(): string {
-    try {
-        // Same layout rule as deploy.ts's getCliVersion: src/cli/x.ts and
-        // dist/cli/kn-next.js are both three segments below package.json.
-        const req = createRequire(import.meta.url);
-        return (
-            (req("../../package.json") as { version?: string }).version ??
-            "0.0.0"
-        );
-    } catch {
-        return "0.0.0";
-    }
-}
 
 /** `knext generate` — bin entry. */
 export function generateMain(argv: readonly string[]): Promise<number> {
