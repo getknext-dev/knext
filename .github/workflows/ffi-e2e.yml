@@ -22,7 +22,7 @@ name: In-process Rust (FFI) — musl load matrix + kind e2e
 # kind-e2e (turbopack x bun, the default cell)
 #   apps/file-manager copied outside the repository with the opt-in laid over
 #   it (packages/ffi/fixtures/ffi-zone: knext.ffi.json, a rust/ crate, the
-#   committed wrapper, a /knext-ffi page whose Server Actions call Rust).
+#   committed wrapper, a /rust-ffi page whose Server Actions call Rust).
 #     1. `knext build` REFUSES runtime: 'node' (the D15 text) and
 #        selfContained: true, before any build work;
 #     2. `knext build` (which runs `knext ffi build`: zigbuild, libc check,

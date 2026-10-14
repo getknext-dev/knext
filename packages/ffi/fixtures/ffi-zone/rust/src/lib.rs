@@ -1,5 +1,5 @@
 //! The e2e fixture zone's Rust functions, called in-process from a Server
-//! Action (`src/app/knext-ffi/actions.ts`) through the generated wrapper.
+//! Action (`src/app/rust-ffi/actions.ts`) through the generated wrapper.
 //! One success path, one `Err` path and one panic path: the kind e2e asserts
 //! each over HTTP and that the pod is not restarted.
 

@@ -3,7 +3,7 @@
 # apps/file-manager, the reference app the compat-smoke checks assert, with
 # the in-process Rust opt-in from packages/ffi/fixtures/ffi-zone laid over it
 # (knext.ffi.json, the rust/ crate, the committed generated wrapper and the
-# /knext-ffi page whose Server Actions call Rust). apps/file-manager itself is
+# /rust-ffi page whose Server Actions call Rust). apps/file-manager itself is
 # never changed.
 #
 #   stage-ffi-zone.sh <repo-root> <dest>
@@ -92,5 +92,5 @@ esac
 
 test -f knext.ffi.json
 test -f src/generated/ffi/index.ts
-test -f src/app/knext-ffi/actions.ts
+test -f src/app/rust-ffi/actions.ts
 echo "stage-ffi-zone: staged apps/file-manager + the ffi-zone overlay at ${dest}"

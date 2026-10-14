@@ -6,7 +6,7 @@
 // JSON body — then parses the RSC response for the action's return value.
 //
 //   node ffi-action-e2e.mjs --url <base> --manifest <server-reference-manifest.json>
-//                           [--host <Host header>] [--page /knext-ffi]
+//                           [--host <Host header>] [--page /rust-ffi]
 //
 // Asserts, each a hard failure (exit 1):
 //   - GET <page> renders the Rust greeting computed at request time;
@@ -28,7 +28,7 @@ const { values: args } = parseArgs({
     url: { type: 'string' },
     manifest: { type: 'string' },
     host: { type: 'string' },
-    page: { type: 'string', default: '/knext-ffi' },
+    page: { type: 'string', default: '/rust-ffi' },
   },
   strict: true,
 });
@@ -52,7 +52,7 @@ function actionIds(path) {
   const manifest = JSON.parse(readFileSync(path, 'utf8'));
   const ids = {};
   for (const [id, entry] of Object.entries(manifest.node ?? {})) {
-    if (!String(entry.filename ?? '').endsWith('app/knext-ffi/actions.ts')) continue;
+    if (!String(entry.filename ?? '').endsWith('app/rust-ffi/actions.ts')) continue;
     if (typeof entry.exportedName === 'string') ids[entry.exportedName] = id;
   }
   for (const name of ['greetAction', 'checkedGreetAction', 'explodeAction']) {
