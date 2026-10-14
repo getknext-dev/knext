@@ -213,24 +213,38 @@ describe("knext build --skip-next", () => {
     });
 });
 
+/**
+ * Run the dry-run deploy, then check the seams BEFORE the message: with the
+ * refusal regressed, the dry run completes, and the first red names what it
+ * reached — the freshness check on `--skip-build`, the ffi dispatch and
+ * project build on the fresh-build leg — rather than "the promise resolved".
+ */
+async function expectDeployRefused(
+    message: string,
+    ...flags: string[]
+): Promise<void> {
+    const outcome = await runDeploy(...flags).then(
+        () => undefined,
+        (err: Error) => err,
+    );
+    expectNoBuildWork();
+    expect(outcome?.message).toContain(message);
+}
+
 describe("knext deploy --skip-build", () => {
     for (const c of [0, 1]) {
         it(`refuses an opted-in app with ${c === 0 ? "runtime 'node'" : "selfContained: true"} before the freshness check or any image step`, async () => {
             enterApp(true);
             const kase = CASES[c] as (typeof CASES)[number];
             loadConfig.mockResolvedValue({ ...CONFIG, ...kase.config });
-            await expect(runDeploy("--skip-build")).rejects.toThrow(
-                kase.message,
-            );
-            expectNoBuildWork();
+            await expectDeployRefused(kase.message, "--skip-build");
         });
     }
 
     it("refuses on the fresh-build leg too", async () => {
         enterApp(true);
         loadConfig.mockResolvedValue({ ...CONFIG, runtime: "node" });
-        await expect(runDeploy()).rejects.toThrow(FFI_NODE_REFUSAL);
-        expectNoBuildWork();
+        await expectDeployRefused(FFI_NODE_REFUSAL);
     });
 });
 
