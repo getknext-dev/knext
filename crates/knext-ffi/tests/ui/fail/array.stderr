@@ -1,0 +1,5 @@
+error: knext-ffi: `[u8; 4]` is not supported: fixed-size arrays are not supported; use `Vec<T>`; supported types are listed in the knext-ffi type table (ADR-0069 D6, crates/README.md)
+ --> tests/ui/fail/array.rs:4:13
+  |
+4 | pub fn f(a: [u8; 4]) -> u8 {
+  |             ^^^^^^^

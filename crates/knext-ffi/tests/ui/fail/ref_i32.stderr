@@ -1,0 +1,5 @@
+error: knext-ffi: `&i32` is not supported: the only supported references are `&str` and `&[u8]`; supported types are listed in the knext-ffi type table (ADR-0069 D6, crates/README.md)
+ --> tests/ui/fail/ref_i32.rs:4:13
+  |
+4 | pub fn f(v: &i32) -> i32 {
+  |             ^

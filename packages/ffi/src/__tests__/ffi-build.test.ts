@@ -144,7 +144,8 @@ function app(
     const key = `${cmd} ${args.join(' ')}`;
     if (key === 'cargo --version')
       return opts.missing === 'cargo' ? enoent() : { status: 0, stdout: 'cargo 1.90.0\n' };
-    // The real cargo-zigbuild 0.23.4 refuses `cargo zigbuild --version` (exit 2).
+    // The real cargo-zigbuild 0.23.4 refuses `cargo zigbuild --version` (exit 2);
+    // the pinned-version probe runs the binary itself (toolchain-fake.ts).
     if (key === 'cargo zigbuild --version') return { status: 2, stdout: '' };
     if (cmd === 'cargo' && args[0] === 'deny') {
       if (args.includes('advisories')) {
