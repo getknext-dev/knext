@@ -195,6 +195,9 @@ export const KITCHEN_SINK: Record<string, unknown>[] = [
   ),
   // A library that sends a 64-bit integer as a JSON number, at the top of a
   // record and inside a Vec in it: the decoder must refuse both, naming the path.
+  // Field names that are Object.prototype members or keywords (Rust's
+  // `r#type`, `r#new` arrive bare): each must still be an own property.
+  fn('echo_odd', [['o', rec('Odd'), 'Odd']], rec('Odd'), { retRust: 'Odd' }),
   fn('bad_id', [], rec('Point'), { retRust: 'Point' }),
   fn('bad_tag', [], rec('Point'), { retRust: 'Point' }),
   record(
@@ -214,4 +217,14 @@ export const KITCHEN_SINK: Record<string, unknown>[] = [
     ['when', opt(t('usize'))],
   ]),
   enumRecord('Color', ['Red', 'Green'], 'A colour.'),
+  record('Odd', [
+    ['constructor', t('u64')],
+    ['toString', t('string')],
+    ['valueOf', t('f64')],
+    ['hasOwnProperty', opt(t('i64'))],
+    ['prototype', vec(t('u64'))],
+    ['new', t('bool')],
+    ['type', en('Color')],
+    ['__defineGetter__', t('string')],
+  ]),
 ];

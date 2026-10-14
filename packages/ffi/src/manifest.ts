@@ -88,8 +88,8 @@ export class ManifestError extends Error {
  * generated module declares itself without a `$` prefix, and the globals it
  * references (an export named `process` would shadow the one the loader reads).
  * Everything else the module declares is `$`-prefixed, which a Rust identifier
- * cannot be. render.test.ts scans a rendered module for every name it declares
- * or references, so this list cannot fall behind the emitter.
+ * cannot be. ffi-render-hygiene.test.ts scans a rendered module for every name
+ * it declares or references, so this list cannot fall behind the emitter.
  */
 export const RESERVED: ReadonlySet<string> = new Set([
   'break',
@@ -163,13 +163,57 @@ export const RESERVED: ReadonlySet<string> = new Set([
   'process',
 ]);
 
+/**
+ * Words a generated record or enum name may not be, on top of {@link RESERVED}:
+ * TypeScript's built-in type names (`export interface string` does not
+ * compile) and the type-operator keywords that do not parse where a type is
+ * expected (`p: keyof`). ffi-render-hygiene.test.ts tries every TypeScript
+ * keyword as a type name and type-checks the result, so this list cannot fall
+ * behind the compiler.
+ */
+export const RESERVED_TYPES: ReadonlySet<string> = new Set([
+  'any',
+  'bigint',
+  'boolean',
+  'never',
+  'number',
+  'object',
+  'string',
+  'symbol',
+  'unknown',
+  'as',
+  'infer',
+  'keyof',
+  'readonly',
+  'unique',
+]);
+
 const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
-function checkIdent(name: string, what: string): void {
-  if (!IDENT.test(name) || RESERVED.has(name)) {
+function checkIdent(name: string, what: 'function' | 'argument' | 'type'): void {
+  if (!IDENT.test(name) || RESERVED.has(name) || (what === 'type' && RESERVED_TYPES.has(name))) {
     throw new ManifestError(
       `"${name}" cannot be a generated ${what} name: rename it in Rust (it must be an identifier ` +
-        'that is not a JavaScript reserved word or a name the generated module declares)',
+        `that is not a JavaScript reserved word${what === 'type' ? ', a TypeScript built-in type name' : ''} ` +
+        'or a name the generated module declares)',
+    );
+  }
+}
+
+/** A Rust field name (XID_Start XID_Continue*, `r#` already stripped by the macro). */
+const FIELD = /^[\p{XID_Start}_][\p{XID_Continue}]*$/u;
+
+/**
+ * A field becomes an object key and a property name, where keywords are legal
+ * (`r#type` arrives as `type`). One key is not: `{ __proto__: x }` sets the
+ * object's prototype instead of creating a property, so the field would never
+ * reach Rust and would be missing from every decoded object.
+ */
+function checkField(name: string): void {
+  if (!FIELD.test(name) || name === '__proto__') {
+    throw new ManifestError(
+      `"${name}" cannot be a generated field name: rename it in Rust (it must be an identifier, ` +
+        'and not __proto__, which an object literal treats as the prototype, not a property)',
     );
   }
 }
@@ -382,7 +426,10 @@ export function scanManifest(bytes: Uint8Array): Manifest {
   }
   for (const r of records) {
     checkIdent(r.name, 'type');
-    for (const fl of r.fields) check(fl.type, r.name, `field "${fl.name}"`, false);
+    for (const fl of r.fields) {
+      checkField(fl.name);
+      check(fl.type, r.name, `field "${fl.name}"`, false);
+    }
   }
   for (const e of enums) checkIdent(e.name, 'type');
 

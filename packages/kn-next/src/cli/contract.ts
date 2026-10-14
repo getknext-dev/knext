@@ -133,6 +133,22 @@ export const CLI_CONTRACT: readonly VerbContract[] = [
         ],
     },
     {
+        // In-process Rust (Beta): routed by core to the optional ffi
+        // package, which owns the subcommands (init, generate, check, build)
+        // and their flags; `--help` is answered either way. `--target` and
+        // `--native-dir` belong to `knext ffi build`, run by `knext build`.
+        verb: "ffi",
+        flags: ["--target", "--native-dir", "-h", "--help"],
+        exitCodes: [
+            OK,
+            {
+                code: 1,
+                meaning:
+                    "usage error, the package is missing or does not match this CLI, a build failure, or an out-of-date wrapper (check)",
+            },
+        ],
+    },
+    {
         verb: "validate",
         flags: ["-h", "--help"],
         exitCodes: [

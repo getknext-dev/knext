@@ -83,6 +83,7 @@ int32_t SYM_nop(uint64_t *out) {
   }
 ECHO(SYM_color)
 ECHO(SYM_echo_point)
+ECHO(SYM_echo_odd)
 ECHO(SYM_ids)
 ECHO(SYM_maybe)
 

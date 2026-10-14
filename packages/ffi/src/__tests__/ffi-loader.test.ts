@@ -418,6 +418,59 @@ describe('path 1 — native/ffi/<triple> beside the executable, integrity requir
     expect(r.status).toBe(0);
   });
 
+  it('record fields named like Object.prototype members or keywords (constructor, toString, prototype, new, type) cross as own properties, both ways', () => {
+    const exe = image();
+    const r = inBun(
+      (m, _c, fixture) => {
+        const odd = {
+          constructor: BigInt(2) ** BigInt(60),
+          toString: 'ts',
+          valueOf: 1.5,
+          hasOwnProperty: null,
+          prototype: [BigInt(1), BigInt(2)],
+          new: true,
+          type: 'Green',
+          __defineGetter__: 'dg',
+        };
+        const back = m.echo_odd(odd);
+        return {
+          back,
+          own: Object.keys(back),
+          proto: Object.getPrototypeOf(back) === Object.prototype,
+          some: m.echo_odd({ ...odd, hasOwnProperty: BigInt(-7) }).hasOwnProperty,
+          live: fixture.fixture_live(),
+        };
+      },
+      { FAKE_EXEC: exe, LIBPATH: join(exe, '..', 'native', 'ffi', TRIPLE, LIB) },
+    );
+    expect(r.result, r.stderr).toEqual({
+      back: {
+        constructor: '1152921504606846976n',
+        toString: 'ts',
+        valueOf: 1.5,
+        hasOwnProperty: null,
+        prototype: ['1n', '2n'],
+        new: true,
+        type: 'Green',
+        __defineGetter__: 'dg',
+      },
+      own: [
+        'constructor',
+        'toString',
+        'valueOf',
+        'hasOwnProperty',
+        'prototype',
+        'new',
+        'type',
+        '__defineGetter__',
+      ],
+      proto: true,
+      some: '-7n',
+      live: '0n',
+    });
+    expect(r.status).toBe(0);
+  });
+
   it('a 64-bit integer that arrives as a JSON number is a RustError naming its path, and the buffer is still freed', () => {
     const exe = image();
     const r = inBun(
