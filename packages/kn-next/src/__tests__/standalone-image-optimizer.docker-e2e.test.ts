@@ -86,6 +86,33 @@ let twinPort = 0;
 let bunPort = 0;
 let nodePort = 0;
 let tracedImg: string[] = [];
+let hostMuslLeft: string[] = ["(not checked)"];
+
+/**
+ * Remove every `@img/*linuxmusl*` package from the fixture's install (bun's
+ * hoisted layout, and its isolated `.bun` store), and return whatever musl
+ * package directories are STILL there afterwards (expected: none).
+ */
+function removeMuslSharpPairs(appDir: string): string[] {
+    const nm = join(appDir, "node_modules");
+    const imgDirs = [join(nm, "@img")];
+    const store = join(nm, ".bun");
+    if (existsSync(store)) {
+        for (const entry of readdirSync(store)) {
+            imgDirs.push(join(store, entry, "node_modules", "@img"));
+        }
+    }
+    const left: string[] = [];
+    for (const dir of imgDirs) {
+        if (!existsSync(dir)) continue;
+        for (const pkg of readdirSync(dir)) {
+            if (!pkg.includes("linuxmusl")) continue;
+            rmSync(join(dir, pkg), { recursive: true, force: true });
+            if (existsSync(join(dir, pkg))) left.push(join(dir, pkg));
+        }
+    }
+    return left;
+}
 
 function run(
     cmd: string,
@@ -180,6 +207,14 @@ beforeAll(async () => {
         "fixture bun install",
         run("bun", ["install"], { cwd: appDir, timeout: 300_000 }),
     );
+    // Make the install look like a typical build host's: bun installs every
+    // libc's sharp addon on Linux, but npm (and any macOS host) installs only
+    // its own, and Next traces only what is installed. Without the musl pair on
+    // the host, the image's addon can only come from the build's own staging
+    // (the lockfile-pinned fetch) — which is what this suite must exercise.
+    // Measured: with bun's install left alone, the node image passed even with
+    // the staging removed.
+    hostMuslLeft = removeMuslSharpPairs(appDir);
     must("fixture next build", run("bun", ["run", "build"], { cwd: appDir }));
 
     // The shipped compile step: heal, stage the image platform's sharp into the
@@ -359,6 +394,8 @@ async function expectOptimized(
 
 describe("next/image optimizes on the compiled standalone executable and in the shipped images (#2360)", () => {
     it("the build staged the image platform's sharp pair beside the traced sharp (the twin below proves the host's pair stayed)", () => {
+        // The host install had no musl pair, so only the staging can have put it there.
+        expect(hostMuslLeft).toEqual([]);
         expect(tracedImg).toContain("sharp-linuxmusl-x64");
         expect(tracedImg).toContain("sharp-libvips-linuxmusl-x64");
     });
