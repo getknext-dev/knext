@@ -29,8 +29,10 @@ import type { KnativeNextConfig } from "../config";
 type AnyFn = (...args: any[]) => any;
 
 const buildStandaloneExecutable = mock<AnyFn>(
-    (opts: { cwd: string; arch: string }) =>
-        join(opts.cwd, `knext-standalone-exec-${opts.arch}`),
+    (opts: { cwd: string; arch: string }) => {
+        callOrder.push("buildStandaloneExecutable");
+        return join(opts.cwd, `knext-standalone-exec-${opts.arch}`);
+    },
 );
 mock.module("../cli/standalone-exec-build", () => ({
     buildStandaloneExecutable: (...a: unknown[]) =>
@@ -47,9 +49,17 @@ const stageOgHarfbuzzForVinextNode = mock<AnyFn>(() => ({
     staged: [],
     warnings: [],
 }));
+// #2360: records the order it ran in relative to the compile, which must see
+// the staged tree (and the freshness stamp must hash it).
+const callOrder: string[] = [];
+const stageSharpForStandalone = mock<AnyFn>(() => {
+    callOrder.push("stageSharpForStandalone");
+    return { staged: [] };
+});
 mock.module("../cli/vinext-build", () => ({
     buildVinextExecutable: (...a: unknown[]) => buildVinextExecutable(...a),
     stageSharpForVinextNode: (...a: unknown[]) => stageSharpForVinextNode(...a),
+    stageSharpForStandalone: (...a: unknown[]) => stageSharpForStandalone(...a),
     stageOgHarfbuzzForVinextNode: (...a: unknown[]) =>
         stageOgHarfbuzzForVinextNode(...a),
 }));
@@ -96,6 +106,8 @@ beforeEach(() => {
     buildStandaloneExecutable.mockClear();
     buildVinextExecutable.mockClear();
     healBunExportTargets.mockClear();
+    stageSharpForStandalone.mockClear();
+    callOrder.length = 0;
 });
 
 afterEach(() => {
@@ -255,6 +267,46 @@ describe("compileArtifactForDeploy", () => {
         stageSharpForVinextNode.mockClear();
         compileArtifactForDeploy(cfg({ build: "vinext" }), dir);
         expect(stageSharpForVinextNode).not.toHaveBeenCalled();
+    });
+
+    // #2360: the standalone images are alpine (linuxmusl) and copy the traced
+    // tree verbatim, so the IMAGE platform's sharp addon must be staged into it
+    // — before the compile, which loads sharp from that tree at runtime and
+    // whose freshness stamp hashes it.
+    it("stages the image platform's sharp into the standalone tree BEFORE compiling the bun executable", () => {
+        standaloneServer();
+        compileArtifactForDeploy(cfg(), dir, { arch: "linux-arm64" });
+        expect(stageSharpForStandalone).toHaveBeenCalledTimes(1);
+        expect(stageSharpForStandalone).toHaveBeenCalledWith(dir, {
+            arch: "linux-arm64",
+        });
+        expect(callOrder).toEqual([
+            "stageSharpForStandalone",
+            "buildStandaloneExecutable",
+        ]);
+    });
+
+    it("stages it for the node standalone image too — the same tree ships into node:alpine", () => {
+        standaloneServer();
+        compileArtifactForDeploy(
+            cfg({ build: "turbopack", runtime: "node" }),
+            dir,
+        );
+        expect(stageSharpForStandalone).toHaveBeenCalledTimes(1);
+        expect(stageSharpForStandalone).toHaveBeenCalledWith(dir, {
+            arch: "linux-x64",
+        });
+        expect(buildStandaloneExecutable).not.toHaveBeenCalled();
+    });
+
+    it("does not stage into a standalone tree for vinext, or when no standalone server was built", () => {
+        vinextOutput();
+        compileArtifactForDeploy(cfg({ build: "vinext" }), dir);
+        compileArtifactForDeploy(
+            cfg({ build: "turbopack", runtime: "node" }),
+            dir,
+        );
+        expect(stageSharpForStandalone).not.toHaveBeenCalled();
     });
 });
 
