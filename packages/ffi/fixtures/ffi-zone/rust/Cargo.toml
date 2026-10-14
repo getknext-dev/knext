@@ -1,0 +1,25 @@
+# The e2e fixture zone's in-process Rust library (Beta): what `knext ffi init`
+# writes, except that knext-ffi is a PATH dependency on this checkout's crates/
+# (a zone outside the repository pins it by git revision instead). The e2e
+# workflow stages the zone outside the repository and rewrites this one path
+# to the checkout's absolute crates/knext-ffi; nothing else changes.
+[package]
+name = "ffi-zone"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+knext-ffi = { path = "../../../../../crates/knext-ffi" }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+
+# Its own workspace root, so cargo never looks for one above the staged copy.
+[workspace]

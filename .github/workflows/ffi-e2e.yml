@@ -1,0 +1,639 @@
+name: In-process Rust (FFI) — musl load matrix + kind e2e
+
+# In-process Rust for Bun zones (Beta, ADR-0069 D14/D15/D17/D20, #2346). The
+# two integration gates that prove the feature on Linux, which no developer
+# machine can:
+#
+# musl-load (x64 on ubuntu-latest, arm64 on ubuntu-24.04-arm)
+#   Cross-builds the knext-ffi-fixture crate with `cargo zigbuild` for the
+#   job's musl triple, generates its wrapper with the product's generator,
+#   stages native/ffi/<triple>/ + the integrity manifest core writes, and runs
+#   the GENERATED wrapper inside oven/bun:1.4.2-alpine with a read-only root
+#   file system and a read-only TMPDIR (packages/ffi/scripts/ffi-musl-driver.ts):
+#   every fixture export, the Err and panic paths (1000 panics in a row: the
+#   panic unwinds through the statically linked unwinder into catch_unwind and
+#   the process lives), and the 1e6-call leak check per phase. Then the same
+#   caller compiled with `bun build --compile`, loading from native/ beside the
+#   executable. Proved red in every run, not only on dispatch:
+#     - native/ffi/ staged for the OTHER triple: the loader must refuse;
+#     - a wrapper mutated to never free a returned buffer: every leak phase
+#       must be flagged (exit 3).
+#
+# kind-e2e (turbopack x bun, the default cell)
+#   apps/file-manager copied outside the repository with the opt-in laid over
+#   it (packages/ffi/fixtures/ffi-zone: knext.ffi.json, a rust/ crate, the
+#   committed wrapper, a /knext-ffi page whose Server Actions call Rust).
+#     1. `knext build` REFUSES runtime: 'node' (the D15 text) and
+#        selfContained: true, before any build work;
+#     2. `knext build` (which runs `knext ffi build`: zigbuild, libc check,
+#        staging, wrapper drift check);
+#     3. the unchanged compat-smoke runner (apps/file-manager/scripts/
+#        compat-smoke.mjs) against a host-arch twin of THAT build's standalone
+#        tree, red-on-fail, as ci.yml's compat-smoke job runs it;
+#     4. `knext deploy --skip-build` of the same build to an ephemeral kind
+#        cluster with the operator built from HEAD; the Server Actions are
+#        called over HTTP (`Next-Action`, ids from server-reference-manifest
+#        .json): the Rust result, a RustError and a RustPanicError, with the
+#        pod's restart count still 0; the pod's native/.integrity.json lists
+#        the library with its real sha256.
+#
+# Mutation proofs that need a build (workflow_dispatch input `mutation`):
+#   wrong-triple  the musl legs stage the library for the other triple
+#   leak          the musl legs' leak check runs against the no-free wrapper
+#   compat-check  the fixture loses the route compat-smoke checks (i)/(j) assert
+# Each must turn its job red; `none` (the default, and every PR/push run) is green.
+#
+# No secrets. Not a required check; path-filtered to the feature's files.
+
+on:
+  pull_request:
+    paths:
+      - 'crates/**'
+      - 'packages/ffi/**'
+      - 'packages/kn-next/src/cli/ffi-preflight.ts'
+      - 'packages/kn-next/src/cli/ffi-dispatch.ts'
+      - 'packages/kn-next/src/cli/build-artifact.ts'
+      - 'packages/kn-next/src/cli/build-target.ts'
+      - 'packages/kn-next/src/cli/build.ts'
+      - 'packages/kn-next/src/cli/deploy.ts'
+      - 'packages/kn-next/src/cli/preview.ts'
+      - 'packages/kn-next/src/cli/runtime-image.ts'
+      - 'packages/kn-next/src/cli/native-integrity.ts'
+      - 'packages/kn-next/src/cli/standalone-exec-build.ts'
+      - 'packages/kn-next/src/cli/vinext-build.ts'
+      - 'packages/kn-next/templates/runtime-standalone/**'
+      - 'apps/file-manager/scripts/compat-smoke.mjs'
+      - 'apps/file-manager/scripts/compat-smoke-mode.mjs'
+      - '.github/workflows/ffi-e2e.yml'
+  push:
+    branches: [main, integration/v2]
+    paths:
+      - 'crates/**'
+      - 'packages/ffi/**'
+      - 'packages/kn-next/src/cli/ffi-preflight.ts'
+      - 'packages/kn-next/src/cli/ffi-dispatch.ts'
+      - 'packages/kn-next/src/cli/build-artifact.ts'
+      - 'packages/kn-next/src/cli/build-target.ts'
+      - 'packages/kn-next/src/cli/build.ts'
+      - 'packages/kn-next/src/cli/deploy.ts'
+      - 'packages/kn-next/src/cli/preview.ts'
+      - 'packages/kn-next/src/cli/runtime-image.ts'
+      - 'packages/kn-next/src/cli/native-integrity.ts'
+      - 'packages/kn-next/src/cli/standalone-exec-build.ts'
+      - 'packages/kn-next/src/cli/vinext-build.ts'
+      - 'packages/kn-next/templates/runtime-standalone/**'
+      - 'apps/file-manager/scripts/compat-smoke.mjs'
+      - 'apps/file-manager/scripts/compat-smoke-mode.mjs'
+      - '.github/workflows/ffi-e2e.yml'
+  workflow_dispatch:
+    inputs:
+      mutation:
+        description: 'Mutation proof (must turn its job red): none | wrong-triple | leak | compat-check'
+        type: choice
+        options: [none, wrong-triple, leak, compat-check]
+        default: none
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ffi-e2e-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The digest every knext Bun image stage pins (Dockerfile.standalone.hbs); a
+  # multi-arch index, so the arm64 runner pulls its own platform.
+  BUN_IMAGE: oven/bun:1.4.2-alpine@sha256:d888c0ae6c86d7866ff10c5aafdd9077b36aee6455b33dd270fb93c0dd5cef6f
+  FFI_E2E_MUTATION: ${{ inputs.mutation || 'none' }}
+  CARGO_TERM_COLOR: never
+
+jobs:
+  musl-load:
+    name: musl load (${{ matrix.arch }}) — oven/bun:1.4.2-alpine, read-only root + TMPDIR
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: ubuntu-latest
+            triple: x86_64-unknown-linux-musl
+            other: aarch64-unknown-linux-musl
+            bun_target: bun-linux-x64-musl
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            triple: aarch64-unknown-linux-musl
+            other: x86_64-unknown-linux-musl
+            bun_target: bun-linux-arm64-musl
+    env:
+      TRIPLE: ${{ matrix.triple }}
+      OTHER_TRIPLE: ${{ matrix.other }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Route Docker Hub pulls through mirror.gcr.io (anonymous rate limit)
+        uses: ./.github/actions/docker-hub-mirror
+
+      - name: Setup bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
+
+      - name: Install workspace dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Install the Rust toolchain, zig and cargo-zigbuild (pinned, sha256-verified)
+        run: packages/ffi/scripts/install-ffi-toolchain.sh crates "$TRIPLE"
+
+      # The flags `knext ffi build` passes (packages/ffi/src/build.ts): a
+      # cdylib against the image's musl, not a static libc.
+      - name: Cross-build the fixture crate with cargo zigbuild (${{ matrix.triple }})
+        working-directory: crates
+        env:
+          RUSTFLAGS: -C target-feature=-crt-static
+        run: |
+          set -euo pipefail
+          cargo zigbuild --release --locked --target "$TRIPLE" -p knext-ffi-fixture
+          LIB="${PWD}/target/${TRIPLE}/release/libknext_ffi_fixture.so"
+          test -f "$LIB"
+          echo "LIB=$LIB" >> "$GITHUB_ENV"
+
+      # The libc check `knext ffi build` runs, the generated wrapper, and
+      # native/ + its integrity manifest as the image carries them. Three
+      # trees: the real one, one staged for the OTHER triple, and one whose
+      # wrapper never frees (app-leak/, written beside the real app).
+      - name: Stage the wrapper, native/ and the two mutants
+        run: |
+          set -euo pipefail
+          STAGE_TRIPLE="$TRIPLE"
+          if [ "$FFI_E2E_MUTATION" = wrong-triple ]; then
+            echo "::warning::MUTATION wrong-triple: staging the library under ${OTHER_TRIPLE}; this job must go red"
+            STAGE_TRIPLE="$OTHER_TRIPLE"
+          fi
+          bun packages/ffi/scripts/stage-musl-load.ts --lib "$LIB" --triple "$TRIPLE" \
+            --out "${RUNNER_TEMP}/musl" --stage-triple "$STAGE_TRIPLE"
+          bun packages/ffi/scripts/stage-musl-load.ts --lib "$LIB" --triple "$TRIPLE" \
+            --out "${RUNNER_TEMP}/musl-wrong" --stage-triple "$OTHER_TRIPLE"
+          echo "DT_NEEDED of the zigbuild library:"; cat "${RUNNER_TEMP}/musl/needed"
+          cat "${RUNNER_TEMP}/musl/native/.integrity.json"
+
+      - name: Pull the image and find the bun binary's directory (process.execPath)
+        run: |
+          set -euo pipefail
+          docker pull "$BUN_IMAGE"
+          BUN_DIR="$(docker run --rm --entrypoint sh "$BUN_IMAGE" -c 'dirname "$(readlink -f "$(command -v bun)")"')"
+          echo "bun lives in ${BUN_DIR}"
+          echo "BUN_DIR=$BUN_DIR" >> "$GITHUB_ENV"
+
+      # The uncompiled leg: `bun driver.ts`, with native/ mounted beside the bun
+      # binary — the production path (NODE_ENV=production: integrity-checked,
+      # no development fallback). The runtime transpiler cache is off: it is a
+      # `bun <file>` convenience the image's compiled executable never uses,
+      # and the compiled leg below is the image shape.
+      - name: bun leg — every export, Err, 1000 panics, timings
+        run: |
+          set -euo pipefail
+          docker run --rm --read-only --network none \
+            -e NODE_ENV=production -e TMPDIR=/tmp -e BUN_RUNTIME_TRANSPILER_CACHE_PATH=0 \
+            -v "${RUNNER_TEMP}/musl/app:/work/app:ro" \
+            -v "${RUNNER_TEMP}/musl/native:${BUN_DIR}/native:ro" \
+            -w /work/app "$BUN_IMAGE" bun --conditions=react-server driver.ts all \
+            2> "${RUNNER_TEMP}/bun-all.stderr" | tee "${RUNNER_TEMP}/bun-all.out"
+          tail -n 2 "${RUNNER_TEMP}/bun-all.stderr"
+          grep -q '^ffi-musl-driver: PASS$' "${RUNNER_TEMP}/bun-all.out"
+
+      - name: bun leg — leak check, 1e6 calls per phase, each phase its own process
+        run: |
+          set -euo pipefail
+          app='app'
+          if [ "$FFI_E2E_MUTATION" = leak ]; then
+            echo "::warning::MUTATION leak: the leak check runs against the no-free wrapper; this job must go red"
+            app='app-leak'
+          fi
+          for phase in String 'Vec<u8>' record; do
+            docker run --rm --read-only --network none \
+              -e NODE_ENV=production -e TMPDIR=/tmp -e BUN_RUNTIME_TRANSPILER_CACHE_PATH=0 \
+              -v "${RUNNER_TEMP}/musl/${app}:/work/app:ro" \
+              -v "${RUNNER_TEMP}/musl/native:${BUN_DIR}/native:ro" \
+              -w /work/app "$BUN_IMAGE" bun --conditions=react-server driver.ts leak "$phase" \
+              | tee -a "${RUNNER_TEMP}/bun-leak.out"
+          done
+
+      - name: Proved red — the leak check flags a wrapper that never frees (every phase exit 3)
+        run: |
+          set -uo pipefail
+          for phase in String 'Vec<u8>' record; do
+            docker run --rm --read-only --network none \
+              -e NODE_ENV=production -e TMPDIR=/tmp -e BUN_RUNTIME_TRANSPILER_CACHE_PATH=0 \
+              -v "${RUNNER_TEMP}/musl/app-leak:/work/app:ro" \
+              -v "${RUNNER_TEMP}/musl/native:${BUN_DIR}/native:ro" \
+              -w /work/app "$BUN_IMAGE" bun --conditions=react-server driver.ts leak "$phase" \
+              | tee -a "${RUNNER_TEMP}/bun-leak-mutant.out"
+            code=${PIPESTATUS[0]}
+            if [ "$code" -ne 3 ]; then
+              echo "::error::the leak check did not flag the no-free wrapper on phase ${phase} (exit ${code}, want 3): it cannot be trusted to see a leak"
+              exit 1
+            fi
+          done
+
+      - name: Proved red — native/ffi/ staged for the other triple is refused
+        run: |
+          set -uo pipefail
+          docker run --rm --read-only --network none \
+            -e NODE_ENV=production -e TMPDIR=/tmp -e BUN_RUNTIME_TRANSPILER_CACHE_PATH=0 \
+            -v "${RUNNER_TEMP}/musl-wrong/app:/work/app:ro" \
+            -v "${RUNNER_TEMP}/musl-wrong/native:${BUN_DIR}/native:ro" \
+            -w /work/app "$BUN_IMAGE" bun --conditions=react-server driver.ts all \
+            > "${RUNNER_TEMP}/wrong.out" 2>&1
+          code=$?
+          cat "${RUNNER_TEMP}/wrong.out"
+          if [ "$code" -eq 0 ]; then
+            echo "::error::a library staged under ${OTHER_TRIPLE} loaded on ${TRIPLE}"; exit 1
+          fi
+          grep -q "holds Rust libraries for ${OTHER_TRIPLE}, but this process runs on ${TRIPLE}" "${RUNNER_TEMP}/wrong.out" || {
+            echo "::error::the wrong-triple run failed, but not with the loader's wrong-platform refusal"; exit 1
+          }
+
+      # The compiled leg: `bun build --compile` of the same caller, for the
+      # image's musl target, with native/ beside the executable (D13 path 1).
+      - name: Compile the caller with bun build --compile (${{ matrix.bun_target }})
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/musl/exe"
+          (cd "${RUNNER_TEMP}/musl/app" && bun build --compile --target="${{ matrix.bun_target }}" \
+            --conditions=react-server driver.ts --outfile "${RUNNER_TEMP}/musl/exe/ffi-caller")
+          cp -R "${RUNNER_TEMP}/musl/native" "${RUNNER_TEMP}/musl/exe/native"
+          ls -la "${RUNNER_TEMP}/musl/exe"
+
+      - name: compiled leg — every export, Err, 1000 panics, timings, leak phases
+        run: |
+          set -euo pipefail
+          run() {
+            docker run --rm --read-only --network none -e NODE_ENV=production -e TMPDIR=/tmp \
+              -v "${RUNNER_TEMP}/musl/exe:/opt/caller:ro" --entrypoint /opt/caller/ffi-caller \
+              "$BUN_IMAGE" "$@"
+          }
+          run all 2> "${RUNNER_TEMP}/exe-all.stderr" | tee "${RUNNER_TEMP}/exe-all.out"
+          tail -n 2 "${RUNNER_TEMP}/exe-all.stderr"
+          grep -q '^ffi-musl-driver: PASS$' "${RUNNER_TEMP}/exe-all.out"
+          for phase in String 'Vec<u8>' record; do
+            run leak "$phase" | tee -a "${RUNNER_TEMP}/exe-leak.out"
+          done
+
+      - name: Job summary (Linux numbers for the research note)
+        if: always()
+        run: |
+          set -uo pipefail
+          {
+            echo "### musl load — ${TRIPLE} (oven/bun:1.4.2-alpine, read-only root + TMPDIR)"
+            echo
+            echo "DT_NEEDED: \`$(tr '\n' ' ' < "${RUNNER_TEMP}/musl/needed" 2>/dev/null)\`"
+            echo
+            for leg in bun exe; do
+              line="$(grep -h '^KNEXT_FFI_SUMMARY ' "${RUNNER_TEMP}/${leg}-all.out" 2>/dev/null | tail -n1 | cut -d' ' -f2-)"
+              if [ -n "$line" ]; then
+                echo "**${leg} leg** — exports called: $(echo "$line" | jq -r .exportsCalled), panics survived: $(echo "$line" | jq -r .panicsSurvived)"
+                echo
+                echo "| call | ns/call |"; echo "|---|---|"
+                echo "$line" | jq -r '.nsPerCall | to_entries[] | "| \(.key) | \(.value) |"'
+                echo
+              fi
+              echo "| ${leg} leak phase (1e6 calls after 1e6 warm-up) | RSS growth (MB) | bound | over |"; echo "|---|---|---|---|"
+              grep -h '^KNEXT_FFI_SUMMARY ' "${RUNNER_TEMP}/${leg}-leak.out" 2>/dev/null | cut -d' ' -f2- \
+                | jq -r '.leak | "| \(.phase) | \(.growthMb) | \(.boundMb) | \(.over) |"'
+              echo
+            done
+            echo "| no-free mutant leak phase | RSS growth (MB) | flagged |"; echo "|---|---|---|"
+            grep -h '^KNEXT_FFI_SUMMARY ' "${RUNNER_TEMP}/bun-leak-mutant.out" 2>/dev/null | cut -d' ' -f2- \
+              | jq -r '.leak | "| \(.phase) | \(.growthMb) | \(.over) |"'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  kind-e2e:
+    name: kind e2e — Server Action calling Rust on a Bun zone (turbopack x bun) + compat-smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # compat-smoke check (k) asserts ISR against a REAL Redis (as ci.yml's
+    # compat-smoke job provides it). Digest-pinned.
+    services:
+      redis:
+        image: mirror.gcr.io/library/redis:7-alpine@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      CLUSTER: ffi-e2e
+      APP_NS: ffi-e2e
+      APP_NAME: ffi-zone
+      TRIPLE: x86_64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Route Docker Hub pulls through mirror.gcr.io (anonymous rate limit)
+        uses: ./.github/actions/docker-hub-mirror
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: packages/kn-next-operator/go.mod
+          cache-dependency-path: packages/kn-next-operator/go.sum
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+
+      - name: Setup bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
+
+      - name: Install kind
+        uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
+        with:
+          install_only: true
+
+      - name: Install workspace dependencies
+        run: bun install --frozen-lockfile
+
+      # @getknext/ffi declares `@getknext/core >=2.0.0-0 <3.0.0`, and refuses a
+      # core outside it (ffi-dispatch.ts). On this line core's package.json
+      # still reads 1.x until the v2 Version PR stamps the 2.0.0 prerelease
+      # (.changeset is in pre mode with core major bumps), so the lane stamps
+      # that prerelease itself — the pair users get — rather than skip the
+      # dispatch. Once core is 2.x this step is a no-op.
+      - name: Stamp core with the v2 prerelease version the ffi package requires
+        run: |
+          set -euo pipefail
+          v="$(node -p 'require("./packages/kn-next/package.json").version')"
+          case "$v" in
+            2.*) echo "core is ${v}; nothing to stamp" ;;
+            *) npm pkg set version=2.0.0-next.0 --prefix packages/kn-next
+               echo "::notice::core ${v} stamped 2.0.0-next.0 for the @getknext/ffi peer range" ;;
+          esac
+
+      - name: Build the workspace packages + the CLI + @getknext/ffi
+        run: |
+          set -euo pipefail
+          bun run --filter "@getknext/lib" build
+          bun run --filter "@getknext/db" build
+          bun run --filter "@getknext/core" build
+          bun run --filter "@getknext/ffi" build
+          test -f packages/kn-next/dist/cli/kn-next.js
+          test -f packages/ffi/dist/cli.js
+
+      - name: Pack the adapter tarballs + @getknext/ffi (npm pack)
+        run: |
+          set -euo pipefail
+          DEST="${RUNNER_TEMP}/knext-tarballs"
+          node scripts/pack-release-tarballs.mjs --dest "${DEST}" \
+            --dirs packages/lib,packages/db,packages/kn-next
+          npm pack ./packages/ffi --pack-destination "${DEST}"
+          ls -la "${DEST}"
+          echo "TARBALLS_DIR=${DEST}" >> "$GITHUB_ENV"
+
+      - name: Stage the fixture zone outside the repo (file-manager + the ffi-zone overlay) + install
+        run: |
+          set -euo pipefail
+          APP_DIR="${RUNNER_TEMP}/ffi-zone"
+          packages/ffi/scripts/stage-ffi-zone.sh "${GITHUB_WORKSPACE}" "$APP_DIR"
+          cd "$APP_DIR"
+          bun install
+          tgz() { find "${TARBALLS_DIR}" -maxdepth 1 -name "$1" | sort | tail -n1; }
+          npm install --no-save --no-audit --no-fund \
+            "$(tgz 'getknext-lib-*.tgz')" "$(tgz 'getknext-db-*.tgz')" \
+            "$(tgz 'getknext-core-*.tgz')" "$(tgz 'getknext-ffi-*.tgz')"
+          test -d node_modules/@getknext/core
+          test -f node_modules/@getknext/ffi/dist/cli.js
+          {
+            echo "APP_DIR=$APP_DIR"
+            echo "DEPLOY_TAG=r${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-ffi"
+            echo "KNEXT=${GITHUB_WORKSPACE}/packages/kn-next/dist/cli/kn-next.js"
+          } >> "$GITHUB_ENV"
+
+      - name: Install the Rust toolchain, zig and cargo-zigbuild (pinned, sha256-verified)
+        run: packages/ffi/scripts/install-ffi-toolchain.sh "${APP_DIR}/rust" "$TRIPLE"
+
+      # D15 / D14: an opted-in app is refused for runtime 'node' and for the
+      # self-contained mode BEFORE any build work. Asserted on the real CLI,
+      # with the exact text, and on the absence of every build output.
+      - name: knext build REFUSES runtime 'node' and selfContained (before any build work)
+        run: |
+          set -uo pipefail
+          cd "$APP_DIR"
+          refuse() {
+            local label="$1" want="$2" body="$3"
+            printf 'const config = { name: "%s", registry: "localhost:5001", %s };\nexport default config;\n' \
+              "$APP_NAME" "$body" > knext.config.ts
+            node "$KNEXT" build > "${RUNNER_TEMP}/refuse-${label}.log" 2>&1
+            code=$?
+            cat "${RUNNER_TEMP}/refuse-${label}.log"
+            if [ "$code" -eq 0 ]; then echo "::error::knext build accepted ${label} for an app with knext.ffi.json"; exit 1; fi
+            grep -qF "$want" "${RUNNER_TEMP}/refuse-${label}.log" || {
+              echo "::error::the ${label} refusal is missing: ${want}"; exit 1; }
+            for out in .next native knext-standalone-exec-linux-x64 rust/target; do
+              if [ -e "$out" ]; then echo "::error::${out} exists after the ${label} refusal: build work ran"; exit 1; fi
+            done
+          }
+          refuse node "knext: in-process Rust (bun:ffi) needs the Bun runtime, but this app builds for Node." 'runtime: "node"'
+          grep -qF "or move this code to a zone function (knext add function <name> --lang rust)," "${RUNNER_TEMP}/refuse-node.log" || {
+            echo "::error::the node refusal does not name the zone-function alternative"; exit 1; }
+          refuse self-contained "knext: in-process Rust (bun:ffi) does not work in self-contained mode." 'selfContained: true'
+
+      - name: Write the fixture's knext.config.ts (the default cell — no runtime, no build key)
+        run: |
+          set -euo pipefail
+          cd "$APP_DIR"
+          cat > knext.config.ts <<EOF
+          const config = {
+            name: "${APP_NAME}",
+            registry: "localhost:5001",
+            healthCheckPath: "/api/health",
+            scaling: { minScale: 1, maxScale: 1, memoryRequest: "256Mi", memoryLimit: "1Gi" },
+          };
+          export default config;
+          EOF
+
+      # `knext build` runs `knext ffi build` (zigbuild for the image's musl
+      # triple, libc check, staging, drift check of the committed wrapper)
+      # before `next build`, then compiles the shipped executable and writes
+      # native/.integrity.json. KNEXT_BUILD_ID pins .next/BUILD_ID to the tag
+      # the deploy below uses (the app's generateBuildId reads it).
+      - name: knext build (turbopack x bun) — ffi build, next build, compile
+        run: |
+          set -euo pipefail
+          cd "$APP_DIR"
+          KNEXT_BUILD_ID="$DEPLOY_TAG" node "$KNEXT" build
+          LIB="native/ffi/${TRIPLE}/libffi_zone.so"
+          test -f "$LIB"
+          test -f "native/ffi/${TRIPLE}/provenance.json"
+          cat "native/ffi/${TRIPLE}/provenance.json"
+          want="$(sha256sum "$LIB" | cut -d' ' -f1)"
+          got="$(jq -r --arg k "ffi/${TRIPLE}/libffi_zone.so" '.files[$k]' native/.integrity.json)"
+          echo "integrity manifest: ${got}; library: ${want}"
+          [ "$got" = "$want" ] || { echo "::error::native/.integrity.json does not list the library's sha256"; exit 1; }
+          test -f .next/server/server-reference-manifest.json
+          echo "LIB_SHA256=$want" >> "$GITHUB_ENV"
+
+      # The SAME runner and checks as ci.yml's compat-smoke job, red-on-fail,
+      # against a host-arch twin of THIS build's standalone tree (the shipped
+      # executable is linux-musl; the kind deploy below runs that one). The
+      # tree is copied first so the build's freshness stamp is untouched; the
+      # copy is laid out as the image lays it out.
+      - name: compat-smoke on the opted-in build (bun lane, compiled standalone executable)
+        env:
+          RUNTIME: bun
+          SMOKE_EXEC_TRANSPORT: node-http
+          REDIS_URL: redis://127.0.0.1:6379
+        run: |
+          set -euo pipefail
+          SMOKE_APP="${RUNNER_TEMP}/ffi-zone-smoke"
+          mkdir -p "${SMOKE_APP}/.next"
+          cp -R "${APP_DIR}/.next/standalone" "${SMOKE_APP}/.next/standalone"
+          cp -R "${APP_DIR}/.next/static" "${SMOKE_APP}/.next/standalone/.next/static"
+          cp -R "${APP_DIR}/public" "${SMOKE_APP}/.next/standalone/public"
+          bun packages/ffi/scripts/compile-smoke-twin.ts "$SMOKE_APP" "${SMOKE_APP}/.next/standalone/knext-smoke-exec"
+          SERVER_CMD="${SMOKE_APP}/.next/standalone/knext-smoke-exec" \
+          SERVER_PATH="${SMOKE_APP}/.next/standalone/knext-smoke-exec" \
+            node apps/file-manager/scripts/compat-smoke.mjs
+
+      - name: Create kind cluster (registry certs.d config_path)
+        run: |
+          set -euo pipefail
+          cat <<'YAML' | kind create cluster --name "$CLUSTER" --wait 120s --config=-
+          kind: Cluster
+          apiVersion: kind.x-k8s.io/v1alpha4
+          containerdConfigPatches:
+          - |-
+            [plugins."io.containerd.grpc.v1.cri".registry]
+              config_path = "/etc/containerd/certs.d"
+          YAML
+
+      - name: Start in-cluster registry + wire the kind node to it
+        run: |
+          set -euo pipefail
+          reg=kind-registry
+          docker run -d --restart=always -p 127.0.0.1:5001:5000 --name "$reg" \
+            registry:2.8.3@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
+          docker network connect kind "$reg"
+          node="${CLUSTER}-control-plane"
+          docker exec "$node" mkdir -p /etc/containerd/certs.d/localhost:5001
+          printf '[host."http://%s:5000"]\n' "$reg" \
+            | docker exec -i "$node" cp /dev/stdin /etc/containerd/certs.d/localhost:5001/hosts.toml
+
+      - name: Install cert-manager
+        run: |
+          set -euo pipefail
+          scripts/kind-manifests/apply-cert-manager.sh
+          kubectl wait --for=condition=Available --timeout=300s \
+            -n cert-manager deployment/cert-manager deployment/cert-manager-webhook deployment/cert-manager-cainjector
+
+      - name: Install Knative Serving + Kourier
+        run: |
+          set -euo pipefail
+          V="knative-v1.16.0"
+          scripts/kind-manifests/apply-knative-kourier.sh "${V}"
+          kubectl patch configmap/config-network -n knative-serving --type merge \
+            --patch '{"data":{"ingress-class":"kourier.ingress.networking.knative.dev"}}'
+          kubectl wait --for=condition=Available --timeout=300s \
+            -n knative-serving deployment/controller deployment/webhook deployment/autoscaler deployment/net-kourier-controller
+
+      - name: Build + deploy the operator from HEAD
+        working-directory: packages/kn-next-operator
+        run: |
+          set -euo pipefail
+          IMG=example.com/kn-next-operator:e2e
+          for attempt in 1 2 3; do
+            make docker-build IMG="$IMG" && break
+            [ "$attempt" = 3 ] && { echo "::error::operator image build failed 3x"; exit 1; }
+            echo "docker-build attempt $attempt failed; retrying"; sleep 10
+          done
+          kind load docker-image "$IMG" --name "$CLUSTER"
+          make install
+          make deploy IMG="$IMG"
+          kubectl rollout status deployment/kn-next-operator-controller-manager \
+            -n kn-next-operator-system --timeout=180s
+          kubectl wait --for=condition=Ready --timeout=120s \
+            -n kn-next-operator-system certificate/kn-next-operator-serving-cert
+          kubectl wait --for=jsonpath='{.subsets[0].addresses[0]}' --timeout=120s \
+            -n kn-next-operator-system endpoints/kn-next-operator-webhook-service
+          "${GITHUB_WORKSPACE}/scripts/kind-manifests/wait-for-webhook-ready.sh"
+
+      - name: Namespace
+        run: kubectl create namespace "$APP_NS"
+
+      - name: knext deploy --skip-build (the build compat-smoke just checked)
+        run: |
+          set -euo pipefail
+          cd "$APP_DIR"
+          node "$KNEXT" deploy --skip-build --registry localhost:5001 --namespace "$APP_NS" --tag "$DEPLOY_TAG"
+
+      - name: Wait for the NextApp to go Ready
+        run: |
+          set -euo pipefail
+          kubectl -n "$APP_NS" wait --for=condition=Ready --timeout=300s "nextapp/$APP_NAME" \
+            || (kubectl -n "$APP_NS" get nextapp,ksvc,pods -o wide; kubectl -n "$APP_NS" describe "nextapp/$APP_NAME"; exit 1)
+          kubectl -n "$APP_NS" wait --for=condition=Ready --timeout=180s pod -l "serving.knative.dev/service=$APP_NAME"
+
+      - name: The image carries the library, listed in native/.integrity.json with its real sha256
+        run: |
+          set -euo pipefail
+          pod="$(kubectl -n "$APP_NS" get pods -l "serving.knative.dev/service=$APP_NAME" -o jsonpath='{.items[0].metadata.name}')"
+          rel="ffi/${TRIPLE}/libffi_zone.so"
+          dir=/app/.next/standalone/native
+          listed="$(kubectl -n "$APP_NS" exec "$pod" -c user-container -- cat "${dir}/.integrity.json" | jq -r --arg k "$rel" '.files[$k]')"
+          actual="$(kubectl -n "$APP_NS" exec "$pod" -c user-container -- sha256sum "${dir}/${rel}" | cut -d' ' -f1)"
+          echo "listed=${listed} in-image=${actual} built=${LIB_SHA256}"
+          [ "$listed" = "$actual" ] && [ "$actual" = "$LIB_SHA256" ] || {
+            echo "::error::the image's native/.integrity.json does not list ${rel} with the library's sha256"; exit 1; }
+
+      - name: Server Actions call Rust over HTTP — result, RustError, RustPanicError; zero restarts
+        run: |
+          set -euo pipefail
+          kubectl -n kourier-system port-forward svc/kourier-internal 8080:80 >/tmp/pf-kourier.log 2>&1 &
+          for _ in $(seq 1 30); do
+            if (exec 3<>/dev/tcp/127.0.0.1/8080) 2>/dev/null; then break; fi
+            sleep 1
+          done
+          host="$(kubectl -n "$APP_NS" get nextapp "$APP_NAME" -o jsonpath='{.status.url}' | sed -e 's#^https\?://##')"
+          [ -n "$host" ] || { echo "::error::nextapp status.url is empty"; exit 1; }
+          sel="serving.knative.dev/service=$APP_NAME"
+          state() {
+            kubectl -n "$APP_NS" get pods -l "$sel" -o json \
+              | jq -c '[.items[] | {name: .metadata.name, restarts: ([.status.containerStatuses[] | select(.name == "user-container") | .restartCount] | add), started: ([.status.containerStatuses[] | select(.name == "user-container") | .state.running.startedAt] | first)}]'
+          }
+          before="$(state)"
+          echo "before: ${before}"
+          node packages/ffi/scripts/ffi-action-e2e.mjs --url http://127.0.0.1:8080 --host "$host" \
+            --manifest "${APP_DIR}/.next/server/server-reference-manifest.json"
+          sleep 5
+          after="$(state)"
+          echo "after:  ${after}"
+          [ "$(echo "$before" | jq length)" = 1 ] || { echo "::error::expected exactly one pod (minScale = maxScale = 1)"; exit 1; }
+          [ "$before" = "$after" ] || { echo "::error::the pod changed across the Rust calls (restarted or replaced): ${before} -> ${after}"; exit 1; }
+          [ "$(echo "$after" | jq '.[0].restarts')" = 0 ] || { echo "::error::user-container restartCount is not 0"; exit 1; }
+          pod="$(echo "$after" | jq -r '.[0].name')"
+          kubectl -n "$APP_NS" logs "$pod" -c user-container > /tmp/app.log
+          grep -q "panicked at" /tmp/app.log || { echo "::error::no Rust panic line in the pod's log: the panic path did not run in Rust"; exit 1; }
+          grep -m1 "panicked at" -A1 /tmp/app.log
+
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          kubectl -n "$APP_NS" get nextapp,ksvc,configuration,revision,pods -o wide 2>&1 || true
+          kubectl -n "$APP_NS" get "nextapp/$APP_NAME" -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.reason}: {.message}{"\n"}{end}' 2>&1 || true
+          kubectl -n "$APP_NS" get events --sort-by=.lastTimestamp 2>&1 | tail -30 || true
+          kubectl -n kn-next-operator-system logs deploy/kn-next-operator-controller-manager --tail=100 2>&1 || true
+          for p in $(kubectl -n "$APP_NS" get pods -l "serving.knative.dev/service=$APP_NAME" -o name 2>/dev/null); do
+            kubectl -n "$APP_NS" logs "$p" --all-containers --tail=120 2>&1 || true
+          done
+
+      - name: Tear down
+        if: always()
+        run: |
+          kind delete cluster --name "$CLUSTER" || true
+          docker rm -f kind-registry || true

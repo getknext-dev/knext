@@ -1,0 +1,2 @@
+# cargo build output (the e2e builds the crate itself)
+rust/target/

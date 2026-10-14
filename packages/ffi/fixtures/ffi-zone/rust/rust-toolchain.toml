@@ -1,0 +1,6 @@
+# The Rust toolchain this crate builds with (the same pin as crates/), plus
+# the musl targets of the images knext builds.
+[toolchain]
+channel = "1.97.1"
+targets = ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"]
+profile = "minimal"
