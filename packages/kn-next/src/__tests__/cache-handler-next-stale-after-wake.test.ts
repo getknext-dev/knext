@@ -88,6 +88,28 @@ function emptyManifest() {
     };
 }
 
+/**
+ * The IncrementalCache constructor changed shape: Next <= 16.3 takes a
+ * `getPrerenderManifest` thunk, Next >= 16.4.0 takes the manifest and the
+ * preview props directly. Passing both lets the one spec run unchanged against
+ * whichever real Next is installed.
+ */
+function nextManifestOptions() {
+    return {
+        getPrerenderManifest: emptyManifest,
+        prerenderManifest: emptyManifest(),
+        previewProps: emptyManifest().preview,
+    };
+}
+
+/** True when the installed Next applies the handler's returned `cacheControl` itself (>= 16.4.0). */
+const NEXT_VERSION = (require("next/package.json") as { version: string })
+    .version;
+const NEXT_APPLIES_HANDLER_WINDOW = (() => {
+    const [major, minor] = NEXT_VERSION.split(".").map(Number);
+    return major > 16 || (major === 16 && minor >= 4);
+})();
+
 /** Temp roots created by `distWithBuildId`, removed after the file runs. */
 const tempRoots: string[] = [];
 afterAll(() => {
@@ -163,7 +185,7 @@ async function wokenPod(
         dev: false,
         minimalMode: false,
         requestHeaders: {},
-        getPrerenderManifest: emptyManifest,
+        ...nextManifestOptions(),
         CurCacheHandler: Handler,
         serverDistDir: serverDistDir ?? undefined,
     });
@@ -401,7 +423,7 @@ describe("ISR freshness survives a scale-to-zero wake on the Next path (#1888)",
         expect(mod.__NEXT_CONSTANT_BUILD_ID).toBe(NEXT_CONSTANT_BUILD_ID);
     });
 
-    it("does not override a window this process already knows", async () => {
+    it("reconciles a window this process already knows with the stored one, per Next version", async () => {
         SharedCacheControls.cacheControls.set(mapKey("/isr/c"), {
             revalidate: 10,
             expire: ONE_YEAR_S,
@@ -413,8 +435,16 @@ describe("ISR freshness survives a scale-to-zero wake on the Next path (#1888)",
             ),
         );
         const entry = await cache.get("/isr/c", PAGE);
-        expect(entry?.cacheControl?.revalidate).toBe(10);
-        expect(entry?.isStale).toBe(true);
+        if (NEXT_APPLIES_HANDLER_WINDOW) {
+            // Next >= 16.4.0 applies the handler's stored window, which is the
+            // newest write; the seeded Map is not consulted for it.
+            expect(entry?.cacheControl?.revalidate).toBe(3600);
+            expect(entry?.isStale).toBeFalsy();
+        } else {
+            // Next <= 16.3: the seed never overrides a window the process knows.
+            expect(entry?.cacheControl?.revalidate).toBe(10);
+            expect(entry?.isStale).toBe(true);
+        }
     });
 
     it("seeds the `/` route under the exact key Next files it under (its `/index` form)", async () => {
@@ -462,6 +492,195 @@ describe("ISR freshness survives a scale-to-zero wake on the Next path (#1888)",
         expect(SharedCacheControls.cacheControls.size).toBe(0);
     });
 
+    it("hands a FETCH (data-cache) entry back untouched, even from another build", async () => {
+        const mod = (await import(
+            `../adapters/cache-handler.js?wakefetch2=${Math.random()}`
+        )) as {
+            default: new (
+                o: unknown,
+            ) => {
+                get: (
+                    k: string,
+                    ctx?: unknown,
+                ) => Promise<{ cacheControl?: unknown } | null>;
+            };
+            __setRedisClientForTests: (c: unknown) => void;
+        };
+        const handler = new mod.default({ serverDistDir: THIS_DIST });
+        mod.__setRedisClientForTests({
+            connected: true,
+            async connect() {},
+            async get() {
+                return JSON.stringify({
+                    buildId: OTHER_BUILD,
+                    value: { kind: "FETCH", data: {}, revalidate: 30 },
+                    lastModified: Date.now(),
+                    tags: [],
+                    cacheControl: { revalidate: 30 },
+                });
+            },
+            async send() {
+                return "OK";
+            },
+        });
+        const hit = await handler.get("fetch-key", { kind: "FETCH" });
+        expect(hit?.cacheControl).toEqual({ revalidate: 30 });
+    });
+
+    it("hands an entry whose VALUE is FETCH back untouched even when the ctx kind is not FETCH", async () => {
+        const mod = (await import(
+            `../adapters/cache-handler.js?wakefetchval=${Math.random()}`
+        )) as {
+            default: new (
+                o: unknown,
+            ) => {
+                get: (
+                    k: string,
+                    ctx?: unknown,
+                ) => Promise<{ cacheControl?: unknown } | null>;
+            };
+            __setRedisClientForTests: (c: unknown) => void;
+        };
+        const handler = new mod.default({ serverDistDir: THIS_DIST });
+        mod.__setRedisClientForTests({
+            connected: true,
+            async connect() {},
+            async get() {
+                return JSON.stringify({
+                    buildId: OTHER_BUILD,
+                    value: { kind: "FETCH", data: {}, revalidate: 30 },
+                    lastModified: Date.now(),
+                    tags: [],
+                    cacheControl: { revalidate: 30 },
+                });
+            },
+            async send() {
+                return "OK";
+            },
+        });
+        const hit = await handler.get("fetch-key", { kind: "APP_PAGE" });
+        expect(hit?.cacheControl).toEqual({ revalidate: 30 });
+    });
+
+    // Handler-level: call `get` directly (no IncrementalCache), so the withhold
+    // logic is proved on ANY installed Next, including the pinned 16.3.x that
+    // ignores a returned cacheControl.
+    describe("scopeWindowToBuild at the handler (Next-version independent)", () => {
+        async function handlerGet(
+            stored: string,
+            serverDistDir: string | null,
+        ) {
+            const mod = (await import(
+                `../adapters/cache-handler.js?scope=${Math.random()}`
+            )) as {
+                default: new (
+                    o: unknown,
+                ) => {
+                    get: (
+                        k: string,
+                        ctx?: unknown,
+                    ) => Promise<{ cacheControl?: unknown } | null>;
+                };
+                __setRedisClientForTests: (c: unknown) => void;
+            };
+            const handler = new mod.default(
+                serverDistDir === null ? {} : { serverDistDir },
+            );
+            mod.__setRedisClientForTests({
+                connected: true,
+                async connect() {},
+                async get() {
+                    return stored;
+                },
+                async send() {
+                    return "OK";
+                },
+            });
+            return handler.get("/isr/scope", { kind: "APP_PAGE" });
+        }
+        const WINDOW = { revalidate: 3600, expire: ONE_YEAR_S };
+
+        it("withholds a foreign build's window but still serves the body", async () => {
+            const hit = await handlerGet(
+                storedEntry(WINDOW, SEVEN_MINUTES_MS, OTHER_BUILD),
+                THIS_DIST,
+            );
+            expect(hit).not.toBeNull();
+            expect(hit?.cacheControl).toBeUndefined();
+        });
+        it("withholds a legacy entry with no build id", async () => {
+            const hit = await handlerGet(
+                storedEntry(WINDOW, SEVEN_MINUTES_MS, null),
+                THIS_DIST,
+            );
+            expect(hit).not.toBeNull();
+            expect(hit?.cacheControl).toBeUndefined();
+        });
+        it("withholds when this process has no build id, even for a legacy entry (undefined must not equal undefined)", async () => {
+            const hit = await handlerGet(
+                storedEntry(WINDOW, SEVEN_MINUTES_MS, null),
+                null,
+            );
+            expect(hit).not.toBeNull();
+            expect(hit?.cacheControl).toBeUndefined();
+        });
+        it("withholds when this process has no build id, for an entry that records one", async () => {
+            const hit = await handlerGet(
+                storedEntry(WINDOW, SEVEN_MINUTES_MS, THIS_BUILD),
+                null,
+            );
+            expect(hit?.cacheControl).toBeUndefined();
+        });
+        it("withholds under Next's CONSTANT build id on both sides", async () => {
+            const hit = await handlerGet(
+                storedEntry(WINDOW, SEVEN_MINUTES_MS, NEXT_CONSTANT_BUILD_ID),
+                distWithBuildId(NEXT_CONSTANT_BUILD_ID),
+            );
+            expect(hit).not.toBeNull();
+            expect(hit?.cacheControl).toBeUndefined();
+        });
+        it("keeps an own-build entry's window", async () => {
+            const hit = await handlerGet(
+                storedEntry(WINDOW, SEVEN_MINUTES_MS, THIS_BUILD),
+                THIS_DIST,
+            );
+            expect(hit?.cacheControl).toEqual(WINDOW);
+        });
+    });
+
+    it("leaves a ctx-less (vinext) read untouched: the window is vinext's to read, even from another build", async () => {
+        const mod = (await import(
+            `../adapters/cache-handler.js?wakevinext=${Math.random()}`
+        )) as {
+            default: new (
+                o: unknown,
+            ) => {
+                get: (k: string) => Promise<{ cacheControl?: unknown } | null>;
+            };
+            __setRedisClientForTests: (c: unknown) => void;
+        };
+        const handler = new mod.default({ serverDistDir: THIS_DIST });
+        mod.__setRedisClientForTests({
+            connected: true,
+            async connect() {},
+            async get() {
+                return storedEntry(
+                    { revalidate: 3600, expire: ONE_YEAR_S },
+                    SEVEN_MINUTES_MS,
+                    OTHER_BUILD,
+                );
+            },
+            async send() {
+                return "OK";
+            },
+        });
+        const hit = await handler.get("vinext-key");
+        expect(hit?.cacheControl).toEqual({
+            revalidate: 3600,
+            expire: ONE_YEAR_S,
+        });
+    });
+
     it("seeds a pre-16.3.7 `/index` key under Next's toRoute form `/` (older-Next branch)", async () => {
         // Peer floor is next >= 16.0.0: those Nexts hand the handler the bare
         // `/index` key (no `/route-cache/` prefix) and file the window under `/`.
@@ -507,7 +726,7 @@ describe("the in-memory path (no REDIS_URL) gets the same treatment", () => {
                 dev: false,
                 minimalMode: false,
                 requestHeaders: {},
-                getPrerenderManifest: emptyManifest,
+                ...nextManifestOptions(),
                 CurCacheHandler: mod.default,
                 serverDistDir: THIS_DIST,
             }) as unknown as {
