@@ -493,16 +493,23 @@ zone, keep calls short or move the work to a zone function.
 When the app has `knext.ffi.json` and runs on Bun, `knext build` (and `knext deploy` and
 `knext preview`, which build the same way) runs `knext ffi build` **before** the project build:
 
-1. **Checks the toolchain** and stops with the install command for anything missing.
-2. **Cross-compiles** the crate for the image: `cargo zigbuild --release --locked --target <target>`
-   with `-C target-feature=-crt-static`, so the library links against the musl C library the
+1. **Checks the toolchain** and stops with the install command for anything missing: Rust and the
+   musl target, the four cargo tools and zig, each at its pinned version (see below).
+2. **Checks the dependencies** before anything is compiled: `rust/Cargo.lock` may take git
+   dependencies only from the knext repository, and `cargo deny check` must pass (see
+   [Supply chain](#supply-chain)).
+3. **Cross-compiles** the crate for the image:
+   `cargo auditable zigbuild --release --locked --target <target>` with
+   `-C target-feature=-crt-static`, so the library links against the musl C library the
    Alpine-based image has. `--locked` means `rust/Cargo.lock` must be committed.
-3. **Checks what the library links.** Only `libc.so`, musl's own `libc.musl-<arch>.so.1` and
+4. **Checks what the library links.** Only `libc.so`, musl's own `libc.musl-<arch>.so.1` and
    `ld-musl-<arch>.so.1`, and `libgcc_s.so.1` are allowed. A glibc library (`libc.so.6`,
-   `ld-linux-*`) would crash on the image, so the build stops and names it.
-4. **Stages** the library as `native/ffi/<target>/lib<name>.so` with a `provenance.json` beside it,
-   replacing only `native/ffi/`.
-5. **Checks the committed module** against the library it just built. If they differ, the build
+   `ld-linux-*`) would crash on the image, so the build stops and names it. The library must also
+   carry the crate list `cargo auditable` embeds.
+5. **Writes an SBOM** of the crate's dependencies for the target with `cargo cyclonedx`.
+6. **Stages** the library as `native/ffi/<target>/lib<name>.so` with a `provenance.json` and an
+   `sbom.cdx.json` beside it, replacing only `native/ffi/`.
+7. **Checks the committed module** against the library it just built. If they differ, the build
    stops: run `knext ffi generate` and commit the result.
 
 Then the normal build runs, and the image ships `native/` beside the server executable with a
@@ -529,14 +536,37 @@ architecture. `knext deploy --image` builds nothing from the checkout, so it nee
   rustup target add x86_64-unknown-linux-musl
   ```
 
-- **cargo-zigbuild**, which cross-compiles against musl from macOS or any Linux:
+- **Four cargo tools, at these exact versions.** `cargo-zigbuild` cross-compiles against musl from
+  macOS or any Linux, `cargo-deny` checks the dependencies, `cargo-auditable` embeds the crate list
+  in the library, and `cargo-cyclonedx` writes the SBOM. A missing tool, or any other version, stops
+  the build with the command that installs the pinned one:
 
   ```bash title="shell"
-  cargo install --locked cargo-zigbuild
+  cargo install --locked --version 0.23.4 cargo-zigbuild
+  cargo install --locked --version 0.20.2 cargo-deny
+  cargo install --locked --version 0.7.7 cargo-auditable
+  cargo install --locked --version 0.5.9 cargo-cyclonedx
   ```
 
-- **zig**, which supplies the musl C library to link against: from
-  [ziglang.org/download](https://ziglang.org/download/), or `pip install ziglang`.
+  `cargo-auditable` has no version flag, so knext reads its version from the record
+  `cargo install` keeps. Install it with `cargo install`, not a system package manager.
+
+- **zig 0.17.0**, which supplies the musl C library to link against. A `zig` on `PATH` is used only
+  if `zig version` prints exactly `0.17.0`; a zig of any other version on `PATH` is refused, never
+  silently replaced. With no zig on `PATH`, knext downloads the pinned zig 0.17.0 archive from
+  ziglang.org and checks its sha256 against the one it pins; a mismatch stops the build and nothing
+  is installed. Downloads are pinned for `linux-x86_64`, `linux-aarch64` and `macos-aarch64`; on
+  any other host (an Intel Mac, say), install zig 0.17.0 from
+  [ziglang.org/download](https://ziglang.org/download/) and put it on `PATH`.
+
+  The archive is cached in `$KNEXT_CACHE_DIR/zig/0.17.0` if `KNEXT_CACHE_DIR` is set, otherwise
+  `$XDG_CACHE_HOME/knext/zig/0.17.0`, otherwise `~/.cache/knext/zig/0.17.0`. The extracted zig is
+  not cached: every build checks the cached archive's sha256 again and extracts it into a private
+  temporary directory of its own, which it removes when done. That costs about 10 s per build;
+  putting zig 0.17.0 on `PATH` skips it.
+
+  The download gives up after 10 minutes, and it does not use `HTTPS_PROXY`. Behind a proxy, or
+  where the build machine cannot reach ziglang.org, install zig 0.17.0 on `PATH` instead.
 
 `knext ffi generate` and `knext ffi check` need only Rust.
 
@@ -593,31 +623,78 @@ knext: in-process Rust (bun:ffi) does not work in self-contained mode.
 
 ## Supply chain
 
-What every image build does today:
+Every image build runs these checks, and stops on the first one that fails, before anything ships:
 
+- **Pinned tools.** zig and the four cargo tools must be the exact versions listed in
+  [Building images](#building-images), and a zig knext downloads is checked against the sha256 it
+  pins. The versions used are recorded in `provenance.json`.
 - **Locked dependencies.** The cross-compile is `--locked`, so `rust/Cargo.lock` must be committed
   and is used as it is. The Rust version is pinned by `rust/rust-toolchain.toml`, and `knext-ffi` by
   a full git commit, not a branch or tag.
-- **A provenance record** beside each library, `native/ffi/<target>/provenance.json`: the crate's
-  name and version, the sha256 of `Cargo.lock`, `rustc -V`, the `cargo zigbuild` version, the
-  target, the profile, the `knext-ffi` commit, and the library's own sha256. It ships in the image.
+- **Git sources.** Every git dependency in `rust/Cargo.lock` must come from
+  [https://github.com/getknext-dev/knext](https://github.com/getknext-dev/knext), where the `knext-ffi` crates live. Depend on anything else
+  through a crates.io release. This is checked from `Cargo.lock` itself, so editing `deny.toml`
+  does not widen it.
+- **`cargo deny check`** runs before every build. Its bans, licences and sources checks run under
+  `rust/deny.toml`, which `knext ffi init` writes (crates.io plus the knext repository as sources,
+  a starting licence list to review, yanked crates refused). Any RustSec advisory against a
+  dependency fails the build unless `rust/advisory-allowlist.json` accepts it (below).
+- **`cargo auditable`** wraps the cross-compile and embeds the list of crates in the library, so
+  image scanners that read it can see the Rust dependencies. A library without that list is
+  refused.
+- **A CycloneDX SBOM** of the crate's dependencies for each target, from `cargo cyclonedx`, staged
+  as `native/ffi/<target>/sbom.cdx.json`. It ships in the image and is covered by the integrity
+  manifest like everything else under `native/`.
+- **A provenance record** beside each library, `native/ffi/<target>/provenance.json`, also in the
+  image, with these fields:
+  - `version`: the format of this file, `1`.
+  - `crate`: the crate's name and version.
+  - `cargoLockSha256`: the sha256 of `rust/Cargo.lock`.
+  - `rustc`: the `rustc -V` line.
+  - `zigbuild`: the `cargo-zigbuild` version.
+  - `target`: the target triple.
+  - `profile`: `release`.
+  - `knextFfiRev`: the `knext-ffi` commit `Cargo.lock` resolved.
+  - `library`: the library's file name and sha256.
+  - `tools`: the version of each cargo tool, and zig's version and where it came from (`path`, or
+    `ziglang.org` with the sha256 of the archive it was extracted from).
+  - `advisoriesAccepted`: the advisory ids the allowlist accepted for this build.
+  - `sbom`: the SBOM's file name and sha256.
 - **An integrity check at load.** `native/.integrity.json` holds the sha256 of every file under
   `native/`, written at build time; the module refuses to load a library that is not listed or does
   not match.
 - **The module matches the library.** The build regenerates the module from the library it is about
   to ship and stops on any difference, and the module itself checks the library's functions when it
   loads.
-- **No glibc surprises.** The link check above refuses a library the image cannot load.
+- **No glibc surprises.** The link check refuses a library the image cannot load.
 
-Planned before this leaves Beta, and **not done by the build today**:
+### Accepting an advisory
 
-- `cargo deny check` (advisories, licences, banned crates, allowed sources) before every image
-  build, with a `deny.toml` that `knext ffi init` writes;
-- building through `cargo auditable`, so image scanners can see the Rust dependency graph;
-- a CycloneDX SBOM of the crate graph shipped as `native/ffi/<target>/sbom.cdx.json`;
-- exact version pins, verified at build time, for zig, `cargo-zigbuild` and the other cargo tools.
+First try to upgrade the affected crate (`cargo update -p <crate>`). If you cannot fix it yet,
+accept that one advisory in `rust/advisory-allowlist.json`, beside `deny.toml`:
 
-Until then, run `cargo deny` or `cargo audit` on `rust/` in your own CI if you need those checks.
+```json title="rust/advisory-allowlist.json"
+{
+  "allow": [
+    {
+      "id": "RUSTSEC-2021-0003",
+      "justification": "The affected function is never called by this crate.",
+      "added": "2026-10-14",
+      "expires": "2027-01-14"
+    }
+  ]
+}
+```
+
+- `id`: the RustSec id, `RUSTSEC-YYYY-NNNN`.
+- `justification`: why the risk is acceptable here; it may not be empty.
+- `added`: the date the entry was added, `YYYY-MM-DD`.
+- `expires`: optional, a `YYYY-MM-DD` date. After it, the entry stops covering the advisory and the
+  build fails again until someone re-justifies it.
+
+A malformed file or entry fails the build. The build prints each advisory it accepted, and
+`provenance.json` records them. An advisory listed only in the `ignore` list of `deny.toml` is
+still refused: that list carries no date or reason, so only the allowlist can accept an advisory.
 
 ## Reserved names
 

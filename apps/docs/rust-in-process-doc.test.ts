@@ -14,8 +14,15 @@
  * - the reserved-name error is the message `scanManifest` throws for a
  *   function named `process`, and the reserved name lists are the generator's
  *   own `RESERVED` and `RESERVED_TYPES` sets;
- * - the toolchain install commands are `INSTALL_HINTS`, the strings the
- *   build's toolchain check prints;
+ * - the toolchain install commands are `INSTALL_HINTS` and
+ *   `cargoInstallCommand`, the strings the build's toolchain checks print,
+ *   for every pinned cargo tool in `CARGO_TOOL_PINS`; the zig version, its
+ *   download hosts, cache directories and timeout are `ZIG_PIN`,
+ *   `zigCacheDir` and `ZIG_DOWNLOAD_TIMEOUT_MS`;
+ * - the supply-chain file names and the allowed git source are the
+ *   constants the build uses, the advisory allowlist example is parsed by
+ *   `loadAdvisoryAllowlist`, and the provenance field list is the set of
+ *   keys the build writes (scanned from build.ts and supply-chain.ts);
  * - the Rust messages (the `char` compile error, the "could not be decoded"
  *   input error) are the string literals in the crates' source, and the
  *   compile error is cross-checked against the compiler output its trybuild
@@ -31,14 +38,29 @@
  */
 
 import { describe, expect, it } from 'bun:test';
-import { readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { blob, D, fn } from '../../packages/ffi/src/__tests__/helpers';
-import { INSTALL_HINTS, SUPPORTED_TARGETS } from '../../packages/ffi/src/build';
+import { INSTALL_HINTS, PROVENANCE_FILE, SUPPORTED_TARGETS } from '../../packages/ffi/src/build';
 import { BETA_NOTICE } from '../../packages/ffi/src/cli';
 import { DEFAULT_CONFIG, serializeConfig } from '../../packages/ffi/src/config';
+import { TEMPLATE_DIR } from '../../packages/ffi/src/init';
 import { RESERVED, RESERVED_TYPES, scanManifest } from '../../packages/ffi/src/manifest';
 import { renderModule } from '../../packages/ffi/src/render';
+import {
+  ADVISORY_ALLOWLIST_FILE,
+  ALLOWED_GIT_SOURCE,
+  CARGO_TOOL_PINS,
+  type CargoTool,
+  cargoInstallCommand,
+  DENY_FILE,
+  loadAdvisoryAllowlist,
+  SBOM_FILE,
+  ZIG_DOWNLOAD_TIMEOUT_MS,
+  ZIG_PIN,
+  zigCacheDir,
+} from '../../packages/ffi/src/supply-chain';
 import {
   FFI_NODE_REFUSAL,
   FFI_SELF_CONTAINED_REFUSAL,
@@ -156,6 +178,63 @@ function rustLiteral(rel: string, before: RegExp): string {
 /** A Rust format string split into literal runs and `{…}` arguments. */
 function rustFormat(fmt: string): Part[] {
   return fmt.split(/(\{[a-z_]*\})/).map((p) => (/^\{[a-z_]*\}$/.test(p) ? null : p));
+}
+
+/**
+ * The top-level keys of the object literal that opens where `anchor` ends (the
+ * anchor ends with its `{`), in `source`. A spread is returned as `...name`.
+ * Any depth-1 line that is not `key:`, `key,` or a spread fails, so a literal
+ * this scan cannot read reds the test rather than shrinking the key set.
+ */
+function literalKeys(rel: string, anchor: RegExp): string[] {
+  const source = repoFile(rel);
+  const hit = only(source, anchor, rel);
+  const keys: string[] = [];
+  let depth = 1;
+  for (const raw of source.slice(hit.index + hit[0].length).split('\n')) {
+    const line = raw.trim();
+    if (depth === 1 && line !== '' && !line.startsWith('//') && !line.startsWith('}')) {
+      const m = /^(?:(\.\.\.[\w.]+),|(\w+)(?::|,$))/.exec(line);
+      if (!m) throw new Error(`${rel}: cannot read the literal line \`${line}\``);
+      keys.push((m[1] ?? m[2]) as string);
+    }
+    for (const c of line.replace(/'[^']*'|`[^`]*`/g, '')) {
+      if (c === '{' || c === '[') depth++;
+      if (c === '}' || c === ']') depth--;
+    }
+    if (depth <= 0) return keys;
+  }
+  throw new Error(`${rel}: unterminated literal after ${anchor}`);
+}
+
+/** Every key `provenance.json` carries: build.ts's literal, with supply-chain.ts's spread in. */
+function provenanceKeys(): string[] {
+  const build = literalKeys('packages/ffi/src/build.ts', /const provenance = \{/);
+  const supply = literalKeys(
+    'packages/ffi/src/supply-chain.ts',
+    /export async function prepareSupplyChain[\s\S]*?\n {4}provenance: \{/,
+  );
+  expect(build).toContain('...supply.provenance');
+  expect(supply.length).toBeGreaterThan(0);
+  return build.flatMap((k) => (k === '...supply.provenance' ? supply : [k]));
+}
+
+/**
+ * Every versioned mention of a pinned tool in `text` (`zig 0.17.0`,
+ * `cargo-deny 0.20.2`, `zig/0.17.0`) names the pinned version: a scan, so a
+ * stale version anywhere on the page fails, not only in the lines a test names.
+ */
+function expectOnlyPinnedVersions(text: string, where: string): void {
+  const pins = new Map<string, string>([
+    ['zig', ZIG_PIN.version],
+    ...Object.values(CARGO_TOOL_PINS).map((p) => [p.crate, p.version] as [string, string]),
+  ]);
+  const tools = [...pins.keys()].map(escapeRe).join('|');
+  const seen = [...text.matchAll(new RegExp(`\\b(${tools})[ /](\\d+\\.\\d+\\.\\d+)`, 'g'))];
+  expect(seen.length, `${where}: no versioned tool mention`).toBeGreaterThan(0);
+  for (const [whole, tool, version] of seen) {
+    expect(version, `${where}: ${whole}`).toBe(pins.get(tool as string) as string);
+  }
 }
 
 /** The message `f` throws. */
@@ -323,12 +402,35 @@ describe('docs — in-process Rust page', () => {
   it('names the image targets and the toolchain install commands the build prints', () => {
     const body = must(page, /building images/i);
     for (const t of SUPPORTED_TARGETS) expect(body).toContain(t);
-    const blocks = codeBlocks(body);
-    expect(blocks).toContain(INSTALL_HINTS.zigbuild);
-    expect(blocks).toContain(`${INSTALL_HINTS.rustupTarget} ${SUPPORTED_TARGETS[0]}`);
-    expect(body).toContain(`(${INSTALL_HINTS.zigUrl})`);
-    expect(body).toContain(`\`${INSTALL_HINTS.zigPip}\``);
+    const lines = codeBlocks(body).flatMap((b) => b.split('\n'));
+    expect(lines).toContain(`${INSTALL_HINTS.rustupTarget} ${SUPPORTED_TARGETS[0]}`);
+    // Every pinned cargo tool, by the exact command its check prints.
+    for (const tool of Object.keys(CARGO_TOOL_PINS) as CargoTool[]) {
+      expect(INSTALL_HINTS[tool], tool).toBe(cargoInstallCommand(tool));
+      expect(lines, tool).toContain(cargoInstallCommand(tool));
+    }
     expect(body).toMatch(/Cargo\.lock/);
+    expect(body).not.toContain('pip install ziglang');
+    expectOnlyPinnedVersions(page, 'rust-in-process.mdx');
+  });
+
+  it('states the pinned zig: version, download hosts, cache, timeout and proxy', () => {
+    const body = must(page, /building images/i);
+    expect(body).toContain(`zig ${ZIG_PIN.version}`);
+    expect(body).toMatch(/other version[^.]*refused/i);
+    for (const host of Object.keys(ZIG_PIN.assets)) expect(body, host).toContain(`\`${host}\``);
+    expect(body).toContain('sha256');
+    expect(body).toMatch(/about 10 s/);
+    expect(ZIG_DOWNLOAD_TIMEOUT_MS % 60_000).toBe(0);
+    expect(body).toContain(`${ZIG_DOWNLOAD_TIMEOUT_MS / 60_000} minutes`);
+    expect(body).toContain('`HTTPS_PROXY`');
+    expect(repoFile('packages/ffi/src/supply-chain.ts')).toContain(
+      'does not go through HTTPS_PROXY',
+    );
+    const v = ZIG_PIN.version;
+    expect(body).toContain(`\`${zigCacheDir({ KNEXT_CACHE_DIR: '$KNEXT_CACHE_DIR' }, '~', v)}\``);
+    expect(body).toContain(`\`${zigCacheDir({ XDG_CACHE_HOME: '$XDG_CACHE_HOME' }, '~', v)}\``);
+    expect(body).toContain(`\`${zigCacheDir({}, '~', v)}\``);
   });
 
   it('says what happens to a non-finite float in each JSON position', () => {
@@ -372,11 +474,50 @@ describe('docs — in-process Rust page', () => {
     expect(body).toContain('--conditions=react-server');
   });
 
-  it('marks the supply-chain checks that are planned rather than shipped', () => {
+  it('describes the supply-chain gates as shipped, by the names the build uses', () => {
     const body = must(page, /supply chain/i);
-    expect(body).toMatch(/planned/i);
-    expect(body).toContain('provenance.json');
+    expect(body).not.toMatch(/planned|not done/i);
+    expect(body).toContain('`cargo deny check`');
+    expect(body).toContain('`cargo auditable`');
+    expect(body).toContain(`\`${DEFAULT_CONFIG.crate}/${DENY_FILE}\``);
+    expect(existsSync(join(TEMPLATE_DIR, DEFAULT_CONFIG.crate, DENY_FILE))).toBe(true);
+    expect(body).toContain(`\`${DEFAULT_CONFIG.crate}/${ADVISORY_ALLOWLIST_FILE}\``);
+    expect(body).toContain(`\`native/ffi/<target>/${SBOM_FILE}\``);
+    expect(body).toContain(`\`native/ffi/<target>/${PROVENANCE_FILE}\``);
     expect(body).toContain('.integrity.json');
+    expect(body).toContain(ALLOWED_GIT_SOURCE);
+    // deny.toml's own `ignore` is not an allowlist.
+    expect(body).toMatch(/ignore[^.]*deny\.toml[^.]*still refused/i);
+  });
+
+  it('shows an advisory allowlist the build accepts, naming every field', () => {
+    const body = must(page, /supply chain/i);
+    const json = codeBlocks(body).filter((b) => b.includes('"allow"'));
+    expect(json).toHaveLength(1);
+    const dir = mkdtempSync(join(tmpdir(), 'knext-docs-allowlist-'));
+    try {
+      writeFileSync(join(dir, ADVISORY_ALLOWLIST_FILE), json[0] as string);
+      const entries = loadAdvisoryAllowlist(dir, 'rust');
+      expect(entries.length).toBeGreaterThan(0);
+      expect(Object.keys(entries[0] as object).sort()).toEqual([
+        'added',
+        'expires',
+        'id',
+        'justification',
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    for (const field of ['id', 'justification', 'added', 'expires']) {
+      expect(body, field).toContain(`\`${field}\``);
+    }
+    expect(body).toMatch(/`expires`[^.]*optional/);
+  });
+
+  it('lists exactly the fields provenance.json carries', () => {
+    const body = must(page, /supply chain/i);
+    const listed = [...body.matchAll(/^ {2}- `(\w+)`/gm)].map((m) => m[1]);
+    expect(listed.sort()).toEqual(provenanceKeys().sort());
   });
 });
 
@@ -391,6 +532,16 @@ describe('docs — the `knext ffi` CLI reference', () => {
     expect(body).toContain('Exit code');
     expect(body).toContain('--target');
     expect(body).toContain('--native-dir');
+  });
+
+  it('names every pinned build tool and the files `knext ffi init` writes', () => {
+    for (const pin of Object.values(CARGO_TOOL_PINS)) {
+      expect(body, pin.crate).toContain(`${pin.crate} ${pin.version}`);
+    }
+    expect(body).toContain(`zig ${ZIG_PIN.version}`);
+    expectOnlyPinnedVersions(cli, 'cli.mdx');
+    expect(body).toContain(`\`${DENY_FILE}\``);
+    expect(body).toContain(`\`${SBOM_FILE}\``);
   });
 
   it('quotes the Beta line every run prints', () => {

@@ -571,7 +571,7 @@ Rust toolchain, and `knext ffi check` (CI) and `knext ffi build` (image) fail on
 Then the normal build continues. Steps 1–5 and the D15 preflight must run for **every** command
 that builds an image, not only `knext build`: `knext deploy` and `knext preview` build through the
 same `runProjectBuild` (`project-build.ts`). **The D15 refusals do not go there** (round 3):
-`runProjectBuild` is skipped by `knext deploy --skip-build` and `knext build --skip-next-build`,
+`runProjectBuild` is skipped by `knext deploy --skip-build` and `knext build --skip-next`,
 and it never sees the resolved `selfContained` (that is resolved from config plus
 `--self-contained` inside `compileArtifactForDeploy`). Nor do they go in
 `compileArtifactForDeploy` alone (round 4): `knext deploy --skip-build` never calls it (that leg
@@ -580,7 +580,7 @@ calls `assertCompiledArtifactFresh` instead). Both refusals live in **one shared
 `compileArtifactForDeploy` uses and is called **first** in each of `knext build`, `knext deploy` and
 `knext preview`: before the ffi dispatch, before any `cargo` or Next build, and before the
 skip-build branch (jev 0.95). So it also stops before any build work for `selfContained`, not only
-for Node. Tests cover `knext deploy --skip-build` and `knext build --skip-next-build` with an
+for Node. Tests cover `knext deploy --skip-build` and `knext build --skip-next` with an
 opted-in `runtime: 'node'` app and with `selfContained: true`, each refused before any build or
 image step; a scan test asserts each of the three callers calls the preflight before anything else. The dispatch (steps 1–5) runs in each of the three callers
 before `runProjectBuild` (it is async, `runProjectBuild` is not), and a test scans the three for it.
@@ -823,7 +823,7 @@ FFI-5 (standalone gates) and an FFI-6 draft can run in parallel from day one.
 |---|---|---|
 | **#2343 FFI-1** | `crates/knext-ffi` + `crates/knext-ffi-macros`: D3, D4 (including the transitive `_schema` hash), D5, D6, D7 (64-bit as a decimal string in every JSON position), D8 (Rust half), D9; trybuild, panic and leak tests; `rust-crates.yml` CI | — |
 | **#2344 FFI-2** | `@getknext/ffi`: `knext ffi init/generate/check`, `knext.ffi.json`, scanner, emitter, generated loader (D11–D13, D15 runtime half), including the two-phase multi-argument marshalling (D13 item 6), the per-position 64-bit codec (D7), the `_schema` check at load (D4) and the prerendering `FfiLoadError` (D13 step 5); core `ffi-dispatch.ts` + help; D18 guard; D19 registry entry | — (its real-library test waits for #2343) |
-| **#2345 FFI-3** | `knext ffi build` (D14 steps 1–5) and core: Node and self-contained refusals (D15) in the shared `assertFfiTargetSupported` preflight called first by build/deploy/preview (round 4; tests for `deploy --skip-build`/`build --skip-next-build`), dispatch before the project build in `build`/`deploy`/`preview`, the standalone-path `writeNativeIntegrityManifest` call in `compileArtifactForDeploy` and the inserted `COPY native /app/.next/standalone/native` line in `stageStandaloneBuildContext`, inserted before nesting, plus its conditional `NEST_RULES` entry and a nested-layout test covering opted-in and non-ffi apps (D14), zero-diff test (D17) | #2344 (dispatch protocol, `renderModule`); #2343 for a real library in tests. Core-side work starts at once against a fake loader |
+| **#2345 FFI-3** | `knext ffi build` (D14 steps 1–5) and core: Node and self-contained refusals (D15) in the shared `assertFfiTargetSupported` preflight called first by build/deploy/preview (round 4; tests for `deploy --skip-build`/`build --skip-next`), dispatch before the project build in `build`/`deploy`/`preview`, the standalone-path `writeNativeIntegrityManifest` call in `compileArtifactForDeploy` and the inserted `COPY native /app/.next/standalone/native` line in `stageStandaloneBuildContext`, inserted before nesting, plus its conditional `NEST_RULES` entry and a nested-layout test covering opted-in and non-ffi apps (D14), zero-diff test (D17) | #2344 (dispatch protocol, `renderModule`); #2343 for a real library in tests. Core-side work starts at once against a fake loader |
 | **#2346 FFI-4** | musl load matrix on Alpine x64/arm64 with a read-only root; kind e2e of a Server Action calling Rust on a Bun zone; Node refusal asserted (D20); the same fixture passes the compat-smoke capability checks, red-on-fail (D17) | #2343, #2344, #2345 merged; fixture and workflow skeleton can be written in parallel |
 | **#2347 FFI-5** | supply chain: `cargo deny`, `cargo auditable` (prove it composes with zigbuild), CycloneDX SBOM, `deny.toml` template, and the build-tool pins (zig version + sha256, `cargo install --locked --version` for the four cargo tools) (D16) | #2345 for the one call site only |
 | **#2348 FFI-6** | user docs page (Beta), including the dynamic-contexts-only rule and the two ways to make a route dynamic (D13 step 5), and the `knext ffi` CLI reference | #2344, #2345 for the final surface; a draft can start now |

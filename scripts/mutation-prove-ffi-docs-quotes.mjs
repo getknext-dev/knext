@@ -5,7 +5,8 @@
  *
  * The page quotes messages a user acts on: the runtime refusals the generated
  * module throws, the build-time refusals, the reserved-name error, the
- * toolchain install commands and two Rust messages. The guard's claim is that
+ * toolchain install commands and tool pins, the supply-chain file names,
+ * allowlist format and provenance fields, and two Rust messages. The guard's claim is that
  * every one of them is bound to the code that prints it, compared WHOLE, so
  * changing any of those strings in the code reds the docs test until the page
  * is updated. Round 1 compared multi-line refusals on their first line only
@@ -89,14 +90,14 @@ const MUTATIONS = [
     anchor: String.raw`status === 3 ? \`invalid input: \${message}\` : message);`,
     replacement: String.raw`status === 3 ? \`bad input: \${message}\` : message);`,
   },
-  // ── The toolchain install commands (build.ts) ──────────────────────────
+  // ── The toolchain install commands and pins (build.ts, supply-chain.ts) ─
   {
     id: 'B1',
     expect: 'red',
-    claim: 'the cargo-zigbuild install hint drops --locked',
-    subject: 'build',
-    anchor: "  zigbuild: 'cargo install --locked cargo-zigbuild',",
-    replacement: "  zigbuild: 'cargo install cargo-zigbuild',",
+    claim: 'the pinned cargo tool install command drops --locked',
+    subject: 'supplyChain',
+    anchor: 'return `cargo install --locked --version ${pin.version} ${pin.crate}`;',
+    replacement: 'return `cargo install --version ${pin.version} ${pin.crate}`;',
   },
   {
     id: 'B2',
@@ -109,10 +110,107 @@ const MUTATIONS = [
   {
     id: 'B3',
     expect: 'red',
-    claim: 'the zig pip hint names a different package',
+    claim: 'the cargo-deny pin moves and the pages still say 0.20.2',
+    subject: 'supplyChain',
+    anchor: "    version: '0.20.2',",
+    replacement: "    version: '0.20.3',",
+  },
+  {
+    id: 'B4',
+    expect: 'red',
+    claim: 'the cargo-cyclonedx pin moves and the pages still say 0.5.9',
+    subject: 'supplyChain',
+    anchor: "    version: '0.5.9',",
+    replacement: "    version: '0.5.10',",
+  },
+  {
+    id: 'Z1',
+    expect: 'red',
+    claim: 'the zig pin moves and the pages still say zig 0.17.0',
+    subject: 'supplyChain',
+    anchor: "  version: '0.17.0',",
+    replacement: "  version: '0.17.1',",
+  },
+  {
+    id: 'Z2',
+    expect: 'red',
+    claim: 'the zig download timeout changes and the page still says 10 minutes',
+    subject: 'supplyChain',
+    anchor: 'export const ZIG_DOWNLOAD_TIMEOUT_MS = 10 * 60 * 1000;',
+    replacement: 'export const ZIG_DOWNLOAD_TIMEOUT_MS = 5 * 60 * 1000;',
+  },
+  {
+    id: 'Z3',
+    expect: 'red',
+    claim: 'the default zig cache directory moves',
+    subject: 'supplyChain',
+    anchor: ": join(home, '.cache', 'knext');",
+    replacement: ": join(home, '.knext', 'cache');",
+  },
+  {
+    id: 'Z4',
+    expect: 'red',
+    claim: 'a pinned zig download host is renamed and the page still lists the old one',
+    subject: 'supplyChain',
+    anchor: "    'macos-aarch64': {",
+    replacement: "    'darwin-aarch64': {",
+  },
+  // ── The supply-chain files, fields and sources ──────────────────────────
+  {
+    id: 'S1',
+    expect: 'red',
+    claim: 'the staged SBOM file is renamed',
+    subject: 'supplyChain',
+    anchor: "export const SBOM_FILE = 'sbom.cdx.json';",
+    replacement: "export const SBOM_FILE = 'sbom.json';",
+  },
+  {
+    id: 'S2',
+    expect: 'red',
+    claim: 'the advisory allowlist file is renamed',
+    subject: 'supplyChain',
+    anchor: "export const ADVISORY_ALLOWLIST_FILE = 'advisory-allowlist.json';",
+    replacement: "export const ADVISORY_ALLOWLIST_FILE = 'rustsec-allowlist.json';",
+  },
+  {
+    id: 'S3',
+    expect: 'red',
+    claim: 'the cargo-deny policy file is renamed (and init no longer writes the documented one)',
+    subject: 'supplyChain',
+    anchor: "export const DENY_FILE = 'deny.toml';",
+    replacement: "export const DENY_FILE = 'cargo-deny.toml';",
+  },
+  {
+    id: 'S4',
+    expect: 'red',
+    claim: 'the allowlist loader wants a field the documented example does not have',
+    subject: 'supplyChain',
+    anchor: '    if (!isIsoDate(e.added)) {',
+    replacement: '    if (!isIsoDate(e.date)) {',
+  },
+  {
+    id: 'S5',
+    expect: 'red',
+    claim: 'provenance.json gains a field the page does not list',
     subject: 'build',
-    anchor: "  zigPip: 'pip install ziglang',",
-    replacement: "  zigPip: 'pip install zig',",
+    anchor: "        profile: 'release',",
+    replacement: `        profile: 'release', ${MARK}\n        builder: 'knext',`,
+  },
+  {
+    id: 'S6',
+    expect: 'red',
+    claim: 'a provenance field from the supply-chain gates is renamed',
+    subject: 'supplyChain',
+    anchor: '      advisoriesAccepted: accepted,',
+    replacement: '      acceptedAdvisories: accepted,',
+  },
+  {
+    id: 'S7',
+    expect: 'red',
+    claim: 'the one allowed git source changes and the page still names the old one',
+    subject: 'init',
+    anchor: "export const CRATE_GIT = 'https://github.com/getknext-dev/knext';",
+    replacement: "export const CRATE_GIT = 'https://github.com/getknext-dev/knext-ffi';",
   },
   // ── The build-time refusals (ffi-preflight.ts), past the first line ────
   {
@@ -194,6 +292,8 @@ const prover = createGuardProver({
   subjects: {
     render: 'packages/ffi/src/render.ts',
     build: 'packages/ffi/src/build.ts',
+    supplyChain: 'packages/ffi/src/supply-chain.ts',
+    init: 'packages/ffi/src/init.ts',
     preflight: 'packages/kn-next/src/cli/ffi-preflight.ts',
     manifest: 'packages/ffi/src/manifest.ts',
     macroTypes: 'crates/knext-ffi-macros/src/types.rs',
@@ -206,9 +306,9 @@ prover.preflight(MUTATIONS);
 declareMutations(MUTATIONS.length);
 prover.baseline();
 prover.proveCanSeeRed({
-  subject: 'build',
-  anchor: "  zigUrl: 'https://ziglang.org/download/',",
-  replacement: "  zigUrl: 'https://ziglang.org/downloads/',",
+  subject: 'supplyChain',
+  anchor: "    version: '0.7.7',",
+  replacement: "    version: '0.7.8',",
 });
 
 console.log('\n=== mutations ===');

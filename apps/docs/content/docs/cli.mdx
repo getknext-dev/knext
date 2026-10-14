@@ -408,12 +408,13 @@ underlying error — the two are never conflated. See [the Bun runtime](/docs/bu
 </Callout>
 
 **In-process Rust (Beta, Bun only).** When the app has a `knext.ffi.json`, `build` (and `deploy`
-and `preview`, which build the same way) first cross-compiles the app's Rust crate for the image
-(`knext ffi build`: Linux musl, release, `--locked`), refuses a library that links anything the
-Alpine image lacks, stages it under `native/ffi/` with a provenance record, and fails if the
-committed generated wrapper is out of date (run `knext ffi generate`). The image then ships
-`native/` beside the executable, with a checksum manifest the loader verifies. This needs Rust,
-`cargo-zigbuild` and `zig` on the build machine. Two configurations are refused before any build
+and `preview`, which build the same way) first checks the Rust crate's dependencies with
+`cargo deny check`, cross-compiles it for the image (`knext ffi build`: Linux musl, release,
+`--locked`), refuses a library that links anything the Alpine image lacks, stages it under
+`native/ffi/` with a provenance record and an SBOM, and fails if the committed generated wrapper is
+out of date (run `knext ffi generate`). The image then ships `native/` beside the executable, with a
+checksum manifest the loader verifies. This needs Rust, pinned versions of four cargo tools and zig
+on the build machine; see [Building images](/docs/rust-in-process#building-images). Two configurations are refused before any build
 work, with a message that says how to fix them: `runtime: 'node'` (Rust is called through
 `bun:ffi`, which exists only in Bun) and the self-contained mode. An app without `knext.ffi.json`
 builds exactly as before.
@@ -825,7 +826,8 @@ knext ffi build --target x86_64-unknown-linux-musl --native-dir native   # run b
 `rust`; the generated module's directory, `out`, to `src/generated/ffi`) and a `rust/` crate:
 `Cargo.toml` (a `cdylib` that depends on the
 `knext-ffi` crate by git, pinned to the full commit the installed `@getknext/ffi` records),
-`rust-toolchain.toml`, and `src/lib.rs` with a `greet` function. It refuses to overwrite: if
+`rust-toolchain.toml`, `src/lib.rs` with a `greet` function, and `deny.toml`, the dependency
+policy `knext ffi build` checks with `cargo deny`. It refuses to overwrite: if
 `knext.ffi.json` or `rust/` exists, nothing is written. It also writes nothing if the installed
 `@getknext/ffi` records no `knext-ffi` commit.
 
@@ -839,13 +841,17 @@ only files it recorded in `.knext-generated.json` and never writes through a sym
 **`knext ffi check`** does the same build and compares instead of writing. Run it in CI.
 
 **`knext ffi build`** is run for you by `knext build`, `knext deploy` and `knext preview` when
-`knext.ffi.json` exists; you do not usually run it by hand. It cross-compiles the crate for the
-image with `cargo zigbuild` (musl, release, `--locked`), refuses a library that links anything the
-Alpine image lacks (a glibc `libc.so.6`, say), stages it as
-`<native-dir>/ffi/<target>/lib<name>.so` with a `provenance.json`, and fails if the committed
-wrapper is not what `knext ffi generate` renders from that library. It needs Rust,
-`cargo-zigbuild` and `zig`, and a committed `Cargo.lock`. See
-[Building images](/docs/rust-in-process#building-images).
+`knext.ffi.json` exists; you do not usually run it by hand. It runs `cargo deny check` on the
+crate's dependencies (with `rust/advisory-allowlist.json` for accepted advisories), cross-compiles
+the crate for the image with `cargo auditable zigbuild` (musl, release, `--locked`), refuses a
+library that links anything the Alpine image lacks (a glibc `libc.so.6`, say), stages it as
+`<native-dir>/ffi/<target>/lib<name>.so` with a `provenance.json` and a CycloneDX `sbom.cdx.json`,
+and fails if the committed wrapper is not what `knext ffi generate` renders from that library. It
+needs Rust, a committed `Cargo.lock`, and these exact tool versions: cargo-zigbuild 0.23.4,
+cargo-deny 0.20.2, cargo-auditable 0.7.7 and cargo-cyclonedx 0.5.9 (each installed with
+`cargo install --locked --version <version> <crate>`), and zig 0.17.0, which knext downloads and
+verifies when no zig is on `PATH`. See [Building images](/docs/rust-in-process#building-images) and
+[Supply chain](/docs/rust-in-process#supply-chain).
 
 | Flag | Notes |
 |---|---|
@@ -858,7 +864,8 @@ wrapper is not what `knext ffi generate` renders from that library. It needs Rus
 **Exit code:** `0` on success, when `check` finds the wrapper up to date, and for `--help`; `1` on
 a usage error (an unknown command or flag, a missing or invalid `knext.ffi.json`), when `init` finds
 `knext.ffi.json` or `rust/` already there, when `check` finds the wrapper out of date, on a missing
-tool, on a failed Rust build, when `build` refuses the library or finds the wrapper out of date, and
+tool or one at another version than its pin, when a supply-chain check refuses a dependency, on a
+failed Rust build, when `build` refuses the library or finds the wrapper out of date, and
 when the package is missing or does not match this `@getknext/core`.
 
 ## Directly runnable entries
