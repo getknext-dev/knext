@@ -281,6 +281,10 @@ describe("usage mistakes are UsageErrors, so they render as messages", () => {
             // count that drifted is a knext packaging defect (caught by
             // runtime-image-nested.test.ts before release), never user input.
             "cannot nest the standalone Dockerfile",
+            // Same class for the in-process Rust native/ COPY's anchor (ADR-0069
+            // D14): a template that moved under the insertion is a packaging
+            // defect (caught by ffi-image-staging.test.ts), never user input.
+            "cannot add the in-process Rust native/ COPY",
             // Internal invariant of an exported function (unreachable from
             // argv today: `validate.ts` rejects every `build` value except
             // `vinext` before a deploy/build ever reaches this selector, so

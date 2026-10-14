@@ -1037,10 +1037,19 @@ function appUsesSharp(
  * writes — present, the manifest's own file list says exactly what knext staged
  * and only those entries (plus the manifest) are removed; absent with content,
  * the build REFUSES rather than deleting what it cannot prove it created.
+ *
+ * `native/ffi/` is never touched: it is in-process Rust's staging (ADR-0069
+ * D14), written by `knext ffi build` BEFORE this runs and owned by that step,
+ * which clears and rewrites it itself. The previous manifest lists `ffi/**`
+ * (it hashes the whole tree), so without this exclusion a rebuild deleted the
+ * freshly staged library, and a first build refused a `native/` holding only
+ * `ffi/`. The manifest written after this still covers `ffi/**`.
  */
+const FFI_STAGING_DIR = "ffi";
+
 function clearStagedNative(dest: string): void {
     if (!existsSync(dest)) return;
-    const entries = readdirSync(dest);
+    const entries = readdirSync(dest).filter((e) => e !== FFI_STAGING_DIR);
     if (entries.length === 0) return;
 
     const manifestPath = join(dest, INTEGRITY_MANIFEST_NAME);
@@ -1073,7 +1082,13 @@ function clearStagedNative(dest: string): void {
     const owned = new Set<string>();
     for (const rel of Object.keys(files)) {
         const seg = rel.split("/")[0];
-        if (seg && seg !== "." && seg !== ".." && !seg.includes("\\")) {
+        if (
+            seg &&
+            seg !== "." &&
+            seg !== ".." &&
+            seg !== FFI_STAGING_DIR &&
+            !seg.includes("\\")
+        ) {
             owned.add(seg);
         }
     }

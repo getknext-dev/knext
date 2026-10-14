@@ -46,6 +46,7 @@ import {
 import { createLogger } from "../utils/logger";
 import { compileArtifactForDeploy } from "./build-artifact";
 import { exportBuildIdEnv } from "./build-id-env";
+import { DEPLOY_SHIP_ARCH } from "./build-target";
 import { resolveCompileToolchain } from "./bun-toolchain";
 import {
     renderNextAppCR,
@@ -53,6 +54,7 @@ import {
     validateCRImageRef,
 } from "./cr-builder";
 import { isEntrypoint, runCapture, runInherit, runQuiet } from "./exec";
+import { assertFfiTargetSupported, runFfiBuildStep } from "./ffi-preflight";
 import { runProjectBuild } from "./project-build";
 import {
     dockerBuildxArgs,
@@ -190,6 +192,10 @@ export async function runPreviewDeploy(
     options: PreviewDeployOptions,
     deps: PreviewDeployDeps,
 ): Promise<string> {
+    // In-process Rust (ADR-0069 D15): `preview()` loads the config and hands
+    // it straight here, so this is "right after loadConfig" on the deploy leg
+    // (destroy builds nothing and is not refused). Inert without knext.ffi.json.
+    assertFfiTargetSupported(config, process.cwd());
     const previewName = derivePreviewName(config.name, options.prId);
     // Validate BEFORE any build/push/apply so an over-long name aborts cleanly.
     validatePreviewName(previewName);
@@ -457,6 +463,10 @@ export async function defaultBuildAndPush(
     // requireEsm gates the vinext ESM preflight (vinext target only). Resolved
     // against DEFAULT_BUILDER_ID, not hardcoded — an absent `build` no longer
     // means vinext (#1183).
+    //
+    // ADR-0069 D14 first: cross-build and stage the zone's Rust library into
+    // native/ffi/ before the project build. No-op without knext.ffi.json.
+    await runFfiBuildStep(process.cwd(), DEPLOY_SHIP_ARCH);
     runProjectBuild({
         requireEsm: (config.build ?? DEFAULT_BUILDER_ID) === "vinext",
         builderId: config.build ?? DEFAULT_BUILDER_ID,

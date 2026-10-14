@@ -52,11 +52,14 @@ import {
     healBunExportTargets,
 } from "../adapters/standalone-bun-exports";
 import type { KnativeNextConfig } from "../config";
+import { DEPLOY_SHIP_ARCH, resolveSelfContained } from "./build-target";
 import {
     type CompileToolchain,
     compileIncludeGlobs,
     wantsPatchedBun,
 } from "./compile-config";
+import { ffiOptedIn, ffiTargetTriple } from "./ffi-preflight";
+import { findLockfile, writeNativeIntegrityManifest } from "./native-integrity";
 import { UsageError } from "./shared";
 import {
     buildStandaloneExecutable,
@@ -132,12 +135,10 @@ export function standaloneStepsApply(artifact: BuildArtifact): boolean {
     return artifact.shape === "next-standalone";
 }
 
-/**
- * The target arch `knext deploy`/`preview` build images for — always
- * `linux/amd64` (`dockerBuildxArgs`'s `--platform`), regardless of the host.
- * Shared with `build.ts`'s own `SHIP_ARCH` so the two names never drift.
- */
-export const DEPLOY_SHIP_ARCH = "linux-x64";
+// `DEPLOY_SHIP_ARCH` and `resolveSelfContained` live in the leaf module
+// `build-target.ts` (so the in-process Rust preflight shares them without
+// importing this one) and are re-exported here unchanged.
+export { DEPLOY_SHIP_ARCH, resolveSelfContained };
 
 /**
  * The vinext build-output subdirectories the freshness stamp hashes —
@@ -148,18 +149,6 @@ export const DEPLOY_SHIP_ARCH = "linux-x64";
  */
 function vinextOutputSourceDirs(cwd: string): readonly string[] {
     return [join(cwd, ".output", "server"), join(cwd, ".output", "public")];
-}
-
-/**
- * Resolve the self-contained mode: an explicit caller value (the
- * `--self-contained` CLI flag) wins over the `selfContained` config key, which
- * defaults to off. Opt-in only — nothing infers it.
- */
-export function resolveSelfContained(
-    config: { selfContained?: boolean },
-    override?: boolean,
-): boolean {
-    return override ?? config.selfContained ?? false;
 }
 
 /**
@@ -333,6 +322,23 @@ export function compileArtifactForDeploy(
             arch,
             ...selfContainedOpt,
         });
+        // In-process Rust (ADR-0069 D14): `knext ffi build` staged
+        // native/ffi/<triple>/ before the project build, and the image ships
+        // native/ beside the exec. The loader refuses a library the manifest
+        // does not list (fail-closed), and nothing else writes one on this
+        // path (only vinext's sharp staging does), so write it here. Only
+        // when opted in: otherwise no native/ tree is created (D17).
+        if (ffiOptedIn(cwd)) {
+            const nativeDir = join(cwd, "native");
+            const triple = ffiTargetTriple(arch);
+            if (!existsSync(join(nativeDir, "ffi", triple))) {
+                throw new UsageError(
+                    `knext.ffi.json opts this app into in-process Rust, but nothing is staged at native/ffi/${triple}/ for the image arch ${arch}, so the image would ship without its Rust library.\n\n` +
+                        "Run the build without --skip-next (it runs `knext ffi build` first), or run `knext ffi build` yourself.",
+                );
+            }
+            writeNativeIntegrityManifest(nativeDir, findLockfile(cwd));
+        }
         // #1351/#1414: stamp the exec with a hash of the WHOLE standalone
         // tree it was JUST compiled from (not just server.js — see
         // `buildStampPathFor`'s doc comment), so a later `--skip-build`

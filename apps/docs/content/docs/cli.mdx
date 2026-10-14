@@ -403,12 +403,23 @@ install guidance; a Bun that is present but cannot report its version stops the 
 underlying error — the two are never conflated. See [the Bun runtime](/docs/bun-runtime).
 </Callout>
 
+**In-process Rust (Beta, Bun only).** When the app has a `knext.ffi.json`, `build` (and `deploy`
+and `preview`, which build the same way) first cross-compiles the app's Rust crate for the image
+(`knext ffi build`: Linux musl, release, `--locked`), refuses a library that links anything the
+Alpine image lacks, stages it under `native/ffi/` with a provenance record, and fails if the
+committed generated wrapper is out of date (run `knext ffi generate`). The image then ships
+`native/` beside the executable, with a checksum manifest the loader verifies. This needs Rust,
+`cargo-zigbuild` and `zig` on the build machine. Two configurations are refused before any build
+work, with a message that says how to fix them: `runtime: 'node'` (Rust is called through
+`bun:ffi`, which exists only in Bun) and the self-contained mode. An app without `knext.ffi.json`
+builds exactly as before.
+
 | Flag | Notes |
 |---|---|
-| `--skip-next` | Reuse an existing `.next/` build instead of running it again. |
+| `--skip-next` | Reuse an existing `.next/` build instead of running it again. With `knext.ffi.json`, the Rust library already staged under `native/ffi/` is reused too, and the build stops if none is staged. |
 | `--skip-smoke` | Do not boot the compiled executable. For CI that cannot execute it (a foreign-architecture runner). The build prints a loud warning and the artifact ships unverified. |
 | `--verbose` | List every compile and closure note. By default they are folded into one line, such as `[knext standalone-compile] 12 notes; rerun with --verbose for details`. Warnings and errors always print in full. |
-| `--self-contained` | Opt in to the self-contained single-executable mode, overriding `selfContained` in `knext.config.ts`. Experimental: on the vinext target the binary needs nothing beside it; the other targets do not use it yet, so there it only shows up in the build log and the build output is unchanged. |
+| `--self-contained` | Opt in to the self-contained single-executable mode, overriding `selfContained` in `knext.config.ts`. Experimental: on the vinext target the binary needs nothing beside it; the other targets do not use it yet, so there it only shows up in the build log and the build output is unchanged. Refused for an app with `knext.ffi.json`. |
 | `-h`, `--help` | Show the usage help. |
 
 **Exit code:** `0` on success (including `--help`); `1` on a usage error (an unknown flag), a missing
