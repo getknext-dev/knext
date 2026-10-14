@@ -1,0 +1,50 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.5",
+  "version": 1,
+  "serialNumber": "urn:uuid:3a18b188-f460-4005-8252-50a50535807b",
+  "metadata": {
+    "timestamp": "2026-10-14T03:21:18.130612000Z",
+    "tools": [
+      {
+        "vendor": "CycloneDX",
+        "name": "cargo-cyclonedx",
+        "version": "0.5.9"
+      }
+    ],
+    "component": {
+      "type": "library",
+      "bom-ref": "path+file:///build/app/rust#zone@0.3.1",
+      "name": "zone",
+      "version": "0.3.1",
+      "scope": "required",
+      "licenses": [
+        {
+          "expression": "Apache-2.0"
+        }
+      ],
+      "purl": "pkg:cargo/zone@0.3.1?download_url=file://.",
+      "components": [
+        {
+          "type": "library",
+          "bom-ref": "path+file:///build/app/rust#zone@0.3.1 bin-target-0",
+          "name": "zone",
+          "version": "0.3.1",
+          "purl": "pkg:cargo/zone@0.3.1?download_url=file://.#src/lib.rs"
+        }
+      ]
+    },
+    "properties": [
+      {
+        "name": "cdx:rustc:sbom:target:triple",
+        "value": "x86_64-unknown-linux-musl"
+      }
+    ]
+  },
+  "components": [],
+  "dependencies": [
+    {
+      "ref": "path+file:///build/app/rust#zone@0.3.1"
+    }
+  ]
+}
