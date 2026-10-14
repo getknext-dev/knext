@@ -2,6 +2,9 @@
 # Runs the UNCHANGED compat-smoke runner (apps/file-manager/scripts/
 # compat-smoke.mjs, the one ci.yml's compat-smoke job runs) against a
 # host-arch twin of a `knext build` (turbopack x bun) standalone tree.
+# The e2e lane GATES on the shipped image (run-compat-smoke-image.sh); this
+# twin is its attribution when that gate fails: twin green and image red puts
+# the defect in the image's packaging, both red in the build.
 #
 #   run-compat-smoke.sh <repo-root> <app-dir> <scratch-dir>
 #
@@ -12,7 +15,8 @@
 # is compiled by compile-smoke-twin.ts (core's buildStandaloneExecutable for
 # the host arch); the shipped executable is linux-musl and cannot run here.
 #
-# Needs REDIS_URL (check (k) never skips). Exit status is the runner's.
+# Redis is flushed first (redis-flush.mjs). Needs REDIS_URL (check (k) never
+# skips). Exit status is the runner's.
 set -euo pipefail
 
 repo="${1:?usage: run-compat-smoke.sh <repo-root> <app-dir> <scratch-dir>}"
@@ -29,5 +33,6 @@ cp -R "${app}/public" "${smoke}/.next/standalone/public"
 exe="${smoke}/.next/standalone/knext-smoke-exec"
 (cd "${repo}" && bun packages/ffi/scripts/compile-smoke-twin.ts "${smoke}" "${exe}")
 cd "${repo}"
+node packages/ffi/scripts/redis-flush.mjs
 RUNTIME=bun SMOKE_EXEC_TRANSPORT=node-http SERVER_CMD="${exe}" SERVER_PATH="${exe}" \
   node apps/file-manager/scripts/compat-smoke.mjs

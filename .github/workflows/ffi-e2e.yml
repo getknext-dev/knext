@@ -27,63 +27,69 @@ name: In-process Rust (FFI) — musl load matrix + kind e2e
 #        selfContained: true, before any build work;
 #     2. `knext build` (which runs `knext ffi build`: zigbuild, libc check,
 #        staging, wrapper drift check);
-#     3. the unchanged compat-smoke runner (apps/file-manager/scripts/
-#        compat-smoke.mjs) against a host-arch twin of THAT build's standalone
-#        tree, red-on-fail, as ci.yml's compat-smoke job runs it;
-#     4. `knext deploy --skip-build` of the same build to an ephemeral kind
+#     3. `knext deploy --skip-build` of the same build to an ephemeral kind
 #        cluster with the operator built from HEAD; the Server Actions are
 #        called over HTTP (`Next-Action`, ids from server-reference-manifest
 #        .json): the Rust result, a RustError and a RustPanicError, with the
 #        pod's restart count still 0; the pod's native/.integrity.json lists
-#        the library with its real sha256.
+#        the library with its real sha256;
+#     4. the unchanged compat-smoke runner (apps/file-manager/scripts/
+#        compat-smoke.mjs), red-on-fail, as ci.yml's compat-smoke job runs
+#        it, against THE SHIPPED IMAGE: the digest-pinned linux-musl image
+#        the pod runs, booted with its own ENTRYPOINT, Redis flushed first.
+#        Only when that fails: the same checks on a host-arch twin of the
+#        build and on the app without the opt-in, as attribution.
 #
 # Mutation proofs that need a build (workflow_dispatch input `mutation`):
 #   wrong-triple  the musl legs stage the library for the other triple
 #   leak          the musl legs' leak check runs against the no-free wrapper
-#   compat-check  the fixture loses the route compat-smoke checks (i)/(j) assert
+#   compat-check  the fixture loses the route compat-smoke checks (i)/(j) assert,
+#                 so the shipped image's smoke must go red
 # Each must turn its job red; `none` (the default, and every PR/push run) is green.
 #
-# No secrets. Not a required check; path-filtered to the feature's files.
+# No secrets. Not a required check; path-filtered to everything the lanes consume.
 
 on:
   pull_request:
+    # Everything the lanes consume. tests/workflow-ffi-e2e-lane.test.ts scans
+    # the run blocks and packages/ffi/scripts/ for repo paths and fails on one
+    # no pattern here matches. The crates and the ffi package; the core, lib
+    # and db packages the lane packs (core's CLI, templates and adapters build
+    # and run the image); the reference app it stages and smokes; the operator
+    # it builds from HEAD; the cluster bootstrap; the lockfile; the actions it
+    # runs. Core's own unit tests never reach the lane.
     paths:
       - 'crates/**'
       - 'packages/ffi/**'
-      - 'packages/kn-next/src/cli/ffi-preflight.ts'
-      - 'packages/kn-next/src/cli/ffi-dispatch.ts'
-      - 'packages/kn-next/src/cli/build-artifact.ts'
-      - 'packages/kn-next/src/cli/build-target.ts'
-      - 'packages/kn-next/src/cli/build.ts'
-      - 'packages/kn-next/src/cli/deploy.ts'
-      - 'packages/kn-next/src/cli/preview.ts'
-      - 'packages/kn-next/src/cli/runtime-image.ts'
-      - 'packages/kn-next/src/cli/native-integrity.ts'
-      - 'packages/kn-next/src/cli/standalone-exec-build.ts'
-      - 'packages/kn-next/src/cli/vinext-build.ts'
-      - 'packages/kn-next/templates/runtime-standalone/**'
-      - 'apps/file-manager/scripts/compat-smoke.mjs'
-      - 'apps/file-manager/scripts/compat-smoke-mode.mjs'
+      - 'packages/kn-next/**'
+      - '!packages/kn-next/src/__tests__/**'
+      - 'packages/lib/**'
+      - 'packages/db/**'
+      - 'packages/kn-next-operator/**'
+      - 'apps/file-manager/**'
+      - 'scripts/kind-manifests/**'
+      - 'scripts/pack-release-tarballs.mjs'
+      - 'bun.lock'
+      - 'package.json'
+      - '.github/actions/docker-hub-mirror/**'
       - '.github/workflows/ffi-e2e.yml'
   push:
     branches: [main, integration/v2]
+    # The same list as pull_request (asserted equal).
     paths:
       - 'crates/**'
       - 'packages/ffi/**'
-      - 'packages/kn-next/src/cli/ffi-preflight.ts'
-      - 'packages/kn-next/src/cli/ffi-dispatch.ts'
-      - 'packages/kn-next/src/cli/build-artifact.ts'
-      - 'packages/kn-next/src/cli/build-target.ts'
-      - 'packages/kn-next/src/cli/build.ts'
-      - 'packages/kn-next/src/cli/deploy.ts'
-      - 'packages/kn-next/src/cli/preview.ts'
-      - 'packages/kn-next/src/cli/runtime-image.ts'
-      - 'packages/kn-next/src/cli/native-integrity.ts'
-      - 'packages/kn-next/src/cli/standalone-exec-build.ts'
-      - 'packages/kn-next/src/cli/vinext-build.ts'
-      - 'packages/kn-next/templates/runtime-standalone/**'
-      - 'apps/file-manager/scripts/compat-smoke.mjs'
-      - 'apps/file-manager/scripts/compat-smoke-mode.mjs'
+      - 'packages/kn-next/**'
+      - '!packages/kn-next/src/__tests__/**'
+      - 'packages/lib/**'
+      - 'packages/db/**'
+      - 'packages/kn-next-operator/**'
+      - 'apps/file-manager/**'
+      - 'scripts/kind-manifests/**'
+      - 'scripts/pack-release-tarballs.mjs'
+      - 'bun.lock'
+      - 'package.json'
+      - '.github/actions/docker-hub-mirror/**'
       - '.github/workflows/ffi-e2e.yml'
   workflow_dispatch:
     inputs:
@@ -563,10 +569,27 @@ jobs:
         run: kubectl create namespace "$APP_NS"
 
       - name: knext deploy --skip-build (the build compat-smoke checks below)
+        id: deploy
         run: |
           set -euo pipefail
           cd "$APP_DIR"
           node "$KNEXT" deploy --skip-build --registry localhost:5001 --namespace "$APP_NS" --tag "$DEPLOY_TAG"
+
+      # The image compat-smoke gates on: the digest-pinned ref the deploy
+      # wrote into the NextApp, the one the cluster pulls. Resolved here,
+      # before the cluster assertions, so the smoke still runs when one of
+      # them fails.
+      - name: The shipped image (the NextApp's digest-pinned spec.image)
+        id: shipped
+        run: |
+          set -euo pipefail
+          img="$(kubectl -n "$APP_NS" get nextapp "$APP_NAME" -o jsonpath='{.spec.image}')"
+          case "$img" in
+            *@sha256:*) ;;
+            *) echo "::error::the NextApp's spec.image is not digest-pinned: '${img}'"; exit 1 ;;
+          esac
+          echo "shipped image: ${img}"
+          echo "SHIPPED_IMAGE=$img" >> "$GITHUB_ENV"
 
       - name: Wait for the NextApp to go Ready
         run: |
@@ -587,6 +610,11 @@ jobs:
           if [ "$listed" != "$actual" ] || [ "$actual" != "$LIB_SHA256" ]; then
             echo "::error::the image's native/.integrity.json does not list ${rel} with the library's sha256"; exit 1
           fi
+          # The pod runs the image compat-smoke checks below, by digest.
+          ran="$(kubectl -n "$APP_NS" get pod "$pod" -o jsonpath='{.status.containerStatuses[?(@.name=="user-container")].imageID}')"
+          echo "pod imageID=${ran} shipped=${SHIPPED_IMAGE}"
+          [ "${ran##*@}" = "${SHIPPED_IMAGE##*@}" ] || {
+            echo "::error::the pod runs ${ran}, not the shipped image ${SHIPPED_IMAGE}"; exit 1; }
 
       - name: Server Actions call Rust over HTTP — result, RustError, RustPanicError; zero restarts
         run: |
@@ -619,17 +647,41 @@ jobs:
           grep -m1 "panicked at" -A1 /tmp/app.log
 
       # The SAME runner and checks as ci.yml's compat-smoke job, red-on-fail,
-      # against a host-arch twin of THE build deployed above (the shipped
-      # executable is linux-musl; the kind deploy runs that one). The tree is
-      # copied first so the build's freshness stamp is untouched; the copy is
-      # laid out as the image lays it out. After the cluster assertions, and
-      # whether or not they passed, so one run reports both gates.
-      - name: compat-smoke on the opted-in build (bun lane, compiled standalone executable)
+      # against THE SHIPPED IMAGE: the digest-pinned linux-musl image the
+      # cluster runs, pulled from the registry and booted with its own
+      # ENTRYPOINT (packages/ffi/scripts/run-compat-smoke-image.sh). Redis is
+      # flushed first, so check (g) cannot pass on an image a previous run
+      # optimized. After the cluster assertions, and whether or not they
+      # passed (never on a cancelled run), so one run reports both gates.
+      - name: compat-smoke on the shipped image (bun lane, compiled standalone executable)
         id: smoke
-        if: always() && steps.build.outcome == 'success'
+        if: ${{ !cancelled() && steps.shipped.outcome == 'success' }}
         env:
           REDIS_URL: redis://127.0.0.1:6379
-        run: packages/ffi/scripts/run-compat-smoke.sh "$GITHUB_WORKSPACE" "$APP_DIR" "${RUNNER_TEMP}/ffi-zone-smoke"
+        run: packages/ffi/scripts/run-compat-smoke-image.sh "$GITHUB_WORKSPACE" "$SHIPPED_IMAGE"
+
+      # Attribution, never a gate (the step above already failed the job): the
+      # SAME build's standalone tree compiled for the host and smoked outside
+      # the image. Green here and red above puts the defect in the image's
+      # packaging; red in both, in the build.
+      - name: 'Attribution: compat-smoke on a host-arch twin of the same build (only when the gate failed)'
+        if: failure() && steps.smoke.outcome == 'failure'
+        env:
+          REDIS_URL: redis://127.0.0.1:6379
+        run: |
+          set +e -uo pipefail  # a report: the gate above is what fails the job
+          packages/ffi/scripts/run-compat-smoke.sh "$GITHUB_WORKSPACE" "$APP_DIR" "${RUNNER_TEMP}/ffi-zone-twin" \
+            > "${RUNNER_TEMP}/twin-smoke.log" 2>&1
+          code=$?
+          grep -E '^(✓ PASS|✗ FAIL|PASS=)' "${RUNNER_TEMP}/twin-smoke.log"
+          echo "::warning::host-arch twin (same build, outside the image) compat-smoke exit ${code} — compare its FAIL lines with the gate's"
+          {
+            echo "### compat-smoke attribution: a host-arch twin of the same build, outside the image (exit ${code})"
+            echo '```'
+            grep -E '^(✓ PASS|✗ FAIL|PASS=)' "${RUNNER_TEMP}/twin-smoke.log"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
 
       # Attribution, never a gate (the step above already failed the job): the
       # SAME file-manager copy WITHOUT the opt-in, built and smoked the same
@@ -654,6 +706,7 @@ jobs:
           ) || { echo "::warning::baseline build failed"; grep -v -e "module" -e "^ *at " "${RUNNER_TEMP}/baseline-build.log" | tail -n 120; exit 0; }
           # REDIS_URL for the smoke only: set during `next build` it makes the
           # app's cache-events route connect at page-data collection (measured).
+          # The baseline is a host-arch twin, like the attribution above.
           REDIS_URL=redis://127.0.0.1:6379 \
             packages/ffi/scripts/run-compat-smoke.sh "$GITHUB_WORKSPACE" "$BASE" "${RUNNER_TEMP}/baseline-smoke" \
             > "${RUNNER_TEMP}/baseline-smoke.log" 2>&1
