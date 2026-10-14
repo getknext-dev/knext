@@ -120,6 +120,11 @@ function throwsClass(fn: () => unknown, cls: unknown, message: string, what: str
   fail(`${what}: did not throw`);
 }
 
+const notFiniteArg = (fn: string, at: string, got: string) =>
+  `${fn}(): argument "${at}" must be a finite number (JSON has no NaN or Infinity), got ${got}`;
+const notFiniteResult = (path: string, t: string, shown: string) =>
+  `invalid input: knext-ffi: the return value cannot cross as JSON: ${path}: ${t} ${shown} is not finite (JSON has no NaN or Infinity)`;
+
 const bytes = (u: Uint8Array) => Array.from(u);
 const big1MiB = 'z'.repeat(1 << 20);
 const scratchFits = 'a'.repeat(3000);
@@ -221,6 +226,72 @@ const CASES: Record<string, () => void> = {
     assert.equal(m.echo_opt_color(null), null);
     assert.equal(m.echo_opt_color('Green'), 'Green');
   },
+  // Floats inside JSON (an Option, a record): finite values cross; NaN and
+  // ±Infinity are refused by the wrapper BEFORE the call (TypeError naming
+  // the argument path), never sent as null.
+  echo_opt_f64: () => {
+    assert.equal(m.echo_opt_f64(1.5), 1.5);
+    assert.equal(m.echo_opt_f64(null), null);
+    throwsClass(
+      () => m.echo_opt_f64(Number.NaN),
+      TypeError,
+      notFiniteArg('echo_opt_f64', 'v', 'NaN'),
+      'echo_opt_f64 NaN',
+    );
+    throwsClass(
+      () => m.echo_opt_f64(Number.POSITIVE_INFINITY),
+      TypeError,
+      notFiniteArg('echo_opt_f64', 'v', 'Infinity'),
+      'echo_opt_f64 Infinity',
+    );
+    assert.equal(m.echo_opt_f64(0.25), 0.25);
+  },
+  echo_reading: () => {
+    const r: m.Reading = { value: 2.5, samples: [0.5, null, -3] };
+    assert.deepEqual(m.echo_reading(r), r);
+    assert.deepEqual(m.echo_reading({ value: null, samples: [] }), { value: null, samples: [] });
+    throwsClass(
+      () => m.echo_reading({ value: null, samples: [1, Number.NEGATIVE_INFINITY] }),
+      TypeError,
+      notFiniteArg('echo_reading', 'r.samples[1]', '-Infinity'),
+      'echo_reading -Infinity',
+    );
+    throwsClass(
+      () => m.echo_reading({ value: Number.NaN, samples: [] }),
+      TypeError,
+      notFiniteArg('echo_reading', 'r.value', 'NaN'),
+      'echo_reading NaN',
+    );
+  },
+  // A non-finite float Rust RETURNS cannot cross as JSON: status 3, a
+  // RustError ("invalid input: …") naming the path under `result`.
+  non_finite_opt: () => {
+    throwsClass(
+      () => m.non_finite_opt(0),
+      m.RustError,
+      notFiniteResult('result', 'f64', 'NaN'),
+      'non_finite_opt NaN',
+    );
+    throwsClass(
+      () => m.non_finite_opt(1),
+      m.RustError,
+      notFiniteResult('result', 'f64', 'Infinity'),
+      'non_finite_opt Infinity',
+    );
+    throwsClass(
+      () => m.non_finite_opt(2),
+      m.RustError,
+      notFiniteResult('result', 'f64', '-Infinity'),
+      'non_finite_opt -Infinity',
+    );
+  },
+  non_finite_reading: () =>
+    throwsClass(
+      () => m.non_finite_reading(),
+      m.RustError,
+      notFiniteResult('result.samples[2]', 'f32', 'NaN'),
+      'non_finite_reading NaN',
+    ),
   parse_i32: () => {
     assert.equal(m.parse_i32(' 42 '), 42);
     throwsClass(
