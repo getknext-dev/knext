@@ -308,12 +308,15 @@ describe("the Beta label is visible wherever a user meets the feature (ADR-0069 
             doc.indexOf("### The `NextApp` CRD is versioned separately"),
         );
         expect(
-            section.split("- **`knext ffi` (in-process Rust, Beta, Bun only)**").length - 1,
+            section.split("- **`knext ffi` (in-process Rust, Beta, Bun only)**")
+                .length - 1,
         ).toBe(1);
     });
 
     it("the CLI help group says Beta and Bun only", () => {
-        expect(CLI_HELP).toContain("In-process Rust (Beta, Bun only, optional package):");
+        expect(CLI_HELP).toContain(
+            "In-process Rust (Beta, Bun only, optional package):",
+        );
     });
 });
 describe("coreVersion finds @getknext/core from the source AND from a bundled chunk", () => {
@@ -328,12 +331,16 @@ describe("coreVersion finds @getknext/core from the source AND from a bundled ch
     });
 
     it("from a chunk at dist/ (one level below), where a fixed ../../ read 0.0.0", () => {
-        expect(coreVersion(pathToFileURL(join(pkgRoot, "dist", "chunk.js")).href)).toBe(version);
+        expect(
+            coreVersion(pathToFileURL(join(pkgRoot, "dist", "chunk.js")).href),
+        ).toBe(version);
     });
 
     it("from dist/cli/ (two levels below)", () => {
         expect(
-            coreVersion(pathToFileURL(join(pkgRoot, "dist", "cli", "x.js")).href),
+            coreVersion(
+                pathToFileURL(join(pkgRoot, "dist", "cli", "x.js")).href,
+            ),
         ).toBe(version);
     });
 });
