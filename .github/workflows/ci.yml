@@ -1288,6 +1288,56 @@ jobs:
           packages/db/src/__tests__/live-dsn-guard.test.ts
           tests/db-live-workflow.test.ts
 
+  use-cache-lua-live-redis:
+    # The 'use cache' tag replay's compare-and-set Lua (REPLAY_STAMPS_SCRIPT) run
+    # EXACTLY as shipped on a REAL Redis. The rest of the suite answers that
+    # script with a JavaScript model (the fake Redis has no Lua engine), so a
+    # mutated script stays green there; this job is where the Lua executes, and
+    # each case must equal the model's result. Same shape as db-live-integration:
+    # a digest-pinned service container, an inline loopback URL (no secret), and
+    # a suite that SKIPS without KNEXT_REDIS_LIVE_URL and FAILS when it is set and
+    # Redis is unreachable. It reads KNEXT_REDIS_LIVE_URL, never REDIS_URL, so no
+    # other cache test in a shared env is pointed at this Redis.
+    # Guarded by tests/use-cache-lua-live-workflow.test.ts.
+    name: "'use cache' replay Lua on a real Redis"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      redis:
+        image: mirror.gcr.io/library/redis:7-alpine@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      KNEXT_REDIS_LIVE_URL: redis://127.0.0.1:6379
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+
+      - name: Setup bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # The live script suite + the guard that keeps this job a blocking gate.
+      - name: Run the live replay-script suite
+        run: >-
+          node scripts/bun-test.mjs
+          packages/kn-next/src/__tests__/use-cache-replay-script-live-redis.test.ts
+          tests/use-cache-lua-live-workflow.test.ts
+
   docs-site:
     # Docs site (apps/docs, knext-platform.dev) build gate — mirrors the compat-smoke
     # file-manager pattern: root workspace-aware install, build the @getknext chain

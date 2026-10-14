@@ -78,6 +78,15 @@ const DECLARED: Record<string, { skips: Record<string, number>; reason: string }
       'non-root so it runs there, and an always-on sibling test injects the same EACCES staging ' +
       "failure through the applier's fs seam, so the guarantee is covered even as root.",
   },
+  'packages/kn-next/src/__tests__/use-cache-replay-script-live-redis.test.ts': {
+    skips: { 'describe.skipIf': 1 },
+    reason:
+      "Runs the 'use cache' tag replay's Lua on a REAL Redis, so it skips without " +
+      "KNEXT_REDIS_LIVE_URL (the fake Redis has no Lua engine). LANE-BACKED: ci.yml's " +
+      'use-cache-lua-live-redis job runs it against a pinned Redis service with the variable set, ' +
+      'where an unreachable Redis FAILS rather than skips; tests/use-cache-lua-live-workflow.test.ts ' +
+      'keeps that job a blocking gate.',
+  },
   'apps/file-manager/sigterm-drain-e2e.test.ts': {
     skips: { 'it.skipIf': 5 },
     reason:

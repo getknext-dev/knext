@@ -13,6 +13,7 @@ import {
     type UseCacheCore,
 } from "../adapters/use-cache-handler.js";
 import { type FakeRedis, startFakeRedis } from "./helpers/fake-redis";
+import { replayStampsModel } from "./helpers/replay-stamps-model";
 
 /**
  * `'use cache'` tag stamps an outage kept from Redis are replayed when the
@@ -63,41 +64,6 @@ interface UseCacheHandler {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const enc = new TextEncoder();
-
-/**
- * The fake has no Lua VM: this is a model of the replay's compare-and-set
- * script, keyed by its exact source. `now` is the script's own `TIME`. ARGV
- * pairs are (field, ms): `s:<tag>` moves forward to now, never back;
- * `e:<tag>` wants now + ms, but an expiry already in effect (<= now) is never
- * moved into the future and a pending one (> now) is never pushed later.
- */
-function replayStampsModel(
-    h: Map<string, string>,
-    argv: string[],
-    now: number,
-): number {
-    let n = 0;
-    for (let i = 0; i + 1 < argv.length; i += 2) {
-        const field = argv[i] as string;
-        const raw = h.get(field);
-        const cur = raw === undefined ? undefined : Number(raw);
-        let v: number | undefined;
-        if (field.startsWith("s:")) {
-            if (cur === undefined || cur < now) v = now;
-        } else {
-            const want = now + Number(argv[i + 1]);
-            if (cur === undefined) v = want;
-            else if (cur <= now) {
-                if (want <= now) v = now;
-            } else if (want < cur) v = want;
-        }
-        if (v !== undefined) {
-            h.set(field, String(v));
-            n += 1;
-        }
-    }
-    return n;
-}
 
 async function waitFor(pred: () => boolean, timeoutMs = 4000) {
     const deadline = Date.now() + timeoutMs;

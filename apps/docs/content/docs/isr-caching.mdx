@@ -173,7 +173,9 @@ for ISR above, so the `'use cache'` entries it covers stop being served on every
 with the time Redis came back, never earlier, so an entry cached between the call and that moment
 is re-rendered once more. It never undoes a newer invalidation of the same tag that reached Redis
 first, from another pod or from a later call on the same pod: an `updateTag` that already expired
-an entry keeps it expired. When a remembered `revalidateTag` with a profile is applied to a tag that
+an entry keeps it expired. On Redis older than 5, or a Redis that refuses Lua scripts, the pod
+falls back to a separate read and write, so a newer invalidation landing between the two can still
+be overwritten. When a remembered `revalidateTag` with a profile is applied to a tag that
 is already expired, its entries are marked stale (re-rendered on the next read) but the profile's
 later expiry is not scheduled. A pod remembers up to 1,000 distinct tags; past that, once Redis is back
 it removes every `'use cache'` entry of the app instead, which costs a burst of re-renders but never

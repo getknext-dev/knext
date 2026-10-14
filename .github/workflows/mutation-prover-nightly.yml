@@ -89,6 +89,23 @@ jobs:
     # because it changes shared lane semantics for every prover, not just the one
     # this PR adds.
     timeout-minutes: 100
+    # `mutation-prove-2331-use-cache-tag-replay.mjs` grades its Lua rows (the
+    # replay's compare-and-set script) on the live suite, which EVALs the exact
+    # script on a real Redis. That prover REFUSES to run without
+    # KNEXT_REDIS_LIVE_URL (a red night, never a silent skip), so the lane gets
+    # the same digest-pinned Redis as ci.yml's use-cache-lua-live-redis job. The
+    # variable is set on the prover step only, and it is not REDIS_URL, so no
+    # other prover's spec is pointed at this Redis.
+    services:
+      redis:
+        image: mirror.gcr.io/library/redis:7-alpine@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -144,6 +161,8 @@ jobs:
           cargo -V
 
       - name: Run every mutation prover (FAIL on exit code OR count mismatch)
+        env:
+          KNEXT_REDIS_LIVE_URL: redis://127.0.0.1:6379
         run: node scripts/run-mutation-provers.mjs
 
       # The provers mutate tracked files and restore from byte snapshots. If a

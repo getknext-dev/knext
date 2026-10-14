@@ -134,8 +134,12 @@ const MUTATIONS = [
     id: 'M14',
     subject: 'handler',
     claim: 'the outage warning is per handler kind again (default and remote each warn)',
-    anchor: 'const state = shared(core);',
-    replacement: 'const state = { outageWarned: false, oversizeWarned: false };',
+    // Two lines: `const state = shared(core);` alone also occurs in the replay's
+    // script fallback (#2331). The per-kind copy keeps the shared replay and
+    // clock objects by reference, so only the warning flags stop being shared.
+    anchor: '  const state = shared(core);\n  publishMetricsSeam();',
+    replacement:
+      '  const state = { ...shared(core), outageWarned: false, oversizeWarned: false };\n  publishMetricsSeam();',
   },
   {
     id: 'M15',
