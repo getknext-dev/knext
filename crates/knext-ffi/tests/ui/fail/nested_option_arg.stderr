@@ -1,0 +1,5 @@
+error: knext-ffi: `Option<Option<i32>>` is not supported: a nested `Option` cannot cross the boundary: `None` and `Some(None)` are both JSON `null`; use a #[knext_ffi::record] struct or unit enum that names the cases; supported types are listed in the knext-ffi type table (ADR-0069 D6, crates/README.md)
+ --> tests/ui/fail/nested_option_arg.rs:4:13
+  |
+4 | pub fn f(v: Option<Option<i32>>) -> i32 {
+  |             ^^^^^^

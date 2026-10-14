@@ -1,0 +1,5 @@
+error: knext-ffi: `char` is not supported: `char` has no TypeScript equivalent; pass a `String` or a `u32` code point; supported types are listed in the knext-ffi type table (ADR-0069 D6, crates/README.md)
+ --> tests/ui/fail/char_arg.rs:4:13
+  |
+4 | pub fn f(c: char) -> u32 {
+  |             ^^^^

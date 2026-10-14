@@ -50,6 +50,24 @@ export const NON_TEST_PACKAGE_MANAGEMENT_FILES = Object.freeze([
 ]);
 
 /**
+ * Provers whose guards are NOT a JS test suite, by PATH (#2343), same posture
+ * as the two lists above (a shape-based exemption is copy-instead-of-share bait).
+ *
+ * The knext-ffi Rust crates are guarded by `cargo test` targets (unit tests,
+ * trybuild compile-fail cases, ABI and ownership tests) and a Bun harness run
+ * against the release-profile fixture library. There is no vitest runner to
+ * find, so `resolveTestRunner` does not apply — routing `cargo` through it
+ * would be a category error, not a fix. The exemption covers ONLY the
+ * "spawns without a resolver" half: the package-manager half still applies,
+ * and `tests/mutation-prover-lane.test.ts` asserts every listed prover is
+ * discovered, spawns `cargo`, and names no JS spec (if it ever runs one, it
+ * must resolve that runner like every other prover).
+ */
+export const NON_JS_TEST_SUITE_PROVERS = Object.freeze([
+  'scripts/mutation-prove-knext-ffi-crates.mjs',
+]);
+
+/**
  * Shared DRIVERS that call the harness's mutating verbs on a prover's behalf.
  *
  * The convention scan below asks "does every file that mutates via the harness
@@ -438,6 +456,8 @@ export function auditRunnerResolution(source, relPath) {
     spawner !== undefined &&
     !definesResolver &&
     !isNonTestPackageManagement &&
+    // #2343: a prover whose guards are cargo/Bun-harness, not a JS test suite.
+    !(relPath !== undefined && NON_JS_TEST_SUITE_PROVERS.includes(relPath)) &&
     !callsFunction(source, 'resolveTestRunner') &&
     // #902: the per-spec dispatcher is the OTHER sanctioned resolver — it
     // wraps resolveTestRunner for vitest specs and routes bun:test specs to

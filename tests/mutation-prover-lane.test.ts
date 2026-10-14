@@ -27,6 +27,7 @@ import {
   GUARD_PROVER_EXEMPTIONS,
   isSharedMutationDriver,
   mutatesViaHarness,
+  NON_JS_TEST_SUITE_PROVERS,
   PROVER_AUDIT_EXEMPTIONS,
   PROVER_RE,
   proverPathBindings,
@@ -429,6 +430,48 @@ describe('#693 the resolveTestRunner exemption is anchored to the DEFINITION FIL
     expect(definers, `resolveTestRunner is defined in: ${definers.join(', ')}`).toEqual([
       RESOLVER_DEFINITION_FILE,
     ]);
+  });
+});
+
+describe('#2343 a prover whose guards are not a JS test suite is exempt BY PATH, and only there', () => {
+  // The knext-ffi crates' guards are `cargo test` targets and a Bun harness, so
+  // there is no vitest runner for resolveTestRunner to resolve. The exemption is
+  // PATH-anchored for the same reason as RESOLVER_DEFINITION_FILE: a shape-based
+  // one is copy-instead-of-share bait.
+  const CARGO_PROVER = [
+    "import { declareMutations, recordMutation } from './lib/prover-report.mjs';",
+    'declareMutations(1);',
+    "spawnSync('cargo', ['test', '--locked'], { cwd: CRATES });",
+    'recordMutation();',
+  ].join('\n');
+
+  it('the same source at any other path IS a finding', () => {
+    expect(auditProverSource(CARGO_PROVER, 'scripts/mutation-prove-copy.mjs').join(' ')).toMatch(
+      /resolveTestRunner/,
+    );
+    expect(auditProverSource(CARGO_PROVER).join(' ')).toMatch(/resolveTestRunner/);
+  });
+
+  it('a listed path is exempt from the resolver rule only, never from the package-manager rule', () => {
+    const path = NON_JS_TEST_SUITE_PROVERS[0] as string;
+    expect(auditProverSource(CARGO_PROVER, path)).toEqual([]);
+    const pm = `${CARGO_PROVER}\nspawnSync('pnpm', ['exec', 'vitest', 'run', spec]);`;
+    expect(auditProverSource(pm, path).join(' ')).toMatch(/pnpm/);
+  });
+
+  it('every listed path is a discovered prover that spawns cargo and runs no JS spec', () => {
+    expect(NON_JS_TEST_SUITE_PROVERS.length).toBeGreaterThan(0);
+    const discovered = new Set(discoverProvers(REPO_ROOT).map((p) => p.relPath));
+    for (const relPath of NON_JS_TEST_SUITE_PROVERS) {
+      expect(discovered.has(relPath), `${relPath} is not a discovered prover`).toBe(true);
+      const literals = codeStringLiterals(read(resolve(REPO_ROOT, relPath)));
+      // If it ever runs a vitest/bun:test spec, it must resolve that runner.
+      expect(
+        literals.some((l) => /\bvitest\b|\.test\.[cm]?[jt]sx?$/.test(l)),
+        relPath,
+      ).toBe(false);
+      expect(literals).toContain('cargo');
+    }
   });
 });
 

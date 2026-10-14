@@ -1,0 +1,15 @@
+# The knext in-process Rust crates (Beta). A Cargo workspace for these crates
+# only, deliberately not at the repository root, so no tool mistakes the
+# monorepo for a Rust project. ABI and type contract: README.md.
+[workspace]
+resolver = "2"
+members = ["knext-ffi", "knext-ffi-macros", "knext-ffi-fixture"]
+
+# The profile the manifest-survival check builds the fixture library with: the
+# records embedded by the macros must survive full LTO, stripping and a single
+# codegen unit (crates/harness/ffi-harness.ts, mode `manifest`).
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

@@ -1,0 +1,79 @@
+error[E0391]: cycle detected when simplifying constant for the type system `<impl at $DIR/tests/ui/fail/mutually_recursive_records.rs:8:1: 8:10>::SCHEMA`
+ --> tests/ui/fail/mutually_recursive_records.rs:8:1
+  |
+8 | #[record]
+  | ^^^^^^^^^
+  |
+note: ...which requires const-evaluating + checking `<impl at $DIR/tests/ui/fail/mutually_recursive_records.rs:8:1: 8:10>::SCHEMA`...
+ --> tests/ui/fail/mutually_recursive_records.rs:8:1
+  |
+8 | #[record]
+  | ^^^^^^^^^
+note: ...which requires caching mir of `<impl at $DIR/tests/ui/fail/mutually_recursive_records.rs:8:1: 8:10>::SCHEMA` for CTFE...
+ --> tests/ui/fail/mutually_recursive_records.rs:8:1
+  |
+8 | #[record]
+  | ^^^^^^^^^
+note: ...which requires elaborating drops for `<impl at $DIR/tests/ui/fail/mutually_recursive_records.rs:8:1: 8:10>::SCHEMA`...
+ --> tests/ui/fail/mutually_recursive_records.rs:8:1
+  |
+8 | #[record]
+  | ^^^^^^^^^
+note: ...which requires simplifying constant for the type system `<impl at $DIR/tests/ui/fail/mutually_recursive_records.rs:8:1: 8:10>::SCHEMA::promoted[0]`...
+ --> tests/ui/fail/mutually_recursive_records.rs:8:1
+  |
+8 | #[record]
+  | ^^^^^^^^^
+note: ...which requires const-evaluating + checking `<impl at $DIR/tests/ui/fail/mutually_recursive_records.rs:8:1: 8:10>::SCHEMA::promoted[0]`...
+ --> tests/ui/fail/mutually_recursive_records.rs:8:1
+  |
+8 | #[record]
+  | ^^^^^^^^^
+note: ...which requires optimizing promoted MIR for `<impl at $DIR/tests/ui/fail/mutually_recursive_records.rs:8:1: 8:10>::SCHEMA`...
+ --> tests/ui/fail/mutually_recursive_records.rs:8:1
+  |
+8 | #[record]
+  | ^^^^^^^^^
+note: ...which requires simplifying constant for the type system `<impl at $DIR/tests/ui/fail/mutually_recursive_records.rs:3:1: 3:10>::SCHEMA`...
+ --> tests/ui/fail/mutually_recursive_records.rs:3:1
+  |
+3 | #[record]
+  | ^^^^^^^^^
+note: ...which requires const-evaluating + checking `<impl at $DIR/tests/ui/fail/mutually_recursive_records.rs:3:1: 3:10>::SCHEMA`...
+ --> tests/ui/fail/mutually_recursive_records.rs:3:1
+  |
+3 | #[record]
+  | ^^^^^^^^^
+note: ...which requires caching mir of `<impl at $DIR/tests/ui/fail/mutually_recursive_records.rs:3:1: 3:10>::SCHEMA` for CTFE...
+ --> tests/ui/fail/mutually_recursive_records.rs:3:1
+  |
+3 | #[record]
+  | ^^^^^^^^^
+note: ...which requires elaborating drops for `<impl at $DIR/tests/ui/fail/mutually_recursive_records.rs:3:1: 3:10>::SCHEMA`...
+ --> tests/ui/fail/mutually_recursive_records.rs:3:1
+  |
+3 | #[record]
+  | ^^^^^^^^^
+note: ...which requires simplifying constant for the type system `<impl at $DIR/tests/ui/fail/mutually_recursive_records.rs:3:1: 3:10>::SCHEMA::promoted[0]`...
+ --> tests/ui/fail/mutually_recursive_records.rs:3:1
+  |
+3 | #[record]
+  | ^^^^^^^^^
+note: ...which requires const-evaluating + checking `<impl at $DIR/tests/ui/fail/mutually_recursive_records.rs:3:1: 3:10>::SCHEMA::promoted[0]`...
+ --> tests/ui/fail/mutually_recursive_records.rs:3:1
+  |
+3 | #[record]
+  | ^^^^^^^^^
+note: ...which requires optimizing promoted MIR for `<impl at $DIR/tests/ui/fail/mutually_recursive_records.rs:3:1: 3:10>::SCHEMA`...
+ --> tests/ui/fail/mutually_recursive_records.rs:3:1
+  |
+3 | #[record]
+  | ^^^^^^^^^
+  = note: ...which again requires simplifying constant for the type system `<impl at $DIR/tests/ui/fail/mutually_recursive_records.rs:8:1: 8:10>::SCHEMA`, completing the cycle
+note: cycle used when const-evaluating + checking `__KNEXT_FFI_PIECES_record_A`
+ --> tests/ui/fail/mutually_recursive_records.rs:3:1
+  |
+3 | #[record]
+  | ^^^^^^^^^
+  = note: see https://rustc-dev-guide.rust-lang.org/overview.html#queries and https://rustc-dev-guide.rust-lang.org/query.html for more information
+  = note: this error originates in the attribute macro `record` (in Nightly builds, run with -Z macro-backtrace for more info)
