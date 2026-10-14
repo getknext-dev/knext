@@ -72,13 +72,12 @@ jobs:
         run: |
           set -euo pipefail
           name="cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl"
-          gh release download "${CARGO_DENY_VERSION}" --repo EmbarkStudios/cargo-deny \
-            --pattern "${name}.tar.gz" --dir "${RUNNER_TEMP}"
-          echo "${CARGO_DENY_SHA256}  ${RUNNER_TEMP}/${name}.tar.gz" | sha256sum -c -
-          tar -xzf "${RUNNER_TEMP}/${name}.tar.gz" -C "${RUNNER_TEMP}"
-          install -m 0755 "${RUNNER_TEMP}/${name}/cargo-deny" "${HOME}/.cargo/bin/cargo-deny"
-        env:
-          GH_TOKEN: ${{ github.token }}
+          cd "${RUNNER_TEMP}"
+          curl -fsSL -o cargo-deny.tar.gz \
+            "https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/${name}.tar.gz"
+          echo "${CARGO_DENY_SHA256}  cargo-deny.tar.gz" | sha256sum -c -
+          tar -xzf cargo-deny.tar.gz
+          install -m 0755 "${name}/cargo-deny" "${HOME}/.cargo/bin/cargo-deny"
 
       - name: cargo deny check
         run: cargo deny check
