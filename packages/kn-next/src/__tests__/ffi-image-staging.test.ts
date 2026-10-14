@@ -14,9 +14,13 @@
  *  3. The standalone compile (`compileArtifactForDeploy`, turbopack × bun)
  *     writes `native/.integrity.json` over the staged `native/ffi/**` when
  *     opted in, and creates no `native/` at all otherwise.
- *  4. vinext's sharp staging (`stageSharpNative`) leaves `native/ffi/` alone —
- *     on a first build (no manifest yet) and on a rebuild (the previous
- *     manifest lists `ffi/**`) — and its manifest covers it.
+ *  4. vinext's sharp staging (`stageSharpNative`) leaves `native/ffi/` alone
+ *     for an opted-in app — on a first build (no manifest yet) and on a
+ *     rebuild (the previous manifest lists `ffi/**`) — and its manifest covers
+ *     it. Once the app opts OUT (deletes `knext.ffi.json`), the old
+ *     `native/ffi/` is cleared like any other staged entry, so neither the
+ *     manifest nor the image (the vinext Dockerfile COPYs `native/` whole)
+ *     carries a library nothing calls.
  */
 
 import { afterAll, describe, expect, it, mock } from "bun:test";
@@ -289,11 +293,11 @@ describe("compileArtifactForDeploy — native/.integrity.json over native/ffi", 
 // vinext's native/ clean-up keeps its hands off native/ffi/.
 // ---------------------------------------------------------------------------
 
-describe("stageSharpNative (vinext × bun) leaves native/ffi/ alone", () => {
+describe("stageSharpNative (vinext × bun) leaves native/ffi/ alone when opted in", () => {
     const LIB = `native/ffi/${TRIPLE}/libzone.so`;
 
     it("first build: native/ffi/ staged before any manifest exists is kept and hashed", () => {
-        const app = tree({ "package.json": "{}", [LIB]: "lib-v1" });
+        const app = tree({ "package.json": "{}", ...OPT_IN, [LIB]: "lib-v1" });
         stageSharpNative(app, { arch: "linux-x64" });
         expect(readFileSync(join(app, LIB), "utf8")).toBe("lib-v1");
         const files = JSON.parse(
@@ -303,7 +307,7 @@ describe("stageSharpNative (vinext × bun) leaves native/ffi/ alone", () => {
     });
 
     it("rebuild: the previous manifest lists ffi/**, and the freshly staged library still survives", () => {
-        const app = tree({ "package.json": "{}", [LIB]: "lib-v1" });
+        const app = tree({ "package.json": "{}", ...OPT_IN, [LIB]: "lib-v1" });
         stageSharpNative(app, { arch: "linux-x64" });
         // The next build's `knext ffi build` replaces native/ffi/ first.
         writeFileSync(join(app, LIB), "lib-v2");
@@ -318,6 +322,7 @@ describe("stageSharpNative (vinext × bun) leaves native/ffi/ alone", () => {
     it("a hand-written file outside native/ffi/ with no manifest is still refused (unchanged)", () => {
         const app = tree({
             "package.json": "{}",
+            ...OPT_IN,
             [LIB]: "lib",
             "native/mine.txt": "do not delete",
         });
@@ -327,5 +332,52 @@ describe("stageSharpNative (vinext × bun) leaves native/ffi/ alone", () => {
         expect(readFileSync(join(app, "native", "mine.txt"), "utf8")).toBe(
             "do not delete",
         );
+    });
+});
+
+describe("stageSharpNative (vinext) clears a stale native/ffi/ once the app opts out", () => {
+    const LIB = `native/ffi/${TRIPLE}/libzone.so`;
+
+    it("the vinext image ships native/ whole, so what is on disk is what ships", () => {
+        const vinextDockerfile = readFileSync(
+            join(dirname(TEMPLATE_DIR), "app", "Dockerfile.hbs"),
+            "utf8",
+        );
+        expect(vinextDockerfile).toMatch(/^COPY native \/app\/native$/m);
+    });
+
+    it("opted out after an opted-in build: native/ffi/ is removed and the manifest no longer lists it", () => {
+        const app = tree({ "package.json": "{}", ...OPT_IN, [LIB]: "lib-v1" });
+        stageSharpNative(app, { arch: "linux-x64" });
+        const before = JSON.parse(
+            readFileSync(join(app, "native", ".integrity.json"), "utf8"),
+        ).files;
+        expect(Object.keys(before)).toContain(`ffi/${TRIPLE}/libzone.so`);
+
+        rmSync(join(app, "knext.ffi.json"));
+        stageSharpNative(app, { arch: "linux-x64" });
+
+        expect(existsSync(join(app, "native", "ffi"))).toBe(false);
+        const after = JSON.parse(
+            readFileSync(join(app, "native", ".integrity.json"), "utf8"),
+        ).files;
+        expect(after).toEqual({});
+        expect(readdirSync(join(app, "native"))).toEqual([".integrity.json"]);
+    });
+
+    it("opted in: the same rebuild keeps native/ffi/ (the control for the case above)", () => {
+        const app = tree({ "package.json": "{}", ...OPT_IN, [LIB]: "lib-v1" });
+        stageSharpNative(app, { arch: "linux-x64" });
+        stageSharpNative(app, { arch: "linux-x64" });
+        expect(readFileSync(join(app, LIB), "utf8")).toBe("lib-v1");
+    });
+
+    it("opted out with a native/ffi/ no manifest accounts for: refused, not deleted", () => {
+        // Not provably knext's (no ownership record), so the usual refusal.
+        const app = tree({ "package.json": "{}", [LIB]: "lib" });
+        expect(() => stageSharpNative(app, { arch: "linux-x64" })).toThrow(
+            /Refusing to stage/,
+        );
+        expect(readFileSync(join(app, LIB), "utf8")).toBe("lib");
     });
 });

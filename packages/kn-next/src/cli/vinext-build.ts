@@ -57,6 +57,7 @@ import {
 } from "../adapters/og-harfbuzz.mjs";
 import { packageRoot } from "./create";
 import { runQuiet } from "./exec";
+import { ffiOptedIn } from "./ffi-preflight";
 import {
     findLockfile,
     formatLockedVersions,
@@ -592,7 +593,7 @@ export function stageSharpNative(
     const dest = opts.nativeDir
         ? resolve(cwd, opts.nativeDir)
         : join(cwd, "native");
-    clearStagedNative(dest);
+    clearStagedNative(dest, { keepFfi: ffiOptedIn(cwd) });
     mkdirSync(dest, { recursive: true });
 
     const imgRoot = findImgPackages(cwd);
@@ -1038,18 +1039,26 @@ function appUsesSharp(
  * and only those entries (plus the manifest) are removed; absent with content,
  * the build REFUSES rather than deleting what it cannot prove it created.
  *
- * `native/ffi/` is never touched: it is in-process Rust's staging (ADR-0069
- * D14), written by `knext ffi build` BEFORE this runs and owned by that step,
- * which clears and rewrites it itself. The previous manifest lists `ffi/**`
- * (it hashes the whole tree), so without this exclusion a rebuild deleted the
- * freshly staged library, and a first build refused a `native/` holding only
- * `ffi/`. The manifest written after this still covers `ffi/**`.
+ * `native/ffi/` is left alone ONLY while the app opts into in-process Rust
+ * (`opts.keepFfi`, i.e. `knext.ffi.json` exists): it is that feature's staging
+ * (ADR-0069 D14), written by `knext ffi build` BEFORE this runs and owned by
+ * that step, which clears and rewrites it itself. The previous manifest lists
+ * `ffi/**` (it hashes the whole tree), so without this exclusion a rebuild
+ * deleted the freshly staged library, and a first build refused a `native/`
+ * holding only `ffi/`. The manifest written after this still covers `ffi/**`.
+ * Once the app opts OUT, nothing owns it any more: it is cleared like any
+ * other staged entry, so the image (which COPYs `native/` whole) and the
+ * manifest stop carrying a library nothing calls.
  */
 const FFI_STAGING_DIR = "ffi";
 
-function clearStagedNative(dest: string): void {
+function clearStagedNative(
+    dest: string,
+    opts: { readonly keepFfi: boolean },
+): void {
     if (!existsSync(dest)) return;
-    const entries = readdirSync(dest).filter((e) => e !== FFI_STAGING_DIR);
+    const kept = (e: string) => opts.keepFfi && e === FFI_STAGING_DIR;
+    const entries = readdirSync(dest).filter((e) => !kept(e));
     if (entries.length === 0) return;
 
     const manifestPath = join(dest, INTEGRITY_MANIFEST_NAME);
@@ -1086,7 +1095,7 @@ function clearStagedNative(dest: string): void {
             seg &&
             seg !== "." &&
             seg !== ".." &&
-            seg !== FFI_STAGING_DIR &&
+            !kept(seg) &&
             !seg.includes("\\")
         ) {
             owned.add(seg);

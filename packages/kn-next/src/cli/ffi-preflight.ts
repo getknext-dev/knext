@@ -102,6 +102,38 @@ export function ffiTargetTriple(arch: string): string {
     return triple;
 }
 
+/** How to recover from an empty native/ffi/<triple>/, per entry point. */
+export const FFI_STAGED_REMEDY = {
+    /** `knext build --skip-next`, and the compile step `deploy`/`preview` share. */
+    compile:
+        "Run the build without --skip-next (it runs `knext ffi build` first), or run `knext ffi build` yourself.",
+    /** `knext deploy --skip-build`, which never runs the build. */
+    skipBuild:
+        "Drop --skip-build (the build runs `knext ffi build` first), or run `knext build` before deploying.",
+} as const;
+
+/**
+ * Refuse an opted-in app whose image would ship without its Rust library:
+ * nothing is staged at `native/ffi/<triple>/` for the image arch. Every image
+ * that runs the app's Bun executable needs it (the standalone and vinext
+ * targets alike), and the legs that skip the build (`build --skip-next`,
+ * `deploy --skip-build`) are exactly where nothing staged it this run. A
+ * no-op without `knext.ffi.json`.
+ */
+export function assertFfiLibraryStaged(
+    cwd: string,
+    arch: string,
+    remedy: string,
+): void {
+    if (!ffiOptedIn(cwd)) return;
+    const triple = ffiTargetTriple(arch);
+    if (!existsSync(join(cwd, "native", "ffi", triple))) {
+        throw new UsageError(
+            `${FFI_CONFIG_FILE} opts this app into in-process Rust, but nothing is staged at native/ffi/${triple}/ for the image arch ${arch}, so the image would ship without its Rust library.\n\n${remedy}`,
+        );
+    }
+}
+
 export interface FfiBuildStepDeps {
     readonly dispatch?: typeof dispatchFfiVerb;
     readonly coreVersion?: string;

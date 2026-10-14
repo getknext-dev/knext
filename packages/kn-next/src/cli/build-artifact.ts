@@ -58,7 +58,11 @@ import {
     compileIncludeGlobs,
     wantsPatchedBun,
 } from "./compile-config";
-import { ffiOptedIn, ffiTargetTriple } from "./ffi-preflight";
+import {
+    assertFfiLibraryStaged,
+    FFI_STAGED_REMEDY,
+    ffiOptedIn,
+} from "./ffi-preflight";
 import { findLockfile, writeNativeIntegrityManifest } from "./native-integrity";
 import { UsageError } from "./shared";
 import {
@@ -330,13 +334,7 @@ export function compileArtifactForDeploy(
         // when opted in: otherwise no native/ tree is created (D17).
         if (ffiOptedIn(cwd)) {
             const nativeDir = join(cwd, "native");
-            const triple = ffiTargetTriple(arch);
-            if (!existsSync(join(nativeDir, "ffi", triple))) {
-                throw new UsageError(
-                    `knext.ffi.json opts this app into in-process Rust, but nothing is staged at native/ffi/${triple}/ for the image arch ${arch}, so the image would ship without its Rust library.\n\n` +
-                        "Run the build without --skip-next (it runs `knext ffi build` first), or run `knext ffi build` yourself.",
-                );
-            }
+            assertFfiLibraryStaged(cwd, arch, FFI_STAGED_REMEDY.compile);
             writeNativeIntegrityManifest(nativeDir, findLockfile(cwd));
         }
         // #1351/#1414: stamp the exec with a hash of the WHOLE standalone
@@ -366,6 +364,13 @@ export function compileArtifactForDeploy(
             ...(include.length > 0 ? { include } : {}),
             ...(opts.toolchain?.bin ? { compilerBin: opts.toolchain.bin } : {}),
         });
+        // In-process Rust (ADR-0069 D14), the same refusal as the standalone
+        // branch: the vinext image ships native/ whole, and its manifest (the
+        // sharp staging inside the compile) covers native/ffi/** — but only
+        // what is there. An opted-in `--skip-next` build with nothing staged
+        // would ship without its library. Before the stamp, so a refused
+        // build leaves nothing `deploy --skip-build` would accept.
+        assertFfiLibraryStaged(cwd, arch, FFI_STAGED_REMEDY.compile);
         // #1351/#1414 rev-2: same stamp, scoped to `.output/server` +
         // `.output/public` — never the whole `.output` root, which is also
         // where THIS CLI writes its own preflight/CR/buildx-metadata files
@@ -645,6 +650,11 @@ export function assertCompiledArtifactFresh(
     cwd: string,
     arch: string = DEPLOY_SHIP_ARCH,
 ): void {
+    // In-process Rust (ADR-0069 D14): `--skip-build` never runs `knext ffi
+    // build`, so an opted-in app must already have its library staged for the
+    // image arch. First, before the early returns below — it holds whether or
+    // not a compiled exec is involved. A no-op without knext.ffi.json.
+    assertFfiLibraryStaged(cwd, arch, FFI_STAGED_REMEDY.skipBuild);
     const target = compiledExecPathFor(config, cwd, arch);
     if (!target) return;
     if (!existsSync(target.sourcePath)) return;

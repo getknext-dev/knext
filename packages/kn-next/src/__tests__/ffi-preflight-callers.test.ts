@@ -10,6 +10,14 @@
  * or `selfContained: true`, and must stop with the refusal BEFORE any build,
  * compile, freshness check, dispatch or image step. The side-effecting seams
  * are module-mocked spies; the preflight itself is the real one.
+ *
+ * The vinext × bun cell is supported, so it is refused only when nothing is
+ * staged at native/ffi/<triple>/ — after the compile on `build --skip-next`,
+ * and in the freshness check on `deploy --skip-build`.
+ *
+ * Every deploy() here runs through `runDeploy`, which always passes
+ * `--dry-run`: with a regressed refusal, deploy() runs on, and a dry run makes
+ * no docker build/push and no cluster call. A scan at the bottom keeps it so.
  */
 
 import {
@@ -21,7 +29,15 @@ import {
     it,
     mock,
 } from "bun:test";
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import {
+    existsSync,
+    mkdirSync,
+    mkdtempSync,
+    readFileSync,
+    realpathSync,
+    rmSync,
+    writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { KnativeNextConfig } from "../config";
@@ -34,6 +50,14 @@ const runProjectBuild = mock<AnyFn>();
 const compileArtifactForDeploy = mock<AnyFn>(() => ({ compiled: false }));
 const assertCompiledArtifactFresh = mock<AnyFn>();
 const dispatchFfiVerb = mock<AnyFn>(async () => 0);
+// The real vinext compile shells out to `bun build --compile`; write a
+// placeholder executable where it would land.
+const buildVinextExecutable = mock<AnyFn>((opts: unknown) => {
+    const { cwd, arch } = opts as { cwd: string; arch: string };
+    const out = join(cwd, `knext-exec-${arch}`);
+    writeFileSync(out, "binary");
+    return out;
+});
 
 const realShared = { ...(await import("../cli/shared")) };
 mock.module("../cli/shared", () => ({
@@ -44,6 +68,11 @@ const realProjectBuild = { ...(await import("../cli/project-build")) };
 mock.module("../cli/project-build", () => ({
     ...realProjectBuild,
     runProjectBuild: (...a: unknown[]) => runProjectBuild(...a),
+}));
+const realVinext = { ...(await import("../cli/vinext-build")) };
+mock.module("../cli/vinext-build", () => ({
+    ...realVinext,
+    buildVinextExecutable: (...a: unknown[]) => buildVinextExecutable(...a),
 }));
 const realArtifact = { ...(await import("../cli/build-artifact")) };
 mock.module("../cli/build-artifact", () => ({
@@ -78,8 +107,25 @@ function enterApp(optedIn: boolean): string {
     const dir = realpathSync(mkdtempSync(join(tmpdir(), "knext-ffi-callers-")));
     roots.push(dir);
     if (optedIn) writeFileSync(join(dir, "knext.ffi.json"), "{}\n");
+    // A lockfile, so deploy() can resolve its docker build context: with a
+    // regressed refusal, deploy() then really reaches the freshness check
+    // (and goes red there) instead of stopping early for an unrelated reason.
+    writeFileSync(
+        join(dir, "package-lock.json"),
+        '{ "lockfileVersion": 3, "packages": {} }\n',
+    );
     process.chdir(dir);
     return dir;
+}
+
+/**
+ * The ONLY way this spec runs deploy(). `--dry-run` is not optional: deploy.ts
+ * skips the prune preflight, docker build/push and the CR apply on a dry run,
+ * so a regressed refusal can never reach the ambient kube context.
+ */
+async function runDeploy(...flags: string[]): Promise<void> {
+    process.argv = ["node", "/path/to/kn-next.js", "--dry-run", ...flags];
+    return deploy();
 }
 
 const CONFIG = {
@@ -112,6 +158,7 @@ beforeEach(() => {
         compileArtifactForDeploy,
         assertCompiledArtifactFresh,
         dispatchFfiVerb,
+        buildVinextExecutable,
     ])
         m.mockClear();
 });
@@ -172,8 +219,9 @@ describe("knext deploy --skip-build", () => {
             enterApp(true);
             const kase = CASES[c] as (typeof CASES)[number];
             loadConfig.mockResolvedValue({ ...CONFIG, ...kase.config });
-            process.argv = ["node", "/path/to/kn-next.js", "--skip-build"];
-            await expect(deploy()).rejects.toThrow(kase.message);
+            await expect(runDeploy("--skip-build")).rejects.toThrow(
+                kase.message,
+            );
             expectNoBuildWork();
         });
     }
@@ -181,8 +229,7 @@ describe("knext deploy --skip-build", () => {
     it("refuses on the fresh-build leg too", async () => {
         enterApp(true);
         loadConfig.mockResolvedValue({ ...CONFIG, runtime: "node" });
-        process.argv = ["node", "/path/to/kn-next.js", "--dry-run"];
-        await expect(deploy()).rejects.toThrow(FFI_NODE_REFUSAL);
+        await expect(runDeploy()).rejects.toThrow(FFI_NODE_REFUSAL);
         expectNoBuildWork();
     });
 });
@@ -211,4 +258,137 @@ describe("knext preview deploy", () => {
             expectNoBuildWork();
         });
     }
+});
+// ---------------------------------------------------------------------------
+// vinext × bun: supported, but refused when nothing is staged for the image.
+// ---------------------------------------------------------------------------
+
+const TRIPLE = "x86_64-unknown-linux-musl";
+const VINEXT_BUN = { ...CONFIG, build: "vinext", runtime: "bun" } as const;
+const NOTHING_STAGED = new RegExp(`nothing is staged at native/ffi/${TRIPLE}/`);
+
+describe("vinext × bun with knext.ffi.json and nothing staged at native/ffi/<triple>", () => {
+    it("knext build --skip-next refuses after the compile, before the manifest or stamp", async () => {
+        const app = enterApp(true);
+        loadConfig.mockResolvedValue(VINEXT_BUN);
+        compileArtifactForDeploy.mockImplementationOnce(
+            realArtifact.compileArtifactForDeploy as AnyFn,
+        );
+        await expect(
+            build({ skipNextBuild: true, skipSmoke: true }),
+        ).rejects.toThrow(NOTHING_STAGED);
+        expect(buildVinextExecutable).toHaveBeenCalledTimes(1);
+        expect(runProjectBuild).not.toHaveBeenCalled();
+        expect(dispatchFfiVerb).not.toHaveBeenCalled();
+        expect(existsSync(join(app, "native", ".integrity.json"))).toBe(false);
+    });
+
+    it("knext build --skip-next with the library staged is not refused for it", async () => {
+        const app = enterApp(true);
+        mkdirSync(join(app, "native", "ffi", TRIPLE), { recursive: true });
+        writeFileSync(join(app, "native", "ffi", TRIPLE, "libzone.so"), "lib");
+        loadConfig.mockResolvedValue(VINEXT_BUN);
+        compileArtifactForDeploy.mockImplementationOnce(
+            realArtifact.compileArtifactForDeploy as AnyFn,
+        );
+        let message = "";
+        try {
+            await build({ skipNextBuild: true, skipSmoke: true });
+        } catch (err) {
+            message = (err as Error).message;
+        }
+        expect(message).not.toMatch(NOTHING_STAGED);
+        expect(buildVinextExecutable).toHaveBeenCalledTimes(1);
+    });
+
+    it("knext deploy --skip-build --dry-run refuses in the freshness check, naming --skip-build", async () => {
+        enterApp(true);
+        loadConfig.mockResolvedValue(VINEXT_BUN);
+        assertCompiledArtifactFresh.mockImplementationOnce(
+            realArtifact.assertCompiledArtifactFresh as AnyFn,
+        );
+        const err = await runDeploy("--skip-build").then(
+            () => undefined,
+            (e: Error) => e,
+        );
+        expect(err?.message).toMatch(NOTHING_STAGED);
+        expect(err?.message).toContain("--skip-build");
+        expect(err?.message).not.toContain("--skip-next");
+        expect(assertCompiledArtifactFresh).toHaveBeenCalledTimes(1);
+        expect(compileArtifactForDeploy).not.toHaveBeenCalled();
+        expect(runProjectBuild).not.toHaveBeenCalled();
+        expect(dispatchFfiVerb).not.toHaveBeenCalled();
+    });
+
+    it("without knext.ffi.json, deploy --skip-build --dry-run is not refused for it", async () => {
+        enterApp(false);
+        loadConfig.mockResolvedValue(VINEXT_BUN);
+        assertCompiledArtifactFresh.mockImplementationOnce(
+            realArtifact.assertCompiledArtifactFresh as AnyFn,
+        );
+        let message = "";
+        try {
+            await runDeploy("--skip-build");
+        } catch (err) {
+            message = (err as Error).message;
+        }
+        expect(message).not.toMatch(NOTHING_STAGED);
+        expect(assertCompiledArtifactFresh).toHaveBeenCalledTimes(1);
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Guard: every deploy() in this spec is a dry run.
+// ---------------------------------------------------------------------------
+
+describe("this spec never runs a non-dry-run deploy()", () => {
+    const SOURCE = readFileSync(import.meta.path, "utf8");
+    // One pass over comments and string/template literals, leftmost first, so
+    // a quote inside a comment (or a slash inside a string) cannot desync it.
+    // Built from a template literal, so the pattern itself is stripped too.
+    const LITERALS = new RegExp(
+        String.raw`/\*[\s\S]*?\*/|//[^\n]*|"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|\x60(?:[^\x60\\]|\\.)*\x60`,
+        "g",
+    );
+    /** Comments removed, strings kept (for the argv literal). */
+    const code = SOURCE.replace(LITERALS, (m) => (m.startsWith("/") ? "" : m));
+    /** Comments AND strings removed: test names mention the command too. */
+    const bare = SOURCE.replace(LITERALS, "");
+    const FN = "deploy";
+
+    it("the command is called exactly once, inside runDeploy", () => {
+        const calls = [...bare.matchAll(new RegExp(`\\b${FN}\\s*\\(`, "g"))];
+        expect(calls.length).toBe(1);
+        const helper = bare.match(
+            /async function runDeploy\([^)]*\)[^{]*\{([\s\S]*?)\n\}/,
+        );
+        expect(helper?.[1]).toMatch(new RegExp(`\\b${FN}\\(\\)`));
+    });
+
+    it("the command is never aliased or passed by reference", () => {
+        // Every bare token: the destructuring import, and the one call.
+        const tokens = [...bare.matchAll(new RegExp(`\\b${FN}\\b`, "g"))]
+            .map((m) =>
+                bare.slice(m.index ?? 0, (m.index ?? 0) + FN.length + 2),
+            )
+            .sort();
+        expect(tokens).toEqual([`${FN} }`, `${FN}()`].sort());
+    });
+
+    it("the only argv assignment is runDeploy's, and it carries --dry-run unconditionally", () => {
+        const assigns = [...code.matchAll(/process\.argv\s*=\s*([^;]+);/g)]
+            .map((m) => (m[1] as string).trim())
+            .sort();
+        // runDeploy's, plus afterEach's restore of the saved argv.
+        expect(assigns).toEqual(
+            [
+                '["node", "/path/to/kn-next.js", "--dry-run", ...flags]',
+                "savedArgv",
+            ].sort(),
+        );
+        // ...and nothing edits argv in place.
+        expect(bare).not.toMatch(
+            /process\.argv\s*(\.\s*(push|splice|unshift|pop|shift)\b|\[)/,
+        );
+    });
 });
