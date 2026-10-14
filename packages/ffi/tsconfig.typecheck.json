@@ -1,0 +1,16 @@
+{
+  // Typecheck gate: unlike tsconfig.json (the build config, which excludes
+  // tests), this pulls the tests into strict scope. `types: ["bun"]` for the
+  // `bun:test` ambient module (TS7 does not auto-include @types/*); rootDir
+  // widened because nothing is emitted. The GENERATED module is checked
+  // separately by fixtures/app/tsconfig.json, which, like a Next.js app, has
+  // Node types only and no @types/bun.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "types": ["bun", "node"],
+    "rootDir": "."
+  },
+  "include": ["src/**/*", "tsup.config.ts"],
+  "exclude": ["node_modules", "dist"]
+}

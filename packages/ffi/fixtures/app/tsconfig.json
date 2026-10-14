@@ -1,0 +1,27 @@
+{
+  // The generated module must type-check in an app that has Node types only
+  // (no @types/bun), the way a Next.js app's tsconfig looks: target ES2017,
+  // the dom + esnext libs. The strict extras a user may turn on are on here,
+  // and erasableSyntaxOnly holds it to what Node's type stripping can run.
+  // src/generated/ffi/index.ts is the golden render.test.ts compares against.
+  "compilerOptions": {
+    "target": "ES2017",
+    "lib": ["dom", "dom.iterable", "esnext"],
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "erasableSyntaxOnly": true,
+    "noUncheckedIndexedAccess": true,
+    "noPropertyAccessFromIndexSignature": true,
+    "exactOptionalPropertyTypes": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "types": ["node"]
+  },
+  "include": ["src/**/*.ts", "server-only.d.ts"]
+}

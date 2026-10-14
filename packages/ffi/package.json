@@ -1,0 +1,49 @@
+{
+  "name": "@getknext/ffi",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Opt-in in-process Rust for Bun zones (Beta): `knext ffi init|generate|check` and the typed, server-only bun:ffi wrapper generator.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/getknext-dev/knext.git",
+    "directory": "packages/ffi"
+  },
+  "homepage": "https://github.com/getknext-dev/knext#readme",
+  "bugs": {
+    "url": "https://github.com/getknext-dev/knext/issues"
+  },
+  "type": "module",
+  "exports": {
+    "./cli": {
+      "types": "./dist/cli.d.ts",
+      "import": "./dist/cli.js",
+      "default": "./dist/cli.js"
+    },
+    "./render": {
+      "types": "./dist/render.d.ts",
+      "import": "./dist/render.js",
+      "default": "./dist/render.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "templates"
+  ],
+  "knextFfi": {
+    "crateRev": null
+  },
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "../../node_modules/typescript-tsc7/bin/tsc -p tsconfig.typecheck.json && ../../node_modules/typescript-tsc7/bin/tsc -p fixtures/app/tsconfig.json"
+  },
+  "peerDependencies": {
+    "@getknext/core": ">=2.0.0-0 <3.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@getknext/core": {
+      "optional": true
+    }
+  }
+}
