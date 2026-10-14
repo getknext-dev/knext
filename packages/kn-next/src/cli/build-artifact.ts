@@ -70,6 +70,7 @@ import {
 import {
     buildVinextExecutable,
     stageOgHarfbuzzForVinextNode,
+    stageSharpForStandalone,
     stageSharpForVinextNode,
 } from "./vinext-build";
 
@@ -312,6 +313,14 @@ export function compileArtifactForDeploy(
         // stamp hashes the tree. Missing = an older adapter: the runtime fails closed.
         if (existsSync(layout.serverDir)) {
             stageCdnRoutingArtifact(join(cwd, ".next"), layout.serverDir);
+        }
+        // #2360: both standalone images are alpine (linuxmusl) and copy this
+        // tree verbatim, but `next build` traced the BUILD HOST's sharp addon
+        // into it — so stage the image platform's pair beside it. Before the
+        // compile: the executable loads sharp from this tree at runtime, and
+        // the freshness stamp below hashes it.
+        if (existsSync(layout.serverPath)) {
+            stageSharpForStandalone(cwd, { arch });
         }
         if (runtimeId !== "bun") {
             return { compiled: false, healed, adapterPathWorkaround };

@@ -44,11 +44,12 @@ import {
     mkdtempSync,
     readdirSync,
     readFileSync,
+    realpathSync,
     rmSync,
     writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { rewriteVinextHarfbuzzAnchors } from "../adapters/entry-asset-anchor.mjs";
 import {
     ogHarfbuzzWarning,
@@ -67,6 +68,7 @@ import {
 } from "./native-integrity";
 import { preflightEsmPackage } from "./project-build";
 import { UsageError } from "./shared";
+import { resolveStandaloneLayout } from "./standalone-layout";
 
 /** The first Bun that ADR-0048 accepts. See the docstring for the measurements. */
 export const MIN_BUN_MAJOR = 1;
@@ -982,6 +984,172 @@ export function stageSharpForVinextNode(
     }
 
     return { staged: true };
+}
+
+export interface StageSharpForStandaloneOptions {
+    /** Image target arch; defaults to the ship target, like the compile. */
+    readonly arch?: string;
+    /** Injectable for tests; the real one fetches from the npm registry. */
+    readonly fetchPackage?: (
+        pkg: { name: string; version: string; integrity: string | null },
+        destDir: string,
+    ) => void;
+}
+
+/**
+ * Stage the IMAGE platform's sharp addon into a standalone build's traced tree
+ * (#2360), for both standalone images (bun and node).
+ *
+ * `next build` traces sharp into `.next/standalone/node_modules` with the
+ * `@img/sharp-<platform>` + `@img/sharp-libvips-<platform>` pair the BUILD
+ * HOST installed, and `Dockerfile.standalone` copies that tree verbatim into
+ * an alpine (`linuxmusl`) image. Built on a glibc host (any CI runner), the
+ * image therefore had no addon it could load: `require('sharp')` failed with
+ * "Could not load the sharp module using the linuxmusl-x64 runtime", Next's
+ * optimizer caught it, and `/_next/image` served the original bytes.
+ *
+ * The target pair is added BESIDE the traced sharp — in the `node_modules`
+ * directory sharp's own loader resolves `@img/...` from — taken from the host
+ * install when it has it and fetched at the lockfile-pinned version otherwise,
+ * exactly as `stageSharpNative` / `stageSharpForVinextNode` do. Unlike
+ * `stageSharpForVinextNode`, the host's own pair is KEPT: sharp 0.35 selects
+ * its addon by the runtime platform (no directory-order coin flip), and the
+ * host-arch smoke binary run on the build machine loads the host's pair from
+ * this same tree.
+ *
+ * A pair Next already traced (a build host of the image's own platform) is
+ * left as it is. No traced sharp (no sharp installed, so nothing for Next's
+ * optimizer to load) is a no-op.
+ */
+export function stageSharpForStandalone(
+    cwd: string,
+    opts: StageSharpForStandaloneOptions = {},
+): { staged: string[] } {
+    const arch = opts.arch ?? "linux-x64";
+    const platformId = SHARP_PLATFORM_IDS[arch];
+    if (!platformId) {
+        throw new UsageError(
+            `Unknown build arch '${arch}'. Known: ${Object.keys(SHARP_PLATFORM_IDS).join(", ")}.`,
+        );
+    }
+
+    const layout = resolveStandaloneLayout(cwd);
+    const tracedSharp = findTracedSharp(layout.standaloneDir, layout.serverDir);
+    if (tracedSharp === undefined) return { staged: [] };
+
+    const imgDest = join(dirname(tracedSharp), "@img");
+    const imgRoot = findImgPackages(cwd);
+    const lockfilePath = findLockfile(cwd);
+    const locked = lockfilePath
+        ? readLockfilePackages(lockfilePath)
+        : undefined;
+    const resolvedSharp = readSharpManifest(tracedSharp);
+
+    const staged: string[] = [];
+    for (const dir of [`sharp-${platformId}`, `sharp-libvips-${platformId}`]) {
+        const destDir = join(imgDest, dir);
+        if (existsSync(join(destDir, "package.json"))) continue;
+        const name = `@img/${dir}`;
+        rmSync(destDir, { recursive: true, force: true });
+        mkdirSync(imgDest, { recursive: true });
+        const hostDir = imgRoot === undefined ? undefined : join(imgRoot, dir);
+        if (hostDir !== undefined && existsSync(hostDir)) {
+            // `dereference`: a bun/pnpm isolated store keeps the real package
+            // behind a symlink; copying the link would ship a dangling pointer.
+            cpSync(hostDir, destDir, { recursive: true, dereference: true });
+            staged.push(name);
+            continue;
+        }
+        if (!lockfilePath || locked === undefined) {
+            throw new UsageError(
+                `This app's standalone build includes sharp, the image targets ${platformId}, and this host's install has no '${name}' — and there is no lockfile (bun.lock or package-lock.json) to fetch a pinned version from.\n\n` +
+                    "Without it the image cannot load sharp, and next/image serves unoptimized originals.\n" +
+                    "Run `npm install` (or `bun install --save-text-lockfile`) in the app and rebuild.",
+            );
+        }
+        const versions = locked.get(name);
+        if (!versions || versions.length === 0) {
+            throw new UsageError(
+                `The standalone image targets ${platformId}, but neither this host's install nor ${lockfilePath} has '${name}' — the image would ship unable to load sharp, and next/image would serve unoptimized originals.\n\n` +
+                    "sharp resolves its native addons as optionalDependencies, so the lockfile\n" +
+                    "normally pins every platform's package. Reinstall from a clean lockfile\n" +
+                    "(`npm install`, or `bun install --save-text-lockfile`) with a sharp version\n" +
+                    `that publishes '${name}', and rebuild.`,
+            );
+        }
+        const entry = pickFetchVersion(
+            name,
+            versions,
+            resolvedSharp,
+            lockfilePath,
+        );
+        (opts.fetchPackage ?? fetchImgPackage)(
+            { name, version: entry.version, integrity: entry.integrity },
+            destDir,
+        );
+        staged.push(name);
+    }
+    return { staged };
+}
+
+/**
+ * The `sharp` package Next traced into the standalone tree — the one Next's
+ * image optimizer's `require('sharp')` loads at runtime — found by walking up
+ * from Next's own `dist/server` the way Node resolution does, never leaving
+ * the standalone tree. Real paths throughout: a bun/pnpm isolated layout keeps
+ * each package behind a symlink, and resolution follows the real path.
+ */
+function findTracedSharp(
+    standaloneDir: string,
+    serverDir: string,
+): string | undefined {
+    if (!existsSync(standaloneDir)) return undefined;
+    const root = realpathSync(standaloneDir);
+    const next = findPackageUp("next", serverDir, root);
+    if (next === undefined) return undefined;
+    return findPackageUp("sharp", join(next, "dist", "server"), root);
+}
+
+/** Node-style walk up `node_modules/<name>` from `fromDir`, confined to `root`. */
+function findPackageUp(
+    name: string,
+    fromDir: string,
+    root: string,
+): string | undefined {
+    const inside = (p: string) => p === root || p.startsWith(`${root}${sep}`);
+    let dir = existsSync(fromDir) ? realpathSync(fromDir) : resolve(fromDir);
+    while (inside(dir)) {
+        const candidate = join(dir, "node_modules", name);
+        if (existsSync(join(candidate, "package.json"))) {
+            const real = realpathSync(candidate);
+            return inside(real) ? real : undefined;
+        }
+        const up = dirname(dir);
+        if (up === dir) return undefined;
+        dir = up;
+    }
+    return undefined;
+}
+
+/** A traced sharp's own manifest: its version and its exact `@img/*` pins. */
+function readSharpManifest(
+    sharpDir: string,
+): { version: string; imgPins: Record<string, string> } | undefined {
+    try {
+        const parsed = JSON.parse(
+            readFileSync(join(sharpDir, "package.json"), "utf8"),
+        ) as {
+            version?: unknown;
+            optionalDependencies?: Record<string, string>;
+        };
+        if (typeof parsed.version !== "string") return undefined;
+        return {
+            version: parsed.version,
+            imgPins: parsed.optionalDependencies ?? {},
+        };
+    } catch {
+        return undefined;
+    }
 }
 
 /**

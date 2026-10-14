@@ -69,8 +69,22 @@ outage degrades to local-only optimization rather than crashing the pod.
 
 ## Shipping sharp with your image
 
-This section is about the vinext build. On the default standalone build, sharp ships in the
-standalone output's `node_modules` that Next traces into the image, and you do nothing extra.
+On the **default standalone build**, sharp ships in the standalone output's `node_modules` that
+Next traces into the image, and you do nothing extra. Two details are handled for you:
+
+- **The image's own addon is added to that tree.** Next traces only the sharp addon your build
+  machine installed — a Linux (glibc) addon on a typical CI runner, a macOS one on a Mac — while the
+  standalone images are Alpine (musl). `knext build`, `knext deploy` and `knext preview` add the
+  image's addon (for example `@img/sharp-linuxmusl-x64` and its `libvips`) beside the traced sharp,
+  copied from your install when it has it and otherwise downloaded at the version your lockfile
+  pins and checked against its integrity hash. Your build machine's own addon stays, so the app
+  still runs where you built it. If neither your install nor your lockfile has the image's addon,
+  the build fails and names the missing package.
+- **The compiled Bun executable loads sharp from that tree**, not from inside the executable: the
+  native addon finds `libvips` next to it on disk, which it cannot do from inside a compiled
+  binary.
+
+The rest of this section is about the vinext build.
 
 On the **vinext build**, your app compiles to a single executable, and sharp is not entirely JavaScript — the part that
 actually resizes pixels is a native library. A compiled executable can only load code that was

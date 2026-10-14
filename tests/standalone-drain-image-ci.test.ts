@@ -1477,13 +1477,16 @@ describe('assertCleanDrain cannot record its leg and skip the assertions that ea
 // A deliberate monorepo tracing root (workspace root above the app): the host
 // build/boot e2e and the image e2e ride in the same job (same docker + bun +
 // @getknext/core setup) with the same no-skip contract, so each needs the same
-// wiring guard as its siblings above.
+// wiring guard as its siblings above. So does the next/image optimizer e2e
+// (#2360): the compiled executable's twin and both shipped standalone images
+// must answer a negotiated WebP, which nothing else in CI asserts on them.
 const MONOREPO_E2E_PATHS = [
   'packages/kn-next/src/__tests__/monorepo-root.docker-e2e.test.ts',
   'packages/kn-next/src/__tests__/monorepo-root-image.docker-e2e.test.ts',
+  'packages/kn-next/src/__tests__/standalone-image-optimizer.docker-e2e.test.ts',
 ];
 
-describe('the monorepo-root e2es are wired into CI', () => {
+describe('the monorepo-root and image-optimizer e2es are wired into CI', () => {
   for (const path of MONOREPO_E2E_PATHS) {
     const name = path.replace(/^.*\//, '');
 
