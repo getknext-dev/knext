@@ -9,19 +9,35 @@
  *     same PR: this test stays red until the entry and its markers are gone;
  *  2b. every upstream issue/PR the registry cites exists with the title it
  *     records (a typo'd number that happens to exist still reds);
- *  3. every `// @upstream-shim <id>` marker under packages/kn-next/src/adapters has
+ *  3. every `// @upstream-shim <id>` marker under MARKER_ROOTS (the adapters and packages/ffi/src) has
  *     an entry, every entry has at least one marker, and no marker is malformed.
  */
 import { describe, expect, it } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { crossCheck, scanMarkers } from './marker-scan';
+import { crossCheck, MARKER_ROOTS, type ScanResult, scanMarkers } from './marker-scan';
 import { bunOnPath, bunVersionOf, pinnedBunVersion, pinnedVinext, REPO_ROOT } from './probe-kit';
-import { type CacheShape, cacheControlVerdict, REGISTRY } from './registry';
+import {
+  BUN_FFI_NOTICE,
+  bunFfiNoticeVerdict,
+  type CacheShape,
+  cacheControlVerdict,
+  pinnedBunFfiDoc,
+  REGISTRY,
+} from './registry';
 
-const ADAPTERS = join(REPO_ROOT, 'packages/kn-next/src/adapters');
+/** Every marker under every scanned root (MARKER_ROOTS), paths relative to the repo root. */
+function scanAll(): ScanResult {
+  const all: ScanResult = { markers: [], malformed: [] };
+  for (const root of MARKER_ROOTS) {
+    const r = scanMarkers(join(REPO_ROOT, root), REPO_ROOT);
+    all.markers.push(...r.markers);
+    all.malformed.push(...r.malformed);
+  }
+  return all;
+}
 const PROBE_TIMEOUT = 120_000;
 
 describe('upstream-retirement: the probes run the pinned toolchain', () => {
@@ -241,16 +257,16 @@ describe('upstream-retirement: @upstream-shim markers ↔ registry', () => {
   const ids = REGISTRY.map((e) => e.id);
 
   it('no marker is malformed', () => {
-    expect(scanMarkers(ADAPTERS).malformed).toEqual([]);
+    expect(scanAll().malformed).toEqual([]);
   });
 
   it('every marker has a registry entry', () => {
-    const { markers } = scanMarkers(ADAPTERS);
+    const { markers } = scanAll();
     expect(crossCheck(markers, ids).orphanMarkers).toEqual([]);
   });
 
   it('every registry entry has at least one marker', () => {
-    const { markers } = scanMarkers(ADAPTERS);
+    const { markers } = scanAll();
     expect(crossCheck(markers, ids).unmarkedEntries).toEqual([]);
   });
 
@@ -279,6 +295,41 @@ describe('upstream-retirement: @upstream-shim markers ↔ registry', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('upstream-retirement: the scan covers the ffi package (ADR-0069 D19)', () => {
+  it('scans packages/ffi/src, and finds the bun-ffi-experimental marker there', () => {
+    expect(MARKER_ROOTS).toContain('packages/ffi/src');
+    const ffi = scanAll().markers.filter((m) => m.id === 'bun-ffi-experimental');
+    expect(ffi.map((m) => m.file)).toEqual(['packages/ffi/src/render.ts']);
+  });
+});
+
+describe('upstream-retirement: the bun:ffi Beta verdict (ADR-0069 D19)', () => {
+  it('the pinned docs carry the notice today (still Beta)', () => {
+    const { path } = pinnedBunFfiDoc();
+    const doc = readFileSync(path, 'utf8');
+    expect(doc).toContain(BUN_FFI_NOTICE);
+    expect(bunFfiNoticeVerdict(doc).stillBroken).toBe(true);
+  });
+
+  it('the probed file with the notice removed reads as graduated (the entry goes red)', () => {
+    const doc = readFileSync(pinnedBunFfiDoc().path, 'utf8');
+    const stripped = doc
+      .split('\n')
+      .filter((l) => !l.includes(BUN_FFI_NOTICE) && !/bun:ffi`?\s+is\s+\**experimental/i.test(l))
+      .join('\n');
+    expect(stripped).not.toBe(doc);
+    expect(bunFfiNoticeVerdict(stripped).stillBroken).toBe(false);
+  });
+
+  it('either half alone keeps it Beta (a reworded notice is not a graduation)', () => {
+    expect(bunFfiNoticeVerdict(`x ${BUN_FFI_NOTICE} y`).stillBroken).toBe(true);
+    expect(bunFfiNoticeVerdict('`bun:ffi` is **experimental**, with known bugs').stillBroken).toBe(
+      true,
+    );
+    expect(bunFfiNoticeVerdict('`bun:ffi` is stable.').stillBroken).toBe(false);
   });
 });
 

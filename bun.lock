@@ -162,6 +162,16 @@
         "drizzle-kit",
       ],
     },
+    "packages/ffi": {
+      "name": "@getknext/ffi",
+      "version": "0.0.0",
+      "peerDependencies": {
+        "@getknext/core": ">=2.0.0-0 <3.0.0",
+      },
+      "optionalPeers": [
+        "@getknext/core",
+      ],
+    },
     "packages/grpc": {
       "name": "@getknext/grpc",
       "version": "0.0.0",
@@ -509,6 +519,8 @@
     "@getknext/core": ["@getknext/core@workspace:packages/kn-next"],
 
     "@getknext/db": ["@getknext/db@workspace:packages/db"],
+
+    "@getknext/ffi": ["@getknext/ffi@workspace:packages/ffi"],
 
     "@getknext/grpc": ["@getknext/grpc@workspace:packages/grpc"],
 

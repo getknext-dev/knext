@@ -442,6 +442,13 @@ it (`@experimental` in its types, "Experimental" in `knext build --help`, or
   environments and load testing. Their flags and output are not part of the
   committed CLI verb contract and may change in a minor release while the
   operability workflow around them settles.
+- **`knext ffi` (in-process Rust, Beta, Bun only)** — `knext ffi init`,
+  `generate` and `check`, `knext.ffi.json`, and the typed module
+  `knext ffi generate` writes, all from the optional `@getknext/ffi` package
+  (not yet published). It calls Rust through Bun's `bun:ffi`, which Bun itself
+  marks experimental, so the feature stays Beta until Bun drops that label;
+  an app that opts in cannot use the Node runtime. Not covered by the
+  compatibility credential.
 
 Nothing else in this document is experimental: every other public import
 follows the full semver policy above.

@@ -167,6 +167,31 @@ export const COMMAND_GROUPS: readonly CliCommandGroup[] = [
         ],
     },
     {
+        // Provided by an optional package (Beta); core only routes the verb
+        // (ffi-dispatch.ts), and answers --help even when it is missing.
+        heading: "In-process Rust (Beta, Bun only, optional package)",
+        commands: [
+            {
+                verb: "ffi",
+                display: "ffi init",
+                summary:
+                    "opt this zone into in-process Rust: knext.ffi.json and a rust/ crate",
+            },
+            {
+                verb: "ffi",
+                display: "ffi generate",
+                summary:
+                    "build the crate and write its typed server-only wrapper (needs Rust)",
+            },
+            {
+                verb: "ffi",
+                display: "ffi check",
+                summary:
+                    "fail if the committed wrapper is out of date (for CI)",
+            },
+        ],
+    },
+    {
         heading: "Internals",
         commands: [
             {
