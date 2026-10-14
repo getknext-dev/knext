@@ -112,9 +112,12 @@ function app(
     const key = `${cmd} ${args.join(' ')}`;
     if (key === 'cargo --version')
       return opts.missing === 'cargo' ? enoent() : { status: 0, stdout: 'cargo 1.90.0\n' };
-    if (key === 'cargo zigbuild --version') {
+    // The real cargo-zigbuild 0.23 rejects `cargo zigbuild --version` with
+    // exit 2; only the bare binary answers --version. The fake mirrors both.
+    if (key === 'cargo zigbuild --version') return { status: 2, stdout: '' };
+    if (key === 'cargo-zigbuild --version') {
       return opts.missing === 'zigbuild'
-        ? { status: 101, stdout: '' }
+        ? enoent()
         : { status: 0, stdout: 'cargo-zigbuild 0.20.1\n' };
     }
     if (key === 'zig version')

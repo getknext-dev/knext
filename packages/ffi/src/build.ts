@@ -88,7 +88,9 @@ function checkToolchain(
       `cargo was not found on PATH. Install Rust from ${RUSTUP} (the crate's rust-toolchain.toml selects the version), then run this again.`,
     );
   }
-  const zb = run('cargo', ['zigbuild', '--version'], { cwd: crateDir });
+  // `cargo zigbuild --version` is not a valid invocation: the zigbuild
+  // subcommand rejects --version (exit 2). The binary answers it directly.
+  const zb = run('cargo-zigbuild', ['--version'], { cwd: crateDir });
   if (notStarted(zb) || zb.status !== 0) {
     throw new FfiUsageError(
       'cargo-zigbuild is not installed; it cross-compiles the library for the musl image. Install it with: cargo install --locked cargo-zigbuild',
