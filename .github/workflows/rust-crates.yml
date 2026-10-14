@@ -33,6 +33,7 @@ on:
       - 'packages/ffi/templates/**'
       - 'packages/ffi/package.json'
       - '.github/workflows/rust-crates.yml'
+      - 'scripts/check-ffi-crate-rev.mjs'
   push:
     branches: [main, integration/v2]
     paths:
@@ -41,6 +42,7 @@ on:
       - 'packages/ffi/templates/**'
       - 'packages/ffi/package.json'
       - '.github/workflows/rust-crates.yml'
+      - 'scripts/check-ffi-crate-rev.mjs'
 
 permissions:
   contents: read
@@ -137,3 +139,29 @@ jobs:
 
       - name: Generator — knext ffi init, then generate/check build the crate as written (git dependency at the recorded revision)
         run: bun harness/ffi-generated.ts init
+
+  # crateRev drift (#2364): `knext ffi init` crates build knext-ffi from GitHub
+  # at packages/ffi/package.json knextFfi.crateRev, so a crates/knext-ffi* change
+  # that merges without moving that pin never reaches them. A PR cannot pin its
+  # own merge commit, so the guard fails on drift INHERITED from the merge base
+  # (an earlier crate change left unpinned) and only warns on the PR's own crate
+  # changes, asking for the follow-up bump. fetch-depth: 0 is REQUIRED: the pin
+  # and the merge base must both resolve, and the guard exits 2 (never passes)
+  # when either is missing from a shallow clone.
+  crate-rev:
+    name: knextFfi.crateRev covers every merged crates/knext-ffi* change
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout (full history — the pin and the merge base must resolve)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+
+      - name: crateRev drift guard
+        run: node scripts/check-ffi-crate-rev.mjs

@@ -32,7 +32,7 @@
     "templates"
   ],
   "knextFfi": {
-    "crateRev": "e48de68c4504be0e9cf15566821ca4e5db6cd60c"
+    "crateRev": "aa2aae672d1cd4f63357a62ac5de58b7ac9ee6a3"
   },
   "scripts": {
     "build": "tsup",
