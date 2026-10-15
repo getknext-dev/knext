@@ -4,7 +4,7 @@
  * refusal, the two-user `'use cache'` isolation, the Node/Bun transport choice,
  * the missing-status rule and the runtime's fail-closed checks.
  *
- * Five guards, five specs, one table each:
+ * Six guards, six specs, one table each:
  *
  *   - `glue-refusals.test.ts` — every case `knext generate` refuses: no auth
  *     option, AUTH_UNSPECIFIED, AUTH_PUBLIC on a write, AUTH_PUBLIC_MUTATION (by
@@ -13,12 +13,18 @@
  *     missing one.
  *   - `use-cache-two-user.test.ts` — a real Next.js build, pods sharing one
  *     Redis: keying on the token, dropping the user from the key, dropping the
- *     served version from it, and losing either tag call must each go red.
+ *     served version from it, losing either tag call, and a write that fails
+ *     after it was sent no longer refreshing the reads must each go red.
  *   - `gateway-transport.test.ts` — Node and Bun gateway processes: the Bun
  *     HTTP/1.1 fallback, the transport log line and the per-binding override.
  *   - `missing-trailer.test.ts` — a response with no status is not retried.
  *   - `glue-runtime.test.ts` — the end-user check, the served version and the
- *     token seam fail closed.
+ *     token seam fail closed; a request carries only the contract's fields (a
+ *     forged `$typeName`/`$unknown` or a non-object request never reaches the
+ *     wire or a cache key).
+ *   - `glue-action-refresh.test.ts` — a generated Server Action refreshes the
+ *     cached reads whenever the write may have reached the function (it failed
+ *     after the request was sent), and never when it was refused before.
  *
  * Each mutation removes ONE behaviour and requires its spec to go red. Verdicts
  * are by EXIT CODE only (the shared driver, `scripts/lib/guard-prover.mjs`),
@@ -136,6 +142,12 @@ const KEY_BLOCK =
   "    '  void protoVersion;',\n" +
   "    `  const token = ${mintExpr(ctx, method, 'subject')};`,";
 
+// The one line of the emitted action that refreshes the reads, and the one
+// that decides whether a failed call may have committed.
+const REFRESH_LINE =
+  '    `    if (mayHaveCommitted) ${updateTag}(${JSON.stringify(serviceTag(ctx.fn, method))});`,';
+const SENT_LINE = '    `    mayHaveCommitted = !${wasNotSent}(err);`,';
+
 const TWO_USER = [
   {
     id: 'U01',
@@ -183,8 +195,8 @@ const TWO_USER = [
     id: 'U04',
     subject: 'plugin',
     claim: 'a write no longer calls updateTag: cached reads on other pods stay stale',
-    anchor: '    `  ${updateTag}(${JSON.stringify(serviceTag(ctx.fn, method))});`,',
-    replacement: '    `  void ${updateTag};`,',
+    anchor: REFRESH_LINE,
+    replacement: '    `    void mayHaveCommitted, ${updateTag};`,',
   },
   {
     id: 'U05',
@@ -192,6 +204,65 @@ const TWO_USER = [
     claim: "reads are no longer tagged: a write's updateTag refreshes nothing",
     anchor: '    `  ${cacheTag}(${JSON.stringify(serviceTag(ctx.fn, method))});`,',
     replacement: '    `  void ${cacheTag};`,',
+  },
+  {
+    id: 'U06',
+    subject: 'plugin',
+    claim:
+      'a write that fails after it was sent refreshes nothing: pods keep pre-write reads although it may have committed',
+    anchor: SENT_LINE,
+    replacement: "    '    mayHaveCommitted = false;',",
+  },
+];
+
+// ── a failed write refreshes the reads only if it may have been sent ──────
+const CHECKS_THEN_CALL =
+  '    `  const message = ${normalize}(${input}, request);`,\n' +
+  "    `  const token = ${mintExpr(ctx, method, 'subject')};`,\n" +
+  "    '  let mayHaveCommitted = true;',\n" +
+  "    '  try {',\n" +
+  '    `    return await ${client}.${name}(message, { idempotencyKey: options?.idempotencyKey, token });`,';
+
+const ACTION = [
+  {
+    id: 'A01',
+    subject: 'plugin',
+    claim: 'only a successful write refreshes the reads (the round-1 behaviour)',
+    anchor: SENT_LINE,
+    replacement: "    '    mayHaveCommitted = false;',",
+  },
+  {
+    id: 'A02',
+    subject: 'plugin',
+    claim: 'every failed write refreshes the reads, one the client refused before sending included',
+    anchor: REFRESH_LINE,
+    replacement:
+      '    `    if (true) ${updateTag}(${JSON.stringify(serviceTag(ctx.fn, method))});`,',
+  },
+  {
+    id: 'A03',
+    subject: 'runtime',
+    claim: 'the client no longer marks the failures it raises before sending',
+    anchor: '        throw markNotSent(err);',
+    replacement: '        throw err;',
+  },
+  {
+    id: 'A04',
+    subject: 'glue',
+    claim: 'the not-sent mark is never read',
+    anchor:
+      "    typeof err === 'object' && err !== null && (err as Record<symbol, unknown>)[NOT_SENT] === true",
+    replacement: '    false',
+  },
+  {
+    id: 'A05',
+    subject: 'plugin',
+    claim: 'the request is validated inside the try, where a refusal counts as a sent write',
+    anchor: CHECKS_THEN_CALL,
+    replacement: CHECKS_THEN_CALL.replace(
+      '    `  const message = ${normalize}(${input}, request);`,',
+      "    '  const message = request;',",
+    ).replace('(message, {', '(${normalize}(${input}, message), {'),
   },
 ];
 
@@ -262,6 +333,29 @@ const RUNTIME = [
     anchor: "  if (served === undefined || served === '') {",
     replacement: '  if (false) {',
   },
+  {
+    id: 'G05',
+    subject: 'glue',
+    claim: 'decoding keeps fields the contract does not have (they are re-encoded and forwarded)',
+    anchor: 'const CONTRACT_FIELDS_ONLY = { readUnknownFields: false } as const;',
+    replacement: 'const CONTRACT_FIELDS_ONLY = { readUnknownFields: true } as const;',
+  },
+  {
+    id: 'G06',
+    subject: 'glue',
+    claim:
+      "a caller-supplied $typeName and $unknown are trusted (create() keeps the caller's object)",
+    anchor:
+      '  const { $typeName: _typeName, $unknown: _unknown, ...fields } = input as Record<string, unknown>;',
+    replacement: '  const fields = input as Record<string, unknown>;',
+  },
+  {
+    id: 'G07',
+    subject: 'glue',
+    claim: 'a plain array (or another non-object) is accepted as an empty request',
+    anchor: "  if (input === null || typeof input !== 'object' || Array.isArray(input)) {",
+    replacement: '  if (false) {',
+  },
 ];
 
 // The subjects are inline literals, not a shared constant: the lane's
@@ -295,6 +389,15 @@ const runtime = createGuardProver({
   spec: 'packages/grpc/src/__tests__/glue-runtime.test.ts',
   subjects: { glue: 'packages/grpc/src/glue.ts' },
 });
+const action = createGuardProver({
+  repoRoot: REPO_ROOT,
+  spec: 'packages/grpc/src/__tests__/glue-action-refresh.test.ts',
+  subjects: {
+    plugin: 'packages/grpc/src/glue-plugin.ts',
+    glue: 'packages/grpc/src/glue.ts',
+    runtime: 'packages/grpc/src/runtime.ts',
+  },
+});
 
 console.log('=== mutation proof: @getknext/grpc zone glue (#2050) ===');
 refusals.preflight(REFUSALS);
@@ -302,8 +405,14 @@ twoUser.preflight(TWO_USER);
 transport.preflight(TRANSPORT);
 trailer.preflight(TRAILER);
 runtime.preflight(RUNTIME);
+action.preflight(ACTION);
 declareMutations(
-  REFUSALS.length + TWO_USER.length + TRANSPORT.length + TRAILER.length + RUNTIME.length,
+  REFUSALS.length +
+    TWO_USER.length +
+    TRANSPORT.length +
+    TRAILER.length +
+    RUNTIME.length +
+    ACTION.length,
 );
 
 console.log('\n=== refusals (knext generate) ===');
@@ -370,3 +479,17 @@ for (const m of RUNTIME) {
   recordMutation();
 }
 runtime.finish(RUNTIME.length);
+
+console.log('\n=== a failed write refreshes the reads only if it may have been sent ===');
+action.baseline();
+action.proveCanSeeRed({
+  subject: 'plugin',
+  anchor:
+    '    `    return await ${client}.${name}(message, { idempotencyKey: options?.idempotencyKey, token });`,',
+  replacement: "    `    throw new Error('canary: no write is ever made');`,",
+});
+for (const m of ACTION) {
+  action.run({ ...m, expect: 'red' });
+  recordMutation();
+}
+action.finish(ACTION.length);
