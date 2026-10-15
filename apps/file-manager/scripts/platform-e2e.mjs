@@ -690,19 +690,23 @@ async function main() {
       const dbCount = Number(psql(ns, 'SELECT COUNT(*) FROM files'));
       // `<prefix>:tag:<tag>` is a set of cache keys; each entry lives at
       // `<prefix>:cache:<key>` (cache-handler.js), so map member -> entry key.
+      // Read fresh on every check: invalidation rewrites the entries.
       const tagIndex = `:tag:${FILE_STATS_TAG}`;
-      const keys = redisCli(ns, ['--scan', '--pattern', `*${tagIndex}`])
-        .split('\n')
-        .filter(Boolean)
-        .flatMap((idx) => {
-          const prefix = idx.slice(0, -tagIndex.length);
-          return redisCli(ns, ['SMEMBERS', idx])
-            .split('\n')
-            .filter(Boolean)
-            .map((member) => `${prefix}:cache:${member}`);
-        });
-      const liveKeys = keys.filter((k) => redisCli(ns, ['EXISTS', k]) === '1').length;
-      const served = assertUseCacheServed({ reads: [r1, r2, r3], dbCount, keys, liveKeys });
+      const readCacheKeys = () => {
+        const keys = redisCli(ns, ['--scan', '--pattern', `*${tagIndex}`])
+          .split('\n')
+          .filter(Boolean)
+          .flatMap((idx) => {
+            const prefix = idx.slice(0, -tagIndex.length);
+            return redisCli(ns, ['SMEMBERS', idx])
+              .split('\n')
+              .filter(Boolean)
+              .map((member) => `${prefix}:cache:${member}`);
+          });
+        const liveKeys = keys.filter((k) => redisCli(ns, ['EXISTS', k]) === '1').length;
+        return { keys, liveKeys };
+      };
+      const served = assertUseCacheServed({ reads: [r1, r2, r3], dbCount, ...readCacheKeys() });
 
       /** @type {import('./platform-e2e-checks.mjs').FileStatsRead | undefined} */
       let between;
@@ -729,7 +733,7 @@ async function main() {
       });
       // The rebuilt entry is itself cached: two more reads agree.
       const settled = await readStats();
-      assertUseCacheServed({ reads: [after, settled], dbCount, keys, liveKeys });
+      assertUseCacheServed({ reads: [after, settled], dbCount, ...readCacheKeys() });
       statsBeforeZero = settled;
       return `${served}; ${auth}; ${invalidated}`;
     },

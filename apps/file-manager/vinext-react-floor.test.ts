@@ -34,3 +34,39 @@ describe("file-manager's React satisfies vinext, so the build never upgrades it 
     expect(getReactUpgradeDeps(APP)).toEqual([]);
   });
 });
+
+/**
+ * React and the RSC renderer vinext uses (`react-server-dom-webpack`) ship in
+ * lockstep: a renderer from one React minor running against `react` from
+ * another is an unsupported pairing. A caret range on react let the workspace
+ * hoist react to the next minor while the renderer stayed behind, so every
+ * resolution of react / react-dom / react-server-dom-webpack in the lockfile --
+ * hoisted or nested under a workspace -- must share one major.minor.
+ */
+const LOCK = await Bun.file(join(APP, '../../bun.lock')).text();
+const REACT_PKGS = ['react', 'react-dom', 'react-server-dom-webpack'];
+
+function resolvedReactVersions(lock: string): Map<string, string[]> {
+  const byPkg = new Map<string, string[]>(REACT_PKGS.map((p) => [p, []]));
+  // A packages entry: `    "<path/>name": ["name@version", ...`
+  const entry = /^ {4}"(?:[^"]*\/)?([^"/]+)": \["([^"@]+)@(\d+\.\d+\.\d+[^"]*)"/gm;
+  for (const [, key, name, version] of lock.matchAll(entry)) {
+    if (key === name) byPkg.get(name)?.push(version);
+  }
+  return byPkg;
+}
+
+const minorOf = (v: string) => v.split('.').slice(0, 2).join('.');
+
+describe('react, react-dom and the RSC renderer resolve to one React minor in bun.lock', () => {
+  const resolved = resolvedReactVersions(LOCK);
+
+  it('the lockfile resolves each of react, react-dom and react-server-dom-webpack', () => {
+    for (const pkg of REACT_PKGS) expect(resolved.get(pkg)?.length ?? 0).toBeGreaterThan(0);
+  });
+
+  it('every resolution shares a single major.minor', () => {
+    const minors = new Set([...resolved.values()].flat().map(minorOf));
+    expect([...minors]).toHaveLength(1);
+  });
+});
