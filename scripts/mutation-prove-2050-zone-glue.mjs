@@ -349,8 +349,8 @@ console.log('\n=== a missing status is not retried ===');
 trailer.baseline();
 trailer.proveCanSeeRed({
   subject: 'runtime',
-  anchor: "    const attempts = policy.kind === 'read' ? policy.retry.maxAttempts : 1;",
-  replacement: '    const attempts = 3;',
+  anchor: '  checkDefinition(def);',
+  replacement: "  throw new Error('canary: no client can be defined');",
 });
 for (const m of TRAILER) {
   trailer.run({ ...m, expect: 'red' });

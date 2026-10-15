@@ -732,10 +732,13 @@ calls over Connect, scale-to-zero like the zone itself. Writes files only; nothi
 knext add function orders --lang go
 ```
 
-It writes `proto/orders/v1/orders.proto` (one read and one write RPC to start from), the knext
-options contract that file imports, a `buf.yaml` if the app has none, and the function's entry in
-`knext.grpc.json`. The name is a lowercase DNS label; the zone reads the function's address from
-`ORDERS_SERVICE_URL` at call time. The function's own server project is not scaffolded yet.
+It writes `proto/orders/v1/orders.proto` (one read and one write RPC to start from, each marked
+`AUTH_USER`), the knext options contract that file imports, a `buf.yaml` if the app has none, the
+function's entry in `knext.grpc.json`, and, if the app has none yet, an `authorize()` hook in
+`src/knext/authorize.ts` that refuses every call until you write it (see
+[generated queries, actions and streams](#generated-queries-actions-and-streams)). The name is a
+lowercase DNS label; the zone reads the function's address from `ORDERS_SERVICE_URL` at call time.
+The function's own server project is not scaffolded yet.
 
 Two options at the top of every contract matter:
 
@@ -791,11 +794,71 @@ Each generated client is server-only (`import "server-only"`) and follows one po
 - **Every write needs an idempotency key**, passed as `{ idempotencyKey }` and sent as the
   `idempotency-key` header, so your function can recognise a write it has already applied. Reuse
   the key when re-submitting the same write.
-- **The endpoint is read at call time** from `<NAME>_SERVICE_URL` (never baked into the code), over
-  HTTP/2 cleartext by default. Setting `ORDERS_SERVICE_HTTP_VERSION=1.1` switches that one function to HTTP/1.1.
+- **The endpoint is read at call time** from `<NAME>_SERVICE_URL` (never baked into the code). On a
+  Node server, calls use HTTP/2 cleartext (h2c) by default. On a Bun server they use HTTP/1.1 by
+  default, because Bun's HTTP/2 client is not yet verified with Connect; unary and
+  server-streaming calls both work over HTTP/1.1. Setting `ORDERS_SERVICE_HTTP_VERSION` to `2` or
+  `1.1` chooses for that one function on either runtime. The server logs the transport it chose
+  once per function, for example
+  `knext: orders function: transport HTTP/1.1, falling back from h2c on a Bun gateway (...)`.
 
 **Exit code:** `0` on success; `1` on a lint failure, a breaking change, out-of-date generated code
 (with `--check`), or a usage error.
+
+### Generated queries, actions and streams
+
+Next to each client, `knext generate` writes the code your pages call. Every RPC maps to one
+shape:
+
+| RPC | Generated as | Where you call it |
+|---|---|---|
+| Unary, `option idempotency_level = NO_SIDE_EFFECTS;` | A cached **query** in `<file>_knext_server.ts` | Server Components, route handlers, Server Actions |
+| Any other unary RPC | A **Server Action** in `<file>_knext_actions.ts` (`'use server'`) | Forms and Client Components |
+| Server-streaming | An **async generator** in `<file>_knext_server.ts`, never cached | Server Components and route handlers |
+
+Both modules import `server-only`. A streaming RPC is never generated as a Server Action.
+
+**Every RPC states who may call it**, with an option from the options contract:
+
+```proto
+rpc GetItem(GetItemRequest) returns (GetItemResponse) {
+  option idempotency_level = NO_SIDE_EFFECTS;
+  option (knext.v1.auth) = AUTH_USER;    // a signed-in user
+}
+```
+
+- `AUTH_USER` — your `authorize()` hook must return a verified user before the call is made.
+  `knext add function` writes it on every RPC it scaffolds.
+- `AUTH_PUBLIC` — anyone, without a user. Allowed only on a `NO_SIDE_EFFECTS` read.
+
+There is no public write. For an anonymous write (sign-up, a contact form), use `AUTH_USER` and
+have `authorize()` return an anonymous principal, but only after your own check (CAPTCHA, rate
+limit, CSRF) has passed.
+
+**`authorize()`** is your code: set `"authorize"` in `knext.grpc.json` to the module that exports
+it (`knext add function` writes `src/knext/authorize.ts`, which refuses every call until you
+write it). It receives the function, service, method and kind of the call, and returns
+`{ sub }` (your session's stable user id) or throws, for example a redirect to sign-in. Each
+generated query, action and stream runs it first, outside any cache.
+
+**Cached reads are per user.** A query's `'use cache'` entry is keyed on the verified `sub`, the
+contract version the function serves, and the request, so two users never share an entry. Entries
+expire within an hour, and every write to the same service refreshes every user's cached reads of
+it, on every replica. The function's served contract version comes from
+`<NAME>_SERVICE_PROTO_VERSION`, which the operator sets beside `<NAME>_SERVICE_URL`; a call is
+refused if it is not set or if the function serves an older contract than the zone was generated
+against.
+
+**Calls carry an identity token**, minted for the one call and never part of a cache key. The
+token setup is not available yet, so for now every generated call is refused before it leaves the
+zone.
+
+`knext generate` refuses, and writes nothing, when an RPC does not state its auth (or states
+anything but `AUTH_USER` or `AUTH_PUBLIC`), when `AUTH_PUBLIC` is on an RPC that is not
+`NO_SIDE_EFFECTS`, for client-streaming and bidirectional-streaming RPCs, when two RPCs in one file
+would export the same name, and when `authorize` is not set or names a file that does not exist.
+Each refusal names the RPC and the fix. An options contract copied before the auth option existed
+is refused with the path of the current one to copy.
 
 ## `knext ffi`
 
