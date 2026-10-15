@@ -3,8 +3,14 @@ name: CI
 on:
   pull_request:
     branches: ['**']
+  # Every long-lived release line, not just `main` (#2249): a push to
+  # `integration/v2` used to run no ci.yml job, so the combined tree after a
+  # merge or forward-merge was never tested on its own. `integration/**`, not a
+  # list of today's lines, so the next line is covered before it exists. A push
+  # only runs the ci.yml AT THE PUSHED COMMIT, so a line picks this up when this
+  # file reaches it. Guarded by tests/integration-line-ci-triggers.test.ts.
   push:
-    branches: [main]
+    branches: [main, 'integration/**']
   # The GitHub merge queue runs this repo's REQUIRED status checks on a temporary
   # `refs/heads/gh-readonly-queue/main/...` ref via the `merge_group` event. Six
   # of ci.yml's jobs post required contexts, so without this trigger those checks
@@ -22,9 +28,10 @@ on:
 # in real run logs): a `pull_request` run's ref is `refs/pull/<n>/merge`
 # (run 31047101359) and a `push` run's is `refs/heads/main` (run 31047831835),
 # so the two triggers cannot collide on `github.ref` and do not cancel each
-# other. `event_name` is in the key so that stays true by construction if
-# `push:` is ever widened past `[main]`, and `workflow` so another workflow
-# copying this idiom cannot join CI's group.
+# other. `event_name` is in the key so that stays true by construction now that
+# `push:` is widened past `[main]` to `integration/**` (#2249), and `workflow`
+# so another workflow copying this idiom cannot join CI's group. Each release
+# line's push group is keyed on its own ref, so lines never cancel each other.
 #
 # Ref scoping is also what keeps this compatible with the #667 blocking-gate
 # audit (tests/helpers/blocking-gate.ts): the only run that can cancel a gate
@@ -40,7 +47,8 @@ on:
 # Keying the GROUP on `event_name` stops the two triggers cancelling each other,
 # but it does not stop the `push`->`main` group cancelling ITSELF: two merges
 # landing inside one CI duration would cancel `main`'s run for the intermediate
-# commit and leave it with no verdict. `main` has already been red across three
+# commit and leave it with no verdict. The same holds for every
+# `integration/**` line (#2249): its push runs are not cancelled either. `main` has already been red across three
 # consecutive commits here, and a per-commit result is what makes that
 # bisectable. The saving #674 is for is entirely in the `pull_request` group, so
 # it is taken there and nowhere else. The cost, stated: consecutive merges to
@@ -1157,8 +1165,11 @@ jobs:
         if: github.event_name != 'merge_group'
         uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         with:
-          # For push (main) the base is the previous commit; on PRs the action
-          # diffs against the PR base automatically.
+          # For push to main the base is the previous commit; on PRs the action
+          # diffs against the PR base automatically. For push to an
+          # `integration/**` line (#2249) no `base` is set, so the action diffs
+          # against the default branch (main): the docs build runs whenever the
+          # line differs from main there. That over-runs; it never under-runs.
           filters: |
             docs:
               - 'apps/docs/**'
@@ -1302,8 +1313,9 @@ jobs:
         if: steps.filter.outputs.docs == 'true' || github.event_name == 'merge_group'
         run: node scripts/sbom-docs-closure.mjs ./.docs-closure ./.docs-closure/closure.cdx.json
 
-      # ENFORCE (fail) on main — the same phased gate the image supply-chain job
-      # uses. FAIL on HIGH/CRITICAL.
+      # ENFORCE (fail) on main and on every `integration/**` release line
+      # (#2249) — the same phased gate the image supply-chain job uses; report
+      # only on PRs and the merge-queue ref. FAIL on HIGH/CRITICAL.
       #
       # The old note here said any HIGH in this closure was "a pre-existing
       # REPO-WIDE toolchain CVE ... not a docs-runtime issue". That was wrong on
@@ -1313,7 +1325,7 @@ jobs:
       # here is now a finding about what ships.
       - name: Trivy scan — docs dependency closure (FAIL on HIGH/CRITICAL)
         if: steps.filter.outputs.docs == 'true' || github.event_name == 'merge_group'
-        continue-on-error: ${{ github.ref != 'refs/heads/main' }}
+        continue-on-error: ${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/heads/integration/') }}
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: sbom
@@ -1870,9 +1882,21 @@ jobs:
         with:
           node-version: '24'
 
+      # On `push` there is no PR base; use the before-SHA of the push, or, on a
+      # push that CREATES the branch (all-zero before), the merge-base with
+      # origin/main. Anything else passes through unchanged.
+      # Tested by tests/ci-resolve-push-base.test.ts.
+      - name: Resolve the diff base (branch-creation push → merge-base with main)
+        if: github.event_name != 'merge_group'
+        id: base
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PUSH_CREATED: ${{ github.event.created }}
+          RAW_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: node scripts/ci-resolve-push-base.mjs
+
       # needs.*.result arrive via env (never interpolated into the shell) and are
-      # read as data by the aggregator. On `push` there is no PR base; use the
-      # before-SHA of the push. The aggregator refuses to scope-out on an
+      # read as data by the aggregator. The aggregator refuses to scope-out on an
       # uncomputable diff (exits non-zero), so it is fail-closed there too.
       - name: Assert every e2e-round leg concluded success (path-scoped)
         if: github.event_name != 'merge_group'
@@ -1882,6 +1906,6 @@ jobs:
           E2E_RESULT_STANDALONE_DRAIN_BUN_IMAGE: ${{ needs.standalone-drain-bun-image.result }}
           E2E_RESULT_BUN_EXEC_ALPINE_IMAGE: ${{ needs.bun-exec-alpine-image.result }}
           E2E_RESULT_SELF_CONTAINED_EXEC_E2E: ${{ needs.self-contained-exec-e2e.result }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          BASE_SHA: ${{ steps.base.outputs.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: node apps/file-manager/scripts/e2e-round-aggregate.mjs
