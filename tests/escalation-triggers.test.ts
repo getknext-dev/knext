@@ -1374,6 +1374,16 @@ describe('#2388 r4 — a path a credential workflow invokes is an edge wherever 
     }
   });
 
+  it('near miss: only the SCRIPT argument is an edge — a data file after it is not', () => {
+    const r = r4('node tools/x.mjs package.json bun.lock', {
+      'tools/x.mjs': '',
+      'package.json': '{}',
+      'bun.lock': '',
+    });
+    expectFollowed(r, 'tools/x.mjs');
+    expect(supply(r, 'bun.lock')).toBeUndefined();
+  });
+
   it('near miss: an invoked path that does not exist (a build output) adds nothing', () => {
     expect(
       invokedPaths(

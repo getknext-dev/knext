@@ -11,7 +11,10 @@
  * `toJSON(secrets)` credentials — plus round 3's (M45–M81): scripts a module
  * spawns or names, `createRequire` and unresolvable child-process gaps, their
  * resolution (wrappers, runner factories, invoker overrides), token-aware comment
- * stripping, and non-literal shell `source` —
+ * stripping, and non-literal shell `source` — plus round 4's (M82–M95): every
+ * script a credential workflow INVOKES is an edge wherever it lives (interpreter
+ * and command-position forms, working-directory / cd / $GITHUB_WORKSPACE
+ * resolution, existence, first-script-argument only, comments and continuations) —
  * and REQUIRES `tests/escalation-triggers.test.ts` to go red. The shared driver
  * (`scripts/lib/guard-prover.mjs`) owns the discipline: verdicts by EXIT CODE
  * only, baseline green first, a canary that must go red, anchors that must occur
@@ -699,6 +702,124 @@ const MUTATIONS = [
     subject: 'guard',
     anchor: '    if (segs.length > 0 && /^(?:scripts|\\.github)(?:\\/|$)/.test(segs[0])) {',
     replacement: '    if (false) {',
+  },
+  // ── round 4: a path a credential workflow INVOKES is an edge wherever it lives ──
+  {
+    id: 'M82',
+    expect: 'red',
+    claim:
+      'workflow invocations are not seeds — the operator/file-manager cosign-verify.sh, prefix.sh, smoke.sh stop firing',
+    subject: 'guard',
+    anchor: '      ...invokedPaths(text, path, exists),\n',
+    replacement: '',
+  },
+  {
+    id: 'M83',
+    expect: 'red',
+    claim: 'a reached shell script / action is not scanned for what IT invokes',
+    subject: 'guard',
+    anchor: '      for (const p of invokedPaths(text, file, (q) => read(q) !== null)) add(p);\n',
+    replacement: '',
+  },
+  {
+    id: 'M84',
+    expect: 'red',
+    claim: 'with a gap, a changed .sh outside scripts/ is no longer failed closed',
+    subject: 'guard',
+    anchor: String.raw`  /\.(?:sh|bash|py)$/.test(p); // round 4: an invoked script can live anywhere`,
+    replacement: '  false;',
+  },
+  {
+    id: 'M85',
+    expect: 'red',
+    claim: 'working-directory: is not a resolution base for a relative script',
+    subject: 'guard',
+    anchor: String.raw`  for (const m of norm.matchAll(/working-directory\s*:\s*['"]?([^\s'"#]+)/g)) bases.add(m[1]);`,
+    replacement: '',
+  },
+  {
+    id: 'M86',
+    expect: 'red',
+    claim: 'a literal cd target is not a resolution base (operator hack/check-no-latest.sh)',
+    subject: 'guard',
+    anchor: String.raw`  for (const m of norm.matchAll(/(?:^|[\s;&|(])cd[ \t]+['"]?([\w.][\w./-]*)/gm)) bases.add(m[1]);`,
+    replacement: '',
+  },
+  {
+    id: 'M87',
+    expect: 'red',
+    claim: 'a full-line comment that names `bash x.sh` reads as an invocation',
+    subject: 'guard',
+    anchor: String.raw`    .replace(/^[ \t]*#.*$/gm, '')`,
+    replacement: '',
+  },
+  {
+    id: 'M88',
+    expect: 'red',
+    claim: 'a \\-continued argument at line start reads as a command (sed … \\ data.yaml)',
+    subject: 'guard',
+    anchor: String.raw`    .replace(/\\\r?\n/g, ' ')`,
+    replacement: '',
+  },
+  {
+    id: 'M89',
+    expect: 'red',
+    claim: '$GITHUB_WORKSPACE/… is not stripped — a workspace-rooted script is dropped',
+    subject: 'guard',
+    anchor: String.raw`    .replace(/\$\{?(?:GITHUB_WORKSPACE|GITHUB_ACTION_PATH)\}?\//g, '');`,
+    replacement: ';',
+  },
+  {
+    id: 'M90',
+    expect: 'red',
+    claim: '${{ github.workspace }}/… is not stripped — a workspace-rooted script is dropped',
+    subject: 'guard',
+    anchor: String.raw`    .replace(/\$\{\{\s*github\.(?:workspace|action_path)\s*\}\}\//g, '')`,
+    replacement: '',
+  },
+  {
+    id: 'M91',
+    expect: 'red',
+    claim: 'an invoked path need not exist — build outputs and stray words become edges',
+    subject: 'guard',
+    anchor: "      .filter((p) => !p.startsWith('..') && !p.startsWith('/') && exists(p));",
+    replacement: "      .filter((p) => !p.startsWith('..') && !p.startsWith('/'));",
+  },
+  {
+    id: 'M92',
+    expect: 'red',
+    claim:
+      'every argument after an interpreter is an edge — node x.mjs package.json adds the data file',
+    subject: 'guard',
+    anchor: '      for (const p of hits) if (!out.includes(p)) out.push(p);\n      break;\n',
+    replacement: '      for (const p of hits) if (!out.includes(p)) out.push(p);\n',
+  },
+  {
+    id: 'M93',
+    expect: 'red',
+    claim: "a script's own directory is not a base — bash ./b.sh inside deploy/a.sh is lost",
+    subject: 'guard',
+    anchor:
+      "    for (let d = posix.dirname(file); d !== '.' && d !== '/'; d = posix.dirname(d)) bases.add(d);",
+    replacement: '',
+  },
+  {
+    id: 'M94',
+    expect: 'red',
+    claim: 'a ./x or dir/x path in command position is not an invocation',
+    subject: 'guard',
+    anchor: '    ...[...norm.matchAll(CMD_PATH)].map((m) => [m[1]]),\n',
+    replacement: '',
+  },
+  {
+    id: 'M95',
+    expect: 'red',
+    claim: 'source / . are not runners — a literal sourced file outside scripts/ is lost',
+    subject: 'guard',
+    anchor:
+      "const SCRIPT_RUNNERS = 'bash|sh|zsh|dash|node|nodejs|bun|deno|tsx|ts-node|python3?|source|\\\\.';",
+    replacement:
+      "const SCRIPT_RUNNERS = 'bash|sh|zsh|dash|node|nodejs|bun|deno|tsx|ts-node|python3?';",
   },
 ];
 
