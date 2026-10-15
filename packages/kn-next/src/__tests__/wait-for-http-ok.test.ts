@@ -136,6 +136,48 @@ describe("waitForHttpOk", () => {
         expect(Date.now() - t0).toBeLessThan(2000);
     });
 
+    it("at the deadline, says the server process is still running (slow, not crashed)", async () => {
+        let served = 0;
+        const url = listen(() => {
+            served++;
+            return new Response("warming", { status: 503 });
+        });
+        const err = await rejection(
+            waitForHttpOk(url, {
+                intervalMs: 10,
+                deadlineMs: 5000,
+                now: clockUntil(() => served >= 1),
+                exited: () => null,
+            }),
+        );
+        expect(err?.message).toContain("server process still running");
+        expect(err?.message).not.toContain("exited");
+    });
+
+    it("at the deadline, reports an exit that happened during the last probe (crash, not slow)", async () => {
+        // A probe that hangs until the deadline: the process dies after the
+        // loop's last exit check but before the deadline is judged, so the
+        // error must name the exit rather than call the server slow.
+        // The injected clock and the exit both flip once the hanging probe has
+        // reached the stub, so the loop's own pre-probe check saw a live process.
+        let served = 0;
+        const url = listen(() => {
+            served++;
+            return new Promise<Response>(() => {});
+        });
+        const err = await rejection(
+            waitForHttpOk(url, {
+                intervalMs: 10,
+                deadlineMs: 300,
+                now: clockUntil(() => served >= 1),
+                exited: () => (served >= 1 ? "code=7 signal=null" : null),
+            }),
+        );
+        expect(err?.message).toContain("server exited before ready");
+        expect(err?.message).toContain("code=7");
+        expect(err?.message).not.toContain("still running");
+    });
+
     it("reports connection errors when the server never listens", async () => {
         const err = await rejection(
             waitForHttpOk("http://127.0.0.1:1/", {
