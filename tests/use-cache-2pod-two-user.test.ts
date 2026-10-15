@@ -73,7 +73,12 @@ describe('the assertion script reads both users on both pods', () => {
   });
 
   it("fails at a named message when one user is served the other user's entry", () => {
-    expect(sh).toContain(COLLAPSED_MSG);
+    // Every per-user read checks the subject the entry was built for, and that
+    // check carries the message the expected-red leg greps for.
+    expect(sh).toContain('[ "$(field "$out" .cached.user)" = "$2" ]');
+    expect(sh).toContain(
+      `fail "user '$2' was served the 'use cache' entry built for '$(field "$out" .cached.user)' (${COLLAPSED_MSG}): $out"`,
+    );
   });
 
   it("invalidates one user and requires the other user's entry to survive", () => {
