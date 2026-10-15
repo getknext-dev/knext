@@ -8,6 +8,7 @@ import {
   classify,
   classifyContent,
   isAcknowledged,
+  mergeFired,
   LEGACY_ACK_LABEL,
   parseNameStatus,
   publicSurfaceChanged,
@@ -309,6 +310,7 @@ describe('#2388 — every package CLI surface', () => {
         change('packages/grpc/src/client.ts'),
         change('packages/grpc/src/__tests__/cli.test.ts'),
         change('apps/file-manager/src/cli.ts'),
+        change('packages/ffi/src/cli/__tests__/generate.test.ts'),
       ]),
     ).toHaveLength(0);
   });
@@ -345,6 +347,7 @@ describe('#2388 — static supply-chain paths', () => {
       classify([
         change('docs/security/threat-model.md'),
         change('packages/ffi/src/__tests__/supply-chain.test.ts'),
+        change('packages/ffi/src/__tests__/supply-chain.ts'),
       ]),
     ).toHaveLength(0);
   });
@@ -537,5 +540,21 @@ describe('#2388 — unknown input fails rather than passes', () => {
       const line = s.length > 1 ? `${s}\told\tnew` : `${s}\tp`;
       expect(() => parseNameStatus(line)).not.toThrow();
     }
+  });
+});
+
+describe('#2388 — path and content triggers merge into one entry per id', () => {
+  it('dedupes paths and keeps both sources', () => {
+    const merged = mergeFired(
+      [{ id: 'supply-chain', label: 'l', why: 'w', paths: ['security/a.json'] }],
+      [
+        { id: 'supply-chain', label: 'l', why: 'w', paths: ['security/a.json', 'scripts/b.mjs'] },
+        { id: 'public-api', label: 'p', why: 'w', paths: ['packages/ffi/package.json'] },
+      ],
+    );
+    expect(merged).toEqual([
+      { id: 'supply-chain', label: 'l', why: 'w', paths: ['security/a.json', 'scripts/b.mjs'] },
+      { id: 'public-api', label: 'p', why: 'w', paths: ['packages/ffi/package.json'] },
+    ]);
   });
 });
