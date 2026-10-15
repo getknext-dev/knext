@@ -133,6 +133,20 @@ describe("doctor: Redis key prefixes", () => {
         expect(row?.detail).toContain("kn-next");
     });
 
+    it("WARN: a prefix nested under the shared fallback ('kn-next:cache'), even by one app", () => {
+        const [row] = redisPrefixCheck(
+            ctxWith([{ name: "shop", cache: redis("kn-next:cache") }]),
+        );
+        expect(row?.status).toBe("warn");
+        expect(row?.detail).toContain("'kn-next:cache'");
+        expect(row?.detail).toContain("shared fallback 'kn-next'");
+        // A prefix that only starts with the letters is its own keyspace.
+        const [own] = redisPrefixCheck(
+            ctxWith([{ name: "shop", cache: redis("kn-nextapp") }]),
+        );
+        expect(own?.status).toBe("pass");
+    });
+
     it("WARN: one prefix nested in another's sweep pattern ('shop' vs 'shop:cache')", () => {
         const [row] = redisPrefixCheck(
             ctxWith([

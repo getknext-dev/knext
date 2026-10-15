@@ -73,18 +73,36 @@ function count(name) {
 export const LEGACY_SHARED_KEY_PREFIX = 'kn-next';
 
 /**
- * Whether a prefix-wide sweep may run under `prefix`. The bare shared default is
- * refused; so is an empty prefix (its glob would match every app's keys).
+ * Whether a prefix-wide sweep may run under `prefix`. The shared default is
+ * refused, and so is any prefix nested under it (`kn-next:cache`): its sweep
+ * would reach keys other apps wrote under the default. So is an empty prefix
+ * (its glob would match every app's keys). The operator's finalizer refuses
+ * the same set (isSharedRedisKeyspace, redis_key_prefix.go).
  */
 export function collapseSweepAllowed(prefix) {
-  return typeof prefix === 'string' && prefix !== '' && prefix !== LEGACY_SHARED_KEY_PREFIX;
+  return (
+    typeof prefix === 'string' &&
+    prefix !== '' &&
+    prefix !== LEGACY_SHARED_KEY_PREFIX &&
+    !prefix.startsWith(`${LEGACY_SHARED_KEY_PREFIX}:`)
+  );
+}
+
+/**
+ * A Redis glob matching `text` literally: backslash-escapes * ? [ ] and the
+ * backslash itself. Both collapse sweeps build their SCAN MATCH pattern with
+ * it. Byte-for-byte the operator's escapeRedisGlob (the finalizer's cleanup
+ * pattern, external_cleaner.go); both sides pin the same vector.
+ */
+export function escapeGlob(text) {
+  return text.replace(/[*?[\]\\]/g, '\\$&');
 }
 
 /** The error a refused collapse logs, naming the fix. */
 export function collapseRefusedMessage(what, prefix) {
   return (
     `[CacheHandler] refusing to sweep every ${what} under the Redis key prefix '${prefix}': ` +
-    'it is the shared default, so other apps on this Redis may keep their keys there too, ' +
+    'it is the shared default (or nested under it), so other apps on this Redis may keep their keys there too, ' +
     'and the sweep would delete their cache. This app keeps its stale entries until they expire. ' +
     'Give the app its own prefix (cache.keyPrefix in knext.config, or REDIS_KEY_PREFIX).'
   );
@@ -633,11 +651,6 @@ async function writeReplayBatch(core, client, args) {
     if (v !== null) writes.push(fields[i], String(v));
   }
   if (writes.length > 0) await core.redisCall(() => core.command(client, 'HSET', [key, ...writes]));
-}
-
-/** A Redis glob matching `text` literally. */
-function escapeGlob(text) {
-  return text.replace(/[*?[\]\\]/g, '\\$&');
 }
 
 /**

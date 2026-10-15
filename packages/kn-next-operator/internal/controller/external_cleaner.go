@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -33,7 +34,8 @@ import (
 // non-S3-compatible providers (e.g. Azure, GCS via native APIs) we no-op with a
 // logged warning rather than guess at credentials/endpoints — see CleanupStorage.
 //
-// Cache: go-redis SCAN MATCH "<KeyPrefix>:*" + batched DEL — never FLUSHDB.
+// Cache: go-redis SCAN MATCH "<glob-escaped KeyPrefix>:*" + batched DEL — never
+// FLUSHDB, never under the shared fallback "kn-next".
 //
 // Cross-app safety: both methods are driven ONLY by the per-app StorageTarget /
 // CacheTarget the reconciler constructs (app-scoped Prefix / KeyPrefix). This
@@ -130,8 +132,24 @@ func (c *DefaultCleaner) CleanupStorage(ctx context.Context, s StorageTarget) er
 	return nil
 }
 
-// CleanupCache deletes only the Redis keys under c.KeyPrefix using SCAN MATCH
-// "<KeyPrefix>:*" + batched DEL. Never FLUSHDB; never another app's prefix.
+// redisGlobEscaper backslash-escapes the Redis glob metacharacters * ? [ ] and
+// the escape character itself, so a SCAN MATCH pattern built from text matches
+// text literally. Byte-for-byte the runtime's escapeGlob
+// (packages/kn-next/src/adapters/use-cache-handler.js, /[*?[\]\\]/g → '\\$&');
+// both pin the same vector (TestRedisKeyPrefix_GlobEscapeVector).
+var redisGlobEscaper = strings.NewReplacer(`\`, `\\`, `*`, `\*`, `?`, `\?`, `[`, `\[`, `]`, `\]`)
+
+// escapeRedisGlob returns a Redis glob that matches text literally.
+func escapeRedisGlob(text string) string {
+	return redisGlobEscaper.Replace(text)
+}
+
+// CleanupCache deletes only the Redis keys that literally start with
+// "<KeyPrefix>:" using SCAN MATCH "<escaped KeyPrefix>:*" + batched DEL. The
+// prefix is glob-escaped, so a prefix such as "kn-*" or "kn-nex?" reaps its own
+// keys and nothing else. It refuses the shared fallback "kn-next" and any prefix
+// under it ("kn-next:cache"): those keys belong to every app without a prefix
+// of its own. Never FLUSHDB; never another app's prefix.
 func (c *DefaultCleaner) CleanupCache(ctx context.Context, t CacheTarget) error {
 	logger := logf.FromContext(ctx)
 
@@ -142,6 +160,9 @@ func (c *DefaultCleaner) CleanupCache(ctx context.Context, t CacheTarget) error 
 	if t.KeyPrefix == "" {
 		return fmt.Errorf("refusing cache cleanup with empty keyPrefix (cross-app safety)")
 	}
+	if isSharedRedisKeyspace(t.KeyPrefix) {
+		return fmt.Errorf("refusing cache cleanup under the shared fallback keyspace %q (cross-app safety)", t.KeyPrefix)
+	}
 
 	opt, err := redis.ParseURL(t.URL)
 	if err != nil {
@@ -150,7 +171,7 @@ func (c *DefaultCleaner) CleanupCache(ctx context.Context, t CacheTarget) error 
 	rdb := redis.NewClient(opt)
 	defer func() { _ = rdb.Close() }()
 
-	match := t.KeyPrefix + ":*" // SCOPE: only this app's keyspace.
+	match := escapeRedisGlob(t.KeyPrefix) + ":*" // SCOPE: only this app's keyspace, literally.
 	var cursor uint64
 	var deleted int
 	for {

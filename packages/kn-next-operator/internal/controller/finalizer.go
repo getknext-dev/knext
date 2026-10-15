@@ -148,11 +148,14 @@ func (r *NextAppReconciler) cleanupExternalState(ctx context.Context, app *appsv
 
 	// The keyspace the operator rendered for this app: spec.cache.keyPrefix, or
 	// the derived per-app default. operatorRedisKeyPrefix is empty for the
-	// shared fallback "kn-next" (even when spec.cache.keyPrefix names it: every
-	// app without a prefix of its own writes there) and for a prefix the user
-	// set through env, so neither is ever reaped. Two apps that set the same
-	// keyPrefix on purpose still share one keyspace, and deleting either one
-	// reaps both caches; the CLI's doctor warns about that collision.
+	// shared fallback "kn-next" and any prefix nested under it such as
+	// "kn-next:cache" (even when spec.cache.keyPrefix names it: every app
+	// without a prefix of its own writes there), and for a prefix the user set
+	// through env, so none of them is ever reaped. The cleaner glob-escapes the
+	// prefix, so it deletes only keys that literally start with "<prefix>:": a
+	// keyPrefix like "kn-*" or "kn-nex?" reaches no other app. Two apps that set
+	// the same keyPrefix on purpose still share one keyspace, and deleting
+	// either one reaps both caches; the CLI's doctor warns about that collision.
 	if keyPrefix := operatorRedisKeyPrefix(app); keyPrefix != "" {
 		target := CacheTarget{
 			Provider:  app.Spec.Cache.Provider,

@@ -21,6 +21,7 @@ import (
 	"regexp"
 	"testing"
 
+	"github.com/alicebob/miniredis/v2"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -219,5 +220,129 @@ func TestRedisKeyPrefix_EmptyUserEnvIsUnset(t *testing.T) {
 	}
 	if len(fc.cacheCalls) != 1 || fc.cacheCalls[0].keyPrefix != "kn-5be479caf0c0" {
 		t.Fatalf("cache cleanup calls = %+v, want one under kn-5be479caf0c0", fc.cacheCalls)
+	}
+}
+
+// The glob escape the cleanup pattern applies to the key prefix. Lockstep with
+// the runtime's escapeGlob (packages/kn-next/src/adapters/use-cache-handler.js),
+// which builds its collapse-sweep patterns the same way; both sides pin this
+// vector (redis-prefix-collapse-isolation.test.ts).
+func TestRedisKeyPrefix_GlobEscapeVector(t *testing.T) {
+	const in = `a*b?c[d]e\f:g-h`
+	const want = `a\*b\?c\[d\]e\\f:g-h`
+	if got := escapeRedisGlob(in); got != want {
+		t.Fatalf("escapeRedisGlob(%q) = %q, want %q", in, got, want)
+	}
+}
+
+// redisKeyspaceUniverse seeds keys an unescaped or nested explicit prefix could
+// reach: the shared fallback's ISR and 'use cache' entries, two derived app
+// keyspaces, a near-miss, and the literal keyspaces of the glob-looking
+// prefixes below.
+var redisKeyspaceUniverse = []string{
+	"kn-next:cache:/home",
+	"kn-next:cache:cache:/nested",
+	"kn-next:uc:default:abc",
+	"kn-5be479caf0c0:cache:/home",
+	"kn-d8bd7dc33539:uc:default:abc",
+	"kn-nexx:cache:/other",
+	`kn-nex?:cache:/own`,
+	`kn-nex[t]:cache:/own`,
+	`kn-*:cache:/own`,
+	`kn-nex\t:cache:/own`,
+}
+
+// seedRedis starts an in-memory Redis (SCAN MATCH implements Redis glob,
+// backslash escapes included) holding redisKeyspaceUniverse.
+func seedRedis(t *testing.T) *miniredis.Miniredis {
+	t.Helper()
+	mr := miniredis.RunT(t)
+	for _, k := range redisKeyspaceUniverse {
+		if err := mr.Set(k, "v"); err != nil {
+			t.Fatalf("seed %q: %v", k, err)
+		}
+	}
+	return mr
+}
+
+// reapWithRealCleaner deletes an app with an explicit keyPrefix through the
+// finalizer and the real DefaultCleaner, and returns the keys left behind.
+func reapWithRealCleaner(t *testing.T, keyPrefix string) map[string]bool {
+	t.Helper()
+	mr := seedRedis(t)
+	app := redisApp("default", "deleted", keyPrefix)
+	app.Spec.Cache.URL = "redis://" + mr.Addr()
+	r := &NextAppReconciler{Cleaner: NewDefaultCleaner()}
+	if err := r.cleanupExternalState(context.Background(), app); err != nil {
+		t.Fatalf("cleanupExternalState: %v", err)
+	}
+	left := map[string]bool{}
+	for _, k := range mr.Keys() {
+		left[k] = true
+	}
+	return left
+}
+
+// assertReapedExactly fails unless exactly `gone` (possibly nothing) left the universe.
+func assertReapedExactly(t *testing.T, keyPrefix string, left map[string]bool, gone ...string) {
+	t.Helper()
+	wantGone := map[string]bool{}
+	for _, g := range gone {
+		wantGone[g] = true
+	}
+	for _, k := range redisKeyspaceUniverse {
+		if wantGone[k] && left[k] {
+			t.Errorf("keyPrefix %q: its own key %q was not reaped", keyPrefix, k)
+		}
+		if !wantGone[k] && !left[k] {
+			t.Errorf("keyPrefix %q reaped %q, which is not its own", keyPrefix, k)
+		}
+	}
+}
+
+// A keyPrefix nested under the shared fallback ("kn-next:cache") would reap
+// every legacy app's ISR entries; the finalizer reaps nothing under kn-next:.
+func TestRedisKeyPrefix_ReapNestedUnderSharedFallbackDeletesNothing(t *testing.T) {
+	if got := operatorRedisKeyPrefix(redisApp("default", "shop", "kn-next:cache")); got != "" {
+		t.Fatalf("operatorRedisKeyPrefix(kn-next:cache) = %q, want empty", got)
+	}
+	assertReapedExactly(t, "kn-next:cache", reapWithRealCleaner(t, "kn-next:cache"))
+}
+
+// "kn-nex?" as a raw glob matches kn-next:* and kn-nexx:*; escaped, only itself.
+func TestRedisKeyPrefix_ReapGlobQuestionMarkIsLiteral(t *testing.T) {
+	assertReapedExactly(t, "kn-nex?", reapWithRealCleaner(t, "kn-nex?"), `kn-nex?:cache:/own`)
+}
+
+// "kn-nex[t]" as a raw glob matches kn-next:*; escaped, only itself.
+func TestRedisKeyPrefix_ReapGlobCharClassIsLiteral(t *testing.T) {
+	assertReapedExactly(t, "kn-nex[t]", reapWithRealCleaner(t, "kn-nex[t]"), `kn-nex[t]:cache:/own`)
+}
+
+// "kn-*" as a raw glob matches every derived app and the shared fallback;
+// escaped, only itself.
+func TestRedisKeyPrefix_ReapGlobStarIsLiteral(t *testing.T) {
+	assertReapedExactly(t, "kn-*", reapWithRealCleaner(t, "kn-*"), `kn-*:cache:/own`)
+}
+
+// "kn-nex\t" as a raw glob is kn-next (the backslash escapes the t); escaped,
+// only itself.
+func TestRedisKeyPrefix_ReapGlobBackslashIsLiteral(t *testing.T) {
+	assertReapedExactly(t, `kn-nex\t`, reapWithRealCleaner(t, `kn-nex\t`), `kn-nex\t:cache:/own`)
+}
+
+// The cleaner refuses the shared fallback and anything under it on its own,
+// whatever its caller resolved: defence in depth behind the finalizer's refusal.
+func TestRedisKeyPrefix_CleanerRefusesSharedFallback(t *testing.T) {
+	for _, prefix := range []string{"kn-next", "kn-next:cache", "kn-next:uc"} {
+		mr := seedRedis(t)
+		err := NewDefaultCleaner().CleanupCache(context.Background(),
+			CacheTarget{Provider: "redis", URL: "redis://" + mr.Addr(), KeyPrefix: prefix})
+		if err == nil {
+			t.Errorf("CleanupCache(%q) = nil, want a refusal", prefix)
+		}
+		if n := len(mr.Keys()); n != len(redisKeyspaceUniverse) {
+			t.Errorf("CleanupCache(%q) deleted %d keys, want none", prefix, len(redisKeyspaceUniverse)-n)
+		}
 	}
 }

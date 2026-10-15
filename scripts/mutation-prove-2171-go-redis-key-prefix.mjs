@@ -9,7 +9,11 @@
  * REDIS_KEY_PREFIX the user sets in spec.env or spec.secrets.envMap, and reaps
  * that derived keyspace on delete, but never the shared fallback `kn-next`, even
  * when `spec.cache.keyPrefix` names it. An empty spec.env REDIS_KEY_PREFIX counts
- * as unset, so the derived default replaces it. Graded by the `go test` targets in
+ * as unset, so the derived default replaces it. The finalizer also refuses any
+ * prefix nested under `kn-next` (`kn-next:cache`), and the cleaner glob-escapes
+ * the prefix so `kn-*` / `kn-nex?` / `kn-nex[t]` / `kn-nex\t` reap only their
+ * literal keyspace (graded against an in-memory Redis that implements SCAN MATCH's
+ * glob). Graded by the `go test` targets in
  * `packages/kn-next-operator/internal/controller`: `redis_key_prefix_test.go`,
  * the reserved-env parity test (whose exclusion of the yielding default must stay
  * narrow), and the finalizer tests.
@@ -39,6 +43,8 @@ const OPERATOR_MODULE = `${REPO_ROOT}/packages/kn-next-operator`;
 const PREFIX = resolve(REPO_ROOT, 'packages/kn-next-operator/internal/controller/redis_key_prefix.go');
 // biome-ignore format: one-line resolve() for the anchor-drift scan
 const CONTROLLER = resolve(REPO_ROOT, 'packages/kn-next-operator/internal/controller/nextapp_controller.go');
+// biome-ignore format: one-line resolve() for the anchor-drift scan
+const CLEANER = resolve(REPO_ROOT, 'packages/kn-next-operator/internal/controller/external_cleaner.go');
 // biome-ignore format: one-line resolve() for the anchor-drift scan
 const PARITY = resolve(REPO_ROOT, 'packages/kn-next-operator/internal/controller/reserved_env_names_parity_test.go');
 
@@ -125,7 +131,7 @@ const MUTATIONS = [
     claim:
       'the finalizer reaps an explicit keyPrefix of kn-next (every legacy app on the shared fallback)',
     subject: 'prefix',
-    anchor: '\tif app.Spec.Cache.KeyPrefix == legacySharedRedisKeyPrefix {\n\t\treturn ""\n\t}',
+    anchor: '\tif isSharedRedisKeyspace(app.Spec.Cache.KeyPrefix) {\n\t\treturn ""\n\t}',
     replacement: '',
   },
   {
@@ -142,9 +148,62 @@ const MUTATIONS = [
     anchor: '\t\t\tif dropsEmptyUserRedisKeyPrefix(nextApp, name) {',
     replacement: '\t\t\tif false {',
   },
+  {
+    id: 'G13',
+    claim:
+      'the finalizer reaps a keyPrefix nested under kn-next (kn-next:cache: every legacy ISR entry)',
+    subject: 'prefix',
+    anchor:
+      '\treturn prefix == legacySharedRedisKeyPrefix || strings.HasPrefix(prefix, legacySharedRedisKeyPrefix+":")',
+    replacement: '\treturn prefix == legacySharedRedisKeyPrefix',
+  },
+  {
+    id: 'G14',
+    claim: 'the cleaner itself no longer refuses the shared fallback keyspace',
+    subject: 'cleaner',
+    anchor: '\tif isSharedRedisKeyspace(t.KeyPrefix) {',
+    replacement: '\tif false {',
+  },
+  {
+    id: 'G15',
+    claim: 'the cleanup pattern is not glob-escaped (kn-* reaps every app)',
+    subject: 'cleaner',
+    anchor: '\tmatch := escapeRedisGlob(t.KeyPrefix) + ":*"',
+    replacement: '\tmatch := t.KeyPrefix + ":*"',
+  },
+  {
+    id: 'G16',
+    claim: 'the escape drops the backslash (kn-nex\\t reaps kn-next:*)',
+    subject: 'cleaner',
+    anchor: 'strings.NewReplacer(`\\`, `\\\\`, ',
+    replacement: 'strings.NewReplacer(',
+  },
+  {
+    id: 'G17',
+    claim: 'the escape drops * (kn-* reaps every derived app)',
+    subject: 'cleaner',
+    anchor: '`*`, `\\*`, ',
+    replacement: '',
+  },
+  {
+    id: 'G18',
+    claim: 'the escape drops ? (kn-nex? reaps kn-next:*)',
+    subject: 'cleaner',
+    anchor: '`?`, `\\?`, ',
+    replacement: '',
+  },
+  {
+    id: 'G19',
+    claim: 'the escape drops [ and ] (kn-nex[t] reaps kn-next:*)',
+    subject: 'cleaner',
+    anchor: ', `[`, `\\[`, `]`, `\\]`)',
+    replacement: ')',
+  },
 ];
 
-const PROVER = { subjects: { prefix: PREFIX, controller: CONTROLLER, parity: PARITY } };
+const PROVER = {
+  subjects: { prefix: PREFIX, controller: CONTROLLER, cleaner: CLEANER, parity: PARITY },
+};
 
 function goTestExit() {
   const [bin, ...args] = GO_TEST;

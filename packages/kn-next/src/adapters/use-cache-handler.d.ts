@@ -66,6 +66,9 @@ export declare const USE_CACHE_METRIC: "knext_use_cache_events_total";
 /** The prefix every app falls back to when it sets none; collapse sweeps refuse it. */
 export declare const LEGACY_SHARED_KEY_PREFIX: "kn-next";
 
+/** A Redis glob matching `text` literally (escapes * ? [ ] and the backslash). */
+export declare function escapeGlob(text: string): string;
+
 /** Whether a prefix-wide collapse sweep may run under `prefix`. */
 export declare function collapseSweepAllowed(prefix: string): boolean;
 

@@ -10,7 +10,9 @@
  *  - COLLAPSE rows grade `redis-prefix-collapse-isolation.test.ts`: two app
  *    processes on one Redis; app A's collapse under the shared fallback must
  *    leave app B's keys, refuse loudly, and count the refusal, while on distinct
- *    prefixes the collapse must still run. Runs on the fake RESP server always and
+ *    prefixes the collapse must still run. A prefix nested under the fallback
+ *    (`kn-next:cache`) is refused the same way, and escapeGlob pins the vector
+ *    the operator's cleanup pattern pins. Runs on the fake RESP server always and
  *    also on a real Redis when KNEXT_REDIS_LIVE_URL is set.
  *  - DOCTOR rows grade `doctor-redis-prefix.test.ts`: the `knext doctor` row that
  *    flags shared, nested and fallback prefixes, and its derivation vector.
@@ -64,17 +66,15 @@ const COLLAPSE = [
     id: 'C03',
     subject: 'uc',
     claim: 'the shared fallback counts as a sweepable prefix',
-    anchor:
-      "  return typeof prefix === 'string' && prefix !== '' && prefix !== LEGACY_SHARED_KEY_PREFIX;",
-    replacement: "  return typeof prefix === 'string' && prefix !== '';",
+    anchor: '    prefix !== LEGACY_SHARED_KEY_PREFIX &&\n',
+    replacement: '',
   },
   {
     id: 'C04',
     subject: 'uc',
     claim: 'the refusal refuses every prefix (a unique prefix is never collapsed)',
-    anchor:
-      "  return typeof prefix === 'string' && prefix !== '' && prefix !== LEGACY_SHARED_KEY_PREFIX;",
-    replacement: '  return false;',
+    anchor: "  return (\n    typeof prefix === 'string' &&",
+    replacement: "  return false && (\n    typeof prefix === 'string' &&",
   },
   {
     id: 'C05',
@@ -103,6 +103,28 @@ const COLLAPSE = [
     claim: 'the ISR fallback prefix drifts from the one the refusal knows',
     anchor: 'let KEY_PREFIX = process.env.REDIS_KEY_PREFIX || LEGACY_SHARED_KEY_PREFIX;',
     replacement: "let KEY_PREFIX = process.env.REDIS_KEY_PREFIX || 'kn-next-drift';",
+  },
+  {
+    id: 'C09',
+    subject: 'uc',
+    claim: 'a prefix nested under the shared fallback (kn-next:cache) is swept',
+    anchor: '    !prefix.startsWith(`${LEGACY_SHARED_KEY_PREFIX}:`)\n',
+    replacement: '    true\n',
+  },
+  {
+    id: 'C10',
+    subject: 'uc',
+    claim:
+      'the nested refusal also refuses a prefix that only starts with the letters (kn-nextapp)',
+    anchor: '    !prefix.startsWith(`${LEGACY_SHARED_KEY_PREFIX}:`)\n',
+    replacement: '    !prefix.startsWith(LEGACY_SHARED_KEY_PREFIX)\n',
+  },
+  {
+    id: 'C11',
+    subject: 'uc',
+    claim: "escapeGlob stops escaping the backslash (drifts from the operator's vector)",
+    anchor: "  return text.replace(/[*?[\\]\\\\]/g, '\\\\$&');",
+    replacement: "  return text.replace(/[*?[\\]]/g, '\\\\$&');",
   },
 ];
 
@@ -164,6 +186,13 @@ const DOCTOR = [
       "an empty spec.env REDIS_KEY_PREFIX counts as a prefix of '' (the operator renders the derived default)",
     anchor: '        else if (fromEnv) prefix = fromEnv;',
     replacement: '        else if (fromEnv !== undefined) prefix = fromEnv;',
+  },
+  {
+    id: 'D09',
+    subject: 'check',
+    claim: 'an app on a prefix nested under the shared fallback (kn-next:cache) is not flagged',
+    anchor: '        } else if (prefix.startsWith(`${LEGACY_SHARED_KEY_PREFIX}:`)) {',
+    replacement: '        } else if (false) {',
   },
 ];
 

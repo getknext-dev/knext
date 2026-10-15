@@ -17,6 +17,8 @@ limitations under the License.
 package controller
 
 import (
+	"strings"
+
 	corev1 "k8s.io/api/core/v1"
 
 	appsv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/api/v1alpha1"
@@ -30,6 +32,22 @@ const redisKeyPrefixEnvName = "REDIS_KEY_PREFIX"
 // lands on it, so no app owns the keys under it: the runtime refuses to sweep it
 // (collapseSweepAllowed) and the finalizer refuses to reap it.
 const legacySharedRedisKeyPrefix = "kn-next"
+
+// isSharedRedisKeyspace reports whether prefix is the shared fallback "kn-next"
+// or nested under it ("kn-next:cache", "kn-next:uc"). Reaping either would
+// delete keys that apps without a prefix of their own wrote: "kn-next:cache:*"
+// is every such app's ISR entries. The finalizer and DefaultCleaner.CleanupCache
+// both refuse it; the runtime's collapseSweepAllowed refuses the same set.
+//
+// Matching is literal: CleanupCache glob-escapes the prefix, so a prefix that
+// only LOOKS like it reaches kn-next ("kn-nex?", "kn-nex[t]", "kn-*") reaps
+// its own literal keyspace and nothing else, and needs no refusal. The derived
+// per-app prefixes (kn-<12 hex>) need none either: once escaped, only an
+// explicit keyPrefix equal to another app's derived prefix reaches that
+// keyspace, which is two apps sharing one prefix on purpose (doctor warns).
+func isSharedRedisKeyspace(prefix string) bool {
+	return prefix == legacySharedRedisKeyPrefix || strings.HasPrefix(prefix, legacySharedRedisKeyPrefix+":")
+}
 
 // defaultRedisKeyPrefix is the Redis key prefix of an app that sets no
 // spec.cache.keyPrefix: "kn-" plus the first 12 lowercase hex of
@@ -100,13 +118,14 @@ func dropsEmptyUserRedisKeyPrefix(app *appsv1alpha1.NextApp, name string) bool {
 // operatorRedisKeyPrefix is the keyspace the operator owns for this app: the
 // explicit spec.cache.keyPrefix, or the derived default when it renders it.
 // Empty when the operator owns none: no Redis cache, a user-set env prefix, or
-// an explicit keyPrefix of the shared fallback "kn-next" (other apps' keys live
-// there too). The finalizer reaps exactly this keyspace on delete.
+// an explicit keyPrefix of the shared fallback "kn-next" or one nested under it
+// such as "kn-next:cache" (other apps' keys live there too). The finalizer reaps
+// exactly the keys that literally start with "<this keyspace>:" on delete.
 func operatorRedisKeyPrefix(app *appsv1alpha1.NextApp) string {
 	if !cacheIsRedis(app) {
 		return ""
 	}
-	if app.Spec.Cache.KeyPrefix == legacySharedRedisKeyPrefix {
+	if isSharedRedisKeyspace(app.Spec.Cache.KeyPrefix) {
 		return ""
 	}
 	if app.Spec.Cache.KeyPrefix != "" {

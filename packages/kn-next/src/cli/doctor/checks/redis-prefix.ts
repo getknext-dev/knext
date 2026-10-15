@@ -8,8 +8,10 @@
  * prefix (`defaultRedisKeyPrefix`), so a collision takes an explicit choice:
  *
  *  - the same `keyPrefix` (or `spec.env.REDIS_KEY_PREFIX`) on two apps;
- *  - the shared fallback `kn-next` set on purpose (the runtime refuses to sweep
- *    under it, so that app's cache is never collapsed after an outage);
+ *  - the shared fallback `kn-next`, or a prefix nested under it such as
+ *    `kn-next:cache`, set on purpose (the runtime refuses to sweep under
+ *    either, so that app's cache is never collapsed after an outage, and the
+ *    operator never reaps it on delete);
  *  - one prefix nested in another's sweep pattern: `shop` sweeps `shop:cache:*`,
  *    which holds every key of an app prefixed `shop:cache`.
  *
@@ -108,6 +110,10 @@ export function redisPrefixCheck(ctx: CheckContext): CheckResult[] {
         if (prefix === LEGACY_SHARED_KEY_PREFIX) {
             problems.push(
                 `${apps.join(", ")} use${apps.length > 1 ? "" : "s"} the shared fallback '${LEGACY_SHARED_KEY_PREFIX}' (its cache is never swept after an outage)`,
+            );
+        } else if (prefix.startsWith(`${LEGACY_SHARED_KEY_PREFIX}:`)) {
+            problems.push(
+                `${apps.join(", ")} use${apps.length > 1 ? "" : "s"} '${prefix}', inside the shared fallback '${LEGACY_SHARED_KEY_PREFIX}' (its cache is never swept after an outage)`,
             );
         }
     }

@@ -8,6 +8,10 @@ import {
     spyOn,
 } from "bun:test";
 import { Redis } from "ioredis";
+import {
+    collapseSweepAllowed,
+    escapeGlob,
+} from "../adapters/use-cache-handler.js";
 import { type FakeRedis, startFakeRedis } from "./helpers/fake-redis";
 
 /**
@@ -251,6 +255,24 @@ for (const backend of BACKENDS) {
             expect(await redis?.exists(`${LEGACY}:cache:/b`)).toBe(true);
         });
 
+        it("ISR: a REDIS_KEY_PREFIX nested under the shared default (kn-next:cache) is refused too", async () => {
+            const nested = `${LEGACY}:cache`;
+            // A legacy app whose ISR key lands inside the nested prefix's sweep.
+            const b = new (await app(undefined)).default({});
+            await b.set("cache:/b", page("b"), pageCtx);
+            expect(await redis?.exists(`${nested}:cache:/b`)).toBe(true);
+            const a = new (await app(nested)).default({});
+            await isrCollapse(a, nested);
+            expect(
+                await redis?.exists(`${nested}:cache:/b`),
+                "a collapse under kn-next:cache deleted a legacy app's ISR entry",
+            ).toBe(true);
+            const refused = errorCalls().filter(
+                (m) => m.includes("refus") && m.includes(`'${nested}'`),
+            );
+            expect(refused.length).toBeGreaterThanOrEqual(1);
+        });
+
         it("ISR control: on distinct per-app prefixes the collapse still runs — A's entries go, B's stay", async () => {
             const b = new (await app(SHOP_B)).default({});
             await b.set("/b", page("b"), pageCtx);
@@ -303,3 +325,23 @@ for (const backend of BACKENDS) {
         });
     });
 }
+
+describe("the sweep's prefix rules, in lockstep with the operator's finalizer", () => {
+    // The operator's cleanup pattern pins the same vector
+    // (TestRedisKeyPrefix_GlobEscapeVector, redis_key_prefix_test.go).
+    it("escapeGlob escapes * ? [ ] and the backslash, nothing else", () => {
+        expect(escapeGlob("a*b?c[d]e\\f:g-h")).toBe(
+            "a\\*b\\?c\\[d\\]e\\\\f:g-h",
+        );
+    });
+
+    it("refuses the shared default and any prefix nested under it; allows the rest", () => {
+        for (const p of ["", LEGACY, `${LEGACY}:cache`, `${LEGACY}:uc`]) {
+            expect(collapseSweepAllowed(p), `prefix '${p}'`).toBe(false);
+        }
+        // Escaped, a glob-looking prefix sweeps only its own literal keys.
+        for (const p of [SHOP, "kn-nextapp", "kn-nex?", "kn-*", "shop"]) {
+            expect(collapseSweepAllowed(p), `prefix '${p}'`).toBe(true);
+        }
+    });
+});

@@ -483,9 +483,9 @@ derives. It `WARN`s, naming the apps, when:
   other's cache;
 - one prefix sits inside another's keyspace (`shop` and `shop:cache`), so the outer app's clean-up
   reaches the inner one;
-- an app is on the shared fallback prefix (keys under `kn-next:*`), even on its own: any app with no
-  prefix lands there too, so that keyspace is never cleared after an outage and its stale entries
-  stay until they expire.
+- an app's keys sit under the shared fallback `kn-next:*`, because its prefix is that fallback or
+  sits inside it (`kn-next:cache`), even on its own: any app with no prefix lands there too, so that
+  keyspace is never cleared after an outage and its stale entries stay until they expire.
 
 The row never fails, because two apps can point at different Redis servers, which doctor cannot see.
 A prefix that comes from a Secret (`secrets.envMap`) cannot be read, so doctor names the app as not

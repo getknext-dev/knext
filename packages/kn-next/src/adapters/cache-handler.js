@@ -33,6 +33,7 @@ import {
   collapseRefusedMessage,
   collapseSweepAllowed,
   createUseCacheHandler,
+  escapeGlob,
   LEGACY_SHARED_KEY_PREFIX,
   resetUseCacheTagReplay,
 } from './use-cache-handler.js';
@@ -1592,11 +1593,6 @@ async function runInvalidationReplay() {
   } finally {
     startCdnPurge(replayed);
   }
-}
-
-/** A Redis glob matching `text` literally. */
-function escapeGlob(text) {
-  return text.replace(/[*?[\]\\]/g, '\\$&');
 }
 
 /**

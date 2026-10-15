@@ -148,10 +148,16 @@ one.
 
 Keys under `kn-next:*` belong to apps that run with no prefix at all, for example outside the
 operator. Any number of apps can land there, so knext never deletes keys under it wholesale: not
-after an outage, and not when an app is deleted, even one that chose that prefix itself. After a
-Redis outage long enough to miss more than 1,000 invalidations, an app with its own prefix clears its
-whole cache to drop the entries it could not invalidate. An app on that shared fallback logs an error
-instead and keeps those entries until they expire.
+after an outage, and not when an app is deleted, even one whose prefix is that shared fallback or
+sits inside it, such as `kn-next:cache`. After a Redis outage long enough to miss more than 1,000
+invalidations, an app with its own prefix clears its whole cache to drop the entries it could not
+invalidate. An app on that shared fallback, or on a prefix inside it, logs an error instead and keeps
+those entries until they expire.
+
+A prefix is matched literally, character for character. When an app is deleted, the operator
+removes only the keys that start with the app's prefix followed by `:`. Characters such as `*`,
+`?` and `[` in a prefix are not wildcards, so an app whose prefix is `kn-*` deletes only keys
+that start with `kn-*:`, never another app's.
 
 ### Upgrading an app that set no prefix [#key-prefix-upgrade]
 
@@ -283,7 +289,7 @@ the rate of any of them:
 | `tags_dropped` | Tag invalidations that could not reach Redis; they are applied once it is back |
 | `tags_replayed` | Tags whose invalidation was applied after Redis came back |
 | `tags_collapsed` | Times a pod had over 1,000 tags to apply and removed every `'use cache'` entry of the app instead |
-| `tags_collapse_refused` | Times a pod had over 1,000 tags to apply but kept its entries, because its key prefix is the shared fallback `kn-next:*` ([why](#key-prefix)) |
+| `tags_collapse_refused` | Times a pod had over 1,000 tags to apply but kept its entries, because its keys sit under the shared fallback `kn-next:*` ([why](#key-prefix)) |
 | `prune_error` | Failed clean-ups of old invalidation timestamps (the invalidation itself was written) |
 | `error` | Redis commands that failed; the request carried on without the cache |
 
