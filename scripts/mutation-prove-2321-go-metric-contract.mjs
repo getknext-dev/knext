@@ -196,6 +196,15 @@ const MUTATIONS = [
     anchor: 'if _, isPkg := p.info.Uses[x].(*types.PkgName); !isPkg {',
     replacement: 'if _, isPkg := p.info.Uses[x].(*types.PkgName); !isPkg && false {',
   },
+  {
+    id: 'S7',
+    expect: 'red',
+    claim:
+      'the scanner stops refusing an exported collector var (reassignable from another package)',
+    subject: 'scanner',
+    anchor: 'if v.Exported() {',
+    replacement: 'if v.Exported() && false {',
+  },
 ];
 
 const PROVER = { subjects: { controller: CONTROLLER, webhook: WEBHOOK, scanner: SCANNER } };

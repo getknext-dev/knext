@@ -463,7 +463,8 @@ func (p *pkg) register(out map[string]Family, arg ast.Expr, depth int) error {
 			return p.errorf(a, "%s is not a package-level variable with an initializer", a.Name)
 		}
 		if v.Exported() {
-			return p.errorf(a, "%s is exported: another package can reassign it, and the scan reads only its declaration", a.Name)
+			return p.errorf(a, "%s is exported: another package can reassign it, "+
+				"and the scan reads only its declaration", a.Name)
 		}
 		if at, re := p.assigned[v]; re {
 			return p.errorf(a, "%s is assigned at %s besides its declaration: the scan reads only the declaration, "+
