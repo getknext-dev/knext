@@ -176,3 +176,48 @@ func TestRedisKeyPrefix_FinalizerReapsDerivedPrefix(t *testing.T) {
 		t.Fatalf("cache cleanup calls = %+v, want none for a user-set env prefix", fc.cacheCalls)
 	}
 }
+
+// An explicit spec.cache.keyPrefix of "kn-next" is the shared fallback that
+// every app without a prefix lands on. Reaping it on delete would SCAN + DEL
+// every legacy app's cache, so the finalizer never touches it — the runtime's
+// collapseSweepAllowed refuses the same prefix for the same reason.
+func TestRedisKeyPrefix_FinalizerNeverReapsSharedFallback(t *testing.T) {
+	app := redisApp("default", "shop", "kn-next")
+	if got := operatorRedisKeyPrefix(app); got != "" {
+		t.Fatalf("operatorRedisKeyPrefix(keyPrefix=kn-next) = %q, want empty (the shared fallback is no app's to reap)", got)
+	}
+	fc := &fakeCleaner{}
+	r := &NextAppReconciler{Cleaner: fc}
+	if err := r.cleanupExternalState(context.Background(), app); err != nil {
+		t.Fatalf("cleanupExternalState: %v", err)
+	}
+	if len(fc.cacheCalls) != 0 {
+		t.Fatalf("cache cleanup calls = %+v, want none under the shared fallback kn-next", fc.cacheCalls)
+	}
+	// The explicit value is still rendered: the app keeps the prefix it chose.
+	if ev, n := renderedRedisPrefix(t, app); n != 1 || ev.Value != "kn-next" {
+		t.Fatalf("explicit keyPrefix kn-next: got %d entries, value %q; want exactly one, kn-next", n, ev.Value)
+	}
+}
+
+// An empty spec.env REDIS_KEY_PREFIX is unset: the runtime reads "" as unset
+// and falls back to the shared "kn-next", so the operator renders the derived
+// default in its place — one entry, never the empty one. Lockstep with the
+// doctor (doctor-redis-prefix.test.ts), which resolves the same app to the same
+// vector.
+func TestRedisKeyPrefix_EmptyUserEnvIsUnset(t *testing.T) {
+	app := redisApp("default", "shop", "")
+	app.Spec.Env = map[string]string{"REDIS_KEY_PREFIX": ""}
+	ev, n := renderedRedisPrefix(t, app)
+	if n != 1 || ev.Value != "kn-5be479caf0c0" {
+		t.Fatalf("spec.env REDIS_KEY_PREFIX=\"\": got %d entries, value %q; want exactly one, kn-5be479caf0c0", n, ev.Value)
+	}
+	fc := &fakeCleaner{}
+	r := &NextAppReconciler{Cleaner: fc}
+	if err := r.cleanupExternalState(context.Background(), app); err != nil {
+		t.Fatalf("cleanupExternalState: %v", err)
+	}
+	if len(fc.cacheCalls) != 1 || fc.cacheCalls[0].keyPrefix != "kn-5be479caf0c0" {
+		t.Fatalf("cache cleanup calls = %+v, want one under kn-5be479caf0c0", fc.cacheCalls)
+	}
+}

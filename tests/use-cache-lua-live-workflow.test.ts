@@ -26,6 +26,10 @@ const REPO_ROOT = resolve(import.meta.dirname, '..');
 const CI_YML = resolve(REPO_ROOT, '.github/workflows/ci.yml');
 const NIGHTLY_YML = resolve(REPO_ROOT, '.github/workflows/mutation-prover-nightly.yml');
 const LIVE_SPEC = 'packages/kn-next/src/__tests__/use-cache-replay-script-live-redis.test.ts';
+// The per-app key-prefix collapse spec: two app processes on one Redis, graded
+// on the fake RESP server always and on this job's real Redis when the variable
+// is set. Without this job it never meets a real SCAN/DEL.
+const PREFIX_SPEC = 'packages/kn-next/src/__tests__/redis-prefix-collapse-isolation.test.ts';
 const PROVER = 'scripts/mutation-prove-2331-use-cache-tag-replay.mjs';
 const JOB_ID = 'use-cache-lua-live-redis';
 const ENV_VAR = 'KNEXT_REDIS_LIVE_URL';
@@ -85,6 +89,14 @@ describe(`ci.yml — ${JOB_ID} (the replay Lua on a real Redis)`, () => {
     expect(String((step as Obj).run)).toMatch(/scripts\/bun-test\.mjs\s+--no-skip\b/);
   });
 
+  it('runs the key-prefix collapse spec in the same gate step, against the same Redis', () => {
+    const job = jobsOf(CI_YML)[JOB_ID] as Obj;
+    const [step] = stepsRunning(job, /use-cache-replay-script-live-redis\.test\.ts/);
+    expect(step, 'no step runs the live suite').toBeDefined();
+    const args = String((step as Obj).run).split(/\s+/);
+    expect(args, `${PREFIX_SPEC} must run in the ${JOB_ID} gate step`).toContain(PREFIX_SPEC);
+  });
+
   it('runs a digest-pinned, health-gated Redis service', () => {
     expectPinnedHealthyRedis(redisService(jobsOf(CI_YML)[JOB_ID] as Obj, JOB_ID), JOB_ID);
   });
@@ -115,6 +127,17 @@ describe('mutation-prover-nightly.yml — the replay prover can run its Lua rows
     const src = readFileSync(resolve(REPO_ROOT, PROVER), 'utf8');
     expect(src).toContain(LIVE_SPEC);
     expect(src).toContain(ENV_VAR);
+  });
+});
+
+describe('the key-prefix collapse spec', () => {
+  // It SETS REDIS_URL itself (each "app" process points at the backend under
+  // test), so the job's env must not, and it takes the real Redis only from
+  // the job's variable, refusing a non-loopback host.
+  it(`takes the real Redis from ${ENV_VAR} and refuses a non-loopback host`, () => {
+    const src = readFileSync(resolve(REPO_ROOT, PREFIX_SPEC), 'utf8');
+    expect(src).toContain(`process.env.${ENV_VAR}`);
+    expect(src).toContain('must be a loopback Redis');
   });
 });
 

@@ -1680,6 +1680,12 @@ func (r *NextAppReconciler) appendUserEnv(nextApp *appsv1alpha1.NextApp, envVars
 		}
 		sort.Strings(names)
 		for _, name := range names {
+			if dropsEmptyUserRedisKeyPrefix(nextApp, name) {
+				// An empty REDIS_KEY_PREFIX is unset: the derived default
+				// appended below takes its place (no Warning: nothing the
+				// user set is overridden).
+				continue
+			}
 			if isReservedCDNEnvName(name) {
 				r.emitEvent(nextApp, corev1.EventTypeWarning, ReasonEnvVarIgnored,
 					fmt.Sprintf("spec.env[%s] ignored: the %s* namespace is reserved by the operator (set spec.cdn instead)",

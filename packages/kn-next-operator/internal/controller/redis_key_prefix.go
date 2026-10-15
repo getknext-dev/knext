@@ -24,6 +24,13 @@ import (
 
 const redisKeyPrefixEnvName = "REDIS_KEY_PREFIX"
 
+// legacySharedRedisKeyPrefix is the runtime's fallback for an app with no
+// REDIS_KEY_PREFIX (LEGACY_SHARED_KEY_PREFIX in
+// packages/kn-next/src/adapters/use-cache-handler.js). Every such app on a Redis
+// lands on it, so no app owns the keys under it: the runtime refuses to sweep it
+// (collapseSweepAllowed) and the finalizer refuses to reap it.
+const legacySharedRedisKeyPrefix = "kn-next"
+
 // defaultRedisKeyPrefix is the Redis key prefix of an app that sets no
 // spec.cache.keyPrefix: "kn-" plus the first 12 lowercase hex of
 // sha256("<namespace>/<name>") — the CDN tag prefix's derivation. Without it the
@@ -44,11 +51,14 @@ func cacheIsRedis(app *appsv1alpha1.NextApp) bool {
 // userSetsRedisKeyPrefix reports whether the CR sets REDIS_KEY_PREFIX itself,
 // through spec.env or a spec.secrets.envMap Secret. That value predates the
 // derived default and keeps winning, the way KNEXT_PUBLIC_ORIGINS yields.
+// An EMPTY spec.env value is unset: the runtime reads "" as unset and would fall
+// back to the shared "kn-next", so the derived default is rendered in its place
+// (see dropsEmptyUserRedisKeyPrefix). The CLI's doctor resolves it the same way.
 // (A REDIS_KEY_PREFIX inside an envFrom Secret or baked into the image is
 // invisible here, and the rendered env takes precedence over both: such an app
 // moves to the derived prefix unless it sets spec.cache.keyPrefix.)
 func userSetsRedisKeyPrefix(app *appsv1alpha1.NextApp) bool {
-	if _, ok := app.Spec.Env[redisKeyPrefixEnvName]; ok {
+	if v, ok := app.Spec.Env[redisKeyPrefixEnvName]; ok && v != "" {
 		return true
 	}
 	if app.Spec.Secrets != nil {
@@ -79,12 +89,24 @@ func defaultRedisKeyPrefixEnv(app *appsv1alpha1.NextApp) (corev1.EnvVar, bool) {
 	return corev1.EnvVar{Name: redisKeyPrefixEnvName, Value: defaultRedisKeyPrefix(app)}, true
 }
 
+// dropsEmptyUserRedisKeyPrefix reports whether spec.env[name] is an empty
+// REDIS_KEY_PREFIX that the derived default replaces. appendUserEnv skips it so
+// the pod gets one REDIS_KEY_PREFIX, the derived one, not a duplicate whose
+// winner depends on kubelet's last-wins resolution.
+func dropsEmptyUserRedisKeyPrefix(app *appsv1alpha1.NextApp, name string) bool {
+	return name == redisKeyPrefixEnvName && app.Spec.Env[name] == "" && rendersDefaultRedisKeyPrefix(app)
+}
+
 // operatorRedisKeyPrefix is the keyspace the operator owns for this app: the
 // explicit spec.cache.keyPrefix, or the derived default when it renders it.
-// Empty when the operator owns none (no Redis cache, or a user-set env prefix).
-// The finalizer reaps exactly this keyspace on delete.
+// Empty when the operator owns none: no Redis cache, a user-set env prefix, or
+// an explicit keyPrefix of the shared fallback "kn-next" (other apps' keys live
+// there too). The finalizer reaps exactly this keyspace on delete.
 func operatorRedisKeyPrefix(app *appsv1alpha1.NextApp) string {
 	if !cacheIsRedis(app) {
+		return ""
+	}
+	if app.Spec.Cache.KeyPrefix == legacySharedRedisKeyPrefix {
 		return ""
 	}
 	if app.Spec.Cache.KeyPrefix != "" {

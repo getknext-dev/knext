@@ -475,6 +475,23 @@ whether your cluster's CNI can **enforce** the default-on `NetworkPolicy` the op
 on flannel it cannot (the policy is declarative only), and doctor says so plainly rather than
 guessing; "cannot determine" is reported as its own outcome, never as "enforced".
 
+**Redis key prefixes.** When any `NextApp` uses a Redis cache, doctor compares the apps' key
+prefixes: `cache.keyPrefix`, a `REDIS_KEY_PREFIX` in `env`, or the per-app default the operator
+derives. It `WARN`s, naming the apps, when:
+
+- two apps share a prefix: they read each other's entries, and one app's clean-up deletes the
+  other's cache;
+- one prefix sits inside another's keyspace (`shop` and `shop:cache`), so the outer app's clean-up
+  reaches the inner one;
+- an app is on the shared fallback prefix (keys under `kn-next:*`), even on its own: any app with no
+  prefix lands there too, so that keyspace is never cleared after an outage and its stale entries
+  stay until they expire.
+
+The row never fails, because two apps can point at different Redis servers, which doctor cannot see.
+A prefix that comes from a Secret (`secrets.envMap`) cannot be read, so doctor names the app as not
+verified. No row appears when no app uses Redis. See
+[each app has its own Redis keyspace](/docs/isr-caching#key-prefix).
+
 A few checks are **local** — they read files in the directory you run `knext doctor` from and
 never touch the cluster, so they still run even when nothing above is reachable:
 

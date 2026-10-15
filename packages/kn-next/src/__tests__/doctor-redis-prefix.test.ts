@@ -144,6 +144,26 @@ describe("doctor: Redis key prefixes", () => {
         expect(row?.detail).toContain("'shop:cache'");
     });
 
+    it("an empty spec.env REDIS_KEY_PREFIX is unset: resolved to the derived default, as the operator renders it (lockstep vector)", () => {
+        // default/shop with REDIS_KEY_PREFIX: "" runs under kn-5be479caf0c0
+        // (redis_key_prefix_test.go, TestRedisKeyPrefix_EmptyUserEnvIsUnset), so
+        // an app that sets that prefix explicitly shares its keyspace.
+        const [row] = redisPrefixCheck(
+            ctxWith([
+                {
+                    name: "shop",
+                    cache: redis(),
+                    env: { REDIS_KEY_PREFIX: "" },
+                },
+                { name: "blog", cache: redis("kn-5be479caf0c0") },
+            ]),
+        );
+        expect(row?.status).toBe("warn");
+        expect(row?.detail).toContain("'kn-5be479caf0c0'");
+        expect(row?.detail).toContain("default/shop");
+        expect(row?.detail).toContain("default/blog");
+    });
+
     it("an envMap REDIS_KEY_PREFIX cannot be read (a Secret): reported as unverified, not as a collision", () => {
         const [row] = redisPrefixCheck(
             ctxWith([

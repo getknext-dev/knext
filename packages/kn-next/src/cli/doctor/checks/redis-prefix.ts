@@ -84,6 +84,10 @@ export function redisPrefixCheck(ctx: CheckContext): CheckResult[] {
         const explicit = item.spec.cache.keyPrefix;
         const fromEnv = item.spec.env?.REDIS_KEY_PREFIX;
         let prefix: string;
+        // An empty value is unset on both, as the operator treats it: an empty
+        // spec.env REDIS_KEY_PREFIX gets the derived default rendered in its
+        // place (userSetsRedisKeyPrefix in the operator), so it must fall
+        // through to that default here rather than count as a prefix of "".
         if (explicit) prefix = explicit;
         else if (fromEnv) prefix = fromEnv;
         else if (item.spec.secrets?.envMap?.REDIS_KEY_PREFIX !== undefined) {

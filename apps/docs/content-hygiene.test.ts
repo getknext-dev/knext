@@ -142,8 +142,12 @@ describe('docs content — no stale `kn-next` command text', () => {
   // `kn-next:` IMMEDIATELY followed by a key character (`kn-next:*`,
   // `kn-next:cache`) is the Redis key prefix knext falls back to, documented on
   // the caching page; it never names the command. A colon followed by a space
-  // (`kn-next: command not found`) still counts as the bare word.
-  const bareKnNextWord = /(?<![\w/])kn-next(?![\w.\-/]|:[^\s`])/;
+  // (`kn-next: command not found`) still counts as the bare word. So does the
+  // VALUE of a `REDIS_KEY_PREFIX` assignment (`REDIS_KEY_PREFIX: 'kn-next'`,
+  // `REDIS_KEY_PREFIX=kn-next`): the caching page pins an app to that shared
+  // prefix to keep its warm cache, and an env value never names the command.
+  const bareKnNextWord =
+    /(?<![\w/])(?<!REDIS_KEY_PREFIX['"]?\s*[:=]\s*['"]?)kn-next(?![\w.\-/]|:[^\s`])/;
   const REMOVAL_PAGES = ['upgrading.mdx', 'versioning.mdx'];
 
   it('never shows `kn-next <verb>` as a command to run, anywhere in the docs', () => {
@@ -179,6 +183,10 @@ describe('docs content — no stale `kn-next` command text', () => {
     expect(bareKnNextWord.test('zsh: kn-next: command not found')).toBe(true);
     expect(bareKnNextWord.test('the prefix `kn-next`')).toBe(true);
     expect(bareKnNextWord.test('under `kn-next:`')).toBe(true);
+    expect(bareKnNextWord.test("env: { REDIS_KEY_PREFIX: 'kn-next' },")).toBe(false);
+    expect(bareKnNextWord.test('REDIS_KEY_PREFIX=kn-next')).toBe(false);
+    expect(bareKnNextWord.test('REDIS_KEY_PREFIX: kn-next or run `kn-next`')).toBe(true);
+    expect(bareKnNextWord.test('PREFIX: kn-next')).toBe(true);
     // The deprecation callout's own bare-alias sentence must not trip the
     // VERB/npx guards (only the bare-word guard is meant to see it, and
     // only to confirm it stays confined to its one page).

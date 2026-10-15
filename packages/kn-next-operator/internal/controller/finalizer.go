@@ -147,9 +147,12 @@ func (r *NextAppReconciler) cleanupExternalState(ctx context.Context, app *appsv
 	}
 
 	// The keyspace the operator rendered for this app: spec.cache.keyPrefix, or
-	// the derived per-app default. Never the shared "kn-next" fallback, and
-	// never a prefix the user set through env (operatorRedisKeyPrefix is empty
-	// then), so this cannot reach another app's keys.
+	// the derived per-app default. operatorRedisKeyPrefix is empty for the
+	// shared fallback "kn-next" (even when spec.cache.keyPrefix names it: every
+	// app without a prefix of its own writes there) and for a prefix the user
+	// set through env, so neither is ever reaped. Two apps that set the same
+	// keyPrefix on purpose still share one keyspace, and deleting either one
+	// reaps both caches; the CLI's doctor warns about that collision.
 	if keyPrefix := operatorRedisKeyPrefix(app); keyPrefix != "" {
 		target := CacheTarget{
 			Provider:  app.Spec.Cache.Provider,
