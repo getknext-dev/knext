@@ -236,6 +236,8 @@ accepted on 2026-10-10** follows it unchanged, keeping its reasons, jev scores a
 `[Superseded by …]` brackets the amendments added. The amendments at the end of this file are the
 change log, with their reasons, options and accepted risks. The consolidation changes no decision.
 If it ever disagrees with an amendment, the amendment governs and this text is the one to fix.
+Where this text omits or disagrees with the 2026-10-10 text on a point no amendment changed, the
+2026-10-10 text governs: the current text is a summary, not a narrowing.
 
 #### D2 current text (consolidated 2026-10-15)
 
@@ -290,7 +292,8 @@ If it ever disagrees with an amendment, the amendment governs and this text is t
     body (ADR-0068 Amendment 2, `foreign_build_body`).
 - Function proto version (Z6, unchanged): part of every Z6 cached read's key. It is passed as an
   explicit argument holding the bound function's served version, which the operator renders beside
-  `<NAME>_SERVICE_URL`.
+  `<NAME>_SERVICE_URL` from the served version Z8 records in `BackendService` status (ADR-0052 D7).
+  The env var name is fixed in Z8's PR, as a CRD/public-API trigger.
 - TTL (unchanged):
   - for `expire > 0`, Redis `EX` = min(entry `expire`, a configurable max, default 24 h);
   - Z6 per-user functions use a generated `cacheLife` with `expire` ≤ 1 h;
@@ -372,7 +375,8 @@ If it ever disagrees with an amendment, the amendment governs and this text is t
 
 **Security** (unchanged).
 - Redis credentials stay in the Secret-backed `REDIS_URL`. The backend adds no endpoint.
-- Z6 keys per-user reads on the verified subject, never the raw token.
+- Z6 keys per-user reads on the verified subject, never the raw token. This backend must not hash
+  anything user-supplied into a shared key on its own.
 - There is no per-process fallback for `'use cache'`.
 - Per-user entries are capped at 1 h.
 
@@ -418,7 +422,7 @@ false on `main`.
 | ISR entries | `<prefix>:cache:<key>`, unchanged |
 | `'use cache'` entries | `<prefix>:uc:<handler>:<cacheKey>`. `<handler>` is `default` or `remote`; `<cacheKey>` is Next's key, stored opaque |
 | Build scoping, `'use cache'` | **Next's key already carries it.** The key's implementation part is `deploymentId \|\| buildId`, or a code hash under the durable-entries flag (`use-cache-wrapper.js:1509-1513`, `:2526-2572`). The handler stores `buildId` for diagnostics only and adds **no** foreign-build miss. A second check would be redundant on the default path, and it would defeat the durable-entries flag, whose purpose is reuse across builds when the code is unchanged |
-| Build scoping, ISR | Unchanged from #2100: a stored `buildId` that differs from this process's is a miss. ISR keys are route paths, which Next does not scope by build |
+| Build scoping, ISR | Unchanged from #2100: a stored `buildId` that differs from this process's is a miss. ISR keys are route paths, which Next does not scope by build. **[Amended by Amendments 2 and 3; see D2 current text.]** |
 | Build id | One resolver: `.next/BUILD_ID` → `KNEXT_BUILD_ID` → `NEXT_DEPLOYMENT_ID`, Next's constant id ignored (the #2100 chain, moved into the shared module) |
 | No build id | ISR: **fail open**, as #2100 does. `'use cache'`: governed by Next's own key, as above. In both cases a one-time warning names the three sources, and `kn-next doctor` reports it |
 | Function proto version (Z6) | **Part of every Z6 cached read's key.** Z6's generated `'use cache'` function takes the bound function's **served** proto version as an explicit argument, so the version lands in the `args` part of Next's key. The operator renders the value into the zone beside `<NAME>_SERVICE_URL`, from the served version Z8 records in `BackendService` status (ADR-0052 D7). The env var name is fixed in Z8's PR, as a CRD/public-API trigger |
@@ -839,6 +843,8 @@ decisions rests on the code or package evidence cited in its D-section, not on t
   Aligning ISR is tech debt, filed as #2122.
 - **Two tag mechanisms.** One `revalidateTag` reaches both through Next's fan-out. A future ISR
   move to timestamp semantics needs its own ADR and a three-step migration.
+- *(These consequences are as written on 2026-10-10; where an amendment changed the rule they rest
+  on, D2 current text is authoritative.)*
 - **No build id → ISR shared across builds.** Images built outside knext with none of the three
   sources can serve an old build's ISR payload to new code. Surfaced by a warning and `doctor`; jev's
   confidence here was medium (0.66).
