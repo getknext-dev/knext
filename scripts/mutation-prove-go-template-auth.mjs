@@ -14,7 +14,7 @@
  *       verifier error, admitting with no JWKS or with a JWKS but no
  *       verifier, dropping the nil-verifier fallback, loosening the bearer
  *       parse — each must RED.
- *   W*  the binary's wiring (internal/server/server.go): the interceptor left
+ *   W*  the binary's wiring (internal/rpc/rpc.go): the interceptor left
  *       out of the chain must RED (the on-the-wire scan of every registered
  *       procedure catches it).
  *   N*  negative control: New wired with a nil verifier is still closed, so
@@ -47,10 +47,20 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 // `resolve(REPO_ROOT, …)` subject shape the anchor scanners read.
 const TEMPLATE_MODULE = `${REPO_ROOT}/templates/go`;
 const AUTH = resolve(REPO_ROOT, 'templates/go/internal/auth/auth.go');
-const SERVER = resolve(REPO_ROOT, 'templates/go/internal/server/server.go');
+const SERVER = resolve(REPO_ROOT, 'templates/go/internal/rpc/rpc.go');
 
-// -count=1: never trust a cached pass for a mutated tree.
-const GO_TEST = ['go', 'test', '-count=1', './internal/auth/', './internal/server/'];
+// -count=1: never trust a cached pass for a mutated tree. -timeout: a
+// mutation that HANGS a test (a wrongly served stream) is a red exit from
+// go test itself, well inside the spawn timeout below.
+const GO_TEST = [
+  'go',
+  'test',
+  '-count=1',
+  '-timeout',
+  '180s',
+  './internal/auth/',
+  './internal/rpc/',
+];
 
 const MUTATIONS = [
   // ── A: the interceptor and the verifier ───────────────────────────────────
@@ -158,6 +168,8 @@ const MUTATIONS = [
 
 const PROVER = { subjects: { auth: AUTH, server: SERVER } };
 
+// Returns go test's exit code, or null if go could not be run. Never exits
+// here: a caller holding a mutation must restore it first.
 function goTestExit() {
   const [bin, ...args] = GO_TEST;
   const r = spawnSync(bin, args, {
@@ -170,7 +182,7 @@ function goTestExit() {
     console.error(
       `mutation-prove-go-template-auth: cannot run ${bin}: ${r.error?.message ?? r.signal}`,
     );
-    process.exit(2);
+    return null;
   }
   return r.status;
 }
@@ -197,6 +209,7 @@ for (const m of MUTATIONS) {
 // Green baseline on a clean tree, else every verdict below is noise.
 assertTreeClean(REPO_ROOT, 'baseline');
 const base = goTestExit();
+if (base === null) process.exit(2);
 if (base !== 0) {
   console.error(`mutation-prove-go-template-auth: baseline RED (exit ${base}); fix the tree first`);
   process.exit(2);
@@ -215,6 +228,7 @@ for (const m of MUTATIONS) {
     restore(snap);
   }
   assertTreeClean(REPO_ROOT, `after ${m.id}`);
+  if (code === null) process.exit(2);
   recordMutation();
   const ok = m.expect === 'red' ? code !== 0 : code === 0;
   if (!ok) failed++;

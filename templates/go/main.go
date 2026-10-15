@@ -16,7 +16,7 @@ import (
 	"syscall"
 
 	"example.com/function/internal/auth"
-	"example.com/function/internal/server"
+	"example.com/function/internal/rpc"
 )
 
 func main() {
@@ -29,7 +29,7 @@ func main() {
 }
 
 func run(logger *slog.Logger) error {
-	fn, err := server.New(server.Config{
+	fn, err := rpc.New(rpc.Config{
 		Addr:     listenAddr(os.Getenv),
 		JWKSPath: auth.DefaultJWKSPath,
 		Logger:   logger,

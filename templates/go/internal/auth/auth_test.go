@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect/v2"
 	"connectrpc.com/connect/v2/connectinprocess"
@@ -171,7 +172,11 @@ func TestEveryRegisteredProcedureExceptHealthCheckIsRefused(t *testing.T) {
 				info.RequestHeader().Set("Authorization", header)
 			}
 			spy := &payloadSpy{}
-			err := server.Call(t.Context(), spec.Procedure, info, spy)
+			// Bounded: a procedure that is wrongly SERVED may stream forever
+			// (health Watch does), and that must red, not hang the suite.
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			err := server.Call(ctx, spec.Procedure, info, spy)
+			cancel()
 			wantUnauthenticated(t, spec.Procedure+" with Authorization "+strconv.Quote(header), err)
 			if n := spy.reads.Load(); n != 0 {
 				t.Errorf("%s: the payload was read %d time(s) before the call was refused", spec.Procedure, n)

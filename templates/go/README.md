@@ -17,7 +17,7 @@ other RPC is refused with `unauthenticated` — and, until zone-token verificati
 | `gen/` | `buf generate` output, committed; CI regenerates and fails on a diff |
 | `internal/auth` | the token interceptor and the JWKS verifier seam |
 | `internal/items` | the example service's handlers — replace with yours |
-| `internal/server` | the connect server, interceptor chain (OTel, recovery, auth), health, h2c HTTP server |
+| `internal/rpc` | the connect server, interceptor chain (OTel, recovery, auth), health, h2c HTTP server |
 | `main.go` | `$PORT` (default 8080), `SIGTERM` drain |
 | `Dockerfile` | digest-pinned `golang` builder and distroless `static:nonroot` runtime |
 | `e2e/` | kind e2e: the image as a cluster-local Knative Service (test harness only) |
