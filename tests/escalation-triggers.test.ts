@@ -1342,6 +1342,14 @@ describe('#2388 r4 — a path a credential workflow invokes is an edge wherever 
     expectFollowed(r, 'tools/d.mjs');
   });
 
+  it('…and the round-2 rule still holds in it: a scripts/ path it only NAMES is followed', () => {
+    const r = r4('bash deploy/a.sh', {
+      'deploy/a.sh': 'run_node() { node "$1"; }\nrun_node scripts/lib/helper.mjs\n',
+      'scripts/lib/helper.mjs': '',
+    });
+    expectFollowed(r, 'scripts/lib/helper.mjs');
+  });
+
   it('…including the fail-closed gaps: a non-literal source in it fails closed, for any .sh', () => {
     const r = r4('bash deploy/a.sh', { 'deploy/a.sh': '. "$(dirname "$0")/lib.sh"\n' });
     expectGap(r, /source/);
