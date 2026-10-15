@@ -233,7 +233,8 @@ independent parallel PRs 0.00 (confidence 0.75).
 D2 has two parts. **D2 current text** below is the decision as it stands. It was consolidated on
 2026-10-15 at the v2 Sprint 4 close design review (#2386) by folding in Amendments 2–5. **D2 as
 accepted on 2026-10-10** follows it unchanged, keeping its reasons, jev scores and the
-`[Superseded by …]` brackets the amendments added. The amendments at the end of this file are the
+`[Superseded by …]` brackets the amendments added (plus one pointer bracket added by this
+consolidation). The amendments at the end of this file are the
 change log, with their reasons, options and accepted risks. The consolidation changes no decision.
 If it ever disagrees with an amendment, the amendment governs and this text is the one to fix.
 Where this text omits or disagrees with the 2026-10-10 text on a point no amendment changed, the
@@ -822,7 +823,7 @@ decisions rests on the code or package evidence cited in its D-section, not on t
 ## Consequences
 
 These consequences are as written on 2026-10-10. Where an amendment changed the rule one rests
-on, D2 current text is authoritative.
+on, the amendment governs; for D2, read D2 current text.
 
 **Positive**
 - Each surface is edited once, against its final Next floor. `cache-handler.js` gets #2100, then the
