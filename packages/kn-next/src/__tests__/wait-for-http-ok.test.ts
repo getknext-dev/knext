@@ -90,6 +90,37 @@ describe("waitForHttpOk", () => {
         expect(Date.now() - t0).toBeLessThan(2000);
     });
 
+    it("at the deadline, says the server process is still running (slow, not crashed)", async () => {
+        const err = await rejection(
+            waitForHttpOk("http://127.0.0.1:1/", {
+                intervalMs: 10,
+                deadlineMs: 200,
+                exited: () => null,
+            }),
+        );
+        expect(err?.message).toContain("server process still running");
+        expect(err?.message).not.toContain("exited");
+    });
+
+    it("at the deadline, reports an exit that happened during the last probe (crash, not slow)", async () => {
+        // A probe that hangs until the deadline: the process dies after the
+        // loop's last exit check but before the deadline is judged, so the
+        // error must name the exit rather than call the server slow.
+        const url = listen(() => new Promise<Response>(() => {}) as never);
+        const t0 = Date.now();
+        const err = await rejection(
+            waitForHttpOk(url, {
+                intervalMs: 10,
+                deadlineMs: 300,
+                exited: () =>
+                    Date.now() - t0 >= 100 ? "code=7 signal=null" : null,
+            }),
+        );
+        expect(err?.message).toContain("server exited before ready");
+        expect(err?.message).toContain("code=7");
+        expect(err?.message).not.toContain("still running");
+    });
+
     it("reports connection errors when the server never listens", async () => {
         const err = await rejection(
             waitForHttpOk("http://127.0.0.1:1/", {
