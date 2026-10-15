@@ -16,6 +16,10 @@ import (
 	"testing"
 	"time"
 
+	"connectrpc.com/connect/v2"
+	"connectrpc.com/connect/v2/connecthttp"
+	"connectrpc.com/grpchealth/v2"
+
 	"example.com/function/internal/auth"
 )
 
@@ -367,5 +371,41 @@ func TestInFlightCallSurvivesShutdown(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("Serve did not return within 10s of the drained call")
+	}
+}
+
+// ReadTimeout bounds the request body, not the call: once the body is read, a
+// call may outlive ReadTimeout, over HTTP/1.1 as over h2c (the docs say so). A
+// health Watch holds its stream open past the timeout.
+func TestReadTimeoutBoundsTheBodyNotTheCall(t *testing.T) {
+	for _, p := range []protocol{
+		{"grpc-web over HTTP/1.1", http1Client(), []connecthttp.Option{connecthttp.WithGRPCWeb()}},
+		{"connect over HTTP/1.1", http1Client(), nil},
+		{"grpc over h2c", h2cClient(), []connecthttp.Option{connecthttp.WithGRPC()}},
+	} {
+		t.Run(p.name, func(t *testing.T) {
+			f, err := newFunction(Config{JWKSPath: absentJWKS(t)}, acceptOnly("good"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.HTTP.ReadTimeout = 300 * time.Millisecond
+			base := serve(t, f)
+			health := grpchealth.NewClient(connect.NewClient(connecthttp.NewTransport(p.client, base, p.opts...)))
+			ctx, cancel := context.WithCancel(bearer(t, "good"))
+			defer cancel()
+
+			events := health.Watch(ctx, &grpchealth.CheckRequest{})
+			first, ok := <-events
+			if !ok || first.Err != nil || first.Response == nil || first.Response.Status != grpchealth.StatusServing {
+				t.Fatalf("health Watch first event = %+v (open %v); want SERVING", first, ok)
+			}
+			start := time.Now()
+			select {
+			case ev, ok := <-events:
+				t.Fatalf("the Watch stream ended %v after its first event (event %+v, open %v); want it open past the %v ReadTimeout",
+					time.Since(start), ev, ok, f.HTTP.ReadTimeout)
+			case <-time.After(5 * f.HTTP.ReadTimeout):
+			}
+		})
 	}
 }

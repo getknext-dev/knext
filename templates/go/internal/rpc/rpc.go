@@ -37,9 +37,8 @@ const MaxRequestBytes = 4 << 20
 const MaxRequestBodyBytes = MaxRequestBytes + 64<<10
 
 // The HTTP server's timeouts. ReadTimeout cuts off a request body that stops
-// arriving. Over HTTP/1.1 it also bounds the whole call (net/http cancels the
-// call's context once the connection's read deadline passes); over h2c, the
-// zone's transport, it bounds only the body.
+// arriving; it bounds only the body, over h2c and HTTP/1.1 alike (net/http
+// lifts the read deadline once the body is read), so a call may run longer.
 const (
 	ReadHeaderTimeout = 10 * time.Second
 	ReadTimeout       = 30 * time.Second

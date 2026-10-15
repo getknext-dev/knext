@@ -27,8 +27,8 @@ starts from.
 - **Panic recovery**: a panicking handler returns `internal` and the process keeps running.
 - **Request limits**: 4 MiB per request message, as sent and once decompressed, so a small
   gzip body cannot inflate into gigabytes. A longer request body is cut off rather than read to
-  the end, and a body that stops arriving is cut off after 30 seconds. Over HTTP/1.1 those
-  30 seconds bound the whole call; over h2c they bound only the request body.
+  the end, and a request body that stops arriving is cut off after 30 seconds. That limit is on
+  sending the request, not on the call: a handler may take longer.
 - **Graceful shutdown**: on `SIGTERM` in-flight calls get up to 25 seconds to finish.
 - **A distroless image**: a static binary, no shell, running as a non-root user.
 
