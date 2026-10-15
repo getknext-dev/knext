@@ -64,6 +64,9 @@ export const ACK_BODY_PATTERN = /Escalation trigger acknowledged:/i;
  * measured that — so precision here is not fussiness, it is what keeps the guard
  * trusted enough to be obeyed.
  */
+const SUPPLY_CHAIN_WHY =
+  'changes the supply chain — a security invariant (security.md): credentials, scan allowlists, SBOM/audit, or what a credential-bearing workflow runs';
+
 export const TRIGGERS = [
   {
     id: 'adr',
@@ -79,9 +82,13 @@ export const TRIGGERS = [
   },
   {
     id: 'crd',
-    label: 'the NextApp CRD',
-    match: (p) => p === 'packages/kn-next-operator/api/v1alpha1/nextapp_types.go',
-    why: 'changes the CRD type, which is the operator/CLI compatibility surface (upgrade order is load-bearing: operator/CRD first, then CLI)',
+    label: 'a CRD type',
+    // SCANNED, not enumerated (#2388): every `*_types.go` under any `api/` tree. It
+    // used to name `nextapp_types.go` alone, so a second API group (platform) and any
+    // NEW types file — the Z8 case — changed a CRD without firing. Adding counts too:
+    // a new CRD is new operator/CLI compatibility surface.
+    match: (p) => CRD_TYPES.test(p),
+    why: 'changes a CRD type, which is the operator/CLI compatibility surface (upgrade order is load-bearing: operator/CRD first, then CLI)',
   },
   {
     id: 'config-schema',
@@ -92,12 +99,187 @@ export const TRIGGERS = [
   {
     id: 'cli-surface',
     label: 'the CLI surface',
-    match: (p) => p.startsWith('packages/kn-next/src/cli/'),
-    why: 'changes the CLI, which is the published entry point (`kn-next`)',
+    // Every package's CLI, not only core's (#2388): `@getknext/grpc` and
+    // `@getknext/ffi` ship their own verbs from `src/cli.ts`.
+    match: (p) => CLI_SURFACE.test(p) && !isTestPath(p),
+    why: 'changes a CLI, which is a published entry point (`knext` and its package verbs)',
+  },
+  {
+    id: 'crates',
+    label: 'the Rust crates',
+    // Everything under the root `crates/` (#2388): source, Cargo.lock, deny.toml and
+    // the toolchain pin are all both public FFI surface and supply chain.
+    match: (p) => p.startsWith('crates/'),
+    why: 'changes the Rust crates — FFI surface and the cargo supply chain (lockfile, deny policy, toolchain pin)',
+  },
+  {
+    id: 'supply-chain',
+    label: 'the supply chain',
+    // The path-only half of the supply-chain trigger (#2388). The content half —
+    // credential-bearing workflows and what they run — is in `classifyContent`.
+    match: (p) => isStaticSupplyChainPath(p),
+    why: SUPPLY_CHAIN_WHY,
   },
 ];
 
-/** Parse `git diff --name-status` output into {status, path} records. */
+/** Any `*_types.go` under an `api/` directory, at any depth. */
+const CRD_TYPES = /(^|\/)api\/(.+\/)?[^/]+_types\.go$/;
+
+/** `packages/<pkg>/src/cli.ts` or anything under `packages/<pkg>/src/cli/`. */
+const CLI_SURFACE = /^packages\/[^/]+\/src\/(cli\.[cm]?[jt]s|cli\/.+)$/;
+
+function isTestPath(p) {
+  return /(^|\/)__tests__\//.test(p) || /\.(test|spec)\.[cm]?[jt]sx?$/.test(p);
+}
+
+/** Supply-chain paths that need no content to recognise. */
+export function isStaticSupplyChainPath(p) {
+  if (p.startsWith('security/')) return true;
+  if (p === 'scripts/audit-published.mjs') return true;
+  // `packages/ffi/src/supply-chain.ts` today; any package's supply-chain module.
+  return /^packages\/[^/]+\/src\/(.+\/)?supply-chain\.[cm]?[jt]s$/.test(p) && !isTestPath(p);
+}
+
+/**
+ * Secrets that do NOT make a workflow credential-bearing for this check. Kept to a
+ * named, justified minimum — everything else that is a `secrets.*` reference fires:
+ *   - GITHUB_TOKEN: per-run, repo-scoped, and in every workflow; its scope is the
+ *     `permissions:` block, which `release-action-pins.test.ts` already polices.
+ *   - CODECOV_TOKEN: an upload-only coverage token referenced by `ci.yml`. Counting it
+ *     would make every `ci.yml` edit (8% of commits, measured) trigger-class — a guard
+ *     that cries wolf. Adding any OTHER secret to `ci.yml` still fires.
+ */
+export const LOW_PRIVILEGE_SECRETS = new Set(['GITHUB_TOKEN', 'CODECOV_TOKEN']);
+
+/**
+ * Does this workflow put a credential in scope? Scanned as text, so it cannot be
+ * defeated by a YAML shape the scanner does not model: any `secrets.<NAME>` other than
+ * the low-privilege set, any `secrets[...]` index expression (name unknowable → fail
+ * closed), or `id-token: write` (OIDC federation / keyless signing).
+ */
+export function workflowHoldsCredential(text) {
+  if (/id-token\s*:\s*['"]?write/.test(text)) return true;
+  if (/secrets\s*\[/.test(text)) return true;
+  for (const m of text.matchAll(/secrets\.([A-Za-z0-9_-]+)/g)) {
+    if (!LOW_PRIVILEGE_SECRETS.has(m[1])) return true;
+  }
+  return false;
+}
+
+/**
+ * Repo paths a workflow mentions under `scripts/` or `.github/actions/` — what it
+ * runs. Comment mentions count too (conservative); trailing prose punctuation is
+ * stripped so `scripts/a.mjs.` at the end of a sentence still resolves.
+ */
+export function referencedPaths(text) {
+  const out = [];
+  for (const m of text.matchAll(
+    /(?:^|[^A-Za-z0-9_./-])(?:\.\/)?((?:scripts|\.github\/actions)\/[A-Za-z0-9_./-]+)/g,
+  )) {
+    const p = m[1].replace(/[.,;:]+$/, '');
+    if (!out.includes(p)) out.push(p);
+  }
+  return out;
+}
+
+const WORKFLOW = /^\.github\/workflows\/[^/]+\.ya?ml$/;
+const PACKAGE_MANIFEST = /^packages\/[^/]+\/package\.json$/;
+
+/**
+ * The content-dependent triggers (#2388): every package's public manifest surface,
+ * credential-bearing workflows, and the scripts/local actions those workflows run.
+ *
+ * `repo.show(side, path)` returns the file text on `'base'`/`'head'`, or null when the
+ * file is absent on that side. `repo.listHead(prefix)` lists head paths under a prefix.
+ * Pure given the reader — the tests drive it with a fake.
+ */
+export function classifyContent(changes, repo) {
+  const fired = [];
+
+  const manifestHits = [];
+  let unparseable = false;
+  for (const c of changes.filter((x) => PACKAGE_MANIFEST.test(x.path))) {
+    const before = parseManifest(repo.show('base', c.path));
+    const after = parseManifest(repo.show('head', c.path));
+    if (before === UNPARSEABLE || after === UNPARSEABLE) {
+      // Fail closed: a manifest we cannot read cannot be proven surface-neutral.
+      unparseable = true;
+      manifestHits.push(c.path);
+    } else if (publicSurfaceChanged(before, after)) {
+      manifestHits.push(c.path);
+    }
+  }
+  if (manifestHits.length > 0) {
+    fired.push({
+      id: 'public-api',
+      label: 'the published package surface',
+      why:
+        `changes ${PUBLIC_MANIFEST_KEYS.join('/')} in a package manifest — what consumers can import or run` +
+        (unparseable ? ' (a manifest is UNPARSEABLE, so it cannot be proven unchanged)' : ''),
+      paths: manifestHits,
+    });
+  }
+
+  const credentialWorkflows = repo
+    .listHead('.github/workflows/')
+    .filter((p) => WORKFLOW.test(p))
+    .map((p) => repo.show('head', p))
+    .filter((text) => text !== null && workflowHoldsCredential(text));
+  const runByCredential = new Set(credentialWorkflows.flatMap(referencedPaths));
+  const runs = (p) =>
+    runByCredential.has(p) ||
+    [...runByCredential].some((r) => r.startsWith('.github/actions/') && p.startsWith(`${r}/`));
+
+  const supplyHits = [];
+  for (const c of changes) {
+    if (WORKFLOW.test(c.path)) {
+      const sides = [repo.show('base', c.path), repo.show('head', c.path)];
+      if (sides.some((t) => t !== null && workflowHoldsCredential(t))) supplyHits.push(c.path);
+    } else if (runs(c.path)) {
+      supplyHits.push(c.path);
+    }
+  }
+  if (supplyHits.length > 0) {
+    fired.push({
+      id: 'supply-chain',
+      label: 'the supply chain',
+      why: SUPPLY_CHAIN_WHY,
+      paths: supplyHits,
+    });
+  }
+
+  return fired;
+}
+
+const UNPARSEABLE = Symbol('unparseable');
+function parseManifest(text) {
+  if (text === null) return null; // absent on that side is a legitimate answer
+  try {
+    return JSON.parse(text);
+  } catch {
+    return UNPARSEABLE;
+  }
+}
+
+/** Merge content-derived triggers into path-derived ones, one entry per id. */
+export function mergeFired(a, b) {
+  const out = a.map((f) => ({ ...f, paths: [...f.paths] }));
+  for (const f of b) {
+    const existing = out.find((x) => x.id === f.id);
+    if (!existing) out.push({ ...f, paths: [...f.paths] });
+    else for (const p of f.paths) if (!existing.paths.includes(p)) existing.paths.push(p);
+  }
+  return out;
+}
+
+/** Every status letter `git diff --name-status` can emit. */
+const GIT_STATUSES = new Set(['A', 'B', 'C', 'D', 'M', 'R', 'T', 'U', 'X']);
+
+/**
+ * Parse `git diff --name-status` output into {status, path} records. Unknown input
+ * THROWS (#2388): a line this parser does not understand must fail the check, not be
+ * silently classified as "nothing to see".
+ */
 export function parseNameStatus(text) {
   return text
     .split('\n')
@@ -105,8 +287,13 @@ export function parseNameStatus(text) {
     .filter(Boolean)
     .map((l) => {
       const [status, ...rest] = l.split('\t');
+      if (!GIT_STATUSES.has(status[0])) {
+        throw new Error(`unknown git name-status "${status}" in line: ${l}`);
+      }
       // rename/copy lines carry two paths; the DESTINATION is what matters here
-      return { status: status[0], path: rest[rest.length - 1] };
+      const path = rest[rest.length - 1];
+      if (!path) throw new Error(`name-status line has no path: ${l}`);
+      return { status: status[0], path };
     });
 }
 
@@ -155,12 +342,28 @@ function git(args) {
   return execFileSync('git', args, { encoding: 'utf8' });
 }
 
-function showJson(ref, path) {
-  try {
-    return JSON.parse(git(['show', `${ref}:${path}`]));
-  } catch {
-    return null; // absent on that side is a legitimate answer
-  }
+/**
+ * A repo reader over two refs. Absence is decided by `cat-file -e` — a legitimate
+ * answer — and anything else that fails to read THROWS, so a git error cannot be
+ * mistaken for "file absent, nothing changed" (#2388: fail rather than pass).
+ */
+function gitReader(baseRef, headRef) {
+  const refs = { base: baseRef, head: headRef };
+  return {
+    show(side, path) {
+      try {
+        execFileSync('git', ['cat-file', '-e', `${refs[side]}:${path}`], { stdio: 'ignore' });
+      } catch {
+        return null;
+      }
+      return git(['show', `${refs[side]}:${path}`]);
+    },
+    listHead(prefix) {
+      return git(['ls-tree', '-r', '--name-only', headRef, '--', prefix])
+        .split('\n')
+        .filter(Boolean);
+    },
+  };
 }
 
 /**
@@ -201,20 +404,11 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   }
 
   const changes = parseNameStatus(git(['diff', '--name-status', `${base}...${head}`]));
-  const fired = classify(changes);
-
-  // The public-API trigger needs content, not just a path.
-  const MANIFEST = 'packages/kn-next/package.json';
-  if (changes.some((c) => c.path === MANIFEST)) {
-    if (publicSurfaceChanged(showJson(base, MANIFEST), showJson(head, MANIFEST))) {
-      fired.push({
-        id: 'public-api',
-        label: 'the published package surface',
-        why: `changes ${PUBLIC_MANIFEST_KEYS.join('/')} in ${MANIFEST} — what consumers can import`,
-        paths: [MANIFEST],
-      });
-    }
-  }
+  // The diff is three-dot (against the merge base), so the "before" side of a
+  // content comparison is the merge base too, not the tip of `base`.
+  const mergeBase = git(['merge-base', base, head]).trim();
+  // The public-API and credential-workflow triggers need content, not just a path.
+  const fired = mergeFired(classify(changes), classifyContent(changes, gitReader(mergeBase, head)));
 
   const labels = (arg('labels', '') || '').split(',').filter(Boolean);
   const body = arg('body', '') || '';

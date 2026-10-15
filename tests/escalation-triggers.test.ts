@@ -6,10 +6,13 @@ import {
   ACK_BODY_PATTERN,
   ACK_LABEL,
   classify,
+  classifyContent,
   isAcknowledged,
   LEGACY_ACK_LABEL,
   parseNameStatus,
   publicSurfaceChanged,
+  referencedPaths,
+  workflowHoldsCredential,
 } from '../scripts/check-escalation-triggers.mjs';
 
 const WORKFLOW_PATH = resolve(import.meta.dirname, '../.github/workflows/escalation-triggers.yml');
@@ -252,5 +255,287 @@ describe('escalation-triggers.yml — the workflow actually re-runs on a body ed
     // cancel-in-progress must be scoped to pull_request — a cancelled merge_group
     // run never reports its required context and hangs the queue.
     expect(String(concurrency['cancel-in-progress'])).toContain("event_name == 'pull_request'");
+  });
+});
+/**
+ * #2388 — the scope the Sprint 4 close review found missing. Each new rule gets a
+ * case that proves it fires and a near miss that proves it does not.
+ */
+const ids = (fired: { id: string }[]) => fired.map((f) => f.id);
+
+describe('#2388 — every CRD types file, not only nextapp_types.go', () => {
+  it('a second API group types file fires', () => {
+    expect(
+      ids(
+        classify([
+          change('packages/kn-next-operator/api/platform/v1alpha1/knextplatform_types.go'),
+        ]),
+      ),
+    ).toContain('crd');
+  });
+
+  it('a NEW types file (the Z8 case) fires on add', () => {
+    expect(
+      ids(classify([change('packages/kn-next-operator/api/v1alpha2/zone_types.go', 'A')])),
+    ).toContain('crd');
+  });
+
+  it('near miss: generated deepcopy, types tests and non-api types files do not fire', () => {
+    expect(
+      classify([
+        change('packages/kn-next-operator/api/v1alpha1/zz_generated.deepcopy.go'),
+        change('packages/kn-next-operator/api/v1alpha1/nextapp_types_test.go'),
+        change('packages/kn-next-operator/internal/controller/status_types.go'),
+      ]),
+    ).toHaveLength(0);
+  });
+});
+
+describe('#2388 — every package CLI surface', () => {
+  it('packages/*/src/cli.ts fires', () => {
+    expect(ids(classify([change('packages/grpc/src/cli.ts')]))).toContain('cli-surface');
+    expect(ids(classify([change('packages/ffi/src/cli.ts')]))).toContain('cli-surface');
+  });
+
+  it('packages/*/src/cli/** fires for a package other than core', () => {
+    expect(ids(classify([change('packages/ffi/src/cli/generate.ts', 'A')]))).toContain(
+      'cli-surface',
+    );
+  });
+
+  it('near miss: files merely named like cli elsewhere do not fire', () => {
+    expect(
+      classify([
+        change('packages/grpc/src/client.ts'),
+        change('packages/grpc/src/__tests__/cli.test.ts'),
+        change('apps/file-manager/src/cli.ts'),
+      ]),
+    ).toHaveLength(0);
+  });
+});
+
+describe('#2388 — Rust crates', () => {
+  it('anything under crates/ fires', () => {
+    expect(ids(classify([change('crates/knext-ffi/src/lib.rs')]))).toContain('crates');
+    expect(ids(classify([change('crates/deny.toml')]))).toContain('crates');
+  });
+
+  it('near miss: a crates-like name outside the root crates/ does not fire', () => {
+    expect(
+      classify([change('docs/crates/overview.md'), change('packages/ffi/crates.ts')]),
+    ).toHaveLength(0);
+  });
+});
+
+describe('#2388 — static supply-chain paths', () => {
+  it('security/** fires', () => {
+    expect(ids(classify([change('security/npm-audit-allowlist.json')]))).toContain('supply-chain');
+  });
+
+  it('a package supply-chain module fires', () => {
+    expect(ids(classify([change('packages/ffi/src/supply-chain.ts')]))).toContain('supply-chain');
+  });
+
+  it('scripts/audit-published.mjs fires', () => {
+    expect(ids(classify([change('scripts/audit-published.mjs')]))).toContain('supply-chain');
+  });
+
+  it('near miss: docs/security and supply-chain TESTS do not fire', () => {
+    expect(
+      classify([
+        change('docs/security/threat-model.md'),
+        change('packages/ffi/src/__tests__/supply-chain.test.ts'),
+      ]),
+    ).toHaveLength(0);
+  });
+});
+
+/** A fake repo reader: `files[side][path]` is the content; absent = null. */
+function reader(files: { base?: Record<string, string>; head?: Record<string, string> }) {
+  return {
+    show: (side: 'base' | 'head', path: string) => files[side]?.[path] ?? null,
+    listHead: (prefix: string) => Object.keys(files.head ?? {}).filter((p) => p.startsWith(prefix)),
+  };
+}
+
+const CRED_WF =
+  'on: push\npermissions:\n  id-token: write\njobs:\n  a:\n    steps:\n' +
+  '      - run: node scripts/pack-release-tarballs.mjs\n' +
+  '      - uses: ./.github/actions/docker-hub-mirror\n';
+const SECRET_WF = 'env:\n  NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}\n';
+const PLAIN_WF =
+  'on: pull_request\njobs:\n  a:\n    steps:\n      - run: node scripts/check-thing.mjs\n';
+const CODECOV_WF =
+  'env:\n  CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}\n  GH: ${{ secrets.GITHUB_TOKEN }}\n';
+const sc = (fired: { id: string; paths: string[] }[]) =>
+  fired.find((f) => f.id === 'supply-chain')?.paths;
+
+describe('#2388 — credential-bearing workflows (scanned, not enumerated)', () => {
+  it('detects a non-GITHUB_TOKEN secret and id-token: write', () => {
+    expect(workflowHoldsCredential(SECRET_WF)).toBe(true);
+    expect(workflowHoldsCredential(CRED_WF)).toBe(true);
+    expect(workflowHoldsCredential('x: ${{ secrets[format("{0}", "NPM_TOKEN")] }}')).toBe(true);
+  });
+
+  it('near miss: GITHUB_TOKEN and the upload-only CODECOV_TOKEN are not credentials here', () => {
+    expect(workflowHoldsCredential(CODECOV_WF)).toBe(false);
+    expect(workflowHoldsCredential(PLAIN_WF)).toBe(false);
+  });
+
+  it('editing a credential-bearing workflow fires', () => {
+    const r = reader({
+      base: { '.github/workflows/release.yml': SECRET_WF },
+      head: { '.github/workflows/release.yml': `${SECRET_WF}# edit\n` },
+    });
+    expect(sc(classifyContent([change('.github/workflows/release.yml')], r))).toEqual([
+      '.github/workflows/release.yml',
+    ]);
+  });
+
+  it('ADDING a secret to a previously plain workflow fires (head side counts)', () => {
+    const r = reader({
+      base: { '.github/workflows/ci.yml': CODECOV_WF },
+      head: { '.github/workflows/ci.yml': `${CODECOV_WF}${SECRET_WF}` },
+    });
+    expect(sc(classifyContent([change('.github/workflows/ci.yml')], r))).toEqual([
+      '.github/workflows/ci.yml',
+    ]);
+  });
+
+  it('DELETING a credential-bearing workflow fires (base side counts)', () => {
+    const r = reader({ base: { '.github/workflows/supply-chain.yml': CRED_WF }, head: {} });
+    expect(sc(classifyContent([change('.github/workflows/supply-chain.yml', 'D')], r))).toEqual([
+      '.github/workflows/supply-chain.yml',
+    ]);
+  });
+
+  it('near miss: editing a plain workflow does not fire', () => {
+    const r = reader({
+      base: { '.github/workflows/ci.yml': CODECOV_WF },
+      head: { '.github/workflows/ci.yml': `${CODECOV_WF}# edit\n` },
+    });
+    expect(classifyContent([change('.github/workflows/ci.yml')], r)).toHaveLength(0);
+  });
+
+  it('a script or local action a credential-bearing workflow runs is supply chain', () => {
+    const r = reader({
+      head: {
+        '.github/workflows/release.yml': CRED_WF,
+        '.github/workflows/lint.yml': PLAIN_WF,
+      },
+    });
+    const fired = classifyContent(
+      [
+        change('scripts/pack-release-tarballs.mjs'),
+        change('.github/actions/docker-hub-mirror/action.yml'),
+      ],
+      r,
+    );
+    expect(sc(fired)).toEqual([
+      'scripts/pack-release-tarballs.mjs',
+      '.github/actions/docker-hub-mirror/action.yml',
+    ]);
+  });
+
+  it('near miss: a script only a plain workflow runs does not fire', () => {
+    const r = reader({
+      head: {
+        '.github/workflows/release.yml': CRED_WF,
+        '.github/workflows/lint.yml': PLAIN_WF,
+      },
+    });
+    expect(classifyContent([change('scripts/check-thing.mjs')], r)).toHaveLength(0);
+  });
+
+  it('referencedPaths strips trailing prose punctuation from comment mentions', () => {
+    expect(referencedPaths('# see scripts/lib/a.mjs. and ./scripts/b.mjs,')).toEqual([
+      'scripts/lib/a.mjs',
+      'scripts/b.mjs',
+    ]);
+  });
+});
+
+describe('#2388 — public surface of EVERY packages/*/package.json', () => {
+  const pkg = (o: Record<string, unknown>) => JSON.stringify({ name: 'x', version: '0.1.0', ...o });
+  const api = (fired: { id: string; paths: string[] }[]) =>
+    fired.find((f) => f.id === 'public-api')?.paths;
+
+  it('a private Beta package adding an export fires', () => {
+    const r = reader({
+      base: { 'packages/ffi/package.json': pkg({ private: true, exports: { '.': './a.js' } }) },
+      head: {
+        'packages/ffi/package.json': pkg({
+          private: true,
+          exports: { '.': './a.js', './render': './r.js' },
+        }),
+      },
+    });
+    expect(api(classifyContent([change('packages/ffi/package.json')], r))).toEqual([
+      'packages/ffi/package.json',
+    ]);
+  });
+
+  it('a NEW package with a bin fires', () => {
+    const r = reader({ head: { 'packages/new/package.json': pkg({ bin: { x: './x.js' } }) } });
+    expect(api(classifyContent([change('packages/new/package.json', 'A')], r))).toEqual([
+      'packages/new/package.json',
+    ]);
+  });
+
+  it('core keeps firing as before', () => {
+    const r = reader({
+      base: { 'packages/kn-next/package.json': pkg({ exports: { '.': './a.js' } }) },
+      head: { 'packages/kn-next/package.json': pkg({ exports: { '.': './b.js' } }) },
+    });
+    expect(api(classifyContent([change('packages/kn-next/package.json')], r))).toEqual([
+      'packages/kn-next/package.json',
+    ]);
+  });
+
+  it('near miss: a version bump in a non-core package does not fire', () => {
+    const r = reader({
+      base: { 'packages/grpc/package.json': pkg({ exports: { '.': './a.js' } }) },
+      head: {
+        'packages/grpc/package.json': pkg({ version: '0.2.0', exports: { '.': './a.js' } }),
+      },
+    });
+    expect(classifyContent([change('packages/grpc/package.json')], r)).toHaveLength(0);
+  });
+
+  it('near miss: a nested template package.json is not a package manifest', () => {
+    const r = reader({
+      head: { 'packages/kn-next/templates/app/package.json': pkg({ bin: { y: './y.js' } }) },
+    });
+    expect(
+      classifyContent([change('packages/kn-next/templates/app/package.json', 'A')], r),
+    ).toHaveLength(0);
+  });
+
+  it('an UNPARSEABLE manifest fails closed — it fires, never passes', () => {
+    const r = reader({
+      base: { 'packages/grpc/package.json': '{ not json' },
+      head: { 'packages/grpc/package.json': '{ also not json' },
+    });
+    const fired = classifyContent([change('packages/grpc/package.json')], r);
+    const hit = fired.find((f: { id: string }) => f.id === 'public-api');
+    expect(hit?.paths).toEqual(['packages/grpc/package.json']);
+    expect(hit?.why).toMatch(/unparseable/i);
+  });
+});
+
+describe('#2388 — unknown input fails rather than passes', () => {
+  it('an unknown name-status letter throws', () => {
+    expect(() => parseNameStatus('Q\tpackages/x.ts')).toThrow(/status/i);
+  });
+
+  it('a status line with no path throws', () => {
+    expect(() => parseNameStatus('M')).toThrow(/path/i);
+  });
+
+  it('every real git status letter is still accepted', () => {
+    for (const s of ['A', 'C75', 'D', 'M', 'R100', 'T', 'U', 'X', 'B']) {
+      const line = s.length > 1 ? `${s}\told\tnew` : `${s}\tp`;
+      expect(() => parseNameStatus(line)).not.toThrow();
+    }
   });
 });
