@@ -1320,6 +1320,8 @@ jobs:
     # Redis is unreachable. It reads KNEXT_REDIS_LIVE_URL, never REDIS_URL, so no
     # other cache test in a shared env is pointed at this Redis.
     # Guarded by tests/use-cache-lua-live-workflow.test.ts.
+    # The same Redis also runs the two-app collapse-isolation suite: one app's
+    # outage collapse must never delete another app's keys on a shared Redis.
     name: "'use cache' replay Lua on a real Redis"
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -1359,6 +1361,7 @@ jobs:
         run: >-
           node scripts/bun-test.mjs --no-skip
           packages/kn-next/src/__tests__/use-cache-replay-script-live-redis.test.ts
+          packages/kn-next/src/__tests__/redis-prefix-collapse-isolation.test.ts
           tests/use-cache-lua-live-workflow.test.ts
 
   docs-site:
