@@ -73,6 +73,7 @@ export const NON_JS_TEST_SUITE_PROVERS = Object.freeze([
   'scripts/mutation-prove-knext-ffi-crates.mjs',
   'scripts/mutation-prove-2321-go-metric-contract.mjs',
   'scripts/mutation-prove-2171-go-redis-key-prefix.mjs',
+  'scripts/mutation-prove-2052-backendservice.mjs',
 ]);
 
 /** The toolchains a `NON_JS_TEST_SUITE_PROVERS` entry may run its guards with. */

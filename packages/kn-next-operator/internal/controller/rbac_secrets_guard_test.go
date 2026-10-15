@@ -34,8 +34,9 @@ import (
 
 // Secrets RBAC least-privilege guard.
 //
-// The operator's Go code never reads or writes a core Secret: the managed
-// database mode that once mirrored a DSN Secret was removed, envFrom /
+// The operator's Go code never writes a core Secret and reads only the METADATA
+// of a Secret a zone function references (the one justified grant below). The
+// managed database mode that once mirrored a DSN Secret was removed, envFrom /
 // secretKeyRef are references the KUBELET resolves, image-pull secrets are only
 // names on a ServiceAccount, and webhook / metrics certs arrive as mounted
 // volumes. A Secrets grant on the manager's ClusterRole is therefore pure
@@ -50,8 +51,24 @@ import (
 //
 // secretsGrantAllowlist is keyed "<Kind>/<name>:<sorted verbs>" for manifest
 // rules and "marker:<sorted verbs>" for kubebuilder markers; the value is the
-// justification. It is empty on purpose.
-var secretsGrantAllowlist = map[string]string{}
+// justification.
+//
+// The ONE entry pair: cluster-wide `get` (no list, no watch, no create) for the
+// zone-function credential allowlist (ADR-0004 Amendment 1 Decision 2). A
+// function may reference a Secret marked as belonging to its own zone (a label
+// or an ownerReference to the zone's NextApp); checking that mark needs the
+// Secret's METADATA. The BackendService reconciler reads it through the
+// uncached APIReader as a PartialObjectMetadata GET: never a Secret's data,
+// never an informer. Blast radius, stated in docs/security/threat-model.md: a
+// compromised operator could read a Secret whose name it already knows (it
+// cannot enumerate). Creating the zone signing-key Secret is the identity
+// task's grant to add, with its own entry here, not this one's.
+var secretsGrantAllowlist = map[string]string{
+	"ClusterRole/manager-role:get": "zone-function credential allowlist: metadata-only GET of a Secret a " +
+		"BackendService references, to check its same-zone mark (ADR-0004 Am1 D2); uncached, no list/watch",
+	"marker:get": "the +kubebuilder:rbac marker on BackendServiceReconciler that generates the get-only " +
+		"Secrets rule above (same justification)",
+}
 
 type rbacRuleRef struct {
 	file string

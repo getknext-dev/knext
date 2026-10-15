@@ -275,6 +275,52 @@ type NextAppSpec struct {
 	// never reaped. Empty => no label stamped (back-compat).
 	// +optional
 	BuildID string `json:"buildId,omitempty"`
+
+	// Backends lists the zone functions (BackendServices in this namespace)
+	// this zone binds, and is the zone's half of the two-sided binding
+	// (ADR-0004 Amendment 2). A function is rendered only when it names this
+	// zone in its spec.zone AND appears here; removing an entry takes that
+	// function down.
+	//
+	// For each bound function the operator renders, into this app's Knative
+	// Service template and never into this spec:
+	//   - <NAME>_SERVICE_URL, the function's cluster-local address;
+	//   - <NAME>_SERVICE_PROTO_VERSION, the contract version the function
+	//     actually serves (unset until a stamped revision is Ready);
+	//   - KNEXT_WAKE_FUNCTIONS, the sorted, comma-separated names of the bound
+	//     functions to wake when the zone starts (minus those that opt out).
+	// <NAME> is the entry's name upper-cased with '-' replaced by '_'
+	// (user-profile -> USER_PROFILE_SERVICE_URL). A same-named entry in
+	// spec.env or spec.secrets.envMap is not overwritten; the binding is
+	// reported failed on the BackendBindings condition instead.
+	//
+	// Unset renders no variable at all, so the pod template is byte-identical
+	// to every NextApp written before this field existed. Additive and
+	// optional; upgrade the operator/CRD before the CLI.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:XValidation:rule="self.all(a, self.exists_one(b, b.service == a.service))",message="each BackendService may be bound at most once"
+	Backends []BackendBinding `json:"backends,omitempty"`
+}
+
+// BackendBinding is the zone half of a binding to a BackendService.
+type BackendBinding struct {
+	// Name is the binding name. It derives the env prefix <NAME> and should
+	// match the function name the zone's generated client was built for.
+	// Lowercase letters and digits in parts joined by single '-', starting
+	// with a letter.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z][a-z0-9]*(-[a-z0-9]+)*$`
+	Name string `json:"name"`
+
+	// Service is the name of the BackendService in this namespace.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	Service string `json:"service"`
 }
 
 // BuildIDLabel is the revision (pod-template) label key carrying the Next.js

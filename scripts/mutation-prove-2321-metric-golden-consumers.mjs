@@ -55,9 +55,11 @@ const RENAME = {
   expect: 'red',
   claim: 'a family is renamed in the golden (alerts/dashboards/docs still name the old series)',
   subject: 'golden',
+  // The first families sort before the renamed one; the anchor spans them so the
+  // marker still lands in the $comment line.
   anchor:
-    '/internal/metriccontract/",\n  "families": {\n    "knext_nextapp_image_prewarm_errors_total": "counter",',
-  replacement: `/internal/metriccontract/ ${MUTATION_MARKER}",\n  "families": {\n    "knext_nextapp_image_prewarm_errors_renamed_total": "counter",`,
+    '/internal/metriccontract/",\n  "families": {\n    "knext_backendservice_reconcile_total": "counter",\n    "knext_backendservice_refusals_total": "counter",\n    "knext_nextapp_image_prewarm_errors_total": "counter",',
+  replacement: `/internal/metriccontract/ ${MUTATION_MARKER}",\n  "families": {\n    "knext_backendservice_reconcile_total": "counter",\n    "knext_backendservice_refusals_total": "counter",\n    "knext_nextapp_image_prewarm_errors_renamed_total": "counter",`,
   validate,
 };
 

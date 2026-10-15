@@ -384,6 +384,27 @@ turn into a defect in Z8 or Z6 if it were settled in review instead of here:
    The PR adds both to this decision before it is accepted, with the shared fixture that ADR-0066
    requires, tested in Go and in TypeScript.
 
+   *Fixed by Z8 (#2052):*
+   - `<NAME>` is the `backends[]` entry's `name` upper-cased, with `-` replaced by `_`
+     (`user-profile` → `USER_PROFILE_SERVICE_URL`). It is the same derivation as the generated
+     client's `urlEnvFor`, and the entry name's CRD pattern
+     (`^[a-z][a-z0-9]*(-[a-z0-9]+)*$`) makes the mapping one-to-one.
+   - The wake list is `KNEXT_WAKE_FUNCTIONS`: the bound functions' entry names, sorted and
+     comma-separated. A function opts out with `BackendService.spec.wakeAhead: false`. The variable
+     is unset when no function is left.
+   - The served version (Decision 7) is the `spec.protoVersion` stamped on the function's
+     **latest Ready** revision (annotation `apps.kn-next.dev/proto-version`), recorded as
+     `status.servedProtoVersion`. It is never read from the spec, so during a rollout it reports
+     the version that actually serves.
+   - The shared fixture is
+     `packages/kn-next-operator/internal/controller/testdata/zone-binding-env.json`, asserted by
+     `backend_bindings_test.go` (Go) and `packages/grpc/src/__tests__/binding-env-contract.test.ts`
+     (TypeScript). The process-start primer (Z9) asserts the same file.
+   - A measured fact for Decision 1: on an apiserver with the `OwnerReferencesPermissionEnforcement`
+     admission plugin, setting the `ownerReference` needs `delete` on `backendservices` as well as
+     `update` on `nextapps/finalizers` ("cannot set an ownerRef on a resource you can't delete").
+     The operator holds both; `backendservice_rbac_envtest_test.go` runs with the plugin on.
+
 4. **Each function runs as an operator-owned ServiceAccount.** The `BackendService` reconciler
    creates one ServiceAccount per function, with `automountServiceAccountToken: false` and no Role or
    RoleBinding, and always renders the function's pod with it. **A user-chosen ServiceAccount is
