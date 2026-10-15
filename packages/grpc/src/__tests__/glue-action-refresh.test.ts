@@ -45,7 +45,7 @@ mock.module('next/cache', () => ({
 mock.module('server-only', () => ({}));
 mock.module('@getknext/grpc/runtime', () => runtime);
 
-type Behaviour = 'ok' | 'reset' | 'unavailable';
+type Behaviour = 'ok' | 'reset' | 'truncated' | 'unavailable';
 let behaviour: Behaviour = 'ok';
 const received: { path: string; body: Uint8Array }[] = [];
 let server: Server | undefined;
@@ -63,6 +63,13 @@ beforeAll(async () => {
       if (behaviour === 'reset') {
         // The function read (and, say, committed) the write; the response is lost.
         req.socket.destroy();
+        return;
+      }
+      if (behaviour === 'truncated') {
+        // The success response is cut off after its headers: no complete answer arrives.
+        res.writeHead(200, { 'content-type': 'application/proto', 'content-length': '64' });
+        res.write(new Uint8Array([0x0a, 0x03]));
+        setTimeout(() => req.socket.destroy(), 20);
         return;
       }
       if (behaviour === 'unavailable') {
@@ -151,6 +158,14 @@ describe('a write that reached the function refreshes the cached reads', () => {
       expect(tags, 'a write whose response was lost may have committed').toEqual([TAG]);
     });
   }
+
+  it('the response is cut off after its headers (no complete status): refreshed', async () => {
+    ready();
+    behaviour = 'truncated';
+    await failure(actions.placeOrder({ sku: 's-1', quantity: 1 }, { idempotencyKey: 'k-5' }));
+    expect(received).toHaveLength(1);
+    expect(tags).toEqual([TAG]);
+  });
 
   it('the function answers an error after receiving the write: refreshed, not retried', async () => {
     ready();
