@@ -14,9 +14,13 @@
  *    also on a real Redis when KNEXT_REDIS_LIVE_URL is set.
  *  - DOCTOR rows grade `doctor-redis-prefix.test.ts`: the `knext doctor` row that
  *    flags shared, nested and fallback prefixes, and its derivation vector.
- *  - HYGIENE row grades `apps/docs/content-hygiene.test.ts`: the docs guard was
- *    narrowed to tolerate the Redis key form `kn-next:<key>`; it must still catch
- *    the bare CLI word, including `kn-next: command not found`.
+ *  - HYGIENE rows grade `apps/docs/content-hygiene.test.ts`: the docs guard was
+ *    narrowed to tolerate the Redis key form `kn-next:<key>` and the value of a
+ *    `REDIS_KEY_PREFIX` assignment; it must still catch the bare CLI word,
+ *    including `kn-next: command not found`.
+ *  - WORKFLOW row grades `tests/use-cache-lua-live-workflow.test.ts`: the
+ *    `use-cache-lua-live-redis` CI job must keep running the collapse spec, the
+ *    only lane where it meets a real Redis.
  *
  * The operator half (the derived default, its yielding, and the finalizer) is
  * `mutation-prove-2171-go-redis-key-prefix.mjs`.
@@ -39,6 +43,7 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const COLLAPSE_SPEC = 'packages/kn-next/src/__tests__/redis-prefix-collapse-isolation.test.ts';
 const DOCTOR_SPEC = 'packages/kn-next/src/__tests__/doctor-redis-prefix.test.ts';
 const HYGIENE_SPEC = 'apps/docs/content-hygiene.test.ts';
+const WORKFLOW_SPEC = 'tests/use-cache-lua-live-workflow.test.ts';
 
 const COLLAPSE = [
   {
@@ -152,6 +157,14 @@ const DOCTOR = [
     anchor: '            unverified.push(app);\n            continue;',
     replacement: '            prefix = defaultRedisKeyPrefix(namespace, name);',
   },
+  {
+    id: 'D08',
+    subject: 'check',
+    claim:
+      "an empty spec.env REDIS_KEY_PREFIX counts as a prefix of '' (the operator renders the derived default)",
+    anchor: '        else if (fromEnv) prefix = fromEnv;',
+    replacement: '        else if (fromEnv !== undefined) prefix = fromEnv;',
+  },
 ];
 
 const HYGIENE = [
@@ -159,8 +172,26 @@ const HYGIENE = [
     id: 'H01',
     subject: 'guard',
     claim: 'the docs guard tolerates any `kn-next:` (including `kn-next: command not found`)',
-    anchor: '  const bareKnNextWord = /(?<![\\w/])kn-next(?![\\w.\\-/]|:[^\\s`])/;',
-    replacement: '  const bareKnNextWord = /(?<![\\w/])kn-next(?![\\w.\\-/:])/;',
+    anchor: 'kn-next(?![\\w.\\-/]|:[^\\s`])/;',
+    replacement: 'kn-next(?![\\w.\\-/:])/;',
+  },
+  {
+    id: 'H02',
+    subject: 'guard',
+    claim:
+      'the docs guard flags the REDIS_KEY_PREFIX value the caching page pins (tolerance removed)',
+    anchor: '(?<!REDIS_KEY_PREFIX[\'"]?\\s*[:=]\\s*[\'"]?)',
+    replacement: '',
+  },
+];
+
+const WORKFLOW = [
+  {
+    id: 'W01',
+    subject: 'ci',
+    claim: 'the use-cache-lua-live-redis job stops running the collapse spec on its real Redis',
+    anchor: '          packages/kn-next/src/__tests__/redis-prefix-collapse-isolation.test.ts\n',
+    replacement: '',
   },
 ];
 
@@ -185,12 +216,18 @@ const hygiene = createGuardProver({
   spec: HYGIENE_SPEC,
   subjects: { guard: 'apps/docs/content-hygiene.test.ts' },
 });
+const workflow = createGuardProver({
+  repoRoot: REPO_ROOT,
+  spec: WORKFLOW_SPEC,
+  subjects: { ci: '.github/workflows/ci.yml' },
+});
 
 console.log('=== mutation proof: Redis key-prefix isolation (#2171), TS half ===');
 collapse.preflight(COLLAPSE);
 doctor.preflight(DOCTOR);
 hygiene.preflight(HYGIENE);
-declareMutations(COLLAPSE.length + DOCTOR.length + HYGIENE.length);
+workflow.preflight(WORKFLOW);
+declareMutations(COLLAPSE.length + DOCTOR.length + HYGIENE.length + WORKFLOW.length);
 
 console.log(`\n=== collapse rows: ${COLLAPSE_SPEC} ===`);
 collapse.baseline();
@@ -218,7 +255,7 @@ for (const m of DOCTOR) {
 }
 doctor.finish(DOCTOR.length);
 
-console.log(`\n=== hygiene row: ${HYGIENE_SPEC} ===`);
+console.log(`\n=== hygiene rows: ${HYGIENE_SPEC} ===`);
 hygiene.baseline();
 hygiene.proveCanSeeRed({
   subject: 'guard',
@@ -230,3 +267,18 @@ for (const m of HYGIENE) {
   recordMutation();
 }
 hygiene.finish(HYGIENE.length);
+
+console.log(`\n=== workflow row: ${WORKFLOW_SPEC} ===`);
+workflow.baseline();
+workflow.proveCanSeeRed({
+  subject: 'ci',
+  anchor:
+    '          node scripts/bun-test.mjs --no-skip\n          packages/kn-next/src/__tests__/use-cache-replay-script-live-redis.test.ts',
+  replacement:
+    '          node scripts/bun-test.mjs\n          packages/kn-next/src/__tests__/use-cache-replay-script-live-redis.test.ts',
+});
+for (const m of WORKFLOW) {
+  workflow.run({ ...m, expect: 'red' });
+  recordMutation();
+}
+workflow.finish(WORKFLOW.length);

@@ -7,7 +7,9 @@
  * `kn-next`, and one app's outage collapse deleted the others' caches. The
  * operator now renders a default derived from namespace/name, yields it to a
  * REDIS_KEY_PREFIX the user sets in spec.env or spec.secrets.envMap, and reaps
- * that derived keyspace on delete. Graded by the `go test` targets in
+ * that derived keyspace on delete, but never the shared fallback `kn-next`, even
+ * when `spec.cache.keyPrefix` names it. An empty spec.env REDIS_KEY_PREFIX counts
+ * as unset, so the derived default replaces it. Graded by the `go test` targets in
  * `packages/kn-next-operator/internal/controller`: `redis_key_prefix_test.go`,
  * the reserved-env parity test (whose exclusion of the yielding default must stay
  * narrow), and the finalizer tests.
@@ -117,6 +119,28 @@ const MUTATIONS = [
     subject: 'parity',
     anchor: '\t\tif ev.Name == redisKeyPrefixEnvName && rendersDefaultRedisKeyPrefix(app) {',
     replacement: '\t\tif ev.Name == redisKeyPrefixEnvName {',
+  },
+  {
+    id: 'G10',
+    claim:
+      'the finalizer reaps an explicit keyPrefix of kn-next (every legacy app on the shared fallback)',
+    subject: 'prefix',
+    anchor: '\tif app.Spec.Cache.KeyPrefix == legacySharedRedisKeyPrefix {\n\t\treturn ""\n\t}',
+    replacement: '',
+  },
+  {
+    id: 'G11',
+    claim: 'an empty spec.env REDIS_KEY_PREFIX counts as user-set (runtime falls back to kn-next)',
+    subject: 'prefix',
+    anchor: '\tif v, ok := app.Spec.Env[redisKeyPrefixEnvName]; ok && v != "" {',
+    replacement: '\tif _, ok := app.Spec.Env[redisKeyPrefixEnvName]; ok {',
+  },
+  {
+    id: 'G12',
+    claim: 'an empty spec.env REDIS_KEY_PREFIX is rendered beside the derived default (duplicate)',
+    subject: 'controller',
+    anchor: '\t\t\tif dropsEmptyUserRedisKeyPrefix(nextApp, name) {',
+    replacement: '\t\t\tif false {',
   },
 ];
 
