@@ -17,9 +17,20 @@
  *   W*  the binary's wiring (internal/rpc/rpc.go): the interceptor left
  *       out of the chain must RED (the on-the-wire scan of every registered
  *       procedure catches it).
+ *   L*  the request-read bounds (internal/rpc/rpc.go): the gzip decompressor
+ *       no longer stopping at the limit, the bounded compressor not mounted,
+ *       the raw-body cap dropped, the ReadTimeout dropped — each must RED.
+ *   D*  the SIGTERM drain: closing connections instead of draining them, or
+ *       a grace of zero, must RED (an in-flight call is held open across the
+ *       shutdown).
  *   N*  negative control: New wired with a nil verifier is still closed, so
  *       the suite must stay GREEN (fail-closed by construction, not by the
  *       one verifier the binary happens to pass).
+ *
+ * A row counts only if the mutated tree COMPILES: before its test run, each
+ * row must pass a build-only `go test -run ^$` (packages and their tests,
+ * plus go test's vet subset). A row that does not compile is reported
+ * NOT-COMPILED and fails the prover: a build failure kills nothing.
  *
  * NOT A JS TEST SUITE: the guards are Go tests, so there is no vitest runner
  * to resolve. Path-listed in `NON_JS_TEST_SUITE_PROVERS`
@@ -31,7 +42,8 @@
  *   node scripts/mutation-prove-go-template-auth.mjs
  *
  * Exit 0 = every row behaved as required; 1 = a row did not (a guard is
- * decoration, or the negative control reddened); 2 = the prover itself could
+ * decoration, the negative control reddened, or a mutation did not
+ * compile); 2 = the prover itself could
  * not run (anchor drift, red baseline, missing tool). Never parses output.
  */
 
@@ -61,6 +73,10 @@ const GO_TEST = [
   './internal/auth/',
   './internal/rpc/',
 ];
+
+// The same packages, compiled with their tests and run through go test's vet
+// subset, running no test: `-run ^$` matches nothing.
+const GO_BUILD = ['go', 'test', '-count=1', '-run', '^$', './internal/auth/', './internal/rpc/'];
 
 const MUTATIONS = [
   // ── A: the interceptor and the verifier ───────────────────────────────────
@@ -155,6 +171,56 @@ const MUTATIONS = [
     anchor: '\t\tauth.NewInterceptor(verifier),\n',
     replacement: '',
   },
+  // ── L: the request-read bounds ────────────────────────────────────────────
+  {
+    id: 'L1',
+    expect: 'red',
+    claim: 'the gzip decompressor no longer stops one byte past the message limit',
+    subject: 'server',
+    anchor: '\treturn limitedReadCloser{Reader: io.LimitReader(r, c.limit+1), Closer: r}, nil\n',
+    replacement: '\treturn r, nil\n',
+  },
+  {
+    id: 'L2',
+    expect: 'red',
+    claim: "the bounded gzip is not mounted (connect-go's default gzip drains a bomb)",
+    subject: 'server',
+    anchor: '\t\tconnecthttp.WithCompressors(boundedGzip(MaxRequestBytes)),\n',
+    replacement: '',
+  },
+  {
+    id: 'L3',
+    expect: 'red',
+    claim: 'the raw request-body cap is dropped (an endless body is read forever)',
+    subject: 'server',
+    anchor: '\t\t\tHandler:           http.MaxBytesHandler(mux, MaxRequestBodyBytes),\n',
+    replacement: '\t\t\tHandler:           mux,\n',
+  },
+  {
+    id: 'L4',
+    expect: 'red',
+    claim: 'the server has no ReadTimeout (a stalled body is never cut off)',
+    subject: 'server',
+    anchor: '\t\t\tReadTimeout:       ReadTimeout,\n',
+    replacement: '',
+  },
+  // ── D: the SIGTERM drain ──────────────────────────────────────────────────
+  {
+    id: 'D1',
+    expect: 'red',
+    claim: 'SIGTERM closes connections instead of draining in-flight calls',
+    subject: 'server',
+    anchor: '\tif err := f.HTTP.Shutdown(shutdownCtx); err != nil {\n',
+    replacement: '\tif err := errors.Join(f.HTTP.Close(), shutdownCtx.Err()); err != nil {\n',
+  },
+  {
+    id: 'D2',
+    expect: 'red',
+    claim: 'the drain grace is zero (Serve returns with a call still in flight)',
+    subject: 'server',
+    anchor: '\tshutdownCtx, cancel := context.WithTimeout(context.Background(), ShutdownGrace)\n',
+    replacement: '\tshutdownCtx, cancel := context.WithTimeout(context.Background(), 0)\n',
+  },
   // ── N: negative control ───────────────────────────────────────────────────
   {
     id: 'N1',
@@ -168,10 +234,10 @@ const MUTATIONS = [
 
 const PROVER = { subjects: { auth: AUTH, server: SERVER } };
 
-// Returns go test's exit code, or null if go could not be run. Never exits
+// Returns the command's exit code, or null if go could not be run. Never exits
 // here: a caller holding a mutation must restore it first.
-function goTestExit() {
-  const [bin, ...args] = GO_TEST;
+function goExit(command) {
+  const [bin, ...args] = command;
   const r = spawnSync(bin, args, {
     cwd: TEMPLATE_MODULE,
     env: { ...process.env, GOTOOLCHAIN: 'auto' },
@@ -206,9 +272,18 @@ for (const m of MUTATIONS) {
   }
 }
 
-// Green baseline on a clean tree, else every verdict below is noise.
+// Green baseline on a clean tree, else every verdict below is noise. The
+// build-only check must pass too, or no row's build check could mean anything.
 assertTreeClean(REPO_ROOT, 'baseline');
-const base = goTestExit();
+const baseBuild = goExit(GO_BUILD);
+if (baseBuild === null) process.exit(2);
+if (baseBuild !== 0) {
+  console.error(
+    `mutation-prove-go-template-auth: baseline does not compile (exit ${baseBuild}); fix the tree first`,
+  );
+  process.exit(2);
+}
+const base = goExit(GO_TEST);
 if (base === null) process.exit(2);
 if (base !== 0) {
   console.error(`mutation-prove-go-template-auth: baseline RED (exit ${base}); fix the tree first`);
@@ -220,16 +295,27 @@ let failed = 0;
 for (const m of MUTATIONS) {
   assertTreeClean(REPO_ROOT, `before ${m.id}`);
   const snap = snapshot(PROVER.subjects[m.subject]);
+  let build;
   let code;
   try {
     mutate(snap, m.anchor, m.replacement);
-    code = goTestExit();
+    // A mutation that does not compile is red for the wrong reason: the test
+    // run would fail at the build, proving nothing about any guard.
+    build = goExit(GO_BUILD);
+    if (build === 0) code = goExit(GO_TEST);
   } finally {
     restore(snap);
   }
   assertTreeClean(REPO_ROOT, `after ${m.id}`);
-  if (code === null) process.exit(2);
+  if (build === null || code === null) process.exit(2);
   recordMutation();
+  if (build !== 0) {
+    failed++;
+    console.error(
+      `*** NOT-COMPILED *** ${m.id} build exit=${build}: the mutated tree does not compile, so this row proves nothing; make it a compiling mutation — ${m.claim}`,
+    );
+    continue;
+  }
   const ok = m.expect === 'red' ? code !== 0 : code === 0;
   if (!ok) failed++;
   const verdict = ok ? (m.expect === 'red' ? 'KILLED   ' : 'TOLERATED') : '*** SURVIVED ***';
