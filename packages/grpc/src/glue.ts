@@ -140,7 +140,12 @@ export type TokenMinter = (request: TokenRequest) => string | Promise<string>;
  */
 const MINTER_KEY = Symbol.for('knext.grpc.tokenMinter');
 
-/** Register (or, with `undefined`, remove) the zone's token minter. */
+/**
+ * Register (or, with `undefined`, remove) the zone's token minter.
+ *
+ * TODO(#2051): the per-zone identity token registers its minter here. Until it
+ * does, no minter is registered and every generated call fails closed.
+ */
 export function registerTokenMinter(minter: TokenMinter | undefined): void {
   (globalThis as Record<symbol, unknown>)[MINTER_KEY] = minter;
 }
