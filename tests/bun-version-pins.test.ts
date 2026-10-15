@@ -177,6 +177,7 @@ describe('bun-version pins (#754) — scanned across every workflow', () => {
       // setup-bun step instead of one per caller.
       'file-manager-platform-e2e.yml': 1,
       'mutation-prover-nightly.yml': 1,
+      'next-minor-matrix.yml': 2,
       // NEW (#1843): the node-runtime Redis cache kind e2e — one "Setup bun"
       // step (workspace install + building/packing the tarballs it deploys).
       'runtime-redis-cache-kind-e2e.yml': 1,

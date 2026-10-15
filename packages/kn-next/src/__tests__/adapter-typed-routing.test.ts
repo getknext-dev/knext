@@ -19,6 +19,7 @@
 import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { NEXT_PEER_RANGE } from "../next-compat";
 
 const pkgDir = join(__dirname, "..", "..");
 const adapterSource = readFileSync(
@@ -33,7 +34,7 @@ describe("in-repo next devDependency (#171 follow-up)", () => {
         );
         expect(pkg.devDependencies.next).toMatch(/^16\.3\./);
         // The public contract does NOT move: 16.0.x consumers stay supported.
-        expect(pkg.peerDependencies.next).toBe(">=16.0.0");
+        expect(pkg.peerDependencies.next).toBe(NEXT_PEER_RANGE);
     });
 });
 

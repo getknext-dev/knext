@@ -71,6 +71,26 @@ surface, that is a version bump and a redeploy.
 
 Security fixes are called out in the release notes for the release that carries them.
 
+## Which Next.js versions are covered
+
+{/* next-policy:start */}
+
+The `next` peer range is **bounded**: it admits only the Next.js minors knext has compatibility
+evidence for (`>=16.0.0 <16.5.0`), and the upper bound is widened one minor at a time, in a knext
+release, as evidence for the next minor lands.
+
+Inside that range, the minors covered by the official Next.js compatibility suite are `16.3`. The
+other admitted minors work, but the compatibility results do not describe them, and `knext doctor`
+prints a warning when your installed Next.js is not one of the covered minors.
+
+A Next.js minor above the range is refused until a knext release admits it, and how you see that
+depends on your package manager: npm stops the install with a peer-dependency conflict
+(`ERESOLVE`), pnpm installs and prints an unmet-peer warning, and Bun installs without a message.
+To try a newer minor before knext admits it, `npm install --legacy-peer-deps` lets npm proceed;
+knext makes no compatibility claim for that combination.
+
+{/* next-policy:end */}
+
 ## The cluster side versions separately
 
 The operator that runs in your cluster, and the `NextApp` resource it reconciles, are **not** on the

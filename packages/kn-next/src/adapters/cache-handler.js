@@ -1177,6 +1177,32 @@ function seedNextCacheControl(key, entry, ctx) {
   map.set(route, cacheControl);
 }
 
+/**
+ * BUILD-SCOPED window, Next >= 16.4.0 (#2238). Redis keys are scoped by app, not
+ * by build, so an entry outlives a redeploy. Next >= 16.4.0 applies the
+ * `cacheControl` a handler returns DIRECTLY (`IncrementalCache.get`:
+ * `if (cacheData?.cacheControl) cacheControl = cacheData.cacheControl`) instead
+ * of reading only the shared Map that `seedNextCacheControl` guards, so a window
+ * recorded by a previous build would be honoured for its whole length after a
+ * deploy -- forever for `revalidate: false` -- and would ignore a changed
+ * `revalidate`. Only this build's own windows are handed back: for an entry
+ * another build wrote, one with no recorded build id (legacy), or while this
+ * process has none (or only Next's constant id), the stored window is withheld
+ * and Next treats the entry as stale and re-renders it. The body is still served
+ * meanwhile. Older Nexts ignore a returned `cacheControl`, so there this is a
+ * no-op and `seedNextCacheControl` carries the window. The FETCH data cache
+ * never carries a route window, so it is left untouched.
+ */
+function scopeWindowToBuild(entry, ctx) {
+  if (!entry || typeof entry !== 'object' || entry.cacheControl === undefined) return entry;
+  // vinext reads without a ctx and reads the window itself: only Next's reads
+  // (which always carry a `kind`) are scoped.
+  if (typeof ctx?.kind !== 'string' || ctx.kind === 'FETCH' || entry.value?.kind === 'FETCH') return entry;
+  if (currentBuildId !== undefined && entry.buildId === currentBuildId) return entry;
+  const { cacheControl: _foreignWindow, ...rest } = entry;
+  return rest;
+}
+
 // ─── CacheHandler Class ───
 
 class CacheHandler {
@@ -1220,7 +1246,7 @@ class CacheHandler {
           logCacheEvent(parsed?.cacheState === 'stale' ? 'STALE' : 'HIT', source, key, {
             durationMs: Date.now() - startTime,
           });
-          return parsed;
+          return scopeWindowToBuild(parsed, ctx);
       }
 
       // In-memory fallback
