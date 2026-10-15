@@ -70,3 +70,32 @@ describe('react, react-dom and the RSC renderer resolve to one React minor in bu
     expect([...minors]).toHaveLength(1);
   });
 });
+
+/**
+ * Some lanes stage file-manager outside the repo and install WITHOUT the
+ * lockfile, so the declared ranges alone decide the versions. If any of the
+ * three may float to a newer minor than the others, a fresh install picks e.g.
+ * react-server-dom-webpack 19.3.x (peer react ^19.3) next to react 19.2.x and
+ * npm refuses with ERESOLVE. So each must be pinned (exact or `~`) to the same
+ * major.minor.
+ */
+const MANIFEST = (await Bun.file(join(APP, 'package.json')).json()) as {
+  dependencies?: Record<string, string>;
+  devDependencies?: Record<string, string>;
+};
+
+describe("file-manager's declared React ranges cannot drift apart on a lockfile-less install", () => {
+  const declared: Record<string, string> = {
+    ...MANIFEST.dependencies,
+    ...MANIFEST.devDependencies,
+  };
+
+  it('react, react-dom and react-server-dom-webpack are each pinned to one minor (exact or ~)', () => {
+    const pinnedMinors = REACT_PKGS.map((pkg) => {
+      const m = /^~?(\d+\.\d+)\.\d+$/.exec(declared[pkg] ?? '');
+      return m ? m[1] : `${pkg}: unpinned ${declared[pkg] ?? '(missing)'}`;
+    });
+    expect(new Set(pinnedMinors).size).toBe(1);
+    expect(pinnedMinors[0]).toMatch(/^\d+\.\d+$/);
+  });
+});
