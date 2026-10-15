@@ -94,9 +94,11 @@ describe('#981 — the two shipped images are Trivy-scanned as BUILT, enforce-on
 
   it('enforces on main, reports on PR (phased continue-on-error), HIGH/CRITICAL, ignore-unfixed', () => {
     const job = builtImageJob();
-    // Same phased rollout the file-manager gate uses: block only on main.
+    // Same phased rollout the file-manager gate uses: block on main and on
+    // every `integration/**` release line (#2249), report on PRs and the queue.
+    // tests/integration-line-ci-triggers.test.ts evaluates the expression per ref.
     expect(job).toMatch(
-      /continue-on-error:\s*\$\{\{\s*github\.ref\s*!=\s*'refs\/heads\/main'\s*\}\}/,
+      /continue-on-error:\s*\$\{\{\s*github\.ref\s*!=\s*'refs\/heads\/main'\s*&&\s*!startsWith\(github\.ref,\s*'refs\/heads\/integration\/'\)\s*\}\}/,
     );
     expect(job).toMatch(/severity:\s*HIGH,CRITICAL/);
     expect(job).toMatch(/exit-code:\s*["']?1["']?/);
