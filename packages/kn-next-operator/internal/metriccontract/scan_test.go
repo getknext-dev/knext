@@ -353,3 +353,168 @@ func TestGoldenJSONIsSortedTypedAndNewlineTerminated(t *testing.T) {
 		t.Fatal("an empty golden rendered")
 	}
 }
+
+// #2377 review: the scan resolved a collector by NAME in the package's var
+// table, ignoring scope and later assignments, so each of these registered the
+// decoy while the scan reported the declaration's name. Each must be REFUSED,
+// with a message naming why, never resolved to the stale name.
+func TestScanRefusesACollectorItCannotTieToItsDeclaration(t *testing.T) {
+	cases := []struct {
+		name  string
+		files map[string]string
+		want  string
+	}{
+		{
+			name: "a package var reassigned in init() before MustRegister",
+			files: map[string]string{"internal/m/m.go": header + `
+var c = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "knext_real_total"}, []string{"r"})
+
+func init() {
+	c = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "knext_decoy_total"}, []string{"r"})
+	metrics.Registry.MustRegister(c)
+}
+`},
+			want: "c is assigned",
+		},
+		{
+			name: "a package var reassigned in another file of the package",
+			files: map[string]string{
+				"internal/m/m.go": header + `
+var c = prometheus.NewCounter(prometheus.CounterOpts{Name: "knext_real_total"})
+
+func init() { metrics.Registry.MustRegister(c) }
+`,
+				"internal/m/other.go": "package m\n\nfunc swap() { c, _ = nil, 0 }\n",
+			},
+			want: "c is assigned",
+		},
+		{
+			name: "a package var whose address is taken",
+			files: map[string]string{"internal/m/m.go": header + `
+var c = prometheus.NewCounter(prometheus.CounterOpts{Name: "knext_real_total"})
+
+func init() {
+	p := &c
+	_ = p
+	metrics.Registry.MustRegister(c)
+}
+`},
+			want: "c is assigned",
+		},
+		{
+			name: "an exported package var (another package can reassign it)",
+			files: map[string]string{"internal/m/m.go": header + `
+var C = prometheus.NewCounter(prometheus.CounterOpts{Name: "knext_real_total"})
+
+func init() { metrics.Registry.MustRegister(C) }
+`},
+			want: "exported",
+		},
+		{
+			name: "a local var shadowing the package var",
+			files: map[string]string{"internal/m/m.go": header + `
+var c = prometheus.NewCounter(prometheus.CounterOpts{Name: "knext_real_total"})
+
+func init() {
+	c := prometheus.NewCounter(prometheus.CounterOpts{Name: "knext_decoy_total"})
+	metrics.Registry.MustRegister(c)
+}
+`},
+			want: "local declaration",
+		},
+		{
+			name: "a local var declared with var, in a nested block",
+			files: map[string]string{"internal/m/m.go": header + `
+var c = prometheus.NewCounter(prometheus.CounterOpts{Name: "knext_real_total"})
+
+func init() {
+	{
+		var c = prometheus.NewCounter(prometheus.CounterOpts{Name: "knext_decoy_total"})
+		metrics.Registry.MustRegister(c)
+	}
+}
+`},
+			want: "local declaration",
+		},
+		{
+			name: "a local const shadowing the package const a name is built from",
+			files: map[string]string{"internal/m/m.go": header + `
+const name = "knext_real_total"
+
+func init() {
+	const name = "knext_decoy_total"
+	metrics.Registry.MustRegister(prometheus.NewCounter(prometheus.CounterOpts{Name: name}))
+}
+`},
+			want: "local declaration",
+		},
+		{
+			name: "a local shadowing the metrics package name",
+			files: map[string]string{"internal/m/m.go": header + `
+var c = prometheus.NewCounter(prometheus.CounterOpts{Name: "knext_real_total"})
+
+func init() {
+	metrics := struct{ Registry *prometheus.Registry }{prometheus.NewRegistry()}
+	metrics.Registry.MustRegister(c)
+}
+`},
+			want: "metrics is shadowed",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			files := map[string]string{"cmd/main.go": mainImportsM}
+			for k, v := range tc.files {
+				files[k] = v
+			}
+			fams, err := Scan(fixture(t, files), "cmd")
+			if err == nil {
+				t.Fatalf("Scan accepted it: %+v", fams)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("refused for the wrong reason: %v (want %q)", err, tc.want)
+			}
+		})
+	}
+}
+
+// The operator image ships linux/amd64 AND linux/arm64; a registration behind
+// either architecture's build constraint is served by that image, so the two
+// scans must agree or the golden describes only one of them.
+func TestScanFailsClosedWhenTheShippedArchitecturesDisagree(t *testing.T) {
+	base := header + `
+var real = prometheus.NewCounter(prometheus.CounterOpts{Name: "knext_real_total"})
+
+func init() { metrics.Registry.MustRegister(real) }
+`
+	for _, arch := range []string{"arm64", "amd64"} {
+		t.Run(arch, func(t *testing.T) {
+			root := fixture(t, map[string]string{
+				"cmd/main.go":     mainImportsM,
+				"internal/m/m.go": base,
+				"internal/m/only_" + arch + ".go": header + `
+var a = prometheus.NewCounter(prometheus.CounterOpts{Name: "knext_` + arch + `_only_total"})
+
+func init() { metrics.Registry.MustRegister(a) }
+`,
+			})
+			fams, err := Scan(root, "cmd")
+			if err == nil {
+				t.Fatalf("Scan accepted an %s-only registration: %+v", arch, fams)
+			}
+			if !strings.Contains(err.Error(), "knext_"+arch+"_only_total") || !strings.Contains(err.Error(), "arm64") {
+				t.Fatalf("refused for the wrong reason: %v", err)
+			}
+		})
+	}
+	// Both architectures registering the same set is fine.
+	root := fixture(t, map[string]string{
+		"cmd/main.go":           mainImportsM,
+		"internal/m/m.go":       base,
+		"internal/m/x_amd64.go": "package m\n",
+		"internal/m/x_arm64.go": "package m\n",
+	})
+	if got := names(mustScan(t, root)); !reflect.DeepEqual(got, []string{"knext_real_total"}) {
+		t.Fatalf("got %v", got)
+	}
+}

@@ -20,19 +20,27 @@ limitations under the License.
 //
 // It reads the AST, never text, and it counts a metric only when it is LIVE:
 //   - the package is linked into the binary (reachable from cmd/'s imports,
-//     honouring build constraints, test files excluded);
+//     honouring build constraints, test files excluded) — for EVERY architecture
+//     the image ships, and the architectures must agree;
 //   - the collector is registered on controller-runtime's metrics.Registry (the
 //     registry /metrics serves) from an init() function;
-//   - the collector is a package-level variable, or an inline call, built by a
-//     known prometheus constructor, and its name is a compile-time constant.
+//   - the collector is an unexported package-level variable that nothing in the
+//     package assigns besides its declaration, or an inline call, built by a
+//     known prometheus constructor, and its name is a compile-time constant of
+//     the package.
+//
+// Identifiers are resolved by SCOPE (go/types), never by name: a local variable
+// or constant that shadows the package-level one is a different object, and a
+// package variable that is reassigned (or whose address escapes) may not hold
+// what its declaration says by the time it is registered.
 //
 // A metric declared but never registered, a registration in a comment or in a
 // package the binary does not import, is not counted. Anything the scanner
 // cannot prove (a registration outside init(), a collector built by a helper
-// function, a name held in a variable, the registry handed to anything else)
-// is an ERROR, never a silent skip, and so is an empty result: a registration
-// the scanner could not read would otherwise be an emitted metric the contract
-// never sees.
+// function, a name held in a variable, a shadowed or reassigned identifier, the
+// registry handed to anything else) is an ERROR, never a silent skip, and so is
+// an empty result: a registration the scanner could not read would otherwise
+// be an emitted metric the contract never sees.
 package metriccontract
 
 import (
@@ -43,8 +51,12 @@ import (
 	"go/build"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"os"
+	"path"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -52,6 +64,11 @@ import (
 // GoldenPath is the committed golden, relative to the operator module root.
 // The TS metric contract reads it; golden_test.go keeps it current.
 const GoldenPath = "internal/metriccontract/operator-metrics.golden.json"
+
+// ShippedArchs are the linux architectures the operator image is built for
+// (.github/workflows/operator-supply-chain.yml `platforms:`). Each is scanned,
+// and a registration only one of them links is an error.
+var ShippedArchs = []string{"amd64", "arm64"}
 
 const (
 	promPath      = "github.com/prometheus/client_golang/prometheus"
@@ -81,14 +98,52 @@ var constructors = map[string]Family{
 }
 
 // Scan returns every metric family the binary built from mainDir (relative to
-// moduleRoot) registers on controller-runtime's metrics.Registry.
+// moduleRoot) registers on controller-runtime's metrics.Registry, for every
+// shipped architecture. The architectures must register the same set.
 func Scan(moduleRoot, mainDir string) (map[string]Family, error) {
+	var first map[string]Family
+	for i, arch := range ShippedArchs {
+		fams, err := scanArch(moduleRoot, mainDir, arch)
+		if err != nil {
+			return nil, fmt.Errorf("linux/%s: %w", arch, err)
+		}
+		if i == 0 {
+			first = fams
+			continue
+		}
+		if diff := diffFamilies(first, fams); diff != "" {
+			return nil, fmt.Errorf("the linux/%s and linux/%s builds register different metrics, "+
+				"so one golden cannot describe the image: %s", ShippedArchs[0], arch, diff)
+		}
+	}
+	return first, nil
+}
+
+func diffFamilies(a, b map[string]Family) string {
+	var out []string
+	for n, f := range a {
+		if g, ok := b[n]; !ok {
+			out = append(out, fmt.Sprintf("%s only on linux/%s", n, ShippedArchs[0]))
+		} else if !reflect.DeepEqual(f, g) {
+			out = append(out, fmt.Sprintf("%s is %+v on one and %+v on the other", n, f, g))
+		}
+	}
+	for n := range b {
+		if _, ok := a[n]; !ok {
+			out = append(out, fmt.Sprintf("%s only on the other architecture", n))
+		}
+	}
+	sort.Strings(out)
+	return strings.Join(out, "; ")
+}
+
+func scanArch(moduleRoot, mainDir, arch string) (map[string]Family, error) {
 	modPath, err := modulePath(moduleRoot)
 	if err != nil {
 		return nil, err
 	}
 	ctx := build.Default
-	ctx.GOOS, ctx.GOARCH, ctx.CgoEnabled = "linux", "amd64", false // the shipped image's build
+	ctx.GOOS, ctx.GOARCH, ctx.CgoEnabled = "linux", arch, false // the shipped image's build
 
 	fset := token.NewFileSet()
 	out := map[string]Family{}
@@ -116,7 +171,7 @@ func Scan(moduleRoot, mainDir string) (map[string]Family, error) {
 				queue = append(queue, filepath.FromSlash(strings.TrimPrefix(imp, modPath+"/")))
 			}
 		}
-		pkg, err := parsePackage(fset, dir, bp.GoFiles)
+		pkg, err := parsePackage(fset, dir, path.Join(modPath, filepath.ToSlash(rel)), bp.GoFiles)
 		if err != nil {
 			return nil, err
 		}
@@ -168,23 +223,50 @@ func modulePath(root string) (string, error) {
 	return "", fmt.Errorf("%s/go.mod has no module line", root)
 }
 
-// pkg is one parsed package: its files plus its package-level vars and consts.
+// pkg is one parsed package: its files, its package-level vars and consts, and
+// the go/types scope information that ties every identifier to its object.
 type pkg struct {
 	fset   *token.FileSet
 	files  []*ast.File
 	vars   map[string]valueRef
 	consts map[string]ast.Expr
+	scope  *types.Scope
+	info   *types.Info
+	// assigned is every package-level variable assigned (or address-taken)
+	// anywhere in the package besides its declaration, with the first site.
+	assigned map[*types.Var]token.Pos
 }
 
 type valueRef struct {
 	expr ast.Expr
-	file *ast.File
 }
 
-func parsePackage(fset *token.FileSet, dir string, goFiles []string) (*pkg, error) {
+// stubImporter satisfies every import with an empty package. The scan needs
+// go/types only for SCOPE — which object an identifier names — never for the
+// types of other packages, so nothing outside this module is loaded and the
+// type errors that follow (every selector into a stub is undefined) are
+// discarded. Identifier resolution does not depend on them.
+type stubImporter map[string]*types.Package
+
+func (s stubImporter) Import(p string) (*types.Package, error) {
+	if p == "unsafe" {
+		return types.Unsafe, nil
+	}
+	if tp, ok := s[p]; ok {
+		return tp, nil
+	}
+	tp := types.NewPackage(p, defaultImportName(p))
+	tp.MarkComplete()
+	s[p] = tp
+	return tp, nil
+}
+
+func defaultImportName(p string) string { return p[strings.LastIndex(p, "/")+1:] }
+
+func parsePackage(fset *token.FileSet, dir, importPath string, goFiles []string) (*pkg, error) {
 	p := &pkg{fset: fset, vars: map[string]valueRef{}, consts: map[string]ast.Expr{}}
 	for _, name := range goFiles {
-		f, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, 0)
+		f, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, parser.SkipObjectResolution)
 		if err != nil {
 			return nil, err
 		}
@@ -202,13 +284,56 @@ func parsePackage(fset *token.FileSet, dir string, goFiles []string) (*pkg, erro
 						val = vs.Values[i]
 					}
 					if gd.Tok == token.VAR {
-						p.vars[id.Name] = valueRef{expr: val, file: f}
+						p.vars[id.Name] = valueRef{expr: val}
 					} else {
 						p.consts[id.Name] = val
 					}
 				}
 			}
 		}
+	}
+	p.info = &types.Info{Uses: map[*ast.Ident]types.Object{}, Defs: map[*ast.Ident]types.Object{}}
+	conf := types.Config{Importer: stubImporter{}, Error: func(error) {}, FakeImportC: true}
+	tp, _ := conf.Check(importPath, fset, p.files, p.info) // errors: see stubImporter
+	if tp == nil {
+		return nil, fmt.Errorf("type-checking %s for scope information failed", importPath)
+	}
+	p.scope = tp.Scope()
+	p.assigned = map[*types.Var]token.Pos{}
+	mark := func(e ast.Expr) {
+		id, ok := ast.Unparen(e).(*ast.Ident)
+		if !ok {
+			return
+		}
+		if v, ok := p.info.Uses[id].(*types.Var); ok && v.Parent() == p.scope {
+			if _, dup := p.assigned[v]; !dup {
+				p.assigned[v] = id.Pos()
+			}
+		}
+	}
+	for _, f := range p.files {
+		ast.Inspect(f, func(n ast.Node) bool {
+			switch n := n.(type) {
+			case *ast.AssignStmt:
+				for _, l := range n.Lhs {
+					mark(l)
+				}
+			case *ast.IncDecStmt:
+				mark(n.X)
+			case *ast.RangeStmt:
+				if n.Key != nil {
+					mark(n.Key)
+				}
+				if n.Value != nil {
+					mark(n.Value)
+				}
+			case *ast.UnaryExpr:
+				if n.Op == token.AND {
+					mark(n.X) // a pointer to the var can reassign it
+				}
+			}
+			return true
+		})
 	}
 	return p, nil
 }
@@ -218,7 +343,7 @@ func importName(f *ast.File, path string) (string, error) {
 	for _, imp := range f.Imports {
 		if p, _ := strconv.Unquote(imp.Path.Value); p == path {
 			if imp.Name == nil {
-				return path[strings.LastIndex(path, "/")+1:], nil
+				return defaultImportName(path), nil
 			}
 			if imp.Name.Name == "." {
 				return "", fmt.Errorf("dot-import of %s is not supported by the metric scan", path)
@@ -229,13 +354,19 @@ func importName(f *ast.File, path string) (string, error) {
 	return "", nil
 }
 
-func isPkgSel(e ast.Expr, pkgName, sel string) bool {
+// pkgSel reports whether e is `<ident>.<sel>` where <ident> RESOLVES (by scope)
+// to the import of path; sel == "" matches any selector.
+func (p *pkg) pkgSel(e ast.Expr, path, sel string) bool {
 	s, ok := e.(*ast.SelectorExpr)
-	if !ok || pkgName == "" {
+	if !ok {
 		return false
 	}
 	x, ok := s.X.(*ast.Ident)
-	return ok && x.Name == pkgName && (sel == "" || s.Sel.Name == sel)
+	if !ok {
+		return false
+	}
+	pn, ok := p.info.Uses[x].(*types.PkgName)
+	return ok && pn.Imported().Path() == path && (sel == "" || s.Sel.Name == sel)
 }
 
 func (p *pkg) errorf(at ast.Node, format string, args ...any) error {
@@ -266,7 +397,7 @@ func (p *pkg) collect(out map[string]Family) error {
 				switch n := n.(type) {
 				case *ast.CallExpr:
 					fun, ok := n.Fun.(*ast.SelectorExpr)
-					if !ok || !isPkgSel(fun.X, crName, "Registry") {
+					if !ok || !p.pkgSel(fun.X, crMetricsPath, "Registry") {
 						return true
 					}
 					if fun.Sel.Name != "MustRegister" && fun.Sel.Name != "Register" {
@@ -278,15 +409,25 @@ func (p *pkg) collect(out map[string]Family) error {
 					}
 					handled[fun.X] = true
 					for _, arg := range n.Args {
-						if walkErr = p.register(out, arg, f, 0); walkErr != nil {
+						if walkErr = p.register(out, arg, 0); walkErr != nil {
 							return false
 						}
 					}
 				case *ast.SelectorExpr:
-					if isPkgSel(n, crName, "Registry") && !handled[n] {
+					if p.pkgSel(n, crMetricsPath, "Registry") && !handled[n] {
 						walkErr = p.errorf(n, "metrics.Registry used other than as metrics.Registry.MustRegister/Register in init(): "+
 							"the scan cannot see what it registers")
 						return false
+					}
+					// The file's name for the metrics package, resolving to
+					// something else: a registration through it may or may not
+					// reach the served registry, and the scan cannot tell.
+					if x, ok := n.X.(*ast.Ident); ok && x.Name == crName {
+						if _, isPkg := p.info.Uses[x].(*types.PkgName); !isPkg {
+							walkErr = p.errorf(n, "%s is shadowed by a local declaration here: the scan cannot tell "+
+								"which registry %s.%s names", crName, crName, n.Sel.Name)
+							return false
+						}
 					}
 				}
 				return true
@@ -300,26 +441,38 @@ func (p *pkg) collect(out map[string]Family) error {
 }
 
 // register resolves one MustRegister argument to its family.
-func (p *pkg) register(out map[string]Family, arg ast.Expr, f *ast.File, depth int) error {
+func (p *pkg) register(out map[string]Family, arg ast.Expr, depth int) error {
 	if depth > 8 {
 		return p.errorf(arg, "collector reference chain too deep")
 	}
 	switch a := arg.(type) {
 	case *ast.ParenExpr:
-		return p.register(out, a.X, f, depth+1)
+		return p.register(out, a.X, depth+1)
 	case *ast.Ident:
-		ref, ok := p.vars[a.Name]
-		if !ok || ref.expr == nil {
+		obj := p.info.Uses[a]
+		if obj == nil {
+			return p.errorf(a, "%s does not resolve to a declaration", a.Name)
+		}
+		if obj.Parent() != p.scope {
+			return p.errorf(a, "%s resolves to a local declaration at %s, not the package-level variable: "+
+				"the scan cannot see what it holds", a.Name, p.fset.Position(obj.Pos()))
+		}
+		v, ok := obj.(*types.Var)
+		ref, has := p.vars[a.Name]
+		if !ok || !has || ref.expr == nil {
 			return p.errorf(a, "%s is not a package-level variable with an initializer", a.Name)
 		}
-		return p.register(out, ref.expr, ref.file, depth+1)
-	case *ast.CallExpr:
-		promName, err := importName(f, promPath)
-		if err != nil {
-			return err
+		if v.Exported() {
+			return p.errorf(a, "%s is exported: another package can reassign it, and the scan reads only its declaration", a.Name)
 		}
+		if at, re := p.assigned[v]; re {
+			return p.errorf(a, "%s is assigned at %s besides its declaration: the scan reads only the declaration, "+
+				"so what is registered may not be what it declares", a.Name, p.fset.Position(at))
+		}
+		return p.register(out, ref.expr, depth+1)
+	case *ast.CallExpr:
 		fun, ok := a.Fun.(*ast.SelectorExpr)
-		if !ok || !isPkgSel(fun, promName, "") {
+		if !ok || !p.pkgSel(fun, promPath, "") {
 			return p.errorf(a, "collector is not built by a prometheus constructor")
 		}
 		fam, ok := constructors[fun.Sel.Name]
@@ -329,7 +482,7 @@ func (p *pkg) register(out map[string]Family, arg ast.Expr, f *ast.File, depth i
 		if len(a.Args) == 0 {
 			return p.errorf(a, "%s has no opts", fun.Sel.Name)
 		}
-		name, err := p.optsName(a.Args[0], promName)
+		name, err := p.optsName(a.Args[0])
 		if err != nil {
 			return err
 		}
@@ -344,9 +497,9 @@ func (p *pkg) register(out map[string]Family, arg ast.Expr, f *ast.File, depth i
 }
 
 // optsName is prometheus.BuildFQName(Namespace, Subsystem, Name) of an opts literal.
-func (p *pkg) optsName(e ast.Expr, promName string) (string, error) {
+func (p *pkg) optsName(e ast.Expr) (string, error) {
 	lit, ok := e.(*ast.CompositeLit)
-	if !ok || !isPkgSel(lit.Type, promName, "") || !strings.HasSuffix(lit.Type.(*ast.SelectorExpr).Sel.Name, "Opts") {
+	if !ok || !p.pkgSel(lit.Type, promPath, "") || !strings.HasSuffix(lit.Type.(*ast.SelectorExpr).Sel.Name, "Opts") {
 		return "", p.errorf(e, "metric opts are not a prometheus.*Opts literal")
 	}
 	fields := map[string]string{}
@@ -405,8 +558,15 @@ func (p *pkg) constString(e ast.Expr, depth int) (string, error) {
 			return l + r, nil
 		}
 	case *ast.Ident:
-		if c, ok := p.consts[v.Name]; ok && c != nil {
-			return p.constString(c, depth+1)
+		obj := p.info.Uses[v]
+		if obj != nil && obj.Parent() != p.scope && obj.Parent() != types.Universe {
+			return "", p.errorf(v, "%s resolves to a local declaration at %s, not a package-level constant",
+				v.Name, p.fset.Position(obj.Pos()))
+		}
+		if _, isConst := obj.(*types.Const); isConst && obj.Parent() == p.scope {
+			if c, ok := p.consts[v.Name]; ok && c != nil {
+				return p.constString(c, depth+1)
+			}
 		}
 	}
 	return "", p.errorf(e, "metric name part is not a string constant of this package")
