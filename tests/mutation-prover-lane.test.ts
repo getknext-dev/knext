@@ -28,6 +28,7 @@ import {
   isSharedMutationDriver,
   mutatesViaHarness,
   NON_JS_TEST_SUITE_PROVERS,
+  NON_JS_TOOLCHAINS,
   PROVER_AUDIT_EXEMPTIONS,
   PROVER_RE,
   proverPathBindings,
@@ -459,7 +460,7 @@ describe('#2343 a prover whose guards are not a JS test suite is exempt BY PATH,
     expect(auditProverSource(pm, path).join(' ')).toMatch(/pnpm/);
   });
 
-  it('every listed path is a discovered prover that spawns cargo and runs no JS spec', () => {
+  it('every listed path is a discovered prover that spawns a non-JS toolchain and runs no JS spec', () => {
     expect(NON_JS_TEST_SUITE_PROVERS.length).toBeGreaterThan(0);
     const discovered = new Set(discoverProvers(REPO_ROOT).map((p) => p.relPath));
     for (const relPath of NON_JS_TEST_SUITE_PROVERS) {
@@ -470,7 +471,12 @@ describe('#2343 a prover whose guards are not a JS test suite is exempt BY PATH,
         literals.some((l) => /\bvitest\b|\.test\.[cm]?[jt]sx?$/.test(l)),
         relPath,
       ).toBe(false);
-      expect(literals).toContain('cargo');
+      // #2321: `cargo` (the knext-ffi crates) or `go` (the operator) — a listed
+      // prover must spawn one of them, i.e. really be grading a non-JS suite.
+      expect(
+        literals.some((l) => NON_JS_TOOLCHAINS.includes(l)),
+        `${relPath} spawns none of ${NON_JS_TOOLCHAINS.join(', ')}`,
+      ).toBe(true);
     }
   });
 });

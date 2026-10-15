@@ -35,10 +35,10 @@ import {
 import {
     expandFamily,
     type ParsedRule,
+    parseOperatorMetricGolden,
     parsePrometheusRules,
     scanBunexecMetrics,
     scanNameConstants,
-    scanOperatorMetrics,
     scanPromClientMetrics,
     seriesNames,
 } from "../adapters/metric-contract";
@@ -108,10 +108,20 @@ function reachableSeries(s: Surface, operatorScraped: boolean): Set<string> {
 }
 
 const NODE_ENTRY_SRC = read(NODE_ENTRY);
-const OPERATOR_SERIES = (() => {
-    const dir = join(OPERATOR, "internal", "controller", "metrics.go");
-    return seriesNames(scanOperatorMetrics(read(dir)));
-})();
+// The operator's registered families, from the golden its Go tests keep
+// current against the parsed AST and the live registry (#2321).
+const OPERATOR_SERIES = seriesNames(
+    parseOperatorMetricGolden(
+        read(
+            join(
+                OPERATOR,
+                "internal",
+                "metriccontract",
+                "operator-metrics.golden.json",
+            ),
+        ),
+    ),
+);
 
 const REAL: Surface = {
     scrapedPorts: scanScrapedPorts(read(PODMONITOR)),

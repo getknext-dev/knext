@@ -100,67 +100,46 @@ export function parseExposition(text: string): Map<string, string> {
     return families;
 }
 
-/**
- * Go source with every comment blanked out, string and rune literals kept
- * intact (a `//` inside `"http://…"` is not a comment). Newlines inside a block
- * comment are kept so positions stay meaningful.
- */
-export function stripGoComments(src: string): string {
-    let out = "";
-    let i = 0;
-    while (i < src.length) {
-        const c = src[i] as string;
-        const next = src[i + 1];
-        if (c === "/" && next === "/") {
-            while (i < src.length && src[i] !== "\n") i++;
-            continue;
-        }
-        if (c === "/" && next === "*") {
-            const end = src.indexOf("*/", i + 2);
-            const stop = end === -1 ? src.length : end + 2;
-            out += src.slice(i, stop).replace(/[^\n]/g, " ");
-            i = stop;
-            continue;
-        }
-        if (c === '"' || c === "'" || c === "`") {
-            let j = i + 1;
-            while (j < src.length && src[j] !== c) {
-                if (c !== "`" && src[j] === "\\") j++;
-                if (c !== "`" && src[j] === "\n") break;
-                j++;
-            }
-            out += src.slice(i, j + 1);
-            i = j + 1;
-            continue;
-        }
-        out += c;
-        i++;
-    }
-    return out;
-}
+const EXPOSITION_TYPES = new Set(["counter", "gauge", "histogram", "summary"]);
 
 /**
- * Scan the operator's Go metric registry.
+ * The operator's emitted families, from the golden its Go tests generate
+ * (`packages/kn-next-operator/internal/metriccontract/operator-metrics.golden.json`).
  *
- * Matches a `prometheus.New<Kind>[Vec](prometheus.<Kind>Opts{ … Name: "…" })`
- * construction and pairs the kind with the name, so a histogram contributes its
- * `_bucket`/`_sum`/`_count` names too.
+ * The operator is the one emitter this lane cannot render: it has no Go
+ * toolchain, and a gathered registry omits a `*Vec` with no children anyway.
+ * So the operator's own Go tests scan its parsed AST — only collectors
+ * registered on the served registry, from `init()`, in a package the binary
+ * links; a declaration that is never registered or a name in a comment is not
+ * counted — cross-check that against the live registry, and fail whenever the
+ * committed golden drifts from either (#2321).
  *
- * The one emitter still read from SOURCE: rendering the operator's registry
- * needs a Go toolchain the TS test job does not have, and a gathered registry
- * omits a `*Vec` with no children. Comments are stripped first, so a
- * construction in a comment does not count (#2307).
- * TODO(#2321): render the operator side too if a Go-side golden ever lands.
+ * Fails CLOSED: anything but a non-empty `families` object of
+ * `name → counter|gauge|histogram|summary` throws, so a truncated or hand-
+ * emptied golden can never yield an empty set that makes every consumer vacuous.
  */
-export function scanOperatorMetrics(goSource: string): Map<string, string> {
+export function parseOperatorMetricGolden(json: string): Map<string, string> {
+    const doc = JSON.parse(json) as { families?: unknown };
+    const fams = doc?.families;
+    if (typeof fams !== "object" || fams === null || Array.isArray(fams)) {
+        throw new Error("operator metric golden has no `families` object");
+    }
     const out = new Map<string, string>();
-    for (const m of stripGoComments(goSource).matchAll(
-        /New(Counter|Gauge|Histogram|Summary)(?:Vec)?\s*\(\s*prometheus\.\w+\{([\s\S]{0,400}?)\}/g,
-    )) {
-        const kind = (m[1] as string).toLowerCase();
-        const body = m[2] as string;
-        const name = body.match(/Name:\s*"([^"]+)"/)?.[1];
-        if (name) out.set(name, kind);
+    for (const [name, type] of Object.entries(fams)) {
+        if (!/^[a-zA-Z_:][a-zA-Z0-9_:]*$/.test(name)) {
+            throw new Error(
+                `operator metric golden: invalid metric name "${name}"`,
+            );
+        }
+        if (typeof type !== "string" || !EXPOSITION_TYPES.has(type)) {
+            throw new Error(
+                `operator metric golden: ${name} has unknown type ${JSON.stringify(type)}`,
+            );
+        }
+        out.set(name, type);
+    }
+    if (out.size === 0) {
+        throw new Error("operator metric golden is empty");
     }
     return out;
 }

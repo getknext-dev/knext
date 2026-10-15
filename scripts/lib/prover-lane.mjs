@@ -60,12 +60,22 @@ export const NON_TEST_PACKAGE_MANAGEMENT_FILES = Object.freeze([
  * would be a category error, not a fix. The exemption covers ONLY the
  * "spawns without a resolver" half: the package-manager half still applies,
  * and `tests/mutation-prover-lane.test.ts` asserts every listed prover is
- * discovered, spawns `cargo`, and names no JS spec (if it ever runs one, it
- * must resolve that runner like every other prover).
+ * discovered, spawns a non-JS toolchain (`NON_JS_TOOLCHAINS`), and names no
+ * JS spec (if it ever runs one, it must resolve that runner like every other
+ * prover).
+ *
+ * #2321 adds the operator's metric-scan prover, whose guards are `go test`
+ * targets in `packages/kn-next-operator` — the same category, a different
+ * toolchain. Its TS half lives in a separate, non-exempt prover on the shared
+ * driver, so this one names no JS spec either.
  */
 export const NON_JS_TEST_SUITE_PROVERS = Object.freeze([
   'scripts/mutation-prove-knext-ffi-crates.mjs',
+  'scripts/mutation-prove-2321-go-metric-contract.mjs',
 ]);
+
+/** The toolchains a `NON_JS_TEST_SUITE_PROVERS` entry may run its guards with. */
+export const NON_JS_TOOLCHAINS = Object.freeze(['cargo', 'go']);
 
 /**
  * Shared DRIVERS that call the harness's mutating verbs on a prover's behalf.
