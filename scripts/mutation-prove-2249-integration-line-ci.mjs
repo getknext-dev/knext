@@ -125,14 +125,14 @@ const MUTATIONS = [
     claim: 'supply-chain.yml file-manager Trivy step reverted to main-only enforcement',
     subject: 'sc',
     anchor: `base-image CVE can't block an unrelated PR, while every line stays gated.\n        ${ENFORCE}`,
-    replacement: `base-image CVE can't block an unrelated PR, while every line stays gated.\n        ${MAIN_ONLY}`,
+    replacement: `base-image CVE can't block an unrelated PR, while every line stays gated.\n        ${MAIN_ONLY} # ${MUTATION_MARKER}`,
   },
   {
     id: 'T9',
     claim: 'supply-chain.yml built-image Trivy step reverted to main-only enforcement',
     subject: 'sc',
     anchor: `rollout as the file-manager built-image gate.\n        ${ENFORCE}`,
-    replacement: `rollout as the file-manager built-image gate.\n        ${MAIN_ONLY}`,
+    replacement: `rollout as the file-manager built-image gate.\n        ${MAIN_ONLY} # ${MUTATION_MARKER}`,
   },
   {
     id: 'T10',
