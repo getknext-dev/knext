@@ -1,6 +1,8 @@
-import { describe, expect, it } from 'bun:test';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { afterAll, describe, expect, it } from 'bun:test';
+import { spawnSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
 import { parse } from 'yaml';
 import {
   ACK_BODY_PATTERN,
@@ -169,9 +171,10 @@ describe('diff parsing and acknowledgement', () => {
     ]);
   });
 
-  it('takes the DESTINATION path of a rename', () => {
+  it('takes BOTH the source and the destination path of a rename (round 2)', () => {
     expect(parseNameStatus('R100\told/path.ts\tnew/path.ts')).toEqual([
       { status: 'R', path: 'new/path.ts' },
+      { status: 'R', path: 'old/path.ts' },
     ]);
   });
 
@@ -555,6 +558,325 @@ describe('#2388 — path and content triggers merge into one entry per id', () =
     expect(merged).toEqual([
       { id: 'supply-chain', label: 'l', why: 'w', paths: ['security/a.json', 'scripts/b.mjs'] },
       { id: 'public-api', label: 'p', why: 'w', paths: ['packages/ffi/package.json'] },
+    ]);
+  });
+});
+/**
+ * #2388 round 2 — four misses the reviewer reproduced in a scratch repo, each of
+ * which exited 0. Each block proves the miss now fires and keeps a near miss quiet.
+ */
+const RELEASE_WF =
+  'on: push\npermissions:\n  id-token: write\njobs:\n  a:\n    steps:\n' +
+  '      - run: node scripts/pack-release-tarballs.mjs\n';
+
+describe('#2388 r2 — static relative imports of a release-path script are followed', () => {
+  const head = {
+    '.github/workflows/release.yml': RELEASE_WF,
+    'scripts/pack-release-tarballs.mjs':
+      "import { readFileSync } from 'node:fs';\nimport { parse } from 'yaml';\n" +
+      "import {\n  packGroup,\n} from './lib/pack-publishable-group.mjs';\n",
+    'scripts/lib/pack-publishable-group.mjs':
+      'import { globs } from "./workspace-globs.mjs";\nexport * from \'./ga-tarball-diff.mjs\';\n',
+    'scripts/lib/workspace-globs.mjs': 'export const globs = [];\n',
+    'scripts/lib/ga-tarball-diff.mjs': 'export const diff = 1;\n',
+    'scripts/lib/unrelated.mjs': 'export const u = 1;\n',
+  };
+
+  it('a direct import, a transitive import and a re-export all fire', () => {
+    const fired = classifyContent(
+      [
+        change('scripts/lib/pack-publishable-group.mjs'),
+        change('scripts/lib/workspace-globs.mjs'),
+        change('scripts/lib/ga-tarball-diff.mjs'),
+      ],
+      reader({ head }),
+    );
+    expect(sc(fired)).toEqual([
+      'scripts/lib/pack-publishable-group.mjs',
+      'scripts/lib/workspace-globs.mjs',
+      'scripts/lib/ga-tarball-diff.mjs',
+    ]);
+  });
+
+  it('require() and import() with a literal string are followed too', () => {
+    const r = reader({
+      head: {
+        ...head,
+        'scripts/pack-release-tarballs.mjs':
+          "const a = require('./lib/workspace-globs.mjs');\n" +
+          'const b = await import(`./lib/ga-tarball-diff.mjs`);\n',
+      },
+    });
+    const fired = classifyContent(
+      [change('scripts/lib/workspace-globs.mjs'), change('scripts/lib/ga-tarball-diff.mjs')],
+      r,
+    );
+    expect(sc(fired)).toEqual([
+      'scripts/lib/workspace-globs.mjs',
+      'scripts/lib/ga-tarball-diff.mjs',
+    ]);
+  });
+
+  it('a DELETED import target is read from the base tree and fires', () => {
+    const r = reader({
+      base: { 'scripts/lib/old.mjs': "import './older.mjs';\n", 'scripts/lib/older.mjs': '' },
+      head: {
+        ...head,
+        'scripts/pack-release-tarballs.mjs': "import './lib/old.mjs';\n",
+      },
+    });
+    const fired = classifyContent(
+      [change('scripts/lib/old.mjs', 'D'), change('scripts/lib/older.mjs', 'D')],
+      r,
+    );
+    expect(sc(fired)).toEqual(['scripts/lib/old.mjs', 'scripts/lib/older.mjs']);
+  });
+
+  it('a shell script or composite action the workflow runs is scanned for what IT runs', () => {
+    const r = reader({
+      head: {
+        '.github/workflows/release.yml':
+          'permissions:\n  id-token: write\njobs:\n  a:\n    steps:\n' +
+          '      - run: bash scripts/release.sh\n      - uses: ./.github/actions/sign\n',
+        'scripts/release.sh': 'node scripts/lib/workspace-globs.mjs\n',
+        '.github/actions/sign/action.yml':
+          'runs:\n  steps:\n    - run: node scripts/lib/ga-tarball-diff.mjs\n',
+        'scripts/lib/workspace-globs.mjs': '',
+        'scripts/lib/ga-tarball-diff.mjs': '',
+      },
+    });
+    const fired = classifyContent(
+      [change('scripts/lib/workspace-globs.mjs'), change('scripts/lib/ga-tarball-diff.mjs')],
+      r,
+    );
+    expect(sc(fired)).toEqual([
+      'scripts/lib/workspace-globs.mjs',
+      'scripts/lib/ga-tarball-diff.mjs',
+    ]);
+  });
+
+  it('near miss: a module nothing on the release path imports does not fire', () => {
+    expect(classifyContent([change('scripts/lib/unrelated.mjs')], reader({ head }))).toHaveLength(
+      0,
+    );
+  });
+
+  it('a NON-LITERAL dynamic import fails closed: any changed module fires, and says why', () => {
+    const r = reader({
+      head: { ...head, 'scripts/pack-release-tarballs.mjs': 'const m = await import(name);\n' },
+    });
+    const fired = classifyContent([change('scripts/lib/unrelated.mjs')], r);
+    const hit = fired.find((f: { id: string }) => f.id === 'supply-chain');
+    expect(hit?.paths).toEqual(['scripts/lib/unrelated.mjs']);
+    expect(hit?.why).toMatch(/non-literal/i);
+    expect(hit?.why).toContain('scripts/pack-release-tarballs.mjs');
+  });
+
+  it('a non-literal require() and an interpolated template also fail closed', () => {
+    for (const src of [
+      'const m = require(dir + "/x.mjs");\n',
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: the source text under test
+      'await import(`./lib/${n}.mjs`);\n',
+    ]) {
+      const r = reader({ head: { ...head, 'scripts/pack-release-tarballs.mjs': src } });
+      expect(sc(classifyContent([change('scripts/lib/unrelated.mjs')], r))).toEqual([
+        'scripts/lib/unrelated.mjs',
+      ]);
+    }
+  });
+
+  it('an unresolvable relative import fails closed and says why', () => {
+    const r = reader({
+      head: { ...head, 'scripts/pack-release-tarballs.mjs': "import './lib/missing.mjs';\n" },
+    });
+    const hit = classifyContent([change('scripts/lib/unrelated.mjs')], r).find(
+      (f: { id: string }) => f.id === 'supply-chain',
+    );
+    expect(hit?.paths).toEqual(['scripts/lib/unrelated.mjs']);
+    expect(hit?.why).toMatch(/unresolv/i);
+  });
+
+  it('near miss: an incomplete closure still does not fire on a non-module file', () => {
+    const r = reader({
+      head: { ...head, 'scripts/pack-release-tarballs.mjs': 'await import(name);\n' },
+    });
+    expect(classifyContent([change('docs/RELEASING.md')], r)).toHaveLength(0);
+  });
+
+  it('near miss: import()/require() mentioned on a COMMENT line is not a gap', () => {
+    // The real release path carries exactly this: a JSDoc line naming `import()`.
+    // Reading it as a non-literal import would fire on every PR that touches a module.
+    const r = reader({
+      head: {
+        ...head,
+        'scripts/pack-release-tarballs.mjs':
+          '/**\n * a lazy `import()`, which would bind tar\n */\n// require(x) is avoided\n' +
+          "/* import('./lib/missing.mjs') */\nexport const x = 1;\n",
+      },
+    });
+    expect(classifyContent([change('scripts/lib/unrelated.mjs')], r)).toHaveLength(0);
+  });
+});
+
+describe('#2388 r2 — renames and copies classify BOTH paths', () => {
+  const fromDiff = (line: string) => ids(classify(parseNameStatus(line)));
+
+  it('moving a CRD types file out of api/ fires', () => {
+    expect(
+      fromDiff('R100\tpackages/kn-next-operator/api/v1alpha1/foo_types.go\tdocs/foo_types.go.txt'),
+    ).toContain('crd');
+  });
+
+  it('moving a CLI file out of src/cli/ fires', () => {
+    expect(
+      fromDiff('R087\tpackages/kn-next/src/cli/deploy.ts\tpackages/kn-next/src/deploy.ts'),
+    ).toContain('cli-surface');
+  });
+
+  it('moving a security/*.json file out fires', () => {
+    expect(fromDiff('R100\tsecurity/npm-audit-allowlist.json\tdocs/allowlist.json')).toContain(
+      'supply-chain',
+    );
+  });
+
+  it('copying INTO scope fires on the destination', () => {
+    expect(fromDiff('C075\tdocs/x.json\tsecurity/x.json')).toContain('supply-chain');
+  });
+
+  it('moving a credential-bearing workflow out of .github/workflows fires', () => {
+    const r = reader({ base: { '.github/workflows/release.yml': SECRET_WF } });
+    const fired = classifyContent(
+      parseNameStatus('R100\t.github/workflows/release.yml\tdocs/release.yml.bak'),
+      r,
+    );
+    expect(sc(fired)).toEqual(['.github/workflows/release.yml']);
+  });
+
+  it('parses NUL-separated (-z) output, including a rename', () => {
+    expect(parseNameStatus('R100\0a b.ts\0c.ts\0M\0é.go\0')).toEqual([
+      { status: 'R', path: 'c.ts' },
+      { status: 'R', path: 'a b.ts' },
+      { status: 'M', path: 'é.go' },
+    ]);
+  });
+
+  it('a -z rename record missing its second path throws', () => {
+    expect(() => parseNameStatus('R100\0a.ts\0')).toThrow(/path/i);
+  });
+});
+
+describe('#2388 r2 — credential detection: write permissions and toJSON(secrets)', () => {
+  it('permissions: write-all is a credential', () => {
+    expect(workflowHoldsCredential('permissions: write-all\n')).toBe(true);
+  });
+
+  it('packages/contents/attestations/id-token: write are credentials, workflow or job level', () => {
+    for (const scope of ['packages', 'contents', 'attestations', 'id-token']) {
+      expect(workflowHoldsCredential(`permissions:\n  ${scope}: write\n`)).toBe(true);
+      expect(
+        workflowHoldsCredential(`jobs:\n  a:\n    permissions:\n      ${scope}: 'write'\n`),
+      ).toBe(true);
+    }
+  });
+
+  it('toJSON(secrets) is a credential (case-insensitive, any spacing)', () => {
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: workflow expression text
+    expect(workflowHoldsCredential('env:\n  ALL: ${{ toJSON(secrets) }}\n')).toBe(true);
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: workflow expression text
+    expect(workflowHoldsCredential('env:\n  ALL: ${{ tojson( secrets ) }}\n')).toBe(true);
+  });
+
+  it('near miss: read scopes, read-all and other write scopes are not credentials here', () => {
+    expect(
+      workflowHoldsCredential(
+        'permissions: read-all\njobs:\n  a:\n    permissions:\n' +
+          '      contents: read\n      pull-requests: write\n      issues: write\n',
+      ),
+    ).toBe(false);
+  });
+});
+
+describe('#2388 r2 — the CLI sees non-ASCII and renamed paths end to end', () => {
+  const SCRIPT = resolve(import.meta.dirname, '../scripts/check-escalation-triggers.mjs');
+  const tempRoots: string[] = [];
+  afterAll(() => {
+    for (const d of tempRoots) rmSync(d, { recursive: true, force: true });
+  });
+
+  function scratchRepo(files: Record<string, string>) {
+    const root = mkdtempSync(join(tmpdir(), 'knext-escalation-cli-'));
+    tempRoots.push(root);
+    const g = (...a: string[]) => {
+      const r = spawnSync(
+        'git',
+        ['-c', 'user.name=t', '-c', 'user.email=t@t', '-c', 'commit.gpgsign=false', ...a],
+        { cwd: root, encoding: 'utf8' },
+      );
+      if (r.status !== 0) throw new Error(`git ${a.join(' ')}: ${r.stderr}`);
+    };
+    g('init', '-q', '-b', 'main');
+    g('config', 'core.quotepath', 'true');
+    for (const [p, c] of Object.entries(files)) {
+      mkdirSync(dirname(join(root, p)), { recursive: true });
+      writeFileSync(join(root, p), c);
+    }
+    g('add', '-A');
+    g('commit', '-q', '-m', 'base');
+    g('switch', '-q', '-c', 'pr');
+    return { root, g };
+  }
+
+  const run = (root: string) =>
+    spawnSync('node', [SCRIPT, '--base', 'main', '--head', 'HEAD', '--json'], {
+      cwd: root,
+      encoding: 'utf8',
+    });
+
+  it('a non-ASCII CRD types path (git would C-quote it) fires', () => {
+    const { root, g } = scratchRepo({ 'README.md': 'x\n' });
+    const p = 'api/v1alpha1/é_types.go';
+    mkdirSync(join(root, 'api/v1alpha1'), { recursive: true });
+    writeFileSync(join(root, p), 'package v1alpha1\n');
+    g('add', '-A');
+    g('commit', '-q', '-m', 'add');
+    const r = run(root);
+    expect(r.status).toBe(1);
+    const out = JSON.parse(r.stdout);
+    expect(out.fired.find((f: { id: string }) => f.id === 'crd')?.paths).toEqual([p]);
+  });
+
+  it('renaming a CRD types file out of api/ fires', () => {
+    const body = 'package v1alpha1\n\n// a body long enough for rename detection\n'.repeat(4);
+    const { root, g } = scratchRepo({ 'api/v1alpha1/foo_types.go': body });
+    mkdirSync(join(root, 'docs'));
+    g('mv', 'api/v1alpha1/foo_types.go', 'docs/foo.go.txt');
+    g('commit', '-q', '-m', 'move');
+    const r = run(root);
+    expect(r.status).toBe(1);
+    const out = JSON.parse(r.stdout);
+    expect(out.fired.find((f: { id: string }) => f.id === 'crd')?.paths).toEqual([
+      'api/v1alpha1/foo_types.go',
+    ]);
+  });
+
+  it('a script a local action runs, imported transitively, fires (the reader sees trees as dirs)', () => {
+    // `git cat-file -e ref:dir` succeeds for a TREE, so a reader that only checks
+    // existence treats the action directory as a file and never opens action.yml.
+    const { root, g } = scratchRepo({
+      '.github/workflows/release.yml':
+        // biome-ignore lint/suspicious/noTemplateCurlyInString: workflow expression text
+        'env:\n  T: ${{ secrets.NPM_TOKEN }}\njobs:\n  a:\n    steps:\n      - uses: ./.github/actions/sign\n',
+      '.github/actions/sign/action.yml': 'runs:\n  steps:\n    - run: node scripts/sign.mjs\n',
+      'scripts/sign.mjs': "import './lib/key.mjs';\n",
+      'scripts/lib/key.mjs': 'export const k = 1;\n',
+    });
+    writeFileSync(join(root, 'scripts/lib/key.mjs'), 'export const k = 2;\n');
+    g('commit', '-q', '-am', 'edit');
+    const r = run(root);
+    expect(r.status).toBe(1);
+    const out = JSON.parse(r.stdout);
+    expect(out.fired.find((f: { id: string }) => f.id === 'supply-chain')?.paths).toEqual([
+      'scripts/lib/key.mjs',
     ]);
   });
 });

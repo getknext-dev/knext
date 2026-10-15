@@ -43,6 +43,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { appendFileSync } from 'node:fs';
+import { posix } from 'node:path';
 
 /** The label that records "a human/agent consciously noted this trigger". */
 export const ACK_LABEL = 'trigger:acknowledged';
@@ -155,10 +156,16 @@ export const LOW_PRIVILEGE_SECRETS = new Set(['GITHUB_TOKEN', 'CODECOV_TOKEN']);
  * Does this workflow put a credential in scope? Scanned as text, so it cannot be
  * defeated by a YAML shape the scanner does not model: any `secrets.<NAME>` other than
  * the low-privilege set, any `secrets[...]` index expression (name unknowable → fail
- * closed), or `id-token: write` (OIDC federation / keyless signing).
+ * closed), `toJSON(secrets)` (every secret, serialised), `id-token: write` (OIDC
+ * federation / keyless signing), or a write grant that can publish or push —
+ * `permissions: write-all`, or `packages`/`contents`/`attestations: write` at
+ * workflow or job level (#2388 round 2).
  */
 export function workflowHoldsCredential(text) {
   if (/id-token\s*:\s*['"]?write/.test(text)) return true;
+  if (/permissions\s*:\s*['"]?write-all/.test(text)) return true;
+  if (/(?:^|[\s{,])(?:packages|contents|attestations)\s*:\s*['"]?write\b/m.test(text)) return true;
+  if (/toJSON\s*\(\s*secrets\s*\)/i.test(text)) return true;
   if (/secrets\s*\[/.test(text)) return true;
   for (const m of text.matchAll(/secrets\.([A-Za-z0-9_-]+)/g)) {
     if (!LOW_PRIVILEGE_SECRETS.has(m[1])) return true;
@@ -183,6 +190,100 @@ export function referencedPaths(text) {
 }
 
 const WORKFLOW = /^\.github\/workflows\/[^/]+\.ya?ml$/;
+
+/** Files whose imports are followed, and the extensions a bare relative specifier may omit. */
+const MODULE_FILE = /\.(?:[cm]?[jt]s|[jt]sx)$/;
+const RESOLVE_EXTS = ['.mjs', '.js', '.cjs', '.ts', '.mts', '.cts', '.tsx', '.jsx', '.json'];
+
+/** `import … from '…'`, side-effect `import '…'`, and `export … from '…'`. */
+const STATIC_IMPORT = /\b(?:import|export)\s+(?:[\w*{}\s,$]+?\s+from\s+)?(['"])([^'"\n]+)\1/g;
+/** `import(…)` and `require(…)` — the argument is inspected separately. */
+const CALL_IMPORT = /\b(import|require)\s*\(/g;
+const LITERAL_ARG = /^\s*(?:(['"])([^'"\n]*)\1|`([^`$]*)`)\s*[,)]/;
+
+/**
+ * The module edges of one source file: every specifier, plus a description of each
+ * `import(…)`/`require(…)` whose argument is NOT a string literal. Scanned as text,
+ * and a call it cannot read as a literal is reported rather than skipped (#2388
+ * round 2).
+ *
+ * Whole COMMENT lines (trimmed start `//`, `/*` or `*`) are blanked first: the real
+ * release path documents `import()` in a JSDoc line, and reading that as a call
+ * would fire on every PR touching a module. Deliberately line-based rather than a
+ * tokenizer — a mis-tokenised regex literal could swallow real code and fail OPEN;
+ * a trailing comment or a string that mentions `import(` is still scanned.
+ */
+export function moduleEdges(source) {
+  const text = source.replace(/^[ \t]*(?:\/\/|\/\*|\*).*$/gm, '');
+  const specs = [];
+  const nonLiteral = [];
+  for (const m of text.matchAll(STATIC_IMPORT)) specs.push(m[2]);
+  for (const m of text.matchAll(CALL_IMPORT)) {
+    const rest = text.slice(m.index + m[0].length);
+    const lit = LITERAL_ARG.exec(rest);
+    if (lit) specs.push(lit[2] ?? lit[3]);
+    else nonLiteral.push(`${m[1]}(${rest.slice(0, 40).split('\n')[0].trim()}`);
+  }
+  return { specs, nonLiteral };
+}
+
+/** Resolve a relative specifier against the importing file; null when nothing matches. */
+function resolveRelative(fromFile, spec, exists) {
+  const target = posix.normalize(posix.join(posix.dirname(fromFile), spec));
+  if (target.startsWith('../')) return null;
+  const candidates = [
+    target,
+    ...RESOLVE_EXTS.map((e) => `${target}${e}`),
+    ...RESOLVE_EXTS.map((e) => `${target}/index${e}`),
+  ];
+  if (/\.[cm]?js$/.test(target)) candidates.push(target.replace(/js$/, 'ts'));
+  return candidates.find(exists) ?? null;
+}
+
+/**
+ * Everything a credential-bearing workflow can execute, transitively (#2388 round 2):
+ * the scripts and local actions it names, every file inside those actions, what any
+ * non-module file among them (a shell script, an `action.yml`) names in turn, and
+ * every static relative import of every module reached. Files are read from the head
+ * tree, falling back to the base tree, so a deleted import target is still followed.
+ *
+ * `gaps` lists every edge that could not be followed — a non-literal `import()` /
+ * `require()`, or a relative specifier that resolves to nothing. A non-empty `gaps`
+ * means the closure is INCOMPLETE and the caller must fail closed.
+ */
+export function releaseClosure(seeds, read, listUnder) {
+  const closure = new Set();
+  const gaps = [];
+  const queue = [];
+  const add = (p) => {
+    if (closure.has(p)) return;
+    closure.add(p);
+    queue.push(p);
+  };
+  const addNamed = (p) => {
+    if (read(p) !== null) add(p);
+    else for (const f of listUnder(`${p}/`)) add(f); // a local action directory
+  };
+  for (const s of seeds) addNamed(s);
+  while (queue.length > 0) {
+    const file = queue.shift();
+    const text = read(file);
+    if (text === null) continue;
+    if (MODULE_FILE.test(file)) {
+      const { specs, nonLiteral } = moduleEdges(text);
+      for (const n of nonLiteral) gaps.push(`${file}: non-literal ${n}`);
+      for (const spec of specs) {
+        if (!spec.startsWith('./') && !spec.startsWith('../')) continue; // bare / node: builtin
+        const target = resolveRelative(file, spec, (p) => read(p) !== null);
+        if (target === null) gaps.push(`${file}: unresolvable import '${spec}'`);
+        else add(target);
+      }
+    } else if (!file.endsWith('.json')) {
+      for (const p of referencedPaths(text)) addNamed(p);
+    }
+  }
+  return { closure, gaps };
+}
 const PACKAGE_MANIFEST = /^packages\/[^/]+\/package\.json$/;
 
 /**
@@ -226,16 +327,32 @@ export function classifyContent(changes, repo) {
     .map((p) => repo.show('head', p))
     .filter((text) => text !== null && workflowHoldsCredential(text));
   const runByCredential = new Set(credentialWorkflows.flatMap(referencedPaths));
+  const cache = new Map();
+  const read = (p) => {
+    if (!cache.has(p)) cache.set(p, repo.show('head', p) ?? repo.show('base', p));
+    return cache.get(p);
+  };
+  const { closure, gaps } = releaseClosure(runByCredential, read, (prefix) =>
+    repo.listHead(prefix),
+  );
   const runs = (p) =>
     runByCredential.has(p) ||
+    closure.has(p) ||
     [...runByCredential].some((r) => r.startsWith('.github/actions/') && p.startsWith(`${r}/`));
 
   const supplyHits = [];
+  let unprovable = false;
   for (const c of changes) {
+    if (supplyHits.includes(c.path)) continue;
     if (WORKFLOW.test(c.path)) {
       const sides = [repo.show('base', c.path), repo.show('head', c.path)];
       if (sides.some((t) => t !== null && workflowHoldsCredential(t))) supplyHits.push(c.path);
     } else if (runs(c.path)) {
+      supplyHits.push(c.path);
+    } else if (gaps.length > 0 && (MODULE_FILE.test(c.path) || c.path.endsWith('.json'))) {
+      // Fail closed: with an edge we could not follow, no changed module can be
+      // proven OFF the release path.
+      unprovable = true;
       supplyHits.push(c.path);
     }
   }
@@ -243,7 +360,11 @@ export function classifyContent(changes, repo) {
     fired.push({
       id: 'supply-chain',
       label: 'the supply chain',
-      why: SUPPLY_CHAIN_WHY,
+      why:
+        SUPPLY_CHAIN_WHY +
+        (unprovable
+          ? ` (the release-path import closure is INCOMPLETE — ${gaps.join('; ')} — so a changed module cannot be proven off it)`
+          : ''),
       paths: supplyHits,
     });
   }
@@ -276,25 +397,51 @@ export function mergeFired(a, b) {
 const GIT_STATUSES = new Set(['A', 'B', 'C', 'D', 'M', 'R', 'T', 'U', 'X']);
 
 /**
- * Parse `git diff --name-status` output into {status, path} records. Unknown input
- * THROWS (#2388): a line this parser does not understand must fail the check, not be
- * silently classified as "nothing to see".
+ * Parse `git diff --name-status` output into {status, path} records — either the
+ * NUL-separated `-z` form (what the CLI uses, so non-ASCII paths are never C-quoted)
+ * or the tab/newline form. Unknown input THROWS (#2388): a record this parser does
+ * not understand must fail the check, not be silently classified as "nothing to see".
+ *
+ * A rename or copy yields TWO records, destination then source (#2388 round 2):
+ * moving a file OUT of a trigger-class path changes that surface as surely as
+ * editing it does.
  */
 export function parseNameStatus(text) {
-  return text
-    .split('\n')
-    .map((l) => l.trim())
-    .filter(Boolean)
-    .map((l) => {
+  const records = [];
+  if (text.includes('\0')) {
+    const tokens = text.split('\0');
+    while (tokens.length > 0 && tokens[tokens.length - 1] === '') tokens.pop();
+    for (let i = 0; i < tokens.length; ) {
+      const status = tokens[i++];
+      const n = pathCount(status);
+      records.push([status, tokens.slice(i, i + n)]);
+      i += n;
+    }
+  } else {
+    for (const l of text.split('\n').map((x) => x.trim())) {
+      if (!l) continue;
       const [status, ...rest] = l.split('\t');
-      if (!GIT_STATUSES.has(status[0])) {
-        throw new Error(`unknown git name-status "${status}" in line: ${l}`);
-      }
-      // rename/copy lines carry two paths; the DESTINATION is what matters here
-      const path = rest[rest.length - 1];
-      if (!path) throw new Error(`name-status line has no path: ${l}`);
-      return { status: status[0], path };
-    });
+      records.push([status, rest]);
+    }
+  }
+  return records.flatMap(([status, paths]) => {
+    const n = pathCount(status);
+    if (paths.length < n || paths.some((p) => !p)) {
+      throw new Error(`name-status record has no path: ${[status, ...paths].join(' ')}`);
+    }
+    return paths
+      .slice(0, n)
+      .reverse()
+      .map((path) => ({ status: status[0], path }));
+  });
+}
+
+/** How many paths a status letter carries: two for a rename/copy, else one. */
+function pathCount(status) {
+  if (!status || !GIT_STATUSES.has(status[0])) {
+    throw new Error(`unknown git name-status "${status}"`);
+  }
+  return status[0] === 'R' || status[0] === 'C' ? 2 : 1;
 }
 
 /**
@@ -351,16 +498,23 @@ function gitReader(baseRef, headRef) {
   const refs = { base: baseRef, head: headRef };
   return {
     show(side, path) {
+      // `cat-file -t`, not `-e`: `-e` also succeeds for a TREE, which made a local
+      // action directory read as a "file" whose action.yml was never opened.
+      let type;
       try {
-        execFileSync('git', ['cat-file', '-e', `${refs[side]}:${path}`], { stdio: 'ignore' });
+        type = execFileSync('git', ['cat-file', '-t', `${refs[side]}:${path}`], {
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'ignore'],
+        }).trim();
       } catch {
         return null;
       }
+      if (type !== 'blob') return null;
       return git(['show', `${refs[side]}:${path}`]);
     },
     listHead(prefix) {
-      return git(['ls-tree', '-r', '--name-only', headRef, '--', prefix])
-        .split('\n')
+      return git(['ls-tree', '-r', '-z', '--name-only', headRef, '--', prefix])
+        .split('\0')
         .filter(Boolean);
     },
   };
@@ -403,7 +557,8 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     process.exit(2);
   }
 
-  const changes = parseNameStatus(git(['diff', '--name-status', `${base}...${head}`]));
+  // `-z`: NUL-separated and never C-quoted, so a non-ASCII path is classified as itself.
+  const changes = parseNameStatus(git(['diff', '-z', '--name-status', `${base}...${head}`]));
   // The diff is three-dot (against the merge base), so the "before" side of a
   // content comparison is the merge base too, not the tip of `base`.
   const mergeBase = git(['merge-base', base, head]).trim();
