@@ -7,6 +7,7 @@ package rpc
 import (
 	"context"
 	"errors"
+	"io"
 	"iter"
 	"log/slog"
 	"net"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect/v2"
+	"connectrpc.com/connect/v2/connectgzip"
 	"connectrpc.com/connect/v2/connecthttp"
 	"connectrpc.com/grpchealth/v2"
 	"connectrpc.com/otelconnect"
@@ -25,11 +27,54 @@ import (
 	"example.com/function/internal/items"
 )
 
-// MaxRequestBytes bounds one request message.
+// MaxRequestBytes bounds one request message, both as sent and after it is
+// decompressed.
 const MaxRequestBytes = 4 << 20
+
+// MaxRequestBodyBytes bounds a whole request body as read off the wire: one
+// message at MaxRequestBytes plus its framing. The server stops reading a
+// longer body there instead of draining it.
+const MaxRequestBodyBytes = MaxRequestBytes + 64<<10
+
+// The HTTP server's timeouts. ReadTimeout cuts off a request body that stops
+// arriving. Over HTTP/1.1 it also bounds the whole call (net/http cancels the
+// call's context once the connection's read deadline passes); over h2c, the
+// zone's transport, it bounds only the body.
+const (
+	ReadHeaderTimeout = 10 * time.Second
+	ReadTimeout       = 30 * time.Second
+	IdleTimeout       = 120 * time.Second
+)
 
 // ShutdownGrace is how long in-flight calls get to finish after SIGTERM.
 const ShutdownGrace = 25 * time.Second
+
+// boundedGzip is gzip whose decompressed stream ends one byte past limit.
+// connect-go reads limit+1 bytes to detect an oversized message and then
+// drains the decompressor to report its size; ending the stream there makes
+// that drain free, so a small compressed body cannot cost the server
+// gigabytes of inflating (the health Check takes a body with no token).
+func boundedGzip(limit int64) connect.Compressor {
+	return limitedDecompressor{Compressor: connectgzip.New(), limit: limit}
+}
+
+type limitedDecompressor struct {
+	*connectgzip.Compressor
+	limit int64
+}
+
+func (c limitedDecompressor) Decompress(src io.Reader) (io.ReadCloser, error) {
+	r, err := c.Compressor.Decompress(src)
+	if err != nil {
+		return nil, err
+	}
+	return limitedReadCloser{Reader: io.LimitReader(r, c.limit+1), Closer: r}, nil
+}
+
+type limitedReadCloser struct {
+	io.Reader
+	io.Closer
+}
 
 // Config is the function's runtime configuration.
 type Config struct {
@@ -86,7 +131,10 @@ func newFunction(cfg Config, verifier auth.Verifier) (*Function, error) {
 	grpchealth.Register(rpc, grpchealth.NewStaticChecker(examplev1connect.ExampleServiceName))
 
 	mux := http.NewServeMux()
-	connecthttp.Mount(mux, rpc, connecthttp.WithReadMaxBytes(MaxRequestBytes))
+	connecthttp.Mount(mux, rpc,
+		connecthttp.WithReadMaxBytes(MaxRequestBytes),
+		connecthttp.WithCompressors(boundedGzip(MaxRequestBytes)),
+	)
 
 	protocols := new(http.Protocols)
 	protocols.SetHTTP1(true)
@@ -98,10 +146,11 @@ func newFunction(cfg Config, verifier auth.Verifier) (*Function, error) {
 	return &Function{
 		HTTP: &http.Server{
 			Addr:              addr,
-			Handler:           mux,
+			Handler:           http.MaxBytesHandler(mux, MaxRequestBodyBytes),
 			Protocols:         protocols,
-			ReadHeaderTimeout: 10 * time.Second,
-			IdleTimeout:       120 * time.Second,
+			ReadHeaderTimeout: ReadHeaderTimeout,
+			ReadTimeout:       ReadTimeout,
+			IdleTimeout:       IdleTimeout,
 		},
 		rpc:    rpc,
 		logger: logger,

@@ -101,6 +101,7 @@ func protocols() []protocol {
 		{"connect+json over h2c", h2cClient(), []connecthttp.Option{connecthttp.WithProtoJSON()}},
 		{"connect GET over h2c", h2cClient(), []connecthttp.Option{connecthttp.WithHTTPGet()}},
 		{"connect+proto over HTTP/1.1", http1Client(), nil},
+		{"connect+proto gzip over h2c", h2cClient(), []connecthttp.Option{connecthttp.WithSendGzip()}},
 		{"grpc over h2c", h2cClient(), []connecthttp.Option{connecthttp.WithGRPC()}},
 		{"grpc-web over HTTP/1.1", http1Client(), []connecthttp.Option{connecthttp.WithGRPCWeb()}},
 	}
@@ -281,8 +282,20 @@ func TestHTTPServerSettings(t *testing.T) {
 	if s.Protocols == nil || !s.Protocols.UnencryptedHTTP2() || !s.Protocols.HTTP1() {
 		t.Errorf("Protocols = %v; want h2c and HTTP/1.1", s.Protocols)
 	}
-	if s.ReadHeaderTimeout <= 0 || s.IdleTimeout <= 0 {
-		t.Errorf("ReadHeaderTimeout = %v, IdleTimeout = %v; want both set", s.ReadHeaderTimeout, s.IdleTimeout)
+	for _, d := range []struct {
+		name      string
+		got, want time.Duration
+	}{
+		{"ReadHeaderTimeout", s.ReadHeaderTimeout, ReadHeaderTimeout},
+		{"ReadTimeout", s.ReadTimeout, ReadTimeout},
+		{"IdleTimeout", s.IdleTimeout, IdleTimeout},
+	} {
+		if d.got <= 0 || d.got != d.want {
+			t.Errorf("%s = %v; want %v", d.name, d.got, d.want)
+		}
+	}
+	if ReadTimeout <= ReadHeaderTimeout {
+		t.Errorf("ReadTimeout = %v; want above ReadHeaderTimeout (%v)", ReadTimeout, ReadHeaderTimeout)
 	}
 }
 
