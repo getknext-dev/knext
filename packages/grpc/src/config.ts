@@ -28,6 +28,14 @@ export interface GrpcConfig {
   readonly deadlineMs: number;
   /** The zone's gateway (request) timeout; the deadline must be shorter. */
   readonly gatewayTimeoutSeconds: number;
+  /**
+   * The app's authorize() hook: a module path relative to the app root
+   * (`.ts`, `.tsx`, `.js` or `.jsx`) exporting
+   * `authorize(ctx): Principal | Promise<Principal>`. Every generated query,
+   * action and stream for an `AUTH_USER` RPC calls it before anything else,
+   * and `knext generate` refuses to run without it.
+   */
+  readonly authorize?: string;
   readonly functions: Readonly<Record<string, FunctionEntry>>;
 }
 
@@ -44,7 +52,10 @@ export class GrpcUsageError extends Error {
   override name = 'GrpcUsageError';
 }
 
-const KEYS = new Set(Object.keys(DEFAULT_CONFIG));
+const KEYS = new Set([...Object.keys(DEFAULT_CONFIG), 'authorize']);
+
+/** Extensions an authorize() module may have; the generated import drops it. */
+export const AUTHORIZE_EXTENSIONS = ['.ts', '.tsx', '.js', '.jsx'] as const;
 
 /** Names a function may not take: `knext` would land in the options contract's package. */
 const RESERVED_NAMES = new Set(['knext']);
@@ -77,6 +88,18 @@ export function urlEnvFor(functionName: string): string {
   return `${functionName.toUpperCase().replaceAll('-', '_')}_SERVICE_URL`;
 }
 
+/**
+ * The suffix of the variable holding the contract version a function SERVES,
+ * which the operator renders into the zone beside `<NAME>_SERVICE_URL`. This
+ * name is a contract with the operator: change it in both places or neither.
+ */
+export const SERVICE_PROTO_VERSION_SUFFIX = '_SERVICE_PROTO_VERSION';
+
+/** `user-profile` -> `USER_PROFILE_SERVICE_PROTO_VERSION`. */
+export function protoVersionEnvFor(functionName: string): string {
+  return `${functionName.toUpperCase().replaceAll('-', '_')}${SERVICE_PROTO_VERSION_SUFFIX}`;
+}
+
 function relativeDir(key: string, value: unknown): string {
   if (typeof value !== 'string' || value === '' || value.startsWith('/') || value.includes('..')) {
     throw new GrpcUsageError(
@@ -106,6 +129,28 @@ function outDir(value: unknown): string {
   if (norm.split('/').some((s) => s.toLowerCase() === 'node_modules')) {
     throw new GrpcUsageError(problem);
   }
+  return norm;
+}
+
+/**
+ * The authorize() module: a relative file path inside the app, outside
+ * node_modules, with one of {@link AUTHORIZE_EXTENSIONS}.
+ */
+function authorizePath(value: unknown): string {
+  const problem =
+    `${CONFIG_FILE}: "authorize" must be the path of your authorize() module inside the app ` +
+    `(${AUTHORIZE_EXTENSIONS.join(', ')}), for example "src/knext/authorize.ts"`;
+  if (typeof value !== 'string' || value.trim() === '' || /[\\,=\s]/.test(value)) {
+    throw new GrpcUsageError(problem);
+  }
+  const norm = posix.normalize(value);
+  if (posix.isAbsolute(value) || norm.startsWith('../') || norm === '..' || norm !== value) {
+    throw new GrpcUsageError(problem);
+  }
+  if (norm.split('/').some((s) => s.toLowerCase() === 'node_modules')) {
+    throw new GrpcUsageError(problem);
+  }
+  if (!AUTHORIZE_EXTENSIONS.some((ext) => norm.endsWith(ext))) throw new GrpcUsageError(problem);
   return norm;
 }
 
@@ -145,6 +190,7 @@ export function parseConfig(raw: unknown): GrpcConfig {
     out: outDir(obj.out ?? DEFAULT_CONFIG.out),
     deadlineMs: num('deadlineMs'),
     gatewayTimeoutSeconds: num('gatewayTimeoutSeconds'),
+    ...(obj.authorize === undefined ? {} : { authorize: authorizePath(obj.authorize) }),
     functions,
   };
 }
@@ -179,6 +225,7 @@ export function serializeConfig(config: GrpcConfig): string {
       out: config.out,
       deadlineMs: config.deadlineMs,
       gatewayTimeoutSeconds: config.gatewayTimeoutSeconds,
+      ...(config.authorize === undefined ? {} : { authorize: config.authorize }),
       functions,
     },
     null,

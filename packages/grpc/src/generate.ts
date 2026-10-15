@@ -49,7 +49,8 @@ import { protocGenEs } from '@bufbuild/protoc-gen-es/dist/cjs/src/protoc-gen-es-
 import type { Plugin } from '@bufbuild/protoplugin';
 import { BaselineUnavailableError, type DeployedBaselineSource, resolveBaseline } from './baseline';
 import { BufIntegrityError, runBuf } from './buf';
-import { type GrpcConfig, GrpcUsageError, loadConfig } from './config';
+import { AUTHORIZE_EXTENSIONS, type GrpcConfig, GrpcUsageError, loadConfig } from './config';
+import { knextGluePlugin } from './glue-plugin';
 import { knextClientPlugin } from './plugin';
 import { checkBudget } from './policy';
 
@@ -82,6 +83,19 @@ export function generateFiles(
   const budget = checkBudget(config.deadlineMs, gatewayTimeoutMs);
   if (budget) throw new GrpcUsageError(`knext.grpc.json: ${budget}`);
 
+  let glueParameter = 'target=ts';
+  if (config.authorize !== undefined) {
+    if (!existsSync(join(cwd, config.authorize))) {
+      throw new GrpcUsageError(
+        `knext.grpc.json: "authorize" names ${config.authorize}, which does not exist. ` +
+          'Create it (it exports authorize()), or point "authorize" at your module',
+      );
+    }
+    const ext = AUTHORIZE_EXTENSIONS.find((e) => config.authorize?.endsWith(e)) ?? '';
+    const module = posix.relative(config.out, config.authorize.slice(0, -ext.length));
+    glueParameter += `,authorize=${module}`;
+  }
+
   const all = buildImage(cwd, false);
   const own = buildImage(cwd, true).map((f) => f.name ?? '');
   const runs: [Plugin, string][] = [
@@ -90,6 +104,7 @@ export function generateFiles(
       knextClientPlugin,
       `target=ts,deadline_ms=${config.deadlineMs},gateway_timeout_ms=${gatewayTimeoutMs}`,
     ],
+    [knextGluePlugin, glueParameter],
   ];
   const files = new Map<string, string>();
   for (const [plugin, parameter] of runs) {

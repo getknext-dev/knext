@@ -47,7 +47,12 @@ describe('knext generate — byte-stable output', () => {
     expect([...treeA.keys()]).toEqual([
       '.knext-generated.json',
       'knext/v1/options_pb.ts',
+      'orders/v1/catalog_knext.ts',
+      'orders/v1/catalog_knext_server.ts',
+      'orders/v1/catalog_pb.ts',
       'orders/v1/orders_knext.ts',
+      'orders/v1/orders_knext_actions.ts',
+      'orders/v1/orders_knext_server.ts',
       'orders/v1/orders_pb.ts',
     ]);
     expect(treeB).toEqual(treeA);

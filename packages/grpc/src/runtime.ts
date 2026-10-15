@@ -14,8 +14,12 @@
  * - every call carries `knext-contract-version`, the contract version the zone
  *   was generated against, so a function can tell it is older than its zone;
  * - the endpoint is read from the operator-injected `<NAME>_SERVICE_URL` at
- *   call time, never baked in. HTTP/2 cleartext (h2c) by default;
- *   `<NAME>_SERVICE_HTTP_VERSION=1.1` switches one binding to HTTP/1.1.
+ *   call time, never baked in. HTTP/2 cleartext (h2c) by default on a Node
+ *   gateway. On a Bun gateway the default falls back to HTTP/1.1, because
+ *   Bun's HTTP/2 client is not verified for Connect. `<NAME>_SERVICE_HTTP_VERSION`
+ *   (`2` or `1.1`) overrides either default for one binding. The transport
+ *   chosen for each binding is logged once, by name;
+ * - a call made with a `token` carries it as `authorization: Bearer <token>`.
  *
  * The policy kinds in a definition are checked against the service
  * descriptor when the client is defined: a definition that would retry a
@@ -59,6 +63,8 @@ export interface FunctionClientDefinition<
 export interface CallOptions {
   readonly signal?: AbortSignal;
   readonly headers?: HeadersInit;
+  /** The per-call identity token, sent as `authorization: Bearer <token>`. */
+  readonly token?: string;
 }
 
 export interface WriteCallOptions extends CallOptions {
@@ -93,10 +99,81 @@ export interface RuntimeDeps {
   readonly createTransport?: (baseUrl: string, httpVersion: HttpVersion) => Transport;
   readonly sleep?: (ms: number) => Promise<void>;
   readonly now?: () => number;
+  /** Is this gateway running on Bun? Defaults to `process.versions.bun`. */
+  readonly isBun?: boolean;
+  /** Where the one-line transport notice goes. Defaults to `console.info`. */
+  readonly log?: (line: string) => void;
 }
 
 export const IDEMPOTENCY_KEY_HEADER = 'idempotency-key';
 export const CONTRACT_VERSION_HEADER = 'knext-contract-version';
+export const AUTHORIZATION_HEADER = 'authorization';
+
+/** Is the current process Bun? */
+export function runningOnBun(): boolean {
+  return typeof process !== 'undefined' && typeof process.versions?.bun === 'string';
+}
+
+/**
+ * Bindings whose transport notice was logged, by `<fn> <version> <url>`: once
+ * per binding per process, however many services or module copies use it.
+ */
+const ANNOUNCED_KEY = Symbol.for('knext.grpc.announcedTransports');
+const anchor = globalThis as Record<symbol, unknown>;
+if (!(anchor[ANNOUNCED_KEY] instanceof Set)) anchor[ANNOUNCED_KEY] = new Set<string>();
+const announced = anchor[ANNOUNCED_KEY] as Set<string>;
+
+export interface TransportChoice {
+  readonly httpVersion: HttpVersion;
+  /** The one-line notice naming the transport and why it was chosen. */
+  readonly notice: string;
+}
+
+/**
+ * Pick the HTTP version for one binding. An explicit
+ * `<NAME>_SERVICE_HTTP_VERSION` wins. Otherwise a Node gateway uses h2c, and a
+ * Bun gateway falls back to HTTP/1.1: Bun's HTTP/2 client is not verified for
+ * Connect, and Connect carries unary and server-streaming calls over HTTP/1.1.
+ * Throws a FAILED_PRECONDITION on a value other than `2` or `1.1`.
+ */
+export function chooseTransport(opts: {
+  readonly fn: string;
+  readonly url: string;
+  readonly versionEnv: string;
+  readonly explicit: string | undefined;
+  readonly isBun: boolean;
+}): TransportChoice {
+  const { fn, url, versionEnv, explicit, isBun } = opts;
+  if (explicit !== undefined && explicit !== '2' && explicit !== '1.1') {
+    throw new ConnectError(`${versionEnv} must be "2" or "1.1"`, Code.FailedPrecondition);
+  }
+  const http2Name = url.startsWith('https:') ? 'HTTP/2 over TLS' : 'h2c (HTTP/2 cleartext)';
+  const gateway = isBun ? 'Bun' : 'Node';
+  if (explicit === '2') {
+    return {
+      httpVersion: '2',
+      notice: `knext: ${fn} function: transport ${http2Name}, set by ${versionEnv}=2 (${gateway} gateway)`,
+    };
+  }
+  if (explicit === '1.1') {
+    return {
+      httpVersion: '1.1',
+      notice: `knext: ${fn} function: transport HTTP/1.1, set by ${versionEnv}=1.1 (${gateway} gateway)`,
+    };
+  }
+  if (isBun) {
+    return {
+      httpVersion: '1.1',
+      notice:
+        `knext: ${fn} function: transport HTTP/1.1, falling back from h2c on a Bun gateway ` +
+        `(Bun's HTTP/2 client is not verified for Connect; set ${versionEnv}=2 to use h2c)`,
+    };
+  }
+  return {
+    httpVersion: '2',
+    notice: `knext: ${fn} function: transport ${http2Name} (Node gateway default)`,
+  };
+}
 
 const MAX_READ_ATTEMPTS = 5;
 const RETRY_BACKOFF_MS = 100;
@@ -173,6 +250,11 @@ export function defineFunctionClient<S extends DescService, P extends MethodPoli
   const makeTransport = deps.createTransport ?? defaultTransport;
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const now = deps.now ?? Date.now;
+  const isBun = deps.isBun ?? runningOnBun();
+  const log =
+    deps.log ??
+    // biome-ignore lint/suspicious/noConsole: the one-line transport notice is meant for the zone's log
+    ((line: string) => console.info(line));
   const versionEnv = def.urlEnv.replace(/_URL$/, '_HTTP_VERSION');
 
   function connectClient(): Client<S> {
@@ -193,16 +275,30 @@ export function defineFunctionClient<S extends DescService, P extends MethodPoli
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
       throw new ConnectError(`${def.urlEnv} must be an http or https URL`, Code.FailedPrecondition);
     }
-    const version = vars[versionEnv] ?? '2';
-    if (version !== '2' && version !== '1.1') {
-      throw new ConnectError(`${versionEnv} must be "2" or "1.1"`, Code.FailedPrecondition);
+    const choice = chooseTransport({
+      fn: def.function,
+      url,
+      versionEnv,
+      explicit: vars[versionEnv],
+      isBun,
+    });
+    const key = `${def.function} ${choice.httpVersion} ${url}`;
+    if (!announced.has(key)) {
+      announced.add(key);
+      log(choice.notice);
     }
-    return createClient(def.service, makeTransport(url, version));
+    return createClient(def.service, makeTransport(url, choice.httpVersion));
   }
 
   function headersFor(options: CallOptions | undefined): Headers {
     const headers = new Headers(options?.headers);
     headers.set(CONTRACT_VERSION_HEADER, def.contractVersion);
+    if (options?.token !== undefined) {
+      if (typeof options.token !== 'string' || !/^[\x21-\x7e]{1,8192}$/.test(options.token)) {
+        throw new ConnectError('the call token is not a usable bearer token', Code.Unauthenticated);
+      }
+      headers.set(AUTHORIZATION_HEADER, `Bearer ${options.token}`);
+    }
     return headers;
   }
 
@@ -256,3 +352,21 @@ export function defineFunctionClient<S extends DescService, P extends MethodPoli
   }
   return client as FunctionClient<S, P>;
 }
+
+export {
+  type Authorize,
+  type AuthorizeContext,
+  decodeRequest,
+  encodeRequest,
+  mintCallToken,
+  normalizeRequest,
+  type Principal,
+  PUBLIC_SUBJECT,
+  QUERY_CACHE_LIFE,
+  registerTokenMinter,
+  servedVersion,
+  subjectSub,
+  type TokenMinter,
+  type TokenRequest,
+  userSubject,
+} from './glue';

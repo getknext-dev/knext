@@ -75,14 +75,18 @@ option (knext.v1.contract_version) = "1.0.0";
 // ${svc} is served by the \`${name}\` function of this zone.
 service ${svc} {
   // GetItem reads one item. NO_SIDE_EFFECTS makes it a read: the zone may
-  // retry it.
+  // retry it, and caches it per signed-in user. AUTH_USER: authorize() must
+  // return a verified user first.
   rpc GetItem(GetItemRequest) returns (GetItemResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
+    option (knext.v1.auth) = AUTH_USER;
   }
 
-  // PutItem writes one item. A write is never retried and carries an
-  // idempotency key.
-  rpc PutItem(PutItemRequest) returns (PutItemResponse);
+  // PutItem writes one item. A write is never retried, carries an
+  // idempotency key, and always needs a user (AUTH_USER).
+  rpc PutItem(PutItemRequest) returns (PutItemResponse) {
+    option (knext.v1.auth) = AUTH_USER;
+  }
 }
 
 // GetItemRequest names the item to read.
@@ -106,6 +110,28 @@ message PutItemRequest {
 message PutItemResponse {}
 `;
 }
+
+/** Where `knext add function` puts the authorize() hook when the app has none. */
+export const DEFAULT_AUTHORIZE = 'src/knext/authorize.ts';
+
+/** The scaffolded authorize() hook: it refuses every call until it is written. */
+export const AUTHORIZE_STUB = `import type { AuthorizeContext, Principal } from '@getknext/grpc/runtime';
+
+/**
+ * Who is calling? Every generated query, action and stream for an AUTH_USER
+ * RPC calls this first, outside any cache. Return the signed-in user's stable
+ * id from your own session (a cookie, a header) as { sub }, or throw (a
+ * redirect to sign-in, an error) to refuse the call.
+ *
+ * For an anonymous write (sign-up, a contact form), run your own check first
+ * (CAPTCHA, rate limit, CSRF), and only then return an anonymous principal.
+ *
+ * Until you write it, every call is refused.
+ */
+export async function authorize(ctx: AuthorizeContext): Promise<Principal> {
+  throw new Error(\`authorize() is not written yet: refusing \${ctx.service}.\${ctx.method}\`);
+}
+`;
 
 export interface AddFunctionOptions {
   readonly cwd: string;
@@ -145,10 +171,13 @@ export function addFunction({ cwd, name, lang, io }: AddFunctionOptions): number
     const optionsRel = join(config.proto, 'knext', 'v1', 'options.proto');
     if (!existsSync(join(cwd, optionsRel))) write(optionsRel, packagedOptionsProto());
     write(protoRel, contractFor(name));
+    const authorize = config.authorize ?? DEFAULT_AUTHORIZE;
+    if (!existsSync(join(cwd, authorize))) write(authorize, AUTHORIZE_STUB);
     write(
       CONFIG_FILE,
       serializeConfig({
         ...config,
+        authorize,
         functions: { ...config.functions, [name]: { lang: lang as Language } },
       }),
     );
@@ -157,7 +186,8 @@ export function addFunction({ cwd, name, lang, io }: AddFunctionOptions): number
       `added the ${lang} function "${name}":\n` +
         written.map((w) => `  ${w}\n`).join('') +
         `\nThe zone reads its address from ${urlEnvFor(name)} at call time.\n` +
-        'Next: edit the contract, then run `knext generate` to write the server-only client.\n',
+        `Next: write authorize() in ${authorize} (until then every call is refused), edit the\n` +
+        'contract, then run `knext generate` to write the server-only client and glue.\n',
     );
     return 0;
   } catch (err) {

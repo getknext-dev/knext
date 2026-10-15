@@ -75,6 +75,35 @@ describe('knext add function <name> --lang go|rust', () => {
     expect(readTree(b)).toEqual(readTree(a));
   });
 
+  it('every scaffolded RPC states AUTH_USER explicitly', () => {
+    const app = emptyDir('add-auth');
+    expect(addFunction({ cwd: app, name: 'orders', lang: 'go', io: capture().io })).toBe(0);
+    const proto = readFileSync(join(app, 'proto/orders/v1/orders.proto'), 'utf8');
+    const rpcs = proto.match(/^\s*rpc /gm) ?? [];
+    const auths = proto.match(/^\s*option \(knext\.v1\.auth\) = AUTH_USER;$/gm) ?? [];
+    expect(rpcs.length).toBeGreaterThan(0);
+    expect(auths.length).toBe(rpcs.length);
+  });
+
+  it('scaffolds an authorize() hook that refuses every call until it is written', async () => {
+    const app = emptyDir('add-authorize');
+    expect(addFunction({ cwd: app, name: 'orders', lang: 'go', io: capture().io })).toBe(0);
+    expect(loadConfig(app).authorize).toBe('src/knext/authorize.ts');
+    const hook = readFileSync(join(app, 'src/knext/authorize.ts'), 'utf8');
+    expect(hook).toContain('export async function authorize(');
+    expect(hook).toContain('throw new Error(');
+    expect(hook).not.toMatch(/return\s*\{/);
+  });
+
+  it('keeps an existing authorize() hook and setting when adding another function', () => {
+    const app = emptyDir('add-authorize-keep');
+    expect(addFunction({ cwd: app, name: 'orders', lang: 'go', io: capture().io })).toBe(0);
+    writeFileSync(join(app, 'src/knext/authorize.ts'), '// mine\n');
+    expect(addFunction({ cwd: app, name: 'billing', lang: 'go', io: capture().io })).toBe(0);
+    expect(readFileSync(join(app, 'src/knext/authorize.ts'), 'utf8')).toBe('// mine\n');
+    expect(loadConfig(app).authorize).toBe('src/knext/authorize.ts');
+  });
+
   it('refuses to overwrite an existing function', () => {
     const app = emptyDir('add-twice');
     expect(addFunction({ cwd: app, name: 'orders', lang: 'go', io: capture().io })).toBe(0);
