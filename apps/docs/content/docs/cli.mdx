@@ -841,13 +841,30 @@ write it). It receives the function, service, method and kind of the call, and r
 `{ sub }` (your session's stable user id) or throws, for example a redirect to sign-in. Each
 generated query, action and stream runs it first, outside any cache.
 
+**Queries need Cache Components.** A generated query is a `'use cache'` function, and Next.js runs
+`'use cache'` only with Cache Components on, so set `cacheComponents: true` in your
+`next.config.ts`. knext does not turn it on for you; without it, Next.js refuses to build a page
+that imports a generated query. The knext build backs `'use cache'` with your app's Redis, so an
+entry is shared by every replica: see
+[`'use cache'` is shared across pods](/docs/isr-caching#use-cache-is-shared-across-pods).
+
 **Cached reads are per user.** A query's `'use cache'` entry is keyed on the verified `sub`, the
 contract version the function serves, and the request, so two users never share an entry. Entries
 expire within an hour, and every write to the same service refreshes every user's cached reads of
-it, on every replica. The function's served contract version comes from
-`<NAME>_SERVICE_PROTO_VERSION`, which the operator sets beside `<NAME>_SERVICE_URL`; a call is
-refused if it is not set or if the function serves an older contract than the zone was generated
-against.
+it, on every replica. A write that fails after its request was sent (a reset connection, a
+deadline, a lost response) refreshes them too, because it may have been applied. A write refused
+before anything was sent (by `authorize()`, an invalid request, or missing configuration)
+refreshes nothing.
+
+The function's served contract version comes from `<NAME>_SERVICE_PROTO_VERSION`. The operator
+renders it into the zone, beside `<NAME>_SERVICE_URL`, once the zone's binding to the function is
+reconciled. Until then every call fails closed: it is refused before it leaves the zone, as it is
+when the function serves an older contract than the zone was generated against.
+
+**Requests carry only the contract's fields.** A Server Action is a public endpoint, so the
+generated code rebuilds each request from the fields its message defines. Anything else in the
+arguments, including protobuf's own `$typeName` and `$unknown` properties, is dropped before the
+call, and a value of the wrong type is refused as `INVALID_ARGUMENT`.
 
 **Calls carry an identity token**, minted for the one call and never part of a cache key. The
 token setup is not available yet, so for now every generated call is refused before it leaves the
