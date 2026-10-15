@@ -22,8 +22,11 @@
  * must belong to one of them or the parse throws. Scanning source text instead
  * let a `# TYPE` string in a comment or dead code enter the accepted set, and
  * could not see a sample line renamed apart from its `# TYPE` line. The Go
- * operator is the one emitter still read from source (it needs a Go toolchain
- * to render); its scan strips Go comments first.
+ * operator cannot be rendered here (this lane has no Go toolchain, and a
+ * gathered registry omits a `*Vec` with no children), so its families come from
+ * a golden the operator's own Go tests generate from the parsed AST and keep
+ * current (#2321): only collectors registered on the served registry, from a
+ * package the binary links, count — never a name in a comment or dead code.
  *
  * The classification below is an ALLOWLIST that FAILS CLOSED: every rule group
  * and every dashboard must be classified, so a new one reds this test until
@@ -55,8 +58,8 @@ import {
     extractMetricNames,
     fencedDocSection,
     parseExposition,
+    parseOperatorMetricGolden,
     parsePrometheusRules,
-    scanOperatorMetrics,
     seriesNames,
 } from "../adapters/metric-contract";
 import { createMetricsRegistry as createKnextMetrics } from "../adapters/metrics";
@@ -257,22 +260,21 @@ const USE_CACHE = seriesNames(parseExposition(renderUseCacheMetrics()));
  * collector the admission webhook registers (it runs in the same process and
  * lands on the same endpoint, e.g. knext_platform_budget_fallback_total).
  *
- * The webhook directory is SCANNED, not enumerated: a second webhook metric
- * file added later is picked up without anyone remembering to list it here.
+ * Read from the operator's metric golden (#2321), which its Go tests generate
+ * from the parsed AST — every package `cmd/` links, only collectors registered
+ * on the served registry from `init()` — and fail on whenever it drifts from
+ * the source or from the live registry. A metric declared but never
+ * registered, or named only in a comment, is not in it. The parse fails closed:
+ * an empty or malformed golden throws rather than yielding an empty set.
  */
-const OPERATOR_WEBHOOK_DIR = join(OPERATOR, "internal/webhook/v1alpha1");
-const OPERATOR_METRIC_SOURCES = [
-    join(OPERATOR, "internal/controller/metrics.go"),
-    ...readdirSync(OPERATOR_WEBHOOK_DIR)
-        .filter((f) => f.endsWith(".go") && !f.endsWith("_test.go"))
-        .map((f) => join(OPERATOR_WEBHOOK_DIR, f)),
-];
+const OPERATOR_GOLDEN = join(
+    OPERATOR,
+    "internal",
+    "metriccontract",
+    "operator-metrics.golden.json",
+);
 const OPERATOR_EMITTED = seriesNames(
-    new Map(
-        OPERATOR_METRIC_SOURCES.flatMap((p) => [
-            ...scanOperatorMetrics(read(p)),
-        ]),
-    ),
+    parseOperatorMetricGolden(read(OPERATOR_GOLDEN)),
 );
 
 /**
@@ -715,19 +717,52 @@ describe("parseExposition reads what an emitter renders (#2307)", () => {
     });
 });
 
-describe("the Go operator scan ignores comments", () => {
-    // TODO(#2321): the operator is still read from source (rendering it needs a
-    // Go toolchain in the test job); stripping comments is the part of #2307
-    // that applies to it.
-    it("a NewCounter in a // or /* */ comment is not an emitted metric", () => {
-        const src = [
-            '// prometheus.NewCounter(prometheus.CounterOpts{Name: "knext_ghost_a_total"})',
-            '/* prometheus.NewGauge(prometheus.GaugeOpts{Name: "knext_ghost_b"}) */',
-            'var real = prometheus.NewCounter(prometheus.CounterOpts{Name: "knext_real_total", Help: "see http://x/y // not a comment"})',
-        ].join("\n");
-        expect([...scanOperatorMetrics(src).keys()]).toEqual([
-            "knext_real_total",
-        ]);
+describe("the operator's metric golden is parsed fail-closed (#2321)", () => {
+    const golden = (families: unknown) =>
+        JSON.stringify({ $comment: "x", families });
+
+    it("reads every family with its type", () => {
+        expect(
+            parseOperatorMetricGolden(
+                golden({
+                    knext_a_total: "counter",
+                    knext_b_seconds: "histogram",
+                }),
+            ),
+        ).toEqual(
+            new Map([
+                ["knext_a_total", "counter"],
+                ["knext_b_seconds", "histogram"],
+            ]),
+        );
+    });
+
+    it("an empty golden throws rather than yielding an empty emitted set", () => {
+        expect(() => parseOperatorMetricGolden(golden({}))).toThrow(/empty/);
+    });
+
+    it("a golden with no families object throws", () => {
+        expect(() => parseOperatorMetricGolden("{}")).toThrow(/families/);
+        expect(() => parseOperatorMetricGolden(golden(["x"]))).toThrow(
+            /families/,
+        );
+        expect(() => parseOperatorMetricGolden("not json")).toThrow();
+    });
+
+    it("an unknown type or a malformed name throws", () => {
+        expect(() =>
+            parseOperatorMetricGolden(golden({ knext_x: "untyped" })),
+        ).toThrow(/knext_x/);
+        expect(() =>
+            parseOperatorMetricGolden(golden({ "knext x": "counter" })),
+        ).toThrow(/knext x/);
+    });
+
+    it("the shipped golden holds the operator's families, histograms expanded", () => {
+        expect(OPERATOR_EMITTED).toContain("knext_nextapp_reconcile_total");
+        expect(OPERATOR_EMITTED).toContain(
+            "knext_nextapp_reconcile_duration_seconds_count",
+        );
     });
 });
 

@@ -200,15 +200,16 @@ describe('docs — platform defaults', () => {
   });
 
   it('names exactly the platform metrics the operator registers, in both directions', () => {
-    const names = (file: string) =>
-      [...readFileSync(join(OPERATOR, file), 'utf-8').matchAll(/Name:\s+"(knext_[a-z_]+)"/g)].map(
-        (m) => m[1],
-      );
+    // What the operator binary registers, from the golden its Go tests keep
+    // current against the parsed source and the live registry: a name in a
+    // comment or an unregistered declaration is not in it.
+    const golden = JSON.parse(
+      readFileSync(join(OPERATOR, 'internal/metriccontract/operator-metrics.golden.json'), 'utf-8'),
+    ) as { families: Record<string, string> };
     // The platform series are the ones outside the long-standing reconcile family.
-    const emitted = [
-      ...names('internal/controller/metrics.go').filter((n) => /platform/.test(n)),
-      ...names('internal/webhook/v1alpha1/budget_fallback_metric.go'),
-    ].sort();
+    const emitted = Object.keys(golden.families)
+      .filter((n) => /^knext_platform_/.test(n))
+      .sort();
     // A parser that found nothing would make the comparison below vacuous.
     expect(emitted.length).toBeGreaterThanOrEqual(5);
     const documented = tableCode(1, /^knext_[a-z_]+$/).sort();
