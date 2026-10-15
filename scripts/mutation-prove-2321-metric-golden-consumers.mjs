@@ -28,7 +28,7 @@
  *   node scripts/mutation-prove-2321-metric-golden-consumers.mjs
  */
 
-import { dirname, relative, resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createGuardProver } from './lib/guard-prover.mjs';
 import { MUTATION_MARKER } from './lib/mutation-harness.mjs';
@@ -39,7 +39,6 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const GOLDEN = resolve(REPO_ROOT, 'packages/kn-next-operator/internal/metriccontract/operator-metrics.golden.json');
 const CONTRACT_SPEC = 'packages/kn-next/src/__tests__/observability-metric-contract.test.ts';
 const REACHABILITY_SPEC = 'packages/kn-next/src/__tests__/alert-reachability.test.ts';
-const subjects = { golden: relative(REPO_ROOT, GOLDEN) };
 
 /** Every mutated golden must still be valid JSON, or its red means nothing. */
 const validate = (text) => {
@@ -92,8 +91,16 @@ const CANARY = {
   replacement: `"knext_nextapp_reconcile_total": "untyped ${MUTATION_MARKER}"`,
 };
 
-const contract = createGuardProver({ repoRoot: REPO_ROOT, spec: CONTRACT_SPEC, subjects });
-const reachability = createGuardProver({ repoRoot: REPO_ROOT, spec: REACHABILITY_SPEC, subjects });
+const contract = createGuardProver({
+  repoRoot: REPO_ROOT,
+  spec: CONTRACT_SPEC,
+  subjects: { golden: GOLDEN },
+});
+const reachability = createGuardProver({
+  repoRoot: REPO_ROOT,
+  spec: REACHABILITY_SPEC,
+  subjects: { golden: GOLDEN },
+});
 
 console.log('=== mutation proof: the operator metric golden consumers (#2321) ===');
 contract.preflight([...CONTRACT_ROWS, { id: 'canary', ...CANARY }]);

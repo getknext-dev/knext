@@ -198,7 +198,7 @@ const MUTATIONS = [
   },
 ];
 
-const SUBJECTS = { controller: CONTROLLER, webhook: WEBHOOK, scanner: SCANNER };
+const PROVER = { subjects: { controller: CONTROLLER, webhook: WEBHOOK, scanner: SCANNER } };
 
 function goTestExit() {
   const [bin, ...args] = GO_TEST;
@@ -221,7 +221,7 @@ console.log(`mutation-prove-2321-go-metric-contract: ${MUTATIONS.length} mutatio
 
 // Preflight: every anchor occurs exactly once BEFORE anything expensive runs.
 for (const m of MUTATIONS) {
-  const path = SUBJECTS[m.subject];
+  const path = PROVER.subjects[m.subject];
   if (path === undefined) {
     console.error(`mutation-prove-2321-go-metric-contract: ${m.id} names no subject ${m.subject}`);
     process.exit(2);
@@ -249,7 +249,7 @@ console.log('mutation-prove-2321-go-metric-contract: baseline green');
 let failed = 0;
 for (const m of MUTATIONS) {
   assertTreeClean(REPO_ROOT, `before ${m.id}`);
-  const snap = snapshot(SUBJECTS[m.subject]);
+  const snap = snapshot(PROVER.subjects[m.subject]);
   let code;
   try {
     mutate(snap, m.anchor, m.replacement);

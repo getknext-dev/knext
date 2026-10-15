@@ -160,6 +160,17 @@ jobs:
           rustc -V
           cargo -V
 
+      # `mutation-prove-2321-go-metric-contract.mjs` (#2321) grades
+      # `go test ./internal/metriccontract/` in the operator module, so the lane
+      # needs the Go toolchain the operator's go.mod names (read from the file,
+      # never restated here). Without it that prover exits 2 at its first `go`
+      # spawn — a red night, never a silent skip.
+      - name: Setup Go (packages/kn-next-operator/go.mod)
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: packages/kn-next-operator/go.mod
+          cache-dependency-path: packages/kn-next-operator/go.sum
+
       - name: Run every mutation prover (FAIL on exit code OR count mismatch)
         env:
           KNEXT_REDIS_LIVE_URL: redis://127.0.0.1:6379
