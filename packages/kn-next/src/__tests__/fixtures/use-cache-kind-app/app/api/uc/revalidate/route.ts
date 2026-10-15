@@ -12,12 +12,21 @@ function authorized(header: string | null): boolean {
     return given.length === want.length && timingSafeEqual(given, want);
 }
 
+const TAG = /^uc-(2pod|user-[a-z0-9-]{1,32})$/;
+
 export async function POST(request: Request) {
     if (!authorized(request.headers.get("authorization"))) {
         return Response.json({ error: "Unauthorized" }, { status: 401 });
     }
+    // `?tag=` picks ONE allow-listed tag (`uc-2pod`, every entry; or
+    // `uc-user-<user>`, one user's entry), read only after the caller is
+    // authenticated. Anything else is refused rather than passed to Next.
+    const tag = new URL(request.url).searchParams.get("tag") ?? "uc-2pod";
+    if (!TAG.test(tag)) {
+        return Response.json({ error: "tag not allowed" }, { status: 400 });
+    }
     // Immediate expiry (not stale-while-revalidate): the next read on ANY pod
     // must recompute.
-    revalidateTag("uc-2pod", { expire: 0 });
-    return Response.json({ ok: true, servedBy: hostname() });
+    revalidateTag(tag, { expire: 0 });
+    return Response.json({ ok: true, tag, servedBy: hostname() });
 }

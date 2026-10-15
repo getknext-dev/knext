@@ -22,7 +22,11 @@ name: use cache — two-pod kind e2e (shared Redis cacheHandlers)
 #   3. the entry sits in Redis under knext's `<prefix>:uc:default:*` namespace;
 #   4. `revalidateTag` through pod A makes pod B build fresh data, and pod A then
 #      reads pod B's regenerated entry without building;
-#   5. the mutating route answers 401 without the Bearer token.
+#   5. the mutating route answers 401 without the Bearer token;
+#   6. two users of ONE `'use cache'` function (the user is the function's
+#      argument, so it is part of Next's cache key) get two entries: each pod
+#      serves each user that user's own entry, pod B serves pod A's entry for
+#      both users, and invalidating one user's tag leaves the other's entry.
 #
 # Teeth, proved by exit code in this lane (a guard that stays green when its
 # subject is removed is decoration):
@@ -32,7 +36,12 @@ name: use cache — two-pod kind e2e (shared Redis cacheHandlers)
 #     pod A's entry" assertion;
 #   - variant `no-handler` (expected red): the app is BUILT without the knext
 #     `cacheHandler` (the pre-fix wiring), so Next keeps its no-op `'use cache'`
-#     handler; the assertions MUST exit non-zero at "pod A recomputed".
+#     handler; the assertions MUST exit non-zero at "pod A recomputed";
+#   - variant `collapsed-keys` (expected red): knext's `'use cache'` entry key is
+#     collapsed to one Redis key in the SHIPPED tarball before the app is built
+#     (scripts/use-cache-collapse-keys-mutation.mjs, anchor exactly once), so two
+#     users of one function share an entry; the assertions MUST exit non-zero at
+#     "(cache keys collapsed)".
 #
 # Triggers: path-filtered PR plus manual dispatch, like the other kind lanes that
 # guard one subsystem; the filters cover the handlers, the adapter wiring that
@@ -48,6 +57,7 @@ on:
       - 'packages/kn-next/src/adapters/next-adapter.ts'
       - 'packages/kn-next/src/__tests__/fixtures/use-cache-kind-app/**'
       - 'scripts/use-cache-2pod-e2e-assert.sh'
+      - 'scripts/use-cache-collapse-keys-mutation.mjs'
       - '.github/workflows/use-cache-2pod-kind-e2e.yml'
   workflow_dispatch: {}
 
@@ -67,6 +77,8 @@ jobs:
           - { runtime: bun, variant: shared }
           # Expected red: built without the knext cacheHandler (see header).
           - { runtime: node, variant: no-handler }
+          # Expected red: knext's entry key collapsed in the shipped tarball.
+          - { runtime: node, variant: collapsed-keys }
     env:
       CLUSTER: use-cache-2pod
       APP_NS: use-cache-2pod
@@ -159,6 +171,15 @@ jobs:
           test -d node_modules/@getknext/core
           echo "APP_DIR=$APP_DIR" >> "$GITHUB_ENV"
           echo "DEPLOY_TAG=uc${GITHUB_RUN_ID}-${{ matrix.runtime }}-${{ matrix.variant }}" >> "$GITHUB_ENV"
+
+      # Teeth for the two-user assertion: collapse knext's 'use cache' entry key
+      # in the staged app's copy of the SHIPPED tarball, before the image is
+      # built from it. The script refuses unless its anchor occurs exactly once.
+      - name: Mutation — collapse the 'use cache' entry key in the shipped handler (collapsed-keys variant)
+        if: matrix.variant == 'collapsed-keys'
+        run: |
+          set -euo pipefail
+          node scripts/use-cache-collapse-keys-mutation.mjs "$APP_DIR/node_modules/@getknext/core/dist"
 
       - name: Create kind cluster (registry certs.d config_path)
         run: |
@@ -310,6 +331,19 @@ jobs:
           grep -F "pod A recomputed on its second request" /tmp/uc-no-handler.log >/dev/null \
             || { echo "::error::the no-handler build went red (rc=$rc) but not at the no-op assertion"; exit 1; }
           echo "mutation proved: exit $rc, 'use cache' is a per-process no-op without the handler"
+
+      - name: Expected red — keys collapsed in the shipped handler, two users must NOT share an entry
+        if: matrix.variant == 'collapsed-keys'
+        run: |
+          set -uo pipefail
+          if bash scripts/use-cache-2pod-e2e-assert.sh "$APP_NS" "$APP_NAME" >/tmp/uc-collapsed.log 2>&1; then rc=0; else rc=$?; fi
+          cat /tmp/uc-collapsed.log
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::the assertions PASSED with every 'use cache' entry on one key — the two-user test cannot see red"; exit 1
+          fi
+          grep -F "cache keys collapsed" /tmp/uc-collapsed.log >/dev/null \
+            || { echo "::error::the collapsed-keys build went red (rc=$rc) but not at the two-user assertion"; exit 1; }
+          echo "mutation proved: exit $rc at the two-user assertion"
 
       - name: Dump state on failure
         if: failure()

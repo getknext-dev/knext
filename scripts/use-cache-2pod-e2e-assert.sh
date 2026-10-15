@@ -18,6 +18,14 @@
 # recompute" is observed, not inferred from a matching timestamp, and the script
 # is re-runnable against the same pods (it resets the entry first).
 #
+# The users section then reads a per-user `'use cache'` function
+# (`/api/uc/user/<user>`, the user passed as the function's ARGUMENT) for two
+# users on both pods: each user gets its own entry, pod B serves pod A's entry
+# for each, and invalidating one user's tag leaves the other's entry alone. A
+# user served another user's entry fails with "(cache keys collapsed)" -- the
+# message the lane's `collapsed-keys` leg (knext's entry key collapsed in the
+# shipped tarball by scripts/use-cache-collapse-keys-mutation.mjs) must hit.
+#
 # Fail-closed throughout: every check exits non-zero with an ::error:: line, and
 # an empty / unparseable value is a failure, never a pass.
 #
@@ -127,11 +135,12 @@ code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 -X POST "http://127
 [ "$code" = "401" ] || fail "unauthenticated POST /api/uc/revalidate answered $code, want 401"
 ok "unauthenticated POST /api/uc/revalidate -> 401"
 
-revalidate() { # <port> <expected-pod>
-  local rev
-  rev="$(curl -fsS --max-time 30 -X POST -H "Authorization: Bearer ${TOKEN}" "http://127.0.0.1:$1/api/uc/revalidate")" \
-    || fail "authenticated POST /api/uc/revalidate on :$1 failed"
+revalidate() { # <port> <expected-pod> [tag, default uc-2pod]
+  local rev tag="${3:-uc-2pod}"
+  rev="$(curl -fsS --max-time 30 -X POST -H "Authorization: Bearer ${TOKEN}" "http://127.0.0.1:$1/api/uc/revalidate?tag=${tag}")" \
+    || fail "authenticated POST /api/uc/revalidate?tag=${tag} on :$1 failed"
   [ "$(field "$rev" .servedBy)" = "$2" ] || fail "revalidate pinned to $2 was served by '$(field "$rev" .servedBy)'"
+  [ "$(field "$rev" .tag)" = "$tag" ] || fail "revalidate invalidated '$(field "$rev" .tag)', want '$tag'"
 }
 # The invalidation's timestamp must be strictly newer than any entry's.
 sleep 1
@@ -203,5 +212,72 @@ ok "pod A served pod B's regenerated entry with no recompute"
 tags="$(kubectl -n "$NS" exec "deploy/${REDIS_DEPLOY}" -- redis-cli --scan --pattern '*:uc:tags')"
 [ -n "$tags" ] || fail "Redis holds no '<prefix>:uc:tags' hash after the invalidation"
 ok "Redis tag-stamp hash present: $tags"
+
+# 9. Two users of ONE `'use cache'` function get two entries, on both pods.
+#    `/api/uc/user/<user>` caches `profileFor(user)`. Next keys the entry on the
+#    function AND its argument, and knext stores that key opaque, so if the two
+#    users shared a key (the argument dropped from it, or knext's entry key
+#    collapsed) the second user would be served the first user's entry.
+user_stamp() { # <port> <user>
+  local out
+  out="$(get_json "$1" "/api/uc/user/$2")"
+  printf '%s' "$out" | jq -e '.cached.nonce and .cached.computedBy and .servedBy and (.computesInThisPod | type == "number")' >/dev/null \
+    || fail "GET /api/uc/user/$2 on :$1 returned an unexpected body: $out"
+  [ "$(field "$out" .cached.user)" = "$2" ] \
+    || fail "user '$2' was served the 'use cache' entry built for '$(field "$out" .cached.user)' (cache keys collapsed): $out"
+  printf '%s' "$out"
+}
+
+sleep 1
+revalidate "$PORT_A" "$POD_A"
+sleep 1
+ok "entries reset before the two-user check (revalidateTag('uc-2pod') on pod A)"
+ubase_a="$(computes "$PORT_A")"
+ubase_b="$(computes "$PORT_B")"
+
+ua_alice="$(user_stamp "$PORT_A" alice)"
+ua_bob="$(user_stamp "$PORT_A" bob)"
+alice_nonce="$(field "$ua_alice" .cached.nonce)"
+bob_nonce="$(field "$ua_bob" .cached.nonce)"
+[ "$alice_nonce" != "$bob_nonce" ] \
+  || fail "alice and bob were served ONE entry (nonce ${alice_nonce}) (cache keys collapsed)"
+[ "$(field "$ua_bob" .computesInThisPod)" = "$((ubase_a + 2))" ] \
+  || fail "pod A should have built one entry per user (baseline ${ubase_a}): $ua_alice / $ua_bob"
+ua_alice2="$(user_stamp "$PORT_A" alice)"
+[ "$(field "$ua_alice2" .cached.nonce)" = "$alice_nonce" ] \
+  || fail "pod A recomputed alice's entry on a second read: $ua_alice / $ua_alice2"
+ok "pod A built one entry per user (alice ${alice_nonce}, bob ${bob_nonce}) and serves each from the cache"
+
+ub_alice="$(user_stamp "$PORT_B" alice)"
+ub_bob="$(user_stamp "$PORT_B" bob)"
+[ "$(field "$ub_alice" .cached.nonce)" = "$alice_nonce" ] \
+  || fail "pod B did not serve pod A's entry for alice (A nonce ${alice_nonce}): $ub_alice"
+[ "$(field "$ub_bob" .cached.nonce)" = "$bob_nonce" ] \
+  || fail "pod B did not serve pod A's entry for bob (A nonce ${bob_nonce}): $ub_bob"
+[ "$(field "$ub_alice" .cached.computedBy)" = "$POD_A" ] && [ "$(field "$ub_bob" .cached.computedBy)" = "$POD_A" ] \
+  || fail "pod B's per-user entries were not built by pod A ($POD_A): $ub_alice / $ub_bob"
+[ "$(field "$ub_bob" .computesInThisPod)" = "$ubase_b" ] \
+  || fail "pod B recomputed a user's entry instead of reading the shared one (baseline ${ubase_b}): $ub_bob"
+ok "pod B served pod A's entry for each user, building nothing"
+
+ukeys="$(kubectl -n "$NS" exec "deploy/${REDIS_DEPLOY}" -- redis-cli --scan --pattern '*:uc:default:*')"
+unkeys="$(printf '%s\n' "$ukeys" | grep -c . || true)"
+[ "$unkeys" -ge 3 ] \
+  || fail "Redis holds ${unkeys} '<prefix>:uc:default:*' entries, want >= 3: the no-argument entry plus one per user (cache keys collapsed)"
+ok "Redis holds ${unkeys} separate 'use cache' entries"
+
+# 10. Invalidating one user leaves the other user's entry alone, across pods.
+sleep 1
+revalidate "$PORT_A" "$POD_A" uc-user-alice
+ok "revalidateTag('uc-user-alice') ran on pod A"
+ub_alice2="$(user_stamp "$PORT_B" alice)"
+[ "$(field "$ub_alice2" .cached.nonce)" != "$alice_nonce" ] \
+  || fail "pod B still serves alice's entry after revalidateTag('uc-user-alice') on pod A: $ub_alice2"
+[ "$(field "$ub_alice2" .cached.computedBy)" = "$POD_B" ] \
+  || fail "alice's fresh entry was built by '$(field "$ub_alice2" .cached.computedBy)', want pod B ($POD_B)"
+ub_bob2="$(user_stamp "$PORT_B" bob)"
+[ "$(field "$ub_bob2" .cached.nonce)" = "$bob_nonce" ] \
+  || fail "bob's entry did not survive alice's invalidation (bob nonce ${bob_nonce}): $ub_bob2"
+ok "alice's entry rebuilt on pod B; bob's entry untouched (nonce ${bob_nonce})"
 
 echo "use-cache two-pod e2e: all assertions passed"
