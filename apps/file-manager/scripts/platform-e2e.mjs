@@ -688,10 +688,19 @@ async function main() {
       const r2 = await readStats();
       const r3 = await readStats();
       const dbCount = Number(psql(ns, 'SELECT COUNT(*) FROM files'));
-      const keys = redisCli(ns, ['--scan', '--pattern', `*:tag:${FILE_STATS_TAG}`])
+      // `<prefix>:tag:<tag>` is a set of cache keys; each entry lives at
+      // `<prefix>:cache:<key>` (cache-handler.js), so map member -> entry key.
+      const tagIndex = `:tag:${FILE_STATS_TAG}`;
+      const keys = redisCli(ns, ['--scan', '--pattern', `*${tagIndex}`])
         .split('\n')
         .filter(Boolean)
-        .flatMap((idx) => redisCli(ns, ['SMEMBERS', idx]).split('\n').filter(Boolean));
+        .flatMap((idx) => {
+          const prefix = idx.slice(0, -tagIndex.length);
+          return redisCli(ns, ['SMEMBERS', idx])
+            .split('\n')
+            .filter(Boolean)
+            .map((member) => `${prefix}:cache:${member}`);
+        });
       const liveKeys = keys.filter((k) => redisCli(ns, ['EXISTS', k]) === '1').length;
       const served = assertUseCacheServed({ reads: [r1, r2, r3], dbCount, keys, liveKeys });
 
