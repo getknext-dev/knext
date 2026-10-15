@@ -63,6 +63,33 @@ function count(name) {
   bag[name] = (bag[name] ?? 0) + 1;
 }
 
+/**
+ * The key prefix every app falls back to when it sets none. Apps that share a
+ * Redis and leave the prefix unset all land on it, so nothing under it is known
+ * to belong to this app: a collapse sweep under it would delete other apps'
+ * caches. Both collapse sweeps (this handler's and the ISR handler's) refuse to
+ * run under it.
+ */
+export const LEGACY_SHARED_KEY_PREFIX = 'kn-next';
+
+/**
+ * Whether a prefix-wide sweep may run under `prefix`. The bare shared default is
+ * refused; so is an empty prefix (its glob would match every app's keys).
+ */
+export function collapseSweepAllowed(prefix) {
+  return typeof prefix === 'string' && prefix !== '' && prefix !== LEGACY_SHARED_KEY_PREFIX;
+}
+
+/** The error a refused collapse logs, naming the fix. */
+export function collapseRefusedMessage(what, prefix) {
+  return (
+    `[CacheHandler] refusing to sweep every ${what} under the Redis key prefix '${prefix}': ` +
+    'it is the shared default, so other apps on this Redis may keep their keys there too, ' +
+    'and the sweep would delete their cache. This app keeps its stale entries until they expire. ' +
+    'Give the app its own prefix (cache.keyPrefix in knext.config, or REDIS_KEY_PREFIX).'
+  );
+}
+
 /** The counter family the app's metrics port serves for this handler. */
 export const USE_CACHE_METRIC = 'knext_use_cache_events_total';
 
@@ -87,6 +114,7 @@ export const USE_CACHE_EVENTS = Object.freeze({
   tagsDropped: 'tags_dropped',
   tagsReplayed: 'tags_replayed',
   tagsCollapsed: 'tags_collapsed',
+  tagsCollapseRefused: 'tags_collapse_refused',
   pruneError: 'prune_error',
   error: 'error',
 });
@@ -440,6 +468,10 @@ function replayArgs(tag, record) {
 //    dropped for a COLLAPSE: the replay deletes every `'use cache'` entry under
 //    this app's key prefix (a cursor SCAN, DEL per page; the stamp hash is kept).
 //    Wider than needed, never stale. The ISR replay's bound and collapse.
+//    REFUSED under the shared default prefix `kn-next` (LEGACY_SHARED_KEY_PREFIX):
+//    other apps on the same Redis may sit under it too, and the sweep would
+//    delete their entries. The refusal logs an error, counts
+//    `tagsCollapseRefused`, and leaves this app's entries until their TTL.
 //  - OFF THE REQUEST PATH. Started by the first connection this handler gets with
 //    the breaker closed, or by a probe timer set for the moment it closes (an
 //    idle pod would otherwise never replay while other pods serve the stale
@@ -616,8 +648,17 @@ function escapeGlob(text) {
 async function replayCollapsedTags(core, client) {
   const replay = shared(core).replay;
   const generation = replay.generation;
+  const prefix = core.keyPrefix();
+  if (!collapseSweepAllowed(prefix)) {
+    // The list is already gone; nothing narrower is left to replay. Drop the
+    // collapse rather than retry it every probe: the refusal cannot change.
+    replay.collapsed = false;
+    count('tagsCollapseRefused');
+    console.error(collapseRefusedMessage("'use cache' entry", prefix));
+    return;
+  }
   const stamps = tagsKeyOf(core);
-  const pattern = `${escapeGlob(core.keyPrefix())}:uc:*`;
+  const pattern = `${escapeGlob(prefix)}:uc:*`;
   let cursor = '0';
   do {
     const reply = await core.redisCall(() =>

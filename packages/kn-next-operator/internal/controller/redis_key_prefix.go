@@ -1,0 +1,97 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package controller
+
+import (
+	corev1 "k8s.io/api/core/v1"
+
+	appsv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/api/v1alpha1"
+)
+
+const redisKeyPrefixEnvName = "REDIS_KEY_PREFIX"
+
+// defaultRedisKeyPrefix is the Redis key prefix of an app that sets no
+// spec.cache.keyPrefix: "kn-" plus the first 12 lowercase hex of
+// sha256("<namespace>/<name>") — the CDN tag prefix's derivation. Without it the
+// runtime falls back to the literal "kn-next", which every such app on a shared
+// Redis would share: each would read the others' entries, and one app's outage
+// collapse (a prefix-wide SCAN + DEL) would delete the others' caches.
+//
+// Lockstep with the CLI's doctor (defaultRedisKeyPrefix in
+// packages/kn-next/src/cli/doctor/checks/redis-prefix.ts); both pin the same vector.
+func defaultRedisKeyPrefix(app *appsv1alpha1.NextApp) string {
+	return "kn-" + cdnTagPrefix(app)
+}
+
+func cacheIsRedis(app *appsv1alpha1.NextApp) bool {
+	return app.Spec.Cache != nil && app.Spec.Cache.Provider == "redis"
+}
+
+// userSetsRedisKeyPrefix reports whether the CR sets REDIS_KEY_PREFIX itself,
+// through spec.env or a spec.secrets.envMap Secret. That value predates the
+// derived default and keeps winning, the way KNEXT_PUBLIC_ORIGINS yields.
+// (A REDIS_KEY_PREFIX inside an envFrom Secret or baked into the image is
+// invisible here, and the rendered env takes precedence over both: such an app
+// moves to the derived prefix unless it sets spec.cache.keyPrefix.)
+func userSetsRedisKeyPrefix(app *appsv1alpha1.NextApp) bool {
+	if _, ok := app.Spec.Env[redisKeyPrefixEnvName]; ok {
+		return true
+	}
+	if app.Spec.Secrets != nil {
+		if _, ok := app.Spec.Secrets.EnvMap[redisKeyPrefixEnvName]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// rendersDefaultRedisKeyPrefix reports whether the operator renders the derived
+// default for this app: a Redis cache, no spec.cache.keyPrefix, and no
+// REDIS_KEY_PREFIX of the user's own.
+func rendersDefaultRedisKeyPrefix(app *appsv1alpha1.NextApp) bool {
+	return cacheIsRedis(app) && app.Spec.Cache.KeyPrefix == "" && !userSetsRedisKeyPrefix(app)
+}
+
+// defaultRedisKeyPrefixEnv returns the derived REDIS_KEY_PREFIX entry, or false
+// when it is not rendered. It is appended AFTER the user's env and only when the
+// user set no REDIS_KEY_PREFIX (rendersDefaultRedisKeyPrefix), so it is never a
+// duplicate and never a reserved name (validation.ReservedOperatorEnvNames does
+// not list it: admission keeps accepting a user-set REDIS_KEY_PREFIX while
+// keyPrefix is unset).
+func defaultRedisKeyPrefixEnv(app *appsv1alpha1.NextApp) (corev1.EnvVar, bool) {
+	if !rendersDefaultRedisKeyPrefix(app) {
+		return corev1.EnvVar{}, false
+	}
+	return corev1.EnvVar{Name: redisKeyPrefixEnvName, Value: defaultRedisKeyPrefix(app)}, true
+}
+
+// operatorRedisKeyPrefix is the keyspace the operator owns for this app: the
+// explicit spec.cache.keyPrefix, or the derived default when it renders it.
+// Empty when the operator owns none (no Redis cache, or a user-set env prefix).
+// The finalizer reaps exactly this keyspace on delete.
+func operatorRedisKeyPrefix(app *appsv1alpha1.NextApp) string {
+	if !cacheIsRedis(app) {
+		return ""
+	}
+	if app.Spec.Cache.KeyPrefix != "" {
+		return app.Spec.Cache.KeyPrefix
+	}
+	if rendersDefaultRedisKeyPrefix(app) {
+		return defaultRedisKeyPrefix(app)
+	}
+	return ""
+}

@@ -63,6 +63,18 @@ export declare function createUseCacheHandler(args: {
 /** The counter family the app's metrics port serves for this handler. */
 export declare const USE_CACHE_METRIC: "knext_use_cache_events_total";
 
+/** The prefix every app falls back to when it sets none; collapse sweeps refuse it. */
+export declare const LEGACY_SHARED_KEY_PREFIX: "kn-next";
+
+/** Whether a prefix-wide collapse sweep may run under `prefix`. */
+export declare function collapseSweepAllowed(prefix: string): boolean;
+
+/** The error a refused collapse sweep logs. */
+export declare function collapseRefusedMessage(
+    what: string,
+    prefix: string,
+): string;
+
 /** Each counter the handler increments, mapped to its `event` label value. */
 export declare const USE_CACHE_EVENTS: Readonly<Record<string, string>>;
 

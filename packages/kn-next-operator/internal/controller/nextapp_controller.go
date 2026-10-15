@@ -1695,6 +1695,14 @@ func (r *NextAppReconciler) appendUserEnv(nextApp *appsv1alpha1.NextApp, envVars
 		}
 	}
 
+	// The derived per-app REDIS_KEY_PREFIX for a Redis cache with no
+	// spec.cache.keyPrefix. Not rendered when spec.env / envMap set one, so a
+	// user-set REDIS_KEY_PREFIX keeps winning, with no ignored-env Warning and
+	// no duplicate entry (see defaultRedisKeyPrefixEnv).
+	if ev, ok := defaultRedisKeyPrefixEnv(nextApp); ok {
+		envVars = append(envVars, ev)
+	}
+
 	// spec.networking.publicHosts -> KNEXT_PUBLIC_ORIGINS. Rendered AFTER the
 	// user's spec.env / envMap entries are in place so a user-set value of the
 	// same name wins (see publicOriginsEnv), with no ignored-env Warning and no

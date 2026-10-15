@@ -126,6 +126,43 @@ The connection details come from the environment — `REDIS_URL` and `REDIS_KEY_
 into your pods from the `cache` block of your deploy config (see
 [the operator reference](/docs/operator)); nothing about Redis is hardcoded in your app.
 
+## Each app has its own Redis keyspace [#key-prefix]
+
+Every key an app writes starts with its key prefix, `REDIS_KEY_PREFIX`. Apps that share one Redis
+are kept apart by that prefix alone.
+
+- Set `cache.keyPrefix` in your deploy config to choose the prefix.
+- Leave it unset and the operator gives the app a prefix of its own: `kn-` followed by 12 hex
+  characters derived from the app's namespace and name. No two apps get the same one, including two
+  apps with the same name in different namespaces.
+- A `REDIS_KEY_PREFIX` you set yourself in `env` or `secrets.envMap` still wins. One baked into
+  your image or loaded through `secrets.envFrom` does not: set `cache.keyPrefix` instead.
+
+Two apps under one prefix read each other's entries and receive each other's invalidations.
+`knext doctor` warns when apps on the cluster share a prefix, or when one prefix sits inside another
+(`shop` and `shop:cache`).
+
+Keys under `kn-next:*` belong to apps that run with no prefix at all, for example outside the
+operator. Any number of apps can land there, so knext never deletes keys under it wholesale. After a
+Redis outage long enough to miss more than 1,000 invalidations, an app with its own prefix clears its
+whole cache to drop the entries it could not invalidate. An app on that shared fallback logs an error
+instead and keeps those entries until they expire.
+
+### Upgrading an app that set no prefix [#key-prefix-upgrade]
+
+Before this change, an app without `cache.keyPrefix` wrote its keys under `kn-next:*`. When the
+operator is upgraded, the app rolls out a new revision under its own prefix and starts with an empty
+cache: pages and `'use cache'` entries are rendered again on their first request. The keys left under
+`kn-next:*` are not deleted for you. They expire on their own, or you can remove them once no app
+writes there any more:
+
+```bash
+redis-cli --scan --pattern 'kn-next:*' | xargs -r redis-cli del
+```
+
+To avoid the cold start, set `cache.keyPrefix` before you upgrade the operator; the app then keeps
+whatever prefix you choose. Choose one no other app uses.
+
 ## `'use cache'` is shared across pods
 
 Next.js runs the `'use cache'` directive (Cache Components) through a different option from ISR:
@@ -219,6 +256,7 @@ the rate of any of them:
 | `tags_dropped` | Tag invalidations that could not reach Redis; they are applied once it is back |
 | `tags_replayed` | Tags whose invalidation was applied after Redis came back |
 | `tags_collapsed` | Times a pod had over 1,000 tags to apply and removed every `'use cache'` entry of the app instead |
+| `tags_collapse_refused` | Times a pod had over 1,000 tags to apply but kept its entries, because its key prefix is the shared fallback `kn-next:*` ([why](#key-prefix)) |
 | `prune_error` | Failed clean-ups of old invalidation timestamps (the invalidation itself was written) |
 | `error` | Redis commands that failed; the request carried on without the cache |
 

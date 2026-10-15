@@ -146,11 +146,15 @@ func (r *NextAppReconciler) cleanupExternalState(ctx context.Context, app *appsv
 		}
 	}
 
-	if app.Spec.Cache != nil && app.Spec.Cache.Provider == "redis" && app.Spec.Cache.KeyPrefix != "" {
+	// The keyspace the operator rendered for this app: spec.cache.keyPrefix, or
+	// the derived per-app default. Never the shared "kn-next" fallback, and
+	// never a prefix the user set through env (operatorRedisKeyPrefix is empty
+	// then), so this cannot reach another app's keys.
+	if keyPrefix := operatorRedisKeyPrefix(app); keyPrefix != "" {
 		target := CacheTarget{
 			Provider:  app.Spec.Cache.Provider,
 			URL:       app.Spec.Cache.URL,
-			KeyPrefix: app.Spec.Cache.KeyPrefix,
+			KeyPrefix: keyPrefix,
 		}
 		if err := r.Cleaner.CleanupCache(ctx, target); err != nil {
 			logger.Error(err, "Redis keyspace cleanup failed; proceeding with deletion (best-effort)",

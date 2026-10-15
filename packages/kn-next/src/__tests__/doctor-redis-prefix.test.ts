@@ -1,0 +1,179 @@
+import { describe, expect, it } from "bun:test";
+import { runDoctor } from "../cli/doctor";
+import {
+    defaultRedisKeyPrefix,
+    redisPrefixCheck,
+} from "../cli/doctor/checks/redis-prefix";
+import type { CheckContext, KubectlFn } from "../cli/doctor/types";
+
+/**
+ * `knext doctor` flags NextApps whose Redis key prefixes collide.
+ *
+ * Two apps under one prefix on a shared Redis read each other's entries, share
+ * each other's tag invalidations, and — before the runtime refused it — one
+ * app's outage collapse deleted the other's whole cache. The operator now gives
+ * every app without `cache.keyPrefix` its own derived prefix, so a collision
+ * takes an explicit choice: the same `keyPrefix` (or `REDIS_KEY_PREFIX`) twice,
+ * the shared fallback `kn-next` set on purpose, or one prefix nested inside
+ * another's sweep pattern (`shop` sweeps `shop:cache:*`, which holds every key
+ * of an app prefixed `shop:cache`).
+ */
+
+type App = {
+    name: string;
+    namespace?: string;
+    cache?: { provider?: string; url?: string; keyPrefix?: string };
+    env?: Record<string, string>;
+    envMap?: Record<string, { secretName: string; secretKey: string }>;
+};
+
+function ctxWith(apps: App[] | "fail"): CheckContext {
+    const kubectl: KubectlFn = (args) => {
+        if (args.join(" ") !== "kubectl get nextapps --all-namespaces -o json")
+            return { ok: false, stdout: "", stderr: "unexpected" };
+        if (apps === "fail")
+            return { ok: false, stdout: "", stderr: "forbidden" };
+        return {
+            ok: true,
+            stderr: "",
+            stdout: JSON.stringify({
+                items: apps.map((a) => ({
+                    metadata: {
+                        name: a.name,
+                        namespace: a.namespace ?? "default",
+                    },
+                    spec: {
+                        cache: a.cache,
+                        env: a.env,
+                        secrets: a.envMap ? { envMap: a.envMap } : undefined,
+                    },
+                })),
+            }),
+        };
+    };
+    return {
+        // biome-ignore lint/suspicious/noExplicitAny: only kubectl is read
+        deps: {} as any,
+        kubectl,
+        skipAll: false,
+    };
+}
+
+const redis = (keyPrefix?: string) => ({
+    provider: "redis",
+    url: "redis://shared:6379",
+    ...(keyPrefix ? { keyPrefix } : {}),
+});
+
+describe("doctor: Redis key prefixes", () => {
+    it("derives the operator's default prefix (lockstep vector with the Go operator)", () => {
+        expect(defaultRedisKeyPrefix("default", "shop")).toBe(
+            "kn-5be479caf0c0",
+        );
+        expect(defaultRedisKeyPrefix("team-b", "shop")).toBe("kn-d8bd7dc33539");
+    });
+
+    it("contributes NO row when no app uses a Redis cache (and when the list cannot be read)", () => {
+        expect(redisPrefixCheck(ctxWith([]))).toEqual([]);
+        expect(
+            redisPrefixCheck(
+                ctxWith([{ name: "a", cache: { provider: "memory" } }]),
+            ),
+        ).toEqual([]);
+        expect(redisPrefixCheck(ctxWith("fail"))).toEqual([]);
+        expect(redisPrefixCheck({ ...ctxWith([]), skipAll: true })).toEqual([]);
+    });
+
+    it("PASS: apps without keyPrefix get distinct derived prefixes, even with the same name in two namespaces", () => {
+        const [row] = redisPrefixCheck(
+            ctxWith([
+                { name: "shop", cache: redis() },
+                { name: "shop", namespace: "team-b", cache: redis() },
+                { name: "blog", cache: redis("blog") },
+            ]),
+        );
+        expect(row?.id).toBe("redis-prefix");
+        expect(row?.status).toBe("pass");
+    });
+
+    it("WARN: two apps set the same keyPrefix — names both apps and the prefix", () => {
+        const [row] = redisPrefixCheck(
+            ctxWith([
+                { name: "shop", cache: redis("shared") },
+                { name: "blog", namespace: "team-b", cache: redis("shared") },
+            ]),
+        );
+        expect(row?.status).toBe("warn");
+        expect(row?.detail).toContain("'shared'");
+        expect(row?.detail).toContain("default/shop");
+        expect(row?.detail).toContain("team-b/blog");
+        expect(row?.hint).toBeDefined();
+    });
+
+    it("WARN: a REDIS_KEY_PREFIX in spec.env counts as the app's prefix", () => {
+        const [row] = redisPrefixCheck(
+            ctxWith([
+                { name: "shop", cache: redis("p1") },
+                {
+                    name: "blog",
+                    cache: redis(),
+                    env: { REDIS_KEY_PREFIX: "p1" },
+                },
+            ]),
+        );
+        expect(row?.status).toBe("warn");
+        expect(row?.detail).toContain("default/blog");
+    });
+
+    it("WARN: the shared fallback 'kn-next' set explicitly, even by one app", () => {
+        const [row] = redisPrefixCheck(
+            ctxWith([{ name: "shop", cache: redis("kn-next") }]),
+        );
+        expect(row?.status).toBe("warn");
+        expect(row?.detail).toContain("kn-next");
+    });
+
+    it("WARN: one prefix nested in another's sweep pattern ('shop' vs 'shop:cache')", () => {
+        const [row] = redisPrefixCheck(
+            ctxWith([
+                { name: "shop", cache: redis("shop") },
+                { name: "other", cache: redis("shop:cache") },
+            ]),
+        );
+        expect(row?.status).toBe("warn");
+        expect(row?.detail).toContain("'shop:cache'");
+    });
+
+    it("an envMap REDIS_KEY_PREFIX cannot be read (a Secret): reported as unverified, not as a collision", () => {
+        const [row] = redisPrefixCheck(
+            ctxWith([
+                { name: "shop", cache: redis() },
+                {
+                    name: "blog",
+                    cache: redis(),
+                    envMap: {
+                        REDIS_KEY_PREFIX: { secretName: "s", secretKey: "k" },
+                    },
+                },
+            ]),
+        );
+        expect(row?.status).toBe("pass");
+        expect(row?.detail).toContain("default/blog");
+    });
+
+    it("is wired into runDoctor: a reachable cluster with colliding prefixes reports the row", async () => {
+        const apps = ctxWith([
+            { name: "shop", cache: redis("shared") },
+            { name: "blog", cache: redis("shared") },
+        ]);
+        const report = await runDoctor({
+            kubectl: (args) =>
+                args.join(" ") === "kubectl get --raw /version"
+                    ? { ok: true, stdout: "{}", stderr: "" }
+                    : apps.kubectl(args),
+            probeImage: async () => "ok",
+        });
+        const row = report.checks.find((c) => c.id === "redis-prefix");
+        expect(row?.status).toBe("warn");
+    });
+});
