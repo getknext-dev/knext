@@ -382,6 +382,112 @@ export function assertStaticPathTagInvalidation({ before, between, after }) {
   return `static ${before} → ${after} (unchanged at ${between} pre-invalidate)`;
 }
 
+// ---------------------------------------------------------------------------
+// 'use cache': GET /api/files/stats (a `'use cache'` function, tags `files` +
+// `file-stats`). The value carries `computedAt`, so "served from the cache" is
+// observed as an unchanged stamp, never inferred from timing.
+// ---------------------------------------------------------------------------
+
+export const FILE_STATS_PATH = '/api/files/stats';
+export const FILE_STATS_TAG = 'file-stats';
+
+/**
+ * @typedef {{ computedAt: string, count: number }} FileStatsRead
+ */
+
+/**
+ * Parse a GET /api/files/stats response, fail-closed.
+ * @param {{ status: number, text: string }} res
+ * @returns {FileStatsRead}
+ */
+export function parseFileStats(res) {
+  if (res.status !== 200)
+    throw new Error(`${FILE_STATS_PATH} HTTP ${res.status}: ${res.text.slice(0, 200)}`);
+  /** @type {any} */
+  let body;
+  try {
+    body = JSON.parse(res.text);
+  } catch {
+    throw new Error(`${FILE_STATS_PATH} is not JSON: ${res.text.slice(0, 200)}`);
+  }
+  if (typeof body?.computedAt !== 'string' || !Number.isFinite(body?.count)) {
+    throw new Error(`${FILE_STATS_PATH} returned an unexpected body: ${res.text.slice(0, 200)}`);
+  }
+  return { computedAt: body.computedAt, count: body.count };
+}
+
+/**
+ * The stats were computed ONCE and served again (same `computedAt`), agree with
+ * the database, and the entry is in the in-cluster Redis: the tag index names
+ * at least one key and at least one of those keys exists.
+ * @param {{ reads: FileStatsRead[], dbCount: number, keys: string[], liveKeys: number }} obs
+ */
+export function assertUseCacheServed({ reads, dbCount, keys, liveKeys }) {
+  assert.ok(
+    reads.length >= 2,
+    `need at least two reads of ${FILE_STATS_PATH}, got ${reads.length}`,
+  );
+  const [first, ...rest] = reads;
+  for (const r of rest) {
+    assert.equal(
+      r.computedAt,
+      first.computedAt,
+      `${FILE_STATS_PATH} was recomputed between reads (${first.computedAt} -> ${r.computedAt}): ` +
+        "'use cache' is not caching",
+    );
+  }
+  assert.equal(
+    first.count,
+    dbCount,
+    `${FILE_STATS_PATH} says ${first.count} file(s), the database holds ${dbCount}`,
+  );
+  assert.ok(
+    keys.length > 0,
+    `no Redis key is indexed under the '${FILE_STATS_TAG}' tag: the 'use cache' entry never reached the in-cluster Redis`,
+  );
+  assert.ok(
+    liveKeys > 0,
+    `the '${FILE_STATS_TAG}' tag index names ${keys.length} key(s) but none exists in Redis`,
+  );
+  return `${reads.length} reads share computedAt ${first.computedAt} (count ${first.count} = database); ${liveKeys} Redis entr${liveKeys === 1 ? 'y' : 'ies'} under '${FILE_STATS_TAG}'`;
+}
+
+/**
+ * The stats changed ONLY after the authenticated invalidation of their tag:
+ * unchanged after the refused (401) attempts, changed after the accepted one.
+ * @param {{ before: FileStatsRead, between: FileStatsRead, after: FileStatsRead }} obs
+ */
+export function assertUseCacheInvalidated({ before, between, after }) {
+  assert.equal(
+    between.computedAt,
+    before.computedAt,
+    `${FILE_STATS_PATH} changed (${before.computedAt} -> ${between.computedAt}) after only ` +
+      'UNAUTHENTICATED invalidate calls',
+  );
+  assert.notEqual(
+    after.computedAt,
+    before.computedAt,
+    `${FILE_STATS_PATH} still serves the entry computed at ${before.computedAt} after ` +
+      `revalidateTag('${FILE_STATS_TAG}')`,
+  );
+  return `computedAt ${before.computedAt} -> ${after.computedAt} only after the authenticated call`;
+}
+
+/**
+ * After scale-to-zero and a wake, the NEW pod served the entry the old pod
+ * computed: the value lives in the shared store, not in a process.
+ * @param {{ before: FileStatsRead, after: FileStatsRead }} obs
+ */
+export function assertUseCacheSurvived({ before, after }) {
+  assert.equal(
+    after.computedAt,
+    before.computedAt,
+    `after scale-to-zero the woken pod recomputed ${FILE_STATS_PATH} ` +
+      `(${before.computedAt} -> ${after.computedAt}): the 'use cache' entry was per-process`,
+  );
+  return `woken pod served computedAt ${after.computedAt}, computed before scale-to-zero`;
+}
+
 /**
  * ISR: two back-to-back reads after a priming read carry a cache-state header
  * and neither is a MISS. The value must later CHANGE, proving revalidation.

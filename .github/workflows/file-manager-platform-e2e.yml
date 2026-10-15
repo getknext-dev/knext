@@ -7,6 +7,8 @@ name: File-manager platform e2e (reusable)
 #   A. app functionality  - upload (server action), list, bytes-identical read-back
 #                           from object storage, users/audit/dashboard, 404
 #   B. platform features  - scale-to-zero + wake, ISR + authenticated invalidation,
+#                           'use cache' (/api/files/stats) served from Redis,
+#                           invalidated by tag, read back by the pod woken from zero,
 #                           image optimization, health, metrics, NetworkPolicy,
 #                           graceful rollout under load
 #   C. deployment basics  - asset content-types + cache headers, RSC streaming,

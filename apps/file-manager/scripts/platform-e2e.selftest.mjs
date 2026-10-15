@@ -17,6 +17,9 @@ import {
   assertRolloutClean,
   assertStaticPathTagInvalidation,
   assertUploadStored,
+  assertUseCacheInvalidated,
+  assertUseCacheServed,
+  assertUseCacheSurvived,
   checkImageOptimization,
   checkInvalidationEndpoint,
   checkMalformedUrls,
@@ -299,6 +302,46 @@ mustThrow('downloaded bytes differ from uploaded bytes', () =>
     sent: Buffer.from('a'),
     stored: Buffer.from('b'),
   }),
+);
+
+// 'use cache' file stats (served from the shared Redis store, invalidated by tag,
+// kept across scale-to-zero).
+const STATS = { computedAt: '2026-10-15T10:00:00.000Z', count: 3 };
+mustPass("'use cache' stats: one entry, matching the database, in Redis", () =>
+  assertUseCacheServed({ reads: [STATS, STATS], dbCount: 3, keys: ['fm:/x'], liveKeys: 1 }),
+);
+mustThrow("'use cache' is a no-op: every read recomputes", () =>
+  assertUseCacheServed({
+    reads: [STATS, { ...STATS, computedAt: '2026-10-15T10:00:01.000Z' }],
+    dbCount: 3,
+    keys: ['fm:/x'],
+    liveKeys: 1,
+  }),
+);
+mustThrow("'use cache' stats disagree with the database", () =>
+  assertUseCacheServed({ reads: [STATS, STATS], dbCount: 4, keys: ['fm:/x'], liveKeys: 1 }),
+);
+mustThrow("'use cache' entry is not in Redis (a per-process cache)", () =>
+  assertUseCacheServed({ reads: [STATS, STATS], dbCount: 3, keys: [], liveKeys: 0 }),
+);
+mustThrow("'use cache' tag index points at no live entry", () =>
+  assertUseCacheServed({ reads: [STATS, STATS], dbCount: 3, keys: ['fm:/x'], liveKeys: 0 }),
+);
+const LATER = { ...STATS, computedAt: '2026-10-15T10:05:00.000Z' };
+mustPass("'use cache' stats change only AFTER the authenticated invalidation", () =>
+  assertUseCacheInvalidated({ before: STATS, between: STATS, after: LATER }),
+);
+mustThrow("'use cache' stats never invalidated by the tag", () =>
+  assertUseCacheInvalidated({ before: STATS, between: STATS, after: STATS }),
+);
+mustThrow("'use cache' stats changed before the authenticated call (an unauthenticated bust)", () =>
+  assertUseCacheInvalidated({ before: STATS, between: LATER, after: LATER }),
+);
+mustPass("'use cache' entry survives scale-to-zero (a new pod reads it)", () =>
+  assertUseCacheSurvived({ before: LATER, after: LATER }),
+);
+mustThrow("'use cache' entry lost with the pod (rebuilt after the wake)", () =>
+  assertUseCacheSurvived({ before: STATS, after: LATER }),
 );
 
 assert.equal(failures, 0, `${failures} self-test expectation(s) failed`);

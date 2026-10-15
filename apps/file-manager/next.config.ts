@@ -51,6 +51,12 @@ const nextConfig: NextConfig = {
     // throws E411 and the denial path would 500, so it is pinned by
     // `observability/_ui/access-denied.test.tsx`.
     authInterrupts: true,
+    // Turns on the `'use cache'` directive (used by `/api/files/stats`) WITHOUT
+    // Cache Components, which would forbid the route segment configs
+    // (`dynamic`, `revalidate`) the cache-test pages exercise. The knext adapter
+    // points `cacheHandlers` at the shared Redis store because `cacheHandler`
+    // above is knext's; vinext stores the entry through its data-cache adapter.
+    useCache: true,
     serverActions: {
       allowedOrigins: ['localhost:8080', 'next-home.default.136.111.227.195.sslip.io'],
     },

@@ -52,6 +52,9 @@ import {
   assertTagInvalidation,
   assertUploadAccepted,
   assertUploadStored,
+  assertUseCacheInvalidated,
+  assertUseCacheServed,
+  assertUseCacheSurvived,
   assertWoken,
   checkInvalidationEndpoint,
   checkMalformedUrls,
@@ -60,12 +63,15 @@ import {
   checkStreaming,
   extensionOf,
   extractAssetRefs,
+  FILE_STATS_PATH,
+  FILE_STATS_TAG,
   findServerActionId,
   generatedAt,
   HOME_MARKER,
   isScaledToZero,
   ORDERS_CLASS,
   PRODUCTS_CLASS,
+  parseFileStats,
   SEEDED_USER_EMAIL,
   STATIC_REVALIDATE_PATH,
   staticRevalidateValue,
@@ -668,6 +674,58 @@ async function main() {
     },
   );
 
+  // 'use cache' (GET /api/files/stats): served from the in-cluster Redis,
+  // invalidated by its tag through the authenticated endpoint. The settled value
+  // is kept for the scale-to-zero check below, which reads it from a NEW pod.
+  /** @type {import('./platform-e2e-checks.mjs').FileStatsRead | undefined} */
+  let statsBeforeZero;
+  const readStats = async () => parseFileStats(await get(FILE_STATS_PATH));
+  await check(
+    'B. platform',
+    "'use cache': file stats served from the in-cluster Redis, invalidated by tag",
+    async () => {
+      const r1 = await readStats();
+      const r2 = await readStats();
+      const r3 = await readStats();
+      const dbCount = Number(psql(ns, 'SELECT COUNT(*) FROM files'));
+      const keys = redisCli(ns, ['--scan', '--pattern', `*:tag:${FILE_STATS_TAG}`])
+        .split('\n')
+        .filter(Boolean)
+        .flatMap((idx) => redisCli(ns, ['SMEMBERS', idx]).split('\n').filter(Boolean));
+      const liveKeys = keys.filter((k) => redisCli(ns, ['EXISTS', k]) === '1').length;
+      const served = assertUseCacheServed({ reads: [r1, r2, r3], dbCount, keys, liveKeys });
+
+      /** @type {import('./platform-e2e-checks.mjs').FileStatsRead | undefined} */
+      let between;
+      const auth = await checkInvalidationEndpoint(
+        http.request,
+        token,
+        FILE_STATS_TAG,
+        async () => {
+          between = await readStats();
+        },
+      );
+      // The endpoint invalidates stale-while-revalidate: the first read after
+      // it may still be the old entry while the new one is built.
+      let after = await readStats();
+      const deadline = Date.now() + 20000;
+      while (Date.now() < deadline && after.computedAt === r1.computedAt) {
+        await sleep(500);
+        after = await readStats();
+      }
+      const invalidated = assertUseCacheInvalidated({
+        before: r1,
+        between: between ?? { computedAt: '(not read)', count: -1 },
+        after,
+      });
+      // The rebuilt entry is itself cached: two more reads agree.
+      const settled = await readStats();
+      assertUseCacheServed({ reads: [after, settled], dbCount, keys, liveKeys });
+      statsBeforeZero = settled;
+      return `${served}; ${auth}; ${invalidated}`;
+    },
+  );
+
   await check(
     'B. platform',
     'Image optimization: /_next/image negotiates webp and re-encodes smaller',
@@ -833,6 +891,19 @@ async function main() {
         ms: Date.now() - t0,
         ceilingMs: WAKE_CEILING_MS,
       });
+    },
+  );
+
+  await check(
+    'B. platform',
+    "'use cache': the file-stats entry survives scale-to-zero (the woken pod reads it)",
+    async () => {
+      if (!statsBeforeZero) {
+        throw new Error(
+          "no settled 'use cache' value from before scale-to-zero (that check failed)",
+        );
+      }
+      return assertUseCacheSurvived({ before: statsBeforeZero, after: await readStats() });
     },
   );
 
