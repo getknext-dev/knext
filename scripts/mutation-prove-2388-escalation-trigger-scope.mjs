@@ -279,7 +279,8 @@ const MUTATIONS = [
     expect: 'red',
     claim: 'an unresolvable relative import is skipped instead of failing closed',
     subject: 'guard',
-    anchor: "        if (target === null) gaps.push(`${file}: unresolvable import '${spec}'`);",
+    anchor:
+      '        if (target === null) gaps.push(`${file}: unresolvable relative specifier ${spec}`);',
     replacement: '        if (target === null) continue;',
   },
   {

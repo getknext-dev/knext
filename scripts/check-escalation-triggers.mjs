@@ -1115,7 +1115,9 @@ export function releaseClosure(seeds, read, listUnder) {
       for (const spec of specs) {
         if (!spec.startsWith('./') && !spec.startsWith('../')) continue; // bare / node: builtin
         const target = resolveRelative(file, spec, (p) => read(p) !== null);
-        if (target === null) gaps.push(`${file}: unresolvable import '${spec}'`);
+        // Wording kept off the `import '<x>'` shape: workflow-script-install-guard
+        // scans this file's text and would read that as a package import.
+        if (target === null) gaps.push(`${file}: unresolvable relative specifier ${spec}`);
         else add(target);
       }
     } else if (!file.endsWith('.json')) {
