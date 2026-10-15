@@ -1020,8 +1020,21 @@ jobs:
         working-directory: packages/grpc
         run: bun scripts/verified-buf.ts lint
 
+      # A push that CREATES a branch (the first push of a new integration/**
+      # line) has an all-zero before-sha; this resolves it to the merge-base
+      # with origin/main. Every other base passes through unchanged for the
+      # step below to fail closed on. Tested by tests/ci-resolve-push-base.test.ts.
+      - name: Resolve the base commit (branch-creation push → merge-base with main)
+        id: base
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PUSH_CREATED: ${{ github.event.created }}
+          RAW_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+        run: node scripts/ci-resolve-push-base.mjs
+
       # The baseline is the commit this change is based on: the PR base, the
-      # merge-queue base, or the previous main commit on a push. FAILS CLOSED:
+      # merge-queue base, the previous commit on a push, or the fork point on a
+      # branch-creation push (resolved above). FAILS CLOSED:
       # the one case that passes without comparing is a base commit that
       # RESOLVES and has no packages/grpc (the change that introduced the
       # package). An empty, all-zero or unresolvable base is an error, never
@@ -1030,7 +1043,7 @@ jobs:
       - name: buf breaking (the knext options contract, against the base commit)
         working-directory: packages/grpc
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          BASE_SHA: ${{ steps.base.outputs.sha }}
         run: |
           if [ -z "$BASE_SHA" ]; then
             echo "::error::no base commit to compare against"
@@ -2109,9 +2122,21 @@ jobs:
         with:
           node-version: '24'
 
+      # On `push` there is no PR base; use the before-SHA of the push, or, on a
+      # push that CREATES the branch (all-zero before), the merge-base with
+      # origin/main. Anything else passes through unchanged.
+      # Tested by tests/ci-resolve-push-base.test.ts.
+      - name: Resolve the diff base (branch-creation push → merge-base with main)
+        if: github.event_name != 'merge_group'
+        id: base
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PUSH_CREATED: ${{ github.event.created }}
+          RAW_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: node scripts/ci-resolve-push-base.mjs
+
       # needs.*.result arrive via env (never interpolated into the shell) and are
-      # read as data by the aggregator. On `push` there is no PR base; use the
-      # before-SHA of the push. The aggregator refuses to scope-out on an
+      # read as data by the aggregator. The aggregator refuses to scope-out on an
       # uncomputable diff (exits non-zero), so it is fail-closed there too.
       - name: Assert every e2e-round leg concluded success (path-scoped)
         if: github.event_name != 'merge_group'
@@ -2121,6 +2146,6 @@ jobs:
           E2E_RESULT_STANDALONE_DRAIN_BUN_IMAGE: ${{ needs.standalone-drain-bun-image.result }}
           E2E_RESULT_BUN_EXEC_ALPINE_IMAGE: ${{ needs.bun-exec-alpine-image.result }}
           E2E_RESULT_SELF_CONTAINED_EXEC_E2E: ${{ needs.self-contained-exec-e2e.result }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          BASE_SHA: ${{ steps.base.outputs.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: node apps/file-manager/scripts/e2e-round-aggregate.mjs

@@ -146,7 +146,7 @@ function continuesOnError(value: unknown, ref: string): boolean {
   });
 }
 
-type RefGatedStep = { where: string; value: string };
+type RefGatedStep = { jobId: string; where: string; value: string };
 
 /** Every Trivy step whose `continue-on-error` depends on `github.ref`. */
 function refGatedTrivySteps(file: string, wf: Workflow): RefGatedStep[] {
@@ -158,11 +158,167 @@ function refGatedTrivySteps(file: string, wf: Workflow): RefGatedStep[] {
       if (!String(step?.uses ?? '').startsWith('aquasecurity/trivy-action@')) continue;
       const value = step['continue-on-error'];
       if (typeof value === 'string' && /github\.ref\b/.test(value)) {
-        found.push({ where: `${file} job \`${jobId}\` step \`${String(step.name)}\``, value });
+        found.push({
+          jobId,
+          where: `${file} job \`${jobId}\` step \`${String(step.name)}\``,
+          value,
+        });
       }
     }
   }
   return found;
+}
+
+/**
+ * The jobs that must RUN on a push to every release line (#2381). Named here
+ * because "Lint & Test" and "Typecheck" carry no marker a scan could find; every
+ * job holding a ref-gated Trivy step is added by derivation, so a new enforce
+ * gate is covered without editing this list.
+ */
+const CRITICAL_JOBS: Record<(typeof WORKFLOWS)[number], readonly string[]> = {
+  'ci.yml': ['lint-and-test', 'typecheck-root'],
+  'supply-chain.yml': ['image-supply-chain', 'built-image-trivy'],
+};
+
+type ExprValue = string | boolean;
+type ExprCtx = { event_name: string; ref: string };
+
+/**
+ * Evaluates a job-level `if:` for a push of `ctx.ref`. A small, fail-closed
+ * model of GitHub's expression language: string literals, `github.event_name`,
+ * `github.ref`, `github.ref_name`, `==`, `!=`, `!`, `&&`, `||`, parentheses,
+ * `startsWith`/`endsWith`, and the status functions. String comparison is
+ * case-insensitive, as in GitHub. Anything else throws.
+ *
+ * Status functions assume every dependency ran (the closure check below makes
+ * that true or reports it): `always()`/`success()` are true,
+ * `failure()`/`cancelled()` false.
+ */
+function evaluateJobIf(raw: unknown, ctx: ExprCtx): boolean {
+  if (raw === undefined || raw === true) return true;
+  if (raw === false) return false;
+  if (typeof raw !== 'string') throw new Error(`unexpected job \`if:\` value: ${String(raw)}`);
+  let src = raw.trim();
+  const wrapped = src.match(/^\$\{\{([\s\S]*)\}\}$/);
+  if (wrapped) src = wrapped[1];
+  const tokens = src.match(/'(?:[^']|'')*'|&&|\|\||==|!=|!|\(|\)|,|[A-Za-z_][\w.-]*|\S/g) ?? [];
+  let i = 0;
+  const peek = () => tokens[i];
+  const take = (want?: string) => {
+    const t = tokens[i++];
+    if (t === undefined || (want !== undefined && t !== want)) {
+      throw new Error(`unmodelled job \`if:\` (expected ${want ?? 'a token'}): ${raw}`);
+    }
+    return t;
+  };
+  const truthy = (v: ExprValue) => (typeof v === 'boolean' ? v : v.length > 0);
+  const str = (v: ExprValue) => String(v).toLowerCase();
+  const fns: Record<string, (args: ExprValue[]) => ExprValue> = {
+    always: () => true,
+    success: () => true,
+    failure: () => false,
+    cancelled: () => false,
+    startswith: ([a, b]) => str(a).startsWith(str(b)),
+    endswith: ([a, b]) => str(a).endsWith(str(b)),
+  };
+  const contexts: Record<string, string> = {
+    'github.event_name': ctx.event_name,
+    'github.ref': ctx.ref,
+    'github.ref_name': ctx.ref.replace(/^refs\/(heads|tags)\//, ''),
+  };
+  function primary(): ExprValue {
+    const t = take();
+    if (t === '(') {
+      const v = or();
+      take(')');
+      return v;
+    }
+    if (t === '!') return !truthy(primary());
+    if (t.startsWith("'")) return t.slice(1, -1).replace(/''/g, "'");
+    if (t === 'true' || t === 'false') return t === 'true';
+    if (peek() === '(') {
+      const fn = fns[t.toLowerCase()];
+      if (!fn) throw new Error(`unmodelled function \`${t}\` in job \`if:\`: ${raw}`);
+      take('(');
+      const args: ExprValue[] = [];
+      while (peek() !== ')') {
+        args.push(or());
+        if (peek() === ',') take(',');
+        else if (peek() !== ')') take(')');
+      }
+      take(')');
+      return fn(args);
+    }
+    if (t in contexts) return contexts[t];
+    throw new Error(`unmodelled term \`${t}\` in job \`if:\`: ${raw}`);
+  }
+  function compare(): ExprValue {
+    const left = primary();
+    const op = peek();
+    if (op !== '==' && op !== '!=') return left;
+    take();
+    const right = primary();
+    const eq = str(left) === str(right);
+    return op === '==' ? eq : !eq;
+  }
+  function and(): ExprValue {
+    let v = compare();
+    while (peek() === '&&') {
+      take();
+      const r = compare();
+      v = truthy(v) ? r : v;
+    }
+    return v;
+  }
+  function or(): ExprValue {
+    let v = and();
+    while (peek() === '||') {
+      take();
+      const r = and();
+      v = truthy(v) ? v : r;
+    }
+    return v;
+  }
+  if (tokens.length === 0) throw new Error(`empty job \`if:\`: ${raw}`);
+  const result = or();
+  if (i !== tokens.length) throw new Error(`unmodelled trailing syntax in job \`if:\`: ${raw}`);
+  return truthy(result);
+}
+
+function asNeeds(value: unknown): string[] {
+  if (value === undefined) return [];
+  return (Array.isArray(value) ? value : [value]).map(String);
+}
+
+/**
+ * Why a push of `ref` would NOT run `jobId`, or null. Walks `needs:`
+ * transitively: a critical job behind a dependency that skips on the line is
+ * skipped too (bare `needs:` semantics), so every job in the closure must run.
+ */
+function jobSkipGap(wf: Workflow, jobId: string, ref: string): string | null {
+  const seen = new Set<string>();
+  const queue = [jobId];
+  while (queue.length > 0) {
+    const id = queue.shift() as string;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const job = wf.jobs[id] as Record<string, unknown> | undefined;
+    if (!job || typeof job !== 'object') {
+      return id === jobId ? 'job does not exist' : `needs \`${id}\`, which does not exist`;
+    }
+    if (!evaluateJobIf(job.if, { event_name: 'push', ref })) {
+      const via = id === jobId ? '' : ` (via needs \`${id}\`)`;
+      return `job-level \`if: ${String(job.if)}\` skips it${via}`;
+    }
+    queue.push(...asNeeds(job.needs));
+  }
+  return null;
+}
+
+/** Named critical jobs plus every job that holds a ref-gated Trivy step. */
+function criticalJobs(file: (typeof WORKFLOWS)[number], wf: Workflow): string[] {
+  const derived = refGatedTrivySteps(file, wf).map((s) => s.jobId);
+  return [...new Set([...CRITICAL_JOBS[file], ...derived])];
 }
 
 describe('every release line gets post-merge CI and enforce-grade Trivy (#2249)', () => {
@@ -206,6 +362,23 @@ describe('every release line gets post-merge CI and enforce-grade Trivy (#2249)'
         }
       }
       expect(problems).toEqual([]);
+    });
+
+    it(`${file}'s critical jobs are not skipped by a job-level \`if:\` on any release-line push (#2381)`, () => {
+      const wf = readWorkflow(file);
+      const jobs = criticalJobs(file, wf);
+      expect(jobs.length, `${file}: no critical jobs to check (vacuous)`).toBeGreaterThan(1);
+      const gaps: string[] = [];
+      for (const jobId of jobs) {
+        for (const ref of lines) {
+          const gap = jobSkipGap(wf, jobId, ref);
+          if (gap) gaps.push(`${file} \`${jobId}\` on ${ref}: ${gap}`);
+        }
+      }
+      expect(
+        gaps,
+        `${file}: a critical job that skips on a release-line push leaves the combined tree untested`,
+      ).toEqual([]);
     });
   }
 });
@@ -253,5 +426,45 @@ describe('the guard helpers fail closed and see red', () => {
       /unmodelled/,
     );
     expect(() => continuesOnError('github.ref != main', 'x')).toThrow(/unmodelled/);
+  });
+
+  it('evaluateJobIf: a main-only or PR-only job skips an integration push; unknown syntax throws', () => {
+    const push = (ref: string) => ({ event_name: 'push', ref });
+    const v2 = push('refs/heads/integration/v2');
+    expect(evaluateJobIf(undefined, v2)).toBe(true);
+    expect(evaluateJobIf("github.ref == 'refs/heads/main'", v2)).toBe(false);
+    expect(evaluateJobIf("github.ref == 'refs/heads/main'", push('refs/heads/main'))).toBe(true);
+    expect(evaluateJobIf("github.event_name == 'pull_request'", v2)).toBe(false);
+    expect(evaluateJobIf(ghExpr("!startsWith(github.ref, 'refs/heads/integration/')"), v2)).toBe(
+      false,
+    );
+    expect(evaluateJobIf('always()', v2)).toBe(true);
+    expect(
+      evaluateJobIf(
+        "github.event_name != 'merge_group' && (github.ref == 'refs/heads/main' || github.ref_name == 'integration/v2')",
+        v2,
+      ),
+    ).toBe(true);
+    expect(evaluateJobIf("github.event_name == 'PUSH'", v2)).toBe(true);
+    expect(() => evaluateJobIf("contains(github.ref, 'main')", v2)).toThrow(/unmodelled/);
+    expect(() => evaluateJobIf('github.event.pull_request.draft == false', v2)).toThrow(
+      /unmodelled/,
+    );
+    expect(() => evaluateJobIf("github.ref == 'a' 'b'", v2)).toThrow(/unmodelled/);
+  });
+
+  it('jobSkipGap: a dependency that skips on the line skips the critical job behind it', () => {
+    const wf: Workflow = {
+      on: {},
+      jobs: {
+        gate: { if: "github.event_name == 'pull_request'" },
+        critical: { needs: ['gate'] },
+        fine: { needs: 'other' },
+        other: {},
+      },
+    };
+    expect(jobSkipGap(wf, 'critical', 'refs/heads/integration/v2')).toMatch(/via needs `gate`/);
+    expect(jobSkipGap(wf, 'fine', 'refs/heads/integration/v2')).toBe(null);
+    expect(jobSkipGap(wf, 'missing', 'refs/heads/main')).toMatch(/does not exist/);
   });
 });
