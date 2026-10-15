@@ -14,10 +14,13 @@
 >   `router-hash-navigation`, `rewrite-with-browser-history`, `scroll-back-restoration`), and npm
 >   refused the tarball install with ERESOLVE. This was a harness fault, fixed in `e2e-deploy.sh`
 >   with a retry that applies only on ERESOLVE.
-> - `transpile-packages-typescript-foreign` is a harness gap, **still open as #2316**. In deploy
->   mode the fixture expects the platform to run `pnpm install` (its `vercel.json`), which copies
->   `file:` deps into `node_modules`. `e2e-deploy.sh`'s npm install symlinks them to the source
->   instead.
+> - `transpile-packages-typescript-foreign` was a harness gap (#2316). In deploy mode the fixture
+>   expects the platform to run `pnpm install` (its `vercel.json`), which copies `file:` deps into
+>   `node_modules`. `e2e-deploy.sh`'s npm install symlinked them to the source instead. The fix
+>   copies such a symlinked `file:` dep into place, only for fixtures whose `vercel.json`
+>   `installCommand` names pnpm (`npm --install-links` cannot do it: npm always links a
+>   project-internal `file:./` dep). A local `next build` at 16.4.0 on the copied layout fails with
+>   the messages the test expects on both bundlers. **No dispatch has proven it yet.**
 > - Two files deploy a static export (`middleware-src`, `middleware-src-node`), so they are
 >   excluded under the existing `static-export` category.
 >

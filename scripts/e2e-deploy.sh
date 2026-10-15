@@ -244,6 +244,57 @@ EOF
     rm -rf "${NM_SNAP}"
   fi
 
+  # ── #2316: a fixture whose vercel.json installs with pnpm gets its `file:`
+  # directory deps as real packages. At v16.4.0 transpile-packages-typescript-
+  # foreign deploys for the first time; its `should fail` case needs `next
+  # build` to reject an untranspiled TypeScript `file:./pkg` dependency. The
+  # fixture's vercel.json sets `"installCommand": "pnpm install"`, and pnpm
+  # installs a `file:` directory as a package inside node_modules, so Next
+  # treats it as foreign code. npm SYMLINKS it (`node_modules/pkg -> ../pkg`),
+  # Next compiles the realpath as app code, and the build passes.
+  # `--install-links` is no help: npm >= 10 always links a project-internal
+  # `file:./` dependency. So, for fixtures whose installCommand names pnpm
+  # ONLY, replace each such symlink with a copy of its target. Every other
+  # fixture (including the native-addon `file:` ones) keeps today's install.
+  if [ -f "${APP_DIR}/vercel.json" ]; then
+    COPIED_FILE_DEPS="$(node -e '
+      const fs = require("node:fs");
+      const path = require("node:path");
+      let installCommand = "";
+      try {
+        installCommand = String(JSON.parse(fs.readFileSync("vercel.json", "utf8")).installCommand || "");
+      } catch (_) {}
+      if (!/(^|[\s;&|(])pnpm(\s|$)/.test(installCommand)) process.exit(0);
+      let pkg = {};
+      try { pkg = JSON.parse(fs.readFileSync("package.json", "utf8")); } catch (_) { process.exit(0); }
+      const copied = [];
+      for (const field of ["dependencies", "devDependencies", "optionalDependencies"]) {
+        for (const [name, spec] of Object.entries(pkg[field] || {})) {
+          if (typeof spec !== "string" || !spec.startsWith("file:")) continue;
+          const dest = path.resolve("node_modules", name);
+          let st;
+          try { st = fs.lstatSync(dest); } catch (_) { continue; }
+          if (!st.isSymbolicLink()) continue;
+          const target = fs.realpathSync(dest);
+          if (!fs.statSync(target).isDirectory()) continue;
+          // A target that contains the link itself (file:.) cannot be copied into it.
+          if (!path.relative(target, dest).startsWith("..")) continue;
+          fs.unlinkSync(dest);
+          fs.cpSync(target, dest, { recursive: true });
+          copied.push("node_modules/" + name + " (" + spec + ")");
+        }
+      }
+      process.stdout.write(copied.join("\n"));
+    ')"
+    if [ -n "${COPIED_FILE_DEPS}" ]; then
+      while IFS= read -r entry; do
+        log "vercel.json installCommand uses pnpm: copied ${entry} into place of npm's symlink (pnpm installs file: deps as packages)"
+      done <<EOF
+${COPIED_FILE_DEPS}
+EOF
+    fi
+  fi
+
   # Resolve the installed adapter entry (package export "./adapter").
   NEXT_ADAPTER_PATH="$(node -e 'process.stdout.write(require.resolve("@getknext/core/adapter"))')"
   # #175 (B7b): resolve the deployed-platform Cache-Control preload from the
