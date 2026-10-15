@@ -1,6 +1,6 @@
 # ADR-0004: `BackendService` CRD for polyglot backends
 
-Status: Accepted (2026-10-12, Z1 design gate — architect and system-designer re-confirmation: [architect](https://github.com/getknext-dev/knext/issues/2045#issuecomment-6128826009), [system designer](https://github.com/getknext-dev/knext/issues/2045#issuecomment-6128845685)) · previously Proposed · Date: 2026-06 · Depends on: ADR-0001, ADR-0002 · Amended 2026-10-09 (see the amendment at the end; revised 2026-10-12 with the Z1 design gate's required changes before the re-confirmation)
+Status: Accepted (2026-10-12, Z1 design gate — architect and system-designer re-confirmation: [architect](https://github.com/getknext-dev/knext/issues/2045#issuecomment-6128826009), [system designer](https://github.com/getknext-dev/knext/issues/2045#issuecomment-6128845685)) · previously Proposed · Date: 2026-06 · Depends on: ADR-0001, ADR-0002 · Amended 2026-10-09 (see the amendment at the end; revised 2026-10-12 with the Z1 design gate's required changes before the re-confirmation) · Amendment 2 (2026-10-15) **Proposed**: `spec.zone`, two-sided binding, rendered binding env, operator-owned ServiceAccount, the activator as a NetworkPolicy peer, explicit RPC auth options (see the end)
 
 > **Amended by ADR-0065 (Proposed, 2026-10-07):** adds a `flavour: model` `BackendService`
 > (HTTP/1.1, loopback-bound model server behind an auth sidecar) and an `external` variant of
@@ -184,7 +184,8 @@ and flannel (OKE, OrbStack) does not enforce NetworkPolicy at all.
     propagation is expected to fail, and a warm-pod rotation test proves it.
 12. **The `authorize()` hook** is a required, user-supplied function in the app: it maps a request
     to a verified user identity or rejects it. Generation **fails closed** without it. Each RPC
-    carries an auth option: `USER` (default) or `PUBLIC` (only on `NO_SIDE_EFFECTS` methods). The
+    carries an auth option: `USER` (default) or `PUBLIC` (only on `NO_SIDE_EFFECTS` methods)
+    *(Amendment 2 Decision 8, Proposed: there is no default; every unary RPC states it)*. The
     generator refuses `PUBLIC` on a mutating RPC. **There is no `PUBLIC_MUTATION` option in 2.0.**
     An anonymous write, such as sign-up or a contact form, is a `USER` RPC whose `authorize()`
     returns an **explicit anonymous principal**, and only after the app's own fail-closed check
@@ -251,3 +252,249 @@ These came from the system designer as tech-debt or test items, not blockers. Th
       unknown `kid`; small `exp` clock skew.
 - [ ] Generator: auth options `USER` and `PUBLIC` only; a `PUBLIC_MUTATION` option is refused.
 - [ ] kind + Calico activator-path drill.
+
+## Amendment 2 (2026-10-15) — `spec.zone`, two-sided binding, rendered binding env, operator-owned identity
+
+**Status of this amendment: Proposed (2026-10-15).** It is accepted or revised at the Sprint 5
+close design review, and #2401 closes on that acceptance, not on this text merging. The amendment
+dated 2026-10-09 above is Amendment 1. This one amends its Decisions 1, 2, 12 and 13 and the base
+Decision's "injects" wording, and changes nothing else. It records the three binding contracts that
+the Sprint 5 planning gates (architect and system designer) found implicit in ADR-0004 and ADR-0052.
+It also records three Z8 (#2052) constraints from the same review (#2402, #2403 and the wording of the
+CNPG host check), and two decisions the lead took for Z6 (#2050). Trigger class: ADR, CRD, security,
+zone data sovereignty. Under the 2026-09-22 workflow amendment it is reviewed at sprint close and
+is not a merge gate, but Z8's PRs are built to it and cite it.
+
+### Context
+
+Z8 is the first v2 component in which the operator mounts Secrets into pods that a user defines and
+publishes a call path into a zone. The earlier text leaves eight points open, and each one would
+turn into a defect in Z8 or Z6 if it were settled in review instead of here:
+
+1. **How a function names its zone.** Amendment 1 Decision 1 requires "a single `ownerReference` to
+   a `NextApp`". A GitOps manifest (Argo CD, Flux) cannot carry one, because an `ownerReference`
+   needs the owner's UID and that UID does not exist when the manifest is written. The CLI could
+   supply it only by reading the `NextApp` back after applying it, which is a race.
+2. **Who may bind.** If the function alone declares the binding, anyone with RBAC to create a
+   `BackendService` in the namespace can get the operator to mount the zone's `db-bind` Secret into
+   a pod they control, without being able to read that Secret themselves. That is a confused deputy.
+   The Secret allowlist does not stop it, because the zone's `db-bind` Secret is on the allowlist.
+3. **Where the binding env lives.** The base Decision says the operator "injects"
+   `<NAME>_SERVICE_URL` into the gateway, and #2052's text says "into the owning `NextApp`". If a
+   reconciler writes that value into `NextApp.spec`, the operator becomes a second writer of the
+   user's CR. The CLI or the GitOps controller then re-applies the user's spec, the operator writes
+   the value back, and the two fight (ADR-0001).
+4. **Which identity the function pod runs as.** If the user chooses `serviceAccountName` and that
+   ServiceAccount has RBAC to read Secrets, the pod can fetch any Secret in the namespace through the
+   API. That bypasses the allowlist completely.
+5. **Who the network peer is.** At zero replicas a call reaches the function through the Knative
+   activator. When the function is warm, the call arrives through the networking layer, not directly
+   from the zone's pod. A policy that admits only the zone's pods drops cold calls on a CNI that
+   enforces policy (Calico). Every test on flannel still passes, because flannel enforces no
+   NetworkPolicy at all.
+6. **What the CNPG host check is.** Amendment 1 Decision 2 rejects an environment value that names
+   another zone's `-rw` or `-ro` host. An IP address, an `ExternalName` Service or a URL built at run
+   time gets past that string match. So the check cannot be what keeps a function out of another
+   zone's database.
+7. **How the served proto version reaches the zone.** Z6 (#2050) keys every cached read on the
+   function's served proto version (ADR-0066). ADR-0066 left the name of that env var to Z8's PR.
+8. **Whether an RPC's auth option has a default.** Amendment 1 Decision 12 calls `USER` the
+   "default". The ADR-0003 amendment's Decision 4 says the generator refuses an RPC that has no auth
+   option. A default and a refusal cannot both hold: with a default, an RPC that states nothing is
+   generated as `USER`, so the refusal never fires.
+
+### Decision
+
+1. **A `BackendService` names its zone with `spec.zone`, and the operator sets the
+   `ownerReference`.** `spec.zone` is required. It holds the name of a `NextApp` in the same
+   namespace, and it is immutable (a CEL `self == oldSelf` rule). The `BackendService` reconciler
+   resolves it and sets the `ownerReference` itself (`controller: true`, `blockOwnerDeletion: true`),
+   so garbage collection works as Amendment 1 Decision 1 intends. Users never write the
+   `ownerReference`. The CLI emits `spec.zone` and never `ownerReferences` (ADR-0052 D3). If the zone
+   does not exist, the function's status is `False` with a reason that names the missing zone, and
+   nothing is rendered. A controller `ownerReference` that disagrees with `spec.zone` is treated as a
+   violation and is not overwritten. On the `BackendService`, the operator writes only
+   `metadata.ownerReferences` and status, never the spec. This implements Amendment 1 Decision 1; it
+   does not reverse it.
+
+2. **Binding is two-sided.** A binding exists only when **both** halves agree:
+   - the function half: `BackendService.spec.zone` names the zone;
+   - the zone half: an entry in the `NextApp`'s `spec.backends[]` (the `{name, service}` list that
+     the base Decision already defines) whose `service` names that `BackendService`.
+
+   The planning notes called the zone half `spec.functions[]`. This amendment uses the base ADR's
+   `backends[]` instead of adding a second list, because two lists would have to be kept consistent,
+   and ADR-0065 (Proposed) already extends `backends[]`. jev: `backends[]` 1.00 / new `functions[]`
+   0.00 (confidence 1.00).
+
+   Until both halves agree, the operator **mounts nothing and renders nothing**:
+   - no `db-bind` Secret or other zone Secret, no JWKS and no per-zone key;
+   - no `<NAME>_SERVICE_URL` or other binding env in the zone;
+   - **no function Knative Service**. One that was already rendered is deleted.
+
+   The function's status is `False` with a reason that names the missing half. A zone entry whose
+   `service` names a function with a different `spec.zone` is a cross-zone binding. It is rejected,
+   as Amendment 1 Decision 1 requires, and reported on the `NextApp`'s status. Withdrawing either
+   half revokes the binding in the same way: the function's Knative Service is deleted, and the
+   zone's next render drops the binding env. That revocation is deliberate, and the docs say that
+   removing the zone's entry takes the function down.
+
+   This closes the confused-deputy path only while RBAC to create a `BackendService` does not also
+   grant RBAC to edit the zone's `NextApp`. A subject that holds both is acting as the zone owner. The
+   namespace is still the trust boundary (Amendment 1 Decision 2).
+
+   The choice between "no Knative Service" and "a bare Knative Service with nothing mounted" was
+   close. jev: no Knative Service 0.69 / bare Knative Service 0.31, **low confidence (0.38)**. "No
+   Knative Service" is taken because it matches the fail-closed rule (a violating spec renders no
+   Knative Service). A bare function is useless anyway: without a JWKS its interceptor rejects every
+   RPC except health. The sprint-close review may revisit this choice.
+
+3. **The binding env is rendered, never written.** The `NextApp` reconciler watches
+   `BackendService`s through a field index on `spec.zone`. From the zone's two-sided bindings it
+   renders the binding env **into the Knative Service template it already owns**:
+   - `<NAME>_SERVICE_URL` for each binding (base Decision);
+   - `<NAME>_SERVICE_PROTO_VERSION` for each binding (Decision 7);
+   - the wake list that ADR-0066 defines for the process-start primer.
+
+   The reconciler **never writes `NextApp.spec`**, or any other part of the user's CR except its
+   status. The `BackendService` reconciler never writes the zone's Knative Service, so each Knative
+   Service has exactly one renderer. The rules that follow from that:
+   - The rendered env is sorted deterministically, so a reconcile with no change rolls no revision.
+   - A zone with no binding renders a template byte-identical to today's, with no new revision.
+   - A served-version bump re-renders the template and rolls exactly one revision.
+   - If an entry in the zone's own `spec.env` has the same name as a rendered binding variable, it is
+     not overwritten. The binding is reported as failed on the `NextApp`'s status, and the report
+     names the variable.
+
+   Z8's PR fixes two names, because they are a CRD and public-API trigger: how `<NAME>` is derived
+   from a `backends[]` entry's `name` (case and separator), and the name of the wake-list variable.
+   The PR adds both to this decision before it is accepted, with the shared fixture that ADR-0066
+   requires, tested in Go and in TypeScript.
+
+4. **Each function runs as an operator-owned ServiceAccount.** The `BackendService` reconciler
+   creates one ServiceAccount per function, with `automountServiceAccountToken: false` and no Role or
+   RoleBinding. The CRD has no `serviceAccountName` field, and a CEL rule rejects one supplied through
+   the pod template. Without this rule, Amendment 1 Decision 2's allowlist governs only what the
+   operator mounts, not what the pod can read through the API. This turns the base Design's
+   "least-privilege ServiceAccount" from a default into a rule. Tracked as #2403.
+
+5. **The function's NetworkPolicy admits the Knative data path, and it is still only
+   defense-in-depth.** The policy admits two peers: the Knative serving system, which includes the
+   activator that carries scale-from-zero, and the networking layer's gateway namespace. Both are
+   admitted on queue-proxy's serving ports, the same peers and port allowlist that the `NextApp`
+   policy uses (ADR-0044). The user container port stays out of the allowlist, because queue-proxy
+   reaches it over loopback.
+
+   Two questions are measured, not assumed: which peers actually appear, and whether the zone's own
+   pods need a peer entry. A Calico scale-from-zero leg in Z8, which extends
+   `networkpolicy-enforcement-drill.sh`, shows that the owning zone reaches a cold function and that a
+   co-resident pod's direct dial to a warm function's pod is dropped. Tracked as #2402.
+
+   A zone's traffic arrives through shared Knative peers, so the policy **cannot express "only the
+   owning zone"**. What it can do is stop direct dials that skip the Knative path. The per-zone
+   control is the token (Amendment 1 Decision 13). Enforcement depends on the CNI. flannel (OKE,
+   OrbStack) enforces no NetworkPolicy, so on those clusters the object is declarative only, and any
+   claim that a function is isolated must carry that caveat.
+
+6. **The CNPG host check is a lint; the credential allowlist is the control.** The operator still
+   rejects an environment literal that names another zone's `-rw` or `-ro` host (Amendment 1
+   Decision 2), but status messages and docs call that check a **lint**. It catches a mistake, but it
+   does not stop an IP address, an `ExternalName` Service or a URL built at run time. The
+   data-sovereignty control is that the function holds **no credential for another zone's database**.
+   Three decisions together make that hold: the Secret allowlist (Amendment 1 Decision 2), applied
+   only through a two-sided binding (Decision 2 here), and enforced against the API by the
+   operator-owned ServiceAccount (Decision 4 here).
+
+7. **The served proto version reaches the zone as `<NAME>_SERVICE_PROTO_VERSION`.** The `NextApp`
+   reconciler renders it next to `<NAME>_SERVICE_URL`, from the served version recorded in the
+   `BackendService`'s status (ADR-0052 D7). The gateway reads it at call time. If it is unset, the
+   gateway **fails closed** with `FAILED_PRECONDITION`; it never falls back to a guessed or compiled-in
+   version. This fixes the name that ADR-0066 left to Z8's PR. The lead decided it for Z6 (#2050).
+
+8. **Every unary RPC states its auth option explicitly; there is no default.** This replaces
+   "`USER` (default)" in Amendment 1 Decision 12 and makes that decision agree with the ADR-0003
+   amendment's Decision 4. Every unary RPC must carry `(knext.v1.auth)`, and the generator refuses an
+   RPC that has none. `USER` is the value that `knext add function` writes into the scaffold. It is
+   not a value the generator assumes when the option is missing. The rest of Decision 12 is
+   unchanged: `PUBLIC` is allowed only on `NO_SIDE_EFFECTS` methods, there is no `PUBLIC_MUTATION`,
+   and generation fails closed without `authorize()`. The lead decided this for Z6 (#2050).
+
+### Options considered
+
+Each option below is a whole binding contract, because Decisions 1 to 4 only work together.
+`spec.zone` without the zone half leaves the confused deputy open, and the zone half without
+rendering still needs somewhere to write the env. Decisions 7 and 8 were taken by the lead and are
+not re-scored here.
+
+| Option | Pros | Cons |
+|---|---|---|
+| **A. `spec.zone` with an operator-set `ownerReference`; two-sided binding through `NextApp.spec.backends[]`; env rendered into the zone's Knative Service template; operator-owned ServiceAccount (recommended)** | GitOps can author every field. The zone owner's consent gates every mount. Each object has one writer (ADR-0001) and each Knative Service one renderer. RBAC cannot bypass the allowlist | One more watch and field index on the `NextApp` reconciler. A function stays down until its zone lists it, which changes the function-first rollout order (see Consequences). Removing the zone's entry takes the function down |
+| B. Amendment 1 and the base text taken literally: a user-written `ownerReference`, one-sided binding, `<NAME>_SERVICE_URL` patched into `NextApp.spec`, a user-chosen ServiceAccount | Least operator code; matches the original wording | GitOps cannot write the `ownerReference`. The confused deputy stays open. The operator becomes a second writer of `NextApp.spec` and fights the apply. A user ServiceAccount bypasses the allowlist |
+| C. `spec.zone` and rendered env, but one-sided binding; the confused deputy handled by docs that tell admins not to grant `BackendService` create to untrusted users | GitOps-friendly and single-writer; no new meaning on a `NextApp` field | The `db-bind` mount rests on a documented expectation that nothing enforces, and a failure is invisible until it has already happened |
+| D. Zone side only: the `NextApp` lists its functions, the `BackendService` has no zone field, and the operator infers the owner from whichever zone lists it | One declaration; consent comes from the zone | If two zones list one function, ownership is ambiguous, and resolving it first-come depends on the apply order under GitOps. A function's own Secret references cannot be checked until some zone claims it. A cross-zone claim looks the same as a legitimate one |
+
+**Recommendation: A.** jev (`jev-1.13.0`, 2026-10-15): A 0.94 / D 0.06 / B 0.00 / C 0.00,
+confidence 0.92. The two sub-choices are scored in Decision 2: the zone half in `backends[]` 1.00 / a
+new `functions[]` 0.00, and for a one-sided binding no Knative Service 0.69 / a bare one 0.31 (low
+confidence, 0.38).
+
+The planning gates scored the same calls:
+- operator-set `ownerReference`: 1.00 (system designer);
+- two-sided opt-in 0.84 against docs-only 0.16, and the confused deputy real at 0.80;
+- one renderer per Knative Service: 0.96;
+- render 0.54 against patch 0.27 (architect, confidence 0.31; decided on the ADR-0001 analysis);
+- the activator-peer blackhole: close to "will happen" (1.54 of 2);
+- the host check as a real control: only 0.20.
+
+jev is a gut check here, not the evidence. The evidence is the ADR-0001 single-writer rule, the UID
+fact, and the RBAC path described in Context.
+
+### Consequences
+
+- **CRD changes** (operator minor, additive, still `v1alpha1`): `BackendService.spec.zone` is
+  required and immutable, and there is no `serviceAccountName`. An entry in `NextApp.spec.backends[]`
+  now also means the zone's consent. The CLI's schema preflight must know both fields, and Z8b
+  (#2053) emits `spec.zone`, never `ownerReferences`.
+- **Function-first rollout (ADR-0052 D7) now needs the zone half in place.** A function is not
+  rendered until its zone lists it, and listing it renders the binding env into the zone. So
+  "function first" now means: apply the `BackendService`, add the zone's `backends[]` entry, and let
+  the function come up while the zone's new revision rolls. The skew condition still flags a
+  function older than its zone. Under GitOps the controller sets the order, as ADR-0052 D7's note
+  already says. Until the operator has recorded a served version, the zone's
+  `<NAME>_SERVICE_PROTO_VERSION` is unset, so its calls fail closed (Decision 7) rather than run
+  against an unknown version.
+- **The `NextApp` reconciler gains a watch on `BackendService`s.** Its render changes only for zones
+  with a two-sided binding, which the byte-identical golden test proves. The rendered binding env is
+  one more item on the operator minor's expected-churn list (the system designer's issue 5).
+- **Revoking consent causes an outage, by design.** Removing a zone's `backends[]` entry deletes the
+  function's Knative Service, and the docs say so.
+- **The NetworkPolicy wording changes.** "Admitting only the owning zone" (Amendment 1 Decision 1 and
+  #2052's scope text) becomes "admits the Knative data path and blocks direct dials". The isolation
+  claim belongs to the token, and it stays unproven until the activator-path drill (Z11, #2056) is
+  green, as Amendment 1's notes already say.
+- **Docs and status call the host check a "lint".** No user-facing text calls it isolation.
+- **Generator (Z6, Z3):** an RPC without `(knext.v1.auth)` is refused, with a test proving it.
+  `knext add function` scaffolds `USER` explicitly.
+
+### Action items
+
+- [ ] Z8 (#2052) types: `spec.zone` required and immutable, no `serviceAccountName`, CEL for both.
+- [ ] Z8 reconciler: resolve `spec.zone`, set the controller `ownerReference`, refuse a conflicting
+      one. Envtests for a missing zone, the operator-set `ownerReference` and a conflicting
+      `ownerReference`, each mutation-proved.
+- [ ] Z8 (#2401): two-sided binding. Envtests for a one-sided binding from each side (refused, nothing
+      mounted, no Knative Service, no binding env), a cross-zone `backends[]` entry, and revocation,
+      each mutation-proved.
+- [ ] Z8: render into the zone's Knative Service template. Envtests prove zero writes to
+      `NextApp.spec`, a byte-identical template for a zone with no binding, no revision on a second
+      reconcile, exactly one revision on a served-version bump, and a reported env-name collision. The
+      same PR adds the `<NAME>` derivation and the wake-list variable's name to Decision 3.
+- [ ] Z8 (#2403): operator-owned ServiceAccount, automount off, no RBAC. A user `serviceAccountName`
+      is rejected, mutation-proved.
+- [ ] Z8 (#2402): function NetworkPolicy admitting the Knative data path. A Calico scale-from-zero leg
+      in `networkpolicy-enforcement-drill.sh`, which Z11 then extends.
+- [ ] Z8 docs and status wording: the CNPG host check is a lint, the credential allowlist is the
+      control, and removing a zone's entry takes the function down.
+- [ ] Z6 (#2050): read `<NAME>_SERVICE_PROTO_VERSION` at call time and fail closed with
+      `FAILED_PRECONDITION` when it is unset. The generator refuses an RPC without `(knext.v1.auth)`.
+- [ ] Sprint 5 close: accept or revise this amendment, then close #2401.

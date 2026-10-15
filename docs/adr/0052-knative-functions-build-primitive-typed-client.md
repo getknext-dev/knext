@@ -9,6 +9,10 @@ Status: Accepted (design; build re-sequenced into v2 by the 2026-10-09 amendment
 > Decision 10); system-designer **BLOCK pending constraints**, all folded in as Decisions 13–15 +
 > revised Decisions 6/8/11/12 + Action items.
 
+> **Binding contract amended by ADR-0004 Amendment 2 (Proposed, 2026-10-15):** `spec.zone` with an
+> operator-set `ownerReference`, two-sided binding, binding env rendered (never written into
+> `NextApp.spec`), and the served version (D7) reaching the zone as `<NAME>_SERVICE_PROTO_VERSION`.
+
 ## Context
 Founder direction (2026-09): *integrate Knative Functions so the CLI generates typed TypeScript
 client functions for a Next.js app* — a tRPC-class DX where the app imports a generated typed client
