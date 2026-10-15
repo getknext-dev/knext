@@ -1216,6 +1216,10 @@ describe('#2388 r3 — a shell source of a non-literal path is a gap', () => {
   it('with a shell gap, a changed shell script under scripts/ also fails closed', () => {
     const hit = supply(sh('. "$(dirname "$0")/lib/x.sh"\n'), 'scripts/lib/other.sh');
     expect(hit?.paths).toEqual(['scripts/lib/other.sh']);
+    // Round 4 covers any .sh anywhere; an extensionless file under scripts/ still
+    // needs the scripts/ clause.
+    const bin = supply(sh('. "$(dirname "$0")/lib/x.sh"\n'), 'scripts/bin/tool');
+    expect(bin?.paths).toEqual(['scripts/bin/tool']);
   });
 
   it('near miss: sourcing a literal path follows it and is not a gap', () => {
