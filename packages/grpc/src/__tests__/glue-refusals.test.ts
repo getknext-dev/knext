@@ -10,11 +10,25 @@ import { join } from 'node:path';
 import { OrdersService } from '../../fixtures/zone/src/generated/grpc/orders/v1/orders_pb';
 import { generateFiles, runGenerate } from '../generate';
 import { emitActionGuard } from '../glue-plugin';
-import { capture, copyFixtureZone, removeScratchDirs } from './helpers';
+import { capture, copyFixtureZone as copyZone, PKG_DIR, removeScratchDirs } from './helpers';
 
 afterAll(removeScratchDirs);
 
 const ORDERS = 'proto/orders/v1/orders.proto';
+
+/**
+ * The fixture zone, with the options contract this package SHIPS (the one
+ * `knext add function` copies into an app) in place of the fixture's copy, so
+ * these refusals exercise what users get.
+ */
+function copyFixtureZone(prefix: string): string {
+  const zone = copyZone(prefix);
+  writeFileSync(
+    join(zone, 'proto/knext/v1/options.proto'),
+    readFileSync(join(PKG_DIR, 'proto/knext/v1/options.proto'), 'utf8'),
+  );
+  return zone;
+}
 const OPTIONS = 'proto/knext/v1/options.proto';
 const OUT = join('src', 'generated', 'grpc');
 
@@ -51,7 +65,7 @@ describe('glue refusals', () => {
     );
     const r = await refused(zone);
     expect(r.code).toBe(1);
-    expect(r.err).toContain('orders.v1.OrdersService.PlaceOrder');
+    expect(r.err).toContain('orders.v1.OrdersService.PlaceOrder does not say who may call it');
     expect(r.err).toContain('(knext.v1.auth)');
     expect(r.wrote).toBe(false);
   });
@@ -66,8 +80,7 @@ describe('glue refusals', () => {
     );
     const r = await refused(zone);
     expect(r.code).toBe(1);
-    expect(r.err).toContain('orders.v1.OrdersService.WatchOrders');
-    expect(r.err).toContain('(knext.v1.auth)');
+    expect(r.err).toContain('orders.v1.OrdersService.WatchOrders does not say who may call it');
   });
 
   it('refuses an RPC whose auth is stated as AUTH_UNSPECIFIED', async () => {
@@ -113,7 +126,18 @@ describe('glue refusals', () => {
     const r = await refused(zone);
     expect(r.code).toBe(1);
     expect(r.err).toContain('AUTH_PUBLIC_MUTATION');
+    // Refused by the contract itself (buf), before any generator runs.
+    expect(r.err).toContain('buf lint found problems');
     expect(r.wrote).toBe(false);
+  });
+
+  it('the shipped options contract reserves AUTH_PUBLIC_MUTATION: defining it fails the build', async () => {
+    const zone = copyFixtureZone('refuse-public-mutation-reserved');
+    edit(zone, OPTIONS, '  AUTH_PUBLIC = 2;', '  AUTH_PUBLIC = 2;\n  AUTH_PUBLIC_MUTATION = 3;');
+    const r = await refused(zone);
+    expect(r.code).toBe(1);
+    expect(r.err).toContain('buf lint found problems');
+    expect(r.err).toContain('reserved');
   });
 
   it('refuses AUTH_PUBLIC_MUTATION even when an edited options contract defines it', async () => {

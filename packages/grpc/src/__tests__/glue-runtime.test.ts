@@ -106,9 +106,12 @@ describe('servedVersion — the served contract version, part of every cache key
     expect(servedVersion('orders', ENV, '1.2.0', { [ENV]: '1.3.1' })).toBe('1.3.1');
   });
 
-  it('fails closed with FAILED_PRECONDITION when the variable is not set', async () => {
+  it('fails closed with FAILED_PRECONDITION when the variable is not set, naming it', async () => {
     expect(await code(() => servedVersion('orders', ENV, '1.2.0', {}))).toBe(
       Code.FailedPrecondition,
+    );
+    expect(() => servedVersion('orders', ENV, '1.2.0', { [ENV]: '' })).toThrow(
+      `${ENV} is not set`,
     );
   });
 
