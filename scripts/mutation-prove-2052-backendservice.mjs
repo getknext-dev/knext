@@ -497,10 +497,12 @@ function envtestAssetsPresent() {
 }
 
 /** Run one command in the operator module; return its exit code. */
-function run(bin, args, env = {}) {
+function run(bin, args, env = {}, { showErrors = false } = {}) {
   const r = spawnSync(bin, args, {
     cwd: OPERATOR_MODULE,
-    stdio: ['ignore', 'ignore', 'ignore'],
+    // stderr is kept ONLY to explain a failed build check to a human; no
+    // verdict ever reads it (verdicts are exit codes).
+    stdio: ['ignore', 'ignore', showErrors ? 'pipe' : 'ignore'],
     env: { ...process.env, ...env },
     timeout: 1_800_000,
   });
@@ -508,6 +510,7 @@ function run(bin, args, env = {}) {
     console.error(`${NAME}: cannot run ${bin}: ${r.error?.message ?? r.signal}`);
     process.exit(2);
   }
+  if (showErrors && r.status !== 0) console.error(String(r.stderr ?? '').slice(-2000));
   return r.status;
 }
 
@@ -519,9 +522,16 @@ function guardExit(test) {
 
 /** The mutated tree must still COMPILE its tests, or the row proves nothing. */
 function buildsExit() {
-  const build = run('go', ['build', './...']);
+  const build = run('go', ['build', './...'], {}, { showErrors: true });
   if (build !== 0) return build;
-  return run('go', ['test', '-count=1', '-run', '^$', PKG, './internal/metriccontract/']);
+  return run(
+    'go',
+    ['test', '-count=1', '-run', '^$', PKG, './internal/metriccontract/'],
+    {},
+    {
+      showErrors: true,
+    },
+  );
 }
 
 declareMutations(MUTATIONS.length);
