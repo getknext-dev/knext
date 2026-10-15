@@ -951,8 +951,15 @@ describe('#2388 r3 — a module that spawns or names a script creates an edge', 
   });
 
   it('near miss: join(REPO_ROOT, "scripts") — a directory — does not pull in every script', () => {
-    const r = entry("const dir = join(REPO_ROOT, 'scripts');\n");
-    expectQuiet(r);
+    expectQuiet(entry("const dir = join(REPO_ROOT, 'scripts');\n"));
+    expectQuiet(entry("const dir = join(REPO_ROOT, 'scripts', 'lib');\n"));
+  });
+
+  it('near miss: a release script READING package.json does not make the root manifest fire', () => {
+    const r = entry("const pkg = readFileSync(join(__dirname, '..', 'package.json'), 'utf8');\n", {
+      'package.json': '{}\n',
+    });
+    expect(supply(r, 'package.json')).toBeUndefined();
   });
 
   it('near miss: a script named only in a code COMMENT is not an edge', () => {
@@ -1001,6 +1008,9 @@ describe('#2388 r3 — an edge that cannot be resolved is a gap, so the fallback
       "import { spawn } from 'node:child_process';\nspawn('bash', [s]);\n",
       "import { execFileSync as run } from 'node:child_process';\nrun('node', [s]);\n",
       "import * as cp from 'node:child_process';\ncp.spawnSync('node', [s]);\n",
+      // `exec`/`fork` are ambiguous names (`regex.exec`): only the namespace binding finds these.
+      "import * as cp from 'node:child_process';\ncp.exec(cmd);\n",
+      "const cp = require('node:child_process');\ncp.fork(s);\n",
       "const { fork: f } = require('node:child_process');\nf(s);\n",
       "import { spawnSync } from 'node:child_process';\nspawnSync(cmd, ['scripts/lib/x.mjs']);\n",
       "import { spawnSync } from 'node:child_process';\nspawnSync('node', args);\n",
@@ -1082,6 +1092,60 @@ describe('#2388 r3 — resolvable child-process calls are NOT gaps (the real rel
           // biome-ignore lint/suspicious/noTemplateCurlyInString: the source text under test
           "run('syft', ['scan', dir]);\nconst out = run('grype', [`sbom:${p}`]);\n",
       ),
+    );
+  });
+
+  it('Bun.spawn with a literal command array is quiet', () => {
+    expectQuiet(entry('Bun.spawn(["node", "scripts/lib/x.mjs"]);\n'));
+  });
+
+  it('a wrapper that escapes as a value fails closed — its call sites are not visible', () => {
+    expectGap(
+      entry(
+        "import { spawnSync } from 'node:child_process';\n" +
+          'function run(cmd, args) {\n  return spawnSync(cmd, args);\n}\n' +
+          "run('git', []);\n[['git', []]].map(run);\n",
+      ),
+      /escapes as a value/,
+    );
+  });
+
+  it('a runner factory with a non-object return fails closed', () => {
+    expectGap(
+      entry(
+        "import { spawnSync } from 'node:child_process';\nimport { mk } from './lib/runner.mjs';\n" +
+          'const runner = mk();\nspawnSync(runner.command, [...runner.args]);\n',
+        {
+          'scripts/lib/runner.mjs':
+            'export function mk() {\n  if (process.env.X) return other();\n' +
+            "  return { command: process.execPath, args: ['scripts/lib/x.mjs'] };\n}\n",
+        },
+      ),
+      /spawnSync/,
+    );
+  });
+
+  it('an invoker override with a literal default resolves in the COMMAND position (bun-test)', () => {
+    expectQuiet(
+      entry(
+        "import { spawn, execFileSync } from 'node:child_process';\n" +
+          "spawn(process.env.KNEXT_BUN ?? 'bun', ['test', file]);\n" +
+          'const flag = (name, fallback) => {\n' +
+          '  const hit = argv.find((a) => a.startsWith(`--${name}=`));\n' +
+          "  return hit ? hit.split('=')[1] : fallback;\n};\n" +
+          "const bunBin = flag('bun', process.env.KNEXT_BUN || 'bun');\n" +
+          "execFileSync(bunBin, ['--version']);\n",
+      ),
+    );
+  });
+
+  it('…but NOT in the script position: node [env ?? literal] fails closed', () => {
+    expectGap(
+      entry(
+        "import { spawnSync } from 'node:child_process';\n" +
+          "spawnSync('node', [process.env.SCRIPT ?? 'scripts/lib/x.mjs']);\n",
+      ),
+      /script argument/,
     );
   });
 
