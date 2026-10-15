@@ -63,15 +63,38 @@ const config: KnativeNextConfig = {
 | `/api/audit?page=N` | GET | Paginated audit logs (20/page) |
 | `/api/cache-stats` | GET | Cache hit/miss statistics |
 | `/api/cache/events` | GET | SSE stream of cache events |
-| `/api/cache/invalidate` | POST | Invalidate cache by tag |
+| `/api/cache/invalidate` | POST | Invalidate cache by tag (Bearer `CACHE_INVALIDATE_TOKEN`) |
+| `/api/files/stats` | GET | File count and total size, cached with `'use cache'` |
 
 ### Cache Invalidation
 
 ```bash
 # Invalidate all audit-related cache
 curl -X POST http://localhost:3000/api/cache/invalidate \
+  -H "Authorization: Bearer $CACHE_INVALIDATE_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"tag": "audit"}'
+```
+
+### `'use cache'`
+
+`/api/files/stats` reads its numbers through `getFileStats()`
+(`src/app/api/files/stats/file-stats.ts`), a `'use cache'` function. The entry is
+stored in the app's Redis, not in the process, so every pod serves the same
+value, and a pod that wakes from scale-to-zero reads the entry instead of
+querying Postgres again. `next.config.ts` turns the directive on with
+`experimental.useCache` rather than Cache Components, so the cache-test pages
+keep their route segment configs.
+
+The entry is tagged `files`, which the upload action invalidates, so a new
+upload refreshes the stats. To refresh them on their own, invalidate
+`file-stats`:
+
+```bash
+curl -X POST http://localhost:3000/api/cache/invalidate \
+  -H "Authorization: Bearer $CACHE_INVALIDATE_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"tag": "file-stats"}'
 ```
 
 ### Cache Tags
@@ -81,6 +104,8 @@ curl -X POST http://localhost:3000/api/cache/invalidate \
 | `audit` | Audit logs API |
 | `audit-logs` | Audit logs API (alias) |
 | `dashboard` | Dashboard page |
+| `files` | File list on `/` and the `'use cache'` file stats |
+| `file-stats` | The `'use cache'` file stats only |
 
 ## Pages
 
