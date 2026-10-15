@@ -1,6 +1,11 @@
 # ADR-0069: In-process Rust for Bun zones via `bun:ffi`, with a generated typed `server-only` wrapper (Beta)
 
-- **Status:** **Proposed (2026-10-14).** Founder-directed on #2315 (comments of 2026-10-14):
+- **Status:** **Accepted (2026-10-15)** at the v2 Sprint 4 close design review (#2386). The lead's
+  tiebreak between the two gates chose Accepted over keeping it Proposed (jev **0.81**). Acceptance is
+  the *decision* status only: the feature's *product stage* stays **Beta**, as D2 states, and leaves
+  Beta only on D19's graduation trigger. Acceptance does not generalise D2's exception to "Node is
+  always an option"; ADR-0064 preserved constraint 11 now points back here and bounds it.
+  History: **Proposed (2026-10-14).** Founder-directed on #2315 (comments of 2026-10-14):
   `bun:ffi`, Bun-only, a generator that writes a typed `server-only` TypeScript wrapper per exported
   Rust function, shipped opt-in and **Beta until Bun drops the experimental label on `bun:ffi`**, and
   built in the current sprint (v2 Sprint 4). The implementation tickets in *Action items* may start

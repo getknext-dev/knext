@@ -1,15 +1,24 @@
 # ADR-0066: Next 16.4 cache surface and runtime-supervisor changes — one sequenced plan
 
-- **Status:** **Accepted with Amendment 1 (2026-10-11); Amendment 2 (2026-10-12) Proposed; Amendment 3 (2026-10-13) Proposed; Amendment 4 (2026-10-13) Proposed; Amendment 5 (2026-10-14) Proposed.** Proposed 2026-10-10 and revised in review
-  round 2 the same day; accepted at the Sprint 2 close design review (jev 0.98). D1–D5 stand as
-  written, except where an amendment (end of this file) supersedes a line: Amendment 1 (Accepted:
-  K4 keeps the `adapterPath` shim), Amendment 2 (Proposed: a live build's window is honoured) and
-  Amendment 3 (Proposed: a non-live build's page or route entry is handed back stale; it supersedes
-  Amendment 2 §1's re-render sentence, §2's "withheld exactly as before" for page and route entries,
-  and Amendment 2's Redis-fault accepted risk), and Amendment 4 (Proposed: ISR invalidations skipped
-  while the Redis breaker is open are replayed when it closes; it supersedes D2's ISR outage
-  residual), and Amendment 5 (Proposed: the same for `'use cache'` tag stamps; it supersedes D2's
-  `'use cache'` outage residual). Design and sequencing only; no code lands with this ADR.
+- **Status:** **Accepted, with Amendments 1–5 Accepted.** Amendment 1 was accepted on 2026-10-11 at
+  the Sprint 2 close design review. **Amendments 2–5 were accepted on 2026-10-15 at the v2 Sprint 4
+  close design review (#2386)**: architect jev 0.74 (accept and consolidate) over accept-only 0.26,
+  ratified by the system designer. The same review consolidated D2: D2 now opens with its **current
+  text**, which folds Amendments 2–5 in; the text as accepted on 2026-10-10 follows it unchanged as
+  history, and the amendments at the end of this file stay as the change log with their reasons,
+  options and accepted risks. D1 and D3–D5 stand as written, except where Amendment 1 supersedes a
+  line.
+  History: Proposed 2026-10-10 and revised in review round 2 the same day; accepted at the Sprint 2
+  close design review (jev 0.98). Before 2026-10-15 this line read: "Accepted with Amendment 1
+  (2026-10-11); Amendment 2 (2026-10-12) Proposed; Amendment 3 (2026-10-13) Proposed; Amendment 4
+  (2026-10-13) Proposed; Amendment 5 (2026-10-14) Proposed." The amendment index it carried:
+  Amendment 1 (K4 keeps the `adapterPath` shim); Amendment 2 (a live build's window is honoured);
+  Amendment 3 (a non-live build's page or route entry is handed back stale; it supersedes Amendment
+  2 §1's re-render sentence, §2's "withheld exactly as before" for page and route entries, and
+  Amendment 2's Redis-fault accepted risk); Amendment 4 (ISR invalidations skipped while the Redis
+  breaker is open are replayed when it closes; it supersedes D2's ISR outage residual); Amendment 5
+  (the same for `'use cache'` tag stamps; it supersedes D2's `'use cache'` outage residual). Design
+  and sequencing only; no code lands with this ADR.
 - **Date:** 2026-10-10
 - **Trigger class:** ADR + hard rule ("don't rewrite the runtime twice"; "gate every feature on the
   official compatibility suite") + public API (the `'use cache'` backend export and its adapter
@@ -220,6 +229,160 @@ jev, order: **this order 0.81** / #2089 before #2083 0.18 / K4 first and compat 
 independent parallel PRs 0.00 (confidence 0.75).
 
 ### D2. #2083: the shared `'use cache'` backend
+
+D2 has two parts. **D2 current text** below is the decision as it stands. It was consolidated on
+2026-10-15 at the v2 Sprint 4 close design review (#2386) by folding in Amendments 2–5. **D2 as
+accepted on 2026-10-10** follows it unchanged, keeping its reasons, jev scores and the
+`[Superseded by …]` brackets the amendments added. The amendments at the end of this file are the
+change log, with their reasons, options and accepted risks. The consolidation changes no decision.
+If it ever disagrees with an amendment, the amendment governs and this text is the one to fix.
+
+#### D2 current text (consolidated 2026-10-15)
+
+**Ownership and wiring** (unchanged).
+- This ADR fixes the cross-cutting contract: keys, build scoping, tags, failure mode and wiring.
+  #2083's PR records only its export path and option names, as a public-API trigger.
+- The adapter's `modifyConfig` sets `cacheHandlers.default` and `cacheHandlers.remote` to knext's
+  Redis handler only when both hold: the app uses knext's `cacheHandler`, and the app has not set
+  that `cacheHandlers` key itself. The app's own entry wins, per key.
+- The scaffolds keep `cacheMaxMemorySize: 0`. A guard test fails if a scaffold sets it while the
+  adapter would not wire the backend for it.
+- Scope: the official-adapter build (Node and Bun standalone). The vinext target stays out of scope
+  while it is Beta.
+
+**Shared module** (unchanged).
+- One module owns the key prefix, the build-id resolver and the Redis connection with its timeouts
+  and its circuit breaker.
+- `cacheHandler` (ISR) and `cacheHandlers` (`'use cache'`) both import it. They do not share an
+  entry format, a tag store or an outage mode.
+
+**Keys and build scoping.**
+- Prefix: `REDIS_KEY_PREFIX` (the app name, set by the operator). ISR entries are
+  `<prefix>:cache:<key>`. `'use cache'` entries are `<prefix>:uc:<handler>:<cacheKey>`, with
+  `<handler>` = `default` or `remote` and Next's `<cacheKey>` stored opaque.
+- Build id: one resolver, `.next/BUILD_ID` → `KNEXT_BUILD_ID` → `NEXT_DEPLOYMENT_ID`, ignoring Next's
+  constant id. If there is no build id, a one-time warning names the three sources and
+  `kn-next doctor` reports it.
+- `'use cache'` (unchanged): Next's key already carries the build scope. The handler stores
+  `buildId` for diagnostics only and adds no foreign-build miss.
+- ISR (Amendments 2 and 3; replaces the 2026-10-10 "Build scoping, ISR" row). Keys stay shared
+  across builds; no build-scoped ISR keys.
+  - **Liveness.** Each process publishes `<prefix>:build-live:<build id>` (value `1`, `EX 90`) from
+    its cache reads and writes, at most every 30 s.
+  - **Lookup.** A reader looks up the writer's key only when it meets an entry another build wrote,
+    and memoises the answer for 5 s. The lookup fails closed: a fault reads as "not live".
+  - **Writer live:** the stored window is handed back, and the entry is regenerated at its own
+    cadence.
+  - **Writer not live, unreadable, or a legacy entry with no build id**, for a page or route entry
+    (`APP_PAGE`, `PAGES`, `APP_ROUTE`) on Next's read, with this process holding a build id: the
+    entry is handed back with an **expired** window, `cacheControl: { revalidate: 1 }` plus the
+    writer's `expire` when it recorded one. Next serves it once as stale and re-renders it in the
+    background under the current build. This applies to `revalidate: false` pages too.
+  - **Every other case keeps the withhold.** That covers other entry kinds, vinext's reads (no
+    `ctx`), and a process with no build id, which forces nothing stale (Amendment 3). The 2026-10-10
+    "No build id" rule (ISR fails open, as #2100 does) is otherwise unchanged.
+  - **Unchanged:** the FETCH data cache and images, and the build-scoped miss for PPR `postponed`
+    state (#2084).
+  - **Guarantee:** a previous build's window is honoured only while that build is serving, plus the
+    liveness TTL (about two minutes after its last request). After that, each page it rendered is
+    served from the origin at most once more per pod, as stale, while the new build re-renders it.
+    Concurrent requests during that render also get the stale body. The edge never stores such a
+    body (ADR-0068 Amendment 2, `foreign_build_body`).
+- Function proto version (Z6, unchanged): part of every Z6 cached read's key. It is passed as an
+  explicit argument holding the bound function's served version, which the operator renders beside
+  `<NAME>_SERVICE_URL`.
+- TTL (unchanged):
+  - for `expire > 0`, Redis `EX` = min(entry `expire`, a configurable max, default 24 h);
+  - Z6 per-user functions use a generated `cacheLife` with `expire` ≤ 1 h;
+  - `expire <= 0` is never sent to Redis. The store is skipped, but the value stream is fully
+    consumed and the pending set resolved;
+  - client-side validation errors never trip the breaker.
+
+**Redis memory policy** (unchanged).
+- Documented setting: `maxmemory` with `maxmemory-policy volatile-lru`.
+- `allkeys-*` policies are not supported.
+- Under `noeviction` the breaker trips at the limit.
+
+**Tag invalidation** (unchanged).
+- ISR keeps its delete-based index, including the MULTI/EXEC guard.
+- `'use cache'` uses the timestamp hash `<prefix>:uc:tags` (`{stale, expired}` per tag), with
+  Next's built-in semantics:
+  - `updateTags(tags, {expire})` sets `stale = now` and `expired = now + expire·1000`;
+    `updateTags(tags)` sets `expired = now`;
+  - `getExpiration` returns the newest `expired`;
+  - `get` reads the entry and its own tags' stamps in one round trip (a server-side script). An
+    `expired` later than the entry's `timestamp` and not in the future is a miss; a `stale` later
+    than `timestamp` returns the entry with `revalidate: -1`;
+  - `refreshTags()` is a no-op;
+  - stamps older than the TTL cap are pruned by a bounded `HSCAN` step in `updateTags`.
+- Next fans each `revalidateTag`/`updateTag` out to both handlers. Tags are not build-scoped.
+
+**Failure mode** (D2's table, with Amendments 4 and 5 applied to the outage rows).
+- **Breaker:** one per process, shared by both handlers.
+- **`'use cache'`, while Redis is down or the breaker is open:**
+  - `get` is a miss;
+  - `set` drains the stream and drops the write;
+  - there is no per-process store of any kind;
+  - one counter and one warning are emitted per outage;
+  - an `updateTags` whose stamps did not reach Redis is **kept for replay** (Amendment 5).
+- **ISR, while Redis is down or the breaker is open:**
+  - it falls back to the per-process `memoryCache`;
+  - `revalidateTag` clears that pod's map, and the tags whose invalidation did not reach Redis are
+    **kept for replay** (Amendment 4).
+- **ISR replay** (Amendment 4).
+  - Tags are kept per process and deduplicated, at most 1000.
+  - Once the breaker closes, the replay runs the Redis invalidation first, then queues the edge
+    purge for exactly the tags whose invalidation completed (ADR-0068 D6.3).
+  - Overflow collapses the list. The replay then deletes every ISR entry under `<prefix>:cache:*`
+    (cursor `SCAN` + `DEL`, tag indexes left alone) and queues one purge of the app tag `kn-<p>`.
+  - It runs off the request path: started by the first connection that finds the breaker closed, or
+    by an unref'd probe timer set for the moment it closes. It is never awaited by a caller, and it
+    is enrolled in the SIGTERM drain.
+  - Only one replay runs at a time, one tag at a time, through the breaker-aware wrapper. The first
+    fault stops the run.
+- **`'use cache'` stamp replay** (Amendment 5).
+  - Tags are kept per process, shared by `default` and `remote`, and deduplicated, at most 1000.
+  - Overflow collapses the list. The replay then deletes every entry under `<prefix>:uc:*`, skipping
+    the stamp hash.
+  - It runs off the request path (first connection with the breaker closed, or an unref'd probe
+    timer). Only one run happens at a time, at 100 tags per write. The first fault stops the run. It
+    is enrolled in the SIGTERM drain.
+  - Generation check: a drop recorded while its write is in flight is kept for the next run, and a
+    drop recorded during a collapse sweep keeps the collapse.
+  - A dropped call is replayed as a late `updateTags`, stamped with the Redis `TIME` of the replay.
+    It is written by a compare-and-set script, per field:
+    - `s:<tag>` only moves forward;
+    - an `e:<tag>` expiry already in effect is never moved into the future;
+    - a pending expiry is never pushed later.
+  - The script is sent outside the breaker-aware wrapper. On error, the same rule is applied from
+    the client (`HMGET` then `HSET`, through the wrapper). Calls for one tag are merged in call
+    order.
+- **Residual.**
+  - Both replay lists live in the pod's memory. A pod that restarts or scales to zero before Redis
+    is back loses its list. Those ISR entries then stay stale at the origin and the edge until their
+    TTL, and those `'use cache'` entries are served until their TTL (capped at 24 h, or 1 h per user).
+  - The other accepted risks, such as over-invalidation, the collapse's breadth and the same-pod
+    window, are listed in Amendments 4 and 5.
+
+**Herd on scale-from-zero** (unchanged).
+- Next joins concurrent invocations of a key. The handler adds the contract's pending-set wait
+  through a per-process map of handler-owned promises, which never holds `pendingEntry` or the
+  stream.
+- There is no cross-pod lock.
+
+**Security** (unchanged).
+- Redis credentials stay in the Secret-backed `REDIS_URL`. The backend adds no endpoint.
+- Z6 keys per-user reads on the verified subject, never the raw token.
+- There is no per-process fallback for `'use cache'`.
+- Per-user entries are capped at 1 h.
+
+**1.x interim** (unchanged).
+- A docs page on `'use cache'` on knext, published from `main`.
+- A `kn-next doctor` finding for apps using `'use cache'` or `cacheComponents`, shipped in 1.4.0
+  behind the #2102 gate.
+- No runtime change on 1.x.
+
+#### D2 as accepted on 2026-10-10 (history; the current text is above)
 
 **Design ownership.** This ADR fixes the cross-cutting contract: keys, build scoping, tags, failure
 mode and wiring. #2083's PR records only its export path and option names, flagged as a public-API
@@ -849,7 +1012,7 @@ starts. D1, D2 and D4 are otherwise unchanged.
 
 ## Amendment 2 (2026-10-12): a window written by a build that is still serving is honoured
 
-**Status of this amendment: Proposed.** Trigger-class (ADR, and the #1888/#2084 build-scoping
+**Status of this amendment: Accepted (2026-10-15)** at the v2 Sprint 4 close design review (#2386); folded into D2's current text. Proposed from 2026-10-12 until then. Trigger-class (ADR, and the #1888/#2084 build-scoping
 guarantee it restates); per the 2026-09-22 workflow amendment it is not a merge gate, and it is
 reviewed at sprint close. It supersedes the "Build scoping, ISR" row of D2's key table, and replaces
 the accepted risk "entries ping-pong until the rollout completes" with the bounded behaviour below.
@@ -920,7 +1083,7 @@ the accepted risk "entries ping-pong until the rollout completes" with the bound
 
 ## Amendment 3 (2026-10-13): a previous build's ISR entry is served once as stale, then re-rendered
 
-**Status of this amendment: Proposed.** Trigger-class (ADR, and the cache runtime); per the
+**Status of this amendment: Accepted (2026-10-15)** at the v2 Sprint 4 close design review (#2386); folded into D2's current text. Proposed from 2026-10-13 until then. Trigger-class (ADR, and the cache runtime); per the
 2026-09-22 workflow amendment it is not a merge gate, and it is reviewed at sprint close. Implemented
 in #2305 meanwhile. It corrects a factual claim that #1888, D2's "Build scoping, ISR" row and
 Amendment 2 §1 all rest on, and replaces the mechanism that claim described.
@@ -1009,7 +1172,7 @@ every entry stale 0.01).
 
 ## Amendment 4 (2026-10-13): ISR invalidations skipped while the breaker is open are replayed
 
-**Status of this amendment: Proposed.** Trigger-class (ADR, and the cache runtime); per the
+**Status of this amendment: Accepted (2026-10-15)** at the v2 Sprint 4 close design review (#2386); folded into D2's current text. Proposed from 2026-10-13 until then. Trigger-class (ADR, and the cache runtime); per the
 2026-09-22 workflow amendment it is not a merge gate, and it is reviewed at sprint close. Implemented
 in #2292 meanwhile. It supersedes two lines of D2's outage residual for the **ISR** handler only:
 "ISR: a `revalidateTag` during the outage clears only the local map. Its Redis entries stay stale
@@ -1078,7 +1241,7 @@ clear only the local map, as today") is superseded the same way.
 
 ## Amendment 5 (2026-10-14): `'use cache'` tag stamps dropped while the breaker is open are replayed
 
-**Status of this amendment: Proposed.** Trigger-class (ADR, and the cache runtime); per the
+**Status of this amendment: Accepted (2026-10-15)** at the v2 Sprint 4 close design review (#2386); folded into D2's current text. Proposed from 2026-10-14 until then. Trigger-class (ADR, and the cache runtime); per the
 2026-09-22 workflow amendment it is not a merge gate, and it is reviewed at sprint close. Implemented
 in #2331 meanwhile. It supersedes, for the **`'use cache'`** handler, D2's residual line "an
 `updateTags` dropped during the outage is lost", the "`'use cache'` still adds none" note under
