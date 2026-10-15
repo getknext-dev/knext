@@ -41,14 +41,14 @@ const PROTO = { commentPrefix: '//' };
 const REFUSALS = [
   {
     id: 'R01',
-    subject: 'glue',
+    subject: 'plugin',
     claim: 'an RPC that does not state (knext.v1.auth) is generated anyway',
     anchor: '  if (!hasOption(method, ext)) {',
     replacement: '  if (false) {',
   },
   {
     id: 'R02',
-    subject: 'glue',
+    subject: 'plugin',
     claim:
       'an auth value other than AUTH_USER/AUTH_PUBLIC (AUTH_UNSPECIFIED, a defined AUTH_PUBLIC_MUTATION) is treated as AUTH_USER',
     anchor:
@@ -57,7 +57,7 @@ const REFUSALS = [
   },
   {
     id: 'R03',
-    subject: 'glue',
+    subject: 'plugin',
     claim: 'AUTH_PUBLIC is accepted on a write (no end-user check on a mutating action)',
     anchor: '    if (method.idempotency !== MethodOptions_IdempotencyLevel.NO_SIDE_EFFECTS) {',
     replacement: '    if (false) {',
@@ -80,28 +80,28 @@ const REFUSALS = [
   },
   {
     id: 'R06',
-    subject: 'glue',
+    subject: 'plugin',
     claim: 'a client-streaming or bidi RPC is planned as a stream instead of refused',
     anchor: '    default:\n      return (',
     replacement: "    default:\n      if (method.methodKind) return 'stream';\n      return (",
   },
   {
     id: 'R07',
-    subject: 'glue',
+    subject: 'plugin',
     claim: 'the action emitter no longer refuses a streaming RPC',
     anchor: "  if (method.methodKind !== 'unary') {",
     replacement: '  if (false) {',
   },
   {
     id: 'R08',
-    subject: 'glue',
+    subject: 'plugin',
     claim: 'two RPCs exporting the same name are no longer refused',
     anchor: '        if (clash) {',
     replacement: '        if (false) {',
   },
   {
     id: 'R09',
-    subject: 'glue',
+    subject: 'plugin',
     claim: 'generation without an authorize() hook is no longer refused up front',
     anchor:
       '  if (problems.length === 0 && planned.size > 0 && schema.options.authorize === undefined) {',
@@ -116,7 +116,7 @@ const REFUSALS = [
   },
   {
     id: 'R11',
-    subject: 'glue',
+    subject: 'plugin',
     claim: 'an options contract with no auth option is not refused with the fix named',
     anchor: '    if (!ext) {',
     replacement: '    if (!ext && false) {',
@@ -139,7 +139,7 @@ const KEY_BLOCK =
 const TWO_USER = [
   {
     id: 'U01',
-    subject: 'glue',
+    subject: 'plugin',
     claim:
       'the user is dropped from the cache key (it reaches the token through a side channel): B is served A',
     anchor: KEY_BLOCK,
@@ -153,7 +153,7 @@ const TWO_USER = [
   },
   {
     id: 'U02',
-    subject: 'glue',
+    subject: 'plugin',
     claim:
       'the cache keys on the token (minted outside the cached function): no read is ever a hit',
     anchor: KEY_BLOCK,
@@ -172,7 +172,7 @@ const TWO_USER = [
   },
   {
     id: 'U03',
-    subject: 'glue',
+    subject: 'plugin',
     claim: 'the served contract version is not in the key: a newer function reuses the old entry',
     anchor:
       '    `  return ${name}$cached(subject, ${servedVersionExpr(ctx)}, ${encode}(${input}, request));`,',
@@ -181,14 +181,14 @@ const TWO_USER = [
   },
   {
     id: 'U04',
-    subject: 'glue',
+    subject: 'plugin',
     claim: 'a write no longer calls updateTag: cached reads on other pods stay stale',
     anchor: '    `  ${updateTag}(${JSON.stringify(serviceTag(ctx.fn, method))});`,',
     replacement: '    `  void ${updateTag};`,',
   },
   {
     id: 'U05',
-    subject: 'glue',
+    subject: 'plugin',
     claim: "reads are no longer tagged: a write's updateTag refreshes nothing",
     anchor: '    `  ${cacheTag}(${JSON.stringify(serviceTag(ctx.fn, method))});`,',
     replacement: '    `  void ${cacheTag};`,',
@@ -270,7 +270,7 @@ const refusals = createGuardProver({
   repoRoot: REPO_ROOT,
   spec: 'packages/grpc/src/__tests__/glue-refusals.test.ts',
   subjects: {
-    glue: 'packages/grpc/src/glue-plugin.ts',
+    plugin: 'packages/grpc/src/glue-plugin.ts',
     options: 'packages/grpc/proto/knext/v1/options.proto',
     generate: 'packages/grpc/src/generate.ts',
   },
@@ -278,7 +278,7 @@ const refusals = createGuardProver({
 const twoUser = createGuardProver({
   repoRoot: REPO_ROOT,
   spec: 'packages/grpc/src/__tests__/use-cache-two-user.test.ts',
-  subjects: { glue: 'packages/grpc/src/glue-plugin.ts' },
+  subjects: { plugin: 'packages/grpc/src/glue-plugin.ts' },
 });
 const transport = createGuardProver({
   repoRoot: REPO_ROOT,
@@ -309,7 +309,7 @@ declareMutations(
 console.log('\n=== refusals (knext generate) ===');
 refusals.baseline();
 refusals.proveCanSeeRed({
-  subject: 'glue',
+  subject: 'plugin',
   anchor: "  if (problems.length > 0) throw new Error(problems.join('\\n'));",
   replacement: '  void problems;',
 });
@@ -322,7 +322,7 @@ refusals.finish(REFUSALS.length);
 console.log("\n=== two users, one 'use cache' backend (real Next.js, pods, Redis) ===");
 twoUser.baseline();
 twoUser.proveCanSeeRed({
-  subject: 'glue',
+  subject: 'plugin',
   anchor: '    \'  "use cache";\',',
   replacement: '    \'  "use nothing";\',',
 });
