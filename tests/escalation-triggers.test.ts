@@ -15,6 +15,7 @@ import {
   parseNameStatus,
   publicSurfaceChanged,
   referencedPaths,
+  releasePathClosure,
   workflowHoldsCredential,
 } from '../scripts/check-escalation-triggers.mjs';
 
@@ -882,5 +883,308 @@ describe('#2388 r2 — the CLI sees non-ASCII and renamed paths end to end', () 
     expect(out.fired.find((f: { id: string }) => f.id === 'supply-chain')?.paths).toEqual([
       'scripts/lib/key.mjs',
     ]);
+  });
+});
+
+/**
+ * #2388 round 3 — edges a JS module on the release path creates WITHOUT an import:
+ * it spawns another script, names one as string segments, or loads one through
+ * `createRequire`. Each block proves the edge is followed (or, when it cannot be
+ * resolved, recorded as a gap so the fallback fails closed) and keeps a near miss
+ * quiet.
+ */
+const R3_TREE = {
+  '.github/workflows/release.yml': RELEASE_WF,
+  'scripts/rewrite-workspace-ranges.mjs': 'export {};\n',
+  'scripts/lib/x.mjs': 'export {};\n',
+  'scripts/lib/unrelated.mjs': 'export const u = 1;\n',
+};
+/** A tree whose release-path entry (`scripts/pack-release-tarballs.mjs`) is `src`. */
+const entry = (src: string, extra: Record<string, string> = {}) =>
+  reader({ head: { ...R3_TREE, 'scripts/pack-release-tarballs.mjs': src, ...extra } });
+const supply = (r: ReturnType<typeof reader>, path: string) =>
+  classifyContent([change(path)], r).find((f: { id: string }) => f.id === 'supply-chain');
+/** `path` fires because it is ON the closure — not via the incomplete-closure fallback. */
+function expectFollowed(r: ReturnType<typeof reader>, path: string) {
+  const hit = supply(r, path);
+  expect(hit?.paths).toEqual([path]);
+  expect(hit?.why).not.toMatch(/INCOMPLETE/);
+}
+/** The closure is incomplete: an unrelated changed module fires, and the reason says why. */
+function expectGap(r: ReturnType<typeof reader>, why: RegExp) {
+  const hit = supply(r, 'scripts/lib/unrelated.mjs');
+  expect(hit?.paths).toEqual(['scripts/lib/unrelated.mjs']);
+  expect(hit?.why).toMatch(/INCOMPLETE/);
+  expect(hit?.why).toMatch(why);
+}
+const expectQuiet = (r: ReturnType<typeof reader>) =>
+  expect(supply(r, 'scripts/lib/unrelated.mjs')).toBeUndefined();
+
+describe('#2388 r3 — a module that spawns or names a script creates an edge', () => {
+  it('join(REPO_ROOT, "scripts", …) spawned with node is followed (pack-publishable-group)', () => {
+    const r = entry(
+      "import { execFileSync } from 'node:child_process';\n" +
+        "execFileSync('node', [join(REPO_ROOT, 'scripts', 'rewrite-workspace-ranges.mjs')], {\n" +
+        '  cwd: dir,\n});\n',
+    );
+    expectFollowed(r, 'scripts/rewrite-workspace-ranges.mjs');
+  });
+
+  it('a literal "scripts/…" string in a module is followed', () => {
+    const r = entry("execFileSync('node', ['scripts/rewrite-workspace-ranges.mjs']);\n");
+    expectFollowed(r, 'scripts/rewrite-workspace-ranges.mjs');
+  });
+
+  it('new URL("./x.mjs", import.meta.url) is followed relative to the module', () => {
+    const r = entry(
+      "const u = new URL('./lib/x.mjs', import.meta.url);\nspawnSync(process.execPath, [fileURLToPath(u)]);\n",
+    );
+    expectFollowed(r, 'scripts/lib/x.mjs');
+  });
+
+  it('join(__dirname, …) bound to a const and spawned is followed (ga-tarball-diff-gate)', () => {
+    const r = entry(
+      "const diffScript = join(__dirname, 'lib', 'x.mjs');\n" +
+        'const result = spawnSync(process.execPath, [diffScript, ...argv], { cwd });\n',
+    );
+    expectFollowed(r, 'scripts/lib/x.mjs');
+  });
+
+  it('near miss: join(REPO_ROOT, "scripts") — a directory — does not pull in every script', () => {
+    const r = entry("const dir = join(REPO_ROOT, 'scripts');\n");
+    expectQuiet(r);
+  });
+
+  it('near miss: a script named only in a code COMMENT is not an edge', () => {
+    const r = entry('// historically ran scripts/lib/unrelated.mjs\nexport {};\n');
+    expectQuiet(r);
+  });
+});
+
+describe('#2388 r3 — an edge that cannot be resolved is a gap, so the fallback fails closed', () => {
+  it('createRequire fails closed', () => {
+    expectGap(
+      entry(
+        "import { createRequire } from 'node:module';\nconst req = createRequire(import.meta.url);\nreq(name);\n",
+      ),
+      /createRequire/,
+    );
+  });
+
+  it('createRequire under an alias, and module.createRequire, fail closed', () => {
+    for (const src of [
+      "import { createRequire as cr } from 'node:module';\ncr(import.meta.url)('./lib/x.mjs');\n",
+      "import module from 'node:module';\nmodule.createRequire(import.meta.url);\n",
+    ]) {
+      expectGap(entry(src), /createRequire/);
+    }
+  });
+
+  it('a spawned script held in a variable fails closed', () => {
+    expectGap(
+      entry(
+        "import { execFileSync } from 'node:child_process';\nconst script = process.argv[2];\nexecFileSync('node', [script]);\n",
+      ),
+      /execFileSync/,
+    );
+  });
+
+  it('every child-process form with a non-literal script fails closed', () => {
+    for (const src of [
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: the source text under test
+      "import { spawnSync } from 'node:child_process';\nspawnSync(process.execPath, [`scripts/${n}.mjs`]);\n",
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: the source text under test
+      "import { execSync } from 'node:child_process';\nexecSync(`node ${s}`);\n",
+      "import { fork } from 'node:child_process';\nfork(name);\n",
+      "import { exec } from 'node:child_process';\nexec(cmd);\n",
+      "import { execFile } from 'node:child_process';\nexecFile('bun', [s]);\n",
+      "import { spawn } from 'node:child_process';\nspawn('bash', [s]);\n",
+      "import { execFileSync as run } from 'node:child_process';\nrun('node', [s]);\n",
+      "import * as cp from 'node:child_process';\ncp.spawnSync('node', [s]);\n",
+      "const { fork: f } = require('node:child_process');\nf(s);\n",
+      "import { spawnSync } from 'node:child_process';\nspawnSync(cmd, ['scripts/lib/x.mjs']);\n",
+      "import { spawnSync } from 'node:child_process';\nspawnSync('node', args);\n",
+      "import { spawnSync } from 'node:child_process';\nspawnSync('node', [...extra, 'x']);\n",
+      'Bun.spawn(["node", s]);\n',
+    ]) {
+      expectGap(entry(src), /spawn|exec|fork/);
+    }
+  });
+
+  it('a non-literal new URL(…) passed to a spawn fails closed', () => {
+    expectGap(
+      entry(
+        "import { spawnSync } from 'node:child_process';\n" +
+          'spawnSync(process.execPath, [fileURLToPath(new URL(name, import.meta.url))]);\n',
+      ),
+      /spawnSync/,
+    );
+  });
+
+  it('a wrapper whose call site passes a non-literal script fails closed', () => {
+    expectGap(
+      entry(
+        "import { spawnSync } from 'node:child_process';\n" +
+          'function run(cmd, args) {\n  return spawnSync(cmd, args);\n}\n' +
+          "run('syft', ['scan']);\nrun('node', [process.argv[2]]);\n",
+      ),
+      /spawnSync/,
+    );
+  });
+
+  it('an EXPORTED wrapper fails closed — its callers live in other files', () => {
+    expectGap(
+      entry(
+        "import { spawnSync } from 'node:child_process';\n" +
+          "export function run(cmd, args) {\n  return spawnSync(cmd, args);\n}\nrun('git', []);\n",
+      ),
+      /spawnSync/,
+    );
+  });
+
+  it('a runner object whose script is not a literal path fails closed', () => {
+    expectGap(
+      entry(
+        "import { spawnSync } from 'node:child_process';\nimport { mk } from './lib/runner.mjs';\n" +
+          'const runner = mk();\nspawnSync(runner.command, [...runner.args, spec]);\n',
+        {
+          'scripts/lib/runner.mjs':
+            'export function mk() {\n  return { command: process.execPath, args: [process.argv[2]] };\n}\n',
+        },
+      ),
+      /spawnSync/,
+    );
+  });
+});
+
+describe('#2388 r3 — resolvable child-process calls are NOT gaps (the real release path)', () => {
+  it('a literal non-interpreter command with computed arguments is quiet', () => {
+    expectQuiet(
+      entry(
+        "import { execFileSync, spawnSync } from 'node:child_process';\n" +
+          "execFileSync('git', ['worktree', 'add', '--detach', dir, ref], { cwd });\n" +
+          // biome-ignore lint/suspicious/noTemplateCurlyInString: the source text under test
+          "spawnSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['view', `${n}@${v}`]);\n" +
+          "execFileSync('bun', ['pm', 'pack', '--destination', dest]);\n",
+      ),
+    );
+  });
+
+  it('regex .exec(), and spawnSync( inside a string, are not child-process calls', () => {
+    expectQuiet(entry("const m = /a(b)/.exec(s);\nthrow new Error('spawnSync(x) failed');\n"));
+  });
+
+  it('a same-file wrapper whose every call site is literal is quiet (precompile-closure-audit)', () => {
+    expectQuiet(
+      entry(
+        "import { spawnSync } from 'node:child_process';\n" +
+          'function run(cmd, args) {\n  const res = spawnSync(cmd, args, { encoding: "utf8" });\n  return res;\n}\n' +
+          // biome-ignore lint/suspicious/noTemplateCurlyInString: the source text under test
+          "run('syft', ['scan', dir]);\nconst out = run('grype', [`sbom:${p}`]);\n",
+      ),
+    );
+  });
+
+  it('a runner object built by an imported function resolves to its literal script (guard-prover)', () => {
+    const r = entry(
+      "import { spawnSync } from 'node:child_process';\nimport { resolveSpecRunner } from './lib/runner.mjs';\n" +
+        'export function runSpecExit(repoRoot, spec) {\n  const runner = resolveSpecRunner(repoRoot, spec);\n' +
+        '  const res = spawnSync(runner.command, [...runner.args, ...runner.runArgs(spec)], {\n    cwd: repoRoot,\n  });\n' +
+        '  return res.status;\n}\n',
+      {
+        'scripts/lib/runner.mjs':
+          'export function resolveSpecRunner(repoRoot, _spec) {\n  return {\n    command: process.execPath,\n' +
+          "    args: [join(repoRoot, 'scripts', 'lib', 'x.mjs')],\n" +
+          '    runArgs: (s) => [s],\n  };\n}\n',
+      },
+    );
+    expectQuiet(r);
+    expectFollowed(r, 'scripts/lib/x.mjs');
+  });
+});
+
+describe('#2388 r3 — comments are stripped token-aware, not by whole line', () => {
+  it('a block comment followed by code on the same line does not hide the import', () => {
+    expectFollowed(entry("/* c */ import './lib/x.mjs';\n"), 'scripts/lib/x.mjs');
+    expectGap(entry('/* c */ const m = await import(name);\n'), /non-literal/);
+  });
+
+  it('a regex containing // does not swallow the rest of the line', () => {
+    expectFollowed(
+      entry("const re = /^https?:\\/\\//; import './lib/x.mjs';\n"),
+      'scripts/lib/x.mjs',
+    );
+  });
+
+  it('a /* inside a string is not a comment', () => {
+    expectFollowed(entry("const s = '/*'; import './lib/x.mjs'; // */\n"), 'scripts/lib/x.mjs');
+  });
+
+  it('near miss: import() inside a block comment that ends mid-line is still not a gap', () => {
+    expectQuiet(entry('/* a lazy `import()` here */ export const x = 1;\n'));
+  });
+});
+
+describe('#2388 r3 — a shell source of a non-literal path is a gap', () => {
+  const SH_WF =
+    'permissions:\n  id-token: write\njobs:\n  a:\n    steps:\n      - run: bash scripts/release.sh\n';
+  const sh = (body: string, extra: Record<string, string> = {}) =>
+    reader({
+      head: {
+        ...R3_TREE,
+        '.github/workflows/release.yml': SH_WF,
+        'scripts/release.sh': body,
+        ...extra,
+      },
+    });
+
+  it('. "$(dirname "$0")/lib/x.sh" and source "$DIR/…" fail closed', () => {
+    for (const body of [
+      '#!/usr/bin/env bash\n. "$(dirname "$0")/lib/x.sh"\n',
+      'set -e\nDIR=$(cd "$(dirname "$0")" && pwd)\nsource "$DIR/lib/common.sh"\n',
+      'if true; then source "$LIB"; fi\n',
+    ]) {
+      expectGap(sh(body), /source/);
+    }
+  });
+
+  it('with a shell gap, a changed shell script under scripts/ also fails closed', () => {
+    const hit = supply(sh('. "$(dirname "$0")/lib/x.sh"\n'), 'scripts/lib/other.sh');
+    expect(hit?.paths).toEqual(['scripts/lib/other.sh']);
+  });
+
+  it('near miss: sourcing a literal path follows it and is not a gap', () => {
+    const r = sh('source scripts/lib/common.sh\n. ./scripts/lib/more.sh\n', {
+      'scripts/lib/common.sh': '',
+      'scripts/lib/more.sh': '',
+    });
+    expectQuiet(r);
+    expectFollowed(r, 'scripts/lib/common.sh');
+    expectFollowed(r, 'scripts/lib/more.sh');
+  });
+});
+
+describe('#2388 r3 — the real release-path closure on this tree', () => {
+  const ROOT = resolve(import.meta.dirname, '..');
+  const tracked = spawnSync('git', ['ls-files', '-z'], { cwd: ROOT, encoding: 'utf8' })
+    .stdout.split('\0')
+    .filter(Boolean);
+  const files = new Set(tracked);
+  const fsRepo = {
+    show: (_side: 'base' | 'head', p: string) =>
+      files.has(p) ? readFileSync(join(ROOT, p), 'utf8') : null,
+    listHead: (prefix: string) => tracked.filter((p) => p.startsWith(prefix)),
+  };
+
+  it('has NO gaps — the fallback would otherwise fire on every module change', () => {
+    expect(releasePathClosure(fsRepo).gaps).toEqual([]);
+  });
+
+  it('includes the scripts the release path SPAWNS, not only those it imports', () => {
+    const { closure } = releasePathClosure(fsRepo);
+    // audit-published.mjs spawns this via join(repoRoot, 'scripts', …); no workflow names it.
+    expect(closure.has('scripts/scan-published-seams.mjs')).toBe(true);
+    // ci-blocking-gate-proof.mjs's runner spawns this.
+    expect(closure.has('scripts/bun-test.mjs')).toBe(true);
   });
 });
