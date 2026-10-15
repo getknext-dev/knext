@@ -180,8 +180,8 @@ const MUTATIONS = [
     claim:
       'every workflow is treated as credential-bearing — a script only a plain workflow runs fires',
     subject: 'guard',
-    anchor: '    .filter((text) => text !== null && workflowHoldsCredential(text));',
-    replacement: '    .filter((text) => text !== null);',
+    anchor: '    .filter(({ text }) => text !== null && workflowHoldsCredential(text));',
+    replacement: '    .filter(({ text }) => text !== null);',
   },
   {
     id: 'M19',
