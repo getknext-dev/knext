@@ -205,6 +205,22 @@ describe("glue mapping — other unary -> 'use server' action + updateTag", () =
     }
   });
 
+  it('the refusals run before the call; the call sits in a try whose finally updates the tag', () => {
+    for (const name of ['placeOrder', 'cancelOrder']) {
+      const body = functionNamed(sf, name).body as ts.Block;
+      const tries = body.statements.filter(ts.isTryStatement);
+      expect(tries, name).toHaveLength(1);
+      const t = tries[0] as ts.TryStatement;
+      const before = body.statements.slice(0, body.statements.indexOf(t)).flatMap((s) => calls(s));
+      for (const check of ['userSubject', 'servedVersion', 'normalizeRequest', 'mintCallToken']) {
+        expect(before, `${name}: ${check} runs before the call`).toContain(check);
+      }
+      expect(calls(t.tryBlock), name).toEqual([name]);
+      expect(calls(t.catchClause as ts.CatchClause), name).toEqual(['wasNotSent']);
+      expect(calls(t.finallyBlock as ts.Block), name).toEqual(['updateTag']);
+    }
+  });
+
   it('an action takes the idempotency key from its caller', () => {
     const fn = functionNamed(sf, 'placeOrder');
     expect(fn.parameters.map((p) => (p.name as ts.Identifier).text)).toEqual([

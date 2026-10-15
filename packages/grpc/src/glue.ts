@@ -167,6 +167,35 @@ export async function mintCallToken(request: TokenRequest): Promise<string> {
   return token;
 }
 
+/**
+ * The mark on an error raised before a request left the zone. A property keyed
+ * by `Symbol.for`, never a module-level set: a second copy of this module must
+ * read the mark the first copy wrote.
+ */
+const NOT_SENT = Symbol.for('knext.grpc.notSent');
+
+/**
+ * Mark `err` as raised before the request was sent, so the function cannot have
+ * seen it. Only a client check that runs before the transport is called may
+ * use this.
+ */
+export function markNotSent(err: unknown): ConnectError {
+  const e = ConnectError.from(err);
+  Object.defineProperty(e, NOT_SENT, { value: true });
+  return e;
+}
+
+/**
+ * Whether `err` provably happened before the request was sent. Anything else
+ * (a reset, a deadline, a lost status, an error the function answered) may
+ * follow a write that committed, so a generated action refreshes its reads.
+ */
+export function wasNotSent(err: unknown): boolean {
+  return (
+    typeof err === 'object' && err !== null && (err as Record<symbol, unknown>)[NOT_SENT] === true
+  );
+}
+
 function invalid(schema: DescMessage, err: unknown): ConnectError {
   return new ConnectError(
     `the request does not match ${schema.typeName}: ${(err as Error).message}`,
@@ -175,8 +204,34 @@ function invalid(schema: DescMessage, err: unknown): ConnectError {
 }
 
 /**
- * A request as the contract defines it: built from `input`, encoded and
- * decoded, so a field the contract does not have is dropped and a value of the
+ * Decode with only the fields the contract has. Without this, protobuf-es keeps
+ * every other field it reads in `$unknown` and writes it back out on encode.
+ */
+const CONTRACT_FIELDS_ONLY = { readUnknownFields: false } as const;
+
+/**
+ * The contract's message, rebuilt from `input`'s known fields only.
+ *
+ * `create()` returns an input whose `$typeName` matches unchanged, so a caller
+ * who forges `$typeName` and adds `$unknown` would have those unknown fields
+ * encoded and forwarded. Neither is trusted: both are dropped before `create`,
+ * and the decode drops any unknown field a nested message carried.
+ */
+function contractMessage<Desc extends DescMessage>(
+  schema: Desc,
+  input: unknown,
+): MessageShape<Desc> {
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) {
+    throw new Error('the request is not an object');
+  }
+  const { $typeName: _typeName, $unknown: _unknown, ...fields } = input as Record<string, unknown>;
+  const bytes = toBinary(schema, create(schema, fields as MessageInitShape<Desc>));
+  return fromBinary(schema, bytes, CONTRACT_FIELDS_ONLY);
+}
+
+/**
+ * A request as the contract defines it: rebuilt from the contract's fields of
+ * `input`, so a field the contract does not have is dropped and a value of the
  * wrong type is INVALID_ARGUMENT. Server Actions are public endpoints; their
  * input is untrusted.
  */
@@ -185,7 +240,7 @@ export function normalizeRequest<Desc extends DescMessage>(
   input: MessageInitShape<Desc>,
 ): MessageShape<Desc> {
   try {
-    return fromBinary(schema, toBinary(schema, create(schema, input)));
+    return contractMessage(schema, input);
   } catch (err) {
     throw invalid(schema, err);
   }
@@ -197,7 +252,7 @@ export function encodeRequest<Desc extends DescMessage>(
   input: MessageInitShape<Desc>,
 ): string {
   try {
-    return base64Encode(toBinary(schema, create(schema, input)));
+    return base64Encode(toBinary(schema, contractMessage(schema, input)));
   } catch (err) {
     throw invalid(schema, err);
   }
@@ -210,7 +265,7 @@ export function decodeRequest<Desc extends DescMessage>(
 ): MessageShape<Desc> {
   try {
     if (!/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)) throw new Error('not base64');
-    return fromBinary(schema, base64Decode(encoded));
+    return fromBinary(schema, base64Decode(encoded), CONTRACT_FIELDS_ONLY);
   } catch (err) {
     throw invalid(schema, err);
   }

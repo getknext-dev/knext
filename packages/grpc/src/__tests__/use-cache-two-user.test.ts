@@ -23,6 +23,7 @@ import { createServer as createHttp2, type Http2Server } from 'node:http2';
 import { type AddressInfo, createServer as createNet } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
+import { Code, ConnectError } from '@connectrpc/connect';
 import { connectNodeAdapter } from '@connectrpc/connect-node';
 import { type FakeRedis, startFakeRedis } from '../../../kn-next/src/__tests__/helpers/fake-redis';
 import { OrdersService } from '../../fixtures/zone/src/generated/grpc/orders/v1/orders_pb';
@@ -48,6 +49,8 @@ import { FIXTURE_ZONE, PKG_DIR } from './helpers';
  *      version is part of the key);
  *   6. no cache key contains a token, and a call with no user is refused before
  *      the function is reached.
+ *   7. a write that fails AFTER it was sent (it may have committed) still
+ *      refreshes the reads on every pod; one refused before it was sent does not.
  *
  * The minter mints a fresh token per call, as a real one does (it carries an
  * expiry), so keying on the token would make (1) miss. Dropping the subject
@@ -156,7 +159,12 @@ async function startFunction(): Promise<{ url: string; log: FunctionLog }> {
             log.calls[`place:${sub}`] = (log.calls[`place:${sub}`] ?? 0) + 1;
             return { id: `placed-by-${sub}` };
           },
-          cancelOrder: () => ({}),
+          cancelOrder(_req, ctx) {
+            // The write commits, then the call fails: what a lost response looks like.
+            const sub = who(ctx.requestHeader.get('authorization'));
+            log.calls[`cancel:${sub}`] = (log.calls[`cancel:${sub}`] ?? 0) + 1;
+            throw new ConnectError('committed, then the response was lost', Code.Unavailable);
+          },
           async *watchOrders() {},
         }),
     }),
@@ -494,5 +502,21 @@ describe("generated 'use cache' reads: two users never share an entry (real Next
     const a4 = await ok(pod3, 'alice');
     expect(a4, 'a pod whose function serves 1.3.0 must not reuse the 1.2.0 entry').not.toBe(a3);
     expect(log.calls['get:alice']).toBe(before + 1);
+
+    // ── 7. a failed write refreshes only if it may have been sent ─────────
+    const cancelId = actionId(appDir, 'cancelOrder');
+    // 7a. no idempotency key: refused before the request left pod 1.
+    expect(await act(pod1, cancelId, 'alice', [{ id: 'o-1' }])).toBe(500);
+    expect(log.calls['cancel:alice']).toBeUndefined();
+    expect(await ok(pod2, 'alice'), 'a write refused before sending refreshes nothing').toBe(a3);
+    // 7b. the function commits, then the call fails: the action throws, and
+    // Next.js still applies its updateTag, on every pod.
+    expect(await act(pod1, cancelId, 'alice', [{ id: 'o-1' }, { idempotencyKey: 'k-2' }])).toBe(
+      500,
+    );
+    expect(log.calls['cancel:alice']).toBe(1);
+    const a5 = await ok(pod2, 'alice');
+    expect(a5, 'a write that failed after it was sent must still refresh the reads').not.toBe(a3);
+    expect(a5).toMatch(/^sub=alice;/);
   }, 600_000);
 });

@@ -32,6 +32,7 @@
 import type { DescMethod, DescService } from '@bufbuild/protobuf';
 import { type Client, Code, ConnectError, createClient, type Transport } from '@connectrpc/connect';
 import { createConnectTransport } from '@connectrpc/connect-node';
+import { markNotSent } from './glue';
 import { checkBudget, methodKind } from './policy';
 import { parseVersion } from './semver';
 
@@ -322,14 +323,21 @@ export function defineFunctionClient<S extends DescService, P extends MethodPoli
 
     const attempts = policy.kind === 'read' ? policy.retry.maxAttempts : 1;
     client[name] = async (request: unknown, options?: CallOptions | WriteCallOptions) => {
-      const headers = headersFor(options);
-      if (policy.kind === 'mutation') {
-        headers.set(
-          IDEMPOTENCY_KEY_HEADER,
-          checkIdempotencyKey((options as WriteCallOptions | undefined)?.idempotencyKey),
-        );
+      let headers: Headers;
+      let c: Client<S>;
+      try {
+        headers = headersFor(options);
+        if (policy.kind === 'mutation') {
+          headers.set(
+            IDEMPOTENCY_KEY_HEADER,
+            checkIdempotencyKey((options as WriteCallOptions | undefined)?.idempotencyKey),
+          );
+        }
+        c = connectClient();
+      } catch (err) {
+        // Nothing has been sent: the function cannot have seen this call.
+        throw markNotSent(err);
       }
-      const c = connectClient();
       const deadlineAt = now() + def.deadlineMs;
       for (let attempt = 1; ; attempt++) {
         const remaining = deadlineAt - now();
@@ -369,4 +377,5 @@ export {
   type TokenMinter,
   type TokenRequest,
   userSubject,
+  wasNotSent,
 } from './glue';

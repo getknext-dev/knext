@@ -14,34 +14,52 @@ import { authorize as $authorize } from "../../../../knext/authorize";
 import { ordersServiceClient as $ordersService } from "./orders_knext";
 import { CancelOrderRequestSchema, type CancelOrderResponse, PlaceOrderRequestSchema, type PlaceOrderResponse } from "./orders_pb";
 import { type MessageInitShape } from "@bufbuild/protobuf";
-import { mintCallToken as $mintCallToken, normalizeRequest as $normalizeRequest, servedVersion as $servedVersion, subjectSub as $subjectSub, userSubject as $userSubject } from "@getknext/grpc/runtime";
+import { mintCallToken as $mintCallToken, normalizeRequest as $normalizeRequest, servedVersion as $servedVersion, subjectSub as $subjectSub, userSubject as $userSubject, wasNotSent as $wasNotSent } from "@getknext/grpc/runtime";
 import { updateTag as $updateTag } from "next/cache";
 
 /**
  * orders.v1.OrdersService.PlaceOrder: a Server Action. authorize() runs first; the call is
  * never retried and carries your idempotency key (reuse it when re-submitting
- * the same write); then every cached read of orders.v1.OrdersService is refreshed.
+ * the same write); then every cached read of orders.v1.OrdersService is refreshed,
+ * also when the call fails after the request was sent (the write may have
+ * committed even though its response was lost).
  */
 export async function placeOrder(request: MessageInitShape<typeof PlaceOrderRequestSchema>, options: { readonly idempotencyKey: string }): Promise<PlaceOrderResponse> {
   const subject = await $userSubject($authorize, { function: "orders", service: "orders.v1.OrdersService", method: "PlaceOrder", kind: "mutation" });
   $servedVersion("orders", "ORDERS_SERVICE_PROTO_VERSION", "1.2.0");
+  const message = $normalizeRequest(PlaceOrderRequestSchema, request);
   const token = await $mintCallToken({ function: "orders", method: "/orders.v1.OrdersService/PlaceOrder", sub: $subjectSub(subject) });
-  const response = await $ordersService.placeOrder($normalizeRequest(PlaceOrderRequestSchema, request), { idempotencyKey: options?.idempotencyKey, token });
-  $updateTag("knext:orders:orders.v1.OrdersService");
-  return response;
+  let mayHaveCommitted = true;
+  try {
+    return await $ordersService.placeOrder(message, { idempotencyKey: options?.idempotencyKey, token });
+  } catch (err) {
+    mayHaveCommitted = !$wasNotSent(err);
+    throw err;
+  } finally {
+    if (mayHaveCommitted) $updateTag("knext:orders:orders.v1.OrdersService");
+  }
 }
 
 /**
  * orders.v1.OrdersService.CancelOrder: a Server Action. authorize() runs first; the call is
  * never retried and carries your idempotency key (reuse it when re-submitting
- * the same write); then every cached read of orders.v1.OrdersService is refreshed.
+ * the same write); then every cached read of orders.v1.OrdersService is refreshed,
+ * also when the call fails after the request was sent (the write may have
+ * committed even though its response was lost).
  */
 export async function cancelOrder(request: MessageInitShape<typeof CancelOrderRequestSchema>, options: { readonly idempotencyKey: string }): Promise<CancelOrderResponse> {
   const subject = await $userSubject($authorize, { function: "orders", service: "orders.v1.OrdersService", method: "CancelOrder", kind: "mutation" });
   $servedVersion("orders", "ORDERS_SERVICE_PROTO_VERSION", "1.2.0");
+  const message = $normalizeRequest(CancelOrderRequestSchema, request);
   const token = await $mintCallToken({ function: "orders", method: "/orders.v1.OrdersService/CancelOrder", sub: $subjectSub(subject) });
-  const response = await $ordersService.cancelOrder($normalizeRequest(CancelOrderRequestSchema, request), { idempotencyKey: options?.idempotencyKey, token });
-  $updateTag("knext:orders:orders.v1.OrdersService");
-  return response;
+  let mayHaveCommitted = true;
+  try {
+    return await $ordersService.cancelOrder(message, { idempotencyKey: options?.idempotencyKey, token });
+  } catch (err) {
+    mayHaveCommitted = !$wasNotSent(err);
+    throw err;
+  } finally {
+    if (mayHaveCommitted) $updateTag("knext:orders:orders.v1.OrdersService");
+  }
 }
 

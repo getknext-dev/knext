@@ -5,7 +5,8 @@
  */
 
 import { afterEach, describe, expect, it } from 'bun:test';
-import { create } from '@bufbuild/protobuf';
+import { create, toBinary } from '@bufbuild/protobuf';
+import { BinaryReader, base64Encode } from '@bufbuild/protobuf/wire';
 import { Code, ConnectError } from '@connectrpc/connect';
 import {
   GetOrderRequestSchema,
@@ -110,9 +111,7 @@ describe('servedVersion — the served contract version, part of every cache key
     expect(await code(() => servedVersion('orders', ENV, '1.2.0', {}))).toBe(
       Code.FailedPrecondition,
     );
-    expect(() => servedVersion('orders', ENV, '1.2.0', { [ENV]: '' })).toThrow(
-      `${ENV} is not set`,
-    );
+    expect(() => servedVersion('orders', ENV, '1.2.0', { [ENV]: '' })).toThrow(`${ENV} is not set`);
   });
 
   it('fails closed on a version that is not MAJOR.MINOR.PATCH', async () => {
@@ -199,6 +198,85 @@ describe('request codec — what crosses the cache key and the action boundary',
     expect(await code(() => decodeRequest(GetOrderRequestSchema, '%%%'))).toBe(
       Code.InvalidArgument,
     );
+  });
+
+  // Field 99 is in no fixture contract; 0x9a 0x06 is its tag (length-delimited).
+  const FIELD_99 = { no: 99, wireType: 2, data: new Uint8Array([3, 0x41, 0x42, 0x43]) };
+  const CLEAN = toBinary(
+    PlaceOrderRequestSchema,
+    create(PlaceOrderRequestSchema, { sku: 'a', quantity: 1 }),
+  );
+  const FORGED = {
+    $typeName: 'orders.v1.PlaceOrderRequest',
+    sku: 'a',
+    quantity: 1,
+  };
+
+  /** Every field number on the wire, read with the contract's own reader. */
+  function wireFields(bytes: Uint8Array): number[] {
+    const r = new BinaryReader(bytes);
+    const out: number[] = [];
+    while (r.pos < r.len) {
+      const [no, wt] = r.tag();
+      out.push(no);
+      r.skip(wt);
+    }
+    return out;
+  }
+
+  it('a forged $typeName with a $unknown field 99 forwards only the contract fields', () => {
+    const m = normalizeRequest(PlaceOrderRequestSchema, {
+      ...FORGED,
+      $unknown: [FIELD_99],
+    } as never);
+    expect(m.$unknown).toBeUndefined();
+    const wire = toBinary(PlaceOrderRequestSchema, m);
+    expect(wireFields(wire)).toEqual([1, 2]);
+    expect(wire).toEqual(CLEAN);
+  });
+
+  it('a $unknown entry whose data is a plain array forwards only the contract fields', () => {
+    const m = normalizeRequest(PlaceOrderRequestSchema, {
+      ...FORGED,
+      $unknown: [{ no: 99, wireType: 2, data: [3, 0x41, 0x42, 0x43] }],
+    } as never);
+    expect(toBinary(PlaceOrderRequestSchema, m)).toEqual(CLEAN);
+  });
+
+  it('a caller-supplied $unknown is never encoded, even one the encoder would choke on', () => {
+    for (const $unknown of [[{}], 'x', [{ no: 99, wireType: 2 }]]) {
+      const m = normalizeRequest(PlaceOrderRequestSchema, { ...FORGED, $unknown } as never);
+      expect(toBinary(PlaceOrderRequestSchema, m), JSON.stringify($unknown)).toEqual(CLEAN);
+    }
+  });
+
+  it('the cache key of a forged request carries only the contract fields', () => {
+    const key = encodeRequest(PlaceOrderRequestSchema, {
+      ...FORGED,
+      $unknown: [FIELD_99],
+    } as never);
+    expect(key).toBe(encodeRequest(PlaceOrderRequestSchema, { sku: 'a', quantity: 1 }));
+  });
+
+  it('decoding a request drops a field the contract does not have', () => {
+    const withField99 = new Uint8Array([...CLEAN, 0x9a, 0x06, 3, 0x41, 0x42, 0x43]);
+    expect(wireFields(withField99)).toEqual([1, 2, 99]);
+    const m = decodeRequest(PlaceOrderRequestSchema, base64Encode(withField99));
+    expect(m.$unknown).toBeUndefined();
+    expect(toBinary(PlaceOrderRequestSchema, m)).toEqual(CLEAN);
+  });
+
+  it('a plain array, null or a primitive is not a request: INVALID_ARGUMENT', async () => {
+    for (const bad of [[], ['a', 1], null, 'sku', 42]) {
+      expect(
+        await code(() => normalizeRequest(PlaceOrderRequestSchema, bad as never)),
+        JSON.stringify(bad),
+      ).toBe(Code.InvalidArgument);
+      expect(
+        await code(() => encodeRequest(GetOrderRequestSchema, bad as never)),
+        JSON.stringify(bad),
+      ).toBe(Code.InvalidArgument);
+    }
   });
 
   it('the per-user cache life expires within an hour', () => {

@@ -377,21 +377,35 @@ function emitAction(ctx: FileCtx, p: PlannedMethod): void {
     true,
   );
   const normalize = ctx.imports.add(RUNTIME_MODULE, 'normalizeRequest', '$normalizeRequest');
+  const wasNotSent = ctx.imports.add(RUNTIME_MODULE, 'wasNotSent', '$wasNotSent');
   const updateTag = ctx.imports.add('next/cache', 'updateTag', '$updateTag');
   const client = clientFor(ctx, method);
+  // Every check that can refuse the call runs BEFORE the try: a refusal there
+  // provably sent nothing, so it refreshes nothing. From the call on, a failure
+  // may follow a write that committed (a reset, a deadline, a lost status), so
+  // the finally refreshes unless the client says the request never left.
   ctx.lines.push(
     '/**',
     ` * ${rpcName(method)}: a Server Action. authorize() runs first; the call is`,
     ' * never retried and carries your idempotency key (reuse it when re-submitting',
-    ` * the same write); then every cached read of ${method.parent.typeName} is refreshed.`,
+    ` * the same write); then every cached read of ${method.parent.typeName} is refreshed,`,
+    ' * also when the call fails after the request was sent (the write may have',
+    ' * committed even though its response was lost).',
     ' */',
     `export async function ${name}(request: ${initShape}<typeof ${input}>, options: { readonly idempotencyKey: string }): Promise<${output}> {`,
     `  const subject = ${subjectExpr(ctx, p, 'mutation')};`,
     `  ${servedVersionExpr(ctx)};`,
+    `  const message = ${normalize}(${input}, request);`,
     `  const token = ${mintExpr(ctx, method, 'subject')};`,
-    `  const response = await ${client}.${name}(${normalize}(${input}, request), { idempotencyKey: options?.idempotencyKey, token });`,
-    `  ${updateTag}(${JSON.stringify(serviceTag(ctx.fn, method))});`,
-    '  return response;',
+    '  let mayHaveCommitted = true;',
+    '  try {',
+    `    return await ${client}.${name}(message, { idempotencyKey: options?.idempotencyKey, token });`,
+    '  } catch (err) {',
+    `    mayHaveCommitted = !${wasNotSent}(err);`,
+    '    throw err;',
+    '  } finally {',
+    `    if (mayHaveCommitted) ${updateTag}(${JSON.stringify(serviceTag(ctx.fn, method))});`,
+    '  }',
     '}',
     '',
   );
