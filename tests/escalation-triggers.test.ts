@@ -9,6 +9,7 @@ import {
   ACK_LABEL,
   classify,
   classifyContent,
+  invokedPaths,
   isAcknowledged,
   LEGACY_ACK_LABEL,
   mergeFired,
@@ -1250,5 +1251,224 @@ describe('#2388 r3 — the real release-path closure on this tree', () => {
     expect(closure.has('scripts/scan-published-seams.mjs')).toBe(true);
     // ci-blocking-gate-proof.mjs's runner spawns this.
     expect(closure.has('scripts/bun-test.mjs')).toBe(true);
+  });
+});
+
+/**
+ * Round 4: a script a credential workflow INVOKES is an edge wherever it lives. The
+ * round-3 edge limit admitted only `scripts/` and `.github/actions/`, so editing the
+ * operator's `hack/cosign-verify.sh` — run with `id-token: write` in scope — fired
+ * nothing. The scope limit survives only where it belongs: on paths a MODULE names
+ * (a release script that reads `package.json` is not running it).
+ */
+const R4_WF = (run: string, extra = '') =>
+  `permissions:\n  id-token: write\njobs:\n  a:\n${extra}    steps:\n      - run: ${run}\n`;
+const r4 = (
+  run: string,
+  files: Record<string, string>,
+  opts: { extra?: string; base?: Record<string, string> } = {},
+) =>
+  reader({
+    head: { ...R3_TREE, '.github/workflows/release.yml': R4_WF(run, opts.extra), ...files },
+    base: opts.base,
+  });
+
+describe('#2388 r4 — a path a credential workflow invokes is an edge wherever it lives', () => {
+  it('bash/sh/node/bun/python/source/. followed by a path outside scripts/ is followed', () => {
+    for (const cmd of [
+      'bash',
+      'sh',
+      'node',
+      'bun',
+      'python3',
+      'source',
+      '.',
+      'bash -euo pipefail',
+    ]) {
+      const r = r4(`${cmd} tools/hack/x.sh "$ARG"`, { 'tools/hack/x.sh': 'echo hi\n' });
+      expectFollowed(r, 'tools/hack/x.sh');
+    }
+  });
+
+  it('a ./-relative command and a dir/x path in run: command position are followed', () => {
+    expectFollowed(r4('./tools/x.sh --flag', { 'tools/x.sh': '' }), 'tools/x.sh');
+    expectFollowed(r4('tools/x.sh --flag', { 'tools/x.sh': '' }), 'tools/x.sh');
+    expectFollowed(r4('set -e && FOO=1 tools/y.py', { 'tools/y.py': '' }), 'tools/y.py');
+  });
+
+  it('working-directory: + a relative script resolves against that directory', () => {
+    const r = r4(
+      'bash hack/check.sh',
+      { 'pkg/op/hack/check.sh': '' },
+      {
+        extra: '    defaults:\n      run:\n        working-directory: pkg/op\n',
+      },
+    );
+    expectFollowed(r, 'pkg/op/hack/check.sh');
+  });
+
+  it('cd <dir> then a relative script resolves against that directory', () => {
+    const r = r4('|\n          cd pkg/op\n          bash hack/check.sh', {
+      'pkg/op/hack/check.sh': '',
+    });
+    expectFollowed(r, 'pkg/op/hack/check.sh');
+  });
+
+  it('$GITHUB_WORKSPACE / ${{ github.workspace }} prefixes resolve to the repo root', () => {
+    for (const pre of ['$GITHUB_WORKSPACE/', '${GITHUB_WORKSPACE}/', '${{ github.workspace }}/']) {
+      expectFollowed(r4(`bash "${pre}deploy/s.sh"`, { 'deploy/s.sh': '' }), 'deploy/s.sh');
+    }
+  });
+
+  it('a script deleted on head is still followed from the base tree', () => {
+    const r = r4('bash deploy/gone.sh', {}, { base: { 'deploy/gone.sh': 'echo\n' } });
+    const hit = supply(r, 'deploy/gone.sh');
+    expect(hit?.paths).toEqual(['deploy/gone.sh']);
+  });
+
+  it('an invoked script is scanned transitively: what it invokes is an edge too', () => {
+    const r = r4('bash deploy/a.sh', {
+      'deploy/a.sh': 'bash ./b.sh\nnode tools/c.mjs\n',
+      'deploy/b.sh': '',
+      'tools/c.mjs': "import './d.mjs';\n",
+      'tools/d.mjs': '',
+    });
+    expectFollowed(r, 'deploy/b.sh');
+    expectFollowed(r, 'tools/c.mjs');
+    expectFollowed(r, 'tools/d.mjs');
+  });
+
+  it('…including the fail-closed gaps: a non-literal source in it fails closed, for any .sh', () => {
+    const r = r4('bash deploy/a.sh', { 'deploy/a.sh': '. "$(dirname "$0")/lib.sh"\n' });
+    expectGap(r, /source/);
+    const hit = supply(r, 'elsewhere/lib.sh');
+    expect(hit?.paths).toEqual(['elsewhere/lib.sh']);
+    expect(hit?.why).toMatch(/INCOMPLETE/);
+  });
+
+  it('near miss: an invocation in a NON-credential workflow is not an edge', () => {
+    const r = reader({
+      head: {
+        ...R3_TREE,
+        '.github/workflows/ci.yml': PLAIN_WF.replace(
+          'node scripts/check-thing.mjs',
+          'bash tools/x.sh',
+        ),
+        'tools/x.sh': '',
+      },
+    });
+    expect(supply(r, 'tools/x.sh')).toBeUndefined();
+  });
+
+  it('near miss: a path only mentioned (comment, data argument, continuation) is not an edge', () => {
+    const r = r4(
+      '|\n          # bash tools/commented.sh\n          sed -i -e s/a/b/ \\\n            tools/data.yaml\n          cat tools/read.sh',
+      {
+        'tools/commented.sh': '',
+        'tools/data.yaml': '',
+        'tools/read.sh': '',
+      },
+    );
+    for (const p of ['tools/commented.sh', 'tools/data.yaml', 'tools/read.sh']) {
+      expect(supply(r, p)).toBeUndefined();
+    }
+  });
+
+  it('near miss: an invoked path that does not exist (a build output) adds nothing', () => {
+    expect(
+      invokedPaths(
+        'run: ./out/bun-linux-x64 --version\n  bun build x',
+        '.github/workflows/w.yml',
+        () => false,
+      ),
+    ).toEqual([]);
+  });
+
+  it('the round-3 data-file restriction still holds for module string references', () => {
+    const r = r4('node tools/release.mjs', {
+      'tools/release.mjs':
+        "import { readFileSync } from 'node:fs';\nreadFileSync('package.json');\nreadFileSync('bun.lock');\n",
+      'package.json': '{}',
+      'bun.lock': '',
+    });
+    expectFollowed(r, 'tools/release.mjs');
+    expect(supply(r, 'bun.lock')).toBeUndefined();
+  });
+});
+
+describe('#2388 r4 — on the real tree, editing a script a credential workflow invokes fires', () => {
+  const ROOT = resolve(import.meta.dirname, '..');
+  const tracked = spawnSync('git', ['ls-files', '-z'], { cwd: ROOT, encoding: 'utf8' })
+    .stdout.split('\0')
+    .filter(Boolean);
+  const files = new Set(tracked);
+  const fsRepo = {
+    show: (_side: 'base' | 'head', p: string) =>
+      files.has(p) ? readFileSync(join(ROOT, p), 'utf8') : null,
+    listHead: (prefix: string) => tracked.filter((p) => p.startsWith(prefix)),
+  };
+  const { closure, gaps } = releasePathClosure(fsRepo);
+
+  // The reviewer's list, each named with the credential workflow that runs it.
+  for (const [path, by] of [
+    ['packages/kn-next-operator/hack/cosign-verify.sh', 'operator-supply-chain.yml'],
+    ['packages/kn-next-operator/hack/stamp-release-version.sh', 'operator-supply-chain.yml'],
+    ['packages/kn-next-operator/hack/check-release-immutable.sh', 'operator-supply-chain.yml'],
+    ['packages/kn-next-operator/hack/marketplace-index-build.sh', 'operator-supply-chain.yml'],
+    ['packages/kn-next-operator/hack/check-no-latest.sh', 'operator-supply-chain.yml (after cd)'],
+    ['apps/file-manager/hack/cosign-verify.sh', 'supply-chain.yml'],
+    ['infra/bun-base/prefix.sh', 'bun-base-build.yml'],
+    ['deploy/bun-patched/smoke.sh', 'bun-patched-release.yml'],
+  ] as const) {
+    it(`editing ${path} (run by ${by}) fires supply-chain, on the closure — not the fallback`, () => {
+      expect(gaps).toEqual([]);
+      const hit = classifyContent([change(path)], fsRepo).find(
+        (f: { id: string }) => f.id === 'supply-chain',
+      );
+      expect(hit?.paths).toEqual([path]);
+      expect(hit?.why).not.toMatch(/INCOMPLETE/);
+    });
+  }
+
+  /**
+   * Scanned, not enumerated, and deliberately NOT the classifier's own scanner: every
+   * `*.sh`/`*.mjs`/`*.py` after an invoking command in any credential workflow. A
+   * relative path matches any tracked file it is a suffix of (a working-directory or
+   * `cd` the classifier must also have resolved); one of those must be on the closure.
+   */
+  it('the closure contains every script any credential workflow invokes', () => {
+    const INVOKED =
+      /(?:^|[\s;&|(`])(?:(?:bash|sh|zsh|dash|node|nodejs|bun|deno|tsx|python3?|source|\.)\s+(?:-\S+\s+)*)?["']?((?:\$\{?GITHUB_WORKSPACE\}?\/|\$\{\{\s*github\.workspace\s*\}\}\/|\.\/)?[\w.-]+(?:\/[\w.-]+)*\.(?:sh|mjs|py))\b/g;
+    const RUNNER =
+      /(?:^|[\s;&|(`])(?:bash|sh|zsh|dash|node|nodejs|bun|deno|tsx|python3?|source|\.)\s+(?:-\S+\s+)*["']?$/;
+    const missing: string[] = [];
+    let found = 0;
+    for (const wf of tracked.filter((p) => /^\.github\/workflows\/[^/]+\.ya?ml$/.test(p))) {
+      const text = readFileSync(join(ROOT, wf), 'utf8');
+      if (!workflowHoldsCredential(text)) continue;
+      for (const line of text.split('\n')) {
+        if (/^\s*#/.test(line)) continue;
+        for (const m of line.matchAll(INVOKED)) {
+          const raw = m[1];
+          const before = line.slice(0, m.index + m[0].length - raw.length).replace(/["']$/, '');
+          const invoked =
+            raw.startsWith('./') ||
+            RUNNER.test(`${before}`) ||
+            /(?:^\s*(?:-\s+)?(?:run:\s*)?|[;&|]\s*)$/.test(before);
+          if (!invoked) continue;
+          const p = raw.replace(
+            /^(?:\$\{?GITHUB_WORKSPACE\}?\/|\$\{\{\s*github\.workspace\s*\}\}\/|\.\/)/,
+            '',
+          );
+          const repoFiles = tracked.filter((f) => f === p || f.endsWith(`/${p}`));
+          if (repoFiles.length === 0) continue; // a build output, not a repo file
+          found++;
+          if (!repoFiles.some((f) => closure.has(f))) missing.push(`${wf}: ${raw}`);
+        }
+      }
+    }
+    // Non-vacuity: the scan must see the operator, file-manager and bun lanes.
+    expect(found).toBeGreaterThanOrEqual(20);
+    expect(missing).toEqual([]);
   });
 });

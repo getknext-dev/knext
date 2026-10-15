@@ -191,6 +191,70 @@ export function referencedPaths(text) {
 
 const WORKFLOW = /^\.github\/workflows\/[^/]+\.ya?ml$/;
 
+/** Commands whose next argument is a script that then runs (#2388 round 4). */
+const SCRIPT_RUNNERS = 'bash|sh|zsh|dash|node|nodejs|bun|deno|tsx|ts-node|python3?|source|\\.';
+/** Shell command position: line start (a YAML `- ` / `run:` lead-in), after `;&|(`, or a keyword; env assignments skipped. */
+const CMD_POS =
+  '(?:^[ \\t]*(?:-[ \\t]+)?(?:run:[ \\t]*)?|[;&|(][ \\t]*|\\b(?:then|do|else|exec|time|env)[ \\t]+)(?:[A-Za-z_]\\w*=\\S*[ \\t]+)*';
+const RUNNER_ARG = new RegExp(`(?:^|[\\s;&|(\`])(?:${SCRIPT_RUNNERS})[ \\t]+([^\\n;&|]*)`, 'gm');
+const CMD_PATH = new RegExp(`${CMD_POS}((?:\\.\\/|[A-Za-z0-9_][\\w.-]*\\/)[^\\s;&|)'"\`]+)`, 'gm');
+
+/**
+ * Repo-relative paths a workflow, local action or shell script INVOKES (#2388
+ * round 4) — wherever they live, not only under `scripts/`: the argument after an
+ * interpreter, `source` or `.` (flags skipped), and a `./x` or `dir/x` path in
+ * command position (`run: hack/x.sh`, `&& ./tools/y`). A relative path resolves
+ * against the repo root, every `working-directory:` and literal `cd` target in the
+ * file and — for a file that is not a workflow — its own directory and ancestors.
+ * Only a path that EXISTS is returned (`exists` reads head, then base, so a deleted
+ * script is still followed); `bun build`, `./out/bun-linux-x64` and prose drop out.
+ *
+ * Unlike a path a module merely NAMES (`addReferenced`, which stays scoped so a
+ * script that reads `package.json` adds no edge), an invocation is an edge wherever
+ * it lives — it is what runs with the credential in scope.
+ */
+export function invokedPaths(text, file, exists) {
+  // A full-line `#` comment invokes nothing (its prose parens would read as subshells);
+  // a `\` continuation joins its line, so a wrapped argument is not a command.
+  const norm = text
+    .replace(/^[ \t]*#.*$/gm, '')
+    .replace(/\\\r?\n/g, ' ')
+    .replace(/\$\{\{\s*github\.(?:workspace|action_path)\s*\}\}\//g, '')
+    .replace(/\$\{?(?:GITHUB_WORKSPACE|GITHUB_ACTION_PATH)\}?\//g, '');
+  const bases = new Set(['']);
+  for (const m of norm.matchAll(/working-directory\s*:\s*['"]?([^\s'"#]+)/g)) bases.add(m[1]);
+  for (const m of norm.matchAll(/(?:^|[\s;&|(])cd[ \t]+['"]?([\w.][\w./-]*)/gm)) bases.add(m[1]);
+  if (!WORKFLOW.test(file)) {
+    for (let d = posix.dirname(file); d !== '.' && d !== '/'; d = posix.dirname(d)) bases.add(d);
+  }
+  const clean = (c) => c.replace(/^["'(]+/, '').replace(/[.,;:)"'`]+$/, '');
+  const resolveAll = (c) => {
+    if (!c || c.startsWith('/') || /[$*?{}<>~\\]/.test(c)) return [];
+    return [...bases]
+      .map((base) => posix.normalize(posix.join(base, c)))
+      .filter((p) => !p.startsWith('..') && !p.startsWith('/') && exists(p));
+  };
+  // Per command, the alternatives in order: after an interpreter, its non-flag
+  // arguments (`bash -o pipefail x.sh` — a flag's value is not the script), of which
+  // only the FIRST that exists is taken, so `node x.mjs package.json` adds no data file.
+  const commands = [
+    ...[...norm.matchAll(RUNNER_ARG)].map((m) =>
+      m[1].split(/[ \t]+/).filter((t) => t && !t.startsWith('-')),
+    ),
+    ...[...norm.matchAll(CMD_PATH)].map((m) => [m[1]]),
+  ];
+  const out = [];
+  for (const alternatives of commands) {
+    for (const c of alternatives) {
+      const hits = resolveAll(clean(c));
+      if (hits.length === 0) continue;
+      for (const p of hits) if (!out.includes(p)) out.push(p);
+      break;
+    }
+  }
+  return out;
+}
+
 /** Files whose imports are followed, and the extensions a bare relative specifier may omit. */
 const MODULE_FILE = /\.(?:[cm]?[jt]s|[jt]sx)$/;
 const RESOLVE_EXTS = ['.mjs', '.js', '.cjs', '.ts', '.mts', '.cts', '.tsx', '.jsx', '.json'];
@@ -1056,6 +1120,8 @@ export function releaseClosure(seeds, read, listUnder) {
       }
     } else if (!file.endsWith('.json')) {
       for (const p of referencedPaths(text)) addNamed(p);
+      // Round 4: what this action / shell script INVOKES is an edge wherever it lives.
+      for (const p of invokedPaths(text, file, (q) => read(q) !== null)) add(p);
       for (const g of shellSourceGaps(text)) gaps.push(`${file}: ${g}`);
     }
   }
@@ -1068,7 +1134,8 @@ const couldBeOnPath = (p) =>
   MODULE_FILE.test(p) ||
   p.endsWith('.json') ||
   p.startsWith('scripts/') ||
-  p.startsWith('.github/actions/');
+  p.startsWith('.github/actions/') ||
+  /\.(?:sh|bash|py)$/.test(p); // round 4: an invoked script can live anywhere
 
 /**
  * The release path of a repo (#2388): the scripts and local actions every
@@ -1081,14 +1148,22 @@ export function releasePathClosure(repo) {
   const credentialWorkflows = repo
     .listHead('.github/workflows/')
     .filter((p) => WORKFLOW.test(p))
-    .map((p) => repo.show('head', p))
-    .filter((text) => text !== null && workflowHoldsCredential(text));
-  const runByCredential = new Set(credentialWorkflows.flatMap(referencedPaths));
+    .map((p) => ({ path: p, text: repo.show('head', p) }))
+    .filter(({ text }) => text !== null && workflowHoldsCredential(text));
   const cache = new Map();
   const read = (p) => {
     if (!cache.has(p)) cache.set(p, repo.show('head', p) ?? repo.show('base', p));
     return cache.get(p);
   };
+  const exists = (p) => read(p) !== null;
+  // Round 4: a script the workflow INVOKES is an edge wherever it lives, not only
+  // under scripts/ or .github/actions/ (which is all `referencedPaths` reads).
+  const runByCredential = new Set(
+    credentialWorkflows.flatMap(({ path, text }) => [
+      ...referencedPaths(text),
+      ...invokedPaths(text, path, exists),
+    ]),
+  );
   const { closure, gaps } = releaseClosure(runByCredential, read, (prefix) =>
     repo.listHead(prefix),
   );
