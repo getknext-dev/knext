@@ -821,6 +821,9 @@ decisions rests on the code or package evidence cited in its D-section, not on t
 
 ## Consequences
 
+These consequences are as written on 2026-10-10. Where an amendment changed the rule one rests
+on, D2 current text is authoritative.
+
 **Positive**
 - Each surface is edited once, against its final Next floor. `cache-handler.js` gets #2100, then the
   #2083 extraction, then #2089. `next-adapter.ts` gets K4, then #2083. `package.json` gets K1, then
@@ -843,8 +846,6 @@ decisions rests on the code or package evidence cited in its D-section, not on t
   Aligning ISR is tech debt, filed as #2122.
 - **Two tag mechanisms.** One `revalidateTag` reaches both through Next's fan-out. A future ISR
   move to timestamp semantics needs its own ADR and a three-step migration.
-- *(These consequences are as written on 2026-10-10; where an amendment changed the rule they rest
-  on, D2 current text is authoritative.)*
 - **No build id → ISR shared across builds.** Images built outside knext with none of the three
   sources can serve an old build's ISR payload to new code. Surfaced by a warning and `doctor`; jev's
   confidence here was medium (0.66).
