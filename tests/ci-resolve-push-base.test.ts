@@ -153,7 +153,7 @@ describe('the CLI writes the step output and fails closed', () => {
   });
 });
 
-describe('ci.yml wires the resolver into both base consumers', () => {
+describe('ci.yml routes every push before-sha through the resolver', () => {
   type Step = {
     id?: string;
     name?: string;
@@ -162,28 +162,51 @@ describe('ci.yml wires the resolver into both base consumers', () => {
     env?: Record<string, string>;
   };
   const ci = parse(readFileSync(join(ROOT, '.github/workflows/ci.yml'), 'utf8')) as {
-    jobs: Record<string, { steps: Step[] }>;
+    jobs: Record<string, { steps?: Step[] }>;
   };
-  const CONSUMERS: Record<string, string> = {
-    'grpc-contracts': 'buf breaking (the knext options contract, against the base commit)',
-    'file-manager-e2e-round': 'Assert every e2e-round leg concluded success (path-scoped)',
-  };
+  const isResolver = (s: Step) => Boolean(s.run?.includes('scripts/ci-resolve-push-base.mjs'));
+  const readsBefore = (s: Step) =>
+    JSON.stringify({
+      env: s.env ?? {},
+      run: s.run ?? '',
+      with: (s as { with?: unknown }).with,
+    }).includes('github.event.before');
 
-  it.each(Object.entries(CONSUMERS))('%s resolves its base before using it', (jobId, consumer) => {
-    const steps = ci.jobs[jobId]?.steps ?? [];
-    const resolverIdx = steps.findIndex((s) => s.run?.includes('scripts/ci-resolve-push-base.mjs'));
-    const consumerIdx = steps.findIndex((s) => s.name === consumer);
+  // SCANNED, not enumerated: any step that reads `github.event.before` itself
+  // would hand the zero sha of a branch-creation push straight to a consumer.
+  it('no step other than the resolver reads github.event.before', () => {
+    const direct: string[] = [];
+    for (const [jobId, job] of Object.entries(ci.jobs)) {
+      for (const s of job.steps ?? []) {
+        if (readsBefore(s) && !isResolver(s)) direct.push(`${jobId}: ${s.name ?? s.id ?? s.run}`);
+      }
+    }
+    expect(direct).toEqual([]);
+  });
+
+  const resolverJobs = Object.entries(ci.jobs).filter(([, job]) =>
+    (job.steps ?? []).some(isResolver),
+  );
+
+  it('the scan is not vacuous: the e2e-round aggregator resolves its base', () => {
+    expect(resolverJobs.map(([id]) => id)).toContain('file-manager-e2e-round');
+  });
+
+  it.each(resolverJobs)('%s resolves its base after checkout and before using it', (jobId, job) => {
+    const steps = job.steps ?? [];
+    const resolverIdx = steps.findIndex(isResolver);
     const checkoutIdx = steps.findIndex((s) => s.uses?.startsWith('actions/checkout@'));
-    expect(resolverIdx, `${jobId}: no resolver step`).toBeGreaterThan(-1);
-    expect(consumerIdx, `${jobId}: consumer step missing`).toBeGreaterThan(-1);
-    expect(resolverIdx).toBeGreaterThan(checkoutIdx);
-    expect(resolverIdx).toBeLessThan(consumerIdx);
-
     const resolver = steps[resolverIdx];
-    expect(resolver.id).toBeTruthy();
+    expect(resolver.id, `${jobId}: the resolver step needs an id`).toBeTruthy();
+    expect(checkoutIdx, `${jobId}: no checkout`).toBeGreaterThan(-1);
+    expect(resolverIdx).toBeGreaterThan(checkoutIdx);
     expect(resolver.env?.EVENT_NAME).toBe('${{ github.event_name }}');
     expect(resolver.env?.PUSH_CREATED).toBe('${{ github.event.created }}');
     expect(resolver.env?.RAW_BASE_SHA).toContain('github.event.before');
-    expect(steps[consumerIdx].env?.BASE_SHA).toBe(`\${{ steps.${resolver.id}.outputs.sha }}`);
+
+    const output = `\${{ steps.${resolver.id}.outputs.sha }}`;
+    const consumers = steps.map((s, i) => ({ s, i })).filter(({ s }) => s.env?.BASE_SHA === output);
+    expect(consumers.length, `${jobId}: nothing reads ${output} as BASE_SHA`).toBeGreaterThan(0);
+    for (const { i } of consumers) expect(i).toBeGreaterThan(resolverIdx);
   });
 });
