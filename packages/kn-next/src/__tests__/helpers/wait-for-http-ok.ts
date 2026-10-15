@@ -38,10 +38,13 @@ export async function waitForHttpOk(
             `${url}: ${why}; ${seen}${log ? `\n--- server output ---\n${log}` : ""}`,
         );
     };
-
-    for (;;) {
+    const failIfExited = () => {
         const gone = opts.exited?.();
         if (gone) fail(`server exited before ready (${gone})`);
+    };
+
+    for (;;) {
+        failIfExited();
         try {
             const res = await fetch(url, {
                 signal: AbortSignal.timeout(
@@ -53,11 +56,19 @@ export async function waitForHttpOk(
             lastError = undefined;
             await res.body?.cancel();
         } catch (e) {
-            lastStatus = undefined;
+            // Keep a status already seen: the final probe is cut short by the
+            // deadline, and its abort must not erase the answer before it.
             lastError = e instanceof Error ? e.message : String(e);
         }
-        if (Date.now() >= deadline)
-            fail(`not ready with HTTP 200 within ${deadlineMs} ms`);
+        if (Date.now() >= deadline) {
+            // Crash vs slow: the process may have died during the last probe,
+            // after the loop's own exit check.
+            failIfExited();
+            fail(
+                `not ready with HTTP 200 within ${deadlineMs} ms` +
+                    (opts.exited ? " (server process still running)" : ""),
+            );
+        }
         await new Promise((r) => setTimeout(r, intervalMs));
     }
 }
