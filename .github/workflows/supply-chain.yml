@@ -22,8 +22,13 @@ name: Supply Chain
 
 on:
   pull_request:
+  # Every long-lived release line, not just `main` (#2249), so the combined tree
+  # after a merge to `integration/v2` gets the build + ENFORCED Trivy gate. The
+  # push/sign steps stay `if: github.ref == 'refs/heads/main'`, so an
+  # integration push builds and scans but publishes and signs nothing. Guarded
+  # by tests/integration-line-ci-triggers.test.ts.
   push:
-    branches: [main]
+    branches: [main, 'integration/**']
   workflow_dispatch:
   # This job posts the REQUIRED "SBOM + Trivy (+ cosign sign on main)" context, so
   # it must report on the merge queue's `refs/heads/gh-readonly-queue/main/...` ref
@@ -209,9 +214,10 @@ jobs:
           path: sbom.spdx.json
 
       - name: Trivy scan — FAIL on HIGH/CRITICAL
-        # Report (don't block) on PRs; ENFORCE (fail) on main. Phased rollout so a
-        # pre-existing base-image CVE can't block an unrelated PR, while main stays gated.
-        continue-on-error: ${{ github.ref != 'refs/heads/main' }}
+        # Report (don't block) on PRs; ENFORCE (fail) on main and on every
+        # `integration/**` release line (#2249). Phased rollout so a pre-existing
+        # base-image CVE can't block an unrelated PR, while every line stays gated.
+        continue-on-error: ${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/heads/integration/') }}
         # SHA-pinned (#202): this action is the publish GATE in a job holding
         # packages:write + id-token:write — a compromised mutable @master could
         # push/sign with this repo's OIDC identity. v0.36.0.
@@ -423,8 +429,8 @@ jobs:
   # runtime OS layer rather than rebuilding the whole app — identical Trivy
   # OS-package result, a fraction of the cost.
   #
-  # Phased EXACTLY like the file-manager gate: report-on-PR, ENFORCE-on-main via
-  # `continue-on-error: ${{ github.ref != 'refs/heads/main' }}`. This job holds no
+  # Phased EXACTLY like the file-manager gate: report-on-PR, ENFORCE on main and
+  # on every `integration/**` line (#2249) via the same `continue-on-error`. This job holds no
   # write credential (contents: read only) and pushes/signs nothing, so running it
   # report-only on the merge queue's gh-readonly-queue ref is safe. It is
   # deliberately NOT added to the required-checks set here — that is founder-owned
@@ -485,8 +491,9 @@ jobs:
 
       - name: Trivy scan BUILT image — FAIL on HIGH/CRITICAL
         # Report (don't block) on PRs and on the merge-queue ref; ENFORCE (fail)
-        # on main. Same phased rollout as the file-manager built-image gate.
-        continue-on-error: ${{ github.ref != 'refs/heads/main' }}
+        # on main and on every `integration/**` release line (#2249). Same phased
+        # rollout as the file-manager built-image gate.
+        continue-on-error: ${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/heads/integration/') }}
         # SHA-pinned to match the gates above.
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
