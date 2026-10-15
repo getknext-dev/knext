@@ -208,6 +208,12 @@ What the operator does, and only the operator (ADR-0001 unchanged):
 - Status conditions (bound / token provisioned / backend ready) go through `computeStatusVerdict`
   (`architecture.md` §4), never new branches in `Reconcile`.
 
+**Amended by ADR-0004 Amendment 2 (Proposed, 2026-10-15).** A `spec.backends[].service` entry now
+also carries the zone's **consent**: a binding to any `BackendService`, `model` flavour included,
+exists only when the `BackendService`'s `spec.zone` names this zone **and** this entry names it.
+Until both agree, the operator mounts nothing, renders no env and runs no Knative Service for the
+backend. A `spec.backends[].external` entry names no `BackendService` and is outside that rule.
+
 The CLI renders these fields into the CR and applies **only the CR**. It never reads, prints or
 writes key material; it may print the `kubectl create secret` command for the user to run.
 
