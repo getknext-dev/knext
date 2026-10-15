@@ -1,0 +1,116 @@
+---
+title: Go zone functions (Beta)
+description: The Go template for a zone function — a connect-go server your Next.js zone calls over HTTP/2, reachable only inside the cluster, that refuses every call without the zone's token.
+---
+
+<Callout type="warn">
+**Beta.** In this version the function **refuses every call except its health check**. The
+token a zone sends to prove a call is its own is not available yet, and the function fails closed
+rather than serve calls it cannot authenticate. Build and test against it now; it starts answering
+your RPCs when zone tokens ship.
+</Callout>
+
+A zone function is a Go or Rust service that a Next.js zone calls like a local function,
+scaling to zero like the zone itself. The contract between the two is a `.proto` file, and both
+sides are generated from it. This page covers the Go side: the template your function's server
+starts from.
+
+## What the template gives you
+
+- **A connect-go server** for your contract, answering the Connect, gRPC and gRPC-Web protocols
+  on one port, over HTTP/2 cleartext (h2c) — what the zone uses — or HTTP/1.1.
+- **A token check on every call** (see [Security](#security)).
+- **The standard gRPC health check**, `grpc.health.v1.Health/Check`, served without a token so
+  probes and the zone's wake-up call work.
+- **OpenTelemetry**: a span per call, with the caller's W3C trace context linked, refused calls
+  included.
+- **Panic recovery**: a panicking handler returns `internal` and the process keeps running.
+- **A 4 MiB limit** on each request message.
+- **Graceful shutdown**: on `SIGTERM` in-flight calls get up to 25 seconds to finish.
+- **A distroless image**: a static binary, no shell, running as a non-root user.
+
+## Start a Go function
+
+1. In your zone, add the function's contract:
+
+   ```bash
+   knext add function orders --lang go
+   ```
+
+   This writes `proto/orders/v1/orders.proto` and the options contract it imports. See
+   [`knext add function`](/docs/cli#knext-add-function).
+
+2. Copy the template from the knext repository (`templates/go`) into a new directory for the
+   function, and rename the module in `go.mod` and the `go_package_prefix` in `buf.gen.yaml`.
+
+3. Replace the template's `proto/example` with your zone's `proto/orders`, so the function and the
+   zone build from the same file. Then generate the Go code and point the server at your handler:
+
+   ```bash
+   buf generate      # writes gen/ — commit it
+   ```
+
+   Register your service in `internal/server/server.go` in place of the example one, and write
+   your handlers where `internal/items` is.
+
+4. Test and build:
+
+   ```bash
+   go test -race ./...
+   docker build -t <registry>/orders-fn:<tag> .
+   ```
+
+The template's own example service has one read (`GetItem`) and one write (`PutItem`), the shape
+`knext add function` starts every contract with.
+
+## Security
+
+The function is **cluster-local**: it has no public route, and only workloads inside the
+cluster can reach it. Inside the cluster, the **token is the control**, not the network: a
+NetworkPolicy is defense in depth, and some CNIs (flannel, which OKE and OrbStack use) do not
+enforce NetworkPolicy at all.
+
+Every call except the health check must carry `Authorization: Bearer <token>`. The check runs
+before the request body is read, and it fails closed:
+
+| Situation | Result |
+|---|---|
+| No `Authorization` header, or not a `Bearer` token | refused, `unauthenticated` |
+| No public keys mounted for the zone | refused, `unauthenticated` |
+| Keys mounted, token present | refused, `unauthenticated`, until zone tokens ship |
+| Health check (`grpc.health.v1.Health/Check`) | served, no token needed |
+
+The zone's public keys are read from `/var/run/knext/jwks/jwks.json`, mounted as a volume, on every
+call, so keys that appear or rotate after start are seen without a restart. There is no setting
+that turns the check off. At start-up the function logs a warning when no keys are mounted.
+
+A refused call returns HTTP 401 on the Connect protocol and `grpc-status` 16 on gRPC.
+
+## Generated code and the contract
+
+The `.proto` file is the source of truth. `gen/` holds the Go message types and handlers, written
+by `buf generate` with the protoc plugins pinned as Go tools in `go.mod`, so generating needs no
+network access and no plugin installed on your machine. Run `buf generate` after every contract
+change and commit `gen/`; a CI step that regenerates and fails on a diff keeps the two in step.
+
+Roll out the function **before** the zone that calls a new version of its contract: a function
+must serve a contract version greater than or equal to the zone's.
+
+## Supply chain
+
+knext's CI builds the template image and, before anything is published, writes an SBOM (SPDX)
+and runs Trivy, failing on any fixable HIGH or CRITICAL finding. Images published from knext's
+release lines are signed with cosign, with the SBOM attached as a signed attestation. `govulncheck` runs over
+the Go module.
+
+That covers the template. An image you build from it is your own: run your scanner on it in your
+pipeline. The Go point release in `go.mod` and the `golang` builder image in the `Dockerfile` move
+together, because the standard library compiled into the binary is part of what gets scanned.
+
+## Limits
+
+- **Beta.** Zone functions are not covered by knext's compatibility credential.
+- **Every RPC but the health check is refused** until zone tokens ship.
+- The template's example store is in memory: per pod, and lost when the function scales to zero.
+  Keep real data in your zone's own database, through the `DATABASE_URL` the zone binds; a
+  function never reads another zone's database.

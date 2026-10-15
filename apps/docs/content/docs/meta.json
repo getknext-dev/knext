@@ -22,6 +22,7 @@
     "bytecode",
     "bun-runtime",
     "rust-in-process",
+    "go-functions",
     "tuning-cold-start",
     "image-optimization",
     "react-compiler",

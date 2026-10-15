@@ -1,0 +1,19 @@
+# Generates the Go message types and the connect-go v2 handlers from proto/.
+# Both plugins are Go tools pinned in go.mod (`go tool ...`), so generation
+# needs no network and no plugin outside this module's go.sum.
+#
+#   buf generate      # then commit gen/
+version: v2
+clean: true
+managed:
+  enabled: true
+  override:
+    - file_option: go_package_prefix
+      value: example.com/function/gen
+plugins:
+  - local: ["go", "tool", "protoc-gen-go"]
+    out: gen
+    opt: paths=source_relative
+  - local: ["go", "tool", "protoc-gen-connect-go"]
+    out: gen
+    opt: paths=source_relative

@@ -184,6 +184,8 @@ describe('bun-version pins (#754) — scanned across every workflow', () => {
       // (file-manager-platform-e2e.yml) that both `uses:` — a single
       // setup-bun step instead of one per caller.
       'file-manager-platform-e2e.yml': 1,
+      // The Go function template's check job: bun runs the verified buf binary.
+      'go-template.yml': 1,
       'mutation-prover-nightly.yml': 1,
       'next-minor-matrix.yml': 2,
       // NEW (#1843): the node-runtime Redis cache kind e2e — one "Setup bun"
