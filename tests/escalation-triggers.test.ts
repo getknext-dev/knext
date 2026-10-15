@@ -630,6 +630,10 @@ describe('#2388 r2 — static relative imports of a release-path script are foll
       r,
     );
     expect(sc(fired)).toEqual(['scripts/lib/old.mjs', 'scripts/lib/older.mjs']);
+    // Followed through the base tree — NOT caught only by the fail-closed fallback,
+    // which a head-only reader would also reach (an unresolvable './lib/old.mjs').
+    const why = fired.find((f: { id: string }) => f.id === 'supply-chain')?.why ?? '';
+    expect(why).not.toMatch(/INCOMPLETE/);
   });
 
   it('a shell script or composite action the workflow runs is scanned for what IT runs', () => {
