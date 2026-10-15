@@ -494,7 +494,8 @@ fact, and the RBAC path described in Context.
   its `backends[]` entry (a GitOps sync of a partial manifest, a bad merge reverted a minute later),
   the operator deletes the function's Knative Service, and when the entry returns it re-creates it.
   The function then comes back through a fresh Knative Service and a cold start, not a warm
-  revision. There is no grace period in this design; the sprint-close review may add one.
+  revision. For a model backend the cost is far larger: re-creating it also reloads the model
+  weights. There is no grace period in this design; the sprint-close review may add one.
 - **The NetworkPolicy wording changes.** "Admitting only the owning zone" (Amendment 1 Decision 1 and
   #2052's scope text) becomes "admits the Knative data path and blocks direct dials". The isolation
   claim belongs to the token, and it stays unproven until the activator-path drill (Z11, #2056) is
