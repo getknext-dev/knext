@@ -260,8 +260,9 @@ const MUTATIONS = [
     id: 'L03',
     claim: 'the shortest zone prefix wins (own cluster flagged as foreign)',
     subject: 'sov',
-    anchor: 'return len(zones[i]) > len(zones[j])',
-    replacement: 'return len(zones[i]) < len(zones[j])',
+    anchor: 'sort.SliceStable(zones, func(i, j int) bool { return len(zones[i]) > len(zones[j]) })',
+    replacement:
+      'sort.SliceStable(zones, func(i, j int) bool { return len(zones[i]) < len(zones[j]) })',
     test: unit('TestDatabaseHostLintLongestZonePrefixWins'),
   },
   {
@@ -359,8 +360,8 @@ const MUTATIONS = [
     id: 'R11',
     claim: 'the zone reference is not a controller ownerReference',
     subject: 'ctl',
-    anchor: 'controllerutil.SetControllerReference(obs.zone, bs, r.Scheme)',
-    replacement: 'controllerutil.SetOwnerReference(obs.zone, bs, r.Scheme)',
+    anchor: 'if err := controllerutil.SetControllerReference(obs.zone, bs, r.Scheme); err != nil {',
+    replacement: 'if err := controllerutil.SetOwnerReference(obs.zone, bs, r.Scheme); err != nil {',
     test: envtest('sets the controller ownerReference itself'),
   },
   // --- the zone render ----------------------------------------------------------
@@ -441,8 +442,12 @@ const MUTATIONS = [
     id: 'C01',
     claim: 'spec.zone can be changed after creation',
     subject: 'crd',
-    anchor: '- message: spec.zone is immutable\n                  rule: self == oldSelf',
-    replacement: "- message: spec.zone is immutable\n                  rule: 'true'",
+    // Whole lines, indentation included: the marker comment goes above the
+    // replacement at its indentation, so a mid-line start would break the YAML.
+    anchor:
+      '                - message: spec.zone is immutable\n                  rule: self == oldSelf\n',
+    replacement:
+      "                - message: spec.zone is immutable\n                  rule: 'true'\n",
     test: envtest('change of spec.zone at admission'),
   },
   {
