@@ -78,6 +78,11 @@ const GO_TEST = [
 // subset, running no test: `-run ^$` matches nothing.
 const GO_BUILD = ['go', 'test', '-count=1', '-run', '^$', './internal/auth/', './internal/rpc/'];
 
+// A row that deletes lines replaces them with '\n', never '': the harness
+// appends its residue marker to a newline-free replacement as a trailing `//`
+// comment, which swallows the line after the anchor. A7, W1 and L2 did that
+// and did not compile (the build check refuses them); L4 compiled only because
+// the line it swallowed was another field, so it mutated two things at once.
 const MUTATIONS = [
   // ── A: the interceptor and the verifier ───────────────────────────────────
   {
@@ -136,7 +141,7 @@ const MUTATIONS = [
     claim: 'a nil verifier is no longer replaced by deny-all',
     subject: 'auth',
     anchor: '\tif v == nil {\n\t\tv = denyAll{err: errNoVerifier}\n\t}\n',
-    replacement: '',
+    replacement: '\n',
   },
   {
     id: 'A8',
@@ -160,7 +165,8 @@ const MUTATIONS = [
     claim: 'an empty or directory JWKS path counts as mounted',
     subject: 'auth',
     anchor: '\treturn err == nil && info.Mode().IsRegular() && info.Size() > 0\n',
-    replacement: '\treturn err == nil\n',
+    // Compiles (info stays used): a directory or an empty file now counts.
+    replacement: '\treturn err == nil && info != nil\n',
   },
   // ── W: the binary's wiring ────────────────────────────────────────────────
   {
@@ -169,7 +175,7 @@ const MUTATIONS = [
     claim: 'the token interceptor is left out of the server chain',
     subject: 'server',
     anchor: '\t\tauth.NewInterceptor(verifier),\n',
-    replacement: '',
+    replacement: '\n',
   },
   // ── L: the request-read bounds ────────────────────────────────────────────
   {
@@ -186,7 +192,7 @@ const MUTATIONS = [
     claim: "the bounded gzip is not mounted (connect-go's default gzip drains a bomb)",
     subject: 'server',
     anchor: '\t\tconnecthttp.WithCompressors(boundedGzip(MaxRequestBytes)),\n',
-    replacement: '',
+    replacement: '\n',
   },
   {
     id: 'L3',
@@ -202,7 +208,7 @@ const MUTATIONS = [
     claim: 'the server has no ReadTimeout (a stalled body is never cut off)',
     subject: 'server',
     anchor: '\t\t\tReadTimeout:       ReadTimeout,\n',
-    replacement: '',
+    replacement: '\n',
   },
   // ── D: the SIGTERM drain ──────────────────────────────────────────────────
   {
