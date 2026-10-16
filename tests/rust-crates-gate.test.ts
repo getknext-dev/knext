@@ -178,6 +178,10 @@ describe('rust-crates.yml gate verdict — the run script, executed (#2441)', ()
     }
   }
 
+  it('judges changes on its own: a non-success changes fails even beside a successful crates job', () => {
+    expect(verdict('true', { changes: 'failure' })).not.toBe(0);
+  });
+
   it('fails closed when changes produced no answer (empty output)', () => {
     expect(verdict('', { crates: 'skipped' })).not.toBe(0);
   });
