@@ -87,6 +87,15 @@ const DECLARED: Record<string, { skips: Record<string, number>; reason: string }
       'where an unreachable Redis FAILS rather than skips; tests/use-cache-lua-live-workflow.test.ts ' +
       'keeps that job a blocking gate.',
   },
+  'tests/redis-acl-spike.test.ts': {
+    skips: { 'describe.skipIf': 1 },
+    reason:
+      'Runs the cache runtime under a per-app Redis ACL user on a REAL Redis (ACL users, MONITOR, ' +
+      'CLIENT PAUSE), so its live half skips without KNEXT_REDIS_LIVE_URL; the source-scan half ' +
+      "always runs. LANE-BACKED: ci.yml's use-cache-lua-live-redis job runs it in its own step with " +
+      '--no-skip against the pinned Redis service; tests/use-cache-lua-live-workflow.test.ts keeps ' +
+      'that step blocking.',
+  },
   'apps/file-manager/sigterm-drain-e2e.test.ts': {
     skips: { 'it.skipIf': 5 },
     reason:

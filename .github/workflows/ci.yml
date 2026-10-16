@@ -1364,6 +1364,14 @@ jobs:
           packages/kn-next/src/__tests__/redis-prefix-collapse-isolation.test.ts
           tests/use-cache-lua-live-workflow.test.ts
 
+      # The per-app Redis ACL spike (docs/security/redis-acl-spike.md): the cache
+      # runtime under a ~<prefix>:* ACL user, on node (ioredis) and bun (native),
+      # plus its mutation proofs. Its OWN step, after the one above: it pauses the
+      # server (CLIENT PAUSE) to force outages, which would stall the suites above
+      # if they shared a step. --no-skip, so a skipped live case fails the job.
+      - name: Run the Redis ACL spike live lane
+        run: node scripts/bun-test.mjs --no-skip tests/redis-acl-spike.test.ts
+
   docs-site:
     # Docs site (apps/docs, knext-platform.dev) build gate — mirrors the compat-smoke
     # file-manager pattern: root workspace-aware install, build the @getknext chain
