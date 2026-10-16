@@ -1253,7 +1253,8 @@ const MUTATIONS = [
   // ── 8. PACKAGE SCOPE controls that must stay GREEN ────────────────────────
   {
     id: 'NEG9',
-    claim: 'NEGATIVE CONTROL: @getknext/ffi description reworded, still private — must stay GREEN',
+    claim:
+      'NEGATIVE CONTROL: a marker-only key added beside private: true in the @getknext/ffi manifest — must stay GREEN',
     subject: 'ffiManifest',
     anchor: '  "private": true,\n',
     replacement: `  "//${MUTATION_MARKER}": "mutation in progress",\n  "private": true,\n`,
