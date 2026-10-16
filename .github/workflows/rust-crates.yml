@@ -1,9 +1,26 @@
 # Rust crates CI — crates/knext-ffi + crates/knext-ffi-macros (in-process Rust, Beta).
 #
 # The crates are a Cargo workspace of their own under crates/ (not the repo
-# root), so this lane is path-filtered to crates/**, the @getknext/ffi generator
-# (packages/ffi src, templates, package.json) and this file: any other PR never
-# pays for it. What it gates (ADR-0069 D16/D20, #2343):
+# root), so the heavy `crates` job is scoped to crates/**, the @getknext/ffi
+# generator (packages/ffi src, templates, package.json) and this file: any other
+# PR never pays for it.
+#
+# ALWAYS REPORTS (#2441), so `rust-crates gate` can be a REQUIRED check. A
+# trigger-level `paths:` filter never starts the workflow on an unrelated PR,
+# and a required context that never reports hangs that PR (and the merge queue,
+# hence `merge_group`) forever. So:
+#   - pull_request and merge_group start the workflow on EVERY change; the
+#     `changes` job (dorny/paths-filter, as in ci.yml) decides whether a crate
+#     path changed, and the heavy `crates` job runs exactly when it did. `push`
+#     keeps its trigger-level filter: no required check reads a push run.
+#   - `deny` (cargo deny) and `crate-rev` (the drift guard) carry NO `if:` and
+#     run on every event: both are cheap, and the publish-lane guard requires
+#     both to be unconditional. A new RUSTSEC advisory therefore reds every PR,
+#     not only crate PRs — on purpose: an advisory is about the committed lock.
+#   - `gate` (`if: always()`) needs every job and fails unless each concluded
+#     success; the only excused non-success is `crates` SKIPPED because
+#     `changes` reported no crate change. Guarded by tests/rust-crates-gate.test.ts.
+# What it gates (ADR-0069 D16/D20, #2343):
 #   - cargo fmt --check, cargo clippy -D warnings, cargo test (ABI round-trips
 #     for every type-table row, golden symbol and _schema values, ownership
 #     with a counting allocator, trybuild compile-fail cases, and the
@@ -26,14 +43,11 @@
 name: Rust crates (knext-ffi)
 
 on:
+  # No `paths:` here: the workflow must start (and `gate` report) on every PR.
   pull_request:
-    paths:
-      - 'crates/**'
-      - 'packages/ffi/src/**'
-      - 'packages/ffi/templates/**'
-      - 'packages/ffi/package.json'
-      - '.github/workflows/rust-crates.yml'
-      - 'scripts/check-ffi-crate-rev.mjs'
+  # The merge queue runs required checks on its own ref; without this trigger a
+  # required `rust-crates gate` never reports there and the queue freezes.
+  merge_group:
   push:
     branches: [main, integration/v2]
     paths:
@@ -58,8 +72,45 @@ env:
   CARGO_DENY_SHA256: 9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f
 
 jobs:
+  # Did this PR / merge-queue entry touch a crate path? `push` is already
+  # path-filtered at the trigger, so it is always relevant. Git mode
+  # (`token: ''`, full history) rather than the REST API, so the token stays
+  # `contents: read`. The filter list mirrors the push trigger's `paths:`.
+  changes:
+    name: Detect knext-ffi crate changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      crates: ${{ github.event_name == 'push' || steps.filter.outputs.crates == 'true' }}
+    steps:
+      - name: Checkout (full history — the diff base must resolve)
+        if: github.event_name != 'push'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Detect crate-path changes
+        id: filter
+        if: github.event_name != 'push'
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        with:
+          # An empty token selects git diff (no pull-requests permission). On a
+          # PR the base is the PR base; on merge_group it defaults to the event's.
+          token: ''
+          base: ${{ github.event.pull_request.base.sha }}
+          filters: |
+            crates:
+              - 'crates/**'
+              - 'packages/ffi/src/**'
+              - 'packages/ffi/templates/**'
+              - 'packages/ffi/package.json'
+              - '.github/workflows/rust-crates.yml'
+              - 'scripts/check-ffi-crate-rev.mjs'
+
   crates:
-    name: knext-ffi crates (fmt, clippy, test, deny, Bun harness)
+    name: knext-ffi crates (fmt, clippy, test, Bun harness)
+    needs: changes
+    if: needs.changes.outputs.crates == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 40
     defaults:
@@ -83,20 +134,6 @@ jobs:
 
       - name: cargo test
         run: cargo test --workspace --locked
-
-      - name: Install cargo-deny (pinned release, sha256-verified)
-        run: |
-          set -euo pipefail
-          name="cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl"
-          cd "${RUNNER_TEMP}"
-          curl -fsSL -o cargo-deny.tar.gz \
-            "https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/${name}.tar.gz"
-          echo "${CARGO_DENY_SHA256}  cargo-deny.tar.gz" | sha256sum -c -
-          tar -xzf cargo-deny.tar.gz
-          install -m 0755 "${name}/cargo-deny" "${HOME}/.cargo/bin/cargo-deny"
-
-      - name: cargo deny check
-        run: cargo deny check
 
       - name: Setup bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
@@ -140,6 +177,40 @@ jobs:
       - name: Generator — knext ffi init, then generate/check build the crate as written (git dependency at the recorded revision)
         run: bun harness/ffi-generated.ts init
 
+  # cargo deny over the crates' Cargo.lock. Its own job with NO `if:` and no
+  # `needs:`, so it runs on every event regardless of `changes` (#2441): the
+  # publish lane relies on it being unconditional.
+  deny:
+    name: knext-ffi crates (cargo deny)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: crates
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install the pinned Rust toolchain (crates/rust-toolchain.toml)
+        run: |
+          rustup toolchain install
+          rustc -V
+          cargo -V
+
+      - name: Install cargo-deny (pinned release, sha256-verified)
+        run: |
+          set -euo pipefail
+          name="cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl"
+          cd "${RUNNER_TEMP}"
+          curl -fsSL -o cargo-deny.tar.gz \
+            "https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/${name}.tar.gz"
+          echo "${CARGO_DENY_SHA256}  cargo-deny.tar.gz" | sha256sum -c -
+          tar -xzf cargo-deny.tar.gz
+          install -m 0755 "${name}/cargo-deny" "${HOME}/.cargo/bin/cargo-deny"
+
+      - name: cargo deny check
+        run: cargo deny check
+
   # crateRev drift (#2364): `knext ffi init` crates build knext-ffi from GitHub
   # at packages/ffi/package.json knextFfi.crateRev, so a crates/knext-ffi* change
   # that merges without moving that pin never reaches them. A PR cannot pin its
@@ -165,3 +236,45 @@ jobs:
 
       - name: crateRev drift guard
         run: node scripts/check-ffi-crate-rev.mjs
+
+  # The one context to mark REQUIRED (#2441). `if: always()` is load-bearing: a
+  # bare dependent of a failed need is SKIPPED, and a skipped required check can
+  # read as passing. So it runs regardless and judges `needs.*.result` itself
+  # (passed via env, read as data): every job must be `success`, except
+  # `crates`, which may be `skipped` only when `changes` succeeded and reported
+  # no crate change. An empty or missing answer from `changes` fails closed.
+  gate:
+    name: rust-crates gate
+    needs: [changes, crates, deny, crate-rev]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Assert every knext-ffi crate job concluded success
+        env:
+          CRATES_CHANGED: ${{ needs.changes.outputs.crates }}
+          RESULT_CHANGES: ${{ needs.changes.result }}
+          RESULT_CRATES: ${{ needs.crates.result }}
+          RESULT_DENY: ${{ needs.deny.result }}
+          RESULT_CRATE_REV: ${{ needs.crate-rev.result }}
+        run: |
+          set -euo pipefail
+          fail=0
+          check() {
+            if [ "$2" = "success" ]; then
+              echo "ok: $1 = $2"
+            else
+              echo "::error::$1 concluded '$2' (want success)"
+              fail=1
+            fi
+          }
+          check changes "${RESULT_CHANGES}"
+          check deny "${RESULT_DENY}"
+          check crate-rev "${RESULT_CRATE_REV}"
+          if [ "${RESULT_CHANGES}" = "success" ] && [ "${CRATES_CHANGED}" = "false" ] \
+            && [ "${RESULT_CRATES}" = "skipped" ]; then
+            echo "ok: crates skipped — no crate path changed"
+          else
+            check crates "${RESULT_CRATES}"
+          fi
+          exit "${fail}"
