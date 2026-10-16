@@ -407,3 +407,53 @@ export const REDIS_SUBCOMMANDS = Object.freeze([
   'xinfo|help',
   'xinfo|stream',
 ]);
+
+/**
+ * The top-level commands Redis accepts with NO argument (`COMMAND INFO` arity 1
+ * or -1, union of both engines). Generated alongside the list above:
+ *
+ *   COMMAND INFO → keep the names whose |arity| <= 1, lowercased, sorted
+ *
+ * Why the scan needs it: Redis checks a command's arity BEFORE its ACL
+ * (measured on both engines: `KEYS` with no argument is `ERR wrong number of
+ * arguments` for a user without `+keys`; `KEYS *` is `NOPERM`). So a call that
+ * passes no Redis argument (`map.keys()`, `rows.sort((a, b) => a - b)`) to a
+ * command NOT in this list can never reach the ACL check, and the scan does not
+ * count it. The live lane checks that this list covers the live server's, since
+ * a missing entry here would hide a real zero-argument command.
+ */
+export const REDIS_NO_ARG_COMMANDS = Object.freeze([
+  'asking',
+  'bgrewriteaof',
+  'bgsave',
+  'command',
+  'dbsize',
+  'discard',
+  'exec',
+  'failover',
+  'flushall',
+  'flushdb',
+  'hello',
+  'info',
+  'lastsave',
+  'lolwut',
+  'monitor',
+  'multi',
+  'pfselftest',
+  'ping',
+  'punsubscribe',
+  'quit',
+  'randomkey',
+  'readonly',
+  'readwrite',
+  'replconf',
+  'reset',
+  'role',
+  'save',
+  'shutdown',
+  'sunsubscribe',
+  'sync',
+  'time',
+  'unsubscribe',
+  'unwatch',
+]);
