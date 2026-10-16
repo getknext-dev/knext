@@ -34,8 +34,9 @@ import (
 
 // Secrets RBAC least-privilege guard.
 //
-// The operator's Go code never writes a core Secret and reads only the METADATA
-// of a Secret a zone function references (the one justified grant below). The
+// The operator's Go code writes exactly one kind of core Secret, a zone's own
+// signing key, and otherwise reads only the METADATA of a Secret a zone function
+// references (the justified grants below). The
 // managed database mode that once mirrored a DSN Secret was removed, envFrom /
 // secretKeyRef are references the KUBELET resolves, image-pull secrets are only
 // names on a ServiceAccount, and webhook / metrics certs arrive as mounted
@@ -53,7 +54,7 @@ import (
 // rules and "marker:<sorted verbs>" for kubebuilder markers; the value is the
 // justification.
 //
-// The ONE entry pair: cluster-wide `get` (no list, no watch, no create) for the
+// The original entry: cluster-wide `get` (no list, no watch) for the
 // zone-function credential allowlist (ADR-0004 Amendment 1 Decision 2). A
 // function may reference a Secret marked as belonging to its own zone (a label
 // or an ownerReference to the zone's NextApp); checking that mark needs the
@@ -61,13 +62,67 @@ import (
 // uncached APIReader as a PartialObjectMetadata GET: never a Secret's data,
 // never an informer. Blast radius, stated in docs/security/threat-model.md: a
 // compromised operator could read a Secret whose name it already knows (it
-// cannot enumerate). Creating the zone signing-key Secret is the identity
-// task's grant to add, with its own entry here, not this one's.
+// cannot enumerate).
+//
+// Widened by the zone identity (ADR-0004 Amendment 1 Decisions 9 and 11): the
+// NextApp reconciler CREATES and UPDATES exactly one Secret per zone, the
+// zone's own signing key (<zone>-knext-signing-key), and GETs it with its data
+// (it must read the current key to rotate it). Still no list, no watch (both
+// readers go through the uncached APIReader), no patch (every write is an
+// Update with the read resourceVersion) and no delete (a zone that loses its
+// bindings keeps its key; the NextApp ownerReference collects it). RBAC cannot
+// name the Secret: resourceNames does not apply to create and the name is per
+// zone. Blast radius, stated in docs/security/threat-model.md: a compromised
+// operator could now also OVERWRITE a Secret whose name it knows, in any
+// namespace; it still cannot enumerate one. The same rule carries ConfigMaps
+// (get/create/update for the JWKS), because controller-gen merges resources
+// with identical verbs.
 var secretsGrantAllowlist = map[string]string{
-	"ClusterRole/manager-role:get": "zone-function credential allowlist: metadata-only GET of a Secret a " +
+	"ClusterRole/manager-role:create,get,update": "zone identity: create/update the zone's own signing-key " +
+		"Secret and read it uncached (ADR-0004 Am1 D9/D11), plus the zone-function credential allowlist's " +
+		"metadata-only GET (Am1 D2); no list/watch/patch/delete",
+	"marker:get": "the +kubebuilder:rbac marker on BackendServiceReconciler: metadata-only GET of a Secret a " +
 		"BackendService references, to check its same-zone mark (ADR-0004 Am1 D2); uncached, no list/watch",
-	"marker:get": "the +kubebuilder:rbac marker on BackendServiceReconciler that generates the get-only " +
-		"Secrets rule above (same justification)",
+	"marker:create,get,update": "the +kubebuilder:rbac marker in zone_signing_key_reconcile.go: the zone's own " +
+		"signing-key Secret, created and rotated in-operator, read uncached; no list/watch/patch/delete",
+}
+
+// TestZoneIdentityRBACIsExactlyGetCreateUpdate pins the widening to its
+// verbs: the generated rule that carries Secrets grants get, create and update
+// and nothing else, and ConfigMaps (the JWKS) the same. A later patch, list,
+// watch or delete on either reds here, not only through the allowlist key.
+func TestZoneIdentityRBACIsExactlyGetCreateUpdate(t *testing.T) {
+	want := "create,get,update"
+	seen := map[string]bool{}
+	for _, r := range loadRBACRules(t) {
+		if r.kind != "ClusterRole" || r.name != "manager-role" {
+			continue
+		}
+		for _, res := range r.rule.Resources {
+			if res != "secrets" && res != "configmaps" {
+				continue
+			}
+			groupCore := false
+			for _, g := range r.rule.APIGroups {
+				groupCore = groupCore || g == ""
+			}
+			if !groupCore {
+				continue
+			}
+			seen[res] = true
+			if got := sortedVerbs(r.rule); got != want {
+				t.Errorf("manager-role grants %s [%s]; the zone identity needs exactly [%s]", res, got, want)
+			}
+			if len(r.rule.ResourceNames) != 0 {
+				t.Errorf("unexpected resourceNames on the %s rule: %v", res, r.rule.ResourceNames)
+			}
+		}
+	}
+	for _, res := range []string{"secrets", "configmaps"} {
+		if !seen[res] {
+			t.Errorf("manager-role has no %s rule; the zone signing key and JWKS cannot be written", res)
+		}
+	}
 }
 
 type rbacRuleRef struct {
@@ -173,7 +228,7 @@ func TestRBACSecretsLeastPrivilege(t *testing.T) {
 		why, ok := secretsGrantAllowlist[key]
 		if !ok || strings.TrimSpace(why) == "" {
 			t.Errorf("%s (%s) grants core Secrets [%s] with no justified entry in secretsGrantAllowlist (key %q). "+
-				"The operator's code never touches Secrets; a cluster-wide Secrets grant lets a compromised operator read every Secret. "+
+				"The operator's code touches only a zone's own signing key; a cluster-wide Secrets grant lets a compromised operator read every Secret. "+
 				"Narrow it (namespaced Role, resourceNames, no list/watch), add a justified allowlist entry, and update docs/security/threat-model.md.",
 				r.kind+"/"+r.name, r.file, strings.Join(r.rule.Verbs, ","), key)
 			continue
@@ -241,7 +296,7 @@ func TestRBACMarkersDoNotGrantSecrets(t *testing.T) {
 			if grantsCoreSecrets(rule) {
 				key := "marker:" + sortedVerbs(rule)
 				if why, ok := secretsGrantAllowlist[key]; !ok || strings.TrimSpace(why) == "" {
-					t.Errorf("%s:%d: +kubebuilder:rbac marker grants core Secrets [%s]; the operator never touches Secrets (see secretsGrantAllowlist, key %q)",
+					t.Errorf("%s:%d: +kubebuilder:rbac marker grants core Secrets [%s] with no justified entry (see secretsGrantAllowlist, key %q)",
 						path, i+1, strings.Join(rule.Verbs, ","), key)
 				}
 			}

@@ -21,6 +21,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"time"
 
 	// Embed the IANA timezone database into the binary. The operator runtime
 	// image is gcr.io/distroless/static:nonroot (Dockerfile), which ships NO
@@ -81,6 +82,7 @@ func main() {
 	var probeAddr string
 	var secureMetrics bool
 	var enableHTTP2 bool
+	var zoneKeyPropagationBound, zoneKeyRotationInterval time.Duration
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -99,6 +101,12 @@ func main() {
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+	flag.DurationVar(&zoneKeyPropagationBound, "zone-signing-key-propagation-bound", controller.DefaultZoneKeyPropagationBound,
+		"How long a zone's new public key is published before the zone signs with it. Must cover the kubelet's "+
+			"ConfigMap-volume sync on every node (at least 60s).")
+	flag.DurationVar(&zoneKeyRotationInterval, "zone-signing-key-rotation-interval", 0,
+		"Rotate every zone signing key this long after it became current. 0 (the default) rotates only on "+
+			"request, through the apps.kn-next.dev/rotate-signing-key annotation on the zone's NextApp.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -184,7 +192,11 @@ func main() {
 
 	// Registers the NextApp reconciler and, only when the KnextPlatform CRD is
 	// installed, the platform layer's status reconciler (ADR-0064 D3).
-	if err := controller.SetupControllers(mgr, controller.NewDefaultCleaner()); err != nil {
+	if err := controller.SetupControllers(mgr, controller.NewDefaultCleaner(),
+		controller.WithZoneSigningKeyConfig(controller.ZoneSigningKeyConfig{
+			PropagationBound: zoneKeyPropagationBound,
+			RotationInterval: zoneKeyRotationInterval,
+		})); err != nil {
 		setupLog.Error(err, "Failed to create controllers")
 		os.Exit(1)
 	}

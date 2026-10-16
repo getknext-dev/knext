@@ -76,14 +76,14 @@ cache is required.
 **Enforcement (both halves).**
 - `internal/controller/rbac_secrets_guard_test.go` parses every Role/ClusterRole under
   `config/rbac/` **and** scans every `+kubebuilder:rbac` marker (wildcards `*` included); any
-  core-Secrets grant fails unless it has a justified entry in `secretsGrantAllowlist` (one
-  entry since zone functions: `get`, below), and a justified ClusterRole grant still cannot carry
-  cluster-wide `list`/`watch`.
+  core-Secrets grant fails unless it has a justified entry in `secretsGrantAllowlist` (since zone
+  functions: `get`; since the zone identity: `create`/`update` on the zone's own signing key, both
+  below), and a justified ClusterRole grant still cannot carry cluster-wide `list`/`watch`.
 - `internal/controller/rbac_narrowed_envtest_test.go` runs the real controller wiring as a
   client-cert identity bound to exactly the shipped `role.yaml`: a NextApp that references
   Secrets by name converges (Knative Service, finalizer, status) while that identity is denied
-  every Secrets verb except `get`, cluster-wide and namespaced (with positive and negative RBAC
-  controls, and an assertion that `get` IS allowed).
+  every Secrets verb except `get`, `create` and `update`, cluster-wide and namespaced (with
+  positive and negative RBAC controls, and an assertion that those three ARE allowed).
 
 **Residual.** (a) Anyone who may create a `NextApp` can still *reference* any Secret in their own
 namespace by name; the kubelet, not the operator, resolves it — restrict `NextApp` create/update
@@ -113,8 +113,8 @@ Secret's data. A Secret that cannot be read is treated as unmarked, so the funct
 
 **Blast radius.** A compromised operator could `get` a Secret whose name it already knows; it
 cannot enumerate Secrets. That is strictly less than the indirect access in residual (c) above,
-which already exists. Creating the zone's signing-key Secret is the identity task's (#2051) grant
-to add, with its own justified entry; the zone-function reconciler does not create Secrets.
+which already exists. The zone-function reconciler itself still does not create Secrets; the
+zone identity's grant is the next section.
 
 **What is the control, and what is not.** The allowlist above, applied only through a two-sided
 binding (the zone must also list the function in `spec.backends`), and the operator-owned
@@ -132,6 +132,55 @@ and is enforced only on a policy-capable CNI (not flannel).
 `ownerReference`, refused without `nextapps/finalizers`), the per-source allowlist tests in
 `backendservice_sovereignty_test.go` and `backendservice_envtest_test.go`, and the Calico
 function leg of `test/networkpolicy-enforcement-drill.sh`.
+
+### Operator RBAC: the zone signing key and JWKS (#2051)
+
+**What changed.** A zone with a two-sided function binding gets one Ed25519 signing key, generated
+in the operator (ADR-0004 Amendment 1 Decisions 9 and 11). The NextApp reconciler creates and
+rotates the zone's Secret `<zone>-knext-signing-key` and its JWKS ConfigMap `<zone>-knext-jwks`.
+The manager ClusterRole gains **`create` and `update` on `secrets`** (on top of the existing `get`)
+and **`get`, `create` and `update` on `configmaps`**. Still **no** `list`, `watch`, `patch` or
+`delete` on either.
+
+**How it is used.** Both objects are read through the **uncached** `APIReader` (no informer, so
+no list/watch) and written with `Update` carrying the read `resourceVersion` (a concurrent writer
+loses with a Conflict; nothing is blind-patched). The reconciler reads the key Secret's data,
+which is new: it must hold the current key to rotate it. The `ownerReference` to the zone's
+`NextApp` is set once, at create, and never changed, so no `delete` is needed even under
+`OwnerReferencesPermissionEnforcement`. A zone that loses its bindings keeps both objects; the
+owner reference collects them with the `NextApp`. An object of either name that the zone's
+`NextApp` does not control is never written (reported as a conflict instead). Key material never
+leaves the Secret: the JWKS type has no private member, rotation state lives in timestamp
+annotations, status and events carry only the public `kid`, and every error the key path returns
+is redacted (`redactKeyMaterial`) so an echoing apiserver or admission webhook cannot carry the key
+into a log line, an event or status.
+
+**Blast radius.** RBAC cannot name these objects: `resourceNames` does not apply to `create`, and
+the names are per zone. So a compromised operator could now also **overwrite** any Secret or
+ConfigMap whose name it knows, in any namespace (it still cannot enumerate them). Tampering is
+the new capability; reading was already possible (`get`), and residual (c) above already lets a
+compromised operator reach any Secret through a pod it creates. A function's verifier trusts its
+zone's JWKS ConfigMap, so anyone who can write ConfigMaps in the namespace can make that zone's
+functions accept their own key: **the namespace is the trust boundary**, as for the zone label.
+
+**Residual.** (a) A `ValidatingAdmissionPolicy` that limits the operator's ServiceAccount to
+writing Secrets named `*-knext-signing-key` and ConfigMaps named `*-knext-jwks` would remove the
+overwrite capability; not shipped. (b) The operator cannot watch Secrets, so a deleted key or an
+edited JWKS is restored on the zone's next reconcile (at most ten minutes, the steady re-check),
+not instantly. (c) The rotation wait trusts the operator's clock: a new leader whose clock runs
+ahead could switch signing early by the skew; keep nodes on NTP. (d) A rotation trusts the
+kubelet's ConfigMap sync to finish within the propagation bound (default 90 s,
+`--zone-signing-key-propagation-bound`, at least 60 s); a slower kubelet sync must raise it. (e) client-go prints request and response bodies at klog verbosity 8 and above, Secret
+data included; never run the operator that verbose in production.
+
+**Enforcement.** `rbac_secrets_guard_test.go` (the justified entries, and
+`TestZoneIdentityRBACIsExactlyGetCreateUpdate` pinning both rules to exactly those verbs),
+`rbac_narrowed_envtest_test.go` (create/update allowed, list/watch/patch/delete denied),
+`zone_signing_key_rbac_envtest_test.go` (the real reconciler under the shipped role with
+`OwnerReferencesPermissionEnforcement` on creates, owns and rotates the key, and fails without the
+Secrets or ConfigMap verbs), and `zone_signing_key_envtest_test.go` / `zone_signing_key_test.go`
+(rotation order, crash safety at every write, ownership, conflicts, no key in a function pod, and
+no key material in events, logs, status or errors).
 
 ## 2. Gateway ↔ backend calls
 
