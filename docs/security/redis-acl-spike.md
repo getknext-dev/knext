@@ -56,12 +56,15 @@ KNEXT_REDIS_LIVE_URL=redis://127.0.0.1:6409 bun test tests/redis-acl-spike.test.
 ```
 
 `--assert` exits 1 on **any** unexpected outcome in either direction (a needed command refused, or a
-forbidden command or cross-app key reachable). Exit 1 means only that. A usage error exits 2: an
-unknown argument, a `--drop` that is not in the minimal rule set, a `--grant` that is not a Redis
-command or is already granted (a mutation proof that silently mutated nothing would otherwise
-pass), or a missing, malformed or non-loopback URL. Infrastructure trouble or a crash exits 3
-(Redis unreachable, no ACL support). The admin URL comes only from `KNEXT_REDIS_ACL_SPIKE_URL`
-(never `REDIS_URL`) and must be loopback.
+forbidden command or cross-app key reachable). Exit 1 means only that, and it covers a spike user's
+ACL refusal (`NOPERM`, `ACL failure in script`) that aborts a whole layer, in every mode: with
+`--drop=set` in the default mode the lifecycle user's first write is refused, which is the rule set
+being wrong, not a crash (it used to exit 3). A usage error exits 2: an unknown argument, a `--drop`
+that is not in the minimal rule set, a `--grant` that is not a Redis command or is already granted
+(a mutation proof that silently mutated nothing would otherwise pass), or a missing, malformed or
+non-loopback URL. Infrastructure trouble or a crash exits 3 (Redis unreachable, no ACL support, an
+ACL refusal of the **admin** user, which means the admin URL lacks a permission the spike needs).
+The admin URL comes only from `KNEXT_REDIS_ACL_SPIKE_URL` (never `REDIS_URL`) and must be loopback.
 
 **Result: all six runs (CI's Redis 7.4.10, Redis 7.4.11 and Valkey 8.1.10, each under node and bun)
 exit 0.** The 7.4.10 and 7.4.11 tables are identical apart from the version line (diffed, node and
@@ -80,6 +83,10 @@ finding.
 | `--drop=eval` | 1 | both stamp scripts refused |
 | `--drop=scan` | 1 | the collapse sweep refused |
 | `--drop=multi` | 1 | the atomic ISR write refused |
+| `--drop=hdel` | 1 | `HDEL` inside the prune script refused (the matrix row's cutoff is above the stamp it wrote, so the script's `HDEL` really runs; with the earlier cutoff of 0 this mutation exited 0) |
+| `--drop=discard` | 1 | Bun's transaction abort refused (a `MULTI` · `DISCARD` row; no row sent `DISCARD` before, and this mutation exited 0) |
+| `--drop=set`, default (full) mode | 1 | the lifecycle user's first write refused: a finding, not a crash (it exited 3) |
+| every `--drop=<cmd>` of the 20, default mode, Redis 7.4.11 and Valkey 8.1.10, node and bun | 1 | swept by exit code; the unmutated run exits 0 in all four |
 | `--grant=flushall` | 1 | a forbidden command became reachable |
 | `--grant=info` | 1 | a pinned known gap changed |
 | `--drop=hmget --handler-only` | 1 | the **real handler** layer alone (its `ACL LOG`), without the matrix |
@@ -106,6 +113,29 @@ after):
 
 The first three are the escapes the round-1 code review proved green against the earlier,
 enumerated scan.
+
+The round-2 review proved seven more green by exit code: `client.unlink?.('k')`,
+`const {unlink}=client; unlink('k')`, `Reflect.apply(client.unlink, client, ['k'])`,
+`client.unlink.bind(client)`, `client.unlinkBuffer('k')`, `client.callBuffer('UNLINK', …)` and
+`client.zscanStream('k')`, and showed that discovery skipped a new file whose only signal was a
+method call. Each is now a test, and the scan's rules are proved by a committed harness,
+`scripts/mutation-prove-redis-command-scan.mjs` (exit codes only, baseline green and a canary red
+first, anchors asserted to occur once, byte-exact restore, clean tree between rows). Every row
+removes one rule and must turn the test red:
+
+| Row | Rule removed | Exit |
+|---|---|---|
+| S1–S8 | optional call; destructuring; `Reflect.apply`; `.bind/.call/.apply`; assignment; `Buffer` variant; `callBuffer`; `Stream` variant; the command helper (`new Redis.Command`) | 1 each |
+| U1–U5 | UNPARSEABLE for an optional or bound computed member; a generic issuer handed on; a computed destructuring key; `Reflect.get` with a non-literal; `Reflect.apply` on an unnamed target | 1 each |
+| X1–X4 | an exclusion widened: the no-argument rule drops `client.info()`; every argument a function literal; every `.call` dropped; `client` treated as a language global | 1 each |
+| D1, D2 | discovery by any hit; discovery by an unparseable construct | 1 each |
+| B1 | a second declaration of an allowlisted receiver | 1 |
+| E1, E2 | the spike's ACL-refusal classification and its exit code | 1 each |
+| L1–L3 (`KNEXT_REDIS_LIVE_URL` set) | full-mode `--drop=set` exits 1; the prune cutoff; the `DISCARD` row | 1 each |
+
+Its first run found one rule that survived its own removal: a separate `new Command(` rule was
+redundant with the command helper rule, which already resolves `new Redis.Command('UNLINK', …)`.
+The duplicate was deleted, and the row now removes the rule that carries it.
 
 The source scan runs in every CI run (it needs no Redis). The live half runs when
 `KNEXT_REDIS_LIVE_URL` is set and is skipped otherwise, like the existing live Lua lane.
