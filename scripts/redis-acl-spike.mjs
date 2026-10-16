@@ -65,7 +65,7 @@
  *      without an address, or any uncaught error
  */
 
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -819,6 +819,41 @@ async function runLifecycle({ Redis, admin, adminClient, commands }) {
         'lifecycle: two passwords overlap (>new), then <old refuses new AUTHs with it while already-authenticated connections keep working',
       ok: rotated,
       observed: `overlap: old=${both[0].ok} new=${both[1].ok}; after <old: old=${oldAfter.ok ? 'accepted' : oldAfter.message} new=${newAfter.ok}; pre-rotation connection works=${await works(live.conn)}`,
+    });
+
+    // 2b. Rotation as ADR-0071 D4 does it: every re-assert is `reset` + the
+    //     Secret's state, i.e. the new password plus the OLD one by its SHA-256
+    //     (`#<hex>`), then, once retired, the new password alone.
+    const third = randomBytes(24).toString('hex');
+    const nextSha = createHash('sha256').update(next).digest('hex');
+    const reassert = (extra) =>
+      adminClient.call(
+        'ACL',
+        'SETUSER',
+        c.username,
+        ...aclRulesFor({ ...c, password: third, commands }),
+        ...extra,
+      );
+    await reassert([`#${nextSha}`]);
+    const hashed = [await open(next), await open(third)];
+    for (const o of hashed) if (o.conn) conns.push(o.conn);
+    await reassert([]);
+    const hashedOldAfter = await open(next);
+    const hashedNewAfter = await open(third);
+    if (hashedNewAfter.conn) conns.push(hashedNewAfter.conn);
+    const liveNext = hashed[0].conn;
+    const reasserted =
+      hashed.every((o) => o.ok) &&
+      !hashedOldAfter.ok &&
+      /WRONGPASS/.test(hashedOldAfter.message ?? '') &&
+      hashedNewAfter.ok &&
+      liveNext !== null &&
+      (await works(liveNext));
+    findings.push({
+      check:
+        're-assert with reset >new #sha256(old) accepts both; a re-assert with >new alone retires the old one, live connections unaffected',
+      ok: reasserted,
+      observed: `overlap: old=${hashed[0].ok} new=${hashed[1].ok}; after retire: old=${hashedOldAfter.ok ? 'accepted' : hashedOldAfter.message} new=${hashedNewAfter.ok}; overlap-time connection works=${liveNext !== null && (await works(liveNext))}`,
     });
 
     // 3. Deletion: what the finalizer does on app delete.
