@@ -258,7 +258,10 @@ describe('the shared token vectors', () => {
         auth: c.auth === 'AUTH_PUBLIC' ? 'public' : 'user',
         sub: c.sub,
       });
-      expect({ name: c.name, token }).toEqual({ name: c.name, token: (c.jws as [string, string, string]).join('.') });
+      expect({ name: c.name, token }).toEqual({
+        name: c.name,
+        token: (c.jws as [string, string, string]).join('.'),
+      });
       reproduced++;
     }
     expect(reproduced).toBe(accepts.length);
