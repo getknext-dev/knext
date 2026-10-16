@@ -58,15 +58,15 @@ type spyVerifier struct {
 	procedures []string
 }
 
-func (s *spyVerifier) Verify(_ context.Context, token, procedure string) error {
+func (s *spyVerifier) Verify(_ context.Context, token, procedure string) (auth.Caller, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls++
 	s.procedures = append(s.procedures, procedure)
 	if s.accept != "" && token == s.accept {
-		return nil
+		return auth.Caller{Subject: "spy-user", Zone: "knext:zone:shop/storefront"}, nil
 	}
-	return errors.New("spy: token refused")
+	return auth.Caller{}, errors.New("spy: token refused")
 }
 
 type fixture struct {
@@ -111,10 +111,20 @@ func absentJWKS(t *testing.T) string {
 	return filepath.Join(t.TempDir(), "jwks", "jwks.json")
 }
 
+// mounted is the binary's verifier — issuer and audience set — reading the
+// JWKS at path.
+func mounted(path string) auth.Verifier {
+	return auth.NewVerifier(auth.Config{
+		JWKSPath: path,
+		Issuer:   "knext:zone:shop/storefront",
+		Audience: "knext:fn:shop/orders",
+	})
+}
+
 // With no JWKS mounted, every RPC except the health check is refused —
 // with no token, with a token, read or write.
 func TestNoJWKSMountedRejectsEveryNonHealthRPC(t *testing.T) {
-	f := newFixture(t, auth.MountedJWKS(absentJWKS(t)))
+	f := newFixture(t, mounted(absentJWKS(t)))
 
 	_, err := f.example.GetItem(t.Context(), &examplev1.GetItemRequest{Id: "a"})
 	wantUnauthenticated(t, "GetItem without a token", err)
@@ -133,7 +143,7 @@ func TestNoJWKSMountedRejectsEveryNonHealthRPC(t *testing.T) {
 // The health check is the one exempt RPC: the wake-ahead GET and probes
 // carry no credentials.
 func TestHealthCheckIsExempt(t *testing.T) {
-	f := newFixture(t, auth.MountedJWKS(absentJWKS(t)))
+	f := newFixture(t, mounted(absentJWKS(t)))
 	res, err := f.health.Check(t.Context(), &grpchealth.CheckRequest{})
 	if err != nil {
 		t.Fatalf("health Check without a token: %v; want SERVING", err)
@@ -155,7 +165,7 @@ func (p *payloadSpy) Send(any) error     { return nil }
 // example service, health Watch, and any RPC added later — is refused without
 // a valid token, before its payload is read. Only health Check is exempt.
 func TestEveryRegisteredProcedureExceptHealthCheckIsRefused(t *testing.T) {
-	server := connect.NewServer(auth.NewInterceptor(auth.MountedJWKS(absentJWKS(t))))
+	server := connect.NewServer(auth.NewInterceptor(mounted(absentJWKS(t))))
 	examplev1connect.RegisterExampleServiceHandler(server, &recordingHandler{})
 	grpchealth.Register(server, grpchealth.NewStaticChecker(examplev1connect.ExampleServiceName))
 
@@ -190,21 +200,21 @@ func TestEveryRegisteredProcedureExceptHealthCheckIsRefused(t *testing.T) {
 	}
 }
 
-// A JWKS on disk does not open the door by itself: token verification is not
-// in this template yet, so a mounted JWKS still rejects every non-health RPC.
-func TestMountedJWKSStillFailsClosedWithoutAVerifier(t *testing.T) {
+// A JWKS on disk does not open the door by itself: a token that does not
+// verify against it is refused.
+func TestMountedJWKSRefusesATokenThatDoesNotVerify(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "jwks.json")
 	jwks := `{"keys":[{"kty":"OKP","crv":"Ed25519","kid":"k1","x":"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"}]}`
 	if err := os.WriteFile(path, []byte(jwks), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	f := newFixture(t, auth.MountedJWKS(path))
+	f := newFixture(t, mounted(path))
 	_, err := f.example.GetItem(withAuthorization(t, "Bearer some.jwt.token"), &examplev1.GetItemRequest{Id: "a"})
 	wantUnauthenticated(t, "GetItem with a JWKS mounted", err)
 
-	err = auth.MountedJWKS(path).Verify(t.Context(), "some.jwt.token", examplev1connect.ExampleServiceGetItemProcedure)
-	if !errors.Is(err, auth.ErrVerificationUnavailable) {
-		t.Fatalf("Verify with a JWKS mounted = %v; want ErrVerificationUnavailable", err)
+	_, err = mounted(path).Verify(t.Context(), "some.jwt.token", examplev1connect.ExampleServiceGetItemProcedure)
+	if !errors.Is(err, auth.ErrMalformed) {
+		t.Fatalf("Verify with a JWKS mounted = %v; want ErrMalformed", err)
 	}
 	if n := f.handler.count(); n != 0 {
 		t.Fatalf("a rejected RPC reached the handler %d time(s)", n)
@@ -224,7 +234,7 @@ func TestNoJWKSShapes(t *testing.T) {
 		"empty file":   empty,
 		"empty string": "",
 	} {
-		err := auth.MountedJWKS(path).Verify(t.Context(), "some.jwt.token", examplev1connect.ExampleServicePutItemProcedure)
+		_, err := mounted(path).Verify(t.Context(), "some.jwt.token", examplev1connect.ExampleServicePutItemProcedure)
 		if !errors.Is(err, auth.ErrNoJWKS) {
 			t.Errorf("%s: Verify = %v; want ErrNoJWKS", name, err)
 		}
@@ -235,7 +245,10 @@ func TestNoJWKSShapes(t *testing.T) {
 // runs — even a verifier that would accept an empty token never sees one.
 func TestMissingTokenIsRejectedBeforeTheVerifier(t *testing.T) {
 	var verifierCalls atomic.Int32
-	acceptAll := verifierFunc(func(context.Context, string, string) error { verifierCalls.Add(1); return nil })
+	acceptAll := verifierFunc(func(context.Context, string, string) (auth.Caller, error) {
+		verifierCalls.Add(1)
+		return auth.Caller{Subject: "anyone"}, nil
+	})
 	f := newFixture(t, acceptAll)
 
 	_, err := f.example.GetItem(t.Context(), &examplev1.GetItemRequest{Id: "a"})
@@ -252,9 +265,9 @@ func TestMissingTokenIsRejectedBeforeTheVerifier(t *testing.T) {
 	}
 }
 
-type verifierFunc func(ctx context.Context, token, procedure string) error
+type verifierFunc func(ctx context.Context, token, procedure string) (auth.Caller, error)
 
-func (f verifierFunc) Verify(ctx context.Context, token, procedure string) error {
+func (f verifierFunc) Verify(ctx context.Context, token, procedure string) (auth.Caller, error) {
 	return f(ctx, token, procedure)
 }
 
@@ -294,7 +307,7 @@ func TestNilVerifierFailsClosed(t *testing.T) {
 
 // The refusal says what is wrong without echoing the token or the cause.
 func TestRejectionDoesNotLeakTheCause(t *testing.T) {
-	f := newFixture(t, auth.MountedJWKS(absentJWKS(t)))
+	f := newFixture(t, mounted(absentJWKS(t)))
 	_, err := f.example.GetItem(withAuthorization(t, "Bearer secret-token-value"), &examplev1.GetItemRequest{Id: "a"})
 	var cerr *connect.Error
 	if !errors.As(err, &cerr) {

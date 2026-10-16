@@ -119,10 +119,73 @@ control is the credential allowlist above.
 
 ## Identity and the JWKS
 
-Each function mounts its zone's public keys (the JWKS) read-only at
-`/var/run/knext/jwks/jwks.json`, and only its own zone's: a reference to another zone's JWKS
-ConfigMap is refused. `/var/run/knext` is reserved for this mount. Until the zone's keys exist, the
+Every call from a zone to its function carries a short-lived token the zone signs with its own
+key. The operator creates and rotates that key; you do not supply one.
+
+As soon as a zone has at least one bound function, the operator creates two objects next to the
+zone's `NextApp`, both owned by it (deleting the `NextApp` deletes them):
+
+| Object | Holds | Mounted into |
+| --- | --- | --- |
+| Secret `<zone>-knext-signing-key` | The zone's Ed25519 private key (`current.key`, `current.kid`, and `previous.*` during a rotation) | The **zone** only, read-only at `/var/run/knext/signing-key` |
+| ConfigMap `<zone>-knext-jwks` | The matching public keys (`jwks.json`, a JWK Set) | Each of the zone's **functions**, read-only at `/var/run/knext/jwks/jwks.json` |
+
+Both are mounted as directories, never through environment variables, so a rotated key reaches a
+running pod without a restart. A function never mounts a signing key: a reference to any zone's
+`-knext-signing-key` Secret, its own included, is refused, and so is a reference to another zone's
+JWKS ConfigMap. `/var/run/knext` is reserved for these mounts. Until the zone's keys exist, the
 function starts, but its generated interceptor refuses every call except the health check.
+
+The operator also sets, as plain values:
+
+| Variable | On | Value |
+| --- | --- | --- |
+| `KNEXT_ZONE_ISSUER` | The zone | `knext:zone:<namespace>/<zone>`, the issuer the zone signs as |
+| `KNEXT_TOKEN_ISSUER` | Each function | The same issuer: the only zone whose tokens the function accepts |
+| `KNEXT_TOKEN_AUDIENCE` | Each function | `knext:fn:<namespace>/<function>`, so a token minted for one function is refused by another |
+
+Names that start with `KNEXT_TOKEN_` are reserved on a function: a `BackendService` that sets one in
+`env` is rejected when you apply it.
+
+If the zone loses its last bound function, the operator stops mounting the key and keeps both
+objects, so binding a function again reuses the same key.
+
+### Rotating the key
+
+To rotate, set an annotation on the zone's `NextApp` to any new value:
+
+```bash
+kubectl annotate nextapp orders apps.kn-next.dev/rotate-signing-key="$(date +%s)" --overwrite
+```
+
+The operator then rotates in this order, so no call fails along the way:
+
+1. It adds the new public key to the JWKS. The zone keeps signing with the old key.
+2. It waits 90 seconds, long enough for the kubelet to update the JWKS file in every running
+   function.
+3. It switches the zone to the new key. The old key stays in the JWKS.
+4. After one hour it removes the old key from both objects.
+
+The `ZoneSigningKey` condition on the zone shows where a rotation is: `RotationPropagating`
+during step 2, `RotationOverlap` during the hour of step 4, `KeyActive` otherwise. A request made
+while a rotation is running starts when that one finishes.
+
+Two operator flags tune this:
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--zone-signing-key-propagation-bound` | `90s` | How long a new public key is published before the zone signs with it. Raise it if your kubelets sync volumes more slowly; it cannot go below `60s`. |
+| `--zone-signing-key-rotation-interval` | `0` (off) | Rotate every zone key this long after it became current, for example `720h`. Must be longer than the bound plus one hour. |
+
+To replace a key at once, for example after you suspect it leaked, delete the Secret. The operator
+creates a new key and republishes the JWKS on the zone's next reconcile (within ten minutes). Calls
+fail until the zone and its functions have read the new files, so expect up to a minute or two of
+refused calls.
+
+If a Secret or ConfigMap with one of these names already exists and the zone's `NextApp` does not
+own it, the operator leaves it alone, publishes nothing, and reports `SigningKeySecretConflict` or
+`JWKSConfigMapConflict` on the `ZoneSigningKey` condition. Remove the object and the operator
+creates its own.
 
 ## Network
 
@@ -152,8 +215,11 @@ Ready revision. It is empty until a revision is Ready, and it is the value the z
 | `DatabaseHostLint` | `False` when an env value names another zone's database host. A warning only. |
 | `Ready` | Bound, compliant, and the function's Knative Service is Ready. |
 
-The zone's `BackendBindings` condition is `True` when every `backends` entry is bound. It does not
-change the zone's `Ready`.
+The zone's `BackendBindings` condition is `True` when every `backends` entry is bound. Its
+`ZoneSigningKey` condition is present while the zone has a bound function: `True` with
+`KeyActive`, `RotationPropagating` or `RotationOverlap`, or `False` with
+`SigningKeySecretConflict`, `JWKSConfigMapConflict` or `SigningKeyInvalid`. Neither changes the
+zone's `Ready`.
 
 | Series | Meaning |
 | --- | --- |

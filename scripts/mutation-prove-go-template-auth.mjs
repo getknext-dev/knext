@@ -9,11 +9,14 @@
  * byte-identically) and runs `go test` over the auth and server packages in
  * the template module, graded by EXIT CODE only:
  *
- *   A*  the interceptor and the verifier (internal/auth/auth.go): widening
- *       the health exemption, dropping the missing-token refusal, ignoring a
- *       verifier error, admitting with no JWKS or with a JWKS but no
- *       verifier, dropping the nil-verifier fallback, loosening the bearer
- *       parse — each must RED.
+ *   A*  the interceptor and the verifier's mount check
+ *       (internal/auth/auth.go, internal/auth/jwks.go): widening the health
+ *       exemption, dropping the missing-token refusal, ignoring a verifier
+ *       error, reading a missing JWKS as an empty one, dropping the
+ *       nil-verifier fallback, loosening the bearer parse — each must RED.
+ *       (A6, "a mounted JWKS admits every token", is retired with the stub it
+ *       mutated: token verification is proved row by row in
+ *       mutation-prove-2051-go-verifier.mjs.)
  *   W*  the binary's wiring (internal/rpc/rpc.go): the interceptor left
  *       out of the chain must RED (the on-the-wire scan of every registered
  *       procedure catches it).
@@ -23,9 +26,11 @@
  *   D*  the SIGTERM drain: closing connections instead of draining them, or
  *       a grace of zero, must RED (an in-flight call is held open across the
  *       shutdown).
- *   N*  negative control: New wired with a nil verifier is still closed, so
- *       the suite must stay GREEN (fail-closed by construction, not by the
- *       one verifier the binary happens to pass).
+ *   N*  negative control: New naming its default auth policy explicitly
+ *       (nil, the compiled contract) changes nothing, so the suite must stay
+ *       GREEN. (The old control, New wired with a nil verifier, now reds by
+ *       design: New must serve a valid zone token, and a nil verifier serves
+ *       none. TestNilVerifierFailsClosed holds the deny-all fallback.)
  *
  * A row counts only if the mutated tree COMPILES: before its test run, each
  * row must pass a build-only `go test -run ^$` (packages and their tests,
@@ -59,6 +64,7 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 // `resolve(REPO_ROOT, …)` subject shape the anchor scanners read.
 const TEMPLATE_MODULE = `${REPO_ROOT}/templates/go`;
 const AUTH = resolve(REPO_ROOT, 'templates/go/internal/auth/auth.go');
+const JWKS = resolve(REPO_ROOT, 'templates/go/internal/auth/jwks.go');
 const SERVER = resolve(REPO_ROOT, 'templates/go/internal/rpc/rpc.go');
 
 // -count=1: never trust a cached pass for a mutated tree. -timeout: a
@@ -116,24 +122,18 @@ const MUTATIONS = [
     expect: 'red',
     claim: 'a verifier error is ignored',
     subject: 'auth',
-    anchor: 'if err := v.Verify(ctx, token, spec.Procedure); err != nil {',
-    replacement: 'if err := v.Verify(ctx, token, spec.Procedure); err != nil && false {',
+    anchor: '\t\t\tcaller, err := v.Verify(ctx, token, spec.Procedure)\n\t\t\tif err != nil {\n',
+    replacement:
+      '\t\t\tcaller, err := v.Verify(ctx, token, spec.Procedure)\n\t\t\tif err != nil && false {\n',
   },
   {
     id: 'A5',
     expect: 'red',
-    claim: 'with no JWKS mounted, every token is admitted',
-    subject: 'auth',
-    anchor: '\t\treturn ErrNoJWKS\n',
-    replacement: '\t\treturn nil\n',
-  },
-  {
-    id: 'A6',
-    expect: 'red',
-    claim: 'a mounted JWKS admits every token though nothing verifies it',
-    subject: 'auth',
-    anchor: '\treturn ErrVerificationUnavailable\n',
-    replacement: '\treturn nil\n',
+    claim: 'with no JWKS mounted, the verifier reads it as an empty one instead of refusing',
+    subject: 'jwks',
+    anchor: '\tif !jwksMounted(info, err) {\n\t\treturn nil, ErrNoJWKS\n\t}\n',
+    replacement:
+      '\tif !jwksMounted(info, err) {\n\t\treturn map[string]ed25519.PublicKey{}, nil\n\t}\n',
   },
   {
     id: 'A7',
@@ -163,7 +163,7 @@ const MUTATIONS = [
     id: 'A10',
     expect: 'red',
     claim: 'an empty or directory JWKS path counts as mounted',
-    subject: 'auth',
+    subject: 'jwks',
     anchor: '\treturn err == nil && info.Mode().IsRegular() && info.Size() > 0\n',
     // Compiles (info stays used): a directory or an empty file now counts.
     replacement: '\treturn err == nil && info != nil\n',
@@ -231,14 +231,15 @@ const MUTATIONS = [
   {
     id: 'N1',
     expect: 'green',
-    claim: 'New wired with a nil verifier is still closed (deny-all fallback)',
+    claim:
+      'New naming its default auth policy explicitly (nil: the compiled contract) changes nothing',
     subject: 'server',
-    anchor: '\treturn newFunction(cfg, auth.MountedJWKS(cfg.JWKSPath))\n',
-    replacement: '\treturn newFunction(cfg, nil)\n',
+    anchor: '\t\tNow:      cfg.Now,\n\t}))\n',
+    replacement: '\t\tNow:      cfg.Now,\n\t\tMethodAuth: nil,\n\t}))\n',
   },
 ];
 
-const PROVER = { subjects: { auth: AUTH, server: SERVER } };
+const PROVER = { subjects: { auth: AUTH, jwks: JWKS, server: SERVER } };
 
 // Returns the command's exit code, or null if go could not be run. Never exits
 // here: a caller holding a mutation must restore it first.

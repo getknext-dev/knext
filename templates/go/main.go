@@ -3,8 +3,10 @@
 // (h2c) or HTTP/1.1 on $PORT.
 //
 // Every RPC except the gRPC health check needs a bearer token from the
-// owning zone. The check fails closed: with no JWKS mounted, every other RPC
-// is refused.
+// owning zone, verified against the zone's JWKS (mounted as a volume) and the
+// issuer and audience in $KNEXT_TOKEN_ISSUER and $KNEXT_TOKEN_AUDIENCE. The
+// check fails closed: with no JWKS mounted, or either variable unset, every
+// other RPC is refused.
 package main
 
 import (
@@ -29,17 +31,19 @@ func main() {
 }
 
 func run(logger *slog.Logger) error {
-	fn, err := rpc.New(rpc.Config{
-		Addr:     listenAddr(os.Getenv),
-		JWKSPath: auth.DefaultJWKSPath,
-		Logger:   logger,
-	})
+	cfg := config(os.Getenv)
+	cfg.Logger = logger
+	fn, err := rpc.New(cfg)
 	if err != nil {
 		return err
 	}
-	if _, err := os.Stat(auth.DefaultJWKSPath); err != nil {
+	if _, err := os.Stat(cfg.JWKSPath); err != nil {
 		logger.Warn("no JWKS is mounted: every RPC except the health check will be refused",
-			"jwks", auth.DefaultJWKSPath)
+			"jwks", cfg.JWKSPath)
+	}
+	if cfg.Issuer == "" || cfg.Audience == "" {
+		logger.Warn("the token issuer or audience is not set: every RPC except the health check will be refused",
+			"issuer_env", auth.EnvIssuer, "audience_env", auth.EnvAudience)
 	}
 
 	// Knative sends SIGTERM before it removes a pod; Serve drains in-flight
@@ -52,6 +56,17 @@ func run(logger *slog.Logger) error {
 	}
 	logger.Info("serving", "addr", ln.Addr().String())
 	return fn.Serve(ctx, ln)
+}
+
+// config is the function's configuration from its environment: the port,
+// and the issuer and audience the operator sets for the token check.
+func config(getenv func(string) string) rpc.Config {
+	return rpc.Config{
+		Addr:     listenAddr(getenv),
+		JWKSPath: auth.DefaultJWKSPath,
+		Issuer:   getenv(auth.EnvIssuer),
+		Audience: getenv(auth.EnvAudience),
+	}
 }
 
 // listenAddr is ":$PORT", or ":8080" when PORT is unset (Knative sets it).

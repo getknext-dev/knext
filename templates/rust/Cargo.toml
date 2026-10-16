@@ -46,6 +46,12 @@ pin-project-lite = "0.2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time", "sync"] }
 tower = { version = "0.5", features = ["util"] }
 
+# The zone identity token check: Ed25519 verification only (no signing, no
+# RNG), pure Rust, from the dalek-cryptography project; sha2 derives a key id.
+base64 = "0.22"
+ed25519-dalek = { version = "3", default-features = false, features = ["fast"] }
+sha2 = { version = "0.11", default-features = false }
+
 opentelemetry = { version = "0.33", default-features = false, features = ["trace"] }
 opentelemetry_sdk = { version = "0.33", default-features = false, features = ["trace"] }
 tracing = "0.1"
@@ -61,7 +67,6 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 connectrpc-health = { path = "vendor/connectrpc-health" }
 
 [dev-dependencies]
-base64 = "0.22"
 flate2 = "1"
 hyper = { version = "1", features = ["client", "server", "http1", "http2"] }
 zstd = "0.13"

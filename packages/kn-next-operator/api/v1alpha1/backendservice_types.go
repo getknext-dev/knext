@@ -109,11 +109,14 @@ type BackendServiceSpec struct {
 	// Env is the function container's environment. A secretKeyRef may name only
 	// the owning zone's database Secret (spec.database of the zone) or a Secret
 	// marked as belonging to the same zone; anything else is refused and the
-	// function is not rendered.
+	// function is not rendered. Names starting with KNEXT_TOKEN_ are reserved:
+	// the operator sets the verifier's KNEXT_TOKEN_ISSUER and
+	// KNEXT_TOKEN_AUDIENCE itself.
 	// +optional
 	// +listType=map
 	// +listMapKey=name
 	// +kubebuilder:validation:MaxItems=128
+	// +kubebuilder:validation:XValidation:rule="self.all(e, !e.name.startsWith('KNEXT_TOKEN_'))",message="env names starting with KNEXT_TOKEN_ are reserved: the operator sets the function's token issuer and audience"
 	Env []corev1.EnvVar `json:"env,omitempty"`
 
 	// EnvFrom imports whole Secrets or ConfigMaps. The same Secret allowlist as

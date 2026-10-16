@@ -7,6 +7,15 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - configmaps
+  - secrets
+  verbs:
+  - create
+  - get
+  - update
+- apiGroups:
+  - ""
+  resources:
   - events
   verbs:
   - create
@@ -22,13 +31,6 @@ rules:
 - apiGroups:
   - ""
   resources:
-  - secrets
-  - services
-  verbs:
-  - get
-- apiGroups:
-  - ""
-  resources:
   - serviceaccounts
   verbs:
   - create
@@ -38,6 +40,12 @@ rules:
   - patch
   - update
   - watch
+- apiGroups:
+  - ""
+  resources:
+  - services
+  verbs:
+  - get
 - apiGroups:
   - apps
   resources:

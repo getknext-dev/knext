@@ -52,14 +52,29 @@
  *
  * The admin URL is read from KNEXT_REDIS_ACL_SPIKE_URL only — never REDIS_URL,
  * so this cannot be pointed at an app's Redis by accident — and must be a
- * loopback host. Exit codes: 0 ok, 1 unexpected outcome (with --assert),
- * 2 precondition (no URL, non-loopback, unreachable, no ACL support).
+ * loopback host. Exit codes, distinct so a caller can tell a finding from a
+ * broken run:
+ *
+ *   0  ok (or, without --assert, unexpected outcomes reported but not failed)
+ *   1  unexpected outcome(s), with --assert: the finding this script exists for.
+ *      A spike user's ACL refusal that aborts a layer (NOPERM, `ACL failure in
+ *      script`) is one of them, in every mode: `--drop=set` in the default mode
+ *      stops the lifecycle user's first write, and that is the rule set being
+ *      wrong, not a crash
+ *   2  usage error: an unknown argument, a --drop that is not in the minimal
+ *      rule set, a --grant that is not a Redis command (scripts/redis-commands.mjs)
+ *      or is already granted, KNEXT_REDIS_ACL_SPIKE_URL unset, not a URL, or
+ *      not loopback
+ *   3  infrastructure or crash: Redis unreachable, no ACL support, CLIENT INFO
+ *      without an address, an ACL refusal of the ADMIN user (the admin URL lacks
+ *      a permission the spike needs), or any other uncaught error
  */
 
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { REDIS_COMMANDS, REDIS_SUBCOMMANDS } from './redis-commands.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(here, '..');
@@ -140,26 +155,46 @@ function parseArgs(argv) {
     else if (a === '--handler-only') opts.handlerOnly = true;
     else if (a.startsWith('--drop=')) opts.drop.push(a.slice(7).toLowerCase());
     else if (a.startsWith('--grant=')) opts.grant.push(a.slice(8).toLowerCase());
-    else throw new Precondition(`unknown argument ${a}`);
+    else throw new UsageError(`unknown argument ${a}`);
+  }
+  // A mutation proof that silently drops nothing (a typo, a command the set never
+  // had) runs the unmutated rule set and passes: refuse it rather than run it.
+  for (const c of opts.drop) {
+    if (!MINIMAL_COMMANDS.includes(c)) {
+      throw new UsageError(
+        `--drop=${c}: not in the minimal rule set (${MINIMAL_COMMANDS.join(' ')})`,
+      );
+    }
+  }
+  for (const c of opts.grant) {
+    if (!REDIS_COMMANDS.includes(c) && !REDIS_SUBCOMMANDS.includes(c)) {
+      throw new UsageError(`--grant=${c}: not a Redis command (scripts/redis-commands.mjs)`);
+    }
+    if (MINIMAL_COMMANDS.includes(c)) {
+      throw new UsageError(`--grant=${c}: already in the minimal rule set, so it changes nothing`);
+    }
   }
   return opts;
 }
 
-class Precondition extends Error {}
+/** Exit 2: the invocation is wrong. */
+class UsageError extends Error {}
+/** Exit 3: the run could not happen (Redis unreachable, no ACL support, ...). */
+class Infrastructure extends Error {}
 
 const LOOPBACK = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
 
 function adminUrl() {
   const raw = process.env.KNEXT_REDIS_ACL_SPIKE_URL ?? '';
-  if (raw === '') throw new Precondition('KNEXT_REDIS_ACL_SPIKE_URL is not set');
+  if (raw === '') throw new UsageError('KNEXT_REDIS_ACL_SPIKE_URL is not set');
   let u;
   try {
     u = new URL(raw);
   } catch {
-    throw new Precondition('KNEXT_REDIS_ACL_SPIKE_URL is not a URL');
+    throw new UsageError('KNEXT_REDIS_ACL_SPIKE_URL is not a URL');
   }
   if (!LOOPBACK.has(u.hostname)) {
-    throw new Precondition(
+    throw new UsageError(
       `refusing non-loopback host ${u.hostname}: this creates and deletes ACL users`,
     );
   }
@@ -181,6 +216,34 @@ function userUrl(admin, username, password) {
 const ACL_DENIAL = /NOPERM|ACL failure in script/;
 const isNoPerm = (err) => typeof err?.message === 'string' && ACL_DENIAL.test(err.message);
 
+/**
+ * What an error that escaped a layer means, for the exit code:
+ *
+ *   'usage'          a UsageError (exit 2)
+ *   'infrastructure' an Infrastructure error, or an ACL refusal of the ADMIN
+ *                    user (`adminUser`): the admin URL lacks a permission the
+ *                    spike needs, which says nothing about the rule set (exit 3)
+ *   'acl'            any other ACL refusal (NOPERM, or `ACL failure in script`):
+ *                    a spike user was refused something the run needed, which
+ *                    IS a rule-set finding (exit 1), wherever it surfaced
+ *   'crash'          anything else (exit 3)
+ *
+ * Exported so the test can pin the mapping without a Redis.
+ */
+export function failureKind(err, adminUser) {
+  if (err instanceof UsageError) return 'usage';
+  if (err instanceof Infrastructure) return 'infrastructure';
+  const text = String(err?.message ?? err);
+  if (!ACL_DENIAL.test(text)) return 'crash';
+  const user = /\bUser (\S+) has no permissions\b/.exec(text)?.[1];
+  return user !== undefined && user === adminUser ? 'infrastructure' : 'acl';
+}
+
+/** The exit code for a failure that ended the run (never 0). */
+export function exitCodeFor(kind) {
+  return kind === 'usage' ? 2 : kind === 'acl' ? 1 : 3;
+}
+
 /** Run one raw command; classify the result as ok / noperm / error. Never throws. */
 async function attempt(client, cmd) {
   try {
@@ -192,6 +255,18 @@ async function attempt(client, cmd) {
 }
 
 const firstLine = (err) => String(err?.message ?? err).split('\n')[0];
+
+/**
+ * Raw commands in order, on one connection (MULTI then DISCARD, as Bun's
+ * client sends them): the first refusal or error is the outcome. Never throws.
+ */
+async function attemptSeq(client, commands) {
+  for (const cmd of commands) {
+    const r = await attempt(client, cmd);
+    if (r.outcome !== 'ok') return r;
+  }
+  return { outcome: 'ok' };
+}
 
 /** A MULTI/EXEC through ioredis's own transaction path, as cache-handler.js issues it. */
 async function attemptTx(client, commands) {
@@ -288,7 +363,17 @@ function commandRows(scripts) {
       origin: 'use-cache-handler.js pruneStamps — HSCAN the stamp hash',
     },
     {
-      cmd: (p) => ['EVAL', scripts.PRUNE_STAMPS_SCRIPT, '1', k(p, 'uc:tags'), '0', 's:t1'],
+      // A cutoff above the stamp the HSET row wrote, so the script's HDEL
+      // really runs: with a cutoff of 0 nothing is older, HDEL never executes,
+      // and `--drop=hdel` went unnoticed (it exited 0).
+      cmd: (p) => [
+        'EVAL',
+        scripts.PRUNE_STAMPS_SCRIPT,
+        '1',
+        k(p, 'uc:tags'),
+        '9007199254740991',
+        's:t1',
+      ],
       origin: 'use-cache-handler.js pruneStamps — EVAL PRUNE_STAMPS_SCRIPT (HGET, HDEL inside)',
     },
     {
@@ -312,6 +397,13 @@ function commandRows(scripts) {
     {
       cmd: () => ['TIME'],
       origin: 'use-cache-handler.js clockOffset — Redis clock',
+      keyless: true,
+    },
+    {
+      // Bun's native branch abandons a failed transaction with a raw DISCARD.
+      // No row sent it, so `--drop=discard` went unnoticed (it exited 0).
+      seq: () => [['MULTI'], ['DISCARD']],
+      origin: "cache-handler.js execAtomic (Bun's client) — MULTI then DISCARD on a failure",
       keyless: true,
     },
     // Health and the reference app
@@ -409,18 +501,20 @@ async function runMatrix({ Redis, admin, adminClient, a, b, scripts, cdnTagPrefi
     for (const row of commandRows(scripts)) {
       const own = row.tx
         ? await attemptTx(clientA, row.tx(a.prefix))
-        : await attempt(clientA, row.cmd(a.prefix));
+        : row.seq
+          ? await attemptSeq(clientA, row.seq(a.prefix))
+          : await attempt(clientA, row.cmd(a.prefix));
       results.push({
         layer: 'matrix',
         kind: 'used',
         origin: row.origin,
         target: 'own',
-        command: row.tx
-          ? row
-              .tx(a.prefix)
-              .map((c) => c[0])
-              .join(' · ')
-          : row.cmd(a.prefix)[0],
+        command:
+          row.tx || row.seq
+            ? (row.tx ?? row.seq)(a.prefix)
+                .map((c) => c[0])
+                .join(' · ')
+            : row.cmd(a.prefix)[0],
         expect: 'ok',
         ...own,
       });
@@ -566,7 +660,7 @@ async function runRealHandler({ Redis, admin, a, b, cdnTagPrefix }) {
     // Redis sees, so that comparison silently excluded nothing.
     const adminAddr = /\baddr=(\S+)/.exec(String(await adminClient.call('CLIENT', 'INFO')))?.[1];
     if (!adminAddr)
-      throw new Precondition('CLIENT INFO returned no addr; cannot separate admin traffic');
+      throw new Infrastructure('CLIENT INFO returned no addr; cannot separate admin traffic');
     const monitor = await adminClient.monitor();
     monitorConn = monitor;
     monitor.on('monitor', (_time, args, source) => {
@@ -791,6 +885,41 @@ async function runLifecycle({ Redis, admin, adminClient, commands }) {
       observed: `overlap: old=${both[0].ok} new=${both[1].ok}; after <old: old=${oldAfter.ok ? 'accepted' : oldAfter.message} new=${newAfter.ok}; pre-rotation connection works=${await works(live.conn)}`,
     });
 
+    // 2b. Rotation as ADR-0071 D4 does it: every re-assert is `reset` + the
+    //     Secret's state, i.e. the new password plus the OLD one by its SHA-256
+    //     (`#<hex>`), then, once retired, the new password alone.
+    const third = randomBytes(24).toString('hex');
+    const nextSha = createHash('sha256').update(next).digest('hex');
+    const reassert = (extra) =>
+      adminClient.call(
+        'ACL',
+        'SETUSER',
+        c.username,
+        ...aclRulesFor({ ...c, password: third, commands }),
+        ...extra,
+      );
+    await reassert([`#${nextSha}`]);
+    const hashed = [await open(next), await open(third)];
+    for (const o of hashed) if (o.conn) conns.push(o.conn);
+    await reassert([]);
+    const hashedOldAfter = await open(next);
+    const hashedNewAfter = await open(third);
+    if (hashedNewAfter.conn) conns.push(hashedNewAfter.conn);
+    const liveNext = hashed[0].conn;
+    const reasserted =
+      hashed.every((o) => o.ok) &&
+      !hashedOldAfter.ok &&
+      /WRONGPASS/.test(hashedOldAfter.message ?? '') &&
+      hashedNewAfter.ok &&
+      liveNext !== null &&
+      (await works(liveNext));
+    findings.push({
+      check:
+        're-assert with reset >new #sha256(old) accepts both; a re-assert with >new alone retires the old one, live connections unaffected',
+      ok: reasserted,
+      observed: `overlap: old=${hashed[0].ok} new=${hashed[1].ok}; after retire: old=${hashedOldAfter.ok ? 'accepted' : hashedOldAfter.message} new=${hashedNewAfter.ok}; overlap-time connection works=${liveNext !== null && (await works(liveNext))}`,
+    });
+
     // 3. Deletion: what the finalizer does on app delete.
     await adminClient.call('ACL', 'DELUSER', c.username);
     await sleep(100);
@@ -835,11 +964,14 @@ function printTable(matrix, handler, meta) {
   }
   if (handler.length > 0) {
     out.push('');
-    out.push('real handler:');
+    out.push('real handler and lifecycle:');
     for (const f of handler) out.push(`${f.ok ? ' ok ' : ' !! '} ${f.check}: ${f.observed}`);
   }
   console.log(out.join('\n'));
 }
+
+/** The admin URL's user (`ACL WHOAMI`), so its own refusals classify as infrastructure. */
+let adminUser;
 
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
@@ -855,7 +987,7 @@ async function main() {
   try {
     await adminClient.connect();
   } catch (err) {
-    throw new Precondition(`cannot reach the admin URL: ${firstLine(err)}`);
+    throw new Infrastructure(`cannot reach the admin URL: ${firstLine(err)}`);
   }
   const info = String(await adminClient.call('INFO', 'server'));
   // Valkey reports a frozen redis_version (7.2.4) for compatibility; name it.
@@ -863,10 +995,10 @@ async function main() {
   const compat = /redis_version:(\S+)/.exec(info)?.[1] ?? 'unknown';
   const redisVersion = valkey ? `valkey ${valkey} (redis_version ${compat})` : `redis ${compat}`;
   try {
-    await adminClient.call('ACL', 'WHOAMI');
+    adminUser = String(await adminClient.call('ACL', 'WHOAMI'));
   } catch (err) {
     adminClient.disconnect();
-    throw new Precondition(`this Redis has no ACL support (ACL WHOAMI: ${firstLine(err)})`);
+    throw new Infrastructure(`this Redis has no ACL support (ACL WHOAMI: ${firstLine(err)})`);
   }
 
   const tag = randomBytes(4).toString('hex');
@@ -885,16 +1017,40 @@ async function main() {
   const rules = aclRulesFor({ prefix: '<prefix>', password: '<redacted>', commands }).join(' ');
 
   let matrix = [];
-  let handler = [];
+  const handler = [];
+  // A layer that a spike user's ACL refusal aborts is a FINDING (exit 1 under
+  // --assert), not a crash: `--drop=set` makes the lifecycle user's first write
+  // NOPERM, which is the rule set being wrong, exactly what this script reports.
+  // Anything else that escapes a layer is infrastructure or a crash (exit 3).
+  const layer = async (name, run) => {
+    try {
+      return await run();
+    } catch (err) {
+      if (failureKind(err, adminUser) !== 'acl') throw err;
+      handler.push({ check: `${name}: ran to completion`, ok: false, observed: firstLine(err) });
+      return [];
+    }
+  };
   try {
     for (const u of [a, b]) {
       await adminClient.call('ACL', 'SETUSER', u.username, ...aclRulesFor({ ...u, commands }));
     }
-    if (!opts.handlerOnly)
-      matrix = await runMatrix({ Redis, admin, adminClient, a, b, scripts, cdnTagPrefix });
-    if (!opts.matrixOnly) handler = await runRealHandler({ Redis, admin, a, b, cdnTagPrefix });
+    if (!opts.handlerOnly) {
+      matrix = await layer('matrix', () =>
+        runMatrix({ Redis, admin, adminClient, a, b, scripts, cdnTagPrefix }),
+      );
+    }
+    if (!opts.matrixOnly) {
+      handler.push(
+        ...(await layer('real handler', () =>
+          runRealHandler({ Redis, admin, a, b, cdnTagPrefix }),
+        )),
+      );
+    }
     if (!opts.matrixOnly && !opts.handlerOnly) {
-      handler.push(...(await runLifecycle({ Redis, admin, adminClient, commands })));
+      handler.push(
+        ...(await layer('lifecycle', () => runLifecycle({ Redis, admin, adminClient, commands }))),
+      );
     }
   } finally {
     // The spike's own throwaway users and keys — nothing else.
@@ -935,9 +1091,10 @@ if (invokedDirectly) {
   main()
     .then((code) => process.exit(code))
     .catch((err) => {
-      console.error(
-        `redis-acl-spike: ${err instanceof Precondition ? 'precondition' : 'error'}: ${err?.message ?? err}`,
-      );
-      process.exit(err instanceof Precondition ? 2 : 1);
+      const kind = failureKind(err, adminUser);
+      console.error(`redis-acl-spike: ${kind}: ${err?.message ?? err}`);
+      // 1 only for a spike user's ACL refusal: that code means "the rule set is
+      // wrong". A crash or a broken environment is never a finding.
+      process.exit(exitCodeFor(kind));
     });
 }

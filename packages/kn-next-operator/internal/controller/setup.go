@@ -37,7 +37,12 @@ import (
 // exactly as before the platform layer existed, and never crash-loop on a
 // missing kind. The NextApp reconciler makes the same discovery decision for
 // its own KnextPlatform watch (SetupWithManager).
-func SetupControllers(mgr ctrl.Manager, cleaner ExternalCleaner) error {
+func SetupControllers(mgr ctrl.Manager, cleaner ExternalCleaner, opts ...SetupOption) error {
+	o := newSetupOptions(opts...)
+	if err := ValidateZoneSigningKeyConfig(o.zoneSigningKey); err != nil {
+		return fmt.Errorf("NextApp controller: %w", err)
+	}
+
 	// Zone functions (ADR-0004): the BackendService reconciler, and the NextApp
 	// reconciler's BackendService watch, run only when the cluster serves the
 	// kind — the same discovery decision as the platform layer, for the same
@@ -55,6 +60,7 @@ func SetupControllers(mgr ctrl.Manager, cleaner ExternalCleaner) error {
 		Recorder:                 mgr.GetEventRecorderFor("nextapp-controller"),
 		Cleaner:                  cleaner,
 		BackendServiceCRDPresent: functionsInstalled,
+		ZoneSigningKey:           o.zoneSigningKey,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("NextApp controller: %w", err)
 	}
@@ -88,4 +94,28 @@ func SetupControllers(mgr ctrl.Manager, cleaner ExternalCleaner) error {
 		}
 	}
 	return nil
+}
+
+// SetupOption configures SetupControllers. Callers that pass none get the
+// defaults, so cmd/main.go and the start-up envtests share one wiring.
+type SetupOption func(*setupOptions)
+
+type setupOptions struct {
+	zoneSigningKey ZoneSigningKeyConfig
+}
+
+func newSetupOptions(opts ...SetupOption) setupOptions {
+	var o setupOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
+	return o
+}
+
+// WithZoneSigningKeyConfig sets the zone signing-key rotation configuration
+// (the operator's --zone-signing-key-* flags). SetupControllers refuses an
+// invalid one (ValidateZoneSigningKeyConfig) rather than run a rotation that
+// could switch signing before the new key has propagated.
+func WithZoneSigningKeyConfig(c ZoneSigningKeyConfig) SetupOption {
+	return func(o *setupOptions) { o.zoneSigningKey = c }
 }

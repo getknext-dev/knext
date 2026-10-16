@@ -15,3 +15,5 @@ pub mod rpc;
 
 #[cfg(test)]
 mod testutil;
+#[cfg(test)]
+mod testvectors;
