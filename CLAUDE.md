@@ -49,6 +49,12 @@
   (was :176) and the infrastructure-manifest apply (was :153); `packages/kn-next/src/generators/`
   contains only `loadtest-job.ts` (no `knative-manifest.ts`); `cr-builder.ts` builds the CR. Do not
   re-file consolidation as open work.
+- **(AMENDED 2026-10-16, founder-authorized, v2 Z1 / ADR-0052 D3 amendment.)** In v2 the invariant
+  widens by exactly one kind: **every CLI cluster write targets a knext CR — `NextApp`, or
+  `BackendService` (built by `@getknext/grpc`, lazily dispatched from `deploy`) — and nothing else.**
+  Both applies carry `--validate=strict` and run after `preflightCRSchema`. The deploy path **never**
+  shells `func deploy` or `kn service` (a scanning guard enforces it). No raw Knative objects, ever;
+  the operator remains the single source of truth and reconciles both CRs.
 - **Known gap that consolidation did NOT close (see `docs/V1_ROADMAP.md` §2.1):** `cr-builder.ts:364`
   hardcodes `apiVersion: apps.kn-next.dev/v1alpha1` and nothing in `src/cli/` negotiates the version
   against the cluster, so a newer CLI can emit a field an older operator's CRD does not know.
@@ -79,11 +85,14 @@
 
 ## 5. Backend / gRPC business-logic layer (opt-in module)
 - Run business logic as **separate, language-agnostic services**; **Next.js stays the HTTP
-  gateway**. **ADR-0002: design now, build post-maturity** (after the migration + Tier-A
-  correctness). **Protobuf = single source of truth** for contracts.
-- **ADR-0003: transport = Connect + buf.** **ADR-0004: a `BackendService` CRD** — cluster-local,
+  gateway**. **ADR-0002 (as amended in v2 Z1): built in the v2 line**, as zone functions shipped
+  at Beta — the original "design now, build post-maturity" sequencing is superseded for v2; the 1.x
+  line stays adapter-only. **Protobuf = single source of truth** for contracts.
+- **ADR-0003: transport = Connect + buf** (amended: connect-go v2; Rust first-wave on connect-rust,
+  pinned and Connect-conformance-gated). **ADR-0004: a `BackendService` CRD** — cluster-local,
   scale-to-zero Knative Services over **h2c, NO public ingress**; operator wires discovery into
-  the gateway. Templates: **Go + TS first**, Python/Rust fast-follow.
+  the gateway; bindings are same-zone only, owned by the zone `NextApp`, and every call carries a
+  short-lived zone identity token. Templates: **Go + Rust first**, others later.
 - CLI-generated gateway glue: **server-only** Connect client wrappers (`import 'server-only'`),
   **Server Actions** (`'use server'`) for mutations, **generated API routes** (JSON-over-HTTP
   facade). Generated code runs under the **official adapter**, not Vinext.
@@ -94,7 +103,8 @@ graceful shutdown, control-plane consolidation, compat-suite gate) → **Tier B 
 (security/SBOM, endpoint auth, previews, rollback, skew protection, RUM) → **Tier C edge** (CDN,
 multi-region, WAF — **partly upstream-gated**: edge Middleware/Proxy, PPR/Cache Components are not
 yet adapter-standardizable) → **Track P** (GitHub org, landing page, docs site — **dogfood the
-docs site on knext**). gRPC layer = **design-now / build-later, after correctness.**
+docs site on knext**). gRPC layer = **built in v2 (ADR-0052 D9 re-sequence), Beta, never gating
+the 1.x credential**; on 1.x it remains design-only.
 
 ## 7. Security (non-negotiable, every phase)
 - **No unauthenticated mutating endpoints.** `POST /api/cache/invalidate` and
