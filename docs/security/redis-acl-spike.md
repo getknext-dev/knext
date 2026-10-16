@@ -8,8 +8,9 @@
 - **Answer: yes, on self-hosted Redis 7 and Valkey 8, with the rule set below.** Measured, not
   inferred: the real cache handler ran under that user on both server engines and both production
   Redis clients with no unexpected denial. There are three known gaps (one key outside the prefix,
-  two connect-time commands sent by ioredis), two residuals (`SCAN` exposes other apps' key *names*,
-  and nested prefixes), and one operational fact that shapes provisioning (ACL users do not survive
+  two connect-time commands sent by ioredis), three residuals (`SCAN` exposes other apps' key
+  *names*, nested prefixes, and a busy Lua script under `+eval` blocks every app on the server), and
+  one operational fact that shapes provisioning (ACL users do not survive
   a restart unless the server persists them).
 
 Everything in the **Measured** sections was run. Everything about managed offerings is **documented,
@@ -19,8 +20,8 @@ not measured**, and labelled that way where it appears.
 
 | | |
 |---|---|
-| Servers | `redis:7-alpine` (`redis@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499`, Redis **7.4.11**); `valkey/valkey:8-alpine` (`valkey/valkey@sha256:081c2f5cb575efc901aa80ff9cdbd1ec6a301682fd35e1ebb4b0990a4a4a8507`, Valkey **8.1.10**, reports `redis_version:7.2.4`) |
-| Clients | **ioredis 5.9.3** under Node 24.14 (the standalone Node path), and **Bun 1.4.2's native `RedisClient`** (the Bun path; `cache-handler.js` picks it whenever `Bun.RedisClient` exists) |
+| Servers | **CI's pinned Redis**, `redis:7-alpine@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2` (Redis **7.4.10**, the digest `ci.yml`'s live lane runs); `redis:7-alpine` (`redis@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499`, Redis **7.4.11**, the first round's local pull); `valkey/valkey:8-alpine` (`valkey/valkey@sha256:081c2f5cb575efc901aa80ff9cdbd1ec6a301682fd35e1ebb4b0990a4a4a8507`, Valkey **8.1.10**, reports `redis_version:7.2.4`) |
+| Clients | **ioredis 5.9.3** under Node 24.14 (the standalone Node path; the version the lockfile gives `@getknext/core`, and what CI runs), and **Bun 1.4.2's native `RedisClient`** (the Bun path; `cache-handler.js` picks it whenever `Bun.RedisClient` exists). The round-2 local re-runs resolved **ioredis 6.0.0** (a worktree without its own install falls through to a parent checkout's); their outcomes were identical row for row. |
 | Where | plain `docker run` on loopback. The kind clusters on this machine were held by other lanes, and nothing here needs Kubernetes: the question is what Redis allows a user to do. |
 | Script | [`scripts/redis-acl-spike.mjs`](../../scripts/redis-acl-spike.mjs), guarded by [`tests/redis-acl-spike.test.ts`](../../tests/redis-acl-spike.test.ts) |
 
@@ -55,14 +56,26 @@ KNEXT_REDIS_LIVE_URL=redis://127.0.0.1:6409 bun test tests/redis-acl-spike.test.
 ```
 
 `--assert` exits 1 on **any** unexpected outcome in either direction (a needed command refused, or a
-forbidden command or cross-app key reachable). The admin URL comes only from
-`KNEXT_REDIS_ACL_SPIKE_URL` (never `REDIS_URL`) and must be loopback.
+forbidden command or cross-app key reachable). Exit 1 means only that, and it covers a spike user's
+ACL refusal (`NOPERM`, `ACL failure in script`) that aborts a whole layer, in every mode: with
+`--drop=set` in the default mode the lifecycle user's first write is refused, which is the rule set
+being wrong, not a crash (it used to exit 3). A usage error exits 2: an unknown argument, a `--drop`
+that is not in the minimal rule set, a `--grant` that is not a Redis command or is already granted
+(a mutation proof that silently mutated nothing would otherwise pass), or a missing, malformed or
+non-loopback URL. Infrastructure trouble or a crash exits 3 (Redis unreachable, no ACL support, an
+ACL refusal of the **admin** user, which means the admin URL lacks a permission the spike needs).
+The admin URL comes only from `KNEXT_REDIS_ACL_SPIKE_URL` (never `REDIS_URL`) and must be loopback.
 
-**Result: all four runs (Redis 7.4.11 and Valkey 8.1.10, each under node and bun) exit 0.**
+**Result: all six runs (CI's Redis 7.4.10, Redis 7.4.11 and Valkey 8.1.10, each under node and bun)
+exit 0.** The 7.4.10 and 7.4.11 tables are identical apart from the version line (diffed, node and
+bun). In CI, the `use-cache-lua-live-redis` job runs the live lane on the 7.4.10 digest on every
+PR, so that is the digest of record; keep this row equal to CI's when either moves.
 
 ### The guard goes red when it should
 
-Proved by exit code (output is never grepped):
+Proved by exit code (output is never grepped). The live rows are asserted **exactly** (1, not
+"non-zero"), so a mutation that crashed the run (3) or was refused as a typo (2) cannot pass as a
+finding.
 
 | Mutation | Exit | What turned it red |
 |---|---|---|
@@ -70,10 +83,80 @@ Proved by exit code (output is never grepped):
 | `--drop=eval` | 1 | both stamp scripts refused |
 | `--drop=scan` | 1 | the collapse sweep refused |
 | `--drop=multi` | 1 | the atomic ISR write refused |
+| `--drop=hdel` | 1 | `HDEL` inside the prune script refused (the matrix row's cutoff is above the stamp it wrote, so the script's `HDEL` really runs; with the earlier cutoff of 0 this mutation exited 0) |
+| `--drop=discard` | 1 | Bun's transaction abort refused (a `MULTI` · `DISCARD` row; no row sent `DISCARD` before, and this mutation exited 0) |
+| `--drop=set`, default (full) mode | 1 | the lifecycle user's first write refused: a finding, not a crash (it exited 3) |
+| every `--drop=<cmd>` of the 20, default mode, Redis 7.4.11 and Valkey 8.1.10, node and bun | 1 | swept by exit code; the unmutated run exits 0 in all four |
 | `--grant=flushall` | 1 | a forbidden command became reachable |
 | `--grant=info` | 1 | a pinned known gap changed |
 | `--drop=hmget --handler-only` | 1 | the **real handler** layer alone (its `ACL LOG`), without the matrix |
 | `hscan` removed from the rule set | 1 | the always-on source scan: the runtime issues a command the rule set lacks |
+| `re-assert` during rotation without `#<sha256(old)>` | 1 | the lifecycle layer: the old password is refused mid-rotation |
+| `--drop=nosuch`, `--drop=info`, `--grant=nosuch`, `--grant=get`, `--bogus`, a non-loopback URL | 2 | usage, refused before any Redis is touched |
+| an unreachable Redis | 3 | infrastructure, never the finding code |
+
+The always-on source scan (`tests/redis-acl-spike.test.ts` with `tests/redis-command-scan.ts`),
+proved by the test file's exit code with one line injected into `cache-handler.js` (anchor
+asserted to occur once, restored with `git checkout`, tree verified clean, control green before and
+after):
+
+| Injected | Exit |
+|---|---|
+| nothing (control) | 0 |
+| `await client.call('UNLINK', 'x');` | 1 |
+| `await redisCommand(c, 'EXPIRE', ['k', '1']);` | 1 |
+| `await conn.expire('k', 1);` | 1 |
+| `await client.call(name, ...args);` (command not a literal) | 1 |
+| `const probe = [['unlink', 'k']];` (lowercase tuple) | 1 |
+| a new tracked file `packages/lib/src/redis/mutation-probe.ts` calling `r.unlink('x')` (no list names it) | 1 |
+| nothing (control, after restore) | 0 |
+
+The first three are the escapes the round-1 code review proved green against the earlier,
+enumerated scan.
+
+The round-2 review proved seven more green by exit code: `client.unlink?.('k')`,
+`const {unlink}=client; unlink('k')`, `Reflect.apply(client.unlink, client, ['k'])`,
+`client.unlink.bind(client)`, `client.unlinkBuffer('k')`, `client.callBuffer('UNLINK', …)` and
+`client.zscanStream('k')`, and showed that discovery skipped a new file whose only signal was a
+method call. Each is now a test, and the scan's rules are proved by a committed harness,
+`scripts/mutation-prove-redis-command-scan.mjs` (exit codes only, baseline green and a canary red
+first, anchors asserted to occur once, byte-exact restore, clean tree between rows). Every row
+removes one rule and must turn the test red:
+
+| Row | Rule removed | Exit |
+|---|---|---|
+| S1–S8 | optional call; destructuring; `Reflect.apply`; `.bind/.call/.apply`; assignment; `Buffer` variant; `callBuffer`; `Stream` variant; the command helper (`new Redis.Command`) | 1 each |
+| U1–U5 | UNPARSEABLE for an optional or bound computed member; a generic issuer handed on; a computed destructuring key; `Reflect.get` with a non-literal; `Reflect.apply` on an unnamed target | 1 each |
+| X1–X4 | an exclusion widened: the no-argument rule drops `client.info()`; every argument a function literal; every `.call` dropped; `client` treated as a language global | 1 each |
+| D1, D2 | discovery by any hit; discovery by an unparseable construct | 1 each |
+| B1 | a second declaration of an allowlisted receiver | 1 |
+| R4-I1–I5 (injected into `cache-handler.js`) | `client.zscanBufferStream(k)`; `client.sscanBufferStream(k, { match })`; a zero-argument `client.zscanStream()`; `client.hgetdel(…)`; `client.send_command('UNLINK', …)` | 1 each |
+| R4-S9, Z1, Z2 | the suffix stripped once only; a `*Stream` method arity-exempt (`client.scanStream()`); client-only commands arity-exempt | 1 each |
+| R4-C1, C2, H1, M1–M3 | the client-only command list; `sentinel`; the ioredis builtin-command helpers; `defineCommand` → EVALSHA; `refreshSlotsCache` → CLUSTER; a prototype member nobody classified | 1 each |
+| R4-K1, K2 | the node:crypto `.digest` exclusion widened to every `.digest`; removed (false hits) | 1 each |
+| R4-N1, N2, B2–B6 | a receiver entry exempting every command; `log.zrange(…)` injected on an exempt receiver; a destructured rebinding injected; the destructuring, import, assignment and `for (const … of)` binding rules | 1 each |
+| E1, E2 | the spike's ACL-refusal classification and its exit code | 1 each |
+| L1–L3 (`KNEXT_REDIS_LIVE_URL` set) | the per-layer handling that reports an ACL abort as a finding; the prune cutoff; the `DISCARD` row | 1 each |
+
+Its first runs found two rows that survived their own removal, both double coverage. A separate
+`new Command(` rule was redundant with the command helper rule, which already resolves
+`new Redis.Command('UNLINK', …)`: the duplicate was deleted, and the row now removes the rule that
+carries it. And with the per-layer handling removed, full-mode `--drop=set --assert` still exited 1,
+because the run's top-level handler maps an ACL refusal to 1 as well; what only the per-layer
+handling gives is a run that reaches its end and reports the finding, so a report-only test
+(`--drop=set` without `--assert` exits 0) now carries that row.
+
+The round-4 review proved `client.zscanBufferStream(key)` green by exit code: the suffix rule
+stripped one suffix, and ioredis also defines `<scan>BufferStream`. The suffix grammar is now read
+off ioredis itself (`Commander` defines `<cmd>Buffer` for every command, `Redis` defines
+`<scan>Stream` and `<scan>BufferStream`), and a test walks every member of the ioredis 5 and 6
+`Redis` / `Cluster` / `Pipeline` prototypes and Bun's `RedisClient`: each must resolve to a
+command or be a listed non-command, with its reason. That walk found more than the review: 52
+command methods the clients send that neither measured engine lists (`hgetdel`, `hsetex`, `vadd`,
+`digest`, `sentinel`, …), ioredis's `send_command` issuer, its `createBuiltinCommand` /
+`addBuiltinCommand` / `createScanStream` helpers, and internals that send a fixed command
+(`defineCommand` → EVALSHA, `_readyCheck` → INFO). A `*Stream` method is never treated as
+arity-safe: `scanStream()` takes no JS argument and still sends `SCAN 0`.
 
 The source scan runs in every CI run (it needs no Redis). The live half runs when
 `KNEXT_REDIS_LIVE_URL` is set and is skipped otherwise, like the existing live Lua lane.
@@ -172,6 +255,13 @@ entries an operator would actually look for, such as a real cross-app attempt.
 2. **Nested prefixes are not isolated.** If app B's prefix is `<A's prefix>:<more>`, B's keys sit
    inside A's pattern and A's user reads them (measured). Admission allows `:` in `keyPrefix`, so the
    operator has to refuse a prefix that nests inside (or contains) another app's on the same Redis.
+3. **A busy Lua script blocks every app.** Measured on CI's Redis 7.4.10 with a throwaway user
+   holding `+eval`: `EVAL "while true do end" 0` made every other client, any user, get `BUSY`
+   after `busy-reply-threshold` (5000 ms); the user's own `SCRIPT KILL` was `NOPERM`; an admin
+   `SCRIPT KILL` (redis-cli) stopped it. A script that wrote a key first and then looped answered an
+   admin `SCRIPT KILL` with `UNKILLABLE`, and only `SHUTDOWN NOSAVE` recovered. New ioredis
+   connections cannot even finish their handshake while the server is `BUSY`. Not measured on
+   Valkey. The ADR records the mitigations (D8).
 
 ## Measured: lifecycle (what provisioning has to live with)
 
@@ -182,6 +272,7 @@ entries an operator would actually look for, such as a real cross-app attempt.
 | `ACL DELUSER <u>` | the user's live connections are dropped |
 | `ACL SAVE` on a server with no `aclfile` | `ERR This Redis instance is not configured to use an ACL file` |
 | Restart a server with no `aclfile` | **the user is gone** |
+| Rotation as ADR-0071 D4 re-asserts it: `ACL SETUSER <u> reset … >new #<sha256(old)>`, then `ACL SETUSER <u> reset … >new` | both passwords authenticate during the overlap; after the second re-assert, a new `AUTH` with the old one gets `WRONGPASS`; a connection opened during the overlap keeps working (both engines; also a lifecycle check in the script) |
 
 The restart result is the one that shapes the design: on the common in-cluster setup (no `aclfile`,
 no persistent config), every Redis pod restart deletes every app user, and the next connection from
@@ -196,7 +287,7 @@ The rule set it proposes was run on both engines with throwaway `nopass` users o
 
 ```sh
 redis-cli ACL SETUSER spike-prov on nopass '~*' resetchannels -@all \
-  '+acl|setuser' '+acl|deluser' '+acl|getuser' '+acl|whoami' +scan +del +ping '+info|server' '+client|setinfo'
+  '+acl|setuser' '+acl|deluser' '+acl|getuser' '+acl|users' '+acl|whoami' +scan +del +ping '+info|server' '+client|setinfo'
 # then, authenticated as spike-prov:
 ACL SETUSER spike-app reset on nopass ~spike-app:* %W~knext:cdn:purged:abc:* resetchannels -@all +get +set '+client|setinfo'
 ACL GETUSER spike-app            # rules round-trip, selector included
@@ -214,6 +305,8 @@ ACL SETUSER spike-prov +@all     # OK  <- the provisioner can escalate itself
 | `INFO server` (needed for `run_id`, the restart signal) with `+info\|server` | allowed | allowed |
 | `INFO keyspace`, bare `INFO` | `NOPERM` | `NOPERM` |
 | Read a key, `FLUSHALL` | `NOPERM` | `NOPERM` |
+| `ACL USERS`, and `ACL GETUSER` of an app user's key patterns (the conflict check, ADR D6a; round 2, `+acl\|users` added) | allowed | allowed |
+| `ACL LIST` (every user's password hashes) | `NOPERM` | `NOPERM` |
 | **`ACL SETUSER <itself> +@all`** | **OK** | **OK** |
 
 The last row is the point: **any user that can run `ACL SETUSER` can grant itself everything.** A
