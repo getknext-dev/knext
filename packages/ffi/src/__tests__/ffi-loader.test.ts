@@ -22,6 +22,7 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   copyFileSync,
+  cpSync,
   existsSync,
   mkdirSync,
   readdirSync,
@@ -33,7 +34,8 @@ import {
 import { join } from 'node:path';
 import { fnv1a64, type Manifest, scanManifest, schemaString } from '../manifest';
 import { renderModule } from '../render';
-import { blob, emptyDir, KITCHEN_SINK, PKG_DIR, removeScratchDirs } from './helpers';
+import { blob, D, emptyDir, fn, KITCHEN_SINK, PKG_DIR, removeScratchDirs } from './helpers';
+import { integerMatrix } from './integer-matrix';
 
 const FIXTURE_C = join(PKG_DIR, 'fixtures', 'abi-v1', 'fixture.c');
 const EXT = process.platform === 'darwin' ? 'dylib' : 'so';
@@ -262,6 +264,80 @@ describe('the fixture library is a faithful stand-in', () => {
   it('the scanner reads the manifest out of the built library, as it would a Rust one', () => {
     const scanned = scanManifest(readFileSync(libs.good as string));
     expect(scanned).toEqual(manifest);
+  });
+});
+
+/** One `echo_<width>` export per integer width the macros support, with its C type. */
+const INT_WIDTHS: [string, string][] = [
+  ['i8', 'int8_t'],
+  ['i16', 'int16_t'],
+  ['i32', 'int32_t'],
+  ['u8', 'uint8_t'],
+  ['u16', 'uint16_t'],
+  ['u32', 'uint32_t'],
+  ['i64', 'int64_t'],
+  ['u64', 'uint64_t'],
+  ['isize', 'int64_t'],
+  ['usize', 'uint64_t'],
+];
+
+describe('integer arguments, every width, through a real library (the same matrix the Rust crates harness runs)', () => {
+  it('each width refuses fractions, NaN, infinities, out-of-range and low-32-bit-alias values, wrong types and a throwing toString; accepts both boundaries and -0', () => {
+    const records = INT_WIDTHS.map(([w]) => fn(`echo_${w}`, [['v', D.t(w)]], D.t(w)));
+    const m = scanManifest(blob(records));
+    const dir = emptyDir('ints');
+    const lines = ['#include <stdint.h>', '#include <string.h>'];
+    for (const f of m.fns) {
+      lines.push(`#define SYM_${f.name} ${f.symbol}`);
+      lines.push(
+        `uint64_t ${f.symbol}_schema(void) { return ${fnv1a64(schemaString(f, m)).toString()}ULL; }`,
+      );
+    }
+    records.forEach((r, i) => {
+      const c = JSON.stringify(`KNEXTFFI1${JSON.stringify(r)}`);
+      lines.push(`__attribute__((used)) const char knext_manifest_${i}[] = ${c};`);
+    });
+    for (const [w, ctype] of INT_WIDTHS) {
+      lines.push(
+        `int32_t SYM_echo_${w}(${ctype} v, uint64_t *out) { memcpy(out, &v, sizeof v); return 0; }`,
+      );
+    }
+    lines.push('void knext_ffi_v1_free(uint8_t *p, size_t n) { (void)p; (void)n; }');
+    const source = join(dir, 'ints.c');
+    writeFileSync(source, `${lines.join('\n')}\n`);
+    const built = join(dir, LIB);
+    const cc1 = spawnSync('cc', ['-shared', '-fPIC', '-O1', '-o', built, source], {
+      encoding: 'utf8',
+    });
+    expect(cc1.status, cc1.stderr).toBe(0);
+
+    const intApp = join(dir, 'app');
+    mkdirSync(join(intApp, 'src', 'generated', 'ffi'), { recursive: true });
+    cpSync(join(app, 'node_modules'), join(intApp, 'node_modules'), { recursive: true });
+    writeFileSync(join(intApp, 'package.json'), '{"type":"module","private":true}\n');
+    writeFileSync(
+      join(intApp, 'src', 'generated', 'ffi', 'index.ts'),
+      renderModule(m, { libName: 'fixture', crate: 'rust' }),
+    );
+    writeFileSync(join(intApp, 'harness.ts'), HARNESS);
+    const exe = image({ lib: built });
+    const r = spawnSync(process.execPath, ['--conditions=react-server', 'harness.ts'], {
+      cwd: intApp,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        NODE_ENV: 'production',
+        NEXT_PHASE: '',
+        BODY: integerMatrix.toString(),
+        FAKE_EXEC: exe,
+      },
+      timeout: 60_000,
+    });
+    const line = r.stdout.split('\n').find((l) => l.startsWith('RESULT '));
+    expect(line, `${r.stdout}${r.stderr}`).toBeDefined();
+    const result = JSON.parse((line as string).slice(7)) as { cases: number; problems: string[] };
+    expect(result.problems).toEqual([]);
+    expect(result.cases).toBeGreaterThan(150);
   });
 });
 
