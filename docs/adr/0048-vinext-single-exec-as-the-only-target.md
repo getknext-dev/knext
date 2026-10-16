@@ -338,3 +338,28 @@ until the founder revisits it.
 - **The rejected option "Flip the default, keep node supported"** was rejected on cost: "two
   compat matrices, two supply-chain surfaces". ADR-0054 accepted that cost. ADR-0054 Amendment 9
   now prices it from the tree and CI runs rather than assuming it.
+
+**Index added 2026-10-16 (#2061, #1151; Proposed, same review).** Which decision stands on each
+point, across ADR-0036, ADR-0042 and this ADR. It changes no decision. The reconciliations above and
+in ADR-0036 and ADR-0042 (each "reconciled with ADR-0054", 2026-09-30) remain the detail; three
+reconciliations in three files do not answer "what stands on point X?" without reading all of them.
+Status is read from each ADR's front matter (`Supersedes`, `Amends`), not inferred from prose. The
+vinext graduation bar is [`docs/compat/bar-vinext-axis.md`](../compat/bar-vinext-axis.md) (Proposed
+for ratification); it does not change any row below.
+
+| Point | Decided by | Stands today |
+|---|---|---|
+| vinext is the **only** target | ADR-0048 | **Superseded** by ADR-0054 (Accepted 2026-09-22). vinext is selectable. |
+| vinext + Bun is the **default** runtime | ADR-0042 D1 | **Superseded** by ADR-0054. The default is `turbopack` x `bun`, compiled with `--bytecode` (`DEFAULT_BUILDER_ID` / `DEFAULT_RUNTIME_ID`). |
+| vinext is an **optional** compiled build target | ADR-0036 | **Stands, as a selectable option.** The "Rejected for 1.0" status line is history. |
+| `node + vinext` is not a supported cell | ADR-0042 D2 | **Superseded** by ADR-0054 Amendment 7: it is a supported cell, a goal-matrix cell, and not in the v1.0 credential (ADR-0058). |
+| Build and runtime are separate axes; one config, one CRD, one operator, exactly two `RuntimeContract` implementations | ADR-0036 Amendment, ADR-0042 D3 | **Stands.** Reaffirmed by ADR-0054 Amendment 9. |
+| Bytecode is mandatory in every cell | ADR-0042 D1 (second half), ADR-0048 Amendment 3 | **Stands**, generalised to every cell by ADR-0054 Amendment 7. |
+| The official suite is the gate for vinext | ADR-0042 D4 | **Stands.** Measured, not credentialed, in v1.0 (ADR-0058). Graduation in v2 follows the vinext bar. |
+| Phase 5 default flip | ADR-0042 D5, ADR-0048 | **Superseded.** There is no pending flip. |
+| ESM Next.js apps only | ADR-0051 | **Stands** for the vinext builder. |
+| Image optimisation does not survive the single executable; keep-alive reuse is disabled under Bun | ADR-0048 Amendments 2 and 4 | **Stand** as facts about the vinext x Bun cell. |
+| Cold start: a process-boot metric, with the cluster number a tie | ADR-0048 Amendment 5 | **Stands.** It is the premise of ADR-0054 and the sample floor in ADR-0054 Amendment 10. |
+| Self-contained single executable | ADR-0048 Amendment 6, ADR-0060 | **Stands**, opt-in (ADR-0060 is itself Proposed). |
+| The v2 graduation of vinext to Stable | (this chain does not decide it) | Defined by the vinext bar, Proposed. **vinext stays Beta** until its cells have run. |
+| The "Amends a hard rule" notes in these headers | ADR-0042, ADR-0048 | **Moot in direction**: the rules need reconciling toward ADR-0054, which is the maintainer's file (`.claude/rules/architecture.md` §4, `CLAUDE.md` §3). |
