@@ -97,6 +97,10 @@ describe('what counts as a claim', () => {
     '- In-process Rust: production-grade.',
     'Rust in-process calls are\nstable and fast.',
     'In-process Rust ships in this release. It is production-ready.',
+    // a later negation or condition about something else does not excuse the claim
+    'In-process Rust is production-ready, not experimental.',
+    'In-process Rust is now production-ready: the call never fails and is never slow.',
+    'In-process Rust is stable; no extra setup is needed.',
     '---\n"@getknext/core": minor\n---\n\nThe `@getknext/ffi` package is stable.',
   ];
   for (const text of claims) {

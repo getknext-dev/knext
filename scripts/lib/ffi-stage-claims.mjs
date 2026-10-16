@@ -67,8 +67,31 @@ const CLAIM_GA = /\bGA\b/;
 const HEDGE =
   /\b(?:not|no|never|nor|cannot|until|unless|before|once|yet|if|when|whether|graduat\w*)\b|n[’']t\b/i;
 
-function hasClaim(s) {
-  return CLAIM_WORDS.test(s) || CLAIM_GA.test(s);
+const FORWARD_CONDITION = /\b(?:once|when|until|unless|if|after|whenever)\b/i;
+
+/** How many words before a stage word a negation or condition still excuses it. */
+const HEDGE_WINDOW = 8;
+
+/**
+ * Does this clause use a stage word that nothing just before it negates or
+ * conditions? "not yet stable", "until it is production-ready" and "when GA"
+ * are excused; "production-ready, not experimental" is not (the "not" comes
+ * AFTER the claim and is about something else).
+ */
+function claimsStage(clause) {
+  const re = new RegExp(`${CLAIM_WORDS.source}|${CLAIM_GA.source}`, 'gi');
+  for (const m of clause.matchAll(re)) {
+    if (!CLAIM_WORDS.test(m[0]) && !CLAIM_GA.test(m[0])) continue;
+    const before = clause.slice(0, m.index).split(/\s+/).slice(-HEDGE_WINDOW).join(' ');
+    const after = clause
+      .slice(m.index + m[0].length)
+      .split(/\s+/)
+      .slice(0, 4)
+      .join(' ');
+    // "becomes stable once Bun drops …" is a condition, not a claim.
+    if (!HEDGE.test(before) && !FORWARD_CONDITION.test(after)) return true;
+  }
+  return false;
 }
 
 /** Split text into sentences; blank lines, table rows, headings and list items end a unit. */
@@ -107,9 +130,10 @@ export function findClaims(text) {
   const body = text.replace(/^---\n[\s\S]*?\n---\n/, '');
   const hits = [];
   for (const { text: s, prev } of sentences(body)) {
-    if (!hasClaim(s) || HEDGE.test(s)) continue;
     const pronoun = /^\W*(?:it|this|that|they|these)\b/i.test(s);
-    if (SUBJECT.test(s) || (pronoun && SUBJECT.test(prev))) hits.push(s.trim());
+    if (!SUBJECT.test(s) && !(pronoun && SUBJECT.test(prev))) continue;
+    // The feature is named in (or, for "It ...", just before) this sentence.
+    if (claimsStage(s)) hits.push(s.trim());
   }
   return hits;
 }
