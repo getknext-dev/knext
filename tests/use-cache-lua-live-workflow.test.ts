@@ -30,6 +30,8 @@ const LIVE_SPEC = 'packages/kn-next/src/__tests__/use-cache-replay-script-live-r
 // on the fake RESP server always and on this job's real Redis when the variable
 // is set. Without this job it never meets a real SCAN/DEL.
 const PREFIX_SPEC = 'packages/kn-next/src/__tests__/redis-prefix-collapse-isolation.test.ts';
+// The per-app Redis ACL spike's live lane (docs/security/redis-acl-spike.md).
+const ACL_SPEC = 'tests/redis-acl-spike.test.ts';
 const PROVER = 'scripts/mutation-prove-2331-use-cache-tag-replay.mjs';
 const JOB_ID = 'use-cache-lua-live-redis';
 const ENV_VAR = 'KNEXT_REDIS_LIVE_URL';
@@ -95,6 +97,24 @@ describe(`ci.yml — ${JOB_ID} (the replay Lua on a real Redis)`, () => {
     expect(step, 'no step runs the live suite').toBeDefined();
     const args = String((step as Obj).run).split(/\s+/);
     expect(args, `${PREFIX_SPEC} must run in the ${JOB_ID} gate step`).toContain(PREFIX_SPEC);
+  });
+
+  it('runs the Redis ACL spike lane in its OWN step, with --no-skip, against the same Redis', () => {
+    const job = jobsOf(CI_YML)[JOB_ID] as Obj;
+    const steps = stepsRunning(job, /tests\/redis-acl-spike\.test\.ts/);
+    expect(steps.length, `${ACL_SPEC} must run in exactly one ${JOB_ID} step`).toBe(1);
+    const step = steps[0] as Obj;
+    const run = String(step.run);
+    expect(run).toMatch(/scripts\/bun-test\.mjs\s+--no-skip\b/);
+    expect(
+      run,
+      'the spike pauses the server (CLIENT PAUSE); sharing a step would stall the other live suites',
+    ).not.toMatch(/use-cache-replay-script-live-redis|redis-prefix-collapse-isolation/);
+    expect(step['continue-on-error'], 'the ACL lane must block').toBeUndefined();
+    expect(step.if, 'the ACL lane must not be conditional').toBeUndefined();
+    const env = stepEnv(job, step);
+    expect(String(env[ENV_VAR]), `${ENV_VAR} must be a loopback URL literal`).toMatch(LOOPBACK_URL);
+    expect('REDIS_URL' in env, 'REDIS_URL would point every cache test at this Redis').toBe(false);
   });
 
   it('runs a digest-pinned, health-gated Redis service', () => {

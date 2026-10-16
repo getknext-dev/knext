@@ -485,6 +485,23 @@ async function runMatrix({ Redis, admin, adminClient, a, b, scripts, cdnTagPrefi
           ? `${(leak.reply?.[1] ?? []).length} of B's key names returned`
           : leak.message,
     });
+    // Nested prefixes: an app whose prefix is `<A's prefix>:<more>` lives
+    // INSIDE A's pattern, so A's user reaches its keys. The admission pattern
+    // allows colons in keyPrefix, so per-app ACLs must refuse nesting
+    // separately. Pinned: the row expects the reach, so a change shows.
+    const nestedKey = `${a.prefix}:nested-app:cache:/route`;
+    await adminClient.set(nestedKey, 'nested');
+    results.push({
+      layer: 'matrix',
+      kind: 'known-gap',
+      origin: "GET <A's prefix>:nested-app:… — a second app whose prefix nests inside A's",
+      target: 'other-app',
+      command: 'GET',
+      expect: 'ok',
+      consequence:
+        "A's pattern covers the nested app's keys; nesting must be refused by the operator",
+      ...(await attempt(clientA, ['GET', nestedKey])),
+    });
   } finally {
     clientA.disconnect();
   }
@@ -692,6 +709,105 @@ async function runRealHandler({ Redis, admin, a, b, cdnTagPrefix }) {
   return findings;
 }
 
+// ─── Layer 3: the user's lifecycle (what provisioning has to live with) ──────
+
+/**
+ * Re-assertion, rotation and deletion, measured on a live connection — the
+ * three things an operator that owns the user does to it. Not a property of the
+ * cache runtime; a property of Redis that the provisioning design rests on.
+ */
+async function runLifecycle({ Redis, admin, adminClient, commands }) {
+  const tag = randomBytes(4).toString('hex');
+  const c = {
+    username: `knext-spike-c-${tag}`,
+    prefix: `spike-c-${tag}`,
+    password: randomBytes(24).toString('hex'),
+  };
+  const next = randomBytes(24).toString('hex');
+  const open = async (password) => {
+    const conn = new Redis(userUrl(admin, c.username, password), {
+      lazyConnect: true,
+      enableReadyCheck: false,
+      maxRetriesPerRequest: 0,
+      retryStrategy: () => null,
+    });
+    let lastError;
+    conn.on('error', (err) => {
+      lastError = err;
+    });
+    try {
+      await conn.connect();
+      await conn.set(`${c.prefix}:k`, '1');
+      return { conn, ok: true };
+    } catch (err) {
+      conn.disconnect();
+      // ioredis reports the AUTH refusal on 'error' and rejects connect() with
+      // a generic 'Connection is closed'; the refusal is the one that matters.
+      return { conn: null, ok: false, message: firstLine(lastError ?? err) };
+    }
+  };
+  const works = async (conn) => {
+    try {
+      return (await conn.get(`${c.prefix}:k`)) === '1';
+    } catch {
+      return false;
+    }
+  };
+  const findings = [];
+  const conns = [];
+  try {
+    await adminClient.call('ACL', 'SETUSER', c.username, ...aclRulesFor({ ...c, commands }));
+    const live = await open(c.password);
+    if (!live.ok) throw new Error(`lifecycle user could not connect: ${live.message}`);
+    conns.push(live.conn);
+
+    // 1. Re-assert the identical rule set (what an idempotent reconcile does,
+    //    and what restores the user after a restart that lost it).
+    await adminClient.call('ACL', 'SETUSER', c.username, ...aclRulesFor({ ...c, commands }));
+    findings.push({
+      check: 'lifecycle: re-asserting the same rules (reset … >pw) keeps live connections working',
+      ok: await works(live.conn),
+      observed: (await works(live.conn)) ? 'live connection unaffected' : 'live connection broken',
+    });
+
+    // 2. Rotation, overlap first: add the new password, then remove the old one.
+    await adminClient.call('ACL', 'SETUSER', c.username, `>${next}`);
+    const both = [await open(c.password), await open(next)];
+    for (const o of both) if (o.conn) conns.push(o.conn);
+    await adminClient.call('ACL', 'SETUSER', c.username, `<${c.password}`);
+    const oldAfter = await open(c.password);
+    const newAfter = await open(next);
+    if (newAfter.conn) conns.push(newAfter.conn);
+    const rotated =
+      both.every((o) => o.ok) &&
+      !oldAfter.ok &&
+      /WRONGPASS/.test(oldAfter.message ?? '') &&
+      newAfter.ok &&
+      (await works(live.conn));
+    findings.push({
+      check:
+        'lifecycle: two passwords overlap (>new), then <old refuses new AUTHs with it while already-authenticated connections keep working',
+      ok: rotated,
+      observed: `overlap: old=${both[0].ok} new=${both[1].ok}; after <old: old=${oldAfter.ok ? 'accepted' : oldAfter.message} new=${newAfter.ok}; pre-rotation connection works=${await works(live.conn)}`,
+    });
+
+    // 3. Deletion: what the finalizer does on app delete.
+    await adminClient.call('ACL', 'DELUSER', c.username);
+    await sleep(100);
+    const afterDelete = await works(live.conn);
+    findings.push({
+      check: "lifecycle: ACL DELUSER disconnects the user's live connections",
+      ok: !afterDelete,
+      observed: afterDelete ? 'live connection still served' : 'live connection dropped',
+    });
+  } finally {
+    for (const conn of conns) conn.disconnect();
+    await adminClient.call('ACL', 'DELUSER', c.username).catch(() => {});
+    await adminClient.call('DEL', `${c.prefix}:k`).catch(() => {});
+  }
+  return findings;
+}
+
 // ─── Driver ──────────────────────────────────────────────────────────────────
 
 function unexpectedOf(matrix, handler) {
@@ -707,7 +823,7 @@ function unexpectedOf(matrix, handler) {
 
 function printTable(matrix, handler, meta) {
   const out = [];
-  out.push(`# redis-acl-spike — runtime ${meta.runtime}, redis ${meta.redisVersion}`);
+  out.push(`# redis-acl-spike — runtime ${meta.runtime}, ${meta.redisVersion}`);
   out.push(`# rule set: ${meta.rules}`);
   out.push('');
   out.push('kind        target     expect  got     command                           origin');
@@ -742,7 +858,10 @@ async function main() {
     throw new Precondition(`cannot reach the admin URL: ${firstLine(err)}`);
   }
   const info = String(await adminClient.call('INFO', 'server'));
-  const redisVersion = /redis_version:(\S+)/.exec(info)?.[1] ?? 'unknown';
+  // Valkey reports a frozen redis_version (7.2.4) for compatibility; name it.
+  const valkey = /valkey_version:(\S+)/.exec(info)?.[1];
+  const compat = /redis_version:(\S+)/.exec(info)?.[1] ?? 'unknown';
+  const redisVersion = valkey ? `valkey ${valkey} (redis_version ${compat})` : `redis ${compat}`;
   try {
     await adminClient.call('ACL', 'WHOAMI');
   } catch (err) {
@@ -774,6 +893,9 @@ async function main() {
     if (!opts.handlerOnly)
       matrix = await runMatrix({ Redis, admin, adminClient, a, b, scripts, cdnTagPrefix });
     if (!opts.matrixOnly) handler = await runRealHandler({ Redis, admin, a, b, cdnTagPrefix });
+    if (!opts.matrixOnly && !opts.handlerOnly) {
+      handler.push(...(await runLifecycle({ Redis, admin, adminClient, commands })));
+    }
   } finally {
     // The spike's own throwaway users and keys — nothing else.
     for (const u of [a, b]) {
