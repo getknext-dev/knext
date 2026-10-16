@@ -79,7 +79,7 @@ const MUTATIONS = [
       'safe direction only while the list stays small; widening it silently drops subjects',
     subject: 'spec',
     anchor:
-      "const NOT_APP_RUNTIMES = ['packages/kn-next-operator/', 'packages/scale-zero-pg/', 'templates/go/'];",
+      "const NOT_APP_RUNTIMES = [\n  'packages/kn-next-operator/',\n  'packages/scale-zero-pg/',\n  'templates/go/',\n  'templates/rust/',\n];",
     replacement: "const NOT_APP_RUNTIMES = ['packages/', 'apps/', 'examples/'];",
   },
   {

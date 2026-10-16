@@ -1,0 +1,27 @@
+# Generates the Rust message types (buffa) and the connect-rust service
+# stubs from proto/. The plugins are the ones the Buf Schema Registry serves
+# as buf.build/connectrpc/rust, built locally at pinned versions by
+# codegen.sh (`cargo install --locked` into .codegen/), so generating needs
+# no plugin outside that directory and no Buf Schema Registry call.
+#
+#   ./codegen.sh      # installs the pinned plugins, runs buf generate; commit gen/
+#
+# Four plugin runs: message types, their mod.rs tree, service stubs (which
+# name the message types through buffa_module=crate::proto), and the stubs'
+# mod.rs tree, filtered to files that declare a service.
+version: v2
+clean: true
+plugins:
+  - local: .codegen/bin/protoc-gen-buffa
+    out: gen/buffa
+    opt: [views=true, json=true]
+  - local: .codegen/bin/protoc-gen-buffa-packaging
+    out: gen/buffa
+    strategy: all
+  - local: .codegen/bin/protoc-gen-connect-rust
+    out: gen/connect
+    opt: [buffa_module=crate::proto]
+  - local: .codegen/bin/protoc-gen-buffa-packaging
+    out: gen/connect
+    strategy: all
+    opt: [filter=services]
