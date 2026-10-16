@@ -113,8 +113,12 @@ run on the same resampled variance (3000 trials per point), behaves as follows a
 So it rejects a slowdown of 15% or more at least 95% of the time and a 20% slowdown about 99% of the
 time. It does **not** reliably detect a 10% slowdown (it passes one about a quarter of the time). The
 honest price is the other side: a shape that truly ties A still fails C5 about one time in six, from
-the outlier rate alone. A failed run is re-run in full, never topped up, and both runs go in the
-ledger. The variance estimate comes from 14 samples, so these figures are approximate; the first
+the outlier rate alone. A failed run may be re-run in full **once**, never topped up, and both runs
+go in the ledger. Because two tries would otherwise let a true 15% slowdown pass about 10% of the
+time, each try is judged at a one-sided **97.5%** bound (Bonferroni over the two allowed tries), which
+keeps the overall false-pass rate at or below 5%; the stricter bound raises a true tie's per-try failure
+somewhat above one in six, and the re-run absorbs that. A shape that fails both tries waits for a code
+change before it may try again. A re-run doubles the cost to about 8 hours. The variance estimate comes from 14 samples, so these figures are approximate; the first
 n ≥ 60 A/B replaces them in the ledger. At about 2 minutes per cold cycle on a queue-of-one cluster,
 one A/B costs about 4 hours. Options and jev scores are under Options considered.
 
