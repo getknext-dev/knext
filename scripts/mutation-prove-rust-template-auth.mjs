@@ -9,12 +9,15 @@
  * byte-identically) and runs `cargo test` over the template crate's unit
  * tests, graded by EXIT CODE only:
  *
- *   A*  the token check and the verifier (src/auth.rs): widening the health
- *       exemption (to Connect GET reads, to the whole health service),
- *       passing a missing token to the verifier, ignoring a verifier error,
- *       admitting with no JWKS or with a JWKS but no verification, dropping
- *       the deny-all fallback for a missing verifier, loosening the bearer
- *       parse, counting an empty or directory JWKS as mounted — each must RED.
+ *   A*  the token check and the verifier's mount check (src/auth.rs,
+ *       src/auth/jwks.rs): widening the health exemption (to Connect GET
+ *       reads, to the whole health service), passing a missing token to the
+ *       verifier, ignoring a verifier error, reading a missing JWKS as an
+ *       empty one, dropping the deny-all fallback for a missing verifier,
+ *       loosening the bearer parse, counting an empty or directory JWKS as
+ *       mounted — each must RED. (A6, "a mounted JWKS admits every token", is
+ *       retired with the stub it mutated: token verification is proved row by
+ *       row in mutation-prove-2051-rust-verifier.mjs.)
  *   W*  the server's wiring (src/rpc/mod.rs): the token layer left out of the
  *       stack must RED (the on-the-wire scan of every registered procedure
  *       catches it).
@@ -28,9 +31,11 @@
  *       grace of zero, or not waiting at all must RED.
  *   R*  panic recovery and tracing (src/rpc/layers.rs): a panic no longer
  *       caught, a span that ignores the caller's trace — each must RED.
- *   N*  negative control: the production constructor wired with no verifier
- *       is still closed, so the suite must stay GREEN (fail-closed by
- *       construction, not by the one verifier the binary happens to pass).
+ *   N*  negative control: the production constructor naming its default
+ *       auth table explicitly changes nothing, so the suite must stay GREEN.
+ *       (The old control, no verifier at all, now reds by design: the
+ *       production constructor must serve a valid zone token, and no verifier
+ *       serves none. no_verifier_fails_closed holds the deny-all fallback.)
  *
  * A row counts only if the mutated tree COMPILES: before its test run, each
  * row must pass a build-only `cargo test --no-run` (the crate and its tests).
@@ -62,6 +67,7 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 // `resolve(REPO_ROOT, …)` subject shape the anchor scanners read.
 const TEMPLATE_CRATE = `${REPO_ROOT}/templates/rust`;
 const AUTH = resolve(REPO_ROOT, 'templates/rust/src/auth.rs');
+const JWKS = resolve(REPO_ROOT, 'templates/rust/src/auth/jwks.rs');
 const SERVER = resolve(REPO_ROOT, 'templates/rust/src/rpc/mod.rs');
 const BODY = resolve(REPO_ROOT, 'templates/rust/src/rpc/body.rs');
 const LAYERS = resolve(REPO_ROOT, 'templates/rust/src/rpc/layers.rs');
@@ -110,25 +116,17 @@ const MUTATIONS = [
     expect: 'red',
     claim: 'a verifier error is ignored',
     subject: 'auth',
-    anchor: '        if let Err(err) = self.verifier.verify(token, procedure) {\n',
+    anchor: '        let caller = match self.verifier.verify(token, procedure) {\n',
     replacement:
-      '        if let Err(err) = self.verifier.verify(token, procedure).or(Ok::<(), AuthError>(())) {\n',
+      '        let caller = match self\n            .verifier\n            .verify(token, procedure)\n            .or_else(|_| Ok::<Caller, AuthError>(Caller::default()))\n        {\n',
   },
   {
     id: 'A5',
     expect: 'red',
-    claim: 'with no JWKS mounted, every token is admitted',
-    subject: 'auth',
+    claim: 'with no JWKS mounted, the verifier reads it as an empty one instead of refusing',
+    subject: 'jwks',
     anchor: '            return Err(AuthError::NoJwks);\n',
-    replacement: '            return Ok(());\n',
-  },
-  {
-    id: 'A6',
-    expect: 'red',
-    claim: 'a mounted JWKS admits every token though nothing verifies it',
-    subject: 'auth',
-    anchor: '        Err(AuthError::VerificationUnavailable)\n',
-    replacement: '        Ok(())\n',
+    replacement: '            return Ok(Keys::default());\n',
   },
   {
     id: 'A7',
@@ -137,7 +135,7 @@ const MUTATIONS = [
     subject: 'auth',
     anchor: '            None => Arc::new(DenyAll(AuthError::NoVerifier)),\n',
     replacement:
-      '            None => {\n                struct Open;\n                impl Verifier for Open {\n                    fn verify(&self, _: &str, _: &str) -> Result<(), AuthError> {\n                        Ok(())\n                    }\n                }\n                Arc::new(Open)\n            }\n',
+      '            None => {\n                struct Open;\n                impl Verifier for Open {\n                    fn verify(&self, _: &str, _: &str) -> Result<Caller, AuthError> {\n                        Ok(Caller::default())\n                    }\n                }\n                Arc::new(Open)\n            }\n',
   },
   {
     id: 'A8',
@@ -159,7 +157,7 @@ const MUTATIONS = [
     id: 'A10',
     expect: 'red',
     claim: 'an empty file or a directory at the JWKS path counts as mounted',
-    subject: 'auth',
+    subject: 'jwks',
     anchor: '    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.len() > 0)\n',
     replacement: '    std::fs::metadata(path).is_ok()\n',
   },
@@ -291,14 +289,15 @@ const MUTATIONS = [
   {
     id: 'N1',
     expect: 'green',
-    claim: 'the production constructor wired with no verifier is still closed (deny-all fallback)',
+    claim: 'the production constructor naming its default auth table explicitly changes nothing',
     subject: 'server',
-    anchor: '    build(example_router(), Some(verifier), cfg)\n',
-    replacement: '    let _ = &verifier;\n    build(example_router(), None, cfg)\n',
+    anchor: '        clock: Arc::clone(&cfg.clock),\n',
+    replacement:
+      '        clock: Arc::clone(&cfg.clock),\n        method_auth: Arc::new(auth::contract_auth),\n',
   },
 ];
 
-const PROVER = { subjects: { auth: AUTH, server: SERVER, body: BODY, layers: LAYERS } };
+const PROVER = { subjects: { auth: AUTH, jwks: JWKS, server: SERVER, body: BODY, layers: LAYERS } };
 
 // Returns the command's exit code, or null if cargo could not be run. Never
 // exits here: a caller holding a mutation must restore it first.

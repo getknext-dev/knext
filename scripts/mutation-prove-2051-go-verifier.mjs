@@ -59,13 +59,21 @@ import { declareMutations, recordMutation } from './lib/prover-report.mjs';
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 // The Go module (the command's cwd), not a mutation subject.
 const TEMPLATE_MODULE = `${REPO_ROOT}/templates/go`;
-const SUBJECTS = {
-  token: resolve(REPO_ROOT, 'templates/go/internal/auth/token.go'),
-  jwks: resolve(REPO_ROOT, 'templates/go/internal/auth/jwks.go'),
-  verifier: resolve(REPO_ROOT, 'templates/go/internal/auth/verifier.go'),
-  auth: resolve(REPO_ROOT, 'templates/go/internal/auth/auth.go'),
-  server: resolve(REPO_ROOT, 'templates/go/internal/rpc/rpc.go'),
-  main: resolve(REPO_ROOT, 'templates/go/main.go'),
+const TOKEN = resolve(REPO_ROOT, 'templates/go/internal/auth/token.go');
+const JWKS = resolve(REPO_ROOT, 'templates/go/internal/auth/jwks.go');
+const VERIFIER = resolve(REPO_ROOT, 'templates/go/internal/auth/verifier.go');
+const AUTH = resolve(REPO_ROOT, 'templates/go/internal/auth/auth.go');
+const SERVER = resolve(REPO_ROOT, 'templates/go/internal/rpc/rpc.go');
+const MAIN = resolve(REPO_ROOT, 'templates/go/main.go');
+const PROVER = {
+  subjects: {
+    token: TOKEN,
+    jwks: JWKS,
+    verifier: VERIFIER,
+    auth: AUTH,
+    server: SERVER,
+    main: MAIN,
+  },
 };
 
 const AUTH_PKG = ['./internal/auth/'];
@@ -458,7 +466,7 @@ console.log(`mutation-prove-2051-go-verifier: ${MUTATIONS.length} mutations decl
 
 // Preflight: every anchor occurs exactly once BEFORE anything expensive runs.
 for (const m of MUTATIONS) {
-  const path = SUBJECTS[m.subject];
+  const path = PROVER.subjects[m.subject];
   if (path === undefined) {
     console.error(`mutation-prove-2051-go-verifier: ${m.id} names no subject ${m.subject}`);
     process.exit(2);
@@ -495,7 +503,7 @@ console.log('mutation-prove-2051-go-verifier: baseline green');
 let failed = 0;
 for (const m of MUTATIONS) {
   assertTreeClean(REPO_ROOT, `before ${m.id}`);
-  const snap = snapshot(SUBJECTS[m.subject]);
+  const snap = snapshot(PROVER.subjects[m.subject]);
   let build;
   let code;
   try {
