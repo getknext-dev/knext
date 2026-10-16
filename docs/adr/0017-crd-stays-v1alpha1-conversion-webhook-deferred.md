@@ -447,4 +447,4 @@ The guard accepts **exact, single-use waivers** in `scripts/crd-narrowing-waiver
 - [ ] Sprint-close design review: accept or revert this amendment and its keyPrefix entries.
 - [ ] Delete the three keyPrefix entries once the narrowing ships in a `v*` tag (the guard will fail
       until someone does).
-- [ ] `knext doctor` warns when the cluster's server version is below the floor (follow-up issue).
+- [ ] `knext doctor` warns when the cluster's server version is below the floor (#2442).
