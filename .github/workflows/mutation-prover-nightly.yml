@@ -160,6 +160,16 @@ jobs:
           rustc -V
           cargo -V
 
+      # `mutation-prove-rust-template-auth.mjs` grades `cargo test` in
+      # `templates/rust`, which pins its own toolchain
+      # (`templates/rust/rust-toolchain.toml`). Installed here so the prover
+      # never depends on rustup auto-installing it at the first `cargo` spawn.
+      - name: Install the Rust template's pinned toolchain (templates/rust/rust-toolchain.toml)
+        working-directory: templates/rust
+        run: |
+          rustup toolchain install
+          rustc -V
+
       # `mutation-prove-2321-go-metric-contract.mjs` (#2321) grades
       # `go test ./internal/metriccontract/` in the operator module, so the lane
       # needs the Go toolchain the operator's go.mod names (read from the file,
