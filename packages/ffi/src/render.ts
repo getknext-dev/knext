@@ -335,7 +335,12 @@ class Emitter {
       lines.push('  const $scratch = $base();');
     }
     call.push('$outPtr');
+    // Timed around the symbol call alone: a call blocks the thread, so a slow
+    // one is counted and logged (it cannot be interrupted), before any error.
+    lines.push('  const $t0 = performance.now();');
     lines.push(`  const $st = $lib.${f.symbol}(${call.join(', ')});`);
+    lines.push('  const $ms = performance.now() - $t0;');
+    lines.push(`  if ($ms > $slowMs) $slow(${name}, $ms);`);
     lines.push(`  if ($st !== 0) $fail(${name}, $st);`);
 
     // 3. Read the return.
@@ -487,6 +492,8 @@ let $ffi = undefined as unknown as $BunFfi;
 let $lib = undefined as unknown as $Symbols;
 let $view = undefined as unknown as DataView;
 let $outPtr = 0;
+/** Calls slower than this many milliseconds are counted and logged. Set on the first call (unreachable until then). */
+let $slowMs = Infinity;
 ${
   scratch
     ? `let $buf = undefined as unknown as ArrayBuffer;
@@ -500,6 +507,7 @@ const $te = new TextEncoder();
 /** The first call loads the library; a failure is cached and rethrown on every later call. */
 function $load(): void {
   if ($failed) throw $failed;
+  const $t0 = performance.now();
   try {
     $open();
     $ready = true;
@@ -512,6 +520,84 @@ function $load(): void {
           );
     throw $failed;
   }
+  $slowMs = $threshold(process.env['KNEXT_FFI_SLOW_CALL_MS']);
+  $loaded((performance.now() - $t0) / 1000);
+}
+
+/** The slow-call threshold in milliseconds: default 50; 0 turns counting off. */
+function $threshold(raw: string | undefined): number {
+  if (raw === undefined || raw.trim() === '') return 50;
+  const ms = Number(raw);
+  if (ms === 0) return Infinity;
+  if (Number.isFinite(ms) && ms > 0) return ms;
+  console.warn(
+    \`knext ffi: ignoring KNEXT_FFI_SLOW_CALL_MS=\${JSON.stringify(raw)}: it must be a number of milliseconds (0 turns slow-call counting off). Using 50.\`,
+  );
+  return 50;
+}
+
+/**
+ * The slow-call counts and load times, one registry per process. It lives on
+ * globalThis because Next can load this module more than once (one copy per
+ * bundler layer), and every copy must count into the same place. A Bun Worker
+ * has its own globalThis, so a Worker's calls are logged but not served.
+ */
+interface $Registry {
+  readonly slow: Map<string, number>;
+  readonly logged: Map<string, number>;
+  readonly load: Map<string, number>;
+}
+
+function $registry(): $Registry {
+  const g = globalThis as unknown as Record<symbol, $Registry | undefined>;
+  const key = Symbol.for('knext.ffi.metrics');
+  let r = g[key];
+  if (r === undefined) {
+    r = { slow: new Map(), logged: new Map(), load: new Map() };
+    g[key] = r;
+  }
+  return r;
+}
+
+/**
+ * After the first successful load: list every function at 0, record how long
+ * the load took (path resolution, the integrity hash, dlopen), and publish the
+ * render function the app's metrics port appends.
+ */
+function $loaded(seconds: number): void {
+  const r = $registry();
+  for (const [fn] of $SCHEMAS) if (!r.slow.has(fn)) r.slow.set(fn, 0);
+  if (!r.load.has($LIB)) r.load.set($LIB, seconds);
+  (globalThis as unknown as Record<symbol, unknown>)[Symbol.for('knext.ffi.renderMetrics')] = $renderMetrics;
+}
+
+/** A call took longer than the threshold: count it, and log the first one per function. */
+function $slow(fn: string, ms: number): void {
+  const r = $registry();
+  r.slow.set(fn, (r.slow.get(fn) ?? 0) + 1);
+  if (r.logged.has(fn)) return;
+  r.logged.set(fn, ms);
+  console.warn(
+    \`knext ffi: \${fn}() took \${ms.toFixed(1)} ms, over the \${$slowMs} ms slow-call threshold (KNEXT_FFI_SLOW_CALL_MS). A Rust call blocks this process for its whole duration: no other request is served and a shutdown cannot drain until it returns. Move long work to a zone function. Later slow calls to \${fn}() are counted in knext_ffi_slow_calls_total, not logged.\`,
+  );
+}
+
+/** Prometheus text for the app's metrics port. */
+function $renderMetrics(): string {
+  const r = $registry();
+  const out = [
+    '# HELP knext_ffi_slow_calls_total In-process Rust calls slower than KNEXT_FFI_SLOW_CALL_MS (default 50 ms), by function. Each one blocked the process for its whole duration.',
+    '# TYPE knext_ffi_slow_calls_total counter',
+  ];
+  for (const [fn, n] of [...r.slow].sort(([a], [b]) => (a < b ? -1 : 1))) {
+    out.push(\`knext_ffi_slow_calls_total{fn="\${fn}"} \${n}\`);
+  }
+  out.push(
+    '# HELP knext_ffi_load_seconds Seconds the first in-process Rust call spent loading the library (finding it, checking its sha256, opening it), by library.',
+    '# TYPE knext_ffi_load_seconds gauge',
+  );
+  for (const [lib, s] of r.load) out.push(\`knext_ffi_load_seconds{lib="\${lib}"} \${s}\`);
+  return \`\${out.join('\\n')}\\n\`;
 }
 
 function $open(): void {

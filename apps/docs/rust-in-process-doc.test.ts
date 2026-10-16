@@ -381,8 +381,34 @@ describe('docs — in-process Rust page', () => {
       /\$createHash\('sha256'\)[^\n]*\n\s*if \(actual !== expected\) \{\s*throw new FfiLoadError\(\s*`/,
     );
     expectBlock(body, pattern(mismatch), 'the sha256 mismatch refusal');
-    const notice = templateAfter(rendered, /console\.warn\(\s*`/);
+    const notice = templateAfter(
+      rendered,
+      /console\.warn\(\s*`(?=knext ffi: loading the development build)/,
+    );
     expectBlock(must(page, /quick start/i), pattern(notice), 'the development-build notice');
+  });
+
+  it('documents slow calls: the threshold, both metrics, the log lines as the module prints them, and that a call is not interrupted', () => {
+    const body = must(page, /slow calls/i);
+    for (const s of [
+      'KNEXT_FFI_SLOW_CALL_MS',
+      'knext_ffi_slow_calls_total',
+      'knext_ffi_load_seconds',
+      '50 ms',
+    ]) {
+      expect(body, s).toContain(s);
+    }
+    expect(rendered).toContain("if (raw === undefined || raw.trim() === '') return 50;");
+    const log = templateAfter(rendered, /console\.warn\(\s*`(?=knext ffi: \$\{fn\}\(\) took)/);
+    expectBlock(body, pattern(log), 'the slow-call log line');
+    const ignoring = templateAfter(
+      rendered,
+      /console\.warn\(\s*`(?=knext ffi: ignoring KNEXT_FFI_SLOW_CALL_MS)/,
+    );
+    expectBlock(body, pattern(ignoring), 'the unusable-threshold warning');
+    // Honest about the limit: counting makes a blocking call visible, not interruptible.
+    expect(body).toMatch(/cannot interrupt/i);
+    expect(body).toMatch(/SIGTERM/);
   });
 
   it('quotes the argument TypeError as the module throws it', () => {
@@ -433,10 +459,9 @@ describe('docs — in-process Rust page', () => {
   it('lists every global and declared name a Rust function or argument may not take', () => {
     const body = must(page, /reserved names/i);
     // Every name the module declares or references that is not a language
-    // keyword: the capitalised ones, plus the two lowercase globals.
-    const globals = [...RESERVED].filter(
-      (n) => /^[A-Z]/.test(n) || n === 'process' || n === 'console',
-    );
+    // keyword: the capitalised ones, plus the lowercase globals.
+    const lowercase = ['process', 'console', 'globalThis', 'performance'];
+    const globals = [...RESERVED].filter((n) => /^[A-Z]/.test(n) || lowercase.includes(n));
     expect(globals.length).toBeGreaterThan(10);
     for (const name of globals) expect(body, name).toContain(`\`${name}\``);
     for (const name of RESERVED_TYPES) expect(body, name).toContain(`\`${name}\``);

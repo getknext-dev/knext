@@ -12,6 +12,7 @@ import {
   explode,
   FfiLoadError,
   greet,
+  pause,
   RustError,
   RustPanicError,
 } from '@/generated/ffi';
@@ -55,4 +56,9 @@ export async function checkedGreetAction(name: string): Promise<FfiResult> {
 /** Rust `explode(String) -> String`: always panics, a `RustPanicError`. */
 export async function explodeAction(message: string): Promise<FfiResult> {
   return settle(() => explode(message));
+}
+
+/** Rust `pause(u32) -> u32`: blocks for `ms` milliseconds, so the call is counted as slow. */
+export async function pauseAction(ms: number): Promise<FfiResult> {
+  return settle(() => String(pause(ms)));
 }

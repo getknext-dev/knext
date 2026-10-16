@@ -11,12 +11,17 @@
  *
  * Build switches: -DOMIT_GREET drops greet's shim (a stale wrapper);
  * -DBAD_SCHEMA skews every _schema value; -DGREETING=\"...\" changes greet.
+ * -DSLOW_ADD_MS=<n> makes add sleep n milliseconds before it answers (a
+ * blocking call, for the slow-call counter).
  */
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef SLOW_ADD_MS
+#include <time.h>
+#endif
 
 #ifndef GREETING
 #define GREETING "Hello"
@@ -57,6 +62,10 @@ static int32_t fail(uint64_t *out, int32_t status, const char *msg) {
 }
 
 int32_t SYM_add(int32_t a, int32_t b, uint64_t *out) {
+#ifdef SLOW_ADD_MS
+  struct timespec ts = {SLOW_ADD_MS / 1000, (SLOW_ADD_MS % 1000) * 1000000L};
+  nanosleep(&ts, NULL);
+#endif
   int32_t r = (int32_t)((uint32_t)a + (uint32_t)b);
   memcpy(out, &r, sizeof r);
   return 0;
