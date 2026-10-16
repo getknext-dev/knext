@@ -23,7 +23,7 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 use super::{Config, Function, Timeouts, build, example_router};
-use crate::auth::{AuthError, Verifier};
+use crate::auth::{AuthError, Caller, Verifier};
 use crate::connect::example::v1::ExampleServiceClient;
 use crate::proto::example::v1::{PutItemRequest, PutItemResponse};
 
@@ -41,8 +41,11 @@ pub const SLOW_HANDLER: Duration = Duration::from_millis(1500);
 pub struct AdmitAll;
 
 impl Verifier for AdmitAll {
-    fn verify(&self, _token: &str, _procedure: &str) -> Result<(), AuthError> {
-        Ok(())
+    fn verify(&self, _token: &str, _procedure: &str) -> Result<Caller, AuthError> {
+        Ok(Caller {
+            subject: "test-user".into(),
+            zone: "knext:zone:test/zone".into(),
+        })
     }
 }
 

@@ -86,6 +86,12 @@ impl Default for Timeouts {
 pub struct Config {
     /// The mounted JWKS file the token check reads.
     pub jwks_path: PathBuf,
+    /// What every token must name: the owning zone and this function. With
+    /// either empty, every RPC but the health check is refused.
+    pub issuer: String,
+    pub audience: String,
+    /// The token check's clock: the system clock (tests set it).
+    pub clock: auth::Clock,
     pub timeouts: Timeouts,
     /// Defaults to a tracer from the global OpenTelemetry provider, which is
     /// a no-op until the binary installs one.
@@ -96,6 +102,9 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             jwks_path: PathBuf::from(auth::DEFAULT_JWKS_PATH),
+            issuer: String::new(),
+            audience: String::new(),
+            clock: Arc::new(std::time::SystemTime::now),
             timeouts: Timeouts::default(),
             tracer: None,
         }
@@ -112,9 +121,19 @@ pub struct Function {
 }
 
 /// Assembles the function with the token check reading the JWKS mounted at
-/// `cfg.jwks_path`. This is the only constructor the binary uses.
+/// `cfg.jwks_path` and holding tokens to `cfg.issuer` and `cfg.audience`,
+/// with each RPC's auth option from the contract table. This is the only
+/// constructor the binary uses.
 pub fn new(cfg: Config) -> Function {
-    let verifier: Arc<dyn Verifier> = Arc::new(auth::mounted_jwks(cfg.jwks_path.clone()));
+    let tokens = auth::TokenConfig {
+        clock: Arc::clone(&cfg.clock),
+        ..auth::TokenConfig::new(
+            cfg.jwks_path.clone(),
+            cfg.issuer.clone(),
+            cfg.audience.clone(),
+        )
+    };
+    let verifier: Arc<dyn Verifier> = Arc::new(auth::token_verifier(tokens));
     build(example_router(), Some(verifier), cfg)
 }
 
