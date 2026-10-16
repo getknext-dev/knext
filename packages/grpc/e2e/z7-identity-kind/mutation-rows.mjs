@@ -1,5 +1,5 @@
 /**
- * The rows of the Z7 kind e2e's mutation proof (mutation-prove.mjs). Pure data,
+ * The rows of the Z7 kind e2e's mutation proof (mutation-prove-operator.sh). Pure data,
  * so tests/z7-identity-kind-e2e-lane.test.ts can check, with no cluster, that
  * every anchor still occurs exactly once in the operator source and that every
  * expected reason is a message run.sh can print: a row whose anchor drifted or

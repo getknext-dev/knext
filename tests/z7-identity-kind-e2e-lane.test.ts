@@ -203,7 +203,8 @@ describe('the path filter covers what the lane consumes', () => {
       ),
       ...readdirSync(LANE_DIR).map((f) => {
         const p = resolve(LANE_DIR, f);
-        if (!/\.(sh|ts)$/.test(f)) return '';
+        // mutation-prove-operator.sh is run by hand and never by the workflow.
+        if (!/\.(sh|ts)$/.test(f) || f.startsWith('mutation-')) return '';
         // Code, not prose: a path in a comment is documentation, not a consumed input.
         return (
           readFileSync(p, 'utf8')
@@ -426,6 +427,24 @@ describe('the lane proves what it claims', () => {
     expect(runSh).toMatch(/\[ "\$\{#line\}" -ge 40 \] \|\| continue/);
   });
 
+  it('scans the logs of EVERY operator pod, and the ones the rotation restart would take away', () => {
+    // The operator runs two replicas and only the leader reconciles: `logs
+    // deployment/...` reads one pod, whichever, and a mutation that logged the key
+    // survived the lane that way. The restart in the rotation replaces both pods.
+    expect(runSh).toMatch(/collect_operator_logs\(\) \{/);
+    expect(runSh).toMatch(/get pods -l control-plane=controller-manager -o name/);
+    expect(runSh).not.toMatch(/\blogs deployment\/kn-next-operator-controller-manager --tail=-1/);
+    const restart = runSh.indexOf('rollout restart deployment/kn-next-operator-controller-manager');
+    const keep = runSh.lastIndexOf(
+      'collect_operator_logs "${WORK}/operator-before-restart.log"',
+      restart,
+    );
+    expect(keep, 'the pre-restart operator logs must be kept before the restart').toBeGreaterThan(
+      0,
+    );
+    expect(runSh).toContain('the scan would be reading the wrong pods');
+  });
+
   it('passes a kid as --kid=<value>: a base64url kid can start with "-" and parseArgs reads that as a flag', () => {
     // Seen on a control run: 1 kid in 64 starts with "-", and `--kid -q5z...` made
     // the probe exit before it sent anything.
@@ -462,7 +481,8 @@ describe('the lane proves what it claims', () => {
 });
 
 describe('the mutation proof is anchored to the code it mutates', () => {
-  // mutation-prove.mjs needs a cluster and 10 to 15 minutes per row. These
+  // The operator rows (mutation-prove-operator.sh) need a cluster
+  // and 10 to 15 minutes each. These
   // checks need neither: they catch the cheap way a proof rots, an anchor that
   // no longer occurs once, or a reason the lane no longer prints.
   const phases = ['up', 'images', 'deploy', 'verify', 'rotate', 'leaks'];

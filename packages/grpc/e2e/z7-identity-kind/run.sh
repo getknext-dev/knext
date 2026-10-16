@@ -188,6 +188,18 @@ export_key() {
   [ -s "${dir}/current.key" ] && [ -s "${dir}/current.kid" ] || fail "the Secret holds no ${slot} key"
 }
 
+# collect_operator_logs <file>: the logs of EVERY operator pod, previous
+# containers included, appended to <file>. The operator runs several replicas and
+# only the leader reconciles, so `kubectl logs deployment/...` (one pod, whichever
+# it picks) would scan the wrong one and call it clean.
+collect_operator_logs() {
+  local pod
+  for pod in $(k -n "${OPERATOR_NS}" get pods -l control-plane=controller-manager -o name); do
+    k -n "${OPERATOR_NS}" logs "${pod}" --all-containers --tail=-1 >>"$1" 2>&1 || true
+    k -n "${OPERATOR_NS}" logs "${pod}" --all-containers --previous --tail=-1 >>"$1" 2>&1 || true
+  done
+}
+
 pair_kids() { printf '%s\n%s\n' "$1" "$2" | LC_ALL=C sort | paste -sd, -; }
 
 # probe <args...>: one call to a function, one JSON line. Exit status 2 means the
@@ -783,6 +795,9 @@ phase_rotate() {
     "apps.kn-next.dev/signing-key-switched-at=$(node -p 'new Date(Date.now() - 2 * 3600 * 1000).toISOString()')" --overwrite
   local t_retire
   t_retire="$(now_s)"
+  # The restart replaces the operator pods, and their logs (the key's creation,
+  # staging and switch) with them: keep what they said for the leak scan.
+  collect_operator_logs "${WORK}/operator-before-restart.log"
   k -n "${OPERATOR_NS}" rollout restart deployment/kn-next-operator-controller-manager
   k -n "${OPERATOR_NS}" rollout status deployment/kn-next-operator-controller-manager --timeout=180s
   wait_until 180 3 "the previous key to leave the Secret" '[ -z "$(secret_get previous.kid)" ]'
@@ -834,15 +849,18 @@ phase_leaks() {
   log "leaks: no key material in logs, events or published objects"
   local dump="${WORK}/dump"
   mkdir -p "${dump}"
-  k -n "${OPERATOR_NS}" logs deployment/kn-next-operator-controller-manager --tail=-1 >"${dump}/operator.log" 2>&1 || true
-  k -n "${OPERATOR_NS}" logs deployment/kn-next-operator-controller-manager --previous --tail=-1 >>"${dump}/operator.log" 2>&1 || true
+  if [ -f "${WORK}/operator-before-restart.log" ]; then cp "${WORK}/operator-before-restart.log" "${dump}/operator.log"; fi
+  collect_operator_logs "${dump}/operator.log"
   k get events -A -o json >"${dump}/events.json" 2>&1 || true
-  k -n "${NS}" get nextapp,backendservice,ksvc,configmap -o yaml >"${dump}/objects.yaml" 2>&1 || true
+  k -n "${NS}" get nextapp,backendservice,ksvc,configmap,pods -o yaml >"${dump}/objects.yaml" 2>&1 || true
   local svc
   for svc in "${ZONE}" "${GO_FN}" "${RUST_FN}"; do
     k -n "${NS}" logs -l "serving.knative.dev/service=${svc}" --all-containers --tail=-1 >"${dump}/${svc}.log" 2>&1 || true
   done
   [ -s "${dump}/operator.log" ] || fail "no operator log to scan"
+  # The scan is only worth something over the log of a pod that did the work.
+  grep -q 'reconciled' "${dump}/operator.log" \
+    || fail "the operator logs show no reconcile: the scan would be reading the wrong pods"
   # Every private key this run touched (old, new, and the current one now).
   export_key "${WORK}/leak-current" current
   local keyfile line n=0 hits=0

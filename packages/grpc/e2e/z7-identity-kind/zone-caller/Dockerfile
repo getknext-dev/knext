@@ -5,6 +5,9 @@
 #
 # node:24-alpine, digest-pinned to the same index the repo's other images use.
 FROM node:24-alpine@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1
+# NODE_ENV=production: the published cache seams refuse under it, and every app
+# runtime image sets it (tests/runtime-image-node-env.test.ts).
+ENV NODE_ENV=production
 WORKDIR /app
 # --chmod: the build context is written by a script that runs under umask 077, and
 # the app runs as `node`, which must be able to read its own bundle.

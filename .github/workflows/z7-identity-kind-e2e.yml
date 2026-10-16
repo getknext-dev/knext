@@ -2,7 +2,7 @@ name: Z7 identity tokens — kind e2e
 
 # The operator half of Z7 (a per-zone Ed25519 signing key, the JWKS built from
 # it, rotation) is proved by unit and envtest tests that have no kubelet, no
-# Knative and no pods. This lane runs it on a real cluster, with the operator
+# serving layer and no pods. This lane runs it on a real cluster, with the operator
 # built from this checkout and a zone bound to a Go and a Rust function built
 # from the templates:
 #

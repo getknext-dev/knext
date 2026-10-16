@@ -39,13 +39,20 @@ into files in a private temporary directory, never to the terminal.
 
 ## Mutation proof
 
-`mutation-prove.mjs` breaks one operator rule at a time (the propagation bound is not
-waited, the staged key is not published, the previous key is retired at once, the staged
-key reaches the zone's pod, a function mounts the JWKS through a subPath, the operator logs
-a key), builds that operator, and expects the lane to go red for that reason. It then runs
-the unmutated operator through every phase, which must pass. It needs a cluster that has
-had `PHASES="up images"` and takes about an hour, so it is run by hand; its anchors are
-checked without a cluster by `tests/z7-identity-kind-e2e-lane.test.ts`.
+`scripts/mutation-prove-2461-z7-kind-e2e.mjs` proves the lane is not decoration, in two
+halves.
+
+- Always (no cluster, part of the nightly prover sweep): it breaks one property of the
+  probe's tokens, or one rule of the workflow, path filter or script, at a time, and
+  requires the two cluster-free guards to go red.
+- By hand: `mutation-prove-operator.sh` breaks one rule in the **operator** at a time (the
+  propagation bound is not waited, the staged key is not published, the previous key is
+  retired at once, the staged key reaches the zone's pod, a function mounts the JWKS through
+  a subPath, the operator logs a key; the rows are in `mutation-rows.mjs`), builds that
+  operator, rolls it out, and requires `run.sh` to go red and to name that reason. It then
+  runs the unmutated operator through every phase, which must pass. It needs a cluster that
+  has had `PHASES="up images"` and takes about an hour. Its anchors are checked without a
+  cluster by `tests/z7-identity-kind-e2e-lane.test.ts`.
 
 ## What it does not prove
 
@@ -64,5 +71,6 @@ checked without a cluster by `tests/z7-identity-kind-e2e-lane.test.ts`.
 - `run.sh`: the lane.
 - `probe.ts`, `probe-lib.ts`: one Connect call to a function with a chosen token;
   unit-tested in `packages/grpc/src/__tests__/z7-e2e-probe.test.ts`.
+- `mutation-prove-operator.sh`, `mutation-rows.mjs`: the operator half of the mutation proof.
 - `zone-caller/`: the zone's image context (`build.ts` runs the real generator over the
   Go template's contract and bundles the glue with the real runtime).
