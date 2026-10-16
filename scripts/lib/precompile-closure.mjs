@@ -80,6 +80,44 @@ export const MIN_COVERAGE = 0.9;
  */
 export const ANCHOR_PACKAGES = ['vinext', 'vite', 'nitro', 'next', 'react', 'react-dom'];
 
+/**
+ * The closure shapes this gate knows (#1525). `vinext` is the original and the
+ * default. `standalone` is the traced `.next/standalone/node_modules` tree that
+ * the self-contained standalone executable embeds: next and react, no vinext
+ * toolchain, and a traced subset, so it carries its own anchors and floors.
+ *
+ * The standalone floors are deliberately LOW and UNMEASURED (a traced tree is a
+ * small fraction of an install). TODO(#1525): set them from the first CI run of
+ * the standalone leg. They are still far above zero, which is the number every
+ * silent-vacuity failure produces.
+ */
+export const STANDALONE_ANCHOR_PACKAGES = ['next', 'react', 'react-dom'];
+export const CLOSURE_SHAPES = {
+  vinext: {
+    label: 'vinext',
+    anchors: ANCHOR_PACKAGES,
+    minComponents: MIN_NPM_COMPONENTS,
+    minInstalled: MIN_INSTALLED_PACKAGES,
+  },
+  standalone: {
+    label: 'standalone',
+    anchors: STANDALONE_ANCHOR_PACKAGES,
+    minComponents: 15,
+    minInstalled: 15,
+  },
+};
+
+/** Resolve a shape by name; no name means `vinext`; an unknown name THROWS. */
+export function closureShape(name) {
+  const shape = CLOSURE_SHAPES[name ?? 'vinext'];
+  if (shape === undefined) {
+    throw new Error(
+      `unknown closure shape "${name}" — expected one of ${Object.keys(CLOSURE_SHAPES).join(', ')}`,
+    );
+  }
+  return shape;
+}
+
 /** The npm components of a CycloneDX document. */
 export function npmComponents(sbom) {
   const components = sbom?.components ?? [];
@@ -155,6 +193,7 @@ export function verifyClosureCoverage({
   minInstalled = MIN_INSTALLED_PACKAGES,
   minCoverage = MIN_COVERAGE,
   anchors = ANCHOR_PACKAGES,
+  label = 'vinext',
 }) {
   const problems = [];
   const npm = npmComponents(sbom);
@@ -168,7 +207,7 @@ export function verifyClosureCoverage({
   } else if (npm.length < minComponents) {
     problems.push(
       `the SBOM contains ${npm.length} npm components, below the floor of ${minComponents} — ` +
-        'a closure this small is not the vinext dependency graph',
+        `a closure this small is not the ${label} dependency graph`,
     );
   }
 
@@ -193,7 +232,7 @@ export function verifyClosureCoverage({
   if (missingAnchors.length > 0) {
     problems.push(
       `the SBOM is missing toolchain anchors [${missingAnchors.join(', ')}] — it does not ` +
-        'describe the vinext pre-compile closure',
+        `describe the ${label} pre-compile closure`,
     );
   }
 

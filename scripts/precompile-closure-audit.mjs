@@ -45,6 +45,10 @@
  *
  *   --closure <dir>   the dir is its OWN install root (examples/bun-exec has its
  *                     own bun.lock). syft scans `<dir>/node_modules` directly.
+ *   --shape <name>    `vinext` (default) or `standalone` (#1525): which toolchain
+ *                     anchors and size floors the SBOM must satisfy. `standalone`
+ *                     is for `.next/standalone` — the tree the self-contained
+ *                     standalone executable embeds.
  *   --app <dir>       the dir is a WORKSPACE MEMBER (apps/file-manager). Its
  *                     `node_modules` is symlinks into the shared isolated store,
  *                     which syft refuses to follow (MEASURED: 0 npm components),
@@ -73,7 +77,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { filterSbomToClosure, resolveAppClosure } from './lib/bun-app-closure.mjs';
 import {
-  ANCHOR_PACKAGES,
+  closureShape,
   evaluateFindings,
   installedPackages,
   readAllowlist,
@@ -90,6 +94,9 @@ function arg(name, fallback) {
 }
 
 const appArg = arg('app', undefined);
+// `--shape standalone` scans the Next standalone trace the self-contained
+// standalone executable embeds (#1525); the default is the vinext closure.
+const shape = closureShape(arg('shape', undefined));
 const closureRoot = resolve(repoRoot, arg('closure', 'examples/bun-exec'));
 // `--app` scans the workspace root (the only tree syft can traverse) and
 // projects; `--closure` scans the install root directly.
@@ -185,10 +192,10 @@ if (appClosure !== null) {
 console.log(`  SBOM: ${sbomPath}`);
 
 // ── 3. the emptiness / coverage guard ───────────────────────────────────────
-const coverage = verifyClosureCoverage({ sbom, installed });
+const coverage = verifyClosureCoverage({ sbom, installed, ...shape });
 console.log(
   `  SBOM npm components: ${coverage.npmComponentCount} · coverage of installed tree: ` +
-    `${(coverage.coverage * 100).toFixed(1)}% · anchors: ${ANCHOR_PACKAGES.join(', ')}`,
+    `${(coverage.coverage * 100).toFixed(1)}% · anchors: ${shape.anchors.join(', ')}`,
 );
 if (!coverage.ok) {
   for (const problem of coverage.problems) console.error(`  - ${problem}`);
@@ -219,7 +226,7 @@ for (const f of suppressed) {
   );
 }
 if (blocking.length > 0) {
-  console.error('\nHIGH/CRITICAL findings in the vinext pre-compile closure:');
+  console.error(`\nHIGH/CRITICAL findings in the ${shape.label} pre-compile closure:`);
   for (const f of blocking) {
     console.error(
       `  ${f.severity.toUpperCase()} ${f.id} — ${f.package}@${f.version}` +
