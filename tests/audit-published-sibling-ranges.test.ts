@@ -193,6 +193,24 @@ describe('#2389 — an optional Beta package peers on core with a bounded major'
     ).toBeGreaterThan(0);
   });
 
+  it('a FIXED-group package may not use the bounded shape even as a peer', () => {
+    const corePeer: Manifest = {
+      name: '@getknext/core',
+      version: '2.0.0',
+      peerDependencies: { '@getknext/lib': '>=2.0.0-0 <3.0.0' },
+    };
+    expect(siblingRangeProblems([lib('2.0.0'), corePeer]).length).toBeGreaterThan(0);
+  });
+
+  it('an optional package may use the bounded shape only as a PEER, not a dependency', () => {
+    const ffiDep: Manifest = {
+      name: '@getknext/ffi',
+      version: '0.1.0',
+      dependencies: { '@getknext/core': '>=2.0.0-0 <3.0.0' },
+    };
+    expect(siblingRangeProblems([core2('2.0.0'), ffiDep]).length).toBeGreaterThan(0);
+  });
+
   it('an optional package with any other range shape still fails closed', () => {
     expect(siblingRangeProblems([core2('2.0.0'), ffi('2.x')]).length).toBeGreaterThan(0);
   });
