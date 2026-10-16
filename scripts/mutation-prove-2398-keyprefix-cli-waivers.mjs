@@ -59,7 +59,7 @@ const RULE = [
     id: 'R04',
     subject: 'rule',
     claim: 'the CLI length check is gone',
-    anchor: '    if (prefix.length > KEY_PREFIX_MAX_LENGTH) {',
+    anchor: '    if (length > KEY_PREFIX_MAX_LENGTH) {',
     replacement: '    if (false) {',
   },
   {
