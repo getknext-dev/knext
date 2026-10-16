@@ -1,0 +1,29 @@
+// Fixture contract for the public-read shape: a read anyone may make, with no
+// signed-in user. Served by the same `orders` function.
+syntax = "proto3";
+
+package orders.v1;
+
+import "knext/v1/options.proto";
+
+option (knext.v1.function) = "orders";
+option (knext.v1.contract_version) = "1.2.0";
+
+// CatalogService is the public half of the `orders` function.
+service CatalogService {
+  // GetMenu reads the public menu. AUTH_PUBLIC is allowed because it is a read.
+  rpc GetMenu(GetMenuRequest) returns (GetMenuResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+    option (knext.v1.auth) = AUTH_PUBLIC;
+  }
+}
+
+// GetMenuRequest selects a menu.
+message GetMenuRequest {
+  string locale = 1;
+}
+
+// GetMenuResponse is the menu.
+message GetMenuResponse {
+  repeated string items = 1;
+}

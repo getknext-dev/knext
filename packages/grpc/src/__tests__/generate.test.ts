@@ -47,7 +47,12 @@ describe('knext generate — byte-stable output', () => {
     expect([...treeA.keys()]).toEqual([
       '.knext-generated.json',
       'knext/v1/options_pb.ts',
+      'orders/v1/catalog_knext.ts',
+      'orders/v1/catalog_knext_server.ts',
+      'orders/v1/catalog_pb.ts',
       'orders/v1/orders_knext.ts',
+      'orders/v1/orders_knext_actions.ts',
+      'orders/v1/orders_knext_server.ts',
       'orders/v1/orders_pb.ts',
     ]);
     expect(treeB).toEqual(treeA);
@@ -58,6 +63,22 @@ describe('knext generate — byte-stable output', () => {
     const twice = generateFiles(FIXTURE_ZONE);
     expect(twice).toEqual(once);
     expect(once).toEqual(readTree(join(FIXTURE_ZONE, OUT)));
+  });
+
+  it('does not depend on the working directory it runs from', () => {
+    // CI checks out into /home/runner/work/knext/knext. An import that climbs
+    // out of the output root (the authorize() hook) must not be resolved
+    // against that path, or `../../knext/authorize` collapses into the
+    // checkout's own `knext` directory and the import loses a segment.
+    const nested = join(emptyDir('cwd'), 'knext', 'knext');
+    mkdirSync(nested, { recursive: true });
+    const before = process.cwd();
+    process.chdir(nested);
+    try {
+      expect(generateFiles(FIXTURE_ZONE)).toEqual(readTree(join(FIXTURE_ZONE, OUT)));
+    } finally {
+      process.chdir(before);
+    }
   });
 
   it('writes nothing machine-specific into the output', () => {

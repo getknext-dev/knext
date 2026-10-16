@@ -148,7 +148,8 @@ pub const EXAMPLE_SERVICE_PUT_ITEM_SPEC: ::connectrpc::Spec = ::connectrpc::Spec
 #[allow(clippy::type_complexity)]
 pub trait ExampleService: Send + Sync + 'static {
     /// GetItem reads one item. NO_SIDE_EFFECTS makes it a read: the zone may
-    /// retry it.
+    /// retry it, and caches it per signed-in user. AUTH_USER: authorize() must
+    /// return a verified user first.
     ///
     /// `'a` lets the response body borrow from `&self` (e.g. server-resident state).
     ///
@@ -171,8 +172,8 @@ pub trait ExampleService: Send + Sync + 'static {
             > + Send + use<'a, Self>,
         >,
     > + Send;
-    /// PutItem writes one item. A write is never retried and carries an
-    /// idempotency key.
+    /// PutItem writes one item. A write is never retried, carries an
+    /// idempotency key, and always needs a user (AUTH_USER).
     ///
     /// `'a` lets the response body borrow from `&self` (e.g. server-resident state).
     ///

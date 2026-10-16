@@ -54,3 +54,34 @@ pub const __CONTRACT_VERSION_JSON_EXT: ::buffa::type_registry::JsonExtEntry = ::
         __from_json
     },
 };
+/**Extension `auth` on `.google.protobuf.MethodOptions` (field 50703).
+
+Proto enum type: `.knext.v1.Auth`. Cast via `EnumValue::from_i32`.*/
+pub const AUTH: ::buffa::Extension<::buffa::extension::codecs::EnumI32> = ::buffa::Extension::new(
+    50703u32,
+    "google.protobuf.MethodOptions",
+);
+#[doc(hidden)]
+pub const __AUTH_JSON_EXT: ::buffa::type_registry::JsonExtEntry = ::buffa::type_registry::JsonExtEntry {
+    number: 50703u32,
+    full_name: "knext.v1.auth",
+    extendee: "google.protobuf.MethodOptions",
+    to_json: ::buffa::extension_registry::helpers::enum_to_json::<super::super::Auth>,
+    from_json: {
+        fn __from_json(
+            value: ::buffa::serde_json::Value,
+            number: u32,
+        ) -> ::core::result::Result<
+            ::buffa::alloc::vec::Vec<::buffa::UnknownField>,
+            ::buffa::alloc::string::String,
+        > {
+            if value.is_null() {
+                return ::core::result::Result::Ok(::buffa::alloc::vec::Vec::new());
+            }
+            ::buffa::extension_registry::helpers::enum_from_json::<
+                super::super::Auth,
+            >(value, number)
+        }
+        __from_json
+    },
+};

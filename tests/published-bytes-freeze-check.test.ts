@@ -7,6 +7,7 @@ import {
   PIN_FILE,
   PIN_FILE_V13,
   ROOT_BUILD_INPUT_FILES,
+  releasedBaseSupersedesRc,
   releaseLine,
   selectPinFile,
   touchesPublishableScope,
@@ -387,8 +388,10 @@ describe('release-line scope (#2098): the pin guards the line whose bytes are cr
     expect(d.reason).toMatch(/not the line whose bytes are credentialed/);
   });
 
+  // #2429: the base is still IN the pinned rc's window (it carries that rc's
+  // own version) — a released 1.0.x would end the window, see the block below.
   it('(b) still PROCEEDS when the base carries the SAME line as the pinned tag', () => {
-    const d = decidePublishedBytesScope({ ...args, baseVersion: '1.0.4' });
+    const d = decidePublishedBytesScope({ ...args, baseVersion: '1.0.0-rc.6' });
     expect(d.action).toBe('proceed');
   });
 
@@ -398,7 +401,7 @@ describe('release-line scope (#2098): the pin guards the line whose bytes are cr
       ...args,
       basePin: v13,
       headPin: v13,
-      baseVersion: '1.3.0',
+      baseVersion: '1.3.0-rc.10',
     });
     expect(d.action).toBe('proceed');
   });
@@ -419,6 +422,69 @@ describe('release-line scope (#2098): the pin guards the line whose bytes are cr
 
   it('still PROCEEDS when the base version is unparseable (fail closed)', () => {
     expect(decidePublishedBytesScope({ ...args, baseVersion: 'garbage' }).action).toBe('proceed');
+  });
+});
+
+describe('released-base scope (#2429): a GA at or above the pinned rc base ends that rc window on this line', () => {
+  const v13 = { rcTag: 'v1.3.0-rc.10', line: 'v1.3' };
+  const args = {
+    basePin: v13,
+    headPin: v13,
+    changedFiles: ['packages/kn-next/src/__tests__/x.test.ts'],
+    packageDirs,
+    now: NOW,
+  };
+
+  it('releasedBaseSupersedesRc: true only for a released X.Y.Z at or above the rc tag base, compared numerically', () => {
+    expect(releasedBaseSupersedesRc('1.3.1', 'v1.3.0-rc.10')).toBe(true);
+    expect(releasedBaseSupersedesRc('1.3.0', 'v1.3.0-rc.10')).toBe(true);
+    expect(releasedBaseSupersedesRc('1.3.10', 'v1.3.9-rc.1')).toBe(true);
+    expect(releasedBaseSupersedesRc('1.3.9', 'v1.3.10-rc.1')).toBe(false);
+    expect(releasedBaseSupersedesRc('1.3.1', 'v1.3.2-rc.1')).toBe(false);
+    expect(releasedBaseSupersedesRc('1.3.0-rc.10', 'v1.3.0-rc.10')).toBe(false);
+    expect(releasedBaseSupersedesRc('1.3.1-rc.1', 'v1.3.0-rc.10')).toBe(false);
+    expect(releasedBaseSupersedesRc(undefined, 'v1.3.0-rc.10')).toBe(false);
+    expect(releasedBaseSupersedesRc('garbage', 'v1.3.0-rc.10')).toBe(false);
+    expect(releasedBaseSupersedesRc('1.3.1', 'garbage')).toBe(false);
+  });
+
+  it('SKIPS with a stated reason when the base is released 1.3.1 and the pin is still v1.3.0-rc.10 (the PR #2428 case)', () => {
+    const d = decidePublishedBytesScope({ ...args, baseVersion: '1.3.1' });
+    expect(d.action).toBe('skip');
+    expect(d.reason).toContain('1.3.1');
+    expect(d.reason).toContain('v1.3.0-rc.10');
+    expect(d.reason).toMatch(/credential window .* has ended on this line/);
+  });
+
+  it('SKIPS when the base is the GA of the pinned rc itself (1.3.0 vs v1.3.0-rc.10: "at")', () => {
+    expect(decidePublishedBytesScope({ ...args, baseVersion: '1.3.0' }).action).toBe('skip');
+  });
+
+  it('still PROCEEDS when the base is still IN the window (base carries the rc version) and bytes change', () => {
+    const d = decidePublishedBytesScope({
+      ...args,
+      changedFiles: ['packages/kn-next/src/index.ts'],
+      baseVersion: '1.3.0-rc.10',
+    });
+    expect(d.action).toBe('proceed');
+  });
+
+  it('still PROCEEDS when the base is a released version BELOW the pinned rc base (1.3.1 vs v1.3.2-rc.1)', () => {
+    const pinned = { rcTag: 'v1.3.2-rc.1', line: 'v1.3' };
+    const d = decidePublishedBytesScope({
+      ...args,
+      basePin: pinned,
+      headPin: pinned,
+      changedFiles: ['packages/kn-next/src/index.ts'],
+      baseVersion: '1.3.1',
+    });
+    expect(d.action).toBe('proceed');
+  });
+
+  it('still PROCEEDS for a prerelease base above the rc base (not released, window not ended)', () => {
+    expect(decidePublishedBytesScope({ ...args, baseVersion: '1.3.1-rc.1' }).action).toBe(
+      'proceed',
+    );
   });
 });
 

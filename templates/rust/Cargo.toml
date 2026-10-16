@@ -55,6 +55,7 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 base64 = "0.22"
 flate2 = "1"
 hyper = { version = "1", features = ["client", "server", "http1", "http2"] }
+zstd = "0.13"
 opentelemetry_sdk = { version = "0.33", default-features = false, features = ["trace", "testing"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time", "sync", "io-util", "test-util"] }
 

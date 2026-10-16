@@ -109,6 +109,58 @@ async fn gzip_bomb_to_an_rpc_stops_at_the_message_limit() {
     running.stop().await.unwrap();
 }
 
+/// Only gzip is accepted: a zstd body is refused as `unimplemented`, on the
+/// health check (the one route that reads a body without a token) and on an
+/// RPC past the token, over Connect and gRPC.
+#[tokio::test]
+async fn a_zstd_request_is_refused() {
+    let running = start(function(admit(), Timeouts::default())).await;
+    let message = PutItemRequest {
+        id: "z".into(),
+        value: "zstd".into(),
+        ..Default::default()
+    }
+    .encode_to_vec();
+    let compressed = Bytes::from(zstd::encode_all(&message[..], 3).unwrap());
+    for procedure in [HEALTH_CHECK, PUT_ITEM] {
+        let connect = post(
+            running.addr,
+            procedure,
+            &[
+                ("content-type", "application/proto"),
+                ("content-encoding", "zstd"),
+                ("authorization", "Bearer a.b.c"),
+            ],
+            compressed.clone(),
+        );
+        let resp = raw(running.addr, Transport::Http1, connect).await.unwrap();
+        assert_eq!(
+            outcome(resp).await.as_deref(),
+            Some("unimplemented"),
+            "connect {procedure}"
+        );
+
+        let grpc = post(
+            running.addr,
+            procedure,
+            &[
+                ("content-type", "application/grpc"),
+                ("grpc-encoding", "zstd"),
+                ("te", "trailers"),
+                ("authorization", "Bearer a.b.c"),
+            ],
+            envelope(true, &compressed),
+        );
+        let resp = raw(running.addr, Transport::H2c, grpc).await.unwrap();
+        assert_eq!(
+            outcome(resp).await.as_deref(),
+            Some("12"),
+            "grpc {procedure}"
+        );
+    }
+    running.stop().await.unwrap();
+}
+
 /// A body that never ends: frames of `chunk` bytes, sent as fast as the
 /// server takes them, until the receiver is dropped.
 fn endless(

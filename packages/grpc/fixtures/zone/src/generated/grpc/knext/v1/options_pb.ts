@@ -10,16 +10,53 @@
 // @generated from file knext/v1/options.proto (package knext.v1, syntax proto3)
 /* eslint-disable */
 
-import type { GenExtension, GenFile } from "@bufbuild/protobuf/codegenv2";
-import { extDesc, fileDesc } from "@bufbuild/protobuf/codegenv2";
-import type { FileOptions } from "@bufbuild/protobuf/wkt";
+import type { GenEnum, GenExtension, GenFile } from "@bufbuild/protobuf/codegenv2";
+import { enumDesc, extDesc, fileDesc } from "@bufbuild/protobuf/codegenv2";
+import type { FileOptions, MethodOptions } from "@bufbuild/protobuf/wkt";
 import { file_google_protobuf_descriptor } from "@bufbuild/protobuf/wkt";
 
 /**
  * Describes the file knext/v1/options.proto.
  */
 export const file_knext_v1_options: GenFile = /*@__PURE__*/
-  fileDesc("ChZrbmV4dC92MS9vcHRpb25zLnByb3RvEghrbmV4dC52MTo6CghmdW5jdGlvbhIcLmdvb2dsZS5wcm90b2J1Zi5GaWxlT3B0aW9ucxiNjAMgASgJUghmdW5jdGlvbjpJChBjb250cmFjdF92ZXJzaW9uEhwuZ29vZ2xlLnByb3RvYnVmLkZpbGVPcHRpb25zGI6MAyABKAlSD2NvbnRyYWN0VmVyc2lvbmIGcHJvdG8z0vYDBAgAGAA", [file_google_protobuf_descriptor]);
+  fileDesc("ChZrbmV4dC92MS9vcHRpb25zLnByb3RvEghrbmV4dC52MSpYCgRBdXRoEhQKEEFVVEhfVU5TUEVDSUZJRUQQABINCglBVVRIX1VTRVIQARIPCgtBVVRIX1BVQkxJQxACIgQIAxADKhRBVVRIX1BVQkxJQ19NVVRBVElPTjo6CghmdW5jdGlvbhIcLmdvb2dsZS5wcm90b2J1Zi5GaWxlT3B0aW9ucxiNjAMgASgJUghmdW5jdGlvbjpJChBjb250cmFjdF92ZXJzaW9uEhwuZ29vZ2xlLnByb3RvYnVmLkZpbGVPcHRpb25zGI6MAyABKAlSD2NvbnRyYWN0VmVyc2lvbjpECgRhdXRoEh4uZ29vZ2xlLnByb3RvYnVmLk1ldGhvZE9wdGlvbnMYj4wDIAEoDjIOLmtuZXh0LnYxLkF1dGhSBGF1dGhiBnByb3RvM9L2AwQIABgA", [file_google_protobuf_descriptor]);
+
+/**
+ * Who may call an RPC through the zone's generated code.
+ *
+ * @generated from enum knext.v1.Auth
+ */
+export enum Auth {
+  /**
+   * Not stated. `knext generate` refuses an RPC whose auth is not stated.
+   *
+   * @generated from enum value: AUTH_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * A signed-in user: the zone's authorize() hook must return a verified
+   * user before the call is made. The value `knext add function` writes.
+   *
+   * @generated from enum value: AUTH_USER = 1;
+   */
+  USER = 1,
+
+  /**
+   * Anyone, without a user. Allowed only on a read
+   * (`idempotency_level = NO_SIDE_EFFECTS`); `knext generate` refuses it on
+   * any other RPC.
+   *
+   * @generated from enum value: AUTH_PUBLIC = 2;
+   */
+  PUBLIC = 2,
+}
+
+/**
+ * Describes the enum knext.v1.Auth.
+ */
+export const AuthSchema: GenEnum<Auth> = /*@__PURE__*/
+  enumDesc(file_knext_v1_options, 0);
 
 /**
  * The zone function that serves this file's services. It names the binding
@@ -41,4 +78,12 @@ export const function$: GenExtension<FileOptions, string> = /*@__PURE__*/
  */
 export const contract_version: GenExtension<FileOptions, string> = /*@__PURE__*/
   extDesc(file_knext_v1_options, 1);
+
+/**
+ * Who may call this RPC. Every RPC states it; there is no implicit default.
+ *
+ * @generated from extension: knext.v1.Auth auth = 50703;
+ */
+export const auth: GenExtension<MethodOptions, Auth> = /*@__PURE__*/
+  extDesc(file_knext_v1_options, 2);
 

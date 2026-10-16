@@ -3,6 +3,7 @@
   "out": "src/generated/grpc",
   "deadlineMs": 10000,
   "gatewayTimeoutSeconds": 300,
+  "authorize": "src/knext/authorize.ts",
   "functions": {
     "orders": {
       "lang": "go"

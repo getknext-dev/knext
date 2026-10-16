@@ -67,6 +67,9 @@ function fakeFunction(failFirst = 0): { deps: RuntimeDeps; seen: Seen } {
       env: () => ({ ORDERS_SERVICE_URL: 'http://orders.shop.svc.cluster.local' }),
       createTransport: () => transport,
       sleep: async () => {},
+      // A Node gateway (h2c by default); the Bun default is tested on its own.
+      isBun: false,
+      log: () => {},
     },
   };
 }
@@ -296,7 +299,7 @@ describe('generated client runtime — default transport is Connect over h2c', (
     server?.close();
   });
 
-  it('calls a real HTTP/2 cleartext Connect server', async () => {
+  it('calls a real HTTP/2 cleartext Connect server (h2c set explicitly for the binding)', async () => {
     server = createServer(
       connectNodeAdapter({
         routes: (router) =>
@@ -311,7 +314,11 @@ describe('generated client runtime — default transport is Connect over h2c', (
     await new Promise<void>((resolve) => server?.listen(0, '127.0.0.1', resolve));
     const { port } = server.address() as AddressInfo;
     const client = defineFunctionClient(DEFINITION, {
-      env: () => ({ ORDERS_SERVICE_URL: `http://127.0.0.1:${port}` }),
+      env: () => ({
+        ORDERS_SERVICE_URL: `http://127.0.0.1:${port}`,
+        ORDERS_SERVICE_HTTP_VERSION: '2',
+      }),
+      log: () => {},
     });
     const res = await client.getOrder({ id: 'h2c-1' });
     expect(res.id).toBe('h2c-1');

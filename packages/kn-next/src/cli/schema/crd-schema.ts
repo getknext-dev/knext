@@ -27,6 +27,15 @@ export const NEXTAPP_VERSION = "v1alpha1";
 export const NEXTAPP_KIND = "NextApp";
 export const NEXTAPP_CRD_NAME = `nextapps.${NEXTAPP_GROUP}`;
 
+/**
+ * The zone-function kind (same group and version as NextApp). The readers
+ * below take a kind / CRD name, so the preflight and `doctor` read its schema
+ * the same way: `crdGetArgv(BACKENDSERVICE_CRD_NAME)`,
+ * `crdSchemaFromOpenApiV3Doc(doc, BACKENDSERVICE_KIND)`.
+ */
+export const BACKENDSERVICE_KIND = "BackendService";
+export const BACKENDSERVICE_CRD_NAME = `backendservices.${NEXTAPP_GROUP}`;
+
 type Json = Record<string, unknown>;
 
 function isObject(v: unknown): v is Json {

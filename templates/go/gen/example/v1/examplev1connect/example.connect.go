@@ -54,10 +54,11 @@ var (
 // ExampleServiceClient is a client for the example.v1.ExampleService service.
 type ExampleServiceClient interface {
 	// GetItem reads one item. NO_SIDE_EFFECTS makes it a read: the zone may
-	// retry it.
+	// retry it, and caches it per signed-in user. AUTH_USER: authorize() must
+	// return a verified user first.
 	GetItem(context.Context, *v1.GetItemRequest) (*v1.GetItemResponse, error)
-	// PutItem writes one item. A write is never retried and carries an
-	// idempotency key.
+	// PutItem writes one item. A write is never retried, carries an
+	// idempotency key, and always needs a user (AUTH_USER).
 	PutItem(context.Context, *v1.PutItemRequest) (*v1.PutItemResponse, error)
 }
 
@@ -70,10 +71,11 @@ func NewExampleServiceClient(client *connect.Client) ExampleServiceClient {
 // ExampleServiceHandler is an implementation of the example.v1.ExampleService service.
 type ExampleServiceHandler interface {
 	// GetItem reads one item. NO_SIDE_EFFECTS makes it a read: the zone may
-	// retry it.
+	// retry it, and caches it per signed-in user. AUTH_USER: authorize() must
+	// return a verified user first.
 	GetItem(context.Context, *v1.GetItemRequest) (*v1.GetItemResponse, error)
-	// PutItem writes one item. A write is never retried and carries an
-	// idempotency key.
+	// PutItem writes one item. A write is never retried, carries an
+	// idempotency key, and always needs a user (AUTH_USER).
 	PutItem(context.Context, *v1.PutItemRequest) (*v1.PutItemResponse, error)
 }
 

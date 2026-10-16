@@ -142,6 +142,21 @@ type verdictOption func(*verdictExtras)
 // verdictExtras are the optional verdict inputs.
 type verdictExtras struct {
 	platform *platformDefaultsState
+	bindings *backendBindingsState
+}
+
+// backendBindingsState is the zone half of the function bindings (ADR-0004
+// Amendment 2) as observed this pass, plus the binding variables the render
+// skipped because the zone already sets them.
+type backendBindingsState struct {
+	bindings   zoneBindings
+	collisions []string
+}
+
+// withBackendBindings supplies the resolved spec.backends[] entries the
+// BackendBindings condition is computed from.
+func withBackendBindings(b zoneBindings, collisions []string) verdictOption {
+	return func(x *verdictExtras) { x.bindings = &backendBindingsState{bindings: b, collisions: collisions} }
 }
 
 // withPlatformDefaults supplies the platform-layer state (ADR-0064) the
@@ -942,6 +957,25 @@ func computeStatusVerdict(
 		}
 	} else if prevReserved != nil {
 		v.removeConditions = append(v.removeConditions, ConditionCDNReservedEnvIgnored)
+	}
+
+	// BackendBindings (ADR-0004 Amendment 2): whether every spec.backends[] entry
+	// is a two-sided binding, and which binding variables were not rendered.
+	// Informational — Ready is untouched: the zone still serves, and a call to an
+	// unbound function fails closed at call time. Appended LAST so every other
+	// condition keeps its persisted order (#98), absent when spec.backends is
+	// empty (a zone without functions keeps its status byte-identical), removed
+	// only if previously reported, and the Warning event is transition-gated.
+	prevBindings := apimeta.FindStatusCondition(app.Status.Conditions, ConditionBackendBindings)
+	if len(app.Spec.Backends) > 0 && extras.bindings != nil {
+		cond := backendBindingsCondition(app, extras.bindings.bindings, extras.bindings.collisions)
+		if cond.Status != metav1.ConditionTrue &&
+			(prevBindings == nil || prevBindings.Reason != cond.Reason || prevBindings.Message != cond.Message) {
+			v.events = append(v.events, verdictEvent{corev1.EventTypeWarning, cond.Reason, cond.Message})
+		}
+		v.conditions = append(v.conditions, cond)
+	} else if prevBindings != nil && len(app.Spec.Backends) == 0 {
+		v.removeConditions = append(v.removeConditions, ConditionBackendBindings)
 	}
 
 	return v

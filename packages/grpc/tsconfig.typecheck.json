@@ -4,14 +4,16 @@
   // strict scope, so a generator change that emits a client which does not
   // type-check against the runtime reds here. `paths` points the generated
   // import of the runtime at its source (no build needed), and
-  // fixtures/zone/server-only.d.ts stands in for Next.js's `server-only`.
+  // fixtures/zone/server-only.d.ts and next-cache.d.ts stand in for Next.js's
+  // `server-only` and `next/cache` (the real ones are built by the two-user test).
   // `types: ["bun"]` for the `bun:test` ambient module (TS7 does not
-  // auto-include @types/*); rootDir widened because nothing is emitted.
+  // auto-include @types/*); rootDir widened (to packages/, for the two-user test's
+  // shared fake Redis from core's test helpers) because nothing is emitted.
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "noEmit": true,
     "types": ["bun"],
-    "rootDir": ".",
+    "rootDir": "..",
     "paths": {
       "@getknext/grpc/runtime": ["./src/runtime.ts"]
     }
@@ -20,7 +22,8 @@
     "src/**/*",
     "scripts/**/*",
     "fixtures/zone/src/generated/**/*.ts",
-    "fixtures/zone/server-only.d.ts"
+    "fixtures/zone/server-only.d.ts",
+    "fixtures/zone/next-cache.d.ts"
   ],
   "exclude": ["node_modules", "dist"]
 }

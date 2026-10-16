@@ -22,7 +22,12 @@ retries, idempotency keys).
 - `src/buf.ts` — the pinned buf binary, verified against a sha256 per platform before it runs.
 - `src/generate.ts`, `src/plugin.ts` — `knext generate`: buf builds, protoc-gen-es and
   protoc-gen-knext run in-process, output is compared or written.
-- `src/policy.ts`, `src/runtime.ts` — the client policy and the runtime that enforces it.
+- `src/glue-plugin.ts` — protoc-gen-knext-glue: the Next.js glue on top of the clients (cached
+  per-user queries, Server Actions that refresh them, streams), and every case it refuses.
+- `src/glue.ts` — the glue's runtime half: the `authorize()` check, the served contract version,
+  the token-mint seam and the request codec. Exported from `@getknext/grpc/runtime`.
+- `src/policy.ts`, `src/runtime.ts` — the client policy and the runtime that enforces it,
+  including the transport per gateway (h2c on Node, HTTP/1.1 on Bun unless overridden).
 - `src/add-function.ts` — `knext add function`.
 - `src/baseline.ts` — `--against` resolution, including the seam for a deployed baseline.
 - `proto/knext/v1/options.proto` — the knext options contract apps import.
