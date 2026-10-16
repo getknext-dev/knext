@@ -23,3 +23,26 @@ extend google.protobuf.FileOptions {
   // roll out the function first, then the zone.
   string contract_version = 50702;
 }
+
+// Who may call an RPC through the zone's generated code.
+enum Auth {
+  // Not stated. `knext generate` refuses an RPC whose auth is not stated.
+  AUTH_UNSPECIFIED = 0;
+  // A signed-in user: the zone's authorize() hook must return a verified
+  // user before the call is made. The value `knext add function` writes.
+  AUTH_USER = 1;
+  // Anyone, without a user. Allowed only on a read
+  // (`idempotency_level = NO_SIDE_EFFECTS`); `knext generate` refuses it on
+  // any other RPC.
+  AUTH_PUBLIC = 2;
+  // A public write was considered and is not offered: an anonymous write is
+  // an AUTH_USER RPC whose authorize() hook returns an anonymous principal
+  // after the app's own check (CAPTCHA, rate limit, CSRF).
+  reserved 3;
+  reserved "AUTH_PUBLIC_MUTATION";
+}
+
+extend google.protobuf.MethodOptions {
+  // Who may call this RPC. Every RPC states it; there is no implicit default.
+  Auth auth = 50703;
+}
