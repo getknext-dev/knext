@@ -213,7 +213,7 @@ on both shapes, against 0.21 for S0 gating plus a reported third arm and 0.00 fo
 
 | C5 non-inferiority rule (power from resampling #1458) | jev |
 |---|---|
-| **Fixed +15% of A's median, n ≥ 60, pre-registered one-sided Hodges-Lehmann bound, 97.5% per try with at most two tries (chosen)**: passes a true 15% slowdown 5%, a true tie 84%, about 4 h per A/B | **0.56** |
+| **Fixed +15% of A's median, n ≥ 60, pre-registered one-sided Hodges-Lehmann bound, 97.5% per try with at most two tries (chosen)**: passes a true 15% slowdown 5%, a true tie 84% (per-try rates at the 95% bound; see the footnote under the power table), about 4 h per A/B | **0.56** |
 | Fixed +20%, n ≥ 40, same test: passes a true 20% slowdown 5%, a true 10% slowdown 45%, a tie 82%, about 2.7 h | 0.40 |
 | Fixed +25%, n ≥ 30, same test: passes a true 25% slowdown 5%, a tie 80%, about 2 h | 0.03 |
 | A's IQR, n ≥ 7 (the earlier draft): passes a true 40% slowdown 48% | 0.01 |
