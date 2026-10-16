@@ -421,7 +421,7 @@ describe('main — release-line scope (#2098)', () => {
     const r = run(root, ['packages/kn-next/src/index.ts'], {
       basePin: pin('v1.0.0-rc.6'),
       headPin: pin('v1.0.0-rc.6'),
-      baseVersion: '1.0.4',
+      baseVersion: '1.0.0-rc.6',
       runDiff: () => 1,
     });
     expect(r.code).toBe(1);
@@ -433,9 +433,57 @@ describe('main — release-line scope (#2098)', () => {
     const r = run(root, ['packages/kn-next/src/index.ts'], {
       basePin: pin('v1.0.0-rc.6'),
       headPin: pin('v1.0.0-rc.6'),
-      baseVersion: '1.0.4',
+      baseVersion: '1.0.0-rc.6',
       tagResolves: () => false,
     });
     expect(r.code).toBe(1);
+  });
+});
+
+describe('main — released-base scope (#2429)', () => {
+  it('a base released as 1.3.1 against the v1.3.0-rc.10 pin: SKIP announced with the reason, no tag lookup, no diff', () => {
+    const root = buildFixtureRoot();
+    let touched = false;
+    const r = run(root, ['packages/kn-next/src/__tests__/x.test.ts'], {
+      basePin: pin('v1.3.0-rc.10'),
+      headPin: pin('v1.3.0-rc.10'),
+      baseVersion: '1.3.1',
+      tagResolves: () => {
+        touched = true;
+        return true;
+      },
+      runDiff: () => {
+        touched = true;
+        return 1;
+      },
+    });
+    expect(r.code).toBe(0);
+    expect(touched).toBe(false);
+    expect(r.summary).toContain('SKIP');
+    expect(r.out).toContain('has ended on this line');
+  });
+
+  it('a base still in the window (1.3.0-rc.10) with a byte change still FAILS when the diff fails', () => {
+    const root = buildFixtureRoot();
+    const r = run(root, ['packages/kn-next/src/index.ts'], {
+      basePin: pin('v1.3.0-rc.10'),
+      headPin: pin('v1.3.0-rc.10'),
+      baseVersion: '1.3.0-rc.10',
+      runDiff: () => 1,
+    });
+    expect(r.code).toBe(1);
+    expect(r.summary).toContain('FAIL');
+  });
+
+  it('a released base BELOW the pinned rc base (1.3.1 vs v1.3.2-rc.1) with a byte change still FAILS', () => {
+    const root = buildFixtureRoot();
+    const r = run(root, ['packages/kn-next/src/index.ts'], {
+      basePin: pin('v1.3.2-rc.1'),
+      headPin: pin('v1.3.2-rc.1'),
+      baseVersion: '1.3.1',
+      runDiff: () => 1,
+    });
+    expect(r.code).toBe(1);
+    expect(r.summary).toContain('FAIL');
   });
 });
