@@ -95,9 +95,10 @@ jobs:
         uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         with:
           # An empty token selects git diff (no pull-requests permission). On a
-          # PR the base is the PR base; on merge_group it defaults to the event's.
+          # PR the base is the PR base; on merge_group the queue's base commit,
+          # passed explicitly rather than relying on the action's own default.
           token: ''
-          base: ${{ github.event.pull_request.base.sha }}
+          base: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
           filters: |
             crates:
               - 'crates/**'
@@ -235,6 +236,14 @@ jobs:
           node-version: '24'
 
       - name: crateRev drift guard
+        env:
+          # merge_group has no GITHUB_BASE_REF, so without this the guard exits 2
+          # ('no base ref') and reds the gate on every queue run. The queue ref is
+          # where the combined change lands, so the guard RUNS there (never
+          # skipped) against the queue's base commit; the script resolves a SHA
+          # as well as a ref name. Empty on every other event, where the script
+          # falls back to origin/$GITHUB_BASE_REF (pull_request) or push mode.
+          FFI_CRATE_REV_BASE_REF: ${{ github.event.merge_group.base_sha }}
         run: node scripts/check-ffi-crate-rev.mjs
 
   # The one context to mark REQUIRED (#2441). `if: always()` is load-bearing: a

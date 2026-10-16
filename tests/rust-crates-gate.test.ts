@@ -1,7 +1,8 @@
-import { describe, expect, it } from 'bun:test';
-import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { afterAll, describe, expect, it } from 'bun:test';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
 import { parse } from 'yaml';
 
 /**
@@ -188,5 +189,156 @@ describe('rust-crates.yml gate verdict — the run script, executed (#2441)', ()
 
   it('a heavy job failure is not excused by "no crate change"', () => {
     expect(verdict('false', { crates: 'failure' })).not.toBe(0);
+  });
+});
+
+/**
+ * merge_group carries no GITHUB_BASE_REF (#2441 round 2). The crateRev guard
+ * used to reach `fail(2, 'no base ref')` there, so the required gate went red on
+ * every queue run. The step now hands the guard the queue's base commit. These
+ * cases render the step's OWN `env:` against a simulated merge_group context and
+ * run the REAL guard script with it in a throwaway repo — so dropping the env
+ * line turns them red (exit 2), not just a text match.
+ */
+type Ctx = Record<string, unknown>;
+
+/** Evaluates the only shapes this workflow uses: `${{ a.b.c }}` and `${{ a.b || c.d }}`. */
+function renderExpr(value: unknown, ctx: Ctx): string {
+  const text = String(value);
+  const m = /^\$\{\{\s*(.+?)\s*\}\}$/.exec(text);
+  if (!m) return text;
+  for (const term of m[1].split('||').map((t) => t.trim())) {
+    if (!/^[a-z_][\w.-]*$/i.test(term)) throw new Error(`unsupported expression term: ${term}`);
+    let cur: unknown = ctx;
+    for (const key of term.split('.')) cur = (cur as Ctx | undefined)?.[key];
+    if (cur) return String(cur);
+  }
+  return '';
+}
+
+const mergeGroupCtx = (baseSha: string): Ctx => ({
+  github: {
+    event_name: 'merge_group',
+    base_ref: '',
+    event: { merge_group: { base_sha: baseSha, head_sha: 'f'.repeat(40) } },
+  },
+});
+
+describe('rust-crates.yml on merge_group — base resolution (#2441)', () => {
+  const crateRevStep = stepsOf(jobs['crate-rev'] ?? {}).find((s) =>
+    /check-ffi-crate-rev\.mjs/.test(String(s.run ?? '')),
+  );
+  const stepEnv = (ctx: Ctx): Record<string, string> => {
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries((crateRevStep?.env ?? {}) as Obj)) {
+      out[k] = renderExpr(v, ctx);
+    }
+    return out;
+  };
+
+  const temps: string[] = [];
+  afterAll(() => {
+    for (const d of temps) rmSync(d, { recursive: true, force: true });
+  });
+
+  const sh = (dir: string, ...args: string[]) =>
+    execFileSync('git', args, { cwd: dir, encoding: 'utf8', stdio: 'pipe' }).trim();
+  const put = (dir: string, rel: string, body: string) => {
+    mkdirSync(dirname(join(dir, rel)), { recursive: true });
+    writeFileSync(join(dir, rel), body);
+  };
+  const commit = (dir: string, msg: string) => {
+    sh(dir, 'add', '-A');
+    sh(dir, 'commit', '--no-gpg-sign', '-qm', msg);
+    return sh(dir, 'rev-parse', 'HEAD');
+  };
+
+  /**
+   * A queue-shaped repo: `main` (the queue base) has the crates pinned; when
+   * `unpinnedOnBase`, a later crate change lands on main WITHOUT a pin bump.
+   * HEAD is the queue entry: one unrelated commit on top of the base.
+   */
+  const queueRepo = (unpinnedOnBase: boolean): { dir: string; baseSha: string } => {
+    const dir = mkdtempSync(join(tmpdir(), 'rust-crates-merge-group-'));
+    temps.push(dir);
+    sh(dir, 'init', '-q', '-b', 'main');
+    sh(dir, 'config', 'user.email', 'test@example.com');
+    sh(dir, 'config', 'user.name', 'test');
+    mkdirSync(join(dir, 'scripts'), { recursive: true });
+    cpSync(
+      resolve(REPO_ROOT, 'scripts/check-ffi-crate-rev.mjs'),
+      join(dir, 'scripts/check-ffi-crate-rev.mjs'),
+    );
+    put(dir, 'crates/knext-ffi/src/wire.rs', '// v1\n');
+    put(dir, 'crates/knext-ffi-macros/src/lib.rs', '// v1\n');
+    const pinned = commit(dir, 'crates v1');
+    put(
+      dir,
+      'packages/ffi/package.json',
+      `${JSON.stringify({ name: '@getknext/ffi', knextFfi: { crateRev: pinned } })}\n`,
+    );
+    commit(dir, 'pin crates v1');
+    if (unpinnedOnBase) {
+      put(dir, 'crates/knext-ffi/src/wire.rs', '// v2\n');
+      commit(dir, 'crate change merged without a bump');
+    }
+    const baseSha = sh(dir, 'rev-parse', 'HEAD');
+    sh(dir, 'switch', '-qc', 'gh-readonly-queue/main/pr-1');
+    put(dir, 'README.md', 'queued change\n');
+    commit(dir, 'queued PR');
+    return { dir, baseSha };
+  };
+
+  const runGuard = (dir: string, baseSha: string) => {
+    const env: Record<string, string> = {};
+    for (const [k, v] of Object.entries(process.env)) {
+      if (v !== undefined && !/^(GITHUB_|FFI_CRATE_REV_)/.test(k)) env[k] = v;
+    }
+    Object.assign(env, { GITHUB_EVENT_NAME: 'merge_group', GITHUB_BASE_REF: '' });
+    Object.assign(env, stepEnv(mergeGroupCtx(baseSha)));
+    const res = spawnSync('node', ['scripts/check-ffi-crate-rev.mjs'], {
+      cwd: dir,
+      env,
+      encoding: 'utf8',
+    });
+    return { status: res.status, out: `${res.stdout ?? ''}${res.stderr ?? ''}` };
+  };
+
+  it('the drift guard step exists', () => {
+    expect(crateRevStep).toBeDefined();
+  });
+
+  it('the guard passes on a merge_group run when nothing drifted (empty GITHUB_BASE_REF, base SHA from the event)', () => {
+    const { dir, baseSha } = queueRepo(false);
+    const { status, out } = runGuard(dir, baseSha);
+    expect(status, out).toBe(0);
+    expect(out).toContain(baseSha);
+  });
+
+  it('the guard fails (exit 1, not 2) on a merge_group run when the crate rev is wrong', () => {
+    const { dir, baseSha } = queueRepo(true);
+    const { status, out } = runGuard(dir, baseSha);
+    expect(status, out).toBe(1);
+    expect(out).toContain('crates/knext-ffi/src/wire.rs');
+  });
+
+  it('on pull_request the step env is empty, so the guard keeps its origin/$GITHUB_BASE_REF fallback', () => {
+    const prCtx: Ctx = {
+      github: {
+        event_name: 'pull_request',
+        event: { pull_request: { base: { sha: 'a'.repeat(40) } } },
+      },
+    };
+    for (const v of Object.values(stepEnv(prCtx))) expect(v).toBe('');
+  });
+
+  it('changes diffs a merge_group entry against the queue base commit, and a PR against its base', () => {
+    const filter = stepsOf(jobs.changes).find((s) =>
+      String(s.uses ?? '').startsWith('dorny/paths-filter@'),
+    );
+    const base = (filter?.with as Obj | undefined)?.base;
+    expect(renderExpr(base, mergeGroupCtx('b'.repeat(40)))).toBe('b'.repeat(40));
+    const prCtx: Ctx = { github: { event: { pull_request: { base: { sha: 'a'.repeat(40) } } } } };
+    expect(renderExpr(base, prCtx)).toBe('a'.repeat(40));
   });
 });
