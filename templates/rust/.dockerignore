@@ -3,6 +3,7 @@
 !Cargo.lock
 !gen/
 !src/
+!vendor/
 **/tests.rs
 **/limits_tests.rs
 **/testkit.rs

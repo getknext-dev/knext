@@ -122,6 +122,15 @@ jobs:
             exit 1
           fi
 
+      - name: zstd is not in the release dependency graph
+        run: |
+          set -euo pipefail
+          if cargo tree --locked -e normal --target all -i zstd 2>/dev/null | grep -q .; then
+            cargo tree --locked -e normal --target all -i zstd
+            echo "::error::zstd is compiled into the release binary; the template accepts gzip only"
+            exit 1
+          fi
+
       - name: cargo fmt --check
         run: cargo fmt --check
 

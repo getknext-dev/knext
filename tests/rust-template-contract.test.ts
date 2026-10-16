@@ -91,6 +91,16 @@ describe('connect-rust stays on its pinned, conformance-gated 0.9 line', () => {
     expect(lockedOnce('connectrpc-health')).toMatch(/^0\.9\.\d+$/);
   });
 
+  it('connectrpc resolves without zstd: the template accepts gzip only', () => {
+    const block = read('Cargo.lock')
+      .split('[[package]]')
+      .find((b) => /^name = "connectrpc"$/m.test(b));
+    expect(block, 'no connectrpc in Cargo.lock').toBeDefined();
+    const deps = [...(block as string).matchAll(/^ "([^" ]+)"/gm)].map((m) => m[1]);
+    expect(deps).toContain('flate2');
+    expect(deps, 'connectrpc pulls zstd into the release binary').not.toContain('zstd');
+  });
+
   it('the codegen plugins are pinned to the runtime lines Cargo.lock holds', () => {
     expect(minor(codegenPin('CONNECTRPC_CODEGEN_VERSION'))).toBe(minor(lockedOnce('connectrpc')));
     expect(codegenPin('PROTOC_GEN_BUFFA_VERSION')).toBe(lockedOnce('buffa'));

@@ -17,6 +17,7 @@ RUN apk add --no-cache musl-dev
 RUN cargo install --locked --root /usr/local cargo-auditable@0.7.7
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
+COPY vendor vendor
 RUN mkdir -p src e2e && echo 'fn main() {}' > src/main.rs && touch src/lib.rs e2e/e2e.rs \
     && cargo fetch --locked
 COPY gen gen
