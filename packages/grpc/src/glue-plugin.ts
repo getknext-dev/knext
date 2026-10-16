@@ -227,10 +227,15 @@ class Imports {
 
 /** A path relative to the output root, as an import from `fileName`. */
 function relativeImport(fileName: string, target: string): string {
-  const rel = posix.relative(
-    posix.dirname(fileName),
-    target.replace(/^\.\//, '').replace(/\.js$/, ''),
-  );
+  const to = posix.normalize(target.replace(/^\.\//, '').replace(/\.js$/, ''));
+  // posix.relative resolves relative paths against process.cwd(), so a target
+  // that climbs out of the output root (the authorize() hook) would come out
+  // differently depending on where the generator runs. Anchor both paths
+  // under a synthetic absolute root deep enough for every `..` instead; its
+  // segments hold a NUL, which no real path segment can.
+  const climbs = to.split('/').filter((s) => s === '..').length;
+  const root = `/${Array.from({ length: climbs + 1 }, (_, i) => `\0${i}`).join('/')}`;
+  const rel = posix.relative(posix.join(root, posix.dirname(fileName)), posix.join(root, to));
   return rel.startsWith('.') ? rel : `./${rel}`;
 }
 
