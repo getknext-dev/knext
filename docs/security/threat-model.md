@@ -168,7 +168,9 @@ writing Secrets named `*-knext-signing-key` and ConfigMaps named `*-knext-jwks` 
 overwrite capability; not shipped. (b) The operator cannot watch Secrets, so a deleted key or an
 edited JWKS is restored on the zone's next reconcile (at most ten minutes, the steady re-check),
 not instantly. (c) The rotation wait trusts the operator's clock: a new leader whose clock runs
-ahead could switch signing early by the skew; keep nodes on NTP. (d) A rotation trusts the
+ahead could switch signing early by the skew; keep nodes on NTP. Within one operator, both waits
+(the bound and the overlap) count from a clock reading taken after the apiserver confirmed the
+write they follow, so a slow write lengthens a wait and never shortens it. (d) A rotation trusts the
 kubelet's ConfigMap sync to finish within the propagation bound (default 90 s,
 `--zone-signing-key-propagation-bound`, at least 60 s); a slower kubelet sync must raise it. (e) client-go prints request and response bodies at klog verbosity 8 and above, Secret
 data included; never run the operator that verbose in production.

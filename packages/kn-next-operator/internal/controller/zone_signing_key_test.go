@@ -30,6 +30,7 @@ import (
 	mrand "math/rand"
 	"os"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -458,98 +459,143 @@ func jwksKidSet(t *testing.T, raw string) map[string]bool {
 	return out
 }
 
+// TestRotationIsCrashSafeAtEveryWrite drives the REAL pass loop (runZoneKeyPass,
+// the one reconcileZoneSigningKey runs) against a simulated store, with a crash
+// before or after any write and a clock that moves WHILE a write is in flight:
+// the apiserver commits a write some time after it is issued, and the operator
+// sees the confirmation some time after that. The invariants are checked
+// against the store's own history (when each kid was committed to the JWKS,
+// when each switch was committed), never against the implementation's
+// annotations.
 func TestRotationIsCrashSafeAtEveryWrite(t *testing.T) {
 	rng := mrand.New(mrand.NewSource(2051))
+	cfg := ZoneSigningKeyConfig{PropagationBound: 90 * time.Second}
+	errCrash := errors.New("simulated crash")
+	gen := func() (zoneKey, error) { return newZoneKey(rand.Reader) }
+	// latency is how long one leg of a write (issue to commit, or commit to
+	// confirmation) takes: often instant, sometimes milliseconds, sometimes far
+	// longer than any healthy apiserver, so a stamp taken at the wrong moment
+	// is off by enough to cross the bound.
+	latency := func() time.Duration {
+		switch rng.Intn(4) {
+		case 0:
+			return 0
+		case 1:
+			return time.Duration(rng.Intn(50)) * time.Millisecond
+		default:
+			return time.Duration(rng.Intn(45000)) * time.Millisecond
+		}
+	}
+	totalSwitches, totalRetires, chaosRetires := 0, 0, 0
 	for run := 0; run < 300; run++ {
 		store := &simStore{inJWKSSince: map[string]time.Time{}}
 		now := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
-		cfg := ZoneSigningKeyConfig{PropagationBound: 90 * time.Second}
+		clock := func() time.Time { return now }
 		nonce := ""
 		switches, retires := 0, 0
-		var lastSwitch time.Time
-		for pass := 0; pass < 120; pass++ {
-			if rng.Intn(6) == 0 {
-				nonce = fmt.Sprintf("n%d", pass)
+		var lastSwitchCommitted time.Time
+
+		// commit persists the world's object for write at the current time,
+		// checking the invariants against the store's history. issued is when
+		// the write left the operator.
+		commit := func(pass int, w *zoneKeyWorld, write zoneKeyWrite, issued time.Time) {
+			prevCurrent, prevPrevious := "", ""
+			if store.secretFound {
+				old, _ := readSigningKeySecret(store.secret)
+				prevCurrent = old.current.kid
+				if old.previous != nil {
+					prevPrevious = old.previous.kid
+				}
 			}
-			w := store.load(t)
-			in := zoneKeyInputs{now: now, cfg: cfg, requestedNonce: nonce}
-			crashAfter := rng.Intn(5) // writes allowed this pass before the "crash"
-			writes := 0
-			for step := 0; step < maxZoneKeySteps; step++ {
-				s := planZoneKeyStep(w, in)
-				if s.action == zkWait {
-					break
+			switch write {
+			case zkWriteSecret:
+				sec := &corev1.Secret{}
+				if store.secret != nil {
+					sec = store.secret.DeepCopy()
 				}
-				write, err := advanceZoneKey(&w, s, in, func() (zoneKey, error) { return newZoneKey(rand.Reader) })
-				if err != nil {
-					t.Fatalf("advance: %v", err)
+				w.keys.applyTo(sec)
+				store.secret, store.secretFound = sec, true
+				// INVARIANT 1: signing switches to a key only once the persisted
+				// JWKS has held it for the propagation bound, measured from the
+				// JWKS write's COMMIT to the switch write's ISSUE.
+				if prevCurrent != "" && w.keys.current.kid != prevCurrent {
+					since, ok := store.inJWKSSince[w.keys.current.kid]
+					if !ok || issued.Sub(since) < cfg.PropagationBound {
+						t.Fatalf("run %d pass %d: signing switched to %s %s after its JWKS write was committed (bound %s)",
+							run, pass, w.keys.current.kid, issued.Sub(since), cfg.PropagationBound)
+					}
+					switches++
+					lastSwitchCommitted = now
 				}
-				if writes == crashAfter {
-					break // crash: this write never reached the store
+				// INVARIANT 2: the previous key is dropped only once the overlap
+				// has passed since the switch was COMMITTED.
+				if prevPrevious != "" && (w.keys.previous == nil || w.keys.previous.kid != prevPrevious) {
+					if issued.Sub(lastSwitchCommitted) < ZoneKeyOverlap {
+						t.Fatalf("run %d pass %d: previous key retired %s after the switch was committed (overlap %s)",
+							run, pass, issued.Sub(lastSwitchCommitted), ZoneKeyOverlap)
+					}
+					retires++
 				}
-				writes++
-				prevCurrent, prevPrevious := "", ""
+			case zkWriteJWKS:
+				store.jwks, store.jwksFound = w.jwks, true
+				kids := jwksKidSet(t, store.jwks)
+				for kid := range store.inJWKSSince {
+					if !kids[kid] {
+						delete(store.inJWKSSince, kid)
+					}
+				}
+				for kid := range kids {
+					if _, ok := store.inJWKSSince[kid]; !ok {
+						store.inJWKSSince[kid] = now
+					}
+				}
+				// INVARIANT 3: the published JWKS never names more than two keys
+				// and always names the key the Secret signs with.
+				if len(kids) > 2 {
+					t.Fatalf("run %d: JWKS holds %d keys", run, len(kids))
+				}
 				if store.secretFound {
-					old, _ := readSigningKeySecret(store.secret)
-					prevCurrent = old.current.kid
-					if old.previous != nil {
-						prevPrevious = old.previous.kid
+					cur, _ := readSigningKeySecret(store.secret)
+					if !kids[cur.current.kid] {
+						t.Fatalf("run %d: JWKS dropped the signing key", run)
 					}
 				}
-				switch write {
-				case zkWriteSecret:
-					sec := &corev1.Secret{}
-					if store.secret != nil {
-						sec = store.secret.DeepCopy()
-					}
-					w.keys.applyTo(sec)
-					store.secret, store.secretFound = sec, true
-					// INVARIANT 1: a new current key is one the persisted JWKS has
-					// held for at least the propagation bound.
-					if prevCurrent != "" && w.keys.current.kid != prevCurrent {
-						since, ok := store.inJWKSSince[w.keys.current.kid]
-						if !ok || now.Sub(since) < cfg.PropagationBound {
-							t.Fatalf("run %d pass %d: signing switched to %s %s after it reached the JWKS (bound %s)",
-								run, pass, w.keys.current.kid, now.Sub(since), cfg.PropagationBound)
-						}
-						switches++
-						lastSwitch = now
-					}
-					// INVARIANT 2: the previous key is dropped only after the overlap.
-					if prevPrevious != "" && (w.keys.previous == nil || w.keys.previous.kid != prevPrevious) {
-						if now.Sub(lastSwitch) < ZoneKeyOverlap {
-							t.Fatalf("run %d pass %d: previous key retired %s after the switch", run, pass, now.Sub(lastSwitch))
-						}
-						retires++
-					}
-				case zkWriteJWKS:
-					store.jwks, store.jwksFound = w.jwks, true
-					kids := jwksKidSet(t, store.jwks)
-					for kid := range store.inJWKSSince {
-						if !kids[kid] {
-							delete(store.inJWKSSince, kid)
-						}
-					}
-					for kid := range kids {
-						if _, ok := store.inJWKSSince[kid]; !ok {
-							store.inJWKSSince[kid] = now
-						}
-					}
-					// INVARIANT 3: the published JWKS never names more than two keys
-					// and always names the key the Secret signs with.
-					if len(kids) > 2 {
-						t.Fatalf("run %d: JWKS holds %d keys", run, len(kids))
-					}
-					if store.secretFound {
-						cur, _ := readSigningKeySecret(store.secret)
-						if !kids[cur.current.kid] {
-							t.Fatalf("run %d: JWKS dropped the signing key", run)
-						}
-					}
-				default:
-					t.Fatalf("unknown write %v", write)
-				}
+			default:
+				t.Fatalf("unknown write %v", write)
 			}
+		}
+
+		// pass runs one reconcile pass. crashMode 0: no crash; 1: the operator
+		// dies before write #crashAt is committed; 2: write #crashAt is
+		// committed but the operator dies before it sees the confirmation.
+		pass := func(pass, crashAt, crashMode int) {
+			w := store.load(t)
+			in := zoneKeyInputs{now: clock(), cfg: cfg, requestedNonce: nonce}
+			writes := 0
+			persist := func(write zoneKeyWrite, _ zoneKeyAction) error {
+				if crashMode == 1 && writes == crashAt {
+					return errCrash
+				}
+				issued := now
+				now = now.Add(latency()) // in flight to the apiserver
+				commit(pass, &w, write, issued)
+				now = now.Add(latency()) // the confirmation in flight back
+				writes++
+				if crashMode == 2 && writes > crashAt {
+					return errCrash
+				}
+				return nil
+			}
+			if _, _, err := runZoneKeyPass(&w, &in, clock, gen, persist); err != nil && !errors.Is(err, errCrash) {
+				t.Fatalf("run %d pass %d: %v", run, pass, err)
+			}
+		}
+
+		for p := 0; p < 120; p++ {
+			if rng.Intn(6) == 0 {
+				nonce = fmt.Sprintf("n%d", p)
+			}
+			pass(p, rng.Intn(5), rng.Intn(3))
 			// Time moves between passes: sometimes a little, sometimes past a bound.
 			switch rng.Intn(4) {
 			case 0:
@@ -562,10 +608,34 @@ func TestRotationIsCrashSafeAtEveryWrite(t *testing.T) {
 				now = now.Add(time.Duration(rng.Intn(5)) * time.Millisecond)
 			}
 		}
-		if run == 0 && switches == 0 {
-			t.Fatalf("the simulation never rotated; it proves nothing")
+		chaosRetires += retires
+
+		// Settle: no new request, no crash, time past every bound. Every
+		// rotation that started must now complete, so each switch has its retire.
+		for p := 0; p < 12; p++ {
+			pass(1000+p, 0, 0)
+			now = now.Add(ZoneKeyOverlap + cfg.PropagationBound + time.Second)
 		}
-		_ = retires
+		settled := store.load(t)
+		if settled.keys.next != nil || settled.keys.previous != nil {
+			t.Fatalf("run %d: crash-free passes past every bound left a rotation unfinished", run)
+		}
+		// Every run requests rotations, so every run must complete at least one
+		// full rotation (switch AND retire), and retire once per switch.
+		if switches == 0 || retires == 0 {
+			t.Fatalf("run %d: no full rotation completed (switches %d, retires %d); the run proves nothing",
+				run, switches, retires)
+		}
+		if retires != switches {
+			t.Fatalf("run %d: %d switches but %d retires: a switched rotation never retired its previous key",
+				run, switches, retires)
+		}
+		totalSwitches += switches
+		totalRetires += retires
+	}
+	if totalSwitches == 0 || totalRetires == 0 || chaosRetires == 0 {
+		t.Fatalf("the simulation never exercised both invariants (switches %d, retires %d, retires under crashes %d); "+
+			"it proves nothing", totalSwitches, totalRetires, chaosRetires)
 	}
 }
 
@@ -576,8 +646,10 @@ func TestRedactKeyMaterialRemovesEveryEncoding(t *testing.T) {
 	sec := &corev1.Secret{}
 	signingKeySet{current: &k, currentSince: time.Now()}.applyTo(sec)
 	asJSON, _ := json.Marshal(sec) // Secret data marshals as base64(PEM)
-	msg := fmt.Sprintf("admission webhook denied the request: %s; raw=%s; seed=%s",
-		asJSON, k.pem, base64.StdEncoding.EncodeToString(k.priv.Seed()))
+	// Every marker, embedded as-is: the PEM, each base64 alphabet with and
+	// without padding of the PEM, the seed and the 64-byte private key.
+	msg := fmt.Sprintf("admission webhook denied the request: %s; raw=%s; all=%s",
+		asJSON, k.pem, strings.Join(keyLeakMarkers(k), " | "))
 	got := redactKeyMaterial(msg, []*zoneKey{&k})
 	for _, leak := range keyLeakMarkers(k) {
 		if strings.Contains(got, leak) {
@@ -598,19 +670,29 @@ func TestRedactKeyMaterialRemovesEveryEncoding(t *testing.T) {
 			t.Fatalf("redactZoneKeyError leaked key material")
 		}
 	}
+	// Each encoding on its own, so one needle never hides another's absence.
+	for _, leak := range keyLeakMarkers(k) {
+		if got := redactKeyMaterial("<"+leak+">", []*zoneKey{&k}); strings.Contains(got, leak) {
+			t.Fatalf("an isolated encoding survived redaction: %q", leak[:12])
+		}
+	}
 }
 
 // keyLeakMarkers are the strings whose presence anywhere means a private key
-// leaked: the PEM itself, its base64 (how a Secret's data appears in JSON), and
-// the raw seed in both base64 alphabets.
+// leaked: the PEM itself, a base64 body line, and the PEM, the seed and the
+// 64-byte private key in every base64 alphabet, with and without padding (how
+// a Secret's data appears in JSON, and how a webhook or a tool may re-encode it).
 func keyLeakMarkers(k zoneKey) []string {
-	return []string{
+	out := []string{
 		string(k.pem),
 		strings.Split(strings.TrimSpace(string(k.pem)), "\n")[1], // the first base64 body line
-		base64.StdEncoding.EncodeToString(k.pem),
-		base64.StdEncoding.EncodeToString(k.priv.Seed()),
-		base64.RawURLEncoding.EncodeToString(k.priv.Seed()),
 	}
+	for _, raw := range [][]byte{k.pem, k.priv.Seed(), k.priv} {
+		for _, enc := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding} {
+			out = append(out, enc.EncodeToString(raw))
+		}
+	}
+	return out
 }
 
 // --- render: the zone's Knative Service ----------------------------------------
@@ -733,9 +815,129 @@ func TestFunctionRenderSetsTheVerifierIdentityAndNoPrivateKey(t *testing.T) {
 	if seen[FunctionTokenAudienceEnv] != 1 || seen["KNEXT_TOKEN_EXTRA"] != 0 || seen["A"] != 1 {
 		t.Fatalf("operator-reserved KNEXT_TOKEN_* names must appear once, from the operator: %v", seen)
 	}
-	for _, v := range ksvc.Spec.Template.Spec.Volumes {
-		if v.Secret != nil && strings.HasSuffix(v.Secret.SecretName, zoneSigningKeySecretSuffix) {
-			t.Fatalf("a function pod must never mount a zone signing key: %+v", v)
+	if leaks := functionPodZoneKeyLeaks(ksvc.Spec.Template.Spec.PodSpec, bs.Spec.Zone); len(leaks) != 0 {
+		t.Fatalf("a function pod must never reach a zone signing key or carry JWKS material in env: %v", leaks)
+	}
+}
+
+// functionPodZoneKeyLeaks scans a function's pod spec for any way it could
+// reach a zone's signing-key Secret: every volume source (secret, every
+// projected source, a CSI driver's secret reference), every container's (and
+// init container's) env secretKeyRef and envFrom secretRef, and finally the
+// whole spec as JSON, so a reference through a source this list does not name
+// is still caught. It also reports an env var that carries JWKS material (an
+// inline JWK, or a value sourced from the zone's JWKS ConfigMap): the function
+// reads the JWKS from its directory mount, never from env, where a rotation
+// could not reach a running pod.
+func functionPodZoneKeyLeaks(spec corev1.PodSpec, zone string) []string {
+	own := ZoneSigningKeySecretName(zone)
+	isKey := func(name string) bool { return name == own || strings.HasSuffix(name, zoneSigningKeySecretSuffix) }
+	var leaks []string
+	for _, v := range spec.Volumes {
+		if v.Secret != nil && isKey(v.Secret.SecretName) {
+			leaks = append(leaks, "volume "+v.Name+": secret")
+		}
+		if v.Projected != nil {
+			for _, s := range v.Projected.Sources {
+				if s.Secret != nil && isKey(s.Secret.Name) {
+					leaks = append(leaks, "volume "+v.Name+": projected secret")
+				}
+			}
+		}
+		if v.CSI != nil && v.CSI.NodePublishSecretRef != nil && isKey(v.CSI.NodePublishSecretRef.Name) {
+			leaks = append(leaks, "volume "+v.Name+": csi nodePublishSecretRef")
+		}
+	}
+	jwkMember := regexp.MustCompile(`"(kty|crv|keys)"\s*:`)
+	jwksName := ZoneJWKSConfigMapName(zone)
+	containers := append(append([]corev1.Container{}, spec.InitContainers...), spec.Containers...)
+	for _, c := range containers {
+		for _, e := range c.Env {
+			if e.ValueFrom != nil && e.ValueFrom.SecretKeyRef != nil && isKey(e.ValueFrom.SecretKeyRef.Name) {
+				leaks = append(leaks, "container "+c.Name+" env "+e.Name+": secretKeyRef")
+			}
+			if e.ValueFrom != nil && e.ValueFrom.ConfigMapKeyRef != nil && e.ValueFrom.ConfigMapKeyRef.Name == jwksName {
+				leaks = append(leaks, "container "+c.Name+" env "+e.Name+": JWKS from configMapKeyRef")
+			}
+			if jwkMember.MatchString(e.Value) || strings.Contains(e.Value, "BEGIN PRIVATE KEY") {
+				leaks = append(leaks, "container "+c.Name+" env "+e.Name+": JWKS or key material in value")
+			}
+		}
+		for _, f := range c.EnvFrom {
+			if f.SecretRef != nil && isKey(f.SecretRef.Name) {
+				leaks = append(leaks, "container "+c.Name+": envFrom secretRef")
+			}
+			if f.ConfigMapRef != nil && f.ConfigMapRef.Name == jwksName {
+				leaks = append(leaks, "container "+c.Name+": JWKS from envFrom configMapRef")
+			}
+		}
+	}
+	raw, _ := json.Marshal(spec)
+	if strings.Contains(string(raw), zoneSigningKeySecretSuffix) {
+		leaks = append(leaks, "pod spec JSON names a "+zoneSigningKeySecretSuffix+" object")
+	}
+	return leaks
+}
+
+// The scan above must see every channel; a scanner that misses one is
+// decoration.
+func TestFunctionPodZoneKeyScanSeesEveryChannel(t *testing.T) {
+	key := ZoneSigningKeySecretName("orders")
+	jwks := ZoneJWKSConfigMapName("orders")
+	other := ZoneSigningKeySecretName("billing")
+	for name, mutate := range map[string]func(*corev1.PodSpec){
+		"secret volume": func(s *corev1.PodSpec) {
+			s.Volumes = append(s.Volumes, corev1.Volume{Name: "k", VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{SecretName: key}}})
+		},
+		"projected secret": func(s *corev1.PodSpec) {
+			s.Volumes = append(s.Volumes, corev1.Volume{Name: "k", VolumeSource: corev1.VolumeSource{
+				Projected: &corev1.ProjectedVolumeSource{Sources: []corev1.VolumeProjection{
+					{ConfigMap: &corev1.ConfigMapProjection{LocalObjectReference: corev1.LocalObjectReference{Name: "x"}}},
+					{Secret: &corev1.SecretProjection{LocalObjectReference: corev1.LocalObjectReference{Name: key}}},
+				}}}})
+		},
+		"another zone's key": func(s *corev1.PodSpec) {
+			s.Volumes = append(s.Volumes, corev1.Volume{Name: "k", VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{SecretName: other}}})
+		},
+		"csi secret ref": func(s *corev1.PodSpec) {
+			s.Volumes = append(s.Volumes, corev1.Volume{Name: "k", VolumeSource: corev1.VolumeSource{
+				CSI: &corev1.CSIVolumeSource{Driver: "d", NodePublishSecretRef: &corev1.LocalObjectReference{Name: key}}}})
+		},
+		"env secretKeyRef": func(s *corev1.PodSpec) {
+			s.Containers[0].Env = append(s.Containers[0].Env, corev1.EnvVar{Name: "K", ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: key}, Key: signingKeyCurrentKey}}})
+		},
+		"init container env secretKeyRef": func(s *corev1.PodSpec) {
+			s.InitContainers = append(s.InitContainers, corev1.Container{Name: "init", Env: []corev1.EnvVar{{Name: "K",
+				ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: key}, Key: signingKeyCurrentKey}}}}})
+		},
+		"envFrom secretRef": func(s *corev1.PodSpec) {
+			s.Containers[0].EnvFrom = append(s.Containers[0].EnvFrom, corev1.EnvFromSource{
+				SecretRef: &corev1.SecretEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: key}}})
+		},
+		"inline JWKS value": func(s *corev1.PodSpec) {
+			s.Containers[0].Env = append(s.Containers[0].Env, corev1.EnvVar{Name: "J",
+				Value: `{"keys":[{"kty":"OKP","crv":"Ed25519","x":"AAAA","kid":"k"}]}`})
+		},
+		"JWKS configMapKeyRef": func(s *corev1.PodSpec) {
+			s.Containers[0].Env = append(s.Containers[0].Env, corev1.EnvVar{Name: "J", ValueFrom: &corev1.EnvVarSource{
+				ConfigMapKeyRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: jwks}, Key: ZoneJWKSFileName}}})
+		},
+		"JWKS envFrom configMapRef": func(s *corev1.PodSpec) {
+			s.Containers[0].EnvFrom = append(s.Containers[0].EnvFrom, corev1.EnvFromSource{
+				ConfigMapRef: &corev1.ConfigMapEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: jwks}}})
+		},
+	} {
+		spec := corev1.PodSpec{Containers: []corev1.Container{{Name: "fn", Image: "img"}}}
+		if leaks := functionPodZoneKeyLeaks(spec, "orders"); len(leaks) != 0 {
+			t.Fatalf("a clean spec must scan clean: %v", leaks)
+		}
+		mutate(&spec)
+		if leaks := functionPodZoneKeyLeaks(spec, "orders"); len(leaks) == 0 {
+			t.Fatalf("%s: the scan missed it", name)
 		}
 	}
 }

@@ -61,7 +61,8 @@ import (
 //  1. stage a new key and publish its public half in the JWKS (the current key
 //     keeps signing);
 //  2. wait the propagation bound (default 90 s), counted from a JWKS write this
-//     operator observed succeed, so every warm function has re-read the file;
+//     operator observed succeed (a clock read after the write returned), so
+//     every warm function has re-read the file;
 //  3. switch signing: current <- new, previous <- old;
 //  4. after the 1 h overlap, drop the old key from the Secret and the JWKS.
 //
@@ -585,7 +586,11 @@ func advanceZoneKey(w *zoneKeyWorld, s zoneKeyStep, in zoneKeyInputs, gen func()
 	case zkSwitchSigning:
 		w.keys.previous, w.keys.current, w.keys.next = w.keys.current, w.keys.next, nil
 		w.keys.nextPublishedAt = time.Time{}
-		w.keys.switchedAt = now
+		// switchedAt is left unset: the overlap counts from the switch the
+		// apiserver CONFIRMED, so StampSwitched stamps it in the next step, on
+		// a clock read after this write returned (a crash in between stamps
+		// it later still, which only lengthens the overlap).
+		w.keys.switchedAt = time.Time{}
 		w.keys.currentSince = now
 		return zkWriteSecret, nil
 	case zkStampSwitched:
@@ -611,6 +616,59 @@ func advanceZoneKey(w *zoneKeyWorld, s zoneKeyStep, in zoneKeyInputs, gen func()
 		return zkWriteSecret, nil
 	}
 	return zkWriteNone, nil
+}
+
+// runZoneKeyPass drives one reconcile pass: plan a step, apply it in memory,
+// persist the one object it changed, and repeat until the plan is a wait (or
+// maxZoneKeySteps). persist must return only once the apiserver has confirmed
+// the write. It returns the last planned step and every key the pass held at
+// any point (read at the start or generated), so the caller can redact an
+// error with all of them: RetirePrevious drops a key from memory BEFORE its
+// write, and a write error can still echo the stored object.
+func runZoneKeyPass(w *zoneKeyWorld, in *zoneKeyInputs, clock func() time.Time,
+	gen func() (zoneKey, error), persist func(zoneKeyWrite, zoneKeyAction) error,
+) (zoneKeyStep, []*zoneKey, error) {
+	held := appendNewKeys(nil, w.keys.keys())
+	last := zoneKeyStep{action: zkWait}
+	for i := 0; i < maxZoneKeySteps; i++ {
+		last = planZoneKeyStep(*w, *in)
+		if last.action == zkWait {
+			break
+		}
+		write, err := advanceZoneKey(w, last, *in, gen)
+		held = appendNewKeys(held, w.keys.keys())
+		if err != nil {
+			return last, held, err
+		}
+		if err := persist(write, last.action); err != nil {
+			return last, held, err
+		}
+		// The next step's clock is read only now, after the apiserver confirmed
+		// this write: a stamp the next step takes (MarkPublished after the JWKS
+		// write, StampSwitched after the switch) can then never predate the
+		// write it vouches for, however long the write (or the GETs and writes
+		// before it) took. A stale reading would start the propagation bound or
+		// the overlap EARLY.
+		in.now = clock()
+	}
+	return last, held, nil
+}
+
+// appendNewKeys adds the keys not already in held (by kid).
+func appendNewKeys(held, keys []*zoneKey) []*zoneKey {
+	for _, k := range keys {
+		known := false
+		for _, h := range held {
+			if h.kid == k.kid {
+				known = true
+				break
+			}
+		}
+		if !known {
+			held = append(held, k)
+		}
+	}
+	return held
 }
 
 // --- status (computed in computeStatusVerdict, never in Reconcile) ---------------
@@ -735,8 +793,10 @@ func zoneSigningKeyRequeue(st zoneSigningKeyState) time.Duration {
 
 var pemBlockPattern = regexp.MustCompile(`-----BEGIN [A-Z0-9 ]+-----[\s\S]*?-----END [A-Z0-9 ]+-----\n?`)
 
-// redactKeyMaterial removes every encoding of the given keys from a message,
-// and any PEM block at all. It is applied to every error the key reconcile
+// redactKeyMaterial removes every encoding of the given keys from a message
+// (the PEM, its body lines, and the PEM, the seed and the 64-byte private key
+// in the standard and URL base64 alphabets, padded and unpadded), and any PEM
+// block at all. It is applied to every error the key reconcile
 // returns, which is the only path an apiserver (or an admission webhook) could
 // echo a Secret's content back through into an event, a log line or status.
 func redactKeyMaterial(msg string, keys []*zoneKey) string {
@@ -751,13 +811,15 @@ func redactKeyMaterial(msg string, keys []*zoneKey) string {
 				needles = append(needles, l)
 			}
 		}
-		needles = append(needles,
-			base64.StdEncoding.EncodeToString(k.pem),
-			base64.StdEncoding.EncodeToString(k.priv.Seed()),
-			base64.RawStdEncoding.EncodeToString(k.priv.Seed()),
-			base64.RawURLEncoding.EncodeToString(k.priv.Seed()),
-			base64.StdEncoding.EncodeToString(k.priv),
-		)
+		// Padded before unpadded: an unpadded encoding is a prefix of the
+		// padded one, so this order leaves no stray "=" behind.
+		for _, raw := range [][]byte{k.pem, k.priv.Seed(), k.priv} {
+			for _, enc := range []*base64.Encoding{
+				base64.StdEncoding, base64.URLEncoding, base64.RawStdEncoding, base64.RawURLEncoding,
+			} {
+				needles = append(needles, enc.EncodeToString(raw))
+			}
+		}
 		for _, n := range needles {
 			if n != "" {
 				msg = strings.ReplaceAll(msg, n, "[REDACTED]")

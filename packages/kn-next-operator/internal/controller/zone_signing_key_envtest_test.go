@@ -608,7 +608,93 @@ var _ = Describe("NextApp reconciler: the zone signing key and JWKS", func() {
 			Expect(strings.Contains(string(statusJSON), m)).To(BeFalse(), "the status carries key material")
 		}
 	})
+
+	It("never leaks the retired key when a RetirePrevious write fails with an error echoing the OLD object", func() {
+		ns, _ := boundZoneFixture(ctx)
+		var logBuf bytes.Buffer
+		var logMu sync.Mutex
+		logger := funcr.New(func(prefix, args string) {
+			logMu.Lock()
+			defer logMu.Unlock()
+			fmt.Fprintln(&logBuf, prefix, args)
+		}, funcr.Options{Verbosity: 10})
+		lctx := logf.IntoContext(ctx, logger)
+		recorder := record.NewFakeRecorder(1024)
+		clock := &zoneClock{now: t0}
+		r := newKeyedZoneReconciler(clock)
+		r.Recorder = recorder
+
+		By("rotating up to the overlap, so the Secret holds a previous key")
+		_, err := reconcileWith(lctx, r, ns, "orders")
+		Expect(err).NotTo(HaveOccurred())
+		requestRotation(ctx, ns, "orders", "old-echo")
+		for _, step := range []time.Duration{0, DefaultZoneKeyPropagationBound} {
+			clock.Advance(step)
+			_, err := reconcileWith(lctx, r, ns, "orders")
+			Expect(err).NotTo(HaveOccurred())
+		}
+		sec, _ := getSigningKey(ctx, ns, "orders")
+		Expect(sec.Data).To(HaveKey(signingKeyPreviousKey), "setup: the zone must be in its overlap")
+
+		By("the RetirePrevious write is refused by a webhook that echoes the stored oldObject (base64 data)")
+		echo := &oldObjectEchoingSecretClient{Client: k8sClient}
+		r.Client = echo
+		clock.Advance(ZoneKeyOverlap)
+		_, err = reconcileWith(lctx, r, ns, "orders")
+		Expect(err).To(HaveOccurred(), "the injected refusal must surface")
+		Expect(err.Error()).To(ContainSubstring(string(zkRetirePrevious)), "the refused write must be the retire")
+		Expect(echo.old).NotTo(BeEmpty(), "the echoing client never saw a Secret write; the proof is vacuous")
+
+		var markers []string
+		for _, s := range echo.old {
+			Expect(s.Data).To(HaveKey(signingKeyPreviousKey), "the echoed old object must carry the retired key")
+			keys, _ := readSigningKeySecretLenient(s)
+			Expect(keys).To(HaveLen(2))
+			for _, k := range keys {
+				markers = append(markers, keyLeakMarkers(*k)...)
+			}
+		}
+
+		close(recorder.Events)
+		var events []string
+		for e := range recorder.Events {
+			events = append(events, e)
+		}
+		statusJSON, _ := json.Marshal(zoneApp(ctx, ns, "orders").Status)
+		logMu.Lock()
+		logs := logBuf.String()
+		logMu.Unlock()
+		for _, m := range markers {
+			for _, e := range events {
+				Expect(strings.Contains(e, m)).To(BeFalse(), "an event carries key material: %.40s", e)
+			}
+			Expect(strings.Contains(err.Error(), m)).To(BeFalse(), "the returned error carries key material")
+			Expect(strings.Contains(logs, m)).To(BeFalse(), "the logs carry key material")
+			Expect(strings.Contains(string(statusJSON), m)).To(BeFalse(), "the status carries key material")
+		}
+	})
 })
+
+// oldObjectEchoingSecretClient fails every Secret update with an error that
+// embeds the object as STORED (an admission webhook quoting oldObject), whose
+// data marshals as base64, and records what it echoed.
+type oldObjectEchoingSecretClient struct {
+	client.Client
+	old []*corev1.Secret
+}
+
+func (c *oldObjectEchoingSecretClient) Update(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
+	if _, ok := obj.(*corev1.Secret); !ok {
+		return c.Client.Update(ctx, obj, opts...)
+	}
+	stored := &corev1.Secret{}
+	if err := c.Client.Get(ctx, client.ObjectKeyFromObject(obj), stored); err != nil {
+		return err
+	}
+	c.old = append(c.old, stored)
+	raw, _ := json.Marshal(stored)
+	return fmt.Errorf("admission webhook \"echo-old\" denied the request: oldObject=%s", raw)
+}
 
 // echoingSecretClient fails every Secret write with an error that embeds the
 // whole object, the way an echoing admission webhook would, and records what it

@@ -134,28 +134,26 @@ func (r *NextAppReconciler) reconcileZoneSigningKey(ctx context.Context, app *ap
 	}
 
 	gen := func() (zoneKey, error) { return newZoneKey(rand.Reader) }
-	last := zoneKeyStep{action: zkWait}
-	for i := 0; i < maxZoneKeySteps; i++ {
-		last = planZoneKeyStep(w, in)
-		if last.action == zkWait {
-			break
-		}
-		write, err := advanceZoneKey(&w, last, in, gen)
-		if err != nil {
-			return zoneSigningKeyState{}, redactZoneKeyError(err, w.keys.keys())
-		}
+	persist := func(write zoneKeyWrite, action zoneKeyAction) error {
+		var err error
 		switch write {
 		case zkWriteSecret:
 			if sec, err = r.writeSigningKeySecret(ctx, app, sec, w.keys); err != nil {
-				return zoneSigningKeyState{}, redactZoneKeyError(
-					fmt.Errorf("writing Secret %s (%s): %w", secretName, last.action, err), w.keys.keys())
+				return fmt.Errorf("writing Secret %s (%s): %w", secretName, action, err)
 			}
 		case zkWriteJWKS:
 			if cm, err = r.writeJWKSConfigMap(ctx, app, cm, w.jwks); err != nil {
-				return zoneSigningKeyState{}, redactZoneKeyError(
-					fmt.Errorf("writing ConfigMap %s (%s): %w", jwksName, last.action, err), w.keys.keys())
+				return fmt.Errorf("writing ConfigMap %s (%s): %w", jwksName, action, err)
 			}
 		}
+		return nil
+	}
+	last, held, err := runZoneKeyPass(&w, &in, r.now, gen, persist)
+	if err != nil {
+		// held, not w.keys: RetirePrevious drops the previous key from memory
+		// before its write, and a refusal can echo the STORED object, which
+		// still carries it.
+		return zoneSigningKeyState{}, redactZoneKeyError(err, held)
 	}
 	return zoneKeyStatusFrom(w, in, last, app.Name), nil
 }
