@@ -426,6 +426,33 @@ describe('the lane proves what it claims', () => {
     expect(runSh).toMatch(/\[ "\$\{#line\}" -ge 40 \] \|\| continue/);
   });
 
+  it('passes a kid as --kid=<value>: a base64url kid can start with "-" and parseArgs reads that as a flag', () => {
+    // Seen on a control run: 1 kid in 64 starts with "-", and `--kid -q5z...` made
+    // the probe exit before it sent anything.
+    const uses = runSh.split('\n').filter((l) => /--kid\b/.test(l) && !/^\s*#/.test(l));
+    expect(uses.length).toBeGreaterThan(0);
+    for (const line of uses) expect(line, line).toMatch(/"--kid=\$\(/);
+  });
+
+  it('re-establishes a dropped gateway port-forward instead of failing an assertion on it', () => {
+    // A long lane cannot depend on one `kubectl port-forward` surviving. The
+    // retry covers only "no response" (probe exit 2, curl 000), never an answer.
+    expect(runSh).toMatch(/ensure_forward\(\) \{/);
+    expect(runSh).toMatch(/\[ "\$\{rc\}" = 2 \] \|\| return "\$\{rc\}"/);
+    expect(runSh).toMatch(/\[ "\$\{out##\*\$'\\n'\}" = 000 \] \|\| break/);
+    // Every forward it starts is recorded, and the cleanup stops them all.
+    expect(runSh).toContain('echo "$!" >>"${PF_PIDS}"');
+    expect(runSh).toMatch(/while read -r pid; do kill "\$\{pid\}"[^\n]*done <"\$\{PF_PIDS\}"/);
+  });
+
+  it('starts the port-forward as kubectl itself, so the pid it records is the one holding the port', () => {
+    // `$!` of a backgrounded shell function is the function's subshell: killing
+    // it leaves kubectl running, and an orphaned port-forward keeps a local port.
+    const started = runSh.split('\n').filter((l) => /\bport-forward\b/.test(l) && /&\s*$/.test(l));
+    expect(started.length).toBeGreaterThan(0);
+    for (const line of started) expect(line, line).toMatch(/^\s*kubectl /);
+  });
+
   it('names a same-pass switch as its own failure, not as a missing staged key', () => {
     // The operator takes a rotation request and stages the key in one write, so a
     // bound that is not waited shows as an already-switched signing key.

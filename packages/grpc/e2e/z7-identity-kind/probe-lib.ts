@@ -16,7 +16,7 @@
  */
 
 import { createHash, generateKeyPairSync, type KeyObject, sign } from 'node:crypto';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -72,16 +72,22 @@ function kidFor(publicKey: KeyObject): string {
   return createHash('sha256').update(raw).digest().subarray(0, 16).toString('base64url');
 }
 
-/** Write a fresh Ed25519 key as a signing-key directory; the caller removes it. */
-function freshKeyDir(): { dir: string; kid: string; pem: string } {
+/**
+ * Run `use` with a fresh Ed25519 key written as a signing-key directory, and
+ * remove the directory afterwards whatever `use` does.
+ */
+async function withFreshKey<T>(use: (dir: string, kid: string) => Promise<T>): Promise<T> {
   const { privateKey, publicKey } = generateKeyPairSync('ed25519');
   const pem = privateKey.export({ format: 'pem', type: 'pkcs8' }) as string;
   const kid = kidFor(publicKey);
   const dir = mkdtempSync(join(tmpdir(), 'knext-z7-probe-key-'));
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, 'current.key'), pem, { mode: 0o600 });
-  writeFileSync(join(dir, 'current.kid'), kid, { mode: 0o600 });
-  return { dir, kid, pem };
+  try {
+    writeFileSync(join(dir, 'current.key'), pem, { mode: 0o600 });
+    writeFileSync(join(dir, 'current.kid'), kid, { mode: 0o600 });
+    return await use(dir, kid);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 async function mintWithSigner(keyDir: string, a: ProbeAuth): Promise<string> {
@@ -111,15 +117,11 @@ export async function authorizationHeader(a: ProbeAuth): Promise<Authorization> 
       const token = await mintWithSigner(a.keyDir, a);
       return { header: `Bearer ${token}`, kid: headerKid(token) };
     }
-    case 'foreign': {
-      const k = freshKeyDir();
-      try {
-        const token = await mintWithSigner(k.dir, a);
-        return { header: `Bearer ${token}`, kid: k.kid };
-      } finally {
-        rmSync(k.dir, { recursive: true, force: true });
-      }
-    }
+    case 'foreign':
+      return withFreshKey(async (dir, kid) => ({
+        header: `Bearer ${await mintWithSigner(dir, a)}`,
+        kid,
+      }));
     case 'forged': {
       if (!a.kid) throw new Error('mode forged needs the kid to claim');
       const { privateKey } = generateKeyPairSync('ed25519');

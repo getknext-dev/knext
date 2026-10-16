@@ -7,7 +7,7 @@ zone's generated glue through the real signer. CI runs it as
 kind cluster of your own:
 
 ```bash
-packages/grpc/e2e/z7-identity-kind/run.sh          # all phases, ~25 minutes the first time
+packages/grpc/e2e/z7-identity-kind/run.sh          # all phases: 30 to 40 minutes from nothing, about 15 once the cluster and images exist
 PHASES="deploy verify" Z7_WITH_RUST=0 packages/grpc/e2e/z7-identity-kind/run.sh
 ```
 
@@ -36,6 +36,16 @@ into files in a private temporary directory, never to the terminal.
 | `Z7_PROPAGATION_BOUND` | `90s` | The operator's `--zone-signing-key-propagation-bound`. The minimum is 60 s. |
 | `Z7_WITH_RUST` | `1` | `0` skips building and binding the Rust function. |
 | `PHASES` | all | A subset of the phases above, in any combination. |
+
+## Mutation proof
+
+`mutation-prove.mjs` breaks one operator rule at a time (the propagation bound is not
+waited, the staged key is not published, the previous key is retired at once, the staged
+key reaches the zone's pod, a function mounts the JWKS through a subPath, the operator logs
+a key), builds that operator, and expects the lane to go red for that reason. It then runs
+the unmutated operator through every phase, which must pass. It needs a cluster that has
+had `PHASES="up images"` and takes about an hour, so it is run by hand; its anchors are
+checked without a cluster by `tests/z7-identity-kind-e2e-lane.test.ts`.
 
 ## What it does not prove
 

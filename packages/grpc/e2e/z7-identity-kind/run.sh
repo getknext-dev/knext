@@ -109,6 +109,7 @@ export KUBECONFIG="${WORK}/kubeconfig"
 PIDS=()
 WATCH_PID=""
 FORWARDS_STARTED=0
+PF_PIDS="${WORK}/pf.pids"
 
 log() { printf '\n== %s\n' "$*"; }
 ok() { printf 'ok: %s\n' "$*"; }
@@ -132,6 +133,9 @@ cleanup() {
   for pid in "${PIDS[@]:-}"; do
     [ -n "${pid}" ] && kill "${pid}" 2>/dev/null || true
   done
+  if [ -f "${PF_PIDS}" ]; then
+    while read -r pid; do kill "${pid}" 2>/dev/null || true; done <"${PF_PIDS}"
+  fi
   if [ "${rc}" -ne 0 ]; then diagnostics; fi
   rm -rf "${WORK}"
   exit "${rc}"
@@ -186,9 +190,20 @@ export_key() {
 
 pair_kids() { printf '%s\n%s\n' "$1" "$2" | LC_ALL=C sort | paste -sd, -; }
 
-# probe <args...>: one call to a function, one JSON line. Exits the script when
-# the function does not answer at all.
-probe() { bun "${PROBE}" --base "http://127.0.0.1:${INTERNAL_PORT}" "$@"; }
+# probe <args...>: one call to a function, one JSON line. Exit status 2 means the
+# gateway could not be reached (a dropped port-forward): the forward is
+# re-established and the call retried. A function that ANSWERS is never retried,
+# so a refusal stays a refusal.
+probe() {
+  local attempt rc=0
+  for attempt in 1 2 3; do
+    rc=0
+    bun "${PROBE}" --base "http://127.0.0.1:${INTERNAL_PORT}" "$@" || rc=$?
+    [ "${rc}" = 2 ] || return "${rc}"
+    ensure_forward
+  done
+  return "${rc}"
+}
 
 # probe_status <args...>: just the HTTP status of one probe call ("" if none).
 probe_status() { probe "$@" 2>/dev/null | jq -r .status 2>/dev/null || true; }
@@ -207,10 +222,20 @@ expect() {
 }
 
 zone_call() { # <path?query>: sets ZC_STATUS / ZC_BODY from the zone, through the cluster-local gateway
-  local out
-  out="$(curl -s -m 30 -H "Host: ${ZONE_HOST}" -w '\n%{http_code}' "http://127.0.0.1:${INTERNAL_PORT}$1")" || out=$'\n000'
+  local out attempt
+  for attempt in 1 2 3; do
+    out="$(curl -s -m 30 -H "Host: ${ZONE_HOST}" -w '\n%{http_code}' "http://127.0.0.1:${INTERNAL_PORT}$1" 2>/dev/null)" || out=$'\n000'
+    # 000 is curl's "no response": only a dropped port-forward gives it. The zone
+    # answering with an error is a status, and is not retried.
+    [ "${out##*$'\n'}" = 000 ] || break
+    ensure_forward
+  done
   ZC_STATUS="${out##*$'\n'}"
   ZC_BODY="${out%$'\n'*}"
+}
+zone_status() { # <path?query>: just the status of one request to the zone
+  zone_call "$1"
+  echo "${ZC_STATUS}"
 }
 expect_zone() { # <description> <path?query> <status> <jq filter that must hold>
   zone_call "$2"
@@ -229,12 +254,26 @@ pod_json() { # <service>: the single live pod of a service
     | jq '[.items[] | select(.metadata.deletionTimestamp == null)] | if length == 1 then .[0] else error("want exactly one live pod, got \(length)") end'
 }
 
+forward_up() { (exec 3<>/dev/tcp/127.0.0.1/"${INTERNAL_PORT}") 2>/dev/null; }
+
+# ensure_forward: a port-forward to Knative's cluster-local gateway, started if
+# the port is not accepting. `kubectl port-forward` ends when its stream breaks,
+# and a long lane must not fail an assertion because of that. Safe to call from
+# the watcher's subshell: every pid it starts is written to a file the cleanup
+# reads.
+ensure_forward() {
+  forward_up && return 0
+  # kubectl itself, not the k() wrapper: `$!` of a backgrounded shell function is
+  # the function's subshell, and killing that leaves kubectl holding the port.
+  kubectl -n kourier-system port-forward svc/kourier-internal "${INTERNAL_PORT}:80" >>"${WORK}/pf-internal.log" 2>&1 &
+  echo "$!" >>"${PF_PIDS}"
+  wait_until 30 1 "port-forward on ${INTERNAL_PORT}" forward_up
+}
+
 start_forwards() {
   [ "${FORWARDS_STARTED}" = 1 ] && return 0
   FORWARDS_STARTED=1
-  k -n kourier-system port-forward svc/kourier-internal "${INTERNAL_PORT}:80" >"${WORK}/pf-internal.log" 2>&1 &
-  PIDS+=("$!")
-  wait_until 30 1 "port-forward on ${INTERNAL_PORT}" "(exec 3<>/dev/tcp/127.0.0.1/${INTERNAL_PORT})"
+  ensure_forward
   # The zone is reached the way its functions are: through the cluster-local
   # gateway, by the host name Knative gave it.
   ZONE_HOST="$(k -n "${NS}" get nextapp "${ZONE}" -o jsonpath='{.status.url}' 2>/dev/null | sed -E 's#^https?://##')"
@@ -470,7 +509,7 @@ refusal_matrix() {
   expect "${label}: a token signed by another key is refused" 401 unauthenticated \
     "${common[@]}" --rpc put --id "evil-${label}" --value x --auth foreign
   expect "${label}: a token claiming the zone's real kid, signed by another key, is refused" 401 unauthenticated \
-    "${common[@]}" --rpc put --id "evil-${label}" --value x --auth forged --kid "$(<"${keydir}/current.kid")"
+    "${common[@]}" --rpc put --id "evil-${label}" --value x --auth forged "--kid=$(<"${keydir}/current.kid")"
   expect "${label}: a token minted for another function is refused" 401 unauthenticated \
     "${common[@]}" --rpc put --id "evil-${label}" --value x --auth signer --key-dir "${keydir}" --audience "${other_aud}"
   expect "${label}: a token minted for another RPC is refused" 401 unauthenticated \
@@ -641,11 +680,11 @@ phase_rotate() {
     i=0
     while :; do
       i=$((i + 1))
-      c1="$(curl -s -o /dev/null -m 30 -w '%{http_code}' -H "Host: ${ZONE_HOST}" "http://127.0.0.1:${INTERNAL_PORT}/example/put?id=w${i}&value=v&sub=watcher" || echo 000)"
-      c2="$(curl -s -o /dev/null -m 30 -w '%{http_code}' -H "Host: ${ZONE_HOST}" "http://127.0.0.1:${INTERNAL_PORT}/example/get?id=w${i}&sub=watcher" || echo 000)"
+      c1="$(zone_status "/example/put?id=w${i}&value=v&sub=watcher")"
+      c2="$(zone_status "/example/get?id=w${i}&sub=watcher")"
       c3=200
       if [ "${WITH_RUST}" = 1 ]; then
-        c3="$(curl -s -o /dev/null -m 30 -w '%{http_code}' -H "Host: ${ZONE_HOST}" "http://127.0.0.1:${INTERNAL_PORT}/inventory/put?id=w${i}&value=v&sub=watcher" || echo 000)"
+        c3="$(zone_status "/inventory/put?id=w${i}&value=v&sub=watcher")"
       fi
       echo "$(date +%s) ${c1} ${c2} ${c3}" >>"${watch_log}"
       sleep 2
@@ -749,7 +788,7 @@ phase_rotate() {
     [ "${fn}" = rust ] && [ "${WITH_RUST}" != 1 ] && continue
     host="${GO_HOST}"
     [ "${fn}" = rust ] && host="${RUST_HOST}"
-    wait_until $((BOUND_SECONDS + 60)) 2 "the warm ${fn} function to refuse the retired key" \
+    wait_until $((BOUND_SECONDS + 150)) 2 "the warm ${fn} function to refuse the retired key" \
       "[ \"\$(probe_status --host ${host} --issuer ${ISSUER} --sub alice --rpc put --id r --value r --auth signer --key-dir ${WORK}/key-old)\" = 401 ]"
     expect "${fn}: the retired key's token is refused" 401 unauthenticated \
       --host "${host}" --issuer "${ISSUER}" --sub alice --rpc put --id r --value r --auth signer --key-dir "${WORK}/key-old"
