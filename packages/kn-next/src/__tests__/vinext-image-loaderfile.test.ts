@@ -24,6 +24,7 @@ import { cpSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { applyVinextPatches } from "../cli/vinext-patches";
+import { waitForHttpOk } from "./helpers/wait-for-http-ok";
 
 const FIXTURE = join(
     import.meta.dir,
@@ -68,16 +69,25 @@ beforeAll(async () => {
     srv.stderr?.on("data", (d) => {
         log += d;
     });
-    for (let i = 0; i < 40; i++) {
-        try {
-            await fetch(`${base}/`);
-            return;
-        } catch {
-            await new Promise((r) => setTimeout(r, 250));
-        }
-    }
-    throw new Error(`the built server never answered\n${log}`);
-}, 240_000);
+    // Crash vs slow: an exit (or a spawn that never started) is reported as
+    // such, instead of running out the deadline as "never answered".
+    let exited: string | null = null;
+    srv.on("exit", (code, signal) => {
+        exited = `code=${code} signal=${signal}`;
+    });
+    srv.on("error", (e) => {
+        exited = `spawn error: ${e.message}`;
+    });
+    // A fixed 10 s poll budget flaked on loaded CI runners: the cold boot of
+    // the built server there can exceed it. 90 s fits a loaded cold boot and
+    // stays inside this hook's timeout after install + build.
+    const res = await waitForHttpOk(`${base}/`, {
+        deadlineMs: 90_000,
+        log: () => log,
+        exited: () => exited,
+    });
+    await res.body?.cancel();
+}, 360_000);
 
 afterAll(() => {
     srv?.kill("SIGKILL");
