@@ -31,6 +31,12 @@
  * - JSON carries no NaN or Infinity (`JSON.stringify` writes `null`, which
  *   Rust would read as `None`), so a non-finite float anywhere inside a JSON
  *   argument is a `TypeError` naming its path, before the call.
+ * - Every symbol call is timed; one slower than `KNEXT_FFI_SLOW_CALL_MS`
+ *   (default 50 ms, 0 = off) is counted per function in a process-wide
+ *   registry on `globalThis` and logged the first time. Once the library has
+ *   loaded, a render function is published under the `knext.ffi.renderMetrics`
+ *   registered symbol for core's loopback metrics listener. This makes a blocking call visible; it cannot interrupt one.
+ *   TODO(#2432): the vinext single-executable build does not serve it yet.
  */
 
 import {
