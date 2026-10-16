@@ -1763,7 +1763,8 @@ describe('package scope (#2389): release sets', () => {
       auditExempt: AUDIT_EXEMPT,
       crateWorkflow: CRATE_WORKFLOW,
     });
-    expect(audit.problems.join('\n')).toMatch(/\.changeset\/config\.json/);
+    // The read failure itself, not the knock-on "no fixed group" finding.
+    expect(audit.problems.join('\n')).toMatch(/\.changeset\/config\.json: unreadable/);
   });
 });
 
