@@ -133,11 +133,17 @@ function decode(token: string, publicKey: KeyObject): Decoded {
   for (const seg of parts) expect(seg).toMatch(/^[A-Za-z0-9_-]+$/); // base64url, no padding
   const headerJson = Buffer.from(h, 'base64url').toString('utf8');
   const claimsJson = Buffer.from(c, 'base64url').toString('utf8');
+  const header = JSON.parse(headerJson);
+  const claims = JSON.parse(claimsJson);
+  // Every token minted here carries its kid in the JWS header, where the Go and
+  // Rust verifiers read it, and never in the claims.
+  expect(Object.keys(header)).toEqual(['alg', 'typ', 'kid']);
+  expect(Object.keys(claims)).not.toContain('kid');
   return {
     headerJson,
-    header: JSON.parse(headerJson),
+    header,
     claimsJson,
-    claims: JSON.parse(claimsJson),
+    claims,
     verified: verify(null, Buffer.from(`${h}.${c}`), publicKey, Buffer.from(s, 'base64url')),
   };
 }

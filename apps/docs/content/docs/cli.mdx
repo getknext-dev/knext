@@ -899,17 +899,26 @@ called.
 The token is signed with your zone's own key. The operator creates the key, mounts it into the zone
 (and no other workload) at `/var/run/knext/signing-key`, and sets `KNEXT_ZONE_ISSUER`, the zone's
 identity, once the zone is bound to a function. The key is read from that mount, never from an
-environment variable, and a rotated key is used from the next call on, without a restart. The
-function is identified from `<NAME>_SERVICE_URL`, which must be the cluster-local address the
-operator renders (`http://<function>.<namespace>.svc.cluster.local`). A call is refused before it
-leaves the zone, with `FAILED_PRECONDITION`, while the key or `KNEXT_ZONE_ISSUER` is missing, when
-the address is anything else, or when the function is in another namespace than the zone.
+environment variable, and when the operator rotates it the zone signs with the new key from the
+first call after the kubelet updates the mounted files, without a restart. The function is
+identified from `<NAME>_SERVICE_URL`, which must be the cluster-local address the operator renders
+(`http://<function>.<namespace>.svc.cluster.local`). A call is refused before it leaves the zone,
+with `FAILED_PRECONDITION`, while the key or `KNEXT_ZONE_ISSUER` is missing, when the address is
+anything else, or when the function is in another namespace than the zone.
+
+The function checks the token against the zone's public keys, which the operator mounts into it at
+`/var/run/knext/jwks/jwks.json`, and against `KNEXT_TOKEN_ISSUER` (the zone) and
+`KNEXT_TOKEN_AUDIENCE` (the function), which the operator also sets. See
+[Identity and the JWKS](/docs/zone-functions#identity-and-the-jwks) for the objects, the variables
+and how to rotate the key.
 
 A token can be used again by whoever holds it until it expires; there is no one-time check. Treat
 anything that records the `authorization` header of calls to your functions, such as request logs
 or traces, as sensitive.
 
-To sign with a key mounted elsewhere, register your own signer in `instrumentation.ts`:
+A function accepts only the keys the operator publishes for the zone, so a token signed with any
+other key is refused by every function. To read the zone's own key from another directory, for
+example in a local run, register a signer in `instrumentation.ts`:
 
 ```ts
 import { createZoneTokenSigner, registerTokenMinter } from "@getknext/grpc/runtime";

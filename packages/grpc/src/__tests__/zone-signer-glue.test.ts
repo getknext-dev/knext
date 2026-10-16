@@ -69,7 +69,12 @@ function verifyCall(ctx: HandlerContext, body: string): void {
   if (!m) throw new ConnectError('no bearer token', Code.Unauthenticated);
   const [, h, c, s] = m as unknown as [string, string, string, string];
   const header = JSON.parse(Buffer.from(h, 'base64url').toString('utf8'));
-  if (header.alg !== 'EdDSA' || header.typ !== 'JWT' || Object.keys(header).length !== 3) {
+  // The kid is read from the header, as the Go and Rust verifiers read it.
+  if (
+    header.alg !== 'EdDSA' ||
+    header.typ !== 'JWT' ||
+    JSON.stringify(Object.keys(header)) !== '["alg","typ","kid"]'
+  ) {
     throw new ConnectError('bad header', Code.Unauthenticated);
   }
   const key = jwks.get(header.kid);
@@ -79,6 +84,7 @@ function verifyCall(ctx: HandlerContext, body: string): void {
   const claims = JSON.parse(Buffer.from(c, 'base64url').toString('utf8'));
   const now = Math.floor(Date.now() / 1000);
   const ok =
+    JSON.stringify(Object.keys(claims)) === '["iss","aud","method","sub","iat","exp"]' &&
     claims.iss === ISSUER &&
     claims.aud === AUDIENCE &&
     claims.method === path &&
