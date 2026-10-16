@@ -330,6 +330,15 @@ const MUTATIONS = [
     anchor: "    new RegExp(String.raw`${id}\\s*(?:\\?\\?|\\|\\||&&)?=(?![=>])`, 'g'),\n",
     replacement: '',
   },
+  {
+    id: 'R4-B6',
+    expect: 'red',
+    claim: 'the binding check no longer sees a for (const log of …) loop binding',
+    subject: 'spec',
+    anchor:
+      "    new RegExp(String.raw`\\b(?:const|let|var)\\s+${r}\\s*(?:=|\\s(?:of|in)\\b)`, 'g'),",
+    replacement: "    new RegExp(String.raw`\\b(?:const|let|var)\\s+${r}\\s*=`, 'g'),",
+  },
   // ── U: what must be UNPARSEABLE, never a pass ───────────────────────────────
   {
     id: 'U1',

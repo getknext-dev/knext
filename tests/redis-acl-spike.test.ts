@@ -93,8 +93,8 @@ import {
  *     through a computed specifier in a file with no other signal at all; a
  *     tuple built from non-literals and handed to a listed forwarder; and, for a
  *     NOT_REDIS_RECEIVERS receiver, a client bound to that name in a way the
- *     binding check does not parse: a function or catch PARAMETER (`(log) =>`,
- *     `({ log }) =>`), a class field, nested destructuring, or a client reached
+ *     binding check does not parse: a function or catch PARAMETER without a
+ *     default (`(log) =>`, `({ log }) =>`), nested destructuring, or a client reached
  *     as a property of the same name (`this.log`, `deps.log`), which then
  *     issues exactly the exempt command (any other command on it still reds).
  *     The live lane's real-handler layer (ACL LOG, MONITOR) is the backstop for
@@ -302,15 +302,18 @@ const NOT_REDIS_RECEIVERS: Record<
 
 /**
  * Every way a file can (re)bind `r` that the binding check sees: a
- * `const|let|var` declaration; a destructuring pattern that binds it (`{ r }`,
- * `{ a: r }`, `{ r = d }`, then `=`); an import (default, namespace, named, or
- * `as r`); and a re-assignment `r = …` (or `??=`, `||=`, `&&=`). Matched over the whole source, so
- * a multi-line pattern counts; the reported line is the one the match starts on.
+ * `const|let|var` declaration, including a `for (const r of|in …)` loop; a
+ * destructuring pattern that binds it (`{ r }`, `{ a: r }`, `{ r = d }`, then
+ * `=`); an import (default, namespace, named, or `as r`); and an assignment
+ * `r = …` (or `??=`, `||=`, `&&=`), which also covers a class field, a later
+ * declarator (`let a = 1, r = c`) and a default parameter. Matched over the
+ * whole source, so a multi-line pattern counts; the reported line is the one
+ * the match starts on.
  */
 function receiverBindings(r: string): RegExp[] {
   const id = String.raw`(?<![\w$.])${r}(?![\w$])`;
   return [
-    new RegExp(String.raw`\b(?:const|let|var)\s+${r}\s*=`, 'g'),
+    new RegExp(String.raw`\b(?:const|let|var)\s+${r}\s*(?:=|\s(?:of|in)\b)`, 'g'),
     new RegExp(
       String.raw`\{[^{}]*${id}\s*(?=[,}]|=(?![=>]))[^{}]*\}\s*(?::[^=;{}\n]+)?=(?![=>])`,
       'g',
@@ -760,6 +763,9 @@ describe('redis ACL spike: NOT_REDIS_RECEIVERS is per command and per binding', 
     ["import { log } from './client';"],
     ['log = new Redis(url);'],
     ['log ??= client;'],
+    ['for (const log of clients) {}'],
+    ['class A {\n  log = createClient();\n}'],
+    ['let a = 1, log = client;'],
   ])('sees %p as a binding of the receiver', (src) => {
     expect(bindingLines(src, 'log').length).toBeGreaterThan(0);
   });
