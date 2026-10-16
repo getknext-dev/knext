@@ -154,10 +154,44 @@ invalidations, an app with its own prefix clears its whole cache to drop the ent
 invalidate. An app on that shared fallback, or on a prefix inside it, logs an error instead and keeps
 those entries until they expire.
 
+### What a key prefix may contain [#key-prefix-rules]
+
+The cluster checks `cache.keyPrefix` when the `NextApp` is applied, and refuses a prefix that:
+
+- is longer than 63 characters;
+- contains whitespace (space, tab, newline, carriage return, form feed or vertical tab);
+- contains one of the Redis pattern characters `*`, `?`, `[`, `]` or `\`;
+- is the shared fallback prefix described above, or sits inside its keyspace (`kn-next:*`, such as
+  `kn-next:cache`).
+
+Letters, digits and other punctuation are fine: `shop`, `tenant-a:shop` and `app.v1_blue` are all
+accepted. An empty `cache.keyPrefix` counts as unset, so the app gets its own prefix. `knext deploy`
+applies the same check before it builds, so a bad prefix fails in seconds rather than after the
+image is pushed.
+
 A prefix is matched literally, character for character. When an app is deleted, the operator
-removes only the keys that start with the app's prefix followed by `:`. Characters such as `*`,
-`?` and `[` in a prefix are not wildcards, so an app whose prefix is `kn-*` deletes only keys
-that start with `kn-*:`, never another app's.
+removes only the keys that start with the app's prefix followed by `:`. Even an app stored with a
+`*`, `?` or `[` in its prefix from before the check existed deletes only keys that start with its
+literal prefix, never another app's.
+
+### Upgrading when a stored prefix is now refused [#key-prefix-check-upgrade]
+
+Upgrade the operator and its CRD first, then the CLI. Before you upgrade, run `knext doctor`
+against the cluster. Its **Redis key prefixes** row names every app whose stored `cache.keyPrefix`
+the new check refuses, with the reason.
+
+What happens to such an app depends on the Kubernetes version of the cluster:
+
+- **Kubernetes 1.30 and later:** the app keeps running and keeps accepting changes that leave its
+  prefix alone, such as a new image or new environment variables. Changing the prefix to another
+  refused value is rejected.
+- **Kubernetes 1.28 and 1.29:** the app keeps running, but its next spec change of any kind is
+  rejected until the prefix is fixed. These versions are below the supported floor; see the
+  [support matrix](/docs/support-matrix#kubernetes).
+
+To fix an app, set a prefix the check accepts, or remove `cache.keyPrefix` to use the app's own
+default, and deploy again. A new prefix starts with an empty cache, as described in the next
+section, and keys under the old prefix expire on their own.
 
 ### Upgrading an app that set no prefix [#key-prefix-upgrade]
 

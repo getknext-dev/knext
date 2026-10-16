@@ -38,16 +38,36 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
-import { diffCrd } from './lib/crd-schema-diff.mjs';
+import { applyWaivers, diffCrd, validateWaiverEntry } from './lib/crd-schema-diff.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, '..');
 
 export const CRD_PATH = 'packages/kn-next-operator/config/crd/bases/apps.kn-next.dev_nextapps.yaml';
+
+/**
+ * Narrowing waivers (ADR-0017 Amendment 3): exact, dated, justified,
+ * single-use entries, each letting ONE violation string through. The rules for
+ * an entry live in `validateWaiverEntry` / `applyWaivers`
+ * (scripts/lib/crd-schema-diff.mjs).
+ */
+export const WAIVERS_PATH = 'scripts/crd-narrowing-waivers.json';
+
+/** Read the waiver file; a missing file is "no waivers". */
+export function readWaivers(readFileSyncFn = readFileSync) {
+  let content;
+  try {
+    content = readFileSyncFn(resolve(repoRoot, WAIVERS_PATH), 'utf8');
+  } catch (err) {
+    if (err?.code === 'ENOENT') return { waivers: [] };
+    throw err;
+  }
+  return JSON.parse(content);
+}
 
 /**
  * Highest `v*` tag REACHABLE FROM HEAD (`--merged HEAD`), or null. Release-line filter (ADR-0063): `v1.3.0-rc.*` tags live on integration/v1.3, whose CRD has fields main lacks; a tag on a line HEAD does not descend from must never be the baseline.
@@ -124,6 +144,11 @@ export function run(
     readFileSyncFn = readFileSync,
     resolveLatestVTagFn = resolveLatestVTag,
     env = process.env,
+    // A caller that fakes the CRD read and passes no waiver reader gets no
+    // waivers: the repo's real waiver file names real violations, which a
+    // fabricated CRD pair would report as stale.
+    readWaiversFn = readFileSyncFn === readFileSync ? () => readWaivers() : () => ({ waivers: [] }),
+    fileExistsFn = (p) => existsSync(resolve(repoRoot, p)),
   } = {},
 ) {
   const opts = parseArgs(argv);
@@ -163,18 +188,54 @@ export function run(
   const newCrd = readCrdFromDisk(opts.crdPath, readFileSyncFn);
 
   const result = diffCrd(oldCrd, newCrd);
-  if (!result.ok) {
-    log(
-      `[crd-schema-diff] FAIL: ${result.violations.length} additive-only violation(s) against ${baseRef}:`,
-    );
-    for (const v of result.violations) log(`  - ${v}`);
-    log(
-      '[crd-schema-diff] See ADR-0017 Amendment 2 §2.1 — within v1alpha1, NextApp schema ' +
-        'changes must be additive-only. A non-additive change needs a new CRD API version.',
-    );
+
+  // Waivers apply to the NextApp CRD only — they name its violation strings.
+  const waivers = opts.crdPath === CRD_PATH ? (readWaiversFn()?.waivers ?? []) : [];
+  const invalid = [];
+  for (const [i, entry] of waivers.entries()) {
+    for (const problem of validateWaiverEntry(entry, fileExistsFn)) {
+      invalid.push(`invalid waiver #${i + 1} in ${WAIVERS_PATH}: ${problem}`);
+    }
+  }
+  if (invalid.length > 0) {
+    log(`[crd-schema-diff] FAIL: ${invalid.length} problem(s) in ${WAIVERS_PATH}:`);
+    for (const p of invalid) log(`  - ${p}`);
     return 1;
   }
+  const { waived, remaining, stale } = applyWaivers(result.violations, waivers);
 
+  let failed = false;
+  if (remaining.length > 0) {
+    failed = true;
+    log(
+      `[crd-schema-diff] FAIL: ${remaining.length} additive-only violation(s) against ${baseRef}:`,
+    );
+    for (const v of remaining) log(`  - ${v}`);
+    log(
+      '[crd-schema-diff] See ADR-0017 Amendment 2 §2.1 — within v1alpha1, NextApp schema ' +
+        'changes must be additive-only. A non-additive change needs a new CRD API version, ' +
+        `or an exact waiver in ${WAIVERS_PATH} under the rules of ADR-0017 Amendment 3.`,
+    );
+  }
+  if (stale.length > 0) {
+    failed = true;
+    log(
+      `[crd-schema-diff] FAIL: ${stale.length} stale waiver(s) in ${WAIVERS_PATH} match no current ` +
+        `violation against ${baseRef}. Waivers are single-use: delete them (the narrowing has ` +
+        'shipped in a tag, or the waived rule text changed and needs a new review):',
+    );
+    for (const w of stale) log(`  - ${w.violation}`);
+  }
+  if (failed) return 1;
+
+  if (waived.length > 0) {
+    log(
+      `[crd-schema-diff] PASS: ${opts.crdPath} vs ${baseRef} — ${waived.length} narrowing(s) waived ` +
+        `by ${WAIVERS_PATH} (ADR-0017 Amendment 3):`,
+    );
+    for (const v of waived) log(`  - ${v}`);
+    return 0;
+  }
   log(`[crd-schema-diff] PASS: ${opts.crdPath} is an additive-only superset of ${baseRef}.`);
   return 0;
 }

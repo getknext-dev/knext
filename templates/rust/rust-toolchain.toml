@@ -1,0 +1,5 @@
+[toolchain]
+# The Dockerfile builder image names the same release (rust:<version>-alpine).
+channel = "1.99.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

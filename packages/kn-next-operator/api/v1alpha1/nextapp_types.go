@@ -1024,8 +1024,24 @@ type StorageSpec struct {
 type CacheSpec struct {
 	Provider string `json:"provider,omitempty"`
 	URL      string `json:"url,omitempty"`
-	// KeyPrefix is prepended to every cache key — maps from KnativeNextConfig.cache.keyPrefix
+	// Admission rules below (#2398) are in lockstep with the runtime's escapeGlob
+	// (the Redis glob metacharacters) and with the CLI's early check
+	// (packages/kn-next/src/cli/redis-key-prefix.ts reads this CRD in its
+	// lockstep test). They narrowed an existing v1alpha1 field, which is safe
+	// only on the Kubernetes >= 1.30 server floor: CRD validation ratcheting
+	// lets an app stored with a now-invalid prefix keep taking unrelated updates
+	// (ADR-0017 Amendment 3; keyprefix_ratcheting_envtest_test.go).
+
+	// KeyPrefix is prepended to every Redis cache key ("<keyPrefix>:..."); maps
+	// from KnativeNextConfig.cache.keyPrefix. Empty means unset: the operator
+	// gives the app its own default prefix, "kn-" plus 12 hex characters.
+	// At most 63 characters, with no whitespace and none of the Redis glob
+	// characters * ? [ ] \. "kn-next" and any prefix starting "kn-next:" are
+	// reserved for the shared fallback keyspace.
 	// +optional
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[^*?\[\]\\ \t\n\r\f\v]*$`
+	// +kubebuilder:validation:XValidation:rule="self != 'kn-next' && !self.startsWith('kn-next:')",message="keyPrefix 'kn-next' and prefixes under 'kn-next:' are reserved for the shared fallback keyspace"
 	KeyPrefix string `json:"keyPrefix,omitempty"`
 }
 

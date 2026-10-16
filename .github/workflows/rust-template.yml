@@ -1,0 +1,290 @@
+name: Rust function template
+
+# The Rust zone-function template (templates/rust): a connect-rust server
+# whose token check fails closed, built into a distroless image.
+#
+#   check        buf lint; `buf generate` with the pinned plugins must
+#                reproduce the committed gen/ (proto is the source of truth);
+#                cargo fmt; clippy -D warnings; cargo test (the token check,
+#                the Connect/gRPC/gRPC-Web protocol matrix over h2c and
+#                HTTP/1.1, the fail-closed wire scan, the request-read
+#                bounds, the drain); cargo deny and cargo audit at pinned,
+#                sha256-verified releases.
+#   conformance  connect-rust is pre-1.0, so its pin is gated by the Connect
+#                conformance suite (templates/rust/conformance.sh): the
+#                upstream conformance server, built from the exact commit of
+#                the connectrpc version in templates/rust/Cargo.lock with the
+#                template's protocol stack, against the pinned,
+#                sha256-verified connectconformance runner, every server test
+#                on every protocol.
+#   image        contents: read only, every event: build locally -> SBOM (syft,
+#                SPDX) -> Trivy gate (FAIL on HIGH/CRITICAL). The binary is
+#                built with `cargo auditable`, so the scan sees its crates.
+#                This is where knext scans the template; an image a user
+#                builds from it is scanned by the user's own pipeline.
+#                Nothing here pushes or signs.
+#   kind-e2e     the image as a cluster-local Knative Service with an h2c port
+#                and no JWKS: the health check is served, every other RPC is
+#                refused, the public gateway has no route; warm and from zero.
+#
+# buf is the lockfile's binary, verified against its sha256 pin
+# (packages/grpc/scripts/verified-buf.ts) — never one from PATH.
+#
+# This workflow holds no write or OIDC credential anywhere. Publishing the
+# template image (push, cosign keyless sign + SBOM attestation) is deferred to
+# a separate, push-only workflow of its own.
+
+on:
+  pull_request:
+    paths:
+      - 'templates/rust/**'
+      - '.github/workflows/rust-template.yml'
+      - 'packages/grpc/proto/**'
+      - 'packages/grpc/src/add-function.ts'
+      - 'scripts/kind-manifests/**'
+      - 'tests/rust-template-contract.test.ts'
+  push:
+    branches: [main, 'integration/**']
+    paths:
+      - 'templates/rust/**'
+      - '.github/workflows/rust-template.yml'
+      - 'packages/grpc/proto/**'
+      - 'packages/grpc/src/add-function.ts'
+      - 'scripts/kind-manifests/**'
+      - 'tests/rust-template-contract.test.ts'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-template-${{ github.ref }}
+  # Publishes nothing, so a superseded run on the same ref is safe to cancel.
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_DENY_VERSION: 0.20.2
+  # sha256 of cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz (the release's own .sha256)
+  CARGO_DENY_SHA256: 9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f
+  CARGO_AUDIT_VERSION: 0.22.2
+  # sha256 of cargo-audit-x86_64-unknown-linux-musl-v0.22.2.tgz
+  CARGO_AUDIT_SHA256: 7fb9497f8594b389e5fce5ef9b92db08432996895b2e0c5a0167a69ed445c428
+  CONFORMANCE_VERSION: v1.0.5
+  # sha256 of connectconformance-v1.0.5-Linux-x86_64.tar.gz (the release's checksums.txt)
+  CONFORMANCE_SHA256: 7d4d1f36980debf900b12514c8d51107245e9195b3c581e61fa165fd95c94284
+
+jobs:
+  check:
+    name: Rust template (buf, fmt, clippy, test, deny, audit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: templates/rust
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install the pinned Rust toolchain (templates/rust/rust-toolchain.toml)
+        run: |
+          rustup toolchain install
+          rustc -V
+          cargo -V
+
+      - name: Setup bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
+
+      - name: Install dependencies (for the verified buf binary)
+        working-directory: .
+        run: bun install --frozen-lockfile
+
+      - name: Cache the pinned codegen plugins
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: templates/rust/.codegen
+          key: rust-template-codegen-${{ runner.os }}-${{ hashFiles('templates/rust/codegen.sh', 'templates/rust/rust-toolchain.toml') }}
+
+      - name: buf lint
+        run: bun ../../packages/grpc/scripts/verified-buf.ts lint
+
+      - name: buf generate reproduces the committed gen/
+        run: |
+          set -euo pipefail
+          BUF="bun ../../packages/grpc/scripts/verified-buf.ts" ./codegen.sh
+          if [ -n "$(git status --porcelain -- gen)" ]; then
+            git status --porcelain -- gen
+            git diff -- gen
+            echo "::error::templates/rust/gen is out of date with proto/; run ./codegen.sh in templates/rust and commit gen/"
+            exit 1
+          fi
+
+      - name: cargo fmt --check
+        run: cargo fmt --check
+
+      - name: cargo clippy -D warnings (including the e2e client)
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
+
+      - name: cargo test
+        run: cargo test --locked
+
+      - name: Install cargo-deny and cargo-audit (pinned releases, sha256-verified)
+        run: |
+          set -euo pipefail
+          cd "${RUNNER_TEMP}"
+          deny="cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl"
+          curl -fsSL -o cargo-deny.tar.gz \
+            "https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/${deny}.tar.gz"
+          echo "${CARGO_DENY_SHA256}  cargo-deny.tar.gz" | sha256sum -c -
+          tar -xzf cargo-deny.tar.gz
+          install -m 0755 "${deny}/cargo-deny" "${HOME}/.cargo/bin/cargo-deny"
+          audit="cargo-audit-x86_64-unknown-linux-musl-v${CARGO_AUDIT_VERSION}"
+          curl -fsSL -o cargo-audit.tgz \
+            "https://github.com/rustsec/rustsec/releases/download/cargo-audit%2Fv${CARGO_AUDIT_VERSION}/${audit}.tgz"
+          echo "${CARGO_AUDIT_SHA256}  cargo-audit.tgz" | sha256sum -c -
+          tar -xzf cargo-audit.tgz
+          install -m 0755 "${audit}/cargo-audit" "${HOME}/.cargo/bin/cargo-audit"
+
+      - name: cargo deny check (advisories, licenses, bans, sources)
+        run: cargo deny check
+
+      - name: cargo audit
+        run: cargo audit --deny warnings
+
+  conformance:
+    name: connect-rust conformance (the pinned connectrpc, every server test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    # Builds and runs third-party code (the upstream conformance server), so
+    # it holds read access to this repository and nothing else.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Check out connect-rust at the pinned release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: connectrpc/connect-rust
+          ref: 7fd4a8248df90a6f5403c7066df0e44d4164d67f # v0.9.1
+          path: connect-rust
+          persist-credentials: false
+
+      - name: Install the conformance runner (pinned release, sha256-verified)
+        run: |
+          set -euo pipefail
+          cd "${RUNNER_TEMP}"
+          tarball="connectconformance-${CONFORMANCE_VERSION}-Linux-x86_64.tar.gz"
+          curl -fsSL -o "${tarball}" \
+            "https://github.com/connectrpc/conformance/releases/download/${CONFORMANCE_VERSION}/${tarball}"
+          echo "${CONFORMANCE_SHA256}  ${tarball}" | sha256sum -c -
+          tar -xzf "${tarball}" connectconformance
+          install -m 0755 connectconformance "${HOME}/.cargo/bin/connectconformance"
+
+      # conformance.sh refuses a checkout that is not the connectrpc version
+      # Cargo.lock pins, builds the upstream conformance server with the
+      # template's buffa/hyper/h2 versions, and runs every server test.
+      - name: Run every server conformance test (Connect, gRPC, gRPC-Web)
+        run: templates/rust/conformance.sh connect-rust "${HOME}/.cargo/bin/connectconformance"
+
+  image:
+    name: Rust template image (build, SBOM, Trivy; read-only, every event)
+    needs: [check]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # This job runs on pull requests, so it holds no write credential: the
+    # local composite action, the build, syft and Trivy all run with
+    # contents: read only. Nothing here pushes or signs.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Route Docker Hub pulls through mirror.gcr.io (anonymous rate limit)
+        id: docker-hub-mirror
+        uses: ./.github/actions/docker-hub-mirror
+
+      # Image repository names must be lowercase; the owner can be mixed-case.
+      - name: Compute lowercase image name
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: echo "IMAGE=ghcr.io/${OWNER,,}/knext-function-rust" >> "$GITHUB_ENV"
+
+      - name: Build the template image (local only)
+        run: docker build -t "${IMAGE}:${GITHUB_SHA}" templates/rust
+
+      - name: SBOM (syft, SPDX)
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          image: ${{ env.IMAGE }}:${{ github.sha }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+          upload-artifact: false
+
+      - name: The SBOM lists the binary's crates (cargo auditable)
+        run: |
+          set -euo pipefail
+          jq -e '[.packages[] | select(.name == "connectrpc")] | length > 0' sbom.spdx.json >/dev/null \
+            || { echo "::error::the SBOM does not list connectrpc: the binary carries no dependency list"; exit 1; }
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rust-template-sbom-${{ github.sha }}
+          path: sbom.spdx.json
+
+      - name: Trivy scan — FAIL on HIGH/CRITICAL
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.IMAGE }}:${{ github.sha }}
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          ignore-unfixed: true
+          format: table
+
+  kind-e2e:
+    name: Rust template on kind (cluster-local h2c, fails closed)
+    needs: [check]
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Route Docker Hub pulls through mirror.gcr.io (anonymous rate limit)
+        id: docker-hub-mirror
+        uses: ./.github/actions/docker-hub-mirror
+
+      - name: Install the pinned Rust toolchain (templates/rust/rust-toolchain.toml)
+        working-directory: templates/rust
+        run: rustup toolchain install
+
+      - name: Install kind
+        uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
+        with:
+          install_only: true
+
+      - name: Create the kind cluster
+        run: kind create cluster --name rust-template-e2e --wait 120s
+
+      - name: Install Knative Serving + Kourier (checksum + digest pinned)
+        run: |
+          set -euo pipefail
+          scripts/kind-manifests/apply-knative-kourier.sh knative-v1.16.0
+          kubectl patch configmap/config-network -n knative-serving --type merge \
+            --patch '{"data":{"ingress-class":"kourier.ingress.networking.knative.dev"}}'
+          kubectl patch configmap/config-autoscaler -n knative-serving --type merge \
+            --patch '{"data":{"scale-to-zero-grace-period":"10s","scale-to-zero-pod-retention-period":"0s","stable-window":"6s"}}'
+          kubectl wait --for=condition=Available --timeout=300s -n knative-serving \
+            deployment/controller deployment/webhook deployment/autoscaler deployment/activator deployment/net-kourier-controller
+          kubectl wait --for=condition=Available --timeout=300s -n kourier-system deployment/3scale-kourier-gateway
+
+      - name: Deploy the function cluster-local and call it
+        env:
+          KIND_CLUSTER: rust-template-e2e
+          SKIP_KNATIVE: '1'
+        run: templates/rust/e2e/kind-e2e.sh

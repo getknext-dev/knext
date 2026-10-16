@@ -1,0 +1,38 @@
+# TEST HARNESS ONLY. The kind e2e (kind-e2e.sh) applies this Knative Service
+# directly because it tests the function image on its own. In a zone you do
+# not write this: the knext operator creates the function's Knative Service
+# from its BackendService.
+#
+# The shape matches what a zone function gets: cluster-local (no public
+# route), the container port named h2c so Knative carries HTTP/2 cleartext,
+# scale-to-zero, a non-root read-only container and no JWKS mounted, so every
+# RPC except the health check must be refused.
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: example-rust-fn
+  labels:
+    networking.knative.dev/visibility: cluster-local
+spec:
+  template:
+    metadata:
+      annotations:
+        # Scale to zero quickly so the e2e can call through the activator.
+        autoscaling.knative.dev/window: "6s"
+        # kind-e2e.sh sets this to the image ID, so a rebuilt image rolls a
+        # new revision without deleting the service.
+        knext.dev/e2e-image: "unset"
+    spec:
+      containers:
+        - image: kind.local/knext-function-rust:e2e
+          ports:
+            - name: h2c
+              containerPort: 8080
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault

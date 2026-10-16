@@ -485,11 +485,14 @@ derives. It `WARN`s, naming the apps, when:
   reaches the inner one;
 - an app's keys sit under the shared fallback `kn-next:*`, because its prefix is that fallback or
   sits inside it (`kn-next:cache`), even on its own: any app with no prefix lands there too, so that
-  keyspace is never cleared after an outage and its stale entries stay until they expire.
+  keyspace is never cleared after an outage and its stale entries stay until they expire;
+- an app's stored `cache.keyPrefix` is one the cluster now refuses (too long, whitespace, a Redis
+  pattern character, or the reserved shared fallback `kn-next:*`), whatever its cache provider. Fix it before the
+  app's next update; see [what a key prefix may contain](/docs/isr-caching#key-prefix-rules).
 
 The row never fails, because two apps can point at different Redis servers, which doctor cannot see.
 A prefix that comes from a Secret (`secrets.envMap`) cannot be read, so doctor names the app as not
-verified. No row appears when no app uses Redis. See
+verified. No row appears when no app uses Redis and no stored prefix is refused. See
 [each app has its own Redis keyspace](/docs/isr-caching#key-prefix).
 
 A few checks are **local** — they read files in the directory you run `knext doctor` from and
@@ -755,8 +758,8 @@ function's entry in `knext.grpc.json`, and, if the app has none yet, an `authori
 `src/knext/authorize.ts` that refuses every call until you write it (see
 [generated queries, actions and streams](#generated-queries-actions-and-streams)). The name is a
 lowercase DNS label; the zone reads the function's address from `ORDERS_SERVICE_URL` at call time.
-The function's own server project is not scaffolded yet; for Go, start from the
-[Go function template](/docs/go-functions).
+The function's own server project is not scaffolded yet: start from the
+[Go function template](/docs/go-functions) or the [Rust function template](/docs/rust-functions).
 
 Two options at the top of every contract matter:
 

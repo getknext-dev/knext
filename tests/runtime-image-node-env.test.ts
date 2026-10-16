@@ -34,12 +34,17 @@ const REPO_ROOT = resolve(import.meta.dirname, '..');
  *
  * The operator image is excluded by path: it is a Go binary with no Node runtime
  * and no `NODE_ENV` to speak of. `scale-zero-pg` is a separate benchmark package,
- * not a shipped app image. The Go zone-function template is a Go binary on
- * distroless static, like the operator: no Node, no seams. The exclusions are
+ * not a shipped app image. The Go and Rust zone-function templates are static
+ * binaries on distroless static, like the operator: no Node, no seams. The exclusions are
  * stated as prefixes here rather than by listing what remains, so a NEW app
  * Dockerfile is included by default — the direction that fails safe.
  */
-const NOT_APP_RUNTIMES = ['packages/kn-next-operator/', 'packages/scale-zero-pg/', 'templates/go/'];
+const NOT_APP_RUNTIMES = [
+  'packages/kn-next-operator/',
+  'packages/scale-zero-pg/',
+  'templates/go/',
+  'templates/rust/',
+];
 
 /**
  * `*.trivyscan` files are NOT shipped runtime images — they are minimal

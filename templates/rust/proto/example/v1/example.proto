@@ -1,0 +1,47 @@
+// The contract of the `example` function. Raise contract_version with every
+// change, and roll out the function before the zone that calls it.
+syntax = "proto3";
+
+package example.v1;
+
+import "knext/v1/options.proto";
+
+option (knext.v1.function) = "example";
+option (knext.v1.contract_version) = "1.0.0";
+
+// ExampleService is served by the `example` function of this zone.
+service ExampleService {
+  // GetItem reads one item. NO_SIDE_EFFECTS makes it a read: the zone may
+  // retry it, and caches it per signed-in user. AUTH_USER: authorize() must
+  // return a verified user first.
+  rpc GetItem(GetItemRequest) returns (GetItemResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+    option (knext.v1.auth) = AUTH_USER;
+  }
+
+  // PutItem writes one item. A write is never retried, carries an
+  // idempotency key, and always needs a user (AUTH_USER).
+  rpc PutItem(PutItemRequest) returns (PutItemResponse) {
+    option (knext.v1.auth) = AUTH_USER;
+  }
+}
+
+// GetItemRequest names the item to read.
+message GetItemRequest {
+  string id = 1;
+}
+
+// GetItemResponse is one item.
+message GetItemResponse {
+  string id = 1;
+  string value = 2;
+}
+
+// PutItemRequest is the item to write.
+message PutItemRequest {
+  string id = 1;
+  string value = 2;
+}
+
+// PutItemResponse confirms the write.
+message PutItemResponse {}

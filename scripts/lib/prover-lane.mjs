@@ -70,14 +70,17 @@ export const NON_TEST_PACKAGE_MANAGEMENT_FILES = Object.freeze([
  * driver, so this one names no JS spec either.
  *
  * The Go zone-function template's token check is the same category again:
- * `go test` targets in `templates/go`, no JS spec.
+ * `go test` targets in `templates/go`, no JS spec. The Rust template's is the
+ * cargo twin: `cargo test` targets in `templates/rust`, no JS spec.
  */
 export const NON_JS_TEST_SUITE_PROVERS = Object.freeze([
   'scripts/mutation-prove-knext-ffi-crates.mjs',
   'scripts/mutation-prove-2321-go-metric-contract.mjs',
   'scripts/mutation-prove-go-template-auth.mjs',
+  'scripts/mutation-prove-rust-template-auth.mjs',
   'scripts/mutation-prove-2171-go-redis-key-prefix.mjs',
   'scripts/mutation-prove-2052-backendservice.mjs',
+  'scripts/mutation-prove-2398-keyprefix-crd.mjs',
 ]);
 
 /** The toolchains a `NON_JS_TEST_SUITE_PROVERS` entry may run its guards with. */

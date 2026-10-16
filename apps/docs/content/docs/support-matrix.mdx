@@ -9,6 +9,15 @@ too, rather than left implied.
 
 ## Kubernetes
 
+- **Server floor: Kubernetes 1.30.** The operator's CRD relies on CRD validation ratcheting, on by
+  default from 1.30, so an app stored before a validation rule was tightened keeps accepting changes
+  that leave the checked field alone. On 1.28 and 1.29 ratcheting is off: an app whose
+  `cache.keyPrefix` the cluster now refuses is rejected on its next spec change of any kind, until
+  the prefix is fixed (see [key prefix rules](/docs/isr-caching#key-prefix-check-upgrade)). The
+  pinned Knative Serving release itself still starts on 1.28, which is why this floor is stated
+  here rather than enforced by the install.
+- The kind-based CI gates, the operator's API tests and the reference OKE cluster all run
+  Kubernetes versions above this floor.
 - **CI does not pin a specific Kubernetes minor version.** The kind-based end-to-end gates
   (`kind create cluster`) use kind's default node image rather than a pinned
   `kubernetesVersion`/node-image, so the exact server version drifts with whichever kind release is
