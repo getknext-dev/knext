@@ -633,9 +633,10 @@ describe('redis ACL spike: what an error that ends a run means (exit codes)', ()
     expect(exitCodeFor(failureKind(new Error(message), ADMIN))).toBe(code);
   });
 });
-/** Run the spike; return its exit code. */
-function spike(runtime: 'node' | 'bun', args: string[], url: string): number {
-  const r = spawnSync(runtime, [SCRIPT, '--assert', ...args], {
+
+/** Run the spike (with `--assert` unless `report` is set); return its exit code. */
+function spike(runtime: 'node' | 'bun', args: string[], url: string, report = false): number {
+  const r = spawnSync(runtime, [SCRIPT, ...(report ? [] : ['--assert']), ...args], {
     cwd: ROOT,
     env: { ...process.env, KNEXT_REDIS_ACL_SPIKE_URL: url },
     encoding: 'utf8',
@@ -734,4 +735,11 @@ describe.skipIf(!LIVE)('redis ACL spike: live Redis (KNEXT_REDIS_LIVE_URL)', () 
       expect(spike('node', [...args], LIVE_URL)).toBe(1);
     }, 120_000);
   }
+
+  // Without --assert the run is report-only: the ACL refusal that aborted the
+  // lifecycle layer is a REPORTED finding (exit 0), and the run reached its
+  // end. A run that died on it instead would exit non-zero here.
+  it('reports, rather than dies on, an ACL refusal that aborts a layer (--drop=set, no --assert)', () => {
+    expect(spike('node', ['--drop=set'], LIVE_URL, true)).toBe(0);
+  }, 120_000);
 });

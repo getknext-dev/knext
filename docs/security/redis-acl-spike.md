@@ -131,11 +131,15 @@ removes one rule and must turn the test red:
 | D1, D2 | discovery by any hit; discovery by an unparseable construct | 1 each |
 | B1 | a second declaration of an allowlisted receiver | 1 |
 | E1, E2 | the spike's ACL-refusal classification and its exit code | 1 each |
-| L1–L3 (`KNEXT_REDIS_LIVE_URL` set) | full-mode `--drop=set` exits 1; the prune cutoff; the `DISCARD` row | 1 each |
+| L1–L3 (`KNEXT_REDIS_LIVE_URL` set) | the per-layer handling that reports an ACL abort as a finding; the prune cutoff; the `DISCARD` row | 1 each |
 
-Its first run found one rule that survived its own removal: a separate `new Command(` rule was
-redundant with the command helper rule, which already resolves `new Redis.Command('UNLINK', …)`.
-The duplicate was deleted, and the row now removes the rule that carries it.
+Its first runs found two rows that survived their own removal, both double coverage. A separate
+`new Command(` rule was redundant with the command helper rule, which already resolves
+`new Redis.Command('UNLINK', …)`: the duplicate was deleted, and the row now removes the rule that
+carries it. And with the per-layer handling removed, full-mode `--drop=set --assert` still exited 1,
+because the run's top-level handler maps an ACL refusal to 1 as well; what only the per-layer
+handling gives is a run that reaches its end and reports the finding, so a report-only test
+(`--drop=set` without `--assert` exits 0) now carries that row.
 
 The source scan runs in every CI run (it needs no Redis). The live half runs when
 `KNEXT_REDIS_LIVE_URL` is set and is skipped otherwise, like the existing live Lua lane.

@@ -252,7 +252,12 @@ const MUTATIONS = [
     id: 'L1',
     live: true,
     expect: 'red',
-    claim: 'a layer aborted by an ACL refusal crashes the run: full-mode --drop=set exits 3',
+    // The first live run of this row SURVIVED: with the layer wrapper gone the
+    // error reaches main's catch, which maps an ACL refusal to 1 as well, so
+    // the --assert row could not tell the two apart. What only the wrapper
+    // gives is a run that REACHES ITS END and reports the finding, so the row
+    // is now killed by the report-only (no --assert) test, which needs exit 0.
+    claim: 'a layer aborted by an ACL refusal ends the run instead of being reported as a finding',
     subject: 'spike',
     anchor: "      if (failureKind(err, adminUser) !== 'acl') throw err;",
     replacement: '      throw err;',
