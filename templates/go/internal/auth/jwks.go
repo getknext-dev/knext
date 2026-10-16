@@ -36,9 +36,6 @@ func (f *jwksFile) keys() (map[string]ed25519.PublicKey, error) {
 	if !jwksMounted(info, err) {
 		return nil, ErrNoJWKS
 	}
-	if info.Size() > MaxJWKSBytes {
-		return nil, fmt.Errorf("%w: larger than %d bytes", ErrBadJWKS, MaxJWKSBytes)
-	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	now := f.now()

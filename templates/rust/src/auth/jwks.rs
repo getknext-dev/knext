@@ -55,9 +55,6 @@ impl JwksFile {
             return Err(AuthError::NoJwks);
         }
         let meta = std::fs::metadata(&self.path).map_err(|_| AuthError::NoJwks)?;
-        if meta.len() > MAX_JWKS_BYTES {
-            return Err(AuthError::BadJwks);
-        }
         let (mtime, len) = (meta.modified().ok(), meta.len());
         let now = (self.clock)();
         let mut last = self.last.lock().unwrap_or_else(|p| p.into_inner());

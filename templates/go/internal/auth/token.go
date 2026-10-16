@@ -6,7 +6,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io"
 	"strconv"
 	"strings"
 	"time"
@@ -161,39 +160,31 @@ func segment(s string) ([]byte, error) {
 }
 
 // object decodes a JSON object into its members by exact name, refusing
-// invalid UTF-8, a duplicate member name and anything but one object.
+// invalid UTF-8 (encoding/json would replace it), anything but exactly one
+// JSON value, a value that is not an object, and a duplicate member name
+// (encoding/json would keep the last).
 func object(data []byte) (map[string]json.RawMessage, error) {
 	if !utf8.Valid(data) {
 		return nil, malformed("JSON is not UTF-8")
 	}
+	if !json.Valid(data) {
+		return nil, malformed("not one JSON value")
+	}
+	// data is one valid JSON value, so the decoder below cannot fail.
 	dec := json.NewDecoder(bytes.NewReader(data))
-	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+	if tok, _ := dec.Token(); tok != json.Delim('{') {
 		return nil, malformed("not a JSON object")
 	}
 	members := map[string]json.RawMessage{}
 	for dec.More() {
-		tok, err := dec.Token()
-		if err != nil {
-			return nil, malformed("JSON: %v", err)
-		}
-		name, ok := tok.(string)
-		if !ok {
-			return nil, malformed("JSON member name")
-		}
+		tok, _ := dec.Token()
+		name, _ := tok.(string)
 		var value json.RawMessage
-		if err := dec.Decode(&value); err != nil {
-			return nil, malformed("JSON: %v", err)
-		}
+		_ = dec.Decode(&value)
 		if _, dup := members[name]; dup {
 			return nil, malformed("duplicate member %q", name)
 		}
 		members[name] = value
-	}
-	if tok, err := dec.Token(); err != nil || tok != json.Delim('}') {
-		return nil, malformed("unterminated JSON object")
-	}
-	if _, err := dec.Token(); err != io.EOF {
-		return nil, malformed("data after the JSON object")
 	}
 	return members, nil
 }
@@ -211,21 +202,16 @@ func stringMember(members map[string]json.RawMessage, name string) (string, erro
 	return s, nil
 }
 
-// intMember is a required JSON integer member: digits only, no fraction or
-// exponent, within int64.
+// intMember is a required JSON integer member within int64. ParseInt
+// refuses a fraction, an exponent and anything but a number.
 func intMember(members map[string]json.RawMessage, name string) (int64, error) {
 	raw, ok := members[name]
 	if !ok {
 		return 0, malformed("missing %q", name)
 	}
-	text := string(raw)
-	digits := strings.TrimPrefix(text, "-")
-	if digits == "" || strings.Trim(digits, "0123456789") != "" || (len(digits) > 1 && digits[0] == '0') {
-		return 0, malformed("%q is not an integer", name)
-	}
-	n, err := strconv.ParseInt(text, 10, 64)
+	n, err := strconv.ParseInt(string(raw), 10, 64)
 	if err != nil {
-		return 0, malformed("%q: %v", name, err)
+		return 0, malformed("%q is not an integer", name)
 	}
 	return n, nil
 }

@@ -71,7 +71,12 @@ function topLevelKeys(text: string): string[] {
 }
 
 function object(bytes: Buffer): Record<string, unknown> {
-  const text = bytes.toString('utf8');
+  let text: string;
+  try {
+    text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch {
+    return refuse('malformed');
+  }
   let value: unknown;
   try {
     value = JSON.parse(text);

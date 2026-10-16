@@ -439,6 +439,20 @@
       "reason": "malformed"
     },
     {
+      "name": "empty-kid",
+      "jwks": "zone-a-overlap",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6IiJ9",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NTB9",
+        "7KSNh7RkC6wupT4oGoyJqCoMWx_Nsw2WnWRG6OOObPtA_jAPbM2yFBlKlURX-OMiTUIO6zVTgkgr5BD7kgXkAg"
+      ],
+      "expect": "reject",
+      "reason": "malformed"
+    },
+    {
       "name": "unknown-kid",
       "jwks": "zone-a-overlap",
       "procedure": "/example.v1.ExampleService/PutItem",
@@ -616,6 +630,76 @@
         "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6Ijg2YVk1dkhPNEh6b3lQdjBtSExzU0EifQ",
         "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwic3ViIjoiYWRtaW4iLCJpYXQiOjE3NjcyMjU1OTAsImV4cCI6MTc2NzIyNTY1MH0",
         "WIPZLYmup5_5eDVQ5aNDEh8CSFaG6MJ5-V4DB0FS66ayQymys6NHqIPg6EwcmdRSpG1_CL7920fgF8r3eUADDA"
+      ],
+      "expect": "reject",
+      "reason": "malformed"
+    },
+    {
+      "name": "sub-null",
+      "jwks": "zone-a-overlap",
+      "procedure": "/catalog.v1.CatalogService/ListProducts",
+      "auth": "AUTH_PUBLIC",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6Ijg2YVk1dkhPNEh6b3lQdjBtSExzU0EifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2NhdGFsb2cudjEuQ2F0YWxvZ1NlcnZpY2UvTGlzdFByb2R1Y3RzIiwic3ViIjpudWxsLCJpYXQiOjE3NjcyMjU1OTAsImV4cCI6MTc2NzIyNTY1MH0",
+        "svvYF4gmlcckjPNgzZn2jLkaXaiiwW4sNEdTpgCEQ8n1TBVfXgx7-pj-tYDS0mlUDVJVlTDaJ7gxCeYFlgfqAA"
+      ],
+      "expect": "reject",
+      "reason": "malformed"
+    },
+    {
+      "name": "invalid-utf8-claims",
+      "jwks": "zone-a-overlap",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6Ijg2YVk1dkhPNEh6b3lQdjBtSExzU0EifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXIt_yIsImlhdCI6MTc2NzIyNTU5MCwiZXhwIjoxNzY3MjI1NjUwfQ",
+        "PMW8X7dOQQK2so2L-jNPxPT8oR0Wf4t7sD4nt5vAq-odfw4zxoE0rpdVLmSenuJ3R6cEst0Ac8B8NI6umhdoAQ"
+      ],
+      "expect": "reject",
+      "reason": "malformed"
+    },
+    {
+      "name": "trailing-json",
+      "jwks": "zone-a-overlap",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6Ijg2YVk1dkhPNEh6b3lQdjBtSExzU0EifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NTB9IHt9",
+        "ShfrXPgnpgLmE6DMsr8_RcvEVqbfO-RkD6j3UbRe538lfwVQ31hZAOBUia25MiQZxNkOm2fP69Mgz_5K2Hy4Aw"
+      ],
+      "expect": "reject",
+      "reason": "malformed"
+    },
+    {
+      "name": "unterminated-claims",
+      "jwks": "zone-a-overlap",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6Ijg2YVk1dkhPNEh6b3lQdjBtSExzU0EifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NTA",
+        "uXycmQzyOpsf_9NwSizvjV-meFocjGaOwb82fP59-2BuPPm3JoUU97nW5l6_w-4YBg1jia-0qV9w0PFuxcyNAg"
+      ],
+      "expect": "reject",
+      "reason": "malformed"
+    },
+    {
+      "name": "claims-array-of-pairs",
+      "jwks": "zone-a-overlap",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6Ijg2YVk1dkhPNEh6b3lQdjBtSExzU0EifQ",
+        "WyJpc3MiLCJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCIsImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIiwiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiIsInVzZXItMTIzIiwiaWF0IiwxNzY3MjI1NTkwLCJleHAiLDE3NjcyMjU2NTBd",
+        "mwh6bfvJTJPfF6sqvofhbS0-7fmAbkeEDbjaovQt5J6nz3vDnS-GvLo01Bi22zzgLXFqvOUMPctT_uiDd2I2Cg"
       ],
       "expect": "reject",
       "reason": "malformed"

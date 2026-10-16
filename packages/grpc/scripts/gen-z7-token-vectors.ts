@@ -303,6 +303,11 @@ export function buildVectors() {
       ...user(...std(current, header(current.kid, { typ: 'at+jwt' }))),
       ...reject('malformed'),
     },
+    {
+      name: 'empty-kid',
+      ...user(...std(current, header(''))),
+      ...reject('malformed'),
+    },
     // ── refused: key and signature ───────────────────────────────────────────
     { name: 'unknown-kid', ...user(...std(outsider)), ...reject('unknown-kid') },
     {
@@ -377,6 +382,47 @@ export function buildVectors() {
           `{"iss":"${ISSUER}","aud":"${AUDIENCE}","method":"${USER_METHOD}","sub":"${SUB}","sub":"admin","iat":${T0 - 10},"exp":${T0 + 50}}`,
         ),
       ),
+      ...reject('malformed'),
+    },
+    {
+      name: 'sub-null',
+      ...user(...std(current, undefined, claims({ method: PUBLIC_METHOD, sub: null }))),
+      procedure: PUBLIC_METHOD,
+      auth: 'AUTH_PUBLIC',
+      ...reject('malformed'),
+    },
+    {
+      name: 'invalid-utf8-claims',
+      ...user(
+        current,
+        validHeader,
+        b64url(
+          Buffer.concat([
+            Buffer.from(
+              `{"iss":"${ISSUER}","aud":"${AUDIENCE}","method":"${USER_METHOD}","sub":"user-`,
+            ),
+            Buffer.from([0xff]),
+            Buffer.from(`","iat":${T0 - 10},"exp":${T0 + 50}}`),
+          ]),
+        ),
+      ),
+      ...reject('malformed'),
+    },
+    {
+      name: 'trailing-json',
+      ...user(current, validHeader, encodeRaw(`${JSON.stringify(claims())} {}`)),
+      ...reject('malformed'),
+    },
+    {
+      name: 'unterminated-claims',
+      ...user(current, validHeader, encodeRaw(JSON.stringify(claims()).slice(0, -1))),
+      ...reject('malformed'),
+    },
+    {
+      // An array of alternating names and values: a parser that skips the
+      // "is this an object" check reads it as the claims.
+      name: 'claims-array-of-pairs',
+      ...user(current, validHeader, encodeJSON(Object.entries(claims()).flat())),
       ...reject('malformed'),
     },
     {

@@ -92,10 +92,8 @@ func splitProcedure(procedure string) (service, method string, ok bool) {
 	if !ok {
 		return "", "", false
 	}
-	service, method, ok = strings.Cut(rest, "/")
-	if !ok || !protoreflect.FullName(service).IsValid() || !protoreflect.Name(method).IsValid() {
-		return "", "", false
-	}
+	// An empty or malformed name finds no descriptor below.
+	service, method, _ = strings.Cut(rest, "/")
 	return service, method, true
 }
 
