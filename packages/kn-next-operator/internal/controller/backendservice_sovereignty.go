@@ -73,6 +73,58 @@ const (
 // optional and its interceptor refuses every RPC except health.
 func ZoneJWKSConfigMapName(zone string) string { return zone + zoneJWKSConfigMapSuffix }
 
+// zoneJWKSState is what the BackendService reconciler found at the zone's JWKS
+// ConfigMap name.
+type zoneJWKSState int
+
+const (
+	// zoneJWKSAbsent: no such ConfigMap yet (the zero value). The mount stays
+	// optional: the NextApp reconciler creates the ConfigMap and the kubelet
+	// fills the volume without a new revision.
+	zoneJWKSAbsent zoneJWKSState = iota
+	// zoneJWKSControlled: the zone's NextApp is the ConfigMap's controller (by
+	// UID), so the keys in it are the zone's own.
+	zoneJWKSControlled
+	// zoneJWKSUntrusted: the ConfigMap exists and the zone does not control it
+	// (a squatter, or an object left by an earlier NextApp of the same name).
+	// It is NOT mounted: the function has no key set and refuses every call
+	// except health (fail closed).
+	zoneJWKSUntrusted
+)
+
+// classifyZoneJWKS decides whether the ConfigMap found at the zone's JWKS name
+// (nil: none) may be mounted into the zone's functions. It trusts the object
+// only when the zone's NextApp is its CONTROLLER by UID: a name match is not
+// enough (an earlier NextApp of the same name leaves an object with another
+// UID), nor is an owner that is not the controller. It is the same test the
+// NextApp reconciler applies before it writes the ConfigMap
+// (controlledByZone), so the two halves agree on who controls the object.
+//
+// For an untrusted object the second result says why, for the status message.
+//
+// An ownerReference is a claim anyone who can write the ConfigMap can make
+// (the zone's UID is readable): this check closes an accidental or early
+// squat and a stale object, not a deliberate forger. The namespace remains
+// the trust boundary (docs/security/threat-model.md).
+func classifyZoneJWKS(cm *metav1.PartialObjectMetadata, zone *appsv1alpha1.NextApp) (zoneJWKSState, string) {
+	if cm == nil {
+		return zoneJWKSAbsent, ""
+	}
+	if controlledByZone(cm, zone) {
+		return zoneJWKSControlled, ""
+	}
+	ref := metav1.GetControllerOf(cm)
+	switch {
+	case ref == nil:
+		return zoneJWKSUntrusted, "it has no controller ownerReference"
+	case ownerReferencesNextApp(*ref) && ref.Name == zone.Name:
+		return zoneJWKSUntrusted, fmt.Sprintf("its controller is a NextApp named %q with a different UID "+
+			"(left by an earlier NextApp of that name?)", ref.Name)
+	default:
+		return zoneJWKSUntrusted, fmt.Sprintf("its controller is %s %q, not the zone", ref.Kind, ref.Name)
+	}
+}
+
 // ZoneSigningKeySecretName is the Secret holding a zone's private signing key.
 // The identity task (Z7) creates it and mounts it into the zone only; no
 // function may reference ANY zone's signing key, its own included.
