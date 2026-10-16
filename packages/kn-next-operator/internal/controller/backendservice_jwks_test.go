@@ -71,6 +71,9 @@ func TestClassifyZoneJWKS(t *testing.T) {
 		{"controlled by a different kind of object", jwksConfigMap(metav1.OwnerReference{
 			APIVersion: "v1", Kind: "ConfigMap", Name: "orders", UID: jwksZoneUID, Controller: ptr.To(true),
 		}), zoneJWKSUntrusted, `ConfigMap "orders"`},
+		{"controlled by another kind in the zone's own API group that carries the zone's name and UID", jwksConfigMap(metav1.OwnerReference{
+			APIVersion: appsv1alpha1.GroupVersion.String(), Kind: "BackendService", Name: "orders", UID: jwksZoneUID, Controller: ptr.To(true),
+		}), zoneJWKSUntrusted, `BackendService "orders"`},
 		{"controlled by another zone's NextApp", jwksConfigMap(nextAppRef("billing", "uid-billing", true)), zoneJWKSUntrusted, `NextApp "billing"`},
 		{"controlled by a NextApp of the same name but another UID (an earlier incarnation)",
 			jwksConfigMap(nextAppRef("orders", "uid-orders-previous", true)), zoneJWKSUntrusted, "different UID"},

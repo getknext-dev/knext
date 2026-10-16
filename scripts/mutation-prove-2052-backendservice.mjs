@@ -455,9 +455,9 @@ const MUTATIONS = [
     id: 'J09',
     claim: "the controller's API group is not compared (a foreign NextApp kind is trusted)",
     subject: 'zonekey',
-    anchor:
-      'ref.Name == app.Name &&\n\t\tstrings.HasPrefix(ref.APIVersion, appsv1alpha1.GroupVersion.Group+"/")',
-    replacement: 'ref.Name == app.Name',
+    // Keeps strings.HasPrefix (the mutated tree must still compile).
+    anchor: 'strings.HasPrefix(ref.APIVersion, appsv1alpha1.GroupVersion.Group+"/")',
+    replacement: 'strings.HasPrefix(ref.APIVersion, "")',
     test: unit('TestClassifyZoneJWKS'),
   },
   {
