@@ -291,6 +291,7 @@ const GUARD = [
     claim: 'the real docs page calls in-process Rust stable while the ADR says Beta',
     anchor: '## Type mapping',
     replacement: 'In-process Rust is stable and production-ready.\n\n## Type mapping',
+    options: { commentPrefix: '<!--' },
   },
   {
     id: 'G12',
