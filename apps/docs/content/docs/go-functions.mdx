@@ -101,10 +101,9 @@ must serve a contract version greater than or equal to the zone's.
 
 ## Supply chain
 
-knext's CI builds the template image and, before anything is published, writes an SBOM (SPDX)
-and runs Trivy, failing on any fixable HIGH or CRITICAL finding. Images published from knext's
-release lines are signed with cosign, with the SBOM attached as a signed attestation. `govulncheck` runs over
-the Go module.
+knext's CI builds the template image, writes an SBOM (SPDX) and runs Trivy, failing on any
+fixable HIGH or CRITICAL finding. `govulncheck` runs over the Go module. knext does not publish a
+prebuilt template image yet: build it from the template.
 
 That covers the template. An image you build from it is your own: run your scanner on it in your
 pipeline. The Go point release in `go.mod` and the `golang` builder image in the `Dockerfile` move

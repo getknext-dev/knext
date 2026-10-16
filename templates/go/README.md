@@ -37,5 +37,5 @@ e2e/kind-e2e.sh                                # kind + Knative: health served, 
 node ../../scripts/mutation-prove-go-template-auth.mjs   # each way of opening the check reds a test
 ```
 
-CI: `.github/workflows/go-template.yml` (tests, drift, govulncheck; image SBOM + Trivy gate, cosign
-sign on main/integration pushes; the kind e2e).
+CI: `.github/workflows/go-template.yml` (tests, drift, govulncheck; image SBOM + Trivy gate; the
+kind e2e). The workflow holds no write credential and publishes no image.
