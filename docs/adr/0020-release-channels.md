@@ -356,4 +356,4 @@ audited on its own. Its own SBOM is a follow-up.
       then remove `private`.
 - [ ] Founder: decide whether `rust-crates.yml` becomes a required status check (needs an
       always-reporting job in place of the path filter, and a `merge_group` trigger).
-- [ ] Follow-up: an SBOM for the `kn-next` alias while it still publishes.
+- [ ] Follow-up: an SBOM for the `kn-next` alias while it still publishes (#2438).

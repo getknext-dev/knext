@@ -1385,7 +1385,7 @@ const AUDIT_EXEMPT: readonly AuditExemption[] = [
   {
     name: 'kn-next',
     reason:
-      'forwarding alias: ships one bin file whose only dependency is @getknext/core, which the audit covers; it leaves the package set at 2.0 (ADR-0020 amendment 2026-10-09). Its own SBOM is a tracked follow-up.',
+      'forwarding alias: ships one bin file whose only dependency is @getknext/core, which the audit covers; it leaves the package set at 2.0 (ADR-0020 amendment 2026-10-09). Its own SBOM is tracked in #2438.',
   },
 ];
 
