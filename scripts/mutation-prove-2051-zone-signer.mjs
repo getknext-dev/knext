@@ -4,7 +4,7 @@
  * mints the per-call token, the generated glue that asks for it, and the
  * generate-time refusal of a zone that does not provide authorize().
  *
- * Five guards, five specs, one table each:
+ * Six guards, six specs, one table each:
  *
  *   - `zone-signer.test.ts` — the signer: the user check (an AUTH_USER RPC
  *     without a sub, a request that does not say its auth), the 60 s lifetime,
@@ -21,6 +21,12 @@
  *     type-only export is not an export.
  *   - `zone-signer-gateway.test.ts` — Node and Bun gateway processes: a token
  *     that reaches the gateway's output is caught.
+ *   - `zone-identity-contract.test.ts` — the cross-PR contract: the signer
+ *     against the operator's shared fixture (key mount, issuer variable, Secret
+ *     file names, issuer and audience forms), the Go and Rust verifier defaults
+ *     against the fixture's function half, and the signer against the shared
+ *     token vectors (every accept case byte for byte, kid in the header only).
+ *     A change on either side alone goes red.
  *
  * Each mutation removes ONE behaviour and requires its spec to go red. Verdicts
  * are by EXIT CODE only (the shared driver, `scripts/lib/guard-prover.mjs`),
@@ -40,6 +46,12 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 const MINT_RETURN = '    return `${input}.${signature}`;';
 const TTL = 'export const TOKEN_TTL_SECONDS = 60;';
+const CLAIMS =
+  '      JSON.stringify({ iss, aud, method, sub, iat, exp: iat + TOKEN_TTL_SECONDS }),';
+const KID_IN_CLAIMS =
+  '      JSON.stringify({ iss, aud, method, sub, iat, exp: iat + TOKEN_TTL_SECONDS, kid }),';
+const KID_DIGEST =
+  "  return createHash('sha256').update(raw).digest().subarray(0, 16).toString('base64url');";
 
 // ── the signer ────────────────────────────────────────────────────────────
 const SIGNER = [
@@ -129,8 +141,7 @@ const SIGNER = [
     id: 'S12',
     subject: 'signer',
     claim: 'the kid is derived from 32 bytes of the digest instead of the first 16',
-    anchor:
-      "  return createHash('sha256').update(raw).digest().subarray(0, 16).toString('base64url');",
+    anchor: KID_DIGEST,
     replacement:
       "  return createHash('sha256').update(raw).digest().subarray(0, 32).toString('base64url');",
   },
@@ -140,6 +151,13 @@ const SIGNER = [
     claim: 'every minted token is written to the log',
     anchor: MINT_RETURN,
     replacement: `    console.error(\`\${input}.\${signature}\`);\n${MINT_RETURN}`,
+  },
+  {
+    id: 'S14',
+    subject: 'signer',
+    claim: 'the kid is carried in the claims as well as the JWS header',
+    anchor: CLAIMS,
+    replacement: KID_IN_CLAIMS,
   },
 ];
 
@@ -168,6 +186,105 @@ const GLUE = [
     anchor: MINT_AUTH,
     replacement:
       '    `auth: ${JSON.stringify(p.auth)}, sub: (request as { sub?: string }).sub ?? ${sub}(${subject}) })`',
+  },
+  {
+    id: 'P04',
+    subject: 'signer',
+    claim: 'the kid is carried in the claims as well as the JWS header (the function refuses it)',
+    anchor: CLAIMS,
+    replacement: KID_IN_CLAIMS,
+  },
+];
+
+// ── the cross-PR contract: the operator fixture, the verifiers, the vectors ──
+const CONTRACT = [
+  {
+    id: 'K01',
+    subject: 'signer',
+    claim: 'the signer reads its key from a directory the operator does not mount',
+    anchor: "export const SIGNING_KEY_DIR = '/var/run/knext/signing-key';",
+    replacement: "export const SIGNING_KEY_DIR = '/var/run/knext/zone-key';",
+  },
+  {
+    id: 'K02',
+    subject: 'signer',
+    claim: 'the signer reads its issuer from a variable the operator does not set',
+    anchor: "export const ZONE_ISSUER_ENV = 'KNEXT_ZONE_ISSUER';",
+    replacement: "export const ZONE_ISSUER_ENV = 'KNEXT_ISSUER';",
+  },
+  {
+    id: 'K03',
+    subject: 'signer',
+    claim: 'the signer signs from a Secret file the operator does not write',
+    anchor: "const KEY_FILE = 'current.key';",
+    replacement: "const KEY_FILE = 'signing.key';",
+  },
+  {
+    id: 'K04',
+    subject: 'signer',
+    claim: 'the kid is derived from 32 bytes of the digest (no vector is reproduced)',
+    anchor: KID_DIGEST,
+    replacement:
+      "  return createHash('sha256').update(raw).digest().subarray(0, 32).toString('base64url');",
+  },
+  {
+    id: 'K05',
+    subject: 'signer',
+    claim: 'the kid is carried in the claims as well as the JWS header',
+    anchor: CLAIMS,
+    replacement: KID_IN_CLAIMS,
+  },
+  {
+    id: 'K06',
+    subject: 'signer',
+    claim: 'the claims are serialised in another order (same claims, different bytes)',
+    anchor: CLAIMS,
+    replacement:
+      '      JSON.stringify({ iss, aud, sub, method, iat, exp: iat + TOKEN_TTL_SECONDS }),',
+  },
+  {
+    id: 'K07',
+    subject: 'signer',
+    claim: "the audience names the function's namespace and name the wrong way round",
+    anchor: '  return `knext:fn:${host[2]}/${host[1]}`;',
+    replacement: '  return `knext:fn:${host[1]}/${host[2]}`;',
+  },
+  {
+    id: 'K08',
+    subject: 'fixture',
+    claim: "the operator mounts the zone's signing key somewhere the signer does not read",
+    anchor: '    "signingKeyMountDir": "/var/run/knext/signing-key",',
+    replacement: '    "signingKeyMountDir": "/var/run/knext/zone-key",',
+  },
+  {
+    id: 'K09',
+    subject: 'fixture',
+    claim: "the operator names the zone's issuer variable something the signer does not read",
+    anchor: '    "issuerEnv": "KNEXT_ZONE_ISSUER",',
+    replacement: '    "issuerEnv": "KNEXT_ISSUER",',
+  },
+  {
+    id: 'K10',
+    subject: 'fixture',
+    claim: 'the operator writes the current key under a file name the signer does not read',
+    anchor:
+      '    "signingKeyFiles": ["current.key", "current.kid", "previous.key", "previous.kid"],',
+    replacement:
+      '    "signingKeyFiles": ["signing.key", "current.kid", "previous.key", "previous.kid"],',
+  },
+  {
+    id: 'K11',
+    subject: 'goAuth',
+    claim: "the Go verifier reads the zone's public keys from a path the operator does not mount",
+    anchor: 'const DefaultJWKSPath = "/var/run/knext/jwks/jwks.json"',
+    replacement: 'const DefaultJWKSPath = "/var/run/knext/keys/jwks.json"',
+  },
+  {
+    id: 'K12',
+    subject: 'rustAuth',
+    claim: 'the Rust verifier reads its audience from a variable the operator does not set',
+    anchor: 'pub const ENV_AUDIENCE: &str = "KNEXT_TOKEN_AUDIENCE";',
+    replacement: 'pub const ENV_AUDIENCE: &str = "KNEXT_AUDIENCE";',
   },
 ];
 
@@ -248,6 +365,16 @@ const gateway = createGuardProver({
   spec: 'packages/grpc/src/__tests__/zone-signer-gateway.test.ts',
   subjects: { signer: 'packages/grpc/src/signer.ts' },
 });
+const contract = createGuardProver({
+  repoRoot: REPO_ROOT,
+  spec: 'packages/grpc/src/__tests__/zone-identity-contract.test.ts',
+  subjects: {
+    signer: 'packages/grpc/src/signer.ts',
+    fixture: 'packages/kn-next-operator/internal/controller/testdata/zone-identity-contract.json',
+    goAuth: 'templates/go/internal/auth/auth.go',
+    rustAuth: 'templates/rust/src/auth.rs',
+  },
+});
 
 console.log('=== mutation proof: zone-side identity token (#2051) ===');
 signer.preflight(SIGNER);
@@ -255,7 +382,10 @@ glue.preflight(GLUE);
 refusal.preflight(REFUSAL);
 exportCheck.preflight(EXPORT);
 gateway.preflight(GATEWAY);
-declareMutations(SIGNER.length + GLUE.length + REFUSAL.length + EXPORT.length + GATEWAY.length);
+contract.preflight(CONTRACT);
+declareMutations(
+  SIGNER.length + GLUE.length + REFUSAL.length + EXPORT.length + GATEWAY.length + CONTRACT.length,
+);
 
 console.log('\n=== the signer ===');
 signer.baseline();
@@ -321,3 +451,16 @@ for (const m of GATEWAY) {
   recordMutation();
 }
 gateway.finish(GATEWAY.length);
+
+console.log('\n=== the cross-PR contract: operator fixture, verifiers, token vectors ===');
+contract.baseline();
+contract.proveCanSeeRed({
+  subject: 'signer',
+  anchor: MINT_RETURN,
+  replacement: "    return 'canary.not.signed';",
+});
+for (const m of CONTRACT) {
+  contract.run({ ...m, expect: 'red' });
+  recordMutation();
+}
+contract.finish(CONTRACT.length);
