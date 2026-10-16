@@ -184,6 +184,9 @@ func renderApp(t *testing.T, app *appsv1alpha1.NextApp, rc reconcilerCase) strin
 		Scheme:             scheme,
 		Clock:              func() time.Time { return goldenClock },
 		PlatformCRDPresent: rc.crdPresent,
+		// Zone functions (ADR-0004 Amendment 2): see
+		// TestZeroDiffGoldenWithFunctionsInTheNamespace.
+		BackendServiceCRDPresent: rc.backendServiceCRDPresent,
 	}
 
 	ctx := context.Background()
@@ -315,8 +318,11 @@ type reconcilerCase struct {
 	// platformKindRegistered says whether the client's scheme knows the
 	// KnextPlatform kind at all (false models a CRD removed after start-up).
 	platformKindRegistered bool
-	// objects pre-exist in the cluster (a KnextPlatform).
+	// objects pre-exist in the cluster (a KnextPlatform, BackendServices).
 	objects []client.Object
+	// backendServiceCRDPresent is what start-up discovery reported for the
+	// BackendService kind (zone functions).
+	backendServiceCRDPresent bool
 }
 
 func goldenPath(app *appsv1alpha1.NextApp) string {

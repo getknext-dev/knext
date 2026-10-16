@@ -43,7 +43,7 @@ knext is the scale-to-zero Next.js adapter for Knative. The assets worth protect
 | **R**epudiate | No record of what the reconciler changed. | Reconcile emits K8s Events + `status.Conditions`. | Conditions population is partial (CLAUDE.md §9) — finish it. |
 | **I**nfo disclosure | Secret values echoed into CR `status` / logs. | Operator reads secrets by reference, never inlines them; never logs values. | Lint guard `block-secrets.sh`. |
 | **D**oS | A flood of CRs / requeues starves the controller. | Single-threaded workqueue with backoff; Knative scales the data plane to zero. | Consider a reconcile-rate alert. |
-| **E**lev. of priv. | Operator over-broad RBAC lets a compromised CR escalate. | Least-privilege ClusterRole (`config/rbac/role.yaml`, generated from `+kubebuilder:rbac` markers); no cluster-admin; **no access to core Secrets at all** (see below). | Periodic RBAC review. |
+| **E**lev. of priv. | Operator over-broad RBAC lets a compromised CR escalate. | Least-privilege ClusterRole (`config/rbac/role.yaml`, generated from `+kubebuilder:rbac` markers); no cluster-admin; core Secrets: **`get` only**, used for metadata reads by the zone-function credential allowlist (see below). | Periodic RBAC review. |
 
 ### Operator RBAC: Secrets (#1966)
 
@@ -76,12 +76,14 @@ cache is required.
 **Enforcement (both halves).**
 - `internal/controller/rbac_secrets_guard_test.go` parses every Role/ClusterRole under
   `config/rbac/` **and** scans every `+kubebuilder:rbac` marker (wildcards `*` included); any
-  core-Secrets grant fails unless it has a justified entry in `secretsGrantAllowlist` (empty
-  today), and a justified ClusterRole grant still cannot carry cluster-wide `list`/`watch`.
+  core-Secrets grant fails unless it has a justified entry in `secretsGrantAllowlist` (one
+  entry since zone functions: `get`, below), and a justified ClusterRole grant still cannot carry
+  cluster-wide `list`/`watch`.
 - `internal/controller/rbac_narrowed_envtest_test.go` runs the real controller wiring as a
   client-cert identity bound to exactly the shipped `role.yaml`: a NextApp that references
   Secrets by name converges (Knative Service, finalizer, status) while that identity is denied
-  every Secrets verb, cluster-wide and namespaced (with positive and negative RBAC controls).
+  every Secrets verb except `get`, cluster-wide and namespaced (with positive and negative RBAC
+  controls, and an assertion that `get` IS allowed).
 
 **Residual.** (a) Anyone who may create a `NextApp` can still *reference* any Secret in their own
 namespace by name; the kubelet, not the operator, resolves it — restrict `NextApp` create/update
@@ -93,6 +95,43 @@ create Knative Services (and thus pods) cluster-wide, a compromised operator can
 Secret by creating a pod that mounts or exposes it; a namespace boundary does not bound a
 cluster-wide operator. Mitigations: per-namespace operator install, or an admission policy
 restricting which Secrets operator-created workloads may reference.
+
+### Operator RBAC: the zone-function `get` on Secrets (#2052)
+
+**What changed.** Zone functions (`BackendService`, ADR-0004 Amendments 1 and 2) bring a
+credential allowlist: a function may reference a Secret only if it is its own zone's database
+Secret (`spec.database` of the zone, known by name from the `NextApp`) or a Secret **marked** for
+its zone (the label `apps.kn-next.dev/zone=<zone>`, or an `ownerReference` to the zone's
+`NextApp`). Checking the mark needs the Secret's metadata, so the manager ClusterRole gains
+**`get` on `secrets` and nothing else**: no `list`, `watch`, `create`, `update` or `delete`.
+
+**How it is used.** Only the `BackendService` reconciler reads a Secret, only one the function's
+spec names, through the **uncached** `APIReader` (no informer, so `list`/`watch` are never
+needed), and as a **metadata-only** `PartialObjectMetadata` GET: the operator never receives a
+Secret's data. A Secret that cannot be read is treated as unmarked, so the function is refused
+(fail closed).
+
+**Blast radius.** A compromised operator could `get` a Secret whose name it already knows; it
+cannot enumerate Secrets. That is strictly less than the indirect access in residual (c) above,
+which already exists. Creating the zone's signing-key Secret is the identity task's (#2051) grant
+to add, with its own justified entry; the zone-function reconciler does not create Secrets.
+
+**What is the control, and what is not.** The allowlist above, applied only through a two-sided
+binding (the zone must also list the function in `spec.backends`), and the operator-owned
+per-function ServiceAccount (no Role, no RoleBinding, automount off; the spec has no
+`serviceAccountName`) are the data-sovereignty control: a function holds no credential for
+another zone's database. The check for another zone's CNPG `-rw`/`-ro` host in an env literal is
+a **lint** (a warning condition): an IP address, an `ExternalName` Service or a URL built at run
+time gets past it. The function `NetworkPolicy` admits the Knative data path (activator,
+gateway) and stops direct dials; it cannot express "only the owning zone", is defense in depth,
+and is enforced only on a policy-capable CNI (not flannel).
+
+**Enforcement.** `rbac_secrets_guard_test.go` (the one justified `get` entry, no list/watch),
+`rbac_narrowed_envtest_test.go` (`get` allowed, every other verb denied),
+`backendservice_rbac_envtest_test.go` (the reconciler under the shipped role sets the zone's
+`ownerReference`, refused without `nextapps/finalizers`), the per-source allowlist tests in
+`backendservice_sovereignty_test.go` and `backendservice_envtest_test.go`, and the Calico
+function leg of `test/networkpolicy-enforcement-drill.sh`.
 
 ## 2. Gateway ↔ backend calls
 

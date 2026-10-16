@@ -1,6 +1,8 @@
 {
   "$comment": "GENERATED - do not edit. The metric families the operator binary registers on its /metrics endpoint, scanned from the Go AST. Regenerate: KNEXT_UPDATE_METRIC_GOLDEN=1 go test ./internal/metriccontract/",
   "families": {
+    "knext_backendservice_reconcile_total": "counter",
+    "knext_backendservice_refusals_total": "counter",
     "knext_nextapp_image_prewarm_errors_total": "counter",
     "knext_nextapp_reconcile_duration_seconds": "histogram",
     "knext_nextapp_reconcile_errors_total": "counter",

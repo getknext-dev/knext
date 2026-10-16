@@ -272,6 +272,12 @@ type NextAppReconciler struct {
 	// The zero value is "not installed", so a reconciler built without the platform
 	// layer behaves exactly as before it existed.
 	PlatformCRDPresent bool
+	// BackendServiceCRDPresent reports whether the BackendService CRD is installed
+	// (zone functions, ADR-0004). Set once at start-up from discovery
+	// (SetupControllers). When false the reconciler never reads the kind: a zone
+	// with spec.backends reports BackendBindings=BackendServiceCRDMissing and
+	// renders no binding env. The zero value is "not installed".
+	BackendServiceCRDPresent bool
 	// rollout paces platform-triggered re-renders (ADR-0064 F2). Zero value ready.
 	rollout rolloutLimiter
 	// held remembers which apps are held, for the fleet metrics. Zero value ready.
@@ -349,13 +355,15 @@ func (r *NextAppReconciler) emitEvent(obj runtime.Object, eventType, reason, mes
 // rbac roles/rolebindings) was replaced because an external writer raced the
 // operator and got reverted every reconcile.
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
-// Secrets: NO grant, on purpose (least privilege). The operator never reads or
-// writes a core Secret: the managed-database mode that mirrored a DSN Secret was
-// removed (ADR-0025); spec.secrets.envFrom/envMap and image-pull secrets are only
-// NAME REFERENCES the kubelet resolves on the app pod's behalf; webhook/metrics
-// certs are mounted volumes. A cluster-wide Secrets rule would let a compromised
-// operator read every Secret in the cluster. rbac_secrets_guard_test.go fails if a
-// Secrets marker or role rule is reintroduced without a justified allowlist entry.
+// Secrets: NO grant for the NextApp reconciler, on purpose (least privilege). It
+// never reads or writes a core Secret: the managed-database mode that mirrored a
+// DSN Secret was removed (ADR-0025); spec.secrets.envFrom/envMap and image-pull
+// secrets are only NAME REFERENCES the kubelet resolves on the app pod's behalf;
+// webhook/metrics certs are mounted volumes. The operator's ONLY Secrets grant is
+// the BackendService reconciler's get (metadata-only reads for the zone-function
+// credential allowlist; see its marker). A list/watch Secrets rule would let a
+// compromised operator read every Secret in the cluster. rbac_secrets_guard_test.go
+// fails if a Secrets marker or role rule appears without a justified allowlist entry.
 // PersistentVolumeClaims: read-only. The controller-runtime cache watches
 // *v1.PersistentVolumeClaim (found live on EKS, #306/#1062); without a
 // cluster-scoped list/watch grant the manager's informer logs repeated
@@ -535,6 +543,18 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		logger.Info("Could not reconcile Image cache (CRD may not be installed)", "error", err.Error())
 	}
 
+	// 2b. Zone functions (ADR-0004 Amendment 2): resolve spec.backends[] against
+	// the BackendServices in this namespace. Read-only; the result is rendered
+	// into the Knative Service template below (never into NextApp.spec) and
+	// reported through computeStatusVerdict. No spec.backends => the zero value,
+	// which renders nothing and reports nothing.
+	bindings, err := r.resolveZoneBindings(ctx, &nextApp)
+	if err != nil {
+		logger.Error(err, "Failed to resolve spec.backends")
+		return ctrl.Result{}, err
+	}
+	var bindingCollisions []string
+
 	// 3. Create/Update Knative Service
 	ksvc := &servingv1.Service{
 		ObjectMeta: metav1.ObjectMeta{
@@ -573,7 +593,13 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		_, err = controllerutil.CreateOrUpdate(ctx, r.Client, ksvc, func() error {
 			var buildErr error
 			envMapCollision, buildErr = r.buildDesiredKsvc(&nextApp, ksvc, eff)
-			return buildErr
+			if buildErr != nil {
+				return buildErr
+			}
+			// The binding env is appended LAST and only for two-sided bindings,
+			// so a zone with none renders byte-identically.
+			bindingCollisions = applyBindingEnv(ksvc, nextApp.Namespace, bindings)
+			return nil
 		})
 		if err != nil {
 			logger.Error(err, "Failed to reconcile Knative Service")
@@ -782,7 +808,8 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 	}
 
 	verdict := computeStatusVerdict(&nextApp, ksvc, db, revCheck, ic, np, envMapCollision, r.detectPrivateExposure(ctx, &nextApp), r.detectPodCreationBlocked(ctx, &nextApp, ksvc), time.Now(),
-		withPlatformDefaults(newPlatformDefaultsState(snap, eff, gate)))
+		withPlatformDefaults(newPlatformDefaultsState(snap, eff, gate)),
+		withBackendBindings(bindings, bindingCollisions))
 	if err := r.applyStatusVerdict(ctx, &nextApp, observedStatus, verdict); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -2239,6 +2266,14 @@ func (r *NextAppReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// Unknown is not absent: a discovery blip must stop start-up rather than
 		// silently turn the platform layer off for the life of the process.
 		return fmt.Errorf("NextApp controller: %w", discoverErr)
+	}
+	// Zone functions (ADR-0004 Amendment 2): a BackendService change re-renders
+	// its zone (and any zone that lists it, so a cross-zone entry is reported).
+	// Status changes count too, because the served proto version lives there.
+	// Registered only when the CRD is served, like the platform watch below.
+	if r.BackendServiceCRDPresent {
+		b = b.Watches(&appsv1alpha1.BackendService{},
+			handler.EnqueueRequestsFromMapFunc(r.backendServiceToZoneRequests))
 	}
 	if platformInstalled && mgr.GetScheme().Recognizes(platformKind) {
 		r.PlatformCRDPresent = true

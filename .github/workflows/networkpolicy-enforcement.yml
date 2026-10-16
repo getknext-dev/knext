@@ -19,6 +19,9 @@ on:
     paths:
       - 'packages/kn-next-operator/internal/controller/nextapp_controller.go'
       - 'packages/kn-next-operator/internal/controller/networkpolicy_test.go'
+      - 'packages/kn-next-operator/internal/controller/backendservice_render.go'
+      - 'packages/kn-next-operator/cmd/policygen/**'
+      - 'packages/kn-next-operator/test/h2cecho/**'
       - 'packages/kn-next-operator/test/networkpolicy-enforcement-drill.sh'
       - '.github/workflows/networkpolicy-enforcement.yml'
   schedule:
@@ -31,7 +34,7 @@ jobs:
   enforcement-drill:
     name: NetworkPolicy is enforced (direct-dial refused, metrics survive)
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 40
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

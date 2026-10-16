@@ -20,8 +20,10 @@ import (
 	"fmt"
 
 	ctrl "sigs.k8s.io/controller-runtime"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	platformv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/api/platform/v1alpha1"
+	appsv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/api/v1alpha1"
 )
 
 // SetupControllers registers every reconciler the operator runs on mgr. It is
@@ -36,14 +38,39 @@ import (
 // missing kind. The NextApp reconciler makes the same discovery decision for
 // its own KnextPlatform watch (SetupWithManager).
 func SetupControllers(mgr ctrl.Manager, cleaner ExternalCleaner) error {
+	// Zone functions (ADR-0004): the BackendService reconciler, and the NextApp
+	// reconciler's BackendService watch, run only when the cluster serves the
+	// kind — the same discovery decision as the platform layer, for the same
+	// reason (a partial bundle apply must not crash-loop the operator). Their
+	// metrics are registered regardless (backendservice_metrics.go).
+	functionsInstalled, err := appsv1alpha1.BackendServiceCRDInstalled(mgr.GetRESTMapper())
+	if err != nil {
+		return fmt.Errorf("BackendService controller: %w", err)
+	}
+
 	if err := (&NextAppReconciler{
-		Client:    mgr.GetClient(),
-		Scheme:    mgr.GetScheme(),
-		APIReader: mgr.GetAPIReader(),
-		Recorder:  mgr.GetEventRecorderFor("nextapp-controller"),
-		Cleaner:   cleaner,
+		Client:                   mgr.GetClient(),
+		Scheme:                   mgr.GetScheme(),
+		APIReader:                mgr.GetAPIReader(),
+		Recorder:                 mgr.GetEventRecorderFor("nextapp-controller"),
+		Cleaner:                  cleaner,
+		BackendServiceCRDPresent: functionsInstalled,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("NextApp controller: %w", err)
+	}
+
+	if functionsInstalled {
+		if err := (&BackendServiceReconciler{
+			Client:    mgr.GetClient(),
+			Scheme:    mgr.GetScheme(),
+			APIReader: mgr.GetAPIReader(),
+			Recorder:  mgr.GetEventRecorderFor("backendservice-controller"),
+		}).SetupWithManager(mgr); err != nil {
+			return fmt.Errorf("BackendService controller: %w", err)
+		}
+	} else {
+		logf.Log.WithName("setup").Info("BackendService CRD not installed: zone functions are off " +
+			"(a NextApp with spec.backends reports BackendBindings=BackendServiceCRDMissing); install the CRD and restart the operator")
 	}
 
 	installed, err := platformv1alpha1.CRDInstalled(mgr.GetRESTMapper())

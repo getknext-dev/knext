@@ -292,6 +292,11 @@ func maximalWarmScheduleSpec() appsv1alpha1.NextAppSpec {
 			Visibility:  appsv1alpha1.VisibilityClusterLocal,
 			PublicHosts: []string{"www.example.com"},
 		},
+		// spec.backends (zone functions) renders container env only, and only
+		// for a two-sided binding resolved at reconcile time (applyBindingEnv),
+		// so it is outside both scans in this file; it only needs non-zero
+		// values here for the leaf walk.
+		Backends: []appsv1alpha1.BackendBinding{{Name: "pricing", Service: "pricing"}},
 		// spec.cdn renders KNEXT_CDN_* container env, also outside both scans in
 		// this file, and likewise only needs non-zero values here.
 		CDN: &appsv1alpha1.CDNSpec{

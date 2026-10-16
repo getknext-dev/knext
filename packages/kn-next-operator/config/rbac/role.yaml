@@ -22,6 +22,13 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - secrets
+  - services
+  verbs:
+  - get
+- apiGroups:
+  - ""
+  resources:
   - serviceaccounts
   verbs:
   - create
@@ -31,12 +38,6 @@ rules:
   - patch
   - update
   - watch
-- apiGroups:
-  - ""
-  resources:
-  - services
-  verbs:
-  - get
 - apiGroups:
   - apps
   resources:
@@ -58,9 +59,8 @@ rules:
 - apiGroups:
   - apps.kn-next.dev
   resources:
-  - nextapps
+  - backendservices
   verbs:
-  - create
   - delete
   - get
   - list
@@ -70,17 +70,31 @@ rules:
 - apiGroups:
   - apps.kn-next.dev
   resources:
+  - backendservices/finalizers
   - nextapps/finalizers
   verbs:
   - update
 - apiGroups:
   - apps.kn-next.dev
   resources:
+  - backendservices/status
   - nextapps/status
   verbs:
   - get
   - patch
   - update
+- apiGroups:
+  - apps.kn-next.dev
+  resources:
+  - nextapps
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
 - apiGroups:
   - caching.internal.knative.dev
   resources:

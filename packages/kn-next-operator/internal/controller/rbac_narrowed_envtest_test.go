@@ -30,8 +30,9 @@ package controller
 //     forbidden informer would block them forever) and a NextApp that
 //     references Secrets by name (envMap + envFrom) gets its Knative Service,
 //     finalizer and status written;
-//  2. the identity is genuinely denied Secrets, cluster-wide AND in the app's
-//     namespace, with a positive control (it CAN list NextApps) and a negative
+//  2. the identity is genuinely denied Secrets beyond the one justified `get`
+//     (zone-function allowlist), cluster-wide AND in the app's namespace, with
+//     a positive control (it CAN list NextApps) and a negative
 //     control (a resource outside the role IS forbidden) so a harness that
 //     denies everything - or allows everything - cannot pass vacuously.
 
@@ -121,9 +122,22 @@ var _ = Describe("Operator reconciles under the shipped (narrowed) ClusterRole",
 		Expect(apierrors.IsForbidden(err)).To(BeTrue(),
 			"configmaps are not in the role; if this is allowed, envtest is not enforcing RBAC and the proof is vacuous (err=%v)", err)
 
-		By("Secrets are DENIED: no list/watch/get/create/update/delete, cluster-wide or namespaced")
+		By("Secrets: GET only (the zone-function allowlist reads a referenced Secret's metadata); " +
+			"no list/watch/create/update/delete, cluster-wide or namespaced")
 		for _, namespace := range []string{"", rbacNS} {
-			for _, verb := range []string{"get", "list", "watch", "create", "update", "patch", "delete"} {
+			getSAR := &authorizationv1.SubjectAccessReview{
+				Spec: authorizationv1.SubjectAccessReviewSpec{
+					User:   userName,
+					Groups: []string{userGroup},
+					ResourceAttributes: &authorizationv1.ResourceAttributes{
+						Namespace: namespace, Verb: "get", Resource: "secrets",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, getSAR)).To(Succeed())
+			Expect(getSAR.Status.Allowed).To(BeTrue(),
+				"the BackendService allowlist needs get on secrets (namespace %q): %s", namespace, getSAR.Status.Reason)
+			for _, verb := range []string{"list", "watch", "create", "update", "patch", "delete"} {
 				sar := &authorizationv1.SubjectAccessReview{
 					Spec: authorizationv1.SubjectAccessReviewSpec{
 						User:   userName,
