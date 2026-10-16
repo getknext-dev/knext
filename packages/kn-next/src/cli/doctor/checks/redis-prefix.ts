@@ -20,19 +20,27 @@
  * never FAIL, for the same reason. A `REDIS_KEY_PREFIX` sourced from an envMap
  * Secret cannot be read either; it is named as unverified.
  *
- * Contributes NO row when no NextApp uses a Redis cache, when the cluster is
+ * It also names any app whose stored `spec.cache.keyPrefix` the CRD's
+ * admission rule now refuses (redis-key-prefix.ts), whatever its provider.
+ *
+ * Contributes NO row when no NextApp uses a Redis cache (and none stores a
+ * refused keyPrefix), when the cluster is
  * unreachable, or when the list cannot be read (the app-image row reports that),
  * which keeps every other report's row set unchanged (doctor-golden.test.ts).
  * Read-only: the same `get nextapps` the app-image check issues.
  */
 
 import { createHash } from "node:crypto";
+import {
+    keyPrefixProblem,
+    LEGACY_SHARED_KEY_PREFIX,
+} from "../../redis-key-prefix";
 import { safeJson } from "../kubectl";
 import { mk } from "../report";
 import type { CheckContext, CheckResult } from "../types";
 
 /** The prefix every app without one falls back to at runtime. */
-export const LEGACY_SHARED_KEY_PREFIX = "kn-next";
+export { LEGACY_SHARED_KEY_PREFIX };
 
 /**
  * The operator's default prefix for an app with no `spec.cache.keyPrefix`:
@@ -58,7 +66,7 @@ interface NextAppItem {
 
 const TITLE = "Redis key prefixes";
 const HINT =
-    "give each app its own prefix: remove cache.keyPrefix to use the per-app default, or set a unique one; keys under the old prefix expire on their own";
+    "give each app its own prefix: remove cache.keyPrefix to use the per-app default, or set a unique one of at most 63 characters with no whitespace or * ? [ ] \\, outside 'kn-next'; keys under the old prefix expire on their own";
 
 export function redisPrefixCheck(ctx: CheckContext): CheckResult[] {
     if (ctx.skipAll) return [];
@@ -75,10 +83,23 @@ export function redisPrefixCheck(ctx: CheckContext): CheckResult[] {
 
     const byPrefix = new Map<string, string[]>();
     const unverified: string[] = [];
+    // A stored keyPrefix the CRD's admission rule now refuses. Ratcheting keeps
+    // the app updatable on Kubernetes >= 1.30 while the prefix is unchanged;
+    // below that floor its next spec change is refused. Checked whatever the
+    // cache provider: admission validates the field regardless.
+    const invalid: string[] = [];
     let redisApps = 0;
     for (const item of items) {
         const name = item.metadata?.name;
         const namespace = item.metadata?.namespace;
+        const stored = item.spec?.cache?.keyPrefix;
+        if (name && namespace && typeof stored === "string") {
+            const problem = keyPrefixProblem(stored);
+            if (problem)
+                invalid.push(
+                    `${namespace}/${name}: keyPrefix '${stored}' ${problem}, so the cluster now refuses it (change it before the app's next update)`,
+                );
+        }
         if (!name || !namespace || item.spec?.cache?.provider !== "redis")
             continue;
         redisApps += 1;
@@ -98,9 +119,9 @@ export function redisPrefixCheck(ctx: CheckContext): CheckResult[] {
         } else prefix = defaultRedisKeyPrefix(namespace, name);
         byPrefix.set(prefix, [...(byPrefix.get(prefix) ?? []), app]);
     }
-    if (redisApps === 0) return [];
+    if (redisApps === 0 && invalid.length === 0) return [];
 
-    const problems: string[] = [];
+    const problems: string[] = [...invalid];
     for (const [prefix, apps] of byPrefix) {
         if (apps.length > 1) {
             problems.push(

@@ -30,7 +30,9 @@
  *   - a narrowed bound on `minLength`/`maximum`/`minItems`/`minProperties`
  *     (increased) or `maxLength`/`maximum`/`maxItems`/`maxProperties`
  *     (decreased) — see `NARROWING_RULES` below for the precise direction
- *     per keyword;
+ *     per keyword — and any such bound ADDED where none existed before
+ *     (except a minLength/minItems/minProperties of 0, which constrains
+ *     nothing);
  *   - a `pattern` that changed value, or was added where none existed before;
  *   - a whole served CRD *version* (`spec.versions[].name`) disappearing
  *     between the old and new document (`diffCrd`, top-level "version
@@ -91,6 +93,8 @@ const NARROWING_RULES = {
   maxProperties: { direction: 'decrease-narrows' },
 };
 
+const COUNT_MINIMUMS = new Set(['minLength', 'minItems', 'minProperties']);
+
 function isPlainObject(v) {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
@@ -134,6 +138,15 @@ export function diffOpenApiSchema(oldSchema, newSchema, path, violations) {
   for (const [key, rule] of Object.entries(NARROWING_RULES)) {
     const oldVal = oldSchema[key];
     const newVal = newSchema[key];
+    // A bound ADDED where none existed narrows too (any value was allowed
+    // before) — except a minLength/minItems/minProperties of 0, which
+    // constrains nothing (a count is never negative). `minimum` always counts.
+    if (oldVal === undefined && typeof newVal === 'number') {
+      if (!(COUNT_MINIMUMS.has(key) && newVal <= 0)) {
+        violations.push(`${path}.${key}: added (${newVal}) where none existed before`);
+      }
+      continue;
+    }
     if (typeof oldVal !== 'number' || typeof newVal !== 'number') continue;
     const narrowed = rule.direction === 'increase-narrows' ? newVal > oldVal : newVal < oldVal;
     if (narrowed) {
@@ -329,4 +342,99 @@ export function diffCrd(oldCrd, newCrd) {
   }
 
   return { ok: violations.length === 0, violations };
+}
+
+/**
+ * NARROWING WAIVERS (ADR-0017 Amendment 3). A waiver lets ONE exact violation
+ * through the additive-only guard. Each entry is:
+ *   - exact: `violation` is the full violation string `diffCrd` prints, and it
+ *     must contain the entry's own `field` path and `rule` text — so editing
+ *     the narrowed rule changes the string and the entry no longer matches;
+ *   - dated (`added`, YYYY-MM-DD), justified (`justification`, a real
+ *     sentence), and pointed at the ADR-0017 amendment that permits it (`adr`,
+ *     an existing docs/adr/0017-*.md path, optionally with an #anchor);
+ *   - single-use: an entry that matches no current violation is STALE and
+ *     fails the guard (see `applyWaivers`), so it is deleted once the narrowing
+ *     ships in a tag and cannot be carried forward to waive anything else.
+ */
+export const WAIVER_KEYS = ['violation', 'field', 'rule', 'added', 'justification', 'adr'];
+const MIN_JUSTIFICATION = 40;
+const WAIVABLE = [
+  /\.pattern: (added|changed) /,
+  /: enum (narrowed,|added )/,
+  /\.(minLength|maxLength|minimum|maximum|minItems|maxItems|minProperties|maxProperties): (added|narrowed) /,
+  /\.x-kubernetes-validations: new or changed CEL rule: /,
+];
+
+/**
+ * @param {Record<string, unknown>} entry
+ * @param {(repoRelativePath: string) => boolean} fileExists
+ * @returns {string[]} problems; empty when the entry is valid
+ */
+export function validateWaiverEntry(entry, fileExists) {
+  const problems = [];
+  if (!isPlainObject(entry)) return ['entry is not an object'];
+  for (const key of WAIVER_KEYS) {
+    if (typeof entry[key] !== 'string' || entry[key].trim() === '') {
+      problems.push(`"${key}" is missing or empty`);
+    }
+  }
+  if (problems.length > 0) return problems;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(entry.added) || Number.isNaN(Date.parse(entry.added))) {
+    problems.push(`"added" must be a YYYY-MM-DD date, got ${JSON.stringify(entry.added)}`);
+  }
+  if (entry.justification.trim().length < MIN_JUSTIFICATION) {
+    problems.push(
+      `"justification" must say why the narrowing is safe (at least ${MIN_JUSTIFICATION} characters)`,
+    );
+  }
+  const adrPath = entry.adr.split('#')[0];
+  if (!/^docs\/adr\/0017-[^/]+\.md$/.test(adrPath)) {
+    problems.push(
+      `"adr" must point at the ADR-0017 amendment (docs/adr/0017-*.md), got ${JSON.stringify(entry.adr)}`,
+    );
+  } else if (!fileExists(adrPath)) {
+    problems.push(`"adr" points at ${adrPath}, which does not exist`);
+  }
+  // Only VALUE-validation narrowings are waivable: those are what CRD
+  // validation ratcheting covers on the server floor (an unchanged invalid
+  // value keeps validating). A removed field, a type change, a new required
+  // field or a dropped version breaks stored objects outright and needs a new
+  // API version — never a waiver. A CEL rule using oldSelf is a transition
+  // rule, which ratcheting does not cover.
+  if (!WAIVABLE.some((re) => re.test(entry.violation))) {
+    problems.push(
+      '"violation" is not a waivable class (only pattern, enum, a length/size/numeric bound, or a CEL rule without oldSelf)',
+    );
+  } else if (/x-kubernetes-validations/.test(entry.violation) && /\boldSelf\b/.test(entry.rule)) {
+    problems.push(
+      'a CEL rule that uses oldSelf is a transition rule; ratcheting does not cover it',
+    );
+  }
+  if (!entry.violation.includes(`$.${entry.field}.`)) {
+    problems.push(`"violation" does not name the entry's field ($.${entry.field})`);
+  }
+  if (
+    !entry.violation.includes(JSON.stringify(entry.rule)) &&
+    !entry.violation.includes(`(${entry.rule})`)
+  ) {
+    problems.push('"violation" does not carry the entry\'s rule text verbatim');
+  }
+  return problems;
+}
+
+/**
+ * Split `violations` into waived / remaining by exact string match against
+ * `waivers`, and report every entry that matched nothing as stale.
+ * @param {string[]} violations
+ * @param {Array<{ violation: string }>} waivers
+ */
+export function applyWaivers(violations, waivers) {
+  const listed = new Set(waivers.map((w) => w.violation));
+  const present = new Set(violations);
+  return {
+    waived: violations.filter((v) => listed.has(v)),
+    remaining: violations.filter((v) => !listed.has(v)),
+    stale: waivers.filter((w) => !present.has(w.violation)),
+  };
 }
