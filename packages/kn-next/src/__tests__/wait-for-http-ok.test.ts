@@ -58,20 +58,31 @@ describe("waitForHttpOk", () => {
         expect(await res.text()).toBe("late");
     });
 
-    it("fails a genuinely broken (500) server at the deadline with last status and server log", async () => {
-        const url = listen(() => new Response("boom", { status: 500 }));
-        const t0 = Date.now();
+    it("retries a 500 until the deadline, then fails with last status and server log", async () => {
+        // Fake clock: time advances only through the injected sleep, so the
+        // attempt count is exact and independent of CI load.
+        let clock = 0;
+        let attempts = 0;
         const err = await rejection(
-            waitForHttpOk(url, {
-                intervalMs: 10,
-                deadlineMs: 400,
+            waitForHttpOk("http://broken.invalid/", {
+                intervalMs: 100,
+                deadlineMs: 1000,
+                now: () => clock,
+                sleep: async (ms) => {
+                    clock += ms;
+                },
+                fetch: async () => {
+                    attempts++;
+                    return new Response("boom", { status: 500 });
+                },
                 log: () => "Invalid hook call (server stderr)",
             }),
         );
         expect(err).toBeInstanceOf(Error);
         expect(err?.message).toContain("500");
         expect(err?.message).toContain("Invalid hook call (server stderr)");
-        expect(Date.now() - t0).toBeLessThan(2000);
+        // Probes at t = 0, 100, ..., 1000 ms: 11 attempts, each retried.
+        expect(attempts).toBe(11);
     });
 
     it("fails fast when the server process has already exited", async () => {
