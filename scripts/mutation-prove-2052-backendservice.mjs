@@ -15,6 +15,13 @@
  *     conflicting owner, the operator-owned ServiceAccount, the optional JWKS
  *     mount, the activator peer, cluster-local, the served version read from the
  *     READY revision, the controller ownerReference;
+ *   - the zone's JWKS ownership check (a function mounts its zone's JWKS
+ *     ConfigMap only when the zone's NextApp controls it, by UID): each squat
+ *     category (no owner, another object, another zone, the same name with
+ *     another UID), the absent and controlled states, the render with and
+ *     without the volume, the uncached read, a failed read, and the verdict
+ *     (condition, Ready roll-up and its precedence, the transition-only warning,
+ *     the pre-registered refusals series, the shipped role's ConfigMap `get`);
  *   - the zone render: rendered at all, sorted, collisions kept, cross-zone
  *     refused, served version, wake opt-out, byte-identical with no binding, and
  *     the BackendBindings condition computed in computeStatusVerdict;
@@ -67,6 +74,8 @@ const VERDICT = resolve(REPO_ROOT, 'packages/kn-next-operator/internal/controlle
 // biome-ignore format: one-line resolve() for the anchor-drift scan
 const BIND = resolve(REPO_ROOT, 'packages/kn-next-operator/internal/controller/backend_bindings.go');
 // biome-ignore format: one-line resolve() for the anchor-drift scan
+const ZONEKEY = resolve(REPO_ROOT, 'packages/kn-next-operator/internal/controller/zone_signing_key_reconcile.go');
+// biome-ignore format: one-line resolve() for the anchor-drift scan
 const NEXTAPP = resolve(REPO_ROOT, 'packages/kn-next-operator/internal/controller/nextapp_controller.go');
 // biome-ignore format: one-line resolve() for the anchor-drift scan
 const STATUS = resolve(REPO_ROOT, 'packages/kn-next-operator/internal/controller/status_verdict.go');
@@ -85,6 +94,7 @@ const PROVER = {
     verdict: VERDICT,
     bind: BIND,
     nextapp: NEXTAPP,
+    zonekey: ZONEKEY,
     status: STATUS,
     metrics: METRICS,
     crd: CRD,
@@ -363,6 +373,247 @@ const MUTATIONS = [
     anchor: 'if err := controllerutil.SetControllerReference(obs.zone, bs, r.Scheme); err != nil {',
     replacement: 'if err := controllerutil.SetOwnerReference(obs.zone, bs, r.Scheme); err != nil {',
     test: envtest('sets the controller ownerReference itself'),
+  },
+  // --- the zone's JWKS is mounted only when the zone controls it -------------
+  {
+    id: 'J01',
+    claim: "every JWKS ConfigMap is trusted (a squatter's key set is mounted)",
+    subject: 'sov',
+    anchor: '\tif controlledByZone(cm, zone) {',
+    replacement: '\tif true {',
+    test: unit('TestClassifyZoneJWKS'),
+  },
+  {
+    id: 'J02',
+    claim: "no JWKS ConfigMap is trusted (the zone's own is never mounted)",
+    subject: 'sov',
+    anchor: '\tif controlledByZone(cm, zone) {',
+    replacement: '\tif false {',
+    test: envtest("mounts the JWKS of a ConfigMap the zone's NextApp controls"),
+  },
+  {
+    id: 'J03',
+    claim:
+      'a missing ConfigMap is untrusted (the optional mount is lost before the operator creates it)',
+    subject: 'sov',
+    anchor: '\t\treturn zoneJWKSAbsent, ""\n\t}\n\tif controlledByZone(cm, zone) {',
+    replacement: '\t\treturn zoneJWKSUntrusted, ""\n\t}\n\tif controlledByZone(cm, zone) {',
+    test: envtest('keeps the optional mount while the ConfigMap does not exist yet'),
+  },
+  {
+    id: 'J04',
+    claim: 'a ConfigMap with no controller ownerReference is mounted',
+    subject: 'sov',
+    anchor: 'return zoneJWKSUntrusted, "it has no controller ownerReference"',
+    replacement: 'return zoneJWKSControlled, ""',
+    test: envtest('does not mount a squatted ConfigMap that nothing owns'),
+  },
+  {
+    id: 'J05',
+    claim: 'a ConfigMap controlled by another zone or some other object is mounted',
+    subject: 'sov',
+    anchor:
+      'return zoneJWKSUntrusted, fmt.Sprintf("its controller is %s %q, not the zone", ref.Kind, ref.Name)',
+    replacement: 'return zoneJWKSControlled, ""',
+    test: envtest(
+      "does not mount a ConfigMap controlled by (some other object|another zone's NextApp)",
+    ),
+  },
+  {
+    id: 'J06',
+    claim: 'a ConfigMap controlled by a NextApp of the same name but another UID is mounted',
+    subject: 'sov',
+    anchor:
+      'return zoneJWKSUntrusted, fmt.Sprintf("its controller is a NextApp named %q with a different UID "+',
+    replacement:
+      'return zoneJWKSControlled, fmt.Sprintf("its controller is a NextApp named %q with a different UID "+',
+    test: envtest(
+      'does not mount a ConfigMap controlled by a NextApp of the same name but another UID',
+    ),
+  },
+  {
+    id: 'J07',
+    claim: "the controller's UID is not compared (an earlier NextApp of the same name is trusted)",
+    subject: 'zonekey',
+    anchor: 'ref.Kind == "NextApp" && ref.UID == app.UID && ref.Name == app.Name &&',
+    replacement: 'ref.Kind == "NextApp" && ref.Name == app.Name &&',
+    test: unit('TestClassifyZoneJWKS'),
+  },
+  {
+    id: 'J08',
+    claim:
+      "the controller's kind is not compared (any object with the zone's name and UID is trusted)",
+    subject: 'zonekey',
+    // Anchors run to the END of the line: the harness appends its residue marker
+    // as a trailing comment, which would swallow the rest of a mid-line anchor.
+    anchor:
+      'return ref != nil && ref.Kind == "NextApp" && ref.UID == app.UID && ref.Name == app.Name &&',
+    replacement: 'return ref != nil && ref.UID == app.UID && ref.Name == app.Name &&',
+    test: unit('TestClassifyZoneJWKS'),
+  },
+  {
+    id: 'J09',
+    claim: "the controller's API group is not compared (a foreign NextApp kind is trusted)",
+    subject: 'zonekey',
+    // Keeps strings.HasPrefix (the mutated tree must still compile).
+    anchor: 'strings.HasPrefix(ref.APIVersion, appsv1alpha1.GroupVersion.Group+"/")',
+    replacement: 'strings.HasPrefix(ref.APIVersion, "")',
+    test: unit('TestClassifyZoneJWKS'),
+  },
+  {
+    id: 'J10',
+    claim: 'an untrusted ConfigMap is still mounted by the render',
+    subject: 'render',
+    anchor: '\tif jwks != zoneJWKSUntrusted {',
+    replacement: '\tif true {',
+    test: unit('TestRenderMountsNoJWKSWhenUntrusted'),
+  },
+  {
+    id: 'J11',
+    claim: "the render never mounts the zone's JWKS (an absent or controlled one is lost)",
+    subject: 'render',
+    anchor: '\tif jwks != zoneJWKSUntrusted {',
+    replacement: '\tif false {',
+    test: unit('TestRenderMountsTheZoneJWKSUnlessUntrusted'),
+  },
+  {
+    id: 'J12',
+    claim:
+      'the reconciler discards what it observed at the JWKS name (an untrusted one is mounted)',
+    subject: 'ctl',
+    anchor:
+      'if obs.jwks, obs.jwksDetail, err = r.observeZoneJWKS(ctx, bs.Namespace, obs.zone); err != nil {',
+    replacement: 'if _, _, err = r.observeZoneJWKS(ctx, bs.Namespace, obs.zone); err != nil {',
+    test: envtest('does not mount a squatted ConfigMap that nothing owns'),
+  },
+  {
+    id: 'J13',
+    claim:
+      'the JWKS ConfigMap is read through the cached client (it would start a ConfigMap informer)',
+    subject: 'ctl',
+    anchor: '\tname := ZoneJWKSConfigMapName(zone.Name)\n',
+    replacement: '\tname := ZoneJWKSConfigMapName(zone.Name)\n\treader = r.Client\n',
+    test: envtest('reads the ConfigMap through the uncached reader'),
+  },
+  {
+    id: 'J14',
+    claim: 'a failed read is swallowed (the function is rendered as if the ConfigMap were absent)',
+    subject: 'ctl',
+    anchor:
+      'return zoneJWKSAbsent, "", fmt.Errorf("reading the metadata of ConfigMap %s: %w", name, err)',
+    replacement: 'return zoneJWKSAbsent, "", nil',
+    test: envtest('on a read failure returns the error'),
+  },
+  {
+    id: 'J15',
+    claim: 'a ConfigMap that does not exist is treated as a read failure (the reconcile errors)',
+    subject: 'ctl',
+    anchor: '\tcase apierrors.IsNotFound(err):\n\t\tstate, detail := classifyZoneJWKS(nil, zone)',
+    replacement: '\tcase false:\n\t\tstate, detail := classifyZoneJWKS(nil, zone)',
+    test: envtest('keeps the optional mount while the ConfigMap does not exist yet'),
+  },
+  {
+    id: 'J16',
+    claim: 'the JWKS is read (and a function rendered) even for a refused function',
+    subject: 'ctl',
+    anchor: '\tif obs.accepted() {',
+    replacement: '\tif true {',
+    test: envtest('does not read the ConfigMap, nor render, for a function that is refused'),
+  },
+  {
+    id: 'J17',
+    claim: 'an untrusted JWKS does not fail Ready',
+    subject: 'verdict',
+    anchor: '\tcase jwks.Status == metav1.ConditionFalse:',
+    replacement: '\tcase false:',
+    test: unit('TestVerdictUntrustedJWKSIsFalseNotReadyAndWarns'),
+  },
+  {
+    id: 'J18',
+    claim:
+      'an untrusted JWKS is reported only once the Knative Service is Ready (a wait outranks the policy fact)',
+    subject: 'verdict',
+    anchor: '\tcase jwks.Status == metav1.ConditionFalse:',
+    replacement:
+      '\tcase jwks.Status == metav1.ConditionFalse && o.ksvc != nil && o.ksvc.Status.GetCondition(servingv1.ServiceConditionReady).IsTrue():',
+    test: unit('TestVerdictUntrustedJWKSOutranksKnativeNotReady'),
+  },
+  {
+    id: 'J19',
+    claim: 'an untrusted JWKS is not reported on the JWKSTrusted condition',
+    subject: 'verdict',
+    anchor: '\tcase o.jwks == zoneJWKSUntrusted:',
+    replacement: '\tcase false:',
+    test: unit('TestVerdictUntrustedJWKSIsFalseNotReadyAndWarns'),
+  },
+  {
+    id: 'J20',
+    claim: 'an absent JWKS is reported untrusted (the normal first state fails Ready)',
+    subject: 'verdict',
+    anchor:
+      'cond(ConditionJWKSTrusted, metav1.ConditionUnknown, ReasonJWKSNotPublished, fmt.Sprintf(',
+    replacement:
+      'cond(ConditionJWKSTrusted, metav1.ConditionFalse, ReasonJWKSNotPublished, fmt.Sprintf(',
+    test: unit('TestVerdictAbsentJWKSIsUnknownAndDoesNotFailReady'),
+  },
+  {
+    id: 'J21',
+    claim: 'a controlled JWKS is not reported True',
+    subject: 'verdict',
+    anchor: 'cond(ConditionJWKSTrusted, metav1.ConditionTrue, ReasonJWKSControlled, fmt.Sprintf(',
+    replacement:
+      'cond(ConditionJWKSTrusted, metav1.ConditionUnknown, ReasonJWKSControlled, fmt.Sprintf(',
+    test: unit('TestVerdictControlledJWKSIsTrue'),
+  },
+  {
+    id: 'J22',
+    claim: 'a refused function reports the JWKS it never mounted (instead of NotRendered)',
+    subject: 'verdict',
+    anchor: '\tcase !o.accepted():',
+    replacement: '\tcase false:',
+    test: unit('TestVerdictRefusedFunctionReportsItsOwnReasonNotTheJWKS'),
+  },
+  {
+    id: 'J23',
+    claim: 'the JWKSTrusted condition is computed but never published',
+    subject: 'verdict',
+    anchor: '\tv.conditions = append(v.conditions, jwks)\n',
+    replacement: '\t_ = jwks\n',
+    test: unit('TestVerdictControlledJWKSIsTrue'),
+  },
+  {
+    id: 'J24',
+    claim: 'the untrusted-JWKS refusal raises no Warning event and no refusal count',
+    subject: 'verdict',
+    anchor: 'if ready.Status != metav1.ConditionTrue && ready.Reason != ReasonFunctionNotReady {',
+    replacement:
+      'if ready.Status != metav1.ConditionTrue && ready.Reason != ReasonFunctionNotReady && ready.Reason != ReasonJWKSUntrusted {',
+    test: unit('TestVerdictUntrustedJWKSIsFalseNotReadyAndWarns'),
+  },
+  {
+    id: 'J25',
+    claim: 'the warning repeats on every pass (not gated on the transition)',
+    subject: 'verdict',
+    anchor: 'if prev == nil || prev.Reason != ready.Reason || prev.Message != ready.Message {',
+    replacement: 'if true {',
+    test: unit('TestVerdictUntrustedJWKSWarnsOnTheTransitionOnly'),
+  },
+  {
+    id: 'J26',
+    claim: 'the JWKSUntrusted refusal series is not published at 0 from start-up',
+    subject: 'metrics',
+    anchor: 'ReasonKnativeServiceNameTaken, ReasonJWKSUntrusted,',
+    replacement: 'ReasonKnativeServiceNameTaken,',
+    test: unit('TestRefusalsMetricCarriesTheJWKSReasonFromStartUp'),
+  },
+  {
+    id: 'J27',
+    claim:
+      "the shipped role lacks `get` on configmaps (the reconciler cannot read the zone's JWKS)",
+    subject: 'role',
+    anchor: '  - configmaps\n  - secrets\n  verbs:',
+    replacement: '  - secrets\n  verbs:',
+    test: unit('TestFunctionOwnerReferenceNeedsTheNextAppFinalizersGrant'),
   },
   // --- the zone render ----------------------------------------------------------
   {
