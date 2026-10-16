@@ -154,3 +154,64 @@ describe('#942 F1 — packed sibling ranges must be satisfied by the co-packed s
     );
   });
 });
+// #2389 — an OPTIONAL Beta package (`@getknext/ffi`, `@getknext/grpc`) enters
+// the audit scope the moment it is publishable, and it declares its core edge
+// as an optional peer over a bounded major (`>=2.0.0-0 <3.0.0`), not a caret.
+// The tripwire must vouch for that shape for optional packages only, with npm's
+// prerelease rule, or the audit dies on a coherent closure (or passes a broken one).
+describe('#2389 — an optional Beta package peers on core with a bounded major', () => {
+  const ffi = (range: string): Manifest => ({
+    name: '@getknext/ffi',
+    version: '0.1.0',
+    peerDependencies: { '@getknext/core': range },
+  });
+  const core2 = (version: string): Manifest => ({ name: '@getknext/core', version });
+
+  it('a co-packed core inside the bound is coherent (2.0.0-rc.3 and 2.4.1 satisfy >=2.0.0-0 <3.0.0)', () => {
+    expect(siblingRangeProblems([core2('2.0.0-rc.3'), ffi('>=2.0.0-0 <3.0.0')])).toEqual([]);
+    expect(siblingRangeProblems([core2('2.4.1'), ffi('>=2.0.0-0 <3.0.0')])).toEqual([]);
+  });
+
+  it('a co-packed core outside the bound REDS (1.3.0 and 3.0.0)', () => {
+    expect(siblingRangeProblems([core2('1.3.0'), ffi('>=2.0.0-0 <3.0.0')]).length).toBeGreaterThan(
+      0,
+    );
+    expect(siblingRangeProblems([core2('3.0.0'), ffi('>=2.0.0-0 <3.0.0')]).length).toBeGreaterThan(
+      0,
+    );
+  });
+
+  it("a prerelease of a tuple neither bound names REDS (npm's rule: 2.1.0-rc.1 does not satisfy >=2.0.0-0 <3.0.0)", () => {
+    expect(
+      siblingRangeProblems([core2('2.1.0-rc.1'), ffi('>=2.0.0-0 <3.0.0')]).length,
+    ).toBeGreaterThan(0);
+  });
+
+  it('a FIXED-group package may not use the bounded shape (it still must be a caret)', () => {
+    expect(
+      siblingRangeProblems([lib('2.0.0'), core('2.0.0', '>=2.0.0-0 <3.0.0')]).length,
+    ).toBeGreaterThan(0);
+  });
+
+  it('a FIXED-group package may not use the bounded shape even as a peer', () => {
+    const corePeer: Manifest = {
+      name: '@getknext/core',
+      version: '2.0.0',
+      peerDependencies: { '@getknext/lib': '>=2.0.0-0 <3.0.0' },
+    };
+    expect(siblingRangeProblems([lib('2.0.0'), corePeer]).length).toBeGreaterThan(0);
+  });
+
+  it('an optional package may use the bounded shape only as a PEER, not a dependency', () => {
+    const ffiDep: Manifest = {
+      name: '@getknext/ffi',
+      version: '0.1.0',
+      dependencies: { '@getknext/core': '>=2.0.0-0 <3.0.0' },
+    };
+    expect(siblingRangeProblems([core2('2.0.0'), ffiDep]).length).toBeGreaterThan(0);
+  });
+
+  it('an optional package with any other range shape still fails closed', () => {
+    expect(siblingRangeProblems([core2('2.0.0'), ffi('2.x')]).length).toBeGreaterThan(0);
+  });
+});

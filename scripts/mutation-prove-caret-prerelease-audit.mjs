@@ -72,6 +72,51 @@ const MUTATIONS = [
     anchor: TUPLE_GUARD,
     replacement: '    // (mutated) prerelease/tuple guard removed\n',
   },
+  // #2389: an optional Beta package's bounded peer on core (`>=A <B`).
+  {
+    id: 'B1',
+    expect: 'red',
+    claim:
+      'the bounded-peer check accepts any co-packed core (an optional package would publish against a core outside its peer range)',
+    subject: 'script',
+    anchor: '          if (!boundedSatisfies(bounded, sibling)) {\n',
+    replacement: '          if (false) {\n',
+  },
+  {
+    id: 'B2',
+    expect: 'red',
+    claim: 'the bounded shape is accepted from a FIXED-group package too',
+    subject: 'script',
+    anchor:
+      "        if (optionalNames.has(manifest.name) && group === 'peerDependencies' && bounded) {\n",
+    replacement: "        if (group === 'peerDependencies' && bounded) {\n",
+  },
+  {
+    id: 'B3',
+    expect: 'red',
+    claim:
+      'the bounded shape is accepted for an optional package as a hard dependency, not only a peer',
+    subject: 'script',
+    anchor:
+      "        if (optionalNames.has(manifest.name) && group === 'peerDependencies' && bounded) {\n",
+    replacement: '        if (optionalNames.has(manifest.name) && bounded) {\n',
+  },
+  {
+    id: 'B4',
+    expect: 'red',
+    claim: "npm's prerelease rule is dropped (2.1.0-rc.1 would satisfy >=2.0.0-0 <3.0.0)",
+    subject: 'script',
+    anchor: '    if (!named) return false;\n',
+    replacement: '    void named;\n',
+  },
+  {
+    id: 'B5',
+    expect: 'red',
+    claim: 'the upper bound is ignored (core 3.0.0 would satisfy >=2.0.0-0 <3.0.0)',
+    subject: 'script',
+    anchor: '  return compareSemver(v, low) >= 0 && compareSemver(v, high) < 0;\n',
+    replacement: '  return compareSemver(v, low) >= 0;\n',
+  },
   {
     id: 'A3',
     expect: 'green',

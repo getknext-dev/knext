@@ -24,6 +24,17 @@
  *      Without them every red above is equally explained by a harness that can
  *      only see red.
  *
+ * Package scope (#2389), the same grading:
+ *
+ *   5. the real tree: `@getknext/ffi` or `@getknext/grpc` loses `private` with
+ *      today's wiring (P1 is the issue's acceptance criterion), core lists ffi,
+ *      or the crates lane's cargo deny / drift guard / triggers are loosened;
+ *   6. `audit-published.mjs` stops auditing or SBOM-ing a publishable optional
+ *      package, or stops failing closed on a misnamed manifest;
+ *   7. the package-scope engine loses each of its rules;
+ *   8. controls that must stay GREEN: a marker-only manifest edit and a renamed
+ *      crates-lane step.
+ *
  * Anchors are asserted to occur exactly once by scripts/lib/mutation-harness.mjs
  * (it refuses otherwise), the snapshot restores byte-identically, and every
  * mutation carries the residue marker. Injected files (class 2) are written by
@@ -48,13 +59,32 @@ const WORKFLOW_DIR = dirname(WORKFLOW);
 const ENGINE = resolve(REPO_ROOT, 'tests/helpers/publish-lane-supply-chain.ts');
 const SPEC = 'tests/publish-lane-supply-chain.test.ts';
 const SPEC_FILE = resolve(REPO_ROOT, 'tests/publish-lane-supply-chain.test.ts');
+// Package scope (#2389): the manifests, the audit script and the engine it relies on.
+const FFI_MANIFEST = resolve(REPO_ROOT, 'packages/ffi/package.json');
+const GRPC_MANIFEST = resolve(REPO_ROOT, 'packages/grpc/package.json');
+const CORE_MANIFEST = resolve(REPO_ROOT, 'packages/kn-next/package.json');
+const CRATE_LANE = resolve(REPO_ROOT, '.github/workflows/rust-crates.yml');
+const AUDIT_SCRIPT = resolve(REPO_ROOT, 'scripts/audit-published.mjs');
+const SCOPE_ENGINE = resolve(REPO_ROOT, 'tests/helpers/optional-beta-release-set.ts');
 
 /**
  * The files mutated, keyed by the `subject` each mutation names. Spelled as a
  * `subjects:` map so `tests/mutation-prover-lane.test.ts` can resolve every
  * anchor below against its file at PR time.
  */
-const LANE = { subjects: { workflow: WORKFLOW, engine: ENGINE, spec: SPEC_FILE } };
+const LANE = {
+  subjects: {
+    workflow: WORKFLOW,
+    engine: ENGINE,
+    spec: SPEC_FILE,
+    ffiManifest: FFI_MANIFEST,
+    grpcManifest: GRPC_MANIFEST,
+    coreManifest: CORE_MANIFEST,
+    crateLane: CRATE_LANE,
+    auditScript: AUDIT_SCRIPT,
+    scopeEngine: SCOPE_ENGINE,
+  },
+};
 
 const DIRECT_NEEDS =
   '    needs: [publish-lane-guard, audit, version-pr, publish-preflight, ga-tarball-diff, pack]\n';
@@ -912,6 +942,330 @@ const MUTATIONS = [
         '      - run: |\n          gh issue create --title t --body "$(cat <<\'EOF\'\n          npm publish is documented elsewhere\n          EOF\n          )"\n',
       ),
     },
+    expect: 'green',
+  },
+  // ── 5. PACKAGE SCOPE (#2389): the real tree ───────────────────────────────
+  {
+    id: 'P1',
+    claim:
+      "@getknext/ffi loses `private` with today's release wiring (no ignore, no audit build, no beta step, no cargo deny need) — the acceptance criterion",
+    subject: 'ffiManifest',
+    anchor: '  "private": true,\n',
+    replacement: `  "//${MUTATION_MARKER}": "mutation in progress",\n  "private": false,\n`,
+    expect: 'red',
+  },
+  {
+    id: 'P2',
+    claim: "@getknext/grpc loses `private` with today's release wiring",
+    subject: 'grpcManifest',
+    anchor: '  "private": true,\n',
+    replacement: `  "//${MUTATION_MARKER}": "mutation in progress",\n  "private": false,\n`,
+    expect: 'red',
+  },
+  {
+    id: 'P3',
+    claim: 'the fixed group (core) lists @getknext/ffi as a dependency',
+    subject: 'coreManifest',
+    anchor: '  "dependencies": {\n',
+    replacement: `  "dependencies": {\n    "//${MUTATION_MARKER}": "mutation in progress",\n    "@getknext/ffi": "0.0.0",\n`,
+    expect: 'red',
+  },
+  {
+    id: 'P4',
+    claim: 'the crates lane cargo deny step may fail without failing the run (continue-on-error)',
+    subject: 'crateLane',
+    anchor: '      - name: cargo deny check\n        run: cargo deny check\n',
+    replacement:
+      '      - name: cargo deny check\n        run: cargo deny check\n        continue-on-error: true\n',
+    expect: 'red',
+  },
+  {
+    id: 'P5',
+    claim: 'the crates lane push trigger stops watching crates/**',
+    subject: 'crateLane',
+    anchor: "    branches: [main, integration/v2]\n    paths:\n      - 'crates/**'\n",
+    replacement: '    branches: [main, integration/v2]\n    paths:\n',
+    expect: 'red',
+  },
+  {
+    id: 'P6',
+    claim: 'the crates lane stops running on pushes to integration/v2',
+    subject: 'crateLane',
+    anchor: '    branches: [main, integration/v2]\n',
+    replacement: '    branches: [main]\n',
+    expect: 'red',
+  },
+  {
+    id: 'P7',
+    claim: 'the crate-rev drift guard no longer runs',
+    subject: 'crateLane',
+    anchor: '        run: node scripts/check-ffi-crate-rev.mjs\n',
+    replacement: '        run: echo crate-rev guard skipped\n',
+    expect: 'red',
+  },
+  // ── 6. PACKAGE SCOPE (#2389): audit-published.mjs ─────────────────────────
+  {
+    id: 'A1',
+    claim:
+      'auditScope() never adds a publishable optional Beta package (it would publish unaudited)',
+    subject: 'auditScript',
+    anchor: '  return [...PUBLISHED, ...publishable];\n',
+    replacement: '  void publishable;\n  return [...PUBLISHED];\n',
+    expect: 'red',
+  },
+  {
+    id: 'A2',
+    claim:
+      'the SBOM loop goes back to the fixed list (an optional package would publish with no SBOM)',
+    subject: 'auditScript',
+    anchor: '  for (const pkg of scope) {\n',
+    replacement: '  for (const pkg of PUBLISHED) {\n',
+    expect: 'red',
+  },
+  {
+    id: 'A3',
+    claim: '@getknext/ffi drops out of OPTIONAL_BETA',
+    subject: 'auditScript',
+    anchor: "  { name: '@getknext/ffi', dir: join(repoRoot, 'packages', 'ffi') },\n",
+    replacement: '',
+    expect: 'red',
+  },
+  {
+    id: 'A4',
+    claim: 'auditScope() stops failing closed on a manifest whose name is not its entry',
+    subject: 'auditScript',
+    anchor: '    if (manifest?.name !== pkg.name) {\n',
+    replacement: '    if (false) {\n',
+    expect: 'red',
+  },
+  // ── 7. PACKAGE SCOPE (#2389): the engine ──────────────────────────────────
+  {
+    id: 'E1',
+    claim: 'a publishable package in no release set is accepted',
+    subject: 'scopeEngine',
+    anchor: '    if (!fixedGroup.includes(name) && !optional.has(name)) {\n',
+    replacement: '    if (false) {\n',
+    expect: 'red',
+  },
+  {
+    id: 'E2',
+    claim: 'a publishable package outside the audit scope is accepted',
+    subject: 'scopeEngine',
+    anchor: '    if (!scope.has(name) && !options.auditExempt.some((e) => e.name === name)) {\n',
+    replacement: '    if (false) {\n',
+    expect: 'red',
+  },
+  {
+    id: 'E3',
+    claim: 'a stale audit exemption is accepted',
+    subject: 'scopeEngine',
+    anchor: '    if (!publishable.includes(e.name)) {\n',
+    replacement: '    if (false) {\n',
+    expect: 'red',
+  },
+  {
+    id: 'E4',
+    claim: 'an optional Beta package in the changesets fixed group is accepted',
+    subject: 'scopeEngine',
+    anchor: '    if (fixedGroups.some((g) => g.includes(name))) {\n',
+    replacement: '    if (false) {\n',
+    expect: 'red',
+  },
+  {
+    id: 'E5',
+    claim: 'an optional Beta package in a changesets linked group is accepted',
+    subject: 'scopeEngine',
+    anchor: '    if (linkedGroups.some((g) => g.includes(name))) {\n',
+    replacement: '    if (false) {\n',
+    expect: 'red',
+  },
+  {
+    id: 'E6',
+    claim: 'an optional Beta package that depends on core is accepted',
+    subject: 'scopeEngine',
+    anchor: '      if (isObj(m[field]) && CORE in (m[field] as Obj)) {\n',
+    replacement: '      if (false) {\n',
+    expect: 'red',
+  },
+  {
+    id: 'E7',
+    claim: 'an unbounded (caret) peer on core is accepted',
+    subject: 'scopeEngine',
+    anchor: '    } else if (!BOUNDED_MAJOR.test(String(peer))) {\n',
+    replacement: '    } else if (false) {\n',
+    expect: 'red',
+  },
+  {
+    id: 'E8',
+    claim: 'a non-optional peer on core is accepted',
+    subject: 'scopeEngine',
+    anchor: '    if (peer !== undefined && !(isObj(meta) && meta.optional === true)) {\n',
+    replacement: '    if (false) {\n',
+    expect: 'red',
+  },
+  {
+    id: 'E9',
+    claim: 'a fixed-group manifest listing an optional Beta package is accepted',
+    subject: 'scopeEngine',
+    anchor: '        if (opt in deps) {\n',
+    replacement: '        if (false) {\n',
+    expect: 'red',
+  },
+  {
+    id: 'E10',
+    claim: 'a publishable optional package left in the shared changeset publish is accepted',
+    subject: 'scopeEngine',
+    anchor: '    if (!ignore.includes(name)) {\n',
+    replacement: '    if (false) {\n',
+    expect: 'red',
+  },
+  {
+    id: 'E11',
+    claim: 'a publishable optional package the audit job does not build is accepted',
+    subject: 'scopeEngine',
+    anchor: '      if (!job.steps.some((s) => builds.test(s.run))) {\n',
+    replacement: '      if (false) {\n',
+    expect: 'red',
+  },
+  {
+    id: 'E12',
+    claim: 'any --tag counts as the beta dist-tag',
+    subject: 'scopeEngine',
+    anchor: '          /--tag(?:=|\\s+)beta\\b/.test(s.run) &&\n',
+    replacement: '          /--tag/.test(s.run) &&\n',
+    expect: 'red',
+  },
+  {
+    id: 'E13',
+    claim: 'a beta publish step for another package counts',
+    subject: 'scopeEngine',
+    anchor: '          names.test(s.run),\n',
+    replacement: '          true,\n',
+    expect: 'red',
+  },
+  {
+    id: 'E14',
+    claim: 'a beta publish job that needs no audit job is accepted',
+    subject: 'scopeEngine',
+    anchor: '      if (!closure.some(runsAudit)) {\n',
+    replacement: '      if (false) {\n',
+    expect: 'red',
+  },
+  {
+    id: 'E15',
+    claim: 'needs are no longer followed transitively',
+    subject: 'scopeEngine',
+    anchor: '      if (next) stack.push(next);\n',
+    replacement: '      void next;\n',
+    expect: 'red',
+  },
+  {
+    id: 'E16',
+    claim: 'a crate-pinning package whose beta publish does not need cargo deny is accepted',
+    subject: 'scopeEngine',
+    anchor: '      if (rev !== undefined && !closure.some(hasCrateDenyGate)) {\n',
+    replacement: '      if (false) {\n',
+    expect: 'red',
+  },
+  {
+    id: 'E17',
+    claim: 'continue-on-error no longer disqualifies a gate',
+    subject: 'scopeEngine',
+    anchor:
+      '  unit.if !== undefined || (unit.continueOnError !== undefined && unit.continueOnError !== false);\n',
+    replacement: '  unit.if !== undefined;\n',
+    expect: 'red',
+  },
+  {
+    id: 'E18',
+    claim: 'a cargo deny that does not run against crates/ counts',
+    subject: 'scopeEngine',
+    anchor: "    return (\n      wd === 'crates' ||\n",
+    replacement: "    return (\n      true ||\n      wd === 'crates' ||\n",
+    expect: 'red',
+  },
+  {
+    id: 'E19',
+    claim: 'a crates lane with no cargo deny gate is accepted',
+    subject: 'scopeEngine',
+    anchor: '  if (!jobs.some(hasCrateDenyGate)) {\n',
+    replacement: '  if (false) {\n',
+    expect: 'red',
+  },
+  {
+    id: 'E20',
+    claim: 'a crates lane path filter that misses a required path is accepted',
+    subject: 'scopeEngine',
+    anchor: '        if (!paths.includes(p)) problems.push(`${file}: ${event} paths miss ${p}`);\n',
+    replacement: '        void p;\n',
+    expect: 'red',
+  },
+  {
+    id: 'E21',
+    claim: 'a crates lane missing a release branch is accepted',
+    subject: 'scopeEngine',
+    anchor: '        if (!branches.includes(b)) {\n',
+    replacement: '        if (false) {\n',
+    expect: 'red',
+  },
+  {
+    id: 'E22',
+    claim: 'a crates lane missing its pull_request trigger is accepted',
+    subject: 'scopeEngine',
+    anchor: '    if (!(event in triggers)) {\n',
+    replacement: '    if (false) {\n',
+    expect: 'red',
+  },
+  {
+    id: 'E23',
+    claim: 'a crates lane without the crate-rev drift guard is accepted',
+    subject: 'scopeEngine',
+    anchor: '  if (!driftGuard) {\n',
+    replacement: '  if (false) {\n',
+    expect: 'red',
+  },
+  {
+    id: 'E24',
+    claim: 'an unreadable changesets config no longer fails closed',
+    subject: 'scopeEngine',
+    anchor:
+      '    problems.push(`.changeset/config.json: unreadable or unparseable (${String(err)})`);\n',
+    replacement: '    void err;\n',
+    expect: 'red',
+  },
+  {
+    id: 'E25',
+    claim: 'a declared optional package missing from the workspace is accepted',
+    subject: 'scopeEngine',
+    anchor:
+      '      problems.push(`${name} is declared an optional Beta package but is not a workspace package`);\n',
+    replacement: '',
+    expect: 'red',
+  },
+  {
+    id: 'E26',
+    claim: 'a missing crates lane is accepted',
+    subject: 'scopeEngine',
+    anchor: '    problems.push(`${file}: the knext-ffi crates lane is missing or unreadable`);\n',
+    replacement: '',
+    expect: 'red',
+  },
+  // ── 8. PACKAGE SCOPE controls that must stay GREEN ────────────────────────
+  {
+    id: 'NEG9',
+    claim:
+      'NEGATIVE CONTROL: a marker-only key added beside private: true in the @getknext/ffi manifest — must stay GREEN',
+    subject: 'ffiManifest',
+    anchor: '  "private": true,\n',
+    replacement: `  "//${MUTATION_MARKER}": "mutation in progress",\n  "private": true,\n`,
+    expect: 'green',
+  },
+  {
+    id: 'NEG10',
+    claim: 'NEGATIVE CONTROL: a crates lane step renamed — must stay GREEN',
+    subject: 'crateLane',
+    anchor: '      - name: cargo deny check\n',
+    replacement: '      - name: cargo deny check (advisories, licenses, bans, sources)\n',
     expect: 'green',
   },
 ];
