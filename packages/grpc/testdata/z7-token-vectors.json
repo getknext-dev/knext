@@ -1,0 +1,792 @@
+{
+  "$comment": [
+    "TEST-ONLY. Shared zone-identity token vectors for the Go and Rust zone-function verifiers",
+    "and the zone-side signer. Every key is derived from its public label (seed = SHA-256 of",
+    "the UTF-8 label), so it is not a secret and must never be trusted outside tests.",
+    "A token is its `jws` segments joined with \".\" (null = no Authorization header).",
+    "Regenerate with `bun packages/grpc/scripts/gen-z7-token-vectors.ts`; never edit by hand."
+  ],
+  "contract": {
+    "alg": "EdDSA",
+    "typ": "JWT",
+    "kid": "base64url (no padding) of the first 16 bytes of SHA-256 over the raw 32-byte public key",
+    "claims": ["iss", "aud", "method", "sub", "iat", "exp"],
+    "maxLifetimeSeconds": 60,
+    "clockSkewSeconds": 5
+  },
+  "verifier": {
+    "issuer": "knext:zone:shop/storefront",
+    "audience": "knext:fn:shop/orders"
+  },
+  "reasons": [
+    "no-token",
+    "malformed",
+    "bad-alg",
+    "unknown-kid",
+    "bad-signature",
+    "lifetime",
+    "expired",
+    "not-yet-valid",
+    "wrong-issuer",
+    "wrong-audience",
+    "wrong-method",
+    "missing-subject"
+  ],
+  "keys": {
+    "zone-a-previous": {
+      "label": "knext z7 TEST VECTOR key zone-a-previous: public test material, never trust it outside tests",
+      "seed": "JBHNkFCVaBkO6w-MOYxi1IUvt9CiJndMlQjgfsmImGI",
+      "kid": "IEgiklF7IKV0yQ5clb8cEw",
+      "x": "Zh2QxfrFjkZWOpfyyImNKZNwtnI3672gIyTyvfj41nU"
+    },
+    "zone-a-current": {
+      "label": "knext z7 TEST VECTOR key zone-a-current: public test material, never trust it outside tests",
+      "seed": "Crqm5x4hhQWdquX6tT1_MJsmaqfNOk8drnHsCuMiEJM",
+      "kid": "86aY5vHO4HzoyPv0mHLsSA",
+      "x": "RtVuked5tcG3ie24v6WecAS6mli8EkYwaoIIQb9T5No"
+    },
+    "zone-a-next": {
+      "label": "knext z7 TEST VECTOR key zone-a-next: public test material, never trust it outside tests",
+      "seed": "DT7blNgq9BQfmTEH91xECtnA5uThwzQ2WudtHkIU7gg",
+      "kid": "KkL-lC4pfFK9PzF76raC6Q",
+      "x": "kbeqfvPcKvzzs0J9-6Mv2BSchUxy87Mon2trI5J8Qjo"
+    },
+    "zone-b-current": {
+      "label": "knext z7 TEST VECTOR key zone-b-current: public test material, never trust it outside tests",
+      "seed": "6vVVw32vCwKVG8DJNVF68fguv6Au7EDeYjOX05mqPbc",
+      "kid": "ID43HHMNCEPTz2-GjvHcuA",
+      "x": "sZhj-x57QUEqGihNGvYnIZOR3APUdLMm-Gf6W6ODWSQ"
+    },
+    "outsider": {
+      "label": "knext z7 TEST VECTOR key outsider: public test material, never trust it outside tests",
+      "seed": "rf2_f53eP1J_WDGf0uberuBSMBHAA9RbBMsLgQMEABk",
+      "kid": "OuFWIPpfRgilkJqVvw_drw",
+      "x": "7IlEQQpNrmUUUTD0vHQ7V1bWggfpPe8di5GXRDPf1Ds"
+    }
+  },
+  "jwks": {
+    "zone-a-overlap": {
+      "keys": [
+        {
+          "kty": "OKP",
+          "crv": "Ed25519",
+          "x": "RtVuked5tcG3ie24v6WecAS6mli8EkYwaoIIQb9T5No",
+          "kid": "86aY5vHO4HzoyPv0mHLsSA",
+          "alg": "EdDSA",
+          "use": "sig"
+        },
+        {
+          "kty": "OKP",
+          "crv": "Ed25519",
+          "x": "Zh2QxfrFjkZWOpfyyImNKZNwtnI3672gIyTyvfj41nU",
+          "kid": "IEgiklF7IKV0yQ5clb8cEw",
+          "alg": "EdDSA",
+          "use": "sig"
+        }
+      ]
+    },
+    "zone-a-current-only": {
+      "keys": [
+        {
+          "kty": "OKP",
+          "crv": "Ed25519",
+          "x": "RtVuked5tcG3ie24v6WecAS6mli8EkYwaoIIQb9T5No",
+          "kid": "86aY5vHO4HzoyPv0mHLsSA",
+          "alg": "EdDSA",
+          "use": "sig"
+        }
+      ]
+    },
+    "zone-a-rotating": {
+      "keys": [
+        {
+          "kty": "OKP",
+          "crv": "Ed25519",
+          "x": "RtVuked5tcG3ie24v6WecAS6mli8EkYwaoIIQb9T5No",
+          "kid": "86aY5vHO4HzoyPv0mHLsSA",
+          "alg": "EdDSA",
+          "use": "sig"
+        },
+        {
+          "kty": "OKP",
+          "crv": "Ed25519",
+          "x": "kbeqfvPcKvzzs0J9-6Mv2BSchUxy87Mon2trI5J8Qjo",
+          "kid": "KkL-lC4pfFK9PzF76raC6Q",
+          "alg": "EdDSA",
+          "use": "sig"
+        }
+      ]
+    },
+    "zone-a-and-b": {
+      "keys": [
+        {
+          "kty": "OKP",
+          "crv": "Ed25519",
+          "x": "RtVuked5tcG3ie24v6WecAS6mli8EkYwaoIIQb9T5No",
+          "kid": "86aY5vHO4HzoyPv0mHLsSA",
+          "alg": "EdDSA",
+          "use": "sig"
+        },
+        {
+          "kty": "OKP",
+          "crv": "Ed25519",
+          "x": "sZhj-x57QUEqGihNGvYnIZOR3APUdLMm-Gf6W6ODWSQ",
+          "kid": "ID43HHMNCEPTz2-GjvHcuA",
+          "alg": "EdDSA",
+          "use": "sig"
+        }
+      ]
+    },
+    "zone-b": {
+      "keys": [
+        {
+          "kty": "OKP",
+          "crv": "Ed25519",
+          "x": "sZhj-x57QUEqGihNGvYnIZOR3APUdLMm-Gf6W6ODWSQ",
+          "kid": "ID43HHMNCEPTz2-GjvHcuA",
+          "alg": "EdDSA",
+          "use": "sig"
+        }
+      ]
+    },
+    "kid-not-derived-from-x": {
+      "keys": [
+        {
+          "kty": "OKP",
+          "crv": "Ed25519",
+          "kid": "86aY5vHO4HzoyPv0mHLsSA",
+          "x": "kbeqfvPcKvzzs0J9-6Mv2BSchUxy87Mon2trI5J8Qjo"
+        }
+      ]
+    },
+    "wrong-kty": {
+      "keys": [
+        {
+          "kty": "EC",
+          "crv": "Ed25519",
+          "kid": "86aY5vHO4HzoyPv0mHLsSA",
+          "x": "RtVuked5tcG3ie24v6WecAS6mli8EkYwaoIIQb9T5No"
+        }
+      ]
+    },
+    "wrong-crv": {
+      "keys": [
+        {
+          "kty": "OKP",
+          "crv": "X25519",
+          "kid": "86aY5vHO4HzoyPv0mHLsSA",
+          "x": "RtVuked5tcG3ie24v6WecAS6mli8EkYwaoIIQb9T5No"
+        }
+      ]
+    },
+    "short-x": {
+      "keys": [
+        {
+          "kty": "OKP",
+          "crv": "Ed25519",
+          "kid": "aItCDgZ3dKGp5YeyylQl0Q",
+          "x": "RtVuked5tcG3ie24v6WecAS6mli8EkYwaoIIQb9T5A"
+        }
+      ]
+    }
+  },
+  "cases": [
+    {
+      "name": "valid-user",
+      "jwks": "zone-a-overlap",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6Ijg2YVk1dkhPNEh6b3lQdjBtSExzU0EifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NTB9",
+        "Y-RJ1W3utndWv5zz3ifLjcUVUMfG9JYIYJn2bH9reM8SEC3Ne9gP7SeSZQvdhhvOo1FepDgzfKhkuqzSostxCw"
+      ],
+      "expect": "accept",
+      "sub": "user-123"
+    },
+    {
+      "name": "valid-public",
+      "jwks": "zone-a-overlap",
+      "procedure": "/catalog.v1.CatalogService/ListProducts",
+      "auth": "AUTH_PUBLIC",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6Ijg2YVk1dkhPNEh6b3lQdjBtSExzU0EifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2NhdGFsb2cudjEuQ2F0YWxvZ1NlcnZpY2UvTGlzdFByb2R1Y3RzIiwic3ViIjoiIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NTB9",
+        "84kGP9mhy8ZSqAZjLhTdWoPDr33fcMkVYYyzApCt0VGCvDNA4KdBxUHlTrA91_JSchYqYyua2QbiPvH0Mo5WDQ"
+      ],
+      "expect": "accept",
+      "sub": ""
+    },
+    {
+      "name": "valid-public-with-user",
+      "jwks": "zone-a-overlap",
+      "procedure": "/catalog.v1.CatalogService/ListProducts",
+      "auth": "AUTH_PUBLIC",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6Ijg2YVk1dkhPNEh6b3lQdjBtSExzU0EifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2NhdGFsb2cudjEuQ2F0YWxvZ1NlcnZpY2UvTGlzdFByb2R1Y3RzIiwic3ViIjoidXNlci0xMjMiLCJpYXQiOjE3NjcyMjU1OTAsImV4cCI6MTc2NzIyNTY1MH0",
+        "Y6ZnPJJA0pMfwUZBio8JUc5SR0PJK0l4OiI2zjkdfcslkDRouBA7y07x3568KUCroQQ-5KbCJo_WvJBPegOpDQ"
+      ],
+      "expect": "accept",
+      "sub": "user-123"
+    },
+    {
+      "name": "valid-exp-inside-skew",
+      "jwks": "zone-a-overlap",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6Ijg2YVk1dkhPNEh6b3lQdjBtSExzU0EifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NTM2LCJleHAiOjE3NjcyMjU1OTZ9",
+        "H0-KlOrx0qbIUBLCBEhFR8SsvDwiYRcql2Kttwy0lr0aezZpHU_875SQrWtRKDB0GQVEdt53fPcSYR9xh6wIDg"
+      ],
+      "expect": "accept",
+      "sub": "user-123"
+    },
+    {
+      "name": "valid-iat-at-skew",
+      "jwks": "zone-a-overlap",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6Ijg2YVk1dkhPNEh6b3lQdjBtSExzU0EifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NjA1LCJleHAiOjE3NjcyMjU2NjV9",
+        "cJ8MvfiEbTXHr7UafliTI5ozMvaB8-LId8Na2cbfW5Vq394LZeLAxE60egApyNh516uLf30cPFZ581BD0U3GAg"
+      ],
+      "expect": "accept",
+      "sub": "user-123"
+    },
+    {
+      "name": "rotation-previous-during-overlap",
+      "jwks": "zone-a-overlap",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6IklFZ2lrbEY3SUtWMHlRNWNsYjhjRXcifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NTB9",
+        "ZJ2F_C7p9IBdt5eTjwLe5PFHOp2b_968EOXJ-DuFYfEJtU4krqkB40u0AVHT_xRLy0K_evC8iolnWnQb6GnPCA"
+      ],
+      "expect": "accept",
+      "sub": "user-123"
+    },
+    {
+      "name": "rotation-next-after-propagation",
+      "jwks": "zone-a-rotating",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6IktrTC1sQzRwZkZLOVB6Rjc2cmFDNlEifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NTB9",
+        "uZ_oxA-FbQiCEc3O82M8bi0BGxaLMsiPawPETRr0LcEozwlGxPIA3vrR_2tfhqAodEkC6x8aIbi4JMtMDOOGBw"
+      ],
+      "expect": "accept",
+      "sub": "user-123"
+    },
+    {
+      "name": "no-token",
+      "jwks": "zone-a-overlap",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": null,
+      "expect": "reject",
+      "reason": "no-token"
+    },
+    {
+      "name": "not-three-segments",
+      "jwks": "zone-a-overlap",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6Ijg2YVk1dkhPNEh6b3lQdjBtSExzU0EifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NTB9"
+      ],
+      "expect": "reject",
+      "reason": "malformed"
+    },
+    {
+      "name": "padded-segment",
+      "jwks": "zone-a-overlap",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6Ijg2YVk1dkhPNEh6b3lQdjBtSExzU0EifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NTB9==",
+        "kwET2O9NTlyzs9Af0iLeX6_aBobcxSNOHD1KnVokCb3_xHrEnn0WamMeqpvhM6q-rUyLqb1StrArDDkJK6kVAQ"
+      ],
+      "expect": "reject",
+      "reason": "malformed"
+    },
+    {
+      "name": "newline-in-segment",
+      "jwks": "zone-a-overlap",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6Ijg2YVk1dkhPNEh6b3lQdjBtSExzU0EifQ",
+        "eyJpc3Mi\nOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NTB9",
+        "_Iz6NnzEEJGuMyn21bMi4ZsHvEbjhy299B8IaUmjNFMgQrz_fVMExGMMrqLU4aXcWhXwJLA4mavKSNpPCYDZDA"
+      ],
+      "expect": "reject",
+      "reason": "malformed"
+    },
+    {
+      "name": "non-canonical-base64",
+      "jwks": "zone-a-overlap",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6Ijg2YVk1dkhPNEh6b3lQdjBtSExzU0EifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NTB9",
+        "Y-RJ1W3utndWv5zz3ifLjcUVUMfG9JYIYJn2bH9reM8SEC3Ne9gP7SeSZQvdhhvOo1FepDgzfKhkuqzSostxCx"
+      ],
+      "expect": "reject",
+      "reason": "malformed"
+    },
+    {
+      "name": "alg-none",
+      "jwks": "zone-a-overlap",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJub25lIiwidHlwIjoiSldUIiwia2lkIjoiODZhWTV2SE80SHpveVB2MG1ITHNTQSJ9",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NTB9",
+        ""
+      ],
+      "expect": "reject",
+      "reason": "bad-alg"
+    },
+    {
+      "name": "alg-hs256-with-public-key",
+      "jwks": "zone-a-overlap",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6Ijg2YVk1dkhPNEh6b3lQdjBtSExzU0EifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NTB9",
+        "ApNkTmAbKFngasko7ql6741Pg2B8eJueaDZHAldBOAk"
+      ],
+      "expect": "reject",
+      "reason": "bad-alg"
+    },
+    {
+      "name": "alg-ed25519-name",
+      "jwks": "zone-a-overlap",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZDI1NTE5IiwidHlwIjoiSldUIiwia2lkIjoiODZhWTV2SE80SHpveVB2MG1ITHNTQSJ9",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NTB9",
+        "HmCwTMa-RogEAfkP6C4O17xlnPxHcQPOFj20P76iLFrumkQIp7iVRXJVpYDEcfitUnx_elgZjI_oSk80NR5xCQ"
+      ],
+      "expect": "reject",
+      "reason": "bad-alg"
+    },
+    {
+      "name": "duplicate-header-alg",
+      "jwks": "zone-a-overlap",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJub25lIiwiYWxnIjoiRWREU0EiLCJ0eXAiOiJKV1QiLCJraWQiOiI4NmFZNXZITzRIem95UHYwbUhMc1NBIn0",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NTB9",
+        "1Zs0dd5YRONFqFnarc0tzA4KPzXh-y8C2GHiqrnoFsGmup2mpgWGwKh0c8UJprL7opkqFJPKp1toX2tRQPMVBA"
+      ],
+      "expect": "reject",
+      "reason": "malformed"
+    },
+    {
+      "name": "header-crit",
+      "jwks": "zone-a-overlap",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6Ijg2YVk1dkhPNEh6b3lQdjBtSExzU0EiLCJjcml0IjpbImV4cCJdfQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NTB9",
+        "J3xsLm_LF7-1spfSTNRSvn82-hOjrwJeVWH85YnUn0qLe4LGoki71RHNoKp7IKgcZfmyb2Pn5bR4DT5KCP-ZCA"
+      ],
+      "expect": "reject",
+      "reason": "malformed"
+    },
+    {
+      "name": "header-wrong-typ",
+      "jwks": "zone-a-overlap",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6ImF0K2p3dCIsImtpZCI6Ijg2YVk1dkhPNEh6b3lQdjBtSExzU0EifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NTB9",
+        "s0oy6L084_TW0n81MFjCC7Y_fgTHl8PRpfVtFXbZ7u3d9msBkZsHy4tZn2mGovMsxDSi7ewnuwAnct24J7uhAg"
+      ],
+      "expect": "reject",
+      "reason": "malformed"
+    },
+    {
+      "name": "unknown-kid",
+      "jwks": "zone-a-overlap",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6Ik91RldJUHBmUmdpbGtKcVZ2d19kcncifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NTB9",
+        "ni0DwoYJkcqgEa13BlIx5BcBpIyN1LzCE4yu2tsQhMtQNDiq-gh0i5n2_No4sXFvPPwhF3pd3z-umOtBVHLeBw"
+      ],
+      "expect": "reject",
+      "reason": "unknown-kid"
+    },
+    {
+      "name": "wrong-key",
+      "jwks": "zone-a-overlap",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6Ijg2YVk1dkhPNEh6b3lQdjBtSExzU0EifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NTB9",
+        "2WPOJFCfuGSgqazygLbfFZT_MT-UlPfCW0odUuxn9fw6a0SQme1YPwAr8UJJXbYbijwICUJFxzNx_o6cZmGxCg"
+      ],
+      "expect": "reject",
+      "reason": "bad-signature"
+    },
+    {
+      "name": "tampered-claims",
+      "jwks": "zone-a-overlap",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6Ijg2YVk1dkhPNEh6b3lQdjBtSExzU0EifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6ImFkbWluIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NTB9",
+        "Y-RJ1W3utndWv5zz3ifLjcUVUMfG9JYIYJn2bH9reM8SEC3Ne9gP7SeSZQvdhhvOo1FepDgzfKhkuqzSostxCw"
+      ],
+      "expect": "reject",
+      "reason": "bad-signature"
+    },
+    {
+      "name": "cross-zone",
+      "jwks": "zone-a-overlap",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6IklENDNISE1OQ0VQVHoyLUdqdkhjdUEifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3AvYWRtaW4iLCJhdWQiOiJrbmV4dDpmbjpzaG9wL29yZGVycyIsIm1ldGhvZCI6Ii9leGFtcGxlLnYxLkV4YW1wbGVTZXJ2aWNlL1B1dEl0ZW0iLCJzdWIiOiJ1c2VyLTEyMyIsImlhdCI6MTc2NzIyNTU5MCwiZXhwIjoxNzY3MjI1NjUwfQ",
+        "u87vXGPNNzt9g57B5WBK1HscJeVsVjqnyzBU34xy5qAJzQmgsZ9E4M_sYQjjSOqcaG4QnL8NqSaQk5e32m86CQ"
+      ],
+      "expect": "reject",
+      "reason": "unknown-kid"
+    },
+    {
+      "name": "cross-zone-forged-kid",
+      "jwks": "zone-a-overlap",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6Ijg2YVk1dkhPNEh6b3lQdjBtSExzU0EifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NTB9",
+        "TDnf5z1miKn_VdINg14GNbtA1qIbWiqeaSM0nzxg7CT15vt4qnsyXOEYTdt7tLrZ1yY94beIqvecwx4N2D9UCg"
+      ],
+      "expect": "reject",
+      "reason": "bad-signature"
+    },
+    {
+      "name": "cross-zone-misconfigured-jwks",
+      "jwks": "zone-a-and-b",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6IklENDNISE1OQ0VQVHoyLUdqdkhjdUEifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3AvYWRtaW4iLCJhdWQiOiJrbmV4dDpmbjpzaG9wL29yZGVycyIsIm1ldGhvZCI6Ii9leGFtcGxlLnYxLkV4YW1wbGVTZXJ2aWNlL1B1dEl0ZW0iLCJzdWIiOiJ1c2VyLTEyMyIsImlhdCI6MTc2NzIyNTU5MCwiZXhwIjoxNzY3MjI1NjUwfQ",
+        "u87vXGPNNzt9g57B5WBK1HscJeVsVjqnyzBU34xy5qAJzQmgsZ9E4M_sYQjjSOqcaG4QnL8NqSaQk5e32m86CQ"
+      ],
+      "expect": "reject",
+      "reason": "wrong-issuer"
+    },
+    {
+      "name": "rotation-previous-after-overlap",
+      "jwks": "zone-a-current-only",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6IklFZ2lrbEY3SUtWMHlRNWNsYjhjRXcifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NTB9",
+        "ZJ2F_C7p9IBdt5eTjwLe5PFHOp2b_968EOXJ-DuFYfEJtU4krqkB40u0AVHT_xRLy0K_evC8iolnWnQb6GnPCA"
+      ],
+      "expect": "reject",
+      "reason": "unknown-kid"
+    },
+    {
+      "name": "rotation-next-before-propagation",
+      "jwks": "zone-a-overlap",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6IktrTC1sQzRwZkZLOVB6Rjc2cmFDNlEifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NTB9",
+        "uZ_oxA-FbQiCEc3O82M8bi0BGxaLMsiPawPETRr0LcEozwlGxPIA3vrR_2tfhqAodEkC6x8aIbi4JMtMDOOGBw"
+      ],
+      "expect": "reject",
+      "reason": "unknown-kid"
+    },
+    {
+      "name": "jwks-kid-not-derived-from-x",
+      "jwks": "kid-not-derived-from-x",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6Ijg2YVk1dkhPNEh6b3lQdjBtSExzU0EifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NTB9",
+        "5RWCQgk0Vjjyif1YBsRvTD79v3Qu_pIf3OpwnxXDu18JL3Kg-OFIdCjvwoAjcoUMpxTBU6VaCZkIHvhBgiQZCA"
+      ],
+      "expect": "reject",
+      "reason": "unknown-kid"
+    },
+    {
+      "name": "jwks-wrong-kty",
+      "jwks": "wrong-kty",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6Ijg2YVk1dkhPNEh6b3lQdjBtSExzU0EifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NTB9",
+        "Y-RJ1W3utndWv5zz3ifLjcUVUMfG9JYIYJn2bH9reM8SEC3Ne9gP7SeSZQvdhhvOo1FepDgzfKhkuqzSostxCw"
+      ],
+      "expect": "reject",
+      "reason": "unknown-kid"
+    },
+    {
+      "name": "jwks-wrong-crv",
+      "jwks": "wrong-crv",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6Ijg2YVk1dkhPNEh6b3lQdjBtSExzU0EifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NTB9",
+        "Y-RJ1W3utndWv5zz3ifLjcUVUMfG9JYIYJn2bH9reM8SEC3Ne9gP7SeSZQvdhhvOo1FepDgzfKhkuqzSostxCw"
+      ],
+      "expect": "reject",
+      "reason": "unknown-kid"
+    },
+    {
+      "name": "jwks-short-x",
+      "jwks": "short-x",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6ImFJdENEZ1ozZEtHcDVZZXl5bFFsMFEifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NTB9",
+        "UjBeqB5FEo5YE8BqPfK5jcgwDcDnwPjOpys4CkCzzxS--mX8APCR4gunWahTmzTqb7TAgQnNBpTz8B7X4tKWDA"
+      ],
+      "expect": "reject",
+      "reason": "unknown-kid"
+    },
+    {
+      "name": "duplicate-claim-sub",
+      "jwks": "zone-a-overlap",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6Ijg2YVk1dkhPNEh6b3lQdjBtSExzU0EifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwic3ViIjoiYWRtaW4iLCJpYXQiOjE3NjcyMjU1OTAsImV4cCI6MTc2NzIyNTY1MH0",
+        "WIPZLYmup5_5eDVQ5aNDEh8CSFaG6MJ5-V4DB0FS66ayQymys6NHqIPg6EwcmdRSpG1_CL7920fgF8r3eUADDA"
+      ],
+      "expect": "reject",
+      "reason": "malformed"
+    },
+    {
+      "name": "missing-sub-claim",
+      "jwks": "zone-a-overlap",
+      "procedure": "/catalog.v1.CatalogService/ListProducts",
+      "auth": "AUTH_PUBLIC",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6Ijg2YVk1dkhPNEh6b3lQdjBtSExzU0EifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2NhdGFsb2cudjEuQ2F0YWxvZ1NlcnZpY2UvTGlzdFByb2R1Y3RzIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NTB9",
+        "KeiH5oxjrON7OA8rhyAsbj5IieyyJugIGYS4q63oOpnKE5GyKh3B93crc4AqII4jenAIiWFP3hYc9eCuzKNyCA"
+      ],
+      "expect": "reject",
+      "reason": "malformed"
+    },
+    {
+      "name": "aud-array",
+      "jwks": "zone-a-overlap",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6Ijg2YVk1dkhPNEh6b3lQdjBtSExzU0EifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6WyJrbmV4dDpmbjpzaG9wL29yZGVycyJdLCJtZXRob2QiOiIvZXhhbXBsZS52MS5FeGFtcGxlU2VydmljZS9QdXRJdGVtIiwic3ViIjoidXNlci0xMjMiLCJpYXQiOjE3NjcyMjU1OTAsImV4cCI6MTc2NzIyNTY1MH0",
+        "QoozdAAPDFrX3S7YHUrqGXXJ-DZJfU7aG3pepWn6jARvldg0xNEtP__oESia3lpoxvlqCMPKslSxxHIPhXAXCw"
+      ],
+      "expect": "reject",
+      "reason": "malformed"
+    },
+    {
+      "name": "exp-not-integer",
+      "jwks": "zone-a-overlap",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6Ijg2YVk1dkhPNEh6b3lQdjBtSExzU0EifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NDkuNX0",
+        "jD7dszPs6ZjgPSmPNbsJlFyFNsKKeWIdeQSZisNY6QCqW8bUVVcGgC6N-_BoKOVMlVHySZXckdXKBHuaIbSxBA"
+      ],
+      "expect": "reject",
+      "reason": "malformed"
+    },
+    {
+      "name": "lifetime-over-60",
+      "jwks": "zone-a-overlap",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6Ijg2YVk1dkhPNEh6b3lQdjBtSExzU0EifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NTF9",
+        "-Y73B_3_hc7qmJU9doq2k6W_6zxhU0xQqiCRItKgeRpt1ujlt-Jj-JWPT7Wp2TL8YJHil8Co9ljPjRek4M9gDw"
+      ],
+      "expect": "reject",
+      "reason": "lifetime"
+    },
+    {
+      "name": "exp-not-after-iat",
+      "jwks": "zone-a-overlap",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6Ijg2YVk1dkhPNEh6b3lQdjBtSExzU0EifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NjAwLCJleHAiOjE3NjcyMjU2MDB9",
+        "slknMJmn0iRQUku0tLGBd3tmLVqNnHz7EjtheGY4PGJHJx2KFtJEzmLWeqyaqI8o9R4M9qyoqZKvrgMmxCWTCw"
+      ],
+      "expect": "reject",
+      "reason": "lifetime"
+    },
+    {
+      "name": "expired",
+      "jwks": "zone-a-overlap",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6Ijg2YVk1dkhPNEh6b3lQdjBtSExzU0EifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NTMwLCJleHAiOjE3NjcyMjU1OTB9",
+        "sRM0cw5cz_3pVkOQFd_rmNIr0V-UCzk7Si0vn7WTbpOh6_PTqZEEXEWcf3ZOE54lb7d4r-2w2VhlEhNwtzCBCA"
+      ],
+      "expect": "reject",
+      "reason": "expired"
+    },
+    {
+      "name": "expired-at-skew-boundary",
+      "jwks": "zone-a-overlap",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6Ijg2YVk1dkhPNEh6b3lQdjBtSExzU0EifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NTM1LCJleHAiOjE3NjcyMjU1OTV9",
+        "kE7S54YVWlbPhQGPYIsMh0A2G7abnQ2CcX7c8J8oayqL5XtXtI33qkoC9SYMca5SDPzDp8OnRSoWLSH55aAwDA"
+      ],
+      "expect": "reject",
+      "reason": "expired"
+    },
+    {
+      "name": "issued-in-future",
+      "jwks": "zone-a-overlap",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6Ijg2YVk1dkhPNEh6b3lQdjBtSExzU0EifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NjA2LCJleHAiOjE3NjcyMjU2NjZ9",
+        "xTNaKWzqc7d7yvLByWd4GnkCxO5nK-JEWCUPIMJub7boM3IC_fgDqAlBwq8MAYh4SP__Oh53u_8raoXjG51GDw"
+      ],
+      "expect": "reject",
+      "reason": "not-yet-valid"
+    },
+    {
+      "name": "wrong-issuer",
+      "jwks": "zone-a-overlap",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6Ijg2YVk1dkhPNEh6b3lQdjBtSExzU0EifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3AvYWRtaW4iLCJhdWQiOiJrbmV4dDpmbjpzaG9wL29yZGVycyIsIm1ldGhvZCI6Ii9leGFtcGxlLnYxLkV4YW1wbGVTZXJ2aWNlL1B1dEl0ZW0iLCJzdWIiOiJ1c2VyLTEyMyIsImlhdCI6MTc2NzIyNTU5MCwiZXhwIjoxNzY3MjI1NjUwfQ",
+        "pcZIA94xqaYyoh32IVWLH5cFiB3BPs9CIOgLRdUkBJmHGCPVDH_HfI44kQTQYwr0NlLySSnjkIHeVzBFKKyEBw"
+      ],
+      "expect": "reject",
+      "reason": "wrong-issuer"
+    },
+    {
+      "name": "wrong-audience",
+      "jwks": "zone-a-overlap",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6Ijg2YVk1dkhPNEh6b3lQdjBtSExzU0EifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3AvYmlsbGluZyIsIm1ldGhvZCI6Ii9leGFtcGxlLnYxLkV4YW1wbGVTZXJ2aWNlL1B1dEl0ZW0iLCJzdWIiOiJ1c2VyLTEyMyIsImlhdCI6MTc2NzIyNTU5MCwiZXhwIjoxNzY3MjI1NjUwfQ",
+        "6pG4DBZtTI_VN9m3u8WuFI9sMNRg8svB8PD3S-ziWADGgqIaVJoXoyw--ioT_p6WtciQKVcetAyX0OKnq1lGCw"
+      ],
+      "expect": "reject",
+      "reason": "wrong-audience"
+    },
+    {
+      "name": "wrong-method",
+      "jwks": "zone-a-overlap",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6Ijg2YVk1dkhPNEh6b3lQdjBtSExzU0EifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvR2V0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NTB9",
+        "zbDFJGLN8SfeOJtVgS-nJsIUpiTmlNUxQV1B5JmaJR0aqiiowyT4iMdAxS0IgN7fwAJgTcWYxoMLBAz8sSAEAQ"
+      ],
+      "expect": "reject",
+      "reason": "wrong-method"
+    },
+    {
+      "name": "user-empty-sub",
+      "jwks": "zone-a-overlap",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6Ijg2YVk1dkhPNEh6b3lQdjBtSExzU0EifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6IiIsImlhdCI6MTc2NzIyNTU5MCwiZXhwIjoxNzY3MjI1NjUwfQ",
+        "9Kn-u4ZK9g_wXh2gzqTYDiPZ2KEq4pZ65DGPPvjkUNKKzvyy16ptuF46ttPOkSjoHLNIhfESsAYsyC7xsd5lCw"
+      ],
+      "expect": "reject",
+      "reason": "missing-subject"
+    }
+  ]
+}
