@@ -15,6 +15,7 @@
  *       (#208)
  *   (e) operator-image anonymous pullability (#198)
  *   (e2) APP-image pullability vs the app SA's pull credentials (#952)
+ *   (e3) NextApps on a Redis cache under a shared or nested key prefix (WARN)
  *   (f) Knative Serving installed
  *   (g) the LOCAL kubectl is new enough (>= v1.25) for `--validate=strict`
  *
@@ -59,6 +60,7 @@ import { nodeFloorCheck } from "./doctor/checks/node-floor";
 import { operatorCheck } from "./doctor/checks/operator";
 import { operatorImageCheck } from "./doctor/checks/operator-image";
 import { operatorVersionCheck } from "./doctor/checks/operator-version";
+import { redisPrefixCheck } from "./doctor/checks/redis-prefix";
 import { storageModeCheck } from "./doctor/checks/storage-mode";
 import { turbopackFragmentsCheck } from "./doctor/checks/turbopack-fragments";
 import { cacheComponentsCheck } from "./doctor/checks/use-cache";
@@ -148,6 +150,7 @@ export async function runDoctor(
     checks.push(...ingressCheck(ctx));
     checks.push(...(await operatorImageCheck(ctx))); // reads ctx.operatorImage
     checks.push(...(await appImageCheck(ctx)));
+    checks.push(...redisPrefixCheck(ctx)); // no row unless a NextApp uses a Redis cache
     checks.push(...knativeCheck(ctx));
     checks.push(...metricsCheck(ctx));
     checks.push(...networkPolicyCheck(ctx));
@@ -200,6 +203,7 @@ Checks: NextApp CRD, operator readiness, the installed operator's release
 version and whether it pairs with this CLI (WARN only), cert-manager webhook, Knative
 ingress-class vs its reconciler (#208), operator-image pullability (#198),
 app-image pullability vs the namespace's pull credentials (#952),
+NextApps whose Redis key prefixes collide (WARN only),
 Knative Serving, CNI NetworkPolicy enforcement (whether the cluster can\nenforce the operator's default-on policy — on flannel it cannot), and the\nlocal kubectl's --validate=strict support, plus (local, only for an app that has vinext)\nwhether the installed vinext is the version knext's bundled fixes were validated\nagainst (older = FAIL, newer = WARN). Exit 1 on
 hard FAILs and on probe ERRORs (a check's kubectl
 probe hit a network/TLS/credential/RBAC failure — the cluster state could not

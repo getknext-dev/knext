@@ -54,6 +54,19 @@ func renderedEnvNames(t *testing.T, app *appsv1alpha1.NextApp) map[string]struct
 	}
 	names := make(map[string]struct{}, len(env))
 	for _, ev := range env {
+		// A YIELDING default is not a claimed name: it is appended after the
+		// user's env and only when the user set no value of that name, so an
+		// envMap entry of that name never collides with it — admission must keep
+		// accepting it, which is exactly why ReservedOperatorEnvNames omits it.
+		// Only the derived REDIS_KEY_PREFIX qualifies, and only when the
+		// operator rendered the derived value (an explicit keyPrefix is a
+		// claimed name and stays in the comparison).
+		if ev.Name == redisKeyPrefixEnvName && rendersDefaultRedisKeyPrefix(app) {
+			if ev.Value != defaultRedisKeyPrefix(app) {
+				t.Fatalf("yielding REDIS_KEY_PREFIX = %q, want the derived default %q", ev.Value, defaultRedisKeyPrefix(app))
+			}
+			continue
+		}
 		names[ev.Name] = struct{}{}
 	}
 	return names

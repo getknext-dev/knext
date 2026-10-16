@@ -481,6 +481,14 @@ not edit them.
     No amendment (the rule already exists; this ADR binds the platform to it).
 11. **Node is always an option.** No conflict: the platform never selects or defaults the runtime
     (D4). No amendment.
+    **Scoped exception, recorded 2026-10-15 at the v2 Sprint 4 close design review (#2386):**
+    ADR-0069 (in-process Rust via `bun:ffi`, Beta) is a **founder-directed** exception to this rule
+    (#2315), and the **only** one. Its boundary (ADR-0069 D2, D15): the exception applies only to an
+    app that opts in with `knext.ffi.json`; Node is refused for that app alone (build preflight and
+    runtime guard); every build target still offers the Node runtime, and an app without
+    `knext.ffi.json` is unaffected. It is **not precedent**: a later feature that would drop Node needs
+    its own founder direction and its own ADR, and cannot cite ADR-0069 for it. This note does not
+    change the platform layer's decisions above, which still never select or default the runtime.
 
 Also preserved: **CLAUDE.md §4, "every CLI cluster write targets the `NextApp` CR"** — the CLI only
 reads the platform CR (D10). **Amendment A8** adds that sentence explicitly so it is not

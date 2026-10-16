@@ -1680,6 +1680,12 @@ func (r *NextAppReconciler) appendUserEnv(nextApp *appsv1alpha1.NextApp, envVars
 		}
 		sort.Strings(names)
 		for _, name := range names {
+			if dropsEmptyUserRedisKeyPrefix(nextApp, name) {
+				// An empty REDIS_KEY_PREFIX is unset: the derived default
+				// appended below takes its place (no Warning: nothing the
+				// user set is overridden).
+				continue
+			}
 			if isReservedCDNEnvName(name) {
 				r.emitEvent(nextApp, corev1.EventTypeWarning, ReasonEnvVarIgnored,
 					fmt.Sprintf("spec.env[%s] ignored: the %s* namespace is reserved by the operator (set spec.cdn instead)",
@@ -1693,6 +1699,14 @@ func (r *NextAppReconciler) appendUserEnv(nextApp *appsv1alpha1.NextApp, envVars
 			}
 			envVars = append(envVars, corev1.EnvVar{Name: name, Value: nextApp.Spec.Env[name]})
 		}
+	}
+
+	// The derived per-app REDIS_KEY_PREFIX for a Redis cache with no
+	// spec.cache.keyPrefix. Not rendered when spec.env / envMap set one, so a
+	// user-set REDIS_KEY_PREFIX keeps winning, with no ignored-env Warning and
+	// no duplicate entry (see defaultRedisKeyPrefixEnv).
+	if ev, ok := defaultRedisKeyPrefixEnv(nextApp); ok {
+		envVars = append(envVars, ev)
 	}
 
 	// spec.networking.publicHosts -> KNEXT_PUBLIC_ORIGINS. Rendered AFTER the
