@@ -29,7 +29,14 @@ import { trackWrite } from './cache-write-registry.js';
 import { enqueueAppPurge, enqueuePurge, firstReadyPurge } from './cdn-purge/index.js';
 // The `'use cache'` (`cacheHandlers`) backend. Pure logic over an injected `core`
 // (below), so it imports nothing from this module and stays testable alone.
-import { createUseCacheHandler, resetUseCacheTagReplay } from './use-cache-handler.js';
+import {
+  collapseRefusedMessage,
+  collapseSweepAllowed,
+  createUseCacheHandler,
+  escapeGlob,
+  LEGACY_SHARED_KEY_PREFIX,
+  resetUseCacheTagReplay,
+} from './use-cache-handler.js';
 // Slow-dependency discrimination (cold-start ledger row 3). Observation only:
 // it attaches two listeners to the connecting client and names which PHASE was
 // slow (TCP connect vs the ready-check INFO). No timer, no budget, no verdict —
@@ -89,11 +96,13 @@ function logCacheEvent(type, source, key, options) {
 // ─── Redis Client (lazy, only when REDIS_URL is set) ───
 
 let REDIS_URL = process.env.REDIS_URL;
-// REDIS_KEY_PREFIX is set by the deploy path (manifest generator / operator) to the
-// app name, so each app owns an isolated ISR keyspace. If Redis is in use but the var
-// is unset, the fallback below ('kn-next') will NOT match the app-name keyspace other
-// pods read/write — a silent split keyspace = cache misses + cross-app collisions.
-// Surface it loudly rather than diverging quietly (see architecture review #2).
+// REDIS_KEY_PREFIX is set by the operator: cache.keyPrefix when the app sets one,
+// otherwise a per-app default derived from its namespace and name. If Redis is in
+// use but the var is unset (an app not deployed by the operator, or an operator
+// that predates the default), the fallback below ('kn-next') is SHARED by every
+// such app on the Redis: they read each other's entries, and an outage collapse
+// would delete each other's caches -- which is why both collapse sweeps refuse to
+// run under it. Surface it loudly rather than diverging quietly.
 /**
  * The split-keyspace warning, as a function so the env reset can re-emit it.
  *
@@ -107,14 +116,16 @@ function warnOnSplitKeyspace() {
   if (REDIS_URL && !process.env.REDIS_KEY_PREFIX) {
     console.warn(
       "[cache-handler] REDIS_KEY_PREFIX is unset while REDIS_URL is set — falling back " +
-        "to 'kn-next'. ISR cache keys may not match the deploy-time prefix (app name); " +
-        'set REDIS_KEY_PREFIX to avoid a split keyspace.',
+        `to the shared default '${LEGACY_SHARED_KEY_PREFIX}'. Every app on this Redis without ` +
+        'its own prefix shares that keyspace (each sees the others\' entries and invalidations), ' +
+        'and the cache is never swept wholesale after an outage. Set cache.keyPrefix ' +
+        '(or REDIS_KEY_PREFIX) to give this app its own keyspace.',
     );
   }
 }
 
 warnOnSplitKeyspace();
-let KEY_PREFIX = process.env.REDIS_KEY_PREFIX || 'kn-next';
+let KEY_PREFIX = process.env.REDIS_KEY_PREFIX || LEGACY_SHARED_KEY_PREFIX;
 
 function envMs(name, fallback) {
   const raw = Number.parseInt(process.env[name] ?? '', 10);
@@ -196,7 +207,7 @@ function assertTestSeamEnabled(name) {
 function __resetEnvForTests() {
   assertTestSeamEnabled('__resetEnvForTests');
   REDIS_URL = process.env.REDIS_URL;
-  KEY_PREFIX = process.env.REDIS_KEY_PREFIX || 'kn-next';
+  KEY_PREFIX = process.env.REDIS_KEY_PREFIX || LEGACY_SHARED_KEY_PREFIX;
   // Re-emit what module evaluation emits, not just what it assigns.
   warnOnSplitKeyspace();
   // EVERY piece of state module evaluation establishes, not just the env-derived
@@ -1464,7 +1475,10 @@ function noteCdnPurgeSkipped(tagCount) {
 //    dropped for a COLLAPSE: the replay invalidates every ISR entry under this
 //    app's key prefix (a cursor SCAN, DEL per page) and queues one purge of the
 //    app's edge tag -- wider than needed, never stale. The same collapse the
-//    CDN purge queue makes at the same size (D6.4).
+//    CDN purge queue makes at the same size (D6.4). REFUSED under the shared
+//    default prefix `kn-next`: other apps on the same Redis may sit under it,
+//    and the sweep would delete their entries. The refusal logs an error and
+//    leaves this app's entries (and its edge copies) until their TTL.
 //  - OFF THE REQUEST PATH. Started by the first connection that finds the
 //    breaker closed, or by a probe timer set for the moment it closes (an idle
 //    pod would otherwise never replay while other pods serve the stale
@@ -1581,11 +1595,6 @@ async function runInvalidationReplay() {
   }
 }
 
-/** A Redis glob matching `text` literally. */
-function escapeGlob(text) {
-  return text.replace(/[*?[\]\\]/g, '\\$&');
-}
-
 /**
  * The collapse: invalidate every ISR entry under this app's prefix, then purge
  * the whole app at the edge. Tag indexes are left alone: deleting one could race
@@ -1594,6 +1603,15 @@ function escapeGlob(text) {
  */
 async function replayCollapsedBacklog(client) {
   const generation = replayGeneration;
+  if (!collapseSweepAllowed(KEY_PREFIX)) {
+    // Nothing narrower is left to replay (the list was dropped for the
+    // collapse), and the refusal cannot change: drop the collapse rather than
+    // retry it every probe. No edge purge either: it would only refill from
+    // the entries this refusal leaves in Redis.
+    replayCollapsed = false;
+    console.error(collapseRefusedMessage('ISR entry', KEY_PREFIX));
+    return;
+  }
   const pattern = `${escapeGlob(KEY_PREFIX)}:cache:*`;
   let cursor = '0';
   let deleted = 0;
