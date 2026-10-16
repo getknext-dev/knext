@@ -1,0 +1,220 @@
+name: Go function template
+
+# The Go zone-function template (templates/go): a connect-go v2 server whose
+# token interceptor fails closed, built into a distroless image.
+#
+#   check     buf lint; `buf generate` must reproduce the committed gen/ (proto
+#             is the source of truth); go.mod tidy; gofmt; go vet; go test
+#             -race (the interceptor, the Connect/gRPC/gRPC-Web protocol
+#             matrix over h2c and HTTP/1.1, the fail-closed wire scan);
+#             govulncheck at a pinned version.
+#   image     contents: read only, every event: build locally -> SBOM (syft,
+#             SPDX) -> Trivy gate (FAIL on HIGH/CRITICAL). This is where knext
+#             scans the template; an image a user builds from it is scanned by
+#             the user's own pipeline. Nothing here pushes or signs.
+#   kind-e2e  the image as a cluster-local Knative Service with an h2c port and
+#             no JWKS: the health check is served, every other RPC is refused,
+#             the public gateway has no route; warm and from zero.
+#
+# buf is the lockfile's binary, verified against its sha256 pin
+# (packages/grpc/scripts/verified-buf.ts) — never one from PATH. The protoc
+# plugins are Go tools pinned in templates/go/go.mod.
+#
+# This workflow holds no write or OIDC credential anywhere, so the buf binary
+# it runs is never in scope of a publish credential. Publishing the template
+# image (push to GHCR, cosign keyless sign + SBOM attestation) is deferred to a
+# separate, push-only workflow of its own.
+
+on:
+  pull_request:
+    paths:
+      - 'templates/go/**'
+      - '.github/workflows/go-template.yml'
+      - 'packages/grpc/proto/**'
+      - 'packages/grpc/src/add-function.ts'
+      - 'scripts/kind-manifests/**'
+      - 'tests/go-template-contract.test.ts'
+  push:
+    branches: [main, 'integration/**']
+    paths:
+      - 'templates/go/**'
+      - '.github/workflows/go-template.yml'
+      - 'packages/grpc/proto/**'
+      - 'packages/grpc/src/add-function.ts'
+      - 'scripts/kind-manifests/**'
+      - 'tests/go-template-contract.test.ts'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: go-template-${{ github.ref }}
+  # Publishes nothing, so a superseded run on the same ref is safe to cancel.
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Go template (buf, vet, test, govulncheck)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go (templates/go/go.mod)
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: templates/go/go.mod
+          cache-dependency-path: templates/go/go.sum
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+
+      - name: Setup bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
+
+      - name: Install dependencies (for the verified buf binary)
+        run: bun install --frozen-lockfile
+
+      - name: buf lint
+        working-directory: templates/go
+        run: bun ../../packages/grpc/scripts/verified-buf.ts lint
+
+      - name: buf generate reproduces the committed gen/
+        working-directory: templates/go
+        run: |
+          set -euo pipefail
+          bun ../../packages/grpc/scripts/verified-buf.ts generate
+          if [ -n "$(git status --porcelain -- gen)" ]; then
+            git status --porcelain -- gen
+            git diff -- gen
+            echo "::error::templates/go/gen is out of date with proto/; run 'buf generate' in templates/go and commit gen/"
+            exit 1
+          fi
+
+      - name: go.mod and go.sum are tidy
+        working-directory: templates/go
+        run: go mod tidy -diff
+
+      - name: gofmt
+        working-directory: templates/go
+        run: |
+          set -euo pipefail
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then echo "::error::gofmt: $unformatted"; exit 1; fi
+
+      - name: go vet (including the e2e build tag)
+        working-directory: templates/go
+        run: |
+          set -euo pipefail
+          go vet ./...
+          go vet -tags e2e ./...
+
+      - name: go test -race
+        working-directory: templates/go
+        run: go test -race -count=1 ./...
+
+      - name: govulncheck (pinned)
+        working-directory: templates/go
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+
+  image:
+    name: Go template image (build, SBOM, Trivy; read-only, every event)
+    needs: [check]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # This job runs on pull requests, so it holds no write credential: the
+    # local composite action, the build, syft and Trivy all run with
+    # contents: read only. Nothing here pushes or signs.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Route Docker Hub pulls through mirror.gcr.io (anonymous rate limit)
+        id: docker-hub-mirror
+        uses: ./.github/actions/docker-hub-mirror
+
+      # GHCR repository names must be lowercase; the owner can be mixed-case.
+      - name: Compute lowercase image name
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: echo "IMAGE=ghcr.io/${OWNER,,}/knext-function-go" >> "$GITHUB_ENV"
+
+      - name: Build the template image (local only)
+        run: docker build -t "${IMAGE}:${GITHUB_SHA}" templates/go
+
+      - name: SBOM (syft, SPDX)
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          image: ${{ env.IMAGE }}:${{ github.sha }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+          upload-artifact: false
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: go-template-sbom-${{ github.sha }}
+          path: sbom.spdx.json
+
+      - name: Trivy scan — FAIL on HIGH/CRITICAL
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.IMAGE }}:${{ github.sha }}
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          ignore-unfixed: true
+          format: table
+
+  kind-e2e:
+    name: Go template on kind (cluster-local h2c, fails closed)
+    needs: [check]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Route Docker Hub pulls through mirror.gcr.io (anonymous rate limit)
+        id: docker-hub-mirror
+        uses: ./.github/actions/docker-hub-mirror
+
+      - name: Set up Go (templates/go/go.mod)
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: templates/go/go.mod
+          cache-dependency-path: templates/go/go.sum
+
+      - name: Install kind
+        uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
+        with:
+          install_only: true
+
+      - name: Create the kind cluster
+        run: kind create cluster --name go-template-e2e --wait 120s
+
+      - name: Install Knative Serving + Kourier (checksum + digest pinned)
+        run: |
+          set -euo pipefail
+          scripts/kind-manifests/apply-knative-kourier.sh knative-v1.16.0
+          kubectl patch configmap/config-network -n knative-serving --type merge \
+            --patch '{"data":{"ingress-class":"kourier.ingress.networking.knative.dev"}}'
+          kubectl patch configmap/config-autoscaler -n knative-serving --type merge \
+            --patch '{"data":{"scale-to-zero-grace-period":"10s","scale-to-zero-pod-retention-period":"0s","stable-window":"6s"}}'
+          kubectl wait --for=condition=Available --timeout=300s -n knative-serving \
+            deployment/controller deployment/webhook deployment/autoscaler deployment/activator deployment/net-kourier-controller
+          kubectl wait --for=condition=Available --timeout=300s -n kourier-system deployment/3scale-kourier-gateway
+
+      - name: Deploy the function cluster-local and call it
+        env:
+          KIND_CLUSTER: go-template-e2e
+          SKIP_KNATIVE: '1'
+        run: templates/go/e2e/kind-e2e.sh

@@ -1,0 +1,108 @@
+{
+  "$comment": "Shared operator/runtime contract for the zone binding env (ADR-0004 Amendment 2 Decision 3, ADR-0066 D3). The operator renders `env` from `bindings`; the zone runtime derives each binding's variable names from its name and parses the wake list. Asserted by the operator's Go test (backend_bindings_test.go) and by the TypeScript test in packages/grpc (binding-env-contract.test.ts). Changing either side alone reds the other's test.",
+  "namespace": "shop",
+  "cases": [
+    {
+      "name": "two bound functions, one opted out of wake-ahead, one not yet served",
+      "bindings": [
+        {
+          "name": "user-profile",
+          "service": "profile",
+          "state": "Bound",
+          "servedProtoVersion": "",
+          "wakeAhead": false
+        },
+        {
+          "name": "orders",
+          "service": "orders-fn",
+          "state": "Bound",
+          "servedProtoVersion": "1.4.0",
+          "wakeAhead": true
+        }
+      ],
+      "env": {
+        "KNEXT_WAKE_FUNCTIONS": "orders",
+        "ORDERS_SERVICE_PROTO_VERSION": "1.4.0",
+        "ORDERS_SERVICE_URL": "http://orders-fn.shop.svc.cluster.local",
+        "USER_PROFILE_SERVICE_URL": "http://profile.shop.svc.cluster.local"
+      }
+    },
+    {
+      "name": "multi-part names and a prerelease served version",
+      "bindings": [
+        {
+          "name": "a2-b3-c4",
+          "service": "abc",
+          "state": "Bound",
+          "servedProtoVersion": "2.0.0-rc.1+build.7",
+          "wakeAhead": true
+        },
+        {
+          "name": "billing",
+          "service": "billing",
+          "state": "Bound",
+          "servedProtoVersion": "0.1.0",
+          "wakeAhead": true
+        }
+      ],
+      "env": {
+        "A2_B3_C4_SERVICE_PROTO_VERSION": "2.0.0-rc.1+build.7",
+        "A2_B3_C4_SERVICE_URL": "http://abc.shop.svc.cluster.local",
+        "BILLING_SERVICE_PROTO_VERSION": "0.1.0",
+        "BILLING_SERVICE_URL": "http://billing.shop.svc.cluster.local",
+        "KNEXT_WAKE_FUNCTIONS": "a2-b3-c4,billing"
+      }
+    },
+    {
+      "name": "one-sided and cross-zone entries render nothing",
+      "bindings": [
+        {
+          "name": "orders",
+          "service": "orders-fn",
+          "state": "Bound",
+          "servedProtoVersion": "1.0.0",
+          "wakeAhead": true
+        },
+        {
+          "name": "ghost",
+          "service": "ghost",
+          "state": "FunctionNotFound",
+          "servedProtoVersion": "",
+          "wakeAhead": true
+        },
+        {
+          "name": "stolen",
+          "service": "billing-fn",
+          "state": "CrossZone",
+          "servedProtoVersion": "3.0.0",
+          "wakeAhead": true
+        }
+      ],
+      "env": {
+        "KNEXT_WAKE_FUNCTIONS": "orders",
+        "ORDERS_SERVICE_PROTO_VERSION": "1.0.0",
+        "ORDERS_SERVICE_URL": "http://orders-fn.shop.svc.cluster.local"
+      }
+    },
+    {
+      "name": "every function opted out: no wake list at all",
+      "bindings": [
+        {
+          "name": "orders",
+          "service": "orders-fn",
+          "state": "Bound",
+          "servedProtoVersion": "",
+          "wakeAhead": false
+        }
+      ],
+      "env": {
+        "ORDERS_SERVICE_URL": "http://orders-fn.shop.svc.cluster.local"
+      }
+    },
+    {
+      "name": "no bindings",
+      "bindings": [],
+      "env": {}
+    }
+  ]
+}

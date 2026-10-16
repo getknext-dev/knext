@@ -171,6 +171,16 @@ jobs:
           go-version-file: packages/kn-next-operator/go.mod
           cache-dependency-path: packages/kn-next-operator/go.sum
 
+      # `mutation-prove-2052-backendservice.mjs` (#2052) grades envtest specs (a
+      # real kube-apiserver + etcd) as well as plain `go test` targets, so the
+      # lane needs the envtest binaries the operator's Makefile pins. They land
+      # in packages/kn-next-operator/bin/k8s, where the suite finds them without
+      # KUBEBUILDER_ASSETS. Without them that prover exits 2 before its baseline
+      # — a red night, never a silent skip.
+      - name: Install the operator's envtest binaries
+        working-directory: packages/kn-next-operator
+        run: make setup-envtest
+
       - name: Run every mutation prover (FAIL on exit code OR count mismatch)
         env:
           KNEXT_REDIS_LIVE_URL: redis://127.0.0.1:6379

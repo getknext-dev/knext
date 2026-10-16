@@ -68,11 +68,16 @@ export const NON_TEST_PACKAGE_MANAGEMENT_FILES = Object.freeze([
  * targets in `packages/kn-next-operator` — the same category, a different
  * toolchain. Its TS half lives in a separate, non-exempt prover on the shared
  * driver, so this one names no JS spec either.
+ *
+ * The Go zone-function template's token check is the same category again:
+ * `go test` targets in `templates/go`, no JS spec.
  */
 export const NON_JS_TEST_SUITE_PROVERS = Object.freeze([
   'scripts/mutation-prove-knext-ffi-crates.mjs',
   'scripts/mutation-prove-2321-go-metric-contract.mjs',
+  'scripts/mutation-prove-go-template-auth.mjs',
   'scripts/mutation-prove-2171-go-redis-key-prefix.mjs',
+  'scripts/mutation-prove-2052-backendservice.mjs',
 ]);
 
 /** The toolchains a `NON_JS_TEST_SUITE_PROVERS` entry may run its guards with. */

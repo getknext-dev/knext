@@ -755,7 +755,8 @@ function's entry in `knext.grpc.json`, and, if the app has none yet, an `authori
 `src/knext/authorize.ts` that refuses every call until you write it (see
 [generated queries, actions and streams](#generated-queries-actions-and-streams)). The name is a
 lowercase DNS label; the zone reads the function's address from `ORDERS_SERVICE_URL` at call time.
-The function's own server project is not scaffolded yet.
+The function's own server project is not scaffolded yet; for Go, start from the
+[Go function template](/docs/go-functions).
 
 Two options at the top of every contract matter:
 

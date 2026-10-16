@@ -78,7 +78,8 @@ const MUTATIONS = [
       'the exclusion list swallows the app images — stating what is NOT an app runtime is the ' +
       'safe direction only while the list stays small; widening it silently drops subjects',
     subject: 'spec',
-    anchor: "const NOT_APP_RUNTIMES = ['packages/kn-next-operator/', 'packages/scale-zero-pg/'];",
+    anchor:
+      "const NOT_APP_RUNTIMES = ['packages/kn-next-operator/', 'packages/scale-zero-pg/', 'templates/go/'];",
     replacement: "const NOT_APP_RUNTIMES = ['packages/', 'apps/', 'examples/'];",
   },
   {

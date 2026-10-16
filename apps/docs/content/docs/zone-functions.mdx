@@ -1,0 +1,161 @@
+---
+title: Zone functions
+description: Run a Go or Rust function beside a zone as a cluster-local, scale-to-zero Knative Service, bound to that zone and to no other.
+---
+
+**Beta.** A zone function is a backend function (Go or Rust, serving gRPC or Connect over h2c) that
+belongs to exactly one zone, your `NextApp`. The operator runs it as its own scale-to-zero Knative
+Service, reachable only from inside the cluster, and tells the zone where it is. You declare it
+with a `BackendService` resource. The [`knext add function`](/docs/cli#knext-add-function) and
+[`knext generate`](/docs/cli#knext-generate) commands write the function's contract and the zone's
+typed client; until the CLI applies `BackendService` resources for you, apply them with
+`kubectl apply --validate=strict` or your GitOps tool.
+
+Upgrade the operator (and its CRDs) before you apply a `BackendService` or set `spec.backends`. An
+older operator does not know these fields.
+
+## Binding a function to its zone
+
+A binding needs **both halves**:
+
+1. **The function names its zone** with `spec.zone`, the name of a `NextApp` in the same namespace.
+   You never write an `ownerReference`; the operator sets it from `spec.zone`. `spec.zone` cannot be
+   changed after the function is created.
+2. **The zone lists the function** in its `spec.backends`. This is the zone owner's consent.
+
+```yaml title="pricing.yaml"
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: BackendService
+metadata:
+  name: pricing
+  namespace: shop
+spec:
+  zone: orders
+  image: registry.example.com/pricing@sha256:<digest>
+  port: 8080            # the h2c port your server listens on (default 8080)
+  protoVersion: 1.4.0   # the contract version this image serves
+```
+
+```yaml title="orders zone (excerpt)"
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata:
+  name: orders
+  namespace: shop
+spec:
+  image: registry.example.com/orders@sha256:<digest>
+  backends:
+    - name: pricing     # the function name your generated client uses
+      service: pricing  # the BackendService
+```
+
+Until both halves agree, the operator runs **nothing** for the function: no Knative Service, no
+mounted Secret, and nothing in the zone's environment. The function's `Bound` condition says which
+half is missing.
+
+**Removing the zone's `backends` entry takes the function down.** Its Knative Service is deleted,
+and the zone's next revision drops the function's variables. If a GitOps sync briefly drops the
+entry, the function comes back through a cold start when the entry returns.
+
+A `backends` entry that names a function belonging to another zone is refused and reported on the
+zone's `BackendBindings` condition.
+
+## What the zone receives
+
+For each bound function, the operator writes these variables into the **zone's revision**, never
+into your `NextApp` spec:
+
+| Variable | Value |
+| --- | --- |
+| `<NAME>_SERVICE_URL` | `http://<service>.<namespace>.svc.cluster.local` |
+| `<NAME>_SERVICE_PROTO_VERSION` | The contract version the function **actually serves**: the `protoVersion` of its latest Ready revision. Unset until one is Ready, so the zone's calls fail closed instead of guessing. |
+| `KNEXT_WAKE_FUNCTIONS` | The bound functions to wake when the zone starts: their names, sorted and comma-separated. A function with `wakeAhead: false` is left out; with none left the variable is not set. |
+
+`<NAME>` is the `backends` entry's name in upper case with `-` replaced by `_`, so `user-profile`
+becomes `USER_PROFILE_SERVICE_URL`. Name each entry after the function your generated client was
+built for.
+
+The variables are sorted, so a reconcile with no change rolls no new revision, and a zone with no
+`backends` renders exactly as before. When a function starts serving a new contract version, the
+zone rolls one new revision with the new `<NAME>_SERVICE_PROTO_VERSION`.
+
+If your zone's `spec.env` or `spec.secrets.envMap` already sets one of these names, your value is
+kept, and the `BackendBindings` condition names the variable that was not written.
+
+## Credentials: what a function may read
+
+A function may reference a Secret (through `env` `secretKeyRef`, `envFrom`, a Secret volume or a
+projected volume) only if it is:
+
+- **its zone's database Secret**, the one named in the zone's `spec.database`; or
+- **marked for its zone**: the label `apps.kn-next.dev/zone: <zone>`, or an `ownerReference` to
+  the zone's `NextApp`.
+
+Everything else is refused, and so is any reference to **another zone's** database Secret or a
+Secret marked for another zone, even one that also carries this zone's mark. `imagePullSecrets`
+are exempt: they expose no data store. A refused function is not run at all, and its
+`SovereigntyCompliant` condition names the reference and its source.
+
+This allowlist **is** the data-sovereignty control: a function holds no credential for another
+zone's database. Two things keep it airtight:
+
+- **The function runs as an operator-owned ServiceAccount** with no Role, no RoleBinding and no
+  mounted API token. `BackendService` has no `serviceAccountName` field, so a manifest cannot pick
+  a more privileged identity; a stray one is rejected by a strict apply and has no effect otherwise.
+- **The binding is two-sided**, so someone who may create a `BackendService` but cannot edit the
+  zone cannot get a Secret mounted into a pod they control.
+
+**The namespace is the trust boundary.** Anyone who can write Secrets in the namespace can set the
+zone label. Put zones whose owners do not trust each other in separate namespaces.
+
+### The database-host check is a lint
+
+The operator also looks at your function's plain `env` values for another zone's CloudNativePG
+service (a `<cluster>-rw` or `<cluster>-ro` host named after another zone in the namespace, or one
+in another namespace) and reports it as a **warning** on the `DatabaseHostLint` condition and as an
+event. It never stops the function. It is a heuristic, not a control: an IP address, an
+`ExternalName` Service, a URL built at run time or a value inside a Secret gets past it. The
+control is the credential allowlist above.
+
+## Identity and the JWKS
+
+Each function mounts its zone's public keys (the JWKS) read-only at
+`/var/run/knext/jwks/jwks.json`, and only its own zone's: a reference to another zone's JWKS
+ConfigMap is refused. `/var/run/knext` is reserved for this mount. Until the zone's keys exist, the
+function starts, but its generated interceptor refuses every call except the health check.
+
+## Network
+
+The function's Knative Service is **cluster-local**: it has no public route. The operator also
+writes a `NetworkPolicy` that admits only the Knative data path, which is the activator that wakes
+a function from zero and the networking layer's gateway, on the queue-proxy ports. It stops a pod
+from dialling the function's pod directly. Because every call arrives through those shared
+Knative components, the policy cannot tell your zone from another one; the per-call identity token
+is what does that. NetworkPolicy is enforced only by a CNI that supports it (Calico, Cilium);
+flannel enforces none.
+
+A bound function stays up a little longer than its zone after its own last call, so a zone that
+just called it does not find it cold on the next request.
+
+## Status and metrics
+
+`kubectl get backendservices` shows each function's zone, readiness and served version.
+
+The served version is `status.servedProtoVersion`: the `protoVersion` of the function's latest
+Ready revision. It is empty until a revision is Ready, and it is the value the zone receives as
+`<NAME>_SERVICE_PROTO_VERSION`.
+
+| Condition | Meaning |
+| --- | --- |
+| `Bound` | Both halves agree. `ZoneNotFound`, `ZoneNotListed` or `ConflictingOwner` otherwise. |
+| `SovereigntyCompliant` | Every Secret reference passes the allowlist. `SecretNotAllowed` names the ones that do not. |
+| `DatabaseHostLint` | `False` when an env value names another zone's database host. A warning only. |
+| `Ready` | Bound, compliant, and the function's Knative Service is Ready. |
+
+The zone's `BackendBindings` condition is `True` when every `backends` entry is bound. It does not
+change the zone's `Ready`.
+
+| Series | Meaning |
+| --- | --- |
+| `knext_backendservice_reconcile_total{result}` | Function reconcile loops, by `success` or `error`. |
+| `knext_backendservice_refusals_total{reason}` | Times a function was refused, by reason. Present at 0 from start-up. |
