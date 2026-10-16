@@ -209,4 +209,5 @@ jobs:
             --head-pin-file head-pin.json \
             --merge-base-pin-file merge-base-pin.json \
             --inherited-pins-file inherited-pins.json \
-            --base-version "${BASE_VERSION}"
+            --base-version "${BASE_VERSION}" \
+            --base-sha "${BASE_SHA}"

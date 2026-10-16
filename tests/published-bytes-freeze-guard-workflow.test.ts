@@ -243,6 +243,14 @@ describe('release-line scope wiring (#2098)', () => {
     expect(String(step?.run)).not.toMatch(/\$\{\{/);
   });
 
+  it('the check receives the base SHA, so a released base is verified against an ancestor release tag', () => {
+    const { wf } = load();
+    const step = wf.jobs[JOB].steps.find((s) =>
+      /Run the published-bytes freeze check/.test(s.name ?? ''),
+    );
+    expect(String(step?.run)).toContain('--base-sha "${BASE_SHA}"');
+  });
+
   it('the pin selection runs after dependency install (it imports the workspace helpers) and before the head/merge-base reads', () => {
     const { wf } = load();
     const steps = wf.jobs[JOB].steps;
