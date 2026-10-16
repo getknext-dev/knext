@@ -9,17 +9,9 @@ name: Go function template
 #             matrix over h2c and HTTP/1.1, the fail-closed wire scan);
 #             govulncheck at a pinned version.
 #   image     contents: read only, every event: build locally -> SBOM (syft,
-#             SPDX) -> Trivy gate (FAIL on HIGH/CRITICAL) -> and only on a
-#             publish ref, save the scanned image as an artifact (its image ID
-#             is a job output). This is where knext scans the template; an
-#             image a user builds from it is scanned by the user's own pipeline.
-#   publish   the only job with write credentials (packages, id-token), gated
-#             at JOB level to a push to main or an integration/** line, so it
-#             never starts on a pull request. It checks out nothing and runs no
-#             local action: load the scanned image, refuse it unless its ID is
-#             the one scanned -> push to GHCR -> cosign keyless sign + SBOM
-#             attestation -> cosign verify. A scan-failed image is never pushed
-#             or signed, and a PR image is never signed.
+#             SPDX) -> Trivy gate (FAIL on HIGH/CRITICAL). This is where knext
+#             scans the template; an image a user builds from it is scanned by
+#             the user's own pipeline. Nothing here pushes or signs.
 #   kind-e2e  the image as a cluster-local Knative Service with an h2c port and
 #             no JWKS: the health check is served, every other RPC is refused,
 #             the public gateway has no route; warm and from zero.
@@ -27,6 +19,11 @@ name: Go function template
 # buf is the lockfile's binary, verified against its sha256 pin
 # (packages/grpc/scripts/verified-buf.ts) — never one from PATH. The protoc
 # plugins are Go tools pinned in templates/go/go.mod.
+#
+# This workflow holds no write or OIDC credential anywhere, so the buf binary
+# it runs is never in scope of a publish credential. Publishing the template
+# image (push to GHCR, cosign keyless sign + SBOM attestation) is deferred to a
+# separate, push-only workflow of its own.
 
 on:
   pull_request:
@@ -53,9 +50,8 @@ permissions:
 
 concurrency:
   group: go-template-${{ github.ref }}
-  # Never cancelled: this workflow pushes and signs, and a half-done
-  # publish is worse than a duplicate run.
-  cancel-in-progress: false
+  # Publishes nothing, so a superseded run on the same ref is safe to cancel.
+  cancel-in-progress: true
 
 jobs:
   check:
@@ -135,13 +131,9 @@ jobs:
     timeout-minutes: 30
     # This job runs on pull requests, so it holds no write credential: the
     # local composite action, the build, syft and Trivy all run with
-    # contents: read only. Publishing is the separate `publish` job.
+    # contents: read only. Nothing here pushes or signs.
     permissions:
       contents: read
-    outputs:
-      image-id: ${{ steps.save.outputs.image-id }}
-    env:
-      PUBLISH: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/integration/')) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -180,125 +172,6 @@ jobs:
           exit-code: "1"
           ignore-unfixed: true
           format: table
-
-      # ── Only after the Trivy gate passed, and only on a publish ref: hand the
-      #    scanned image (not a rebuild) to the publish job ───────────────────
-
-      - name: Save the scanned image
-        id: save
-        if: env.PUBLISH == 'true'
-        run: |
-          set -euo pipefail
-          id="$(docker inspect --format '{{.Id}}' "${IMAGE}:${GITHUB_SHA}")"
-          case "$id" in sha256:*) ;; *) echo "::error::no image ID for the scanned image ($id)"; exit 1 ;; esac
-          docker save -o image.tar "${IMAGE}:${GITHUB_SHA}"
-          echo "image-id=${id}" >> "$GITHUB_OUTPUT"
-
-      - name: Upload the scanned image
-        if: env.PUBLISH == 'true'
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: go-template-image-${{ github.sha }}
-          path: image.tar
-          retention-days: 1
-          if-no-files-found: error
-
-  publish:
-    name: Go template publish (push the scanned image, cosign sign + attest, verify)
-    needs: [image]
-    # Job-level gate: on a pull request this job never starts, so its write
-    # credentials are never in scope for PR-controlled code. It checks out
-    # nothing and runs no local action: it loads the image the read-only job
-    # built and scanned, and refuses it unless its ID is the one scanned.
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/integration/'))
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    permissions:
-      packages: write # push to GHCR
-      id-token: write # cosign keyless signing via OIDC
-    env:
-      SCANNED_ID: ${{ needs.image.outputs.image-id }}
-    steps:
-      # The inline form of ./.github/actions/docker-hub-mirror (this job checks
-      # out nothing, so it cannot run a local action). Nothing here pulls from
-      # Docker Hub (docker load reads the artifact); every docker-running job
-      # carries the mirror so a future pull cannot hit the anonymous limit.
-      - name: Route Docker Hub pulls through mirror.gcr.io (inline, no checkout)
-        run: |
-          set -euo pipefail
-          existing='{}'
-          if [ -s /etc/docker/daemon.json ]; then existing="$(cat /etc/docker/daemon.json)"; fi
-          echo "$existing" | jq '. + {"registry-mirrors": ["https://mirror.gcr.io"]}' | sudo tee /etc/docker/daemon.json >/dev/null
-          sudo systemctl restart docker
-
-      # GHCR repository names must be lowercase; the owner can be mixed-case.
-      - name: Compute lowercase image name
-        env:
-          OWNER: ${{ github.repository_owner }}
-        run: echo "IMAGE=ghcr.io/${OWNER,,}/knext-function-go" >> "$GITHUB_ENV"
-
-      - name: Download the scanned image
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: go-template-image-${{ github.sha }}
-
-      - name: Download the SBOM
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: go-template-sbom-${{ github.sha }}
-
-      - name: Load the image and check it is the one scanned
-        run: |
-          set -euo pipefail
-          case "$SCANNED_ID" in sha256:*) ;; *) echo "::error::the image job passed no image ID ($SCANNED_ID)"; exit 1 ;; esac
-          docker load -i image.tar
-          loaded="$(docker inspect --format '{{.Id}}' "${IMAGE}:${GITHUB_SHA}")"
-          if [ "$loaded" != "$SCANNED_ID" ]; then
-            echo "::error::loaded image ${loaded} is not the scanned image ${SCANNED_ID}"
-            exit 1
-          fi
-
-      - name: Log in to GHCR
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Push the scanned image
-        id: push
-        run: |
-          set -euo pipefail
-          docker push "${IMAGE}:${GITHUB_SHA}"
-          ref="$(docker inspect --format '{{index .RepoDigests 0}}' "${IMAGE}:${GITHUB_SHA}")"
-          digest="${ref##*@}"
-          case "$digest" in sha256:*) ;; *) echo "::error::no digest for the pushed image ($ref)"; exit 1 ;; esac
-          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
-
-      - name: Install cosign
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
-
-      - name: cosign sign + attest the SBOM (keyless, by digest)
-        env:
-          DIGEST: ${{ steps.push.outputs.digest }}
-        run: |
-          set -euo pipefail
-          cosign sign --yes "${IMAGE}@${DIGEST}"
-          cosign attest --yes --predicate sbom.spdx.json --type spdxjson "${IMAGE}@${DIGEST}"
-
-      - name: cosign verify (signature + SBOM attestation)
-        env:
-          DIGEST: ${{ steps.push.outputs.digest }}
-          IDENTITY_REGEXP: ^https://github.com/${{ github.repository }}/\.github/workflows/go-template\.yml@
-        run: |
-          set -euo pipefail
-          cosign verify "${IMAGE}@${DIGEST}" \
-            --certificate-identity-regexp "${IDENTITY_REGEXP}" \
-            --certificate-oidc-issuer https://token.actions.githubusercontent.com >/dev/null
-          cosign verify-attestation "${IMAGE}@${DIGEST}" --type spdxjson \
-            --certificate-identity-regexp "${IDENTITY_REGEXP}" \
-            --certificate-oidc-issuer https://token.actions.githubusercontent.com >/dev/null
-          echo "signed and verified: ${IMAGE}@${DIGEST}"
 
   kind-e2e:
     name: Go template on kind (cluster-local h2c, fails closed)

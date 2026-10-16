@@ -9,10 +9,10 @@
  * templates/go/gen is checked against the proto by `buf generate` in the
  * template's workflow (a regenerate-then-diff), not here.
  *
- * The workflow half asserts the supply-chain ORDER for the template image:
- * Trivy (HIGH/CRITICAL, exit 1) runs before any push or signature, and every
- * push/sign step is gated to a publish ref, so a scan-failed image is never
- * pushed or signed and a PR image is never signed.
+ * The workflow half asserts the template image is scanned on every event
+ * (SBOM, then Trivy HIGH/CRITICAL exit 1) and that the workflow holds no
+ * write or id-token credential: publishing the image is deferred to a
+ * separate push-only workflow, so nothing here pushes or signs.
  */
 
 import { describe, expect, it } from 'bun:test';
@@ -81,26 +81,20 @@ type Job = {
   permissions?: Record<string, string>;
 };
 
-// The refs that publish. The publish job's job-level `if` and the image job's
-// PUBLISH (which gates saving the scanned image) must both be exactly this.
-const PUBLISH_REF =
-  "github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/integration/'))";
-
 const isPublishing = (s: Step) =>
   /docker push|cosign (sign|attest|verify)/.test(s.run ?? '') ||
   (s.uses ?? '').startsWith('docker/login-action@') ||
   (s.uses ?? '').startsWith('sigstore/cosign-installer@');
 
-describe('the template image workflow gates before it publishes', () => {
-  const wf = parse(
-    readFileSync(resolve(REPO_ROOT, '.github/workflows/go-template.yml'), 'utf8'),
-  ) as {
+const WORKFLOW_TEXT = readFileSync(resolve(REPO_ROOT, '.github/workflows/go-template.yml'), 'utf8');
+
+describe('the template image workflow scans and holds no credential', () => {
+  const wf = parse(WORKFLOW_TEXT) as {
     on: Record<string, unknown>;
     permissions?: Record<string, string>;
     jobs: Record<string, Job>;
   };
   const image = wf.jobs.image;
-  const publishJob = wf.jobs.publish;
   const find = (job: Job, name: string, pred: (s: Step) => boolean, what: string) => {
     expect(job, `no ${name} job`).toBeDefined();
     const i = job.steps.findIndex(pred);
@@ -125,30 +119,28 @@ describe('the template image workflow gates before it publishes', () => {
     expect(publishing, 'the image job pushes or signs').toEqual([]);
   });
 
-  it('only the publish job holds write credentials, gated at job level to a publish ref', () => {
-    for (const [name, job] of Object.entries(wf.jobs)) {
-      const writes = Object.entries(job.permissions ?? {}).filter(([, v]) => v === 'write');
-      if (name === 'publish') continue;
-      expect(writes, `${name} holds a write permission`).toEqual([]);
-      expect(job.permissions, `${name} inherits the workflow's permissions`).toBeDefined();
+  // Publishing (push + cosign) needs a separately approved, push-only workflow.
+  // Until then this one grants nothing beyond read: no `write`, no `write-all`,
+  // no `id-token` — at the workflow level or on any job. Asserted on the parsed
+  // YAML and on the raw text, so a shape the parser view misses still reds.
+  it('grants no write or id-token permission, at workflow or job level', () => {
+    const scopes = [
+      ['workflow', wf.permissions],
+      ...Object.entries(wf.jobs).map(([name, job]) => [name, job.permissions] as const),
+    ] as const;
+    for (const [where, perms] of scopes) {
+      expect(perms, `${where} has no explicit permissions block`).toBeDefined();
+      expect(typeof perms, `${where} permissions are not a scope map`).toBe('object');
+      for (const [scope, level] of Object.entries(perms ?? {})) {
+        expect(level, `${where} grants ${scope}: ${level}`).not.toMatch(/write/);
+        expect(scope, `${where} grants ${scope}`).not.toBe('id-token');
+      }
     }
-    expect(publishJob.permissions).toEqual({ packages: 'write', 'id-token': 'write' });
-    expect(publishJob.if).toBe(PUBLISH_REF);
-    expect(image.env?.PUBLISH).toBe(`\${{ ${PUBLISH_REF} }}`);
+    expect(WORKFLOW_TEXT).not.toMatch(/^[^#\n]*\b[\w-]+\s*:\s*['"]?write(?:-all)?\b/m);
+    expect(WORKFLOW_TEXT).not.toMatch(/^[^#\n]*\bid-token\s*:/m);
   });
 
-  it('the publish job runs no PR-controllable code: no checkout, no local action, SHA-pinned actions', () => {
-    for (const s of publishJob.steps) {
-      if (s.uses === undefined) continue;
-      expect(s.uses, `${s.name} checks out the repository`).not.toMatch(/^actions\/checkout@/);
-      expect(s.uses, `${s.name} runs a local action`).not.toMatch(/^\.\//);
-      expect(s.uses, `${s.name} is not pinned by commit SHA`).toMatch(
-        /^[\w.-]+\/[\w./-]+@[0-9a-f]{40}$/,
-      );
-    }
-  });
-
-  it('writes an SBOM before the gate and saves the scanned image only after it, on a publish ref', () => {
+  it('writes an SBOM before the Trivy gate', () => {
     const sbom = find(
       image,
       'image',
@@ -157,82 +149,6 @@ describe('the template image workflow gates before it publishes', () => {
     );
     const trivy = find(image, 'image', trivyStep, 'Trivy');
     expect(sbom).toBeLessThan(trivy);
-    const save = find(
-      image,
-      'image',
-      (s) => s.run?.includes('docker save') ?? false,
-      'docker save',
-    );
-    const upload = find(
-      image,
-      'image',
-      (s) => (s.uses ?? '').startsWith('actions/upload-artifact@') && s.with?.path === 'image.tar',
-      'upload the image',
-    );
-    for (const i of [save, upload]) {
-      expect(i, `${image.steps[i].name} runs before the Trivy gate`).toBeGreaterThan(trivy);
-      expect(image.steps[i].if).toBe("env.PUBLISH == 'true'");
-    }
-    expect(save).toBeLessThan(upload);
-    expect(image.steps[save].id).toBe('save');
-    expect(image.outputs?.['image-id']).toBe('${{ steps.save.outputs.image-id }}');
-    expect(image.steps[save].run).toContain("docker inspect --format '{{.Id}}'");
-  });
-
-  it('publishes exactly the scanned image: load, refuse a different ID, then push, sign, verify', () => {
-    expect(publishJob.needs).toEqual(['image']);
-    expect(publishJob.env?.SCANNED_ID).toBe('${{ needs.image.outputs.image-id }}');
-    const download = find(
-      publishJob,
-      'publish',
-      (s) =>
-        (s.uses ?? '').startsWith('actions/download-artifact@') &&
-        String(s.with?.name).startsWith('go-template-image-'),
-      'download the image',
-    );
-    const load = find(
-      publishJob,
-      'publish',
-      (s) => s.run?.includes('docker load') ?? false,
-      'docker load',
-    );
-    expect(publishJob.steps[load].run).toContain('"$loaded" != "$SCANNED_ID"');
-    const push = find(
-      publishJob,
-      'publish',
-      (s) => s.run?.includes('docker push') ?? false,
-      'push',
-    );
-    const sign = find(
-      publishJob,
-      'publish',
-      (s) => s.run?.includes('cosign sign --yes') ?? false,
-      'sign',
-    );
-    const verify = find(
-      publishJob,
-      'publish',
-      (s) => s.run?.includes('cosign verify ') ?? false,
-      'verify',
-    );
-    expect(download).toBeLessThan(load);
-    expect(load).toBeLessThan(push);
-    expect(push).toBeLessThan(sign);
-    expect(sign).toBeLessThan(verify);
-    expect(publishJob.steps.filter(isPublishing).length).toBeGreaterThanOrEqual(5);
-    expect(publishJob.steps[sign].run).toContain(
-      'cosign attest --yes --predicate sbom.spdx.json --type spdxjson',
-    );
-  });
-
-  it('signs keylessly by digest and verifies against this workflow identity', () => {
-    const sign = publishJob.steps.find((s) => s.run?.includes('cosign sign --yes'));
-    expect(sign?.run).toMatch(/"\$\{IMAGE\}@\$\{DIGEST\}"/);
-    const verify = publishJob.steps.find((s) => s.run?.includes('cosign verify '));
-    expect(verify?.run).toContain('cosign verify-attestation');
-    expect(verify?.run).toContain(
-      '--certificate-oidc-issuer https://token.actions.githubusercontent.com',
-    );
   });
 
   it('the check job runs the tests, the drift check and govulncheck', () => {
