@@ -5,9 +5,18 @@ cleartext (h2c), cluster-local, scaling to zero. User docs: the "Go zone functio
 knext docs.
 
 **It fails closed.** Every RPC except `grpc.health.v1.Health/Check` needs
-`Authorization: Bearer <token>`. With no JWKS mounted at `/var/run/knext/jwks/jwks.json`, every
-other RPC is refused with `unauthenticated` — and, until zone-token verification lands
-(`TODO(#2051)` in `internal/auth/auth.go`), so is every RPC with a JWKS mounted.
+`Authorization: Bearer <token>`: the owning zone's Ed25519 identity token, verified against the
+JWK Set mounted at `/var/run/knext/jwks/jwks.json` (re-read on change and at least every 10 s)
+and held to `$KNEXT_TOKEN_ISSUER` (the zone), `$KNEXT_TOKEN_AUDIENCE` (this function), the RPC
+called (`method`), a 60 s lifetime with 5 s of skew, and, for an `AUTH_USER` RPC, a non-empty
+`sub`. Each RPC's `(knext.v1.auth)` option is read from the compiled contract. With no JWKS
+mounted, the issuer or audience unset, or an RPC that states no option, every RPC but the health
+check is refused with `unauthenticated`. Handlers take the user from `auth.CallerFrom(ctx)`,
+never from the request.
+
+The verifier is tested against the shared token vectors in
+`packages/grpc/testdata/z7-token-vectors.json` (read from the repository; set
+`KNEXT_Z7_VECTORS` to their path in a copy of the template outside it).
 
 ## Layout
 
@@ -15,7 +24,8 @@ other RPC is refused with `unauthenticated` — and, until zone-token verificati
 |---|---|
 | `proto/` | the contract (`example/v1`) and the knext options it imports — the source of truth |
 | `gen/` | `buf generate` output, committed; CI regenerates and fails on a diff |
-| `internal/auth` | the token interceptor and the JWKS verifier seam |
+| `internal/auth` | the token interceptor, the zone-token verifier (`token.go`), the JWKS reader (`jwks.go`) and the auth-option lookup |
+| `internal/testvectors` | test-only loader for the shared token vectors |
 | `internal/items` | the example service's handlers — replace with yours |
 | `internal/rpc` | the connect server, interceptor chain (OTel, recovery, auth), health, h2c HTTP server |
 | `main.go` | `$PORT` (default 8080), `SIGTERM` drain |
@@ -35,6 +45,7 @@ go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 docker build -t <image> .
 e2e/kind-e2e.sh                                # kind + Knative: health served, everything else refused
 node ../../scripts/mutation-prove-go-template-auth.mjs   # each way of opening the check reds a test
+node ../../scripts/mutation-prove-2051-go-verifier.mjs   # each token check, removed, reds a test
 ```
 
 CI: `.github/workflows/go-template.yml` (tests, drift, govulncheck; image SBOM + Trivy gate; the

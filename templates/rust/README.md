@@ -5,9 +5,19 @@ cleartext (h2c), cluster-local, scaling to zero. User docs: the "Rust zone funct
 the knext docs.
 
 **It fails closed.** Every RPC except `grpc.health.v1.Health/Check` needs
-`Authorization: Bearer <token>`. With no JWKS mounted at `/var/run/knext/jwks/jwks.json`, every
-other RPC is refused with `unauthenticated` — and, until zone-token verification lands
-(`TODO(#2051)` in `src/auth.rs`), so is every RPC with a JWKS mounted.
+`Authorization: Bearer <token>`: the owning zone's Ed25519 identity token, verified
+(`ed25519-dalek` `verify_strict`) against the JWK Set mounted at
+`/var/run/knext/jwks/jwks.json` (re-read on change and at least every 10 s) and held to
+`$KNEXT_TOKEN_ISSUER` (the zone), `$KNEXT_TOKEN_AUDIENCE` (this function), the RPC called
+(`method`), a 60 s lifetime with 5 s of skew, and, for an `AUTH_USER` RPC, a non-empty `sub`.
+Each RPC's `(knext.v1.auth)` option is listed in `src/auth/policy.rs` (a test holds it to
+`proto/`). With no JWKS mounted, the issuer or audience unset, or an RPC not in the table, every
+RPC but the health check is refused with `unauthenticated`. Handlers take the user from
+`auth::Caller::of(&ctx)`, never from the request.
+
+The verifier is tested against the shared token vectors in
+`packages/grpc/testdata/z7-token-vectors.json` (read from the repository; set
+`KNEXT_Z7_VECTORS` to their path in a copy of the template outside it).
 
 ## Layout
 
@@ -16,7 +26,7 @@ other RPC is refused with `unauthenticated` — and, until zone-token verificati
 | `proto/` | the contract (`example/v1`) and the knext options it imports — the source of truth |
 | `gen/` | `buf generate` output (buffa messages, connect-rust stubs), committed; CI regenerates and fails on a diff |
 | `codegen.sh` | installs the pinned codegen plugins into `.codegen/` and runs `buf generate` |
-| `src/auth.rs` | the token check (a Tower layer, before the body is read) and the JWKS verifier seam |
+| `src/auth.rs`, `src/auth/` | the token check (a Tower layer, before the body is read), the zone-token verifier (`token.rs`), the JWKS reader (`jwks.rs`) and the auth-option table (`policy.rs`) |
 | `src/items.rs` | the example service's handlers — replace with yours |
 | `src/rpc/` | the server: limits, layers (OTel, panic recovery, body bounds, token), health, the h2c + HTTP/1.1 accept loop and its drain |
 | `src/main.rs` | `$PORT` (default 8080), `SIGTERM` drain |
@@ -41,6 +51,7 @@ cargo deny check && cargo audit
 docker build -t <image> .
 e2e/kind-e2e.sh                                # kind + Knative: health served, everything else refused
 node ../../scripts/mutation-prove-rust-template-auth.mjs   # each way of opening the check reds a test
+node ../../scripts/mutation-prove-2051-rust-verifier.mjs   # each token check, removed, reds a test
 ```
 
 `vendor/connectrpc-health` and the `[patch.crates-io]` entry in `Cargo.toml` exist only to keep zstd out of the release binary (this template accepts gzip only); delete both once the upstream crate publishes the same change (see `vendor/connectrpc-health/VENDORED.md`).

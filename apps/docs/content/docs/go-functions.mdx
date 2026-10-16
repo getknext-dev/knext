@@ -1,13 +1,13 @@
 ---
 title: Go zone functions (Beta)
-description: The Go template for a zone function — a connect-go server your Next.js zone calls over HTTP/2, reachable only inside the cluster, that refuses every call without the zone's token.
+description: The Go template for a zone function — a connect-go server your Next.js zone calls over HTTP/2, reachable only inside the cluster, that serves a call only with a valid token from its zone.
 ---
 
 <Callout type="warn">
-**Beta.** In this version the function **refuses every call except its health check**. The
-token a zone sends to prove a call is its own is not available yet, and the function fails closed
-rather than serve calls it cannot authenticate. Build and test against it now; it starts answering
-your RPCs when zone tokens ship.
+**Beta.** The function serves a call only when it carries a valid identity token from its own
+zone. Until the zone's public keys are mounted into the function and its issuer and audience are
+set, it refuses every call except its health check: it fails closed rather than serve calls it
+cannot authenticate.
 </Callout>
 
 A zone function is a Go or Rust service that a Next.js zone calls like a local function,
@@ -73,21 +73,59 @@ cluster can reach it. Inside the cluster, the **token is the control**, not the 
 NetworkPolicy is defense in depth, and some CNIs (flannel, which OKE and OrbStack use) do not
 enforce NetworkPolicy at all.
 
-Every call except the health check must carry `Authorization: Bearer <token>`. The check runs
-before the request body is read, and it fails closed:
+Every call except the health check must carry `Authorization: Bearer <token>`: an identity
+token the zone signs for that one call. The check runs before the request body is read. The token
+is a JWT signed with Ed25519 (`alg` `EdDSA`), and the function checks:
+
+- **the signature**, against the zone's public keys, a JWK Set mounted as a volume at
+  `/var/run/knext/jwks/jwks.json`. A token signed by any other key, another zone's included, is
+  refused.
+- **`iss` and `aud`**: the token must name the function's own zone and the function itself, as
+  given by the function's `KNEXT_TOKEN_ISSUER` (`knext:zone:<namespace>/<zone>`) and
+  `KNEXT_TOKEN_AUDIENCE` (`knext:fn:<namespace>/<function>`) environment variables.
+- **`method`**: the RPC being called, so a token for one RPC cannot call another.
+- **`iat` and `exp`**: at most 60 seconds apart, with 5 seconds of allowance for clock skew.
+- **`sub`** on an RPC whose `(knext.v1.auth)` option is `AUTH_USER`: the zone must name a
+  user. An `AUTH_PUBLIC` read still needs the zone's token, but no user.
+
+The function reads each RPC's `(knext.v1.auth)` option from the compiled contract, so a
+new RPC is covered as soon as it is in your `.proto` file and `gen/`.
+
+It fails closed:
 
 | Situation | Result |
 |---|---|
 | No `Authorization` header, or not a `Bearer` token | refused, `unauthenticated` |
 | No public keys mounted for the zone | refused, `unauthenticated` |
-| Keys mounted, token present | refused, `unauthenticated`, until zone tokens ship |
+| `KNEXT_TOKEN_ISSUER` or `KNEXT_TOKEN_AUDIENCE` not set | refused, `unauthenticated` |
+| A token that fails any check above | refused, `unauthenticated` |
+| An RPC that states no `(knext.v1.auth)` option | refused, `unauthenticated` |
+| A token that passes every check | served |
 | Health check (`grpc.health.v1.Health/Check`) | served, no token needed |
 
-The zone's public keys are read from `/var/run/knext/jwks/jwks.json`, mounted as a volume, on every
-call, so keys that appear or rotate after start are seen without a restart. There is no setting
-that turns the check off. At start-up the function logs a warning when no keys are mounted.
+There is no setting that turns the check off. At start-up the function logs a warning when no
+keys are mounted or the issuer or audience is not set.
 
 A refused call returns HTTP 401 on the Connect protocol and `grpc-status` 16 on gRPC.
+
+### The user a handler acts for
+
+Take the user from the verified token, never from the request. `auth.CallerFrom(ctx)` returns the
+verified caller: `Subject`, the user the zone vouched for, and `Zone`, the zone that signed the
+token. A user id in a request body or header is never trusted.
+
+### Key rotation
+
+The function re-reads the mounted keys when the file changes, and at least every 10 seconds, so a
+running function picks up a new key without a restart. During a rotation the key set holds both
+the old and the new key, and tokens signed by either verify; once the old key is removed from the
+set, its tokens are refused. A token signed by a key the function has not received yet is refused
+too, which is why a rotation publishes the new key, waits for it to reach every function, and only
+then signs with it.
+
+A token can be replayed within its 60-second life: there is no per-token replay cache, since it
+could only be per pod. Make writes idempotent; the zone sends an `idempotency-key` header with
+each one for that reason.
 
 ## Generated code and the contract
 
@@ -112,7 +150,7 @@ together, because the standard library compiled into the binary is part of what 
 ## Limits
 
 - **Beta.** Zone functions are not covered by knext's compatibility credential.
-- **Every RPC but the health check is refused** until zone tokens ship.
+- A zone identity token can be replayed within its 60-second life (see [Key rotation](#key-rotation)).
 - The template's example store is in memory: per pod, and lost when the function scales to zero.
   Keep real data in your zone's own database, through the `DATABASE_URL` the zone binds; a
   function never reads another zone's database.
