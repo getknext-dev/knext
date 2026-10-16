@@ -36,6 +36,7 @@
  * Usage:  node scripts/mutation-prove-2461-z7-kind-e2e.mjs
  */
 
+import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
@@ -84,8 +85,9 @@ const PROBE = [
     subject: 'probe',
     claim:
       'a forged token claims some other kid: it is refused as an unknown key, not as a bad signature',
-    anchor: "JSON.stringify({ alg: 'EdDSA', typ: 'JWT', kid: a.kid })",
-    replacement: "JSON.stringify({ alg: 'EdDSA', typ: 'JWT', kid: 'not-the-kid' })",
+    anchor: "const header = b64url(JSON.stringify({ alg: 'EdDSA', typ: 'JWT', kid: a.kid }));",
+    replacement:
+      "const header = b64url(JSON.stringify({ alg: 'EdDSA', typ: 'JWT', kid: 'not-the-kid' }));",
   },
   {
     id: 'P03',
@@ -279,8 +281,8 @@ const LANE_ROWS = [
     id: 'S08',
     subject: 'run',
     claim: 'the expired-token refusal is no longer asserted as a refusal',
-    anchor: '  expect "${label}: an expired token is refused" 401 unauthenticated \\',
-    replacement: '  expect "${label}: an expired token is accepted" 401 unauthenticated \\',
+    anchor: '  expect "${label}: an expired token is refused" 401 unauthenticated \\\n',
+    replacement: '  expect "${label}: an expired token is accepted" 401 unauthenticated \\\n',
   },
   {
     id: 'K01',
@@ -353,6 +355,29 @@ const lane = createGuardProver({
 // ── preflight, declare, run ──────────────────────────────────────────────────
 probe.preflight(PROBE);
 lane.preflight(LANE_ROWS);
+
+// The harness stamps a residue marker on every mutation: INLINE, as a trailing
+// comment, when the replacement is one line. That comment runs to the end of the
+// line, so an anchor that stops mid-line (or a replacement ending in a
+// continuation backslash) would comment out code the row never meant to touch,
+// and the red it caused would be for the wrong reason. Refuse such a row up front.
+for (const [rows, files] of [
+  [PROBE, { probe: PROBE_LIB }],
+  [LANE_ROWS, { workflow: WORKFLOW, run: RUN_SH }],
+]) {
+  for (const m of rows) {
+    if (m.replacement.includes('\n')) continue; // the marker goes on a line of its own
+    const text = readFileSync(resolve(REPO_ROOT, files[m.subject]), 'utf8');
+    const after = text[text.indexOf(m.anchor) + m.anchor.length];
+    if ((after !== undefined && after !== '\n') || m.replacement.endsWith('\\')) {
+      console.error(
+        `ABORT: ${m.id} would have its residue marker comment out more than its anchor ` +
+          '(the anchor stops mid-line, or the replacement ends in a backslash).',
+      );
+      process.exit(2);
+    }
+  }
+}
 declareMutations(PROBE.length + LANE_ROWS.length);
 
 console.log("\n=== the probe's tokens differ from the control in exactly one property ===");
