@@ -30,8 +30,9 @@ package controller
 //     forbidden informer would block them forever) and a NextApp that
 //     references Secrets by name (envMap + envFrom) gets its Knative Service,
 //     finalizer and status written;
-//  2. the identity is genuinely denied Secrets beyond the one justified `get`
-//     (zone-function allowlist), cluster-wide AND in the app's namespace, with
+//  2. the identity is genuinely denied Secrets beyond the justified `get`
+//     (zone-function allowlist, zone signing key) and `create`/`update` (the
+//     zone signing key), cluster-wide AND in the app's namespace, with
 //     a positive control (it CAN list NextApps) and a negative
 //     control (a resource outside the role IS forbidden) so a harness that
 //     denies everything - or allows everything - cannot pass vacuously.
@@ -117,27 +118,30 @@ var _ = Describe("Operator reconciles under the shipped (narrowed) ClusterRole",
 		}, 10*time.Second, 200*time.Millisecond).Should(Succeed(),
 			"RBAC propagation: the bound identity must be able to list NextApps")
 
-		By("negative control: RBAC is genuinely enforced (a resource outside the role is forbidden)")
+		By("negative control: RBAC is genuinely enforced (a verb outside the role is forbidden)")
 		err = userClient.List(ctx, &corev1.ConfigMapList{}, client.InNamespace(rbacNS))
 		Expect(apierrors.IsForbidden(err)).To(BeTrue(),
-			"configmaps are not in the role; if this is allowed, envtest is not enforcing RBAC and the proof is vacuous (err=%v)", err)
+			"configmaps carry get/create/update only (the zone JWKS), never list; if this is allowed, envtest is not "+
+				"enforcing RBAC and the proof is vacuous (err=%v)", err)
 
-		By("Secrets: GET only (the zone-function allowlist reads a referenced Secret's metadata); " +
-			"no list/watch/create/update/delete, cluster-wide or namespaced")
+		By("Secrets: GET (the zone-function allowlist's metadata read, the zone signing key's read) and " +
+			"CREATE/UPDATE (the zone signing key) only; no list/watch/patch/delete, cluster-wide or namespaced")
 		for _, namespace := range []string{"", rbacNS} {
-			getSAR := &authorizationv1.SubjectAccessReview{
-				Spec: authorizationv1.SubjectAccessReviewSpec{
-					User:   userName,
-					Groups: []string{userGroup},
-					ResourceAttributes: &authorizationv1.ResourceAttributes{
-						Namespace: namespace, Verb: "get", Resource: "secrets",
+			for _, verb := range []string{"get", "create", "update"} {
+				allowSAR := &authorizationv1.SubjectAccessReview{
+					Spec: authorizationv1.SubjectAccessReviewSpec{
+						User:   userName,
+						Groups: []string{userGroup},
+						ResourceAttributes: &authorizationv1.ResourceAttributes{
+							Namespace: namespace, Verb: verb, Resource: "secrets",
+						},
 					},
-				},
+				}
+				Expect(k8sClient.Create(ctx, allowSAR)).To(Succeed())
+				Expect(allowSAR.Status.Allowed).To(BeTrue(),
+					"the zone identity needs %q on secrets (namespace %q): %s", verb, namespace, allowSAR.Status.Reason)
 			}
-			Expect(k8sClient.Create(ctx, getSAR)).To(Succeed())
-			Expect(getSAR.Status.Allowed).To(BeTrue(),
-				"the BackendService allowlist needs get on secrets (namespace %q): %s", namespace, getSAR.Status.Reason)
-			for _, verb := range []string{"list", "watch", "create", "update", "patch", "delete"} {
+			for _, verb := range []string{"list", "watch", "patch", "delete"} {
 				sar := &authorizationv1.SubjectAccessReview{
 					Spec: authorizationv1.SubjectAccessReviewSpec{
 						User:   userName,

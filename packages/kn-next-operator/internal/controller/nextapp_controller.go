@@ -278,6 +278,10 @@ type NextAppReconciler struct {
 	// with spec.backends reports BackendBindings=BackendServiceCRDMissing and
 	// renders no binding env. The zero value is "not installed".
 	BackendServiceCRDPresent bool
+	// ZoneSigningKey tunes the zone signing-key rotation (zone_signing_key.go).
+	// The zero value is the contract's defaults: a 90 s propagation bound and
+	// no scheduled rotation.
+	ZoneSigningKey ZoneSigningKeyConfig
 	// rollout paces platform-triggered re-renders (ADR-0064 F2). Zero value ready.
 	rollout rolloutLimiter
 	// held remembers which apps are held, for the fleet metrics. Zero value ready.
@@ -355,15 +359,17 @@ func (r *NextAppReconciler) emitEvent(obj runtime.Object, eventType, reason, mes
 // rbac roles/rolebindings) was replaced because an external writer raced the
 // operator and got reverted every reconcile.
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
-// Secrets: NO grant for the NextApp reconciler, on purpose (least privilege). It
-// never reads or writes a core Secret: the managed-database mode that mirrored a
-// DSN Secret was removed (ADR-0025); spec.secrets.envFrom/envMap and image-pull
-// secrets are only NAME REFERENCES the kubelet resolves on the app pod's behalf;
-// webhook/metrics certs are mounted volumes. The operator's ONLY Secrets grant is
-// the BackendService reconciler's get (metadata-only reads for the zone-function
-// credential allowlist; see its marker). A list/watch Secrets rule would let a
-// compromised operator read every Secret in the cluster. rbac_secrets_guard_test.go
-// fails if a Secrets marker or role rule appears without a justified allowlist entry.
+// Secrets: the NextApp reconciler touches exactly ONE Secret per zone, the zone's
+// own signing key (<zone>-knext-signing-key, zone_signing_key_reconcile.go, which
+// carries the get;create;update marker and the reasoning), and only while the zone
+// has a two-sided function binding. Nothing else: the managed-database mode that
+// mirrored a DSN Secret was removed (ADR-0025); spec.secrets.envFrom/envMap and
+// image-pull secrets are only NAME REFERENCES the kubelet resolves on the app
+// pod's behalf; webhook/metrics certs are mounted volumes. The BackendService
+// reconciler's get is metadata-only (the zone-function credential allowlist). No
+// list, watch, patch or delete: a list/watch Secrets rule would let a compromised
+// operator read every Secret in the cluster. rbac_secrets_guard_test.go fails if
+// a Secrets marker or role rule appears without a justified allowlist entry.
 // PersistentVolumeClaims: read-only. The controller-runtime cache watches
 // *v1.PersistentVolumeClaim (found live on EKS, #306/#1062); without a
 // cluster-scoped list/watch grant the manager's informer logs repeated
@@ -555,6 +561,21 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 	}
 	var bindingCollisions []string
 
+	// 2c. Zone identity (ADR-0004 Amendment 1 Decisions 9 and 11): a zone with a
+	// two-sided function binding owns one signing key (a Secret mounted into
+	// this zone only) and a JWKS ConfigMap its functions mount, and rotates
+	// them in the contract's order. Before the Knative Service, so a new zone's
+	// first revision finds its key. A failed write fails the pass, like the
+	// NetworkPolicy: it is a security control. Its state reaches status through
+	// computeStatusVerdict (ZoneSigningKey), never through a branch here.
+	var zoneKey zoneSigningKeyState
+	if zoneKey, err = r.reconcileZoneSigningKey(ctx, &nextApp, bindings); err != nil {
+		logger.Error(err, "Failed to reconcile the zone signing key")
+		r.emitEvent(&nextApp, corev1.EventTypeWarning, ReasonReconcileFailed,
+			fmt.Sprintf("Failed to reconcile the zone signing key: %s", err.Error()))
+		return ctrl.Result{}, err
+	}
+
 	// 3. Create/Update Knative Service
 	ksvc := &servingv1.Service{
 		ObjectMeta: metav1.ObjectMeta{
@@ -597,8 +618,13 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 				return buildErr
 			}
 			// The binding env is appended LAST and only for two-sided bindings,
-			// so a zone with none renders byte-identically.
+			// so a zone with none renders byte-identically. The zone's key mount
+			// and issuer follow the same rule.
 			bindingCollisions = applyBindingEnv(ksvc, nextApp.Namespace, bindings)
+			if c := applyZoneIdentity(ksvc, &nextApp, bindings); len(c) > 0 {
+				bindingCollisions = append(bindingCollisions, c...)
+				sort.Strings(bindingCollisions)
+			}
 			return nil
 		})
 		if err != nil {
@@ -809,7 +835,8 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 
 	verdict := computeStatusVerdict(&nextApp, ksvc, db, revCheck, ic, np, envMapCollision, r.detectPrivateExposure(ctx, &nextApp), r.detectPodCreationBlocked(ctx, &nextApp, ksvc), time.Now(),
 		withPlatformDefaults(newPlatformDefaultsState(snap, eff, gate)),
-		withBackendBindings(bindings, bindingCollisions))
+		withBackendBindings(bindings, bindingCollisions),
+		withZoneSigningKey(zoneKey))
 	if err := r.applyStatusVerdict(ctx, &nextApp, observedStatus, verdict); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -2226,7 +2253,14 @@ func (r *NextAppReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// reconcile (generation is bumped only on spec changes). That is the
 		// accepted trade-off. We do NOT filter the Owns(...) watches: drift in an
 		// owned child (ksvc/SA/NetworkPolicy) must still trigger a reconcile.
-		For(&appsv1alpha1.NextApp{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		//
+		// The ONE annotation that does reconcile is the signing-key rotation
+		// request (zone_signing_key.go): a rotation, which may answer a suspected
+		// key leak, should not wait for the next periodic re-check. Only a change
+		// of that annotation's VALUE passes, so it adds no hot-loop: the operator
+		// never writes NextApp annotations.
+		For(&appsv1alpha1.NextApp{}, builder.WithPredicates(predicate.Or(
+			predicate.GenerationChangedPredicate{}, rotationRequestChanged))).
 		Owns(&servingv1.Service{}).
 		Owns(&corev1.ServiceAccount{}).
 		Owns(&networkingv1.NetworkPolicy{}).

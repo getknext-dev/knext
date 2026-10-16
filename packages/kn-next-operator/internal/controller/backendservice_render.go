@@ -229,10 +229,12 @@ func buildFunctionKsvc(bs *appsv1alpha1.BackendService, retention time.Duration,
 	}
 	spec.Volumes = volumes
 	spec.Containers = []corev1.Container{{
-		Name:         functionContainerName,
-		Image:        bs.Spec.Image,
-		Ports:        []corev1.ContainerPort{{Name: "h2c", ContainerPort: functionPort(bs)}},
-		Env:          append([]corev1.EnvVar(nil), bs.Spec.Env...),
+		Name:  functionContainerName,
+		Image: bs.Spec.Image,
+		Ports: []corev1.ContainerPort{{Name: "h2c", ContainerPort: functionPort(bs)}},
+		// The user's env, then the verifier's identity (zone_signing_key.go):
+		// KNEXT_TOKEN_ISSUER / KNEXT_TOKEN_AUDIENCE, operator-owned, never the spec's.
+		Env:          functionIdentityEnv(bs),
 		EnvFrom:      append([]corev1.EnvFromSource(nil), bs.Spec.EnvFrom...),
 		VolumeMounts: mounts,
 		Resources:    resources,

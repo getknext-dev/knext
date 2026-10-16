@@ -67,7 +67,9 @@ spec:
                   Env is the function container's environment. A secretKeyRef may name only
                   the owning zone's database Secret (spec.database of the zone) or a Secret
                   marked as belonging to the same zone; anything else is refused and the
-                  function is not rendered.
+                  function is not rendered. Names starting with KNEXT_TOKEN_ are reserved:
+                  the operator sets the verifier's KNEXT_TOKEN_ISSUER and
+                  KNEXT_TOKEN_AUDIENCE itself.
                 items:
                   description: EnvVar represents an environment variable present in
                     a Container.
@@ -227,6 +229,10 @@ spec:
                 x-kubernetes-list-map-keys:
                 - name
                 x-kubernetes-list-type: map
+                x-kubernetes-validations:
+                - message: 'env names starting with KNEXT_TOKEN_ are reserved: the
+                    operator sets the function''s token issuer and audience'
+                  rule: self.all(e, !e.name.startsWith('KNEXT_TOKEN_'))
               envFrom:
                 description: |-
                   EnvFrom imports whole Secrets or ConfigMaps. The same Secret allowlist as

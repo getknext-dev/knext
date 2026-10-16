@@ -1,0 +1,29 @@
+{
+  "$comment": "Shared operator/runtime contract for the zone identity token (ADR-0004 Amendment 1 Decisions 8 to 11). The operator renders the zone half (signing-key mount and issuer env on the zone's Knative Service) and the function half (JWKS mount and verifier env on the function's Knative Service) from these values; the zone signer and the function verifiers read the same paths and names. Asserted by the operator's Go test (zone_signing_key_test.go, TestSharedZoneIdentityFixture). Changing one side alone reds the other's test.",
+  "namespace": "shop",
+  "zone": {
+    "name": "orders",
+    "signingKeySecret": "orders-knext-signing-key",
+    "signingKeyMountDir": "/var/run/knext/signing-key",
+    "signingKeyFiles": ["current.key", "current.kid", "previous.key", "previous.kid"],
+    "signingKeyFileMode": 292,
+    "issuerEnv": "KNEXT_ZONE_ISSUER",
+    "issuer": "knext:zone:shop/orders"
+  },
+  "function": {
+    "name": "pricing",
+    "jwksConfigMap": "orders-knext-jwks",
+    "jwksMountDir": "/var/run/knext/jwks",
+    "jwksFile": "jwks.json",
+    "issuerEnv": "KNEXT_TOKEN_ISSUER",
+    "issuer": "knext:zone:shop/orders",
+    "audienceEnv": "KNEXT_TOKEN_AUDIENCE",
+    "audience": "knext:fn:shop/pricing"
+  },
+  "rotation": {
+    "propagationBoundSeconds": 90,
+    "overlapSeconds": 3600,
+    "requestAnnotation": "apps.kn-next.dev/rotate-signing-key",
+    "maxPublishedKeys": 2
+  }
+}

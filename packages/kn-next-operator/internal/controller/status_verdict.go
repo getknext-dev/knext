@@ -143,6 +143,13 @@ type verdictOption func(*verdictExtras)
 type verdictExtras struct {
 	platform *platformDefaultsState
 	bindings *backendBindingsState
+	zoneKey  *zoneSigningKeyState
+}
+
+// withZoneSigningKey supplies the zone signing key's state (zone_signing_key.go)
+// the ZoneSigningKey condition and its requeue are computed from.
+func withZoneSigningKey(st zoneSigningKeyState) verdictOption {
+	return func(x *verdictExtras) { x.zoneKey = &st }
 }
 
 // backendBindingsState is the zone half of the function bindings (ADR-0004
@@ -976,6 +983,33 @@ func computeStatusVerdict(
 		v.conditions = append(v.conditions, cond)
 	} else if prevBindings != nil && len(app.Spec.Backends) == 0 {
 		v.removeConditions = append(v.removeConditions, ConditionBackendBindings)
+	}
+
+	// ZoneSigningKey (ADR-0004 Amendment 1 Decisions 9 and 11): the zone's
+	// signing key and JWKS, and where a rotation stands. Informational — Ready
+	// is untouched: the zone serves its pages either way, and a call that cannot
+	// be signed or verified fails closed. Appended LAST (#98 order), present only
+	// while the zone has a bound function, removed only if previously reported.
+	// Events fire on a reason or message change only: Warning into a False
+	// state, Normal into each True one (each rotation step is announced once).
+	// The requeue carries the next rotation step, or the steady re-check that
+	// stands in for the Secret watch the operator does not have.
+	prevZoneKey := apimeta.FindStatusCondition(app.Status.Conditions, ConditionZoneSigningKey)
+	if extras.zoneKey != nil && extras.zoneKey.active {
+		cond := zoneSigningKeyCondition(app, *extras.zoneKey)
+		if prevZoneKey == nil || prevZoneKey.Reason != cond.Reason || prevZoneKey.Message != cond.Message {
+			eventType := corev1.EventTypeNormal
+			if cond.Status != metav1.ConditionTrue {
+				eventType = corev1.EventTypeWarning
+			}
+			v.events = append(v.events, verdictEvent{eventType, cond.Reason, cond.Message})
+		}
+		v.conditions = append(v.conditions, cond)
+		if rq := zoneSigningKeyRequeue(*extras.zoneKey); rq > 0 && (v.requeueAfter == 0 || rq < v.requeueAfter) {
+			v.requeueAfter = rq
+		}
+	} else if extras.zoneKey != nil && prevZoneKey != nil {
+		v.removeConditions = append(v.removeConditions, ConditionZoneSigningKey)
 	}
 
 	return v
