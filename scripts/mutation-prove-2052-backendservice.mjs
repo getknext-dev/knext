@@ -444,8 +444,11 @@ const MUTATIONS = [
     claim:
       "the controller's kind is not compared (any object with the zone's name and UID is trusted)",
     subject: 'zonekey',
-    anchor: 'return ref != nil && ref.Kind == "NextApp" && ref.UID == app.UID',
-    replacement: 'return ref != nil && ref.UID == app.UID',
+    // Anchors run to the END of the line: the harness appends its residue marker
+    // as a trailing comment, which would swallow the rest of a mid-line anchor.
+    anchor:
+      'return ref != nil && ref.Kind == "NextApp" && ref.UID == app.UID && ref.Name == app.Name &&',
+    replacement: 'return ref != nil && ref.UID == app.UID && ref.Name == app.Name &&',
     test: unit('TestClassifyZoneJWKS'),
   },
   {
@@ -478,8 +481,9 @@ const MUTATIONS = [
     claim:
       'the reconciler discards what it observed at the JWKS name (an untrusted one is mounted)',
     subject: 'ctl',
-    anchor: 'if obs.jwks, obs.jwksDetail, err = r.observeZoneJWKS(',
-    replacement: 'if _, _, err = r.observeZoneJWKS(',
+    anchor:
+      'if obs.jwks, obs.jwksDetail, err = r.observeZoneJWKS(ctx, bs.Namespace, obs.zone); err != nil {',
+    replacement: 'if _, _, err = r.observeZoneJWKS(ctx, bs.Namespace, obs.zone); err != nil {',
     test: envtest('does not mount a squatted ConfigMap that nothing owns'),
   },
   {
