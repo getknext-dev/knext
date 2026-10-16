@@ -284,9 +284,16 @@ from git objects at the PR's **base** commit by `scripts/published-bytes-select-
    check skips with the visible reason "the base is not the line whose bytes are credentialed" — no
    pack, no tag lookup, no marker. This is what lets a core change on `main` (1.3) merge while the
    v1.0 window is open without a `publishedBytesBumpMarker`.
+3. **Released base.** If the base's version is a released `X.Y.Z` (no prerelease) numerically **at
+   or above** the pinned rc's `X.Y.Z` base — e.g. `integration/v1.3` carrying `1.3.1` while the pin
+   is still `v1.3.0-rc.10` — that rc's GA is already cut on this line, so there is no pending
+   GA-vs-rc diff left to protect (and the diff itself would only ever reject the version pair
+   `rc.10 -> 1.3.1` before comparing a byte). The check skips with the visible reason "has ended on
+   this line". A prerelease base, or a released base **below** the rc's base (a new rc cut ahead of
+   its GA), stays guarded.
 
-A base on the credentialed line is unchanged: it still packs and diffs, and a change to its
-published bytes still fails red. An absent or unparseable base version stays **guarded** (fail
+A base on the credentialed line that is still in its rc window is unchanged: it still packs and
+diffs, and a change to its published bytes still fails red. An absent or unparseable base version stays **guarded** (fail
 closed). `scripts/mutation-prove-published-bytes-freeze-check.mjs` proves both directions by exit
 code. Two follow-ups are deliberately not done here: `dependabot-published-bytes-pause.yml` still
 reads only the v1.0 pin and is not line-scoped (it is a `pull_request_target` job, so widening it is
