@@ -55,8 +55,8 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 # compile zstd into the release binary although the template refuses zstd. A
 # dependent cannot switch another crate's default features off, so the crate is
 # vendored unchanged except for `default-features = false` on that one edge.
-# TODO: drop this patch when upstream publishes the same change; upstream issue/PR links are
-# tracked on getknext-dev/knext#2452 (see vendor/connectrpc-health/VENDORED.md).
+# TODO: drop this patch when upstream publishes the same change; upstream issue:
+# https://github.com/connectrpc/connect-rust/issues/337 (see vendor/connectrpc-health/VENDORED.md).
 [patch.crates-io]
 connectrpc-health = { path = "vendor/connectrpc-health" }
 

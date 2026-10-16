@@ -8,6 +8,6 @@
   which compile zstd into the release binary. Everything else is byte-for-byte upstream.
 - Wired by `[patch.crates-io]` in `../../Cargo.toml`.
 - Retirement: delete this directory and the `[patch.crates-io]` table once upstream publishes
-  a connectrpc-health release whose connectrpc edge has default features off. The upstream
-  issue and PR links are tracked on getknext-dev/knext issue 2452 (not yet posted when this
-  was vendored); replace this line with the upstream issue URL when they exist.
+  a connectrpc-health release whose connectrpc edge has default features off. Upstream
+  issue: https://github.com/connectrpc/connect-rust/issues/337 (fix PR:
+  https://github.com/connectrpc/connect-rust/pull/338).
