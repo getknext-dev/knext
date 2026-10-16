@@ -1,0 +1,38 @@
+# cargo-deny: the supply-chain gate over Cargo.lock.
+#
+#   cargo deny check      # advisories, licenses, bans, sources
+#
+# CI runs it at a pinned version beside `cargo audit` (the RustSec database
+# both read). An advisory is fixed by upgrading in Cargo.lock; one that
+# cannot be fixed yet goes in [advisories].ignore with the reason and a date.
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = []
+
+[licenses]
+version = 2
+confidence-threshold = 0.9
+allow = [
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "MIT",
+  "Unicode-3.0",
+  "Zlib",
+]
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

@@ -1,0 +1,136 @@
+---
+title: Rust zone functions (Beta)
+description: The Rust template for a zone function — a connect-rust server your Next.js zone calls over HTTP/2, reachable only inside the cluster, that refuses every call without the zone's token.
+---
+
+<Callout type="warn">
+**Beta.** In this version the function **refuses every call except its health check**. The
+token a zone sends to prove a call is its own is not available yet, and the function fails closed
+rather than serve calls it cannot authenticate. Build and test against it now; it starts answering
+your RPCs when zone tokens ship.
+</Callout>
+
+A zone function is a Go or Rust service that a Next.js zone calls like a local function,
+scaling to zero like the zone itself. The contract between the two is a `.proto` file, and both
+sides are generated from it. This page covers the Rust side: the template your function's server
+starts from. The [Go template](/docs/go-functions) is the same function in Go.
+
+## What the template gives you
+
+- **A connect-rust server** for your contract, answering the Connect, gRPC and gRPC-Web protocols
+  on one port, over HTTP/2 cleartext (h2c) — what the zone uses — or HTTP/1.1.
+- **A token check on every call** (see [Security](#security)).
+- **The standard gRPC health check**, `grpc.health.v1.Health/Check`, served without a token so
+  probes and the zone's wake-up call work.
+- **OpenTelemetry**: a span per call, with the caller's W3C trace context linked, refused calls
+  included. A handler reads the span's context from the request extensions
+  (`ctx.extensions().get::<opentelemetry::Context>()`) to continue the trace on its own calls.
+- **Panic recovery**: a panicking handler returns `internal` and the process keeps running.
+- **Request limits**: 4 MiB per request message, as sent and once decompressed, so a small
+  gzip body cannot inflate into gigabytes. A request body longer than 4 MiB and 64 KiB is cut off
+  rather than read to the end, on streaming calls too, and a request body that stops arriving is
+  cut off after 30 seconds. That limit is on sending the request, not on the call: a handler may
+  take longer.
+- **Connection limits**: a connection that does not start a request within 10 seconds is
+  closed, and an idle connection, with no call in flight, is closed within 2 minutes.
+- **Graceful shutdown**: on `SIGTERM` the function stops accepting connections and in-flight
+  calls get up to 25 seconds to finish.
+- **A distroless image**: a static binary, no shell, running as a non-root user.
+
+## Start a Rust function
+
+1. In your zone, add the function's contract:
+
+   ```bash
+   knext add function orders --lang rust
+   ```
+
+   This writes `proto/orders/v1/orders.proto` and the options contract it imports. See
+   [`knext add function`](/docs/cli#knext-add-function).
+
+2. Copy the template from the knext repository (`templates/rust`) into a new directory for the
+   function, and rename the package in `Cargo.toml`.
+
+3. Replace the template's `proto/example` with your zone's `proto/orders`, so the function and the
+   zone build from the same file. Then generate the Rust code:
+
+   ```bash
+   ./codegen.sh      # writes gen/ — commit it
+   ```
+
+   Register your service in `src/rpc/mod.rs` in place of the example one, and write your
+   handlers where `src/items.rs` is.
+
+4. Test and build:
+
+   ```bash
+   cargo test
+   docker build -t <registry>/orders-fn:<tag> .
+   ```
+
+The template's own example service has one read (`GetItem`) and one write (`PutItem`), the shape
+`knext add function` starts every contract with.
+
+## Security
+
+The function is **cluster-local**: it has no public route, and only workloads inside the
+cluster can reach it. Inside the cluster, the **token is the control**, not the network: a
+NetworkPolicy is defense in depth, and some CNIs (flannel, which OKE and OrbStack use) do not
+enforce NetworkPolicy at all.
+
+Every call except the health check must carry `Authorization: Bearer <token>`. The check runs
+on the request headers, before any of the request body is read, and it fails closed:
+
+| Situation | Result |
+|---|---|
+| No `Authorization` header, or not a `Bearer` token | refused, `unauthenticated` |
+| No public keys mounted for the zone | refused, `unauthenticated` |
+| Keys mounted, token present | refused, `unauthenticated`, until zone tokens ship |
+| Health check (`grpc.health.v1.Health/Check`) | served, no token needed |
+
+The zone's public keys are read from `/var/run/knext/jwks/jwks.json`, mounted as a volume, on every
+call, so keys that appear or rotate after start are seen without a restart. There is no setting
+that turns the check off. At start-up the function logs a warning when no keys are mounted.
+
+A refused call returns HTTP 401 on the Connect protocol and `grpc-status` 16 on gRPC and gRPC-Web.
+
+## Generated code and the contract
+
+The `.proto` file is the source of truth. `gen/` holds the Rust message types and service stubs,
+written by `buf generate` with the connect-rust and buffa protoc plugins. `codegen.sh` installs
+those plugins at pinned versions with `cargo install --locked` into the template's `.codegen/`
+directory and runs `buf generate`, so every machine generates with the same plugins. Run it after
+every contract change and commit `gen/`; a CI step that regenerates and fails on a diff keeps the
+two in step.
+
+Roll out the function **before** the zone that calls a new version of its contract: a function
+must serve a contract version greater than or equal to the zone's.
+
+## connect-rust is pre-1.0
+
+The template uses connect-rust, which has not reached 1.0. Its version is pinned to the 0.9 line
+in `Cargo.toml` and exactly in `Cargo.lock`, and knext's CI runs the Connect conformance suite —
+every server test, on the Connect, gRPC and gRPC-Web protocols — against the locked version. When
+you upgrade connect-rust in your function, upgrade the codegen plugin in `codegen.sh` with it and
+regenerate.
+
+## Supply chain
+
+knext's CI builds the template image, writes an SBOM (SPDX) and runs Trivy, failing on any
+fixable HIGH or CRITICAL finding. The binary is built with `cargo auditable`, which embeds its
+dependency list, so the SBOM and the scan see every crate compiled into it. `cargo deny`
+(advisories, licenses, sources) and `cargo audit` run over `Cargo.lock`. knext does not publish a
+prebuilt template image yet: build it from the template.
+
+That covers the template. An image you build from it is your own: run your scanner on it in your
+pipeline. The Rust release in `rust-toolchain.toml` and the `rust` builder image in the
+`Dockerfile` move together.
+
+## Limits
+
+- **Beta.** Zone functions are not covered by knext's compatibility credential.
+- **Every RPC but the health check is refused** until zone tokens ship.
+- A compressed request must use gzip.
+- The template's example store is in memory: per pod, and lost when the function scales to zero.
+  Keep real data in your zone's own database, through the `DATABASE_URL` the zone binds; a
+  function never reads another zone's database.

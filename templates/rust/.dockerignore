@@ -1,0 +1,9 @@
+*
+!Cargo.toml
+!Cargo.lock
+!gen/
+!src/
+**/tests.rs
+**/limits_tests.rs
+**/testkit.rs
+**/testutil.rs

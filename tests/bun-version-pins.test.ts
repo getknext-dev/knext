@@ -207,6 +207,8 @@ describe('bun-version pins (#754) — scanned across every workflow', () => {
       // round-trip, panic and leak checks against the fixture library) — one
       // pinned "Setup bun" step; no workspace install.
       'rust-crates.yml': 1,
+      // The Rust function template's check job: bun runs the verified buf binary.
+      'rust-template.yml': 1,
       // NEW (#2346): the in-process Rust e2e — one pinned "Setup bun" per job
       // (musl-load: workspace install + staging + `bun build --compile`;
       // kind-e2e: workspace install + building the CLI it deploys with).
