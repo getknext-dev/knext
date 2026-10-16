@@ -412,6 +412,107 @@ describe('path 1 — native/ffi/<triple> beside the executable, integrity requir
     expect(r.status).toBe(0);
   });
 
+  it('integer arguments: the wrapper refuses what bun:ffi would corrupt (fractions, NaN, infinities, out of range, the low-32-bit alias, wrong types) and accepts both boundaries and -0', () => {
+    const exe = image();
+    const r = inBun(
+      (m, c) => {
+        const two = (n: number) => BigInt(2) ** BigInt(n);
+        const refused = (f: () => unknown) => {
+          const x = c(f) as { cls?: string; message?: string };
+          return x.cls === 'TypeError' ? x.message : x;
+        };
+        return {
+          ok: [
+            m.add(-2147483648, 2147483647),
+            m.add(-0, -0),
+            m.tiny(-128),
+            m.tiny(127),
+            m.tiny(-0),
+            m.big(-two(63)),
+            m.big(two(63) - BigInt(1)),
+          ],
+          i32: [
+            m.add(2147483647, 0),
+            refused(() => m.add(0.5, 0)),
+            refused(() => m.add(Number.NaN, 0)),
+            refused(() => m.add(0, Number.POSITIVE_INFINITY)),
+            refused(() => m.add(0, Number.NEGATIVE_INFINITY)),
+            refused(() => m.add(-2147483649, 0)),
+            refused(() => m.add(2 ** 32 + 1, 0)),
+            refused(() => m.add(2 ** 53, 0)),
+            refused(() => m.add('1', 0)),
+            refused(() => m.add(BigInt(1), 0)),
+            refused(() => m.add(null, 0)),
+          ],
+          i8: [
+            refused(() => m.tiny(-129)),
+            refused(() => m.tiny(128)),
+            refused(() => m.tiny(127.5)),
+            refused(() => m.tiny(Number.NaN)),
+            refused(() => m.tiny(-Infinity)),
+          ],
+          i64: [
+            refused(() => m.big(-two(63) - BigInt(1))),
+            refused(() => m.big(two(63))),
+            refused(() => m.big(0)),
+            refused(() => m.big(-0)),
+            refused(() => m.big(Number.NaN)),
+            refused(() => m.big('1')),
+          ],
+          hostile: refused(() =>
+            m.add(
+              {
+                toString() {
+                  throw new Error('toString ran');
+                },
+              },
+              0,
+            ),
+          ),
+          huge: String(refused(() => m.big(two(200000)))).length < 200,
+          negZero: [refused(() => m.tiny(-0.5)), refused(() => m.add(-0.5, 0))],
+          after: m.add(20, 22),
+        };
+      },
+      { FAKE_EXEC: exe },
+    );
+    const i32 = 'add(): argument "a" must be an integer from -2147483648 to 2147483647, got';
+    const i32b = 'add(): argument "b" must be an integer from -2147483648 to 2147483647, got';
+    const i8 = 'tiny(): argument "x" must be an integer from -128 to 127, got';
+    const i64 =
+      'big(): argument "x" must be a bigint from -9223372036854775808 to 9223372036854775807, got';
+    expect(r.result, r.stderr).toEqual({
+      ok: [-1, 0, -128, 127, 0, '-9223372036854775808n', '9223372036854775807n'],
+      i32: [
+        2147483647,
+        `${i32} 0.5`,
+        `${i32} NaN`,
+        `${i32b} Infinity`,
+        `${i32b} -Infinity`,
+        `${i32} -2147483649`,
+        `${i32} 4294967297`,
+        `${i32} 9007199254740992`,
+        `${i32} string`,
+        `${i32} bigint`,
+        `${i32} object`,
+      ],
+      i8: [`${i8} -129`, `${i8} 128`, `${i8} 127.5`, `${i8} NaN`, `${i8} -Infinity`],
+      i64: [
+        `${i64} bigint -9223372036854775809`,
+        `${i64} bigint 9223372036854775808`,
+        `${i64} number 0`,
+        `${i64} number -0`,
+        `${i64} number NaN`,
+        `${i64} string`,
+      ],
+      hostile: `${i32} object`,
+      huge: true,
+      negZero: [`${i8} -0.5`, `${i32} -0.5`],
+      after: 42,
+    });
+    expect(r.status).toBe(0);
+  });
+
   it('Rust argument names never collide with what the generated body declares (r, st, base, o0, n0), nor an export with an import (join)', () => {
     const exe = image();
     const r = inBun(

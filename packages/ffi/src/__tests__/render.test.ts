@@ -600,6 +600,29 @@ describe('D13 item 6 — the spike binding rules', () => {
     const f = body(src, 'add');
     expect(f.indexOf('$int(')).toBeLessThan(f.indexOf('$lib.'));
   });
+
+  it('EVERY integer-typed argument of every width is guarded before the native call, and a refusal echoes only a bounded number or bigint', () => {
+    const widths = ['i8', 'i16', 'i32', 'u8', 'u16', 'u32', 'i64', 'u64', 'isize', 'usize'];
+    const src = render([
+      fn(
+        'all',
+        widths.map((w) => [`a_${w}`, D.t(w)] as [string, ReturnType<typeof D.t>]),
+        D.t('unit'),
+      ),
+    ]);
+    const f = body(src, 'all');
+    const call = f.indexOf('$lib.');
+    expect(call).toBeGreaterThan(-1);
+    for (const w of widths) {
+      const guard = f.search(new RegExp(`\\$(int|big)\\('all', 'a_${w}', a_${w}, `));
+      expect(guard, `${w} is not guarded`).toBeGreaterThan(-1);
+      expect(guard, `${w} is guarded after the call`).toBeLessThan(call);
+    }
+    // The message never runs user code (no String(x) of an arbitrary value) and bounds a bigint.
+    expect(src).toContain('function $shown(v: number | bigint): string {');
+    expect(src).not.toMatch(/got \\\$\{String\(v\)\}/);
+    expect(src).toContain("typeof v === 'number' ? $shown(v) : typeof v");
+  });
 });
 
 describe('the full golden module (the fixture app type-checks it with Node types only)', () => {

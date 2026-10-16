@@ -486,9 +486,16 @@ function $base(): number {
   return $ffi.ptr($buf);
 }
 
+/** A number or bigint for an error message: bounded (a huge bigint is a bit count, never its digits), and the only values ever echoed. */
+function $shown(v: number | bigint): string {
+  if (typeof v === 'number') return v === 0 && 1 / v < 0 ? '-0' : String(v);
+  const hex = v.toString(16).length;
+  return hex > 24 ? `about ${hex * 4} bits` : String(v);
+}
+
 function $int(fn: string, arg: string, v: unknown, min: number, max: number): void {
   if (typeof v !== 'number' || !Number.isInteger(v) || v < min || v > max) {
-    throw new TypeError(`${fn}(): argument "${arg}" must be an integer from ${min} to ${max}, got ${String(v)}`);
+    throw new TypeError(`${fn}(): argument "${arg}" must be an integer from ${min} to ${max}, got ${typeof v === 'number' ? $shown(v) : typeof v}`);
   }
 }
 

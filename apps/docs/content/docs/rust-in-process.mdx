@@ -161,8 +161,8 @@ bun test --conditions=react-server
 
 | Rust (argument or return) | TypeScript | Notes |
 |---|---|---|
-| `i8` `i16` `i32` `u8` `u16` `u32` | `number` | checked before the call: a non-integer or out-of-range value throws a `TypeError` |
-| `i64` `u64` `isize` `usize` | `bigint` | checked the same way; a `number` is refused |
+| `i8` `i16` `i32` `u8` `u16` `u32` | `number` | checked before the call: a fraction, `NaN`, `Infinity`, a value outside the type's range or a non-number throws a `TypeError` naming the function and argument (`-0` is accepted and arrives as `0`) |
+| `i64` `u64` `isize` `usize` | `bigint` | checked the same way against the 64-bit range; a `number` is refused, and an error message never prints more than a short number or a bit count |
 | `f32` `f64` | `number` | anything but a `number` throws a `TypeError` |
 | `bool` | `boolean` | anything but a `boolean` throws a `TypeError` |
 | `&str`, `String` | `string` | UTF-8. Prefer `&str` for arguments: an owned `String` costs Rust a copy |
