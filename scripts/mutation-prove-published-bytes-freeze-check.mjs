@@ -268,9 +268,38 @@ const MUTATIONS = [
     anchor: ' \\\n            --base-version "${BASE_VERSION}"',
     replacement: '',
   },
+
+  // ── #2429: a released base at or above the pinned rc base ends the window ──
+  {
+    label:
+      'released-base: never skip a released base past the rc (the #2428 always-red job returns)',
+    subject: 'lib',
+    anchor: '  if (releasedBaseSupersedesRc(baseVersion, rcTag)) {',
+    replacement: '  if (false) {',
+  },
+  {
+    label:
+      'released-base: a prerelease base counts as released (an in-window rc base escapes the freeze)',
+    subject: 'lib',
+    anchor: 'const RELEASED_VERSION_RE = /^(\\d+)\\.(\\d+)\\.(\\d+)$/;',
+    replacement: 'const RELEASED_VERSION_RE = /^(\\d+)\\.(\\d+)\\.(\\d+)/;',
+  },
+  {
+    label:
+      'released-base: ignore the comparison direction (a released base BELOW the rc base escapes the freeze)',
+    subject: 'lib',
+    anchor: '    if (diff !== 0) return diff > 0;',
+    replacement: '    if (diff !== 0) return true;',
+  },
+  {
+    label: 'released-base: the GA of the pinned rc itself ("at", 1.3.0 vs rc.10) no longer skips',
+    subject: 'lib',
+    anchor: '    if (diff !== 0) return diff > 0;\n  }\n  return true;',
+    replacement: '    if (diff !== 0) return diff > 0;\n  }\n  return false;',
+  },
 ];
 
-declareMutations(28);
+declareMutations(32);
 
 const RUNNER = resolveSpecRunner(REPO_ROOT, SPECS[0]);
 
@@ -283,8 +312,8 @@ function specPasses() {
   return r.status === 0;
 }
 
-if (MUTATIONS.length !== 28) {
-  console.error(`FATAL: declared 28 mutations, table has ${MUTATIONS.length}`);
+if (MUTATIONS.length !== 32) {
+  console.error(`FATAL: declared 32 mutations, table has ${MUTATIONS.length}`);
   process.exit(1);
 }
 
