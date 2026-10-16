@@ -31,8 +31,11 @@ name: In-process Rust (FFI) — musl load matrix + kind e2e
 #        cluster with the operator built from HEAD; the Server Actions are
 #        called over HTTP (`Next-Action`, ids from server-reference-manifest
 #        .json): the Rust result, a RustError and a RustPanicError, with the
-#        pod's restart count still 0; the pod's native/.integrity.json lists
-#        the library with its real sha256;
+#        pod's restart count still 0; a Rust call that blocks past the
+#        slow-call threshold, twice, adds exactly 2 to
+#        knext_ffi_slow_calls_total{fn="pause"} on the pod's metrics port
+#        (a fast call adds 0) and logs one line; the pod's
+#        native/.integrity.json lists the library with its real sha256;
 #     4. the unchanged compat-smoke runner (apps/file-manager/scripts/
 #        compat-smoke.mjs), red-on-fail, as ci.yml's compat-smoke job runs
 #        it, against THE SHIPPED IMAGE: the digest-pinned linux-musl image
@@ -636,8 +639,17 @@ jobs:
           }
           before="$(state)"
           echo "before: ${before}"
+          # The pod's own metrics port (what the shipped scrape collects): the
+          # slow-call counter must reach it through the server's metrics listener.
+          pod0="$(echo "$before" | jq -r '.[0].name')"
+          kubectl -n "$APP_NS" port-forward "pod/${pod0}" 19464:9464 >/tmp/pf-metrics.log 2>&1 &
+          for _ in $(seq 1 30); do
+            if (exec 3<>/dev/tcp/127.0.0.1/19464) 2>/dev/null; then break; fi
+            sleep 1
+          done
           node packages/ffi/scripts/ffi-action-e2e.mjs --url http://127.0.0.1:8080 --host "$host" \
-            --manifest "${APP_DIR}/.next/server/server-reference-manifest.json"
+            --manifest "${APP_DIR}/.next/server/server-reference-manifest.json" \
+            --metrics http://127.0.0.1:19464/metrics
           sleep 5
           after="$(state)"
           echo "after:  ${after}"
@@ -648,6 +660,10 @@ jobs:
           kubectl -n "$APP_NS" logs "$pod" -c user-container > /tmp/app.log
           grep -q "panicked at" /tmp/app.log || { echo "::error::no Rust panic line in the pod's log: the panic path did not run in Rust"; exit 1; }
           grep -m1 "panicked at" -A1 /tmp/app.log
+          # Two slow pause() calls, one log line: logged once per function.
+          slow_logs="$(grep -c 'knext ffi: pause() took ' /tmp/app.log || true)"
+          [ "$slow_logs" = 1 ] || { echo "::error::want exactly 1 slow-call log line for pause(), got ${slow_logs}"; exit 1; }
+          grep -m1 'knext ffi: pause() took ' /tmp/app.log
 
       # The SAME runner and checks as ci.yml's compat-smoke job, red-on-fail,
       # against THE SHIPPED IMAGE: the digest-pinned linux-musl image the

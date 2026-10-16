@@ -64,9 +64,9 @@ const HYGIENE = [
     subject: 'render',
     claim: 'the status local is a bare `st` again',
     anchor:
-      "    lines.push(`  const $st = $lib.${f.symbol}(${call.join(', ')});`);\n    lines.push(`  if ($st !== 0) $fail(${name}, $st);`);",
+      "    lines.push(`  const $st = $lib.${f.symbol}(${call.join(', ')});`);\n    lines.push('  const $ms = performance.now() - $t0;');\n    lines.push(`  if ($ms > $slowMs) $slow(${name}, $ms);`);\n    lines.push(`  if ($st !== 0) $fail(${name}, $st);`);",
     replacement:
-      "    lines.push(`  const st = $lib.${f.symbol}(${call.join(', ')});`);\n    lines.push(`  if (st !== 0) $fail(${name}, st);`);",
+      "    lines.push(`  const st = $lib.${f.symbol}(${call.join(', ')});`);\n    lines.push('  const $ms = performance.now() - $t0;');\n    lines.push(`  if ($ms > $slowMs) $slow(${name}, $ms);`);\n    lines.push(`  if (st !== 0) $fail(${name}, st);`);",
   },
   {
     id: 'H04',
@@ -226,9 +226,9 @@ const LOADER = [
     subject: 'render',
     claim: 'an argument named `st` redeclares the status local',
     anchor:
-      "    lines.push(`  const $st = $lib.${f.symbol}(${call.join(', ')});`);\n    lines.push(`  if ($st !== 0) $fail(${name}, $st);`);",
+      "    lines.push(`  const $st = $lib.${f.symbol}(${call.join(', ')});`);\n    lines.push('  const $ms = performance.now() - $t0;');\n    lines.push(`  if ($ms > $slowMs) $slow(${name}, $ms);`);\n    lines.push(`  if ($st !== 0) $fail(${name}, $st);`);",
     replacement:
-      "    lines.push(`  const st = $lib.${f.symbol}(${call.join(', ')});`);\n    lines.push(`  if (st !== 0) $fail(${name}, st);`);",
+      "    lines.push(`  const st = $lib.${f.symbol}(${call.join(', ')});`);\n    lines.push('  const $ms = performance.now() - $t0;');\n    lines.push(`  if ($ms > $slowMs) $slow(${name}, $ms);`);\n    lines.push(`  if (st !== 0) $fail(${name}, st);`);",
   },
   {
     id: 'L05',

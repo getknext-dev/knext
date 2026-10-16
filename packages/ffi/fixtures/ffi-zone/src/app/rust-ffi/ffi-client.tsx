@@ -5,7 +5,13 @@
 // where the FFI e2e reads their ids.
 
 import { useState } from 'react';
-import { checkedGreetAction, explodeAction, type FfiResult, greetAction } from './actions';
+import {
+  checkedGreetAction,
+  explodeAction,
+  type FfiResult,
+  greetAction,
+  pauseAction,
+} from './actions';
 
 export function FfiClient() {
   const [result, setResult] = useState<FfiResult | null>(null);
@@ -22,6 +28,9 @@ export function FfiClient() {
         onClick={async () => setResult(await explodeAction('from the browser'))}
       >
         explode (panic)
+      </button>
+      <button type="button" onClick={async () => setResult(await pauseAction(100))}>
+        pause (slow call)
       </button>
       <pre data-knext-ffi-result>{result === null ? '' : JSON.stringify(result)}</pre>
     </div>

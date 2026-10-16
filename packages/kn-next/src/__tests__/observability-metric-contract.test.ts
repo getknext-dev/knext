@@ -256,6 +256,44 @@ const { renderUseCacheMetrics } = await import(
 const USE_CACHE = seriesNames(parseExposition(renderUseCacheMetrics()));
 
 /**
+ * The in-process Rust module's families: the slow-call counter and the load
+ * gauge. They are emitted by the module `knext ffi generate` writes into an app
+ * that opts in (app code, rendered by the optional ffi package), and reach the
+ * metrics port through the ffi seam core's loopback listener appends. Read from
+ * the module the generator renders (its `# TYPE` lines are the exposition's own),
+ * never imported into core. No alert or dashboard depends on them; only the
+ * docs side (S5) names them.
+ */
+const { renderModule: renderFfiModule } = await import(
+    "../../../ffi/src/render"
+);
+const FFI_MODULE: string = renderFfiModule(
+    {
+        fns: [
+            {
+                name: "f",
+                symbol: "knext_ffi_v1_f_00000000",
+                sig: "f()->()",
+                doc: "",
+                args: [],
+                ret: { type: { t: "unit" }, rust: "()" },
+                err: null,
+            },
+        ],
+        records: [],
+        enums: [],
+    },
+    { libName: "zone", crate: "rust" },
+);
+const FFI = seriesNames(
+    parseExposition(
+        [...FFI_MODULE.matchAll(/'(# (?:HELP|TYPE) knext_ffi_[^']*)'/g)]
+            .map((m) => m[1])
+            .join("\n"),
+    ),
+);
+
+/**
  * The Go operator process's own /metrics: the controller's registry AND every
  * collector the admission webhook registers (it runs in the same process and
  * lands on the same endpoint, e.g. knext_platform_budget_fallback_total).
@@ -340,6 +378,7 @@ const EMITTERS = {
     "cdn-purge": CDN_PURGE,
     "cdn-edge": CDN_EDGE,
     "use-cache": USE_CACHE,
+    ffi: FFI,
 } as const;
 type EmitterId = keyof typeof EMITTERS;
 
@@ -858,6 +897,7 @@ const ALL_EMITTED = allowed([
     "cdn-purge",
     "cdn-edge",
     "use-cache",
+    "ffi",
 ]);
 
 describe("the doc metric extractor skips the in-process Rust ABI names", () => {
@@ -898,6 +938,13 @@ describe("every metric a DOC names is one something emits (S5)", () => {
 
     it("the use-cache emitter render finds its counter (an empty render would let a dead name through)", () => {
         expect([...USE_CACHE]).toEqual(["knext_use_cache_events_total"]);
+    });
+
+    it("the ffi emitter render finds both families (an empty render would let a dead name through)", () => {
+        expect([...FFI].sort()).toEqual([
+            "knext_ffi_load_seconds",
+            "knext_ffi_slow_calls_total",
+        ]);
     });
 
     it("finds doc files at all — a vacuous scan would pass everything", () => {

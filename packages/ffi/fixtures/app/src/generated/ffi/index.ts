@@ -81,7 +81,10 @@ export function add(a: number, b: number): number {
   $int('add', 'a', a, -2147483648, 2147483647);
   $int('add', 'b', b, -2147483648, 2147483647);
   if (!$ready) $load();
+  const $t0 = performance.now();
   const $st = $lib.knext_ffi_v1_add_0badc0de(a, b, $outPtr);
+  const $ms = performance.now() - $t0;
+  if ($ms > $slowMs) $slow('add', $ms);
   if ($st !== 0) $fail('add', $st);
   return $view.getInt32(0, true);
 }
@@ -95,7 +98,10 @@ export function add(a: number, b: number): number {
  */
 export function bad_id(): Point {
   if (!$ready) $load();
+  const $t0 = performance.now();
   const $st = $lib.knext_ffi_v1_bad_id_0badc0de($outPtr);
+  const $ms = performance.now() - $t0;
+  if ($ms > $slowMs) $slow('bad_id', $ms);
   if ($st !== 0) $fail('bad_id', $st);
   const $r: unknown = JSON.parse($takeString());
   return $d_Point('bad_id', 'result', $r);
@@ -110,7 +116,10 @@ export function bad_id(): Point {
  */
 export function bad_point(): Point {
   if (!$ready) $load();
+  const $t0 = performance.now();
   const $st = $lib.knext_ffi_v1_bad_point_0badc0de($outPtr);
+  const $ms = performance.now() - $t0;
+  if ($ms > $slowMs) $slow('bad_point', $ms);
   if ($st !== 0) $fail('bad_point', $st);
   const $r: unknown = JSON.parse($takeString());
   return $d_Point('bad_point', 'result', $r);
@@ -125,7 +134,10 @@ export function bad_point(): Point {
  */
 export function bad_tag(): Point {
   if (!$ready) $load();
+  const $t0 = performance.now();
   const $st = $lib.knext_ffi_v1_bad_tag_0badc0de($outPtr);
+  const $ms = performance.now() - $t0;
+  if ($ms > $slowMs) $slow('bad_tag', $ms);
   if ($st !== 0) $fail('bad_tag', $st);
   const $r: unknown = JSON.parse($takeString());
   return $d_Point('bad_tag', 'result', $r);
@@ -141,7 +153,10 @@ export function bad_tag(): Point {
 export function big(x: bigint): bigint {
   $big('big', 'x', x, $I64_MIN, $I64_MAX);
   if (!$ready) $load();
+  const $t0 = performance.now();
   const $st = $lib.knext_ffi_v1_big_0badc0de(x, $outPtr);
+  const $ms = performance.now() - $t0;
+  if ($ms > $slowMs) $slow('big', $ms);
   if ($st !== 0) $fail('big', $st);
   return $view.getBigInt64(0, true);
 }
@@ -154,7 +169,10 @@ export function big(x: bigint): bigint {
  */
 export function boom(): void {
   if (!$ready) $load();
+  const $t0 = performance.now();
   const $st = $lib.knext_ffi_v1_boom_0badc0de($outPtr);
+  const $ms = performance.now() - $t0;
+  if ($ms > $slowMs) $slow('boom', $ms);
   if ($st !== 0) $fail('boom', $st);
 }
 
@@ -170,7 +188,10 @@ export function color(c: Color): Color {
   const $o0 = $put(JSON.stringify(c));
   const $n0 = $last;
   const $scratch = $base();
+  const $t0 = performance.now();
   const $st = $lib.knext_ffi_v1_color_0badc0de($n0 === 0 ? null : $scratch + $o0, $n0, $outPtr);
+  const $ms = performance.now() - $t0;
+  if ($ms > $slowMs) $slow('color', $ms);
   if ($st !== 0) $fail('color', $st);
   const $r: unknown = JSON.parse($takeString());
   return $r as Color;
@@ -192,7 +213,10 @@ export function concat(a: string, b: string): string {
   const $o1 = $put(b);
   const $n1 = $last;
   const $scratch = $base();
+  const $t0 = performance.now();
   const $st = $lib.knext_ffi_v1_concat_0badc0de($n0 === 0 ? null : $scratch + $o0, $n0, $n1 === 0 ? null : $scratch + $o1, $n1, $outPtr);
+  const $ms = performance.now() - $t0;
+  if ($ms > $slowMs) $slow('concat', $ms);
   if ($st !== 0) $fail('concat', $st);
   return $takeString();
 }
@@ -210,7 +234,10 @@ export function echo_bytes(data: Uint8Array): Uint8Array {
   const $o0 = $put(data);
   const $n0 = $last;
   const $scratch = $base();
+  const $t0 = performance.now();
   const $st = $lib.knext_ffi_v1_echo_bytes_0badc0de($n0 === 0 ? null : $scratch + $o0, $n0, $outPtr);
+  const $ms = performance.now() - $t0;
+  if ($ms > $slowMs) $slow('echo_bytes', $ms);
   if ($st !== 0) $fail('echo_bytes', $st);
   return $takeBytes();
 }
@@ -229,7 +256,10 @@ export function echo_odd(o: Odd): Odd {
   const $o0 = $put(JSON.stringify($e_Odd('echo_odd', 'o', o)));
   const $n0 = $last;
   const $scratch = $base();
+  const $t0 = performance.now();
   const $st = $lib.knext_ffi_v1_echo_odd_0badc0de($n0 === 0 ? null : $scratch + $o0, $n0, $outPtr);
+  const $ms = performance.now() - $t0;
+  if ($ms > $slowMs) $slow('echo_odd', $ms);
   if ($st !== 0) $fail('echo_odd', $st);
   const $r: unknown = JSON.parse($takeString());
   return $d_Odd('echo_odd', 'result', $r);
@@ -249,7 +279,10 @@ export function echo_point(p: Point): Point {
   const $o0 = $put(JSON.stringify($e_Point('echo_point', 'p', p)));
   const $n0 = $last;
   const $scratch = $base();
+  const $t0 = performance.now();
   const $st = $lib.knext_ffi_v1_echo_point_0badc0de($n0 === 0 ? null : $scratch + $o0, $n0, $outPtr);
+  const $ms = performance.now() - $t0;
+  if ($ms > $slowMs) $slow('echo_point', $ms);
   if ($st !== 0) $fail('echo_point', $st);
   const $r: unknown = JSON.parse($takeString());
   return $d_Point('echo_point', 'result', $r);
@@ -265,7 +298,10 @@ export function echo_point(p: Point): Point {
 export function flag(b: boolean): boolean {
   $bool('flag', 'b', b);
   if (!$ready) $load();
+  const $t0 = performance.now();
   const $st = $lib.knext_ffi_v1_flag_0badc0de(b, $outPtr);
+  const $ms = performance.now() - $t0;
+  if ($ms > $slowMs) $slow('flag', $ms);
   if ($st !== 0) $fail('flag', $st);
   return $view.getUint8(0) !== 0;
 }
@@ -284,7 +320,10 @@ export function floats(xs: (number | null)[]): (number | null)[] {
   const $o0 = $put(JSON.stringify(xs.map(($x0, $i0) => $opt($x0, ($x1) => (Number.isFinite($x1) ? $x1 : $efin('floats', 'xs' + '[' + $i0 + ']', $x1))))));
   const $n0 = $last;
   const $scratch = $base();
+  const $t0 = performance.now();
   const $st = $lib.knext_ffi_v1_floats_0badc0de($n0 === 0 ? null : $scratch + $o0, $n0, $outPtr);
+  const $ms = performance.now() - $t0;
+  if ($ms > $slowMs) $slow('floats', $ms);
   if ($st !== 0) $fail('floats', $st);
   const $r: unknown = JSON.parse($takeString());
   return $vec($r, 'result', ($x0, $at0) => $opt($x0, ($x1) => $fin('floats', $at0, $x1)));
@@ -307,7 +346,10 @@ export function greet(name: string): string {
   const $o0 = $put(name);
   const $n0 = $last;
   const $scratch = $base();
+  const $t0 = performance.now();
   const $st = $lib.knext_ffi_v1_greet_0badc0de($n0 === 0 ? null : $scratch + $o0, $n0, $outPtr);
+  const $ms = performance.now() - $t0;
+  if ($ms > $slowMs) $slow('greet', $ms);
   if ($st !== 0) $fail('greet', $st);
   return $takeString();
 }
@@ -322,7 +364,10 @@ export function greet(name: string): string {
 export function half(x: number): number {
   $num('half', 'x', x);
   if (!$ready) $load();
+  const $t0 = performance.now();
   const $st = $lib.knext_ffi_v1_half_0badc0de(x, $outPtr);
+  const $ms = performance.now() - $t0;
+  if ($ms > $slowMs) $slow('half', $ms);
   if ($st !== 0) $fail('half', $st);
   return $view.getFloat64(0, true);
 }
@@ -339,7 +384,10 @@ export function ids(v: bigint[]): bigint[] {
   const $o0 = $put(JSON.stringify(v.map(($x0) => $s64($x0))));
   const $n0 = $last;
   const $scratch = $base();
+  const $t0 = performance.now();
   const $st = $lib.knext_ffi_v1_ids_0badc0de($n0 === 0 ? null : $scratch + $o0, $n0, $outPtr);
+  const $ms = performance.now() - $t0;
+  if ($ms > $slowMs) $slow('ids', $ms);
   if ($st !== 0) $fail('ids', $st);
   const $r: unknown = JSON.parse($takeString());
   return $vec($r, 'result', ($x0, $at0) => $d64('ids', $at0, $x0));
@@ -370,7 +418,10 @@ export function join(st: string, base: string, o0: string, n0: string, r: string
   const $o4 = $put(r);
   const $n4 = $last;
   const $scratch = $base();
+  const $t0 = performance.now();
   const $st = $lib.knext_ffi_v1_join_0badc0de($n0 === 0 ? null : $scratch + $o0, $n0, $n1 === 0 ? null : $scratch + $o1, $n1, $n2 === 0 ? null : $scratch + $o2, $n2, $n3 === 0 ? null : $scratch + $o3, $n3, $n4 === 0 ? null : $scratch + $o4, $n4, $outPtr);
+  const $ms = performance.now() - $t0;
+  if ($ms > $slowMs) $slow('join', $ms);
   if ($st !== 0) $fail('join', $st);
   const $r: unknown = JSON.parse($takeString());
   return $r as string[];
@@ -388,7 +439,10 @@ export function maybe(x: bigint | null): bigint | null {
   const $o0 = $put(JSON.stringify($opt(x, ($x0) => $s64($x0))));
   const $n0 = $last;
   const $scratch = $base();
+  const $t0 = performance.now();
   const $st = $lib.knext_ffi_v1_maybe_0badc0de($n0 === 0 ? null : $scratch + $o0, $n0, $outPtr);
+  const $ms = performance.now() - $t0;
+  if ($ms > $slowMs) $slow('maybe', $ms);
   if ($st !== 0) $fail('maybe', $st);
   const $r: unknown = JSON.parse($takeString());
   return $opt($r, ($x0) => $d64('maybe', 'result', $x0));
@@ -402,7 +456,10 @@ export function maybe(x: bigint | null): bigint | null {
  */
 export function nop(): void {
   if (!$ready) $load();
+  const $t0 = performance.now();
   const $st = $lib.knext_ffi_v1_nop_0badc0de($outPtr);
+  const $ms = performance.now() - $t0;
+  if ($ms > $slowMs) $slow('nop', $ms);
   if ($st !== 0) $fail('nop', $st);
 }
 
@@ -420,7 +477,10 @@ export function opt_f(x: number | null): number | null {
   const $o0 = $put(JSON.stringify($opt(x, ($x0) => (Number.isFinite($x0) ? $x0 : $efin('opt_f', 'x', $x0)))));
   const $n0 = $last;
   const $scratch = $base();
+  const $t0 = performance.now();
   const $st = $lib.knext_ffi_v1_opt_f_0badc0de($n0 === 0 ? null : $scratch + $o0, $n0, $outPtr);
+  const $ms = performance.now() - $t0;
+  if ($ms > $slowMs) $slow('opt_f', $ms);
   if ($st !== 0) $fail('opt_f', $st);
   const $r: unknown = JSON.parse($takeString());
   return $opt($r, ($x0) => $fin('opt_f', 'result', $x0));
@@ -442,7 +502,10 @@ export function parse(s: string): number {
   const $o0 = $put(s);
   const $n0 = $last;
   const $scratch = $base();
+  const $t0 = performance.now();
   const $st = $lib.knext_ffi_v1_parse_0badc0de($n0 === 0 ? null : $scratch + $o0, $n0, $outPtr);
+  const $ms = performance.now() - $t0;
+  if ($ms > $slowMs) $slow('parse', $ms);
   if ($st !== 0) $fail('parse', $st);
   return $view.getInt32(0, true);
 }
@@ -458,7 +521,10 @@ export function parse(s: string): number {
 export function scale(r: number): Point {
   $num('scale', 'r', r);
   if (!$ready) $load();
+  const $t0 = performance.now();
   const $st = $lib.knext_ffi_v1_scale_0badc0de(r, $outPtr);
+  const $ms = performance.now() - $t0;
+  if ($ms > $slowMs) $slow('scale', $ms);
   if ($st !== 0) $fail('scale', $st);
   const $r: unknown = JSON.parse($takeString());
   return $d_Point('scale', 'result', $r);
@@ -477,7 +543,10 @@ export function strict(s: string): string {
   const $o0 = $put(s);
   const $n0 = $last;
   const $scratch = $base();
+  const $t0 = performance.now();
   const $st = $lib.knext_ffi_v1_strict_0badc0de($n0 === 0 ? null : $scratch + $o0, $n0, $outPtr);
+  const $ms = performance.now() - $t0;
+  if ($ms > $slowMs) $slow('strict', $ms);
   if ($st !== 0) $fail('strict', $st);
   return $takeString();
 }
@@ -495,7 +564,10 @@ export function sum(data: Uint8Array): bigint {
   const $o0 = $put(data);
   const $n0 = $last;
   const $scratch = $base();
+  const $t0 = performance.now();
   const $st = $lib.knext_ffi_v1_sum_0badc0de($n0 === 0 ? null : $scratch + $o0, $n0, $outPtr);
+  const $ms = performance.now() - $t0;
+  if ($ms > $slowMs) $slow('sum', $ms);
   if ($st !== 0) $fail('sum', $st);
   return $view.getBigUint64(0, true);
 }
@@ -510,7 +582,10 @@ export function sum(data: Uint8Array): bigint {
 export function tiny(x: number): number {
   $int('tiny', 'x', x, -128, 127);
   if (!$ready) $load();
+  const $t0 = performance.now();
   const $st = $lib.knext_ffi_v1_tiny_0badc0de(x, $outPtr);
+  const $ms = performance.now() - $t0;
+  if ($ms > $slowMs) $slow('tiny', $ms);
   if ($st !== 0) $fail('tiny', $st);
   return $view.getInt8(0);
 }
@@ -624,6 +699,8 @@ let $ffi = undefined as unknown as $BunFfi;
 let $lib = undefined as unknown as $Symbols;
 let $view = undefined as unknown as DataView;
 let $outPtr = 0;
+/** Calls slower than this many milliseconds are counted and logged. Set on the first call (unreachable until then). */
+let $slowMs = Infinity;
 let $buf = undefined as unknown as ArrayBuffer;
 let $mem = new Uint8Array(0);
 let $used = 0;
@@ -633,6 +710,7 @@ const $te = new TextEncoder();
 /** The first call loads the library; a failure is cached and rethrown on every later call. */
 function $load(): void {
   if ($failed) throw $failed;
+  const $t0 = performance.now();
   try {
     $open();
     $ready = true;
@@ -645,6 +723,84 @@ function $load(): void {
           );
     throw $failed;
   }
+  $slowMs = $threshold(process.env['KNEXT_FFI_SLOW_CALL_MS']);
+  $loaded((performance.now() - $t0) / 1000);
+}
+
+/** The slow-call threshold in milliseconds: default 50; 0 turns counting off. */
+function $threshold(raw: string | undefined): number {
+  if (raw === undefined || raw.trim() === '') return 50;
+  const ms = Number(raw);
+  if (ms === 0) return Infinity;
+  if (Number.isFinite(ms) && ms > 0) return ms;
+  console.warn(
+    `knext ffi: ignoring KNEXT_FFI_SLOW_CALL_MS=${JSON.stringify(raw)}: it must be a number of milliseconds (0 turns slow-call counting off). Using 50.`,
+  );
+  return 50;
+}
+
+/**
+ * The slow-call counts and load times, one registry per process. It lives on
+ * globalThis because Next can load this module more than once (one copy per
+ * bundler layer), and every copy must count into the same place. A Bun Worker
+ * has its own globalThis, so a Worker's calls are logged but not served.
+ */
+interface $Registry {
+  readonly slow: Map<string, number>;
+  readonly logged: Map<string, number>;
+  readonly load: Map<string, number>;
+}
+
+function $registry(): $Registry {
+  const g = globalThis as unknown as Record<symbol, $Registry | undefined>;
+  const key = Symbol.for('knext.ffi.metrics');
+  let r = g[key];
+  if (r === undefined) {
+    r = { slow: new Map(), logged: new Map(), load: new Map() };
+    g[key] = r;
+  }
+  return r;
+}
+
+/**
+ * After the first successful load: list every function at 0, record how long
+ * the load took (path resolution, the integrity hash, dlopen), and publish the
+ * render function the app's metrics port appends.
+ */
+function $loaded(seconds: number): void {
+  const r = $registry();
+  for (const [fn] of $SCHEMAS) if (!r.slow.has(fn)) r.slow.set(fn, 0);
+  if (!r.load.has($LIB)) r.load.set($LIB, seconds);
+  (globalThis as unknown as Record<symbol, unknown>)[Symbol.for('knext.ffi.renderMetrics')] = $renderMetrics;
+}
+
+/** A call took longer than the threshold: count it, and log the first one per function. */
+function $slow(fn: string, ms: number): void {
+  const r = $registry();
+  r.slow.set(fn, (r.slow.get(fn) ?? 0) + 1);
+  if (r.logged.has(fn)) return;
+  r.logged.set(fn, ms);
+  console.warn(
+    `knext ffi: ${fn}() took ${ms.toFixed(1)} ms, over the ${$slowMs} ms slow-call threshold (KNEXT_FFI_SLOW_CALL_MS). A Rust call blocks this process for its whole duration: no other request is served and a shutdown cannot drain until it returns. Move long work to a zone function. Later slow calls to ${fn}() are counted in knext_ffi_slow_calls_total, not logged.`,
+  );
+}
+
+/** Prometheus text for the app's metrics port. */
+function $renderMetrics(): string {
+  const r = $registry();
+  const out = [
+    '# HELP knext_ffi_slow_calls_total In-process Rust calls slower than KNEXT_FFI_SLOW_CALL_MS (default 50 ms), by function. Each one blocked the process for its whole duration.',
+    '# TYPE knext_ffi_slow_calls_total counter',
+  ];
+  for (const [fn, n] of [...r.slow].sort(([a], [b]) => (a < b ? -1 : 1))) {
+    out.push(`knext_ffi_slow_calls_total{fn="${fn}"} ${n}`);
+  }
+  out.push(
+    '# HELP knext_ffi_load_seconds Seconds the first in-process Rust call spent loading the library (finding it, checking its sha256, opening it), by library.',
+    '# TYPE knext_ffi_load_seconds gauge',
+  );
+  for (const [lib, s] of r.load) out.push(`knext_ffi_load_seconds{lib="${lib}"} ${s}`);
+  return `${out.join('\n')}\n`;
 }
 
 function $open(): void {

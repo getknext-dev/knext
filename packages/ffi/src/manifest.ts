@@ -161,6 +161,11 @@ export const RESERVED: ReadonlySet<string> = new Set([
   'Uint8Array',
   'console',
   'process',
+  // ...and the ones its slow-call counter references.
+  'Map',
+  'Symbol',
+  'globalThis',
+  'performance',
 ]);
 
 /**

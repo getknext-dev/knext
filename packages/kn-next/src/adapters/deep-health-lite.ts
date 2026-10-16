@@ -94,11 +94,34 @@ export function readUseCacheMetrics(): string {
 }
 
 /**
- * Every seam-published family this process holds (CDN, then `'use cache'`),
- * joined into one exposition: what the loopback listeners append.
+ * The in-process Rust seam. The module `knext ffi generate` writes into an app
+ * that opts in (app code; core never imports the ffi package) counts calls
+ * slower than its threshold and reports its first load, and publishes a render
+ * function under this key once its library has loaded. Duplicated by literal
+ * like the keys above; `ffi-metrics-seam.test.ts` pins it against the
+ * generator's source. Without the opt-in nothing publishes it.
+ */
+const FFI_METRICS_SEAM = Symbol.for("knext.ffi.renderMetrics");
+
+/**
+ * The in-process Rust counters this process holds, in Prometheus text, or `""`
+ * when the app has none (no seam) or the render throws. Fail-open, like
+ * {@link readCdnMetrics}.
+ */
+export function readFfiMetrics(): string {
+    return readSeam(FFI_METRICS_SEAM);
+}
+
+/**
+ * Every seam-published family this process holds (CDN, `'use cache'`, then
+ * in-process Rust), joined into one exposition: what the loopback listeners
+ * append.
  */
 export function readSeamMetrics(): string {
-    return appendExposition(readCdnMetrics(), readUseCacheMetrics());
+    return appendExposition(
+        appendExposition(readCdnMetrics(), readUseCacheMetrics()),
+        readFfiMetrics(),
+    );
 }
 
 function readSeam(key: symbol): string {

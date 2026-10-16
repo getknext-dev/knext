@@ -51,6 +51,18 @@ function hostTriple(): string {
 }
 const TRIPLE = hostTriple();
 
+/** How long the slow fixture's `add` blocks: well past the 50 ms default threshold. */
+const SLOW_ADD_MS = 80;
+/** Core's tracing-off loopback metrics listener, which serves the seam the module publishes. */
+const CORE_DEEP_HEALTH_LITE = join(
+  PKG_DIR,
+  '..',
+  'kn-next',
+  'src',
+  'adapters',
+  'deep-health-lite.ts',
+);
+
 let work: string;
 let app: string;
 let manifest: Manifest;
@@ -206,6 +218,7 @@ beforeAll(() => {
   libs.debug = cc('debug', ['-DGREETING="Debug"']);
   libs.omit = cc('omit', ['-DOMIT_GREET']);
   libs.badSchema = cc('bad-schema', ['-DBAD_SCHEMA']);
+  libs.slow = cc('slow', [`-DSLOW_ADD_MS=${SLOW_ADD_MS}`]);
 
   app = emptyDir('app');
   writeFileSync(join(app, 'package.json'), '{"type":"module","private":true}\n');
@@ -713,6 +726,188 @@ describe('prerendering (ADR-0069 round 2): calls work in dynamic contexts only',
     ]) {
       expect(out.message).toContain(s);
     }
+  });
+});
+
+describe('slow calls are made visible (counted, logged once), not preemptible', () => {
+  /** The `fn` -> count samples of knext_ffi_slow_calls_total in an exposition. */
+  const slowCounts = (text: string) =>
+    Object.fromEntries(
+      [...text.matchAll(/^knext_ffi_slow_calls_total\{fn="([^"]+)"\} (\d+)$/gm)].map((x) => [
+        x[1],
+        Number(x[2]),
+      ]),
+    );
+  const slowLines = (stderr: string) =>
+    stderr.split('\n').filter((l) => l.includes('slow-call threshold'));
+  const allZero = () => Object.fromEntries(manifest.fns.map((f) => [f.name, 0]));
+  it('a call over the threshold is counted once per call and logged once per function; its result is unchanged', () => {
+    const r = inBun(
+      (m) => {
+        // What the module publishes for the metrics port: null before anything is published.
+        const read = () => {
+          const render = (globalThis as Record<symbol, unknown>)[
+            Symbol.for('knext.ffi.renderMetrics')
+          ];
+          return typeof render === 'function' ? render() : null;
+        };
+        const before = read();
+        const results = [m.add(2, 3), m.add(-1, 0), m.add(40, 2), m.greet('fast')];
+        return { before, results, text: read() };
+      },
+      { FAKE_EXEC: image({ lib: libs.slow }), KNEXT_FFI_SLOW_CALL_MS: '' },
+    );
+    expect(r.status, r.stderr).toBe(0);
+    const out = r.result as { before: unknown; results: unknown[]; text: string };
+    // Nothing is published at import time: the first call publishes it.
+    expect(out.before).toBeNull();
+    expect(out.results).toEqual([5, -1, 42, 'Hello, fast!']);
+    expect(slowCounts(out.text)).toEqual({ ...allZero(), add: 3 });
+    expect(out.text.match(/^# TYPE knext_ffi_slow_calls_total counter$/gm)).toHaveLength(1);
+    expect(out.text.match(/^# TYPE knext_ffi_load_seconds gauge$/gm)).toHaveLength(1);
+    expect(out.text.endsWith('\n')).toBe(true);
+    const lines = slowLines(r.stderr);
+    expect(lines, r.stderr).toHaveLength(1);
+    expect(lines[0]).toMatch(
+      /^knext ffi: add\(\) took (\d+\.\d) ms, over the 50 ms slow-call threshold \(KNEXT_FFI_SLOW_CALL_MS\)\./,
+    );
+    const took = Number(/took (\d+\.\d) ms/.exec(lines[0] as string)?.[1]);
+    expect(took).toBeGreaterThanOrEqual(SLOW_ADD_MS - 1);
+  });
+
+  it('the fast path counts nothing and logs nothing', () => {
+    const r = inBun(
+      (m) => {
+        for (let i = 0; i < 1000; i++) m.add(i, 1);
+        m.greet('x');
+        m.sum(new Uint8Array([1, 2, 3]));
+        const render = (globalThis as Record<symbol, () => string>)[
+          Symbol.for('knext.ffi.renderMetrics')
+        ];
+        return render?.() ?? null;
+      },
+      { FAKE_EXEC: image(), KNEXT_FFI_SLOW_CALL_MS: '' },
+    );
+    expect(r.status, r.stderr).toBe(0);
+    expect(slowCounts(r.result as string)).toEqual(allZero());
+    expect(slowLines(r.stderr)).toEqual([]);
+  });
+
+  it('the first load (path resolution, integrity hash, dlopen) is reported once, in seconds, labelled by library', () => {
+    const r = inBun(
+      (m) => {
+        m.add(1, 1);
+        m.add(1, 1);
+        const render = (globalThis as Record<symbol, () => string>)[
+          Symbol.for('knext.ffi.renderMetrics')
+        ];
+        return render?.() ?? null;
+      },
+      { FAKE_EXEC: image() },
+    );
+    expect(r.status, r.stderr).toBe(0);
+    const samples = [
+      ...(r.result as string).matchAll(/^knext_ffi_load_seconds\{lib="([^"]+)"\} (\S+)$/gm),
+    ];
+    expect(samples.map((x) => x[1])).toEqual(['fixture']);
+    const seconds = Number(samples[0]?.[2]);
+    expect(seconds).toBeGreaterThan(0);
+    expect(seconds).toBeLessThan(10);
+  });
+
+  it('KNEXT_FFI_SLOW_CALL_MS sets the threshold, 0 turns counting off, and an unusable value falls back to 50 with a warning', () => {
+    const run = (value: string) =>
+      inBun(
+        (m) => {
+          m.add(2, 3);
+          const render = (globalThis as Record<symbol, () => string>)[
+            Symbol.for('knext.ffi.renderMetrics')
+          ];
+          return render?.() ?? null;
+        },
+        { FAKE_EXEC: image({ lib: libs.slow }), KNEXT_FFI_SLOW_CALL_MS: value },
+      );
+    const raised = run('1000');
+    expect(raised.status, raised.stderr).toBe(0);
+    expect(slowCounts(raised.result as string).add).toBe(0);
+    expect(slowLines(raised.stderr)).toEqual([]);
+
+    const lowered = run('2.5');
+    expect(slowCounts(lowered.result as string).add).toBe(1);
+    expect(slowLines(lowered.stderr)[0]).toContain('over the 2.5 ms slow-call threshold');
+
+    const off = run('0');
+    expect(off.status, off.stderr).toBe(0);
+    expect(slowCounts(off.result as string).add).toBe(0);
+    expect(slowLines(off.stderr)).toEqual([]);
+
+    for (const bad of ['fast', '-5', 'Infinity']) {
+      const r = run(bad);
+      expect(r.status, r.stderr).toBe(0);
+      expect(r.stderr).toContain(
+        `knext ffi: ignoring KNEXT_FFI_SLOW_CALL_MS=${JSON.stringify(bad)}: it must be a number of milliseconds (0 turns slow-call counting off). Using 50.`,
+      );
+      expect(slowCounts(r.result as string).add).toBe(1);
+    }
+  });
+
+  it('two copies of the module in one process (Next loads one per bundler layer) count into one place', () => {
+    const r = inBun(
+      async (m) => {
+        const copy = await import(`${process.env.MODULE_PATH}?copy=2`);
+        const same = copy === m;
+        m.add(1, 2);
+        copy.add(3, 4);
+        const render = (globalThis as Record<symbol, () => string>)[
+          Symbol.for('knext.ffi.renderMetrics')
+        ];
+        return { same, text: render() };
+      },
+      {
+        FAKE_EXEC: image({ lib: libs.slow }),
+        MODULE_PATH: join(app, 'src', 'generated', 'ffi', 'index.ts'),
+        KNEXT_FFI_SLOW_CALL_MS: '',
+      },
+    );
+    expect(r.status, r.stderr).toBe(0);
+    const out = r.result as { same: boolean; text: string };
+    expect(out.same).toBe(false);
+    expect(slowCounts(out.text).add).toBe(2);
+    // Logged once per function per process, not once per copy.
+    expect(slowLines(r.stderr)).toHaveLength(1);
+  });
+
+  it("core's metrics listener serves the counters over HTTP (the seam key matches end to end)", () => {
+    const r = inBun(
+      async (m) => {
+        const { startDeepHealthLite } = await import(process.env.CORE_LITE as string);
+        m.add(2, 3);
+        const server = startDeepHealthLite({
+          port: 0,
+          env: {},
+          app: 'a',
+          readActivityAt: () => undefined,
+          loadHealth: async () => {
+            throw new Error('must not probe an idle app');
+          },
+        });
+        if (!server.listening) await new Promise((ok) => server.once('listening', ok));
+        const res = await fetch(`http://127.0.0.1:${server.address().port}/metrics`);
+        const text = await res.text();
+        server.close();
+        return { status: res.status, text };
+      },
+      {
+        FAKE_EXEC: image({ lib: libs.slow }),
+        CORE_LITE: CORE_DEEP_HEALTH_LITE,
+        KNEXT_FFI_SLOW_CALL_MS: '',
+      },
+    );
+    expect(r.status, r.stderr).toBe(0);
+    const out = r.result as { status: number; text: string };
+    expect(out.status).toBe(200);
+    expect(slowCounts(out.text)).toEqual({ ...allZero(), add: 1 });
+    expect(out.text).toMatch(/^knext_ffi_load_seconds\{lib="fixture"\} \S+$/m);
   });
 });
 

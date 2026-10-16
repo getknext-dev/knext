@@ -422,6 +422,14 @@ the knext build; the vinext binary above has its own cache adapter), the same po
 a cache key, tag, path or argument. It discloses the app's `'use cache'` hit ratio, write volume,
 oversize entries and Redis outages as seen by the cache.
 
+**On the standalone server of an app that opts into in-process Rust** (`knext.ffi.json`; the
+generated module publishes the seam on its first call), the same port also carries
+`knext_ffi_slow_calls_total` (`fn`) and `knext_ffi_load_seconds` (`lib`). The labels are a closed
+set: the Rust export names and the library name from the library's embedded manifest, never an
+argument or a request value. They disclose which Rust functions the app exports, how often each
+one blocked the process past the threshold, and how long the library took to load. Without the
+opt-in they do not exist.
+
 **What is NOT on this port, contrary to earlier versions of this section:** cold-start and DB-wake
 series, the rest of the app's request-metric registry, and the `nodejs_*`/`process_*` families `collectDefaultMetrics` registers. Those
 are prom-client metrics on an app's own `/api/metrics` route, which the shipped PodMonitor does not

@@ -503,6 +503,77 @@ then loads it from a URL that does not exist on the server. Both were checked wi
 on Bun 1.4.2. Inside the
 zone, keep calls short or move the work to a zone function.
 
+## Slow calls
+
+A call that blows the budget is easy to miss: it shows up only as tail latency, or as requests
+dropped when a pod scales down. So the generated module times every Rust call, and when one takes
+longer than a threshold it counts the call and logs it.
+
+This makes a slow call **visible**. It does not make it any shorter: while a Rust call runs,
+nothing else runs in that process, and knext cannot interrupt it (neither can Bun).
+
+### The threshold
+
+`KNEXT_FFI_SLOW_CALL_MS` sets the threshold, in milliseconds. The default is **50 ms**. Fractions
+work (`2.5`), and `0` turns counting and the log line off. The module reads it on the first call.
+Any other value is ignored, with a warning, and the default is used:
+
+```
+knext ffi: ignoring KNEXT_FFI_SLOW_CALL_MS="fast": it must be a number of milliseconds (0 turns slow-call counting off). Using 50.
+```
+
+Timing a call reads the clock twice. Measured on an Apple M1 Pro (macOS) with Bun 1.4.2, that took
+`add(i32, i32) -> i32` from about 4.5 ns to about 69 ns per call through the shipped module. It is
+the same fixed cost for every call, so it matters only on a hot path of scalar calls, and `0` does
+not remove it.
+
+### The log line
+
+The first slow call to each function logs one line with the time it took:
+
+```
+knext ffi: stretch() took 212.4 ms, over the 50 ms slow-call threshold (KNEXT_FFI_SLOW_CALL_MS). A Rust call blocks this process for its whole duration: no other request is served and a shutdown cannot drain until it returns. Move long work to a zone function. Later slow calls to stretch() are counted in knext_ffi_slow_calls_total, not logged.
+```
+
+Later slow calls to the same function are counted but not logged, so a slow function on a hot
+path cannot flood the log.
+
+### The metrics
+
+| Metric | Type | Meaning |
+|---|---|---|
+| `knext_ffi_slow_calls_total` | Counter, labelled `fn` | Calls slower than the threshold, per Rust function. Every function is listed, at 0, once the library has loaded. |
+| `knext_ffi_load_seconds` | Gauge, labelled `lib` | How long the first call spent loading the library: finding it, checking its sha256 against the integrity manifest, and opening it. Set once per process. |
+
+On the default standalone build, both are served on the app's metrics port, the one the shipped
+scrape collects, from the first call on. They need the app's metrics listener, which the scaffolded
+`instrumentation.ts` starts. The `fn` and `lib` labels come from the library's own export list, so
+the set of series is fixed.
+
+Two limits:
+
+- **The single-executable (vinext) build does not serve them yet.** The log line works there; the
+  counter does not reach the metrics port.
+- **A Bun `Worker` keeps its own count**, which the metrics port does not read. A slow call in a
+  Worker is logged but not counted. It also blocks only that Worker, not the requests.
+
+To be told about slow calls, alert on the counter, for example
+`increase(knext_ffi_slow_calls_total[5m]) > 0`.
+
+### What a slow call does to the pod
+
+- **No other request on the pod is served** until it returns. Requests queue behind it, and the
+  autoscaler sees the concurrency pile up on that pod.
+- **Health checks wait too**, so a long call can mark the pod unready.
+- **Shutdown cannot drain.** On `SIGTERM`, knext stops taking requests and drains the ones in
+  flight, with a hard cap. Both are timers on the same thread, so neither can fire until the call
+  returns. A call that runs past the pod's termination grace period ends with the pod killed
+  (`SIGKILL`), and every request still in flight on it is dropped.
+- **The first call after a cold start is slower**: it also loads the library and hashes it for the
+  integrity check. `knext_ffi_load_seconds` shows that cost; it is not counted as a slow call.
+
+The fix is the one above: keep each call short, and move long work to a zone function.
+
 ## Building images
 
 When the app has `knext.ffi.json` and runs on Bun, `knext build` (and `knext deploy` and
@@ -724,7 +795,8 @@ not work there, and says which:
   `await`, `yield`, …), `undefined`, `NaN`, `Infinity`, `arguments` or `eval`, or a name the
   generated module uses itself: `RustError`, `RustPanicError`, `FfiLoadError`, `ArrayBuffer`,
   `BigInt`, `DataView`, `Error`, `JSON`, `Math`, `Number`, `Record`, `String`, `TextEncoder`,
-  `TypeError`, `Uint8Array`, `console` and `process`.
+  `TypeError`, `Uint8Array`, `Map`, `Symbol`, `console`, `process`, `globalThis` and
+  `performance`.
 - **Record and enum names** follow the same rule, and also cannot be a TypeScript built-in type
   name (`any`, `bigint`, `boolean`, `never`, `number`, `object`, `string`, `symbol`, `unknown`) or
   `as`, `infer`, `keyof`, `readonly` or `unique`.

@@ -7,6 +7,7 @@
 //
 //   node ffi-action-e2e.mjs --url <base> --manifest <server-reference-manifest.json>
 //                           [--host <Host header>] [--page /rust-ffi]
+//                           [--metrics <the pod's metrics URL>]
 //
 // Asserts, each a hard failure (exit 1):
 //   - GET <page> renders the Rust greeting computed at request time;
@@ -15,7 +16,12 @@
 //     message: 'name must not be empty' };
 //   - explodeAction(msg) returns { ok: false, error: 'RustPanicError', message: msg }
 //     — the panic was caught inside Rust and the process kept serving;
-//   - greetAction again answers correctly after the panic.
+//   - greetAction again answers correctly after the panic;
+//   - with --metrics: pauseAction(SLOW_MS) twice, past the 50 ms default
+//     threshold, adds exactly 2 to knext_ffi_slow_calls_total{fn="pause"} on
+//     the metrics port, a fast greetAction adds 0, and knext_ffi_load_seconds
+//     is served for the library. (That the slow call is logged once is the
+//     workflow's assertion: it reads the pod's log.)
 // Prints one `KNEXT_FFI_ACTIONS {json}` line. Pod restarts are the workflow's
 // assertion (it reads them from the cluster around this run).
 
@@ -29,12 +35,13 @@ const { values: args } = parseArgs({
     manifest: { type: 'string' },
     host: { type: 'string' },
     page: { type: 'string', default: '/rust-ffi' },
+    metrics: { type: 'string' },
   },
   strict: true,
 });
 if (!args.url || !args.manifest) {
   console.error(
-    'usage: ffi-action-e2e.mjs --url <base> --manifest <path> [--host <h>] [--page <p>]',
+    'usage: ffi-action-e2e.mjs --url <base> --manifest <path> [--host <h>] [--page <p>] [--metrics <url>]',
   );
   process.exit(2);
 }
@@ -55,7 +62,7 @@ function actionIds(path) {
     if (!String(entry.filename ?? '').endsWith('app/rust-ffi/actions.ts')) continue;
     if (typeof entry.exportedName === 'string') ids[entry.exportedName] = id;
   }
-  for (const name of ['greetAction', 'checkedGreetAction', 'explodeAction']) {
+  for (const name of ['greetAction', 'checkedGreetAction', 'explodeAction', 'pauseAction']) {
     if (!ids[name]) {
       console.error(`ffi-action-e2e: FAIL: no ${name} in ${path} (found: ${JSON.stringify(ids)})`);
       process.exit(1);
@@ -177,6 +184,77 @@ expectResult('greet after the panic', await callAction(ids.greetAction, ['again'
   ok: true,
   value: 'Hello, again, from Rust!',
 });
+
+// A Rust call that blocks past the threshold is counted on the metrics port.
+// The library is already loaded (the calls above), so every function is listed.
+const SLOW_MS = 120;
+
+/** Slow-call counts by function, and the load gauge's samples, from an exposition. */
+function parseFfiMetrics(text) {
+  const slow = {};
+  for (const m of text.matchAll(/^knext_ffi_slow_calls_total\{fn="([^"]+)"\} (\d+)$/gm)) {
+    slow[m[1]] = Number(m[2]);
+  }
+  const load = [...text.matchAll(/^knext_ffi_load_seconds\{lib="([^"]+)"\} (\S+)$/gm)].map((m) => ({
+    lib: m[1],
+    seconds: Number(m[2]),
+  }));
+  return { slow, load };
+}
+
+function scrapeMetrics(url) {
+  return new Promise((resolve, reject) => {
+    const req = http.get(url, (res) => {
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () =>
+        resolve({
+          status: res.statusCode,
+          ...parseFfiMetrics(Buffer.concat(chunks).toString('utf8')),
+        }),
+      );
+      res.on('error', reject);
+    });
+    req.on('error', reject);
+    req.setTimeout(30_000, () => req.destroy(new Error('metrics timeout')));
+  });
+}
+
+if (args.metrics) {
+  const before = await scrapeMetrics(args.metrics);
+  expectResult('pause', await callAction(ids.pauseAction, [SLOW_MS]), {
+    ok: true,
+    value: String(SLOW_MS),
+  });
+  expectResult('pause again', await callAction(ids.pauseAction, [SLOW_MS]), {
+    ok: true,
+    value: String(SLOW_MS),
+  });
+  expectResult('greet (fast)', await callAction(ids.greetAction, ['fast']), {
+    ok: true,
+    value: 'Hello, fast, from Rust!',
+  });
+  const after = await scrapeMetrics(args.metrics);
+  record.metrics = { before, after };
+  if (before.status !== 200 || after.status !== 200) {
+    fail(`metrics: HTTP ${before.status} / ${after.status}, want 200`);
+  } else if (before.slow.pause === undefined || after.slow.pause === undefined) {
+    fail('metrics: no knext_ffi_slow_calls_total{fn="pause"} series on the metrics port');
+  } else {
+    const added = after.slow.pause - before.slow.pause;
+    if (added !== 2) fail(`metrics: the two slow pause() calls added ${added}, want 2`);
+    if (after.slow.greet !== before.slow.greet) {
+      fail(
+        `metrics: the fast greet() call changed its slow count (${before.slow.greet} -> ${after.slow.greet})`,
+      );
+    }
+    if (after.load.length !== 1 || !(after.load[0].seconds > 0)) {
+      fail(
+        `metrics: want one knext_ffi_load_seconds sample > 0, got ${JSON.stringify(after.load)}`,
+      );
+    }
+  }
+}
 
 console.log(`KNEXT_FFI_ACTIONS ${JSON.stringify(record)}`);
 if (failures.length > 0) {
