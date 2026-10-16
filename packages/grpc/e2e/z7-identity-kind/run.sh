@@ -81,7 +81,7 @@ PHASES="${PHASES:-up images deploy verify rotate leaks}"
 INTERNAL_PORT="${INTERNAL_PORT:-18080}"
 KNATIVE_VERSION="${KNATIVE_VERSION:-knative-v1.16.0}"
 REGISTRY_IMAGE='registry:2.8.3@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373'
-OPERATOR_IMG='example.com/kn-next-operator:z7-e2e'
+OPERATOR_IMG='example.com/kn-next-operator:z7-build'
 OPERATOR_NS='kn-next-operator-system'
 
 case "${BOUND}" in
@@ -328,13 +328,19 @@ YAML
     echo "docker-build attempt ${attempt} failed; retrying"
     sleep 10
   done
-  kind load docker-image "${OPERATOR_IMG}" --name "${CLUSTER}"
+  # Tagged by what it is: re-running this phase after the operator changed must
+  # roll the Deployment, and the same tag with new bytes would not.
+  local operator_id operator_img
+  operator_id="$(docker image inspect --format '{{.Id}}' "${OPERATOR_IMG}" | sed 's/^sha256://' | cut -c1-12)"
+  operator_img="example.com/kn-next-operator:z7-${operator_id}"
+  docker tag "${OPERATOR_IMG}" "${operator_img}"
+  kind load docker-image "${operator_img}" --name "${CLUSTER}"
 
   # Rendered from a COPY of config/, so the checkout is never edited
   # (`make deploy` runs `kustomize edit` in place).
   local cfg="${WORK}/config"
   cp -R "${OPERATOR}/config" "${cfg}"
-  (cd "${cfg}/manager" && "${OPERATOR}/bin/kustomize" edit set image "controller=${OPERATOR_IMG}")
+  (cd "${cfg}/manager" && "${OPERATOR}/bin/kustomize" edit set image "controller=${operator_img}")
   local arg='--health-probe-bind-address=:8081'
   [ "$(grep -c -- "- ${arg}\$" "${cfg}/manager/manager.yaml")" = 1 ] || fail "manager.yaml no longer has exactly one '${arg}' arg to anchor on"
   awk -v bound="${BOUND}" '

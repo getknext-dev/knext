@@ -63,9 +63,9 @@ export const ROWS = [
     // A function mounts the JWKS through a subPath: a rotated file never arrives.
     file: 'packages/kn-next-operator/internal/controller/backendservice_render.go',
     anchor:
-      'mounts := []corev1.VolumeMount{{Name: FunctionJWKSVolumeName, MountPath: ZoneJWKSMountDir, ReadOnly: true}}',
+      'mounts = append(mounts, corev1.VolumeMount{Name: FunctionJWKSVolumeName, MountPath: ZoneJWKSMountDir, ReadOnly: true})',
     replacement:
-      'mounts := []corev1.VolumeMount{{Name: FunctionJWKSVolumeName, MountPath: ZoneJWKSMountDir + "/" + ZoneJWKSFileName, SubPath: ZoneJWKSFileName, ReadOnly: true}}',
+      'mounts = append(mounts, corev1.VolumeMount{Name: FunctionJWKSVolumeName, MountPath: ZoneJWKSMountDir + "/" + ZoneJWKSFileName, SubPath: ZoneJWKSFileName, ReadOnly: true})',
     phases: 'deploy verify',
     reason: 'is not mounted as a read-only directory volume',
   },

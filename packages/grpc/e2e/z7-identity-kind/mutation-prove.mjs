@@ -51,7 +51,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(HERE, '../../../..');
 const OPERATOR = join(REPO, 'packages/kn-next-operator');
 const CLUSTER = process.env.KIND_CLUSTER ?? 'knext-z7-e2e';
-const BASE_IMG = 'example.com/kn-next-operator:z7-e2e';
+const BUILD_IMG = 'example.com/kn-next-operator:z7-build';
 const OPERATOR_NS = 'kn-next-operator-system';
 const DEPLOY = 'deployment/kn-next-operator-controller-manager';
 
@@ -75,20 +75,28 @@ const kc = sh('kind', ['get', 'kubeconfig', '--name', CLUSTER]);
 if (kc.status !== 0) die(`no kind cluster ${CLUSTER}; run run.sh with PHASES="up images" first`);
 writeFileSync(kubeconfig, kc.stdout, { mode: 0o600 });
 
-/** Build the operator from the current tree as `img`, load it into kind, roll the Deployment. */
-function installOperator(img, log) {
+/**
+ * Build the operator from the current tree, tag it by its image id (the same tag
+ * with new bytes would not roll the Deployment), load it into kind and roll it.
+ */
+function installOperator(log) {
   const env = { ...process.env, KUBECONFIG: kubeconfig };
-  const steps = [
-    ['make', ['-C', OPERATOR, 'docker-build', `IMG=${img}`], {}],
-    ['kind', ['load', 'docker-image', img, '--name', CLUSTER], {}],
-    ['kubectl', ['-n', OPERATOR_NS, 'set', 'image', DEPLOY, `manager=${img}`], { env }],
-    ['kubectl', ['-n', OPERATOR_NS, 'rollout', 'status', DEPLOY, '--timeout=240s'], { env }],
-  ];
-  for (const [cmd, args, opts] of steps) {
+  const run = (cmd, args, opts = {}) => {
     const r = sh(cmd, args, opts);
     appendFileSync(log, `$ ${cmd} ${args.join(' ')}\n${r.stdout}${r.stderr}\n`);
     if (r.status !== 0) die(`${cmd} ${args.slice(0, 3).join(' ')} failed (see ${log})`);
-  }
+    return r.stdout;
+  };
+  run('make', ['-C', OPERATOR, 'docker-build', `IMG=${BUILD_IMG}`]);
+  const id = run('docker', ['image', 'inspect', '--format', '{{.Id}}', BUILD_IMG])
+    .trim()
+    .replace(/^sha256:/, '')
+    .slice(0, 12);
+  const img = `example.com/kn-next-operator:z7-${id}`;
+  run('docker', ['tag', BUILD_IMG, img]);
+  run('kind', ['load', 'docker-image', img, '--name', CLUSTER]);
+  run('kubectl', ['-n', OPERATOR_NS, 'set', 'image', DEPLOY, `manager=${img}`], { env });
+  run('kubectl', ['-n', OPERATOR_NS, 'rollout', 'status', DEPLOY, '--timeout=240s'], { env });
 }
 
 function runLane(phases, log) {
@@ -110,7 +118,7 @@ try {
     let outcome;
     try {
       mutate(snap, row.anchor, row.replacement);
-      installOperator(`example.com/kn-next-operator:z7-mut-${row.id.toLowerCase()}`, log);
+      installOperator(log);
       outcome = runLane(row.phases, log);
     } finally {
       restore(snap);
@@ -129,7 +137,7 @@ try {
   // The control: the unmutated operator, rebuilt from the restored tree, through
   // every phase the rows used. A row is only evidence if this passes.
   const controlLog = join(work, 'control.log');
-  installOperator(BASE_IMG, controlLog);
+  installOperator(controlLog);
   const control = runLane('deploy verify rotate leaks', controlLog);
   console.log(`CONTROL (unmutated operator, deploy verify rotate leaks): exit ${control.status}`);
   const killed = results.filter((v) => v === 'KILLED').length;
