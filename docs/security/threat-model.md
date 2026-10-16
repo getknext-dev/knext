@@ -163,6 +163,42 @@ compromised operator reach any Secret through a pod it creates. A function's ver
 zone's JWKS ConfigMap, so anyone who can write ConfigMaps in the namespace can make that zone's
 functions accept their own key: **the namespace is the trust boundary**, as for the zone label.
 
+**Defence in depth: the function mounts the JWKS only if the zone controls it (#2464).** Before it
+renders a function, the BackendService reconciler reads the metadata of `<zone>-knext-jwks`
+(a `PartialObjectMetadata` GET through the uncached `APIReader`; the `get` on `configmaps` that
+the zone-key writer already holds, so no new grant, and still no informer) and mounts it only if
+the zone's `NextApp` is its **controller** by UID (the test the NextApp reconciler applies before
+it writes the object). If the ConfigMap exists and the zone does not control it (no owner,
+another object, another zone, or a `NextApp` of the same name with a different UID, as left by an
+earlier incarnation), the function is rendered with **no JWKS volume at all**: it still starts and
+answers its health check, and refuses every other call (fail closed). The reconciler reports
+`JWKSTrusted=False` and `Ready=False` with reason `JWKSUntrusted` (computed in
+`computeBackendServiceVerdict`), records one Warning event per transition and counts the
+transition in `knext_backendservice_refusals_total{reason="JWKSUntrusted"}`. While the ConfigMap
+does not exist yet the optional mount is kept, so the kubelet fills it as soon as the operator
+creates it without a new revision. A failed read returns an error and leaves the rendered function
+as it was: it says nothing about ownership.
+
+**Residual (#2464).** (a) An `ownerReference` is a claim: anyone who can write ConfigMaps in the
+namespace and can read the zone's UID can forge one, so this closes an accidental or early squat
+and a stale object, not a deliberate forger; the namespace stays the trust boundary. (b) The check
+is point-in-time. It runs on each reconcile of the function (on any change to a `NextApp` in the
+namespace, which includes the zone's own `ZoneSigningKey` condition flipping to
+`JWKSConfigMapConflict`, and at the latest on the ten-minute re-check), so a ConfigMap replaced
+after the last check is still mounted by running pods until then: the volume names an object, not
+a UID. (c) The absent case keeps the optional mount, so a squatter that creates the ConfigMap
+between the read and the kubelet's next volume sync is mounted until the next check. (d) Ownership
+says nothing about content: an in-place edit of the zone-owned JWKS is repaired by the zone's
+steady re-check (see the residuals above), not detected here.
+
+**Enforcement (#2464).** `backendservice_jwks_test.go` (the ownership classification, the render
+with and without the volume, the verdict and its transition-only warning),
+`backendservice_jwks_envtest_test.go` (a squatted, foreign-owned, other-zone and
+same-name-other-UID ConfigMap is not mounted; a zone-controlled one is; an absent one keeps the
+optional mount; a replaced one is unmounted and mounts again once it is gone; the read goes through
+the uncached reader; a read failure changes nothing), and the mutation prover
+`scripts/mutation-prove-2052-backendservice.mjs` (one row per rule).
+
 **Residual.** (a) A `ValidatingAdmissionPolicy` that limits the operator's ServiceAccount to
 writing Secrets named `*-knext-signing-key` and ConfigMaps named `*-knext-jwks` would remove the
 overwrite capability; not shipped. (b) The operator cannot watch Secrets, so a deleted key or an

@@ -798,7 +798,7 @@ func TestFunctionRenderSetsTheVerifierIdentityAndNoPrivateKey(t *testing.T) {
 		},
 	}
 	ksvc := &servingv1.Service{}
-	if err := buildFunctionKsvc(bs, 0, ksvc); err != nil {
+	if err := buildFunctionKsvc(bs, 0, zoneJWKSAbsent, ksvc); err != nil {
 		t.Fatal(err)
 	}
 	env := ksvc.Spec.Template.Spec.Containers[0].Env
@@ -1161,7 +1161,7 @@ func TestSharedZoneIdentityFixture(t *testing.T) {
 		Spec:       appsv1alpha1.BackendServiceSpec{Zone: fx.Zone.Name, Image: "img"},
 	}
 	fn := &servingv1.Service{}
-	if err := buildFunctionKsvc(bs, 0, fn); err != nil {
+	if err := buildFunctionKsvc(bs, 0, zoneJWKSAbsent, fn); err != nil {
 		t.Fatal(err)
 	}
 	var jwksVol *corev1.ConfigMapVolumeSource

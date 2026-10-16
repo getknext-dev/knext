@@ -136,6 +136,18 @@ running pod without a restart. A function never mounts a signing key: a referenc
 JWKS ConfigMap. `/var/run/knext` is reserved for these mounts. Until the zone's keys exist, the
 function starts, but its generated interceptor refuses every call except the health check.
 
+A function mounts the JWKS only if the zone's `NextApp` controls the ConfigMap, meaning the
+zone is the owner marked as its controller. If something else created a ConfigMap of that name
+first, the operator does not mount it. The function is rendered without any JWKS, so it starts
+but refuses every call except the health check, and its `JWKSTrusted` condition is `False` with
+reason `JWKSUntrusted` (the function is then not `Ready`, and a `Warning` event is recorded).
+The zone reports `JWKSConfigMapConflict` at the same time. Remove the ConfigMap and the operator
+publishes the zone's own keys and mounts them again on its next check, within ten minutes. The
+check runs at each reconcile, not continuously, and an owner reference is a claim that anyone who
+can write ConfigMaps in the namespace can make: it protects against a name taken by accident or
+left behind by an earlier zone of the same name, not against someone you already trust with write
+access to the namespace.
+
 The operator also sets, as plain values:
 
 | Variable | On | Value |
@@ -213,7 +225,8 @@ Ready revision. It is empty until a revision is Ready, and it is the value the z
 | `Bound` | Both halves agree. `ZoneNotFound`, `ZoneNotListed` or `ConflictingOwner` otherwise. |
 | `SovereigntyCompliant` | Every Secret reference passes the allowlist. `SecretNotAllowed` names the ones that do not. |
 | `DatabaseHostLint` | `False` when an env value names another zone's database host. A warning only. |
-| `Ready` | Bound, compliant, and the function's Knative Service is Ready. |
+| `JWKSTrusted` | `True` when the zone controls its JWKS ConfigMap and the function mounts it. `Unknown` (`NotPublished`) while the ConfigMap does not exist yet. `False` (`JWKSUntrusted`) when another object holds the name: nothing is mounted and every call except the health check is refused. |
+| `Ready` | Bound, compliant, the function's JWKS is not untrusted, and the function's Knative Service is Ready. |
 
 The zone's `BackendBindings` condition is `True` when every `backends` entry is bound. Its
 `ZoneSigningKey` condition is present while the zone has a bound function: `True` with

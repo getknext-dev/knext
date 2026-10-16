@@ -158,7 +158,7 @@ series moves the set and reds every query that still names the old one.
 | `knext_nextapp_reconcile_duration_seconds` | histogram | — | reconcile loop duration |
 | `knext_nextapp_reconcile_errors_total` | counter | — | reconcile loops that errored |
 | `knext_backendservice_reconcile_total` | counter | `result` (`success`\|`error`) | zone-function (BackendService) reconcile loops |
-| `knext_backendservice_refusals_total` | counter | `reason` | transitions into a refused function (`ZoneNotFound`, `ZoneNotListed`, `ConflictingOwner`, `SovereigntyViolation`, `InvalidImage`, `KnativeServiceNameTaken`); every reason is published at 0 from start-up |
+| `knext_backendservice_refusals_total` | counter | `reason` | transitions into a refused function, or one rendered without its zone's JWKS (`ZoneNotFound`, `ZoneNotListed`, `ConflictingOwner`, `SovereigntyViolation`, `InvalidImage`, `KnativeServiceNameTaken`, `JWKSUntrusted`); every reason is published at 0 from start-up |
 | `workqueue_depth` | gauge | `name` (`nextapp`), `priority` | control-plane WORK-QUEUE DEPTH (registered by controller-runtime's workqueue provider for the named `nextapp` queue) |
 
 `workqueue_depth{name="nextapp"}` is the control-plane saturation signal — a

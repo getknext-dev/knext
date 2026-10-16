@@ -62,9 +62,11 @@ type BackendServiceReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 	// APIReader is the UNCACHED reader for Secret metadata (the same-zone-mark
-	// allow rule). The operator holds cluster-wide `get` on Secrets and nothing
-	// else on them, so it must never start a Secret informer; it reads only
-	// metadata (a PartialObjectMetadata GET), never a Secret's data.
+	// allow rule) and for the metadata of the zone's JWKS ConfigMap (the
+	// controller-ownership check before it is mounted). The operator holds
+	// cluster-wide `get` on Secrets and ConfigMaps and nothing else on them
+	// (no list, no watch), so it must never start an informer for either; it
+	// reads only metadata (a PartialObjectMetadata GET), never their data.
 	APIReader client.Reader
 	Recorder  record.EventRecorder
 }
@@ -86,6 +88,11 @@ type BackendServiceReconciler struct {
 // uncached APIReader, as a metadata-only read. Justified in
 // rbac_secrets_guard_test.go and docs/security/threat-model.md.
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get
+// ConfigMaps: GET ONLY here, for the same reason and through the same uncached
+// reader: a metadata read of the zone's JWKS ConfigMap, to mount it only when the
+// zone's NextApp controls it. The grant is shared with the zone-key writer
+// (zone_signing_key_reconcile.go declares get;create;update on configmaps).
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get
 
 func (r *BackendServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
 	logger := logf.FromContext(ctx)
@@ -174,7 +181,16 @@ func (r *BackendServiceReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 	served, revision := bs.Status.ServedProtoVersion, bs.Status.ObservedRevision
 	if obs.accepted() {
-		ksvc, renderErr, err := r.render(ctx, bs, obs.zone)
+		// The zone's key set reaches the function only if the zone controls the
+		// ConfigMap that holds it. A read failure is returned, not guessed at: it
+		// says nothing about ownership, and flipping a running function's mount
+		// on an apiserver blip would roll a revision for no reason.
+		var err error
+		if obs.jwks, obs.jwksDetail, err = r.observeZoneJWKS(ctx, bs.Namespace, obs.zone); err != nil {
+			logger.Error(err, "Failed to read the zone's JWKS ConfigMap")
+			return ctrl.Result{}, err
+		}
+		ksvc, renderErr, err := r.render(ctx, bs, obs.zone, obs.jwks)
 		if err != nil {
 			logger.Error(err, "Failed to render the function")
 			return ctrl.Result{}, err
@@ -256,6 +272,33 @@ func (r *BackendServiceReconciler) secretMetadata(ctx context.Context, namespace
 	}
 }
 
+// observeZoneJWKS reads the metadata of the ConfigMap at the zone's JWKS name
+// through the uncached reader (never its data, never an informer) and says
+// whether the zone controls it. NotFound is a state (absent), not an error.
+func (r *BackendServiceReconciler) observeZoneJWKS(
+	ctx context.Context,
+	namespace string,
+	zone *appsv1alpha1.NextApp,
+) (zoneJWKSState, string, error) {
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	name := ZoneJWKSConfigMapName(zone.Name)
+	meta := &metav1.PartialObjectMetadata{}
+	meta.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("ConfigMap"))
+	switch err := reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, meta); {
+	case apierrors.IsNotFound(err):
+		state, detail := classifyZoneJWKS(nil, zone)
+		return state, detail, nil
+	case err != nil:
+		return zoneJWKSAbsent, "", fmt.Errorf("reading the metadata of ConfigMap %s: %w", name, err)
+	default:
+		state, detail := classifyZoneJWKS(meta, zone)
+		return state, detail, nil
+	}
+}
+
 // render creates or updates the function's ServiceAccount, Knative Service and
 // NetworkPolicy. A child name that another object already controls is reported
 // as renderErr (the function is then not Ready), never taken over.
@@ -263,6 +306,7 @@ func (r *BackendServiceReconciler) render(
 	ctx context.Context,
 	bs *appsv1alpha1.BackendService,
 	zone *appsv1alpha1.NextApp,
+	jwks zoneJWKSState,
 ) (*servingv1.Service, string, error) {
 	sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: FunctionServiceAccountName(bs.Name), Namespace: bs.Namespace}}
 	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, sa, func() error {
@@ -296,7 +340,7 @@ func (r *BackendServiceReconciler) render(
 
 	ksvc := &servingv1.Service{ObjectMeta: metav1.ObjectMeta{Name: bs.Name, Namespace: bs.Namespace}}
 	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, ksvc, func() error {
-		if err := buildFunctionKsvc(bs, zoneRetention(zoneKsvc), ksvc); err != nil {
+		if err := buildFunctionKsvc(bs, zoneRetention(zoneKsvc), jwks, ksvc); err != nil {
 			return err
 		}
 		return ctrl.SetControllerReference(bs, ksvc, r.Scheme)

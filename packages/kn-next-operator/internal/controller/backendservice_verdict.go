@@ -48,6 +48,18 @@ const (
 	// False is a warning and never stops the function from rendering.
 	ConditionDatabaseHostLint = "DatabaseHostLint"
 
+	// ConditionJWKSTrusted: the zone's JWKS ConfigMap is mounted only when the
+	// zone's NextApp controls it. True: it does, and it is mounted. Unknown: it
+	// does not exist yet (the mount is optional) or nothing is rendered. False
+	// (JWKSUntrusted): another object holds the name, so it is NOT mounted and
+	// the function refuses every call except health.
+	ConditionJWKSTrusted = "JWKSTrusted"
+
+	ReasonJWKSControlled   = "Controlled"
+	ReasonJWKSNotPublished = "NotPublished"
+	ReasonJWKSUntrusted    = "JWKSUntrusted"
+	ReasonJWKSNotRendered  = "NotRendered"
+
 	ReasonFunctionBound           = "Bound"
 	ReasonZoneNotFound            = "ZoneNotFound"
 	ReasonZoneNotListed           = "ZoneNotListed"
@@ -95,6 +107,10 @@ type functionObservation struct {
 	// ksvc is the function's Knative Service as rendered this pass; nil when the
 	// function is refused (nothing rendered).
 	ksvc *servingv1.Service
+	// jwks is what was found at the zone's JWKS ConfigMap name; jwksDetail says
+	// why it is untrusted.
+	jwks       zoneJWKSState
+	jwksDetail string
 }
 
 // accepted reports whether the function may be rendered: a valid image, both
@@ -165,6 +181,29 @@ func computeBackendServiceVerdict(bs *appsv1alpha1.BackendService, o functionObs
 	}
 	v.conditions = append(v.conditions, sov)
 
+	// JWKSTrusted — whether the zone's key set reaches the function. Evaluated
+	// only for a function that renders; a refused one mounts nothing.
+	jwksName := ZoneJWKSConfigMapName(bs.Spec.Zone)
+	var jwks metav1.Condition
+	switch {
+	case !o.accepted():
+		jwks = cond(ConditionJWKSTrusted, metav1.ConditionUnknown, ReasonJWKSNotRendered,
+			"the function is not rendered, so no JWKS is mounted")
+	case o.jwks == zoneJWKSUntrusted:
+		jwks = cond(ConditionJWKSTrusted, metav1.ConditionFalse, ReasonJWKSUntrusted, fmt.Sprintf(
+			"ConfigMap %q exists but is not controlled by zone %q (%s), so it is NOT mounted: the function has no "+
+				"key set and refuses every call except the health check. The zone reports JWKSConfigMapConflict. "+
+				"Remove the ConfigMap and the operator publishes the zone's keys", jwksName, bs.Spec.Zone, o.jwksDetail))
+	case o.jwks == zoneJWKSControlled:
+		jwks = cond(ConditionJWKSTrusted, metav1.ConditionTrue, ReasonJWKSControlled, fmt.Sprintf(
+			"ConfigMap %q is controlled by zone %q and is mounted into the function", jwksName, bs.Spec.Zone))
+	default:
+		jwks = cond(ConditionJWKSTrusted, metav1.ConditionUnknown, ReasonJWKSNotPublished, fmt.Sprintf(
+			"ConfigMap %q does not exist yet: the mount is optional, and the function refuses every call except "+
+				"the health check until the zone publishes its keys", jwksName))
+	}
+	v.conditions = append(v.conditions, jwks)
+
 	// DatabaseHostLint — a warning only.
 	var lint metav1.Condition
 	if len(o.lint) > 0 {
@@ -195,6 +234,11 @@ func computeBackendServiceVerdict(bs *appsv1alpha1.BackendService, o functionObs
 		ready = cond(ConditionReady, metav1.ConditionFalse, ReasonSovereigntyViolation, sov.Message)
 	case o.renderErr != "":
 		ready = cond(ConditionReady, metav1.ConditionFalse, ReasonKnativeServiceNameTaken, o.renderErr)
+	case jwks.Status == metav1.ConditionFalse:
+		// Rendered, but with no key set: it refuses every call, so it is not
+		// Ready however healthy its pods are. A policy fact, so it outranks the
+		// wait for the Knative Service.
+		ready = cond(ConditionReady, metav1.ConditionFalse, ReasonJWKSUntrusted, jwks.Message)
 	case o.ksvc == nil || !o.ksvc.Status.GetCondition(servingv1.ServiceConditionReady).IsTrue():
 		reason, msg := "Pending", "the function's Knative Service has not reported Ready yet"
 		if o.ksvc != nil {

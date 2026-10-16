@@ -149,8 +149,11 @@ func functionPort(bs *appsv1alpha1.BackendService) int32 {
 }
 
 // buildFunctionKsvc mutates ksvc toward the function's desired state. The
-// caller sets the controller reference.
-func buildFunctionKsvc(bs *appsv1alpha1.BackendService, retention time.Duration, ksvc *servingv1.Service) error {
+// caller sets the controller reference. jwks is what the reconciler found at
+// the zone's JWKS ConfigMap name: the volume is rendered unless that object is
+// untrusted (see zoneJWKSUntrusted), in which case the function gets no key set
+// at all and refuses every call except health.
+func buildFunctionKsvc(bs *appsv1alpha1.BackendService, retention time.Duration, jwks zoneJWKSState, ksvc *servingv1.Service) error {
 	if ksvc.Labels == nil {
 		ksvc.Labels = map[string]string{}
 	}
@@ -181,18 +184,22 @@ func buildFunctionKsvc(bs *appsv1alpha1.BackendService, retention time.Duration,
 		return err
 	}
 
-	volumes := []corev1.Volume{{
-		Name: FunctionJWKSVolumeName,
-		VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
-			LocalObjectReference: corev1.LocalObjectReference{Name: ZoneJWKSConfigMapName(bs.Spec.Zone)},
-			Items:                []corev1.KeyToPath{{Key: ZoneJWKSFileName, Path: ZoneJWKSFileName}},
-			// Optional until the zone identity exists: the pod starts, and the
-			// function's interceptor refuses every RPC except health (fail closed).
-			Optional: ptr.To(true),
-		}},
-	}}
-	// A directory mount, never a subPath, so a rotated JWKS propagates.
-	mounts := []corev1.VolumeMount{{Name: FunctionJWKSVolumeName, MountPath: ZoneJWKSMountDir, ReadOnly: true}}
+	var volumes []corev1.Volume
+	var mounts []corev1.VolumeMount
+	if jwks != zoneJWKSUntrusted {
+		volumes = append(volumes, corev1.Volume{
+			Name: FunctionJWKSVolumeName,
+			VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
+				LocalObjectReference: corev1.LocalObjectReference{Name: ZoneJWKSConfigMapName(bs.Spec.Zone)},
+				Items:                []corev1.KeyToPath{{Key: ZoneJWKSFileName, Path: ZoneJWKSFileName}},
+				// Optional until the zone identity exists: the pod starts, and the
+				// function's interceptor refuses every RPC except health (fail closed).
+				Optional: ptr.To(true),
+			}},
+		})
+		// A directory mount, never a subPath, so a rotated JWKS propagates.
+		mounts = append(mounts, corev1.VolumeMount{Name: FunctionJWKSVolumeName, MountPath: ZoneJWKSMountDir, ReadOnly: true})
+	}
 	for _, v := range bs.Spec.Volumes {
 		vol := corev1.Volume{Name: v.Name}
 		switch {
@@ -266,7 +273,9 @@ func RenderFunctionObjects(bs *appsv1alpha1.BackendService, zoneRetention time.D
 		TypeMeta:   metav1.TypeMeta{APIVersion: servingv1.SchemeGroupVersion.String(), Kind: "Service"},
 		ObjectMeta: metav1.ObjectMeta{Name: bs.Name, Namespace: bs.Namespace},
 	}
-	if err := buildFunctionKsvc(bs, zoneRetention, ksvc); err != nil {
+	// No cluster object is read, so the JWKS is rendered as for a zone that has
+	// not published one yet: the optional mount.
+	if err := buildFunctionKsvc(bs, zoneRetention, zoneJWKSAbsent, ksvc); err != nil {
 		return nil, err
 	}
 	return []client.Object{sa, ksvc, DesiredFunctionNetworkPolicy(bs.Name, bs.Spec.Zone, bs.Namespace)}, nil
