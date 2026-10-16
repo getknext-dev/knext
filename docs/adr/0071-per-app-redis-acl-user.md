@@ -143,6 +143,19 @@ ACL SETUSER knext-app-<cluster tag>-<app hash> reset on ><password> [#<sha256 of
   `KnextPlatform` uid was rejected: deleting and recreating the singleton would rename every user and
   leave the old ones behind as orphans, which win every conflict (D6a rule 3) and so would fail the
   whole cluster closed.
+- **A rebuild that reattaches to the same Redis fails every app closed, unless the admin acts.**
+  The same thing happens to the `kube-system` uid when a cluster is rebuilt and pointed back at the
+  Redis it used before (this happened on the OKE test cluster). The new uid gives a new cluster tag,
+  so every user the old cluster created is now a foreign user whose pattern overlaps the re-created
+  app with the same namespace and name. A foreign user always wins (D6a rule 3), and the operator
+  never deletes a user it cannot attribute, so **every app fails closed with `PrefixConflict`**.
+  That is the safe direction (a second live cluster looks exactly the same), but it is an outage.
+  The remedy is the platform admin's, and the docs must say it: **before the rebuild**, set
+  `spec.cache.clusterId` on the new cluster's `KnextPlatform` to the old identity (the old
+  `kube-system` uid, or the `clusterId` it already had), so the tag and every username stay the
+  same; **after the fact**, either do that or `ACL DELUSER` the old tag's `knext-app-*` users once
+  the old cluster is known to be gone. To make the second path safe to run, `kn-next doctor` (or an
+  operator report in `status.cache`) should list foreign-tag users per endpoint (Action item 10).
 - **An operator owns only the users that carry its own cluster tag.** It re-asserts (on reconcile and
   on the `run_id` resync) and deletes only those. A `knext-app-*` user with another tag belongs to
   another cluster: this operator never re-asserts, resets or deletes it, and it is a conflict only
@@ -220,21 +233,32 @@ ACL SETUSER knext-app-<cluster tag>-<app hash> reset on ><password> [#<sha256 of
    template. A changed Secret alone does not restart pods, so the stamp is what makes Knative roll a
    new revision onto the new password.
 4. **Retire, only when no pod can still hold the old password.** Kubernetes resolves
-   `valueFrom.secretKeyRef` when a container is created and never updates it, so a pod holds the old
-   password exactly when it was created before step 3. The operator retires only once **no pod of
-   the app, in any revision, has a `creationTimestamp` at or before `rotated-at` plus one second**
-   (timestamps have one-second resolution, so a pod in the same second counts as old). It then
-   deletes `previous-password-sha256` and both annotations from the Secret and re-asserts with `>new`
-   only. Measured: connections that authenticated earlier keep working until they close, and a new
-   `AUTH` with the old password gets `WRONGPASS`, which is why a still-running old pod blocks the
-   retire: every connection it opens afterwards (a reconnect, a pool growing) would be refused. Pods
-   that an older revision starts after step 3 read the new password, so an old revision kept alive
-   by a traffic split or `minScale` does not block the retire forever, only its pods from before the
-   rotation do. **`retire-previous-after` no longer retires.** When it passes and such pods remain,
-   the operator sets `CacheCredentialsReady` to reason `RotationStalled` (still `True`: both passwords
-   belong to the same scoped user, so the boundary holds), emits a Warning event naming the pods, and
-   `kn-next doctor` lists them. Deleting those pods unblocks the retire, and then any queued
-   rotation. The cost is stated: until then, the old password stays valid.
+   `valueFrom.secretKeyRef` when it creates a container and never updates a running one. A container
+   that restarts inside a pod is created again and re-reads the Secret, so a pod created before
+   step 3 may already hold the new password. The gate below therefore **errs safe**: it treats every
+   such pod as holding the old one, which can only delay a retire, never let it run under a pod that
+   still needs the old password. The operator retires only once **no non-terminal pod of the app, in
+   any revision, has a `creationTimestamp` at or before `rotated-at` plus one second** (timestamps
+   have one-second resolution, so a pod in the same second counts as old). **Non-terminal** means
+   phase `Pending`, `Running` or `Unknown`: `Unknown` counts because a pod on an unreachable node may
+   still be running, and a `Running` pod counts whether or not it is `Ready` or already terminating,
+   because a draining pod can still open connections. A pod in phase `Failed` or `Succeeded` runs no
+   container and opens no connection, so it does not count. That matters: an evicted Knative pod stays
+   behind as a `Failed` object until terminated-pod garbage collection removes it, which by default
+   only starts at 12,500 terminated pods cluster-wide. A gate that counted those would stall the
+   rotation, and every rotation queued behind it, more or less for good. Once the gate is clear the
+   operator deletes `previous-password-sha256` and both annotations from the Secret and re-asserts
+   with `>new` only. Measured: connections that authenticated earlier keep working until they close,
+   and a new `AUTH` with the old password gets `WRONGPASS`, which is why a still-running old pod
+   blocks the retire: every connection it opens afterwards (a reconnect, a pool growing) would be
+   refused. Pods that an older revision starts after step 3 read the new password, so an old revision
+   kept alive by a traffic split or `minScale` does not block the retire forever, only its
+   non-terminal pods from before the rotation do. **`retire-previous-after` no longer retires.** When
+   it passes and such pods remain, the operator sets `CacheCredentialsReady` to reason
+   `RotationStalled` (still `True`: both passwords belong to the same scoped user, so the boundary
+   holds), emits a Warning event naming the pods, and `kn-next doctor` lists them. Deleting those pods
+   unblocks the retire, and then any queued rotation. The cost is stated: until then, the old password
+   stays valid.
 
 **The rotation state lives in the Secret, so every re-assert during a rotation carries both
 passwords** (D2: the arguments are a function of the Secret). Each crash point converges:
@@ -245,7 +269,8 @@ passwords** (D2: the arguments are a function of the Secret). Each crash point c
 | step 3 | new password + previous hash | `>new #<old>` | both work until retire, as intended |
 | a Redis restart anywhere mid-rotation | as above | the `run_id` resync re-asserts from the Secret | both passwords restored, not only the new one |
 | step 4's Secret update, before its re-assert | new password only | `>new` | the old password goes, as intended |
-| `retire-previous-after` passes while a pod created before step 3 still runs | new password + previous hash | `>new #<old>` (not retired) | the old pod keeps connecting; `RotationStalled` until it is gone; then the retire runs |
+| `retire-previous-after` passes while a non-terminal pod (`Pending`, `Running`, `Unknown`) created before step 3 remains | new password + previous hash | `>new #<old>` (not retired) | the old pod keeps connecting; `RotationStalled` until it is gone; then the retire runs |
+| a pod created before step 3 was evicted or completed and lingers as a `Failed` / `Succeeded` object until terminated-pod GC | new password + previous hash | `>new` once no non-terminal old pod remains | not counted (it runs no container), so the retire is not stalled by it |
 | a second rotation is requested before the retire | unchanged: one previous hash | `>new #<old>` | the request is queued (`status.cache.rotation.pending`), never written into the slot; it starts after the retire |
 | a crash after the retire, with a rotation queued | new password only; `pending` in status | `>new` | the next reconcile starts the queued rotation at step 2 |
 
@@ -433,7 +458,7 @@ scope (they hold the provisioner credential by design).
 | **Suppress another app's CDN purges** | set `spec.cache.keyPrefix` to `knext` or anything under `knext:`, which is issued a pattern over every app's claim keys | the platform keyspace is reserved for every app, refused at admission and re-checked at reconcile; the finalizer never sweeps it; each app's claim selector uses the operator-derived tag prefix (D2, D6a rule 0) | the CRD itself does not refuse `knext` yet (Action item 9); until then the webhook is the only admission gate |
 | Lock out an app on another cluster | run an app with the victim's namespace and name on a second cluster that shares the Redis, so its operator re-asserts the victim's user with a new password | the username carries a cluster tag, and an operator never re-asserts or deletes a user with another cluster's tag (D2, D6a rule 3) | the two apps share a derived prefix, so the second to provision fails closed (`PrefixConflict`) until one gets an explicit prefix; two clusters given the same `clusterId` by their admins collide (admin misconfiguration) |
 | Lock out a victim by stealing its rotation | none found: rotation is driven by an annotation on the victim's own `NextApp` | the rotation state lives in the victim's operator-owned Secret (D4) | none known |
-| Break an app's own pods with a rotation | rotate while pods created before the rotation still run, or rotate twice before the retire | the retire waits until no pod created before `rotated-at` remains; a second request is queued, never written over the previous-hash slot (D4) | while a stale pod lives, the old password stays valid (`RotationStalled` makes that visible) |
+| Break an app's own pods with a rotation | rotate while pods created before the rotation still run, or rotate twice before the retire | the retire waits until no non-terminal pod created before `rotated-at` remains (an evicted `Failed` pod does not block it); a second request is queued, never written over the previous-hash slot (D4) | while a stale pod lives, the old password stays valid (`RotationStalled` makes that visible) |
 
 ## Options considered
 
@@ -483,6 +508,9 @@ scope (they hold the provisioner credential by design).
   grants it does not hold for this today.
 - The same namespace and name in two clusters on one Redis now fail closed for the second cluster
   instead of silently sharing a cache (D6a rule 3).
+- A cluster rebuilt and reattached to the same Redis fails every app closed (`PrefixConflict`)
+  until the platform admin carries the old identity over in `spec.cache.clusterId` or sweeps the
+  old tag's users (D2, Action item 10).
 - A rotation can stay open while a pod from before it runs; the old password stays valid that long
   (`RotationStalled`).
 - Registration takes only an in-cluster Service FQDN in phase 1 (D1a).
@@ -497,8 +525,9 @@ scope (they hold the provisioner credential by design).
    function of the Secret; `CacheCredentialsReady` in `computeStatusVerdict`), D3 (operator-owned
    Secret, `secretKeyRef` wiring, the two admission refusals keyed on the canonical endpoint,
    re-checked at reconcile), D4 (rotation with the previous password's hash, `rotated-at` and
-   `retire-previous-after` persisted in the Secret; the retire gated on no pod created at or before
-   `rotated-at`, with the RBAC to list the app's pods; `RotationStalled`; a queued second rotation
+   `retire-previous-after` persisted in the Secret; the retire gated on no **non-terminal** pod
+   (`Pending`, `Running`, `Unknown`; not `Failed` / `Succeeded`) created at or before `rotated-at`,
+   with the RBAC to list the app's pods, and a test that an evicted `Failed` pod does not stall it; `RotationStalled`; a queued second rotation
    in `status.cache.rotation.pending`; a test per crash point in the D4 table), D6
    (`spec.cache.isolation` and the fail-closed table), **D6a** (rule 0: admission and reconcile
    refuse `knext` / `knext:…` for every app, and the finalizer never sweeps it; rule 1: admission
@@ -517,21 +546,29 @@ scope (they hold the provisioner credential by design).
    helpers, **or in which the scan finds any hit or any construct it cannot resolve** (so a file only
    handed a client is scanned for what it calls), except the CLI directory (it never runs as the
    app's user). In those files it counts a member named like a Redis command (the canonical
-   `COMMAND LIST` of Redis 7.4 and Valkey 8.1, or its ioredis `Buffer` / `Stream` variant, any
-   receiver) that is called, optionally called, bound / called / applied, handed to
-   `Reflect.apply`, or assigned; `.call/.pcall/.send/.sendCommand/.callBuffer`, `command/
-   redisCommand` and `new Command` with a literal command; `['CMD', …]` tuples; destructured
-   command keys; `Reflect.get(x, 'cmd')`. A command it cannot resolve fails unless it is an exact,
-   justified forwarder line. Language-global receivers and calls that pass no Redis argument to a
-   command that needs one are not counted (Redis checks arity before ACL, measured). False
-   positives are explained per file (a receiver with the declaration that binds it, or an exact
-   line), and every entry must still occur. It does **not** see a command method passed as an
-   argument or stored in a literal, a computed member read now and invoked later, nested or
-   parameter destructuring, or `eval`/`with`/Proxy tricks; the scanner's header lists them, and the
-   live lane's real-handler layer is the backstop for the paths it runs.
-   `scripts/mutation-prove-redis-command-scan.mjs` proves each rule by exit code.
-3. **The live lane runs in CI** (done in this PR): `ci.yml`'s `use-cache-lua-live-redis` job runs
-   `tests/redis-acl-spike.test.ts` in its own blocking `--no-skip` step against the job's
+   `COMMAND LIST` of Redis 7.4 and Valkey 8.1 plus the command methods ioredis and Bun's client
+   expose that those engines do not list, such as `hgetdel`; any run of ioredis's `Buffer` /
+   `Stream` suffixes on one, such as `zscanBufferStream`; or an ioredis method that sends a fixed
+   command, such as `defineCommand`; any receiver) that is called, optionally called, bound /
+   called / applied, handed to `Reflect.apply`, or assigned;
+   `.call/.pcall/.send/.sendCommand/.send_command/.callBuffer`, `command/redisCommand`,
+   `new Command` and ioredis's builtin-command helpers with a literal command; `['CMD', …]` tuples;
+   destructured command keys; `Reflect.get(x, 'cmd')`. Every member of the ioredis 5 and 6 and Bun
+   client prototypes must resolve under those rules or be a listed non-command, so a client upgrade
+   that adds a command method or a suffix reds. A command it cannot resolve fails unless it is an
+   exact, justified forwarder line. Three exclusions, each tested both ways: language-global
+   receivers; a `.digest(…)` ending a `createHash(…)` / `createHmac(…)` chain in one expression; and
+   calls that pass no Redis argument to a measured command that needs one (Redis checks arity
+   before ACL, measured), never applied to a `*Stream` method or a client-only command. False
+   positives are explained per file (a receiver, for its listed commands only, with the declaration
+   that binds it and no other binding of it, or an exact line), and every entry must still occur. It
+   does **not** see a command method passed as an argument or stored in a literal, a computed member
+   read now and invoked later, nested or parameter destructuring, `eval`/`with`/Proxy tricks, or a
+   client bound to an exempt receiver's name through a parameter or property; the scanner's and the
+   test's headers list them, and the live lane's real-handler layer is the backstop for the paths it
+   runs. `scripts/mutation-prove-redis-command-scan.mjs` proves each rule by exit code.
+3. **The live lane runs in CI** (landed in #2454, already on `integration/v2`, not in this PR):
+   `ci.yml`'s `use-cache-lua-live-redis` job runs `tests/redis-acl-spike.test.ts` in its own blocking `--no-skip` step against the job's
    digest-pinned Redis (`e7723ff…`, Redis 7.4.10), and the spike doc records that digest. Keep the
    spike doc's recorded digest equal to CI's when either moves.
 4. **Follow-up issue:** rebuild both collapse sweeps on an app-owned index, then drop `+scan` (D8).
@@ -548,6 +585,11 @@ scope (they hold the provisioner credential by design).
 9. **#2396, CRD (trigger-class, not changed by this ADR's PR):** add `knext` and `knext:*` to the
    CRD's `keyPrefix` CEL rule and to the CLI's copy of it, next to `kn-next` / `kn-next:*`, so the
    reserved platform keyspace is refused at the schema as well as by the webhook (D6a rule 0).
+10. **#2396, foreign-tag report (D2):** `kn-next doctor`, or an operator report in `status.cache`,
+    lists the `knext-app-*` users on each registered endpoint whose cluster tag is not this
+    cluster's, with their key patterns and whether they overlap an app here. It reports, never
+    deletes: it is what lets a platform admin tell a rebuilt cluster's orphans from a live second
+    cluster before sweeping them, and the docs carry the `clusterId`-before-rebuild step.
 
 ## Decision log (jev, 2026-10-16)
 
@@ -586,3 +628,12 @@ Round 3 (code review of round 2; carried by a follow-up PR, because #2454 merged
 | Reserving the `knext` platform keyspace (D6a rule 0) | refuse for every app at the webhook and reconcile; CRD rule as an action item | 0.98 (vs change the CRD in this PR 0.02, reserve only for isolated apps 0.00) |
 | When the previous password retires (D4) | no pod created at or before `rotated-at` remains; the deadline only raises `RotationStalled` | 0.84 (vs gate on older revisions' Ready pods with a forced deadline 0.16, retire at the deadline 0.00) |
 | A second rotation before the retire (D4) | queue it until the retire | 0.43 (vs refuse it at admission 0.31, two previous-hash slots 0.26). Low confidence: queueing needs no new admission rule and never drops a live password, which is what tipped it |
+
+Round 4 (code review of round 3):
+
+| Decision | Pick | Score |
+|---|---|---|
+| Which pods the retire gate counts (D4) | non-terminal pods only (`Pending`, `Running`, `Unknown`) | 0.94 (vs Ready pods only 0.06, every pod object 0.00) |
+| A rebuilt cluster reattached to the same Redis (D2) | name the remedy (`clusterId` before the rebuild, or an admin sweep of the old tag) and add a foreign-tag report | 0.96 (vs `clusterId` only 0.04, the operator deleting foreign users 0.00) |
+| Client command methods the measured engines do not list (scan) | a generated client command list, checked against every installed client's prototypes | 0.73 (vs leave them as a residual 0.17, import the client's list at scan time 0.10) |
+| `DIGEST` false hits on node:crypto chains (scan) | a narrow exclusion for a `createHash` / `createHmac` chain, tested both ways | 1.00 (vs per-line allowlist entries 0.00, drop `digest` 0.00) |

@@ -130,6 +130,11 @@ removes one rule and must turn the test red:
 | X1–X4 | an exclusion widened: the no-argument rule drops `client.info()`; every argument a function literal; every `.call` dropped; `client` treated as a language global | 1 each |
 | D1, D2 | discovery by any hit; discovery by an unparseable construct | 1 each |
 | B1 | a second declaration of an allowlisted receiver | 1 |
+| R4-I1–I5 (injected into `cache-handler.js`) | `client.zscanBufferStream(k)`; `client.sscanBufferStream(k, { match })`; a zero-argument `client.zscanStream()`; `client.hgetdel(…)`; `client.send_command('UNLINK', …)` | 1 each |
+| R4-S9, Z1, Z2 | the suffix stripped once only; a `*Stream` method arity-exempt (`client.scanStream()`); client-only commands arity-exempt | 1 each |
+| R4-C1, C2, H1, M1–M3 | the client-only command list; `sentinel`; the ioredis builtin-command helpers; `defineCommand` → EVALSHA; `refreshSlotsCache` → CLUSTER; a prototype member nobody classified | 1 each |
+| R4-K1, K2 | the node:crypto `.digest` exclusion widened to every `.digest`; removed (false hits) | 1 each |
+| R4-N1, N2, B2–B6 | a receiver entry exempting every command; `log.zrange(…)` injected on an exempt receiver; a destructured rebinding injected; the destructuring, import, assignment and `for (const … of)` binding rules | 1 each |
 | E1, E2 | the spike's ACL-refusal classification and its exit code | 1 each |
 | L1–L3 (`KNEXT_REDIS_LIVE_URL` set) | the per-layer handling that reports an ACL abort as a finding; the prune cutoff; the `DISCARD` row | 1 each |
 
@@ -140,6 +145,18 @@ carries it. And with the per-layer handling removed, full-mode `--drop=set --ass
 because the run's top-level handler maps an ACL refusal to 1 as well; what only the per-layer
 handling gives is a run that reaches its end and reports the finding, so a report-only test
 (`--drop=set` without `--assert` exits 0) now carries that row.
+
+The round-4 review proved `client.zscanBufferStream(key)` green by exit code: the suffix rule
+stripped one suffix, and ioredis also defines `<scan>BufferStream`. The suffix grammar is now read
+off ioredis itself (`Commander` defines `<cmd>Buffer` for every command, `Redis` defines
+`<scan>Stream` and `<scan>BufferStream`), and a test walks every member of the ioredis 5 and 6
+`Redis` / `Cluster` / `Pipeline` prototypes and Bun's `RedisClient`: each must resolve to a
+command or be a listed non-command, with its reason. That walk found more than the review: 52
+command methods the clients send that neither measured engine lists (`hgetdel`, `hsetex`, `vadd`,
+`digest`, `sentinel`, …), ioredis's `send_command` issuer, its `createBuiltinCommand` /
+`addBuiltinCommand` / `createScanStream` helpers, and internals that send a fixed command
+(`defineCommand` → EVALSHA, `_readyCheck` → INFO). A `*Stream` method is never treated as
+arity-safe: `scanStream()` takes no JS argument and still sends `SCAN 0`.
 
 The source scan runs in every CI run (it needs no Redis). The live half runs when
 `KNEXT_REDIS_LIVE_URL` is set and is skipped otherwise, like the existing live Lua lane.
