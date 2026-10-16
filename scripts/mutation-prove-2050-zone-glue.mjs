@@ -140,7 +140,7 @@ const KEY_BLOCK =
   '    `  ${cacheTag}(${JSON.stringify(serviceTag(ctx.fn, method))});`,\n' +
   "    '  // protoVersion is part of the cache key only: a function rollout is a new entry.',\n" +
   "    '  void protoVersion;',\n" +
-  "    `  const token = ${mintExpr(ctx, method, 'subject')};`,";
+  "    `  const token = ${mintExpr(ctx, p, 'subject')};`,";
 
 // The one line of the emitted action that refreshes the reads, and the one
 // that decides whether a failed call may have committed.
@@ -158,10 +158,7 @@ const TWO_USER = [
     replacement: KEY_BLOCK.replace(
       '    `  return ${name}$cached(subject,',
       '    `  globalThis.__knextSubject = subject;`,\n    `  return ${name}$cached("everyone",',
-    ).replace(
-      "${mintExpr(ctx, method, 'subject')}",
-      "${mintExpr(ctx, method, 'globalThis.__knextSubject')}",
-    ),
+    ).replace("${mintExpr(ctx, p, 'subject')}", "${mintExpr(ctx, p, 'globalThis.__knextSubject')}"),
   },
   {
     id: 'U02',
@@ -172,7 +169,7 @@ const TWO_USER = [
     // The token is minted BEFORE the cached call and becomes its first key
     // argument; the cached function's own mint is gone.
     replacement:
-      "    `  const token = ${mintExpr(ctx, method, 'subject')};`,\n" +
+      "    `  const token = ${mintExpr(ctx, p, 'subject')};`,\n" +
       '    `  return ${name}$cached(token, ${servedVersionExpr(ctx)}, ${encode}(${input}, request));`,\n' +
       "    '}',\n" +
       "    '',\n" +
@@ -218,7 +215,7 @@ const TWO_USER = [
 // ── a failed write refreshes the reads only if it may have been sent ──────
 const CHECKS_THEN_CALL =
   '    `  const message = ${normalize}(${input}, request);`,\n' +
-  "    `  const token = ${mintExpr(ctx, method, 'subject')};`,\n" +
+  "    `  const token = ${mintExpr(ctx, p, 'subject')};`,\n" +
   "    '  let mayHaveCommitted = true;',\n" +
   "    '  try {',\n" +
   '    `    return await ${client}.${name}(message, { idempotencyKey: options?.idempotencyKey, token });`,';
@@ -308,9 +305,12 @@ const RUNTIME = [
   {
     id: 'G01',
     subject: 'glue',
-    claim: 'with no minter registered, a call is not refused as FAILED_PRECONDITION',
-    anchor: "  if (typeof minter !== 'function') {",
-    replacement: '  if (false) {',
+    claim:
+      'with no minter registered and no signing key, a call is not refused as FAILED_PRECONDITION (an unsigned fallback mints)',
+    anchor:
+      "    typeof registered === 'function' ? (registered as TokenMinter) : defaultZoneSigner();",
+    replacement:
+      "    typeof registered === 'function' ? (registered as TokenMinter) : () => 'unsigned';",
   },
   {
     id: 'G02',

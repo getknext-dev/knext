@@ -33,7 +33,7 @@ async function getOrder$cached(subject: string, protoVersion: string, request: s
   $cacheTag("knext:orders:orders.v1.OrdersService");
   // protoVersion is part of the cache key only: a function rollout is a new entry.
   void protoVersion;
-  const token = await $mintCallToken({ function: "orders", method: "/orders.v1.OrdersService/GetOrder", sub: $subjectSub(subject) });
+  const token = await $mintCallToken({ function: "orders", method: "/orders.v1.OrdersService/GetOrder", auth: "user", sub: $subjectSub(subject) });
   return $ordersService.getOrder($decodeRequest(GetOrderRequestSchema, request), { token });
 }
 
@@ -44,7 +44,7 @@ async function getOrder$cached(subject: string, protoVersion: string, request: s
 export async function* watchOrders(request: MessageInitShape<typeof WatchOrdersRequestSchema>, options?: { readonly signal?: AbortSignal }): AsyncGenerator<WatchOrdersResponse> {
   const subject = await $userSubject($authorize, { function: "orders", service: "orders.v1.OrdersService", method: "WatchOrders", kind: "stream" });
   $servedVersion("orders", "ORDERS_SERVICE_PROTO_VERSION", "1.2.0");
-  const token = await $mintCallToken({ function: "orders", method: "/orders.v1.OrdersService/WatchOrders", sub: $subjectSub(subject) });
+  const token = await $mintCallToken({ function: "orders", method: "/orders.v1.OrdersService/WatchOrders", auth: "user", sub: $subjectSub(subject) });
   yield* $ordersService.watchOrders($normalizeRequest(WatchOrdersRequestSchema, request), { token, signal: options?.signal });
 }
 

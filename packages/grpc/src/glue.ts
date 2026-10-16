@@ -12,10 +12,12 @@
  *   read's key, so a function rolled out ahead of its zone never has its
  *   predecessor's results served for it. Unset, unreadable or older than the
  *   zone's contract is FAILED_PRECONDITION.
- * - {@link mintCallToken} is the seam the per-call identity token comes from.
+ * - {@link mintCallToken} is where the per-call identity token comes from.
  *   The generated code calls it INSIDE the cached function, so the token is
- *   never part of a cache key. With no minter registered it is
- *   FAILED_PRECONDITION: a call never leaves the zone without a token.
+ *   never part of a cache key. It uses the zone signer over the mounted
+ *   signing-key Secret (`signer.ts`) unless a minter is registered; without a
+ *   key, an issuer or a function address it is FAILED_PRECONDITION: a call
+ *   never leaves the zone without a token.
  * - {@link encodeRequest}/{@link decodeRequest}/{@link normalizeRequest} move a
  *   request across the cache-key and Server-Action boundaries as the contract
  *   defines it, and nothing else.
@@ -32,6 +34,7 @@ import {
 import { base64Decode, base64Encode } from '@bufbuild/protobuf/wire';
 import { Code, ConnectError } from '@connectrpc/connect';
 import type { MethodKind } from './policy';
+import { defaultZoneSigner } from './signer';
 import { checkContractSkew } from './skew';
 
 /** What the generated code tells authorize() about the call it is about to make. */
@@ -127,6 +130,11 @@ export interface TokenRequest {
   readonly function: string;
   /** The RPC, as its path: `/orders.v1.OrdersService/GetOrder`. */
   readonly method: string;
+  /**
+   * The RPC's `(knext.v1.auth)`. Only `public` may go without a user; a request
+   * that does not say is held to `user`.
+   */
+  readonly auth?: 'user' | 'public';
   /** The verified user, absent for an `AUTH_PUBLIC` read. */
   readonly sub?: string;
 }
@@ -141,26 +149,23 @@ export type TokenMinter = (request: TokenRequest) => string | Promise<string>;
 const MINTER_KEY = Symbol.for('knext.grpc.tokenMinter');
 
 /**
- * Register (or, with `undefined`, remove) the zone's token minter.
- *
- * TODO(#2051): the per-zone identity token registers its minter here. Until it
- * does, no minter is registered and every generated call fails closed.
+ * Register (or, with `undefined`, remove) a token minter in place of the
+ * default zone signer: a signer with other options
+ * (`createZoneTokenSigner({ ... })`), or a test double.
  */
 export function registerTokenMinter(minter: TokenMinter | undefined): void {
   (globalThis as Record<symbol, unknown>)[MINTER_KEY] = minter;
 }
 
-/** Mint the identity token for one call. Fails closed without a minter. */
+/**
+ * Mint the identity token for one call: with the registered minter, or else
+ * the default zone signer, which fails closed without its key and issuer.
+ */
 export async function mintCallToken(request: TokenRequest): Promise<string> {
-  const minter = (globalThis as Record<symbol, unknown>)[MINTER_KEY];
-  if (typeof minter !== 'function') {
-    throw new ConnectError(
-      `no identity-token minter is registered, so ${request.method} on the ${request.function} ` +
-        'function was not called',
-      Code.FailedPrecondition,
-    );
-  }
-  const token: unknown = await (minter as TokenMinter)(request);
+  const registered = (globalThis as Record<symbol, unknown>)[MINTER_KEY];
+  const minter =
+    typeof registered === 'function' ? (registered as TokenMinter) : defaultZoneSigner();
+  const token: unknown = await minter(request);
   if (typeof token !== 'string' || !/^[\x21-\x7e]{1,8192}$/.test(token)) {
     throw new ConnectError('the token minter returned no usable token', Code.Unauthenticated);
   }

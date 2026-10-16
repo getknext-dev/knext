@@ -234,6 +234,42 @@ describe('glue refusals', () => {
     expect(r.err).toContain('src/knext/authorize.ts');
   });
 
+  it('refuses an authorize() module that does not export authorize by name', async () => {
+    for (const [name, source] of [
+      ['empty', '// TODO: write the hook\n'],
+      ['commented', '// export async function authorize(ctx) { return { sub: "x" }; }\n'],
+      ['default-only', 'export default async function authorize() { return { sub: "x" }; }\n'],
+      ['other-name', 'export async function authorise() { return { sub: "x" }; }\n'],
+      ['type-only', 'type authorize = () => void;\nexport type { authorize };\n'],
+      ['star-only', 'export * from "./session";\n'],
+    ] as const) {
+      const zone = copyFixtureZone(`refuse-noexport-${name}`);
+      writeFileSync(join(zone, 'src/knext/authorize.ts'), source);
+      const r = await refused(zone);
+      expect(r.code, name).toBe(1);
+      expect(r.err, name).toContain('src/knext/authorize.ts');
+      expect(r.err, name).toContain('does not export authorize');
+      expect(r.wrote, name).toBe(false);
+    }
+  });
+
+  it('accepts every way of exporting authorize by name', async () => {
+    for (const [name, source] of [
+      ['async-function', 'export async function authorize(ctx) {\n  throw new Error("no");\n}\n'],
+      ['function', 'export function authorize(ctx) {\n  throw new Error("no");\n}\n'],
+      ['const', 'export const authorize = async () => {\n  throw new Error("no");\n};\n'],
+      [
+        'list',
+        'async function check() {\n  throw new Error("no");\n}\nexport { check as authorize };\n',
+      ],
+      ['re-export', 'export { authorize } from "./session";\n'],
+    ] as const) {
+      const zone = copyFixtureZone(`accept-export-${name}`);
+      writeFileSync(join(zone, 'src/knext/authorize.ts'), source);
+      expect(generateFiles(zone).size, name).toBeGreaterThan(0);
+    }
+  });
+
   it('refuses two services in one file whose RPCs would export the same name', async () => {
     const zone = copyFixtureZone('refuse-collision');
     const path = join(zone, ORDERS);

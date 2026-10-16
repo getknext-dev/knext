@@ -20,6 +20,7 @@
  *   (`2` or `1.1`) overrides either default for one binding. The transport
  *   chosen for each binding is logged once, by name;
  * - a call made with a `token` carries it as `authorization: Bearer <token>`.
+ *   The generated code mints it per call with the zone signer (`signer.ts`).
  *
  * The policy kinds in a definition are checked against the service
  * descriptor when the client is defined: a definition that would retry a
@@ -379,3 +380,12 @@ export {
   userSubject,
   wasNotSent,
 } from './glue';
+export {
+  audienceFromServiceUrl,
+  contractKid,
+  createZoneTokenSigner,
+  SIGNING_KEY_DIR,
+  TOKEN_TTL_SECONDS,
+  ZONE_ISSUER_ENV,
+  type ZoneSignerOptions,
+} from './signer';
