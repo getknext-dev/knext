@@ -13,9 +13,13 @@
  *     graduates the feature the guard relaxes by itself, and an ADR whose
  *     stage cannot be read FAILS rather than relaxing (a guard that goes quiet
  *     when its input is unparseable is decoration).
- *   - A claim is a sentence that names the feature AND uses a stage word with
- *     no negation or condition in the same sentence ("not stable", "until it
- *     is stable"). Files are found by scanning for their class, not by name.
+ *   - A claim is a sentence that names the feature AND uses a stage word that
+ *     no negation directly on it ("not yet stable"), prior condition ("until it
+ *     is stable") or future-framed condition ("will be stable once ...") excuses.
+ *     Files are found by scanning for their class, not by name.
+ *   - Heuristic limit: this is phrase matching, not parsing. A claim with no
+ *     stage word ("has graduated", "is past Beta") is not seen, and an exotic
+ *     excuse we have not listed is flagged, which a human then rewords.
  */
 
 import { readdirSync, readFileSync, statSync } from 'node:fs';
@@ -61,35 +65,49 @@ export function adrStage(adr) {
 const SUBJECT =
   /\bin[- ]process\s+(?:rust|native)\b|\brust\s+in[- ]process\b|\bbun:ffi\b|\bffi\b|\bin[- ]process\s+(?:zone|rust)\s+code\b/i;
 const CLAIM_WORDS =
-  /\b(?:stable|production[- ](?:ready|grade)|generally available|general availability)\b/i;
+  /\b(?:stable|prod(?:uction)?[- ](?:ready|grade)|ready for production|generally available|general availability|no longer (?:experimental|beta))\b/gi;
 // "GA" counts only upper-case: the lower-case letters are an ordinary word fragment.
-const CLAIM_GA = /\bGA\b/;
-const HEDGE =
-  /\b(?:not|no|never|nor|cannot|until|unless|before|once|yet|if|when|whether|graduat\w*)\b|n[’']t\b/i;
+const CLAIM_GA = /\bGA\b/g;
+
+/** A negation excuses a claim only when it sits DIRECTLY on the stage word ("not yet stable"). */
+const DIRECT_NEGATION =
+  /(?:\b(?:not|never|cannot|no longer)|n[’']t)(?:\s+(?:yet|currently|really|quite|fully|officially|considered|be|been|being|a|an|the|just|so|very))*\s*$/i;
+
+/** A condition earlier in the clause ("until it is stable", "whether it is stable"). */
+const PRIOR_CONDITION = /\b(?:until|unless|before|once|if|when|whether|graduat\w*)\b/i;
 
 const FORWARD_CONDITION = /\b(?:once|when|until|unless|if|after|whenever)\b/i;
 
-/** How many words before a stage word a negation or condition still excuses it. */
+/** A trailing condition excuses only a future framing ("will be stable once ..."), not "is now stable when ...". */
+const FUTURE_FRAMING = /\b(?:will|would|could|may|might|should|becomes?|becoming|can be)\b/i;
+
+/** "stable Rust toolchain", "Bun stable release", "the stable channel": a toolchain, not a claim. */
+const STABLE_TOOLCHAIN = /^\s*(?:rust|toolchain|release|channel|version|bun|node)\b/i;
+
+/** How many words before a stage word a prior condition or future framing still counts. */
 const HEDGE_WINDOW = 8;
 
 /**
- * Does this clause use a stage word that nothing just before it negates or
- * conditions? "not yet stable", "until it is production-ready" and "when GA"
- * are excused; "production-ready, not experimental" is not (the "not" comes
- * AFTER the claim and is about something else).
+ * Does this clause use a stage word that nothing excuses? Excused: a negation
+ * directly on the word ("not yet stable", "isn't GA"), a prior condition
+ * ("until it is production-ready"), a future-framed trailing condition
+ * ("will be stable once ..."), and "stable" modifying a toolchain noun.
+ * "production-ready, not experimental" is still a claim: that "not" is about
+ * something else.
  */
 function claimsStage(clause) {
-  const re = new RegExp(`${CLAIM_WORDS.source}|${CLAIM_GA.source}`, 'gi');
-  for (const m of clause.matchAll(re)) {
-    if (!CLAIM_WORDS.test(m[0]) && !CLAIM_GA.test(m[0])) continue;
-    const before = clause.slice(0, m.index).split(/\s+/).slice(-HEDGE_WINDOW).join(' ');
-    const after = clause
-      .slice(m.index + m[0].length)
-      .split(/\s+/)
-      .slice(0, 4)
-      .join(' ');
-    // "becomes stable once Bun drops …" is a condition, not a claim.
-    if (!HEDGE.test(before) && !FORWARD_CONDITION.test(after)) return true;
+  for (const re of [CLAIM_WORDS, CLAIM_GA]) {
+    for (const m of clause.matchAll(re)) {
+      const head = clause.slice(0, m.index);
+      const tail = clause.slice(m.index + m[0].length);
+      if (/^stable$/i.test(m[0]) && STABLE_TOOLCHAIN.test(tail)) continue;
+      if (DIRECT_NEGATION.test(head)) continue;
+      const before = head.split(/\s+/).slice(-HEDGE_WINDOW).join(' ');
+      if (PRIOR_CONDITION.test(before)) continue;
+      const after = tail.split(/\s+/).slice(0, 4).join(' ');
+      if (FORWARD_CONDITION.test(after) && FUTURE_FRAMING.test(before)) continue;
+      return true;
+    }
   }
   return false;
 }

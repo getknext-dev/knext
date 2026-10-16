@@ -102,6 +102,14 @@ describe('what counts as a claim', () => {
     'In-process Rust is now production-ready: the call never fails and is never slow.',
     'In-process Rust is stable; no extra setup is needed.',
     '---\n"@getknext/core": minor\n---\n\nThe `@getknext/ffi` package is stable.',
+    // round 2: escapes a loose window let through
+    'In-process Rust is no longer experimental and is stable.',
+    'In-process Rust is no longer experimental.',
+    'bun:ffi is now stable when used correctly.',
+    'In-process Rust is not just fast, it is stable.',
+    'In-process Rust is ready for production.',
+    'bun:ffi is prod ready.',
+    'In-process Rust is production ready.',
   ];
   for (const text of claims) {
     it(`flags ${JSON.stringify(text)}`, () => {
@@ -122,6 +130,12 @@ describe('what counts as a claim', () => {
     'Beta: in-process Rust runs only on Bun.',
     'The official cache interfaces are production-ready.',
     'in-process rust\n\nA stable release of Next.js is required.',
+    // round 2: "stable" naming a toolchain or channel is not a stage claim
+    'Use stable Rust toolchain with bun:ffi.',
+    'Requires Bun stable release for FFI.',
+    'bun:ffi loads from the stable channel.',
+    'In-process Rust is not ready for production.',
+    'It will be stable once Bun drops the experimental label on bun:ffi.',
   ];
   for (const text of fine) {
     it(`accepts ${JSON.stringify(text)}`, () => {
