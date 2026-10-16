@@ -186,9 +186,20 @@ spec:
                 description: Caching infrastructure
                 properties:
                   keyPrefix:
-                    description: KeyPrefix is prepended to every cache key — maps
-                      from KnativeNextConfig.cache.keyPrefix
+                    description: |-
+                      KeyPrefix is prepended to every Redis cache key ("<keyPrefix>:..."); maps
+                      from KnativeNextConfig.cache.keyPrefix. Empty means unset: the operator
+                      gives the app its own default prefix, "kn-" plus 12 hex characters.
+                      At most 63 characters, with no whitespace and none of the Redis glob
+                      characters * ? [ ] \. "kn-next" and any prefix starting "kn-next:" are
+                      reserved for the shared fallback keyspace.
+                    maxLength: 63
+                    pattern: ^[^*?\[\]\\ \t\n\r\f\v]*$
                     type: string
+                    x-kubernetes-validations:
+                    - message: keyPrefix 'kn-next' and prefixes under 'kn-next:' are
+                        reserved for the shared fallback keyspace
+                      rule: self != 'kn-next' && !self.startsWith('kn-next:')
                   provider:
                     type: string
                   url:

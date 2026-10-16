@@ -1,7 +1,9 @@
 # ADR-0017: NextApp CRD stays v1alpha1; conversion webhook deferred
 
 - Status: Accepted (amended 2026-07-28: CRD versioning at 1.0; amended 2026-09-30: v1.0 GA CRD
-  decision + §2.1 mechanical enforcement — see the amendments below)
+  decision + §2.1 mechanical enforcement; Amendment 3 (2026-10-16) **Proposed**: exact, single-use
+  waivers for value narrowings, resting on a Kubernetes server floor of 1.30 — see the amendments
+  below)
 - Date: 2026-06-27
 - Deciders: knext architect
 - Related: ADR-0001 (operator = single source of truth), ADR-0008 (finalizer + reconcile predicate),
@@ -360,3 +362,89 @@ same way they would treat any other honest-but-not-required signal: read it, do 
 - [x] Restate the npm-surface-is-the-1.0-contract split as the 1.0-GA answer (§3).
 - [x] Enforce §2.1 mechanically: `scripts/crd-schema-diff.mjs` + `scripts/lib/crd-schema-diff.mjs`,
       wired as `ci.yml`'s `crd-schema-additive-guard` job (§4).
+
+## Amendment 3 (2026-10-16) — narrowing waivers
+
+**Status: Proposed.** Listed for the sprint-close design review. Until that review accepts it, the
+three waivers below stand on the code and spec reviews of the PRs that added them.
+
+### Context
+
+The keyPrefix work (#2398) needed to reject a bad `spec.cache.keyPrefix` at admission: whitespace,
+the Redis glob characters `* ? [ ] \`, more than 63 characters, and the shared fallback keyspace
+`kn-next` / `kn-next:*`. That is a pattern, a `maxLength` and a CEL rule added to an **existing**
+field, which §2.1 forbids within `v1alpha1` and which Amendment 2's guard fails on. The guard had no
+escape hatch, so the choice was a new API version (T-a) for three value rules, or a narrow,
+recorded exception.
+
+Two facts make some narrowings safe in place, and only those:
+
+1. **CRD validation ratcheting.** From Kubernetes 1.30 (beta, on by default; GA in 1.33) the
+   apiserver does not re-apply a value rule to a field whose value an update leaves unchanged. An
+   object stored before the narrowing keeps taking unrelated updates; only a *changed* invalid value
+   is refused. Ratcheting covers value validations (`pattern`, `enum`, length/size/numeric bounds,
+   `format`) and CEL rules that do not use `oldSelf`. It does **not** cover structure: a removed
+   field, a type change, a new required field.
+2. **A server floor at or above 1.30.** On 1.28 and 1.29 ratcheting is alpha and off, so the same
+   update is refused (measured: `keyprefix_ratcheting_envtest_test.go` on envtest 1.29.5 refuses all
+   four rule classes; 1.30.3 and 1.35.0 admit the unrelated edit). The keyPrefix PR therefore also
+   **declares a Kubernetes server floor of 1.30** in the support matrix. That floor is the
+   precondition this amendment rests on; lowering it would void every waiver granted under it.
+
+### Decision
+
+The guard accepts **exact, single-use waivers** in `scripts/crd-narrowing-waivers.json`, checked by
+`validateWaiverEntry` / `applyWaivers` in `scripts/lib/crd-schema-diff.mjs`.
+
+- **What an entry is.** One exact violation string as the guard prints it, which must contain the
+  entry's own field path and rule text, plus `added` (a date), `justification` (why it is safe) and
+  `adr` (a link to this amendment). Editing the narrowed rule changes the string, so the entry stops
+  matching and the guard fails again.
+- **What can be waived.** Only value narrowings that ratcheting covers: `pattern`, `enum`, a
+  length/size/numeric bound, or a CEL rule without `oldSelf`. The validator refuses an entry for any
+  other class; those still need a new API version (§3, T-a).
+- **Single use.** An entry that matches no current violation is stale and **fails** the guard. Once
+  the narrowing ships in a `v*` tag the violation disappears from the diff, and the entry must be
+  deleted in the next PR on that line. An entry cannot be carried forward to cover anything else.
+- **Who may add one.** Any PR author may propose an entry. It merges only when the PR carries all
+  of the evidence below, both the code and the spec review clear it, and the PR body acknowledges
+  the ADR and CRD escalation triggers. Every entry is listed for the next sprint-close design
+  review, which may revert it.
+- **Evidence required.**
+  1. An envtest proving the apiserver rejects each invalid class and admits each valid one.
+  2. A ratcheting envtest: an object stored under the pre-narrowing schema, the CRD then narrowed,
+     an unrelated edit admitted on the server floor, and a changed invalid value still refused.
+  3. The documented server floor is at least the ratcheting floor (1.30).
+  4. A way for users to find affected objects before they upgrade (a `knext doctor` finding), or a
+     stated reason there can be none.
+  5. Upgrade notes in the user docs: operator/CRD first, then CLI, and what happens to an existing
+     object whose value the rule now refuses.
+
+### Options considered
+
+| Option | Pros | Cons |
+|---|---|---|
+| **A. Exact single-use waiver + declared 1.30 floor (chosen)** | Admission-time defense in depth now; the exception is explicit, reviewable and expires on its own; structural changes stay blocked | Stored objects with a now-invalid value need fixing before a *change* to that field; clusters below 1.30 refuse the next spec change |
+| B. Graduate to `v1beta1` for three value rules | No exception to §2.1 | Conversion webhook, second served version and a deprecation timeline for a defense-in-depth rule; far out of proportion |
+| C. Validate only in the operator and the CLI | No CRD change | The rule is not enforced at admission; a GitOps apply bypasses the CLI copy |
+| D. A ValidatingAdmissionPolicy outside the CRD | Guard stays green | Narrows the API anyway while hiding it from the guard built to catch it |
+
+### Consequences
+
+- Clusters below Kubernetes 1.30 are outside the supported range. On 1.28/1.29 an app stored with a
+  now-invalid `keyPrefix` is refused on its next spec change until the prefix is fixed.
+- The guard's violation list grew a class it was missing: a length/size/numeric bound **added**
+  where none existed (it compared only when both sides had a number), except a `minLength` /
+  `minItems` / `minProperties` of 0.
+- Upgrade order stays operator/CRD first, then CLI. The CLI's early `cache.keyPrefix` check matches
+  the CRD (a lockstep test reads the generated CRD), so a newer CLI never accepts what the CRD
+  refuses.
+
+### Action items
+
+- [x] Waiver file, validator and stale check in the guard, with tests (this PR).
+- [x] Declare the Kubernetes server floor (1.30) in the support matrix (this PR).
+- [ ] Sprint-close design review: accept or revert this amendment and its keyPrefix entries.
+- [ ] Delete the three keyPrefix entries once the narrowing ships in a `v*` tag (the guard will fail
+      until someone does).
+- [ ] `knext doctor` warns when the cluster's server version is below the floor (#2442).

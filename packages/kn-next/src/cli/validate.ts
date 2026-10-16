@@ -14,6 +14,7 @@ import {
 } from "../adapters/artifact-contract";
 import type { KnativeNextConfig } from "../config";
 import { validateCompileConfig } from "./compile-config";
+import { keyPrefixProblem } from "./redis-key-prefix";
 
 // Storage providers with a real, tested upload/verify path in `asset-upload.ts`.
 // Kept in lock-step with the `StorageProvider` type (config.ts) and the
@@ -537,6 +538,17 @@ export function validateConfig(
                     "set REDIS_URL (or KN_REDIS_URL) in your environment when you run `knext deploy` " +
                     "(it is not needed at build time)",
             );
+        }
+        // Early copy of the CRD's admission rule (the apiserver stays the
+        // authority; redis-key-prefix.ts is lockstep-tested against the CRD).
+        const keyPrefix = config.cache.keyPrefix;
+        if (typeof keyPrefix === "string") {
+            const problem = keyPrefixProblem(keyPrefix);
+            if (problem) {
+                errors.push(
+                    `'cache.keyPrefix' '${keyPrefix}' ${problem}; the cluster refuses it`,
+                );
+            }
         }
     }
 

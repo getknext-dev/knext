@@ -1,0 +1,29 @@
+{
+  "$comment": "Exact, dated, justified, single-use waivers for the NextApp CRD additive-only guard (scripts/crd-schema-diff.mjs). Rules: ADR-0017 Amendment 3. Delete an entry once its narrowing ships in a v* tag; the guard fails on a stale entry.",
+  "waivers": [
+    {
+      "violation": "version \"v1alpha1\", $.spec.cache.keyPrefix.maxLength: added (63) where none existed before",
+      "field": "spec.cache.keyPrefix",
+      "added": "2026-10-16",
+      "adr": "docs/adr/0017-crd-stays-v1alpha1-conversion-webhook-deferred.md#amendment-3-2026-10-16--narrowing-waivers",
+      "rule": "63",
+      "justification": "spec.cache.keyPrefix becomes part of a Redis SCAN MATCH glob and of the runtime keyspace; a bound keeps the derived keys and the SCAN pattern a sane size (derived prefixes are 15 characters). Safe because the documented Kubernetes server floor is 1.30, where CRD validation ratcheting lets an app stored with a now-invalid prefix keep taking updates that leave the prefix unchanged (keyprefix_ratcheting_envtest_test.go: passes on 1.30.3 and 1.35.0; 1.29.5 refuses, as documented). knext doctor names such apps."
+    },
+    {
+      "violation": "version \"v1alpha1\", $.spec.cache.keyPrefix.pattern: added (\"^[^*?\\\\[\\\\]\\\\\\\\ \\\\t\\\\n\\\\r\\\\f\\\\v]*$\") where none existed before",
+      "field": "spec.cache.keyPrefix",
+      "added": "2026-10-16",
+      "adr": "docs/adr/0017-crd-stays-v1alpha1-conversion-webhook-deferred.md#amendment-3-2026-10-16--narrowing-waivers",
+      "rule": "^[^*?\\[\\]\\\\ \\t\\n\\r\\f\\v]*$",
+      "justification": "spec.cache.keyPrefix becomes part of a Redis SCAN MATCH glob and of the runtime keyspace; whitespace and the glob characters * ? [ ] \\ widened what the finalizer reaped before escaping landed, and are refused at admission as defense in depth. Safe because the documented Kubernetes server floor is 1.30, where CRD validation ratcheting lets an app stored with a now-invalid prefix keep taking updates that leave the prefix unchanged (keyprefix_ratcheting_envtest_test.go: passes on 1.30.3 and 1.35.0; 1.29.5 refuses, as documented). knext doctor names such apps."
+    },
+    {
+      "violation": "version \"v1alpha1\", $.spec.cache.keyPrefix.x-kubernetes-validations: new or changed CEL rule: \"self != 'kn-next' && !self.startsWith('kn-next:')\"",
+      "field": "spec.cache.keyPrefix",
+      "added": "2026-10-16",
+      "adr": "docs/adr/0017-crd-stays-v1alpha1-conversion-webhook-deferred.md#amendment-3-2026-10-16--narrowing-waivers",
+      "rule": "self != 'kn-next' && !self.startsWith('kn-next:')",
+      "justification": "spec.cache.keyPrefix becomes part of a Redis SCAN MATCH glob and of the runtime keyspace; 'kn-next' and prefixes under 'kn-next:' are the shared fallback keyspace that the finalizer, cache cleanup, runtime and doctor all refuse; admission now refuses them too. Safe because the documented Kubernetes server floor is 1.30, where CRD validation ratcheting lets an app stored with a now-invalid prefix keep taking updates that leave the prefix unchanged (keyprefix_ratcheting_envtest_test.go: passes on 1.30.3 and 1.35.0; 1.29.5 refuses, as documented). knext doctor names such apps."
+    }
+  ]
+}
