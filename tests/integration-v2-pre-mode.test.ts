@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { auditScope } from '../scripts/audit-published.mjs';
 import { PRE_MODE_TAGS, PUBLISH_LANES } from '../scripts/publish-lane-guard.mjs';
 
 /**
@@ -69,30 +70,36 @@ describe('integration/v2 is in changesets pre mode on the next tag (#2038)', () 
     expect(config.ignore).toContain('@getknext/ui');
   });
 
-  // @getknext/grpc landed with Z3 (#2047). The package set becomes {core, lib,
-  // db, grpc} and grpc versions INDEPENDENTLY with a peer range on core
-  // (ADR-0020 amendment, Q20): OUTSIDE the fixed group, and never ignored, so
-  // pre mode versions it.
+  // @getknext/grpc landed with Z3 (#2047). It versions INDEPENDENTLY with a
+  // peer range on core (ADR-0020 amendment, Q20), OUTSIDE the fixed group.
   //
-  // This guard used to assert "publishable once it exists". It now asserts
-  // "publishable only once the published-package audit covers it": ADR-0020's
-  // Consequences put publishability in the PR that extends the release gates,
-  // and `changeset publish` publishes any non-private package — so flipping
-  // `private` without adding the package to `audit-published.mjs` would publish
-  // it unaudited. Both directions are pinned: private while unaudited, and
-  // publishable the moment the audit lists it.
+  // #2389 (ADR-0020 amendment, 2026-10-16) adds the dist-tag half: an optional
+  // Beta package publishes on `beta`, never through the shared
+  // `changeset publish`, which always passes `--tag next` here (and `latest`
+  // after GA) and overrides `publishConfig.tag`. So the package goes into the
+  // changesets `ignore` list in the PR that removes `private`, its version is
+  // bumped by hand, and a dedicated `npm publish --tag beta` step behind the
+  // audit ships it. The full flip-time rule (audit build, beta step, cargo deny
+  // for a crate-pinning package) is asserted by the package-scope half of
+  // tests/publish-lane-supply-chain.test.ts; this file pins the changesets side.
+  //
+  // Publishable only once the published-package audit covers it: `auditScope()`
+  // must list it exactly when it is publishable, in both directions.
   const grpc = workspace().get('@getknext/grpc');
-  const auditCoversGrpc = readFileSync(join(ROOT, 'scripts/audit-published.mjs'), 'utf8').includes(
-    "'@getknext/grpc'",
-  );
+  const grpcPublishable = grpc?.private === false;
 
-  it('@getknext/grpc exists, outside the fixed group, and is not changeset-ignored', () => {
+  it('@getknext/grpc exists and sits outside the fixed group', () => {
     expect(grpc, '@getknext/grpc must be a workspace package').toBeDefined();
     expect(fixed).not.toContain('@getknext/grpc');
-    expect(config.ignore ?? []).not.toContain('@getknext/grpc');
+  });
+
+  it('@getknext/grpc is changeset-ignored once publishable (the shared publish cannot tag it beta)', () => {
+    if (grpcPublishable) expect(config.ignore ?? []).toContain('@getknext/grpc');
+    else expect(grpc?.private).toBe(true);
   });
 
   it('@getknext/grpc is publishable exactly when the published-package audit covers it', () => {
-    expect(grpc?.private === false).toBe(auditCoversGrpc);
+    const covered = auditScope().some((p: { name: string }) => p.name === '@getknext/grpc');
+    expect(grpcPublishable).toBe(covered);
   });
 });

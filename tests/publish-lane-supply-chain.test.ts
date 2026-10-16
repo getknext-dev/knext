@@ -1,7 +1,11 @@
 import { afterEach, describe, expect, it } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
+// The script guards its main() behind an entrypoint check, so importing the
+// pure scope helpers runs no pack/install/audit.
+import { auditScope, OPTIONAL_BETA, PUBLISHED } from '../scripts/audit-published.mjs';
+import { type AuditExemption, auditReleaseSets } from './helpers/optional-beta-release-set';
 import { auditPublishLanes, type NonLane } from './helpers/publish-lane-supply-chain';
 import { WORKFLOW_DIR } from './helpers/release-workflow';
 
@@ -1358,5 +1362,609 @@ describe('publish-lane supply-chain guard: fail closed on what it cannot read', 
     const audit = auditPublishLanes(fixture({ 'lane.yaml': wf(publishJob('[]')) }));
     expect(audit.lanes.map((l) => l.file)).toEqual(['lane.yaml']);
     expect(audit.problems.length).toBeGreaterThan(0);
+  });
+});
+// ════════════════════════════════════════════════════════════════════════════
+// PACKAGE SCOPE (#2389) — the other half of R8.
+//
+// The lane checks above prove every publish job `needs` the audit job, and the
+// audit job runs `scripts/audit-published.mjs`. That only covers a package if
+// the SCRIPT audits it. These checks close that link: every publishable
+// workspace package belongs to a release set and is in the audit's scope, and
+// the optional Beta packages (`@getknext/grpc`, `@getknext/ffi`) follow the
+// release-set rule recorded in the ADR-0020 amendment of 2026-10-16. Both are
+// `private: true` today; the flip-time rules below are what turn red when one
+// of them loses `private` without its publish wiring.
+// ════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Publishable packages the audit deliberately does not cover on their own.
+ * Every entry must name a publishable package (a stale entry is a failure).
+ */
+const AUDIT_EXEMPT: readonly AuditExemption[] = [
+  {
+    name: 'kn-next',
+    reason:
+      'forwarding alias: ships one bin file whose only dependency is @getknext/core, which the audit covers; it leaves the package set at 2.0 (ADR-0020 amendment 2026-10-09). Its own SBOM is a tracked follow-up.',
+  },
+];
+
+const REAL_REPO = resolve(WORKFLOW_DIR, '..', '..');
+
+/** Replace `from` (which must occur exactly once) — a fixture mutation that silently misses proves nothing. */
+function swap(text: string, from: string, to: string): string {
+  const count = text.split(from).length - 1;
+  if (count !== 1) throw new Error(`fixture anchor occurs ${count} times: ${JSON.stringify(from)}`);
+  return text.replace(from, () => to);
+}
+const CRATE_WORKFLOW = 'rust-crates.yml';
+
+type ManifestFields = Record<string, unknown>;
+
+/** Real manifests, read by the audit script's own `dir` → `package.json`. */
+const readRealManifest = (dir: string): ManifestFields =>
+  JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
+
+/** The audit scope for a tree whose manifests `read` returns (names only). */
+const scopeNames = (read: (dir: string) => ManifestFields): string[] =>
+  auditScope(read).map((p: { name: string }) => p.name);
+
+/** The real reader, with `overrides` (name → manifest fields) applied. */
+const realReaderWith =
+  (overrides: Record<string, ManifestFields>) =>
+  (dir: string): ManifestFields => {
+    const m = readRealManifest(dir);
+    return { ...m, ...(overrides[m.name as string] ?? {}) };
+  };
+
+const realReleaseSets = (overrides: Record<string, ManifestFields> = {}) =>
+  auditReleaseSets({
+    repoRoot: REAL_REPO,
+    workflowDir: WORKFLOW_DIR,
+    optionalBeta: OPTIONAL_BETA.map((p: { name: string }) => p.name),
+    auditScope: scopeNames(realReaderWith(overrides)),
+    auditExempt: AUDIT_EXEMPT,
+    crateWorkflow: CRATE_WORKFLOW,
+    overrides,
+  });
+
+describe('package scope (#2389): the real tree', () => {
+  const audit = realReleaseSets();
+
+  it('every publishable package is in a release set and in the audit scope; optional Beta packages obey the rule', () => {
+    expect(audit.problems).toEqual([]);
+  });
+
+  it('is not vacuous: it saw the fixed group, both optional Beta packages and the crates lane', () => {
+    expect(audit.publishable).toEqual(
+      expect.arrayContaining(['@getknext/core', '@getknext/lib', '@getknext/db']),
+    );
+    expect(audit.fixedGroup).toEqual(
+      expect.arrayContaining(['@getknext/core', '@getknext/lib', '@getknext/db']),
+    );
+    expect([...audit.optionalSeen].sort()).toEqual(['@getknext/ffi', '@getknext/grpc']);
+    expect(audit.crateLaneChecked).toBe(true);
+  });
+
+  it('the audit scope is exactly the fixed group while both optional Beta packages are private (no release-lane change today)', () => {
+    expect(scopeNames(readRealManifest)).toEqual(PUBLISHED.map((p: { name: string }) => p.name));
+  });
+
+  for (const name of ['@getknext/ffi', '@getknext/grpc']) {
+    it(`${name} enters the audit + SBOM scope the moment it is publishable`, () => {
+      expect(scopeNames(realReaderWith({ [name]: { private: false } }))).toContain(name);
+    });
+
+    it(`${name} losing \`private\` with today's release wiring is RED`, () => {
+      const flipped = realReleaseSets({ [name]: { private: false } });
+      expect(flipped.problems.length).toBeGreaterThan(0);
+      expect(flipped.problems.every((p) => p.includes(name))).toBe(true);
+      // The audit half is already in place: the flip is red for the publish
+      // wiring, never for "not audited".
+      expect(flipped.problems.join('\n')).not.toMatch(/not in the audit scope/);
+    });
+  }
+
+  it('the @getknext/ffi flip names the crates gate too (it records a knext-ffi crate revision)', () => {
+    const flipped = realReleaseSets({ '@getknext/ffi': { private: false } });
+    expect(flipped.problems.join('\n')).toMatch(/cargo deny/);
+  });
+});
+
+describe('package scope (#2389): audit-published.mjs uses the derived scope everywhere', () => {
+  const source = readFileSync(resolve(REAL_REPO, 'scripts/audit-published.mjs'), 'utf8');
+  const mainAt = source.indexOf('function main()');
+  const mainBody = source.slice(mainAt, source.indexOf('\n}\n', mainAt));
+
+  it('main() computes the scope with auditScope()', () => {
+    expect(mainAt).toBeGreaterThan(-1);
+    expect(mainBody).toMatch(/const scope = auditScope\(/);
+  });
+
+  it('main() never reads the fixed PUBLISHED list directly (pack, install, seams and SBOM follow the scope)', () => {
+    expect(mainBody.length).toBeGreaterThan(1000);
+    expect(mainBody).not.toMatch(/\bPUBLISHED\b/);
+  });
+
+  it('the SBOM loop iterates the scope', () => {
+    expect(mainBody).toMatch(/for \(const pkg of scope\) \{\n\s+const outFile = join\(sbomOutDir/);
+  });
+
+  it('auditScope fails closed on a manifest whose name does not match its entry', () => {
+    expect(() => auditScope(() => ({ name: 'someone-else', private: false }))).toThrow();
+  });
+});
+
+/** A throwaway repo for the release-set engine. */
+interface RsTree {
+  manifests: Record<string, ManifestFields>;
+  changeset: Record<string, unknown>;
+  workflows: Record<string, string>;
+}
+
+const CORE_PEER = { '@getknext/core': '>=2.0.0-0 <3.0.0' };
+const OPTIONAL_PEER_META = { '@getknext/core': { optional: true } };
+const CRATE_REV = 'a'.repeat(40);
+
+const rsAuditJob = (builds: string[]) => `
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - run: ${builds.map((b) => `bun run --filter ${b} build`).join(' && ')}
+      - run: node scripts/audit-published.mjs
+      - uses: actions/upload-artifact@v7
+        with:
+          name: npm-sbom
+          path: sbom/*.cdx.json
+`;
+
+const RS_RELEASE_JOB = `
+  release:
+    runs-on: ubuntu-latest
+    needs: [audit]
+    steps:
+      - run: bun run release
+`;
+
+const RS_DENY_JOB = `
+  crates-deny:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates
+    steps:
+      - run: cargo deny check
+`;
+
+const rsBetaJob = (needs: string, run: string) => `
+  publish-beta:
+    runs-on: ubuntu-latest
+    needs: ${needs}
+    steps:
+      - run: ${run}
+`;
+
+const RS_CRATE_LANE = `name: Rust crates
+on:
+  pull_request:
+    paths:
+      - 'crates/**'
+      - 'packages/ffi/package.json'
+  push:
+    branches: [main, integration/v2]
+    paths:
+      - 'crates/**'
+      - 'packages/ffi/package.json'
+jobs:
+  crates:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates
+    steps:
+      - name: cargo deny check
+        run: cargo deny check
+  crate-rev:
+    runs-on: ubuntu-latest
+    steps:
+      - run: node scripts/check-ffi-crate-rev.mjs
+`;
+
+const FIXED_BUILDS = ['@getknext/lib', '@getknext/db', '@getknext/core'];
+
+function rsBase(): RsTree {
+  return {
+    manifests: {
+      lib: { name: '@getknext/lib', version: '2.0.0-rc.1' },
+      db: { name: '@getknext/db', version: '2.0.0-rc.1' },
+      'kn-next': {
+        name: '@getknext/core',
+        version: '2.0.0-rc.1',
+        dependencies: { '@getknext/lib': 'workspace:^', '@getknext/db': 'workspace:^' },
+      },
+      'kn-next-alias': {
+        name: 'kn-next',
+        version: '2.0.0-rc.1',
+        dependencies: { '@getknext/core': 'workspace:^' },
+      },
+      ffi: {
+        name: '@getknext/ffi',
+        version: '0.1.0',
+        private: true,
+        peerDependencies: CORE_PEER,
+        peerDependenciesMeta: OPTIONAL_PEER_META,
+        knextFfi: { crateRev: CRATE_REV },
+      },
+      grpc: {
+        name: '@getknext/grpc',
+        version: '0.1.0',
+        private: true,
+        peerDependencies: CORE_PEER,
+        peerDependenciesMeta: OPTIONAL_PEER_META,
+      },
+      ui: { name: '@getknext/ui', version: '0.0.0', private: true },
+    },
+    changeset: {
+      fixed: [['@getknext/core', '@getknext/lib', '@getknext/db', 'kn-next']],
+      linked: [],
+      ignore: ['@getknext/ui'],
+    },
+    workflows: {
+      'release.yml': `name: Release\non: push\njobs:${rsAuditJob(FIXED_BUILDS)}${RS_RELEASE_JOB}`,
+      [CRATE_WORKFLOW]: RS_CRATE_LANE,
+    },
+  };
+}
+
+/** `rsBase()` with @getknext/ffi publishable AND every piece of its publish wiring in place. */
+function rsFfiReady(): RsTree {
+  const t = rsBase();
+  t.manifests.ffi = { ...t.manifests.ffi, private: false };
+  t.changeset.ignore = ['@getknext/ui', '@getknext/ffi'];
+  t.workflows['release.yml'] =
+    `name: Release\non: push\njobs:${rsAuditJob([...FIXED_BUILDS, '@getknext/ffi'])}${RS_RELEASE_JOB}${RS_DENY_JOB}` +
+    rsBetaJob('[audit, crates-deny]', 'npm publish packages/ffi --tag beta --access public');
+  return t;
+}
+
+function rsWrite(t: RsTree): { repoRoot: string; workflowDir: string } {
+  const root = mkdtempSync(join(tmpdir(), 'release-sets-'));
+  tmpDirs.push(root);
+  writeFileSync(
+    join(root, 'package.json'),
+    JSON.stringify({ name: 'root', private: true, workspaces: ['packages/*'] }),
+  );
+  for (const [dir, manifest] of Object.entries(t.manifests)) {
+    mkdirSync(join(root, 'packages', dir), { recursive: true });
+    writeFileSync(join(root, 'packages', dir, 'package.json'), JSON.stringify(manifest));
+  }
+  mkdirSync(join(root, '.changeset'), { recursive: true });
+  writeFileSync(join(root, '.changeset', 'config.json'), JSON.stringify(t.changeset));
+  const workflowDir = join(root, '.github', 'workflows');
+  mkdirSync(workflowDir, { recursive: true });
+  for (const [name, text] of Object.entries(t.workflows)) {
+    writeFileSync(join(workflowDir, name), text);
+  }
+  return { repoRoot: root, workflowDir };
+}
+
+/** Run the engine over a fixture, with the REAL auditScope() reading the fixture manifests. */
+function rsAudit(t: RsTree, exempt: readonly AuditExemption[] = AUDIT_EXEMPT) {
+  const paths = rsWrite(t);
+  const byDir = (dir: string): ManifestFields => {
+    const m = t.manifests[basename(dir)];
+    if (!m) throw new Error(`fixture has no manifest for ${dir}`);
+    return m;
+  };
+  return auditReleaseSets({
+    ...paths,
+    optionalBeta: ['@getknext/grpc', '@getknext/ffi'],
+    auditScope: scopeNames(byDir),
+    auditExempt: exempt,
+    crateWorkflow: CRATE_WORKFLOW,
+  });
+}
+
+const rsProblems = (t: RsTree, exempt?: readonly AuditExemption[]) =>
+  rsAudit(t, exempt).problems.join('\n');
+
+describe('package scope (#2389): release sets', () => {
+  it('the base fixture (both optional packages private) is clean', () => {
+    expect(rsAudit(rsBase()).problems).toEqual([]);
+  });
+
+  it('a publishable package that belongs to no release set is RED', () => {
+    const t = rsBase();
+    t.manifests.ui = { name: '@getknext/ui', version: '0.0.0' };
+    expect(rsProblems(t)).toMatch(/@getknext\/ui.*no release set/);
+  });
+
+  it('a publishable package outside the audit scope and not exempt is RED', () => {
+    expect(rsProblems(rsBase(), [])).toMatch(/kn-next.*not in the audit scope/);
+  });
+
+  it('a stale exemption (names no publishable package) is RED', () => {
+    const t = rsBase();
+    t.manifests['kn-next-alias'] = { ...t.manifests['kn-next-alias'], private: true };
+    expect(rsProblems(t)).toMatch(/exemption.*kn-next.*not a publishable package/);
+  });
+
+  it('an optional Beta package in the changesets fixed group is RED', () => {
+    const t = rsBase();
+    t.changeset.fixed = [
+      ['@getknext/core', '@getknext/lib', '@getknext/db', 'kn-next', '@getknext/ffi'],
+    ];
+    expect(rsProblems(t)).toMatch(/@getknext\/ffi.*fixed/);
+  });
+
+  it('an optional Beta package in a changesets linked group is RED', () => {
+    const t = rsBase();
+    t.changeset.linked = [['@getknext/core', '@getknext/grpc']];
+    expect(rsProblems(t)).toMatch(/@getknext\/grpc.*linked/);
+  });
+
+  for (const field of ['dependencies', 'optionalDependencies', 'peerDependencies']) {
+    it(`a fixed-group package listing an optional Beta package in ${field} is RED (never required by the fixed group)`, () => {
+      const t = rsBase();
+      const core = t.manifests['kn-next'];
+      t.manifests['kn-next'] = {
+        ...core,
+        [field]: { ...((core[field] as Record<string, string>) ?? {}), '@getknext/ffi': '^0.1.0' },
+      };
+      expect(rsProblems(t)).toMatch(/@getknext\/core.*@getknext\/ffi/);
+    });
+  }
+
+  it('an optional Beta package without a peer range on core is RED', () => {
+    const t = rsBase();
+    t.manifests.grpc = { ...t.manifests.grpc, peerDependencies: {} };
+    expect(rsProblems(t)).toMatch(/@getknext\/grpc.*peer/);
+  });
+
+  it('an optional Beta package whose core peer is not optional is RED', () => {
+    const t = rsBase();
+    t.manifests.grpc = { ...t.manifests.grpc, peerDependenciesMeta: {} };
+    expect(rsProblems(t)).toMatch(/@getknext\/grpc.*optional/);
+  });
+
+  it('an optional Beta package whose core peer is a caret (not a bounded major) is RED', () => {
+    const t = rsBase();
+    t.manifests.grpc = { ...t.manifests.grpc, peerDependencies: { '@getknext/core': '^2.0.0' } };
+    expect(rsProblems(t)).toMatch(/@getknext\/grpc.*>=/);
+  });
+
+  it('an optional Beta package that DEPENDS on core (instead of a peer) is RED', () => {
+    const t = rsBase();
+    t.manifests.grpc = { ...t.manifests.grpc, dependencies: { '@getknext/core': '^2.0.0' } };
+    expect(rsProblems(t)).toMatch(/@getknext\/grpc.*depends on @getknext\/core/);
+  });
+
+  it('a declared optional Beta package that does not exist in the workspace is RED', () => {
+    const t = rsBase();
+    delete t.manifests.grpc;
+    const paths = rsWrite(t);
+    const audit = auditReleaseSets({
+      ...paths,
+      optionalBeta: ['@getknext/grpc', '@getknext/ffi'],
+      auditScope: ['@getknext/lib', '@getknext/db', '@getknext/core'],
+      auditExempt: AUDIT_EXEMPT,
+      crateWorkflow: CRATE_WORKFLOW,
+    });
+    expect(audit.problems.join('\n')).toMatch(/@getknext\/grpc.*not a workspace package/);
+  });
+
+  it('an unreadable changesets config fails closed', () => {
+    const paths = rsWrite(rsBase());
+    writeFileSync(join(paths.repoRoot, '.changeset', 'config.json'), '{ nope');
+    const audit = auditReleaseSets({
+      ...paths,
+      optionalBeta: ['@getknext/grpc', '@getknext/ffi'],
+      auditScope: [],
+      auditExempt: AUDIT_EXEMPT,
+      crateWorkflow: CRATE_WORKFLOW,
+    });
+    expect(audit.problems.join('\n')).toMatch(/\.changeset\/config\.json/);
+  });
+});
+
+describe('package scope (#2389): an optional Beta package losing `private`', () => {
+  it('with the full wiring (ignored by changesets, built by the audit job, published on beta behind the audit and cargo deny) is clean', () => {
+    expect(rsAudit(rsFfiReady()).problems).toEqual([]);
+  });
+
+  it('still in the shared changesets publish (not in `ignore`) is RED: changeset publish always passes --tag latest/next', () => {
+    const t = rsFfiReady();
+    t.changeset.ignore = ['@getknext/ui'];
+    expect(rsProblems(t)).toMatch(/@getknext\/ffi.*ignore/);
+  });
+
+  it('not built by the audit job is RED (the audit would pack an empty dist/)', () => {
+    const t = rsFfiReady();
+    t.workflows['release.yml'] = swap(
+      t.workflows['release.yml'],
+      ' && bun run --filter @getknext/ffi build',
+      '',
+    );
+    expect(rsProblems(t)).toMatch(/@getknext\/ffi.*audit job.*build/);
+  });
+
+  it('with no beta publish step is RED', () => {
+    const t = rsFfiReady();
+    t.workflows['release.yml'] = swap(
+      t.workflows['release.yml'],
+      'npm publish packages/ffi --tag beta --access public',
+      'echo nothing',
+    );
+    expect(rsProblems(t)).toMatch(/@getknext\/ffi.*--tag beta/);
+  });
+
+  it('published on a non-beta dist-tag is RED', () => {
+    const t = rsFfiReady();
+    t.workflows['release.yml'] = swap(t.workflows['release.yml'], '--tag beta', '--tag next');
+    expect(rsProblems(t)).toMatch(/@getknext\/ffi.*--tag beta/);
+  });
+
+  it('a beta publish step for ANOTHER package does not count', () => {
+    const t = rsFfiReady();
+    t.workflows['release.yml'] = swap(
+      t.workflows['release.yml'],
+      'npm publish packages/ffi',
+      'npm publish packages/grpc',
+    );
+    expect(rsProblems(t)).toMatch(/@getknext\/ffi.*--tag beta/);
+  });
+
+  it('a beta publish job that does not need the audit job is RED', () => {
+    const t = rsFfiReady();
+    t.workflows['release.yml'] = swap(
+      t.workflows['release.yml'],
+      'needs: [audit, crates-deny]',
+      'needs: [crates-deny]',
+    );
+    expect(rsProblems(t)).toMatch(/@getknext\/ffi.*needs.*audit/);
+  });
+
+  it('the audit need may be transitive', () => {
+    const t = rsFfiReady();
+    t.workflows['release.yml'] = swap(
+      t.workflows['release.yml'],
+      'needs: [audit, crates-deny]',
+      'needs: [release, crates-deny]',
+    );
+    expect(rsAudit(t).problems).toEqual([]);
+  });
+
+  it('a package recording a crate revision whose beta publish does not need cargo deny is RED', () => {
+    const t = rsFfiReady();
+    t.workflows['release.yml'] = swap(
+      t.workflows['release.yml'],
+      'needs: [audit, crates-deny]',
+      'needs: [audit]',
+    );
+    expect(rsProblems(t)).toMatch(/@getknext\/ffi.*cargo deny/);
+  });
+
+  it('a cargo deny job that cannot fail (continue-on-error) does not count', () => {
+    const t = rsFfiReady();
+    t.workflows['release.yml'] = swap(
+      t.workflows['release.yml'],
+      '      - run: cargo deny check\n',
+      '      - run: cargo deny check\n        continue-on-error: true\n',
+    );
+    expect(rsProblems(t)).toMatch(/@getknext\/ffi.*cargo deny/);
+  });
+
+  it('a cargo deny job that does not run against crates/ does not count', () => {
+    const t = rsFfiReady();
+    t.workflows['release.yml'] = swap(
+      t.workflows['release.yml'],
+      '        working-directory: crates\n    steps:\n      - run: cargo deny check',
+      '        working-directory: packages/ffi\n    steps:\n      - run: cargo deny check',
+    );
+    expect(rsProblems(t)).toMatch(/@getknext\/ffi.*cargo deny/);
+  });
+
+  it('a package that records no crate revision does not need cargo deny (grpc)', () => {
+    const t = rsBase();
+    t.manifests.grpc = { ...t.manifests.grpc, private: false };
+    t.changeset.ignore = ['@getknext/ui', '@getknext/grpc'];
+    t.workflows['release.yml'] =
+      `name: Release\non: push\njobs:${rsAuditJob([...FIXED_BUILDS, '@getknext/grpc'])}${RS_RELEASE_JOB}` +
+      rsBetaJob('[audit]', 'npm publish packages/grpc --tag beta --access public');
+    expect(rsAudit(t).problems).toEqual([]);
+  });
+});
+
+describe('package scope (#2389): the knext-ffi crates lane is an unconditional cargo deny gate', () => {
+  const withLane = (lane: string) => {
+    const t = rsBase();
+    t.workflows[CRATE_WORKFLOW] = lane;
+    return rsProblems(t);
+  };
+
+  it('a missing crates lane is RED', () => {
+    const t = rsBase();
+    delete t.workflows[CRATE_WORKFLOW];
+    expect(rsProblems(t)).toMatch(/rust-crates\.yml/);
+  });
+
+  it('a cargo deny step with continue-on-error is RED', () => {
+    expect(
+      withLane(
+        swap(
+          RS_CRATE_LANE,
+          'run: cargo deny check',
+          'run: cargo deny check\n        continue-on-error: true',
+        ),
+      ),
+    ).toMatch(/cargo deny/);
+  });
+
+  it('a cargo deny step behind an `if:` is RED', () => {
+    expect(
+      withLane(
+        swap(
+          RS_CRATE_LANE,
+          '      - name: cargo deny check\n',
+          "      - name: cargo deny check\n        if: github.event_name == 'push'\n",
+        ),
+      ),
+    ).toMatch(/cargo deny/);
+  });
+
+  it('a crates job behind an `if:` is RED', () => {
+    expect(
+      withLane(
+        swap(RS_CRATE_LANE, '  crates:\n    runs-on', '  crates:\n    if: false\n    runs-on'),
+      ),
+    ).toMatch(/cargo deny/);
+  });
+
+  it('no cargo deny step at all is RED', () => {
+    expect(withLane(swap(RS_CRATE_LANE, 'run: cargo deny check', 'run: cargo test'))).toMatch(
+      /cargo deny/,
+    );
+  });
+
+  it('a path filter that misses crates/** is RED', () => {
+    expect(
+      withLane(
+        swap(
+          RS_CRATE_LANE,
+          "    paths:\n      - 'crates/**'\n      - 'packages/ffi/package.json'\njobs:",
+          "    paths:\n      - 'packages/ffi/package.json'\njobs:",
+        ),
+      ),
+    ).toMatch(/crates\/\*\*/);
+  });
+
+  it('a path filter that misses the manifest recording the crate revision is RED', () => {
+    expect(
+      withLane(swap(RS_CRATE_LANE, "      - 'packages/ffi/package.json'\njobs:", 'jobs:')),
+    ).toMatch(/packages\/ffi\/package\.json/);
+  });
+
+  it('a lane that does not run on push to integration/v2 is RED', () => {
+    expect(withLane(swap(RS_CRATE_LANE, '[main, integration/v2]', '[main]'))).toMatch(
+      /integration\/v2/,
+    );
+  });
+
+  it('a lane with no pull_request trigger is RED', () => {
+    expect(
+      withLane(
+        swap(
+          RS_CRATE_LANE,
+          "  pull_request:\n    paths:\n      - 'crates/**'\n      - 'packages/ffi/package.json'\n",
+          '',
+        ),
+      ),
+    ).toMatch(/pull_request/);
+  });
+
+  it('a lane without the crate-rev drift guard is RED', () => {
+    expect(
+      withLane(swap(RS_CRATE_LANE, 'node scripts/check-ffi-crate-rev.mjs', 'echo skipped')),
+    ).toMatch(/check-ffi-crate-rev/);
   });
 });

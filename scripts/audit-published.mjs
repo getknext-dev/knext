@@ -34,7 +34,9 @@
  *   4. Generate a CycloneDX JS SBOM (`@cyclonedx/cyclonedx-npm`, prod-only) per
  *      published package into sbom/ for the workflow to upload as an artifact.
  *
- * SCOPE = the PUBLISHED set {@getknext/core, @getknext/lib, @getknext/db} (ADR-0020).
+ * SCOPE = the PUBLISHED set {@getknext/core, @getknext/lib, @getknext/db} (ADR-0020), plus
+ * every OPTIONAL Beta package (`OPTIONAL_BETA`: @getknext/grpc, @getknext/ffi) the moment it
+ * is publishable — `auditScope()` (#2389, ADR-0020 amendment 2026-10-16).
  * The private/changeset-ignored UI package (packages/ui) is deliberately OUT of
  * scope — it is never published, so it carries no consumer supply-chain risk.
  *
@@ -63,11 +65,50 @@ const sbomOutDir = resolve(repoRoot, 'sbom');
 
 // The PUBLISHED package set (ADR-0020), in dependency order (lib → db → core).
 // The private UI package is excluded — it is in the changeset ignore list, never shipped.
-const PUBLISHED = [
+export const PUBLISHED = [
   { name: '@getknext/lib', dir: join(repoRoot, 'packages', 'lib') },
   { name: '@getknext/db', dir: join(repoRoot, 'packages', 'db') },
   { name: '@getknext/core', dir: join(repoRoot, 'packages', 'kn-next') },
 ];
+
+// The OPTIONAL Beta packages (ADR-0020 amendment, 2026-10-16): versioned on
+// their own, outside the changesets `fixed` group, an optional peer range on
+// core, never required by the fixed group, published on the `beta` dist-tag
+// from the same release workflow behind THIS audit. Both are `private: true`
+// today, so neither is in scope and the release lane is unchanged. The moment
+// one loses `private`, `auditScope()` puts it in the pack, install, seam scan,
+// npm audit and SBOM below; the publish wiring that must exist by then is
+// asserted by tests/publish-lane-supply-chain.test.ts (package scope, #2389).
+export const OPTIONAL_BETA = [
+  { name: '@getknext/grpc', dir: join(repoRoot, 'packages', 'grpc') },
+  { name: '@getknext/ffi', dir: join(repoRoot, 'packages', 'ffi') },
+];
+
+/** Read a workspace package's manifest from its directory. */
+function readPackageManifest(dir) {
+  return JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
+}
+
+/**
+ * The packages this audit covers: the fixed group, then every optional Beta
+ * package that is publishable (`private` is not `true`). Throws (fail closed)
+ * on a manifest that cannot be read or whose name is not the entry's.
+ *
+ * @param {(dir: string) => {name?: string, private?: boolean}} [readManifest]
+ * @returns {Array<{name: string, dir: string}>}
+ */
+export function auditScope(readManifest = readPackageManifest) {
+  const publishable = OPTIONAL_BETA.filter((pkg) => {
+    const manifest = readManifest(pkg.dir);
+    if (manifest?.name !== pkg.name) {
+      throw new Error(
+        `${pkg.dir}/package.json is named ${JSON.stringify(manifest?.name)}, expected ${pkg.name}`,
+      );
+    }
+    return manifest.private !== true;
+  });
+  return [...PUBLISHED, ...publishable];
+}
 
 // The audit threshold — HIGH and CRITICAL fail the gate (mirror security.md +
 // the Trivy severity: HIGH,CRITICAL rule). Kept as string literals the
@@ -266,7 +307,7 @@ function caretSatisfies(range, version) {
  *   peerDependencies?: Record<string,string>}>} manifests the PACKED manifests
  * @returns {string[]} human-readable problems; empty means coherent
  */
-export function siblingRangeProblems(manifests) {
+export function siblingRangeProblems(manifests, optionalNames = OPTIONAL_BETA_NAMES) {
   const problems = [];
   const packedVersions = new Map(manifests.map((m) => [m.name, m.version]));
   for (const manifest of manifests) {
@@ -280,6 +321,21 @@ export function siblingRangeProblems(manifests) {
               'not in the packed set — the #255/#256 shape: consumers can only 404 or fetch a ' +
               'stale registry copy',
           );
+          continue;
+        }
+        // #2389: an optional Beta package's peer on the fixed group is a
+        // bounded major, not a pack-rewritten caret. Only optional packages,
+        // only peers, only the exact `>=A <B` shape; anything else falls
+        // through to the caret rule below and fails closed there.
+        const bounded = boundedRange(range);
+        if (optionalNames.has(manifest.name) && group === 'peerDependencies' && bounded) {
+          if (!boundedSatisfies(bounded, sibling)) {
+            problems.push(
+              `${manifest.name}@${manifest.version} peers on ${dep}@'${range}' but the co-packed ` +
+                `${dep} is ${sibling} — the optional package would publish against a core it ` +
+                'does not accept; move its peer range or release it from a matching core',
+            );
+          }
           continue;
         }
         if (!/^\^\d+\.\d+\.\d+(-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.test(String(range).trim())) {
@@ -303,6 +359,44 @@ export function siblingRangeProblems(manifests) {
     }
   }
   return problems;
+}
+
+/** Names of the optional Beta packages, for the sibling-range rule above. */
+const OPTIONAL_BETA_NAMES = new Set(OPTIONAL_BETA.map((pkg) => pkg.name));
+
+/**
+ * Parse exactly `>=A <B` (A and B semver, A may carry a prerelease); null for
+ * any other shape. Deliberately not a general range engine.
+ */
+function boundedRange(range) {
+  const parts = String(range).trim().split(/\s+/);
+  if (parts.length !== 2 || !parts[0].startsWith('>=') || !parts[1].startsWith('<')) return null;
+  if (parts[1].startsWith('<=')) return null;
+  const low = parseSemver(parts[0].slice(2));
+  const high = parseSemver(parts[1].slice(1));
+  if (!low || !high || compareSemver(low, high) >= 0) return null;
+  return { low, high };
+}
+
+/**
+ * `low <= version < high`, with npm's prerelease rule: a prerelease version
+ * satisfies only when a bound with a prerelease names the same
+ * major.minor.patch (so `>=2.0.0-0 <3.0.0` takes 2.0.0-rc.3 but not 2.1.0-rc.1).
+ */
+function boundedSatisfies({ low, high }, version) {
+  const v = parseSemver(version);
+  if (!v) return false;
+  if (v.prerelease.length > 0) {
+    const named = [low, high].some(
+      (b) =>
+        b.prerelease.length > 0 &&
+        b.major === v.major &&
+        b.minor === v.minor &&
+        b.patch === v.patch,
+    );
+    if (!named) return false;
+  }
+  return compareSemver(v, low) >= 0 && compareSemver(v, high) < 0;
 }
 
 /** Read `package/package.json` out of a packed tarball. */
@@ -329,13 +423,17 @@ function main() {
   mkdirSync(consumerDir, { recursive: true });
   mkdirSync(sbomOutDir, { recursive: true });
 
-  console.log('[audit-published] packing the published set (lib → db → core)…');
-  for (const pkg of PUBLISHED) packPublished(pkg.dir, tarballDir);
+  // #2389: the fixed group, plus any optional Beta package that is publishable.
+  const scope = auditScope();
+  console.log(
+    `[audit-published] packing the published set (${scope.map((p) => p.name).join(' → ')})…`,
+  );
+  for (const pkg of scope) packPublished(pkg.dir, tarballDir);
   const tarballs = readdirSync(tarballDir)
     .filter((f) => f.endsWith('.tgz'))
     .map((f) => join(tarballDir, f));
-  if (tarballs.length !== PUBLISHED.length) {
-    die(`expected ${PUBLISHED.length} tarballs, got ${tarballs.length}`);
+  if (tarballs.length !== scope.length) {
+    die(`expected ${scope.length} tarballs, got ${tarballs.length}`);
   }
 
   // #942 F1 — BEFORE anything installs: the packed sibling edges must point at
@@ -365,7 +463,7 @@ function main() {
   );
   const npmTarballDir = join(workDir, 'npm-tarballs');
   mkdirSync(npmTarballDir, { recursive: true });
-  const npmTarballs = packPublishableGroup(PUBLISHED, npmTarballDir).map((p) => p.tarball);
+  const npmTarballs = packPublishableGroup(scope, npmTarballDir).map((p) => p.tarball);
 
   // Install the PROD closure only — outside the repo, no scripts, no audit yet.
   console.log('[audit-published] installing the production closure (--omit=dev)…');
@@ -390,7 +488,7 @@ function main() {
     process.execPath,
     [
       join(repoRoot, 'scripts', 'scan-published-seams.mjs'),
-      ...PUBLISHED.flatMap((pkg) => [
+      ...scope.flatMap((pkg) => [
         '--package',
         join(consumerDir, 'node_modules', ...pkg.name.split('/')),
       ]),
@@ -437,7 +535,7 @@ function main() {
 
   // ── SBOM per published package (CycloneDX, prod-only). ────────────────────
   console.log('[audit-published] generating CycloneDX SBOMs (prod-only) per published package…');
-  for (const pkg of PUBLISHED) {
+  for (const pkg of scope) {
     const outFile = join(sbomOutDir, `${pkg.name.replace('@', '').replace('/', '-')}.cdx.json`);
     const sbom = spawnSync(
       'npx',
@@ -459,7 +557,7 @@ function main() {
 
   if (failing.length > 0) {
     console.error(
-      '\n[audit-published] HIGH/CRITICAL advisories in the PUBLISHED production closure:',
+      '\n[audit-published] HIGH/CRITICAL advisories in the published production closure:',
     );
     for (const f of failing) {
       console.error(`  - ${f.name} [${f.severity}] ${f.ids.join(', ')}`);

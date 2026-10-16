@@ -3,7 +3,8 @@
 - **Status:** Accepted (amended 2026-07-12: `@getknext/db` joins the package set;
   amended 2026-07-28: upgrade order — operator/CRD first, then CLI; amended 2026-10-09: the operator
   major is independent of the npm major, and `@getknext/grpc` joins the package set outside the
-  fixed group)
+  fixed group; amended 2026-10-16: optional Beta packages are their own release set, published on
+  the `beta` dist-tag behind the same audit)
 - **Date:** 2026-07-10
 - **Relates to:** the E1 adoption workstream (issue #53 — first npm publish, the
   #1 adoption blocker), PR #226 (interim GitHub Packages channel), PR #227
@@ -241,3 +242,118 @@ and how does the new opt-in `@getknext/grpc` module version against core?
 - [ ] Core lazy dispatcher: check the module's version against the peer range.
 - [ ] Extend the release-set and release-policy guards to the five-package reality (including the
       alias until 2.0) in the same PR that adds the package.
+
+## Amendment (2026-10-16) — optional Beta packages are their own release set
+
+**Status of this amendment: Accepted (2026-10-16).** Decided under the standing rule that a jev
+score picks between options rather than waiting on the founder (scores below). It records how an
+optional Beta package relates to the fixed group *before* any of them loses `private: true`
+(#2389). It does not publish anything: removing `private` from `@getknext/grpc` or
+`@getknext/ffi` stays a founder action (ADR-0069 D12). Trigger-class (ADR, release set, supply
+chain); per the 2026-09-22 workflow amendment it is reviewed at sprint close, not as a merge gate.
+
+### Context
+
+The 2026-10-09 amendment made `@getknext/grpc` independently versioned, outside the Changesets
+`fixed` group, with a peer range on core. ADR-0069 D12 then added a second opt-in package,
+`@getknext/ffi`, also `private: true` at Beta, which additionally pins the in-repo `knext-ffi`
+crates by git revision (`knextFfi.crateRev`, ADR-0069 D3). Three questions were open:
+
+- **Which dist-tag?** The packages are Beta, so a user who runs `npm install @getknext/ffi` should
+  not get a Beta build as if it were stable, and the fixed group's pre-release channel (`next`)
+  belongs to the line, not to these packages.
+- **Which gates?** The publish-blocking audit (`scripts/audit-published.mjs`) listed only core,
+  lib and db, so a package that lost `private` would have published with no npm audit and no SBOM.
+- **What does `cargo deny` gate for the crates?** `rust-crates.yml` runs it on every crate change,
+  but nothing tied a publish of `@getknext/ffi` to it.
+
+Measured while deciding (not assumed):
+
+1. `changeset publish` (changesets CLI 3.0.1) always calls `npm publish --tag <tag>`, where the tag
+   is the pre-mode tag (`next` on `integration/v2`) or `latest`. A package never published before
+   gets the pre-mode tag. There is no per-package tag.
+2. npm 11.9 lets a command-line `--tag` override `publishConfig.tag`, so `publishConfig.tag: beta`
+   cannot steer the shared publish.
+3. Changesets skips a package in its `ignore` list at both version and publish time. A changeset
+   that names only ignored packages is skipped and stays pending. Today no changeset names
+   `@getknext/grpc` or `@getknext/ffi`.
+4. `rust-crates.yml` is path-filtered and is not among `main`'s 12 required status contexts, and
+   `integration/v2` has no branch protection. A path-filtered workflow cannot be a required check
+   (a pull request that skips it would wait forever), so "make it a required check" is a repository
+   setting plus a workflow change, not something a test can assert.
+
+### Decision
+
+1. **Two release sets.** The **fixed group** (`@getknext/core`, `@getknext/lib`, `@getknext/db`,
+   plus the `kn-next` alias until 2.0) ships as one version. The **optional Beta set**
+   (`@getknext/grpc`, `@getknext/ffi`; the list is `OPTIONAL_BETA` in
+   `scripts/audit-published.mjs`) ships separately. Every publishable workspace package belongs to
+   exactly one of them.
+2. **An optional Beta package is never required by the fixed group.** It is outside every
+   Changesets `fixed` and `linked` group. It declares `@getknext/core` as an **optional peer over a
+   bounded major** (`>=A <B`), never as a dependency. No fixed-group manifest lists it; core reaches
+   it only through its lazy dispatcher, which checks the peer range at run time. Its version is its
+   own.
+3. **It publishes on the `beta` dist-tag, from the same release workflow, behind the same audit.**
+   Because of facts 1 and 2, the shared `changeset publish` cannot do this. So the PR that removes
+   `private` also:
+   - adds the package to `.changeset/config.json` `ignore`, so the shared publish skips it (its
+     version is then bumped by hand in that PR; no changeset may name it while it is Beta);
+   - builds it in the release `audit` job, which audits and SBOMs it automatically:
+     `auditScope()` puts every optional Beta package that is not `private` into the pack, install,
+     seam scan, `npm audit --omit=dev` and CycloneDX SBOM;
+   - adds a dedicated `npm publish <dir> --tag beta` step (public access, provenance) in a job that
+     needs the `audit` job, directly or transitively;
+   - for a package that records a crate revision (`@getknext/ffi`), makes that job also need an
+     unconditional `cargo deny check` over `crates/`, so the crates the published package pins are
+     checked at release time and not only when they merged.
+
+   jev: changesets `ignore` plus a dedicated `--tag beta` step **0.99** (first framing) and **0.81**
+   (with the versioning cost and the existing grpc guard stated), versus changesets versioning plus
+   a beta step that the core release waits on 0.14, versus the line tag plus `npm dist-tag add`
+   0.05. Recorded in this ADR rather than ADR-0063 or ADR-0069: **0.90**.
+4. **Leaving Beta is a new decision.** Moving an optional package to `latest` (and into the
+   ordinary release flow) is an amendment, tied for `@getknext/ffi` to ADR-0069 D19.
+5. **The crates lane stays path-filtered.** The guard asserts what can be asserted in the repo:
+   `rust-crates.yml` runs `cargo deny check` and the crate-revision drift guard with no `if:` and no
+   `continue-on-error`, on pull requests and on pushes to `main` and `integration/v2`, with path
+   filters that include `crates/**` and `packages/ffi/package.json`. Making it a required status
+   check is a founder settings step, and needs the path filter replaced first. Until then, rule 3's
+   publish-time `cargo deny` is what makes the crates publish-blocking. jev: in-repo assertion plus
+   a publish-time need **0.74**, versus dropping the path filter now 0.02.
+
+### Enforcement
+
+The package-scope half of `tests/publish-lane-supply-chain.test.ts` (the R8 guard) checks all of
+the above against the real tree and against fixtures. It turns red if a publishable package belongs
+to no release set or is outside the audit scope, if an optional package breaks rule 2, or if one
+loses `private` without every item in rule 3. It is mutation-proved by
+`scripts/mutation-prove-publish-lane-supply-chain.mjs`. One exemption is written down there with
+its reason: the `kn-next` alias, which ships one bin file whose only dependency is core, is not
+audited on its own. Its own SBOM is a follow-up.
+
+### Consequences
+
+- The release lane is unchanged today: both optional packages are `private`, so the audit scope is
+  still exactly core, lib and db.
+- Removing `private` cannot happen on its own. The PR that does it is red until it carries the
+  `ignore` entry, the audit build, the `beta` publish step and, for `@getknext/ffi`, the
+  `cargo deny` need. Those edits are in `release.yml`, which holds the npm credential, so that PR
+  needs the same review as any other change to the publish lane.
+- npm's registry is known to point `latest` at a package's first published version when it has no
+  `latest` yet, whatever `--tag` says (not measured here). The first `beta` publish of each package
+  will therefore also be `latest` until a later stable release moves it.
+- Optional packages are versioned by hand while Beta. That is the cost of keeping them out of the
+  shared publish.
+
+### Action items
+
+- [x] `scripts/audit-published.mjs`: derive the audit scope (`auditScope()`); accept an optional
+      package's bounded peer on core in the sibling-range check.
+- [x] Guard: the package-scope half of `tests/publish-lane-supply-chain.test.ts`, mutation-proved.
+- [ ] Founder, when publishing an optional package: in the same PR, add it to `ignore`, build it in
+      the audit job, add the `beta` publish step (plus the `cargo deny` need for `@getknext/ffi`),
+      then remove `private`.
+- [ ] Founder: decide whether `rust-crates.yml` becomes a required status check (needs an
+      always-reporting job in place of the path filter, and a `merge_group` trigger).
+- [ ] Follow-up: an SBOM for the `kn-next` alias while it still publishes.

@@ -426,6 +426,8 @@ my-zone/
 - A new optional package **`@getknext/ffi`** (`packages/ffi`), `private: true` at Beta like
   `@getknext/grpc`; publishing it is a founder action. It holds the generator, the config schema,
   the manifest scanner, the `knext ffi build` orchestration, and the templates for `knext ffi init`.
+  How it is released once `private` goes (its own version, the `beta` dist-tag, the audit and SBOM,
+  and a publish-time `cargo deny` over the crates it pins) is ADR-0020's amendment of 2026-10-16.
 - Core gains `packages/kn-next/src/cli/ffi-dispatch.ts`, a copy of the `grpc-dispatch.ts` protocol
   (lazy, runtime-resolved import; peer-range check; `--help` answered even when the package is
   missing; plain messages, exit codes, nothing thrown). Core does not depend on the package.
