@@ -502,10 +502,14 @@ describe('#2342 — merged-in publishedBytesBumpMarker, executed against real gi
     }
   }
 
-  /** main: a live v1.0 window (rcTag set, no marker) and a published package. */
+  /**
+   * main: a live v1.0 window (rcTag set, no marker) and a published package.
+   * #2429: the base carries the pinned rc's own version — a released 1.0.0
+   * would mean that rc's GA is already cut, which ends the window.
+   */
   function seedMain(git: Git, put: Put): void {
     put(PIN, pinWith());
-    put(CORE_MANIFEST, JSON.stringify({ name: '@getknext/core', version: '1.0.0' }));
+    put(CORE_MANIFEST, JSON.stringify({ name: '@getknext/core', version: '1.0.0-rc.9990' }));
     put(CORE_SRC, 'export const v = 0;\n');
     git('add', '-A');
     git('commit', '-q', '-m', 'main: live window');
