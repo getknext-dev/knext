@@ -276,6 +276,10 @@ describe('bun-version pins (#754) — scanned across every workflow', () => {
       // The write-free runtime proof lane (dispatch-only): one setup-bun to
       // build the workspace + compile the default bun runtime.
       'write-free-runtime-kind-e2e.yml': 1,
+      // NEW (#2461): the Z7 identity-token kind e2e — one pinned "Setup bun":
+      // the workspace install (the lockfile's verified buf, the Connect runtime)
+      // and the probe, the zone-image build and `knext generate` it runs.
+      'z7-identity-kind-e2e.yml': 1,
       // NEW (#926): the npm publish lane installed with `pnpm install
       // --frozen-lockfile` against a repo with NO pnpm-lock.yaml, so every job
       // died at install. All three release.yml jobs now install with bun,
