@@ -22,6 +22,7 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   copyFileSync,
+  cpSync,
   existsSync,
   mkdirSync,
   readdirSync,
@@ -33,7 +34,8 @@ import {
 import { join } from 'node:path';
 import { fnv1a64, type Manifest, scanManifest, schemaString } from '../manifest';
 import { renderModule } from '../render';
-import { blob, emptyDir, KITCHEN_SINK, PKG_DIR, removeScratchDirs } from './helpers';
+import { blob, D, emptyDir, fn, KITCHEN_SINK, PKG_DIR, removeScratchDirs } from './helpers';
+import { integerMatrix } from './integer-matrix';
 
 const FIXTURE_C = join(PKG_DIR, 'fixtures', 'abi-v1', 'fixture.c');
 const EXT = process.platform === 'darwin' ? 'dylib' : 'so';
@@ -265,6 +267,80 @@ describe('the fixture library is a faithful stand-in', () => {
   });
 });
 
+/** One `echo_<width>` export per integer width the macros support, with its C type. */
+const INT_WIDTHS: [string, string][] = [
+  ['i8', 'int8_t'],
+  ['i16', 'int16_t'],
+  ['i32', 'int32_t'],
+  ['u8', 'uint8_t'],
+  ['u16', 'uint16_t'],
+  ['u32', 'uint32_t'],
+  ['i64', 'int64_t'],
+  ['u64', 'uint64_t'],
+  ['isize', 'int64_t'],
+  ['usize', 'uint64_t'],
+];
+
+describe('integer arguments, every width, through a real library (the same matrix the Rust crates harness runs)', () => {
+  it('each width refuses fractions, NaN, infinities, out-of-range and low-32-bit-alias values, wrong types and a throwing toString; accepts both boundaries and -0', () => {
+    const records = INT_WIDTHS.map(([w]) => fn(`echo_${w}`, [['v', D.t(w)]], D.t(w)));
+    const m = scanManifest(blob(records));
+    const dir = emptyDir('ints');
+    const lines = ['#include <stdint.h>', '#include <string.h>'];
+    for (const f of m.fns) {
+      lines.push(`#define SYM_${f.name} ${f.symbol}`);
+      lines.push(
+        `uint64_t ${f.symbol}_schema(void) { return ${fnv1a64(schemaString(f, m)).toString()}ULL; }`,
+      );
+    }
+    records.forEach((r, i) => {
+      const c = JSON.stringify(`KNEXTFFI1${JSON.stringify(r)}`);
+      lines.push(`__attribute__((used)) const char knext_manifest_${i}[] = ${c};`);
+    });
+    for (const [w, ctype] of INT_WIDTHS) {
+      lines.push(
+        `int32_t SYM_echo_${w}(${ctype} v, uint64_t *out) { memcpy(out, &v, sizeof v); return 0; }`,
+      );
+    }
+    lines.push('void knext_ffi_v1_free(uint8_t *p, size_t n) { (void)p; (void)n; }');
+    const source = join(dir, 'ints.c');
+    writeFileSync(source, `${lines.join('\n')}\n`);
+    const built = join(dir, LIB);
+    const cc1 = spawnSync('cc', ['-shared', '-fPIC', '-O1', '-o', built, source], {
+      encoding: 'utf8',
+    });
+    expect(cc1.status, cc1.stderr).toBe(0);
+
+    const intApp = join(dir, 'app');
+    mkdirSync(join(intApp, 'src', 'generated', 'ffi'), { recursive: true });
+    cpSync(join(app, 'node_modules'), join(intApp, 'node_modules'), { recursive: true });
+    writeFileSync(join(intApp, 'package.json'), '{"type":"module","private":true}\n');
+    writeFileSync(
+      join(intApp, 'src', 'generated', 'ffi', 'index.ts'),
+      renderModule(m, { libName: 'fixture', crate: 'rust' }),
+    );
+    writeFileSync(join(intApp, 'harness.ts'), HARNESS);
+    const exe = image({ lib: built });
+    const r = spawnSync(process.execPath, ['--conditions=react-server', 'harness.ts'], {
+      cwd: intApp,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        NODE_ENV: 'production',
+        NEXT_PHASE: '',
+        BODY: integerMatrix.toString(),
+        FAKE_EXEC: exe,
+      },
+      timeout: 60_000,
+    });
+    const line = r.stdout.split('\n').find((l) => l.startsWith('RESULT '));
+    expect(line, `${r.stdout}${r.stderr}`).toBeDefined();
+    const result = JSON.parse((line as string).slice(7)) as { cases: number; problems: string[] };
+    expect(result.problems).toEqual([]);
+    expect(result.cases).toBeGreaterThan(150);
+  });
+});
+
 describe('path 1 — native/ffi/<triple> beside the executable, integrity required', () => {
   it('every call crosses correctly, every buffer is freed exactly once', () => {
     const exe = image();
@@ -408,6 +484,107 @@ describe('path 1 — native/ffi/<triple> beside the executable, integrity requir
         },
       ],
       live: '0n',
+    });
+    expect(r.status).toBe(0);
+  });
+
+  it('integer arguments: the wrapper refuses what bun:ffi would corrupt (fractions, NaN, infinities, out of range, the low-32-bit alias, wrong types) and accepts both boundaries and -0', () => {
+    const exe = image();
+    const r = inBun(
+      (m, c) => {
+        const two = (n: number) => BigInt(2) ** BigInt(n);
+        const refused = (f: () => unknown) => {
+          const x = c(f) as { cls?: string; message?: string };
+          return x.cls === 'TypeError' ? x.message : x;
+        };
+        return {
+          ok: [
+            m.add(-2147483648, 2147483647),
+            m.add(-0, -0),
+            m.tiny(-128),
+            m.tiny(127),
+            m.tiny(-0),
+            m.big(-two(63)),
+            m.big(two(63) - BigInt(1)),
+          ],
+          i32: [
+            m.add(2147483647, 0),
+            refused(() => m.add(0.5, 0)),
+            refused(() => m.add(Number.NaN, 0)),
+            refused(() => m.add(0, Number.POSITIVE_INFINITY)),
+            refused(() => m.add(0, Number.NEGATIVE_INFINITY)),
+            refused(() => m.add(-2147483649, 0)),
+            refused(() => m.add(2 ** 32 + 1, 0)),
+            refused(() => m.add(2 ** 53, 0)),
+            refused(() => m.add('1', 0)),
+            refused(() => m.add(BigInt(1), 0)),
+            refused(() => m.add(null, 0)),
+          ],
+          i8: [
+            refused(() => m.tiny(-129)),
+            refused(() => m.tiny(128)),
+            refused(() => m.tiny(127.5)),
+            refused(() => m.tiny(Number.NaN)),
+            refused(() => m.tiny(-Infinity)),
+          ],
+          i64: [
+            refused(() => m.big(-two(63) - BigInt(1))),
+            refused(() => m.big(two(63))),
+            refused(() => m.big(0)),
+            refused(() => m.big(-0)),
+            refused(() => m.big(Number.NaN)),
+            refused(() => m.big('1')),
+          ],
+          hostile: refused(() =>
+            m.add(
+              {
+                toString() {
+                  throw new Error('toString ran');
+                },
+              },
+              0,
+            ),
+          ),
+          huge: String(refused(() => m.big(two(200000)))).length < 200,
+          negZero: [refused(() => m.tiny(-0.5)), refused(() => m.add(-0.5, 0))],
+          after: m.add(20, 22),
+        };
+      },
+      { FAKE_EXEC: exe },
+    );
+    const i32 = 'add(): argument "a" must be an integer from -2147483648 to 2147483647, got';
+    const i32b = 'add(): argument "b" must be an integer from -2147483648 to 2147483647, got';
+    const i8 = 'tiny(): argument "x" must be an integer from -128 to 127, got';
+    const i64 =
+      'big(): argument "x" must be a bigint from -9223372036854775808 to 9223372036854775807, got';
+    expect(r.result, r.stderr).toEqual({
+      ok: [-1, 0, -128, 127, 0, '-9223372036854775808n', '9223372036854775807n'],
+      i32: [
+        2147483647,
+        `${i32} 0.5`,
+        `${i32} NaN`,
+        `${i32b} Infinity`,
+        `${i32b} -Infinity`,
+        `${i32} -2147483649`,
+        `${i32} 4294967297`,
+        `${i32} 9007199254740992`,
+        `${i32} string`,
+        `${i32} bigint`,
+        `${i32} object`,
+      ],
+      i8: [`${i8} -129`, `${i8} 128`, `${i8} 127.5`, `${i8} NaN`, `${i8} -Infinity`],
+      i64: [
+        `${i64} bigint -9223372036854775809`,
+        `${i64} bigint 9223372036854775808`,
+        `${i64} number 0`,
+        `${i64} number -0`,
+        `${i64} number NaN`,
+        `${i64} string`,
+      ],
+      hostile: `${i32} object`,
+      huge: true,
+      negZero: [`${i8} -0.5`, `${i32} -0.5`],
+      after: 42,
     });
     expect(r.status).toBe(0);
   });

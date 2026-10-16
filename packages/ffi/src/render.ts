@@ -829,14 +829,21 @@ function $base(): number {
   }
 
   const checks: Record<string, string> = {
+    $shown: `/** A number or bigint for an error message: bounded (a huge bigint is a bit count, never its digits), and the only values ever echoed. */
+function $shown(v: number | bigint): string {
+  if (typeof v === 'number') return v === 0 && 1 / v < 0 ? '-0' : String(v);
+  const hex = v.toString(16).length;
+  return hex > 24 ? \`about \${hex * 4} bits\` : String(v);
+}`,
     $int: `function $int(fn: string, arg: string, v: unknown, min: number, max: number): void {
   if (typeof v !== 'number' || !Number.isInteger(v) || v < min || v > max) {
-    throw new TypeError(\`\${fn}(): argument "\${arg}" must be an integer from \${min} to \${max}, got \${String(v)}\`);
+    throw new TypeError(\`\${fn}(): argument "\${arg}" must be an integer from \${min} to \${max}, got \${typeof v === 'number' ? $shown(v) : typeof v}\`);
   }
 }`,
     $big: `function $big(fn: string, arg: string, v: unknown, min: bigint, max: bigint): void {
   if (typeof v !== 'bigint' || v < min || v > max) {
-    throw new TypeError(\`\${fn}(): argument "\${arg}" must be a bigint from \${min} to \${max}, got \${typeof v} \${String(v)}\`);
+    const got = typeof v === 'number' || typeof v === 'bigint' ? \`\${typeof v} \${$shown(v)}\` : typeof v;
+    throw new TypeError(\`\${fn}(): argument "\${arg}" must be a bigint from \${min} to \${max}, got \${got}\`);
   }
 }`,
     $num: `function $num(fn: string, arg: string, v: unknown): void {
@@ -892,6 +899,7 @@ function $efin(fn: string, at: string, v: unknown): unknown {
   if (e.used.has('$U64')) {
     parts.push("const $U64_MIN = BigInt('0');\nconst $U64_MAX = BigInt('18446744073709551615');");
   }
+  if (e.used.has('$int') || e.used.has('$big')) e.used.add('$shown');
   for (const [name, text] of Object.entries(checks)) if (e.used.has(name)) parts.push(text);
   parts.push(schemas);
   return parts.join('\n\n');

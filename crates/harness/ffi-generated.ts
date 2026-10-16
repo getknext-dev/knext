@@ -40,6 +40,7 @@ import {
 import { tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
+import { integerMatrix } from '../../packages/ffi/src/__tests__/integer-matrix';
 import { runGenerate } from '../../packages/ffi/src/generate';
 import { CRATE_GIT, recordedCrateRev, runInit } from '../../packages/ffi/src/init';
 import { scanManifest } from '../../packages/ffi/src/manifest';
@@ -259,6 +260,17 @@ function wrapper(libPath: string): void {
     { FAKE_EXEC: join(image, 'server'), NODE_ENV: 'production' },
   ) as Record<string, unknown> | undefined;
   if (result === undefined) return;
+
+  // Integer arguments (bun:ffi corrupts some: a double to an i32 arrives as 0,
+  // and only the low 32 bits cross): every width, through the real library.
+  const integers = inBun(dir, integerMatrix, {
+    FAKE_EXEC: join(image, 'server'),
+    NODE_ENV: 'production',
+  }) as { cases: number; problems: string[] } | undefined;
+  if (integers !== undefined) {
+    check(integers.cases > 150, `the integer matrix ran only ${integers.cases} case(s)`);
+    same(integers.problems, [], 'every integer argument is validated before the native call');
+  }
 
   const refusedJs = (fn: string, at: string, got: string) => ({
     cls: 'TypeError',
