@@ -23,8 +23,12 @@
  *       catches it).
  *   L*  the request-read bounds (src/rpc/mod.rs, src/rpc/body.rs): the
  *       message limit lifted, the body cap lifted at the wiring or in the
- *       body, the read timeout lifted at the wiring or in the body, zstd
- *       accepted beside gzip — each must RED.
+ *       body, the read timeout lifted at the wiring or in the body — each
+ *       must RED. (L6, "zstd accepted beside gzip", is retired: since the
+ *       template stopped compiling zstd in, connectrpc::ZstdProvider does not
+ *       exist, so the mutation cannot compile. The gzip-only property is held
+ *       by the type system and by the zstd-free `cargo tree` gate in
+ *       rust-template.yml and tests/rust-template-contract.test.ts.)
  *   C*  the connection bounds (src/rpc/mod.rs): a silent connection never
  *       closed, an idle connection never reaped — each must RED.
  *   D*  the SIGTERM drain: closing connections instead of draining them, a
@@ -210,16 +214,6 @@ const MUTATIONS = [
     subject: 'body',
     anchor: '        if this.deadline.poll(cx).is_ready() {\n',
     replacement: '        if *this.limit == 0 && this.deadline.poll(cx).is_ready() {\n',
-  },
-  {
-    id: 'L6',
-    expect: 'red',
-    claim: 'zstd is accepted beside gzip (the template accepts gzip only)',
-    subject: 'server',
-    anchor:
-      '        .with_compression(CompressionRegistry::new().register(GzipProvider::new()));\n',
-    replacement:
-      '        .with_compression(\n            CompressionRegistry::new()\n                .register(GzipProvider::new())\n                .register(connectrpc::ZstdProvider::new()),\n        );\n',
   },
   // ── C: the connection bounds ──────────────────────────────────────────────
   {
