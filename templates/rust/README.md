@@ -43,6 +43,8 @@ e2e/kind-e2e.sh                                # kind + Knative: health served, 
 node ../../scripts/mutation-prove-rust-template-auth.mjs   # each way of opening the check reds a test
 ```
 
+`vendor/connectrpc-health` and the `[patch.crates-io]` entry in `Cargo.toml` exist only to keep zstd out of the release binary (this template accepts gzip only); delete both once the upstream crate publishes the same change (see `vendor/connectrpc-health/VENDORED.md`).
+
 CI: `.github/workflows/rust-template.yml` (tests, drift, cargo deny and audit; Connect
 conformance; image SBOM + Trivy gate; the kind e2e). The workflow holds no write credential and
 publishes no image.

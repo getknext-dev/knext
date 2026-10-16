@@ -118,14 +118,11 @@ dependencies = [
  "tower-http",
  "tracing",
  "wasm-bindgen-futures",
- "zstd",
 ]
 
 [[package]]
 name = "connectrpc-health"
 version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d20fc0ce78972ca7473b961953a8d57f5fd5943b184c65c971a96305f28bbebb"
 dependencies = [
  "buffa",
  "connectrpc",
