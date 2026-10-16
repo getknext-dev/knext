@@ -113,12 +113,17 @@ const MUTATIONS = [
     replacement: '  const stem = /^(.+?)(?:buffer)$/.exec(lower)?.[1];',
   },
   {
+    // The first run of this prover had a separate `new Command(` rule here; it
+    // SURVIVED its own removal, because this helper rule already resolves
+    // `new Redis.Command('UNLINK', …)`. The redundant rule was deleted, and
+    // the row now removes the rule that actually carries it.
     id: 'S8',
     expect: 'red',
-    claim: "new Redis.Command('UNLINK', …) is missed",
+    claim:
+      "the command helper is gone: new Redis.Command('UNLINK', …) and command(c, 'X') are missed",
     subject: 'scan',
-    anchor: '  for (const m of src.matchAll(/\\bnew\\s+(?:[\\w$]+\\s*\\.\\s*)?Command\\s*\\(/g)) {',
-    replacement: '  for (const m of [].values()) {',
+    anchor: "const HELPERS = new Set(['command', 'rediscommand']);",
+    replacement: "const HELPERS = new Set(['rediscommand']);",
   },
   // ── U: what must be UNPARSEABLE, never a pass ───────────────────────────────
   {

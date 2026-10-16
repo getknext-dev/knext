@@ -20,11 +20,12 @@
  *      `client.unlink?.(…)`, `client.unlink.bind(client)` all count; `Map#get`
  *      counts as `get` too, which is harmless because `get` is granted.
  *   2. issuer — `.call(`, `.pcall(`, `.send(`, `.sendCommand(`, `.callBuffer(`
- *      (ioredis, Lua's `redis.call`, Bun's native client, node-redis) and
- *      `new Command(` / `new <x>.Command(` (ioredis): the FIRST argument is the
- *      command.
- *   3. helper — `command(`, `redisCommand(` (bare or as a method):
- *      `(client, '<CMD>', …)`, the SECOND argument is the command.
+ *      (ioredis, Lua's `redis.call`, Bun's native client, node-redis): the FIRST
+ *      argument is the command.
+ *   3. helper — `command(`, `redisCommand(`, any case, bare, as a method or
+ *      after `new` (ioredis's `new Redis.Command('UNLINK', …)`): the FIRST
+ *      argument when it is a literal (`x.command('INFO')`, `new Command(…)`),
+ *      else the SECOND (`command(client, '<CMD>', …)`).
  *   4. tuple — an array literal whose first element is a quoted command name,
  *      any case and any quote (`['SET', key, …]`), as fed to the MULTI/EXEC and
  *      pipeline forwarders.
@@ -261,14 +262,6 @@ export function scanRedisCommands(src: string): ScanResult {
     if (invokes(src, after, lead)) {
       hits.push({ command: cmd, via: 'method', site, line: at(start) });
     }
-  }
-
-  // 2: `new Command('UNLINK', …)` / `new Redis.Command(…)` (ioredis).
-  for (const m of src.matchAll(/\bnew\s+(?:[\w$]+\s*\.\s*)?Command\s*\(/g)) {
-    const [first] = leadingArgs(src, (m.index ?? 0) + m[0].length, 1);
-    const cmd = literalCommand(first);
-    if (cmd === null) bad(m.index ?? 0, 'new Command(…) with a non-literal command');
-    else hits.push({ command: cmd, via: 'issuer', site: 'new Command', line: at(m.index ?? 0) });
   }
 
   // 4: command tuples, any case, any quote.

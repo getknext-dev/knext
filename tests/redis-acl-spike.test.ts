@@ -44,8 +44,9 @@ import { GLOBAL_RECEIVERS, type ScanResult, scanRedisCommands } from './redis-co
  *     the full list: a method named like a command (or its ioredis `Buffer` /
  *     `Stream` variant) on any receiver, called, optionally called, bound /
  *     called / applied, passed to `Reflect.apply`, or assigned; `.call/.pcall/
- *     .send/.sendCommand/.callBuffer` and `new Command` with the command first;
- *     `command/redisCommand(client, CMD)`; `['CMD', …]` tuples; destructured
+ *     .send/.sendCommand/.callBuffer` with the command first;
+ *     `command/redisCommand(client, CMD)` and `new Command(CMD)`; `['CMD', …]`
+ *     tuples; destructured
  *     command keys; `Reflect.get(x, 'cmd')` and `x['cmd'](…)`. A command it
  *     cannot resolve is UNPARSEABLE and fails here unless it is an exact line in
  *     FORWARDERS with its justification. Two exclusions, each principled and
