@@ -7,9 +7,17 @@
  * as a failure, never as a pass.
  *
  * A "command name" is a name in the canonical list (scripts/redis-commands.mjs:
- * `COMMAND LIST` on Redis 7.4 and Valkey 8.1), compared lowercased, or such a
- * name followed by ioredis's `Buffer` / `Stream` suffix (`unlinkBuffer`,
- * `zscanStream`), which sends the same command. What counts as issuing one, for
+ * `COMMAND LIST` on Redis 7.4 and Valkey 8.1, plus CLIENT_COMMANDS, the
+ * command methods an installed ioredis or Bun exposes that neither engine
+ * lists), compared lowercased, or such a name followed by any run of ioredis's
+ * method suffixes, IOREDIS_SUFFIXES: `Buffer` (`Commander`: every command gets
+ * `<cmd>Buffer`), `Stream` and `BufferStream` (`Redis`: `scanStream`,
+ * `zscanBufferStream`, …), each sending the same command. Plus
+ * INTERNAL_COMMAND_METHODS, the ioredis internals whose name is not a command
+ * but which send a fixed one (`_readyCheck` sends INFO, `defineCommand` defines a
+ * method that sends EVALSHA). The test checks every
+ * method on ioredis's and Bun's client prototypes against these rules, so a new
+ * suffix or a new command method reds there. What counts as issuing one, for
  * ANY receiver (no receiver names):
  *
  *   1. method — a member named like a command, `<anything>.<m>` or `?.<m>`, in a
@@ -19,13 +27,15 @@
  *      (`const f = client.unlink;`). `conn.expire(…)`, `tx.unlink(…)`,
  *      `client.unlink?.(…)`, `client.unlink.bind(client)` all count; `Map#get`
  *      counts as `get` too, which is harmless because `get` is granted.
- *   2. issuer — `.call(`, `.pcall(`, `.send(`, `.sendCommand(`, `.callBuffer(`
- *      (ioredis, Lua's `redis.call`, Bun's native client, node-redis): the FIRST
- *      argument is the command.
- *   3. helper — `command(`, `redisCommand(`, any case, bare, as a method or
+ *   2. issuer — `.call(`, `.pcall(`, `.send(`, `.sendCommand(`, `.callBuffer(`,
+ *      `.send_command(` (ioredis, Lua's `redis.call`, Bun's native client,
+ *      node-redis): the FIRST argument is the command.
+ *   3. helper — `command(`, `redisCommand(`, and ioredis's `createBuiltinCommand(`,
+ *      `addBuiltinCommand(`, `createScanStream(`, any case, bare, as a method or
  *      after `new` (ioredis's `new Redis.Command('UNLINK', …)`): the FIRST
  *      argument when it is a literal (`x.command('INFO')`, `new Command(…)`),
- *      else the SECOND (`command(client, '<CMD>', …)`).
+ *      else the SECOND (`command(client, '<CMD>', …)`); a suffixed literal
+ *      (`createScanStream('zscanBuffer', …)`) resolves like a method name.
  *   4. tuple — an array literal whose first element is a quoted command name,
  *      any case and any quote (`['SET', key, …]`), as fed to the MULTI/EXEC and
  *      pipeline forwarders.
@@ -43,14 +53,22 @@
  * and a generic issuer that is referenced rather than called
  * (`client.call.bind(client)`), which can send anything.
  *
- * TWO EXCLUSIONS, each tested on both sides: a receiver in GLOBAL_RECEIVERS
- * (`Object.keys`, `console.info`: language globals, never a client), and a
+ * THREE EXCLUSIONS, each tested on both sides: a receiver in GLOBAL_RECEIVERS
+ * (`Object.keys`, `console.info`: language globals, never a client); a
+ * `.digest(` that ends a node:crypto chain written out in the same expression,
+ * `createHash(…)` / `createHmac(…)` followed only by `.update(…)` calls
+ * (`createHash('sha256').update(b).digest('hex')`: a Hash, never a client; a
+ * Hash held in a variable is NOT excluded, it is explained per file); and a
  * call that passes no Redis argument (nothing, or only function literals) to a
  * command that needs one (`map.keys()`, `rows.sort((a, b) => a - b)`). Redis
  * checks arity before ACL (measured, Redis 7.4 and Valkey 8.1: `KEYS` with no
  * argument is `wrong number of arguments` for a user without `+keys`), so such
- * a call can never be a NOPERM. REDIS_NO_ARG_COMMANDS lists the commands that
- * DO take no argument (`client.info()`, `client.reset()` still count).
+ * a call can never be a NOPERM. The no-argument exclusion is narrow on purpose. It
+ * never applies to a command REDIS_NO_ARG_COMMANDS lists (`client.info()`,
+ * `client.reset()` still count); to a CLIENT_COMMANDS name (no arity was
+ * measured for those); or to a `*Stream` method, because ioredis's
+ * `scanStream()` / `zscanBufferStream()` take no JS argument and still send
+ * `SCAN 0 …`: the JS arity is not the Redis arity there.
  *
  * WHAT IT DOES NOT SEE (stated, not hidden): a command method passed as an
  * argument (other than `Reflect.apply`'s first), stored in an array element, an
@@ -59,16 +77,55 @@
  * read into a variable and invoked later (`const f = client[name]; f()`);
  * nested destructuring (`const { a: { unlink } } = x`); a destructuring
  * PARAMETER (`function f({ unlink })`); `with`, `eval`, `new Function`, and a
- * Proxy over the client. Strings and comments are scanned like code, on purpose
+ * Proxy over the client; a user function NAMED `createHash` / `createHmac` that
+ * returns a client, whose `.update(…).digest(k)` the crypto exclusion drops. Strings and comments are scanned like code, on purpose
  * (Lua lives in strings), so they can produce false hits but never hide one.
  */
-import { REDIS_COMMANDS, REDIS_NO_ARG_COMMANDS } from '../scripts/redis-commands.mjs';
+import {
+  CLIENT_COMMANDS,
+  REDIS_COMMANDS,
+  REDIS_NO_ARG_COMMANDS,
+} from '../scripts/redis-commands.mjs';
 
-export const REDIS_COMMAND_SET: ReadonlySet<string> = new Set(REDIS_COMMANDS);
+/** The commands whose arity the measured engines report (the no-argument exclusion's domain). */
+const MEASURED: ReadonlySet<string> = new Set(REDIS_COMMANDS);
+export const REDIS_COMMAND_SET: ReadonlySet<string> = new Set([
+  ...REDIS_COMMANDS,
+  ...CLIENT_COMMANDS,
+]);
 const NO_ARG: ReadonlySet<string> = new Set(REDIS_NO_ARG_COMMANDS);
 
-const GENERIC_ISSUERS = new Set(['call', 'pcall', 'send', 'sendcommand', 'callbuffer']);
-const HELPERS = new Set(['command', 'rediscommand']);
+/**
+ * ioredis's method-name suffixes, from its generated API: `Commander` defines
+ * `<cmd>Buffer` for every command, `Redis` defines `<scan>Stream` and
+ * `<scan>BufferStream`. Stripped repeatedly, so any combination resolves.
+ */
+export const IOREDIS_SUFFIXES: readonly string[] = ['buffer', 'stream'];
+
+/** ioredis methods whose name is not a command but which send a fixed one. */
+export const INTERNAL_COMMAND_METHODS: ReadonlyMap<string, string> = new Map([
+  ['_readycheck', 'info'], // Redis#_readyCheck: INFO
+  ['readycheck', 'cluster'], // Cluster#readyCheck: CLUSTER INFO
+  ['getinfofromnode', 'cluster'], // Cluster#getInfoFromNode: CLUSTER SLOTS
+  ['refreshslotscache', 'cluster'], // Cluster#refreshSlotsCache: CLUSTER SLOTS via getInfoFromNode
+  ['definecommand', 'evalsha'], // defines a script method that sends EVALSHA (then EVAL)
+]);
+
+export const GENERIC_ISSUERS: ReadonlySet<string> = new Set([
+  'call',
+  'pcall',
+  'send',
+  'sendcommand',
+  'send_command',
+  'callbuffer',
+]);
+export const HELPERS: ReadonlySet<string> = new Set([
+  'command',
+  'rediscommand',
+  'createbuiltincommand',
+  'addbuiltincommand',
+  'createscanstream',
+]);
 
 /**
  * Receivers that are ECMAScript or host globals (`Object.keys`, `console.info`,
@@ -90,6 +147,23 @@ export const GLOBAL_RECEIVERS: ReadonlySet<string> = new Set([
   'console',
 ]);
 
+/** Balanced parentheses, two levels deep: `(a)`, `(f(a), 'x')`, `(f(g(a)))`. */
+const PARENS = String.raw`\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\)`;
+
+/**
+ * The receiver of a `.digest` member, from the start of its line: a node:crypto
+ * chain, `createHash(…)` / `createHmac(…)` then only `.update(…)` calls.
+ */
+const CRYPTO_DIGEST_CHAIN = new RegExp(
+  String.raw`\bcreateH(?:ash|mac)\s*${PARENS}(?:\s*\.\s*update\s*${PARENS})*\s*\.\s*$`,
+);
+
+/** Is the `digest` member at `start` the end of a node:crypto Hash/Hmac chain? */
+function isCryptoDigest(src: string, lower: string, start: number): boolean {
+  if (lower !== 'digest') return false;
+  return CRYPTO_DIGEST_CHAIN.test(src.slice(src.lastIndexOf('\n', start - 1) + 1, start));
+}
+
 /** An argument that cannot be a Redis argument: a function literal (a comparator, a callback). */
 const FUNCTION_LITERAL = /^(?:async\s+)?(?:function\b|\([^()]*\)\s*=>|[\w$]+\s*=>)/;
 
@@ -105,15 +179,30 @@ function passesNoRedisArgument(src: string, open: number): boolean {
 }
 
 /**
- * The command a method or property name sends, or null. `unlinkBuffer` and
- * `zscanStream` are ioredis's buffer-reply and streaming variants of `unlink`
- * and `zscan`: same command on the wire.
+ * The command a method or property name sends, or null. `unlinkBuffer`,
+ * `zscanStream` and `zscanBufferStream` are ioredis's buffer-reply and
+ * streaming variants of `unlink` and `zscan`: same command on the wire.
  */
 export function commandOfName(name: string): string | null {
-  const lower = name.toLowerCase();
-  if (REDIS_COMMAND_SET.has(lower)) return lower;
-  const stem = /^(.+?)(?:buffer|stream)$/.exec(lower)?.[1];
-  return stem !== undefined && REDIS_COMMAND_SET.has(stem) ? stem : null;
+  let stem = name.toLowerCase();
+  for (;;) {
+    if (REDIS_COMMAND_SET.has(stem)) return stem;
+    const internal = INTERNAL_COMMAND_METHODS.get(stem);
+    if (internal !== undefined) return internal;
+    const suffix = IOREDIS_SUFFIXES.find((s) => stem.length > s.length && stem.endsWith(s));
+    if (suffix === undefined) return null;
+    stem = stem.slice(0, -suffix.length);
+  }
+}
+
+/**
+ * May a call to `cmd` through the method `name` that passes no Redis argument
+ * be dropped? Only for a measured command that needs an argument, and never for
+ * a `*Stream` method, which sends `SCAN 0 …` whatever its JS arguments.
+ */
+function zeroArgExempt(name: string, cmd: string): boolean {
+  if (/stream$/i.test(name)) return false; // ioredis streams: JS arity is not Redis arity
+  return MEASURED.has(cmd) && !NO_ARG.has(cmd);
 }
 
 export type Hit = {
@@ -247,7 +336,8 @@ export function scanRedisCommands(src: string): ScanResult {
       const args = leadingArgs(src, open, 2);
       // `x.command('INFO')` is ioredis's COMMAND-style call with the command first;
       // `command(client, 'HSET', …)` is a helper with the command second.
-      const cmd = literalCommand(args[0]) ?? literalCommand(args[1]);
+      const literal = literalCommand(args[0]) ?? literalCommand(args[1]);
+      const cmd = literal === null ? null : (commandOfName(literal) ?? literal);
       if (cmd === null) {
         // A declaration (`function redisCommand(client, name, args) {`) is not a call.
         if (/\bfunction\s*$/.test(before)) continue;
@@ -258,7 +348,8 @@ export function scanRedisCommands(src: string): ScanResult {
     if (!receiver || GLOBAL_RECEIVERS.has(receiver)) continue;
     const cmd = commandOfName(name);
     if (cmd === null) continue;
-    if (called && !NO_ARG.has(cmd) && passesNoRedisArgument(src, open)) continue;
+    if (isCryptoDigest(src, lower, start)) continue; // createHash(…).update(…).digest(…)
+    if (called && zeroArgExempt(name, cmd) && passesNoRedisArgument(src, open)) continue;
     if (invokes(src, after, lead)) {
       hits.push({ command: cmd, via: 'method', site, line: at(start) });
     }

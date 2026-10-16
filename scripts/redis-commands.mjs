@@ -457,3 +457,75 @@ export const REDIS_NO_ARG_COMMANDS = Object.freeze([
   'unsubscribe',
   'unwatch',
 ]);
+
+/**
+ * Commands a client library the runtime uses exposes as methods, that neither
+ * measured engine lists (newer-server commands: `hgetdel`, `hsetex`, `vadd`,
+ * `digest`, …, and Sentinel's `sentinel`). Generated from what EVERY installed
+ * ioredis actually defines (ioredis 5 and 6: `Commander` defines one method per
+ * `getBuiltinCommands()` name, which is `@ioredis/commands` `list` plus
+ * `sentinel`) minus REDIS_COMMANDS, and checked against Bun's RedisClient (its
+ * non-server names, `hgetdel`, `hgetex`, `hsetex`, are all here):
+ *
+ *   Redis.prototype.getBuiltinCommands(), per ioredis, minus REDIS_COMMANDS, sorted
+ *
+ * Why the scan needs it: `client.hgetdel(k)` sends HGETDEL whether or not the
+ * engines measured here know it, and a server that does would answer NOPERM.
+ * The scan counts these like any command, and NEVER drops a zero-argument call
+ * to one (no arity was measured for them). tests/redis-acl-spike.test.ts reds
+ * when an installed ioredis or Bun exposes a command name this file lacks.
+ */
+export const CLIENT_COMMANDS = Object.freeze([
+  'arcount',
+  'ardel',
+  'ardelrange',
+  'arget',
+  'argetrange',
+  'argrep',
+  'arinfo',
+  'arinsert',
+  'arlastitems',
+  'arlen',
+  'armget',
+  'armset',
+  'arnext',
+  'arop',
+  'arring',
+  'arscan',
+  'arseek',
+  'arset',
+  'backup',
+  'blmovem',
+  'delex',
+  'digest',
+  'hgetdel',
+  'hgetex',
+  'himport',
+  'hotkeys',
+  'hsetex',
+  'increx',
+  'lmovem',
+  'msetex',
+  'sdiffcard',
+  'sentinel',
+  'sunioncard',
+  'trimslots',
+  'vadd',
+  'vcard',
+  'vdim',
+  'vemb',
+  'vgetattr',
+  'vinfo',
+  'vismember',
+  'vlinks',
+  'vrandmember',
+  'vrange',
+  'vrem',
+  'vsetattr',
+  'vsim',
+  'xackdel',
+  'xcfgset',
+  'xdelex',
+  'xidmprecord',
+  'xnack',
+]);

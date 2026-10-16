@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { join, resolve } from 'node:path';
 import {
   aclRulesFor,
@@ -14,7 +15,16 @@ import {
   REDIS_NO_ARG_COMMANDS,
   REDIS_SUBCOMMANDS,
 } from '../scripts/redis-commands.mjs';
-import { GLOBAL_RECEIVERS, type ScanResult, scanRedisCommands } from './redis-command-scan';
+import {
+  commandOfName,
+  GENERIC_ISSUERS,
+  GLOBAL_RECEIVERS,
+  HELPERS,
+  IOREDIS_SUFFIXES,
+  REDIS_COMMAND_SET,
+  type ScanResult,
+  scanRedisCommands,
+} from './redis-command-scan';
 
 /**
  * The Redis ACL compatibility spike (scripts/redis-acl-spike.mjs,
@@ -41,37 +51,54 @@ import { GLOBAL_RECEIVERS, type ScanResult, scanRedisCommands } from './redis-co
  *     "unclassified" state to fall into: a new file is scanned by default.
  *
  *     WHAT COUNTS AS A COMMAND — tests/redis-command-scan.ts, whose header is
- *     the full list: a method named like a command (or its ioredis `Buffer` /
- *     `Stream` variant) on any receiver, called, optionally called, bound /
- *     called / applied, passed to `Reflect.apply`, or assigned; `.call/.pcall/
- *     .send/.sendCommand/.callBuffer` with the command first;
- *     `command/redisCommand(client, CMD)` and `new Command(CMD)`; `['CMD', …]`
- *     tuples; destructured
- *     command keys; `Reflect.get(x, 'cmd')` and `x['cmd'](…)`. A command it
- *     cannot resolve is UNPARSEABLE and fails here unless it is an exact line in
- *     FORWARDERS with its justification. Two exclusions, each principled and
- *     tested on both sides: a receiver that is a language global
- *     (GLOBAL_RECEIVERS: `Object.keys`, `console.info`), and a call that passes
- *     no Redis argument to a command that needs one (`map.keys()`,
- *     `rows.sort((a, b) => a - b)`), which Redis answers with a wrong-arity
- *     error before its ACL check (measured on both engines).
+ *     the full list: a method named like a command (the measured engines'
+ *     COMMAND LIST plus the command methods ioredis and Bun expose that they do
+ *     not list, CLIENT_COMMANDS; or any run of ioredis's `Buffer` / `Stream`
+ *     suffixes on one, `zscanBufferStream`; or an ioredis method that sends a
+ *     fixed command, `_readyCheck`, `defineCommand`) on any receiver, called,
+ *     optionally called, bound / called / applied, passed to `Reflect.apply`, or
+ *     assigned; `.call/.pcall/.send/.sendCommand/.send_command/.callBuffer` with
+ *     the command first; `command/redisCommand(client, CMD)`, `new Command(CMD)`
+ *     and ioredis's `createBuiltinCommand/addBuiltinCommand/createScanStream`;
+ *     `['CMD', …]` tuples; destructured command keys; `Reflect.get(x, 'cmd')`
+ *     and `x['cmd'](…)`. Every member of the ioredis (5 and 6) and Bun client
+ *     prototypes must resolve under these rules or be listed in
+ *     CLIENT_NON_COMMAND_METHODS, so a client upgrade that adds a command
+ *     method or a suffix reds. A command it cannot resolve is UNPARSEABLE and
+ *     fails here unless it is an exact line in FORWARDERS with its
+ *     justification. Three exclusions, each principled and tested on both
+ *     sides: a receiver that is a language global (GLOBAL_RECEIVERS:
+ *     `Object.keys`, `console.info`); a `.digest(…)` ending a node:crypto chain
+ *     written out in one expression (`createHash('sha256').update(b).digest
+ *     ('hex')`); and a call that passes no Redis argument to a measured command
+ *     that needs one (`map.keys()`, `rows.sort((a, b) => a - b)`), which Redis
+ *     answers with a wrong-arity error before its ACL check (measured on both
+ *     engines), never applied to a `*Stream` method (it sends SCAN 0 with no JS
+ *     argument) or to a CLIENT_COMMANDS name (no arity measured).
  *
  *     FALSE POSITIVES are explained, never skipped: NOT_REDIS_RECEIVERS (a
- *     receiver in one file, with the declaration that binds it to something
- *     that is not a client, and no other declaration of it in that file) and
- *     NOT_REDIS_LINES (an exact trimmed line). Every entry must still occur, so
- *     a stale one reds.
+ *     receiver in one file, exempt for its listed commands ONLY, with the
+ *     declaration that binds it to something that is not a client, and no other
+ *     binding of it in that file: declaration, destructuring, import or
+ *     re-assignment) and NOT_REDIS_LINES (an exact trimmed line). Every entry,
+ *     and every command in a receiver entry, must still occur, so a stale one
+ *     reds.
  *
  *     WHAT IT DOES NOT SEE (stated, not hidden): everything in the scanner
  *     header's own list (a command method stored in an array or object literal,
  *     a computed member read into a variable and invoked later, nested
  *     destructuring, a destructuring parameter, `with` / `eval` /
- *     `new Function` / a Proxy over the client); a client reached through a
- *     computed specifier in a file with no other signal at all; a tuple built
- *     from non-literals and handed to a listed forwarder; a receiver in
- *     NOT_REDIS_RECEIVERS rebound to a client through a PARAMETER of the same
- *     name. The live lane's real-handler layer (ACL LOG, MONITOR) is the
- *     backstop for the paths it exercises.
+ *     `new Function` / a Proxy over the client, a user function named
+ *     `createHash` / `createHmac` that returns a client); a client reached
+ *     through a computed specifier in a file with no other signal at all; a
+ *     tuple built from non-literals and handed to a listed forwarder; and, for a
+ *     NOT_REDIS_RECEIVERS receiver, a client bound to that name in a way the
+ *     binding check does not parse: a function or catch PARAMETER (`(log) =>`,
+ *     `({ log }) =>`), a class field, nested destructuring, or a client reached
+ *     as a property of the same name (`this.log`, `deps.log`), which then
+ *     issues exactly the exempt command (any other command on it still reds).
+ *     The live lane's real-handler layer (ACL LOG, MONITOR) is the backstop for
+ *     the paths it exercises.
  *   - LIVE LANE (KNEXT_REDIS_LIVE_URL, loopback only, like the use-cache Lua
  *     lane): run the spike with `--assert` under node (ioredis) and bun (Bun's
  *     native client) — exit 0 — and mutation-prove it: dropping a command the
@@ -91,6 +118,90 @@ const SCRIPT = join(ROOT, 'scripts', 'redis-acl-spike.mjs');
 /** The connect-time commands ACL never gates (measured: AUTH, HELLO). */
 const HANDSHAKE = new Set(['auth', 'hello']);
 
+/** Both installed ioredis majors (the runtime packages pin 5, the root 6). */
+const IOREDIS_PACKAGES = ['ioredis', 'ioredis5'] as const;
+const rootRequire = createRequire(join(ROOT, 'package.json'));
+
+const EMITTER = 'EventEmitter API, sends nothing';
+const LIFECYCLE =
+  'connection lifecycle: the connect-time handshake (AUTH, HELLO, CLIENT SETINFO, the INFO ' +
+  'ready check) is what the live lane measures, not a call site';
+const INTERNAL =
+  'client internals: queue, timer, state or option bookkeeping; sends nothing itself';
+
+/**
+ * Members of the ioredis (5, 6) Redis / Cluster / Pipeline and Bun RedisClient
+ * prototypes whose name is not a command and that the scan therefore does not
+ * count, each with why. Every OTHER member must resolve to a command (by name,
+ * suffix or INTERNAL_COMMAND_METHODS) or be an issuer / helper, so a client
+ * upgrade that adds a command method or a new suffix reds here. Every entry
+ * must still exist on some prototype.
+ */
+const CLIENT_NON_COMMAND_METHODS: Record<string, string> = {
+  _eventsCount: EMITTER,
+  addListener: EMITTER,
+  emit: EMITTER,
+  eventNames: EMITTER,
+  getMaxListeners: EMITTER,
+  listenerCount: EMITTER,
+  listeners: EMITTER,
+  off: EMITTER,
+  on: EMITTER,
+  once: EMITTER,
+  prependListener: EMITTER,
+  prependOnceListener: EMITTER,
+  rawListeners: EMITTER,
+  removeAllListeners: EMITTER,
+  removeListener: EMITTER,
+  setMaxListeners: EMITTER,
+  silentEmit: EMITTER,
+  _connect: LIFECYCLE,
+  close: LIFECYCLE,
+  connect: LIFECYCLE,
+  connected: LIFECYCLE,
+  disconnect: LIFECYCLE,
+  duplicate: LIFECYCLE,
+  end: LIFECYCLE,
+  handleCloseEvent: LIFECYCLE,
+  handleError: LIFECYCLE,
+  handleReconnection: LIFECYCLE,
+  onclose: LIFECYCLE,
+  onconnect: LIFECYCLE,
+  recoverFromFatalError: LIFECYCLE,
+  _buildBatchContext: INTERNAL,
+  _buildCommandContext: INTERNAL,
+  _getDescription: INTERNAL,
+  _getServerAddress: INTERNAL,
+  addBatch: INTERNAL,
+  autoPipelineQueueSize: INTERNAL,
+  bufferedAmount: INTERNAL,
+  clearNodesRefreshInterval: INTERNAL,
+  delayUntilReady: INTERNAL,
+  dnsLookup: INTERNAL,
+  fillResult: INTERNAL,
+  flushQueue: INTERNAL,
+  getBlockingTimeoutInMs: INTERNAL,
+  getConfiguredBlockingTimeout: INTERNAL,
+  invokeReadyDelayedCallbacks: INTERNAL,
+  mode: INTERNAL,
+  natMapper: INTERNAL,
+  parseOptions: INTERNAL,
+  resetCommandQueue: INTERNAL,
+  resetNodesRefreshInterval: INTERNAL,
+  resetOfflineQueue: INTERNAL,
+  resolveSrv: INTERNAL,
+  resolveStartupNodeHostnames: INTERNAL,
+  setSocketTimeout: INTERNAL,
+  setStatus: INTERNAL,
+  createShardedSubscriberGroup:
+    'Cluster sharded pub/sub setup; SSUBSCRIBE goes through the subscriber, and pub/sub is refused by resetchannels',
+  executeOfflineCommands:
+    'Cluster: replays commands already issued (and scanned) at their call sites',
+  getBuiltinCommands: 'returns the command-name list; sends nothing',
+  nodes: 'Cluster: returns the node connections; sends nothing',
+  pipeline: 'builds a pipeline; its commands are scanned as method calls or `[CMD, …]` tuples',
+};
+
 /** Directories whose code never runs as the app's ACL user, and why. */
 const NOT_THE_APP_USER: Record<string, string> = {
   'packages/kn-next/src/cli/':
@@ -99,63 +210,118 @@ const NOT_THE_APP_USER: Record<string, string> = {
 };
 
 /**
- * Receivers that are not Redis clients, per file. `bindings` are the
- * declarations that bind the receiver to something that is not a client; each
- * must occur in the file, and every `const|let|var <receiver> =` in the file
- * must be one of them, so a second, client-valued declaration reds. Every entry
- * must still explain a hit.
+ * Receivers that are not Redis clients, per file, each exempt for the listed
+ * `commands` ONLY: `log.info(…)` is explained, `log.zrange(…)` on the same
+ * receiver is not, and reds. `bindings` are the declarations that bind the
+ * receiver to something that is not a client; each must occur in the file, and
+ * every other binding of the receiver the file makes reds (receiverBindings:
+ * `const|let|var <r> =`, a destructuring pattern that binds `<r>`, an import of
+ * `<r>`, a plain re-assignment `<r> = …`), so a second, client-valued binding
+ * is caught. Every entry, and every command in it, must still explain a hit.
  */
-const NOT_REDIS_RECEIVERS: Record<string, Record<string, { bindings: string[]; why: string }>> = {
+const NOT_REDIS_RECEIVERS: Record<
+  string,
+  Record<string, { bindings: string[]; commands: string[]; why: string }>
+> = {
   'packages/kn-next/src/adapters/deferred-default-metrics.ts': {
     log: {
       bindings: ['readonly log?: { info: (obj: object, msg: string) => void };'],
+      commands: ['info'],
       why: 'an injected logger, typed as one (INFO is a Redis command)',
     },
   },
   'packages/kn-next/src/adapters/deferred-supervisor-init.ts': {
-    log: { bindings: ['readonly log?: StepLogger;'], why: 'an injected step logger' },
+    log: {
+      bindings: ['readonly log?: StepLogger;'],
+      commands: ['info'],
+      why: 'an injected step logger',
+    },
   },
   'packages/kn-next/src/adapters/image-cache-sync.ts': {
     log: {
       bindings: ['const log = opts.log ?? console;', 'const log = deps.log ?? console;'],
+      commands: ['info'],
       why: 'an injected logger or console',
     },
     fs: {
       bindings: ['import { existsSync, promises as fs, constants as fsConstants } from "node:fs";'],
+      commands: ['watch'],
       why: "node:fs's promises API (fs.watch)",
     },
   },
   'packages/kn-next/src/adapters/metrics.ts': {
     deepHealthState: {
       bindings: ['const deepHealthState = new Gauge({'],
+      commands: ['reset'],
       why: 'a prom-client gauge reset',
     },
   },
   'packages/kn-next/src/adapters/node-server.ts': {
-    log: { bindings: ['const log = createLogger({ module: "server" });'], why: 'the pino logger' },
+    log: {
+      bindings: ['const log = createLogger({ module: "server" });'],
+      commands: ['info'],
+      why: 'the pino logger',
+    },
   },
   'packages/kn-next/src/adapters/sandbox-fetch-debug.cjs': {
     dc: {
       bindings: ["const dc = require('node:diagnostics_channel');"],
-      why: 'node:diagnostics_channel (subscribe/unsubscribe)',
+      commands: ['unsubscribe'],
+      why: 'node:diagnostics_channel (unsubscribe)',
     },
   },
   'packages/kn-next/src/adapters/sandbox-fetch-realm-debug.cjs': {
     dc: {
       bindings: ["const dc = require('node:diagnostics_channel');"],
-      why: 'node:diagnostics_channel (subscribe/unsubscribe)',
+      commands: ['subscribe'],
+      why: 'node:diagnostics_channel (subscribe)',
+    },
+  },
+  'packages/kn-next/src/adapters/sharp-native-extract.mjs': {
+    key: {
+      bindings: ["const key = createHash('sha256');"],
+      commands: ['digest'],
+      why: 'a node:crypto Hash held in a variable (DIGEST is a newer Redis command)',
     },
   },
   'packages/kn-next/src/utils/asset-upload.ts': {
     log: {
       bindings: ['const log = createLogger({ module: "asset-upload" });'],
+      commands: ['info'],
       why: 'the pino logger',
     },
   },
   'packages/lib/src/health/index.ts': {
-    logger: { bindings: ["import { logger } from '../logger';"], why: 'the pino logger' },
+    logger: {
+      bindings: ["import { logger } from '../logger';"],
+      commands: ['info'],
+      why: 'the pino logger',
+    },
   },
 };
+
+/**
+ * Every way a file can (re)bind `r` that the binding check sees: a
+ * `const|let|var` declaration; a destructuring pattern that binds it (`{ r }`,
+ * `{ a: r }`, `{ r = d }`, then `=`); an import (default, namespace, named, or
+ * `as r`); and a re-assignment `r = …` (or `??=`, `||=`, `&&=`). Matched over the whole source, so
+ * a multi-line pattern counts; the reported line is the one the match starts on.
+ */
+function receiverBindings(r: string): RegExp[] {
+  const id = String.raw`(?<![\w$.])${r}(?![\w$])`;
+  return [
+    new RegExp(String.raw`\b(?:const|let|var)\s+${r}\s*=`, 'g'),
+    new RegExp(
+      String.raw`\{[^{}]*${id}\s*(?=[,}]|=(?![=>]))[^{}]*\}\s*(?::[^=;{}\n]+)?=(?![=>])`,
+      'g',
+    ),
+    new RegExp(
+      String.raw`\bimport\s+(?:type\s+)?(?:${r}\b|\*\s*as\s+${r}\b|[^;]*\{[^}]*${id}\s*[,}][^;]*from)`,
+      'g',
+    ),
+    new RegExp(String.raw`${id}\s*(?:\?\?|\|\||&&)?=(?![=>])`, 'g'),
+  ];
+}
 
 /**
  * Hits on exact lines that are not Redis, and why. Matched on the exact trimmed
@@ -294,12 +460,24 @@ const DISCOVERED = discover();
 const SCANNED = DISCOVERED.filter((d) => d.excludedBy === undefined);
 
 const textAt = (src: string, line: number) => (src.split('\n')[line - 1] ?? '').trim();
+
+/** The trimmed line each binding of `receiver` in `src` starts on (receiverBindings). */
+function bindingLines(src: string, receiver: string): string[] {
+  const out: string[] = [];
+  for (const re of receiverBindings(receiver)) {
+    for (const m of src.matchAll(re)) {
+      out.push(textAt(src, src.slice(0, m.index ?? 0).split('\n').length));
+    }
+  }
+  return out;
+}
 const receiverOf = (site: string) => site.slice(0, Math.max(0, site.lastIndexOf('.')));
 
 /** Is this non-granted hit explained by NOT_REDIS_RECEIVERS or NOT_REDIS_LINES? */
 function explained(file: string, src: string, h: ScanResult['hits'][number]): boolean {
-  if (h.via === 'method' && NOT_REDIS_RECEIVERS[file]?.[receiverOf(h.site)] !== undefined)
-    return true;
+  // A receiver entry explains only its own commands: `log.info` yes, `log.zrange` no.
+  const receiver = NOT_REDIS_RECEIVERS[file]?.[receiverOf(h.site)];
+  if (h.via === 'method' && receiver?.commands.includes(h.command) === true) return true;
   return NOT_REDIS_LINES[file]?.[textAt(src, h.line)] !== undefined;
 }
 
@@ -462,6 +640,141 @@ describe('redis ACL spike: the command scanner (tests/redis-command-scan.ts)', (
       expect(REDIS_NO_ARG_COMMANDS).not.toContain(c);
     }
   });
+
+  // Round 4: the suffix grammar, client-only commands, and every *Stream method
+  // counted even with no JS argument (it still sends SCAN 0 …).
+  it.each([
+    ['client.zscanBufferStream(key);', 'zscan', 'BufferStream'],
+    ["client.sscanBufferStream(key, { match: 'x:*' });", 'sscan', 'BufferStream with options'],
+    ['client.hscanBufferStream(key);', 'hscan', 'BufferStream'],
+    ['client.scanStream();', 'scan', 'a zero-argument Stream still sends SCAN'],
+    ['client.zscanStream();', 'zscan', 'a zero-argument Stream still sends ZSCAN'],
+    ['client.scanBufferStream();', 'scan', 'a zero-argument BufferStream'],
+    ["await client.send_command('UNLINK', k);", 'unlink', "ioredis's send_command issuer"],
+    ["client.createBuiltinCommand('unlink').string(k);", 'unlink', 'createBuiltinCommand'],
+    ["client.addBuiltinCommand('unlink');", 'unlink', 'addBuiltinCommand'],
+    ["client.createScanStream('zscanBuffer', { key });", 'zscan', 'createScanStream, suffixed'],
+    ["await client.hgetdel(k, 'FIELDS', '1', f);", 'hgetdel', 'a client-only command'],
+    ['await client.hotkeys();', 'hotkeys', 'a client-only command, no argument'],
+    ['await client.digest(k);', 'digest', 'DIGEST on a client'],
+    ["hash.digest('hex');", 'digest', 'a Hash in a variable is explained per file, not excluded'],
+    ["createHash('a').update(x); client.digest(k);", 'digest', 'a chain that ends before'],
+    ["client.update(b).digest('hex');", 'digest', 'no createHash at the head'],
+    ['client._readyCheck(cb);', 'info', 'an internal that sends INFO'],
+    ["client.defineCommand('purge', { lua });", 'evalsha', 'a script method sends EVALSHA'],
+  ])('sees %s as %s (%s)', (src, cmd) => {
+    expect(commands(src)).toContain(cmd);
+  });
+
+  it.each([
+    ["createHash('sha256').update(b).digest('hex');"],
+    ["$createHash('sha256').update($readFileSync(path)).digest('hex');"],
+    ["crypto.createHash('sha256').update(String(input)).digest('hex').slice(0, n);"],
+    ["createHmac('sha256', k).update(String(v), 'utf8').digest('base64url');"],
+    ["createHash('sha256').digest('hex');"],
+  ])('does not count the node:crypto chain %s', (src) => {
+    expect(scanRedisCommands(src)).toEqual({ hits: [], unparseable: [] });
+  });
+
+  it('every command ioredis defines a method for is a known command (5 and 6)', () => {
+    for (const pkg of IOREDIS_PACKAGES) {
+      const { Redis } = rootRequire(pkg);
+      const builtin: string[] = Redis.prototype.getBuiltinCommands.call({});
+      expect(builtin.length, `${pkg}: getBuiltinCommands is empty`).toBeGreaterThan(200);
+      expect(
+        builtin.filter((c) => !REDIS_COMMAND_SET.has(c.toLowerCase())),
+        `${pkg} sends these, the scan would not see them: add them to CLIENT_COMMANDS`,
+      ).toEqual([]);
+    }
+  });
+
+  it('every method on the ioredis (5, 6) and Bun client prototypes is a command or a listed non-command', () => {
+    const unknown: string[] = [];
+    const seen = new Set<string>();
+    const walk = (label: string, proto: object) => {
+      for (let p = proto; p && p !== Object.prototype; p = Object.getPrototypeOf(p)) {
+        for (const name of Object.getOwnPropertyNames(p)) {
+          if (name === 'constructor') continue;
+          seen.add(name);
+          const lower = name.toLowerCase();
+          if (commandOfName(name) !== null) continue;
+          if (GENERIC_ISSUERS.has(lower) || HELPERS.has(lower)) continue;
+          if (CLIENT_NON_COMMAND_METHODS[name] !== undefined) continue;
+          unknown.push(`${label}#${name}`);
+        }
+      }
+    };
+    for (const pkg of IOREDIS_PACKAGES) {
+      const m = rootRequire(pkg);
+      walk(`${pkg}.Redis`, m.Redis.prototype);
+      walk(`${pkg}.Cluster`, m.Cluster.prototype);
+      walk(`${pkg}.Pipeline`, m.Pipeline.prototype);
+    }
+    walk('Bun.RedisClient', Bun.RedisClient.prototype);
+    expect(
+      unknown,
+      'a client method the scan cannot classify: if it sends a command, teach the scan ' +
+        '(a suffix in IOREDIS_SUFFIXES, CLIENT_COMMANDS, INTERNAL_COMMAND_METHODS, an issuer ' +
+        'or a helper); if it does not, list it in CLIENT_NON_COMMAND_METHODS with why',
+    ).toEqual([]);
+    // Not vacuous: the walk reached the generated and the hand-written methods.
+    for (const n of ['zscanBufferStream', 'unlinkBuffer', 'sendCommand', 'getBuffer'])
+      expect(seen.has(n), `the walk no longer reaches ${n}`).toBe(true);
+    expect(
+      Object.keys(CLIENT_NON_COMMAND_METHODS).filter((n) => !seen.has(n)),
+      'stale CLIENT_NON_COMMAND_METHODS entries',
+    ).toEqual([]);
+  });
+
+  it('a *Stream method resolves through every suffix combination, and a non-suffix does not', () => {
+    for (const s of IOREDIS_SUFFIXES) expect(['buffer', 'stream']).toContain(s);
+    expect(commandOfName('zscanBufferStream')).toBe('zscan');
+    expect(commandOfName('unlinkStreamBuffer')).toBe('unlink');
+    expect(commandOfName('getBuffer')).toBe('get');
+    expect(commandOfName('bufferStream')).toBeNull();
+    expect(commandOfName('nodes')).toBeNull();
+  });
+});
+
+describe('redis ACL spike: NOT_REDIS_RECEIVERS is per command and per binding', () => {
+  const NODE_SERVER = 'packages/kn-next/src/adapters/node-server.ts';
+  const hit = (site: string, command: string) =>
+    ({ command, via: 'method', site, line: 1 }) as const;
+
+  it('explains only the listed command on an exempt receiver', () => {
+    expect(explained(NODE_SERVER, '', hit('log.info', 'info'))).toBe(true);
+    expect(explained(NODE_SERVER, '', hit('log.zrange', 'zrange'))).toBe(false);
+    expect(explained(NODE_SERVER, '', hit('log.keys', 'keys'))).toBe(false);
+  });
+
+  it.each([
+    ['const log = connectRedis();'],
+    ['const { log } = deps;'],
+    ['const { client: log } = deps;'],
+    ['const { log = fallback } = deps;'],
+    ['({ log } = deps);'],
+    ['const {\n  other,\n  log,\n} = deps;'],
+    ["import log from 'ioredis';"],
+    ["import * as log from 'ioredis';"],
+    ["import { createClient as log } from 'redis';"],
+    ["import { log } from './client';"],
+    ['log = new Redis(url);'],
+    ['log ??= client;'],
+  ])('sees %p as a binding of the receiver', (src) => {
+    expect(bindingLines(src, 'log').length).toBeGreaterThan(0);
+  });
+
+  it.each([
+    ['options.log?.info({ reason }, "done");'],
+    ['readonly log?: StepLogger;'],
+    ['if (log === undefined) return;'],
+    ['const { log: other } = deps;'],
+    ['const catalog = 1;'],
+    ['const f = (log) => log;'],
+    ['deps.log = x;'],
+  ])('does not see %p as a binding of the receiver', (src) => {
+    expect(bindingLines(src, 'log')).toEqual([]);
+  });
 });
 
 describe('redis ACL spike: discovery', () => {
@@ -539,16 +852,14 @@ describe('redis ACL spike: the runtime source scan', () => {
     const problems: string[] = [];
     for (const [file, receivers] of Object.entries(NOT_REDIS_RECEIVERS)) {
       const src = DISCOVERED.find((d) => d.file === file)?.src ?? '';
-      const lines = src.split('\n').map((l) => l.trim());
       for (const [receiver, { bindings }] of Object.entries(receivers)) {
         for (const binding of bindings) {
           if (!src.includes(binding))
             problems.push(`${file}: ${receiver}'s binding is gone: ${binding}`);
         }
-        const decl = new RegExp(`\\b(?:const|let|var)\\s+${receiver}\\s*=`);
-        for (const line of lines) {
-          if (decl.test(line) && !bindings.some((b) => line.includes(b)))
-            problems.push(`${file}: ${receiver} is also declared by: ${line}`);
+        for (const line of bindingLines(src, receiver)) {
+          if (!bindings.some((b) => line.includes(b)))
+            problems.push(`${file}: ${receiver} is also bound by: ${line}`);
         }
       }
     }
@@ -560,14 +871,17 @@ describe('redis ACL spike: the runtime source scan', () => {
     const byFile = new Map(SCANNED.map((d) => [d.file, d]));
     for (const [file, receivers] of Object.entries(NOT_REDIS_RECEIVERS)) {
       const d = byFile.get(file);
-      for (const receiver of Object.keys(receivers)) {
-        const used = d?.scan.hits.some(
-          (h) =>
-            h.via === 'method' &&
-            receiverOf(h.site) === receiver &&
-            !MINIMAL_COMMANDS.includes(h.command),
-        );
-        if (!used) stale.push(`NOT_REDIS_RECEIVERS ${file} ${receiver}`);
+      for (const [receiver, { commands }] of Object.entries(receivers)) {
+        for (const command of commands) {
+          const used = d?.scan.hits.some(
+            (h) =>
+              h.via === 'method' &&
+              receiverOf(h.site) === receiver &&
+              h.command === command &&
+              !MINIMAL_COMMANDS.includes(h.command),
+          );
+          if (!used) stale.push(`NOT_REDIS_RECEIVERS ${file} ${receiver} ${command}`);
+        }
       }
     }
     for (const [file, lines] of Object.entries(NOT_REDIS_LINES)) {

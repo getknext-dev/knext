@@ -13,7 +13,14 @@
  * the X rows widen one of the two exclusions (language-global receivers, calls
  * that pass no Redis argument) past what it is allowed to drop; the D rows are
  * discovery; B1 is the receiver-binding check; E1/E2 are the spike's
- * "an ACL refusal is a finding (1), not a crash (3)" mapping.
+ * "an ACL refusal is a finding (1), not a crash (3)" mapping. The R4 rows are
+ * the round-4 review: ioredis's real method grammar (`zscanBufferStream`, a
+ * zero-argument `*Stream` that still sends SCAN, `send_command`, the builtin-
+ * command helpers, the client-only commands such as HGETDEL, the prototype walk
+ * that keeps all of it honest), the node:crypto `.digest` exclusion both ways,
+ * and NOT_REDIS_RECEIVERS per command and per binding (destructuring, import,
+ * re-assignment). The R4-I rows and R4-N2/R4-B2 INJECT the escaping construct
+ * into a scanned runtime file rather than remove a rule.
  *
  * The L rows need a Redis: they run only when KNEXT_REDIS_LIVE_URL is set (the
  * same loopback URL the live lane uses), and are not declared otherwise. They
@@ -92,25 +99,24 @@ const MUTATIONS = [
     expect: 'red',
     claim: "ioredis's <cmd>Buffer variant is not a command: client.unlinkBuffer('k') is missed",
     subject: 'scan',
-    anchor: '  const stem = /^(.+?)(?:buffer|stream)$/.exec(lower)?.[1];',
-    replacement: '  const stem = /^(.+?)(?:stream)$/.exec(lower)?.[1];',
+    anchor: "export const IOREDIS_SUFFIXES: readonly string[] = ['buffer', 'stream'];",
+    replacement: "export const IOREDIS_SUFFIXES: readonly string[] = ['stream'];",
   },
   {
     id: 'S6',
     expect: 'red',
     claim: "callBuffer is not a generic issuer: client.callBuffer('UNLINK', …) is missed",
     subject: 'scan',
-    anchor:
-      "const GENERIC_ISSUERS = new Set(['call', 'pcall', 'send', 'sendcommand', 'callbuffer']);",
-    replacement: "const GENERIC_ISSUERS = new Set(['call', 'pcall', 'send', 'sendcommand']);",
+    anchor: "  'send_command',\n  'callbuffer',\n]);",
+    replacement: "  'send_command',\n]);",
   },
   {
     id: 'S7',
     expect: 'red',
     claim: "ioredis's <cmd>Stream variant is not a command: client.zscanStream('k') is missed",
     subject: 'scan',
-    anchor: '  const stem = /^(.+?)(?:buffer|stream)$/.exec(lower)?.[1];',
-    replacement: '  const stem = /^(.+?)(?:buffer)$/.exec(lower)?.[1];',
+    anchor: "export const IOREDIS_SUFFIXES: readonly string[] = ['buffer', 'stream'];",
+    replacement: "export const IOREDIS_SUFFIXES: readonly string[] = ['buffer'];",
   },
   {
     // The first run of this prover had a separate `new Command(` rule here; it
@@ -122,8 +128,207 @@ const MUTATIONS = [
     claim:
       "the command helper is gone: new Redis.Command('UNLINK', …) and command(c, 'X') are missed",
     subject: 'scan',
-    anchor: "const HELPERS = new Set(['command', 'rediscommand']);",
-    replacement: "const HELPERS = new Set(['rediscommand']);",
+    anchor: "  'command',\n  'rediscommand',\n  'createbuiltincommand',",
+    replacement: "  'rediscommand',\n  'createbuiltincommand',",
+  },
+  // ── R4: the round-4 escapes (ioredis's real method grammar and API) ─────────
+  // The I rows inject the construct the round-4 review proved green into a
+  // scanned runtime file; the others remove the one rule that catches it.
+  {
+    id: 'R4-I1',
+    expect: 'red',
+    claim: 'client.zscanBufferStream(key) in cache-handler.js goes unseen (two suffixes)',
+    subject: 'cacheHandler',
+    anchor: '  const keys = await redisCall(() => client.smembers(tKey));',
+    replacement:
+      '  const keys = await redisCall(() => client.smembers(tKey));\n  client.zscanBufferStream(tKey);',
+  },
+  {
+    id: 'R4-I2',
+    expect: 'red',
+    claim: 'client.sscanBufferStream(key, { match }) in cache-handler.js goes unseen',
+    subject: 'cacheHandler',
+    anchor: '  const keys = await redisCall(() => client.smembers(tKey));',
+    replacement:
+      "  const keys = await redisCall(() => client.smembers(tKey));\n  client.sscanBufferStream(tKey, { match: 'x:*' });",
+  },
+  {
+    id: 'R4-I3',
+    expect: 'red',
+    claim: 'a zero-argument client.zscanStream() in cache-handler.js is dropped as arity-safe',
+    subject: 'cacheHandler',
+    anchor: '  const keys = await redisCall(() => client.smembers(tKey));',
+    replacement:
+      '  const keys = await redisCall(() => client.smembers(tKey));\n  client.zscanStream();',
+  },
+  {
+    id: 'R4-I4',
+    expect: 'red',
+    claim: 'a client-only command (client.hgetdel) in cache-handler.js goes unseen',
+    subject: 'cacheHandler',
+    anchor: '  const keys = await redisCall(() => client.smembers(tKey));',
+    replacement:
+      "  const keys = await redisCall(() => client.smembers(tKey));\n  client.hgetdel(tKey, 'FIELDS', '1', 'f');",
+  },
+  {
+    id: 'R4-I5',
+    expect: 'red',
+    claim: "ioredis's send_command issuer in cache-handler.js goes unseen",
+    subject: 'cacheHandler',
+    anchor: '  const keys = await redisCall(() => client.smembers(tKey));',
+    replacement:
+      "  const keys = await redisCall(() => client.smembers(tKey));\n  client.send_command('UNLINK', tKey);",
+  },
+  {
+    id: 'R4-S9',
+    expect: 'red',
+    claim: 'the suffix is stripped once only (the round-3 grammar): zscanBufferStream is missed',
+    subject: 'scan',
+    anchor: '    if (suffix === undefined) return null;\n    stem = stem.slice(0, -suffix.length);',
+    replacement:
+      '    if (suffix === undefined) return null;\n    const once = stem.slice(0, -suffix.length);\n    return REDIS_COMMAND_SET.has(once) ? once : null;',
+  },
+  {
+    id: 'R4-Z1',
+    expect: 'red',
+    claim:
+      'a *Stream method with no JS argument is dropped as arity-safe: client.scanStream() is missed',
+    subject: 'scan',
+    anchor:
+      '  if (/stream$/i.test(name)) return false; // ioredis streams: JS arity is not Redis arity',
+    replacement: '  void name;',
+  },
+  {
+    id: 'R4-Z2',
+    expect: 'red',
+    claim: 'the no-argument exclusion also drops client-only commands (client.hotkeys())',
+    subject: 'scan',
+    anchor: '  return MEASURED.has(cmd) && !NO_ARG.has(cmd);',
+    replacement: '  return !NO_ARG.has(cmd);',
+  },
+  {
+    id: 'R4-C1',
+    expect: 'red',
+    claim: 'the client-only commands are not commands: client.hgetdel(k) is missed',
+    subject: 'scan',
+    anchor: '  ...REDIS_COMMANDS,\n  ...CLIENT_COMMANDS,\n]);',
+    replacement: '  ...REDIS_COMMANDS,\n]);',
+  },
+  {
+    id: 'R4-C2',
+    expect: 'red',
+    claim: "Sentinel's command (ioredis defines sentinel()) is not a command",
+    subject: 'commands',
+    anchor: "  'sdiffcard',\n  'sentinel',\n  'sunioncard',",
+    replacement: "  'sdiffcard',\n  'sunioncard',",
+  },
+  {
+    id: 'R4-H1',
+    expect: 'red',
+    claim: "ioredis's createBuiltinCommand / addBuiltinCommand / createScanStream are not helpers",
+    subject: 'scan',
+    anchor: "  'createbuiltincommand',\n  'addbuiltincommand',\n  'createscanstream',\n]);",
+    replacement: ']);',
+  },
+  {
+    id: 'R4-M1',
+    expect: 'red',
+    claim:
+      'defineCommand (a method that sends EVALSHA) is neither a command nor a listed non-command',
+    subject: 'scan',
+    anchor:
+      "  ['definecommand', 'evalsha'], // defines a script method that sends EVALSHA (then EVAL)\n",
+    replacement: '',
+  },
+  {
+    id: 'R4-M2',
+    expect: 'red',
+    claim:
+      'Cluster#refreshSlotsCache (sends CLUSTER SLOTS) is unmapped; the prototype walk must catch it',
+    subject: 'scan',
+    anchor:
+      "  ['refreshslotscache', 'cluster'], // Cluster#refreshSlotsCache: CLUSTER SLOTS via getInfoFromNode\n",
+    replacement: '',
+  },
+  {
+    id: 'R4-M3',
+    expect: 'red',
+    claim: 'a client method nobody classified passes (the non-command list is not checked)',
+    subject: 'spec',
+    anchor:
+      "  pipeline: 'builds a pipeline; its commands are scanned as method calls or `[CMD, …]` tuples',\n",
+    replacement: '',
+  },
+  {
+    id: 'R4-K1',
+    expect: 'red',
+    claim: 'the crypto exclusion drops every .digest, so client.digest(k) passes',
+    subject: 'scan',
+    anchor:
+      "  return CRYPTO_DIGEST_CHAIN.test(src.slice(src.lastIndexOf('\\n', start - 1) + 1, start));",
+    replacement: '  return true;',
+  },
+  {
+    id: 'R4-K2',
+    expect: 'red',
+    claim: 'the crypto exclusion is gone: createHash(…).update(…).digest(…) is a false NOPERM hit',
+    subject: 'scan',
+    anchor:
+      '    if (isCryptoDigest(src, lower, start)) continue; // createHash(…).update(…).digest(…)\n',
+    replacement: '',
+  },
+  // ── R4-N: NOT_REDIS_RECEIVERS per command and per binding (non-blocking 4) ──
+  {
+    id: 'R4-N1',
+    expect: 'red',
+    claim: 'a receiver entry exempts every command: log.zrange(…) on node-server.ts passes',
+    subject: 'spec',
+    anchor:
+      "  if (h.via === 'method' && receiver?.commands.includes(h.command) === true) return true;",
+    replacement: "  if (h.via === 'method' && receiver !== undefined) return true;",
+  },
+  {
+    id: 'R4-N2',
+    expect: 'red',
+    claim: 'log.zrange(…) injected on the exempt receiver in node-server.ts goes unseen',
+    subject: 'nodeServer',
+    anchor: 'const log = createLogger({ module: "server" });',
+    replacement: 'const log = createLogger({ module: "server" });\nvoid log.zrange("k", 0, -1);',
+  },
+  {
+    id: 'R4-B2',
+    expect: 'red',
+    claim: 'a destructured rebinding of an exempt receiver (const { log } = deps) goes unnoticed',
+    subject: 'nodeServer',
+    anchor: 'const log = createLogger({ module: "server" });',
+    replacement:
+      'const log = createLogger({ module: "server" });\nfunction rebound(deps) {\n  const { log } = deps;\n  return log;\n}',
+  },
+  {
+    id: 'R4-B3',
+    expect: 'red',
+    claim: 'the binding check no longer sees a destructuring pattern that binds the receiver',
+    subject: 'spec',
+    anchor:
+      "    new RegExp(\n      String.raw`\\{[^{}]*${id}\\s*(?=[,}]|=(?![=>]))[^{}]*\\}\\s*(?::[^=;{}\\n]+)?=(?![=>])`,\n      'g',\n    ),\n",
+    replacement: '',
+  },
+  {
+    id: 'R4-B4',
+    expect: 'red',
+    claim: 'the binding check no longer sees an import of the receiver',
+    subject: 'spec',
+    anchor:
+      "    new RegExp(\n      String.raw`\\bimport\\s+(?:type\\s+)?(?:${r}\\b|\\*\\s*as\\s+${r}\\b|[^;]*\\{[^}]*${id}\\s*[,}][^;]*from)`,\n      'g',\n    ),\n",
+    replacement: '',
+  },
+  {
+    id: 'R4-B5',
+    expect: 'red',
+    claim: 'the binding check no longer sees a re-assignment of the receiver (log = client)',
+    subject: 'spec',
+    anchor: "    new RegExp(String.raw`${id}\\s*(?:\\?\\?|\\|\\||&&)?=(?![=>])`, 'g'),\n",
+    replacement: '',
   },
   // ── U: what must be UNPARSEABLE, never a pass ───────────────────────────────
   {
@@ -174,8 +379,8 @@ const MUTATIONS = [
     expect: 'red',
     claim: 'the no-argument exclusion also drops commands that TAKE no argument (client.info())',
     subject: 'scan',
-    anchor: '    if (called && !NO_ARG.has(cmd) && passesNoRedisArgument(src, open)) continue;',
-    replacement: '    if (called && passesNoRedisArgument(src, open)) continue;',
+    anchor: '  return MEASURED.has(cmd) && !NO_ARG.has(cmd);',
+    replacement: '  return MEASURED.has(cmd);',
   },
   {
     id: 'X2',
@@ -292,6 +497,8 @@ const prover = createGuardProver({
     spec: 'tests/redis-acl-spike.test.ts',
     spike: 'scripts/redis-acl-spike.mjs',
     nodeServer: 'packages/kn-next/src/adapters/node-server.ts',
+    cacheHandler: 'packages/kn-next/src/adapters/cache-handler.js',
+    commands: 'scripts/redis-commands.mjs',
   },
 });
 
@@ -316,8 +523,8 @@ withLive(LIVE_URL !== '', () => prover.baseline());
 withLive(false, () =>
   prover.proveCanSeeRed({
     subject: 'scan',
-    anchor: '  if (REDIS_COMMAND_SET.has(lower)) return lower;',
-    replacement: '  if (REDIS_COMMAND_SET.has(lower)) return null;',
+    anchor: '    if (REDIS_COMMAND_SET.has(stem)) return stem;',
+    replacement: '    if (REDIS_COMMAND_SET.has(stem)) return null;',
   }),
 );
 
