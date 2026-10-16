@@ -26,6 +26,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 
 	appsv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/api/v1alpha1"
@@ -73,6 +74,8 @@ var _ = Describe("NextApp spec.cache.keyPrefix admission (#2398)", func() {
 		{"space", "my app", "whitespace (space)"},
 		{"tab", "my\tapp", "whitespace (tab)"},
 		{"newline", "my\napp", "whitespace (newline)"},
+		{"cr", "my\rapp", "whitespace (carriage return)"},
+		{"formfeed", "my\fapp", "whitespace (form feed)"},
 		{"vtab", "my\vapp", "whitespace (vertical tab)"},
 		{"too-long", strings.Repeat("a", 64), "longer than 63 characters"},
 		{"reserved", "kn-next", "the shared fallback keyspace"},
@@ -99,6 +102,31 @@ var _ = Describe("NextApp spec.cache.keyPrefix admission (#2398)", func() {
 		{"punctuation", "app.v1_blue@eu/1"},
 		{"empty-is-unset", ""},
 	}
+	// The typed client drops "" (omitempty), so an explicit empty keyPrefix —
+	// what a hand-written manifest or GitOps apply can send — goes through an
+	// unstructured object to reach the schema at all.
+	It(`ADMITS an explicit keyPrefix: "" sent over the wire (empty is unset)`, func() {
+		name := "keyprefix-ok-explicit-empty"
+		u := &unstructured.Unstructured{Object: map[string]interface{}{
+			"apiVersion": "apps.kn-next.dev/v1alpha1",
+			"kind":       "NextApp",
+			"metadata":   map[string]interface{}{"name": name, "namespace": namespace},
+			"spec": map[string]interface{}{
+				"image": validImage,
+				"cache": map[string]interface{}{"provider": "redis", "url": "redis://redis:6379", "keyPrefix": ""},
+			},
+		}}
+		Expect(k8sClient.Create(ctx, u)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, u) })
+		stored := &unstructured.Unstructured{}
+		stored.SetGroupVersionKind(u.GroupVersionKind())
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, stored)).To(Succeed())
+		v, found, err := unstructured.NestedString(stored.Object, "spec", "cache", "keyPrefix")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(found).To(BeTrue(), "the explicit empty keyPrefix was not sent, so the schema never saw it")
+		Expect(v).To(Equal(""))
+	})
+
 	for i, tc := range admitted {
 		It(fmt.Sprintf("ADMITS keyPrefix %q", tc.prefix), func() {
 			name := fmt.Sprintf("keyprefix-ok-%d-%s", i, tc.name)
