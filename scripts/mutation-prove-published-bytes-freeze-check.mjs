@@ -233,8 +233,8 @@ const MUTATIONS = [
   {
     label: 'cli: stops passing baseVersion to the decision',
     subject: 'cli',
-    anchor: '    packageDirs,\n    baseVersion,\n    now,\n  });',
-    replacement: '    packageDirs,\n    now,\n  });',
+    anchor: '    packageDirs,\n    baseVersion,\n    baseReleaseTagged:',
+    replacement: '    packageDirs,\n    baseReleaseTagged:',
   },
   {
     label: 'select-script: a per-line pin absent at the base commit is not read from main',
@@ -339,8 +339,8 @@ const MUTATIONS = [
   {
     label: 'release-tag: the workflow stops passing --base-sha to the check',
     subject: 'workflow',
-    anchor: ' \\\n            --base-sha "${BASE_SHA}"',
-    replacement: '',
+    anchor: '"${BASE_VERSION}" \\\n            --base-sha "${BASE_SHA}"',
+    replacement: '"${BASE_VERSION}"',
   },
 ];
 
