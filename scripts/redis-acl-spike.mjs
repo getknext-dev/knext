@@ -52,14 +52,24 @@
  *
  * The admin URL is read from KNEXT_REDIS_ACL_SPIKE_URL only — never REDIS_URL,
  * so this cannot be pointed at an app's Redis by accident — and must be a
- * loopback host. Exit codes: 0 ok, 1 unexpected outcome (with --assert),
- * 2 precondition (no URL, non-loopback, unreachable, no ACL support).
+ * loopback host. Exit codes, distinct so a caller can tell a finding from a
+ * broken run:
+ *
+ *   0  ok (or, without --assert, unexpected outcomes reported but not failed)
+ *   1  unexpected outcome(s), with --assert: the finding this script exists for
+ *   2  usage error: an unknown argument, a --drop that is not in the minimal
+ *      rule set, a --grant that is not a Redis command (scripts/redis-commands.mjs)
+ *      or is already granted, KNEXT_REDIS_ACL_SPIKE_URL unset, not a URL, or
+ *      not loopback
+ *   3  infrastructure or crash: Redis unreachable, no ACL support, CLIENT INFO
+ *      without an address, or any uncaught error
  */
 
 import { randomBytes } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { REDIS_COMMANDS, REDIS_SUBCOMMANDS } from './redis-commands.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(here, '..');
@@ -140,26 +150,46 @@ function parseArgs(argv) {
     else if (a === '--handler-only') opts.handlerOnly = true;
     else if (a.startsWith('--drop=')) opts.drop.push(a.slice(7).toLowerCase());
     else if (a.startsWith('--grant=')) opts.grant.push(a.slice(8).toLowerCase());
-    else throw new Precondition(`unknown argument ${a}`);
+    else throw new UsageError(`unknown argument ${a}`);
+  }
+  // A mutation proof that silently drops nothing (a typo, a command the set never
+  // had) runs the unmutated rule set and passes: refuse it rather than run it.
+  for (const c of opts.drop) {
+    if (!MINIMAL_COMMANDS.includes(c)) {
+      throw new UsageError(
+        `--drop=${c}: not in the minimal rule set (${MINIMAL_COMMANDS.join(' ')})`,
+      );
+    }
+  }
+  for (const c of opts.grant) {
+    if (!REDIS_COMMANDS.includes(c) && !REDIS_SUBCOMMANDS.includes(c)) {
+      throw new UsageError(`--grant=${c}: not a Redis command (scripts/redis-commands.mjs)`);
+    }
+    if (MINIMAL_COMMANDS.includes(c)) {
+      throw new UsageError(`--grant=${c}: already in the minimal rule set, so it changes nothing`);
+    }
   }
   return opts;
 }
 
-class Precondition extends Error {}
+/** Exit 2: the invocation is wrong. */
+class UsageError extends Error {}
+/** Exit 3: the run could not happen (Redis unreachable, no ACL support, ...). */
+class Infrastructure extends Error {}
 
 const LOOPBACK = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
 
 function adminUrl() {
   const raw = process.env.KNEXT_REDIS_ACL_SPIKE_URL ?? '';
-  if (raw === '') throw new Precondition('KNEXT_REDIS_ACL_SPIKE_URL is not set');
+  if (raw === '') throw new UsageError('KNEXT_REDIS_ACL_SPIKE_URL is not set');
   let u;
   try {
     u = new URL(raw);
   } catch {
-    throw new Precondition('KNEXT_REDIS_ACL_SPIKE_URL is not a URL');
+    throw new UsageError('KNEXT_REDIS_ACL_SPIKE_URL is not a URL');
   }
   if (!LOOPBACK.has(u.hostname)) {
-    throw new Precondition(
+    throw new UsageError(
       `refusing non-loopback host ${u.hostname}: this creates and deletes ACL users`,
     );
   }
@@ -566,7 +596,7 @@ async function runRealHandler({ Redis, admin, a, b, cdnTagPrefix }) {
     // Redis sees, so that comparison silently excluded nothing.
     const adminAddr = /\baddr=(\S+)/.exec(String(await adminClient.call('CLIENT', 'INFO')))?.[1];
     if (!adminAddr)
-      throw new Precondition('CLIENT INFO returned no addr; cannot separate admin traffic');
+      throw new Infrastructure('CLIENT INFO returned no addr; cannot separate admin traffic');
     const monitor = await adminClient.monitor();
     monitorConn = monitor;
     monitor.on('monitor', (_time, args, source) => {
@@ -855,7 +885,7 @@ async function main() {
   try {
     await adminClient.connect();
   } catch (err) {
-    throw new Precondition(`cannot reach the admin URL: ${firstLine(err)}`);
+    throw new Infrastructure(`cannot reach the admin URL: ${firstLine(err)}`);
   }
   const info = String(await adminClient.call('INFO', 'server'));
   // Valkey reports a frozen redis_version (7.2.4) for compatibility; name it.
@@ -866,7 +896,7 @@ async function main() {
     await adminClient.call('ACL', 'WHOAMI');
   } catch (err) {
     adminClient.disconnect();
-    throw new Precondition(`this Redis has no ACL support (ACL WHOAMI: ${firstLine(err)})`);
+    throw new Infrastructure(`this Redis has no ACL support (ACL WHOAMI: ${firstLine(err)})`);
   }
 
   const tag = randomBytes(4).toString('hex');
@@ -935,9 +965,14 @@ if (invokedDirectly) {
   main()
     .then((code) => process.exit(code))
     .catch((err) => {
-      console.error(
-        `redis-acl-spike: ${err instanceof Precondition ? 'precondition' : 'error'}: ${err?.message ?? err}`,
-      );
-      process.exit(err instanceof Precondition ? 2 : 1);
+      const kind =
+        err instanceof UsageError
+          ? 'usage'
+          : err instanceof Infrastructure
+            ? 'infrastructure'
+            : 'crash';
+      console.error(`redis-acl-spike: ${kind}: ${err?.message ?? err}`);
+      // Never 1: that code means "the rule set is wrong", and a crash is not a finding.
+      process.exit(err instanceof UsageError ? 2 : 3);
     });
 }
