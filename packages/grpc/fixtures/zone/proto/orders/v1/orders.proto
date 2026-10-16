@@ -1,6 +1,7 @@
 // Fixture contract for the @getknext/grpc tests and the CI drift check: one
 // read, two writes (one of them IDEMPOTENT, which is still a write) and a
-// server stream, so every generated-client shape is exercised.
+// server stream, so every generated-client shape is exercised. Every RPC
+// states who may call it; the public read lives in catalog.proto.
 syntax = "proto3";
 
 package orders.v1;
@@ -15,20 +16,25 @@ service OrdersService {
   // GetOrder reads one order. It has no side effects, so the client may retry it.
   rpc GetOrder(GetOrderRequest) returns (GetOrderResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
+    option (knext.v1.auth) = AUTH_USER;
   }
 
   // PlaceOrder creates an order. A write: never retried, and it carries an
   // idempotency key.
-  rpc PlaceOrder(PlaceOrderRequest) returns (PlaceOrderResponse);
+  rpc PlaceOrder(PlaceOrderRequest) returns (PlaceOrderResponse) {
+    option (knext.v1.auth) = AUTH_USER;
+  }
 
   // CancelOrder is IDEMPOTENT but not side-effect free: still a write.
   rpc CancelOrder(CancelOrderRequest) returns (CancelOrderResponse) {
     option idempotency_level = IDEMPOTENT;
+    option (knext.v1.auth) = AUTH_USER;
   }
 
   // WatchOrders streams order updates.
   rpc WatchOrders(WatchOrdersRequest) returns (stream WatchOrdersResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
+    option (knext.v1.auth) = AUTH_USER;
   }
 }
 

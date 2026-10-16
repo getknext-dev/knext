@@ -11,7 +11,7 @@
 import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { urlEnvFor } from '../config';
+import { protoVersionEnvFor, urlEnvFor } from '../config';
 
 interface FixtureBinding {
   name: string;
@@ -42,12 +42,6 @@ const WAKE_FUNCTIONS_ENV = 'KNEXT_WAKE_FUNCTIONS';
 
 const fixture = JSON.parse(readFileSync(FIXTURE, 'utf8')) as Fixture;
 
-// TODO(#2050): use the exported `protoVersionEnvFor` once the gateway glue
-// lands; until then the suffix is the operator's constant, spelled once here.
-function protoVersionEnv(name: string): string {
-  return urlEnvFor(name).replace(/_SERVICE_URL$/, '_SERVICE_PROTO_VERSION');
-}
-
 describe('zone binding env: the generated client reads what the operator renders', () => {
   it('covers several cases', () => {
     expect(fixture.cases.length).toBeGreaterThanOrEqual(4);
@@ -65,7 +59,7 @@ describe('zone binding env: the generated client reads what the operator renders
         }
         expect(c.env[url]).toBe(`http://${b.service}.${fixture.namespace}.svc.cluster.local`);
         accounted.add(url);
-        const version = protoVersionEnv(b.name);
+        const version = protoVersionEnvFor(b.name);
         if (b.servedProtoVersion === '') {
           // Unset until the function serves: the gateway fails closed.
           expect(c.env[version]).toBeUndefined();

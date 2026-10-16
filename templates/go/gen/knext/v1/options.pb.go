@@ -19,6 +19,7 @@ import (
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	descriptorpb "google.golang.org/protobuf/types/descriptorpb"
 	reflect "reflect"
+	sync "sync"
 	unsafe "unsafe"
 )
 
@@ -28,6 +29,62 @@ const (
 	// Verify that runtime/protoimpl is sufficiently up-to-date.
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
+
+// Who may call an RPC through the zone's generated code.
+type Auth int32
+
+const (
+	// Not stated. `knext generate` refuses an RPC whose auth is not stated.
+	Auth_AUTH_UNSPECIFIED Auth = 0
+	// A signed-in user: the zone's authorize() hook must return a verified
+	// user before the call is made. The value `knext add function` writes.
+	Auth_AUTH_USER Auth = 1
+	// Anyone, without a user. Allowed only on a read
+	// (`idempotency_level = NO_SIDE_EFFECTS`); `knext generate` refuses it on
+	// any other RPC.
+	Auth_AUTH_PUBLIC Auth = 2
+)
+
+// Enum value maps for Auth.
+var (
+	Auth_name = map[int32]string{
+		0: "AUTH_UNSPECIFIED",
+		1: "AUTH_USER",
+		2: "AUTH_PUBLIC",
+	}
+	Auth_value = map[string]int32{
+		"AUTH_UNSPECIFIED": 0,
+		"AUTH_USER":        1,
+		"AUTH_PUBLIC":      2,
+	}
+)
+
+func (x Auth) Enum() *Auth {
+	p := new(Auth)
+	*p = x
+	return p
+}
+
+func (x Auth) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (Auth) Descriptor() protoreflect.EnumDescriptor {
+	return file_knext_v1_options_proto_enumTypes[0].Descriptor()
+}
+
+func (Auth) Type() protoreflect.EnumType {
+	return &file_knext_v1_options_proto_enumTypes[0]
+}
+
+func (x Auth) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use Auth.Descriptor instead.
+func (Auth) EnumDescriptor() ([]byte, []int) {
+	return file_knext_v1_options_proto_rawDescGZIP(), []int{0}
+}
 
 var file_knext_v1_options_proto_extTypes = []protoimpl.ExtensionInfo{
 	{
@@ -44,6 +101,14 @@ var file_knext_v1_options_proto_extTypes = []protoimpl.ExtensionInfo{
 		Field:         50702,
 		Name:          "knext.v1.contract_version",
 		Tag:           "bytes,50702,opt,name=contract_version",
+		Filename:      "knext/v1/options.proto",
+	},
+	{
+		ExtendedType:  (*descriptorpb.MethodOptions)(nil),
+		ExtensionType: (*Auth)(nil),
+		Field:         50703,
+		Name:          "knext.v1.auth",
+		Tag:           "varint,50703,opt,name=auth,enum=knext.v1.Auth",
 		Filename:      "knext/v1/options.proto",
 	},
 }
@@ -65,25 +130,55 @@ var (
 	E_ContractVersion = &file_knext_v1_options_proto_extTypes[1]
 )
 
+// Extension fields to descriptorpb.MethodOptions.
+var (
+	// Who may call this RPC. Every RPC states it; there is no implicit default.
+	//
+	// optional knext.v1.Auth auth = 50703;
+	E_Auth = &file_knext_v1_options_proto_extTypes[2]
+)
+
 var File_knext_v1_options_proto protoreflect.FileDescriptor
 
 const file_knext_v1_options_proto_rawDesc = "" +
 	"\n" +
-	"\x16knext/v1/options.proto\x12\bknext.v1\x1a google/protobuf/descriptor.proto::\n" +
+	"\x16knext/v1/options.proto\x12\bknext.v1\x1a google/protobuf/descriptor.proto*X\n" +
+	"\x04Auth\x12\x14\n" +
+	"\x10AUTH_UNSPECIFIED\x10\x00\x12\r\n" +
+	"\tAUTH_USER\x10\x01\x12\x0f\n" +
+	"\vAUTH_PUBLIC\x10\x02\"\x04\b\x03\x10\x03*\x14AUTH_PUBLIC_MUTATION::\n" +
 	"\bfunction\x12\x1c.google.protobuf.FileOptions\x18\x8d\x8c\x03 \x01(\tR\bfunction:I\n" +
-	"\x10contract_version\x12\x1c.google.protobuf.FileOptions\x18\x8e\x8c\x03 \x01(\tR\x0fcontractVersionB\x88\x01\n" +
+	"\x10contract_version\x12\x1c.google.protobuf.FileOptions\x18\x8e\x8c\x03 \x01(\tR\x0fcontractVersion:D\n" +
+	"\x04auth\x12\x1e.google.protobuf.MethodOptions\x18\x8f\x8c\x03 \x01(\x0e2\x0e.knext.v1.AuthR\x04authB\x88\x01\n" +
 	"\fcom.knext.v1B\fOptionsProtoP\x01Z)example.com/function/gen/knext/v1;knextv1\xa2\x02\x03KXX\xaa\x02\bKnext.V1\xca\x02\bKnext\\V1\xe2\x02\x14Knext\\V1\\GPBMetadata\xea\x02\tKnext::V1b\x06proto3"
 
+var (
+	file_knext_v1_options_proto_rawDescOnce sync.Once
+	file_knext_v1_options_proto_rawDescData []byte
+)
+
+func file_knext_v1_options_proto_rawDescGZIP() []byte {
+	file_knext_v1_options_proto_rawDescOnce.Do(func() {
+		file_knext_v1_options_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_knext_v1_options_proto_rawDesc), len(file_knext_v1_options_proto_rawDesc)))
+	})
+	return file_knext_v1_options_proto_rawDescData
+}
+
+var file_knext_v1_options_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
 var file_knext_v1_options_proto_goTypes = []any{
-	(*descriptorpb.FileOptions)(nil), // 0: google.protobuf.FileOptions
+	(Auth)(0),                          // 0: knext.v1.Auth
+	(*descriptorpb.FileOptions)(nil),   // 1: google.protobuf.FileOptions
+	(*descriptorpb.MethodOptions)(nil), // 2: google.protobuf.MethodOptions
 }
 var file_knext_v1_options_proto_depIdxs = []int32{
-	0, // 0: knext.v1.function:extendee -> google.protobuf.FileOptions
-	0, // 1: knext.v1.contract_version:extendee -> google.protobuf.FileOptions
-	2, // [2:2] is the sub-list for method output_type
-	2, // [2:2] is the sub-list for method input_type
-	2, // [2:2] is the sub-list for extension type_name
-	0, // [0:2] is the sub-list for extension extendee
+	1, // 0: knext.v1.function:extendee -> google.protobuf.FileOptions
+	1, // 1: knext.v1.contract_version:extendee -> google.protobuf.FileOptions
+	2, // 2: knext.v1.auth:extendee -> google.protobuf.MethodOptions
+	0, // 3: knext.v1.auth:type_name -> knext.v1.Auth
+	4, // [4:4] is the sub-list for method output_type
+	4, // [4:4] is the sub-list for method input_type
+	3, // [3:4] is the sub-list for extension type_name
+	0, // [0:3] is the sub-list for extension extendee
 	0, // [0:0] is the sub-list for field type_name
 }
 
@@ -97,13 +192,14 @@ func file_knext_v1_options_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_knext_v1_options_proto_rawDesc), len(file_knext_v1_options_proto_rawDesc)),
-			NumEnums:      0,
+			NumEnums:      1,
 			NumMessages:   0,
-			NumExtensions: 2,
+			NumExtensions: 3,
 			NumServices:   0,
 		},
 		GoTypes:           file_knext_v1_options_proto_goTypes,
 		DependencyIndexes: file_knext_v1_options_proto_depIdxs,
+		EnumInfos:         file_knext_v1_options_proto_enumTypes,
 		ExtensionInfos:    file_knext_v1_options_proto_extTypes,
 	}.Build()
 	File_knext_v1_options_proto = out.File

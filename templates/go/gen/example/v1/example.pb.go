@@ -227,10 +227,10 @@ const file_example_v1_example_proto_rawDesc = "" +
 	"\x0ePutItemRequest\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value\"\x11\n" +
-	"\x0fPutItemResponse2\x9d\x01\n" +
-	"\x0eExampleService\x12G\n" +
-	"\aGetItem\x12\x1a.example.v1.GetItemRequest\x1a\x1b.example.v1.GetItemResponse\"\x03\x90\x02\x01\x12B\n" +
-	"\aPutItem\x12\x1a.example.v1.PutItemRequest\x1a\x1b.example.v1.PutItemResponseB\xaa\x01\xea\xe0\x18\aexample\xf2\xe0\x18\x051.0.0\n" +
+	"\x0fPutItemResponse2\xa7\x01\n" +
+	"\x0eExampleService\x12K\n" +
+	"\aGetItem\x12\x1a.example.v1.GetItemRequest\x1a\x1b.example.v1.GetItemResponse\"\a\xf8\xe0\x18\x01\x90\x02\x01\x12H\n" +
+	"\aPutItem\x12\x1a.example.v1.PutItemRequest\x1a\x1b.example.v1.PutItemResponse\"\x04\xf8\xe0\x18\x01B\xaa\x01\xea\xe0\x18\aexample\xf2\xe0\x18\x051.0.0\n" +
 	"\x0ecom.example.v1B\fExampleProtoP\x01Z-example.com/function/gen/example/v1;examplev1\xa2\x02\x03EXX\xaa\x02\n" +
 	"Example.V1\xca\x02\n" +
 	"Example\\V1\xe2\x02\x16Example\\V1\\GPBMetadata\xea\x02\vExample::V1b\x06proto3"
