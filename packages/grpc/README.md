@@ -26,6 +26,8 @@ retries, idempotency keys).
   per-user queries, Server Actions that refresh them, streams), and every case it refuses.
 - `src/glue.ts` — the glue's runtime half: the `authorize()` check, the served contract version,
   the token-mint seam and the request codec. Exported from `@getknext/grpc/runtime`.
+- `src/signer.ts` — the zone signer behind that seam: a 60 s Ed25519 identity token per call,
+  signed with the key mounted from the zone's signing-key Secret and re-read when it rotates.
 - `src/policy.ts`, `src/runtime.ts` — the client policy and the runtime that enforces it,
   including the transport per gateway (h2c on Node, HTTP/1.1 on Bun unless overridden).
 - `src/add-function.ts` — `knext add function`.

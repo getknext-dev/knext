@@ -136,10 +136,18 @@ describe('servedVersion — the served contract version, part of every cache key
 });
 
 describe('mintCallToken — the identity-token seam', () => {
-  it('fails closed when no minter is registered', async () => {
+  it('fails closed when no minter is registered and the zone has no signing key', async () => {
+    // With nothing registered the default zone signer mints; this process has
+    // no mounted key and no KNEXT_ZONE_ISSUER, so a well-formed request for a
+    // signed-in user is still refused before anything is sent.
     expect(
       await code(
-        mintCallToken({ function: 'orders', method: '/orders.v1.OrdersService/GetOrder' }),
+        mintCallToken({
+          function: 'orders',
+          method: '/orders.v1.OrdersService/GetOrder',
+          auth: 'user',
+          sub: 'alice',
+        }),
       ),
     ).toBe(Code.FailedPrecondition);
   });

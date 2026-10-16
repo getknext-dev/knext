@@ -287,12 +287,19 @@ function servedVersionExpr(ctx: FileCtx): string {
   return `${served}(${JSON.stringify(ctx.fn)}, ${JSON.stringify(protoVersionEnvFor(ctx.fn))}, ${JSON.stringify(ctx.version)})`;
 }
 
-function mintExpr(ctx: FileCtx, method: DescMethod, subject: string): string {
+/**
+ * The per-call token request. `auth` is the RPC's `(knext.v1.auth)`, so the
+ * signer refuses a user RPC without a user; `sub` comes from the subject
+ * authorize() produced, never from the request.
+ */
+function mintExpr(ctx: FileCtx, p: PlannedMethod, subject: string): string {
+  const { method } = p;
   const mint = ctx.imports.add(RUNTIME_MODULE, 'mintCallToken', '$mintCallToken');
   const sub = ctx.imports.add(RUNTIME_MODULE, 'subjectSub', '$subjectSub');
   return (
     `await ${mint}({ function: ${JSON.stringify(ctx.fn)}, ` +
-    `method: ${JSON.stringify(`/${method.parent.typeName}/${method.name}`)}, sub: ${sub}(${subject}) })`
+    `method: ${JSON.stringify(`/${method.parent.typeName}/${method.name}`)}, ` +
+    `auth: ${JSON.stringify(p.auth)}, sub: ${sub}(${subject}) })`
   );
 }
 
@@ -334,7 +341,7 @@ function emitQuery(ctx: FileCtx, p: PlannedMethod): void {
     `  ${cacheTag}(${JSON.stringify(serviceTag(ctx.fn, method))});`,
     '  // protoVersion is part of the cache key only: a function rollout is a new entry.',
     '  void protoVersion;',
-    `  const token = ${mintExpr(ctx, method, 'subject')};`,
+    `  const token = ${mintExpr(ctx, p, 'subject')};`,
     `  return ${client}.${name}(${decode}(${input}, request), { token });`,
     '}',
     '',
@@ -362,7 +369,7 @@ function emitStream(ctx: FileCtx, p: PlannedMethod): void {
     `export async function* ${name}(request: ${initShape}<typeof ${input}>, options?: { readonly signal?: AbortSignal }): AsyncGenerator<${output}> {`,
     `  const subject = ${subjectExpr(ctx, p, 'stream')};`,
     `  ${servedVersionExpr(ctx)};`,
-    `  const token = ${mintExpr(ctx, method, 'subject')};`,
+    `  const token = ${mintExpr(ctx, p, 'subject')};`,
     `  yield* ${client}.${name}(${normalize}(${input}, request), { token, signal: options?.signal });`,
     '}',
     '',
@@ -401,7 +408,7 @@ function emitAction(ctx: FileCtx, p: PlannedMethod): void {
     `  const subject = ${subjectExpr(ctx, p, 'mutation')};`,
     `  ${servedVersionExpr(ctx)};`,
     `  const message = ${normalize}(${input}, request);`,
-    `  const token = ${mintExpr(ctx, method, 'subject')};`,
+    `  const token = ${mintExpr(ctx, p, 'subject')};`,
     '  let mayHaveCommitted = true;',
     '  try {',
     `    return await ${client}.${name}(message, { idempotencyKey: options?.idempotencyKey, token });`,

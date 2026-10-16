@@ -49,7 +49,13 @@ import { protocGenEs } from '@bufbuild/protoc-gen-es/dist/cjs/src/protoc-gen-es-
 import type { Plugin } from '@bufbuild/protoplugin';
 import { BaselineUnavailableError, type DeployedBaselineSource, resolveBaseline } from './baseline';
 import { BufIntegrityError, runBuf } from './buf';
-import { AUTHORIZE_EXTENSIONS, type GrpcConfig, GrpcUsageError, loadConfig } from './config';
+import {
+  AUTHORIZE_EXTENSIONS,
+  exportsAuthorize,
+  type GrpcConfig,
+  GrpcUsageError,
+  loadConfig,
+} from './config';
 import { knextGluePlugin } from './glue-plugin';
 import { knextClientPlugin } from './plugin';
 import { checkBudget } from './policy';
@@ -89,6 +95,13 @@ export function generateFiles(
       throw new GrpcUsageError(
         `knext.grpc.json: "authorize" names ${config.authorize}, which does not exist. ` +
           'Create it (it exports authorize()), or point "authorize" at your module',
+      );
+    }
+    if (!exportsAuthorize(readFileSync(join(cwd, config.authorize), 'utf8'))) {
+      throw new GrpcUsageError(
+        `knext.grpc.json: "authorize" names ${config.authorize}, which does not export authorize. ` +
+          'Export it by name, for example `export async function authorize(ctx) { ... }` ' +
+          '(a default export or an `export *` re-export is not enough): every generated call runs it first',
       );
     }
     const ext = AUTHORIZE_EXTENSIONS.find((e) => config.authorize?.endsWith(e)) ?? '';

@@ -57,6 +57,38 @@ const KEYS = new Set([...Object.keys(DEFAULT_CONFIG), 'authorize']);
 /** Extensions an authorize() module may have; the generated import drops it. */
 export const AUTHORIZE_EXTENSIONS = ['.ts', '.tsx', '.js', '.jsx'] as const;
 
+/**
+ * Whether an authorize() module's source exports `authorize` BY NAME, which is
+ * what the generated `import { authorize } from ...` needs. Read lexically
+ * (the CLI carries no TypeScript compiler), after comments are blanked:
+ *
+ * - `export [async] function authorize`, `export const|let|var authorize`;
+ * - `authorize` named in an `export { ... }` list, directly or as
+ *   `x as authorize`, including a re-export `export { ... } from "..."`.
+ *
+ * Not accepted: a default export, an `export *` re-export (what it provides
+ * cannot be read here), a type-only export, a comment. Fails closed: a module
+ * this cannot prove exports authorize is refused, with the fix named.
+ */
+export function exportsAuthorize(source: string): boolean {
+  const code = source
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    // A line comment, unless the `//` is part of a URL (`https://`) or a string.
+    .replace(/(^|[^:'"`\\])\/\/[^\n]*/g, '$1');
+  if (/\bexport\s+(?:async\s+)?function\s+authorize\b/.test(code)) return true;
+  if (/\bexport\s+(?:const|let|var)\s+authorize\b/.test(code)) return true;
+  for (const list of code.matchAll(/\bexport\s*(type\b\s*)?\{([^}]*)\}/g)) {
+    if (list[1]) continue; // `export type { ... }` exports no value
+    for (const spec of (list[2] ?? '').split(',')) {
+      const words = spec.trim().split(/\s+/);
+      if (words[0] === 'type') continue; // `export { type authorize }`
+      const exported = words.length === 3 && words[1] === 'as' ? words[2] : words[0];
+      if (exported === 'authorize') return true;
+    }
+  }
+  return false;
+}
+
 /** Names a function may not take: `knext` would land in the options contract's package. */
 const RESERVED_NAMES = new Set(['knext']);
 

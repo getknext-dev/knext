@@ -860,7 +860,9 @@ limit, CSRF) has passed.
 it (`knext add function` writes `src/knext/authorize.ts`, which refuses every call until you
 write it). It receives the function, service, method and kind of the call, and returns
 `{ sub }` (your session's stable user id) or throws, for example a redirect to sign-in. Each
-generated query, action and stream runs it first, outside any cache.
+generated query, action and stream runs it first, outside any cache. The module must export it by
+name, for example `export async function authorize(ctx) { ... }` or `export { check as authorize }`.
+A default export or an `export *` re-export is not enough, and `knext generate` refuses the module.
 
 **Queries need Cache Components.** A generated query is a `'use cache'` function, and Next.js runs
 `'use cache'` only with Cache Components on, so set `cacheComponents: true` in your
@@ -887,14 +889,50 @@ generated code rebuilds each request from the fields its message defines. Anythi
 arguments, including protobuf's own `$typeName` and `$unknown` properties, is dropped before the
 call, and a value of the wrong type is refused as `INVALID_ARGUMENT`.
 
-**Calls carry an identity token**, minted for the one call and never part of a cache key. The
-token setup is not available yet, so for now every generated call is refused before it leaves the
-zone.
+**Calls carry an identity token.** Every generated call sends a token in its `authorization`
+header, minted for that one call and never part of a cache key, and the function checks it before
+your code runs. The token names the calling zone, the one function and the one RPC it is for, and
+the user `authorize()` returned (empty for an `AUTH_PUBLIC` read). It expires 60 seconds after it
+is minted. The user comes only from `authorize()`: no field of a request can set it, whatever it is
+called.
+
+The token is signed with your zone's own key. The operator creates the key, mounts it into the zone
+(and no other workload) at `/var/run/knext/signing-key`, and sets `KNEXT_ZONE_ISSUER`, the zone's
+identity, once the zone is bound to a function. The key is read from that mount, never from an
+environment variable, and when the operator rotates it the zone signs with the new key from the
+first call after the kubelet updates the mounted files, without a restart. The function is
+identified from `<NAME>_SERVICE_URL`, which must be the cluster-local address the operator renders
+(`http://<function>.<namespace>.svc.cluster.local`). A call is refused before it leaves the zone,
+with `FAILED_PRECONDITION`, while the key or `KNEXT_ZONE_ISSUER` is missing, when the address is
+anything else, or when the function is in another namespace than the zone.
+
+The function checks the token against the zone's public keys, which the operator mounts into it at
+`/var/run/knext/jwks/jwks.json`, and against `KNEXT_TOKEN_ISSUER` (the zone) and
+`KNEXT_TOKEN_AUDIENCE` (the function), which the operator also sets. See
+[Identity and the JWKS](/docs/zone-functions#identity-and-the-jwks) for the objects, the variables
+and how to rotate the key.
+
+A token can be used again by whoever holds it until it expires; there is no one-time check. Treat
+anything that records the `authorization` header of calls to your functions, such as request logs
+or traces, as sensitive.
+
+A function accepts only the keys the operator publishes for the zone, so a token signed with any
+other key is refused by every function. To read the zone's own key from another directory, for
+example in a local run, register a signer in `instrumentation.ts`:
+
+```ts
+import { createZoneTokenSigner, registerTokenMinter } from "@getknext/grpc/runtime";
+
+export function register() {
+  registerTokenMinter(createZoneTokenSigner({ keyDir: "/etc/zone-key" }));
+}
+```
 
 `knext generate` refuses, and writes nothing, when an RPC does not state its auth (or states
 anything but `AUTH_USER` or `AUTH_PUBLIC`), when `AUTH_PUBLIC` is on an RPC that is not
 `NO_SIDE_EFFECTS`, for client-streaming and bidirectional-streaming RPCs, when two RPCs in one file
-would export the same name, and when `authorize` is not set or names a file that does not exist.
+would export the same name, and when `authorize` is not set, names a file that does not exist, or
+names a module that does not export `authorize` by name.
 Each refusal names the RPC and the fix. An options contract copied before the auth option existed
 is refused with the path of the current one to copy.
 

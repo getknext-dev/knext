@@ -28,7 +28,7 @@ export async function placeOrder(request: MessageInitShape<typeof PlaceOrderRequ
   const subject = await $userSubject($authorize, { function: "orders", service: "orders.v1.OrdersService", method: "PlaceOrder", kind: "mutation" });
   $servedVersion("orders", "ORDERS_SERVICE_PROTO_VERSION", "1.2.0");
   const message = $normalizeRequest(PlaceOrderRequestSchema, request);
-  const token = await $mintCallToken({ function: "orders", method: "/orders.v1.OrdersService/PlaceOrder", sub: $subjectSub(subject) });
+  const token = await $mintCallToken({ function: "orders", method: "/orders.v1.OrdersService/PlaceOrder", auth: "user", sub: $subjectSub(subject) });
   let mayHaveCommitted = true;
   try {
     return await $ordersService.placeOrder(message, { idempotencyKey: options?.idempotencyKey, token });
@@ -51,7 +51,7 @@ export async function cancelOrder(request: MessageInitShape<typeof CancelOrderRe
   const subject = await $userSubject($authorize, { function: "orders", service: "orders.v1.OrdersService", method: "CancelOrder", kind: "mutation" });
   $servedVersion("orders", "ORDERS_SERVICE_PROTO_VERSION", "1.2.0");
   const message = $normalizeRequest(CancelOrderRequestSchema, request);
-  const token = await $mintCallToken({ function: "orders", method: "/orders.v1.OrdersService/CancelOrder", sub: $subjectSub(subject) });
+  const token = await $mintCallToken({ function: "orders", method: "/orders.v1.OrdersService/CancelOrder", auth: "user", sub: $subjectSub(subject) });
   let mayHaveCommitted = true;
   try {
     return await $ordersService.cancelOrder(message, { idempotencyKey: options?.idempotencyKey, token });
