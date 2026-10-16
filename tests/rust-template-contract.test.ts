@@ -112,9 +112,7 @@ describe('connect-rust stays on its pinned, conformance-gated 0.9 line', () => {
       .split('[[package]]')
       .find((b) => /^name = "connectrpc-health"$/m.test(b));
     expect(block, 'no connectrpc-health in Cargo.lock').toBeDefined();
-    expect(block, 'connectrpc-health must be the vendored path package').not.toMatch(
-      /^source = /m,
-    );
+    expect(block, 'connectrpc-health must be the vendored path package').not.toMatch(/^source = /m);
   });
 
   it('the codegen plugins are pinned to the runtime lines Cargo.lock holds', () => {
