@@ -17,6 +17,12 @@ export interface WaitForHttpOkOptions {
     log?: () => string;
     /** Returns a description once the server process has exited, else null. */
     exited?: () => string | null;
+    /** Clock, injectable so tests can drive time deterministically. */
+    now?: () => number;
+    /** Pause, injectable so tests can advance a fake clock. */
+    sleep?: (ms: number) => Promise<void>;
+    /** Probe, injectable so tests can script server answers. */
+    fetch?: (url: string, init: RequestInit) => Promise<Response>;
 }
 
 export async function waitForHttpOk(
@@ -24,7 +30,13 @@ export async function waitForHttpOk(
     opts: WaitForHttpOkOptions = {},
 ): Promise<Response> {
     const { deadlineMs = 60_000, intervalMs = 250 } = opts;
-    const deadline = Date.now() + deadlineMs;
+    const now = opts.now ?? Date.now;
+    const sleep =
+        opts.sleep ??
+        ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+    const probe =
+        opts.fetch ?? ((u: string, init: RequestInit) => fetch(u, init));
+    const deadline = now() + deadlineMs;
     let lastStatus: number | undefined;
     let lastError: string | undefined;
 
@@ -46,9 +58,9 @@ export async function waitForHttpOk(
     for (;;) {
         failIfExited();
         try {
-            const res = await fetch(url, {
+            const res = await probe(url, {
                 signal: AbortSignal.timeout(
-                    Math.max(1, Math.min(5000, deadline - Date.now())),
+                    Math.max(1, Math.min(5000, deadline - now())),
                 ),
             });
             if (res.status === 200) return res;
@@ -60,7 +72,7 @@ export async function waitForHttpOk(
             // deadline, and its abort must not erase the answer before it.
             lastError = e instanceof Error ? e.message : String(e);
         }
-        if (Date.now() >= deadline) {
+        if (now() >= deadline) {
             // Crash vs slow: the process may have died during the last probe,
             // after the loop's own exit check.
             failIfExited();
@@ -69,6 +81,6 @@ export async function waitForHttpOk(
                     (opts.exited ? " (server process still running)" : ""),
             );
         }
-        await new Promise((r) => setTimeout(r, intervalMs));
+        await sleep(intervalMs);
     }
 }
