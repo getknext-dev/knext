@@ -146,6 +146,6 @@ describe("CLI schema preflight knows the zone-function CRD fields", () => {
             },
         };
         const found = crdSchemaFromOpenApiV3Doc(doc, BACKENDSERVICE_KIND);
-        expect(found?.schema).toBe(schema as object);
+        expect(found?.schema).toBe(schema);
     });
 });

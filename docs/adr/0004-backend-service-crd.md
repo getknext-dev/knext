@@ -438,13 +438,17 @@ turn into a defect in Z8 or Z6 if it were settled in review instead of here:
    claim that a function is isolated must carry that caveat.
 
 6. **The CNPG host check is a lint; the credential allowlist is the control.** The operator still
-   rejects an environment literal that names another zone's `-rw` or `-ro` host (Amendment 1
-   Decision 2), but status messages and docs call that check a **lint**. It catches a mistake, but it
+   checks for an environment literal that names another zone's `-rw` or `-ro` host (Amendment 1
+   Decision 2), and status messages and docs call that check a **lint**: it raises a Warning event
+   and the `DatabaseHostLint` condition and **never rejects** the function. It catches a mistake, but it
    does not stop an IP address, an `ExternalName` Service or a URL built at run time. The
    data-sovereignty control is that the function holds **no credential for another zone's database**.
    Three decisions together make that hold: the Secret allowlist (Amendment 1 Decision 2), applied
    only through a two-sided binding (Decision 2 here), and enforced against the API by the
    operator-owned ServiceAccount (Decision 4 here).
+   *(Changed 2026-10-16: this decision previously said the operator "still rejects" such a literal.
+   It is warn-only. The sovereignty controls that reject are the Secret allowlist and the two-sided
+   binding; Amendment 1 Decision 2's rejection of the host literal is superseded by this lint.)*
 
 7. **The served proto version reaches the zone as `<NAME>_SERVICE_PROTO_VERSION`**, for **function**
    bindings only; an ADR-0065 `model`-flavour binding carries no proto version and gets the

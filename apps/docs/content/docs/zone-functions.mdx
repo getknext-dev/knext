@@ -141,6 +141,10 @@ just called it does not find it cold on the next request.
 
 `kubectl get backendservices` shows each function's zone, readiness and served version.
 
+The served version is `status.servedProtoVersion`: the `protoVersion` of the function's latest
+Ready revision. It is empty until a revision is Ready, and it is the value the zone receives as
+`<NAME>_SERVICE_PROTO_VERSION`.
+
 | Condition | Meaning |
 | --- | --- |
 | `Bound` | Both halves agree. `ZoneNotFound`, `ZoneNotListed` or `ConflictingOwner` otherwise. |
