@@ -36,8 +36,10 @@ const PATTERN = new RegExp(KEY_PREFIX_PATTERN);
  * operator gives the app its own default.
  */
 export function keyPrefixProblem(prefix: string): string | undefined {
-    if (prefix.length > KEY_PREFIX_MAX_LENGTH) {
-        return `is ${prefix.length} characters; the limit is ${KEY_PREFIX_MAX_LENGTH}`;
+    // The apiserver's maxLength counts code points, not UTF-16 units.
+    const length = [...prefix].length;
+    if (length > KEY_PREFIX_MAX_LENGTH) {
+        return `is ${length} characters; the limit is ${KEY_PREFIX_MAX_LENGTH}`;
     }
     if (!PATTERN.test(prefix)) {
         return "contains whitespace or a Redis glob character (* ? [ ] \\)";

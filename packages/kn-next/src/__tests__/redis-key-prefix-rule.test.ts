@@ -54,6 +54,8 @@ const INVALID = [
     "my\fapp",
     "my\vapp",
     "a".repeat(64),
+    // maxLength counts code points (the apiserver), not UTF-16 units.
+    "\u{1F600}".repeat(64),
     "kn-next",
     "kn-next:cache",
 ];
@@ -64,6 +66,8 @@ const VALID = [
     "kn-nextapp",
     "kn-next-v2",
     "a".repeat(63),
+    "\u{1F600}".repeat(63),
+    `${"a".repeat(62)}\u{1F600}`,
     "app.v1_blue@eu/1",
 ];
 
@@ -107,7 +111,8 @@ describe("lockstep with the generated CRD", () => {
         for (const p of [...INVALID, ...VALID]) {
             const crdOk =
                 re.test(p) &&
-                p.length <= (schema.maxLength ?? 0) &&
+                // OpenAPI maxLength on a string counts code points.
+                [...p].length <= (schema.maxLength ?? 0) &&
                 p !== "kn-next" &&
                 !p.startsWith("kn-next:");
             expect({ p, ok: keyPrefixProblem(p) === undefined }).toEqual({

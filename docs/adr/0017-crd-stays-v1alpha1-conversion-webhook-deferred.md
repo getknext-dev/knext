@@ -366,7 +366,7 @@ same way they would treat any other honest-but-not-required signal: read it, do 
 ## Amendment 3 (2026-10-16) — narrowing waivers
 
 **Status: Proposed.** Listed for the sprint-close design review. Until that review accepts it, the
-one waiver below stands on the code and spec reviews of the PR that added it.
+three waivers below stand on the code and spec reviews of the PRs that added them.
 
 ### Context
 
