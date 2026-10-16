@@ -101,6 +101,22 @@ describe('connect-rust stays on its pinned, conformance-gated 0.9 line', () => {
     expect(deps, 'connectrpc pulls zstd into the release binary').not.toContain('zstd');
   });
 
+  it('the zstd drop is wired by a vendored path patch, not only a lock outcome', () => {
+    expect(read('Cargo.toml')).toMatch(
+      /^\[patch\.crates-io\]\nconnectrpc-health = \{ path = "vendor\/connectrpc-health" \}$/m,
+    );
+    expect(read('vendor/connectrpc-health/Cargo.toml')).toMatch(
+      /^\[dependencies\.connectrpc\]\n(?:(?!\[).*\n)*?default-features = false$/m,
+    );
+    const block = read('Cargo.lock')
+      .split('[[package]]')
+      .find((b) => /^name = "connectrpc-health"$/m.test(b));
+    expect(block, 'no connectrpc-health in Cargo.lock').toBeDefined();
+    expect(block, 'connectrpc-health must be the vendored path package').not.toMatch(
+      /^source = /m,
+    );
+  });
+
   it('the codegen plugins are pinned to the runtime lines Cargo.lock holds', () => {
     expect(minor(codegenPin('CONNECTRPC_CODEGEN_VERSION'))).toBe(minor(lockedOnce('connectrpc')));
     expect(codegenPin('PROTOC_GEN_BUFFA_VERSION')).toBe(lockedOnce('buffa'));
@@ -191,6 +207,19 @@ describe('the template workflow scans, gates and holds no credential', () => {
   };
   const trivyStep = (s: Step) => s.uses?.startsWith('aquasecurity/trivy-action@') ?? false;
   const runs = (job: string) => (wf.jobs[job] as Job).steps.map((s) => s.run ?? '').join('\n');
+
+  it('the zstd graph check fails closed', () => {
+    const step = Object.values(wf.jobs)
+      .flatMap((j) => j.steps)
+      .find((s) => s.name === 'zstd is not in the release dependency graph');
+    expect(step, 'no zstd graph step').toBeDefined();
+    const run = step?.run ?? '';
+    expect(run).toContain('set -euo pipefail');
+    expect(run, 'stderr must not be discarded').not.toContain('2>/dev/null');
+    expect(run).toMatch(/cargo tree --locked [^\n]*> "\$\{tree\}"/);
+    expect(run).toContain('[ ! -s "${tree}" ]');
+    expect(run).toContain("grep -E '^zstd(-sys|-safe)? '");
+  });
 
   it('scans with Trivy and fails on HIGH/CRITICAL, on every event', () => {
     const trivy = image.steps[find(image, 'image', trivyStep, 'Trivy')] as Step;

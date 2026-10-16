@@ -125,8 +125,13 @@ jobs:
       - name: zstd is not in the release dependency graph
         run: |
           set -euo pipefail
-          if cargo tree --locked -e normal --target all -i zstd 2>/dev/null | grep -q .; then
-            cargo tree --locked -e normal --target all -i zstd
+          tree="${RUNNER_TEMP}/tree.txt"
+          cargo tree --locked -e normal --target all --prefix none --format '{p}' > "${tree}"
+          if [ ! -s "${tree}" ]; then
+            echo "::error::cargo tree produced no output; the zstd check would be vacuous"
+            exit 1
+          fi
+          if grep -E '^zstd(-sys|-safe)? ' "${tree}"; then
             echo "::error::zstd is compiled into the release binary; the template accepts gzip only"
             exit 1
           fi
