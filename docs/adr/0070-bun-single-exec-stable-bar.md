@@ -93,9 +93,30 @@ the table gives the check and its current state.
 | **C2** | **Self-contained / empty-dir serving.** The binary boots and serves every compat route from a directory holding only the binary, static assets and `native/`, as ADR-0060 D2 defines it. That holds in the runtime image (no `node_modules` anywhere) and on a read-only root filesystem with only an operator-rendered writable tmp. | The lane's allowlist check (`scripts/e2e-deploy.sh`, `e2e-deploy-vinext.sh`, #1455): exists. The image e2e `standalone-self-contained-image.docker-e2e.test.ts` and the `self-contained-exec-e2e` CI job: exist. The read-only-root mount: **#1524** (open). The image variant: **#1457** (open). | **Partly met.** The image and exec e2e pass on the file-manager app; the read-only-root mount path is wrong (#1524); the scheduled lane is C1. |
 | **C3** | **Native-addon policy.** S1 stages native addons into `native/` with an integrity manifest the runtime verifies before `dlopen`, as S2 already does. An addon that cannot be staged fails the build and names the file. An addon is never embedded in the binary. A sharp-using app serves an optimized image from the empty directory. Sharp is extracted lazily, to the writable tmp from C2. | The fail-loud guard (`standalone-native-addon-guard.test.ts`): exists. S1 staging plus a test that it stages and serves: **#1516** (open; this ADR adds the test to its exit). | **Not met for S1** (fails on any addon). **Met for S2** (`native/` with a verified manifest). |
 | **C4** | **Metrics parity.** The S1 and S2 executables serve, on `:9464`, every metric family the disk-mode image serves (golden signals, cold-start, default process metrics). They also drain the DB pool on SIGTERM and sync the image-variant cache. The parity check holds an allowlist of accepted missing families, and that allowlist must be **empty** when a shape graduates. | A red-on-fail contract test that diffs the metric families of the two images: **#1523** (open; this ADR adds the test to its exit). FFI slow-call counter on the vinext executable: #2432. | **Not met.** S1 serves `knext_up` and uptime only. |
-| **C5** | **Cold-start claim policy.** Graduation needs a paired OKE A/B: n ≥ 7 per arm, all pods on one node, warm image, pull time reported separately. Arm A is the S0 disk-mode image; arm B is the shape. B must be **non-inferior**: B's median may not exceed A's median by more than A's IQR. A *superiority* claim ("faster cold start") additionally needs ADR-0060 D7's win (B's median below A's by more than A's IQR) recorded in the cold-start ledger. Without that, docs may state a tie and the measured numbers, nothing more. | The A/B itself is a measurement, not CI: #1458 (S1) and #1461 (S2) run it into `docs/benchmarks/cold-start-ledger.md`. The red-on-fail guard against unsupported comparative claims in the docs: **to build, #2447**. Existing guards: `apps/docs/boot-claim-hygiene.test.ts` (one figure only) and `docs/compat/retracted-figures.json`. | **Non-inferiority not yet run as a graduation A/B.** The only S1 A/B (n=7) is 2.07 s against 2.93 s, inside the spread. That passes non-inferiority on its face, but it was not run to this protocol. No superiority claim is supported. |
+| **C5** | **Cold-start claim policy.** Graduation needs a paired OKE A/B: **n ≥ 60 cold cycles per arm**, arms alternating, all pods on one node, warm image, pull time reported separately, every cycle kept (no outlier removal). Arm A is the **S0 disk-mode image for both shapes** (see D5 for why this departs from ADR-0060 D7 for S2); arm B is the shape. B must be **non-inferior** under a test pre-registered here: the one-sided 95% upper confidence bound of the Hodges-Lehmann shift of log(B) against log(A) must be **below log(1.15)**, that is B may be at most **15% slower than A's median**. A *superiority* claim ("faster cold start") additionally needs ADR-0060 D7's win (B's median below A's by more than A's IQR) recorded in the cold-start ledger. Without that, docs may state a tie and the measured numbers, nothing more. | The A/B itself is a measurement, not CI: #1458 (S1) and #1461 (S2) run it into `docs/benchmarks/cold-start-ledger.md`. The red-on-fail guard against unsupported comparative claims in the docs: **to build, #2447**. Existing guards: `apps/docs/boot-claim-hygiene.test.ts` (one figure only) and `docs/compat/retracted-figures.json`. | **Not met; not yet run to this protocol.** The only S1 A/B (#1458, n=7) is 2.07 s against 2.93 s, inside the spread, and n=7 is below this protocol's minimum, so it neither passes nor fails C5. No superiority claim is supported. |
 | **C6** | **Supply chain.** Stable cells and release images are compiled with **stock released Bun only**. The knext-patched toolchain stays opt-in and outside the Stable promise, and the patched base executable stays CI-only (ADR-0060 D4). Every shipped single-exec image has an SBOM, a HIGH/CRITICAL scan that also covers the **embedded JS closure**, and a cosign signature with an SBOM attestation, like every other image (security.md). Every knext shim the shape depends on has a registered retirement probe. | SBOM, signature and the stock-Bun assertion: **to build, #2444**. Embedded-closure scan: **#1525** (open). The app-closure SBOM scan for the vinext image (`supply-chain.yml`): exists. Shim registry, probes and marker scan (`tests/upstream-retirement/`): exist. | **Not met for S1** (OS-layer Trivy only, no SBOM or signature, closure unscanned). **Partly met for S2** (closure SBOM scan exists). Stock-Bun assertion missing for both. |
 | **C7** | **Rollback.** A user can leave the shape by config alone (`selfContained: false`, `build: 'turbopack'`, or `runtime: 'node'`) and redeploy. Traffic can split between a single-exec revision and a disk-mode or Node revision with every revision serving. The shared Redis ISR entry survives the switch. The operator renders the right command per revision. The docs carry the one-line opt-out. | A kind e2e across shapes: **to build, #2445**. Operator N→N−1 rollback: #2043 (separate). | **Not met.** No test exists. The old-operator compat shim (`server.js` exec relay) exists and covers skew, not rollback. |
+
+**C5's margin and what it can detect.** An earlier draft used A's IQR as the margin at n ≥ 7. In
+#1458 that IQR was 1186 ms, about 40% of A's 2929 ms median, and the test could barely fail: resampling
+#1458's measured residuals (log-scale sd 0.56, one 8–10 s outlier per arm kept in), it passed a true
+25% slowdown 64% of the time and a true 40% slowdown 48% of the time. The fixed-margin test above,
+run on the same resampled variance (3000 trials per point), behaves as follows at n = 60 per arm:
+
+| True slowdown of B | P(C5 passes) |
+|---|---|
+| none (a real tie) | 0.84 |
+| 10% | 0.26 |
+| 15% (the margin) | 0.05 |
+| 20% or more | ≤ 0.01 |
+
+So it rejects a slowdown of 15% or more at least 95% of the time and a 20% slowdown about 99% of the
+time. It does **not** reliably detect a 10% slowdown (it passes one about a quarter of the time). The
+honest price is the other side: a shape that truly ties A still fails C5 about one time in six, from
+the outlier rate alone. A failed run is re-run in full, never topped up, and both runs go in the
+ledger. The variance estimate comes from 14 samples, so these figures are approximate; the first
+n ≥ 60 A/B replaces them in the ledger. At about 2 minutes per cold cycle on a queue-of-one cluster,
+one A/B costs about 4 hours. Options and jev scores are under Options considered.
 
 Two cross-cutting conditions apply to every shape:
 
@@ -151,6 +172,14 @@ depend on a quantity the platform does not control. The other benefits (one arti
 `node_modules` in the image) do not stand in for compat, metrics or supply-chain parity. They only
 stop a tie from being disqualifying. jev 0.98 for non-inferiority against 0.02 for a required win.
 
+The amendment changes a second thing in D7: **its comparison arm, for S2.** D7 compares each track
+against "today's shipped image", which for S1 is S0 but for S2 is vinext in disk mode. C5 uses S0 as
+arm A for both shapes. The reason: Stable is a promise to a user choosing the shape *instead of the
+default build*, and the default build is S0. vinext disk mode is itself Beta, so being non-inferior
+to it says nothing about the Stable alternative the user would otherwise pick. S2's own disk mode
+may still be measured and recorded in the ledger, but it does not gate graduation. jev 0.79 for S0
+on both shapes, against 0.21 for S0 gating plus a reported third arm and 0.00 for keeping D7's arm.
+
 ## Options considered
 
 | Option | What it means | Verdict |
@@ -174,6 +203,17 @@ stop a tie from being disqualifying. jev 0.98 for non-inferiority against 0.02 f
 | M-of-N tolerance | 0.00 |
 | two dispatched runs (ADR-0060 D7's compat half) | 0.00 |
 
+| C5 non-inferiority rule (power from resampling #1458) | jev |
+|---|---|
+| **Fixed +15% of A's median, n ≥ 60, pre-registered one-sided 95% Hodges-Lehmann bound (chosen)**: passes a true 15% slowdown 5%, a true tie 84%, about 4 h per A/B | **0.56** |
+| Fixed +20%, n ≥ 40, same test: passes a true 20% slowdown 5%, a true 10% slowdown 45%, a tie 82%, about 2.7 h | 0.40 |
+| Fixed +25%, n ≥ 30, same test: passes a true 25% slowdown 5%, a tie 80%, about 2 h | 0.03 |
+| A's IQR, n ≥ 7 (the earlier draft): passes a true 40% slowdown 48% | 0.01 |
+| Absolute 300 ms, n ≥ 20: passes a true tie only 32% | 0.00 |
+
+jev's confidence in that pick is low (0.45), with +20% at n ≥ 40 close behind. The sprint-close
+review may trade margin for cluster time between those two; it should not go back to the IQR rule.
+
 Other choices: stock Bun only for Stable cells (**0.99**, against 0.01 for allowing the signed patched
 toolchain and 0.00 for making it the default). Full metrics parity with an allowlist that must be empty
 (**0.97**, against 0.03 for a disclosed subset). Stage native addons like vinext (**0.98**, against 0.02
@@ -184,14 +224,17 @@ already track, filing new ones only for uncovered checks (**0.98**).
 
 - **Single-exec graduation becomes decidable.** Each criterion names a check, and a reviewer at sprint
   close can read a pass/fail per shape rather than a judgement.
-- **No shape graduates soon.** Every criterion except S2's C3 is unmet today, and C1 alone is ≥14 runs
+- **No shape graduates soon.** As the table stands, S2 fully meets one criterion (C3) and S1 none.
+  C2 is partly met for both shapes and C6 partly met for S2; C1, C4, C5 and C7 are not met for
+  either, and C3 and C6 are not met for S1. C1 alone is ≥14 runs
   (four to five days at three runs a cell a day) *after* the empty-dir reds are fixed and a v2 rc is
   pinned. That cost is deliberate: the bar is the same one the default cells meet.
 - **CI cost.** Three more scheduled 16-shard cells. The shared pool (GitHub Free, 20 concurrent jobs)
   already carries 8 credential cells. #2443 must show the pool still fits, or schedule the
   self-contained cells only while their prerequisites are green.
-- **A Proposed amendment to ADR-0060 D7** (D5). If the review rejects it, C5 reverts to requiring a
-  win, and on today's evidence no shape can graduate.
+- **A Proposed amendment to ADR-0060 D7** (D5): non-inferiority instead of a win, and S0 as S2's
+  comparison arm. If the review rejects it, C5 reverts to requiring a win against D7's arm, and on
+  today's evidence no shape can graduate.
 - **Not covered, stated:** the shim-count ratchet in ADR-0060 D3 ("must not rise between sprint
   closes") is not a mechanical check today; it stays a sprint-close review item and is not part of this
   bar. Read-only-root behaviour on a cluster without an operator-rendered `emptyDir` is out of scope;
@@ -214,3 +257,8 @@ already track, filing new ones only for uncovered checks (**0.98**).
 | OKE A/B to the C5 protocol | #1458 (S1), #1461 (S2) (existing) | C5 |
 | vinext compat threshold | #2061 (existing) | C1 (S2) |
 | Ratify this ADR at the Sprint 5 close | #2406 | — |
+
+#1516 and #1461 sit on the v1.3 milestone while this bar is v2-only; on the v2 line, C3 (S1 native-addon
+staging and its stage-and-serve test) and C5 for S2 (the graduation A/B to this protocol) are carried
+by #2406 until a graduation PR lands, with C5's docs guard on #2447, and 1.x work on either issue
+graduates nothing.
