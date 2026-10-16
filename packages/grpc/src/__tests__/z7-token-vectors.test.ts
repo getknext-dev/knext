@@ -3,8 +3,12 @@ import { createHash, createPublicKey, verify } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import {
   buildVectors,
+  NON_CANONICAL_KEY,
+  OFF_CURVE_KEY,
+  PRIVATE_JWK_MEMBERS,
   REASONS,
   type Reason,
+  SMALL_ORDER_KEYS,
   T0,
   VECTORS_PATH,
 } from '../../scripts/gen-z7-token-vectors';
@@ -92,13 +96,83 @@ function object(bytes: Buffer): Record<string, unknown> {
 const kidOf = (raw: Buffer) =>
   createHash('sha256').update(raw).digest().subarray(0, 16).toString('base64url');
 
-/** The usable keys of a JWK Set: Ed25519 OKP keys whose kid is derived from x. */
-function usableKeys(set: { keys: JWK[] }): Map<string, Buffer> {
+// edwards25519, in affine coordinates over BigInt: enough to decode a public
+// key strictly and to compute [8]A, written from RFC 8032 rather than taken
+// from any of the verifiers it checks.
+const FIELD_P = (1n << 255n) - 19n;
+const fmod = (a: bigint) => ((a % FIELD_P) + FIELD_P) % FIELD_P;
+function fpow(base: bigint, exp: bigint): bigint {
+  let result = 1n;
+  let b = fmod(base);
+  for (let e = exp; e > 0n; e >>= 1n) {
+    if (e & 1n) result = (result * b) % FIELD_P;
+    b = (b * b) % FIELD_P;
+  }
+  return result;
+}
+const finv = (a: bigint) => fpow(a, FIELD_P - 2n);
+const CURVE_D = fmod(-121665n * finv(121666n));
+const SQRT_M1 = fpow(2n, (FIELD_P - 1n) / 4n);
+type Point = { x: bigint; y: bigint };
+
+/**
+ * RFC 8032 §5.1.3 decoding, strict: null for y >= p, a y off the curve, or
+ * x = 0 signed. `lax` reduces y mod p and ignores the sign of x = 0 instead,
+ * as many verifiers do, to name the point a non-canonical encoding aliases.
+ */
+function decodePoint(raw: Buffer, lax = false): Point | null {
+  const le = BigInt(`0x${Buffer.from(raw).reverse().toString('hex')}`);
+  const sign = le >> 255n;
+  let y = le & ((1n << 255n) - 1n);
+  if (y >= FIELD_P) {
+    if (!lax) return null;
+    y -= FIELD_P;
+  }
+  const x2 = fmod((y * y - 1n) * finv(CURVE_D * y * y + 1n));
+  let x = fpow(x2, (FIELD_P + 3n) / 8n);
+  if (fmod(x * x - x2) !== 0n) x = fmod(x * SQRT_M1);
+  if (fmod(x * x - x2) !== 0n) return null;
+  if (x === 0n && sign === 1n && !lax) return null;
+  if ((x & 1n) !== sign) x = FIELD_P - x;
+  return { x, y };
+}
+
+function addPoints(a: Point, b: Point): Point {
+  const t = fmod(CURVE_D * a.x * b.x * a.y * b.y);
+  return {
+    x: fmod((a.x * b.y + b.x * a.y) * finv(1n + t)),
+    y: fmod((a.y * b.y + a.x * b.x) * finv(1n - t)),
+  };
+}
+
+/** [8]P is the identity: P lies in the small-order (torsion) subgroup. */
+function smallOrder(p: Point): boolean {
+  let q = p;
+  for (let i = 0; i < 3; i++) q = addPoints(q, q);
+  return q.x === 0n && q.y === 1n;
+}
+
+/** A public key a verifier may trust: a canonical encoding of a point outside the small-order subgroup. */
+function strongKey(raw: Buffer): boolean {
+  const point = decodePoint(raw);
+  return point !== null && !smallOrder(point);
+}
+
+/**
+ * The usable keys of a JWK Set: Ed25519 OKP keys whose kid is derived from x
+ * and whose x is a strong key. A set in which any JWK carries private key
+ * material is refused whole.
+ */
+function usableKeys(set: { keys: JWK[] }, skip: Skip = {}): Map<string, Buffer> {
+  if (!skip['bad-jwks'] && set.keys.some((k) => PRIVATE_JWK_MEMBERS.some((m) => m in k))) {
+    refuse('bad-jwks');
+  }
   const keys = new Map<string, Buffer>();
   for (const k of set.keys) {
     if (k.kty !== 'OKP' || k.crv !== 'Ed25519' || typeof k.x !== 'string') continue;
     const raw = Buffer.from(k.x, 'base64url');
     if (raw.length !== 32 || k.kid !== kidOf(raw)) continue;
+    if (!skip['weak-key'] && !strongKey(raw)) continue;
     keys.set(k.kid, raw);
   }
   return keys;
@@ -106,11 +180,14 @@ function usableKeys(set: { keys: JWK[] }): Map<string, Buffer> {
 
 const SPKI_ED25519_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
 
-type Skip = Partial<Record<Reason, true>>;
+/** A check to drop: a refusal reason, or `weak-key` (trust any 32-byte x). */
+type Skip = Partial<Record<Reason | 'weak-key', true>>;
 
 /** The contract's verifier. `skip` drops named checks, to show a case is single-fault. */
 function referenceVerify(c: Case, skip: Skip = {}): string {
   if (c.jws === null) return refuse('no-token');
+  // The mounted JWKS is read before the token is looked at.
+  const keys = usableKeys(committed.jwks[c.jwks as keyof Vectors['jwks']], skip);
   if (c.jws.length !== 3) refuse('malformed');
   const [h, p, s] = c.jws as [string, string, string];
   const header = object(b64(h));
@@ -121,8 +198,7 @@ function referenceVerify(c: Case, skip: Skip = {}): string {
     refuse('malformed');
   }
   if (header.alg !== 'EdDSA' && !skip['bad-alg']) refuse('bad-alg');
-  const set = committed.jwks[c.jwks as keyof Vectors['jwks']];
-  const raw = usableKeys(set).get(header.kid as string) ?? refuse('unknown-kid');
+  const raw = keys.get(header.kid as string) ?? refuse('unknown-kid');
   const key = createPublicKey({
     key: Buffer.concat([SPKI_ED25519_PREFIX, raw]),
     format: 'der',
@@ -196,6 +272,7 @@ describe('z7 token vectors', () => {
       'wrong-audience',
       'wrong-method',
       'missing-subject',
+      'bad-jwks',
     ];
     let checked = 0;
     for (const c of committed.cases) {
@@ -207,7 +284,7 @@ describe('z7 token vectors', () => {
       });
       checked++;
     }
-    expect(checked).toBeGreaterThanOrEqual(12);
+    expect(checked).toBeGreaterThanOrEqual(21);
     // alg confusion with a VALID EdDSA signature is caught only by the alg check.
     const algName = committed.cases.find((c) => c.name === 'alg-ed25519-name');
     expect(algName && !(outcome(algName, { 'bad-alg': true }) instanceof Refused)).toBe(true);
@@ -234,12 +311,66 @@ describe('z7 token vectors', () => {
       'rotation-previous-after-overlap',
       'rotation-next-before-propagation',
       'rotation-next-after-propagation',
+      'signature-s-plus-l',
+      'escaped-duplicate-header-alg',
+      'escaped-duplicate-claim-sub',
+      'jwks-non-canonical-key',
+      'jwks-off-curve-key',
+      ...SMALL_ORDER_KEYS.map(([label]) => `jwks-small-order-key-${label}`),
+      ...PRIVATE_JWK_MEMBERS.map((m) => `jwks-private-member-${m}`),
     ]) {
       expect({ required, present: names.has(required) }).toEqual({ required, present: true });
     }
     for (const c of committed.cases) {
       if (c.expect === 'reject') expect(REASONS).toContain(c.reason);
     }
+  });
+
+  it('the small-order keys are every encoding of every small-order point', () => {
+    const canonical = new Set<string>();
+    for (const [label, hex] of SMALL_ORDER_KEYS) {
+      const raw = Buffer.from(hex, 'hex');
+      const point = decodePoint(raw, true);
+      expect({ label, smallOrder: point !== null && smallOrder(point) }).toEqual({
+        label,
+        smallOrder: true,
+      });
+      if (decodePoint(raw) !== null) canonical.add(`${point?.x}:${point?.y}`);
+    }
+    // The small-order subgroup has exactly eight points: all are here.
+    expect(canonical.size).toBe(8);
+    expect(SMALL_ORDER_KEYS.length).toBe(14);
+    // The non-canonical key is a real point of large order, only badly encoded.
+    const aliased = decodePoint(Buffer.from(NON_CANONICAL_KEY, 'hex'), true);
+    expect(decodePoint(Buffer.from(NON_CANONICAL_KEY, 'hex'))).toBeNull();
+    expect(aliased !== null && !smallOrder(aliased)).toBe(true);
+    // The off-curve key is no point at all.
+    expect(decodePoint(Buffer.from(OFF_CURVE_KEY, 'hex'), true)).toBeNull();
+  });
+
+  // Each weak-key case is refused only because its key is not trusted: a
+  // verifier that trusts any 32-byte x refuses it for another reason, or
+  // accepts it — the identity key admits the forgery for every message.
+  it('every weak-key negative is single-fault, and the identity-key forgery is real', () => {
+    const weak = committed.cases.filter(
+      (c) =>
+        c.name.startsWith('jwks-small-order-key-') ||
+        c.name.endsWith('-curve-key') ||
+        c.name === 'jwks-non-canonical-key',
+    );
+    expect(weak.length).toBe(SMALL_ORDER_KEYS.length + 2);
+    for (const c of weak) {
+      const got = outcome(c, { 'weak-key': true });
+      expect({
+        name: c.name,
+        unknownKid: got instanceof Refused && got.reason === 'unknown-kid',
+      }).toEqual({ name: c.name, unknownKid: false });
+    }
+    const identity = committed.cases.find((c) => c.name === 'jwks-small-order-key-identity');
+    expect(identity && outcome(identity, { 'weak-key': true })).toEqual({
+      expect: 'accept',
+      sub: 'user-123',
+    });
   });
 
   it('every kid in a well-formed JWK Set is derived from its key, and the clock is fixed', () => {

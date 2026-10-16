@@ -30,7 +30,8 @@
     "wrong-issuer",
     "wrong-audience",
     "wrong-method",
-    "missing-subject"
+    "missing-subject",
+    "bad-jwks"
   ],
   "keys": {
     "zone-a-previous": {
@@ -186,6 +187,412 @@
           "crv": "Ed25519",
           "kid": "aItCDgZ3dKGp5YeyylQl0Q",
           "x": "RtVuked5tcG3ie24v6WecAS6mli8EkYwaoIIQb9T5A"
+        }
+      ]
+    },
+    "non-canonical-key": {
+      "keys": [
+        {
+          "kty": "OKP",
+          "crv": "Ed25519",
+          "x": "8P_______________________________________38",
+          "kid": "5-fVBIv7pEeVUI0DWNTPlQ",
+          "alg": "EdDSA",
+          "use": "sig"
+        }
+      ]
+    },
+    "off-curve-key": {
+      "keys": [
+        {
+          "kty": "OKP",
+          "crv": "Ed25519",
+          "x": "AgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "kid": "V3j5hdt1TGYoaR9W-trlDA",
+          "alg": "EdDSA",
+          "use": "sig"
+        }
+      ]
+    },
+    "small-order-identity": {
+      "keys": [
+        {
+          "kty": "OKP",
+          "crv": "Ed25519",
+          "x": "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "kid": "AdD6vSUfy74rk7S5J7Jq0g",
+          "alg": "EdDSA",
+          "use": "sig"
+        }
+      ]
+    },
+    "small-order-order-2": {
+      "keys": [
+        {
+          "kty": "OKP",
+          "crv": "Ed25519",
+          "x": "7P_______________________________________38",
+          "kid": "_-HqCPOvRDtaLWSXybfFpw",
+          "alg": "EdDSA",
+          "use": "sig"
+        }
+      ]
+    },
+    "small-order-order-4": {
+      "keys": [
+        {
+          "kty": "OKP",
+          "crv": "Ed25519",
+          "x": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "kid": "Zmh6rfhivXdsj8GLjp-OIA",
+          "alg": "EdDSA",
+          "use": "sig"
+        }
+      ]
+    },
+    "small-order-order-4-negated": {
+      "keys": [
+        {
+          "kty": "OKP",
+          "crv": "Ed25519",
+          "x": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIA",
+          "kid": "Y3lKO_iHWsLDK6YjjSfn4Q",
+          "alg": "EdDSA",
+          "use": "sig"
+        }
+      ]
+    },
+    "small-order-order-8": {
+      "keys": [
+        {
+          "kty": "OKP",
+          "crv": "Ed25519",
+          "x": "xxdqcD1N2E-6PAt2DRBnDyogU_osOczGTsf9d5KsA3o",
+          "kid": "E4EjGiAh8zHxubadL1_wSg",
+          "alg": "EdDSA",
+          "use": "sig"
+        }
+      ]
+    },
+    "small-order-order-8-negated": {
+      "keys": [
+        {
+          "kty": "OKP",
+          "crv": "Ed25519",
+          "x": "xxdqcD1N2E-6PAt2DRBnDyogU_osOczGTsf9d5KsA_o",
+          "kid": "6k2XwCtBHXvG5SWCKVRj_g",
+          "alg": "EdDSA",
+          "use": "sig"
+        }
+      ]
+    },
+    "small-order-order-8-other": {
+      "keys": [
+        {
+          "kty": "OKP",
+          "crv": "Ed25519",
+          "x": "JuiVj8KyJ7BFw_SJ8u-Y8NXfrAXTxjM5sTgCiG1T_AU",
+          "kid": "DTT9DZmVfFPk3JVN2q5ZNA",
+          "alg": "EdDSA",
+          "use": "sig"
+        }
+      ]
+    },
+    "small-order-order-8-other-negated": {
+      "keys": [
+        {
+          "kty": "OKP",
+          "crv": "Ed25519",
+          "x": "JuiVj8KyJ7BFw_SJ8u-Y8NXfrAXTxjM5sTgCiG1T_IU",
+          "kid": "UgQBBIjKMzjtbFa7NKnibA",
+          "alg": "EdDSA",
+          "use": "sig"
+        }
+      ]
+    },
+    "small-order-identity-x0-signed": {
+      "keys": [
+        {
+          "kty": "OKP",
+          "crv": "Ed25519",
+          "x": "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIA",
+          "kid": "BeM6eiXcOasljaz-palV0A",
+          "alg": "EdDSA",
+          "use": "sig"
+        }
+      ]
+    },
+    "small-order-order-2-x0-signed": {
+      "keys": [
+        {
+          "kty": "OKP",
+          "crv": "Ed25519",
+          "x": "7P________________________________________8",
+          "kid": "GFw8cSCM_SH3EChUS0Hjtg",
+          "alg": "EdDSA",
+          "use": "sig"
+        }
+      ]
+    },
+    "small-order-order-4-y-plus-p": {
+      "keys": [
+        {
+          "kty": "OKP",
+          "crv": "Ed25519",
+          "x": "7f_______________________________________38",
+          "kid": "vWF0p8FuGvBycpZqnAccig",
+          "alg": "EdDSA",
+          "use": "sig"
+        }
+      ]
+    },
+    "small-order-order-4-y-plus-p-signed": {
+      "keys": [
+        {
+          "kty": "OKP",
+          "crv": "Ed25519",
+          "x": "7f________________________________________8",
+          "kid": "E4OX5qn_mS5D_1ffsJ917w",
+          "alg": "EdDSA",
+          "use": "sig"
+        }
+      ]
+    },
+    "small-order-identity-y-plus-p": {
+      "keys": [
+        {
+          "kty": "OKP",
+          "crv": "Ed25519",
+          "x": "7v_______________________________________38",
+          "kid": "68qr1ksJR7ZNaBNRGcVPLQ",
+          "alg": "EdDSA",
+          "use": "sig"
+        }
+      ]
+    },
+    "small-order-identity-y-plus-p-signed": {
+      "keys": [
+        {
+          "kty": "OKP",
+          "crv": "Ed25519",
+          "x": "7v________________________________________8",
+          "kid": "6lrtn9qS2bDl6bwBx65X_A",
+          "alg": "EdDSA",
+          "use": "sig"
+        }
+      ]
+    },
+    "private-d": {
+      "keys": [
+        {
+          "kty": "OKP",
+          "crv": "Ed25519",
+          "x": "RtVuked5tcG3ie24v6WecAS6mli8EkYwaoIIQb9T5No",
+          "kid": "86aY5vHO4HzoyPv0mHLsSA",
+          "alg": "EdDSA",
+          "use": "sig",
+          "d": "Crqm5x4hhQWdquX6tT1_MJsmaqfNOk8drnHsCuMiEJM"
+        },
+        {
+          "kty": "OKP",
+          "crv": "Ed25519",
+          "x": "Zh2QxfrFjkZWOpfyyImNKZNwtnI3672gIyTyvfj41nU",
+          "kid": "IEgiklF7IKV0yQ5clb8cEw",
+          "alg": "EdDSA",
+          "use": "sig"
+        }
+      ]
+    },
+    "private-p": {
+      "keys": [
+        {
+          "kty": "OKP",
+          "crv": "Ed25519",
+          "x": "RtVuked5tcG3ie24v6WecAS6mli8EkYwaoIIQb9T5No",
+          "kid": "86aY5vHO4HzoyPv0mHLsSA",
+          "alg": "EdDSA",
+          "use": "sig"
+        },
+        {
+          "kty": "OKP",
+          "crv": "Ed25519",
+          "x": "Zh2QxfrFjkZWOpfyyImNKZNwtnI3672gIyTyvfj41nU",
+          "kid": "IEgiklF7IKV0yQ5clb8cEw",
+          "alg": "EdDSA",
+          "use": "sig"
+        },
+        {
+          "kty": "RSA",
+          "kid": "test-rsa",
+          "n": "AQAB",
+          "e": "AQAB",
+          "p": "AQAB"
+        }
+      ]
+    },
+    "private-q": {
+      "keys": [
+        {
+          "kty": "OKP",
+          "crv": "Ed25519",
+          "x": "RtVuked5tcG3ie24v6WecAS6mli8EkYwaoIIQb9T5No",
+          "kid": "86aY5vHO4HzoyPv0mHLsSA",
+          "alg": "EdDSA",
+          "use": "sig"
+        },
+        {
+          "kty": "OKP",
+          "crv": "Ed25519",
+          "x": "Zh2QxfrFjkZWOpfyyImNKZNwtnI3672gIyTyvfj41nU",
+          "kid": "IEgiklF7IKV0yQ5clb8cEw",
+          "alg": "EdDSA",
+          "use": "sig"
+        },
+        {
+          "kty": "RSA",
+          "kid": "test-rsa",
+          "n": "AQAB",
+          "e": "AQAB",
+          "q": "AQAB"
+        }
+      ]
+    },
+    "private-dp": {
+      "keys": [
+        {
+          "kty": "OKP",
+          "crv": "Ed25519",
+          "x": "RtVuked5tcG3ie24v6WecAS6mli8EkYwaoIIQb9T5No",
+          "kid": "86aY5vHO4HzoyPv0mHLsSA",
+          "alg": "EdDSA",
+          "use": "sig"
+        },
+        {
+          "kty": "OKP",
+          "crv": "Ed25519",
+          "x": "Zh2QxfrFjkZWOpfyyImNKZNwtnI3672gIyTyvfj41nU",
+          "kid": "IEgiklF7IKV0yQ5clb8cEw",
+          "alg": "EdDSA",
+          "use": "sig"
+        },
+        {
+          "kty": "RSA",
+          "kid": "test-rsa",
+          "n": "AQAB",
+          "e": "AQAB",
+          "dp": "AQAB"
+        }
+      ]
+    },
+    "private-dq": {
+      "keys": [
+        {
+          "kty": "OKP",
+          "crv": "Ed25519",
+          "x": "RtVuked5tcG3ie24v6WecAS6mli8EkYwaoIIQb9T5No",
+          "kid": "86aY5vHO4HzoyPv0mHLsSA",
+          "alg": "EdDSA",
+          "use": "sig"
+        },
+        {
+          "kty": "OKP",
+          "crv": "Ed25519",
+          "x": "Zh2QxfrFjkZWOpfyyImNKZNwtnI3672gIyTyvfj41nU",
+          "kid": "IEgiklF7IKV0yQ5clb8cEw",
+          "alg": "EdDSA",
+          "use": "sig"
+        },
+        {
+          "kty": "RSA",
+          "kid": "test-rsa",
+          "n": "AQAB",
+          "e": "AQAB",
+          "dq": "AQAB"
+        }
+      ]
+    },
+    "private-qi": {
+      "keys": [
+        {
+          "kty": "OKP",
+          "crv": "Ed25519",
+          "x": "RtVuked5tcG3ie24v6WecAS6mli8EkYwaoIIQb9T5No",
+          "kid": "86aY5vHO4HzoyPv0mHLsSA",
+          "alg": "EdDSA",
+          "use": "sig"
+        },
+        {
+          "kty": "OKP",
+          "crv": "Ed25519",
+          "x": "Zh2QxfrFjkZWOpfyyImNKZNwtnI3672gIyTyvfj41nU",
+          "kid": "IEgiklF7IKV0yQ5clb8cEw",
+          "alg": "EdDSA",
+          "use": "sig"
+        },
+        {
+          "kty": "RSA",
+          "kid": "test-rsa",
+          "n": "AQAB",
+          "e": "AQAB",
+          "qi": "AQAB"
+        }
+      ]
+    },
+    "private-oth": {
+      "keys": [
+        {
+          "kty": "OKP",
+          "crv": "Ed25519",
+          "x": "RtVuked5tcG3ie24v6WecAS6mli8EkYwaoIIQb9T5No",
+          "kid": "86aY5vHO4HzoyPv0mHLsSA",
+          "alg": "EdDSA",
+          "use": "sig"
+        },
+        {
+          "kty": "OKP",
+          "crv": "Ed25519",
+          "x": "Zh2QxfrFjkZWOpfyyImNKZNwtnI3672gIyTyvfj41nU",
+          "kid": "IEgiklF7IKV0yQ5clb8cEw",
+          "alg": "EdDSA",
+          "use": "sig"
+        },
+        {
+          "kty": "RSA",
+          "kid": "test-rsa",
+          "n": "AQAB",
+          "e": "AQAB",
+          "oth": [
+            {
+              "r": "AQAB",
+              "d": "AQAB",
+              "t": "AQAB"
+            }
+          ]
+        }
+      ]
+    },
+    "private-k": {
+      "keys": [
+        {
+          "kty": "OKP",
+          "crv": "Ed25519",
+          "x": "RtVuked5tcG3ie24v6WecAS6mli8EkYwaoIIQb9T5No",
+          "kid": "86aY5vHO4HzoyPv0mHLsSA",
+          "alg": "EdDSA",
+          "use": "sig"
+        },
+        {
+          "kty": "OKP",
+          "crv": "Ed25519",
+          "x": "Zh2QxfrFjkZWOpfyyImNKZNwtnI3672gIyTyvfj41nU",
+          "kid": "IEgiklF7IKV0yQ5clb8cEw",
+          "alg": "EdDSA",
+          "use": "sig"
+        },
+        {
+          "kty": "oct",
+          "kid": "test-oct",
+          "k": "AQAB"
         }
       ]
     }
@@ -411,6 +818,20 @@
       "reason": "malformed"
     },
     {
+      "name": "escaped-duplicate-header-alg",
+      "jwks": "zone-a-overlap",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJub25lIiwiXHUwMDYxbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6Ijg2YVk1dkhPNEh6b3lQdjBtSExzU0EifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NTB9",
+        "FXXXq-sDyXB-ALklseEHGUXvLf5LNml6CIh6nr59KwGgSCsUxkTmbchHh8gwRL8Y2GAj6_QcGt1SBm0IQ-MTDw"
+      ],
+      "expect": "reject",
+      "reason": "malformed"
+    },
+    {
       "name": "header-crit",
       "jwks": "zone-a-overlap",
       "procedure": "/example.v1.ExampleService/PutItem",
@@ -490,6 +911,20 @@
         "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6Ijg2YVk1dkhPNEh6b3lQdjBtSExzU0EifQ",
         "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6ImFkbWluIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NTB9",
         "Y-RJ1W3utndWv5zz3ifLjcUVUMfG9JYIYJn2bH9reM8SEC3Ne9gP7SeSZQvdhhvOo1FepDgzfKhkuqzSostxCw"
+      ],
+      "expect": "reject",
+      "reason": "bad-signature"
+    },
+    {
+      "name": "signature-s-plus-l",
+      "jwks": "zone-a-overlap",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6Ijg2YVk1dkhPNEh6b3lQdjBtSExzU0EifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NTB9",
+        "Y-RJ1W3utndWv5zz3ifLjcUVUMfG9JYIYJn2bH9reM__4yIqljsiRf4uXa67gPrio1FepDgzfKhkuqzSostxGw"
       ],
       "expect": "reject",
       "reason": "bad-signature"
@@ -621,6 +1056,342 @@
       "reason": "unknown-kid"
     },
     {
+      "name": "jwks-non-canonical-key",
+      "jwks": "non-canonical-key",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6IjUtZlZCSXY3cEVlVlVJMERXTlRQbFEifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NTB9",
+        "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      ],
+      "expect": "reject",
+      "reason": "unknown-kid"
+    },
+    {
+      "name": "jwks-off-curve-key",
+      "jwks": "off-curve-key",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6IlYzajVoZHQxVEdZb2FSOVctdHJsREEifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NTB9",
+        "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      ],
+      "expect": "reject",
+      "reason": "unknown-kid"
+    },
+    {
+      "name": "jwks-small-order-key-identity",
+      "jwks": "small-order-identity",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6IkFkRDZ2U1VmeTc0cms3UzVKN0pxMGcifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NTB9",
+        "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      ],
+      "expect": "reject",
+      "reason": "unknown-kid"
+    },
+    {
+      "name": "jwks-small-order-key-order-2",
+      "jwks": "small-order-order-2",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6Il8tSHFDUE92UkR0YUxXU1h5YmZGcHcifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NTB9",
+        "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      ],
+      "expect": "reject",
+      "reason": "unknown-kid"
+    },
+    {
+      "name": "jwks-small-order-key-order-4",
+      "jwks": "small-order-order-4",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6IlptaDZyZmhpdlhkc2o4R0xqcC1PSUEifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NTB9",
+        "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      ],
+      "expect": "reject",
+      "reason": "unknown-kid"
+    },
+    {
+      "name": "jwks-small-order-key-order-4-negated",
+      "jwks": "small-order-order-4-negated",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6IlkzbEtPX2lIV3NMREs2WWpqU2ZuNFEifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NTB9",
+        "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      ],
+      "expect": "reject",
+      "reason": "unknown-kid"
+    },
+    {
+      "name": "jwks-small-order-key-order-8",
+      "jwks": "small-order-order-8",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6IkU0RWpHaUFoOHpIeHViYWRMMV93U2cifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NTB9",
+        "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      ],
+      "expect": "reject",
+      "reason": "unknown-kid"
+    },
+    {
+      "name": "jwks-small-order-key-order-8-negated",
+      "jwks": "small-order-order-8-negated",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6IjZrMlh3Q3RCSFh2RzVTV0NLVlJqX2cifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NTB9",
+        "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      ],
+      "expect": "reject",
+      "reason": "unknown-kid"
+    },
+    {
+      "name": "jwks-small-order-key-order-8-other",
+      "jwks": "small-order-order-8-other",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6IkRUVDlEWm1WZkZQazNKVk4ycTVaTkEifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NTB9",
+        "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      ],
+      "expect": "reject",
+      "reason": "unknown-kid"
+    },
+    {
+      "name": "jwks-small-order-key-order-8-other-negated",
+      "jwks": "small-order-order-8-other-negated",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6IlVnUUJCSWpLTXpqdGJGYTdOS25pYkEifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NTB9",
+        "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      ],
+      "expect": "reject",
+      "reason": "unknown-kid"
+    },
+    {
+      "name": "jwks-small-order-key-identity-x0-signed",
+      "jwks": "small-order-identity-x0-signed",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6IkJlTTZlaVhjT2FzbGphei1wYWxWMEEifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NTB9",
+        "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      ],
+      "expect": "reject",
+      "reason": "unknown-kid"
+    },
+    {
+      "name": "jwks-small-order-key-order-2-x0-signed",
+      "jwks": "small-order-order-2-x0-signed",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6IkdGdzhjU0NNX1NIM0VDaFVTMEhqdGcifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NTB9",
+        "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      ],
+      "expect": "reject",
+      "reason": "unknown-kid"
+    },
+    {
+      "name": "jwks-small-order-key-order-4-y-plus-p",
+      "jwks": "small-order-order-4-y-plus-p",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6InZXRjBwOEZ1R3ZCeWNwWnFuQWNjaWcifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NTB9",
+        "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      ],
+      "expect": "reject",
+      "reason": "unknown-kid"
+    },
+    {
+      "name": "jwks-small-order-key-order-4-y-plus-p-signed",
+      "jwks": "small-order-order-4-y-plus-p-signed",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6IkU0T1g1cW5fbVM1RF8xZmZzSjkxN3cifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NTB9",
+        "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      ],
+      "expect": "reject",
+      "reason": "unknown-kid"
+    },
+    {
+      "name": "jwks-small-order-key-identity-y-plus-p",
+      "jwks": "small-order-identity-y-plus-p",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6IjY4cXIxa3NKUjdaTmFCTlJHY1ZQTFEifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NTB9",
+        "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      ],
+      "expect": "reject",
+      "reason": "unknown-kid"
+    },
+    {
+      "name": "jwks-small-order-key-identity-y-plus-p-signed",
+      "jwks": "small-order-identity-y-plus-p-signed",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6IjZscnRuOXFTMmJEbDZid0J4NjVYX0EifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NTB9",
+        "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      ],
+      "expect": "reject",
+      "reason": "unknown-kid"
+    },
+    {
+      "name": "jwks-private-member-d",
+      "jwks": "private-d",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6Ijg2YVk1dkhPNEh6b3lQdjBtSExzU0EifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NTB9",
+        "Y-RJ1W3utndWv5zz3ifLjcUVUMfG9JYIYJn2bH9reM8SEC3Ne9gP7SeSZQvdhhvOo1FepDgzfKhkuqzSostxCw"
+      ],
+      "expect": "reject",
+      "reason": "bad-jwks"
+    },
+    {
+      "name": "jwks-private-member-p",
+      "jwks": "private-p",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6Ijg2YVk1dkhPNEh6b3lQdjBtSExzU0EifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NTB9",
+        "Y-RJ1W3utndWv5zz3ifLjcUVUMfG9JYIYJn2bH9reM8SEC3Ne9gP7SeSZQvdhhvOo1FepDgzfKhkuqzSostxCw"
+      ],
+      "expect": "reject",
+      "reason": "bad-jwks"
+    },
+    {
+      "name": "jwks-private-member-q",
+      "jwks": "private-q",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6Ijg2YVk1dkhPNEh6b3lQdjBtSExzU0EifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NTB9",
+        "Y-RJ1W3utndWv5zz3ifLjcUVUMfG9JYIYJn2bH9reM8SEC3Ne9gP7SeSZQvdhhvOo1FepDgzfKhkuqzSostxCw"
+      ],
+      "expect": "reject",
+      "reason": "bad-jwks"
+    },
+    {
+      "name": "jwks-private-member-dp",
+      "jwks": "private-dp",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6Ijg2YVk1dkhPNEh6b3lQdjBtSExzU0EifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NTB9",
+        "Y-RJ1W3utndWv5zz3ifLjcUVUMfG9JYIYJn2bH9reM8SEC3Ne9gP7SeSZQvdhhvOo1FepDgzfKhkuqzSostxCw"
+      ],
+      "expect": "reject",
+      "reason": "bad-jwks"
+    },
+    {
+      "name": "jwks-private-member-dq",
+      "jwks": "private-dq",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6Ijg2YVk1dkhPNEh6b3lQdjBtSExzU0EifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NTB9",
+        "Y-RJ1W3utndWv5zz3ifLjcUVUMfG9JYIYJn2bH9reM8SEC3Ne9gP7SeSZQvdhhvOo1FepDgzfKhkuqzSostxCw"
+      ],
+      "expect": "reject",
+      "reason": "bad-jwks"
+    },
+    {
+      "name": "jwks-private-member-qi",
+      "jwks": "private-qi",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6Ijg2YVk1dkhPNEh6b3lQdjBtSExzU0EifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NTB9",
+        "Y-RJ1W3utndWv5zz3ifLjcUVUMfG9JYIYJn2bH9reM8SEC3Ne9gP7SeSZQvdhhvOo1FepDgzfKhkuqzSostxCw"
+      ],
+      "expect": "reject",
+      "reason": "bad-jwks"
+    },
+    {
+      "name": "jwks-private-member-oth",
+      "jwks": "private-oth",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6Ijg2YVk1dkhPNEh6b3lQdjBtSExzU0EifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NTB9",
+        "Y-RJ1W3utndWv5zz3ifLjcUVUMfG9JYIYJn2bH9reM8SEC3Ne9gP7SeSZQvdhhvOo1FepDgzfKhkuqzSostxCw"
+      ],
+      "expect": "reject",
+      "reason": "bad-jwks"
+    },
+    {
+      "name": "jwks-private-member-k",
+      "jwks": "private-k",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6Ijg2YVk1dkhPNEh6b3lQdjBtSExzU0EifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwiaWF0IjoxNzY3MjI1NTkwLCJleHAiOjE3NjcyMjU2NTB9",
+        "Y-RJ1W3utndWv5zz3ifLjcUVUMfG9JYIYJn2bH9reM8SEC3Ne9gP7SeSZQvdhhvOo1FepDgzfKhkuqzSostxCw"
+      ],
+      "expect": "reject",
+      "reason": "bad-jwks"
+    },
+    {
       "name": "duplicate-claim-sub",
       "jwks": "zone-a-overlap",
       "procedure": "/example.v1.ExampleService/PutItem",
@@ -630,6 +1401,20 @@
         "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6Ijg2YVk1dkhPNEh6b3lQdjBtSExzU0EifQ",
         "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwic3ViIjoiYWRtaW4iLCJpYXQiOjE3NjcyMjU1OTAsImV4cCI6MTc2NzIyNTY1MH0",
         "WIPZLYmup5_5eDVQ5aNDEh8CSFaG6MJ5-V4DB0FS66ayQymys6NHqIPg6EwcmdRSpG1_CL7920fgF8r3eUADDA"
+      ],
+      "expect": "reject",
+      "reason": "malformed"
+    },
+    {
+      "name": "escaped-duplicate-claim-sub",
+      "jwks": "zone-a-overlap",
+      "procedure": "/example.v1.ExampleService/PutItem",
+      "auth": "AUTH_USER",
+      "now": 1767225600,
+      "jws": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6Ijg2YVk1dkhPNEh6b3lQdjBtSExzU0EifQ",
+        "eyJpc3MiOiJrbmV4dDp6b25lOnNob3Avc3RvcmVmcm9udCIsImF1ZCI6ImtuZXh0OmZuOnNob3Avb3JkZXJzIiwibWV0aG9kIjoiL2V4YW1wbGUudjEuRXhhbXBsZVNlcnZpY2UvUHV0SXRlbSIsInN1YiI6InVzZXItMTIzIiwic1x1MDA3NWIiOiJhZG1pbiIsImlhdCI6MTc2NzIyNTU5MCwiZXhwIjoxNzY3MjI1NjUwfQ",
+        "SB-qKD5Xie0__Y4UXBtreErYXGF9zFV2xy6_gEVHZb1y5-hjcgD96kUloqvz8QbTshGJ5O9bORqt9S7b0ZLiDw"
       ],
       "expect": "reject",
       "reason": "malformed"

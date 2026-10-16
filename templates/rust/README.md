@@ -11,8 +11,9 @@ the knext docs.
 `$KNEXT_TOKEN_ISSUER` (the zone), `$KNEXT_TOKEN_AUDIENCE` (this function), the RPC called
 (`method`), a 60 s lifetime with 5 s of skew, and, for an `AUTH_USER` RPC, a non-empty `sub`.
 Each RPC's `(knext.v1.auth)` option is listed in `src/auth/policy.rs` (a test holds it to
-`proto/`). With no JWKS mounted, the issuer or audience unset, or an RPC not in the table, every
-RPC but the health check is refused with `unauthenticated`. Handlers take the user from
+`proto/`). A key that is non-canonical or of small order is never trusted. With no JWKS
+mounted, a JWKS holding private key material, the issuer or audience unset, or an RPC not in the
+table, every RPC but the health check is refused with `unauthenticated`. Handlers take the user from
 `auth::Caller::of(&ctx)`, never from the request.
 
 The verifier is tested against the shared token vectors in

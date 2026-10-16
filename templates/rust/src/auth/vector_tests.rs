@@ -32,6 +32,7 @@ fn reason(err: &AuthError) -> &'static str {
         AuthError::WrongAudience => "wrong-audience",
         AuthError::WrongMethod => "wrong-method",
         AuthError::MissingSubject => "missing-subject",
+        AuthError::BadJwks => "bad-jwks",
         _ => "other",
     }
 }
@@ -110,6 +111,7 @@ fn shared_vector_reasons_are_all_mapped() {
         AuthError::WrongAudience,
         AuthError::WrongMethod,
         AuthError::MissingSubject,
+        AuthError::BadJwks,
     ];
     for r in v.reasons.iter().filter(|r| r.as_str() != "no-token") {
         assert!(
@@ -168,8 +170,8 @@ async fn shared_vectors() {
     }
     // A run that saw fewer cases proves nothing about the ones it missed.
     assert!(
-        accepted >= 7 && refused >= 36,
-        "ran {accepted} accepted and {refused} refused cases; want at least 7 and 36"
+        accepted >= 7 && refused >= 69,
+        "ran {accepted} accepted and {refused} refused cases; want at least 7 and 69"
     );
 }
 

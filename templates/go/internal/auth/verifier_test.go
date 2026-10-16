@@ -39,6 +39,7 @@ var reasonErr = map[string]error{
 	"wrong-audience":  auth.ErrWrongAudience,
 	"wrong-method":    auth.ErrWrongMethod,
 	"missing-subject": auth.ErrMissingSubject,
+	"bad-jwks":        auth.ErrBadJWKS,
 }
 
 var authOf = map[string]knextv1.Auth{
@@ -163,8 +164,8 @@ func TestSharedVectors(t *testing.T) {
 		})
 	}
 	// A run that saw fewer cases proves nothing about the ones it missed.
-	if accepted < 7 || refused < 36 {
-		t.Fatalf("ran %d accepted and %d refused cases; want at least 7 and 36", accepted, refused)
+	if accepted < 7 || refused < 69 {
+		t.Fatalf("ran %d accepted and %d refused cases; want at least 7 and 69", accepted, refused)
 	}
 }
 

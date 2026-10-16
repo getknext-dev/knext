@@ -22,9 +22,13 @@
  *       and AUTH_PUBLIC not demanding one.
  *   J*  the JWKS (src/auth/jwks.rs): kty, crv, kid derived from the key, a
  *       removed or unparseable JWKS not served from cache, the reload on
- *       change and on the interval, the bounded read, a set with no keys.
- *       (A key that is not 32 bytes cannot become a VerifyingKey at all: the
- *       type holds that check, so there is no row for it.)
+ *       change and on the interval, the bounded read, a set with no keys;
+ *       every usable key trusted (the rotation overlap), a set carrying
+ *       private key material refused whole (any member, not only d), and a
+ *       key that is non-canonical or of small order refused.
+ *       (A key that is not 32 bytes, or not on the curve, cannot become a
+ *       VerifyingKey at all: the type holds those checks, so there is no row
+ *       for them; the off-curve vector still runs.)
  *   V*  the verifier (src/auth.rs): issuer and audience configured, an RPC
  *       with no auth option refused, the verified caller replacing any other
  *       in the request.
@@ -343,6 +347,44 @@ const MUTATIONS = [
       '    let Some(entries) = set.get("keys").and_then(Value::as_array) else {\n        return Err(AuthError::BadJwks);\n    };\n',
     replacement:
       '    let empty = Vec::new();\n    let entries = set.get("keys").and_then(Value::as_array).unwrap_or(&empty);\n',
+  },
+  {
+    id: 'J10',
+    claim:
+      'only the first usable key of the JWKS is trusted (a previous-key token fails during the rotation overlap)',
+    subject: 'jwks',
+    anchor: '        keys.insert(kid.to_owned(), key);\n',
+    replacement: '        keys.insert(kid.to_owned(), key);\n        break;\n',
+  },
+  {
+    id: 'J11',
+    claim: 'a JWK Set carrying private key material is used, not refused',
+    subject: 'jwks',
+    anchor: '        .any(|k| PRIVATE_JWK_MEMBERS.iter().any(|m| k.get(m).is_some()))\n',
+    replacement:
+      '        .any(|k| PRIVATE_JWK_MEMBERS.iter().any(|m| k.get(m).is_some() && m.is_empty()))\n',
+  },
+  {
+    id: 'J12',
+    claim: 'only d counts as private key material (p, q, dp, dq, qi, oth, k pass)',
+    subject: 'jwks',
+    anchor:
+      'const PRIVATE_JWK_MEMBERS: [&str; 8] = ["d", "p", "q", "dp", "dq", "qi", "oth", "k"];\n',
+    replacement: 'const PRIVATE_JWK_MEMBERS: [&str; 1] = ["d"];\n',
+  },
+  {
+    id: 'J13',
+    claim: 'a non-canonical key encoding (y >= p) is reduced and trusted',
+    subject: 'jwks',
+    anchor: '        if key.to_edwards().compress().to_bytes() != raw {\n',
+    replacement: '        if key.to_edwards().compress().to_bytes() == [0; 32] {\n',
+  },
+  {
+    id: 'J14',
+    claim: 'a small-order key is trusted at parse (left to verify_strict, a different refusal)',
+    subject: 'jwks',
+    anchor: '        if key.is_weak() {\n',
+    replacement: '        if key.is_weak() && kid.is_empty() {\n',
   },
   // ── V: the verifier ───────────────────────────────────────────────────────
   {

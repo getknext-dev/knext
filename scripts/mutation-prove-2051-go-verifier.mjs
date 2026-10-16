@@ -23,7 +23,10 @@
  *       AUTH_PUBLIC not demanding one.
  *   J*  the JWKS (jwks.go): kty, crv, key length, kid derived from the key,
  *       a removed or unparseable JWKS not served from cache, the reload on
- *       change and on the interval, the bounded read, a set with no keys.
+ *       change and on the interval, the bounded read, a set with no keys;
+ *       every usable key trusted (the rotation overlap), a set carrying
+ *       private key material refused whole (any member, not only d), and a
+ *       key that is non-canonical, off the curve or of small order refused.
  *   V*  the verifier (verifier.go): issuer and audience configured, an RPC
  *       with no auth option refused, the option read from the contract, the
  *       procedure parse, the default policy.
@@ -366,6 +369,56 @@ const MUTATIONS = [
     subject: 'jwks',
     anchor: '\tif err := json.Unmarshal(data, &set); err != nil || set.Keys == nil {\n',
     replacement: '\tif err := json.Unmarshal(data, &set); err != nil {\n',
+  },
+  {
+    id: 'J11',
+    claim:
+      'only the first usable key of the JWKS is trusted (a previous-key token fails during the rotation overlap)',
+    subject: 'jwks',
+    anchor: '\t\tkeys[kid] = ed25519.PublicKey(raw)\n',
+    replacement: '\t\tkeys[kid] = ed25519.PublicKey(raw)\n\t\tbreak\n',
+  },
+  {
+    id: 'J12',
+    claim: 'a JWK Set carrying private key material is used, not refused',
+    subject: 'jwks',
+    anchor: '\t\t\tif _, ok := k[member]; ok {\n',
+    replacement: '\t\t\tif _, ok := k[member]; ok && member == "" {\n',
+  },
+  {
+    id: 'J13',
+    claim: 'only d counts as private key material (p, q, dp, dq, qi, oth, k pass)',
+    subject: 'jwks',
+    anchor: 'var privateJWKMembers = []string{"d", "p", "q", "dp", "dq", "qi", "oth", "k"}\n',
+    replacement: 'var privateJWKMembers = []string{"d"}\n',
+  },
+  {
+    id: 'J14',
+    claim: 'a non-canonical key encoding (y >= p) is reduced and trusted',
+    subject: 'jwks',
+    anchor: '\tif y.Cmp(fieldP) >= 0 {\n\t\treturn false\n\t}\n',
+    replacement: '\ty.Mod(y, fieldP)\n',
+  },
+  {
+    id: 'J15',
+    claim: 'a key off the curve is trusted',
+    subject: 'jwks',
+    anchor: '\tif x == nil {\n\t\treturn false\n\t}\n',
+    replacement: '\tif x == nil {\n\t\treturn true\n\t}\n',
+  },
+  {
+    id: 'J16',
+    claim: 'a small-order key is trusted (R = identity, S = 0 forges a token for the identity key)',
+    subject: 'jwks',
+    anchor: '\treturn !smallOrder(x, y)\n',
+    replacement: '\treturn true\n',
+  },
+  {
+    id: 'J17',
+    claim: 'the small-order test computes [4]A, not [8]A (the order-8 keys pass)',
+    subject: 'jwks',
+    anchor: '\tfor range 3 {\n',
+    replacement: '\tfor range 2 {\n',
   },
   // ── V: the verifier ───────────────────────────────────────────────────────
   {

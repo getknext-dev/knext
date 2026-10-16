@@ -91,15 +91,29 @@ fn read_at_most(path: &Path, limit: u64) -> Result<Vec<u8>, AuthError> {
     Ok(data)
 }
 
+/// JWK members that hold private or symmetric key material (RFC 7517, RFC
+/// 7518 §6.2.2, §6.3.2, §6.4). A published JWK Set holds public keys only.
+const PRIVATE_JWK_MEMBERS: [&str; 8] = ["d", "p", "q", "dp", "dq", "qi", "oth", "k"];
+
 /// The usable keys of an RFC 7517 JWK Set, by kid. A key is usable when it
 /// is an Ed25519 OKP key of 32 bytes whose kid is the one derived from it
-/// ([`key_id`]); any other entry is ignored, so a token naming it is refused
-/// as an unknown key. `alg` and `use` are informational.
+/// ([`key_id`]) and which is the canonical encoding of a point of the curve
+/// outside its small-order subgroup; any other entry is ignored, so a token
+/// naming it is refused as an unknown key. `alg` and `use` are
+/// informational. A set in which any JWK carries private key material is
+/// refused whole: whatever published it leaked a private key, and that must
+/// surface rather than be quietly skipped.
 fn parse(data: &[u8]) -> Result<HashMap<String, VerifyingKey>, AuthError> {
     let set: Value = serde_json::from_slice(data).map_err(|_| AuthError::BadJwks)?;
     let Some(entries) = set.get("keys").and_then(Value::as_array) else {
         return Err(AuthError::BadJwks);
     };
+    if entries
+        .iter()
+        .any(|k| PRIVATE_JWK_MEMBERS.iter().any(|m| k.get(m).is_some()))
+    {
+        return Err(AuthError::BadJwks);
+    }
     let mut keys = HashMap::new();
     for k in entries {
         let field = |name: &str| k.get(name).and_then(Value::as_str).unwrap_or("");
@@ -122,6 +136,15 @@ fn parse(data: &[u8]) -> Result<HashMap<String, VerifyingKey>, AuthError> {
         let Ok(key) = VerifyingKey::from_bytes(&raw) else {
             continue;
         };
+        // Decoding reduces y mod p: only the canonical encoding round-trips.
+        if key.to_edwards().compress().to_bytes() != raw {
+            continue;
+        }
+        // verify_strict refuses a small-order key too; refusing it here
+        // makes it an unknown key, as in every other verifier of the contract.
+        if key.is_weak() {
+            continue;
+        }
         keys.insert(kid.to_owned(), key);
     }
     Ok(keys)

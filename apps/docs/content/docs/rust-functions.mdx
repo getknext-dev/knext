@@ -84,7 +84,8 @@ is a JWT signed with Ed25519 (`alg` `EdDSA`), and the function checks:
 
 - **the signature**, against the zone's public keys, a JWK Set mounted as a volume at
   `/var/run/knext/jwks/jwks.json`. A token signed by any other key, another zone's included, is
-  refused.
+  refused. A key in the set that is not a valid Ed25519 public key (a non-canonical encoding, a
+  point off the curve, or a small-order point, which would accept forged signatures) is ignored.
 - **`iss` and `aud`**: the token must name the function's own zone and the function itself, as
   given by the function's `KNEXT_TOKEN_ISSUER` (`knext:zone:<namespace>/<zone>`) and
   `KNEXT_TOKEN_AUDIENCE` (`knext:fn:<namespace>/<function>`) environment variables.
@@ -104,6 +105,7 @@ It fails closed:
 |---|---|
 | No `Authorization` header, or not a `Bearer` token | refused, `unauthenticated` |
 | No public keys mounted for the zone | refused, `unauthenticated` |
+| The mounted key set holds private key material (`d`, `k` or an RSA private member) | refused, `unauthenticated` |
 | `KNEXT_TOKEN_ISSUER` or `KNEXT_TOKEN_AUDIENCE` not set | refused, `unauthenticated` |
 | A token that fails any check above | refused, `unauthenticated` |
 | An RPC that states no `(knext.v1.auth)` option | refused, `unauthenticated` |

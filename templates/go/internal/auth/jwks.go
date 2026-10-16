@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/big"
 	"os"
+	"slices"
 	"sync"
 	"time"
 )
@@ -73,16 +75,30 @@ func readAtMost(path string, limit int64) ([]byte, error) {
 	return data, nil
 }
 
+// privateJWKMembers hold private or symmetric key material (RFC 7517, RFC
+// 7518 §6.2.2, §6.3.2, §6.4). A published JWK Set holds public keys only.
+var privateJWKMembers = []string{"d", "p", "q", "dp", "dq", "qi", "oth", "k"}
+
 // parseJWKS returns the usable keys of an RFC 7517 JWK Set, by kid. A key is
 // usable when it is an Ed25519 OKP key of 32 bytes whose kid is the one
-// derived from it (keyID); any other entry is ignored, so a token naming it
-// is refused as an unknown key. alg and use are informational.
+// derived from it (keyID) and which is a strong point (strongKey); any other
+// entry is ignored, so a token naming it is refused as an unknown key. alg
+// and use are informational. A set in which any JWK carries private key
+// material is refused whole: whatever published it leaked a private key, and
+// that must surface rather than be quietly skipped.
 func parseJWKS(data []byte) (map[string]ed25519.PublicKey, error) {
 	var set struct {
 		Keys []map[string]json.RawMessage `json:"keys"`
 	}
 	if err := json.Unmarshal(data, &set); err != nil || set.Keys == nil {
 		return nil, fmt.Errorf("%w: not a JWK Set", ErrBadJWKS)
+	}
+	for _, k := range set.Keys {
+		for _, member := range privateJWKMembers {
+			if _, ok := k[member]; ok {
+				return nil, fmt.Errorf("%w: a JWK carries the private member %q", ErrBadJWKS, member)
+			}
+		}
 	}
 	keys := make(map[string]ed25519.PublicKey, len(set.Keys))
 	for _, k := range set.Keys {
@@ -100,9 +116,75 @@ func parseJWKS(data []byte) (map[string]ed25519.PublicKey, error) {
 		if kid != keyID(raw) {
 			continue
 		}
+		if !strongKey(raw) {
+			continue
+		}
 		keys[kid] = ed25519.PublicKey(raw)
 	}
 	return keys, nil
+}
+
+// edwards25519 over math/big, enough to vet a public key (RFC 8032 §5.1.3).
+// crypto/ed25519 verifies with any 32 bytes that decode, including a point of
+// small order, for which R = identity, S = 0 is a valid signature of many
+// messages (of every message, for the identity itself). Public keys are
+// public, so variable time is fine.
+var (
+	fieldP = new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 255), big.NewInt(19))
+	// curveD is -121665/121666 mod p.
+	curveD = new(big.Int).Mod(new(big.Int).Mul(big.NewInt(-121665),
+		new(big.Int).ModInverse(big.NewInt(121666), fieldP)), fieldP)
+)
+
+// strongKey reports whether raw is the canonical encoding of a point of the
+// curve outside its small-order subgroup: y < p, y on the curve, and [8]A is
+// not the identity. Which of the two x the sign bit picks does not matter
+// here: A and -A have the same order.
+func strongKey(raw []byte) bool {
+	be := slices.Clone(raw)
+	be[31] &= 0x7f
+	slices.Reverse(be)
+	y := new(big.Int).SetBytes(be)
+	if y.Cmp(fieldP) >= 0 {
+		return false
+	}
+	x := curveX(y)
+	if x == nil {
+		return false
+	}
+	return !smallOrder(x, y)
+}
+
+// curveX returns an x with (x, y) on the curve, -x^2 + y^2 = 1 + d x^2 y^2,
+// or nil when there is none.
+func curveX(y *big.Int) *big.Int {
+	yy := new(big.Int).Mul(y, y)
+	u := new(big.Int).Sub(yy, big.NewInt(1))
+	v := new(big.Int).Add(new(big.Int).Mul(curveD, yy), big.NewInt(1))
+	xx := new(big.Int).Mul(u, new(big.Int).ModInverse(v.Mod(v, fieldP), fieldP))
+	return new(big.Int).ModSqrt(xx.Mod(xx, fieldP), fieldP)
+}
+
+// smallOrder reports whether [8](x, y) is the identity (0, 1).
+func smallOrder(x, y *big.Int) bool {
+	for range 3 {
+		x, y = double(x, y)
+	}
+	return x.Sign() == 0 && y.Cmp(big.NewInt(1)) == 0
+}
+
+// double is the twisted Edwards addition law (a = -1) for (x, y) + (x, y):
+// complete on this curve, because d is not a square mod p.
+func double(x, y *big.Int) (*big.Int, *big.Int) {
+	mod := func(n *big.Int) *big.Int { return n.Mod(n, fieldP) }
+	xy := mod(new(big.Int).Mul(x, y))
+	t := mod(new(big.Int).Mul(curveD, new(big.Int).Mul(xy, xy)))
+	one := big.NewInt(1)
+	x3 := new(big.Int).Mul(new(big.Int).Lsh(xy, 1),
+		new(big.Int).ModInverse(mod(new(big.Int).Add(one, t)), fieldP))
+	y3 := new(big.Int).Mul(new(big.Int).Add(new(big.Int).Mul(y, y), new(big.Int).Mul(x, x)),
+		new(big.Int).ModInverse(mod(new(big.Int).Sub(one, t)), fieldP))
+	return mod(x3), mod(y3)
 }
 
 func jwkString(k map[string]json.RawMessage, name string) string {

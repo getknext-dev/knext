@@ -9,9 +9,10 @@ knext docs.
 JWK Set mounted at `/var/run/knext/jwks/jwks.json` (re-read on change and at least every 10 s)
 and held to `$KNEXT_TOKEN_ISSUER` (the zone), `$KNEXT_TOKEN_AUDIENCE` (this function), the RPC
 called (`method`), a 60 s lifetime with 5 s of skew, and, for an `AUTH_USER` RPC, a non-empty
-`sub`. Each RPC's `(knext.v1.auth)` option is read from the compiled contract. With no JWKS
-mounted, the issuer or audience unset, or an RPC that states no option, every RPC but the health
-check is refused with `unauthenticated`. Handlers take the user from `auth.CallerFrom(ctx)`,
+`sub`. Each RPC's `(knext.v1.auth)` option is read from the compiled contract. A key that is
+non-canonical, off the curve or of small order is never trusted. With no JWKS mounted, a JWKS
+holding private key material, the issuer or audience unset, or an RPC that states no option,
+every RPC but the health check is refused with `unauthenticated`. Handlers take the user from `auth.CallerFrom(ctx)`,
 never from the request.
 
 The verifier is tested against the shared token vectors in

@@ -72,7 +72,47 @@ export const REASONS = Object.freeze([
   'wrong-audience',
   'wrong-method',
   'missing-subject',
+  'bad-jwks',
 ] as const);
+
+/**
+ * Every Ed25519 encoding of a small-order point (the eight points whose order
+ * divides 8): the eight canonical encodings, then their non-canonical aliases
+ * (x = 0 with the sign bit set, and y + p). A verifier that trusts one of
+ * these as a public key accepts a forged token: with A of small order,
+ * R = identity and S = 0 satisfies the cofactorless equation for many
+ * messages, and for the identity for every message. The vectors test proves
+ * each is small-order and that the eight canonical points are all of them.
+ */
+export const SMALL_ORDER_KEYS = Object.freeze([
+  ['identity', '0100000000000000000000000000000000000000000000000000000000000000'],
+  ['order-2', 'ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f'],
+  ['order-4', '0000000000000000000000000000000000000000000000000000000000000000'],
+  ['order-4-negated', '0000000000000000000000000000000000000000000000000000000000000080'],
+  ['order-8', 'c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a'],
+  ['order-8-negated', 'c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa'],
+  ['order-8-other', '26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05'],
+  ['order-8-other-negated', '26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85'],
+  ['identity-x0-signed', '0100000000000000000000000000000000000000000000000000000000000080'],
+  ['order-2-x0-signed', 'ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff'],
+  ['order-4-y-plus-p', 'edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f'],
+  ['order-4-y-plus-p-signed', 'edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff'],
+  ['identity-y-plus-p', 'eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f'],
+  ['identity-y-plus-p-signed', 'eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff'],
+] as const);
+
+/** y = p + 3: a valid point of large order, encoded non-canonically (y >= p). */
+export const NON_CANONICAL_KEY = 'f0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f';
+
+/** y = 2: no point of the curve has it, so this encodes no public key at all. */
+export const OFF_CURVE_KEY = '0200000000000000000000000000000000000000000000000000000000000000';
+
+/**
+ * JWK members that hold private or symmetric key material (RFC 7517/7518).
+ * A JWK Set carrying any of them is refused whole: a published set must only
+ * ever hold public keys, so one that does not is an operator fault to surface.
+ */
+export const PRIVATE_JWK_MEMBERS = Object.freeze(['d', 'p', 'q', 'dp', 'dq', 'qi', 'oth', 'k']);
 
 /** Why a case is refused. */
 export type Reason = (typeof REASONS)[number];
@@ -105,9 +145,57 @@ function testKey(name: string): TestKey {
   const { x } = createPublicKey(privateKey).export({ format: 'jwk' });
   if (typeof x !== 'string') throw new Error(`no public key for ${name}`);
   const raw = Buffer.from(x, 'base64url');
-  // kid: base64url (no padding) of the first 16 bytes of SHA-256 over the raw 32-byte key.
-  const kid = b64url(createHash('sha256').update(raw).digest().subarray(0, 16));
-  return { name, label, seed: b64url(seed), x, kid, raw, privateKey };
+  return { name, label, seed: b64url(seed), x, kid: kidOf(raw), raw, privateKey };
+}
+
+// kid: base64url (no padding) of the first 16 bytes of SHA-256 over the raw 32-byte key.
+const kidOf = (raw: Uint8Array): string =>
+  b64url(createHash('sha256').update(raw).digest().subarray(0, 16));
+
+// The published shape of a raw 32-byte key that is not one of the test keys.
+const rawJwk = (raw: Buffer) => ({
+  kty: 'OKP',
+  crv: 'Ed25519',
+  x: b64url(raw),
+  kid: kidOf(raw),
+  alg: 'EdDSA',
+  use: 'sig',
+});
+
+// The order of the Ed25519 group: S and S + L are the same scalar mod L.
+const ORDER_L = (1n << 252n) + 27742317777372353535851937790883648493n;
+
+/** The signature with its scalar S replaced by S + L (little-endian, still 32 bytes). */
+function sPlusL(signature: string): string {
+  const bytes = Buffer.from(signature, 'base64url');
+  const s = BigInt(`0x${Buffer.from(bytes.subarray(32)).reverse().toString('hex')}`);
+  const malleated = Buffer.from((s + ORDER_L).toString(16).padStart(64, '0'), 'hex').reverse();
+  return b64url(Buffer.concat([bytes.subarray(0, 32), malleated]));
+}
+
+// R = the identity point, S = 0: the forgery a small-order public key admits.
+const FORGED_SIGNATURE = b64url(Buffer.concat([Buffer.from([1]), Buffer.alloc(63)]));
+
+// A private member on the key the set publishes (d: the test seed, as a
+// leaked Ed25519 private key would be) or on another JWK in the same set.
+function privateMemberSet(member: string, current: TestKey, previous: TestKey) {
+  const set = jwkSet(current, previous);
+  if (member === 'd') {
+    return {
+      keys: set.keys.map((k) => (k.kid === current.kid ? { ...k, d: current.seed } : k)),
+    };
+  }
+  const extra =
+    member === 'k'
+      ? { kty: 'oct', kid: 'test-oct', k: 'AQAB' }
+      : {
+          kty: 'RSA',
+          kid: 'test-rsa',
+          n: 'AQAB',
+          e: 'AQAB',
+          [member]: member === 'oth' ? [{ r: 'AQAB', d: 'AQAB', t: 'AQAB' }] : 'AQAB',
+        };
+  return { keys: [...set.keys, extra] };
 }
 
 // The shape the operator publishes: alg and use are informational, the verifier ignores them.
@@ -183,6 +271,17 @@ export function buildVectors() {
     'wrong-kty': { keys: [{ kty: 'EC', crv: 'Ed25519', kid: current.kid, x: current.x }] },
     'wrong-crv': { keys: [{ kty: 'OKP', crv: 'X25519', kid: current.kid, x: current.x }] },
     'short-x': { keys: [{ kty: 'OKP', crv: 'Ed25519', kid: shortKid, x: shortX }] },
+    'non-canonical-key': { keys: [rawJwk(Buffer.from(NON_CANONICAL_KEY, 'hex'))] },
+    'off-curve-key': { keys: [rawJwk(Buffer.from(OFF_CURVE_KEY, 'hex'))] },
+    ...Object.fromEntries(
+      SMALL_ORDER_KEYS.map(([label, hex]) => [
+        `small-order-${label}`,
+        { keys: [rawJwk(Buffer.from(hex, 'hex'))] },
+      ]),
+    ),
+    ...Object.fromEntries(
+      PRIVATE_JWK_MEMBERS.map((m) => [`private-${m}`, privateMemberSet(m, current, previous)]),
+    ),
   };
 
   const user = (key: TestKey, h: string, p: string) => ({
@@ -211,6 +310,12 @@ export function buildVectors() {
   const sigNonCanonical = [validUser[0], validUser[1], nonCanonical(validUser[2])];
   // The newline sits inside the payload segment; the signature covers it as received.
   const newline = `${validClaims.slice(0, 8)}\n${validClaims.slice(8)}`;
+  // A token naming a raw key, carrying the small-order forgery as its signature.
+  const forged = (hex: string) => [
+    encodeJSON(header(kidOf(Buffer.from(hex, 'hex')))),
+    validClaims,
+    FORGED_SIGNATURE,
+  ];
 
   const cases = [
     // ── accepted ─────────────────────────────────────────────────────────────
@@ -294,6 +399,16 @@ export function buildVectors() {
       ...reject('malformed'),
     },
     {
+      // The same duplicate, with the second name escaped: still the name "alg".
+      name: 'escaped-duplicate-header-alg',
+      ...user(
+        current,
+        encodeRaw(`{"alg":"none","\\u0061lg":"EdDSA","typ":"JWT","kid":"${current.kid}"}`),
+        validClaims,
+      ),
+      ...reject('malformed'),
+    },
+    {
       name: 'header-crit',
       ...user(...std(current, header(current.kid, { crit: ['exp'] }))),
       ...reject('malformed'),
@@ -319,6 +434,14 @@ export function buildVectors() {
       name: 'tampered-claims',
       ...user(...std(current)),
       jws: tampered,
+      ...reject('bad-signature'),
+    },
+    {
+      // S + L is the same scalar mod L: a verifier that reduces S accepts a
+      // second encoding of a valid signature (malleability).
+      name: 'signature-s-plus-l',
+      ...user(...std(current)),
+      jws: [validUser[0], validUser[1], sPlusL(validUser[2])],
       ...reject('bad-signature'),
     },
     {
@@ -372,6 +495,34 @@ export function buildVectors() {
       jwks: 'short-x',
       ...reject('unknown-kid'),
     },
+    {
+      name: 'jwks-non-canonical-key',
+      ...user(...std(current)),
+      jwks: 'non-canonical-key',
+      jws: forged(NON_CANONICAL_KEY),
+      ...reject('unknown-kid'),
+    },
+    {
+      name: 'jwks-off-curve-key',
+      ...user(...std(current)),
+      jwks: 'off-curve-key',
+      jws: forged(OFF_CURVE_KEY),
+      ...reject('unknown-kid'),
+    },
+    ...SMALL_ORDER_KEYS.map(([label, hex]) => ({
+      name: `jwks-small-order-key-${label}`,
+      ...user(...std(current)),
+      jwks: `small-order-${label}`,
+      jws: forged(hex),
+      ...reject('unknown-kid'),
+    })),
+    // ── refused: a JWK Set carrying private key material ────────────────────
+    ...PRIVATE_JWK_MEMBERS.map((m) => ({
+      name: `jwks-private-member-${m}`,
+      ...user(...std(current)),
+      jwks: `private-${m}`,
+      ...reject('bad-jwks'),
+    })),
     // ── refused: claims ──────────────────────────────────────────────────────
     {
       name: 'duplicate-claim-sub',
@@ -380,6 +531,17 @@ export function buildVectors() {
         validHeader,
         encodeRaw(
           `{"iss":"${ISSUER}","aud":"${AUDIENCE}","method":"${USER_METHOD}","sub":"${SUB}","sub":"admin","iat":${T0 - 10},"exp":${T0 + 50}}`,
+        ),
+      ),
+      ...reject('malformed'),
+    },
+    {
+      name: 'escaped-duplicate-claim-sub',
+      ...user(
+        current,
+        validHeader,
+        encodeRaw(
+          `{"iss":"${ISSUER}","aud":"${AUDIENCE}","method":"${USER_METHOD}","sub":"${SUB}","s\\u0075b":"admin","iat":${T0 - 10},"exp":${T0 + 50}}`,
         ),
       ),
       ...reject('malformed'),
