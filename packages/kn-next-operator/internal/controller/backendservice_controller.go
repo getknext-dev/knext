@@ -106,7 +106,13 @@ func (r *BackendServiceReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	// Deletion: take the Knative Service down, then release the object.
 	if !bs.DeletionTimestamp.IsZero() {
 		if controllerutil.ContainsFinalizer(bs, BackendServiceFinalizer) {
-			r.removeRendered(ctx, bs)
+			// Best effort, and it never blocks the delete: the children carry this
+			// object's controller ownerReference, so garbage collection removes
+			// whatever a failed delete leaves behind.
+			if rmErr := r.removeRendered(ctx, bs); rmErr != nil {
+				logger.Info("could not delete the function's Knative Service before release; "+
+					"garbage collection will", "error", rmErr.Error())
+			}
 			patch := client.MergeFrom(bs.DeepCopy())
 			controllerutil.RemoveFinalizer(bs, BackendServiceFinalizer)
 			if err := r.Patch(ctx, bs, patch); err != nil {
