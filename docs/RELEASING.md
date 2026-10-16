@@ -289,7 +289,10 @@ from git objects at the PR's **base** commit by `scripts/published-bytes-select-
    is still `v1.3.0-rc.10` — that rc's GA is already cut on this line, so there is no pending
    GA-vs-rc diff left to protect (and the diff itself would only ever reject the version pair
    `rc.10 -> 1.3.1` before comparing a byte). The check skips with the visible reason "has ended on
-   this line". A prerelease base, or a released base **below** the rc's base (a new rc cut ahead of
+   this line". "Released" is never decided from the version string alone: it also requires a
+   `v<version>` tag that is an ancestor of the base commit, so a merged Version PR whose publish has
+   not happened yet (version bumped, tag absent) stays guarded. A checkout without that tag (shallow,
+   tagless) is guarded too. A prerelease base, or a released base **below** the rc's base (a new rc cut ahead of
    its GA), stays guarded.
 
 A base on the credentialed line that is still in its rc window is unchanged: it still packs and

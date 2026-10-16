@@ -407,7 +407,11 @@ export function overrideMarkerIntroducedByPr(mergeBasePin, headPin, inheritedPin
  * marker is NOT honoured, a `proceed` carries `markerNote` saying why, so the
  * author is pointed at the right fix.
  *
- * @param {{ basePin: unknown, headPin: unknown, mergeBasePin?: unknown, inheritedPins?: readonly unknown[], changedFiles: string[], packageDirs: string[], rootInputFiles?: readonly string[], baseVersion?: string, now: Date }} input
+ * `baseReleaseTagged` (#2435): true only when the caller verified a `v<baseVersion>` tag that is an
+ * ancestor of the base commit. A version string alone never ends the window (a merged Version PR
+ * reads as released before the publish); default false = guarded, fail closed.
+ *
+ * @param {{ basePin: unknown, headPin: unknown, mergeBasePin?: unknown, inheritedPins?: readonly unknown[], changedFiles: string[], packageDirs: string[], rootInputFiles?: readonly string[], baseVersion?: string, baseReleaseTagged?: boolean, now: Date }} input
  * @returns {{ action: 'skip', reason: string } | { action: 'proceed', rcTag: string, reason: string, matchedFiles: string[], markerNote?: string }}
  */
 export function decidePublishedBytesScope({
@@ -419,6 +423,7 @@ export function decidePublishedBytesScope({
   packageDirs,
   rootInputFiles = ROOT_BUILD_INPUT_FILES,
   baseVersion,
+  baseReleaseTagged = false,
   now,
 }) {
   const rcTag =
@@ -454,9 +459,12 @@ export function decidePublishedBytesScope({
 
   // #2429 — a released X.Y.Z at or above the pinned rc's base means that rc's
   // GA is already cut on this line: the window this guard protects is over.
+  // #2435 — "released" needs an ancestor `vX.Y.Z` tag on the base, verified by
+  // the caller; the version string alone is true between a Version PR merging
+  // and the publish.
   // Re-pinning is not an escape (rcTag must stay X.Y.Z-rc.N) and a marker
   // would falsely claim a byte change, so the guard itself must say so.
-  if (releasedBaseSupersedesRc(baseVersion, rcTag)) {
+  if (baseReleaseTagged === true && releasedBaseSupersedesRc(baseVersion, rcTag)) {
     return {
       action: 'skip',
       reason:

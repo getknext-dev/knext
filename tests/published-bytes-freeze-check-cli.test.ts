@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
+  defaultBaseReleaseTagged,
   defaultRunDiff,
   defaultTagResolves,
   main,
@@ -538,6 +539,8 @@ describe('main — released-base scope (#2429)', () => {
       basePin: pin('v1.3.0-rc.10'),
       headPin: pin('v1.3.0-rc.10'),
       baseVersion: '1.3.1',
+      baseSha: 'abc123',
+      baseReleaseTagged: () => true,
       tagResolves: () => {
         touched = true;
         return true;
@@ -575,5 +578,114 @@ describe('main — released-base scope (#2429)', () => {
     });
     expect(r.code).toBe(1);
     expect(r.summary).toContain('FAIL');
+  });
+});
+
+describe('main — released base needs a verified release tag (#2435)', () => {
+  it('a version-string-only released base (no verified tag) is NOT skipped: the diff runs', () => {
+    const root = buildFixtureRoot();
+    const r = run(root, ['packages/kn-next/src/index.ts'], {
+      basePin: pin('v1.3.0-rc.10'),
+      headPin: pin('v1.3.0-rc.10'),
+      baseVersion: '1.3.1',
+      baseSha: 'abc123',
+      baseReleaseTagged: () => false,
+      runDiff: () => 1,
+    });
+    expect(r.code).toBe(1);
+    expect(r.summary).toContain('FAIL');
+  });
+
+  it('a missing baseSha fails closed (guard runs) even if the tag checker would say yes', () => {
+    const root = buildFixtureRoot();
+    const r = run(root, ['packages/kn-next/src/index.ts'], {
+      basePin: pin('v1.3.0-rc.10'),
+      headPin: pin('v1.3.0-rc.10'),
+      baseVersion: '1.3.1',
+      baseReleaseTagged: () => true,
+      runDiff: () => 1,
+    });
+    expect(r.code).toBe(1);
+  });
+});
+
+describe('defaultBaseReleaseTagged — real temp git repos (#2435)', () => {
+  const git = (cwd: string, ...a: string[]) =>
+    execFileSync(
+      'git',
+      [
+        '-c',
+        'user.email=t@t',
+        '-c',
+        'user.name=t',
+        '-c',
+        'commit.gpgsign=false',
+        '-c',
+        'tag.gpgsign=false',
+        ...a,
+      ],
+      { cwd, encoding: 'utf8' },
+    ).trim();
+  function repo() {
+    const dir = mkdtempSync(join(tmpdir(), 'pb-tag-repo-'));
+    registry.push(dir);
+    git(dir, 'init', '-q', '-b', 'main');
+    git(dir, 'commit', '-q', '--allow-empty', '-m', 'one');
+    const c1 = git(dir, 'rev-parse', 'HEAD');
+    git(dir, 'commit', '-q', '--allow-empty', '-m', 'two');
+    const c2 = git(dir, 'rev-parse', 'HEAD');
+    return { dir, c1, c2 };
+  }
+
+  it('tag vX.Y.Z present and an ancestor of the base: true (annotated or lightweight)', () => {
+    const { dir, c1, c2 } = repo();
+    git(dir, 'tag', 'v1.3.1', c1);
+    expect(defaultBaseReleaseTagged(dir, c2, '1.3.1')).toBe(true);
+    git(dir, 'tag', '-a', 'v1.3.2', c1, '-m', 'x');
+    expect(defaultBaseReleaseTagged(dir, c2, '1.3.2')).toBe(true);
+    expect(defaultBaseReleaseTagged(dir, c1, '1.3.1')).toBe(true);
+  });
+
+  it('tag absent (merged-but-unpublished Version PR): false', () => {
+    const { dir, c2 } = repo();
+    expect(defaultBaseReleaseTagged(dir, c2, '1.3.1')).toBe(false);
+  });
+
+  it('tag exists on a commit that is NOT an ancestor of the base: false', () => {
+    const { dir, c1 } = repo();
+    git(dir, 'switch', '-q', '-c', 'other');
+    git(dir, 'commit', '-q', '--allow-empty', '-m', 'side');
+    git(dir, 'tag', 'v1.3.1');
+    expect(defaultBaseReleaseTagged(dir, c1, '1.3.1')).toBe(false);
+  });
+
+  it('only the exact vX.Y.Z tag counts (a different version tag does not)', () => {
+    const { dir, c1, c2 } = repo();
+    git(dir, 'tag', 'v1.3.0', c1);
+    expect(defaultBaseReleaseTagged(dir, c2, '1.3.1')).toBe(false);
+  });
+
+  it('a prerelease/garbage version, unknown sha, or non-repo: false (fail closed)', () => {
+    const { dir, c1, c2 } = repo();
+    git(dir, 'tag', 'v1.3.1', c1);
+    expect(defaultBaseReleaseTagged(dir, c2, '1.3.1-rc.1')).toBe(false);
+    expect(defaultBaseReleaseTagged(dir, c2, undefined)).toBe(false);
+    expect(defaultBaseReleaseTagged(dir, 'deadbeef', '1.3.1')).toBe(false);
+    const notRepo = mkdtempSync(join(tmpdir(), 'pb-not-repo-'));
+    registry.push(notRepo);
+    expect(defaultBaseReleaseTagged(notRepo, c2, '1.3.1')).toBe(false);
+  });
+
+  it('shallow clone WITHOUT tags: false; after fetching tags + history: true', () => {
+    const { dir, c1, c2 } = repo();
+    git(dir, 'tag', 'v1.3.1', c1);
+    const clone = mkdtempSync(join(tmpdir(), 'pb-shallow-'));
+    registry.push(clone);
+    git(clone, 'init', '-q');
+    git(clone, 'remote', 'add', 'origin', `file://${dir}`);
+    git(clone, 'fetch', '-q', '--no-tags', '--depth=1', 'origin', c2);
+    expect(defaultBaseReleaseTagged(clone, c2, '1.3.1')).toBe(false);
+    git(clone, 'fetch', '-q', '--unshallow', '--tags', 'origin');
+    expect(defaultBaseReleaseTagged(clone, c2, '1.3.1')).toBe(true);
   });
 });

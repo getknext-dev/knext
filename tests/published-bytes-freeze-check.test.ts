@@ -590,7 +590,11 @@ describe('released-base scope (#2429): a GA at or above the pinned rc base ends 
   });
 
   it('SKIPS with a stated reason when the base is released 1.3.1 and the pin is still v1.3.0-rc.10 (the PR #2428 case)', () => {
-    const d = decidePublishedBytesScope({ ...args, baseVersion: '1.3.1' });
+    const d = decidePublishedBytesScope({
+      ...args,
+      baseVersion: '1.3.1',
+      baseReleaseTagged: true,
+    });
     expect(d.action).toBe('skip');
     expect(d.reason).toContain('1.3.1');
     expect(d.reason).toContain('v1.3.0-rc.10');
@@ -598,7 +602,16 @@ describe('released-base scope (#2429): a GA at or above the pinned rc base ends 
   });
 
   it('SKIPS when the base is the GA of the pinned rc itself (1.3.0 vs v1.3.0-rc.10: "at")', () => {
-    expect(decidePublishedBytesScope({ ...args, baseVersion: '1.3.0' }).action).toBe('skip');
+    expect(
+      decidePublishedBytesScope({ ...args, baseVersion: '1.3.0', baseReleaseTagged: true }).action,
+    ).toBe('skip');
+  });
+
+  it('#2435: a released-looking version WITHOUT a verified ancestor release tag stays guarded (merged-but-unpublished Version PR)', () => {
+    for (const baseReleaseTagged of [false, undefined]) {
+      const d = decidePublishedBytesScope({ ...args, baseVersion: '1.3.1', baseReleaseTagged });
+      expect(d.action).toBe('proceed');
+    }
   });
 
   it('still PROCEEDS when the base is still IN the window (base carries the rc version) and bytes change', () => {

@@ -233,8 +233,8 @@ const MUTATIONS = [
   {
     label: 'cli: stops passing baseVersion to the decision',
     subject: 'cli',
-    anchor: '    packageDirs,\n    baseVersion,\n    now,\n  });',
-    replacement: '    packageDirs,\n    now,\n  });',
+    anchor: '    packageDirs,\n    baseVersion,\n    baseReleaseTagged:',
+    replacement: '    packageDirs,\n    baseReleaseTagged:',
   },
   {
     label: 'select-script: a per-line pin absent at the base commit is not read from main',
@@ -279,7 +279,7 @@ const MUTATIONS = [
     label:
       'released-base: never skip a released base past the rc (the #2428 always-red job returns)',
     subject: 'lib',
-    anchor: '  if (releasedBaseSupersedesRc(baseVersion, rcTag)) {',
+    anchor: '  if (baseReleaseTagged === true && releasedBaseSupersedesRc(baseVersion, rcTag)) {',
     replacement: '  if (false) {',
   },
   {
@@ -302,9 +302,49 @@ const MUTATIONS = [
     anchor: '    if (diff !== 0) return diff > 0;\n  }\n  return true;',
     replacement: '    if (diff !== 0) return diff > 0;\n  }\n  return false;',
   },
+
+  // ── #2435: "released" needs an ancestor vX.Y.Z tag, not the version string ──
+  {
+    label: 'release-tag: the version string alone ends the window again (tag not required)',
+    subject: 'lib',
+    anchor: '  if (baseReleaseTagged === true && releasedBaseSupersedesRc(baseVersion, rcTag)) {',
+    replacement: '  if (releasedBaseSupersedesRc(baseVersion, rcTag)) {',
+  },
+  {
+    label: 'release-tag: ancestry is not checked (a tag on a non-ancestor commit counts)',
+    subject: 'cli',
+    anchor: "    git(['merge-base', '--is-ancestor', tagCommit, base]);\n",
+    replacement: '',
+  },
+  {
+    label: 'release-tag: a git failure (missing tag, shallow/tagless checkout) fails OPEN',
+    subject: 'cli',
+    anchor:
+      '    return true;\n  } catch {\n    return false;\n  }\n}\n\n// `./ga-tarball-diff.mjs`',
+    replacement:
+      '    return true;\n  } catch {\n    return true;\n  }\n}\n\n// `./ga-tarball-diff.mjs`',
+  },
+  {
+    label: 'release-tag: main() never consults the verifier (always treats the base as tagged)',
+    subject: 'cli',
+    anchor: '      baseReleaseTagged(repoRoot, baseSha, baseVersion),',
+    replacement: '      true,',
+  },
+  {
+    label: 'release-tag: main() verifies without a base SHA (missing SHA no longer fails closed)',
+    subject: 'cli',
+    anchor: '      baseSha !== undefined &&\n',
+    replacement: '',
+  },
+  {
+    label: 'release-tag: the workflow stops passing --base-sha to the check',
+    subject: 'workflow',
+    anchor: '"${BASE_VERSION}" \\\n            --base-sha "${BASE_SHA}"',
+    replacement: '"${BASE_VERSION}"',
+  },
 ];
 
-declareMutations(32);
+declareMutations(38);
 
 const RUNNER = resolveSpecRunner(REPO_ROOT, SPECS[0]);
 
@@ -317,8 +357,8 @@ function specPasses() {
   return r.status === 0;
 }
 
-if (MUTATIONS.length !== 32) {
-  console.error(`FATAL: declared 32 mutations, table has ${MUTATIONS.length}`);
+if (MUTATIONS.length !== 38) {
+  console.error(`FATAL: declared 38 mutations, table has ${MUTATIONS.length}`);
   process.exit(1);
 }
 
