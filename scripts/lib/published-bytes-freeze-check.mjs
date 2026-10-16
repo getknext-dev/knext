@@ -132,6 +132,41 @@ export function releaseLine(versionOrTag) {
   return m ? `${m[1]}.${m[2]}` : null;
 }
 
+const RELEASED_VERSION_RE = /^(\d+)\.(\d+)\.(\d+)$/;
+const RC_BASE_RE = /^v?(\d+)\.(\d+)\.(\d+)/;
+
+/**
+ * #2429 — has a RELEASED version on this line already superseded the pinned
+ * rc? True only when `baseVersion` is a plain `X.Y.Z` (no prerelease, no build
+ * metadata) that is numerically at or above the `X.Y.Z` base of `rcTag`
+ * (`v1.3.0-rc.10` -> `1.3.0`).
+ *
+ * Why that ends the window FOR THIS GUARD: the freeze exists so the EVENTUAL
+ * GA-vs-rc diff (`ga-tarball-diff.mjs`, which only pairs `X.Y.Z-rc.N` with
+ * `X.Y.Z` or a later `rc.M`) can still pass. Once the base already carries a
+ * released `X.Y.Z` >= the rc's base, that GA has been cut — there is no
+ * pending GA for this rc to protect, and every version pair the diff would
+ * form (`rc.10` -> `1.3.1`) is rejected before any byte is compared, so the
+ * guard could only ever go red. Anything else — a prerelease base, a released
+ * base BELOW the rc's base (a new rc cut ahead of its GA), or an unparseable
+ * value on either side — returns false and stays guarded (fail closed).
+ *
+ * @param {unknown} baseVersion
+ * @param {unknown} rcTag
+ * @returns {boolean}
+ */
+export function releasedBaseSupersedesRc(baseVersion, rcTag) {
+  if (typeof baseVersion !== 'string' || typeof rcTag !== 'string') return false;
+  const base = RELEASED_VERSION_RE.exec(baseVersion);
+  const rc = RC_BASE_RE.exec(rcTag);
+  if (!base || !rc) return false;
+  for (let i = 1; i <= 3; i++) {
+    const diff = Number(base[i]) - Number(rc[i]);
+    if (diff !== 0) return diff > 0;
+  }
+  return true;
+}
+
 /**
  * #2098 — which pin file applies to a PR, given the line its BASE commit
  * carries (`baseVersion`, the base's `@getknext/core` version) and the branch
@@ -380,6 +415,20 @@ export function decidePublishedBytesScope({
         `skipped: this PR's base carries line ${baseLine} but the pinned rcTag ${JSON.stringify(rcTag)} ` +
         `is on line ${pinLine} — the base is not the line whose bytes are credentialed ` +
         '(credential runs pack from the rc tag, not from this branch)',
+    };
+  }
+
+  // #2429 — a released X.Y.Z at or above the pinned rc's base means that rc's
+  // GA is already cut on this line: the window this guard protects is over.
+  // Re-pinning is not an escape (rcTag must stay X.Y.Z-rc.N) and a marker
+  // would falsely claim a byte change, so the guard itself must say so.
+  if (releasedBaseSupersedesRc(baseVersion, rcTag)) {
+    return {
+      action: 'skip',
+      reason:
+        `skipped: this PR's base is already released as ${baseVersion}, at or above the base of ` +
+        `the pinned rcTag ${JSON.stringify(rcTag)} — that rc's credential window (for this guard) ` +
+        'has ended on this line; there is no pending GA-vs-rc diff left to protect',
     };
   }
 
