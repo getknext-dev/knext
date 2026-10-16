@@ -752,7 +752,8 @@ knext add function orders --lang go
 It writes `proto/orders/v1/orders.proto` (one read and one write RPC to start from), the knext
 options contract that file imports, a `buf.yaml` if the app has none, and the function's entry in
 `knext.grpc.json`. The name is a lowercase DNS label; the zone reads the function's address from
-`ORDERS_SERVICE_URL` at call time. The function's own server project is not scaffolded yet.
+`ORDERS_SERVICE_URL` at call time. The function's own server project is not scaffolded yet; for Go,
+start from the [Go function template](/docs/go-functions).
 
 Two options at the top of every contract matter:
 
