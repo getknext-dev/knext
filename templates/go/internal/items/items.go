@@ -5,6 +5,9 @@
 // The store is an in-memory map, so it is per pod and lost on scale-to-zero.
 // A real function keeps its data in its zone's own database, read from the
 // DATABASE_URL its zone binds; it never reads another zone's database.
+//
+// A handler that acts for a user takes the user from auth.CallerFrom(ctx),
+// the subject of the zone's verified token, never from the request.
 package items
 
 import (

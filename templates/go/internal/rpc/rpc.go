@@ -81,6 +81,12 @@ type Config struct {
 	Addr string
 	// JWKSPath is the mounted JWKS file the token check reads.
 	JWKSPath string
+	// Issuer and Audience are what every token must name: the owning zone
+	// and this function. With either empty, every RPC but the health check
+	// is refused.
+	Issuer, Audience string
+	// Now is the token check's clock; it defaults to time.Now (tests set it).
+	Now func() time.Time
 	// Logger defaults to slog.Default().
 	Logger *slog.Logger
 	// TracerProvider defaults to the global OTel provider.
@@ -95,9 +101,16 @@ type Function struct {
 }
 
 // New assembles the function with the token check reading the JWKS mounted
-// at cfg.JWKSPath. This is the only constructor the binary uses.
+// at cfg.JWKSPath and holding tokens to cfg.Issuer and cfg.Audience, with each
+// RPC's auth option read from the compiled contract. This is the only
+// constructor the binary uses.
 func New(cfg Config) (*Function, error) {
-	return newFunction(cfg, auth.MountedJWKS(cfg.JWKSPath))
+	return newFunction(cfg, auth.NewVerifier(auth.Config{
+		JWKSPath: cfg.JWKSPath,
+		Issuer:   cfg.Issuer,
+		Audience: cfg.Audience,
+		Now:      cfg.Now,
+	}))
 }
 
 func newFunction(cfg Config, verifier auth.Verifier) (*Function, error) {

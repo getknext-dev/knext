@@ -23,11 +23,11 @@ const HEALTH_WATCH: &str = "/grpc.health.v1.Health/Watch";
 /// A verifier that records what it was asked and answers `result`.
 struct Recording {
     calls: AtomicUsize,
-    result: Result<(), AuthError>,
+    result: Result<Caller, AuthError>,
 }
 
 impl Recording {
-    fn new(result: Result<(), AuthError>) -> Arc<Self> {
+    fn new(result: Result<Caller, AuthError>) -> Arc<Self> {
         Arc::new(Self {
             calls: AtomicUsize::new(0),
             result,
@@ -36,7 +36,7 @@ impl Recording {
 }
 
 impl Verifier for Recording {
-    fn verify(&self, _token: &str, _procedure: &str) -> Result<(), AuthError> {
+    fn verify(&self, _token: &str, _procedure: &str) -> Result<Caller, AuthError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.result.clone()
     }
@@ -111,6 +111,16 @@ async fn call(
     code_of(resp).await
 }
 
+/// The binary's verifier (issuer and audience set) reading the JWKS at
+/// `path`.
+fn mounted(path: impl Into<PathBuf>) -> TokenVerifier {
+    token_verifier(TokenConfig::new(
+        path,
+        "knext:zone:shop/storefront",
+        "knext:fn:shop/orders",
+    ))
+}
+
 fn temp_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("knext-fn-auth-{}-{name}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
@@ -121,7 +131,7 @@ fn temp_dir(name: &str) -> PathBuf {
 #[tokio::test]
 async fn no_jwks_mounted_rejects_every_non_health_rpc() {
     let dir = temp_dir("no-jwks");
-    let verifier: Arc<dyn Verifier> = Arc::new(mounted_jwks(dir.join("jwks.json")));
+    let verifier: Arc<dyn Verifier> = Arc::new(mounted(dir.join("jwks.json")));
     let (mut svc, reached) = checked(Some(verifier as Arc<dyn Verifier>));
     for procedure in [GET_ITEM, PUT_ITEM, HEALTH_WATCH, "/no.such.Service/Method"] {
         for authorization in [None, Some("Bearer forged.jwt.token")] {
@@ -170,16 +180,18 @@ async fn health_check_is_exempt() {
     assert_eq!(reached.load(Ordering::SeqCst), 1);
 }
 
+/// A JWKS on disk does not open the door by itself: a token that does not
+/// verify against it is refused.
 #[tokio::test]
-async fn mounted_jwks_still_fails_closed_without_verification() {
+async fn mounted_jwks_refuses_a_token_that_does_not_verify() {
     let dir = temp_dir("mounted");
     let path = dir.join("jwks.json");
     fs::write(&path, br#"{"keys":[]}"#).unwrap();
-    let jwks = mounted_jwks(&path);
-    assert_eq!(
+    let jwks = mounted(&path);
+    assert!(matches!(
         jwks.verify("header.payload.signature", GET_ITEM),
-        Err(AuthError::VerificationUnavailable)
-    );
+        Err(AuthError::Malformed(_))
+    ));
     let (mut svc, reached) = checked(Some(Arc::new(jwks)));
     let code = call(
         &mut svc,
@@ -205,7 +217,7 @@ fn no_jwks_shapes() {
     ] {
         assert!(!jwks_mounted(&path), "{what} counts as mounted");
         assert_eq!(
-            mounted_jwks(&path).verify("a.b.c", PUT_ITEM),
+            mounted(&path).verify("a.b.c", PUT_ITEM),
             Err(AuthError::NoJwks),
             "{what}"
         );
@@ -217,7 +229,7 @@ fn no_jwks_shapes() {
 
 #[tokio::test]
 async fn missing_or_malformed_token_is_rejected_before_the_verifier() {
-    let verifier = Recording::new(Ok(()));
+    let verifier = Recording::new(Ok(Caller::default()));
     let (mut svc, reached) = checked(Some(verifier.clone() as Arc<dyn Verifier>));
     for authorization in [
         None,
@@ -265,7 +277,7 @@ async fn refused_token_is_rejected() {
 
 #[tokio::test]
 async fn accepted_token_reaches_the_service() {
-    let verifier = Recording::new(Ok(()));
+    let verifier = Recording::new(Ok(Caller::default()));
     let (mut svc, reached) = checked(Some(verifier.clone() as Arc<dyn Verifier>));
     let code = call(
         &mut svc,

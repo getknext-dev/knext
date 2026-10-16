@@ -19,21 +19,24 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
+	"google.golang.org/protobuf/reflect/protoregistry"
 
 	examplev1 "example.com/function/gen/example/v1"
 	"example.com/function/gen/example/v1/examplev1connect"
+	knextv1 "example.com/function/gen/knext/v1"
 	"example.com/function/internal/auth"
+	"example.com/function/internal/testvectors"
 )
 
 // acceptOnly is a test verifier that admits exactly one token. It exists only
 // in this test file: the binary's wiring (New) has no way to select it.
 type acceptOnly string
 
-func (a acceptOnly) Verify(_ context.Context, token, _ string) error {
+func (a acceptOnly) Verify(_ context.Context, token, _ string) (auth.Caller, error) {
 	if token == string(a) {
-		return nil
+		return auth.Caller{Subject: "test-user", Zone: "knext:zone:test/zone"}, nil
 	}
-	return errors.New("test verifier: token refused")
+	return auth.Caller{}, errors.New("test verifier: token refused")
 }
 
 // serve starts f on a loopback listener and returns its base URL.
@@ -266,6 +269,73 @@ func TestProductionWiringFailsClosedOnTheWire(t *testing.T) {
 	}
 	if scanned != 4 {
 		t.Fatalf("scanned %d procedures; want 4 (GetItem, PutItem, health Check and Watch)", scanned)
+	}
+}
+
+// The binary's wiring with a JWKS mounted and its issuer and audience set
+// (New, as main calls it): a zone token verifies on every protocol, against
+// the auth option the compiled contract states for the RPC, and anything else
+// is refused.
+func TestProductionWiringVerifiesZoneTokens(t *testing.T) {
+	v := testvectors.Load(t)
+	c := v.Case(t, "valid-user")
+	if c.Procedure != examplev1connect.ExampleServicePutItemProcedure {
+		t.Fatalf("valid-user calls %s; this test needs PutItem", c.Procedure)
+	}
+	path := filepath.Join(t.TempDir(), "jwks", "jwks.json")
+	v.WriteJWKS(t, path, c.JWKS)
+	f, err := New(Config{
+		JWKSPath: path,
+		Issuer:   v.Verifier.Issuer,
+		Audience: v.Verifier.Audience,
+		Now:      func() time.Time { return time.Unix(c.Now, 0) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := serve(t, f)
+	for _, p := range protocols() {
+		t.Run(p.name, func(t *testing.T) {
+			example := examplev1connect.NewExampleServiceClient(connect.NewClient(connecthttp.NewTransport(p.client, base, p.opts...)))
+			if _, err := example.PutItem(bearer(t, v.Token(t, "valid-user")), &examplev1.PutItemRequest{Id: "a", Value: "b"}); err != nil {
+				t.Fatalf("PutItem with a valid zone token: %v", err)
+			}
+			// The same token names PutItem, so it does not open GetItem.
+			_, err := example.GetItem(bearer(t, v.Token(t, "valid-user")), &examplev1.GetItemRequest{Id: "a"})
+			wantCode(t, "GetItem with a PutItem token", err, connect.CodeUnauthenticated)
+			for _, name := range []string{"user-empty-sub", "expired", "cross-zone", "wrong-audience"} {
+				_, err := example.PutItem(bearer(t, v.Token(t, name)), &examplev1.PutItemRequest{Id: "a"})
+				wantCode(t, "PutItem with "+name, err, connect.CodeUnauthenticated)
+			}
+			_, err = example.PutItem(t.Context(), &examplev1.PutItemRequest{Id: "a"})
+			wantCode(t, "PutItem with no token", err, connect.CodeUnauthenticated)
+		})
+	}
+}
+
+// Every RPC the function serves, except the exempt health check, states its
+// (knext.v1.auth) option in the compiled contract, so the verifier can bind a
+// token's user requirement to it. Scanned, so an RPC added later is covered.
+func TestEveryServedRPCStatesItsAuth(t *testing.T) {
+	f, err := New(Config{JWKSPath: absentJWKS(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lookup := auth.DescriptorAuth(protoregistry.GlobalFiles)
+	var stated int
+	for spec := range f.Specs() {
+		if strings.HasPrefix(spec.Procedure, "/grpc.health.v1.Health/") {
+			continue
+		}
+		switch got := lookup(spec.Procedure); got {
+		case knextv1.Auth_AUTH_USER, knextv1.Auth_AUTH_PUBLIC:
+			stated++
+		default:
+			t.Errorf("%s: (knext.v1.auth) = %v; every served RPC must state AUTH_USER or AUTH_PUBLIC", spec.Procedure, got)
+		}
+	}
+	if stated != 2 {
+		t.Fatalf("%d served RPCs state their auth; want 2 (GetItem, PutItem)", stated)
 	}
 }
 
