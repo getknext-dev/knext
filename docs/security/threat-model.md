@@ -150,13 +150,14 @@ it and create one with the same name:
 - The zone sends its users' identity tokens (`sub`) to that image on every call.
 
 So **`update` on `backendservices` in a namespace is equivalent to reading the database Secret of every
-zone that binds a function there, and to receiving those zones' users' tokens, until the zone pins the
-function's image.** Grant `update`/`patch` on `backendservices` (and `create`, since a delete followed by a
-create is the same act) only to principals who may already read those Secrets. A GitOps controller that
-applies the `BackendService` has this power by construction. This is not visible in the cluster's
-RBAC for Secrets, which is what makes it easy to miss in a review.
+zone that binds a function there, and to receiving those zones' users' tokens. This holds with or without
+the image pin below** (see "What it does not cover": the pin binds the image only). Grant
+`update`/`patch` on `backendservices` (and `create`, since a delete followed by a create is the same act)
+only to principals who may already read those Secrets. A GitOps controller that applies the
+`BackendService` has this power by construction. This is not visible in the cluster's RBAC for
+Secrets, which is what makes it easy to miss in a review.
 
-**The control.** The zone's optional pin (`NextApp.spec.backends[].image`, ADR-0004 Amendment 3, the
+**The partial control.** The zone's optional pin (`NextApp.spec.backends[].image`, ADR-0004 Amendment 3, the
 CLI's `backends[].image`): `"@sha256:"` plus 64 lowercase hex characters. With a pin, the operator
 renders the function only while the digest of its `spec.image` equals the pin exactly. Any other
 digest, an image with no digest, or an ambiguous reference refuses the function: `Ready=False`, reason
@@ -168,8 +169,17 @@ the refusal and cannot undo it.
 
 **What it does not cover.**
 
-- **No pin, no control.** The pin is optional (adding it to every existing zone would break them), so
-  a zone that does not set it keeps the name-only binding and the equivalence above holds in full.
+- **The pin binds the image content only; it does not close the exposure above.** The function's `env`,
+  `envFrom`, `volumes` and command/arguments are all in the `BackendService` spec and stay with whoever
+  can write it. Reviewer-verified on Node v25: a writer keeps the pinned digest and adds
+  `spec.env: NODE_OPTIONS=--import=data:...`; that code runs inside the pinned image with the zone's
+  db-bind mounted and its users' tokens arriving. The credential allowlist does not catch it (it checks
+  Secret and ConfigMap references, not what an env value makes the image execute). The real fix is
+  tracked in #2526 (P1, decided at sprint close). Until then the RBAC advice above applies to **every**
+  zone, pinned or not.
+
+- **No pin, no image control.** The pin is optional (adding it to every existing zone would break them), so
+  a zone that does not set it keeps the name-only binding for the image too.
   Check which zones pin: `kubectl get nextapps -o jsonpath` over `spec.backends[*].image`.
 - **Whoever can write the `NextApp` can move the pin.** That principal can already name a Secret in the
   zone's own `spec`, so nothing is lost; the pin narrows the set of people who can redirect the

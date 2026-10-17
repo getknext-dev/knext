@@ -619,6 +619,6 @@ func imagePinMismatch(pin, image string) string {
 		have = digest
 	}
 	return fmt.Sprintf("the zone pins this function's image to %s, but spec.image carries %s: "+
-		"nothing is rendered or mounted, so the zone's database Secret and keys reach no image it did not agree to. "+
+		"nothing is rendered or mounted until the image is the pinned one. "+
 		"Update the zone's backends[].image pin (or restore spec.image) so the two agree", pin, have)
 }

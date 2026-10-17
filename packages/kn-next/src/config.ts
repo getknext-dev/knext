@@ -291,11 +291,16 @@ export interface BackendBindingConfig {
      *
      * With a pin the operator runs the function only while its BackendService
      * image carries exactly that digest; any other image is refused (Ready
-     * False, reason `BindingImageMismatch`) and nothing is mounted into it, so
-     * a change to the BackendService alone cannot send your database Secret or
-     * your users' tokens to an image you did not agree to. Without one, any
-     * image the BackendService names is bound. Update the pin whenever you
-     * deploy a new function image.
+     * False, reason `BindingImageMismatch`) and nothing is mounted into it.
+     * Without one, any image the BackendService names is bound. Update the pin
+     * whenever you deploy a new function image.
+     *
+     * The pin binds the image content ONLY. The function's env, envFrom,
+     * volumes and command stay with whoever can write its BackendService, so
+     * they can still change what runs inside the pinned image, with your
+     * database Secret mounted. Grant update, patch and create on
+     * backendservices only to people who may already read that Secret, pinned
+     * or not.
      */
     image?: string;
 }

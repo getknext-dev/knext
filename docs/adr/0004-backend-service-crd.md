@@ -585,7 +585,8 @@ surface:
   `*-knext-signing-key` Secret is refused (suffix deny).
 - **Rotation bound.** See Decision 11 above: 120 s default, 90 s minimum, enforced at operator start.
 - **Open residuals, not decided here.** The binding matches names only, so a `BackendService` update
-  on a bound name re-opens the db-bind confused deputy (#2497, answered by Amendment 3 below); a transient Secret read error removes
+  on a bound name re-opens the db-bind confused deputy (#2497; Amendment 3 below narrows it to the
+  function's settings, it does not remove it, see its residual (e)); a transient Secret read error removes
   a running function's Knative Service (#2498); the grace period on zone-half loss is revisited before
   model backends ship (#2496).
 
@@ -659,10 +660,11 @@ the threat model did not say so. jev: the bypass is real, 0.77 yes.
    the two are applied together, a refusal with a cold start when applied apart, in either order. There
    is no list of allowed digests (jev 1.00 for a single pin): a list widens the trusted set and lets a
    stale digest stay trusted. The docs say to change both in one apply or one commit.
-7. **The residual is stated.** Until a zone sets the pin, `update` on `backendservices` is equivalent to
-   `get` on the zone's database Secret and to receiving its users' tokens. The threat model and the
-   zone-function docs say so, with the advice to grant `update`, `patch` and `create` on `backendservices`
-   only to principals who may already read that Secret. The pin does not stop the owner of the zone's
+7. **The residual is stated, and the pin does not remove it.** `update` on `backendservices` is
+   equivalent to `get` on the zone's database Secret and to receiving its users' tokens, **pinned or
+   not** (residual (e) below: the pin binds the image only). The threat model and the zone-function docs
+   say so, with the advice to grant `update`, `patch` and `create` on `backendservices` only to
+   principals who may already read that Secret. The pin does not stop the owner of the zone's
    `NextApp` (who can already name a Secret in the zone's own spec), does not say anything about
    provenance (a pinned malicious image is bound), and is optional by design: making it required would
    reject every `NextApp` written before.
@@ -671,10 +673,10 @@ the threat model did not say so. jev: the bypass is real, 0.77 yes.
 
 | Option | Pros | Cons |
 |---|---|---|
-| **A. Optional digest pin on `backends[]`, compared by the operator, not rendered (recommended)** | Closes both paths from the zone's side, where the consent already lives; additive; the CLI knows the digest; positive evidence, so it fits the revocation model; no new cluster writer | An opt-in: zones that do not set it keep the residual; a rotation is two writes |
+| **A. Optional digest pin on `backends[]`, compared by the operator, not rendered (recommended)** | Stops both image-swap paths from the zone's side, where the consent already lives; it does not stop a writer who keeps the pinned image and changes the function's settings (residual (e)); additive; the CLI knows the digest; positive evidence, so it fits the revocation model; no new cluster writer | An opt-in: zones that do not set it keep the residual; a rotation is two writes |
 | B. A ValidatingAdmissionPolicy restricting who may write `BackendService.spec.image` | No zone change | It restricts *by principal*, which knext cannot know (GitOps tools, CI and humans all legitimately write it); needs Kubernetes 1.30; silently fails open below that or when deleted (the same class as the write policy tracked in #2500); a second admission surface to maintain |
 | C. Docs only: "grant `update` together with Secret read" | No code | Not a control; does not survive a GitOps controller or a review |
-| D. A required pin | The residual is closed everywhere | Rejects every existing `NextApp` that binds a function; a breaking CRD change in a `v1alpha1` minor |
+| D. A required pin | The image swap is stopped everywhere | Rejects every existing `NextApp` that binds a function; a breaking CRD change in a `v1alpha1` minor |
 | E. A list of allowed digests | Overlap during a rotation | A stale digest stays trusted; widens the surface the pin exists to narrow |
 
 **Recommendation: A.** jev (2026-10-17): pin the digest 0.90 / a VAP restricting `spec.image` writers
@@ -696,9 +698,17 @@ the positive-evidence model of the revocation work, and the zone-env golden.
 - **No change to the zone's render.** Proved by a golden and by the zero-diff goldens that already cover a
   zone with no binding.
 - **A rotation costs a cold start when the two writes are apart.** Documented; not avoided by design.
-- **Residuals.** (a) Optional: unpinned zones keep the equivalence. (b) Anyone who can edit the zone's
-  `NextApp` can move the pin. (c) Content, not provenance. (d) The zone's own status does not show the
-  refusal. Each is stated in the threat model.
+- **Residuals.** (a) Optional: unpinned zones keep the name-only binding. (b) Anyone who can edit the
+  zone's `NextApp` can move the pin. (c) Content, not provenance. (d) The zone's own status does not
+  show the refusal. (e) **The pin binds the image only; it does not close the db-bind exposure.** The
+  `BackendService`'s `env`, `envFrom`, `volumes` and `command`/`args` stay with whoever can write it. A
+  writer who keeps the pinned digest and sets `spec.env` `NODE_OPTIONS=--import=data:...` (verified on
+  Node v25 by the PR review) runs code of their choosing inside the pinned image, with the zone's
+  database Secret mounted and its users' tokens arriving; the credential allowlist checks references,
+  not what a value makes the image execute. So `update`/`patch`/`create` on `backendservices` stays
+  equivalent to reading the zone's database Secret, pinned or not, and must be granted only to
+  principals who may already read it. The fix is #2526 (P1, decided at sprint close). Each is stated in
+  the threat model.
 
 ### Action items
 

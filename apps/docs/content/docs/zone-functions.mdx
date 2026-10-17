@@ -96,11 +96,11 @@ A binding matches **names**. Without more, anyone who may **update** the functio
 can change `spec.image` to an image they chose, and the operator runs that image with your zone's
 database Secret and key set mounted. Your zone then sends it your users' identity tokens. In other
 words, **permission to update `backendservices` is equivalent to permission to read your zone's
-database Secret**, until you pin the image. Until then, grant `update`, `patch` and `create` on
-`backendservices` only to people who may already read that Secret. A GitOps tool that applies the
-`BackendService` has this power too.
+database Secret**. Grant `update`, `patch` and `create` on `backendservices` only to people who may
+already read that Secret. A GitOps tool that applies the `BackendService` has this power too.
 
-To close it, put the function's image digest in the zone's entry. `knext deploy function` prints the
+Pinning the image narrows this, but does not remove it: see [What the pin does not cover](#what-the-pin-does-not-cover).
+To pin, put the function's image digest in the zone's entry. `knext deploy function` prints the
 exact entry after it applies the function:
 
 ```ts title="knext.config.ts (excerpt)"
@@ -142,10 +142,26 @@ GitOps tool). While only one of them has been written, the function is refused, 
 function is refused until you update the pin; if you update the pin first, it is refused until the
 function's image follows. Either order works; neither avoids that window.
 
-**Limits.** The pin is optional, so a zone that does not set it keeps the name-only binding. It says
-"this exact image", not "an image from a source you trust": pin only images you built and signed.
-Anyone who can edit your zone's `NextApp` can also change the pin, so keep write access to the zone
-as tight as access to its database Secret.
+#### What the pin does not cover
+
+**The pin binds the image content, and nothing else.** The function's other settings stay with
+whoever can write its `BackendService`: its `env`, `envFrom`, `volumes`, and its command and
+arguments. Someone who can write the `BackendService` can keep the pinned image and still change
+what runs inside it. For example, setting `NODE_OPTIONS=--import=...` in `env` makes a Node image
+run code of their choosing, with your zone's database Secret mounted and your users' tokens arriving.
+A pin does not stop that.
+
+So, even with a pin on every function: **grant `update`, `patch` and `create` on `backendservices`
+only to people who may already read your zone's database Secret.** The pin protects against a swapped
+image, not against a writer who changes the function's settings.
+
+Also:
+
+- The pin is optional, so a zone that does not set it keeps the name-only binding.
+- It says "this exact image", not "an image from a source you trust": pin only images you built and
+  signed.
+- Anyone who can edit your zone's `NextApp` can also change the pin, so keep write access to the zone
+  as tight as access to its database Secret.
 
 ## What the zone receives
 
@@ -191,8 +207,9 @@ zone's database. Two things keep it airtight:
   a more privileged identity; a stray one is rejected by a strict apply and has no effect otherwise.
 - **The binding is two-sided**, so someone who may create a `BackendService` but cannot edit the
   zone cannot get a Secret mounted into a pod they control. It matches names, though, so someone
-  who may *update* a function that is already bound can swap its image: [pin the
-  image](#pin-the-functions-image) to close that.
+  who may *update* a function that is already bound can swap its image, or change its `env` or
+  `envFrom`. [Pinning the image](#pin-the-functions-image) stops the image swap only; keep `update` on
+  `backendservices` limited to people who may read the zone's database Secret.
 
 **The namespace is the trust boundary.** Anyone who can write Secrets in the namespace can set the
 zone label. Put zones whose owners do not trust each other in separate namespaces.

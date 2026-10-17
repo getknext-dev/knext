@@ -101,10 +101,15 @@ spec:
                         BindingImageMismatch, and removes the Knative Service it rendered, so
                         the zone's database Secret and key set are mounted into nothing.
 
+                        The pin binds the image content ONLY. The BackendService's env, envFrom,
+                        volumes, command and args stay with whoever can write it, so a writer
+                        who keeps the pinned image can still change what runs inside it, with
+                        the zone's database Secret mounted and its users' tokens arriving. Grant
+                        update, patch and create on backendservices only to principals who may
+                        already read the zone's database Secret, pinned or not.
+
                         Unset keeps the name-only binding: any image the BackendService names
-                        is bound, which means a principal who may update backendservices can
-                        change what runs with the zone's database Secret and receives its
-                        users' tokens. Set it to close that.
+                        is bound.
 
                         The pin is never rendered into the zone's pod template: deploying a
                         new function image must not roll a zone revision. Rotate it by
