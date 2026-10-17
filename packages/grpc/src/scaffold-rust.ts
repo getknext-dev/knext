@@ -293,7 +293,7 @@ function generateWithBuf(stage: string): void {
     );
   }
   const cache = codegenCacheDir();
-  const install = spawnSync('bash', ['codegen.sh'], {
+  const install = spawnSync('./codegen.sh', [], {
     cwd: stage,
     env: { ...process.env, CODEGEN_ROOT: cache, CODEGEN_INSTALL_ONLY: '1' },
     encoding: 'utf8',
