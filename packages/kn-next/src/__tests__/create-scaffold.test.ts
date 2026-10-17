@@ -261,6 +261,40 @@ describe("knext create --builder vinext — next.config is minimal under vinext 
     });
 });
 
+describe("knext create (default standalone target) — next.config wires the Redis cache handler (#895/#2514)", () => {
+    // The #895 wiring assertions above run against the VINEXT scaffold
+    // (`next.config.ts.vinext.hbs`) only. Since #1342 made standalone the
+    // default build, the DEFAULT scaffold renders a different template
+    // (`next.config.ts.hbs`) that nothing here read — so deleting its
+    // `cacheHandler` line left this whole file green and the scaffold-cache
+    // prover (scripts/mutation-prove-scaffold-cache-handler.mjs) could not
+    // see red. These pin the default template's own copy of the wiring.
+    function defaultConfigCode(): string {
+        const { appDir } = scaffoldApp();
+        const src = readFileSync(join(appDir, "next.config.ts"), "utf8");
+        return src
+            .replace(/\/\*[\s\S]*?\*\//g, "")
+            .replace(/^\s*\/\/.*$/gm, "");
+    }
+
+    it("wires cacheHandler at the scaffolded cache-handler.js — a scaffold without one has NO ISR/data cache", () => {
+        const code = defaultConfigCode();
+        expect(code).toMatch(/cacheHandler\s*:/);
+        expect(code).toContain("cache-handler.js");
+    });
+
+    it("turns the per-pod in-memory cache off — memory caches diverge across Knative pods", () => {
+        expect(defaultConfigCode()).toMatch(/cacheMaxMemorySize:\s*0\b/);
+    });
+
+    it("still exports a NextConfig, so the wiring above is actually consumed by Next", () => {
+        const { appDir } = scaffoldApp();
+        const src = readFileSync(join(appDir, "next.config.ts"), "utf8");
+        expect(src).toMatch(/NextConfig/);
+        expect(src).toMatch(/export default nextConfig/);
+    });
+});
+
 describe("knext create — graduated per-app guards ship with the app (#344/#408)", () => {
     it("ships the edge-safety guard, which still applies", () => {
         // #342 is a Next-level concern (instrumentation compiled for BOTH the
