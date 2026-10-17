@@ -239,8 +239,8 @@ const MUTATIONS = [
 
 declareMutations(19);
 
-if (MUTATIONS.length !== 17) {
-  console.error(`FATAL: declared 17 mutations, table has ${MUTATIONS.length}`);
+if (MUTATIONS.length !== 19) {
+  console.error(`FATAL: declared 19 mutations, table has ${MUTATIONS.length}`);
   process.exit(1);
 }
 

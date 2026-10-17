@@ -200,9 +200,18 @@ const MUTATIONS = [
   {
     id: 'W19',
     subject: 'wf',
-    claim: 'every cargo run does a cold dependency build (no shared target dir per leg)',
-    anchor: '          CARGO_TARGET_DIR: ${{ runner.temp }}/cargo-target',
-    replacement: '          CARGO_HOME_UNUSED: 1',
+    claim: 'the opt-in per-leg cargo target dir is gone',
+    anchor: '          KNEXT_LANE_CARGO_TARGET_DIR: ${{ runner.temp }}/cargo-target',
+    replacement: '          KNEXT_LANE_UNUSED: 1',
+    validate: parses,
+  },
+  {
+    id: 'W20',
+    subject: 'wf',
+    claim: 'the cargo target dir goes lane-wide (measured to break knext-ffi-crates)',
+    anchor: '          KNEXT_LANE_CARGO_TARGET_DIR: ${{ runner.temp }}/cargo-target',
+    replacement:
+      '          KNEXT_LANE_CARGO_TARGET_DIR: ${{ runner.temp }}/cargo-target\n          CARGO_TARGET_DIR: ${{ runner.temp }}/cargo-target',
     validate: parses,
   },
   // ── the library ───────────────────────────────────────────────────────────
