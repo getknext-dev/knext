@@ -54,9 +54,13 @@ Three guards stand between the registry and the tree. Know them before you add o
   is required, at most 180 days out), after trying to bump.
 - **Release age.** `scripts/release-age-gate.mjs` fails a PR whose added or changed lockfile entries
   (npm, crates.io, Go proxy) were published less than the bunfig quarantine ago, judged from the
-  registry's own publish time; an unreachable registry fails it too. If a fresh release truly cannot
-  wait, record a scoped entry (ecosystem, package, exact version, `expires` within 14 days) in
-  `security/release-age-exceptions.json` and say why in the PR.
+  registry's own publish time; an unreachable registry fails it too. An added or changed entry that
+  does not resolve to a public-registry version at all (a git or tarball dependency, a package on
+  another registry, a Cargo `git+` source, a go.mod `replace` to a module) fails as well, because it
+  has no publish time to check; a `replace` to a module is aged at the replacement version. If a
+  fresh release truly cannot wait, record a scoped entry (ecosystem, package, exact version,
+  `expires` within 14 days) in `security/release-age-exceptions.json` and say why in the PR; for an
+  unresolved source the entry names the exact source spec and may run up to 180 days.
 - **Install scripts.** `bun install` runs a dependency's lifecycle script only if it is in the root
   `trustedDependencies` or on bun's built-in default list, which cannot be switched off. If
   `tests/bun-install-scripts.test.ts` goes red on a new dependency, read its script, then add it to
