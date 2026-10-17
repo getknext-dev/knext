@@ -18,28 +18,20 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import {
-  cpSync,
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readdirSync,
-  readFileSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from 'node:fs';
-import { tmpdir } from 'node:os';
-import { dirname, join, relative, resolve } from 'node:path';
+import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { runBuf } from './buf';
 import { GrpcUsageError } from './config';
+import {
+  isExcludedBy,
+  resolveLangTemplateDir,
+  type StagedFunction,
+  stageProject,
+  type TemplateExclude,
+  walkFiles,
+} from './scaffold-template';
 
-export interface TemplateExclude {
-  /** A file, or a directory (everything under it), relative to the template root. */
-  readonly path: string;
-  readonly why: string;
-}
+export type { TemplateExclude };
 
 /** Template paths that are deliberately not copied. Counted by a test. */
 export const GO_TEMPLATE_EXCLUDES: readonly TemplateExclude[] = [
@@ -62,51 +54,24 @@ export const GO_TEMPLATE_EXCLUDES: readonly TemplateExclude[] = [
 ];
 
 export function isExcluded(rel: string): boolean {
-  return GO_TEMPLATE_EXCLUDES.some((e) => rel === e.path || rel.startsWith(`${e.path}/`));
+  return isExcludedBy(GO_TEMPLATE_EXCLUDES, rel);
 }
 
-/**
- * Which `templates/go` a run scaffolds from, by an explicit rule rather than
- * "whichever exists". Run from source (a `.ts` module: tests, the in-repo CLI),
- * the repository's template is the truth, and the gitignored package copy
- * `build` leaves behind is stale by construction. Run from the built package
- * (`dist/*.js`), the copy packed beside `dist/` is the only one there is.
- */
+/** Which `templates/go` a run scaffolds from (see {@link resolveLangTemplateDir}). */
 export function resolveTemplateDir(
   moduleFile: string,
   exists: (path: string) => boolean = existsSync,
 ): string {
-  const here = dirname(moduleFile);
-  const fromSource = moduleFile.endsWith('.ts');
-  const dir = fromSource
-    ? join(resolve(here, '..', '..', '..'), 'templates', 'go')
-    : join(resolve(here, '..'), 'templates', 'go');
-  if (!exists(join(dir, 'go.mod'))) {
-    throw new Error(`the Go function template is not available in this install (looked in ${dir})`);
-  }
-  return dir;
+  return resolveLangTemplateDir('go', 'go.mod', moduleFile, exists);
 }
 
 export function goTemplateDir(): string {
   return resolveTemplateDir(fileURLToPath(import.meta.url));
 }
 
-function walk(dir: string): string[] {
-  const out: string[] = [];
-  const rec = (d: string) => {
-    for (const name of readdirSync(d).sort()) {
-      const p = join(d, name);
-      if (statSync(p).isDirectory()) rec(p);
-      else out.push(relative(dir, p).split('\\').join('/'));
-    }
-  };
-  rec(dir);
-  return out;
-}
-
 /** Every template file that is copied: all of them minus the exclude list. */
 export function goTemplateFiles(dir: string = goTemplateDir()): string[] {
-  return walk(dir).filter((f) => !isExcluded(f));
+  return walkFiles(dir, GO_TEMPLATE_EXCLUDES);
 }
 
 /** The relative paths the scaffold writes from the template (before gen/ and proto/). */
@@ -176,21 +141,12 @@ function generateWithBuf(stage: string): void {
   }
 }
 
-export interface StagedGoFunction {
-  /** The finished project, in a temporary directory. */
-  readonly dir: string;
-  /** Its files, relative to `dir`. */
-  readonly files: readonly string[];
-  /** Move the project to `target`, then drop the staging directory. */
-  install(target: string): void;
-  /** Drop the staging directory (idempotent). */
-  dispose(): void;
-}
+export type StagedGoFunction = StagedFunction;
 
 /**
- * Build the function project in a staging directory and generate its Go code.
- * Nothing outside the staging directory is touched; the caller installs it
- * last, after every other write has succeeded.
+ * Build the Go function project in a staging directory and generate its Go
+ * code. Nothing outside the staging directory is touched; the caller installs
+ * it last, after every other write has succeeded.
  */
 export function stageGoFunction(
   s: GoScaffold,
@@ -198,34 +154,14 @@ export function stageGoFunction(
   generate?: (stageDir: string) => void,
 ): StagedGoFunction {
   const template = templateDir ?? goTemplateDir();
-  const stage = mkdtempSync(join(tmpdir(), 'knext-go-function-'));
-  const dispose = () => rmSync(stage, { recursive: true, force: true });
-  try {
-    for (const rel of goTemplateFiles(template)) {
-      const dest = join(stage, rel);
-      mkdirSync(dirname(dest), { recursive: true });
-      writeFileSync(dest, substitute(readFileSync(join(template, rel), 'utf8'), s));
-    }
-    const protoDir = join(stage, 'proto');
-    mkdirSync(join(protoDir, s.pkg, 'v1'), { recursive: true });
-    mkdirSync(join(protoDir, 'knext', 'v1'), { recursive: true });
-    writeFileSync(join(protoDir, s.pkg, 'v1', `${s.pkg}.proto`), s.contract);
-    writeFileSync(join(protoDir, 'knext', 'v1', 'options.proto'), s.options);
-
-    if (generate) generate(stage);
-    else generateWithBuf(stage);
-    return {
-      dir: stage,
-      files: walk(stage),
-      install(target) {
-        mkdirSync(dirname(target), { recursive: true });
-        cpSync(stage, target, { recursive: true });
-        dispose();
-      },
-      dispose,
-    };
-  } catch (err) {
-    dispose();
-    throw err;
-  }
+  return stageProject({
+    prefix: 'knext-go-function-',
+    pkg: s.pkg,
+    contract: s.contract,
+    options: s.options,
+    template,
+    files: goTemplateFiles(template),
+    transform: (_rel, text) => substitute(text, s),
+    generate: generate ?? generateWithBuf,
+  });
 }

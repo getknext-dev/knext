@@ -24,6 +24,13 @@ path = "e2e/e2e.rs"
 required-features = ["e2e"]
 
 [features]
+# The tests signed against the example service and read from the knext
+# repository (src/testvectors.rs, src/auth/vector_tests.rs, the wiring test in
+# src/rpc/tests.rs). On here, in this template; `knext add function` writes a
+# copy without those files and with this default off, where the feature must
+# stay off (there is nothing for it to compile).
+default = ["shared-vectors"]
+shared-vectors = []
 e2e = []
 
 [dependencies]

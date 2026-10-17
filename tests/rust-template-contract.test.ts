@@ -22,7 +22,7 @@
  */
 
 import { describe, expect, it } from 'bun:test';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parse } from 'yaml';
 import { contractFor, packagedOptionsProto } from '../packages/grpc/src/add-function';
@@ -321,5 +321,79 @@ describe('the template workflow scans, gates and holds no credential', () => {
     expect(image.needs).toEqual(['check']);
     expect((wf.jobs['kind-e2e'] as Job).needs).toEqual(['check']);
     expect(runs('kind-e2e')).toContain('templates/rust/e2e/kind-e2e.sh');
+  });
+});
+
+describe('`knext add function --lang rust` copies the template, and this workflow gates the copy', () => {
+  const wf = parse(WORKFLOW_TEXT) as {
+    on: { pull_request: { paths: string[] }; push: { paths: string[] } };
+    jobs: Record<string, Job>;
+  };
+  const check = wf.jobs.check as Job;
+  const stepIndex = (pred: (s: Step) => boolean) => check.steps.findIndex(pred);
+
+  it('the check job builds, lints and tests a freshly scaffolded function, outside the template directory', () => {
+    const i = stepIndex((s) => (s.run ?? '').includes('add function orders --lang rust'));
+    expect(i, 'no scaffold step in the check job').toBeGreaterThanOrEqual(0);
+    const step = check.steps[i] as Step & {
+      'working-directory'?: string;
+      env?: Record<string, string>;
+    };
+    const run = step.run ?? '';
+    expect(run).toContain('set -euo pipefail');
+    expect(run).toContain('packages/grpc/scripts/knext-grpc.ts');
+    expect(run).toContain('cargo build --locked --all-targets');
+    expect(run).toContain('cargo clippy --all-targets --features e2e --locked -- -D warnings');
+    expect(run).toContain('cargo test --locked');
+    expect(run, 'stderr must not be discarded').not.toContain('2>/dev/null');
+    // The job defaults to templates/rust; a scaffold run from there would not be a copy.
+    expect(step['working-directory']).toBe('.');
+    // It generates with the plugins the drift check installed, not a second install.
+    expect(step.env?.KNEXT_RUST_CODEGEN_DIR).toBe(
+      '${{ github.workspace }}/templates/rust/.codegen',
+    );
+    const drift = stepIndex((s) => (s.run ?? '').includes('./codegen.sh'));
+    expect(drift).toBeGreaterThanOrEqual(0);
+    expect(i, 'the scaffold step must follow the codegen step').toBeGreaterThan(drift);
+  });
+
+  const SCAFFOLD_PATHS = [
+    'templates/rust/**',
+    'packages/grpc/src/add-function.ts',
+    'packages/grpc/src/scaffold-rust.ts',
+    'packages/grpc/src/scaffold-template.ts',
+    'packages/grpc/src/cli.ts',
+    'packages/grpc/scripts/copy-templates.mjs',
+    'packages/grpc/scripts/knext-grpc.ts',
+    'packages/grpc/src/__tests__/add-function-rust.test.ts',
+    'packages/grpc/turbo.json',
+  ];
+  it.each([
+    'pull_request',
+    'push',
+  ] as const)('a change to the scaffold code re-runs the workflow on %s', (event) => {
+    for (const path of SCAFFOLD_PATHS) {
+      expect(wf.on[event].paths, `${event} paths miss ${path}`).toContain(path);
+    }
+  });
+
+  it('every path the filter names exists (a renamed file must not leave a dead filter)', () => {
+    for (const path of SCAFFOLD_PATHS) {
+      if (path.endsWith('/**')) continue;
+      expect(existsSync(resolve(REPO_ROOT, path)), `${path} does not exist`).toBe(true);
+    }
+  });
+
+  it('the template keeps the tests the scaffold drops: the feature is on by default here', () => {
+    expect(read('Cargo.toml')).toContain('default = ["shared-vectors"]');
+    expect(read('src/lib.rs')).toContain(
+      '#[cfg(all(test, feature = "shared-vectors"))]\nmod testvectors;',
+    );
+    expect(read('src/auth.rs')).toContain(
+      '#[cfg(all(test, feature = "shared-vectors"))]\nmod vector_tests;',
+    );
+    expect(read('src/rpc/tests.rs')).toContain(
+      '#[cfg(feature = "shared-vectors")]\n#[tokio::test]\nasync fn production_wiring_verifies_zone_tokens',
+    );
   });
 });

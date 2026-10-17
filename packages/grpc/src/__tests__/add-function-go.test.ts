@@ -335,7 +335,15 @@ describe('a failure at any step leaves the app as it was, and a rerun works', ()
 
   it('restores an existing knext.grpc.json byte for byte when install fails', () => {
     const app = emptyDir('go-fail-restore');
-    expect(addFunction({ cwd: app, name: 'first', lang: 'rust', io: capture().io })).toBe(0);
+    expect(
+      addFunction({
+        cwd: app,
+        name: 'first',
+        lang: 'rust',
+        serverProject: false,
+        io: capture().io,
+      }),
+    ).toBe(0);
     const before = walk(app).map((f) => [f, readFileSync(join(app, f), 'utf8')]);
     expect(() =>
       addFunction({

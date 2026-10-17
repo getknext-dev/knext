@@ -188,6 +188,7 @@ async fn production_wiring_fails_closed_on_the_wire() {
 /// The production constructor with a JWKS mounted and its issuer and
 /// audience set: a zone token verifies on every protocol, against the auth
 /// option the contract states for the RPC, and anything else is refused.
+#[cfg(feature = "shared-vectors")]
 #[tokio::test]
 async fn production_wiring_verifies_zone_tokens() {
     let v = crate::testvectors::load();

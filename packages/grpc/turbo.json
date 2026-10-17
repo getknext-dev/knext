@@ -3,7 +3,11 @@
   "extends": ["//"],
   "tasks": {
     "build": {
-      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/templates/go/**"],
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/templates/go/**",
+        "$TURBO_ROOT$/templates/rust/**"
+      ],
       "outputs": ["$TURBO_EXTENDS$", "templates/**"]
     }
   }

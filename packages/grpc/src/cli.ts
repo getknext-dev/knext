@@ -52,9 +52,10 @@ const ADD_HELP = `knext add function — add a function's contract to this zone 
 
 Usage: knext add function <name> --lang go|rust [--module <go-module-path>]
 
-For --lang go it also copies the Go function template to functions/<name>/ (the
+It also copies the function template for the language to functions/<name>/ (the
 token-verifying server, health check and Dockerfile), renamed to the function
-and with its Go code generated; this needs the Go toolchain on PATH.
+and with its code generated; this needs the Go toolchain (--lang go) or the Rust
+toolchain (--lang rust) on PATH.
 
 Writes proto/<name>/v1/<name>.proto (one read and one write RPC to start
 from), the knext options contract it imports, a buf.yaml if there is none, and
