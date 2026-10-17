@@ -296,10 +296,18 @@ jobs:
       # must see only what a prover left behind). 4800000 ms = 80 minutes per
       # prover: above the slowest prover's measured/estimated cost (~55 minutes,
       # `empty-dir-guard`), below the leg's ceiling.
+      #
+      # CARGO_TARGET_DIR: the cargo-driven provers (`knext-ffi-crates`,
+      # `rust-template-auth`, and the Rust scaffold prover's ~20 runs) otherwise
+      # each do a COLD build of the whole dependency tree in a fresh `target/`
+      # (3+ minutes a run). One target dir per leg, OUTSIDE the tree, lets later
+      # runs reuse it. Cargo fingerprints by source content/mtime, so a mutated
+      # source rebuilds; the harness restores bytes, which also rebuilds.
       - name: Run this shard's mutation provers (FAIL on exit code, count mismatch OR timeout)
         env:
           KNEXT_REDIS_LIVE_URL: redis://127.0.0.1:6379
           KNEXT_PROVER_TIMEOUT_MS: 4800000
+          CARGO_TARGET_DIR: ${{ runner.temp }}/cargo-target
           PROVER_LANE_REF: ${{ matrix.ref }}
           PROVER_LANE_SHA: ${{ matrix.sha }}
         run: >-
