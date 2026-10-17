@@ -253,6 +253,11 @@ describe('evaluate', () => {
 });
 
 describe('loadAllowlist', () => {
+  it('rejects a justification that is only a token word', () => {
+    expect(() =>
+      loadAllowlist({ allow: [{ id: 'X', justification: 'fine', added: '2026-10-01' }] }, TODAY),
+    ).toThrow(/justification/);
+  });
   it('rejects an entry with no justification, no date or a bad date', () => {
     expect(() => loadAllowlist({ allow: [{ id: 'X', added: '2026-10-01' }] }, TODAY)).toThrow(
       /justification/,
