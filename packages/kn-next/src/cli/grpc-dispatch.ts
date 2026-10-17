@@ -22,6 +22,14 @@ import { createRequire } from "node:module";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { coreVersion } from "./core-version";
+import { runInherit } from "./exec";
+import { captureKubectl } from "./schema/kubectl-capture";
+import {
+    type KubectlCapture,
+    type KubectlResult,
+    preflightCRSchema,
+} from "./schema/preflight";
+import { withKubeContext } from "./shared";
 
 /** The package that provides the verbs below. */
 export const GRPC_PACKAGE = "@getknext/grpc";
@@ -32,13 +40,83 @@ export const GRPC_VERBS: ReadonlySet<string> = new Set(["generate", "add"]);
 /** The module shape this core knows how to call. */
 const SUPPORTED_PROTOCOL = 1;
 
+/**
+ * The cluster seam `knext deploy function` runs on. Core owns the kubectl
+ * boundary; the package builds the `BackendService` and decides the order
+ * (preflight, then a strict apply) but never spawns anything itself.
+ * Structurally typed: core does not import the package's types.
+ */
+export interface DeployHost {
+    preflight(args: {
+        readonly crPath: string;
+        readonly namespace: string;
+        readonly context?: string;
+    }): {
+        readonly verdict: "ok" | "skew" | "blocked";
+        readonly reason: string;
+        readonly unknownFields: readonly string[];
+        readonly stderr: string;
+    };
+    run(argv: readonly string[], context?: string): void;
+}
+
 /** What core calls on `@getknext/grpc/cli`. */
 export interface GrpcCliModule {
     readonly DISPATCH_PROTOCOL: number;
     readonly GRPC_VERSION: string;
     readonly CORE_PEER_RANGE: string;
     helpText(verb: string): string;
-    run(verb: string, argv: readonly string[]): Promise<number>;
+    run(
+        verb: string,
+        argv: readonly string[],
+        io?: {
+            readonly host?: DeployHost;
+            readonly stdout?: (text: string) => void;
+            readonly stderr?: (text: string) => void;
+        },
+    ): Promise<number>;
+}
+
+/** The two kubectl processes core can run. Injectable so tests spawn nothing. */
+export interface KubectlSeam {
+    /** Capture stdout/stderr; never throws. */
+    readonly capture: KubectlCapture;
+    /** Inherit stdio; throws on a non-zero exit. */
+    readonly run: (argv: readonly string[]) => void;
+}
+
+const defaultKubectl: KubectlSeam = {
+    capture: captureKubectl,
+    run: runInherit,
+};
+
+/**
+ * The host handed to `knext deploy function`. The preflight is the same
+ * server-side `--dry-run=server --validate=strict` apply `deploy` runs for a
+ * NextApp (`preflightCRSchema`); every kubectl argv is bound to the target
+ * context.
+ */
+export function buildDeployHost(
+    kubectl: KubectlSeam = defaultKubectl,
+): DeployHost {
+    return {
+        preflight: ({ crPath, namespace, context }) => {
+            const outcome = preflightCRSchema(
+                {
+                    kubectl: (argv): KubectlResult =>
+                        kubectl.capture(withKubeContext(argv, context)),
+                },
+                { crPath, namespace },
+            );
+            return {
+                verdict: outcome.verdict,
+                reason: outcome.reason,
+                unknownFields: outcome.unknownFields,
+                stderr: outcome.stderr,
+            };
+        },
+        run: (argv, context) => kubectl.run(withKubeContext(argv, context)),
+    };
 }
 
 export interface DispatchDeps {
@@ -46,6 +124,8 @@ export interface DispatchDeps {
     readonly load?: () => Promise<GrpcCliModule>;
     readonly stdout?: (text: string) => void;
     readonly stderr?: (text: string) => void;
+    /** The kubectl processes `deploy function` runs; defaults to the real ones. */
+    readonly kubectl?: KubectlSeam;
 }
 
 // ---------------------------------------------------------------------------
@@ -159,7 +239,8 @@ async function defaultLoad(): Promise<GrpcCliModule> {
 }
 
 function displayVerb(verb: string): string {
-    return verb === "add" ? "knext add function" : `knext ${verb}`;
+    if (verb === "add") return "knext add function";
+    return verb === "deploy" ? "knext deploy function" : `knext ${verb}`;
 }
 
 function installHelp(verb: string): string {
@@ -236,7 +317,15 @@ export async function dispatchGrpcVerb(
         return 1;
     }
     try {
-        return await mod.run(verb, argv);
+        // Only `deploy function` writes to the cluster, so only it is handed
+        // the kubectl seam.
+        return await (verb === "deploy"
+            ? mod.run(verb, argv, {
+                  host: buildDeployHost(deps.kubectl),
+                  stdout,
+                  stderr,
+              })
+            : mod.run(verb, argv));
     } catch (err) {
         stderr(`${typed} failed: ${(err as Error)?.message ?? String(err)}\n`);
         return 1;
@@ -251,4 +340,9 @@ export function generateMain(argv: readonly string[]): Promise<number> {
 /** `knext add` — bin entry. Answers `--help` itself when the package is missing. */
 export function addMain(argv: readonly string[]): Promise<number> {
     return dispatchGrpcVerb("add", argv, coreVersion());
+}
+
+/** `knext deploy function` — bin entry. Applies the function's BackendService. */
+export function deployFunctionMain(argv: readonly string[]): Promise<number> {
+    return dispatchGrpcVerb("deploy", ["function", ...argv], coreVersion());
 }

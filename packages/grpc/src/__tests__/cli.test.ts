@@ -18,8 +18,8 @@ describe('the module core dispatches to', () => {
     expect(CORE_PEER_RANGE).toBe(pkg.peerDependencies['@getknext/core'] as string);
   });
 
-  it('owns exactly the generate and add verbs', () => {
-    expect([...VERBS].sort()).toEqual(['add', 'generate']);
+  it('owns exactly the generate, add and deploy verbs', () => {
+    expect([...VERBS].sort()).toEqual(['add', 'deploy', 'generate']);
   });
 
   it.each([

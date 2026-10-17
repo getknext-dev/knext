@@ -8,8 +8,9 @@ belongs to exactly one zone, your `NextApp`. The operator runs it as its own sca
 Service, reachable only from inside the cluster, and tells the zone where it is. You declare it
 with a `BackendService` resource. The [`knext add function`](/docs/cli#knext-add-function) and
 [`knext generate`](/docs/cli#knext-generate) commands write the function's contract and the zone's
-typed client; until the CLI applies `BackendService` resources for you, apply them with
-`kubectl apply --validate=strict` or your GitOps tool.
+typed client, and [`knext deploy function`](/docs/cli#knext-deploy-function) applies the
+`BackendService` for you. You can also apply it yourself with `kubectl apply --validate=strict` or
+your GitOps tool.
 
 Upgrade the operator (and its CRDs) before you apply a `BackendService` or set `spec.backends`. An
 older operator does not know these fields.

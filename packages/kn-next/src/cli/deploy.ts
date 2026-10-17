@@ -1465,6 +1465,15 @@ if (isEntrypoint(import.meta.url)) {
         } else if (sub === "add") {
             const { addMain } = await import("./grpc-dispatch");
             process.exit(await addMain(process.argv.slice(3)));
+        } else if (
+            process.argv[2] === "deploy" &&
+            process.argv[3] === "function"
+        ) {
+            // `knext deploy function`: the optional gRPC package builds the
+            // BackendService CR; core supplies the kubectl boundary and applies
+            // it like a NextApp (preflight, then --validate=strict).
+            const { deployFunctionMain } = await import("./grpc-dispatch");
+            process.exit(await deployFunctionMain(process.argv.slice(4)));
         } else if (sub === "ffi") {
             // In-process Rust (ADR-0069 D12, Beta): the optional ffi package
             // owns `knext ffi …`; core only loads it lazily (ffi-dispatch.ts).
