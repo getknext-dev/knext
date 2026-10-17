@@ -385,8 +385,8 @@ const LANE_ROWS = [
     id: 'P04',
     subject: 'run',
     claim: 'the pin phase never pins: the swap is refused by nothing it set',
-    anchor: '      image: "${digest}"\n',
-    replacement: '',
+    anchor: '      image: "${digest}"',
+    replacement: '      # not pinned',
   },
   {
     id: 'S05',
