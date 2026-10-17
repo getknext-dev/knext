@@ -70,7 +70,7 @@ const MUTATIONS = [
     claim: 'a reviewed package is dropped from the root trustedDependencies',
     subject: 'root',
     anchor: TRUSTED_TAIL,
-    replacement: '    "esbuild"\n  ],',
+    replacement: `    "esbuild"\n  ],\n  "x-${M}": 0,`,
     validate: parsesJson,
   },
   {
@@ -133,7 +133,7 @@ const MUTATIONS = [
     claim: 'an allowlist justification is reworded',
     subject: 'allow',
     anchor: 'Dev tooling only: it is a devDependency of the workspace',
-    replacement: 'Dev tooling only; it is a devDependency of the workspace',
+    replacement: `Dev tooling only; (${M}) it is a devDependency of the workspace`,
     validate: parsesJson,
   },
   {
@@ -149,7 +149,7 @@ const MUTATIONS = [
 const CANARY = {
   subject: 'root',
   anchor: TRUSTED_TAIL,
-  replacement: '    "sharp"\n  ],',
+  replacement: `    "sharp"\n  ],\n  "x-${M}": 0,`,
 };
 
 const prover = createGuardProver({
