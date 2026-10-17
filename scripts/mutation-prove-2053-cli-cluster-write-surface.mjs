@@ -342,14 +342,6 @@ const KINDS = [
     replacement: '];',
   },
   {
-    id: 'K12',
-    subject: 'writelib',
-    claim: 'kind: in an object literal is no longer read',
-    anchor:
-      'for (const m of text.matchAll(/(?<![\\w.])kind\\s*:\\s*["\']([A-Z][A-Za-z0-9]*)["\']/g))',
-    replacement: 'for (const m of [])',
-  },
-  {
     id: 'K13',
     subject: 'tscall',
     claim: 'an argv returned from a function (the preflight builds its argv so) is never scanned',
