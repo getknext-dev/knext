@@ -365,7 +365,7 @@ same way they would treat any other honest-but-not-required signal: read it, do 
 
 ## Amendment 3 (2026-10-16) — narrowing waivers
 
-**Status: Accepted (2026-10-17, v2 sprint-5 close design review; architect `v2-sprint5-close-architect.md`).** The
+**Status: Accepted (2026-10-17, v2 sprint-5 close design review; [architect](https://github.com/getknext-dev/knext/issues/2504#issuecomment-6229290082)).** The
 three waivers below stood on the code and spec reviews of the PRs that added them and are now ratified.
 The Kubernetes 1.30 server floor this amendment rests on is reinforced by a second, independent
 reason: the operator write policy (a `ValidatingAdmissionPolicy`, recorded in ADR-0004 Amendment 2's Z7

@@ -1,16 +1,17 @@
 # ADR-0071: Per-app Redis ACL user, issued by the operator
 
-- **Status:** **Accepted with conditions (2026-10-17, sprint-5 close design review: architect
-  `v2-sprint5-close-architect.md`, concurred by the system designer
-  `v2-sprint5-close-systemdesigner.md`).** Proposed 2026-10-16. A low-confidence call (jev split),
+- **Status:** **Accepted with conditions (2026-10-17, sprint-5 close design review: architect [review](https://github.com/getknext-dev/knext/issues/2504#issuecomment-6229290082),
+  concurred by the system designer [review](https://github.com/getknext-dev/knext/issues/2504#issuecomment-6229290314).** Proposed 2026-10-16. A low-confidence call (jev split),
   taken by the architect on the evidence. #2396 builds against it and against these conditions:
   1. **Phase 1 covers in-cluster Service FQDNs only.**
   2. **Managed Redis stays bring-your-own** (provisioning there is phase 2).
-  3. **The #2457 residuals fold into the #2396 build PR.**
+  3. **Process note: the #2457 residuals fold into the #2396 build PR.**
   4. **knext makes no per-zone isolation claim** (Ready reason, docs or `doctor` wording saying
-     "isolated") until the operator has observed the shared or default path refused. While
-     `AUTH default` or a no-auth connect still succeeds against the registered endpoint, `doctor`
-     and `status` report **"isolation not in force: shared credential live"**.
+     "isolated") until the operator has observed the shared or default path refused. "Observed" is
+     testable: the operator (and `doctor`) attempts `AUTH default` and a no-auth connect against
+     the registered endpoint, and **both** must fail with `NOPERM` / `WRONGPASS` / `NOAUTH` before
+     any isolation claim is made. While either still succeeds, `doctor` and `status` report
+     **"isolation not in force: shared credential live"**.
   5. **The build's kind exit includes a leg** where, after `ACL SETUSER default off`, zone B's pod
      using the old shared URL gets `NOPERM` / `WRONGPASS` on zone A's keys.
 

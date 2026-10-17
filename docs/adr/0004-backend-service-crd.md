@@ -86,9 +86,10 @@ and flannel (OKE, OrbStack) does not enforce NetworkPolicy at all.
 **Ownership and bindings**
 
 1. **A `BackendService` belongs to exactly one zone: a required, single `ownerReference` to a
-   `NextApp` in the same namespace.** *(Superseded by Amendment 2 Decision 1: the user writes
-   `spec.zone`, and the operator sets the `ownerReference` itself.)* Bindings are **same-zone only**; the operator **rejects
-   cross-zone bindings**. The NetworkPolicy admitting only the owning zone stays as
+   `NextApp` in the same namespace.** Bindings are **same-zone only**; the operator **rejects
+   cross-zone bindings**. *(Still in force. Amendment 2 Decision 1 supersedes only the mechanism of
+   the "required, single `ownerReference`" clause above: the user writes `spec.zone`, and the
+   operator sets the `ownerReference` itself.)* The NetworkPolicy admitting only the owning zone stays as
    defense-in-depth. *(Superseded by Amendment 2 Decision 5: the policy admits the Knative data
    path and blocks direct dials; it cannot express "only the owning zone". The per-zone control is
    the token.)*
@@ -101,7 +102,8 @@ and flannel (OKE, OrbStack) does not enforce NetworkPolicy at all.
    exempt**: a private registry (OCIR on OKE) needs them, and they expose no data store. Any
    reference to **another zone's** `db-bind` Secret or to a Secret marked for another zone is
    rejected, as is any environment value naming another zone's database `-rw` or `-ro` host
-   (`scs-zones.md`). Each rule has its own test, mutation-proved. *(Z1 gate: the first text allowed
+   (`scs-zones.md`) *(the host-literal check is superseded by Amendment 2 Decision 6: it is a
+   warn-only lint, never a rejection; the credential allowlist is the control)*. Each rule has its own test, mutation-proved. *(Z1 gate: the first text allowed
    only the `db-bind` Secret, which broke the base spec's `secrets`/`env` field and private-registry
    pulls without serving data sovereignty.)*
    - **Deny rules win.** A Secret that is another zone's `db-bind` Secret is rejected even if it
@@ -193,7 +195,7 @@ and flannel (OKE, OrbStack) does not enforce NetworkPolicy at all.
     propagation is expected to fail, and a warm-pod rotation test proves it.
 12. **The `authorize()` hook** is a required, user-supplied function in the app: it maps a request
     to a verified user identity or rejects it. Generation **fails closed** without it. Each RPC
-    carries an auth option: `USER` (default) or `PUBLIC` (only on `NO_SIDE_EFFECTS` methods)
+    carries an auth option: `USER` or `PUBLIC` (only on `NO_SIDE_EFFECTS` methods)
     *(Amendment 2 Decision 8, Accepted: there is no default; every unary RPC states it)*. The
     generator refuses `PUBLIC` on a mutating RPC. **There is no `PUBLIC_MUTATION` option in 2.0.**
     An anonymous write, such as sign-up or a contact form, is a `USER` RPC whose `authorize()`
@@ -264,7 +266,7 @@ These came from the system designer as tech-debt or test items, not blockers. Th
 
 ## Amendment 2 (2026-10-15) — `spec.zone`, two-sided binding, rendered binding env, operator-owned identity
 
-**Status of this amendment: Accepted (2026-10-17, sprint-5 close design review: architect `v2-sprint5-close-architect.md`, system designer `v2-sprint5-close-systemdesigner.md`).** All eight decisions are built (Z8 #2419, Z8b #2477, the `NextApp` `backends` emission #2490, Z7 #2458/#2459/#2460/#2473/#2491). #2401 closes on this acceptance. Proposed 2026-10-15. The amendment
+**Status of this amendment: Accepted (2026-10-17, sprint-5 close design review: [architect](https://github.com/getknext-dev/knext/issues/2504#issuecomment-6229290082), [system designer](https://github.com/getknext-dev/knext/issues/2504#issuecomment-6229290314)).** All eight decisions are built (Z8 #2419, Z8b #2477, the `NextApp` `backends` emission #2490, Z7 #2458/#2459/#2460/#2473/#2491). #2401 closes on this acceptance. Proposed 2026-10-15. The amendment
 dated 2026-10-09 above is Amendment 1. This one amends its Decisions 1, 2, 12 and 13 and the base
 Decision's "injects" wording, and changes nothing else. It records the three binding contracts that
 the Sprint 5 planning gates (architect and system designer) found implicit in ADR-0004 and ADR-0052.

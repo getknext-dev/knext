@@ -1,7 +1,7 @@
 # ADR-0070: The Stable bar for the Bun single executable (v2)
 
 - **Status:** **Accepted (2026-10-17, ratified at the v2 Sprint 5 close design review, beside the
-  vinext bar #2061; architect `v2-sprint5-close-architect.md`).** Proposed 2026-10-16. Design only. It defines a bar; it graduates nothing, changes
+  vinext bar #2061; [architect](https://github.com/getknext-dev/knext/issues/2504#issuecomment-6229290082)).** Proposed 2026-10-16. Design only. It defines a bar; it graduates nothing, changes
   no runtime code, dispatches no compat run and edits no user docs. Trigger-class (ADR, credential window
   definition, public-API tier of `selfContained`), so per `.claude/rules/workflow.md` (2026-09-22
   amendment) it is reviewed at sprint close, not gated per PR.
@@ -240,7 +240,7 @@ already track, filing new ones only for uncovered checks (**0.98**).
 - **CI cost.** Three more scheduled 16-shard cells. The shared pool (GitHub Free, 20 concurrent jobs)
   already carries 8 credential cells. #2443 must show the pool still fits, or schedule the
   self-contained cells only while their prerequisites are green.
-- **A Proposed amendment to ADR-0060 D7** (D5): non-inferiority instead of a win, and S0 as S2's
+- **An Accepted amendment to ADR-0060 D7** (D5): non-inferiority instead of a win, and S0 as S2's
   comparison arm. If the review rejects it, C5 reverts to requiring a win against D7's arm, and on
   today's evidence no shape can graduate.
 - **Not covered, stated:** the shim-count ratchet in ADR-0060 D3 ("must not rise between sprint
