@@ -66,6 +66,7 @@ const (
 	ReasonConflictingOwner        = "ConflictingOwner"
 	ReasonCompliant               = "Compliant"
 	ReasonSecretNotAllowed        = "SecretNotAllowed"
+	ReasonSecretsUnverified       = "SecretsUnverified"
 	ReasonSovereigntyViolation    = "SovereigntyViolation"
 	ReasonNoForeignDatabaseHost   = "NoForeignDatabaseHost"
 	ReasonForeignDatabaseHost     = "ForeignDatabaseHost"
@@ -100,6 +101,9 @@ type functionObservation struct {
 	// zoneListed: the zone's spec.backends[] names this function (zone half).
 	zoneListed bool
 	violations []sovereigntyViolation
+	// unverified are referenced Secrets whose metadata could not be read: no
+	// answer, so neither a violation nor a pass (#2498).
+	unverified []unverifiedSecret
 	lint       []databaseHostFinding
 	// renderErr is a failure to render a child that is not an API hiccup (a
 	// name already controlled by another object), or "".
@@ -118,6 +122,22 @@ type functionObservation struct {
 // violation. Fail closed: anything else renders nothing.
 func (o functionObservation) accepted() bool {
 	return o.invalidImage == "" && o.zone != nil && o.conflictingOwner == "" && o.zoneListed && len(o.violations) == 0
+}
+
+// undecided reports whether the function would be accepted but for Secret
+// lookups that returned no answer. Reconcile must then neither render nor tear
+// down: it returns the error and requeues, leaving the function as it is.
+func (o functionObservation) undecided() bool {
+	return len(o.unverified) > 0 && o.accepted()
+}
+
+// unverifiedNames lists the Secrets whose metadata could not be read.
+func (o functionObservation) unverifiedNames() string {
+	names := make([]string, 0, len(o.unverified))
+	for _, u := range o.unverified {
+		names = append(names, fmt.Sprintf("Secret %q", u.name))
+	}
+	return strings.Join(names, ", ")
 }
 
 // functionVerdict is the full status outcome of one pass.
@@ -175,6 +195,13 @@ func computeBackendServiceVerdict(bs *appsv1alpha1.BackendService, o functionObs
 	case o.zone == nil:
 		sov = cond(ConditionSovereigntyCompliant, metav1.ConditionUnknown, ReasonZoneNotFound,
 			"the allowlist cannot be evaluated without the zone")
+	case o.undecided():
+		// No answer, which is not a violation: the function is neither rendered
+		// nor removed this pass (a static message: it names Secrets, never the
+		// transient error, so a persistent condition does not churn status).
+		sov = cond(ConditionSovereigntyCompliant, metav1.ConditionUnknown, ReasonSecretsUnverified,
+			"could not read the metadata of "+o.unverifiedNames()+
+				"; retrying with backoff. A running function is left as it is, and one never rendered stays unrendered")
 	default:
 		sov = cond(ConditionSovereigntyCompliant, metav1.ConditionTrue, ReasonCompliant,
 			"every Secret reference is the zone's own database Secret or marked for the zone")
@@ -186,6 +213,14 @@ func computeBackendServiceVerdict(bs *appsv1alpha1.BackendService, o functionObs
 	jwksName := ZoneJWKSConfigMapName(bs.Spec.Zone)
 	var jwks metav1.Condition
 	switch {
+	case o.undecided():
+		// Nothing was re-evaluated this pass: carry the last verdict forward.
+		if prev := apimeta.FindStatusCondition(bs.Status.Conditions, ConditionJWKSTrusted); prev != nil {
+			jwks = cond(ConditionJWKSTrusted, prev.Status, prev.Reason, prev.Message)
+		} else {
+			jwks = cond(ConditionJWKSTrusted, metav1.ConditionUnknown, ReasonJWKSNotRendered,
+				"the function is not rendered, so no JWKS is mounted")
+		}
 	case !o.accepted():
 		jwks = cond(ConditionJWKSTrusted, metav1.ConditionUnknown, ReasonJWKSNotRendered,
 			"the function is not rendered, so no JWKS is mounted")
@@ -232,6 +267,8 @@ func computeBackendServiceVerdict(bs *appsv1alpha1.BackendService, o functionObs
 		ready = cond(ConditionReady, metav1.ConditionFalse, bound.Reason, bound.Message)
 	case len(o.violations) > 0:
 		ready = cond(ConditionReady, metav1.ConditionFalse, ReasonSovereigntyViolation, sov.Message)
+	case o.undecided() && o.ksvc == nil:
+		ready = cond(ConditionReady, metav1.ConditionFalse, ReasonSecretsUnverified, sov.Message)
 	case o.renderErr != "":
 		ready = cond(ConditionReady, metav1.ConditionFalse, ReasonKnativeServiceNameTaken, o.renderErr)
 	case jwks.Status == metav1.ConditionFalse:
@@ -255,8 +292,12 @@ func computeBackendServiceVerdict(bs *appsv1alpha1.BackendService, o functionObs
 			fmt.Sprintf("Knative Service is not Ready (%s): %s", reason, msg))
 		v.requeueAfter = functionNotReadyRequeueAfter
 	default:
-		ready = cond(ConditionReady, metav1.ConditionTrue, ReasonFunctionReady,
-			"the function is bound, compliant and its Knative Service is Ready")
+		msg := "the function is bound, compliant and its Knative Service is Ready"
+		if o.undecided() {
+			msg = "the function is bound and its Knative Service is Ready; its Secret references could not be " +
+				"re-verified this pass (SovereigntyCompliant is Unknown)"
+		}
+		ready = cond(ConditionReady, metav1.ConditionTrue, ReasonFunctionReady, msg)
 	}
 	v.conditions = append(v.conditions, ready)
 

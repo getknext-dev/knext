@@ -136,9 +136,20 @@ type secretMetadata struct {
 	found     bool
 	labels    map[string]string
 	ownerRefs []metav1.OwnerReference
-	// readErr is set when the metadata could not be read (not NotFound). The
-	// Secret is then treated as unmarked: fail closed, with the error named.
+	// readErr is set when the metadata could not be read (not NotFound). That is
+	// NOT an answer about the Secret's marks (a timeout, a 429, a 5xx, a missing
+	// grant say nothing about them), so it is never a violation: the Secret is
+	// reported as unverified and the reconcile errors and requeues, leaving what
+	// was rendered (#2498). Only a definitive answer (NotFound, or an object with
+	// the wrong owner or labels) refuses a function.
 	readErr string
+}
+
+// unverifiedSecret is a referenced Secret whose metadata could not be read, so
+// its marks are unknown. It is not a violation.
+type unverifiedSecret struct {
+	name string
+	err  string
 }
 
 // secretLookup returns the metadata of a Secret in the function's namespace.
@@ -265,7 +276,7 @@ func checkFunctionSovereignty(
 	zone *appsv1alpha1.NextApp,
 	others []appsv1alpha1.NextApp,
 	lookup secretLookup,
-) []sovereigntyViolation {
+) ([]sovereigntyViolation, []unverifiedSecret) {
 	foreignDB := map[string]string{} // secret name -> owning zone
 	for i := range others {
 		for _, name := range zoneDatabaseSecrets(&others[i]) {
@@ -282,6 +293,8 @@ func checkFunctionSovereignty(
 	}
 
 	var out []sovereigntyViolation
+	var unverified []unverifiedSecret
+	unverifiedSeen := map[string]bool{}
 	meta := map[string]secretMetadata{}
 	for _, ref := range functionSecretRefs(&bs.Spec) {
 		if strings.HasSuffix(ref.name, zoneSigningKeySecretSuffix) {
@@ -312,12 +325,17 @@ func checkFunctionSovereignty(
 		if ownDB[ref.name] || markedFor(m, zone) {
 			continue
 		}
-		msg := fmt.Sprintf("Secret %q is not zone %q's database Secret and is not marked for zone %q "+
-			"(label it %s=%s, or give it an ownerReference to the zone)", ref.name, zoneName, zoneName, ZoneLabel, zoneName)
 		if m.readErr != "" {
-			msg += fmt.Sprintf("; its metadata could not be read: %s", m.readErr)
+			// Could not decide: not a violation (#2498).
+			if !unverifiedSeen[ref.name] {
+				unverifiedSeen[ref.name] = true
+				unverified = append(unverified, unverifiedSecret{ref.name, m.readErr})
+			}
+			continue
 		}
-		out = append(out, sovereigntyViolation{ref.source, ref.name, msg})
+		out = append(out, sovereigntyViolation{ref.source, ref.name,
+			fmt.Sprintf("Secret %q is not zone %q's database Secret and is not marked for zone %q "+
+				"(label it %s=%s, or give it an ownerReference to the zone)", ref.name, zoneName, zoneName, ZoneLabel, zoneName)})
 	}
 
 	ownJWKS := ZoneJWKSConfigMapName(zoneName)
@@ -327,7 +345,7 @@ func checkFunctionSovereignty(
 				fmt.Sprintf("ConfigMap %q is another zone's JWKS; a function mounts only its own zone's (the operator does that)", ref.name)})
 		}
 	}
-	return out
+	return out, unverified
 }
 
 // foreignMark returns the other zone a Secret is marked for, or "".

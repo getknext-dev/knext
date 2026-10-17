@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -176,11 +177,27 @@ func (r *BackendServiceReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 
 	// The credential allowlist (the control) and the host lint (a warning).
-	obs.violations = checkFunctionSovereignty(bs, obs.zone, others, r.secretMetadata(ctx, bs.Namespace))
+	obs.violations, obs.unverified = checkFunctionSovereignty(bs, obs.zone, others, r.secretMetadata(ctx, bs.Namespace))
 	obs.lint = lintForeignDatabaseHosts(bs, obs.zone, others)
 
 	served, revision := bs.Status.ServedProtoVersion, bs.Status.ObservedRevision
-	if obs.accepted() {
+	// heldErr is returned AFTER the verdict is applied: an undecided pass reports
+	// SecretsUnverified in status, then requeues with backoff.
+	var heldErr error
+	if obs.undecided() {
+		// A Secret lookup that errored (not NotFound) says nothing about the
+		// Secret's marks. Like the JWKS read below, hold the error: a running,
+		// previously accepted function must not be deleted on an apiserver blip
+		// (nothing is rendered, nothing removed), and one never rendered stays
+		// unrendered (fail closed on new access).
+		heldErr = unverifiedSecretsError(obs.unverified)
+		logger.Error(heldErr, "Could not verify the function's Secrets; leaving it as it is")
+		ksvc, err := r.existingFunctionService(ctx, bs)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		obs.ksvc = ksvc
+	} else if obs.accepted() {
 		// The zone's key set reaches the function only if the zone controls the
 		// ConfigMap that holds it. A read failure is returned, not guessed at: it
 		// says nothing about ownership, and flipping a running function's mount
@@ -221,6 +238,9 @@ func (r *BackendServiceReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 	if err := r.applyFunctionVerdict(ctx, bs, observed, verdict); err != nil {
 		return ctrl.Result{}, err
+	}
+	if heldErr != nil {
+		return ctrl.Result{}, heldErr
 	}
 	return ctrl.Result{RequeueAfter: verdict.requeueAfter}, nil
 }
@@ -270,6 +290,30 @@ func (r *BackendServiceReconciler) secretMetadata(ctx context.Context, namespace
 			return secretMetadata{readErr: err.Error()}
 		}
 	}
+}
+
+// existingFunctionService returns the function's Knative Service as it stands
+// (nil when there is none, or when another object controls the name), so a pass
+// that rendered nothing still reports what is running.
+func (r *BackendServiceReconciler) existingFunctionService(ctx context.Context, bs *appsv1alpha1.BackendService) (*servingv1.Service, error) {
+	ksvc := &servingv1.Service{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: bs.Namespace, Name: bs.Name}, ksvc); err != nil {
+		return nil, client.IgnoreNotFound(err)
+	}
+	if !metav1.IsControlledBy(ksvc, bs) {
+		return nil, nil
+	}
+	return ksvc, nil
+}
+
+// unverifiedSecretsError names the Secrets whose metadata could not be read.
+func unverifiedSecretsError(u []unverifiedSecret) error {
+	parts := make([]string, 0, len(u))
+	for _, s := range u {
+		parts = append(parts, fmt.Sprintf("%q (%s)", s.name, s.err))
+	}
+	return fmt.Errorf("reading the metadata of Secret(s) %s: no answer, so the function is neither "+
+		"rendered nor removed", strings.Join(parts, ", "))
 }
 
 // observeZoneJWKS reads the metadata of the ConfigMap at the zone's JWKS name
