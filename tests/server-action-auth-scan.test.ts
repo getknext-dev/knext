@@ -18,6 +18,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import {
   ALLOWLIST,
+  ASYNC_AUTH_CALLS,
   AUTH_CALLS,
   listScanFiles,
   SCAN_ROOTS,
@@ -114,6 +115,96 @@ describe('RED: a Server Action that is not gated', () => {
       ['ok', true],
       ['bad', false],
     ]);
+  });
+});
+
+describe('RED: an async auth check that is not awaited', () => {
+  // `!<Promise>` is always false, so the check never refuses and the action runs
+  // for everyone - and neither tsc nor biome says a word.
+  it.each([
+    [
+      'no await in an action',
+      `'use server';\n${IMPORTS}export async function up(fd: FormData) {\n if (!authorizeMutation(fd)) return { error: 'no' };\n await db.query('x');\n}`,
+      ACTIONS,
+    ],
+    [
+      'no await in an inline action',
+      `${IMPORTS}export default function Page() {\n async function add(fd: FormData) {\n 'use server';\n if (!authorizeMutation(fd)) throw new Error('no');\n await db.query('x');\n }\n return null;\n}`,
+      'apps/demo/src/app/page.tsx',
+    ],
+    [
+      'no await in a route handler',
+      `${IMPORTS}export async function POST(req: Request) {\n if (!authorizeMutation(req as never)) return new Response(null, { status: 401 });\n await db.query('x');\n}`,
+      ROUTE,
+    ],
+    [
+      'the await is on a different call',
+      `'use server';\n${IMPORTS}export async function up(fd: FormData) {\n if (!authorizeMutation(await fd.get('x'))) return;\n await db.query('x');\n}`,
+      ACTIONS,
+    ],
+  ])('flags %s', (_why, src, file) => {
+    const bad = ungated(src, file);
+    expect(bad).toHaveLength(1);
+    expect(bad[0].why).toContain('not awaited');
+  });
+
+  it('an await OUTSIDE the negation (await of a boolean) is not a gate either', () => {
+    const src = `'use server';\n${IMPORTS}export async function up(fd: FormData) {\n if (await !authorizeMutation(fd)) return;\n await db.query('x');\n}`;
+    expect(ungated(src)).toHaveLength(1);
+  });
+
+  it('names the async members, and keeps the sync one out of the rule', () => {
+    expect([...ASYNC_AUTH_CALLS]).toEqual(['authorizeMutation']);
+    const sync = `${IMPORTS}export async function POST(req: Request) {\n if (!isAuthorized(req.headers.get('authorization'), process.env.T)) return new Response(null, { status: 401 });\n await db.query('x');\n}`;
+    expect(ungated(sync, ROUTE)).toEqual([]);
+    const awaitedSync = sync
+      .replace('if (!isAuthorized(', 'if (!(await isAuthorized(')
+      .replace('process.env.T))', 'process.env.T)))');
+    expect(ungated(awaitedSync, ROUTE)).toEqual([]);
+  });
+});
+
+describe('RED: the auth name is shadowed', () => {
+  const body = (decl: string) =>
+    `'use server';\n${IMPORTS}export async function up(fd: FormData${decl.startsWith('param:') ? `, ${decl.slice(6)}` : ''}) {\n${decl.startsWith('param:') ? '' : ` ${decl}\n`} if (!(await authorizeMutation(fd))) return;\n await db.query('x');\n}`;
+  it.each([
+    ['a parameter', body('param:authorizeMutation: (f: FormData) => Promise<boolean>')],
+    ['a const in the body', body('const authorizeMutation = async (_f: FormData) => true;')],
+    ['a let in the body', body('let authorizeMutation = async (_f: FormData) => true;')],
+    [
+      'a nested function declaration',
+      body('async function authorizeMutation(_f: FormData) { return true; }'),
+    ],
+    [
+      'a destructured binding',
+      body('const { authorizeMutation } = { authorizeMutation: async () => true };'),
+    ],
+  ])('flags %s', (_why, src) => {
+    const bad = ungated(src);
+    expect(bad).toHaveLength(1);
+    expect(bad[0].why).toContain('re-declared');
+  });
+
+  it('flags a shadow in a scope ENCLOSING an inline action', () => {
+    const src = `${IMPORTS}export default function Page({ authorizeMutation }: { authorizeMutation: (f: FormData) => Promise<boolean> }) {\n async function add(fd: FormData) {\n 'use server';\n if (!(await authorizeMutation(fd))) throw new Error('no');\n await db.query('x');\n }\n return null;\n}`;
+    const bad = ungated(src, 'apps/demo/src/app/page.tsx');
+    expect(bad).toHaveLength(1);
+    expect(bad[0].why).toContain('re-declared');
+  });
+
+  it('flags a catch binding and a loop variable that shadow it', () => {
+    const inCatch = `'use server';\n${IMPORTS}export async function up(fd: FormData) {\n try { await x(); } catch (authorizeMutation) {\n if (!(await authorizeMutation(fd))) return;\n await db.query('x');\n }\n}`;
+    // the check is not the function's first effectful statement here, so it is ungated either way;
+    // the shadow rule is what the next case isolates
+    expect(ungated(inCatch).length).toBe(1);
+    const inFor = `'use server';\n${IMPORTS}export async function up(fd: FormData) {\n for (const authorizeMutation of []) {}\n if (!(await authorizeMutation(fd))) return;\n await db.query('x');\n}`;
+    // a loop variable is scoped to the loop: it does NOT shadow the later check
+    expect(ungated(inFor)).toEqual([]);
+  });
+
+  it('does not flag a sibling function that happens to use the same local name', () => {
+    const src = `'use server';\n${IMPORTS}function other() { const authorizeMutation = 1; return authorizeMutation; }\nexport async function up(fd: FormData) {\n if (!(await authorizeMutation(fd))) return;\n await db.query('x');\n}`;
+    expect(ungated(src)).toEqual([]);
   });
 });
 

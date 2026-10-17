@@ -39,9 +39,23 @@
  * matches a surface which is in fact gated, is itself a violation, so the list
  * can only shrink by deleting entries and only grow by editing the pinned count.
  *
- * LIMIT. Name-based: it proves the check is present, imported and positioned
- * first, not that the imported function is correct (that is
- * `mutation-auth.test.ts` and `auth.test.ts`).
+ * ASYNC AUTH MUST BE AWAITED. `authorizeMutation` returns a Promise, and a Promise
+ * is always truthy: `if (!authorizeMutation(fd)) return;` NEVER refuses, and neither
+ * tsc nor biome flags it. So for every name in {@link ASYNC_AUTH_CALLS} the
+ * negated operand must contain an `await`, or the surface is ungated.
+ *
+ * SHADOWING FAILS. The auth name is matched by identifier, so a parameter,
+ * variable, function or catch binding called `authorizeMutation` (or
+ * `isAuthorized`) in any scope between the call and the module would make the
+ * check call something else. The scan walks the call's enclosing scopes and
+ * treats a re-declaration as ungated.
+ *
+ * LIMIT. Name-based: it proves the check is present, imported, awaited where it
+ * is async, not shadowed, and positioned first - not that the imported function
+ * is correct (that is `mutation-auth.test.ts` and `auth.test.ts`). A
+ * type-aware lint (no-misused-promises) was considered as a second net and not
+ * added: it needs a new linter dependency, or an unstable biome nursery rule
+ * enabled repo-wide, to catch what the scan already refuses.
  *
  * The test is `tests/server-action-auth-scan.test.ts`; the mutation proof is
  * `scripts/mutation-prove-2532-server-action-auth.mjs`.
@@ -59,6 +73,12 @@ export const SCAN_ROOTS = ['apps', 'packages/kn-next/templates/app'];
 
 /** The authentication calls that satisfy the rule (each must be imported). */
 export const AUTH_CALLS = new Set(['authorizeMutation', 'isAuthorized']);
+
+/**
+ * The members of {@link AUTH_CALLS} that return a Promise. `!<promise>` is always
+ * false, so these only gate when awaited.
+ */
+export const ASYNC_AUTH_CALLS = new Set(['authorizeMutation']);
 
 /** Route methods that change state. GET/HEAD/OPTIONS are out of scope by verb. */
 export const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
@@ -240,17 +260,77 @@ function isInert(node) {
   return inert;
 }
 
-/** `!<auth call>` (through parens / await), or undefined. */
+/**
+ * `!<auth call>` (through parens / await), or undefined. Reports whether an
+ * `await` sits between the `!` and the call.
+ */
 function negatedAuthCall(expr, imported) {
   const e = ts.isParenthesizedExpression(expr) ? unwrap(expr) : expr;
   if (!ts.isPrefixUnaryExpression(e) || e.operator !== ts.SyntaxKind.ExclamationToken) {
     return undefined;
   }
-  const call = unwrap(e.operand);
-  if (!ts.isCallExpression(call) || !ts.isIdentifier(call.expression)) return undefined;
-  const name = call.expression.text;
+  let cur = e.operand;
+  let awaited = false;
+  for (;;) {
+    if (ts.isParenthesizedExpression(cur)) cur = cur.expression;
+    else if (ts.isAwaitExpression(cur)) {
+      awaited = true;
+      cur = cur.expression;
+    } else if (ts.isAsExpression(cur) || ts.isNonNullExpression(cur)) cur = cur.expression;
+    else break;
+  }
+  if (!ts.isCallExpression(cur) || !ts.isIdentifier(cur.expression)) return undefined;
+  const name = cur.expression.text;
   if (!AUTH_CALLS.has(name) || !imported.has(name)) return undefined;
-  return name;
+  return { name, awaited, call: cur };
+}
+
+/** Every identifier a binding name (identifier or destructuring pattern) declares. */
+function bindingNames(nameNode, out) {
+  if (ts.isIdentifier(nameNode)) out.add(nameNode.text);
+  else if (ts.isObjectBindingPattern(nameNode) || ts.isArrayBindingPattern(nameNode)) {
+    for (const el of nameNode.elements) {
+      if (ts.isBindingElement(el)) bindingNames(el.name, out);
+    }
+  }
+  return out;
+}
+
+/** The names a single scope node declares directly. */
+function scopeDeclarations(scope) {
+  const out = new Set();
+  if (ts.isFunctionLike(scope)) {
+    for (const p of scope.parameters ?? []) bindingNames(p.name, out);
+    if (ts.isFunctionExpression(scope) && scope.name) out.add(scope.name.text);
+  }
+  if (ts.isCatchClause(scope) && scope.variableDeclaration) {
+    bindingNames(scope.variableDeclaration.name, out);
+  }
+  if (
+    (ts.isForStatement(scope) || ts.isForInStatement(scope) || ts.isForOfStatement(scope)) &&
+    scope.initializer &&
+    ts.isVariableDeclarationList(scope.initializer)
+  ) {
+    for (const d of scope.initializer.declarations) bindingNames(d.name, out);
+  }
+  if (ts.isBlock(scope) || ts.isSourceFile(scope) || ts.isModuleBlock(scope)) {
+    for (const st of scope.statements) {
+      if (ts.isVariableStatement(st)) {
+        for (const d of st.declarationList.declarations) bindingNames(d.name, out);
+      } else if ((ts.isFunctionDeclaration(st) || ts.isClassDeclaration(st)) && st.name) {
+        out.add(st.name.text);
+      }
+    }
+  }
+  return out;
+}
+
+/** Is `name` re-declared in any scope enclosing `node`, up to the module? */
+function isShadowed(node, name) {
+  for (let cur = node.parent; cur; cur = cur.parent) {
+    if (scopeDeclarations(cur).has(name)) return true;
+  }
+  return false;
 }
 
 function refuses(statement) {
@@ -273,8 +353,21 @@ export function gateVerdict(fn, imported) {
   const statements = fn.body.statements.slice(prologue(fn.body.statements).length);
   for (const st of statements) {
     if (ts.isIfStatement(st)) {
-      const name = negatedAuthCall(st.expression, imported);
-      if (name) {
+      const neg = negatedAuthCall(st.expression, imported);
+      if (neg) {
+        const { name, awaited, call } = neg;
+        if (ASYNC_AUTH_CALLS.has(name) && !awaited) {
+          return {
+            ok: false,
+            why: `\`${name}\` is async and is not awaited: a Promise is always truthy, so \`!${name}(...)\` never refuses`,
+          };
+        }
+        if (isShadowed(call, name)) {
+          return {
+            ok: false,
+            why: `\`${name}\` is re-declared in a scope enclosing the check, so it is not the imported auth function`,
+          };
+        }
         return refuses(st.thenStatement)
           ? { ok: true, call: name }
           : { ok: false, why: `\`if (!${name}(...))\` does not return or throw` };

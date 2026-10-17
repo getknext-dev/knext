@@ -243,6 +243,49 @@ const SCANNER = [
     anchor: 'const CODE_FILE = /\\.(?:[cm]?[jt]sx?)(?:\\.hbs)?$/;',
     replacement: 'const CODE_FILE = /\\.(?:[cm]?[jt]sx?)$/;',
   },
+  {
+    id: 'S25',
+    subject: 'lib',
+    claim: 'an un-awaited async auth call (always-false `!Promise`) is accepted as a gate',
+    anchor: 'if (ASYNC_AUTH_CALLS.has(name) && !awaited) {',
+    replacement: 'if (false) {',
+  },
+  {
+    id: 'S26',
+    subject: 'lib',
+    claim: 'an await is never recognised, so every correctly awaited check is rejected',
+    anchor: '      awaited = true;',
+    replacement: '      awaited = false;',
+  },
+  {
+    id: 'S27',
+    subject: 'lib',
+    claim: 'a shadowed auth name is accepted',
+    anchor: 'if (isShadowed(call, name)) {',
+    replacement: 'if (false) {',
+  },
+  {
+    id: 'S28',
+    subject: 'lib',
+    claim: 'a parameter named like the auth function is not seen as a shadow',
+    anchor: 'for (const p of scope.parameters ?? []) bindingNames(p.name, out);',
+    replacement: 'void 0;',
+  },
+  {
+    id: 'S29',
+    subject: 'lib',
+    claim: 'a variable declared in a block is not seen as a shadow',
+    anchor: 'for (const d of st.declarationList.declarations) bindingNames(d.name, out);',
+    replacement: 'void 0;',
+  },
+  {
+    id: 'S30',
+    subject: 'lib',
+    claim: 'the shadow walk stops at the handler, missing a shadow in an enclosing component',
+    anchor: 'if (scopeDeclarations(cur).has(name)) return true;',
+    replacement:
+      'if (scopeDeclarations(cur).has(name)) return true;\n    if (ts.isFunctionLike(cur)) break;',
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -359,6 +402,20 @@ const TREE = [
     claim: 'the setup Server Action loses its auth check',
     anchor: GUARD,
     replacement: OFF,
+  },
+  {
+    id: 'T19',
+    subject: 'actions',
+    claim: 'uploadFile checks auth WITHOUT await (always-false `!Promise`): runs for everyone',
+    anchor: GUARD,
+    replacement: 'if (!authorizeMutation(formData)) {',
+  },
+  {
+    id: 'T20',
+    subject: 'actions',
+    claim: 'uploadFile shadows the auth name with a local that always says yes',
+    anchor: GUARD,
+    replacement: `const authorizeMutation = async (_f: FormData) => true;\n  ${GUARD}`,
   },
 ];
 

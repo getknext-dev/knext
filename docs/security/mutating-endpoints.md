@@ -73,6 +73,14 @@ export async function myAction(formData: FormData) {
 - One token for every mutating surface keeps the reference app simple. A real product that needs
   per-user or per-role authorization replaces `authorizeMutation` with its session check; the position
   rule (first statement, refuse by return or throw) is the part to keep.
+- **Blast radius of the token, stated plainly.** `CACHE_INVALIDATE_TOKEN` used to authorize one thing:
+  invalidating cache tags. In the reference app it now also authorizes **data writes** (file uploads and the
+  object-storage and `files` rows they create, adding users), **database DDL and seeding** (`/setup`), and
+  **reading the audit log**. Anyone who holds it can do all of those. Treat it as the app's admin
+  credential: provision it per deployment from a Kubernetes Secret, give it a long random value, never
+  reuse it across apps or environments, and rotate it (replace the Secret and restart) when anyone who knew
+  it leaves or it may have leaked. If you need the cache-invalidation credential to be weaker than the
+  write credential, split them: give the writes their own token and their own `authorizeMutation`.
 
 **Inventory** (every `'use server'` function under `apps/` and the app templates; the scan fails if
 this list and the tree disagree):
@@ -108,8 +116,18 @@ anything it cannot read: a file that does not parse, a method re-exported from a
 two entries: `/api/rum` and `echoAction`), each entry needs a reason, and an entry that
 matches nothing, or that matches a surface which is in fact gated, fails too.
 
-It checks that the auth call is present, imported and first. That the call is *correct* is the job of
-`mutation-auth.test.ts` and `auth.test.ts`.
+Two bypasses the scan closes explicitly, because neither `tsc` nor `biome` catches them:
+
+- **An un-awaited async check.** `authorizeMutation` returns a Promise and a Promise is always truthy, so
+  `if (!authorizeMutation(fd)) return;` never refuses. The operand of `!` must contain an `await`.
+- **A shadowed name.** A parameter, variable, function or catch binding called `authorizeMutation` /
+  `isAuthorized` in any scope enclosing the check means it is not the imported function, so the surface
+  fails.
+
+It checks that the auth call is present, imported, awaited where async, not shadowed, and first. That the
+call is *correct* is the job of `mutation-auth.test.ts` and `auth.test.ts`. A type-aware
+`no-misused-promises` lint was considered as a second net and not added: it needs a new linter dependency
+(or an unstable biome nursery rule enabled repo-wide) to catch what the scan already refuses.
 
 ## Network isolation (defense-in-depth) — #90
 

@@ -57,6 +57,19 @@ export async function uploadFile(formData: FormData) {
 fail-closed when unset, constant-time compare. A script sends it as `Authorization: Bearer <token>`;
 a browser form sends it in a `token` field, because a plain `<form>` cannot set headers.
 
+<Callout type="warn">
+In the reference app this one token is now the **admin credential**, not just the cache-invalidation
+key: it also authorizes file uploads, adding users, creating and seeding the demo tables, and reading
+the audit log. Anyone who holds it can do all of those. Give it a long random value per deployment,
+keep it in a Kubernetes Secret, never reuse it across apps or environments, and rotate it when it may
+have leaked. If you want cache invalidation to hold a weaker credential than data writes, give the
+writes their own token and their own check.
+</Callout>
+
+Two details matter when you copy the pattern: the check is `async`, so it must be **awaited**
+(`if (!(await authorizeMutation(formData)))`; without `await` a Promise is always truthy and the
+check never refuses), and nothing in the action may redefine the name `authorizeMutation`.
+
 Two more rules the reference app follows for uploads:
 
 - **Never use the client's filename as the storage key.** Store under a generated id plus the
