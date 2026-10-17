@@ -28,6 +28,7 @@ import {
   MANIFEST_WRITES,
   scanClusterWriteSource,
   scanClusterWriteTree,
+  writeScopeFiles,
 } from '../scripts/lib/cli-cluster-write-scan.mjs';
 
 const FILE = 'packages/kn-next/src/cli/fixture.ts';
@@ -352,6 +353,17 @@ describe('cluster-write scan: the real tree', () => {
       'ServiceAccount',
     ]);
     expect([...ALLOWED_KINDS].sort()).toEqual(['BackendService', 'NextApp']);
+  });
+
+  it('covers @getknext/grpc, core, the generators and every kind source the table names', () => {
+    const files = writeScopeFiles();
+    expect(files).toContain('packages/grpc/src/deploy-function.ts');
+    expect(files).toContain('packages/grpc/src/backend-service.ts');
+    expect(files).toContain('packages/kn-next/src/cli/grpc-dispatch.ts');
+    expect(files).toContain('packages/kn-next/src/generators/loadtest-job.ts');
+    for (const e of MANIFEST_WRITES) {
+      for (const src of e.kindSources ?? []) expect(files, src).toContain(src);
+    }
   });
 
   it('the tree scan cross-checks declared kinds against the source files', () => {
