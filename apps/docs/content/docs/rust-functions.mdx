@@ -45,21 +45,26 @@ starts from. The [Go template](/docs/go-functions) is the same function in Go.
    knext add function orders --lang rust
    ```
 
-   This writes `proto/orders/v1/orders.proto` and the options contract it imports. See
+   This writes the contract (`proto/orders/v1/orders.proto` and the options contract it imports)
+   and the server project at `functions/orders/`: the template below, with its example service
+   renamed to `OrdersService`, the crate named `orders`, and the Rust code already generated. It
+   needs the Rust toolchain on your `PATH` and, on the first run on a machine, a network
+   connection and a few minutes to download and compile the code generators (they are cached in
+   `$XDG_CACHE_HOME/knext/rust-codegen`, or `KNEXT_RUST_CODEGEN_DIR` when you set it to an
+   absolute path). If generation fails, nothing is written. See
    [`knext add function`](/docs/cli#knext-add-function).
 
-2. Copy the template from the knext repository (`templates/rust`) into a new directory for the
-   function, and rename the package in `Cargo.toml`.
+2. Write your handlers where `functions/orders/src/items.rs` is. The service is already
+   registered in `src/rpc/mod.rs`.
 
-3. Replace the template's `proto/example` with your zone's `proto/orders`, so the function and the
-   zone build from the same file. Then generate the Rust code:
+3. After a change to the contract, copy the changed `proto/orders/v1/orders.proto` over
+   `functions/orders/proto/orders/v1/orders.proto`, then regenerate (this needs `buf` on your
+   `PATH`):
 
    ```bash
+   cd functions/orders
    ./codegen.sh      # writes gen/ — commit it
    ```
-
-   Register your service in `src/rpc/mod.rs` in place of the example one, and write your
-   handlers where `src/items.rs` is.
 
 4. Test and build:
 
@@ -67,6 +72,10 @@ starts from. The [Go template](/docs/go-functions) is the same function in Go.
    cargo test
    docker build -t <registry>/orders-fn:<tag> .
    ```
+
+The template itself lives in the knext repository at `templates/rust`. The scaffold leaves out its
+repository-only files: its maintainer README, its conformance and kind test harnesses, and the
+tests that read knext's shared token vectors.
 
 The template's own example service has one read (`GetItem`) and one write (`PutItem`), the shape
 `knext add function` starts every contract with.

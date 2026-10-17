@@ -24,6 +24,13 @@ path = "e2e/e2e.rs"
 required-features = ["e2e"]
 
 [features]
+# BEGIN repository-only tests (`knext add function` leaves this block out)
+# The tests signed against the example service and read from the knext
+# repository: src/testvectors.rs, src/auth/vector_tests.rs and
+# src/rpc/tests/vector_wiring.rs. On here, in this template.
+default = ["shared-vectors"]
+shared-vectors = []
+# END repository-only tests
 e2e = []
 
 [dependencies]

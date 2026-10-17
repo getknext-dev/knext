@@ -6,7 +6,7 @@ scale-to-zero like the zone itself. Not published yet.
 This package provides two `knext` commands. `@getknext/core` owns the `knext` binary and loads
 this package only when one of them is typed:
 
-- `knext add function <name> --lang go|rust` — add a function's contract to the app.
+- `knext add function <name> --lang go|rust` — add a function's contract and its server project to the app.
 - `knext generate [--check] [--against <baseline>]` — lint the contracts, optionally run
   `buf breaking` against a baseline, and write the server-only clients.
 
@@ -31,6 +31,8 @@ retries, idempotency keys).
 - `src/policy.ts`, `src/runtime.ts` — the client policy and the runtime that enforces it,
   including the transport per gateway (h2c on Node, HTTP/1.1 on Bun unless overridden).
 - `src/add-function.ts` — `knext add function`.
+- `src/scaffold-go.ts`, `src/scaffold-rust.ts`, `src/scaffold-template.ts` — the server project
+  `knext add function` copies from `templates/go` and `templates/rust`.
 - `src/baseline.ts` — `--against` resolution, including the seam for a deployed baseline.
 - `proto/knext/v1/options.proto` — the knext options contract apps import.
 - `fixtures/zone` — the fixture app whose committed output CI checks with `generate --check`.

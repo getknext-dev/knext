@@ -6,10 +6,8 @@
  * it imports, a `buf.yaml` if the app has none, and the function's entry in
  * `knext.grpc.json`. Writes files only; never touches a cluster.
  *
- * For `--lang go` it also scaffolds the function's server project from
- * `templates/go` into `functions/<name>/` (see scaffold-go.ts). Rust is
- * contract-only until its template is scaffolded the same way.
- * TODO(#2489): `--lang rust` scaffolds from `templates/rust`.
+ * It also scaffolds the function's server project into `functions/<name>/`,
+ * from `templates/go` (scaffold-go.ts) or `templates/rust` (scaffold-rust.ts).
  *
  * Output is a pure function of the name and language, so the same command in
  * two apps writes identical bytes.
@@ -31,7 +29,9 @@ import {
   urlEnvFor,
 } from './config';
 import type { Io } from './generate';
-import { checkModulePath, type StagedGoFunction, stageGoFunction } from './scaffold-go';
+import { checkModulePath, stageGoFunction } from './scaffold-go';
+import { checkCrateName, rustTemplateDir, stageRustFunction } from './scaffold-rust';
+import type { StagedFunction } from './scaffold-template';
 
 /** The options contract shipped in this package (`proto/` at the package root). */
 export function packagedOptionsProto(): string {
@@ -140,11 +140,11 @@ export interface AddFunctionOptions {
   /** Go module path for `--lang go` (default `example.com/<name>`). */
   readonly module?: string;
   readonly io: Io;
-  /** Test seam: the Go template to scaffold from (default: the resolved one). */
+  /** Test seam: the template to scaffold from (default: the resolved one for the language). */
   readonly templateDir?: string;
-  /** Test seam: replaces `buf generate` over the staged Go project. */
+  /** Test seam: replaces code generation over the staged project. */
   readonly generate?: (stageDir: string) => void;
-  /** Test seam: false writes the contract only, as `--lang rust` does (default true). */
+  /** Test seam: false writes the contract only, with no server project (default true). */
   readonly serverProject?: boolean;
   /** Test seam: called before each step; a throw there simulates that step failing. */
   readonly onStep?: (step: string) => void;
@@ -165,7 +165,7 @@ export function addFunction({
   // Every write is undone if a later one fails, so a rerun starts from the same
   // tree. `undo` runs newest-first.
   const undo: Array<() => void> = [];
-  let staged: StagedGoFunction | undefined;
+  let staged: StagedFunction | undefined;
   try {
     const nameProblem = checkFunctionName(name);
     if (nameProblem) throw new GrpcUsageError(nameProblem);
@@ -189,13 +189,17 @@ export function addFunction({
     if (lang === 'go') {
       const moduleProblem = checkModulePath(goModule);
       if (moduleProblem) throw new GrpcUsageError(moduleProblem);
-      if (existsSync(join(cwd, fnDirRel))) {
-        throw new GrpcUsageError(
-          `function "${name}" already exists (${fnDirRel}); nothing was changed`,
-        );
-      }
     } else if (module !== undefined) {
       throw new GrpcUsageError('--module applies to --lang go only');
+    }
+    if (existsSync(join(cwd, fnDirRel))) {
+      throw new GrpcUsageError(
+        `function "${name}" already exists (${fnDirRel}); nothing was changed`,
+      );
+    }
+    if (lang === 'rust' && serverProject) {
+      const crateProblem = checkCrateName(name, templateDir ?? rustTemplateDir());
+      if (crateProblem) throw new GrpcUsageError(crateProblem);
     }
 
     const written: string[] = [];
@@ -213,21 +217,20 @@ export function addFunction({
       writeFileSync(abs, content);
       written.push(rel);
     };
-    if (lang === 'go' && serverProject) {
+    if (serverProject) {
       // Staged first (a failed code generation writes nothing), installed last.
       step('stage');
-      staged = stageGoFunction(
-        {
-          name,
-          pkg,
-          service: `${pascal(name)}Service`,
-          module: goModule,
-          contract: contractFor(name),
-          options: packagedOptionsProto(),
-        },
-        templateDir,
-        generate,
-      );
+      const scaffold = {
+        name,
+        pkg,
+        service: `${pascal(name)}Service`,
+        contract: contractFor(name),
+        options: packagedOptionsProto(),
+      };
+      staged =
+        lang === 'go'
+          ? stageGoFunction({ ...scaffold, module: goModule }, templateDir, generate)
+          : stageRustFunction(scaffold, templateDir, generate);
     }
     if (!existsSync(join(cwd, 'buf.yaml'))) write('buf.yaml', BUF_YAML);
     const optionsRel = join(config.proto, 'knext', 'v1', 'options.proto');

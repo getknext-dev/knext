@@ -38,7 +38,15 @@ describe('knext add function <name> --lang go|rust', () => {
 
   it('vendors the options contract byte-for-byte from the package', () => {
     const app = emptyDir('add-vendor');
-    expect(addFunction({ cwd: app, name: 'orders', lang: 'rust', io: capture().io })).toBe(0);
+    expect(
+      addFunction({
+        cwd: app,
+        name: 'orders',
+        lang: 'rust',
+        serverProject: false,
+        io: capture().io,
+      }),
+    ).toBe(0);
     expect(readFileSync(join(app, 'proto/knext/v1/options.proto'), 'utf8')).toBe(
       readFileSync(join(PKG_DIR, 'proto/knext/v1/options.proto'), 'utf8'),
     );
@@ -46,7 +54,15 @@ describe('knext add function <name> --lang go|rust', () => {
 
   it('maps a dashed name onto a proto package, a service and the URL binding', async () => {
     const app = emptyDir('add-dashed');
-    expect(addFunction({ cwd: app, name: 'user-profile', lang: 'rust', io: capture().io })).toBe(0);
+    expect(
+      addFunction({
+        cwd: app,
+        name: 'user-profile',
+        lang: 'rust',
+        serverProject: false,
+        io: capture().io,
+      }),
+    ).toBe(0);
     const proto = readFileSync(join(app, 'proto/user_profile/v1/user_profile.proto'), 'utf8');
     expect(proto).toContain('package user_profile.v1;');
     expect(proto).toContain('service UserProfileService');
@@ -63,7 +79,15 @@ describe('knext add function <name> --lang go|rust', () => {
     expect(
       addFunction({ cwd: app, name: 'orders', lang: 'go', serverProject: false, io: capture().io }),
     ).toBe(0);
-    expect(addFunction({ cwd: app, name: 'billing', lang: 'rust', io: capture().io })).toBe(0);
+    expect(
+      addFunction({
+        cwd: app,
+        name: 'billing',
+        lang: 'rust',
+        serverProject: false,
+        io: capture().io,
+      }),
+    ).toBe(0);
     const raw = readFileSync(join(app, 'knext.grpc.json'), 'utf8');
     expect(raw.indexOf('"billing"')).toBeLessThan(raw.indexOf('"orders"'));
     expect(loadConfig(app).functions).toEqual({
@@ -135,7 +159,9 @@ describe('knext add function <name> --lang go|rust', () => {
     const proto = join(app, 'proto/orders/v1/orders.proto');
     writeFileSync(proto, `${readFileSync(proto, 'utf8')}// mine\n`);
     const c = capture();
-    expect(addFunction({ cwd: app, name: 'orders', lang: 'rust', io: c.io })).toBe(1);
+    expect(
+      addFunction({ cwd: app, name: 'orders', lang: 'rust', serverProject: false, io: c.io }),
+    ).toBe(1);
     expect(c.err()).toContain('already');
     expect(readFileSync(proto, 'utf8')).toContain('// mine');
     expect(loadConfig(app).functions.orders?.lang).toBe('go');

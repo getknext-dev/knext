@@ -63,6 +63,15 @@ const DECLARED: Record<string, { skips: Record<string, number>; reason: string }
       'and a missing or broken toolchain FAILS rather than vanishing. All other scaffold tests use a ' +
       'generator stub and never skip.',
   },
+  'packages/grpc/src/__tests__/add-function-rust.test.ts': {
+    skips: { 'it.skipIf': 3 },
+    reason:
+      'The three tests that run REAL Rust code generation (`buf generate` with the pinned `cargo install`ed ' +
+      'plugins) and build the scaffold with cargo need the Rust toolchain on PATH. They skip only when ' +
+      '`cargo` is absent AND `CI` is unset, so a contributor machine without Rust still runs the rest; ' +
+      'every CI lane that runs this file has Rust, so there they run and a missing or broken toolchain ' +
+      'FAILS rather than vanishing. All other scaffold tests use a generator stub and never skip.',
+  },
   'packages/kn-next/src/__tests__/compile-include-patched.test.ts': {
     skips: { 'describe.skipIf': 1 },
     reason:

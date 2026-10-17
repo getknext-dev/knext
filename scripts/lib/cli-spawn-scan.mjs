@@ -195,6 +195,15 @@ export const DYNAMIC_SPAWN_ALLOWLIST = [
       'literal "bun".',
   },
   {
+    file: 'packages/grpc/src/scaffold-rust.ts',
+    callee: 'spawnSync',
+    arg: "'./codegen.sh'",
+    reason:
+      'pinned cargo install of protoc plugins; no kn/func. The script is templates/rust/codegen.sh ' +
+      '(CODEGEN_INSTALL_ONLY=1: it installs the pinned plugins and stops), copied into the staging ' +
+      'directory from the template that ships with the package.',
+  },
+  {
     file: 'packages/grpc/src/buf.ts',
     callee: 'spawnSync',
     arg: 'bin',
@@ -238,6 +247,9 @@ function argvProblem(elems, depth = 0) {
   if (head.type !== 'string') return 'unparseable';
   const prog = base(head.value.trim());
 
+  // A script's body is not in the source being scanned, so what it runs cannot
+  // be read: spawning a `.sh` file is unreadable, directly or through a shell.
+  if (/\.sh$/.test(prog)) return 'unparseable';
   if (prog === 'kn') return 'kn is never run by the CLI';
   if (prog === 'func') {
     if (rest.some((e) => e.type === 'string' && e.value.trim() === 'deploy')) {
