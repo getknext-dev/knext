@@ -7,11 +7,13 @@ zone's generated glue through the real signer. CI runs it as
 kind cluster of your own:
 
 ```bash
-packages/grpc/e2e/z7-identity-kind/run.sh          # all phases: 30 to 40 minutes from nothing, about 15 once the cluster and images exist
+packages/grpc/e2e/z7-identity-kind/run.sh          # all phases: about 12 minutes on a GitHub-hosted runner
 PHASES="deploy verify" Z7_WITH_RUST=0 packages/grpc/e2e/z7-identity-kind/run.sh
 ```
 
-Needs `docker`, `kind`, `kubectl`, `jq`, `go`, `bun` and `node` on the PATH.
+Needs `docker`, `kind`, `kubectl`, `jq`, `go`, `bun` and `node` on the PATH. The first local run is longer
+(it builds the operator and the images); against a cluster that already has them, `PHASES="deploy verify rotate leaks"`
+is about 15 minutes, most of it waiting for the kubelet.
 
 | Phase | What it does and proves |
 | --- | --- |

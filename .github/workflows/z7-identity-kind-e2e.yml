@@ -89,7 +89,7 @@ jobs:
   z7-identity-e2e:
     name: Z7 zone identity tokens on kind (key, JWKS, rotation, warm functions)
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 40
     env:
       KIND_CLUSTER: z7-identity-e2e
       REGISTRY_NAME: kind-registry
