@@ -24,6 +24,14 @@ describe('cache-invalidate auth (B1 — no unauthenticated mutating endpoint)', 
     expect(isAuthorized('Basic xyz', TOKEN)).toBe(false);
   });
 
+  it('rejects a wrong token of the SAME length (the compare is by content, not length)', () => {
+    const sameLength = 'x'.repeat(TOKEN.length);
+    expect(sameLength).toHaveLength(TOKEN.length);
+    expect(isAuthorized(`Bearer ${sameLength}`, TOKEN)).toBe(false);
+    // One character off at the end is the case a prefix or length check lets through.
+    expect(isAuthorized(`Bearer ${TOKEN.slice(0, -1)}X`, TOKEN)).toBe(false);
+  });
+
   it('rejects a token of different length (no timing-leak shortcut to true)', () => {
     expect(isAuthorized('Bearer short', TOKEN)).toBe(false);
     expect(isAuthorized(`Bearer ${TOKEN}extra`, TOKEN)).toBe(false);
