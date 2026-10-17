@@ -77,6 +77,11 @@ const REPO_ROOT = resolve(import.meta.dirname, '..');
 const WORKFLOW_PATH = resolve(REPO_ROOT, '.github/workflows/mutation-prover-nightly.yml');
 const LANE_RUNNER = 'scripts/run-mutation-provers.mjs';
 const LANE_JOB_ID = 'run-mutation-provers';
+// #2499: the lane job is a matrix of ref x shard fed by the plan job, so its
+// `strategy:` is a DYNAMIC matrix — permitted by opt-in, for this job only. The
+// aggregate job is what fails on an empty expansion (see
+// tests/mutation-prover-lane-sharding.test.ts).
+const LANE_AUDIT_OPTIONS = { dynamicMatrixJobs: [LANE_JOB_ID] };
 
 const read = (path: string) => readFileSync(path, 'utf8');
 
@@ -361,7 +366,7 @@ describe('#693 the lane job can NOT be conditioned off — a skip is silent AND 
 
   it('the lane job, and everything it needs, carries no disarm', () => {
     const problems: string[] = [];
-    const closure = auditJobCanNotSkip(laneJobs(), LANE_JOB_ID, problems);
+    const closure = auditJobCanNotSkip(laneJobs(), LANE_JOB_ID, problems, LANE_AUDIT_OPTIONS);
     expect(problems, problems.join(' | ')).toEqual([]);
     expect(closure, 'the audit must have actually reached the lane job').toContain(LANE_JOB_ID);
   });
@@ -370,7 +375,12 @@ describe('#693 the lane job can NOT be conditioned off — a skip is silent AND 
     const jobs = laneJobs() as unknown as Record<string, Record<string, unknown>>;
     (jobs[LANE_JOB_ID] as Record<string, unknown>).if = "github.actor != 'dependabot[bot]'";
     const problems: string[] = [];
-    auditJobCanNotSkip(jobs as unknown as Record<string, never>, LANE_JOB_ID, problems);
+    auditJobCanNotSkip(
+      jobs as unknown as Record<string, never>,
+      LANE_JOB_ID,
+      problems,
+      LANE_AUDIT_OPTIONS,
+    );
     expect(problems.join(' ')).toMatch(/job-level `if:`/);
   });
 
@@ -379,7 +389,12 @@ describe('#693 the lane job can NOT be conditioned off — a skip is silent AND 
     (jobs[LANE_JOB_ID] as { steps: Array<Record<string, unknown>> }).steps[0]['continue-on-error'] =
       true;
     const problems: string[] = [];
-    auditJobCanNotSkip(jobs as unknown as Record<string, never>, LANE_JOB_ID, problems);
+    auditJobCanNotSkip(
+      jobs as unknown as Record<string, never>,
+      LANE_JOB_ID,
+      problems,
+      LANE_AUDIT_OPTIONS,
+    );
     expect(problems.join(' ')).toMatch(/continue-on-error/);
   });
 });
