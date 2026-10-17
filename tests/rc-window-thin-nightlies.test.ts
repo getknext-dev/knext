@@ -48,6 +48,18 @@ describe('#1675: thin early-warning nightlies during credential window', () => {
     }
   });
 
+  it('mutation-prover-nightly has TWO schedule entries on purpose: weekly (#1675) + daily integration/v2-only', () => {
+    // The loop above reads schedule[0] only, so the second entry would otherwise be
+    // invisible to this guard. The refs each entry proves are asserted in
+    // tests/mutation-prover-lane-sharding.test.ts.
+    const workflow = YAML.parse(
+      readFileSync('.github/workflows/mutation-prover-nightly.yml', 'utf-8'),
+    );
+    const crons = (workflow.on?.schedule ?? []).map((e: { cron: string }) => e.cron);
+    expect(crons).toEqual(['7 6 * * 0', '37 6 * * 1-6']);
+    expect(crons[0].split(' ')[4]).toMatch(/^[0-6]$/);
+  });
+
   it('security workflows stay daily (never weekly)', () => {
     for (const filename of keptDaily) {
       const filepath = join('.github/workflows', filename);

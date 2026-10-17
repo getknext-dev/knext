@@ -46,7 +46,7 @@
  */
 
 import { execFileSync, spawn } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { discoverProvers, evaluateProverRun } from './lib/prover-lane.mjs';
@@ -177,6 +177,36 @@ if (args.list) {
   process.exit(0);
 }
 
+/** Run a repo command, or null when it cannot (not a repository, no such command). */
+function repoOut(argv) {
+  try {
+    return execFileSync(argv[0], argv.slice(1), {
+      cwd: REPO_ROOT,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+  } catch {
+    return null;
+  }
+}
+
+// The leg's ACTUAL checked-out HEAD. The report used to echo PROVER_LANE_SHA back,
+// which is the plan's own claim, so the aggregate compared the plan with itself.
+// Reading HEAD is the only way the aggregate's sha check can ever fail.
+const actualSha = repoOut(['git', 'rev-parse', 'HEAD'])?.trim() ?? null;
+const plannedSha = process.env.PROVER_LANE_SHA;
+if (plannedSha && actualSha !== plannedSha) {
+  fatal(
+    `the checked-out HEAD (${actualSha ?? 'unreadable'}) is not the sha the plan pinned (${plannedSha}) — this leg would prove the wrong tree`,
+  );
+}
+
+/** Untracked, non-ignored files, as a Set (null when the tree is not a repository). */
+function untrackedFiles() {
+  const out = repoOut(['git', 'ls-files', '--others', '--exclude-standard', '-z']);
+  return out === null ? null : new Set(out.split('\0').filter(Boolean));
+}
+
 const timeoutMs = proverTimeoutMs();
 console.log(
   `Running ${provers.length} of ${discovered.length} mutation prover(s)` +
@@ -186,28 +216,48 @@ console.log(
 for (const p of provers) console.log(`  - ${p.relPath}`);
 console.log('');
 
-/** After a kill the prover's byte-snapshot restore never ran; do not let the next prover inherit it. */
-function restoreTreeAfterKill() {
-  if (process.env.GITHUB_ACTIONS !== 'true') {
+/**
+ * After a kill the prover's byte-snapshot restore never ran; do not let the next
+ * prover inherit a half-mutated tree.
+ *
+ * Two halves, because a prover can leave two kinds of residue: a MODIFIED tracked
+ * file (restored by checkout) and a NEW untracked file (checkout cannot see it).
+ * The untracked half removes only what appeared since `before` was taken, never
+ * the whole untracked set, so lane-owned files that existed before the prover
+ * started (and everything git ignores: node_modules, dist, bin) are preserved.
+ */
+function restoreTreeAfterKill(before) {
+  if (process.env.GITHUB_ACTIONS !== 'true' && process.env.KNEXT_LANE_RESTORE_AFTER_KILL !== '1') {
     return 'the prover was killed mid-mutation; this is not CI so the tree was NOT restored — check the working tree';
   }
+  const notes = [];
   try {
     execFileSync('git', ['checkout', '--', '.'], { cwd: REPO_ROOT, stdio: 'ignore' });
-    return 'the tree was restored before the next prover';
+    notes.push('tracked files restored');
   } catch (error) {
     return `RESTORE FAILED (${error.message}) — later provers ran on a possibly-dirty tree`;
   }
+  const after = untrackedFiles();
+  if (before && after) {
+    const created = [...after].filter((f) => !before.has(f));
+    for (const f of created) rmSync(resolve(REPO_ROOT, f), { force: true });
+    notes.push(`${created.length} untracked file(s) it created removed`);
+  } else {
+    notes.push('untracked files could not be compared');
+  }
+  return `${notes.join(', ')} before the next prover`;
 }
 
 const results = [];
 for (const prover of provers) {
   console.log(`\n${'═'.repeat(78)}\n▶ ${prover.relPath}\n${'═'.repeat(78)}`);
   const started = Date.now();
+  const untrackedBefore = untrackedFiles();
   const run = await runProver(prover.absPath, { cwd: REPO_ROOT, timeoutMs });
   if (run.error) console.error(`   spawn error: ${run.error.message}`);
   const { summary, findings } = evaluateProverRun({ status: run.status, output: run.output });
   if (run.timedOut) {
-    const note = restoreTreeAfterKill();
+    const note = restoreTreeAfterKill(untrackedBefore);
     findings.unshift(
       `TIMED OUT after ${Math.round((Date.now() - started) / 1000)}s (bound ${Math.round(timeoutMs / 1000)}s) — killed with its process group; ${note}`,
     );
@@ -226,7 +276,7 @@ for (const r of results) {
 if (args.report) {
   const report = makeReport({
     ref: process.env.PROVER_LANE_REF ?? 'unknown',
-    sha: process.env.PROVER_LANE_SHA ?? 'unknown',
+    sha: actualSha ?? 'unknown',
     shard: shard?.index ?? 1,
     shards: shard?.count ?? 1,
     discovered: discovered.map((p) => p.relPath),

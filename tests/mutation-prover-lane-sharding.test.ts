@@ -20,11 +20,9 @@ import {
   estimateShardMinutes,
   LANE_REFS,
   makeReport,
-  PENDING_PROVER_WEIGHT_MINUTES,
   PROVER_WEIGHT_MINUTES,
   parseShardSpec,
   proverTimeoutMs,
-  proverWeight,
   reportFileName,
   shardProvers,
   WEIGHTED_ON_ONE_REF_ONLY,
@@ -124,39 +122,6 @@ describe('#2208 legs are balanced by ESTIMATED COST, not by count', () => {
     }
   });
 
-  it('a pending weight is honoured by the partition, and is promoted once its prover exists', () => {
-    const have = new Set(real().map((p) => p.relPath));
-    for (const [path, w] of Object.entries(PENDING_PROVER_WEIGHT_MINUTES)) {
-      expect(proverWeight({ relPath: path }), path).toBe(w);
-      expect(
-        have.has(path),
-        `${path} now exists: move its weight from PENDING_PROVER_WEIGHT_MINUTES to PROVER_WEIGHT_MINUTES`,
-      ).toBe(false);
-      expect(Object.keys(PROVER_WEIGHT_MINUTES), path).not.toContain(path);
-    }
-  });
-
-  it('a cargo-heavy prover that arrives is balanced like any other (the pending weight shapes the split)', () => {
-    const heavy = Object.keys(PENDING_PROVER_WEIGHT_MINUTES)[0];
-    const withIt = [...real(), { relPath: heavy }];
-    const loads = Array.from({ length: N }, (_, i) => estimateShardMinutes(withIt, i + 1, N));
-    const mean = loads.reduce((a, b) => a + b, 0) / N;
-    const biggest = Math.max(
-      ...Object.values(PROVER_WEIGHT_MINUTES),
-      ...Object.values(PENDING_PROVER_WEIGHT_MINUTES),
-    );
-    expect(Math.max(...loads)).toBeLessThanOrEqual(mean + biggest);
-    // ...and it does not share a leg with the other >=30 minute provers.
-    const legOf = (path: string) =>
-      Array.from({ length: N }, (_, i) => i + 1).find((i) =>
-        shardProvers(withIt, i, N).some((p) => p.relPath === path),
-      );
-    const big = Object.entries(PROVER_WEIGHT_MINUTES)
-      .filter(([, w]) => w >= 30)
-      .map(([p]) => p);
-    for (const p of big) expect(legOf(p), `${p} shares a leg with ${heavy}`).not.toBe(legOf(heavy));
-  });
-
   it('no leg exceeds the mean estimated load by more than the heaviest single prover (the LPT bound)', () => {
     const all = real();
     const loads = Array.from({ length: N }, (_, i) => estimateShardMinutes(all, i + 1, N));
@@ -166,11 +131,14 @@ describe('#2208 legs are balanced by ESTIMATED COST, not by count', () => {
   });
 
   it('the heaviest provers are NOT co-located (a count split put them in one leg)', () => {
+    const all = real();
+    const present = new Set(all.map((p) => p.relPath));
+    // Only provers this ref HAS: the cargo-heavy Rust scaffold prover (60) exists
+    // on integration/v2 only, and must not share a leg with the other long ones.
     const heavy = Object.entries(PROVER_WEIGHT_MINUTES)
-      .filter(([, w]) => w >= 20)
+      .filter(([path, w]) => w >= 20 && present.has(path))
       .map(([p]) => p);
     expect(heavy.length).toBeGreaterThanOrEqual(3);
-    const all = real();
     const legOf = (path: string) =>
       Array.from({ length: N }, (_, i) => i + 1).find((i) =>
         shardProvers(all, i, N).some((p) => p.relPath === path),
@@ -422,6 +390,25 @@ describe('#2208 the runner: --shard, --list, --report and a PER-PROVER timeout',
     }
     return dir;
   };
+  /** Make `dir` a one-commit repository and return its HEAD. */
+  const commitAll = (dir: string): string => {
+    const env = {
+      ...process.env,
+      GIT_AUTHOR_NAME: 't',
+      GIT_AUTHOR_EMAIL: 't@t',
+      GIT_COMMITTER_NAME: 't',
+      GIT_COMMITTER_EMAIL: 't@t',
+    };
+    for (const a of [
+      ['init', '-q'],
+      ['add', '-A'],
+      ['-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'x'],
+    ]) {
+      const r = spawnSync('git', a, { cwd: dir, env, encoding: 'utf8' });
+      if (r.status !== 0) throw new Error(`git ${a.join(' ')}: ${r.stderr}`);
+    }
+    return spawnSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).stdout.trim();
+  };
   const ok = (declared: number, run: number) =>
     `console.log('::prover-summary:: ' + JSON.stringify({ declared: ${declared}, run: ${run} }));`;
   const run = (dir: string, args: string[], env: Record<string, string> = {}) =>
@@ -499,11 +486,12 @@ describe('#2208 the runner: --shard, --list, --report and a PER-PROVER timeout',
       'mutation-prove-b.mjs': ok(5, 5),
       'mutation-prove-c.mjs': ok(2, 1),
     });
+    const head = commitAll(dir);
     try {
       const report = join(dir, 'report.json');
       const r = run(dir, ['--shard', '2/2', '--report', report], {
         PROVER_LANE_REF: 'x',
-        PROVER_LANE_SHA: 'e'.repeat(40),
+        PROVER_LANE_SHA: head,
       });
       expect(r.status, r.stdout + r.stderr).toBe(0);
       const rep = JSON.parse(read(report));
@@ -515,12 +503,108 @@ describe('#2208 the runner: --shard, --list, --report and a PER-PROVER timeout',
       ]);
       expect(rep.shard).toBe(2);
       expect(rep.shards).toBe(2);
-      expect(rep.sha).toBe('e'.repeat(40));
+      expect(rep.sha, 'the report carries the leg’s ACTUAL HEAD').toBe(head);
       expect(rep.results[0].declared).toBe(5);
       expect(rep.results[0].run).toBe(5);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it('a checked-out HEAD that is not the planned sha FAILS the leg before any prover runs', () => {
+    const dir = makeTree({ 'mutation-prove-a.mjs': 'throw new Error("must not run");' });
+    commitAll(dir);
+    try {
+      const r = run(dir, ['--shard', '1/1'], { PROVER_LANE_SHA: 'd'.repeat(40) });
+      expect(r.status).not.toBe(0);
+      expect(`${r.stdout}${r.stderr}`).toMatch(/is not the sha the plan pinned/);
+      expect(r.stdout).not.toMatch(/▶ scripts/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('the report records the ACTUAL head, not the sha the plan claimed', () => {
+    // No PROVER_LANE_SHA in the environment: nothing to compare, but the report
+    // must still carry the real HEAD (it used to echo the env var back).
+    const dir = makeTree({ 'mutation-prove-a.mjs': ok(1, 1) });
+    const head = commitAll(dir);
+    try {
+      const report = join(dir, 'report.json');
+      const r = run(dir, ['--report', report]);
+      expect(r.status, r.stdout + r.stderr).toBe(0);
+      expect(JSON.parse(read(report)).sha).toBe(head);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  describe('after a timeout the tree is restored — tracked AND untracked residue', () => {
+    // A killed prover never ran its byte-snapshot restore. Two kinds of residue:
+    // a modified tracked file (git checkout fixes it) and a NEW untracked file
+    // (git checkout cannot see it). Files that existed before the prover started
+    // are lane-owned and must survive.
+    const tree = () => {
+      const dir = makeTree({
+        'mutation-prove-a-leaky.mjs': `
+          import { writeFileSync } from 'node:fs';
+          writeFileSync('tracked.txt', 'MUTATED');
+          writeFileSync('leak.txt', 'planted by the killed prover');
+          setInterval(() => {}, 1000);`,
+        'mutation-prove-b-after.mjs': ok(1, 1),
+      });
+      writeFileSync(join(dir, 'tracked.txt'), 'original');
+      commitAll(dir);
+      // Untracked, and present BEFORE any prover starts: lane-owned.
+      writeFileSync(join(dir, 'lane-owned.txt'), 'lane');
+      return dir;
+    };
+    const env = { KNEXT_PROVER_TIMEOUT_MS: '1500', KNEXT_LANE_RESTORE_AFTER_KILL: '1' };
+
+    it('restores the modified tracked file', () => {
+      const dir = tree();
+      try {
+        const r = run(dir, [], env);
+        expect(r.status).not.toBe(0);
+        expect(read(join(dir, 'tracked.txt'))).toBe('original');
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }, 30_000);
+
+    it('removes the untracked file the killed prover created, but keeps lane-owned files', () => {
+      const dir = tree();
+      try {
+        run(dir, [], env);
+        expect(existsSync(join(dir, 'leak.txt')), 'the killed prover’s new file survived').toBe(
+          false,
+        );
+        expect(existsSync(join(dir, 'lane-owned.txt')), 'a lane-owned file was deleted').toBe(true);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }, 30_000);
+
+    it('the next prover still runs on the restored tree', () => {
+      const dir = tree();
+      try {
+        const r = run(dir, [], env);
+        expect(r.stdout).toMatch(/ok\s+1\/1\s+scripts\/mutation-prove-b-after\.mjs/);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }, 30_000);
+
+    it('outside CI (and without the opt-in) the tree is NOT touched, and the finding says so', () => {
+      const dir = tree();
+      try {
+        const r = run(dir, [], { KNEXT_PROVER_TIMEOUT_MS: '1500', GITHUB_ACTIONS: '' });
+        expect(read(join(dir, 'tracked.txt'))).toBe('MUTATED');
+        expect(`${r.stdout}${r.stderr}`).toMatch(/tree was NOT restored/);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }, 30_000);
   });
 
   it('declared != run in a shard still FAILS the shard (the count check survived the split)', () => {
@@ -629,6 +713,51 @@ describe('#2499 the workflow: both refs, sharded, per-shard timeout, aggregated,
     expect(dispatch, 'the dispatch input default').toBe('main integration/v2');
     expect(LANE_REFS.join(' '), 'the library constant the plan script falls back to').toBe(
       'main integration/v2',
+    );
+  });
+
+  it('the schedule is weekly over BOTH refs plus a DAILY entry that proves integration/v2 ONLY', () => {
+    const crons = (wf.on as { schedule?: Array<{ cron: string }> }).schedule?.map((e) => e.cron);
+    expect(crons).toEqual(['7 6 * * 0', '37 6 * * 1-6']);
+    const planStep = (wf.jobs.plan?.steps ?? []).find((s) => s.id === 'plan');
+    const refs = String((planStep?.env as Record<string, unknown>)?.LANE_REFS ?? '');
+    // The daily cron string appears in the mapping, and maps to v2 alone...
+    expect(refs).toContain("github.event.schedule == '37 6 * * 1-6' && 'integration/v2'");
+    // ...while the fall-through (the weekly run, and a drifted string) is BOTH refs.
+    expect(refs).toMatch(/\|\| 'main integration\/v2' \}\}$/);
+  });
+
+  it('the residue step also catches NEW untracked files, against a snapshot taken before the provers', () => {
+    const steps = (wf.jobs['run-mutation-provers'].steps ?? []) as Step[];
+    const snap = steps.findIndex(
+      (s) =>
+        /untracked-before\.txt/.test(String(s.run ?? '')) && !/comm /.test(String(s.run ?? '')),
+    );
+    const lane = steps.findIndex((s) => /run-mutation-provers\.mjs/.test(String(s.run ?? '')));
+    const residue = steps.find((s) => /scan-mutation-residue\.mjs/.test(String(s.run ?? '')));
+    expect(snap, 'no step records the untracked files').toBeGreaterThanOrEqual(0);
+    expect(snap, 'the snapshot must precede the provers').toBeLessThan(lane);
+    expect(String(residue?.run)).toMatch(/comm -13 .*untracked-before\.txt.*untracked-after\.txt/);
+    expect(String(residue?.run)).toMatch(/if \[ -n "\$\{new\}" \]; then/);
+    expect(String(residue?.run)).toMatch(/exit 1/);
+  });
+
+  it('the cargo-heavy Rust scaffold prover ADOPTS the per-leg cargo dir, for its own process only', () => {
+    // It exists on integration/v2 only; on a ref without it there is nothing to adopt
+    // and the seam stays unused, which is correct, not a gap.
+    const path = resolve(REPO_ROOT, 'scripts/mutation-prove-2489-rust-scaffold.mjs');
+    if (existsSync(path)) {
+      expect(read(path)).toMatch(
+        /if \(process\.env\.KNEXT_LANE_CARGO_TARGET_DIR\) \{\s*process\.env\.CARGO_TARGET_DIR = process\.env\.KNEXT_LANE_CARGO_TARGET_DIR;/,
+      );
+    }
+    // The lane keeps the generators between that prover's runs (unconditional: the
+    // workflow is the same file on every ref, whether or not the prover exists).
+    const step = (wf.jobs['run-mutation-provers'].steps ?? []).find((s) =>
+      /run-mutation-provers\.mjs/.test(String(s.run ?? '')),
+    );
+    expect(String((step?.env as Record<string, unknown>)?.KNEXT_RUST_CODEGEN_DIR)).toMatch(
+      /^\$\{\{ runner\.temp \}\}\//,
     );
   });
 
