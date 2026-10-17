@@ -129,7 +129,7 @@ runs:
       shell: bash
       working-directory: ${{ inputs.working-directory }}
       env:
-        KNEXT_CLI_PACKAGE: 'kn-next@1.3.1'
+        KNEXT_CLI_PACKAGE: '@getknext/core@1.3.1'
       run: |
         set -euo pipefail
         npx --yes "$KNEXT_CLI_PACKAGE" doctor
@@ -144,7 +144,7 @@ runs:
       # would write shell with the kubeconfig in scope. The pinned CLI version is
       # not an input: this legacy action only shrinks (see the header).
       env:
-        KNEXT_CLI_PACKAGE: 'kn-next@1.3.1'
+        KNEXT_CLI_PACKAGE: '@getknext/core@1.3.1'
         KNEXT_REGISTRY: ${{ inputs.registry }}
         KNEXT_BUCKET: ${{ inputs.bucket }}
         KNEXT_TAG: ${{ inputs.tag }}

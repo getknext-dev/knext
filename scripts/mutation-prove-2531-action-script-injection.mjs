@@ -167,16 +167,16 @@ const MUTATIONS = [
     subject: 'root',
     claim: 'legacy root action: the doctor step runs an unpinned package',
     anchor:
-      'KNEXT_CLI_PACKAGE: \'kn-next@1.3.1\'\n      run: |\n        set -euo pipefail\n        npx --yes "$KNEXT_CLI_PACKAGE" doctor',
+      'KNEXT_CLI_PACKAGE: \'@getknext/core@1.3.1\'\n      run: |\n        set -euo pipefail\n        npx --yes "$KNEXT_CLI_PACKAGE" doctor',
     replacement:
-      'KNEXT_CLI_PACKAGE: \'kn-next\'\n      run: |\n        set -euo pipefail\n        npx --yes "$KNEXT_CLI_PACKAGE" doctor',
+      'KNEXT_CLI_PACKAGE: \'@getknext/core\'\n      run: |\n        set -euo pipefail\n        npx --yes "$KNEXT_CLI_PACKAGE" doctor',
   },
   {
     id: 'V9',
     subject: 'root',
     claim: 'the legacy root pin drifts from the published action pin',
-    anchor: "KNEXT_CLI_PACKAGE: 'kn-next@1.3.1'\n        KNEXT_REGISTRY",
-    replacement: "KNEXT_CLI_PACKAGE: 'kn-next@1.3.0'\n        KNEXT_REGISTRY",
+    anchor: "KNEXT_CLI_PACKAGE: '@getknext/core@1.3.1'\n        KNEXT_REGISTRY",
+    replacement: "KNEXT_CLI_PACKAGE: '@getknext/core@1.3.0'\n        KNEXT_REGISTRY",
   },
 
   // ── S: the scan itself ─────────────────────────────────────────────────────
