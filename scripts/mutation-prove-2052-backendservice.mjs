@@ -987,8 +987,8 @@ const MUTATIONS = [
     claim: 'a field is left unclassified (language dropped from the exclusion list)',
     subject: 'specpin',
     anchor:
-      '\t"language": {exclusionNotRendered,\n\t\t"Informational metadata; the operator renders nothing from it into the function\'s objects."},\n',
-    replacement: '',
+      '\t"language": {exclusionNotRendered,\n\t\t"Informational metadata; the operator renders nothing from it into the function\'s objects."},',
+    replacement: '\t// "language" is no longer classified',
     test: unit('TestEveryBackendServiceSpecFieldIsBoundOrReviewed'),
   },
   {
