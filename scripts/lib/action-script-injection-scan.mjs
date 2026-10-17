@@ -173,12 +173,17 @@ export const WORKFLOW_GITHUB_ALLOWED = new Set([
 /**
  * Put an expression into a form the reference scan can read: lower case, `['x']`
  * as `.x`, no whitespace around `.` or before `[`, string literals blanked.
- * Returns null when it cannot be read (unbalanced quotes, parentheses or brackets).
+ * Returns null when it cannot be read: a non-ASCII character, or unbalanced quotes,
+ * parentheses or brackets.
  *
  * @param {string} expression
  * @returns {string | null}
  */
 function normalizeExpression(expression) {
+  // Before lower-casing: toLowerCase maps some non-ASCII letters to ASCII ones (the
+  // Kelvin sign to k), and the runner folds case differently from this scan. A name
+  // spelled with a long s or a fullwidth letter is not one this scan can vouch for.
+  if (/[^ -~\t\n\r]/.test(expression)) return null;
   let s = expression.toLowerCase();
   if ((s.match(/'/g) ?? []).length % 2 !== 0) return null;
   if ((s.match(/"/g) ?? []).length % 2 !== 0) return null;
@@ -206,7 +211,11 @@ function normalizeExpression(expression) {
  */
 export function workflowExpressionProblems(expression, env, seen = new Set()) {
   const s = normalizeExpression(expression);
-  if (s === null) return ['unparseable expression (unbalanced quotes, parentheses or brackets)'];
+  if (s === null) {
+    return [
+      'unparseable expression (non-ASCII character, or unbalanced quotes, parentheses or brackets)',
+    ];
+  }
   const problems = [];
   const re = /(^|[^\w.-])(github|inputs|env)(?![\w-])/g;
   for (let m = re.exec(s); m !== null; m = re.exec(s)) {
@@ -234,8 +243,20 @@ export function workflowExpressionProblems(expression, env, seen = new Set()) {
   return problems;
 }
 
+/**
+ * The env key that stands for "any name": an `env:` written as a string expression
+ * (`env: ${{ fromJSON(...) }}`) defines names the scan cannot list. `*` cannot be a
+ * real variable name, so it cannot collide with one.
+ */
+const ENV_WILDCARD = '*';
+
 /** True when env value `name` contains an expression that is not safe in a script body. */
 function envTainted(name, env, seen) {
+  // A string-valued env at this scope or above defines any name: if it is built from
+  // untrusted text, so is every env.X.
+  if (name !== ENV_WILDCARD && env.has(ENV_WILDCARD) && envTainted(ENV_WILDCARD, env, seen)) {
+    return true;
+  }
   const value = env.get(name);
   if (typeof value !== 'string') return false;
   if (seen.has(name)) return true; // a cycle cannot be resolved: fail closed
@@ -243,11 +264,32 @@ function envTainted(name, env, seen) {
   return expressionsIn(value).some((e) => workflowExpressionProblems(e, env, next).length > 0);
 }
 
-/** Lower-cased name to value for an `env:` map (anything that is not a map is empty). */
+/**
+ * Lower-cased name to value for an `env:` block. A string (an expression standing for
+ * the whole mapping) is recorded under {@link ENV_WILDCARD}.
+ */
 function envEntries(env) {
   const out = new Map();
-  if (env && typeof env === 'object' && !Array.isArray(env)) {
+  if (typeof env === 'string') {
+    out.set(ENV_WILDCARD, env);
+  } else if (env && typeof env === 'object' && !Array.isArray(env)) {
     for (const [k, v] of Object.entries(env)) out.set(String(k).toLowerCase(), v);
+  }
+  return out;
+}
+
+/**
+ * Merge env scopes, later over earlier. The wildcard is the exception: a string env at
+ * ANY scope can define any name, and a mapping below it cannot prove otherwise, so
+ * the wildcard values accumulate instead of overriding.
+ */
+function mergeEnvs(...scopes) {
+  const out = new Map();
+  for (const scope of scopes) {
+    for (const [k, v] of scope) {
+      if (k === ENV_WILDCARD && out.has(k)) out.set(k, `${out.get(k)} ${v}`);
+      else out.set(k, v);
+    }
   }
   return out;
 }
@@ -272,11 +314,7 @@ export function scanWorkflowText(text, file) {
     }
     job.steps.forEach((step, i) => {
       const name = `${jobId}/${String(step?.name ?? step?.id ?? `#${i + 1}`)}`;
-      const env = new Map([
-        ...envEntries(doc?.env),
-        ...envEntries(job.env),
-        ...envEntries(step?.env),
-      ]);
+      const env = mergeEnvs(envEntries(doc?.env), envEntries(job.env), envEntries(step?.env));
       for (const [key, body] of scriptBodies(step)) {
         for (const expression of expressionsIn(body)) {
           for (const reason of workflowExpressionProblems(expression, env)) {

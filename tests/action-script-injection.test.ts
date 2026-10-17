@@ -274,6 +274,24 @@ describe('workflows — event data in a run: body (#2531)', () => {
     });
   }
 
+  // A name spelled with a character this scan cannot fold the way the runner does is
+  // not one it can vouch for: fullwidth letters, a long s, the Kelvin sign (which
+  // lower-cases to an ASCII k), a Cyrillic look-alike.
+  for (const expr of [
+    'ｇithub.head_ref',
+    'github.ſha',
+    'github.Key',
+    'github.event_name == а',
+    "format('{0}', github.sha) + 'é'",
+    `github.sha${String.fromCharCode(0xa0)}== github.run_id`,
+  ]) {
+    it(`fails closed on a non-ASCII character: \${{ ${JSON.stringify(expr)} }}`, () => {
+      const f = scanWorkflowText(workflow(`echo "\${{ ${expr} }}"`), 'w.yml');
+      expect(f).toHaveLength(1);
+      expect(f[0]?.reason).toMatch(/unparseable.*non-ASCII/);
+    });
+  }
+
   const OK = [
     'matrix.shard',
     'steps.build.outcome',
@@ -394,6 +412,114 @@ describe('workflows — event data in a run: body (#2531)', () => {
       expect(
         scanWorkflowText(withEnv({ wf: [TAINT] }, 'echo "${{ toJSON(env) }}"'), 'w.yml'),
       ).toHaveLength(1);
+    });
+
+    describe('an env: written as a string expression stands for any name', () => {
+      const BODY = 'github.event.pull_request.body';
+      /** `env: <value>` at the given scope; `mapping` lines go in a mapping at another scope. */
+      const withStringEnv = (
+        scope: 'wf' | 'job' | 'step',
+        value: string,
+        body: string,
+        mapping: { scope: 'wf' | 'job' | 'step'; lines: string[] } | null = null,
+      ) => {
+        const at = (s: 'wf' | 'job' | 'step', pad: string) => {
+          if (scope === s) return [`${pad}env: ${value}`];
+          if (mapping?.scope === s)
+            return [`${pad}env:`, ...mapping.lines.map((l) => `${pad}  ${l}`)];
+          return [];
+        };
+        return [
+          'name: t',
+          'on: pull_request',
+          ...at('wf', ''),
+          'jobs:',
+          '  j:',
+          '    runs-on: ubuntu-latest',
+          ...at('job', '    '),
+          '    steps:',
+          '      - name: s',
+          ...at('step', '        '),
+          '        run: |',
+          `          ${body}`,
+          '',
+        ].join('\n');
+      };
+      const TAINTED = `\${{ fromJSON(${BODY}) }}`;
+
+      for (const scope of ['wf', 'job', 'step'] as const) {
+        it(`${scope}-level: env.X is flagged when the whole env is built from event data`, () => {
+          const f = scanWorkflowText(
+            withStringEnv(scope, TAINTED, 'echo "${{ env.ANY }}"'),
+            'w.yml',
+          );
+          expect(f).toHaveLength(1);
+          expect(f[0]?.expression).toBe('env.ANY');
+        });
+
+        it(`${scope}-level: toJSON(env) is flagged too`, () => {
+          const f = scanWorkflowText(
+            withStringEnv(scope, TAINTED, 'echo "${{ toJSON(env) }}"'),
+            'w.yml',
+          );
+          expect(f).toHaveLength(1);
+        });
+      }
+
+      it('a mapping below a tainted string env cannot vouch for a name', () => {
+        // The job-level string could define HEAD as well; the step-level SHA does not prove otherwise.
+        const text = withStringEnv('job', TAINTED, 'echo "${{ env.HEAD }}"', {
+          scope: 'step',
+          lines: ['HEAD: ${{ github.sha }}'],
+        });
+        expect(scanWorkflowText(text, 'w.yml')).toHaveLength(1);
+      });
+
+      it('a safe string env at a lower scope does not clear a tainted one above it', () => {
+        const text = [
+          'name: t',
+          'on: pull_request',
+          `env: ${TAINTED}`,
+          'jobs:',
+          '  j:',
+          '    runs-on: ubuntu-latest',
+          '    steps:',
+          '      - name: s',
+          '        env: ${{ fromJSON(vars.CFG) }}',
+          '        run: |',
+          '          echo "${{ env.ANY }}"',
+          '',
+        ].join('\n');
+        expect(scanWorkflowText(text, 'w.yml')).toHaveLength(1);
+        // And the other way round: the tainted one is the lower scope.
+        const flipped = text
+          .replace(`env: ${TAINTED}\n`, 'env: ${{ fromJSON(vars.CFG) }}\n')
+          .replace('        env: ${{ fromJSON(vars.CFG) }}', `        env: ${TAINTED}`);
+        expect(scanWorkflowText(flipped, 'w.yml')).toHaveLength(1);
+      });
+
+      it('a tainted string env is flagged when built from an input, and chained through env', () => {
+        for (const v of ['${{ fromJSON(inputs.cfg) }}', '${{ fromJSON(env.OTHER) }}']) {
+          const f = scanWorkflowText(withStringEnv('job', v, 'echo "${{ env.ANY }}"'), 'w.yml');
+          expect(f).toHaveLength(1);
+        }
+      });
+
+      it('a string env built only from safe values taints nothing', () => {
+        for (const v of [
+          '${{ fromJSON(vars.CFG) }}',
+          '${{ fromJSON(needs.a.outputs.cfg) }}',
+          'literal',
+        ]) {
+          expect(
+            scanWorkflowText(withStringEnv('job', v, 'echo "${{ env.ANY }}"'), 'w.yml'),
+          ).toEqual([]);
+        }
+      });
+
+      it('the tainted string env is harmless when its names are read as shell variables', () => {
+        expect(scanWorkflowText(withStringEnv('job', TAINTED, 'echo "$ANY"'), 'w.yml')).toEqual([]);
+      });
     });
 
     it('does not flag an env built from safe values, or a tainted env that is never interpolated', () => {

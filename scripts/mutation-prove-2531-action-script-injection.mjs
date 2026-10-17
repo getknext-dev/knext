@@ -351,18 +351,16 @@ const MUTATIONS = [
     id: 'W15',
     subject: 'scan',
     claim: 'workflow env overrides step env (precedence reversed)',
-    anchor:
-      '        ...envEntries(doc?.env),\n        ...envEntries(job.env),\n        ...envEntries(step?.env),',
-    replacement:
-      '        ...envEntries(step?.env),\n        ...envEntries(job.env),\n        ...envEntries(doc?.env),',
+    anchor: 'mergeEnvs(envEntries(doc?.env), envEntries(job.env), envEntries(step?.env))',
+    replacement: 'mergeEnvs(envEntries(step?.env), envEntries(job.env), envEntries(doc?.env))',
   },
   {
     id: 'W16',
     subject: 'scan',
     claim: 'an unreadable expression passes instead of failing closed',
     anchor:
-      "if (s === null) return ['unparseable expression (unbalanced quotes, parentheses or brackets)'];",
-    replacement: 'if (s === null) return [];',
+      "    return [\n      'unparseable expression (non-ASCII character, or unbalanced quotes, parentheses or brackets)',\n    ];",
+    replacement: '    return [];',
   },
   {
     id: 'W17',
@@ -406,6 +404,35 @@ const MUTATIONS = [
     anchor:
       'throw new Error(`${file}: job ${jobId} has steps that are not a list; cannot be scanned`);',
     replacement: 'continue;',
+  },
+  {
+    id: 'X1',
+    subject: 'scan',
+    claim: 'a string-valued env (env: ${{ fromJSON(...) }}) no longer taints every env.X',
+    anchor:
+      'if (name !== ENV_WILDCARD && env.has(ENV_WILDCARD) && envTainted(ENV_WILDCARD, env, seen)) {',
+    replacement: 'if (false) {',
+  },
+  {
+    id: 'X2',
+    subject: 'scan',
+    claim: 'a string-valued env is read as an empty mapping again (untainted)',
+    anchor: 'out.set(ENV_WILDCARD, env);',
+    replacement: '',
+  },
+  {
+    id: 'X3',
+    subject: 'scan',
+    claim: 'wildcard envs at several scopes override each other instead of accumulating',
+    anchor: 'out.set(k, `${out.get(k)} ${v}`);',
+    replacement: 'out.set(k, v);',
+  },
+  {
+    id: 'N1',
+    subject: 'scan',
+    claim: 'a non-ASCII character in an expression is read as ordinary text, not failed closed',
+    anchor: 'if (/[^ -~\\t\\n\\r]/.test(expression)) return null;',
+    replacement: '',
   },
 ];
 
