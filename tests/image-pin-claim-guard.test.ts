@@ -167,8 +167,7 @@ describe('every user-facing place states the caveat', () => {
   for (const [label, get] of USER_FACING) {
     it(`${label}: the pin binds the image only; env, envFrom and volumes stay with the writer`, () => {
       const text = get().replace(/\s+/g, ' ');
-      expect(text).toMatch(/\bONLY\b|\bonly\b/);
-      expect(text).toMatch(/image content|image only|the image/i);
+      expect(text).toMatch(/binds the image content(?:,)? (?:only|and nothing else)/i);
       expect(text).toMatch(/\benv\b/);
       expect(text).toMatch(/\benvFrom\b/);
       expect(text).toMatch(/volumes/);
