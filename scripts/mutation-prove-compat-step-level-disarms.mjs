@@ -385,15 +385,15 @@ MUTATIONS.push({
 function preflight() {
   const problems = [];
 
-  if (TAIL.length < 4) {
+  if (TAIL.length < 5) {
     problems.push(
-      `the derived reporting tail is ${TAIL.length} step(s) — the spec asserts a floor of 4, so ` +
+      `the derived reporting tail is ${TAIL.length} step(s) — the spec asserts a floor of 5, so ` +
         'either the workflow changed or this file and tests/helpers/workflow-conditioning.ts ' +
         'have drifted apart',
     );
   }
-  if (SPINE.length < 3) {
-    problems.push(`the derived ledger spine is ${SPINE.length} job(s) — the spec's floor is 3`);
+  if (SPINE.length < 4) {
+    problems.push(`the derived ledger spine is ${SPINE.length} job(s) — the spec's floor is 4`);
   }
   if (!TAIL.some((s) => s.name === GATE_STEP)) {
     problems.push(`the reporting tail does not contain \`${GATE_STEP}\` — every row here is stale`);
