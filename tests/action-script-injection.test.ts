@@ -37,8 +37,11 @@ import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
 import {
   discoverActionFiles,
+  discoverWorkflowFiles,
   scanActionFile,
   scanActionText,
+  scanWorkflowFile,
+  scanWorkflowText,
 } from '../scripts/lib/action-script-injection-scan.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -194,6 +197,132 @@ describe('every action.yml in the repo (#2531)', () => {
   }
 });
 
+// ── 2b. workflows: outside-controlled contexts never reach a script body ──────
+
+const workflow = (body: string, step = '') =>
+  [
+    'name: t',
+    'on: pull_request',
+    'jobs:',
+    '  j:',
+    '    runs-on: ubuntu-latest',
+    '    steps:',
+    '      - name: s',
+    step,
+    '        run: |',
+    ...body.split('\n').map((l) => `          ${l}`),
+    '',
+  ]
+    .filter((l) => l !== '')
+    .join('\n');
+
+describe('workflows — event data in a run: body (#2531)', () => {
+  const HOSTILE = [
+    'github.event.pull_request.title',
+    'github.event.head_commit.message',
+    'github.event.pull_request.head.ref',
+    'github.event.inputs.tag',
+    'github.event',
+    'github.head_ref',
+    'github.base_ref',
+    'github.ref_name',
+    'github.ref',
+    'inputs.tag',
+    "inputs['tag']",
+    "format('{0}', github.head_ref)",
+    'toJSON(github.event)',
+    "github.event.pull_request.title || 'x'",
+  ];
+  for (const expr of HOSTILE) {
+    it(`flags \${{ ${expr} }}`, () => {
+      const f = scanWorkflowText(workflow(`echo "\${{ ${expr} }}"`), 'w.yml');
+      expect(f).toHaveLength(1);
+      expect(f[0]?.expression).toBe(expr);
+    });
+  }
+
+  const OK = [
+    'matrix.shard',
+    'steps.build.outcome',
+    'steps.build.outputs.cmd',
+    'github.workspace',
+    'github.repository',
+    'github.event_name',
+    'github.run_id',
+    'github.sha',
+    'secrets.TOKEN',
+    'env.X',
+  ];
+  for (const expr of OK) {
+    it(`does not flag \${{ ${expr} }} (not outside-controlled text)`, () => {
+      expect(scanWorkflowText(workflow(`echo "\${{ ${expr} }}"`), 'w.yml')).toEqual([]);
+    });
+  }
+
+  it('does not flag the same expressions in env:, with:, if: (where they are safe)', () => {
+    const text = [
+      'name: t',
+      'on: pull_request',
+      'jobs:',
+      '  j:',
+      "    if: github.event_name == 'pull_request'",
+      '    runs-on: ubuntu-latest',
+      '    steps:',
+      '      - name: s',
+      "        if: github.head_ref != ''",
+      '        env:',
+      '          HEAD: ${{ github.head_ref }}',
+      '          TITLE: ${{ github.event.pull_request.title }}',
+      '        run: echo "$HEAD $TITLE"',
+      '',
+    ].join('\n');
+    expect(scanWorkflowText(text, 'w.yml')).toEqual([]);
+  });
+
+  it('flags a github-script `script:` body', () => {
+    const text = [
+      'name: t',
+      'on: pull_request',
+      'jobs:',
+      '  j:',
+      '    runs-on: ubuntu-latest',
+      '    steps:',
+      '      - uses: actions/github-script@0000000000000000000000000000000000000000 # v7.0.0',
+      '        with:',
+      '          script: |',
+      '            core.info("${{ github.event.pull_request.title }}")',
+      '',
+    ].join('\n');
+    expect(scanWorkflowText(text, 'w.yml')).toHaveLength(1);
+  });
+
+  it('tolerates a reusable-workflow call (no steps) but fails closed on unreadable shapes', () => {
+    const call = [
+      'name: t',
+      'on: push',
+      'jobs:',
+      '  j:',
+      '    uses: ./.github/workflows/x.yml',
+      '',
+    ];
+    expect(scanWorkflowText(call.join('\n'), 'w.yml')).toEqual([]);
+    expect(() => scanWorkflowText('jobs: [', 'w.yml')).toThrow(/w\.yml/);
+    expect(() => scanWorkflowText('jobs:\n  j:\n    steps: nope\n', 'w.yml')).toThrow(/steps/);
+    expect(() => scanWorkflowText('jobs: nope\n', 'w.yml')).toThrow(/jobs/);
+  });
+
+  const workflows = discoverWorkflowFiles(REPO_ROOT);
+  it('discovers the repo workflows — a vacuous scan fails', () => {
+    expect(workflows.length).toBeGreaterThan(10);
+    expect(workflows).toContain('.github/workflows/ci.yml');
+  });
+  for (const rel of workflows) {
+    it(`${rel} puts no event data, ref name or input inside a script body`, () => {
+      expect(scanWorkflowFile(REPO_ROOT, rel)).toEqual([]);
+    });
+  }
+});
+
 // ── 3. behaviour: the real Deploy step under hostile input ────────────────────
 
 type Step = { name?: string; run?: string; env?: Record<string, string> };
@@ -237,10 +366,10 @@ let seq = 0;
  * `env:` expressions to the supplied inputs (falling back to the declared
  * defaults), then hand the UNMODIFIED `run:` text to bash.
  */
-function runDeploy(rel: string, inputs: Record<string, string>): RunResult {
+function runStep(rel: string, stepName: string, inputs: Record<string, string>): RunResult {
   const doc = actionDoc(rel);
-  const step = doc.runs.steps.find((s) => s.name === 'Deploy');
-  if (!step?.run) throw new Error(`${rel}: no Deploy step`);
+  const step = doc.runs.steps.find((s) => s.name === stepName);
+  if (!step?.run) throw new Error(`${rel}: no ${stepName} step`);
 
   const dir = join(scratch, `run${seq++}`);
   const calls = join(dir, 'calls');
@@ -287,6 +416,9 @@ function runDeploy(rel: string, inputs: Record<string, string>): RunResult {
     argv,
   };
 }
+
+const runDeploy = (rel: string, inputs: Record<string, string>): RunResult =>
+  runStep(rel, 'Deploy', inputs);
 
 const payloadsFor = (dir: string): string[] => {
   const s = join(dir, 'PWNED');
@@ -372,7 +504,10 @@ for (const d of DEPLOYS) {
     });
 
     it('rejects a tag or bucket that begins with a dash (would read as a CLI flag)', () => {
-      for (const bad of [{ tag: '--force' }, { bucket: '--endpoint=x' }]) {
+      for (const bad of [{ tag: '--force' }, { bucket: '--endpoint=x' }] as Record<
+        string,
+        string
+      >[]) {
         const r = runDeploy(d.rel, { ...d.required, 'dry-run': 'true', ...bad });
         expect(r.status).not.toBe(0);
         expect(r.argv.flat()).not.toContain('deploy');
@@ -403,6 +538,49 @@ for (const d of DEPLOYS) {
     });
   });
 }
+
+// ── 3b. an error message never echoes an input ────────────────────────────────
+
+describe('workflow commands cannot be forged through an error message (#2531)', () => {
+  it('no ::error:: / ::warning:: / ::notice:: line in any action expands an input variable', () => {
+    let seen = 0;
+    for (const rel of discoverActionFiles(REPO_ROOT)) {
+      for (const step of actionDoc(rel).runs.steps) {
+        for (const line of String(step.run ?? '').split('\n')) {
+          if (!/::(error|warning|notice)(\s[^:]*)?::/.test(line)) continue;
+          seen++;
+          // KNEXT_* are the env-passed inputs. A newline in one of them would
+          // start a new line of output, and `::set-output` or `::add-mask` there
+          // is a workflow command.
+          expect(line, `${rel}: ${line.trim()}`).not.toMatch(/\$\{?KNEXT_/);
+        }
+      }
+    }
+    expect(seen).toBeGreaterThan(0);
+  });
+
+  const NEWLINE_COMMAND = 'x\n::set-output name=pwned::1\n::add-mask::y';
+
+  it("an unknown 'auth' value with a newline is refused without being echoed", () => {
+    const r = runStep(ACTION, 'Configure cluster access', { auth: NEWLINE_COMMAND });
+    expect(r.status).not.toBe(0);
+    expect(r.out).toMatch(/::error::unknown auth mode/);
+    expect(r.out).not.toContain('set-output');
+    expect(r.out).not.toContain('add-mask');
+  });
+
+  it("a 'cli' value with a newline that names no executable is refused without being echoed", () => {
+    const r = runStep(ACTION, 'Deploy', {
+      namespace: 'ns',
+      registry: 'ghcr.io/acme',
+      cli: `no-such-binary-2531${NEWLINE_COMMAND}`,
+    });
+    expect(r.status).not.toBe(0);
+    expect(r.out).toMatch(/::error::the 'cli' input's executable/);
+    expect(r.out).not.toContain('set-output');
+    expect(r.out).not.toContain('add-mask');
+  });
+});
 
 // ── 4. the CLI the action runs is pinned ──────────────────────────────────────
 
