@@ -27,6 +27,7 @@ import {
   proverWeight,
   reportFileName,
   shardProvers,
+  WEIGHTED_ON_ONE_REF_ONLY,
 } from '../scripts/lib/prover-shard.mjs';
 import { auditJobCanNotSkip } from './helpers/blocking-gate.js';
 
@@ -111,7 +112,15 @@ describe('#2208 legs are balanced by ESTIMATED COST, not by count', () => {
   it('every weighted prover is a real, discovered prover (a rename cannot silently unweight it)', () => {
     const have = new Set(real().map((p) => p.relPath));
     for (const path of Object.keys(PROVER_WEIGHT_MINUTES)) {
-      expect(have.has(path), `${path} is weighted but not discovered`).toBe(true);
+      expect(
+        have.has(path) || WEIGHTED_ON_ONE_REF_ONLY.includes(path),
+        `${path} is weighted but not discovered (and not listed as a one-ref-only prover)`,
+      ).toBe(true);
+    }
+    for (const path of WEIGHTED_ON_ONE_REF_ONLY) {
+      expect(Object.keys(PROVER_WEIGHT_MINUTES), `${path} is listed but not weighted`).toContain(
+        path,
+      );
     }
   });
 
@@ -387,7 +396,7 @@ describe('#2208 the per-prover bound', () => {
   it('defaults to a finite, positive bound well under the per-leg ceiling', () => {
     const ms = proverTimeoutMs({});
     expect(Number.isFinite(ms) && ms > 0).toBe(true);
-    expect(ms).toBe(80 * 60 * 1000);
+    expect(ms).toBe(100 * 60 * 1000);
   });
 
   it('is overridable by KNEXT_PROVER_TIMEOUT_MS and refuses nonsense rather than running unbounded', () => {

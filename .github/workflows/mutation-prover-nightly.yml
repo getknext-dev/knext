@@ -159,15 +159,15 @@ jobs:
     runs-on: ubuntu-latest
     # PER SHARD (the leg, not the lane). Replaces the single 100-minute job
     # ceiling that cancelled five runs running (#2208). The provers are split by
-    # ESTIMATED COST (`PROVER_WEIGHT_MINUTES`): the heaviest, `empty-dir-guard`
-    # (58 mutations x a ~30-60 s spec), sits in a leg of its own and the other
-    # five legs are balanced to roughly 40 estimated minutes. The per-prover
-    # bound below is 80 minutes, so one hung prover costs one prover (named and
+    # ESTIMATED COST (`PROVER_WEIGHT_MINUTES`): the heaviest provers
+    # (`kind-manifest-apply-safety` 67 minutes measured, `empty-dir-guard` ~55
+    # estimated, 58 mutations x a ~30-60 s spec) never share a leg. The per-prover
+    # bound below is 100 minutes, so one hung prover costs one prover (named and
     # red), and this ceiling is deliberately ABOVE the bound plus a leg's normal
     # work so that a hang is reported by the runner rather than by a blind
     # cancellation. A leg that DOES hit this has no report, which the aggregate
     # turns into a named finding for that ref and shard — never a silent pass.
-    timeout-minutes: 130
+    timeout-minutes: 160
     strategy:
       # A red leg must not hide the other eleven: the whole board is the point.
       fail-fast: false
@@ -293,9 +293,10 @@ jobs:
 
       # THIS LEG'S SLICE, each prover under its own bound, with the report the
       # aggregate job consumes written OUTSIDE the tree (the residue check below
-      # must see only what a prover left behind). 4800000 ms = 80 minutes per
-      # prover: above the slowest prover's measured/estimated cost (~55 minutes,
-      # `empty-dir-guard`), below the leg's ceiling.
+      # must see only what a prover left behind). 6000000 ms = 100 minutes per
+      # prover: above the slowest MEASURED prover (`kind-manifest-apply-safety`,
+      # 67 minutes on a hosted runner; `empty-dir-guard` is estimated ~55), below
+      # the leg's ceiling.
       #
       # CARGO_TARGET_DIR: the cargo-driven provers (`knext-ffi-crates`,
       # `rust-template-auth`, and the Rust scaffold prover's ~20 runs) otherwise
@@ -306,7 +307,7 @@ jobs:
       - name: Run this shard's mutation provers (FAIL on exit code, count mismatch OR timeout)
         env:
           KNEXT_REDIS_LIVE_URL: redis://127.0.0.1:6379
-          KNEXT_PROVER_TIMEOUT_MS: 4800000
+          KNEXT_PROVER_TIMEOUT_MS: 6000000
           CARGO_TARGET_DIR: ${{ runner.temp }}/cargo-target
           PROVER_LANE_REF: ${{ matrix.ref }}
           PROVER_LANE_SHA: ${{ matrix.sha }}
