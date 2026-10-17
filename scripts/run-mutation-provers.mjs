@@ -27,40 +27,192 @@
  * tells you about one prover per night, and the whole point of running them
  * together is to see the entire board.
  *
- * Usage:  node scripts/run-mutation-provers.mjs
+ * SHARDED AND BOUNDED (#2208 / #2499). One serial job over every prover under a
+ * single ceiling was cancelled five runs running: one prover with no bound of its
+ * own ate 47 minutes and ninety never started. So the lane now splits the set
+ * across matrix legs (`--shard <i>/<n>`, a pure function of the sorted set, see
+ * `lib/prover-shard.mjs`), every prover has its OWN wall-clock bound
+ * (`KNEXT_PROVER_TIMEOUT_MS`, default 80 minutes; a timeout is a finding and the
+ * next prover still runs), output is streamed as it arrives so a cancelled run
+ * still shows what was running, and `--report <file>` writes the leg's
+ * machine-readable result for the aggregate job, which proves that the legs'
+ * union is the whole set and that declared == run for every prover.
+ *
+ * Usage:  node scripts/run-mutation-provers.mjs [--shard <i>/<n>] [--list] [--report <file>]
+ *   --shard   run only this shard (1-based); omitted = every prover
+ *   --list    print the selected provers and exit 0 without running anything
+ *   --report  write the JSON report the aggregate job consumes
+ * Env: KNEXT_PROVER_TIMEOUT_MS, PROVER_LANE_REF, PROVER_LANE_SHA (report metadata)
  */
 
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { discoverProvers, evaluateProverRun } from './lib/prover-lane.mjs';
+import { makeReport, parseShardSpec, proverTimeoutMs, shardProvers } from './lib/prover-shard.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
-const provers = discoverProvers(REPO_ROOT);
-if (provers.length === 0) {
+function fatal(message) {
+  console.error(`FATAL: ${message}`);
+  process.exit(1);
+}
+
+function parseArgs(argv) {
+  const out = { shard: null, list: false, report: null };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--list') out.list = true;
+    else if (a === '--shard' || a === '--report') {
+      const v = argv[++i];
+      if (v === undefined) fatal(`${a} needs a value`);
+      out[a.slice(2)] = v;
+    } else {
+      fatal(
+        `unknown argument ${JSON.stringify(a)} — an unrecognised flag must not mean "run everything"`,
+      );
+    }
+  }
+  return out;
+}
+
+/**
+ * Run ONE prover under a wall-clock bound, streaming its output (#2208).
+ *
+ * The lane used to `spawnSync` each prover with `maxBuffer` and NO `timeout`,
+ * and printed the output only after the child exited. Both halves hurt on the
+ * night that mattered: a prover that never exited ate the whole job ceiling
+ * (47 minutes of a 100-minute budget, run 38140088966), and because its output
+ * was buffered, the cancelled run's log held nothing about it.
+ *
+ * Here the child's output is echoed AS IT ARRIVES (and also captured, because
+ * the verdict is parsed from it), and on timeout the child's whole PROCESS
+ * GROUP is killed. Group, not child: a prover's work is done by grandchildren
+ * (vitest, go test, cargo), and an orphan that outlives its prover keeps running
+ * against a tree the next prover is about to mutate.
+ */
+/** Cap on captured output, matching the old `maxBuffer`. Echo is not capped. */
+const MAX_CAPTURE = 64 * 1024 * 1024;
+
+/**
+ * @param {string} absPath the prover script
+ * @param {{ cwd: string, timeoutMs: number, echo?: (chunk: string) => void }} opts
+ * @returns {Promise<{ status: number | null, signal: string | null, output: string,
+ *                     timedOut: boolean, error?: Error }>}
+ */
+function runProver(absPath, { cwd, timeoutMs, echo = (c) => process.stdout.write(c) }) {
+  return new Promise((resolvePromise) => {
+    const child = spawn(process.execPath, [absPath], {
+      cwd,
+      // Its own process group, so the kill below can take the whole tree.
+      detached: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let output = '';
+    let timedOut = false;
+    let spawnError;
+    const take = (chunk) => {
+      const text = chunk.toString('utf8');
+      echo(text);
+      if (output.length < MAX_CAPTURE) output += text;
+    };
+    child.stdout.on('data', take);
+    child.stderr.on('data', take);
+
+    const killGroup = () => {
+      try {
+        process.kill(-child.pid, 'SIGKILL');
+      } catch {
+        try {
+          child.kill('SIGKILL');
+        } catch {
+          // already gone
+        }
+      }
+    };
+    const timer = setTimeout(() => {
+      timedOut = true;
+      killGroup();
+    }, timeoutMs);
+
+    child.on('error', (error) => {
+      spawnError = error;
+    });
+    // Sweep the group the moment the prover itself exits: a grandchild that
+    // lingers would otherwise keep running into the next prover (and, holding the
+    // stdio pipes open, would delay `close` until the timeout).
+    child.on('exit', () => killGroup());
+    child.on('close', (status, signal) => {
+      clearTimeout(timer);
+      resolvePromise({ status, signal, output, timedOut, error: spawnError });
+    });
+  });
+}
+
+const args = parseArgs(process.argv.slice(2));
+const discovered = discoverProvers(REPO_ROOT);
+if (discovered.length === 0) {
   console.error('FATAL: no scripts/mutation-prove-*.mjs found — the lane would pass vacuously');
   process.exit(1);
 }
 
-console.log(`Running ${provers.length} mutation prover(s), discovered by glob:\n`);
+let shard = null;
+if (args.shard !== null) {
+  try {
+    shard = parseShardSpec(args.shard);
+  } catch (error) {
+    fatal(error.message);
+  }
+}
+const provers = shard ? shardProvers(discovered, shard.index, shard.count) : discovered;
+if (provers.length === 0) {
+  fatal(
+    `no prover in shard ${args.shard} (empty shard of ${discovered.length}) — more shards than provers`,
+  );
+}
+
+if (args.list) {
+  for (const p of provers) console.log(p.relPath);
+  process.exit(0);
+}
+
+const timeoutMs = proverTimeoutMs();
+console.log(
+  `Running ${provers.length} of ${discovered.length} mutation prover(s)` +
+    `${shard ? ` (shard ${shard.index}/${shard.count})` : ''}, discovered by glob, ` +
+    `each bounded to ${Math.round(timeoutMs / 1000)}s:\n`,
+);
 for (const p of provers) console.log(`  - ${p.relPath}`);
 console.log('');
+
+/** After a kill the prover's byte-snapshot restore never ran; do not let the next prover inherit it. */
+function restoreTreeAfterKill() {
+  if (process.env.GITHUB_ACTIONS !== 'true') {
+    return 'the prover was killed mid-mutation; this is not CI so the tree was NOT restored — check the working tree';
+  }
+  try {
+    execFileSync('git', ['checkout', '--', '.'], { cwd: REPO_ROOT, stdio: 'ignore' });
+    return 'the tree was restored before the next prover';
+  } catch (error) {
+    return `RESTORE FAILED (${error.message}) — later provers ran on a possibly-dirty tree`;
+  }
+}
 
 const results = [];
 for (const prover of provers) {
   console.log(`\n${'═'.repeat(78)}\n▶ ${prover.relPath}\n${'═'.repeat(78)}`);
-  const run = spawnSync(process.execPath, [prover.absPath], {
-    cwd: REPO_ROOT,
-    encoding: 'utf8',
-    // The child's own output is the triage material for a red night, so it is
-    // captured AND echoed rather than swallowed into a summary line.
-    maxBuffer: 64 * 1024 * 1024,
-  });
-  const output = `${run.stdout ?? ''}${run.stderr ?? ''}`;
-  process.stdout.write(output);
+  const started = Date.now();
+  const run = await runProver(prover.absPath, { cwd: REPO_ROOT, timeoutMs });
   if (run.error) console.error(`   spawn error: ${run.error.message}`);
-  const { summary, findings } = evaluateProverRun({ status: run.status, output });
+  const { summary, findings } = evaluateProverRun({ status: run.status, output: run.output });
+  if (run.timedOut) {
+    const note = restoreTreeAfterKill();
+    findings.unshift(
+      `TIMED OUT after ${Math.round((Date.now() - started) / 1000)}s (bound ${Math.round(timeoutMs / 1000)}s) — killed with its process group; ${note}`,
+    );
+    console.error(`\n   ${findings[0]}`);
+  }
   results.push({ relPath: prover.relPath, summary, findings });
 }
 
@@ -69,6 +221,20 @@ for (const r of results) {
   const counts = r.summary ? `${r.summary.run}/${r.summary.declared}` : '—/—';
   console.log(`${r.findings.length === 0 ? 'ok  ' : 'FAIL'} ${counts.padEnd(8)} ${r.relPath}`);
   for (const f of r.findings) console.log(`       ${f}`);
+}
+
+if (args.report) {
+  const report = makeReport({
+    ref: process.env.PROVER_LANE_REF ?? 'unknown',
+    sha: process.env.PROVER_LANE_SHA ?? 'unknown',
+    shard: shard?.index ?? 1,
+    shards: shard?.count ?? 1,
+    discovered: discovered.map((p) => p.relPath),
+    results,
+  });
+  mkdirSync(dirname(resolve(args.report)), { recursive: true });
+  writeFileSync(args.report, `${JSON.stringify(report, null, 2)}\n`);
+  console.log(`\nreport written: ${args.report}`);
 }
 
 const failed = results.filter((r) => r.findings.length > 0);
