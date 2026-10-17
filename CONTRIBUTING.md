@@ -37,6 +37,25 @@ bun run lint:mutation-residue     # red-on-fail in CI; run it before you commit
 Read [`docs/guides/mutation-testing.md`](docs/guides/mutation-testing.md) before writing a harness;
 it ships one (`scripts/lib/mutation-harness.mjs`) so you do not hand-roll the restore.
 
+## Dependencies: quarantine, intake checks, install scripts
+
+Three guards stand between the registry and the tree. Know them before you add or bump a dependency.
+
+- **Fresh-release quarantine.** `bunfig.toml` sets `[install] minimumReleaseAge` (3 days). `bun add`,
+  `bun update` and an unlocked `bun install` will not pick a version younger than that. If you must take
+  a fix today, pass `--minimum-release-age 0` for that one command and say why in the PR. A standing
+  exception for one package goes in `minimumReleaseAgeExcludes`, which `tests/bun-release-age.test.ts`
+  pins, so it is a reviewed change. `bun install --frozen-lockfile` is unaffected.
+- **OSV gate.** Every PR runs `scripts/osv-gate.mjs` over every tracked `bun.lock`, `Cargo.lock` and
+  `go.mod`. A malicious-package advisory fails the check; so does a NEW HIGH/CRITICAL vulnerability.
+  Suppress only with a dated, justified entry in `security/osv-allowlist.json`, after trying to bump.
+- **Install scripts.** `bun install` runs a dependency's lifecycle script only if it is in the root
+  `trustedDependencies` or on bun's built-in default list, which cannot be switched off. If
+  `tests/bun-install-scripts.test.ts` goes red on a new dependency, read its script, then add it to
+  `security/bun-install-scripts.json` AND the root `trustedDependencies`, with a justification.
+- **Dependabot PRs.** A bump of a published package's `dependencies` needs a changeset or the
+  `no-changeset` label like any other change (the "Changeset required" check). Tooling bumps do not.
+
 ## Docs live with the code (`apps/docs/`)
 
 The user-facing docs site (knext-platform.dev) lives in this monorepo at **`apps/docs/`** and consumes
