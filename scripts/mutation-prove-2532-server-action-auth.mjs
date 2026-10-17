@@ -371,8 +371,8 @@ const UPLOAD = [
     id: 'U04',
     subject: 'actions',
     claim: 'the row is named by the client filename',
-    anchor: '[key, file.size,',
-    replacement: '[file.name, file.size,',
+    anchor: "[key, file.size, file.type || 'application/octet-stream', storagePath],",
+    replacement: "[file.name, file.size, file.type || 'application/octet-stream', storagePath],",
   },
   {
     id: 'U05',
