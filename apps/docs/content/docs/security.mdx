@@ -311,9 +311,11 @@ serve the kind, so applying `install.yaml` reports `no matches for kind "Validat
 for these two objects, and the operator would run without the restriction.
 
 <Callout type="info">
-**Honest scope — not yet shipped.** Service-to-service **mTLS/authz** between the gateway and
-backends, and the **cluster-local** gRPC backend services with no public ingress, are designed but
-**not yet shipped**. Today's enforced boundary is endpoint auth plus the network policy above.
+**Honest scope.** A zone's calls to its functions are authenticated with a short-lived token signed
+by the zone's own key, and functions have no public ingress. Three limits remain: a captured token
+can be replayed for up to about a minute, replies from a function are not authenticated, and a
+function accepts the user the zone names. Mutual TLS between zone and function is not built. See the
+[threat model](/docs/threat-model).
 </Callout>
 
 See also: [Operator & the NextApp CRD](/docs/operator) ·
