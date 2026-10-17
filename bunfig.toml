@@ -25,3 +25,26 @@
 preload = ["./tests/setup.ts"]
 
 
+
+[install]
+# FRESH-RELEASE QUARANTINE. Bun will not resolve a registry version published less
+# than this many seconds ago, so a malicious or broken release that is pulled within
+# a day or two never reaches this tree through `bun add`, `bun update` or an
+# unlocked `bun install`. Three days (259200 s) is long enough for the registry's
+# takedown and the OSV malicious-package feed to catch up on most incidents, short
+# enough that routine bumps are not held back. Dependabot's cooldown is the same
+# number (.github/dependabot.yml) and tests/bun-release-age.test.ts keeps them equal.
+#
+# `bun install --frozen-lockfile` is unaffected: it installs what the lockfile
+# already pins and resolves nothing new. The quarantine bites when a version is first
+# chosen.
+#
+# ESCAPE HATCHES, in order of preference:
+#   1. One-off: `bun add <pkg>@<version> --minimum-release-age 0` (or `bun update ...`).
+#      Needed for a security fix you must take today. Say so in the PR.
+#   2. Standing, for one package: add its exact name to `minimumReleaseAgeExcludes`
+#      below. Each entry is pinned by tests/bun-release-age.test.ts, so adding one is
+#      a reviewed change, not a quiet edit. Only first-party packages belong here by
+#      default.
+minimumReleaseAge = 259200
+minimumReleaseAgeExcludes = ["@getknext/core", "@getknext/lib", "@getknext/db", "kn-next"]
