@@ -25,17 +25,19 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	appsv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/api/v1alpha1"
+	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 )
 
 // Revocation must survive an unreadable Secret. Holding a running function on
@@ -62,6 +64,37 @@ func (c specOverrideClient) Get(ctx context.Context, key client.ObjectKey, obj c
 		c.mutate(bs)
 	}
 	return err
+}
+
+// webhookLikeClient rejects every write of a Knative Service the way Knative's
+// admission webhook rejects a reserved mount path: Reconcile's render fails and
+// returns early, so anything that only runs AFTER render never runs.
+type webhookLikeClient struct{ specOverrideClient }
+
+func rejectedByWebhook() error {
+	return apierrors.NewInvalid(schema.GroupKind{Group: "serving.knative.dev", Kind: "Service"}, "pricing",
+		nil)
+}
+
+func (c webhookLikeClient) Create(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {
+	if _, ok := obj.(*servingv1.Service); ok {
+		return rejectedByWebhook()
+	}
+	return c.Client.Create(ctx, obj, opts...)
+}
+
+func (c webhookLikeClient) Update(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
+	if _, ok := obj.(*servingv1.Service); ok {
+		return rejectedByWebhook()
+	}
+	return c.Client.Update(ctx, obj, opts...)
+}
+
+func (c webhookLikeClient) Patch(ctx context.Context, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+	if _, ok := obj.(*servingv1.Service); ok {
+		return rejectedByWebhook()
+	}
+	return c.Client.Patch(ctx, obj, patch, opts...)
 }
 
 var _ = Describe("BackendService reconciler: an unreadable Secret never keeps a revoked one running", func() {
@@ -154,6 +187,55 @@ var _ = Describe("BackendService reconciler: an unreadable Secret never keeps a 
 		})
 	}
 
+	It("tears down a running function whose Secret was revoked even when the new spec cannot be rolled out", func() {
+		ns := setup("stripe")
+		createFunction(ctx, ns, "pricing", "orders", envFrom("stripe"))
+		reconcileFunction(ctx, ns, "pricing")
+		Expect(functionKsvcExists(ctx, ns, "pricing")).To(BeTrue())
+		revoke(ns, "stripe")
+
+		By("the owner drops stripe and adds a volume Knative refuses (a reserved mount path); the ksvc update is rejected as the webhook does")
+		r := newBSReconciler()
+		r.Client = webhookLikeClient{specOverrideClient{Client: k8sClient, mutate: func(bs *appsv1alpha1.BackendService) {
+			bs.Spec.EnvFrom = nil
+			bs.Spec.Volumes = []appsv1alpha1.FunctionVolume{{Name: "scratch", MountPath: "/dev", EmptyDir: &corev1.EmptyDirVolumeSource{}}}
+		}}}
+		_ = reconcileFn(r, ns)
+
+		expectNothingRendered(ctx, ns, "pricing")
+		c := sovereignty(ns)
+		Expect(c.Status).To(Equal(metav1.ConditionFalse), "what is RUNNING is checked whatever the new spec says")
+		Expect(c.Message).To(ContainSubstring(`"stripe"`))
+	})
+
+	Context("the CRD refuses a mount path Knative serving reserves", func() {
+		mount := func(ns, path string) error {
+			bs := &appsv1alpha1.BackendService{
+				ObjectMeta: metav1.ObjectMeta{Name: "pricing", Namespace: ns},
+				Spec: appsv1alpha1.BackendServiceSpec{Volumes: []appsv1alpha1.FunctionVolume{
+					{Name: "scratch", MountPath: path, EmptyDir: &corev1.EmptyDirVolumeSource{}}}},
+			}
+			bs.Spec.Zone, bs.Spec.Image, bs.Spec.ProtoVersion = "orders", bsImage, "1.0.0"
+			err := k8sClient.Create(ctx, bs)
+			if err == nil {
+				DeferCleanup(deleteFunctionAndFinalize, ctx, client.ObjectKeyFromObject(bs))
+			}
+			return err
+		}
+		for _, path := range []string{"/", "/dev", "/dev/log", "/dev/", "//dev", "/dev//log", "/a/../dev", "/./dev", "/dev/."} {
+			It("rejects "+path, func() {
+				err := mount(setup(), path)
+				Expect(apierrors.IsInvalid(err)).To(BeTrue(), "got %v", err)
+				Expect(err.Error()).To(Or(ContainSubstring("reserved by Knative"), ContainSubstring("clean absolute path")))
+			})
+		}
+		for _, path := range []string{"/creds", "/dev/shm", "/data.v2/x", "/var/lib/app"} {
+			It("admits "+path, func() {
+				Expect(mount(setup(), path)).To(Succeed())
+			})
+		}
+	})
+
 	Context("the CRD refuses a Secret reference that names no Secret", func() {
 		sources := map[string]func(string) appsv1alpha1.BackendServiceSpec{
 			"secretKeyRef":    specSecretKeyRef,
@@ -245,12 +327,14 @@ var _ = Describe("BackendService reconciler: an unreadable Secret never keeps a 
 	Context("a persistent Forbidden", func() {
 		forbidden := apierrors.NewForbidden(schema.GroupResource{Resource: "secrets"}, "stripe", errors.New("simulated"))
 
-		backdateUnverified := func(ns string, age time.Duration) {
+		// The hold is counted from the first DENIAL, which the operator records
+		// in status.secretsDeniedSince. Backdating it stands in for elapsed time.
+		deniedSince := func(ns string) *metav1.Time { return getFunction(ctx, ns, "pricing").Status.SecretsDeniedSince }
+		backdateDenial := func(ns string, age time.Duration) {
 			bs := getFunction(ctx, ns, "pricing")
-			c := apimeta.FindStatusCondition(bs.Status.Conditions, ConditionSovereigntyCompliant)
-			Expect(c).NotTo(BeNil())
-			Expect(c.Reason).To(Equal(ReasonSecretsUnverified), "the first held pass must have reported it")
-			c.LastTransitionTime = metav1.NewTime(time.Now().Add(-age))
+			Expect(bs.Status.SecretsDeniedSince).NotTo(BeNil(), "the first denied pass must have recorded it")
+			t := metav1.NewTime(time.Now().Add(-age))
+			bs.Status.SecretsDeniedSince = &t
 			Expect(k8sClient.Status().Update(ctx, bs)).To(Succeed())
 		}
 		run := func(ns string, err error) error {
@@ -258,24 +342,26 @@ var _ = Describe("BackendService reconciler: an unreadable Secret never keeps a 
 			r.APIReader = &secretMetaFailer{Reader: k8sClient, err: err}
 			return reconcileFn(r, ns)
 		}
-
-		It("is held at first, so a short RBAC blip never costs a running function", func() {
+		running := func() string {
 			ns := setup("stripe")
 			createFunction(ctx, ns, "pricing", "orders", envFrom("stripe"))
 			reconcileFunction(ctx, ns, "pricing")
+			return ns
+		}
+
+		It("is held at first, so a short RBAC blip never costs a running function", func() {
+			ns := running()
 			Expect(run(ns, forbidden)).NotTo(Succeed())
 			Expect(functionKsvcExists(ctx, ns, "pricing")).To(BeTrue())
-			backdateUnverified(ns, 2*time.Minute)
+			backdateDenial(ns, 2*time.Minute)
 			Expect(run(ns, forbidden)).NotTo(Succeed())
 			Expect(functionKsvcExists(ctx, ns, "pricing")).To(BeTrue(), "2 minutes is inside the hold")
 		})
 
 		It("is treated as definitive once the hold has run out: the function is refused and torn down", func() {
-			ns := setup("stripe")
-			createFunction(ctx, ns, "pricing", "orders", envFrom("stripe"))
-			reconcileFunction(ctx, ns, "pricing")
+			ns := running()
 			Expect(run(ns, forbidden)).NotTo(Succeed())
-			backdateUnverified(ns, 2*time.Hour)
+			backdateDenial(ns, 2*time.Hour)
 
 			Expect(run(ns, forbidden)).To(Succeed(), "after the hold it is a definitive refusal, not an error")
 			expectNothingRendered(ctx, ns, "pricing")
@@ -284,14 +370,65 @@ var _ = Describe("BackendService reconciler: an unreadable Secret never keeps a 
 			Expect(c.Message).To(ContainSubstring("denied"))
 		})
 
-		It("never turns a TRANSIENT error into a teardown, however long it lasts", func() {
-			ns := setup("stripe")
-			createFunction(ctx, ns, "pricing", "orders", envFrom("stripe"))
-			reconcileFunction(ctx, ns, "pricing")
-			Expect(run(ns, transientErrors["a 503"])).NotTo(Succeed())
-			backdateUnverified(ns, 24*time.Hour)
+		It("never turns a TRANSIENT error into a teardown, however long it lasts, and never starts the clock", func() {
+			ns := running()
+			for i := 0; i < 3; i++ {
+				Expect(run(ns, transientErrors["a 503"])).NotTo(Succeed())
+				Expect(deniedSince(ns)).To(BeNil(), "a 503 is not a denial")
+				Expect(functionKsvcExists(ctx, ns, "pricing")).To(BeTrue())
+			}
+		})
 
+		It("counts the hold from the first 403, not from the 503s that came before", func() {
+			ns := running()
 			Expect(run(ns, transientErrors["a 503"])).NotTo(Succeed())
+			Expect(run(ns, forbidden)).NotTo(Succeed())
+			Expect(deniedSince(ns)).NotTo(BeNil())
+			Expect(time.Since(deniedSince(ns).Time)).To(BeNumerically("<", time.Minute))
+
+			By("9 minutes into the denial it is still held")
+			backdateDenial(ns, 9*time.Minute)
+			Expect(run(ns, forbidden)).NotTo(Succeed())
+			Expect(functionKsvcExists(ctx, ns, "pricing")).To(BeTrue())
+			By("11 minutes in it is refused")
+			backdateDenial(ns, 11*time.Minute)
+			Expect(run(ns, forbidden)).To(Succeed())
+			expectNothingRendered(ctx, ns, "pricing")
+		})
+
+		It("stays refused while the denial lasts: no flapping back to Unknown, one refusal counted, one event", func() {
+			ns := running()
+			Expect(run(ns, forbidden)).NotTo(Succeed())
+			backdateDenial(ns, 2*time.Hour)
+
+			r := newBSReconciler()
+			r.APIReader = &secretMetaFailer{Reader: k8sClient, err: forbidden}
+			recorder := r.Recorder.(*record.FakeRecorder)
+			before := testutil.ToFloat64(backendServiceRefusalsTotal.WithLabelValues(ReasonSovereigntyViolation))
+			for i := 0; i < 4; i++ {
+				Expect(reconcileFn(r, ns)).To(Succeed())
+				c := sovereignty(ns)
+				Expect(c.Status).To(Equal(metav1.ConditionFalse), "pass %d must still be refused", i)
+				Expect(c.Reason).To(Equal(ReasonSecretNotAllowed), "pass %d must not flap back to Unknown", i)
+				expectNothingRendered(ctx, ns, "pricing")
+			}
+			Expect(testutil.ToFloat64(backendServiceRefusalsTotal.WithLabelValues(ReasonSovereigntyViolation))-before).To(Equal(1.0),
+				"the transition into the refusal is counted once, not on every pass")
+			warnings := 0
+			for len(recorder.Events) > 0 {
+				if strings.Contains(<-recorder.Events, ReasonSovereigntyViolation) {
+					warnings++
+				}
+			}
+			Expect(warnings).To(Equal(1), "one Warning event, not one per pass")
+		})
+
+		It("clears the recorded denial as soon as no read is denied, and renders again", func() {
+			ns := running()
+			Expect(run(ns, forbidden)).NotTo(Succeed())
+			Expect(deniedSince(ns)).NotTo(BeNil())
+			Expect(run(ns, nil)).To(Succeed())
+			Expect(deniedSince(ns)).To(BeNil())
 			Expect(functionKsvcExists(ctx, ns, "pricing")).To(BeTrue())
 		})
 	})

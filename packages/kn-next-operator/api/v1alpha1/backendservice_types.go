@@ -169,6 +169,13 @@ type FunctionScalingSpec struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.secret) || (has(self.secret.secretName) && self.secret.secretName.size() > 0 && self.secret.secretName.size() <= 253)",message="a Secret reference must name a Secret: a non-empty name of at most 253 characters"
 // +kubebuilder:validation:XValidation:rule="[has(self.secret), has(self.configMap), has(self.projected), has(self.emptyDir)].filter(x, x).size() == 1",message="a volume sets exactly one of secret, configMap, projected or emptyDir"
 // +kubebuilder:validation:XValidation:rule="self.mountPath != '/var/run/knext' && !self.mountPath.startsWith('/var/run/knext/')",message="/var/run/knext is reserved for operator mounts"
+// Knative serving refuses a Service whose container mounts a reserved path (its
+// reservedPaths in pkg/apis/serving/k8s_validation.go: "/", "/dev", "/dev/log"),
+// compared after path.Clean. The webhook's refusal would surface only at render,
+// so the schema refuses these here, and refuses any spelling path.Clean would
+// fold onto them (a doubled or trailing slash, a . or .. segment).
+// +kubebuilder:validation:XValidation:rule="!(self.mountPath in ['/', '/dev', '/dev/log'])",message="mountPath is reserved by Knative serving: /, /dev and /dev/log cannot be mounted"
+// +kubebuilder:validation:XValidation:rule="!self.mountPath.matches('(//|/[.]{1,2}(/|$)|.+/$)')",message="mountPath must be a clean absolute path: no //, no . or .. segment and no trailing slash"
 type FunctionVolume struct {
 	// Name of the volume (DNS label).
 	// +kubebuilder:validation:Required
@@ -230,6 +237,15 @@ type FunctionVolumeProjection struct {
 
 // BackendServiceStatus is the observed state of a BackendService.
 type BackendServiceStatus struct {
+	// SecretsDeniedSince is when the operator's reads of this function's Secrets
+	// first started being DENIED (Forbidden or Unauthorized), and it is cleared
+	// as soon as no read is denied. A denial that outlasts the hold refuses the
+	// function: an operator that cannot read Secrets cannot enforce the
+	// allowlist, and holding forever would freeze revocation. Timeouts and
+	// server errors do not start this clock.
+	// +optional
+	SecretsDeniedSince *metav1.Time `json:"secretsDeniedSince,omitempty"`
+
 	// ObservedGeneration is the spec generation the status describes.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`

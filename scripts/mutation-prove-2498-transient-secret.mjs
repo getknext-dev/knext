@@ -72,17 +72,19 @@ const CLASSIFY =
   'TestSovereigntyUnreadableSecretIsUnverifiedNotAViolation|TestSovereigntyDefinitiveViolationSurvivesAnUnverifiedNeighbour|TestSovereigntyNotFoundSecretIsStillAViolationNotUnverified|TestSovereigntyNoZoneRefusesEvenWhenTheReadFails';
 const UNDECIDED = 'TestUndecidedOnlyWhenOtherwiseAccepted';
 const GUARD =
-  'TestNoAPIErrorReachesTeardownOrAViolation|TestRemoveRenderedHasTwoSanctionedCallSites|TestReconcileLeavesOnUndecidedBeforeTheAcceptedFork|TestKnativeServiceIsDeletedOnlyInsideRemoveRendered|TestSovereigntyViolationsAreBuiltOnlyWhereSanctioned';
+  'TestNoAPIErrorReachesTeardownOrAViolation|TestRemoveRenderedHasTwoSanctionedCallSites|TestReconcileLeavesOnUndecidedBeforeTheAcceptedFork|TestKnativeServiceIsDeletedOnlyInsideRemoveRendered|TestSovereigntyViolationsAreBuiltOnlyWhereSanctioned|TestOnlyNameProblemsAndNotFoundReachADefinitiveVerdict';
 const VERDICT_UNIT = 'TestVerdictForAnUndecidedFunctionIsUnverifiedNotAViolation';
 const REVOKED = 'an unreadable Secret never keeps a revoked one running';
 const FORBIDDEN = `${REVOKED} a persistent Forbidden`;
 const CRD_REFUSES = `${REVOKED} the CRD refuses a Secret reference that names no Secret`;
 const R_CLASSIFY = 'TestClassifyReadError|TestSecretLookupMapsEachReadFailure';
-const R_NAMES =
-  'TestSecretNameProblem|TestInvalidSecretNameIsAViolationNeverUnverified|TestRejectedLookupIsAViolation';
+const R_NAMES = 'TestSecretNameProblem|TestInvalidSecretNameIsAViolationNeverUnverified';
 const R_RUNNING =
   'TestRunningSecretRefsCoversEverySource|TestCheckRunningSovereigntyRefusesARevokedSecretAndIgnoresNoService';
-const R_ESCALATE = 'TestEscalateDeniedSecretsOnlyAfterTheHold';
+const R_ESCALATE =
+  'TestEscalateDeniedSecretsOnlyAfterTheHold|TestNextDeniedSinceStartsAtTheFirstDenialAndClearsWithIt';
+const R_DEFINITIVE =
+  'TestOnlyNameProblemsAndNotFoundReachADefinitiveVerdict|TestAFailedReadHasNoDefinitiveState';
 const R_GENERATION = 'TestVerdictHoldsTheGenerationWhileUndecided';
 const TRANSIENT = 'a transient Secret read error never tears a function down';
 
@@ -102,7 +104,8 @@ const GO_MUTATIONS = [
     id: 'M06',
     claim: 'the Secret lookup drops the read error, so an apiserver blip reads as "unmarked"',
     subject: 'controller',
-    anchor: 'return secretMetadata{readErr: err.Error()}',
+    anchor:
+      'return secretMetadata{readErr: err.Error(), denied: classifyReadError(err) == readDenied}',
     replacement: 'return secretMetadata{}',
     test: envtest(TRANSIENT),
   },
@@ -176,16 +179,6 @@ const GO_MUTATIONS = [
   },
   // --- (a) the running template is re-checked -----------------------------------
   {
-    id: 'A01',
-    claim: 'the running Knative Service is never re-checked (a revoked Secret stays mounted)',
-    subject: 'controller',
-    anchor:
-      'runViolations, runUnverified := checkRunningSovereignty(bs, obs.zone, others, lookup, running)',
-    replacement:
-      'runViolations, runUnverified := []sovereigntyViolation(nil), []unverifiedSecret(nil)',
-    test: envtest(`${REVOKED} tears down a running function whose Secret was revoked`),
-  },
-  {
     id: 'A02',
     claim: 'the running-template check finds nothing',
     subject: 'sovereignty',
@@ -210,40 +203,6 @@ const GO_MUTATIONS = [
     anchor: 'if problem := secretNameProblem(ref.name); problem != "" {',
     replacement: 'if problem := secretNameProblem(ref.name); problem != "" && false {',
     test: unit(R_NAMES),
-  },
-  {
-    id: 'B02',
-    claim: 'any API status error is read as a transient one',
-    subject: 'controller',
-    anchor:
-      'if code := status.Status().Code; code == http.StatusRequestTimeout || code >= http.StatusInternalServerError {',
-    replacement:
-      'if code := status.Status().Code; code >= 0 || code == http.StatusRequestTimeout || code >= http.StatusInternalServerError {',
-    test: unit(R_CLASSIFY),
-  },
-  {
-    id: 'B03',
-    claim: 'a client-side error ("name is required") is read as a transient one',
-    subject: 'controller',
-    anchor: '\t\treturn readTransient\n\t}\n\treturn readDefinitive\n}',
-    replacement: '\t\treturn readTransient\n\t}\n\treturn readTransient\n}',
-    test: unit(R_CLASSIFY),
-  },
-  {
-    id: 'B04',
-    claim: 'a rejected lookup is ignored (neither a violation nor unknown)',
-    subject: 'sovereignty',
-    anchor: 'if m.rejected != "" {',
-    replacement: 'if false && m.rejected != "" {',
-    test: unit(R_NAMES),
-  },
-  {
-    id: 'B05',
-    claim: 'the Secret lookup reports a definitive read failure as unknown',
-    subject: 'controller',
-    anchor: 'return secretMetadata{rejected: err.Error()}',
-    replacement: 'return secretMetadata{readErr: err.Error()}',
-    test: unit(R_CLASSIFY),
   },
   {
     id: 'B06',
@@ -279,12 +238,109 @@ const GO_MUTATIONS = [
   },
   // --- (c) a persistent Forbidden is not held forever ---------------------------
   {
+    id: 'A01',
+    claim: 'the running Knative Service is never re-checked (a revoked Secret stays mounted)',
+    subject: 'controller',
+    anchor:
+      'runViolations, runUnverified := checkRunningSovereignty(bs, obs.zone, others, lookup, running)',
+    replacement:
+      'runViolations, runUnverified := []sovereigntyViolation(nil), []unverifiedSecret(nil)',
+    test: envtest(`${REVOKED} tears down a running function whose Secret was revoked`),
+  },
+  {
+    id: 'A04',
+    claim:
+      'the running Knative Service is re-checked only when the spec is undecided (a decided pass whose render is refused keeps a revoked Secret)',
+    subject: 'controller',
+    anchor:
+      'runViolations, runUnverified := checkRunningSovereignty(bs, obs.zone, others, lookup, running)',
+    replacement:
+      'runViolations, runUnverified := func() ([]sovereigntyViolation, []unverifiedSecret) {\n\t\tif len(obs.unverified) == 0 {\n\t\t\treturn nil, nil\n\t\t}\n\t\treturn checkRunningSovereignty(bs, obs.zone, others, lookup, running)\n\t}()',
+    test: envtest(
+      `${REVOKED} tears down a running function whose Secret was revoked even when the new spec cannot be rolled out`,
+    ),
+  },
+  {
+    id: 'B02',
+    claim: 'every unrecognised read error is read as a denial',
+    subject: 'controller',
+    anchor: '\treturn readTransient\n}',
+    replacement: '\treturn readDenied\n}',
+    test: unit(R_CLASSIFY),
+  },
+  {
+    id: 'B03',
+    claim: 'a bare 401 or 403 status is no longer a denial (it is held without limit)',
+    subject: 'controller',
+    anchor: 'code == http.StatusUnauthorized || code == http.StatusForbidden',
+    replacement:
+      'code == http.StatusUnauthorized && false || code == http.StatusForbidden && false',
+    test: unit(R_CLASSIFY),
+  },
+  {
+    id: 'B04',
+    claim: 'a failed read gains a definitive state of its own again',
+    subject: 'sovereignty',
+    anchor: '\tdenied bool\n}\n\n// unverifiedSecret is',
+    replacement: '\tdenied bool\n\trejected string\n}\n\n// unverifiedSecret is',
+    test: unit(R_DEFINITIVE),
+  },
+  {
+    id: 'E01',
+    claim: 'the CRD admits a volume mounted at a path Knative serving reserves',
+    subject: 'crd',
+    anchor: "rule: '!(self.mountPath in [''/'', ''/dev'', ''/dev/log''])'",
+    replacement: "rule: '!(self.mountPath in [''/x''])'",
+    test: envtest(`${REVOKED} the CRD refuses a mount path Knative serving reserves`),
+  },
+  {
+    id: 'E02',
+    claim: 'the CRD admits a spelling path.Clean folds onto a reserved path',
+    subject: 'crd',
+    anchor: "rule: '!self.mountPath.matches(''(//|/[.]{1,2}(/|$)|.+/$)'')'",
+    replacement: "rule: '!self.mountPath.matches(''(//zzz)'')'",
+    test: envtest(`${REVOKED} the CRD refuses a mount path Knative serving reserves`),
+  },
+  {
     id: 'C01',
     claim: 'a denied read is held forever (never escalated)',
     subject: 'controller',
     anchor:
-      'obs.violations, obs.unverified = escalateDeniedSecrets(bs, obs.violations, obs.unverified, time.Now())',
-    replacement: '_, _ = escalateDeniedSecrets(bs, obs.violations, obs.unverified, time.Now())',
+      'obs.violations, obs.unverified = escalateDeniedSecrets(obs.violations, obs.unverified, obs.deniedSince, now)',
+    replacement:
+      '_, _ = escalateDeniedSecrets(obs.violations, obs.unverified, obs.deniedSince, now)',
+    test: envtest(FORBIDDEN),
+  },
+  {
+    id: 'C04',
+    claim: 'the hold ignores the clock (escalates as soon as a denial exists)',
+    subject: 'verdict',
+    anchor: 'if deniedSince == nil || now.Sub(deniedSince.Time) < secretsDeniedHold {',
+    replacement: 'if deniedSince == nil {',
+    test: unit(R_ESCALATE),
+  },
+  {
+    id: 'C05',
+    claim: 'a transient error starts the denial clock',
+    subject: 'controller',
+    anchor: 'nextDeniedSince(bs.Status.SecretsDeniedSince, hasDenied(obs.unverified), now)',
+    replacement: 'nextDeniedSince(bs.Status.SecretsDeniedSince, len(obs.unverified) > 0, now)',
+    test: envtest(FORBIDDEN),
+  },
+  {
+    id: 'C06',
+    claim: 'the denial clock restarts on every pass (the hold never runs out)',
+    subject: 'verdict',
+    anchor: 'case prev != nil:\n\t\treturn prev',
+    replacement: 'case prev != nil:\n\t\treturn &metav1.Time{Time: now}',
+    test: unit(R_ESCALATE),
+  },
+  {
+    id: 'C07',
+    claim: 'the denial clock is not cleared when no read is denied',
+    subject: 'verdict',
+    anchor: 'case !denied:\n\t\treturn nil',
+    replacement: 'case !denied:\n\t\treturn prev',
     test: envtest(FORBIDDEN),
   },
   {
@@ -302,14 +358,6 @@ const GO_MUTATIONS = [
     anchor: 'if !u.denied {',
     replacement: 'if false {',
     test: envtest(FORBIDDEN),
-  },
-  {
-    id: 'C04',
-    claim: 'the hold ignores the clock (escalates as soon as the condition exists)',
-    subject: 'verdict',
-    anchor: 'now.Sub(prev.LastTransitionTime.Time) >= secretsDeniedHold',
-    replacement: 'true',
-    test: unit(R_ESCALATE),
   },
   // --- the status of a spec that was not rolled out -----------------------------
   {

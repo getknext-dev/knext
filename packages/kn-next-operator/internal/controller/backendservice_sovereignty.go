@@ -148,14 +148,15 @@ type secretMetadata struct {
 	readErr string
 	// denied marks a readErr that is an authorization failure (Forbidden or
 	// Unauthorized): held like any unknown answer, but only for a bounded window
-	// (secretsDeniedHold), because a lost grant would otherwise freeze
-	// revocation for every function.
+	// (secretsDeniedHold) counted from the first denial, because a lost grant
+	// would otherwise freeze revocation for every function.
+	//
+	// There is deliberately no "rejected" state: a failed read is NEVER a
+	// definitive answer. The only definitive answers are NotFound and the marks
+	// of an object that was read; a name no Secret can have is refused before any
+	// read (secretNameProblem). An error the owner can provoke must never mean
+	// teardown, and an error nobody anticipated must never either.
 	denied bool
-	// rejected is set when the read failed in a way that says something about
-	// the REFERENCE, not about the apiserver: a name the client refuses to send,
-	// or a 4xx the server answers definitively. It is a violation. An owner
-	// controls the spec, so an error they can provoke must never mean "unknown".
-	rejected string
 }
 
 // unverifiedSecret is a referenced Secret whose metadata could not be read, so
@@ -376,11 +377,6 @@ func checkSecretRefs(
 		if !seen {
 			m = lookup(ref.name)
 			meta[ref.name] = m
-		}
-		if m.rejected != "" {
-			out = append(out, sovereigntyViolation{ref.source, ref.name,
-				fmt.Sprintf("Secret %q cannot be checked: the lookup was rejected (%s)", ref.name, m.rejected)})
-			continue
 		}
 		if other := foreignMark(m, zoneName, zone); other != "" {
 			out = append(out, sovereigntyViolation{ref.source, ref.name,

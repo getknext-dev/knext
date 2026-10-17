@@ -397,8 +397,13 @@ spec:
                   volumes. The same Secret allowlist applies to Secret and projected
                   sources. /var/run/knext is reserved for operator mounts.
                 items:
-                  description: FunctionVolume is one volume and its mount. Exactly
-                    one source is set.
+                  description: |-
+                    FunctionVolume is one volume and its mount. Exactly one source is set.
+                    Knative serving refuses a Service whose container mounts a reserved path (its
+                    reservedPaths in pkg/apis/serving/k8s_validation.go: "/", "/dev", "/dev/log"),
+                    compared after path.Clean. The webhook's refusal would surface only at render,
+                    so the schema refuses these here, and refuses any spelling path.Clean would
+                    fold onto them (a doubled or trailing slash, a . or .. segment).
                   properties:
                     configMap:
                       description: |-
@@ -729,6 +734,12 @@ spec:
                       has(self.emptyDir)].filter(x, x).size() == 1'
                   - message: /var/run/knext is reserved for operator mounts
                     rule: self.mountPath != '/var/run/knext' && !self.mountPath.startsWith('/var/run/knext/')
+                  - message: 'mountPath is reserved by Knative serving: /, /dev and
+                      /dev/log cannot be mounted'
+                    rule: '!(self.mountPath in [''/'', ''/dev'', ''/dev/log''])'
+                  - message: 'mountPath must be a clean absolute path: no //, no .
+                      or .. segment and no trailing slash'
+                    rule: '!self.mountPath.matches(''(//|/[.]{1,2}(/|$)|.+/$)'')'
                 maxItems: 16
                 type: array
                 x-kubernetes-list-map-keys:
@@ -832,6 +843,16 @@ spec:
               observedRevision:
                 description: ObservedRevision is the function's latest Ready Knative
                   Revision.
+                type: string
+              secretsDeniedSince:
+                description: |-
+                  SecretsDeniedSince is when the operator's reads of this function's Secrets
+                  first started being DENIED (Forbidden or Unauthorized), and it is cleared
+                  as soon as no read is denied. A denial that outlasts the hold refuses the
+                  function: an operator that cannot read Secrets cannot enforce the
+                  allowlist, and holding forever would freeze revocation. Timeouts and
+                  server errors do not start this clock.
+                format: date-time
                 type: string
               servedProtoVersion:
                 description: |-

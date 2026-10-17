@@ -280,27 +280,37 @@ Ready revision. It is empty until a revision is Ready, and it is the value the z
 
 ### When Secrets cannot be verified
 
-The operator reads each referenced Secret's metadata to check that it belongs to the function's zone. When that
-read fails for a reason that says nothing about the Secret, such as an API server timeout, throttling, a server
-error or a connection failure, the operator does not guess:
+The operator reads each referenced Secret's metadata to check that it belongs to the function's zone. A failed read is
+never a verdict about the Secret, so the operator does not guess. Only three things refuse a function on the strength of
+a Secret: the Secret does not exist, the Secret is marked for another zone (or is not marked for this one), or the
+reference's name cannot be a Secret name.
 
-- A function that is already running is left as it is. Nothing is removed, and nothing new is rendered.
-- A function that was never rendered stays unrendered.
-- The Secrets the running Knative Service already mounts are still checked on every pass, so a Secret that has
-  been re-marked for another zone still removes the function.
+**What always holds**
+
+- **What runs is always re-checked.** On every pass, before anything is rendered, the Secrets the running Knative Service
+  already mounts are checked against the zone, whatever the spec now says. A Secret that has been re-marked for another
+  zone removes the function even when the new spec drops it, or when the new spec cannot be rolled out.
+- A reference that can never name a Secret (an empty name, `..`, a name containing `/`, upper-case letters, or more than
+  253 characters) is not "unverified": it is refused straight away as a violation.
+- A volume cannot mount `/`, `/dev` or `/dev/log` (Knative serving reserves them), and mount paths must be clean
+  absolute paths: no `//`, no `.` or `..` segment and no trailing slash.
+
+**When a read fails**
+
+- **Unknown errors are held.** An API server timeout, throttling, a server error, a connection failure, or any error the
+  operator does not recognise leaves the function as it is: a running function is not removed and nothing new is
+  rendered, a function that was never rendered stays unrendered, and the operator retries with backoff. It holds for as
+  long as the error lasts and never removes a function.
 - **A spec change does not roll out while this holds.** `status.observedGeneration` stays at the last generation that
   was rolled out, and `Ready` is `False` with reason `SecretsUnverified`, so `kubectl wait` and GitOps tools do not
   report the new spec as deployed.
-- The operator retries with backoff and recovers on its own when the read succeeds.
-
-A reference that can never name a Secret (an empty name, `..`, a name containing `/`, upper-case letters, or more than
-253 characters) is not "unverified": it is refused straight away as a violation.
-
-A read that is **denied** (Forbidden or Unauthorized) is held for ten minutes, because it does not heal by itself. After
-that the function is refused and its Knative Service is removed: an operator that cannot read Secrets cannot enforce the
-allowlist, and keeping the function would freeze revocation for every function. When access returns, the next pass
-renders the function again, as a new revision with a cold start. Timeouts, throttling and server errors are held for as
-long as they last and never remove a function.
+- **Denied reads are held for ten minutes from the first denial.** A read the API server answers with Forbidden or
+  Unauthorized does not heal by itself, so it is held for ten minutes, counted from the first denied read
+  (`status.secretsDeniedSince`; timeouts and server errors before it do not count, and it is cleared as soon as no read is
+  denied). After that the function is refused with `SecretNotAllowed` and its Knative Service is removed: an operator that
+  cannot read Secrets cannot enforce the allowlist, and keeping the function would freeze revocation for every function.
+  It stays refused for as long as the denial lasts, without flipping back and forth. When access returns, the next pass
+  renders the function again, as a new revision with a cold start.
 
 If `SecretsUnverified` does not clear on its own:
 

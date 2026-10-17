@@ -78,11 +78,12 @@ const (
 	functionNotReadyRequeueAfter = 30 * time.Second
 	// secretsDeniedHold is how long a Secret read that is DENIED (Forbidden or
 	// Unauthorized) is held as "unknown" before it becomes a definitive refusal.
-	// Transient errors (timeouts, 429, 5xx) are held without limit. A denied read
-	// is different: it does not heal by itself, and if the operator's Secret grant
-	// is gone, holding it forever would freeze revocation for every function.
-	// Stateless: measured from the SovereigntyCompliant condition's transition to
-	// SecretsUnverified, so it survives an operator restart.
+	// Every other failed read (timeouts, 429, 5xx, anything unrecognised) is held
+	// without limit. A denied read is different: it does not heal by itself, and
+	// if the operator's Secret grant is gone, holding it forever would freeze
+	// revocation for every function. Measured from status.secretsDeniedSince, the
+	// first denial itself, so it survives an operator restart and is not moved by
+	// other conditions or by transient errors that came first.
 	secretsDeniedHold = 10 * time.Minute
 	// functionRevalidateAfter re-runs the allowlist periodically: a Secret's
 	// marks can change without any event the operator watches (it holds no
@@ -112,7 +113,10 @@ type functionObservation struct {
 	// unverified are referenced Secrets whose metadata could not be read: no
 	// answer, so neither a violation nor a pass (#2498).
 	unverified []unverifiedSecret
-	lint       []databaseHostFinding
+	// deniedSince is when reads of this function's Secrets were first denied
+	// (nil while none is), already carried forward from status.
+	deniedSince *metav1.Time
+	lint        []databaseHostFinding
 	// renderErr is a failure to render a child that is not an API hiccup (a
 	// name already controlled by another object), or "".
 	renderErr string
@@ -139,19 +143,44 @@ func (o functionObservation) undecided() bool {
 	return len(o.unverified) > 0 && o.accepted()
 }
 
-// escalateDeniedSecrets turns a Secret that has been DENIED for longer than
-// secretsDeniedHold into a definitive violation. Anything else that is
+// hasDenied reports whether any unverified Secret was DENIED (Forbidden or
+// Unauthorized), as opposed to merely unreadable.
+func hasDenied(unverified []unverifiedSecret) bool {
+	for _, u := range unverified {
+		if u.denied {
+			return true
+		}
+	}
+	return false
+}
+
+// nextDeniedSince carries the start of a denial forward. It is set on the first
+// pass on which a read is denied, kept while any read stays denied, and cleared
+// the first pass on which none is: so the hold is counted from the denial
+// itself, not from some other transition.
+func nextDeniedSince(prev *metav1.Time, denied bool, now time.Time) *metav1.Time {
+	switch {
+	case !denied:
+		return nil
+	case prev != nil:
+		return prev
+	default:
+		t := metav1.NewTime(now)
+		return &t
+	}
+}
+
+// escalateDeniedSecrets turns a Secret whose reads have been DENIED for longer
+// than secretsDeniedHold into a definitive violation. It stays one for as long
+// as the denial persists, so the refusal does not flap. Anything else that is
 // unverified stays unverified.
 func escalateDeniedSecrets(
-	bs *appsv1alpha1.BackendService,
 	violations []sovereigntyViolation,
 	unverified []unverifiedSecret,
+	deniedSince *metav1.Time,
 	now time.Time,
 ) ([]sovereigntyViolation, []unverifiedSecret) {
-	prev := apimeta.FindStatusCondition(bs.Status.Conditions, ConditionSovereigntyCompliant)
-	expired := prev != nil && prev.Status == metav1.ConditionUnknown && prev.Reason == ReasonSecretsUnverified &&
-		now.Sub(prev.LastTransitionTime.Time) >= secretsDeniedHold
-	if !expired {
+	if deniedSince == nil || now.Sub(deniedSince.Time) < secretsDeniedHold {
 		return violations, unverified
 	}
 	var still []unverifiedSecret
@@ -187,6 +216,8 @@ type functionVerdict struct {
 	// undecided pass rolled nothing out, so it keeps the previous value: the new
 	// spec has not been observed.
 	observedGeneration int64
+	// secretsDeniedSince is the status field's next value.
+	secretsDeniedSince *metav1.Time
 	// refusal is the Ready reason when the function newly ENTERED a refusal
 	// this pass (a transition), for the refusals metric; "" otherwise.
 	refusal string
@@ -199,6 +230,7 @@ func computeBackendServiceVerdict(bs *appsv1alpha1.BackendService, o functionObs
 	var v functionVerdict
 	gen := bs.Generation
 	v.observedGeneration = gen
+	v.secretsDeniedSince = o.deniedSince
 	if o.undecided() {
 		v.observedGeneration = bs.Status.ObservedGeneration
 	}

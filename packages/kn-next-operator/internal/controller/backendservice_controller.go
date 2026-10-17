@@ -20,12 +20,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
-	"net"
 	"net/http"
-	"net/url"
 	"strings"
-	"syscall"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -186,19 +182,21 @@ func (r *BackendServiceReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	lookup := memoSecretLookup(r.secretMetadata(ctx, bs.Namespace))
 	obs.violations, obs.unverified = checkFunctionSovereignty(bs, obs.zone, others, lookup)
 	obs.lint = lintForeignDatabaseHosts(bs, obs.zone, others)
-	// Whatever stays running through a pass that cannot decide the spec's own
-	// Secrets is the RUNNING template, so that is what is checked then.
-	var running *servingv1.Service
-	if len(obs.unverified) > 0 {
-		var err error
-		if running, err = r.existingFunctionService(ctx, bs); err != nil {
-			return ctrl.Result{}, err
-		}
-		runViolations, runUnverified := checkRunningSovereignty(bs, obs.zone, others, lookup, running)
-		obs.violations = append(obs.violations, runViolations...)
-		obs.unverified = mergeUnverified(obs.unverified, runUnverified)
+	// What is RUNNING is checked on EVERY pass, before anything is rendered: the
+	// spec says what the owner wants next, but only the running template says
+	// what is mounted now. If a render is later refused (a webhook, a rejected
+	// mount path) or the spec's own Secrets cannot be read, the old template
+	// stays, and a Secret revoked since it was rendered must not stay with it.
+	running, err := r.existingFunctionService(ctx, bs)
+	if err != nil {
+		return ctrl.Result{}, err
 	}
-	obs.violations, obs.unverified = escalateDeniedSecrets(bs, obs.violations, obs.unverified, time.Now())
+	runViolations, runUnverified := checkRunningSovereignty(bs, obs.zone, others, lookup, running)
+	obs.violations = append(obs.violations, runViolations...)
+	obs.unverified = mergeUnverified(obs.unverified, runUnverified)
+	now := time.Now()
+	obs.deniedSince = nextDeniedSince(bs.Status.SecretsDeniedSince, hasDenied(obs.unverified), now)
+	obs.violations, obs.unverified = escalateDeniedSecrets(obs.violations, obs.unverified, obs.deniedSince, now)
 
 	served, revision := bs.Status.ServedProtoVersion, bs.Status.ObservedRevision
 	// heldErr is returned AFTER the verdict is applied: an undecided pass reports
@@ -243,6 +241,7 @@ func (r *BackendServiceReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 	verdict := computeBackendServiceVerdict(bs, obs)
 	bs.Status.ObservedGeneration = verdict.observedGeneration
+	bs.Status.SecretsDeniedSince = verdict.secretsDeniedSince
 	bs.Status.ServedProtoVersion = served
 	bs.Status.ObservedRevision = revision
 	if obs.ksvc != nil {
@@ -303,61 +302,42 @@ func (r *BackendServiceReconciler) secretMetadata(ctx context.Context, namespace
 		case apierrors.IsNotFound(err):
 			return secretMetadata{}
 		default:
-			switch classifyReadError(err) {
-			case readDenied:
-				return secretMetadata{readErr: err.Error(), denied: true}
-			case readTransient:
-				return secretMetadata{readErr: err.Error()}
-			default:
-				return secretMetadata{rejected: err.Error()}
-			}
+			// A failed read is never a verdict: it is held, and only a denied
+			// one is held for a bounded time.
+			return secretMetadata{readErr: err.Error(), denied: classifyReadError(err) == readDenied}
 		}
 	}
 }
 
-// readClass says what a failed Secret metadata read tells us.
+// readClass says how a failed Secret metadata read is held. Neither class is a
+// verdict: a failed read never refuses a function by itself.
 type readClass int
 
 const (
-	// readTransient: the apiserver or the network failed to answer (timeout, 429,
-	// 5xx, connection refused or reset, context deadline). Says nothing about
-	// the Secret; held without limit.
+	// readTransient: held without limit. This is the default for EVERY failed
+	// read that is not an authorization failure: timeouts, 429, 5xx, transport
+	// errors, and anything nobody anticipated. It says nothing about the Secret.
 	readTransient readClass = iota
-	// readDenied: Forbidden or Unauthorized. Held for a bounded window.
+	// readDenied: Forbidden or Unauthorized (401 or 403). Held, but only for
+	// secretsDeniedHold counted from the first denial.
 	readDenied
-	// readDefinitive: anything else, including a name the client refuses to send
-	// ("name is required") and any other 4xx. It is about the reference itself.
-	readDefinitive
 )
 
-// classifyReadError sorts a failed read. Only a server transient is an unknown
-// answer; the owner controls the spec, so an error they can provoke is never
-// "unknown".
+// classifyReadError sorts a failed read. The default is HELD: an unrecognised
+// error must never be able to tear a running function down. The only definitive
+// answers are a NotFound (handled before this is called) and a name no Secret
+// can have (refused before any read).
 func classifyReadError(err error) readClass {
-	switch {
-	case apierrors.IsForbidden(err), apierrors.IsUnauthorized(err):
+	if apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err) {
 		return readDenied
-	case apierrors.IsTimeout(err), apierrors.IsServerTimeout(err), apierrors.IsTooManyRequests(err),
-		apierrors.IsInternalError(err), apierrors.IsServiceUnavailable(err):
-		return readTransient
 	}
 	var status apierrors.APIStatus
 	if errors.As(err, &status) {
-		if code := status.Status().Code; code == http.StatusRequestTimeout || code >= http.StatusInternalServerError {
-			return readTransient
+		if code := status.Status().Code; code == http.StatusUnauthorized || code == http.StatusForbidden {
+			return readDenied
 		}
-		return readDefinitive
 	}
-	var netErr net.Error
-	var urlErr *url.Error
-	switch {
-	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled),
-		errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF),
-		errors.Is(err, syscall.ECONNREFUSED), errors.Is(err, syscall.ECONNRESET), errors.Is(err, syscall.EPIPE),
-		errors.As(err, &netErr), errors.As(err, &urlErr):
-		return readTransient
-	}
-	return readDefinitive
+	return readTransient
 }
 
 // memoSecretLookup reads each Secret at most once per pass, so the spec's and

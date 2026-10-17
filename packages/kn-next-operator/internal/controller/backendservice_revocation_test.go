@@ -23,6 +23,7 @@ import (
 	"io"
 	"net"
 	"net/url"
+	"reflect"
 	"strings"
 	"syscall"
 	"testing"
@@ -54,21 +55,23 @@ func TestClassifyReadError(t *testing.T) {
 		{"429", apierrors.NewTooManyRequests("x", 1), readTransient},
 		{"500", apierrors.NewInternalError(errors.New("x")), readTransient},
 		{"503", apierrors.NewServiceUnavailable("x"), readTransient},
-		{"504 as a bare status", &apierrors.StatusError{ErrStatus: metav1.Status{Code: 504}}, readTransient},
 		{"context deadline", fmt.Errorf("get: %w", context.DeadlineExceeded), readTransient},
 		{"connection refused", &net.OpError{Op: "dial", Err: syscall.ECONNREFUSED}, readTransient},
-		{"connection reset", fmt.Errorf("read: %w", syscall.ECONNRESET), readTransient},
 		{"unexpected EOF", io.ErrUnexpectedEOF, readTransient},
 		{"url error", &url.Error{Op: "Get", URL: "https://x", Err: errors.New("http2: client connection lost")}, readTransient},
 		{"forbidden", forbidden, readDenied},
 		{"unauthorized", apierrors.NewUnauthorized("x"), readDenied},
-		// Everything else says something about the REFERENCE, and an owner can
-		// provoke it: never "unknown".
-		{"client-side name error", errors.New("resource name may not be empty"), readDefinitive},
-		{"name is required", errors.New("name is required"), readDefinitive},
-		{"bad request", apierrors.NewBadRequest("x"), readDefinitive},
-		{"invalid", apierrors.NewInvalid(schema.GroupKind{Kind: "Secret"}, "s", nil), readDefinitive},
-		{"conflict", apierrors.NewConflict(schema.GroupResource{}, "s", errors.New("x")), readDefinitive},
+		{"a bare 403 status", &apierrors.StatusError{ErrStatus: metav1.Status{Code: 403}}, readDenied},
+		{"a bare 401 status", &apierrors.StatusError{ErrStatus: metav1.Status{Code: 401}}, readDenied},
+		// The DEFAULT is held. None of these can tear a function down: nobody
+		// anticipated them, and some an owner could provoke.
+		{"an unrecognised error", errors.New("something nobody planned for"), readTransient},
+		{"client-side name error", errors.New("resource name may not be empty"), readTransient},
+		{"name is required", errors.New("name is required"), readTransient},
+		{"bad request", apierrors.NewBadRequest("x"), readTransient},
+		{"invalid", apierrors.NewInvalid(schema.GroupKind{Kind: "Secret"}, "s", nil), readTransient},
+		{"conflict", apierrors.NewConflict(schema.GroupResource{}, "s", errors.New("x")), readTransient},
+		{"gone", apierrors.NewResourceExpired("x"), readTransient},
 	}
 	for _, c := range cases {
 		if got := classifyReadError(c.err); got != c.want {
@@ -103,13 +106,16 @@ func TestInvalidSecretNameIsAViolationNeverUnverified(t *testing.T) {
 	}
 }
 
-func TestRejectedLookupIsAViolation(t *testing.T) {
-	zone, others := sovFixture()
-	lookup := func(string) secretMetadata { return secretMetadata{rejected: "the server answered 422"} }
-	got, unverified := checkFunctionSovereignty(sovFunction(specEnvFromSecret("stripe")), zone, others, lookup)
-	assertOneViolation(t, got, "envFrom[0].secretRef", "stripe", "rejected")
-	if len(unverified) != 0 {
-		t.Errorf("a rejected lookup is definitive, not unverified: %+v", unverified)
+// The only way a failed read can reach a verdict is through its NAME: the type
+// has no "rejected" state to put an error in, and an unrecognised error is held.
+func TestAFailedReadHasNoDefinitiveState(t *testing.T) {
+	typ := reflect.TypeOf(secretMetadata{})
+	for i := 0; i < typ.NumField(); i++ {
+		switch typ.Field(i).Name {
+		case "found", "labels", "ownerRefs", "readErr", "denied":
+		default:
+			t.Errorf("secretMetadata.%s: a failed read must not gain a state of its own; only the marks of an object that was READ, NotFound, or a name problem are definitive", typ.Field(i).Name)
+		}
 	}
 }
 
@@ -171,41 +177,48 @@ func TestCheckRunningSovereigntyRefusesARevokedSecretAndIgnoresNoService(t *test
 
 func TestEscalateDeniedSecretsOnlyAfterTheHold(t *testing.T) {
 	now := time.Now()
-	bsAt := func(age time.Duration, reason string, status metav1.ConditionStatus) *appsv1alpha1.BackendService {
-		bs := sovFunction(appsv1alpha1.BackendServiceSpec{})
-		bs.Status.Conditions = []metav1.Condition{{
-			Type: ConditionSovereigntyCompliant, Status: status, Reason: reason,
-			LastTransitionTime: metav1.NewTime(now.Add(-age)),
-		}}
-		return bs
-	}
+	since := func(age time.Duration) *metav1.Time { t := metav1.NewTime(now.Add(-age)); return &t }
 	unverified := []unverifiedSecret{
 		{source: "envFrom[0].secretRef", name: "denied", err: "forbidden", denied: true},
 		{source: "envFrom[1].secretRef", name: "flaky", err: "503"},
 	}
 	// Inside the hold: nothing changes.
-	v, u := escalateDeniedSecrets(bsAt(time.Minute, ReasonSecretsUnverified, metav1.ConditionUnknown), nil, unverified, now)
+	v, u := escalateDeniedSecrets(nil, unverified, since(time.Minute), now)
 	if len(v) != 0 || len(u) != 2 {
 		t.Errorf("inside the hold: violations=%+v unverified=%+v", v, u)
 	}
 	// Past the hold: the DENIED one is a violation, the transient one is still held.
-	v, u = escalateDeniedSecrets(bsAt(2*secretsDeniedHold, ReasonSecretsUnverified, metav1.ConditionUnknown), nil, unverified, now)
+	v, u = escalateDeniedSecrets(nil, unverified, since(2*secretsDeniedHold), now)
 	if len(v) != 1 || v[0].name != "denied" || !strings.Contains(v[0].message, "denied access") {
 		t.Errorf("past the hold: want the denied Secret refused, got %+v", v)
 	}
 	if len(u) != 1 || u[0].name != "flaky" {
 		t.Errorf("past the hold: the transient Secret stays unverified, got %+v", u)
 	}
-	// A condition that is not (Unknown, SecretsUnverified) starts no clock: a
-	// function that was compliant an hour ago has not been unverified for an hour.
-	for _, bs := range []*appsv1alpha1.BackendService{
-		bsAt(2*secretsDeniedHold, ReasonCompliant, metav1.ConditionTrue),
-		bsAt(2*secretsDeniedHold, ReasonSecretNotAllowed, metav1.ConditionFalse),
-		sovFunction(appsv1alpha1.BackendServiceSpec{}),
-	} {
-		if v, u := escalateDeniedSecrets(bs, nil, unverified, now); len(v) != 0 || len(u) != 2 {
-			t.Errorf("no running clock must mean no escalation, got %+v %+v", v, u)
-		}
+	// No denial, no clock: nothing escalates, however old the transient error.
+	if v, u := escalateDeniedSecrets(nil, unverified, nil, now); len(v) != 0 || len(u) != 2 {
+		t.Errorf("no denial must mean no escalation, got %+v %+v", v, u)
+	}
+}
+
+func TestNextDeniedSinceStartsAtTheFirstDenialAndClearsWithIt(t *testing.T) {
+	now := time.Now()
+	earlier := metav1.NewTime(now.Add(-7 * time.Minute))
+	// The first denied pass starts the clock; transient-only passes never do.
+	if got := nextDeniedSince(nil, false, now); got != nil {
+		t.Errorf("no denial must not start the clock, got %v", got)
+	}
+	got := nextDeniedSince(nil, true, now)
+	if got == nil || !got.Time.Equal(now) {
+		t.Errorf("the first denial starts the clock now, got %v", got)
+	}
+	// The clock keeps its start while the denial lasts.
+	if got := nextDeniedSince(&earlier, true, now); got == nil || !got.Time.Equal(earlier.Time) {
+		t.Errorf("a persisting denial keeps its start, got %v", got)
+	}
+	// And it clears the first pass on which nothing is denied.
+	if got := nextDeniedSince(&earlier, false, now); got != nil {
+		t.Errorf("a denial that ended must clear the clock, got %v", got)
 	}
 }
 
@@ -267,21 +280,24 @@ func (e erroringReader) List(context.Context, client.ObjectList, ...client.ListO
 // rejected (a violation). NotFound stays "unmarked".
 func TestSecretLookupMapsEachReadFailure(t *testing.T) {
 	cases := []struct {
-		name string
-		err  error
-		want secretMetadata
+		name       string
+		err        error
+		wantFound  bool
+		wantReadEr bool
+		wantDenied bool
 	}{
-		{"timeout", apierrors.NewTimeoutError("x", 1), secretMetadata{readErr: "x"}},
-		{"forbidden", apierrors.NewForbidden(schema.GroupResource{Resource: "secrets"}, "s", errors.New("x")), secretMetadata{readErr: "x", denied: true}},
-		{"client-side", errors.New("name is required"), secretMetadata{rejected: "x"}},
-		{"not found", apierrors.NewNotFound(schema.GroupResource{Resource: "secrets"}, "s"), secretMetadata{}},
+		{"timeout", apierrors.NewTimeoutError("x", 1), false, true, false},
+		{"forbidden", apierrors.NewForbidden(schema.GroupResource{Resource: "secrets"}, "s", errors.New("x")), false, true, true},
+		{"unauthorized", apierrors.NewUnauthorized("x"), false, true, true},
+		{"client-side", errors.New("name is required"), false, true, false},
+		{"unrecognised", errors.New("something nobody planned for"), false, true, false},
+		{"not found", apierrors.NewNotFound(schema.GroupResource{Resource: "secrets"}, "s"), false, false, false},
 	}
 	for _, c := range cases {
 		r := &BackendServiceReconciler{APIReader: erroringReader{c.err}}
 		got := r.secretMetadata(context.Background(), "ns")("s")
-		if (got.readErr != "") != (c.want.readErr != "") || got.denied != c.want.denied ||
-			(got.rejected != "") != (c.want.rejected != "") || got.found {
-			t.Errorf("%s: got %+v, want the shape of %+v", c.name, got, c.want)
+		if got.found != c.wantFound || (got.readErr != "") != c.wantReadEr || got.denied != c.wantDenied {
+			t.Errorf("%s: got %+v", c.name, got)
 		}
 	}
 }
