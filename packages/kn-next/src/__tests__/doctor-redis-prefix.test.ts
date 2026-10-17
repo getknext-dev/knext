@@ -130,7 +130,53 @@ describe("doctor: Redis key prefixes", () => {
             ctxWith([{ name: "shop", cache: redis("kn-next") }]),
         );
         expect(row?.status).toBe("warn");
-        expect(row?.detail).toContain("kn-next");
+        // The CRD's admission rule refuses a stored 'kn-next' keyPrefix, so the
+        // "refused by the cluster" note alone would also say 'kn-next' and warn.
+        // Only the shared-fallback finding says the cache is never swept; pin
+        // that sentence so removing the finding goes red, not just the note.
+        expect(row?.detail).toContain(
+            "default/shop uses the shared fallback 'kn-next' (its cache is never swept after an outage)",
+        );
+    });
+
+    it("WARN: the shared fallback 'kn-next' via spec.env REDIS_KEY_PREFIX (admission never sees it), even by one app", () => {
+        const [row] = redisPrefixCheck(
+            ctxWith([
+                {
+                    name: "shop",
+                    cache: redis(),
+                    env: { REDIS_KEY_PREFIX: "kn-next" },
+                },
+            ]),
+        );
+        expect(row?.status).toBe("warn");
+        expect(row?.detail).toContain(
+            "default/shop uses the shared fallback 'kn-next' (its cache is never swept after an outage)",
+        );
+        // Not also reported as a keyPrefix the cluster refuses: that is stored
+        // spec.cache.keyPrefix only, so this finding stands on its own.
+        expect(row?.detail).not.toContain("the cluster now refuses it");
+    });
+
+    it("WARN: two apps on the shared fallback are named together, in the plural", () => {
+        const [row] = redisPrefixCheck(
+            ctxWith([
+                {
+                    name: "shop",
+                    cache: redis(),
+                    env: { REDIS_KEY_PREFIX: "kn-next" },
+                },
+                {
+                    name: "blog",
+                    cache: redis(),
+                    env: { REDIS_KEY_PREFIX: "kn-next" },
+                },
+            ]),
+        );
+        expect(row?.status).toBe("warn");
+        expect(row?.detail).toContain(
+            "default/shop, default/blog use the shared fallback 'kn-next'",
+        );
     });
 
     it("WARN: a prefix nested under the shared fallback ('kn-next:cache'), even by one app", () => {
