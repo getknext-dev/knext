@@ -34,7 +34,10 @@
  *   node scripts/mutation-prove-osv-gate.mjs
  */
 
-import { dirname, resolve } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
 import { createGuardProver } from './lib/guard-prover.mjs';
@@ -62,6 +65,19 @@ const parsesJson = (text) => {
   }
 };
 
+/** A mutated module must still be valid JavaScript, or its red is a red for the wrong reason. */
+const parsesJs = (text) => {
+  const dir = mkdtempSync(join(tmpdir(), 'osv-prover-'));
+  const file = join(dir, 'mutated.mjs');
+  try {
+    writeFileSync(file, text);
+    const res = spawnSync(process.execPath, ['--check', file], { encoding: 'utf8' });
+    return res.status === 0 ? undefined : `not valid JavaScript: ${res.stderr.split('\n')[0]}`;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+};
+
 const MUTATIONS = [
   {
     id: 'G1',
@@ -74,8 +90,8 @@ const MUTATIONS = [
     id: 'G2',
     claim: 'a MAL- alias no longer marks a package malicious',
     subject: 'lib',
-    anchor: '(v.aliases ?? []).some((a) => /^MAL-/.test(a))',
-    replacement: 'false',
+    anchor: 'return /^MAL-/.test(v.id) || (v.aliases ?? []).some((a) => /^MAL-/.test(a));',
+    replacement: 'return /^MAL-/.test(v.id);',
   },
   {
     id: 'G3',
@@ -116,8 +132,8 @@ const MUTATIONS = [
     id: 'G8',
     claim: 'the allowlist stops requiring a real justification',
     subject: 'lib',
-    anchor: 'e.justification.trim().length < 20',
-    replacement: 'e.justification.trim().length < 0',
+    anchor: "if (typeof e.justification !== 'string' || e.justification.trim().length < 20) {",
+    replacement: "if (typeof e.justification !== 'string') {",
   },
   {
     id: 'G9',
@@ -178,8 +194,8 @@ const MUTATIONS = [
     expect: 'green',
     claim: 'the report wording changes',
     subject: 'lib',
-    anchor: "'OSV: no malicious packages and no new HIGH/CRITICAL vulnerabilities.'",
-    replacement: "'OSV: clean, nothing malicious and nothing new at HIGH or above.'",
+    anchor: "out.push('OSV: no malicious packages and no new HIGH/CRITICAL vulnerabilities.');",
+    replacement: "out.push('OSV: clean, nothing malicious and nothing new at HIGH or above.');",
   },
   {
     id: 'N2',
@@ -190,7 +206,11 @@ const MUTATIONS = [
     replacement: '  cancel-in-progress: false',
     validate: parsesYaml,
   },
-].map((m) => ({ expect: 'red', validate: undefined, ...m }));
+].map((m) => ({
+  expect: 'red',
+  validate: m.subject === 'lib' ? parsesJs : undefined,
+  ...m,
+}));
 
 const CANARY = {
   subject: 'lib',
