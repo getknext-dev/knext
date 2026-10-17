@@ -18,8 +18,12 @@
  *                                              the CR the builder emits (digest-pinned
  *                                              image, no ownerReference, only fields the
  *                                              shipped CRD defines).
- *   - `tests/deploy-function-bin-e2e.test.ts`  the real built bin starts the processes
- *                                              in that order and never `func` / `kn`.
+ *   - `tests/deploy-function-bin-e2e.test.ts`  the real built bin, under node and bun, starts
+ *                                              the processes in that order and never
+ *                                              `func` / `kn`.
+ *   - `packages/kn-next/src/__tests__/cli-help-docs-parity.test.ts`
+ *                                              `knext --help` lists what the reference
+ *                                              lists; the install hint names every verb.
  *
  * Two kinds of row: the SCANNER weakened (a fixture must then go red), and the
  * REAL TREE broken (a violation planted in shipped code must go red). Both
@@ -55,9 +59,9 @@ const GRPC_DEPLOY_SPEC = 'packages/grpc/src/__tests__/deploy-function.test.ts';
 const GRPC_CR_SPEC = 'packages/grpc/src/__tests__/backend-service-cr.test.ts';
 const CRD_SPEC = 'tests/backendservice-cr-crd-contract.test.ts';
 const E2E_SPEC = 'tests/deploy-function-bin-e2e.test.ts';
+const HELP_SPEC = 'packages/kn-next/src/__tests__/cli-help-docs-parity.test.ts';
 
-const APPLY_LINE =
-  "host.run(['kubectl', 'apply', '--validate=strict', '-f', crPath, '-n', namespace], context);";
+const APPLY_LINE = 'host.apply({ crPath, namespace, context });';
 
 // ---------------------------------------------------------------------------
 // ADR-0052 D3: no `func deploy` / `kn service`
@@ -102,7 +106,7 @@ const SPAWN = [
     id: 'S06',
     subject: 'spawnlib',
     claim: 'a spawn the scan cannot read passes instead of failing',
-    anchor: "push('unparseable-spawn', m.index, `${name}(${key}): ${problem.unparseable}`);",
+    anchor: "push('unparseable-spawn', at, `${name}(${key}): ${problem.unparseable}`);",
     replacement: 'void 0;',
   },
   {
@@ -178,6 +182,55 @@ const SPAWN = [
     replacement: "  'typeof',",
   },
   {
+    id: 'S17',
+    subject: 'spawnlib',
+    claim: 'a member call handed an argv (host.run, x.spawn) is no longer read as a spawn',
+    anchor: 'if (!MEMBER_SPAWN.has(name)) continue;',
+    replacement: 'continue;',
+  },
+  {
+    id: 'S18',
+    subject: 'spawnlib',
+    claim: 'a member spawn is found but never graded',
+    anchor: 'if (kind) handleSpawn(name, kind, m.index, open);',
+    replacement: 'void 0;',
+  },
+  {
+    id: 'S19',
+    subject: 'spawnlib',
+    claim: 'func/kn are matched by exact name only (an absolute path escapes)',
+    anchor: "const base = (p) => p.replace(/^.*[\\\\/]/, '').replace(/\\.exe$/i, '');",
+    replacement: 'const base = (p) => p;',
+  },
+  {
+    id: 'S20',
+    subject: 'spawnlib',
+    claim: 'execa is no longer a recognised spawn',
+    anchor: "  'execaSync',\n]);",
+    replacement: ']);',
+  },
+  {
+    id: 'S21',
+    subject: 'spawnlib',
+    claim: 'a backtick require of child_process is not followed',
+    anchor: 'const reqRe = /\\brequire\\s*\\(\\s*([\'"`])/g;',
+    replacement: 'const reqRe = /\\brequire\\s*\\(\\s*([\'"])/g;',
+  },
+  {
+    id: 'S22',
+    subject: 'spawnlib',
+    claim: 'a backtick dynamic import of child_process is not followed',
+    anchor: 'const dynRe = /\\bimport\\s*\\(\\s*([\'"`])/g;',
+    replacement: 'const dynRe = /\\bimport\\s*\\(\\s*([\'"])/g;',
+  },
+  {
+    id: 'S23',
+    subject: 'tscall',
+    claim: 'a program kept in a constant is not read as the string it is',
+    anchor: 'if (/^[A-Za-z_$][\\w$]*$/.test(b.slice(a, e)) && p.consts?.has(b.slice(a, e))) {',
+    replacement: 'if (false) {',
+  },
+  {
     id: 'T01',
     subject: 'deployfn',
     claim: 'a func deploy argv planted in @getknext/grpc',
@@ -215,7 +268,7 @@ const KINDS = [
     id: 'K01',
     subject: 'writelib',
     claim: 'a write of any other resource is no longer refused',
-    anchor: 'if (!ALLOWED_RESOURCES.has(normResource(resource))) {',
+    anchor: 'if (!kinds.every((k) => ALLOWED_RESOURCES.has(k))) {',
     replacement: 'if (false) {',
   },
   {
@@ -250,15 +303,15 @@ const KINDS = [
     id: 'K06',
     subject: 'writelib',
     claim: 'a stale manifest-write entry is never reported',
-    anchor: 'mine.filter((e) => e.used === 0)',
-    replacement: 'mine.filter(() => false)',
+    anchor: '.filter((e) => e.used < (e.count ?? 1))',
+    replacement: '.filter(() => false)',
   },
   {
     id: 'K07',
     subject: 'writelib',
     claim: 'a spawn of the literal program kubectl is no longer read (ci-preflight create unseen)',
-    anchor: "if (lit(args[0]) !== 'kubectl' || !args[1]) continue;",
-    replacement: 'continue;',
+    anchor: 'if (isKubectl(args[0])) handle(elems, m.index);',
+    replacement: 'if (false) handle(elems, m.index);',
   },
   {
     id: 'K08',
@@ -304,6 +357,128 @@ const KINDS = [
     replacement: "  'typeof',",
   },
   {
+    id: 'K14',
+    subject: 'tscall',
+    claim: 'a kubectl kept in a constant is not read as kubectl',
+    anchor: 'if (/^[A-Za-z_$][\\w$]*$/.test(b.slice(a, e)) && p.consts?.has(b.slice(a, e))) {',
+    replacement: 'if (false) {',
+  },
+  {
+    id: 'K15',
+    subject: 'writelib',
+    claim: 'a quoted "kind" key, or a template-literal kind value, is not read',
+    anchor:
+      'for (const m of text.matchAll(/(?<![\\w.])["\']?kind["\']?\\s*:\\s*(["\'`])([A-Z][A-Za-z0-9]*)\\1/g))',
+    replacement:
+      'for (const m of text.matchAll(/(?<![\\w.])kind\\s*:\\s*(["\'])([A-Z][A-Za-z0-9]*)\\1/g))',
+  },
+  {
+    id: 'K16',
+    subject: 'writelib',
+    claim: 'a kind built from a template with a hole passes unseen',
+    anchor: 'if (/(?<![\\w.])["\']?kind["\']?\\s*:\\s*`[^`]*\\$\\{/.test(text))',
+    replacement: 'if (false)',
+  },
+  {
+    id: 'K17',
+    subject: 'writelib',
+    claim: 'kubectl is matched by exact name only (an absolute path escapes)',
+    anchor: ".replace(/^.*[\\\\/]/, '')\n    .replace(/\\.exe$/i, '');",
+    replacement: ';',
+  },
+  {
+    id: 'K18',
+    subject: 'writelib',
+    claim: 'a sh -c string is no longer read for kubectl',
+    anchor: 'if (cmd) shell(cmd, i);',
+    replacement: 'void 0;',
+  },
+  {
+    id: 'K19',
+    subject: 'writelib',
+    claim: 'a shell started with execFile/spawn is no longer read for kubectl',
+    anchor: 'if (cmd) shell(cmd, m.index);',
+    replacement: 'void 0;',
+  },
+  {
+    id: 'K20',
+    subject: 'writelib',
+    claim: 'an exec/execSync string is no longer read for kubectl',
+    anchor:
+      "if (args[0].type === 'string' || args[0].type === 'template') shell(args[0], m.index);",
+    replacement: 'void 0;',
+  },
+  {
+    id: 'K21',
+    subject: 'writelib',
+    claim: 'kubectl behind env/xargs in a shell string passes unread',
+    anchor: 'if (mentions > heads) {',
+    replacement: 'if (false) {',
+  },
+  {
+    id: 'K22',
+    subject: 'writelib',
+    claim: 'the value of a flag such as -l is taken for the resource',
+    anchor: 'if (VALUE_FLAGS.has(v)) {',
+    replacement: 'if (false) {',
+  },
+  {
+    id: 'K23',
+    subject: 'writelib',
+    claim: 'an unknown flag before the resource is skipped instead of failing',
+    anchor: 'if (BOOL_FLAGS.has(v)) continue;',
+    replacement: 'continue;',
+  },
+  {
+    id: 'K24',
+    subject: 'writelib',
+    claim: 'the slash form (nextapp/foo) and comma lists are not split into kinds',
+    anchor: "const kinds = resource.split(',').map((x) => normResource(x.split('/')[0]));",
+    replacement: 'const kinds = [normResource(resource)];',
+  },
+  {
+    id: 'K25',
+    subject: 'writelib',
+    claim: 'manifest writes are not counted (a second apply in a listed file passes)',
+    anchor: 'if (entry.used > (entry.count ?? 1)) {',
+    replacement: 'if (false) {',
+  },
+  {
+    id: 'K26',
+    subject: 'writelib',
+    claim: 'an entry whose sites dropped below its count is not reported stale',
+    anchor: '.filter((e) => e.used < (e.count ?? 1))',
+    replacement: '.filter((e) => e.used === 0)',
+  },
+  {
+    id: 'K27',
+    subject: 'writelib',
+    claim: 'a kind a source emits but the entry does not declare passes',
+    anchor: 'if (!declared.has(k)) {',
+    replacement: 'if (false) {',
+  },
+  {
+    id: 'K28',
+    subject: 'writelib',
+    claim: 'a declared kind that no source emits passes',
+    anchor: 'if (!found.has(k)) {',
+    replacement: 'if (false) {',
+  },
+  {
+    id: 'K29',
+    subject: 'writelib',
+    claim: 'an entry that names no kind source is accepted',
+    anchor: 'if (!e.kindSources || e.kindSources.length === 0) {',
+    replacement: 'if (false) {',
+  },
+  {
+    id: 'K30',
+    subject: 'writelib',
+    claim: 'the tree scan no longer compares declared kinds with the sources',
+    anchor: '...checkManifestKinds(allow, (f) => {',
+    replacement: '...checkManifestKinds([], (f) => {',
+  },
+  {
     id: 'T05',
     subject: 'cleanup',
     claim: 'a delete of another resource planted in core cleanup',
@@ -312,10 +487,10 @@ const KINDS = [
   },
   {
     id: 'T06',
-    subject: 'deployfn',
-    claim: '@getknext/grpc applies without --validate=strict',
-    anchor: APPLY_LINE,
-    replacement: "host.run(['kubectl', 'apply', '-f', crPath, '-n', namespace], context);",
+    subject: 'dispatch',
+    claim: "core's apply (the only kubectl apply of a BackendService) drops --validate=strict",
+    anchor: '"apply",\n                        "--validate=strict",',
+    replacement: '"apply",',
   },
   {
     id: 'T07',
@@ -323,6 +498,13 @@ const KINDS = [
     claim: 'a manifest apply planted in a file with no table entry',
     anchor: '["kubectl", "delete", "nextapp", config.name, "--ignore-not-found"],',
     replacement: '["kubectl", "apply", "--validate=strict", "-f", "x.yaml"],',
+  },
+  {
+    id: 'T09',
+    subject: 'crbuilder',
+    claim: 'the NextApp builder starts emitting an allowed kind the deploy entry does not declare',
+    anchor: 'kind: "NextApp",',
+    replacement: 'kind: "BackendService",',
   },
   {
     id: 'T08',
@@ -337,6 +519,7 @@ const KINDS = [
 // Preflight first, then a strict apply, context bound to both
 // ---------------------------------------------------------------------------
 const PREFLIGHT_CALL = 'const outcome = host.preflight({ crPath, namespace, context });';
+const CORE_ARGV_STRICT = '"apply",\n                        "--validate=strict",';
 const APPLY_ROWS = (spec) => [
   {
     id: 'O01',
@@ -354,20 +537,6 @@ const APPLY_ROWS = (spec) => [
     replacement: 'if (false) {',
   },
   {
-    id: 'O03',
-    subject: 'deployfn',
-    claim: 'the apply drops --validate=strict',
-    anchor: APPLY_LINE,
-    replacement: "host.run(['kubectl', 'apply', '-f', crPath, '-n', namespace], context);",
-  },
-  {
-    id: 'O04',
-    subject: 'deployfn',
-    claim: 'the apply drops the namespace',
-    anchor: APPLY_LINE,
-    replacement: "host.run(['kubectl', 'apply', '--validate=strict', '-f', crPath], context);",
-  },
-  {
     id: 'O05',
     subject: 'deployfn',
     claim: 'the preflight no longer gets the kubectl context',
@@ -379,8 +548,7 @@ const APPLY_ROWS = (spec) => [
     subject: 'deployfn',
     claim: 'the apply no longer gets the kubectl context',
     anchor: APPLY_LINE,
-    replacement:
-      "host.run(['kubectl', 'apply', '--validate=strict', '-f', crPath, '-n', namespace]);",
+    replacement: 'host.apply({ crPath, namespace });',
   },
   {
     id: 'O07',
@@ -399,12 +567,27 @@ const APPLY_ROWS = (spec) => [
   {
     id: 'O09',
     subject: 'deployfn',
-    claim: 'a func process started before the apply',
+    claim: 'the apply is issued twice',
     anchor: APPLY_LINE,
-    replacement: `host.run(['func', 'build'], context);\n      ${APPLY_LINE}`,
+    replacement: `${APPLY_LINE}\n      ${APPLY_LINE}`,
   },
   ...(spec === ORDER_SPEC
     ? [
+        {
+          id: 'O03',
+          subject: 'dispatch',
+          claim: "core's apply drops --validate=strict",
+          anchor: CORE_ARGV_STRICT,
+          replacement: '"apply",',
+        },
+        {
+          id: 'O04',
+          subject: 'dispatch',
+          claim: "core's apply drops the namespace",
+          anchor:
+            '                        crPath,\n                        "-n",\n                        namespace,',
+          replacement: '                        crPath,',
+        },
         {
           id: 'O10',
           subject: 'dispatch',
@@ -415,9 +598,11 @@ const APPLY_ROWS = (spec) => [
         {
           id: 'O11',
           subject: 'dispatch',
-          claim: "core's apply run loses the kubectl context",
-          anchor: 'run: (argv, context) => kubectl.run(withKubeContext(argv, context)),',
-          replacement: 'run: (argv, _context) => kubectl.run(argv),',
+          claim: "core's apply loses the kubectl context",
+          anchor:
+            '                    ],\n                    context,\n                ),\n            ),',
+          replacement:
+            '                    ],\n                    undefined,\n                ),\n            ),',
         },
         {
           id: 'O12',
@@ -433,8 +618,42 @@ const APPLY_ROWS = (spec) => [
           anchor: 'process.argv[3] === "function"',
           replacement: 'process.argv[3] === "functionx"',
         },
+        {
+          id: 'O14',
+          subject: 'dispatch',
+          claim: 'the seam core hands the package grows a way to run any argv',
+          anchor: '        apply: ({ crPath, namespace, context }) =>',
+          replacement:
+            '        run: (argv: readonly string[]) => kubectl.run(argv),\n        apply: ({ crPath, namespace, context }) =>',
+        },
+        {
+          id: 'O15',
+          subject: 'dispatch',
+          claim: "core's apply runs a program other than kubectl",
+          anchor: '                        "kubectl",\n                        "apply",',
+          replacement: '                        "echo",\n                        "apply",',
+        },
       ]
     : []),
+];
+
+const HELP_ROWS = [
+  {
+    id: 'H01',
+    subject: 'help',
+    claim: '`deploy function` is dropped from the printed help',
+    anchor: 'display: "deploy function",',
+    replacement: 'display: "deploy fn",',
+  },
+  {
+    id: 'H02',
+    subject: 'dispatch',
+    claim: 'the install hint stops naming `knext deploy function`',
+    anchor:
+      '\\`knext generate\\`, \\`knext add function\\` and \\`knext deploy function\\` come from\n${GRPC_PACKAGE}, which is',
+    replacement:
+      '\\`knext generate\\` and \\`knext add function\\` come from ${GRPC_PACKAGE}, which is',
+  },
 ];
 
 const CR_ROWS = [
@@ -485,21 +704,29 @@ const E2E_ROWS = [
     subject: 'deployfn',
     claim: 'a func process is started on the deploy path (the fake func on PATH records it)',
     anchor: APPLY_LINE,
-    replacement: `host.run(['func', 'build'], context);\n      ${APPLY_LINE}`,
+    replacement: `${APPLY_LINE}\n      (globalThis as unknown as { Bun: { spawnSync(a: string[]): void } }).Bun.spawnSync(['func', 'build']);`,
   },
   {
     id: 'E02',
     subject: 'deployfn',
-    claim: 'the real apply drops --validate=strict',
-    anchor: APPLY_LINE,
-    replacement: "host.run(['kubectl', 'apply', '-f', crPath, '-n', namespace], context);",
+    claim: 'the apply runs before the preflight',
+    anchor: PREFLIGHT_CALL,
+    replacement: `${APPLY_LINE}\n    const outcome = host.preflight({ crPath, namespace, context });`,
   },
   {
     id: 'E03',
     subject: 'deployfn',
-    claim: 'the apply runs before the preflight',
+    claim: 'the preflight is skipped (no dry-run reaches kubectl)',
     anchor: PREFLIGHT_CALL,
-    replacement: `${APPLY_LINE}\n    const outcome = host.preflight({ crPath, namespace, context });`,
+    replacement:
+      "const outcome: PreflightResult = { verdict: 'ok', reason: 'none', unknownFields: [], stderr: '' };",
+  },
+  {
+    id: 'E04',
+    subject: 'deployfn',
+    claim: 'the apply is issued twice (a third kubectl process)',
+    anchor: APPLY_LINE,
+    replacement: `${APPLY_LINE}\n      ${APPLY_LINE}`,
   },
 ];
 
@@ -526,6 +753,8 @@ const kinds = createGuardProver({
     tscall: 'scripts/lib/ts-call-scan.mjs',
     cleanup: 'packages/kn-next/src/cli/cleanup.ts',
     deployfn: 'packages/grpc/src/deploy-function.ts',
+    dispatch: 'packages/kn-next/src/cli/grpc-dispatch.ts',
+    crbuilder: 'packages/kn-next/src/cli/cr-builder.ts',
     bscr: 'packages/grpc/src/backend-service.ts',
   },
 });
@@ -553,6 +782,14 @@ const crd = createGuardProver({
   spec: CRD_SPEC,
   subjects: { bscr: 'packages/grpc/src/backend-service.ts' },
 });
+const help = createGuardProver({
+  repoRoot: REPO_ROOT,
+  spec: HELP_SPEC,
+  subjects: {
+    help: 'packages/kn-next/src/cli/help.ts',
+    dispatch: 'packages/kn-next/src/cli/grpc-dispatch.ts',
+  },
+});
 const e2e = createGuardProver({
   repoRoot: REPO_ROOT,
   spec: E2E_SPEC,
@@ -576,6 +813,7 @@ grpcDeploy.preflight(GRPC_DEPLOY_ROWS);
 grpcCr.preflight(CR_ROWS);
 crd.preflight(CRD_ROWS);
 e2e.preflight(E2E_ROWS);
+help.preflight(HELP_ROWS);
 declareMutations(
   SPAWN.length +
     KINDS.length +
@@ -583,7 +821,8 @@ declareMutations(
     GRPC_DEPLOY_ROWS.length +
     CR_ROWS.length +
     CRD_ROWS.length +
-    E2E_ROWS.length,
+    E2E_ROWS.length +
+    HELP_ROWS.length,
 );
 
 const sweep = (label, p, spec, rows, canary) => {
@@ -606,12 +845,12 @@ sweep('cluster-write kinds', kinds, KINDS_SPEC, KINDS, {
 sweep('apply order (core + package)', order, ORDER_SPEC, ORDER_ROWS, {
   subject: 'deployfn',
   anchor: APPLY_LINE,
-  replacement: "host.run(['kubectl', 'apply', '-f', crPath, '-n', namespace], context);",
+  replacement: 'host.apply({ crPath, namespace });',
 });
 sweep('apply order (package alone)', grpcDeploy, GRPC_DEPLOY_SPEC, GRPC_DEPLOY_ROWS, {
   subject: 'deployfn',
   anchor: APPLY_LINE,
-  replacement: "host.run(['kubectl', 'apply', '-f', crPath, '-n', namespace], context);",
+  replacement: 'host.apply({ crPath, namespace });',
 });
 sweep('the CR the builder emits', grpcCr, GRPC_CR_SPEC, CR_ROWS, {
   subject: 'bscr',
@@ -626,5 +865,10 @@ sweep('builder vs shipped CRD', crd, CRD_SPEC, CRD_ROWS, {
 sweep('built bin end to end', e2e, E2E_SPEC, E2E_ROWS, {
   subject: 'deployfn',
   anchor: APPLY_LINE,
-  replacement: "host.run(['kubectl', 'apply', '-f', crPath, '-n', namespace], context);",
+  replacement: `${APPLY_LINE}\n      ${APPLY_LINE}`,
+});
+sweep('help vs the reference', help, HELP_SPEC, HELP_ROWS, {
+  subject: 'help',
+  anchor: 'display: "deploy function",',
+  replacement: 'display: "deploy fn",',
 });

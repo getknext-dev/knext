@@ -13,7 +13,11 @@ import { afterAll, describe, expect, it } from 'bun:test';
 import { cpSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { dispatchGrpcVerb, type GrpcCliModule } from '../packages/kn-next/src/cli/grpc-dispatch';
+import {
+  buildDeployHost,
+  dispatchGrpcVerb,
+  type GrpcCliModule,
+} from '../packages/kn-next/src/cli/grpc-dispatch';
 
 const REPO = resolve(import.meta.dir, '..');
 const FIXTURE_ZONE = join(REPO, 'packages', 'grpc', 'fixtures', 'zone');
@@ -178,5 +182,40 @@ describe('core has exactly one lazy dispatch line for `deploy function`', () => 
   it('never imports the package or the dispatcher statically', () => {
     expect(deploySrc).not.toMatch(/^import .*grpc-dispatch/m);
     expect(deploySrc).not.toMatch(/@getknext\/grpc/);
+  });
+});
+
+describe('the seam core hands @getknext/grpc cannot run an arbitrary program', () => {
+  const ran: (readonly string[])[] = [];
+  const host = buildDeployHost({
+    capture: () => ({ ok: true, stdout: '', stderr: '' }),
+    run: (argv) => {
+      ran.push(argv);
+    },
+  });
+
+  it('has exactly two methods: preflight and apply', () => {
+    expect(Object.keys(host).sort()).toEqual(['apply', 'preflight']);
+  });
+
+  it('apply runs kubectl apply --validate=strict on the given file, and nothing else', () => {
+    ran.length = 0;
+    host.apply({ crPath: '/tmp/x.json', namespace: 'prod' });
+    expect(ran).toEqual([
+      ['kubectl', 'apply', '--validate=strict', '-f', '/tmp/x.json', '-n', 'prod'],
+    ]);
+  });
+
+  it('apply binds the kubectl context', () => {
+    ran.length = 0;
+    host.apply({ crPath: '/tmp/x.json', namespace: 'prod', context: 'staging' });
+    expect(ran[0]?.slice(0, 3)).toEqual(['kubectl', '--context', 'staging']);
+  });
+
+  it('an argv the package smuggles in as a path is still one -f argument to kubectl', () => {
+    ran.length = 0;
+    host.apply({ crPath: '; func deploy', namespace: 'prod' });
+    expect(ran[0]?.[0]).toBe('kubectl');
+    expect(ran[0]?.[4]).toBe('; func deploy');
   });
 });

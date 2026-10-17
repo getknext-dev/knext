@@ -159,6 +159,12 @@ export const COMMAND_GROUPS: readonly CliCommandGroup[] = [
                     "add a Go or Rust function's contract to this zone (writes files only)",
             },
             {
+                verb: "deploy",
+                display: "deploy function",
+                summary:
+                    "apply a zone function's BackendService (strict dry-run first, then --validate=strict)",
+            },
+            {
                 verb: "generate",
                 display: "generate",
                 summary:

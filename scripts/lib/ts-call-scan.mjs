@@ -20,7 +20,34 @@ import { blankNonCode } from './blank-non-code.mjs';
  * @returns {Prepared}
  */
 export function prepare(src) {
-  return { s: src, b: blankNonCode(src) };
+  const p = { s: src, b: blankNonCode(src), consts: new Map() };
+  p.consts = stringConsts(p);
+  return p;
+}
+
+/**
+ * `const NAME = '<literal>'` bindings, so a program kept in a constant
+ * (`const KN = "/usr/local/bin/kn"`) is read as the string it is. A name bound
+ * twice to different values is dropped: shadowing makes it ambiguous, and an
+ * unreadable name fails the guards rather than passing them.
+ */
+function stringConsts(p) {
+  const { s, b } = p;
+  const found = new Map();
+  const re = /\bconst\s+([A-Za-z_$][\w$]*)\s*(?::\s*[^=;(){}]+)?=\s*(?=['"`])/g;
+  for (let m = re.exec(b); m; m = re.exec(b)) {
+    const at = m.index + m[0].length;
+    const end = readLiteral(b, at);
+    if (b.slice(at, end).includes('${')) continue;
+    let k = end;
+    while (k < b.length && /[ \t]/.test(b[k])) k++;
+    if (k < b.length && !/[;\n,)}]/.test(b[k])) continue; // part of a larger expression
+    const value = s.slice(at + 1, end - 1);
+    const prior = found.get(m[1]);
+    found.set(m[1], prior === undefined || prior === value ? value : null);
+  }
+  for (const [k, v] of found) if (v === null) found.delete(k);
+  return found;
 }
 
 /** 1-based line of offset `idx`. */
@@ -167,6 +194,9 @@ export function classify(p, [from, to]) {
     return { type: 'dynamic', ...base };
   }
   if (b.startsWith('...', a)) return { type: 'spread', ...base };
+  if (/^[A-Za-z_$][\w$]*$/.test(b.slice(a, e)) && p.consts?.has(b.slice(a, e))) {
+    return { type: 'string', value: p.consts.get(b.slice(a, e)), resolved: true, ...base };
+  }
   const id = /^[A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*/.exec(b.slice(a, e));
   if (id) {
     const afterId = a + id[0].length;

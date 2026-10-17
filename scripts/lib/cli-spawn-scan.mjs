@@ -62,9 +62,33 @@ const EXCLUDED_SEGMENTS = new Set([
 /** The project's exec helpers (`src/cli/exec.ts`): they take an argv array. */
 const ARGV_WRAPPERS = new Set(['runInherit', 'runQuiet', 'runCapture', 'runQuietAllowFail']);
 /** `child_process` calls taking (program, args[]). */
-const FILE_STYLE = new Set(['execFile', 'execFileSync', 'spawn', 'spawnSync', 'fork']);
+const FILE_STYLE = new Set([
+  'execFile',
+  'execFileSync',
+  'spawn',
+  'spawnSync',
+  'fork',
+  'execa',
+  'execaSync',
+]);
 /** `child_process` calls taking one shell string. */
-const SHELL_STYLE = new Set(['exec', 'execSync']);
+const SHELL_STYLE = new Set(['exec', 'execSync', 'execaCommand', 'execaCommandSync']);
+/** Methods that run a program when handed an argv ARRAY (`host.run([...])`, `x.spawn([...])`). */
+const MEMBER_SPAWN = new Set([
+  'run',
+  'spawn',
+  'spawnSync',
+  'exec',
+  'execSync',
+  'execFile',
+  'execFileSync',
+  'execa',
+  'execaSync',
+  'runInherit',
+  'runQuiet',
+  'runCapture',
+  'runQuietAllowFail',
+]);
 const BUN_SPAWN = new Set(['Bun.spawn', 'Bun.spawnSync']);
 
 /** Programs that run another program given as their arguments. */
@@ -192,7 +216,8 @@ export const DYNAMIC_SPAWN_ALLOWLIST = [
   },
 ];
 
-const base = (p) => p.replace(/^.*\//, '');
+/** Program name: no directory (either separator), no `.exe`. */
+const base = (p) => p.replace(/^.*[\\/]/, '').replace(/\.exe$/i, '');
 
 /**
  * Whether a shell command line runs `kn`, or `func` with `deploy`.
@@ -370,14 +395,14 @@ function importAliases(p, push) {
       if (mm) alias.set(mm[2] ?? mm[1], mm[1]);
     }
   }
-  const reqRe = /\brequire\s*\(\s*(['"])/g;
+  const reqRe = /\brequire\s*\(\s*(['"`])/g;
   for (let m = reqRe.exec(b); m; m = reqRe.exec(b)) {
     const q = m.index + m[0].length - 1;
     if (CP_MODULE.test(s.slice(q + 1, readLiteral(b, q) - 1))) {
       push('unparseable-import', m.index, 'child_process loaded with require()');
     }
   }
-  const dynRe = /\bimport\s*\(\s*(['"])/g;
+  const dynRe = /\bimport\s*\(\s*(['"`])/g;
   for (let m = dynRe.exec(b); m; m = dynRe.exec(b)) {
     const q = m.index + m[0].length - 1;
     if (CP_MODULE.test(s.slice(q + 1, readLiteral(b, q) - 1))) {
@@ -415,22 +440,17 @@ export function scanSpawnSource(src, { file, allow = DYNAMIC_SPAWN_ALLOWLIST }) 
     .map((e) => ({ ...e, left: e.count ?? 1, used: 0 }));
 
   let spawnCount = 0;
-  const callRe = /(?<![\w$.])(Bun\s*\.\s*spawnSync|Bun\s*\.\s*spawn|[A-Za-z_$][\w$]*)\s*\(/g;
-  for (let m = callRe.exec(b); m; m = callRe.exec(b)) {
-    const name = m[1].replace(/\s+/g, '');
-    const kind = BUN_SPAWN.has(name) ? 'argv' : kindOf(name);
-    if (!kind) continue;
-    // A declaration (`function exec(`), not a call.
-    const before = b.slice(Math.max(0, m.index - 12), m.index);
-    if (/\bfunction\s*\*?\s*$/.test(before)) continue;
+  const handled = new Set();
+  const handleSpawn = (name, kind, at, open) => {
+    if (handled.has(open)) return;
+    handled.add(open);
     spawnCount++;
-    const open = m.index + m[0].length - 1;
     const args = callArgs(p, open);
     const problem = spawnProblem(kind, args);
-    if (!problem) continue;
+    if (!problem) return;
     if (problem.reason) {
-      push('forbidden-spawn', m.index, `${name}(): ${problem.reason}`);
-      continue;
+      push('forbidden-spawn', at, `${name}(): ${problem.reason}`);
+      return;
     }
     const first = unwrap(args[0]);
     const key = first?.type === 'call' ? `${first.name}(...)` : (first?.text ?? '');
@@ -440,9 +460,40 @@ export function scanSpawnSource(src, { file, allow = DYNAMIC_SPAWN_ALLOWLIST }) 
     if (entry) {
       entry.left -= 1;
       entry.used += 1;
-      continue;
+      return;
     }
-    push('unparseable-spawn', m.index, `${name}(${key}): ${problem.unparseable}`);
+    push('unparseable-spawn', at, `${name}(${key}): ${problem.unparseable}`);
+  };
+
+  const callRe = /(?<![\w$.])(Bun\s*\.\s*spawnSync|Bun\s*\.\s*spawn|[A-Za-z_$][\w$]*)\s*\(/g;
+  for (let m = callRe.exec(b); m; m = callRe.exec(b)) {
+    const name = m[1].replace(/\s+/g, '');
+    const kind = BUN_SPAWN.has(name) ? 'argv' : kindOf(name);
+    if (!kind) continue;
+    // A declaration (`function exec(`), not a call.
+    const before = b.slice(Math.max(0, m.index - 12), m.index);
+    if (/\bfunction\s*\*?\s*$/.test(before)) continue;
+    handleSpawn(name, kind, m.index, m.index + m[0].length - 1);
+  }
+
+  // A MEMBER call handed an argv array runs a program just as a bare call does:
+  // `host.run([...])`, `x.spawn([...])`, `host?.run([...])`. A member call whose
+  // first argument is not an array (`re.exec(text)`, `opts.run(argv)`) is left
+  // alone - it cannot be told from any other method - and the seam it reaches is
+  // narrowed instead (core's DeployHost has no way to run an arbitrary program).
+  const memberRe = /\??\.\s*([A-Za-z_$][\w$]*)\s*\(/g;
+  for (let m = memberRe.exec(b); m; m = memberRe.exec(b)) {
+    const name = m[1];
+    if (!MEMBER_SPAWN.has(name)) continue;
+    const open = m.index + m[0].length - 1;
+    const first = unwrap(callArgs(p, open)[0]);
+    const kind =
+      first?.type === 'array'
+        ? 'argv'
+        : first?.type === 'string' && FILE_STYLE.has(name)
+          ? 'file'
+          : undefined;
+    if (kind) handleSpawn(name, kind, m.index, open);
   }
 
   // An argv ARRAY naming `kn`, or `func` with `deploy`, anywhere - not only as the

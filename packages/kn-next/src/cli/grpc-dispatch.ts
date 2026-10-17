@@ -57,7 +57,15 @@ export interface DeployHost {
         readonly unknownFields: readonly string[];
         readonly stderr: string;
     };
-    run(argv: readonly string[], context?: string): void;
+    /**
+     * Apply the CR file. Core builds the argv itself, so the package cannot
+     * run any other program through the seam.
+     */
+    apply(args: {
+        readonly crPath: string;
+        readonly namespace: string;
+        readonly context?: string;
+    }): void;
 }
 
 /** What core calls on `@getknext/grpc/cli`. */
@@ -115,7 +123,21 @@ export function buildDeployHost(
                 stderr: outcome.stderr,
             };
         },
-        run: (argv, context) => kubectl.run(withKubeContext(argv, context)),
+        apply: ({ crPath, namespace, context }) =>
+            kubectl.run(
+                withKubeContext(
+                    [
+                        "kubectl",
+                        "apply",
+                        "--validate=strict",
+                        "-f",
+                        crPath,
+                        "-n",
+                        namespace,
+                    ],
+                    context,
+                ),
+            ),
     };
 }
 
@@ -246,7 +268,8 @@ function displayVerb(verb: string): string {
 function installHelp(verb: string): string {
     return `${displayVerb(verb)} — provided by the optional ${GRPC_PACKAGE} package (Beta)
 
-\`knext generate\` and \`knext add function\` come from ${GRPC_PACKAGE}, which is
+\`knext generate\`, \`knext add function\` and \`knext deploy function\` come from
+${GRPC_PACKAGE}, which is
 not installed in this app. Install it next to @getknext/core:
 
   npm install --save-dev ${GRPC_PACKAGE}

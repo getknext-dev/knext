@@ -10,9 +10,14 @@
  * part the CLI owns: the exact processes started, in order, with the exact
  * flags, and that `func` and `kn` are never started - fake `func` and `kn`
  * scripts sit on the same PATH and the test fails if either ran.
+ *
+ * It runs under BOTH runtimes. The published bin is plain Node, so `node` is the
+ * one that matters; `bun` (how a source checkout runs) loads the package from
+ * source. The Node leg loads the package the way it ships, from a fresh build of
+ * `packages/grpc/dist`.
  */
 
-import { afterAll, describe, expect, it } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
 import {
   chmodSync,
   cpSync,
@@ -29,7 +34,9 @@ import { join, resolve } from 'node:path';
 const REPO = resolve(import.meta.dir, '..');
 const DIST_BIN = join(REPO, 'packages', 'kn-next', 'dist', 'cli', 'kn-next.js');
 const FIXTURE_ZONE = join(REPO, 'packages', 'grpc', 'fixtures', 'zone');
-const GRPC_SRC_CLI = join(REPO, 'packages', 'grpc', 'src', 'cli.ts');
+const GRPC_DIR = join(REPO, 'packages', 'grpc');
+const GRPC_SRC_CLI = join(GRPC_DIR, 'src', 'cli.ts');
+const GRPC_DIST_CLI = join(GRPC_DIR, 'dist', 'cli.js');
 const GRPC_PKG = join(REPO, 'packages', 'grpc', 'package.json');
 
 const scratch: string[] = [];
@@ -37,11 +44,21 @@ afterAll(() => {
   for (const d of scratch) rmSync(d, { recursive: true, force: true });
 });
 
+type Runtime = 'bun' | 'node';
+const NODE = Bun.which('node');
+
+// The Node leg loads the package as it ships, so build it fresh: a stale dist
+// would let a source change pass unseen. (dist/ is untracked build output.)
+beforeAll(() => {
+  const r = Bun.spawnSync([process.execPath, 'run', 'build'], { cwd: GRPC_DIR });
+  if (r.exitCode !== 0) throw new Error(`@getknext/grpc build failed:\n${r.stderr.toString()}`);
+}, 180_000);
+
 const DIGEST = `sha256:${'e'.repeat(64)}`;
 const IMAGE = `registry.example.com/shop/orders@${DIGEST}`;
 
 /** An app dir (the fixture zone) with @getknext/grpc installed and fake cluster tools on PATH. */
-function arrange() {
+function arrange(runtime: Runtime) {
   const root = mkdtempSync(join(tmpdir(), 'knext-deploy-function-bin-'));
   scratch.push(root);
   const app = join(root, 'app');
@@ -65,7 +82,8 @@ function arrange() {
   // covered by grpc-dispatch.test.ts. An explicit export beats the star export.
   writeFileSync(
     join(pkgDir, 'cli.js'),
-    `export * from ${JSON.stringify(GRPC_SRC_CLI)};\nexport const CORE_PEER_RANGE = ">=0.0.0";\n`,
+    `export * from ${JSON.stringify(runtime === 'node' ? GRPC_DIST_CLI : GRPC_SRC_CLI)};\n` +
+      'export const CORE_PEER_RANGE = ">=0.0.0";\n',
   );
   // cli.ts reads ../package.json relative to itself, which resolves in the repo.
   expect(existsSync(GRPC_PKG)).toBe(true);
@@ -97,9 +115,11 @@ function arrange() {
   return { app, bin, log, forbidden };
 }
 
-function runBin(args: string[], opts: { dryrunFail?: boolean } = {}) {
-  const t = arrange();
-  const r = Bun.spawnSync([process.execPath, DIST_BIN, ...args], {
+function runBin(runtime: Runtime, args: string[], opts: { dryrunFail?: boolean } = {}) {
+  const t = arrange(runtime);
+  const program = runtime === 'node' ? NODE : process.execPath;
+  if (!program) throw new Error('node is not on PATH, so the published runtime cannot be tested');
+  const r = Bun.spawnSync([program, DIST_BIN, ...args], {
     cwd: t.app,
     env: {
       ...process.env,
@@ -139,13 +159,17 @@ const ARGS = [
   'prod',
 ];
 
-describe('knext deploy function through the built bin', () => {
-  it('requires the built bin (build @getknext/core first)', () => {
+describe.each([
+  'node',
+  'bun',
+] as const)('knext deploy function through the built bin, under %s', (runtime) => {
+  it('has the built bin and the runtime (build @getknext/core first)', () => {
     expect(existsSync(DIST_BIN), `${DIST_BIN} missing - build core first`).toBe(true);
+    expect(runtime === 'node' ? NODE : process.execPath).toBeTruthy();
   });
 
   it('starts the strict dry-run first, then the strict apply, and never func or kn', () => {
-    const r = runBin(ARGS);
+    const r = runBin(runtime, ARGS);
     expect(r.status, r.stderr).toBe(0);
     expect(r.kubectl.length).toBe(2);
     expect(r.kubectl[0]).toMatch(
@@ -158,7 +182,7 @@ describe('knext deploy function through the built bin', () => {
   });
 
   it('applies a BackendService, not a NextApp, with spec.zone', () => {
-    const r = runBin(ARGS);
+    const r = runBin(runtime, ARGS);
     const cr = JSON.parse(
       readFileSync(join(r.app, '.output', 'backendservice-orders.json'), 'utf8'),
     );
@@ -168,13 +192,13 @@ describe('knext deploy function through the built bin', () => {
   });
 
   it('binds --context into every kubectl process', () => {
-    const r = runBin([...ARGS, '--context', 'staging']);
+    const r = runBin(runtime, [...ARGS, '--context', 'staging']);
     expect(r.status, r.stderr).toBe(0);
     for (const line of r.kubectl) expect(line).toMatch(/^--context staging apply /);
   });
 
   it('stops after a failed dry-run: the strict apply never starts', () => {
-    const r = runBin(ARGS, { dryrunFail: true });
+    const r = runBin(runtime, ARGS, { dryrunFail: true });
     expect(r.status).toBe(1);
     expect(r.stderr).toContain('PREFLIGHT FAILED');
     expect(r.stderr).toContain('spec.zone');
@@ -184,7 +208,7 @@ describe('knext deploy function through the built bin', () => {
   });
 
   it('--dry-run starts no process at all', () => {
-    const r = runBin([...ARGS, '--dry-run']);
+    const r = runBin(runtime, [...ARGS, '--dry-run']);
     expect(r.status, r.stderr).toBe(0);
     expect(JSON.parse(r.stdout).kind).toBe('BackendService');
     expect(r.kubectl).toEqual([]);
@@ -192,7 +216,7 @@ describe('knext deploy function through the built bin', () => {
   });
 
   it('the bare `knext deploy` is still the NextApp deploy, not a function deploy', () => {
-    const r = runBin(['deploy', 'nonsense']);
+    const r = runBin(runtime, ['deploy', 'nonsense']);
     expect(r.status).toBe(1);
     expect(r.kubectl).toEqual([]);
   });

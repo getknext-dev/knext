@@ -14,7 +14,7 @@ const OK: PreflightResult = { verdict: 'ok', reason: 'none', unknownFields: [], 
 
 type Call =
   | { op: 'preflight'; crPath: string; namespace: string; context?: string; crText: string }
-  | { op: 'run'; argv: readonly string[]; context?: string; crText: string };
+  | { op: 'apply'; crPath: string; namespace: string; context?: string; crText: string };
 
 /** A host that records every cluster-facing call, in order, with the CR file as it was then. */
 function recordingHost(opts: { preflight?: PreflightResult; runError?: Error } = {}) {
@@ -30,9 +30,14 @@ function recordingHost(opts: { preflight?: PreflightResult; runError?: Error } =
       });
       return opts.preflight ?? OK;
     },
-    run: (argv, context) => {
-      const f = argv[argv.indexOf('-f') + 1] as string;
-      calls.push({ op: 'run', argv, context, crText: readFileSync(f, 'utf8') });
+    apply: (args) => {
+      calls.push({
+        op: 'apply',
+        crPath: args.crPath,
+        namespace: args.namespace,
+        context: args.context,
+        crText: readFileSync(args.crPath, 'utf8'),
+      });
       if (opts.runError) throw opts.runError;
     },
   };
@@ -50,21 +55,17 @@ describe('knext deploy function: apply order and strictness', () => {
     const code = await run('deploy', ARGS, { ...c.io, cwd: dir, host });
 
     expect(code).toBe(0);
-    expect(calls.map((x) => x.op)).toEqual(['preflight', 'run']);
+    expect(calls.map((x) => x.op)).toEqual(['preflight', 'apply']);
     const [pre, apply] = calls as [
       Extract<Call, { op: 'preflight' }>,
-      Extract<Call, { op: 'run' }>,
+      Extract<Call, { op: 'apply' }>,
     ];
     expect(pre.namespace).toBe('prod');
-    expect(apply.argv).toEqual([
-      'kubectl',
-      'apply',
-      '--validate=strict',
-      '-f',
-      pre.crPath,
-      '-n',
-      'prod',
-    ]);
+    // Core builds the argv (kubectl apply --validate=strict), asserted in
+    // tests/deploy-function-apply-order.test.ts; here the seam gets the same
+    // file and namespace the preflight used, and nothing else to run.
+    expect(apply.crPath).toBe(pre.crPath);
+    expect(apply.namespace).toBe('prod');
     // The preflight validated the exact bytes the apply sends.
     expect(apply.crText).toBe(pre.crText);
   });
@@ -94,8 +95,8 @@ describe('knext deploy function: apply order and strictness', () => {
     const { host, calls } = recordingHost();
     const args = ['function', 'orders', '--zone', 'shop', '--image', IMAGE];
     await run('deploy', args, { ...capture().io, cwd: dir, host });
-    const apply = calls[1] as Extract<Call, { op: 'run' }>;
-    expect(apply.argv.slice(-2)).toEqual(['-n', 'default']);
+    const apply = calls[1] as Extract<Call, { op: 'apply' }>;
+    expect(apply.namespace).toBe('default');
   });
 
   it.each([
@@ -158,7 +159,7 @@ describe('knext deploy function: apply order and strictness', () => {
     const c = capture();
     const code = await run('deploy', ARGS, { ...c.io, cwd: dir, host });
     expect(code).toBe(1);
-    expect(calls.map((x) => x.op)).toEqual(['preflight', 'run']);
+    expect(calls.map((x) => x.op)).toEqual(['preflight', 'apply']);
     expect(c.err()).toContain('kubectl apply of the BackendService');
   });
 

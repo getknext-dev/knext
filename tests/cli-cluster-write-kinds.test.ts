@@ -23,6 +23,7 @@
 import { describe, expect, it } from 'bun:test';
 import {
   ALLOWED_KINDS,
+  checkManifestKinds,
   KIND_EXCEPTIONS,
   MANIFEST_WRITES,
   scanClusterWriteSource,
@@ -44,6 +45,105 @@ describe('cluster-write scan: RED fixtures', () => {
     ['a rollout', 'x(["kubectl", "rollout", "restart", "deploy", n]);'],
   ])('reds %s as a foreign write kind', (_label, src) => {
     expect(rules(src)).toContain('foreign-write-kind');
+  });
+
+  it.each([
+    ['a quoted double-quote key', 'const m = { "kind": "Secret" };'],
+    ['a quoted single-quote key', "const m = { 'kind': 'Secret' };"],
+    ['a template literal value', 'const m = { kind: `Secret` };'],
+    ['a YAML kind in a template literal', 'const y = `apiVersion: v1\nkind: Secret\n`;'],
+  ])('reds a foreign kind written as %s', (_label, src) => {
+    expect(rules(src)).toContain('foreign-kind');
+  });
+
+  it('fails (does not pass) on a kind built from a template with a hole', () => {
+    expect(rules('const m = { kind: `${k}` };')).toContain('unparseable-kind');
+  });
+
+  it.each([
+    ['kubectl by absolute path', 'x(["/usr/local/bin/kubectl", "delete", "ksvc", n]);'],
+    ['kubectl kept in a constant', "const K = '/usr/bin/kubectl';\nx([K, 'delete', 'ksvc', n]);"],
+    [
+      'kubectl spawned by absolute path',
+      "execFileSync('/usr/bin/kubectl', ['delete', 'ksvc', n]);",
+    ],
+    ['kubectl.exe', 'x(["kubectl.exe", "delete", "ksvc", n]);'],
+    ['kubectl in a sh -c string', "x(['sh', '-c', 'kubectl label secret foo a=b']);"],
+    ['kubectl in an exec string', "execSync('kubectl delete ksvc x');"],
+    [
+      'kubectl in a shell started with execFileSync',
+      "execFileSync('sh', ['-c', 'kubectl label secret foo a=b']);",
+    ],
+    ['kubectl in a chained shell string', "execSync('kubectl get ns && kubectl delete ksvc x');"],
+    [
+      'a label whose selector value names the allowed kind',
+      'x(["kubectl", "label", "-l", "nextapp", "secrets", "a=b"]);',
+    ],
+    [
+      'a resource list that includes another kind',
+      'x(["kubectl", "delete", "nextapp,secret", n]);',
+    ],
+    ['the slash form of another kind', 'x(["kubectl", "delete", "secret/foo"]);'],
+  ])('reds %s as a foreign write kind', (_label, src) => {
+    expect(rules(src)).toContain('foreign-write-kind');
+  });
+
+  it.each([
+    ['a shell string with a computed verb', "execSync('kubectl $VERB nextapp x');"],
+    ['kubectl behind env in a shell string', "execSync('env X=1 kubectl delete ksvc x');"],
+    [
+      'a template shell string with a hole that mentions kubectl',
+      'execSync(`kubectl ${verb} nextapp x`);',
+    ],
+    ['an unknown flag before the resource', 'x(["kubectl", "delete", "--weird", "nextapp", n]);'],
+    ['a computed program next to a write verb in sh -c', "x(['bash', '-c', cmd]);"],
+  ])('fails (does not pass) on an unparseable construct: %s', (_label, src) => {
+    expect(rules(src)).toContain('unparseable-kubectl');
+  });
+
+  it('counts manifest writes: a second apply in a file whose entry allows one reds', () => {
+    const allow = [{ file: FILE, verb: 'apply', kinds: ['NextApp'], reason: 'fixture' }];
+    const two =
+      'x(["kubectl", "apply", "--validate=strict", "-f", a]);\n' +
+      'x(["kubectl", "apply", "--validate=strict", "-f", b]);';
+    expect(rules(two, allow)).toContain('unlisted-manifest-write');
+  });
+
+  it('counts manifest writes: an entry with count 2 admits two and reds a third', () => {
+    const allow = [{ file: FILE, verb: 'apply', count: 2, kinds: ['NextApp'], reason: 'fixture' }];
+    const one = 'x(["kubectl", "apply", "--validate=strict", "-f", a]);';
+    expect(rules(`${one}\n${one}`, allow)).toEqual([]);
+    expect(rules(`${one}\n${one}\n${one}`, allow)).toContain('unlisted-manifest-write');
+  });
+
+  it('counts manifest writes: an entry whose sites dropped below its count is stale', () => {
+    const allow = [{ file: FILE, verb: 'apply', count: 2, kinds: ['NextApp'], reason: 'fixture' }];
+    const one = 'x(["kubectl", "apply", "--validate=strict", "-f", a]);';
+    expect(scan(one, allow).unusedAllow).toHaveLength(1);
+  });
+
+  it('compares the declared kinds with what the source files can emit', () => {
+    const entry = {
+      file: 'a.ts',
+      verb: 'apply',
+      kinds: ['NextApp'],
+      kindSources: ['b.ts'],
+      reason: 'fixture entry',
+    };
+    const kindsOf = (m: Record<string, string[]>) => (f: string) => m[f] ?? [];
+    expect(checkManifestKinds([entry], kindsOf({ 'b.ts': ['NextApp'] }))).toEqual([]);
+    // an undeclared kind is applied
+    expect(
+      checkManifestKinds([entry], kindsOf({ 'b.ts': ['NextApp', 'Secret'] })).map((v) => v.rule),
+    ).toContain('undeclared-kind');
+    // a declared kind the sources never emit
+    expect(checkManifestKinds([entry], kindsOf({ 'b.ts': [] })).map((v) => v.rule)).toContain(
+      'declared-kind-not-emitted',
+    );
+    // an entry that names no source cannot be compared: it fails
+    expect(
+      checkManifestKinds([{ ...entry, kindSources: [] }], kindsOf({})).map((v) => v.rule),
+    ).toContain('undeclared-kind-source');
   });
 
   it('reads an argv that a function returns (the preflight builds its argv that way)', () => {
@@ -144,6 +244,20 @@ describe('cluster-write scan: GREEN fixtures', () => {
     expect(scan(src).violations).toEqual([]);
   });
 
+  it.each([
+    [
+      'a namespace flag before the resource',
+      'x(["kubectl", "delete", "-n", "prod", "nextapp", n]);',
+    ],
+    ['the slash form of an allowed kind', 'x(["kubectl", "delete", "nextapp/foo"]);'],
+    ['a label of an allowed kind', 'x(["kubectl", "label", "-n", ns, "nextapp", n, "a=b"]);'],
+    ['an absolute-path kubectl read', 'x(["/usr/local/bin/kubectl", "get", "ns"]);'],
+    ['kubectl get in a sh -c string', "x(['sh', '-c', 'kubectl get ns']);"],
+    ['a shell string with no kubectl', "execSync('echo hello && ls');"],
+  ])('passes %s', (_label, src) => {
+    expect(scan(src).violations).toEqual([]);
+  });
+
   it('passes a strict apply from a listed file, and records it', () => {
     const allow = [{ file: FILE, verb: 'apply', kinds: ['NextApp'], reason: 'fixture' }];
     const r = scan('x(["kubectl", "apply", "--validate=strict", "-f", p, "-n", ns]);', allow);
@@ -208,16 +322,16 @@ describe('cluster-write scan: the real tree', () => {
     expect(result.kubectlArgvCount).toBeGreaterThan(25);
   });
 
-  it('the CLI applies a BackendService from @getknext/grpc and nothing else is new', () => {
+  it('@getknext/grpc makes no cluster write itself: core applies the BackendService it builds', () => {
     const grpcWrites = result.writes.filter((w: { file: string }) =>
       w.file.startsWith('packages/grpc/'),
     );
-    expect(grpcWrites.map((w: { verb: string }) => w.verb)).toEqual(['apply']);
-    expect(
-      MANIFEST_WRITES.find(
-        (e: { file: string }) => e.file === 'packages/grpc/src/deploy-function.ts',
-      )?.kinds,
-    ).toEqual(['BackendService']);
+    expect(grpcWrites).toEqual([]);
+    const entry = MANIFEST_WRITES.find(
+      (e: { file: string }) => e.file === 'packages/kn-next/src/cli/grpc-dispatch.ts',
+    );
+    expect(entry?.kinds).toEqual(['BackendService']);
+    expect(entry?.kindSources).toEqual(['packages/grpc/src/backend-service.ts']);
   });
 
   it('every kind the sources can emit is allowed or a pinned exception', () => {
@@ -240,8 +354,28 @@ describe('cluster-write scan: the real tree', () => {
     expect([...ALLOWED_KINDS].sort()).toEqual(['BackendService', 'NextApp']);
   });
 
+  it('the tree scan cross-checks declared kinds against the source files', () => {
+    // Declare a kind deploy.ts's manifest never carries: the scan must say so.
+    const wrong = MANIFEST_WRITES.map((e) =>
+      e.file === 'packages/kn-next/src/cli/deploy.ts' ? { ...e, kinds: ['NextApp', 'Job'] } : e,
+    );
+    const rules = scanClusterWriteTree(undefined, wrong).violations.map(
+      (v: { rule: string }) => v.rule,
+    );
+    expect(rules).toContain('declared-kind-not-emitted');
+  });
+
   it('no table entry is stale, and each says why it is safe', () => {
     expect(result.unusedAllow).toEqual([]);
+    // sites are COUNTED: the table must account for every write the scan saw
+    const seen = new Map<string, number>();
+    for (const w of result.writes as { file: string; verb: string; resource?: string }[]) {
+      if (w.resource !== undefined) continue;
+      seen.set(`${w.file} ${w.verb}`, (seen.get(`${w.file} ${w.verb}`) ?? 0) + 1);
+    }
+    for (const e of MANIFEST_WRITES) {
+      expect(seen.get(`${e.file} ${e.verb}`), `${e.file} ${e.verb}`).toBe(e.count ?? 1);
+    }
     for (const e of MANIFEST_WRITES) {
       expect(e.reason.length, `${e.file} ${e.verb}`).toBeGreaterThan(20);
     }

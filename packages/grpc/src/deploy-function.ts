@@ -7,14 +7,15 @@
  *   3. PREFLIGHT: a server-side `--dry-run=server --validate=strict` apply
  *      (core's `preflightCRSchema`), before the cluster is touched. Anything
  *      but an `ok` verdict stops here;
- *   4. APPLY with `kubectl apply --validate=strict`, so the guarantee that an
- *      unknown field is rejected rather than silently pruned is knext's, not
- *      the user's kubectl default.
+ *   4. APPLY: core runs `kubectl apply --validate=strict`, so the guarantee that
+ *      an unknown field is rejected rather than silently pruned is knext's,
+ *      not the user's kubectl default.
  *
- * Core owns the kubectl boundary (context binding, stdio, the preflight
- * itself) and hands it in as a {@link DeployHost}; this package never imports
- * core (ADR-0052 D8) and never spawns a process itself. That split also keeps
- * the rule below checkable in one place.
+ * Core owns the kubectl boundary (the argv, context binding, stdio, the
+ * preflight itself) and hands this package a {@link DeployHost} with two
+ * methods, `preflight` and `apply`. There is no way to run another program
+ * through it. This package never imports core (ADR-0052 D8) and never spawns a
+ * process itself.
  *
  * The deploy path never runs Knative's `func` or `kn` tools: `func` emits an
  * image only, and the operator is the single reconciler of cluster state
@@ -49,8 +50,16 @@ export interface DeployHost {
     readonly namespace: string;
     readonly context?: string;
   }): PreflightResult;
-  /** Run an argv (argv[0] is the binary), inheriting stdio. Throws on a non-zero exit. */
-  run(argv: readonly string[], context?: string): void;
+  /**
+   * Apply the CR file. Core builds the argv (`kubectl apply --validate=strict`)
+   * and runs it, so this package cannot run any other program through the seam.
+   * Inherits stdio; throws on a non-zero exit.
+   */
+  apply(args: {
+    readonly crPath: string;
+    readonly namespace: string;
+    readonly context?: string;
+  }): void;
 }
 
 export const DEPLOY_USAGE =
@@ -204,10 +213,10 @@ export async function deployFunction(args: DeployFunctionArgs): Promise<number> 
       return 1;
     }
 
-    // 2. Apply. `--validate=strict` is passed explicitly, not inherited from
-    // whatever kubectl is on PATH.
+    // 2. Apply. Core builds the argv, with `--validate=strict` passed
+    // explicitly rather than inherited from whatever kubectl is on PATH.
     try {
-      host.run(['kubectl', 'apply', '--validate=strict', '-f', crPath, '-n', namespace], context);
+      host.apply({ crPath, namespace, context });
     } catch (err) {
       io.stderr(
         `kubectl apply of the BackendService FAILED (kubectl's own error is printed above): ` +

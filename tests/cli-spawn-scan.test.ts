@@ -66,6 +66,19 @@ describe('the D3 spawn scan: RED fixtures', () => {
       'an aliased child_process import',
       'import { spawnSync as s } from "node:child_process";\ns("func", ["deploy"]);',
     ],
+    [
+      'an absolute-path kn bound to a constant, handed to a seam',
+      "const KN = '/usr/local/bin/kn';\nhost.run([KN, 'service', 'apply']);",
+    ],
+    ['execa with an absolute-path kn', "execa('/usr/local/bin/kn', ['service']);"],
+    ['execa with an absolute-path func deploy', "execa('/opt/func', ['deploy']);"],
+    ['a member call handed an absolute-path kn argv', "x.run(['/usr/local/bin/kn', 'service']);"],
+    ['an optional-chained member spawn of func deploy', "host?.run(['/opt/func', 'deploy']);"],
+    ['a kn.exe argv', "runInherit(['kn.exe', 'service']);"],
+    [
+      'a backtick dynamic import with an aliased callee',
+      'const { spawnSync: s } = await import(`node:child_process`);\ns("func", ["deploy"]);',
+    ],
   ])('reds %s', (_label, src) => {
     expect(scan(src).violations.length).toBeGreaterThan(0);
   });
@@ -83,12 +96,27 @@ describe('the D3 spawn scan: RED fixtures', () => {
     ['a default child_process import', 'import cp from "node:child_process";\ncp.execSync(x);'],
     ['a require of child_process', 'const cp = require("node:child_process");\ncp.execSync(x);'],
     ['a dynamic import of child_process', 'const cp = await import("node:child_process");'],
+    [
+      'a backtick dynamic import of child_process',
+      'const cp = await import(`node:child_process`);',
+    ],
+    ['a backtick require of child_process', 'const cp = require(`node:child_process`);'],
+    ['a member call handed an array with a computed program', "host.run([program, 'x']);"],
+    [
+      'a member call handed an array with a program defined elsewhere',
+      "x.spawn([TOOL, 'service']);",
+    ],
   ])('fails (does not pass) on an unparseable construct: %s', (_label, src) => {
     const v = scan(src).violations;
     expect(v.length).toBeGreaterThan(0);
     expect(v.every((x) => x.rule === 'unparseable-spawn' || x.rule === 'unparseable-import')).toBe(
       true,
     );
+  });
+
+  it('reads a program kept in a constant as the string it is (forbidden, not merely unreadable)', () => {
+    const src = "const KN = '/usr/local/bin/kn';\nhost.run([KN, 'service', 'apply']);";
+    expect(rules(src)).toContain('forbidden-spawn');
   });
 
   it('reds the literal text "func deploy" / "kn service" even when it is not passed straight to a spawn', () => {
@@ -148,6 +176,8 @@ describe('the D3 spawn scan: GREEN fixtures', () => {
     ],
     ['a method that is not a spawn', 'registry.exec(x); table.spawn(y);'],
     ['an index access on a name that is not an argv', 'const x = table[key]; const y = names[0];'],
+    ['a member call with a literal harmless program', 'deps.run(["docker", "build", "-t", tag]);'],
+    ['a member call that is not given an array', 'opts.run(argv); re.exec(text);'],
     ['an argv to a seam that is not func or kn', 'host.run(["kubectl", "apply", "-f", p], ctx);'],
   ])('passes %s', (_label, src) => {
     expect(scan(src).violations).toEqual([]);
