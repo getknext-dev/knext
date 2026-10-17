@@ -1369,8 +1369,7 @@ if [ -n "${STANDALONE_EXEC}" ] && [ "${KNEXT_SELF_CONTAINED:-0}" = "1" ]; then
 fi
 (
   if [ "${SERVED_FROM}" != "disk" ]; then
-    # KNEXT-MUTATION
-    cd "${STANDALONE_APP_DIR}"
+    cd "${EMPTY_DIR}"
     exec docker run --rm --name "${ED_SUITE_CONTAINER}" \
       --network host \
       --user "$(id -u):$(id -g)" \
