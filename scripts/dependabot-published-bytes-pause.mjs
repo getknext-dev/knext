@@ -4,10 +4,11 @@
  * published packages' dependency manifests while a window is open" leg.
  *
  * WHY AN AUTO-CLOSE WORKFLOW, NOT A `.github/dependabot.yml` EDIT:
- * `.github/dependabot.yml` today has EXACTLY ONE `package-ecosystem` entry —
- * `github-actions` — and no `npm`/`bun` ecosystem block exists in this repo at
- * all (verified by reading the file, not assumed). A config-based "pause"
- * would therefore have NOTHING to disable today, and — worse — would require
+ * When this script was written, `.github/dependabot.yml` had no `npm`/`bun`
+ * ecosystem block at all, so a config-based "pause" would have had NOTHING to
+ * disable. A `bun` entry has since been added (the supply-chain hardening
+ * pass), which makes this workflow live rather than a no-op; its design is
+ * unchanged. A config-based "pause" would also have required
  * a REVIEWED PR to toggle the config open/closed around every credential
  * window, which is exactly the manual, easy-to-forget step ADR-0056's own
  * design already tries to avoid for the harness freeze. An auto-close
@@ -15,9 +16,8 @@
  * on WHAT a bot PR actually touches (the SAME `decidePublishedBytesScope`
  * used by `scripts/published-bytes-freeze-check.mjs`), not on which
  * ecosystem block happens to exist in `dependabot.yml` on a given day — so it
- * is correct BEFORE an npm/bun ecosystem entry is ever added (a no-op today,
- * proven by the fact that no npm/bun Dependabot PR can exist yet) and
- * requires NO further edit the day one is.
+ * was correct before the `bun` entry existed and needed NO edit the day one
+ * was added.
  *
  * WHAT THIS SCRIPT DECIDES: given the SAME pin file + changed-files diff as
  * the freeze check, would this PR's content be disallowed by the freeze

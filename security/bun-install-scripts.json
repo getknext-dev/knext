@@ -1,0 +1,20 @@
+{
+  "$schema-note": "The reviewed allowlist of dependencies whose install lifecycle scripts (preinstall/install/postinstall) may run during `bun install`. Bun runs a dependency's scripts only if the package is in the ROOT package.json `trustedDependencies` OR on Bun's built-in default-trusted list (`bun pm default-trusted`, a few hundred popular native-addon packages). The default list is ADDITIVE and cannot be switched off by configuration (measured on bun 1.4.2: an explicit `trustedDependencies: [\"x\"]` still ran esbuild's postinstall), so this file pins BOTH paths: the root package.json `trustedDependencies` must equal `allow` exactly, and every package in bun.lock that is on Bun's default list must be named here. tests/bun-install-scripts.test.ts enforces both, so a new dependency that can run an install script cannot arrive without a reviewed edit to this file. Each entry MUST carry `name`, `justification` (what the script does and why we accept it) and `added` (ISO date).",
+  "allow": [
+    {
+      "name": "@bufbuild/buf",
+      "justification": "postinstall (`node ./install.js`) places the buf binary used for protobuf codegen and lint. Dev tooling only: it is a devDependency of the workspace and ships in no published package.",
+      "added": "2026-10-17"
+    },
+    {
+      "name": "esbuild",
+      "justification": "postinstall (`node install.js`) validates and links the platform binary that vite, tsup and drizzle-kit shell out to. Build-time tooling; esbuild is not in the published packages' production closure.",
+      "added": "2026-10-17"
+    },
+    {
+      "name": "sharp",
+      "justification": "On Bun's default-trusted list. The 0.35.x line defines no install, preinstall or postinstall script (its libvips binaries ship as optional dependencies), so nothing runs today. Listed so a future sharp release that adds an install script is already a reviewed name and its script is read at the bump.",
+      "added": "2026-10-17"
+    }
+  ]
+}

@@ -1,0 +1,253 @@
+name: Shipped artifacts re-scan (nightly)
+
+# Re-scan what we have ALREADY SHIPPED, every night.
+#
+# The publish-time gates are a snapshot: `audit-published.mjs` clears the npm
+# tarballs when they are published, and Trivy clears an image when it is pushed.
+# An advisory filed next week against a dependency we shipped last month is
+# invisible to both, and the artifact keeps being installed. This lane reads the
+# REGISTRY, not the checkout:
+#
+#   npm-published     every distinct version on every dist-tag of @getknext/core,
+#                     installed from npmjs into a scratch dir (production closure,
+#                     no scripts): `npm audit`, OSV-Scanner over the resolved
+#                     lockfile (malware included) and `npm audit signatures`.
+#   resolve-images    the digest-pinned operator image in the install.yaml of the
+#                     operator-latest, operator-edge and newest operator-v* releases,
+#                     the newest published file-manager image, and the function
+#                     template images when they exist (they are not published yet).
+#   images            Trivy over each of those by digest, HIGH,CRITICAL, exit 1.
+#   lockfile-malware  OSV-Scanner over every tracked lockfile, malicious-package
+#                     advisories only. A package can be reported as malware long
+#                     after the PR that added it merged; the PR gate cannot see that.
+#
+# FAIL LOUD, in the places a nightly usually goes quietly green:
+#   - no job carries a job-level `if:` or a soft-fail flag. A skipped job does not
+#     fail the run, and `needs.<job>.result` is then 'skipped', so the alert below
+#     would never fire either (tests/shipped-scan.test.ts audits this);
+#   - an unreachable registry, an `npm audit` error document, an image the
+#     registry cannot serve, a release bundle with no digest-pinned image: all are
+#     failures. Only a positive "manifest unknown" for a template image is
+#     "not published";
+#   - the alert fires on failure OR cancelled of every scan job.
+#
+# EXPECTED TO BE RED when it lands, and that is the point: it reports what is
+# actually vulnerable in what is actually shipped. The alert is a single
+# create-or-update issue (scripts/nightly-alert-issue.mjs, the same helper as the
+# other nightlies) and never blocks a PR; this workflow has no pull_request trigger.
+#
+# SUPPLY CHAIN OF THE SCANNER. osv-scanner is pinned by version AND the sha256 of
+# the release asset (the line in the release's osv-scanner_SHA256SUMS). crane is
+# pinned by version and sha256 like supply-chain.yml. Trivy is the SHA-pinned action.
+#
+# HUMAN PRECONDITION: the alert needs "Settings -> Actions -> General -> Workflow
+# permissions -> Allow GitHub Actions to create and approve pull requests" (it also
+# governs issue creation by the default token), as for the other nightlies.
+
+on:
+  # 02:47 UTC, clear of the other nightlies' minutes (tests/ci-capacity-budget.test.ts).
+  schedule:
+    - cron: '47 2 * * *'
+  # Manual runs; the alert job is scheduled-only so an experiment never files an issue.
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  npm-published:
+    name: Published @getknext/* (npm audit, OSV, signatures)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+
+      - name: Install osv-scanner (version + checksum pinned)
+        env:
+          OSV_SCANNER_VERSION: v2.6.0
+          # sha256 of osv-scanner_linux_amd64 from the v2.6.0 release's
+          # osv-scanner_SHA256SUMS (github.com/google/osv-scanner). Keep equal to the
+          # pin in osv-scan.yml; tests/shipped-scan.test.ts checks they match.
+          OSV_SCANNER_SHA256: ca69b3d3cd08f889a49dc0a383122f71cc528b83803671df5fd874d97485b108
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "${RUNNER_TEMP}/osv-scanner" \
+            "https://github.com/google/osv-scanner/releases/download/${OSV_SCANNER_VERSION}/osv-scanner_linux_amd64"
+          echo "${OSV_SCANNER_SHA256}  ${RUNNER_TEMP}/osv-scanner" | sha256sum -c -
+          chmod +x "${RUNNER_TEMP}/osv-scanner"
+
+      - name: Re-scan the published versions
+        run: node scripts/audit-shipped-npm.mjs --scanner "${RUNNER_TEMP}/osv-scanner"
+
+  resolve-images:
+    name: Resolve published image digests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # The reference app image is private, so reading its tags needs packages: read.
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      images: ${{ steps.resolve.outputs.images }}
+    steps:
+      # Enough history to walk back from the tip to the newest commit that has a
+      # published image tag.
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 30
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+
+      - name: Install crane (version + checksum pinned)
+        env:
+          CRANE_VERSION: v0.21.7
+          # sha256 of go-containerregistry_Linux_x86_64.tar.gz from the v0.21.7
+          # release's checksums.txt (github.com/google/go-containerregistry).
+          CRANE_SHA256: 1a57bc98207fa1c0d04bf760699099e26f8383499bfd55b99c1b919a928a7230
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/crane.tar.gz \
+            "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz"
+          echo "${CRANE_SHA256}  /tmp/crane.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/crane.tar.gz -C /tmp crane
+          sudo install -m 0755 /tmp/crane /usr/local/bin/crane
+          crane version
+
+      - name: Resolve the published image digests
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REGISTRY_USER: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          printf '%s' "${GH_TOKEN}" | crane auth login ghcr.io -u "${REGISTRY_USER}" --password-stdin
+          node scripts/resolve-shipped-images.mjs --repo "${GITHUB_REPOSITORY}"
+
+  images:
+    name: Trivy ${{ matrix.image.name }}
+    needs: [resolve-images]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: read
+    strategy:
+      fail-fast: false
+      # One vector whose values are the resolved `{name, ref}` objects: an empty list
+      # is an evaluation error, never a job that silently runs nothing.
+      matrix:
+        image: ${{ fromJSON(needs.resolve-images.outputs.images) }}
+    steps:
+      - name: Trivy scan by digest — FAIL on HIGH/CRITICAL
+        # SHA-pinned like every other Trivy use in this repo. The ref is a digest,
+        # so this scans exactly the bytes a user pulls, not whatever a tag points at
+        # tonight. Same severity and ignore-unfixed policy as the publish-time gate.
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_USERNAME: ${{ github.actor }}
+          TRIVY_PASSWORD: ${{ github.token }}
+        with:
+          image-ref: ${{ matrix.image.ref }}
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          ignore-unfixed: true
+          format: table
+
+  lockfile-malware:
+    name: Tracked lockfiles (malicious-package advisories)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+
+      - name: Install osv-scanner (version + checksum pinned)
+        env:
+          OSV_SCANNER_VERSION: v2.6.0
+          OSV_SCANNER_SHA256: ca69b3d3cd08f889a49dc0a383122f71cc528b83803671df5fd874d97485b108
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "${RUNNER_TEMP}/osv-scanner" \
+            "https://github.com/google/osv-scanner/releases/download/${OSV_SCANNER_VERSION}/osv-scanner_linux_amd64"
+          echo "${OSV_SCANNER_SHA256}  ${RUNNER_TEMP}/osv-scanner" | sha256sum -c -
+          chmod +x "${RUNNER_TEMP}/osv-scanner"
+
+      # Malicious packages only: known vulnerabilities in dev tooling are owned by
+      # Dependabot and the PR gate (new ones), and failing here on the standing ones
+      # would turn this alert into permanent noise.
+      - name: OSV gate (malicious-package advisories, no base)
+        run: node scripts/osv-gate.mjs --scanner "${RUNNER_TEMP}/osv-scanner" --malicious-only
+
+  # ── Idempotent alert (same shape as mutation-prover-nightly / action-pin-resolution) ──
+  nightly-red-alert:
+    name: Nightly red alert (issue)
+    needs: [npm-published, resolve-images, images, lockfile-malware]
+    # always() so this is not skipped when a scan job fails; failure OR cancelled so a
+    # timed-out lane cannot leave the alert silent; scheduled-only so a dispatch
+    # experiment never files an issue.
+    if: >-
+      always() &&
+      github.event_name == 'schedule' &&
+      (needs.npm-published.result == 'failure' || needs.npm-published.result == 'cancelled' ||
+       needs.resolve-images.result == 'failure' || needs.resolve-images.result == 'cancelled' ||
+       needs.images.result == 'failure' || needs.images.result == 'cancelled' ||
+       needs.lockfile-malware.result == 'failure' || needs.lockfile-malware.result == 'cancelled')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Create or update the "Shipped artifacts RED" issue (idempotent)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          NPM: ${{ needs.npm-published.result }}
+          RESOLVE: ${{ needs.resolve-images.result }}
+          IMAGES: ${{ needs.images.result }}
+          LOCKFILES: ${{ needs.lockfile-malware.result }}
+        run: |
+          set -euo pipefail
+          # The idempotency KEY is this fixed literal title. Keep it a constant.
+          title='Shipped artifacts RED'
+          body="The nightly re-scan of what we have ALREADY SHIPPED found a problem, or could not run.
+
+          - Run (per-job logs and the step summaries name the exact package, advisory or image): ${RUN_URL}
+          - Published @getknext/* (npm audit, OSV, signatures): ${NPM}
+          - Image digest resolution: ${RESOLVE}
+          - Trivy over the published images: ${IMAGES}
+          - Tracked lockfiles, malicious-package advisories: ${LOCKFILES}
+
+          **Triage.**
+
+          - *A published npm version has a HIGH/CRITICAL or malicious dependency.* The shipped tarball cannot be changed. Bump the dependency, release a patch, and (if the old version is a real exposure) deprecate it. If the advisory is not reachable from our code, add a dated, justified, expiring entry to \`security/npm-audit-allowlist.json\` (npm audit) or \`security/osv-allowlist.json\` (OSV) after reading the vulnerable code path. Do not allowlist to make the night green.
+          - *An operator or app image has fixable HIGH/CRITICAL findings.* Rebuild from a patched base or toolchain and publish a new digest; the operator-latest and operator-edge bundles must then be re-pinned by a release. A digest that is already pulled stays vulnerable until users move.
+          - *A step failed rather than found something.* Registry unreachable, a release bundle with no digest-pinned image, no app image for the last 25 commits: those are failures on purpose, because a scan that could not look is not a clean scan. Fix the cause; do not soften the lane.
+          - *A malicious-package advisory on a tracked lockfile.* Treat as an incident: find the dependent, remove or pin the package, and check what ran on any machine that installed it.
+
+          Re-run the workflow to confirm the fix, then close this issue."
+          TITLE="${title}" BODY="${body}" node scripts/nightly-alert-issue.mjs
