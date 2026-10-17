@@ -119,7 +119,7 @@ const MUTATIONS = [
     claim: 'an expired allowlist entry keeps suppressing',
     subject: 'lib',
     anchor: 'if (e.expires < today)',
-    replacement: 'if (false)',
+    replacement: `if (false /* ${M} */)`,
   },
   {
     id: 'G8',
