@@ -65,9 +65,9 @@ describe('the module core dispatches to', () => {
   it('runs add function, then generate --check, end to end', async () => {
     const dir = emptyDir('e2e');
     const add = capture();
-    expect(await run('add', ['function', 'orders', '--lang', 'go'], { ...add.io, cwd: dir })).toBe(
-      0,
-    );
+    expect(
+      await run('add', ['function', 'orders', '--lang', 'rust'], { ...add.io, cwd: dir }),
+    ).toBe(0);
     expect(await run('generate', [], { ...capture().io, cwd: dir })).toBe(0);
     const check = capture();
     expect(await run('generate', ['--check'], { ...check.io, cwd: dir }), check.err()).toBe(0);

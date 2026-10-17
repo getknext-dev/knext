@@ -13,7 +13,10 @@ describe('knext add function <name> --lang go|rust', () => {
   it('scaffolds a contract that lints, generates, and passes --check', async () => {
     const app = emptyDir('add-go');
     const c = capture();
-    expect(addFunction({ cwd: app, name: 'orders', lang: 'go', io: c.io }), c.err()).toBe(0);
+    expect(
+      addFunction({ cwd: app, name: 'orders', lang: 'go', serverProject: false, io: c.io }),
+      c.err(),
+    ).toBe(0);
 
     expect(existsSync(join(app, 'buf.yaml'))).toBe(true);
     expect(existsSync(join(app, 'proto/knext/v1/options.proto'))).toBe(true);
@@ -57,7 +60,9 @@ describe('knext add function <name> --lang go|rust', () => {
 
   it('adds a second function next to the first and keeps the config sorted', () => {
     const app = emptyDir('add-second');
-    expect(addFunction({ cwd: app, name: 'orders', lang: 'go', io: capture().io })).toBe(0);
+    expect(
+      addFunction({ cwd: app, name: 'orders', lang: 'go', serverProject: false, io: capture().io }),
+    ).toBe(0);
     expect(addFunction({ cwd: app, name: 'billing', lang: 'rust', io: capture().io })).toBe(0);
     const raw = readFileSync(join(app, 'knext.grpc.json'), 'utf8');
     expect(raw.indexOf('"billing"')).toBeLessThan(raw.indexOf('"orders"'));
@@ -70,14 +75,20 @@ describe('knext add function <name> --lang go|rust', () => {
   it('is byte-stable: the same command in two apps writes identical files', () => {
     const a = emptyDir('add-stable-a');
     const b = emptyDir('add-stable-b');
-    expect(addFunction({ cwd: a, name: 'orders', lang: 'go', io: capture().io })).toBe(0);
-    expect(addFunction({ cwd: b, name: 'orders', lang: 'go', io: capture().io })).toBe(0);
+    expect(
+      addFunction({ cwd: a, name: 'orders', lang: 'go', serverProject: false, io: capture().io }),
+    ).toBe(0);
+    expect(
+      addFunction({ cwd: b, name: 'orders', lang: 'go', serverProject: false, io: capture().io }),
+    ).toBe(0);
     expect(readTree(b)).toEqual(readTree(a));
   });
 
   it('every scaffolded RPC states AUTH_USER explicitly', () => {
     const app = emptyDir('add-auth');
-    expect(addFunction({ cwd: app, name: 'orders', lang: 'go', io: capture().io })).toBe(0);
+    expect(
+      addFunction({ cwd: app, name: 'orders', lang: 'go', serverProject: false, io: capture().io }),
+    ).toBe(0);
     const proto = readFileSync(join(app, 'proto/orders/v1/orders.proto'), 'utf8');
     const rpcs = proto.match(/^\s*rpc /gm) ?? [];
     const auths = proto.match(/^\s*option \(knext\.v1\.auth\) = AUTH_USER;$/gm) ?? [];
@@ -87,7 +98,9 @@ describe('knext add function <name> --lang go|rust', () => {
 
   it('scaffolds an authorize() hook that refuses every call until it is written', async () => {
     const app = emptyDir('add-authorize');
-    expect(addFunction({ cwd: app, name: 'orders', lang: 'go', io: capture().io })).toBe(0);
+    expect(
+      addFunction({ cwd: app, name: 'orders', lang: 'go', serverProject: false, io: capture().io }),
+    ).toBe(0);
     expect(loadConfig(app).authorize).toBe('src/knext/authorize.ts');
     const hook = readFileSync(join(app, 'src/knext/authorize.ts'), 'utf8');
     expect(hook).toContain('export async function authorize(');
@@ -97,16 +110,28 @@ describe('knext add function <name> --lang go|rust', () => {
 
   it('keeps an existing authorize() hook and setting when adding another function', () => {
     const app = emptyDir('add-authorize-keep');
-    expect(addFunction({ cwd: app, name: 'orders', lang: 'go', io: capture().io })).toBe(0);
+    expect(
+      addFunction({ cwd: app, name: 'orders', lang: 'go', serverProject: false, io: capture().io }),
+    ).toBe(0);
     writeFileSync(join(app, 'src/knext/authorize.ts'), '// mine\n');
-    expect(addFunction({ cwd: app, name: 'billing', lang: 'go', io: capture().io })).toBe(0);
+    expect(
+      addFunction({
+        cwd: app,
+        name: 'billing',
+        lang: 'go',
+        serverProject: false,
+        io: capture().io,
+      }),
+    ).toBe(0);
     expect(readFileSync(join(app, 'src/knext/authorize.ts'), 'utf8')).toBe('// mine\n');
     expect(loadConfig(app).authorize).toBe('src/knext/authorize.ts');
   });
 
   it('refuses to overwrite an existing function', () => {
     const app = emptyDir('add-twice');
-    expect(addFunction({ cwd: app, name: 'orders', lang: 'go', io: capture().io })).toBe(0);
+    expect(
+      addFunction({ cwd: app, name: 'orders', lang: 'go', serverProject: false, io: capture().io }),
+    ).toBe(0);
     const proto = join(app, 'proto/orders/v1/orders.proto');
     writeFileSync(proto, `${readFileSync(proto, 'utf8')}// mine\n`);
     const c = capture();
@@ -119,7 +144,9 @@ describe('knext add function <name> --lang go|rust', () => {
   it('keeps an existing buf.yaml', () => {
     const app = emptyDir('add-bufyaml');
     writeFileSync(join(app, 'buf.yaml'), 'version: v2\nmodules:\n  - path: proto\n');
-    expect(addFunction({ cwd: app, name: 'orders', lang: 'go', io: capture().io })).toBe(0);
+    expect(
+      addFunction({ cwd: app, name: 'orders', lang: 'go', serverProject: false, io: capture().io }),
+    ).toBe(0);
     expect(readFileSync(join(app, 'buf.yaml'), 'utf8')).toBe(
       'version: v2\nmodules:\n  - path: proto\n',
     );
@@ -140,18 +167,31 @@ describe('knext add function <name> --lang go|rust', () => {
       '',
     ]) {
       const c = capture();
-      expect(addFunction({ cwd: emptyDir('add-bad'), name: bad, lang: 'go', io: c.io }), bad).toBe(
-        1,
-      );
+      expect(
+        addFunction({
+          cwd: emptyDir('add-bad'),
+          name: bad,
+          lang: 'go',
+          serverProject: false,
+          io: c.io,
+        }),
+        bad,
+      ).toBe(1);
       expect(c.err()).toContain('not a valid function name');
     }
   });
 
   it('refuses the name `knext`, which would land in the knext options package', () => {
     const c = capture();
-    expect(addFunction({ cwd: emptyDir('add-knext'), name: 'knext', lang: 'go', io: c.io })).toBe(
-      1,
-    );
+    expect(
+      addFunction({
+        cwd: emptyDir('add-knext'),
+        name: 'knext',
+        lang: 'go',
+        serverProject: false,
+        io: c.io,
+      }),
+    ).toBe(1);
     expect(c.err()).toContain('reserved');
   });
 
@@ -173,7 +213,10 @@ describe('knext add function <name> --lang go|rust', () => {
     ]) {
       const app = emptyDir('add-good');
       const c = capture();
-      expect(addFunction({ cwd: app, name, lang: 'go', io: c.io }), `${name}: ${c.err()}`).toBe(0);
+      expect(
+        addFunction({ cwd: app, name, lang: 'go', serverProject: false, io: c.io }),
+        `${name}: ${c.err()}`,
+      ).toBe(0);
       const lint = runBuf(['lint'], { cwd: app });
       expect(lint.status, `${name}: ${lint.stdout.toString()}`).toBe(0);
     }

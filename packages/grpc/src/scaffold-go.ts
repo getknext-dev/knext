@@ -156,6 +156,26 @@ export function substitute(text: string, s: GoScaffold): string {
   return text.replace(re, (m) => map[m] as string);
 }
 
+/**
+ * `buf generate` over the staged project. The plugins are Go tools pinned in
+ * its go.mod, so the first run on a machine downloads (and compiles) them into
+ * the Go module cache; later runs are offline.
+ */
+function generateWithBuf(stage: string): void {
+  const go = spawnSync('go', ['version']);
+  if (go.status !== 0) {
+    throw new GrpcUsageError(
+      "the Go toolchain (`go`) is needed to generate the function's code and was not found on PATH; nothing was changed",
+    );
+  }
+  const gen = runBuf(['generate'], { cwd: stage });
+  if (gen.status !== 0) {
+    throw new GrpcUsageError(
+      `generating the function's Go code failed; nothing was changed:\n${gen.stderr}`,
+    );
+  }
+}
+
 export interface StagedGoFunction {
   /** The finished project, in a temporary directory. */
   readonly dir: string;
@@ -172,7 +192,11 @@ export interface StagedGoFunction {
  * Nothing outside the staging directory is touched; the caller installs it
  * last, after every other write has succeeded.
  */
-export function stageGoFunction(s: GoScaffold, templateDir?: string): StagedGoFunction {
+export function stageGoFunction(
+  s: GoScaffold,
+  templateDir?: string,
+  generate?: (stageDir: string) => void,
+): StagedGoFunction {
   const template = templateDir ?? goTemplateDir();
   const stage = mkdtempSync(join(tmpdir(), 'knext-go-function-'));
   const dispose = () => rmSync(stage, { recursive: true, force: true });
@@ -188,18 +212,8 @@ export function stageGoFunction(s: GoScaffold, templateDir?: string): StagedGoFu
     writeFileSync(join(protoDir, s.pkg, 'v1', `${s.pkg}.proto`), s.contract);
     writeFileSync(join(protoDir, 'knext', 'v1', 'options.proto'), s.options);
 
-    const go = spawnSync('go', ['version']);
-    if (go.status !== 0) {
-      throw new GrpcUsageError(
-        "the Go toolchain (`go`) is needed to generate the function's code and was not found on PATH; nothing was changed",
-      );
-    }
-    const gen = runBuf(['generate'], { cwd: stage });
-    if (gen.status !== 0) {
-      throw new GrpcUsageError(
-        `generating the function's Go code failed; nothing was changed:\n${gen.stderr}`,
-      );
-    }
+    if (generate) generate(stage);
+    else generateWithBuf(stage);
     return {
       dir: stage,
       files: walk(stage),

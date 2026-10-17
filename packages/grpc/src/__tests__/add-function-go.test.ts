@@ -1,6 +1,14 @@
 import { afterAll, describe, expect, it } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { cpSync, existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 import { addFunction } from '../add-function';
 import {
@@ -29,51 +37,74 @@ function walk(dir: string): string[] {
 }
 
 const hasGo = spawnSync('go', ['version']).status === 0;
+// Where Go generation is the point, CI must have Go (it does); a contributor
+// machine without it skips those two tests only.
+const needsGo = !hasGo && !process.env.CI;
+const REAL_TIMEOUT = 600_000;
+
+// Real generation runs `buf generate` over `go tool` plugins, which a cold Go
+// module cache must download and compile first. Only the tests that are ABOUT
+// the generated code pay for it; every other scaffold test swaps in this stub,
+// so the suite does not depend on the network or on how fast the runner is.
+const stubGen = (dir: string) => {
+  mkdirSync(join(dir, 'gen'), { recursive: true });
+  writeFileSync(join(dir, 'gen', 'stub.go'), 'package gen\n');
+};
 
 describe('knext add function <name> --lang go scaffolds templates/go', () => {
-  it('writes the server project with the name and module path substituted', () => {
-    const app = emptyDir('go-scaffold');
-    const c = capture();
-    expect(
-      addFunction({
-        cwd: app,
-        name: 'user-profile',
-        lang: 'go',
-        module: 'acme.dev/user-profile',
-        io: c.io,
-      }),
-      c.err(),
-    ).toBe(0);
-    const root = join(app, 'functions', 'user-profile');
-    const files = walk(root);
-    for (const f of [
-      'go.mod',
-      'main.go',
-      'Dockerfile',
-      'internal/auth/token.go',
-      'internal/rpc/rpc.go',
-      'internal/items/items.go',
-    ]) {
-      expect(files).toContain(f);
-    }
-    expect(files).toContain('proto/user_profile/v1/user_profile.proto');
-    expect(files).toContain('gen/user_profile/v1/user_profile.pb.go');
-    expect(readFileSync(join(root, 'go.mod'), 'utf8')).toContain('module acme.dev/user-profile\n');
-    expect(readFileSync(join(root, 'main.go'), 'utf8')).toContain(
-      '"acme.dev/user-profile/internal/rpc"',
-    );
-    expect(readFileSync(join(root, 'buf.gen.yaml'), 'utf8')).toContain('acme.dev/user-profile/gen');
-    expect(readFileSync(join(root, 'internal/items/items.go'), 'utf8')).toContain(
-      'user_profilev1connect.UserProfileServiceHandler',
-    );
-    // The zone side still gets its contract and config entry.
-    expect(existsSync(join(app, 'proto/user_profile/v1/user_profile.proto'))).toBe(true);
-    expect(readFileSync(join(app, 'knext.grpc.json'), 'utf8')).toContain('"user-profile"');
-  });
+  it.skipIf(needsGo)(
+    'writes the server project with the name and module path substituted (real generation)',
+    () => {
+      const app = emptyDir('go-scaffold');
+      const c = capture();
+      expect(
+        addFunction({
+          cwd: app,
+          name: 'user-profile',
+          lang: 'go',
+          module: 'acme.dev/user-profile',
+          io: c.io,
+        }),
+        c.err(),
+      ).toBe(0);
+      const root = join(app, 'functions', 'user-profile');
+      const files = walk(root);
+      for (const f of [
+        'go.mod',
+        'main.go',
+        'Dockerfile',
+        'internal/auth/token.go',
+        'internal/rpc/rpc.go',
+        'internal/items/items.go',
+      ]) {
+        expect(files).toContain(f);
+      }
+      expect(files).toContain('proto/user_profile/v1/user_profile.proto');
+      expect(files).toContain('gen/user_profile/v1/user_profile.pb.go');
+      expect(readFileSync(join(root, 'go.mod'), 'utf8')).toContain(
+        'module acme.dev/user-profile\n',
+      );
+      expect(readFileSync(join(root, 'main.go'), 'utf8')).toContain(
+        '"acme.dev/user-profile/internal/rpc"',
+      );
+      expect(readFileSync(join(root, 'buf.gen.yaml'), 'utf8')).toContain(
+        'acme.dev/user-profile/gen',
+      );
+      expect(readFileSync(join(root, 'internal/items/items.go'), 'utf8')).toContain(
+        'user_profilev1connect.UserProfileServiceHandler',
+      );
+      // The zone side still gets its contract and config entry.
+      expect(existsSync(join(app, 'proto/user_profile/v1/user_profile.proto'))).toBe(true);
+      expect(readFileSync(join(app, 'knext.grpc.json'), 'utf8')).toContain('"user-profile"');
+    },
+    REAL_TIMEOUT,
+  );
 
   it('leaves no template placeholder behind', () => {
     const app = emptyDir('go-placeholders');
-    expect(addFunction({ cwd: app, name: 'orders', lang: 'go', io: capture().io })).toBe(0);
+    expect(
+      addFunction({ cwd: app, name: 'orders', lang: 'go', io: capture().io, generate: stubGen }),
+    ).toBe(0);
     const root = join(app, 'functions', 'orders');
     const stale = [
       'example.com/function',
@@ -94,29 +125,42 @@ describe('knext add function <name> --lang go scaffolds templates/go', () => {
 
   it('refuses an existing function directory without writing anything', () => {
     const app = emptyDir('go-exists');
-    expect(addFunction({ cwd: app, name: 'orders', lang: 'go', io: capture().io })).toBe(0);
+    expect(
+      addFunction({ cwd: app, name: 'orders', lang: 'go', io: capture().io, generate: stubGen }),
+    ).toBe(0);
     const c = capture();
-    expect(addFunction({ cwd: app, name: 'orders', lang: 'go', io: c.io })).toBe(1);
+    expect(addFunction({ cwd: app, name: 'orders', lang: 'go', io: c.io, generate: stubGen })).toBe(
+      1,
+    );
     expect(c.err()).toContain('already exists');
   });
 
   it('refuses a module path that is not a Go module path', () => {
     const app = emptyDir('go-badmodule');
     const c = capture();
-    expect(addFunction({ cwd: app, name: 'orders', lang: 'go', module: 'a b"', io: c.io })).toBe(1);
+    expect(
+      addFunction({
+        cwd: app,
+        name: 'orders',
+        lang: 'go',
+        module: 'a b"',
+        io: c.io,
+        generate: stubGen,
+      }),
+    ).toBe(1);
     expect(c.err()).toContain('module');
     expect(existsSync(join(app, 'functions'))).toBe(false);
   });
 
-  it.skipIf(!hasGo)(
+  it.skipIf(needsGo)(
     'the scaffolded function builds, passes its tests and serves health',
     () => {
       const app = emptyDir('go-build');
       expect(addFunction({ cwd: app, name: 'orders', lang: 'go', io: capture().io })).toBe(0);
       const root = join(app, 'functions', 'orders');
       const build = spawnSync('go', ['build', './...'], { cwd: root });
-      expect(build.stderr.toString(), 'go build').toBe('');
-      expect(build.status).toBe(0);
+      // stderr also carries "go: downloading ..." progress on a cold module cache.
+      expect(build.status, build.stderr.toString()).toBe(0);
       const test = spawnSync('go', ['test', '-count=1', './...'], { cwd: root });
       const text = test.stdout.toString() + test.stderr.toString();
       expect(test.status, text).toBe(0);
@@ -128,7 +172,7 @@ describe('knext add function <name> --lang go scaffolds templates/go', () => {
       );
       expect(health.stdout.toString()).toContain('--- PASS: TestProtocolMatrix');
     },
-    300_000,
+    REAL_TIMEOUT,
   );
 });
 
@@ -161,7 +205,9 @@ describe('the Go scaffold copies templates/go minus a counted exclude list', () 
 
   it('what lands on disk is the copied set plus proto/ and gen/ and nothing else', () => {
     const app = emptyDir('go-guard');
-    expect(addFunction({ cwd: app, name: 'orders', lang: 'go', io: capture().io })).toBe(0);
+    expect(
+      addFunction({ cwd: app, name: 'orders', lang: 'go', io: capture().io, generate: stubGen }),
+    ).toBe(0);
     const root = join(app, 'functions', 'orders');
     const onDisk = walk(root);
     expect(onDisk.filter((f) => !f.startsWith('proto/') && !f.startsWith('gen/'))).toEqual(
@@ -202,7 +248,14 @@ describe('which template a run scaffolds from', () => {
     writeFileSync(join(copy, 'main.go'), `${main}\n// template-edit-marker\n`);
     const app = emptyDir('go-template-change');
     expect(
-      addFunction({ cwd: app, name: 'orders', lang: 'go', io: capture().io, templateDir: copy }),
+      addFunction({
+        cwd: app,
+        name: 'orders',
+        lang: 'go',
+        io: capture().io,
+        templateDir: copy,
+        generate: stubGen,
+      }),
     ).toBe(0);
     const root = join(app, 'functions', 'orders');
     expect(readFileSync(join(root, 'NOTES.md'), 'utf8')).toBe('marker file\n');
@@ -234,7 +287,14 @@ describe('--module path elements', () => {
   it('still accepts dots inside an element', () => {
     const app = emptyDir('go-dotsok');
     expect(
-      addFunction({ cwd: app, name: 'orders', lang: 'go', module: 'a.b/c..d/e', io: capture().io }),
+      addFunction({
+        cwd: app,
+        name: 'orders',
+        lang: 'go',
+        module: 'a.b/c..d/e',
+        io: capture().io,
+        generate: stubGen,
+      }),
     ).toBe(0);
   });
 });
@@ -258,6 +318,7 @@ describe('a failure at any step leaves the app as it was, and a rerun works', ()
         name: 'orders',
         lang: 'go',
         io: capture().io,
+        generate: stubGen,
         onStep: (step) => {
           if (step === failAt) throw boom;
         },
@@ -266,8 +327,11 @@ describe('a failure at any step leaves the app as it was, and a rerun works', ()
     expect(walk(app), `files left behind after failing at ${failAt}`).toEqual([]);
     expect(existsSync(join(app, 'functions'))).toBe(false);
     const c = capture();
-    expect(addFunction({ cwd: app, name: 'orders', lang: 'go', io: c.io }), c.err()).toBe(0);
-  }, 120_000);
+    expect(
+      addFunction({ cwd: app, name: 'orders', lang: 'go', io: c.io, generate: stubGen }),
+      c.err(),
+    ).toBe(0);
+  });
 
   it('restores an existing knext.grpc.json byte for byte when install fails', () => {
     const app = emptyDir('go-fail-restore');
@@ -279,13 +343,14 @@ describe('a failure at any step leaves the app as it was, and a rerun works', ()
         name: 'orders',
         lang: 'go',
         io: capture().io,
+        generate: stubGen,
         onStep: (step) => {
           if (step === 'install') throw new Error('boom');
         },
       }),
     ).toThrow('boom');
     expect(walk(app).map((f) => [f, readFileSync(join(app, f), 'utf8')])).toEqual(before);
-  }, 120_000);
+  });
 });
 
 describe('the build ships the template and turbo knows it', () => {

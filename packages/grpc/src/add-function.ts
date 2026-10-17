@@ -142,6 +142,10 @@ export interface AddFunctionOptions {
   readonly io: Io;
   /** Test seam: the Go template to scaffold from (default: the resolved one). */
   readonly templateDir?: string;
+  /** Test seam: replaces `buf generate` over the staged Go project. */
+  readonly generate?: (stageDir: string) => void;
+  /** Test seam: false writes the contract only, as `--lang rust` does (default true). */
+  readonly serverProject?: boolean;
   /** Test seam: called before each step; a throw there simulates that step failing. */
   readonly onStep?: (step: string) => void;
 }
@@ -154,6 +158,8 @@ export function addFunction({
   module,
   io,
   templateDir,
+  generate,
+  serverProject = true,
   onStep,
 }: AddFunctionOptions): number {
   // Every write is undone if a later one fails, so a rerun starts from the same
@@ -207,7 +213,7 @@ export function addFunction({
       writeFileSync(abs, content);
       written.push(rel);
     };
-    if (lang === 'go') {
+    if (lang === 'go' && serverProject) {
       // Staged first (a failed code generation writes nothing), installed last.
       step('stage');
       staged = stageGoFunction(
@@ -220,6 +226,7 @@ export function addFunction({
           options: packagedOptionsProto(),
         },
         templateDir,
+        generate,
       );
     }
     if (!existsSync(join(cwd, 'buf.yaml'))) write('buf.yaml', BUF_YAML);
