@@ -394,7 +394,7 @@ const UPLOAD = [
     subject: 'objkey',
     claim: 'the generated id is a constant, so the same name maps to the same key',
     anchor: "return `${randomBytes(8).toString('hex')}-${validatedName}`;",
-    replacement: "return `0000000000000000-${validatedName}`;",
+    replacement: 'return `0000000000000000-${validatedName}`;',
   },
   {
     id: 'U08',
@@ -505,7 +505,7 @@ const KEY = [
     subject: 'objkey',
     claim: 'the generated id is a constant',
     anchor: "return `${randomBytes(8).toString('hex')}-${validatedName}`;",
-    replacement: "return `0000000000000000-${validatedName}`;",
+    replacement: 'return `0000000000000000-${validatedName}`;',
   },
   {
     id: 'K08',
