@@ -1,7 +1,7 @@
 # ADR-0071: Per-app Redis ACL user, issued by the operator
 
 - **Status:** **Accepted with conditions (2026-10-17, sprint-5 close design review: architect [review](https://github.com/getknext-dev/knext/issues/2504#issuecomment-6229290082),
-  concurred by the system designer [review](https://github.com/getknext-dev/knext/issues/2504#issuecomment-6229290314).** Proposed 2026-10-16. A low-confidence call (jev split),
+  concurred by the system designer [review](https://github.com/getknext-dev/knext/issues/2504#issuecomment-6229290314)).** Proposed 2026-10-16. A low-confidence call (jev split),
   taken by the architect on the evidence. #2396 builds against it and against these conditions:
   1. **Phase 1 covers in-cluster Service FQDNs only.**
   2. **Managed Redis stays bring-your-own** (provisioning there is phase 2).
