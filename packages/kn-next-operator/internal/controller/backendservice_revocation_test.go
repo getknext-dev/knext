@@ -33,6 +33,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	appsv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/api/v1alpha1"
 )
@@ -247,5 +248,40 @@ func TestVerdictHoldsTheGenerationWhileUndecided(t *testing.T) {
 	bs.Status.ObservedGeneration = 2
 	if v := computeBackendServiceVerdict(bs, o); v.observedGeneration != 3 {
 		t.Errorf("a decided pass observes the new generation, got %d", v.observedGeneration)
+	}
+}
+
+// erroringReader answers every read with err.
+type erroringReader struct{ err error }
+
+func (e erroringReader) Get(context.Context, client.ObjectKey, client.Object, ...client.GetOption) error {
+	return e.err
+}
+
+func (e erroringReader) List(context.Context, client.ObjectList, ...client.ListOption) error {
+	return e.err
+}
+
+// The lookup the reconciler hands the allowlist maps each failed read onto
+// exactly one of: unknown (held), denied (held for a bounded window), or
+// rejected (a violation). NotFound stays "unmarked".
+func TestSecretLookupMapsEachReadFailure(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want secretMetadata
+	}{
+		{"timeout", apierrors.NewTimeoutError("x", 1), secretMetadata{readErr: "x"}},
+		{"forbidden", apierrors.NewForbidden(schema.GroupResource{Resource: "secrets"}, "s", errors.New("x")), secretMetadata{readErr: "x", denied: true}},
+		{"client-side", errors.New("name is required"), secretMetadata{rejected: "x"}},
+		{"not found", apierrors.NewNotFound(schema.GroupResource{Resource: "secrets"}, "s"), secretMetadata{}},
+	}
+	for _, c := range cases {
+		r := &BackendServiceReconciler{APIReader: erroringReader{c.err}}
+		got := r.secretMetadata(context.Background(), "ns")("s")
+		if (got.readErr != "") != (c.want.readErr != "") || got.denied != c.want.denied ||
+			(got.rejected != "") != (c.want.rejected != "") || got.found {
+			t.Errorf("%s: got %+v, want the shape of %+v", c.name, got, c.want)
+		}
 	}
 }
