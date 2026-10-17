@@ -91,7 +91,7 @@ const MUTATIONS = [
     subject: 'dep',
     anchor:
       "    groups:\n      rust-crates:\n        patterns:\n          - '*'\n        update-types:\n          - 'minor'\n          - 'patch'\n",
-    replacement: '',
+    replacement: '    # groups removed\n',
   },
   {
     id: 'E7',
@@ -129,7 +129,7 @@ const MUTATIONS = [
     subject: 'dep',
     anchor:
       "    # Same quarantine as bunfig.toml's minimumReleaseAge; see the bun entry below.\n    cooldown:\n      default-days: 3\n",
-    replacement: '',
+    replacement: '    # cooldown removed\n',
   },
   {
     id: 'E12',
