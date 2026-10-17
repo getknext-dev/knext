@@ -1,6 +1,6 @@
 # ADR-0004: `BackendService` CRD for polyglot backends
 
-Status: Accepted (2026-10-12, Z1 design gate — architect and system-designer re-confirmation: [architect](https://github.com/getknext-dev/knext/issues/2045#issuecomment-6128826009), [system designer](https://github.com/getknext-dev/knext/issues/2045#issuecomment-6128845685)) · previously Proposed · Date: 2026-06 · Depends on: ADR-0001, ADR-0002 · Amended 2026-10-09 (see the amendment at the end; revised 2026-10-12 with the Z1 design gate's required changes before the re-confirmation) · Amendment 2 (2026-10-15) **Proposed**: `spec.zone`, two-sided binding, rendered binding env, operator-owned ServiceAccount, the activator as a NetworkPolicy peer, explicit RPC auth options (see the end)
+Status: Accepted (2026-10-12, Z1 design gate — architect and system-designer re-confirmation: [architect](https://github.com/getknext-dev/knext/issues/2045#issuecomment-6128826009), [system designer](https://github.com/getknext-dev/knext/issues/2045#issuecomment-6128845685)) · previously Proposed · Date: 2026-06 · Depends on: ADR-0001, ADR-0002 · Amended 2026-10-09 (see the amendment at the end; revised 2026-10-12 with the Z1 design gate's required changes before the re-confirmation) · Amendment 2 (2026-10-15) **Accepted (2026-10-17, sprint-5 close design review)**: `spec.zone`, two-sided binding, rendered binding env, operator-owned ServiceAccount, the activator as a NetworkPolicy peer, explicit RPC auth options (see the end)
 
 > **Amended by ADR-0065 (Proposed, 2026-10-07):** adds a `flavour: model` `BackendService`
 > (HTTP/1.1, loopback-bound model server behind an auth sidecar) and an `external` variant of
@@ -87,8 +87,12 @@ and flannel (OKE, OrbStack) does not enforce NetworkPolicy at all.
 
 1. **A `BackendService` belongs to exactly one zone: a required, single `ownerReference` to a
    `NextApp` in the same namespace.** Bindings are **same-zone only**; the operator **rejects
-   cross-zone bindings**. The NetworkPolicy admitting only the owning zone stays as
-   defense-in-depth.
+   cross-zone bindings**. *(Still in force. Amendment 2 Decision 1 supersedes only the mechanism of
+   the "required, single `ownerReference`" clause above: the user writes `spec.zone`, and the
+   operator sets the `ownerReference` itself.)* The NetworkPolicy admitting only the owning zone stays as
+   defense-in-depth. *(Superseded by Amendment 2 Decision 5: the policy admits the Knative data
+   path and blocks direct dials; it cannot express "only the owning zone". The per-zone control is
+   the token.)*
 2. **Data sovereignty is an allowlist.** A function may reference a Secret, from any source —
    `secretKeyRef`, `envFrom`, a Secret volume or a projected volume — only if it is **(a)** its
    owning zone's `db-bind` Secret, or **(b)** a Secret marked as belonging to the same zone: a
@@ -98,7 +102,8 @@ and flannel (OKE, OrbStack) does not enforce NetworkPolicy at all.
    exempt**: a private registry (OCIR on OKE) needs them, and they expose no data store. Any
    reference to **another zone's** `db-bind` Secret or to a Secret marked for another zone is
    rejected, as is any environment value naming another zone's database `-rw` or `-ro` host
-   (`scs-zones.md`). Each rule has its own test, mutation-proved. *(Z1 gate: the first text allowed
+   (`scs-zones.md`) *(the host-literal check is superseded by Amendment 2 Decision 6: it is a
+   warn-only lint, never a rejection; the credential allowlist is the control)*. Each rule has its own test, mutation-proved. *(Z1 gate: the first text allowed
    only the `db-bind` Secret, which broke the base spec's `secrets`/`env` field and private-registry
    pulls without serving data sovereignty.)*
    - **Deny rules win.** A Secret that is another zone's `db-bind` Secret is rejected even if it
@@ -129,13 +134,17 @@ and flannel (OKE, OrbStack) does not enforce NetworkPolicy at all.
      runtime supervisor at process start, and the supervisor is core (`packages/kn-next`), which the
      ADR-0002 amendment's scope fence keeps free of function orchestration. So core gets only a
      function-agnostic seam. The primary shape: the operator injects a list of warm URLs into the
-     zone (an env var such as `KNEXT_WARM_URLS`, built from the bound functions' health URLs minus
+     zone (an env var such as `KNEXT_WARM_URLS` *(superseded by Amendment 2 Decision 3: the built
+     variable is `KNEXT_WAKE_FUNCTIONS`, which holds function entry names, not URLs)*, built from the bound functions' health URLs minus
      the opted-out ones), and the core supervisor sends one non-blocking GET to each at process
      start — never awaited, never failing the boot. The acceptable alternative: a generic preload
      extension point in core that `@getknext/grpc` registers on. Either way core never imports or
      names gRPC, Connect or a function.
    - **Bounds on the seam** *(Z1 re-confirmation)*. `KNEXT_WARM_URLS`, or whatever it ends up
      named, is **operator-owned**: a user-set value in the `NextApp` env is overwritten or rejected.
+     *(Superseded by Amendment 2 Decision 3: for `KNEXT_WAKE_FUNCTIONS`, a same-named `spec.env`
+     entry is **kept** and the binding is reported failed. The cluster-local bound below applies to
+     the rendered value, now entry names rather than URLs.)*
      It holds **only the bound functions' cluster-local health URLs** (`http` or `https`, host under
      `*.svc.cluster.local`), and the supervisor ignores any entry that is not one. Each GET is
      **plain, with no credentials or auth headers**; the health RPC is the only token-exempt RPC, so
@@ -178,14 +187,16 @@ and flannel (OKE, OrbStack) does not enforce NetworkPolicy at all.
     cache** (it would be pod-local under scale-out), so a token can be replayed inside its 60 s
     life; that window is documented to users rather than hidden.
 11. **Rotation order (load-bearing):** (1) publish the new public key to the JWKS; (2) **wait at
-    least the ConfigMap volume propagation time** (kubelet sync bound, about 60 to 90 s by default);
+    least the ConfigMap volume propagation time** (the kubelet's ConfigMap refresh, worst case about 90 s; the operator flag
+    `--zone-signing-key-propagation-bound` defaults to **120 s** with a **90 s minimum**, and the
+    operator refuses to start below the minimum; ratified at the sprint-5 close review);
     (3) only then switch signing to the new key; (4) retire the old key after a **1 h overlap**
     (longer than the TTL plus a rollout; 1 h scored 0.75 against 10 min 0.25). Switching before
     propagation is expected to fail, and a warm-pod rotation test proves it.
 12. **The `authorize()` hook** is a required, user-supplied function in the app: it maps a request
     to a verified user identity or rejects it. Generation **fails closed** without it. Each RPC
-    carries an auth option: `USER` (default) or `PUBLIC` (only on `NO_SIDE_EFFECTS` methods)
-    *(Amendment 2 Decision 8, Proposed: there is no default; every unary RPC states it)*. The
+    carries an auth option: `USER` or `PUBLIC` (only on `NO_SIDE_EFFECTS` methods)
+    *(Amendment 2 Decision 8, Accepted: there is no default; every unary RPC states it)*. The
     generator refuses `PUBLIC` on a mutating RPC. **There is no `PUBLIC_MUTATION` option in 2.0.**
     An anonymous write, such as sign-up or a contact form, is a `USER` RPC whose `authorize()`
     returns an **explicit anonymous principal**, and only after the app's own fail-closed check
@@ -241,22 +252,21 @@ These came from the system designer as tech-debt or test items, not blockers. Th
 
 ### Action items
 
-- [ ] Types and reconciler: ownerRef, same-zone rejection, allowlist (owning zone's `db-bind`,
+- [x] Types and reconciler (Z8 #2419, Z8b #2477, #2490; the ownerRef wording is superseded by Amendment 2): ownerRef, same-zone rejection, allowlist (owning zone's `db-bind`,
       same-zone-marked Secrets, `imagePullSecrets` exempt), retention, served version.
-- [ ] Wake-ahead through a function-agnostic core seam; the firing point and seam chosen by Z9's
+- [ ] Open, Z9 #2054 (cluster-local bound: #2276). Wake-ahead through a function-agnostic core seam; the firing point and seam chosen by Z9's
       measurement (#2054); the seam's bounds from Decision 4, with the never-answering-GET test.
-- [ ] Docs (D3, #2071): the namespace is the trust boundary; zones whose owners do not trust each
+- [x] Docs (D3, #2071): the namespace is the trust boundary; zones whose owners do not trust each
       other go in separate namespaces.
-- [ ] Per-zone key Secret and JWKS ConfigMap; rotation in the order above.
-- [ ] Interceptors in the Go and Rust templates, fail-closed, mutation-proved; JWKS re-read on an
+- [x] Per-zone key Secret and JWKS ConfigMap; rotation in the order above (Z7 #2458/#2459/#2460/#2473/#2491; OKE rotation proofs open: #2461, #2483).
+- [x] Interceptors in the Go and Rust templates (Z7 verifiers, #2455), fail-closed, mutation-proved; JWKS re-read on an
       unknown `kid`; small `exp` clock skew.
-- [ ] Generator: auth options `USER` and `PUBLIC` only; a `PUBLIC_MUTATION` option is refused.
-- [ ] kind + Calico activator-path drill.
+- [x] Generator (Z6 #2411): auth options `USER` and `PUBLIC` only; a `PUBLIC_MUTATION` option is refused.
+- [ ] Open, Z11 #2056: the kind + Calico activator-path drill with the token as the control (Z8's Calico drill proved the cold call and the direct-dial refusal).
 
 ## Amendment 2 (2026-10-15) — `spec.zone`, two-sided binding, rendered binding env, operator-owned identity
 
-**Status of this amendment: Proposed (2026-10-15).** It is accepted or revised at the Sprint 5
-close design review, and #2401 closes on that acceptance, not on this text merging. The amendment
+**Status of this amendment: Accepted (2026-10-17, sprint-5 close design review: [architect](https://github.com/getknext-dev/knext/issues/2504#issuecomment-6229290082), [system designer](https://github.com/getknext-dev/knext/issues/2504#issuecomment-6229290314)).** All eight decisions are built (Z8 #2419, Z8b #2477, the `NextApp` `backends` emission #2490, Z7 #2458/#2459/#2460/#2473/#2491). #2401 closes on this acceptance. Proposed 2026-10-15. The amendment
 dated 2026-10-09 above is Amendment 1. This one amends its Decisions 1, 2, 12 and 13 and the base
 Decision's "injects" wording, and changes nothing else. It records the three binding contracts that
 the Sprint 5 planning gates (architect and system designer) found implicit in ADR-0004 and ADR-0052.
@@ -531,27 +541,50 @@ fact, and the RBAC path described in Context.
 
 ### Action items
 
-- [ ] Z8 (#2052) types: `spec.zone` required and immutable (CEL), no `serviceAccountName` and no pod
+- [x] Z8 (#2052) types: `spec.zone` required and immutable (CEL), no `serviceAccountName` and no pod
       template.
-- [ ] Z8 reconciler: resolve `spec.zone`, set the controller `ownerReference`, refuse a conflicting
+- [x] Z8 reconciler: resolve `spec.zone`, set the controller `ownerReference`, refuse a conflicting
       one. Envtests for a missing zone, the operator-set `ownerReference` and a conflicting
       `ownerReference`, each mutation-proved. New conditions go through `computeStatusVerdict`.
-- [ ] Z8 RBAC: grant the operator `update` on `nextapps/finalizers` (a kubebuilder RBAC marker), which
+- [x] Z8 RBAC: grant the operator `update` on `nextapps/finalizers` (a kubebuilder RBAC marker), which
       `blockOwnerDeletion: true` requires. An envtest with RBAC enforced proves the `ownerReference` is
       accepted, and is red without the grant.
-- [ ] Z8 (#2401): two-sided binding. Envtests for a one-sided binding from each side (refused, nothing
+- [x] Z8 (#2401): two-sided binding. Envtests for a one-sided binding from each side (refused, nothing
       mounted, no Knative Service, no binding env), a cross-zone `backends[]` entry, and revocation,
       each mutation-proved.
-- [ ] Z8: render into the zone's Knative Service template. Envtests prove zero writes to
+- [x] Z8: render into the zone's Knative Service template. Envtests prove zero writes to
       `NextApp.spec`, a byte-identical template for a zone with no binding, no revision on a second
       reconcile, exactly one revision on a served-version bump, and a reported env-name collision. The
       same PR adds the `<NAME>` derivation and the wake-list variable's name to Decision 3.
-- [ ] Z8 (#2403): operator-owned ServiceAccount, automount off, no RBAC. A test proves the rendered
+- [x] Z8 (#2403): operator-owned ServiceAccount, automount off, no RBAC. A test proves the rendered
       pod always uses it and a stray `serviceAccountName` has no effect, mutation-proved.
-- [ ] Z8 (#2402): function NetworkPolicy admitting the Knative data path. A Calico scale-from-zero leg
+- [x] Z8 (#2402): function NetworkPolicy admitting the Knative data path. A Calico scale-from-zero leg
       in `networkpolicy-enforcement-drill.sh`, which Z11 then extends.
-- [ ] Z8 docs and status wording: the CNPG host check is a lint, the credential allowlist is the
+- [x] Z8 docs and status wording: the CNPG host check is a lint, the credential allowlist is the
       control, and removing a zone's entry takes the function down.
-- [ ] Z6 (#2050): read `<NAME>_SERVICE_PROTO_VERSION` at call time and fail closed with
+- [x] Z6 (#2050): read `<NAME>_SERVICE_PROTO_VERSION` at call time and fail closed with
       `FAILED_PRECONDITION` when it is unset. The generator refuses an RPC without `(knext.v1.auth)`.
-- [ ] Sprint 5 close: accept or revise this amendment, then close #2401.
+- [x] Sprint 5 close: accepted 2026-10-17 (sprint-5 close review); #2401 closes on it.
+
+### Z7 operator write surface (recorded at the sprint-5 close review, 2026-10-17)
+
+Amendment 1 Decisions 9 and 11 made the operator the writer of per-zone signing material. The built
+surface:
+
+- **Objects written.** An Opaque Secret named `*-knext-signing-key` (the private key) and a
+  ConfigMap named `*-knext-jwks` (the public set). The operator holds `create` and `update` on
+  Secrets and ConfigMaps for this.
+- **Confinement.** A `ValidatingAdmissionPolicy` (#2482) limits the operator's writes to those two
+  names and, for the Secret, the Opaque type. It needs **Kubernetes 1.30**, which is also the v2
+  server floor (ADR-0017 Amendment 3). Below 1.30 the policy does not apply and the operator runs
+  unrestricted; that silent fail-open is tracked in #2486 (apply side) and #2500 (runtime
+  self-check).
+- **JWKS mount rule (#2473).** A function mounts a zone's JWKS only when that zone's `NextApp`
+  controls the ConfigMap by UID (`JWKSTrusted`: kind, group and UID all match); otherwise it reports
+  `JWKSUntrusted` / `JWKSConfigMapConflict` and nothing is mounted. A function that references a
+  `*-knext-signing-key` Secret is refused (suffix deny).
+- **Rotation bound.** See Decision 11 above: 120 s default, 90 s minimum, enforced at operator start.
+- **Open residuals, not decided here.** The binding matches names only, so a `BackendService` update
+  on a bound name re-opens the db-bind confused deputy (#2497); a transient Secret read error removes
+  a running function's Knative Service (#2498); the grace period on zone-half loss is revisited before
+  model backends ship (#2496).
