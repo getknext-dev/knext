@@ -33,6 +33,12 @@ on:
       - 'packages/grpc/proto/**'
       - 'packages/grpc/testdata/z7-token-vectors.json'
       - 'packages/grpc/src/add-function.ts'
+      - 'packages/grpc/src/scaffold-go.ts'
+      - 'packages/grpc/src/cli.ts'
+      - 'packages/grpc/scripts/copy-templates.mjs'
+      - 'packages/grpc/scripts/knext-grpc.ts'
+      - 'packages/grpc/src/__tests__/add-function-go.test.ts'
+      - 'packages/grpc/turbo.json'
       - 'scripts/kind-manifests/**'
       - 'tests/go-template-contract.test.ts'
   push:
@@ -43,6 +49,12 @@ on:
       - 'packages/grpc/proto/**'
       - 'packages/grpc/testdata/z7-token-vectors.json'
       - 'packages/grpc/src/add-function.ts'
+      - 'packages/grpc/src/scaffold-go.ts'
+      - 'packages/grpc/src/cli.ts'
+      - 'packages/grpc/scripts/copy-templates.mjs'
+      - 'packages/grpc/scripts/knext-grpc.ts'
+      - 'packages/grpc/src/__tests__/add-function-go.test.ts'
+      - 'packages/grpc/turbo.json'
       - 'scripts/kind-manifests/**'
       - 'tests/go-template-contract.test.ts'
   workflow_dispatch:
@@ -121,6 +133,18 @@ jobs:
       - name: go test -race
         working-directory: templates/go
         run: go test -race -count=1 ./...
+
+      - name: A scaffolded function builds, vets and passes its own tests
+        # `knext add function --lang go` copies this template; the copy must
+        # build and pass outside the template directory.
+        run: |
+          set -euo pipefail
+          app="$(mktemp -d)"
+          (cd "$app" && bun "$GITHUB_WORKSPACE/packages/grpc/scripts/knext-grpc.ts" add function orders --lang go)
+          cd "$app/functions/orders"
+          go build ./...
+          go vet ./...
+          go test -race -count=1 ./...
 
       - name: govulncheck (pinned)
         working-directory: templates/go

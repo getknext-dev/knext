@@ -54,6 +54,15 @@ const REPO_ROOT = resolve(import.meta.dirname, '..');
  * grew to eleven files unobserved in the first place.
  */
 const DECLARED: Record<string, { skips: Record<string, number>; reason: string }> = {
+  'packages/grpc/src/__tests__/add-function-go.test.ts': {
+    skips: { 'it.skipIf': 2 },
+    reason:
+      'The two tests that run REAL Go code generation (`buf generate` over `go tool` plugins) and build ' +
+      'the scaffold need the Go toolchain on PATH. They skip only when `go` is absent AND `CI` is unset, ' +
+      'so a contributor machine without Go still runs the rest; every CI lane has Go, so there they run ' +
+      'and a missing or broken toolchain FAILS rather than vanishing. All other scaffold tests use a ' +
+      'generator stub and never skip.',
+  },
   'packages/kn-next/src/__tests__/compile-include-patched.test.ts': {
     skips: { 'describe.skipIf': 1 },
     reason:

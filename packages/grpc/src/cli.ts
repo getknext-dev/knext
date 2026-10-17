@@ -50,7 +50,11 @@ generated code (with --check), or a usage error.`;
 
 const ADD_HELP = `knext add function — add a function's contract to this zone (Beta)
 
-Usage: knext add function <name> --lang go|rust
+Usage: knext add function <name> --lang go|rust [--module <go-module-path>]
+
+For --lang go it also copies the Go function template to functions/<name>/ (the
+token-verifying server, health check and Dockerfile), renamed to the function
+and with its Go code generated; this needs the Go toolchain on PATH.
 
 Writes proto/<name>/v1/<name>.proto (one read and one write RPC to start
 from), the knext options contract it imports, a buf.yaml if there is none, and
@@ -60,6 +64,7 @@ through <NAME>_SERVICE_URL.
 
 Options:
   --lang <go|rust>  the language the function is written in
+  --module <path>   the Go module path of the server (--lang go; default example.com/<name>)
   -h, --help        show this help
 
 Exit code: 0 on success; 1 if the function already exists or on a usage error.`;
@@ -162,11 +167,11 @@ export async function run(
     return runGenerate({ cwd, check: values.check, against: values.against, io: out });
   }
 
-  let parsed: { values: { lang?: string }; positionals: string[] };
+  let parsed: { values: { lang?: string; module?: string }; positionals: string[] };
   try {
     parsed = parseArgs({
       args: [...argv],
-      options: { lang: { type: 'string' } },
+      options: { lang: { type: 'string' }, module: { type: 'string' } },
       allowPositionals: true,
       strict: true,
     });
@@ -179,5 +184,11 @@ export async function run(
     out.stderr(`${ADD_USAGE}\nRun \`knext add --help\` for usage.\n`);
     return 1;
   }
-  return addFunction({ cwd, name, lang: parsed.values.lang, io: out });
+  return addFunction({
+    cwd,
+    name,
+    lang: parsed.values.lang,
+    module: parsed.values.module,
+    io: out,
+  });
 }
