@@ -306,7 +306,7 @@ const MUTATIONS = [
     spec: OPERATOR_SPEC,
     anchor:
       " && steps.channel.outputs.is_version_tag == 'true'\n        env:\n          RELEASE_TAG:",
-    replacement: "\n        env:\n          RELEASE_TAG:",
+    replacement: '\n        env:\n          RELEASE_TAG:',
     expect: 'red',
   },
   // ── tag placement (round 2) ───────────────────────────────────────────────
