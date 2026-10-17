@@ -20,9 +20,9 @@
  * into). `env:`, `with:` (other keys), `if:`, `working-directory:` are not script
  * bodies and are not scanned.
  *
- * Workflows under `.github/workflows` are scanned too, with a DENYLIST of outside-
- * controlled contexts ({@link WORKFLOW_UNTRUSTED}) rather than the allowlist: see
- * `scanWorkflowText`.
+ * Workflows under `.github/workflows` are scanned too, by different rules (an
+ * allowlist for `github`, `inputs` banned, env taint) and with documented limits:
+ * see {@link WORKFLOW_GITHUB_ALLOWED} and `scanWorkflowText`.
  *
  * A file the scan cannot read is an error, not a pass.
  *
@@ -114,25 +114,148 @@ export function scanActionText(text, file) {
 }
 
 /**
- * WORKFLOWS use a DENYLIST, not the allowlist above, deliberately: a workflow's own
- * scripts legitimately interpolate `matrix.*`, `steps.*.outcome`, `github.workspace`
- * and the like, and a workflow is not a published surface a stranger calls with
- * their own values. What must never appear inside a `run:` or `github-script` body
- * is text an outside party chooses: event payload fields (PR title, branch, commit
- * message), branch/ref names, and dispatch/call inputs. The pattern is searched for
- * ANYWHERE in the expression, so wrapping it (`format('{0}', github.head_ref)`,
- * `toJSON(github.event)`) does not hide it.
+ * WORKFLOWS. A workflow's own scripts legitimately interpolate `matrix.*`,
+ * `steps.*.outcome` and the like, and a workflow is not a published surface a
+ * stranger calls with their own values, so this is not the action allowlist. What
+ * must never appear inside a `run:` or `github-script` body is text an outside
+ * party chooses: event payload fields (PR title, branch, commit message), ref and
+ * actor names, and dispatch/call inputs. Rules:
  *
- * `github.event_name` and `github.event_path` are not event payload fields and are
- * not matched (`\b` does not split `event_name`).
+ *   - `inputs` in ANY form is flagged.
+ *   - `github` is an ALLOWLIST ({@link WORKFLOW_GITHUB_ALLOWED}). Every other
+ *     reference is flagged: `github.event.*`, `head_ref`, `base_ref`, `ref`,
+ *     `ref_name`, `actor`, `triggering_actor`, the bare `github` (so
+ *     `toJSON(github)` cannot smuggle the lot), `github.*`, and index syntax
+ *     (`github['head_ref']`, `github[inputs.k]`).
+ *   - `env.X` is flagged when X resolves (step over job over workflow) to a value
+ *     built from a flagged expression: moving an untrusted value into `env:` is the
+ *     fix ONLY when the script then reads `"$X"`, not `${{ env.X }}`.
+ *   - `runner.*` is runner-controlled and always allowed.
+ *   - Matching is case-insensitive (contexts are), whitespace around `.`/`[` is
+ *     ignored, `['x']` is read as `.x`, and string literals are blanked so a quoted
+ *     name is not a reference. An expression with unbalanced quotes, parentheses or
+ *     brackets cannot be read and is flagged ("unparseable"), never passed.
+ *
+ * KNOWN LIMITATION, stated rather than hidden: data flow through `steps.*.outputs`,
+ * `needs.*.outputs` and `matrix.*` is NOT tracked. A step that writes an untrusted
+ * value to `$GITHUB_OUTPUT` and a later `run:` that interpolates
+ * `${{ steps.x.outputs.y }}` is not caught, nor is a matrix built from event data
+ * with `fromJSON`. Those need a taint analysis over the whole job graph; this scan
+ * stops at the contexts a caller can name directly. `secrets.*` and `vars.*` are
+ * also not flagged (a leak, not an injection, and repo-owner controlled).
+ *
+ * Each `github` property allowed, and why it is not event-derived:
+ *   sha                  the commit being built (a hex string, never free text)
+ *   workspace            the runner's checkout path
+ *   run_id, run_number, run_attempt   counters the platform assigns
+ *   repository, repository_owner      the repo this workflow lives in (fixed)
+ *   event_name           which trigger fired: one of a closed set of event names
+ *   job                  the job id written in the workflow file
+ *   action_path          where a composite action was unpacked
+ *   server_url, api_url, graphql_url  the GitHub host, fixed per runner
  */
-export const WORKFLOW_UNTRUSTED =
-  /\b(?:inputs\s*[.[]|github\.event\b(?!_)|github\.head_ref\b|github\.base_ref\b|github\.ref_name\b|github\.ref\b(?!_))/;
+export const WORKFLOW_GITHUB_ALLOWED = new Set([
+  'sha',
+  'workspace',
+  'run_id',
+  'run_number',
+  'run_attempt',
+  'repository',
+  'repository_owner',
+  'event_name',
+  'job',
+  'action_path',
+  'server_url',
+  'api_url',
+  'graphql_url',
+]);
+
+/**
+ * Put an expression into a form the reference scan can read: lower case, `['x']`
+ * as `.x`, no whitespace around `.` or before `[`, string literals blanked.
+ * Returns null when it cannot be read (unbalanced quotes, parentheses or brackets).
+ *
+ * @param {string} expression
+ * @returns {string | null}
+ */
+function normalizeExpression(expression) {
+  let s = expression.toLowerCase();
+  if ((s.match(/'/g) ?? []).length % 2 !== 0) return null;
+  if ((s.match(/"/g) ?? []).length % 2 !== 0) return null;
+  s = s.replace(/\s*\.\s*/g, '.').replace(/\s+\[/g, '[');
+  s = s.replace(/\[\s*(?:'([^']*)'|"([^"]*)")\s*\]/g, (_, a, b) => `.${a ?? b}`);
+  s = s.replace(/'(?:[^']|'')*'/g, "''").replace(/"[^"]*"/g, '""');
+  const depth = { '(': 0, '[': 0 };
+  for (const ch of s) {
+    if (ch === '(') depth['(']++;
+    if (ch === ')' && --depth['('] < 0) return null;
+    if (ch === '[') depth['[']++;
+    if (ch === ']' && --depth['['] < 0) return null;
+  }
+  if (depth['('] !== 0 || depth['['] !== 0) return null;
+  return s;
+}
+
+/**
+ * Why `expression` is not safe inside a workflow script body (empty = safe).
+ *
+ * @param {string} expression the trimmed text between `${{` and `}}`
+ * @param {Map<string, string>} env effective env for this step: lower-cased name to raw value
+ * @param {Set<string>} [seen] env names being resolved (cycle guard)
+ * @returns {string[]}
+ */
+export function workflowExpressionProblems(expression, env, seen = new Set()) {
+  const s = normalizeExpression(expression);
+  if (s === null) return ['unparseable expression (unbalanced quotes, parentheses or brackets)'];
+  const problems = [];
+  const re = /(^|[^\w.-])(github|inputs|env)(?![\w-])/g;
+  for (let m = re.exec(s); m !== null; m = re.exec(s)) {
+    const root = m[2];
+    const rest = s.slice(m.index + m[0].length);
+    const prop = /^\.([\w-]+)(?![\w-])(?![.[])/.exec(rest)?.[1];
+    if (root === 'inputs') {
+      problems.push('inputs are caller-controlled text');
+    } else if (root === 'github') {
+      if (prop === undefined || !WORKFLOW_GITHUB_ALLOWED.has(prop)) {
+        problems.push(
+          prop === undefined
+            ? 'the github context other than a plain allowed field (bare, indexed or wildcard)'
+            : `github.${prop} is not on the allowed list of non-event fields`,
+        );
+      }
+    } else if (prop === undefined) {
+      if ([...env.keys()].some((k) => envTainted(k, env, seen))) {
+        problems.push('env used whole while some env value is built from untrusted text');
+      }
+    } else if (envTainted(prop, env, seen)) {
+      problems.push(`env.${prop} is built from untrusted text`);
+    }
+  }
+  return problems;
+}
+
+/** True when env value `name` contains an expression that is not safe in a script body. */
+function envTainted(name, env, seen) {
+  const value = env.get(name);
+  if (typeof value !== 'string') return false;
+  if (seen.has(name)) return true; // a cycle cannot be resolved: fail closed
+  const next = new Set(seen).add(name);
+  return expressionsIn(value).some((e) => workflowExpressionProblems(e, env, next).length > 0);
+}
+
+/** Lower-cased name to value for an `env:` map (anything that is not a map is empty). */
+function envEntries(env) {
+  const out = new Map();
+  if (env && typeof env === 'object' && !Array.isArray(env)) {
+    for (const [k, v] of Object.entries(env)) out.set(String(k).toLowerCase(), v);
+  }
+  return out;
+}
 
 /**
  * @param {string} text the workflow file
  * @param {string} file used in messages
- * @returns {Array<{file: string, step: string, key: string, expression: string}>}
+ * @returns {Array<{file: string, step: string, key: string, expression: string, reason: string}>}
  */
 export function scanWorkflowText(text, file) {
   const doc = parseYaml(text, file);
@@ -149,10 +272,16 @@ export function scanWorkflowText(text, file) {
     }
     job.steps.forEach((step, i) => {
       const name = `${jobId}/${String(step?.name ?? step?.id ?? `#${i + 1}`)}`;
+      const env = new Map([
+        ...envEntries(doc?.env),
+        ...envEntries(job.env),
+        ...envEntries(step?.env),
+      ]);
       for (const [key, body] of scriptBodies(step)) {
         for (const expression of expressionsIn(body)) {
-          if (!WORKFLOW_UNTRUSTED.test(expression)) continue;
-          findings.push({ file, step: name, key, expression });
+          for (const reason of workflowExpressionProblems(expression, env)) {
+            findings.push({ file, step: name, key, expression, reason });
+          }
         }
       }
     });
