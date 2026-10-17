@@ -59,7 +59,8 @@ const VERSION_PR_PERMS =
   '    permissions:\n      contents: write\n      pull-requests: write\n    concurrency:';
 const PUBLISH_JOB_PERMS =
   '      pull-requests: write\n      id-token: write\n    # Publish-BLOCKING';
-const PUBLISH_ENV = "          # attested.\n          NPM_CONFIG_PROVENANCE: 'true'";
+const PUBLISH_ENV =
+  "          # manifest without that opt-in is still attested.\n          NPM_CONFIG_PROVENANCE: 'true'";
 const HEAL_ENV =
   "          # group, so the heal step requests it exactly as the Publish step does.\n          NPM_CONFIG_PROVENANCE: 'true'";
 
@@ -98,7 +99,7 @@ const MUTATIONS = [
     claim: 'the Publish step stops exporting NPM_CONFIG_PROVENANCE',
     subject: 'rel',
     anchor: PUBLISH_ENV,
-    replacement: '          # attested.',
+    replacement: '          # manifest without that opt-in is still attested.',
   },
   {
     id: 'R6',
@@ -113,7 +114,8 @@ const MUTATIONS = [
     claim: "the Publish step sets NPM_CONFIG_PROVENANCE to 'false'",
     subject: 'rel',
     anchor: PUBLISH_ENV,
-    replacement: "          # attested.\n          NPM_CONFIG_PROVENANCE: 'false'",
+    replacement:
+      "          # manifest without that opt-in is still attested.\n          NPM_CONFIG_PROVENANCE: 'false'",
   },
   {
     id: 'R8',
