@@ -197,6 +197,14 @@ const MUTATIONS = [
       '      matrix: { include: [{ ref: main, sha: abc, shard: 1, shards: 1, slug: main }] }',
     validate: parses,
   },
+  {
+    id: 'W19',
+    subject: 'wf',
+    claim: 'every cargo run does a cold dependency build (no shared target dir per leg)',
+    anchor: '          CARGO_TARGET_DIR: ${{ runner.temp }}/cargo-target',
+    replacement: '          CARGO_HOME_UNUSED: 1',
+    validate: parses,
+  },
   // ── the library ───────────────────────────────────────────────────────────
   {
     id: 'L01',
@@ -285,6 +293,13 @@ const MUTATIONS = [
     claim: 'a nonsense per-prover bound is accepted (and would run unbounded)',
     anchor: '  if (!Number.isFinite(n) || n <= 0) {',
     replacement: '  if (false) {',
+  },
+  {
+    id: 'L14',
+    subject: 'lib',
+    claim: 'a pending (not yet merged) heavy prover is weighted as 1 once it arrives',
+    anchor: '  PROVER_WEIGHT_MINUTES[p.relPath] ?? PENDING_PROVER_WEIGHT_MINUTES[p.relPath] ?? 1;',
+    replacement: '  PROVER_WEIGHT_MINUTES[p.relPath] ?? 1;',
   },
   {
     id: 'L13',

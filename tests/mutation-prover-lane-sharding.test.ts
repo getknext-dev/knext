@@ -20,9 +20,11 @@ import {
   estimateShardMinutes,
   LANE_REFS,
   makeReport,
+  PENDING_PROVER_WEIGHT_MINUTES,
   PROVER_WEIGHT_MINUTES,
   parseShardSpec,
   proverTimeoutMs,
+  proverWeight,
   reportFileName,
   shardProvers,
 } from '../scripts/lib/prover-shard.mjs';
@@ -111,6 +113,39 @@ describe('#2208 legs are balanced by ESTIMATED COST, not by count', () => {
     for (const path of Object.keys(PROVER_WEIGHT_MINUTES)) {
       expect(have.has(path), `${path} is weighted but not discovered`).toBe(true);
     }
+  });
+
+  it('a pending weight is honoured by the partition, and is promoted once its prover exists', () => {
+    const have = new Set(real().map((p) => p.relPath));
+    for (const [path, w] of Object.entries(PENDING_PROVER_WEIGHT_MINUTES)) {
+      expect(proverWeight({ relPath: path }), path).toBe(w);
+      expect(
+        have.has(path),
+        `${path} now exists: move its weight from PENDING_PROVER_WEIGHT_MINUTES to PROVER_WEIGHT_MINUTES`,
+      ).toBe(false);
+      expect(Object.keys(PROVER_WEIGHT_MINUTES), path).not.toContain(path);
+    }
+  });
+
+  it('a cargo-heavy prover that arrives is balanced like any other (the pending weight shapes the split)', () => {
+    const heavy = Object.keys(PENDING_PROVER_WEIGHT_MINUTES)[0];
+    const withIt = [...real(), { relPath: heavy }];
+    const loads = Array.from({ length: N }, (_, i) => estimateShardMinutes(withIt, i + 1, N));
+    const mean = loads.reduce((a, b) => a + b, 0) / N;
+    const biggest = Math.max(
+      ...Object.values(PROVER_WEIGHT_MINUTES),
+      ...Object.values(PENDING_PROVER_WEIGHT_MINUTES),
+    );
+    expect(Math.max(...loads)).toBeLessThanOrEqual(mean + biggest);
+    // ...and it does not share a leg with the other >=30 minute provers.
+    const legOf = (path: string) =>
+      Array.from({ length: N }, (_, i) => i + 1).find((i) =>
+        shardProvers(withIt, i, N).some((p) => p.relPath === path),
+      );
+    const big = Object.entries(PROVER_WEIGHT_MINUTES)
+      .filter(([, w]) => w >= 30)
+      .map(([p]) => p);
+    for (const p of big) expect(legOf(p), `${p} shares a leg with ${heavy}`).not.toBe(legOf(heavy));
   });
 
   it('no leg exceeds the mean estimated load by more than the heaviest single prover (the LPT bound)', () => {
@@ -624,6 +659,11 @@ describe('#2499 the workflow: both refs, sharded, per-shard timeout, aggregated,
       /--shard \$\{\{ matrix\.shard \}\}\/\$\{\{ matrix\.shards \}\}/,
     );
     expect(String(step?.run)).toMatch(/--report/);
+    // One cargo target dir per leg, outside the tree: cargo-heavy provers do a
+    // cold dependency build per run otherwise.
+    expect(String(env.CARGO_TARGET_DIR ?? ''), 'CARGO_TARGET_DIR').toMatch(
+      /^\$\{\{ runner\.temp \}\}\//,
+    );
   });
 
   it('every leg uploads its report even when the leg is red', () => {
