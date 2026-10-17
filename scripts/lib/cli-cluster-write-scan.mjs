@@ -35,7 +35,15 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { callArgs, classify, lineOf, matchClose, prepare, splitTopLevel } from './ts-call-scan.mjs';
+import {
+  callArgs,
+  classify,
+  isIndexAccess,
+  lineOf,
+  matchClose,
+  prepare,
+  splitTopLevel,
+} from './ts-call-scan.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -256,9 +264,7 @@ export function scanClusterWriteSource(
   for (let i = 0; i < b.length; i++) {
     if (b[i] !== '[') continue;
     // an index access (`argv[0]`, `x[i]`) is not an array literal
-    let k = i - 1;
-    while (k >= 0 && /\s/.test(b[k])) k--;
-    if (k >= 0 && /[\w$)\]]/.test(b[k])) continue;
+    if (isIndexAccess(b, i)) continue;
     const close = matchClose(b, i);
     const elems = splitTopLevel(b, i + 1, close).map((r) => classify(p, r));
     if (elems[0]?.type === 'string' && elems[0].value === 'kubectl') {

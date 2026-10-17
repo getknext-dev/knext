@@ -183,6 +183,44 @@ export function classify(p, [from, to]) {
   return { type: 'dynamic', ...base };
 }
 
+/**
+ * Keywords after which a `[` opens an ARRAY LITERAL, not an index access:
+ * `return ["kubectl", ...]` is a literal, `argv[0]` is not. Missing this made a
+ * scan blind to every array returned from a function (measured: the preflight's
+ * `dryRunApplyArgv` was invisible until a mutation of the scan survived).
+ */
+const LITERAL_AFTER = new Set([
+  'return',
+  'typeof',
+  'case',
+  'in',
+  'of',
+  'void',
+  'delete',
+  'new',
+  'else',
+  'yield',
+  'await',
+  'throw',
+  'default',
+  'do',
+]);
+
+/**
+ * Whether the `[` at `i` is an index access (`x[0]`, `f()[0]`) rather than an
+ * array literal. Looks back over whitespace on the blanked text.
+ */
+export function isIndexAccess(b, i) {
+  let k = i - 1;
+  while (k >= 0 && /\s/.test(b[k])) k--;
+  if (k < 0) return false;
+  if (b[k] === ')' || b[k] === ']') return true;
+  if (!/[\w$]/.test(b[k])) return false;
+  let s = k;
+  while (s >= 0 && /[\w$]/.test(b[s])) s--;
+  return !LITERAL_AFTER.has(b.slice(s + 1, k + 1));
+}
+
 /** The classified top-level arguments of the call whose `(` is at `open`. */
 export function callArgs(p, open) {
   const close = matchClose(p.b, open);

@@ -46,6 +46,14 @@ describe('cluster-write scan: RED fixtures', () => {
     expect(rules(src)).toContain('foreign-write-kind');
   });
 
+  it('reads an argv that a function returns (the preflight builds its argv that way)', () => {
+    expect(rules('function f() {\n  return ["kubectl", "delete", "ksvc", n];\n}')).toContain(
+      'foreign-write-kind',
+    );
+    // ...and an index access after `return` is still not an array literal
+    expect(scan('function g() {\n  return names[0];\n}').kubectlArgvCount).toBe(0);
+  });
+
   it('reds a manifest write from a file that is not on the table', () => {
     expect(rules('x(["kubectl", "apply", "--validate=strict", "-f", p]);')).toContain(
       'unlisted-manifest-write',

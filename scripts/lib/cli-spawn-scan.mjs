@@ -35,6 +35,7 @@ import { fileURLToPath } from 'node:url';
 import {
   callArgs,
   classify,
+  isIndexAccess,
   lineOf,
   matchClose,
   prepare,
@@ -449,9 +450,7 @@ export function scanSpawnSource(src, { file, allow = DYNAMIC_SPAWN_ALLOWLIST }) 
   // binding it to a variable (`const cmd = [...]`) does not make it safe.
   for (let i = 0; i < b.length; i++) {
     if (b[i] !== '[') continue;
-    let k = i - 1;
-    while (k >= 0 && /\s/.test(b[k])) k--;
-    if (k >= 0 && /[\w$)\]]/.test(b[k])) continue; // an index access, not a literal
+    if (isIndexAccess(b, i)) continue; // an index access, not a literal
     const arr = classify(p, [i, matchClose(b, i) + 1]);
     if (arr.type !== 'array' || arr.elems[0]?.type !== 'string') continue;
     const verdict = argvProblem(arr.elems);

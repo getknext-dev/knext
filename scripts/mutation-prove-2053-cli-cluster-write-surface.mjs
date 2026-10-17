@@ -171,6 +171,13 @@ const SPAWN = [
     replacement: "export const SPAWN_SCOPE_DIRS = ['packages/kn-next/src/cli'];",
   },
   {
+    id: 'S16',
+    subject: 'tscall',
+    claim: 'an argv returned from a function is read as an index access, so it is never scanned',
+    anchor: "  'return',\n  'typeof',",
+    replacement: "  'typeof',",
+  },
+  {
     id: 'T01',
     subject: 'deployfn',
     claim: 'a func deploy argv planted in @getknext/grpc',
@@ -288,6 +295,13 @@ const KINDS = [
     anchor:
       'for (const m of text.matchAll(/(?<![\\w.])kind\\s*:\\s*["\']([A-Z][A-Za-z0-9]*)["\']/g))',
     replacement: 'for (const m of [])',
+  },
+  {
+    id: 'K13',
+    subject: 'tscall',
+    claim: 'an argv returned from a function (the preflight builds its argv so) is never scanned',
+    anchor: "  'return',\n  'typeof',",
+    replacement: "  'typeof',",
   },
   {
     id: 'T05',
@@ -497,6 +511,7 @@ const spawn = createGuardProver({
   spec: SPAWN_SPEC,
   subjects: {
     spawnlib: 'scripts/lib/cli-spawn-scan.mjs',
+    tscall: 'scripts/lib/ts-call-scan.mjs',
     deployfn: 'packages/grpc/src/deploy-function.ts',
     cleanup: 'packages/kn-next/src/cli/cleanup.ts',
     exec: 'packages/kn-next/src/cli/exec.ts',
@@ -508,6 +523,7 @@ const kinds = createGuardProver({
   spec: KINDS_SPEC,
   subjects: {
     writelib: 'scripts/lib/cli-cluster-write-scan.mjs',
+    tscall: 'scripts/lib/ts-call-scan.mjs',
     cleanup: 'packages/kn-next/src/cli/cleanup.ts',
     deployfn: 'packages/grpc/src/deploy-function.ts',
     bscr: 'packages/grpc/src/backend-service.ts',

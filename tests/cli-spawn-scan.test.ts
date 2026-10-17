@@ -56,6 +56,7 @@ describe('the D3 spawn scan: RED fixtures', () => {
     ['a template literal program', 'runInherit([`func`, "deploy"]);'],
     ['Bun.spawn func deploy', 'Bun.spawn(["func", "deploy"]);'],
     ['an argv handed to a seam that is not a known spawn', 'host.run(["func", "deploy"], ctx);'],
+    ['an argv returned from a function', 'function f() {\n  return ["func", "deploy"];\n}'],
     ['an argv bound to a variable', 'const cmd = ["kn", "service", "create", name];'],
     [
       'an argv inside a wrapper bound to a variable',
