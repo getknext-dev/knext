@@ -88,8 +88,8 @@ const MUTATIONS = [
     id: 'X4',
     subject: 'scaffold',
     claim: 'the package and bin target keep the template crate name',
-    anchor: 'out = out.replaceAll(\'name = "function"\', `name = "${s.name}"`);',
-    replacement: 'out = out.replaceAll(\'name = "function"\', \'name = "function"\');',
+    anchor: 'out.replaceAll(\'name = "function"\', `name = "${s.name}"`)',
+    replacement: 'out.replaceAll(\'name = "function"\', \'name = "function"\')',
   },
   {
     id: 'X5',
