@@ -2,6 +2,11 @@
   "name": "knative-next-monorepo",
   "private": true,
   "packageManager": "bun@1.4.2",
+  "trustedDependencies": [
+    "@bufbuild/buf",
+    "esbuild",
+    "sharp"
+  ],
   "scripts": {
     "build": "turbo run build",
     "dev": "turbo run dev",

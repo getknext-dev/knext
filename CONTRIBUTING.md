@@ -37,6 +37,37 @@ bun run lint:mutation-residue     # red-on-fail in CI; run it before you commit
 Read [`docs/guides/mutation-testing.md`](docs/guides/mutation-testing.md) before writing a harness;
 it ships one (`scripts/lib/mutation-harness.mjs`) so you do not hand-roll the restore.
 
+## Dependencies: quarantine, intake checks, install scripts
+
+Three guards stand between the registry and the tree. Know them before you add or bump a dependency.
+
+- **Fresh-release quarantine.** `bunfig.toml` sets `[install] minimumReleaseAge` (3 days). `bun add`,
+  `bun update` and an unlocked `bun install` will not pick a version younger than that. If you must take
+  a fix today, pass `--minimum-release-age 0` for that one command and say why in the PR. A standing
+  exception for one package goes in `minimumReleaseAgeExcludes`, which `tests/bun-release-age.test.ts`
+  pins, so it is a reviewed change. `bun install --frozen-lockfile` is unaffected.
+- **OSV gate.** Every PR runs `scripts/osv-gate.mjs` over every tracked `bun.lock`, `Cargo.lock`,
+  `go.mod` and `package-lock.json`. A malicious-package advisory fails the check; so does a NEW
+  HIGH/CRITICAL vulnerability, and a NEW advisory with no severity score (a finding that moves
+  between lockfiles is new). Suppress only with a dated, justified, EXPIRING entry in
+  `security/osv-allowlist.json`, scoped to one advisory, package, version and lockfile (`expires`
+  is required, at most 180 days out), after trying to bump.
+- **Release age.** `scripts/release-age-gate.mjs` fails a PR whose added or changed lockfile entries
+  (npm, crates.io, Go proxy) were published less than the bunfig quarantine ago, judged from the
+  registry's own publish time; an unreachable registry fails it too. An added or changed entry that
+  does not resolve to a public-registry version at all (a git or tarball dependency, a package on
+  another registry, a Cargo `git+` source, a go.mod `replace` to a module) fails as well, because it
+  has no publish time to check; a `replace` to a module is aged at the replacement version. If a
+  fresh release truly cannot wait, record a scoped entry (ecosystem, package, exact version,
+  `expires` within 14 days) in `security/release-age-exceptions.json` and say why in the PR; for an
+  unresolved source the entry names the exact source spec and may run up to 180 days.
+- **Install scripts.** `bun install` runs a dependency's lifecycle script only if it is in the root
+  `trustedDependencies` or on bun's built-in default list, which cannot be switched off. If
+  `tests/bun-install-scripts.test.ts` goes red on a new dependency, read its script, then add it to
+  `security/bun-install-scripts.json` AND the root `trustedDependencies`, with a justification.
+- **Dependabot PRs.** A bump of a published package's `dependencies` needs a changeset or the
+  `no-changeset` label like any other change (the "Changeset required" check). Tooling bumps do not.
+
 ## Docs live with the code (`apps/docs/`)
 
 The user-facing docs site (knext-platform.dev) lives in this monorepo at **`apps/docs/`** and consumes

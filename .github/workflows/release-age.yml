@@ -1,0 +1,57 @@
+name: Release age
+
+# The fresh-release quarantine, enforced on lockfiles.
+#
+# bunfig.toml makes bun refuse to RESOLVE a registry version younger than
+# `install.minimumReleaseAge`. That protects the machine running `bun add` and nothing
+# else: a Dependabot branch, a hand-edited lockfile, a Cargo or Go bump, or an install
+# with `--minimum-release-age 0` all reach the tree untouched. This job checks the
+# RESULT: every lockfile entry the change adds or alters (bun.lock, package-lock.json,
+# Cargo.lock, go.mod) must have been published at least that long ago, judged from the
+# registry's own publish time (npm packument, crates.io, the Go module proxy).
+#
+# FAIL CLOSED. A registry that cannot be reached, a version it does not know, or no
+# resolvable base commit fails the job. The only override is a scoped, dated,
+# short-lived entry in security/release-age-exceptions.json.
+#
+# Policy: scripts/lib/release-age.mjs, pinned by tests/release-age-gate.test.ts.
+# READ-ONLY: `contents: read` and nothing else; no credential, no scanner binary.
+
+on:
+  pull_request:
+  push:
+    branches: [main, 'integration/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-age-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  release-age:
+    name: Lockfile entries are old enough (fresh-release quarantine)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      # Full depth: the gate re-reads the lockfiles at the merge base.
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+
+      # On a pull request the base is the PR's base commit; on a push the previous tip.
+      # A dispatch or a branch's first push has none (or the all-zero "before"), and the
+      # gate then falls back to origin/integration/v2, then origin/main.
+      - name: Release-age gate
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: node scripts/release-age-gate.mjs --base "${BASE_SHA}"
