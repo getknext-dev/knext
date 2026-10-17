@@ -32,6 +32,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
 import { createGuardProver } from './lib/guard-prover.mjs';
+import { MUTATION_MARKER } from './lib/mutation-harness.mjs';
 import { declareMutations, recordMutation } from './lib/prover-report.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -122,7 +123,7 @@ const MUTATIONS = [
     claim: "a published package's manifest drops publishConfig.provenance",
     subject: 'pkg',
     anchor: '"provenance": true',
-    replacement: '"provenance": false',
+    replacement: `"provenance": false, "_mutation": "${MUTATION_MARKER}"`,
     validate: validJson,
   },
   {
