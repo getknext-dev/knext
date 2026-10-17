@@ -103,7 +103,8 @@ func main() {
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
 	flag.DurationVar(&zoneKeyPropagationBound, "zone-signing-key-propagation-bound", controller.DefaultZoneKeyPropagationBound,
 		"How long a zone's new public key is published before the zone signs with it. Must cover the kubelet's "+
-			"ConfigMap-volume sync on every node (at least 60s).")
+			"ConfigMap-volume refresh on every node: the default 2m is a default kubelet's worst case (1.5 x its 60s "+
+			"sync period = 90s) plus 30s of margin, and the operator refuses anything under 90s.")
 	flag.DurationVar(&zoneKeyRotationInterval, "zone-signing-key-rotation-interval", 0,
 		"Rotate every zone signing key this long after it became current. 0 (the default) rotates only on "+
 			"request, through the apps.kn-next.dev/rotate-signing-key annotation on the zone's NextApp.")

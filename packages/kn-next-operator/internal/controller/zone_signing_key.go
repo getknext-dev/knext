@@ -60,7 +60,7 @@ import (
 //
 //  1. stage a new key and publish its public half in the JWKS (the current key
 //     keeps signing);
-//  2. wait the propagation bound (default 90 s), counted from a JWKS write this
+//  2. wait the propagation bound (default 120 s), counted from a JWKS write this
 //     operator observed succeed (a clock read after the write returned), so
 //     every warm function has re-read the file;
 //  3. switch signing: current <- new, previous <- old;
@@ -120,14 +120,45 @@ const (
 	annSigningKeySwitchedAt      = "apps.kn-next.dev/signing-key-switched-at"
 	annSigningKeyRotationNonce   = "apps.kn-next.dev/signing-key-rotation-nonce"
 
+	// The propagation bound is DERIVED, not picked. A warm function sees a new
+	// JWKS only after the kubelet rewrites the ConfigMap volume, and the kubelet
+	// does that on a pod's periodic resync:
+	//
+	//	ZoneKeyKubeletSyncFrequency   the kubelet's default syncFrequency, 60 s;
+	//	ZoneKeyKubeletRefreshWorstCase  a pod's resync runs every syncFrequency
+	//	                                stretched by up to 50% jitter, so one
+	//	                                refresh can take 1.5 x 60 s = 90 s;
+	//	ZoneKeyPropagationMargin      time for the ConfigMap watch to carry the
+	//	                              write to the kubelet, and for the function's
+	//	                              own re-read of the file (a few seconds),
+	//	                              with room to spare: 30 s.
+	//
+	//	minimum = ZoneKeyKubeletRefreshWorstCase                     = 90 s
+	//	default = ZoneKeyKubeletRefreshWorstCase + ZoneKeyPropagationMargin = 120 s
+	//
+	// The minimum is the longest a default kubelet takes with no slack at all, so
+	// anything shorter is wrong on a default node. The default is what keeps a
+	// slow moment from switching signing early. Measured on GitHub-hosted kind
+	// nodes, a warm function saw the staged key after 4.7 to 84.6 s, so a
+	// 90 s default left 5.4 s at the worst sample. A node that sets a longer
+	// syncFrequency, or has switched ConfigMaps to the TTL-cache strategy
+	// (which adds up to one more cache TTL), needs a larger bound than the
+	// default; the flag raises it. The cost of the margin is that a rotation
+	// takes 30 s longer; the cost of too little is a function that refuses the
+	// zone's calls (unauthenticated) until its next refresh, with nothing wrong
+	// in the operator.
+	ZoneKeyKubeletSyncFrequency    = 60 * time.Second
+	ZoneKeyKubeletRefreshWorstCase = ZoneKeyKubeletSyncFrequency * 3 / 2
+	ZoneKeyPropagationMargin       = 30 * time.Second
+
 	// DefaultZoneKeyPropagationBound is the default wait between publishing a
-	// new public key and signing with it: the kubelet's ConfigMap-volume sync
-	// bound (about 60 to 90 s on a default kubelet).
-	DefaultZoneKeyPropagationBound = 90 * time.Second
-	// MinZoneKeyPropagationBound is the smallest bound the operator accepts: a
-	// default kubelet syncs volumes every 60 s, so anything shorter can switch
-	// signing before a warm function has the key.
-	MinZoneKeyPropagationBound = 60 * time.Second
+	// new public key and signing with it: the worst-case kubelet refresh plus
+	// the margin (120 s).
+	DefaultZoneKeyPropagationBound = ZoneKeyKubeletRefreshWorstCase + ZoneKeyPropagationMargin
+	// MinZoneKeyPropagationBound is the smallest bound the operator accepts: the
+	// worst-case refresh of a default kubelet (90 s), so a shorter wait can
+	// switch signing before a warm function has the key.
+	MinZoneKeyPropagationBound = ZoneKeyKubeletRefreshWorstCase
 	// ZoneKeyOverlap is how long the previous key stays published after the
 	// switch: longer than a token's 60 s life plus a zone rollout.
 	ZoneKeyOverlap = time.Hour
@@ -436,7 +467,8 @@ func ValidateZoneSigningKeyConfig(c ZoneSigningKeyConfig) error {
 	c = c.withDefaults()
 	if c.PropagationBound < MinZoneKeyPropagationBound {
 		return fmt.Errorf("the zone signing-key propagation bound %s is below the %s minimum "+
-			"(a default kubelet syncs ConfigMap volumes every 60 s)", c.PropagationBound, MinZoneKeyPropagationBound)
+			"(a default kubelet can take 1.5 x its 60 s sync period to refresh a ConfigMap volume)",
+			c.PropagationBound, MinZoneKeyPropagationBound)
 	}
 	if c.RotationInterval < 0 {
 		return fmt.Errorf("the zone signing-key rotation interval %s is negative", c.RotationInterval)
@@ -711,6 +743,12 @@ type zoneSigningKeyState struct {
 	previousKid string
 	// pending: a rotation request arrived during a rotation and waits for it.
 	pending bool
+	// bound is the configured propagation bound, and shortBound is true when it
+	// sits under DefaultZoneKeyPropagationBound: allowed (it is at or over the
+	// minimum), but it leaves less than the stated margin over a kubelet's
+	// worst-case volume refresh.
+	bound      time.Duration
+	shortBound bool
 	// nextStep is the time until the next scheduled step (0: none).
 	nextStep time.Duration
 
@@ -742,6 +780,8 @@ func zoneKeyStatusFrom(w zoneKeyWorld, in zoneKeyInputs, last zoneKeyStep, zone 
 		st.phase, st.previousKid = zoneKeyPhaseOverlap, k.previous.kid
 	}
 	st.pending = st.phase != zoneKeyPhaseSteady && in.requestedNonce != "" && in.requestedNonce != k.rotationNonce
+	st.bound = in.cfg.withDefaults().PropagationBound
+	st.shortBound = st.bound < DefaultZoneKeyPropagationBound
 	return st
 }
 
@@ -770,6 +810,15 @@ func zoneSigningKeyCondition(app *appsv1alpha1.NextApp, st zoneSigningKeyState) 
 	}
 	if st.pending {
 		c.Message += ". A further rotation request is pending and starts when this rotation completes"
+	}
+	// A short bound is the one misconfiguration that fails quietly: a function
+	// whose volume refresh lands after the switch refuses the zone's calls, and
+	// nothing else reports it. The sentence is static for a given state, so a
+	// converged status write stays a no-op.
+	if st.shortBound && st.phase != zoneKeyPhaseSteady {
+		c.Message += fmt.Sprintf(". The propagation bound %s is below the %s default that covers a kubelet's "+
+			"worst-case ConfigMap volume refresh, so a function whose refresh is late refuses this zone's calls "+
+			"until it catches up", st.bound, DefaultZoneKeyPropagationBound)
 	}
 	return c
 }

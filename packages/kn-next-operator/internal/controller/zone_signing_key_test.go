@@ -1059,24 +1059,104 @@ func TestZoneSigningKeyConfigDefaultsAndValidation(t *testing.T) {
 	if d.PropagationBound != DefaultZoneKeyPropagationBound || d.RotationInterval != 0 {
 		t.Fatalf("defaults: %+v", d)
 	}
-	if DefaultZoneKeyPropagationBound != 90*time.Second || ZoneKeyOverlap != time.Hour {
-		t.Fatalf("the contract's numbers moved: bound %s overlap %s", DefaultZoneKeyPropagationBound, ZoneKeyOverlap)
+	if DefaultZoneKeyPropagationBound != 120*time.Second || MinZoneKeyPropagationBound != 90*time.Second ||
+		ZoneKeyOverlap != time.Hour {
+		t.Fatalf("the contract's numbers moved: bound %s minimum %s overlap %s",
+			DefaultZoneKeyPropagationBound, MinZoneKeyPropagationBound, ZoneKeyOverlap)
 	}
 	for _, bad := range []ZoneSigningKeyConfig{
 		{PropagationBound: 59 * time.Second},
-		{PropagationBound: 90 * time.Second, RotationInterval: time.Hour},
-		{PropagationBound: 90 * time.Second, RotationInterval: -time.Second},
+		// The old minimum and the old default: both are under the 90 s a
+		// jittered kubelet volume sync can take, and a CI node measured 84.6 s.
+		{PropagationBound: 60 * time.Second},
+		{PropagationBound: 89 * time.Second},
+		{PropagationBound: 120 * time.Second, RotationInterval: time.Hour},
+		{PropagationBound: 120 * time.Second, RotationInterval: -time.Second},
 	} {
 		if err := ValidateZoneSigningKeyConfig(bad); err == nil {
 			t.Fatalf("%+v must be refused", bad)
 		}
 	}
 	for _, good := range []ZoneSigningKeyConfig{
-		{PropagationBound: 60 * time.Second},
-		{PropagationBound: 90 * time.Second, RotationInterval: 30 * 24 * time.Hour},
+		{PropagationBound: 90 * time.Second},
+		{PropagationBound: 120 * time.Second},
+		{PropagationBound: 120 * time.Second, RotationInterval: 30 * 24 * time.Hour},
 	} {
 		if err := ValidateZoneSigningKeyConfig(good); err != nil {
 			t.Fatalf("%+v must be accepted: %v", good, err)
+		}
+	}
+	// The refusal says what the minimum is and why, so an operator reading it
+	// knows which number to raise.
+	err := ValidateZoneSigningKeyConfig(ZoneSigningKeyConfig{PropagationBound: 60 * time.Second})
+	if err == nil || !strings.Contains(err.Error(), "1m30s") || !strings.Contains(err.Error(), "kubelet") {
+		t.Fatalf("the refusal must name the 1m30s minimum and the kubelet: %v", err)
+	}
+	if err := ValidateZoneSigningKeyConfig(ZoneSigningKeyConfig{}); err != nil {
+		t.Fatalf("the zero value (the defaults) must be valid: %v", err)
+	}
+}
+
+// The two numbers are derived, not picked (see the comment on the constants):
+// the minimum is the longest a kubelet takes to deliver a ConfigMap volume
+// update, its sync frequency stretched by the worker resync jitter, and the
+// default adds a margin for the watch to carry the change to the kubelet.
+func TestZoneKeyPropagationBoundIsDerivedFromTheKubeletSyncPeriod(t *testing.T) {
+	if ZoneKeyKubeletSyncFrequency != 60*time.Second {
+		t.Fatalf("the kubelet's default sync frequency is 60 s, the formula uses %s", ZoneKeyKubeletSyncFrequency)
+	}
+	if want := ZoneKeyKubeletSyncFrequency * 3 / 2; ZoneKeyKubeletRefreshWorstCase != want {
+		t.Fatalf("worst-case refresh = %s, want sync frequency x 1.5 = %s", ZoneKeyKubeletRefreshWorstCase, want)
+	}
+	if MinZoneKeyPropagationBound != ZoneKeyKubeletRefreshWorstCase {
+		t.Fatalf("the minimum %s must be the worst-case refresh %s", MinZoneKeyPropagationBound, ZoneKeyKubeletRefreshWorstCase)
+	}
+	if want := ZoneKeyKubeletRefreshWorstCase + ZoneKeyPropagationMargin; DefaultZoneKeyPropagationBound != want {
+		t.Fatalf("the default %s must be worst case %s + margin %s", DefaultZoneKeyPropagationBound,
+			ZoneKeyKubeletRefreshWorstCase, ZoneKeyPropagationMargin)
+	}
+	// Measured on GitHub-hosted kind nodes: a warm function saw the staged key
+	// 84.6 s after it was published. The minimum has to clear that, and the
+	// default has to clear it with room to spare.
+	const worstMeasured = 84600 * time.Millisecond
+	if MinZoneKeyPropagationBound <= worstMeasured || DefaultZoneKeyPropagationBound < worstMeasured+30*time.Second {
+		t.Fatalf("the bounds %s / %s leave no margin over the %s measured on a CI node",
+			MinZoneKeyPropagationBound, DefaultZoneKeyPropagationBound, worstMeasured)
+	}
+}
+
+// A bound the operator accepts but that sits under the default (between 90 s
+// and 120 s) leaves less than the stated margin. It still rotates, and the
+// condition says so while the rotation is propagating and during the overlap,
+// since a function that refreshed late refuses the zone's calls in both.
+func TestZoneSigningKeyConditionWarnsOnABoundBelowTheDefault(t *testing.T) {
+	k := testKeys(t, 2)
+	now := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
+	app := &appsv1alpha1.NextApp{}
+	for name, keys := range map[string]signingKeySet{
+		"propagating": {current: &k[0], next: &k[1], nextPublishedAt: now, currentSince: now},
+		"overlap":     {current: &k[1], previous: &k[0], switchedAt: now, currentSince: now},
+		"steady":      {current: &k[0], currentSince: now},
+	} {
+		w := zoneKeyWorld{secretFound: true, jwksFound: true, jwks: mustJWKS(t, &k[0], &k[1]), keys: keys}
+		for _, tc := range []struct {
+			bound time.Duration
+			warns bool
+		}{
+			{MinZoneKeyPropagationBound, true},
+			{DefaultZoneKeyPropagationBound - time.Second, true},
+			{DefaultZoneKeyPropagationBound, false},
+			{DefaultZoneKeyPropagationBound * 2, false},
+			{0, false}, // zero means the default
+		} {
+			in := zoneKeyInputs{now: now, cfg: ZoneSigningKeyConfig{PropagationBound: tc.bound}}
+			st := zoneKeyStatusFrom(w, in, zoneKeyStep{action: zkWait, wait: time.Second}, "orders")
+			msg := zoneSigningKeyCondition(app, st).Message
+			warned := strings.Contains(msg, "below the "+DefaultZoneKeyPropagationBound.String())
+			wantWarn := tc.warns && name != "steady" // nothing is in flight to refuse
+			if warned != wantWarn {
+				t.Errorf("%s with bound %s: warned=%v, want %v: %q", name, tc.bound, warned, wantWarn, msg)
+			}
 		}
 	}
 }
@@ -1106,6 +1186,7 @@ type zoneIdentityFixture struct {
 	} `json:"function"`
 	Rotation struct {
 		PropagationBoundSeconds int    `json:"propagationBoundSeconds"`
+		MinimumBoundSeconds     int    `json:"propagationBoundMinimumSeconds"`
 		OverlapSeconds          int    `json:"overlapSeconds"`
 		RequestAnnotation       string `json:"requestAnnotation"`
 		MaxPublishedKeys        int    `json:"maxPublishedKeys"`
@@ -1195,6 +1276,7 @@ func TestSharedZoneIdentityFixture(t *testing.T) {
 
 	// Rotation numbers.
 	if time.Duration(fx.Rotation.PropagationBoundSeconds)*time.Second != DefaultZoneKeyPropagationBound ||
+		time.Duration(fx.Rotation.MinimumBoundSeconds)*time.Second != MinZoneKeyPropagationBound ||
 		time.Duration(fx.Rotation.OverlapSeconds)*time.Second != ZoneKeyOverlap ||
 		fx.Rotation.RequestAnnotation != RotateSigningKeyAnnotation || fx.Rotation.MaxPublishedKeys != 2 {
 		t.Errorf("rotation numbers drifted from the fixture: %+v", fx.Rotation)

@@ -21,7 +21,8 @@
     "audience": "knext:fn:shop/pricing"
   },
   "rotation": {
-    "propagationBoundSeconds": 90,
+    "propagationBoundSeconds": 120,
+    "propagationBoundMinimumSeconds": 90,
     "overlapSeconds": 3600,
     "requestAnnotation": "apps.kn-next.dev/rotate-signing-key",
     "maxPublishedKeys": 2

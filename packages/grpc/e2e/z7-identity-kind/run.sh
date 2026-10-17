@@ -53,8 +53,11 @@
 #   Z7_NAMESPACE          namespace for the zone and its functions (default
 #                         z7-e2e). It is deleted and recreated each run, and
 #                         only if this script created it (label).
-#   Z7_PROPAGATION_BOUND  the operator's --zone-signing-key-propagation-bound
-#                         (default 90s, the shipped default; the minimum is 60s).
+#   Z7_PROPAGATION_BOUND  the operator's --zone-signing-key-propagation-bound, whole
+#                         seconds like 150s. Unset (the default), the operator runs
+#                         WITHOUT the flag, so the lane is a canary for the shipped
+#                         default, whose value and the minimum it reads from
+#                         testdata/zone-identity-contract.json.
 #   Z7_WITH_RUST          1 (default) also builds and binds the Rust function.
 #   PHASES                space-separated subset of: up images deploy verify
 #                         rotate leaks (default: all, in that order).
@@ -76,7 +79,15 @@ CLUSTER="${KIND_CLUSTER:-knext-z7-e2e}"
 REG_NAME="${REGISTRY_NAME:-knext-z7-registry}"
 REG_PORT="${REGISTRY_PORT:-5001}"
 NS="${Z7_NAMESPACE:-z7-e2e}"
-BOUND="${Z7_PROPAGATION_BOUND:-90s}"
+# The propagation bound the operator ships with, and the smallest it accepts, are
+# read from the operator's own contract fixture (its Go test pins them to the
+# constants), so this lane follows a change to either instead of hard-coding it.
+BOUND_FIXTURE="${REPO}/packages/kn-next-operator/internal/controller/testdata/zone-identity-contract.json"
+SHIPPED_BOUND_SECONDS="$(jq -er '.rotation.propagationBoundSeconds' "${BOUND_FIXTURE}")" \
+  || { echo "cannot read .rotation.propagationBoundSeconds from ${BOUND_FIXTURE}" >&2; exit 64; }
+MIN_BOUND_SECONDS="$(jq -er '.rotation.propagationBoundMinimumSeconds' "${BOUND_FIXTURE}")" \
+  || { echo "cannot read .rotation.propagationBoundMinimumSeconds from ${BOUND_FIXTURE}" >&2; exit 64; }
+BOUND="${Z7_PROPAGATION_BOUND:-${SHIPPED_BOUND_SECONDS}s}"
 WITH_RUST="${Z7_WITH_RUST:-1}"
 PHASES="${PHASES:-up images deploy verify rotate leaks}"
 INTERNAL_PORT="${INTERNAL_PORT:-18080}"
@@ -87,9 +98,10 @@ OPERATOR_NS='kn-next-operator-system'
 
 case "${BOUND}" in
   [0-9]*s) BOUND_SECONDS="${BOUND%s}" ;;
-  *) echo "Z7_PROPAGATION_BOUND must be whole seconds like 90s, got '${BOUND}'" >&2; exit 64 ;;
+  *) echo "Z7_PROPAGATION_BOUND must be whole seconds like 150s, got '${BOUND}'" >&2; exit 64 ;;
 esac
-[ "${BOUND_SECONDS}" -ge 60 ] || { echo "the operator refuses a bound below 60s" >&2; exit 64; }
+[ "${BOUND_SECONDS}" -ge "${MIN_BOUND_SECONDS}" ] \
+  || { echo "the operator refuses a bound below ${MIN_BOUND_SECONDS}s" >&2; exit 64; }
 
 ZONE=storefront
 GO_FN=example-go          # the BackendService (and Knative Service) of the Go function
@@ -332,7 +344,7 @@ YAML
     deployment/controller deployment/webhook deployment/autoscaler deployment/activator deployment/net-kourier-controller
   k wait --for=condition=Available --timeout=300s -n kourier-system deployment/3scale-kourier-gateway
 
-  log "the operator, built from this checkout (propagation bound ${BOUND})"
+  log "the operator, built from this checkout (propagation bound ${BOUND}$([ -n "${Z7_PROPAGATION_BOUND:-}" ] || echo ', the shipped default'))"
   make -C "${OPERATOR}" manifests kustomize >/dev/null
   local attempt
   for attempt in 1 2 3; do
@@ -356,13 +368,15 @@ YAML
   (cd "${cfg}/manager" && "${OPERATOR}/bin/kustomize" edit set image "controller=${operator_img}")
   local arg='--health-probe-bind-address=:8081'
   [ "$(grep -c -- "- ${arg}\$" "${cfg}/manager/manager.yaml")" = 1 ] || fail "manager.yaml no longer has exactly one '${arg}' arg to anchor on"
-  awk -v bound="${BOUND}" '
-    { print }
-    /- --health-probe-bind-address=:8081$/ {
-      match($0, /^ */)
-      printf "%s- --zone-signing-key-propagation-bound=%s\n", substr($0, 1, RLENGTH), bound
-    }' "${cfg}/manager/manager.yaml" >"${cfg}/manager/manager.yaml.new"
-  mv "${cfg}/manager/manager.yaml.new" "${cfg}/manager/manager.yaml"
+  if [ -n "${Z7_PROPAGATION_BOUND:-}" ]; then
+    awk -v bound="${BOUND}" '
+      { print }
+      /- --health-probe-bind-address=:8081$/ {
+        match($0, /^ */)
+        printf "%s- --zone-signing-key-propagation-bound=%s\n", substr($0, 1, RLENGTH), bound
+      }' "${cfg}/manager/manager.yaml" >"${cfg}/manager/manager.yaml.new"
+    mv "${cfg}/manager/manager.yaml.new" "${cfg}/manager/manager.yaml"
+  fi
   "${OPERATOR}/bin/kustomize" build "${cfg}/default" | k apply -f -
   k wait --for=condition=Established --timeout=120s \
     crd/nextapps.apps.kn-next.dev crd/backendservices.apps.kn-next.dev
@@ -371,10 +385,17 @@ YAML
   k wait --for=jsonpath='{.subsets[0].addresses[0]}' --timeout=120s \
     -n "${OPERATOR_NS}" endpoints/kn-next-operator-webhook-service
   "${REPO}/scripts/kind-manifests/wait-for-webhook-ready.sh"
-  k -n "${OPERATOR_NS}" get deployment kn-next-operator-controller-manager -o json \
-    | jq -e --arg a "--zone-signing-key-propagation-bound=${BOUND}" '.spec.template.spec.containers[0].args | index($a) != null' >/dev/null \
-    || fail "the operator is not running with --zone-signing-key-propagation-bound=${BOUND}"
-  ok "operator running with a ${BOUND} propagation bound"
+  if [ -n "${Z7_PROPAGATION_BOUND:-}" ]; then
+    k -n "${OPERATOR_NS}" get deployment kn-next-operator-controller-manager -o json \
+      | jq -e --arg a "--zone-signing-key-propagation-bound=${BOUND}" '.spec.template.spec.containers[0].args | index($a) != null' >/dev/null \
+      || fail "the operator is not running with --zone-signing-key-propagation-bound=${BOUND}"
+    ok "operator running with a ${BOUND} propagation bound"
+  else
+    k -n "${OPERATOR_NS}" get deployment kn-next-operator-controller-manager -o json \
+      | jq -e '[.spec.template.spec.containers[0].args[] | select(startswith("--zone-signing-key-propagation-bound"))] | length == 0' >/dev/null \
+      || fail "the operator is running with a --zone-signing-key-propagation-bound it should not have: with Z7_PROPAGATION_BOUND unset the lane tests the shipped default (${BOUND})"
+    ok "operator running with its shipped ${BOUND} propagation bound (no flag)"
+  fi
 }
 
 # ---------------------------------------------------------------- phase: images

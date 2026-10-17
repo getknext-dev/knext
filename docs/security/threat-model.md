@@ -265,8 +265,10 @@ not instantly. (c) The rotation wait trusts the operator's clock: a new leader w
 ahead could switch signing early by the skew; keep nodes on NTP. Within one operator, both waits
 (the bound and the overlap) count from a clock reading taken after the apiserver confirmed the
 write they follow, so a slow write lengthens a wait and never shortens it. (d) A rotation trusts the
-kubelet's ConfigMap sync to finish within the propagation bound (default 90 s,
-`--zone-signing-key-propagation-bound`, at least 60 s); a slower kubelet sync must raise it. (e) client-go prints request and response bodies at klog verbosity 8 and above, Secret
+kubelet's ConfigMap sync to finish within the propagation bound (default 120 s,
+`--zone-signing-key-propagation-bound`, at least 90 s: a default kubelet's 60 s sync stretched by up
+to 50% jitter, plus a 30 s margin in the default); a slower kubelet sync must raise it. A bound under
+the default still rotates and is reported on the `ZoneSigningKey` condition. (e) client-go prints request and response bodies at klog verbosity 8 and above, Secret
 data included; never run the operator that verbose in production.
 
 **Enforcement.** `rbac_secrets_guard_test.go` (the justified entries, and

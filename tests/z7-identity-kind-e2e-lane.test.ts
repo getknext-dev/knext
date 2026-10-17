@@ -357,6 +357,49 @@ describe('the lane proves what it claims', () => {
     expect(main).toContain('for phase in up images deploy verify rotate leaks');
   });
 
+  it("follows the operator's shipped propagation bound instead of hard-coding one", () => {
+    // The lane is the canary for the shipped default, so with no override it
+    // must run the operator WITHOUT the flag and read the expected bound from
+    // the operator's own contract fixture (which the operator's Go test pins to
+    // DefaultZoneKeyPropagationBound and MinZoneKeyPropagationBound).
+    const fixture = JSON.parse(
+      readFileSync(
+        resolve(
+          REPO_ROOT,
+          'packages/kn-next-operator/internal/controller/testdata/zone-identity-contract.json',
+        ),
+        'utf8',
+      ),
+    ) as { rotation: { propagationBoundSeconds: number; propagationBoundMinimumSeconds: number } };
+    const { propagationBoundSeconds: def, propagationBoundMinimumSeconds: min } = fixture.rotation;
+    expect(Number.isInteger(def) && Number.isInteger(min) && min > 0 && def >= min).toBe(true);
+    expect(runSh).toContain('testdata/zone-identity-contract.json');
+    // Each value is bound to its own field by the jq call that reads it (a bare
+    // mention of the field name, such as the one in the error message, would not
+    // notice the call being pointed at another field).
+    expect(runSh).toMatch(
+      /^SHIPPED_BOUND_SECONDS="\$\(jq -er '\.rotation\.propagationBoundSeconds' "\$\{BOUND_FIXTURE\}"\)"/m,
+    );
+    expect(runSh).toMatch(
+      /^MIN_BOUND_SECONDS="\$\(jq -er '\.rotation\.propagationBoundMinimumSeconds' "\$\{BOUND_FIXTURE\}"\)"/m,
+    );
+    // No number of the bound is written into the script, as default or minimum.
+    expect(runSh).not.toMatch(/Z7_PROPAGATION_BOUND:-\d/);
+    expect(runSh).not.toMatch(/BOUND_SECONDS\}" -ge \d/);
+    expect(runSh).not.toMatch(/BOUND=.*[0-9]+s/);
+    // The flag reaches the operator only when the caller sets an override, and
+    // the unset case is checked to run the operator without it.
+    expect(runSh).toMatch(
+      /if \[ -n "\$\{Z7_PROPAGATION_BOUND:-\}" \]; then\n\s+awk -v bound="\$\{BOUND\}"/,
+    );
+    expect(runSh).toContain(
+      'select(startswith("--zone-signing-key-propagation-bound"))] | length == 0',
+    );
+    expect(runSh).toContain(
+      'is running with a --zone-signing-key-propagation-bound it should not have',
+    );
+  });
+
   it('binds a Go and a Rust function, and warm pods (min and max scale 1)', () => {
     expect(runSh).toContain('language: go');
     expect(runSh).toContain('language: rust');
