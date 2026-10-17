@@ -422,6 +422,15 @@ describe('pickBase: which commit to compare against', () => {
       );
     }
   });
+  it('never trusts an all-zero base, even if the resolver would accept it', () => {
+    expect(
+      pickBase({
+        supplied: '0000000000000000000000000000000000000000',
+        resolves: () => true,
+        currentRef: 'feature',
+      }),
+    ).toBe('origin/integration/v2');
+  });
   it('falls back when the supplied base is not in the clone', () => {
     expect(
       pickBase({ supplied: 'deadbeef', resolves: exists(['origin/main']), currentRef: 'f' }),
