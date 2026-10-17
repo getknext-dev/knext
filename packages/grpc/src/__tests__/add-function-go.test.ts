@@ -222,8 +222,12 @@ describe('--module path elements', () => {
   ])('refuses %s before anything runs', (module) => {
     const app = emptyDir('go-dotmodule');
     const c = capture();
-    expect(addFunction({ cwd: app, name: 'orders', lang: 'go', module, io: c.io })).toBe(1);
-    expect(c.err()).toContain('module');
+    // A template that does not exist proves the check runs before any staging.
+    const templateDir = join(app, 'no-such-template');
+    expect(
+      addFunction({ cwd: app, name: 'orders', lang: 'go', module, io: c.io, templateDir }),
+    ).toBe(1);
+    expect(c.err()).toContain('path elements');
     expect(walk(app)).toEqual([]);
   });
 
