@@ -29,6 +29,9 @@
  *   U9-U10 an unresolved source passes / stops failing the check.
  *   U11 an exception may be dated in the future.
  *   U12 the OSV report stops listing what it did not cover.
+ *   I1-I5 integrity: the entry key, bun.lock/package-lock.json reading, and the
+ *       exception scope all forget the content hash (a tarball re-pinned to new
+ *       bytes under the same URL passes).
  *   W1  the workflow gets a soft-fail flag.
  *   W2  the workflow's token gains a write scope.
  *   W3  the workflow stops fetching full history.
@@ -98,9 +101,8 @@ const MUTATIONS = [
     id: 'A6',
     claim: 'an exception stops being scoped to its version',
     subject: 'lib',
-    anchor:
-      '(x) => x.ecosystem === e.ecosystem && x.package === e.name && x.version === e.version,',
-    replacement: '(x) => x.ecosystem === e.ecosystem && x.package === e.name,',
+    anchor: '        x.package === e.name &&\n        x.version === e.version &&',
+    replacement: '        x.package === e.name &&',
   },
   {
     id: 'A7',
@@ -258,6 +260,42 @@ const MUTATIONS = [
     subject: 'lib',
     anchor: "if (bad.length === 0) return '';",
     replacement: `return ''; /* ${M} */`,
+  },
+  {
+    id: 'I1',
+    claim: 'the entry key forgets the integrity hash (a re-pinned tarball is not a change)',
+    subject: 'lib',
+    anchor:
+      "const keyOf = (e) => `${e.lockfile}|${e.ecosystem}|${e.name}|${e.version}|${e.integrity ?? ''}`;",
+    replacement: 'const keyOf = (e) => `${e.lockfile}|${e.ecosystem}|${e.name}|${e.version}`;',
+  },
+  {
+    id: 'I2',
+    claim: 'bun.lock integrity is no longer read for unresolved entries',
+    subject: 'lib',
+    anchor: 'if (integrity) e.integrity = integrity;',
+    replacement: 'void integrity;',
+  },
+  {
+    id: 'I3',
+    claim: 'an exception stops being scoped to the integrity hash',
+    subject: 'lib',
+    anchor: '        x.version === e.version &&\n        x.integrity === e.integrity,',
+    replacement: '        x.version === e.version,',
+  },
+  {
+    id: 'I4',
+    claim: 'package-lock.json integrity is dropped for unresolved entries',
+    subject: 'lib',
+    anchor: "unresolved: 'resolved outside registry.npmjs.org',\n        ...integrity,",
+    replacement: "unresolved: 'resolved outside registry.npmjs.org',",
+  },
+  {
+    id: 'I5',
+    claim: 'a malformed exception integrity is accepted',
+    subject: 'lib',
+    anchor: 'if (e.integrity !== undefined && !/^[A-Za-z0-9+/=_.-]+$/.test(String(e.integrity))) {',
+    replacement: `if (false /* ${M} */) {`,
   },
   {
     id: 'W1',

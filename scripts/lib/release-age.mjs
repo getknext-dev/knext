@@ -40,7 +40,7 @@ const LOCAL_SPEC = /^(?:workspace|file|link|portal):/;
 
 /**
  * @typedef {{ecosystem: 'npm' | 'crates' | 'go', name: string, version: string,
- *   unresolved?: string}} Entry
+ *   unresolved?: string, integrity?: string}} Entry
  *   `unresolved` is set (to the reason) when the entry does not resolve to a version
  *   on the public registry; `version` is then the raw source spec.
  * @typedef {Entry & {lockfile: string}} LockEntry
@@ -129,7 +129,18 @@ function parseBunLock(text, parseJsoncFn) {
     const id = Array.isArray(entry) ? entry[0] : null;
     if (typeof id !== 'string') continue;
     const e = npmFromId(id, entry[1]);
-    if (e) out.push(e);
+    if (!e) continue;
+    if (e.unresolved) {
+      // The content hash is the last string field: [id, registry, meta, integrity] or
+      // [id, meta, integrity]. A tarball re-pinned to new bytes keeps the same URL, so
+      // the hash is what tells the two apart.
+      const integrity = entry
+        .slice(2)
+        .filter((x) => typeof x === 'string')
+        .at(-1);
+      if (integrity) e.integrity = integrity;
+    }
+    out.push(e);
   }
   return out;
 }
@@ -145,8 +156,9 @@ function parsePackageLock(text) {
     if (marker < 0 || e.inBundle) continue;
     const name = e.name ?? key.slice(marker + 'node_modules/'.length);
     const version = typeof e.version === 'string' ? e.version : '(none)';
+    const integrity = typeof e.integrity === 'string' ? { integrity: e.integrity } : {};
     if (typeof e.resolved !== 'string') {
-      out.push({ ecosystem: 'npm', name, version, unresolved: 'no resolved URL' });
+      out.push({ ecosystem: 'npm', name, version, unresolved: 'no resolved URL', ...integrity });
     } else if (e.resolved.startsWith('file:')) {
       // local path dependency
     } else if (e.resolved.startsWith('https://registry.npmjs.org/') && SEMVERISH.test(version)) {
@@ -157,6 +169,7 @@ function parsePackageLock(text) {
         name,
         version: e.resolved,
         unresolved: 'resolved outside registry.npmjs.org',
+        ...integrity,
       });
     }
   }
@@ -266,7 +279,13 @@ export function parseLockfile(lockfile, text, parseJsoncFn = parseJsonc) {
   throw new Error(`no release-age parser for ${lockfile}`);
 }
 
-const keyOf = (e) => `${e.lockfile}|${e.ecosystem}|${e.name}|${e.version}`;
+/**
+ * Identity of an entry across base and head. An unresolved source's integrity hash is part
+ * of it: a tarball URL (or a git tag) can be re-pinned to different bytes with the same
+ * spec, and that must read as a change. A Cargo git source carries its revision in the
+ * spec, and a go.mod replacement carries its version, so those already change the key.
+ */
+const keyOf = (e) => `${e.lockfile}|${e.ecosystem}|${e.name}|${e.version}|${e.integrity ?? ''}`;
 
 /**
  * Entries in `head` that `base` does not have, per lockfile: what a change ADDED or
@@ -295,7 +314,15 @@ export function isExcluded(entry, excludes) {
 }
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
-const EXC_KEYS = new Set(['ecosystem', 'package', 'version', 'justification', 'added', 'expires']);
+const EXC_KEYS = new Set([
+  'ecosystem',
+  'package',
+  'version',
+  'integrity',
+  'justification',
+  'added',
+  'expires',
+]);
 /** A too-new release stops being too new within days, so an exception is short-lived. */
 export const MAX_EXCEPTION_DAYS = 14;
 /**
@@ -339,6 +366,9 @@ export function loadExceptions(doc, today) {
       /^[\^~<>=|]/.test(e.version)
     ) {
       throw new Error(`${at} needs an exact \`version\` or source spec (no ranges or wildcards)`);
+    }
+    if (e.integrity !== undefined && !/^[A-Za-z0-9+/=_.-]+$/.test(String(e.integrity))) {
+      throw new Error(`${at} has a malformed \`integrity\` (the lockfile's hash, no spaces)`);
     }
     if (typeof e.justification !== 'string' || e.justification.trim().length < 20) {
       throw new Error(`${at} needs a real \`justification\` (>= 20 chars)`);
@@ -430,9 +460,15 @@ export async function evaluateAges({
   const errors = [];
   const skipped = [];
   const queue = [];
+  // An entry that carries an integrity hash is excused only by an exception naming that
+  // same hash, so re-pinning an excepted tarball to new bytes is not silently allowed.
   const isExcepted = (e) =>
     exceptions.active.some(
-      (x) => x.ecosystem === e.ecosystem && x.package === e.name && x.version === e.version,
+      (x) =>
+        x.ecosystem === e.ecosystem &&
+        x.package === e.name &&
+        x.version === e.version &&
+        x.integrity === e.integrity,
     );
   for (const e of entries) {
     if (e.unresolved) {
