@@ -41,7 +41,9 @@ FAILS=0
 # Minimum patched Go point release the builder must use. Bump this when a newer
 # Go stdlib CVE lands; it is the single knob that keeps the binary patched.
 # 12: CVE-2026-39822 (os.Root symlink following, HIGH) fixed in 1.25.12.
-MIN_PATCH=13
+# 1.26.9: CVE-2026-78667 (net/http Range DoS), CVE-2026-78669 (HTTP/2 SETTINGS flood), CVE-2026-97031 (crypto/tls ECH DoS).
+MIN_MINOR=26
+MIN_PATCH=9
 
 assert() { # <desc> <cmd...>
   local desc="$1"; shift
@@ -58,13 +60,13 @@ GO_TAG="$(printf '%s\n' "$BUILDER_LINE" | sed -E 's/.*golang:([0-9A-Za-z._-]+).*
 assert "builder Go tag is a pinned point release golang:X.Y.Z (not floating golang:X.Y)" \
   bash -c "printf '%s' '$GO_TAG' | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+'"
 
-# 2. The pinned point release must be >= MIN_PATCH on the 1.25 line (or any newer
+# 2. The pinned point release must be >= MIN_PATCH on the 1.$MIN_MINOR line (or any newer
 #    minor), so the Go-stdlib CVEs Trivy flags are fixed in the binary.
 GO_MAJOR="$(printf '%s' "$GO_TAG" | cut -d. -f1)"
 GO_MINOR="$(printf '%s' "$GO_TAG" | cut -d. -f2)"
 GO_PATCH="$(printf '%s' "$GO_TAG" | cut -d. -f3 | grep -oE '^[0-9]+' || echo 0)"
-assert "builder Go is patched (>= 1.25.$MIN_PATCH, or a newer minor)" \
-  bash -c "[ '$GO_MAJOR' -gt 1 ] || { [ '$GO_MAJOR' -eq 1 ] && { [ '$GO_MINOR' -gt 25 ] || { [ '$GO_MINOR' -eq 25 ] && [ '$GO_PATCH' -ge $MIN_PATCH ]; }; }; }"
+assert "builder Go is patched (>= 1.$MIN_MINOR.$MIN_PATCH, or a newer minor)" \
+  bash -c "[ '$GO_MAJOR' -gt 1 ] || { [ '$GO_MAJOR' -eq 1 ] && { [ '$GO_MINOR' -gt $MIN_MINOR ] || { [ '$GO_MINOR' -eq $MIN_MINOR ] && [ '$GO_PATCH' -ge $MIN_PATCH ]; }; }; }"
 
 # 3. No floating `golang:1.25` (bare minor) anywhere in the Dockerfile — guards
 #    against a second builder stage regressing the pin.
