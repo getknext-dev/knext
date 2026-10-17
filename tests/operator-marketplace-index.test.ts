@@ -543,7 +543,11 @@ describe('operator-supply-chain.yml wires the Marketplace variant (#1954)', () =
     ]) {
       const s = step(n);
       expect(s).toContain("steps.channel.outputs.is_version_tag == 'true'");
-      expect(s).toContain("steps.trivy.outcome == 'success'");
+      // The passed-scan requirement moved to the job level when the publish steps
+      // were split into their own push-only job: the scan job folds
+      // `steps.trivy.outcome` into its `ready` output and the publish job's `if:`
+      // requires it (asserted in operator-supply-chain-workflow.test.ts).
+      expect(s).toContain("steps.channel.outputs.publish == 'true'");
     }
   });
 

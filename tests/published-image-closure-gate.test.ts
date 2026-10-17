@@ -66,7 +66,9 @@ describe('every job that PUBLISHES a vinext image audits that app’s closure fi
     expect(
       hits.map((h) => `${h.workflow}:${h.job}`),
       'no job that pushes a vinext image was found — the scan is not reading the workflows',
-    ).toContain(`${SUPPLY_CHAIN}:image-supply-chain`);
+      // The push-only publish job, not the read-only build/scan job: it is the job
+      // that pushes, and its `needs` closure carries the closure audit.
+    ).toContain(`${SUPPLY_CHAIN}:image-publish`);
   });
 
   it('audits the app it actually publishes — not some other app’s closure', () => {

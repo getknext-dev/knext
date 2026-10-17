@@ -37,7 +37,7 @@ const WORKFLOW = resolve(REPO_ROOT, '.github/workflows/operator-supply-chain.yml
 const LANE = { subjects: { guard: GUARD, workflow: WORKFLOW } };
 
 const STEP_HEAD =
-  "        if: steps.channel.outputs.is_version_tag == 'true' && steps.trivy.outcome == 'success'\n" +
+  "        if: steps.channel.outputs.is_version_tag == 'true'\n" +
   '        env:\n          DIGEST: ${{ steps.push.outputs.digest }}\n          RELEASE_TAG:';
 
 const MUTATIONS = [

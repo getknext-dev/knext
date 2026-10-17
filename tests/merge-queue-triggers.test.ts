@@ -151,15 +151,17 @@ describe('merge queue — signing/publish side effects stay ref-gated to main', 
    * "publish is never true for pull_request/merge_group refs" test below,
    * which proves that derivation directly against the real script rather
    * than re-deriving it here as a second copy of the regex). It ALSO
-   * requires `steps.trivy.outcome == 'success'` (#1667 round 4) —
-   * `continue-on-error` on the Trivy step masks `conclusion`, so `outcome`
-   * is the only field that still tells the truth about a failed scan.
+   * requires a REAL passed scan (#1667 round 4) — `continue-on-error` on the
+   * Trivy step masks `conclusion`, so the scan job reads `steps.trivy.outcome`
+   * and exposes the result as its `ready` output. The side-effect steps live
+   * in their own job (so a pull request never holds the write credentials),
+   * whose job-level `if:` requires that output; this check reads it there.
    */
-  function mainGated(file: string, cond: string): boolean {
+  function mainGated(file: string, cond: string, jobIf: string): boolean {
     if (file === 'operator-supply-chain.yml') {
       return (
         /steps\.channel\.outputs\.(publish|is_stable)\s*==\s*'true'/.test(cond) &&
-        /steps\.trivy\.outcome\s*==\s*'success'/.test(cond)
+        /needs\.[\w-]+\.outputs\.ready\s*==\s*'true'/.test(jobIf)
       );
     }
     return /github\.ref\s*==\s*'refs\/heads\/main'/.test(cond);
@@ -176,7 +178,7 @@ describe('merge queue — signing/publish side effects stay ref-gated to main', 
           const body = `${step.run ?? ''}\n${step.uses ?? ''}`;
           if (!DANGEROUS_STEP.test(body)) continue;
           const cond = 'if' in step ? String(step.if) : '';
-          if (!mainGated(file, cond)) {
+          if (!mainGated(file, cond, String(job.if ?? ''))) {
             const label = typeof step.name === 'string' ? step.name : (step.uses ?? step.run);
             offenders.push(`${file} job \`${jobId}\` step \`${label}\` if: ${cond || '(none)'}`);
           }

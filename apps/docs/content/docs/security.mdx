@@ -212,6 +212,16 @@ it passes the scan, and signing happens on the digest that was actually pushed.
 - **Digest-pinned release bundle** — the operator's `install.yaml` release asset is regenerated
   with the **real pushed digest** of the operator image, so what you `kubectl apply` is exactly
   what was scanned and signed. See [Installing knext](/docs/install#4--install-the-operator).
+- **Publishing is isolated from pull requests** — the job that builds and scans runs on every
+  event with a read-only token. A separate job holds the registry-write and OIDC credentials, runs
+  on pushes only, and publishes the exact layout the scan approved: it re-checks the layout's
+  sha256 against the digest the scan job recorded before it pushes or signs anything. A pull
+  request, or a merge-queue run, never holds a credential that can write a registry or request an
+  OIDC token.
+- **npm provenance** — `@getknext/core`, `@getknext/lib` and `@getknext/db` are published with an
+  npm provenance statement that links each tarball to the workflow run that built it. Only the
+  publish job holds the OIDC token that makes this possible. Verify an installed tree with
+  `npm audit signatures`.
 
 ## Runtime hardening
 
