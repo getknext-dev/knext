@@ -28,7 +28,7 @@ knext cleanup        # remove the app from the cluster (deletes its NextApp CR)
 knext db bind        # bind an existing Postgres Secret to the CR
 knext db migrate     # apply pending migrations against the writer, once
 knext gc             # reap old _next/static/<build-id>/ asset prefixes
-knext add function   # add a function to this zone: its contract, plus a Go server project (Beta)
+knext add function   # add a function to this zone: its contract, plus a Go or Rust server project (Beta)
 knext deploy function # apply a zone function's BackendService (Beta)
 knext generate       # write the server-only clients for this zone's functions (Beta)
 knext ffi init       # opt this zone into in-process Rust (Beta, Bun only)
@@ -748,8 +748,9 @@ commands print how to install it and exit 1; `--help` still exits 0. Once instal
 must match your `@getknext/core`, and a mismatched pair is refused with both versions named.
 </Callout>
 
-Adds a zone function's **contract** to your app: a Go or Rust backend function your Next.js zone
-calls over Connect, scale-to-zero like the zone itself. Writes files only; nothing is deployed.
+Adds a zone function to your app: its **contract**, and the server project that implements it, in
+Go or Rust. Your Next.js zone calls it over Connect, and it scales to zero like the zone itself.
+Writes files only; nothing is deployed.
 
 ```bash
 knext add function orders --lang go
@@ -761,12 +762,21 @@ function's entry in `knext.grpc.json`, and, if the app has none yet, an `authori
 `src/knext/authorize.ts` that refuses every call until you write it (see
 [generated queries, actions and streams](#generated-queries-actions-and-streams)). The name is a
 lowercase DNS label; the zone reads the function's address from `ORDERS_SERVICE_URL` at call time.
-With `--lang go` it also scaffolds the function's server project at `functions/orders/`, from the
-[Go function template](/docs/go-functions): the token-verifying server, the health check and a
-Dockerfile, renamed to your function, with its Go code generated. That needs the Go toolchain on
-your `PATH`, and `--module <path>` sets the Go module path (default `example.com/orders`). With
-`--lang rust` only the contract is written; start the server from the
-[Rust function template](/docs/rust-functions).
+It also scaffolds the function's server project at `functions/orders/`: the token-verifying server,
+the health check and a Dockerfile, renamed to your function, with its code generated.
+
+- `--lang go` copies the [Go function template](/docs/go-functions). It needs the Go toolchain on
+  your `PATH`, and `--module <path>` sets the Go module path (default `example.com/orders`).
+- `--lang rust` copies the [Rust function template](/docs/rust-functions), with the crate named
+  after the function. It needs the Rust toolchain (`cargo`, via `rustup`) on your `PATH`, and a
+  network connection the first time: the first run on a machine downloads the code generators'
+  crates and compiles them, which takes a few minutes. Later runs reuse them from the knext cache
+  directory, `$XDG_CACHE_HOME/knext/rust-codegen` (`~/.cache/knext/rust-codegen` when
+  `XDG_CACHE_HOME` is unset). `XDG_CACHE_HOME` is ignored unless it is an absolute path.
+  `KNEXT_RUST_CODEGEN_DIR` puts the cache somewhere else; it must be an absolute path, and a
+  relative one is refused. The scaffolded code is formatted with `cargo fmt` before it is written.
+
+If generating the code fails, nothing is written.
 
 Two options at the top of every contract matter:
 

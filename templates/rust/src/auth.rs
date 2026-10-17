@@ -321,5 +321,5 @@ pub fn bearer_token(header: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests;
-#[cfg(test)]
+#[cfg(all(test, feature = "shared-vectors"))]
 mod vector_tests;

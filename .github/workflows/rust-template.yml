@@ -42,6 +42,14 @@ on:
       - 'packages/grpc/proto/**'
       - 'packages/grpc/testdata/z7-token-vectors.json'
       - 'packages/grpc/src/add-function.ts'
+      - 'packages/grpc/src/scaffold-rust.ts'
+      - 'packages/grpc/src/scaffold-template.ts'
+      - 'packages/grpc/src/buf.ts'
+      - 'packages/grpc/src/cli.ts'
+      - 'packages/grpc/scripts/copy-templates.mjs'
+      - 'packages/grpc/scripts/knext-grpc.ts'
+      - 'packages/grpc/src/__tests__/add-function-rust.test.ts'
+      - 'packages/grpc/turbo.json'
       - 'scripts/kind-manifests/**'
       - 'tests/rust-template-contract.test.ts'
   push:
@@ -52,6 +60,14 @@ on:
       - 'packages/grpc/proto/**'
       - 'packages/grpc/testdata/z7-token-vectors.json'
       - 'packages/grpc/src/add-function.ts'
+      - 'packages/grpc/src/scaffold-rust.ts'
+      - 'packages/grpc/src/scaffold-template.ts'
+      - 'packages/grpc/src/buf.ts'
+      - 'packages/grpc/src/cli.ts'
+      - 'packages/grpc/scripts/copy-templates.mjs'
+      - 'packages/grpc/scripts/knext-grpc.ts'
+      - 'packages/grpc/src/__tests__/add-function-rust.test.ts'
+      - 'packages/grpc/turbo.json'
       - 'scripts/kind-manifests/**'
       - 'tests/rust-template-contract.test.ts'
   workflow_dispatch:
@@ -146,6 +162,24 @@ jobs:
 
       - name: cargo test
         run: cargo test --locked
+
+      - name: A scaffolded function builds, lints and passes its own tests
+        # `knext add function --lang rust` copies this template; the copy must
+        # build and pass outside the template directory. It generates its code
+        # with the pinned plugins the drift check above already installed.
+        working-directory: .
+        env:
+          KNEXT_RUST_CODEGEN_DIR: ${{ github.workspace }}/templates/rust/.codegen
+        run: |
+          set -euo pipefail
+          app="$(mktemp -d)"
+          (cd "$app" && bun "$GITHUB_WORKSPACE/packages/grpc/scripts/knext-grpc.ts" add function orders --lang rust)
+          cd "$app/functions/orders"
+          cargo fmt --check
+          cargo build --locked --all-targets
+          cargo check --locked --all-features --all-targets
+          cargo clippy --all-targets --features e2e --locked -- -D warnings
+          cargo test --locked
 
       - name: Install cargo-deny and cargo-audit (pinned releases, sha256-verified)
         run: |

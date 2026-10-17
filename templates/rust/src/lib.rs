@@ -15,5 +15,5 @@ pub mod rpc;
 
 #[cfg(test)]
 mod testutil;
-#[cfg(test)]
+#[cfg(all(test, feature = "shared-vectors"))]
 mod testvectors;

@@ -1,6 +1,7 @@
 import { afterAll, describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { addFunction } from '../add-function';
 import { CORE_PEER_RANGE, DISPATCH_PROTOCOL, GRPC_VERSION, helpText, run, VERBS } from '../cli';
 import { capture, copyFixtureZone, emptyDir, PKG_DIR, removeScratchDirs } from './helpers';
 
@@ -64,9 +65,12 @@ describe('the module core dispatches to', () => {
 
   it('runs add function, then generate --check, end to end', async () => {
     const dir = emptyDir('e2e');
+    // The verb scaffolds a server project and generates its code, which the
+    // scaffold suites cover; here the contract half is what feeds `generate`.
     const add = capture();
     expect(
-      await run('add', ['function', 'orders', '--lang', 'rust'], { ...add.io, cwd: dir }),
+      addFunction({ cwd: dir, name: 'orders', lang: 'rust', serverProject: false, io: add.io }),
+      add.err(),
     ).toBe(0);
     expect(await run('generate', [], { ...capture().io, cwd: dir })).toBe(0);
     const check = capture();
