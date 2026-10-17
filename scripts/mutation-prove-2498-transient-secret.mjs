@@ -306,18 +306,32 @@ const GO_MUTATIONS = [
   },
   {
     id: 'E01',
-    claim: 'the CRD admits a volume mounted at a path Knative serving reserves',
+    claim: 'the CRD admits the root path and its slash/dot spellings (/, //, /./)',
     subject: 'crd',
-    anchor: "rule: '!(self.mountPath in [''/'', ''/dev'', ''/dev/log''])'",
-    replacement: "rule: '!(self.mountPath in [''/x''])'",
+    anchor:
+      "rule: '!self.mountPath.matches(''^((/+[.])*/*|(/+[.])*/+dev(/+[.])*/*|(/+[.])*/+dev(/+[.])*/+log(/+[.])*/*)$'')'",
+    replacement:
+      "rule: '!self.mountPath.matches(''^((/+[.])*zz|(/+[.])*/+dev(/+[.])*/*|(/+[.])*/+dev(/+[.])*/+log(/+[.])*/*)$'')'",
     test: envtest(`${REVOKED} the CRD refuses a mount path Knative serving reserves`),
   },
   {
     id: 'E02',
-    claim: 'the CRD admits a spelling path.Clean folds onto a reserved path',
+    claim: 'the CRD admits /dev/log and its spellings',
     subject: 'crd',
-    anchor: "rule: '!self.mountPath.matches(''(//|/[.]{1,2}(/|$)|.+/$)'')'",
-    replacement: "rule: '!self.mountPath.matches(''(//zzz)'')'",
+    anchor:
+      "rule: '!self.mountPath.matches(''^((/+[.])*/*|(/+[.])*/+dev(/+[.])*/*|(/+[.])*/+dev(/+[.])*/+log(/+[.])*/*)$'')'",
+    replacement:
+      "rule: '!self.mountPath.matches(''^((/+[.])*/*|(/+[.])*/+dev(/+[.])*/*|(/+[.])*/+dev(/+[.])*/+zzz(/+[.])*/*)$'')'",
+    test: envtest(`${REVOKED} the CRD refuses a mount path Knative serving reserves`),
+  },
+  {
+    id: 'E03',
+    claim: 'the CRD admits /dev and its spellings (/dev/, //dev, /./dev)',
+    subject: 'crd',
+    anchor:
+      "rule: '!self.mountPath.matches(''^((/+[.])*/*|(/+[.])*/+dev(/+[.])*/*|(/+[.])*/+dev(/+[.])*/+log(/+[.])*/*)$'')'",
+    replacement:
+      "rule: '!self.mountPath.matches(''^((/+[.])*/*|(/+[.])*/+zzz(/+[.])*/*|(/+[.])*/+dev(/+[.])*/+log(/+[.])*/*)$'')'",
     test: envtest(`${REVOKED} the CRD refuses a mount path Knative serving reserves`),
   },
   {

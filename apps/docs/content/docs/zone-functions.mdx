@@ -280,10 +280,16 @@ Ready revision. It is empty until a revision is Ready, and it is the value the z
 
 ### When Secrets cannot be verified
 
-The operator reads each referenced Secret's metadata to check that it belongs to the function's zone. A failed read is
-never a verdict about the Secret, so the operator does not guess. Only three things refuse a function on the strength of
-a Secret: the Secret does not exist, the Secret is marked for another zone (or is not marked for this one), or the
-reference's name cannot be a Secret name.
+The operator reads each referenced Secret's metadata to check that it belongs to the function's zone. **A failed read
+never refuses a function, except a denial that outlasts the hold below.** Refusals come from what the Secret is, and
+they apply whatever the state of the API server:
+
+- it is a zone's signing key (a function never mounts a private key);
+- it is another zone's database Secret, even if it was re-marked for this zone;
+- it is marked for another zone, is not marked for this one, or does not exist;
+- the function's zone does not exist, so no Secret is allowed;
+- its name cannot be a Secret name;
+- a function may also not reference another zone's JWKS ConfigMap.
 
 **What always holds**
 
@@ -296,8 +302,8 @@ reference's name cannot be a Secret name.
   is updated in place.
 - A reference that can never name a Secret (an empty name, `..`, a name containing `/`, upper-case letters, or more than
   253 characters) is not "unverified": it is refused straight away as a violation.
-- A volume cannot mount `/`, `/dev` or `/dev/log` (Knative serving reserves them), and mount paths must be clean
-  absolute paths: no `//`, no `.` or `..` segment and no trailing slash.
+- A volume cannot mount `/`, `/dev` or `/dev/log`, which Knative serving reserves, however the path is spelled with
+  repeated or trailing slashes or `.` segments (`/dev/`, `//dev`, `/./dev`). A path such as `/data/` is fine.
 
 **When a read fails**
 

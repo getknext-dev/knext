@@ -172,10 +172,13 @@ type FunctionScalingSpec struct {
 // Knative serving refuses a Service whose container mounts a reserved path (its
 // reservedPaths in pkg/apis/serving/k8s_validation.go: "/", "/dev", "/dev/log"),
 // compared after path.Clean. The webhook's refusal would surface only at render,
-// so the schema refuses these here, and refuses any spelling path.Clean would
-// fold onto them (a doubled or trailing slash, a . or .. segment).
-// +kubebuilder:validation:XValidation:rule="!(self.mountPath in ['/', '/dev', '/dev/log'])",message="mountPath is reserved by Knative serving: /, /dev and /dev/log cannot be mounted"
-// +kubebuilder:validation:XValidation:rule="!self.mountPath.matches('(//|/[.]{1,2}(/|$)|.+/$)')",message="mountPath must be a clean absolute path: no //, no . or .. segment and no trailing slash"
+// so the schema refuses these here, together with the spellings path.Clean folds
+// onto them by repeated or trailing slashes and "." segments (/dev/, //dev,
+// /./dev). A ".." segment needs balanced reasoning no regular expression can do,
+// so a spelling like /a/../dev is left to Knative's own webhook (the reconciler
+// then keeps the old Service and returns the refusal). Other paths, /data/
+// included, are untouched.
+// +kubebuilder:validation:XValidation:rule="!self.mountPath.matches('^((/+[.])*/*|(/+[.])*/+dev(/+[.])*/*|(/+[.])*/+dev(/+[.])*/+log(/+[.])*/*)$')",message="mountPath is reserved by Knative serving: /, /dev and /dev/log cannot be mounted"
 type FunctionVolume struct {
 	// Name of the volume (DNS label).
 	// +kubebuilder:validation:Required

@@ -271,14 +271,14 @@ var _ = Describe("BackendService reconciler: an unreadable Secret never keeps a 
 			}
 			return err
 		}
-		for _, path := range []string{"/", "/dev", "/dev/log", "/dev/", "//dev", "/dev//log", "/a/../dev", "/./dev", "/dev/."} {
+		for _, path := range []string{"/", "/dev", "/dev/log", "/dev/", "//dev", "/dev//log", "/./dev", "/dev/.", "/./", "//", "/dev/./log/"} {
 			It("rejects "+path, func() {
 				err := mount(setup(), path)
 				Expect(apierrors.IsInvalid(err)).To(BeTrue(), "got %v", err)
-				Expect(err.Error()).To(Or(ContainSubstring("reserved by Knative"), ContainSubstring("clean absolute path")))
+				Expect(err.Error()).To(ContainSubstring("reserved by Knative"))
 			})
 		}
-		for _, path := range []string{"/creds", "/dev/shm", "/data.v2/x", "/var/lib/app"} {
+		for _, path := range []string{"/creds", "/dev/shm", "/data.v2/x", "/var/lib/app", "/data/", "//data", "/devices", "/dev/logs", "/.hidden", "/dev/.cache"} {
 			It("admits "+path, func() {
 				Expect(mount(setup(), path)).To(Succeed())
 			})
