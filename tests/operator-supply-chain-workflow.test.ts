@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { parse } from 'yaml';
 
 /**
  * GUARD TESTS for .github/workflows/operator-supply-chain.yml (#201).
@@ -186,27 +187,38 @@ describe('operator-supply-chain workflow: nothing is published before the Trivy 
     ).toBe(false);
   });
 
-  it('every push/sign/release step ALSO requires steps.trivy.outcome == success (#1667 round 4)', () => {
+  it('a push/sign/release only ever follows a REAL passed scan: the hand-off reads steps.trivy.outcome and the publish job needs it (#1667 round 4)', () => {
     // continue-on-error hides a real failure from `conclusion` (it always
     // reports success there) — `outcome` is the one field that still tells
-    // the truth, so every step that pushes, signs, or publishes a release
-    // must check it explicitly, not just steps.channel.outputs.publish.
+    // the truth. The publishing steps now live in their own job (so a pull
+    // request never holds the write credentials), which means the outcome is
+    // read ONCE, by the scan job's hand-off step, and handed over as the
+    // job output `ready`; the publish job's `if:` requires it.
     const trivyIdx = stepIndex(TRIVY_RE);
     expect(trivyIdx, 'expected a Trivy scan step').toBeGreaterThanOrEqual(0);
-    const publishGatedSteps = stepBlocks()
+    const handoff = stepBlocks()
       .slice(trivyIdx + 1)
-      .filter((b) => /steps\.channel\.outputs\.(publish|is_stable)\s*==\s*'true'/.test(b));
+      .find((b) => /^\s*id:\s*handoff\s*$/m.test(stripComments(b)));
+    expect(handoff, 'expected a hand-off step after the Trivy scan').toBeDefined();
+    const handoffIf = (handoff ?? '').split('\n').find((l) => /^\s*if:/.test(l)) ?? '';
     expect(
-      publishGatedSteps.length,
-      'expected at least one publish-gated step after the Trivy scan',
-    ).toBeGreaterThan(0);
-    for (const block of publishGatedSteps) {
-      const ifLine = block.split('\n').find((l) => /^\s*if:/.test(l)) ?? '';
-      expect(
-        /steps\.trivy\.outcome\s*==\s*'success'/.test(ifLine),
-        `every publish-gated step must also require steps.trivy.outcome == 'success', missing in: ${ifLine.trim()}`,
-      ).toBe(true);
-    }
+      /steps\.trivy\.outcome\s*==\s*'success'/.test(handoffIf),
+      `the hand-off must require steps.trivy.outcome == 'success', got: ${handoffIf.trim()}`,
+    ).toBe(true);
+    expect(
+      /steps\.channel\.outputs\.publish\s*==\s*'true'/.test(handoffIf),
+      `the hand-off must require steps.channel.outputs.publish == 'true', got: ${handoffIf.trim()}`,
+    ).toBe(true);
+
+    const doc = parse(workflowText()) as { jobs: Record<string, Record<string, unknown>> };
+    const publishJob = doc.jobs['operator-image-publish'];
+    expect(publishJob, 'expected the operator-image-publish job').toBeDefined();
+    expect(String(publishJob.if)).toMatch(
+      /needs\.operator-image-supply-chain\.outputs\.ready\s*==\s*'true'/,
+    );
+    // No step in the publish job may be reachable without that gate: nothing in
+    // it re-reads steps.trivy (there is no such step in this job).
+    expect(JSON.stringify(publishJob.steps)).not.toContain('steps.trivy');
   });
 
   it('the push step is main-gated, crane-pushes the scanned layout, and captures the PUSHED digest fail-loud', () => {

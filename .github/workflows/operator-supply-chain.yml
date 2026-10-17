@@ -166,10 +166,20 @@ jobs:
     # job too (the default `success()` behavior for a `needs:` dependency).
     if: needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
+    # READ-ONLY. This job runs on every event, pull requests included, and
+    # executes third-party actions (sbom, trivy, upload) and the operator image
+    # build. It holds no credential that can write a registry, create a release
+    # or mint an OIDC token. `operator-image-publish` below holds those, runs on
+    # push only, and consumes the layout THIS job scanned.
     permissions:
-      contents: write # create/update the GitHub Release that carries install.yaml
-      packages: write # push to GHCR on main
-      id-token: write # cosign keyless signing via OIDC
+      contents: read
+    outputs:
+      # "true" only when this run intends to publish AND the Trivy gate passed.
+      ready: ${{ steps.handoff.outputs.ready }}
+      # sha256 of each scanned layout's index.json: a layout is content-addressed
+      # from its index down, so these name every byte the gate approved.
+      layout_sha256: ${{ steps.handoff.outputs.layout_sha256 }}
+      mp_layout_sha256: ${{ steps.handoff.outputs.mp_layout_sha256 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -314,13 +324,14 @@ jobs:
         # NOTHING downstream publishes (an ordinary PR).
         continue-on-error: ${{ steps.channel.outputs.publish != 'true' }}
         # `id: trivy` (#1667 round 4): continue-on-error masks `conclusion`
-        # (it always reports success there) — every push/sign/release step
-        # below must additionally gate on `steps.trivy.outcome == 'success'`,
-        # which reflects the REAL pass/fail regardless of continue-on-error.
+        # (it always reports success there), so the hand-off step below reads
+        # `steps.trivy.outcome`, which reflects the REAL pass/fail regardless of
+        # continue-on-error, and folds it into the job's `ready` output. The
+        # publish job runs only when `ready` is true.
         id: trivy
-        # SHA-pinned (#202): this action is the publish GATE in a job holding
-        # packages:write + id-token:write — a compromised mutable @master could
-        # push/sign with this repo's OIDC identity. v0.36.0.
+        # SHA-pinned (#202): this action is the publish GATE — a compromised mutable
+        # @master could approve a bad image that the publish job then signs with this
+        # repo's OIDC identity. v0.36.0.
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           input: operator-oci
@@ -329,13 +340,121 @@ jobs:
           ignore-unfixed: true
           format: table
 
-      # ── Everything below runs ONLY after the Trivy gate passed — both that
-      # it was intended to publish (steps.channel.outputs.publish) AND that
-      # the scan itself actually succeeded (steps.trivy.outcome), which
-      # continue-on-error above cannot hide (#1667 round 4). ────────────────
+      # ── Hand the SCANNED bytes to the publish job ───────────────────────────────
+      #
+      # Publication needs credentials this job must not hold, so it runs in
+      # `operator-image-publish`. That job does not rebuild: it downloads exactly
+      # what the Trivy gate above scanned and checks it against the digests
+      # recorded here, so a layout nobody scanned can never be signed (#201).
+      #
+      # `steps.trivy.outcome` is read here and nowhere downstream: continue-on-error
+      # above masks `conclusion` (it always reports success), but `outcome` is the
+      # REAL pass/fail (#1667 round 4). This step runs only when the run intends to
+      # release AND the scan really passed; when it does not run, `ready` is empty,
+      # which the release job's `if:` reads as "no". So the gate cannot be skipped
+      # by forgetting a step condition downstream.
+      - name: Record the scanned layouts' digests and release readiness
+        id: handoff
+        if: steps.channel.outputs.publish == 'true' && steps.trivy.outcome == 'success'
+        run: |
+          set -euo pipefail
+          {
+            echo "ready=true"
+            echo "layout_sha256=$(sha256sum operator-oci/index.json | cut -d' ' -f1)"
+            echo "mp_layout_sha256=$(sha256sum operator-oci-mp/index.json | cut -d' ' -f1)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload the scanned layouts + SBOM for the publish job
+        if: steps.handoff.outputs.ready == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: operator-scanned-layouts-${{ github.sha }}
+          path: |
+            operator-oci
+            operator-oci-mp
+            operator-sbom.spdx.json
+          if-no-files-found: error
+          retention-days: 1
+
+  # ── PUBLISH + SIGN + RELEASE (push only; the only job here holding write/OIDC) ─
+  #
+  # Split out of `operator-image-supply-chain` so a pull request never runs with a
+  # GHCR-write token, the OIDC token-request credential or `contents: write` in
+  # reach (a job-level `if:` is evaluated before the job starts; a step-level one
+  # is not a boundary). Skipped outright on `pull_request` and `merge_group`.
+  #
+  # `needs` the scan job and runs only when it reports `ready`, so a failed Trivy
+  # gate publishes, signs and releases nothing. Guarded by
+  # tests/workflow-pr-token-scope.test.ts.
+  operator-image-publish:
+    name: Operator publish + cosign sign + release
+    needs: [operator-image-supply-chain]
+    if: >-
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      needs.operator-image-supply-chain.outputs.ready == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create/update the GitHub Release that carries install.yaml
+      packages: write # push to GHCR
+      id-token: write # cosign keyless signing via OIDC
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The same derivation the scan job ran, from the same ref: every publish step
+      # below reads steps.channel.outputs.* rather than re-deriving it.
+      - name: Determine release channel (#1667)
+        id: channel
+        env:
+          REF: ${{ github.ref }}
+          REF_NAME: ${{ github.ref_name }}
+        run: bash packages/kn-next-operator/hack/release-channel.sh "${REF}" "${REF_NAME}" >> "$GITHUB_OUTPUT"
+
+      # Re-asserted here, immediately before the publish steps, because this is
+      # the job that can actually overwrite a release (see the scan job's note).
+      - name: Guard operator-vX.Y.Z release immutability (#1667)
+        if: steps.channel.outputs.is_version_tag == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash packages/kn-next-operator/hack/check-release-immutable.sh "${{ github.repository }}" "${{ steps.channel.outputs.release_tag }}"
+
+      - name: Compute lowercase image name
+        run: echo "IMAGE=ghcr.io/${OWNER,,}/kn-next-operator" >> "$GITHUB_ENV"
+        env:
+          OWNER: ${{ github.repository_owner }}
+
+      - name: Download the scanned layouts + SBOM
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: operator-scanned-layouts-${{ github.sha }}
+
+      # Refuse anything but the bytes the scan job approved. A mismatch is a hard
+      # failure, never a warning.
+      - name: Verify the downloaded layouts are the ones that were scanned
+        env:
+          EXPECTED: ${{ needs.operator-image-supply-chain.outputs.layout_sha256 }}
+          EXPECTED_MP: ${{ needs.operator-image-supply-chain.outputs.mp_layout_sha256 }}
+        run: |
+          set -euo pipefail
+          check() {
+            local dir="$1" expected="$2" actual
+            if ! printf '%s' "${expected}" | grep -Eq '^[0-9a-f]{64}$'; then
+              echo "::error::the scan job recorded no digest for ${dir} (got: '${expected}') — refusing to continue"
+              exit 1
+            fi
+            actual="$(sha256sum "${dir}/index.json" | cut -d' ' -f1)"
+            if [ "${actual}" != "${expected}" ]; then
+              echo "::error::${dir}/index.json is sha256:${actual}, the scan job scanned sha256:${expected} — refusing to continue"
+              exit 1
+            fi
+            echo "${dir} matches the scanned digest: sha256:${actual}"
+          }
+          check operator-oci "${EXPECTED}"
+          check operator-oci-mp "${EXPECTED_MP}"
+
+      # ── Everything below publishes the layouts verified above. ──────────────
 
       - name: Log in to GHCR
-        if: steps.channel.outputs.publish == 'true' && steps.trivy.outcome == 'success'
+        if: steps.channel.outputs.publish == 'true'
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
@@ -348,7 +467,7 @@ jobs:
       # packages:write + id-token:write, the same discipline that SHA-pinned
       # trivy-action/sbom-action (#202).
       - name: Install crane (version + checksum pinned)
-        if: steps.channel.outputs.publish == 'true' && steps.trivy.outcome == 'success'
+        if: steps.channel.outputs.publish == 'true'
         env:
           CRANE_VERSION: v0.21.7
           # sha256 of go-containerregistry_Linux_x86_64.tar.gz from the v0.21.7
@@ -371,7 +490,7 @@ jobs:
       # digest pin below, and fail loud if it doesn't parse (we must never sign
       # — or bake into the release bundle — a guessed digest).
       - name: Push operator image (publish channel, after the Trivy gate)
-        if: steps.channel.outputs.publish == 'true' && steps.trivy.outcome == 'success'
+        if: steps.channel.outputs.publish == 'true'
         id: push
         run: |
           set -euo pipefail
@@ -389,7 +508,7 @@ jobs:
       # provenance-bearing images. Fails loud if the pushed index carries no
       # attestation manifest or the attestation has no SLSA provenance predicate.
       - name: Verify buildkit provenance survived the push (publish channel)
-        if: steps.channel.outputs.publish == 'true' && steps.trivy.outcome == 'success'
+        if: steps.channel.outputs.publish == 'true'
         env:
           DIGEST: ${{ steps.push.outputs.digest }}
         run: |
@@ -407,13 +526,13 @@ jobs:
           echo "Buildkit SLSA provenance present: ${IMAGE}@${ATT_DIGEST}"
 
       - name: Install cosign
-        if: steps.channel.outputs.publish == 'true' && steps.trivy.outcome == 'success'
+        if: steps.channel.outputs.publish == 'true'
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
       # No working-directory default: this `run:` step executes at repo root, so it
       # references the SAME operator-sbom.spdx.json that the sbom-action wrote there.
       - name: Sign image + attest SBOM (keyless)
-        if: steps.channel.outputs.publish == 'true' && steps.trivy.outcome == 'success'
+        if: steps.channel.outputs.publish == 'true'
         env:
           COSIGN_EXPERIMENTAL: "1"
           DIGEST: ${{ steps.push.outputs.digest }}
@@ -426,7 +545,7 @@ jobs:
       # advertise the image as signed, and exercises the same hack/cosign-verify.sh
       # a client runs. The identity-regexp/issuer default to this repo's signer.
       - name: Verify operator image signature (cosign verify, publish channel)
-        if: steps.channel.outputs.publish == 'true' && steps.trivy.outcome == 'success'
+        if: steps.channel.outputs.publish == 'true'
         env:
           IDENTITY_REGEXP: https://github.com/${{ github.repository }}/.*
           DIGEST: ${{ steps.push.outputs.digest }}
@@ -439,7 +558,7 @@ jobs:
       # so a failed run leaves no `-mp` release tag behind. The platform blobs
       # already exist in the repository, so this uploads one small index.
       - name: Push Marketplace index (version tags only, #1954)
-        if: steps.channel.outputs.publish == 'true' && steps.channel.outputs.is_version_tag == 'true' && steps.trivy.outcome == 'success'
+        if: steps.channel.outputs.publish == 'true' && steps.channel.outputs.is_version_tag == 'true'
         id: push_mp
         run: |
           set -euo pipefail
@@ -456,7 +575,7 @@ jobs:
       # attestation manifest and its platform manifests carry the SAME config +
       # layer digests as the gated, signed image. Fails the run otherwise.
       - name: Assert Marketplace index has no attestations and identical bits (#1954)
-        if: steps.channel.outputs.publish == 'true' && steps.channel.outputs.is_version_tag == 'true' && steps.trivy.outcome == 'success'
+        if: steps.channel.outputs.publish == 'true' && steps.channel.outputs.is_version_tag == 'true'
         env:
           GATED_DIGEST: ${{ steps.push.outputs.digest }}
           MP_DIGEST: ${{ steps.push_mp.outputs.digest }}
@@ -466,7 +585,7 @@ jobs:
       # it gets its own keyless signature (same OIDC identity as the gated image).
       # The platform manifests underneath are the already-signed gated ones.
       - name: Sign + verify Marketplace index (version tags only, #1954)
-        if: steps.channel.outputs.publish == 'true' && steps.channel.outputs.is_version_tag == 'true' && steps.trivy.outcome == 'success'
+        if: steps.channel.outputs.publish == 'true' && steps.channel.outputs.is_version_tag == 'true'
         env:
           COSIGN_EXPERIMENTAL: "1"
           IDENTITY_REGEXP: https://github.com/${{ github.repository }}/.*
@@ -477,7 +596,7 @@ jobs:
           bash packages/kn-next-operator/hack/cosign-verify.sh "${IMAGE}@${MP_DIGEST}"
 
       - name: Tag the Marketplace index (version tags only, #1954)
-        if: steps.channel.outputs.publish == 'true' && steps.channel.outputs.is_version_tag == 'true' && steps.trivy.outcome == 'success'
+        if: steps.channel.outputs.publish == 'true' && steps.channel.outputs.is_version_tag == 'true'
         env:
           GATED_DIGEST: ${{ steps.push.outputs.digest }}
           MP_DIGEST: ${{ steps.push_mp.outputs.digest }}
@@ -507,7 +626,7 @@ jobs:
       # an unsigned or unverified digest, and (the release is immutable) a
       # failed run therefore leaves no `:vX.Y.Z` behind for a re-run to re-point.
       - name: Tag the verified digest with the release version (version tags only, #1947)
-        if: steps.channel.outputs.is_version_tag == 'true' && steps.trivy.outcome == 'success'
+        if: steps.channel.outputs.is_version_tag == 'true'
         env:
           DIGEST: ${{ steps.push.outputs.digest }}
           VERSION: ${{ steps.channel.outputs.version }}
@@ -530,13 +649,13 @@ jobs:
       # nothing) if either anchor has drifted. `main` / operator-edge builds keep
       # the committed `unreleased` sentinel: they never claim a version.
       - name: Stamp the release version into the bundle sources (version tags only, #1947)
-        if: steps.channel.outputs.is_version_tag == 'true' && steps.trivy.outcome == 'success'
+        if: steps.channel.outputs.is_version_tag == 'true'
         env:
           VERSION: ${{ steps.channel.outputs.version }}
         run: bash packages/kn-next-operator/hack/stamp-release-version.sh "${VERSION}"
 
       - name: Build installer + pin real digest (publish channel)
-        if: steps.channel.outputs.publish == 'true' && steps.trivy.outcome == 'success'
+        if: steps.channel.outputs.publish == 'true'
         env:
           DIGEST: ${{ steps.push.outputs.digest }}
         run: |
@@ -572,7 +691,7 @@ jobs:
       # release step's `files:`; for operator-edge it is empty (no extra asset).
       - name: Write install-vX.Y.Z.yaml (version tags only, #1947)
         id: versioned_asset
-        if: steps.channel.outputs.publish == 'true' && steps.trivy.outcome == 'success'
+        if: steps.channel.outputs.publish == 'true'
         env:
           DIGEST: ${{ steps.push.outputs.digest }}
           VERSION: ${{ steps.channel.outputs.version }}
@@ -599,7 +718,7 @@ jobs:
       # the release body and the publish step, on both attached assets, and fails
       # closed (unreadable file, no image line, missing digest). Plain `node`.
       - name: Verify the bundle pins this release's image (version tags only, S3-O2)
-        if: steps.channel.outputs.is_version_tag == 'true' && steps.trivy.outcome == 'success'
+        if: steps.channel.outputs.is_version_tag == 'true'
         env:
           DIGEST: ${{ steps.push.outputs.digest }}
           RELEASE_TAG: ${{ steps.channel.outputs.release_tag }}
@@ -620,7 +739,7 @@ jobs:
       # whose rolling release keeps whatever body it has.
       - name: Generate the operator release body from install.yaml (version tags only, #2153)
         id: release_body
-        if: steps.channel.outputs.publish == 'true' && steps.trivy.outcome == 'success' && steps.channel.outputs.is_version_tag == 'true'
+        if: steps.channel.outputs.publish == 'true' && steps.channel.outputs.is_version_tag == 'true'
         env:
           RELEASE_TAG: ${{ steps.channel.outputs.release_tag }}
           REPO: ${{ github.repository }}
@@ -634,7 +753,7 @@ jobs:
       # Transient CI artifact (auth-gated) — handy for inspecting the exact bundle a
       # run produced, but NOT the user-facing install path.
       - name: Upload install.yaml artifact (main + release tags only)
-        if: steps.channel.outputs.publish == 'true' && steps.trivy.outcome == 'success'
+        if: steps.channel.outputs.publish == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: operator-install-bundle-${{ github.sha }}
@@ -657,7 +776,7 @@ jobs:
       # (`releases/download/<channel>/install.yaml`), which no other release
       # can steal.
       - name: Publish install.yaml to its channel release (#1667)
-        if: steps.channel.outputs.publish == 'true' && steps.trivy.outcome == 'success'
+        if: steps.channel.outputs.publish == 'true'
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           tag_name: ${{ steps.channel.outputs.release_tag }}
@@ -680,7 +799,7 @@ jobs:
       # that IS mutable by design: "install the latest operator" always means
       # the newest cut stable version, re-published to this same tag.
       - name: Move operator-latest to this stable release (#1667)
-        if: steps.channel.outputs.is_stable == 'true' && steps.trivy.outcome == 'success'
+        if: steps.channel.outputs.is_stable == 'true'
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           tag_name: operator-latest

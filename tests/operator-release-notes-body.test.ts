@@ -304,7 +304,8 @@ describe('operator-supply-chain.yml wiring', () => {
   ) as {
     jobs: Record<string, { steps: Array<Record<string, unknown>> }>;
   };
-  const steps = doc.jobs['operator-image-supply-chain'].steps;
+  // The release steps run in the push-only publish job (the scan job is read-only).
+  const steps = doc.jobs['operator-image-publish'].steps;
   const bodyIdx = steps.findIndex((s) =>
     String(s.run ?? '').includes('operator-release-notes-body.mjs'),
   );
@@ -317,7 +318,7 @@ describe('operator-supply-chain.yml wiring', () => {
     const step = steps[bodyIdx];
     expect(String(step.run)).toContain('packages/kn-next-operator/dist/install.yaml');
     expect(String(step.if)).toContain("steps.channel.outputs.is_version_tag == 'true'");
-    expect(String(step.if)).toContain("steps.trivy.outcome == 'success'");
+    expect(String(step.if)).toContain("steps.channel.outputs.publish == 'true'");
   });
 
   it('builds the body before the release step and hands it over as body_path', () => {
