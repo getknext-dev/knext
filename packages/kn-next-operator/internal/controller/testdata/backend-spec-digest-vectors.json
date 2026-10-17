@@ -223,6 +223,30 @@
       "digest": "sha256:b3d21abebb36f6496a88afe706517d5a48af46651b6fc19d9d18d754d61947d8"
     },
     {
+      "name": "an empty string is dropped even where the Go type does not omit it",
+      "spec": {
+        "zone": "orders",
+        "image": "registry.example.com/fn@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "volumes": [
+          {
+            "name": "v",
+            "mountPath": "/v",
+            "secret": {
+              "secretName": "orders-db",
+              "items": [
+                {
+                  "key": "k",
+                  "path": ""
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "canonical": "ds5:images95:registry.example.com/fn@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaas7:volumeslds9:mountPaths2:/vs4:names1:vs6:secretds5:itemslds3:keys1:kees10:secretNames9:orders-dbeeee",
+      "digest": "sha256:e7eb67d7c900449f86ede5492cae39c9dc3252c72dbad9baa6a090ccc90bc266"
+    },
+    {
       "name": "absent twin of the zero-ish case",
       "spec": {
         "zone": "orders",
