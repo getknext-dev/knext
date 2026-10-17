@@ -115,6 +115,30 @@ export const WEIGHTED_ON_ONE_REF_ONLY = Object.freeze([
 /** @param {{ relPath: string }} p */
 export const proverWeight = (p) => PROVER_WEIGHT_MINUTES[p.relPath] ?? 1;
 
+/**
+ * Provers that get a leg of their OWN, by path, with the reason.
+ *
+ * `mutation-prove-cdn-purge.mjs` row M03 (MAX_ATTEMPTS 3 -> 4) made the spec run
+ * away: the retry back-off table had no fourth entry, `sleep(NaN)` poisoned the
+ * fake clock, and the rate limiter then spun forever pushing to an array, taking
+ * the hosted runner's 16 GB in seconds. The runner died with no log, TWICE, in the
+ * same leg. The cause is fixed (the fake clock now refuses a non-finite sleep and
+ * a runaway count) and the lane now kills a runaway prover, but a prover that has
+ * once taken a runner down stays isolated: a loss then costs one prover, not the
+ * 30 others that share its leg.
+ *
+ * The list is applied only where the prover EXISTS, and only when at least one
+ * balanced leg remains, so the file stays identical on every ref. Isolated provers
+ * take the LAST legs, one each; everything else is balanced over the rest.
+ */
+export const ISOLATED_PROVERS = Object.freeze([
+  {
+    prover: 'scripts/mutation-prove-cdn-purge.mjs',
+    reason:
+      'row M03 ran away with memory (NaN sleep spun a fake-clock loop) and killed the hosted runner twice',
+  },
+]);
+
 const byPath = (a, b) => (a.relPath < b.relPath ? -1 : a.relPath > b.relPath ? 1 : 0);
 
 /**
@@ -128,15 +152,25 @@ const byPath = (a, b) => (a.relPath < b.relPath ? -1 : a.relPath > b.relPath ? 1
  * @returns {Map<string, number>} relPath -> 0-based shard
  */
 function assignShards(provers, count) {
-  const order = [...provers].sort((a, b) => proverWeight(b) - proverWeight(a) || byPath(a, b));
-  const load = new Array(count).fill(0);
+  const isolatedPaths = new Set(ISOLATED_PROVERS.map((i) => i.prover));
+  let isolated = provers.filter((p) => isolatedPaths.has(p.relPath)).sort(byPath);
+  // Isolation needs a balanced leg left over for everything else.
+  if (isolated.length >= count) isolated = [];
+  const taken = new Set(isolated.map((p) => p.relPath));
+  const rest = provers.filter((p) => !taken.has(p.relPath));
+  const balanced = count - isolated.length;
+  const order = [...rest].sort((a, b) => proverWeight(b) - proverWeight(a) || byPath(a, b));
+  const load = new Array(balanced).fill(0);
   const owner = new Map();
   for (const p of order) {
     let best = 0;
-    for (let k = 1; k < count; k++) if (load[k] < load[best]) best = k;
+    for (let k = 1; k < balanced; k++) if (load[k] < load[best]) best = k;
     owner.set(p.relPath, best);
     load[best] += proverWeight(p);
   }
+  isolated.forEach((p, i) => {
+    owner.set(p.relPath, balanced + i);
+  });
   return owner;
 }
 

@@ -31,6 +31,11 @@ export const DEFAULT_THRESHOLDS = Object.freeze({
   hardFreeDiskMiB: 1024,
   hardAvailMemMiB: 256,
   softFreeDiskMiB: 3072,
+  // MID-prover: kill the running prover's process group when available memory
+  // falls below this. Picked with jev (2048 over 1024 and 512) for a 16 GB runner:
+  // a real runaway grew about 270 MB/s, the watch polls every 2 s, and healthy
+  // legs sit at about 14 GB available.
+  killAvailMemMiB: 2048,
 });
 
 const MIB = 1024 * 1024;
@@ -50,6 +55,7 @@ export function thresholdsFromEnv(env = process.env) {
     hardFreeDiskMiB: read('KNEXT_LANE_MIN_FREE_DISK_MIB', DEFAULT_THRESHOLDS.hardFreeDiskMiB),
     hardAvailMemMiB: read('KNEXT_LANE_MIN_AVAIL_MEM_MIB', DEFAULT_THRESHOLDS.hardAvailMemMiB),
     softFreeDiskMiB: read('KNEXT_LANE_SOFT_FREE_DISK_MIB', DEFAULT_THRESHOLDS.softFreeDiskMiB),
+    killAvailMemMiB: read('KNEXT_LANE_KILL_AVAIL_MEM_MIB', DEFAULT_THRESHOLDS.killAvailMemMiB),
   };
 }
 
@@ -104,6 +110,57 @@ export function evaluateResources(res, t) {
     };
   }
   return { level: 'ok', reasons: [] };
+}
+
+/**
+ * Is a RUNNING prover consuming the machine? Pure; the runner polls it.
+ *
+ * @param {{ availMemMiB: number|null }} res
+ * @param {{ killAvailMemMiB: number }} t
+ * @returns {string | null} the reason to kill, or null
+ */
+export function runawayReason(res, t) {
+  if (res.availMemMiB !== null && res.availMemMiB < t.killAvailMemMiB) {
+    return `available memory ${Math.round(res.availMemMiB)} MiB < ${t.killAvailMemMiB} MiB while the prover was running`;
+  }
+  return null;
+}
+
+/**
+ * May we signal the process GROUP `-pid`? Only a real child's own group: an
+ * integer above 1 that is not this process. `kill(-0)` signals the caller's whole
+ * group and `kill(-1)` signals every process the user can reach, either of which
+ * would take the runner agent down with it; a failed spawn leaves `pid`
+ * undefined, and `-undefined` is NaN. Anything else falls back to signalling the
+ * child alone.
+ *
+ * @param {unknown} pid
+ * @param {number} selfPid
+ */
+export function isSafeGroupTarget(pid, selfPid = process.pid) {
+  return Number.isInteger(pid) && pid > 1 && pid !== selfPid;
+}
+
+/** The count of numeric entries in a /proc listing (processes), or null. */
+export function countProcesses(procEntries) {
+  return procEntries === null ? null : procEntries.filter((n) => /^\d+$/.test(n)).length;
+}
+
+/**
+ * One sample line, streamed to the log every few seconds while a prover runs, so
+ * what the machine looked like up to the moment of a lost runner survives in the
+ * log. `extra` carries the parts that need a subprocess (top processes, kernel
+ * log), gathered by the runner because this library does not spawn.
+ *
+ * @param {{ prover: string, res: object, procs: number|null, load: number[], extra?: string[] }} s
+ */
+export function sampleLine({ prover, res, procs, load, extra = [] }) {
+  const f = (n) => (n === null ? 'unknown' : `${Math.round(n)}`);
+  const head =
+    `   sample [${prover.replace('scripts/mutation-prove-', '')}]: ` +
+    `mem avail ${f(res.availMemMiB)} MiB, procs ${procs ?? 'unknown'}, ` +
+    `load ${load.map((n) => n.toFixed(2)).join('/')}, disk free ${f(res.freeDiskMiB)} MiB`;
+  return [head, ...extra.map((l) => `      ${l}`)].join('\n');
 }
 
 /** One human line, printed after every prover. */

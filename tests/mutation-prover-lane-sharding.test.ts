@@ -19,11 +19,15 @@ import {
   knownRedMarkdown,
 } from '../scripts/lib/known-red-provers.mjs';
 import {
+  countProcesses,
   DEFAULT_THRESHOLDS,
   describeResources,
   evaluateResources,
+  isSafeGroupTarget,
   parseMeminfo,
   REGENERABLE_BUILD_DIRS,
+  runawayReason,
+  sampleLine,
   thresholdsFromEnv,
 } from '../scripts/lib/lane-resources.mjs';
 import { discoverProvers, PROVER_RE } from '../scripts/lib/prover-lane.mjs';
@@ -31,6 +35,7 @@ import {
   aggregateReports,
   buildMatrix,
   estimateShardMinutes,
+  ISOLATED_PROVERS,
   LANE_REFS,
   makeReport,
   PROVER_WEIGHT_MINUTES,
@@ -423,7 +428,50 @@ describe('#2499 resource tripwire — pure logic', () => {
       hardFreeDiskMiB: 1024,
       hardAvailMemMiB: 256,
       softFreeDiskMiB: 3072,
+      killAvailMemMiB: 2048,
     });
+  });
+
+  it('a RUNNING prover is a runaway only below the kill threshold, and the reason names the number', () => {
+    const t = DEFAULT_THRESHOLDS;
+    expect(runawayReason({ availMemMiB: 14_000 }, t)).toBeNull();
+    expect(runawayReason({ availMemMiB: null }, t)).toBeNull();
+    expect(runawayReason({ availMemMiB: t.killAvailMemMiB }, t)).toBeNull();
+    expect(runawayReason({ availMemMiB: t.killAvailMemMiB - 1 }, t)).toMatch(
+      /available memory 2047 MiB < 2048 MiB while the prover was running/,
+    );
+  });
+
+  it('the kill threshold is env-overridable', () => {
+    expect(thresholdsFromEnv({ KNEXT_LANE_KILL_AVAIL_MEM_MIB: '512' }).killAvailMemMiB).toBe(512);
+  });
+
+  it('only a real child’s own group may be signalled (never 0, 1, NaN or ourselves)', () => {
+    expect(isSafeGroupTarget(4242, 100)).toBe(true);
+    for (const bad of [0, 1, -1, Number.NaN, undefined, null, '5', 1.5, 100]) {
+      expect(isSafeGroupTarget(bad, 100), String(bad)).toBe(false);
+    }
+  });
+
+  it('counts only numeric /proc entries as processes', () => {
+    expect(countProcesses(['1', '42', 'self', 'sys', '9000'])).toBe(3);
+    expect(countProcesses(null)).toBeNull();
+  });
+
+  it('the sample line carries memory, processes, load, disk and any extra lines', () => {
+    const line = sampleLine({
+      prover: 'scripts/mutation-prove-cdn-purge.mjs',
+      res: { availMemMiB: 1234, freeDiskMiB: 5678 },
+      procs: 321,
+      load: [1.5, 2, 0.25],
+      extra: ['ps: 1 0 100 00:01 node', 'kernel: Out of memory'],
+    });
+    expect(line).toContain('sample [cdn-purge.mjs]');
+    expect(line).toContain('mem avail 1234 MiB');
+    expect(line).toContain('procs 321');
+    expect(line).toContain('load 1.50/2.00/0.25');
+    expect(line).toContain('disk free 5678 MiB');
+    expect(line).toContain('kernel: Out of memory');
   });
 
   it('the description line is what the runner prints', () => {
@@ -574,6 +622,88 @@ describe('#2499 the known-red list labels the alert, it never excuses a prover',
   });
 });
 
+describe('#2499 an isolated prover gets a leg of its own, and the union stays exact', () => {
+  const ISO = ISOLATED_PROVERS[0].prover;
+  const withIso = () => [...fakeProvers(40), { relPath: ISO }];
+  const legsOf = (all: Array<{ relPath: string }>, count: number) =>
+    Array.from({ length: count }, (_, i) => shardProvers(all, i + 1, count).map((p) => p.relPath));
+
+  it('the list names its reason and a real prover path', () => {
+    for (const i of ISOLATED_PROVERS) {
+      expect(i.prover).toMatch(/^scripts\/mutation-prove-.*\.mjs$/);
+      expect(i.reason.length).toBeGreaterThan(20);
+    }
+  });
+
+  it('the isolated prover is ALONE in the last leg', () => {
+    const legs = legsOf(withIso(), 6);
+    expect(legs[5]).toEqual([ISO]);
+    for (const leg of legs.slice(0, 5)) expect(leg).not.toContain(ISO);
+  });
+
+  it('the union over all legs is still the full set, exactly once', () => {
+    for (const count of [2, 3, 6, 7]) {
+      const all = withIso();
+      const seen = legsOf(all, count).flat();
+      expect(seen.length, `count=${count}`).toBe(all.length);
+      expect([...new Set(seen)].sort(), `count=${count}`).toEqual(all.map((p) => p.relPath).sort());
+    }
+  });
+
+  it('the rest is still balanced over the remaining legs', () => {
+    const legs = legsOf(withIso(), 6).slice(0, 5);
+    const sizes = legs.map((l) => l.length);
+    expect(Math.max(...sizes) - Math.min(...sizes)).toBeLessThanOrEqual(1);
+  });
+
+  it('with no balanced leg left (one leg), isolation is skipped and nothing is dropped', () => {
+    const legs = legsOf(withIso(), 1);
+    expect(legs[0].length).toBe(41);
+  });
+
+  it('a ref without the prover is unaffected (the list is inert, not an error)', () => {
+    const legs = legsOf(fakeProvers(40), 6);
+    expect(legs.flat().length).toBe(40);
+    for (const leg of legs) expect(leg.length).toBeGreaterThan(0);
+  });
+
+  it('is independent of input order', () => {
+    const a = withIso();
+    expect(legsOf([...a].reverse(), 6)).toEqual(legsOf(a, 6));
+  });
+
+  it('the aggregate accepts the isolated layout (recomputed from the same function)', () => {
+    const all = withIso();
+    const discovered = all.map((p) => p.relPath);
+    const expected = Array.from({ length: 6 }, (_, i) => ({
+      ref: 'integration/v2',
+      sha: 'c'.repeat(40),
+      shard: i + 1,
+      shards: 6,
+    }));
+    const reports = expected.map((leg) =>
+      makeReport({
+        ...leg,
+        discovered,
+        results: shardProvers(all, leg.shard, 6).map((p) => ({
+          relPath: p.relPath,
+          summary: { declared: 1, run: 1 },
+          findings: [],
+        })),
+      }),
+    );
+    const out = aggregateReports({ expected, reports });
+    expect(out.findings).toEqual([]);
+    expect(out.unionVerified).toEqual(['integration/v2']);
+  });
+
+  it('on the real tree, if the prover exists it is alone in the last leg', () => {
+    const all = discoverProvers(REPO_ROOT) as Array<{ relPath: string }>;
+    if (!all.some((p) => p.relPath === ISO)) return;
+    expect(shardProvers(all, 6, 6).map((p) => p.relPath)).toEqual([ISO]);
+  });
+});
+
 describe('#2208 the per-prover bound', () => {
   it('defaults to a finite, positive bound well under the per-leg ceiling', () => {
     const ms = proverTimeoutMs({});
@@ -642,6 +772,10 @@ describe('#2208 the runner: --shard, --list, --report and a PER-PROVER timeout',
     'KNEXT_LANE_MIN_FREE_DISK_MIB',
     'KNEXT_LANE_MIN_AVAIL_MEM_MIB',
     'KNEXT_LANE_SOFT_FREE_DISK_MIB',
+    'KNEXT_LANE_KILL_AVAIL_MEM_MIB',
+    'KNEXT_LANE_MEMINFO_PATH',
+    'KNEXT_LANE_SAMPLE_MS',
+    'KNEXT_LANE_WATCH_MS',
   ];
   const hermeticEnv = (extra: Record<string, string> = {}) => {
     const env: Record<string, string | undefined> = { ...process.env };
@@ -666,6 +800,80 @@ describe('#2208 the runner: --shard, --list, --report and a PER-PROVER timeout',
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  describe('the watch: samples while a prover runs and kills a runaway', () => {
+    const meminfo = (dir: string, availMiB: number) => {
+      const path = join(dir, 'meminfo');
+      writeFileSync(path, `MemTotal:       16384000 kB\nMemAvailable:    ${availMiB * 1024} kB\n`);
+      return path;
+    };
+    const base = { KNEXT_LANE_MIN_AVAIL_MEM_MIB: '0', KNEXT_LANE_MIN_FREE_DISK_MIB: '0' };
+    const marker = (name: string) =>
+      `import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(name)}, 'ran');` +
+      `console.log('::prover-summary:: ' + JSON.stringify({ declared: 1, run: 1 }));`;
+
+    it('streams a sample line (memory, processes, load) every interval WHILE the prover runs', () => {
+      const dir = makeTree({
+        'mutation-prove-a.mjs': `await new Promise((r) => setTimeout(r, 1800));
+          console.log('::prover-summary:: ' + JSON.stringify({ declared: 1, run: 1 }));`,
+      });
+      try {
+        const r = run(dir, [], {
+          ...base,
+          KNEXT_LANE_MEMINFO_PATH: meminfo(dir, 8000),
+          KNEXT_LANE_SAMPLE_MS: '300',
+          KNEXT_LANE_WATCH_MS: '200',
+        });
+        expect(r.status, `${r.stdout}${r.stderr}`).toBe(0);
+        const samples =
+          r.stdout.match(/sample \[a\.mjs\]: mem avail 8000 MiB, procs \S+, load \S+/g) ?? [];
+        expect(samples.length, 'sample lines while it ran').toBeGreaterThanOrEqual(2);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }, 30_000);
+
+    it('kills a prover whose machine runs out of memory, names it, and the NEXT prover still runs', () => {
+      const dir = makeTree({
+        'mutation-prove-a-runaway.mjs': 'setInterval(() => {}, 1000);',
+        'mutation-prove-b-after.mjs': marker('ran-b'),
+      });
+      try {
+        const report = join(dir, 'report.json');
+        const t0 = Date.now();
+        const r = run(dir, ['--report', report], {
+          ...base,
+          KNEXT_LANE_MEMINFO_PATH: meminfo(dir, 100), // 100 MiB available: starved
+          KNEXT_LANE_WATCH_MS: '200',
+          KNEXT_PROVER_TIMEOUT_MS: '20000', // the watch must win long before this
+        });
+        expect(Date.now() - t0, 'the runaway was not killed promptly').toBeLessThan(15_000);
+        expect(r.status).not.toBe(0);
+        expect(`${r.stdout}${r.stderr}`).toMatch(
+          /RESOURCE RUNAWAY: available memory 100 MiB < 2048 MiB/,
+        );
+        const rep = JSON.parse(read(report));
+        const by = Object.fromEntries(rep.results.map((x: { relPath: string }) => [x.relPath, x]));
+        expect(by['scripts/mutation-prove-a-runaway.mjs'].findings.join(' ')).toMatch(
+          /RESOURCE RUNAWAY/,
+        );
+        expect(existsSync(join(dir, 'ran-b')), 'the next prover did not run').toBe(true);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }, 40_000);
+
+    it('a healthy machine is never killed', () => {
+      const dir = makeTree({ 'mutation-prove-a.mjs': marker('ran-a') });
+      try {
+        const r = run(dir, [], { ...base, KNEXT_LANE_MEMINFO_PATH: meminfo(dir, 14_000) });
+        expect(r.status, `${r.stdout}${r.stderr}`).toBe(0);
+        expect(`${r.stdout}${r.stderr}`).not.toMatch(/RESOURCE RUNAWAY/);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
   });
 
   describe('resource tripwire and between-prover cleanup', () => {
