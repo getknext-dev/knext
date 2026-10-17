@@ -13,9 +13,7 @@ too, rather than left implied.
   default from 1.30, so an app stored before a validation rule was tightened keeps accepting changes
   that leave the checked field alone. On 1.28 and 1.29 ratcheting is off: an app whose
   `cache.keyPrefix` the cluster now refuses is rejected on its next spec change of any kind, until
-  the prefix is fixed (see [key prefix rules](/docs/isr-caching#key-prefix-check-upgrade)). The
-  pinned Knative Serving release itself still starts on 1.28, which is why this floor is stated
-  here rather than enforced by the install.
+  the prefix is fixed (see [key prefix rules](/docs/isr-caching#key-prefix-check-upgrade)).
 - **The operator's install bundle also needs 1.30.** It ships a `ValidatingAdmissionPolicy` that
   limits the operator's Secret and ConfigMap writes (see
   [Security](/docs/security#write-policy)), and that API is generally available from 1.30. Before

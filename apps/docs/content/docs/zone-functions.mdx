@@ -137,8 +137,8 @@ JWKS ConfigMap. `/var/run/knext` is reserved for these mounts. Until the zone's 
 function starts, but its generated interceptor refuses every call except the health check.
 
 The operator creates and rotates these two objects, and the install bundle's admission policy
-lets its ServiceAccount write nothing but a Secret ending in `-knext-signing-key` and a ConfigMap
-ending in `-knext-jwks` (Kubernetes 1.30 or later). See
+lets its ServiceAccount write nothing but an `Opaque` Secret ending in `-knext-signing-key` and a
+ConfigMap ending in `-knext-jwks` (Kubernetes 1.30 or later). See
 [Security](/docs/security#write-policy).
 
 A function mounts the JWKS only if the zone's `NextApp` controls the ConfigMap, meaning the

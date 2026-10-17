@@ -165,8 +165,9 @@ functions accept their own key: **the namespace is the trust boundary**, as for 
 
 **Narrowing: the operator's write policy (#2462).** The install bundle ships a
 `ValidatingAdmissionPolicy` and its binding (`config/admission`) that confine the operator's
-ServiceAccount, and only that identity, to the names it writes: Secrets ending `-knext-signing-key`
-and ConfigMaps ending `-knext-jwks`, on create, update and delete. Any other write by the operator
+ServiceAccount, and only that identity, to the names it writes: `Opaque` Secrets ending
+`-knext-signing-key` and ConfigMaps ending `-knext-jwks`, on create, update and delete (the type is
+checked on create and update). Any other write by the operator
 is refused with 403 whatever its RBAC says, which removes the overwrite capability described in the
 blast radius above. Every other principal is untouched: the garbage collector that deletes a zone's
 objects with its `NextApp`, the namespace controller, a tenant, a human who deletes the key Secret
@@ -191,11 +192,23 @@ to replace it, and a ServiceAccount with the operator's name in another namespac
   writes exactly two objects, and no other Secret or ConfigMap: the leader-election lock is a Lease
   (pinned in `cmd/main_test.go`), and the `config-network` ConfigMap in the bundle is applied by
   whoever installs it, not written by the operator.
+- *Type (round-2 review finding).* The name alone was a bypass. A Secret of type
+  `kubernetes.io/service-account-token` named `x-knext-signing-key`, annotated
+  `kubernetes.io/service-account.name: <privileged ServiceAccount>`, is filled in by the tokens
+  controller with that ServiceAccount's credential, and the operator can `get` the Secret it wrote:
+  it becomes that ServiceAccount (the envtest rows reproduced the create succeeding before the fix).
+  The policy therefore also admits only `Opaque` on create and update (variable
+  `allowedSecretType`; a delete creates no credential and is not checked). A Secret's type is
+  immutable, so checking the new object also refuses an update of a foreign token Secret that
+  carries an allowed name. The check reads the field as `dyn(object).type` and only for Secrets,
+  because the policy also matches ConfigMaps, which have no type. The scan pins the code side: the
+  writer's Secret literal must set `Type` to the constant `Opaque`, nothing may assign a Secret's
+  `Type` afterwards, and the policy's allowed type must equal it.
 - *Version floor.* `ValidatingAdmissionPolicy` is `admissionregistration.k8s.io/v1` from
-  Kubernetes 1.30, the documented server floor (support matrix). The bundle is therefore one
-  artifact; there is no policy-free variant. On an older cluster the apply rejects the two policy
-  objects and the rest of the bundle applies, leaving the operator unrestricted. The older install
-  page that still says 1.27+ conflicts with the support matrix and is flagged for the maintainer.
+  Kubernetes 1.30, the documented server floor (support matrix, and now the install page too). The
+  bundle is one artifact; there is no policy-free variant (jev: align the docs 1.00, ship a second
+  bundle 0.00). On an older cluster the apply rejects the two policy objects and the rest of the
+  bundle applies, leaving the operator unrestricted.
 
 **Defence in depth: the function mounts the JWKS only if the zone controls it (#2464).** Before it
 renders a function, the BackendService reconciler reads the metadata of `<zone>-knext-jwks`
@@ -233,9 +246,10 @@ optional mount; a replaced one is unmounted and mounts again once it is gone; th
 the uncached reader; a read failure changes nothing), and the mutation prover
 `scripts/mutation-prove-2052-backendservice.mjs` (one row per rule).
 
-**Residual.** (a) The write policy (#2462, above) bounds **names, not ownership**. A compromised
-operator can still overwrite an object that carries an allowed name and belongs to someone else
-(another zone's `<zone>-knext-signing-key` or `<zone>-knext-jwks`); the reconciler's own
+**Residual.** (a) The write policy (#2462, above) bounds **name and Secret type, not ownership**. A
+compromised operator can still overwrite an `Opaque` Secret or a ConfigMap that carries an allowed
+name and belongs to someone else (another zone's `<zone>-knext-signing-key` or
+`<zone>-knext-jwks`); the reconciler's own
 controller-ownership test refuses that in normal operation, the policy does not enforce it.
 Requiring a controller `ownerReference` to a `NextApp` on update and delete would close it, and was
 left out on purpose (jev 1.00 for names only): it risks breaking crash recovery and the adoption of
@@ -266,11 +280,16 @@ no key material in events, logs, status or errors).
 
 **Enforcement (#2462).** `operator_write_policy_envtest_test.go` (the shipped policy on a real
 kube-apiserver: the operator identity, bound to the shipped role, writes its two names and is
-refused any other on create, update and delete; cannot remove its own binding; other principals
-and a same-named ServiceAccount elsewhere are untouched; the real zone reconciler creates and
-rotates under the policy; and the proof reddens when the JWKS name leaves the allow-list),
+refused any other on create, update and delete; refused a service-account-token, dockerconfigjson or
+tls Secret under an allowed name, and cannot update a foreign token Secret that carries one; cannot
+remove its own binding; other principals and a same-named ServiceAccount elsewhere are untouched;
+the real zone reconciler creates and rotates under the policy; and the proof reddens when the JWKS
+name leaves the allow-list), `operator_write_policy_bundle_envtest_test.go` (the rendered bundle's
+policy on a real apiserver, identity taken from the rendered ClusterRoleBinding, token Secret
+refused),
 `operator_write_inventory_test.go` (the type-checked scan of the operator's source, the lockstep with
-the allow-list in both directions, and the no-self-edit scan of `config/rbac`),
+the allow-list in both directions, the Opaque-only Secret type, and the no-self-edit scan of
+`config/rbac`),
 `internal/install/operator_write_policy_test.go` (the policy is strict, is in the default overlay,
 and in the rendered bundle confines exactly the identity the operator runs as), and the mutation
 prover `scripts/mutation-prove-2462-operator-write-policy.mjs` (one row per rule, run nightly).
