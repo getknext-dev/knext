@@ -206,8 +206,8 @@ const SCANNER = [
     id: 'S20',
     subject: 'lib',
     claim: 'test files are scanned as if they were app code',
-    anchor: '!TEST_FILE.test(name)',
-    replacement: 'true',
+    anchor: '} else if (CODE_FILE.test(name) && !TEST_FILE.test(name)) {',
+    replacement: '} else if (CODE_FILE.test(name)) {',
   },
   {
     id: 'S21',
