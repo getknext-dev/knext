@@ -262,6 +262,111 @@ exclude (
   });
 });
 
+describe('integrity: a source re-pinned to new bytes is a change', () => {
+  const jsonc = (t: string) => Bun.JSONC.parse(t) as any;
+  const tarball = (sha: string) =>
+    `{"packages":{"t":["t@https://example.com/t-1.0.0.tgz",{},"${sha}"]}}`;
+  const heads = (text: string) =>
+    parseLockfile('bun.lock', text, jsonc).map((e: any) => ({ ...e, lockfile: 'bun.lock' }));
+
+  it('bun.lock: the integrity of an unresolved entry is read from the last string field', () => {
+    const [shortForm] = heads(tarball('sha512-OLD'));
+    expect(shortForm.integrity).toBe('sha512-OLD');
+    const [registryForm] = parseLockfile(
+      'bun.lock',
+      '{"packages":{"a":["a@1.0.0","https://npm.corp.example/",{},"sha512-REG"]}}',
+      jsonc,
+    );
+    expect(registryForm.integrity).toBe('sha512-REG');
+  });
+
+  it('bun.lock: re-pinning a tarball to new bytes under the SAME url is a changed entry', () => {
+    const changed = changedEntries(heads(tarball('sha512-NEW')), heads(tarball('sha512-OLD')));
+    expect(changed).toHaveLength(1);
+    expect(changed[0].integrity).toBe('sha512-NEW');
+  });
+
+  it('bun.lock: the same hash is not a change', () => {
+    expect(changedEntries(heads(tarball('sha512-OLD')), heads(tarball('sha512-OLD')))).toEqual([]);
+  });
+
+  it('package-lock.json: an integrity-only re-pin of a non-registry source is a changed entry', () => {
+    const lock = (integrity: string) =>
+      JSON.stringify({
+        packages: {
+          'node_modules/g': { version: '1.0.0', resolved: 'git+ssh://x/y.git#abc', integrity },
+        },
+      });
+    const mk = (i: string) =>
+      parseLockfile('package-lock.json', lock(i)).map((e: any) => ({
+        ...e,
+        lockfile: 'package-lock.json',
+      }));
+    expect(mk('sha512-OLD')[0].integrity).toBe('sha512-OLD');
+    expect(changedEntries(mk('sha512-NEW'), mk('sha512-OLD'))).toHaveLength(1);
+    expect(changedEntries(mk('sha512-OLD'), mk('sha512-OLD'))).toEqual([]);
+  });
+
+  it('Cargo git sources carry the revision in the key: a new rev is a change', () => {
+    const lock = (rev: string) =>
+      `[[package]]\nname = "time"\nversion = "0.1.0"\nsource = "git+https://github.com/o/r?rev=${rev}#${rev}"\n`;
+    const mk = (rev: string) =>
+      parseLockfile('Cargo.lock', lock(rev)).map((e: any) => ({ ...e, lockfile: 'Cargo.lock' }));
+    expect(changedEntries(mk('bbbb'), mk('aaaa'))).toHaveLength(1);
+    expect(changedEntries(mk('aaaa'), mk('aaaa'))).toEqual([]);
+  });
+
+  it('go.mod replacements carry their version in the key: a new replacement version is a change', () => {
+    const mk = (v: string) =>
+      parseLockfile('go.mod', `require a/b v1.0.0\nreplace a/b => c/d ${v}\n`).map((e: any) => ({
+        ...e,
+        lockfile: 'go.mod',
+      }));
+    expect(changedEntries(mk('v1.0.2'), mk('v1.0.1'))).toHaveLength(1);
+  });
+
+  it('an exception without the hash does NOT excuse a hashed entry; one with the hash does', async () => {
+    const base = {
+      ecosystem: 'npm',
+      package: 't',
+      version: 'https://example.com/t-1.0.0.tgz',
+      justification: 'vendored tarball with the fix, reviewed the unpacked contents',
+      added: '2026-10-01',
+      expires: '2026-12-01',
+    };
+    const e = (integrity: string) =>
+      entry({ name: 't', version: base.version, unresolved: 'x', integrity });
+    const unscoped = loadExceptions({ allow: [base] }, TODAY);
+    const scoped = loadExceptions({ allow: [{ ...base, integrity: 'sha512-OLD' }] }, TODAY);
+    const look = async () => NOW;
+    expect((await run([e('sha512-OLD')], look, { exceptions: unscoped })).unresolved).toHaveLength(
+      1,
+    );
+    expect((await run([e('sha512-OLD')], look, { exceptions: scoped })).unresolved).toEqual([]);
+    // re-pinned to new bytes: the excepted hash no longer matches
+    expect((await run([e('sha512-NEW')], look, { exceptions: scoped })).unresolved).toHaveLength(1);
+    // an entry with no hash at all is still excused by an exception that names none
+    const noHash = entry({ name: 't', version: base.version, unresolved: 'x' });
+    expect((await run([noHash], look, { exceptions: unscoped })).unresolved).toEqual([]);
+  });
+
+  it('loadExceptions accepts an integrity key and rejects a malformed one', () => {
+    const ok = {
+      ecosystem: 'npm',
+      package: 't',
+      version: 'https://example.com/t.tgz',
+      integrity: 'sha512-AbC+/=',
+      justification: 'vendored tarball with the fix, reviewed the unpacked contents',
+      added: '2026-10-01',
+      expires: '2026-12-01',
+    };
+    expect(() => loadExceptions({ allow: [ok] }, TODAY)).not.toThrow();
+    expect(() => loadExceptions({ allow: [{ ...ok, integrity: 'has space' }] }, TODAY)).toThrow(
+      /integrity/,
+    );
+  });
+});
+
 describe('changedEntries', () => {
   it('returns what head adds or alters, per lockfile, never removals', () => {
     const base = [entry(), entry({ name: 'gone' })];

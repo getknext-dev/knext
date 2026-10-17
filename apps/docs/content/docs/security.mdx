@@ -234,7 +234,9 @@ The same discipline applies to what knext itself builds from, before any image e
   (npm, Cargo or Go) fails if the registry says that version is younger than three days, or if
   the registry cannot be reached. A dependency that does not come from the public registry at
   all (a git or tarball source, another registry) has no publish time to check and fails the same
-  way. The only way past either is a scoped, short-lived, justified exception.
+  way. The only way past either is a scoped, short-lived, justified exception. The Go check uses
+  the module proxy's recorded publish time, which a compromised maintainer can backdate, so for Go
+  it is a delay on honest releases, not a defence against a malicious one.
 - **Install scripts are an allowlist** — only a reviewed list of dependencies may run a
   lifecycle script during install. Adding a dependency that can run one needs an explicit,
   justified review.
