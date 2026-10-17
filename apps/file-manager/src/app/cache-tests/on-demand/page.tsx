@@ -1,4 +1,6 @@
 import { revalidatePath, revalidateTag, unstable_cache } from 'next/cache';
+import { authorizeMutation } from '@/app/_auth/mutation-auth';
+import TokenField from '@/components/TokenField';
 
 // Allow dynamic for server actions to work
 export const dynamic = 'force-dynamic';
@@ -45,23 +47,39 @@ const getSummary = unstable_cache(
   { tags: ['products', 'orders'] },
 );
 
-async function invalidateProducts() {
+async function invalidateProducts(formData: FormData) {
   'use server';
+  // Invalidating the cache is a mutation: authenticate first (public POST endpoint).
+  if (!(await authorizeMutation(formData))) {
+    throw new Error('Unauthorized');
+  }
   revalidateTag('products', 'max');
 }
 
-async function invalidateOrders() {
+async function invalidateOrders(formData: FormData) {
   'use server';
+  // Invalidating the cache is a mutation: authenticate first (public POST endpoint).
+  if (!(await authorizeMutation(formData))) {
+    throw new Error('Unauthorized');
+  }
   revalidateTag('orders', 'max');
 }
 
-async function invalidatePath() {
+async function invalidatePath(formData: FormData) {
   'use server';
+  // Invalidating the cache is a mutation: authenticate first (public POST endpoint).
+  if (!(await authorizeMutation(formData))) {
+    throw new Error('Unauthorized');
+  }
   revalidatePath('/cache-tests/on-demand');
 }
 
-async function invalidateAll() {
+async function invalidateAll(formData: FormData) {
   'use server';
+  // Invalidating the cache is a mutation: authenticate first (public POST endpoint).
+  if (!(await authorizeMutation(formData))) {
+    throw new Error('Unauthorized');
+  }
   revalidateTag('products', 'max');
   revalidateTag('orders', 'max');
 }
@@ -83,7 +101,8 @@ export default async function OnDemandPage() {
       <div className="mb-8 p-6 bg-white/5 border border-white/10 rounded-xl">
         <h2 className="text-lg font-semibold text-white mb-4">Invalidation Controls</h2>
         <div className="flex flex-wrap gap-3">
-          <form action={invalidateProducts}>
+          <form action={invalidateProducts} className="flex items-end gap-2">
+            <TokenField id="token-invalidateProducts" />
             <button
               type="submit"
               className="px-4 py-2 bg-green-500/20 hover:bg-green-500/30 text-green-300 rounded-lg transition-colors"
@@ -91,7 +110,8 @@ export default async function OnDemandPage() {
               🏷️ Invalidate "products"
             </button>
           </form>
-          <form action={invalidateOrders}>
+          <form action={invalidateOrders} className="flex items-end gap-2">
+            <TokenField id="token-invalidateOrders" />
             <button
               type="submit"
               className="px-4 py-2 bg-blue-500/20 hover:bg-blue-500/30 text-blue-300 rounded-lg transition-colors"
@@ -99,7 +119,8 @@ export default async function OnDemandPage() {
               🏷️ Invalidate "orders"
             </button>
           </form>
-          <form action={invalidatePath}>
+          <form action={invalidatePath} className="flex items-end gap-2">
+            <TokenField id="token-invalidatePath" />
             <button
               type="submit"
               className="px-4 py-2 bg-yellow-500/20 hover:bg-yellow-500/30 text-yellow-300 rounded-lg transition-colors"
@@ -107,7 +128,8 @@ export default async function OnDemandPage() {
               📁 Invalidate Path
             </button>
           </form>
-          <form action={invalidateAll}>
+          <form action={invalidateAll} className="flex items-end gap-2">
+            <TokenField id="token-invalidateAll" />
             <button
               type="submit"
               className="px-4 py-2 bg-red-500/20 hover:bg-red-500/30 text-red-300 rounded-lg transition-colors"

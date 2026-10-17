@@ -187,14 +187,22 @@ Reads run in server components / route handlers; wrap writes in `'use server'` a
 'use server';
 import { revalidatePath } from 'next/cache';
 import { addMessage } from '@/db/queries';
+import { authorizeMutation } from '@/lib/mutation-auth'; // your auth check
 
 export async function postMessage(formData: FormData): Promise<void> {
+  // A 'use server' export is a public POST endpoint: authenticate before any write.
+  if (!(await authorizeMutation(formData))) throw new Error('Unauthorized');
   const body = String(formData.get('body') ?? '').trim();
   if (!body) return;
   await addMessage({ author: 'anonymous', body });
   revalidatePath('/');
 }
 ```
+
+A Server Action is reachable by anyone who can reach the app, so the first line checks the caller and
+refuses before anything is written. The example app's `authorizeMutation` (`apps/db-demo/src/lib/mutation-auth.ts`)
+reads a write token from `DB_DEMO_WRITE_TOKEN`, is fail-closed when it is unset, and accepts it as a
+`Bearer` header or a `token` form field. See [Security](/docs/security) for the pattern.
 
 Rule of thumb: **write, or read-your-own-write → `getDb()`**; **read that tolerates a few seconds
 of staleness → `getDbRO()`**.

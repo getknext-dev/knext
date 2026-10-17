@@ -33,6 +33,58 @@ prefetchable/link-triggerable and would leak the Bearer token into URLs and logs
 returns `405` for the unexported GET; `POST` is the only invalidation entrypoint.
 </Callout>
 
+### Server Actions are endpoints too
+
+Every function exported from a `'use server'` file is a public `POST` endpoint: anyone who can
+reach your app can call it, whether or not they ever loaded the page with its form. A Server Action
+that writes needs the same authentication as a mutating route.
+
+The reference app (`apps/file-manager`) shows the pattern. The **first statement** of every action
+checks the caller and refuses before anything else runs:
+
+```ts
+'use server';
+
+import { authorizeMutation } from './_auth/mutation-auth';
+
+export async function uploadFile(formData: FormData) {
+  if (!(await authorizeMutation(formData))) return { error: 'Unauthorized' };
+  // ...only now touch storage, the database or the cache
+}
+```
+
+`authorizeMutation` uses the same token and rules as the cache routes: `CACHE_INVALIDATE_TOKEN`,
+fail-closed when unset, constant-time compare. A script sends it as `Authorization: Bearer <token>`;
+a browser form sends it in a `token` field, because a plain `<form>` cannot set headers.
+
+<Callout type="warn">
+In the reference app this one token is now the **admin credential**, not just the cache-invalidation
+key: it also authorizes file uploads, adding users, creating and seeding the demo tables, and reading
+the audit log. Anyone who holds it can do all of those. Give it a long random value per deployment,
+keep it in a Kubernetes Secret, never reuse it across apps or environments, and rotate it when it may
+have leaked. If you want cache invalidation to hold a weaker credential than data writes, give the
+writes their own token and their own check.
+</Callout>
+
+Two details matter when you copy the pattern: the check is `async`, so it must be **awaited**
+(`if (!(await authorizeMutation(formData)))`; without `await` a Promise is always truthy and the
+check never refuses), and nothing in the action may redefine the name `authorizeMutation`.
+
+Two more rules the reference app follows for uploads:
+
+- **Never use the client's filename as the storage key.** Store under a generated id plus the
+  validated name, and insert a new row each time. Two uploads of `report.pdf` then become two
+  objects, and one can never overwrite the other. Refuse a name containing a path separator, a
+  control character, or nothing but dots.
+- **Gate reads of private data too.** `GET /api/audit` returns audit rows, so it takes the same
+  Bearer token and answers `private, no-store`, so a shared cache cannot replay it to a caller
+  without one.
+
+A CI scan in the knext repository parses every Server Action and mutating route in the example
+apps and the app templates, and fails the build if one does not begin with such a check. It also
+fails on anything it cannot read (a handler re-exported from another file, for example) instead of
+passing it.
+
 The browser RUM beacon `POST /api/rum` is a deliberate, justified exception — a bounded metrics
 aggregator, not a write primitive. See [Observability → RUM](/docs/observability#rum-web-vitals)
 for the full rationale.
