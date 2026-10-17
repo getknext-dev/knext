@@ -55,6 +55,13 @@
   Both applies carry `--validate=strict` and run after `preflightCRSchema`. The deploy path **never**
   shells `func deploy` or `kn service` (a scanning guard enforces it). No raw Knative objects, ever;
   the operator remains the single source of truth and reconciles both CRs.
+- **(AMENDED 2026-10-17, founder-approved, v2 Sprint 5 close.)** The invariant is about **app
+  state**: **every app-state CLI cluster write targets a knext CR** (`NextApp` or `BackendService`).
+  Writes that are not app state are named, counted exceptions in the cluster-write scan
+  (`scripts/lib/cli-cluster-write-scan.mjs`, `KIND_EXCEPTIONS` / `MANIFEST_WRITES`), and any write
+  outside that list fails CI: `knext loadtest`'s k6 ConfigMap + Job (#1544, still debt), the
+  `ci-preflight` SelfSubjectAccess/RulesReview queries (not stored), and `init-ci`'s RBAC YAML
+  (rendered by `credential-scope.ts`, written to disk for the user to apply, never applied by the CLI).
 - **Known gap that consolidation did NOT close (see `docs/V1_ROADMAP.md` §2.1):** `cr-builder.ts:364`
   hardcodes `apiVersion: apps.kn-next.dev/v1alpha1` and nothing in `src/cli/` negotiates the version
   against the cluster, so a newer CLI can emit a field an older operator's CRD does not know.
