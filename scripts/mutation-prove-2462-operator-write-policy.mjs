@@ -13,6 +13,9 @@
  *     test (contains instead of endsWith), the resource-to-list ternary, the
  *     DELETE name source, the exact-identity equality (negated, loosened to every
  *     ServiceAccount), and the 403 reason;
+ *   - the Secret type: the policy pins it (a service-account-token Secret under an
+ *     allowed name would let the operator mint a credential), on create and update
+ *     but not on delete or ConfigMaps, and the writer builds only that type;
  *   - the binding: it must Deny, name the policy, and not narrow the scope;
  *   - the kustomize wiring: the policy is in the default overlay, the namespace
  *     and name are rewritten from the real ServiceAccount (a wrong source or a
@@ -105,6 +108,8 @@ const APISERVER = unit('TestOperatorWritePolicyNarrowsSecretAndConfigMapWrites')
 const BUNDLE = { kind: 'bundle' };
 /** The rendered bundle's policy on a real apiserver, confining the identity its ClusterRoleBinding grants. */
 const BUNDLE_APISERVER = { kind: 'bundle-apiserver' };
+/** The Secret type: the writer builds Opaque Secrets, never changes the type, and the policy admits exactly that. */
+const OPAQUE = unit('TestOperatorWritesOnlyOpaqueSecrets');
 /** The RBAC scan: no shipped rule may let the operator write its own policy. */
 const NO_SELF_EDIT = unit('TestOperatorCannotEditItsOwnWritePolicy');
 /** The leader-election lock must stay a Lease (a ConfigMap lock would be refused by the policy). */
@@ -219,10 +224,77 @@ const MUTATIONS = [
   },
   {
     id: 'P14',
-    claim: 'a refusal is no longer a 403 Forbidden',
+    claim: 'a name refusal is no longer a 403 Forbidden',
     subject: 'policy',
-    anchor: '    reason: Forbidden',
-    replacement: '    reason: Invalid',
+    // Whole lines from the line start: the marker comment goes above the replacement.
+    anchor: String.raw`    messageExpression: "'the knext operator may not ' + request.operation.lowerAscii() + ' the ' + request.resource.resource + ' object \"' + variables.objectName + '\": it writes only the per-zone signing key and JWKS'"
+    reason: Forbidden`,
+    replacement: String.raw`    messageExpression: "'the knext operator may not ' + request.operation.lowerAscii() + ' the ' + request.resource.resource + ' object \"' + variables.objectName + '\": it writes only the per-zone signing key and JWKS'"
+    reason: Invalid`,
+    test: APISERVER,
+  },
+  // --- the Secret type (a service-account-token Secret under an allowed name) ----
+  {
+    id: 'T01',
+    claim:
+      'the type check is removed: a service-account-token Secret under an allowed name is admitted',
+    subject: 'policy',
+    anchor: `  - expression: "request.resource.resource != 'secrets' || request.operation == 'DELETE' || dyn(object).type == variables.allowedSecretType"
+    message: "the knext operator may write only Opaque Secrets: a service-account-token or any other Secret type under an allowed name would let it mint a credential"
+    reason: Forbidden`,
+    replacement: '',
+    test: APISERVER,
+  },
+  {
+    id: 'T02',
+    claim: 'the type check admits any non-empty type',
+    subject: 'policy',
+    anchor: `  - expression: "request.resource.resource != 'secrets' || request.operation == 'DELETE' || dyn(object).type == variables.allowedSecretType"`,
+    replacement: `  - expression: "request.resource.resource != 'secrets' || request.operation == 'DELETE' || dyn(object).type != ''"`,
+    test: APISERVER,
+  },
+  {
+    id: 'T03',
+    claim:
+      'the type check also runs on DELETE, where there is no new object, so an owned name errors',
+    subject: 'policy',
+    anchor: `  - expression: "request.resource.resource != 'secrets' || request.operation == 'DELETE' || dyn(object).type == variables.allowedSecretType"`,
+    replacement: `  - expression: "request.resource.resource != 'secrets' || dyn(object).type == variables.allowedSecretType"`,
+    test: APISERVER,
+  },
+  {
+    id: 'T04',
+    claim: 'the type check also runs on ConfigMaps, which have no type, so the JWKS is refused',
+    subject: 'policy',
+    anchor: `  - expression: "request.resource.resource != 'secrets' || request.operation == 'DELETE' || dyn(object).type == variables.allowedSecretType"`,
+    replacement: `  - expression: "request.operation == 'DELETE' || dyn(object).type == variables.allowedSecretType"`,
+    test: APISERVER,
+  },
+  {
+    id: 'T05',
+    claim:
+      'the type check skips UPDATE, so a foreign token Secret under an allowed name can be changed',
+    subject: 'policy',
+    anchor: `  - expression: "request.resource.resource != 'secrets' || request.operation == 'DELETE' || dyn(object).type == variables.allowedSecretType"`,
+    replacement: `  - expression: "request.resource.resource != 'secrets' || request.operation != 'CREATE' || dyn(object).type == variables.allowedSecretType"`,
+    test: APISERVER,
+  },
+  {
+    id: 'T06',
+    claim: 'the allowed type is changed to a type the operator does not write (lockstep)',
+    subject: 'policy',
+    anchor: `    expression: "'Opaque'"`,
+    replacement: `    expression: "'kubernetes.io/service-account-token'"`,
+    test: OPAQUE,
+  },
+  {
+    id: 'T07',
+    claim: 'the type refusal is no longer a 403 Forbidden',
+    subject: 'policy',
+    anchor: String.raw`    message: "the knext operator may write only Opaque Secrets: a service-account-token or any other Secret type under an allowed name would let it mint a credential"
+    reason: Forbidden`,
+    replacement: String.raw`    message: "the knext operator may write only Opaque Secrets: a service-account-token or any other Secret type under an allowed name would let it mint a credential"
+    reason: Invalid`,
     test: APISERVER,
   },
   // --- the binding ---------------------------------------------------------------
@@ -351,6 +423,31 @@ const MUTATIONS = [
     anchor: '		if err := r.Create(ctx, cm); err != nil {',
     replacement: '		if err := error(nil); err != nil {',
     test: INVENTORY,
+  },
+  {
+    id: 'C07',
+    claim: 'the signing-key Secret is built as a service-account-token Secret',
+    subject: 'zonekey',
+    anchor: '			Type: corev1.SecretTypeOpaque,',
+    replacement: '			Type: corev1.SecretTypeServiceAccountToken,',
+    test: OPAQUE,
+  },
+  {
+    id: 'C08',
+    claim: 'the signing-key Secret leaves its type unset, so the lockstep cannot see it',
+    subject: 'zonekey',
+    anchor: '			Type: corev1.SecretTypeOpaque,',
+    replacement: '',
+    test: OPAQUE,
+  },
+  {
+    id: 'C09',
+    claim: "a Secret's type is assigned after its literal was built",
+    subject: 'zonekey',
+    anchor: 'func (r *NextAppReconciler) writeJWKSConfigMap(',
+    replacement:
+      'func sneakyType(sec *corev1.Secret) {\n\tsec.Type = corev1.SecretTypeTLS\n}\n\nfunc (r *NextAppReconciler) writeJWKSConfigMap(',
+    test: OPAQUE,
   },
   // --- the operator must not be able to lift its own restriction -----------------
   {
@@ -525,6 +622,31 @@ for (const m of ROWS) {
   }
 }
 console.log(`${NAME}: baseline green (${seen.size} distinct guards)`);
+
+// CANARY: prove the harness can SEE red before any green below is trusted. A runner
+// that always exits 0 would certify every row while nothing ran. The canary is a real
+// mutation of the real policy (fail open) graded by the fast, cluster-free guard, so
+// it also proves the runner is pointed at the right test.
+{
+  assertTreeClean(REPO_ROOT, 'before the canary');
+  const canary = MUTATIONS.find((m) => m.id === 'P01');
+  const snap = snapshot(PROVER.subjects[canary.subject]);
+  let code;
+  try {
+    mutate(snap, canary.anchor, canary.replacement);
+    code = guardExit(canary.test, KUSTOMIZE);
+  } finally {
+    restore(snap);
+  }
+  assertTreeClean(REPO_ROOT, 'after the canary');
+  if (code === 0) {
+    console.error(
+      `${NAME}: the canary mutation (${canary.claim}) left its guard GREEN; the harness cannot observe red, so nothing below would mean anything`,
+    );
+    process.exit(2);
+  }
+  console.log(`${NAME}: canary ok: the harness sees red (exit ${code})`);
+}
 
 let failed = 0;
 for (const m of ROWS) {
