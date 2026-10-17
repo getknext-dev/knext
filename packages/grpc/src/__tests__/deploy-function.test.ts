@@ -83,6 +83,28 @@ describe('knext deploy function: apply order and strictness', () => {
     expect(JSON.stringify(cr)).not.toContain('ownerReferences');
   });
 
+  it('prints the exact backends entry to paste, with the image digest as the pin', async () => {
+    const dir = copyFixtureZone('deploy-pin-hint');
+    const { host } = recordingHost();
+    const c = capture();
+    expect(await run('deploy', ARGS, { ...c.io, cwd: dir, host })).toBe(0);
+    // The zone's pin is the digest only (the registry path may move, the content
+    // may not): "@sha256:<64 hex>", exactly what the CRD accepts.
+    expect(c.out()).toContain(`{ name: 'orders', image: '@${DIGEST}' }`);
+    expect(c.out()).toMatch(/pins? the image/i);
+    expect(c.out()).not.toContain(IMAGE);
+  });
+
+  it('prints the same pin entry whatever tag the image reference carries', async () => {
+    const dir = copyFixtureZone('deploy-pin-hint-tag');
+    const { host } = recordingHost();
+    const c = capture();
+    const tagged = `registry.example.com/shop/orders:v7@${DIGEST}`;
+    const args = ['function', 'orders', '--zone', 'shop', '--image', tagged];
+    expect(await run('deploy', args, { ...c.io, cwd: dir, host })).toBe(0);
+    expect(c.out()).toContain(`{ name: 'orders', image: '@${DIGEST}' }`);
+  });
+
   it('threads --context to both the preflight and the apply', async () => {
     const dir = copyFixtureZone('deploy-context');
     const { host, calls } = recordingHost();

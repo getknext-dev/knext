@@ -173,6 +173,7 @@ func (r *BackendServiceReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		for _, entry := range obs.zone.Spec.Backends {
 			if entry.Service == bs.Name {
 				obs.zoneListed = true
+				obs.imageMismatch = imagePinMismatch(entry.Image, bs.Spec.Image)
 			}
 		}
 	}

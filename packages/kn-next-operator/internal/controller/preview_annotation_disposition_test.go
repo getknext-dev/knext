@@ -296,7 +296,10 @@ func maximalWarmScheduleSpec() appsv1alpha1.NextAppSpec {
 		// for a two-sided binding resolved at reconcile time (applyBindingEnv),
 		// so it is outside both scans in this file; it only needs non-zero
 		// values here for the leaf walk.
-		Backends: []appsv1alpha1.BackendBinding{{Name: "pricing", Service: "pricing"}},
+		Backends: []appsv1alpha1.BackendBinding{{
+			Name: "pricing", Service: "pricing",
+			Image: "@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
+		}},
 		// spec.cdn renders KNEXT_CDN_* container env, also outside both scans in
 		// this file, and likewise only needs non-zero values here.
 		CDN: &appsv1alpha1.CDNSpec{

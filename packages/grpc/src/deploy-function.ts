@@ -232,10 +232,23 @@ export async function deployFunction(args: DeployFunctionArgs): Promise<number> 
       );
       return 1;
     }
+    // The zone's half of the binding. Its optional `image` pins the digest of
+    // the image just applied (digest only: the registry path may move, the
+    // content may not), so a later swap of spec.image by anyone with `update`
+    // on backendservices is refused instead of inheriting the zone's database
+    // Secret. Core's schema, the CRD and the operator agree on this shape.
+    const pin = `@${v.image.slice(v.image.lastIndexOf('@') + 1)}`;
     io.stdout(
-      `BackendService ${namespace}/${name} applied. The function runs once the zone lists it: ` +
-        `add { name: '${name}' } to \`backends\` in knext.config.ts and run \`knext deploy\`, ` +
-        'then the operator reconciles both halves.\n',
+      `BackendService ${namespace}/${name} applied. The function runs once the zone lists it. ` +
+        'Add this entry to `backends` in knext.config.ts and run `knext deploy`, ' +
+        'then the operator reconciles both halves:\n' +
+        `  { name: '${name}', image: '${pin}' }\n` +
+        'The `image` field pins the image the zone binds: if the BackendService image ever ' +
+        'changes without the zone changing the pin too, the function is refused and nothing is ' +
+        'mounted into it. Leave `image` out to keep the name-only binding. After you deploy a new ' +
+        'function image, update the pin in the same step. The pin binds the image only: whoever can ' +
+        "write the BackendService can still change the function's env, envFrom and volumes, so grant " +
+        'update on backendservices only to people who may read the zone database Secret.\n',
     );
     return 0;
   } catch (err) {
