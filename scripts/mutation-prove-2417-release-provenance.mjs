@@ -137,8 +137,10 @@ const MUTATIONS = [
     id: 'R10',
     claim: 'the GitHub-release job is granted id-token: write',
     subject: 'rel',
-    anchor: '    permissions:\n      contents: write\n    steps:',
-    replacement: '    permissions:\n      contents: write\n      id-token: write\n    steps:',
+    anchor:
+      '    permissions:\n      contents: write\n    concurrency:\n      group: github-release-',
+    replacement:
+      '    permissions:\n      contents: write\n      id-token: write\n    concurrency:\n      group: github-release-',
   },
   {
     id: 'N1',
