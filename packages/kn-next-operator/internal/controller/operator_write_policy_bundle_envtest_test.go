@@ -210,6 +210,14 @@ func TestRenderedBundlePolicyConfinesTheIdentityTheOperatorRunsAs(t *testing.T) 
 	if err := operator.Create(ctx, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "evil", Namespace: "bundle-zone"}}); !isPolicyDenial(err) {
 		t.Errorf("the operator created a stranger's ConfigMap (want a policy denial): %v", err)
 	}
+	// The name is allowed but the type is not: a service-account-token Secret would be
+	// filled in with a credential for the ServiceAccount its annotation names.
+	token := secret(ZoneSigningKeySecretName("kube-system"))
+	token.Type = corev1.SecretTypeServiceAccountToken
+	token.Annotations = map[string]string{corev1.ServiceAccountNameKey: "privileged"}
+	if err := operator.Create(ctx, token); !isPolicyDenial(err) || !strings.Contains(err.Error(), "Opaque") {
+		t.Errorf("the operator created a service-account-token Secret under an allowed name (want the type denial): %v", err)
+	}
 	// Not affected: the cluster admin.
 	if err := admin.Create(ctx, secret("admin-free")); err != nil {
 		t.Errorf("the cluster admin was refused: %v", err)

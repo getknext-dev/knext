@@ -291,6 +291,60 @@ func TestOperatorWritePolicyNarrowsSecretAndConfigMapWrites(t *testing.T) {
 		}
 	})
 
+	t.Run("the operator may write only Opaque Secrets, even under an allowed name", func(t *testing.T) {
+		// The name is allowed; the type is not. A service-account-token Secret is
+		// filled in by the tokens controller with a credential for the ServiceAccount
+		// its annotation names, and the operator can read the Secret it wrote, so
+		// without a type check the operator could become any ServiceAccount.
+		const policyMessage = "may write only Opaque Secrets"
+		typed := func(name string, secretType corev1.SecretType, data map[string][]byte) *corev1.Secret {
+			s := secret(name)
+			s.Type = secretType
+			s.StringData = nil
+			s.Data = data
+			if secretType == corev1.SecretTypeServiceAccountToken {
+				s.Annotations = map[string]string{corev1.ServiceAccountNameKey: "privileged"}
+			}
+			return s
+		}
+		typeDenial := func(err error) bool { return isPolicyDenial(err) && strings.Contains(err.Error(), policyMessage) }
+
+		for _, c := range []struct {
+			what string
+			s    *corev1.Secret
+		}{
+			{"service-account-token", typed(ZoneSigningKeySecretName("kube-system"), corev1.SecretTypeServiceAccountToken, nil)},
+			{"dockerconfigjson", typed(ZoneSigningKeySecretName("docker"), corev1.SecretTypeDockerConfigJson, map[string][]byte{corev1.DockerConfigJsonKey: []byte("{}")})},
+			{"tls", typed(ZoneSigningKeySecretName("tls"), corev1.SecretTypeTLS, map[string][]byte{corev1.TLSCertKey: []byte("c"), corev1.TLSPrivateKeyKey: []byte("k")})},
+		} {
+			if err := operator.Create(ctx, c.s); !typeDenial(err) {
+				t.Errorf("the operator created a %s Secret under the allowed name %s (want the policy's type denial): %v", c.what, c.s.Name, err)
+			}
+			if err := admin.Get(ctx, client.ObjectKeyFromObject(c.s), &corev1.Secret{}); !apierrors.IsNotFound(err) {
+				t.Errorf("the refused %s Secret was stored anyway: %v", c.what, err)
+			}
+		}
+
+		// Controls: explicit Opaque under an allowed name is fine, so the denial
+		// above is the type and not the name.
+		ok := typed(ZoneSigningKeySecretName("opaque"), corev1.SecretTypeOpaque, map[string][]byte{"k": []byte("v")})
+		if err := operator.Create(ctx, ok); err != nil {
+			t.Errorf("the operator was refused an explicit Opaque Secret under an allowed name: %v", err)
+		}
+
+		// A token Secret somebody else created under an allowed name: the operator may
+		// neither update it (the type is immutable, and it is not Opaque) nor turn it
+		// into something else. The refusal is the policy's type check.
+		foreign := typed(ZoneSigningKeySecretName("foreign-token"), corev1.SecretTypeServiceAccountToken, nil)
+		if err := admin.Create(ctx, foreign); err != nil {
+			t.Fatal(err)
+		}
+		foreign.Labels = map[string]string{"touched": "by-the-operator"}
+		if err := operator.Update(ctx, foreign); !typeDenial(err) {
+			t.Errorf("the operator updated a foreign service-account-token Secret under an allowed name (want the type denial): %v", err)
+		}
+	})
+
 	t.Run("the operator cannot lift its own restriction", func(t *testing.T) {
 		// RBAC, not the policy: the shipped role holds nothing on the policy kinds.
 		isRBACDenial := func(err error) bool {

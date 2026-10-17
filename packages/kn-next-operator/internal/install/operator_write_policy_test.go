@@ -218,6 +218,21 @@ func assertPolicyIsStrict(t *testing.T, o writePolicyObjects, where string) {
 	if len(p.Spec.Validations) == 0 {
 		t.Errorf("%s: the policy has no validation", where)
 	}
+	// The name is not enough. A service-account-token Secret under an allowed name
+	// is filled in with a credential for the ServiceAccount its annotation names,
+	// which the operator could read; the policy must also pin the Secret's type.
+	typeDeclared, typeEnforced := false, false
+	for _, v := range p.Spec.Variables {
+		typeDeclared = typeDeclared || v.Name == "allowedSecretType"
+	}
+	for _, v := range p.Spec.Validations {
+		typeEnforced = typeEnforced || strings.Contains(v.Expression, "variables.allowedSecretType")
+	}
+	if !typeDeclared || !typeEnforced {
+		t.Errorf("%s: the policy must pin the Secret type (variable allowedSecretType, used by a validation), "+
+			"or a service-account-token Secret under an allowed name lets the operator mint a credential (declared %v, enforced %v)",
+			where, typeDeclared, typeEnforced)
+	}
 
 	// The binding enforces, everywhere.
 	if b.Spec.PolicyName != p.Name {

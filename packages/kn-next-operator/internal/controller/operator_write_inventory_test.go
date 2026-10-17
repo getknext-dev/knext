@@ -65,6 +65,7 @@ import (
 	"golang.org/x/tools/go/packages"
 	"golang.org/x/tools/go/types/typeutil"
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
+	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/yaml"
 )
 
@@ -147,7 +148,13 @@ type operatorScan struct {
 	// clientsetUses lists every use of a typed clientset or apply configuration
 	// for the two kinds.
 	clientsetUses []string
-	files         int
+	// secretTypes maps a function to the Type of every core/v1 Secret literal it
+	// builds: the constant's value, "(unset)" when the literal has no Type, or
+	// "(not constant)" when it is computed.
+	secretTypes map[string][]string
+	// secretTypeAssigns lists every assignment to a Secret's Type field.
+	secretTypeAssigns []string
+	files             int
 }
 
 type literalSite struct{ pos, fn, value string }
@@ -172,6 +179,7 @@ func scanOperatorWrites(t *testing.T) *operatorScan {
 	scan := &operatorScan{
 		funcWrites: map[string]bool{}, typeRefs: map[string]bool{},
 		nameFuncs: map[string][]string{}, nonConstKind: map[string]string{},
+		secretTypes: map[string][]string{},
 	}
 	sawController := false
 	for _, p := range pkgs {
@@ -217,9 +225,52 @@ func (s *operatorScan) scanFunc(p *packages.Package, fd *ast.FuncDecl) {
 			s.scanLiteral(p, name, x)
 		case *ast.CompositeLit:
 			s.scanObjectMeta(p, name, x)
+			s.scanSecretLiteral(p, name, x)
+		case *ast.AssignStmt:
+			s.scanSecretTypeAssign(p, x)
 		}
 		return true
 	})
+}
+
+// scanSecretLiteral records the Type of a core/v1 Secret composite literal.
+func (s *operatorScan) scanSecretLiteral(p *packages.Package, fn string, lit *ast.CompositeLit) {
+	tv, ok := p.TypesInfo.Types[lit]
+	if !ok || classifyObjectArg(tv.Type) != "secrets" {
+		return
+	}
+	if named, ok := tv.Type.(*types.Named); !ok || named.Obj().Name() != "Secret" {
+		return
+	}
+	got := "(unset)"
+	for _, el := range lit.Elts {
+		kv, ok := el.(*ast.KeyValueExpr)
+		if !ok {
+			continue
+		}
+		if key, ok := kv.Key.(*ast.Ident); !ok || key.Name != "Type" {
+			continue
+		}
+		got = "(not constant)"
+		if v := p.TypesInfo.Types[kv.Value].Value; v != nil && v.Kind() == constant.String {
+			got = constant.StringVal(v)
+		}
+	}
+	s.secretTypes[fn] = append(s.secretTypes[fn], got)
+}
+
+// scanSecretTypeAssign records `<secret>.Type = ...`, which would change a
+// Secret's type after its literal was built.
+func (s *operatorScan) scanSecretTypeAssign(p *packages.Package, as *ast.AssignStmt) {
+	for _, lhs := range as.Lhs {
+		sel, ok := lhs.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "Type" {
+			continue
+		}
+		if classifyObjectArg(p.TypesInfo.TypeOf(sel.X)) == "secrets" {
+			s.secretTypeAssigns = append(s.secretTypeAssigns, p.Fset.Position(as.Pos()).String())
+		}
+	}
 }
 
 // scanPackageLevel picks up constants and declarations outside any function.
@@ -234,6 +285,8 @@ func (s *operatorScan) scanPackageLevel(p *packages.Package, file *ast.File) {
 				s.scanLiteral(p, "(package level)", x)
 			case *ast.SelectorExpr:
 				s.scanSelector(p, "(package level)", x)
+			case *ast.CompositeLit:
+				s.scanSecretLiteral(p, "(package level)", x)
 			}
 			return true
 		})
@@ -652,6 +705,66 @@ func TestPolicyAllowListEqualsWhatTheOperatorWrites(t *testing.T) {
 				"(a missing suffix breaks the reconciler; an extra one widens the operator's write power)",
 				resource, got, want[resource])
 		}
+	}
+}
+
+// TestOperatorWritesOnlyOpaqueSecrets: the policy checks a Secret's TYPE as well as
+// its name. A service-account-token Secret under an allowed name would be filled in
+// with a credential for any ServiceAccount its annotation names, which the operator
+// could then read and use, so the policy admits only the type the operator writes.
+// This pins both sides: the writer builds Opaque Secrets and never changes the type
+// afterwards, and the policy's allowed type is exactly that.
+func TestOperatorWritesOnlyOpaqueSecrets(t *testing.T) {
+	scan := scanOperatorWrites(t)
+	opaque := string(corev1.SecretTypeOpaque)
+
+	writerTypes := map[string]bool{}
+	sawWriter := false
+	for _, w := range operatorWriters {
+		if w.Resource != "secrets" {
+			continue
+		}
+		sawWriter = true
+		got := scan.secretTypes[w.Func]
+		if len(got) == 0 {
+			t.Errorf("%s builds no Secret literal: the type it writes cannot be read from the source", w.Func)
+		}
+		for _, ty := range got {
+			writerTypes[ty] = true
+			if ty != opaque {
+				t.Errorf("%s builds a Secret of type %q; the operator writes only %q (set Type explicitly, to the constant)",
+					w.Func, ty, opaque)
+			}
+		}
+	}
+	// Any other Secret literal in the operator's source may leave the type unset
+	// (a Get target) but may not name a different one.
+	for fn, tys := range scan.secretTypes {
+		for _, ty := range tys {
+			if ty != opaque && ty != "(unset)" {
+				t.Errorf("%s builds a Secret of type %q; the operator's source may name only %q", fn, ty, opaque)
+			}
+		}
+	}
+	for _, pos := range scan.secretTypeAssigns {
+		t.Errorf("%s assigns a Secret's Type; the policy admits only %q, so the type must be set once, in the literal", pos, opaque)
+	}
+	if !sawWriter {
+		t.Fatal("no Secret writer in the registry; the type guard would pass vacuously")
+	}
+
+	// Lockstep with the policy: it names the same single type, and its validation uses it.
+	policy, _ := loadShippedWritePolicy(t)
+	got := policyAllowList(t, policy, "allowedSecretType")
+	if len(got) != 1 || got[0] != opaque || !writerTypes[got[0]] {
+		t.Errorf("the policy allows Secret types %v, the operator writes %v: they must be the same single type", got, sortedVerbSet(writerTypes))
+	}
+	used := false
+	for _, v := range policy.Spec.Validations {
+		used = used || strings.Contains(v.Expression, "variables.allowedSecretType")
+	}
+	if !used {
+		t.Error("no validation uses variables.allowedSecretType: the allowed type is declared but never enforced")
 	}
 }
 
