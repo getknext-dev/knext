@@ -1,93 +1,49 @@
-import { getDbPool } from '@getknext/lib/clients';
-import { unstable_noStore } from 'next/cache';
+import TokenField from '@/components/TokenField';
+import { runSetup } from './actions';
 
-async function setupDatabase() {
-  unstable_noStore(); // Prevent static prerendering
-  const db = getDbPool();
-
-  try {
-    // Create files table
-    await db.query(`
-      CREATE TABLE IF NOT EXISTS files (
-        id SERIAL PRIMARY KEY,
-        name TEXT NOT NULL UNIQUE,
-        size INTEGER NOT NULL,
-        mime_type TEXT,
-        storage_path TEXT,
-        uploaded_at TIMESTAMP DEFAULT NOW()
-      );
-    `);
-
-    // Add missing columns if table exists (migration)
-    await db.query('ALTER TABLE files ADD COLUMN IF NOT EXISTS mime_type TEXT;').catch(() => {});
-    await db.query('ALTER TABLE files ADD COLUMN IF NOT EXISTS storage_path TEXT;').catch(() => {});
-
-    // Create users table
-    await db.query(`
-      CREATE TABLE IF NOT EXISTS users (
-        id SERIAL PRIMARY KEY,
-        name TEXT NOT NULL,
-        email TEXT NOT NULL UNIQUE,
-        role TEXT DEFAULT 'user',
-        created_at TIMESTAMP DEFAULT NOW()
-      );
-    `);
-
-    // Create audit_logs table
-    await db.query(`
-      CREATE TABLE IF NOT EXISTS audit_logs (
-        id SERIAL PRIMARY KEY,
-        action TEXT NOT NULL,
-        details TEXT,
-        created_at TIMESTAMP DEFAULT NOW()
-      );
-    `);
-
-    // Seed some data if empty
-    const userCount = await db.query('SELECT COUNT(*) FROM users');
-    if (Number.parseInt(userCount.rows[0].count, 10) === 0) {
-      await db.query(`
-        INSERT INTO users (name, email, role) VALUES 
-        ('Admin User', 'admin@example.com', 'admin'),
-        ('John Doe', 'john@example.com', 'user'),
-        ('Jane Smith', 'jane@example.com', 'editor')
-        ON CONFLICT (email) DO NOTHING;
-      `);
-    }
-
-    // Seed audit logs
-    const auditCount = await db.query('SELECT COUNT(*) FROM audit_logs');
-    if (Number.parseInt(auditCount.rows[0].count, 10) === 0) {
-      // Generate 1000 dummy logs
-      const values = Array.from(
-        { length: 1000 },
-        (_, i) => `('LOGIN', 'User logged in session ${i}', NOW() - INTERVAL '${i} minutes')`,
-      ).join(',');
-      await db.query(`INSERT INTO audit_logs (action, details, created_at) VALUES ${values}`);
-    }
-
-    return { success: true, message: 'Database initialized successfully' };
-  } catch (error: any) {
-    console.error('Database setup failed:', error);
-    return { success: false, message: error.message };
-  }
-}
-
-export default async function SetupPage() {
-  const result = await setupDatabase();
+/**
+ * Database setup. A GET only RENDERS: it never touches the database. Creating the
+ * tables and seeding data is the `runSetup` Server Action (a POST that needs the
+ * admin token), so a crawler, a prefetch or a cross-site request cannot trigger it.
+ */
+export default async function SetupPage({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
+  const params = await searchParams;
+  const done = params.done === '1';
+  const failed = params.failed === '1';
 
   return (
     <div className="p-8 text-white">
       <h1 className="text-3xl font-bold mb-4">Database Setup</h1>
-      <div className={`p-4 rounded ${result.success ? 'bg-green-800' : 'bg-red-800'}`}>
-        {result.message}
-      </div>
-      {result.success && (
-        <div className="mt-4">
-          <p>Tables created: files, users, audit_logs</p>
+
+      {done && (
+        <div className="p-4 rounded bg-green-800">
+          <p>Database initialized successfully</p>
+          <p className="mt-2">Tables created: files, users, audit_logs</p>
           <p>Seeded initial data.</p>
         </div>
       )}
+      {failed && (
+        <div className="p-4 rounded bg-red-800">
+          Database setup failed. See the server logs for the cause.
+        </div>
+      )}
+
+      <form action={runSetup} className="mt-4 max-w-sm space-y-4">
+        <p className="text-purple-200">
+          Creates the demo tables and seeds them if they are empty. Safe to run again.
+        </p>
+        <TokenField id="setup-token" />
+        <button
+          type="submit"
+          className="w-full bg-purple-600 hover:bg-purple-500 py-2 rounded font-bold"
+        >
+          Initialize database
+        </button>
+      </form>
     </div>
   );
 }

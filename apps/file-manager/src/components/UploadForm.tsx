@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import { uploadFile } from '@/app/actions';
+import TokenField from '@/components/TokenField';
 
 export default function UploadForm() {
   const [uploading, setUploading] = useState(false);
@@ -24,6 +25,7 @@ export default function UploadForm() {
 
   return (
     <form action={handleSubmit} className="space-y-4">
+      <TokenField id="upload-token" />
       <div>
         <label htmlFor="file" className="block text-sm font-medium text-purple-200 mb-2">
           Choose a file

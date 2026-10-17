@@ -205,8 +205,11 @@ export async function addMessage(input: NewMessage): Promise<Message> {
 'use server';
 import { revalidatePath } from 'next/cache';
 import { addMessage } from '@/db/queries';
+import { authorizeMutation } from '@/lib/mutation-auth'; // your auth check
 
 export async function postMessage(formData: FormData): Promise<void> {
+  // A 'use server' export is a public POST endpoint: authenticate before any write.
+  if (!(await authorizeMutation(formData))) throw new Error('Unauthorized');
   const author = String(formData.get('author') ?? '').trim() || 'anonymous';
   const body = String(formData.get('body') ?? '').trim();
   if (!body) return;

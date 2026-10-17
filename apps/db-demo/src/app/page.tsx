@@ -23,6 +23,14 @@ export default async function Home() {
       </p>
 
       <form action={postMessage} style={{ display: 'grid', gap: 8, margin: '1.5rem 0' }}>
+        <input
+          name="token"
+          type="password"
+          autoComplete="off"
+          placeholder="write token"
+          aria-label="write token"
+          required
+        />
         <input name="author" placeholder="your name" aria-label="author" />
         <textarea name="body" placeholder="leave a message" aria-label="message" required />
         <button type="submit">Post</button>
