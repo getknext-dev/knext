@@ -140,7 +140,24 @@ export function routeFetch(
     return routed;
 }
 
-/** A clock whose `sleep` records the wait and advances time without waiting. */
+/**
+ * The most waits a test may ask the fake clock for. Real purges make a handful;
+ * this is generous, and it exists so that a loop which keeps sleeping FAILS the
+ * test instead of eating the machine (see `fakeClock`).
+ */
+export const MAX_FAKE_SLEEPS = 10_000;
+
+/**
+ * A clock whose `sleep` records the wait and advances time without waiting.
+ *
+ * It REFUSES what would otherwise run away. A non-finite or negative wait turns
+ * `t` into NaN for every later timestamp, which makes the module's rate limiter
+ * (`tokens >= 1` is never true) call `sleep` forever; with an instant fake `sleep`
+ * that is a tight async loop pushing to `sleeps`, and it took a 16 GB hosted
+ * runner down in seconds when a mutation (MAX_ATTEMPTS 3 -> 4, one entry past the
+ * back-off table) fed it `sleep(NaN)`. Throwing turns the same mistake into a
+ * red test.
+ */
 export function fakeClock(start = 1_700_000_000_000) {
     let t = start;
     const sleeps: number[] = [];
@@ -148,6 +165,16 @@ export function fakeClock(start = 1_700_000_000_000) {
         sleeps,
         now: () => t,
         sleep: async (ms: number) => {
+            if (!Number.isFinite(ms) || ms < 0) {
+                throw new Error(
+                    `fakeClock: sleep(${ms}) is not a finite, non-negative wait`,
+                );
+            }
+            if (sleeps.length >= MAX_FAKE_SLEEPS) {
+                throw new Error(
+                    `fakeClock: runaway sleep loop (${MAX_FAKE_SLEEPS} waits)`,
+                );
+            }
             sleeps.push(ms);
             t += ms;
         },

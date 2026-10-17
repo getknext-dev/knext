@@ -53,6 +53,16 @@ import { declareMutations, recordMutation } from './lib/prover-report.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
+// The mutation-prover lane (#2499) hands each leg a cargo target directory outside
+// the tree through KNEXT_LANE_CARGO_TARGET_DIR. This prover runs about 20 spec runs
+// that each do a real cargo generation, so it adopts the directory for ITS OWN
+// process only (every spec it spawns inherits it): the dependency build is then
+// done once per leg rather than once per run. It is an opt-in seam, not set
+// lane-wide, because a lane-wide CARGO_TARGET_DIR broke `knext-ffi-crates`.
+if (process.env.KNEXT_LANE_CARGO_TARGET_DIR) {
+  process.env.CARGO_TARGET_DIR = process.env.KNEXT_LANE_CARGO_TARGET_DIR;
+}
+
 // JSON has no comments: the residue marker rides in as a key or an element of its own.
 const JSON_KEY_MARK = `"//${MUTATION_MARKER}": "mutated"`;
 const JSON_ELEMENT_MARK = `"//${MUTATION_MARKER}"`;
