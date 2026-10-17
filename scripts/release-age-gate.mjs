@@ -122,12 +122,7 @@ async function main() {
   const head = [];
   const base = [];
   for (const f of files) {
-    head.push(
-      ...withFile(
-        parseLockfile(f, readFileSync(resolve(REPO_ROOT, f), 'utf8'), (t) => parseJsonc(t)),
-        f,
-      ),
-    );
+    head.push(...withFile(parseLockfile(f, readFileSync(resolve(REPO_ROOT, f), 'utf8')), f));
     let baseText = null;
     try {
       baseText = execFileSync('git', ['show', `${mergeBase}:${f}`], {
@@ -139,13 +134,7 @@ async function main() {
     } catch {
       // a lockfile the change adds has no base side: every entry in it is new
     }
-    if (baseText !== null)
-      base.push(
-        ...withFile(
-          parseLockfile(f, baseText, (t) => parseJsonc(t)),
-          f,
-        ),
-      );
+    if (baseText !== null) base.push(...withFile(parseLockfile(f, baseText), f));
   }
 
   const entries = changedEntries(head, base);
@@ -172,36 +161,6 @@ async function main() {
     );
   }
   process.exit(ageFailed(result) ? 1 : 0);
-}
-
-/**
- * `bun.lock` is JSONC (comments and trailing commas). Node has no JSONC parser, so strip
- * both outside strings with a small scanner rather than pull in a dependency.
- */
-function parseJsonc(text) {
-  let out = '';
-  let inString = false;
-  for (let i = 0; i < text.length; i += 1) {
-    const c = text[i];
-    if (inString) {
-      out += c;
-      if (c === '\\') out += text[++i];
-      else if (c === '"') inString = false;
-    } else if (c === '"') {
-      inString = true;
-      out += c;
-    } else if (c === '/' && text[i + 1] === '/') {
-      while (i < text.length && text[i] !== '\n') i += 1;
-      out += '\n';
-    } else if (c === '/' && text[i + 1] === '*') {
-      i += 2;
-      while (i < text.length && !(text[i] === '*' && text[i + 1] === '/')) i += 1;
-      i += 1;
-    } else {
-      out += c;
-    }
-  }
-  return JSON.parse(out.replace(/,(\s*[}\]])/g, '$1'));
 }
 
 main().catch((err) => {

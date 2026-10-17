@@ -46,6 +46,7 @@ import {
   renderReport,
   selectLockfiles,
 } from './lib/osv-gate.mjs';
+import { parseLockfile, renderUnscannable } from './lib/release-age.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -190,15 +191,23 @@ function main() {
     today,
     full: flag('full'),
   });
-  console.log(renderReport(result));
+  // OSV matches advisories by package name and version. A source dependency, a tarball
+  // or a package from another registry is not reliably matched that way, so say what
+  // this scan did NOT cover. The release-age gate fails a NEW one of these.
+  const unscannable = renderUnscannable(
+    files.flatMap((f) =>
+      parseLockfile(f, readFileSync(resolve(REPO_ROOT, f), 'utf8')).map((e) => ({
+        ...e,
+        lockfile: f,
+      })),
+    ),
+  );
+  const report = [renderReport(result), unscannable].filter(Boolean).join('\n\n');
+  console.log(report);
   if (process.env.GITHUB_STEP_SUMMARY) {
-    writeFileSync(
-      process.env.GITHUB_STEP_SUMMARY,
-      `### OSV gate\n\n\`\`\`\n${renderReport(result)}\n\`\`\`\n`,
-      {
-        flag: 'a',
-      },
-    );
+    writeFileSync(process.env.GITHUB_STEP_SUMMARY, `### OSV gate\n\n\`\`\`\n${report}\n\`\`\`\n`, {
+      flag: 'a',
+    });
   }
   process.exit(result.failures.length > 0 ? 1 : 0);
 }

@@ -344,6 +344,9 @@ describe('loadAllowlist', () => {
     expect(bad({ added: '2026-01-01', expires: '2026-12-31' })).toThrow(/180/);
     expect(bad({ added: '2026-10-01', expires: '2027-03-30' })).not.toThrow();
   });
+  it('rejects an added date in the future (it would push the expiry cap out with it)', () => {
+    expect(bad({ added: '2026-10-25', expires: '2026-12-01' })).toThrow(/future/);
+  });
   it('rejects unknown keys (a typo must not silently widen or drop a scope)', () => {
     expect(bad({ packages: 'x' })).toThrow(/unknown/);
   });
@@ -447,6 +450,14 @@ describe('pickBase: which commit to compare against', () => {
   });
   it('returns null when nothing resolves (the caller then fails closed)', () => {
     expect(pickBase({ supplied: undefined, resolves: exists([]), currentRef: 'f' })).toBeNull();
+  });
+});
+
+describe('scripts/osv-gate.mjs: what it cannot scan', () => {
+  const src = readFileSync(resolve(REPO_ROOT, 'scripts/osv-gate.mjs'), 'utf8');
+  it('OSV matches by name and version, so the report lists git, tarball and other-registry sources it did not cover', () => {
+    expect(src).toContain('renderUnscannable(');
+    expect(src).toContain("from './lib/release-age.mjs'");
   });
 });
 
