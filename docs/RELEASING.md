@@ -37,8 +37,13 @@ package that makes the bare `npx kn-next` resolve; it forwards to `@getknext/cor
 the `fixed` group in #820, so all four now move to the same version together.
 
 All four carry `"publishConfig": { "access": "public", "provenance": true }`, so `changeset publish`
-publishes them publicly and CI attaches a signed provenance attestation (via the workflow's
-`id-token: write` permission).
+publishes them publicly and CI attaches a signed provenance attestation. The workflow is
+read-only at its top level (`contents: read`); `id-token: write`, the OIDC token-request
+credential that provenance needs, is held by the `release` job **only**. The `Publish` and
+`Heal` steps also export `NPM_CONFIG_PROVENANCE=true`, so a package that gains a public manifest
+without the `publishConfig` opt-in is still attested. Check a published version with
+`npm view @getknext/core dist.attestations` or `npm audit signatures`.
+`tests/release-provenance-scope.test.ts` pins all of this.
 
 **Does NOT publish:**
 
