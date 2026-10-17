@@ -18,10 +18,21 @@
  * Every failure here is a plain message and an exit code; nothing throws.
  */
 
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import YAML from "yaml";
 import { coreVersion } from "./core-version";
+import { runInherit } from "./exec";
+import { captureKubectl } from "./schema/kubectl-capture";
+import {
+    type KubectlCapture,
+    type KubectlResult,
+    preflightCRSchema,
+} from "./schema/preflight";
+import { UsageError, withKubeContext } from "./shared";
 
 /** The package that provides the verbs below. */
 export const GRPC_PACKAGE = "@getknext/grpc";
@@ -32,13 +43,256 @@ export const GRPC_VERBS: ReadonlySet<string> = new Set(["generate", "add"]);
 /** The module shape this core knows how to call. */
 const SUPPORTED_PROTOCOL = 1;
 
+/**
+ * The cluster seam `knext deploy function` runs on. Core owns the kubectl
+ * boundary; the package builds the `BackendService` and decides the order
+ * (preflight, then a strict apply) but never spawns anything itself.
+ * Structurally typed: core does not import the package's types.
+ */
+export interface DeployHost {
+    preflight(args: {
+        readonly crPath: string;
+        readonly namespace: string;
+        readonly context?: string;
+    }): {
+        readonly verdict: "ok" | "skew" | "blocked";
+        readonly reason: string;
+        readonly unknownFields: readonly string[];
+        readonly stderr: string;
+    };
+    /**
+     * Apply the CR file. Core builds the argv itself, so the package cannot
+     * run any other program through the seam.
+     */
+    apply(args: {
+        readonly crPath: string;
+        readonly namespace: string;
+        readonly context?: string;
+    }): void;
+}
+
 /** What core calls on `@getknext/grpc/cli`. */
 export interface GrpcCliModule {
     readonly DISPATCH_PROTOCOL: number;
     readonly GRPC_VERSION: string;
     readonly CORE_PEER_RANGE: string;
     helpText(verb: string): string;
-    run(verb: string, argv: readonly string[]): Promise<number>;
+    run(
+        verb: string,
+        argv: readonly string[],
+        io?: {
+            readonly host?: DeployHost;
+            readonly stdout?: (text: string) => void;
+            readonly stderr?: (text: string) => void;
+        },
+    ): Promise<number>;
+}
+
+/** The two kubectl processes core can run. Injectable so tests spawn nothing. */
+export interface KubectlSeam {
+    /** Capture stdout/stderr; never throws. */
+    readonly capture: KubectlCapture;
+    /** Inherit stdio; throws on a non-zero exit. */
+    readonly run: (argv: readonly string[]) => void;
+}
+
+const defaultKubectl: KubectlSeam = {
+    capture: captureKubectl,
+    run: runInherit,
+};
+
+const BACKEND_SERVICE_API_VERSION = "apps.kn-next.dev/v1alpha1";
+
+/** The only top-level keys of a BackendService this command will apply. */
+const BACKEND_SERVICE_KEYS = ["apiVersion", "kind", "metadata", "spec"];
+/** And the only metadata keys: the CLI never writes ownerReferences, finalizers or labels. */
+const BACKEND_SERVICE_METADATA_KEYS = ["name", "namespace"];
+
+/** The object core has validated: exactly the four top-level keys, nothing else. */
+interface ValidatedBackendService {
+    apiVersion: string;
+    kind: "BackendService";
+    metadata: { name: string; namespace?: string };
+    spec: unknown;
+}
+
+/**
+ * Read the file the package built and refuse anything but ONE `BackendService`
+ * of this group and version, in the namespace it is applied to. The package
+ * builds this file, but the seam does not trust it: a different kind, a second
+ * document or a stray namespace in it would be a write core never agreed to.
+ *
+ * The top-level keys are checked as a SET, not just `kind`: kubectl decodes any
+ * object carrying `items` as a list and applies the items, not the wrapper, so a
+ * `BackendService` with an `items` field would pass a kind check and apply
+ * whatever the items name. Returns the validated object (only the four keys);
+ * throws before anything runs.
+ */
+export function readValidatedBackendService(
+    crPath: string,
+    namespace: string,
+): ValidatedBackendService {
+    const docs = YAML.parseAllDocuments(readFileSync(crPath, "utf-8")).filter(
+        (d) => d.contents !== null,
+    );
+    if (docs.length !== 1) {
+        throw new UsageError(
+            `refusing to apply ${crPath}: it must hold exactly one document, found ${docs.length}`,
+        );
+    }
+    const doc = docs[0] as YAML.Document.Parsed;
+    if (doc.errors.length > 0) {
+        throw new UsageError(
+            `refusing to apply ${crPath}: ${doc.errors[0]?.message ?? "it does not parse"}`,
+        );
+    }
+    const obj: unknown = doc.toJS();
+    if (typeof obj !== "object" || obj === null || Array.isArray(obj)) {
+        throw new UsageError(
+            `refusing to apply ${crPath}: it must be a single object, not a list or a scalar`,
+        );
+    }
+    const cr = obj as Record<string, unknown> & {
+        metadata?: Record<string, unknown>;
+    };
+    if (cr.kind !== "BackendService") {
+        throw new UsageError(
+            `refusing to apply ${crPath}: kind is ${JSON.stringify(cr.kind)}, and this command applies only a BackendService`,
+        );
+    }
+    if (cr.apiVersion !== BACKEND_SERVICE_API_VERSION) {
+        throw new UsageError(
+            `refusing to apply ${crPath}: apiVersion is ${JSON.stringify(cr.apiVersion)}, expected ${BACKEND_SERVICE_API_VERSION}`,
+        );
+    }
+    const extra = Object.keys(cr).filter(
+        (k) => !BACKEND_SERVICE_KEYS.includes(k),
+    );
+    if (extra.length > 0) {
+        throw new UsageError(
+            `refusing to apply ${crPath}: unexpected top-level field(s) ${extra.join(", ")}; a BackendService has only ${BACKEND_SERVICE_KEYS.join(", ")} (kubectl treats an object with "items" as a list and applies the items)`,
+        );
+    }
+    const meta = cr.metadata;
+    if (typeof meta !== "object" || meta === null || Array.isArray(meta)) {
+        throw new UsageError(
+            `refusing to apply ${crPath}: metadata must be an object with a name`,
+        );
+    }
+    const extraMeta = Object.keys(meta).filter(
+        (k) => !BACKEND_SERVICE_METADATA_KEYS.includes(k),
+    );
+    if (extraMeta.length > 0) {
+        throw new UsageError(
+            `refusing to apply ${crPath}: unexpected metadata field(s) ${extraMeta.join(", ")}; the CLI sets only ${BACKEND_SERVICE_METADATA_KEYS.join(" and ")}`,
+        );
+    }
+    const name = meta.name;
+    if (
+        typeof name !== "string" ||
+        !/^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/.test(name) ||
+        name.length > 63
+    ) {
+        throw new UsageError(
+            `refusing to apply ${crPath}: metadata.name ${JSON.stringify(name)} is not a valid name`,
+        );
+    }
+    const ns = meta.namespace;
+    if (ns !== undefined && ns !== namespace) {
+        throw new UsageError(
+            `refusing to apply ${crPath}: its namespace is ${JSON.stringify(ns)} but it is being applied to ${JSON.stringify(namespace)}`,
+        );
+    }
+    return {
+        apiVersion: BACKEND_SERVICE_API_VERSION,
+        kind: "BackendService",
+        metadata:
+            ns === undefined ? { name } : { name, namespace: ns as string },
+        spec: cr.spec,
+    };
+}
+
+/**
+ * Validate `crPath`, write core's OWN copy of what it validated (the four keys,
+ * re-serialised as JSON) to a private directory, run `fn` on THAT file, and
+ * remove the directory. kubectl never reads the caller's path, so what was
+ * checked is exactly what is previewed and applied, and nothing in the original
+ * file that the check did not look at can reach it.
+ */
+function withValidatedCopy<T>(
+    crPath: string,
+    namespace: string,
+    fn: (corePath: string) => T,
+): T {
+    const cr = readValidatedBackendService(crPath, namespace);
+    const dir = mkdtempSync(join(tmpdir(), "knext-backendservice-"));
+    try {
+        const corePath = join(dir, `backendservice-${cr.metadata.name}.json`);
+        writeFileSync(corePath, `${JSON.stringify(cr, null, 2)}\n`, "utf-8");
+        return fn(corePath);
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+}
+
+/**
+ * The host handed to `knext deploy function`. The preflight is the same
+ * server-side `--dry-run=server --validate=strict` apply `deploy` runs for a
+ * NextApp (`preflightCRSchema`); every kubectl argv is bound to the target
+ * context.
+ */
+export function buildDeployHost(
+    kubectl: KubectlSeam = defaultKubectl,
+): DeployHost {
+    return {
+        preflight: ({ crPath, namespace, context }) => {
+            try {
+                return withValidatedCopy(crPath, namespace, (corePath) => {
+                    const outcome = preflightCRSchema(
+                        {
+                            kubectl: (argv): KubectlResult =>
+                                kubectl.capture(withKubeContext(argv, context)),
+                        },
+                        { crPath: corePath, namespace },
+                    );
+                    return {
+                        verdict: outcome.verdict,
+                        reason: outcome.reason,
+                        unknownFields: outcome.unknownFields,
+                        stderr: outcome.stderr,
+                    };
+                });
+            } catch (err) {
+                // The preflight never throws: a file core refuses is a blocked verdict
+                // that names why, and kubectl was never started.
+                return {
+                    verdict: "blocked",
+                    reason: "invalid-file",
+                    unknownFields: [],
+                    stderr: (err as Error).message,
+                };
+            }
+        },
+        apply: ({ crPath, namespace, context }) =>
+            // Validated and copied before anything runs: nothing is applied on a
+            // refusal, and kubectl reads core's copy, never `crPath`.
+            withValidatedCopy(crPath, namespace, (corePath) => {
+                kubectl.run(
+                    withKubeContext(
+                        [
+                            "kubectl",
+                            "apply",
+                            "--validate=strict",
+                            "-f",
+                            corePath,
+                            "-n",
+                            namespace,
+                        ],
+                        context,
+                    ),
+                );
+            }),
+    };
 }
 
 export interface DispatchDeps {
@@ -46,6 +300,8 @@ export interface DispatchDeps {
     readonly load?: () => Promise<GrpcCliModule>;
     readonly stdout?: (text: string) => void;
     readonly stderr?: (text: string) => void;
+    /** The kubectl processes `deploy function` runs; defaults to the real ones. */
+    readonly kubectl?: KubectlSeam;
 }
 
 // ---------------------------------------------------------------------------
@@ -159,13 +415,15 @@ async function defaultLoad(): Promise<GrpcCliModule> {
 }
 
 function displayVerb(verb: string): string {
-    return verb === "add" ? "knext add function" : `knext ${verb}`;
+    if (verb === "add") return "knext add function";
+    return verb === "deploy" ? "knext deploy function" : `knext ${verb}`;
 }
 
 function installHelp(verb: string): string {
     return `${displayVerb(verb)} — provided by the optional ${GRPC_PACKAGE} package (Beta)
 
-\`knext generate\` and \`knext add function\` come from ${GRPC_PACKAGE}, which is
+\`knext generate\`, \`knext add function\` and \`knext deploy function\` come from
+${GRPC_PACKAGE}, which is
 not installed in this app. Install it next to @getknext/core:
 
   npm install --save-dev ${GRPC_PACKAGE}
@@ -236,7 +494,15 @@ export async function dispatchGrpcVerb(
         return 1;
     }
     try {
-        return await mod.run(verb, argv);
+        // Only `deploy function` writes to the cluster, so only it is handed
+        // the kubectl seam.
+        return await (verb === "deploy"
+            ? mod.run(verb, argv, {
+                  host: buildDeployHost(deps.kubectl),
+                  stdout,
+                  stderr,
+              })
+            : mod.run(verb, argv));
     } catch (err) {
         stderr(`${typed} failed: ${(err as Error)?.message ?? String(err)}\n`);
         return 1;
@@ -251,4 +517,9 @@ export function generateMain(argv: readonly string[]): Promise<number> {
 /** `knext add` — bin entry. Answers `--help` itself when the package is missing. */
 export function addMain(argv: readonly string[]): Promise<number> {
     return dispatchGrpcVerb("add", argv, coreVersion());
+}
+
+/** `knext deploy function` — bin entry. Applies the function's BackendService. */
+export function deployFunctionMain(argv: readonly string[]): Promise<number> {
+    return dispatchGrpcVerb("deploy", ["function", ...argv], coreVersion());
 }

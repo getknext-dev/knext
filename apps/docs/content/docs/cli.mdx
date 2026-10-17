@@ -1,12 +1,13 @@
 ---
 title: CLI reference
-description: The knext CLI — create, init-ci, validate, deploy, build, doctor, status, rollback, cleanup, db bind, db migrate, gc, add function, generate, ffi.
+description: The knext CLI — create, init-ci, validate, deploy, build, doctor, status, rollback, cleanup, db bind, db migrate, gc, add function, deploy function, generate, ffi.
 ---
 
 The `knext` binary ships in **`@getknext/core`** (`npm i @getknext/core`), so it is available as
 `npx @getknext/core` in any project that depends on it. It is a small dispatcher around one job:
 **build → push → apply the `NextApp` CR**. Everything on the cluster is reconciled by the operator;
-the CLI's cluster writes are limited to applying or patching the CR, and its diagnostic commands
+the CLI's cluster writes are limited to applying or patching the CR (and, with the optional
+`@getknext/grpc` package, applying a zone function's `BackendService`), and its diagnostic commands
 are strictly read-only.
 
 Use `npx @getknext/core <command>` (or a locally installed `knext`, once `@getknext/core` is a
@@ -28,15 +29,17 @@ knext db bind        # bind an existing Postgres Secret to the CR
 knext db migrate     # apply pending migrations against the writer, once
 knext gc             # reap old _next/static/<build-id>/ asset prefixes
 knext add function   # add a Go or Rust function's contract to this zone (Beta)
+knext deploy function # apply a zone function's BackendService (Beta)
 knext generate       # write the server-only clients for this zone's functions (Beta)
 knext ffi init       # opt this zone into in-process Rust (Beta, Bun only)
 knext ffi generate   # build the zone's Rust crate and write its typed wrapper (Beta)
 knext ffi check      # fail if the committed Rust wrapper is out of date (Beta)
 ```
 
-`knext --help` lists exactly this set, `create` first. `add function` and `generate` come from one
-optional package, and the `ffi` commands from another; see
-[`knext add function`](#knext-add-function) and [`knext ffi`](#knext-ffi).
+`knext --help` lists exactly this set, `create` first. `add function`, `deploy function` and
+`generate` come from one optional package, and the `ffi` commands from another; see
+[`knext add function`](#knext-add-function), [`knext deploy function`](#knext-deploy-function) and
+[`knext ffi`](#knext-ffi).
 
 The command is `knext`. If a script still calls the older command name, see
 [Upgrading](/docs/upgrading#version-specific-step-the-kn-next-command-is-gone) for what to change.
@@ -775,6 +778,43 @@ can tell when it is older than its caller.
 
 **Exit code:** `0` on success; `1` if the function already exists (nothing is changed) or on a
 usage error.
+
+## `knext deploy function`
+
+<Callout type="warn">
+**Beta, and not published yet.** Provided by the optional `@getknext/grpc` package, like
+`knext add function`; without it the command prints how to install it and exits 1 (`--help` still
+exits 0).
+</Callout>
+
+Applies a zone function's `BackendService` to the cluster. The function's image must already be
+built and pushed; the command neither builds nor pushes it, and it never runs Knative's own `func`
+or `kn` tools. The operator does the rest.
+
+```bash
+knext deploy function orders \
+  --zone shop \
+  --image registry.example.com/shop/orders@sha256:<digest>
+```
+
+- `--zone` names the `NextApp` that owns the function, in the same namespace.
+- `--image` must be pinned by digest; a tag-only reference and `:latest` are refused.
+- The function's language comes from `knext.grpc.json`, where `knext add function` recorded it.
+- Optional: `--namespace`, `--context`, `--port`, `--proto-version`, `--no-wake-ahead`,
+  `--min-scale`, `--max-scale`, `--container-concurrency`.
+- `--dry-run` prints the resource and applies nothing, so it pipes into `kubectl apply -f -`.
+
+It applies the way `knext deploy` applies a `NextApp`. First a server-side dry run checks the
+resource under strict validation, before anything changes: if the cluster's `BackendService` CRD
+does not know a field this CLI sends, the run stops and names the field. Upgrade the operator (and
+its CRDs) first, then the CLI. Then the apply itself passes `--validate=strict`, so an unknown field
+is rejected rather than silently dropped, whatever your `kubectl` defaults to.
+
+The function runs only once the zone also lists it in `spec.backends` with `service: orders`; see
+[Zone functions](/docs/zone-functions#binding-a-function-to-its-zone). The command does not edit the
+zone's `NextApp`.
+
+**Exit code:** `0` on success; `1` on a usage error, a failed preflight, or a failed apply.
 
 ## `knext generate`
 

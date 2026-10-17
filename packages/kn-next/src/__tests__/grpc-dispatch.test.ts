@@ -27,6 +27,7 @@ import { fileURLToPath } from "node:url";
 import { KNOWN_VERBS } from "../cli/dispatch";
 import {
     addMain,
+    deployFunctionMain,
     dispatchGrpcVerb,
     GRPC_PACKAGE,
     GRPC_VERBS,
@@ -187,6 +188,52 @@ describe("the dispatcher routes generate and add, and nothing else", () => {
         }
         expect(writes.join("")).toContain("knext generate");
         expect(writes.join("")).toContain("knext add function");
+    });
+
+    it("hands the cluster seam to `deploy function` and to no other verb", async () => {
+        const seen: Record<string, unknown> = {};
+        const { mod } = fakeModule({
+            run: async (verb, _argv, io) => {
+                seen[verb] = io?.host;
+                return 0;
+            },
+        });
+        const kubectl = {
+            capture: () => ({ ok: true, stdout: "", stderr: "" }),
+            run: () => {},
+        };
+        for (const [verb, argv] of [
+            ["generate", []],
+            ["add", ["function", "x", "--lang", "go"]],
+            ["deploy", ["function", "x"]],
+        ] as const) {
+            await dispatchGrpcVerb(verb, argv, "2.0.0", {
+                load: async () => mod,
+                kubectl,
+                ...capture().io,
+            });
+        }
+        expect(seen.generate).toBeUndefined();
+        expect(seen.add).toBeUndefined();
+        expect(seen.deploy).toBeDefined();
+    });
+
+    it("deployFunctionMain names `knext deploy function` and answers --help without the package", async () => {
+        const writes: string[] = [];
+        const original = process.stdout.write.bind(process.stdout);
+        process.stdout.write = ((chunk: string | Uint8Array) => {
+            writes.push(String(chunk));
+            return true;
+        }) as typeof process.stdout.write;
+        try {
+            expect(await deployFunctionMain(["--help"])).toBe(0);
+        } finally {
+            process.stdout.write = original;
+        }
+        expect(writes.join("")).toContain("knext deploy function");
+        expect(writes.join("")).toContain(
+            "npm install --save-dev @getknext/grpc",
+        );
     });
 
     it("the default loader finds the package from the app directory", async () => {
