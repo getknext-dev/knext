@@ -15,9 +15,17 @@
  *       version would read as pre-existing).
  *   G7  an expired allowlist entry keeps suppressing.
  *   G8  the allowlist stops requiring a real justification.
- *   G9  an advisory with no severity score starts failing.
+ *   G9  a PRE-EXISTING unscored advisory starts failing.
  *   G10 lockfile discovery forgets go.mod.
  *   G11 the committed allowlist is malformed.
+ *   G12 the base-vs-head key forgets the lockfile (a HIGH moved in from a fixture).
+ *   G13 a NEW unscored advisory stops failing.
+ *   G14-G16 an allowlist entry stops being scoped to its package, version, lockfile.
+ *   G17 an entry may expire more than 180 days after it was added.
+ *   G18-G19 the allowlist accepts unknown keys / a wildcard package.
+ *   G20-G22 the base fallback compares a branch with itself, trusts an all-zero base,
+ *       or forgets origin/main.
+ *   G23 lockfile discovery forgets package-lock.json.
  *   W1  the workflow stops verifying the scanner's sha256.
  *   W2  the workflow gets a soft-fail flag on the gate step.
  *   W3  the workflow's token gains a write scope.
@@ -96,21 +104,21 @@ const MUTATIONS = [
     id: 'G5',
     claim: 'a NEW HIGH stops failing',
     subject: 'lib',
-    anchor: 'if (full || isNew) failures.push(f);',
-    replacement: 'if (full) failures.push(f);',
+    anchor: '    if (full || isNew) failures.push(f);\n    else preexisting.push(f);',
+    replacement: '    if (full) failures.push(f);\n    else preexisting.push(f);',
   },
   {
     id: 'G6',
     claim: 'the base-vs-head key forgets the version',
     subject: 'lib',
-    anchor: 'const keyOf = (f) => `${f.ecosystem}|${f.name}|${f.version}|${f.id}`;',
-    replacement: 'const keyOf = (f) => `${f.ecosystem}|${f.name}|${f.id}`;',
+    anchor: 'const keyOf = (f) => `${f.lockfile}|${f.ecosystem}|${f.name}|${f.version}|${f.id}`;',
+    replacement: 'const keyOf = (f) => `${f.lockfile}|${f.ecosystem}|${f.name}|${f.id}`;',
   },
   {
     id: 'G7',
     claim: 'an expired allowlist entry keeps suppressing',
     subject: 'lib',
-    anchor: 'if (e.expires !== undefined && e.expires < today)',
+    anchor: 'if (e.expires < today)',
     replacement: 'if (false)',
   },
   {
@@ -122,17 +130,18 @@ const MUTATIONS = [
   },
   {
     id: 'G9',
-    claim: 'an advisory with no severity score starts failing',
+    claim: 'a PRE-EXISTING unscored advisory starts failing',
     subject: 'lib',
-    anchor: '      unknownSeverity.push(f);\n',
-    replacement: '      failures.push(f);\n',
+    anchor: '      else unknownSeverity.push(f);\n',
+    replacement: '      else failures.push(f);\n',
   },
   {
     id: 'G10',
     claim: 'lockfile discovery forgets go.mod',
     subject: 'lib',
-    anchor: "export const LOCKFILE_NAMES = ['bun.lock', 'Cargo.lock', 'go.mod'];",
-    replacement: "export const LOCKFILE_NAMES = ['bun.lock', 'Cargo.lock'];",
+    anchor:
+      "export const LOCKFILE_NAMES = ['bun.lock', 'Cargo.lock', 'go.mod', 'package-lock.json'];",
+    replacement: "export const LOCKFILE_NAMES = ['bun.lock', 'Cargo.lock', 'go.mod'];",
   },
   {
     id: 'G11',
@@ -141,6 +150,100 @@ const MUTATIONS = [
     anchor: '"allow": []',
     replacement: `"allow": [{"id": "${M}"}]`,
     validate: parsesJson,
+  },
+  {
+    id: 'G12',
+    claim:
+      'the base-vs-head key forgets the LOCKFILE (a HIGH moved from a fixture is pre-existing)',
+    subject: 'lib',
+    anchor: 'const keyOf = (f) => `${f.lockfile}|${f.ecosystem}|${f.name}|${f.version}|${f.id}`;',
+    replacement: 'const keyOf = (f) => `${f.ecosystem}|${f.name}|${f.version}|${f.id}`;',
+  },
+  {
+    id: 'G13',
+    claim: 'a NEW unscored advisory stops failing',
+    subject: 'lib',
+    anchor:
+      '    if (f.severity === null) {\n      if (full || isNew) failures.push(f);\n      else unknownSeverity.push(f);',
+    replacement: '    if (f.severity === null) {\n      unknownSeverity.push(f);',
+  },
+  {
+    id: 'G14',
+    claim: 'an allowlist entry stops being scoped to its package',
+    subject: 'lib',
+    anchor: '        e.package === f.name &&\n        e.version === f.version &&',
+    replacement: '        e.version === f.version &&',
+  },
+  {
+    id: 'G15',
+    claim: 'an allowlist entry stops being scoped to its version',
+    subject: 'lib',
+    anchor: '        e.version === f.version &&\n        e.lockfile === f.lockfile,',
+    replacement: '        e.lockfile === f.lockfile,',
+  },
+  {
+    id: 'G16',
+    claim: 'an allowlist entry stops being scoped to its lockfile',
+    subject: 'lib',
+    anchor: '        e.version === f.version &&\n        e.lockfile === f.lockfile,',
+    replacement: '        e.version === f.version,',
+  },
+  {
+    id: 'G17',
+    claim: 'an allowlist entry may expire more than 180 days after it was added',
+    subject: 'lib',
+    anchor: 'if (span > MAX_ALLOW_DAYS) {',
+    replacement: 'if (false) {',
+  },
+  {
+    id: 'G18',
+    claim: 'the allowlist accepts unknown keys',
+    subject: 'lib',
+    anchor: 'if (!ALLOW_KEYS.has(key)) throw',
+    replacement: `if (false /* ${M} */) throw`,
+  },
+  {
+    id: 'G19',
+    claim: 'the allowlist accepts a wildcard package',
+    subject: 'lib',
+    anchor: ' || /[*?\\s]/.test(e.package)',
+    replacement: ` /* ${M} */`,
+  },
+  {
+    id: 'G20',
+    claim: 'the base fallback may compare a branch with itself',
+    subject: 'lib',
+    anchor: 'if (ref === `origin/${currentRef}`) continue;',
+    replacement: `if (false /* ${M} */) continue;`,
+  },
+  {
+    id: 'G21',
+    claim: 'an all-zero base (a first push) is trusted as a real base',
+    subject: 'lib',
+    anchor: '!/^0+$/.test(supplied) && ',
+    replacement: `/* ${M} */ `,
+  },
+  {
+    id: 'G22',
+    claim: 'the base fallback forgets origin/main',
+    subject: 'lib',
+    anchor: "export const FALLBACK_BASES = ['origin/integration/v2', 'origin/main'];",
+    replacement: "export const FALLBACK_BASES = ['origin/integration/v2'];",
+  },
+  {
+    id: 'G23',
+    claim: 'lockfile discovery forgets package-lock.json',
+    subject: 'lib',
+    anchor:
+      "export const LOCKFILE_NAMES = ['bun.lock', 'Cargo.lock', 'go.mod', 'package-lock.json'];",
+    replacement: "export const LOCKFILE_NAMES = ['bun.lock', 'Cargo.lock', 'go.mod'];",
+  },
+  {
+    id: 'G24',
+    claim: 'the gate stops failing closed when no base resolves',
+    subject: 'cli',
+    anchor: 'if (picked === null) {',
+    replacement: 'if (false) {',
   },
   {
     id: 'W1',
@@ -193,7 +296,7 @@ const MUTATIONS = [
   },
 ].map((m) => ({
   expect: 'red',
-  validate: m.subject === 'lib' ? jsStillParses : undefined,
+  validate: m.subject === 'lib' || m.subject === 'cli' ? jsStillParses : undefined,
   ...m,
 }));
 
@@ -208,6 +311,7 @@ const prover = createGuardProver({
   spec: SPEC,
   subjects: {
     lib: 'scripts/lib/osv-gate.mjs',
+    cli: 'scripts/osv-gate.mjs',
     wf: '.github/workflows/osv-scan.yml',
     allow: 'security/osv-allowlist.json',
   },

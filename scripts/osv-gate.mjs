@@ -11,7 +11,9 @@
  *
  *   --base <sha>  the PR's base. Lockfiles are re-read at the MERGE BASE of <sha>
  *                 and HEAD, and a vulnerability only fails if it is absent there.
- *                 Without it only malicious packages fail (a push to a branch).
+ *                 Empty, all-zero (a first push to a new branch) or unresolvable: fall
+ *                 back to origin/integration/v2, then origin/main, so a HIGH still blocks.
+ *                 If even those are missing the gate fails closed.
  *   --full        fail on EVERY HIGH/CRITICAL, not only new ones (the nightly view).
  *   --malicious-only  fail on malicious packages and ignore vulnerabilities (the
  *                 nightly lockfile re-scan, which must not red on known advisories).
@@ -40,6 +42,7 @@ import {
   evaluate,
   loadAllowlist,
   parseOsv,
+  pickBase,
   renderReport,
   selectLockfiles,
 } from './lib/osv-gate.mjs';
@@ -143,9 +146,30 @@ function main() {
   const head = scan(scanner, REPO_ROOT, files);
 
   let base = null;
-  const baseSha = arg('base');
-  if (baseSha && !/^0+$/.test(baseSha) && !flag('full')) {
-    const mergeBase = execFileSync('git', ['merge-base', baseSha, 'HEAD'], {
+  if (!flag('full') && !flag('malicious-only')) {
+    const resolves = (ref) => {
+      try {
+        execFileSync('git', ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`], {
+          cwd: REPO_ROOT,
+          stdio: 'ignore',
+        });
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    const picked = pickBase({
+      supplied: arg('base'),
+      resolves,
+      currentRef: process.env.GITHUB_REF_NAME ?? '',
+    });
+    if (picked === null) {
+      throw new Error(
+        'no base to compare against (not even origin/integration/v2 or origin/main): ' +
+          'refusing to treat "nothing to compare" as "nothing new"',
+      );
+    }
+    const mergeBase = execFileSync('git', ['merge-base', picked, 'HEAD'], {
       cwd: REPO_ROOT,
       encoding: 'utf8',
     }).trim();
@@ -155,7 +179,7 @@ function main() {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
-    console.log(`Compared against merge base ${mergeBase.slice(0, 12)}.`);
+    console.log(`Compared against ${picked} (merge base ${mergeBase.slice(0, 12)}).`);
   }
 
   const maliciousOnly = flag('malicious-only');
