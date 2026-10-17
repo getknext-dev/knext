@@ -891,7 +891,7 @@ const MUTATIONS = [
     claim: 'object keys are not sorted: the digest depends on map iteration order',
     subject: 'specpin',
     anchor: '\t\tsort.Strings(keys) // byte order of the UTF-8 strings',
-    replacement: '\t\t// keys left in map order',
+    replacement: '\t\t_ = sort.Strings',
     test: unit('TestSpecDigestVectors'),
   },
   {

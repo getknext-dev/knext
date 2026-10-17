@@ -382,7 +382,9 @@ describe('the lane proves what it claims', () => {
     // proved to be the pin and not a broken function.
     expect(pin).toMatch(/swap_fn_image "\$\{go_img\}"[\s\S]*fn_ksvc_mounts_db/);
     // And it holds: a refusal that flaps back is not one.
-    expect(pin).toMatch(/sleep 20[\s\S]*fn_ksvc_gone \|\| fail/);
+    expect(pin).toMatch(
+      /sleep 20\n\s*fn_ksvc_gone \|\| fail "the refused function's Knative Service came back"/,
+    );
   });
 
   it('the pin phase adds an env var with kubectl under a spec pin and asserts the refusal and that nothing mounts the database Secret', () => {
