@@ -16,6 +16,12 @@ too, rather than left implied.
   the prefix is fixed (see [key prefix rules](/docs/isr-caching#key-prefix-check-upgrade)). The
   pinned Knative Serving release itself still starts on 1.28, which is why this floor is stated
   here rather than enforced by the install.
+- **The operator's install bundle also needs 1.30.** It ships a `ValidatingAdmissionPolicy` that
+  limits the operator's Secret and ConfigMap writes (see
+  [Security](/docs/security#write-policy)), and that API is generally available from 1.30. Before
+  1.30 the API server does not serve it, so applying `install.yaml` reports
+  `no matches for kind "ValidatingAdmissionPolicy"` for the two policy objects and the operator
+  runs without the restriction.
 - The kind-based CI gates, the operator's API tests and the reference OKE cluster all run
   Kubernetes versions above this floor.
 - **CI does not pin a specific Kubernetes minor version.** The kind-based end-to-end gates

@@ -163,6 +163,40 @@ compromised operator reach any Secret through a pod it creates. A function's ver
 zone's JWKS ConfigMap, so anyone who can write ConfigMaps in the namespace can make that zone's
 functions accept their own key: **the namespace is the trust boundary**, as for the zone label.
 
+**Narrowing: the operator's write policy (#2462).** The install bundle ships a
+`ValidatingAdmissionPolicy` and its binding (`config/admission`) that confine the operator's
+ServiceAccount, and only that identity, to the names it writes: Secrets ending `-knext-signing-key`
+and ConfigMaps ending `-knext-jwks`, on create, update and delete. Any other write by the operator
+is refused with 403 whatever its RBAC says, which removes the overwrite capability described in the
+blast radius above. Every other principal is untouched: the garbage collector that deletes a zone's
+objects with its `NextApp`, the namespace controller, a tenant, a human who deletes the key Secret
+to replace it, and a ServiceAccount with the operator's name in another namespace.
+- *Identity.* One exact username, `system:serviceaccount:<namespace>:<name>`, spelled as separate
+  literals so `config/default` rewrites the namespace and the prefixed name from the real
+  ServiceAccount. A literal left behind would never match and the operator would be unrestricted
+  with no error anywhere, so the rendered-bundle test asserts the confined identity equals the
+  ClusterRoleBinding subject and the manager Deployment's `serviceAccountName`.
+- *`failurePolicy: Fail`* (jev 0.95). The policy confines only the operator, through a plain
+  equality that cannot error, and runs in the apiserver (no webhook, no network hop), so Fail can
+  only ever refuse the operator itself; Ignore would turn an evaluation error into an unrestricted
+  operator.
+- *Cannot be lifted by the operator.* The shipped role holds nothing on admission policies; a scan
+  of every rule under `config/rbac` and an envtest attempt (RBAC refuses the delete and the edit)
+  pin it.
+- *Lockstep with the code.* The allow-list is two suffix lists in the policy.
+  `operator_write_inventory_test.go` type-checks the operator's source with `go/packages`, finds
+  every Secret and ConfigMap write by static type (and every write whose kind the type hides:
+  interface-typed, unstructured or metadata-only objects, and `"Secret"` / `"ConfigMap"` kind
+  literals), and fails if the code and the policy disagree in either direction. Today the operator
+  writes exactly two objects, and no other Secret or ConfigMap: the leader-election lock is a Lease
+  (pinned in `cmd/main_test.go`), and the `config-network` ConfigMap in the bundle is applied by
+  whoever installs it, not written by the operator.
+- *Version floor.* `ValidatingAdmissionPolicy` is `admissionregistration.k8s.io/v1` from
+  Kubernetes 1.30, the documented server floor (support matrix). The bundle is therefore one
+  artifact; there is no policy-free variant. On an older cluster the apply rejects the two policy
+  objects and the rest of the bundle applies, leaving the operator unrestricted. The older install
+  page that still says 1.27+ conflicts with the support matrix and is flagged for the maintainer.
+
 **Defence in depth: the function mounts the JWKS only if the zone controls it (#2464).** Before it
 renders a function, the BackendService reconciler reads the metadata of `<zone>-knext-jwks`
 (a `PartialObjectMetadata` GET through the uncached `APIReader`; the `get` on `configmaps` that
@@ -199,9 +233,19 @@ optional mount; a replaced one is unmounted and mounts again once it is gone; th
 the uncached reader; a read failure changes nothing), and the mutation prover
 `scripts/mutation-prove-2052-backendservice.mjs` (one row per rule).
 
-**Residual.** (a) A `ValidatingAdmissionPolicy` that limits the operator's ServiceAccount to
-writing Secrets named `*-knext-signing-key` and ConfigMaps named `*-knext-jwks` would remove the
-overwrite capability; not shipped. (b) The operator cannot watch Secrets, so a deleted key or an
+**Residual.** (a) The write policy (#2462, above) bounds **names, not ownership**. A compromised
+operator can still overwrite an object that carries an allowed name and belongs to someone else
+(another zone's `<zone>-knext-signing-key` or `<zone>-knext-jwks`); the reconciler's own
+controller-ownership test refuses that in normal operation, the policy does not enforce it.
+Requiring a controller `ownerReference` to a `NextApp` on update and delete would close it, and was
+left out on purpose (jev 1.00 for names only): it risks breaking crash recovery and the adoption of
+objects an earlier operator made, and the task is the names. The policy also leaves the operator's
+reads alone, can be removed by anyone with rights on admission policies (a cluster admin; the
+operator has none), and needs Kubernetes 1.30. A write that bypasses the apiserver's admission
+chain (etcd directly) is out of scope. The guard behind the lockstep follows calls and types it can
+see: an object of an interface type handed in from another function, or a client reached by
+reflection, is not followed (the first is refused outright: a dynamic write must build its object
+locally). (b) The operator cannot watch Secrets, so a deleted key or an
 edited JWKS is restored on the zone's next reconcile (at most ten minutes, the steady re-check),
 not instantly. (c) The rotation wait trusts the operator's clock: a new leader whose clock runs
 ahead could switch signing early by the skew; keep nodes on NTP. Within one operator, both waits
@@ -219,6 +263,17 @@ data included; never run the operator that verbose in production.
 Secrets or ConfigMap verbs), and `zone_signing_key_envtest_test.go` / `zone_signing_key_test.go`
 (rotation order, crash safety at every write, ownership, conflicts, no key in a function pod, and
 no key material in events, logs, status or errors).
+
+**Enforcement (#2462).** `operator_write_policy_envtest_test.go` (the shipped policy on a real
+kube-apiserver: the operator identity, bound to the shipped role, writes its two names and is
+refused any other on create, update and delete; cannot remove its own binding; other principals
+and a same-named ServiceAccount elsewhere are untouched; the real zone reconciler creates and
+rotates under the policy; and the proof reddens when the JWKS name leaves the allow-list),
+`operator_write_inventory_test.go` (the type-checked scan of the operator's source, the lockstep with
+the allow-list in both directions, and the no-self-edit scan of `config/rbac`),
+`internal/install/operator_write_policy_test.go` (the policy is strict, is in the default overlay,
+and in the rendered bundle confines exactly the identity the operator runs as), and the mutation
+prover `scripts/mutation-prove-2462-operator-write-policy.mjs` (one row per rule, run nightly).
 
 ## 2. Gateway ↔ backend calls
 
