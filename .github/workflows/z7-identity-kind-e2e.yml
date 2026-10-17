@@ -1,0 +1,142 @@
+name: Z7 identity tokens — kind e2e
+
+# The operator half of Z7 (a per-zone Ed25519 signing key, the JWKS built from
+# it, rotation) is proved by unit and envtest tests that have no kubelet, no
+# serving layer and no pods. This lane runs it on a real cluster, with the operator
+# built from this checkout and a zone bound to a Go and a Rust function built
+# from the templates:
+#
+#   - the operator creates the zone's key Secret and JWKS ConfigMap; a call from
+#     the zone's generated glue, through the real signer, succeeds with a real
+#     served token (Go: the generated query and Server Action; Rust: the same
+#     signer);
+#   - no token, a garbage token, a token from another key, a forged kid, a token
+#     for another function or RPC, an expired one and one from another issuer
+#     are each refused, next to a control that differs in that one property;
+#   - a rotation by annotation publishes the new key, a WARM function accepts a
+#     token signed by it before the switch, signing switches only after the
+#     propagation bound, the zone picks up the new key, the previous key keeps
+#     verifying during the overlap, and no call through the zone fails;
+#   - retirement removes the previous key from the Secret and the JWKS and a
+#     warm function then refuses it;
+#   - the function pod holds no private key and takes the JWKS as a directory
+#     volume (no subPath, no env); no key material reaches any log or event.
+#
+# packages/grpc/e2e/z7-identity-kind/run.sh is the whole lane and runs the same
+# on a developer's kind cluster. Not proved here, and stated in run.sh: the
+# one-hour overlap is a constant (retirement backdates its stamp), NetworkPolicy
+# enforcement (the Calico drill owns that), a built Next.js zone, and OKE.
+#
+# Deliberately NO continue-on-error: every assertion is state-based (Secret and
+# JWKS contents, operator timestamps, pod identity, HTTP status), so a red step
+# is signal. Path-filtered like the other kind lanes; not a required check.
+
+on:
+  pull_request:
+    paths:
+      # The whole operator: the lane builds its image and installs its CRDs and
+      # RBAC, so any of it can change what a zone's key does. Its own tests and
+      # docs cannot (envtest and unit tests have their own lanes).
+      - 'packages/kn-next-operator/**'
+      - '!packages/kn-next-operator/**/*_test.go'
+      - '!packages/kn-next-operator/test/**'
+      - '!packages/kn-next-operator/**/*.md'
+      - 'templates/go/**'
+      - 'templates/rust/**'
+      - 'packages/grpc/src/*.ts'
+      - 'packages/grpc/proto/**'
+      - 'packages/grpc/scripts/**'
+      - 'packages/grpc/e2e/**'
+      - 'packages/grpc/package.json'
+      - 'scripts/kind-manifests/**'
+      - '.github/actions/docker-hub-mirror/**'
+      - '.github/workflows/z7-identity-kind-e2e.yml'
+      - 'tests/z7-identity-kind-e2e-lane.test.ts'
+      - 'bun.lock'
+  push:
+    branches: [main, 'integration/**']
+    paths:
+      # The whole operator: the lane builds its image and installs its CRDs and
+      # RBAC, so any of it can change what a zone's key does. Its own tests and
+      # docs cannot (envtest and unit tests have their own lanes).
+      - 'packages/kn-next-operator/**'
+      - '!packages/kn-next-operator/**/*_test.go'
+      - '!packages/kn-next-operator/test/**'
+      - '!packages/kn-next-operator/**/*.md'
+      - 'templates/go/**'
+      - 'templates/rust/**'
+      - 'packages/grpc/src/*.ts'
+      - 'packages/grpc/proto/**'
+      - 'packages/grpc/scripts/**'
+      - 'packages/grpc/e2e/**'
+      - 'packages/grpc/package.json'
+      - 'scripts/kind-manifests/**'
+      - '.github/actions/docker-hub-mirror/**'
+      - '.github/workflows/z7-identity-kind-e2e.yml'
+      - 'tests/z7-identity-kind-e2e-lane.test.ts'
+      - 'bun.lock'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: z7-identity-kind-e2e-${{ github.ref }}
+  # Publishes nothing, so a superseded run on the same ref is safe to cancel.
+  cancel-in-progress: true
+
+jobs:
+  z7-identity-e2e:
+    name: Z7 zone identity tokens on kind (key, JWKS, rotation, warm functions)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      KIND_CLUSTER: z7-identity-e2e
+      REGISTRY_NAME: kind-registry
+      REGISTRY_PORT: '5001'
+      # The Rust function is bound in CI: its verifier reads the same JWKS file
+      # on its own schedule, so it is a separate proof of a warm reload.
+      Z7_WITH_RUST: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Route Docker Hub pulls through mirror.gcr.io (anonymous rate limit)
+        id: docker-hub-mirror
+        uses: ./.github/actions/docker-hub-mirror
+
+      - name: Set up Go (the operator builds its tools and image from go.mod)
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: packages/kn-next-operator/go.mod
+          cache-dependency-path: packages/kn-next-operator/go.sum
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+
+      - name: Setup bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
+
+      - name: Install kind
+        uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
+        with:
+          install_only: true
+
+      - name: Install workspace dependencies (the pinned buf, the Connect runtime)
+        run: bun install --frozen-lockfile
+
+      - name: Run the Z7 identity-token e2e on kind
+        run: packages/grpc/e2e/z7-identity-kind/run.sh
+
+      # run.sh prints object status and log tails on failure and never reads a
+      # Secret, so nothing more is collected here.
+      - name: Delete the kind cluster and its registry
+        if: always()
+        run: |
+          kind delete cluster --name "${KIND_CLUSTER}" || true
+          docker rm -f "${REGISTRY_NAME}" || true

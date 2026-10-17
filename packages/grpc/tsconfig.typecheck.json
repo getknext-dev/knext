@@ -21,6 +21,10 @@
   "include": [
     "src/**/*",
     "scripts/**/*",
+    "e2e/z7-identity-kind/probe.ts",
+    "e2e/z7-identity-kind/probe-lib.ts",
+    "e2e/z7-identity-kind/key-needles.ts",
+    "e2e/z7-identity-kind/zone-caller/build.ts",
     "fixtures/zone/src/generated/**/*.ts",
     "fixtures/zone/server-only.d.ts",
     "fixtures/zone/next-cache.d.ts"
