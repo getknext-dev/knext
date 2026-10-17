@@ -1,4 +1,11 @@
 {
   "$schema-note": "Dated + justified allowlist for the OSV dependency gate (scripts/osv-gate.mjs, .github/workflows/osv-scan.yml). A finding is suppressed ONLY by an entry here, so the gate can never be silently neutered. It covers both kinds of finding the gate fails on: a malicious-package advisory (`MAL-…`; suppress only a confirmed false positive) and a NEW HIGH/CRITICAL vulnerability. Each entry MUST carry: `id` (the advisory id or any alias: MAL-…, GHSA-…, CVE-…, GO-…), `justification` (at least 20 characters: why it is accepted, not exploitable in our usage, no fix available, upstream confirmed false positive), and `added` (ISO date). `expires` (ISO date) is optional; past its expiry the entry stops suppressing and the risk must be re-justified. Bump the dependency FIRST; allowlist only when there is no fix. Mirrors security/npm-audit-allowlist.json.",
-  "allow": []
+  "allow": [
+    {
+      "id": "GHSA-w5hq-g745-h8pq",
+      "justification": "uuid < 11.1.1 (and 12.0.0, 13.0.0): missing buffer bounds check in v3/v5/v6 when a `buf` argument is supplied. The published @getknext/core closure reaches uuid@9.0.1 only through @google-cloud/storage -> gaxios and teeny-request, which call `uuid.v4()` with no buffer to make a multipart boundary (verified in the installed 7.22.0 closure), so the vulnerable path is not reachable. GitHub rates it medium (CVSS v4 6.3); OSV reports the v3 vector's 7.5. Remove once @google-cloud/storage ships a gaxios on uuid >= 11.1.1.",
+      "added": "2026-10-17",
+      "expires": "2026-12-15"
+    }
+  ]
 }
