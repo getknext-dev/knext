@@ -279,7 +279,7 @@ type NextAppReconciler struct {
 	// renders no binding env. The zero value is "not installed".
 	BackendServiceCRDPresent bool
 	// ZoneSigningKey tunes the zone signing-key rotation (zone_signing_key.go).
-	// The zero value is the contract's defaults: a 90 s propagation bound and
+	// The zero value is the contract's defaults: a 120 s propagation bound and
 	// no scheduled rotation.
 	ZoneSigningKey ZoneSigningKeyConfig
 	// rollout paces platform-triggered re-renders (ADR-0064 F2). Zero value ready.

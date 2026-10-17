@@ -17,7 +17,7 @@ is about 15 minutes, most of it waiting for the kubelet.
 
 | Phase | What it does and proves |
 | --- | --- |
-| `up` | Creates the kind cluster (default `knext-z7-e2e`) and a local registry, installs cert-manager, Knative Serving and Kourier, then builds and installs the operator with a 90 s propagation bound. |
+| `up` | Creates the kind cluster (default `knext-z7-e2e`) and a local registry, installs cert-manager, Knative Serving and Kourier, then builds and installs the operator with the operator's shipped propagation bound (it reads the number from the operator's contract fixture, so the lane follows the default). |
 | `images` | Builds and pushes the Go function, the Rust function and the zone to the local registry. The operator requires digests, so every image is referenced by one. |
 | `deploy` | Recreates the namespace and applies the zone (`NextApp`) and its functions (`BackendService`), all at minScale 1 so a rotation meets warm pods. |
 | `verify` | The key Secret and JWKS exist and are owned by the zone; a generated query and Server Action reach the Go function with a real token; each wrong token (none, garbage, another key, a forged kid, another function, another RPC, expired, another issuer, an empty sub on an AUTH_USER RPC, a life of 61 s) is refused next to a control that differs in that one property; the function pod holds no private key and mounts the JWKS as a directory volume. |
@@ -35,7 +35,7 @@ into files in a private temporary directory, never to the terminal.
 | `KIND_CLUSTER` | `knext-z7-e2e` | Cluster name; created if missing, kept afterwards. |
 | `REGISTRY_NAME` / `REGISTRY_PORT` | `knext-z7-registry` / `5001` | The local image registry. |
 | `Z7_NAMESPACE` | `z7-e2e` | Namespace for the zone and its functions. |
-| `Z7_PROPAGATION_BOUND` | `90s` | The operator's `--zone-signing-key-propagation-bound`. The minimum is 60 s. |
+| `Z7_PROPAGATION_BOUND` | unset | Set it (whole seconds, for example `150s`) to run the operator with `--zone-signing-key-propagation-bound`. Unset, the operator runs without the flag, so the lane tests the shipped default; the lane reads that value and the minimum from the operator's contract fixture. |
 | `Z7_WITH_RUST` | `1` | `0` skips building and binding the Rust function. |
 | `PHASES` | all | A subset of the phases above, in any combination. |
 

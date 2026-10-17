@@ -174,8 +174,8 @@ kubectl annotate nextapp orders apps.kn-next.dev/rotate-signing-key="$(date +%s)
 The operator then rotates in this order, so no call fails along the way:
 
 1. It adds the new public key to the JWKS. The zone keeps signing with the old key.
-2. It waits 90 seconds, long enough for the kubelet to update the JWKS file in every running
-   function.
+2. It waits 120 seconds, long enough for the kubelet to update the JWKS file in every running
+   function, with room to spare.
 3. It switches the zone to the new key. The old key stays in the JWKS.
 4. After one hour it removes the old key from both objects.
 
@@ -187,8 +187,23 @@ Two operator flags tune this:
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--zone-signing-key-propagation-bound` | `90s` | How long a new public key is published before the zone signs with it. Raise it if your kubelets sync volumes more slowly; it cannot go below `60s`. |
+| `--zone-signing-key-propagation-bound` | `2m` (120 seconds) | How long a new public key is published before the zone signs with it. Raise it if your kubelets refresh volumes more slowly; the operator refuses anything below `90s`. |
 | `--zone-signing-key-rotation-interval` | `0` (off) | Rotate every zone key this long after it became current, for example `720h`. Must be longer than the bound plus one hour. |
+
+**Why 120 seconds, and why not below 90.** A running function sees the new JWKS only after the
+kubelet rewrites the mounted ConfigMap. A default kubelet re-syncs each pod every 60 seconds, and
+that interval is stretched by up to half again (so up to 90 seconds) before the update lands. That
+worst case is the minimum. The default adds 30 seconds on top, for the ConfigMap change to reach the
+kubelet and for the function to re-read the file. On GitHub-hosted test nodes a running function
+picked up a new key anywhere from under 5 seconds to about 85 seconds later, so a shorter wait works
+most of the time and fails on the slow runs. If a function's refresh lands after the zone switches,
+that function refuses the zone's calls (`unauthenticated`) until it catches up, and nothing else
+reports it. A rotation takes about 30 seconds longer than a 90-second wait would.
+
+If you set a bound between `90s` and `2m`, the operator accepts it and rotates, and the
+`ZoneSigningKey` condition says the bound is below the default for as long as a rotation is
+propagating or in its overlap. Raise the bound above `2m` if your kubelets run a longer sync period
+(`syncFrequency`), or if you changed how they cache ConfigMaps.
 
 To replace a key at once, for example after you suspect it leaked, delete the Secret. The operator
 creates a new key and republishes the JWKS on the zone's next reconcile (within ten minutes). Calls
