@@ -33,6 +33,7 @@ Every field the CLI can emit is defined by the bundled CRD.
 | `spec.backends.*.image` | yes |
 | `spec.backends.*.name` | yes |
 | `spec.backends.*.service` | yes |
+| `spec.backends.*.specDigest` | yes |
 | `spec.build` | yes |
 | `spec.buildId` | yes |
 | `spec.cache` | yes |

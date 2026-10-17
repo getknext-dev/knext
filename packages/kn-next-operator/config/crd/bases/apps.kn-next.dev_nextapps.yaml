@@ -104,9 +104,11 @@ spec:
                         The pin binds the image content ONLY. The BackendService's env, envFrom,
                         volumes stay with whoever can write it, so a writer
                         who keeps the pinned image can still change what runs inside it, with
-                        the zone's database Secret mounted and its users' tokens arriving. Grant
-                        update, patch and create on backendservices only to principals who may
-                        already read the zone's database Secret, pinned or not.
+                        the zone's database Secret mounted and its users' tokens arriving. To
+                        close that for the zone, set specDigest (below): it binds the image AND
+                        the env, envFrom and volumes. With only this field set, grant update,
+                        patch and create on backendservices only to principals who may already
+                        read the zone's database Secret.
 
                         Unset keeps the name-only binding: any image the BackendService names
                         is bound.
@@ -132,6 +134,34 @@ spec:
                         namespace.
                       maxLength: 63
                       pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                      type: string
+                    specDigest:
+                      description: |-
+                        SpecDigest pins the whole security-relevant spec of the function this
+                        zone agreed to bind: a SHA-256 over a canonical encoding of the
+                        BackendService's image, env, envFrom and volumes, written
+                        "sha256:" followed by 64 lowercase hex characters. When set, the operator
+                        re-computes the digest from the live BackendService on every reconcile
+                        and renders the function only while it equals this value; any other spec
+                        (an env var added, an envFrom or a volume added, any of them changed or
+                        reordered, another image) refuses the function with Ready=False, reason
+                        BindingSpecMismatch, and removes the Knative Service it rendered, so the
+                        zone's database Secret and key set are mounted into nothing. The refusal
+                        message names the digest the live spec has.
+
+                        What is NOT hashed (port, scaling, resources, protoVersion, language,
+                        wakeAhead, imagePullSecrets, zone) is tuning that cannot change what
+                        code runs or what it can read, and stays with whoever can write the
+                        BackendService; the canonical form and the exclusions are in the
+                        operator docs.
+
+                        Unset keeps the weaker binding: image alone if image is set, else
+                        name-only. image and specDigest may both be set; the image is checked
+                        first. The digest is never rendered into the zone's pod template.
+                        Rotate it by changing the zone's digest and the BackendService
+                        together. Additive and optional; upgrade the operator/CRD before the CLI.
+                      maxLength: 71
+                      pattern: ^sha256:[a-f0-9]{64}$
                       type: string
                   required:
                   - name

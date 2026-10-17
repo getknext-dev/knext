@@ -22,6 +22,7 @@ export const EMITTED_CR_FIELD_PATHS: readonly string[] = [
     "spec.backends.*.image",
     "spec.backends.*.name",
     "spec.backends.*.service",
+    "spec.backends.*.specDigest",
     "spec.build",
     "spec.buildId",
     "spec.cache",

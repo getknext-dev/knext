@@ -1,0 +1,249 @@
+{
+  "_comment": "Shared cross-language vectors for the BackendService spec digest (ADR-0004 Amendment 4). The Go operator (internal/controller/backendservice_spec_pin_test.go) and the TypeScript CLI (packages/grpc/src/__tests__/spec-digest.test.ts) both recompute every entry and must agree on `canonical` and `digest`. Generated once by an independent third implementation.",
+  "domain": "knext.dev/backendservice-spec/v1\n",
+  "vectors": [
+    {
+      "name": "image only",
+      "spec": {
+        "zone": "orders",
+        "image": "registry.example.com/fn@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "canonical": "ds5:images95:registry.example.com/fn@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaae",
+      "digest": "sha256:92e415349d157fb12d9395224e623e8036ecb2f3467592781f3dcc55e3c1e4d9"
+    },
+    {
+      "name": "operational fields are not hashed",
+      "spec": {
+        "zone": "other",
+        "image": "registry.example.com/fn@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "language": "go",
+        "port": 9090,
+        "protoVersion": "1.2.3",
+        "wakeAhead": false,
+        "scaling": {
+          "minScale": 1,
+          "maxScale": 5,
+          "containerConcurrency": 10
+        },
+        "resources": {
+          "cpuRequest": "100m",
+          "memoryLimit": "256Mi"
+        },
+        "imagePullSecrets": [
+          {
+            "name": "regcred"
+          }
+        ]
+      },
+      "canonical": "ds5:images95:registry.example.com/fn@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaae",
+      "digest": "sha256:92e415349d157fb12d9395224e623e8036ecb2f3467592781f3dcc55e3c1e4d9"
+    },
+    {
+      "name": "another image",
+      "spec": {
+        "zone": "orders",
+        "image": "registry.example.com/fn:v1@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "canonical": "ds5:images98:registry.example.com/fn:v1@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbe",
+      "digest": "sha256:7b7e131971562a23173de8a448e1d0238512ff6c1d1b48f18fcbd46e29baae4e"
+    },
+    {
+      "name": "env literal and secretKeyRef",
+      "spec": {
+        "zone": "orders",
+        "image": "registry.example.com/fn@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "env": [
+          {
+            "name": "LOG_LEVEL",
+            "value": "debug"
+          },
+          {
+            "name": "DB_PASSWORD",
+            "valueFrom": {
+              "secretKeyRef": {
+                "name": "orders-db",
+                "key": "password"
+              }
+            }
+          }
+        ]
+      },
+      "canonical": "ds3:envlds4:names9:LOG_LEVELs5:values5:debugeds4:names11:DB_PASSWORDs9:valueFromds12:secretKeyRefds3:keys8:passwords4:names9:orders-dbeeees5:images95:registry.example.com/fn@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaae",
+      "digest": "sha256:c559fabe76fecfa0b7781861ff000846541d4aaa06c7331e0a8ad56aa62e51c4"
+    },
+    {
+      "name": "env order is part of the digest (reordered)",
+      "spec": {
+        "zone": "orders",
+        "image": "registry.example.com/fn@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "env": [
+          {
+            "name": "DB_PASSWORD",
+            "valueFrom": {
+              "secretKeyRef": {
+                "name": "orders-db",
+                "key": "password"
+              }
+            }
+          },
+          {
+            "name": "LOG_LEVEL",
+            "value": "debug"
+          }
+        ]
+      },
+      "canonical": "ds3:envlds4:names11:DB_PASSWORDs9:valueFromds12:secretKeyRefds3:keys8:passwords4:names9:orders-dbeeeds4:names9:LOG_LEVELs5:values5:debugees5:images95:registry.example.com/fn@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaae",
+      "digest": "sha256:4c813b0be330b5c6d19e77ae458e8e2a84b56a985efd10864827dd92436e4c1b"
+    },
+    {
+      "name": "envFrom secretRef and configMapRef",
+      "spec": {
+        "zone": "orders",
+        "image": "registry.example.com/fn@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "envFrom": [
+          {
+            "secretRef": {
+              "name": "orders-db"
+            }
+          },
+          {
+            "prefix": "APP_",
+            "configMapRef": {
+              "name": "settings",
+              "optional": true
+            }
+          }
+        ]
+      },
+      "canonical": "ds7:envFromlds9:secretRefds4:names9:orders-dbeeds12:configMapRefds4:names8:settingss8:optionaltes6:prefixs4:APP_ees5:images95:registry.example.com/fn@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaae",
+      "digest": "sha256:411d227082267e064bc4c67a6df77fbfc72fb2c2923962dd38fd333e57b1724b"
+    },
+    {
+      "name": "volumes: secret with mode zero, configMap, projected, emptyDir",
+      "spec": {
+        "zone": "orders",
+        "image": "registry.example.com/fn@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "volumes": [
+          {
+            "name": "creds",
+            "mountPath": "/creds",
+            "secret": {
+              "secretName": "orders-db",
+              "defaultMode": 0,
+              "items": [
+                {
+                  "key": "password",
+                  "path": "pw",
+                  "mode": 256
+                }
+              ]
+            }
+          },
+          {
+            "name": "cfg",
+            "mountPath": "/cfg",
+            "configMap": {
+              "name": "settings"
+            }
+          },
+          {
+            "name": "bundle",
+            "mountPath": "/bundle",
+            "projected": {
+              "sources": [
+                {
+                  "configMap": {
+                    "name": "settings"
+                  }
+                },
+                {
+                  "secret": {
+                    "name": "orders-db"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "name": "tmp",
+            "mountPath": "/tmp/work",
+            "emptyDir": {
+              "medium": "Memory"
+            }
+          }
+        ]
+      },
+      "canonical": "ds5:images95:registry.example.com/fn@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaas7:volumeslds9:mountPaths6:/credss4:names5:credss6:secretds11:defaultModei0;s5:itemslds3:keys8:passwords4:modei256;s4:paths2:pwees10:secretNames9:orders-dbeeds9:configMapds4:names8:settingses9:mountPaths4:/cfgs4:names3:cfgeds9:mountPaths7:/bundles4:names6:bundles9:projectedds7:sourceslds9:configMapds4:names8:settingseeds6:secretds4:names9:orders-dbeeeeeds8:emptyDirds6:mediums6:Memoryes9:mountPaths9:/tmp/works4:names3:tmpeee",
+      "digest": "sha256:eb596944875ac7d6b0229d2e085eabe882bcf31b4a057885b00a297ce55b217c"
+    },
+    {
+      "name": "unicode and markup characters are length-prefixed bytes",
+      "spec": {
+        "zone": "orders",
+        "image": "registry.example.com/fn@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "env": [
+          {
+            "name": "GREETING",
+            "value": "héllo <b>&☃ 😀</b>"
+          },
+          {
+            "name": "KEY_é",
+            "value": "x"
+          }
+        ]
+      },
+      "canonical": "ds3:envlds4:names8:GREETINGs5:values23:héllo <b>&☃ 😀</b>eds4:names6:KEY_és5:values1:xees5:images95:registry.example.com/fn@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaae",
+      "digest": "sha256:7f923c329f3648433c697c31f3789a22e6529a613fee4d0c6323443f1dcafe9f"
+    },
+    {
+      "name": "zero-ish values are the same as absent",
+      "spec": {
+        "zone": "orders",
+        "image": "registry.example.com/fn@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "env": [
+          {
+            "name": "A",
+            "value": ""
+          },
+          {
+            "name": "B",
+            "valueFrom": {
+              "secretKeyRef": {
+                "name": "orders-db",
+                "key": "k",
+                "optional": false
+              }
+            }
+          }
+        ],
+        "envFrom": [],
+        "volumes": []
+      },
+      "canonical": "ds3:envlds4:names1:Aeds4:names1:Bs9:valueFromds12:secretKeyRefds3:keys1:ks4:names9:orders-dbeeees5:images95:registry.example.com/fn@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaae",
+      "digest": "sha256:d5a1b1fe76c22325d1c62d9fa0c40f43ee46323f4b612298c651939fe4630933"
+    },
+    {
+      "name": "absent twin of the zero-ish case",
+      "spec": {
+        "zone": "orders",
+        "image": "registry.example.com/fn@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "env": [
+          {
+            "name": "A"
+          },
+          {
+            "name": "B",
+            "valueFrom": {
+              "secretKeyRef": {
+                "name": "orders-db",
+                "key": "k"
+              }
+            }
+          }
+        ]
+      },
+      "canonical": "ds3:envlds4:names1:Aeds4:names1:Bs9:valueFromds12:secretKeyRefds3:keys1:ks4:names9:orders-dbeeees5:images95:registry.example.com/fn@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaae",
+      "digest": "sha256:d5a1b1fe76c22325d1c62d9fa0c40f43ee46323f4b612298c651939fe4630933"
+    }
+  ]
+}

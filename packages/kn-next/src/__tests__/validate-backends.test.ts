@@ -33,7 +33,14 @@ interface Field {
 }
 interface BackendsSchema {
     maxItems: number;
-    items: { properties: { name: Field; service: Field; image: Field } };
+    items: {
+        properties: {
+            name: Field;
+            service: Field;
+            image: Field;
+            specDigest: Field;
+        };
+    };
     "x-kubernetes-validations": { rule: string }[];
 }
 
@@ -108,6 +115,11 @@ describe("backends mirrors the shipped CRD", () => {
         expect(SCHEMA.items.properties.image.pattern).toBe(
             "^@sha256:[a-f0-9]{64}$",
         );
+        // The zone's optional spec pin: "sha256:" + 64 lowercase hex.
+        expect(SCHEMA.items.properties.specDigest.maxLength).toBe(71);
+        expect(SCHEMA.items.properties.specDigest.pattern).toBe(
+            "^sha256:[a-f0-9]{64}$",
+        );
         expect(SCHEMA["x-kubernetes-validations"].map((v) => v.rule)).toContain(
             "self.all(a, self.exists_one(b, b.service == a.service))",
         );
@@ -155,6 +167,31 @@ describe("backends mirrors the shipped CRD", () => {
         });
     }
 
+    const SPEC_PINS: [string, string][] = [
+        ["a lowercase sha256 digest", `sha256:${HEX}`],
+        ["an image-style @sha256 digest", `@sha256:${HEX}`],
+        ["a bare hex digest", HEX],
+        ["a full image reference", `registry/app@sha256:${HEX}`],
+        ["63 hex characters", `sha256:${HEX.slice(1)}`],
+        ["65 hex characters", `sha256:${HEX}0`],
+        ["uppercase hex", `sha256:${HEX.toUpperCase()}`],
+        ["another algorithm", `sha512:${HEX}`],
+        ["non-hex characters", `sha256:${"z".repeat(64)}`],
+        ["a trailing newline", `sha256:${HEX}\n`],
+        ["an empty string", ""],
+    ];
+    for (const [label, value] of SPEC_PINS) {
+        it(`specDigest: agrees with the CRD on ${label}`, () => {
+            const ok = crdAllows(SCHEMA.items.properties.specDigest, value);
+            if (ok) accepts([{ name: "fn", specDigest: value }]);
+            else
+                rejects(
+                    [{ name: "fn", specDigest: value }],
+                    /backends\[0\]\.specDigest/,
+                );
+        });
+    }
+
     it("accepts exactly maxItems entries and refuses one more", () => {
         const entries = (n: number) =>
             Array.from({ length: n }, (_, i) => ({ name: `fn-${i}` }));
@@ -192,6 +229,28 @@ describe("validateConfig backends", () => {
         rejects([{ name: "pricing", image: 7 }], /backends\[0\]\.image/);
     });
 
+    it("accepts a spec pin next to an image pin, and refuses a non-string one", () => {
+        accepts([{ name: "pricing", specDigest: `sha256:${"ab12".repeat(16)}` }]);
+        accepts([
+            {
+                name: "pricing",
+                image: `@sha256:${"ab12".repeat(16)}`,
+                specDigest: `sha256:${"cd34".repeat(16)}`,
+            },
+        ]);
+        rejects(
+            [{ name: "pricing", specDigest: 7 }],
+            /backends\[0\]\.specDigest/,
+        );
+    });
+
+    it("tells the user what a spec pin looks like, and where it comes from", () => {
+        rejects(
+            [{ name: "pricing", specDigest: `@sha256:${"ab12".repeat(16)}` }],
+            /backends\[0\]\.specDigest.*sha256:.*knext deploy function/s,
+        );
+    });
+
     it("tells the user what an image pin looks like, and not to paste the whole reference", () => {
         rejects(
             [
@@ -219,7 +278,7 @@ describe("validateConfig backends", () => {
     it("refuses an unknown key, naming the keys that exist", () => {
         rejects(
             [{ name: "pricing", serviceName: "pricing" }],
-            /backends\[0\]\.serviceName.*name, service, image/,
+            /backends\[0\]\.serviceName.*name, service, image, specDigest/,
         );
     });
 

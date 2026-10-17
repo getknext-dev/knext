@@ -76,6 +76,33 @@ describe("cr-builder spec.backends", () => {
         expect("image" in (spec.backends as object[])[1]).toBe(false);
     });
 
+    it("carries the zone's spec pin into the NextApp, and only when set", () => {
+        const specDigest = `sha256:${"cd34".repeat(16)}`;
+        const spec = specOf(
+            config([{ name: "pricing", specDigest }, { name: "search" }]),
+        );
+        expect(spec.backends).toEqual([
+            { name: "pricing", service: "pricing", specDigest },
+            { name: "search", service: "search" },
+        ]);
+        expect("specDigest" in (spec.backends as object[])[1]).toBe(false);
+    });
+
+    it("carries both pins when both are set", () => {
+        const image = `@sha256:${"ab12".repeat(16)}`;
+        const specDigest = `sha256:${"cd34".repeat(16)}`;
+        const yaml = renderNextAppCR(
+            config([{ name: "pricing", image, specDigest }]),
+            IMG,
+            "default",
+        );
+        const parsed = YAML.parse(yaml) as {
+            spec: { backends: { image?: string; specDigest?: string }[] };
+        };
+        expect(parsed.spec.backends[0]?.image).toBe(image);
+        expect(parsed.spec.backends[0]?.specDigest).toBe(specDigest);
+    });
+
     it("the rendered YAML carries the pin the apply will send", () => {
         const pin = `@sha256:${"ab12".repeat(16)}`;
         const yaml = renderNextAppCR(

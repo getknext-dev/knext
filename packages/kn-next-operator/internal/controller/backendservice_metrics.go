@@ -41,7 +41,7 @@ var (
 
 	// backendServiceRefusalsTotal counts transitions INTO a refusal, by reason: a
 	// function the operator would not render (zone missing, binding not
-	// consented, an image other than the one the zone pinned, a conflicting owner, a credential-allowlist violation, an
+	// consented, an image or a spec other than the one the zone pinned, a conflicting owner, a credential-allowlist violation, an
 	// unpinned image, a name another object controls), or would render only
 	// without its zone's JWKS (a ConfigMap the zone does not control holds the
 	// name).
@@ -49,7 +49,7 @@ var (
 		prometheus.CounterOpts{
 			Name: "knext_backendservice_refusals_total",
 			Help: "Total number of times a BackendService entered a refused state, labeled by reason " +
-				"(ZoneNotFound | ZoneNotListed | BindingImageMismatch | ConflictingOwner | SovereigntyViolation | InvalidImage | KnativeServiceNameTaken | JWKSUntrusted).",
+				"(ZoneNotFound | ZoneNotListed | BindingImageMismatch | BindingSpecMismatch | ConflictingOwner | SovereigntyViolation | InvalidImage | KnativeServiceNameTaken | JWKSUntrusted).",
 		},
 		[]string{"reason"},
 	)
@@ -57,7 +57,7 @@ var (
 
 // backendServiceRefusalReasons is every reason the refusals counter carries.
 var backendServiceRefusalReasons = []string{
-	ReasonZoneNotFound, ReasonZoneNotListed, ReasonBindingImageMismatch, ReasonConflictingOwner,
+	ReasonZoneNotFound, ReasonZoneNotListed, ReasonBindingImageMismatch, ReasonBindingSpecMismatch, ReasonConflictingOwner,
 	ReasonSovereigntyViolation, ReasonInvalidImage, ReasonKnativeServiceNameTaken, ReasonJWKSUntrusted,
 }
 

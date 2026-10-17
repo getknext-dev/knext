@@ -64,6 +64,7 @@ const (
 	ReasonZoneNotFound            = "ZoneNotFound"
 	ReasonZoneNotListed           = "ZoneNotListed"
 	ReasonBindingImageMismatch    = "BindingImageMismatch"
+	ReasonBindingSpecMismatch     = "BindingSpecMismatch"
 	ReasonConflictingOwner        = "ConflictingOwner"
 	ReasonCompliant               = "Compliant"
 	ReasonSecretNotAllowed        = "SecretNotAllowed"
@@ -115,7 +116,13 @@ type functionObservation struct {
 	// matches. It is read from the two specs, never from a Secret or a request
 	// that can fail, so it is always a definitive answer.
 	imageMismatch string
-	violations    []sovereigntyViolation
+	// specMismatch is why the live spec is not the one the zone pinned with
+	// backends[].specDigest (ADR-0004 Amendment 4), or "" when there is no pin
+	// or it matches. Like imageMismatch it is computed from the two specs alone,
+	// never from a Secret or a request that can fail, so it is always a
+	// definitive answer.
+	specMismatch string
+	violations   []sovereigntyViolation
 	// unverified are referenced Secrets whose metadata could not be read: no
 	// answer, so neither a violation nor a pass (#2498).
 	unverified []unverifiedSecret
@@ -136,12 +143,12 @@ type functionObservation struct {
 }
 
 // accepted reports whether the function may be rendered: a valid image, both
-// halves of the binding (and the image the zone pinned, if it pinned one), the
-// zone's own controller reference, and no allowlist violation. Fail closed:
+// halves of the binding (and the image and the spec the zone pinned, if it
+// pinned them), the zone's own controller reference, and no allowlist violation. Fail closed:
 // anything else renders nothing.
 func (o functionObservation) accepted() bool {
 	return o.invalidImage == "" && o.zone != nil && o.conflictingOwner == "" && o.zoneListed &&
-		o.imageMismatch == "" && len(o.violations) == 0
+		o.imageMismatch == "" && o.specMismatch == "" && len(o.violations) == 0
 }
 
 // undecided reports whether the function would be accepted but for Secret
@@ -262,6 +269,8 @@ func computeBackendServiceVerdict(bs *appsv1alpha1.BackendService, o functionObs
 				"nothing is rendered or mounted until it does", bs.Spec.Zone))
 	case o.imageMismatch != "":
 		bound = cond(ConditionFunctionBound, metav1.ConditionFalse, ReasonBindingImageMismatch, o.imageMismatch)
+	case o.specMismatch != "":
+		bound = cond(ConditionFunctionBound, metav1.ConditionFalse, ReasonBindingSpecMismatch, o.specMismatch)
 	default:
 		bound = cond(ConditionFunctionBound, metav1.ConditionTrue, ReasonFunctionBound, fmt.Sprintf(
 			"bound to zone %q: the function names it and the zone lists the function", bs.Spec.Zone))

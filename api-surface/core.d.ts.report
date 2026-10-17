@@ -12,6 +12,7 @@ interface BackendBindingConfig {
   image?: string | undefined
   name: string
   service?: string | undefined
+  specDigest?: string | undefined
 }
 
 type CacheConfig {
