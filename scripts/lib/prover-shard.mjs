@@ -52,10 +52,10 @@ export function parseShardSpec(spec) {
  * 38140088966 (the cancelled one) the cost is wildly uneven: 40 provers took 53
  * minutes, one of them (`compat-cell-fingerprint`) 20 and another
  * (`bytecode-liveness`) 11; `empty-dir-guard` declares 58 mutations that each run
- * a ~30-60 s spec (so ~30-55 minutes on its own), and `install-smoke-coverage`
- * is documented in the old workflow comment as ~30 minutes because most of its
- * mutations are graded by a full pack + clean install. A count-balanced split
- * measured 100+ minutes in one leg and ~20 in the others.
+ * a ~30-60 s spec (so ~30-55 minutes on its own). The first live sharded run
+ * (39002159226) then MEASURED three more: `kind-manifest-apply-safety` 67
+ * minutes (111 mutations), `published-seam-scan` 26, `install-smoke-coverage`
+ * 9.5. A count-balanced split put 100+ minutes in one leg and ~20 in others.
  *
  * These are ESTIMATES, used only to BALANCE legs. A stale weight makes a leg
  * longer or shorter; it cannot make a prover drop out, because the partition is
@@ -63,9 +63,15 @@ export function parseShardSpec(spec) {
  * not listed weighs 1.
  */
 export const PROVER_WEIGHT_MINUTES = Object.freeze({
+  // MEASURED on a hosted runner, run 39002159226 (shard 2): 111 mutations.
+  'scripts/mutation-prove-kind-manifest-apply-safety.mjs': 67,
+  // Estimated, not yet measured: 58 mutations x a ~30-60 s spec.
   'scripts/mutation-prove-empty-dir-guard.mjs': 55,
-  'scripts/mutation-prove-install-smoke-coverage.mjs': 30,
+  // MEASURED, run 39002159226: 26 minutes.
+  'scripts/mutation-prove-published-seam-scan.mjs': 26,
   'scripts/mutation-prove-compat-cell-fingerprint.mjs': 20,
+  // MEASURED, run 39002159226: 9.5 minutes (the old workflow comment said ~30).
+  'scripts/mutation-prove-install-smoke-coverage.mjs': 10,
   'scripts/mutation-prove-bytecode-liveness.mjs': 11,
   'scripts/mutation-prove-1533-kubeconfig-ci-secret.mjs': 5,
   'scripts/mutation-prove-compat-window-packed-anchor.mjs': 4,
@@ -340,7 +346,7 @@ export function aggregateReports({ expected, reports, shard = shardProvers }) {
 /** The per-prover bound, in ms. Overridable so the guard can use a short one. */
 export function proverTimeoutMs(env = process.env) {
   const raw = env.KNEXT_PROVER_TIMEOUT_MS;
-  if (raw === undefined || raw === '') return 80 * 60 * 1000;
+  if (raw === undefined || raw === '') return 100 * 60 * 1000;
   const n = Number(raw);
   if (!Number.isFinite(n) || n <= 0) {
     throw new Error(

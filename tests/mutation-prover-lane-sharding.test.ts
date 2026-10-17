@@ -387,7 +387,7 @@ describe('#2208 the per-prover bound', () => {
   it('defaults to a finite, positive bound well under the per-leg ceiling', () => {
     const ms = proverTimeoutMs({});
     expect(Number.isFinite(ms) && ms > 0).toBe(true);
-    expect(ms).toBe(80 * 60 * 1000);
+    expect(ms).toBe(100 * 60 * 1000);
   });
 
   it('is overridable by KNEXT_PROVER_TIMEOUT_MS and refuses nonsense rather than running unbounded', () => {
