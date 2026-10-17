@@ -110,9 +110,11 @@ const MAX_CAPTURE = 64 * 1024 * 1024;
 /**
  * @param {string} absPath the prover script
  * @param {{ cwd: string, timeoutMs: number, echo?: (chunk: string) => void,
- *           watch?: () => string | null, watchEveryMs?: number }} opts
- *   `watch` is polled every `watchEveryMs` while the prover runs; a returned string
- *   is a reason to kill its process group NOW (a runaway), reported as `runaway`.
+ *           watch?: () => { why: string | null, sample?: () => void },
+ *           watchEveryMs?: number }} opts
+ *   `watch` is polled every `watchEveryMs` while the prover runs; `why` is a reason
+ *   to kill its process group NOW (a runaway), reported as `runaway`. `sample`, if
+ *   present, is the slow diagnostic and runs only AFTER any kill.
  * @returns {Promise<{ status: number | null, signal: string | null, output: string,
  *                     timedOut: boolean, runaway: string | null, error?: Error }>}
  */
@@ -156,11 +158,14 @@ function runProver(
     const watcher = watch
       ? setInterval(() => {
           try {
-            const why = watch();
-            if (why && runaway === null) {
-              runaway = why;
+            const verdict = watch();
+            // KILL FIRST. The sample (ps, dmesg, sudo dmesg, journalctl: seconds in
+            // the worst case) is gathered only after the runaway is already dead.
+            if (verdict.why && runaway === null) {
+              runaway = verdict.why;
               killGroup();
             }
+            verdict.sample?.();
           } catch {
             // a diagnostic must never fail the lane
           }
@@ -351,9 +356,17 @@ function cleanBuildOutput() {
 /** `ps` (top by RSS) and the kernel log, Linux only; each part best-effort. */
 let lastKernelTail = '';
 function heavyExtras() {
+  // A test seam: a command whose stdout lines become the extras (so the slow path
+  // can be exercised on any platform).
+  const custom = process.env.KNEXT_LANE_EXTRAS_CMD;
+  if (custom) {
+    const r = spawnSync(custom, [], { encoding: 'utf8', timeout: 15_000 });
+    return (r.stdout ?? '').trim().split('\n').filter(Boolean);
+  }
   if (process.platform !== 'linux') return [];
   const out = [];
-  const ps = spawnSync('ps', ['-eo', 'pid,ppid,rss,etime,args', '--sort=-rss'], {
+  // `comm`, never `args`: a command line can carry a token that must not reach a log.
+  const ps = spawnSync('ps', ['-eo', 'pid,ppid,rss,etime,comm', '--sort=-rss'], {
     encoding: 'utf8',
     timeout: 3000,
   });
@@ -394,25 +407,29 @@ function makeWatch(proverRel) {
     const res = readResources(REPO_ROOT, MEMINFO_PATH);
     const why = runawayReason(res, thresholds);
     const now = Date.now();
-    if (now - lastSample >= SAMPLE_EVERY_MS || why) {
-      lastSample = now;
-      let procs = null;
-      try {
-        procs = countProcesses(readdirSync('/proc'));
-      } catch {
-        // not Linux
-      }
-      console.log(
-        sampleLine({
-          prover: proverRel,
-          res,
-          procs,
-          load: loadavg(),
-          extra: heavyExtras(),
-        }),
-      );
-    }
-    return why;
+    if (now - lastSample < SAMPLE_EVERY_MS && !why) return { why };
+    lastSample = now;
+    return {
+      why,
+      // Deferred: the caller runs this after it has acted on `why`.
+      sample: () => {
+        let procs = null;
+        try {
+          procs = countProcesses(readdirSync('/proc'));
+        } catch {
+          // not Linux
+        }
+        console.log(
+          sampleLine({
+            prover: proverRel,
+            res,
+            procs,
+            load: loadavg(),
+            extra: heavyExtras(),
+          }),
+        );
+      },
+    };
   };
 }
 
