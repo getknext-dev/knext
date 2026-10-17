@@ -333,11 +333,11 @@ type BackendBinding struct {
 	// The pin binds the image content ONLY. The BackendService's env, envFrom,
 	// volumes stay with whoever can write it, so a writer
 	// who keeps the pinned image can still change what runs inside it, with
-	// the zone's database Secret mounted and its users' tokens arriving. To
-	// close that for the zone, set specDigest (below): it binds the image AND
-	// the env, envFrom and volumes. With only this field set, grant update,
-	// patch and create on backendservices only to principals who may already
-	// read the zone's database Secret.
+	// the zone's database Secret mounted and its users' tokens arriving.
+	// specDigest (below) binds the env, envFrom and volumes as well as the
+	// image. With only this field set, or none, this still applies: grant
+	// update, patch and create on backendservices only to principals who may
+	// already read the zone's database Secret, pinned or not.
 	//
 	// Unset keeps the name-only binding: any image the BackendService names
 	// is bound.
@@ -366,8 +366,8 @@ type BackendBinding struct {
 	// What is NOT hashed (port, scaling, resources, protoVersion, language,
 	// wakeAhead, imagePullSecrets, zone) is tuning that cannot change what
 	// code runs or what it can read, and stays with whoever can write the
-	// BackendService; the canonical form and the exclusions are in the
-	// operator docs.
+	// BackendService. Neither are the contents of the Secrets and ConfigMaps
+	// the spec names: the digest binds which ones, not what is inside them.
 	//
 	// Unset keeps the weaker binding: image alone if image is set, else
 	// name-only. image and specDigest may both be set; the image is checked

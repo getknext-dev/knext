@@ -32,7 +32,15 @@
  *     a reference with two digests, a tag-only image, a prefix or case-folded
  *     match), its input to accepted(), the Bound condition and the refusals
  *     series, the reconciler reading the entry, the CRD's pattern, and the pin
- *     leaking into the zone's rendered env.
+ *     leaking into the zone's rendered env;
+ *   - the zone's SPEC pin on backends[] (ADR-0004 Amendment 4, X01-X23 for the
+ *     operator, T01-T06 for the CLI): the comparison, each hashed member
+ *     (image, env, envFrom, volumes) dropped in turn, an excluded member leaking
+ *     in, the canonical form (list order, key sort, the domain line, byte
+ *     lengths, the normalisation of zero values), the Bound condition, the
+ *     reconciler reading the entry, the field coverage guard (an unclassified
+ *     field, a dishonest class), and the TypeScript twin of the canonical form
+ *     plus the digest `knext deploy function` prints.
  *
  * Besides the rows: a CANARY (the first pin row graded by the same runner before
  * the table; it must go red or the harness cannot see red) and a NEUTRAL control
@@ -98,6 +106,12 @@ const CRD = resolve(REPO_ROOT, 'packages/kn-next-operator/config/crd/bases/apps.
 const ROLE = resolve(REPO_ROOT, 'packages/kn-next-operator/config/rbac/role.yaml');
 // biome-ignore format: one-line resolve() for the anchor-drift scan
 const NEXTAPP_CRD = resolve(REPO_ROOT, 'packages/kn-next-operator/config/crd/bases/apps.kn-next.dev_nextapps.yaml');
+// biome-ignore format: one-line resolve() for the anchor-drift scan
+const SPECPIN = resolve(REPO_ROOT, 'packages/kn-next-operator/internal/controller/backendservice_spec_pin.go');
+// biome-ignore format: one-line resolve() for the anchor-drift scan
+const SPECDIGEST_TS = resolve(REPO_ROOT, 'packages/grpc/src/spec-digest.ts');
+// biome-ignore format: one-line resolve() for the anchor-drift scan
+const DEPLOY_FN_TS = resolve(REPO_ROOT, 'packages/grpc/src/deploy-function.ts');
 
 const PROVER = {
   subjects: {
@@ -113,6 +127,9 @@ const PROVER = {
     crd: CRD,
     role: ROLE,
     nextappcrd: NEXTAPP_CRD,
+    specpin: SPECPIN,
+    spects: SPECDIGEST_TS,
+    deployfn: DEPLOY_FN_TS,
   },
 };
 
@@ -124,6 +141,15 @@ const unit = (run, pkg = PKG) => ({ kind: 'go', args: ['-run', run, pkg] });
 const envtest = (focus) => ({
   kind: 'go',
   args: ['-run', 'TestControllers', PKG, `-ginkgo.focus=${focus}`],
+});
+
+/** A TypeScript row's guard: `bun test <file>` from the repo root (exit code only). */
+const BUN = `${process.env.HOME}/.bun/bin/bun`;
+const bunTest = (file) => ({ kind: 'bash', args: ['-c', `cd ../.. && ${BUN} test ${file}`] });
+/** A TypeScript row's build check: the mutated module must still load. */
+const bunLoads = (file) => ({
+  kind: 'bash',
+  args: ['-c', `cd ../.. && ${BUN} -e "await import('${REPO_ROOT}/${file}')"`],
 });
 
 const MUTATIONS = [
@@ -756,8 +782,8 @@ const MUTATIONS = [
     id: 'I07',
     claim: 'a mismatch is not an input of accepted(): the function still renders',
     subject: 'verdict',
-    anchor: 'o.imageMismatch == "" && len(o.violations) == 0',
-    replacement: 'len(o.violations) == 0',
+    anchor: 'o.imageMismatch == "" && o.specMismatch == "" && len(o.violations) == 0',
+    replacement: 'o.specMismatch == "" && len(o.violations) == 0',
     test: unit('TestAMismatchIsNotAccepted|TestAMismatchIsDecidedEvenWhenASecretReadFails'),
   },
   {
@@ -788,8 +814,8 @@ const MUTATIONS = [
     id: 'I11',
     claim: 'the refusal is not pre-registered in the refusals series',
     subject: 'metrics',
-    anchor: 'ReasonZoneNotListed, ReasonBindingImageMismatch, ReasonConflictingOwner,',
-    replacement: 'ReasonZoneNotListed, ReasonConflictingOwner,',
+    anchor: 'ReasonBindingImageMismatch, ReasonBindingSpecMismatch, ReasonConflictingOwner,',
+    replacement: 'ReasonBindingSpecMismatch, ReasonConflictingOwner,',
     test: unit('TestTheRefusalIsCountedUnderItsOwnReason'),
   },
   {
@@ -807,6 +833,251 @@ const MUTATIONS = [
     anchor: 'zb := zoneBinding{name: entry.Name, service: entry.Service}',
     replacement: 'zb := zoneBinding{name: entry.Name, service: entry.Service + entry.Image}',
     test: unit('TestAPinChangesNothingRenderedIntoTheZone'),
+  },
+  // --- the zone's SPEC pin on backends[] (ADR-0004 Amendment 4) -----------------
+  {
+    id: 'X01',
+    claim: 'the spec pin is never compared: any spec matches',
+    subject: 'specpin',
+    anchor: '\tif have == pin {',
+    replacement: '\tif true {',
+    test: unit('TestSpecPinMismatch'),
+  },
+  {
+    id: 'X02',
+    claim: "an entry with no spec pin is treated as a mismatch (today's behaviour is lost)",
+    subject: 'specpin',
+    anchor: '\tif pin == "" {\n\t\treturn ""\n\t}',
+    replacement: '\tif false {\n\t\treturn ""\n\t}',
+    test: unit('TestSpecPinMismatch'),
+  },
+  {
+    id: 'X03',
+    claim: 'env is not hashed: NODE_OPTIONS can be added under a pinned spec',
+    subject: 'specpin',
+    anchor: 'var specPinHashedFields = []string{"image", "env", "envFrom", "volumes"}',
+    replacement: 'var specPinHashedFields = []string{"image", "envFrom", "volumes"}',
+    test: unit('TestSpecPinMismatch'),
+  },
+  {
+    id: 'X04',
+    claim: 'envFrom is not hashed: a Secret can be imported under a pinned spec',
+    subject: 'specpin',
+    anchor: 'var specPinHashedFields = []string{"image", "env", "envFrom", "volumes"}',
+    replacement: 'var specPinHashedFields = []string{"image", "env", "volumes"}',
+    test: unit('TestSpecPinMismatch'),
+  },
+  {
+    id: 'X05',
+    claim: 'volumes are not hashed: a volume can be mounted under a pinned spec',
+    subject: 'specpin',
+    anchor: 'var specPinHashedFields = []string{"image", "env", "envFrom", "volumes"}',
+    replacement: 'var specPinHashedFields = []string{"image", "env", "envFrom"}',
+    test: unit('TestSpecPinMismatch'),
+  },
+  {
+    id: 'X06',
+    claim: 'the image is not hashed: an image swap passes the spec pin',
+    subject: 'specpin',
+    anchor: 'var specPinHashedFields = []string{"image", "env", "envFrom", "volumes"}',
+    replacement: 'var specPinHashedFields = []string{"env", "envFrom", "volumes"}',
+    test: unit('TestSpecPinMismatch'),
+  },
+  {
+    id: 'X07',
+    claim: 'an excluded member (port) leaks into the hash: tuning needs a re-pin',
+    subject: 'specpin',
+    anchor: 'var specPinHashedFields = []string{"image", "env", "envFrom", "volumes"}',
+    replacement: 'var specPinHashedFields = []string{"image", "env", "envFrom", "volumes", "port"}',
+    test: unit('TestSpecPinIgnoresWhatDoesNotDecideCodeOrReads'),
+  },
+  {
+    id: 'X08',
+    claim: 'list order is not part of the digest: a reordered env passes',
+    subject: 'specpin',
+    anchor:
+      '\t\tb.WriteString("l")\n\t\tfor _, x := range t {\n\t\t\tif err := writeCanonical(b, x); err != nil {\n\t\t\t\treturn err\n\t\t\t}\n\t\t}\n\t\tb.WriteString("e")',
+    replacement:
+      '\t\tb.WriteString("l")\n\t\tparts := make([]string, 0, len(t))\n\t\tfor _, x := range t {\n\t\t\tvar sb strings.Builder\n\t\t\tif err := writeCanonical(&sb, x); err != nil {\n\t\t\t\treturn err\n\t\t\t}\n\t\t\tparts = append(parts, sb.String())\n\t\t}\n\t\tsort.Strings(parts)\n\t\tb.WriteString(strings.Join(parts, ""))\n\t\tb.WriteString("e")',
+    test: unit('TestSpecDigestIsOrderSensitiveForLists|TestSpecDigestVectors'),
+  },
+  {
+    id: 'X09',
+    claim: 'object keys are not sorted: the digest depends on map iteration order',
+    subject: 'specpin',
+    anchor: '\t\tsort.Strings(keys) // byte order of the UTF-8 strings',
+    replacement: '\t\t// keys left in map order',
+    test: unit('TestSpecDigestVectors'),
+  },
+  {
+    id: 'X10',
+    claim: 'an empty string is kept: absent and empty hash differently from the CLI',
+    subject: 'specpin',
+    anchor: '\t\treturn t, t == ""',
+    replacement: '\t\treturn t, false',
+    test: unit('TestSpecDigestVectors'),
+  },
+  {
+    id: 'X11',
+    claim: 'false is kept: an explicit optional:false hashes differently from absent',
+    subject: 'specpin',
+    anchor: '\t\treturn t, !t',
+    replacement: '\t\treturn t, false',
+    test: unit('TestSpecDigestVectors'),
+  },
+  {
+    id: 'X12',
+    claim: 'the domain line is dropped: the digest is a bare SHA-256 of the encoding',
+    subject: 'specpin',
+    anchor: 'const specDigestDomain = "knext.dev/backendservice-spec/v1\\n"',
+    replacement: 'const specDigestDomain = ""',
+    test: unit('TestSpecDigestVectors'),
+  },
+  {
+    id: 'X13',
+    claim: 'string length is counted in characters, not UTF-8 bytes',
+    subject: 'specpin',
+    anchor: '\t\tfmt.Fprintf(b, "s%d:%s", len(t), t)',
+    replacement: '\t\tfmt.Fprintf(b, "s%d:%s", len([]rune(t)), t)',
+    test: unit('TestSpecDigestVectors'),
+  },
+  {
+    id: 'X14',
+    claim: 'a spec mismatch is not an input of accepted(): the function still renders',
+    subject: 'verdict',
+    anchor: 'o.imageMismatch == "" && o.specMismatch == "" && len(o.violations) == 0',
+    replacement: 'o.imageMismatch == "" && len(o.violations) == 0',
+    test: unit('TestASpecMismatchIsNotAccepted|TestASpecMismatchIsDecidedEvenWhenASecretReadFails'),
+  },
+  {
+    id: 'X15',
+    claim: 'the Bound condition does not name the spec mismatch',
+    subject: 'verdict',
+    anchor: '\tcase o.specMismatch != "":',
+    replacement: '\tcase false:',
+    test: unit('TestVerdictForASpecMismatchIsBindingSpecMismatch'),
+  },
+  {
+    id: 'X16',
+    claim: 'the reconciler never records the spec mismatch: an injected env keeps running',
+    subject: 'ctl',
+    anchor: 'obs.specMismatch = specPinMismatch(entry.SpecDigest, &bs.Spec)',
+    replacement: '_ = specPinMismatch(entry.SpecDigest, &bs.Spec)',
+    test: envtest('refuses env added under a pinned spec'),
+  },
+  {
+    id: 'X17',
+    claim: 'the reconciler compares against an empty spec pin: nothing is ever refused',
+    subject: 'ctl',
+    anchor: 'obs.specMismatch = specPinMismatch(entry.SpecDigest, &bs.Spec)',
+    replacement: 'obs.specMismatch = specPinMismatch("", &bs.Spec)',
+    test: envtest('refuses a volume added under a pinned spec'),
+  },
+  {
+    id: 'X18',
+    claim: 'the spec refusal is not pre-registered in the refusals series',
+    subject: 'metrics',
+    anchor: 'ReasonBindingImageMismatch, ReasonBindingSpecMismatch, ReasonConflictingOwner,',
+    replacement: 'ReasonBindingImageMismatch, ReasonConflictingOwner,',
+    test: unit('TestTheSpecRefusalIsCountedUnderItsOwnReason'),
+  },
+  {
+    id: 'X19',
+    claim: 'the CRD accepts a malformed spec pin',
+    subject: 'nextappcrd',
+    anchor: 'pattern: ^sha256:[a-f0-9]{64}$',
+    replacement: 'pattern: ^.*$',
+    test: envtest('NextApp CRD: the backends.*specDigest pin'),
+  },
+  {
+    id: 'X20',
+    claim: "the spec pin leaks into the zone's rendered env (a pin change rolls a zone revision)",
+    subject: 'bind',
+    anchor: 'zb := zoneBinding{name: entry.Name, service: entry.Service}',
+    replacement: 'zb := zoneBinding{name: entry.Name, service: entry.Service + entry.SpecDigest}',
+    test: unit('TestASpecPinChangesNothingRenderedIntoTheZone'),
+  },
+  {
+    id: 'X21',
+    claim: 'a field is left unclassified (language dropped from the exclusion list)',
+    subject: 'specpin',
+    anchor:
+      '\t"language": {exclusionNotRendered,\n\t\t"Informational metadata; the operator renders nothing from it into the function\'s objects."},\n',
+    replacement: '',
+    test: unit('TestEveryBackendServiceSpecFieldIsBoundOrReviewed'),
+  },
+  {
+    id: 'X22',
+    claim:
+      'a field is classified dishonestly (port claimed as not rendered, though it reaches the pod)',
+    subject: 'specpin',
+    anchor: '\t"port": {exclusionOperational,',
+    replacement: '\t"port": {exclusionNotRendered,',
+    test: unit('TestFieldClassificationMatchesWhatTheOperatorRenders'),
+  },
+  {
+    id: 'X23',
+    claim: 'the mismatch message does not name the digest the live spec has',
+    subject: 'specpin',
+    anchor: '"otherwise restore the BackendService\'s spec", pin, have)',
+    replacement: '"otherwise restore the BackendService\'s spec", pin, pin)',
+    test: unit('TestSpecPinMismatchNamesBothDigests'),
+  },
+  // --- the CLI's twin of the canonical form (packages/grpc/src/spec-digest.ts) ----
+  {
+    id: 'T01',
+    claim: 'the CLI does not sort object keys: its digest differs from the operator',
+    subject: 'spects',
+    anchor: "Buffer.compare(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8')),",
+    replacement: '0,',
+    test: bunTest('packages/grpc/src/__tests__/spec-digest.test.ts'),
+    check: bunLoads('packages/grpc/src/spec-digest.ts'),
+  },
+  {
+    id: 'T02',
+    claim: 'the CLI does not hash env: its printed digest ignores the settings it should bind',
+    subject: 'spects',
+    anchor: "['image', 'env', 'envFrom', 'volumes']",
+    replacement: "['image', 'envFrom', 'volumes']",
+    test: bunTest('packages/grpc/src/__tests__/spec-digest.test.ts'),
+    check: bunLoads('packages/grpc/src/spec-digest.ts'),
+  },
+  {
+    id: 'T03',
+    claim: 'the CLI drops the domain line from the preimage',
+    subject: 'spects',
+    anchor: "export const SPEC_DIGEST_DOMAIN = 'knext.dev/backendservice-spec/v1\\n';",
+    replacement: "export const SPEC_DIGEST_DOMAIN = '';",
+    test: bunTest('packages/grpc/src/__tests__/spec-digest.test.ts'),
+    check: bunLoads('packages/grpc/src/spec-digest.ts'),
+  },
+  {
+    id: 'T04',
+    claim: 'the CLI counts string length in UTF-16 units, not UTF-8 bytes',
+    subject: 'spects',
+    anchor: 'return `s${bytes.length}:${s}`;',
+    replacement: 'return `s${s.length}:${s}`;',
+    test: bunTest('packages/grpc/src/__tests__/spec-digest.test.ts'),
+    check: bunLoads('packages/grpc/src/spec-digest.ts'),
+  },
+  {
+    id: 'T05',
+    claim: 'the CLI keeps empty strings: absent and empty hash differently from the operator',
+    subject: 'spects',
+    anchor: "if (typeof v === 'string') return [v, v === ''];",
+    replacement: "if (typeof v === 'string') return [v, false];",
+    test: bunTest('packages/grpc/src/__tests__/spec-digest.test.ts'),
+    check: bunLoads('packages/grpc/src/spec-digest.ts'),
+  },
+  {
+    id: 'T06',
+    claim: 'knext deploy function prints a digest of something other than the spec it applied',
+    subject: 'deployfn',
+    anchor: 'const specDigest = backendSpecDigest(cr.spec);',
+    replacement:
+      'const specDigest = backendSpecDigest({ ...cr.spec, image: `${cr.spec.image}x` });',
+    test: bunTest('packages/grpc/src/__tests__/deploy-function.test.ts'),
+    check: bunLoads('packages/grpc/src/deploy-function.ts'),
   },
   // --- CRD, RBAC and metrics ---------------------------------------------------
   {
@@ -856,8 +1127,8 @@ const NEUTRAL = {
   id: 'N01',
   claim: 'control: the same conjunction with its operands swapped changes nothing',
   subject: 'verdict',
-  anchor: 'o.imageMismatch == "" && len(o.violations) == 0',
-  replacement: 'len(o.violations) == 0 && o.imageMismatch == ""',
+  anchor: 'o.imageMismatch == "" && o.specMismatch == "" && len(o.violations) == 0',
+  replacement: 'o.specMismatch == "" && o.imageMismatch == "" && len(o.violations) == 0',
   test: unit('TestAMismatchIsNotAccepted|TestAMismatchIsDecidedEvenWhenASecretReadFails'),
 };
 
@@ -908,7 +1179,11 @@ function guardExit(test) {
   return run('bash', test.args, test.env);
 }
 
-/** The mutated tree must still COMPILE its tests, or the row proves nothing. */
+/**
+ * The mutated tree must still COMPILE its tests, or the row proves nothing. A
+ * row may bring its own `check` (the TypeScript rows: the mutated module must
+ * still load), which replaces this Go build.
+ */
 function buildsExit() {
   const build = run('go', ['build', './...'], {}, { showErrors: true });
   if (build !== 0) return build;
@@ -969,7 +1244,7 @@ function grade(m) {
   let code;
   try {
     mutate(snap, m.anchor, m.replacement);
-    built = buildsExit();
+    built = m.check ? guardExit(m.check) : buildsExit();
     code = built === 0 ? guardExit(m.test) : undefined;
   } finally {
     restore(snap);

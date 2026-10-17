@@ -388,6 +388,38 @@ const LANE_ROWS = [
     anchor: '      image: "${digest}"',
     replacement: '      # not pinned',
   },
+  // The zone spec pin phase (ADR-0004 Amendment 4).
+  {
+    id: 'SPIN1',
+    subject: 'run',
+    claim:
+      'the spec pin phase has no control: the env var is never shown to render under the image pin alone',
+    anchor:
+      '  wait_until 120 2 "the injected env is gone again" \'! fn_ksvc_has_env NODE_OPTIONS\'\n',
+    replacement: '  :\n',
+  },
+  {
+    id: 'SPIN2',
+    subject: 'run',
+    claim: 'the spec pin phase never sets the pin: the env var is refused by nothing it set',
+    anchor: '  set_zone_spec_pin "${spec_pin}"\n',
+    replacement: '  :\n',
+  },
+  {
+    id: 'SPIN3',
+    subject: 'run',
+    claim:
+      'the spec pin phase no longer holds the refusal: a function that comes back is not caught',
+    anchor: '  fn_ksvc_gone || fail "the spec-refused function\'s Knative Service came back"\n',
+    replacement: '  :\n',
+  },
+  {
+    id: 'SPIN4',
+    subject: 'run',
+    claim: 'the spec pin phase pins a made-up digest instead of the CLI computed one',
+    anchor: '  spec_pin="$(live_spec_digest)"\n',
+    replacement: '  spec_pin="sha256:$(printf \'0%.0s\' $(seq 64))"\n',
+  },
   {
     id: 'S05',
     subject: 'run',

@@ -90,18 +90,82 @@ entry, the function comes back through a cold start when the entry returns.
 A `backends` entry that names a function belonging to another zone is refused and reported on the
 zone's `BackendBindings` condition.
 
-### Pin the function's image
+### Pin the function's spec
 
 A binding matches **names**. Without more, anyone who may **update** the function's `BackendService`
-can change `spec.image` to an image they chose, and the operator runs that image with your zone's
-database Secret and key set mounted. Your zone then sends it your users' identity tokens. In other
-words, **permission to update `backendservices` is equivalent to permission to read your zone's
+can change `spec.image` to an image they chose, or keep the image and add `env`, `envFrom` or
+`volumes`, and the operator runs the result with your zone's database Secret and key set mounted.
+Your zone then sends it your users' identity tokens. In other words, **with no pin, or with only an
+image pin, permission to update `backendservices` is equivalent to permission to read your zone's
 database Secret**. Grant `update`, `patch` and `create` on `backendservices` only to people who may
 already read that Secret. A GitOps tool that applies the `BackendService` has this power too.
 
-Pinning the image narrows this, but does not remove it: see [What the pin does not cover](#what-the-pin-does-not-cover).
-To pin, put the function's image digest in the zone's entry. `knext deploy function` prints the
-exact entry after it applies the function:
+The zone can pin what it agreed to bind, in its own entry in `backends`, where only someone who can
+edit the zone can change it. There are two pins. The **spec pin** (`specDigest`) covers the image and
+the settings that decide what runs and what it can read. The **image pin** (`image`) covers the image
+only and is the weaker option. Use the spec pin.
+
+#### Pin the whole spec
+
+`knext deploy function` prints the exact entry after it applies the function:
+
+```ts title="knext.config.ts (excerpt)"
+export default {
+  // ...
+  backends: [
+    { name: "pricing", specDigest: "sha256:0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b" },
+  ],
+};
+```
+
+`specDigest` is `sha256:` followed by 64 lowercase hexadecimal characters: a digest of the function's
+**image, `env`, `envFrom` and `volumes`**, the parts of a `BackendService` that decide what code runs
+and which Secrets and ConfigMaps it can read. The operator computes the same digest from the
+`BackendService` on the cluster at every reconcile and runs the function only while the two are equal.
+The same field exists on the resource if you apply the zone yourself:
+
+```yaml title="orders zone (excerpt)"
+spec:
+  backends:
+    - name: pricing
+      service: pricing
+      specDigest: "sha256:0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b"
+```
+
+What is **not** in the digest is tuning that cannot change what runs or what it can read: `port`,
+`scaling`, `resources`, `protoVersion`, `language`, `wakeAhead` and `imagePullSecrets`. You can change
+those without touching the zone. The order of the entries in `env`, `envFrom` and `volumes` does
+count, because the order of `env` decides how `$(VAR)` references expand and the order of `envFrom`
+decides which source wins when two define the same name; a tool that reorders them makes the pin
+mismatch, and the function is refused rather than run with a different environment.
+
+**If you write `env`, `envFrom` or `volumes` into the `BackendService` yourself.** `knext deploy
+function` has no flags for them, so the digest it prints covers the spec it applied, not the settings
+you add afterwards. The function is then refused until the zone's pin matches, and the message names
+the digest the operator computed from the spec as it stands. Review that spec, then put that digest in
+the zone's entry. Do not copy a digest out of a refusal you have not reviewed: it is the digest of
+whatever is on the cluster now.
+
+**What happens on a mismatch.** The operator runs the function only while its spec has exactly the
+pinned digest. Any other spec (an env var or a volume added, an `envFrom` added, any of them changed
+or reordered, another image) refuses the function: `Bound` and `Ready` turn `False` with the reason
+`BindingSpecMismatch`, the message names both digests, the function's Knative Service is removed, and
+nothing is mounted into it: no database Secret and no key set. Put the pinned spec back, or change
+the pin, and the function runs again. The pin itself never appears in your zone's pods, so setting,
+changing or removing it does not roll a zone revision. A refused function stops reporting a served
+version, so, as with any refused function, the zone's next revision drops
+`<NAME>_SERVICE_PROTO_VERSION` and its calls to that function fail closed until the function is bound
+again. A failed read of a Secret can never cause this refusal, because the check compares the two
+resources and nothing else.
+
+With the spec pin set, someone who can only write the function's `BackendService` can no longer make
+it run their code with your zone's database Secret: whatever they change is refused before anything
+is mounted. What is left, and what the spec pin cannot see, is listed under
+[What the pin does not cover](#what-the-pin-does-not-cover).
+
+#### Pin the image only
+
+The image pin is the earlier, weaker form. Put the function's image digest in the zone's entry:
 
 ```ts title="knext.config.ts (excerpt)"
 export default {
@@ -113,54 +177,49 @@ export default {
 ```
 
 `image` is the digest only: `@sha256:` followed by 64 lowercase hexadecimal characters. It is not the
-whole image reference, so the registry path and tag can change while the content stays the same. The
-same field exists on the resource if you apply the zone yourself:
+whole image reference, so the registry path and tag can change while the content stays the same.
+`knext deploy function` prints this entry too. With it, the function is refused with the reason
+`BindingImageMismatch` while its `spec.image` carries any other digest, or none. It keeps working
+beside `specDigest`: when both are set, the image is checked first, so a swapped image is reported as
+an image mismatch. It does not see `env`, `envFrom` or `volumes`; see below.
 
-```yaml title="orders zone (excerpt)"
-spec:
-  backends:
-    - name: pricing
-      service: pricing
-      image: "@sha256:0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b"
-```
-
-**What happens on a mismatch.** The operator runs the function only while the digest in its
-`spec.image` is exactly the pinned one. Any other digest, or an image with no digest, refuses the
-function: `Bound` and `Ready` turn `False` with the reason `BindingImageMismatch`, the message names
-both digests, the function's Knative Service is removed, and nothing is mounted into it: no database
-Secret and no key set. Put the pinned image back, or change the pin, and the function runs again.
-The pin itself never appears in your zone's pods, so setting, changing or removing it does not roll a
-zone revision. A refused function stops reporting a served version, so, as with any refused function,
-the zone's next revision drops `<NAME>_SERVICE_PROTO_VERSION` and its calls to that function fail
-closed until the function is bound again. A failed read of a Secret can never cause this refusal,
-because the check compares the two resources and nothing else.
-
-**Rotating the pin.** A new function image and a new pin are two writes, and they cannot land in the
-same instant. Change both in one step (one `kubectl apply -f` of both resources, or one commit for a
+**Rotating a pin.** A new function and a new pin are two writes, and they cannot land in the same
+instant. Change both in one step (one `kubectl apply -f` of both resources, or one commit for a
 GitOps tool). While only one of them has been written, the function is refused, and it starts again
-(with a cold start) as soon as the other follows. If you update the function's image first, the
-function is refused until you update the pin; if you update the pin first, it is refused until the
-function's image follows. Either order works; neither avoids that window.
+(with a cold start) as soon as the other follows. If you update the function first, it is refused
+until you update the pin; if you update the pin first, it is refused until the function follows.
+Either order works; neither avoids that window.
 
 #### What the pin does not cover
 
-**The pin binds the image content, and nothing else.** The function's other settings stay with
-whoever can write its `BackendService`: its `env`, `envFrom` and `volumes`. Someone who can write the `BackendService` can keep the pinned image and still change
-what runs inside it. For example, setting `NODE_OPTIONS=--import=...` in `env` makes a Node image
-run code of their choosing, with your zone's database Secret mounted and your users' tokens arriving.
-A pin does not stop that.
+**The image pin binds the image content, and nothing else.** The function's other settings stay with
+whoever can write its `BackendService`: its `env`, `envFrom` and `volumes`. Someone who can write the
+`BackendService` can keep the pinned image and still change what runs inside it. For example, setting
+`NODE_OPTIONS=--import=...` in `env` makes a Node image run code of their choosing, with your zone's
+database Secret mounted and your users' tokens arriving. An image pin does not stop that.
 
-So, even with a pin on every function: **grant `update`, `patch` and `create` on `backendservices`
-only to people who may already read your zone's database Secret.** The pin protects against a swapped
-image, not against a writer who changes the function's settings.
+So, with only an image pin, or none: **grant `update`, `patch` and `create` on `backendservices` only
+to people who may already read your zone's database Secret.** That advice still applies to every zone
+that has not set `specDigest`.
 
-Also:
+**With the spec pin, that no longer holds for the `BackendService` itself.** It does not remove every
+way to change what a function does. What remains:
 
-- The pin is optional, so a zone that does not set it keeps the name-only binding.
-- It says "this exact image", not "an image from a source you trust": pin only images you built and
+- **The contents of the objects the spec names.** The digest covers which Secrets and ConfigMaps the
+  function reads, not what is inside them. Someone who can write a ConfigMap the function mounts, or a
+  Secret marked for your zone, can change what the function reads, and if the function loads code or
+  configuration from there, what it does. That takes write access to that object, not to
+  `backendservices`: treat it like write access to the function.
+- **A Secret your own spec provides.** If the pinned spec gives the function a credential, the function
+  has it. The pin is your statement that it may.
+- **Settings outside the digest.** Someone who can write the `BackendService` can still change its
+  `port` (aiming traffic at another listener of the same image), its `protoVersion` (misreporting the
+  contract version to your zone), its scaling and its resources.
+- **The pin is optional**, so a zone that does not set it keeps the weaker binding.
+- **It says "this exact spec", not "a spec from a source you trust"**: pin only images you built and
   signed.
-- Anyone who can edit your zone's `NextApp` can also change the pin, so keep write access to the zone
-  as tight as access to its database Secret.
+- **Anyone who can edit your zone's `NextApp` can also change the pin**, so keep write access to the
+  zone as tight as access to its database Secret.
 
 ## What the zone receives
 
@@ -206,8 +265,9 @@ zone's database. Two things keep it airtight:
   a more privileged identity; a stray one is rejected by a strict apply and has no effect otherwise.
 - **The binding is two-sided**, so someone who may create a `BackendService` but cannot edit the
   zone cannot get a Secret mounted into a pod they control. It matches names, though, so someone
-  who may *update* a function that is already bound can swap its image, or change its `env` or
-  `envFrom`. [Pinning the image](#pin-the-functions-image) stops the image swap only; keep `update` on
+  who may *update* a function that is already bound can swap its image, or change its `env`,
+  `envFrom` or `volumes`. [Pinning the whole spec](#pin-the-whole-spec) refuses any such change; an
+  image pin alone stops the image swap only. Without the spec pin, keep `update` on
   `backendservices` limited to people who may read the zone's database Secret.
 
 **The namespace is the trust boundary.** Anyone who can write Secrets in the namespace can set the

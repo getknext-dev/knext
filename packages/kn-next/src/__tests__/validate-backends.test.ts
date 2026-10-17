@@ -230,7 +230,9 @@ describe("validateConfig backends", () => {
     });
 
     it("accepts a spec pin next to an image pin, and refuses a non-string one", () => {
-        accepts([{ name: "pricing", specDigest: `sha256:${"ab12".repeat(16)}` }]);
+        accepts([
+            { name: "pricing", specDigest: `sha256:${"ab12".repeat(16)}` },
+        ]);
         accepts([
             {
                 name: "pricing",

@@ -254,7 +254,7 @@ export async function deployFunction(args: DeployFunctionArgs): Promise<number> 
         'pin in the same step. Port, scaling, resources and protoVersion are not part of it.\n' +
         'If you hand-write env, envFrom or volumes into the BackendService, this digest covers none ' +
         'of them: the function is refused until you pin the digest the operator reports in the ' +
-        'function\'s Ready condition, after you have reviewed that spec.\n' +
+        "function's Ready condition, after you have reviewed that spec.\n" +
         'The weaker alternative pins the image only (whoever can write the BackendService can ' +
         'still change its env, envFrom and volumes):\n' +
         `  { name: '${name}', image: '${pin}' }\n` +

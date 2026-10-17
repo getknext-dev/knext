@@ -35,7 +35,16 @@
 #              could, refuses it (Ready=False, BindingImageMismatch), removes its
 #              Knative Service and pods so nothing mounts the Secret, and the
 #              pin is never rendered into the zone's Knative Service; putting
-#              the pinned image back renders it again.
+#              the pinned image back renders it again. Then the zone's SPEC pin
+#              (ADR-0004 Amendment 4): with only the image pin, adding an env var
+#              under the pinned image still renders (the control); with
+#              specDigest set (computed by the CLI's own implementation from the
+#              spec on the cluster), the same `kubectl patch` that keeps the
+#              pinned image and adds NODE_OPTIONS refuses the function (Ready=
+#              False, BindingSpecMismatch), removes its Knative Service and pods
+#              so nothing mounts the database Secret, and removing the env
+#              renders it again; a rotation of the spec and the pin together
+#              updates it.
 #   leaks      no key material in the operator's or the pods' logs, the events,
 #              or the objects the operator publishes.
 #
@@ -82,6 +91,7 @@ REPO="$(cd "${PKG}/../.." && pwd)"
 OPERATOR="${REPO}/packages/kn-next-operator"
 PROBE="${HERE}/probe.ts"
 NEEDLES="${HERE}/key-needles.ts"
+SPEC_DIGEST="${HERE}/spec-digest.ts"
 
 CLUSTER="${KIND_CLUSTER:-knext-z7-e2e}"
 REG_NAME="${REGISTRY_NAME:-knext-z7-registry}"
@@ -933,6 +943,24 @@ fn_ksvc_mounts_db() { # the function's Knative Service reads the zone's database
 fn_ksvc_gone() { ! k -n "${NS}" get ksvc "${PIN_FN}" >/dev/null 2>&1; }
 fn_pods_gone() { [ -z "$(k -n "${NS}" get pods -l "serving.knative.dev/service=${PIN_FN}" -o name)" ]; }
 fn_netpol_gone() { ! k -n "${NS}" get networkpolicy -l "apps.kn-next.dev/function=${PIN_FN}" -o name 2>/dev/null | grep -q .; }
+fn_ksvc_has_env() { # <name>: the function's Knative Service sets this env var
+  k -n "${NS}" get ksvc "${PIN_FN}" -o json \
+    | jq -e --arg n "$1" '[.spec.template.spec.containers[]?.env[]?.name] | index($n) != null' >/dev/null
+}
+fn_spec_image() { k -n "${NS}" get backendservice "${PIN_FN}" -o jsonpath='{.spec.image}'; }
+# The CLI's own digest of the BackendService spec as the cluster holds it.
+live_spec_digest() {
+  k -n "${NS}" get backendservice "${PIN_FN}" -o json | jq -c .spec | bun "${SPEC_DIGEST}"
+}
+add_fn_env() { # <name> <value>: a principal with only `update` on backendservices adds an env var
+  k -n "${NS}" patch backendservice "${PIN_FN}" --type=json \
+    -p "[{\"op\":\"add\",\"path\":\"/spec/env\",\"value\":[{\"name\":\"$1\",\"value\":\"$2\"}]}]"
+}
+drop_fn_env() { k -n "${NS}" patch backendservice "${PIN_FN}" --type=json -p '[{"op":"remove","path":"/spec/env"}]'; }
+set_zone_spec_pin() { # <digest>: the zone owner moves the pin on the zone's own entry
+  k -n "${NS}" patch nextapp "${PIN_ZONE}" --type=json \
+    -p "[{\"op\":\"add\",\"path\":\"/spec/backends/0/specDigest\",\"value\":\"$1\"}]"
+}
 swap_fn_image() { # <image>: change the BackendService image and nothing else, as a principal with only `update` on backendservices
   k -n "${NS}" patch backendservice "${PIN_FN}" --type=json \
     -p "[{\"op\":\"replace\",\"path\":\"/spec/image\",\"value\":\"$1\"}]"
@@ -1026,6 +1054,61 @@ YAML
   wait_until 180 3 "the function renders again once its image is the pinned one" "fn_ksvc_mounts_db"
   wait_until 60 2 "the refusal clears" '[ "$(fn_condition Bound)" = "True/Bound" ]'
   ok "restoring the pinned image binds the function again"
+
+  # ---- the spec pin (ADR-0004 Amendment 4). The zone still pins the image; the
+  # image is never touched below, so an image pin alone has nothing to refuse.
+  log "pin: with only the image pin, env added under the pinned image still renders (the control)"
+  add_fn_env NODE_OPTIONS '--import=data:text/javascript,console.log(1)'
+  wait_until 120 2 "the function re-renders with the injected env (the image pin does not see env)" \
+    'fn_ksvc_has_env NODE_OPTIONS && fn_ksvc_mounts_db'
+  [ "$(fn_spec_image)" = "${go_img}" ] || fail "the control changed the image"
+  ok "the image pin alone lets an env var in: the function runs it with ${PIN_DB} mounted (the gap)"
+  drop_fn_env
+  wait_until 120 2 "the injected env is gone again" '! fn_ksvc_has_env NODE_OPTIONS'
+
+  log "pin: the zone pins the whole spec"
+  local spec_pin
+  spec_pin="$(live_spec_digest)"
+  [[ "${spec_pin}" =~ ^sha256:[0-9a-f]{64}$ ]] || fail "the CLI's spec digest has the wrong shape: ${spec_pin}"
+  set_zone_spec_pin "${spec_pin}"
+  wait_until 60 2 "the function stays bound under the spec pin the CLI computed" \
+    '[ "$(fn_condition Bound)" = "True/Bound" ] && fn_ksvc_mounts_db'
+  ok "the CLI's digest of the live spec is the operator's: the function is bound"
+
+  log "pin: the same kubectl patch, now under the spec pin"
+  add_fn_env NODE_OPTIONS '--import=data:text/javascript,console.log(1)'
+  [ "$(fn_spec_image)" = "${go_img}" ] || fail "the pinned image must be untouched: only env was added"
+  wait_until 120 2 "the function is refused: Ready=False BindingSpecMismatch" \
+    '[ "$(fn_condition Ready)" = "False/BindingSpecMismatch" ]'
+  wait_until 120 2 "the refused function's Knative Service is removed" fn_ksvc_gone
+  wait_until 120 2 "the refused function's pods are gone" fn_pods_gone
+  wait_until 60 2 "the refused function's NetworkPolicy is removed" fn_netpol_gone
+  [ "$(fn_condition Bound)" = "False/BindingSpecMismatch" ] || fail "Bound is $(fn_condition Bound), want False/BindingSpecMismatch"
+  k -n "${NS}" get backendservice "${PIN_FN}" -o json \
+    | jq -e --arg p "${spec_pin}" '[.status.conditions[]? | select(.type == "Ready") | .message] | .[0] | contains($p)' >/dev/null \
+    || fail "the refusal does not name the pinned digest"
+  # Nothing mounts the database Secret on the function's behalf, and it holds.
+  sleep 20
+  fn_ksvc_gone || fail "the spec-refused function's Knative Service came back"
+  fn_pods_gone || fail "a pod of the spec-refused function is running"
+  ok "env added under a pinned image is refused: no Knative Service, no pod, nothing mounts ${PIN_DB}"
+  if k -n "${NS}" get ksvc "${PIN_ZONE}" -o json 2>/dev/null | grep -qF "${spec_pin#sha256:}"; then
+    fail "the spec pin appears in the zone's Knative Service"
+  fi
+  ok "the spec pin is not rendered into the zone's Knative Service"
+
+  log "pin: the pinned spec back renders the function again (the refusal was the spec pin)"
+  drop_fn_env
+  wait_until 180 3 "the function renders again once its spec is the pinned one" "fn_ksvc_mounts_db"
+  wait_until 60 2 "the refusal clears" '[ "$(fn_condition Bound)" = "True/Bound" ]'
+  ok "restoring the pinned spec binds the function again"
+
+  log "pin: rotating the spec and the pin together"
+  add_fn_env LOG_LEVEL debug
+  set_zone_spec_pin "$(live_spec_digest)"
+  wait_until 180 3 "the function renders with the new env under the new pin" \
+    'fn_ksvc_has_env LOG_LEVEL && fn_ksvc_mounts_db && [ "$(fn_condition Bound)" = "True/Bound" ]'
+  ok "a spec and a pin changed together bind the function"
 
   k -n "${NS}" delete nextapp "${PIN_ZONE}" --ignore-not-found --wait=true --timeout=300s
   k -n "${NS}" delete backendservice "${PIN_FN}" --ignore-not-found --wait=true --timeout=300s
