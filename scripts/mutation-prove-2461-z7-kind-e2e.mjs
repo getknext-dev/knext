@@ -361,28 +361,28 @@ const LANE_ROWS = [
   },
   // The zone image pin phase (ADR-0004 Amendment 3).
   {
-    id: 'P01',
+    id: 'PIN1',
     subject: 'run',
     claim: 'the default phases drop the image pin phase',
     anchor: 'PHASES="${PHASES:-up images deploy verify rotate pin leaks}"',
     replacement: 'PHASES="${PHASES:-up images deploy verify rotate leaks}"',
   },
   {
-    id: 'P02',
+    id: 'PIN2',
     subject: 'run',
     claim: 'the pin phase no longer holds the refusal: a function that comes back is not caught',
     anchor: '  fn_ksvc_gone || fail "the refused function\'s Knative Service came back"\n',
     replacement: '  :\n',
   },
   {
-    id: 'P03',
+    id: 'PIN3',
     subject: 'run',
     claim: 'the pin phase has no control: the pinned image is never put back',
     anchor: '  swap_fn_image "${go_img}"\n',
     replacement: '  :\n',
   },
   {
-    id: 'P04',
+    id: 'PIN4',
     subject: 'run',
     claim: 'the pin phase never pins: the swap is refused by nothing it set',
     anchor: '      image: "${digest}"',
