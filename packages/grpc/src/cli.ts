@@ -55,7 +55,10 @@ Usage: knext add function <name> --lang go|rust [--module <go-module-path>]
 It also copies the function template for the language to functions/<name>/ (the
 token-verifying server, health check and Dockerfile), renamed to the function
 and with its code generated; this needs the Go toolchain (--lang go) or the Rust
-toolchain (--lang rust) on PATH.
+toolchain (--lang rust) on PATH. The first Rust run on a machine downloads and
+compiles the code generators (network needed, a few minutes) and caches them in
+$XDG_CACHE_HOME/knext/rust-codegen (~/.cache/knext/rust-codegen); set
+KNEXT_RUST_CODEGEN_DIR to an absolute path to keep them elsewhere.
 
 Writes proto/<name>/v1/<name>.proto (one read and one write RPC to start
 from), the knext options contract it imports, a buf.yaml if there is none, and

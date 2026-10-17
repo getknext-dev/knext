@@ -13,6 +13,8 @@
  *   W3  the scaffold step no longer builds and lints the scaffold
  *   W4  a change to scaffold-rust.ts does not re-run the workflow on a pull request
  *   W5  a change to scaffold-rust.ts does not re-run the workflow on a push
+ *   W7  the scaffold step no longer checks that the copy is rustfmt-clean
+ *   W8  the scaffold step no longer checks every feature combination compiles
  *   W6  the scaffold step generates with a second, unpinned plugin install
  *   C1  the template no longer runs the repository-only tests by default
  *
@@ -65,7 +67,7 @@ const MUTATIONS = [
     subject: 'workflow',
     claim: 'the scaffold step no longer builds and lints the scaffold',
     anchor:
-      '          cargo build --locked --all-targets\n          cargo clippy --all-targets --features e2e --locked -- -D warnings\n',
+      '          cargo build --locked --all-targets\n          cargo check --locked --all-features --all-targets\n          cargo clippy --all-targets --features e2e --locked -- -D warnings\n',
     replacement: '          true\n',
   },
   {
@@ -89,6 +91,21 @@ const MUTATIONS = [
     anchor:
       '        env:\n          KNEXT_RUST_CODEGEN_DIR: ${{ github.workspace }}/templates/rust/.codegen\n',
     replacement: '        env:\n          KNEXT_UNUSED: unused\n',
+  },
+  {
+    id: 'W7',
+    subject: 'workflow',
+    claim: 'the scaffold step no longer checks that the copy is rustfmt-clean',
+    anchor: '          cargo fmt --check\n          cargo build --locked --all-targets\n',
+    replacement: '          cargo build --locked --all-targets\n',
+  },
+  {
+    id: 'W8',
+    subject: 'workflow',
+    claim: 'the scaffold step no longer checks every feature combination compiles',
+    anchor:
+      '          cargo check --locked --all-features --all-targets\n          cargo clippy --all-targets --features e2e --locked -- -D warnings\n',
+    replacement: '          cargo clippy --all-targets --features e2e --locked -- -D warnings\n',
   },
   {
     id: 'C1',

@@ -48,7 +48,10 @@ starts from. The [Go template](/docs/go-functions) is the same function in Go.
    This writes the contract (`proto/orders/v1/orders.proto` and the options contract it imports)
    and the server project at `functions/orders/`: the template below, with its example service
    renamed to `OrdersService`, the crate named `orders`, and the Rust code already generated. It
-   needs the Rust toolchain on your `PATH`; if generation fails, nothing is written. See
+   needs the Rust toolchain on your `PATH` and, on the first run on a machine, a network
+   connection and a few minutes to download and compile the code generators (they are cached in
+   `$XDG_CACHE_HOME/knext/rust-codegen`, or `KNEXT_RUST_CODEGEN_DIR` when you set it to an
+   absolute path). If generation fails, nothing is written. See
    [`knext add function`](/docs/cli#knext-add-function).
 
 2. Write your handlers where `functions/orders/src/items.rs` is. The service is already

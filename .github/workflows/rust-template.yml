@@ -175,7 +175,9 @@ jobs:
           app="$(mktemp -d)"
           (cd "$app" && bun "$GITHUB_WORKSPACE/packages/grpc/scripts/knext-grpc.ts" add function orders --lang rust)
           cd "$app/functions/orders"
+          cargo fmt --check
           cargo build --locked --all-targets
+          cargo check --locked --all-features --all-targets
           cargo clippy --all-targets --features e2e --locked -- -D warnings
           cargo test --locked
 

@@ -345,6 +345,9 @@ describe('`knext add function --lang rust` copies the template, and this workflo
     expect(run).toContain('cargo build --locked --all-targets');
     expect(run).toContain('cargo clippy --all-targets --features e2e --locked -- -D warnings');
     expect(run).toContain('cargo test --locked');
+    // The copy is formatted as shipped, and every feature combination compiles.
+    expect(run).toContain('cargo fmt --check');
+    expect(run).toContain('cargo check --locked --all-features --all-targets');
     expect(run, 'stderr must not be discarded').not.toContain('2>/dev/null');
     // The job defaults to templates/rust; a scaffold run from there would not be a copy.
     expect(step['working-directory']).toBe('.');
@@ -385,7 +388,12 @@ describe('`knext add function --lang rust` copies the template, and this workflo
   });
 
   it('the template keeps the tests the scaffold drops: the feature is on by default here', () => {
-    expect(read('Cargo.toml')).toContain('default = ["shared-vectors"]');
+    const manifest = read('Cargo.toml');
+    expect(manifest).toContain('default = ["shared-vectors"]');
+    // The block the scaffold leaves out is delimited, and holds the feature.
+    expect(manifest).toMatch(
+      /# BEGIN repository-only tests[^\n]*\n(?:#[^\n]*\n)*default = \["shared-vectors"\]\nshared-vectors = \[\]\n# END repository-only tests\n/,
+    );
     expect(read('src/lib.rs')).toContain(
       '#[cfg(all(test, feature = "shared-vectors"))]\nmod testvectors;',
     );
@@ -393,7 +401,10 @@ describe('`knext add function --lang rust` copies the template, and this workflo
       '#[cfg(all(test, feature = "shared-vectors"))]\nmod vector_tests;',
     );
     expect(read('src/rpc/tests.rs')).toContain(
-      '#[cfg(feature = "shared-vectors")]\n#[tokio::test]\nasync fn production_wiring_verifies_zone_tokens',
+      '#[cfg(feature = "shared-vectors")]\nmod vector_wiring;',
+    );
+    expect(read('src/rpc/tests/vector_wiring.rs')).toContain(
+      'async fn production_wiring_verifies_zone_tokens',
     );
   });
 });

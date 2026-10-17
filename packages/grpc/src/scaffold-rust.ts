@@ -21,7 +21,7 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runBuf } from './buf';
 import { GrpcUsageError } from './config';
@@ -58,8 +58,12 @@ export const RUST_TEMPLATE_EXCLUDES: readonly TemplateExclude[] = [
     why: 'signed against the example service and read from the knext repository',
   },
   {
+    path: 'src/rpc/tests/vector_wiring.rs',
+    why: 'signed against the example service and read from the knext repository',
+  },
+  {
     path: 'src/testvectors.rs',
-    why: 'loads the shared vectors; only the test above and one wiring test use it',
+    why: 'loads the shared vectors; only the two tests above use it',
   },
   { path: 'target', why: 'build output of a local cargo run (git-ignored)' },
 ];
@@ -93,22 +97,21 @@ export function scaffoldedRustFromTemplate(): string[] {
   return rustTemplateFiles();
 }
 
-/** Crate names the toolchain owns, and Rust's keywords: none can name a crate or a proto package. */
-const RESERVED_CRATES = new Set([
-  'alloc',
-  'core',
-  'proc_macro',
-  'std',
-  'test',
-  'self',
-  'super',
-  'crate',
+/**
+ * The keywords of the Rust Reference (Keywords chapter), edition 2024, which is
+ * the template's edition: strict keywords, then the reserved ones (`gen` among
+ * them since 2024). A crate named like one cannot be `use`d, and the same word
+ * cannot be a proto package module. A test pins this list to the Reference's.
+ */
+export const RUST_KEYWORDS_2024: readonly string[] = [
+  // strict
   'as',
   'async',
   'await',
   'break',
   'const',
   'continue',
+  'crate',
   'dyn',
   'else',
   'enum',
@@ -128,8 +131,10 @@ const RESERVED_CRATES = new Set([
   'pub',
   'ref',
   'return',
+  'self',
   'static',
   'struct',
+  'super',
   'trait',
   'true',
   'type',
@@ -137,11 +142,13 @@ const RESERVED_CRATES = new Set([
   'use',
   'where',
   'while',
+  // reserved
   'abstract',
   'become',
   'box',
   'do',
   'final',
+  'gen',
   'macro',
   'override',
   'priv',
@@ -150,7 +157,18 @@ const RESERVED_CRATES = new Set([
   'unsized',
   'virtual',
   'yield',
-]);
+];
+
+/** Crates the toolchain itself provides: a function crate of the same name would shadow them. */
+export const RUST_TOOLCHAIN_CRATES: readonly string[] = [
+  'alloc',
+  'core',
+  'proc_macro',
+  'std',
+  'test',
+];
+
+const RESERVED_CRATES = new Set([...RUST_KEYWORDS_2024, ...RUST_TOOLCHAIN_CRATES]);
 
 const asCrateIdent = (name: string) => name.replaceAll('-', '_');
 
@@ -194,9 +212,31 @@ export function upperSnake(pascal: string): string {
     .toUpperCase();
 }
 
-/** The lines of Cargo.toml the scaffold rewrites, each present exactly once. */
-const FEATURE_DEFAULT_ON = 'default = ["shared-vectors"]';
-const FEATURE_DEFAULT_OFF = 'default = []';
+/**
+ * The repository-only tests sit behind a cargo feature, `shared-vectors`, that
+ * is on in the template. The copy has neither those files nor the feature:
+ * each place the template names it is cut out here, exactly once per file, and
+ * nothing may still name it afterwards.
+ */
+const VECTOR_GATE_FILES = ['Cargo.toml', 'src/lib.rs', 'src/auth.rs', 'src/rpc/tests.rs'];
+
+export function stripVectorGate(rel: string, text: string): string {
+  const pattern =
+    rel === 'Cargo.toml'
+      ? /^# BEGIN repository-only tests[^\n]*\n[\s\S]*?^# END repository-only tests[^\n]*\n/gm
+      : /(?:^\/\/[^\n]*\n)*^#\[cfg\([^\n]*shared-vectors[^\n]*\)\]\nmod \w+;\n/gm;
+  const found = text.match(pattern)?.length ?? 0;
+  if (found !== 1) {
+    throw new Error(
+      `the Rust template changed: expected one repository-only test gate in ${rel}, found ${found}`,
+    );
+  }
+  const out = text.replace(pattern, '');
+  if (out.includes('shared-vectors')) {
+    throw new Error(`the Rust template changed: ${rel} still names shared-vectors after the gate`);
+  }
+  return out;
+}
 
 function once(text: string, needle: string, file: string, expected: number): void {
   const n = text.split(needle).length - 1;
@@ -239,9 +279,7 @@ export function substituteRust(rel: string, text: string, s: RustScaffold): stri
   if (rel === 'Cargo.toml') {
     // The package and its bin target both carry the template's crate name.
     once(out, 'name = "function"', rel, 2);
-    out = out.replaceAll('name = "function"', `name = "${s.name}"`);
-    once(out, FEATURE_DEFAULT_ON, rel, 1);
-    return out.replace(FEATURE_DEFAULT_ON, FEATURE_DEFAULT_OFF);
+    return stripVectorGate(rel, out.replaceAll('name = "function"', `name = "${s.name}"`));
   }
   if (rel === 'Cargo.lock') return renameLockedPackage(out, 'function', s.name);
   if (rel === 'Dockerfile') {
@@ -251,6 +289,7 @@ export function substituteRust(rel: string, text: string, s: RustScaffold): stri
       .replace('--bin function', `--bin ${s.name}`)
       .replace('target/release/function ', `target/release/${s.name} `);
   }
+  if (VECTOR_GATE_FILES.includes(rel)) out = stripVectorGate(rel, out);
   const map: Record<string, string> = {
     EXAMPLE_SERVICE_SERVICE_NAME: `${upperSnake(s.service)}_SERVICE_NAME`,
     ExampleService: s.service,
@@ -270,12 +309,27 @@ export function substituteRust(rel: string, text: string, s: RustScaffold): stri
   return out.replace(re, (m) => map[m] as string);
 }
 
-/** Where the generation plugins are installed, shared by every function on this machine. */
+/**
+ * Where the generation plugins are installed, shared by every function on this
+ * machine. `KNEXT_RUST_CODEGEN_DIR` must be absolute: the scaffold runs in a
+ * staging directory, so a relative path would put the plugin binaries inside
+ * the project it copies out (refused with a usage error rather than guessed at).
+ * A relative `XDG_CACHE_HOME` is ignored, as the XDG base directory spec says.
+ * An empty value counts as unset.
+ */
 export function codegenCacheDir(env: NodeJS.ProcessEnv = process.env): string {
-  return (
-    env.KNEXT_RUST_CODEGEN_DIR ??
-    join(env.XDG_CACHE_HOME ?? join(homedir(), '.cache'), 'knext', 'rust-codegen')
-  );
+  const own = env.KNEXT_RUST_CODEGEN_DIR;
+  if (own) {
+    if (!isAbsolute(own)) {
+      throw new GrpcUsageError(
+        `KNEXT_RUST_CODEGEN_DIR must be an absolute path (got "${own}"); nothing was changed`,
+      );
+    }
+    return own;
+  }
+  const xdg = env.XDG_CACHE_HOME;
+  const base = xdg && isAbsolute(xdg) ? xdg : join(homedir(), '.cache');
+  return join(base, 'knext', 'rust-codegen');
 }
 
 /**
@@ -286,13 +340,14 @@ export function codegenCacheDir(env: NodeJS.ProcessEnv = process.env): string {
  * offline.
  */
 function generateWithBuf(stage: string): void {
+  // First, so a bad cache location is refused before any tool runs.
+  const cache = codegenCacheDir();
   const cargo = spawnSync('cargo', ['--version'], { cwd: stage });
   if (cargo.status !== 0) {
     throw new GrpcUsageError(
       "the Rust toolchain (`cargo`, at the version in the function's rust-toolchain.toml) is needed to generate the function's code and was not usable; install it with rustup; nothing was changed",
     );
   }
-  const cache = codegenCacheDir();
   const install = spawnSync('./codegen.sh', [], {
     cwd: stage,
     env: { ...process.env, CODEGEN_ROOT: cache, CODEGEN_INSTALL_ONLY: '1' },
@@ -315,6 +370,14 @@ function generateWithBuf(stage: string): void {
     }
   } finally {
     rmSync(link, { force: true });
+  }
+  // The renamed identifiers change line lengths; rustfmt (pinned with the
+  // toolchain) makes the copy formatted as shipped. Fail closed if it cannot.
+  const fmt = spawnSync('cargo', ['fmt'], { cwd: stage, encoding: 'utf8' });
+  if (fmt.status !== 0) {
+    throw new GrpcUsageError(
+      `formatting the function's code with \`cargo fmt\` failed; nothing was changed:\n${fmt.stderr ?? fmt.error?.message ?? ''}`,
+    );
   }
 }
 

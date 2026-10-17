@@ -768,9 +768,13 @@ the health check and a Dockerfile, renamed to your function, with its code gener
 - `--lang go` copies the [Go function template](/docs/go-functions). It needs the Go toolchain on
   your `PATH`, and `--module <path>` sets the Go module path (default `example.com/orders`).
 - `--lang rust` copies the [Rust function template](/docs/rust-functions), with the crate named
-  after the function. It needs the Rust toolchain (`cargo`, via `rustup`) on your `PATH`. The first
-  run on a machine compiles the code generators, which takes a few minutes; later runs reuse them
-  from `~/.cache/knext/rust-codegen` (set `KNEXT_RUST_CODEGEN_DIR` to keep them elsewhere).
+  after the function. It needs the Rust toolchain (`cargo`, via `rustup`) on your `PATH`, and a
+  network connection the first time: the first run on a machine downloads the code generators'
+  crates and compiles them, which takes a few minutes. Later runs reuse them from the knext cache
+  directory, `$XDG_CACHE_HOME/knext/rust-codegen` (`~/.cache/knext/rust-codegen` when
+  `XDG_CACHE_HOME` is unset). `XDG_CACHE_HOME` is ignored unless it is an absolute path.
+  `KNEXT_RUST_CODEGEN_DIR` puts the cache somewhere else; it must be an absolute path, and a
+  relative one is refused. The scaffolded code is formatted with `cargo fmt` before it is written.
 
 If generating the code fails, nothing is written.
 

@@ -10,13 +10,15 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { join, relative, resolve } from 'node:path';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 import { addFunction } from '../add-function';
 import {
   checkCrateName,
   codegenCacheDir,
   RUST_GITIGNORE,
+  RUST_KEYWORDS_2024,
   RUST_TEMPLATE_EXCLUDES,
+  RUST_TOOLCHAIN_CRATES,
   renameLockedPackage,
   resolveRustTemplateDir,
   rustTemplateDir,
@@ -110,7 +112,7 @@ describe('knext add function <name> --lang rust scaffolds templates/rust', () =>
 
       const manifest = readFileSync(join(root, 'Cargo.toml'), 'utf8');
       expect(manifest.match(/^name = "user-profile"$/gm)?.length).toBe(2);
-      expect(manifest).toContain('default = []');
+      expect(manifest).not.toContain('shared-vectors');
       expect(readFileSync(join(root, 'src/items.rs'), 'utf8')).toContain(
         'impl UserProfileService for Service',
       );
@@ -147,6 +149,15 @@ describe('knext add function <name> --lang rust scaffolds templates/rust', () =>
         encoding: 'utf8',
       });
       expect(build.status, build.stderr).toBe(0);
+      // Formatted as shipped, and every feature combination still compiles.
+      const fmt = spawnSync('cargo', ['fmt', '--check'], { cwd: root, encoding: 'utf8' });
+      expect(fmt.status, fmt.stdout + fmt.stderr).toBe(0);
+      const allFeatures = spawnSync(
+        'cargo',
+        ['check', '--locked', '--all-features', '--all-targets'],
+        { cwd: root, encoding: 'utf8' },
+      );
+      expect(allFeatures.status, allFeatures.stderr).toBe(0);
       const test = spawnSync('cargo', ['test', '--locked', '--', '--format', 'terse'], {
         cwd: root,
         encoding: 'utf8',
@@ -289,8 +300,15 @@ describe('the scaffolded manifest and scripts', () => {
     const manifest = readFileSync(join(root, 'Cargo.toml'), 'utf8');
     expect(manifest.match(/^name = "user-profile"$/gm)?.length).toBe(2);
     expect(manifest).not.toContain('name = "function"');
-    expect(manifest).toContain('default = []');
-    expect(manifest).not.toContain('default = ["shared-vectors"]');
+    // The feature that switches the repository-only tests on is not in the copy at all.
+    expect(manifest).not.toContain('shared-vectors');
+    expect(manifest).not.toContain('repository-only');
+    for (const f of walk(root).filter((p) => !p.startsWith('vendor/') && !p.startsWith('gen/'))) {
+      const text = readFileSync(join(root, f), 'utf8');
+      expect(text.includes('shared-vectors'), `${f} still names the feature`).toBe(false);
+      expect(text.includes('vector_wiring'), `${f} still names the vector tests`).toBe(false);
+    }
+    expect(existsSync(join(root, 'src/rpc/tests/vector_wiring.rs'))).toBe(false);
     expect(readFileSync(join(root, 'src/main.rs'), 'utf8')).toContain('use user_profile::{');
     // codegen.sh is run by hand to regenerate gen/: it keeps its executable bit.
     expect(lstatSync(join(root, 'codegen.sh')).mode & 0o111).not.toBe(0);
@@ -320,7 +338,14 @@ describe('generation fails closed and leaves the app untouched', () => {
 
   /** Run `body` with a stand-in `cargo` first on PATH and a prepared plugin cache. */
   function withFakes<T>(
-    opts: { installed: boolean; pluginExit: number; cargo?: boolean },
+    opts: {
+      installed: boolean;
+      pluginExit: number;
+      cargo?: boolean;
+      fmtExit?: number;
+      /** The value of KNEXT_RUST_CODEGEN_DIR (default: the prepared cache). */
+      dirEnv?: string;
+    },
     body: (env: { cargoLog: string; cache: string }) => T,
   ): T {
     const tools = emptyDir('rust-fake-tools');
@@ -331,7 +356,7 @@ describe('generation fails closed and leaves the app untouched', () => {
     if (opts.cargo !== false) {
       writeFileSync(
         join(tools, 'cargo'),
-        `#!/bin/sh\necho "$@" >> "${cargoLog}"\nif [ "$1" = "--version" ]; then echo cargo-stand-in; exit 0; fi\nexit 1\n`,
+        `#!/bin/sh\necho "$@" >> "${cargoLog}"\nif [ "$1" = "--version" ]; then echo cargo-stand-in; exit 0; fi\nif [ "$1" = "fmt" ]; then exit ${opts.fmtExit ?? 0}; fi\nexit 1\n`,
         { mode: 0o755 },
       );
     }
@@ -351,7 +376,7 @@ describe('generation fails closed and leaves the app untouched', () => {
     const saved = { PATH: process.env.PATH, DIR: process.env.KNEXT_RUST_CODEGEN_DIR };
     // With no stand-in cargo, PATH holds an (otherwise empty) directory only.
     process.env.PATH = opts.cargo === false ? tools : `${tools}:${saved.PATH}`;
-    process.env.KNEXT_RUST_CODEGEN_DIR = cache;
+    process.env.KNEXT_RUST_CODEGEN_DIR = opts.dirEnv ?? cache;
     try {
       return body({ cargoLog, cache });
     } finally {
@@ -399,6 +424,53 @@ describe('generation fails closed and leaves the app untouched', () => {
     });
   });
 
+  it('formats the staged project with cargo fmt, so the copy is rustfmt-clean as shipped', () => {
+    withFakes({ installed: true, pluginExit: 0 }, ({ cargoLog }) => {
+      const app = emptyDir('rust-fake-fmt');
+      expect(addFunction({ cwd: app, name: 'orders', lang: 'rust', io: capture().io })).toBe(0);
+      expect(readFileSync(cargoLog, 'utf8')).toMatch(/^fmt$/m);
+    });
+  });
+
+  it('a cargo fmt that fails stops the run: nothing is written', () => {
+    withFakes({ installed: true, pluginExit: 0, fmtExit: 1 }, () => {
+      const app = emptyDir('rust-fake-fmt-fail');
+      const c = capture();
+      expect(addFunction({ cwd: app, name: 'orders', lang: 'rust', io: c.io })).toBe(1);
+      expect(c.err()).toContain('cargo fmt');
+      expect(c.err()).toContain('nothing was changed');
+      expect(walk(app)).toEqual([]);
+    });
+  });
+
+  it('keeps no plugin binary or cache file in the function directory', () => {
+    withFakes({ installed: true, pluginExit: 0 }, () => {
+      const app = emptyDir('rust-fake-nobin');
+      expect(addFunction({ cwd: app, name: 'orders', lang: 'rust', io: capture().io })).toBe(0);
+      const all = walk(app);
+      expect(all.filter((f) => /protoc-gen-|\.installed$/.test(f))).toEqual([]);
+    });
+  });
+
+  it.each([
+    'rel-cache',
+    './rel-cache',
+    '../rel-cache',
+    'a/b',
+  ])('a relative KNEXT_RUST_CODEGEN_DIR (%s) is refused, and no plugin lands in the function directory', (dirEnv) => {
+    withFakes({ installed: false, pluginExit: 0, dirEnv }, ({ cargoLog }) => {
+      const app = emptyDir('rust-fake-relative');
+      const c = capture();
+      expect(addFunction({ cwd: app, name: 'orders', lang: 'rust', io: c.io })).toBe(1);
+      expect(c.err()).toContain('KNEXT_RUST_CODEGEN_DIR');
+      expect(c.err()).toContain('absolute');
+      // Refused before any tool ran, so nothing could be installed anywhere.
+      expect(readFileSync(cargoLog, 'utf8')).toBe('');
+      expect(walk(app)).toEqual([]);
+      expect(existsSync(resolve(dirEnv))).toBe(false);
+    });
+  });
+
   it('no usable Rust toolchain says so and writes nothing', () => {
     withFakes({ installed: true, pluginExit: 0, cargo: false }, () => {
       const app = emptyDir('rust-no-cargo');
@@ -411,13 +483,98 @@ describe('generation fails closed and leaves the app untouched', () => {
   });
 });
 
+/**
+ * The keywords of the Rust Reference (Keywords chapter), edition 2024, written
+ * out here on purpose: the scaffold's list is pinned to this one, so a keyword
+ * added or dropped by an edition bump is a visible edit in both places.
+ */
+const DOCUMENTED_KEYWORDS_2024 = [
+  // strict
+  'as',
+  'async',
+  'await',
+  'break',
+  'const',
+  'continue',
+  'crate',
+  'dyn',
+  'else',
+  'enum',
+  'extern',
+  'false',
+  'fn',
+  'for',
+  'if',
+  'impl',
+  'in',
+  'let',
+  'loop',
+  'match',
+  'mod',
+  'move',
+  'mut',
+  'pub',
+  'ref',
+  'return',
+  'self',
+  'static',
+  'struct',
+  'super',
+  'trait',
+  'true',
+  'type',
+  'unsafe',
+  'use',
+  'where',
+  'while',
+  // reserved
+  'abstract',
+  'become',
+  'box',
+  'do',
+  'final',
+  'gen',
+  'macro',
+  'override',
+  'priv',
+  'try',
+  'typeof',
+  'unsized',
+  'virtual',
+  'yield',
+];
+
+describe('the reserved names are the documented ones', () => {
+  it('the keyword list is exactly the Rust Reference list for edition 2024', () => {
+    expect([...RUST_KEYWORDS_2024].sort()).toEqual([...DOCUMENTED_KEYWORDS_2024].sort());
+    expect(new Set(RUST_KEYWORDS_2024).size).toBe(RUST_KEYWORDS_2024.length);
+  });
+
+  it('the crates the toolchain owns are listed', () => {
+    expect([...RUST_TOOLCHAIN_CRATES].sort()).toEqual([
+      'alloc',
+      'core',
+      'proc_macro',
+      'std',
+      'test',
+    ]);
+  });
+
+  it('the template is on the edition the list is for', () => {
+    expect(readFileSync(join(TEMPLATE, 'Cargo.toml'), 'utf8')).toContain('edition = "2024"');
+  });
+});
+
 describe('a function name that cannot name the crate is refused before anything runs', () => {
+  // The Rust Reference, "Keywords", edition 2024: strict, then reserved. A crate
+  // named like one cannot be `use`d, so `use <name>::...` does not compile.
   it.each([
+    ...DOCUMENTED_KEYWORDS_2024,
     'std',
     'core',
+    'alloc',
+    'proc-macro',
     'test',
-    'async',
-    'type',
     'tokio',
     'serde',
     'serde-json',
@@ -461,10 +618,11 @@ describe('the Rust scaffold copies templates/rust minus a counted exclude list',
       'gen',
       'proto',
       'src/auth/vector_tests.rs',
+      'src/rpc/tests/vector_wiring.rs',
       'src/testvectors.rs',
       'target',
     ]);
-    expect(RUST_TEMPLATE_EXCLUDES.length).toBe(11);
+    expect(RUST_TEMPLATE_EXCLUDES.length).toBe(12);
     for (const e of RUST_TEMPLATE_EXCLUDES) expect(e.why.length).toBeGreaterThan(10);
   });
 
@@ -590,7 +748,10 @@ describe('which template a run scaffolds from', () => {
       filter: (src) => !BUILD_OUTPUT.some((o) => src === join(TEMPLATE, o)),
     });
     const manifest = readFileSync(join(copy, 'Cargo.toml'), 'utf8');
-    writeFileSync(join(copy, 'Cargo.toml'), manifest.replace('default = ["shared-vectors"]', ''));
+    writeFileSync(
+      join(copy, 'Cargo.toml'),
+      manifest.replace('# BEGIN repository-only tests', '# BEGIN'),
+    );
     const app = emptyDir('rust-template-drift-app');
     expect(() =>
       addFunction({
@@ -616,6 +777,18 @@ describe('the pieces the scaffold is built from', () => {
   it('keeps the plugin cache in the user cache directory unless told otherwise', () => {
     expect(codegenCacheDir({ KNEXT_RUST_CODEGEN_DIR: '/x/y' })).toBe('/x/y');
     expect(codegenCacheDir({ XDG_CACHE_HOME: '/c' })).toBe('/c/knext/rust-codegen');
+  });
+
+  it('ignores a relative XDG_CACHE_HOME, as the XDG base directory spec says', () => {
+    const fallback = codegenCacheDir({});
+    expect(isAbsolute(fallback)).toBe(true);
+    expect(codegenCacheDir({ XDG_CACHE_HOME: 'rel/cache' })).toBe(fallback);
+    expect(codegenCacheDir({ XDG_CACHE_HOME: '' })).toBe(fallback);
+  });
+
+  it('refuses a relative KNEXT_RUST_CODEGEN_DIR with a usage error, and treats an empty one as unset', () => {
+    expect(() => codegenCacheDir({ KNEXT_RUST_CODEGEN_DIR: 'rel' })).toThrow(/absolute/);
+    expect(codegenCacheDir({ KNEXT_RUST_CODEGEN_DIR: '' })).toBe(codegenCacheDir({}));
   });
 
   it('renameLockedPackage refuses a lockfile without exactly one such package', () => {

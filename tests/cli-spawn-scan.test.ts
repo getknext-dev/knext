@@ -122,6 +122,13 @@ describe('the D3 spawn scan: RED fixtures', () => {
     ],
     ['a backtick require of child_process', 'const cp = require(`node:child_process`);'],
     ['a member call handed an array with a computed program', "host.run([program, 'x']);"],
+    // A script's body is not in this source, so what it runs cannot be read here.
+    ['a .sh file spawned directly', "spawnSync('./codegen.sh', [], { cwd });"],
+    ['a .sh file spawned by bare name', "execFileSync('deploy.sh', ['x']);"],
+    ['a .sh file as an argv program', "runInherit(['./go.sh', 'x']);"],
+    ['bash running a .sh file', "spawnSync('bash', ['codegen.sh']);"],
+    ['sh running a .sh file', "runInherit(['sh', 'run.sh']);"],
+    ['a .sh file handed to env', "runInherit(['env', 'X=1', './go.sh']);"],
     [
       'a member call handed an array with a program defined elsewhere',
       "x.spawn([TOOL, 'service']);",
@@ -233,6 +240,20 @@ describe('the D3 spawn scan: GREEN fixtures', () => {
       scanSpawnSource('runInherit(argv);', { file: 'packages/grpc/src/x.ts', allow }).violations
         .length,
     ).toBe(1);
+  });
+
+  it('the one allowlisted .sh spawn passes at its exact call site and nowhere else', () => {
+    const call = "spawnSync('./codegen.sh', [], { cwd: stage });";
+    const at = (file: string, src: string) => scanSpawnSource(src, { file }).violations;
+    expect(at('packages/grpc/src/scaffold-rust.ts', call)).toEqual([]);
+    // Counted: a second such spawn in the same file is not covered.
+    expect(at('packages/grpc/src/scaffold-rust.ts', `${call}\n${call}`).length).toBe(1);
+    // Exact: another script, or the same call in another file, is not covered.
+    expect(at('packages/grpc/src/scaffold-rust.ts', "spawnSync('./other.sh', []);").length).toBe(1);
+    expect(at('packages/grpc/src/scaffold-go.ts', call).length).toBe(1);
+    const entry = DYNAMIC_SPAWN_ALLOWLIST.filter((e) => e.file.endsWith('scaffold-rust.ts'));
+    expect(entry).toHaveLength(1);
+    expect(entry[0]?.reason).toContain('pinned cargo install of protoc plugins; no kn/func');
   });
 
   it('an allowlist entry that matches no call site is reported stale', () => {

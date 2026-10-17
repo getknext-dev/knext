@@ -13,7 +13,8 @@
  *   X3  an unreviewed entry is added to the exclude list
  *   X4  the crate (package and bin target) is not renamed
  *   X5  Cargo.lock is not re-sorted after the rename (--locked would refuse it)
- *   X6  the scaffold keeps the repository-only tests switched on
+ *   X6  the scaffold keeps the repository-only feature in Cargo.toml
+ *   X10 the scaffold keeps the cfg'd repository-only test modules
  *   X7  the scaffold does not write a .gitignore (npm drops the template's)
  *   X8  Rust keywords and toolchain names are accepted as a function name
  *   X9  a function name that shadows a template dependency is accepted
@@ -100,9 +101,45 @@ const MUTATIONS = [
   {
     id: 'X6',
     subject: 'scaffold',
-    claim: 'the scaffold keeps the repository-only tests switched on (feature default stays on)',
-    anchor: 'return out.replace(FEATURE_DEFAULT_ON, FEATURE_DEFAULT_OFF);',
-    replacement: 'return out;',
+    claim: 'the scaffold keeps the repository-only feature in Cargo.toml (--all-features breaks)',
+    anchor:
+      'return stripVectorGate(rel, out.replaceAll(\'name = "function"\', `name = "${s.name}"`));',
+    replacement: 'return out.replaceAll(\'name = "function"\', `name = "${s.name}"`);',
+  },
+  {
+    id: 'X10',
+    subject: 'scaffold',
+    claim: 'the scaffold keeps the cfg-gated repository-only test modules in the source',
+    anchor: 'if (VECTOR_GATE_FILES.includes(rel)) out = stripVectorGate(rel, out);',
+    replacement: ';',
+  },
+  {
+    id: 'N1',
+    subject: 'scaffold',
+    claim: '`gen` (reserved in edition 2024) is accepted as a function name',
+    anchor: "  'gen',\n  'macro',\n",
+    replacement: "  'macro',\n",
+  },
+  {
+    id: 'N2',
+    subject: 'scaffold',
+    claim: 'a relative KNEXT_RUST_CODEGEN_DIR is accepted (plugins would land in the project)',
+    anchor: 'if (!isAbsolute(own)) {',
+    replacement: 'if (false) {',
+  },
+  {
+    id: 'N3',
+    subject: 'scaffold',
+    claim: 'a relative XDG_CACHE_HOME is honoured instead of ignored',
+    anchor: "const base = xdg && isAbsolute(xdg) ? xdg : join(homedir(), '.cache');",
+    replacement: "const base = xdg ? xdg : join(homedir(), '.cache');",
+  },
+  {
+    id: 'M1',
+    subject: 'scaffold',
+    claim: 'a failed `cargo fmt` no longer stops the run',
+    anchor: 'if (fmt.status !== 0) {',
+    replacement: 'if (false) {',
   },
   {
     id: 'X7',
