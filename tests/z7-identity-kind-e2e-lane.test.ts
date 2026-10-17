@@ -374,8 +374,15 @@ describe('the lane proves what it claims', () => {
     const { propagationBoundSeconds: def, propagationBoundMinimumSeconds: min } = fixture.rotation;
     expect(Number.isInteger(def) && Number.isInteger(min) && min > 0 && def >= min).toBe(true);
     expect(runSh).toContain('testdata/zone-identity-contract.json');
-    expect(runSh).toContain('.rotation.propagationBoundSeconds');
-    expect(runSh).toContain('.rotation.propagationBoundMinimumSeconds');
+    // Each value is bound to its own field by the jq call that reads it (a bare
+    // mention of the field name, such as the one in the error message, would not
+    // notice the call being pointed at another field).
+    expect(runSh).toMatch(
+      /^SHIPPED_BOUND_SECONDS="\$\(jq -er '\.rotation\.propagationBoundSeconds' "\$\{BOUND_FIXTURE\}"\)"/m,
+    );
+    expect(runSh).toMatch(
+      /^MIN_BOUND_SECONDS="\$\(jq -er '\.rotation\.propagationBoundMinimumSeconds' "\$\{BOUND_FIXTURE\}"\)"/m,
+    );
     // No number of the bound is written into the script, as default or minimum.
     expect(runSh).not.toMatch(/Z7_PROPAGATION_BOUND:-\d/);
     expect(runSh).not.toMatch(/BOUND_SECONDS\}" -ge \d/);
