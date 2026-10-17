@@ -137,7 +137,7 @@ jobs:
           node scripts/resolve-shipped-images.mjs --repo "${GITHUB_REPOSITORY}"
 
   images:
-    name: Trivy ${{ matrix.name }}
+    name: Trivy ${{ matrix.image.name }}
     needs: [resolve-images]
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -146,8 +146,10 @@ jobs:
       packages: read
     strategy:
       fail-fast: false
+      # One vector whose values are the resolved `{name, ref}` objects: an empty list
+      # is an evaluation error, never a job that silently runs nothing.
       matrix:
-        include: ${{ fromJSON(needs.resolve-images.outputs.images) }}
+        image: ${{ fromJSON(needs.resolve-images.outputs.images) }}
     steps:
       - name: Trivy scan by digest — FAIL on HIGH/CRITICAL
         # SHA-pinned like every other Trivy use in this repo. The ref is a digest,
@@ -158,7 +160,7 @@ jobs:
           TRIVY_USERNAME: ${{ github.actor }}
           TRIVY_PASSWORD: ${{ github.token }}
         with:
-          image-ref: ${{ matrix.ref }}
+          image-ref: ${{ matrix.image.ref }}
           severity: HIGH,CRITICAL
           exit-code: "1"
           ignore-unfixed: true

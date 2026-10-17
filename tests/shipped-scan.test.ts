@@ -282,12 +282,12 @@ describe('.github/workflows/shipped-artifacts-nightly.yml', () => {
   it('the images matrix is exactly the resolved list, never empty by construction, and fails fast off', () => {
     const strategy = doc.jobs.images.strategy as {
       'fail-fast'?: unknown;
-      matrix?: { include?: unknown } & Record<string, unknown>;
+      matrix?: { image?: unknown } & Record<string, unknown>;
     };
     expect(Object.keys(strategy).sort()).toEqual(['fail-fast', 'matrix']);
     expect(strategy['fail-fast']).toBe(false);
-    expect(Object.keys(strategy.matrix ?? {})).toEqual(['include']);
-    expect(String(strategy.matrix?.include)).toBe(
+    expect(Object.keys(strategy.matrix ?? {})).toEqual(['image']);
+    expect(String(strategy.matrix?.image)).toBe(
       '${{ fromJSON(needs.resolve-images.outputs.images) }}',
     );
     expect(doc.jobs.images.needs).toEqual(['resolve-images']);
@@ -333,7 +333,7 @@ describe('.github/workflows/shipped-artifacts-nightly.yml', () => {
     expect(code).toMatch(/aquasecurity\/trivy-action@[0-9a-f]{40}/);
     expect(code).toMatch(/severity:\s*HIGH,CRITICAL/);
     expect(code).toMatch(/exit-code:\s*["']?1["']?/);
-    expect(code).toMatch(/image-ref:\s*\$\{\{\s*matrix\.ref\s*\}\}/);
+    expect(code).toMatch(/image-ref:\s*\$\{\{\s*matrix\.image\.ref\s*\}\}/);
   });
   it('the npm scan and the lockfile scan use the sha256-pinned osv-scanner', () => {
     expect(code).toMatch(/OSV_SCANNER_SHA256:\s*[0-9a-f]{64}/);
