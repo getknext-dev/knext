@@ -157,10 +157,13 @@ describe.skipIf(skipReason !== null)(
           v.exportedName === 'uploadFile' && /(^|\/)app\/actions\.ts$/.test(v.filename ?? ''),
       )?.[0];
       expect(uploadAction).toBeDefined();
-      const plain = await boot(b.exec, { env });
+      // The upload action refuses every caller without the app's admin token (fail-closed
+      // when unset), so this boot configures one and the request below presents it.
+      const UPLOAD_TOKEN = 'self-contained-e2e-token';
+      const plain = await boot(b.exec, { env: { ...env, CACHE_INVALIDATE_TOKEN: UPLOAD_TOKEN } });
       try {
         expect(plain.output()).toContain('REQUEST_BYTE_CAP:8388608 (default)');
-        const upload = async (bytes: number) => {
+        const upload = async (bytes: number, authed = true) => {
           // The React Server Actions reply encoding a browser sends for
           // `uploadFile(formData)`: root `0` = ["$K1"], FormData fields `_1_<name>`.
           const fd = new FormData();
@@ -172,11 +175,20 @@ describe.skipIf(skipReason !== null)(
           const r = await fetch(`http://127.0.0.1:${plain.port}/`, {
             method: 'POST',
             body: fd,
-            headers: { 'Next-Action': uploadAction as string, Accept: 'text/x-component' },
+            headers: {
+              'Next-Action': uploadAction as string,
+              Accept: 'text/x-component',
+              ...(authed ? { Authorization: `Bearer ${UPLOAD_TOKEN}` } : {}),
+            },
             signal: AbortSignal.timeout(30_000),
           });
           return { status: r.status, text: await r.text() };
         };
+        // An unauthenticated upload is refused by the action itself, before the file is read.
+        const anon = await upload(1024, false);
+        expect(anon.status).toBe(200);
+        expect(anon.text).toContain('"error":"Unauthorized"');
+        expect(anon.text).not.toContain('"success":true');
         const ok = await upload(900 * 1024);
         expect(ok.status).toBe(200);
         // The action ran AND saw the file (without a database it then reports

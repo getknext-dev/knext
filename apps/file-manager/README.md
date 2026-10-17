@@ -54,13 +54,24 @@ const config: KnativeNextConfig = {
 | `REDIS_URL` | Redis connection URL |
 | `DATABASE_URL` | PostgreSQL connection string |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Path to GCS service account key |
+| `CACHE_INVALIDATE_TOKEN` | The app's admin token. Required for every change: uploads, adding a user, cache invalidation, and reading the audit log. Unset means all of those are refused. |
+
+### Authentication
+
+Every action that changes state, and the audit read, needs the admin token. Scripts send
+`Authorization: Bearer $CACHE_INVALIDATE_TOKEN`. The pages ask for it in an **Access token** field
+(a plain form cannot set headers, so the form sends it in a `token` field). Without the token the
+upload, add-user and invalidate actions refuse and write nothing.
+
+Uploads are stored under a generated id plus the file name (`<id>-<name>`), so uploading the same
+name twice keeps both files.
 
 ## API Endpoints
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/health` | GET | Kubernetes health check |
-| `/api/audit?page=N` | GET | Paginated audit logs (20/page) |
+| `/api/audit?page=N` | GET | Paginated audit logs (20/page); Bearer `CACHE_INVALIDATE_TOKEN` |
 | `/api/cache-stats` | GET | Cache hit/miss statistics |
 | `/api/cache/events` | GET | SSE stream of cache events |
 | `/api/cache/invalidate` | POST | Invalidate cache by tag (Bearer `CACHE_INVALIDATE_TOKEN`) |

@@ -2,6 +2,7 @@ import { getDbPool } from '@getknext/lib/clients';
 import { unstable_cache } from 'next/cache';
 import { NextResponse } from 'next/server';
 import { withRedMetrics } from '../_metrics/registry';
+import { isAuthorized } from '../cache/invalidate/auth';
 
 const PAGE_SIZE = 20;
 
@@ -37,7 +38,20 @@ const getAuditLogsCached = unstable_cache(
 // Wrapped in withRedMetrics (observability P0) under route="/api/audit".
 // Behavior-preserving: returns this handler's own Response (incl. its 500-on-DB
 // -error path) so the error-rate SLI sees DB outages on this route.
+//
+// Reading audit rows needs the same Bearer token as the mutating routes
+// (CACHE_INVALIDATE_TOKEN, fail-closed when unset). The answer is therefore
+// `private, no-store`: a shared cache must never replay it to a caller who has no
+// token. (The server-side `unstable_cache` below is inside the process, after the
+// check, and is not reachable without it.)
 export const GET = withRedMetrics('/api/audit', async (request: any, _context: any) => {
+  if (!isAuthorized(request?.headers?.get?.('authorization'), process.env.CACHE_INVALIDATE_TOKEN)) {
+    return NextResponse.json(
+      { error: 'Unauthorized' },
+      { status: 401, headers: { 'Cache-Control': 'no-store' } },
+    );
+  }
+
   // Vinext passes route params in context.params.
   // It turns out Vinext's Request shim sometimes drops the internal Next.js `nextUrl`
   // property entirely or strips standard properties off when creating the dummy request.
@@ -60,7 +74,7 @@ export const GET = withRedMetrics('/api/audit', async (request: any, _context: a
 
     return NextResponse.json(data, {
       headers: {
-        'Cache-Control': 'public, s-maxage=60, stale-while-revalidate=30',
+        'Cache-Control': 'private, no-store',
       },
     });
   } catch (error) {

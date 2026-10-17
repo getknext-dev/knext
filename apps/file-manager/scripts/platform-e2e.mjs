@@ -302,9 +302,29 @@ async function main() {
       throw new Error(
         'no $ACTION_ID_ field on /users — the addUser form is not wired to a server action',
       );
+    // Unauthenticated first: the action must refuse and write nothing.
+    const anonEmail = `e2e-anon-${Date.now().toString(36)}@example.com`;
+    const anonForm = encodeMultipart([
+      [id, ''],
+      ['name', 'Platform E2E Anonymous'],
+      ['email', anonEmail],
+    ]);
+    const anon = await http.request('/users', {
+      method: 'POST',
+      headers: {
+        'content-type': `multipart/form-data; boundary=${anonForm.boundary}`,
+        accept: 'text/html',
+      },
+      body: anonForm.body,
+    });
+    const anonRow = psql(ns, `SELECT email FROM users WHERE email='${anonEmail}'`);
+    if (anonRow !== '') {
+      throw new Error(`unauthenticated addUser inserted ${anonEmail} (HTTP ${anon.status})`);
+    }
     const email = `e2e-${Date.now().toString(36)}@example.com`;
     const { boundary, body } = encodeMultipart([
       [id, ''],
+      ['token', token],
       ['name', 'Platform E2E'],
       ['email', email],
     ]);
@@ -321,15 +341,28 @@ async function main() {
     return `inserted + listed ${email}`;
   });
 
-  await check('A. app', 'GET /api/audit returns the seeded audit log page (JSON)', async () => {
-    const res = await get('/api/audit?page=0');
-    if (res.status !== 200) throw new Error(`HTTP ${res.status}: ${res.text.slice(0, 200)}`);
-    const json = JSON.parse(res.text);
-    if (!(Array.isArray(json.logs) && json.logs.length > 0 && json.total >= 1000)) {
-      throw new Error(`unexpected audit payload: ${res.text.slice(0, 200)}`);
-    }
-    return `${json.logs.length} logs, total ${json.total}`;
-  });
+  await check(
+    'A. app',
+    'GET /api/audit refuses an unauthenticated read, then returns the seeded audit log page (JSON)',
+    async () => {
+      const anon = await get('/api/audit?page=0');
+      if (anon.status !== 401) {
+        throw new Error(`unauthenticated /api/audit answered HTTP ${anon.status}, expected 401`);
+      }
+      if (anon.text.includes('"logs":[{')) throw new Error('401 body leaked audit rows');
+      const res = await get('/api/audit?page=0', { authorization: `Bearer ${token}` });
+      if (res.status !== 200) throw new Error(`HTTP ${res.status}: ${res.text.slice(0, 200)}`);
+      const cc = String(res.headers['cache-control'] ?? '');
+      if (/public|s-maxage/.test(cc)) {
+        throw new Error(`audit answer is publicly cacheable (cache-control: ${cc})`);
+      }
+      const json = JSON.parse(res.text);
+      if (!(Array.isArray(json.logs) && json.logs.length > 0 && json.total >= 1000)) {
+        throw new Error(`unexpected audit payload: ${res.text.slice(0, 200)}`);
+      }
+      return `401 without a token; ${json.logs.length} logs, total ${json.total}`;
+    },
+  );
 
   await check('A. app', 'GET /audit (client page) and /dashboard render', async () => {
     const audit = await get('/audit');
@@ -341,82 +374,144 @@ async function main() {
     return '/audit 200, /dashboard 200';
   });
 
+  // The upload form is a CLIENT component, so there is no no-JS path. Call the action the
+  // way the browser does: find its id in the client JS the page loads, then POST the React
+  // reply encoding with x-rsc-action.
+  /** @type {string | undefined} */
+  let uploadActionId;
+  const findUploadActionId = async () => {
+    if (uploadActionId) return uploadActionId;
+    const home = await get('/');
+    const scripts = extractAssetRefs(home.text).filter((p) =>
+      ['.js', '.mjs'].includes(extensionOf(p)),
+    );
+    /** @type {string[]} */
+    const texts = [];
+    const seen = new Set();
+    const queue = [...scripts];
+    while (queue.length && seen.size < 200) {
+      const p = /** @type {string} */ (queue.shift());
+      if (seen.has(p)) continue;
+      seen.add(p);
+      const r = await get(p);
+      if (r.status !== 200) continue;
+      texts.push(r.text);
+      for (const m of r.text.matchAll(
+        /(?:from|import)\s*\(?\s*["'`](\.{1,2}\/[^"'`]+\.m?js)["'`]/g,
+      )) {
+        queue.push(new URL(m[1], `http://x${p}`).pathname);
+      }
+    }
+    uploadActionId = findServerActionId(texts, 'uploadFile');
+    return uploadActionId;
+  };
+  /** @param {string} name @param {Buffer} data @param {boolean} authed */
+  const postUpload = async (name, data, authed) => {
+    const actionId = await findUploadActionId();
+    const { boundary, body } = encodeMultipart([
+      ['0', '["$K1"]'],
+      ['_1_file', { filename: name, contentType: 'text/plain', data }],
+    ]);
+    return http.request('/', {
+      method: 'POST',
+      headers: {
+        'content-type': `multipart/form-data; boundary=${boundary}`,
+        'x-rsc-action': actionId,
+        accept: 'text/x-component',
+        origin: `http://${host}`,
+        ...(authed ? { authorization: `Bearer ${token}` } : {}),
+      },
+      body,
+    });
+  };
+  /** The object the row for an uploaded filename points at (`assets/<id>-<name>`). */
+  const storagePathsFor = (/** @type {string} */ name) =>
+    psql(ns, `SELECT storage_path FROM files WHERE name LIKE '%-${name}' ORDER BY id`)
+      .split('\n')
+      .filter(Boolean);
+  const readObject = (/** @type {string} */ storagePath) =>
+    execFileSync('aws', ['s3', 'cp', `s3://${storagePath}`, '-', '--endpoint-url', minioEndpoint], {
+      env: {
+        ...process.env,
+        AWS_ACCESS_KEY_ID: minioKey,
+        AWS_SECRET_ACCESS_KEY: minioSecret,
+        AWS_DEFAULT_REGION: 'us-east-1',
+        AWS_REQUEST_CHECKSUM_CALCULATION: 'when_required',
+        AWS_RESPONSE_CHECKSUM_VALIDATION: 'when_required',
+      },
+      maxBuffer: 16 * 1024 * 1024,
+      timeout: AWS_TIMEOUT_MS,
+      killSignal: 'SIGKILL',
+    });
+
   await check(
     'A. app',
-    'Upload a file (the client server action) → listed on / and /dashboard → bytes in object storage',
+    'Unauthenticated upload is refused and writes nothing (no row, no object)',
     async () => {
-      // The upload form is a CLIENT component, so there is no no-JS path. Call the
-      // action the way the browser does: find its id in the client JS the page
-      // loads, then POST the React reply encoding with x-rsc-action.
-      const home = await get('/');
-      const scripts = extractAssetRefs(home.text).filter((p) =>
-        ['.js', '.mjs'].includes(extensionOf(p)),
-      );
-      /** @type {string[]} */
-      const texts = [];
-      const seen = new Set();
-      const queue = [...scripts];
-      while (queue.length && seen.size < 200) {
-        const p = /** @type {string} */ (queue.shift());
-        if (seen.has(p)) continue;
-        seen.add(p);
-        const r = await get(p);
-        if (r.status !== 200) continue;
-        texts.push(r.text);
-        for (const m of r.text.matchAll(
-          /(?:from|import)\s*\(?\s*["'`](\.{1,2}\/[^"'`]+\.m?js)["'`]/g,
-        )) {
-          queue.push(new URL(m[1], `http://x${p}`).pathname);
-        }
+      const name = `platform-e2e-anon-${Date.now().toString(36)}.txt`;
+      const data = Buffer.from(`knext platform e2e anonymous ${name}\n`);
+      const res = await postUpload(name, data, false);
+      if (!/"error"\s*:\s*"Unauthorized"/.test(res.text) || /"success"\s*:\s*true/.test(res.text)) {
+        throw new Error(
+          `unauthenticated upload was not refused (HTTP ${res.status}): ${res.text.slice(0, 200)}`,
+        );
       }
-      const actionId = findServerActionId(texts, 'uploadFile');
+      const rows = storagePathsFor(name);
+      if (rows.length !== 0) {
+        throw new Error(`unauthenticated upload left ${rows.length} row(s) for ${name}`);
+      }
+      return 'refused with Unauthorized; no files row';
+    },
+  );
+
+  await check(
+    'A. app',
+    'Upload a file (the client server action) → listed on / and /dashboard → bytes in object storage; a second upload of the same name does not overwrite it',
+    async () => {
+      const actionId = await findUploadActionId();
       const name = `platform-e2e-${Date.now().toString(36)}.txt`;
       const data = Buffer.from(`knext platform e2e ${name} ${Math.random().toString(36)}\n`);
-      const { boundary, body } = encodeMultipart([
-        ['0', '["$K1"]'],
-        ['_1_file', { filename: name, contentType: 'text/plain', data }],
-      ]);
-      const res = await http.request('/', {
-        method: 'POST',
-        headers: {
-          'content-type': `multipart/form-data; boundary=${boundary}`,
-          'x-rsc-action': actionId,
-          accept: 'text/x-component',
-          origin: `http://${host}`,
-        },
-        body,
-      });
+      const res = await postUpload(name, data, true);
       const accepted = assertUploadAccepted(res);
       const listed = await get('/');
       if (!listed.text.includes(name)) throw new Error(`uploaded ${name} is not listed on /`);
       const dash = await get('/dashboard');
       if (!dash.text.includes(name))
         throw new Error(`uploaded ${name} is not in /dashboard recent files`);
-      const dbRow = psql(ns, `SELECT storage_path FROM files WHERE name='${name}'`);
-      const stored = execFileSync(
-        'aws',
-        ['s3', 'cp', `s3://assets/${name}`, '-', '--endpoint-url', minioEndpoint],
-        {
-          env: {
-            ...process.env,
-            AWS_ACCESS_KEY_ID: minioKey,
-            AWS_SECRET_ACCESS_KEY: minioSecret,
-            AWS_DEFAULT_REGION: 'us-east-1',
-            AWS_REQUEST_CHECKSUM_CALCULATION: 'when_required',
-            AWS_RESPONSE_CHECKSUM_VALIDATION: 'when_required',
-          },
-          maxBuffer: 16 * 1024 * 1024,
-          timeout: AWS_TIMEOUT_MS,
-          killSignal: 'SIGKILL',
-        },
-      );
+      const [firstPath] = storagePathsFor(name);
+      if (!firstPath) throw new Error(`no files row for ${name} after a successful upload`);
+      if (firstPath === `assets/${name}`) {
+        throw new Error(
+          'object key is the raw client filename: a second upload would overwrite it',
+        );
+      }
       const storedEv = assertUploadStored({
-        dbRow,
-        expectedPath: `assets/${name}`,
+        dbRow: firstPath,
+        expectedPath: firstPath,
         sent: data,
-        stored,
+        stored: readObject(firstPath),
       });
-      return `action ${actionId}; ${accepted}; listed on / and /dashboard; ${storedEv}`;
+
+      // The same filename again, different bytes: a NEW object and a NEW row, the first
+      // one untouched.
+      const data2 = Buffer.from(`second upload of ${name} ${Math.random().toString(36)}\n`);
+      assertUploadAccepted(await postUpload(name, data2, true));
+      const paths = storagePathsFor(name);
+      if (paths.length !== 2 || new Set(paths).size !== 2) {
+        throw new Error(
+          `expected two distinct stored objects for ${name}, got ${JSON.stringify(paths)}`,
+        );
+      }
+      if (Buffer.compare(readObject(firstPath), data) !== 0) {
+        throw new Error(`the first upload of ${name} was overwritten by the second`);
+      }
+      assertUploadStored({
+        dbRow: paths[1],
+        expectedPath: paths[1],
+        sent: data2,
+        stored: readObject(paths[1]),
+      });
+      return `action ${actionId}; ${accepted}; listed on / and /dashboard; ${storedEv}; same-name re-upload kept both objects`;
     },
   );
 

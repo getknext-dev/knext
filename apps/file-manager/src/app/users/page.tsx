@@ -1,5 +1,7 @@
 import { getDbPool } from '@getknext/lib/clients';
 import { revalidatePath, unstable_noStore } from 'next/cache';
+import { authorizeMutation } from '@/app/_auth/mutation-auth';
+import TokenField from '@/components/TokenField';
 
 async function getUsers() {
   unstable_noStore(); // Prevent static prerendering
@@ -15,6 +17,10 @@ async function getUsers() {
 
 async function addUser(formData: FormData) {
   'use server';
+  // A Server Action is a public POST endpoint: authenticate before any write.
+  if (!(await authorizeMutation(formData))) {
+    throw new Error('Unauthorized');
+  }
   const name = formData.get('name') as string;
   const email = formData.get('email') as string;
 
@@ -64,6 +70,7 @@ export default async function UsersPage() {
           <div className="bg-white/10 p-6 rounded-xl border border-white/20">
             <h3 className="text-xl font-bold mb-4">Add User</h3>
             <form action={addUser} className="space-y-4">
+              <TokenField id="user-token" />
               <div>
                 <label htmlFor="user-name" className="block text-sm mb-1">
                   Name

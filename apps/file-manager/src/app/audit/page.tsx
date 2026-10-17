@@ -41,6 +41,9 @@ export default function AuditPage() {
   const [total, setTotal] = useState(0);
   const [error, setError] = useState<string | null>(null);
 
+  // The access token the viewer typed. A ref, not state: it is only ever read inside the
+  // fetch, and typing must not re-render the (long) table.
+  const tokenRef = useRef('');
   const observerRef = useRef<IntersectionObserver | null>(null);
   const loadMoreRef = useRef<HTMLDivElement>(null);
 
@@ -53,12 +56,23 @@ export default function AuditPage() {
   const fetchLogs = useCallback(async (pageNum: number, append = true) => {
     // Guard against concurrent fetches using ref (not state) to avoid races
     if (stateRefs.current.loading) return;
+    // The audit API requires the access token; do not call it without one.
+    if (!tokenRef.current) {
+      setError('Enter the access token to load the audit logs.');
+      setInitialLoading(false);
+      return;
+    }
     stateRefs.current.loading = true;
     setLoading(true);
     setError(null);
 
     try {
-      const res = await fetch(`/api/audit?page=${pageNum}`);
+      const res = await fetch(`/api/audit?page=${pageNum}`, {
+        headers: { Authorization: `Bearer ${tokenRef.current}` },
+      });
+      if (res.status === 401) {
+        throw new Error('Unauthorized');
+      }
       if (!res.ok) throw new Error('Failed to fetch');
 
       const data: AuditData = await res.json();
@@ -70,7 +84,11 @@ export default function AuditPage() {
       stateRefs.current.page = pageNum;
       stateRefs.current.hasMore = data.hasMore;
     } catch (err) {
-      setError('Failed to load audit logs. Please try again.');
+      setError(
+        err instanceof Error && err.message === 'Unauthorized'
+          ? 'The access token was not accepted.'
+          : 'Failed to load audit logs. Please try again.',
+      );
       console.error('Fetch error:', err);
     } finally {
       stateRefs.current.loading = false;
@@ -128,6 +146,35 @@ export default function AuditPage() {
           <span className="text-gray-400 ml-2">← Use for invalidation</span>
         </div>
       </div>
+
+      <form
+        className="mb-4 flex items-end gap-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          fetchLogs(0, false);
+        }}
+      >
+        <div>
+          <label htmlFor="audit-token" className="block text-sm mb-1 text-purple-200">
+            Access token
+          </label>
+          <input
+            id="audit-token"
+            type="password"
+            autoComplete="off"
+            onChange={(e) => {
+              tokenRef.current = e.target.value;
+            }}
+            className="p-2 rounded bg-black/20 border border-white/10 text-white"
+          />
+        </div>
+        <button
+          type="submit"
+          className="px-4 py-2 bg-purple-600 hover:bg-purple-500 rounded font-bold"
+        >
+          Load
+        </button>
+      </form>
 
       {error && (
         <div className="bg-red-500/20 text-red-200 p-4 rounded-lg mb-4">

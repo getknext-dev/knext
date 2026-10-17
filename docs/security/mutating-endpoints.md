@@ -5,7 +5,7 @@
 > internal-only `NetworkPolicy`. This doc is the audit of record; keep it current when adding
 > any state-changing handler.
 
-Last audited: 2026-06-22.
+Last audited: 2026-10-17 (Server Actions added; `/api/audit` now gated).
 
 ## Method
 Enumerated every state-changing HTTP handler and admission webhook:
@@ -15,7 +15,12 @@ Enumerated every state-changing HTTP handler and admission webhook:
 grep -rln 'export async function \(POST\|PUT\|DELETE\|PATCH\)' apps/*/src/app/api
 # Operator admission webhooks
 grep -rln 'webhook\|Mutate\|Validate.*admission' packages/kn-next-operator/internal
+# Server Actions: every export of a 'use server' module is a public POST endpoint
+grep -rln "use server" apps packages/kn-next/templates/app
 ```
+
+The last step is no longer manual: `tests/server-action-auth-scan.test.ts` runs that scan on every PR
+(see "Server Actions" below).
 
 ## Endpoints
 
@@ -23,6 +28,7 @@ grep -rln 'webhook\|Mutate\|Validate.*admission' packages/kn-next-operator/inter
 |---|---|---|---|---|
 | `/api/cache/invalidate` | POST | Next.js cache (`revalidateTag`) | Bearer token `CACHE_INVALIDATE_TOKEN`, fail-closed (`isAuthorized`) | ✅ authed |
 | `/api/cache/events` | DELETE | clears all cache events (Redis / in-memory) | same Bearer token (reuses the single `isAuthorized` helper) | ✅ authed (E4-2) |
+| `/api/audit` | GET | nothing (reads `audit_logs` rows) | same Bearer token; answers `private, no-store`, never publicly cacheable | ✅ authed (read gated because the rows are not public) |
 | `/api/rum` | POST | `observe()` into pre-declared Web Vitals histograms (no storage/cache/state write) | **bounded-aggregator exception** — see "RUM ingest" below (#94) | ✅ justified |
 
 There is intentionally **no `GET /api/cache/invalidate`** handler (#78): invalidation mutates state,
@@ -30,8 +36,9 @@ and a mutating GET is prefetchable/link-triggerable and leaks the Bearer token i
 App Router returns 405 for the unexported GET method; POST is the only invalidation entrypoint.
 
 Read-only handlers (no auth required, by design): `GET /api/cache/events`, `GET /api/health`,
-`GET /api/metrics`, `GET /api/audit`, `GET /api/cache-stats`. These disclose operational data only —
-if any later exposes sensitive data, gate it too.
+`GET /api/metrics`, `GET /api/cache-stats`. These disclose operational data only —
+if any later exposes sensitive data, gate it too (as `GET /api/audit` now is; the scan holds a short
+list of such reads to the same gate as a mutation).
 
 **Operator admission webhooks:** none yet. When validating/defaulting webhooks land (E3-4), add them
 here; admission is the operator's mutating surface.
@@ -41,6 +48,66 @@ here; admission is the operator's mutating surface.
 - **Fail-closed:** unauthorized when the token is unset/empty; constant-time compare (`timingSafeEqual`).
 - Token is provisioned as a K8s Secret → `CACHE_INVALIDATE_TOKEN` env var; never in config/image/URL.
 - Tests: `invalidate/auth.test.ts` (helper) + `events/route.test.ts` (the DELETE guard, 4 cases).
+
+## Server Actions
+
+A `'use server'` export is a **public POST endpoint**: anyone who can reach the app can invoke it,
+with or without the page that renders its form. The original audit enumerated only route handlers, so
+the file-manager `uploadFile` action wrote object storage and Postgres with no authentication while
+this document said there were no such endpoints. Server Actions are therefore a category of their own.
+
+**The pattern (copy it).** The first statement of every exported action is the auth check, and nothing
+that calls anything may run before it:
+
+```ts
+export async function myAction(formData: FormData) {
+  if (!(await authorizeMutation(formData))) return { error: 'Unauthorized' }; // or: throw
+  // ... writes ...
+}
+```
+
+- `authorizeMutation` (`apps/file-manager/src/app/_auth/mutation-auth.ts`) reuses `isAuthorized`:
+  the app's one admin Bearer token, `CACHE_INVALIDATE_TOKEN` (a K8s Secret), **fail-closed** when unset
+  or empty, constant-time compare. The credential arrives as `Authorization: Bearer <token>` (scripts,
+  tests) or as a `token` form field (the browser, since a plain `<form>` cannot set headers).
+- One token for every mutating surface keeps the reference app simple. A real product that needs
+  per-user or per-role authorization replaces `authorizeMutation` with its session check; the position
+  rule (first statement, refuse by return or throw) is the part to keep.
+
+**Inventory** (every `'use server'` function under `apps/` and the app templates; the scan fails if
+this list and the tree disagree):
+
+| Action | Mutates | Auth | Status |
+|---|---|---|---|
+| `apps/file-manager/src/app/actions.ts::uploadFile` | object storage (`assets` bucket), `files` table, `files` cache tag | `authorizeMutation`, first statement | ✅ authed. Object key and row name are `<random id>-<validated filename>`, never the raw client name, and the row is an insert, never an upsert: two uploads of one filename never overwrite each other. A name with a path separator, a control character or only dots is refused. |
+| `apps/file-manager/src/app/users/page.tsx::addUser` | `users` table | `authorizeMutation` | ✅ authed |
+| `apps/file-manager/src/app/cache-tests/on-demand/page.tsx::invalidateProducts` | cache tag `products` | `authorizeMutation` | ✅ authed |
+| `apps/file-manager/src/app/cache-tests/on-demand/page.tsx::invalidateOrders` | cache tag `orders` | `authorizeMutation` | ✅ authed |
+| `apps/file-manager/src/app/cache-tests/on-demand/page.tsx::invalidatePath` | path cache for the page | `authorizeMutation` | ✅ authed |
+| `apps/file-manager/src/app/cache-tests/on-demand/page.tsx::invalidateAll` | cache tags `products` and `orders` | `authorizeMutation` | ✅ authed |
+| `apps/file-manager/src/app/knext-smoke/stream/page.tsx::echoAction` | one cookie on the caller's own response; no server-side state | none | ✅ justified exception: compat-smoke fixture, nothing shared is written |
+| `apps/db-demo/src/app/actions.ts::postMessage` | `messages` table | none | ⚠️ **known debt**, tracked in #2533; held on the scan's allowlist until gated |
+
+The scaffold templates (`packages/kn-next/templates/app`) emit no Server Action and one `GET` route
+(`/api/health`), so a freshly scaffolded app starts clean. Generated gRPC glue actions (`*_knext_actions.ts`)
+run `authorize()` first by construction and refuse an RPC that does not declare it.
+
+**Known gap, tracked:** `GET /setup` in the file-manager runs idempotent DDL and seed inserts on a GET
+with no authentication (#2534). It takes no client input; it is listed here so the audit does not hide it.
+
+**The scan** (`scripts/lib/server-action-auth-scan.mjs`, spec `tests/server-action-auth-scan.test.ts`,
+mutation-proved by `scripts/mutation-prove-2532-server-action-auth.mjs`) parses every source file under
+`apps/` and `packages/kn-next/templates/app`. Every exported `'use server'` function, every inline
+`'use server'` function, and every exported `POST|PUT|PATCH|DELETE` handler of a `route.*` file (plus the
+`GET` of `api/audit`) must open with `if (!(await authorizeMutation(...)))` or `if (!isAuthorized(...))` that
+returns or throws, preceded by nothing that calls, awaits or assigns. It **fails rather than passes** on
+anything it cannot read: a file that does not parse, a method re-exported from another module,
+`export *`, an expression-bodied action, a `pages/api` route. The allowlist is counted (the spec pins
+three entries: `/api/rum`, `echoAction`, `postMessage`), each entry needs a reason, and an entry that
+matches nothing, or that matches a surface which is in fact gated, fails too.
+
+It checks that the auth call is present, imported and first. That the call is *correct* is the job of
+`mutation-auth.test.ts` and `auth.test.ts`.
 
 ## Network isolation (defense-in-depth) — #90
 
@@ -175,7 +242,7 @@ client sends nothing — the endpoint exists but is never exercised.
 (`reconcile_output_test.go` → "RUM env propagation").
 
 ## Remaining (defense-in-depth)
-- **CI guard** so a new open mutating handler fails the build. Ready-to-wire check: every file under
-  `apps/*/src/app/api` that exports `POST|PUT|DELETE|PATCH` must contain `isAuthorized` (or be listed
-  here as an explicit, justified exception). **`/api/rum` is such an explicit, justified exception**
-  (the bounded-aggregator rationale above) — the guard must allow-list it, not require `isAuthorized`.
+- ~~**CI guard** so a new open mutating handler fails the build.~~ **Done**: `tests/server-action-auth-scan.test.ts`
+  (see "Server Actions"). `/api/rum` is on its allowlist, with the bounded-aggregator rationale above.
+- Gate `GET /setup` (#2534) and `db-demo`'s `postMessage` (#2533), then shrink the allowlist to two.
+- Service-to-service and per-user authorization for the reference app: today one shared admin token.
