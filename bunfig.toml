@@ -47,4 +47,4 @@ preload = ["./tests/setup.ts"]
 #      a reviewed change, not a quiet edit. Only first-party packages belong here by
 #      default.
 minimumReleaseAge = 259200
-minimumReleaseAgeExcludes = ["@getknext/core", "@getknext/lib", "@getknext/db", "kn-next"]
+minimumReleaseAgeExcludes = ["@getknext/core", "@getknext/lib", "@getknext/db"]
