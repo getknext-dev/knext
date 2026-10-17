@@ -239,6 +239,13 @@ const MUTATIONS = [
     replacement: "export const LOCKFILE_NAMES = ['bun.lock', 'Cargo.lock', 'go.mod'];",
   },
   {
+    id: 'G25',
+    claim: 'an allowlist entry may be dated in the future (pushing its expiry cap out)',
+    subject: 'lib',
+    anchor: 'if (e.added > today) throw',
+    replacement: `if (false /* ${M} */) throw`,
+  },
+  {
     id: 'G24',
     claim: 'the gate stops failing closed when no base resolves',
     subject: 'cli',
