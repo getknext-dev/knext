@@ -46,7 +46,8 @@
  */
 
 import { execFileSync, spawn } from 'node:child_process';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, rmSync, statfsSync, writeFileSync } from 'node:fs';
+import { freemem, totalmem } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { discoverProvers, evaluateProverRun } from './lib/prover-lane.mjs';
@@ -248,6 +249,24 @@ function restoreTreeAfterKill(before) {
   return `${notes.join(', ')} before the next prover`;
 }
 
+/**
+ * Free memory and disk after each prover. A hosted runner that is starved (memory
+ * or disk) is killed without a log, which is what happened to one leg of the
+ * first full run: its output was lost with it. This line is printed as the run
+ * goes, so the last one that survives says which resource was running out.
+ */
+function resourceLine() {
+  const mib = (n) => Math.round(n / (1024 * 1024));
+  let disk = 'unknown';
+  try {
+    const st = statfsSync(REPO_ROOT);
+    disk = `${mib(st.bavail * st.bsize)} MiB`;
+  } catch {
+    // not fatal: a diagnostic must never fail the lane
+  }
+  return `   resources: free memory ${mib(freemem())} of ${mib(totalmem())} MiB, free disk ${disk}`;
+}
+
 const results = [];
 for (const prover of provers) {
   console.log(`\n${'═'.repeat(78)}\n▶ ${prover.relPath}\n${'═'.repeat(78)}`);
@@ -264,6 +283,7 @@ for (const prover of provers) {
     console.error(`\n   ${findings[0]}`);
   }
   results.push({ relPath: prover.relPath, summary, findings });
+  console.log(resourceLine());
 }
 
 console.log(`\n${'═'.repeat(78)}\nLANE SUMMARY\n${'═'.repeat(78)}`);
