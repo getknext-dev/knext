@@ -107,6 +107,9 @@ const TARGET =
   /\b(?:database secret|db-bind|exposure|users' tokens|confused deputy|equivalent to|that|this|it|them)\b/i;
 const LIMITER = /\b(?:not|never|cannot|can't|narrows?|neither|nor)\b|n't/i;
 
+const TO_CLOSE =
+  /\b(?:set|enable|use|add|put|apply|configure)\b[^.]*\bto (?:close|fix|solve|eliminate|prevent|protect against) (?:it|that|this|the (?:exposure|risk|gap|problem))\b/i;
+
 function claimClauses(sentence: string): string[] {
   return sentence.split(/[,;:—|]|\s(?:but|while|although)\s/i);
 }
@@ -117,6 +120,8 @@ function overclaims(text: string): string[] {
     .replace(/fail(?:s|ed)? closed/gi, 'fail-shut')
     .replace(/\s+/g, ' ');
   return flat.split(/(?<=[.!?])\s+/).filter((s) => {
+    // The imperative form names no pin ("Set it to close that."): "it" is the pin.
+    if (TO_CLOSE.test(s) && !LIMITER.test(s)) return true;
     if (!PIN_TERM.test(s)) return false;
     // A claim verb in a clause with no limiter in that clause.
     return claimClauses(s).some((c) => CLAIM_VERB.test(c) && TARGET.test(c) && !LIMITER.test(c));
@@ -145,6 +150,7 @@ describe('the scanner sees the wording we removed and its paraphrases', () => {
     'The pin guarantees the database Secret reaches only the agreed image.',
     "With the pin, a writer can no longer reach the users' tokens.",
     'Pinning the image fixes this.',
+    'Unset keeps the name-only binding: any image is bound, which means a writer can change what runs. Set it to close that.',
     'Pin it and the problem is solved.',
     'The pin prevents the exposure, which is not slow.',
   ];
