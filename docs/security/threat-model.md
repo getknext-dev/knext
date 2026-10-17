@@ -296,9 +296,10 @@ the allow-list in both directions, the Opaque-only Secret type, and the no-self-
 and in the rendered bundle confines exactly the identity the operator runs as), and the mutation
 prover `scripts/mutation-prove-2462-operator-write-policy.mjs` (one row per rule). Every committed
 mutation prover, this one and the other sovereignty provers included, is re-run on a schedule against
-both `main` and `integration/v2` by `.github/workflows/mutation-prover-nightly.yml`. The cadence is
-weekly during the release-candidate window, and a red, timed-out or cancelled leg opens or updates a
-"Mutation provers RED" issue.
+both `main` and `integration/v2` by `.github/workflows/mutation-prover-nightly.yml`. The full run over
+both refs is weekly during the release-candidate window, and `integration/v2` alone, where the
+sovereignty provers live, is re-run daily (Monday to Saturday) in addition. A red, timed-out or
+cancelled leg opens or updates the shared "Mutation provers RED" issue.
 
 ## 2. Gateway ↔ backend calls (zone → function)
 
