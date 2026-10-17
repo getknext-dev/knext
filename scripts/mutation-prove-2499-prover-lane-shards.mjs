@@ -55,9 +55,9 @@ const MUTATIONS = [
   {
     id: 'W01',
     subject: 'wf',
-    claim: 'the SCHEDULED default drops integration/v2 (the v2 provers never re-run)',
-    anchor: "LANE_REFS: ${{ inputs.refs || 'main integration/v2' }}",
-    replacement: "LANE_REFS: ${{ inputs.refs || 'main' }}",
+    claim: 'the weekly/default run drops integration/v2 (the v2 provers never re-run on Sunday)',
+    anchor: "|| 'main integration/v2' }}",
+    replacement: "|| 'main' }}",
     validate: parses,
   },
   {
@@ -214,6 +214,49 @@ const MUTATIONS = [
       '          KNEXT_LANE_CARGO_TARGET_DIR: ${{ runner.temp }}/cargo-target\n          CARGO_TARGET_DIR: ${{ runner.temp }}/cargo-target',
     validate: parses,
   },
+  {
+    id: 'W21',
+    subject: 'wf',
+    claim: 'the daily integration/v2 cron is changed (the schedule no longer matches the mapping)',
+    anchor: "    - cron: '37 6 * * 1-6'",
+    replacement: "    - cron: '37 6 * * 2-6'",
+    validate: parses,
+  },
+  {
+    id: 'W22',
+    subject: 'wf',
+    claim:
+      'the daily run proves main as well as integration/v2 (the credential line is no longer thinned)',
+    anchor: "&& 'integration/v2') ||",
+    replacement: "&& 'main integration/v2') ||",
+    validate: parses,
+  },
+  {
+    id: 'W23',
+    subject: 'wf',
+    claim: 'the untracked-file snapshot is never taken (the residue step has nothing to compare)',
+    anchor:
+      '        run: git ls-files --others --exclude-standard | sort > "${{ runner.temp }}/untracked-before.txt"',
+    replacement: "        run: 'true'",
+    validate: parses,
+  },
+  {
+    id: 'W24',
+    subject: 'wf',
+    claim: 'new untracked residue no longer fails the leg',
+    anchor: '          if [ -n "${new}" ]; then',
+    replacement: '          if false; then',
+    // A residue marker inside a `run: |` block would land in the script text.
+    validate: parses,
+  },
+  {
+    id: 'W25',
+    subject: 'wf',
+    claim: 'the Rust code generators are no longer kept between the scaffold prover runs',
+    anchor: '          KNEXT_RUST_CODEGEN_DIR: ${{ runner.temp }}/rust-codegen',
+    replacement: '          KNEXT_RUST_CODEGEN_UNUSED: 1',
+    validate: parses,
+  },
   // ── the library ───────────────────────────────────────────────────────────
   {
     id: 'L01',
@@ -304,13 +347,6 @@ const MUTATIONS = [
     replacement: '  if (false) {',
   },
   {
-    id: 'L14',
-    subject: 'lib',
-    claim: 'a pending (not yet merged) heavy prover is weighted as 1 once it arrives',
-    anchor: '  PROVER_WEIGHT_MINUTES[p.relPath] ?? PENDING_PROVER_WEIGHT_MINUTES[p.relPath] ?? 1;',
-    replacement: '  PROVER_WEIGHT_MINUTES[p.relPath] ?? 1;',
-  },
-  {
     id: 'L13',
     subject: 'lib',
     claim: 'the default per-prover bound is zero (every prover times out) ',
@@ -368,6 +404,36 @@ const MUTATIONS = [
     claim: "the report's discovered set shrinks to the shard (the union can never be checked)",
     anchor: '    discovered: discovered.map((p) => p.relPath),',
     replacement: '    discovered: provers.map((p) => p.relPath),',
+  },
+  {
+    id: 'R08',
+    subject: 'runner',
+    claim: 'a killed prover’s modified tracked files are not restored',
+    anchor:
+      "    execFileSync('git', ['checkout', '--', '.'], { cwd: REPO_ROOT, stdio: 'ignore' });",
+    replacement: '    void 0;',
+  },
+  {
+    id: 'R09',
+    subject: 'runner',
+    claim: 'a killed prover’s NEW untracked files are not removed',
+    anchor: 'for (const f of created) rmSync(resolve(REPO_ROOT, f), { force: true });',
+    replacement: 'void created;',
+  },
+  {
+    id: 'R10',
+    subject: 'runner',
+    claim: 'a leg whose HEAD is not the planned sha runs anyway',
+    anchor: 'if (plannedSha && actualSha !== plannedSha) {',
+    replacement: 'if (false) {',
+  },
+  {
+    id: 'R11',
+    subject: 'runner',
+    claim:
+      'the leg reports the sha the plan claimed instead of reading its own HEAD (the check compares the plan with itself)',
+    anchor: "const actualSha = repoOut(['git', 'rev-parse', 'HEAD'])?.trim() ?? null;",
+    replacement: 'const actualSha = process.env.PROVER_LANE_SHA?.trim() ?? null;',
   },
 ];
 

@@ -92,9 +92,19 @@ on:
   # action-pin (05:11) and image-pin (05:41) nightlies, so the longest-running
   # job of the set does not make the security signals queue behind it.
   # (#1675) — WEEKLY during the rc credential window to reduce runner contention
-  # with the credential lanes. Restore to daily after GA.
+  # with the credential lanes: Sunday proves BOTH refs. Restore to daily after GA.
+  #
+  # The second entry is DAILY and covers `integration/v2` ONLY (Monday-Saturday;
+  # Sunday's full run already includes it). The v2 sovereignty provers are the ones
+  # whose rules a later commit can weaken while the unit tests stay green, so they
+  # are re-proved every day, while `main` (the credential line) stays weekly to
+  # keep the runner pool free. Which ref a run proves is decided from
+  # `github.event.schedule` in the plan step below; if that string and this cron
+  # drift apart the run falls through to BOTH refs, which is the safe direction.
+  # `tests/rc-window-thin-nightlies.test.ts` asserts both entries on purpose.
   schedule:
     - cron: '7 6 * * 0'
+    - cron: '37 6 * * 1-6'
   # Manual re-runs after fixing a prover; the alert job is scheduled-only (below)
   # so a dispatch experiment never files or updates the issue.
   #   refs        space/comma separated branches to prove (default: both lane refs).
@@ -146,7 +156,7 @@ jobs:
       - name: Plan
         id: plan
         env:
-          LANE_REFS: ${{ inputs.refs || 'main integration/v2' }}
+          LANE_REFS: ${{ inputs.refs || (github.event.schedule == '37 6 * * 1-6' && 'integration/v2') || 'main integration/v2' }}
           LANE_SHARDS: 6
           LANE_ONLY_SHARD: ${{ inputs.only_shard }}
         run: node scripts/prover-lane-plan.mjs
@@ -299,18 +309,30 @@ jobs:
       # the leg's ceiling.
       #
       # KNEXT_LANE_CARGO_TARGET_DIR is an OPT-IN seam, deliberately NOT
-      # `CARGO_TARGET_DIR`. A cargo-heavy prover (the Rust scaffold prover does ~20
-      # cold dependency builds, 3+ minutes each) may point its own cargo at this
-      # per-leg directory, outside the tree, to reuse the build. It is not set
-      # lane-wide because that was measured to break a prover: a lane-wide
+      # `CARGO_TARGET_DIR`. The Rust scaffold prover (about 20 spec runs, each a
+      # cold cargo generation, 3+ minutes) adopts it for its OWN process only
+      # (`mutation-prove-2489-rust-scaffold.mjs`), so its cargo reuses one build
+      # directory outside the tree. It is not set lane-wide because that was
+      # measured to break another prover: a lane-wide
       # `CARGO_TARGET_DIR` made `knext-ffi-crates` red at its baseline (it
       # hardcodes `target/release/` for its Bun harness; run 39009526071). A
       # global side effect on every cargo call is the wrong default.
+      # Untracked, non-ignored files BEFORE the provers run. The residue step below
+      # compares against this, so a prover that leaves a stray NEW file behind is
+      # caught as well as one that leaves a modified tracked file (`git diff` alone
+      # cannot see an untracked file). Files the setup steps legitimately create are
+      # in the "before" set and are not flagged.
+      - name: Record the untracked files before the provers run
+        run: git ls-files --others --exclude-standard | sort > "${{ runner.temp }}/untracked-before.txt"
+
       - name: Run this shard's mutation provers (FAIL on exit code, count mismatch OR timeout)
         env:
           KNEXT_REDIS_LIVE_URL: redis://127.0.0.1:6379
           KNEXT_PROVER_TIMEOUT_MS: 6000000
           KNEXT_LANE_CARGO_TARGET_DIR: ${{ runner.temp }}/cargo-target
+          # The Rust scaffold prover documents this as the way to keep the code
+          # generators between its ~20 runs instead of rebuilding them each time.
+          KNEXT_RUST_CODEGEN_DIR: ${{ runner.temp }}/rust-codegen
           PROVER_LANE_REF: ${{ matrix.ref }}
           PROVER_LANE_SHA: ${{ matrix.sha }}
         run: >-
@@ -327,6 +349,13 @@ jobs:
           set -euo pipefail
           node scripts/scan-mutation-residue.mjs
           git diff --exit-code
+          git ls-files --others --exclude-standard | sort > "${RUNNER_TEMP}/untracked-after.txt"
+          new="$(comm -13 "${RUNNER_TEMP}/untracked-before.txt" "${RUNNER_TEMP}/untracked-after.txt")"
+          if [ -n "${new}" ]; then
+            echo "::error::a prover left NEW untracked file(s) behind:"
+            echo "${new}"
+            exit 1
+          fi
 
       # Uploaded even from a red leg: the report is what lets the aggregate tell
       # "this prover failed" from "this leg never reported". `if-no-files-found:

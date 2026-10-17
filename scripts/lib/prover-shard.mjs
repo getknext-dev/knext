@@ -69,6 +69,12 @@ export const PROVER_WEIGHT_MINUTES = Object.freeze({
   'scripts/mutation-prove-empty-dir-guard.mjs': 55,
   // MEASURED, run 39002159226: 26 minutes.
   'scripts/mutation-prove-published-seam-scan.mjs': 26,
+  // Estimated, not yet measured: baseline + canary + 18 rows, each a spec run that
+  // does a real `cargo` generation (3+ minutes cold). The lane hands the prover a
+  // per-leg target dir through KNEXT_LANE_CARGO_TARGET_DIR, which the prover adopts
+  // for its own process only; the weight stays at the cold worst case until a run
+  // measures it.
+  'scripts/mutation-prove-2489-rust-scaffold.mjs': 60,
   'scripts/mutation-prove-compat-cell-fingerprint.mjs': 20,
   // MEASURED, run 39002159226: 9.5 minutes (the old workflow comment said ~30).
   'scripts/mutation-prove-install-smoke-coverage.mjs': 10,
@@ -90,28 +96,11 @@ export const PROVER_WEIGHT_MINUTES = Object.freeze({
  */
 export const WEIGHTED_ON_ONE_REF_ONLY = Object.freeze([
   'scripts/mutation-prove-published-seam-scan.mjs',
+  'scripts/mutation-prove-2489-rust-scaffold.mjs',
 ]);
 
-/**
- * Weights for provers that are APPROVED BUT NOT YET MERGED to the branch this
- * file is on. Inert until the prover exists (the partition only iterates provers
- * that are present), so an entry here cannot unbalance anything early; the lane
- * test fails once the prover appears, to force promotion into
- * `PROVER_WEIGHT_MINUTES` where the rename-rot guard covers it.
- *
- * `mutation-prove-2489-rust-scaffold.mjs` (open PR for the Rust zone template):
- * baseline + canary + 18 rows, each a cold `cargo build` of the whole dependency
- * tree (3+ minutes with a fresh target dir) — ~60 minutes cold. The lane now
- * shares one `CARGO_TARGET_DIR` per leg, which should cut that sharply, but the
- * weight stays at the cold worst case until a run measures it.
- */
-export const PENDING_PROVER_WEIGHT_MINUTES = Object.freeze({
-  'scripts/mutation-prove-2489-rust-scaffold.mjs': 60,
-});
-
 /** @param {{ relPath: string }} p */
-export const proverWeight = (p) =>
-  PROVER_WEIGHT_MINUTES[p.relPath] ?? PENDING_PROVER_WEIGHT_MINUTES[p.relPath] ?? 1;
+export const proverWeight = (p) => PROVER_WEIGHT_MINUTES[p.relPath] ?? 1;
 
 const byPath = (a, b) => (a.relPath < b.relPath ? -1 : a.relPath > b.relPath ? 1 : 0);
 
