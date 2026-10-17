@@ -18,6 +18,13 @@
  * sprint-2 template work owned the subject. That work has landed; this file
  * removes the exemption by proving the guard.
  *
+ * WHICH TEMPLATE (#2514): these rows mutate `next.config.ts.hbs`, the DEFAULT
+ * (standalone) target's config. Since #1342 the guard's original #895 assertions
+ * read the vinext scaffold (`next.config.ts.vinext.hbs`) only, so for a while no
+ * test read this template and the canary below left the guard green (the prover
+ * aborted, declared 4 / run 0). The "default standalone target" describe in
+ * `create-scaffold.test.ts` now pins this template's own wiring.
+ *
  * THE FOUR MUTATIONS are the ways the #895 defect could quietly return, each an
  * independent RED of the guard, plus a negative control that must stay GREEN.
  *
@@ -117,8 +124,8 @@ prover.preflight(ALL);
 declareMutations(ALL.length);
 prover.baseline();
 
-// The canary removes the `export default` from the scaffolded next.config, so
-// the guard's "still exports a NextConfig" assertion must fall. If the runner
+// The canary removes the `export default` from the scaffolded (default-target)
+// next.config, so the default-target "still exports a NextConfig" assertion must fall. If the runner
 // cannot see that, nothing below is worth reading.
 prover.proveCanSeeRed({
   subject: 'nextConfig',
