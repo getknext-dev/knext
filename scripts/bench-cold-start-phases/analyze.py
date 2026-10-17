@@ -23,6 +23,7 @@ cycle's measured node-clock offset was < 1 ms, so their stamps are used as-is.
 """
 import datetime
 import json
+import os
 import statistics
 import sys
 
@@ -38,7 +39,7 @@ def load_cp(kind, path):
         except json.JSONDecodeError:
             continue
         key = j.get("knative.dev/key", "")
-        if "bench-cells/" not in key:
+        if f"{os.environ.get('NS', 'bench-cells')}/" not in key:
             continue
         base, _, frac = j.get("timestamp", "").rstrip("Z").partition(".")
         t = datetime.datetime.strptime(base, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=datetime.timezone.utc).timestamp()

@@ -22,12 +22,14 @@ untreated control, so the treatment alternates ABAB on the same Knative Service.
 Cluster work is a queue of one: never run two drivers at once.
 """
 import json
+import os
 import pathlib
 import subprocess
 import sys
 import time
 
-CTX = ["kubectl", "--context", "knext-oke-sa", "-n", "bench-cells"]
+# NS selects the namespace (default bench-cells); the phase-bench pod must carry the same NS env.
+CTX = ["kubectl", "--context", "knext-oke-sa", "-n", os.environ.get("NS", "bench-cells")]
 HERE = pathlib.Path(__file__).resolve().parent
 DNS_JS = (HERE / "dns-probe.js").read_text()
 
