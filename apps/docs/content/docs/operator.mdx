@@ -17,8 +17,10 @@ Knative Service  →  scaled-to-zero, reachable
 ## Installing the operator
 
 The operator ships as one digest-pinned `install.yaml` bundle (CRDs + RBAC + manager
-Deployment + webhook), regenerated for every release. Install the control plane with one
-command, after cert-manager:
+Deployment + webhook + a policy that limits what the operator may write to Secrets and ConfigMaps),
+regenerated for every release. That policy is a `ValidatingAdmissionPolicy`, which needs
+**Kubernetes 1.30 or later**; see [Security](/docs/security#write-policy). Install the control
+plane with one command, after cert-manager:
 
 ```sh title="shell"
 kubectl apply --server-side -f https://github.com/getknext-dev/knext/releases/download/operator-latest/install.yaml
@@ -307,12 +309,15 @@ The operator is also the policy boundary:
   only if it contains `@sha256:`.
 - **Mutating endpoints require auth.** App-level cache-invalidation routes require a signed bearer
   token; nothing mutating is open by default.
-- **No direct access to your Secrets.** The operator's ClusterRole grants no permission on
-  Kubernetes Secrets at all. `envFrom` / `envMap` / `spec.database` only write *references*
-  (Secret name and key) into your app's Pod spec; the kubelet resolves them when the pod starts.
-  This is not a complete barrier: because the operator can create workloads cluster-wide, a
-  compromised operator could still reach a Secret indirectly through a pod it creates. Install
-  the operator per namespace or add an admission policy to close that path. See
+- **Narrow access to Secrets and ConfigMaps.** The operator cannot list or watch Secrets, and an
+  admission policy in the install bundle lets its ServiceAccount write only the per-zone signing
+  key Secret (`*-knext-signing-key`, type `Opaque`) and key set ConfigMap (`*-knext-jwks`), nothing
+  else.
+  `envFrom` / `envMap` / `spec.database` only write *references* (Secret name and key) into your
+  app's Pod spec; the kubelet resolves them when the pod starts. This is not a complete barrier:
+  because the operator can create workloads cluster-wide, a compromised operator could still reach
+  a Secret indirectly through a pod it creates. Install the operator per namespace or add your own
+  admission policy for workloads to close that path. See
   [Security](/docs/security#operator-permissions).
 - **Default-on NetworkPolicy.** `spec.security.networkPolicy` reconciles an internal-only network
   policy for the app.

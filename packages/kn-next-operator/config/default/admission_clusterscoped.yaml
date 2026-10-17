@@ -1,0 +1,26 @@
+# The write policy and its binding are CLUSTER-scoped objects.
+#
+# config/default applies `namespace: kn-next-operator-system` to every resource it
+# does not know to be cluster-scoped, and kustomize's built-in list of cluster-scoped
+# kinds does not include ValidatingAdmissionPolicy or its binding, so both would
+# render with a metadata.namespace. The apiserver clears it on create, but GitOps
+# controllers diff the rendered manifest against the live object and would see a
+# permanent difference, and a stray namespace on a cluster-scoped kind is wrong
+# regardless.
+#
+# A `transformers:` entry runs AFTER the built-in namespace transformer, so this
+# PatchTransformer can take the field back off (the same ordering that
+# config_network_repin.yaml relies on). It removes the field only; the name prefix
+# is left in place, which keeps two installs from colliding on the policy name.
+# internal/install/operator_write_policy_test.go asserts the rendered objects carry
+# no namespace.
+apiVersion: builtin
+kind: PatchTransformer
+metadata:
+  name: admission-clusterscoped
+patch: |-
+  - op: remove
+    path: /metadata/namespace
+target:
+  group: admissionregistration.k8s.io
+  kind: ValidatingAdmissionPolicy(Binding)?

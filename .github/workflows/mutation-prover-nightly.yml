@@ -191,6 +191,16 @@ jobs:
         working-directory: packages/kn-next-operator
         run: make setup-envtest
 
+      # `mutation-prove-2462-operator-write-policy.mjs` re-renders the install
+      # bundle (`kustomize build config/default`) for every row that mutates the
+      # overlay, so the lane needs the kustomize the operator's Makefile pins, at
+      # packages/kn-next-operator/bin/kustomize where the prover looks first.
+      # Without it that prover exits 2 before its baseline: a red night, never a
+      # silent skip.
+      - name: Install the operator's kustomize
+        working-directory: packages/kn-next-operator
+        run: make kustomize
+
       - name: Run every mutation prover (FAIL on exit code OR count mismatch)
         env:
           KNEXT_REDIS_LIVE_URL: redis://127.0.0.1:6379

@@ -382,6 +382,22 @@ func TestBuildManagerOptionsReleasesLeaseOnCancel(t *testing.T) {
 	}
 }
 
+// TestBuildManagerOptionsLeaderElectionNeverLocksOnAConfigMap: the lock is a
+// coordination.k8s.io Lease (the controller-runtime default, "" or "leases"). The
+// install bundle's admission policy lets the operator's ServiceAccount write only
+// the per-zone key and JWKS names, so a ConfigMap-based lock ("configmapsleases"
+// still writes a ConfigMap, and "configmaps" is all ConfigMap) would be refused and
+// the operator could never acquire leadership.
+func TestBuildManagerOptionsLeaderElectionNeverLocksOnAConfigMap(t *testing.T) {
+	opts := buildManagerOptions(true, metricsserver.Options{}, nil, ":8081")
+	switch opts.LeaderElectionResourceLock {
+	case "", "leases":
+	default:
+		t.Errorf("LeaderElectionResourceLock = %q; only a Lease is compatible with the operator's Secret/ConfigMap write policy",
+			opts.LeaderElectionResourceLock)
+	}
+}
+
 // TestBuildManagerOptionsWiresProbeAddr: the health-probe bind address must be
 // threaded through so the liveness/readiness probes (#252, #307) have a listener.
 func TestBuildManagerOptionsWiresProbeAddr(t *testing.T) {
