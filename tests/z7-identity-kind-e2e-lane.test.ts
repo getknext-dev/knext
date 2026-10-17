@@ -562,7 +562,10 @@ describe('the rotation watcher proves what it says: it ran the whole rotation an
     expect(r).toMatch(/last_ts/);
     expect(r).toContain('t_retired_refused');
     expect(r).toContain('is older than the end of the rotation');
-    expect(r).toMatch(/after_switch/);
+    // The check and its failure, together: the words alone also appear in a comment.
+    expect(r).toMatch(
+      /\[ "\$\{after_switch\}" -ge 10 \] \\\n\s+\|\| fail "only \$\{after_switch\} watcher rounds after the switch/,
+    );
     expect(r).toContain('rounds after the switch');
     // Not the old, only liveness check.
     expect(r).toMatch(/\[ "\$\{total\}" -ge 20 \]/);
