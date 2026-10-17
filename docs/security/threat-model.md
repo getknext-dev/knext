@@ -301,6 +301,7 @@ prover `scripts/mutation-prove-2462-operator-write-policy.mjs` (one row per rule
 **The model that shipped (Z7, ADR-0004 Amendment 1).** A zone calls a bound `BackendService`
 function with a per-call EdDSA (Ed25519) JWT. There is no shared token.
 
+- **Stage.** Zone functions are Beta and exist on the v2 line only; released 1.x has none of this.
 - **Per-zone keys.** Each zone with a two-sided function binding has its own Ed25519 key in the
   Secret `<zone>-knext-signing-key`. The operator generates and rotates it; the private half never
   reaches a function pod.
@@ -324,45 +325,47 @@ function with a per-call EdDSA (Ed25519) JWT. There is no shared token.
 
 | STRIDE | Threat | Mitigation | Residual / action |
 |---|---|---|---|
-| **S**poof | A pod impersonates a zone to call a function directly. | Functions are `networking.knative.dev/visibility: cluster-local`. Every call needs a JWT signed by the zone's own key, verified against its JWKS, with the function's `aud` and the call's `method`. Functions hold no signing key, so they cannot call each other. | Residual (a) below: a captured token is replayable for up to 60 s. A same-namespace actor who can write ConfigMaps can forge the JWKS owner reference (JWKS residual (a) in §1). |
-| **T**amper | In-cluster MITM rewrites an h2c request or its response. | The token binds `iss`, `aud`, `method`, `sub` and a 60 s life, so a request cannot be re-aimed at another function or method. A default-on internal-only `NetworkPolicy` limits who can reach the pod. | Residual (b) below: the response is not authenticated, and the request body is not covered by the token. NetworkPolicy is enforced only on a CNI that implements it (not flannel). |
-| **R**epudiate | No attribution for a function mutation. | The token names the zone (`iss`) and the user (`sub`); the function can log both. | The `sub` is the zone's assertion, not the user's (residual (c) below). |
-| **I**nfo disclosure | A function leaks data, or a zone reads another zone's data through it. | cluster-local visibility; the function holds no other zone's DB credential (allowlist) and no signing key. | Plaintext h2c: anything on the pod network path can read traffic (residual (b)). |
+| **S**poof | A pod impersonates a zone to call a function directly. | Functions are labelled `networking.knative.dev/visibility: cluster-local`. That is Knative's setting, not a guarantee: on some installs a DomainMapping is routed on the public load balancer regardless (on OKE keep private apps behind a tunnel). The token is the control. Every call needs a JWT signed by the zone's own key, verified against its JWKS, with the function's `aud` and the call's `method`. Functions hold no signing key, so they cannot call each other. | Residual G1 below: a captured token is replayable for up to 60 s, with a body of the attacker's choosing. A same-namespace actor who can write ConfigMaps can forge the JWKS owner reference (JWKS residual (a) in §1). |
+| **T**amper | In-cluster MITM rewrites an h2c request or its response. | The token binds `iss`, `aud`, `method`, `sub` and a 60 s life, so a request cannot be re-aimed at another function or method. A default-on internal-only `NetworkPolicy` limits who can reach the pod. | Residual G2 below: the response is not authenticated, and the request body is not covered by the token. NetworkPolicy is enforced only on a CNI that implements it (not flannel). |
+| **R**epudiate | No attribution for a function mutation. | The token names the zone (`iss`) and the user (`sub`); the function can log both. | The `sub` is the zone's assertion, not the user's (G3 below). |
+| **I**nfo disclosure | A function leaks data, or a zone reads another zone's data through it. | cluster-local label (Knative's; see Spoof); the function holds no other zone's DB credential (allowlist) and no signing key. | Plaintext h2c: anything on the pod network path can read traffic (G2). |
 | **D**oS | A zone floods a scaled-to-zero function on cold start. | Knative concurrency limits and revision autoscaling; the verifier rejects a bad token before any handler work. | — |
-| **E**lev. of priv. | Implicit pod-to-pod trust; a call crosses a namespace or a function. | **No implicit trust**: a zone-issued, function-audienced token is required; a cross-namespace token is refused. | Residual (c) below: the function trusts the zone's `sub`. |
+| **E**lev. of priv. | Implicit pod-to-pod trust; a call crosses a namespace or a function. | **No implicit trust**: a zone-issued, function-audienced token is required; a cross-namespace token is refused. | Residual G3 below: the function trusts the zone's `sub`. |
 
-### Gateway ↔ function residuals
+### Gateway ↔ function residuals (G1–G3)
 
 Each is stated with likelihood and impact, the mitigation that exists today, and what closes it. They
 sit beside the operator-side residuals (a)–(d) of the signing-key and JWKS sections in §1 and the
 open items in ADR-0004's "Z7 operator write surface" (names-only binding, read-error removal); none
 of those is repeated here.
 
-**(a) Replay within the token's life (#2510).** The token has no `jti` and the verifier keeps no replay
+**G1. Replay within the token's life (#2510).** The token has no `jti` and the verifier keeps no replay
 cache. An attacker who captures a token on the pod network can replay it, unchanged, against the
-**same** function and the **same** method for up to 60 s plus 5 s of skew.
+**same** function and the **same** method for up to 60 s plus 5 s of skew. The token carries no
+hash of the request body, so the replay is not of the original call: it runs that RPC with an
+**attacker-chosen body**. This is the same missing integrity as G2.
 - *Likelihood:* low. Capture needs a position on the pod network, which is plaintext h2c, and on a
   flannel cluster (OKE, OrbStack) the NetworkPolicy that would limit who can reach the pod is not
   enforced.
 - *Impact:* bounded. `aud` limits it to one function and `method` to one RPC. A replayed call
   repeats whatever that RPC does, so a non-idempotent write is the worst case.
-- *Mitigation today:* the 60 s life; `aud` and `method` binding; cluster-local visibility.
+- *Mitigation today:* the 60 s life; `aud` and `method` binding.
 - *Closes it:* a `jti` claim plus a short replay cache in the verifier (per-pod memory; lost on
   scale-to-zero, which is acceptable because the life bounds it), or mTLS so the token is not
   capturable in the first place.
 
-**(b) Responses are not authenticated (#2511).** The token authenticates the zone to the function. Nothing
+**G2. Responses are not authenticated (#2511).** The token authenticates the zone to the function. Nothing
 authenticates the function's reply to the zone, and nothing integrity-protects the request body.
 An attacker in the path can tamper with either.
-- *Likelihood:* low. It needs the same pod-network position as (a).
+- *Likelihood:* low. It needs the same pod-network position as G1.
 - *Impact:* moderate. The zone would act on a forged result; confidentiality of traffic is also
   absent.
-- *Mitigation today:* cluster-local visibility, the internal-only NetworkPolicy where the CNI
+- *Mitigation today:* the internal-only NetworkPolicy where the CNI
   enforces it, and the request-side token. None of these authenticates the reply.
 - *Closes it:* mTLS between the zone and the function (a service mesh, or workload certificates).
   This is the stated closure; it is not built.
 
-**(c) The function trusts the zone's `sub` (#2512).** The user the function sees is whatever the zone put in
+**G3. The function trusts the zone's `sub` (#2512).** The user the function sees is whatever the zone put in
 `sub`. The function cannot check that this user signed in. A compromised zone pod can therefore mint
 any user for **its own** functions (the key, `iss` and `aud` still confine it to them).
 - *Likelihood:* follows the compromise of a zone pod, which already holds that zone's key and its
@@ -376,7 +379,7 @@ any user for **its own** functions (the key, `iss` and `aud` still confine it to
 
 **Related:** `.claude/rules/security.md` still describes this link as "shared signed token → mTLS via
 mesh". That file is not an agent's to edit; the maintainer should update it to the per-zone EdDSA
-design above, with mTLS as the closure of (a) and (b).
+design above, with mTLS as the closure of G1 and G2.
 
 ## 3. Cache-invalidate endpoint
 

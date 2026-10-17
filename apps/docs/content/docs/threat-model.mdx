@@ -46,15 +46,20 @@ service, **E**levation of privilege.
 
 ## 2. Gateway to function calls
 
+Zone functions and their identity tokens are **Beta**. They are available on the **v2** line only; released 1.x has none of this.
+
 A zone calls a bound zone function with a short-lived token signed by the zone's own key. The
 function checks it against the zone's published public keys. The token names the zone as issuer and
 the function as audience, binds the RPC being called, and lives 60 seconds (5 seconds of clock skew
-allowed). Functions have no public ingress and hold no signing key. See
+allowed). Functions hold no signing key. They are cluster-local, which is Knative's visibility
+setting; on some installs a DomainMapping is routed on the public load balancer regardless (on OKE,
+keep private apps behind a tunnel rather than a DomainMapping). The token is the control, not the
+network position. See
 [Zone functions](/docs/zone-functions) for how keys are created and rotated.
 
 | STRIDE | Threat | Mitigation | Residual risk |
 | --- | --- | --- | --- |
-| **S** | A pod impersonates a zone to call a function directly. | Cluster-local visibility with no public ingress, plus a token signed by that zone's key for that function and that RPC. | A captured token can be replayed against the same function and RPC for up to about a minute. |
+| **S** | A pod impersonates a zone to call a function directly. | Cluster-local visibility (Knative's, not a guarantee on every install), plus a token signed by that zone's key for that function and that RPC. | A captured token can be replayed against the same function and RPC for up to about a minute. |
 | **T** | An in-cluster attacker rewrites a request or a reply. | The token binds issuer, audience, RPC and user. The default NetworkPolicy limits who can reach the pod. | Replies are not authenticated and the link is plaintext HTTP/2. Mutual TLS through a mesh would close this; it is not built. NetworkPolicy is enforced only on a CNI that implements it. |
 | **E** | Implicit pod-to-pod trust. | No implicit trust: a token issued for that function is required, and the NetworkPolicy defaults to deny. | The function accepts the user the zone names. A compromised zone can name any user for its own functions. |
 
