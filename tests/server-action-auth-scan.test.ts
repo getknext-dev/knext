@@ -19,6 +19,7 @@ import { dirname, join, resolve } from 'node:path';
 import {
   ALLOWLIST,
   AUTH_CALLS,
+  listScanFiles,
   SCAN_ROOTS,
   SENSITIVE_READS,
   scanSource,
@@ -149,6 +150,12 @@ describe('RED: what the scan cannot read FAILS', () => {
 
   it('a route `export *`', () => {
     expect(problems(`export * from './impl';`, ROUTE)[0]).toContain('export *');
+  });
+
+  it('a route method wrapped around a handler that is not written inline', () => {
+    expect(ungated(`import { h } from './h';\nexport const POST = withRed(h);`, ROUTE).length).toBe(
+      1,
+    );
   });
 
   it('a route method assigned from an identifier', () => {
@@ -318,6 +325,10 @@ describe('the real tree', () => {
   it('scans the apps and the app scaffold templates', () => {
     expect(SCAN_ROOTS).toEqual(['apps', 'packages/kn-next/templates/app']);
     expect(result.scannedFiles).toBeGreaterThan(50);
+    // Handlebars templates are read as source, not skipped.
+    expect(listScanFiles(REPO_ROOT)).toContain(
+      'packages/kn-next/templates/app/src/app/api/health/route.ts.hbs',
+    );
   });
 
   it('sees exactly the surfaces the audit lists (a scan that reads nothing is green too)', () => {
