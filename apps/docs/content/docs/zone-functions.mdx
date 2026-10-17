@@ -8,12 +8,14 @@ belongs to exactly one zone, your `NextApp`. The operator runs it as its own sca
 Service, reachable only from inside the cluster, and tells the zone where it is. You declare it
 with a `BackendService` resource. The [`knext add function`](/docs/cli#knext-add-function) and
 [`knext generate`](/docs/cli#knext-generate) commands write the function's contract and the zone's
-typed client, and [`knext deploy function`](/docs/cli#knext-deploy-function) applies the
-`BackendService` for you. You can also apply it yourself with `kubectl apply --validate=strict` or
-your GitOps tool.
+typed client, [`knext deploy function`](/docs/cli#knext-deploy-function) applies the
+`BackendService` for you, and [`knext deploy`](/docs/cli#knext-deploy-default) tells the zone about it from
+the `backends` list in your `knext.config.ts`. You can also apply the `BackendService` yourself with
+`kubectl apply --validate=strict` or your GitOps tool.
 
-Upgrade the operator (and its CRDs) before you apply a `BackendService` or set `spec.backends`. An
-older operator does not know these fields.
+Upgrade the operator (and its CRDs) before you apply a `BackendService` or deploy a config with
+`backends`. An older operator does not know these fields, and `knext deploy` stops before it changes
+anything and names the field.
 
 ## Binding a function to its zone
 
@@ -22,7 +24,8 @@ A binding needs **both halves**:
 1. **The function names its zone** with `spec.zone`, the name of a `NextApp` in the same namespace.
    You never write an `ownerReference`; the operator sets it from `spec.zone`. `spec.zone` cannot be
    changed after the function is created.
-2. **The zone lists the function** in its `spec.backends`. This is the zone owner's consent.
+2. **The zone lists the function** in its `backends`. This is the zone owner's consent, and it lives
+   in your zone's own config, so it is reviewed and versioned with the rest of the zone.
 
 ```yaml title="pricing.yaml"
 apiVersion: apps.kn-next.dev/v1alpha1
@@ -37,6 +40,29 @@ spec:
   protoVersion: 1.4.0   # the contract version this image serves
 ```
 
+List the function in the zone's `knext.config.ts`:
+
+```ts title="knext.config.ts (excerpt)"
+export default {
+  name: "orders",
+  // ...
+  backends: [
+    { name: "pricing" }, // the function name your generated client uses
+  ],
+};
+```
+
+`knext deploy` sends this list on the zone's `NextApp` as `spec.backends`, in the same apply as the
+rest of the zone, so you do not edit the `NextApp` yourself. `service` is the name of the
+`BackendService` and defaults to `name`, which is how `knext deploy function pricing` names it; set
+it only when the two differ. Each `name` is lowercase letters and digits in parts joined by single
+hyphens, starting with a letter and at most 63 characters, and each name and each function may be
+listed only once. `knext deploy` checks all of this before it builds anything. Leaving `backends`
+out, or empty, sends nothing, so a zone without functions deploys exactly as before.
+
+If you apply the zone with your own GitOps tool instead of `knext deploy`, write the same list on
+the resource:
+
 ```yaml title="orders zone (excerpt)"
 apiVersion: apps.kn-next.dev/v1alpha1
 kind: NextApp
@@ -49,6 +75,9 @@ spec:
     - name: pricing     # the function name your generated client uses
       service: pricing  # the BackendService
 ```
+
+A preview deployment does not inherit `backends`: a function belongs to exactly one zone, and a
+preview is a different one.
 
 Until both halves agree, the operator runs **nothing** for the function: no Knative Service, no
 mounted Secret, and nothing in the zone's environment. The function's `Bound` condition says which

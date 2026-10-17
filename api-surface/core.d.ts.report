@@ -8,6 +8,11 @@
 # entry file, including through `export * from` re-exports, is
 # tracked wherever it is actually declared (checker.getExportsOfModule).
 ### .
+interface BackendBindingConfig {
+  name: string
+  service?: string | undefined
+}
+
 type CacheConfig {
   keyPrefix?: string | undefined
   provider: "redis"
@@ -64,6 +69,7 @@ interface KafkaQueueConfig {
 }
 
 interface KnativeNextConfig {
+  backends?: BackendBindingConfig[] | undefined
   build?: "turbopack" | "vinext" | "webpack" | undefined
   cache?: RedisCacheConfig | undefined
   cdn?: CdnConfig | undefined

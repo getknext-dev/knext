@@ -269,6 +269,23 @@ export interface SecretsConfig {
     envMap?: Record<string, SecretRef>; // Map of explicit ENV_VAR -> { name, key } Secret mapping
 }
 
+// One zone function this app binds: the zone's half of a function binding.
+// The function's own half is its BackendService (`knext deploy function`,
+// `spec.zone`); a function is wired in only when both halves agree.
+export interface BackendBindingConfig {
+    /**
+     * The binding name. It derives the env prefix: `user-profile` becomes
+     * `USER_PROFILE_SERVICE_URL`. Lowercase letters and digits in parts joined
+     * by single '-', starting with a letter, at most 63 characters.
+     */
+    name: string;
+    /**
+     * The function's BackendService name in this namespace. Defaults to
+     * `name`, which is how `knext deploy function <name>` names it.
+     */
+    service?: string;
+}
+
 // Network exposure (#1865): whether the app's Knative Route is reachable from
 // outside the cluster.
 export interface NetworkingConfig {
@@ -520,4 +537,11 @@ export interface KnativeNextConfig {
     // revision, the same compat-normalized headers as today. Needs an operator
     // that knows the field: upgrade the operator/CRD first, then the CLI.
     cdn?: CdnConfig;
+    // The zone functions this app binds (the zone's consent half of a function
+    // binding). The CLI sends the list as `spec.backends` on the NextApp; the
+    // operator renders `<NAME>_SERVICE_URL` and the rest of the binding env into
+    // the pod from it and never writes it back. Removing an entry takes that
+    // function down. Omitted or empty sends no field at all. Needs an operator
+    // that knows the field: upgrade the operator/CRD first, then the CLI.
+    backends?: BackendBindingConfig[];
 }

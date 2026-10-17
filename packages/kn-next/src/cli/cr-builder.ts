@@ -519,6 +519,30 @@ export function buildNextAppCRObject(
           }
         : undefined;
 
+    // spec.backends: the zone's half of each function binding. The function's
+    // own half is its BackendService (`spec.zone`), applied by `knext deploy
+    // function`; the operator wires a function in only when both agree, and
+    // renders the binding env (<NAME>_SERVICE_URL, ...) into the pod template.
+    // It is NEVER written into this spec by anything but this apply, so the CLI
+    // or a GitOps controller can re-apply it without a second writer fighting.
+    //
+    // Emitted only when at least one function is configured, so a config
+    // without it renders a CR byte-identical to every CR written before the
+    // field existed. Not emitted on a preview: a function names ONE zone, and a
+    // preview is a different NextApp, so the base app's list would only be
+    // reported as cross-zone bindings. `service` defaults to the binding name
+    // (`knext deploy function <name>` names the object after the function).
+    // #548 upgrade order: an operator/CRD that predates the field rejects it
+    // under --validate=strict and deploy's preflightCRSchema names it before
+    // the cluster is touched. Upgrade operator/CRD first, then CLI.
+    const backends =
+        !preview && config.backends?.length
+            ? config.backends.map((b) => ({
+                  name: b.name,
+                  service: b.service ?? b.name,
+              }))
+            : undefined;
+
     const spec: Record<string, unknown> = {
         image,
         // #794/#952 private-registry pull secrets: config names Secrets, the CRD
@@ -554,6 +578,7 @@ export function buildNextAppCRObject(
         ...(writeFree ? { security: { writeFree: true } } : {}),
         ...(networking ? { networking } : {}),
         ...(cdn ? { cdn } : {}),
+        ...(backends ? { backends } : {}),
         // #93 skew protection: carry the deploy's BUILD_ID so the operator can stamp
         // the `apps.kn-next.dev/build-id` revision label the asset GC resolves against.
         ...(buildId ? { buildId } : {}),

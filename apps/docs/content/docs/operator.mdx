@@ -102,6 +102,7 @@ status:
 | `build` | `turbopack` (the standalone shape — `next build`, the default the CLI writes and what absence means), `webpack` (the same standalone shape with a different bundler), or `vinext` (the compiled single executable, selectable). Drives how the operator starts the container. See [Bun & the compiled executable](/docs/bun-runtime). |
 | `runtime` | `bun` (default) or `node`. Standalone shape only — for `build: "vinext"` the runtime ships inside the binary and this field has no effect on startup. |
 | `imagePullSecrets` | Names of Secrets the app's ServiceAccount uses to pull the image. See [Private registries](/docs/private-registries). |
+| `backends` | `name`, `service` for each zone function this app binds: the zone's half of the binding. `knext deploy` sends it from `backends` in your config. See [Zone functions](/docs/zone-functions#binding-a-function-to-its-zone). |
 | `healthCheckPath` | Path Knative's readiness and liveness probes hit (default `/api/health`). |
 | `observability` | `enabled`, plus `rum` and `tracing` sub-blocks. See [Observability](/docs/observability). |
 | `preview` | `enabled`, `prId`, `branch` — marks the resource as a per-PR preview. See [Preview environments](/docs/previews). |
