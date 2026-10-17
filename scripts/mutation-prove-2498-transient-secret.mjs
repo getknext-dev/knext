@@ -292,7 +292,7 @@ const GO_MUTATIONS = [
     claim: 'the hold is zero (a first denied read tears the function down)',
     subject: 'verdict',
     anchor: 'secretsDeniedHold = 10 * time.Minute',
-    replacement: 'secretsDeniedHold = 0',
+    replacement: 'secretsDeniedHold = 0 * time.Minute',
     test: envtest(FORBIDDEN),
   },
   {

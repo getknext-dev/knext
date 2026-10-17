@@ -29,6 +29,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -174,6 +175,36 @@ var _ = Describe("BackendService reconciler: an unreadable Secret never keeps a 
 					Expect(err.Error()).To(ContainSubstring("must name a Secret"))
 				})
 			}
+		}
+
+		// A Go client omits an empty name from the JSON, so `has()` alone would
+		// catch that. A manifest that spells `name: ""` out must be refused too.
+		rawSpecs := map[string]map[string]any{
+			"secretKeyRef": {"env": []any{map[string]any{"name": "DSN", "valueFrom": map[string]any{
+				"secretKeyRef": map[string]any{"name": "", "key": "k"}}}}},
+			"envFrom": {"envFrom": []any{map[string]any{"secretRef": map[string]any{"name": ""}}}},
+			"a Secret volume": {"volumes": []any{map[string]any{"name": "creds", "mountPath": "/creds",
+				"secret": map[string]any{"secretName": ""}}}},
+			"a projected one": {"volumes": []any{map[string]any{"name": "bundle", "mountPath": "/bundle",
+				"projected": map[string]any{"sources": []any{map[string]any{"secret": map[string]any{"name": ""}}}}}}},
+		}
+		for source, extra := range rawSpecs {
+			It("rejects "+source+" with an explicitly empty name", func() {
+				ns := setup()
+				spec := map[string]any{"zone": "orders", "image": bsImage, "protoVersion": "1.0.0"}
+				for k, v := range extra {
+					spec[k] = v
+				}
+				u := &unstructured.Unstructured{Object: map[string]any{
+					"apiVersion": appsv1alpha1.GroupVersion.String(),
+					"kind":       "BackendService",
+					"metadata":   map[string]any{"name": "pricing", "namespace": ns},
+					"spec":       spec,
+				}}
+				err := k8sClient.Create(ctx, u)
+				Expect(apierrors.IsInvalid(err)).To(BeTrue(), "the schema must refuse an explicit empty name, got %v", err)
+				Expect(err.Error()).To(ContainSubstring("must name a Secret"))
+			})
 		}
 
 		// The apiserver's static cost budget does not allow a regular expression
