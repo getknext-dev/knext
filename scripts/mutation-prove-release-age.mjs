@@ -134,9 +134,8 @@ const MUTATIONS = [
     id: 'A5',
     claim: 'first-party excludes start to excuse an UNRESOLVED source',
     subject: 'lib',
-    anchor:
-      "return !entry.unresolved && entry.ecosystem === 'npm' && excludes.includes(entry.name);",
-    replacement: `return entry.ecosystem === 'npm' && excludes.includes(entry.name); /* ${M} */`,
+    anchor: 'if (e.unresolved) {',
+    replacement: `if (e.unresolved && !excludes.includes(e.name) /* ${M} */) {`,
   },
   {
     id: 'A8',
