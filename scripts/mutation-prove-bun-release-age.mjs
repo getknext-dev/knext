@@ -45,8 +45,7 @@ const parsesYaml = (text) => {
 };
 
 const AGE = 'minimumReleaseAge = 259200';
-const EXCLUDES =
-  'minimumReleaseAgeExcludes = ["@getknext/core", "@getknext/lib", "@getknext/db", "kn-next"]';
+const EXCLUDES = 'minimumReleaseAgeExcludes = ["@getknext/core", "@getknext/lib", "@getknext/db"]';
 const INSTALL = '        run: bun install --frozen-lockfile';
 
 const MUTATIONS = [
@@ -77,14 +76,14 @@ const MUTATIONS = [
     subject: 'bunfig',
     anchor: EXCLUDES,
     replacement:
-      'minimumReleaseAgeExcludes = ["@getknext/core", "@getknext/lib", "@getknext/db", "kn-next", "left-pad"]',
+      'minimumReleaseAgeExcludes = ["@getknext/core", "@getknext/lib", "@getknext/db", "left-pad"]',
   },
   {
     id: 'Q5',
     claim: 'a first-party package is dropped from the excludes',
     subject: 'bunfig',
     anchor: EXCLUDES,
-    replacement: 'minimumReleaseAgeExcludes = ["@getknext/core", "@getknext/lib", "kn-next"]',
+    replacement: 'minimumReleaseAgeExcludes = ["@getknext/core", "@getknext/lib"]',
   },
   {
     id: 'Q6',
@@ -123,8 +122,7 @@ const MUTATIONS = [
     claim: 'the exclude list is reordered',
     subject: 'bunfig',
     anchor: EXCLUDES,
-    replacement:
-      'minimumReleaseAgeExcludes = ["kn-next", "@getknext/db", "@getknext/lib", "@getknext/core"]',
+    replacement: 'minimumReleaseAgeExcludes = ["@getknext/db", "@getknext/lib", "@getknext/core"]',
   },
 ].map((m) => ({ expect: 'red', validate: undefined, ...m }));
 

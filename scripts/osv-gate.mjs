@@ -63,28 +63,31 @@ function die(message) {
  * missing/unparseable report, is a scan that did not happen.
  */
 function scan(scanner, root, files) {
-  const outFile = join(mkdtempSync(join(tmpdir(), 'osv-out-')), 'report.json');
-  const args = [
-    'scan',
-    'source',
-    ...files.flatMap((f) => ['-L', f]),
-    '--format',
-    'json',
-    '--output-file',
-    outFile,
-  ];
-  const run = spawnSync(scanner, args, { cwd: root, encoding: 'utf8', timeout: 600_000 });
-  if (run.error) die(`could not run ${scanner}: ${run.error.message}`);
-  if (run.status !== 0 && run.status !== 1) {
-    die(`osv-scanner exited ${run.status} (a scan that did not run is not a pass):\n${run.stderr}`);
-  }
-  if (!existsSync(outFile)) die('osv-scanner wrote no report');
+  // Every failure in here is a thrown Error, never process.exit, so the scratch
+  // directory is always removed; main() maps the throw to exit code 2.
+  const outDir = mkdtempSync(join(tmpdir(), 'osv-out-'));
+  const outFile = join(outDir, 'report.json');
   try {
+    const args = [
+      'scan',
+      'source',
+      ...files.flatMap((f) => ['-L', f]),
+      '--format',
+      'json',
+      '--output-file',
+      outFile,
+    ];
+    const run = spawnSync(scanner, args, { cwd: root, encoding: 'utf8', timeout: 600_000 });
+    if (run.error) throw new Error(`could not run ${scanner}: ${run.error.message}`);
+    if (run.status !== 0 && run.status !== 1) {
+      throw new Error(
+        `osv-scanner exited ${run.status} (a scan that did not run is not a pass):\n${run.stderr}`,
+      );
+    }
+    if (!existsSync(outFile)) throw new Error('osv-scanner wrote no report');
     return parseOsv(readFileSync(outFile, 'utf8'), realpathSync(root));
-  } catch (err) {
-    return die(err.message);
   } finally {
-    rmSync(dirname(outFile), { recursive: true, force: true });
+    rmSync(outDir, { recursive: true, force: true });
   }
 }
 
@@ -176,4 +179,8 @@ function main() {
   process.exit(result.failures.length > 0 ? 1 : 0);
 }
 
-main();
+try {
+  main();
+} catch (err) {
+  die(err instanceof Error ? err.message : String(err));
+}

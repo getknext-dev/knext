@@ -37,7 +37,6 @@ const REVIEWED_EXCLUDES: Record<string, string> = {
   '@getknext/core': 'first-party; published by this repository',
   '@getknext/lib': 'first-party; published by this repository',
   '@getknext/db': 'first-party; published by this repository',
-  'kn-next': 'first-party alias; published by this repository',
 };
 
 function bunfig(): { install?: Record<string, unknown> } {
