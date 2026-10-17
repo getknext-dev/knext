@@ -294,7 +294,7 @@ func checkFunctionSovereignty(
 	others []appsv1alpha1.NextApp,
 	lookup secretLookup,
 ) ([]sovereigntyViolation, []unverifiedSecret) {
-	out, unverified := checkSecretRefs(functionSecretRefs(&bs.Spec), bs, zone, others, lookup)
+	out, unverified := checkSecretRefs(functionSecretRefs(&bs.Spec), bs, zone, others, lookup, false)
 
 	zoneName := bs.Spec.Zone
 	if zone != nil {
@@ -315,6 +315,13 @@ func checkFunctionSovereignty(
 // decide the spec's own Secrets, the running template is what stays up, so it is
 // what must still be checked: otherwise a Secret revoked since it was rendered
 // stays mounted for as long as the owner can make a read fail.
+//
+// Only POSITIVE evidence of revocation counts here: the Secret was re-marked
+// for another zone (or no longer carries this zone's mark), it is another zone's
+// database Secret or a signing key, or the zone is gone. A Secret the old
+// template mounts that is simply NOT FOUND is a routine rotation (the new
+// version was created, the spec points at it, the old one was pruned) and is
+// never a violation: the new template replaces the old one.
 func checkRunningSovereignty(
 	bs *appsv1alpha1.BackendService,
 	zone *appsv1alpha1.NextApp,
@@ -325,16 +332,19 @@ func checkRunningSovereignty(
 	if running == nil {
 		return nil, nil
 	}
-	return checkSecretRefs(runningSecretRefs(running), bs, zone, others, lookup)
+	return checkSecretRefs(runningSecretRefs(running), bs, zone, others, lookup, true)
 }
 
 // checkSecretRefs is the Secret half of the allowlist, over any list of refs.
+// absentIsRotation is set for the RUNNING template: a Secret that is not found
+// there is a pruned old version, not a violation.
 func checkSecretRefs(
 	refs []objectRef,
 	bs *appsv1alpha1.BackendService,
 	zone *appsv1alpha1.NextApp,
 	others []appsv1alpha1.NextApp,
 	lookup secretLookup,
+	absentIsRotation bool,
 ) ([]sovereigntyViolation, []unverifiedSecret) {
 	foreignDB := map[string]string{} // secret name -> owning zone
 	for i := range others {
@@ -397,6 +407,9 @@ func checkSecretRefs(
 				unverifiedSeen[ref.name] = true
 				unverified = append(unverified, unverifiedSecret{ref.source, ref.name, m.readErr, m.denied})
 			}
+			continue
+		}
+		if absentIsRotation && !m.found {
 			continue
 		}
 		out = append(out, sovereigntyViolation{ref.source, ref.name,

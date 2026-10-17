@@ -74,6 +74,9 @@ const UNDECIDED = 'TestUndecidedOnlyWhenOtherwiseAccepted';
 const GUARD =
   'TestNoAPIErrorReachesTeardownOrAViolation|TestRemoveRenderedHasThreeSanctionedCallSites|TestReconcileLeavesOnUndecidedBeforeTheAcceptedFork|TestKnativeServiceIsDeletedOnlyInsideRemoveRendered|TestSovereigntyViolationsAreBuiltOnlyWhereSanctioned|TestOnlyNameProblemsAndNotFoundReachADefinitiveVerdict';
 const VERDICT_UNIT = 'TestVerdictForAnUndecidedFunctionIsUnverifiedNotAViolation';
+const BLIP = 'a rotation that coincides with an apiserver blip keeps the function';
+const POSITIVE =
+  'TestRunningTemplateViolationNeedsPositiveEvidence|TestIsRefusedRolloutIsOnlyInvalidAndBadRequest|TestAnErrorDerivedBoolGatesTeardownOnlyWithPositiveEvidence|TestRunningCheckAloneToleratesAbsentSecrets';
 const REVOKED = 'an unreadable Secret never keeps a revoked one running';
 const FORBIDDEN = `${REVOKED} a persistent Forbidden`;
 const CRD_REFUSES = `${REVOKED} the CRD refuses a Secret reference that names no Secret`;
@@ -184,7 +187,7 @@ const GO_MUTATIONS = [
     id: 'A02',
     claim: 'the running-template check finds nothing',
     subject: 'sovereignty',
-    anchor: 'return checkSecretRefs(runningSecretRefs(running), bs, zone, others, lookup)',
+    anchor: 'return checkSecretRefs(runningSecretRefs(running), bs, zone, others, lookup, true)',
     replacement: 'return nil, nil',
     test: unit(R_RUNNING),
   },
@@ -256,16 +259,64 @@ const GO_MUTATIONS = [
     subject: 'controller',
     anchor: 'if obs.undecided() {\n\t\tobs.violations = append(obs.violations, runViolations...)',
     replacement: 'if true {\n\t\tobs.violations = append(obs.violations, runViolations...)',
-    test: envtest(`${REVOKED} rolls a routine Secret rotation out in place`),
+    test: envtest(
+      `${REVOKED} (rolls a routine Secret rotation out in place|replaces a revoked Secret in place)`,
+    ),
   },
   {
     id: 'A06',
     claim:
       'a running-template violation tears the function down after a rollout that SUCCEEDED, not only when it fails',
     subject: 'controller',
-    anchor: 'stuckOnRevoked := rollErr != nil && len(runViolations) > 0',
+    anchor: 'stuckOnRevoked := isRefusedRollout(rollErr) && len(runViolations) > 0',
     replacement: 'stuckOnRevoked := len(runViolations) > 0',
-    test: envtest(`${REVOKED} rolls a routine Secret rotation out in place`),
+    test: envtest(
+      `${REVOKED} (rolls a routine Secret rotation out in place|replaces a revoked Secret in place)`,
+    ),
+  },
+  {
+    id: 'A07',
+    claim:
+      'a NotFound Secret in the RUNNING template counts as a violation again (a pruned old version tears a healthy function down)',
+    subject: 'sovereignty',
+    anchor: 'if absentIsRotation && !m.found {',
+    replacement: 'if absentIsRotation && !m.found && false {',
+    test: envtest(`${BLIP} keeps the function and requeues on a 503 reading the NEW Secret`),
+  },
+  {
+    id: 'A08',
+    claim:
+      'ANY rollout error tears the function down, with no definitive refusal and no evidence required (a 503, a 409, a JWKS read blip)',
+    subject: 'controller',
+    anchor: 'stuckOnRevoked := isRefusedRollout(rollErr) && len(runViolations) > 0',
+    replacement: 'stuckOnRevoked := rollErr != nil',
+    test: envtest(BLIP),
+  },
+  {
+    id: 'A09',
+    claim: 'every non-nil rollout error is read as a definitive refusal',
+    subject: 'controller',
+    anchor: 'return apierrors.IsInvalid(err) || apierrors.IsBadRequest(err)',
+    replacement: 'return err != nil',
+    test: envtest(`${BLIP} holds a REVOKED running Secret`),
+  },
+  {
+    id: 'A10',
+    claim: 'a Forbidden on the update counts as a definitive refusal',
+    subject: 'controller',
+    anchor: 'return apierrors.IsInvalid(err) || apierrors.IsBadRequest(err)',
+    replacement:
+      'return apierrors.IsInvalid(err) || apierrors.IsBadRequest(err) || apierrors.IsForbidden(err)',
+    test: unit(POSITIVE),
+  },
+  {
+    id: 'A11',
+    claim:
+      'the teardown gate drops the positive-evidence requirement (the guard pins the exact expression)',
+    subject: 'controller',
+    anchor: 'stuckOnRevoked := isRefusedRollout(rollErr) && len(runViolations) > 0',
+    replacement: 'stuckOnRevoked := isRefusedRollout(rollErr)',
+    test: unit(POSITIVE),
   },
   {
     id: 'A04',

@@ -238,6 +238,29 @@ var _ = Describe("BackendService reconciler: an unreadable Secret never keeps a 
 		}
 	})
 
+	It("replaces a revoked Secret in place when the new spec drops it and rolls out", func() {
+		ns := setup("stripe")
+		createFunction(ctx, ns, "pricing", "orders", envFrom("stripe"))
+		reconcileFunction(ctx, ns, "pricing")
+		ksvcKey := types.NamespacedName{Namespace: ns, Name: "pricing"}
+		before := &servingv1.Service{}
+		Expect(k8sClient.Get(ctx, ksvcKey, before)).To(Succeed())
+		revoke(ns, "stripe")
+
+		By("the owner drops the revoked Secret; the new template replaces the old one, so nothing revoked survives")
+		bs := getFunction(ctx, ns, "pricing")
+		bs.Spec.EnvFrom = nil
+		bs.Spec.Env = append(bs.Spec.Env, corev1.EnvVar{Name: "FEATURE", Value: "on"})
+		Expect(k8sClient.Update(ctx, bs)).To(Succeed())
+		Expect(reconcileFn(newBSReconciler(), ns)).To(Succeed())
+
+		after := &servingv1.Service{}
+		Expect(k8sClient.Get(ctx, ksvcKey, after)).To(Succeed(), "an accepted spec that rolls out is never blocked by the old template")
+		Expect(after.UID).To(Equal(before.UID))
+		Expect(after.Spec.Template.Spec.Containers[0].EnvFrom).To(BeEmpty(), "the revoked Secret is no longer mounted")
+		Expect(sovereignty(ns).Status).To(Equal(metav1.ConditionTrue))
+	})
+
 	It("keeps a healthy running function when its new spec cannot be rolled out and nothing was revoked", func() {
 		ns := setup("stripe")
 		createFunction(ctx, ns, "pricing", "orders", envFrom("stripe"))
