@@ -54,6 +54,16 @@ describe('postMessage authentication', () => {
     expect(addMessage).not.toHaveBeenCalled();
   });
 
+  it('refuses a wrong token of the SAME length (compared by content, not length)', async () => {
+    const sameLength = 'x'.repeat(TOKEN.length);
+    await expect(postMessage(form({ body: 'hello', token: sameLength }))).rejects.toThrow(
+      'Unauthorized',
+    );
+    incomingAuthorization = `Bearer ${sameLength}`;
+    await expect(postMessage(form({ body: 'hello' }))).rejects.toThrow('Unauthorized');
+    expect(addMessage).not.toHaveBeenCalled();
+  });
+
   it('fails closed when the server has no token configured', async () => {
     delete process.env.DB_DEMO_WRITE_TOKEN;
     incomingAuthorization = `Bearer ${TOKEN}`;
