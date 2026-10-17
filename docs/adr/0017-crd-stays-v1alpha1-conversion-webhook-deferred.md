@@ -1,7 +1,7 @@
 # ADR-0017: NextApp CRD stays v1alpha1; conversion webhook deferred
 
 - Status: Accepted (amended 2026-07-28: CRD versioning at 1.0; amended 2026-09-30: v1.0 GA CRD
-  decision + §2.1 mechanical enforcement; Amendment 3 (2026-10-16) **Proposed**: exact, single-use
+  decision + §2.1 mechanical enforcement; Amendment 3 (2026-10-16) **Accepted (2026-10-17, sprint-5 close design review)**: exact, single-use
   waivers for value narrowings, resting on a Kubernetes server floor of 1.30 — see the amendments
   below)
 - Date: 2026-06-27
@@ -365,8 +365,12 @@ same way they would treat any other honest-but-not-required signal: read it, do 
 
 ## Amendment 3 (2026-10-16) — narrowing waivers
 
-**Status: Proposed.** Listed for the sprint-close design review. Until that review accepts it, the
-three waivers below stand on the code and spec reviews of the PRs that added them.
+**Status: Accepted (2026-10-17, v2 sprint-5 close design review; architect `v2-sprint5-close-architect.md`).** The
+three waivers below stood on the code and spec reviews of the PRs that added them and are now ratified.
+The Kubernetes 1.30 server floor this amendment rests on is reinforced by a second, independent
+reason: the operator write policy (a `ValidatingAdmissionPolicy`, recorded in ADR-0004 Amendment 2's Z7
+write-surface note) also needs 1.30. main and 1.x still say 1.27+, correctly for 1.x; the raise is a v2
+support change that needs release-note visibility (#2485).
 
 ### Context
 

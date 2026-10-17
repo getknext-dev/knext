@@ -1,8 +1,8 @@
 # The vinext Stable bar and support policy (v2)
 
-**Status: PROPOSED FOR RATIFICATION (2026-10-16).** Ratified, revised or rejected at the v2 Sprint 5
-close design review, beside the Bun single-executable bar
-([ADR-0070](../adr/0070-bun-single-exec-stable-bar.md)). Until then nothing here is binding.
+**Status: RATIFIED (2026-10-17, v2 Sprint 5 close design review, beside the Bun single-executable bar
+[ADR-0070](../adr/0070-bun-single-exec-stable-bar.md); architect `v2-sprint5-close-architect.md`).** Proposed 2026-10-16.
+Ratifying the bar does not graduate anything.
 
 **This document graduates nothing.** vinext is **Beta** today and stays Beta until every criterion
 below is met by runs that exist. No sentence in the docs, release notes or matrix may say "Stable"

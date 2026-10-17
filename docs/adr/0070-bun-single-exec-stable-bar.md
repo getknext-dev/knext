@@ -1,12 +1,12 @@
 # ADR-0070: The Stable bar for the Bun single executable (v2)
 
-- **Status:** **Proposed (2026-10-16).** Design only. It defines a bar; it graduates nothing, changes
-  no runtime code, dispatches no compat run and edits no user docs. Ratified (or revised) at the v2
-  Sprint 5 close design review, beside the vinext bar (#2061). Trigger-class (ADR, credential window
+- **Status:** **Accepted (2026-10-17, ratified at the v2 Sprint 5 close design review, beside the
+  vinext bar #2061; architect `v2-sprint5-close-architect.md`).** Proposed 2026-10-16. Design only. It defines a bar; it graduates nothing, changes
+  no runtime code, dispatches no compat run and edits no user docs. Trigger-class (ADR, credential window
   definition, public-API tier of `selfContained`), so per `.claude/rules/workflow.md` (2026-09-22
   amendment) it is reviewed at sprint close, not gated per PR.
 - **Issue:** #2406 (v2 Sprint 5, task V5, with #2061).
-- **Amends (Proposed):** ADR-0060 Decision 7, only as it applies to graduation. See D5.
+- **Amends:** ADR-0060 Decision 7, only as it applies to graduation. See D5.
 - **Relates to:** ADR-0036 and ADR-0048 (the compiled target), ADR-0054 Amendments 7–9 (bun-standalone
   ships compiled; the cost table), ADR-0056 Amendment 5 (the credential is 14 consecutive green
   independent runs per cell), ADR-0058 (the cell matrix), ADR-0060 (the self-contained capability),
@@ -169,7 +169,7 @@ already chose this and the fingerprint machinery exists on those lanes. The pric
 `test-e2e-deploy.yml` restarts every credential cell on it (ADR-0056 D3), so #2443 lands between
 windows or on the v2 line's derived workflow.
 
-### D5 — Amendment to ADR-0060 Decision 7 (Proposed)
+### D5 — Amendment to ADR-0060 Decision 7 (Accepted 2026-10-17)
 
 ADR-0060 D7 says a track is "done" only with a cold-start **win**, and otherwise stays behind the
 flag. For graduation, this ADR replaces "win" with **non-inferiority** (C5). A shape that ties the
