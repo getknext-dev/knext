@@ -81,6 +81,18 @@ export const PROVER_WEIGHT_MINUTES = Object.freeze({
 });
 
 /**
+ * Weighted provers that exist on ONE lane ref only (today: `integration/v2`).
+ * This file is identical on `main` and `integration/v2`, so a measured weight for
+ * a v2-only prover is legitimately "not discovered" on `main`. The rename-rot
+ * guard accepts a weighted-but-absent path only if it is listed here, and it is
+ * inert on a ref that lacks the prover (the partition only iterates what exists).
+ * Drop an entry once the prover exists on both refs.
+ */
+export const WEIGHTED_ON_ONE_REF_ONLY = Object.freeze([
+  'scripts/mutation-prove-published-seam-scan.mjs',
+]);
+
+/**
  * Weights for provers that are APPROVED BUT NOT YET MERGED to the branch this
  * file is on. Inert until the prover exists (the partition only iterates provers
  * that are present), so an entry here cannot unbalance anything early; the lane
