@@ -103,6 +103,8 @@ const SOURCE = unit('TestOperatorWritePolicySourceIsStrict', INSTALL);
 const APISERVER = unit('TestOperatorWritePolicyNarrowsSecretAndConfigMapWrites');
 /** The rendered bundle: re-render dist/install.yaml, then the install tests that read it. */
 const BUNDLE = { kind: 'bundle' };
+/** The rendered bundle's policy on a real apiserver, confining the identity its ClusterRoleBinding grants. */
+const BUNDLE_APISERVER = { kind: 'bundle-apiserver' };
 /** The RBAC scan: no shipped rule may let the operator write its own policy. */
 const NO_SELF_EDIT = unit('TestOperatorCannotEditItsOwnWritePolicy');
 /** The leader-election lock must stay a Lease (a ConfigMap lock would be refused by the policy). */
@@ -284,6 +286,17 @@ const MUTATIONS = [
     replacement: '# - admission_clusterscoped.yaml',
     test: BUNDLE,
   },
+  {
+    id: 'K05',
+    claim:
+      'the rendered policy confines an identity nobody runs as, so the operator is unrestricted on a real apiserver',
+    subject: 'defaultKust',
+    anchor:
+      '# ServiceAccount namespace -> policy matchCondition (namespace literal)\n- source:\n    kind: ServiceAccount\n    version: v1\n    name: controller-manager\n    fieldPath: .metadata.namespace',
+    replacement:
+      '# ServiceAccount namespace -> policy matchCondition (namespace literal)\n- source:\n    kind: ServiceAccount\n    version: v1\n    name: controller-manager\n    fieldPath: .metadata.name',
+    test: BUNDLE_APISERVER,
+  },
   // --- the code-side scan --------------------------------------------------------
   {
     id: 'C01',
@@ -428,12 +441,25 @@ function renderBundle(kustomize) {
   ]);
 }
 
-function bundleExit(kustomize) {
+function bundleExit(kustomize, test) {
   // A render that fails would "kill" the row for the wrong reason (a broken overlay,
   // not a failed assertion), so it stops the prover instead of scoring.
   if (renderBundle(kustomize) !== 0) {
     console.error(`${NAME}: kustomize could not render config/default; the row proves nothing`);
     process.exit(2);
+  }
+  if (test.kind === 'bundle-apiserver') {
+    return run(
+      'go',
+      [
+        'test',
+        '-count=1',
+        '-run',
+        'TestRenderedBundlePolicyConfinesTheIdentityTheOperatorRunsAs',
+        CTRL,
+      ],
+      { KNEXT_REQUIRE_BUNDLE: '1' },
+    );
   }
   return run('go', ['test', '-count=1', '-run', 'WritePolicy', INSTALL], {
     KNEXT_REQUIRE_BUNDLE: '1',
@@ -442,7 +468,8 @@ function bundleExit(kustomize) {
 
 /** The row's guard. -count=1: never trust a cached verdict for a mutated tree. */
 function guardExit(test, kustomize) {
-  if (test.kind === 'bundle') return bundleExit(kustomize);
+  if (test.kind === 'bundle' || test.kind === 'bundle-apiserver')
+    return bundleExit(kustomize, test);
   return run('go', ['test', '-count=1', ...test.args]);
 }
 
@@ -528,7 +555,7 @@ for (const m of ROWS) {
 // The last bundle row rendered a MUTATED overlay into dist/install.yaml (gitignored). Put
 // the restored tree's bundle back so a local `go test ./internal/install/` is not left
 // reading a mutant.
-if (ROWS.some((m) => m.test.kind === 'bundle')) renderBundle(KUSTOMIZE);
+if (ROWS.some((m) => m.test.kind.startsWith('bundle'))) renderBundle(KUSTOMIZE);
 
 console.log(`${NAME}: ${ROWS.length - failed}/${ROWS.length} went red as required`);
 process.exit(failed === 0 ? 0 : 1);
