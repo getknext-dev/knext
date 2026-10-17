@@ -232,8 +232,9 @@ The same discipline applies to what knext itself builds from, before any image e
   except for its own security updates. Installs from the committed lockfile are unaffected. The
   same rule is checked on the result: a pull request that adds or changes a lockfile entry
   (npm, Cargo or Go) fails if the registry says that version is younger than three days, or if
-  the registry cannot be reached. The only way past it is a scoped, short-lived, justified
-  exception.
+  the registry cannot be reached. A dependency that does not come from the public registry at
+  all (a git or tarball source, another registry) has no publish time to check and fails the same
+  way. The only way past either is a scoped, short-lived, justified exception.
 - **Install scripts are an allowlist** — only a reviewed list of dependencies may run a
   lifecycle script during install. Adding a dependency that can run one needs an explicit,
   justified review.

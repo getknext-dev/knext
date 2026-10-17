@@ -148,6 +148,8 @@ export function loadAllowlist(doc, today) {
     if (typeof e.added !== 'string' || !ISO_DATE.test(e.added)) {
       throw new Error(`${at} needs an ISO \`added\` date`);
     }
+    // A future `added` would push the expiry cap into the future with it.
+    if (e.added > today) throw new Error(`${at} \`added\` is in the future`);
     if (typeof e.expires !== 'string' || !ISO_DATE.test(e.expires)) {
       throw new Error(`${at} needs an ISO \`expires\` date (it is required)`);
     }

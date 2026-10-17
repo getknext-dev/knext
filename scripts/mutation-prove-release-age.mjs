@@ -10,7 +10,7 @@
  *   A2  the quarantine is not enforced (any age passes).
  *   A3  a registry failure is swallowed instead of failing the check (fail OPEN).
  *   A4  a lookup that returns a non-time is accepted.
- *   A5  first-party exclusions stop applying.
+ *   A5  first-party exclusions start to excuse an unresolved source.
  *   A6  an exception stops being scoped to its version.
  *   A7  the added-or-changed key forgets the lockfile.
  *   A8  an exception may outlive its 14-day cap.
@@ -20,6 +20,15 @@
  *   A12 go.mod require blocks are ignored.
  *   A13 Cargo.lock path and git sources are treated as registry crates.
  *   A14 npm aliases are not resolved to the real package.
+ *   A15 a freshness exception gets the long source-spec cap.
+ *   U1-U4 a git/tarball source, a non-default registry, or an entry with no
+ *       resolved URL is treated as a registry release (bun.lock, package-lock.json).
+ *   U5  a Cargo alternate registry named like crates.io is accepted.
+ *   U6-U8 go.mod replace handling: a local replace, a replaced-away require, the
+ *       replacement module.
+ *   U9-U10 an unresolved source passes / stops failing the check.
+ *   U11 an exception may be dated in the future.
+ *   U12 the OSV report stops listing what it did not cover.
  *   W1  the workflow gets a soft-fail flag.
  *   W2  the workflow's token gains a write scope.
  *   W3  the workflow stops fetching full history.
@@ -86,13 +95,6 @@ const MUTATIONS = [
     replacement: 'void 0;',
   },
   {
-    id: 'A5',
-    claim: 'first-party exclusions stop applying',
-    subject: 'lib',
-    anchor: "return entry.ecosystem === 'npm' && excludes.includes(entry.name);",
-    replacement: 'return false;',
-  },
-  {
     id: 'A6',
     claim: 'an exception stops being scoped to its version',
     subject: 'lib',
@@ -106,13 +108,6 @@ const MUTATIONS = [
     subject: 'lib',
     anchor: 'const keyOf = (e) => `${e.lockfile}|${e.ecosystem}|${e.name}|${e.version}`;',
     replacement: 'const keyOf = (e) => `${e.ecosystem}|${e.name}|${e.version}`;',
-  },
-  {
-    id: 'A8',
-    claim: 'an exception may outlive its 14-day cap',
-    subject: 'lib',
-    anchor: 'if (span > MAX_EXCEPTION_DAYS) {',
-    replacement: 'if (false) {',
   },
   {
     id: 'A9',
@@ -136,26 +131,133 @@ const MUTATIONS = [
     replacement: 'const escaped = e.name;',
   },
   {
-    id: 'A12',
-    claim: 'go.mod require blocks are ignored',
+    id: 'A5',
+    claim: 'first-party excludes start to excuse an UNRESOLVED source',
     subject: 'lib',
-    anchor: "if (block === 'require') {",
-    replacement: 'if (false) {',
+    anchor: 'if (e.unresolved) {',
+    replacement: `if (e.unresolved && !excludes.includes(e.name) /* ${M} */) {`,
+  },
+  {
+    id: 'A8',
+    claim: 'an exception may outlive its cap',
+    subject: 'lib',
+    anchor: 'if (span > cap) {',
+    replacement: `if (false /* ${M} */) {`,
+  },
+  {
+    id: 'A12',
+    claim: 'go.mod require/replace blocks are ignored',
+    subject: 'lib',
+    anchor: 'else handle(block, line, raw);',
+    replacement: 'void 0;',
   },
   {
     id: 'A13',
-    claim: 'Cargo.lock path and git sources are treated as registry crates',
+    claim: 'a Cargo git or alternate-registry crate is silently dropped',
     subject: 'lib',
     anchor:
-      "if (name && version && source?.startsWith('registry+') && source.includes('crates.io')) {",
-    replacement: 'if (name && version) {',
+      "else out.push({ ecosystem: 'crates', name, version: source, unresolved: 'not crates.io' });",
+    replacement: 'void 0;',
   },
   {
     id: 'A14',
     claim: 'npm aliases are not resolved to the real package',
     subject: 'lib',
-    anchor: "const target = id.includes('@npm:') ? id.slice(id.indexOf('@npm:') + 5) : id;",
-    replacement: 'const target = id;',
+    anchor: "if (spec.startsWith('npm:')) return npmFromId(spec.slice(4), registry);",
+    replacement: `if (false /* ${M} */) return npmFromId(spec.slice(4), registry);`,
+  },
+  {
+    id: 'A15',
+    claim: 'a freshness exception gets the long source-spec cap',
+    subject: 'lib',
+    anchor:
+      'const cap = SEMVERISH.test(e.version) ? MAX_EXCEPTION_DAYS : MAX_UNRESOLVED_EXCEPTION_DAYS;',
+    replacement: 'const cap = MAX_UNRESOLVED_EXCEPTION_DAYS;',
+  },
+  {
+    id: 'U1',
+    claim: 'a bun.lock github:/tarball source is treated as a registry version',
+    subject: 'lib',
+    anchor: 'if (!SEMVERISH.test(spec)) {',
+    replacement: `if (false /* ${M} */) {`,
+  },
+  {
+    id: 'U2',
+    claim: 'a bun.lock entry on a non-default registry is accepted',
+    subject: 'lib',
+    anchor: "if (typeof registry === 'string' && registry !== '') {",
+    replacement: `if (false /* ${M} */) {`,
+  },
+  {
+    id: 'U3',
+    claim: 'a package-lock.json git or other-host source is treated as registry',
+    subject: 'lib',
+    anchor:
+      "} else if (e.resolved.startsWith('https://registry.npmjs.org/') && SEMVERISH.test(version)) {",
+    replacement: `} else if (e.resolved.startsWith('https://registry.npmjs.org/') || true /* ${M} */) {`,
+  },
+  {
+    id: 'U4',
+    claim: 'a package-lock.json entry with no resolved URL is accepted',
+    subject: 'lib',
+    anchor: "if (typeof e.resolved !== 'string') {",
+    replacement: `if (false /* ${M} */) {`,
+  },
+  {
+    id: 'U5',
+    claim: 'a Cargo alternate registry with crates.io in its name is accepted',
+    subject: 'lib',
+    anchor: 'if (CRATES_IO_SOURCES.includes(source))',
+    replacement: `if (source.includes('crates.io') /* ${M} */)`,
+  },
+  {
+    id: 'U6',
+    claim: 'a go.mod replace to a local directory is no longer skipped',
+    subject: 'lib',
+    anchor: 'if (isLocalPath(r.target)) continue;',
+    replacement: `void 0; /* ${M} */`,
+  },
+  {
+    id: 'U7',
+    claim: 'a go.mod require that a replace swaps out is still age-checked',
+    subject: 'lib',
+    anchor: 'const out = requires.filter((e) => !replacedAway(e));',
+    replacement: 'const out = [...requires];',
+  },
+  {
+    id: 'U8',
+    claim: 'a go.mod replacement is aged at the wrong module',
+    subject: 'lib',
+    anchor: 'name: r.target, version: r.targetVer',
+    replacement: `name: r.old, version: r.targetVer /* ${M} */`,
+  },
+  {
+    id: 'U9',
+    claim: 'an unresolved source passes without an exception',
+    subject: 'lib',
+    anchor: '(isExcepted(e) ? excepted : unresolved).push(e);',
+    replacement: 'excepted.push(e);',
+  },
+  {
+    id: 'U10',
+    claim: 'an unresolved source no longer fails the check',
+    subject: 'lib',
+    anchor: ' || r.unresolved.length > 0',
+    replacement: ` /* ${M} */`,
+  },
+  {
+    id: 'U11',
+    claim: 'an exception may be dated in the future',
+    subject: 'lib',
+    anchor: 'if (e.added > today) throw',
+    replacement: `if (false /* ${M} */) throw`,
+  },
+  {
+    id: 'U12',
+    claim: 'the OSV report stops listing what it did not cover',
+    subject: 'lib',
+    anchor: "if (bad.length === 0) return '';",
+    replacement: `return ''; /* ${M} */`,
   },
   {
     id: 'W1',
