@@ -305,8 +305,8 @@ const MUTATIONS = [
     subject: 'operatorWorkflow',
     spec: OPERATOR_SPEC,
     anchor:
-      " && steps.trivy.outcome == 'success' && steps.channel.outputs.is_version_tag == 'true'\n        env:\n          RELEASE_TAG:",
-    replacement: " && steps.trivy.outcome == 'success'\n        env:\n          RELEASE_TAG:",
+      " && steps.channel.outputs.is_version_tag == 'true'\n        env:\n          RELEASE_TAG:",
+    replacement: "\n        env:\n          RELEASE_TAG:",
     expect: 'red',
   },
   // ── tag placement (round 2) ───────────────────────────────────────────────
