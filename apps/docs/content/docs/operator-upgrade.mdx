@@ -34,9 +34,17 @@ kubectl get deploy kn-next-operator-controller-manager -n kn-next-operator-syste
   -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'  # current image digest
 kubectl get crd nextapps.apps.kn-next.dev \
   -o jsonpath='{.spec.versions[*].name}{"\n"}'                   # v1alpha1
+kubectl api-resources --api-group=admissionregistration.k8s.io \
+  | grep validatingadmissionpolicies                             # served on Kubernetes 1.30+
 ```
 
 Note the current image reference so you can compare after, and so you know what to roll back to.
+
+The last command matters when the bundle you are about to apply carries the operator's Secret and
+ConfigMap write policy (see [Security](/docs/security#write-policy)). That policy needs Kubernetes
+1.30 or later. On an older cluster the command prints nothing, and applying the bundle reports
+`no matches for kind "ValidatingAdmissionPolicy"` for the two policy objects while the rest of the
+bundle applies.
 
 ## Roll a new operator image
 

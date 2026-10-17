@@ -12,6 +12,9 @@ internal/webhook/*             Validation/defaulting (if present)
 config/crd/bases/*             Generated CRDs (DO NOT EDIT)
 config/rbac/role.yaml          Generated RBAC (DO NOT EDIT)
 config/samples/*               Example CRs (edit these)
+config/admission/*             Hand-authored ValidatingAdmissionPolicy limiting the operator's
+                               Secret/ConfigMap writes; its name allow-list must match the code
+                               (internal/controller/operator_write_inventory_test.go)
 Makefile                       Build/test/deploy commands
 PROJECT                        Kubebuilder metadata Auto-generated (DO NOT EDIT)
 ```

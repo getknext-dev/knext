@@ -245,10 +245,10 @@ reads them from the environment.
 ## Operator permissions
 
 The operator runs with a least-privilege `ClusterRole` (`config/rbac/role.yaml` in the install
-bundle) and, in particular, **no permission on core Secrets** — no `get`, `list`, `watch`, or any
-write verb, cluster-wide or in any namespace. Your `spec.secrets` entries are passed to the
-kubelet as references (`envFrom.secretRef`, `valueFrom.secretKeyRef`), and the kubelet reads the
-Secret when your pod starts. You can verify what an installed operator may do:
+bundle). It can never **list** or **watch** Secrets, cluster-wide or in any namespace. Your
+`spec.secrets` entries are passed to the kubelet as references (`envFrom.secretRef`,
+`valueFrom.secretKeyRef`), and the kubelet reads the Secret when your pod starts, not the
+operator. You can verify what an installed operator may do:
 
 ```sh
 kubectl auth can-i list secrets --all-namespaces \
@@ -258,13 +258,57 @@ kubectl auth can-i list secrets --all-namespaces \
 
 What the operator *does* still hold, so you can size the risk accurately: create/update/delete on
 the Knative Services, ServiceAccounts, NetworkPolicies, image-prewarm DaemonSets, and Kafka
-sources it manages, and read-only access to PersistentVolumeClaims and Knative Revisions.
+sources it manages, read-only access to PersistentVolumeClaims and Knative Revisions, and `get`,
+`create` and `update` on Secrets and ConfigMaps. That last grant exists for
+[zone functions](/docs/zone-functions#identity-and-the-jwks): the operator generates and rotates
+each zone's signing key (a Secret) and publishes its public keys (a ConfigMap). It reads the data
+of that one Secret, and only the labels and owner references of a Secret a function references.
 Anyone allowed to create a `NextApp` can reference a Secret **in their own namespace** by name, so
 restrict who may create `NextApp` resources with ordinary namespace RBAC.
 
-This removes the operator's *direct* access to Secrets, not every path to them: because it can
+This limits the operator's *direct* access to Secrets, not every path to them: because it can
 create workloads cluster-wide, a compromised operator could still reach a Secret through a pod it
-creates. Install the operator per namespace, or add an admission policy, to close that path.
+creates. Install the operator per namespace, or add your own admission policy for workloads, to
+close that path.
+
+### Limiting the operator's Secret and ConfigMap writes [#write-policy]
+
+Kubernetes RBAC cannot restrict `create` to particular object names, so the grant above covers
+every namespace. The install bundle therefore also ships a `ValidatingAdmissionPolicy` and its
+binding, both named `kn-next-operator-secret-configmap-writes`, that close the gap. They confine
+the operator's own ServiceAccount, and nobody else, to
+
+- Secrets whose name ends in `-knext-signing-key` **and whose type is `Opaque`**, and
+- ConfigMaps whose name ends in `-knext-jwks`
+
+on create, update and delete. Those are the two objects it writes for each zone, and it writes
+nothing else. Any other write from the operator, such as overwriting one of your Secrets, is refused
+by the API server with `Forbidden`, whatever its RBAC says.
+
+The type is part of the rule because the name alone is not enough. Kubernetes fills in a Secret of
+type `kubernetes.io/service-account-token` with a credential for whichever ServiceAccount its
+annotation names, and the operator can read the Secret it wrote. Without the type check, a
+compromised operator could create one under an allowed name and read a privileged ServiceAccount's
+token. With it, any Secret of another type is refused, and so is an update to an existing
+non-`Opaque` Secret that happens to carry an allowed name. A delete is not type-checked, because it
+creates no credential. Your own tooling, other controllers and
+other ServiceAccounts are not affected, including a ServiceAccount with the operator's name in
+another namespace. The operator holds no permission on admission policies, so it cannot remove the
+restriction itself. To check that the policy is installed:
+
+```sh
+kubectl get validatingadmissionpolicy,validatingadmissionpolicybinding
+```
+
+Two limits. The policy checks name and type, not ownership: a compromised operator could still
+change an `Opaque` Secret or a ConfigMap that happens to carry the name of a zone's key or key set.
+And a cluster administrator can remove the policy.
+
+The policy needs **Kubernetes 1.30 or later**, where `ValidatingAdmissionPolicy` became generally
+available. That is the same server floor as the rest of knext (see the
+[support matrix](/docs/support-matrix#kubernetes)). On an older cluster the API server does not
+serve the kind, so applying `install.yaml` reports `no matches for kind "ValidatingAdmissionPolicy"`
+for these two objects, and the operator would run without the restriction.
 
 <Callout type="info">
 **Honest scope — not yet shipped.** Service-to-service **mTLS/authz** between the gateway and

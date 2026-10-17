@@ -28,6 +28,12 @@ resources:
 - ../webhook
 # [CERTMANAGER] cert-manager provisions the webhook serving cert. 'WEBHOOK' components are required.
 - ../certmanager
+# [ADMISSION] ValidatingAdmissionPolicy that confines the operator's ServiceAccount to the
+# Secret/ConfigMap names it writes (the per-zone signing key and JWKS). RBAC cannot
+# restrict `create` by name, so this bounds the operator's cluster-wide create/update.
+# Needs Kubernetes 1.30+ (the policy API is GA there). The operator's identity inside the
+# policy is rewritten from the ServiceAccount by the replacements below.
+- ../admission
 # [PROMETHEUS] To enable prometheus monitor, uncomment all sections with 'PROMETHEUS'.
 #- ../prometheus
 # [GRAFANA] Turnkey dashboards (#316). Opt-in like PROMETHEUS: uncomment to fold
@@ -51,6 +57,9 @@ resources:
 #   - config-network  (issue #45)
 transformers:
 - config_network_repin.yaml
+# [ADMISSION] The write policy and its binding are cluster-scoped; take back the namespace the
+# built-in transformer put on them.
+- admission_clusterscoped.yaml
 
 # Uncomment the patches line if you enable Metrics
 patches:
@@ -145,6 +154,47 @@ replacements:
       delimiter: '/'
       index: 1
       create: true
+# [ADMISSION] The write policy confines ONE identity, the operator's ServiceAccount username
+# system:serviceaccount:<namespace>:<name>. The namespace and name prefix applied above would
+# leave a literal behind, and a policy that names an identity no one runs as never matches: the
+# operator would be unrestricted with no error anywhere. So both parts are rewritten from the
+# ServiceAccount itself. The expression is
+#   request.userInfo.username == 'system:serviceaccount:' + '<namespace>' + ':' + '<name>'
+# and splitting it on the quote character puts the namespace at index 3 and the name at index 7.
+# internal/install/operator_write_policy_test.go proves the rendered identity equals the one the
+# ClusterRoleBinding and the manager Deployment use.
+# ServiceAccount namespace -> policy matchCondition (namespace literal)
+- source:
+    kind: ServiceAccount
+    version: v1
+    name: controller-manager
+    fieldPath: .metadata.namespace
+  targets:
+  - select:
+      kind: ValidatingAdmissionPolicy
+      group: admissionregistration.k8s.io
+      name: secret-configmap-writes
+    fieldPaths:
+    - .spec.matchConditions.[name=request-is-from-the-operator].expression
+    options:
+      delimiter: "'"
+      index: 3
+# ServiceAccount name -> policy matchCondition (name literal)
+- source:
+    kind: ServiceAccount
+    version: v1
+    name: controller-manager
+    fieldPath: .metadata.name
+  targets:
+  - select:
+      kind: ValidatingAdmissionPolicy
+      group: admissionregistration.k8s.io
+      name: secret-configmap-writes
+    fieldPaths:
+    - .spec.matchConditions.[name=request-is-from-the-operator].expression
+    options:
+      delimiter: "'"
+      index: 7
 # --- The original commented metrics/conversion replacement scaffold follows (left disabled) ---
 #replacements_disabled:
 # - source: # Uncomment the following block to enable certificates for metrics
