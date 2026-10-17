@@ -114,6 +114,15 @@ describe('knext deploy function: apply order and strictness', () => {
       { verdict: 'blocked', reason: 'apply-failed', unknownFields: [], stderr: 'forbidden' },
     ],
     [
+      'invalid file',
+      {
+        verdict: 'blocked',
+        reason: 'invalid-file',
+        unknownFields: [],
+        stderr: 'refusing to apply x: unexpected top-level field(s) items',
+      },
+    ],
+    [
       'client-too-old',
       { verdict: 'blocked', reason: 'client-too-old', unknownFields: [], stderr: '' },
     ],

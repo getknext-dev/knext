@@ -10,9 +10,9 @@
  */
 
 import { afterAll, describe, expect, it } from 'bun:test';
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import {
   buildDeployHost,
   dispatchGrpcVerb,
@@ -187,10 +187,22 @@ describe('core has exactly one lazy dispatch line for `deploy function`', () => 
 
 describe('the seam core hands @getknext/grpc cannot run an arbitrary program', () => {
   const ran: (readonly string[])[] = [];
+  const captured: (readonly string[])[] = [];
+  /** The text of the file each kubectl process was told to read, as it was at that moment. */
+  const filesSeen: string[] = [];
+  const readNow = (argv: readonly string[]) => {
+    const i = argv.indexOf('-f');
+    if (i !== -1) filesSeen.push(readFileSync(argv[i + 1] as string, 'utf8'));
+  };
   const host = buildDeployHost({
-    capture: () => ({ ok: true, stdout: '', stderr: '' }),
+    capture: (argv) => {
+      captured.push(argv);
+      readNow(argv);
+      return { ok: true, stdout: '', stderr: '' };
+    },
     run: (argv) => {
       ran.push(argv);
+      readNow(argv);
     },
   });
   const API = 'apps.kn-next.dev/v1alpha1';
@@ -215,11 +227,67 @@ describe('the seam core hands @getknext/grpc cannot run an arbitrary program', (
     expect(Object.keys(host).sort()).toEqual(['apply', 'preflight']);
   });
 
-  it('apply runs kubectl apply --validate=strict on the given file, and nothing else', () => {
+  it("apply runs kubectl apply --validate=strict on core's own copy, and nothing else", () => {
     ran.length = 0;
     const path = file(json(cr()));
     host.apply({ crPath: path, namespace: 'prod' });
-    expect(ran).toEqual([['kubectl', 'apply', '--validate=strict', '-f', path, '-n', 'prod']]);
+    expect(ran).toHaveLength(1);
+    const argv = ran[0] as readonly string[];
+    expect(argv.slice(0, 4)).toEqual(['kubectl', 'apply', '--validate=strict', '-f']);
+    expect(argv.slice(5)).toEqual(['-n', 'prod']);
+    // the file kubectl reads is core's, never the caller's path
+    expect(argv[4]).not.toBe(path);
+    expect(basename(argv[4] as string)).toBe('backendservice-orders.json');
+  });
+
+  it("kubectl is told to read core's file, not crPath, for BOTH the preflight and the apply", () => {
+    ran.length = 0;
+    captured.length = 0;
+    const path = file(json(cr()));
+    host.preflight({ crPath: path, namespace: 'prod' });
+    host.apply({ crPath: path, namespace: 'prod' });
+    const pre = captured[0] as readonly string[];
+    expect(pre.slice(0, 4)).toEqual(['kubectl', 'apply', '--dry-run=server', '--validate=strict']);
+    const preFile = pre[pre.indexOf('-f') + 1] as string;
+    const applyFile = (ran[0] as readonly string[])[4] as string;
+    expect(preFile).not.toBe(path);
+    expect(applyFile).not.toBe(path);
+    expect(dirname(preFile)).not.toBe(dirname(path));
+    expect(dirname(applyFile)).not.toBe(dirname(path));
+  });
+
+  it("core's copy is the validated object re-serialised, and is removed afterwards", () => {
+    ran.length = 0;
+    filesSeen.length = 0;
+    // the YAML spelling, with comments and spacing the copy must not inherit
+    const yaml = `# a comment\napiVersion: ${API}\nkind: BackendService\nmetadata: { name: orders, namespace: prod }\nspec:\n  zone: shop\n  image: ${IMAGE}\n  language: go\n`;
+    host.apply({ crPath: file(yaml, 'cr.yaml'), namespace: 'prod' });
+    expect(filesSeen).toHaveLength(1);
+    expect(Object.keys(JSON.parse(filesSeen[0] as string)).sort()).toEqual([
+      'apiVersion',
+      'kind',
+      'metadata',
+      'spec',
+    ]);
+    expect(JSON.parse(filesSeen[0] as string)).toEqual(cr());
+    expect(filesSeen[0]).not.toContain('# a comment');
+    const copy = (ran[0] as readonly string[])[4] as string;
+    expect(existsSync(copy)).toBe(false);
+    expect(existsSync(dirname(copy))).toBe(false);
+  });
+
+  it("removes core's copy even when kubectl fails", () => {
+    const failing = buildDeployHost({
+      capture: () => ({ ok: true, stdout: '', stderr: '' }),
+      run: (argv) => {
+        seen = argv[4] as string;
+        throw new Error('exit 1');
+      },
+    });
+    let seen = '';
+    expect(() => failing.apply({ crPath: file(json(cr())), namespace: 'prod' })).toThrow(/exit 1/);
+    expect(seen).not.toBe('');
+    expect(existsSync(dirname(seen))).toBe(false);
   });
 
   it('apply binds the kubectl context', () => {
@@ -228,12 +296,12 @@ describe('the seam core hands @getknext/grpc cannot run an arbitrary program', (
     expect(ran[0]?.slice(0, 3)).toEqual(['kubectl', '--context', 'staging']);
   });
 
-  it('a path that looks like a command is still one -f argument to kubectl', () => {
+  it('a path that looks like a command never reaches kubectl at all', () => {
     ran.length = 0;
     const path = file(json(cr()), '; func deploy.json');
     host.apply({ crPath: path, namespace: 'prod' });
     expect(ran[0]?.[0]).toBe('kubectl');
-    expect(ran[0]?.[4]).toBe(path);
+    expect(ran[0]?.join(' ')).not.toContain('func deploy');
   });
 
   it('accepts the YAML spelling of the same single BackendService', () => {
@@ -258,6 +326,37 @@ describe('the seam core hands @getknext/grpc cannot run an arbitrary program', (
       /one/i,
     ],
     ['a list', () => json({ apiVersion: 'v1', kind: 'List', items: [cr()] }), /BackendService/],
+    [
+      'a BackendService with a top-level items field (kubectl would apply the items, not the wrapper)',
+      () =>
+        json(
+          cr({
+            items: [
+              {
+                apiVersion: 'v1',
+                kind: 'ConfigMap',
+                metadata: { name: 'smuggled', namespace: 'prod' },
+              },
+            ],
+          }),
+        ),
+      /items/,
+    ],
+    ['an unknown top-level key (status)', () => json(cr({ status: {} })), /status/],
+    ['an unknown top-level key (foo)', () => json(cr({ foo: 1 })), /foo/],
+    [
+      'an unknown top-level key in a YAML file',
+      () =>
+        `apiVersion: ${API}\nkind: BackendService\nmetadata:\n  name: orders\nspec: {}\nitems: []\n`,
+      /items/,
+    ],
+    [
+      'metadata that carries an ownerReference',
+      () => json(cr({ metadata: { name: 'orders', ownerReferences: [{ kind: 'NextApp' }] } })),
+      /ownerReferences/,
+    ],
+    ['a metadata name that is not a name', () => json(cr({ metadata: { name: '../x' } })), /name/],
+    ['no metadata name', () => json(cr({ metadata: { namespace: 'prod' } })), /name/],
     ['an array', () => json([cr()]), /single|object/i],
     ['text that is not an object', () => 'just text', /object|single/i],
     ['an empty file', () => '', /one|object/i],
@@ -270,6 +369,18 @@ describe('the seam core hands @getknext/grpc cannot run an arbitrary program', (
     ran.length = 0;
     expect(() => host.apply({ crPath: file(make()), namespace: 'prod' })).toThrow(message);
     expect(ran).toEqual([]);
+  });
+
+  it('refuses the same files in the preflight: kubectl is never started', () => {
+    captured.length = 0;
+    const smuggle = json(
+      cr({ items: [{ apiVersion: 'v1', kind: 'ConfigMap', metadata: { name: 'smuggled' } }] }),
+    );
+    const out = host.preflight({ crPath: file(smuggle), namespace: 'prod' });
+    expect(out.verdict).toBe('blocked');
+    expect(out.reason).toBe('invalid-file');
+    expect(out.stderr).toContain('items');
+    expect(captured).toEqual([]);
   });
 
   it('refuses a file that cannot be read: nothing is applied', () => {

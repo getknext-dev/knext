@@ -86,6 +86,12 @@ export function formatPreflightFailure(outcome: PreflightResult): string {
       '  kubectl get crd backendservices.apps.kn-next.dev\n  knext doctor'
     );
   }
+  if (outcome.reason === 'invalid-file') {
+    return (
+      'PREFLIGHT FAILED: core refused the BackendService file before contacting the cluster:\n' +
+      `${firstLine(outcome.stderr)}\n${tail}`
+    );
+  }
   if (outcome.reason === 'client-too-old') {
     return (
       'PREFLIGHT FAILED: your kubectl is older than v1.25, where `--validate=strict` does not ' +

@@ -18,8 +18,9 @@
  * Every failure here is a plain message and an exit code; nothing throws.
  */
 
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import YAML from "yaml";
@@ -102,17 +103,35 @@ const defaultKubectl: KubectlSeam = {
 
 const BACKEND_SERVICE_API_VERSION = "apps.kn-next.dev/v1alpha1";
 
+/** The only top-level keys of a BackendService this command will apply. */
+const BACKEND_SERVICE_KEYS = ["apiVersion", "kind", "metadata", "spec"];
+/** And the only metadata keys: the CLI never writes ownerReferences, finalizers or labels. */
+const BACKEND_SERVICE_METADATA_KEYS = ["name", "namespace"];
+
+/** The object core has validated: exactly the four top-level keys, nothing else. */
+interface ValidatedBackendService {
+    apiVersion: string;
+    kind: "BackendService";
+    metadata: { name: string; namespace?: string };
+    spec: unknown;
+}
+
 /**
- * Read the file `apply` is about to hand to kubectl and refuse anything but ONE
- * `BackendService` of this group and version, in the namespace it is applied to.
- * The package builds this file, but the seam does not trust it: a different kind,
- * a second document or a stray namespace in it would be a write core never
- * agreed to. Throws before anything runs.
+ * Read the file the package built and refuse anything but ONE `BackendService`
+ * of this group and version, in the namespace it is applied to. The package
+ * builds this file, but the seam does not trust it: a different kind, a second
+ * document or a stray namespace in it would be a write core never agreed to.
+ *
+ * The top-level keys are checked as a SET, not just `kind`: kubectl decodes any
+ * object carrying `items` as a list and applies the items, not the wrapper, so a
+ * `BackendService` with an `items` field would pass a kind check and apply
+ * whatever the items name. Returns the validated object (only the four keys);
+ * throws before anything runs.
  */
-export function assertSingleBackendService(
+export function readValidatedBackendService(
     crPath: string,
     namespace: string,
-): void {
+): ValidatedBackendService {
     const docs = YAML.parseAllDocuments(readFileSync(crPath, "utf-8")).filter(
         (d) => d.contents !== null,
     );
@@ -133,10 +152,8 @@ export function assertSingleBackendService(
             `refusing to apply ${crPath}: it must be a single object, not a list or a scalar`,
         );
     }
-    const cr = obj as {
-        apiVersion?: unknown;
-        kind?: unknown;
-        metadata?: { namespace?: unknown };
+    const cr = obj as Record<string, unknown> & {
+        metadata?: Record<string, unknown>;
     };
     if (cr.kind !== "BackendService") {
         throw new UsageError(
@@ -148,11 +165,73 @@ export function assertSingleBackendService(
             `refusing to apply ${crPath}: apiVersion is ${JSON.stringify(cr.apiVersion)}, expected ${BACKEND_SERVICE_API_VERSION}`,
         );
     }
-    const ns = cr.metadata?.namespace;
+    const extra = Object.keys(cr).filter(
+        (k) => !BACKEND_SERVICE_KEYS.includes(k),
+    );
+    if (extra.length > 0) {
+        throw new UsageError(
+            `refusing to apply ${crPath}: unexpected top-level field(s) ${extra.join(", ")}; a BackendService has only ${BACKEND_SERVICE_KEYS.join(", ")} (kubectl treats an object with "items" as a list and applies the items)`,
+        );
+    }
+    const meta = cr.metadata;
+    if (typeof meta !== "object" || meta === null || Array.isArray(meta)) {
+        throw new UsageError(
+            `refusing to apply ${crPath}: metadata must be an object with a name`,
+        );
+    }
+    const extraMeta = Object.keys(meta).filter(
+        (k) => !BACKEND_SERVICE_METADATA_KEYS.includes(k),
+    );
+    if (extraMeta.length > 0) {
+        throw new UsageError(
+            `refusing to apply ${crPath}: unexpected metadata field(s) ${extraMeta.join(", ")}; the CLI sets only ${BACKEND_SERVICE_METADATA_KEYS.join(" and ")}`,
+        );
+    }
+    const name = meta.name;
+    if (
+        typeof name !== "string" ||
+        !/^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/.test(name) ||
+        name.length > 63
+    ) {
+        throw new UsageError(
+            `refusing to apply ${crPath}: metadata.name ${JSON.stringify(name)} is not a valid name`,
+        );
+    }
+    const ns = meta.namespace;
     if (ns !== undefined && ns !== namespace) {
         throw new UsageError(
             `refusing to apply ${crPath}: its namespace is ${JSON.stringify(ns)} but it is being applied to ${JSON.stringify(namespace)}`,
         );
+    }
+    return {
+        apiVersion: BACKEND_SERVICE_API_VERSION,
+        kind: "BackendService",
+        metadata:
+            ns === undefined ? { name } : { name, namespace: ns as string },
+        spec: cr.spec,
+    };
+}
+
+/**
+ * Validate `crPath`, write core's OWN copy of what it validated (the four keys,
+ * re-serialised as JSON) to a private directory, run `fn` on THAT file, and
+ * remove the directory. kubectl never reads the caller's path, so what was
+ * checked is exactly what is previewed and applied, and nothing in the original
+ * file that the check did not look at can reach it.
+ */
+function withValidatedCopy<T>(
+    crPath: string,
+    namespace: string,
+    fn: (corePath: string) => T,
+): T {
+    const cr = readValidatedBackendService(crPath, namespace);
+    const dir = mkdtempSync(join(tmpdir(), "knext-backendservice-"));
+    try {
+        const corePath = join(dir, `backendservice-${cr.metadata.name}.json`);
+        writeFileSync(corePath, `${JSON.stringify(cr, null, 2)}\n`, "utf-8");
+        return fn(corePath);
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
     }
 }
 
@@ -167,38 +246,52 @@ export function buildDeployHost(
 ): DeployHost {
     return {
         preflight: ({ crPath, namespace, context }) => {
-            const outcome = preflightCRSchema(
-                {
-                    kubectl: (argv): KubectlResult =>
-                        kubectl.capture(withKubeContext(argv, context)),
-                },
-                { crPath, namespace },
-            );
-            return {
-                verdict: outcome.verdict,
-                reason: outcome.reason,
-                unknownFields: outcome.unknownFields,
-                stderr: outcome.stderr,
-            };
+            try {
+                return withValidatedCopy(crPath, namespace, (corePath) => {
+                    const outcome = preflightCRSchema(
+                        {
+                            kubectl: (argv): KubectlResult =>
+                                kubectl.capture(withKubeContext(argv, context)),
+                        },
+                        { crPath: corePath, namespace },
+                    );
+                    return {
+                        verdict: outcome.verdict,
+                        reason: outcome.reason,
+                        unknownFields: outcome.unknownFields,
+                        stderr: outcome.stderr,
+                    };
+                });
+            } catch (err) {
+                // The preflight never throws: a file core refuses is a blocked verdict
+                // that names why, and kubectl was never started.
+                return {
+                    verdict: "blocked",
+                    reason: "invalid-file",
+                    unknownFields: [],
+                    stderr: (err as Error).message,
+                };
+            }
         },
-        apply: ({ crPath, namespace, context }) => {
-            // Read before anything runs: nothing is applied on a refusal.
-            assertSingleBackendService(crPath, namespace);
-            kubectl.run(
-                withKubeContext(
-                    [
-                        "kubectl",
-                        "apply",
-                        "--validate=strict",
-                        "-f",
-                        crPath,
-                        "-n",
-                        namespace,
-                    ],
-                    context,
-                ),
-            );
-        },
+        apply: ({ crPath, namespace, context }) =>
+            // Validated and copied before anything runs: nothing is applied on a
+            // refusal, and kubectl reads core's copy, never `crPath`.
+            withValidatedCopy(crPath, namespace, (corePath) => {
+                kubectl.run(
+                    withKubeContext(
+                        [
+                            "kubectl",
+                            "apply",
+                            "--validate=strict",
+                            "-f",
+                            corePath,
+                            "-n",
+                            namespace,
+                        ],
+                        context,
+                    ),
+                );
+            }),
     };
 }
 

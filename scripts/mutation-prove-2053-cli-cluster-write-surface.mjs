@@ -558,7 +558,7 @@ const KINDS = [
     id: 'T06',
     subject: 'dispatch',
     claim: "core's apply (the only kubectl apply of a BackendService) drops --validate=strict",
-    anchor: '"apply",\n                        "--validate=strict",',
+    anchor: '"apply",\n                            "--validate=strict",',
     replacement: '"apply",',
   },
   {
@@ -588,7 +588,7 @@ const KINDS = [
 // Preflight first, then a strict apply, context bound to both
 // ---------------------------------------------------------------------------
 const PREFLIGHT_CALL = 'const outcome = host.preflight({ crPath, namespace, context });';
-const CORE_ARGV_STRICT = '"apply",\n                        "--validate=strict",';
+const CORE_ARGV_STRICT = '"apply",\n                            "--validate=strict",';
 const APPLY_ROWS = (spec) => [
   {
     id: 'O01',
@@ -654,8 +654,8 @@ const APPLY_ROWS = (spec) => [
           subject: 'dispatch',
           claim: "core's apply drops the namespace",
           anchor:
-            '                        crPath,\n                        "-n",\n                        namespace,',
-          replacement: '                        crPath,',
+            '                            corePath,\n                            "-n",\n                            namespace,',
+          replacement: '                            corePath,',
         },
         {
           id: 'O10',
@@ -669,9 +669,9 @@ const APPLY_ROWS = (spec) => [
           subject: 'dispatch',
           claim: "core's apply loses the kubectl context",
           anchor:
-            '                    ],\n                    context,\n                ),\n            );',
+            '                        ],\n                        context,\n                    ),\n                );',
           replacement:
-            '                    ],\n                    undefined,\n                ),\n            );',
+            '                        ],\n                        undefined,\n                    ),\n                );',
         },
         {
           id: 'O12',
@@ -698,9 +698,10 @@ const APPLY_ROWS = (spec) => [
         {
           id: 'C01',
           subject: 'dispatch',
-          claim: "core's apply does not read the file before running kubectl",
-          anchor: 'assertSingleBackendService(crPath, namespace);',
-          replacement: 'void 0;',
+          claim: "core's apply does not validate the file before running kubectl",
+          anchor: 'const cr = readValidatedBackendService(crPath, namespace);',
+          replacement:
+            'const cr = YAML.parse(readFileSync(crPath, "utf-8")) as ValidatedBackendService;',
         },
         {
           id: 'C02',
@@ -738,11 +739,67 @@ const APPLY_ROWS = (spec) => [
           replacement: 'if (false) {',
         },
         {
+          id: 'C07',
+          subject: 'dispatch',
+          claim: "kubectl is told to read the caller's path, not core's validated copy",
+          anchor: 'return fn(corePath);',
+          replacement: 'return fn(crPath);',
+        },
+        {
+          id: 'C08',
+          subject: 'dispatch',
+          claim: 'an unknown top-level key (items, status, foo) is accepted',
+          anchor: 'if (extra.length > 0) {',
+          replacement: 'if (false) {',
+        },
+        {
+          id: 'C09',
+          subject: 'dispatch',
+          claim: "core's copy is the caller's text, not the validated object re-serialised",
+          anchor: 'writeFileSync(corePath, `${JSON.stringify(cr, null, 2)}\\n`, "utf-8");',
+          replacement: 'writeFileSync(corePath, readFileSync(crPath, "utf-8"), "utf-8");',
+        },
+        {
+          id: 'C10',
+          subject: 'dispatch',
+          claim: 'unexpected metadata fields (ownerReferences, finalizers) are accepted',
+          anchor: 'if (extraMeta.length > 0) {',
+          replacement: 'if (false) {',
+        },
+        {
+          id: 'C11',
+          subject: 'dispatch',
+          claim: 'a metadata name that is not a name (../x) is accepted',
+          anchor: '!/^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/.test(name) ||',
+          replacement: 'false ||',
+        },
+        {
+          id: 'C12',
+          subject: 'dispatch',
+          claim: "core's temporary copy is never removed",
+          anchor: 'rmSync(dir, { recursive: true, force: true });',
+          replacement: 'void 0;',
+        },
+        {
+          id: 'C13',
+          subject: 'dispatch',
+          claim: "the preflight reads the caller's path, not core's copy",
+          anchor: '{ crPath: corePath, namespace },',
+          replacement: '{ crPath, namespace },',
+        },
+        {
+          id: 'C14',
+          subject: 'dispatch',
+          claim: 'a file core refuses is reported as some other verdict reason',
+          anchor: 'reason: "invalid-file",',
+          replacement: 'reason: "apply-failed",',
+        },
+        {
           id: 'O15',
           subject: 'dispatch',
           claim: "core's apply runs a program other than kubectl",
-          anchor: '                        "kubectl",\n                        "apply",',
-          replacement: '                        "echo",\n                        "apply",',
+          anchor: '                            "kubectl",\n                            "apply",',
+          replacement: '                            "echo",\n                            "apply",',
         },
       ]
     : []),
