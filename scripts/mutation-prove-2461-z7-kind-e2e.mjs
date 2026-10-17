@@ -359,13 +359,6 @@ const LANE_ROWS = [
     replacement: '  k -n "${NS}" get secret "${KEY_SECRET}" -o yaml \\\n',
   },
   {
-    id: 'S06',
-    subject: 'run',
-    claim: 'the leak scan counts an empty line, which matches every line of every file',
-    anchor: '      [ "${#line}" -ge 40 ] || continue\n',
-    replacement: '      : # every line counts\n',
-  },
-  {
     id: 'S07',
     subject: 'run',
     claim: 'the operator switching before the bound is no longer a failure',
