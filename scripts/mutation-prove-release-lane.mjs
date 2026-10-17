@@ -210,8 +210,8 @@ prove(
   'the workflow-level concurrency group comes back',
   WORKFLOW,
   LIVENESS_SPEC,
-  '\npermissions:\n  contents: write\n',
-  '\nconcurrency:\n  group: release-${{ github.ref }}\n  cancel-in-progress: false\n\npermissions:\n  contents: write\n',
+  '\npermissions:\n  contents: read\n',
+  '\nconcurrency:\n  group: release-${{ github.ref }}\n  cancel-in-progress: false\n\npermissions:\n  contents: read\n',
 );
 
 // 2. The subtler version: two job-level groups, but the SAME one — a parked
