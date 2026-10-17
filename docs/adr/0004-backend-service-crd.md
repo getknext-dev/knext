@@ -783,7 +783,7 @@ bound, not only the image.
    3. *Encode*: `string` = `s<N>:<bytes>` (N is the UTF-8 byte length); `integer` = `i<N>;`; `true` =
       `t`; `list` = `l<items>e` (**order kept**); `object` = `d<key><value>...e` with keys sorted by their
       UTF-8 bytes. No whitespace, no escaping; floats and `null` are refused.
-   4. `digest = "sha256:" + hex(SHA-256("knext.dev/backendservice-spec/v1\n" + encoding))`. The domain line
+   4. `digest = "sha256:" + hex(SHA-256("knext/backendservice-spec/v1\n" + encoding))`. The domain line
       separates this use of SHA-256 and carries the form's version.
 
    A bespoke encoding rather than JSON because JSON encoders differ between Go and JS in string escaping

@@ -67,7 +67,7 @@ import (
 
 // specDigestDomain separates this digest from any other use of SHA-256 and
 // carries the version of the canonical form.
-const specDigestDomain = "knext.dev/backendservice-spec/v1\n"
+const specDigestDomain = "knext/backendservice-spec/v1\n"
 
 // specPinHashedFields are the BackendServiceSpec members the digest binds: the
 // ones that decide WHAT CODE RUNS (image, and env/envFrom/volumes, which can

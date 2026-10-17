@@ -39,10 +39,10 @@
  * Pure: no I/O.
  */
 
-import { createHash } from 'node:crypto';
+import { hash } from 'node:crypto';
 
 /** Separates this digest from any other use of SHA-256 and carries the form's version. */
-export const SPEC_DIGEST_DOMAIN = 'knext.dev/backendservice-spec/v1\n';
+export const SPEC_DIGEST_DOMAIN = 'knext/backendservice-spec/v1\n';
 
 /** The BackendService spec members the digest binds, in the operator's order. */
 export const BACKEND_SPEC_PINNED_FIELDS: readonly string[] = ['image', 'env', 'envFrom', 'volumes'];
@@ -116,8 +116,6 @@ export function canonicalBackendSpec(spec: Readonly<Record<string, unknown>>): s
 
 /** The digest the zone pins: `sha256:<64 lowercase hex>`. */
 export function backendSpecDigest(spec: Readonly<Record<string, unknown>>): string {
-  const hash = createHash('sha256')
-    .update(SPEC_DIGEST_DOMAIN + canonicalBackendSpec(spec), 'utf8')
-    .digest('hex');
-  return `sha256:${hash}`;
+  const hex = hash('sha256', SPEC_DIGEST_DOMAIN + canonicalBackendSpec(spec), 'hex');
+  return `sha256:${hex}`;
 }

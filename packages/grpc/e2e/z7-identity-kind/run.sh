@@ -1105,7 +1105,9 @@ YAML
 
   log "pin: rotating the spec and the pin together"
   add_fn_env LOG_LEVEL debug
-  set_zone_spec_pin "$(live_spec_digest)"
+  local rotated_pin
+  rotated_pin="$(live_spec_digest)"
+  set_zone_spec_pin "${rotated_pin}"
   wait_until 180 3 "the function renders with the new env under the new pin" \
     'fn_ksvc_has_env LOG_LEVEL && fn_ksvc_mounts_db && [ "$(fn_condition Bound)" = "True/Bound" ]'
   ok "a spec and a pin changed together bind the function"

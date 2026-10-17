@@ -33,14 +33,13 @@
  *     match), its input to accepted(), the Bound condition and the refusals
  *     series, the reconciler reading the entry, the CRD's pattern, and the pin
  *     leaking into the zone's rendered env;
- *   - the zone's SPEC pin on backends[] (ADR-0004 Amendment 4, X01-X23 for the
- *     operator, T01-T06 for the CLI): the comparison, each hashed member
+ *   - the zone's SPEC pin on backends[] (ADR-0004 Amendment 4, X01-X23): the comparison, each hashed member
  *     (image, env, envFrom, volumes) dropped in turn, an excluded member leaking
  *     in, the canonical form (list order, key sort, the domain line, byte
  *     lengths, the normalisation of zero values), the Bound condition, the
  *     reconciler reading the entry, the field coverage guard (an unclassified
- *     field, a dishonest class), and the TypeScript twin of the canonical form
- *     plus the digest `knext deploy function` prints.
+ *     field, a dishonest class). The CLI's twin of the canonical form is proved by
+ *     scripts/mutation-prove-2526-spec-digest-cli.mjs.
  *
  * Besides the rows: a CANARY (the first pin row graded by the same runner before
  * the table; it must go red or the harness cannot see red) and a NEUTRAL control
@@ -108,10 +107,6 @@ const ROLE = resolve(REPO_ROOT, 'packages/kn-next-operator/config/rbac/role.yaml
 const NEXTAPP_CRD = resolve(REPO_ROOT, 'packages/kn-next-operator/config/crd/bases/apps.kn-next.dev_nextapps.yaml');
 // biome-ignore format: one-line resolve() for the anchor-drift scan
 const SPECPIN = resolve(REPO_ROOT, 'packages/kn-next-operator/internal/controller/backendservice_spec_pin.go');
-// biome-ignore format: one-line resolve() for the anchor-drift scan
-const SPECDIGEST_TS = resolve(REPO_ROOT, 'packages/grpc/src/spec-digest.ts');
-// biome-ignore format: one-line resolve() for the anchor-drift scan
-const DEPLOY_FN_TS = resolve(REPO_ROOT, 'packages/grpc/src/deploy-function.ts');
 
 const PROVER = {
   subjects: {
@@ -128,8 +123,6 @@ const PROVER = {
     role: ROLE,
     nextappcrd: NEXTAPP_CRD,
     specpin: SPECPIN,
-    spects: SPECDIGEST_TS,
-    deployfn: DEPLOY_FN_TS,
   },
 };
 
@@ -141,15 +134,6 @@ const unit = (run, pkg = PKG) => ({ kind: 'go', args: ['-run', run, pkg] });
 const envtest = (focus) => ({
   kind: 'go',
   args: ['-run', 'TestControllers', PKG, `-ginkgo.focus=${focus}`],
-});
-
-/** A TypeScript row's guard: `bun test <file>` from the repo root (exit code only). */
-const BUN = `${process.env.HOME}/.bun/bin/bun`;
-const bunTest = (file) => ({ kind: 'bash', args: ['-c', `cd ../.. && ${BUN} test ${file}`] });
-/** A TypeScript row's build check: the mutated module must still load. */
-const bunLoads = (file) => ({
-  kind: 'bash',
-  args: ['-c', `cd ../.. && ${BUN} -e "await import('${REPO_ROOT}/${file}')"`],
 });
 
 const MUTATIONS = [
@@ -319,8 +303,9 @@ const MUTATIONS = [
     id: 'L04',
     claim: 'the lint rejects the function instead of warning',
     subject: 'verdict',
-    anchor: 'o.imageMismatch == "" && len(o.violations) == 0',
-    replacement: 'o.imageMismatch == "" && len(o.violations) == 0 && len(o.lint) == 0',
+    anchor: 'o.imageMismatch == "" && o.specMismatch == "" && len(o.violations) == 0',
+    replacement:
+      'o.imageMismatch == "" && o.specMismatch == "" && len(o.violations) == 0 && len(o.lint) == 0',
     test: envtest('foreign database host as a lint WARNING'),
   },
   // --- the reconciler ---------------------------------------------------------
@@ -929,7 +914,7 @@ const MUTATIONS = [
     id: 'X12',
     claim: 'the domain line is dropped: the digest is a bare SHA-256 of the encoding',
     subject: 'specpin',
-    anchor: 'const specDigestDomain = "knext.dev/backendservice-spec/v1\\n"',
+    anchor: 'const specDigestDomain = "knext/backendservice-spec/v1\\n"',
     replacement: 'const specDigestDomain = ""',
     test: unit('TestSpecDigestVectors'),
   },
@@ -1022,62 +1007,6 @@ const MUTATIONS = [
     anchor: '"otherwise restore the BackendService\'s spec", pin, have)',
     replacement: '"otherwise restore the BackendService\'s spec", pin, pin)',
     test: unit('TestSpecPinMismatchNamesBothDigests'),
-  },
-  // --- the CLI's twin of the canonical form (packages/grpc/src/spec-digest.ts) ----
-  {
-    id: 'T01',
-    claim: 'the CLI does not sort object keys: its digest differs from the operator',
-    subject: 'spects',
-    anchor: "Buffer.compare(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8')),",
-    replacement: '0,',
-    test: bunTest('packages/grpc/src/__tests__/spec-digest.test.ts'),
-    check: bunLoads('packages/grpc/src/spec-digest.ts'),
-  },
-  {
-    id: 'T02',
-    claim: 'the CLI does not hash env: its printed digest ignores the settings it should bind',
-    subject: 'spects',
-    anchor: "['image', 'env', 'envFrom', 'volumes']",
-    replacement: "['image', 'envFrom', 'volumes']",
-    test: bunTest('packages/grpc/src/__tests__/spec-digest.test.ts'),
-    check: bunLoads('packages/grpc/src/spec-digest.ts'),
-  },
-  {
-    id: 'T03',
-    claim: 'the CLI drops the domain line from the preimage',
-    subject: 'spects',
-    anchor: "export const SPEC_DIGEST_DOMAIN = 'knext.dev/backendservice-spec/v1\\n';",
-    replacement: "export const SPEC_DIGEST_DOMAIN = '';",
-    test: bunTest('packages/grpc/src/__tests__/spec-digest.test.ts'),
-    check: bunLoads('packages/grpc/src/spec-digest.ts'),
-  },
-  {
-    id: 'T04',
-    claim: 'the CLI counts string length in UTF-16 units, not UTF-8 bytes',
-    subject: 'spects',
-    anchor: 'return `s${bytes.length}:${s}`;',
-    replacement: 'return `s${s.length}:${s}`;',
-    test: bunTest('packages/grpc/src/__tests__/spec-digest.test.ts'),
-    check: bunLoads('packages/grpc/src/spec-digest.ts'),
-  },
-  {
-    id: 'T05',
-    claim: 'the CLI keeps empty strings: absent and empty hash differently from the operator',
-    subject: 'spects',
-    anchor: "if (typeof v === 'string') return [v, v === ''];",
-    replacement: "if (typeof v === 'string') return [v, false];",
-    test: bunTest('packages/grpc/src/__tests__/spec-digest.test.ts'),
-    check: bunLoads('packages/grpc/src/spec-digest.ts'),
-  },
-  {
-    id: 'T06',
-    claim: 'knext deploy function prints a digest of something other than the spec it applied',
-    subject: 'deployfn',
-    anchor: 'const specDigest = backendSpecDigest(cr.spec);',
-    replacement:
-      'const specDigest = backendSpecDigest({ ...cr.spec, image: `${cr.spec.image}x` });',
-    test: bunTest('packages/grpc/src/__tests__/deploy-function.test.ts'),
-    check: bunLoads('packages/grpc/src/deploy-function.ts'),
   },
   // --- CRD, RBAC and metrics ---------------------------------------------------
   {
@@ -1179,11 +1108,7 @@ function guardExit(test) {
   return run('bash', test.args, test.env);
 }
 
-/**
- * The mutated tree must still COMPILE its tests, or the row proves nothing. A
- * row may bring its own `check` (the TypeScript rows: the mutated module must
- * still load), which replaces this Go build.
- */
+/** The mutated tree must still COMPILE its tests, or the row proves nothing. */
 function buildsExit() {
   const build = run('go', ['build', './...'], {}, { showErrors: true });
   if (build !== 0) return build;
@@ -1244,7 +1169,7 @@ function grade(m) {
   let code;
   try {
     mutate(snap, m.anchor, m.replacement);
-    built = m.check ? guardExit(m.check) : buildsExit();
+    built = buildsExit();
     code = built === 0 ? guardExit(m.test) : undefined;
   } finally {
     restore(snap);

@@ -424,9 +424,7 @@ describe('the lane proves what it claims', () => {
     expect(pin).toMatch(
       /drop_fn_env\n\s*wait_until 180 3 "the function renders again once its spec is the pinned one"/,
     );
-    expect(pin).toMatch(
-      /add_fn_env LOG_LEVEL debug[\s\S]*set_zone_spec_pin "\$\(live_spec_digest\)"/,
-    );
+    expect(pin).toMatch(/add_fn_env LOG_LEVEL debug[\s\S]*set_zone_spec_pin "\$\{rotated_pin\}"/);
   });
 
   it("follows the operator's shipped propagation bound instead of hard-coding one", () => {

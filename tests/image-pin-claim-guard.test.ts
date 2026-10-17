@@ -527,7 +527,7 @@ describe('the internal docs record the spec pin and its exact residuals', () => 
     expect(a4).toContain('#2526');
     expect(a4).toContain('specDigest');
     expect(a4).toContain('BindingSpecMismatch');
-    expect(a4).toMatch(/knext\.dev\/backendservice-spec\/v1/);
+    expect(a4).toMatch(/knext\/backendservice-spec\/v1/);
     expect(a4).toContain('TestEveryBackendServiceSpecFieldIsBoundOrReviewed');
     expect(a4).toMatch(/closed for the BackendService route/);
     expect(a4).toMatch(/Contents of the objects the spec names/);
