@@ -270,12 +270,10 @@ const GO_MUTATIONS = [
   },
   {
     id: 'B03',
-    claim: 'a bare 401 or 403 status is no longer a denial (it is held without limit)',
+    claim: 'a 401 is no longer a denial (it is held without limit)',
     subject: 'controller',
-    anchor:
-      'if code := status.Status().Code; code == http.StatusUnauthorized || code == http.StatusForbidden {',
-    replacement:
-      'if code := status.Status().Code; code == http.StatusUnauthorized && false || code == http.StatusForbidden && false {',
+    anchor: 'if apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err) {',
+    replacement: 'if apierrors.IsForbidden(err) {',
     test: unit(R_CLASSIFY),
   },
   {
@@ -358,7 +356,7 @@ const GO_MUTATIONS = [
     subject: 'verdict',
     anchor: 'if !u.denied {',
     replacement: 'if false {',
-    test: envtest(FORBIDDEN),
+    test: unit(R_ESCALATE),
   },
   // --- the status of a spec that was not rolled out -----------------------------
   {

@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/http"
 	"strings"
 	"time"
 
@@ -330,12 +329,6 @@ const (
 func classifyReadError(err error) readClass {
 	if apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err) {
 		return readDenied
-	}
-	var status apierrors.APIStatus
-	if errors.As(err, &status) {
-		if code := status.Status().Code; code == http.StatusUnauthorized || code == http.StatusForbidden {
-			return readDenied
-		}
 	}
 	return readTransient
 }
