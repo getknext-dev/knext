@@ -225,8 +225,10 @@ const MUTATIONS = [
     expect: 'green',
     claim: 'an error message is reworded and still matches',
     subject: 'lib',
-    anchor: "'registry returned no dist-tags: nothing to scan'",
-    replacement: "'registry returned no dist-tags at all: nothing to scan'",
+    anchor:
+      "if (entries.length === 0) throw new Error('registry returned no dist-tags: nothing to scan');",
+    replacement:
+      "if (entries.length === 0) throw new Error('registry returned no dist-tags at all: nothing to scan');",
   },
   {
     id: 'N2',
