@@ -46,11 +46,64 @@ export function parseShardSpec(spec) {
 }
 
 /**
- * The provers of ONE shard: a function of the SET (sorted by path), never of
- * readdir order, so every leg computes the same partition independently.
- * Round-robin rather than contiguous ranges: provers that share a prefix
- * (`compat-*`, `2xxx-*`) are written together and are slow together, and a range
- * split would hand a whole family to one leg.
+ * Estimated wall-clock MINUTES of the provers that are not ~1 minute, by path.
+ *
+ * Sharding by COUNT put the slowest provers in one leg. Measured on run
+ * 38140088966 (the cancelled one) the cost is wildly uneven: 40 provers took 53
+ * minutes, one of them (`compat-cell-fingerprint`) 20 and another
+ * (`bytecode-liveness`) 11; `empty-dir-guard` declares 58 mutations that each run
+ * a ~30-60 s spec (so ~30-55 minutes on its own), and `install-smoke-coverage`
+ * is documented in the old workflow comment as ~30 minutes because most of its
+ * mutations are graded by a full pack + clean install. A count-balanced split
+ * measured 100+ minutes in one leg and ~20 in the others.
+ *
+ * These are ESTIMATES, used only to BALANCE legs. A stale weight makes a leg
+ * longer or shorter; it cannot make a prover drop out, because the partition is
+ * a pure function of the set and the aggregate re-proves the union. Any prover
+ * not listed weighs 1.
+ */
+export const PROVER_WEIGHT_MINUTES = Object.freeze({
+  'scripts/mutation-prove-empty-dir-guard.mjs': 55,
+  'scripts/mutation-prove-install-smoke-coverage.mjs': 30,
+  'scripts/mutation-prove-compat-cell-fingerprint.mjs': 20,
+  'scripts/mutation-prove-bytecode-liveness.mjs': 11,
+  'scripts/mutation-prove-1533-kubeconfig-ci-secret.mjs': 5,
+  'scripts/mutation-prove-compat-window-packed-anchor.mjs': 4,
+  'scripts/mutation-prove-compat-credential-freeze-guard.mjs': 2,
+  'scripts/mutation-prove-compat-credential-line.mjs': 2,
+  'scripts/mutation-prove-continuation-attribution.mjs': 2,
+});
+
+/** @param {{ relPath: string }} p */
+export const proverWeight = (p) => PROVER_WEIGHT_MINUTES[p.relPath] ?? 1;
+
+const byPath = (a, b) => (a.relPath < b.relPath ? -1 : a.relPath > b.relPath ? 1 : 0);
+
+/**
+ * Longest-processing-time-first assignment: heaviest prover first, each to the
+ * currently lightest leg (ties to the lowest index). Pure and deterministic, a
+ * function of the SET and the weights, never of readdir order, so every leg
+ * computes the same partition independently and the aggregate can recompute it.
+ *
+ * @param {Array<{ relPath: string }>} provers
+ * @param {number} count
+ * @returns {Map<string, number>} relPath -> 0-based shard
+ */
+function assignShards(provers, count) {
+  const order = [...provers].sort((a, b) => proverWeight(b) - proverWeight(a) || byPath(a, b));
+  const load = new Array(count).fill(0);
+  const owner = new Map();
+  for (const p of order) {
+    let best = 0;
+    for (let k = 1; k < count; k++) if (load[k] < load[best]) best = k;
+    owner.set(p.relPath, best);
+    load[best] += proverWeight(p);
+  }
+  return owner;
+}
+
+/**
+ * The provers of ONE shard (see `assignShards`), sorted by path.
  *
  * @template {{ relPath: string }} P
  * @param {P[]} provers
@@ -60,9 +113,13 @@ export function parseShardSpec(spec) {
  */
 export function shardProvers(provers, index, count) {
   parseShardSpec(`${index}/${count}`);
-  return [...provers]
-    .sort((a, b) => (a.relPath < b.relPath ? -1 : a.relPath > b.relPath ? 1 : 0))
-    .filter((_, i) => i % count === index - 1);
+  const owner = assignShards(provers, count);
+  return [...provers].sort(byPath).filter((p) => owner.get(p.relPath) === index - 1);
+}
+
+/** Estimated minutes of one shard, for the balance guard and the plan log. */
+export function estimateShardMinutes(provers, index, count) {
+  return shardProvers(provers, index, count).reduce((n, p) => n + proverWeight(p), 0);
 }
 
 /** A filesystem- and artifact-safe name for a ref. */
@@ -152,12 +209,17 @@ const sameSet = (a, b) =>
  * Prove the lane from its legs' reports.
  *
  * @param {{ expected: Array<{ref: string, sha: string, shard: number, shards: number}>,
- *           reports: Array<object | undefined | null> }} input
+ *           reports: Array<object | undefined | null>,
+ *           shard?: typeof shardProvers }} input
+ *   `shard` is the partition function the legs are entitled to; it defaults to the
+ *   real one and is injectable ONLY so a test can hand it a lossy partition and
+ *   prove the final union check catches what the per-leg recomputation cannot
+ *   (a partition that is wrong the same way in the runner and here).
  *   `reports[i]` is the report for `expected[i]` (`undefined` when the leg wrote
  *   none — cancelled, crashed, artifact lost).
  * @returns {{ findings: string[], partialRefs: string[] }}
  */
-export function aggregateReports({ expected, reports }) {
+export function aggregateReports({ expected, reports, shard = shardProvers }) {
   const findings = [];
   const partialRefs = [];
   if (!Array.isArray(expected) || expected.length === 0) {
@@ -193,7 +255,7 @@ export function aggregateReports({ expected, reports }) {
       findings.push(`${label}: discovered zero provers — a vacuous green`);
       return;
     }
-    const entitled = shardProvers(
+    const entitled = shard(
       report.discovered.map((relPath) => ({ relPath })),
       leg.shard,
       leg.shards,
@@ -260,7 +322,7 @@ export function aggregateReports({ expected, reports }) {
 /** The per-prover bound, in ms. Overridable so the guard can use a short one. */
 export function proverTimeoutMs(env = process.env) {
   const raw = env.KNEXT_PROVER_TIMEOUT_MS;
-  if (raw === undefined || raw === '') return 35 * 60 * 1000;
+  if (raw === undefined || raw === '') return 80 * 60 * 1000;
   const n = Number(raw);
   if (!Number.isFinite(n) || n <= 0) {
     throw new Error(

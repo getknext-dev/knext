@@ -32,7 +32,7 @@
  * own ate 47 minutes and ninety never started. So the lane now splits the set
  * across matrix legs (`--shard <i>/<n>`, a pure function of the sorted set, see
  * `lib/prover-shard.mjs`), every prover has its OWN wall-clock bound
- * (`KNEXT_PROVER_TIMEOUT_MS`, default 35 minutes; a timeout is a finding and the
+ * (`KNEXT_PROVER_TIMEOUT_MS`, default 80 minutes; a timeout is a finding and the
  * next prover still runs), output is streamed as it arrives so a cancelled run
  * still shows what was running, and `--report <file>` writes the leg's
  * machine-readable result for the aggregate job, which proves that the legs'

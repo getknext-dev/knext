@@ -17,9 +17,12 @@ import { discoverProvers, PROVER_RE } from '../scripts/lib/prover-lane.mjs';
 import {
   aggregateReports,
   buildMatrix,
+  estimateShardMinutes,
   LANE_REFS,
   makeReport,
+  PROVER_WEIGHT_MINUTES,
   parseShardSpec,
+  proverTimeoutMs,
   reportFileName,
   shardProvers,
 } from '../scripts/lib/prover-shard.mjs';
@@ -96,6 +99,40 @@ describe('#2499 shardProvers — the shard union is the full set, exactly once',
     const all = fakeProvers(131);
     const sizes = Array.from({ length: 6 }, (_, i) => shardProvers(all, i + 1, 6).length);
     expect(Math.max(...sizes) - Math.min(...sizes)).toBeLessThanOrEqual(1);
+  });
+});
+
+describe('#2208 legs are balanced by ESTIMATED COST, not by count', () => {
+  const real = () => discoverProvers(REPO_ROOT) as Array<{ relPath: string }>;
+  const N = 6;
+
+  it('every weighted prover is a real, discovered prover (a rename cannot silently unweight it)', () => {
+    const have = new Set(real().map((p) => p.relPath));
+    for (const path of Object.keys(PROVER_WEIGHT_MINUTES)) {
+      expect(have.has(path), `${path} is weighted but not discovered`).toBe(true);
+    }
+  });
+
+  it('no leg exceeds the mean estimated load by more than the heaviest single prover (the LPT bound)', () => {
+    const all = real();
+    const loads = Array.from({ length: N }, (_, i) => estimateShardMinutes(all, i + 1, N));
+    const mean = loads.reduce((a, b) => a + b, 0) / N;
+    const heaviest = Math.max(...Object.values(PROVER_WEIGHT_MINUTES));
+    expect(Math.max(...loads)).toBeLessThanOrEqual(mean + heaviest);
+  });
+
+  it('the heaviest provers are NOT co-located (a count split put them in one leg)', () => {
+    const heavy = Object.entries(PROVER_WEIGHT_MINUTES)
+      .filter(([, w]) => w >= 20)
+      .map(([p]) => p);
+    expect(heavy.length).toBeGreaterThanOrEqual(3);
+    const all = real();
+    const legOf = (path: string) =>
+      Array.from({ length: N }, (_, i) => i + 1).find((i) =>
+        shardProvers(all, i, N).some((p) => p.relPath === path),
+      );
+    const legs = heavy.map(legOf);
+    expect(new Set(legs).size, `heavy provers share a leg: ${legs.join(',')}`).toBe(heavy.length);
   });
 });
 
@@ -237,7 +274,58 @@ describe('#2499 aggregateReports — declared == run, and a missing prover FAILS
     // Hand a leg a smaller assignment than the function gives it.
     reports[0].assigned = reports[0].assigned.slice(1);
     reports[0].results = reports[0].results.slice(1);
-    expect(aggregateReports({ expected, reports }).findings.join('\n')).toMatch(/union|assign/i);
+    expect(aggregateReports({ expected, reports }).findings.join('\n')).toMatch(
+      /assigned set differs from the deterministic shard/,
+    );
+  });
+
+  it('a prover whose count is wrong is a finding EVEN IF the leg reported no findings of its own', () => {
+    // The aggregate re-derives the verdict from declared/run. A leg that wrote
+    // `findings: []` next to declared 13 / run 4 (an old runner, a hand-edited
+    // report) must not read as clean.
+    const expected = legsFor(2);
+    const reports = reportsFor(expected);
+    reports[0].results[0] = {
+      relPath: reports[0].results[0].relPath,
+      declared: 13,
+      run: 4,
+      findings: [],
+    };
+    expect(aggregateReports({ expected, reports }).findings.join('\n')).toMatch(
+      /declared 13.*ran 4/s,
+    );
+  });
+
+  it('the final UNION check catches a partition that is wrong the same way everywhere', () => {
+    // The per-leg recomputation cannot see this: runner and aggregate would agree
+    // on the same lossy function. Only comparing the union with the discovered set
+    // does. (Inject the lossy partition; the real one is covered above.)
+    const lossy = (all: Array<{ relPath: string }>, index: number, count: number) =>
+      shardProvers(all, index, count).slice(1);
+    const expected = legsFor(2);
+    const reports = expected.map((leg) => {
+      const assigned = lossy(
+        discovered.map((relPath) => ({ relPath })),
+        leg.shard,
+        leg.shards,
+      ).map((p) => p.relPath);
+      return makeReport({
+        ...leg,
+        discovered,
+        results: assigned.map((relPath) => ({
+          relPath,
+          summary: { declared: 1, run: 1 },
+          findings: [],
+        })),
+      });
+    });
+    // makeReport derives `assigned` with the REAL function; overwrite with the lossy one.
+    reports.forEach((r, i) => {
+      r.assigned = r.results.map((x: { relPath: string }) => x.relPath);
+      void i;
+    });
+    const out = aggregateReports({ expected, reports, shard: lossy });
+    expect(out.findings.join('\n')).toMatch(/union is not the discovered set/);
   });
 
   it('a PARTIAL dispatch (fewer legs than shards) is reported as partial, not as a union failure', () => {
@@ -255,6 +343,21 @@ describe('#2499 aggregateReports — declared == run, and a missing prover FAILS
     const leg = legsFor(1)[0];
     const r = makeReport({ ...leg, discovered: [], results: [] });
     expect(aggregateReports({ expected: [leg], reports: [r] }).findings.length).toBeGreaterThan(0);
+  });
+});
+
+describe('#2208 the per-prover bound', () => {
+  it('defaults to a finite, positive bound well under the per-leg ceiling', () => {
+    const ms = proverTimeoutMs({});
+    expect(Number.isFinite(ms) && ms > 0).toBe(true);
+    expect(ms).toBe(80 * 60 * 1000);
+  });
+
+  it('is overridable by KNEXT_PROVER_TIMEOUT_MS and refuses nonsense rather than running unbounded', () => {
+    expect(proverTimeoutMs({ KNEXT_PROVER_TIMEOUT_MS: '1500' })).toBe(1500);
+    for (const bad of ['abc', '0', '-5', 'Infinity']) {
+      expect(() => proverTimeoutMs({ KNEXT_PROVER_TIMEOUT_MS: bad }), bad).toThrow();
+    }
   });
 });
 
@@ -385,6 +488,17 @@ describe('#2208 the runner: --shard, --list, --report and a PER-PROVER timeout',
     }
   });
 
+  it('an unrecognised flag is fatal, not "run everything"', () => {
+    const dir = makeTree({ 'mutation-prove-a.mjs': ok(1, 1) });
+    try {
+      const r = run(dir, ['--shrad', '1/2']);
+      expect(r.status).not.toBe(0);
+      expect(`${r.stdout}${r.stderr}`).toMatch(/unknown argument/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('an invalid --shard is fatal, not "run everything"', () => {
     const dir = makeTree({ 'mutation-prove-a.mjs': ok(1, 1) });
     try {
@@ -457,9 +571,19 @@ describe('#2499 the workflow: both refs, sharded, per-shard timeout, aggregated,
   const lane = () => wf.jobs['run-mutation-provers'];
 
   it('plans over BOTH main and integration/v2 by default (a schedule runs from main only)', () => {
-    const plan = JSON.stringify(wf.jobs.plan?.steps ?? []) + JSON.stringify(wf.on);
-    expect(plan).toContain('main');
-    expect(plan).toContain('integration/v2');
+    // Two places state the default and BOTH must carry both refs: the plan's own
+    // fallback is what a SCHEDULE uses (no inputs exist then), the dispatch
+    // input default is what a manual run shows. Asserting the pair as one blob
+    // would let either be dropped while the other kept the test green.
+    const planStep = (wf.jobs.plan?.steps ?? []).find((s) => s.id === 'plan');
+    const scheduled = String((planStep?.env as Record<string, unknown>)?.LANE_REFS ?? '');
+    expect(scheduled, 'the SCHEDULED default').toMatch(/'main integration\/v2'/);
+    const dispatch = (wf.on as { workflow_dispatch?: { inputs?: { refs?: { default?: string } } } })
+      .workflow_dispatch?.inputs?.refs?.default;
+    expect(dispatch, 'the dispatch input default').toBe('main integration/v2');
+    expect(LANE_REFS.join(' '), 'the library constant the plan script falls back to').toBe(
+      'main integration/v2',
+    );
   });
 
   it('the lane job is a matrix fed by the plan job, fail-fast OFF (a red leg must not hide the others)', () => {
@@ -478,11 +602,11 @@ describe('#2499 the workflow: both refs, sharded, per-shard timeout, aggregated,
     expect(JSON.stringify(checkout?.with)).toContain('matrix.sha');
   });
 
-  it('the TIMEOUT is set on the leg (per shard), numeric, and bounded below the old 100-minute serial ceiling', () => {
+  it('the TIMEOUT is set on the leg (per shard) as a number, and is a real bound (not the 360-minute default)', () => {
     const t = lane()['timeout-minutes'];
     expect(typeof t).toBe('number');
     expect(t as number).toBeGreaterThan(0);
-    expect(t as number).toBeLessThan(100);
+    expect(t as number).toBeLessThanOrEqual(180);
   });
 
   it('every prover is bounded too: the lane step sets KNEXT_PROVER_TIMEOUT_MS below the leg timeout', () => {

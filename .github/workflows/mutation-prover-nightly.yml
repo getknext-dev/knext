@@ -138,10 +138,11 @@ jobs:
 
       # Dispatch inputs reach the script as ENV only, never interpolated into the
       # shell, and the script rejects any ref that is not a plain branch name.
-      # LANE_SHARDS is the shard count: 6 legs per ref keeps each leg far inside
-      # its own timeout (the slowest provers run 10-30 minutes each) while the
-      # per-leg setup — install, closure build, toolchains — is paid 12 times, not
-      # 30. `max-parallel` on the lane bounds the load on the shared runner pool.
+      # LANE_SHARDS is the shard count: 6 legs per ref. The provers are placed by
+      # estimated cost (`PROVER_WEIGHT_MINUTES` in scripts/lib/prover-shard.mjs),
+      # so the slowest three never share a leg, while the per-leg setup — install,
+      # closure build, toolchains — is paid 12 times, not 30. `max-parallel` on
+      # the lane bounds the load on the shared runner pool.
       - name: Plan
         id: plan
         env:
@@ -157,12 +158,16 @@ jobs:
     needs: [plan]
     runs-on: ubuntu-latest
     # PER SHARD (the leg, not the lane). Replaces the single 100-minute job
-    # ceiling that cancelled five runs running (#2208). A leg holds roughly a
-    # sixth of the provers; the per-prover bound below is 35 minutes, so one hung
-    # prover costs one prover and the leg still has room to finish the rest and
-    # report. A leg that DOES hit this has no report, which the aggregate turns
-    # into a named finding for that ref and shard — never a silent pass.
-    timeout-minutes: 75
+    # ceiling that cancelled five runs running (#2208). The provers are split by
+    # ESTIMATED COST (`PROVER_WEIGHT_MINUTES`): the heaviest, `empty-dir-guard`
+    # (58 mutations x a ~30-60 s spec), sits in a leg of its own and the other
+    # five legs are balanced to roughly 40 estimated minutes. The per-prover
+    # bound below is 80 minutes, so one hung prover costs one prover (named and
+    # red), and this ceiling is deliberately ABOVE the bound plus a leg's normal
+    # work so that a hang is reported by the runner rather than by a blind
+    # cancellation. A leg that DOES hit this has no report, which the aggregate
+    # turns into a named finding for that ref and shard — never a silent pass.
+    timeout-minutes: 130
     strategy:
       # A red leg must not hide the other eleven: the whole board is the point.
       fail-fast: false
@@ -288,12 +293,13 @@ jobs:
 
       # THIS LEG'S SLICE, each prover under its own bound, with the report the
       # aggregate job consumes written OUTSIDE the tree (the residue check below
-      # must see only what a prover left behind). 2100000 ms = 35 minutes per
-      # prover, deliberately below the leg's 75-minute ceiling.
+      # must see only what a prover left behind). 4800000 ms = 80 minutes per
+      # prover: above the slowest prover's measured/estimated cost (~55 minutes,
+      # `empty-dir-guard`), below the leg's ceiling.
       - name: Run this shard's mutation provers (FAIL on exit code, count mismatch OR timeout)
         env:
           KNEXT_REDIS_LIVE_URL: redis://127.0.0.1:6379
-          KNEXT_PROVER_TIMEOUT_MS: 2100000
+          KNEXT_PROVER_TIMEOUT_MS: 4800000
           PROVER_LANE_REF: ${{ matrix.ref }}
           PROVER_LANE_SHA: ${{ matrix.sha }}
         run: >-
