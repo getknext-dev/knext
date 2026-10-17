@@ -291,6 +291,26 @@ func TestOperatorWritePolicyNarrowsSecretAndConfigMapWrites(t *testing.T) {
 		}
 	})
 
+	t.Run("the operator cannot lift its own restriction", func(t *testing.T) {
+		// RBAC, not the policy: the shipped role holds nothing on the policy kinds.
+		isRBACDenial := func(err error) bool {
+			return err != nil && apierrors.IsForbidden(err) && !strings.Contains(err.Error(), "ValidatingAdmissionPolicy '")
+		}
+		b := binding.DeepCopy()
+		if err := operator.Delete(ctx, b); !isRBACDenial(err) {
+			t.Errorf("the operator deleted (or was not RBAC-refused deleting) its own policy binding: %v", err)
+		}
+		p := policy.DeepCopy()
+		p.Spec.FailurePolicy = nil
+		if err := operator.Update(ctx, p); !isRBACDenial(err) {
+			t.Errorf("the operator edited (or was not RBAC-refused editing) its own policy: %v", err)
+		}
+		// Control: the binding is still there, so the denial above bit something real.
+		if err := admin.Get(ctx, client.ObjectKeyFromObject(binding), &admissionregistrationv1.ValidatingAdmissionPolicyBinding{}); err != nil {
+			t.Errorf("the policy binding is gone: %v", err)
+		}
+	})
+
 	t.Run("other principals are not affected", func(t *testing.T) {
 		for _, who := range []struct {
 			name   string

@@ -22,7 +22,11 @@
  *   - the code-side scan: a Secret named without the registered helper, a new
  *     Secret writer, an extra verb on a registered writer, a Secret written
  *     through an unstructured object, an interface-typed object written from a
- *     parameter, and a registered writer that stops writing.
+ *     parameter, and a registered writer that stops writing;
+ *   - the operator must not be able to lift the restriction itself: a shipped
+ *     role that writes the policy kinds, scanned and then tried on a real
+ *     apiserver, and a leader-election lock on a ConfigMap, which the policy
+ *     would refuse.
  *
  * Graded by `go test` targets in packages/kn-next-operator: the typed-scan and
  * lockstep tests, the install-bundle tests (the rendered bundle is rebuilt for
@@ -39,6 +43,8 @@
  *
  * Usage:
  *   node scripts/mutation-prove-2462-operator-write-policy.mjs
+ *   MUTATION_ONLY=R01,L01 node scripts/mutation-prove-2462-operator-write-policy.mjs
+ *     (just those rows, for a fast re-check; the nightly lane runs them all)
  */
 
 import { spawnSync } from 'node:child_process';
@@ -63,6 +69,10 @@ const DEFAULT_KUST = resolve(REPO_ROOT, 'packages/kn-next-operator/config/defaul
 const ZONEKEY = resolve(REPO_ROOT, 'packages/kn-next-operator/internal/controller/zone_signing_key_reconcile.go');
 // biome-ignore format: one-line resolve() for the anchor-drift scan
 const NEXTAPP = resolve(REPO_ROOT, 'packages/kn-next-operator/internal/controller/nextapp_controller.go');
+// biome-ignore format: one-line resolve() for the anchor-drift scan
+const ROLE = resolve(REPO_ROOT, 'packages/kn-next-operator/config/rbac/role.yaml');
+// biome-ignore format: one-line resolve() for the anchor-drift scan
+const MAIN = resolve(REPO_ROOT, 'packages/kn-next-operator/cmd/main.go');
 
 const PROVER = {
   subjects: {
@@ -71,6 +81,8 @@ const PROVER = {
     defaultKust: DEFAULT_KUST,
     zonekey: ZONEKEY,
     nextapp: NEXTAPP,
+    role: ROLE,
+    main: MAIN,
   },
 };
 
@@ -91,6 +103,10 @@ const SOURCE = unit('TestOperatorWritePolicySourceIsStrict', INSTALL);
 const APISERVER = unit('TestOperatorWritePolicyNarrowsSecretAndConfigMapWrites');
 /** The rendered bundle: re-render dist/install.yaml, then the install tests that read it. */
 const BUNDLE = { kind: 'bundle' };
+/** The RBAC scan: no shipped rule may let the operator write its own policy. */
+const NO_SELF_EDIT = unit('TestOperatorCannotEditItsOwnWritePolicy');
+/** The leader-election lock must stay a Lease (a ConfigMap lock would be refused by the policy). */
+const LEASE_LOCK = unit('TestBuildManagerOptionsLeaderElectionNeverLocksOnAConfigMap', './cmd/...');
 
 const MUTATIONS = [
   // --- the policy ----------------------------------------------------------------
@@ -323,7 +339,49 @@ const MUTATIONS = [
     replacement: '		if err := error(nil); err != nil {',
     test: INVENTORY,
   },
+  // --- the operator must not be able to lift its own restriction -----------------
+  {
+    id: 'R01',
+    claim: 'the shipped role lets the operator edit and delete the policy binding (RBAC scan)',
+    subject: 'role',
+    anchor: 'rules:\n- apiGroups:\n  - ""\n  resources:\n  - configmaps',
+    replacement:
+      'rules:\n- apiGroups:\n  - admissionregistration.k8s.io\n  resources:\n  - validatingadmissionpolicies\n  - validatingadmissionpolicybindings\n  verbs:\n  - delete\n  - update\n- apiGroups:\n  - ""\n  resources:\n  - configmaps',
+    test: NO_SELF_EDIT,
+  },
+  {
+    id: 'R02',
+    claim: 'the same grant lets the operator delete its binding on a real apiserver',
+    subject: 'role',
+    anchor: 'rules:\n- apiGroups:\n  - ""\n  resources:\n  - configmaps',
+    replacement:
+      'rules:\n- apiGroups:\n  - admissionregistration.k8s.io\n  resources:\n  - validatingadmissionpolicies\n  - validatingadmissionpolicybindings\n  verbs:\n  - delete\n  - update\n- apiGroups:\n  - ""\n  resources:\n  - configmaps',
+    test: APISERVER,
+  },
+  // --- the leader-election lock stays a Lease ---------------------------------------
+  {
+    id: 'L01',
+    claim: 'leader election locks on a ConfigMap, which the policy would refuse',
+    subject: 'main',
+    anchor: '		LeaderElectionReleaseOnCancel: true,',
+    replacement:
+      '		LeaderElectionReleaseOnCancel: true,\n		LeaderElectionResourceLock:    "configmapsleases",',
+    test: LEASE_LOCK,
+  },
 ];
+
+// MUTATION_ONLY=R01,L01 runs just those rows (a fast re-check while iterating). Unset,
+// as in the nightly lane, every row runs; the declared count is the rows selected, so
+// declared == run holds either way.
+const ONLY = (process.env.MUTATION_ONLY ?? '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+const ROWS = ONLY.length === 0 ? MUTATIONS : MUTATIONS.filter((m) => ONLY.includes(m.id));
+if (ONLY.length > 0 && ROWS.length !== ONLY.length) {
+  console.error(`${NAME}: MUTATION_ONLY names a row that does not exist (${ONLY.join(',')})`);
+  process.exit(2);
+}
 
 function envtestAssetsPresent() {
   if (process.env.KUBEBUILDER_ASSETS) return true;
@@ -363,12 +421,20 @@ function run(bin, args, env = {}, { showErrors = false } = {}) {
  * tool downloads), then run the install tests that read it. A render that fails
  * is a red guard: a mutated overlay that no longer builds is not a bundle.
  */
-function bundleExit(kustomize) {
-  const render = run('bash', [
+function renderBundle(kustomize) {
+  return run('bash', [
     '-c',
     `mkdir -p dist && "${kustomize}" build config/default > dist/install.yaml && ./hack/set-ingress-class.sh dist/install.yaml ""`,
   ]);
-  if (render !== 0) return render;
+}
+
+function bundleExit(kustomize) {
+  // A render that fails would "kill" the row for the wrong reason (a broken overlay,
+  // not a failed assertion), so it stops the prover instead of scoring.
+  if (renderBundle(kustomize) !== 0) {
+    console.error(`${NAME}: kustomize could not render config/default; the row proves nothing`);
+    process.exit(2);
+  }
   return run('go', ['test', '-count=1', '-run', 'WritePolicy', INSTALL], {
     KNEXT_REQUIRE_BUNDLE: '1',
   });
@@ -387,11 +453,11 @@ function buildsExit() {
   return run('go', ['test', '-count=1', '-run', '^$', CTRL, INSTALL], {}, { showErrors: true });
 }
 
-declareMutations(MUTATIONS.length);
-console.log(`${NAME}: ${MUTATIONS.length} mutations declared`);
+declareMutations(ROWS.length);
+console.log(`${NAME}: ${ROWS.length} mutations declared`);
 
 // Preflight: every anchor occurs exactly once BEFORE anything expensive runs.
-for (const m of MUTATIONS) {
+for (const m of ROWS) {
   const path = PROVER.subjects[m.subject];
   if (path === undefined) {
     console.error(`${NAME}: ${m.id} names no subject ${m.subject}`);
@@ -421,7 +487,7 @@ if (KUSTOMIZE === '') {
 // below is noise.
 assertTreeClean(REPO_ROOT, 'baseline');
 const seen = new Set();
-for (const m of MUTATIONS) {
+for (const m of ROWS) {
   const key = JSON.stringify(m.test);
   if (seen.has(key)) continue;
   seen.add(key);
@@ -434,7 +500,7 @@ for (const m of MUTATIONS) {
 console.log(`${NAME}: baseline green (${seen.size} distinct guards)`);
 
 let failed = 0;
-for (const m of MUTATIONS) {
+for (const m of ROWS) {
   assertTreeClean(REPO_ROOT, `before ${m.id}`);
   const snap = snapshot(PROVER.subjects[m.subject]);
   let built;
@@ -459,5 +525,10 @@ for (const m of MUTATIONS) {
   console.log(`${ok ? 'KILLED   ' : '*** SURVIVED ***'} ${m.id} exit=${code} — ${m.claim}`);
 }
 
-console.log(`${NAME}: ${MUTATIONS.length - failed}/${MUTATIONS.length} went red as required`);
+// The last bundle row rendered a MUTATED overlay into dist/install.yaml (gitignored). Put
+// the restored tree's bundle back so a local `go test ./internal/install/` is not left
+// reading a mutant.
+if (ROWS.some((m) => m.test.kind === 'bundle')) renderBundle(KUSTOMIZE);
+
+console.log(`${NAME}: ${ROWS.length - failed}/${ROWS.length} went red as required`);
 process.exit(failed === 0 ? 0 : 1);

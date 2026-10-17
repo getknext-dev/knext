@@ -654,3 +654,37 @@ func TestPolicyAllowListEqualsWhatTheOperatorWrites(t *testing.T) {
 		}
 	}
 }
+
+// TestOperatorCannotEditItsOwnWritePolicy: the policy narrows the operator only
+// if the operator cannot lift it. No rule shipped under config/rbac, for the
+// manager or anyone else, may write the policy or its binding, directly or by
+// wildcard. (The envtest proof asserts the same against a real apiserver.)
+func TestOperatorCannotEditItsOwnWritePolicy(t *testing.T) {
+	writes := map[string]bool{"create": true, "update": true, "patch": true, "delete": true, "deletecollection": true, "*": true}
+	policyKinds := map[string]bool{"validatingadmissionpolicies": true, "validatingadmissionpolicybindings": true, "*": true}
+	scanned := 0
+	for _, r := range loadRBACRules(t) {
+		scanned++
+		groupHit := false
+		for _, g := range r.rule.APIGroups {
+			groupHit = groupHit || g == "admissionregistration.k8s.io" || g == "*"
+		}
+		resourceHit := false
+		for _, res := range r.rule.Resources {
+			resourceHit = resourceHit || policyKinds[res]
+		}
+		if !groupHit || !resourceHit {
+			continue
+		}
+		for _, v := range r.rule.Verbs {
+			if writes[v] {
+				t.Errorf("%s/%s (%s) grants %q on the admission policy kinds: the operator could lift its own Secret/ConfigMap "+
+					"write restriction", r.kind, r.name, r.file, v)
+			}
+		}
+	}
+	// Both halves: a scan of no rules would pass vacuously.
+	if scanned < 5 {
+		t.Fatalf("scanned only %d RBAC rules; the guard would pass vacuously", scanned)
+	}
+}
