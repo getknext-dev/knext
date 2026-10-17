@@ -130,8 +130,10 @@ func TestUndecidedOnlyWhenOtherwiseAccepted(t *testing.T) {
 // Service survives every transient error; a revoked or malformed reference does
 // not). The scan only makes the obvious regressions fail early, and cheaply.
 //
-//	G1  removeRendered is called only from Reconcile, in exactly two places: the
-//	    finalizer (deletion) block, and the else of obs.accepted().
+//	G1  removeRendered is called only from Reconcile, in exactly three places: the
+//	    finalizer (deletion) block, the else of obs.accepted(), and the
+//	    `stuckOnRevoked` block (the spec cannot be rolled out AND the running
+//	    template has a definitive violation).
 //	G2  no branch whose condition mentions an error value (err, readErr, rmErr,
 //	    getErr ... or the result of a call compared with nil) may call
 //	    removeRendered or build a sovereigntyViolation in its body: an error is
@@ -280,7 +282,7 @@ func TestNoAPIErrorReachesTeardownOrAViolation(t *testing.T) {
 	}
 }
 
-func TestRemoveRenderedHasTwoSanctionedCallSites(t *testing.T) {
+func TestRemoveRenderedHasThreeSanctionedCallSites(t *testing.T) {
 	sanctioned := map[string]bool{}
 	for _, file := range bsReconcilerSources {
 		fset := token.NewFileSet()
@@ -328,16 +330,19 @@ func TestRemoveRenderedHasTwoSanctionedCallSites(t *testing.T) {
 					case cond == "obs.accepted()" && inElse:
 						sanctioned["refused"] = true
 						return true
+					case cond == "stuckOnRevoked" && !inElse:
+						sanctioned["stuckOnRevoked"] = true
+						return true
 					}
 				}
-				t.Errorf("%s: removeRendered is outside the two sanctioned forks (the finalizer block, "+
-					"the else of obs.accepted()): a function may be torn down only by deletion or a definitive refusal", pos)
+				t.Errorf("%s: removeRendered is outside the sanctioned forks (the finalizer block, "+
+					"the else of obs.accepted(), stuckOnRevoked): a function may be torn down only by deletion or a definitive refusal", pos)
 				return true
 			})
 		}
 	}
-	if !sanctioned["finalizer"] || !sanctioned["refused"] {
-		t.Fatalf("the scan must see both sanctioned call sites, saw %v", sanctioned)
+	if !sanctioned["finalizer"] || !sanctioned["refused"] || !sanctioned["stuckOnRevoked"] {
+		t.Fatalf("the scan must see all three sanctioned call sites, saw %v", sanctioned)
 	}
 }
 

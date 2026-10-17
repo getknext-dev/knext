@@ -287,9 +287,13 @@ reference's name cannot be a Secret name.
 
 **What always holds**
 
-- **What runs is always re-checked.** On every pass, before anything is rendered, the Secrets the running Knative Service
-  already mounts are checked against the zone, whatever the spec now says. A Secret that has been re-marked for another
-  zone removes the function even when the new spec drops it, or when the new spec cannot be rolled out.
+- **What is running is re-checked whenever a change cannot roll out.** When the new spec cannot be verified, or cannot be
+  rolled out (a webhook or Knative refuses the new Service), the previous template stays up, so the Secrets it already
+  mounts are checked against the zone. A Secret that has been re-marked for another zone, or is no longer allowed,
+  removes the function in that case, whatever the new spec says. When a valid spec does roll out, the new template
+  replaces the old one, so nothing revoked survives it, and a Secret the old template named that has since been deleted
+  (a routine rotation: create the new version, point the spec at it, prune the old one) is not a violation: the function
+  is updated in place.
 - A reference that can never name a Secret (an empty name, `..`, a name containing `/`, upper-case letters, or more than
   253 characters) is not "unverified": it is refused straight away as a violation.
 - A volume cannot mount `/`, `/dev` or `/dev/log` (Knative serving reserves them), and mount paths must be clean

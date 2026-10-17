@@ -208,6 +208,55 @@ var _ = Describe("BackendService reconciler: an unreadable Secret never keeps a 
 		Expect(c.Message).To(ContainSubstring(`"stripe"`))
 	})
 
+	It("rolls a routine Secret rotation out in place: the old version is pruned and nothing is torn down", func() {
+		ns := setup("stripe-v1", "stripe-v2")
+		createFunction(ctx, ns, "pricing", "orders", envFrom("stripe-v1"))
+		reconcileFunction(ctx, ns, "pricing")
+		ksvcKey := types.NamespacedName{Namespace: ns, Name: "pricing"}
+		before := &servingv1.Service{}
+		Expect(k8sClient.Get(ctx, ksvcKey, before)).To(Succeed())
+
+		By("the spec points at v2, then the GitOps prune deletes v1")
+		bs := getFunction(ctx, ns, "pricing")
+		bs.Spec.EnvFrom = specEnvFromSecret("stripe-v2").EnvFrom
+		Expect(k8sClient.Update(ctx, bs)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "stripe-v1", Namespace: ns}})).To(Succeed())
+
+		r := newBSReconciler()
+		recorder := r.Recorder.(*record.FakeRecorder)
+		Expect(reconcileFn(r, ns)).To(Succeed())
+
+		after := &servingv1.Service{}
+		Expect(k8sClient.Get(ctx, ksvcKey, after)).To(Succeed(), "the function must not be torn down")
+		Expect(after.UID).To(Equal(before.UID), "the same Knative Service, rolled in place: no cold start, no dropped requests")
+		Expect(after.Generation).To(BeNumerically(">", before.Generation), "the new template was rolled out")
+		Expect(after.Spec.Template.Spec.Containers[0].EnvFrom[0].SecretRef.Name).To(Equal("stripe-v2"))
+		Expect(sovereignty(ns).Status).To(Equal(metav1.ConditionTrue))
+		Expect(functionCondition(getFunction(ctx, ns, "pricing"), ConditionReady).Reason).NotTo(Equal(ReasonSovereigntyViolation))
+		for len(recorder.Events) > 0 {
+			Expect(<-recorder.Events).NotTo(HavePrefix("Warning"), "a routine rotation raises no Warning")
+		}
+	})
+
+	It("keeps a healthy running function when its new spec cannot be rolled out and nothing was revoked", func() {
+		ns := setup("stripe")
+		createFunction(ctx, ns, "pricing", "orders", envFrom("stripe"))
+		reconcileFunction(ctx, ns, "pricing")
+		before := &servingv1.Service{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "pricing"}, before)).To(Succeed())
+
+		r := newBSReconciler()
+		r.Client = webhookLikeClient{specOverrideClient{Client: k8sClient, mutate: func(bs *appsv1alpha1.BackendService) {
+			bs.Spec.Env = append(bs.Spec.Env, corev1.EnvVar{Name: "FEATURE", Value: "on"})
+		}}}
+		Expect(reconcileFn(r, ns)).NotTo(Succeed(), "the refused rollout is an error, retried with backoff")
+
+		after := &servingv1.Service{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "pricing"}, after)).To(Succeed())
+		Expect(after.UID).To(Equal(before.UID))
+		Expect(sovereignty(ns).Status).To(Equal(metav1.ConditionTrue))
+	})
+
 	Context("the CRD refuses a mount path Knative serving reserves", func() {
 		mount := func(ns, path string) error {
 			bs := &appsv1alpha1.BackendService{

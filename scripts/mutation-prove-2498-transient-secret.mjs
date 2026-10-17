@@ -72,7 +72,7 @@ const CLASSIFY =
   'TestSovereigntyUnreadableSecretIsUnverifiedNotAViolation|TestSovereigntyDefinitiveViolationSurvivesAnUnverifiedNeighbour|TestSovereigntyNotFoundSecretIsStillAViolationNotUnverified|TestSovereigntyNoZoneRefusesEvenWhenTheReadFails';
 const UNDECIDED = 'TestUndecidedOnlyWhenOtherwiseAccepted';
 const GUARD =
-  'TestNoAPIErrorReachesTeardownOrAViolation|TestRemoveRenderedHasTwoSanctionedCallSites|TestReconcileLeavesOnUndecidedBeforeTheAcceptedFork|TestKnativeServiceIsDeletedOnlyInsideRemoveRendered|TestSovereigntyViolationsAreBuiltOnlyWhereSanctioned|TestOnlyNameProblemsAndNotFoundReachADefinitiveVerdict';
+  'TestNoAPIErrorReachesTeardownOrAViolation|TestRemoveRenderedHasThreeSanctionedCallSites|TestReconcileLeavesOnUndecidedBeforeTheAcceptedFork|TestKnativeServiceIsDeletedOnlyInsideRemoveRendered|TestSovereigntyViolationsAreBuiltOnlyWhereSanctioned|TestOnlyNameProblemsAndNotFoundReachADefinitiveVerdict';
 const VERDICT_UNIT = 'TestVerdictForAnUndecidedFunctionIsUnverifiedNotAViolation';
 const REVOKED = 'an unreadable Secret never keeps a revoked one running';
 const FORBIDDEN = `${REVOKED} a persistent Forbidden`;
@@ -123,8 +123,10 @@ const GO_MUTATIONS = [
     id: 'M02',
     claim: 'Reconcile no longer leaves on an undecided function (it falls into the teardown fork)',
     subject: 'controller',
-    anchor: 'if obs.undecided() {',
-    replacement: 'if false {',
+    anchor:
+      'if obs.undecided() {\n\t\t// A Secret lookup that errored (not NotFound) says nothing about the',
+    replacement:
+      'if false {\n\t\t// A Secret lookup that errored (not NotFound) says nothing about the',
     test: envtest(TRANSIENT),
   },
   {
@@ -246,6 +248,24 @@ const GO_MUTATIONS = [
     replacement:
       'runViolations, runUnverified := []sovereigntyViolation(nil), []unverifiedSecret(nil)',
     test: envtest(`${REVOKED} tears down a running function whose Secret was revoked`),
+  },
+  {
+    id: 'A05',
+    claim:
+      'the running template is acted on even when the spec rolls out (a routine Secret rotation tears a healthy function down)',
+    subject: 'controller',
+    anchor: 'if obs.undecided() {\n\t\tobs.violations = append(obs.violations, runViolations...)',
+    replacement: 'if true {\n\t\tobs.violations = append(obs.violations, runViolations...)',
+    test: envtest(`${REVOKED} rolls a routine Secret rotation out in place`),
+  },
+  {
+    id: 'A06',
+    claim:
+      'a running-template violation tears the function down after a rollout that SUCCEEDED, not only when it fails',
+    subject: 'controller',
+    anchor: 'stuckOnRevoked := rollErr != nil && len(runViolations) > 0',
+    replacement: 'stuckOnRevoked := len(runViolations) > 0',
+    test: envtest(`${REVOKED} rolls a routine Secret rotation out in place`),
   },
   {
     id: 'A04',
