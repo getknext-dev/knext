@@ -25,6 +25,8 @@ import {
   ALLOWED_KINDS,
   checkManifestKinds,
   KIND_EXCEPTIONS,
+  KIND_UNREADABLE_WAIVERS,
+  kindsOfSource,
   MANIFEST_WRITES,
   scanClusterWriteSource,
   scanClusterWriteTree,
@@ -46,6 +48,115 @@ describe('cluster-write scan: RED fixtures', () => {
     ['a rollout', 'x(["kubectl", "rollout", "restart", "deploy", n]);'],
   ])('reds %s as a foreign write kind', (_label, src) => {
     expect(rules(src)).toContain('foreign-write-kind');
+  });
+
+  it.each([
+    [
+      'kubectl behind env in an argv array',
+      "runInherit(['env', 'KUBECONFIG=/x', 'kubectl', 'label', 'secret', 'x', 'a=b']);",
+    ],
+    [
+      'kubectl behind sudo in an argv array',
+      "runInherit(['sudo', 'kubectl', 'label', 'secret', 'x', 'a=b']);",
+    ],
+    [
+      'kubectl behind sudo with a flag that takes a value',
+      "runInherit(['sudo', '-u', 'root', 'kubectl', 'delete', 'ksvc', 'x']);",
+    ],
+    [
+      'kubectl behind two wrappers',
+      "runInherit(['env', 'X=1', 'sudo', 'kubectl', 'delete', 'ksvc', 'x']);",
+    ],
+    [
+      'kubectl behind env given to execFileSync',
+      "execFileSync('env', ['kubectl', 'delete', 'ksvc', 'x']);",
+    ],
+    ['kubectl behind xargs', "runInherit(['xargs', '-n1', 'kubectl', 'delete', 'ksvc']);"],
+  ])('reds %s as a foreign write kind', (_label, src) => {
+    expect(rules(src)).toContain('foreign-write-kind');
+  });
+
+  it.each([
+    ['an assignment to a member', "m.kind = 'Secret';"],
+    ['an optional-chained assignment', "m?.kind = 'Secret';"],
+    ['a constant used as the value', "const K = 'Secret';\nconst m = ({ kind: K });"],
+    ['a let-bound constant used as the value', "let K = 'Secret';\nconst m = ({ kind: K });"],
+    ['a computed single-quote key', "const m = { ['kind']: 'Secret' };"],
+    ['a computed double-quote key', 'const m = { ["kind"]: "Secret" };'],
+    ['a computed template key and value', 'const m = { [`kind`]: `Secret` };'],
+  ])('reds a foreign kind written as %s', (_label, src) => {
+    expect(rules(src)).toContain('foreign-kind');
+  });
+
+  it.each([
+    ['an identifier that is not a known constant', 'const m = { kind: someKind, spec: {} };'],
+    ['a member expression value', 'const m = { kind: opts.kind };'],
+    ['a function call value', 'const m = { kind: pick() };'],
+    ['an assignment of an unknown identifier', 'm.kind = other;'],
+    [
+      'a reassigned let used as the value',
+      "let K = 'NextApp';\nK = pick();\nconst m = { kind: K };",
+    ],
+  ])('fails (does not pass) on an unreadable kind: %s', (_label, src) => {
+    expect(rules(src)).toContain('unparseable-kind');
+  });
+
+  it.each([
+    ['a type annotation', 'interface M { readonly kind: MethodKind; }\ntype T = { kind: Foo };'],
+    ['a comparison', "if (x.kind === 'Secret') {}\nif (x.kind !== 'Job') {}"],
+    ['a lower-case discriminator', "const m = { kind: 'verb' }; m.kind = 'deploy';"],
+    [
+      'a known allowed constant',
+      "const NEXTAPP_KIND = 'NextApp';\nconst m = { kind: NEXTAPP_KIND };",
+    ],
+    ['a destructured kind', 'const { kind } = node;'],
+  ])('passes %s', (_label, src) => {
+    expect(scan(src).violations).toEqual([]);
+  });
+
+  it('an unreadable-kind waiver admits exactly its count, and a changed count reds', () => {
+    const glue = 'packages/grpc/src/glue-plugin.ts';
+    expect(KIND_UNREADABLE_WAIVERS[glue].count).toBe(1);
+    const one = 'const a = { kind: `${k}` };';
+    const run = (src: string) =>
+      scanClusterWriteSource(src, { file: glue, allow: [], kindExceptions: {} }).violations.map(
+        (v: { rule: string }) => v.rule,
+      );
+    expect(run(one)).toEqual([]);
+    expect(run(`${one}\n${one}`)).toContain('unparseable-kind'); // one more than waived
+    expect(run('const a = 1;')).toContain('unparseable-kind'); // fewer than waived: stale
+    // a file with no waiver gets none
+    expect(rules(one)).toContain('unparseable-kind');
+  });
+
+  it('the kinds a source file can emit include those forms, so kindSources see them', () => {
+    expect(kindsOfSource("m.kind = 'Secret';").map((k: { kind?: string }) => k.kind)).toEqual([
+      'Secret',
+    ]);
+    expect(
+      kindsOfSource("const K = 'Secret';\nconst m = ({ kind: K });").map(
+        (k: { kind?: string }) => k.kind,
+      ),
+    ).toEqual(['Secret']);
+    expect(
+      kindsOfSource("const m = { ['kind']: 'Secret' };").map((k: { kind?: string }) => k.kind),
+    ).toEqual(['Secret']);
+    // ...and an entry whose source can emit one of them but does not declare it reds
+    const entry = {
+      file: 'a.ts',
+      verb: 'apply',
+      kinds: ['NextApp'],
+      kindSources: ['b.ts'],
+      reason: 'fixture entry',
+    };
+    const sources: Record<string, string> = {
+      'b.ts': "const a = { kind: 'NextApp' };\nm.kind = 'Secret';",
+    };
+    const kindsOf = (f: string) =>
+      kindsOfSource(sources[f] ?? '')
+        .map((k: { kind?: string }) => k.kind)
+        .filter((k: string | undefined): k is string => k !== undefined);
+    expect(checkManifestKinds([entry], kindsOf).map((v) => v.rule)).toContain('undeclared-kind');
   });
 
   it.each([

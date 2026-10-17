@@ -74,6 +74,14 @@ describe('the D3 spawn scan: RED fixtures', () => {
     ['execa with an absolute-path func deploy', "execa('/opt/func', ['deploy']);"],
     ['a member call handed an absolute-path kn argv', "x.run(['/usr/local/bin/kn', 'service']);"],
     ['an optional-chained member spawn of func deploy', "host?.run(['/opt/func', 'deploy']);"],
+    [
+      'a let-bound absolute-path kn handed to a seam',
+      "let KN = '/usr/local/bin/kn';\nhost.run([KN, 'service', 'apply']);",
+    ],
+    [
+      'createRequire(...) of child_process, then kn',
+      "const req = createRequire(import.meta.url)('node:child_process');\nreq.execFileSync('kn', ['service']);",
+    ],
     ['a kn.exe argv', "runInherit(['kn.exe', 'service']);"],
     [
       'a backtick dynamic import with an aliased callee',
@@ -100,6 +108,18 @@ describe('the D3 spawn scan: RED fixtures', () => {
       'a backtick dynamic import of child_process',
       'const cp = await import(`node:child_process`);',
     ],
+    [
+      'createRequire(...) of child_process',
+      "const cp = createRequire(import.meta.url)('node:child_process');",
+    ],
+    [
+      'createRequire(...) of child_process, backtick',
+      'const cp = createRequire(import.meta.url)(`child_process`);',
+    ],
+    [
+      'a reassigned let program handed to a seam',
+      "let P = '/bin/ls';\nP = pick();\nhost.run([P, 'x']);",
+    ],
     ['a backtick require of child_process', 'const cp = require(`node:child_process`);'],
     ['a member call handed an array with a computed program', "host.run([program, 'x']);"],
     [
@@ -111,6 +131,19 @@ describe('the D3 spawn scan: RED fixtures', () => {
     expect(v.length).toBeGreaterThan(0);
     expect(v.every((x) => x.rule === 'unparseable-spawn' || x.rule === 'unparseable-import')).toBe(
       true,
+    );
+  });
+
+  it('reads a let-bound program as the string it is, and a reassigned one as unreadable', () => {
+    const bound = "let KN = '/usr/local/bin/kn';\nhost.run([KN, 'service', 'apply']);";
+    expect(rules(bound)).toContain('forbidden-spawn');
+    const moved = "let KN = '/usr/local/bin/kn';\nKN = pick();\nhost.run([KN, 'service']);";
+    expect(rules(moved)).toEqual(['unparseable-spawn']);
+  });
+
+  it('reads kn behind a wrapper in an argv array', () => {
+    expect(rules("runInherit(['sudo', '-u', 'root', 'kn', 'service']);")).toContain(
+      'forbidden-spawn',
     );
   });
 

@@ -219,7 +219,7 @@ export async function deployFunction(args: DeployFunctionArgs): Promise<number> 
       host.apply({ crPath, namespace, context });
     } catch (err) {
       io.stderr(
-        `kubectl apply of the BackendService FAILED (kubectl's own error is printed above): ` +
+        `kubectl apply of the BackendService FAILED (kubectl's own error, if it ran, is printed above): ` +
           `${(err as Error).message}\n` +
           'The preflight passed, so this is not field skew; check permissions and that the ' +
           'zone exists in the namespace.\n',

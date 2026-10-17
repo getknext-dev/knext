@@ -42,7 +42,9 @@ import {
   lineOf,
   matchClose,
   prepare,
+  progName,
   splitTopLevel,
+  wrappedArgvs,
 } from './ts-call-scan.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -86,6 +88,21 @@ export const KIND_EXCEPTIONS = {
     'SelfSubjectRulesReview',
   ],
   'packages/kn-next/src/cli/ci/init-ci.ts': ['Role', 'RoleBinding', 'ServiceAccount'],
+  'packages/kn-next/src/cli/ci/credential-scope.ts': ['Role'],
+};
+
+/**
+ * A kind the scan cannot read is a violation, unless the file is listed here with
+ * the exact number of such places and why they are not Kubernetes kinds. A count
+ * that changes (up or down) reds.
+ */
+export const KIND_UNREADABLE_WAIVERS = {
+  'packages/grpc/src/glue-plugin.ts': {
+    count: 1,
+    reason:
+      'writes TypeScript for the generated client; the `kind` it emits is the RPC kind ' +
+      '(unary/stream), not a Kubernetes kind.',
+  },
 };
 
 /**
@@ -97,6 +114,8 @@ export const KIND_EXCEPTIONS = {
  *                     the object is never stored.
  *   init-ci.ts        WRITES RBAC YAML to disk for the user to review and apply
  *                     themselves; the CLI holds no kubectl call for it.
+ *   credential-scope.ts  renders the same RBAC Role text (for init-ci and the CI
+ *                     credential check); it is text, never applied by the CLI.
  */
 
 /**
@@ -236,12 +255,6 @@ const normResource = (r) => r.toLowerCase().replace(/\.apps\.kn-next\.dev$/, '')
 
 const lit = (e) => (e?.type === 'string' ? e.value : undefined);
 
-/** Program name: no directory (either separator), no `.exe`. */
-const progName = (v) =>
-  v
-    .trim()
-    .replace(/^.*[\\/]/, '')
-    .replace(/\.exe$/i, '');
 const isKubectl = (e) => e?.type === 'string' && progName(e.value) === 'kubectl';
 
 const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh']);
@@ -434,22 +447,85 @@ function shellCommandOf(elems) {
   return i === -1 ? undefined : (elems[i + 1] ?? { type: 'dynamic', text: '(nothing)' });
 }
 
-/** `kind:` values the source can emit (object literals, YAML text, *_KIND constants). */
-function kindsIn(src) {
+const TYPE_WORDS = new Set([
+  'string',
+  'number',
+  'boolean',
+  'unknown',
+  'any',
+  'never',
+  'object',
+  'bigint',
+  'symbol',
+  'void',
+]);
+
+/**
+ * The kinds a source file can emit, and the places it writes a kind it cannot
+ * read. Exported because `checkManifestKinds` reads the kind SOURCES through it.
+ *
+ * Read: a property `kind: 'X'` (bare, "quoted" or computed `['kind']`), an
+ * assignment `m.kind = 'X'`, a value that is a string literal, a no-hole
+ * template, or a constant bound to one in the same file, YAML text (`kind: X`),
+ * and `*_KIND = 'X'` constants. Unreadable (it FAILS): a template with a hole, or
+ * an identifier / member / call that is not a known constant. Not read: a lower
+ * -case value (a discriminator, not a Kubernetes kind), a type annotation
+ * (`readonly kind: T;`, or a line starting `type`/`interface`), a comparison.
+ *
+ * @param {string} src
+ * @returns {Array<{kind?: string, line: number, unreadable?: boolean}>}
+ */
+export function kindsOfSource(src) {
+  const { consts } = prepare(src);
   const out = [];
   const lines = src.split('\n');
+  const KEY = String.raw`(?:["']kind["']|\[\s*["'\x60]kind["'\x60]\s*\]|(?<![\w$])kind)`;
+  const prop = new RegExp(`${KEY}\\s*:\\s*(.*)$`);
+  const assign = /(?:\??\.\s*kind|\[\s*["'\x60]kind["'\x60]\s*\])\s*=(?!=)\s*(.*)$/;
   for (let i = 0; i < lines.length; i++) {
     const text = lines[i];
     const t = text.trim();
     if (t.startsWith('//') || t.startsWith('*') || t.startsWith('/*')) continue;
-    // a key written bare, "double-quoted" or 'single-quoted'; a value in any quote or a template
-    for (const m of text.matchAll(/(?<![\w.])["']?kind["']?\s*:\s*(["'`])([A-Z][A-Za-z0-9]*)\1/g))
-      out.push({ kind: m[2], line: i + 1 });
-    if (/(?<![\w.])["']?kind["']?\s*:\s*`[^`]*\$\{/.test(text))
+    if (/^(?:export\s+)?(?:declare\s+)?(?:type|interface)\b/.test(t)) continue;
+
+    // The value after a `kind:` key or a `.kind =` assignment.
+    const value = (rest, isAssign) => {
+      const v = rest.trim();
+      const lit = /^(["'`])([A-Za-z][A-Za-z0-9]*)\1/.exec(v);
+      if (lit) {
+        if (/^[A-Z]/.test(lit[2])) out.push({ kind: lit[2], line: i + 1 });
+        return;
+      }
+      if (/^`/.test(v)) {
+        if (/^`[^`]*\$\{/.test(v)) out.push({ kind: undefined, line: i + 1, unreadable: true });
+        return;
+      }
+      const id = /^([A-Za-z_$][\w$]*(?:\s*\??\.\s*[A-Za-z_$][\w$]*)*)\s*(.?)/.exec(v);
+      if (!id) return;
+      const name = id[1].replace(/\s+/g, '');
+      if (consts.has(name)) {
+        const c = consts.get(name);
+        if (/^[A-Z]/.test(c)) out.push({ kind: c, line: i + 1 });
+        return;
+      }
+      if (['true', 'false', 'null', 'undefined', 'typeof', 'new'].includes(name)) return;
+      // An identifier property value is unreadable in an object literal, but the
+      // same text ending a statement is a type member (`kind: Foo;`).
+      // The same text ending the line, or the template, is YAML (`kind: Job`) read below.
+      if (!isAssign && TYPE_WORDS.has(name)) return; // a typed parameter: (kind: string)
+      if (!isAssign && [';', '|', '', '`', '\\', '"', "'"].includes(id[2])) return;
       out.push({ kind: undefined, line: i + 1, unreadable: true });
-    const yaml = /^\s*(?:-\s+)?["']?\s*(?:-\s+)?kind:\s*([A-Z][A-Za-z0-9]*)\s*["',]*\s*$/.exec(
-      text,
-    );
+    };
+    const p1 = prop.exec(text);
+    // `readonly kind: T` is a type member, not a value.
+    if (p1 && !/\breadonly\s+(?:["']?kind["']?)\s*:/.test(text)) value(p1[1], false);
+    const a1 = assign.exec(text);
+    if (a1) value(a1[1], true);
+
+    const yaml =
+      /^\s*(?:-\s+)?["'`]?\s*(?:-\s+)?kind:\s*([A-Z][A-Za-z0-9]*)\s*(?:\\n)?["',`;+\s]*$/.exec(
+        text,
+      );
     if (yaml) out.push({ kind: yaml[1], line: i + 1 });
     for (const m of text.matchAll(/\b[A-Z][A-Z0-9_]*KIND\s*=\s*["'`]([A-Z][A-Za-z0-9]*)["'`]/g))
       out.push({ kind: m[1], line: i + 1 });
@@ -497,6 +573,24 @@ export function scanClusterWriteSource(
     }
   };
 
+  // An argv, read as kubectl or as a shell: directly, or behind a wrapper program
+  // (`env`, `sudo`, `xargs`...), whose reading is shared with the spawn scan.
+  const inspect = (elems, index) => {
+    const cands = [elems, ...wrappedArgvs(elems)];
+    const kubectl = cands.find((c) => isKubectl(c[0]));
+    if (kubectl) {
+      handle(kubectl, index);
+      return;
+    }
+    for (const c of cands) {
+      const cmd = shellCommandOf(c);
+      if (cmd) {
+        shell(cmd, index);
+        return;
+      }
+    }
+  };
+
   // (a) arrays whose first element is kubectl (by name, by path, or via a constant),
   //     and arrays that are `sh -c <command>`.
   for (let i = 0; i < b.length; i++) {
@@ -505,11 +599,7 @@ export function scanClusterWriteSource(
     if (isIndexAccess(b, i)) continue;
     const close = matchClose(b, i);
     const elems = splitTopLevel(b, i + 1, close).map((r) => classify(p, r));
-    if (isKubectl(elems[0])) handle(elems, i);
-    else {
-      const cmd = shellCommandOf(elems);
-      if (cmd) shell(cmd, i);
-    }
+    inspect(elems, i);
   }
 
   // (b) a spawn of the program kubectl (or a shell) with an array of arguments, and
@@ -527,12 +617,7 @@ export function scanClusterWriteSource(
       // is the spawn scan's to refuse (unparseable-spawn); an array is read in (a).
       if (args[0].type === 'string' || args[0].type === 'template') shell(args[0], m.index);
     } else if (isFile && args[0] && args[1]?.type === 'array') {
-      const elems = [args[0], ...args[1].elems];
-      if (isKubectl(args[0])) handle(elems, m.index);
-      else {
-        const cmd = shellCommandOf(elems);
-        if (cmd) shell(cmd, m.index);
-      }
+      inspect([args[0], ...args[1].elems], m.index);
     }
     // A computed argument list is the wrapper pattern (kubectl-capture.ts): its
     // callers hand it a literal array starting "kubectl", read in (a).
@@ -564,9 +649,13 @@ export function scanClusterWriteSource(
   // Every kind the file can emit.
   const kinds = [];
   const permitted = new Set([...ALLOWED_KINDS, ...(kindExceptions[file] ?? [])]);
-  for (const { kind, line, unreadable } of kindsIn(src)) {
+  const waiver = KIND_UNREADABLE_WAIVERS[file];
+  let unreadableSeen = 0;
+  for (const { kind, line, unreadable } of kindsOfSource(src)) {
     if (unreadable) {
-      push('unparseable-kind', line, 'a kind built from a template with a hole cannot be read');
+      unreadableSeen += 1;
+      if (waiver && unreadableSeen <= waiver.count) continue;
+      push('unparseable-kind', line, 'a kind that cannot be read (a hole, an unknown identifier)');
       continue;
     }
     kinds.push(kind);
@@ -576,6 +665,14 @@ export function scanClusterWriteSource(
         line,
         `kind: ${kind} is not NextApp or BackendService and ${file} is not pinned to emit it`,
       );
+  }
+
+  if (waiver && unreadableSeen < waiver.count) {
+    push(
+      'unparseable-kind',
+      0,
+      `the waiver for ${file} expects ${waiver.count} unreadable kind(s), found ${unreadableSeen}`,
+    );
   }
 
   const unusedAllow = mine
@@ -632,7 +729,7 @@ export function scanClusterWriteTree(
   violations.push(
     ...checkManifestKinds(allow, (f) => {
       try {
-        return kindsIn(readFileSync(join(root, f), 'utf8'))
+        return kindsOfSource(readFileSync(join(root, f), 'utf8'))
           .filter((x) => x.kind !== undefined)
           .map((x) => x.kind);
       } catch {

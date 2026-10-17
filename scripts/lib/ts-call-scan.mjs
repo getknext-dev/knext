@@ -26,15 +26,18 @@ export function prepare(src) {
 }
 
 /**
- * `const NAME = '<literal>'` bindings, so a program kept in a constant
+ * `const|let|var NAME = '<literal>'` bindings, so a program kept in a constant
  * (`const KN = "/usr/local/bin/kn"`) is read as the string it is. A name bound
- * twice to different values is dropped: shadowing makes it ambiguous, and an
- * unreadable name fails the guards rather than passing them.
+ * twice to different values is dropped: shadowing makes it ambiguous. A `let` or
+ * `var` that is assigned again anywhere is dropped too, because its value at the
+ * use site is not the literal. An unreadable name fails the guards rather than
+ * passing them.
  */
 function stringConsts(p) {
   const { s, b } = p;
   const found = new Map();
-  const re = /\bconst\s+([A-Za-z_$][\w$]*)\s*(?::\s*[^=;(){}]+)?=\s*(?=['"`])/g;
+  const mutable = new Set();
+  const re = /\b(const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::\s*[^=;(){}]+)?=\s*(?=['"`])/g;
   for (let m = re.exec(b); m; m = re.exec(b)) {
     const at = m.index + m[0].length;
     const end = readLiteral(b, at);
@@ -43,8 +46,17 @@ function stringConsts(p) {
     while (k < b.length && /[ \t]/.test(b[k])) k++;
     if (k < b.length && !/[;\n,)}]/.test(b[k])) continue; // part of a larger expression
     const value = s.slice(at + 1, end - 1);
-    const prior = found.get(m[1]);
-    found.set(m[1], prior === undefined || prior === value ? value : null);
+    if (m[1] !== 'const') mutable.add(m[2]);
+    const prior = found.get(m[2]);
+    found.set(m[2], prior === undefined || prior === value ? value : null);
+  }
+  // A let/var assigned again (`NAME = ...`, `NAME += ...`) is not its literal.
+  for (const name of mutable) {
+    const assign = new RegExp(
+      `(?<![\\w$.])${name.replace(/\$/g, '\\$')}\\s*(?:\\*\\*|<<|>>>?|\\?\\?|&&|\\|\\||[-+*/%&|^])?=(?!=)`,
+      'g',
+    );
+    if ((b.match(assign) ?? []).length > 1) found.set(name, null);
   }
   for (const [k, v] of found) if (v === null) found.delete(k);
   return found;
@@ -299,5 +311,60 @@ export function stringLiterals(p) {
     }
   };
   walk(0, b.length);
+  return out;
+}
+
+/** Programs that run another program given as their arguments. */
+export const WRAPPER_PROGRAMS = new Set([
+  'env',
+  'sudo',
+  'nohup',
+  'time',
+  'command',
+  'exec',
+  'xargs',
+  'npx',
+  'bunx',
+  'nice',
+  'timeout',
+]);
+
+/** Program name: no directory (either separator), no `.exe`. */
+export const progName = (v) =>
+  v
+    .trim()
+    .replace(/^.*[\\/]/, '')
+    .replace(/\.exe$/i, '');
+
+/**
+ * Every argv a wrapper might run, for an argv whose head is a wrapper program
+ * (`env`, `sudo`, `xargs`, ...); `[]` for any other argv. The first is the plain
+ * reading: the wrapper(s) stripped, with their flags and `VAR=` assignments
+ * skipped. The rest start at each later literal element, because a flag that
+ * takes a value (`sudo -u root kubectl ...`) cannot be told from the program
+ * without knowing the wrapper's flags, and guessing wrong must not hide one.
+ * Shared by the spawn scan and the cluster-write scan so they cannot disagree.
+ */
+export function wrappedArgvs(elems) {
+  const isWrapper = (e) => e?.type === 'string' && WRAPPER_PROGRAMS.has(progName(e.value));
+  if (!isWrapper(elems[0])) return [];
+  let cur = elems;
+  for (let depth = 0; depth < 8 && isWrapper(cur[0]); depth++) {
+    let k = 1;
+    while (
+      k < cur.length &&
+      cur[k].type === 'string' &&
+      (cur[k].value.startsWith('-') || /^[A-Za-z_]\w*=/.test(cur[k].value))
+    )
+      k++;
+    cur = cur.slice(k);
+  }
+  const out = [cur];
+  for (let i = 1; i < elems.length; i++) {
+    const e = elems[i];
+    if (e.type === 'string' && !e.value.startsWith('-') && !/^[A-Za-z_]\w*=/.test(e.value)) {
+      out.push(elems.slice(i));
+    }
+  }
   return out;
 }

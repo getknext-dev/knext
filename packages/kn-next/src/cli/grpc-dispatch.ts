@@ -18,9 +18,11 @@
  * Every failure here is a plain message and an exit code; nothing throws.
  */
 
+import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import YAML from "yaml";
 import { coreVersion } from "./core-version";
 import { runInherit } from "./exec";
 import { captureKubectl } from "./schema/kubectl-capture";
@@ -29,7 +31,7 @@ import {
     type KubectlResult,
     preflightCRSchema,
 } from "./schema/preflight";
-import { withKubeContext } from "./shared";
+import { UsageError, withKubeContext } from "./shared";
 
 /** The package that provides the verbs below. */
 export const GRPC_PACKAGE = "@getknext/grpc";
@@ -98,6 +100,62 @@ const defaultKubectl: KubectlSeam = {
     run: runInherit,
 };
 
+const BACKEND_SERVICE_API_VERSION = "apps.kn-next.dev/v1alpha1";
+
+/**
+ * Read the file `apply` is about to hand to kubectl and refuse anything but ONE
+ * `BackendService` of this group and version, in the namespace it is applied to.
+ * The package builds this file, but the seam does not trust it: a different kind,
+ * a second document or a stray namespace in it would be a write core never
+ * agreed to. Throws before anything runs.
+ */
+export function assertSingleBackendService(
+    crPath: string,
+    namespace: string,
+): void {
+    const docs = YAML.parseAllDocuments(readFileSync(crPath, "utf-8")).filter(
+        (d) => d.contents !== null,
+    );
+    if (docs.length !== 1) {
+        throw new UsageError(
+            `refusing to apply ${crPath}: it must hold exactly one document, found ${docs.length}`,
+        );
+    }
+    const doc = docs[0] as YAML.Document.Parsed;
+    if (doc.errors.length > 0) {
+        throw new UsageError(
+            `refusing to apply ${crPath}: ${doc.errors[0]?.message ?? "it does not parse"}`,
+        );
+    }
+    const obj: unknown = doc.toJS();
+    if (typeof obj !== "object" || obj === null || Array.isArray(obj)) {
+        throw new UsageError(
+            `refusing to apply ${crPath}: it must be a single object, not a list or a scalar`,
+        );
+    }
+    const cr = obj as {
+        apiVersion?: unknown;
+        kind?: unknown;
+        metadata?: { namespace?: unknown };
+    };
+    if (cr.kind !== "BackendService") {
+        throw new UsageError(
+            `refusing to apply ${crPath}: kind is ${JSON.stringify(cr.kind)}, and this command applies only a BackendService`,
+        );
+    }
+    if (cr.apiVersion !== BACKEND_SERVICE_API_VERSION) {
+        throw new UsageError(
+            `refusing to apply ${crPath}: apiVersion is ${JSON.stringify(cr.apiVersion)}, expected ${BACKEND_SERVICE_API_VERSION}`,
+        );
+    }
+    const ns = cr.metadata?.namespace;
+    if (ns !== undefined && ns !== namespace) {
+        throw new UsageError(
+            `refusing to apply ${crPath}: its namespace is ${JSON.stringify(ns)} but it is being applied to ${JSON.stringify(namespace)}`,
+        );
+    }
+}
+
 /**
  * The host handed to `knext deploy function`. The preflight is the same
  * server-side `--dry-run=server --validate=strict` apply `deploy` runs for a
@@ -123,7 +181,9 @@ export function buildDeployHost(
                 stderr: outcome.stderr,
             };
         },
-        apply: ({ crPath, namespace, context }) =>
+        apply: ({ crPath, namespace, context }) => {
+            // Read before anything runs: nothing is applied on a refusal.
+            assertSingleBackendService(crPath, namespace);
             kubectl.run(
                 withKubeContext(
                     [
@@ -137,7 +197,8 @@ export function buildDeployHost(
                     ],
                     context,
                 ),
-            ),
+            );
+        },
     };
 }
 

@@ -10,7 +10,7 @@
  */
 
 import { afterAll, describe, expect, it } from 'bun:test';
-import { cpSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
@@ -193,6 +193,23 @@ describe('the seam core hands @getknext/grpc cannot run an arbitrary program', (
       ran.push(argv);
     },
   });
+  const API = 'apps.kn-next.dev/v1alpha1';
+  const cr = (over: Record<string, unknown> = {}) => ({
+    apiVersion: API,
+    kind: 'BackendService',
+    metadata: { name: 'orders', namespace: 'prod' },
+    spec: { zone: 'shop', image: IMAGE, language: 'go' },
+    ...over,
+  });
+  /** Write `text` to a fresh file and return its path. */
+  function file(text: string, name = 'cr.json') {
+    const dir = mkdtempSync(join(tmpdir(), 'knext-host-apply-'));
+    scratch.push(dir);
+    const path = join(dir, name);
+    writeFileSync(path, text);
+    return path;
+  }
+  const json = (o: unknown) => JSON.stringify(o);
 
   it('has exactly two methods: preflight and apply', () => {
     expect(Object.keys(host).sort()).toEqual(['apply', 'preflight']);
@@ -200,22 +217,66 @@ describe('the seam core hands @getknext/grpc cannot run an arbitrary program', (
 
   it('apply runs kubectl apply --validate=strict on the given file, and nothing else', () => {
     ran.length = 0;
-    host.apply({ crPath: '/tmp/x.json', namespace: 'prod' });
-    expect(ran).toEqual([
-      ['kubectl', 'apply', '--validate=strict', '-f', '/tmp/x.json', '-n', 'prod'],
-    ]);
+    const path = file(json(cr()));
+    host.apply({ crPath: path, namespace: 'prod' });
+    expect(ran).toEqual([['kubectl', 'apply', '--validate=strict', '-f', path, '-n', 'prod']]);
   });
 
   it('apply binds the kubectl context', () => {
     ran.length = 0;
-    host.apply({ crPath: '/tmp/x.json', namespace: 'prod', context: 'staging' });
+    host.apply({ crPath: file(json(cr())), namespace: 'prod', context: 'staging' });
     expect(ran[0]?.slice(0, 3)).toEqual(['kubectl', '--context', 'staging']);
   });
 
-  it('an argv the package smuggles in as a path is still one -f argument to kubectl', () => {
+  it('a path that looks like a command is still one -f argument to kubectl', () => {
     ran.length = 0;
-    host.apply({ crPath: '; func deploy', namespace: 'prod' });
+    const path = file(json(cr()), '; func deploy.json');
+    host.apply({ crPath: path, namespace: 'prod' });
     expect(ran[0]?.[0]).toBe('kubectl');
-    expect(ran[0]?.[4]).toBe('; func deploy');
+    expect(ran[0]?.[4]).toBe(path);
+  });
+
+  it('accepts the YAML spelling of the same single BackendService', () => {
+    ran.length = 0;
+    const yaml = `apiVersion: ${API}\nkind: BackendService\nmetadata:\n  name: orders\nspec:\n  zone: shop\n  image: ${IMAGE}\n`;
+    host.apply({ crPath: file(yaml, 'cr.yaml'), namespace: 'prod' });
+    expect(ran).toHaveLength(1);
+  });
+
+  it.each([
+    ['a Secret', () => json(cr({ kind: 'Secret' })), /BackendService/],
+    ['a NextApp', () => json(cr({ kind: 'NextApp' })), /BackendService/],
+    [
+      'a wrong apiVersion',
+      () => json(cr({ apiVersion: 'apps.kn-next.dev/v1beta1' })),
+      /apiVersion/,
+    ],
+    ['a core-group apiVersion', () => json(cr({ apiVersion: 'v1' })), /apiVersion/],
+    [
+      'a multi-document file',
+      () => `${json(cr())}\n---\n${json(cr({ kind: 'Secret' }))}\n`,
+      /one/i,
+    ],
+    ['a list', () => json({ apiVersion: 'v1', kind: 'List', items: [cr()] }), /BackendService/],
+    ['an array', () => json([cr()]), /single|object/i],
+    ['text that is not an object', () => 'just text', /object|single/i],
+    ['an empty file', () => '', /one|object/i],
+    [
+      'a namespace other than the one it is applied to',
+      () => json(cr({ metadata: { name: 'orders', namespace: 'kube-system' } })),
+      /namespace/,
+    ],
+  ])('refuses %s: nothing is applied', (_label, make, message) => {
+    ran.length = 0;
+    expect(() => host.apply({ crPath: file(make()), namespace: 'prod' })).toThrow(message);
+    expect(ran).toEqual([]);
+  });
+
+  it('refuses a file that cannot be read: nothing is applied', () => {
+    ran.length = 0;
+    expect(() =>
+      host.apply({ crPath: join(tmpdir(), 'knext-no-such-file.json'), namespace: 'prod' }),
+    ).toThrow();
+    expect(ran).toEqual([]);
   });
 });

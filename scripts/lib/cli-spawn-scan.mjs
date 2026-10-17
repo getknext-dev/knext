@@ -41,6 +41,8 @@ import {
   prepare,
   readLiteral,
   stringLiterals,
+  WRAPPER_PROGRAMS,
+  wrappedArgvs,
 } from './ts-call-scan.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -91,20 +93,6 @@ const MEMBER_SPAWN = new Set([
 ]);
 const BUN_SPAWN = new Set(['Bun.spawn', 'Bun.spawnSync']);
 
-/** Programs that run another program given as their arguments. */
-const WRAPPER_PROGRAMS = new Set([
-  'env',
-  'sudo',
-  'nohup',
-  'time',
-  'command',
-  'exec',
-  'xargs',
-  'npx',
-  'bunx',
-  'nice',
-  'timeout',
-]);
 const SHELL_PROGRAMS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh']);
 
 /**
@@ -270,19 +258,16 @@ function argvProblem(elems, depth = 0) {
     return shellProblem(cmd.value, depth + 1);
   }
   if (WRAPPER_PROGRAMS.has(prog)) {
-    const inner = [];
-    let started = false;
-    for (const e of rest) {
-      if (
-        !started &&
-        e.type === 'string' &&
-        (e.value.startsWith('-') || /^[A-Za-z_]\w*=/.test(e.value))
-      )
-        continue;
-      started = true;
-      inner.push(e);
+    // The plain reading first (it may be unreadable); every later literal as a
+    // possible program too, where only a definite reason counts.
+    const [direct, ...others] = wrappedArgvs(elems);
+    const v = argvProblem(direct, depth + 1);
+    if (v) return v;
+    for (const o of others) {
+      const w = argvProblem(o, depth + 1);
+      if (w && w !== 'unparseable') return w;
     }
-    return argvProblem(inner, depth + 1);
+    return undefined;
   }
   return undefined;
 }
@@ -400,6 +385,14 @@ function importAliases(p, push) {
     const q = m.index + m[0].length - 1;
     if (CP_MODULE.test(s.slice(q + 1, readLiteral(b, q) - 1))) {
       push('unparseable-import', m.index, 'child_process loaded with require()');
+    }
+  }
+  // createRequire(...)('node:child_process'): a require by another name.
+  const crRe = /\bcreateRequire\s*\([^)]*\)\s*\(\s*(['"`])/g;
+  for (let m = crRe.exec(b); m; m = crRe.exec(b)) {
+    const q = m.index + m[0].length - 1;
+    if (CP_MODULE.test(s.slice(q + 1, readLiteral(b, q) - 1))) {
+      push('unparseable-import', m.index, 'child_process loaded with createRequire()(...)');
     }
   }
   const dynRe = /\bimport\s*\(\s*(['"`])/g;
