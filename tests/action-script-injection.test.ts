@@ -232,12 +232,45 @@ describe('workflows — event data in a run: body (#2531)', () => {
     "format('{0}', github.head_ref)",
     'toJSON(github.event)',
     "github.event.pull_request.title || 'x'",
+    // The spellings that slipped past a case-sensitive, dot-only pattern.
+    'GITHUB.HEAD_REF',
+    'Github.Event.pull_request.title',
+    'Inputs.tag',
+    "github['head_ref']",
+    "github['event']['pull_request']['title']",
+    'toJSON(github)',
+    'fromJSON(toJSON(github)).head_ref',
+    "join(github.*, ',')",
+    // The rest of the github context that is not on the allowed list.
+    'github.actor',
+    'github.triggering_actor',
+    'github.token',
+    'github.ref_type',
+    'github.event_path',
+    "github [ 'head_ref' ]",
+    'github . head_ref',
+    "github[format('{0}', 'head_ref')]",
+    'github[inputs.k]',
+    "fromJSON('{}').x || github.head_ref",
   ];
   for (const expr of HOSTILE) {
     it(`flags \${{ ${expr} }}`, () => {
       const f = scanWorkflowText(workflow(`echo "\${{ ${expr} }}"`), 'w.yml');
+      expect(f.length).toBeGreaterThanOrEqual(1);
+      for (const x of f) expect(x.expression).toBe(expr);
+    });
+  }
+
+  for (const expr of [
+    "github.head_ref || '",
+    '(github.sha',
+    "format('{0}', github.sha",
+    'github.sha)',
+  ]) {
+    it(`fails closed on an expression it cannot read: \${{ ${expr} }}`, () => {
+      const f = scanWorkflowText(workflow(`echo "\${{ ${expr} }}"`), 'w.yml');
       expect(f).toHaveLength(1);
-      expect(f[0]?.expression).toBe(expr);
+      expect(f[0]?.reason).toMatch(/unparseable/);
     });
   }
 
@@ -250,6 +283,19 @@ describe('workflows — event data in a run: body (#2531)', () => {
     'github.event_name',
     'github.run_id',
     'github.sha',
+    'GITHUB.SHA',
+    "github['sha']",
+    'github.run_number',
+    'github.run_attempt',
+    'github.repository_owner',
+    'github.job',
+    'github.action_path',
+    'github.server_url',
+    'github.api_url',
+    "github.event_name == 'push'",
+    'github.sha == github.run_id',
+    'runner.temp',
+    "'github.head_ref'",
     'secrets.TOKEN',
     'env.X',
   ];
@@ -277,6 +323,107 @@ describe('workflows — event data in a run: body (#2531)', () => {
       '',
     ].join('\n');
     expect(scanWorkflowText(text, 'w.yml')).toEqual([]);
+  });
+
+  describe('env taint: ${{ env.X }} in a script body when X is built from untrusted text', () => {
+    /** A workflow with env at the three levels and one run: body. */
+    const withEnv = (levels: { wf?: string[]; job?: string[]; step?: string[] }, body: string) =>
+      [
+        'name: t',
+        'on: pull_request',
+        ...(levels.wf ? ['env:', ...levels.wf.map((l) => `  ${l}`)] : []),
+        'jobs:',
+        '  j:',
+        '    runs-on: ubuntu-latest',
+        ...(levels.job ? ['    env:', ...levels.job.map((l) => `      ${l}`)] : []),
+        '    steps:',
+        '      - name: s',
+        ...(levels.step ? ['        env:', ...levels.step.map((l) => `          ${l}`)] : []),
+        '        run: |',
+        `          ${body}`,
+        '',
+      ].join('\n');
+    const TAINT = 'HEAD: ${{ github.head_ref }}';
+
+    it('flags a workflow-level, a job-level and a step-level tainted env', () => {
+      for (const levels of [{ wf: [TAINT] }, { job: [TAINT] }, { step: [TAINT] }]) {
+        const f = scanWorkflowText(withEnv(levels, 'echo "${{ env.HEAD }}"'), 'w.yml');
+        expect(f).toHaveLength(1);
+        expect(f[0]?.expression).toBe('env.HEAD');
+        expect(f[0]?.reason).toMatch(/env\.head/);
+      }
+    });
+
+    it('matches the name case-insensitively and in index form', () => {
+      for (const body of [
+        'echo "${{ env.head }}"',
+        'echo "${{ env[\'HEAD\'] }}"',
+        'echo "${{ ENV.Head }}"',
+      ]) {
+        expect(scanWorkflowText(withEnv({ wf: [TAINT] }, body), 'w.yml')).toHaveLength(1);
+      }
+    });
+
+    it('follows a chain: an env built from a tainted env is tainted', () => {
+      const f = scanWorkflowText(
+        withEnv({ wf: [TAINT, 'COPY: ${{ env.HEAD }}'] }, 'echo "${{ env.COPY }}"'),
+        'w.yml',
+      );
+      expect(f).toHaveLength(1);
+    });
+
+    it('flags an env built from an input or from event data', () => {
+      for (const v of [
+        '${{ inputs.tag }}',
+        '${{ github.event.pull_request.title }}',
+        'x-${{ github.actor }}',
+      ]) {
+        expect(
+          scanWorkflowText(withEnv({ job: [`T: ${v}`] }, 'echo "${{ env.T }}"'), 'w.yml'),
+        ).toHaveLength(1);
+      }
+    });
+
+    it('fails closed on a cycle and on the whole env being used', () => {
+      expect(
+        scanWorkflowText(
+          withEnv({ wf: ['A: ${{ env.B }}', 'B: ${{ env.A }}'] }, 'echo "${{ env.A }}"'),
+          'w.yml',
+        ),
+      ).toHaveLength(1);
+      expect(
+        scanWorkflowText(withEnv({ wf: [TAINT] }, 'echo "${{ toJSON(env) }}"'), 'w.yml'),
+      ).toHaveLength(1);
+    });
+
+    it('does not flag an env built from safe values, or a tainted env that is never interpolated', () => {
+      expect(
+        scanWorkflowText(
+          withEnv(
+            { wf: ['SHA: ${{ github.sha }}', 'N: literal'] },
+            'echo "${{ env.SHA }} ${{ env.N }}"',
+          ),
+          'w.yml',
+        ),
+      ).toEqual([]);
+      // The recommended shape: the tainted value read as a shell variable.
+      expect(scanWorkflowText(withEnv({ wf: [TAINT] }, 'echo "$HEAD"'), 'w.yml')).toEqual([]);
+    });
+
+    it('a step-level env overrides a tainted workflow-level one (the scan resolves precedence)', () => {
+      expect(
+        scanWorkflowText(
+          withEnv({ wf: [TAINT], step: ['HEAD: ${{ github.sha }}'] }, 'echo "${{ env.HEAD }}"'),
+          'w.yml',
+        ),
+      ).toEqual([]);
+      expect(
+        scanWorkflowText(
+          withEnv({ wf: ['HEAD: ${{ github.sha }}'], step: [TAINT] }, 'echo "${{ env.HEAD }}"'),
+          'w.yml',
+        ),
+      ).toHaveLength(1);
+    });
   });
 
   it('flags a github-script `script:` body', () => {
