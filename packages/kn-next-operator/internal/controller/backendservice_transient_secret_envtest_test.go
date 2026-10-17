@@ -54,10 +54,12 @@ import (
 type secretMetaFailer struct {
 	client.Reader
 	err error
+	// only, when set, limits the failure to the Secret with that name.
+	only string
 }
 
 func (f *secretMetaFailer) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-	if o, ok := obj.(*metav1.PartialObjectMetadata); ok && o.Kind == "Secret" && f.err != nil {
+	if o, ok := obj.(*metav1.PartialObjectMetadata); ok && o.Kind == "Secret" && f.err != nil && (f.only == "" || f.only == key.Name) {
 		return f.err
 	}
 	return f.Reader.Get(ctx, key, obj, opts...)
@@ -65,13 +67,13 @@ func (f *secretMetaFailer) Get(ctx context.Context, key client.ObjectKey, obj cl
 
 // transientErrors are the non-definitive answers an apiserver read can give.
 var transientErrors = map[string]error{
-	"a timeout":            apierrors.NewTimeoutError("simulated", 1),
-	"a 429":                apierrors.NewTooManyRequests("simulated", 1),
-	"a 500":                apierrors.NewInternalError(errors.New("simulated")),
-	"a 503":                apierrors.NewServiceUnavailable("simulated"),
-	"a missing grant":      apierrors.NewForbidden(schema.GroupResource{Resource: "secrets"}, "stripe", errors.New("simulated")),
-	"a refused connection": &net.OpError{Op: "dial", Net: "tcp", Err: os.NewSyscallError("connect", syscall.ECONNREFUSED)},
-	"a context deadline":   fmt.Errorf("get secret: %w", context.DeadlineExceeded),
+	"a timeout": apierrors.NewTimeoutError("simulated", 1),
+	"a 429":     apierrors.NewTooManyRequests("simulated", 1),
+	"a 500":     apierrors.NewInternalError(errors.New("simulated")),
+	"a 503":     apierrors.NewServiceUnavailable("simulated"),
+	"a missing grant, inside the hold window": apierrors.NewForbidden(schema.GroupResource{Resource: "secrets"}, "stripe", errors.New("simulated")),
+	"a refused connection":                    &net.OpError{Op: "dial", Net: "tcp", Err: os.NewSyscallError("connect", syscall.ECONNREFUSED)},
+	"a context deadline":                      fmt.Errorf("get secret: %w", context.DeadlineExceeded),
 }
 
 var _ = Describe("BackendService reconciler: a transient Secret read error never tears a function down", func() {

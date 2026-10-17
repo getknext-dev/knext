@@ -116,6 +116,7 @@ type BackendServiceSpec struct {
 	// +listType=map
 	// +listMapKey=name
 	// +kubebuilder:validation:MaxItems=128
+	// +kubebuilder:validation:XValidation:rule="self.all(e, !has(e.valueFrom) || !has(e.valueFrom.secretKeyRef) || (has(e.valueFrom.secretKeyRef.name) && e.valueFrom.secretKeyRef.name.size() > 0 && e.valueFrom.secretKeyRef.name.size() <= 253))",message="a Secret reference must name a Secret: a non-empty name of at most 253 characters"
 	// +kubebuilder:validation:XValidation:rule="self.all(e, !e.name.startsWith('KNEXT_TOKEN_'))",message="env names starting with KNEXT_TOKEN_ are reserved: the operator sets the function's token issuer and audience"
 	Env []corev1.EnvVar `json:"env,omitempty"`
 
@@ -123,6 +124,7 @@ type BackendServiceSpec struct {
 	// Env applies.
 	// +optional
 	// +kubebuilder:validation:MaxItems=16
+	// +kubebuilder:validation:XValidation:rule="self.all(e, !has(e.secretRef) || (has(e.secretRef.name) && e.secretRef.name.size() > 0 && e.secretRef.name.size() <= 253))",message="a Secret reference must name a Secret: a non-empty name of at most 253 characters"
 	EnvFrom []corev1.EnvFromSource `json:"envFrom,omitempty"`
 
 	// Volumes mounts Secret, ConfigMap, projected (Secret/ConfigMap) or emptyDir
@@ -164,6 +166,7 @@ type FunctionScalingSpec struct {
 }
 
 // FunctionVolume is one volume and its mount. Exactly one source is set.
+// +kubebuilder:validation:XValidation:rule="!has(self.secret) || (has(self.secret.secretName) && self.secret.secretName.size() > 0 && self.secret.secretName.size() <= 253)",message="a Secret reference must name a Secret: a non-empty name of at most 253 characters"
 // +kubebuilder:validation:XValidation:rule="[has(self.secret), has(self.configMap), has(self.projected), has(self.emptyDir)].filter(x, x).size() == 1",message="a volume sets exactly one of secret, configMap, projected or emptyDir"
 // +kubebuilder:validation:XValidation:rule="self.mountPath != '/var/run/knext' && !self.mountPath.startsWith('/var/run/knext/')",message="/var/run/knext is reserved for operator mounts"
 type FunctionVolume struct {
@@ -213,6 +216,7 @@ type FunctionProjectedVolume struct {
 }
 
 // FunctionVolumeProjection is one projected source.
+// +kubebuilder:validation:XValidation:rule="!has(self.secret) || (has(self.secret.name) && self.secret.name.size() > 0 && self.secret.name.size() <= 253)",message="a Secret reference must name a Secret: a non-empty name of at most 253 characters"
 // +kubebuilder:validation:XValidation:rule="has(self.secret) != has(self.configMap)",message="a projected source sets exactly one of secret or configMap"
 type FunctionVolumeProjection struct {
 	// Secret projects keys of a Secret. Subject to the Secret allowlist.

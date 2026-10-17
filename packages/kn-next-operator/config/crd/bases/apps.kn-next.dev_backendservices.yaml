@@ -230,6 +230,11 @@ spec:
                 - name
                 x-kubernetes-list-type: map
                 x-kubernetes-validations:
+                - message: 'a Secret reference must name a Secret: a non-empty name
+                    of at most 253 characters'
+                  rule: self.all(e, !has(e.valueFrom) || !has(e.valueFrom.secretKeyRef)
+                    || (has(e.valueFrom.secretKeyRef.name) && e.valueFrom.secretKeyRef.name.size()
+                    > 0 && e.valueFrom.secretKeyRef.name.size() <= 253))
                 - message: 'env names starting with KNEXT_TOKEN_ are reserved: the
                     operator sets the function''s token issuer and audience'
                   rule: self.all(e, !e.name.startsWith('KNEXT_TOKEN_'))
@@ -283,6 +288,11 @@ spec:
                   type: object
                 maxItems: 16
                 type: array
+                x-kubernetes-validations:
+                - message: 'a Secret reference must name a Secret: a non-empty name
+                    of at most 253 characters'
+                  rule: self.all(e, !has(e.secretRef) || (has(e.secretRef.name) &&
+                    e.secretRef.name.size() > 0 && e.secretRef.name.size() <= 253))
               image:
                 description: |-
                   Image is the function's container image, pinned by digest. A tag-only
@@ -628,6 +638,11 @@ spec:
                                 x-kubernetes-map-type: atomic
                             type: object
                             x-kubernetes-validations:
+                            - message: 'a Secret reference must name a Secret: a non-empty
+                                name of at most 253 characters'
+                              rule: '!has(self.secret) || (has(self.secret.name) &&
+                                self.secret.name.size() > 0 && self.secret.name.size()
+                                <= 253)'
                             - message: a projected source sets exactly one of secret
                                 or configMap
                               rule: has(self.secret) != has(self.configMap)
@@ -704,6 +719,10 @@ spec:
                   - name
                   type: object
                   x-kubernetes-validations:
+                  - message: 'a Secret reference must name a Secret: a non-empty name
+                      of at most 253 characters'
+                    rule: '!has(self.secret) || (has(self.secret.secretName) && self.secret.secretName.size()
+                      > 0 && self.secret.secretName.size() <= 253)'
                   - message: a volume sets exactly one of secret, configMap, projected
                       or emptyDir
                     rule: '[has(self.secret), has(self.configMap), has(self.projected),

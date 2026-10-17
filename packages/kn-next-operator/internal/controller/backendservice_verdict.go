@@ -76,6 +76,14 @@ const (
 
 	// functionNotReadyRequeueAfter re-checks a rendered function that is not Ready.
 	functionNotReadyRequeueAfter = 30 * time.Second
+	// secretsDeniedHold is how long a Secret read that is DENIED (Forbidden or
+	// Unauthorized) is held as "unknown" before it becomes a definitive refusal.
+	// Transient errors (timeouts, 429, 5xx) are held without limit. A denied read
+	// is different: it does not heal by itself, and if the operator's Secret grant
+	// is gone, holding it forever would freeze revocation for every function.
+	// Stateless: measured from the SovereigntyCompliant condition's transition to
+	// SecretsUnverified, so it survives an operator restart.
+	secretsDeniedHold = 10 * time.Minute
 	// functionRevalidateAfter re-runs the allowlist periodically: a Secret's
 	// marks can change without any event the operator watches (it holds no
 	// Secret list/watch, by design).
@@ -131,6 +139,34 @@ func (o functionObservation) undecided() bool {
 	return len(o.unverified) > 0 && o.accepted()
 }
 
+// escalateDeniedSecrets turns a Secret that has been DENIED for longer than
+// secretsDeniedHold into a definitive violation. Anything else that is
+// unverified stays unverified.
+func escalateDeniedSecrets(
+	bs *appsv1alpha1.BackendService,
+	violations []sovereigntyViolation,
+	unverified []unverifiedSecret,
+	now time.Time,
+) ([]sovereigntyViolation, []unverifiedSecret) {
+	prev := apimeta.FindStatusCondition(bs.Status.Conditions, ConditionSovereigntyCompliant)
+	expired := prev != nil && prev.Status == metav1.ConditionUnknown && prev.Reason == ReasonSecretsUnverified &&
+		now.Sub(prev.LastTransitionTime.Time) >= secretsDeniedHold
+	if !expired {
+		return violations, unverified
+	}
+	var still []unverifiedSecret
+	for _, u := range unverified {
+		if !u.denied {
+			still = append(still, u)
+			continue
+		}
+		violations = append(violations, sovereigntyViolation{u.source, u.name, fmt.Sprintf(
+			"Secret %q cannot be read: the operator has been denied access (Forbidden) for over %s, so it is refused "+
+				"rather than kept running unchecked", u.name, secretsDeniedHold)})
+	}
+	return violations, still
+}
+
 // unverifiedNames lists the Secrets whose metadata could not be read.
 func (o functionObservation) unverifiedNames() string {
 	names := make([]string, 0, len(o.unverified))
@@ -147,6 +183,10 @@ type functionVerdict struct {
 	conditions   []metav1.Condition
 	events       []verdictEvent
 	requeueAfter time.Duration
+	// observedGeneration is the generation Reconcile records as observed. An
+	// undecided pass rolled nothing out, so it keeps the previous value: the new
+	// spec has not been observed.
+	observedGeneration int64
 	// refusal is the Ready reason when the function newly ENTERED a refusal
 	// this pass (a transition), for the refusals metric; "" otherwise.
 	refusal string
@@ -158,6 +198,10 @@ type functionVerdict struct {
 func computeBackendServiceVerdict(bs *appsv1alpha1.BackendService, o functionObservation) functionVerdict {
 	var v functionVerdict
 	gen := bs.Generation
+	v.observedGeneration = gen
+	if o.undecided() {
+		v.observedGeneration = bs.Status.ObservedGeneration
+	}
 	cond := func(t string, s metav1.ConditionStatus, reason, msg string) metav1.Condition {
 		return metav1.Condition{Type: t, Status: s, ObservedGeneration: gen, Reason: reason, Message: msg}
 	}
@@ -269,6 +313,11 @@ func computeBackendServiceVerdict(bs *appsv1alpha1.BackendService, o functionObs
 		ready = cond(ConditionReady, metav1.ConditionFalse, ReasonSovereigntyViolation, sov.Message)
 	case o.undecided() && o.ksvc == nil:
 		ready = cond(ConditionReady, metav1.ConditionFalse, ReasonSecretsUnverified, sov.Message)
+	case o.undecided() && bs.Generation != bs.Status.ObservedGeneration:
+		// The spec changed and could not be verified, so it was not rolled out:
+		// whatever Ready the old Knative Service has describes the OLD spec.
+		ready = cond(ConditionReady, metav1.ConditionFalse, ReasonSecretsUnverified,
+			"the latest spec could not be verified and was not rolled out; the previous revision keeps serving. "+sov.Message)
 	case o.renderErr != "":
 		ready = cond(ConditionReady, metav1.ConditionFalse, ReasonKnativeServiceNameTaken, o.renderErr)
 	case jwks.Status == metav1.ConditionFalse:

@@ -122,13 +122,26 @@ func TestUndecidedOnlyWhenOtherwiseAccepted(t *testing.T) {
 // sovereignty violation, fails here instead of deleting someone's running
 // function on an apiserver blip.
 //
+// THE ENVTEST TABLE IS THE AUTHORITATIVE GUARD. This scan is a syntactic net:
+// it cannot follow a value through a helper, and it recognises "an error" by
+// the name it is held in or by an `if x := call(); x != nil` shape. What it
+// cannot see, backendservice_transient_secret_envtest_test.go and
+// backendservice_revocation_envtest_test.go prove by behaviour (the Knative
+// Service survives every transient error; a revoked or malformed reference does
+// not). The scan only makes the obvious regressions fail early, and cheaply.
+//
 //	G1  removeRendered is called only from Reconcile, in exactly two places: the
 //	    finalizer (deletion) block, and the else of obs.accepted().
 //	G2  no branch whose condition mentions an error value (err, readErr, rmErr,
-//	    getErr ...) may call removeRendered or build a sovereigntyViolation in
-//	    its body: an error is "no answer", never a verdict.
-//	G3  Reconcile leaves on obs.undecided() (returning an error) BEFORE the
-//	    accepted()/removeRendered fork.
+//	    getErr ... or the result of a call compared with nil) may call
+//	    removeRendered or build a sovereigntyViolation in its body: an error is
+//	    "no answer", never a verdict.
+//	G3  Reconcile holds on obs.undecided() BEFORE the accepted()/removeRendered
+//	    fork, and returns the held error after the verdict.
+//	G4  a Knative Service is deleted ONLY inside removeRendered (no direct
+//	    r.Delete elsewhere), so G1 is the only way to a teardown.
+//	G5  a sovereigntyViolation is built ONLY in the sanctioned functions, so a
+//	    helper cannot launder an error into a verdict out of sight of G2.
 
 var bsReconcilerSources = []string{
 	"backendservice_controller.go",
@@ -141,6 +154,45 @@ func exprString(fset *token.FileSet, n ast.Node) string {
 	var b bytes.Buffer
 	_ = printer.Fprint(&b, fset, n)
 	return b.String()
+}
+
+// initCallNilCompare reports whether an if statement has the shape
+// `if v := call(...); v != nil` (or `== nil`): the variable holds a call's
+// result, whatever it is named.
+func initCallNilCompare(x *ast.IfStmt) bool {
+	assign, ok := x.Init.(*ast.AssignStmt)
+	if !ok {
+		return false
+	}
+	hasCall := false
+	for _, rhs := range assign.Rhs {
+		if _, ok := rhs.(*ast.CallExpr); ok {
+			hasCall = true
+		}
+	}
+	if !hasCall {
+		return false
+	}
+	vars := map[string]bool{}
+	for _, lhs := range assign.Lhs {
+		if id, ok := lhs.(*ast.Ident); ok {
+			vars[id.Name] = true
+		}
+	}
+	found := false
+	ast.Inspect(x.Cond, func(n ast.Node) bool {
+		b, ok := n.(*ast.BinaryExpr)
+		if !ok || (b.Op != token.NEQ && b.Op != token.EQL) {
+			return true
+		}
+		l, lok := b.X.(*ast.Ident)
+		r, rok := b.Y.(*ast.Ident)
+		if lok && rok && ((vars[l.Name] && r.Name == "nil") || (vars[r.Name] && l.Name == "nil")) {
+			found = true
+		}
+		return true
+	})
+	return found
 }
 
 // condMentionsError reports whether a branch condition reads an error value.
@@ -195,7 +247,7 @@ func TestNoAPIErrorReachesTeardownOrAViolation(t *testing.T) {
 		ast.Inspect(f, func(n ast.Node) bool {
 			switch x := n.(type) {
 			case *ast.IfStmt:
-				if condMentionsError(x.Cond) {
+				if condMentionsError(x.Cond) || initCallNilCompare(x) {
 					errBranches++
 					for _, h := range teardownOrVerdictIn(fset, x.Body) {
 						t.Errorf("%s: a branch on an error value reaches %s (an error is no answer: return it and requeue)", file, h)
@@ -381,6 +433,87 @@ func TestVerdictForAnUndecidedFunctionIsUnverifiedNotAViolation(t *testing.T) {
 	for _, c := range v.conditions {
 		if c.Reason == ReasonSovereigntyViolation || c.Reason == ReasonSecretNotAllowed {
 			t.Errorf("%s carries the violation reason %s for an unknown answer", c.Type, c.Reason)
+		}
+	}
+}
+
+// parsedReconcilerSources parses the reconciler sources, by file.
+func parsedReconcilerSources(t *testing.T) map[string]*ast.File {
+	t.Helper()
+	out := map[string]*ast.File{}
+	for _, file := range bsReconcilerSources {
+		f, err := parser.ParseFile(token.NewFileSet(), file, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", file, err)
+		}
+		out[file] = f
+	}
+	return out
+}
+
+// G4: the only Delete in the reconciler is the one inside removeRendered.
+func TestKnativeServiceIsDeletedOnlyInsideRemoveRendered(t *testing.T) {
+	deletes := 0
+	for file, f := range parsedReconcilerSources(t) {
+		for _, decl := range f.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				sel, ok := call.Fun.(*ast.SelectorExpr)
+				if !ok || (sel.Sel.Name != "Delete" && sel.Sel.Name != "DeleteAllOf") {
+					return true
+				}
+				deletes++
+				if fn.Name.Name != "removeRendered" {
+					t.Errorf("%s: %s calls %s; a function is torn down only through removeRendered (see G1)", file, fn.Name.Name, sel.Sel.Name)
+				}
+				return true
+			})
+		}
+	}
+	if deletes == 0 {
+		t.Fatal("found no Delete call at all; the scan is not seeing removeRendered")
+	}
+}
+
+// G5: a sovereigntyViolation is built only where a DEFINITIVE answer is known.
+func TestSovereigntyViolationsAreBuiltOnlyWhereSanctioned(t *testing.T) {
+	sanctioned := map[string]bool{
+		"checkSecretRefs":          true, // the allowlist itself
+		"checkFunctionSovereignty": true, // the ConfigMap rule
+		"escalateDeniedSecrets":    true, // a denied read that outlived its hold
+	}
+	seen := map[string]int{}
+	for file, f := range parsedReconcilerSources(t) {
+		for _, decl := range f.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				lit, ok := n.(*ast.CompositeLit)
+				if !ok {
+					return true
+				}
+				if id, ok := lit.Type.(*ast.Ident); ok && id.Name == "sovereigntyViolation" {
+					seen[fn.Name.Name]++
+					if !sanctioned[fn.Name.Name] {
+						t.Errorf("%s: %s builds a sovereigntyViolation; only %v may (a violation is a definitive answer)", file, fn.Name.Name, sanctioned)
+					}
+				}
+				return true
+			})
+		}
+	}
+	for name := range sanctioned {
+		if seen[name] == 0 {
+			t.Errorf("sanctioned function %s builds no sovereigntyViolation; the scan is stale", name)
 		}
 	}
 }

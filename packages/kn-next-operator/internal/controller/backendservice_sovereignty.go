@@ -21,7 +21,10 @@ import (
 	"sort"
 	"strings"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
+	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 
 	appsv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/api/v1alpha1"
 )
@@ -143,13 +146,26 @@ type secretMetadata struct {
 	// was rendered (#2498). Only a definitive answer (NotFound, or an object with
 	// the wrong owner or labels) refuses a function.
 	readErr string
+	// denied marks a readErr that is an authorization failure (Forbidden or
+	// Unauthorized): held like any unknown answer, but only for a bounded window
+	// (secretsDeniedHold), because a lost grant would otherwise freeze
+	// revocation for every function.
+	denied bool
+	// rejected is set when the read failed in a way that says something about
+	// the REFERENCE, not about the apiserver: a name the client refuses to send,
+	// or a 4xx the server answers definitively. It is a violation. An owner
+	// controls the spec, so an error they can provoke must never mean "unknown".
+	rejected string
 }
 
 // unverifiedSecret is a referenced Secret whose metadata could not be read, so
 // its marks are unknown. It is not a violation.
 type unverifiedSecret struct {
-	name string
-	err  string
+	source string
+	name   string
+	err    string
+	// denied: the read was refused for lack of permission (see secretMetadata).
+	denied bool
 }
 
 // secretLookup returns the metadata of a Secret in the function's namespace.
@@ -277,6 +293,48 @@ func checkFunctionSovereignty(
 	others []appsv1alpha1.NextApp,
 	lookup secretLookup,
 ) ([]sovereigntyViolation, []unverifiedSecret) {
+	out, unverified := checkSecretRefs(functionSecretRefs(&bs.Spec), bs, zone, others, lookup)
+
+	zoneName := bs.Spec.Zone
+	if zone != nil {
+		zoneName = zone.Name
+	}
+	ownJWKS := ZoneJWKSConfigMapName(zoneName)
+	for _, ref := range functionConfigMapRefs(&bs.Spec) {
+		if strings.HasSuffix(ref.name, zoneJWKSConfigMapSuffix) && ref.name != ownJWKS {
+			out = append(out, sovereigntyViolation{ref.source, ref.name,
+				fmt.Sprintf("ConfigMap %q is another zone's JWKS; a function mounts only its own zone's (the operator does that)", ref.name)})
+		}
+	}
+	return out, unverified
+}
+
+// checkRunningSovereignty applies the SAME Secret allowlist to the Secret
+// references of the function's RUNNING Knative Service. When a pass cannot
+// decide the spec's own Secrets, the running template is what stays up, so it is
+// what must still be checked: otherwise a Secret revoked since it was rendered
+// stays mounted for as long as the owner can make a read fail.
+func checkRunningSovereignty(
+	bs *appsv1alpha1.BackendService,
+	zone *appsv1alpha1.NextApp,
+	others []appsv1alpha1.NextApp,
+	lookup secretLookup,
+	running *servingv1.Service,
+) ([]sovereigntyViolation, []unverifiedSecret) {
+	if running == nil {
+		return nil, nil
+	}
+	return checkSecretRefs(runningSecretRefs(running), bs, zone, others, lookup)
+}
+
+// checkSecretRefs is the Secret half of the allowlist, over any list of refs.
+func checkSecretRefs(
+	refs []objectRef,
+	bs *appsv1alpha1.BackendService,
+	zone *appsv1alpha1.NextApp,
+	others []appsv1alpha1.NextApp,
+	lookup secretLookup,
+) ([]sovereigntyViolation, []unverifiedSecret) {
 	foreignDB := map[string]string{} // secret name -> owning zone
 	for i := range others {
 		for _, name := range zoneDatabaseSecrets(&others[i]) {
@@ -296,7 +354,14 @@ func checkFunctionSovereignty(
 	var unverified []unverifiedSecret
 	unverifiedSeen := map[string]bool{}
 	meta := map[string]secretMetadata{}
-	for _, ref := range functionSecretRefs(&bs.Spec) {
+	for _, ref := range refs {
+		if problem := secretNameProblem(ref.name); problem != "" {
+			// A name no Secret can have is a definitive answer about the
+			// reference, not a read that "failed": never "unknown".
+			out = append(out, sovereigntyViolation{ref.source, ref.name,
+				fmt.Sprintf("%q is not a valid Secret name (%s)", ref.name, problem)})
+			continue
+		}
 		if strings.HasSuffix(ref.name, zoneSigningKeySecretSuffix) {
 			out = append(out, sovereigntyViolation{ref.source, ref.name,
 				fmt.Sprintf("Secret %q is a zone signing key; a function never mounts a zone's private key", ref.name)})
@@ -311,6 +376,11 @@ func checkFunctionSovereignty(
 		if !seen {
 			m = lookup(ref.name)
 			meta[ref.name] = m
+		}
+		if m.rejected != "" {
+			out = append(out, sovereigntyViolation{ref.source, ref.name,
+				fmt.Sprintf("Secret %q cannot be checked: the lookup was rejected (%s)", ref.name, m.rejected)})
+			continue
 		}
 		if other := foreignMark(m, zoneName, zone); other != "" {
 			out = append(out, sovereigntyViolation{ref.source, ref.name,
@@ -329,7 +399,7 @@ func checkFunctionSovereignty(
 			// Could not decide: not a violation (#2498).
 			if !unverifiedSeen[ref.name] {
 				unverifiedSeen[ref.name] = true
-				unverified = append(unverified, unverifiedSecret{ref.name, m.readErr})
+				unverified = append(unverified, unverifiedSecret{ref.source, ref.name, m.readErr, m.denied})
 			}
 			continue
 		}
@@ -337,15 +407,54 @@ func checkFunctionSovereignty(
 			fmt.Sprintf("Secret %q is not zone %q's database Secret and is not marked for zone %q "+
 				"(label it %s=%s, or give it an ownerReference to the zone)", ref.name, zoneName, zoneName, ZoneLabel, zoneName)})
 	}
+	return out, unverified
+}
 
-	ownJWKS := ZoneJWKSConfigMapName(zoneName)
-	for _, ref := range functionConfigMapRefs(&bs.Spec) {
-		if strings.HasSuffix(ref.name, zoneJWKSConfigMapSuffix) && ref.name != ownJWKS {
-			out = append(out, sovereigntyViolation{ref.source, ref.name,
-				fmt.Sprintf("ConfigMap %q is another zone's JWKS; a function mounts only its own zone's (the operator does that)", ref.name)})
+// secretNameProblem returns why a Secret reference's name can never name a
+// Secret ("" when it can). A Secret name is a DNS-1123 subdomain, so an empty
+// name, "..", "a/b" or an upper-case name never exists, and the metadata client
+// refuses to send some of them at all.
+func secretNameProblem(name string) string {
+	if name == "" {
+		return "empty"
+	}
+	if msgs := validation.IsDNS1123Subdomain(name); len(msgs) > 0 {
+		return msgs[0]
+	}
+	return ""
+}
+
+// runningSecretRefs lists every Secret the running Knative Service's pod
+// template references, in template order.
+func runningSecretRefs(ksvc *servingv1.Service) []objectRef {
+	var refs []objectRef
+	ps := ksvc.Spec.Template.Spec.PodSpec
+	containers := append(append([]corev1.Container{}, ps.InitContainers...), ps.Containers...)
+	for _, c := range containers {
+		for _, e := range c.Env {
+			if e.ValueFrom != nil && e.ValueFrom.SecretKeyRef != nil {
+				refs = append(refs, objectRef{fmt.Sprintf("the running Knative Service: container %s env[%s].valueFrom.secretKeyRef", c.Name, e.Name), e.ValueFrom.SecretKeyRef.Name})
+			}
+		}
+		for i, ef := range c.EnvFrom {
+			if ef.SecretRef != nil {
+				refs = append(refs, objectRef{fmt.Sprintf("the running Knative Service: container %s envFrom[%d].secretRef", c.Name, i), ef.SecretRef.Name})
+			}
 		}
 	}
-	return out, unverified
+	for _, v := range ps.Volumes {
+		if v.Secret != nil {
+			refs = append(refs, objectRef{fmt.Sprintf("the running Knative Service: volumes[%s].secret", v.Name), v.Secret.SecretName})
+		}
+		if v.Projected != nil {
+			for i, s := range v.Projected.Sources {
+				if s.Secret != nil {
+					refs = append(refs, objectRef{fmt.Sprintf("the running Knative Service: volumes[%s].projected.sources[%d].secret", v.Name, i), s.Secret.Name})
+				}
+			}
+		}
+	}
+	return refs
 }
 
 // foreignMark returns the other zone a Secret is marked for, or "".

@@ -20,7 +20,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/url"
 	"strings"
+	"syscall"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -177,8 +183,22 @@ func (r *BackendServiceReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 
 	// The credential allowlist (the control) and the host lint (a warning).
-	obs.violations, obs.unverified = checkFunctionSovereignty(bs, obs.zone, others, r.secretMetadata(ctx, bs.Namespace))
+	lookup := memoSecretLookup(r.secretMetadata(ctx, bs.Namespace))
+	obs.violations, obs.unverified = checkFunctionSovereignty(bs, obs.zone, others, lookup)
 	obs.lint = lintForeignDatabaseHosts(bs, obs.zone, others)
+	// Whatever stays running through a pass that cannot decide the spec's own
+	// Secrets is the RUNNING template, so that is what is checked then.
+	var running *servingv1.Service
+	if len(obs.unverified) > 0 {
+		var err error
+		if running, err = r.existingFunctionService(ctx, bs); err != nil {
+			return ctrl.Result{}, err
+		}
+		runViolations, runUnverified := checkRunningSovereignty(bs, obs.zone, others, lookup, running)
+		obs.violations = append(obs.violations, runViolations...)
+		obs.unverified = mergeUnverified(obs.unverified, runUnverified)
+	}
+	obs.violations, obs.unverified = escalateDeniedSecrets(bs, obs.violations, obs.unverified, time.Now())
 
 	served, revision := bs.Status.ServedProtoVersion, bs.Status.ObservedRevision
 	// heldErr is returned AFTER the verdict is applied: an undecided pass reports
@@ -192,11 +212,7 @@ func (r *BackendServiceReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		// unrendered (fail closed on new access).
 		heldErr = unverifiedSecretsError(obs.unverified)
 		logger.Error(heldErr, "Could not verify the function's Secrets; leaving it as it is")
-		ksvc, err := r.existingFunctionService(ctx, bs)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-		obs.ksvc = ksvc
+		obs.ksvc = running
 	} else if obs.accepted() {
 		// The zone's key set reaches the function only if the zone controls the
 		// ConfigMap that holds it. A read failure is returned, not guessed at: it
@@ -226,7 +242,7 @@ func (r *BackendServiceReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 
 	verdict := computeBackendServiceVerdict(bs, obs)
-	bs.Status.ObservedGeneration = bs.Generation
+	bs.Status.ObservedGeneration = verdict.observedGeneration
 	bs.Status.ServedProtoVersion = served
 	bs.Status.ObservedRevision = revision
 	if obs.ksvc != nil {
@@ -287,9 +303,91 @@ func (r *BackendServiceReconciler) secretMetadata(ctx context.Context, namespace
 		case apierrors.IsNotFound(err):
 			return secretMetadata{}
 		default:
-			return secretMetadata{readErr: err.Error()}
+			switch classifyReadError(err) {
+			case readDenied:
+				return secretMetadata{readErr: err.Error(), denied: true}
+			case readTransient:
+				return secretMetadata{readErr: err.Error()}
+			default:
+				return secretMetadata{rejected: err.Error()}
+			}
 		}
 	}
+}
+
+// readClass says what a failed Secret metadata read tells us.
+type readClass int
+
+const (
+	// readTransient: the apiserver or the network failed to answer (timeout, 429,
+	// 5xx, connection refused or reset, context deadline). Says nothing about
+	// the Secret; held without limit.
+	readTransient readClass = iota
+	// readDenied: Forbidden or Unauthorized. Held for a bounded window.
+	readDenied
+	// readDefinitive: anything else, including a name the client refuses to send
+	// ("name is required") and any other 4xx. It is about the reference itself.
+	readDefinitive
+)
+
+// classifyReadError sorts a failed read. Only a server transient is an unknown
+// answer; the owner controls the spec, so an error they can provoke is never
+// "unknown".
+func classifyReadError(err error) readClass {
+	switch {
+	case apierrors.IsForbidden(err), apierrors.IsUnauthorized(err):
+		return readDenied
+	case apierrors.IsTimeout(err), apierrors.IsServerTimeout(err), apierrors.IsTooManyRequests(err),
+		apierrors.IsInternalError(err), apierrors.IsServiceUnavailable(err):
+		return readTransient
+	}
+	var status apierrors.APIStatus
+	if errors.As(err, &status) {
+		if code := status.Status().Code; code == http.StatusRequestTimeout || code >= http.StatusInternalServerError {
+			return readTransient
+		}
+		return readDefinitive
+	}
+	var netErr net.Error
+	var urlErr *url.Error
+	switch {
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled),
+		errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF),
+		errors.Is(err, syscall.ECONNREFUSED), errors.Is(err, syscall.ECONNRESET), errors.Is(err, syscall.EPIPE),
+		errors.As(err, &netErr), errors.As(err, &urlErr):
+		return readTransient
+	}
+	return readDefinitive
+}
+
+// memoSecretLookup reads each Secret at most once per pass, so the spec's and
+// the running template's references to the same Secret agree and cost one GET.
+func memoSecretLookup(lookup secretLookup) secretLookup {
+	seen := map[string]secretMetadata{}
+	return func(name string) secretMetadata {
+		if m, ok := seen[name]; ok {
+			return m
+		}
+		m := lookup(name)
+		seen[name] = m
+		return m
+	}
+}
+
+// mergeUnverified appends the unverified Secrets of b not already in a.
+func mergeUnverified(a, b []unverifiedSecret) []unverifiedSecret {
+	for _, u := range b {
+		dup := false
+		for _, x := range a {
+			if x.name == u.name {
+				dup = true
+			}
+		}
+		if !dup {
+			a = append(a, u)
+		}
+	}
+	return a
 }
 
 // existingFunctionService returns the function's Knative Service as it stands
