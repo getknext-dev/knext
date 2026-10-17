@@ -488,9 +488,13 @@ describe('packages/kn-next-action — the cli input actually drives the Deploy s
     return String(a.runs.steps.find((s) => s.name === 'Deploy')?.run ?? '');
   };
 
-  it('the cli input defaults to npx, for a consumer who never sets it', () => {
+  it('a consumer who never sets cli runs the published package at the PINNED cli-version', () => {
     const a = parse(actionRaw()) as { inputs: Record<string, { default?: string }> };
-    expect(a.inputs.cli?.default).toBe('npx --yes @getknext/core');
+    // Empty means "the published package"; the version it runs is cli-version's
+    // exact default — never an unpinned latest (see action-script-injection.test.ts).
+    expect(a.inputs.cli?.default).toBe('');
+    expect(a.inputs['cli-version']?.default).toMatch(/^\d+\.\d+\.\d+/);
+    expect(deployRun()).toContain('npx --yes "@getknext/core@$KNEXT_CLI_VERSION"');
   });
 
   it('the Deploy step invokes the resolved cli array, not a hardcoded npx call', () => {

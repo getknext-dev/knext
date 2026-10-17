@@ -97,15 +97,16 @@ only with a cluster-admin one.
 | `registry-token` | no | — | on GHCR, `github.token` suffices |
 | `registry-username` | no | `github.actor` | |
 | `working-directory` | no | `.` | where `knext.config.ts` lives |
-| `tag` | no | `github.sha` | a timestamp cannot be traced to a commit |
-| `bucket` | no | from config | object storage for static assets |
+| `tag` | no | `github.sha` | a timestamp cannot be traced to a commit. Letters, digits, `_`, `.` and `-` only (up to 128 characters, not starting with `.` or `-`); anything else is refused |
+| `bucket` | no | from config | object storage for static assets. Lowercase letters, digits, `.`, `_` and `-` (3 to 222 characters); anything else is refused |
 | `skip-upload` | no | `false` | the credential-free path — no cloud CLI needed |
 | `skip-build` | no | `false` | when a previous job already produced the output |
 | `dry-run` | no | `false` | print the resource, apply nothing |
 | `doctor` | no | `true` | read-only cluster preflight |
 | `auth` | no | `kubeconfig` | reserved for short-lived cloud credentials |
 | `skip-credential-preflight` | no | `false` | read the section above first |
-| `cli` | no | `npx --yes @getknext/core` | the command that runs the CLI, split on whitespace. Leave it at the default unless you are dogfooding this action from its own checkout — point it at a locally built CLI (e.g. `node ./packages/kn-next/dist/cli/kn-next.js`) to deploy with that build instead of the published package |
+| `cli-version` | no | an exact release (see `action.yml`) | the version of the published `@getknext/core` CLI to run. It must be an exact version such as `1.3.1` — ranges and tags like `latest` are refused, because this step holds your kubeconfig and registry token and must not run whatever npm serves today. Raise it deliberately to take a newer CLI |
+| `cli` | no | empty | a command to run instead of the published package, split on whitespace. Leave it empty unless you are dogfooding this action from its own checkout — point it at a locally built CLI (e.g. `node ./packages/kn-next/dist/cli/kn-next.js`) to deploy with that build. When set, `cli-version` is ignored |
 
 No outputs. The deployed URL comes from the cluster — `knext status`, or
 `kubectl get ksvc -n <namespace>`.

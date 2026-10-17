@@ -99,8 +99,18 @@ inputs:
       checkout's own built CLI instead — e.g.
       `node /path/to/packages/kn-next/dist/cli/kn-next.js` — so the deploy
       runs the code under test rather than whatever npm currently serves.
+      Leave it empty to run the published package at `cli-version`.
     required: false
-    default: 'npx --yes @getknext/core'
+    default: ''
+  cli-version:
+    description: >-
+      The exact version of the published `@getknext/core` CLI to run (for
+      example `1.3.1`). The action never runs an unpinned latest: this step
+      holds your kubeconfig and registry token, so what it executes is pinned
+      the same way its own dependencies are. Ranges and dist-tags such as
+      `latest` are refused. Ignored when `cli` is set.
+    required: false
+    default: '1.3.1'
 
 runs:
   using: composite
@@ -215,20 +225,52 @@ runs:
       id: deploy
       shell: bash
       working-directory: ${{ inputs.working-directory }}
+      # Every input reaches the script through env and is read as a quoted
+      # shell variable. `${{ }}` is substituted as TEXT before bash parses the
+      # script, so an expression inside `run:` lets whoever controls the input
+      # (a branch name passed as `tag`, say) write shell with the kubeconfig and
+      # registry token in scope. tests/action-script-injection.test.ts scans every
+      # action.yml in the repo and fails on any such expression.
       env:
         KNEXT_NAMESPACE: ${{ inputs.namespace }}
         KNEXT_REGISTRY: ${{ inputs.registry }}
         KNEXT_CLI: ${{ inputs.cli }}
+        KNEXT_CLI_VERSION: ${{ inputs.cli-version }}
+        KNEXT_TAG: ${{ inputs.tag }}
+        KNEXT_BUCKET: ${{ inputs.bucket }}
+        KNEXT_DOCTOR: ${{ inputs.doctor }}
+        KNEXT_SKIP_UPLOAD: ${{ inputs.skip-upload }}
+        KNEXT_SKIP_BUILD: ${{ inputs.skip-build }}
+        KNEXT_DRY_RUN: ${{ inputs.dry-run }}
       run: |
         set -euo pipefail
+        # Inputs with a known shape are checked against an allowlist and refused
+        # otherwise. The message names the rule and never echoes the value: a
+        # refused value is hostile by definition and the log is not a place for it.
+        # `[[ =~ ]]` with the pattern in a variable, so it is a regex, not a glob.
+        tag_re='^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$'
+        bucket_re='^[a-z0-9][a-z0-9._-]{1,220}[a-z0-9]$'
+        version_re='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'
+        if [ -n "$KNEXT_TAG" ] && ! [[ "$KNEXT_TAG" =~ $tag_re ]]; then
+          echo "::error::the 'tag' input is not a valid image tag. Use letters, digits, '_', '.' and '-' (at most 128 characters, not starting with '.' or '-'). The commit SHA is the recommended value."
+          exit 1
+        fi
+        if [ -n "$KNEXT_BUCKET" ] && ! [[ "$KNEXT_BUCKET" =~ $bucket_re ]]; then
+          echo "::error::the 'bucket' input is not a valid bucket name. Use lowercase letters, digits, '.', '_' and '-' (3 to 222 characters, starting and ending with a letter or digit)."
+          exit 1
+        fi
         # Split on whitespace into argv entries — no shell quoting/expansion of
         # the input's contents, so a `cli` value cannot inject anything beyond
         # separate words. `read -ra` does that safely, without re-interpreting
         # the string as shell code.
         read -r -a CLI <<< "$KNEXT_CLI"
         if [ "${#CLI[@]}" -eq 0 ]; then
-          echo "::error::the 'cli' input is empty — nothing to run."
-          exit 1
+          # No override: run the PUBLISHED package at an exact, validated version.
+          if ! [[ "$KNEXT_CLI_VERSION" =~ $version_re ]]; then
+            echo "::error::the 'cli-version' input must be an exact version such as 1.3.1 — not a range, not a dist-tag like 'latest', and not empty."
+            exit 1
+          fi
+          CLI=(npx --yes "@getknext/core@$KNEXT_CLI_VERSION")
         fi
         # A wrong 'cli' input must be a named error here, not exit 127 from a
         # bare `sh: <word>: not found` deep inside the deploy call (#1502).
@@ -240,7 +282,7 @@ runs:
           echo "::error::the 'cli' input points node at '${CLI[1]}', which does not exist. Build the CLI before this step, or leave 'cli' at its default (npx)."
           exit 1
         fi
-        if [ "${{ inputs.doctor }}" = "true" ]; then
+        if [ "$KNEXT_DOCTOR" = "true" ]; then
           "${CLI[@]}" doctor --namespace "$KNEXT_NAMESPACE"
         fi
         DEPLOY_ARGS=(--namespace "$KNEXT_NAMESPACE" --registry "$KNEXT_REGISTRY")
@@ -250,9 +292,9 @@ runs:
         # depends on a line that follows it: append one optional flag after the
         # deploy call, or reorder these, and the default configuration starts
         # exiting 1 for no visible reason.
-        if [ -n "${{ inputs.tag }}" ]; then DEPLOY_ARGS+=(--tag "${{ inputs.tag }}"); fi
-        if [ -n "${{ inputs.bucket }}" ]; then DEPLOY_ARGS+=(--bucket "${{ inputs.bucket }}"); fi
-        if [ "${{ inputs.skip-upload }}" = "true" ]; then DEPLOY_ARGS+=(--skip-upload); fi
-        if [ "${{ inputs.skip-build }}" = "true" ]; then DEPLOY_ARGS+=(--skip-build); fi
-        if [ "${{ inputs.dry-run }}" = "true" ]; then DEPLOY_ARGS+=(--dry-run); fi
+        if [ -n "$KNEXT_TAG" ]; then DEPLOY_ARGS+=(--tag "$KNEXT_TAG"); fi
+        if [ -n "$KNEXT_BUCKET" ]; then DEPLOY_ARGS+=(--bucket "$KNEXT_BUCKET"); fi
+        if [ "$KNEXT_SKIP_UPLOAD" = "true" ]; then DEPLOY_ARGS+=(--skip-upload); fi
+        if [ "$KNEXT_SKIP_BUILD" = "true" ]; then DEPLOY_ARGS+=(--skip-build); fi
+        if [ "$KNEXT_DRY_RUN" = "true" ]; then DEPLOY_ARGS+=(--dry-run); fi
         "${CLI[@]}" deploy "${DEPLOY_ARGS[@]}"
