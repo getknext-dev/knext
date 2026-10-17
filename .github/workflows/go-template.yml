@@ -122,6 +122,18 @@ jobs:
         working-directory: templates/go
         run: go test -race -count=1 ./...
 
+      - name: A scaffolded function builds, vets and passes its own tests
+        # `knext add function --lang go` copies this template; the copy must
+        # build and pass outside the template directory.
+        run: |
+          set -euo pipefail
+          app="$(mktemp -d)"
+          (cd "$app" && bun "$GITHUB_WORKSPACE/packages/grpc/scripts/knext-grpc.ts" add function orders --lang go)
+          cd "$app/functions/orders"
+          go build ./...
+          go vet ./...
+          go test -race -count=1 ./...
+
       - name: govulncheck (pinned)
         working-directory: templates/go
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...

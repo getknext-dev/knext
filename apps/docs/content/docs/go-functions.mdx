@@ -34,27 +34,29 @@ starts from.
 
 ## Start a Go function
 
-1. In your zone, add the function's contract:
+1. In your zone, scaffold the function:
 
    ```bash
    knext add function orders --lang go
    ```
 
-   This writes `proto/orders/v1/orders.proto` and the options contract it imports. See
+   This writes the contract (`proto/orders/v1/orders.proto` and the options contract it imports)
+   and the server project at `functions/orders/`: the template below, with its example service
+   renamed to `OrdersService`, the Go module set to `example.com/orders` (choose your own with
+   `--module github.com/acme/orders`), and the Go code already generated. It needs the Go
+   toolchain on your `PATH`; if generation fails, nothing is written. See
    [`knext add function`](/docs/cli#knext-add-function).
 
-2. Copy the template from the knext repository (`templates/go`) into a new directory for the
-   function, and rename the module in `go.mod` and the `go_package_prefix` in `buf.gen.yaml`.
+2. Write your handlers where `functions/orders/internal/items` is. The service is already
+   registered in `internal/rpc/rpc.go`.
 
-3. Replace the template's `proto/example` with your zone's `proto/orders`, so the function and the
-   zone build from the same file. Then generate the Go code and point the server at your handler:
+3. After a change to the contract, copy the changed `proto/orders/v1/orders.proto` over
+   `functions/orders/proto/orders/v1/orders.proto`, then regenerate:
 
    ```bash
+   cd functions/orders
    buf generate      # writes gen/ — commit it
    ```
-
-   Register your service in `internal/rpc/rpc.go` in place of the example one, and write
-   your handlers where `internal/items` is.
 
 4. Test and build:
 
@@ -62,6 +64,10 @@ starts from.
    go test -race ./...
    docker build -t <registry>/orders-fn:<tag> .
    ```
+
+The template itself lives in the knext repository at `templates/go`. The scaffold leaves out its
+repository-only files: its maintainer README, its kind test harness, and the tests that read
+knext's shared token vectors.
 
 The template's own example service has one read (`GetItem`) and one write (`PutItem`), the shape
 `knext add function` starts every contract with.

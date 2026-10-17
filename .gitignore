@@ -202,3 +202,4 @@ triage-shape-*/
 # packages/kn-next/node_modules. Removed in afterAll(); this pattern only
 # guards a run that was killed before cleanup ran.
 packages/kn-next/src/__tests__/fixtures/.dev-edge-fence-work-*/
+packages/grpc/templates/

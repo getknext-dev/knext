@@ -6,11 +6,10 @@
  * it imports, a `buf.yaml` if the app has none, and the function's entry in
  * `knext.grpc.json`. Writes files only; never touches a cluster.
  *
- * TODO(#2048, #2049): the function's own server project (Go and Rust
- * templates with the token-verifying interceptor, health RPC and image build)
- * is scaffolded by the language templates. Until they land, this command
- * records the language and writes the contract only, so it never produces a
- * server without its authentication check.
+ * For `--lang go` it also scaffolds the function's server project from
+ * `templates/go` into `functions/<name>/` (see scaffold-go.ts). Rust is
+ * contract-only until its template is scaffolded the same way.
+ * TODO(#2479): `--lang rust` scaffolds from `templates/rust`.
  *
  * Output is a pure function of the name and language, so the same command in
  * two apps writes identical bytes.
@@ -32,6 +31,7 @@ import {
   urlEnvFor,
 } from './config';
 import type { Io } from './generate';
+import { checkModulePath, scaffoldGoFunction } from './scaffold-go';
 
 /** The options contract shipped in this package (`proto/` at the package root). */
 export function packagedOptionsProto(): string {
@@ -50,7 +50,7 @@ breaking:
     - FILE
 `;
 
-function pascal(name: string): string {
+export function pascal(name: string): string {
   return name
     .split('-')
     .map((p) => p.charAt(0).toUpperCase() + p.slice(1))
@@ -137,11 +137,13 @@ export interface AddFunctionOptions {
   readonly cwd: string;
   readonly name: string;
   readonly lang: string;
+  /** Go module path for `--lang go` (default `example.com/<name>`). */
+  readonly module?: string;
   readonly io: Io;
 }
 
 /** The `knext add function` verb. Returns the process exit code. */
-export function addFunction({ cwd, name, lang, io }: AddFunctionOptions): number {
+export function addFunction({ cwd, name, lang, module, io }: AddFunctionOptions): number {
   try {
     const nameProblem = checkFunctionName(name);
     if (nameProblem) throw new GrpcUsageError(nameProblem);
@@ -160,7 +162,33 @@ export function addFunction({ cwd, name, lang, io }: AddFunctionOptions): number
       );
     }
 
+    const fnDirRel = join('functions', name);
+    const goModule = module ?? `example.com/${name}`;
+    if (lang === 'go') {
+      const moduleProblem = checkModulePath(goModule);
+      if (moduleProblem) throw new GrpcUsageError(moduleProblem);
+      if (existsSync(join(cwd, fnDirRel))) {
+        throw new GrpcUsageError(
+          `function "${name}" already exists (${fnDirRel}); nothing was changed`,
+        );
+      }
+    } else if (module !== undefined) {
+      throw new GrpcUsageError('--module applies to --lang go only');
+    }
+
     const written: string[] = [];
+    if (lang === 'go') {
+      // First, so a failed code generation writes nothing at all.
+      const files = scaffoldGoFunction(join(cwd, fnDirRel), {
+        name,
+        pkg,
+        service: `${pascal(name)}Service`,
+        module: goModule,
+        contract: contractFor(name),
+        options: packagedOptionsProto(),
+      });
+      for (const f of files) written.push(join(fnDirRel, f));
+    }
     const write = (rel: string, content: string) => {
       const abs = join(cwd, rel);
       mkdirSync(dirname(abs), { recursive: true });

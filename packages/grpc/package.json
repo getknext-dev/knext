@@ -34,10 +34,11 @@
   },
   "files": [
     "dist",
-    "proto"
+    "proto",
+    "templates"
   ],
   "scripts": {
-    "build": "tsup",
+    "build": "tsup && node scripts/copy-templates.mjs",
     "typecheck": "../../node_modules/typescript-tsc7/bin/tsc -p tsconfig.typecheck.json"
   },
   "peerDependencies": {
