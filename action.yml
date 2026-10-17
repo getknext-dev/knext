@@ -109,7 +109,7 @@ runs:
       run: |
         set -euo pipefail
         if [ -z "${KUBECONFIG_B64}" ]; then
-          echo "::error::kubeconfig input is empty. Pass a base64-encoded kubeconfig, e.g. \${{ secrets.KUBECONFIG_B64 }}."
+          echo "::error::kubeconfig input is empty. Pass a base64-encoded kubeconfig, e.g. secrets.KUBECONFIG_B64."
           exit 1
         fi
         mkdir -p "${HOME}/.kube"
@@ -128,38 +128,65 @@ runs:
       if: inputs.doctor == 'true'
       shell: bash
       working-directory: ${{ inputs.working-directory }}
+      env:
+        KNEXT_CLI_PACKAGE: '@getknext/core@1.3.1'
       run: |
         set -euo pipefail
-        npx --yes @getknext/core doctor
+        npx --yes "$KNEXT_CLI_PACKAGE" doctor
 
     - name: Deploy
       id: deploy
       shell: bash
       working-directory: ${{ inputs.working-directory }}
+      # Every input reaches the script through env and is read as a quoted shell
+      # variable. A `${{ }}` inside `run:` is substituted as TEXT before bash
+      # parses it, so whoever controls an input (a branch name passed as `tag`)
+      # would write shell with the kubeconfig in scope. The pinned CLI version is
+      # not an input: this legacy action only shrinks (see the header).
+      env:
+        KNEXT_CLI_PACKAGE: '@getknext/core@1.3.1'
+        KNEXT_REGISTRY: ${{ inputs.registry }}
+        KNEXT_BUCKET: ${{ inputs.bucket }}
+        KNEXT_TAG: ${{ inputs.tag }}
+        KNEXT_NAMESPACE: ${{ inputs.namespace }}
+        KNEXT_SKIP_UPLOAD: ${{ inputs.skip-upload }}
+        KNEXT_DRY_RUN: ${{ inputs.dry-run }}
       run: |
         set -euo pipefail
+        # Inputs with a known shape are checked against an allowlist and refused
+        # otherwise. The message names the rule and never echoes the value.
+        tag_re='^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$'
+        bucket_re='^[a-z0-9][a-z0-9._-]{1,220}[a-z0-9]$'
+        if [ -n "$KNEXT_TAG" ] && ! [[ "$KNEXT_TAG" =~ $tag_re ]]; then
+          echo "::error::the 'tag' input is not a valid image tag. Use letters, digits, '_', '.' and '-' (at most 128 characters, not starting with '.' or '-'). The commit SHA is the recommended value."
+          exit 1
+        fi
+        if [ -n "$KNEXT_BUCKET" ] && ! [[ "$KNEXT_BUCKET" =~ $bucket_re ]]; then
+          echo "::error::the 'bucket' input is not a valid bucket name. Use lowercase letters, digits, '.', '_' and '-' (3 to 222 characters, starting and ending with a letter or digit)."
+          exit 1
+        fi
         args=()
-        [ -n "${{ inputs.registry }}" ]  && args+=( --registry  "${{ inputs.registry }}" )
-        [ -n "${{ inputs.bucket }}" ]    && args+=( --bucket    "${{ inputs.bucket }}" )
-        [ -n "${{ inputs.tag }}" ]       && args+=( --tag       "${{ inputs.tag }}" )
-        [ -n "${{ inputs.namespace }}" ] && args+=( --namespace "${{ inputs.namespace }}" )
-        [ "${{ inputs.skip-upload }}" = "true" ] && args+=( --skip-upload )
-        [ "${{ inputs.dry-run }}" = "true" ]     && args+=( --dry-run )
+        [ -n "$KNEXT_REGISTRY" ]  && args+=( --registry  "$KNEXT_REGISTRY" )
+        [ -n "$KNEXT_BUCKET" ]    && args+=( --bucket    "$KNEXT_BUCKET" )
+        [ -n "$KNEXT_TAG" ]       && args+=( --tag       "$KNEXT_TAG" )
+        [ -n "$KNEXT_NAMESPACE" ] && args+=( --namespace "$KNEXT_NAMESPACE" )
+        [ "$KNEXT_SKIP_UPLOAD" = "true" ] && args+=( --skip-upload )
+        [ "$KNEXT_DRY_RUN" = "true" ]     && args+=( --dry-run )
 
         # `"${args[@]}"` on an EMPTY array is an unbound-variable error under
         # `set -u` in bash 3.2, which is what macOS runners still ship. GitHub's
         # ubuntu images are bash 5 and would not notice. The `+` guard expands to
         # nothing when the array is empty, which is correct on both.
-        npx --yes @getknext/core ${args[@]+"${args[@]}"}
+        npx --yes "$KNEXT_CLI_PACKAGE" ${args[@]+"${args[@]}"}
 
         # A dry run applies nothing, so there is no URL to report. Emitting an
         # empty output here is correct; emitting a stale or invented one is not.
-        if [ "${{ inputs.dry-run }}" = "true" ]; then
+        if [ "$KNEXT_DRY_RUN" = "true" ]; then
           echo "url=" >> "${GITHUB_OUTPUT}"
           exit 0
         fi
 
-        url="$(npx --yes @getknext/core status --json 2>/dev/null | jq -r '.url // empty')"
+        url="$(npx --yes "$KNEXT_CLI_PACKAGE" status --json 2>/dev/null | jq -r '.url // empty')"
         echo "url=${url}" >> "${GITHUB_OUTPUT}"
         if [ -n "${url}" ]; then
           echo "Deployed: ${url}" >> "${GITHUB_STEP_SUMMARY}"
