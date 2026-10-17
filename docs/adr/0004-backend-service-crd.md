@@ -701,7 +701,7 @@ the positive-evidence model of the revocation work, and the zone-env golden.
 - **Residuals.** (a) Optional: unpinned zones keep the name-only binding. (b) Anyone who can edit the
   zone's `NextApp` can move the pin. (c) Content, not provenance. (d) The zone's own status does not
   show the refusal. (e) **The pin binds the image only; it does not close the db-bind exposure.** The
-  `BackendService`'s `env`, `envFrom`, `volumes` and `command`/`args` stay with whoever can write it. A
+  `BackendService`'s `env`, `envFrom` and `volumes` stay with whoever can write it (the spec has no command or args). A
   writer who keeps the pinned digest and sets `spec.env` `NODE_OPTIONS=--import=data:...` (verified on
   Node v25 by the PR review) runs code of their choosing inside the pinned image, with the zone's
   database Secret mounted and its users' tokens arriving; the credential allowlist checks references,

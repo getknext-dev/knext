@@ -295,8 +295,8 @@ export interface BackendBindingConfig {
      * Without one, any image the BackendService names is bound. Update the pin
      * whenever you deploy a new function image.
      *
-     * The pin binds the image content ONLY. The function's env, envFrom,
-     * volumes and command stay with whoever can write its BackendService, so
+     * The pin binds the image content ONLY. The function's env, envFrom and
+     * volumes stay with whoever can write its BackendService, so
      * they can still change what runs inside the pinned image, with your
      * database Secret mounted. Grant update, patch and create on
      * backendservices only to people who may already read that Secret, pinned

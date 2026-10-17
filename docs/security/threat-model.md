@@ -170,7 +170,7 @@ the refusal and cannot undo it.
 **What it does not cover.**
 
 - **The pin binds the image content only; it does not close the exposure above.** The function's `env`,
-  `envFrom`, `volumes` and command/arguments are all in the `BackendService` spec and stay with whoever
+  `envFrom` and `volumes` are all in the `BackendService` spec (it has no command or args field) and stay with whoever
   can write it. Reviewer-verified on Node v25: a writer keeps the pinned digest and adds
   `spec.env: NODE_OPTIONS=--import=data:...`; that code runs inside the pinned image with the zone's
   db-bind mounted and its users' tokens arriving. The credential allowlist does not catch it (it checks

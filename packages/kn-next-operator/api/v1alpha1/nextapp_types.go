@@ -331,7 +331,7 @@ type BackendBinding struct {
 	// the zone's database Secret and key set are mounted into nothing.
 	//
 	// The pin binds the image content ONLY. The BackendService's env, envFrom,
-	// volumes, command and args stay with whoever can write it, so a writer
+	// volumes stay with whoever can write it, so a writer
 	// who keeps the pinned image can still change what runs inside it, with
 	// the zone's database Secret mounted and its users' tokens arriving. Grant
 	// update, patch and create on backendservices only to principals who may

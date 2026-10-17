@@ -246,7 +246,9 @@ export async function deployFunction(args: DeployFunctionArgs): Promise<number> 
         'The `image` field pins the image the zone binds: if the BackendService image ever ' +
         'changes without the zone changing the pin too, the function is refused and nothing is ' +
         'mounted into it. Leave `image` out to keep the name-only binding. After you deploy a new ' +
-        'function image, update the pin in the same step.\n',
+        'function image, update the pin in the same step. The pin binds the image only: whoever can ' +
+        "write the BackendService can still change the function's env, envFrom and volumes, so grant " +
+        'update on backendservices only to people who may read the zone database Secret.\n',
     );
     return 0;
   } catch (err) {

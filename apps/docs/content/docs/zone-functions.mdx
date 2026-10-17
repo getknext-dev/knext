@@ -145,8 +145,7 @@ function's image follows. Either order works; neither avoids that window.
 #### What the pin does not cover
 
 **The pin binds the image content, and nothing else.** The function's other settings stay with
-whoever can write its `BackendService`: its `env`, `envFrom`, `volumes`, and its command and
-arguments. Someone who can write the `BackendService` can keep the pinned image and still change
+whoever can write its `BackendService`: its `env`, `envFrom` and `volumes`. Someone who can write the `BackendService` can keep the pinned image and still change
 what runs inside it. For example, setting `NODE_OPTIONS=--import=...` in `env` makes a Node image
 run code of their choosing, with your zone's database Secret mounted and your users' tokens arriving.
 A pin does not stop that.
