@@ -293,7 +293,20 @@ for (const split of SPLITS) {
     it('the build/scan job hands the layout and its digest to the publish job', () => {
       const text = jobText(build);
       expect(text).toMatch(/actions\/upload-artifact@/);
-      expect(JSON.stringify(build.outputs ?? {})).toMatch(/sha256/i);
+      expect(Object.keys((build.outputs as Record<string, unknown>) ?? {})).toContain(
+        'layout_sha256',
+      );
+    });
+
+    it('the publish job reads that exact output as the digest it verifies against', () => {
+      const verifyStep = stepsOf(publish).find(
+        (s) =>
+          /sha256sum/.test(String(s.run ?? '')) &&
+          new RegExp(split.layout).test(String(s.run ?? '')),
+      );
+      expect(JSON.stringify(verifyStep?.env ?? {})).toContain(
+        `needs.${split.build}.outputs.layout_sha256`,
+      );
     });
 
     it('no job outside the publish job holds a write grant', () => {
