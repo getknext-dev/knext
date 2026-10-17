@@ -293,8 +293,8 @@ const MUTATIONS = [
     id: 'L04',
     claim: 'the lint rejects the function instead of warning',
     subject: 'verdict',
-    anchor: '&& o.zoneListed && len(o.violations) == 0',
-    replacement: '&& o.zoneListed && len(o.violations) == 0 && len(o.lint) == 0',
+    anchor: 'o.imageMismatch == "" && len(o.violations) == 0',
+    replacement: 'o.imageMismatch == "" && len(o.violations) == 0 && len(o.lint) == 0',
     test: envtest('foreign database host as a lint WARNING'),
   },
   // --- the reconciler ---------------------------------------------------------
