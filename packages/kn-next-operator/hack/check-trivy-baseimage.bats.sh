@@ -42,8 +42,19 @@ FAILS=0
 # Go stdlib CVE lands; it is the single knob that keeps the binary patched.
 # 12: CVE-2026-39822 (os.Root symlink following, HIGH) fixed in 1.25.12.
 # 1.26.9: CVE-2026-78667 (net/http Range DoS), CVE-2026-78669 (HTTP/2 SETTINGS flood), CVE-2026-97031 (crypto/tls ECH DoS).
-MIN_MINOR=26
-MIN_PATCH=9
+# Explicit per-minor floors: a minor with no entry (1.25, 1.28 until reviewed) and a
+# patch below its minor's floor (1.27.0 / 1.27.1 are unpatched, fixed in 1.27.2) are
+# REJECTED, never waved through as "newer".
+#   1.26 -> 9 ; 1.27 -> 2
+go_floor() { case "$1" in 1.26) echo 9 ;; 1.27) echo 2 ;; *) echo "" ;; esac; }
+go_patched() { # <major.minor.patch>
+  local maj="${1%%.*}" rest="${1#*.}"
+  local min="${rest%%.*}" pat="${rest#*.}"
+  pat="${pat%%[!0-9]*}"
+  local f; f="$(go_floor "$maj.$min")"
+  [ -n "$f" ] && [ "${pat:-0}" -ge "$f" ]
+}
+not() { ! "$@"; }
 
 assert() { # <desc> <cmd...>
   local desc="$1"; shift
@@ -62,11 +73,13 @@ assert "builder Go tag is a pinned point release golang:X.Y.Z (not floating gola
 
 # 2. The pinned point release must be >= MIN_PATCH on the 1.$MIN_MINOR line (or any newer
 #    minor), so the Go-stdlib CVEs Trivy flags are fixed in the binary.
-GO_MAJOR="$(printf '%s' "$GO_TAG" | cut -d. -f1)"
-GO_MINOR="$(printf '%s' "$GO_TAG" | cut -d. -f2)"
-GO_PATCH="$(printf '%s' "$GO_TAG" | cut -d. -f3 | grep -oE '^[0-9]+' || echo 0)"
-assert "builder Go is patched (>= 1.$MIN_MINOR.$MIN_PATCH, or a newer minor)" \
-  bash -c "[ '$GO_MAJOR' -gt 1 ] || { [ '$GO_MAJOR' -eq 1 ] && { [ '$GO_MINOR' -gt $MIN_MINOR ] || { [ '$GO_MINOR' -eq $MIN_MINOR ] && [ '$GO_PATCH' -ge $MIN_PATCH ]; }; }; }"
+assert "builder Go is patched (1.26.9+ or 1.27.2+)" go_patched "$GO_TAG"
+for bad in 1.25.14 1.26.8 1.27.0 1.27.1 1.28.0; do
+  assert "rejects unpatched/unreviewed Go $bad" not go_patched "$bad"
+done
+for good in 1.26.9 1.26.10 1.27.2 1.27.3; do
+  assert "accepts patched Go $good" go_patched "$good"
+done
 
 # 3. No floating `golang:1.25` (bare minor) anywhere in the Dockerfile — guards
 #    against a second builder stage regressing the pin.
