@@ -281,6 +281,22 @@ jobs:
           go-version-file: packages/kn-next-operator/go.mod
           cache-dependency-path: packages/kn-next-operator/go.sum
 
+      # `mutation-prove-2479-go-scaffold.mjs` grades the Go zone-function scaffold,
+      # which runs REAL generation over `templates/go`. That module requires a
+      # NEWER Go than the operator's (go 1.26.9 vs 1.25.3), and `setup-go` pins
+      # GOTOOLCHAIN=local, so with only the operator's toolchain the grading spec
+      # exited 1 within seconds ("requires go >= ..."), found by the first full run
+      # that reached it (run 39029215555). A newer Go builds the operator module
+      # fine (a go.mod names a MINIMUM), so this second install, which wins on PATH,
+      # serves both. Gated by FILE PRESENCE like the Rust toolchains: a ref without
+      # `templates/go` keeps the operator's.
+      - name: Setup Go for the Go zone template (templates/go/go.mod)
+        if: ${{ hashFiles('templates/go/go.mod') != '' }}
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: templates/go/go.mod
+          cache-dependency-path: templates/go/go.sum
+
       # `mutation-prove-2052-backendservice.mjs` (#2052) grades envtest specs (a
       # real kube-apiserver + etcd) as well as plain `go test` targets, so the
       # lane needs the envtest binaries the operator's Makefile pins. They land

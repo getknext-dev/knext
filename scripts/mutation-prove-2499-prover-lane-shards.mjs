@@ -177,7 +177,8 @@ const MUTATIONS = [
     subject: 'wf',
     claim: 'a non-alert job holds a write scope',
     anchor: '    timeout-minutes: 10\n    # The findings',
-    replacement: '    timeout-minutes: 10\n    permissions:\n      contents: write\n    # The findings',
+    replacement:
+      '    timeout-minutes: 10\n    permissions:\n      contents: write\n    # The findings',
     validate: parses,
   },
   {
@@ -212,6 +213,24 @@ const MUTATIONS = [
     anchor: '          KNEXT_LANE_CARGO_TARGET_DIR: ${{ runner.temp }}/cargo-target',
     replacement:
       '          KNEXT_LANE_CARGO_TARGET_DIR: ${{ runner.temp }}/cargo-target\n          CARGO_TARGET_DIR: ${{ runner.temp }}/cargo-target',
+    validate: parses,
+  },
+  {
+    id: 'W26',
+    subject: 'wf',
+    claim:
+      'the Go zone template is built with the operator’s older Go (GOTOOLCHAIN=local refuses it)',
+    anchor: '          go-version-file: templates/go/go.mod',
+    replacement: '          go-version-file: packages/kn-next-operator/go.mod',
+    validate: parses,
+  },
+  {
+    id: 'W27',
+    subject: 'wf',
+    claim:
+      'the template Go install runs unconditionally (a ref without templates/go fails its setup)',
+    anchor: "        if: ${{ hashFiles('templates/go/go.mod') != '' }}",
+    replacement: '        if: ${{ true }}',
     validate: parses,
   },
   {
