@@ -245,7 +245,7 @@ refusal above still runs.
 | `registry-token` | no | — | On GHCR, `github.token` suffices |
 | `registry-username` | no | `github.actor` | |
 | `tag` | no | `github.sha` | Image tag. The commit SHA traces an image to its commit. Letters, digits, `_`, `.` and `-` only (up to 128 characters, not starting with `.` or `-`); anything else is refused. A branch name such as `feature/login` is not a valid tag, so replace the `/` or use the SHA |
-| `bucket` | no | from `knext.config.ts` | Object-storage bucket for static assets. Lowercase letters, digits, `.`, `_` and `-` (3 to 222 characters); anything else is refused |
+| `bucket` | no | from `knext.config.ts` | Object-storage bucket for static assets. Lowercase letters, digits, `.`, `_` and `-` (3 to 222 characters, starting and ending with a letter or digit); anything else is refused |
 | `skip-upload` | no | `false` | Skip the static-asset upload. Needs only a kubeconfig and registry auth |
 | `skip-build` | no | `false` | Skip `next build`, for when a previous job already produced the output |
 | `auth` | no | `kubeconfig` | Reserved for short-lived cloud credentials later |

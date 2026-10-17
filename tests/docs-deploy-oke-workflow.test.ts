@@ -528,7 +528,7 @@ describe('packages/kn-next-action — the cli input actually drives the Deploy s
 
   it('REDS when the executable check is removed (mutation)', () => {
     const mutated = actionRaw().replace(
-      /\s*# A wrong 'cli' input[\s\S]*?not found on PATH\. cli=\\"\$KNEXT_CLI\\""\n\s*exit 1\n\s*fi\n/,
+      /\s*# A wrong 'cli' input[\s\S]*?not found on PATH\."\n\s*exit 1\n\s*fi\n/,
       '\n',
     );
     expect(mutated).not.toEqual(actionRaw());

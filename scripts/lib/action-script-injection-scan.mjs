@@ -20,6 +20,10 @@
  * into). `env:`, `with:` (other keys), `if:`, `working-directory:` are not script
  * bodies and are not scanned.
  *
+ * Workflows under `.github/workflows` are scanned too, with a DENYLIST of outside-
+ * controlled contexts ({@link WORKFLOW_UNTRUSTED}) rather than the allowlist: see
+ * `scanWorkflowText`.
+ *
  * A file the scan cannot read is an error, not a pass.
  *
  * The test is `tests/action-script-injection.test.ts`; the mutation proof is
@@ -59,17 +63,38 @@ export function expressionsIn(body) {
 }
 
 /**
+ * @param {string} text
+ * @param {string} file used in messages
+ */
+function parseYaml(text, file) {
+  try {
+    return parse(text);
+  } catch (e) {
+    throw new Error(`${file}: not parseable YAML, so it cannot be scanned: ${e.message}`);
+  }
+}
+
+/**
+ * The script bodies of one step: its `run:`, and the `script:` of an
+ * `actions/github-script` step (JavaScript the same expression is pasted into).
+ *
+ * @param {any} step
+ * @returns {Array<[string, string]>}
+ */
+function scriptBodies(step) {
+  const bodies = [];
+  if (typeof step?.run === 'string') bodies.push(['run', step.run]);
+  if (typeof step?.with?.script === 'string') bodies.push(['with.script', step.with.script]);
+  return bodies;
+}
+
+/**
  * @param {string} text the action file
  * @param {string} file used in messages
  * @returns {Array<{file: string, step: string, key: string, expression: string}>}
  */
 export function scanActionText(text, file) {
-  let doc;
-  try {
-    doc = parse(text);
-  } catch (e) {
-    throw new Error(`${file}: not parseable YAML, so it cannot be scanned: ${e.message}`);
-  }
+  const doc = parseYaml(text, file);
   const runs = doc?.runs;
   if (!runs || runs.using !== 'composite') return [];
   if (!Array.isArray(runs.steps)) {
@@ -78,10 +103,7 @@ export function scanActionText(text, file) {
   const findings = [];
   runs.steps.forEach((step, i) => {
     const name = String(step?.name ?? step?.id ?? `#${i + 1}`);
-    const bodies = [];
-    if (typeof step?.run === 'string') bodies.push(['run', step.run]);
-    if (typeof step?.with?.script === 'string') bodies.push(['with.script', step.with.script]);
-    for (const [key, body] of bodies) {
+    for (const [key, body] of scriptBodies(step)) {
       for (const expression of expressionsIn(body)) {
         if (isRunnerControlled(expression)) continue;
         findings.push({ file, step: name, key, expression });
@@ -89,6 +111,71 @@ export function scanActionText(text, file) {
     }
   });
   return findings;
+}
+
+/**
+ * WORKFLOWS use a DENYLIST, not the allowlist above, deliberately: a workflow's own
+ * scripts legitimately interpolate `matrix.*`, `steps.*.outcome`, `github.workspace`
+ * and the like, and a workflow is not a published surface a stranger calls with
+ * their own values. What must never appear inside a `run:` or `github-script` body
+ * is text an outside party chooses: event payload fields (PR title, branch, commit
+ * message), branch/ref names, and dispatch/call inputs. The pattern is searched for
+ * ANYWHERE in the expression, so wrapping it (`format('{0}', github.head_ref)`,
+ * `toJSON(github.event)`) does not hide it.
+ *
+ * `github.event_name` and `github.event_path` are not event payload fields and are
+ * not matched (`\b` does not split `event_name`).
+ */
+export const WORKFLOW_UNTRUSTED =
+  /\b(?:inputs\s*[.[]|github\.event\b(?!_)|github\.head_ref\b|github\.base_ref\b|github\.ref_name\b|github\.ref\b(?!_))/;
+
+/**
+ * @param {string} text the workflow file
+ * @param {string} file used in messages
+ * @returns {Array<{file: string, step: string, key: string, expression: string}>}
+ */
+export function scanWorkflowText(text, file) {
+  const doc = parseYaml(text, file);
+  const jobs = doc?.jobs;
+  if (jobs === undefined || jobs === null) return [];
+  if (typeof jobs !== 'object' || Array.isArray(jobs)) {
+    throw new Error(`${file}: workflow whose jobs is not a map; cannot be scanned`);
+  }
+  const findings = [];
+  for (const [jobId, job] of Object.entries(jobs)) {
+    if (job?.steps === undefined) continue; // a reusable-workflow call has no steps
+    if (!Array.isArray(job.steps)) {
+      throw new Error(`${file}: job ${jobId} has steps that are not a list; cannot be scanned`);
+    }
+    job.steps.forEach((step, i) => {
+      const name = `${jobId}/${String(step?.name ?? step?.id ?? `#${i + 1}`)}`;
+      for (const [key, body] of scriptBodies(step)) {
+        for (const expression of expressionsIn(body)) {
+          if (!WORKFLOW_UNTRUSTED.test(expression)) continue;
+          findings.push({ file, step: name, key, expression });
+        }
+      }
+    });
+  }
+  return findings;
+}
+
+/** @param {string} repoRoot @param {string} rel */
+export function scanWorkflowFile(repoRoot, rel) {
+  return scanWorkflowText(readFileSync(resolve(repoRoot, rel), 'utf8'), rel);
+}
+
+/**
+ * Every `.github/workflows/*.yml` / `*.yaml`, repo-relative.
+ *
+ * @param {string} repoRoot
+ * @returns {string[]}
+ */
+export function discoverWorkflowFiles(repoRoot) {
+  return readdirSync(join(repoRoot, '.github', 'workflows'), { withFileTypes: true })
+    .filter((e) => e.isFile() && /\.ya?ml$/.test(e.name))
+    .map((e) => `.github/workflows/${e.name}`)
+    .sort();
 }
 
 /** @param {string} repoRoot @param {string} rel */

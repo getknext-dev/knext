@@ -12,6 +12,11 @@
  *       (the last proves discovery reaches it);
  *   V*  the VALIDATION and the PIN: neuter the tag / bucket / version allowlist,
  *       or let the CLI float to `latest`, or let the two pins drift;
+ *   E*  an ERROR MESSAGE echoes an input again (a newline in it forges workflow
+ *       commands);
+ *   W*  WORKFLOWS: `github.base_ref` interpolated into a `ci.yml` script again,
+ *       and each piece of the workflow denylist, its discovery and its fail-closed
+ *       branch removed;
  *   S*  the SCAN itself: stop treating an expression as untrusted, stop reading
  *       `with.script`, swallow an unparseable file, or stop discovering a file.
  *
@@ -235,6 +240,98 @@ const MUTATIONS = [
     replacement:
       "} else if (e.isFile() && /^action\\.ya?ml$/.test(e.name) && !rel.startsWith('.github')) {",
   },
+
+  // ── E: an error message echoes an input (newline forges workflow commands) ──
+  {
+    id: 'E1',
+    subject: 'kna',
+    claim: "the 'cli' error message echoes the raw input again",
+    anchor: 'was not found on PATH."',
+    replacement: 'was not found on PATH. cli=\\"$KNEXT_CLI\\""',
+  },
+  {
+    id: 'E2',
+    subject: 'kna',
+    claim: "the unknown 'auth' error message echoes the raw input again",
+    anchor: 'unknown auth mode (expected: kubeconfig)',
+    replacement: "unknown auth mode '$KNEXT_AUTH' (expected: kubeconfig)",
+  },
+
+  // ── W: workflows ───────────────────────────────────────────────────────────
+  {
+    id: 'W1',
+    subject: 'ci',
+    claim: 'ci.yml interpolates github.base_ref into the docs-reminder script again (1st step)',
+    anchor: 'git fetch --no-tags --depth=1 origin "$BASE_REF" || true\n          CHANGED=',
+    replacement:
+      'git fetch --no-tags --depth=1 origin "${{ github.base_ref }}" || true\n          CHANGED=',
+  },
+  {
+    id: 'W2',
+    subject: 'ci',
+    claim:
+      'ci.yml interpolates github.base_ref into the internal-reference script again (2nd step)',
+    anchor: 'git fetch --no-tags --depth=1 origin "$BASE_REF" || true\n          # Only scan',
+    replacement:
+      'git fetch --no-tags --depth=1 origin "${{ github.base_ref }}" || true\n          # Only scan',
+  },
+  {
+    id: 'W3',
+    subject: 'scan',
+    claim: 'the workflow denylist stops matching inputs',
+    anchor: 'inputs\\s*[.[]|',
+    replacement: '',
+  },
+  {
+    id: 'W4',
+    subject: 'scan',
+    claim: 'the workflow denylist stops matching github.event payload fields',
+    anchor: 'github\\.event\\b(?!_)|',
+    replacement: '',
+  },
+  {
+    id: 'W5',
+    subject: 'scan',
+    claim: 'the workflow denylist stops matching github.head_ref',
+    anchor: 'github\\.head_ref\\b|',
+    replacement: '',
+  },
+  {
+    id: 'W6',
+    subject: 'scan',
+    claim: 'the workflow denylist stops matching github.base_ref',
+    anchor: 'github\\.base_ref\\b|',
+    replacement: '',
+  },
+  {
+    id: 'W7',
+    subject: 'scan',
+    claim: 'the workflow denylist stops matching github.ref_name',
+    anchor: 'github\\.ref_name\\b|',
+    replacement: '',
+  },
+  {
+    id: 'W8',
+    subject: 'scan',
+    claim: 'the workflow scan reports nothing at all',
+    anchor: 'if (!WORKFLOW_UNTRUSTED.test(expression)) continue;',
+    replacement: 'continue;',
+  },
+  {
+    id: 'W9',
+    subject: 'scan',
+    claim: 'workflow discovery stops reaching all but one workflow',
+    anchor: 'e.isFile() && /\\.ya?ml$/.test(e.name)',
+    replacement: "e.isFile() && e.name === 'ci.yml'",
+  },
+  {
+    id: 'W10',
+    subject: 'scan',
+    claim: 'a workflow job whose steps are not a list passes silently',
+    anchor:
+      'throw new Error(`${file}: job ${jobId} has steps that are not a list; cannot be scanned`);',
+    replacement: 'continue;',
+  },
 ];
 
 // The subjects are inline literals, not a shared constant: the lane's
@@ -247,6 +344,7 @@ const prover = createGuardProver({
     root: 'action.yml',
     mirror: '.github/actions/docker-hub-mirror/action.yml',
     scan: 'scripts/lib/action-script-injection-scan.mjs',
+    ci: '.github/workflows/ci.yml',
   },
 });
 

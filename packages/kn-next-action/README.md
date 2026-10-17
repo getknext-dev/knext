@@ -98,7 +98,7 @@ only with a cluster-admin one.
 | `registry-username` | no | `github.actor` | |
 | `working-directory` | no | `.` | where `knext.config.ts` lives |
 | `tag` | no | `github.sha` | a timestamp cannot be traced to a commit. Letters, digits, `_`, `.` and `-` only (up to 128 characters, not starting with `.` or `-`); anything else is refused |
-| `bucket` | no | from config | object storage for static assets. Lowercase letters, digits, `.`, `_` and `-` (3 to 222 characters); anything else is refused |
+| `bucket` | no | from config | object storage for static assets. Lowercase letters, digits, `.`, `_` and `-` (3 to 222 characters, starting and ending with a letter or digit); anything else is refused |
 | `skip-upload` | no | `false` | the credential-free path — no cloud CLI needed |
 | `skip-build` | no | `false` | when a previous job already produced the output |
 | `dry-run` | no | `false` | print the resource, apply nothing |
