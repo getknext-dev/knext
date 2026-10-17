@@ -345,13 +345,13 @@ describe('the real tree', () => {
       'apps/file-manager/src/app/cache-tests/on-demand/page.tsx::invalidatePath',
       'apps/file-manager/src/app/cache-tests/on-demand/page.tsx::invalidateProducts',
       'apps/file-manager/src/app/knext-smoke/stream/page.tsx::echoAction',
+      'apps/file-manager/src/app/setup/actions.ts::runSetup',
       'apps/file-manager/src/app/users/page.tsx::addUser',
     ]);
   });
 
-  it('the allowlist is exactly three entries, each with a reason', () => {
+  it('the allowlist is exactly two entries, each with a reason', () => {
     expect(ALLOWLIST.map((a) => `${a.file}::${a.name}`).sort()).toEqual([
-      'apps/db-demo/src/app/actions.ts::postMessage',
       'apps/file-manager/src/app/api/rum/route.ts::POST',
       'apps/file-manager/src/app/knext-smoke/stream/page.tsx::echoAction',
     ]);

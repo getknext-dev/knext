@@ -17,6 +17,10 @@
  *   - `apps/file-manager/src/app/api/audit/route.test.ts`       the audit read.
  *   - `apps/file-manager/src/app/api/cache/invalidate/auth.test.ts`   the
  *       fail-closed compare the whole gate stands on.
+ *   - `apps/file-manager/src/app/setup/setup.test.tsx`   GET /setup writes
+ *       nothing; the setup Server Action (a POST) refuses anonymous callers.
+ *   - `apps/db-demo/src/app/actions.test.ts`   the db-demo guestbook write is
+ *       refused without its own token, fail-closed when unset.
  *
  * Two kinds of row, and both halves matter: the SCANNER weakened (a RED fixture
  * must then go red), and the REAL TREE broken (an unauthenticated action, a write
@@ -56,6 +60,8 @@ const MAUTH_SPEC = 'apps/file-manager/src/app/_auth/mutation-auth.test.ts';
 const KEY_SPEC = 'apps/file-manager/src/app/_upload/object-key.test.ts';
 const AUDIT_SPEC = 'apps/file-manager/src/app/api/audit/route.test.ts';
 const AUTH_SPEC = 'apps/file-manager/src/app/api/cache/invalidate/auth.test.ts';
+const SETUP_SPEC = 'apps/file-manager/src/app/setup/setup.test.tsx';
+const DBDEMO_SPEC = 'apps/db-demo/src/app/actions.test.ts';
 
 const GUARD = 'if (!(await authorizeMutation(formData))) {';
 const OFF = 'if (false) {';
@@ -191,8 +197,8 @@ const SCANNER = [
     id: 'S18',
     subject: 'lib',
     claim: 'an allowlist entry outlives the code it excused',
-    anchor: "file: 'apps/db-demo/src/app/actions.ts',",
-    replacement: "file: 'apps/db-demo/src/app/gone.ts',",
+    anchor: "file: 'apps/file-manager/src/app/knext-smoke/stream/page.tsx',",
+    replacement: "file: 'apps/file-manager/src/app/knext-smoke/stream/gone.tsx',",
   },
   {
     id: 'S19',
@@ -335,10 +341,24 @@ const TREE = [
   {
     id: 'T16',
     subject: 'dbdemo',
-    claim: 'a new unauthenticated action is added to db-demo beside the allowlisted one',
+    claim: 'a new unauthenticated action is added to db-demo beside the gated one',
     anchor: 'export async function postMessage(formData: FormData): Promise<void> {',
     replacement:
       'export async function postAnother(formData: FormData): Promise<void> {\n  await addMessage({ author: "x", body: String(formData.get("body")) });\n}\n\nexport async function postMessage(formData: FormData): Promise<void> {',
+  },
+  {
+    id: 'T17',
+    subject: 'dbdemo',
+    claim: 'db-demo postMessage loses its auth check (it is no longer allowlisted)',
+    anchor: GUARD,
+    replacement: OFF,
+  },
+  {
+    id: 'T18',
+    subject: 'setupactions',
+    claim: 'the setup Server Action loses its auth check',
+    anchor: GUARD,
+    replacement: OFF,
   },
 ];
 
@@ -543,6 +563,96 @@ const AUDIT = [
   },
 ];
 
+// ---------------------------------------------------------------------------
+// /setup: a GET only renders; the work is an authenticated POST
+// ---------------------------------------------------------------------------
+const SETUP = [
+  {
+    id: 'P01',
+    subject: 'setupactions',
+    claim: 'an unauthenticated setup POST creates the tables (the auth check is off)',
+    anchor: GUARD,
+    replacement: OFF,
+  },
+  {
+    id: 'P02',
+    subject: 'setupactions',
+    claim: 'the tables are created before the caller is checked',
+    anchor: GUARD,
+    replacement: `await setupDatabase();\n  ${GUARD}`,
+  },
+  {
+    id: 'P03',
+    subject: 'setupactions',
+    claim: 'a refused setup POST returns normally instead of throwing',
+    anchor: "throw new Error('Unauthorized');",
+    replacement: 'return;',
+  },
+  {
+    id: 'P04',
+    subject: 'setuppage',
+    claim: 'rendering GET /setup creates the tables again',
+    anchor: 'const params = await searchParams;',
+    replacement:
+      "const { setupDatabase } = await import('./setup-database');\n  await setupDatabase();\n  const params = await searchParams;",
+  },
+];
+
+// ---------------------------------------------------------------------------
+// db-demo: its own copy of the check, its own token
+// ---------------------------------------------------------------------------
+const DBDEMO = [
+  {
+    id: 'D01',
+    subject: 'dbactions',
+    claim: 'an unauthenticated post writes (the auth check is off)',
+    anchor: GUARD,
+    replacement: OFF,
+  },
+  {
+    id: 'D02',
+    subject: 'dbactions',
+    claim: 'a refused post returns normally instead of throwing',
+    anchor: "throw new Error('Unauthorized');",
+    replacement: 'return;',
+  },
+  {
+    id: 'D03',
+    subject: 'dbauth',
+    claim: 'an unset token authorizes everyone (fail-open)',
+    anchor: 'if (!expected) return false; // unconfigured = deny all',
+    replacement: 'if (!expected) return true;',
+  },
+  {
+    id: 'D04',
+    subject: 'dbauth',
+    claim: 'any token is accepted',
+    anchor: 'return timingSafeEqual(a, b);',
+    replacement: 'return true;',
+  },
+  {
+    id: 'D05',
+    subject: 'dbauth',
+    claim: 'a token of the wrong length reaches timingSafeEqual (which throws)',
+    anchor: 'if (a.length !== b.length) return false; // timingSafeEqual needs equal lengths',
+    replacement: '',
+  },
+  {
+    id: 'D06',
+    subject: 'dbauth',
+    claim: 'the form token field is never read',
+    anchor: "const field = formData?.get('token');",
+    replacement: 'const field = undefined as FormDataEntryValue | null | undefined;',
+  },
+  {
+    id: 'D07',
+    subject: 'dbauth',
+    claim: 'the Authorization header is never read',
+    anchor: "header = (await headers()).get('authorization');",
+    replacement: 'header = null;',
+  },
+];
+
 // One literal `subjects` map per guard, so the PR-time anchor-liveness audit
 // (scripts/lib/prover-lane.mjs) can read every subject path and re-check every
 // anchor above without running this prover.
@@ -559,6 +669,7 @@ const scan = createGuardProver({
     audit: 'apps/file-manager/src/app/api/audit/route.ts',
     healthtpl: 'packages/kn-next/templates/app/src/app/api/health/route.ts.hbs',
     dbdemo: 'apps/db-demo/src/app/actions.ts',
+    setupactions: 'apps/file-manager/src/app/setup/actions.ts',
   },
 });
 const upload = createGuardProver({
@@ -584,6 +695,22 @@ const key = createGuardProver({
   spec: KEY_SPEC,
   subjects: { objkey: 'apps/file-manager/src/app/_upload/object-key.ts' },
 });
+const setup = createGuardProver({
+  repoRoot: REPO_ROOT,
+  spec: SETUP_SPEC,
+  subjects: {
+    setupactions: 'apps/file-manager/src/app/setup/actions.ts',
+    setuppage: 'apps/file-manager/src/app/setup/page.tsx',
+  },
+});
+const dbdemo = createGuardProver({
+  repoRoot: REPO_ROOT,
+  spec: DBDEMO_SPEC,
+  subjects: {
+    dbactions: 'apps/db-demo/src/app/actions.ts',
+    dbauth: 'apps/db-demo/src/lib/mutation-auth.ts',
+  },
+});
 const audit = createGuardProver({
   repoRoot: REPO_ROOT,
   spec: AUDIT_SPEC,
@@ -593,7 +720,7 @@ const audit = createGuardProver({
 // A mutation must stay valid TypeScript/JavaScript, or its red is for the wrong
 // reason. `.tsx` and `.hbs` subjects cannot go through the TS transpile check
 // as written, and T15 breaks the grammar on purpose.
-const NO_VALIDATE = new Set(['T15', 'T14', 'T06', 'T07', 'T08', 'T09', 'T10']);
+const NO_VALIDATE = new Set(['T15', 'T14', 'T06', 'T07', 'T08', 'T09', 'T10', 'P04']);
 const withValidate = (rows) =>
   rows.map((m) =>
     NO_VALIDATE.has(m.id) || m.subject === 'healthtpl' ? m : { ...m, validate: jsStillParses },
@@ -605,8 +732,12 @@ const MAUTH_ROWS = withValidate(MAUTH);
 const AUTH_TS_ROWS = withValidate(AUTH_ROWS);
 const KEY_ROWS = withValidate(KEY);
 const AUDIT_ROWS = withValidate(AUDIT);
+const SETUP_ROWS = withValidate(SETUP);
+const DBDEMO_ROWS = withValidate(DBDEMO);
 
 const CANARY = {
+  setup: { subject: 'setupactions', anchor: GUARD, replacement: OFF },
+  dbdemo: { subject: 'dbactions', anchor: GUARD, replacement: OFF },
   scan: { subject: 'actions', anchor: GUARD, replacement: OFF },
   upload: { subject: 'actions', anchor: GUARD, replacement: OFF },
   mauth: {
@@ -639,13 +770,17 @@ mauth.preflight(MAUTH_ROWS);
 authSpec.preflight(AUTH_TS_ROWS);
 key.preflight(KEY_ROWS);
 audit.preflight(AUDIT_ROWS);
+setup.preflight(SETUP_ROWS);
+dbdemo.preflight(DBDEMO_ROWS);
 declareMutations(
   SCAN_ROWS.length +
     UPLOAD_ROWS.length +
     MAUTH_ROWS.length +
     AUTH_TS_ROWS.length +
     KEY_ROWS.length +
-    AUDIT_ROWS.length,
+    AUDIT_ROWS.length +
+    SETUP_ROWS.length +
+    DBDEMO_ROWS.length,
 );
 
 const sweep = (label, p, spec, rows, canary) => {
@@ -665,5 +800,7 @@ sweep('authorizeMutation', mauth, MAUTH_SPEC, MAUTH_ROWS, CANARY.mauth);
 sweep('isAuthorized (fail-closed compare)', authSpec, AUTH_SPEC, AUTH_TS_ROWS, CANARY.auth);
 sweep('filename validation + key', key, KEY_SPEC, KEY_ROWS, CANARY.key);
 sweep('audit read', audit, AUDIT_SPEC, AUDIT_ROWS, CANARY.audit);
+sweep('/setup', setup, SETUP_SPEC, SETUP_ROWS, CANARY.setup);
+sweep('db-demo', dbdemo, DBDEMO_SPEC, DBDEMO_ROWS, CANARY.dbdemo);
 
 console.log('\nall sweeps behaved as required');

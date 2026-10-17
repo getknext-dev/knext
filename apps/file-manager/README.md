@@ -58,7 +58,8 @@ const config: KnativeNextConfig = {
 
 ### Authentication
 
-Every action that changes state, and the audit read, needs the admin token. Scripts send
+Every action that changes state, and the audit read, needs the admin token. That includes creating
+the demo tables on `/setup`: opening the page does nothing until you submit its form with the token. Scripts send
 `Authorization: Bearer $CACHE_INVALIDATE_TOKEN`. The pages ask for it in an **Access token** field
 (a plain form cannot set headers, so the form sends it in a `token` field). Without the token the
 upload, add-user and invalidate actions refuse and write nothing.
@@ -127,7 +128,7 @@ curl -X POST http://localhost:3000/api/cache/invalidate \
 | `/users` | User management |
 | `/audit` | Audit logs with infinite scroll |
 | `/cache` | Cache monitor (SSE) |
-| `/setup` | Database setup wizard |
+| `/setup` | Database setup. A GET only shows a form; the **Initialize database** button is a POST that needs the admin token |
 
 ## Development
 

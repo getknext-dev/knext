@@ -94,14 +94,6 @@ export const ALLOWLIST = [
       "compat-smoke fixture: sets one cookie on the CALLER's own response and touches no " +
       'server-side state (no database, no cache, no module state).',
   },
-  {
-    file: 'apps/db-demo/src/app/actions.ts',
-    name: 'postMessage',
-    reason:
-      'KNOWN DEBT, not an exception in principle: the db-demo guestbook writes a row with no ' +
-      'authentication. Tracked by its own issue (see docs/security/mutating-endpoints.md); ' +
-      'remove this entry when it is gated.',
-  },
 ];
 
 const SKIP_DIRS = new Set([

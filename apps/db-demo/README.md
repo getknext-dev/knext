@@ -40,7 +40,11 @@ bun run --filter db-demo dev
 2. **Migrate once** — after the database is `Ready`, run the writer-only one-shot
    Job ([`migrate-job.yaml`](./migrate-job.yaml)) — `restartPolicy: Never`,
    sequenced with `kubectl wait`. See the guide's migrations section.
-3. **Deploy** — `knext deploy`. The app scales to zero; the first visitor request
+3. **Set the write token** — the guestbook form is a Server Action, which is a public POST
+   endpoint, so posting requires a token. Put a random value in a Kubernetes Secret and expose it
+   as `DB_DEMO_WRITE_TOKEN`. Unset or empty means every post is refused. The page's **write token**
+   field sends it as a form field; a script sends `Authorization: Bearer <token>`.
+4. **Deploy** — `knext deploy`. The app scales to zero; the first visitor request
    wakes the app pod, and the pool's first connection wakes its scale-to-zero
    compute. App + database sleep and wake together on one request.
 

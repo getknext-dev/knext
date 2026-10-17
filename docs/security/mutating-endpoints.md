@@ -86,14 +86,16 @@ this list and the tree disagree):
 | `apps/file-manager/src/app/cache-tests/on-demand/page.tsx::invalidatePath` | path cache for the page | `authorizeMutation` | ✅ authed |
 | `apps/file-manager/src/app/cache-tests/on-demand/page.tsx::invalidateAll` | cache tags `products` and `orders` | `authorizeMutation` | ✅ authed |
 | `apps/file-manager/src/app/knext-smoke/stream/page.tsx::echoAction` | one cookie on the caller's own response; no server-side state | none | ✅ justified exception: compat-smoke fixture, nothing shared is written |
-| `apps/db-demo/src/app/actions.ts::postMessage` | `messages` table | none | ⚠️ **known debt**, tracked in #2533; held on the scan's allowlist until gated |
+| `apps/file-manager/src/app/setup/actions.ts::runSetup` | creates the demo tables and seeds them when empty (idempotent DDL + inserts) | `authorizeMutation`, first statement | ✅ authed (#2534). This used to run on every `GET /setup`; the page now only renders a form and the work is this Server Action, a POST, so a crawler, a prefetch or a cross-site GET cannot trigger it. |
+| `apps/db-demo/src/app/actions.ts::postMessage` | `messages` table | its own `authorizeMutation` (`apps/db-demo/src/lib/mutation-auth.ts`), token `DB_DEMO_WRITE_TOKEN`, fail-closed when unset | ✅ authed (#2533) |
 
 The scaffold templates (`packages/kn-next/templates/app`) emit no Server Action and one `GET` route
 (`/api/health`), so a freshly scaffolded app starts clean. Generated gRPC glue actions (`*_knext_actions.ts`)
 run `authorize()` first by construction and refuse an RPC that does not declare it.
 
-**Known gap, tracked:** `GET /setup` in the file-manager runs idempotent DDL and seed inserts on a GET
-with no authentication (#2534). It takes no client input; it is listed here so the audit does not hide it.
+**Database bootstrap.** Nothing in the platform needs `/setup` at boot: the platform e2e calls it explicitly
+(`POST` of the form with the token), and a real app should create its schema in a migration step
+(for example a one-shot Job) rather than from a web route. A `GET /setup` now renders the form and writes nothing.
 
 **The scan** (`scripts/lib/server-action-auth-scan.mjs`, spec `tests/server-action-auth-scan.test.ts`,
 mutation-proved by `scripts/mutation-prove-2532-server-action-auth.mjs`) parses every source file under
@@ -103,7 +105,7 @@ mutation-proved by `scripts/mutation-prove-2532-server-action-auth.mjs`) parses 
 returns or throws, preceded by nothing that calls, awaits or assigns. It **fails rather than passes** on
 anything it cannot read: a file that does not parse, a method re-exported from another module,
 `export *`, an expression-bodied action, a `pages/api` route. The allowlist is counted (the spec pins
-three entries: `/api/rum`, `echoAction`, `postMessage`), each entry needs a reason, and an entry that
+two entries: `/api/rum` and `echoAction`), each entry needs a reason, and an entry that
 matches nothing, or that matches a surface which is in fact gated, fails too.
 
 It checks that the auth call is present, imported and first. That the call is *correct* is the job of
@@ -244,5 +246,5 @@ client sends nothing — the endpoint exists but is never exercised.
 ## Remaining (defense-in-depth)
 - ~~**CI guard** so a new open mutating handler fails the build.~~ **Done**: `tests/server-action-auth-scan.test.ts`
   (see "Server Actions"). `/api/rum` is on its allowlist, with the bounded-aggregator rationale above.
-- Gate `GET /setup` (#2534) and `db-demo`'s `postMessage` (#2533), then shrink the allowlist to two.
+- ~~Gate `GET /setup` (#2534) and `db-demo`'s `postMessage` (#2533)~~ **Done**; the allowlist is down to two.
 - Service-to-service and per-user authorization for the reference app: today one shared admin token.

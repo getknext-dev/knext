@@ -277,16 +277,62 @@ async function main() {
     return `200 ${res.body.length}B, x-knext-smoke=1`;
   });
 
-  await check('A. app', 'GET /setup initialises the database (tables + seed)', async () => {
-    const res = await get('/setup');
-    if (res.status !== 200) throw new Error(`HTTP ${res.status}`);
-    if (!res.text.includes('Database initialized successfully')) {
-      throw new Error(`setup did not succeed: ${res.text.replace(/<[^>]+>/g, ' ').slice(0, 300)}`);
-    }
-    const users = psql(ns, 'SELECT count(*) FROM users');
-    if (Number(users) < 3) throw new Error(`users table has ${users} rows after setup`);
-    return `tables created, ${users} users seeded`;
-  });
+  await check(
+    'A. app',
+    'GET /setup writes nothing; the setup POST refuses an anonymous caller, then initialises the database (tables + seed) with the token',
+    async () => {
+      const tablesNow = () => psql(ns, "SELECT to_regclass('public.users')");
+      const before = tablesNow();
+      const page = await get('/setup');
+      if (page.status !== 200) throw new Error(`GET /setup HTTP ${page.status}`);
+      if (tablesNow() !== before) {
+        throw new Error('a plain GET of /setup changed the database schema');
+      }
+      const id = /name="(\$ACTION_ID_[^"]+)"/.exec(page.text)?.[1];
+      if (!id) throw new Error('no $ACTION_ID_ field on /setup: the form is not a server action');
+
+      const post = (/** @type {Array<[string, string]>} */ fields) => {
+        const { boundary, body } = encodeMultipart(fields);
+        return http.request('/setup', {
+          method: 'POST',
+          headers: {
+            'content-type': `multipart/form-data; boundary=${boundary}`,
+            accept: 'text/html',
+          },
+          body,
+        });
+      };
+
+      const anon = await post([[id, '']]);
+      if (tablesNow() !== before) {
+        throw new Error(`an unauthenticated setup POST changed the schema (HTTP ${anon.status})`);
+      }
+      const wrong = await post([
+        [id, ''],
+        ['token', `${token}-wrong`],
+      ]);
+      if (tablesNow() !== before) {
+        throw new Error(
+          `a setup POST with a wrong token changed the schema (HTTP ${wrong.status})`,
+        );
+      }
+
+      const res = await post([
+        [id, ''],
+        ['token', token],
+      ]);
+      if (res.status < 200 || res.status >= 400) throw new Error(`setup POST HTTP ${res.status}`);
+      const done = await get('/setup?done=1');
+      if (!done.text.includes('Database initialized successfully')) {
+        throw new Error(
+          `setup did not succeed: ${done.text.replace(/<[^>]+>/g, ' ').slice(0, 300)}`,
+        );
+      }
+      const users = psql(ns, 'SELECT count(*) FROM users');
+      if (Number(users) < 3) throw new Error(`users table has ${users} rows after setup`);
+      return `GET wrote nothing; anonymous and wrong-token POSTs refused; tables created, ${users} users seeded`;
+    },
+  );
 
   await check('A. app', 'GET /users lists the seeded users from Postgres', async () => {
     const res = await get('/users');
