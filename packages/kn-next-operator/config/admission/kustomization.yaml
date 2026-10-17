@@ -1,0 +1,3 @@
+resources:
+- secret-configmap-writes.yaml
+- secret-configmap-writes-binding.yaml
