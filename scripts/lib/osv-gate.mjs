@@ -13,7 +13,6 @@
  *   - anything unreadable is an error, never a pass.
  */
 
-import { execFileSync } from 'node:child_process';
 import { relative } from 'node:path';
 
 /** CVSS base score at which a vulnerability is HIGH (the Trivy/npm-audit threshold). */
@@ -23,20 +22,16 @@ export const HIGH_SEVERITY = 7;
 export const LOCKFILE_NAMES = ['bun.lock', 'Cargo.lock', 'go.mod'];
 
 /**
- * Every tracked lockfile, repo-relative. Derived from git, never listed, so a new
- * crate, module or workspace is scanned the day it lands. Nothing is exempt:
- * a malicious package is malicious in a fixture too.
+ * The lockfiles among a list of tracked paths. The caller supplies the list
+ * (`git ls-files`), so a new crate, module or workspace is scanned the day it
+ * lands, with no list kept here. Nothing is exempt: a malicious package is
+ * malicious in a fixture too.
  *
- * @param {string} repoRoot
+ * @param {string[]} trackedPaths repo-relative paths
  * @returns {string[]}
  */
-export function discoverLockfiles(repoRoot) {
-  const out = execFileSync(
-    'git',
-    ['ls-files', '--', ...LOCKFILE_NAMES.flatMap((n) => [n, `**/${n}`])],
-    { cwd: repoRoot, encoding: 'utf8' },
-  );
-  return out.split('\n').filter(Boolean);
+export function selectLockfiles(trackedPaths) {
+  return trackedPaths.filter((p) => LOCKFILE_NAMES.includes(p.split('/').pop() ?? ''));
 }
 
 /**

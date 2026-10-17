@@ -34,14 +34,12 @@
  *   node scripts/mutation-prove-osv-gate.mjs
  */
 
-import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
 import { createGuardProver } from './lib/guard-prover.mjs';
 import { MUTATION_MARKER } from './lib/mutation-harness.mjs';
+import { jsStillParses } from './lib/parse-validity.mjs';
 import { declareMutations, recordMutation } from './lib/prover-report.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -62,19 +60,6 @@ const parsesJson = (text) => {
     return undefined;
   } catch (err) {
     return `not valid JSON: ${err.message}`;
-  }
-};
-
-/** A mutated module must still be valid JavaScript, or its red is a red for the wrong reason. */
-const parsesJs = (text) => {
-  const dir = mkdtempSync(join(tmpdir(), 'osv-prover-'));
-  const file = join(dir, 'mutated.mjs');
-  try {
-    writeFileSync(file, text);
-    const res = spawnSync(process.execPath, ['--check', file], { encoding: 'utf8' });
-    return res.status === 0 ? undefined : `not valid JavaScript: ${res.stderr.split('\n')[0]}`;
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
   }
 };
 
@@ -208,7 +193,7 @@ const MUTATIONS = [
   },
 ].map((m) => ({
   expect: 'red',
-  validate: m.subject === 'lib' ? parsesJs : undefined,
+  validate: m.subject === 'lib' ? jsStillParses : undefined,
   ...m,
 }));
 

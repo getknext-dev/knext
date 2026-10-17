@@ -4,13 +4,13 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parse } from 'yaml';
 import {
-  discoverLockfiles,
   evaluate,
   HIGH_SEVERITY,
   isMalicious,
   LOCKFILE_NAMES,
   loadAllowlist,
   parseOsv,
+  selectLockfiles,
 } from '../scripts/lib/osv-gate.mjs';
 
 /**
@@ -315,7 +315,16 @@ describe('lockfile discovery', () => {
       .split('\n')
       .filter(Boolean)
       .sort();
-    expect(discoverLockfiles(REPO_ROOT).sort()).toEqual(tracked);
+    const everything = execFileSync('git', ['ls-files'], {
+      cwd: REPO_ROOT,
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
+    })
+      .split('\n')
+      .filter(Boolean);
+    expect(selectLockfiles(everything).sort()).toEqual(tracked);
+    // A lockfile named like one but with a different basename is not selected.
+    expect(selectLockfiles(['a/bun.lockb', 'a/my-go.mod', 'x/go.mod'])).toEqual(['x/go.mod']);
     expect(tracked.length).toBeGreaterThan(10);
     expect(LOCKFILE_NAMES).toEqual(['bun.lock', 'Cargo.lock', 'go.mod']);
   });

@@ -37,11 +37,11 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  discoverLockfiles,
   evaluate,
   loadAllowlist,
   parseOsv,
   renderReport,
+  selectLockfiles,
 } from './lib/osv-gate.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -125,7 +125,15 @@ function main() {
     die(`security/osv-allowlist.json is unusable: ${err.message}`);
   }
 
-  const files = discoverLockfiles(REPO_ROOT);
+  const files = selectLockfiles(
+    execFileSync('git', ['ls-files'], {
+      cwd: REPO_ROOT,
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
+    })
+      .split('\n')
+      .filter(Boolean),
+  );
   if (files.length === 0) die('no lockfiles found: refusing to report a scan of nothing as clean');
   console.log(`Scanning ${files.length} lockfile(s):\n${files.map((f) => `  ${f}`).join('\n')}`);
 
