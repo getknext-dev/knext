@@ -221,8 +221,8 @@ const LANE_ROWS = [
     id: 'L11',
     subject: 'workflow',
     claim: 'the teardown deletes a cluster other than the one the job created',
-    anchor: 'kind delete cluster --name "${KIND_CLUSTER}"',
-    replacement: 'kind delete cluster --name kind',
+    anchor: '          kind delete cluster --name "${KIND_CLUSTER}" || true',
+    replacement: '          kind delete cluster --name kind || true',
     validate: validateYaml,
   },
   {
