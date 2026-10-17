@@ -58,6 +58,12 @@ const NON_LANES: readonly NonLane[] = [
     reason: 'opens a GitHub issue titled about npm-publish protection drift; publishes nothing',
   },
   {
+    file: 'shipped-artifacts-nightly.yml',
+    job: 'nightly-red-alert',
+    reason:
+      'opens a GitHub issue; the body prose says "published" for the artifacts it re-scans; no npm access and no registry credential',
+  },
+  {
     file: 'scaffold-install-nightly.yml',
     job: 'nightly-red-alert',
     reason: 'opens a GitHub issue; the body prose mentions publish; no npm access',
