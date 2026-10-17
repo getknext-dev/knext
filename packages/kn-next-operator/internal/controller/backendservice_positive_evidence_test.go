@@ -17,14 +17,11 @@ limitations under the License.
 package controller
 
 import (
-	"errors"
 	"go/ast"
 	"go/token"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 
@@ -72,32 +69,12 @@ func TestRunningTemplateViolationNeedsPositiveEvidence(t *testing.T) {
 	}
 }
 
-func TestIsRefusedRolloutIsOnlyInvalidAndBadRequest(t *testing.T) {
-	gr := schema.GroupResource{Resource: "services"}
-	for name, c := range map[string]struct {
-		err  error
-		want bool
-	}{
-		"invalid":     {apierrors.NewInvalid(schema.GroupKind{Kind: "Service"}, "s", nil), true},
-		"bad request": {apierrors.NewBadRequest("x"), true},
-		"503":         {apierrors.NewServiceUnavailable("x"), false},
-		"409":         {apierrors.NewConflict(gr, "s", errors.New("x")), false},
-		"forbidden":   {apierrors.NewForbidden(gr, "s", errors.New("x")), false},
-		"a plain err": {errors.New("jwks read failed"), false},
-		"nil":         {nil, false},
-	} {
-		if got := isRefusedRollout(c.err); got != c.want {
-			t.Errorf("%s: isRefusedRollout = %v, want %v", name, got, c.want)
-		}
-	}
-}
-
 // G2 widening: a bool DERIVED from an error may gate removeRendered only when it
 // is ANDed with positive-revocation evidence. The scan finds every bare-identifier
 // condition whose body tears down, resolves the assignment that defines it, and
 // pins the exact expression, so a weaker one (say `rollErr != nil && ...`) fails.
 func TestAnErrorDerivedBoolGatesTeardownOnlyWithPositiveEvidence(t *testing.T) {
-	const want = "isRefusedRollout(rollErr) && len(runViolations) > 0"
+	const want = "rollErr != nil && len(runViolations) > 0"
 	gates := 0
 	for file, f := range parsedReconcilerSources(t) {
 		for _, decl := range f.Decls {
@@ -132,7 +109,7 @@ func TestAnErrorDerivedBoolGatesTeardownOnlyWithPositiveEvidence(t *testing.T) {
 				gates++
 				if got := exprString(token.NewFileSet(), def); got != want {
 					t.Errorf("%s: %s gates a teardown and is defined as %q; it must be exactly %q "+
-						"(a definitive refusal AND positive evidence of revocation)", file, id.Name, got, want)
+						"(a failed rollout AND positive evidence of revocation)", file, id.Name, got, want)
 				}
 				return true
 			})

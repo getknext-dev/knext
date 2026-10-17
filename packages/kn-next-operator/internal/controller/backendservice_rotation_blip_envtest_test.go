@@ -148,17 +148,19 @@ var _ = Describe("BackendService reconciler: a rotation that coincides with an a
 		expectKept(ns, uid)
 	})
 
-	// Only a DEFINITIVE refusal of the spec (Invalid or BadRequest, as Knative's
-	// webhook answers) may tear a function down on the running template's
-	// account, and only when that template has positive evidence of revocation.
-	// A transient error, a Conflict or a Forbidden is held: the function keeps
-	// running and the reconcile retries.
+	// Positive evidence of revocation is what tears a function down; the kind of
+	// error that stops the rollout is irrelevant. Admission policies (Gatekeeper,
+	// a ValidatingAdmissionPolicy with reason Forbidden), a fail-closed webhook
+	// returning 5xx, a Conflict: whatever keeps the update from landing, a REVOKED
+	// Secret in the running template must not stay mounted, and the status must
+	// say so. A rotation alone (nothing revoked) is held and retried instead.
 	for name, refusal := range map[string]error{
 		"a 503":       apierrors.NewServiceUnavailable("simulated"),
+		"a 500":       apierrors.NewInternalError(errors.New("simulated")),
 		"a 409":       apierrors.NewConflict(schema.GroupResource{Resource: "services"}, "pricing", errors.New("simulated")),
 		"a Forbidden": apierrors.NewForbidden(schema.GroupResource{Resource: "services"}, "pricing", errors.New("simulated")),
 	} {
-		It("holds a REVOKED running Secret when the update fails with "+name+" (not a definitive refusal)", func() {
+		It("tears down a REVOKED running Secret when the update fails with "+name+", and says so in status", func() {
 			ns := bsNamespace(ctx)
 			createZone(ctx, ns, "orders", appsv1alpha1.BackendBinding{Name: "pricing", Service: "pricing"})
 			Expect(k8sClient.Create(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
@@ -178,8 +180,19 @@ var _ = Describe("BackendService reconciler: a rotation that coincides with an a
 
 			r := newBSReconciler()
 			r.Client = ksvcWriteFails{k8sClient, refusal}
-			Expect(run(r, ns)).NotTo(Succeed())
-			Expect(functionKsvcExists(ctx, ns, "pricing")).To(BeTrue(), "only a definitive refusal tears down")
+			Expect(run(r, ns)).NotTo(Succeed(), "the rollout error is still returned, so the reconcile retries")
+			expectNothingRendered(ctx, ns, "pricing")
+			c := functionCondition(getFunction(ctx, ns, "pricing"), ConditionSovereigntyCompliant)
+			Expect(c.Status).To(Equal(metav1.ConditionFalse), "status must never read Compliant while a revoked Secret is running")
+			Expect(c.Message).To(ContainSubstring(`"stripe"`))
 		})
 	}
+
+	It("keeps the function on a Forbidden updating the Knative Service when nothing was revoked (rotation blip E)", func() {
+		ns, uid := prep()
+		r := newBSReconciler()
+		r.Client = ksvcWriteFails{k8sClient, apierrors.NewForbidden(schema.GroupResource{Resource: "services"}, "pricing", errors.New("simulated"))}
+		Expect(run(r, ns)).NotTo(Succeed())
+		expectKept(ns, uid)
+	})
 })

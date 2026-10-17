@@ -76,7 +76,7 @@ const GUARD =
 const VERDICT_UNIT = 'TestVerdictForAnUndecidedFunctionIsUnverifiedNotAViolation';
 const BLIP = 'a rotation that coincides with an apiserver blip keeps the function';
 const POSITIVE =
-  'TestRunningTemplateViolationNeedsPositiveEvidence|TestIsRefusedRolloutIsOnlyInvalidAndBadRequest|TestAnErrorDerivedBoolGatesTeardownOnlyWithPositiveEvidence|TestRunningCheckAloneToleratesAbsentSecrets';
+  'TestRunningTemplateViolationNeedsPositiveEvidence|TestAnErrorDerivedBoolGatesTeardownOnlyWithPositiveEvidence|TestRunningCheckAloneToleratesAbsentSecrets';
 const REVOKED = 'an unreadable Secret never keeps a revoked one running';
 const FORBIDDEN = `${REVOKED} a persistent Forbidden`;
 const CRD_REFUSES = `${REVOKED} the CRD refuses a Secret reference that names no Secret`;
@@ -268,7 +268,7 @@ const GO_MUTATIONS = [
     claim:
       'a running-template violation tears the function down after a rollout that SUCCEEDED, not only when it fails',
     subject: 'controller',
-    anchor: 'stuckOnRevoked := isRefusedRollout(rollErr) && len(runViolations) > 0',
+    anchor: 'stuckOnRevoked := rollErr != nil && len(runViolations) > 0',
     replacement: 'stuckOnRevoked := len(runViolations) > 0',
     test: envtest(
       `${REVOKED} (rolls a routine Secret rotation out in place|replaces a revoked Secret in place)`,
@@ -288,35 +288,37 @@ const GO_MUTATIONS = [
     claim:
       'ANY rollout error tears the function down, with no definitive refusal and no evidence required (a 503, a 409, a JWKS read blip)',
     subject: 'controller',
-    anchor: 'stuckOnRevoked := isRefusedRollout(rollErr) && len(runViolations) > 0',
+    anchor: 'stuckOnRevoked := rollErr != nil && len(runViolations) > 0',
     replacement: 'stuckOnRevoked := rollErr != nil',
     test: envtest(BLIP),
-  },
-  {
-    id: 'A09',
-    claim: 'every non-nil rollout error is read as a definitive refusal',
-    subject: 'controller',
-    anchor: 'return apierrors.IsInvalid(err) || apierrors.IsBadRequest(err)',
-    replacement: 'return err != nil',
-    test: envtest(`${BLIP} holds a REVOKED running Secret`),
-  },
-  {
-    id: 'A10',
-    claim: 'a Forbidden on the update counts as a definitive refusal',
-    subject: 'controller',
-    anchor: 'return apierrors.IsInvalid(err) || apierrors.IsBadRequest(err)',
-    replacement:
-      'return apierrors.IsInvalid(err) || apierrors.IsBadRequest(err) || apierrors.IsForbidden(err)',
-    test: unit(POSITIVE),
   },
   {
     id: 'A11',
     claim:
       'the teardown gate drops the positive-evidence requirement (the guard pins the exact expression)',
     subject: 'controller',
-    anchor: 'stuckOnRevoked := isRefusedRollout(rollErr) && len(runViolations) > 0',
-    replacement: 'stuckOnRevoked := isRefusedRollout(rollErr)',
+    anchor: 'stuckOnRevoked := rollErr != nil && len(runViolations) > 0',
+    replacement: 'stuckOnRevoked := rollErr != nil || len(runViolations) > 0',
     test: unit(POSITIVE),
+  },
+  {
+    id: 'A09',
+    claim:
+      'the teardown fires only on a definitive refusal again (a 403 admission policy or a 5xx webhook leaves a revoked Secret mounted)',
+    subject: 'controller',
+    anchor: 'stuckOnRevoked := rollErr != nil && len(runViolations) > 0',
+    replacement:
+      'stuckOnRevoked := (apierrors.IsInvalid(rollErr) || apierrors.IsBadRequest(rollErr)) && len(runViolations) > 0',
+    test: envtest(`${BLIP} tears down a REVOKED running Secret`),
+  },
+  {
+    id: 'A10',
+    claim:
+      'a rollout-error pass returns before the verdict (status keeps reading Compliant while a revoked Secret runs)',
+    subject: 'controller',
+    anchor: 'heldErr = rollErr',
+    replacement: 'return ctrl.Result{}, rollErr',
+    test: envtest(`${BLIP} tears down a REVOKED running Secret`),
   },
   {
     id: 'A04',

@@ -218,7 +218,14 @@ func (r *BackendServiceReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		obs.ksvc = running
 	} else if obs.accepted() {
 		ksvc, renderErr, rollErr := r.rollout(ctx, bs, &obs)
-		stuckOnRevoked := isRefusedRollout(rollErr) && len(runViolations) > 0
+		// runViolations holds ONLY positive evidence of revocation (a Secret
+		// re-marked, another zone's database Secret, a signing key, a zone that is
+		// gone; a pruned old Secret is exempt), so ANY rollout error is a reason to
+		// tear the function down when one is present: an admission policy answering
+		// 403, a fail-closed webhook answering 5xx and a Conflict all leave the old
+		// template running, and what is revoked must not stay mounted. The pass
+		// falls through to the verdict, so status says so.
+		stuckOnRevoked := rollErr != nil && len(runViolations) > 0
 		if rollErr != nil && !stuckOnRevoked {
 			logger.Error(rollErr, "Failed to roll the function out")
 			return ctrl.Result{}, rollErr
@@ -372,15 +379,6 @@ func mergeUnverified(a, b []unverifiedSecret) []unverifiedSecret {
 		}
 	}
 	return a
-}
-
-// isRefusedRollout reports whether a rollout failure is a DEFINITIVE refusal of
-// the spec (what Knative's webhook answers: Invalid or BadRequest), as opposed
-// to a transient error, a Conflict, a Forbidden or a failed read. Only a refusal
-// means the old template will keep running for good; anything else is retried
-// with the function left as it is.
-func isRefusedRollout(err error) bool {
-	return apierrors.IsInvalid(err) || apierrors.IsBadRequest(err)
 }
 
 // rollout rolls the accepted spec out: it reads the zone's JWKS state, then
