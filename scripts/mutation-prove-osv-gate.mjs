@@ -147,8 +147,8 @@ const MUTATIONS = [
     id: 'G11',
     claim: 'the committed allowlist is malformed',
     subject: 'allow',
-    anchor: '"allow": []',
-    replacement: `"allow": [{"id": "${M}"}]`,
+    anchor: '"expires": "2026-12-15"',
+    replacement: `"expires": "soon-${M}"`,
     validate: parsesJson,
   },
   {

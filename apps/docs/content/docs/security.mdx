@@ -302,6 +302,15 @@ The same discipline applies to what knext itself builds from, before any image e
 - **Install scripts are an allowlist** — only a reviewed list of dependencies may run a
   lifecycle script during install. Adding a dependency that can run one needs an explicit,
   justified review.
+- **What we have already shipped is re-scanned every night** — a clean scan at publish time says
+  nothing about an advisory filed next month. Each night a scheduled job reads the registries,
+  not the repository: it installs every published version of `@getknext/core`, `@getknext/lib`
+  and `@getknext/db` that carries a dist-tag and checks the production closure with `npm audit`,
+  OSV-Scanner (malicious packages included) and `npm audit signatures`; it scans the operator
+  image digests pinned in the published install bundles, and the published reference app image,
+  with Trivy at high and critical; and it re-checks every lockfile for malicious-package
+  advisories. A finding, or a scan that could not run, opens or updates a single alert issue. The
+  job never passes by not looking: an unreachable registry or a skipped job is a failure.
 - **Dependabot covers every ecosystem we ship** — the bun workspace, the Rust crates and
   function template, the Go function template and operator, and GitHub Actions, each grouped and
   weekly.
