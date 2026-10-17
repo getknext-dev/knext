@@ -250,7 +250,7 @@ describe('#2499 aggregateReports — declared == run, and a missing prover FAILS
     const reports = reportsFor(expected);
     const dropped = reports[1].results.pop();
     const { findings } = aggregateReports({ expected, reports });
-    expect(findings.join('\n')).toContain(dropped.relPath);
+    expect(findings.join('\n')).toContain(dropped?.relPath ?? '<none dropped>');
     expect(findings.join('\n')).toMatch(/missing/i);
   });
 
@@ -265,7 +265,9 @@ describe('#2499 aggregateReports — declared == run, and a missing prover FAILS
     const expected = legsFor(2);
     const reports = reportsFor(expected);
     reports[1].discovered = reports[1].discovered.slice(1);
-    expect(aggregateReports({ expected, reports }).findings.join('\n')).toMatch(/discovered a different prover set/);
+    expect(aggregateReports({ expected, reports }).findings.join('\n')).toMatch(
+      /discovered a different prover set/,
+    );
   });
 
   it('a prover discovered but assigned to NO shard is a finding (the union must equal the set)', () => {

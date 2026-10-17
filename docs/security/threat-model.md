@@ -294,7 +294,11 @@ the allow-list in both directions, the Opaque-only Secret type, and the no-self-
 `config/rbac`),
 `internal/install/operator_write_policy_test.go` (the policy is strict, is in the default overlay,
 and in the rendered bundle confines exactly the identity the operator runs as), and the mutation
-prover `scripts/mutation-prove-2462-operator-write-policy.mjs` (one row per rule, run nightly).
+prover `scripts/mutation-prove-2462-operator-write-policy.mjs` (one row per rule). Every committed
+mutation prover, this one and the other sovereignty provers included, is re-run on a schedule against
+both `main` and `integration/v2` by `.github/workflows/mutation-prover-nightly.yml`. The cadence is
+weekly during the release-candidate window, and a red, timed-out or cancelled leg opens or updates a
+"Mutation provers RED" issue.
 
 ## 2. Gateway ↔ backend calls
 

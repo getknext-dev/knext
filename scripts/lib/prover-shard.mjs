@@ -210,7 +210,7 @@ const sameSet = (a, b) =>
  *
  * @param {{ expected: Array<{ref: string, sha: string, shard: number, shards: number}>,
  *           reports: Array<object | undefined | null>,
- *           shard?: typeof shardProvers }} input
+ *           shard?: (provers: Array<{ relPath: string }>, index: number, count: number) => Array<{ relPath: string }> }} input
  *   `shard` is the partition function the legs are entitled to; it defaults to the
  *   real one and is injectable ONLY so a test can hand it a lossy partition and
  *   prove the final union check catches what the per-leg recomputation cannot
