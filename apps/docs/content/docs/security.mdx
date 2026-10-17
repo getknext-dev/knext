@@ -220,14 +220,20 @@ The same discipline applies to what knext itself builds from, before any image e
 - **Malware and new vulnerabilities fail the pull request** — every pull request is scanned with
   OSV-Scanner over each lockfile in the repository (`bun.lock`, `Cargo.lock`, `go.mod`). A
   package flagged as malware by the OpenSSF malicious-packages feed fails the check outright. A
-  new high or critical vulnerability that the change introduces fails it too; advisories already
-  in the tree are reported rather than blocking unrelated work. The only way past either is a
+  new high or critical vulnerability that the change introduces fails it too, and so does a new
+  advisory that carries no severity score; advisories already in the tree are reported rather
+  than blocking unrelated work. A finding that merely moves from one lockfile to another counts
+  as new. The only way past either is a
   dated, justified entry in a reviewed allowlist, and a scan that cannot reach the advisory
   database fails instead of passing.
 - **Fresh releases wait three days** — the workspace refuses to resolve a registry version
   published less than three days earlier, so a malicious release that is pulled within a day or
   two never reaches the tree. Dependabot waits the same three days before proposing a bump,
-  except for its own security updates. Installs from the committed lockfile are unaffected.
+  except for its own security updates. Installs from the committed lockfile are unaffected. The
+  same rule is checked on the result: a pull request that adds or changes a lockfile entry
+  (npm, Cargo or Go) fails if the registry says that version is younger than three days, or if
+  the registry cannot be reached. The only way past it is a scoped, short-lived, justified
+  exception.
 - **Install scripts are an allowlist** — only a reviewed list of dependencies may run a
   lifecycle script during install. Adding a dependency that can run one needs an explicit,
   justified review.

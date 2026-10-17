@@ -46,9 +46,17 @@ Three guards stand between the registry and the tree. Know them before you add o
   a fix today, pass `--minimum-release-age 0` for that one command and say why in the PR. A standing
   exception for one package goes in `minimumReleaseAgeExcludes`, which `tests/bun-release-age.test.ts`
   pins, so it is a reviewed change. `bun install --frozen-lockfile` is unaffected.
-- **OSV gate.** Every PR runs `scripts/osv-gate.mjs` over every tracked `bun.lock`, `Cargo.lock` and
-  `go.mod`. A malicious-package advisory fails the check; so does a NEW HIGH/CRITICAL vulnerability.
-  Suppress only with a dated, justified entry in `security/osv-allowlist.json`, after trying to bump.
+- **OSV gate.** Every PR runs `scripts/osv-gate.mjs` over every tracked `bun.lock`, `Cargo.lock`,
+  `go.mod` and `package-lock.json`. A malicious-package advisory fails the check; so does a NEW
+  HIGH/CRITICAL vulnerability, and a NEW advisory with no severity score (a finding that moves
+  between lockfiles is new). Suppress only with a dated, justified, EXPIRING entry in
+  `security/osv-allowlist.json`, scoped to one advisory, package, version and lockfile (`expires`
+  is required, at most 180 days out), after trying to bump.
+- **Release age.** `scripts/release-age-gate.mjs` fails a PR whose added or changed lockfile entries
+  (npm, crates.io, Go proxy) were published less than the bunfig quarantine ago, judged from the
+  registry's own publish time; an unreachable registry fails it too. If a fresh release truly cannot
+  wait, record a scoped entry (ecosystem, package, exact version, `expires` within 14 days) in
+  `security/release-age-exceptions.json` and say why in the PR.
 - **Install scripts.** `bun install` runs a dependency's lifecycle script only if it is in the root
   `trustedDependencies` or on bun's built-in default list, which cannot be switched off. If
   `tests/bun-install-scripts.test.ts` goes red on a new dependency, read its script, then add it to

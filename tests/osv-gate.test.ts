@@ -10,6 +10,7 @@ import {
   LOCKFILE_NAMES,
   loadAllowlist,
   parseOsv,
+  pickBase,
   selectLockfiles,
 } from '../scripts/lib/osv-gate.mjs';
 
@@ -66,6 +67,18 @@ const pkg = (
 
 const TODAY = '2026-10-17';
 const NO_ALLOW = loadAllowlist({ allow: [] }, TODAY);
+
+/** A fully scoped allowlist entry; override one field to break it. */
+const entry = (over: Record<string, unknown> = {}) => ({
+  id: 'MAL-2026-1234',
+  package: 'evil-pkg',
+  version: '1.0.0',
+  lockfile: 'bun.lock',
+  justification: 'false positive: confirmed with the maintainer',
+  added: '2026-10-01',
+  expires: '2026-12-01',
+  ...over,
+});
 
 describe('parseOsv', () => {
   it('reads packages, advisories and the group severity, with repo-relative paths', () => {
@@ -199,10 +212,56 @@ describe('evaluate', () => {
     ).toEqual([]);
   });
 
-  it('an unknown-severity vulnerability is reported, not failed', () => {
+  it('a NEW vulnerability with no severity score FAILS (it cannot be shown to be below HIGH)', () => {
     const r = evaluate({ head: unknown, base: [], allowlist: NO_ALLOW, today: TODAY });
+    expect(r.failures.map((f: { id: string }) => f.id)).toEqual(['GO-3']);
+  });
+
+  it('a PRE-EXISTING unscored vulnerability is reported, not failed', () => {
+    const r = evaluate({ head: unknown, base: unknown, allowlist: NO_ALLOW, today: TODAY });
     expect(r.failures).toEqual([]);
     expect(r.unknownSeverity).toHaveLength(1);
+  });
+
+  it('with no base, an unscored vulnerability is reported, and fails only in full mode', () => {
+    const r = evaluate({ head: unknown, base: null, allowlist: NO_ALLOW, today: TODAY });
+    expect(r.failures).toEqual([]);
+    expect(r.unknownSeverity).toHaveLength(1);
+    expect(
+      evaluate({ head: unknown, base: null, allowlist: NO_ALLOW, today: TODAY, full: true })
+        .failures,
+    ).toHaveLength(1);
+  });
+
+  it('a new unscored vulnerability can be suppressed by a scoped entry', () => {
+    const allow = loadAllowlist(
+      {
+        allow: [entry({ id: 'GO-3', package: 'x/net', version: '1', lockfile: 'go.mod' })],
+      },
+      TODAY,
+    );
+    const r = evaluate({ head: unknown, base: [], allowlist: allow, today: TODAY });
+    expect(r.failures).toEqual([]);
+    expect(r.suppressed).toHaveLength(1);
+  });
+
+  it('a HIGH already in ANOTHER lockfile at the base is NEW when it moves into this one', () => {
+    const inFixture = parseOsv(
+      scan([
+        {
+          path: 'fixtures/app/bun.lock',
+          packages: [pkg('braces', '3.0.3', [{ id: 'GHSA-1', severity: '8.7' }])],
+        },
+      ]),
+      '/work',
+    );
+    // Same package, version and advisory, now in the root lockfile.
+    const r = evaluate({ head: high, base: inFixture, allowlist: NO_ALLOW, today: TODAY });
+    expect(r.failures.map((f: { lockfile: string }) => f.lockfile)).toEqual(['bun.lock']);
+    // And the same finding in the same lockfile stays pre-existing.
+    expect(
+      evaluate({ head: high, base: high, allowlist: NO_ALLOW, today: TODAY }).failures,
+    ).toEqual([]);
   });
 
   it('without a base, a vulnerability fails only in full mode', () => {
@@ -214,36 +273,35 @@ describe('evaluate', () => {
     ).toHaveLength(1);
   });
 
-  it('an allowlist entry suppresses by id or alias', () => {
-    const allow = loadAllowlist(
-      {
-        allow: [
-          {
-            id: 'MAL-2026-1234',
-            justification: 'false positive: confirmed with the maintainer',
-            added: '2026-10-01',
-          },
-        ],
-      },
-      TODAY,
-    );
+  it('a scoped allowlist entry suppresses by id or alias', () => {
+    const allow = loadAllowlist({ allow: [entry()] }, TODAY);
     const r = evaluate({ head: mal, base: null, allowlist: allow, today: TODAY });
     expect(r.failures).toEqual([]);
     expect(r.suppressed).toHaveLength(1);
+    const viaAlias = loadAllowlist({ allow: [entry({ id: 'GHSA-alias-0001' })] }, TODAY);
+    const withAlias = [{ ...mal[0], aliases: ['GHSA-alias-0001'] }];
+    expect(
+      evaluate({ head: withAlias, base: null, allowlist: viaAlias, today: TODAY }).failures,
+    ).toEqual([]);
+  });
+
+  it('an entry is scoped: another package, version or lockfile is NOT suppressed', () => {
+    for (const over of [
+      { package: 'other-pkg' },
+      { version: '1.0.1' },
+      { lockfile: 'examples/app/bun.lock' },
+    ]) {
+      const allow = loadAllowlist({ allow: [entry(over)] }, TODAY);
+      expect(
+        evaluate({ head: mal, base: null, allowlist: allow, today: TODAY }).failures,
+        JSON.stringify(over),
+      ).toHaveLength(1);
+    }
   });
 
   it('an EXPIRED allowlist entry stops suppressing', () => {
     const allow = loadAllowlist(
-      {
-        allow: [
-          {
-            id: 'MAL-2026-1234',
-            justification: 'false positive: confirmed with the maintainer',
-            added: '2026-09-01',
-            expires: '2026-10-01',
-          },
-        ],
-      },
+      { allow: [entry({ added: '2026-09-01', expires: '2026-10-01' })] },
       TODAY,
     );
     expect(
@@ -253,30 +311,41 @@ describe('evaluate', () => {
 });
 
 describe('loadAllowlist', () => {
-  it('rejects a justification that is only a token word', () => {
-    expect(() =>
-      loadAllowlist({ allow: [{ id: 'X', justification: 'fine', added: '2026-10-01' }] }, TODAY),
-    ).toThrow(/justification/);
+  const bad = (over: Record<string, unknown>) => () =>
+    loadAllowlist({ allow: [entry(over)] }, TODAY);
+  it('accepts a fully scoped entry', () => {
+    expect(() => loadAllowlist({ allow: [entry()] }, TODAY)).not.toThrow();
   });
-  it('rejects an entry with no justification, no date or a bad date', () => {
-    expect(() => loadAllowlist({ allow: [{ id: 'X', added: '2026-10-01' }] }, TODAY)).toThrow(
-      /justification/,
-    );
-    expect(() =>
-      loadAllowlist({ allow: [{ id: 'X', justification: 'long enough reason here' }] }, TODAY),
-    ).toThrow(/added/);
-    expect(() =>
-      loadAllowlist(
-        { allow: [{ id: 'X', justification: 'long enough reason here', added: 'yesterday' }] },
-        TODAY,
-      ),
-    ).toThrow(/added/);
-    expect(() =>
-      loadAllowlist(
-        { allow: [{ justification: 'long enough reason here', added: '2026-10-01' }] },
-        TODAY,
-      ),
-    ).toThrow(/id/);
+  it('rejects a justification that is only a token word', () => {
+    expect(bad({ justification: 'fine' })).toThrow(/justification/);
+  });
+  it('rejects a missing id, justification or a bad added date', () => {
+    expect(bad({ id: undefined })).toThrow(/id/);
+    expect(bad({ justification: undefined })).toThrow(/justification/);
+    expect(bad({ added: undefined })).toThrow(/added/);
+    expect(bad({ added: 'yesterday' })).toThrow(/added/);
+  });
+  it('REQUIRES package, version and lockfile (no id-only entries)', () => {
+    expect(bad({ package: undefined })).toThrow(/package/);
+    expect(bad({ version: undefined })).toThrow(/version/);
+    expect(bad({ lockfile: undefined })).toThrow(/lockfile/);
+  });
+  it('rejects wildcards and ranges in the scope', () => {
+    expect(bad({ package: '*' })).toThrow(/package/);
+    expect(bad({ package: 'ev*l' })).toThrow(/package/);
+    expect(bad({ version: '^1.0.0' })).toThrow(/version/);
+    expect(bad({ version: '>=1.0.0' })).toThrow(/version/);
+    expect(bad({ lockfile: '**/bun.lock' })).toThrow(/lockfile/);
+  });
+  it('REQUIRES expires, well formed, after added and within 180 days of it', () => {
+    expect(bad({ expires: undefined })).toThrow(/expires/);
+    expect(bad({ expires: 'soon' })).toThrow(/expires/);
+    expect(bad({ added: '2026-10-01', expires: '2026-09-30' })).toThrow(/expires/);
+    expect(bad({ added: '2026-01-01', expires: '2026-12-31' })).toThrow(/180/);
+    expect(bad({ added: '2026-10-01', expires: '2027-03-30' })).not.toThrow();
+  });
+  it('rejects unknown keys (a typo must not silently widen or drop a scope)', () => {
+    expect(bad({ packages: 'x' })).toThrow(/unknown/);
   });
   it('rejects a document that is not an allowlist', () => {
     expect(() => loadAllowlist({}, TODAY)).toThrow();
@@ -294,7 +363,7 @@ describe('the committed allowlist', () => {
 });
 
 describe('lockfile discovery', () => {
-  it('covers every tracked bun.lock, Cargo.lock and go.mod', () => {
+  it('covers every tracked bun.lock, Cargo.lock, go.mod and package-lock.json', () => {
     const tracked = execFileSync(
       'git',
       [
@@ -306,6 +375,8 @@ describe('lockfile discovery', () => {
         '**/Cargo.lock',
         'go.mod',
         '**/go.mod',
+        'package-lock.json',
+        '**/package-lock.json',
       ],
       {
         cwd: REPO_ROOT,
@@ -326,7 +397,70 @@ describe('lockfile discovery', () => {
     // A lockfile named like one but with a different basename is not selected.
     expect(selectLockfiles(['a/bun.lockb', 'a/my-go.mod', 'x/go.mod'])).toEqual(['x/go.mod']);
     expect(tracked.length).toBeGreaterThan(10);
-    expect(LOCKFILE_NAMES).toEqual(['bun.lock', 'Cargo.lock', 'go.mod']);
+    expect(LOCKFILE_NAMES).toEqual(['bun.lock', 'Cargo.lock', 'go.mod', 'package-lock.json']);
+  });
+});
+
+describe('pickBase: which commit to compare against', () => {
+  const exists = (refs: string[]) => (r: string) => refs.includes(r);
+  it('uses the supplied base when it resolves', () => {
+    expect(pickBase({ supplied: 'abc123', resolves: exists(['abc123']), currentRef: 'x' })).toBe(
+      'abc123',
+    );
+  });
+  it('falls back to origin/integration/v2, then origin/main, for an empty or all-zero base', () => {
+    for (const supplied of [undefined, '', '0000000000000000000000000000000000000000']) {
+      expect(
+        pickBase({
+          supplied,
+          resolves: exists(['origin/integration/v2', 'origin/main']),
+          currentRef: 'feature',
+        }),
+      ).toBe('origin/integration/v2');
+      expect(pickBase({ supplied, resolves: exists(['origin/main']), currentRef: 'feature' })).toBe(
+        'origin/main',
+      );
+    }
+  });
+  it('never trusts an all-zero base, even if the resolver would accept it', () => {
+    expect(
+      pickBase({
+        supplied: '0000000000000000000000000000000000000000',
+        resolves: () => true,
+        currentRef: 'feature',
+      }),
+    ).toBe('origin/integration/v2');
+  });
+  it('falls back when the supplied base is not in the clone', () => {
+    expect(
+      pickBase({ supplied: 'deadbeef', resolves: exists(['origin/main']), currentRef: 'f' }),
+    ).toBe('origin/main');
+  });
+  it('never compares a branch with itself: on integration/v2 the fallback is main', () => {
+    expect(
+      pickBase({
+        supplied: undefined,
+        resolves: exists(['origin/integration/v2', 'origin/main']),
+        currentRef: 'integration/v2',
+      }),
+    ).toBe('origin/main');
+  });
+  it('returns null when nothing resolves (the caller then fails closed)', () => {
+    expect(pickBase({ supplied: undefined, resolves: exists([]), currentRef: 'f' })).toBeNull();
+  });
+});
+
+describe('scripts/osv-gate.mjs: base handling', () => {
+  const src = readFileSync(resolve(REPO_ROOT, 'scripts/osv-gate.mjs'), 'utf8');
+  it('picks its base with pickBase and FAILS CLOSED when none resolves', () => {
+    expect(src).toContain('pickBase(');
+    expect(src).toMatch(/picked === null\) \{\s*throw new Error/);
+  });
+  it('does not skip the base comparison on a first push or a dispatch', () => {
+    // The old code compared only when a non-zero base was supplied, so "no base"
+    // silently meant "nothing can be new". The comparison is now gated on the mode only.
+    expect(src).toMatch(/if \(!flag\('full'\) && !flag\('malicious-only'\)\)/);
+    expect(src).not.toMatch(/\^0\+\$/);
   });
 });
 
