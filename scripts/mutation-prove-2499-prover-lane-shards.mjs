@@ -80,7 +80,7 @@ const MUTATIONS = [
     id: 'W04',
     subject: 'wf',
     claim: 'the per-leg ceiling is blown past any real bound',
-    anchor: '    timeout-minutes: 160',
+    anchor: '    timeout-minutes: 200',
     replacement: '    timeout-minutes: 360',
     validate: parses,
   },
@@ -88,7 +88,7 @@ const MUTATIONS = [
     id: 'W05',
     subject: 'wf',
     claim: 'the per-prover bound is no longer below the leg ceiling',
-    anchor: '          KNEXT_PROVER_TIMEOUT_MS: 6000000',
+    anchor: '          KNEXT_PROVER_TIMEOUT_MS: 7800000',
     replacement: '          KNEXT_PROVER_TIMEOUT_MS: 99999999',
     validate: parses,
   },
@@ -177,7 +177,8 @@ const MUTATIONS = [
     subject: 'wf',
     claim: 'a non-alert job holds a write scope',
     anchor: '    timeout-minutes: 10\n    # The findings',
-    replacement: '    timeout-minutes: 10\n    permissions:\n      contents: write\n    # The findings',
+    replacement:
+      '    timeout-minutes: 10\n    permissions:\n      contents: write\n    # The findings',
     validate: parses,
   },
   {
@@ -212,6 +213,24 @@ const MUTATIONS = [
     anchor: '          KNEXT_LANE_CARGO_TARGET_DIR: ${{ runner.temp }}/cargo-target',
     replacement:
       '          KNEXT_LANE_CARGO_TARGET_DIR: ${{ runner.temp }}/cargo-target\n          CARGO_TARGET_DIR: ${{ runner.temp }}/cargo-target',
+    validate: parses,
+  },
+  {
+    id: 'W26',
+    subject: 'wf',
+    claim:
+      'the Go zone template is built with the operator’s older Go (GOTOOLCHAIN=local refuses it)',
+    anchor: '          go-version-file: templates/go/go.mod',
+    replacement: '          go-version-file: packages/kn-next-operator/go.mod',
+    validate: parses,
+  },
+  {
+    id: 'W27',
+    subject: 'wf',
+    claim:
+      'the template Go install runs unconditionally (a ref without templates/go fails its setup)',
+    anchor: "        if: ${{ hashFiles('templates/go/go.mod') != '' }}",
+    replacement: '        if: ${{ true }}',
     validate: parses,
   },
   {
@@ -350,7 +369,7 @@ const MUTATIONS = [
     id: 'L13',
     subject: 'lib',
     claim: 'the default per-prover bound is zero (every prover times out) ',
-    anchor: "  if (raw === undefined || raw === '') return 100 * 60 * 1000;",
+    anchor: "  if (raw === undefined || raw === '') return 130 * 60 * 1000;",
     replacement: "  if (raw === undefined || raw === '') return 0;",
   },
   // ── the runner ────────────────────────────────────────────────────────────

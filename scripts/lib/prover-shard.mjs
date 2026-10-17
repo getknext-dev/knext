@@ -66,7 +66,9 @@ export const PROVER_WEIGHT_MINUTES = Object.freeze({
   // MEASURED on hosted runners: run 39016841640 (all six legs, integration/v2) unless
   // noted. Minutes are wall-clock for the whole prover.
   'scripts/mutation-prove-empty-dir-guard.mjs': 68,
-  'scripts/mutation-prove-kind-manifest-apply-safety.mjs': 67,
+  // 71 minutes on one runner (run 39016841640), but still on mutation 109 of 111
+  // when a 100-minute bound killed it on another (run 39029215555).
+  'scripts/mutation-prove-kind-manifest-apply-safety.mjs': 100,
   'scripts/mutation-prove-published-seam-scan.mjs': 27,
   'scripts/mutation-prove-2052-backendservice.mjs': 22,
   'scripts/mutation-prove-compat-cell-fingerprint.mjs': 20,
@@ -364,7 +366,7 @@ export function aggregateReports({ expected, reports, shard = shardProvers }) {
 /** The per-prover bound, in ms. Overridable so the guard can use a short one. */
 export function proverTimeoutMs(env = process.env) {
   const raw = env.KNEXT_PROVER_TIMEOUT_MS;
-  if (raw === undefined || raw === '') return 100 * 60 * 1000;
+  if (raw === undefined || raw === '') return 130 * 60 * 1000;
   const n = Number(raw);
   if (!Number.isFinite(n) || n <= 0) {
     throw new Error(

@@ -578,7 +578,7 @@ describe('#2208 the per-prover bound', () => {
   it('defaults to a finite, positive bound well under the per-leg ceiling', () => {
     const ms = proverTimeoutMs({});
     expect(Number.isFinite(ms) && ms > 0).toBe(true);
-    expect(ms).toBe(100 * 60 * 1000);
+    expect(ms).toBe(130 * 60 * 1000);
   });
 
   it('is overridable by KNEXT_PROVER_TIMEOUT_MS and refuses nonsense rather than running unbounded', () => {
@@ -1209,7 +1209,7 @@ describe('#2499 the workflow: both refs, sharded, per-shard timeout, aggregated,
     const t = lane()['timeout-minutes'];
     expect(typeof t).toBe('number');
     expect(t as number).toBeGreaterThan(0);
-    expect(t as number).toBeLessThanOrEqual(180);
+    expect(t as number).toBeLessThanOrEqual(240);
   });
 
   it('every prover is bounded too: the lane step sets KNEXT_PROVER_TIMEOUT_MS below the leg timeout', () => {
@@ -1311,6 +1311,49 @@ describe('#2499 the workflow: both refs, sharded, per-shard timeout, aggregated,
       .workflow_dispatch?.inputs;
     expect(Object.keys(inputs ?? {})).toEqual(expect.arrayContaining(['refs', 'only_shard']));
     expect(text).not.toMatch(/continue-on-error/);
+  });
+
+  it('the Go on PATH satisfies EVERY go.mod a prover builds (the last setup-go is the newest needed)', () => {
+    const goLine = (rel: string) => {
+      const path = resolve(REPO_ROOT, rel);
+      if (!existsSync(path)) return null;
+      const m = /^go (\d+)\.(\d+)(?:\.(\d+))?/m.exec(read(path));
+      return m ? [Number(m[1]), Number(m[2]), Number(m[3] ?? 0)] : null;
+    };
+    const cmp = (a: number[], b: number[]) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
+    const mods = ['packages/kn-next-operator/go.mod', 'templates/go/go.mod'].filter((m) =>
+      existsSync(resolve(REPO_ROOT, m)),
+    );
+    const needed = mods
+      .map((m) => ({ m, v: goLine(m) as number[] }))
+      .sort((a, b) => cmp(b.v, a.v))[0];
+    const goSteps = (lane().steps ?? []).filter((s) =>
+      String(s.uses ?? '').startsWith('actions/setup-go'),
+    );
+    expect(goSteps.length).toBeGreaterThan(0);
+    // setup-go prepends to PATH, so the LAST step that runs wins. Each step is
+    // gated by file presence, so the last one whose go.mod EXISTS is the one.
+    const live = goSteps.filter((s) => {
+      const f = String((s.with as Record<string, unknown>)['go-version-file']);
+      return existsSync(resolve(REPO_ROOT, f));
+    });
+    const last = live[live.length - 1];
+    expect(String((last.with as Record<string, unknown>)['go-version-file'])).toBe(needed.m);
+    // On EVERY ref (whether or not templates/go exists there) the lane carries the
+    // template's Go install, so the guard does not go quiet on a ref without it.
+    expect(
+      goSteps.some(
+        (s) => (s.with as Record<string, unknown>)['go-version-file'] === 'templates/go/go.mod',
+      ),
+      'no setup-go step for templates/go/go.mod',
+    ).toBe(true);
+    // ...and a step for a module that may be absent on some ref is gated by presence.
+    for (const s of goSteps) {
+      const f = String((s.with as Record<string, unknown>)['go-version-file']);
+      if (f.startsWith('templates/')) {
+        expect(String(s.if ?? ''), f).toContain(`hashFiles('${f}')`);
+      }
+    }
   });
 
   it('toolchains that exist only on some refs are installed by FILE PRESENCE, not skipped by ref name', () => {
