@@ -1369,9 +1369,13 @@ jobs:
           fetch-depth: 0
 
       - name: Public-surface-changed-without-docs reminder
+        # The base branch name is chosen by whoever opens the PR's target, so it
+        # reaches the script through env, never as `${{ }}` text inside it.
+        env:
+          BASE_REF: ${{ github.base_ref }}
         run: |
-          BASE="origin/${{ github.base_ref }}"
-          git fetch --no-tags --depth=1 origin "${{ github.base_ref }}" || true
+          BASE="origin/$BASE_REF"
+          git fetch --no-tags --depth=1 origin "$BASE_REF" || true
           CHANGED="$(git diff --name-only "$BASE"...HEAD || true)"
           echo "Changed files:"; echo "$CHANGED"
           SURFACE="$(echo "$CHANGED" | grep -E '^packages/kn-next/src/|^packages/kn-next/package.json' || true)"
@@ -1383,9 +1387,13 @@ jobs:
           fi
 
       - name: User-facing internal-reference reminder (content/** only)
+        # The base branch name is chosen by whoever opens the PR's target, so it
+        # reaches the script through env, never as `${{ }}` text inside it.
+        env:
+          BASE_REF: ${{ github.base_ref }}
         run: |
-          BASE="origin/${{ github.base_ref }}"
-          git fetch --no-tags --depth=1 origin "${{ github.base_ref }}" || true
+          BASE="origin/$BASE_REF"
+          git fetch --no-tags --depth=1 origin "$BASE_REF" || true
           # Only scan ADDED lines in content/** — the app's next-adapter/config
           # legitimately reference internals; this guard is content-only.
           DIFF="$(git diff "$BASE"...HEAD -- 'apps/docs/content/**' || true)"
