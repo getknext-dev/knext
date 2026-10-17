@@ -46,10 +46,17 @@
  */
 
 import { execFileSync, spawn } from 'node:child_process';
-import { mkdirSync, rmSync, statfsSync, writeFileSync } from 'node:fs';
-import { freemem, totalmem } from 'node:os';
+import { mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  describeResources,
+  evaluateResources,
+  REGENERABLE_BUILD_DIRS,
+  readResources,
+  thresholdsFromEnv,
+} from './lib/lane-resources.mjs';
 import { discoverProvers, evaluateProverRun } from './lib/prover-lane.mjs';
 import { makeReport, parseShardSpec, proverTimeoutMs, shardProvers } from './lib/prover-shard.mjs';
 
@@ -250,21 +257,63 @@ function restoreTreeAfterKill(before) {
 }
 
 /**
- * Free memory and disk after each prover. A hosted runner that is starved (memory
- * or disk) is killed without a log, which is what happened to one leg of the
- * first full run: its output was lost with it. This line is printed as the run
- * goes, so the last one that survives says which resource was running out.
+ * Between-prover housekeeping and the resource TRIPWIRE.
+ *
+ * A leg of the first full run lost its hosted runner about 75 minutes in and left
+ * nothing: no log, no report. A line printed afterwards cannot help a dead runner,
+ * so the shortage is noticed here, between provers, while the runner is alive:
+ *
+ *   1. (CI only) remove the temp entries the prover left in the OS temp dir;
+ *   2. read free disk and available memory;
+ *   3. under pressure, delete REGENERABLE build output (see lane-resources.mjs);
+ *   4. if the leg is STILL below the hard threshold, stop it with a named finding
+ *      and mark every remaining prover NOT RUN, so the report uploads and the
+ *      aggregate says exactly which resource ended the leg.
+ *
+ * Cleanup only runs in CI (or with KNEXT_LANE_CLEANUP=1): a developer's temp dir
+ * and `target/` are not the lane's to delete.
  */
-function resourceLine() {
-  const mib = (n) => Math.round(n / (1024 * 1024));
-  let disk = 'unknown';
+const cleanupOn = process.env.GITHUB_ACTIONS === 'true' || process.env.KNEXT_LANE_CLEANUP === '1';
+const thresholds = thresholdsFromEnv();
+const SYSTEM_TMP_PREFIXES = ['.', 'systemd-private', 'snap-private', 'tmux-'];
+
+function tmpEntries() {
   try {
-    const st = statfsSync(REPO_ROOT);
-    disk = `${mib(st.bavail * st.bsize)} MiB`;
+    return new Set(readdirSync(tmpdir()));
   } catch {
-    // not fatal: a diagnostic must never fail the lane
+    return new Set();
   }
-  return `   resources: free memory ${mib(freemem())} of ${mib(totalmem())} MiB, free disk ${disk}`;
+}
+
+/** Remove the entries that appeared in the temp dir since `before`. */
+function cleanNewTmp(before) {
+  let removed = 0;
+  for (const name of tmpEntries()) {
+    if (before.has(name) || SYSTEM_TMP_PREFIXES.some((p) => name.startsWith(p))) continue;
+    try {
+      rmSync(resolve(tmpdir(), name), { recursive: true, force: true });
+      removed += 1;
+    } catch {
+      // a diagnostic/cleanup step must never fail the lane
+    }
+  }
+  return removed;
+}
+
+/** Delete regenerable build output; returns what was removed. */
+function cleanBuildOutput() {
+  const dirs = REGENERABLE_BUILD_DIRS.map((d) => resolve(REPO_ROOT, d));
+  if (process.env.KNEXT_LANE_CARGO_TARGET_DIR) dirs.push(process.env.KNEXT_LANE_CARGO_TARGET_DIR);
+  const removed = [];
+  for (const d of dirs) {
+    try {
+      rmSync(d, { recursive: true, force: true });
+      removed.push(d);
+    } catch {
+      // best effort
+    }
+  }
+  return removed;
 }
 
 const results = [];
@@ -272,6 +321,7 @@ for (const prover of provers) {
   console.log(`\n${'═'.repeat(78)}\n▶ ${prover.relPath}\n${'═'.repeat(78)}`);
   const started = Date.now();
   const untrackedBefore = untrackedFiles();
+  const tmpBefore = tmpEntries();
   const run = await runProver(prover.absPath, { cwd: REPO_ROOT, timeoutMs });
   if (run.error) console.error(`   spawn error: ${run.error.message}`);
   const { summary, findings } = evaluateProverRun({ status: run.status, output: run.output });
@@ -283,7 +333,37 @@ for (const prover of provers) {
     console.error(`\n   ${findings[0]}`);
   }
   results.push({ relPath: prover.relPath, summary, findings });
-  console.log(resourceLine());
+
+  if (cleanupOn) {
+    const n = cleanNewTmp(tmpBefore);
+    if (n > 0)
+      console.log(`   cleanup: removed ${n} temp entr${n === 1 ? 'y' : 'ies'} the prover left`);
+  }
+  let resources = readResources(REPO_ROOT);
+  let verdict = evaluateResources(resources, thresholds);
+  if (verdict.level !== 'ok' && cleanupOn) {
+    const removed = cleanBuildOutput();
+    console.log(
+      `   cleanup: under pressure (${verdict.reasons.join('; ')}), removed regenerable build output: ${removed.length ? removed.join(', ') : 'none'}`,
+    );
+    resources = readResources(REPO_ROOT);
+    verdict = evaluateResources(resources, thresholds);
+  }
+  console.log(`   resources: ${describeResources(resources)}`);
+  if (verdict.level === 'hard') {
+    const why = `RESOURCE TRIPWIRE after ${prover.relPath}: ${verdict.reasons.join('; ')}`;
+    findings.push(`${why} — the leg was stopped while the runner was alive`);
+    console.error(`\n   ${why}`);
+    const rest = provers.slice(provers.indexOf(prover) + 1);
+    for (const p of rest) {
+      results.push({
+        relPath: p.relPath,
+        summary: null,
+        findings: [`NOT RUN — the leg was stopped by the resource tripwire (${why})`],
+      });
+    }
+    break;
+  }
 }
 
 console.log(`\n${'═'.repeat(78)}\nLANE SUMMARY\n${'═'.repeat(78)}`);

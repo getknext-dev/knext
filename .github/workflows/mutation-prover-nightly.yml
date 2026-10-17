@@ -380,6 +380,10 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # The findings, split into NEW and known-red (scripts/lib/known-red-provers.mjs),
+    # for the alert issue. Labelling only: every finding still fails this job.
+    outputs:
+      summary: ${{ steps.aggregate.outputs.summary }}
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -399,6 +403,7 @@ jobs:
           path: ${{ runner.temp }}/lane-reports
 
       - name: Aggregate (FAIL on a missing leg, a missing prover, or declared != run)
+        id: aggregate
         env:
           EXPECTED_LEGS: ${{ needs.plan.outputs.expected }}
           REPORT_DIR: ${{ runner.temp }}/lane-reports
@@ -443,6 +448,7 @@ jobs:
           PLAN_RESULT: ${{ needs.plan.result }}
           CHECK_RESULT: ${{ needs.run-mutation-provers.result }}
           AGGREGATE_RESULT: ${{ needs.aggregate.result }}
+          AGG_SUMMARY: ${{ needs.aggregate.outputs.summary }}
         run: |
           set -euo pipefail
           # Which legs were not green. Best effort by design: failing to LIST
@@ -466,6 +472,12 @@ jobs:
           Legs that were not green:
 
           ${legs}
+
+          Aggregate findings (new red first, then the known red):
+
+          ${AGG_SUMMARY}
+
+          $(node scripts/prover-lane-known-red.mjs)
 
           **Triage — read the failing leg's LANE SUMMARY table at the end of its log first, then the
           Aggregate job's findings (they name the ref, shard and prover).** The summary prints
