@@ -7,7 +7,7 @@ PASS  kubectl strict validation                   client v1.31.2 — the CR appl
 PASS  Static asset mode                           object storage configured (gcs: assets) — assets are offloaded to the bucket and retained across deploys
 SKIP  vinext-on-node entry freshness              this app does not build with build: 'vinext' + runtime: 'node' (or no knext.config.ts was found) — knext-node-entry.mjs, if scaffolded, is never run
 PASS  NextApp CRD                                 served version: v1alpha1; pairs with this CLI (apps.kn-next.dev/v1alpha1)
-PASS  NextApp CRD schema coverage                 all 90 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)
+PASS  NextApp CRD schema coverage                 all 93 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)
 PASS  Operator deployment                         kn-next-operator-controller-manager Ready in kn-next-operator-system
 WARN  Operator version                            no release version reported, image sha256:75be42bb6b4c… (a bundle from before the operator version line); compatibility with this CLI cannot be checked (hint: Move to a versioned operator (operator first, then CLI). Apply a specific release's digest-pinned bundle: \`kubectl apply --server-side -f https://github.com/getknext-dev/knext/releases/download/operator-v<X.Y.Z>/install-v<X.Y.Z>.yaml\` (see https://knext-platform.dev/docs/versioning).)
 PASS  cert-manager webhook                        cert-manager-webhook Ready
@@ -59,7 +59,7 @@ exports[`doctor golden output (#1055 byte-identical pin) reachable — all check
     "title": "NextApp CRD",
   },
   {
-    "detail": "all 90 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)",
+    "detail": "all 93 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)",
     "id": "crd-schema",
     "status": "pass",
     "title": "NextApp CRD schema coverage",
@@ -506,7 +506,7 @@ PASS  kubectl strict validation                   client v1.31.2 — the CR appl
 PASS  Static asset mode                           object storage configured (gcs: assets) — assets are offloaded to the bucket and retained across deploys
 SKIP  vinext-on-node entry freshness              this app does not build with build: 'vinext' + runtime: 'node' (or no knext.config.ts was found) — knext-node-entry.mjs, if scaffolded, is never run
 PASS  NextApp CRD                                 served version: v1alpha1; pairs with this CLI (apps.kn-next.dev/v1alpha1)
-PASS  NextApp CRD schema coverage                 all 90 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)
+PASS  NextApp CRD schema coverage                 all 93 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)
 PASS  Operator deployment                         kn-next-operator-controller-manager Ready in kn-next-operator-system
 WARN  Operator version                            no release version reported, image sha256:75be42bb6b4c… (a bundle from before the operator version line); compatibility with this CLI cannot be checked (hint: Move to a versioned operator (operator first, then CLI). Apply a specific release's digest-pinned bundle: \`kubectl apply --server-side -f https://github.com/getknext-dev/knext/releases/download/operator-v<X.Y.Z>/install-v<X.Y.Z>.yaml\` (see https://knext-platform.dev/docs/versioning).)
 PASS  cert-manager webhook                        cert-manager-webhook Ready
@@ -558,7 +558,7 @@ exports[`doctor golden output (#1055 byte-identical pin) budget-exhausted — th
     "title": "NextApp CRD",
   },
   {
-    "detail": "all 90 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)",
+    "detail": "all 93 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)",
     "id": "crd-schema",
     "status": "pass",
     "title": "NextApp CRD schema coverage",
@@ -755,7 +755,7 @@ PASS  kubectl strict validation                   client v1.31.2 — the CR appl
 PASS  Static asset mode                           object storage configured (gcs: assets) — assets are offloaded to the bucket and retained across deploys
 SKIP  vinext-on-node entry freshness              this app does not build with build: 'vinext' + runtime: 'node' (or no knext.config.ts was found) — knext-node-entry.mjs, if scaffolded, is never run
 FAIL  NextApp CRD                                 this CLI emits apps.kn-next.dev/v1alpha1, but the installed nextapps.apps.kn-next.dev does not serve v1alpha1 (it serves: v1beta1) — upgrade the CLI to match the operator (hint: The installed CRD serves only newer versions than this CLI emits: upgrade the CLI (@getknext/core) to a release that emits one of v1beta1 — see https://knext-platform.dev/docs/versioning)
-PASS  NextApp CRD schema coverage                 all 90 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)
+PASS  NextApp CRD schema coverage                 all 93 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)
 PASS  Operator deployment                         kn-next-operator-controller-manager Ready in kn-next-operator-system
 WARN  Operator version                            no release version reported, image sha256:75be42bb6b4c… (a bundle from before the operator version line); compatibility with this CLI cannot be checked (hint: Move to a versioned operator (operator first, then CLI). Apply a specific release's digest-pinned bundle: \`kubectl apply --server-side -f https://github.com/getknext-dev/knext/releases/download/operator-v<X.Y.Z>/install-v<X.Y.Z>.yaml\` (see https://knext-platform.dev/docs/versioning).)
 PASS  cert-manager webhook                        cert-manager-webhook Ready
@@ -808,7 +808,7 @@ exports[`doctor golden output (#1055 byte-identical pin) crd-version — a CRD t
     "title": "NextApp CRD",
   },
   {
-    "detail": "all 90 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)",
+    "detail": "all 93 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)",
     "id": "crd-schema",
     "status": "pass",
     "title": "NextApp CRD schema coverage",
@@ -880,7 +880,7 @@ PASS  kubectl strict validation                   client v1.31.2 — the CR appl
 PASS  Static asset mode                           object storage configured (gcs: assets) — assets are offloaded to the bucket and retained across deploys
 SKIP  vinext-on-node entry freshness              this app does not build with build: 'vinext' + runtime: 'node' (or no knext.config.ts was found) — knext-node-entry.mjs, if scaffolded, is never run
 PASS  NextApp CRD                                 served version: v1alpha1; pairs with this CLI (apps.kn-next.dev/v1alpha1)
-PASS  NextApp CRD schema coverage                 all 90 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)
+PASS  NextApp CRD schema coverage                 all 93 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)
 PASS  Operator deployment                         kn-next-operator-controller-manager Ready in kn-next-operator-system
 PASS  Operator version                            v1.5.0 (from label), image sha256:75be42bb6b4c…; different major from CLI 2.0.0 (the operator keeps its own version line) — supported pairing is decided by the CRD API version, see the NextApp CRD row
 PASS  cert-manager webhook                        cert-manager-webhook Ready
@@ -932,7 +932,7 @@ exports[`doctor golden output (#1055 byte-identical pin) cli-2.0 — a 2.0 CLI a
     "title": "NextApp CRD",
   },
   {
-    "detail": "all 90 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)",
+    "detail": "all 93 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)",
     "id": "crd-schema",
     "status": "pass",
     "title": "NextApp CRD schema coverage",

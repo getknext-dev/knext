@@ -233,8 +233,9 @@ export async function deployFunction(args: DeployFunctionArgs): Promise<number> 
       return 1;
     }
     io.stdout(
-      `BackendService ${namespace}/${name} applied. The function runs once the zone lists it in ` +
-        `spec.backends (service: ${name}) and the operator has reconciled both halves.\n`,
+      `BackendService ${namespace}/${name} applied. The function runs once the zone lists it: ` +
+        `add { name: '${name}' } to \`backends\` in knext.config.ts and run \`knext deploy\`, ` +
+        'then the operator reconciles both halves.\n',
     );
     return 0;
   } catch (err) {

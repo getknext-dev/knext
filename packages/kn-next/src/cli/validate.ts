@@ -276,6 +276,94 @@ function validatePublicHosts(hosts: unknown): string[] {
 }
 
 /**
+ * Mirrors the CRD's schema on spec.backends (kept in lockstep with
+ * api/v1alpha1/nextapp_types.go; `validate-backends.test.ts` reads the shipped
+ * CRD and fails when either side moves alone). A binding name has the shape of
+ * a function name, a service is a DNS label, at most 64 entries, the list is
+ * keyed by name, and each BackendService may be bound at most once.
+ */
+const BACKEND_NAME_PATTERN = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/;
+const BACKEND_SERVICE_PATTERN = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/;
+const BACKEND_NAME_MAX_LENGTH = 63;
+const BACKENDS_MAX_ITEMS = 64;
+const BACKEND_KEYS = ["name", "service"];
+
+function validateBackends(backends: unknown): string[] {
+    if (backends === undefined) return [];
+    if (!Array.isArray(backends)) {
+        return [
+            "'backends' must be an array of functions, e.g. [{ name: \"user-profile\" }]",
+        ];
+    }
+    const errors: string[] = [];
+    if (backends.length > BACKENDS_MAX_ITEMS) {
+        errors.push(
+            `'backends' lists ${backends.length} functions; the maximum is ${BACKENDS_MAX_ITEMS}`,
+        );
+    }
+    const names = new Set<string>();
+    const services = new Set<string>();
+    const reported = new Set<string>();
+    backends.forEach((entry, i) => {
+        const at = `backends[${i}]`;
+        if (!isPlainObject(entry)) {
+            errors.push(
+                `'${at}' must be an object like { name: "user-profile" }, got ${JSON.stringify(entry)}`,
+            );
+            return;
+        }
+        for (const key of Object.keys(entry)) {
+            if (!BACKEND_KEYS.includes(key)) {
+                errors.push(
+                    `'${at}.${key}' is not a known key (known: ${BACKEND_KEYS.join(", ")})`,
+                );
+            }
+        }
+        const { name } = entry;
+        if (
+            typeof name !== "string" ||
+            name.length > BACKEND_NAME_MAX_LENGTH ||
+            !BACKEND_NAME_PATTERN.test(name)
+        ) {
+            errors.push(
+                `'${at}.name' must be lowercase letters and digits in parts joined by single '-', starting with a letter, at most ${BACKEND_NAME_MAX_LENGTH} characters, got ${JSON.stringify(name)}`,
+            );
+        } else if (names.has(name) && !reported.has(`name:${name}`)) {
+            reported.add(`name:${name}`);
+            errors.push(
+                `'backends' lists the name "${name}" more than once; each binding name must be unique`,
+            );
+        } else {
+            names.add(name);
+        }
+        const service = entry.service;
+        if (service !== undefined) {
+            if (
+                typeof service !== "string" ||
+                service.length > BACKEND_NAME_MAX_LENGTH ||
+                !BACKEND_SERVICE_PATTERN.test(service)
+            ) {
+                errors.push(
+                    `'${at}.service' must be a DNS label (lowercase letters, digits and '-'), at most ${BACKEND_NAME_MAX_LENGTH} characters, got ${JSON.stringify(service)}`,
+                );
+                return;
+            }
+        }
+        const bound = service ?? name;
+        if (typeof bound === "string" && BACKEND_SERVICE_PATTERN.test(bound)) {
+            if (services.has(bound) && !reported.has(`service:${bound}`)) {
+                reported.add(`service:${bound}`);
+                errors.push(
+                    `'backends' has the function "${bound}" bound more than once; each function may be bound at most once`,
+                );
+            }
+            services.add(bound);
+        }
+    });
+    return errors;
+}
+
+/**
  * Mirrors the CRD's schema + CEL on spec.cdn (kept in lockstep with
  * api/v1alpha1/nextapp_types.go; the shared boundary table
  * __tests__/fixtures/cdn-validation-cases.json is read by both validators).
@@ -616,6 +704,10 @@ export function validateConfig(
     // so a typo is a local config error instead of an admission rejection
     // after the image is built.
     errors.push(...validatePublicHosts(config.networking?.publicHosts));
+
+    // backends: the zone's half of a function binding, checked against the
+    // CRD's own bounds so a bad name stops here instead of at admission.
+    errors.push(...validateBackends(config.backends));
 
     // cdn (ADR-0068): the same bounds the CRD enforces on spec.cdn.
     errors.push(...validateCdn((config as { cdn?: unknown }).cdn));

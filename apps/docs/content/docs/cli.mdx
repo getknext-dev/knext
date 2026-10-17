@@ -814,9 +814,10 @@ does not know a field this CLI sends, the run stops and names the field. Upgrade
 its CRDs) first, then the CLI. Then the apply itself passes `--validate=strict`, so an unknown field
 is rejected rather than silently dropped, whatever your `kubectl` defaults to.
 
-The function runs only once the zone also lists it in `spec.backends` with `service: orders`; see
-[Zone functions](/docs/zone-functions#binding-a-function-to-its-zone). The command does not edit the
-zone's `NextApp`.
+The function runs only once the zone also lists it: add `{ name: "orders" }` to `backends` in the
+zone's `knext.config.ts` and run `knext deploy`, which sends the list on the zone's `NextApp`. See
+[Zone functions](/docs/zone-functions#binding-a-function-to-its-zone). This command does not edit
+the zone's `NextApp`.
 
 **Exit code:** `0` on success; `1` on a usage error, a failed preflight, or a failed apply.
 
