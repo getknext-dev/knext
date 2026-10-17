@@ -216,6 +216,14 @@ const NEEDLES = [
     replacement: "      .filter((l) => l !== ''),",
   },
   {
+    id: 'N10',
+    subject: 'needles',
+    claim:
+      "the PEM needle is the file's text, not the PEM the operator holds (an extra trailing newline from jq -r changes base64 from the last group on)",
+    anchor: '    pem: Buffer.from(canonical),',
+    replacement: '    pem: Buffer.from(pem),',
+  },
+  {
     id: 'N09',
     subject: 'needles',
     claim: 'the helper prints the needles it was asked to keep private',

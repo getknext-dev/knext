@@ -40,19 +40,26 @@ export const MIN_NEEDLE = 40;
 
 /** Every class's needles for one PKCS#8 Ed25519 private key in PEM form. */
 export function needlesFor(pem: string): Record<string, string[]> {
-  const jwk = createPrivateKey(pem).export({ format: 'jwk' });
+  const key = createPrivateKey(pem);
+  // The PEM as the operator holds and logs it (Go's pem.EncodeToMemory: 64-character
+  // lines, ONE trailing newline), not as the file happened to be written: `jq -r` adds
+  // a newline after a PEM that already ends in one, and base64 of the file would then
+  // differ from base64 of the held PEM from its last 3-byte group on. Re-exporting
+  // the parsed key gives the canonical text whatever the input's whitespace.
+  const canonical = key.export({ format: 'pem', type: 'pkcs8' }) as string;
+  const jwk = key.export({ format: 'jwk' });
   if (jwk.kty !== 'OKP' || jwk.crv !== 'Ed25519' || !jwk.d || !jwk.x) {
     throw new Error('not an Ed25519 private key');
   }
   const seed = Buffer.from(jwk.d, 'base64url');
   const pub = Buffer.from(jwk.x, 'base64url');
   const raw: Record<(typeof RAW_FORMS)[number], Buffer> = {
-    pem: Buffer.from(pem),
+    pem: Buffer.from(canonical),
     seed,
     private: Buffer.concat([seed, pub]),
   };
   const out: Record<string, string[]> = {
-    'pem-body-line': pem
+    'pem-body-line': canonical
       .split('\n')
       .map((l) => l.trim())
       .filter((l) => l !== '' && !l.startsWith('-----')),

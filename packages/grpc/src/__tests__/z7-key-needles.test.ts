@@ -203,3 +203,33 @@ describe('the operator redaction set has not outgrown the scan', () => {
     expect(go).toContain('!strings.HasPrefix(l, "-----")');
   });
 });
+describe('the needles are the PEM the operator holds, not the file the lane wrote', () => {
+  // The lane exports the key with `jq -r`, which adds a newline after a PEM that
+  // already ends in one. The operator logs (and a Secret holds) the PEM as
+  // pem.EncodeToMemory wrote it, one trailing newline. Base64 of the PEM differs
+  // from the second byte after the last full 3-byte group on, so a needle built
+  // from the file would never match a key logged as the []byte zap prints. The
+  // operator mutation M6b survived exactly this way on the first run.
+  it('a key file with the extra trailing newline gives the same needles as the PEM itself', () => {
+    expect(PEM.endsWith('\n')).toBe(true);
+    expect(PEM.endsWith('\n\n')).toBe(false);
+    const asExported = needlesFor(`${PEM}\n`);
+    const asHeld = needlesFor(PEM);
+    expect(asExported['pem-std']).toEqual(asHeld['pem-std']);
+    for (const cls of CLASSES) expect(asExported[cls], cls).toEqual(asHeld[cls]);
+  });
+
+  it('a PEM without its trailing newline, or with Windows line endings, still finds the held PEM', () => {
+    const held = needlesFor(PEM);
+    for (const variant of [PEM.trimEnd(), PEM.replaceAll('\n', '\r\n'), `\n${PEM}\n\n`]) {
+      const got = needlesFor(variant);
+      for (const cls of CLASSES) expect(got[cls], cls).toEqual(held[cls]);
+    }
+  });
+
+  it('finds a key logged as base64 of the held PEM even when the file had the extra newline', () => {
+    const logged = JSON.stringify({ data: std(Buffer.from(PEM)) });
+    const fromFile = needlesFor(`${PEM}\n`);
+    expect((fromFile['pem-std'] as string[]).some((n) => logged.includes(n))).toBe(true);
+  });
+});
