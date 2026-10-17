@@ -43,6 +43,8 @@ describe('the D3 spawn scan: RED fixtures', () => {
     ['execFileSync func deploy', 'execFileSync("func", ["deploy"]);'],
     ['spawnSync kn service', 'spawnSync("kn", ["service", "create", "x"]);'],
     ['any kn invocation, not only kn service', 'runCapture(["kn", "revision", "list"]);'],
+    ['any kn invocation in a shell string', 'execSync("kn revision list");'],
+    ['sh -c wrapping any kn', 'runInherit(["sh", "-c", "kn revision list"]);'],
     ['execSync of a func deploy shell string', 'execSync("func deploy --image x");'],
     ['exec of a kn service shell string', 'exec("kn service create x", cb);'],
     ['a chained shell string', 'execSync("make build && func deploy");'],
