@@ -108,8 +108,10 @@ const MUTATIONS = [
     id: 'A7',
     claim: 'the added-or-changed key forgets the lockfile',
     subject: 'lib',
-    anchor: 'const keyOf = (e) => `${e.lockfile}|${e.ecosystem}|${e.name}|${e.version}`;',
-    replacement: 'const keyOf = (e) => `${e.ecosystem}|${e.name}|${e.version}`;',
+    anchor:
+      "const keyOf = (e) => `${e.lockfile}|${e.ecosystem}|${e.name}|${e.version}|${e.integrity ?? ''}`;",
+    replacement:
+      "const keyOf = (e) => `${e.ecosystem}|${e.name}|${e.version}|${e.integrity ?? ''}`;",
   },
   {
     id: 'A9',
