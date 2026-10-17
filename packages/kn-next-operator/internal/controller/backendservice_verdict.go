@@ -66,6 +66,7 @@ const (
 	ReasonConflictingOwner        = "ConflictingOwner"
 	ReasonCompliant               = "Compliant"
 	ReasonSecretNotAllowed        = "SecretNotAllowed"
+	ReasonSecretsUnverified       = "SecretsUnverified"
 	ReasonSovereigntyViolation    = "SovereigntyViolation"
 	ReasonNoForeignDatabaseHost   = "NoForeignDatabaseHost"
 	ReasonForeignDatabaseHost     = "ForeignDatabaseHost"
@@ -75,6 +76,15 @@ const (
 
 	// functionNotReadyRequeueAfter re-checks a rendered function that is not Ready.
 	functionNotReadyRequeueAfter = 30 * time.Second
+	// secretsDeniedHold is how long a Secret read that is DENIED (Forbidden or
+	// Unauthorized) is held as "unknown" before it becomes a definitive refusal.
+	// Every other failed read (timeouts, 429, 5xx, anything unrecognised) is held
+	// without limit. A denied read is different: it does not heal by itself, and
+	// if the operator's Secret grant is gone, holding it forever would freeze
+	// revocation for every function. Measured from status.secretsDeniedSince, the
+	// first denial itself, so it survives an operator restart and is not moved by
+	// other conditions or by transient errors that came first.
+	secretsDeniedHold = 10 * time.Minute
 	// functionRevalidateAfter re-runs the allowlist periodically: a Secret's
 	// marks can change without any event the operator watches (it holds no
 	// Secret list/watch, by design).
@@ -100,7 +110,13 @@ type functionObservation struct {
 	// zoneListed: the zone's spec.backends[] names this function (zone half).
 	zoneListed bool
 	violations []sovereigntyViolation
-	lint       []databaseHostFinding
+	// unverified are referenced Secrets whose metadata could not be read: no
+	// answer, so neither a violation nor a pass (#2498).
+	unverified []unverifiedSecret
+	// deniedSince is when reads of this function's Secrets were first denied
+	// (nil while none is), already carried forward from status.
+	deniedSince *metav1.Time
+	lint        []databaseHostFinding
 	// renderErr is a failure to render a child that is not an API hiccup (a
 	// name already controlled by another object), or "".
 	renderErr string
@@ -120,6 +136,75 @@ func (o functionObservation) accepted() bool {
 	return o.invalidImage == "" && o.zone != nil && o.conflictingOwner == "" && o.zoneListed && len(o.violations) == 0
 }
 
+// undecided reports whether the function would be accepted but for Secret
+// lookups that returned no answer. Reconcile must then neither render nor tear
+// down: it returns the error and requeues, leaving the function as it is.
+func (o functionObservation) undecided() bool {
+	return len(o.unverified) > 0 && o.accepted()
+}
+
+// hasDenied reports whether any unverified Secret was DENIED (Forbidden or
+// Unauthorized), as opposed to merely unreadable.
+func hasDenied(unverified []unverifiedSecret) bool {
+	for _, u := range unverified {
+		if u.denied {
+			return true
+		}
+	}
+	return false
+}
+
+// nextDeniedSince carries the start of a denial forward. It is set on the first
+// pass on which a read is denied, kept while any read stays denied, and cleared
+// the first pass on which none is: so the hold is counted from the denial
+// itself, not from some other transition.
+func nextDeniedSince(prev *metav1.Time, denied bool, now time.Time) *metav1.Time {
+	switch {
+	case !denied:
+		return nil
+	case prev != nil:
+		return prev
+	default:
+		t := metav1.NewTime(now)
+		return &t
+	}
+}
+
+// escalateDeniedSecrets turns a Secret whose reads have been DENIED for longer
+// than secretsDeniedHold into a definitive violation. It stays one for as long
+// as the denial persists, so the refusal does not flap. Anything else that is
+// unverified stays unverified.
+func escalateDeniedSecrets(
+	violations []sovereigntyViolation,
+	unverified []unverifiedSecret,
+	deniedSince *metav1.Time,
+	now time.Time,
+) ([]sovereigntyViolation, []unverifiedSecret) {
+	if deniedSince == nil || now.Sub(deniedSince.Time) < secretsDeniedHold {
+		return violations, unverified
+	}
+	var still []unverifiedSecret
+	for _, u := range unverified {
+		if !u.denied {
+			still = append(still, u)
+			continue
+		}
+		violations = append(violations, sovereigntyViolation{u.source, u.name, fmt.Sprintf(
+			"Secret %q cannot be read: the operator has been denied access (Forbidden) for over %s, so it is refused "+
+				"rather than kept running unchecked", u.name, secretsDeniedHold)})
+	}
+	return violations, still
+}
+
+// unverifiedNames lists the Secrets whose metadata could not be read.
+func (o functionObservation) unverifiedNames() string {
+	names := make([]string, 0, len(o.unverified))
+	for _, u := range o.unverified {
+		names = append(names, fmt.Sprintf("Secret %q", u.name))
+	}
+	return strings.Join(names, ", ")
+}
+
 // functionVerdict is the full status outcome of one pass.
 type functionVerdict struct {
 	// conditions are set in this order (the persisted order is part of the
@@ -127,6 +212,12 @@ type functionVerdict struct {
 	conditions   []metav1.Condition
 	events       []verdictEvent
 	requeueAfter time.Duration
+	// observedGeneration is the generation Reconcile records as observed. An
+	// undecided pass rolled nothing out, so it keeps the previous value: the new
+	// spec has not been observed.
+	observedGeneration int64
+	// secretsDeniedSince is the status field's next value.
+	secretsDeniedSince *metav1.Time
 	// refusal is the Ready reason when the function newly ENTERED a refusal
 	// this pass (a transition), for the refusals metric; "" otherwise.
 	refusal string
@@ -138,6 +229,11 @@ type functionVerdict struct {
 func computeBackendServiceVerdict(bs *appsv1alpha1.BackendService, o functionObservation) functionVerdict {
 	var v functionVerdict
 	gen := bs.Generation
+	v.observedGeneration = gen
+	v.secretsDeniedSince = o.deniedSince
+	if o.undecided() {
+		v.observedGeneration = bs.Status.ObservedGeneration
+	}
 	cond := func(t string, s metav1.ConditionStatus, reason, msg string) metav1.Condition {
 		return metav1.Condition{Type: t, Status: s, ObservedGeneration: gen, Reason: reason, Message: msg}
 	}
@@ -175,6 +271,13 @@ func computeBackendServiceVerdict(bs *appsv1alpha1.BackendService, o functionObs
 	case o.zone == nil:
 		sov = cond(ConditionSovereigntyCompliant, metav1.ConditionUnknown, ReasonZoneNotFound,
 			"the allowlist cannot be evaluated without the zone")
+	case o.undecided():
+		// No answer, which is not a violation: the function is neither rendered
+		// nor removed this pass (a static message: it names Secrets, never the
+		// transient error, so a persistent condition does not churn status).
+		sov = cond(ConditionSovereigntyCompliant, metav1.ConditionUnknown, ReasonSecretsUnverified,
+			"could not read the metadata of "+o.unverifiedNames()+
+				"; retrying with backoff. A running function is left as it is, and one never rendered stays unrendered")
 	default:
 		sov = cond(ConditionSovereigntyCompliant, metav1.ConditionTrue, ReasonCompliant,
 			"every Secret reference is the zone's own database Secret or marked for the zone")
@@ -186,6 +289,14 @@ func computeBackendServiceVerdict(bs *appsv1alpha1.BackendService, o functionObs
 	jwksName := ZoneJWKSConfigMapName(bs.Spec.Zone)
 	var jwks metav1.Condition
 	switch {
+	case o.undecided():
+		// Nothing was re-evaluated this pass: carry the last verdict forward.
+		if prev := apimeta.FindStatusCondition(bs.Status.Conditions, ConditionJWKSTrusted); prev != nil {
+			jwks = cond(ConditionJWKSTrusted, prev.Status, prev.Reason, prev.Message)
+		} else {
+			jwks = cond(ConditionJWKSTrusted, metav1.ConditionUnknown, ReasonJWKSNotRendered,
+				"the function is not rendered, so no JWKS is mounted")
+		}
 	case !o.accepted():
 		jwks = cond(ConditionJWKSTrusted, metav1.ConditionUnknown, ReasonJWKSNotRendered,
 			"the function is not rendered, so no JWKS is mounted")
@@ -232,6 +343,13 @@ func computeBackendServiceVerdict(bs *appsv1alpha1.BackendService, o functionObs
 		ready = cond(ConditionReady, metav1.ConditionFalse, bound.Reason, bound.Message)
 	case len(o.violations) > 0:
 		ready = cond(ConditionReady, metav1.ConditionFalse, ReasonSovereigntyViolation, sov.Message)
+	case o.undecided() && o.ksvc == nil:
+		ready = cond(ConditionReady, metav1.ConditionFalse, ReasonSecretsUnverified, sov.Message)
+	case o.undecided() && bs.Generation != bs.Status.ObservedGeneration:
+		// The spec changed and could not be verified, so it was not rolled out:
+		// whatever Ready the old Knative Service has describes the OLD spec.
+		ready = cond(ConditionReady, metav1.ConditionFalse, ReasonSecretsUnverified,
+			"the latest spec could not be verified and was not rolled out; the previous revision keeps serving. "+sov.Message)
 	case o.renderErr != "":
 		ready = cond(ConditionReady, metav1.ConditionFalse, ReasonKnativeServiceNameTaken, o.renderErr)
 	case jwks.Status == metav1.ConditionFalse:
@@ -255,8 +373,12 @@ func computeBackendServiceVerdict(bs *appsv1alpha1.BackendService, o functionObs
 			fmt.Sprintf("Knative Service is not Ready (%s): %s", reason, msg))
 		v.requeueAfter = functionNotReadyRequeueAfter
 	default:
-		ready = cond(ConditionReady, metav1.ConditionTrue, ReasonFunctionReady,
-			"the function is bound, compliant and its Knative Service is Ready")
+		msg := "the function is bound, compliant and its Knative Service is Ready"
+		if o.undecided() {
+			msg = "the function is bound and its Knative Service is Ready; its Secret references could not be " +
+				"re-verified this pass (SovereigntyCompliant is Unknown)"
+		}
+		ready = cond(ConditionReady, metav1.ConditionTrue, ReasonFunctionReady, msg)
 	}
 	v.conditions = append(v.conditions, ready)
 
@@ -264,7 +386,8 @@ func computeBackendServiceVerdict(bs *appsv1alpha1.BackendService, o functionObs
 		prev := apimeta.FindStatusCondition(bs.Status.Conditions, ConditionReady)
 		if prev == nil || prev.Reason != ready.Reason || prev.Message != ready.Message {
 			v.events = append(v.events, verdictEvent{corev1.EventTypeWarning, ready.Reason, ready.Message})
-			if prev == nil || prev.Reason != ready.Reason {
+			// SecretsUnverified is no answer, not a refusal: it is not counted as one.
+			if (prev == nil || prev.Reason != ready.Reason) && ready.Reason != ReasonSecretsUnverified {
 				v.refusal = ready.Reason
 			}
 		}

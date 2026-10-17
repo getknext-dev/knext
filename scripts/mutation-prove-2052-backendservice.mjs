@@ -288,8 +288,8 @@ const MUTATIONS = [
     id: 'R01',
     claim: 'a refused function is rendered anyway (not fail-closed)',
     subject: 'ctl',
-    anchor: '\tif obs.accepted() {',
-    replacement: '\tif true {',
+    anchor: '\t} else if obs.accepted() {',
+    replacement: '\t} else if true {',
     test: envtest('the credential allowlist'),
   },
   {
@@ -516,8 +516,8 @@ const MUTATIONS = [
     id: 'J16',
     claim: 'the JWKS is read (and a function rendered) even for a refused function',
     subject: 'ctl',
-    anchor: '\tif obs.accepted() {',
-    replacement: '\tif true {',
+    anchor: '\t} else if obs.accepted() {',
+    replacement: '\t} else if true {',
     test: envtest('does not read the ConfigMap, nor render, for a function that is refused'),
   },
   {

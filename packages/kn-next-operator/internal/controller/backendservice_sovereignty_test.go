@@ -152,7 +152,7 @@ func TestSovereigntyAllowsOwnDatabaseSecretFromEverySource(t *testing.T) {
 	zone, others := sovFixture()
 	for _, src := range secretSources {
 		for _, secret := range []string{sovOwnDB, sovOwnDBRO} {
-			got := checkFunctionSovereignty(sovFunction(src.spec(secret)), zone, others, noSecrets())
+			got, _ := checkFunctionSovereignty(sovFunction(src.spec(secret)), zone, others, noSecrets())
 			if len(got) != 0 {
 				t.Errorf("%s -> the zone's own database Secret %q must be allowed, got %+v", src.name, secret, got)
 			}
@@ -169,7 +169,7 @@ func testUnmarkedSecretRejected(t *testing.T, srcName string) {
 		if src.name != srcName {
 			continue
 		}
-		got := checkFunctionSovereignty(sovFunction(src.spec("stripe-key")), zone, others,
+		got, _ := checkFunctionSovereignty(sovFunction(src.spec("stripe-key")), zone, others,
 			sovSecrets(map[string]secretMetadata{"stripe-key": {}}))
 		assertOneViolation(t, got, src.source, "stripe-key", "not marked for zone")
 		return
@@ -194,7 +194,7 @@ func TestSovereigntyRejectsUnmarkedSecret_ProjectedVolume(t *testing.T) {
 // rule fail-closed (a later-created Secret is re-checked on the next pass).
 func TestSovereigntyRejectsMissingSecret(t *testing.T) {
 	zone, others := sovFixture()
-	got := checkFunctionSovereignty(sovFunction(specSecretKeyRef("ghost")), zone, others, noSecrets())
+	got, _ := checkFunctionSovereignty(sovFunction(specSecretKeyRef("ghost")), zone, others, noSecrets())
 	assertOneViolation(t, got, "env[DSN].valueFrom.secretKeyRef", "ghost", "not marked for zone")
 }
 
@@ -207,7 +207,7 @@ func testForeignDatabaseSecretRejected(t *testing.T, srcName string) {
 		if src.name != srcName {
 			continue
 		}
-		got := checkFunctionSovereignty(sovFunction(src.spec(sovForeignDB)), zone, others,
+		got, _ := checkFunctionSovereignty(sovFunction(src.spec(sovForeignDB)), zone, others,
 			sovSecrets(map[string]secretMetadata{sovForeignDB: {}}))
 		assertOneViolation(t, got, src.source, sovForeignDB, `zone "billing"'s database Secret`)
 		return
@@ -232,7 +232,7 @@ func TestSovereigntyRejectsForeignDatabaseSecret_ProjectedVolume(t *testing.T) {
 func TestSovereigntyRejectsForeignReadOnlyDatabaseSecret(t *testing.T) {
 	zone, others := sovFixture()
 	others[0].Spec.Database.ROSecretRef = &appsv1alpha1.DatabaseSecretRef{Name: "billing-ro"}
-	got := checkFunctionSovereignty(sovFunction(specEnvFromSecret("billing-ro")), zone, others, noSecrets())
+	got, _ := checkFunctionSovereignty(sovFunction(specEnvFromSecret("billing-ro")), zone, others, noSecrets())
 	assertOneViolation(t, got, "envFrom[0].secretRef", "billing-ro", `zone "billing"'s database Secret`)
 }
 
@@ -244,7 +244,7 @@ func TestSovereigntyAllowsSecretMarkedForSameZoneByLabel(t *testing.T) {
 		"stripe-key": {labels: map[string]string{ZoneLabel: sovZone}},
 	})
 	for _, src := range secretSources {
-		if got := checkFunctionSovereignty(sovFunction(src.spec("stripe-key")), zone, others, lookup); len(got) != 0 {
+		if got, _ := checkFunctionSovereignty(sovFunction(src.spec("stripe-key")), zone, others, lookup); len(got) != 0 {
 			t.Errorf("%s: a Secret labelled %s=%s must be allowed, got %+v", src.name, ZoneLabel, sovZone, got)
 		}
 	}
@@ -257,7 +257,7 @@ func TestSovereigntyAllowsSecretMarkedForSameZoneByOwnerReference(t *testing.T) 
 			APIVersion: appsv1alpha1.GroupVersion.String(), Kind: "NextApp", Name: sovZone, UID: sovZoneUID,
 		}}},
 	})
-	if got := checkFunctionSovereignty(sovFunction(specSecretVolume("stripe-key")), zone, others, lookup); len(got) != 0 {
+	if got, _ := checkFunctionSovereignty(sovFunction(specSecretVolume("stripe-key")), zone, others, lookup); len(got) != 0 {
 		t.Errorf("a Secret owned by the zone's NextApp must be allowed, got %+v", got)
 	}
 }
@@ -271,7 +271,7 @@ func TestSovereigntyRejectsOwnerReferenceWithWrongUID(t *testing.T) {
 			APIVersion: appsv1alpha1.GroupVersion.String(), Kind: "NextApp", Name: sovZone, UID: "stale-uid",
 		}}},
 	})
-	got := checkFunctionSovereignty(sovFunction(specSecretVolume("stripe-key")), zone, others, lookup)
+	got, _ := checkFunctionSovereignty(sovFunction(specSecretVolume("stripe-key")), zone, others, lookup)
 	assertOneViolation(t, got, "volumes[creds].secret", "stripe-key", "not marked for zone")
 }
 
@@ -282,7 +282,7 @@ func TestSovereigntyRejectsSecretLabelledForAnotherZone(t *testing.T) {
 	lookup := sovSecrets(map[string]secretMetadata{
 		"billing-stripe": {labels: map[string]string{ZoneLabel: sovOther}},
 	})
-	got := checkFunctionSovereignty(sovFunction(specEnvFromSecret("billing-stripe")), zone, others, lookup)
+	got, _ := checkFunctionSovereignty(sovFunction(specEnvFromSecret("billing-stripe")), zone, others, lookup)
 	assertOneViolation(t, got, "envFrom[0].secretRef", "billing-stripe", `marked for zone "billing"`)
 }
 
@@ -293,7 +293,7 @@ func TestSovereigntyRejectsSecretOwnedByAnotherZone(t *testing.T) {
 			APIVersion: appsv1alpha1.GroupVersion.String(), Kind: "NextApp", Name: sovOther, UID: sovOtherUID,
 		}}},
 	})
-	got := checkFunctionSovereignty(sovFunction(specSecretKeyRef("billing-stripe")), zone, others, lookup)
+	got, _ := checkFunctionSovereignty(sovFunction(specSecretKeyRef("billing-stripe")), zone, others, lookup)
 	assertOneViolation(t, got, "env[DSN].valueFrom.secretKeyRef", "billing-stripe", `marked for zone "billing"`)
 }
 
@@ -311,7 +311,7 @@ func TestSovereigntyDenyWinsOverSameZoneMark(t *testing.T) {
 			}},
 		},
 	})
-	got := checkFunctionSovereignty(sovFunction(specSecretVolume(sovForeignDB)), zone, others, lookup)
+	got, _ := checkFunctionSovereignty(sovFunction(specSecretVolume(sovForeignDB)), zone, others, lookup)
 	assertOneViolation(t, got, "volumes[creds].secret", sovForeignDB, `zone "billing"'s database Secret`)
 }
 
@@ -323,7 +323,7 @@ func TestSovereigntyRejectsEveryZoneSigningKeySecret(t *testing.T) {
 		key := ZoneSigningKeySecretName(owner)
 		// Even marked for this zone: the private key is never a function's.
 		lookup := sovSecrets(map[string]secretMetadata{key: {labels: map[string]string{ZoneLabel: sovZone}}})
-		got := checkFunctionSovereignty(sovFunction(specProjectedSecret(key)), zone, others, lookup)
+		got, _ := checkFunctionSovereignty(sovFunction(specProjectedSecret(key)), zone, others, lookup)
 		assertOneViolation(t, got, "volumes[bundle].projected.sources[1].secret", key, "signing key")
 	}
 }
@@ -335,7 +335,7 @@ func TestSovereigntyExemptsImagePullSecrets(t *testing.T) {
 	bs := sovFunction(appsv1alpha1.BackendServiceSpec{
 		ImagePullSecrets: []corev1.LocalObjectReference{{Name: "ocir-pull"}, {Name: sovForeignDB}},
 	})
-	if got := checkFunctionSovereignty(bs, zone, others, noSecrets()); len(got) != 0 {
+	if got, _ := checkFunctionSovereignty(bs, zone, others, noSecrets()); len(got) != 0 {
 		t.Errorf("imagePullSecrets are exempt from the allowlist, got %+v", got)
 	}
 }
@@ -344,7 +344,7 @@ func TestSovereigntyExemptsImagePullSecrets(t *testing.T) {
 
 func TestSovereigntyWithoutZoneAllowsNoSecret(t *testing.T) {
 	_, others := sovFixture()
-	got := checkFunctionSovereignty(sovFunction(specSecretKeyRef(sovOwnDB)), nil, others,
+	got, _ := checkFunctionSovereignty(sovFunction(specSecretKeyRef(sovOwnDB)), nil, others,
 		sovSecrets(map[string]secretMetadata{sovOwnDB: {labels: map[string]string{ZoneLabel: sovZone}}}))
 	if len(got) != 1 {
 		t.Fatalf("with no resolved zone every Secret reference is refused, got %+v", got)
@@ -392,7 +392,7 @@ func TestSovereigntyRejectsForeignJWKSFromEverySource(t *testing.T) {
 	foreign := ZoneJWKSConfigMapName(sovOther)
 	for _, src := range configMapSources {
 		t.Run(src.name, func(t *testing.T) {
-			got := checkFunctionSovereignty(sovFunction(src.spec(foreign)), zone, others, noSecrets())
+			got, _ := checkFunctionSovereignty(sovFunction(src.spec(foreign)), zone, others, noSecrets())
 			assertOneViolation(t, got, src.source, foreign, "another zone's JWKS")
 		})
 	}
@@ -402,7 +402,7 @@ func TestSovereigntyAllowsOwnJWKSAndPlainConfigMaps(t *testing.T) {
 	zone, others := sovFixture()
 	for _, src := range configMapSources {
 		for _, cm := range []string{ZoneJWKSConfigMapName(sovZone), "plain-config"} {
-			if got := checkFunctionSovereignty(sovFunction(src.spec(cm)), zone, others, noSecrets()); len(got) != 0 {
+			if got, _ := checkFunctionSovereignty(sovFunction(src.spec(cm)), zone, others, noSecrets()); len(got) != 0 {
 				t.Errorf("%s -> ConfigMap %q must be allowed, got %+v", src.name, cm, got)
 			}
 		}
@@ -485,7 +485,7 @@ func TestDatabaseHostLintIgnoresOwnAndUnrelatedHosts(t *testing.T) {
 func TestDatabaseHostLintIsNotARejection(t *testing.T) {
 	zone, others := sovFixture()
 	bs := lintFunction(corev1.EnvVar{Name: "X", Value: cnpgHost("billing", "rw", "")})
-	if got := checkFunctionSovereignty(bs, zone, others, noSecrets()); len(got) != 0 {
+	if got, _ := checkFunctionSovereignty(bs, zone, others, noSecrets()); len(got) != 0 {
 		t.Fatalf("the database-host check is a lint, not a rejection: %+v", got)
 	}
 }

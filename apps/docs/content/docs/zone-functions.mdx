@@ -273,10 +273,64 @@ Ready revision. It is empty until a revision is Ready, and it is the value the z
 | Condition | Meaning |
 | --- | --- |
 | `Bound` | Both halves agree. `ZoneNotFound`, `ZoneNotListed` or `ConflictingOwner` otherwise. |
-| `SovereigntyCompliant` | Every Secret reference passes the allowlist. `SecretNotAllowed` names the ones that do not. |
+| `SovereigntyCompliant` | Every Secret reference passes the allowlist. `SecretNotAllowed` names the ones that do not, including a reference whose name cannot be a Secret name. `Unknown` (`SecretsUnverified`) when the operator could not read a referenced Secret's metadata: see [When Secrets cannot be verified](#when-secrets-cannot-be-verified). |
 | `DatabaseHostLint` | `False` when an env value names another zone's database host. A warning only. |
 | `JWKSTrusted` | `True` when the zone controls its JWKS ConfigMap and the function mounts it. `Unknown` (`NotPublished`) while the ConfigMap does not exist yet. `False` (`JWKSUntrusted`) when another object holds the name: nothing is mounted and every call except the health check is refused. |
-| `Ready` | Bound, compliant, the function's JWKS is not untrusted, and the function's Knative Service is Ready. |
+| `Ready` | Bound, compliant, the function's JWKS is not untrusted, and the function's Knative Service is Ready. `False` (`SecretsUnverified`) while a Secret cannot be verified and the function was never rendered, or its latest spec has not been rolled out. |
+
+### When Secrets cannot be verified
+
+The operator reads each referenced Secret's metadata to check that it belongs to the function's zone. **A failed read
+never refuses a function, except a denial that outlasts the hold below.** Refusals come from what the Secret is, and
+they apply whatever the state of the API server:
+
+- it is a zone's signing key (a function never mounts a private key);
+- it is another zone's database Secret, even if it was re-marked for this zone;
+- it is marked for another zone, is not marked for this one, or does not exist;
+- the function's zone does not exist, so no Secret is allowed;
+- its name cannot be a Secret name;
+- a function may also not reference another zone's JWKS ConfigMap.
+
+**What always holds**
+
+- **What is running is re-checked whenever a change cannot roll out.** When the new spec cannot be verified, or cannot be
+  rolled out (a webhook or Knative refuses the new Service), the previous template stays up, so the Secrets it already
+  mounts are checked against the zone. A Secret that has been re-marked for another zone, or is no longer allowed,
+  removes the function in that case, whatever the new spec says. When a valid spec does roll out, the new template
+  replaces the old one, so nothing revoked survives it, and a Secret the old template named that has since been deleted
+  (a routine rotation: create the new version, point the spec at it, prune the old one) is not a violation: the function
+  is updated in place. A rotation that coincides with a failed read or a refused rollout keeps the function running and
+  is retried; only a Secret that was positively revoked (re-marked for another zone, no longer carrying this zone's mark,
+  another zone's database Secret, a signing key, or a zone that no longer exists) removes it, whatever stopped the
+  rollout, and a Secret that is merely gone never does.
+- A reference that can never name a Secret (an empty name, `..`, a name containing `/`, upper-case letters, or more than
+  253 characters) is not "unverified": it is refused straight away as a violation.
+- A volume cannot mount `/`, `/dev` or `/dev/log`, which Knative serving reserves, however the path is spelled with
+  repeated or trailing slashes or `.` segments (`/dev/`, `//dev`, `/./dev`). A path such as `/data/` is fine.
+
+**When a read fails**
+
+- **Unknown errors are held.** An API server timeout, throttling, a server error, a connection failure, or any error the
+  operator does not recognise leaves the function as it is: a running function is not removed and nothing new is
+  rendered, a function that was never rendered stays unrendered, and the operator retries with backoff. It holds for as
+  long as the error lasts and never removes a function.
+- **A spec change does not roll out while this holds.** `status.observedGeneration` stays at the last generation that
+  was rolled out, and `Ready` is `False` with reason `SecretsUnverified`, so `kubectl wait` and GitOps tools do not
+  report the new spec as deployed.
+- **Denied reads are held for ten minutes from the first denial.** A read the API server answers with Forbidden or
+  Unauthorized does not heal by itself, so it is held for ten minutes, counted from the first denied read
+  (`status.secretsDeniedSince`; timeouts and server errors before it do not count, and it is cleared as soon as no read is
+  denied). After that the function is refused with `SecretNotAllowed` and its Knative Service is removed: an operator that
+  cannot read Secrets cannot enforce the allowlist, and keeping the function would freeze revocation for every function.
+  It stays refused for as long as the denial lasts, without flipping back and forth. When access returns, the next pass
+  renders the function again, as a new revision with a cold start.
+
+If `SecretsUnverified` does not clear on its own:
+
+1. Check the operator's permission to read Secrets:
+   `kubectl auth can-i get secrets -n <namespace> --as=system:serviceaccount:<operator-namespace>:<operator-service-account>`
+2. Check the API server's health, for example `kubectl get --raw='/readyz?verbose'`.
+3. Read the operator's logs for the error it reports for the Secret.
 
 The zone's `BackendBindings` condition is `True` when every `backends` entry is bound. Its
 `ZoneSigningKey` condition is present while the zone has a bound function: `True` with
