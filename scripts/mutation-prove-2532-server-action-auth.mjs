@@ -287,7 +287,7 @@ const TREE = [
     replacement: OFF,
   },
   ...['invalidateProducts', 'invalidateOrders', 'invalidatePath', 'invalidateAll'].map((fn, i) => ({
-    id: `T0${7 + i}`,
+    id: `T${String(7 + i).padStart(2, '0')}`,
     subject: 'ondemand',
     claim: `the inline ${fn} action loses its check`,
     anchor: `async function ${fn}(formData: FormData) {\n  'use server';\n  // Invalidating the cache is a mutation: authenticate first (public POST endpoint).\n  ${GUARD}`,
