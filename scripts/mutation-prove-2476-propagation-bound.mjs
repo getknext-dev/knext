@@ -3,9 +3,7 @@
  * Mutation proof for the zone key-rotation propagation bound (default 120 s,
  * minimum 90 s, derived from the kubelet's sync period).
  *
- * Three groups of rows, each breaking ONE rule and requiring its guard to go red:
- *
- *   OPERATOR (graded by `go test` in packages/kn-next-operator)
+ * Every row breaks ONE rule and requires its `go test` guard to go red:
  *   - the derivation: the 60 s sync frequency, the 1.5x jitter factor, the
  *     30 s margin, the default being worst case + margin, the minimum being the
  *     worst case;
@@ -18,11 +16,8 @@
  *   - the contract fixture the Z7 kind lane reads: its default, its minimum and
  *     the minimum's presence.
  *
- *   LANE (graded by tests/z7-identity-kind-e2e-lane.test.ts)
- *   - the Z7 kind lane follows the operator's shipped default instead of
- *     hard-coding one: no literal default, no literal minimum, both read from the
- *     fixture, the flag passed only on an explicit override, and the unset case
- *     checked to run the operator WITHOUT the flag.
+ * The lane's half (it follows the shipped default instead of hard-coding one)
+ * is proved by `mutation-prove-2476-z7-lane-default.mjs`, on the shared driver.
  *
  * Verdicts are by EXIT CODE only, every anchor must occur exactly once
  * (preflight first), the baselines must be green, a CANARY must go red before
@@ -31,8 +26,8 @@
  * Go row is BUILD-CHECKED first (so a row is killed by a failing assertion, never
  * a compile error), and every restore is content-verified.
  *
- * What this does not prove: the lane's bash running against a real cluster (the
- * Z7 kind lane in CI does), and the kubelet's actual refresh time.
+ * What this does not prove: the kubelet's actual refresh time on a real node
+ * (the Z7 kind lane in CI measures it).
  *
  * Exit 0 = every row behaved as required; 1 = a row survived; 2 = the prover
  * could not run (anchor drift, red baseline, a mutation that does not compile).
@@ -44,7 +39,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, readdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { assertTreeClean, createGuardProver } from './lib/guard-prover.mjs';
+import { assertTreeClean } from './lib/guard-prover.mjs';
 import { MUTATION_MARKER, mutate, restore, snapshot } from './lib/mutation-harness.mjs';
 import { declareMutations, recordMutation } from './lib/prover-report.mjs';
 
@@ -59,7 +54,7 @@ const MAIN = resolve(REPO_ROOT, 'packages/kn-next-operator/cmd/main.go');
 // biome-ignore format: one-line resolve() for the anchor-drift scan
 const FIXTURE = resolve(REPO_ROOT, 'packages/kn-next-operator/internal/controller/testdata/zone-identity-contract.json');
 
-const SUBJECTS = { zonekey: ZONEKEY, main: MAIN, fixture: FIXTURE };
+const PROVER = { subjects: { zonekey: ZONEKEY, main: MAIN, fixture: FIXTURE } };
 
 const PKG = './internal/controller/';
 const unit = (run, pkg = PKG) => ({ kind: 'go', args: ['-run', run, pkg] });
@@ -240,61 +235,6 @@ const NEUTRAL = {
   test: unit(`${CONFIG}|${DERIVED}|${WARN}`),
 };
 
-// The lane: the Z7 kind e2e follows the shipped default.
-const LANE_MUTATIONS = [
-  {
-    id: 'L01',
-    subject: 'runsh',
-    claim: 'the lane hard-codes its default bound (and so stops following the operator)',
-    anchor: 'BOUND="${Z7_PROPAGATION_BOUND:-${SHIPPED_BOUND_SECONDS}s}"',
-    replacement: 'BOUND="${Z7_PROPAGATION_BOUND:-90s}"',
-  },
-  {
-    id: 'L02',
-    subject: 'runsh',
-    claim: 'the lane hard-codes the minimum it accepts',
-    anchor:
-      '[ "${BOUND_SECONDS}" -ge "${MIN_BOUND_SECONDS}" ] \\\n  || { echo "the operator refuses a bound below ${MIN_BOUND_SECONDS}s" >&2; exit 64; }',
-    replacement:
-      '[ "${BOUND_SECONDS}" -ge 60 ] \\\n  || { echo "the operator refuses a bound below ${MIN_BOUND_SECONDS}s" >&2; exit 64; }',
-  },
-  {
-    id: 'L03',
-    subject: 'runsh',
-    claim:
-      'the lane passes the flag even when no override is set (no longer a canary of the default)',
-    anchor: '  if [ -n "${Z7_PROPAGATION_BOUND:-}" ]; then\n    awk -v bound="${BOUND}" \'',
-    replacement: '  if true; then\n    awk -v bound="${BOUND}" \'',
-  },
-  {
-    id: 'L04',
-    subject: 'runsh',
-    claim: 'the lane no longer checks that the operator runs without the flag when unset',
-    anchor:
-      '      | jq -e \'[.spec.template.spec.containers[0].args[] | select(startswith("--zone-signing-key-propagation-bound"))] | length == 0\' >/dev/null \\\n',
-    replacement:
-      '      | jq -e \'[.spec.template.spec.containers[0].args[] | select(startswith("--zone-signing-key-propagation-bound"))] | length >= 0\' >/dev/null \\\n',
-  },
-  {
-    id: 'L05',
-    subject: 'runsh',
-    claim: "the lane reads the expected default from a field that is not the operator's default",
-    anchor:
-      'SHIPPED_BOUND_SECONDS="$(jq -er \'.rotation.propagationBoundSeconds\' "${BOUND_FIXTURE}")" \\\n',
-    replacement:
-      'SHIPPED_BOUND_SECONDS="$(jq -er \'.rotation.overlapSeconds\' "${BOUND_FIXTURE}")" \\\n',
-  },
-  {
-    id: 'L06',
-    subject: 'runsh',
-    claim: "the lane reads the minimum from a field that is not the operator's minimum",
-    anchor:
-      'MIN_BOUND_SECONDS="$(jq -er \'.rotation.propagationBoundMinimumSeconds\' "${BOUND_FIXTURE}")" \\\n',
-    replacement:
-      'MIN_BOUND_SECONDS="$(jq -er \'.rotation.overlapSeconds\' "${BOUND_FIXTURE}")" \\\n',
-  },
-];
-
 // --- the go driver ---------------------------------------------------------
 
 function envtestAssetsPresent() {
@@ -330,7 +270,7 @@ const buildsExit = () =>
 /** Plant one mutation, return {built, code}; the subject is restored either way. */
 function grade(m) {
   assertTreeClean(REPO_ROOT, `before ${m.id}`);
-  const snap = snapshot(SUBJECTS[m.subject]);
+  const snap = snapshot(PROVER.subjects[m.subject]);
   let built;
   let code;
   try {
@@ -352,28 +292,20 @@ function grade(m) {
 
 // --- main ---------------------------------------------------------------------
 
-const lane = createGuardProver({
-  repoRoot: REPO_ROOT,
-  spec: 'tests/z7-identity-kind-e2e-lane.test.ts',
-  subjects: { runsh: 'packages/grpc/e2e/z7-identity-kind/run.sh' },
-});
-
-declareMutations(GO_MUTATIONS.length + LANE_MUTATIONS.length);
-console.log(
-  `${NAME}: ${GO_MUTATIONS.length} operator + ${LANE_MUTATIONS.length} lane mutations declared (+ canary and neutral control)`,
-);
+declareMutations(GO_MUTATIONS.length);
+console.log(`${NAME}: ${GO_MUTATIONS.length} mutations declared (+ canary and neutral control)`);
 
 // Preflight: every anchor occurs exactly once BEFORE anything expensive runs.
 for (const m of [...GO_MUTATIONS, NEUTRAL]) {
-  const count = snapshot(SUBJECTS[m.subject]).bytes.toString('utf8').split(m.anchor).length - 1;
+  const count =
+    snapshot(PROVER.subjects[m.subject]).bytes.toString('utf8').split(m.anchor).length - 1;
   if (count !== 1) {
     console.error(
-      `${NAME}: ${m.id}'s anchor occurs ${count} times in ${SUBJECTS[m.subject]}; aborting`,
+      `${NAME}: ${m.id}'s anchor occurs ${count} times in ${PROVER.subjects[m.subject]}; aborting`,
     );
     process.exit(2);
   }
 }
-lane.preflight(LANE_MUTATIONS);
 if (!envtestAssetsPresent()) {
   console.error(
     `${NAME}: no envtest binaries (set KUBEBUILDER_ASSETS or run \`make setup-envtest\` in packages/kn-next-operator)`,
@@ -427,21 +359,6 @@ for (const m of GO_MUTATIONS) {
 }
 
 console.log(
-  '\n=== the Z7 kind lane follows the shipped default (z7-identity-kind-e2e-lane.test.ts) ===',
-);
-lane.baseline();
-lane.proveCanSeeRed({
-  subject: 'runsh',
-  anchor: LANE_MUTATIONS[0].anchor,
-  replacement: LANE_MUTATIONS[0].replacement,
-});
-for (const m of LANE_MUTATIONS) {
-  lane.run({ ...m, expect: 'red' });
-  recordMutation();
-}
-lane.finish(LANE_MUTATIONS.length);
-
-console.log(
-  `${NAME}: ${GO_MUTATIONS.length - failed}/${GO_MUTATIONS.length} operator rows went red as required`,
+  `${NAME}: ${GO_MUTATIONS.length - failed}/${GO_MUTATIONS.length} rows went red as required`,
 );
 process.exit(failed === 0 ? 0 : 1);
