@@ -45,16 +45,20 @@
  * Env: KNEXT_PROVER_TIMEOUT_MS, PROVER_LANE_REF, PROVER_LANE_SHA (report metadata)
  */
 
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { loadavg, tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  countProcesses,
   describeResources,
   evaluateResources,
+  isSafeGroupTarget,
   REGENERABLE_BUILD_DIRS,
   readResources,
+  runawayReason,
+  sampleLine,
   thresholdsFromEnv,
 } from './lib/lane-resources.mjs';
 import { discoverProvers, evaluateProverRun } from './lib/prover-lane.mjs';
@@ -105,11 +109,17 @@ const MAX_CAPTURE = 64 * 1024 * 1024;
 
 /**
  * @param {string} absPath the prover script
- * @param {{ cwd: string, timeoutMs: number, echo?: (chunk: string) => void }} opts
+ * @param {{ cwd: string, timeoutMs: number, echo?: (chunk: string) => void,
+ *           watch?: () => string | null, watchEveryMs?: number }} opts
+ *   `watch` is polled every `watchEveryMs` while the prover runs; a returned string
+ *   is a reason to kill its process group NOW (a runaway), reported as `runaway`.
  * @returns {Promise<{ status: number | null, signal: string | null, output: string,
- *                     timedOut: boolean, error?: Error }>}
+ *                     timedOut: boolean, runaway: string | null, error?: Error }>}
  */
-function runProver(absPath, { cwd, timeoutMs, echo = (c) => process.stdout.write(c) }) {
+function runProver(
+  absPath,
+  { cwd, timeoutMs, echo = (c) => process.stdout.write(c), watch, watchEveryMs = 2000 },
+) {
   return new Promise((resolvePromise) => {
     const child = spawn(process.execPath, [absPath], {
       cwd,
@@ -119,6 +129,7 @@ function runProver(absPath, { cwd, timeoutMs, echo = (c) => process.stdout.write
     });
     let output = '';
     let timedOut = false;
+    let runaway = null;
     let spawnError;
     const take = (chunk) => {
       const text = chunk.toString('utf8');
@@ -130,6 +141,9 @@ function runProver(absPath, { cwd, timeoutMs, echo = (c) => process.stdout.write
 
     const killGroup = () => {
       try {
+        // Never signal a group we cannot prove is the child's own (pid 0/1, NaN
+        // from a failed spawn, or ourselves): that would be the runner agent's.
+        if (!isSafeGroupTarget(child.pid)) throw new Error('unsafe group target');
         process.kill(-child.pid, 'SIGKILL');
       } catch {
         try {
@@ -139,6 +153,19 @@ function runProver(absPath, { cwd, timeoutMs, echo = (c) => process.stdout.write
         }
       }
     };
+    const watcher = watch
+      ? setInterval(() => {
+          try {
+            const why = watch();
+            if (why && runaway === null) {
+              runaway = why;
+              killGroup();
+            }
+          } catch {
+            // a diagnostic must never fail the lane
+          }
+        }, watchEveryMs)
+      : null;
     const timer = setTimeout(() => {
       timedOut = true;
       killGroup();
@@ -153,7 +180,8 @@ function runProver(absPath, { cwd, timeoutMs, echo = (c) => process.stdout.write
     child.on('exit', () => killGroup());
     child.on('close', (status, signal) => {
       clearTimeout(timer);
-      resolvePromise({ status, signal, output, timedOut, error: spawnError });
+      if (watcher) clearInterval(watcher);
+      resolvePromise({ status, signal, output, timedOut, runaway, error: spawnError });
     });
   });
 }
@@ -275,6 +303,10 @@ function restoreTreeAfterKill(before) {
  */
 const cleanupOn = process.env.GITHUB_ACTIONS === 'true' || process.env.KNEXT_LANE_CLEANUP === '1';
 const thresholds = thresholdsFromEnv();
+// Where MemAvailable is read from. Overridable so tests can fake a starved machine.
+const MEMINFO_PATH = process.env.KNEXT_LANE_MEMINFO_PATH || '/proc/meminfo';
+const SAMPLE_EVERY_MS = Number(process.env.KNEXT_LANE_SAMPLE_MS) || 10_000;
+const WATCH_EVERY_MS = Number(process.env.KNEXT_LANE_WATCH_MS) || 2_000;
 const SYSTEM_TMP_PREFIXES = ['.', 'systemd-private', 'snap-private', 'tmux-'];
 
 function tmpEntries() {
@@ -316,19 +348,99 @@ function cleanBuildOutput() {
   return removed;
 }
 
+/** `ps` (top by RSS) and the kernel log, Linux only; each part best-effort. */
+let lastKernelTail = '';
+function heavyExtras() {
+  if (process.platform !== 'linux') return [];
+  const out = [];
+  const ps = spawnSync('ps', ['-eo', 'pid,ppid,rss,etime,args', '--sort=-rss'], {
+    encoding: 'utf8',
+    timeout: 3000,
+  });
+  if (ps.status === 0) {
+    for (const l of ps.stdout.split('\n').slice(1, 5)) out.push(`ps: ${l.trim().slice(0, 150)}`);
+  }
+  // dmesg first (may be restricted), then passwordless sudo, then the journal.
+  for (const cmd of [
+    ['dmesg'],
+    ['sudo', '-n', 'dmesg'],
+    ['journalctl', '-k', '-n', '5', '--no-pager'],
+  ]) {
+    const r = spawnSync(cmd[0], cmd.slice(1), { encoding: 'utf8', timeout: 3000 });
+    if (r.status === 0 && r.stdout.trim()) {
+      const tail = r.stdout.trim().split('\n').slice(-3).join(' | ').slice(0, 300);
+      if (tail !== lastKernelTail) {
+        lastKernelTail = tail;
+        out.push(`kernel: ${tail}`);
+      }
+      return out;
+    }
+  }
+  out.push('kernel: log not readable');
+  return out;
+}
+
+/**
+ * Polled while a prover runs. Every few seconds it streams one sample line (memory,
+ * process count, load, top processes, kernel log tail) so that what the machine
+ * looked like up to the moment of a lost runner survives in the job log; and it
+ * returns a reason to KILL the prover's process group when available memory falls
+ * below the runaway threshold, so a runaway prover costs one prover, not the
+ * runner (a fake-clock spin took a 16 GB runner in seconds, twice).
+ */
+function makeWatch(proverRel) {
+  let lastSample = 0;
+  return () => {
+    const res = readResources(REPO_ROOT, MEMINFO_PATH);
+    const why = runawayReason(res, thresholds);
+    const now = Date.now();
+    if (now - lastSample >= SAMPLE_EVERY_MS || why) {
+      lastSample = now;
+      let procs = null;
+      try {
+        procs = countProcesses(readdirSync('/proc'));
+      } catch {
+        // not Linux
+      }
+      console.log(
+        sampleLine({
+          prover: proverRel,
+          res,
+          procs,
+          load: loadavg(),
+          extra: heavyExtras(),
+        }),
+      );
+    }
+    return why;
+  };
+}
+
 const results = [];
 for (const prover of provers) {
   console.log(`\n${'═'.repeat(78)}\n▶ ${prover.relPath}\n${'═'.repeat(78)}`);
   const started = Date.now();
   const untrackedBefore = untrackedFiles();
   const tmpBefore = tmpEntries();
-  const run = await runProver(prover.absPath, { cwd: REPO_ROOT, timeoutMs });
+  const run = await runProver(prover.absPath, {
+    cwd: REPO_ROOT,
+    timeoutMs,
+    watch: makeWatch(prover.relPath),
+    watchEveryMs: WATCH_EVERY_MS,
+  });
   if (run.error) console.error(`   spawn error: ${run.error.message}`);
   const { summary, findings } = evaluateProverRun({ status: run.status, output: run.output });
   if (run.timedOut) {
     const note = restoreTreeAfterKill(untrackedBefore);
     findings.unshift(
       `TIMED OUT after ${Math.round((Date.now() - started) / 1000)}s (bound ${Math.round(timeoutMs / 1000)}s) — killed with its process group; ${note}`,
+    );
+    console.error(`\n   ${findings[0]}`);
+  }
+  if (run.runaway) {
+    const note = restoreTreeAfterKill(untrackedBefore);
+    findings.unshift(
+      `RESOURCE RUNAWAY: ${run.runaway} — killed with its process group after ${Math.round((Date.now() - started) / 1000)}s; ${note}`,
     );
     console.error(`\n   ${findings[0]}`);
   }
@@ -339,14 +451,14 @@ for (const prover of provers) {
     if (n > 0)
       console.log(`   cleanup: removed ${n} temp entr${n === 1 ? 'y' : 'ies'} the prover left`);
   }
-  let resources = readResources(REPO_ROOT);
+  let resources = readResources(REPO_ROOT, MEMINFO_PATH);
   let verdict = evaluateResources(resources, thresholds);
   if (verdict.level !== 'ok' && cleanupOn) {
     const removed = cleanBuildOutput();
     console.log(
       `   cleanup: under pressure (${verdict.reasons.join('; ')}), removed regenerable build output: ${removed.length ? removed.join(', ') : 'none'}`,
     );
-    resources = readResources(REPO_ROOT);
+    resources = readResources(REPO_ROOT, MEMINFO_PATH);
     verdict = evaluateResources(resources, thresholds);
   }
   console.log(`   resources: ${describeResources(resources)}`);

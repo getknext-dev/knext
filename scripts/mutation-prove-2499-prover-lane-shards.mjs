@@ -465,11 +465,9 @@ const MUTATIONS = [
     id: 'R13',
     subject: 'runner',
     claim:
-      'the untracked snapshot is taken AFTER the prover (the killed prover’s own files look pre-existing)',
-    anchor:
-      '  const untrackedBefore = untrackedFiles();\n  const tmpBefore = tmpEntries();\n  const run = await runProver(prover.absPath, { cwd: REPO_ROOT, timeoutMs });',
-    replacement:
-      '  const tmpBefore = tmpEntries();\n  const run = await runProver(prover.absPath, { cwd: REPO_ROOT, timeoutMs });\n  const untrackedBefore = untrackedFiles();',
+      'the untracked snapshot is never taken (a killed prover’s own new files cannot be told from pre-existing ones)',
+    anchor: '  const untrackedBefore = untrackedFiles();',
+    replacement: '  const untrackedBefore = null;',
   },
   {
     id: 'R14',
@@ -580,6 +578,62 @@ const MUTATIONS = [
     anchor: '          $(node scripts/prover-lane-known-red.mjs)',
     replacement: '          $(true)',
     validate: parses,
+  },
+  {
+    id: 'Z01',
+    subject: 'lib',
+    claim: 'isolation is switched off: the isolated prover shares a leg again',
+    anchor: '  if (isolated.length >= count) isolated = [];',
+    replacement: '  isolated = [];',
+  },
+  {
+    id: 'Z02',
+    subject: 'lib',
+    claim: 'isolated provers take the FIRST legs, colliding with the balanced ones',
+    anchor: '    owner.set(p.relPath, balanced + i);',
+    replacement: '    owner.set(p.relPath, i);',
+  },
+  {
+    id: 'R19',
+    subject: 'runner',
+    claim: 'no sample line is streamed while a prover runs (a lost runner leaves nothing)',
+    anchor: '    if (now - lastSample >= SAMPLE_EVERY_MS || why) {',
+    replacement: '    if (false) {',
+  },
+  {
+    id: 'R20',
+    subject: 'runner',
+    claim: 'a runaway prover is detected but never killed',
+    anchor: '            if (why && runaway === null) {',
+    replacement: '            if (false) {',
+  },
+  {
+    id: 'Q06',
+    subject: 'res',
+    claim: 'any integer, including 0 and 1, is accepted as a process group to signal',
+    anchor: '  return Number.isInteger(pid) && pid > 1 && pid !== selfPid;',
+    replacement: '  return Number.isInteger(pid);',
+  },
+  {
+    id: 'Q07',
+    subject: 'res',
+    claim: 'low available memory is never a runaway',
+    anchor: '  if (res.availMemMiB !== null && res.availMemMiB < t.killAvailMemMiB) {',
+    replacement: '  if (false) {',
+  },
+  {
+    id: 'Q08',
+    subject: 'res',
+    claim: 'the runaway kill threshold is halved (not the jev-picked one)',
+    anchor: '  killAvailMemMiB: 2048,',
+    replacement: '  killAvailMemMiB: 1024,',
+  },
+  {
+    id: 'Q09',
+    subject: 'res',
+    claim: 'every /proc entry counts as a process',
+    anchor: '.filter((n) => /^\\d+$/.test(n)).length',
+    replacement: '.filter((n) => /./.test(n)).length',
   },
   {
     id: 'T01',
