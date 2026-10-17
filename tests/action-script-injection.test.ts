@@ -629,7 +629,7 @@ describe('the CLI an action runs through npx is pinned (#2531)', () => {
     // Both steps that run the CLI (doctor and deploy) carry the pin.
     expect(pins.length).toBeGreaterThanOrEqual(2);
     for (const pin of pins) {
-      expect(pin).toMatch(/^(@getknext\/core|kn-next)@/);
+      expect(pin).toMatch(/^@getknext\/core@/);
       expect(String(pin).split('@').pop()).toBe(want);
     }
   });
@@ -646,7 +646,7 @@ describe('the CLI an action runs through npx is pinned (#2531)', () => {
             // The package operand is an exact pin, or one of the two pinned variables
             // (each validated and tested above).
             expect(m[1]).toMatch(
-              /^"?(?:(?:@getknext\/core|kn-next)@(?:\d+\.\d+\.\d+\S*|\$\{?KNEXT_CLI_VERSION\}?)|\$\{?KNEXT_CLI_PACKAGE\}?)"?\)?$/,
+              /^"?(?:@getknext\/core@(?:\d+\.\d+\.\d+\S*|\$\{?KNEXT_CLI_VERSION\}?)|\$\{?KNEXT_CLI_PACKAGE\}?)"?\)?$/,
             );
           }
         }
