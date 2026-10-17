@@ -540,6 +540,10 @@ export function buildNextAppCRObject(
             ? config.backends.map((b) => ({
                   name: b.name,
                   service: b.service ?? b.name,
+                  // The optional image pin (a digest). Never rendered into the
+                  // zone's pod by the operator; only emitted when set, so a CR
+                  // without pins is byte-identical to one written before it.
+                  ...(b.image ? { image: b.image } : {}),
               }))
             : undefined;
 

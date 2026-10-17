@@ -90,6 +90,78 @@ entry, the function comes back through a cold start when the entry returns.
 A `backends` entry that names a function belonging to another zone is refused and reported on the
 zone's `BackendBindings` condition.
 
+### Pin the function's image
+
+A binding matches **names**. Without more, anyone who may **update** the function's `BackendService`
+can change `spec.image` to an image they chose, and the operator runs that image with your zone's
+database Secret and key set mounted. Your zone then sends it your users' identity tokens. In other
+words, **permission to update `backendservices` is equivalent to permission to read your zone's
+database Secret**. Grant `update`, `patch` and `create` on `backendservices` only to people who may
+already read that Secret. A GitOps tool that applies the `BackendService` has this power too.
+
+Pinning the image narrows this, but does not remove it: see [What the pin does not cover](#what-the-pin-does-not-cover).
+To pin, put the function's image digest in the zone's entry. `knext deploy function` prints the
+exact entry after it applies the function:
+
+```ts title="knext.config.ts (excerpt)"
+export default {
+  // ...
+  backends: [
+    { name: "pricing", image: "@sha256:0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b" },
+  ],
+};
+```
+
+`image` is the digest only: `@sha256:` followed by 64 lowercase hexadecimal characters. It is not the
+whole image reference, so the registry path and tag can change while the content stays the same. The
+same field exists on the resource if you apply the zone yourself:
+
+```yaml title="orders zone (excerpt)"
+spec:
+  backends:
+    - name: pricing
+      service: pricing
+      image: "@sha256:0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b"
+```
+
+**What happens on a mismatch.** The operator runs the function only while the digest in its
+`spec.image` is exactly the pinned one. Any other digest, or an image with no digest, refuses the
+function: `Bound` and `Ready` turn `False` with the reason `BindingImageMismatch`, the message names
+both digests, the function's Knative Service is removed, and nothing is mounted into it: no database
+Secret and no key set. Put the pinned image back, or change the pin, and the function runs again.
+The pin itself never appears in your zone's pods, so setting, changing or removing it does not roll a
+zone revision. A refused function stops reporting a served version, so, as with any refused function,
+the zone's next revision drops `<NAME>_SERVICE_PROTO_VERSION` and its calls to that function fail
+closed until the function is bound again. A failed read of a Secret can never cause this refusal,
+because the check compares the two resources and nothing else.
+
+**Rotating the pin.** A new function image and a new pin are two writes, and they cannot land in the
+same instant. Change both in one step (one `kubectl apply -f` of both resources, or one commit for a
+GitOps tool). While only one of them has been written, the function is refused, and it starts again
+(with a cold start) as soon as the other follows. If you update the function's image first, the
+function is refused until you update the pin; if you update the pin first, it is refused until the
+function's image follows. Either order works; neither avoids that window.
+
+#### What the pin does not cover
+
+**The pin binds the image content, and nothing else.** The function's other settings stay with
+whoever can write its `BackendService`: its `env`, `envFrom` and `volumes`. Someone who can write the `BackendService` can keep the pinned image and still change
+what runs inside it. For example, setting `NODE_OPTIONS=--import=...` in `env` makes a Node image
+run code of their choosing, with your zone's database Secret mounted and your users' tokens arriving.
+A pin does not stop that.
+
+So, even with a pin on every function: **grant `update`, `patch` and `create` on `backendservices`
+only to people who may already read your zone's database Secret.** The pin protects against a swapped
+image, not against a writer who changes the function's settings.
+
+Also:
+
+- The pin is optional, so a zone that does not set it keeps the name-only binding.
+- It says "this exact image", not "an image from a source you trust": pin only images you built and
+  signed.
+- Anyone who can edit your zone's `NextApp` can also change the pin, so keep write access to the zone
+  as tight as access to its database Secret.
+
 ## What the zone receives
 
 For each bound function, the operator writes these variables into the **zone's revision**, never
@@ -133,7 +205,10 @@ zone's database. Two things keep it airtight:
   mounted API token. `BackendService` has no `serviceAccountName` field, so a manifest cannot pick
   a more privileged identity; a stray one is rejected by a strict apply and has no effect otherwise.
 - **The binding is two-sided**, so someone who may create a `BackendService` but cannot edit the
-  zone cannot get a Secret mounted into a pod they control.
+  zone cannot get a Secret mounted into a pod they control. It matches names, though, so someone
+  who may *update* a function that is already bound can swap its image, or change its `env` or
+  `envFrom`. [Pinning the image](#pin-the-functions-image) stops the image swap only; keep `update` on
+  `backendservices` limited to people who may read the zone's database Secret.
 
 **The namespace is the trust boundary.** Anyone who can write Secrets in the namespace can set the
 zone label. Put zones whose owners do not trust each other in separate namespaces.
@@ -272,11 +347,65 @@ Ready revision. It is empty until a revision is Ready, and it is the value the z
 
 | Condition | Meaning |
 | --- | --- |
-| `Bound` | Both halves agree. `ZoneNotFound`, `ZoneNotListed` or `ConflictingOwner` otherwise. |
-| `SovereigntyCompliant` | Every Secret reference passes the allowlist. `SecretNotAllowed` names the ones that do not. |
+| `Bound` | Both halves agree, and the image is the one the zone pinned, if it pinned one. `ZoneNotFound`, `ZoneNotListed`, `BindingImageMismatch` or `ConflictingOwner` otherwise. |
+| `SovereigntyCompliant` | Every Secret reference passes the allowlist. `SecretNotAllowed` names the ones that do not, including a reference whose name cannot be a Secret name. `Unknown` (`SecretsUnverified`) when the operator could not read a referenced Secret's metadata: see [When Secrets cannot be verified](#when-secrets-cannot-be-verified). |
 | `DatabaseHostLint` | `False` when an env value names another zone's database host. A warning only. |
 | `JWKSTrusted` | `True` when the zone controls its JWKS ConfigMap and the function mounts it. `Unknown` (`NotPublished`) while the ConfigMap does not exist yet. `False` (`JWKSUntrusted`) when another object holds the name: nothing is mounted and every call except the health check is refused. |
-| `Ready` | Bound, compliant, the function's JWKS is not untrusted, and the function's Knative Service is Ready. |
+| `Ready` | Bound, compliant, the function's JWKS is not untrusted, and the function's Knative Service is Ready. `False` (`SecretsUnverified`) while a Secret cannot be verified and the function was never rendered, or its latest spec has not been rolled out. |
+
+### When Secrets cannot be verified
+
+The operator reads each referenced Secret's metadata to check that it belongs to the function's zone. **A failed read
+never refuses a function, except a denial that outlasts the hold below.** Refusals come from what the Secret is, and
+they apply whatever the state of the API server:
+
+- it is a zone's signing key (a function never mounts a private key);
+- it is another zone's database Secret, even if it was re-marked for this zone;
+- it is marked for another zone, is not marked for this one, or does not exist;
+- the function's zone does not exist, so no Secret is allowed;
+- its name cannot be a Secret name;
+- a function may also not reference another zone's JWKS ConfigMap.
+
+**What always holds**
+
+- **What is running is re-checked whenever a change cannot roll out.** When the new spec cannot be verified, or cannot be
+  rolled out (a webhook or Knative refuses the new Service), the previous template stays up, so the Secrets it already
+  mounts are checked against the zone. A Secret that has been re-marked for another zone, or is no longer allowed,
+  removes the function in that case, whatever the new spec says. When a valid spec does roll out, the new template
+  replaces the old one, so nothing revoked survives it, and a Secret the old template named that has since been deleted
+  (a routine rotation: create the new version, point the spec at it, prune the old one) is not a violation: the function
+  is updated in place. A rotation that coincides with a failed read or a refused rollout keeps the function running and
+  is retried; only a Secret that was positively revoked (re-marked for another zone, no longer carrying this zone's mark,
+  another zone's database Secret, a signing key, or a zone that no longer exists) removes it, whatever stopped the
+  rollout, and a Secret that is merely gone never does.
+- A reference that can never name a Secret (an empty name, `..`, a name containing `/`, upper-case letters, or more than
+  253 characters) is not "unverified": it is refused straight away as a violation.
+- A volume cannot mount `/`, `/dev` or `/dev/log`, which Knative serving reserves, however the path is spelled with
+  repeated or trailing slashes or `.` segments (`/dev/`, `//dev`, `/./dev`). A path such as `/data/` is fine.
+
+**When a read fails**
+
+- **Unknown errors are held.** An API server timeout, throttling, a server error, a connection failure, or any error the
+  operator does not recognise leaves the function as it is: a running function is not removed and nothing new is
+  rendered, a function that was never rendered stays unrendered, and the operator retries with backoff. It holds for as
+  long as the error lasts and never removes a function.
+- **A spec change does not roll out while this holds.** `status.observedGeneration` stays at the last generation that
+  was rolled out, and `Ready` is `False` with reason `SecretsUnverified`, so `kubectl wait` and GitOps tools do not
+  report the new spec as deployed.
+- **Denied reads are held for ten minutes from the first denial.** A read the API server answers with Forbidden or
+  Unauthorized does not heal by itself, so it is held for ten minutes, counted from the first denied read
+  (`status.secretsDeniedSince`; timeouts and server errors before it do not count, and it is cleared as soon as no read is
+  denied). After that the function is refused with `SecretNotAllowed` and its Knative Service is removed: an operator that
+  cannot read Secrets cannot enforce the allowlist, and keeping the function would freeze revocation for every function.
+  It stays refused for as long as the denial lasts, without flipping back and forth. When access returns, the next pass
+  renders the function again, as a new revision with a cold start.
+
+If `SecretsUnverified` does not clear on its own:
+
+1. Check the operator's permission to read Secrets:
+   `kubectl auth can-i get secrets -n <namespace> --as=system:serviceaccount:<operator-namespace>:<operator-service-account>`
+2. Check the API server's health, for example `kubectl get --raw='/readyz?verbose'`.
+3. Read the operator's logs for the error it reports for the Secret.
 
 The zone's `BackendBindings` condition is `True` when every `backends` entry is bound. Its
 `ZoneSigningKey` condition is present while the zone has a bound function: `True` with

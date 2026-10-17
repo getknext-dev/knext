@@ -21,7 +21,10 @@ import (
 	"sort"
 	"strings"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
+	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 
 	appsv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/api/v1alpha1"
 )
@@ -136,9 +139,34 @@ type secretMetadata struct {
 	found     bool
 	labels    map[string]string
 	ownerRefs []metav1.OwnerReference
-	// readErr is set when the metadata could not be read (not NotFound). The
-	// Secret is then treated as unmarked: fail closed, with the error named.
+	// readErr is set when the metadata could not be read (not NotFound). That is
+	// NOT an answer about the Secret's marks (a timeout, a 429, a 5xx, a missing
+	// grant say nothing about them), so it is never a violation: the Secret is
+	// reported as unverified and the reconcile errors and requeues, leaving what
+	// was rendered (#2498). Only a definitive answer (NotFound, or an object with
+	// the wrong owner or labels) refuses a function.
 	readErr string
+	// denied marks a readErr that is an authorization failure (Forbidden or
+	// Unauthorized): held like any unknown answer, but only for a bounded window
+	// (secretsDeniedHold) counted from the first denial, because a lost grant
+	// would otherwise freeze revocation for every function.
+	//
+	// There is deliberately no "rejected" state: a failed read is NEVER a
+	// definitive answer. The only definitive answers are NotFound and the marks
+	// of an object that was read; a name no Secret can have is refused before any
+	// read (secretNameProblem). An error the owner can provoke must never mean
+	// teardown, and an error nobody anticipated must never either.
+	denied bool
+}
+
+// unverifiedSecret is a referenced Secret whose metadata could not be read, so
+// its marks are unknown. It is not a violation.
+type unverifiedSecret struct {
+	source string
+	name   string
+	err    string
+	// denied: the read was refused for lack of permission (see secretMetadata).
+	denied bool
 }
 
 // secretLookup returns the metadata of a Secret in the function's namespace.
@@ -265,7 +293,59 @@ func checkFunctionSovereignty(
 	zone *appsv1alpha1.NextApp,
 	others []appsv1alpha1.NextApp,
 	lookup secretLookup,
-) []sovereigntyViolation {
+) ([]sovereigntyViolation, []unverifiedSecret) {
+	out, unverified := checkSecretRefs(functionSecretRefs(&bs.Spec), bs, zone, others, lookup, false)
+
+	zoneName := bs.Spec.Zone
+	if zone != nil {
+		zoneName = zone.Name
+	}
+	ownJWKS := ZoneJWKSConfigMapName(zoneName)
+	for _, ref := range functionConfigMapRefs(&bs.Spec) {
+		if strings.HasSuffix(ref.name, zoneJWKSConfigMapSuffix) && ref.name != ownJWKS {
+			out = append(out, sovereigntyViolation{ref.source, ref.name,
+				fmt.Sprintf("ConfigMap %q is another zone's JWKS; a function mounts only its own zone's (the operator does that)", ref.name)})
+		}
+	}
+	return out, unverified
+}
+
+// checkRunningSovereignty applies the SAME Secret allowlist to the Secret
+// references of the function's RUNNING Knative Service. When a pass cannot
+// decide the spec's own Secrets, the running template is what stays up, so it is
+// what must still be checked: otherwise a Secret revoked since it was rendered
+// stays mounted for as long as the owner can make a read fail.
+//
+// Only POSITIVE evidence of revocation counts here: the Secret was re-marked
+// for another zone (or no longer carries this zone's mark), it is another zone's
+// database Secret or a signing key, or the zone is gone. A Secret the old
+// template mounts that is simply NOT FOUND is a routine rotation (the new
+// version was created, the spec points at it, the old one was pruned) and is
+// never a violation: the new template replaces the old one.
+func checkRunningSovereignty(
+	bs *appsv1alpha1.BackendService,
+	zone *appsv1alpha1.NextApp,
+	others []appsv1alpha1.NextApp,
+	lookup secretLookup,
+	running *servingv1.Service,
+) ([]sovereigntyViolation, []unverifiedSecret) {
+	if running == nil {
+		return nil, nil
+	}
+	return checkSecretRefs(runningSecretRefs(running), bs, zone, others, lookup, true)
+}
+
+// checkSecretRefs is the Secret half of the allowlist, over any list of refs.
+// absentIsRotation is set for the RUNNING template: a Secret that is not found
+// there is a pruned old version, not a violation.
+func checkSecretRefs(
+	refs []objectRef,
+	bs *appsv1alpha1.BackendService,
+	zone *appsv1alpha1.NextApp,
+	others []appsv1alpha1.NextApp,
+	lookup secretLookup,
+	absentIsRotation bool,
+) ([]sovereigntyViolation, []unverifiedSecret) {
 	foreignDB := map[string]string{} // secret name -> owning zone
 	for i := range others {
 		for _, name := range zoneDatabaseSecrets(&others[i]) {
@@ -282,8 +362,17 @@ func checkFunctionSovereignty(
 	}
 
 	var out []sovereigntyViolation
+	var unverified []unverifiedSecret
+	unverifiedSeen := map[string]bool{}
 	meta := map[string]secretMetadata{}
-	for _, ref := range functionSecretRefs(&bs.Spec) {
+	for _, ref := range refs {
+		if problem := secretNameProblem(ref.name); problem != "" {
+			// A name no Secret can have is a definitive answer about the
+			// reference, not a read that "failed": never "unknown".
+			out = append(out, sovereigntyViolation{ref.source, ref.name,
+				fmt.Sprintf("%q is not a valid Secret name (%s)", ref.name, problem)})
+			continue
+		}
 		if strings.HasSuffix(ref.name, zoneSigningKeySecretSuffix) {
 			out = append(out, sovereigntyViolation{ref.source, ref.name,
 				fmt.Sprintf("Secret %q is a zone signing key; a function never mounts a zone's private key", ref.name)})
@@ -312,22 +401,69 @@ func checkFunctionSovereignty(
 		if ownDB[ref.name] || markedFor(m, zone) {
 			continue
 		}
-		msg := fmt.Sprintf("Secret %q is not zone %q's database Secret and is not marked for zone %q "+
-			"(label it %s=%s, or give it an ownerReference to the zone)", ref.name, zoneName, zoneName, ZoneLabel, zoneName)
 		if m.readErr != "" {
-			msg += fmt.Sprintf("; its metadata could not be read: %s", m.readErr)
+			// Could not decide: not a violation (#2498).
+			if !unverifiedSeen[ref.name] {
+				unverifiedSeen[ref.name] = true
+				unverified = append(unverified, unverifiedSecret{ref.source, ref.name, m.readErr, m.denied})
+			}
+			continue
 		}
-		out = append(out, sovereigntyViolation{ref.source, ref.name, msg})
+		if absentIsRotation && !m.found {
+			continue
+		}
+		out = append(out, sovereigntyViolation{ref.source, ref.name,
+			fmt.Sprintf("Secret %q is not zone %q's database Secret and is not marked for zone %q "+
+				"(label it %s=%s, or give it an ownerReference to the zone)", ref.name, zoneName, zoneName, ZoneLabel, zoneName)})
 	}
+	return out, unverified
+}
 
-	ownJWKS := ZoneJWKSConfigMapName(zoneName)
-	for _, ref := range functionConfigMapRefs(&bs.Spec) {
-		if strings.HasSuffix(ref.name, zoneJWKSConfigMapSuffix) && ref.name != ownJWKS {
-			out = append(out, sovereigntyViolation{ref.source, ref.name,
-				fmt.Sprintf("ConfigMap %q is another zone's JWKS; a function mounts only its own zone's (the operator does that)", ref.name)})
+// secretNameProblem returns why a Secret reference's name can never name a
+// Secret ("" when it can). A Secret name is a DNS-1123 subdomain, so an empty
+// name, "..", "a/b" or an upper-case name never exists, and the metadata client
+// refuses to send some of them at all.
+func secretNameProblem(name string) string {
+	if name == "" {
+		return "empty"
+	}
+	if msgs := validation.IsDNS1123Subdomain(name); len(msgs) > 0 {
+		return msgs[0]
+	}
+	return ""
+}
+
+// runningSecretRefs lists every Secret the running Knative Service's pod
+// template references, in template order.
+func runningSecretRefs(ksvc *servingv1.Service) []objectRef {
+	var refs []objectRef
+	ps := ksvc.Spec.Template.Spec.PodSpec
+	containers := append(append([]corev1.Container{}, ps.InitContainers...), ps.Containers...)
+	for _, c := range containers {
+		for _, e := range c.Env {
+			if e.ValueFrom != nil && e.ValueFrom.SecretKeyRef != nil {
+				refs = append(refs, objectRef{fmt.Sprintf("the running Knative Service: container %s env[%s].valueFrom.secretKeyRef", c.Name, e.Name), e.ValueFrom.SecretKeyRef.Name})
+			}
+		}
+		for i, ef := range c.EnvFrom {
+			if ef.SecretRef != nil {
+				refs = append(refs, objectRef{fmt.Sprintf("the running Knative Service: container %s envFrom[%d].secretRef", c.Name, i), ef.SecretRef.Name})
+			}
 		}
 	}
-	return out
+	for _, v := range ps.Volumes {
+		if v.Secret != nil {
+			refs = append(refs, objectRef{fmt.Sprintf("the running Knative Service: volumes[%s].secret", v.Name), v.Secret.SecretName})
+		}
+		if v.Projected != nil {
+			for i, s := range v.Projected.Sources {
+				if s.Secret != nil {
+					refs = append(refs, objectRef{fmt.Sprintf("the running Knative Service: volumes[%s].projected.sources[%d].secret", v.Name, i), s.Secret.Name})
+				}
+			}
+		}
+	}
+	return refs
 }
 
 // foreignMark returns the other zone a Secret is marked for, or "".
@@ -458,4 +594,31 @@ func hostTokens(value string) []string {
 	return strings.FieldsFunc(strings.ToLower(value), func(r rune) bool {
 		return !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-' || r == '.')
 	})
+}
+
+// imagePinMismatch compares the zone's pin ("@sha256:<64 hex>", or "" for none)
+// with the digest of the function's spec.image, and returns a description of the
+// disagreement, or "" when there is no pin or the digests are equal.
+//
+// It compares CONTENT, not names: the registry path and tag are free to differ
+// (a mirror, a rename), the digest is not. An image without exactly one "@"
+// carries no digest (or an ambiguous one) and cannot match a pin: fail closed.
+func imagePinMismatch(pin, image string) string {
+	if pin == "" {
+		return ""
+	}
+	digest := ""
+	if strings.Count(image, "@") == 1 {
+		digest = image[strings.Index(image, "@"):]
+	}
+	if digest == pin {
+		return ""
+	}
+	have := "no digest"
+	if digest != "" {
+		have = digest
+	}
+	return fmt.Sprintf("the zone pins this function's image to %s, but spec.image carries %s: "+
+		"nothing is rendered or mounted until the image is the pinned one. "+
+		"Update the zone's backends[].image pin (or restore spec.image) so the two agree", pin, have)
 }

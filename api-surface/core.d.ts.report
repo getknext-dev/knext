@@ -9,6 +9,7 @@
 # tracked wherever it is actually declared (checker.getExportsOfModule).
 ### .
 interface BackendBindingConfig {
+  image?: string | undefined
   name: string
   service?: string | undefined
 }

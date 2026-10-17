@@ -28,6 +28,14 @@
 #              through the zone fails at any point of the rotation;
 #           4. retirement after the overlap: the previous key leaves the Secret
 #              and the JWKS, and a warm function then refuses its tokens.
+#   pin        the zone's image pin (ADR-0004 Amendment 3), on a second zone with
+#              its own database Secret: a function bound with a matching pin
+#              renders and mounts that Secret; swapping its BackendService image
+#              with kubectl, as someone who may only `update` backendservices
+#              could, refuses it (Ready=False, BindingImageMismatch), removes its
+#              Knative Service and pods so nothing mounts the Secret, and the
+#              pin is never rendered into the zone's Knative Service; putting
+#              the pinned image back renders it again.
 #   leaks      no key material in the operator's or the pods' logs, the events,
 #              or the objects the operator publishes.
 #
@@ -60,7 +68,7 @@
 #                         testdata/zone-identity-contract.json.
 #   Z7_WITH_RUST          1 (default) also builds and binds the Rust function.
 #   PHASES                space-separated subset of: up images deploy verify
-#                         rotate leaks (default: all, in that order).
+#                         rotate pin leaks (default: all, in that order).
 #   INTERNAL_PORT         local port of the port-forward to Knative's cluster-local gateway.
 set -euo pipefail
 # This script handles private keys: it must never trace, and what it creates is
@@ -89,7 +97,7 @@ MIN_BOUND_SECONDS="$(jq -er '.rotation.propagationBoundMinimumSeconds' "${BOUND_
   || { echo "cannot read .rotation.propagationBoundMinimumSeconds from ${BOUND_FIXTURE}" >&2; exit 64; }
 BOUND="${Z7_PROPAGATION_BOUND:-${SHIPPED_BOUND_SECONDS}s}"
 WITH_RUST="${Z7_WITH_RUST:-1}"
-PHASES="${PHASES:-up images deploy verify rotate leaks}"
+PHASES="${PHASES:-up images deploy verify rotate pin leaks}"
 INTERNAL_PORT="${INTERNAL_PORT:-18080}"
 KNATIVE_VERSION="${KNATIVE_VERSION:-knative-v1.16.0}"
 REGISTRY_IMAGE='registry:2.8.3@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373'
@@ -905,6 +913,125 @@ phase_rotate() {
   printf '  retire requested -> old key refused     %s\n' "$(node -p "(${t_retired_refused} - ${t_retire}).toFixed(1)")"
 }
 
+# ---------------------------------------------------------------- phase: pin
+
+# A second zone, so the first one's key and rotation state are untouched. It has
+# its own database Secret (the db-bind), which its function reads through envFrom:
+# exactly what a swapped image would inherit if the binding matched names only.
+PIN_ZONE=pin-zone
+PIN_FN=pin-fn
+PIN_DB=pin-zone-db
+
+fn_condition() { # <type>: "<status>/<reason>" of a condition on the pin function
+  k -n "${NS}" get backendservice "${PIN_FN}" -o json \
+    | jq -r --arg t "$1" '[.status.conditions // [] | .[] | select(.type == $t)] | if length == 0 then "none" else .[0] | "\(.status)/\(.reason)" end'
+}
+fn_ksvc_mounts_db() { # the function's Knative Service reads the zone's database Secret
+  k -n "${NS}" get ksvc "${PIN_FN}" -o json \
+    | jq -e --arg s "${PIN_DB}" '[.spec.template.spec.containers[]?.envFrom[]?.secretRef.name] | index($s) != null' >/dev/null
+}
+fn_ksvc_gone() { ! k -n "${NS}" get ksvc "${PIN_FN}" >/dev/null 2>&1; }
+fn_pods_gone() { [ -z "$(k -n "${NS}" get pods -l "serving.knative.dev/service=${PIN_FN}" -o name)" ]; }
+fn_netpol_gone() { ! k -n "${NS}" get networkpolicy -l "apps.kn-next.dev/function=${PIN_FN}" -o name 2>/dev/null | grep -q .; }
+swap_fn_image() { # <image>: change the BackendService image and nothing else, as a principal with only `update` on backendservices
+  k -n "${NS}" patch backendservice "${PIN_FN}" --type=json \
+    -p "[{\"op\":\"replace\",\"path\":\"/spec/image\",\"value\":\"$1\"}]"
+}
+
+phase_pin() {
+  log "pin: a zone that pins its function's image refuses a swapped one"
+  local go_img zone_img digest
+  go_img="$(image_ref function-go)"
+  zone_img="$(image_ref zone-caller)"
+  digest="@${go_img##*@}"
+  [ "${zone_img##*@}" != "${go_img##*@}" ] || fail "the swap image must differ from the pinned one"
+
+  k -n "${NS}" delete nextapp "${PIN_ZONE}" --ignore-not-found --wait=true --timeout=300s
+  k -n "${NS}" delete backendservice "${PIN_FN}" --ignore-not-found --wait=true --timeout=300s
+  k -n "${NS}" delete secret "${PIN_DB}" --ignore-not-found
+  # A placeholder DSN: the function never connects, the point is whether the
+  # Secret is MOUNTED. Created here, never read back.
+  k -n "${NS}" create secret generic "${PIN_DB}" --from-literal=DATABASE_URL='postgres://pin:pin@pin-db.invalid:5432/pin'
+
+  k apply --validate=strict -f - <<YAML
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata:
+  name: ${PIN_ZONE}
+  namespace: ${NS}
+spec:
+  image: ${zone_img}
+  healthCheckPath: /api/health
+  scaling:
+    minScale: 0
+    maxScale: 1
+  database:
+    secretRef:
+      name: ${PIN_DB}
+  backends:
+    - name: pin
+      service: ${PIN_FN}
+      image: "${digest}"
+---
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: BackendService
+metadata:
+  name: ${PIN_FN}
+  namespace: ${NS}
+spec:
+  zone: ${PIN_ZONE}
+  image: ${go_img}
+  language: go
+  port: 8080
+  protoVersion: 1.0.0
+  envFrom:
+    - secretRef:
+        name: ${PIN_DB}
+  scaling:
+    minScale: 0
+    maxScale: 1
+YAML
+
+  wait_until 180 3 "the pinned function renders with the zone's database Secret mounted" \
+    "fn_ksvc_mounts_db"
+  [ "$(fn_condition Bound)" = "True/Bound" ] || fail "a matching pin did not bind: $(fn_condition Bound)"
+  ok "a matching pin renders the function, and it mounts ${PIN_DB}"
+
+  log "pin: swap the BackendService image with kubectl"
+  swap_fn_image "${zone_img}"
+  wait_until 120 2 "the swapped function is refused: Ready=False BindingImageMismatch" \
+    '[ "$(fn_condition Ready)" = "False/BindingImageMismatch" ]'
+  wait_until 120 2 "the swapped function's Knative Service is removed" fn_ksvc_gone
+  wait_until 120 2 "the swapped function's pods are gone" fn_pods_gone
+  wait_until 60 2 "the swapped function's NetworkPolicy is removed" fn_netpol_gone
+  [ "$(fn_condition Bound)" = "False/BindingImageMismatch" ] || fail "Bound is $(fn_condition Bound), want False/BindingImageMismatch"
+  # Nothing mounts the database Secret on the function's behalf: no Knative
+  # Service, no pod. Hold for a while: a refusal that flaps back is not one.
+  sleep 20
+  fn_ksvc_gone || fail "the refused function's Knative Service came back"
+  fn_pods_gone || fail "a pod of the refused function is running"
+  ok "the swapped image is refused, its Knative Service and pods are gone: nothing mounts ${PIN_DB}"
+
+  # The pin is the zone owner's statement and is never rendered into the zone's
+  # pods. (A refused function stops reporting a served version, so the zone's next
+  # revision drops <NAME>_SERVICE_PROTO_VERSION, as for any refusal; that is not
+  # the pin.)
+  if k -n "${NS}" get ksvc "${PIN_ZONE}" -o json 2>/dev/null | grep -qF "${go_img##*@sha256:}"; then
+    fail "the pin appears in the zone's Knative Service"
+  fi
+  ok "the pin is not rendered into the zone's Knative Service"
+
+  log "pin: the pinned image back renders the function again (the refusal was the pin)"
+  swap_fn_image "${go_img}"
+  wait_until 180 3 "the function renders again once its image is the pinned one" "fn_ksvc_mounts_db"
+  wait_until 60 2 "the refusal clears" '[ "$(fn_condition Bound)" = "True/Bound" ]'
+  ok "restoring the pinned image binds the function again"
+
+  k -n "${NS}" delete nextapp "${PIN_ZONE}" --ignore-not-found --wait=true --timeout=300s
+  k -n "${NS}" delete backendservice "${PIN_FN}" --ignore-not-found --wait=true --timeout=300s
+  k -n "${NS}" delete secret "${PIN_DB}" --ignore-not-found
+}
+
 # ---------------------------------------------------------------- phase: leaks
 
 phase_leaks() {
@@ -955,7 +1082,7 @@ phase_leaks() {
 # ---------------------------------------------------------------- main
 
 if kind get clusters 2>/dev/null | grep -qx "${CLUSTER}"; then use_cluster; fi
-for phase in up images deploy verify rotate leaks; do
+for phase in up images deploy verify rotate pin leaks; do
   if has_phase "${phase}"; then
     "phase_${phase}"
   fi

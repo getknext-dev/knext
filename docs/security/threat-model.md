@@ -133,6 +133,83 @@ and is enforced only on a policy-capable CNI (not flannel).
 `backendservice_sovereignty_test.go` and `backendservice_envtest_test.go`, and the Calico
 function leg of `test/networkpolicy-enforcement-drill.sh`.
 
+### Zone-function binding: `update` on `backendservices` is `get` on the zone's database Secret (#2497)
+
+**The residual, stated plainly.** The two-sided binding (the function names its zone in
+`spec.zone`, the zone lists the function in `spec.backends`) matches **names only**. It stops
+someone who may **create** a `BackendService` from pulling in a zone's database Secret under a new
+name. It does **not** stop someone who may **update** an already-bound `BackendService`, or delete
+it and create one with the same name:
+
+- The principal needs `update` (or `create` after a delete) on `backendservices` and nothing else:
+  no Secret read, no `NextApp` write.
+- They change `spec.image` to an image they chose. The operator re-renders the function, and the
+  function's `envFrom` or volume still names the zone's own database Secret, which the credential
+  allowlist permits. That image now runs with the zone's database credentials mounted and the zone's
+  JWKS mounted.
+- The zone sends its users' identity tokens (`sub`) to that image on every call.
+
+So **`update` on `backendservices` in a namespace is equivalent to reading the database Secret of every
+zone that binds a function there, and to receiving those zones' users' tokens. This holds with or without
+the image pin below** (see "What it does not cover": the pin binds the image only). Grant
+`update`/`patch` on `backendservices` (and `create`, since a delete followed by a create is the same act)
+only to principals who may already read those Secrets. A GitOps controller that applies the
+`BackendService` has this power by construction. This is not visible in the cluster's RBAC for
+Secrets, which is what makes it easy to miss in a review.
+
+**The partial control.** The zone's optional pin (`NextApp.spec.backends[].image`, ADR-0004 Amendment 3, the
+CLI's `backends[].image`): `"@sha256:"` plus 64 lowercase hex characters. With a pin, the operator
+renders the function only while the digest of its `spec.image` equals the pin exactly. Any other
+digest, an image with no digest, or an ambiguous reference refuses the function: `Ready=False`, reason
+`BindingImageMismatch`, the Knative Service and NetworkPolicy removed, nothing mounted, no JWKS. The pin
+is the zone owner's statement of what it agreed to bind, written where only a principal with `update` on
+the `NextApp` can change it, so the principal above cannot move it. It is positive evidence read from the
+two specs (never from a Secret read or any request that can fail), so a transient error cannot cause
+the refusal and cannot undo it.
+
+**What it does not cover.**
+
+- **The pin binds the image content only; it does not close the exposure above.** The function's `env`,
+  `envFrom` and `volumes` are all in the `BackendService` spec (it has no command or args field) and stay with whoever
+  can write it. Reviewer-verified on Node v25: a writer keeps the pinned digest and adds
+  `spec.env: NODE_OPTIONS=--import=data:...`; that code runs inside the pinned image with the zone's
+  db-bind mounted and its users' tokens arriving. The credential allowlist does not catch it (it checks
+  Secret and ConfigMap references, not what an env value makes the image execute). The real fix is
+  tracked in #2526 (P1, decided at sprint close). Until then the RBAC advice above applies to **every**
+  zone, pinned or not.
+
+- **No pin, no image control.** The pin is optional (adding it to every existing zone would break them), so
+  a zone that does not set it keeps the name-only binding for the image too.
+  Check which zones pin: `kubectl get nextapps -o jsonpath` over `spec.backends[*].image`.
+- **Whoever can write the `NextApp` can move the pin.** That principal can already name a Secret in the
+  zone's own `spec`, so nothing is lost; the pin narrows the set of people who can redirect the
+  zone's credentials, it does not remove the set.
+- **It binds content, not provenance.** A pin says "this digest", not "built by us": a malicious
+  image that the zone owner pins is bound. Provenance is the supply-chain controls (signing, SBOM).
+- **Rotation is two writes.** A new image and a new pin cannot land in one instant. Between the two
+  writes the function is refused and renders again once they agree (a cold start). Apply both in one
+  `kubectl apply -f` (or one commit for a GitOps controller) to keep the window to a few seconds.
+- **The zone does not render the pin, and does not report the refusal.** The zone's pod template is
+  byte-identical with and without it, and its `BackendBindings` condition still reads `Bound`: a
+  name-level fact. (A refused function stops reporting a served version, so the zone drops
+  `<NAME>_SERVICE_PROTO_VERSION` and its calls fail closed, as for any refusal.) Read the refusal on the
+  function: `kubectl get backendservice <name> -o jsonpath` over `status.conditions`, or the
+  `knext_backendservice_refusals_total{reason="BindingImageMismatch"}` counter.
+- **Proved on kind, not on OKE.** The kind lane swaps the image with `kubectl` and asserts the
+  function's Knative Service and pods are gone, so nothing mounts the zone's database Secret on its
+  behalf. The refusal is a delete of two objects and does not depend on the CNI.
+
+**Enforcement.** `backendservice_image_pin_test.go` (the comparison table: no pin, matching digest,
+another digest, tag-only, tag containing the digest text, two digests, uppercase hex, a longer digest; the
+verdict; a mismatch is definitive even with an unreadable Secret; the zone's rendered Knative Service
+byte-identical with and without a pin and across a function image swap),
+`backendservice_image_pin_envtest_test.go` (a swapped image is refused and its Knative Service
+removed; a re-created function with another image is refused; a matching pin renders; no pin keeps
+today's behaviour; the function recovers in place when the image returns; rotation with both sides
+changing together updates the same Knative Service; either order of two writes refuses in between; a
+Secret read error leaves a matching pinned function alone; the CRD rejects each malformed pin), and the
+mutation prover `scripts/mutation-prove-2052-backendservice.mjs` (a row per rule of the comparison).
+
 ### Operator RBAC: the zone signing key and JWKS (#2051)
 
 **What changed.** A zone with a two-sided function binding gets one Ed25519 signing key, generated

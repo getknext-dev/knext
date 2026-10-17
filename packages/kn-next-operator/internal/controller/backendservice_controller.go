@@ -20,6 +20,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -171,34 +173,81 @@ func (r *BackendServiceReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		for _, entry := range obs.zone.Spec.Backends {
 			if entry.Service == bs.Name {
 				obs.zoneListed = true
+				obs.imageMismatch = imagePinMismatch(entry.Image, bs.Spec.Image)
 			}
 		}
 	}
 
 	// The credential allowlist (the control) and the host lint (a warning).
-	obs.violations = checkFunctionSovereignty(bs, obs.zone, others, r.secretMetadata(ctx, bs.Namespace))
+	lookup := memoSecretLookup(r.secretMetadata(ctx, bs.Namespace))
+	obs.violations, obs.unverified = checkFunctionSovereignty(bs, obs.zone, others, lookup)
 	obs.lint = lintForeignDatabaseHosts(bs, obs.zone, others)
+	// What is RUNNING is read before anything is rendered, but its verdict is
+	// acted on ONLY when the spec cannot be rolled out: the pass is undecided, or
+	// the rollout fails (a webhook refuses the Service, a mount path is rejected).
+	// Then the old template is what stays up, and a Secret revoked since it was
+	// rendered must not stay with it. When an accepted spec rolls out, the new
+	// template REPLACES the old one, so nothing revoked survives it, and a Secret
+	// the old template names that has since gone (a routine rotation: the new
+	// version is created, the spec points at it, the old one is pruned) is not a
+	// violation and never tears a healthy function down.
+	running, err := r.existingFunctionService(ctx, bs)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	runViolations, runUnverified := checkRunningSovereignty(bs, obs.zone, others, lookup, running)
+	if obs.undecided() {
+		obs.violations = append(obs.violations, runViolations...)
+		obs.unverified = mergeUnverified(obs.unverified, runUnverified)
+	}
+	now := time.Now()
+	obs.deniedSince = nextDeniedSince(bs.Status.SecretsDeniedSince, hasDenied(obs.unverified), now)
+	obs.violations, obs.unverified = escalateDeniedSecrets(obs.violations, obs.unverified, obs.deniedSince, now)
 
 	served, revision := bs.Status.ServedProtoVersion, bs.Status.ObservedRevision
-	if obs.accepted() {
-		// The zone's key set reaches the function only if the zone controls the
-		// ConfigMap that holds it. A read failure is returned, not guessed at: it
-		// says nothing about ownership, and flipping a running function's mount
-		// on an apiserver blip would roll a revision for no reason.
-		var err error
-		if obs.jwks, obs.jwksDetail, err = r.observeZoneJWKS(ctx, bs.Namespace, obs.zone); err != nil {
-			logger.Error(err, "Failed to read the zone's JWKS ConfigMap")
-			return ctrl.Result{}, err
+	// heldErr is returned AFTER the verdict is applied: an undecided pass reports
+	// SecretsUnverified in status, then requeues with backoff.
+	var heldErr error
+	if obs.undecided() {
+		// A Secret lookup that errored (not NotFound) says nothing about the
+		// Secret's marks. Like the JWKS read below, hold the error: a running,
+		// previously accepted function must not be deleted on an apiserver blip
+		// (nothing is rendered, nothing removed), and one never rendered stays
+		// unrendered (fail closed on new access).
+		heldErr = unverifiedSecretsError(obs.unverified)
+		logger.Error(heldErr, "Could not verify the function's Secrets; leaving it as it is")
+		obs.ksvc = running
+	} else if obs.accepted() {
+		ksvc, renderErr, rollErr := r.rollout(ctx, bs, &obs)
+		// runViolations holds ONLY positive evidence of revocation (a Secret
+		// re-marked, another zone's database Secret, a signing key, a zone that is
+		// gone; a pruned old Secret is exempt), so ANY rollout error is a reason to
+		// tear the function down when one is present: an admission policy answering
+		// 403, a fail-closed webhook answering 5xx and a Conflict all leave the old
+		// template running, and what is revoked must not stay mounted. The pass
+		// falls through to the verdict, so status says so.
+		stuckOnRevoked := rollErr != nil && len(runViolations) > 0
+		if rollErr != nil && !stuckOnRevoked {
+			logger.Error(rollErr, "Failed to roll the function out")
+			return ctrl.Result{}, rollErr
 		}
-		ksvc, renderErr, err := r.render(ctx, bs, obs.zone, obs.jwks)
-		if err != nil {
-			logger.Error(err, "Failed to render the function")
-			return ctrl.Result{}, err
-		}
-		obs.renderErr = renderErr
-		obs.ksvc = ksvc
-		if ksvc != nil {
-			served, revision = r.servedVersion(ctx, ksvc, served, revision)
+		if stuckOnRevoked {
+			// The new spec cannot be rolled out, so the RUNNING template stays,
+			// and it mounts a Secret that is definitively no longer allowed:
+			// refuse it, as a refused function keeps nothing it rendered.
+			logger.Error(rollErr, "Failed to roll the function out, and its running Knative Service mounts a Secret it may not")
+			obs.violations = append(obs.violations, runViolations...)
+			if rmErr := r.removeRendered(ctx, bs); rmErr != nil {
+				return ctrl.Result{}, rmErr
+			}
+			served, revision = "", ""
+			heldErr = rollErr
+		} else {
+			obs.renderErr = renderErr
+			obs.ksvc = ksvc
+			if ksvc != nil {
+				served, revision = r.servedVersion(ctx, ksvc, served, revision)
+			}
 		}
 	} else {
 		// Fail closed: a refused function keeps nothing it rendered before.
@@ -209,7 +258,8 @@ func (r *BackendServiceReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 
 	verdict := computeBackendServiceVerdict(bs, obs)
-	bs.Status.ObservedGeneration = bs.Generation
+	bs.Status.ObservedGeneration = verdict.observedGeneration
+	bs.Status.SecretsDeniedSince = verdict.secretsDeniedSince
 	bs.Status.ServedProtoVersion = served
 	bs.Status.ObservedRevision = revision
 	if obs.ksvc != nil {
@@ -221,6 +271,9 @@ func (r *BackendServiceReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 	if err := r.applyFunctionVerdict(ctx, bs, observed, verdict); err != nil {
 		return ctrl.Result{}, err
+	}
+	if heldErr != nil {
+		return ctrl.Result{}, heldErr
 	}
 	return ctrl.Result{RequeueAfter: verdict.requeueAfter}, nil
 }
@@ -267,9 +320,107 @@ func (r *BackendServiceReconciler) secretMetadata(ctx context.Context, namespace
 		case apierrors.IsNotFound(err):
 			return secretMetadata{}
 		default:
-			return secretMetadata{readErr: err.Error()}
+			// A failed read is never a verdict: it is held, and only a denied
+			// one is held for a bounded time.
+			return secretMetadata{readErr: err.Error(), denied: classifyReadError(err) == readDenied}
 		}
 	}
+}
+
+// readClass says how a failed Secret metadata read is held. Neither class is a
+// verdict: a failed read never refuses a function by itself.
+type readClass int
+
+const (
+	// readTransient: held without limit. This is the default for EVERY failed
+	// read that is not an authorization failure: timeouts, 429, 5xx, transport
+	// errors, and anything nobody anticipated. It says nothing about the Secret.
+	readTransient readClass = iota
+	// readDenied: Forbidden or Unauthorized (401 or 403). Held, but only for
+	// secretsDeniedHold counted from the first denial.
+	readDenied
+)
+
+// classifyReadError sorts a failed read. The default is HELD: an unrecognised
+// error must never be able to tear a running function down. The only definitive
+// answers are a NotFound (handled before this is called) and a name no Secret
+// can have (refused before any read).
+func classifyReadError(err error) readClass {
+	if apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err) {
+		return readDenied
+	}
+	return readTransient
+}
+
+// memoSecretLookup reads each Secret at most once per pass, so the spec's and
+// the running template's references to the same Secret agree and cost one GET.
+func memoSecretLookup(lookup secretLookup) secretLookup {
+	seen := map[string]secretMetadata{}
+	return func(name string) secretMetadata {
+		if m, ok := seen[name]; ok {
+			return m
+		}
+		m := lookup(name)
+		seen[name] = m
+		return m
+	}
+}
+
+// mergeUnverified appends the unverified Secrets of b not already in a.
+func mergeUnverified(a, b []unverifiedSecret) []unverifiedSecret {
+	for _, u := range b {
+		dup := false
+		for _, x := range a {
+			if x.name == u.name {
+				dup = true
+			}
+		}
+		if !dup {
+			a = append(a, u)
+		}
+	}
+	return a
+}
+
+// rollout rolls the accepted spec out: it reads the zone's JWKS state, then
+// renders the function. A non-nil error means the spec could NOT be rolled out
+// (and a failed JWKS read is returned, not guessed at: it says nothing about
+// ownership, and flipping a running function's mount on an apiserver blip would
+// roll a revision for no reason).
+func (r *BackendServiceReconciler) rollout(
+	ctx context.Context,
+	bs *appsv1alpha1.BackendService,
+	obs *functionObservation,
+) (*servingv1.Service, string, error) {
+	var err error
+	if obs.jwks, obs.jwksDetail, err = r.observeZoneJWKS(ctx, bs.Namespace, obs.zone); err != nil {
+		return nil, "", err
+	}
+	return r.render(ctx, bs, obs.zone, obs.jwks)
+}
+
+// existingFunctionService returns the function's Knative Service as it stands
+// (nil when there is none, or when another object controls the name), so a pass
+// that rendered nothing still reports what is running.
+func (r *BackendServiceReconciler) existingFunctionService(ctx context.Context, bs *appsv1alpha1.BackendService) (*servingv1.Service, error) {
+	ksvc := &servingv1.Service{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: bs.Namespace, Name: bs.Name}, ksvc); err != nil {
+		return nil, client.IgnoreNotFound(err)
+	}
+	if !metav1.IsControlledBy(ksvc, bs) {
+		return nil, nil
+	}
+	return ksvc, nil
+}
+
+// unverifiedSecretsError names the Secrets whose metadata could not be read.
+func unverifiedSecretsError(u []unverifiedSecret) error {
+	parts := make([]string, 0, len(u))
+	for _, s := range u {
+		parts = append(parts, fmt.Sprintf("%q (%s)", s.name, s.err))
+	}
+	return fmt.Errorf("reading the metadata of Secret(s) %s: no answer, so the function is neither "+
+		"rendered nor removed", strings.Join(parts, ", "))
 }
 
 // observeZoneJWKS reads the metadata of the ConfigMap at the zone's JWKS name

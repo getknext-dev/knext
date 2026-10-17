@@ -286,7 +286,9 @@ const BACKEND_NAME_PATTERN = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/;
 const BACKEND_SERVICE_PATTERN = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/;
 const BACKEND_NAME_MAX_LENGTH = 63;
 const BACKENDS_MAX_ITEMS = 64;
-const BACKEND_KEYS = ["name", "service"];
+const BACKEND_IMAGE_PATTERN = /^@sha256:[a-f0-9]{64}$/;
+const BACKEND_IMAGE_MAX_LENGTH = 72;
+const BACKEND_KEYS = ["name", "service", "image"];
 
 function validateBackends(backends: unknown): string[] {
     if (backends === undefined) return [];
@@ -335,6 +337,17 @@ function validateBackends(backends: unknown): string[] {
             );
         } else {
             names.add(name);
+        }
+        const image = entry.image;
+        if (
+            image !== undefined &&
+            (typeof image !== "string" ||
+                image.length > BACKEND_IMAGE_MAX_LENGTH ||
+                !BACKEND_IMAGE_PATTERN.test(image))
+        ) {
+            errors.push(
+                `'${at}.image' must be the image digest only, "@sha256:" followed by 64 lowercase hex characters (not a full image reference; \`knext deploy function\` prints the exact entry), got ${JSON.stringify(image)}`,
+            );
         }
         const service = entry.service;
         if (service !== undefined) {

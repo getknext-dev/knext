@@ -2267,15 +2267,17 @@ describe('compat-suite fail-on-red gate — revocation teeth (test-e2e-deploy.ym
     // The direction the audit above cannot see. It judges the steps it FINDS,
     // so deleting an `if:` from the middle of the tail removes that step — and
     // everything above it — from the suffix, and the audit passes by looking at
-    // less. The floor is what reds instead. Four is measured, not chosen:
-    // compute-excluded / summarize / upload / fail-on-red.
+    // less. The floor is what reds instead. Five is measured, not chosen:
+    // compute-excluded / summarize / upload / fail-on-red / verify-boot-mode-ledger.
+    // (It was four until the boot-mode ledger step joined the tail; a floor left
+    // one below the real size lets the FIRST step lose its `if:` unnoticed.)
     const { tailLength, totalSteps, tailLabels } = auditReportingTail(WORKFLOW_PATH);
     expect(totalSteps, 'deploy-tests should have a real step list').toBeGreaterThan(20);
     expect(
       tailLength,
       `the unconditional reporting tail shrank to ${tailLength} step(s) (${tailLabels.join(', ')}) — ` +
         'a step that stopped declaring `if:` has left it, and every step above it went with it',
-    ).toBeGreaterThanOrEqual(4);
+    ).toBeGreaterThanOrEqual(5);
   });
 
   it('#703 no job on the ledger spine can be conditioned off', () => {
@@ -2286,13 +2288,21 @@ describe('compat-suite fail-on-red gate — revocation teeth (test-e2e-deploy.ym
   it('#703 the ledger spine walk is NON-VACUOUS', () => {
     // Same shrink-the-denominator direction, one level up: dropping
     // `needs: build-next` does not ADD a problem, it removes a job from the
-    // closure. Three is measured: shard-ledger -> deploy-tests -> build-next.
+    // closure. Four is measured: shard-ledger -> credential-ref, deploy-tests ->
+    // build-next. A bare count is not enough: `credential-ref` is reachable by
+    // two edges, so cutting `deploy-tests`' `needs:` still left three jobs and a
+    // floor of three stayed green. The deploy-tests -> build-next edge is
+    // therefore asserted by NAME, not just by count.
     const { jobsWalked } = auditLedgerSpine(WORKFLOW_PATH);
+    expect(
+      jobsWalked,
+      'the spine must still reach build-next through deploy-tests — that `needs:` edge was cut',
+    ).toEqual(expect.arrayContaining(['shard-ledger', 'deploy-tests', 'build-next']));
     expect(
       jobsWalked.length,
       `the reconciliation spine walked only ${jobsWalked.join(' -> ')} — a \`needs:\` edge was cut, ` +
         'so a job that can now be silenced is no longer being judged',
-    ).toBeGreaterThanOrEqual(3);
+    ).toBeGreaterThanOrEqual(4);
   });
 
   it('#703 every inadmissible if: SHAPE is rejected, and every admissible spelling accepted', () => {

@@ -62,6 +62,43 @@ describe("cr-builder spec.backends", () => {
         ]);
     });
 
+    it("carries the zone's image pin into the NextApp, and only when set", () => {
+        const pin = `@sha256:${"ab12".repeat(16)}`;
+        const spec = specOf(
+            config([{ name: "pricing", image: pin }, { name: "search" }]),
+        );
+        expect(spec.backends).toEqual([
+            { name: "pricing", service: "pricing", image: pin },
+            { name: "search", service: "search" },
+        ]);
+        // An unpinned entry carries no `image` key at all, so a CR written
+        // without pins is byte-identical to every CR written before the field.
+        expect("image" in (spec.backends as object[])[1]).toBe(false);
+    });
+
+    it("the rendered YAML carries the pin the apply will send", () => {
+        const pin = `@sha256:${"ab12".repeat(16)}`;
+        const yaml = renderNextAppCR(
+            config([{ name: "pricing", image: pin }]),
+            IMG,
+            "default",
+        );
+        const parsed = YAML.parse(yaml) as {
+            spec: { backends: { image?: string }[] };
+        };
+        expect(parsed.spec.backends[0]?.image).toBe(pin);
+    });
+
+    it("a config without pins renders a CR byte-identical to one that never knew the field", () => {
+        const plain = renderNextAppCR(
+            config([{ name: "pricing" }]),
+            IMG,
+            "default",
+        );
+        expect(plain).not.toContain("image: @sha256");
+        expect(plain).toContain("service: pricing");
+    });
+
     it("emits no field at all when backends is absent (old operators see an unchanged CR)", () => {
         const spec = specOf(config());
         expect("backends" in spec).toBe(false);

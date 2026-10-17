@@ -116,6 +116,7 @@ type BackendServiceSpec struct {
 	// +listType=map
 	// +listMapKey=name
 	// +kubebuilder:validation:MaxItems=128
+	// +kubebuilder:validation:XValidation:rule="self.all(e, !has(e.valueFrom) || !has(e.valueFrom.secretKeyRef) || (has(e.valueFrom.secretKeyRef.name) && e.valueFrom.secretKeyRef.name.size() > 0 && e.valueFrom.secretKeyRef.name.size() <= 253))",message="a Secret reference must name a Secret: a non-empty name of at most 253 characters"
 	// +kubebuilder:validation:XValidation:rule="self.all(e, !e.name.startsWith('KNEXT_TOKEN_'))",message="env names starting with KNEXT_TOKEN_ are reserved: the operator sets the function's token issuer and audience"
 	Env []corev1.EnvVar `json:"env,omitempty"`
 
@@ -123,6 +124,7 @@ type BackendServiceSpec struct {
 	// Env applies.
 	// +optional
 	// +kubebuilder:validation:MaxItems=16
+	// +kubebuilder:validation:XValidation:rule="self.all(e, !has(e.secretRef) || (has(e.secretRef.name) && e.secretRef.name.size() > 0 && e.secretRef.name.size() <= 253))",message="a Secret reference must name a Secret: a non-empty name of at most 253 characters"
 	EnvFrom []corev1.EnvFromSource `json:"envFrom,omitempty"`
 
 	// Volumes mounts Secret, ConfigMap, projected (Secret/ConfigMap) or emptyDir
@@ -164,8 +166,19 @@ type FunctionScalingSpec struct {
 }
 
 // FunctionVolume is one volume and its mount. Exactly one source is set.
+// +kubebuilder:validation:XValidation:rule="!has(self.secret) || (has(self.secret.secretName) && self.secret.secretName.size() > 0 && self.secret.secretName.size() <= 253)",message="a Secret reference must name a Secret: a non-empty name of at most 253 characters"
 // +kubebuilder:validation:XValidation:rule="[has(self.secret), has(self.configMap), has(self.projected), has(self.emptyDir)].filter(x, x).size() == 1",message="a volume sets exactly one of secret, configMap, projected or emptyDir"
 // +kubebuilder:validation:XValidation:rule="self.mountPath != '/var/run/knext' && !self.mountPath.startsWith('/var/run/knext/')",message="/var/run/knext is reserved for operator mounts"
+// Knative serving refuses a Service whose container mounts a reserved path (its
+// reservedPaths in pkg/apis/serving/k8s_validation.go: "/", "/dev", "/dev/log"),
+// compared after path.Clean. The webhook's refusal would surface only at render,
+// so the schema refuses these here, together with the spellings path.Clean folds
+// onto them by repeated or trailing slashes and "." segments (/dev/, //dev,
+// /./dev). A ".." segment needs balanced reasoning no regular expression can do,
+// so a spelling like /a/../dev is left to Knative's own webhook (the reconciler
+// then keeps the old Service and returns the refusal). Other paths, /data/
+// included, are untouched.
+// +kubebuilder:validation:XValidation:rule="!self.mountPath.matches('^((/+[.])*/*|(/+[.])*/+dev(/+[.])*/*|(/+[.])*/+dev(/+[.])*/+log(/+[.])*/*)$')",message="mountPath is reserved by Knative serving: /, /dev and /dev/log cannot be mounted"
 type FunctionVolume struct {
 	// Name of the volume (DNS label).
 	// +kubebuilder:validation:Required
@@ -213,6 +226,7 @@ type FunctionProjectedVolume struct {
 }
 
 // FunctionVolumeProjection is one projected source.
+// +kubebuilder:validation:XValidation:rule="!has(self.secret) || (has(self.secret.name) && self.secret.name.size() > 0 && self.secret.name.size() <= 253)",message="a Secret reference must name a Secret: a non-empty name of at most 253 characters"
 // +kubebuilder:validation:XValidation:rule="has(self.secret) != has(self.configMap)",message="a projected source sets exactly one of secret or configMap"
 type FunctionVolumeProjection struct {
 	// Secret projects keys of a Secret. Subject to the Secret allowlist.
@@ -226,6 +240,15 @@ type FunctionVolumeProjection struct {
 
 // BackendServiceStatus is the observed state of a BackendService.
 type BackendServiceStatus struct {
+	// SecretsDeniedSince is when the operator's reads of this function's Secrets
+	// first started being DENIED (Forbidden or Unauthorized), and it is cleared
+	// as soon as no read is denied. A denial that outlasts the hold refuses the
+	// function: an operator that cannot read Secrets cannot enforce the
+	// allowlist, and holding forever would freeze revocation. Timeouts and
+	// server errors do not start this clock.
+	// +optional
+	SecretsDeniedSince *metav1.Time `json:"secretsDeniedSince,omitempty"`
+
 	// ObservedGeneration is the spec generation the status describes.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
