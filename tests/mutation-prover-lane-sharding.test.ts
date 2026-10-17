@@ -411,12 +411,63 @@ describe('#2208 the runner: --shard, --list, --report and a PER-PROVER timeout',
   };
   const ok = (declared: number, run: number) =>
     `console.log('::prover-summary:: ' + JSON.stringify({ declared: ${declared}, run: ${run} }));`;
+  // The lane's OWN variables must not leak into a runner under test. This spec runs
+  // INSIDE the lane (the lane prover grades it), where PROVER_LANE_SHA is the real
+  // planned sha and GITHUB_ACTIONS is true: leaking either turned every temp-repo
+  // runner test red on the first live run that carried the HEAD check.
+  const LANE_ENV = [
+    'PROVER_LANE_SHA',
+    'PROVER_LANE_REF',
+    'KNEXT_PROVER_TIMEOUT_MS',
+    'KNEXT_LANE_RESTORE_AFTER_KILL',
+    'KNEXT_LANE_CARGO_TARGET_DIR',
+    'KNEXT_RUST_CODEGEN_DIR',
+    'CARGO_TARGET_DIR',
+    'GITHUB_ACTIONS',
+  ];
+  const hermeticEnv = (extra: Record<string, string> = {}) => {
+    const env: Record<string, string | undefined> = { ...process.env };
+    for (const k of LANE_ENV) delete env[k];
+    return { ...env, ...extra } as Record<string, string>;
+  };
   const run = (dir: string, args: string[], env: Record<string, string> = {}) =>
     spawnSync(process.execPath, [join(dir, RUNNER), ...args], {
       encoding: 'utf8',
-      env: { ...process.env, ...env },
+      env: hermeticEnv(env),
       timeout: 60_000,
     });
+
+  it('prints free memory and disk after each prover (a starved runner dies without a log)', () => {
+    const dir = makeTree({ 'mutation-prove-a.mjs': ok(1, 1), 'mutation-prove-b.mjs': ok(1, 1) });
+    try {
+      const r = run(dir, []);
+      expect(r.status, `${r.stdout}${r.stderr}`).toBe(0);
+      const lines =
+        r.stdout.match(/resources: free memory \d+ of \d+ MiB, free disk \d+ MiB/g) ?? [];
+      expect(lines.length, 'one resource line per prover').toBe(2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('is HERMETIC: a lane-style environment does not leak into the runner under test', () => {
+    const dir = makeTree({ 'mutation-prove-a.mjs': ok(1, 1) });
+    commitAll(dir);
+    const saved = Object.fromEntries(LANE_ENV.map((k) => [k, process.env[k]]));
+    try {
+      process.env.PROVER_LANE_SHA = 'd'.repeat(40); // not this temp repo's HEAD
+      process.env.GITHUB_ACTIONS = 'true';
+      process.env.KNEXT_PROVER_TIMEOUT_MS = '1';
+      const r = run(dir, ['--shard', '1/1']);
+      expect(r.status, `${r.stdout}${r.stderr}`).toBe(0);
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 
   it('--list prints exactly the shard and runs nothing', () => {
     const dir = makeTree({

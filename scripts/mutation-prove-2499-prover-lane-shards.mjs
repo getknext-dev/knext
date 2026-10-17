@@ -435,6 +435,31 @@ const MUTATIONS = [
     anchor: "const actualSha = repoOut(['git', 'rev-parse', 'HEAD'])?.trim() ?? null;",
     replacement: 'const actualSha = process.env.PROVER_LANE_SHA?.trim() ?? null;',
   },
+  {
+    id: 'R12',
+    subject: 'runner',
+    claim: 'the per-prover resource line is gone (a starved runner leaves no trace)',
+    anchor: '  console.log(resourceLine());',
+    replacement: '  void resourceLine;',
+  },
+  {
+    id: 'R13',
+    subject: 'runner',
+    claim:
+      'the untracked snapshot is taken AFTER the prover (the killed prover’s own files look pre-existing)',
+    anchor:
+      '  const untrackedBefore = untrackedFiles();\n  const run = await runProver(prover.absPath, { cwd: REPO_ROOT, timeoutMs });',
+    replacement:
+      '  const run = await runProver(prover.absPath, { cwd: REPO_ROOT, timeoutMs });\n  const untrackedBefore = untrackedFiles();',
+  },
+  {
+    id: 'T01',
+    subject: 'spec',
+    claim:
+      'the runner tests stop scrubbing the lane’s own variables (they go red inside the lane, as they did live)',
+    anchor: '    for (const k of LANE_ENV) delete env[k];',
+    replacement: '    void LANE_ENV;',
+  },
 ];
 
 // A real mutation of a real subject, distinct from the rows, so it also proves
@@ -453,6 +478,7 @@ const prover = createGuardProver({
     wf: '.github/workflows/mutation-prover-nightly.yml',
     lib: 'scripts/lib/prover-shard.mjs',
     runner: 'scripts/run-mutation-provers.mjs',
+    spec: 'tests/mutation-prover-lane-sharding.test.ts',
   },
 });
 

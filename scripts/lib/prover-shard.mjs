@@ -63,23 +63,27 @@ export function parseShardSpec(spec) {
  * not listed weighs 1.
  */
 export const PROVER_WEIGHT_MINUTES = Object.freeze({
-  // MEASURED on a hosted runner, run 39002159226 (shard 2): 111 mutations.
+  // MEASURED on hosted runners: run 39016841640 (all six legs, integration/v2) unless
+  // noted. Minutes are wall-clock for the whole prover.
+  'scripts/mutation-prove-empty-dir-guard.mjs': 68,
   'scripts/mutation-prove-kind-manifest-apply-safety.mjs': 67,
-  // Estimated, not yet measured: 58 mutations x a ~30-60 s spec.
-  'scripts/mutation-prove-empty-dir-guard.mjs': 55,
-  // MEASURED, run 39002159226: 26 minutes.
-  'scripts/mutation-prove-published-seam-scan.mjs': 26,
-  // Estimated, not yet measured: baseline + canary + 18 rows, each a spec run that
-  // does a real `cargo` generation (3+ minutes cold). The lane hands the prover a
-  // per-leg target dir through KNEXT_LANE_CARGO_TARGET_DIR, which the prover adopts
-  // for its own process only; the weight stays at the cold worst case until a run
-  // measures it.
-  'scripts/mutation-prove-2489-rust-scaffold.mjs': 60,
+  'scripts/mutation-prove-published-seam-scan.mjs': 27,
+  'scripts/mutation-prove-2052-backendservice.mjs': 22,
   'scripts/mutation-prove-compat-cell-fingerprint.mjs': 20,
-  // MEASURED, run 39002159226: 9.5 minutes (the old workflow comment said ~30).
-  'scripts/mutation-prove-install-smoke-coverage.mjs': 10,
+  'scripts/mutation-prove-2331-use-cache-tag-replay.mjs': 14,
+  'scripts/mutation-prove-2462-operator-write-policy.mjs': 14,
+  // 12 minutes for 23 mutations with the per-leg cargo dir and generator dir adopted;
+  // the earlier 60-minute estimate was the cold worst case.
+  'scripts/mutation-prove-2489-rust-scaffold.mjs': 12,
+  // MEASURED, run 39002159226: 11 and 9.5 minutes.
   'scripts/mutation-prove-bytecode-liveness.mjs': 11,
+  'scripts/mutation-prove-install-smoke-coverage.mjs': 10,
+  'scripts/mutation-prove-rust-template-auth.mjs': 10,
+  'scripts/mutation-prove-publish-lane-supply-chain.mjs': 7,
+  'scripts/mutation-prove-go-template-auth.mjs': 5,
   'scripts/mutation-prove-1533-kubeconfig-ci-secret.mjs': 5,
+  'scripts/mutation-prove-2171-redis-prefix-isolation.mjs': 4,
+  'scripts/mutation-prove-2051-rust-verifier.mjs': 4,
   'scripts/mutation-prove-compat-window-packed-anchor.mjs': 4,
   'scripts/mutation-prove-compat-credential-freeze-guard.mjs': 2,
   'scripts/mutation-prove-compat-credential-line.mjs': 2,
@@ -96,7 +100,14 @@ export const PROVER_WEIGHT_MINUTES = Object.freeze({
  */
 export const WEIGHTED_ON_ONE_REF_ONLY = Object.freeze([
   'scripts/mutation-prove-published-seam-scan.mjs',
+  'scripts/mutation-prove-2052-backendservice.mjs',
+  'scripts/mutation-prove-2331-use-cache-tag-replay.mjs',
+  'scripts/mutation-prove-2462-operator-write-policy.mjs',
   'scripts/mutation-prove-2489-rust-scaffold.mjs',
+  'scripts/mutation-prove-rust-template-auth.mjs',
+  'scripts/mutation-prove-go-template-auth.mjs',
+  'scripts/mutation-prove-2171-redis-prefix-isolation.mjs',
+  'scripts/mutation-prove-2051-rust-verifier.mjs',
 ]);
 
 /** @param {{ relPath: string }} p */
