@@ -372,6 +372,12 @@ func TestVerdictForAnUndecidedFunctionIsUnverifiedNotAViolation(t *testing.T) {
 	if ready.Status != metav1.ConditionFalse || ready.Reason != ReasonSecretsUnverified {
 		t.Errorf("Ready = %+v; want False/SecretsUnverified for a never-rendered function", ready)
 	}
+	if v.refusal != "" {
+		t.Errorf("an unknown answer is not a refusal; the refusals metric got %q", v.refusal)
+	}
+	if len(v.events) != 1 || v.events[0].reason != ReasonSecretsUnverified {
+		t.Errorf("want one SecretsUnverified event, got %+v", v.events)
+	}
 	for _, c := range v.conditions {
 		if c.Reason == ReasonSovereigntyViolation || c.Reason == ReasonSecretNotAllowed {
 			t.Errorf("%s carries the violation reason %s for an unknown answer", c.Type, c.Reason)

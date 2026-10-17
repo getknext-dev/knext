@@ -305,7 +305,8 @@ func computeBackendServiceVerdict(bs *appsv1alpha1.BackendService, o functionObs
 		prev := apimeta.FindStatusCondition(bs.Status.Conditions, ConditionReady)
 		if prev == nil || prev.Reason != ready.Reason || prev.Message != ready.Message {
 			v.events = append(v.events, verdictEvent{corev1.EventTypeWarning, ready.Reason, ready.Message})
-			if prev == nil || prev.Reason != ready.Reason {
+			// SecretsUnverified is no answer, not a refusal: it is not counted as one.
+			if (prev == nil || prev.Reason != ready.Reason) && ready.Reason != ReasonSecretsUnverified {
 				v.refusal = ready.Reason
 			}
 		}

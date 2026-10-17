@@ -273,7 +273,7 @@ Ready revision. It is empty until a revision is Ready, and it is the value the z
 | Condition | Meaning |
 | --- | --- |
 | `Bound` | Both halves agree. `ZoneNotFound`, `ZoneNotListed` or `ConflictingOwner` otherwise. |
-| `SovereigntyCompliant` | Every Secret reference passes the allowlist. `SecretNotAllowed` names the ones that do not. |
+| `SovereigntyCompliant` | Every Secret reference passes the allowlist. `SecretNotAllowed` names the ones that do not. `Unknown` (`SecretsUnverified`) when a Secret's metadata could not be read, for example during an API server timeout: that is not a violation, so a running function is left as it is, nothing new is rendered, and the operator retries with backoff. |
 | `DatabaseHostLint` | `False` when an env value names another zone's database host. A warning only. |
 | `JWKSTrusted` | `True` when the zone controls its JWKS ConfigMap and the function mounts it. `Unknown` (`NotPublished`) while the ConfigMap does not exist yet. `False` (`JWKSUntrusted`) when another object holds the name: nothing is mounted and every call except the health check is refused. |
 | `Ready` | Bound, compliant, the function's JWKS is not untrusted, and the function's Knative Service is Ready. |

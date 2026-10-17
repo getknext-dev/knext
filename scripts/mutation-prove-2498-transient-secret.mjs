@@ -14,7 +14,7 @@
  *     holds the error but never returns it (M05), `undecided` ignores a
  *     definitive refusal (M03) or never fires (M04);
  *   - the status: an undecided pass says SecretsUnverified, not compliant and
- *     not a violation (M10, M11);
+ *     not a violation (M10, M11), and is not counted as a refusal (M12);
  *   - the scan: a new API-error-to-teardown path is added to Reconcile (M07) or
  *     to the sanctioned fork's neighbour (M08), and the AST guard must see it.
  *
@@ -149,6 +149,14 @@ const GO_MUTATIONS = [
     subject: 'verdict',
     anchor: 'case o.undecided() && o.ksvc == nil:',
     replacement: 'case false:',
+    test: unit(VERDICT_UNIT),
+  },
+  {
+    id: 'M12',
+    claim: 'an unknown answer is counted as a refusal in the refusals metric',
+    subject: 'verdict',
+    anchor: ') && ready.Reason != ReasonSecretsUnverified {',
+    replacement: ') {',
     test: unit(VERDICT_UNIT),
   },
   // --- the scan ------------------------------------------------------------------
