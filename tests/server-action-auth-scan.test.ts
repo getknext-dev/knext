@@ -69,6 +69,10 @@ describe('RED: a Server Action that is not gated', () => {
       `'use server';\n${IMPORTS}export async function up(fd: FormData) {\n if (fd && !(await authorizeMutation(fd))) return;\n await db.query('x');\n}`,
     ],
     [
+      'an auth function that is not imported at all (an ambient/global name)',
+      `'use server';\nexport async function up(fd: FormData) {\n if (!(await authorizeMutation(fd))) return;\n await db.query('x');\n}`,
+    ],
+    [
       'an auth function that is not imported (a local stub)',
       `'use server';\nasync function authorizeMutation(_f: FormData) { return true; }\nexport async function up(fd: FormData) {\n if (!(await authorizeMutation(fd))) return;\n await db.query('x');\n}`,
     ],
