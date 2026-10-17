@@ -162,16 +162,16 @@ const MUTATIONS = [
     subject: 'root',
     claim: 'legacy root action: the doctor step runs an unpinned package',
     anchor:
-      'KNEXT_CLI_PACKAGE: \'@getknext/core@1.3.1\'\n      run: |\n        set -euo pipefail\n        npx --yes "$KNEXT_CLI_PACKAGE" doctor',
+      'KNEXT_CLI_PACKAGE: \'kn-next@1.3.1\'\n      run: |\n        set -euo pipefail\n        npx --yes "$KNEXT_CLI_PACKAGE" doctor',
     replacement:
-      'KNEXT_CLI_PACKAGE: \'@getknext/core\'\n      run: |\n        set -euo pipefail\n        npx --yes "$KNEXT_CLI_PACKAGE" doctor',
+      'KNEXT_CLI_PACKAGE: \'kn-next\'\n      run: |\n        set -euo pipefail\n        npx --yes "$KNEXT_CLI_PACKAGE" doctor',
   },
   {
     id: 'V9',
     subject: 'root',
     claim: 'the legacy root pin drifts from the published action pin',
-    anchor: "KNEXT_CLI_PACKAGE: '@getknext/core@1.3.1'\n        KNEXT_REGISTRY",
-    replacement: "KNEXT_CLI_PACKAGE: '@getknext/core@1.3.0'\n        KNEXT_REGISTRY",
+    anchor: "KNEXT_CLI_PACKAGE: 'kn-next@1.3.1'\n        KNEXT_REGISTRY",
+    replacement: "KNEXT_CLI_PACKAGE: 'kn-next@1.3.0'\n        KNEXT_REGISTRY",
   },
 
   // ── S: the scan itself ─────────────────────────────────────────────────────
@@ -231,9 +231,9 @@ const MUTATIONS = [
     id: 'S8',
     subject: 'scan',
     claim: 'discovery stops reaching actions outside the two published ones',
-    anchor: '.filter((p) => /(^|\\/)action\\.ya?ml$/.test(p))',
+    anchor: '} else if (e.isFile() && /^action\\.ya?ml$/.test(e.name)) {',
     replacement:
-      '.filter((p) => /^action\\.ya?ml$/.test(p) || /^packages\\/kn-next-action\\//.test(p))',
+      "} else if (e.isFile() && /^action\\.ya?ml$/.test(e.name) && !rel.startsWith('.github')) {",
   },
 ];
 

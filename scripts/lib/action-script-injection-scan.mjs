@@ -13,8 +13,8 @@
  * Everything else — including contexts nobody has thought of yet — is a finding.
  * The right shape is to pass the value through `env:` and read `"$VAR"`.
  *
- * Scope: every `action.yml` / `action.yaml` the repository tracks (discovered with
- * `git ls-files`, never enumerated by hand), whatever its directory. The keys
+ * Scope: every `action.yml` / `action.yaml` in the repository (discovered by
+ * walking the tree, never enumerated by hand), whatever its directory. The keys
  * scanned are each composite step's `run:` and a `with.script:` (the
  * `actions/github-script` body, which is JavaScript the same expression is pasted
  * into). `env:`, `with:` (other keys), `if:`, `working-directory:` are not script
@@ -26,9 +26,8 @@
  * `scripts/mutation-prove-2531-action-script-injection.mjs`.
  */
 
-import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { parse } from 'yaml';
 
 /**
@@ -97,19 +96,39 @@ export function scanActionFile(repoRoot, rel) {
   return scanActionText(readFileSync(resolve(repoRoot, rel), 'utf8'), rel);
 }
 
+/** Directories that hold dependencies, build output or agent scratch, not the repo's own actions. */
+const SKIP_DIRS = new Set([
+  'node_modules',
+  '.git',
+  '.claude',
+  'dist',
+  '.next',
+  '.turbo',
+  'target',
+  'coverage',
+  'graphify-out',
+]);
+
 /**
- * Every tracked `action.yml` / `action.yaml`, as repo-relative paths.
+ * Every `action.yml` / `action.yaml` in the repository, as repo-relative paths.
+ * A directory walk rather than a process spawn: the shared-helper rule in
+ * `tests/mutation-prover-lane.test.ts` keeps spawns out of `scripts/lib`.
  *
  * @param {string} repoRoot
  * @returns {string[]}
  */
 export function discoverActionFiles(repoRoot) {
-  const out = execFileSync('git', ['ls-files', '-z', '--', '*action.yml', '*action.yaml'], {
-    cwd: repoRoot,
-    encoding: 'utf8',
-  });
-  return out
-    .split('\0')
-    .filter((p) => /(^|\/)action\.ya?ml$/.test(p))
-    .sort();
+  const out = [];
+  const walk = (rel) => {
+    for (const e of readdirSync(join(repoRoot, rel), { withFileTypes: true })) {
+      const next = rel === '' ? e.name : `${rel}/${e.name}`;
+      if (e.isDirectory()) {
+        if (!SKIP_DIRS.has(e.name)) walk(next);
+      } else if (e.isFile() && /^action\.ya?ml$/.test(e.name)) {
+        out.push(next);
+      }
+    }
+  };
+  walk('');
+  return out.sort();
 }
