@@ -279,8 +279,9 @@ describe("knext create (default standalone target) — next.config wires the Red
 
     it("wires cacheHandler at the scaffolded cache-handler.js — a scaffold without one has NO ISR/data cache", () => {
         const code = defaultConfigCode();
-        expect(code).toMatch(/cacheHandler\s*:/);
-        expect(code).toContain("cache-handler.js");
+        // One anchored check: the KEY (word-bounded, so `xcacheHandler:` does
+        // not pass) and its VALUE path on the same entry.
+        expect(code).toMatch(/\bcacheHandler\s*:[^,\n]*cache-handler\.js/);
     });
 
     it("turns the per-pod in-memory cache off — memory caches diverge across Knative pods", () => {

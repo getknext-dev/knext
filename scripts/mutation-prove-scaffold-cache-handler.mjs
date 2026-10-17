@@ -25,7 +25,7 @@
  * aborted, declared 4 / run 0). The "default standalone target" describe in
  * `create-scaffold.test.ts` now pins this template's own wiring.
  *
- * THE FOUR MUTATIONS are the ways the #895 defect could quietly return, each an
+ * THE FOUR RED MUTATIONS (M1, M2, M3, M5) are the ways the #895 defect could quietly return, each an
  * independent RED of the guard, plus a negative control that must stay GREEN.
  *
  * WHY NO `jsStillParses` VALIDATE: the subjects are Handlebars templates
@@ -75,6 +75,18 @@ const MUTATIONS = [
     options: HBS,
     anchor: 'cacheMaxMemorySize: 0,',
     replacement: 'cacheMaxMemorySize: 1,',
+  },
+  {
+    id: 'M5',
+    expect: 'red',
+    claim:
+      'the cacheHandler key is renamed (cacheHandler -> xcacheHandler) — Next ignores the unknown ' +
+      'key, so the scaffolded app silently has no handler while the path string is still present; ' +
+      'an unanchored /cacheHandler\\s*:/ matches the suffix and stays green',
+    subject: 'nextConfig',
+    options: HBS,
+    anchor: 'cacheHandler: new URL("./cache-handler.js", import.meta.url).pathname,',
+    replacement: 'xcacheHandler: new URL("./cache-handler.js", import.meta.url).pathname,',
   },
   {
     id: 'M3',
