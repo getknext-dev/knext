@@ -595,3 +595,30 @@ func hostTokens(value string) []string {
 		return !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-' || r == '.')
 	})
 }
+
+// imagePinMismatch compares the zone's pin ("@sha256:<64 hex>", or "" for none)
+// with the digest of the function's spec.image, and returns a description of the
+// disagreement, or "" when there is no pin or the digests are equal.
+//
+// It compares CONTENT, not names: the registry path and tag are free to differ
+// (a mirror, a rename), the digest is not. An image without exactly one "@"
+// carries no digest (or an ambiguous one) and cannot match a pin: fail closed.
+func imagePinMismatch(pin, image string) string {
+	if pin == "" {
+		return ""
+	}
+	digest := ""
+	if strings.Count(image, "@") == 1 {
+		digest = image[strings.Index(image, "@"):]
+	}
+	if digest == pin {
+		return ""
+	}
+	have := "no digest"
+	if digest != "" {
+		have = digest
+	}
+	return fmt.Sprintf("the zone pins this function's image to %s, but spec.image carries %s: "+
+		"nothing is rendered or mounted, so the zone's database Secret and keys reach no image it did not agree to. "+
+		"Update the zone's backends[].image pin (or restore spec.image) so the two agree", pin, have)
+}

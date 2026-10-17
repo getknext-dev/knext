@@ -1,6 +1,6 @@
 # ADR-0004: `BackendService` CRD for polyglot backends
 
-Status: Accepted (2026-10-12, Z1 design gate — architect and system-designer re-confirmation: [architect](https://github.com/getknext-dev/knext/issues/2045#issuecomment-6128826009), [system designer](https://github.com/getknext-dev/knext/issues/2045#issuecomment-6128845685)) · previously Proposed · Date: 2026-06 · Depends on: ADR-0001, ADR-0002 · Amended 2026-10-09 (see the amendment at the end; revised 2026-10-12 with the Z1 design gate's required changes before the re-confirmation) · Amendment 2 (2026-10-15) **Accepted (2026-10-17, sprint-5 close design review)**: `spec.zone`, two-sided binding, rendered binding env, operator-owned ServiceAccount, the activator as a NetworkPolicy peer, explicit RPC auth options (see the end)
+Status: Accepted (2026-10-12, Z1 design gate — architect and system-designer re-confirmation: [architect](https://github.com/getknext-dev/knext/issues/2045#issuecomment-6128826009), [system designer](https://github.com/getknext-dev/knext/issues/2045#issuecomment-6128845685)) · previously Proposed · Date: 2026-06 · Depends on: ADR-0001, ADR-0002 · Amended 2026-10-09 (see the amendment at the end; revised 2026-10-12 with the Z1 design gate's required changes before the re-confirmation) · Amendment 2 (2026-10-15) **Accepted (2026-10-17, sprint-5 close design review)**: `spec.zone`, two-sided binding, rendered binding env, operator-owned ServiceAccount, the activator as a NetworkPolicy peer, explicit RPC auth options (see the end) · Amendment 3 (2026-10-17) **Proposed**, decided at the sprint-6 close per the 2026-09-22 rule: an optional image digest pin on `NextApp.spec.backends[]` (see the end)
 
 > **Amended by ADR-0065 (Proposed, 2026-10-07):** adds a `flavour: model` `BackendService`
 > (HTTP/1.1, loopback-bound model server behind an auth sidecar) and an `external` variant of
@@ -585,6 +585,131 @@ surface:
   `*-knext-signing-key` Secret is refused (suffix deny).
 - **Rotation bound.** See Decision 11 above: 120 s default, 90 s minimum, enforced at operator start.
 - **Open residuals, not decided here.** The binding matches names only, so a `BackendService` update
-  on a bound name re-opens the db-bind confused deputy (#2497); a transient Secret read error removes
+  on a bound name re-opens the db-bind confused deputy (#2497, answered by Amendment 3 below); a transient Secret read error removes
   a running function's Knative Service (#2498); the grace period on zone-half loss is revisited before
   model backends ship (#2496).
+
+## Amendment 3 (2026-10-17) — an optional image digest pin on `backends[]` (Proposed)
+
+Status: **Proposed.** It is decided at the sprint-6 close review, per the 2026-09-22 workflow rule
+(design gates review the sprint's aggregate and are no longer a merge gate). The implementation (#2497)
+ships behind this status; nothing in it changes a zone that does not set the field.
+
+### Context
+
+Amendment 2 made the binding two-sided so that someone who may **create** a `BackendService` but may not
+read Secrets cannot get the operator to mount a zone's database Secret into a pod they control. The
+sprint-5 close review found that the two sides agree on **names only**
+(`BackendBinding{name, service}`): nothing identifies *which* function the zone agreed to. Two paths
+follow, both with `update` (or `create` after a delete) on `backendservices` and nothing else:
+
+1. Change `spec.image` of an already-bound function. The operator re-renders, the function's `envFrom`
+   still names the zone's own database Secret (which the allowlist permits), and the zone's JWKS is
+   still mounted. The zone then sends its users' tokens (`sub`) to the image they chose.
+2. Delete a bound function and create the same name with another image: bound again with no zone
+   action.
+
+So the two-sided check closes *creating a new name* but not *updating or re-creating a bound one*, and
+the threat model did not say so. jev: the bypass is real, 0.77 yes.
+
+### Decision
+
+1. **A new optional field `NextApp.spec.backends[].image`** (`BackendBinding.Image`), the digest of the
+   function image the zone agreed to bind: `@sha256:` followed by 64 lowercase hex characters
+   (`+kubebuilder:validation:Pattern=^@sha256:[a-f0-9]{64}$`, `MaxLength=72`). A pattern and a length
+   bound, no CEL, so the list's existing `exists_one` rule keeps its cost estimate. Additive and
+   optional; the CRD stays `v1alpha1`. The value is the digest only, not a full reference: the digest
+   is the content identity, the registry path and tag may legitimately move (a mirror, a rename), and
+   the CLI already knows the digest when it emits both objects.
+2. **Mismatch semantics.** When the zone's entry for a function has a pin, the operator renders the
+   function only if the digest of its `BackendService.spec.image` equals the pin exactly. The digest is
+   the substring from the single `@` of the reference. An image with no `@`, with more than one `@`, or
+   with any other digest is a **mismatch** (fail closed: a tag-only or ambiguous reference carries no
+   digest to compare). A mismatch refuses the function exactly like the other binding refusals: it is
+   reported on `Bound` as `False` with reason `BindingImageMismatch` (Ready inherits it), the message
+   names both digests, a Warning event is raised once per transition, the refusal counter gains the
+   reason, and the Knative Service and NetworkPolicy the operator rendered are removed through the one
+   `removeRendered` path. Nothing is mounted: no database Secret, no JWKS. No pin keeps today's
+   behaviour in full.
+3. **It is positive evidence, so it fits the revocation model.** The comparison reads the two specs, which
+   the reconciler already holds. It is never derived from a Secret read or from any request that can
+   fail, so a transient apiserver error can neither cause the refusal nor undo it, and an unreadable
+   Secret does not turn a mismatch into "undecided": the mismatch is definitive and the function is
+   refused (`undecided()` is true only for an otherwise-accepted function). The comparison is an input of
+   `accepted()` and a case of `computeBackendServiceVerdict`; `Reconcile` gains an assignment, not a
+   branch, and no new `removeRendered` call site.
+4. **The pin is never rendered into the zone.** The zone's pod template, environment, annotations and
+   conditions are byte-identical with and without the pin (a golden test over the zone's rendered
+   Knative Service, for a pin that matches, one that does not, and none). Rendering it would roll a zone
+   revision whenever a pin changed, which is what the binding env was designed not to do. A refused
+   function stops reporting a served version, so, as for every other refusal, the zone's next revision
+   drops `<NAME>_SERVICE_PROTO_VERSION` and its calls to that function fail closed (Amendment 2
+   Decision 7); that comes from the refusal, not from the pin. Consequently the zone's
+   `BackendBindings` condition does not report a mismatch (it is a name-level fact); the function's own
+   status and the `knext_backendservice_refusals_total{reason="BindingImageMismatch"}` series do.
+5. **CLI.** `knext.config.ts` `backends[]` gains an optional `image` (validated with the CRD's pattern,
+   with the bound read from the shipped CRD in a test, as for `name` and `service`). `knext deploy` emits
+   it into `spec.backends[].image` only when set, so a config without pins renders a CR byte-identical to
+   one written before the field. `knext deploy function` prints the exact `backends` entry, with its
+   digest, after a successful apply, so users paste it instead of copying a digest by hand (jev 0.99).
+   Neither command writes anything new to the cluster: the cluster-write surface is unchanged (the
+   `NextApp`, and the `BackendService` from `deploy function`).
+6. **Rotation.** A new function image and a new pin are two writes that cannot land in one instant. The
+   operator refuses between them and renders again as soon as the other follows: an in-place update when
+   the two are applied together, a refusal with a cold start when applied apart, in either order. There
+   is no list of allowed digests (jev 1.00 for a single pin): a list widens the trusted set and lets a
+   stale digest stay trusted. The docs say to change both in one apply or one commit.
+7. **The residual is stated.** Until a zone sets the pin, `update` on `backendservices` is equivalent to
+   `get` on the zone's database Secret and to receiving its users' tokens. The threat model and the
+   zone-function docs say so, with the advice to grant `update`, `patch` and `create` on `backendservices`
+   only to principals who may already read that Secret. The pin does not stop the owner of the zone's
+   `NextApp` (who can already name a Secret in the zone's own spec), does not say anything about
+   provenance (a pinned malicious image is bound), and is optional by design: making it required would
+   reject every `NextApp` written before.
+
+### Options considered
+
+| Option | Pros | Cons |
+|---|---|---|
+| **A. Optional digest pin on `backends[]`, compared by the operator, not rendered (recommended)** | Closes both paths from the zone's side, where the consent already lives; additive; the CLI knows the digest; positive evidence, so it fits the revocation model; no new cluster writer | An opt-in: zones that do not set it keep the residual; a rotation is two writes |
+| B. A ValidatingAdmissionPolicy restricting who may write `BackendService.spec.image` | No zone change | It restricts *by principal*, which knext cannot know (GitOps tools, CI and humans all legitimately write it); needs Kubernetes 1.30; silently fails open below that or when deleted (the same class as the write policy tracked in #2500); a second admission surface to maintain |
+| C. Docs only: "grant `update` together with Secret read" | No code | Not a control; does not survive a GitOps controller or a review |
+| D. A required pin | The residual is closed everywhere | Rejects every existing `NextApp` that binds a function; a breaking CRD change in a `v1alpha1` minor |
+| E. A list of allowed digests | Overlap during a rotation | A stale digest stays trusted; widens the surface the pin exists to narrow |
+
+**Recommendation: A.** jev (2026-10-17): pin the digest 0.90 / a VAP restricting `spec.image` writers
+0.08 / docs only 0.02 (confidence 0.85, from the issue); refuse on a mismatch 1.00 against warn 0.00;
+report on the existing `Bound` condition 0.92 against a new condition 0.08; optional 1.00 against
+required 0.00; a single pin 1.00 against a list 0.00; the zone does not report or drop its env 0.96
+against reporting 0.04; the digest-only format 0.47 against a full reference 0.53 (a tie at confidence
+0.06, so the format follows the lead's decision, as the registry path is not part of the content
+identity). jev is a gut check, not the evidence: the evidence is the confused-deputy path in Context,
+the positive-evidence model of the revocation work, and the zone-env golden.
+
+### Consequences
+
+- **CRD change** (operator minor, additive, still `v1alpha1`): `NextApp.spec.backends[].image`, optional.
+  The CLI's schema preflight knows it (the emitted-fields list is regenerated). Upgrade order is the usual
+  one: operator and CRD first, then the CLI; an older CRD rejects the field under `--validate=strict` and
+  the preflight names it.
+- **The refusals counter gains `BindingImageMismatch`** (present at 0 from start-up, like the others).
+- **No change to the zone's render.** Proved by a golden and by the zero-diff goldens that already cover a
+  zone with no binding.
+- **A rotation costs a cold start when the two writes are apart.** Documented; not avoided by design.
+- **Residuals.** (a) Optional: unpinned zones keep the equivalence. (b) Anyone who can edit the zone's
+  `NextApp` can move the pin. (c) Content, not provenance. (d) The zone's own status does not show the
+  refusal. Each is stated in the threat model.
+
+### Action items
+
+- [x] `NextApp.spec.backends[].image` in the types, the CRD and the bundle (pattern, `MaxLength=72`).
+- [x] Operator: `imageMismatch` in the observation, an input of `accepted()` and a `Bound` case of
+      `computeBackendServiceVerdict`; the reason in the refusals counter.
+- [x] CLI: `backends[].image` in the config type, the validator (bound read from the shipped CRD), the
+      builder and the regenerated emitted-fields list; `knext deploy function` prints the entry.
+- [x] Tests: the comparison table, the verdict, the zone-render golden, envtest (swap refused and removed,
+      matching pin renders, no pin unchanged, recovery, rotation, malformed pin rejected by the CRD),
+      the CLI tests, and prover rows in `scripts/mutation-prove-2052-backendservice.mjs`.
+- [x] Docs: the threat model residual, the zone-functions page, the CLI and operator references.
+- [ ] kind: swap the image with `kubectl` and assert no database Secret mount (extends the Z8 kind lane).
+- [ ] Sprint-6 close review: accept, amend or reject this amendment.

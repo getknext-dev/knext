@@ -284,6 +284,20 @@ export interface BackendBindingConfig {
      * `name`, which is how `knext deploy function <name>` names it.
      */
     service?: string;
+    /**
+     * Pins the function image this app agreed to bind, as a digest only:
+     * `"@sha256:<64 lowercase hex>"`. `knext deploy function` prints the exact
+     * entry to paste.
+     *
+     * With a pin the operator runs the function only while its BackendService
+     * image carries exactly that digest; any other image is refused (Ready
+     * False, reason `BindingImageMismatch`) and nothing is mounted into it, so
+     * a change to the BackendService alone cannot send your database Secret or
+     * your users' tokens to an image you did not agree to. Without one, any
+     * image the BackendService names is bound. Update the pin whenever you
+     * deploy a new function image.
+     */
+    image?: string;
 }
 
 // Network exposure (#1865): whether the app's Knative Route is reachable from

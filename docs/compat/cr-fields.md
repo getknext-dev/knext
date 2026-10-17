@@ -30,6 +30,7 @@ Every field the CLI can emit is defined by the bundled CRD.
 | `metadata.namespace` | yes |
 | `spec` | yes |
 | `spec.backends` | yes |
+| `spec.backends.*.image` | yes |
 | `spec.backends.*.name` | yes |
 | `spec.backends.*.service` | yes |
 | `spec.build` | yes |

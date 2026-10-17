@@ -63,6 +63,7 @@ const (
 	ReasonFunctionBound           = "Bound"
 	ReasonZoneNotFound            = "ZoneNotFound"
 	ReasonZoneNotListed           = "ZoneNotListed"
+	ReasonBindingImageMismatch    = "BindingImageMismatch"
 	ReasonConflictingOwner        = "ConflictingOwner"
 	ReasonCompliant               = "Compliant"
 	ReasonSecretNotAllowed        = "SecretNotAllowed"
@@ -109,7 +110,12 @@ type functionObservation struct {
 	conflictingOwner string
 	// zoneListed: the zone's spec.backends[] names this function (zone half).
 	zoneListed bool
-	violations []sovereigntyViolation
+	// imageMismatch is why spec.image is not the image the zone pinned on its
+	// backends[] entry (ADR-0004 Amendment 3), or "" when there is no pin or it
+	// matches. It is read from the two specs, never from a Secret or a request
+	// that can fail, so it is always a definitive answer.
+	imageMismatch string
+	violations    []sovereigntyViolation
 	// unverified are referenced Secrets whose metadata could not be read: no
 	// answer, so neither a violation nor a pass (#2498).
 	unverified []unverifiedSecret
@@ -130,10 +136,12 @@ type functionObservation struct {
 }
 
 // accepted reports whether the function may be rendered: a valid image, both
-// halves of the binding, the zone's own controller reference, and no allowlist
-// violation. Fail closed: anything else renders nothing.
+// halves of the binding (and the image the zone pinned, if it pinned one), the
+// zone's own controller reference, and no allowlist violation. Fail closed:
+// anything else renders nothing.
 func (o functionObservation) accepted() bool {
-	return o.invalidImage == "" && o.zone != nil && o.conflictingOwner == "" && o.zoneListed && len(o.violations) == 0
+	return o.invalidImage == "" && o.zone != nil && o.conflictingOwner == "" && o.zoneListed &&
+		o.imageMismatch == "" && len(o.violations) == 0
 }
 
 // undecided reports whether the function would be accepted but for Secret
@@ -252,6 +260,8 @@ func computeBackendServiceVerdict(bs *appsv1alpha1.BackendService, o functionObs
 		bound = cond(ConditionFunctionBound, metav1.ConditionFalse, ReasonZoneNotListed, fmt.Sprintf(
 			"zone %q does not list this function in spec.backends (the zone half of the binding is missing): "+
 				"nothing is rendered or mounted until it does", bs.Spec.Zone))
+	case o.imageMismatch != "":
+		bound = cond(ConditionFunctionBound, metav1.ConditionFalse, ReasonBindingImageMismatch, o.imageMismatch)
 	default:
 		bound = cond(ConditionFunctionBound, metav1.ConditionTrue, ReasonFunctionBound, fmt.Sprintf(
 			"bound to zone %q: the function names it and the zone lists the function", bs.Spec.Zone))

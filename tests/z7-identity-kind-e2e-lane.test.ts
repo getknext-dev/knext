@@ -350,11 +350,39 @@ describe('the harness never touches what it did not create', () => {
 
 describe('the lane proves what it claims', () => {
   it('runs the phases the issue maps to, in order, by default', () => {
-    expect(runSh).toMatch(/^PHASES="\$\{PHASES:-up images deploy verify rotate leaks\}"$/m);
+    expect(runSh).toMatch(/^PHASES="\$\{PHASES:-up images deploy verify rotate pin leaks\}"$/m);
     const main = runSh.slice(
       runSh.lastIndexOf('# ---------------------------------------------------------------- main'),
     );
-    expect(main).toContain('for phase in up images deploy verify rotate leaks');
+    expect(main).toContain('for phase in up images deploy verify rotate pin leaks');
+  });
+
+  it('the pin phase swaps the image with kubectl and asserts nothing mounts the zone database Secret', () => {
+    const pin = runSh.slice(
+      runSh.indexOf('phase_pin() {'),
+      runSh.indexOf(
+        '# ---------------------------------------------------------------- phase: leaks',
+      ),
+    );
+    expect(pin.length).toBeGreaterThan(500);
+    // A matching pin first: the function renders AND mounts the zone's database
+    // Secret, so the later absence is the pin's doing, not a function that never
+    // mounted it.
+    expect(pin).toContain('image: "${digest}"');
+    expect(pin).toContain('fn_ksvc_mounts_db');
+    // The swap is a JSON patch of the BackendService image only (never a merge
+    // patch of a Knative Service) and the refusal is asserted by reason, by the
+    // Knative Service and by the pods.
+    expect(runSh).toContain('/spec/image');
+    expect(pin).toContain('False/BindingImageMismatch');
+    expect(pin).toContain('fn_ksvc_gone');
+    expect(pin).toContain('fn_pods_gone');
+    expect(pin).toContain('fn_netpol_gone');
+    // A control: the pinned image back renders it again, so the refusal is
+    // proved to be the pin and not a broken function.
+    expect(pin).toMatch(/swap_fn_image "\$\{go_img\}"[\s\S]*fn_ksvc_mounts_db/);
+    // And it holds: a refusal that flaps back is not one.
+    expect(pin).toMatch(/sleep 20[\s\S]*fn_ksvc_gone \|\| fail/);
   });
 
   it("follows the operator's shipped propagation bound instead of hard-coding one", () => {
@@ -620,7 +648,7 @@ describe('the mutation proof is anchored to the code it mutates', () => {
   // and 10 to 15 minutes each. These
   // checks need neither: they catch the cheap way a proof rots, an anchor that
   // no longer occurs once, or a reason the lane no longer prints.
-  const phases = ['up', 'images', 'deploy', 'verify', 'rotate', 'leaks'];
+  const phases = ['up', 'images', 'deploy', 'verify', 'rotate', 'pin', 'leaks'];
 
   it('has at least one row per property the lane claims', () => {
     expect(ROWS.map((r) => r.id)).toEqual(['M1', 'M2', 'M3', 'M4', 'M5', 'M6', 'M6b', 'M6c', 'M7']);

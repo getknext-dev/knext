@@ -26,7 +26,18 @@
  *     refused, served version, wake opt-out, byte-identical with no binding, and
  *     the BackendBindings condition computed in computeStatusVerdict;
  *   - the CRD's CEL rules (spec.zone immutable, /var/run/knext reserved), the
- *     nextapps/finalizers grant, and unconditional metric registration.
+ *     nextapps/finalizers grant, and unconditional metric registration;
+ *   - the zone's image pin on backends[] (ADR-0004 Amendment 3, I01-I13): the
+ *     digest comparison itself (an ignored pin, a no-pin refusal, a lax parse of
+ *     a reference with two digests, a tag-only image, a prefix or case-folded
+ *     match), its input to accepted(), the Bound condition and the refusals
+ *     series, the reconciler reading the entry, the CRD's pattern, and the pin
+ *     leaking into the zone's rendered env.
+ *
+ * Besides the rows: a CANARY (the first pin row graded by the same runner before
+ * the table; it must go red or the harness cannot see red) and a NEUTRAL control
+ * (the same conjunction with its operands swapped; it must stay green, or a
+ * runner that fails for any mutation would certify the whole table).
  *
  * Graded by `go test` targets in packages/kn-next-operator: plain unit tests,
  * the envtest Ginkgo suite (focused per row), the RBAC envtest and the metric
@@ -85,6 +96,8 @@ const METRICS = resolve(REPO_ROOT, 'packages/kn-next-operator/internal/controlle
 const CRD = resolve(REPO_ROOT, 'packages/kn-next-operator/config/crd/bases/apps.kn-next.dev_backendservices.yaml');
 // biome-ignore format: one-line resolve() for the anchor-drift scan
 const ROLE = resolve(REPO_ROOT, 'packages/kn-next-operator/config/rbac/role.yaml');
+// biome-ignore format: one-line resolve() for the anchor-drift scan
+const NEXTAPP_CRD = resolve(REPO_ROOT, 'packages/kn-next-operator/config/crd/bases/apps.kn-next.dev_nextapps.yaml');
 
 const PROVER = {
   subjects: {
@@ -99,6 +112,7 @@ const PROVER = {
     metrics: METRICS,
     crd: CRD,
     role: ROLE,
+    nextappcrd: NEXTAPP_CRD,
   },
 };
 
@@ -688,6 +702,112 @@ const MUTATIONS = [
     replacement: 'if false {',
     test: unit('TestBackendBindingsCondition'),
   },
+  // --- the zone's image pin on backends[] (ADR-0004 Amendment 3) -----------------
+  {
+    id: 'I01',
+    claim: 'the pin is never compared: any digest matches',
+    subject: 'sov',
+    anchor: '\tif digest == pin {',
+    replacement: '\tif true {',
+    test: unit('TestImagePinMismatch'),
+  },
+  {
+    id: 'I02',
+    claim: "an entry with no pin is treated as a mismatch (today's behaviour is lost)",
+    subject: 'sov',
+    anchor: '\tif pin == "" {\n\t\treturn ""\n\t}',
+    replacement: '\tif false {\n\t\treturn ""\n\t}',
+    test: unit('TestImagePinMismatch'),
+  },
+  {
+    id: 'I03',
+    claim: 'a reference with two digests is read leniently (the LAST one is taken)',
+    subject: 'sov',
+    anchor: '\tif strings.Count(image, "@") == 1 {\n\t\tdigest = image[strings.Index(image, "@"):]',
+    replacement:
+      '\tif strings.Contains(image, "@") {\n\t\tdigest = image[strings.LastIndex(image, "@"):]',
+    test: unit('TestImagePinMismatch'),
+  },
+  {
+    id: 'I04',
+    claim: 'an image with no digest matches the pin (fail open)',
+    subject: 'sov',
+    anchor: '\tdigest := ""\n',
+    replacement: '\tdigest := pin\n',
+    test: unit('TestImagePinMismatch'),
+  },
+  {
+    id: 'I05',
+    claim: 'a longer digest that merely starts with the pin matches',
+    subject: 'sov',
+    anchor: '\tif digest == pin {',
+    replacement: '\tif strings.HasPrefix(digest, pin) {',
+    test: unit('TestImagePinMismatch'),
+  },
+  {
+    id: 'I06',
+    claim: 'the digests are compared case-insensitively',
+    subject: 'sov',
+    anchor: '\tif digest == pin {',
+    replacement: '\tif strings.EqualFold(digest, pin) {',
+    test: unit('TestImagePinMismatch'),
+  },
+  {
+    id: 'I07',
+    claim: 'a mismatch is not an input of accepted(): the function still renders',
+    subject: 'verdict',
+    anchor: 'o.imageMismatch == "" && len(o.violations) == 0',
+    replacement: 'len(o.violations) == 0',
+    test: unit('TestAMismatchIsNotAccepted|TestAMismatchIsDecidedEvenWhenASecretReadFails'),
+  },
+  {
+    id: 'I08',
+    claim: 'the Bound condition does not name the mismatch',
+    subject: 'verdict',
+    anchor: '\tcase o.imageMismatch != "":',
+    replacement: '\tcase false:',
+    test: unit('TestVerdictForAMismatchIsBindingImageMismatch'),
+  },
+  {
+    id: 'I09',
+    claim: 'the reconciler never records the mismatch: a swapped image keeps running',
+    subject: 'ctl',
+    anchor: 'obs.imageMismatch = imagePinMismatch(entry.Image, bs.Spec.Image)',
+    replacement: '_ = imagePinMismatch(entry.Image, bs.Spec.Image)',
+    test: envtest('refuses a swapped image and removes its Knative Service'),
+  },
+  {
+    id: 'I10',
+    claim: 'the reconciler compares against an empty pin: nothing is ever refused',
+    subject: 'ctl',
+    anchor: 'obs.imageMismatch = imagePinMismatch(entry.Image, bs.Spec.Image)',
+    replacement: 'obs.imageMismatch = imagePinMismatch("", bs.Spec.Image)',
+    test: envtest('refuses a bound function that was deleted and re-created with another image'),
+  },
+  {
+    id: 'I11',
+    claim: 'the refusal is not pre-registered in the refusals series',
+    subject: 'metrics',
+    anchor: 'ReasonZoneNotListed, ReasonBindingImageMismatch, ReasonConflictingOwner,',
+    replacement: 'ReasonZoneNotListed, ReasonConflictingOwner,',
+    test: unit('TestTheRefusalIsCountedUnderItsOwnReason'),
+  },
+  {
+    id: 'I12',
+    claim: 'the CRD accepts a malformed pin',
+    subject: 'nextappcrd',
+    anchor: 'pattern: ^@sha256:[a-f0-9]{64}$',
+    replacement: 'pattern: ^.*$',
+    test: envtest('NextApp CRD: the backends.*image pin'),
+  },
+  {
+    id: 'I13',
+    claim: "the pin leaks into the zone's rendered env (a pin change rolls a zone revision)",
+    subject: 'bind',
+    anchor: 'zb := zoneBinding{name: entry.Name, service: entry.Service}',
+    replacement: 'zb := zoneBinding{name: entry.Name, service: entry.Service + entry.Image}',
+    test: unit('TestAPinChangesNothingRenderedIntoTheZone'),
+  },
   // --- CRD, RBAC and metrics ---------------------------------------------------
   {
     id: 'C01',
@@ -728,6 +848,18 @@ const MUTATIONS = [
     test: unit('TestGoldenMatchesTheOperatorsRegisteredMetrics', './internal/metriccontract/'),
   },
 ];
+
+// A mutation that changes NOTHING about behaviour (the same conjunction, its
+// operands swapped): its guard must stay green. A runner that exits non-zero for
+// any mutation at all would otherwise certify the whole table.
+const NEUTRAL = {
+  id: 'N01',
+  claim: 'control: the same conjunction with its operands swapped changes nothing',
+  subject: 'verdict',
+  anchor: 'o.imageMismatch == "" && len(o.violations) == 0',
+  replacement: 'len(o.violations) == 0 && o.imageMismatch == ""',
+  test: unit('TestAMismatchIsNotAccepted|TestAMismatchIsDecidedEvenWhenASecretReadFails'),
+};
 
 const CALICO_CLUSTER = process.env.KNEXT_CALICO_CLUSTER ?? '';
 if (CALICO_CLUSTER !== '') {
@@ -794,7 +926,7 @@ declareMutations(MUTATIONS.length);
 console.log(`${NAME}: ${MUTATIONS.length} mutations declared`);
 
 // Preflight: every anchor occurs exactly once BEFORE anything expensive runs.
-for (const m of MUTATIONS) {
+for (const m of [...MUTATIONS, NEUTRAL]) {
   const path = PROVER.subjects[m.subject];
   if (path === undefined) {
     console.error(`${NAME}: ${m.id} names no subject ${m.subject}`);
@@ -817,7 +949,7 @@ if (!envtestAssetsPresent()) {
 // below is noise.
 assertTreeClean(REPO_ROOT, 'baseline');
 const seen = new Set();
-for (const m of MUTATIONS) {
+for (const m of [...MUTATIONS, NEUTRAL]) {
   const key = JSON.stringify(m.test);
   if (seen.has(key)) continue;
   seen.add(key);
@@ -829,8 +961,8 @@ for (const m of MUTATIONS) {
 }
 console.log(`${NAME}: baseline green (${seen.size} distinct guards)`);
 
-let failed = 0;
-for (const m of MUTATIONS) {
+/** Plant one mutation, return {built, code}; the subject is restored either way. */
+function grade(m) {
   assertTreeClean(REPO_ROOT, `before ${m.id}`);
   const snap = snapshot(PROVER.subjects[m.subject]);
   let built;
@@ -849,6 +981,33 @@ for (const m of MUTATIONS) {
     );
     process.exit(2);
   }
+  return code;
+}
+
+// STEP 0: the harness can SEE red. A real mutation of a real subject, graded by
+// the same runner: if it stays green, nothing below means anything.
+const canary = grade({ ...MUTATIONS.find((m) => m.id === 'I01'), id: 'canary' });
+if (canary === 0) {
+  console.error(
+    `${NAME}: the canary mutation left the guard GREEN; the harness cannot observe red`,
+  );
+  process.exit(2);
+}
+console.log(`step 0 ok: the harness sees red (canary exit=${canary})`);
+
+// The neutral control must stay green.
+const neutral = grade(NEUTRAL);
+if (neutral !== 0) {
+  console.error(
+    `${NAME}: the neutral control (${NEUTRAL.id}) turned its guard red (exit ${neutral}); a runner that fails for any mutation proves nothing`,
+  );
+  process.exit(2);
+}
+console.log('step 0 ok: a neutral mutation stays green');
+
+let failed = 0;
+for (const m of MUTATIONS) {
+  const code = grade(m);
   recordMutation();
   const ok = code !== 0;
   if (!ok) failed++;

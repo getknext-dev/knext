@@ -91,6 +91,28 @@ spec:
                 items:
                   description: BackendBinding is the zone half of a binding to a BackendService.
                   properties:
+                    image:
+                      description: |-
+                        Image pins the function image this zone agreed to bind, as a digest:
+                        "@sha256:" followed by 64 lowercase hex characters. When set, the
+                        operator renders the function only while its BackendService's
+                        spec.image carries exactly this digest; any other digest (or an image
+                        with none) refuses the function with Ready=False, reason
+                        BindingImageMismatch, and removes the Knative Service it rendered, so
+                        the zone's database Secret and key set are mounted into nothing.
+
+                        Unset keeps the name-only binding: any image the BackendService names
+                        is bound, which means a principal who may update backendservices can
+                        change what runs with the zone's database Secret and receives its
+                        users' tokens. Set it to close that.
+
+                        The pin is never rendered into the zone's pod template: deploying a
+                        new function image must not roll a zone revision. Rotate it by
+                        changing the zone's pin and the BackendService image together.
+                        Additive and optional; upgrade the operator/CRD before the CLI.
+                      maxLength: 72
+                      pattern: ^@sha256:[a-f0-9]{64}$
+                      type: string
                     name:
                       description: |-
                         Name is the binding name. It derives the env prefix <NAME> and should

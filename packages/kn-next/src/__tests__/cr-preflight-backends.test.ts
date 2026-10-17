@@ -48,11 +48,18 @@ function loadCrd(): Crd {
     return YAML.parse(readFileSync(CRD_YAML, "utf-8")) as Crd;
 }
 
-function crdJson(withoutBackends: boolean): string {
+function crdJson(withoutBackends: boolean, withoutImagePin = false): string {
     const crd = loadCrd();
     const spec = crd.spec.versions[0]?.schema.openAPIV3Schema.properties.spec;
     if (!spec) throw new Error("bundled CRD has no spec");
     if (withoutBackends) delete spec.properties.backends;
+    // A CRD from the release that added spec.backends but not the image pin.
+    const items = (
+        spec.properties.backends as unknown as {
+            items?: { properties: Record<string, unknown> };
+        }
+    )?.items;
+    if (withoutImagePin && items) delete items.properties.image;
     return JSON.stringify(crd);
 }
 
@@ -71,10 +78,12 @@ interface Cluster {
     withoutBackends: boolean;
     /** Make the server-side dry-run apply reject the CR. */
     reject: boolean;
+    /** Serve a CRD that has spec.backends but not its image pin. */
+    withoutImagePin?: boolean;
 }
 
 function kubectl(cluster: Cluster): KubectlCapture {
-    const crd = crdJson(cluster.withoutBackends);
+    const crd = crdJson(cluster.withoutBackends, cluster.withoutImagePin);
     return (argv) => {
         if (argv[1] === "apply") return cluster.reject ? REJECT : ACCEPT;
         if (argv.join(" ").includes("openapi"))
@@ -114,6 +123,7 @@ describe("the NextApp the CLI emits matches the shipped CRD for spec.backends", 
         );
         expect(emitted).toEqual([
             "spec.backends",
+            "spec.backends.*.image",
             "spec.backends.*.name",
             "spec.backends.*.service",
         ]);
@@ -164,6 +174,57 @@ describe("the NextApp the CLI emits matches the shipped CRD for spec.backends", 
         expect(new Set(entries.map((e) => e.service)).size).toBe(
             entries.length,
         );
+    });
+});
+
+describe("preflight knows the backends image pin", () => {
+    const PINNED: KnativeNextConfig = {
+        name: "app",
+        registry: "registry",
+        backends: [{ name: "pricing", image: `@sha256:${"ab12".repeat(16)}` }],
+    };
+
+    it("the pin the builder emits satisfies the CRD's own pattern and bound", () => {
+        const cr = buildNextAppCRObject(PINNED, IMG, "ns", "b1");
+        const entry = (cr.spec as { backends: { image: string }[] })
+            .backends[0] as { image: string };
+        const field = (
+            loadCrd().spec.versions[0]?.schema.openAPIV3Schema.properties.spec
+                ?.properties.backends as unknown as {
+                items: {
+                    properties: Record<
+                        string,
+                        { pattern: string; maxLength: number }
+                    >;
+                };
+            }
+        ).items.properties.image as { pattern: string; maxLength: number };
+        expect(entry.image.length).toBeLessThanOrEqual(field.maxLength);
+        expect(new RegExp(field.pattern).test(entry.image)).toBe(true);
+    });
+
+    it("blames no field against the CRD this repo ships", () => {
+        expect(run(PINNED, { withoutBackends: false, reject: true })).toEqual(
+            [],
+        );
+    });
+
+    it("names the pin against a CRD that has backends but not the pin (operator first, then CLI)", () => {
+        const fields = run(PINNED, {
+            withoutBackends: false,
+            withoutImagePin: true,
+            reject: true,
+        });
+        expect(fields).toContain("spec.backends.*.image");
+    });
+
+    it("does not blame that CRD when no entry is pinned (a config without pins keeps working)", () => {
+        const fields = run(WITH_BACKENDS, {
+            withoutBackends: false,
+            withoutImagePin: true,
+            reject: true,
+        });
+        expect(fields).toEqual([]);
     });
 });
 
