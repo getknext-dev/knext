@@ -73,7 +73,7 @@ const MUTATIONS = [
     label: 'GitHub Action: the doctor step runs `npx --yes kn-next doctor` again',
     subject: 'actionYml',
     spec: GUARD_SPEC,
-    anchor: 'npx --yes @getknext/core doctor',
+    anchor: 'npx --yes "$KNEXT_CLI_PACKAGE" doctor',
     replacement: 'npx --yes kn-next doctor',
   },
   {

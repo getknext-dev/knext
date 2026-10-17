@@ -231,9 +231,9 @@ const MUTATIONS = [
     id: 'S8',
     subject: 'scan',
     claim: 'discovery stops reaching actions outside the two published ones',
-    anchor: '.filter((p) => /(^|\\/)action\\.ya?ml$/.test(p))',
+    anchor: '} else if (e.isFile() && /^action\\.ya?ml$/.test(e.name)) {',
     replacement:
-      '.filter((p) => /^action\\.ya?ml$/.test(p) || /^packages\\/kn-next-action\\//.test(p))',
+      "} else if (e.isFile() && /^action\\.ya?ml$/.test(e.name) && !rel.startsWith('.github')) {",
   },
 ];
 
