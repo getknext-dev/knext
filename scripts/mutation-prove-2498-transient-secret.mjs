@@ -272,9 +272,10 @@ const GO_MUTATIONS = [
     id: 'B03',
     claim: 'a bare 401 or 403 status is no longer a denial (it is held without limit)',
     subject: 'controller',
-    anchor: 'code == http.StatusUnauthorized || code == http.StatusForbidden',
+    anchor:
+      'if code := status.Status().Code; code == http.StatusUnauthorized || code == http.StatusForbidden {',
     replacement:
-      'code == http.StatusUnauthorized && false || code == http.StatusForbidden && false',
+      'if code := status.Status().Code; code == http.StatusUnauthorized && false || code == http.StatusForbidden && false {',
     test: unit(R_CLASSIFY),
   },
   {
