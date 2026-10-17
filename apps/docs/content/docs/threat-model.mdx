@@ -44,19 +44,24 @@ service, **E**levation of privilege.
 | **D** | A flood of resources or requeues starves the controller. | A rate-limited work queue with backoff. Knative scales the data plane to zero. Reconcile error and latency alerts ship. | No per-tenant limit on how many `NextApp` resources one user can create. |
 | **E** | An over-broad role lets a compromised resource escalate. | The operator uses a ClusterRole limited to the resource kinds it reconciles, and no cluster-admin. | Review the role in the install bundle against your own policy before installing. |
 
-## 2. Gateway to backend calls
+## 2. Gateway to function calls
 
-<Callout type="warn">
-Service-to-service authentication between a gateway and backend services is **designed but not yet
-shipped**, as is the cluster-local backend service resource. The rows below describe the intended
-posture and the controls that exist today.
-</Callout>
+Zone functions and their identity tokens are **Beta**. They are available on the **v2** line only; released 1.x has none of this.
+
+A zone calls a bound zone function with a short-lived token signed by the zone's own key. The
+function checks it against the zone's published public keys. The token names the zone as issuer and
+the function as audience, binds the RPC being called, and lives 60 seconds (5 seconds of clock skew
+allowed). Functions hold no signing key. They are cluster-local, which is Knative's visibility
+setting; on some installs a DomainMapping is routed on the public load balancer regardless (on OKE,
+keep private apps behind a tunnel rather than a DomainMapping). The token is the control, not the
+network position. See
+[Zone functions](/docs/zone-functions) for how keys are created and rotated.
 
 | STRIDE | Threat | Mitigation | Residual risk |
 | --- | --- | --- | --- |
-| **S** | A pod impersonates the gateway to call a backend directly. | The intended design uses cluster-local visibility with no public ingress, plus a shared signed token. | Mutual TLS through a mesh is the planned upgrade. Until then, plaintext HTTP/2 inside the cluster is a gap. |
-| **T** | An in-cluster attacker rewrites a request. | The default NetworkPolicy limits who can reach the pod. | Enforced only on a CNI that implements NetworkPolicy. |
-| **E** | Implicit pod-to-pod trust. | No implicit trust: a token is required and the NetworkPolicy defaults to deny. | Depends on the CNI, as above. |
+| **S** | A pod impersonates a zone to call a function directly. | Cluster-local visibility (Knative's, not a guarantee on every install), plus a token signed by that zone's key for that function and that RPC. | A captured token can be replayed against the same function and RPC for up to about a minute. |
+| **T** | An in-cluster attacker rewrites a request or a reply. | The token binds issuer, audience, RPC and user. The default NetworkPolicy limits who can reach the pod. | Replies are not authenticated and the link is plaintext HTTP/2. Mutual TLS through a mesh would close this; it is not built. NetworkPolicy is enforced only on a CNI that implements it. |
+| **E** | Implicit pod-to-pod trust. | No implicit trust: a token issued for that function is required, and the NetworkPolicy defaults to deny. | The function accepts the user the zone names. A compromised zone can name any user for its own functions. |
 
 ## 3. Cache-invalidation endpoint
 
