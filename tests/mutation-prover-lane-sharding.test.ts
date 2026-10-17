@@ -668,10 +668,14 @@ describe('#2499 the workflow: both refs, sharded, per-shard timeout, aggregated,
       /--shard \$\{\{ matrix\.shard \}\}\/\$\{\{ matrix\.shards \}\}/,
     );
     expect(String(step?.run)).toMatch(/--report/);
-    // One cargo target dir per leg, outside the tree: cargo-heavy provers do a
-    // cold dependency build per run otherwise.
-    expect(String(env.CARGO_TARGET_DIR ?? ''), 'CARGO_TARGET_DIR').toMatch(
+    // An OPT-IN per-leg cargo target dir, outside the tree...
+    expect(String(env.KNEXT_LANE_CARGO_TARGET_DIR ?? ''), 'KNEXT_LANE_CARGO_TARGET_DIR').toMatch(
       /^\$\{\{ runner\.temp \}\}\//,
+    );
+    // ...and NEVER lane-wide: a global CARGO_TARGET_DIR was measured live to turn
+    // `knext-ffi-crates` red at its baseline (it hardcodes target/release/).
+    expect(Object.keys(env), 'a lane-wide CARGO_TARGET_DIR breaks provers').not.toContain(
+      'CARGO_TARGET_DIR',
     );
   });
 

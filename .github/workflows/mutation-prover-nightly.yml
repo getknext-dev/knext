@@ -298,17 +298,19 @@ jobs:
       # 67 minutes on a hosted runner; `empty-dir-guard` is estimated ~55), below
       # the leg's ceiling.
       #
-      # CARGO_TARGET_DIR: the cargo-driven provers (`knext-ffi-crates`,
-      # `rust-template-auth`, and the Rust scaffold prover's ~20 runs) otherwise
-      # each do a COLD build of the whole dependency tree in a fresh `target/`
-      # (3+ minutes a run). One target dir per leg, OUTSIDE the tree, lets later
-      # runs reuse it. Cargo fingerprints by source content/mtime, so a mutated
-      # source rebuilds; the harness restores bytes, which also rebuilds.
+      # KNEXT_LANE_CARGO_TARGET_DIR is an OPT-IN seam, deliberately NOT
+      # `CARGO_TARGET_DIR`. A cargo-heavy prover (the Rust scaffold prover does ~20
+      # cold dependency builds, 3+ minutes each) may point its own cargo at this
+      # per-leg directory, outside the tree, to reuse the build. It is not set
+      # lane-wide because that was measured to break a prover: a lane-wide
+      # `CARGO_TARGET_DIR` made `knext-ffi-crates` red at its baseline (it
+      # hardcodes `target/release/` for its Bun harness; run 39009526071). A
+      # global side effect on every cargo call is the wrong default.
       - name: Run this shard's mutation provers (FAIL on exit code, count mismatch OR timeout)
         env:
           KNEXT_REDIS_LIVE_URL: redis://127.0.0.1:6379
           KNEXT_PROVER_TIMEOUT_MS: 6000000
-          CARGO_TARGET_DIR: ${{ runner.temp }}/cargo-target
+          KNEXT_LANE_CARGO_TARGET_DIR: ${{ runner.temp }}/cargo-target
           PROVER_LANE_REF: ${{ matrix.ref }}
           PROVER_LANE_SHA: ${{ matrix.sha }}
         run: >-
