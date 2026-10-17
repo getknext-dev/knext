@@ -138,8 +138,8 @@ const MUTATIONS = [
     id: 'A5',
     claim: 'first-party excludes start to excuse an UNRESOLVED source',
     subject: 'lib',
-    anchor: 'if (e.unresolved) {',
-    replacement: `if (e.unresolved && !excludes.includes(e.name) /* ${M} */) {`,
+    anchor: 'if (e.unresolved) {\n      // No publish time exists',
+    replacement: `if (e.unresolved && !excludes.includes(e.name) /* ${M} */) {\n      // No publish time exists`,
   },
   {
     id: 'A8',
