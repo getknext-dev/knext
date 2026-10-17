@@ -217,7 +217,8 @@ const GO_MUTATIONS = [
     subject: 'controller',
     anchor:
       'if code := status.Status().Code; code == http.StatusRequestTimeout || code >= http.StatusInternalServerError {',
-    replacement: 'if code := status.Status().Code; code >= 0 {',
+    replacement:
+      'if code := status.Status().Code; code >= 0 || code == http.StatusRequestTimeout || code >= http.StatusInternalServerError {',
     test: unit(R_CLASSIFY),
   },
   {
