@@ -202,12 +202,15 @@ const SPLITS = [
     build: 'image-supply-chain',
     publish: 'image-publish',
     layout: 'image-oci',
+    // What, besides leaving PR events out, the publish job's own if: must demand.
+    gate: /github\.ref\s*==\s*'refs\/heads\/main'/,
   },
   {
     file: 'operator-supply-chain.yml',
     build: 'operator-image-supply-chain',
     publish: 'operator-image-publish',
     layout: 'operator-oci',
+    gate: /needs\.operator-image-supply-chain\.outputs\.ready\s*==\s*'true'/,
   },
 ] as const;
 
@@ -254,6 +257,10 @@ for (const split of SPLITS) {
 
     it('the publish job is excluded from PR and merge-queue events by its own if:', () => {
       expect(ifExcludesPullRequests(publish.if as string)).toBe(true);
+    });
+
+    it('the publish job also demands its publish gate in the same if:', () => {
+      expect(String(publish.if)).toMatch(split.gate);
     });
 
     it('the publish job needs the build/scan job, so a failed scan publishes nothing', () => {
