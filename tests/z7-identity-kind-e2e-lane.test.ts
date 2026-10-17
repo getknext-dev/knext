@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parse } from 'yaml';
+import { CLASSES } from '../packages/grpc/e2e/z7-identity-kind/key-needles';
 import { ROWS } from '../packages/grpc/e2e/z7-identity-kind/mutation-rows.mjs';
 
 /**
@@ -372,11 +373,27 @@ describe('the lane proves what it claims', () => {
       'a token minted for another RPC is refused',
       'an expired token is refused',
       "a token from another zone's issuer is refused",
+      'an AUTH_USER token with an empty sub is refused',
+      'a token that lives past 60 s is refused',
       'none of the refused writes took effect',
     ]) {
       expect(runSh, refusal).toContain(refusal);
     }
     expect(runSh).toContain("control, a token from the zone's real key is accepted");
+  });
+
+  it('pairs the two hand-built refusals with a control built the same way, differing in one claim', () => {
+    // The real signer will not mint either bad token, so both are hand-built with the
+    // zone's real key (--auth raw). Their control is hand-built too, so the only
+    // difference is the claim under test: an empty sub, a life of 61 s (not 60).
+    expect(runSh).toContain(
+      'control, a hand-built token with the zone key, a user and a 60 s life, is accepted',
+    );
+    const raw = runSh.split('\n').filter((l) => /--auth raw\b/.test(l) && !/^\s*#/.test(l));
+    expect(raw.length).toBeGreaterThanOrEqual(3);
+    expect(raw.some((l) => /"--sub="/.test(l))).toBe(true);
+    expect(raw.some((l) => /--lifetime 61\b/.test(l))).toBe(true);
+    expect(raw.some((l) => /--lifetime 60\b/.test(l))).toBe(true);
   });
 
   it('asserts the pod specs: no private key in a function, a directory volume, no subPath', () => {
@@ -423,8 +440,8 @@ describe('the lane proves what it claims', () => {
     expect(runSh).toContain('the scan would prove nothing');
     expect(runSh).toContain('no operator log to scan');
     // An empty line as a grep pattern matches every line of every file: only a
-    // real base64 body line may count, or the scan reds on nothing.
-    expect(runSh).toMatch(/\[ "\$\{#line\}" -ge 40 \] \|\| continue/);
+    // needle of real length may count, or the scan reds on nothing.
+    expect(runSh).toMatch(/awk 'length\(\$0\) < 40 \{ bad = 1 \} END \{ exit bad \}'/);
   });
 
   it('scans the logs of EVERY operator pod, and the ones the rotation restart would take away', () => {
@@ -480,6 +497,78 @@ describe('the lane proves what it claims', () => {
   });
 });
 
+describe('the leak scan looks for every shape the operator itself redacts', () => {
+  it('builds the needles with key-needles.ts, one class at a time, and names a class, never a needle', () => {
+    expect(runSh).toContain('key-needles.ts');
+    // The call itself, not just the path: the classes come from here and from nowhere else.
+    expect(runSh).toMatch(/bun "\$\{NEEDLES\}" "\$\{keyfile\}" "\$\{nd\}"/);
+    // A class that matched is a failure.
+    expect(runSh).toMatch(/\[ -z "\$\{leaked_classes\}" \]/);
+    expect(runSh).toMatch(/grep -rqF -f "\$\{class_file\}" "\$\{dump\}"/);
+    expect(runSh).toMatch(/key material appears in .* \(classes:\$\{leaked_classes\}/);
+    // Not the old scan, which looked only at the PEM body lines.
+    expect(runSh).not.toMatch(/grep -v -- '\^-----' "\$\{keyfile\}"/);
+  });
+
+  it('fails closed when a class is missing, empty or too short to mean anything', () => {
+    expect(CLASSES.length).toBe(13);
+    expect(runSh).toMatch(/-ge 13 \]/);
+    expect(runSh).toContain('the scan would prove nothing');
+    expect(runSh).toMatch(/length\(\$0\) < 40/);
+  });
+
+  it('keeps the needles in private files and never prints them', () => {
+    const leaks = runSh.slice(runSh.indexOf('phase_leaks() {'));
+    // The script's umask 077 makes every file it writes private; the helper also sets 0600/0700.
+    expect(runSh).toMatch(/^umask 077$/m);
+    expect(leaks).not.toMatch(/(echo|printf|cat)[^\n]*needle/i);
+    expect(leaks).not.toMatch(/\bset -x\b/);
+  });
+});
+
+describe('the rotation watcher proves what it says: it ran the whole rotation and never failed', () => {
+  const rotate = () =>
+    runSh.slice(
+      runSh.indexOf('phase_rotate() {'),
+      runSh.indexOf(
+        '# ---------------------------------------------------------------- phase: leaks',
+      ),
+    );
+
+  it('a failure inside the watcher subshell reaches the parent through a sentinel file', () => {
+    const r = rotate();
+    const start = r.indexOf('rm -f "${watch_failed}"');
+    const end = r.indexOf('  ) &', start);
+    expect(start).toBeGreaterThan(0);
+    const body = r.slice(start, end);
+    expect(body).toContain('fail() {');
+    expect(r).toContain('watch_failed="${WORK}/watcher.failed"');
+    expect(body).toMatch(/>"\$\{watch_failed\}"/);
+    // The parent reads the sentinel before it trusts the log, and again before it stops the watcher.
+    expect(r.split('[ ! -e "${watch_failed}" ]').length - 1).toBeGreaterThanOrEqual(2);
+  });
+
+  it('asserts the watcher is still alive before it stops it', () => {
+    const r = rotate();
+    const alive = r.indexOf('kill -0 "${WATCH_PID}"');
+    const stop = r.indexOf('kill "${WATCH_PID}"');
+    expect(alive, 'no liveness check').toBeGreaterThan(0);
+    expect(stop, 'no stop').toBeGreaterThan(alive);
+    expect(r).toContain('the watcher stopped early');
+  });
+
+  it('wants a round at or after the last assertion, and enough rounds after the switch', () => {
+    const r = rotate();
+    expect(r).toMatch(/last_ts/);
+    expect(r).toContain('t_retired_refused');
+    expect(r).toContain('is older than the end of the rotation');
+    expect(r).toMatch(/after_switch/);
+    expect(r).toContain('rounds after the switch');
+    // Not the old, only liveness check.
+    expect(r).toMatch(/\[ "\$\{total\}" -ge 20 \]/);
+  });
+});
+
 describe('the mutation proof is anchored to the code it mutates', () => {
   // The operator rows (mutation-prove-operator.sh) need a cluster
   // and 10 to 15 minutes each. These
@@ -488,7 +577,7 @@ describe('the mutation proof is anchored to the code it mutates', () => {
   const phases = ['up', 'images', 'deploy', 'verify', 'rotate', 'leaks'];
 
   it('has at least one row per property the lane claims', () => {
-    expect(ROWS.map((r) => r.id)).toEqual(['M1', 'M2', 'M3', 'M4', 'M5', 'M6']);
+    expect(ROWS.map((r) => r.id)).toEqual(['M1', 'M2', 'M3', 'M4', 'M5', 'M6', 'M6b', 'M6c', 'M7']);
     expect(new Set(ROWS.map((r) => r.name)).size).toBe(ROWS.length);
   });
 
@@ -500,7 +589,9 @@ describe('the mutation proof is anchored to the code it mutates', () => {
     });
 
     it(`${row.id} ${row.name}: the lane can print the reason, and runs the phases that notice`, () => {
-      expect(runSh, row.reason).toContain(row.reason);
+      // A leak row is named by the needle class that must match (printed by the leak
+      // scan from key-needles.ts); every other reason is a message run.sh prints.
+      expect(runSh.includes(row.reason) || CLASSES.includes(row.reason), row.reason).toBe(true);
       for (const p of row.phases.split(' ')) expect(phases).toContain(p);
     });
   }

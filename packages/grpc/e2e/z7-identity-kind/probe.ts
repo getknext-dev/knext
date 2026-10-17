@@ -17,7 +17,7 @@ const RPCS = {
   health: '/grpc.health.v1.Health/Check',
 } as const;
 
-const MODES: readonly AuthMode[] = ['none', 'garbage', 'signer', 'foreign', 'forged'];
+const MODES: readonly AuthMode[] = ['none', 'garbage', 'signer', 'foreign', 'forged', 'raw'];
 
 function usage(message: string): never {
   console.error(`probe: ${message}`);
@@ -38,6 +38,7 @@ const { values } = parseArgs({
     id: { type: 'string', default: 'item' },
     value: { type: 'string', default: 'value' },
     'age-seconds': { type: 'string', default: '0' },
+    lifetime: { type: 'string' },
     kid: { type: 'string' },
   },
   strict: true,
@@ -65,6 +66,7 @@ const auth = needsToken
       method: values['token-method'] ?? procedure,
       sub: values.sub as string,
       ageSeconds: Number(values['age-seconds']),
+      lifetimeSeconds: values.lifetime === undefined ? undefined : Number(values.lifetime),
       kid: values.kid,
     })
   : { header: undefined, kid: undefined };

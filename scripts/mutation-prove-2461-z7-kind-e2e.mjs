@@ -4,7 +4,7 @@
  * (packages/grpc/e2e/z7-identity-kind/run.sh + .github/workflows/
  * z7-identity-kind-e2e.yml) and the probe it makes its calls with.
  *
- * Two guards, no cluster needed:
+ * Three guards, no cluster needed:
  *
  *   - `z7-e2e-probe.test.ts` — the probe's tokens. A refusal proves something
  *     only if the refused token is wrong in exactly ONE way: a "foreign key"
@@ -13,13 +13,23 @@
  *     foreign token is signed with, the kid a forged one claims, the age of an
  *     expired one, the audience, the Host header, what it prints, the key
  *     directory it leaves behind).
+ *   - `z7-key-needles.test.ts` — the leak scan's needles. A scan finds only the shapes
+ *     it looks for, and the operator redacts a wider set than a PEM's body lines:
+ *     the PEM, the 32-byte seed and the 64-byte private key, each in four base64
+ *     encodings. Each row drops one class (the seed, the private key, the PEM's
+ *     base64, an encoding) or breaks one (the private key without the public half,
+ *     a URL encoding that is the standard one), or makes the helper print them.
  *   - `z7-identity-kind-e2e-lane.test.ts` — the lane's workflow, path filter
  *     and script: a `continue-on-error`, an unpinned action, a write token, a
  *     path filter that misses the operator or a template, a teardown that is not
  *     `always()`, a trace flag, a cluster delete, an ownership check removed, a
  *     phase dropped from the default list, a Secret read left unguarded, a leak
  *     scan that counts an empty line, a bound assertion removed, a
- *     port-forward that is not kubectl itself, a kid passed as a separate argument.
+ *     port-forward that is not kubectl itself, a kid passed as a separate argument,
+ *     the leak scan's checks (the needle call, the class count, the length guard, a
+ *     matched class that is not a failure), the two hand-built refusals (an empty
+ *     sub, a life of 61 s) and their control, and the rotation watcher's checks
+ *     (still running, a round at the end, rounds after the switch, its own sentinel).
  *
  * The OPERATOR half (break one rule in the operator, run it on a kind cluster,
  * require the lane to go red for that reason) needs a cluster and 10 to 15 minutes
@@ -51,6 +61,8 @@ const RUN_SH = `${LANE}/run.sh`;
 const PROBE_LIB = `${LANE}/probe-lib.ts`;
 const PROBE_SPEC = 'packages/grpc/src/__tests__/z7-e2e-probe.test.ts';
 const LANE_SPEC = 'tests/z7-identity-kind-e2e-lane.test.ts';
+const NEEDLES_LIB = `${LANE}/key-needles.ts`;
+const NEEDLES_SPEC = 'packages/grpc/src/__tests__/z7-key-needles.test.ts';
 
 // ── validity: a mutation must leave its subject parseable ────────────────────
 const validateYaml = (text) => {
@@ -125,6 +137,90 @@ const PROBE = [
     claim: 'the audience option is ignored: a "wrong function" token carries the right audience',
     anchor: '    audience: () => a.audience,\n',
     replacement: '    // the audience option is not passed\n',
+  },
+  {
+    id: 'P08',
+    subject: 'probe',
+    claim:
+      'a hand-built token ignores the lifetime it was asked for: the "too long" token is the control',
+    anchor: '          exp: iat + (a.lifetimeSeconds ?? TOKEN_TTL_SECONDS),',
+    replacement: '          exp: iat + TOKEN_TTL_SECONDS,',
+  },
+  {
+    id: 'P09',
+    subject: 'probe',
+    claim:
+      "a hand-built token carries a kid that is not the zone key's: it is refused as an unknown key",
+    anchor: "      const header = b64url(JSON.stringify({ alg: 'EdDSA', typ: 'JWT', kid }));",
+    replacement:
+      "      const header = b64url(JSON.stringify({ alg: 'EdDSA', typ: 'JWT', kid: 'not-the-kid' }));",
+  },
+];
+
+// ── the leak scan's needles: the operator's whole redaction set ─────────────
+const NEEDLES = [
+  {
+    id: 'N01',
+    subject: 'needles',
+    claim: "the seed's four encodings are not scanned for (a JWK's `d`)",
+    anchor: "const RAW_FORMS = ['pem', 'seed', 'private'] as const;",
+    replacement: "const RAW_FORMS = ['pem', 'private'] as const;",
+  },
+  {
+    id: 'N02',
+    subject: 'needles',
+    claim: "the 64-byte private key's four encodings are not scanned for",
+    anchor: "const RAW_FORMS = ['pem', 'seed', 'private'] as const;",
+    replacement: "const RAW_FORMS = ['pem', 'seed'] as const;",
+  },
+  {
+    id: 'N03',
+    subject: 'needles',
+    claim: "base64 of the PEM bytes (a Secret's Data, a zap []byte field) is not scanned for",
+    anchor: "const RAW_FORMS = ['pem', 'seed', 'private'] as const;",
+    replacement: "const RAW_FORMS = ['seed', 'private'] as const;",
+  },
+  {
+    id: 'N04',
+    subject: 'needles',
+    claim: 'the "private key" needle is the seed alone, not Go\'s seed-then-public-key layout',
+    anchor: '    private: Buffer.concat([seed, pub]),',
+    replacement: '    private: seed,',
+  },
+  {
+    id: 'N05',
+    subject: 'needles',
+    claim: 'the unpadded standard encoding is not produced',
+    anchor: "  'std-nopad': (b: Buffer) => b.toString('base64').replace(/=+$/, ''),\n",
+    replacement: '  // the unpadded standard encoding is not produced\n',
+  },
+  {
+    id: 'N06',
+    subject: 'needles',
+    claim: 'the padded URL encoding is the standard one (+ and / are not swapped)',
+    anchor: "  url: (b: Buffer) => b.toString('base64').replaceAll('+', '-').replaceAll('/', '_'),",
+    replacement: "  url: (b: Buffer) => b.toString('base64'),",
+  },
+  {
+    id: 'N07',
+    subject: 'needles',
+    claim: 'the unpadded URL encoding (a JWK `d`) is the standard one',
+    anchor: "  'url-nopad': (b: Buffer) => b.toString('base64url'),",
+    replacement: "  'url-nopad': (b: Buffer) => b.toString('base64'),",
+  },
+  {
+    id: 'N08',
+    subject: 'needles',
+    claim: 'the PEM body lines include the BEGIN/END header lines (too short to be a safe needle)',
+    anchor: "      .filter((l) => l !== '' && !l.startsWith('-----')),",
+    replacement: "      .filter((l) => l !== ''),",
+  },
+  {
+    id: 'N09',
+    subject: 'needles',
+    claim: 'the helper prints the needles it was asked to keep private',
+    anchor: "    console.log(`${writeNeedles(readFileSync(keyFile, 'utf8'), outDir)} classes`);",
+    replacement: "    console.log(JSON.stringify(needlesFor(readFileSync(keyFile, 'utf8'))));",
   },
 ];
 
@@ -336,15 +432,143 @@ const LANE_ROWS = [
     replacement:
       '  k -n kourier-system port-forward svc/kourier-internal "${INTERNAL_PORT}:80" >>"${WORK}/pf-internal.log" 2>&1 &\n',
   },
+  {
+    id: 'S09',
+    subject: 'run',
+    claim: 'the leak scan never builds its needles, so it scans for nothing',
+    anchor:
+      '    bun "${NEEDLES}" "${keyfile}" "${nd}" >/dev/null || fail "could not build the leak-scan needles"',
+    replacement: '    : # no needles are built',
+  },
+  {
+    id: 'S10',
+    subject: 'run',
+    claim: 'the leak scan accepts a needle set of any size',
+    anchor:
+      '    [ "${classes}" -ge 13 ] || fail "the key needles have ${classes} classes, want 13 or more: the scan would prove nothing"',
+    replacement:
+      '    [ "${classes}" -ge 0 ] || fail "the key needles have ${classes} classes, want 13 or more: the scan would prove nothing"',
+  },
+  {
+    id: 'S11',
+    subject: 'run',
+    claim:
+      'a needle line shorter than 40 characters (an empty one matches every line) is no longer refused',
+    anchor: '      awk \'length($0) < 40 { bad = 1 } END { exit bad }\' "${class_file}" \\\n',
+    replacement: '      awk \'length($0) < 0 { bad = 1 } END { exit bad }\' "${class_file}" \\\n',
+  },
+  {
+    id: 'S12',
+    subject: 'run',
+    claim: 'the leak scan never greps the dump for a class',
+    anchor:
+      '      if grep -rqF -f "${class_file}" "${dump}"; then leaked_classes="${leaked_classes} ${class_file##*/}"; fi',
+    replacement: '      if false; then leaked_classes="${leaked_classes} ${class_file##*/}"; fi',
+  },
+  {
+    id: 'S13',
+    subject: 'run',
+    claim: 'a matched class is no longer a failure',
+    anchor: '  [ -z "${leaked_classes}" ] \\\n',
+    replacement: '  true \\\n',
+  },
+  {
+    id: 'S14',
+    subject: 'run',
+    claim: 'the hand-built control is not the same shape as the hand-built refusals',
+    anchor:
+      '  expect "${label}: control, a hand-built token with the zone key, a user and a 60 s life, is accepted" 200 "" \\\n',
+    replacement: '  expect "${label}: a hand-built token is accepted" 200 "" \\\n',
+  },
+  {
+    id: 'S15',
+    subject: 'run',
+    claim: 'the empty-sub refusal is no longer asserted as a refusal',
+    anchor:
+      '  expect "${label}: an AUTH_USER token with an empty sub is refused" 401 unauthenticated \\\n',
+    replacement:
+      '  expect "${label}: an AUTH_USER token with an empty sub is accepted" 401 unauthenticated \\\n',
+  },
+  {
+    id: 'S16',
+    subject: 'run',
+    claim: 'the over-long-lifetime refusal is no longer asserted as a refusal',
+    anchor: '  expect "${label}: a token that lives past 60 s is refused" 401 unauthenticated \\\n',
+    replacement:
+      '  expect "${label}: a token that lives past 60 s is accepted" 401 unauthenticated \\\n',
+  },
+  {
+    id: 'S17',
+    subject: 'run',
+    claim: 'the "empty sub" probe sends a sub after all',
+    anchor:
+      '    --host "${host}" --issuer "${ISSUER}" "--sub=" --rpc put --id "evil-${label}" --value x --auth raw --key-dir "${keydir}" --lifetime 60',
+    replacement:
+      '    --host "${host}" --issuer "${ISSUER}" --sub alice --rpc put --id "evil-${label}" --value x --auth raw --key-dir "${keydir}" --lifetime 60',
+  },
+  {
+    id: 'S18',
+    subject: 'run',
+    claim: 'the "too long" probe asks for a 60 s life, which is the control',
+    anchor:
+      '    --host "${host}" --issuer "${ISSUER}" --sub alice --rpc put --id "evil-${label}" --value x --auth raw --key-dir "${keydir}" --lifetime 61',
+    replacement:
+      '    --host "${host}" --issuer "${ISSUER}" --sub alice --rpc put --id "evil-${label}" --value x --auth raw --key-dir "${keydir}" --lifetime 60',
+  },
+  {
+    id: 'W01',
+    subject: 'run',
+    claim: 'the rotation no longer asserts its watcher is still running',
+    anchor:
+      '    || fail "the watcher stopped early: its \'no call failed\' would cover only the start of the rotation"',
+    replacement: '    || true',
+  },
+  {
+    id: 'W02',
+    subject: 'run',
+    claim: "the watcher's last round may be older than the end of the rotation",
+    anchor:
+      '    || fail "the watcher\'s last round (${last_ts:-none}) is older than the end of the rotation (${end_ts}): it stopped or hung, so it did not see all of it"',
+    replacement: '    || true',
+  },
+  {
+    id: 'W03',
+    subject: 'run',
+    claim: 'rounds after the switch are no longer counted',
+    anchor:
+      '    || fail "only ${after_switch} watcher rounds after the switch (want 10 or more): too few to say the switch and the retirement broke no call"',
+    replacement: '    || true',
+  },
+  {
+    id: 'W04',
+    subject: 'run',
+    claim: "the watcher's own failure sentinel is read only once, not before the liveness check",
+    anchor:
+      '  [ ! -e "${watch_failed}" ] || fail "the watcher failed: $(<"${watch_failed}")"\n  kill -0 "${WATCH_PID}" 2>/dev/null \\\n',
+    replacement: '  kill -0 "${WATCH_PID}" 2>/dev/null \\\n',
+  },
+  {
+    id: 'W05',
+    subject: 'run',
+    claim: "a failure inside the watcher's subshell is lost (it ends only the subshell)",
+    anchor: '    fail() {\n      printf \'%s\\n\' "$*" >"${watch_failed}"\n      exit 1\n    }\n',
+    replacement: '    : # a fail in here ends only this subshell\n',
+  },
 ];
 
-// Validators for the probe rows (TypeScript).
+// Validators for the probe and needle rows (TypeScript).
 for (const m of PROBE) m.validate = validateTs;
+for (const m of NEEDLES) m.validate = validateTs;
 
 const probe = createGuardProver({
   repoRoot: REPO_ROOT,
   spec: PROBE_SPEC,
   subjects: { probe: PROBE_LIB },
+});
+const needles = createGuardProver({
+  repoRoot: REPO_ROOT,
+  spec: NEEDLES_SPEC,
+  subjects: { needles: NEEDLES_LIB },
 });
 const lane = createGuardProver({
   repoRoot: REPO_ROOT,
@@ -354,6 +578,7 @@ const lane = createGuardProver({
 
 // ── preflight, declare, run ──────────────────────────────────────────────────
 probe.preflight(PROBE);
+needles.preflight(NEEDLES);
 lane.preflight(LANE_ROWS);
 
 // The harness stamps a residue marker on every mutation: INLINE, as a trailing
@@ -363,6 +588,7 @@ lane.preflight(LANE_ROWS);
 // and the red it caused would be for the wrong reason. Refuse such a row up front.
 for (const [rows, files] of [
   [PROBE, { probe: PROBE_LIB }],
+  [NEEDLES, { needles: NEEDLES_LIB }],
   [LANE_ROWS, { workflow: WORKFLOW, run: RUN_SH }],
 ]) {
   for (const m of rows) {
@@ -378,7 +604,7 @@ for (const [rows, files] of [
     }
   }
 }
-declareMutations(PROBE.length + LANE_ROWS.length);
+declareMutations(PROBE.length + NEEDLES.length + LANE_ROWS.length);
 
 console.log("\n=== the probe's tokens differ from the control in exactly one property ===");
 probe.baseline();
@@ -392,6 +618,19 @@ for (const m of PROBE) {
   recordMutation();
 }
 probe.finish(PROBE.length);
+
+console.log("\n=== the leak scan's needles are the operator's whole redaction set ===");
+needles.baseline();
+needles.proveCanSeeRed({
+  subject: 'needles',
+  anchor: "const RAW_FORMS = ['pem', 'seed', 'private'] as const;",
+  replacement: "const RAW_FORMS = ['pem'] as const;",
+});
+for (const m of NEEDLES) {
+  needles.run({ ...m, expect: 'red' });
+  recordMutation();
+}
+needles.finish(NEEDLES.length);
 
 console.log("\n=== the lane's workflow, path filter and script ===");
 lane.baseline();

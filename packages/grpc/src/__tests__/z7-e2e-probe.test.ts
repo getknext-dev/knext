@@ -255,3 +255,114 @@ describe('summarize', () => {
     });
   });
 });
+describe('hand-built tokens, signed by the zone key (mode raw)', () => {
+  // The real signer will not mint a token with no sub for an AUTH_USER RPC, nor one
+  // that lives past 60 s. The e2e still has to prove the FUNCTION refuses both, so
+  // those two are built by hand with the zone's real key. A refusal then proves
+  // something only if each differs from a control built the same way in exactly one
+  // property; the control is itself pinned to the real signer's token.
+  const raw: ProbeAuth = { ...base, mode: 'raw' };
+
+  it('the real signer refuses to mint either of them, which is why they are hand-built', async () => {
+    await expect(authorizationHeader({ ...base, sub: '' })).rejects.toThrow();
+  });
+
+  it('the raw control is the real signer token: same header, same claim set, same values, accepted', async () => {
+    const signer = parts((await authorizationHeader(base)).header);
+    const control = parts((await authorizationHeader(raw)).header);
+    expect(control.header).toEqual(signer.header);
+    expect(Object.keys(control.claims)).toEqual(Object.keys(signer.claims));
+    for (const k of ['iss', 'aud', 'method', 'sub'])
+      expect(control.claims[k]).toBe(signer.claims[k]);
+    expect((control.claims.exp as number) - (control.claims.iat as number)).toBe(60);
+    expect(control.signatureOk).toBe(true);
+    expect(claimsOk(control)).toEqual({ ok: true, why: [] });
+  });
+
+  it('an empty sub: only sub differs from the control, and the real key signed it', async () => {
+    const empty = parts((await authorizationHeader({ ...raw, sub: '' })).header);
+    const control = parts((await authorizationHeader(raw)).header);
+    expect(empty.header).toEqual(control.header);
+    expect(empty.claims.sub).toBe('');
+    expect(empty.signatureOk).toBe(true);
+    expect(claimsOk(empty).why).toEqual(['sub']);
+    for (const k of ['iss', 'aud', 'method']) expect(empty.claims[k]).toBe(control.claims[k]);
+    expect((empty.claims.exp as number) - (empty.claims.iat as number)).toBe(60);
+  });
+
+  it('a lifetime over 60 s: only exp differs from the control, and the real key signed it', async () => {
+    const long = parts((await authorizationHeader({ ...raw, lifetimeSeconds: 61 })).header);
+    const control = parts((await authorizationHeader(raw)).header);
+    expect(long.header).toEqual(control.header);
+    expect((long.claims.exp as number) - (long.claims.iat as number)).toBe(61);
+    expect(long.signatureOk).toBe(true);
+    expect(claimsOk(long).why).toEqual(['lifetime']);
+    for (const k of ['iss', 'aud', 'method', 'sub']) expect(long.claims[k]).toBe(control.claims[k]);
+  });
+
+  it('a lifetime of exactly 60 s is the control, not a variant', async () => {
+    const sixty = parts((await authorizationHeader({ ...raw, lifetimeSeconds: 60 })).header);
+    expect(claimsOk(sixty)).toEqual({ ok: true, why: [] });
+  });
+
+  it('needs the zone key directory', async () => {
+    await expect(authorizationHeader({ ...raw, keyDir: undefined })).rejects.toThrow();
+  });
+});
+
+describe('the probe command line', () => {
+  it('--sub= sends an empty sub and --lifetime sets the token life, both signed by the key dir', async () => {
+    const seen: IncomingHttpHeaders[] = [];
+    const server = createServer((req, res) => {
+      seen.push(req.headers);
+      req.resume();
+      res.writeHead(401, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ code: 'unauthenticated', message: 'nope' }));
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const port = (server.address() as AddressInfo).port;
+    // Async: the server above lives in this process, so a blocking spawn would starve it.
+    const run = async (extra: string[]) => {
+      const proc = Bun.spawn(
+        [
+          process.execPath,
+          join(import.meta.dir, '../../e2e/z7-identity-kind/probe.ts'),
+          '--base',
+          `http://127.0.0.1:${port}`,
+          '--host',
+          'pricing.shop.svc.cluster.local',
+          '--issuer',
+          ISSUER,
+          '--rpc',
+          'put',
+          '--auth',
+          'raw',
+          '--key-dir',
+          KEY_DIR,
+          ...extra,
+        ],
+        { stdout: 'pipe', stderr: 'pipe' },
+      );
+      return { exitCode: await proc.exited, stdout: await new Response(proc.stdout).text() };
+    };
+    try {
+      const emptySub = await run(['--sub=']);
+      expect(emptySub.exitCode).toBe(0);
+      const a = parts(seen[0]?.authorization);
+      expect(a.claims.sub).toBe('');
+      expect(a.signatureOk).toBe(true);
+
+      const long = await run(['--sub', 'alice', '--lifetime', '61']);
+      expect(long.exitCode).toBe(0);
+      const b = parts(seen[1]?.authorization);
+      expect((b.claims.exp as number) - (b.claims.iat as number)).toBe(61);
+      expect(b.claims.sub).toBe('alice');
+
+      // What it prints is one JSON line with the status and the Connect code only.
+      const out = JSON.parse(emptySub.stdout);
+      expect(out).toEqual({ status: 401, code: 'unauthenticated', kid: KID });
+    } finally {
+      server.close();
+    }
+  });
+});

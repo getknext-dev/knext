@@ -77,6 +77,43 @@ export const ROWS = [
     anchor: `case zkWriteSecret:\n${T}${T}${T}if sec, err = r.writeSigningKeySecret(ctx, app, sec, w.keys); err != nil {`,
     replacement: `case zkWriteSecret:\n${T}${T}${T}ctrl.LoggerFrom(ctx).Info("zone key written", "pem", string(w.keys.current.pem))\n${T}${T}${T}if sec, err = r.writeSigningKeySecret(ctx, app, sec, w.keys); err != nil {`,
     phases: 'deploy leaks',
-    reason: 'key material appears',
+    // Named by the class that matched: the PEM's body lines (the only shape the first
+    // scan looked for).
+    reason: 'pem-body-line',
+  },
+  {
+    id: 'M6b',
+    name: 'key-bytes-in-operator-log',
+    // The operator logs the key as the []byte zap prints it (base64 of the PEM, which
+    // is also what a Secret's Data holds). A scan of the PEM's body lines misses it.
+    file: 'packages/kn-next-operator/internal/controller/zone_signing_key_reconcile.go',
+    anchor: `case zkWriteSecret:\n${T}${T}${T}if sec, err = r.writeSigningKeySecret(ctx, app, sec, w.keys); err != nil {`,
+    replacement: `case zkWriteSecret:\n${T}${T}${T}ctrl.LoggerFrom(ctx).Info("zone key written", "data", w.keys.current.pem)\n${T}${T}${T}if sec, err = r.writeSigningKeySecret(ctx, app, sec, w.keys); err != nil {`,
+    phases: 'deploy leaks',
+    reason: 'pem-std',
+  },
+  {
+    id: 'M6c',
+    name: 'jwk-d-in-operator-log',
+    // The operator prints a JWK with its private member: `d` is the 32-byte seed in
+    // unpadded base64url. Neither the PEM's body lines nor its base64 contain it.
+    file: 'packages/kn-next-operator/internal/controller/zone_signing_key.go',
+    anchor: `${T}der, err := x509.MarshalPKCS8PrivateKey(priv)`,
+    replacement: `${T}fmt.Println("jwk", fmt.Sprintf("{\\"kty\\":\\"OKP\\",\\"crv\\":\\"Ed25519\\",\\"d\\":%q}", base64.RawURLEncoding.EncodeToString(priv.Seed())))\n${T}der, err := x509.MarshalPKCS8PrivateKey(priv)`,
+    phases: 'deploy leaks',
+    reason: 'seed-url-nopad',
+  },
+  {
+    id: 'M7',
+    name: 'watcher-dies-early',
+    // The lane's own watcher stops after three rounds: "no call failed" would then
+    // cover only the start of the rotation. The row mutates the lane, not the
+    // operator (the tool runs it the same way).
+    file: 'packages/grpc/e2e/z7-identity-kind/run.sh',
+    anchor: '      echo "$(date +%s) ${c1} ${c2} ${c3}" >>"${watch_log}"',
+    replacement:
+      '      echo "$(date +%s) ${c1} ${c2} ${c3}" >>"${watch_log}"\n      [ "${i}" -lt 3 ] || exit 0',
+    phases: 'deploy rotate',
+    reason: 'the watcher stopped early',
   },
 ];

@@ -15,8 +15,14 @@
  * public `kid`.
  */
 
-import { createHash, generateKeyPairSync, type KeyObject, sign } from 'node:crypto';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  createHash,
+  createPrivateKey,
+  generateKeyPairSync,
+  type KeyObject,
+  sign,
+} from 'node:crypto';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -33,7 +39,13 @@ export type AuthMode =
   /** The real signer over a freshly generated key the function has never seen. */
   | 'foreign'
   /** A token naming `kid` in its header, signed by a freshly generated key. */
-  | 'forged';
+  | 'forged'
+  /**
+   * A token built by hand and signed by the zone's real key in `keyDir`, for the
+   * two claims the real signer refuses to mint: an empty `sub` for an AUTH_USER RPC
+   * and a lifetime over 60 s. Everything else is the signer's token, byte for byte.
+   */
+  | 'raw';
 
 export interface ProbeAuth {
   readonly mode: AuthMode;
@@ -48,6 +60,8 @@ export interface ProbeAuth {
   readonly sub: string;
   /** How long ago the token was issued, in seconds. 0 (default) is now. */
   readonly ageSeconds?: number;
+  /** `raw`: the token's life, `exp - iat`, in seconds. Default 60, the contract's maximum. */
+  readonly lifetimeSeconds?: number;
   /** `forged`: the kid to claim. */
   readonly kid?: string;
   /** The function's name in the zone's contract (default `example`). */
@@ -122,6 +136,29 @@ export async function authorizationHeader(a: ProbeAuth): Promise<Authorization> 
         header: `Bearer ${await mintWithSigner(dir, a)}`,
         kid,
       }));
+    case 'raw': {
+      if (!a.keyDir) throw new Error('mode raw needs the zone key directory');
+      const pem = readFileSync(join(a.keyDir, 'current.key'), 'utf8');
+      const kid = readFileSync(join(a.keyDir, 'current.kid'), 'utf8').trim();
+      const iat = Math.floor((Date.now() - (a.ageSeconds ?? 0) * 1000) / 1000);
+      const header = b64url(JSON.stringify({ alg: 'EdDSA', typ: 'JWT', kid }));
+      const claims = b64url(
+        JSON.stringify({
+          iss: a.issuer,
+          aud: a.audience,
+          method: a.method,
+          sub: a.sub,
+          iat,
+          exp: iat + (a.lifetimeSeconds ?? TOKEN_TTL_SECONDS),
+        }),
+      );
+      const signature = sign(
+        null,
+        Buffer.from(`${header}.${claims}`, 'utf8'),
+        createPrivateKey(pem),
+      ).toString('base64url');
+      return { header: `Bearer ${header}.${claims}.${signature}`, kid };
+    }
     case 'forged': {
       if (!a.kid) throw new Error('mode forged needs the kid to claim');
       const { privateKey } = generateKeyPairSync('ed25519');

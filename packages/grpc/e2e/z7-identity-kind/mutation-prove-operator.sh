@@ -14,7 +14,11 @@
 #   M3 no-overlap              the previous key is retired the moment it is stamped
 #   M4 staged-key-projected    the zone's key volume also projects next.*
 #   M5 jwks-subpath            a function mounts the JWKS through a subPath
-#   M6 key-in-operator-log     the operator logs the private key it stores
+#   M6 key-in-operator-log     the operator logs the private key it stores (the PEM string)
+#   M6b key-bytes-in-operator-log  ... as the []byte zap prints, base64 of the PEM
+#   M6c jwk-d-in-operator-log  ... as a JWK `d`, the seed in unpadded base64url
+#   M7 watcher-dies-early      the LANE's rotation watcher stops after three rounds
+#                              (this row mutates run.sh, not the operator)
 #
 # A row is KILLED only when run.sh exits non-zero AND its output names the
 # expected reason: a red for another reason (a flake, an unready pod) is not a

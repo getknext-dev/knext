@@ -70,6 +70,7 @@ PKG="$(cd "${HERE}/../.." && pwd)"
 REPO="$(cd "${PKG}/../.." && pwd)"
 OPERATOR="${REPO}/packages/kn-next-operator"
 PROBE="${HERE}/probe.ts"
+NEEDLES="${HERE}/key-needles.ts"
 
 CLUSTER="${KIND_CLUSTER:-knext-z7-e2e}"
 REG_NAME="${REGISTRY_NAME:-knext-z7-registry}"
@@ -538,6 +539,15 @@ refusal_matrix() {
   expect "${label}: a token from another zone's issuer is refused" 401 unauthenticated \
     --host "${host}" --issuer "knext:zone:${NS}/not-${ZONE}" --sub alice \
     --rpc put --id "evil-${label}" --value x --auth signer --key-dir "${keydir}"
+  # Two tokens the real signer will not mint, so they are hand-built with the zone's
+  # real key (--auth raw), next to a control built the same way: the only difference
+  # is the one claim under test.
+  expect "${label}: control, a hand-built token with the zone key, a user and a 60 s life, is accepted" 200 "" \
+    --host "${host}" --issuer "${ISSUER}" --sub alice --rpc put --id "raw-${label}" --value r --auth raw --key-dir "${keydir}" --lifetime 60
+  expect "${label}: an AUTH_USER token with an empty sub is refused" 401 unauthenticated \
+    --host "${host}" --issuer "${ISSUER}" "--sub=" --rpc put --id "evil-${label}" --value x --auth raw --key-dir "${keydir}" --lifetime 60
+  expect "${label}: a token that lives past 60 s is refused" 401 unauthenticated \
+    --host "${host}" --issuer "${ISSUER}" --sub alice --rpc put --id "evil-${label}" --value x --auth raw --key-dir "${keydir}" --lifetime 61
   expect "${label}: none of the refused writes took effect" 404 not_found \
     "${common[@]}" --rpc get --id "evil-${label}" --auth signer --key-dir "${keydir}"
 }
@@ -692,9 +702,16 @@ phase_rotate() {
 
   # Calls through the zone every 2 s for the whole rotation. A rotation must not
   # fail one: the point of publish-then-wait-then-switch.
-  local watch_log="${WORK}/watch.log"
+  local watch_log="${WORK}/watch.log" watch_failed="${WORK}/watcher.failed"
   : >"${watch_log}"
+  rm -f "${watch_failed}"
   (
+    # A `fail` in here would end only this subshell and be seen by no one: it leaves
+    # a sentinel, which the parent checks before it trusts the watcher's log.
+    fail() {
+      printf '%s\n' "$*" >"${watch_failed}"
+      exit 1
+    }
     i=0
     while :; do
       i=$((i + 1))
@@ -821,6 +838,24 @@ phase_rotate() {
   expect_zone "Go: the zone's calls still succeed after retirement" '/example/get?id=after&sub=alice' 200 '.value == "v2"'
 
   log "rotate: nothing restarted, and no call through the zone failed at any point"
+  # "No call failed" is only worth what the watcher saw. It must not have failed on
+  # its own, must still be running, and must have made a round at or after the last
+  # assertion above (waiting at most a minute for the next one): otherwise it stopped
+  # somewhere in the rotation and its log covers only the start of it.
+  [ ! -e "${watch_failed}" ] || fail "the watcher failed: $(<"${watch_failed}")"
+  kill -0 "${WATCH_PID}" 2>/dev/null \
+    || fail "the watcher stopped early: its 'no call failed' would cover only the start of the rotation"
+  local end_ts last_ts="" w
+  end_ts="${t_retired_refused%.*}"
+  for w in $(seq 1 60); do
+    last_ts="$(tail -n 1 "${watch_log}" | cut -d' ' -f1)"
+    if [ "${last_ts:-0}" -ge "${end_ts}" ]; then break; fi
+    kill -0 "${WATCH_PID}" 2>/dev/null || break
+    sleep 1
+  done
+  [ "${last_ts:-0}" -ge "${end_ts}" ] \
+    || fail "the watcher's last round (${last_ts:-none}) is older than the end of the rotation (${end_ts}): it stopped or hung, so it did not see all of it"
+  [ ! -e "${watch_failed}" ] || fail "the watcher failed: $(<"${watch_failed}")"
   kill "${WATCH_PID}" 2>/dev/null || true
   [ "$(pod_idents "${GO_FN}")" = "${go_before}" ] || fail "the Go function pod was restarted or replaced during the rotation"
   [ "$(pod_idents "${ZONE}")" = "${zone_before}" ] || fail "the zone pod was restarted or replaced during the rotation"
@@ -832,6 +867,12 @@ phase_rotate() {
   total="$(wc -l <"${watch_log}" | tr -d ' ')"
   bad="$(awk '$2 != 200 || $3 != 200 || $4 != 200' "${watch_log}" | wc -l | tr -d ' ')"
   [ "${total}" -ge 20 ] || fail "only ${total} watcher rounds ran; too few to say nothing failed"
+  # The switch and the retirement are the part of the rotation that can break a
+  # call, so the rounds after the switch are counted on their own.
+  local after_switch
+  after_switch="$(awk -v t="${t_switched%.*}" '$1 >= t' "${watch_log}" | wc -l | tr -d ' ')"
+  [ "${after_switch}" -ge 10 ] \
+    || fail "only ${after_switch} watcher rounds after the switch (want 10 or more): too few to say the switch and the retirement broke no call"
   [ "${bad}" = 0 ] || { awk '$2 != 200 || $3 != 200 || $4 != 200' "${watch_log}" | head -5 >&2; fail "${bad} of ${total} calls through the zone failed during the rotation"; }
   ok "${total} rounds of calls through the zone during the rotation, none failed"
 
@@ -861,24 +902,33 @@ phase_leaks() {
   # The scan is only worth something over the log of a pod that did the work.
   grep -q 'reconciled' "${dump}/operator.log" \
     || fail "the operator logs show no reconcile: the scan would be reading the wrong pods"
-  # Every private key this run touched (old, new, and the current one now).
+  # Every private key this run touched (old, new, and the current one now), in every
+  # shape a logger could print it (key-needles.ts: the set the operator redacts from
+  # its own errors). Each class is one 0600 file of needles, scanned with grep -F -f;
+  # a hit is reported by CLASS NAME, and no needle is ever printed.
   export_key "${WORK}/leak-current" current
-  local keyfile line n=0 hits=0
+  local keyfile class_file nd tag=0 classes n=0 leaked_classes=""
   for keyfile in "${WORK}/key-old/current.key" "${WORK}/key-new/current.key" "${WORK}/leak-current/current.key"; do
     [ -s "${keyfile}" ] || continue
-    # The key's base64 body lines: any of them appearing anywhere is a leak.
-    while IFS= read -r line; do
-      # Only a base64 body line of real length counts: an empty line, as a
-      # grep pattern, matches every line of every file.
-      [ "${#line}" -ge 40 ] || continue
+    tag=$((tag + 1))
+    nd="${WORK}/needles-${tag}"
+    bun "${NEEDLES}" "${keyfile}" "${nd}" >/dev/null || fail "could not build the leak-scan needles"
+    classes="$(find "${nd}" -type f | wc -l | tr -d ' ')"
+    [ "${classes}" -ge 13 ] || fail "the key needles have ${classes} classes, want 13 or more: the scan would prove nothing"
+    for class_file in "${nd}"/*; do
+      # A line shorter than 40 characters, an empty one above all, could match by
+      # accident: as a grep pattern an empty line matches every line of every file.
+      awk 'length($0) < 40 { bad = 1 } END { exit bad }' "${class_file}" \
+        || fail "a needle file has a line shorter than 40 characters: the scan would prove nothing"
       n=$((n + 1))
-      if grep -rqF -- "${line}" "${dump}"; then hits=$((hits + 1)); fi
-    done < <(grep -v -- '^-----' "${keyfile}")
+      if grep -rqF -f "${class_file}" "${dump}"; then leaked_classes="${leaked_classes} ${class_file##*/}"; fi
+    done
   done
-  [ "${n}" -gt 0 ] || fail "no key lines to scan for: the scan would prove nothing"
-  [ "${hits}" = 0 ] || fail "key material appears in the operator's or the pods' logs, the events or the published objects (${hits} of ${n} key lines; not printed)"
+  [ "${n}" -gt 0 ] || fail "no key needles to scan for: the scan would prove nothing"
+  [ -z "${leaked_classes}" ] \
+    || fail "key material appears in the operator's or the pods' logs, the events or the published objects (classes:${leaked_classes}; the needles are not printed)"
   if grep -rqE -- 'BEGIN (EC |RSA |OPENSSH )?PRIVATE KEY' "${dump}"; then fail "a PEM private key header appears in the dumped logs or objects"; fi
-  ok "scanned ${n} key lines across the operator log, events, objects and pod logs: no key material"
+  ok "scanned ${n} needle classes (${tag} keys) across the operator logs, events, objects and pod logs: no key material"
 }
 
 # ---------------------------------------------------------------- main
