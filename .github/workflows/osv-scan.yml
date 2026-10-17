@@ -1,0 +1,88 @@
+name: OSV scan
+
+# Malicious packages and NEW high-severity vulnerabilities, on every pull request.
+#
+# OSV-Scanner reads every tracked bun.lock, Cargo.lock and go.mod and asks the OSV
+# database. OSV carries the OpenSSF malicious-packages feed (advisory ids `MAL-…`)
+# next to the usual GHSA, CVE and GO advisories, so one scan answers "is this
+# package malware" and "is this version vulnerable". No account, no token.
+#
+# POLICY (scripts/lib/osv-gate.mjs, pinned by tests/osv-gate.test.ts):
+#   - a MAL- advisory on any locked package fails, always;
+#   - a HIGH or CRITICAL vulnerability (CVSS >= 7.0) fails only when the change
+#     INTRODUCES it relative to the merge base. The tree already carries
+#     advisories, all in tooling transitives, and a gate that reds every unrelated
+#     PR gets ignored. The nightly re-scan (shipped-artifacts-nightly.yml) owns the
+#     standing ones;
+#   - the only suppression is security/osv-allowlist.json: dated, justified,
+#     optionally expiring.
+#
+# FAIL-CLOSED. A scanner that cannot reach api.osv.dev, or a report that cannot be
+# read, exits 2 and fails the job. A scan that did not happen is never a pass.
+#
+# `go.sum` is not scanned because OSV-Scanner has no extractor for it; `go.mod`
+# lists the whole module graph for modern Go and `go.sum` only carries hashes.
+#
+# SUPPLY CHAIN OF THE SCANNER ITSELF. The binary is pinned by version AND the
+# sha256 of the release asset (the same discipline as the crane pin in
+# supply-chain.yml), downloaded and verified before it runs. The sha256 is the
+# `osv-scanner_linux_amd64` line of the release's `osv-scanner_SHA256SUMS`.
+# Bumping the version means bumping the sha256 in the same edit; Dependabot does
+# not own this pin (it is a release asset, not an action), so re-check it when
+# osv-scanner publishes a release that matters.
+#
+# READ-ONLY. `contents: read` and nothing else: this workflow never publishes,
+# comments or signs, so a pull request gets no credential from it.
+
+on:
+  pull_request:
+  push:
+    branches: [main, 'integration/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: osv-scan-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  osv:
+    name: OSV-Scanner (malicious packages, new HIGH/CRITICAL)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # Full depth: the gate re-reads the lockfiles at the merge base.
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+
+      - name: Install osv-scanner (version + checksum pinned)
+        env:
+          OSV_SCANNER_VERSION: v2.6.0
+          # sha256 of osv-scanner_linux_amd64 from the v2.6.0 release's
+          # osv-scanner_SHA256SUMS (github.com/google/osv-scanner).
+          OSV_SCANNER_SHA256: ca69b3d3cd08f889a49dc0a383122f71cc528b83803671df5fd874d97485b108
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "${RUNNER_TEMP}/osv-scanner" \
+            "https://github.com/google/osv-scanner/releases/download/${OSV_SCANNER_VERSION}/osv-scanner_linux_amd64"
+          echo "${OSV_SCANNER_SHA256}  ${RUNNER_TEMP}/osv-scanner" | sha256sum -c -
+          chmod +x "${RUNNER_TEMP}/osv-scanner"
+          "${RUNNER_TEMP}/osv-scanner" --version
+
+      # On a pull request the base is the PR's base commit; on a push it is the
+      # previous tip. A branch's first push has an all-zero "before", which the gate
+      # reads as "no base" and then fails only on malicious packages.
+      - name: OSV gate
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: node scripts/osv-gate.mjs --scanner "${RUNNER_TEMP}/osv-scanner" --base "${BASE_SHA}"

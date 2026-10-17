@@ -1,0 +1,4 @@
+{
+  "$schema-note": "Dated + justified allowlist for the OSV dependency gate (scripts/osv-gate.mjs, .github/workflows/osv-scan.yml). A finding is suppressed ONLY by an entry here, so the gate can never be silently neutered. It covers both kinds of finding the gate fails on: a malicious-package advisory (`MAL-…`; suppress only a confirmed false positive) and a NEW HIGH/CRITICAL vulnerability. Each entry MUST carry: `id` (the advisory id or any alias: MAL-…, GHSA-…, CVE-…, GO-…), `justification` (at least 20 characters: why it is accepted, not exploitable in our usage, no fix available, upstream confirmed false positive), and `added` (ISO date). `expires` (ISO date) is optional; past its expiry the entry stops suppressing and the risk must be re-justified. Bump the dependency FIRST; allowlist only when there is no fix. Mirrors security/npm-audit-allowlist.json.",
+  "allow": []
+}

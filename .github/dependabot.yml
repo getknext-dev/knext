@@ -137,8 +137,121 @@ updates:
         patterns:
           - '*'
     open-pull-requests-limit: 5
+    # Same quarantine as bunfig.toml's minimumReleaseAge; see the bun entry below.
+    cooldown:
+      default-days: 3
     commit-message:
       prefix: 'chore(operator)'
     labels:
+      - 'dependencies'
       - 'operator'
       - 'reliability'
+
+  # ── Dependency channels added by the supply-chain hardening pass ──────────
+  #
+  # Until this block, Dependabot covered GitHub Actions and the operator's Go
+  # module only. The bun workspace, the Rust crates and the function templates
+  # had no bump channel, so a vulnerable transitive version stayed until someone
+  # happened to notice. tests/dependabot-ecosystems.test.ts derives the set of
+  # lockfiles from `git ls-files`, so a manifest added later fails CI until it is
+  # covered here or named as exempt with a reason.
+  #
+  # COOLDOWN. Every entry waits 3 days after a release before proposing it, the
+  # same number as `install.minimumReleaseAge` in bunfig.toml (the test keeps them
+  # equal). A malicious version that is pulled within a couple of days never gets
+  # a PR. Dependabot's own security updates are NOT delayed by a cooldown, so a
+  # CVE fix still arrives immediately.
+  #
+  # CHANGESETS. A bump that edits a published package's `dependencies` changes
+  # what every consumer installs, so the "Changeset required" check (rightly)
+  # asks for a changeset or the `no-changeset` label. That is why the bun entry
+  # keeps runtime dependencies (`bun-runtime`) apart from tooling (`bun-tooling`):
+  # a tooling bump touches only devDependencies and never trips the check, and a
+  # runtime bump is a deliberate, reviewable PR. A maintainer adds the changeset
+  # to the bot's branch (or the label with a one-line reason) as for any other PR.
+  # tests/dependabot-ecosystems.test.ts pins both halves of that behaviour.
+  #
+  # PUBLISHED-BYTES FREEZE. While a credential window is open,
+  # scripts/dependabot-published-bytes-pause.mjs closes a bot PR that reaches a
+  # published package's manifest. That is intended and unchanged: the bump comes
+  # back on the next weekly run once the window closes.
+  #
+  # UNPROVEN until the first run: Dependabot's `bun` ecosystem reads `bun.lock`
+  # and the workspace `package.json` files (dependabot-core ships a `bun`
+  # ecosystem with a bun.lock file fetcher), but this repo's `workspace:` and
+  # `catalog:` specifiers have not been seen by it. Check the Dependabot run log
+  # on the first Monday after merge.
+  - package-ecosystem: 'bun'
+    directories:
+      - '/'
+      - '/examples/bun-exec'
+    schedule:
+      interval: 'weekly'
+    cooldown:
+      default-days: 3
+    groups:
+      bun-runtime:
+        dependency-type: 'production'
+        patterns:
+          - '*'
+        update-types:
+          - 'minor'
+          - 'patch'
+      bun-tooling:
+        dependency-type: 'development'
+        patterns:
+          - '*'
+        update-types:
+          - 'minor'
+          - 'patch'
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: 'chore(deps)'
+    labels:
+      - 'dependencies'
+
+  # The Rust crates (`crates/`, the in-process FFI family) and the Rust function
+  # template. Both are Cargo workspaces/packages with a committed Cargo.lock.
+  - package-ecosystem: 'cargo'
+    directories:
+      - '/crates'
+      - '/templates/rust'
+    schedule:
+      interval: 'weekly'
+    cooldown:
+      default-days: 3
+    groups:
+      rust-crates:
+        patterns:
+          - '*'
+        update-types:
+          - 'minor'
+          - 'patch'
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: 'chore(rust)'
+    labels:
+      - 'dependencies'
+
+  # The Go function template and the scale-zero-pg gateway. The operator keeps its
+  # own entry above (its own prefix and labels).
+  - package-ecosystem: 'gomod'
+    directories:
+      - '/templates/go'
+      - '/packages/scale-zero-pg/gateway'
+    schedule:
+      interval: 'weekly'
+    cooldown:
+      default-days: 3
+    groups:
+      go-modules:
+        patterns:
+          - '*'
+        update-types:
+          - 'minor'
+          - 'patch'
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: 'chore(go)'
+    labels:
+      - 'dependencies'
