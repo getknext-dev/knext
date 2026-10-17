@@ -13,6 +13,19 @@ import {
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { parse } from 'yaml';
+import {
+  classifyFindings,
+  KNOWN_RED_PROVERS,
+  knownRedMarkdown,
+} from '../scripts/lib/known-red-provers.mjs';
+import {
+  DEFAULT_THRESHOLDS,
+  describeResources,
+  evaluateResources,
+  parseMeminfo,
+  REGENERABLE_BUILD_DIRS,
+  thresholdsFromEnv,
+} from '../scripts/lib/lane-resources.mjs';
 import { discoverProvers, PROVER_RE } from '../scripts/lib/prover-lane.mjs';
 import {
   aggregateReports,
@@ -360,6 +373,207 @@ describe('#2499 aggregateReports — declared == run, and a missing prover FAILS
   });
 });
 
+describe('#2499 resource tripwire — pure logic', () => {
+  const T = DEFAULT_THRESHOLDS;
+  const ev = (freeDiskMiB: number | null, availMemMiB: number | null) =>
+    evaluateResources({ freeDiskMiB, availMemMiB }, T);
+
+  it('healthy resources are ok', () => {
+    expect(ev(10_000, 8_000).level).toBe('ok');
+  });
+
+  it('low free disk is HARD below the threshold and names the number', () => {
+    const v = ev(T.hardFreeDiskMiB - 1, 8_000);
+    expect(v.level).toBe('hard');
+    expect(v.reasons.join(' ')).toMatch(/free disk 1023 MiB < 1024 MiB/);
+  });
+
+  it('low available memory is HARD and names the number', () => {
+    const v = ev(10_000, T.hardAvailMemMiB - 1);
+    expect(v.level).toBe('hard');
+    expect(v.reasons.join(' ')).toMatch(/available memory 255 MiB < 256 MiB/);
+  });
+
+  it('between the soft and hard disk thresholds is SOFT (clean, do not stop)', () => {
+    expect(ev(T.softFreeDiskMiB - 1, 8_000).level).toBe('soft');
+    expect(ev(T.hardFreeDiskMiB, 8_000).level).toBe('soft');
+  });
+
+  it('an unreadable reading is skipped, never fabricated into a trip', () => {
+    expect(ev(null, null).level).toBe('ok');
+  });
+
+  it('memory comes from MemAvailable, not MemFree', () => {
+    const text =
+      'MemTotal:       16384000 kB\nMemFree:          100000 kB\nMemAvailable:    8192000 kB\n';
+    expect(parseMeminfo(text)).toEqual({ availMemMiB: 8000, totalMemMiB: 16000 });
+    expect(parseMeminfo('nothing useful')).toEqual({ availMemMiB: null, totalMemMiB: null });
+  });
+
+  it('thresholds are env-overridable and refuse nonsense', () => {
+    expect(thresholdsFromEnv({})).toEqual(DEFAULT_THRESHOLDS);
+    expect(thresholdsFromEnv({ KNEXT_LANE_MIN_FREE_DISK_MIB: '5' }).hardFreeDiskMiB).toBe(5);
+    for (const bad of ['abc', '-1', 'Infinity']) {
+      expect(() => thresholdsFromEnv({ KNEXT_LANE_MIN_FREE_DISK_MIB: bad }), bad).toThrow();
+    }
+  });
+
+  it('the defaults are the jev-picked ones for a standard 14 GB / 16 GB hosted runner', () => {
+    expect(DEFAULT_THRESHOLDS).toEqual({
+      hardFreeDiskMiB: 1024,
+      hardAvailMemMiB: 256,
+      softFreeDiskMiB: 3072,
+    });
+  });
+
+  it('the description line is what the runner prints', () => {
+    expect(describeResources({ freeDiskMiB: 5000.4, availMemMiB: 1200, totalMemMiB: 16000 })).toBe(
+      'free memory 1200 of 16000 MiB available, free disk 5000 MiB',
+    );
+  });
+
+  it('regenerable build output NEVER includes a built CLI bundle, node_modules or the toolchain', () => {
+    // Several provers REQUIRE packages/kn-next/dist and do not rebuild it.
+    for (const d of REGENERABLE_BUILD_DIRS) {
+      expect(d, d).not.toMatch(/dist|node_modules|operator|\/bin\b/);
+    }
+    expect(REGENERABLE_BUILD_DIRS.length).toBeGreaterThan(0);
+  });
+});
+
+describe('#2499 the known-red list labels the alert, it never excuses a prover', () => {
+  it('every entry is a well-formed prover path with a distinct open-issue number', () => {
+    expect(KNOWN_RED_PROVERS.length).toBeGreaterThan(0);
+    const issues = new Set<number>();
+    const paths = new Set<string>();
+    for (const k of KNOWN_RED_PROVERS) {
+      expect(Number.isInteger(k.issue) && k.issue > 0, JSON.stringify(k)).toBe(true);
+      expect(k.prover, k.prover).toMatch(/^scripts\/mutation-prove-.*\.mjs$/);
+      expect(k.why.length, k.prover).toBeGreaterThan(5);
+      expect(issues.has(k.issue), `duplicate issue ${k.issue}`).toBe(false);
+      expect(paths.has(k.prover), `duplicate prover ${k.prover}`).toBe(false);
+      issues.add(k.issue);
+      paths.add(k.prover);
+    }
+  });
+
+  it('every listed prover EXISTS in the tree and is still discovered (nothing is skipped)', () => {
+    const have = new Set(discoverProvers(REPO_ROOT).map((p: { relPath: string }) => p.relPath));
+    for (const k of KNOWN_RED_PROVERS) {
+      expect(
+        have.has(k.prover) || 'onlyOn' in k,
+        `${k.prover} is listed as known-red but is not a prover`,
+      ).toBe(true);
+    }
+  });
+
+  it('classifies a finding that names a listed prover as KNOWN, everything else as FRESH', () => {
+    const [a] = KNOWN_RED_PROVERS;
+    const known = `integration/v2 4/6: ${a.prover}: non-zero exit (1)`;
+    const fresh1 = 'integration/v2 4/6: scripts/mutation-prove-other.mjs: non-zero exit (1)';
+    const fresh2 =
+      'integration/v2 6/6: no report — the leg was cancelled, crashed, or its artifact is missing';
+    const out = classifyFindings([known, fresh1, fresh2]);
+    expect(out.known).toEqual([{ finding: known, issue: a.issue }]);
+    expect(out.fresh).toEqual([fresh1, fresh2]);
+  });
+
+  it('the alert markdown names every listed issue and says they still fail', () => {
+    const md = knownRedMarkdown();
+    for (const k of KNOWN_RED_PROVERS) expect(md).toContain(`#${k.issue}`);
+    expect(md).toMatch(/still FAIL the lane/);
+  });
+
+  it('the runner and the shard library never read the list (it cannot skip or recount anything)', () => {
+    for (const f of ['scripts/run-mutation-provers.mjs', 'scripts/lib/prover-shard.mjs']) {
+      expect(read(resolve(REPO_ROOT, f)), f).not.toMatch(/known-red/);
+    }
+  });
+
+  describe('through the real aggregate script', () => {
+    const [known] = KNOWN_RED_PROVERS;
+    const discovered = [known.prover, 'scripts/mutation-prove-zz-other.mjs'];
+    const SHA = 'a'.repeat(40);
+    const leg = { ref: 'integration/v2', sha: SHA, shard: 1, shards: 1 };
+    const aggregate = (
+      results: Array<{
+        relPath: string;
+        summary: { declared: number; run: number } | null;
+        findings: string[];
+      }>,
+    ) => {
+      const dir = mkdtempSync(join(tmpdir(), 'knext-agg-'));
+      try {
+        const rep = makeReport({ ...leg, discovered, results });
+        writeFileSync(join(dir, reportFileName(leg)), JSON.stringify(rep));
+        const out = join(dir, 'gh-output.txt');
+        const r = spawnSync(
+          process.execPath,
+          [resolve(REPO_ROOT, 'scripts/prover-lane-aggregate.mjs')],
+          {
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              EXPECTED_LEGS: JSON.stringify([leg]),
+              REPORT_DIR: dir,
+              GITHUB_OUTPUT: out,
+            },
+          },
+        );
+        return { r, output: existsSync(out) ? read(out) : '' };
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    const ok = (relPath: string) => ({
+      relPath,
+      summary: { declared: 1, run: 1 },
+      findings: [] as string[],
+    });
+    const red = (relPath: string) => ({
+      relPath,
+      summary: { declared: 3, run: 1 },
+      findings: ['declared 3 mutation(s) but ran 1 — the prover did not do what it claims'],
+    });
+
+    it('a KNOWN-red prover still FAILS the lane (exit 1) but is labelled, with zero new reds', () => {
+      const { r, output } = aggregate([
+        red(known.prover),
+        ok('scripts/mutation-prove-zz-other.mjs'),
+      ]);
+      expect(r.status, `${r.stdout}${r.stderr}`).toBe(1);
+      expect(output).toContain('New red findings (not on the known-red list): 0');
+      expect(output).toContain(`(#${known.issue})`);
+      expect(r.stderr).toContain(`(known #${known.issue})`);
+    });
+
+    it('an UNLISTED red is NEW and fails the lane', () => {
+      const { r, output } = aggregate([
+        ok(known.prover),
+        red('scripts/mutation-prove-zz-other.mjs'),
+      ]);
+      expect(r.status).toBe(1);
+      expect(output).toContain('New red findings (not on the known-red list): 1');
+      expect(output).toContain('mutation-prove-zz-other.mjs');
+    });
+
+    it('a clean lane passes and PRINTS that the union equals the discovered set', () => {
+      const { r, output } = aggregate([
+        ok(known.prover),
+        ok('scripts/mutation-prove-zz-other.mjs'),
+      ]);
+      expect(r.status, `${r.stdout}${r.stderr}`).toBe(0);
+      expect(r.stdout).toContain('union == discovered set: verified for integration/v2');
+      expect(output).toContain('Shard union == discovered set: verified');
+    });
+
+    it('the union line is printed even when the lane is red (it is evidence, not a reward)', () => {
+      const { r } = aggregate([red(known.prover), ok('scripts/mutation-prove-zz-other.mjs')]);
+      expect(r.stdout).toContain('union == discovered set: verified for integration/v2');
+    });
+  });
+});
+
 describe('#2208 the per-prover bound', () => {
   it('defaults to a finite, positive bound well under the per-leg ceiling', () => {
     const ms = proverTimeoutMs({});
@@ -424,6 +638,10 @@ describe('#2208 the runner: --shard, --list, --report and a PER-PROVER timeout',
     'KNEXT_RUST_CODEGEN_DIR',
     'CARGO_TARGET_DIR',
     'GITHUB_ACTIONS',
+    'KNEXT_LANE_CLEANUP',
+    'KNEXT_LANE_MIN_FREE_DISK_MIB',
+    'KNEXT_LANE_MIN_AVAIL_MEM_MIB',
+    'KNEXT_LANE_SOFT_FREE_DISK_MIB',
   ];
   const hermeticEnv = (extra: Record<string, string> = {}) => {
     const env: Record<string, string | undefined> = { ...process.env };
@@ -443,11 +661,170 @@ describe('#2208 the runner: --shard, --list, --report and a PER-PROVER timeout',
       const r = run(dir, []);
       expect(r.status, `${r.stdout}${r.stderr}`).toBe(0);
       const lines =
-        r.stdout.match(/resources: free memory \d+ of \d+ MiB, free disk \d+ MiB/g) ?? [];
+        r.stdout.match(/resources: free memory \S+ of \S+ MiB available, free disk \S+ MiB/g) ?? [];
       expect(lines.length, 'one resource line per prover').toBe(2);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  describe('resource tripwire and between-prover cleanup', () => {
+    const marker = (name: string) =>
+      `import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(name)}, 'ran');` +
+      `console.log('::prover-summary:: ' + JSON.stringify({ declared: 1, run: 1 }));`;
+    const threeProvers = () =>
+      makeTree({
+        'mutation-prove-a.mjs': marker('ran-a'),
+        'mutation-prove-b.mjs': marker('ran-b'),
+        'mutation-prove-c.mjs': marker('ran-c'),
+      });
+
+    it('a hard shortage STOPS the leg after the prover, names it, and marks the rest NOT RUN', () => {
+      const dir = threeProvers();
+      try {
+        const report = join(dir, 'report.json');
+        const r = run(dir, ['--report', report], { KNEXT_LANE_MIN_FREE_DISK_MIB: '999999999' });
+        expect(r.status).not.toBe(0);
+        expect(`${r.stdout}${r.stderr}`).toMatch(
+          /RESOURCE TRIPWIRE after scripts\/mutation-prove-a\.mjs: free disk/,
+        );
+        expect(existsSync(join(dir, 'ran-a'))).toBe(true);
+        expect(existsSync(join(dir, 'ran-b')), 'the leg kept going after the tripwire').toBe(false);
+        expect(existsSync(join(dir, 'ran-c'))).toBe(false);
+        // The report STILL exists (the runner is alive), and names every assigned prover.
+        const rep = JSON.parse(read(report));
+        const by = Object.fromEntries(rep.results.map((x: { relPath: string }) => [x.relPath, x]));
+        expect(Object.keys(by).sort()).toEqual([
+          'scripts/mutation-prove-a.mjs',
+          'scripts/mutation-prove-b.mjs',
+          'scripts/mutation-prove-c.mjs',
+        ]);
+        expect(by['scripts/mutation-prove-a.mjs'].findings.join(' ')).toMatch(/RESOURCE TRIPWIRE/);
+        expect(by['scripts/mutation-prove-b.mjs'].findings.join(' ')).toMatch(/NOT RUN/);
+        expect(by['scripts/mutation-prove-c.mjs'].findings.join(' ')).toMatch(/NOT RUN/);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it.skipIf(!existsSync('/proc/meminfo'))(
+      'a memory shortage stops the leg too (Linux, where MemAvailable exists)',
+      () => {
+        const dir = threeProvers();
+        try {
+          const r = run(dir, [], { KNEXT_LANE_MIN_AVAIL_MEM_MIB: '999999999' });
+          expect(r.status).not.toBe(0);
+          expect(`${r.stdout}${r.stderr}`).toMatch(/RESOURCE TRIPWIRE .*available memory/);
+          expect(existsSync(join(dir, 'ran-b'))).toBe(false);
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+        }
+      },
+    );
+
+    it('no shortage: every prover runs and no tripwire fires', () => {
+      const dir = threeProvers();
+      try {
+        const r = run(dir, [], {
+          KNEXT_LANE_MIN_FREE_DISK_MIB: '0',
+          KNEXT_LANE_MIN_AVAIL_MEM_MIB: '0',
+        });
+        expect(r.status, `${r.stdout}${r.stderr}`).toBe(0);
+        expect(`${r.stdout}${r.stderr}`).not.toMatch(/RESOURCE TRIPWIRE/);
+        for (const n of ['ran-a', 'ran-b', 'ran-c']) expect(existsSync(join(dir, n))).toBe(true);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    const withBuildOutput = () => {
+      const dir = threeProvers();
+      for (const rel of [
+        'crates/target/release/x.bin',
+        'templates/rust/target/debug/y.bin',
+        'packages/kn-next/dist/cli/kn-next.js',
+      ]) {
+        mkdirSync(join(dir, rel, '..'), { recursive: true });
+        writeFileSync(join(dir, rel), 'x');
+      }
+      return dir;
+    };
+    const SOFT = { KNEXT_LANE_SOFT_FREE_DISK_MIB: '999999999', KNEXT_LANE_MIN_FREE_DISK_MIB: '0' };
+
+    it('under SOFT pressure in CI the regenerable build output is deleted, the built CLI is not', () => {
+      const dir = withBuildOutput();
+      try {
+        const r = run(dir, [], { ...SOFT, KNEXT_LANE_CLEANUP: '1' });
+        expect(r.status, `${r.stdout}${r.stderr}`).toBe(0);
+        expect(r.stdout).toMatch(/removed regenerable build output/);
+        expect(existsSync(join(dir, 'crates/target'))).toBe(false);
+        expect(existsSync(join(dir, 'templates/rust/target'))).toBe(false);
+        expect(
+          existsSync(join(dir, 'packages/kn-next/dist/cli/kn-next.js')),
+          'the built CLI was deleted',
+        ).toBe(true);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('outside CI (no opt-in) build output is NEVER deleted, whatever the pressure', () => {
+      const dir = withBuildOutput();
+      try {
+        run(dir, [], SOFT);
+        expect(existsSync(join(dir, 'crates/target/release/x.bin'))).toBe(true);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('a pre-existing lane-owned cargo dir is cleaned only under pressure, never when healthy', () => {
+      const dir = threeProvers();
+      const cargo = join(dir, 'lane-cargo');
+      mkdirSync(cargo);
+      writeFileSync(join(cargo, 'dep.rlib'), 'x');
+      try {
+        run(dir, [], {
+          KNEXT_LANE_CLEANUP: '1',
+          KNEXT_LANE_CARGO_TARGET_DIR: cargo,
+          KNEXT_LANE_SOFT_FREE_DISK_MIB: '0',
+        });
+        expect(existsSync(join(cargo, 'dep.rlib')), 'cleaned while healthy').toBe(true);
+        run(dir, [], { ...SOFT, KNEXT_LANE_CLEANUP: '1', KNEXT_LANE_CARGO_TARGET_DIR: cargo });
+        expect(existsSync(join(cargo, 'dep.rlib')), 'not cleaned under pressure').toBe(false);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('temp entries a prover leaves are removed in CI; entries that pre-existed are kept', () => {
+      const tmp = mkdtempSync(join(tmpdir(), 'knext-lane-tmp-'));
+      writeFileSync(join(tmp, 'pre-existing.txt'), 'keep');
+      const dir = makeTree({
+        'mutation-prove-a.mjs': `
+          import { mkdtempSync, writeFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          import { tmpdir } from 'node:os';
+          const d = mkdtempSync(join(tmpdir(), 'leaky-'));
+          writeFileSync(join(d, 'big.bin'), 'x');
+          console.log('::prover-summary:: ' + JSON.stringify({ declared: 1, run: 1 }));`,
+      });
+      try {
+        const leftovers = (extra: Record<string, string>) => {
+          run(dir, [], { TMPDIR: tmp, ...extra });
+          return readdirSync(tmp).filter((n) => n.startsWith('leaky-'));
+        };
+        expect(leftovers({}), 'left alone outside CI without the opt-in').toHaveLength(1);
+        for (const n of readdirSync(tmp).filter((x) => x.startsWith('leaky-'))) {
+          rmSync(join(tmp, n), { recursive: true, force: true });
+        }
+        expect(leftovers({ KNEXT_LANE_CLEANUP: '1' }), 'leaked temp dir survived').toHaveLength(0);
+        expect(existsSync(join(tmp, 'pre-existing.txt'))).toBe(true);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    });
   });
 
   it('is HERMETIC: a lane-style environment does not leak into the runner under test', () => {
@@ -881,6 +1258,20 @@ describe('#2499 the workflow: both refs, sharded, per-shard timeout, aggregated,
     expect(needs).toEqual(expect.arrayContaining(['plan', 'run-mutation-provers']));
     expect(String(agg.if ?? '')).toMatch(/always\(\)/);
     expect(JSON.stringify(agg.steps)).toContain('prover-lane-aggregate.mjs');
+  });
+
+  it('the alert embeds the aggregate summary and the known-red list', () => {
+    const agg = wf.jobs.aggregate;
+    expect(JSON.stringify(agg.outputs)).toContain('steps.aggregate.outputs.summary');
+    expect((agg.steps ?? []).some((s) => s.id === 'aggregate')).toBe(true);
+    const step = (wf.jobs['nightly-red-alert'].steps ?? []).find((s) =>
+      /nightly-alert-issue\.mjs/.test(String(s.run ?? '')),
+    );
+    expect(String((step?.env as Record<string, unknown>)?.AGG_SUMMARY)).toBe(
+      '${{ needs.aggregate.outputs.summary }}',
+    );
+    expect(String(step?.run)).toContain('${AGG_SUMMARY}');
+    expect(String(step?.run)).toContain('node scripts/prover-lane-known-red.mjs');
   });
 
   it('the alert fires on failure OR cancelled of ANY of plan / lane / aggregate', () => {

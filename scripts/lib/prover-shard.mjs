@@ -253,17 +253,21 @@ const sameSet = (a, b) =>
  *   (a partition that is wrong the same way in the runner and here).
  *   `reports[i]` is the report for `expected[i]` (`undefined` when the leg wrote
  *   none — cancelled, crashed, artifact lost).
- * @returns {{ findings: string[], partialRefs: string[] }}
+ * @returns {{ findings: string[], partialRefs: string[], unionVerified: string[] }}
+ *   `unionVerified` lists the refs whose legs ALL reported and whose shards' union
+ *   was proved equal to the discovered set.
  */
 export function aggregateReports({ expected, reports, shard = shardProvers }) {
   const findings = [];
   const partialRefs = [];
+  const unionVerified = [];
   if (!Array.isArray(expected) || expected.length === 0) {
     return {
       findings: [
         'the plan expected no legs at all — a lane that proves nothing is not a green lane',
       ],
       partialRefs,
+      unionVerified,
     };
   }
 
@@ -350,9 +354,11 @@ export function aggregateReports({ expected, reports, shard = shardProvers }) {
       findings.push(
         `${ref}: the shards' union is not the discovered set (a prover is in no shard or in two)`,
       );
+    } else if (present.length === legs.length) {
+      unionVerified.push(ref);
     }
   }
-  return { findings, partialRefs };
+  return { findings, partialRefs, unionVerified };
 }
 
 /** The per-prover bound, in ms. Overridable so the guard can use a short one. */

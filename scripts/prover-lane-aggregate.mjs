@@ -12,9 +12,44 @@
  * directory the report artifacts were downloaded into.
  */
 
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { classifyFindings } from './lib/known-red-provers.mjs';
 import { aggregateReports, reportFileName } from './lib/prover-shard.mjs';
+
+/** Job outputs are capped; the alert needs the gist, the job log has the rest. */
+const SUMMARY_CAP = 20_000;
+
+/**
+ * The markdown the alert issue embeds: FRESH findings first (what a reader must
+ * act on), then the KNOWN-red ones (still failing, tracked elsewhere).
+ */
+function summaryMarkdown({ fresh, known, unionVerified, partialRefs, expectedCount }) {
+  const out = [`Legs expected: ${expectedCount}.`];
+  out.push(
+    unionVerified.length > 0
+      ? `Shard union == discovered set: verified for ${unionVerified.map((r) => `\`${r}\``).join(', ')}.`
+      : 'Shard union == discovered set: NOT verified for any ref (see the findings).',
+  );
+  for (const ref of partialRefs) out.push(`\`${ref}\`: partial run, union not asserted.`);
+  out.push('', `**New red findings (not on the known-red list): ${fresh.length}**`);
+  for (const f of fresh) out.push(`- ${f}`);
+  out.push('', `**Known red findings (tracked, still failing): ${known.length}**`);
+  for (const k of known) out.push(`- (#${k.issue}) ${k.finding}`);
+  const text = out.join('\n');
+  return text.length > SUMMARY_CAP
+    ? `${text.slice(0, SUMMARY_CAP)}\n... (truncated; the aggregate job log has the rest)`
+    : text;
+}
+
+/** Write a multi-line job output with a delimiter that cannot appear in the value. */
+function setOutput(name, value) {
+  const file = process.env.GITHUB_OUTPUT;
+  if (!file) return;
+  let delim = 'EOF_SUMMARY';
+  while (value.includes(delim)) delim += '_X';
+  appendFileSync(file, `${name}<<${delim}\n${value}\n${delim}\n`);
+}
 
 function findReport(dir, leg) {
   const name = reportFileName(leg);
@@ -53,7 +88,20 @@ function main() {
   if (!Array.isArray(expected)) die('EXPECTED_LEGS is not an array');
 
   const reports = expected.map((leg) => findReport(dir, leg));
-  const { findings, partialRefs } = aggregateReports({ expected, reports });
+  const { findings, partialRefs, unionVerified } = aggregateReports({ expected, reports });
+  // Classification LABELS findings for the alert only. It never removes one: every
+  // finding below still fails the lane, known or not.
+  const { known, fresh } = classifyFindings(findings);
+  setOutput(
+    'summary',
+    summaryMarkdown({
+      fresh,
+      known,
+      unionVerified,
+      partialRefs,
+      expectedCount: expected.length,
+    }),
+  );
 
   console.log(`LANE AGGREGATE — ${expected.length} expected leg(s)`);
   for (const [i, leg] of expected.entries()) {
@@ -68,9 +116,15 @@ function main() {
       `NOTE ${ref}: PARTIAL run (fewer legs than shards, a manual dispatch) — the union was not asserted`,
     );
   }
+  for (const ref of unionVerified) {
+    console.log(`union == discovered set: verified for ${ref}`);
+  }
   if (findings.length > 0) {
-    console.error(`\n${findings.length} finding(s):`);
-    for (const f of findings) console.error(`::error::${f}`);
+    console.error(
+      `\n${findings.length} finding(s): ${fresh.length} new, ${known.length} known-red (still failing):`,
+    );
+    for (const f of fresh) console.error(`::error::${f}`);
+    for (const k of known) console.error(`::error::(known #${k.issue}) ${k.finding}`);
     process.exit(1);
   }
   console.log(

@@ -176,8 +176,8 @@ const MUTATIONS = [
     id: 'W16',
     subject: 'wf',
     claim: 'a non-alert job holds a write scope',
-    anchor: '    timeout-minutes: 10\n    steps:',
-    replacement: '    timeout-minutes: 10\n    permissions:\n      contents: write\n    steps:',
+    anchor: '    timeout-minutes: 10\n    # The findings',
+    replacement: '    timeout-minutes: 10\n    permissions:\n      contents: write\n    # The findings',
     validate: parses,
   },
   {
@@ -439,8 +439,8 @@ const MUTATIONS = [
     id: 'R12',
     subject: 'runner',
     claim: 'the per-prover resource line is gone (a starved runner leaves no trace)',
-    anchor: '  console.log(resourceLine());',
-    replacement: '  void resourceLine;',
+    anchor: '  console.log(`   resources: ${describeResources(resources)}`);',
+    replacement: '  void describeResources;',
   },
   {
     id: 'R13',
@@ -448,9 +448,119 @@ const MUTATIONS = [
     claim:
       'the untracked snapshot is taken AFTER the prover (the killed prover’s own files look pre-existing)',
     anchor:
-      '  const untrackedBefore = untrackedFiles();\n  const run = await runProver(prover.absPath, { cwd: REPO_ROOT, timeoutMs });',
+      '  const untrackedBefore = untrackedFiles();\n  const tmpBefore = tmpEntries();\n  const run = await runProver(prover.absPath, { cwd: REPO_ROOT, timeoutMs });',
     replacement:
-      '  const run = await runProver(prover.absPath, { cwd: REPO_ROOT, timeoutMs });\n  const untrackedBefore = untrackedFiles();',
+      '  const tmpBefore = tmpEntries();\n  const run = await runProver(prover.absPath, { cwd: REPO_ROOT, timeoutMs });\n  const untrackedBefore = untrackedFiles();',
+  },
+  {
+    id: 'R14',
+    subject: 'runner',
+    claim: 'the resource tripwire never stops a leg (a starved runner dies silently again)',
+    anchor: "  if (verdict.level === 'hard') {",
+    replacement: '  if (false) {',
+  },
+  {
+    id: 'R15',
+    subject: 'runner',
+    claim:
+      'after a tripwire the remaining provers are not marked NOT RUN (the aggregate cannot name them)',
+    anchor: '    for (const p of rest) {',
+    replacement: '    for (const p of []) {',
+  },
+  {
+    id: 'R16',
+    subject: 'runner',
+    claim: 'under disk pressure no regenerable build output is deleted',
+    anchor: '    const removed = cleanBuildOutput();',
+    replacement: '    const removed = [];',
+  },
+  {
+    id: 'R17',
+    subject: 'runner',
+    claim: 'the temp entries a prover leaves are never removed',
+    anchor: '    const n = cleanNewTmp(tmpBefore);',
+    replacement: '    const n = 0;',
+  },
+  {
+    id: 'R18',
+    subject: 'runner',
+    claim: 'cleanup runs outside CI too (a developer’s temp dir and target/ are deleted)',
+    anchor:
+      "const cleanupOn = process.env.GITHUB_ACTIONS === 'true' || process.env.KNEXT_LANE_CLEANUP === '1';",
+    replacement: 'const cleanupOn = true;',
+  },
+  {
+    id: 'U01',
+    subject: 'lib',
+    claim: 'the aggregate never records that a ref’s union was verified (nothing to print)',
+    anchor: '      unionVerified.push(ref);',
+    replacement: '      void ref;',
+  },
+  {
+    id: 'Q01',
+    subject: 'res',
+    claim: 'low free disk is no longer a hard stop',
+    anchor: '  if (res.freeDiskMiB !== null && res.freeDiskMiB < t.hardFreeDiskMiB) {',
+    replacement: '  if (false) {',
+  },
+  {
+    id: 'Q02',
+    subject: 'res',
+    claim: 'low available memory is no longer a hard stop',
+    anchor: '  if (res.availMemMiB !== null && res.availMemMiB < t.hardAvailMemMiB) {',
+    replacement: '  if (false) {',
+  },
+  {
+    id: 'Q03',
+    subject: 'res',
+    claim: 'the soft (clean first) level is gone',
+    anchor: '  if (res.freeDiskMiB !== null && res.freeDiskMiB < t.softFreeDiskMiB) {',
+    replacement: '  if (false) {',
+  },
+  {
+    id: 'Q04',
+    subject: 'res',
+    claim: 'the default hard disk threshold is halved (not the jev-picked one)',
+    anchor: '  hardFreeDiskMiB: 1024,',
+    replacement: '  hardFreeDiskMiB: 512,',
+  },
+  {
+    id: 'Q05',
+    subject: 'res',
+    claim: 'the built CLI bundle becomes "regenerable" (provers that need it do not rebuild it)',
+    anchor: "Object.freeze(['crates/target', 'templates/rust/target']);",
+    replacement:
+      "Object.freeze(['crates/target', 'templates/rust/target', 'packages/kn-next/dist']);",
+  },
+  {
+    id: 'K01',
+    subject: 'known',
+    claim: 'a known-red finding is classified as fresh (the label is lost)',
+    anchor: '    if (hit) known.push({ finding, issue: hit.issue });',
+    replacement: '    if (hit) fresh.push(finding);',
+  },
+  {
+    id: 'K02',
+    subject: 'agg',
+    claim: 'known-red findings stop failing the lane (the list excuses a prover)',
+    anchor: '  if (findings.length > 0) {',
+    replacement: '  if (fresh.length > 0) {',
+  },
+  {
+    id: 'K03',
+    subject: 'wf',
+    claim: 'the alert drops the aggregate summary',
+    anchor: '          ${AGG_SUMMARY}',
+    replacement: '          (summary omitted)',
+    validate: parses,
+  },
+  {
+    id: 'K04',
+    subject: 'wf',
+    claim: 'the alert drops the known-red list',
+    anchor: '          $(node scripts/prover-lane-known-red.mjs)',
+    replacement: '          $(true)',
+    validate: parses,
   },
   {
     id: 'T01',
@@ -479,6 +589,9 @@ const prover = createGuardProver({
     lib: 'scripts/lib/prover-shard.mjs',
     runner: 'scripts/run-mutation-provers.mjs',
     spec: 'tests/mutation-prover-lane-sharding.test.ts',
+    res: 'scripts/lib/lane-resources.mjs',
+    known: 'scripts/lib/known-red-provers.mjs',
+    agg: 'scripts/prover-lane-aggregate.mjs',
   },
 });
 
