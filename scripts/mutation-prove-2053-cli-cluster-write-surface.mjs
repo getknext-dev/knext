@@ -206,7 +206,7 @@ const SPAWN = [
     id: 'S20',
     subject: 'spawnlib',
     claim: 'execa is no longer a recognised spawn',
-    anchor: "  'execaSync',\n]);",
+    anchor: "  'execa',\n  'execaSync',\n]);",
     replacement: ']);',
   },
   {
