@@ -237,8 +237,8 @@ const MUTATIONS = [
     id: 'W21',
     subject: 'wf',
     claim: 'the daily integration/v2 cron is changed (the schedule no longer matches the mapping)',
-    anchor: "    - cron: '37 6 * * 1-6'",
-    replacement: "    - cron: '37 6 * * 2-6'",
+    anchor: "    - cron: '37 6 * * 1,2,3,4,5,6'",
+    replacement: "    - cron: '37 6 * * 2,3,4,5,6'",
     validate: parses,
   },
   {
@@ -597,14 +597,14 @@ const MUTATIONS = [
     id: 'R19',
     subject: 'runner',
     claim: 'no sample line is streamed while a prover runs (a lost runner leaves nothing)',
-    anchor: '    if (now - lastSample >= SAMPLE_EVERY_MS || why) {',
-    replacement: '    if (false) {',
+    anchor: '    if (now - lastSample < SAMPLE_EVERY_MS && !why) return { why };',
+    replacement: '    return { why };',
   },
   {
     id: 'R20',
     subject: 'runner',
     claim: 'a runaway prover is detected but never killed',
-    anchor: '            if (why && runaway === null) {',
+    anchor: '            if (verdict.why && runaway === null) {',
     replacement: '            if (false) {',
   },
   {
@@ -634,6 +634,30 @@ const MUTATIONS = [
     claim: 'every /proc entry counts as a process',
     anchor: '.filter((n) => /^\\d+$/.test(n)).length',
     replacement: '.filter((n) => /./.test(n)).length',
+  },
+  {
+    id: 'R21',
+    subject: 'runner',
+    claim:
+      'the slow sample runs BEFORE the kill (a 12 s dmesg/journalctl delays killing a runaway)',
+    anchor:
+      '            if (verdict.why && runaway === null) {\n              runaway = verdict.why;\n              killGroup();\n            }\n            verdict.sample?.();',
+    replacement:
+      '            verdict.sample?.();\n            if (verdict.why && runaway === null) {\n              runaway = verdict.why;\n              killGroup();\n            }',
+  },
+  {
+    id: 'R22',
+    subject: 'runner',
+    claim: 'the sampler prints full command lines (an argv token could reach the log)',
+    anchor: "'pid,ppid,rss,etime,comm'",
+    replacement: "'pid,ppid,rss,etime,args'",
+  },
+  {
+    id: 'A01',
+    subject: 'agg',
+    claim: 'a partial run claims the union was checked',
+    anchor: '  const unionChecked = [...refsExpected].every((ref) => unionVerified.includes(ref));',
+    replacement: '  const unionChecked = true;',
   },
   {
     id: 'T01',

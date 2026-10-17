@@ -104,7 +104,7 @@ on:
   # `tests/rc-window-thin-nightlies.test.ts` asserts both entries on purpose.
   schedule:
     - cron: '7 6 * * 0'
-    - cron: '37 6 * * 1-6'
+    - cron: '37 6 * * 1,2,3,4,5,6'
   # Manual re-runs after fixing a prover; the alert job is scheduled-only (below)
   # so a dispatch experiment never files or updates the issue.
   #   refs        space/comma separated branches to prove (default: both lane refs).
@@ -156,7 +156,7 @@ jobs:
       - name: Plan
         id: plan
         env:
-          LANE_REFS: ${{ inputs.refs || (github.event.schedule == '37 6 * * 1-6' && 'integration/v2') || 'main integration/v2' }}
+          LANE_REFS: ${{ inputs.refs || (github.event.schedule == '37 6 * * 1,2,3,4,5,6' && 'integration/v2') || 'main integration/v2' }}
           LANE_SHARDS: 6
           LANE_ONLY_SHARD: ${{ inputs.only_shard }}
         run: node scripts/prover-lane-plan.mjs

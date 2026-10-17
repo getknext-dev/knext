@@ -56,7 +56,7 @@ describe('#1675: thin early-warning nightlies during credential window', () => {
       readFileSync('.github/workflows/mutation-prover-nightly.yml', 'utf-8'),
     );
     const crons = (workflow.on?.schedule ?? []).map((e: { cron: string }) => e.cron);
-    expect(crons).toEqual(['7 6 * * 0', '37 6 * * 1-6']);
+    expect(crons).toEqual(['7 6 * * 0', '37 6 * * 1,2,3,4,5,6']);
     expect(crons[0].split(' ')[4]).toMatch(/^[0-6]$/);
   });
 

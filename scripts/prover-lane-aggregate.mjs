@@ -14,7 +14,7 @@
 
 import { appendFileSync, existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { classifyFindings } from './lib/known-red-provers.mjs';
+import { classifyFindings, KNOWN_RED_PROVERS } from './lib/known-red-provers.mjs';
 import { aggregateReports, reportFileName } from './lib/prover-shard.mjs';
 
 /** Job outputs are capped; the alert needs the gist, the job log has the rest. */
@@ -91,7 +91,11 @@ function main() {
   const { findings, partialRefs, unionVerified } = aggregateReports({ expected, reports });
   // Classification LABELS findings for the alert only. It never removes one: every
   // finding below still fails the lane, known or not.
-  const { known, fresh } = classifyFindings(findings);
+  // KNEXT_LANE_KNOWN_RED_JSON is a test seam: a JSON array standing in for the list.
+  const list = process.env.KNEXT_LANE_KNOWN_RED_JSON
+    ? JSON.parse(process.env.KNEXT_LANE_KNOWN_RED_JSON)
+    : KNOWN_RED_PROVERS;
+  const { known, fresh } = classifyFindings(findings, list);
   setOutput(
     'summary',
     summaryMarkdown({
@@ -127,8 +131,13 @@ function main() {
     for (const k of known) console.error(`::error::(known #${k.issue}) ${k.finding}`);
     process.exit(1);
   }
+  // Only claim what was checked: on a partial run the union is NOT asserted.
+  const refsExpected = new Set(expected.map((leg) => leg.ref));
+  const unionChecked = [...refsExpected].every((ref) => unionVerified.includes(ref));
   console.log(
-    '\nevery expected leg reported; declared == run for every prover; union == discovered set',
+    unionChecked
+      ? '\nevery expected leg reported; declared == run for every prover; union == discovered set'
+      : '\nevery expected leg reported; declared == run for every prover; PARTIAL run, union == discovered set was NOT checked',
   );
 }
 

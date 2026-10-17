@@ -17,30 +17,8 @@
  * stale entry would mislabel a regression of that prover as "known".
  */
 
-export const KNOWN_RED_PROVERS = Object.freeze([
-  {
-    prover: 'scripts/mutation-prove-2171-redis-prefix-isolation.mjs',
-    issue: 2517,
-    why: 'mutation D03 survives: the doctor guard is decoration for that rule',
-    // Exists on integration/v2 only; the list is identical on main, where it is inert.
-    onlyOn: 'integration/v2',
-  },
-  {
-    prover: 'scripts/mutation-prove-anonymous-install.mjs',
-    issue: 2518,
-    why: 'anchor rot: preflight refuses to start',
-  },
-  {
-    prover: 'scripts/mutation-prove-compat-fail-on-red-teeth.mjs',
-    issue: 2519,
-    why: 'anchor rot: preflight refuses to start',
-  },
-  {
-    prover: 'scripts/mutation-prove-compat-step-level-disarms.mjs',
-    issue: 2520,
-    why: 'two rows prove a decorative guard',
-  },
-]);
+/** @type {ReadonlyArray<{ prover: string, issue: number, why: string, onlyOn?: string }>} */
+export const KNOWN_RED_PROVERS = Object.freeze([]);
 
 /**
  * Split aggregate findings into KNOWN (names a listed prover) and FRESH.
@@ -62,7 +40,11 @@ export function classifyFindings(findings, list = KNOWN_RED_PROVERS) {
 }
 
 /** Markdown for the alert: the standing list, so a reader can tell new from known. */
+/** @param {ReadonlyArray<{ prover: string, issue: number, why: string }>} [list] */
 export function knownRedMarkdown(list = KNOWN_RED_PROVERS) {
+  if (list.length === 0) {
+    return 'No prover is on the known-red list: every red finding above is NEW.';
+  }
   const lines = list.map((k) => `- #${k.issue} \`${k.prover}\` — ${k.why}`);
   return [
     'Known red, tracked elsewhere (these still FAIL the lane; they are only labelled here so a new red stands out):',

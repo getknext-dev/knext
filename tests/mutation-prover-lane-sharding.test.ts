@@ -490,8 +490,14 @@ describe('#2499 resource tripwire — pure logic', () => {
 });
 
 describe('#2499 the known-red list labels the alert, it never excuses a prover', () => {
+  // The REAL list is empty when nothing is known-red; the mechanics are proved on
+  // a fixture list so they stay proved while the real one is empty.
+  const FIXTURE = Object.freeze([
+    { prover: 'scripts/mutation-prove-zz-known.mjs', issue: 9001, why: 'a tracked red (fixture)' },
+    { prover: 'scripts/mutation-prove-zz-other-known.mjs', issue: 9002, why: 'another (fixture)' },
+  ]);
+
   it('every entry is a well-formed prover path with a distinct open-issue number', () => {
-    expect(KNOWN_RED_PROVERS.length).toBeGreaterThan(0);
     const issues = new Set<number>();
     const paths = new Set<string>();
     for (const k of KNOWN_RED_PROVERS) {
@@ -516,20 +522,22 @@ describe('#2499 the known-red list labels the alert, it never excuses a prover',
   });
 
   it('classifies a finding that names a listed prover as KNOWN, everything else as FRESH', () => {
-    const [a] = KNOWN_RED_PROVERS;
+    const [a] = FIXTURE;
     const known = `integration/v2 4/6: ${a.prover}: non-zero exit (1)`;
     const fresh1 = 'integration/v2 4/6: scripts/mutation-prove-other.mjs: non-zero exit (1)';
     const fresh2 =
       'integration/v2 6/6: no report — the leg was cancelled, crashed, or its artifact is missing';
-    const out = classifyFindings([known, fresh1, fresh2]);
+    const out = classifyFindings([known, fresh1, fresh2], FIXTURE);
     expect(out.known).toEqual([{ finding: known, issue: a.issue }]);
     expect(out.fresh).toEqual([fresh1, fresh2]);
   });
 
   it('the alert markdown names every listed issue and says they still fail', () => {
-    const md = knownRedMarkdown();
-    for (const k of KNOWN_RED_PROVERS) expect(md).toContain(`#${k.issue}`);
+    const md = knownRedMarkdown(FIXTURE);
+    for (const k of FIXTURE) expect(md).toContain(`#${k.issue}`);
     expect(md).toMatch(/still FAIL the lane/);
+    // An empty list says so, instead of printing a header over nothing.
+    expect(knownRedMarkdown([])).toMatch(/every red finding above is NEW/);
   });
 
   it('the runner and the shard library never read the list (it cannot skip or recount anything)', () => {
@@ -539,7 +547,7 @@ describe('#2499 the known-red list labels the alert, it never excuses a prover',
   });
 
   describe('through the real aggregate script', () => {
-    const [known] = KNOWN_RED_PROVERS;
+    const [known] = FIXTURE;
     const discovered = [known.prover, 'scripts/mutation-prove-zz-other.mjs'];
     const SHA = 'a'.repeat(40);
     const leg = { ref: 'integration/v2', sha: SHA, shard: 1, shards: 1 };
@@ -565,6 +573,7 @@ describe('#2499 the known-red list labels the alert, it never excuses a prover',
               EXPECTED_LEGS: JSON.stringify([leg]),
               REPORT_DIR: dir,
               GITHUB_OUTPUT: out,
+              KNEXT_LANE_KNOWN_RED_JSON: JSON.stringify(FIXTURE),
             },
           },
         );
@@ -613,6 +622,37 @@ describe('#2499 the known-red list labels the alert, it never excuses a prover',
       expect(r.status, `${r.stdout}${r.stderr}`).toBe(0);
       expect(r.stdout).toContain('union == discovered set: verified for integration/v2');
       expect(output).toContain('Shard union == discovered set: verified');
+    });
+
+    it('a PARTIAL run does not claim the union was checked', () => {
+      const dir = mkdtempSync(join(tmpdir(), 'knext-agg-'));
+      try {
+        const partialLeg = { ...leg, shard: 1, shards: 2 };
+        const rep = makeReport({
+          ...partialLeg,
+          discovered,
+          results: shardProvers(
+            discovered.map((relPath) => ({ relPath })),
+            1,
+            2,
+          ).map((p) => ({ relPath: p.relPath, summary: { declared: 1, run: 1 }, findings: [] })),
+        });
+        writeFileSync(join(dir, reportFileName(partialLeg)), JSON.stringify(rep));
+        const r = spawnSync(
+          process.execPath,
+          [resolve(REPO_ROOT, 'scripts/prover-lane-aggregate.mjs')],
+          {
+            encoding: 'utf8',
+            env: { ...process.env, EXPECTED_LEGS: JSON.stringify([partialLeg]), REPORT_DIR: dir },
+          },
+        );
+        expect(r.status, `${r.stdout}${r.stderr}`).toBe(0);
+        expect(r.stdout).toContain('PARTIAL run, union == discovered set was NOT checked');
+        expect(r.stdout).not.toMatch(/union == discovered set: verified/);
+        expect(r.stdout).not.toMatch(/; union == discovered set\s*$/);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
     });
 
     it('the union line is printed even when the lane is red (it is evidence, not a reward)', () => {
@@ -776,6 +816,7 @@ describe('#2208 the runner: --shard, --list, --report and a PER-PROVER timeout',
     'KNEXT_LANE_MEMINFO_PATH',
     'KNEXT_LANE_SAMPLE_MS',
     'KNEXT_LANE_WATCH_MS',
+    'KNEXT_LANE_EXTRAS_CMD',
   ];
   const hermeticEnv = (extra: Record<string, string> = {}) => {
     const env: Record<string, string | undefined> = { ...process.env };
@@ -864,6 +905,43 @@ describe('#2208 the runner: --shard, --list, --report and a PER-PROVER timeout',
       }
     }, 40_000);
 
+    it('KILLS FIRST: a slow sample (ps, dmesg, journalctl) cannot delay the runaway kill', () => {
+      const dir = makeTree({
+        'mutation-prove-a-runaway.mjs': `
+          import { writeFileSync } from 'node:fs';
+          const start = Date.now();
+          writeFileSync('started', String(start));
+          setInterval(() => writeFileSync('heartbeat', String(Date.now())), 100);`,
+      });
+      // The sample command takes 6 s. If the runner sampled BEFORE killing, the
+      // prover would keep beating for those 6 s.
+      const slow = join(dir, 'slow-extras.sh');
+      writeFileSync(slow, '#!/bin/sh\nsleep 6\necho "kernel: slow"\n', { mode: 0o755 });
+      try {
+        run(dir, [], {
+          ...base,
+          KNEXT_LANE_MEMINFO_PATH: meminfo(dir, 100),
+          KNEXT_LANE_WATCH_MS: '200',
+          KNEXT_LANE_EXTRAS_CMD: slow,
+          KNEXT_PROVER_TIMEOUT_MS: '30000',
+        });
+        const started = Number(read(join(dir, 'started')));
+        const lastBeat = Number(read(join(dir, 'heartbeat')));
+        expect(
+          lastBeat - started,
+          'the prover kept running while the slow sample was gathered',
+        ).toBeLessThan(3000);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }, 60_000);
+
+    it('the sampler lists processes by command NAME (comm), never their full argv', () => {
+      const src = read(resolve(REPO_ROOT, RUNNER));
+      expect(src).toContain("'pid,ppid,rss,etime,comm'");
+      expect(src).not.toMatch(/etime,args/);
+    });
+
     it('a healthy machine is never killed', () => {
       const dir = makeTree({ 'mutation-prove-a.mjs': marker('ran-a') });
       try {
@@ -915,20 +993,25 @@ describe('#2208 the runner: --shard, --list, --report and a PER-PROVER timeout',
       }
     });
 
-    it.skipIf(!existsSync('/proc/meminfo'))(
-      'a memory shortage stops the leg too (Linux, where MemAvailable exists)',
-      () => {
-        const dir = threeProvers();
-        try {
-          const r = run(dir, [], { KNEXT_LANE_MIN_AVAIL_MEM_MIB: '999999999' });
-          expect(r.status).not.toBe(0);
-          expect(`${r.stdout}${r.stderr}`).toMatch(/RESOURCE TRIPWIRE .*available memory/);
-          expect(existsSync(join(dir, 'ran-b'))).toBe(false);
-        } finally {
-          rmSync(dir, { recursive: true, force: true });
-        }
-      },
-    );
+    it('a memory shortage stops the leg too (a fixture meminfo, on every platform)', () => {
+      const dir = threeProvers();
+      const meminfo = join(dir, 'meminfo');
+      writeFileSync(meminfo, 'MemTotal:       16384000 kB\nMemAvailable:      102400 kB\n');
+      try {
+        const r = run(dir, [], {
+          KNEXT_LANE_MEMINFO_PATH: meminfo, // 100 MiB available: below the 256 MiB hard stop
+          KNEXT_LANE_KILL_AVAIL_MEM_MIB: '0', // keep the mid-prover kill out of this test
+          KNEXT_LANE_MIN_FREE_DISK_MIB: '0',
+        });
+        expect(r.status).not.toBe(0);
+        expect(`${r.stdout}${r.stderr}`).toMatch(
+          /RESOURCE TRIPWIRE after scripts\/mutation-prove-a\.mjs: available memory 100 MiB < 256 MiB/,
+        );
+        expect(existsSync(join(dir, 'ran-b'))).toBe(false);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
 
     it('no shortage: every prover runs and no tripwire fires', () => {
       const dir = threeProvers();
@@ -1354,11 +1437,11 @@ describe('#2499 the workflow: both refs, sharded, per-shard timeout, aggregated,
 
   it('the schedule is weekly over BOTH refs plus a DAILY entry that proves integration/v2 ONLY', () => {
     const crons = (wf.on as { schedule?: Array<{ cron: string }> }).schedule?.map((e) => e.cron);
-    expect(crons).toEqual(['7 6 * * 0', '37 6 * * 1-6']);
+    expect(crons).toEqual(['7 6 * * 0', '37 6 * * 1,2,3,4,5,6']);
     const planStep = (wf.jobs.plan?.steps ?? []).find((s) => s.id === 'plan');
     const refs = String((planStep?.env as Record<string, unknown>)?.LANE_REFS ?? '');
     // The daily cron string appears in the mapping, and maps to v2 alone...
-    expect(refs).toContain("github.event.schedule == '37 6 * * 1-6' && 'integration/v2'");
+    expect(refs).toContain("github.event.schedule == '37 6 * * 1,2,3,4,5,6' && 'integration/v2'");
     // ...while the fall-through (the weekly run, and a drifted string) is BOTH refs.
     expect(refs).toMatch(/\|\| 'main integration\/v2' \}\}$/);
   });
