@@ -9,13 +9,13 @@
  * For `--lang go` it also scaffolds the function's server project from
  * `templates/go` into `functions/<name>/` (see scaffold-go.ts). Rust is
  * contract-only until its template is scaffolded the same way.
- * TODO(#2479): `--lang rust` scaffolds from `templates/rust`.
+ * TODO(#2489): `--lang rust` scaffolds from `templates/rust`.
  *
  * Output is a pure function of the name and language, so the same command in
  * two apps writes identical bytes.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -31,7 +31,7 @@ import {
   urlEnvFor,
 } from './config';
 import type { Io } from './generate';
-import { checkModulePath, scaffoldGoFunction } from './scaffold-go';
+import { checkModulePath, type StagedGoFunction, stageGoFunction } from './scaffold-go';
 
 /** The options contract shipped in this package (`proto/` at the package root). */
 export function packagedOptionsProto(): string {
@@ -140,10 +140,26 @@ export interface AddFunctionOptions {
   /** Go module path for `--lang go` (default `example.com/<name>`). */
   readonly module?: string;
   readonly io: Io;
+  /** Test seam: the Go template to scaffold from (default: the resolved one). */
+  readonly templateDir?: string;
+  /** Test seam: called before each step; a throw there simulates that step failing. */
+  readonly onStep?: (step: string) => void;
 }
 
 /** The `knext add function` verb. Returns the process exit code. */
-export function addFunction({ cwd, name, lang, module, io }: AddFunctionOptions): number {
+export function addFunction({
+  cwd,
+  name,
+  lang,
+  module,
+  io,
+  templateDir,
+  onStep,
+}: AddFunctionOptions): number {
+  // Every write is undone if a later one fails, so a rerun starts from the same
+  // tree. `undo` runs newest-first.
+  const undo: Array<() => void> = [];
+  let staged: StagedGoFunction | undefined;
   try {
     const nameProblem = checkFunctionName(name);
     if (nameProblem) throw new GrpcUsageError(nameProblem);
@@ -177,24 +193,35 @@ export function addFunction({ cwd, name, lang, module, io }: AddFunctionOptions)
     }
 
     const written: string[] = [];
-    if (lang === 'go') {
-      // First, so a failed code generation writes nothing at all.
-      const files = scaffoldGoFunction(join(cwd, fnDirRel), {
-        name,
-        pkg,
-        service: `${pascal(name)}Service`,
-        module: goModule,
-        contract: contractFor(name),
-        options: packagedOptionsProto(),
-      });
-      for (const f of files) written.push(join(fnDirRel, f));
-    }
+    const step = (label: string) => onStep?.(label);
     const write = (rel: string, content: string) => {
+      step(rel);
       const abs = join(cwd, rel);
-      mkdirSync(dirname(abs), { recursive: true });
+      const prior = existsSync(abs) ? readFileSync(abs) : undefined;
+      const firstCreated = mkdirSync(dirname(abs), { recursive: true });
+      undo.push(() => {
+        if (prior !== undefined) writeFileSync(abs, prior);
+        else rmSync(abs, { force: true });
+        if (firstCreated) rmSync(firstCreated, { recursive: true, force: true });
+      });
       writeFileSync(abs, content);
       written.push(rel);
     };
+    if (lang === 'go') {
+      // Staged first (a failed code generation writes nothing), installed last.
+      step('stage');
+      staged = stageGoFunction(
+        {
+          name,
+          pkg,
+          service: `${pascal(name)}Service`,
+          module: goModule,
+          contract: contractFor(name),
+          options: packagedOptionsProto(),
+        },
+        templateDir,
+      );
+    }
     if (!existsSync(join(cwd, 'buf.yaml'))) write('buf.yaml', BUF_YAML);
     const optionsRel = join(config.proto, 'knext', 'v1', 'options.proto');
     if (!existsSync(join(cwd, optionsRel))) write(optionsRel, packagedOptionsProto());
@@ -209,6 +236,15 @@ export function addFunction({ cwd, name, lang, module, io }: AddFunctionOptions)
         functions: { ...config.functions, [name]: { lang: lang as Language } },
       }),
     );
+    if (staged) {
+      step('install');
+      const target = join(cwd, fnDirRel);
+      const functionsDir = join(cwd, 'functions');
+      const removeOnFailure = existsSync(functionsDir) ? target : functionsDir;
+      undo.push(() => rmSync(removeOnFailure, { recursive: true, force: true }));
+      staged.install(target);
+      for (const f of staged.files) written.push(join(fnDirRel, f));
+    }
 
     io.stdout(
       `added the ${lang} function "${name}":\n` +
@@ -219,10 +255,19 @@ export function addFunction({ cwd, name, lang, module, io }: AddFunctionOptions)
     );
     return 0;
   } catch (err) {
+    for (const u of undo.reverse()) {
+      try {
+        u();
+      } catch {
+        // Best effort: the original error is the one to report.
+      }
+    }
     if (err instanceof GrpcUsageError) {
       io.stderr(`${err.message}\n`);
       return 1;
     }
     throw err;
+  } finally {
+    staged?.dispose();
   }
 }
