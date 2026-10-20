@@ -145,11 +145,15 @@ function docsPinSection(): string {
  *     secure, safe, stop, guarantee, eliminate, "keeps ... from", "no longer"), AND
  *   - it names the thing protected (the database Secret, db-bind, the exposure,
  *     users' tokens, the confused deputy) or points at it ("that", "this", "it"),
- * UNLESS a negation or limiter (not, never, only, still, narrows, cannot) sits in
- * the SAME clause as the claim verb. A negation elsewhere in the sentence does
- * not rescue it: "Pinning protects the database Secret, and it is not slow" is a
- * claim. Clauses are cut at , ; : — | and at "but", "while", "although" ("and" does not cut a
- * clause: a limiter before "and" still rescues a claim after it).
+ * UNLESS a negation or limiter (not, never, only, narrows, cannot) sits in the SAME
+ * clause, within three words BEFORE that claim verb: a limiter must negate the
+ * claim, not merely appear near it. A negation elsewhere does not rescue it:
+ * "Pinning protects the database Secret and it is not slow" and "Pinning closes
+ * the exposure when the image is not mutable" are claims. Clauses are cut at
+ * , ; : — | and at "but", "while", "although", "and". Text is NFKC-normalised
+ * and stripped of zero-width characters first, and list items are separate
+ * sentences. A claim about the SPEC pin must be scoped to the BackendService
+ * route, and an absolute quantifier (any, every, nobody, entirely) is no scope.
  *
  * It is a net, not a proof: it catches the wordings this repo has had and a
  * corpus of paraphrases (below, every one asserted). The positive checks (the
@@ -158,10 +162,13 @@ function docsPinSection(): string {
  */
 const PIN_TERM = /\b(?:pin(?:s|ned|ning)?|image digest)\b/i;
 const CLAIM_VERB =
-  /\b(?:close[sd]?(?!\s+(?:review|meeting))|closing|eliminat\w+|fix(?:es|ed)?|solv\w+|prevent\w*|protect\w*|secur(?:e|es|ed|ing)|safe(?:ly|guard\w*)?|stop(?:s|ped)?|guarantee\w*|remov(?:e|es|ed) the (?:risk|exposure))\b|\bkeeps?\b[^,;:]*\bfrom\b|\bno longer\b/i;
+  /\b(?:close[sd]?(?!\s+(?:review|meeting))|closing|eliminat\w+|fix(?:es|ed)?|solv\w+|prevent\w*|protect\w*|secur(?:e|es|ed|ing)|safe(?:ly|guard\w*)?|stop(?:s|ped)?|guarantee\w*|remov(?:e|es|ed) the (?:risk|exposure)|immutable|tamper-?proof|shields?|shielded|locks? down|guards?|guarded|defends?|defended|hardened against|rules? out|mitigat\w+|neutrali[sz]\w+|resolv\w+|address(?:es|ed)?|blocks?|blocked|remed(?:y|ies|ied)|ensures? only|makes? it impossible)\b|\bkeeps?\b[^,;:]*\bfrom\b|\bno longer\b/i;
 const TARGET =
-  /\b(?:database secret|secret|db-bind|exposure|users' tokens|confused deputy|equivalent to|that|this|it|them)\b/i;
-const LIMITER = /\b(?:not|never|cannot|can't|narrows?|neither|nor)\b|n't/i;
+  /\b(?:database secret|secret|db-bind|exposure|(?:the )?(?:problem|gap|risk|hole|issue)|users' tokens|confused deputy|equivalent to|(?:the )?zone(?:'s)? (?:database|data)|that|this|it|them)\b/i;
+const LIMITER = /\b(?:not|never|cannot|can't|narrows?|neither|nor|only)\b|n't/i;
+/** Words that make a protection claim absolute; they are never a scope. */
+const ABSOLUTE =
+  /\b(?:any|every|all|always|never|nobody|no one|entirely|completely|fully|anywhere)\b/i;
 
 /** A sentence about the SPEC pin. The image pin never closes anything, so a sentence that also names it is not exempt. */
 const SPEC_PIN_TERM =
@@ -182,35 +189,73 @@ function scanText(text: string): string[] {
 }
 
 function claimClauses(sentence: string): string[] {
-  return sentence.split(/[,;:—|]|\s(?:but|while|although)\s/i);
+  return sentence.split(/[,;:—|]|\s(?:but|while|although|and)\s/i);
+}
+
+/** True when the last three words before `index` in `clause` hold a limiter: it must negate the verb at `index`. */
+function limitedBefore(clause: string, index: number): boolean {
+  const words = clause.slice(0, index).trim().split(/\s+/).slice(-3).join(' ');
+  return LIMITER.test(words);
+}
+
+/** A claim verb in `clause` that no limiter negates, and a target for it. */
+function claimsIn(clause: string): boolean {
+  if (!TARGET.test(clause)) return false;
+  const verbs = new RegExp(CLAIM_VERB.source, 'gi');
+  for (let m = verbs.exec(clause); m; m = verbs.exec(clause)) {
+    if (!limitedBefore(clause, m.index)) return true;
+  }
+  return false;
+}
+
+/** Normalise before scanning: NFKC (fullwidth letters), curly quotes, no zero-width characters. */
+function normalise(text: string): string {
+  return text
+    .normalize('NFKC')
+    .replace(/[\u200b-\u200d\u2060\ufeff]/g, '')
+    .replace(/[\u2018\u2019]/g, "'");
 }
 
 function flatten(text: string): string[] {
   // A blank line ends a sentence too: headings, table rows and code carry no full stop,
-  // and without this a claim appended after one is judged with its limiters.
-  return text.split(/\n\s*\n/).flatMap((para) =>
-    para
-      .replace(/[*`]/g, '')
-      .replace(/fail(?:s|ed)? closed/gi, 'fail-shut')
-      .replace(/\s+/g, ' ')
-      .split(/(?<=[.!?])\s+/),
-  );
+  // and without this a claim appended after one is judged with its limiters. So does a
+  // list marker: each bullet or numbered item stands alone.
+  return normalise(text)
+    .split(/\n\s*\n/)
+    .flatMap((para) => para.split(/\n\s*(?:[-*+\u2022]|\d+[.)])\s+/))
+    .flatMap((item) =>
+      item
+        .replace(/^\s*(?:[-*+\u2022]|\d+[.)])\s+/, '')
+        .replace(/[*`]/g, '')
+        .replace(/fail(?:s|ed)?[ -]closed/gi, 'fail-shut')
+        .replace(/\s+/g, ' ')
+        .split(/(?<=[.!?])\s+/),
+    );
 }
 
 const isSpecOnly = (s: string) => SPEC_PIN_TERM.test(s) && !IMAGE_PIN_TERM.test(s);
 
+/** True when a claim verb in the sentence is not negated: used for the absolute-quantifier rule. */
+function hasUnlimitedVerb(sentence: string): boolean {
+  const verbs = new RegExp(CLAIM_VERB.source, 'gi');
+  for (let m = verbs.exec(sentence); m; m = verbs.exec(sentence)) {
+    if (!limitedBefore(sentence, m.index)) return true;
+  }
+  return false;
+}
+
 /**
  * A sentence about the spec pin that claims protection without scoping it to the
  * BackendService route ("the spec pin makes the Secret safe"). The claim itself
- * is allowed; an unbounded one is not.
+ * is allowed; an unbounded one is not. An absolute quantifier is no scope: "any
+ * route", "nobody", "entirely" turn a scoped claim back into an unbounded one.
  */
 function specOverclaims(text: string): string[] {
-  return flatten(text).filter(
-    (s) =>
-      isSpecOnly(s) &&
-      claimClauses(s).some((c) => CLAIM_VERB.test(c) && TARGET.test(c) && !LIMITER.test(c)) &&
-      !SPEC_SCOPE.test(s),
-  );
+  return flatten(text).filter((s) => {
+    if (!isSpecOnly(s)) return false;
+    if (hasUnlimitedVerb(s) && ABSOLUTE.test(s)) return true;
+    return claimClauses(s).some(claimsIn) && !SPEC_SCOPE.test(s);
+  });
 }
 
 function overclaims(text: string): string[] {
@@ -218,10 +263,10 @@ function overclaims(text: string): string[] {
     // The spec pin is judged by specOverclaims, not by the image-pin rules.
     if (isSpecOnly(s)) return false;
     // The imperative form names no pin ("Set it to close that."): "it" is the pin.
-    if (TO_CLOSE.test(s) && !LIMITER.test(s)) return true;
+    const toClose = TO_CLOSE.exec(s);
+    if (toClose && !limitedBefore(s, toClose.index) && !LIMITER.test(toClose[0])) return true;
     if (!PIN_TERM.test(s)) return false;
-    // A claim verb in a clause with no limiter in that clause.
-    return claimClauses(s).some((c) => CLAIM_VERB.test(c) && TARGET.test(c) && !LIMITER.test(c));
+    return claimClauses(s).some(claimsIn);
   });
 }
 
@@ -251,7 +296,48 @@ describe('the scanner sees the wording we removed and its paraphrases', () => {
     'Pin it and the problem is solved.',
     'The pin prevents the exposure, which is not slow.',
   ];
-  for (const sentence of [...OLD, ...PARAPHRASES]) {
+  // Round 2: attacks that evaded the first whole-page scanner. Each must be flagged.
+  const ROUND2 = [
+    // A limiter must not rescue a claim across a conjunction (no comma).
+    'Pinning protects the database Secret and it is not slow.',
+    'Pinning is not slow and closes the exposure.',
+    'Pinning does not hurt and closes the exposure.',
+    // A limiter that does not negate the claim verb must not rescue it.
+    'Pinning closes the exposure when the image is not mutable.',
+    'Pinning closes the exposure whenever the digest is not stale.',
+    // Verbs of protection the first list missed.
+    'Pinning makes the database Secret immutable.',
+    'The pin is tamper-proof, so it shields the database Secret.',
+    'Pinning locks down the exposure.',
+    'The pin guards the database Secret.',
+    'The pin defends the database Secret.',
+    'A pinned image is hardened against the exposure.',
+    'Pinning rules out the exposure.',
+    'Pinning mitigates the exposure.',
+    'Pinning neutralises the exposure.',
+    'Pinning neutralizes the exposure.',
+    'Pinning resolves the exposure.',
+    'Pinning addresses the exposure.',
+    'Pinning blocks the exposure.',
+    'Pinning remedies the exposure.',
+    'Pinning removes the risk to the database Secret.',
+    'Pinning ensures only the agreed image reaches the database Secret.',
+    'Pinning makes it impossible to reach the database Secret.',
+    'Pinning is the fix for the exposure.',
+    // Targets the first list missed.
+    "Pinning protects the zone's database.",
+    "Pinning keeps the zone's data safe.",
+    'Pinning protects the zone’s data.',
+    // Unicode tricks: a zero-width joiner or a fullwidth letter inside the verb.
+    'Pinning c\u200dloses the exposure.',
+    'Pinning cl\u200bos\ufeffes the exposure.',
+    'Pinning ｃｌｏｓｅｓ the exposure.',
+    // A list item is its own sentence: a limiter in the next item does not rescue it.
+    '- Pinning closes the exposure\n- This is not slow\n- Cheap',
+    '1. Pinning closes the exposure\n2. It is not slow',
+    '* Pinning closes the exposure\n* never mind',
+  ];
+  for (const sentence of [...OLD, ...PARAPHRASES, ...ROUND2]) {
     it(`flags: ${sentence}`, () => {
       expect(overclaims(sentence), sentence).toHaveLength(1);
     });
@@ -259,6 +345,11 @@ describe('the scanner sees the wording we removed and its paraphrases', () => {
 
   it('does not flag the corrected wording (a limiter in the same clause)', () => {
     for (const ok of [
+      'Pinning does not close and does not fix the exposure.',
+      'Pinning neither closes nor fixes the database Secret exposure.',
+      'Pinning never fully closes the exposure.',
+      'Pinning cannot close or fix the exposure.',
+      'Pinning closes only an image swap.',
       'The pin does not close the database Secret exposure: it binds the image only.',
       'Pinning the image narrows this, but does not remove it.',
       'A pin does not stop that.',
@@ -289,6 +380,13 @@ describe('the scanner sees the wording we removed and its paraphrases', () => {
       "specDigest protects your users' tokens.",
       'Setting the spec pin closes the exposure.',
       'With the spec pin the confused deputy is eliminated.',
+      // Round 2: an absolute quantifier is not a scope, and a mention of the route is not one either.
+      "The spec pin makes the zone's data safe.",
+      'specDigest guarantees nobody reads the Secret on any route.',
+      'The spec pin protects the BackendService and the Secret entirely.',
+      'The spec pin closes every route to the Secret.',
+      'The spec pin closes the exposure when specDigest is not stale.',
+      'The spec pin makes the Secret imm\u200dutable.',
       // A bare "writes"/"writers"/"update" is not a scope: it names no route.
       'The spec pin makes the Secret safe from writes.',
       'The spec pin keeps the database Secret safe from writers.',
@@ -358,30 +456,34 @@ const PLACES: [string, (extra?: string) => string][] = [
 ];
 
 // Whole-page scanning meets sentences that use the word "pin" about something else
-// (a base-image tag, a build manifest). Each is exempt by its EXACT text, on its own
-// page only, and the exemption fails if the sentence is gone or no longer needs it,
-// so the list cannot rot into a blanket skip.
+// (a base-image tag, a build manifest, a test index). Each is exempt by a distinctive
+// fragment of the sentence (at least 40 characters), on its own page only, and the
+// exemption fails if the sentence is gone or no longer needs it, so the list cannot
+// rot into a blanket skip.
 const EXEMPT: Record<string, string[]> = {
   'the operator reference': [
     'Install the operator per namespace or add your own admission policy for workloads to close that path.',
-  ],
-  'the user threat model page': [
-    'That pulls only fixes already published on the same pinned Alpine branch — it cannot move the base to a different release.',
+    'after a short stall window that rules out an in-progress deploy',
   ],
   'the threat model': [
     'The template Dockerfile therefore fails the build when the manifest is missing, which narrows the window to an image mutated after build; closing it fully needs the manifest bound to the image digest by a signature, which is the same owed work as the closure SBOM attestation above.',
+    'backendservice_image_pin_test.go (the comparison table: no pin, matching digest,',
   ],
+  'ADR-0004': ['the guard forces a decision for any new top-level field'],
 };
 const unexempt = (label: string, found: string[]) =>
-  found.filter((s) => !(EXEMPT[label] ?? []).includes(s));
+  found.filter((s) => !(EXEMPT[label] ?? []).some((frag) => s.includes(frag)));
 
 describe('the exemptions are live', () => {
   for (const [label, sentences] of Object.entries(EXEMPT)) {
     const get = PLACES.find(([l]) => l === label)?.[1];
     for (const sentence of sentences) {
-      it(`${label}: exempt sentence still present and still flagged by the scanner`, () => {
+      it(`${label}: exempt fragment still present and still flagged by the scanner`, () => {
         expect(get).toBeDefined();
-        expect(overclaims(get?.() ?? '')).toContain(sentence);
+        expect(sentence.length).toBeGreaterThanOrEqual(40);
+        const text = get?.() ?? '';
+        const flagged = [...overclaims(text), ...specOverclaims(text)];
+        expect(flagged.some((f) => f.includes(sentence))).toBe(true);
       });
     }
   }
@@ -417,7 +519,7 @@ describe('no place says the image pin closes the database-Secret exposure', () =
       expect(unexempt(label, overclaims(get()))).toEqual([]);
     });
     it(`${label}: any claim about the spec pin is scoped to the BackendService route`, () => {
-      expect(specOverclaims(get())).toEqual([]);
+      expect(unexempt(label, specOverclaims(get()))).toEqual([]);
     });
   }
 
