@@ -361,8 +361,8 @@ const MUTATIONS = [
     id: 'H9',
     claim: 'the commit-tarball exemption accepts any host, not only codeload.github.com',
     subject: 'lib',
-    anchor: 'https:\\/\\/codeload\\.github\\.com',
-    replacement: 'https:\\/\\/[^/]+',
+    anchor: 'codeload\\.github\\.com',
+    replacement: '[a-z.]+',
   },
   {
     id: 'H10',
