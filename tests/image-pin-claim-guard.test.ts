@@ -389,6 +389,8 @@ describe('the scanner sees the wording we removed and its paraphrases', () => {
       'Pinning never fully closes the exposure.',
       'Pinning cannot close or fix the exposure.',
       'Pinning closes only an image swap.',
+      'Pinning only closes the image swap exposure.',
+      'Pinning closes only the image exposure.',
       'Pinning only the image does not protect the database Secret.',
       'Pinning can not close the exposure.',
       'Pinning cannot close the exposure.',
