@@ -73,6 +73,9 @@
  * 2 = the prover could not run (anchor drift, red baseline, a mutation that does
  * not compile, missing tool). Never parses output.
  *
+ * KNEXT_PROVER_ROWS=H selects the rows whose id starts with H (comma list of prefixes);
+ * unset, the whole table runs.
+ *
  * Usage:
  *   node scripts/mutation-prove-2052-backendservice.mjs
  *   KNEXT_CALICO_CLUSTER=knext-z8-e2e node scripts/mutation-prove-2052-backendservice.mjs
@@ -1233,6 +1236,25 @@ if (CALICO_CLUSTER !== '') {
   });
 }
 
+// The canary is always the first pin row, whatever subset is selected below.
+const CANARY_ROW = MUTATIONS.find((m) => m.id === 'I01');
+
+// Optional: run a subset while iterating on one family of rows, for example
+// KNEXT_PROVER_ROWS=H runs only the pod hardening rows (ids starting with H).
+// A comma list of id prefixes. Unset, the whole table runs, which is what the
+// nightly lane does; the declared count follows the selection so a partial run
+// reports honestly.
+const ROW_FILTER = (process.env.KNEXT_PROVER_ROWS ?? '').split(',').filter(Boolean);
+if (ROW_FILTER.length > 0) {
+  const kept = MUTATIONS.filter((m) => ROW_FILTER.some((p) => m.id.startsWith(p)));
+  if (kept.length === 0) {
+    console.error(`${NAME}: KNEXT_PROVER_ROWS=${ROW_FILTER.join(',')} selects no row`);
+    process.exit(2);
+  }
+  MUTATIONS.length = 0;
+  MUTATIONS.push(...kept);
+}
+
 function envtestAssetsPresent() {
   if (process.env.KUBEBUILDER_ASSETS) return true;
   const dir = `${OPERATOR_MODULE}/bin/k8s`;
@@ -1341,7 +1363,7 @@ function grade(m) {
 
 // STEP 0: the harness can SEE red. A real mutation of a real subject, graded by
 // the same runner: if it stays green, nothing below means anything.
-const canary = grade({ ...MUTATIONS.find((m) => m.id === 'I01'), id: 'canary' });
+const canary = grade({ ...CANARY_ROW, id: 'canary' });
 if (canary === 0) {
   console.error(
     `${NAME}: the canary mutation left the guard GREEN; the harness cannot observe red`,

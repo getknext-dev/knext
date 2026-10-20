@@ -43,28 +43,6 @@ const SPEC = 'tests/dockerfile-numeric-nonroot-user.test.ts';
 const DOCKER = { commentPrefix: '#' };
 const TS_INLINE = { commentPrefix: '/*' };
 
-const SUBJECTS = {
-  fileManager: resolve(REPO_ROOT, 'apps/file-manager/Dockerfile'),
-  docs: resolve(REPO_ROOT, 'apps/docs/Dockerfile'),
-  bunExec: resolve(REPO_ROOT, 'examples/bun-exec/Dockerfile'),
-  bunExecNode: resolve(REPO_ROOT, 'examples/bun-exec/Dockerfile.node'),
-  goTemplate: resolve(REPO_ROOT, 'templates/go/Dockerfile'),
-  rustTemplate: resolve(REPO_ROOT, 'templates/rust/Dockerfile'),
-  appHbs: resolve(REPO_ROOT, 'packages/kn-next/templates/app/Dockerfile.hbs'),
-  selfContainedHbs: resolve(
-    REPO_ROOT,
-    'packages/kn-next/templates/app/Dockerfile.self-contained.hbs',
-  ),
-  vinextNodeHbs: resolve(REPO_ROOT, 'packages/kn-next/templates/app/Dockerfile.vinext-node.hbs'),
-  standaloneHbs: resolve(
-    REPO_ROOT,
-    'packages/kn-next/templates/runtime-standalone/Dockerfile.standalone.hbs',
-  ),
-  zoneCaller: resolve(REPO_ROOT, 'packages/grpc/e2e/z7-identity-kind/zone-caller/Dockerfile'),
-  szpgDemo: resolve(REPO_ROOT, 'packages/scale-zero-pg/demo/app/Dockerfile'),
-  spec: resolve(REPO_ROOT, 'tests/dockerfile-numeric-nonroot-user.test.ts'),
-};
-
 const MUTATIONS = [
   {
     id: 'U01',
@@ -208,7 +186,25 @@ const CANARY = {
 declareMutations(MUTATIONS.length);
 console.log(`mutation-prove-2530-dockerfile-user: ${MUTATIONS.length} mutations declared`);
 
-const prover = createGuardProver({ repoRoot: REPO_ROOT, spec: SPEC, subjects: SUBJECTS });
+const prover = createGuardProver({
+  repoRoot: REPO_ROOT,
+  spec: SPEC,
+  subjects: {
+    fileManager: 'apps/file-manager/Dockerfile',
+    docs: 'apps/docs/Dockerfile',
+    bunExec: 'examples/bun-exec/Dockerfile',
+    bunExecNode: 'examples/bun-exec/Dockerfile.node',
+    goTemplate: 'templates/go/Dockerfile',
+    rustTemplate: 'templates/rust/Dockerfile',
+    appHbs: 'packages/kn-next/templates/app/Dockerfile.hbs',
+    selfContainedHbs: 'packages/kn-next/templates/app/Dockerfile.self-contained.hbs',
+    vinextNodeHbs: 'packages/kn-next/templates/app/Dockerfile.vinext-node.hbs',
+    standaloneHbs: 'packages/kn-next/templates/runtime-standalone/Dockerfile.standalone.hbs',
+    zoneCaller: 'packages/grpc/e2e/z7-identity-kind/zone-caller/Dockerfile',
+    szpgDemo: 'packages/scale-zero-pg/demo/app/Dockerfile',
+    spec: 'tests/dockerfile-numeric-nonroot-user.test.ts',
+  },
+});
 prover.preflight(MUTATIONS);
 prover.baseline();
 prover.proveCanSeeRed(CANARY);
