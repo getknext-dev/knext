@@ -454,6 +454,7 @@ describe('integrity: a source re-pinned to new bytes is a change', () => {
           },
         });
       const [bad] = parseLockfile('package-lock.json', lock('junk'));
+      expect(bad.integrity).toBeUndefined();
       expect(isHashlessUrlSource(bad)).toBe(true);
       const [good] = parseLockfile('package-lock.json', lock('sha512-AbC='));
       expect(isHashlessUrlSource(good)).toBe(false);
