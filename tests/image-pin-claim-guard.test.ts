@@ -13,8 +13,19 @@ import { resolve } from 'node:path';
  * the zone's database Secret, pinned or not.
  *
  * An earlier wording said the pin "closes" that exposure. It does not, and a
- * security claim that overstates its control is worse than none. This guard
- * keeps the wording honest in every place a user or an operator reads it:
+ * security claim that overstates its control is worse than none.
+ *
+ * THE SPEC PIN (`backends[].specDigest`) is different, and the docs may now say
+ * so: it binds the image AND env, envFrom and volumes, so for a zone that sets
+ * it the BackendService route to the database Secret IS closed. What that claim
+ * may and may not say is bounded here too: a sentence about the spec pin that
+ * claims protection must be scoped to the BackendService route (not "the Secret
+ * is safe"), and every place that makes it must state what remains (the contents
+ * of the objects the spec names, the settings outside the digest). A sentence
+ * that mentions BOTH the image pin and the spec pin is still read as an
+ * image-pin sentence: the image-only pin never closes anything.
+ *
+ * This guard keeps the wording honest in every place a user or an operator reads it:
  *
  *   1. no user-facing text may say the pin closes / fixes / prevents the
  *      database-Secret or token exposure (a sentence scan, with a self-test so
@@ -66,6 +77,50 @@ function configFieldDoc(): string {
     .join('\n');
 }
 
+/** The comment block above `SpecDigest string` in BackendBinding, as prose. */
+function goSpecFieldDoc(): string {
+  const src = read('packages/kn-next-operator/api/v1alpha1/nextapp_types.go');
+  const start = src.indexOf('// SpecDigest pins the whole security-relevant spec');
+  const end = src.indexOf('SpecDigest string `json:"specDigest,omitempty"`');
+  if (start < 0 || end < 0) throw new Error('BackendBinding.SpecDigest doc not found');
+  return src
+    .slice(start, end)
+    .split('\n')
+    .map((l) => l.replace(/^\s*\/\/ ?/, ''))
+    .filter((l) => !l.startsWith('+'))
+    .join('\n');
+}
+
+/** The generated CRD description of the same field. */
+function crdSpecFieldDoc(): string {
+  const src = read('packages/kn-next-operator/config/crd/bases/apps.kn-next.dev_nextapps.yaml');
+  const start = src.indexOf('SpecDigest pins the whole security-relevant spec');
+  const end = src.indexOf('maxLength: 71', start);
+  if (start < 0 || end < 0) throw new Error('CRD backends[].specDigest description not found');
+  return src.slice(start, end);
+}
+
+/** The JSDoc above `specDigest?: string` in BackendBindingConfig. */
+function configSpecFieldDoc(): string {
+  const src = read('packages/kn-next/src/config.ts');
+  const start = src.indexOf('Pins the whole function spec this app agreed to bind');
+  const end = src.indexOf('specDigest?: string;', start);
+  if (start < 0 || end < 0) throw new Error('BackendBindingConfig.specDigest doc not found');
+  return src
+    .slice(start, end)
+    .split('\n')
+    .map((l) => l.replace(/^\s*\*+\/?\s?/, ''))
+    .join('\n');
+}
+
+/** The spec-pin mismatch message, from the Go source of specPinMismatch. */
+function specStatusMessage(): string {
+  const src = read('packages/kn-next-operator/internal/controller/backendservice_spec_pin.go');
+  const start = src.indexOf('func specPinMismatch');
+  if (start < 0) throw new Error('specPinMismatch not found');
+  return src.slice(start);
+}
+
 /** The pin-mismatch message, from the Go source of imagePinMismatch. */
 function statusMessage(): string {
   const src = read('packages/kn-next-operator/internal/controller/backendservice_sovereignty.go');
@@ -77,7 +132,7 @@ function statusMessage(): string {
 /** The zone-functions page, the pin section only. */
 function docsPinSection(): string {
   const src = read('apps/docs/content/docs/zone-functions.mdx');
-  const start = src.indexOf('### Pin the function');
+  const start = src.indexOf("### Pin the function's spec");
   const end = src.indexOf('## What the zone receives');
   if (start < 0 || end < 0) throw new Error('pin section not found');
   return src.slice(start, end);
@@ -107,6 +162,15 @@ const TARGET =
   /\b(?:database secret|db-bind|exposure|users' tokens|confused deputy|equivalent to|that|this|it|them)\b/i;
 const LIMITER = /\b(?:not|never|cannot|can't|narrows?|neither|nor)\b|n't/i;
 
+/** A sentence about the SPEC pin. The image pin never closes anything, so a sentence that also names it is not exempt. */
+const SPEC_PIN_TERM =
+  /\b(?:specDigest|spec pin|spec digest|whole spec|pins? the (?:function's )?spec)\b/i;
+const IMAGE_PIN_TERM =
+  /\bimage[- ]pin\b|\bimage-only\b|\bpins? (?:only )?the image\b|\bpinn(?:ed|ing) (?:the )?image\b|\bpinned image\b|\b(?:an|the) `?image`? pin\b/i;
+/** What a protection claim about the spec pin must be scoped to: the BackendService route. */
+const SPEC_SCOPE =
+  /\b(?:backendservices?|writes?|writers?|update|route|refus\w+|mismatch\w*|can no longer make|cannot make)\b/i;
+
 const TO_CLOSE =
   /\b(?:set|enable|use|add|put|apply|configure)\b[^.]*\bto (?:close|fix|solve|eliminate|prevent|protect against) (?:it|that|this|the (?:exposure|risk|gap|problem))\b/i;
 
@@ -114,12 +178,34 @@ function claimClauses(sentence: string): string[] {
   return sentence.split(/[,;:—|]|\s(?:but|while|although)\s/i);
 }
 
-function overclaims(text: string): string[] {
+function flatten(text: string): string[] {
   const flat = text
     .replace(/[*`]/g, '')
     .replace(/fail(?:s|ed)? closed/gi, 'fail-shut')
     .replace(/\s+/g, ' ');
-  return flat.split(/(?<=[.!?])\s+/).filter((s) => {
+  return flat.split(/(?<=[.!?])\s+/);
+}
+
+const isSpecOnly = (s: string) => SPEC_PIN_TERM.test(s) && !IMAGE_PIN_TERM.test(s);
+
+/**
+ * A sentence about the spec pin that claims protection without scoping it to the
+ * BackendService route ("the spec pin makes the Secret safe"). The claim itself
+ * is allowed; an unbounded one is not.
+ */
+function specOverclaims(text: string): string[] {
+  return flatten(text).filter(
+    (s) =>
+      isSpecOnly(s) &&
+      claimClauses(s).some((c) => CLAIM_VERB.test(c) && TARGET.test(c) && !LIMITER.test(c)) &&
+      !SPEC_SCOPE.test(s),
+  );
+}
+
+function overclaims(text: string): string[] {
+  return flatten(text).filter((s) => {
+    // The spec pin is judged by specOverclaims, not by the image-pin rules.
+    if (isSpecOnly(s)) return false;
     // The imperative form names no pin ("Set it to close that."): "it" is the pin.
     if (TO_CLOSE.test(s) && !LIMITER.test(s)) return true;
     if (!PIN_TERM.test(s)) return false;
@@ -176,6 +262,36 @@ describe('the scanner sees the wording we removed and its paraphrases', () => {
   it('a limiter in ANOTHER clause does not rescue a claim', () => {
     expect(overclaims('Pinning protects the database Secret, and it is not slow.')).toHaveLength(1);
   });
+
+  // The spec pin may be said to close the BackendService route, scoped to it.
+  it('allows a scoped claim about the spec pin, and still sees an unscoped one', () => {
+    for (const ok of [
+      'With the spec pin set, a writer of the BackendService can no longer make the function run their code with the Secret mounted.',
+      'The spec pin closes that route: anything a writer changes is refused before it is mounted.',
+      'For a zone that sets specDigest, update on backendservices is no longer equivalent to reading the database Secret.',
+    ]) {
+      expect(overclaims(ok), ok).toEqual([]);
+      expect(specOverclaims(ok), ok).toEqual([]);
+    }
+    for (const bad of [
+      'The spec pin makes the database Secret safe.',
+      "specDigest protects your users' tokens.",
+      'Setting the spec pin closes the exposure.',
+      'With the spec pin the confused deputy is eliminated.',
+    ]) {
+      expect(specOverclaims(bad), bad).toHaveLength(1);
+    }
+  });
+
+  it('a sentence that also names the image pin is still an image-pin sentence', () => {
+    for (const bad of [
+      'The image pin closes the exposure when specDigest is set.',
+      'The image pin and the spec pin protect the database Secret.',
+      'Pinning the image stops that, and so does the spec pin.',
+    ]) {
+      expect(overclaims(bad), bad).toHaveLength(1);
+    }
+  });
 });
 
 /** Lines of `text` that mention `needle` (a table row or a paragraph of a long page). */
@@ -212,7 +328,12 @@ const PLACES: [string, () => string][] = [
   ['the generated CRD description', crdFieldDoc],
   ['the config.ts field doc', configFieldDoc],
   ['the changeset', () => read('.changeset/zone-function-image-pin.md')],
+  ['the spec-pin changeset', () => read('.changeset/zone-function-spec-pin.md')],
+  ['the SpecDigest field doc in the Go types', goSpecFieldDoc],
+  ['the generated CRD specDigest description', crdSpecFieldDoc],
+  ['the config.ts specDigest field doc', configSpecFieldDoc],
   ['the operator status message', statusMessage],
+  ['the spec-pin status message', specStatusMessage],
   [
     'the threat model',
     () => section(read('docs/security/threat-model.md'), '### Zone-function binding'),
@@ -221,12 +342,19 @@ const PLACES: [string, () => string][] = [
     'ADR-0004 Amendment 3',
     () => section(read('docs/adr/0004-backend-service-crd.md'), '## Amendment 3'),
   ],
+  [
+    'ADR-0004 Amendment 4',
+    () => section(read('docs/adr/0004-backend-service-crd.md'), '## Amendment 4'),
+  ],
 ];
 
 describe('no place says the image pin closes the database-Secret exposure', () => {
   for (const [label, get] of PLACES) {
     it(label, () => {
       expect(overclaims(get())).toEqual([]);
+    });
+    it(`${label}: any claim about the spec pin is scoped to the BackendService route`, () => {
+      expect(specOverclaims(get())).toEqual([]);
     });
   }
 
@@ -280,10 +408,13 @@ describe('every user-facing place states the caveat', () => {
     expect(page).not.toMatch(/#2\d{3}/);
   });
 
-  it('the deploy function hint carries the env caveat', () => {
+  it('the deploy function hint offers the spec pin first and calls the image pin the weaker one', () => {
     const src = read('packages/grpc/src/deploy-function.ts').replace(/\s+/g, ' ');
-    expect(src).toMatch(/pin binds the image only/);
-    expect(src).toMatch(/env, envFrom and volumes/);
+    expect(src).toMatch(/specDigest/);
+    expect(src).toMatch(/image, env, envFrom and volumes/);
+    // The image-only entry still carries the caveat.
+    expect(src).toMatch(/weaker alternative pins the image only/);
+    expect(src).toMatch(/still change its env, envFrom and volumes/);
   });
 
   it('the docs page names the concrete env example', () => {
@@ -317,5 +448,110 @@ describe('the status message of a refused function makes no safety claim about t
     expect(msg).not.toMatch(/database Secret/i);
     expect(msg).not.toMatch(/reach no image/i);
     expect(msg).toContain('backends[].image pin');
+  });
+});
+
+describe('the spec pin: every user-facing place says what it binds', () => {
+  const SPEC_PLACES: [string, () => string][] = [
+    ['the zone-functions pin section', docsPinSection],
+    ['the SpecDigest field doc in the Go types', goSpecFieldDoc],
+    ['the generated CRD specDigest description', crdSpecFieldDoc],
+    ['the config.ts specDigest field doc', configSpecFieldDoc],
+    ['the spec-pin changeset', () => read('.changeset/zone-function-spec-pin.md')],
+    ['the user threat model page', () => read('apps/docs/content/docs/threat-model.mdx')],
+  ];
+  for (const [label, get] of SPEC_PLACES) {
+    it(`${label}: names specDigest and binds image, env, envFrom and volumes`, () => {
+      const text = get().replace(/\s+/g, ' ');
+      expect(text).toMatch(/specDigest/);
+      expect(text).toMatch(/\bimage\b/);
+      expect(text).toMatch(/\benv\b/);
+      expect(text).toMatch(/\benvFrom\b/);
+      expect(text).toMatch(/volumes/);
+    });
+  }
+});
+
+describe('the spec pin: every place that says it closes the route also says what remains', () => {
+  const RESIDUAL_PLACES: [string, () => string][] = [
+    ['the zone-functions pin section', docsPinSection],
+    ['the user threat model page', () => read('apps/docs/content/docs/threat-model.mdx')],
+    [
+      'the threat model',
+      () => section(read('docs/security/threat-model.md'), '### Zone-function binding'),
+    ],
+    [
+      'ADR-0004 Amendment 4',
+      () => section(read('docs/adr/0004-backend-service-crd.md'), '## Amendment 4'),
+    ],
+    ['the spec-pin changeset', () => read('.changeset/zone-function-spec-pin.md')],
+  ];
+  for (const [label, get] of RESIDUAL_PLACES) {
+    it(`${label}: contents of the named objects, and the settings outside the digest`, () => {
+      const text = get().replace(/\s+/g, ' ');
+      // What a spec pin cannot see: the data inside the Secrets and ConfigMaps it names.
+      expect(text).toMatch(/contents of the (?:objects|Secrets and ConfigMaps)/i);
+      // And the settings that are not hashed.
+      expect(text).toMatch(/\bport\b/);
+      expect(text).toMatch(/protoVersion/);
+    });
+  }
+
+  it('the advice to restrict update/patch/create still applies without a spec pin, in the docs page and the changeset', () => {
+    for (const text of [
+      docsPinSection().replace(/\s+/g, ' '),
+      read('.changeset/zone-function-spec-pin.md').replace(/\s+/g, ' '),
+    ]) {
+      expect(text).toMatch(/`?update`?, `?patch`? and `?create`? on\s+`?backendservices`?/i);
+      expect(text).toMatch(/already read/i);
+      expect(text).toMatch(/image pin|image-only|no pin|none/i);
+    }
+  });
+
+  it('the user docs keep no issue, PR or ADR numbers for the spec pin either', () => {
+    for (const p of [
+      'apps/docs/content/docs/zone-functions.mdx',
+      'apps/docs/content/docs/cli.mdx',
+      'apps/docs/content/docs/operator.mdx',
+    ]) {
+      expect(read(p), p).not.toMatch(/ADR-\d+/);
+    }
+    expect(read('apps/docs/content/docs/zone-functions.mdx')).not.toMatch(/#\d{3,}/);
+  });
+});
+
+describe('the internal docs record the spec pin and its exact residuals', () => {
+  it('ADR-0004 Amendment 4 records what is closed, what remains, the canonical form and the field coverage guard', () => {
+    const adr = read('docs/adr/0004-backend-service-crd.md');
+    const a4 = adr.slice(adr.indexOf('## Amendment 4')).replace(/\s+/g, ' ');
+    expect(a4).toContain('#2526');
+    expect(a4).toContain('specDigest');
+    expect(a4).toContain('BindingSpecMismatch');
+    expect(a4).toMatch(/knext\/backendservice-spec\/v1/);
+    expect(a4).toContain('TestEveryBackendServiceSpecFieldIsBoundOrReviewed');
+    expect(a4).toMatch(/closed for the BackendService route/);
+    expect(a4).toMatch(/Contents of the objects the spec names/);
+    expect(a4).toMatch(/jev/);
+  });
+
+  it('the threat model keeps the image-only residual and adds the spec pin', () => {
+    const tm = section(read('docs/security/threat-model.md'), '### Zone-function binding').replace(
+      /\s+/g,
+      ' ',
+    );
+    expect(tm).toMatch(/pin binds the image content only/i);
+    expect(tm).toContain('specDigest');
+    expect(tm).toContain('BindingSpecMismatch');
+    expect(tm).toMatch(/closed for a zone that sets the spec pin/);
+  });
+});
+
+describe('the status message of a spec-pin refusal makes no safety claim about the Secret', () => {
+  it('says what to do, names both digests, and does not say the Secret is safe', () => {
+    const msg = specStatusMessage().slice(0, specStatusMessage().indexOf('\n}\n'));
+    expect(msg).not.toMatch(/database Secret/i);
+    expect(msg).not.toMatch(/\bsafe\b/i);
+    expect(msg).toContain('backends[].specDigest');
+    expect(msg).toContain('pin');
   });
 });

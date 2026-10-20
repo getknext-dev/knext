@@ -1,6 +1,6 @@
 # ADR-0004: `BackendService` CRD for polyglot backends
 
-Status: Accepted (2026-10-12, Z1 design gate — architect and system-designer re-confirmation: [architect](https://github.com/getknext-dev/knext/issues/2045#issuecomment-6128826009), [system designer](https://github.com/getknext-dev/knext/issues/2045#issuecomment-6128845685)) · previously Proposed · Date: 2026-06 · Depends on: ADR-0001, ADR-0002 · Amended 2026-10-09 (see the amendment at the end; revised 2026-10-12 with the Z1 design gate's required changes before the re-confirmation) · Amendment 2 (2026-10-15) **Accepted (2026-10-17, sprint-5 close design review)**: `spec.zone`, two-sided binding, rendered binding env, operator-owned ServiceAccount, the activator as a NetworkPolicy peer, explicit RPC auth options (see the end) · Amendment 3 (2026-10-17) **Proposed**, decided at the sprint-6 close per the 2026-09-22 rule: an optional image digest pin on `NextApp.spec.backends[]` (see the end)
+Status: Accepted (2026-10-12, Z1 design gate — architect and system-designer re-confirmation: [architect](https://github.com/getknext-dev/knext/issues/2045#issuecomment-6128826009), [system designer](https://github.com/getknext-dev/knext/issues/2045#issuecomment-6128845685)) · previously Proposed · Date: 2026-06 · Depends on: ADR-0001, ADR-0002 · Amended 2026-10-09 (see the amendment at the end; revised 2026-10-12 with the Z1 design gate's required changes before the re-confirmation) · Amendment 2 (2026-10-15) **Accepted (2026-10-17, sprint-5 close design review)**: `spec.zone`, two-sided binding, rendered binding env, operator-owned ServiceAccount, the activator as a NetworkPolicy peer, explicit RPC auth options (see the end) · Amendment 3 (2026-10-17) **Proposed**, decided at the sprint-6 close per the 2026-09-22 rule: an optional image digest pin on `NextApp.spec.backends[]` (see the end) · Amendment 4 (2026-10-17) **Proposed**, decided at the sprint-6 close: an optional whole-spec digest pin, `NextApp.spec.backends[].specDigest`, binding the function's image, env, envFrom and volumes (see the end)
 
 > **Amended by ADR-0065 (Proposed, 2026-10-07):** adds a `flavour: model` `BackendService`
 > (HTTP/1.1, loopback-bound model server behind an auth sidecar) and an `external` variant of
@@ -707,8 +707,8 @@ the positive-evidence model of the revocation work, and the zone-env golden.
   database Secret mounted and its users' tokens arriving; the credential allowlist checks references,
   not what a value makes the image execute. So `update`/`patch`/`create` on `backendservices` stays
   equivalent to reading the zone's database Secret, pinned or not, and must be granted only to
-  principals who may already read it. The fix is #2526 (P1, decided at sprint close). Each is stated in
-  the threat model.
+  principals who may already read it. The fix is #2526: Amendment 4 adds a whole-spec pin for zones that
+  set it. Each is stated in the threat model.
 
 ### Action items
 
@@ -722,4 +722,173 @@ the positive-evidence model of the revocation work, and the zone-env golden.
       the CLI tests, and prover rows in `scripts/mutation-prove-2052-backendservice.mjs`.
 - [x] Docs: the threat model residual, the zone-functions page, the CLI and operator references.
 - [ ] kind: swap the image with `kubectl` and assert no database Secret mount (extends the Z8 kind lane).
+- [ ] Sprint-6 close review: accept, amend or reject this amendment.
+
+
+## Amendment 4 (2026-10-17) — the zone pins the function's whole spec, not only its image (Proposed)
+
+Status: **Proposed.** It is decided at the sprint-6 close review, per the 2026-09-22 workflow rule.
+The implementation (#2526, P1, security) ships behind this status; nothing in it changes a zone that
+does not set the new field.
+
+### Context
+
+Amendment 3 let a zone pin the digest of the function image it agreed to bind. The code review of that
+change found, and Amendment 3 residual (e) records, that the pin binds `spec.image` and nothing else. A
+principal with `update` on `backendservices` can keep the pinned digest and add `spec.env:
+NODE_OPTIONS=--import=data:text/javascript,...` (verified on Node v25), or an `envFrom` or a volume.
+Their code then runs inside the pinned image with the zone's database Secret mounted (the credential
+allowlist permits it, because the reference is the zone's own) and the users' `sub` tokens arriving. So
+`update` on `backendservices` stayed equivalent to reading the zone's database Secret, pinned or not.
+
+The goal: when a zone pins a function, everything that decides what code runs and what it can read is
+bound, not only the image.
+
+### Decision
+
+1. **One new optional field, `NextApp.spec.backends[].specDigest`** (`BackendBinding.SpecDigest`):
+   `sha256:` followed by 64 lowercase hex characters (`+kubebuilder:validation:Pattern=^sha256:[a-f0-9]{64}$`,
+   `MaxLength=71`; a pattern and a length, no CEL). It is a **single hash** of the function's
+   security-relevant spec, not a pin per field (jev: one hash 0.97 / a pin per field 0.03). The format
+   deliberately differs from `image`'s `@sha256:` form so the two cannot be confused: `image` is the
+   digest of a container image, `specDigest` is the digest of a spec. Additive and optional; the CRD
+   stays `v1alpha1`.
+2. **What is hashed.** The members of `BackendServiceSpec` that decide what code runs and what it can
+   read: **`image`, `env`, `envFrom`, `volumes`**. The whole member is bound (its marshalled form), so a
+   field later added *inside* one of them is bound with no change. `image` is the full reference as
+   written (jev: the whole reference 0.85 / the digest alone 0.15): the spec is "as written", and a mirror
+   or tag move is a deliberate re-pin. The image-only pin keeps comparing content, not names, for those
+   who want that.
+3. **What is not hashed, and why: a reviewed exclusion list, enforced by a test.** Every field of
+   `BackendServiceSpec` is either in `specPinHashedFields` or in `specPinExcludedFields` with a class and
+   a reason (`zone`: the binding's identity, immutable; `language`, `wakeAhead`: nothing is rendered from
+   them into the function; `port`, `protoVersion`, `scaling`, `resources`, `imagePullSecrets`: reach the
+   pod only as tuning that cannot add code or widen what it can read; jev: image, env, envFrom, volumes
+   0.83 / everything that reaches the pod 0.17). `TestEveryBackendServiceSpecFieldIsBoundOrReviewed`
+   enumerates the fields by **reflection** on the type and fails when one is in neither list, in both, or
+   stale; a second test compares each classification with **behaviour** (it renders the function objects
+   with the field changed and requires that a `notRendered` field changes nothing, an `operational` one
+   does change the output, and a hashed one changes the digest); a third requires that an excluded
+   struct field holds only scalars, so a list or nested object added to `scaling` or `resources` cannot
+   slip past. A new field therefore cannot reach the pod outside the pin without a decision a reviewer
+   reads.
+4. **The canonical form (version 1), the one place it is specified.** The CLI computes it, the operator
+   re-computes it, and `testdata/backend-spec-digest-vectors.json` is recomputed by both (and was
+   generated by a third, independent implementation).
+   1. *Project*: take the spec as JSON and keep the members named in `specPinHashedFields`.
+   2. *Normalise*, recursively: drop every object member whose value is `null`, `""`, `false`, an empty
+      list or an empty object. (The Go types omit some zero values and not others; this makes absent,
+      empty and false one thing on both sides, which they are to Kubernetes for every hashed type.)
+      Numbers are kept, so `defaultMode: 0` differs from absent.
+   3. *Encode*: `string` = `s<N>:<bytes>` (N is the UTF-8 byte length); `integer` = `i<N>;`; `true` =
+      `t`; `list` = `l<items>e` (**order kept**); `object` = `d<key><value>...e` with keys sorted by their
+      UTF-8 bytes. No whitespace, no escaping; floats and `null` are refused.
+   4. `digest = "sha256:" + hex(SHA-256("knext/backendservice-spec/v1\n" + encoding))`. The domain line
+      separates this use of SHA-256 and carries the form's version.
+
+   A bespoke encoding rather than JSON because JSON encoders differ between Go and JS in string escaping
+   (`<`, `>`, `&`, U+2028), key order and number text, and a digest has to match to the byte (jev: RFC 8785
+   JCS 0.51 / this encoding 0.41 / plain JSON 0.08, confidence 0.27, so close; the deciding facts were no
+   new dependency in the CLI and a form small enough to specify in a paragraph and prove with vectors).
+   **List order counts** (jev: keep order 0.57 / sort 0.43, low confidence): `env` order decides `$(VAR)`
+   expansion and `envFrom` order decides which source wins a name collision, so a reorder can change what
+   the pod sees; the price is that a tool which reorders a list makes the pin mismatch, which fails closed.
+5. **Mismatch semantics, same model as `imageMismatch`.** When the entry has a `specDigest`, the operator
+   computes the digest from the live `BackendService` and the function renders only if it equals the
+   pin. A mismatch (or a spec that cannot be encoded) refuses the function exactly like the image
+   mismatch: `Bound=False`, **reason `BindingSpecMismatch`** (a new reason, with its own series in the
+   refusals counter; jev: a new reason 0.75 / reusing `BindingImageMismatch` 0.25, confidence 0.50), Ready
+   inherits it, the message names the pin **and the digest the live spec has**, a Warning event is raised
+   once per transition, and the Knative Service and NetworkPolicy are removed through the one
+   `removeRendered` path. It is a field of `functionObservation`, an input of `accepted()` and a case of
+   `computeBackendServiceVerdict`; `Reconcile` gains one assignment next to `imageMismatch`, no branch and
+   no new `removeRendered` call site. If the image pin is also set and the image moved, the image reason is
+   reported (it is the more specific one).
+6. **Positive evidence only.** Like the image pin, it is computed from the two specs the reconciler holds,
+   never from a Secret read or any request that can fail. A transient error can neither cause the
+   refusal nor undo it, and an unreadable Secret does not turn a mismatch into "undecided".
+7. **Not rendered into the zone.** The pin is on the zone's spec only; the zone's pod template, env,
+   annotations and conditions are byte-identical with and without it (a golden over the zone's rendered
+   Knative Service, for a matching pin, a non-matching one, none, and across a function env change).
+8. **CLI.** `knext deploy function` computes the digest of the `BackendService` spec it applied
+   (`packages/grpc/src/spec-digest.ts`) and prints `{ name: '<fn>', specDigest: 'sha256:...' }` to paste
+   (and the image-only entry, as the weaker alternative). `knext.config.ts` `backends[].specDigest` is
+   validated with the CRD's pattern and bound, read from the shipped CRD in a test; `knext deploy`
+   emits it only when set; the emitted-fields list is regenerated. The cluster-write surface is unchanged.
+   The canonicalisation lives in `@getknext/grpc` (where the `BackendService` is built), not in core
+   (jev: `@getknext/grpc` 0.68 / core 0.32); core only validates the shape.
+9. **`backends[].image` stays, as the image-only option** (jev: keep it, documented as weaker 0.92 /
+   deprecate 0.04 / remove 0.04). Removing it would break zones that already set it; deprecating it adds
+   noise for a pin that is still exactly right when only the image should be bound (a function whose
+   `env` is owned by someone else). Both may be set.
+10. **Rotation.** A new function spec and a new `specDigest` are two writes that cannot land together. The
+    operator refuses between them and renders again as soon as they agree: an in-place update when
+    applied together, a refusal with a cold start when applied apart, either order. No list of allowed
+    digests (Amendment 3 Decision 6).
+11. **The residual is narrowed, exactly.** For a zone that sets `specDigest`, "`update` on
+    `backendservices` equals read the zone's db-bind Secret" is **closed for the BackendService route**: a
+    writer of the object alone can no longer run their code with the Secret mounted, because anything
+    they change is refused before it is rendered. What remains is stated in Consequences.
+
+### Options considered
+
+| Option | Pros | Cons |
+|---|---|---|
+| **A. One `specDigest` over image + env + envFrom + volumes, recomputed by the operator, field coverage enforced by a test (recommended)** | One field, one rule, one reason; binds nested fields added later; the guard forces a decision for any new top-level field; positive evidence; additive; the CLI already builds the spec | A hash is opaque (the message carries the live digest, and reviewers must review the spec before pinning it); order-sensitive; hand-written `env` needs the operator's digest |
+| B. A separate pin per field (`image`, `env`, `envFrom`, `volumes`) | Each is human-readable | Four fields and four rules to keep in step with the type; an `env` pin is a list of values the zone must copy; every new field is a new CRD field |
+| C. A denylist of env names | Small | Whack-a-mole (`NODE_OPTIONS`, `LD_PRELOAD`, `JAVA_TOOL_OPTIONS`, `PYTHONSTARTUP`, ...); rejected in the issue |
+| D. A ValidatingAdmissionPolicy limiting who writes `env` | No zone change | Restricts by principal, which knext cannot know; needs Kubernetes 1.30; fails open when deleted (Amendment 3 option B) |
+| E. Hash the rendered pod spec instead | Covers whatever the operator renders | Couples the pin to operator-internal rendering (JWKS mount, identity env, annotations), so an operator upgrade would mismatch every pin |
+
+**Recommendation: A.** jev (2026-10-17, from the issue): one hash 0.97 against a pin per field 0.03
+(confidence 0.94); the other scores are in the Decision above. jev also answered "is the residual closed
+for a pinned zone?" at 0.34 yes: that is why the Consequences list what remains instead of claiming
+closure without them. jev is a gut check, not the evidence: the evidence is the `NODE_OPTIONS` path in
+Context and the tests below.
+
+### Consequences
+
+- **CRD change** (operator minor, additive, still `v1alpha1`): `NextApp.spec.backends[].specDigest`,
+  optional. The CLI's schema preflight knows it. Upgrade order is the usual one: operator and CRD first,
+  then the CLI; an older CRD rejects the field under `--validate=strict` and the preflight names it.
+- **The refusals counter gains `BindingSpecMismatch`** (present at 0 from start-up).
+- **No change to the zone's render.** Proved by a golden.
+- **What is closed.** For a zone that sets `specDigest`, a principal with only `update`/`patch`/`create`
+  on `backendservices` cannot make the function run their code with the zone's database Secret mounted
+  through `env`, `envFrom`, `volumes` or `image`. Proved by envtest (env added under a pinned spec is
+  refused; envFrom added; a volume added; a reorder; a matching spec renders; no pin keeps today's
+  behaviour; rotation in place) and on kind (the Z7 lane pin phase adds an env with `kubectl patch` and
+  asserts the refusal and that nothing mounts the database Secret).
+- **Residuals, exactly.** (a) **Contents of the objects the spec names:** the digest binds which Secrets
+  and ConfigMaps the function reads, not their data; a principal who can write one of them can change
+  what the function reads, and what it executes if the image loads code or configuration from it. That
+  needs write on that object, not on `backendservices`. (b) **A Secret the zone itself provides** is
+  readable by the function by design. (c) **Excluded fields**: `port` (aim traffic at another listener of
+  the pinned image), `protoVersion` (misreport the contract version), `scaling`, `resources`,
+  `imagePullSecrets`. (d) **Optional per zone**: an unset `specDigest` keeps the image-only or name-only
+  binding and the residual of Amendment 3 (e). (e) **Whoever can write the `NextApp` can move the pin.**
+  (f) **Content, not provenance.** (g) **Rotation is two writes** and costs a cold start when apart.
+  (h) **List order counts**, so a reordering tool makes the pin mismatch (fail closed). (i) **Digest is
+  computed over the stored object**: quantities the apiserver re-renders can make a hand-written spec
+  mismatch (fail closed); the CLI emits none. (j) **A refusal's digest is the digest of whatever is on the
+  cluster**: pinning one without reviewing the spec pins an attacker's spec; the docs say so.
+- **A hash is opaque.** The refusal message names the pin and the live digest, and the docs say how to
+  review the spec before pinning.
+
+### Action items
+
+- [x] `NextApp.spec.backends[].specDigest` in the types, the CRD and the bundle (pattern, `MaxLength=71`).
+- [x] Operator: `specMismatch` in the observation, an input of `accepted()` and a `Bound` case of
+      `computeBackendServiceVerdict`; `ReasonBindingSpecMismatch` in the refusals counter;
+      `backendservice_spec_pin.go` (canonical form, digest, exclusion list).
+- [x] CLI: `packages/grpc/src/spec-digest.ts`; `knext deploy function` prints the entry; `backends[].specDigest`
+      in the config type, the validator (bound read from the shipped CRD), the builder and the regenerated
+      emitted-fields list.
+- [x] Tests: shared TS/Go vectors; the comparison table; the field coverage guard (reflection plus
+      behaviour); the verdict; the zone-render golden; envtest; the CLI tests; the claim guard
+      (`tests/image-pin-claim-guard.test.ts`) now lets the docs say the spec pin closes the route while the
+      image-only pin still does not; prover rows in `scripts/mutation-prove-2052-backendservice.mjs`.
+- [x] Docs: the zone-functions page, the threat models, the CLI and operator references.
+- [x] kind: the Z7 lane pin phase adds an env with `kubectl patch` and asserts the refusal and that no pod
+      or Knative Service mounts the database Secret (runs in CI; not run locally).
 - [ ] Sprint-6 close review: accept, amend or reject this amendment.

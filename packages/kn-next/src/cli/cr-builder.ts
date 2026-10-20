@@ -544,6 +544,10 @@ export function buildNextAppCRObject(
                   // zone's pod by the operator; only emitted when set, so a CR
                   // without pins is byte-identical to one written before it.
                   ...(b.image ? { image: b.image } : {}),
+                  // The optional whole-spec pin (ADR-0004 Amendment 4), emitted
+                  // under the same rule: only when set, never rendered into the
+                  // zone's pod by the operator.
+                  ...(b.specDigest ? { specDigest: b.specDigest } : {}),
               }))
             : undefined;
 

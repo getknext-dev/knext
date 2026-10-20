@@ -14,6 +14,7 @@
     "spec.backends.*.image",
     "spec.backends.*.name",
     "spec.backends.*.service",
+    "spec.backends.*.specDigest",
     "spec.build",
     "spec.buildId",
     "spec.cache",
@@ -100,5 +101,5 @@
     "spec.storage.region"
   ],
   "notInBundledCRD": [],
-  "fieldCount": 94
+  "fieldCount": 95
 }

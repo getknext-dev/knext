@@ -133,7 +133,7 @@ and is enforced only on a policy-capable CNI (not flannel).
 `backendservice_sovereignty_test.go` and `backendservice_envtest_test.go`, and the Calico
 function leg of `test/networkpolicy-enforcement-drill.sh`.
 
-### Zone-function binding: `update` on `backendservices` is `get` on the zone's database Secret (#2497)
+### Zone-function binding: `update` on `backendservices` is `get` on the zone's database Secret (#2497, #2526)
 
 **The residual, stated plainly.** The two-sided binding (the function names its zone in
 `spec.zone`, the zone lists the function in `spec.backends`) matches **names only**. It stops
@@ -150,14 +150,15 @@ it and create one with the same name:
 - The zone sends its users' identity tokens (`sub`) to that image on every call.
 
 So **`update` on `backendservices` in a namespace is equivalent to reading the database Secret of every
-zone that binds a function there, and to receiving those zones' users' tokens. This holds with or without
-the image pin below** (see "What it does not cover": the pin binds the image only). Grant
+zone that binds a function there, and to receiving those zones' users' tokens. This holds with no pin and
+with only the image pin below** (see "What it does not cover": the image pin binds the image only). For the BackendService route it is
+**closed for a zone that sets the spec pin** (next section), apart from the residuals listed there. Grant
 `update`/`patch` on `backendservices` (and `create`, since a delete followed by a create is the same act)
 only to principals who may already read those Secrets. A GitOps controller that applies the
 `BackendService` has this power by construction. This is not visible in the cluster's RBAC for
 Secrets, which is what makes it easy to miss in a review.
 
-**The partial control.** The zone's optional pin (`NextApp.spec.backends[].image`, ADR-0004 Amendment 3, the
+**The partial control: the image pin.** The zone's optional pin (`NextApp.spec.backends[].image`, ADR-0004 Amendment 3, the
 CLI's `backends[].image`): `"@sha256:"` plus 64 lowercase hex characters. With a pin, the operator
 renders the function only while the digest of its `spec.image` equals the pin exactly. Any other
 digest, an image with no digest, or an ambiguous reference refuses the function: `Ready=False`, reason
@@ -167,16 +168,61 @@ the `NextApp` can change it, so the principal above cannot move it. It is positi
 two specs (never from a Secret read or any request that can fail), so a transient error cannot cause
 the refusal and cannot undo it.
 
-**What it does not cover.**
+**The control that closes the BackendService route: the spec pin (#2526, ADR-0004 Amendment 4).** The
+zone's optional `NextApp.spec.backends[].specDigest` (`"sha256:"` plus 64 lowercase hex characters, the
+CLI's `backends[].specDigest`, printed by `knext deploy function`) pins a digest of the function's
+**image, `env`, `envFrom` and `volumes`**: everything in `BackendServiceSpec` that decides what code
+runs and what it can read. The operator re-computes the digest from the live `BackendService` on every
+reconcile (canonical form: ADR-0004 Amendment 4, shared vectors recomputed by the Go operator and the TS
+CLI) and renders the function only while it equals the pin. Any other spec (an env var, an `envFrom` or a
+volume added; any of them changed or reordered; another image) refuses the function: `Ready=False`, reason
+`BindingSpecMismatch`, the Knative Service and NetworkPolicy removed, nothing mounted, no JWKS; the message
+names both digests. Like the image pin it is positive evidence read from the two specs, so a transient
+read error can neither cause the refusal nor undo it, and it is never rendered into the zone (golden).
+The classification of every `BackendServiceSpec` field (hashed, or excluded with a reviewed reason) is
+enforced by `TestEveryBackendServiceSpecFieldIsBoundOrReviewed`, so a field added later cannot reach the
+pod outside the pin without a decision. For a zone that sets it, **`update` on `backendservices` is no
+longer equivalent to reading the zone's database Secret through the `BackendService`**: the
+`NODE_OPTIONS=--import=...` path below is refused before anything is mounted.
 
-- **The pin binds the image content only; it does not close the exposure above.** The function's `env`,
+**What the spec pin leaves (residuals).**
+
+- **Contents of the objects the spec names.** The digest binds the *names* of the Secrets and ConfigMaps
+  the function reads, not their data. A principal who can write a ConfigMap the function mounts, or a
+  Secret marked for the zone, can change what the function reads, and what it executes if the pinned
+  image loads code or configuration from it. That needs write on that object, not on `backendservices`;
+  namespace write access to Secrets and ConfigMaps stays inside the namespace trust boundary
+  (`ZoneLabel` is writable by anyone who can write Secrets).
+- **A Secret the zone itself provides.** If the pinned spec references a Secret marked for the zone, the
+  function has it by design; the pin is the zone's statement that it may.
+- **Excluded settings** (each with a reviewed reason in `specPinExcludedFields`): `port` (a writer can
+  aim traffic at another listener of the same pinned image), `protoVersion` (a writer can misreport the
+  contract version to the zone's version gate), `scaling`, `resources`, `imagePullSecrets` (the kubelet
+  uses them only to authenticate the pull of the image by digest; the pod does not mount them),
+  `language` and `wakeAhead` (nothing is rendered from them into the function), and `zone` (immutable;
+  it is the binding itself).
+- **Optional, per zone.** A zone that sets neither pin keeps the name-only binding; a zone that sets only
+  `image` keeps the residual below. List order counts (`env` order decides `$(VAR)` expansion), so a tool
+  that reorders a list makes the pin mismatch and the function is refused (fail closed).
+- **Hand-written specs need the operator's digest.** `knext deploy function` hashes the spec it applies.
+  A `BackendService` with `env`, `envFrom` or `volumes` added by hand hashes differently; the refusal
+  message carries the digest the operator computed so a reviewer can pin it. Pinning a digest copied
+  from a refusal nobody reviewed pins whatever is on the cluster.
+- **Whoever can write the `NextApp` can move the pin**, as for the image pin.
+- **Quantities and defaults.** The digest is computed over the stored object: a `sizeLimit` or a
+  `resourceFieldRef.divisor` the apiserver re-renders differently from how it was written can make a
+  hand-written spec mismatch (fail closed). The CLI emits neither.
+
+**What the image pin does not cover.**
+
+- **The image pin binds the image content only; it does not close the exposure above.** The function's `env`,
   `envFrom` and `volumes` are all in the `BackendService` spec (it has no command or args field) and stay with whoever
   can write it. Reviewer-verified on Node v25: a writer keeps the pinned digest and adds
   `spec.env: NODE_OPTIONS=--import=data:...`; that code runs inside the pinned image with the zone's
   db-bind mounted and its users' tokens arriving. The credential allowlist does not catch it (it checks
-  Secret and ConfigMap references, not what an env value makes the image execute). The real fix is
-  tracked in #2526 (P1, decided at sprint close). Until then the RBAC advice above applies to **every**
-  zone, pinned or not.
+  Secret and ConfigMap references, not what an env value makes the image execute). The fix is the spec
+  pin above (#2526). A zone that sets only the image pin, or none, keeps this residual, and the RBAC
+  advice above applies to it.
 
 - **No pin, no image control.** The pin is optional (adding it to every existing zone would break them), so
   a zone that does not set it keeps the name-only binding for the image too.
@@ -203,6 +249,14 @@ the refusal and cannot undo it.
 another digest, tag-only, tag containing the digest text, two digests, uppercase hex, a longer digest; the
 verdict; a mismatch is definitive even with an unreadable Secret; the zone's rendered Knative Service
 byte-identical with and without a pin and across a function image swap),
+`backendservice_spec_pin_test.go` (the shared vectors the TS CLI recomputes; env, envFrom and
+volume additions, a reorder and an image change all mismatch; tuning fields do not; the field coverage
+guard and its behavioural check against the rendered objects; the zone's rendered Knative Service
+byte-identical with and without a spec pin), `backendservice_spec_pin_envtest_test.go` (env added under
+a pinned spec is refused and nothing renders or mounts; the same for envFrom and a volume; a matching
+spec renders; no pin keeps today's behaviour; rotation with both sides changing together updates in
+place; either order of two writes refuses in between; a Secret read error leaves a matching pinned
+function alone and does not hide a mismatch; the CRD rejects each malformed pin),
 `backendservice_image_pin_envtest_test.go` (a swapped image is refused and its Knative Service
 removed; a re-created function with another image is refused; a matching pin renders; no pin keeps
 today's behaviour; the function recovers in place when the image returns; rotation with both sides

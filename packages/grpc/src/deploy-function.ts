@@ -32,6 +32,7 @@ import { parseArgs } from 'node:util';
 import { buildBackendServiceCR, renderBackendServiceCR } from './backend-service';
 import { GrpcUsageError, loadConfig } from './config';
 import type { Io } from './generate';
+import { backendSpecDigest } from './spec-digest';
 
 /** What core's server-side preflight tells us. A subset of its `PreflightOutcome`. */
 export interface PreflightResult {
@@ -232,23 +233,32 @@ export async function deployFunction(args: DeployFunctionArgs): Promise<number> 
       );
       return 1;
     }
-    // The zone's half of the binding. Its optional `image` pins the digest of
-    // the image just applied (digest only: the registry path may move, the
-    // content may not), so a later swap of spec.image by anyone with `update`
-    // on backendservices is refused instead of inheriting the zone's database
-    // Secret. Core's schema, the CRD and the operator agree on this shape.
+    // The zone's half of the binding. Its optional `specDigest` pins the whole
+    // security-relevant spec just applied (image, env, envFrom, volumes), so a
+    // later change to any of them by anyone with `update` on backendservices is
+    // refused instead of inheriting the zone's database Secret. The weaker
+    // `image` pin (digest only: the registry path may move, the content may not)
+    // is still accepted and printed as the alternative. Core's schema, the CRD
+    // and the operator agree on both shapes.
+    const specDigest = backendSpecDigest(cr.spec);
     const pin = `@${v.image.slice(v.image.lastIndexOf('@') + 1)}`;
     io.stdout(
       `BackendService ${namespace}/${name} applied. The function runs once the zone lists it. ` +
         'Add this entry to `backends` in knext.config.ts and run `knext deploy`, ' +
         'then the operator reconciles both halves:\n' +
+        `  { name: '${name}', specDigest: '${specDigest}' }\n` +
+        "The `specDigest` field pins the function's whole spec: its image, env, envFrom and volumes. " +
+        'If any of them changes without the zone changing the pin too, the function is refused and ' +
+        'nothing is mounted into it, so whoever can write the BackendService cannot add an env var ' +
+        'or a volume and read your zone database Secret. After you change the function, update the ' +
+        'pin in the same step. Port, scaling, resources and protoVersion are not part of it.\n' +
+        'If you hand-write env, envFrom or volumes into the BackendService, this digest covers none ' +
+        'of them: the function is refused until you pin the digest the operator reports in the ' +
+        "function's Ready condition, after you have reviewed that spec.\n" +
+        'The weaker alternative pins the image only (whoever can write the BackendService can ' +
+        'still change its env, envFrom and volumes):\n' +
         `  { name: '${name}', image: '${pin}' }\n` +
-        'The `image` field pins the image the zone binds: if the BackendService image ever ' +
-        'changes without the zone changing the pin too, the function is refused and nothing is ' +
-        'mounted into it. Leave `image` out to keep the name-only binding. After you deploy a new ' +
-        'function image, update the pin in the same step. The pin binds the image only: whoever can ' +
-        "write the BackendService can still change the function's env, envFrom and volumes, so grant " +
-        'update on backendservices only to people who may read the zone database Secret.\n',
+        'Leave both out to keep the name-only binding.\n',
     );
     return 0;
   } catch (err) {

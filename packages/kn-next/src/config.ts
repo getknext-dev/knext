@@ -303,6 +303,23 @@ export interface BackendBindingConfig {
      * or not.
      */
     image?: string;
+    /**
+     * Pins the whole function spec this app agreed to bind (`specDigest`), as
+     * a digest: `"sha256:<64 lowercase hex>"`. `knext deploy function` prints
+     * the exact entry to paste.
+     *
+     * It covers the BackendService's image AND its env, envFrom and volumes,
+     * so whoever can write the BackendService can no longer keep the image and
+     * add an env var or a volume to read your database Secret.
+     * The operator re-computes the digest from the live BackendService and runs
+     * the function only while it matches; otherwise it is refused (Ready False,
+     * reason `BindingSpecMismatch`) and nothing is mounted into it. Port,
+     * scaling, resources and protoVersion are not part of the digest.
+     *
+     * Without it the weaker `image` pin (or the name-only binding) applies;
+     * both may be set. Update the pin whenever you change the function.
+     */
+    specDigest?: string;
 }
 
 // Network exposure (#1865): whether the app's Knative Route is reachable from

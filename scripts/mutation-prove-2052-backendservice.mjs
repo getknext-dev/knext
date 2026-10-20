@@ -32,7 +32,14 @@
  *     a reference with two digests, a tag-only image, a prefix or case-folded
  *     match), its input to accepted(), the Bound condition and the refusals
  *     series, the reconciler reading the entry, the CRD's pattern, and the pin
- *     leaking into the zone's rendered env.
+ *     leaking into the zone's rendered env;
+ *   - the zone's SPEC pin on backends[] (ADR-0004 Amendment 4, X01-X23): the comparison, each hashed member
+ *     (image, env, envFrom, volumes) dropped in turn, an excluded member leaking
+ *     in, the canonical form (list order, key sort, the domain line, byte
+ *     lengths, the normalisation of zero values), the Bound condition, the
+ *     reconciler reading the entry, the field coverage guard (an unclassified
+ *     field, a dishonest class). The CLI's twin of the canonical form is proved by
+ *     scripts/mutation-prove-2526-spec-digest-cli.mjs.
  *
  * Besides the rows: a CANARY (the first pin row graded by the same runner before
  * the table; it must go red or the harness cannot see red) and a NEUTRAL control
@@ -98,6 +105,8 @@ const CRD = resolve(REPO_ROOT, 'packages/kn-next-operator/config/crd/bases/apps.
 const ROLE = resolve(REPO_ROOT, 'packages/kn-next-operator/config/rbac/role.yaml');
 // biome-ignore format: one-line resolve() for the anchor-drift scan
 const NEXTAPP_CRD = resolve(REPO_ROOT, 'packages/kn-next-operator/config/crd/bases/apps.kn-next.dev_nextapps.yaml');
+// biome-ignore format: one-line resolve() for the anchor-drift scan
+const SPECPIN = resolve(REPO_ROOT, 'packages/kn-next-operator/internal/controller/backendservice_spec_pin.go');
 
 const PROVER = {
   subjects: {
@@ -113,6 +122,7 @@ const PROVER = {
     crd: CRD,
     role: ROLE,
     nextappcrd: NEXTAPP_CRD,
+    specpin: SPECPIN,
   },
 };
 
@@ -293,8 +303,9 @@ const MUTATIONS = [
     id: 'L04',
     claim: 'the lint rejects the function instead of warning',
     subject: 'verdict',
-    anchor: 'o.imageMismatch == "" && len(o.violations) == 0',
-    replacement: 'o.imageMismatch == "" && len(o.violations) == 0 && len(o.lint) == 0',
+    anchor: 'o.imageMismatch == "" && o.specMismatch == "" && len(o.violations) == 0',
+    replacement:
+      'o.imageMismatch == "" && o.specMismatch == "" && len(o.violations) == 0 && len(o.lint) == 0',
     test: envtest('foreign database host as a lint WARNING'),
   },
   // --- the reconciler ---------------------------------------------------------
@@ -756,8 +767,8 @@ const MUTATIONS = [
     id: 'I07',
     claim: 'a mismatch is not an input of accepted(): the function still renders',
     subject: 'verdict',
-    anchor: 'o.imageMismatch == "" && len(o.violations) == 0',
-    replacement: 'len(o.violations) == 0',
+    anchor: 'o.imageMismatch == "" && o.specMismatch == "" && len(o.violations) == 0',
+    replacement: 'o.specMismatch == "" && len(o.violations) == 0',
     test: unit('TestAMismatchIsNotAccepted|TestAMismatchIsDecidedEvenWhenASecretReadFails'),
   },
   {
@@ -788,8 +799,8 @@ const MUTATIONS = [
     id: 'I11',
     claim: 'the refusal is not pre-registered in the refusals series',
     subject: 'metrics',
-    anchor: 'ReasonZoneNotListed, ReasonBindingImageMismatch, ReasonConflictingOwner,',
-    replacement: 'ReasonZoneNotListed, ReasonConflictingOwner,',
+    anchor: 'ReasonBindingImageMismatch, ReasonBindingSpecMismatch, ReasonConflictingOwner,',
+    replacement: 'ReasonBindingSpecMismatch, ReasonConflictingOwner,',
     test: unit('TestTheRefusalIsCountedUnderItsOwnReason'),
   },
   {
@@ -807,6 +818,195 @@ const MUTATIONS = [
     anchor: 'zb := zoneBinding{name: entry.Name, service: entry.Service}',
     replacement: 'zb := zoneBinding{name: entry.Name, service: entry.Service + entry.Image}',
     test: unit('TestAPinChangesNothingRenderedIntoTheZone'),
+  },
+  // --- the zone's SPEC pin on backends[] (ADR-0004 Amendment 4) -----------------
+  {
+    id: 'X01',
+    claim: 'the spec pin is never compared: any spec matches',
+    subject: 'specpin',
+    anchor: '\tif have == pin {',
+    replacement: '\tif true {',
+    test: unit('TestSpecPinMismatch'),
+  },
+  {
+    id: 'X02',
+    claim: "an entry with no spec pin is treated as a mismatch (today's behaviour is lost)",
+    subject: 'specpin',
+    anchor: '\tif pin == "" {\n\t\treturn ""\n\t}',
+    replacement: '\tif false {\n\t\treturn ""\n\t}',
+    test: unit('TestSpecPinMismatch'),
+  },
+  {
+    id: 'X03',
+    claim: 'env is not hashed: NODE_OPTIONS can be added under a pinned spec',
+    subject: 'specpin',
+    anchor: 'var specPinHashedFields = []string{"image", "env", "envFrom", "volumes"}',
+    replacement: 'var specPinHashedFields = []string{"image", "envFrom", "volumes"}',
+    test: unit('TestSpecPinMismatch'),
+  },
+  {
+    id: 'X04',
+    claim: 'envFrom is not hashed: a Secret can be imported under a pinned spec',
+    subject: 'specpin',
+    anchor: 'var specPinHashedFields = []string{"image", "env", "envFrom", "volumes"}',
+    replacement: 'var specPinHashedFields = []string{"image", "env", "volumes"}',
+    test: unit('TestSpecPinMismatch'),
+  },
+  {
+    id: 'X05',
+    claim: 'volumes are not hashed: a volume can be mounted under a pinned spec',
+    subject: 'specpin',
+    anchor: 'var specPinHashedFields = []string{"image", "env", "envFrom", "volumes"}',
+    replacement: 'var specPinHashedFields = []string{"image", "env", "envFrom"}',
+    test: unit('TestSpecPinMismatch'),
+  },
+  {
+    id: 'X06',
+    claim: 'the image is not hashed: an image swap passes the spec pin',
+    subject: 'specpin',
+    anchor: 'var specPinHashedFields = []string{"image", "env", "envFrom", "volumes"}',
+    replacement: 'var specPinHashedFields = []string{"env", "envFrom", "volumes"}',
+    test: unit('TestSpecPinMismatch'),
+  },
+  {
+    id: 'X07',
+    claim: 'an excluded member (port) leaks into the hash: tuning needs a re-pin',
+    subject: 'specpin',
+    anchor: 'var specPinHashedFields = []string{"image", "env", "envFrom", "volumes"}',
+    replacement: 'var specPinHashedFields = []string{"image", "env", "envFrom", "volumes", "port"}',
+    test: unit('TestSpecPinIgnoresWhatDoesNotDecideCodeOrReads'),
+  },
+  {
+    id: 'X08',
+    claim: 'list order is not part of the digest: a reordered env passes',
+    subject: 'specpin',
+    anchor:
+      '\t\tb.WriteString("l")\n\t\tfor _, x := range t {\n\t\t\tif err := writeCanonical(b, x); err != nil {\n\t\t\t\treturn err\n\t\t\t}\n\t\t}\n\t\tb.WriteString("e")',
+    replacement:
+      '\t\tb.WriteString("l")\n\t\tparts := make([]string, 0, len(t))\n\t\tfor _, x := range t {\n\t\t\tvar sb strings.Builder\n\t\t\tif err := writeCanonical(&sb, x); err != nil {\n\t\t\t\treturn err\n\t\t\t}\n\t\t\tparts = append(parts, sb.String())\n\t\t}\n\t\tsort.Strings(parts)\n\t\tb.WriteString(strings.Join(parts, ""))\n\t\tb.WriteString("e")',
+    test: unit('TestSpecDigestIsOrderSensitiveForLists|TestSpecDigestVectors'),
+  },
+  {
+    id: 'X09',
+    claim: 'object keys are not sorted: the digest depends on map iteration order',
+    subject: 'specpin',
+    anchor: '\t\tsort.Strings(keys) // byte order of the UTF-8 strings',
+    replacement: '\t\t_ = sort.Strings',
+    test: unit('TestSpecDigestVectors'),
+  },
+  {
+    id: 'X10',
+    claim: 'an empty string is kept: absent and empty hash differently from the CLI',
+    subject: 'specpin',
+    anchor: '\t\treturn t, t == ""',
+    replacement: '\t\treturn t, false',
+    test: unit('TestSpecDigestVectors'),
+  },
+  {
+    id: 'X11',
+    claim: 'false is kept: an explicit optional:false hashes differently from absent',
+    subject: 'specpin',
+    anchor: '\t\treturn t, !t',
+    replacement: '\t\treturn t, false',
+    test: unit('TestSpecDigestVectors'),
+  },
+  {
+    id: 'X12',
+    claim: 'the domain line is dropped: the digest is a bare SHA-256 of the encoding',
+    subject: 'specpin',
+    anchor: 'const specDigestDomain = "knext/backendservice-spec/v1\\n"',
+    replacement: 'const specDigestDomain = ""',
+    test: unit('TestSpecDigestVectors'),
+  },
+  {
+    id: 'X13',
+    claim: 'string length is counted in characters, not UTF-8 bytes',
+    subject: 'specpin',
+    anchor: '\t\tfmt.Fprintf(b, "s%d:%s", len(t), t)',
+    replacement: '\t\tfmt.Fprintf(b, "s%d:%s", len([]rune(t)), t)',
+    test: unit('TestSpecDigestVectors'),
+  },
+  {
+    id: 'X14',
+    claim: 'a spec mismatch is not an input of accepted(): the function still renders',
+    subject: 'verdict',
+    anchor: 'o.imageMismatch == "" && o.specMismatch == "" && len(o.violations) == 0',
+    replacement: 'o.imageMismatch == "" && len(o.violations) == 0',
+    test: unit('TestASpecMismatchIsNotAccepted|TestASpecMismatchIsDecidedEvenWhenASecretReadFails'),
+  },
+  {
+    id: 'X15',
+    claim: 'the Bound condition does not name the spec mismatch',
+    subject: 'verdict',
+    anchor: '\tcase o.specMismatch != "":',
+    replacement: '\tcase false:',
+    test: unit('TestVerdictForASpecMismatchIsBindingSpecMismatch'),
+  },
+  {
+    id: 'X16',
+    claim: 'the reconciler never records the spec mismatch: an injected env keeps running',
+    subject: 'ctl',
+    anchor: 'obs.specMismatch = specPinMismatch(entry.SpecDigest, &bs.Spec)',
+    replacement: '_ = specPinMismatch(entry.SpecDigest, &bs.Spec)',
+    test: envtest('refuses env added under a pinned spec'),
+  },
+  {
+    id: 'X17',
+    claim: 'the reconciler compares against an empty spec pin: nothing is ever refused',
+    subject: 'ctl',
+    anchor: 'obs.specMismatch = specPinMismatch(entry.SpecDigest, &bs.Spec)',
+    replacement: 'obs.specMismatch = specPinMismatch("", &bs.Spec)',
+    test: envtest('refuses a volume added under a pinned spec'),
+  },
+  {
+    id: 'X18',
+    claim: 'the spec refusal is not pre-registered in the refusals series',
+    subject: 'metrics',
+    anchor: 'ReasonBindingImageMismatch, ReasonBindingSpecMismatch, ReasonConflictingOwner,',
+    replacement: 'ReasonBindingImageMismatch, ReasonConflictingOwner,',
+    test: unit('TestTheSpecRefusalIsCountedUnderItsOwnReason'),
+  },
+  {
+    id: 'X19',
+    claim: 'the CRD accepts a malformed spec pin',
+    subject: 'nextappcrd',
+    anchor: 'pattern: ^sha256:[a-f0-9]{64}$',
+    replacement: 'pattern: ^.*$',
+    test: envtest('NextApp CRD: the backends.*specDigest pin'),
+  },
+  {
+    id: 'X20',
+    claim: "the spec pin leaks into the zone's rendered env (a pin change rolls a zone revision)",
+    subject: 'bind',
+    anchor: 'zb := zoneBinding{name: entry.Name, service: entry.Service}',
+    replacement: 'zb := zoneBinding{name: entry.Name, service: entry.Service + entry.SpecDigest}',
+    test: unit('TestASpecPinChangesNothingRenderedIntoTheZone'),
+  },
+  {
+    id: 'X21',
+    claim: 'a field is left unclassified (language dropped from the exclusion list)',
+    subject: 'specpin',
+    anchor:
+      '\t"language": {exclusionNotRendered,\n\t\t"Informational metadata; the operator renders nothing from it into the function\'s objects."},',
+    replacement: '\t// "language" is no longer classified',
+    test: unit('TestEveryBackendServiceSpecFieldIsBoundOrReviewed'),
+  },
+  {
+    id: 'X22',
+    claim:
+      'a field is classified dishonestly (port claimed as not rendered, though it reaches the pod)',
+    subject: 'specpin',
+    anchor: '\t"port": {exclusionOperational,',
+    replacement: '\t"port": {exclusionNotRendered,',
+    test: unit('TestFieldClassificationMatchesWhatTheOperatorRenders'),
+  },
+  {
+    id: 'X23',
+    claim: 'the mismatch message does not name the digest the live spec has',
+    subject: 'specpin',
+    anchor: '"otherwise restore the BackendService\'s spec", pin, have)',
+    replacement: '"otherwise restore the BackendService\'s spec", pin, pin)',
+    test: unit('TestSpecPinMismatchNamesBothDigests'),
   },
   // --- CRD, RBAC and metrics ---------------------------------------------------
   {
@@ -856,8 +1056,8 @@ const NEUTRAL = {
   id: 'N01',
   claim: 'control: the same conjunction with its operands swapped changes nothing',
   subject: 'verdict',
-  anchor: 'o.imageMismatch == "" && len(o.violations) == 0',
-  replacement: 'len(o.violations) == 0 && o.imageMismatch == ""',
+  anchor: 'o.imageMismatch == "" && o.specMismatch == "" && len(o.violations) == 0',
+  replacement: 'o.specMismatch == "" && o.imageMismatch == "" && len(o.violations) == 0',
   test: unit('TestAMismatchIsNotAccepted|TestAMismatchIsDecidedEvenWhenASecretReadFails'),
 };
 

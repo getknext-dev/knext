@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { helpText, run } from '../cli';
 import type { DeployHost, PreflightResult } from '../deploy-function';
+import { backendSpecDigest } from '../spec-digest';
 import { capture, copyFixtureZone, emptyDir, removeScratchDirs } from './helpers';
 
 afterAll(removeScratchDirs);
@@ -103,6 +104,54 @@ describe('knext deploy function: apply order and strictness', () => {
     const args = ['function', 'orders', '--zone', 'shop', '--image', tagged];
     expect(await run('deploy', args, { ...c.io, cwd: dir, host })).toBe(0);
     expect(c.out()).toContain(`{ name: 'orders', image: '@${DIGEST}' }`);
+  });
+
+  it('prints the spec pin entry to paste: the digest of the spec it just applied', async () => {
+    const dir = copyFixtureZone('deploy-spec-pin-hint');
+    const { host, calls } = recordingHost();
+    const c = capture();
+    expect(await run('deploy', ARGS, { ...c.io, cwd: dir, host })).toBe(0);
+
+    const applied = JSON.parse((calls[1] as Call).crText);
+    const specDigest = backendSpecDigest(applied.spec);
+    expect(specDigest).toMatch(/^sha256:[a-f0-9]{64}$/);
+    expect(c.out()).toContain(`{ name: 'orders', specDigest: '${specDigest}' }`);
+    // The spec pin binds the image AND env, envFrom and volumes, so the output
+    // says that, and says the digest has to be re-pinned when those change.
+    expect(c.out()).toMatch(/env, envFrom and volumes/);
+    expect(c.out()).toMatch(/specDigest/);
+  });
+
+  it('keeps the image-only pin as the weaker option, and says so', async () => {
+    const dir = copyFixtureZone('deploy-image-only-weaker');
+    const { host } = recordingHost();
+    const c = capture();
+    expect(await run('deploy', ARGS, { ...c.io, cwd: dir, host })).toBe(0);
+    expect(c.out()).toContain(`{ name: 'orders', image: '@${DIGEST}' }`);
+    // Only the image: a writer of the BackendService can still add env.
+    expect(c.out()).toMatch(/image only|only the image/i);
+  });
+
+  it('prints a spec digest that ignores tuning flags and follows the image', async () => {
+    const digestFor = async (extra: string[], image = IMAGE) => {
+      const dir = copyFixtureZone(`deploy-spec-pin-${extra.length}-${image.length}`);
+      const { host, calls } = recordingHost();
+      const c = capture();
+      const args = ['function', 'orders', '--zone', 'shop', '--image', image, ...extra];
+      expect(await run('deploy', args, { ...c.io, cwd: dir, host })).toBe(0);
+      expect(calls.length).toBe(2);
+      const m = c.out().match(/specDigest: '(sha256:[a-f0-9]{64})'/);
+      expect(m).not.toBeNull();
+      return (m as RegExpMatchArray)[1];
+    };
+    const plain = await digestFor([]);
+    // port, scaling and protoVersion are tuning: not bound, so no re-pin.
+    expect(
+      await digestFor(['--port', '9090', '--min-scale', '1', '--proto-version', '1.2.3']),
+    ).toBe(plain);
+    // A different image is a different spec.
+    const other = `registry.example.com/shop/orders@sha256:${'c'.repeat(64)}`;
+    expect(await digestFor([], other)).not.toBe(plain);
   });
 
   it('threads --context to both the preflight and the apply', async () => {

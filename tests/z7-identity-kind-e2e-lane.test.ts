@@ -382,7 +382,51 @@ describe('the lane proves what it claims', () => {
     // proved to be the pin and not a broken function.
     expect(pin).toMatch(/swap_fn_image "\$\{go_img\}"[\s\S]*fn_ksvc_mounts_db/);
     // And it holds: a refusal that flaps back is not one.
-    expect(pin).toMatch(/sleep 20[\s\S]*fn_ksvc_gone \|\| fail/);
+    expect(pin).toMatch(
+      /sleep 20\n\s*fn_ksvc_gone \|\| fail "the refused function's Knative Service came back"/,
+    );
+  });
+
+  it('the pin phase adds an env var with kubectl under a spec pin and asserts the refusal and that nothing mounts the database Secret', () => {
+    const pin = runSh.slice(
+      runSh.indexOf('phase_pin() {'),
+      runSh.indexOf(
+        '# ---------------------------------------------------------------- phase: leaks',
+      ),
+    );
+    // The control first: with only the image pin, an env var added under the
+    // pinned image renders and the function still mounts the database Secret.
+    // Without it the later refusal could be a function that never worked.
+    expect(pin).toMatch(
+      /add_fn_env NODE_OPTIONS[\s\S]*fn_ksvc_has_env NODE_OPTIONS && fn_ksvc_mounts_db[\s\S]*drop_fn_env/,
+    );
+    expect(pin).toContain('the injected env is gone again');
+    // The pin is the CLI's own digest of the spec on the cluster, not a value the
+    // lane made up, so the CLI and the operator are proved to agree on a real
+    // apiserver object.
+    expect(runSh).toContain('bun "${SPEC_DIGEST}"');
+    expect(pin).toContain('spec_pin="$(live_spec_digest)"');
+    expect(pin).toContain('set_zone_spec_pin "${spec_pin}"');
+    // The env is added with a JSON patch of the BackendService only; the image is
+    // asserted untouched, so the image pin has nothing to refuse.
+    expect(runSh).toContain('"path\\":\\"/spec/env\\"');
+    expect(pin).toMatch(/fn_spec_image\)" = "\$\{go_img\}"/);
+    // The refusal is asserted by reason, by the Knative Service, the pods and the
+    // NetworkPolicy, it names the pinned digest, and it holds.
+    expect(pin).toContain('False/BindingSpecMismatch');
+    expect(pin).toMatch(
+      /BindingSpecMismatch[\s\S]*fn_ksvc_gone[\s\S]*fn_pods_gone[\s\S]*fn_netpol_gone/,
+    );
+    expect(pin).toContain('the refusal does not name the pinned digest');
+    expect(pin).toMatch(/sleep 20[\s\S]*the spec-refused function's Knative Service came back/);
+    // The pin is never rendered into the zone.
+    expect(pin).toContain('${spec_pin#sha256:}');
+    // Controls: the pinned spec back renders again, and a spec and a pin changed
+    // together bind it.
+    expect(pin).toMatch(
+      /drop_fn_env\n\s*wait_until 180 3 "the function renders again once its spec is the pinned one"/,
+    );
+    expect(pin).toMatch(/add_fn_env LOG_LEVEL debug[\s\S]*set_zone_spec_pin "\$\{rotated_pin\}"/);
   });
 
   it("follows the operator's shipped propagation bound instead of hard-coding one", () => {

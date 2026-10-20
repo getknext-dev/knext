@@ -827,10 +827,12 @@ is rejected rather than silently dropped, whatever your `kubectl` defaults to.
 The function runs only once the zone also lists it: add `{ name: "orders" }` to `backends` in the
 zone's `knext.config.ts` and run `knext deploy`, which sends the list on the zone's `NextApp`. See
 [Zone functions](/docs/zone-functions#binding-a-function-to-its-zone). After a successful apply the
-command prints the exact entry to paste, with the image digest as the optional `image` pin, for
-example `{ name: 'orders', image: '@sha256:...' }`. With the pin, the operator refuses the function
-if its image is ever changed without the zone changing the pin too; see
-[Pin the function's image](/docs/zone-functions#pin-the-functions-image). This command does not edit
+command prints the exact entry to paste, with the digest of the spec it applied as the optional
+`specDigest` pin, for example `{ name: 'orders', specDigest: 'sha256:...' }`. That digest covers the
+function's image, `env`, `envFrom` and `volumes`: with the pin, the operator refuses the function if
+any of them is ever changed without the zone changing the pin too. It also prints the weaker `image`
+pin (the image digest alone, `{ name: 'orders', image: '@sha256:...' }`) for zones that want only that.
+See [Pin the function's spec](/docs/zone-functions#pin-the-functions-spec). This command does not edit
 the zone's `NextApp`.
 
 **Exit code:** `0` on success; `1` on a usage error, a failed preflight, or a failed apply.

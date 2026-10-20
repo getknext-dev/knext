@@ -48,7 +48,11 @@ function loadCrd(): Crd {
     return YAML.parse(readFileSync(CRD_YAML, "utf-8")) as Crd;
 }
 
-function crdJson(withoutBackends: boolean, withoutImagePin = false): string {
+function crdJson(
+    withoutBackends: boolean,
+    withoutImagePin = false,
+    withoutSpecPin = false,
+): string {
     const crd = loadCrd();
     const spec = crd.spec.versions[0]?.schema.openAPIV3Schema.properties.spec;
     if (!spec) throw new Error("bundled CRD has no spec");
@@ -60,6 +64,8 @@ function crdJson(withoutBackends: boolean, withoutImagePin = false): string {
         }
     )?.items;
     if (withoutImagePin && items) delete items.properties.image;
+    // A CRD from the release that has the image pin but not the spec pin.
+    if (withoutSpecPin && items) delete items.properties.specDigest;
     return JSON.stringify(crd);
 }
 
@@ -80,10 +86,16 @@ interface Cluster {
     reject: boolean;
     /** Serve a CRD that has spec.backends but not its image pin. */
     withoutImagePin?: boolean;
+    /** Serve a CRD that has the image pin but not the spec pin. */
+    withoutSpecPin?: boolean;
 }
 
 function kubectl(cluster: Cluster): KubectlCapture {
-    const crd = crdJson(cluster.withoutBackends, cluster.withoutImagePin);
+    const crd = crdJson(
+        cluster.withoutBackends,
+        cluster.withoutImagePin,
+        cluster.withoutSpecPin,
+    );
     return (argv) => {
         if (argv[1] === "apply") return cluster.reject ? REJECT : ACCEPT;
         if (argv.join(" ").includes("openapi"))
@@ -126,6 +138,7 @@ describe("the NextApp the CLI emits matches the shipped CRD for spec.backends", 
             "spec.backends.*.image",
             "spec.backends.*.name",
             "spec.backends.*.service",
+            "spec.backends.*.specDigest",
         ]);
         const schema = crdSchemaFromCrdObject(loadCrd());
         if (!schema) throw new Error("no v1alpha1 schema in the bundled CRD");
@@ -222,6 +235,59 @@ describe("preflight knows the backends image pin", () => {
         const fields = run(WITH_BACKENDS, {
             withoutBackends: false,
             withoutImagePin: true,
+            reject: true,
+        });
+        expect(fields).toEqual([]);
+    });
+});
+
+describe("preflight knows the backends spec pin", () => {
+    const SPEC_PINNED: KnativeNextConfig = {
+        name: "app",
+        registry: "registry",
+        backends: [
+            { name: "pricing", specDigest: `sha256:${"cd34".repeat(16)}` },
+        ],
+    };
+
+    it("the pin the builder emits satisfies the CRD's own pattern and bound", () => {
+        const cr = buildNextAppCRObject(SPEC_PINNED, IMG, "ns", "b1");
+        const entry = (cr.spec as { backends: { specDigest: string }[] })
+            .backends[0] as { specDigest: string };
+        const field = (
+            loadCrd().spec.versions[0]?.schema.openAPIV3Schema.properties.spec
+                ?.properties.backends as unknown as {
+                items: {
+                    properties: Record<
+                        string,
+                        { pattern: string; maxLength: number }
+                    >;
+                };
+            }
+        ).items.properties.specDigest as { pattern: string; maxLength: number };
+        expect(entry.specDigest.length).toBeLessThanOrEqual(field.maxLength);
+        expect(new RegExp(field.pattern).test(entry.specDigest)).toBe(true);
+    });
+
+    it("blames no field against the CRD this repo ships", () => {
+        expect(
+            run(SPEC_PINNED, { withoutBackends: false, reject: true }),
+        ).toEqual([]);
+    });
+
+    it("names the spec pin against a CRD that has the image pin but not the spec pin (operator first, then CLI)", () => {
+        const fields = run(SPEC_PINNED, {
+            withoutBackends: false,
+            withoutSpecPin: true,
+            reject: true,
+        });
+        expect(fields).toContain("spec.backends.*.specDigest");
+    });
+
+    it("does not blame that CRD when no entry carries a spec pin", () => {
+        const fields = run(WITH_BACKENDS, {
+            withoutBackends: false,
+            withoutSpecPin: true,
             reject: true,
         });
         expect(fields).toEqual([]);
