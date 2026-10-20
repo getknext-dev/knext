@@ -112,6 +112,7 @@ const MUTATIONS = [
     claim: 'the Rust function template has no USER at all (distroless:nonroot is not relied on)',
     anchor: 'USER 65532:65532\n',
     replacement: '\n',
+    options: DOCKER,
   },
   {
     id: 'U07',
@@ -127,6 +128,7 @@ const MUTATIONS = [
     claim: 'the self-contained app image has no USER',
     anchor: 'USER 65532:65532\n',
     replacement: '\n',
+    options: DOCKER,
   },
   {
     id: 'U09',
@@ -150,6 +152,7 @@ const MUTATIONS = [
     claim: 'the standalone self-contained stage has no USER (one stage of three loses it)',
     anchor: 'COPY knext-self-contained-server-shim.js /app/server.js\n\nUSER 65532:65532\n',
     replacement: 'COPY knext-self-contained-server-shim.js /app/server.js\n\n',
+    options: DOCKER,
   },
   {
     id: 'U12',
