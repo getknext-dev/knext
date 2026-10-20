@@ -606,6 +606,43 @@ export function continueOnErrorProblem(container: Job, where: string): string | 
   return `${where} carries continue-on-error: ${JSON.stringify(value)} — its failure cannot fail the run`;
 }
 
+/** Opt-ins for `auditJobCanNotSkip`. */
+export interface AuditJobCanNotSkipOptions {
+  /**
+   * Job ids whose `strategy:` is a DYNAMIC matrix (`matrix: ${{ fromJSON(...) }}`)
+   * and is therefore permitted despite `strategy` being absent from
+   * `ALLOWED_JOB_KEYS`.
+   *
+   * `strategy` is absent because a matrix that expands to zero jobs runs nothing,
+   * and a skipped gate is green. That holds for a PR gate nobody else checks. A
+   * caller opting a job in here takes on the obligation that something DOWNSTREAM
+   * fails on an empty expansion; the mutation-prover lane's `aggregate` job does
+   * (`aggregateReports` reds on zero expected legs), and
+   * `tests/mutation-prover-lane-sharding.test.ts` asserts it. Opt-in per job id,
+   * never a global allowance, so every other workflow keeps the strict reading.
+   */
+  dynamicMatrixJobs?: readonly string[];
+}
+
+/** Why a `strategy:` is NOT a safe dynamic matrix, or null when it is. */
+export function dynamicMatrixProblem(strategy: unknown): string | null {
+  if (strategy === null || typeof strategy !== 'object') return '`strategy` is not a mapping';
+  const s = strategy as Record<string, unknown>;
+  for (const key of Object.keys(s)) {
+    if (key !== 'matrix' && key !== 'fail-fast' && key !== 'max-parallel') {
+      return `unrecognised \`strategy.${key}\``;
+    }
+  }
+  const m = s.matrix;
+  if (
+    typeof m !== 'string' ||
+    !/^\$\{\{\s*fromJSON\(needs\.[\w-]+\.outputs\.[\w-]+\)\s*\}\}$/.test(m.trim())
+  ) {
+    return '`strategy.matrix` must be exactly `${{ fromJSON(needs.<job>.outputs.<name>) }}`';
+  }
+  return null;
+}
+
 /**
  * The checks that apply to the gate job AND to everything it `needs`.
  *
@@ -628,7 +665,9 @@ export function auditJobCanNotSkip(
   jobs: Record<string, Job>,
   jobId: string,
   problems: string[],
+  options: AuditJobCanNotSkipOptions = {},
 ): string[] {
+  const dynamicMatrixJobs = new Set(options.dynamicMatrixJobs ?? []);
   const seen = new Set<string>();
   const queue: Array<{ id: string; via: string[] }> = [{ id: jobId, via: [] }];
 
@@ -656,6 +695,14 @@ export function auditJobCanNotSkip(
     if (coe) problems.push(coe);
 
     for (const key of Object.keys(job)) {
+      if (key === 'strategy' && dynamicMatrixJobs.has(id)) {
+        const why = dynamicMatrixProblem(job.strategy);
+        if (why)
+          problems.push(
+            `${label} carries a \`strategy:\` that is not a safe dynamic matrix — ${why}`,
+          );
+        continue;
+      }
       if (!ALLOWED_JOB_KEYS.has(key) && key !== 'if' && key !== 'continue-on-error') {
         problems.push(
           `${label} carries the unrecognised job-level key \`${key}\` — this audit fails closed: either it cannot neutralise the gate (add it to ALLOWED_JOB_KEYS with a reason) or it can`,

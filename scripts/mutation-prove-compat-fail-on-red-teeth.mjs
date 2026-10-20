@@ -156,7 +156,17 @@ const FAILED_COND = '            if ((s.failed ?? 0) > 0 || (s.notRun ?? 0) > 0)
 const TRUNC_EXIT = '              process.exit(1);\n            }\n          \' "${SUMMARY}"';
 const TRUNC_COND = '            if (s.truncated === true) {';
 const NODE_CLOSE = '          \' "${SUMMARY}"';
-const SET_E = '          set -euo pipefail\n          SAFE_SHARD=';
+// Four steps in this workflow open with `set -euo pipefail` + `SAFE_SHARD=`, so
+// that prefix alone matches four times. The teeth step is the only one that goes
+// on to derive SUMMARY and test it for presence — anchor through that.
+const SET_E_PREFIX = '          set -euo pipefail\n';
+const SET_E_TAIL =
+  '          SAFE_SHARD="${{ matrix.shard }}"\n' +
+  '          SAFE_SHARD="${SAFE_SHARD/\\//-}"\n' +
+  '          SUMMARY="compat-suite-summary-${SAFE_SHARD}.json"\n' +
+  '          if [ ! -f "${SUMMARY}" ]; then';
+const SET_E = SET_E_PREFIX + SET_E_TAIL;
+const SET_E_OFF = `          set +e\n${SET_E_TAIL}`;
 const STEP_NAME = '      - name: Fail shard on red results (revocation teeth)\n';
 const MISSING_COND = '          if [ ! -f "${SUMMARY}" ]; then';
 const NODE_OPEN = "          node -e '\n            const s = require";
@@ -533,7 +543,7 @@ const MUTATIONS = [
   {
     label: 'errexit is turned OFF for the whole gate script',
     anchor: SET_E,
-    replacement: '          set +e\n          SAFE_SHARD=',
+    replacement: SET_E_OFF,
     reds: T.reaches,
     green: [T.missing, T.failed, T.truncated, T.vacuity, T.shape, T.lanes, T.escape, T.coverage],
   },
@@ -546,7 +556,7 @@ const MUTATIONS = [
     // alone is caught; only together did they hide.
     label: 'errexit is OFF **and** the program is no longer inline (the vacuous-pass case)',
     anchor: SET_E,
-    replacement: '          set +e\n          SAFE_SHARD=',
+    replacement: SET_E_OFF,
     also: [
       {
         anchor: NODE_OPEN,

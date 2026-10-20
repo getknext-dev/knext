@@ -131,6 +131,23 @@ const MUTATIONS = [
       "(needs.run-mutation-provers.result == 'failure' || needs.run-mutation-provers.result == 'cancelled')",
     replacement: "needs.run-mutation-provers.result == 'failure'",
   },
+  // #2499: the lane is now plan -> sharded legs -> aggregate, and the alert
+  // watches all three. A plan that is CANCELLED or an aggregate that is
+  // CANCELLED must alert exactly as a cancelled lane does.
+  {
+    label:
+      "mutation-prover-nightly.yml: drop 'cancelled' from the PLAN term of nightly-red-alert (#2499)",
+    subject: 'mutationProverWorkflow',
+    anchor: "(needs.plan.result == 'failure' || needs.plan.result == 'cancelled')",
+    replacement: "needs.plan.result == 'failure'",
+  },
+  {
+    label:
+      "mutation-prover-nightly.yml: drop 'cancelled' from the AGGREGATE term of nightly-red-alert (#2499)",
+    subject: 'mutationProverWorkflow',
+    anchor: "(needs.aggregate.result == 'failure' || needs.aggregate.result == 'cancelled')",
+    replacement: "needs.aggregate.result == 'failure'",
+  },
   {
     label:
       "retracted-figure-resolution-nightly.yml: drop 'cancelled' from nightly-red-alert (reintroduce #1645)",
@@ -159,9 +176,9 @@ const MUTATIONS = [
       "mutation-prover-nightly.yml: drop always() from nightly-red-alert's if: (reintroduce the implicit success() gate)",
     subject: 'mutationProverWorkflow',
     anchor:
-      "    if: >-\n      always() &&\n      github.event_name == 'schedule' &&\n      (needs.run-mutation-provers.result == 'failure' || needs.run-mutation-provers.result == 'cancelled')",
+      "    if: >-\n      always() &&\n      github.event_name == 'schedule' &&\n      ((needs.plan.result == 'failure'",
     replacement:
-      "    if: >-\n      github.event_name == 'schedule' &&\n      (needs.run-mutation-provers.result == 'failure' || needs.run-mutation-provers.result == 'cancelled')",
+      "    if: >-\n      github.event_name == 'schedule' &&\n      ((needs.plan.result == 'failure'",
   },
   {
     label:
@@ -220,10 +237,10 @@ const MUTATIONS = [
   },
 ];
 
-declareMutations(17);
+declareMutations(19);
 
-if (MUTATIONS.length !== 17) {
-  console.error(`FATAL: declared 17 mutations, table has ${MUTATIONS.length}`);
+if (MUTATIONS.length !== 19) {
+  console.error(`FATAL: declared 19 mutations, table has ${MUTATIONS.length}`);
   process.exit(1);
 }
 
