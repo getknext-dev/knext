@@ -33,6 +33,9 @@ fn reason(err: &AuthError) -> &'static str {
         AuthError::WrongMethod => "wrong-method",
         AuthError::MissingSubject => "missing-subject",
         AuthError::BadJwks => "bad-jwks",
+        AuthError::MissingJti => "missing-jti",
+        AuthError::Replayed => "replayed",
+        AuthError::SeenSetFull => "seen-set-full",
         _ => "other",
     }
 }
@@ -64,6 +67,7 @@ fn config(v: &Vectors, c: &Case, jwks_path: &Path, clock: Clock) -> TokenConfig 
         audience: v.verifier.audience.clone(),
         method_auth: only_method(&c.procedure, auth_of(&c.auth)),
         clock,
+        seen_capacity: 0,
     }
 }
 
@@ -112,6 +116,9 @@ fn shared_vector_reasons_are_all_mapped() {
         AuthError::WrongMethod,
         AuthError::MissingSubject,
         AuthError::BadJwks,
+        AuthError::MissingJti,
+        AuthError::Replayed,
+        AuthError::SeenSetFull,
     ];
     for r in v.reasons.iter().filter(|r| r.as_str() != "no-token") {
         assert!(
@@ -170,8 +177,8 @@ async fn shared_vectors() {
     }
     // A run that saw fewer cases proves nothing about the ones it missed.
     assert!(
-        accepted >= 7 && refused >= 69,
-        "ran {accepted} accepted and {refused} refused cases; want at least 7 and 69"
+        accepted >= 10 && refused >= 74,
+        "ran {accepted} accepted and {refused} refused cases; want at least 10 and 74"
     );
 }
 
@@ -338,9 +345,10 @@ fn rotation_overlap_then_retire() {
         "unknown-kid",
         "a previous-key token after the overlap",
     );
+    // A token is single-use: the current key's next token is a new one.
     verifier
-        .verify(&current, &c.procedure)
-        .expect("after the overlap, the current-key token");
+        .verify(&v.token("valid-user-second-jti"), &c.procedure)
+        .expect("after the overlap, a new current-key token");
 }
 
 /// Warm-pod rotation: switching signing to a new key BEFORE the JWKS
@@ -613,4 +621,311 @@ fn rpcs_in(source: &str) -> Vec<(String, Option<String>)> {
         }
     }
     out
+}
+
+/// The verifier a vector sequence runs against: the sequence's JWK Set
+/// mounted at a fresh path, the vectors' issuer and audience, a clock the
+/// steps move, and the sequence's replay-set size (`None`: the default).
+fn sequence_verifier(
+    v: &Vectors,
+    seq: &testvectors::Sequence,
+    dir: &str,
+) -> (TokenVerifier, TestClock) {
+    let path = testvectors::temp_dir(dir).join("jwks").join("jwks.json");
+    v.write_jwks(&path, &seq.jwks);
+    let clock = TestClock::at(0);
+    let cfg = TokenConfig {
+        jwks_path: path,
+        issuer: v.verifier.issuer.clone(),
+        audience: v.verifier.audience.clone(),
+        method_auth: only_method(&seq.procedure, auth_of(&seq.auth)),
+        clock: clock.clock(),
+        seen_capacity: seq.capacity.unwrap_or(0),
+    };
+    (token_verifier(cfg), clock)
+}
+
+/// Every sequence in the shared vectors: tokens presented in order to ONE
+/// verifier at stated clock readings. A token seen before is refused until it
+/// expires, a full set refuses new tokens and forgets none, an expired entry
+/// is purged, and a token refused for another reason is not recorded.
+#[test]
+fn shared_replay_sequences() {
+    let v = testvectors::load();
+    assert!(
+        v.sequences.len() >= 9,
+        "the vectors hold {} replay sequences; want at least 9",
+        v.sequences.len()
+    );
+    let t0 = v.case("valid-user").now;
+    let (mut replayed, mut full) = (0, 0);
+    for (i, seq) in v.sequences.iter().enumerate() {
+        let (verifier, clock) = sequence_verifier(&v, seq, &format!("sequence-{i}"));
+        for (n, step) in seq.steps.iter().enumerate() {
+            clock.set(step.now);
+            let what = format!("{} step {n} (now T0{:+})", seq.name, step.now - t0);
+            let result = verifier.verify(&step.token(), &seq.procedure);
+            match step.expect.as_str() {
+                "accept" => {
+                    let caller = result.unwrap_or_else(|e| panic!("{what}: refused: {e}"));
+                    assert_eq!(
+                        caller,
+                        Caller {
+                            subject: step.sub.clone(),
+                            zone: v.verifier.issuer.clone()
+                        },
+                        "{what}"
+                    );
+                }
+                "reject" => {
+                    refused_with(result, &step.reason, &what);
+                    match step.reason.as_str() {
+                        "replayed" => replayed += 1,
+                        "seen-set-full" => full += 1,
+                        _ => {}
+                    }
+                }
+                other => panic!("{what}: unknown expectation {other:?}"),
+            }
+        }
+    }
+    // A run that saw fewer refusals proves nothing about the rules they test.
+    assert!(
+        replayed >= 8 && full >= 6,
+        "ran {replayed} replay and {full} full refusals; want at least 8 and 6"
+    );
+}
+
+/// The defaults the vectors state are the defaults the verifier has.
+#[test]
+fn replay_defaults_match_the_vectors() {
+    let v = testvectors::load();
+    assert_eq!(DEFAULT_SEEN_CAPACITY, v.contract.default_seen_capacity);
+    assert_eq!(MIN_JTI_CHARS, v.contract.jti_chars.min);
+    assert_eq!(MAX_JTI_CHARS, v.contract.jti_chars.max);
+    assert_eq!(CLOCK_SKEW_SECS, v.contract.clock_skew_seconds);
+}
+
+/// The same token sent twice through the layer: the first call reaches the
+/// service, the second is refused as unauthenticated before it, and the
+/// refusal does not name its reason.
+#[tokio::test]
+async fn replayed_token_never_reaches_the_service() {
+    let v = testvectors::load();
+    let c = v.case("valid-user");
+    let (verifier, _) = case_verifier(&v, c, "replay-layer");
+    let (mut svc, reached) = stand_in(Arc::new(verifier));
+    let first = svc
+        .ready()
+        .await
+        .unwrap()
+        .call(post(&c.procedure, Some(&v.token("valid-user")), b"{}"))
+        .await
+        .unwrap();
+    assert_eq!(first.status(), http::StatusCode::OK);
+    let second = svc
+        .ready()
+        .await
+        .unwrap()
+        .call(post(
+            &c.procedure,
+            Some(&v.token("valid-user")),
+            br#"{"id":"attacker-chosen"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(second.status(), http::StatusCode::UNAUTHORIZED);
+    let body = http_body_util::BodyExt::collect(second.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
+    assert!(
+        !String::from_utf8_lossy(&body)
+            .to_lowercase()
+            .contains("replay"),
+        "the refusal names its reason"
+    );
+    assert_eq!(
+        reached.lock().unwrap().len(),
+        1,
+        "the replay reached the service"
+    );
+}
+
+/// A hundred threads presenting one token at once: exactly one is admitted.
+#[test]
+fn concurrent_replay_admits_exactly_one() {
+    let v = testvectors::load();
+    let c = v.case("valid-user");
+    let (verifier, _) = case_verifier(&v, c, "replay-concurrent");
+    let verifier = Arc::new(verifier);
+    let token = v.token("valid-user");
+    let procedure = c.procedure.clone();
+    let handles: Vec<_> = (0..100)
+        .map(|_| {
+            let (verifier, token, procedure) =
+                (Arc::clone(&verifier), token.clone(), procedure.clone());
+            std::thread::spawn(move || verifier.verify(&token, &procedure))
+        })
+        .collect();
+    let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    let admitted = results.iter().filter(|r| r.is_ok()).count();
+    assert_eq!(
+        admitted, 1,
+        "{admitted} concurrent uses of one token were admitted"
+    );
+    for r in results.iter().filter_map(|r| r.as_ref().err()) {
+        assert_eq!(r, &AuthError::Replayed);
+    }
+}
+
+/// A pod at its cap refuses every new token, which looks like an outage from
+/// outside, so it says so: one warning, then at most one every ten seconds.
+/// The warning never carries a token.
+#[test]
+fn full_replay_set_is_reported_once_in_a_while() {
+    use std::io::Write;
+
+    #[derive(Clone, Default)]
+    struct Sink(Arc<Mutex<Vec<u8>>>);
+    impl Write for Sink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let v = testvectors::load();
+    let seq = v
+        .sequences
+        .iter()
+        .find(|s| s.name == "cap-reached-refuses-new")
+        .expect("the cap-reached-refuses-new sequence");
+    let (verifier, clock) = sequence_verifier(&v, seq, "full-warning");
+    clock.set(seq.steps[0].now);
+    for step in &seq.steps[..2] {
+        verifier
+            .verify(&step.token(), &seq.procedure)
+            .expect("filling the set");
+    }
+    let full = seq.steps[2].token();
+    let sink = Sink::default();
+    let captured = sink.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(move || captured.clone())
+        .with_ansi(false)
+        .finish();
+    let warnings = || {
+        String::from_utf8(sink.0.lock().unwrap().clone())
+            .unwrap()
+            .matches("replay set is full")
+            .count()
+    };
+    tracing::subscriber::with_default(subscriber, || {
+        for _ in 0..5 {
+            assert_eq!(
+                verifier.verify(&full, &seq.procedure),
+                Err(AuthError::SeenSetFull)
+            );
+        }
+        assert_eq!(warnings(), 1, "five refusals in one second");
+        clock.advance(Duration::from_secs(9));
+        let _ = verifier.verify(&full, &seq.procedure);
+        assert_eq!(warnings(), 1, "after 9 s");
+        clock.advance(Duration::from_secs(2));
+        let _ = verifier.verify(&full, &seq.procedure);
+        assert_eq!(warnings(), 2, "after 11 s");
+    });
+    let log = String::from_utf8(sink.0.lock().unwrap().clone()).unwrap();
+    for segment in &seq.steps[2].jws {
+        assert!(
+            !log.contains(segment),
+            "the warning carries part of a token"
+        );
+    }
+}
+
+/// The measured cost behind the default replay-set cap. It counts allocations,
+/// so it needs a global allocator, and sits here with the repository-only
+/// tests rather than in a function's own.
+mod memory_cost {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+    use std::sync::Arc;
+
+    use crate::auth::replay::{DEFAULT_SEEN_CAPACITY, SeenSet};
+
+    fn jti(n: usize) -> String {
+        format!("{n:022}")
+    }
+
+    fn iss() -> Arc<str> {
+        Arc::from("knext:zone:shop/storefront")
+    }
+
+    /// Counts the bytes the current thread holds: allocations minus frees made on
+    /// it. The set is built and measured on one thread, so what it retains is the
+    /// difference. (Test builds only; thread-local so other tests do not move it.)
+    struct Counting;
+
+    thread_local! {
+        static LIVE: Cell<isize> = const { Cell::new(0) };
+    }
+
+    #[allow(unsafe_code)]
+    unsafe impl GlobalAlloc for Counting {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            let _ = LIVE.try_with(|c| c.set(c.get() + layout.size() as isize));
+            unsafe { System.alloc(layout) }
+        }
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            let _ = LIVE.try_with(|c| c.set(c.get() - layout.size() as isize));
+            unsafe { System.dealloc(ptr, layout) }
+        }
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            let _ = LIVE.try_with(|c| c.set(c.get() + new_size as isize - layout.size() as isize));
+            unsafe { System.realloc(ptr, layout, new_size) }
+        }
+    }
+
+    #[global_allocator]
+    static ALLOC: Counting = Counting;
+
+    fn live() -> isize {
+        LIVE.with(Cell::get)
+    }
+
+    /// Tokens live at most 65 s in the set, so a pod holds about 65 times its
+    /// rate of verified calls: the default cap is that for about 1,000 verified
+    /// calls a second. This fills the set to the cap with real-shaped ids and the
+    /// issuer the verifier shares, measures what it retains, and holds the
+    /// per-entry cost under a stated bound, so a change that doubles it reds here.
+    #[test]
+    fn memory_cost_at_the_default_cap() {
+        const PER_ENTRY_BUDGET: isize = 200; // bytes
+        let set = SeenSet::new(DEFAULT_SEEN_CAPACITY);
+        let iss = iss();
+        let before = live();
+        for i in 0..DEFAULT_SEEN_CAPACITY {
+            // A fresh string per entry, as the verifier gets from a parsed token.
+            let id = jti(i);
+            set.admit(&iss, &id, 2000 + i64::try_from(i % 65).unwrap(), 1000)
+                .unwrap_or_else(|e| panic!("entry {i}: {e}"));
+        }
+        let after = live();
+        assert_eq!(set.len(), DEFAULT_SEEN_CAPACITY);
+        let used = after - before;
+        let per_entry = used / isize::try_from(DEFAULT_SEEN_CAPACITY).unwrap();
+        println!(
+            "MEASURED: {DEFAULT_SEEN_CAPACITY} entries retain {used} bytes = {per_entry} bytes/entry ({:.1} MiB at the cap)",
+            used as f64 / f64::from(1 << 20)
+        );
+        assert!(
+            per_entry <= PER_ENTRY_BUDGET,
+            "{per_entry} bytes per entry; budget {PER_ENTRY_BUDGET}"
+        );
+    }
 }

@@ -341,7 +341,9 @@ function emitQuery(ctx: FileCtx, p: PlannedMethod): void {
     `  ${cacheTag}(${JSON.stringify(serviceTag(ctx.fn, method))});`,
     '  // protoVersion is part of the cache key only: a function rollout is a new entry.',
     '  void protoVersion;',
-    `  const token = ${mintExpr(ctx, p, 'subject')};`,
+    // A read is retried by the client, and a function refuses a token it has
+    // already accepted: the client asks for a new token on every attempt.
+    `  const token = async () => ${mintExpr(ctx, p, 'subject')};`,
     `  return ${client}.${name}(${decode}(${input}, request), { token });`,
     '}',
     '',

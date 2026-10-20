@@ -12,21 +12,22 @@ async fn production_wiring_verifies_zone_tokens() {
     assert_eq!(c.procedure, PUT_ITEM, "this test needs a PutItem token");
     let path = crate::testvectors::temp_dir("wiring").join("jwks.json");
     v.write_jwks(&path, &c.jwks);
-    let running = start(new(Config {
-        jwks_path: path,
-        issuer: v.verifier.issuer.clone(),
-        audience: v.verifier.audience.clone(),
-        clock: crate::testvectors::TestClock::at(c.now).clock(),
-        ..Config::default()
-    }))
-    .await;
     for wire in MATRIX {
+        // One server per protocol: a token is single-use, and the same valid
+        // token is the control on each of them.
+        let running = start(new(Config {
+            jwks_path: path.clone(),
+            issuer: v.verifier.issuer.clone(),
+            audience: v.verifier.audience.clone(),
+            clock: crate::testvectors::TestClock::at(c.now).clock(),
+            ..Config::default()
+        }))
+        .await;
+        // Every refusal first: a refused token is not remembered, so the valid
+        // token below is still unused, and a check that was dropped would
+        // admit its case (and use up the valid token) rather than be masked.
         let client = example(&running, wire, Some(&v.token("valid-user")));
-        client
-            .put_item(put("a", "b"))
-            .await
-            .unwrap_or_else(|e| panic!("{}: PutItem with a valid zone token: {e:?}", wire.name));
-        // The same token names PutItem, so it does not open GetItem.
+        // The valid token names PutItem, so it does not open GetItem.
         let err = client.get_item(get("a")).await.unwrap_err();
         assert_eq!(
             err.code,
@@ -49,6 +50,22 @@ async fn production_wiring_verifies_zone_tokens() {
             "{} no token",
             wire.name
         );
+        client
+            .put_item(put("a", "b"))
+            .await
+            .unwrap_or_else(|e| panic!("{}: PutItem with a valid zone token: {e:?}", wire.name));
+        // A token is single-use: the same one again, with a body of the
+        // attacker's choosing, is refused on every protocol.
+        let err = example(&running, wire, Some(&v.token("valid-user")))
+            .put_item(put("a", "attacker-chosen"))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.code,
+            ErrorCode::Unauthenticated,
+            "{} PutItem with a token already used",
+            wire.name
+        );
+        running.stop().await.unwrap();
     }
-    running.stop().await.unwrap();
 }

@@ -22,6 +22,15 @@ const EnvPath = "KNEXT_Z7_VECTORS"
 
 // File is the vectors file.
 type File struct {
+	Contract struct {
+		MaxLifetimeSeconds  int64 `json:"maxLifetimeSeconds"`
+		ClockSkewSeconds    int64 `json:"clockSkewSeconds"`
+		DefaultSeenCapacity int   `json:"defaultSeenCapacity"`
+		JTIChars            struct {
+			Min int `json:"min"`
+			Max int `json:"max"`
+		} `json:"jtiChars"`
+	} `json:"contract"`
 	Verifier struct {
 		Issuer   string `json:"issuer"`
 		Audience string `json:"audience"`
@@ -30,6 +39,8 @@ type File struct {
 	Keys    map[string]Key             `json:"keys"`
 	JWKS    map[string]json.RawMessage `json:"jwks"`
 	Cases   []Case                     `json:"cases"`
+	// Sequences present several tokens, in order, to ONE verifier: the replay rules.
+	Sequences []Sequence `json:"sequences"`
 }
 
 // Key is one test key: Seed is the base64url Ed25519 seed (test material).
@@ -52,6 +63,29 @@ type Case struct {
 	Sub       string   `json:"sub"`
 	Reason    string   `json:"reason"`
 }
+
+// Sequence is a run of tokens presented to one verifier, each at its own clock
+// reading. Capacity is the verifier's replay-set size (nil: its default).
+type Sequence struct {
+	Name      string `json:"name"`
+	JWKS      string `json:"jwks"`
+	Procedure string `json:"procedure"`
+	Auth      string `json:"auth"`
+	Capacity  *int   `json:"capacity"`
+	Steps     []Step `json:"steps"`
+}
+
+// Step is one token in a Sequence and what the verifier must make of it.
+type Step struct {
+	Now    int64    `json:"now"`
+	JWS    []string `json:"jws"`
+	Expect string   `json:"expect"`
+	Sub    string   `json:"sub"`
+	Reason string   `json:"reason"`
+}
+
+// Token is the step's compact JWS.
+func (s Step) Token() string { return strings.Join(s.JWS, ".") }
 
 // Token is the compact JWS, and false for the case with no token at all.
 func (c Case) Token() (string, bool) {

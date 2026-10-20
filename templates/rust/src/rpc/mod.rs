@@ -92,6 +92,9 @@ pub struct Config {
     pub audience: String,
     /// The token check's clock: the system clock (tests set it).
     pub clock: auth::Clock,
+    /// How many accepted tokens the token check remembers to refuse a replay;
+    /// zero is `auth::DEFAULT_SEEN_CAPACITY` (see its comment before changing it).
+    pub seen_capacity: usize,
     pub timeouts: Timeouts,
     /// Defaults to a tracer from the global OpenTelemetry provider, which is
     /// a no-op until the binary installs one.
@@ -105,6 +108,7 @@ impl Default for Config {
             issuer: String::new(),
             audience: String::new(),
             clock: Arc::new(std::time::SystemTime::now),
+            seen_capacity: 0,
             timeouts: Timeouts::default(),
             tracer: None,
         }
@@ -127,6 +131,7 @@ pub struct Function {
 pub fn new(cfg: Config) -> Function {
     let tokens = auth::TokenConfig {
         clock: Arc::clone(&cfg.clock),
+        seen_capacity: cfg.seen_capacity,
         ..auth::TokenConfig::new(
             cfg.jwks_path.clone(),
             cfg.issuer.clone(),

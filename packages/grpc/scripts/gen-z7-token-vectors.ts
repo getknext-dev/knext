@@ -21,6 +21,14 @@
  * test key. Every case uses a fixed clock (`now`), so the file is
  * byte-for-byte reproducible: Ed25519 signatures are deterministic.
  *
+ * `sequences` are the stateful half: several tokens presented one after the
+ * other to ONE verifier at stated clock readings, to prove the replay rules
+ * (a token seen before is refused until it expires; a full set refuses new
+ * tokens and never forgets one early; an expired entry is purged; a token
+ * refused for another reason is not recorded). The verifier is built with the
+ * sequence's `capacity` (null = its default, `contract.defaultSeenCapacity`).
+ * Every `jti` is derived from a public label, so the file is reproducible.
+ *
  * Every negative case is SINGLE-FAULT: it is valid in every respect except the
  * one its `reason` names, so a verifier that drops that one check accepts it.
  * `packages/grpc/src/__tests__/z7-token-vectors.test.ts` holds both
@@ -73,7 +81,28 @@ export const REASONS = Object.freeze([
   'wrong-method',
   'missing-subject',
   'bad-jwks',
+  'missing-jti',
+  'replayed',
+  'seen-set-full',
 ] as const);
+
+/**
+ * How many tokens a verifier remembers by default, from the measured cost of
+ * an entry at a realistic rate (see docs/security/threat-model.md, residual G1):
+ * both verifiers must default to it, and both tests read it from here.
+ */
+export const DEFAULT_SEEN_CAPACITY = 65536;
+
+/** A `jti` is 22-64 base64url characters: 22 is exactly 16 random bytes. */
+export const JTI_CHARS = Object.freeze({ min: 22, max: 64 });
+
+/** A reproducible jti: 16 bytes of SHA-256 over a public label, base64url (22 characters). */
+export const jtiFor = (label: string): string =>
+  createHash('sha256')
+    .update(`knext z7 TEST VECTOR jti ${label}`, 'utf8')
+    .digest()
+    .subarray(0, 16)
+    .toString('base64url');
 
 /**
  * Every Ed25519 encoding of a small-order point (the eight points whose order
@@ -220,12 +249,13 @@ const header = (kid: string, overrides: Fields = {}): Fields => ({
   ...overrides,
 });
 
-// Claims in the signer's order: iss, aud, method, sub, iat, exp.
+// Claims in the signer's order: iss, aud, method, sub, jti, iat, exp.
 const claims = (overrides: Fields = {}): Fields => ({
   iss: ISSUER,
   aud: AUDIENCE,
   method: USER_METHOD,
   sub: SUB,
+  jti: jtiFor('default'),
   iat: T0 - 10,
   exp: T0 + 50,
   ...overrides,
@@ -317,6 +347,12 @@ export function buildVectors() {
     FORGED_SIGNATURE,
   ];
 
+  /** The default claims without `name`: what a signer that never heard of it would mint. */
+  const withoutClaim = (name: string): Fields => {
+    const { [name]: _dropped, ...rest } = claims();
+    return rest;
+  };
+
   const cases = [
     // ── accepted ─────────────────────────────────────────────────────────────
     { name: 'valid-user', ...user(...std(current)), ...accept(SUB) },
@@ -344,10 +380,22 @@ export function buildVectors() {
       ...user(...std(current, undefined, claims({ iat: T0 + 5, exp: T0 + 65 }))),
       ...accept(SUB),
     },
-    { name: 'rotation-previous-during-overlap', ...user(...std(previous)), ...accept(SUB) },
+    {
+      // A token with its own jti, for a test that presents two valid tokens to one verifier.
+      name: 'valid-user-second-jti',
+      ...user(...std(current, undefined, claims({ jti: jtiFor('second') }))),
+      ...accept(SUB),
+    },
+    {
+      // The previous key's token has its own jti, so a test can present it and a
+      // current-key token to one verifier: one token is single-use, two are not one.
+      name: 'rotation-previous-during-overlap',
+      ...user(...std(previous, undefined, claims({ jti: jtiFor('previous') }))),
+      ...accept(SUB),
+    },
     {
       name: 'rotation-next-after-propagation',
-      ...user(...std(next)),
+      ...user(...std(next, undefined, claims({ jti: jtiFor('next') }))),
       jwks: 'zone-a-rotating',
       ...accept(SUB),
     },
@@ -462,13 +510,13 @@ export function buildVectors() {
     },
     {
       name: 'rotation-previous-after-overlap',
-      ...user(...std(previous)),
+      ...user(...std(previous, undefined, claims({ jti: jtiFor('previous') }))),
       jwks: 'zone-a-current-only',
       ...reject('unknown-kid'),
     },
     {
       name: 'rotation-next-before-propagation',
-      ...user(...std(next)),
+      ...user(...std(next, undefined, claims({ jti: jtiFor('next') }))),
       ...reject('unknown-kid'),
     },
     {
@@ -530,7 +578,7 @@ export function buildVectors() {
         current,
         validHeader,
         encodeRaw(
-          `{"iss":"${ISSUER}","aud":"${AUDIENCE}","method":"${USER_METHOD}","sub":"${SUB}","sub":"admin","iat":${T0 - 10},"exp":${T0 + 50}}`,
+          `{"iss":"${ISSUER}","aud":"${AUDIENCE}","method":"${USER_METHOD}","sub":"${SUB}","sub":"admin","jti":"${jtiFor('default')}","iat":${T0 - 10},"exp":${T0 + 50}}`,
         ),
       ),
       ...reject('malformed'),
@@ -541,7 +589,7 @@ export function buildVectors() {
         current,
         validHeader,
         encodeRaw(
-          `{"iss":"${ISSUER}","aud":"${AUDIENCE}","method":"${USER_METHOD}","sub":"${SUB}","s\\u0075b":"admin","iat":${T0 - 10},"exp":${T0 + 50}}`,
+          `{"iss":"${ISSUER}","aud":"${AUDIENCE}","method":"${USER_METHOD}","sub":"${SUB}","s\\u0075b":"admin","jti":"${jtiFor('default')}","iat":${T0 - 10},"exp":${T0 + 50}}`,
         ),
       ),
       ...reject('malformed'),
@@ -564,7 +612,7 @@ export function buildVectors() {
               `{"iss":"${ISSUER}","aud":"${AUDIENCE}","method":"${USER_METHOD}","sub":"user-`,
             ),
             Buffer.from([0xff]),
-            Buffer.from(`","iat":${T0 - 10},"exp":${T0 + 50}}`),
+            Buffer.from(`","jti":"${jtiFor('default')}","iat":${T0 - 10},"exp":${T0 + 50}}`),
           ]),
         ),
       ),
@@ -594,6 +642,7 @@ export function buildVectors() {
           iss: ISSUER,
           aud: AUDIENCE,
           method: PUBLIC_METHOD,
+          jti: jtiFor('default'),
           iat: T0 - 10,
           exp: T0 + 50,
         }),
@@ -657,6 +706,140 @@ export function buildVectors() {
       ...user(...std(current, undefined, claims({ sub: '' }))),
       ...reject('missing-subject'),
     },
+    // ── refused: the jti ─────────────────────────────────────────────────────
+    {
+      // A token with no jti cannot be remembered, so it could be replayed: refused.
+      name: 'missing-jti',
+      ...user(...std(current, undefined, withoutClaim('jti'))),
+      ...reject('missing-jti'),
+    },
+    {
+      name: 'jti-null',
+      ...user(...std(current, undefined, claims({ jti: null }))),
+      ...reject('malformed'),
+    },
+    {
+      name: 'jti-too-short',
+      ...user(...std(current, undefined, claims({ jti: 'A'.repeat(JTI_CHARS.min - 1) }))),
+      ...reject('malformed'),
+    },
+    {
+      name: 'jti-too-long',
+      ...user(...std(current, undefined, claims({ jti: 'A'.repeat(JTI_CHARS.max + 1) }))),
+      ...reject('malformed'),
+    },
+    {
+      name: 'jti-not-base64url',
+      ...user(...std(current, undefined, claims({ jti: `${'A'.repeat(JTI_CHARS.min - 1)}=` }))),
+      ...reject('malformed'),
+    },
+    {
+      name: 'jti-at-min-length',
+      ...user(...std(current, undefined, claims({ jti: 'A'.repeat(JTI_CHARS.min) }))),
+      ...accept(SUB),
+    },
+    {
+      name: 'jti-at-max-length',
+      ...user(...std(current, undefined, claims({ jti: 'A'.repeat(JTI_CHARS.max) }))),
+      ...accept(SUB),
+    },
+  ];
+
+  // ── the stateful half: tokens presented to ONE verifier, in order ───────────
+  // A token with the default claims, its own jti and optional claim overrides.
+  const token = (label: string, overrides: Fields = {}): string[] =>
+    signed(...std(current, undefined, claims({ jti: jtiFor(label), ...overrides })));
+  // The token's window: iat - 10 .. iat + 50 by default, so exp = T0 + 50.
+  const at = (now: number, jws: string[]) => ({ now, jws });
+  const accepted = (now: number, jws: string[], sub = SUB) => ({ ...at(now, jws), ...accept(sub) });
+  const refused = (now: number, jws: string[], reason: Reason) => ({
+    ...at(now, jws),
+    ...reject(reason),
+  });
+  const sequence = (
+    name: string,
+    capacity: number | null,
+    steps: Array<ReturnType<typeof accepted> | ReturnType<typeof refused>>,
+    overrides: Fields = {},
+  ) => ({
+    name,
+    jwks: 'zone-a-overlap',
+    procedure: USER_METHOD,
+    auth: 'AUTH_USER',
+    capacity,
+    ...overrides,
+    steps,
+  });
+  const A = token('a');
+  const B = token('b');
+  const C = token('c');
+  // A token that lives T0+31 .. T0+91 (exp is 60 s after iat): outlasts A and B.
+  const late = (label: string, iat: number) => token(label, { iat, exp: iat + 60 });
+
+  const sequences = [
+    sequence('replay-same-token', null, [
+      accepted(T0, A),
+      refused(T0 + 1, A, 'replayed'),
+      refused(T0 + 2, A, 'replayed'),
+    ]),
+    sequence('replay-until-exp-plus-skew', null, [
+      accepted(T0, A),
+      // exp = T0 + 50: still replayed at exp and just inside the skew ...
+      refused(T0 + 50, A, 'replayed'),
+      refused(T0 + 54, A, 'replayed'),
+      // ... and at exp + skew the entry is gone, and the token is plainly expired.
+      refused(T0 + 55, A, 'expired'),
+    ]),
+    sequence('distinct-jti-both-accepted', null, [accepted(T0, A), accepted(T0, B)]),
+    sequence('cap-reached-refuses-new', 2, [
+      accepted(T0, A),
+      accepted(T0, B),
+      refused(T0, C, 'seen-set-full'),
+      // A refused token is not recorded: it is refused again, as full, not as replayed.
+      refused(T0 + 1, C, 'seen-set-full'),
+    ]),
+    sequence('cap-reached-keeps-seen', 2, [
+      accepted(T0, A),
+      accepted(T0, B),
+      refused(T0, C, 'seen-set-full'),
+      // Full is not an excuse to forget: the tokens already seen are still refused.
+      refused(T0 + 1, A, 'replayed'),
+      refused(T0 + 1, B, 'replayed'),
+    ]),
+    sequence('expired-entry-purged', 2, [
+      accepted(T0, A),
+      accepted(T0, B),
+      refused(T0 + 10, C, 'seen-set-full'),
+      // A and B (exp T0 + 50) are purged at T0 + 55: there is room again.
+      accepted(T0 + 56, late('d', T0 + 50)),
+      accepted(T0 + 56, late('e', T0 + 50)),
+      refused(T0 + 56, late('f', T0 + 50), 'seen-set-full'),
+    ]),
+    sequence('purge-is-per-entry', 2, [
+      accepted(T0, A),
+      accepted(T0 + 40, late('b', T0 + 35)),
+      refused(T0 + 41, late('c', T0 + 36), 'seen-set-full'),
+      // Only A (exp T0 + 50) has expired by T0 + 56: one place is free, not two.
+      accepted(T0 + 56, late('c', T0 + 36)),
+      refused(T0 + 57, late('d', T0 + 37), 'seen-set-full'),
+      refused(T0 + 58, late('b', T0 + 35), 'replayed'),
+    ]),
+    sequence('refused-token-is-not-recorded', null, [
+      // Valid signature, wrong RPC: refused before anything is remembered ...
+      refused(T0, token('x', { method: OTHER_METHOD }), 'wrong-method'),
+      // ... so the same jti on a token that is right is accepted, once.
+      accepted(T0 + 1, token('x')),
+      refused(T0 + 2, token('x'), 'replayed'),
+    ]),
+    sequence(
+      'replay-public-rpc',
+      null,
+      [
+        accepted(T0, token('p', { method: PUBLIC_METHOD, sub: '' }), ''),
+        refused(T0 + 1, token('p', { method: PUBLIC_METHOD, sub: '' }), 'replayed'),
+      ],
+      { procedure: PUBLIC_METHOD, auth: 'AUTH_PUBLIC' },
+    ),
   ];
 
   const keys = Object.fromEntries(
@@ -678,15 +861,18 @@ export function buildVectors() {
       alg: 'EdDSA',
       typ: 'JWT',
       kid: 'base64url (no padding) of the first 16 bytes of SHA-256 over the raw 32-byte public key',
-      claims: ['iss', 'aud', 'method', 'sub', 'iat', 'exp'],
+      claims: ['iss', 'aud', 'method', 'sub', 'jti', 'iat', 'exp'],
       maxLifetimeSeconds: 60,
       clockSkewSeconds: 5,
+      jtiChars: JTI_CHARS,
+      defaultSeenCapacity: DEFAULT_SEEN_CAPACITY,
     },
     verifier: { issuer: ISSUER, audience: AUDIENCE },
     reasons: [...REASONS],
     keys,
     jwks,
     cases,
+    sequences,
   };
 }
 

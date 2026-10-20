@@ -3,10 +3,13 @@ package auth_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -40,6 +43,9 @@ var reasonErr = map[string]error{
 	"wrong-method":    auth.ErrWrongMethod,
 	"missing-subject": auth.ErrMissingSubject,
 	"bad-jwks":        auth.ErrBadJWKS,
+	"missing-jti":     auth.ErrMissingJTI,
+	"replayed":        auth.ErrReplayed,
+	"seen-set-full":   auth.ErrSeenSetFull,
 }
 
 var authOf = map[string]knextv1.Auth{
@@ -59,6 +65,13 @@ func (c *clock) Now() time.Time {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.now
+}
+
+// Set moves the clock to an absolute reading, in Unix seconds.
+func (c *clock) Set(unix int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = time.Unix(unix, 0)
 }
 
 func (c *clock) Advance(d time.Duration) {
@@ -164,8 +177,8 @@ func TestSharedVectors(t *testing.T) {
 		})
 	}
 	// A run that saw fewer cases proves nothing about the ones it missed.
-	if accepted < 7 || refused < 69 {
-		t.Fatalf("ran %d accepted and %d refused cases; want at least 7 and 69", accepted, refused)
+	if accepted < 10 || refused < 74 {
+		t.Fatalf("ran %d accepted and %d refused cases; want at least 10 and 74", accepted, refused)
 	}
 }
 
@@ -269,7 +282,8 @@ func TestRotationOverlapThenRetire(t *testing.T) {
 	replaceJWKS(t, v, path, "zone-a-current-only")
 	_, err := verifier.Verify(t.Context(), previous, c.Procedure)
 	wantRefused(t, "a previous-key token after the overlap", err, auth.ErrUnknownKID)
-	if _, err := verifier.Verify(t.Context(), current, c.Procedure); err != nil {
+	// A token is single-use: the current key's next token is a new one.
+	if _, err := verifier.Verify(t.Context(), v.Token(t, "valid-user-second-jti"), c.Procedure); err != nil {
 		t.Fatalf("after the overlap, the current-key token was refused: %v", err)
 	}
 }
@@ -569,5 +583,220 @@ func writeLater(t *testing.T, path string, data []byte) {
 	later := info.ModTime().Add(2 * time.Second)
 	if err := os.Chtimes(path, later, later); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// verifierFor is the verifier a vector sequence runs against: the sequence's JWK
+// Set mounted at a fresh path, the vectors' issuer and audience, a clock the
+// steps move, and the sequence's replay-set size (zero: the default).
+func verifierFor(t *testing.T, v *testvectors.File, seq testvectors.Sequence) (auth.Verifier, *clock) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "jwks", "jwks.json")
+	v.WriteJWKS(t, path, seq.JWKS)
+	mode, ok := authOf[seq.Auth]
+	if !ok {
+		t.Fatalf("%s: unknown auth %q", seq.Name, seq.Auth)
+	}
+	capacity := 0
+	if seq.Capacity != nil {
+		capacity = *seq.Capacity
+	}
+	clk := newClock(0)
+	return auth.NewVerifier(auth.Config{
+		JWKSPath:     path,
+		Issuer:       v.Verifier.Issuer,
+		Audience:     v.Verifier.Audience,
+		MethodAuth:   onlyMethod(seq.Procedure, mode),
+		Now:          clk.Now,
+		SeenCapacity: capacity,
+	}), clk
+}
+
+// Every sequence in the shared vectors: tokens presented in order to ONE
+// verifier at stated clock readings. A token seen before is refused until it
+// expires, a full set refuses new tokens and forgets none, an expired entry is
+// purged, and a token refused for another reason is not recorded.
+func TestSharedReplaySequences(t *testing.T) {
+	v := testvectors.Load(t)
+	if len(v.Sequences) < 9 {
+		t.Fatalf("the vectors hold %d replay sequences; want at least 9", len(v.Sequences))
+	}
+	t0 := v.Case(t, "valid-user").Now
+	var replayed, full int
+	for _, seq := range v.Sequences {
+		t.Run(seq.Name, func(t *testing.T) {
+			verifier, clk := verifierFor(t, v, seq)
+			for i, step := range seq.Steps {
+				clk.Set(step.Now)
+				caller, err := verifier.Verify(t.Context(), step.Token(), seq.Procedure)
+				what := fmt.Sprintf("step %d (now T0%+d)", i, step.Now-t0)
+				switch step.Expect {
+				case "accept":
+					if err != nil {
+						t.Fatalf("%s: refused: %v", what, err)
+					}
+					if caller.Subject != step.Sub || caller.Zone != v.Verifier.Issuer {
+						t.Fatalf("%s: caller = %+v; want subject %q", what, caller, step.Sub)
+					}
+				case "reject":
+					want, ok := reasonErr[step.Reason]
+					if !ok {
+						t.Fatalf("%s: unmapped reason %q", what, step.Reason)
+					}
+					wantRefused(t, what, err, want)
+					if caller != (auth.Caller{}) {
+						t.Fatalf("%s: a refused token still produced caller %+v", what, caller)
+					}
+					switch step.Reason {
+					case "replayed":
+						replayed++
+					case "seen-set-full":
+						full++
+					}
+				default:
+					t.Fatalf("%s: unknown expectation %q", what, step.Expect)
+				}
+			}
+		})
+	}
+	// A run that saw fewer refusals proves nothing about the rules they test.
+	if replayed < 8 || full < 6 {
+		t.Fatalf("ran %d replay and %d full refusals; want at least 8 and 6", replayed, full)
+	}
+}
+
+// The defaults the vectors state are the defaults the verifier has.
+func TestReplayDefaultsMatchTheVectors(t *testing.T) {
+	v := testvectors.Load(t)
+	if auth.DefaultSeenCapacity != v.Contract.DefaultSeenCapacity {
+		t.Errorf("DefaultSeenCapacity = %d; the vectors say %d", auth.DefaultSeenCapacity, v.Contract.DefaultSeenCapacity)
+	}
+	if auth.MinJTIChars != v.Contract.JTIChars.Min || auth.MaxJTIChars != v.Contract.JTIChars.Max {
+		t.Errorf("jti length = %d..%d; the vectors say %d..%d", auth.MinJTIChars, auth.MaxJTIChars, v.Contract.JTIChars.Min, v.Contract.JTIChars.Max)
+	}
+	if v.Contract.ClockSkewSeconds != int64(auth.ClockSkew/time.Second) {
+		t.Errorf("ClockSkew = %v; the vectors say %ds", auth.ClockSkew, v.Contract.ClockSkewSeconds)
+	}
+}
+
+// The same token sent twice through the interceptor: the first call reaches the
+// handler, the second is refused as unauthenticated before any handler runs, and
+// what the caller is told does not name the reason.
+func TestReplayedTokenNeverReachesTheHandler(t *testing.T) {
+	v := testvectors.Load(t)
+	c := v.Case(t, "valid-user")
+	verifier, _ := vectorVerifier(t, v, c)
+	f := newFixture(t, verifier)
+	ctx := withAuthorization(t, "Bearer "+v.Token(t, "valid-user"))
+	if _, err := f.example.PutItem(ctx, &examplev1.PutItemRequest{Id: "a"}); err != nil {
+		t.Fatalf("the first use of a valid token: %v", err)
+	}
+	_, err := f.example.PutItem(ctx, &examplev1.PutItemRequest{Id: "a", Value: "attacker-chosen"})
+	wantUnauthenticated(t, "the second use of the same token", err)
+	var cerr *connect.Error
+	if errors.As(err, &cerr) && strings.Contains(strings.ToLower(cerr.Message()), "replay") {
+		t.Fatalf("the refusal %q names its reason", cerr.Message())
+	}
+	if n := f.handler.count(); n != 1 {
+		t.Fatalf("the handler ran %d times; want 1 (the replay must not reach it)", n)
+	}
+}
+
+// A hundred goroutines presenting one token at once: exactly one is admitted.
+func TestConcurrentReplayAdmitsExactlyOne(t *testing.T) {
+	v := testvectors.Load(t)
+	c := v.Case(t, "valid-user")
+	verifier, _ := vectorVerifier(t, v, c)
+	token := v.Token(t, "valid-user")
+	var admitted atomic.Int32
+	var wg sync.WaitGroup
+	for range 100 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := verifier.Verify(t.Context(), token, c.Procedure); err == nil {
+				admitted.Add(1)
+			} else if !errors.Is(err, auth.ErrReplayed) {
+				t.Errorf("refused with %v; want ErrReplayed", err)
+			}
+		}()
+	}
+	wg.Wait()
+	if n := admitted.Load(); n != 1 {
+		t.Fatalf("%d concurrent uses of one token were admitted; want exactly 1", n)
+	}
+}
+
+type writerFunc func([]byte) (int, error)
+
+func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
+
+// A pod at its cap refuses every new token, which looks like an outage from
+// outside, so it says so: one warning, then at most one every ten seconds. The
+// warning never carries a token.
+func TestFullReplaySetIsReportedOnceInAWhile(t *testing.T) {
+	v := testvectors.Load(t)
+	var seq testvectors.Sequence
+	for _, s := range v.Sequences {
+		if s.Name == "cap-reached-refuses-new" {
+			seq = s
+		}
+	}
+	if len(seq.Steps) < 3 || seq.Capacity == nil {
+		t.Fatal("no usable cap-reached-refuses-new sequence")
+	}
+	var buf strings.Builder
+	var mu sync.Mutex
+	logger := slog.New(slog.NewTextHandler(writerFunc(func(p []byte) (int, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		return buf.Write(p)
+	}), nil))
+	path := filepath.Join(t.TempDir(), "jwks", "jwks.json")
+	v.WriteJWKS(t, path, seq.JWKS)
+	clk := newClock(seq.Steps[0].Now)
+	verifier := auth.NewVerifier(auth.Config{
+		JWKSPath:     path,
+		Issuer:       v.Verifier.Issuer,
+		Audience:     v.Verifier.Audience,
+		MethodAuth:   onlyMethod(seq.Procedure, knextv1.Auth_AUTH_USER),
+		Now:          clk.Now,
+		SeenCapacity: *seq.Capacity,
+		Logger:       logger,
+	})
+	for _, step := range seq.Steps[:2] {
+		if _, err := verifier.Verify(t.Context(), step.Token(), seq.Procedure); err != nil {
+			t.Fatalf("filling the set: %v", err)
+		}
+	}
+	full := seq.Steps[2].Token()
+	warnings := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return strings.Count(buf.String(), "replay set is full")
+	}
+	for range 5 {
+		_, err := verifier.Verify(t.Context(), full, seq.Procedure)
+		wantRefused(t, "a new token into a full set", err, auth.ErrSeenSetFull)
+	}
+	if n := warnings(); n != 1 {
+		t.Fatalf("%d warnings for five refusals in one second; want 1", n)
+	}
+	clk.Advance(9 * time.Second)
+	_, _ = verifier.Verify(t.Context(), full, seq.Procedure)
+	if n := warnings(); n != 1 {
+		t.Fatalf("%d warnings after 9 s; want still 1", n)
+	}
+	clk.Advance(2 * time.Second)
+	_, _ = verifier.Verify(t.Context(), full, seq.Procedure)
+	if n := warnings(); n != 2 {
+		t.Fatalf("%d warnings after 11 s; want 2", n)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, segment := range seq.Steps[2].JWS {
+		if strings.Contains(buf.String(), segment) {
+			t.Fatal("the warning carries part of a token")
+		}
 	}
 }

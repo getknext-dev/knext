@@ -85,6 +85,10 @@ type Config struct {
 	// and this function. With either empty, every RPC but the health check
 	// is refused.
 	Issuer, Audience string
+	// SeenCapacity is how many accepted tokens the token check remembers to
+	// refuse a replay; zero is auth.DefaultSeenCapacity (see its comment before
+	// changing it).
+	SeenCapacity int
 	// Now is the token check's clock; it defaults to time.Now (tests set it).
 	Now func() time.Time
 	// Logger defaults to slog.Default().
@@ -110,6 +114,9 @@ func New(cfg Config) (*Function, error) {
 		Issuer:   cfg.Issuer,
 		Audience: cfg.Audience,
 		Now:      cfg.Now,
+
+		SeenCapacity: cfg.SeenCapacity,
+		Logger:       cfg.Logger,
 	}))
 }
 

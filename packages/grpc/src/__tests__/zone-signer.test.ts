@@ -9,8 +9,9 @@
  * - header exactly `{"alg":"EdDSA","typ":"JWT","kid":"<kid>"}`, the kid being
  *   base64url (no padding) of the first 16 bytes of SHA-256 over the raw
  *   32-byte public key;
- * - claims exactly `iss`, `aud`, `method`, `sub`, `iat`, `exp`, with
- *   `exp - iat <= 60` and integer seconds;
+ * - claims exactly `iss`, `aud`, `method`, `sub`, `jti`, `iat`, `exp`, with
+ *   `exp - iat <= 60` and integer seconds, and a `jti` that is at least 128
+ *   random bits, different on every mint;
  * - `sub` from the verified user only: non-empty for an AUTH_USER RPC, empty
  *   for AUTH_PUBLIC, and nothing else the caller passes can set it.
  *
@@ -166,18 +167,49 @@ describe('the token: shape, claims, signature', () => {
     expect(t.headerJson).toBe(`{"alg":"EdDSA","typ":"JWT","kid":"${key.kid}"}`);
   });
 
-  it('carries exactly iss, aud, method, sub, iat and exp, as the contract defines them', async () => {
+  it('carries exactly iss, aud, method, sub, jti, iat and exp, as the contract defines them', async () => {
     const { dir, key } = mountedKey('signer-claims');
     const t = decode(await signer(dir).mint(USER_CALL), key.publicKey);
-    expect(Object.keys(t.claims)).toEqual(['iss', 'aud', 'method', 'sub', 'iat', 'exp']);
+    expect(Object.keys(t.claims)).toEqual(['iss', 'aud', 'method', 'sub', 'jti', 'iat', 'exp']);
     expect(t.claims).toEqual({
       iss: ISSUER,
       aud: AUDIENCE,
       method: GET_ORDER,
       sub: 'alice',
+      jti: expect.any(String),
       iat: Math.floor(NOW_MS / 1000),
       exp: Math.floor(NOW_MS / 1000) + 60,
     });
+  });
+
+  it('gives every token a jti: at least 128 random bits, base64url, never repeated', async () => {
+    const { dir, key } = mountedKey('signer-jti');
+    // One clock reading for every mint: only the jti can tell the tokens apart.
+    const { mint } = signer(dir);
+    const seen = new Set<string>();
+    for (let i = 0; i < 2000; i++) {
+      const { claims } = decode(await mint(USER_CALL), key.publicKey);
+      const jti = claims.jti;
+      expect(typeof jti).toBe('string');
+      expect(jti as string).toMatch(/^[A-Za-z0-9_-]{22,64}$/);
+      expect(Buffer.from(jti as string, 'base64url').length).toBeGreaterThanOrEqual(16);
+      seen.add(jti as string);
+    }
+    expect(seen.size).toBe(2000);
+  });
+
+  it("the jti is signed: swapping it for another token's jti breaks the signature", async () => {
+    const { dir, key } = mountedKey('signer-jti-signed');
+    const { mint } = signer(dir);
+    const a = await mint(USER_CALL);
+    const b = decode(await mint(USER_CALL), key.publicKey).claims;
+    const [h, , s] = a.split('.') as [string, string, string];
+    const swapped = Buffer.from(
+      JSON.stringify({ ...decode(a, key.publicKey).claims, jti: b.jti }),
+    ).toString('base64url');
+    expect(
+      verify(null, Buffer.from(`${h}.${swapped}`), key.publicKey, Buffer.from(s, 'base64url')),
+    ).toBe(false);
   });
 
   it('lives at most 60 seconds, in integer seconds', async () => {
@@ -390,6 +422,7 @@ describe('sub: the verified user, and only the verified user', () => {
       aud: AUDIENCE,
       method: GET_ORDER,
       sub: 'alice',
+      jti: expect.any(String),
       iat: Math.floor(NOW_MS / 1000),
       exp: Math.floor(NOW_MS / 1000) + 60,
     });

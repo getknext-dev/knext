@@ -497,6 +497,29 @@ describe('the lane proves what it claims', () => {
     expect(runSh).toContain("control, a token from the zone's real key is accepted");
   });
 
+  it('sends the same token twice for Go and Rust, accepts the first and refuses the second', () => {
+    // The refusal matrix runs for both functions (label go / rust), and its replay
+    // row sends ONE token twice (--twice): the first use is accepted, the second
+    // is refused. A token is single-use, so a copy captured on the pod network
+    // is refused by the pod that already accepted it.
+    const matrix = runSh.slice(runSh.indexOf('refusal_matrix() {'));
+    expect(matrix).toContain('the same token sent twice, the second use is refused');
+    const lines = matrix.split('\n');
+    const row = lines.findIndex((l) =>
+      l.includes('expect_replay "${label}: the same token sent twice'),
+    );
+    expect(row).toBeGreaterThan(0);
+    const call = lines.slice(row, row + 2).join(' ');
+    expect(call).toMatch(/--rpc put\b.*--auth signer\b/);
+    const helper = runSh.slice(runSh.indexOf('expect_replay() {'), runSh.indexOf('zone_call() {'));
+    expect(helper).toContain('--twice');
+    expect(helper).toMatch(/= 200/);
+    expect(helper).toMatch(/= 401/);
+    expect(helper).toContain('unauthenticated');
+    expect(runSh).toMatch(/refusal_matrix go /);
+    expect(runSh).toMatch(/refusal_matrix rust /);
+  });
+
   it('pairs the two hand-built refusals with a control built the same way, differing in one claim', () => {
     // The real signer will not mint either bad token, so both are hand-built with the
     // zone's real key (--auth raw). Their control is hand-built too, so the only

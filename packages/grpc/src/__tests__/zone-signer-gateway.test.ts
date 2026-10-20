@@ -78,7 +78,8 @@ function verified(ctx) {
   const c = JSON.parse(Buffer.from(m[2], 'base64url').toString('utf8'));
   const now = Math.floor(Date.now() / 1000);
   const ok =
-    JSON.stringify(Object.keys(c)) === JSON.stringify(['iss', 'aud', 'method', 'sub', 'iat', 'exp']) &&
+    JSON.stringify(Object.keys(c)) === JSON.stringify(['iss', 'aud', 'method', 'sub', 'jti', 'iat', 'exp']) &&
+    typeof c.jti === 'string' && /^[A-Za-z0-9_-]{22,64}$/.test(c.jti) &&
     c.iss === process.env.TEST_ISSUER &&
     c.aud === process.env.TEST_AUDIENCE &&
     c.method === path &&
