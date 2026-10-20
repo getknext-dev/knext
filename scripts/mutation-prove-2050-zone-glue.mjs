@@ -445,8 +445,8 @@ console.log('\n=== Node and Bun gateways ===');
 transport.baseline();
 transport.proveCanSeeRed({
   subject: 'runtime',
-  anchor: '      headers.set(AUTHORIZATION_HEADER, `Bearer ${options.token}`);',
-  replacement: '      void options.token;',
+  anchor: '    headers.set(AUTHORIZATION_HEADER, `Bearer ${token}`);',
+  replacement: '    void token;',
 });
 for (const m of TRANSPORT) {
   transport.run({ ...m, expect: 'red' });

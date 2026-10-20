@@ -61,12 +61,16 @@ const NAME = 'mutation-prove-2510-rust-verifier';
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 // The crate (the command's cwd), not a mutation subject.
 const TEMPLATE_CRATE = `${REPO_ROOT}/templates/rust`;
+const TOKEN = resolve(REPO_ROOT, 'templates/rust/src/auth/token.rs');
+const REPLAY = resolve(REPO_ROOT, 'templates/rust/src/auth/replay.rs');
+const AUTH = resolve(REPO_ROOT, 'templates/rust/src/auth.rs');
+const SERVER = resolve(REPO_ROOT, 'templates/rust/src/rpc/mod.rs');
 const PROVER = {
   subjects: {
-    token: resolve(REPO_ROOT, 'templates/rust/src/auth/token.rs'),
-    replay: resolve(REPO_ROOT, 'templates/rust/src/auth/replay.rs'),
-    auth: resolve(REPO_ROOT, 'templates/rust/src/auth.rs'),
-    server: resolve(REPO_ROOT, 'templates/rust/src/rpc/mod.rs'),
+    token: TOKEN,
+    replay: REPLAY,
+    auth: AUTH,
+    server: SERVER,
   },
 };
 

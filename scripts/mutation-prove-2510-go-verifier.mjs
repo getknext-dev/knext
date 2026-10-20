@@ -62,12 +62,16 @@ const NAME = 'mutation-prove-2510-go-verifier';
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 // The Go module (the command's cwd), not a mutation subject.
 const TEMPLATE_MODULE = `${REPO_ROOT}/templates/go`;
+const TOKEN = resolve(REPO_ROOT, 'templates/go/internal/auth/token.go');
+const REPLAY = resolve(REPO_ROOT, 'templates/go/internal/auth/replay.go');
+const VERIFIER = resolve(REPO_ROOT, 'templates/go/internal/auth/verifier.go');
+const SERVER = resolve(REPO_ROOT, 'templates/go/internal/rpc/rpc.go');
 const PROVER = {
   subjects: {
-    token: resolve(REPO_ROOT, 'templates/go/internal/auth/token.go'),
-    replay: resolve(REPO_ROOT, 'templates/go/internal/auth/replay.go'),
-    verifier: resolve(REPO_ROOT, 'templates/go/internal/auth/verifier.go'),
-    server: resolve(REPO_ROOT, 'templates/go/internal/rpc/rpc.go'),
+    token: TOKEN,
+    replay: REPLAY,
+    verifier: VERIFIER,
+    server: SERVER,
   },
 };
 
