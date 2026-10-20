@@ -160,7 +160,7 @@ const PIN_TERM = /\b(?:pin(?:s|ned|ning)?|image digest)\b/i;
 const CLAIM_VERB =
   /\b(?:close[sd]?(?!\s+(?:review|meeting))|closing|eliminat\w+|fix(?:es|ed)?|solv\w+|prevent\w*|protect\w*|secur(?:e|es|ed|ing)|safe(?:ly|guard\w*)?|stop(?:s|ped)?|guarantee\w*|remov(?:e|es|ed) the (?:risk|exposure))\b|\bkeeps?\b[^,;:]*\bfrom\b|\bno longer\b/i;
 const TARGET =
-  /\b(?:database secret|db-bind|exposure|users' tokens|confused deputy|equivalent to|that|this|it|them)\b/i;
+  /\b(?:database secret|secret|db-bind|exposure|users' tokens|confused deputy|equivalent to|that|this|it|them)\b/i;
 const LIMITER = /\b(?:not|never|cannot|can't|narrows?|neither|nor)\b|n't/i;
 
 /** A sentence about the SPEC pin. The image pin never closes anything, so a sentence that also names it is not exempt. */
@@ -170,10 +170,16 @@ const IMAGE_PIN_TERM =
   /\bimage[- ]pin\b|\bimage-only\b|\bpins? (?:only )?the image\b|\bpinn(?:ed|ing) (?:the )?image\b|\bpinned image\b|\b(?:an|the) `?image`? pin\b/i;
 /** What a protection claim about the spec pin must be scoped to: the BackendService route. */
 const SPEC_SCOPE =
-  /\b(?:backendservices?|writes?|writers?|update|route|refus\w+|mismatch\w*|can no longer make|cannot make)\b/i;
+  /\b(?:backendservices?|route|refus\w+|mismatch\w*|can no longer make|cannot make)\b/i;
 
 const TO_CLOSE =
   /\b(?:set|enable|use|add|put|apply|configure)\b[^.]*\bto (?:close|fix|solve|eliminate|prevent|protect against) (?:it|that|this|the (?:exposure|risk|gap|problem))\b/i;
+
+/** The scan entry point for text that must carry content: blank input is an error, not a clean bill. */
+function scanText(text: string): string[] {
+  if (text.trim().length === 0) throw new Error('nothing to scan');
+  return overclaims(text);
+}
 
 function claimClauses(sentence: string): string[] {
   return sentence.split(/[,;:—|]|\s(?:but|while|although)\s/i);
@@ -283,9 +289,20 @@ describe('the scanner sees the wording we removed and its paraphrases', () => {
       "specDigest protects your users' tokens.",
       'Setting the spec pin closes the exposure.',
       'With the spec pin the confused deputy is eliminated.',
+      // A bare "writes"/"writers"/"update" is not a scope: it names no route.
+      'The spec pin makes the Secret safe from writes.',
+      'The spec pin keeps the database Secret safe from writers.',
+      'With specDigest set, the Secret is protected on every update.',
     ]) {
       expect(specOverclaims(bad), bad).toHaveLength(1);
     }
+  });
+
+  it('an empty page fails rather than passes', () => {
+    const empty = page('apps/docs/content/docs/does-not-exist.mdx');
+    expect(() => empty()).toThrow();
+    expect(() => PLACES[0][1]('')).not.toThrow();
+    expect(() => scanText('   ')).toThrow();
   });
 
   it('a sentence that also names the image pin is still an image-pin sentence', () => {
