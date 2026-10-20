@@ -440,6 +440,7 @@ describe('the scanner sees the wording we removed and its paraphrases', () => {
       'The spec pin makes the Secret safe whatever the writer does when a change is refused.',
       'specDigest makes the Secret safe everywhere because every change is refused.',
       'specDigest makes the Secret safe because a change is refused.',
+      'specDigest closes the BackendService route to the Secret everywhere because a change is refused.',
       'specDigest closes the route to the Secret regardless of what the writer does.',
       'specDigest closes the route to the Secret, no matter what the writer changes.',
       // A bare "writes"/"writers"/"update" is not a scope: it names no route.
