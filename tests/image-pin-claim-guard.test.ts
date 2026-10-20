@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'bun:test';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
@@ -162,13 +163,23 @@ function docsPinSection(): string {
  */
 const PIN_TERM = /\b(?:pin(?:s|ned|ning)?|image digest)\b/i;
 const CLAIM_VERB =
-  /\b(?:close[sd]?(?!\s+(?:review|meeting))|closing|eliminat\w+|fix(?:es|ed)?|solv\w+|prevent\w*|protect\w*|secur(?:e|es|ed|ing)|safe(?:ly|guard\w*)?|stop(?:s|ped)?|guarantee\w*|remov(?:e|es|ed) the (?:risk|exposure)|immutable|tamper-?proof|shields?|shielded|locks? down|guards?|guarded|defends?|defended|hardened against|rules? out|mitigat\w+|neutrali[sz]\w+|resolv\w+|address(?:es|ed)?|blocks?|blocked|remed(?:y|ies|ied)|ensures? only|makes? it impossible)\b|\bkeeps?\b[^,;:]*\bfrom\b|\bno longer\b/i;
+  /\b(?:close[sd]?(?!\s+(?:review|meeting))|closing|eliminat\w+|fix(?:es|ed)?|solv\w+|prevent\w*|protect\w*|secur(?:e|es|ed|ing)|safe(?:ly|guard\w*)?|stop(?:s|ped)?|guarantee\w*|remov(?:e|es|ed) the (?:risk|exposure)|immutable|tamper-?proof|shields?|shielded|locks? down|guards?|guarded|defends?|defended|hardened against|rules? out|mitigat\w+|neutrali[sz]\w+|resolv\w+|address(?:es|ed)?|blocks?|blocked|remed(?:y|ies|ied)|ensures? only|makes? it impossible|unreachable|out of reach|moot|complete answer)\b|\bkeeps?\b[^,;:]*\bfrom\b|\bno longer\b/i;
 const TARGET =
   /\b(?:database secret|secret|db-bind|exposure|(?:the )?(?:problem|gap|risk|hole|issue)|users' tokens|confused deputy|equivalent to|(?:the )?zone(?:'s)? (?:database|data)|that|this|it|them)\b/i;
-const LIMITER = /\b(?:not|never|cannot|can't|narrows?|neither|nor|only)\b|n't/i;
+const LIMITER = /\b(?:not|never|cannot|can't|narrows?|neither|nor)\b|n't/i;
+/** "only" narrows a claim only when it sits right before what the claim is narrowed to ("only an image swap", "only stops an image swap"). */
+const ONLY_NARROWS = /\bonly (?:(?:an? |the )?(?:image|swap)|\w+ (?:an? |the )?(?:image|swap))\b/i;
+/** A negation that is itself negated ("never fails to close") is a claim, not a limiter. */
+const DOUBLE_NEGATION =
+  /\b(?:never|not|n't|cannot) (?:fail|fails|failed|miss|misses|neglect|neglects)(?: to)?\b|\b\w+n't (?:fail|miss|neglect)\w*(?: to)?\b/gi;
+/** A condition before a negation: "no good if it does not stop" does not negate the claim. */
+const CONDITION = /\b(?:if|unless|when|whenever|whether|once|where)\b/i;
 /** Words that make a protection claim absolute; they are never a scope. */
 const ABSOLUTE =
-  /\b(?:any|every|all|always|never|nobody|no one|entirely|completely|fully|anywhere)\b/i;
+  /\b(?:any|every|all|always|never|nobody|no one|entirely|completely|fully|anywhere|everywhere|whatever|regardless|no matter)\b/i;
+/** A clause that states the mechanism ("is refused") bounds its own "whatever". */
+const MECHANISM = /\b(?:refus\w+|mismatch\w*)\b/i;
+const absoluteIn = (clause: string) => ABSOLUTE.test(clause) && !MECHANISM.test(clause);
 
 /** A sentence about the SPEC pin. The image pin never closes anything, so a sentence that also names it is not exempt. */
 const SPEC_PIN_TERM =
@@ -194,8 +205,18 @@ function claimClauses(sentence: string): string[] {
 
 /** True when the last three words before `index` in `clause` hold a limiter: it must negate the verb at `index`. */
 function limitedBefore(clause: string, index: number): boolean {
-  const words = clause.slice(0, index).trim().split(/\s+/).slice(-3).join(' ');
-  return LIMITER.test(words);
+  const before = clause.slice(0, index).trim().split(/\s+/);
+  const near = before.slice(-3).join(' ');
+  // What follows the verb matters for "only": "only stops an image swap".
+  const after = clause.slice(index, index + 50);
+  if (ONLY_NARROWS.test(`${near} ${after}`)) return true;
+  const cleaned = near.replace(DOUBLE_NEGATION, ' ');
+  const hit = LIMITER.exec(cleaned);
+  if (!hit) return false;
+  // A negation under a condition (within five words before it) does not negate the claim.
+  const ahead = before.slice(-8).join(' ');
+  const at = ahead.search(LIMITER);
+  return !(at >= 0 && CONDITION.test(ahead.slice(0, at)));
 }
 
 /** A claim verb in `clause` that no limiter negates, and a target for it. */
@@ -253,8 +274,10 @@ function hasUnlimitedVerb(sentence: string): boolean {
 function specOverclaims(text: string): string[] {
   return flatten(text).filter((s) => {
     if (!isSpecOnly(s)) return false;
-    if (hasUnlimitedVerb(s) && ABSOLUTE.test(s)) return true;
-    return claimClauses(s).some(claimsIn) && !SPEC_SCOPE.test(s);
+    const clauses = claimClauses(s);
+    if (hasUnlimitedVerb(s) && clauses.some(absoluteIn)) return true;
+    // The scope must sit in the same clause as the claim.
+    return clauses.some((c) => claimsIn(c) && !SPEC_SCOPE.test(c));
   });
 }
 
@@ -330,6 +353,19 @@ describe('the scanner sees the wording we removed and its paraphrases', () => {
     "Pinning keeps the zone's data safe.",
     'Pinning protects the zone’s data.',
     // Unicode tricks: a zero-width joiner or a fullwidth letter inside the verb.
+    // Round 3: "only" narrows only when it directly precedes a narrowing object.
+    'Pinning only ever really protects the database Secret.',
+    'Pinning is only here to stop the exposure.',
+    // A negation under a condition does not negate the claim.
+    'Pinning is no good if it does not stop the exposure.',
+    // A double negation is a claim.
+    'Pinning never fails to close the exposure.',
+    'Pinning does not fail to protect the database Secret.',
+    // Further wordings of the same claim.
+    'Pinning makes the database Secret unreachable.',
+    'With a pin the database Secret is out of reach.',
+    'With a pin the exposure is moot.',
+    'Pinning is the complete answer to the exposure.',
     'Pinning c\u200dloses the exposure.',
     'Pinning cl\u200bos\ufeffes the exposure.',
     'Pinning ｃｌｏｓｅｓ the exposure.',
@@ -353,6 +389,9 @@ describe('the scanner sees the wording we removed and its paraphrases', () => {
       'Pinning never fully closes the exposure.',
       'Pinning cannot close or fix the exposure.',
       'Pinning closes only an image swap.',
+      'Pinning only the image does not protect the database Secret.',
+      'Pinning can not close the exposure.',
+      'Pinning cannot close the exposure.',
       'The pin does not close the database Secret exposure: it binds the image only.',
       'Pinning the image narrows this, but does not remove it.',
       'A pin does not stop that.',
@@ -390,6 +429,12 @@ describe('the scanner sees the wording we removed and its paraphrases', () => {
       'The spec pin closes every route to the Secret.',
       'The spec pin closes the exposure when specDigest is not stale.',
       'The spec pin makes the Secret imm\u200dutable.',
+      // Round 3: the scope must sit in the same clause as the claim verb.
+      'The spec pin closes the BackendService route and the Secret is safe everywhere.',
+      'specDigest closes the BackendService route to the Secret, and the Secret is safe.',
+      'specDigest closes the route to the Secret, whatever the writer does.',
+      'specDigest closes the route to the Secret regardless of what the writer does.',
+      'specDigest closes the route to the Secret, no matter what the writer changes.',
       // A bare "writes"/"writers"/"update" is not a scope: it names no route.
       'The spec pin makes the Secret safe from writes.',
       'The spec pin keeps the database Secret safe from writers.',
@@ -459,35 +504,71 @@ const PLACES: [string, (extra?: string) => string][] = [
 ];
 
 // Whole-page scanning meets sentences that use the word "pin" about something else
-// (a base-image tag, a build manifest, a test index). Each is exempt by a distinctive
-// fragment of the sentence (at least 40 characters), on its own page only, and the
-// exemption fails if the sentence is gone or no longer needs it, so the list cannot
-// rot into a blanket skip.
-const EXEMPT: Record<string, string[]> = {
+// (a base-image tag, a build manifest, a test index). Each is exempt only as the WHOLE
+// normalised sentence, matched exactly (a hash of it, plus its opening words so a
+// reader can find it), on its own page only. Appending anything to it, or editing it,
+// ends the exemption and the scanner judges it again. A test keeps each entry live.
+const sha = (text: string) => createHash('sha256').update(text).digest('hex');
+type Exempt = { head: string; sha: string };
+const EXEMPT: Record<string, Exempt[]> = {
   'the operator reference': [
-    'Install the operator per namespace or add your own admission policy for workloads to close that path.',
-    'after a short stall window that rules out an in-progress deploy',
+    {
+      head: 'The operator instead performs its own existence check and',
+      sha: '5101043eac93247563c7313ae49db5ac0004fddff711a69b13f91ba8c351f152',
+    },
+    {
+      head: 'Install the operator per namespace or add your own admission policy',
+      sha: '44e5a9c854c034ce97182529027c80e16d60bece21cda5946018413bb5b887e7',
+    },
+  ],
+  'the user threat model page': [
+    {
+      head: 'That pulls only fixes already published on the same pinned Alpine',
+      sha: '6bfd5c8a268084c11d609846cb1d70557c5719f0a8d4a2a7f141592eec37884b',
+    },
   ],
   'the threat model': [
-    'The template Dockerfile therefore fails the build when the manifest is missing, which narrows the window to an image mutated after build; closing it fully needs the manifest bound to the image digest by a signature, which is the same owed work as the closure SBOM attestation above.',
-    'backendservice_image_pin_test.go (the comparison table: no pin, matching digest,',
+    {
+      head: 'The template Dockerfile therefore fails the build',
+      sha: 'e4e5fde448251d14c5a83737fd2d06bdf4247a7911727a03bed51ac32cc38d2c',
+    },
   ],
-  'ADR-0004': ['the guard forces a decision for any new top-level field'],
+  'ADR-0004': [
+    {
+      head: 'One specDigest over image + env + envFrom + volumes',
+      sha: '2ddac3643624effe53e5f0c603e00950fcf714842f1050d1e5505579ac61272e',
+    },
+  ],
 };
-const unexempt = (label: string, found: string[]) =>
-  found.filter((s) => !(EXEMPT[label] ?? []).some((frag) => s.includes(frag)));
+const isExempt = (label: string, sentence: string) =>
+  (EXEMPT[label] ?? []).some((e) => sentence.startsWith(e.head) && sha(sentence) === e.sha);
+const unexempt = (label: string, found: string[]) => found.filter((s) => !isExempt(label, s));
+const flaggedSentences = (text: string) => [...overclaims(text), ...specOverclaims(text)];
 
-describe('the exemptions are live', () => {
-  for (const [label, sentences] of Object.entries(EXEMPT)) {
-    const get = PLACES.find(([l]) => l === label)?.[1];
-    for (const sentence of sentences) {
-      it(`${label}: exempt fragment still present and still flagged by the scanner`, () => {
-        expect(get).toBeDefined();
-        expect(sentence.length).toBeGreaterThanOrEqual(40);
-        const text = get?.() ?? '';
-        const flagged = [...overclaims(text), ...specOverclaims(text)];
-        expect(flagged.some((f) => f.includes(sentence))).toBe(true);
+describe('the exemptions are live and exact', () => {
+  for (const [label, entries] of Object.entries(EXEMPT)) {
+    const get = PLACES.find(([l]) => l === label)?.[1] as (extra?: string) => string;
+    for (const entry of entries) {
+      const findIn = (text: string) =>
+        flatten(text).filter((f) => f.startsWith(entry.head) && sha(f) === entry.sha);
+      it(`${label}: "${entry.head}" is still on the page and still flagged by the scanner`, () => {
+        const flagged = flaggedSentences(get());
+        expect(findIn(get())).toHaveLength(1);
+        expect(flagged.filter((f) => isExempt(label, f)).length).toBeGreaterThan(0);
       });
+      for (const tail of [
+        ', so pinning fully protects the database Secret.',
+        ', and pinning makes the Secret safe.',
+        ' Pinning closes the exposure to the database Secret.',
+      ]) {
+        it(`${label}: "${entry.head}" plus an appended claim (${tail.trim()}) is judged again`, () => {
+          const sentence = findIn(get())[0];
+          expect(sentence).toBeDefined();
+          const edited = sentence.replace(/[.!?]?$/, tail);
+          expect(isExempt(label, edited)).toBe(false);
+          expect(flaggedSentences(edited).length).toBeGreaterThan(0);
+        });
+      }
     }
   }
 });
