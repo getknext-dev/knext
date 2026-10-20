@@ -148,7 +148,8 @@ function docsPinSection(): string {
  * UNLESS a negation or limiter (not, never, only, still, narrows, cannot) sits in
  * the SAME clause as the claim verb. A negation elsewhere in the sentence does
  * not rescue it: "Pinning protects the database Secret, and it is not slow" is a
- * claim. Clauses are cut at , ; : and at "but", "while", "although", "and".
+ * claim. Clauses are cut at , ; : — | and at "but", "while", "although" ("and" does not cut a
+ * clause: a limiter before "and" still rescues a claim after it).
  *
  * It is a net, not a proof: it catches the wordings this repo has had and a
  * corpus of paraphrases (below, every one asserted). The positive checks (the
@@ -179,11 +180,15 @@ function claimClauses(sentence: string): string[] {
 }
 
 function flatten(text: string): string[] {
-  const flat = text
-    .replace(/[*`]/g, '')
-    .replace(/fail(?:s|ed)? closed/gi, 'fail-shut')
-    .replace(/\s+/g, ' ');
-  return flat.split(/(?<=[.!?])\s+/);
+  // A blank line ends a sentence too: headings, table rows and code carry no full stop,
+  // and without this a claim appended after one is judged with its limiters.
+  return text.split(/\n\s*\n/).flatMap((para) =>
+    para
+      .replace(/[*`]/g, '')
+      .replace(/fail(?:s|ed)? closed/gi, 'fail-shut')
+      .replace(/\s+/g, ' ')
+      .split(/(?<=[.!?])\s+/),
+  );
 }
 
 const isSpecOnly = (s: string) => SPEC_PIN_TERM.test(s) && !IMAGE_PIN_TERM.test(s);
@@ -294,12 +299,6 @@ describe('the scanner sees the wording we removed and its paraphrases', () => {
   });
 });
 
-/** Lines of `text` that mention `needle` (a table row or a paragraph of a long page). */
-const linesWith = (text: string, needle: string) =>
-  text
-    .split('\n')
-    .filter((l) => l.includes(needle))
-    .join('\n');
 /** From the heading that starts with `start` to the next heading of the same or higher level. */
 function section(text: string, start: string): string {
   const i = text.indexOf(start);
@@ -310,48 +309,95 @@ function section(text: string, start: string): string {
   return text.slice(i, next < 0 ? undefined : i + start.length + next);
 }
 
-// Pages that talk about other kinds of pinning (base images, revisions) are
-// scanned only where the image pin is discussed, so the scan stays about the
-// claim and not about the word.
-const PLACES: [string, () => string][] = [
-  ['the zone-functions docs page', () => read('apps/docs/content/docs/zone-functions.mdx')],
-  ['the CLI reference', () => linesWith(read('apps/docs/content/docs/cli.mdx'), 'pin')],
-  [
-    'the operator reference',
-    () => linesWith(read('apps/docs/content/docs/operator.mdx'), '`backends`'),
-  ],
-  [
-    'the user threat model page',
-    () => linesWith(read('apps/docs/content/docs/threat-model.mdx'), 'backendservices'),
-  ],
-  ['the CRD field doc in the Go types', goFieldDoc],
-  ['the generated CRD description', crdFieldDoc],
-  ['the config.ts field doc', configFieldDoc],
-  ['the changeset', () => read('.changeset/zone-function-image-pin.md')],
-  ['the spec-pin changeset', () => read('.changeset/zone-function-spec-pin.md')],
-  ['the SpecDigest field doc in the Go types', goSpecFieldDoc],
-  ['the generated CRD specDigest description', crdSpecFieldDoc],
-  ['the config.ts specDigest field doc', configSpecFieldDoc],
-  ['the operator status message', statusMessage],
-  ['the spec-pin status message', specStatusMessage],
-  [
-    'the threat model',
-    () => section(read('docs/security/threat-model.md'), '### Zone-function binding'),
-  ],
-  [
-    'ADR-0004 Amendment 3',
-    () => section(read('docs/adr/0004-backend-service-crd.md'), '## Amendment 3'),
-  ],
-  [
-    'ADR-0004 Amendment 4',
-    () => section(read('docs/adr/0004-backend-service-crd.md'), '## Amendment 4'),
-  ],
+// Whole pages are scanned, case-insensitively: the scanner already needs a pin term,
+// a claim verb and a target in one sentence, so false positives stay low, and a claim
+// appended anywhere on a page is seen. `extra` is text appended to the page (the
+// mutation rows below use it to prove no region of a page is unscanned).
+const page =
+  (path: string) =>
+  (extra = '') => {
+    const text = read(path) + extra;
+    if (text.trim().length === 0) throw new Error(`empty page: ${path}`);
+    return text;
+  };
+const OVERCLAIM = '\n\nPinning closes the exposure to the database Secret.\n';
+const PLACES: [string, (extra?: string) => string][] = [
+  ['the zone-functions docs page', page('apps/docs/content/docs/zone-functions.mdx')],
+  ['the CLI reference', page('apps/docs/content/docs/cli.mdx')],
+  ['the operator reference', page('apps/docs/content/docs/operator.mdx')],
+  ['the user threat model page', page('apps/docs/content/docs/threat-model.mdx')],
+  ['the CRD field doc in the Go types', (e = '') => goFieldDoc() + e],
+  ['the generated CRD description', (e = '') => crdFieldDoc() + e],
+  ['the config.ts field doc', (e = '') => configFieldDoc() + e],
+  ['the changeset', page('.changeset/zone-function-image-pin.md')],
+  ['the spec-pin changeset', page('.changeset/zone-function-spec-pin.md')],
+  ['the SpecDigest field doc in the Go types', (e = '') => goSpecFieldDoc() + e],
+  ['the generated CRD specDigest description', (e = '') => crdSpecFieldDoc() + e],
+  ['the config.ts specDigest field doc', (e = '') => configSpecFieldDoc() + e],
+  ['the operator status message', (e = '') => statusMessage() + e],
+  ['the spec-pin status message', (e = '') => specStatusMessage() + e],
+  ['the threat model', page('docs/security/threat-model.md')],
+  ['ADR-0004', page('docs/adr/0004-backend-service-crd.md')],
 ];
+
+// Whole-page scanning meets sentences that use the word "pin" about something else
+// (a base-image tag, a build manifest). Each is exempt by its EXACT text, on its own
+// page only, and the exemption fails if the sentence is gone or no longer needs it,
+// so the list cannot rot into a blanket skip.
+const EXEMPT: Record<string, string[]> = {
+  'the operator reference': [
+    'Install the operator per namespace or add your own admission policy for workloads to close that path.',
+  ],
+  'the user threat model page': [
+    'That pulls only fixes already published on the same pinned Alpine branch — it cannot move the base to a different release.',
+  ],
+  'the threat model': [
+    'The template Dockerfile therefore fails the build when the manifest is missing, which narrows the window to an image mutated after build; closing it fully needs the manifest bound to the image digest by a signature, which is the same owed work as the closure SBOM attestation above.',
+  ],
+};
+const unexempt = (label: string, found: string[]) =>
+  found.filter((s) => !(EXEMPT[label] ?? []).includes(s));
+
+describe('the exemptions are live', () => {
+  for (const [label, sentences] of Object.entries(EXEMPT)) {
+    const get = PLACES.find(([l]) => l === label)?.[1];
+    for (const sentence of sentences) {
+      it(`${label}: exempt sentence still present and still flagged by the scanner`, () => {
+        expect(get).toBeDefined();
+        expect(overclaims(get?.() ?? '')).toContain(sentence);
+      });
+    }
+  }
+});
+
+describe('the scan covers every region of every page', () => {
+  const VARIANTS: [string, string][] = [
+    ['capitalised "Pinning"', OVERCLAIM],
+    ['lower-case "pinning"', '\n\npinning closes the exposure to the database secret.\n'],
+    ['upper-case', '\n\nPINNING CLOSES THE EXPOSURE TO THE DATABASE SECRET.\n'],
+    [
+      'a line without "backendservices" or "backends"',
+      '\n\nThe Pin keeps your tokens safe from it.\n',
+    ],
+  ];
+  for (const [label, get] of PLACES) {
+    for (const [vlabel, v] of VARIANTS) {
+      it(`${label}: an appended claim (${vlabel}) is flagged`, () => {
+        expect(unexempt(label, overclaims(get(v))).length).toBeGreaterThan(0);
+      });
+    }
+  }
+  it('unparseable or empty input fails rather than passes', () => {
+    expect(() => page('apps/docs/content/docs/does-not-exist.mdx')()).toThrow();
+    expect(() => section('# nothing here', '## Missing')).toThrow();
+    expect(() => section(read('docs/security/threat-model.md'), '### No such section')).toThrow();
+  });
+});
 
 describe('no place says the image pin closes the database-Secret exposure', () => {
   for (const [label, get] of PLACES) {
     it(label, () => {
-      expect(overclaims(get())).toEqual([]);
+      expect(unexempt(label, overclaims(get()))).toEqual([]);
     });
     it(`${label}: any claim about the spec pin is scoped to the BackendService route`, () => {
       expect(specOverclaims(get())).toEqual([]);
