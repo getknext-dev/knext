@@ -277,8 +277,8 @@ const MUTATIONS = [
     id: 'I2',
     claim: 'bun.lock integrity is no longer read for unresolved entries',
     subject: 'lib',
-    anchor: 'if (integrity) e.integrity = integrity;',
-    replacement: 'void integrity;',
+    anchor: '        e.integrity = integrity;',
+    replacement: '        void integrity;',
   },
   {
     id: 'I3',
@@ -319,8 +319,8 @@ const MUTATIONS = [
     id: 'H3',
     claim: 'the hashless classifier treats a tarball with no hash as safe',
     subject: 'lib',
-    anchor: '    !e.integrity &&\n    !PINNED_REPO_SPEC.test(e.version)',
-    replacement: `    e.integrity === 'never' /* ${M} */ &&\n    !PINNED_REPO_SPEC.test(e.version)`,
+    anchor: '    Boolean(e.unresolved) &&',
+    replacement: `    false /* ${M} */ &&`,
   },
   {
     id: 'H4',
