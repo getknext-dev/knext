@@ -827,7 +827,7 @@ bound, not only the image.
     digests (Amendment 3 Decision 6).
 11. **The residual is narrowed, exactly.** For a zone that sets `specDigest`, "`update` on
     `backendservices` equals read the zone's db-bind Secret" is **closed for the BackendService route**: a
-    writer of the object alone can no longer run their code with the Secret mounted, because anything
+    writer of the BackendService alone can no longer run their code with the Secret mounted, because anything
     they change is refused before it is rendered. What remains is stated in Consequences.
 
 ### Options considered
