@@ -196,9 +196,9 @@ const MUTATIONS = [
 // The canary: a real mutation of a real subject. If this stays green the harness
 // cannot see red and nothing below means anything.
 const CANARY = {
-  subject: resolve(REPO_ROOT, 'fileManager'),
-  anchor: resolve(REPO_ROOT, 'USER 65532:65532\n'),
-  replacement: resolve(REPO_ROOT, 'USER node\n'),
+  subject: 'fileManager',
+  anchor: 'USER 65532:65532\n',
+  replacement: 'USER node\n',
   options: DOCKER,
 };
 
