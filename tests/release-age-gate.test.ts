@@ -7,6 +7,7 @@ import {
   ageFailed,
   changedEntries,
   evaluateAges,
+  isHashlessUrlSource,
   loadExceptions,
   parseLockfile,
   publishTime,
@@ -345,9 +346,69 @@ describe('integrity: a source re-pinned to new bytes is a change', () => {
     expect((await run([e('sha512-OLD')], look, { exceptions: scoped })).unresolved).toEqual([]);
     // re-pinned to new bytes: the excepted hash no longer matches
     expect((await run([e('sha512-NEW')], look, { exceptions: scoped })).unresolved).toHaveLength(1);
-    // an entry with no hash at all is still excused by an exception that names none
+    // an entry with no hash at all is NOT excusable, even by an exception that names none
     const noHash = entry({ name: 't', version: base.version, unresolved: 'x' });
-    expect((await run([noHash], look, { exceptions: unscoped })).unresolved).toEqual([]);
+    const r = await run([noHash], look, { exceptions: unscoped });
+    expect(r.excepted).toEqual([]);
+    expect(r.hashless).toHaveLength(1);
+  });
+
+  describe('a hashless URL dependency is refused even with an exception', () => {
+    const tgz = 'https://example.com/t-1.0.0.tgz';
+    const exc = loadExceptions(
+      {
+        allow: [
+          {
+            ecosystem: 'npm',
+            package: 't',
+            version: tgz,
+            justification: 'vendored tarball with the fix, reviewed the unpacked contents',
+            added: '2026-10-01',
+            expires: '2026-12-01',
+          },
+        ],
+      },
+      TODAY,
+    );
+    const look = async () => NOW;
+
+    it('an excepted tarball with no integrity fails the gate, with an actionable message', async () => {
+      const e = entry({ name: 't', version: tgz, unresolved: 'not a registry version' });
+      const r = await run([e], look, { exceptions: exc });
+      expect(r.excepted).toEqual([]);
+      expect(r.hashless).toHaveLength(1);
+      expect(ageFailed(r)).toBe(true);
+      expect(renderAgeReport(r, MIN)).toMatch(/no integrity hash/);
+      expect(renderAgeReport(r, MIN)).toMatch(/exception cannot excuse/);
+    });
+
+    it('the same entry WITH an integrity hash and a matching exception is still allowed', async () => {
+      const scoped = loadExceptions(
+        { allow: [{ ...exc.active[0], integrity: 'sha512-OK' }] },
+        TODAY,
+      );
+      const e = entry({
+        name: 't',
+        version: tgz,
+        unresolved: 'not a registry version',
+        integrity: 'sha512-OK',
+      });
+      const r = await run([e], look, { exceptions: scoped });
+      expect(r.hashless).toEqual([]);
+      expect(r.excepted).toHaveLength(1);
+      expect(ageFailed(r)).toBe(false);
+    });
+
+    it('classifies URL sources; a repo spec pins its commit in the spec and is not hashless', () => {
+      const u = (version: string, over = {}) => entry({ unresolved: 'x', version, ...over });
+      expect(isHashlessUrlSource(u(tgz))).toBe(true);
+      expect(isHashlessUrlSource(u(tgz, { integrity: 'sha512-A' }))).toBe(false);
+      expect(isHashlessUrlSource(u('github:o/r#abc123'))).toBe(false);
+      expect(isHashlessUrlSource(u('git+ssh://x/y.git#abc123'))).toBe(false);
+      expect(isHashlessUrlSource(u('github:o/r'))).toBe(true); // unpinned: a branch moves
+      expect(isHashlessUrlSource(entry())).toBe(false); // resolved registry entry
+      expect(isHashlessUrlSource(u('x', { ecosystem: 'crates' }))).toBe(false);
+    });
   });
 
   it('loadExceptions accepts an integrity key and rejects a malformed one', () => {
@@ -670,6 +731,22 @@ describe('the committed tree resolves everything to the public registry', () => 
       }
     }
     expect(offenders).toEqual([]);
+  });
+
+  it('no tracked lockfile carries a URL/tarball dependency without an integrity hash', () => {
+    const offenders: string[] = [];
+    for (const f of tracked.filter((p) => /(^|\/)(bun\.lock|package-lock\.json)$/.test(p))) {
+      for (const e of parseLockfile(f, readFileSync(resolve(REPO_ROOT, f), 'utf8'))) {
+        if (isHashlessUrlSource(e)) offenders.push(`${f}: ${e.name}@${e.version}`);
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it('the hashless-URL rule flags a planted hashless tarball (non-vacuity of the rule)', () => {
+    const planted = '{"packages":{"t":["t@https://example.com/t-1.0.0.tgz",{}]}}';
+    const found = parseLockfile('bun.lock', planted, (t: string) => Bun.JSONC.parse(t) as any);
+    expect(found.filter((e: any) => isHashlessUrlSource(e))).toHaveLength(1);
   });
 
   it('the scan sees the tree (non-vacuity)', () => {

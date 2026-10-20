@@ -32,6 +32,8 @@
  *   I1-I5 integrity: the entry key, bun.lock/package-lock.json reading, and the
  *       exception scope all forget the content hash (a tarball re-pinned to new
  *       bytes under the same URL passes).
+ *   H1-H3 a hashless URL dependency is excusable by an exception / stops failing /
+ *       is not classified as hashless.
  *   W1  the workflow gets a soft-fail flag.
  *   W2  the workflow's token gains a write scope.
  *   W3  the workflow stops fetching full history.
@@ -246,8 +248,8 @@ const MUTATIONS = [
     id: 'U10',
     claim: 'an unresolved source no longer fails the check',
     subject: 'lib',
-    anchor: ' || r.unresolved.length > 0',
-    replacement: ` /* ${M} */`,
+    anchor: '  r.unresolved.length > 0 ||\n',
+    replacement: `  false /* ${M} */ ||\n`,
   },
   {
     id: 'U11',
@@ -298,6 +300,27 @@ const MUTATIONS = [
     subject: 'lib',
     anchor: 'if (e.integrity !== undefined && !/^[A-Za-z0-9+/=_.-]+$/.test(String(e.integrity))) {',
     replacement: `if (false /* ${M} */) {`,
+  },
+  {
+    id: 'H1',
+    claim: 'an exception can excuse a URL dependency that has no integrity hash',
+    subject: 'lib',
+    anchor: 'if (isHashlessUrlSource(e)) hashless.push(e);',
+    replacement: `if (false /* ${M} */) hashless.push(e);`,
+  },
+  {
+    id: 'H2',
+    claim: 'a hashless URL dependency stops failing the check',
+    subject: 'lib',
+    anchor: '  (r.hashless?.length ?? 0) > 0;',
+    replacement: `  false /* ${M} */;`,
+  },
+  {
+    id: 'H3',
+    claim: 'the hashless classifier treats a tarball with no hash as safe',
+    subject: 'lib',
+    anchor: '    !e.integrity &&\n    !PINNED_REPO_SPEC.test(e.version)',
+    replacement: `    e.integrity === 'never' /* ${M} */ &&\n    !PINNED_REPO_SPEC.test(e.version)`,
   },
   {
     id: 'W1',
