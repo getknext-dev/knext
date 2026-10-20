@@ -456,6 +456,11 @@ phase_deploy() {
   fi
   k create namespace "${NS}"
   k label namespace "${NS}" e2e.kn-next.dev/z7-owned=true
+  # The namespace ENFORCES the Pod Security `restricted` level, so the zone and
+  # both functions are admitted only if every pod the operator renders (and the
+  # queue-proxy Knative adds) meets it. Set before the first apply: a Revision
+  # whose pod is rejected never goes Ready, which fails the waits below.
+  k label namespace "${NS}" pod-security.kubernetes.io/enforce=restricted
 
   local go_img zone_img rust_img backends rust_bs=''
   go_img="$(image_ref function-go)"
@@ -591,6 +596,29 @@ refusal_matrix() {
     "${common[@]}" --rpc get --id "evil-${label}" --auth signer --key-dir "${keydir}"
 }
 
+# assert_restricted_pod <service>: the namespace enforces Pod Security
+# `restricted` (so admission itself proved the pod meets it), and the serving
+# container carries the four fields the operator renders. Asserted by name so a
+# dropped namespace label, or a field the admission plugin stops requiring, cannot
+# turn the admission proof into a silent no-op.
+assert_restricted_pod() {
+  local svc=$1 pod
+  [ "$(k get namespace "${NS}" -o json | jq -r '.metadata.labels["pod-security.kubernetes.io/enforce"] // ""')" = restricted ] \
+    || fail "namespace ${NS} does not enforce Pod Security restricted: the lane would prove nothing about admission"
+  pod="$(pod_json "${svc}")"
+  jq -e '
+    [.spec.containers[] | select(.name != "queue-proxy")] as $app
+    | ($app | length >= 1)
+    and ($app | all(
+        .securityContext.allowPrivilegeEscalation == false
+        and (.securityContext.capabilities.drop == ["ALL"])
+        and .securityContext.seccompProfile.type == "RuntimeDefault"
+        and .securityContext.runAsNonRoot == true))' \
+    <<<"${pod}" >/dev/null \
+    || fail "${svc}: the serving container lacks allowPrivilegeEscalation=false, capabilities.drop=[ALL], seccompProfile=RuntimeDefault or runAsNonRoot=true"
+  ok "${svc}: admitted under Pod Security restricted, and its container carries the four restricted fields"
+}
+
 assert_function_pod_spec() { # <service>
   local pod
   pod="$(pod_json "$1")"
@@ -645,6 +673,11 @@ phase_verify() {
     || fail "the published JWKS carries a private member"
   [ "$(zone_condition ZoneSigningKey)" = "True/KeyActive" ] || fail "ZoneSigningKey is $(zone_condition ZoneSigningKey), want True/KeyActive"
   ok "Secret ${KEY_SECRET} and ConfigMap ${JWKS_CM} exist, are owned by the NextApp and agree on kid ${kid}"
+
+  log "verify: every pod is admitted under Pod Security restricted"
+  assert_restricted_pod "${ZONE}"
+  assert_restricted_pod "${GO_FN}"
+  if [ "${WITH_RUST}" = 1 ]; then assert_restricted_pod "${RUST_FN}"; fi
 
   log "verify: pod specs (the function holds no private key; the JWKS is a directory volume)"
   assert_function_pod_spec "${GO_FN}"

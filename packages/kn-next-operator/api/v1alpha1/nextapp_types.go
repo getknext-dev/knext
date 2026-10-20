@@ -530,6 +530,26 @@ type SecuritySpec struct {
 	// ReadOnlyRootFilesystem is false.
 	// +optional
 	WriteFree *bool `json:"writeFree,omitempty"`
+
+	// RunAsNonRoot controls `runAsNonRoot: true` on the rendered APP
+	// (serving) container. The rest of the Pod Security `restricted`
+	// profile the operator renders (no privilege escalation, every Linux
+	// capability dropped, the runtime's default seccomp profile) is not
+	// optional and has no field: none of it depends on how the image was
+	// built.
+	//
+	// DEFAULT (nil, or true): `runAsNonRoot: true` is rendered, and the
+	// kubelet refuses to start a container whose image would run as root
+	// (uid 0) or names its user rather than a number (`USER node` — use
+	// `USER 65532:65532`). This is what lets the app be admitted in a
+	// namespace that enforces the `restricted` Pod Security level.
+	//
+	// false => `runAsNonRoot` is omitted and the image's own user applies.
+	// Use it only for an image that must run as root and cannot be rebuilt.
+	// A namespace that enforces `restricted` rejects such a pod regardless
+	// of this field; the opt-out is for clusters that do not enforce it.
+	// +optional
+	RunAsNonRoot *bool `json:"runAsNonRoot,omitempty"`
 }
 
 // VisibilityClusterLocal is the NextAppSpec.Networking.Visibility value that

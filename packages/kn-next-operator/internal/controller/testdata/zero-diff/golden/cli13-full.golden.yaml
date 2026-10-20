@@ -117,7 +117,14 @@ spec:
             cpu: 500m
             memory: 512Mi
         securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
           readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          seccompProfile:
+            type: RuntimeDefault
         volumeMounts:
         - mountPath: /app/.next/standalone/.next/cache
           name: knext-writable

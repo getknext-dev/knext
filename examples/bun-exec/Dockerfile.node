@@ -60,6 +60,9 @@ ENV PORT=3000
 ENV HOSTNAME=0.0.0.0
 EXPOSE 3000
 
-USER node
+# Numeric, not `node`: the operator renders runAsNonRoot, and the kubelet
+# cannot verify a named user is non-root, so it refuses to start the container.
+# 1000:1000 is the `node` user this base image ships.
+USER 1000:1000
 
 CMD ["node", "server.js"]

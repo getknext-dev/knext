@@ -10,8 +10,10 @@ FROM node:24-alpine@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b533
 ENV NODE_ENV=production
 WORKDIR /app
 # --chmod: the build context is written by a script that runs under umask 077, and
-# the app runs as `node`, which must be able to read its own bundle.
+# the app runs as uid 1000 (`node`), which must be able to read its own bundle.
 COPY --chmod=0444 zone-caller.mjs ./
-USER node
+# Numeric, not `node`: the operator renders runAsNonRoot, and the kubelet cannot
+# verify a named user is non-root. 1000:1000 is the `node` user of this base image.
+USER 1000:1000
 EXPOSE 3000
 ENTRYPOINT ["node", "/app/zone-caller.mjs"]
