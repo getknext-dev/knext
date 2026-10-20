@@ -179,7 +179,9 @@ const ABSOLUTE =
   /\b(?:any|every|all|always|never|nobody|no one|entirely|completely|fully|anywhere|everywhere|whatever|regardless|no matter)\b/i;
 /** A clause that states the mechanism ("is refused") bounds its own "whatever". */
 const MECHANISM = /\b(?:refus\w+|mismatch\w*)\b/i;
-const absoluteIn = (clause: string) => ABSOLUTE.test(clause) && !MECHANISM.test(clause);
+/** The mechanism bounds an absolute only in a clause that states the mechanism and nothing else: a clause that also claims protection stays absolute. */
+const absoluteIn = (clause: string) =>
+  ABSOLUTE.test(clause) && !(MECHANISM.test(clause) && !CLAIM_VERB.test(clause));
 
 /** A sentence about the SPEC pin. The image pin never closes anything, so a sentence that also names it is not exempt. */
 const SPEC_PIN_TERM =
@@ -187,8 +189,7 @@ const SPEC_PIN_TERM =
 const IMAGE_PIN_TERM =
   /\bimage[- ]pin\b|\bimage-only\b|\bpins? (?:only )?the image\b|\bpinn(?:ed|ing) (?:the )?image\b|\bpinned image\b|\b(?:an|the) `?image`? pin\b/i;
 /** What a protection claim about the spec pin must be scoped to: the BackendService route. */
-const SPEC_SCOPE =
-  /\b(?:backendservices?|route|refus\w+|mismatch\w*|can no longer make|cannot make)\b/i;
+const SPEC_SCOPE = /\b(?:backendservices?|route|can no longer make|cannot make)\b/i;
 
 const TO_CLOSE =
   /\b(?:set|enable|use|add|put|apply|configure)\b[^.]*\bto (?:close|fix|solve|eliminate|prevent|protect against) (?:it|that|this|the (?:exposure|risk|gap|problem))\b/i;
@@ -435,6 +436,10 @@ describe('the scanner sees the wording we removed and its paraphrases', () => {
       'The spec pin closes the BackendService route and the Secret is safe everywhere.',
       'specDigest closes the BackendService route to the Secret, and the Secret is safe.',
       'specDigest closes the route to the Secret, whatever the writer does.',
+      // A stray "refused" is neither a scope nor a bound on an unrelated absolute.
+      'The spec pin makes the Secret safe whatever the writer does when a change is refused.',
+      'specDigest makes the Secret safe everywhere because every change is refused.',
+      'specDigest makes the Secret safe because a change is refused.',
       'specDigest closes the route to the Secret regardless of what the writer does.',
       'specDigest closes the route to the Secret, no matter what the writer changes.',
       // A bare "writes"/"writers"/"update" is not a scope: it names no route.
