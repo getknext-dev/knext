@@ -308,6 +308,7 @@ describe('the scanner sees the wording we removed and its paraphrases', () => {
     // Verbs of protection the first list missed.
     'Pinning makes the database Secret immutable.',
     'The pin is tamper-proof, so it shields the database Secret.',
+    'A pinned image is tamper-proof for the database Secret.',
     'Pinning locks down the exposure.',
     'The pin guards the database Secret.',
     'The pin defends the database Secret.',
@@ -336,6 +337,8 @@ describe('the scanner sees the wording we removed and its paraphrases', () => {
     '- Pinning closes the exposure\n- This is not slow\n- Cheap',
     '1. Pinning closes the exposure\n2. It is not slow',
     '* Pinning closes the exposure\n* never mind',
+    '- Never\n- Pinning closes the exposure',
+    '1. Not\n2. Pinning closes the exposure',
   ];
   for (const sentence of [...OLD, ...PARAPHRASES, ...ROUND2]) {
     it(`flags: ${sentence}`, () => {
