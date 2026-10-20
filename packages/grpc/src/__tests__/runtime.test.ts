@@ -131,6 +131,23 @@ describe('generated client runtime — retry policy', () => {
     expect(seen.calls.getOrder).toBeUndefined();
   });
 
+  it('a stream is never retried, so it takes its token as a string, not a source', () => {
+    const { deps } = fakeFunction(0);
+    const client = defineFunctionClient(DEFINITION, deps);
+    expect(() => client.watchOrders({}, { token: async () => 'tok' })).toThrow(
+      'a stream takes its identity token as a string',
+    );
+  });
+
+  it('a stream with a string token sends it', async () => {
+    const { deps, seen } = fakeFunction(0);
+    const client = defineFunctionClient(DEFINITION, deps);
+    for await (const _ of client.watchOrders({}, { token: 'stream-tok' })) {
+      // drain
+    }
+    expect(seen.headers.map((h) => h.get('authorization'))).toEqual(['Bearer stream-tok']);
+  });
+
   it('a token source returning an unusable token is refused before anything is sent', async () => {
     const { deps, seen } = fakeFunction(0);
     const client = defineFunctionClient(DEFINITION, deps);
