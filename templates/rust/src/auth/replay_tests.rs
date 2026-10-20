@@ -132,3 +132,21 @@ fn capacity_defaults() {
     assert_eq!(SeenSet::new(0).capacity(), DEFAULT_SEEN_CAPACITY);
     assert_eq!(SeenSet::new(7).capacity(), 7);
 }
+
+/// A panic while the set is being updated leaves it untrustworthy: from then
+/// on every new token is refused (fail closed), not admitted unchecked.
+#[test]
+fn a_poisoned_set_refuses_every_token() {
+    let set = SeenSet::new(10);
+    let iss = iss();
+    set.admit(&iss, &jti(1), 2000, 1000).unwrap();
+    set.poison();
+    assert_eq!(
+        set.admit(&iss, &jti(2), 2000, 1000),
+        Err(AuthError::SeenSetFull)
+    );
+    assert_eq!(
+        set.admit(&iss, &jti(1), 2000, 1000),
+        Err(AuthError::SeenSetFull)
+    );
+}

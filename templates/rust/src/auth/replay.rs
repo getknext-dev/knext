@@ -100,6 +100,19 @@ impl SeenSet {
         Ok(())
     }
 
+    /// Poisons the lock, as a panic mid-update would.
+    #[cfg(test)]
+    pub(super) fn poison(&self) {
+        std::thread::scope(|scope| {
+            let _ = scope
+                .spawn(|| {
+                    let _held = self.0.lock().unwrap();
+                    panic!("poisoning the replay set on purpose");
+                })
+                .join();
+        });
+    }
+
     #[cfg(test)]
     pub(super) fn len(&self) -> usize {
         self.0.lock().unwrap().entries.len()

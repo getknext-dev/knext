@@ -69,3 +69,39 @@ async fn production_wiring_verifies_zone_tokens() {
         running.stop().await.unwrap();
     }
 }
+
+/// `Config::seen_capacity` reaches the token check: with room for one token,
+/// the first valid token is served and a second, different valid token is
+/// refused because the replay set is full (not because anything is wrong with
+/// it).
+#[tokio::test]
+async fn seen_capacity_reaches_the_token_check() {
+    let v = crate::testvectors::load();
+    let c = v.case("valid-user");
+    let path = crate::testvectors::temp_dir("wiring-capacity").join("jwks.json");
+    v.write_jwks(&path, &c.jwks);
+    let running = start(new(Config {
+        jwks_path: path,
+        issuer: v.verifier.issuer.clone(),
+        audience: v.verifier.audience.clone(),
+        clock: crate::testvectors::TestClock::at(c.now).clock(),
+        seen_capacity: 1,
+        ..Config::default()
+    }))
+    .await;
+    let wire = MATRIX[0];
+    example(&running, wire, Some(&v.token("valid-user")))
+        .put_item(put("a", "b"))
+        .await
+        .expect("the first token");
+    let err = example(&running, wire, Some(&v.token("valid-user-second-jti")))
+        .put_item(put("a", "b"))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.code,
+        ErrorCode::Unauthenticated,
+        "a second token with room for one"
+    );
+    running.stop().await.unwrap();
+}
