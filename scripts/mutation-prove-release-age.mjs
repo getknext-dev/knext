@@ -370,7 +370,7 @@ const MUTATIONS = [
     claim: 'the report calls every hashless entry a URL dependency again',
     subject: 'lib',
     anchor: '} unresolved dependenc${',
-    replacement: `} URL dependenc${/* ${M} */ ''}${`,
+    replacement: `} URL dependenc\${/* ${M} */ ''}\${`,
   },
   {
     id: 'W1',
