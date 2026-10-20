@@ -270,6 +270,23 @@ jobs:
           rustup toolchain install
           rustc -V
 
+      # `mutation-prove-2479-go-scaffold.mjs` grades the Go zone-function scaffold,
+      # which runs REAL generation over `templates/go`, so the Go on PATH must
+      # satisfy that module's go.mod (`setup-go` pins GOTOOLCHAIN=local; run
+      # 39029215555 exited 1 within seconds with "requires go >= ..." when only
+      # the operator's was installed). Install ORDER matters: setup-go prepends to
+      # PATH, so the LAST step wins and must be the newest go.mod a prover builds
+      # (asserted by tests/mutation-prover-lane-sharding.test.ts). Both modules sit
+      # at go 1.26.9, a tie the guard resolves to the operator, so the operator's
+      # install follows this one. A newer Go builds either module (a go.mod names
+      # a MINIMUM). Gated by FILE PRESENCE like the Rust toolchains.
+      - name: Setup Go for the Go zone template (templates/go/go.mod)
+        if: ${{ hashFiles('templates/go/go.mod') != '' }}
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: templates/go/go.mod
+          cache-dependency-path: templates/go/go.sum
+
       # `mutation-prove-2321-go-metric-contract.mjs` (#2321) grades
       # `go test ./internal/metriccontract/` in the operator module, so the lane
       # needs the Go toolchain the operator's go.mod names (read from the file,
@@ -280,22 +297,6 @@ jobs:
         with:
           go-version-file: packages/kn-next-operator/go.mod
           cache-dependency-path: packages/kn-next-operator/go.sum
-
-      # `mutation-prove-2479-go-scaffold.mjs` grades the Go zone-function scaffold,
-      # which runs REAL generation over `templates/go`. That module requires a
-      # NEWER Go than the operator's (go 1.26.9 vs 1.25.3), and `setup-go` pins
-      # GOTOOLCHAIN=local, so with only the operator's toolchain the grading spec
-      # exited 1 within seconds ("requires go >= ..."), found by the first full run
-      # that reached it (run 39029215555). A newer Go builds the operator module
-      # fine (a go.mod names a MINIMUM), so this second install, which wins on PATH,
-      # serves both. Gated by FILE PRESENCE like the Rust toolchains: a ref without
-      # `templates/go` keeps the operator's.
-      - name: Setup Go for the Go zone template (templates/go/go.mod)
-        if: ${{ hashFiles('templates/go/go.mod') != '' }}
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: templates/go/go.mod
-          cache-dependency-path: templates/go/go.sum
 
       # `mutation-prove-2052-backendservice.mjs` (#2052) grades envtest specs (a
       # real kube-apiserver + etcd) as well as plain `go test` targets, so the
