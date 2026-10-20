@@ -121,6 +121,12 @@ function npmFromId(id, registry) {
   return { ecosystem: 'npm', name, version: spec };
 }
 
+/** A real subresource-integrity value, as bun and npm write it. */
+const SRI = /^sha(?:256|384|512)-[A-Za-z0-9+/=]+$/;
+
+/** A repository source (`github:o/r#…`, `git+ssh://…`). */
+const REPO_SPEC = /^(?:github:|gitlab:|bitbucket:|git(?:\+[a-z]+)?:\/\/|git\+)/;
+
 /** Packages in a `bun.lock` (JSONC). */
 function parseBunLock(text, parseJsoncFn) {
   const lock = parseJsoncFn(text);
@@ -138,7 +144,11 @@ function parseBunLock(text, parseJsoncFn) {
         .slice(2)
         .filter((x) => typeof x === 'string')
         .at(-1);
-      if (integrity) e.integrity = integrity;
+      // Only a repository spec may carry bun's own non-SRI id (`o-r-abc`) as its identity;
+      // for any other source a trailing string that is not a real hash is not a hash.
+      if (integrity && (SRI.test(integrity) || REPO_SPEC.test(e.version))) {
+        e.integrity = integrity;
+      }
     }
     out.push(e);
   }
@@ -156,7 +166,8 @@ function parsePackageLock(text) {
     if (marker < 0 || e.inBundle) continue;
     const name = e.name ?? key.slice(marker + 'node_modules/'.length);
     const version = typeof e.version === 'string' ? e.version : '(none)';
-    const integrity = typeof e.integrity === 'string' ? { integrity: e.integrity } : {};
+    const integrity =
+      typeof e.integrity === 'string' && SRI.test(e.integrity) ? { integrity: e.integrity } : {};
     if (typeof e.resolved !== 'string') {
       out.push({ ecosystem: 'npm', name, version, unresolved: 'no resolved URL', ...integrity });
     } else if (e.resolved.startsWith('file:')) {
@@ -309,7 +320,11 @@ export function changedEntries(head, base) {
 }
 
 /** A repository source that pins a commit in its own spec (`github:o/r#sha`, `git+ssh://…#sha`). */
-const PINNED_REPO_SPEC = /^(?:github:|gitlab:|bitbucket:|git(?:\+[a-z]+)?:\/\/|git\+).*#.+$/;
+const PINNED_REPO_SPEC =
+  /^(?:github:|gitlab:|bitbucket:|git(?:\+[a-z]+)?:\/\/|git\+).*#(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+/** `github:` deps resolve to a codeload tarball addressed by the full commit sha. */
+const COMMIT_TARBALL =
+  /^https:\/\/codeload\.github\.com\/[^/]+\/[^/]+\/tar\.gz\/(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
 /**
  * An npm dependency fetched from a URL (tarball, other registry, no resolved URL) whose
@@ -324,8 +339,9 @@ export function isHashlessUrlSource(e) {
   return (
     e.ecosystem === 'npm' &&
     Boolean(e.unresolved) &&
-    !e.integrity &&
-    !PINNED_REPO_SPEC.test(e.version)
+    !SRI.test(e.integrity ?? '') &&
+    !(REPO_SPEC.test(e.version) && PINNED_REPO_SPEC.test(e.version)) &&
+    !COMMIT_TARBALL.test(e.version)
   );
 }
 
@@ -554,7 +570,7 @@ export function renderAgeReport(r, minSeconds) {
   }
   if (r.hashless?.length) {
     out.push(
-      `FAIL: ${r.hashless.length} URL dependenc${r.hashless.length === 1 ? 'y has' : 'ies have'} no integrity hash, so nothing verifies the bytes behind the URL and a security/release-age-exceptions.json exception cannot excuse it:`,
+      `FAIL: ${r.hashless.length} unresolved dependenc${r.hashless.length === 1 ? 'y has' : 'ies have'} no valid integrity hash (sha256/384/512) and no full-commit pin, so nothing verifies the bytes behind the source and a security/release-age-exceptions.json exception cannot excuse it:`,
       ...r.hashless.map((e) => `${lineOf(e)}  [${e.unresolved}]`),
       'Re-lock with bun (it writes a sha512 for tarball dependencies), pin a git source to a commit, or use a registry release. Never hand-write the entry.',
     );

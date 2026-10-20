@@ -378,7 +378,7 @@ describe('integrity: a source re-pinned to new bytes is a change', () => {
       expect(r.excepted).toEqual([]);
       expect(r.hashless).toHaveLength(1);
       expect(ageFailed(r)).toBe(true);
-      expect(renderAgeReport(r, MIN)).toMatch(/no integrity hash/);
+      expect(renderAgeReport(r, MIN)).toMatch(/no valid integrity hash/);
       expect(renderAgeReport(r, MIN)).toMatch(/exception cannot excuse/);
     });
 
@@ -399,12 +399,86 @@ describe('integrity: a source re-pinned to new bytes is a change', () => {
       expect(ageFailed(r)).toBe(false);
     });
 
+    it('only a full commit sha pins a repo spec: branch, tag and range fragments are hashless', () => {
+      const u = (version: string) => entry({ unresolved: 'x', version });
+      const sha = 'a'.repeat(40);
+      for (const v of [
+        'github:o/r#main',
+        'git+ssh://x/y.git#main',
+        'github:o/r#semver:^1',
+        'github:o/r#abc123',
+        'github:o/r#',
+        `github:o/r#${'a'.repeat(39)}`,
+      ]) {
+        expect(isHashlessUrlSource(u(v))).toBe(true);
+      }
+      expect(isHashlessUrlSource(u(`github:o/r#${sha}`))).toBe(false);
+      expect(isHashlessUrlSource(u(`git+ssh://x/y.git#${'b'.repeat(64)}`))).toBe(false);
+    });
+
+    it('a junk integrity value does not count as a hash', () => {
+      const u = (integrity: string) =>
+        entry({ unresolved: 'x', version: 'https://example.com/t.tgz', integrity });
+      for (const bad of ['junk', '   ', 'sha1-AAAA', 'sha512-', 'o-r-abc']) {
+        expect(isHashlessUrlSource(u(bad))).toBe(true);
+      }
+      for (const ok of ['sha256-AAAA', 'sha384-AB+/==', 'sha512-AbC123+/=']) {
+        expect(isHashlessUrlSource(u(ok))).toBe(false);
+      }
+    });
+
+    it('a github: dependency resolved to a codeload tarball at a full commit is commit-addressed', () => {
+      const sha = 'c'.repeat(40);
+      const u = (v: string) => entry({ unresolved: 'x', version: v });
+      expect(isHashlessUrlSource(u(`https://codeload.github.com/o/r/tar.gz/${sha}`))).toBe(false);
+      expect(isHashlessUrlSource(u('https://codeload.github.com/o/r/tar.gz/main'))).toBe(true);
+      expect(isHashlessUrlSource(u(`https://evil.example.com/o/r/tar.gz/${sha}`))).toBe(true);
+    });
+
+    it('bun.lock: a git-style trailing id on a tarball entry is not an integrity hash', () => {
+      const text = '{"packages":{"t":["t@https://example.com/t-1.0.0.tgz",{},"o-r-abc"]}}';
+      const [e] = parseLockfile('bun.lock', text, (t: string) => Bun.JSONC.parse(t) as any);
+      expect(e.integrity).toBeUndefined();
+      expect(isHashlessUrlSource(e)).toBe(true);
+    });
+
+    it('package-lock.json: a junk integrity on a non-registry source is not a hash', () => {
+      const lock = (integrity: string) =>
+        JSON.stringify({
+          packages: {
+            'node_modules/t': {
+              version: '1.0.0',
+              resolved: 'https://example.com/t.tgz',
+              integrity,
+            },
+          },
+        });
+      const [bad] = parseLockfile('package-lock.json', lock('junk'));
+      expect(isHashlessUrlSource(bad)).toBe(true);
+      const [good] = parseLockfile('package-lock.json', lock('sha512-AbC='));
+      expect(isHashlessUrlSource(good)).toBe(false);
+    });
+
+    it('the report says "no resolved URL" entries are not URL dependencies', async () => {
+      const e = entry({ unresolved: 'no resolved URL' });
+      const r = await run([e], look, { exceptions: exc });
+      expect(r.hashless).toHaveLength(1);
+      const text = renderAgeReport(r, MIN);
+      expect(text).not.toMatch(/URL dependenc/);
+      expect(text).toMatch(/no valid integrity hash/);
+      expect(text).toMatch(/\[no resolved URL\]/);
+    });
+
     it('classifies URL sources; a repo spec pins its commit in the spec and is not hashless', () => {
       const u = (version: string, over = {}) => entry({ unresolved: 'x', version, ...over });
       expect(isHashlessUrlSource(u(tgz))).toBe(true);
       expect(isHashlessUrlSource(u(tgz, { integrity: 'sha512-A' }))).toBe(false);
-      expect(isHashlessUrlSource(u('github:o/r#abc123'))).toBe(false);
-      expect(isHashlessUrlSource(u('git+ssh://x/y.git#abc123'))).toBe(false);
+      expect(isHashlessUrlSource(u('github:o/r#aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'))).toBe(
+        false,
+      );
+      expect(
+        isHashlessUrlSource(u('git+ssh://x/y.git#aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')),
+      ).toBe(false);
       expect(isHashlessUrlSource(u('github:o/r'))).toBe(true); // unpinned: a branch moves
       expect(isHashlessUrlSource(entry())).toBe(false); // resolved registry entry
       expect(isHashlessUrlSource(u('x', { ecosystem: 'crates' }))).toBe(false);
@@ -542,7 +616,12 @@ describe('evaluateAges', () => {
   it('an UNRESOLVED entry fails without a publish time ever being looked up', async () => {
     let calls = 0;
     const r = await run(
-      [entry({ unresolved: 'not a registry version', version: 'github:o/r#abc' })],
+      [
+        entry({
+          unresolved: 'not a registry version',
+          version: 'github:o/r#aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        }),
+      ],
       async () => {
         calls += 1;
         return NOW - 30 * DAY;
@@ -557,7 +636,13 @@ describe('evaluateAges', () => {
   });
   it('first-party excludes do NOT excuse an unresolved source', async () => {
     const r = await run(
-      [entry({ name: '@getknext/core', unresolved: 'x', version: 'github:o/r#abc' })],
+      [
+        entry({
+          name: '@getknext/core',
+          unresolved: 'x',
+          version: 'github:o/r#aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        }),
+      ],
       async () => NOW,
       { excludes: ['@getknext/core'] },
     );
@@ -570,7 +655,7 @@ describe('evaluateAges', () => {
           {
             ecosystem: 'npm',
             package: 'g',
-            version: 'github:o/r#abc',
+            version: 'github:o/r#aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
             justification: 'pinned fork carrying the fix, reviewed the diff at that commit',
             added: '2026-10-01',
             expires: '2026-12-01',
@@ -581,10 +666,18 @@ describe('evaluateAges', () => {
     );
     const mk = (version: string) => entry({ name: 'g', unresolved: 'x', version });
     expect(
-      (await run([mk('github:o/r#abc')], async () => NOW, { exceptions: exc })).unresolved,
+      (
+        await run([mk('github:o/r#aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')], async () => NOW, {
+          exceptions: exc,
+        })
+      ).unresolved,
     ).toEqual([]);
     expect(
-      (await run([mk('github:o/r#def')], async () => NOW, { exceptions: exc })).unresolved,
+      (
+        await run([mk('github:o/r#dddddddddddddddddddddddddddddddddddddddd')], async () => NOW, {
+          exceptions: exc,
+        })
+      ).unresolved,
     ).toHaveLength(1);
   });
   it('an exception allows exactly one ecosystem, package and version', async () => {
