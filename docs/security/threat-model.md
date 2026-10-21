@@ -488,11 +488,17 @@ templates both do this (shared vectors, mutation-proved). **What this does NOT c
   captured token carries an attacker-chosen body. If the attacker's copy reaches the function before the
   zone's own call, the attacker's request is the one served and the zone's own call is the one refused.
   The jti makes the second arrival fail; it does not make the first one trustworthy.
-- *The set can fill.* It holds 65,536 tokens by default (about 1,000 verified calls a second on one pod;
-  measured at 152-154 bytes per entry, 9.5-9.7 MiB at the cap). When it is full the function refuses
-  **new** tokens (and logs one warning every 10 s) rather than forgetting a seen one, so a flood of
-  valid tokens, or a pod busier than the cap, turns into refused calls. Raise `SeenCapacity` /
-  `seen_capacity` in the scaffolded `main` if a pod really serves more.
+- *The set can fill, and the autoscaler does not help.* It holds 65,536 tokens by default (about
+  1,000 verified calls a second on one pod; measured at 152 bytes per entry in Go and 154 in Rust,
+  9.5 and 9.7 MiB at the cap). When it is full the function refuses **new** tokens with Connect
+  `ResourceExhausted` (HTTP 429), not `unauthenticated`, because the caller did nothing wrong and may
+  retry; a replay of a token already seen stays `unauthenticated`. It logs one warning every 10 s
+  naming the capacity in effect, and never forgets a seen token to make room. These refusals are
+  answered immediately, so they add no in-flight concurrency: the Knative autoscaler gets no signal from
+  them and will not add pods. A flood of valid tokens, or a pod busier than about 1,000 calls a second,
+  therefore turns into refused calls until entries expire (at most 65 s) or the cap is raised
+  (`SeenCapacity` / `seen_capacity` in the scaffolded `main`). This is a deliberate fail-closed
+  availability cost.
 - *Rollout.* A function with this check refuses tokens that carry no `jti` (fail closed, no deprecation
   window: v2 is unreleased and nothing deployed signs without one; jev 0.86 for immediate refusal over a
   deprecation step). Functions ignore claims they do not know, so an older function accepts a token that

@@ -395,8 +395,10 @@ the function that already served the original. It is a limit, not a seal:
   minute). Make writes idempotent.
 - The token does not cover the request body, so a copy that arrives before the original is served
   with whatever body its sender chose.
-- A function that is busier than its memory (65,536 tokens by default) refuses new tokens instead of
-  forgetting one it has seen, and logs a warning.
+- A function that is busier than its memory (65,536 tokens by default, about 1,000 verified calls a
+  second per pod) refuses new tokens with `ResourceExhausted` instead of forgetting one it has seen,
+  and logs a warning. A replay of a token already seen stays `unauthenticated`. The refusals are
+  answered at once, so the autoscaler gets no signal from them and does not add pods by itself.
 - A function refuses a token with no id, so upgrade the zone first, then its functions (the reverse of the usual order for contract versions). The zone
   asks for a new token on every attempt of a retried read.
 
