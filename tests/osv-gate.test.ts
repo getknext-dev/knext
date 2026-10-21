@@ -13,6 +13,7 @@ import {
   pickBase,
   selectLockfiles,
 } from '../scripts/lib/osv-gate.mjs';
+import { parseLockfile } from '../scripts/lib/release-age.mjs';
 
 /**
  * GUARD: a malicious dependency, or a NEW high-severity vulnerability, cannot
@@ -361,7 +362,64 @@ describe('the committed allowlist', () => {
     const json = JSON.parse(
       readFileSync(resolve(REPO_ROOT, 'security/osv-allowlist.json'), 'utf8'),
     );
-    expect(() => loadAllowlist(json, TODAY)).not.toThrow();
+    // The real date, not the fixed TODAY the policy tests use: an entry is dated when it
+    // is written, and a fixed past date would call every later entry "added in the future".
+    expect(() => loadAllowlist(json, new Date().toISOString().slice(0, 10))).not.toThrow();
+  });
+
+  // An entry must keep naming something that is really in its lockfile. Without this a
+  // bump leaves a dead entry behind that silently pre-approves the old version coming
+  // back, and the allowlist grows into a list nobody can audit (#2542).
+  // The root `package-lock.json` is the nightly re-scan's scratch install of the published
+  // packages, not a tracked file (see the schema note in the allowlist itself).
+  const SCRATCH_LOCKFILES = new Set(['package-lock.json']);
+  const committed = JSON.parse(
+    readFileSync(resolve(REPO_ROOT, 'security/osv-allowlist.json'), 'utf8'),
+  ) as { allow: Array<{ id: string; package: string; version: string; lockfile: string }> };
+
+  it('every entry names a package@version that is present in its tracked lockfile', () => {
+    const dead: string[] = [];
+    for (const e of committed.allow) {
+      if (SCRATCH_LOCKFILES.has(e.lockfile)) continue;
+      let text: string;
+      try {
+        text = readFileSync(resolve(REPO_ROOT, e.lockfile), 'utf8');
+      } catch {
+        dead.push(`${e.id} ${e.package}@${e.version}: ${e.lockfile} does not exist`);
+        continue;
+      }
+      const present = parseLockfile(e.lockfile, text).some(
+        (p: { name: string; version: string }) =>
+          p.name === e.package && p.version.replace(/^v/, '') === e.version.replace(/^v/, ''),
+      );
+      if (!present) dead.push(`${e.id} ${e.package}@${e.version} is not in ${e.lockfile}`);
+    }
+    expect(dead, 'remove the allowlist entry once the dependency is bumped away').toEqual([]);
+  });
+
+  it('has no duplicate entry for one advisory, package, version and lockfile', () => {
+    const keys = committed.allow.map((e) => `${e.id}|${e.package}|${e.version}|${e.lockfile}`);
+    expect(keys.filter((k, i) => keys.indexOf(k) !== i)).toEqual([]);
+  });
+
+  it('no entry suppresses a package that a floor test in osv-triage-floors says was fixed by a bump', () => {
+    // braces has no patched release and the rest are frozen fixtures or unreachable;
+    // the packages below were FIXED, so allowlisting them would be hiding a regression.
+    const fixedByBump = new Set([
+      'brace-expansion',
+      'minimatch',
+      'handlebars',
+      'shell-quote',
+      'tmp',
+      'ws',
+      'happy-dom',
+      'image-size',
+      'launch-editor',
+    ]);
+    const bad = committed.allow
+      .filter((e) => fixedByBump.has(e.package))
+      .map((e) => `${e.package}@${e.version}`);
+    expect(bad).toEqual([]);
   });
 });
 

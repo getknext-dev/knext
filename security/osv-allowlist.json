@@ -2,6 +2,42 @@
   "$schema-note": "Dated, justified, SCOPED allowlist for the OSV dependency gate (scripts/osv-gate.mjs, .github/workflows/osv-scan.yml) and the nightly re-scan of published packages (scripts/audit-shipped-npm.mjs). A finding is suppressed ONLY by an entry here, so the gate can never be silently neutered. It covers both kinds of finding the gate fails on: a malicious-package advisory (`MAL-…`; suppress only a confirmed false positive) and a NEW HIGH/CRITICAL or unscored vulnerability. Each entry suppresses ONE advisory on ONE package at ONE version in ONE lockfile, never an advisory id everywhere. Each entry MUST carry: `id` (the advisory id or any alias: MAL-…, GHSA-…, CVE-…, GO-…), `package` (exact name), `version` (exact version), `lockfile` (exact repo-relative path of the lockfile the finding appears in; for the nightly re-scan of the published npm packages that is `package-lock.json`, the lockfile of its scratch install), `justification` (at least 20 characters: why it is accepted, not exploitable in our usage, no fix available, upstream confirmed false positive), `added` (ISO date) and `expires` (ISO date, REQUIRED, at most 180 days after `added`). Past its expiry the entry stops suppressing and the risk must be re-justified. Wildcards, ranges and unknown keys are rejected. Bump the dependency FIRST; allowlist only when there is no fix. Mirrors security/npm-audit-allowlist.json.",
   "allow": [
     {
+      "id": "GHSA-vfj7-8cjw-p6xm",
+      "package": "braces",
+      "version": "3.0.3",
+      "lockfile": "bun.lock",
+      "justification": "braces vulnerable to stack-exhaustion denial of service through deeply nested patterns. No patched release exists: 3.0.3 is the newest braces on npm and the advisory lists no fixed version, so there is nothing to bump to. The flaw is stack exhaustion on a pattern of deeply nested braces; in this workspace it sits under the dev tools @turbo/gen (node-plop -> globby -> fast-glob) and vinext (vite-plugin-commonjs -> vite-plugin-dynamic-import -> fast-glob), where braces only expands glob patterns taken from first-party source and config, never request-supplied or attacker-controlled input. Re-triage when braces publishes a fix.",
+      "added": "2026-10-20",
+      "expires": "2027-01-18"
+    },
+    {
+      "id": "GHSA-w5hq-g745-h8pq",
+      "package": "uuid",
+      "version": "8.3.2",
+      "lockfile": "bun.lock",
+      "justification": "uuid: Missing buffer bounds check in v3/v5/v6 when buf is provided. uuid 8.3.2 (fixed in 11.1.1+): the missing bounds check needs a `buf` argument to v3/v5/v6. It is pulled in by @google-cloud/storage (directly and via gaxios and teeny-request), and every call site in the installed 7.19.0 closure is `uuid.v4()` with no buffer (resumable-upload, request id headers, multipart boundary), so the vulnerable path is not reachable. A workspace override to 11+ would make our tests exercise a combination consumers never get, because overrides do not ship with the published package. Same justification as the package-lock.json entry for the published closure; remove once @google-cloud/storage ships a gaxios on uuid >= 11.1.1.",
+      "added": "2026-10-20",
+      "expires": "2027-01-18"
+    },
+    {
+      "id": "GHSA-w5hq-g745-h8pq",
+      "package": "uuid",
+      "version": "9.0.1",
+      "lockfile": "bun.lock",
+      "justification": "uuid: Missing buffer bounds check in v3/v5/v6 when buf is provided. uuid 9.0.1 (fixed in 11.1.1+): the missing bounds check needs a `buf` argument to v3/v5/v6. It is pulled in by @google-cloud/storage (directly and via gaxios and teeny-request), and every call site in the installed 7.19.0 closure is `uuid.v4()` with no buffer (resumable-upload, request id headers, multipart boundary), so the vulnerable path is not reachable. A workspace override to 11+ would make our tests exercise a combination consumers never get, because overrides do not ship with the published package. Same justification as the package-lock.json entry for the published closure; remove once @google-cloud/storage ships a gaxios on uuid >= 11.1.1.",
+      "added": "2026-10-20",
+      "expires": "2027-01-18"
+    },
+    {
+      "id": "GHSA-vfj7-8cjw-p6xm",
+      "package": "braces",
+      "version": "3.0.3",
+      "lockfile": "examples/bun-exec/bun.lock",
+      "justification": "braces vulnerable to stack-exhaustion denial of service through deeply nested patterns. No patched release exists: 3.0.3 is the newest braces on npm and the advisory lists no fixed version, so there is nothing to bump to. The flaw is stack exhaustion on a pattern of deeply nested braces; in this example it sits under vinext (vite-plugin-commonjs -> vite-plugin-dynamic-import -> fast-glob) at build time, where braces only expands glob patterns taken from first-party source and config, never request-supplied or attacker-controlled input. Re-triage when braces publishes a fix.",
+      "added": "2026-10-20",
+      "expires": "2027-01-18"
+    },
+    {
       "id": "GHSA-w5hq-g745-h8pq",
       "package": "uuid",
       "version": "9.0.1",
@@ -9,6 +45,483 @@
       "justification": "uuid < 11.1.1 (and 12.0.0, 13.0.0): missing buffer bounds check in v3/v5/v6 when a `buf` argument is supplied. The published @getknext/core closure reaches uuid@9.0.1 only through @google-cloud/storage -> gaxios and teeny-request, which call `uuid.v4()` with no buffer to make a multipart boundary (verified in the installed 7.22.0 closure), so the vulnerable path is not reachable. GitHub rates it medium (CVSS v4 6.3); OSV reports the v3 vector's 7.5. Remove once @google-cloud/storage ships a gaxios on uuid >= 11.1.1.",
       "added": "2026-10-17",
       "expires": "2026-12-15"
+    },
+    {
+      "id": "GHSA-68fv-2mgg-jv7q",
+      "package": "source-map-js",
+      "version": "1.2.1",
+      "lockfile": "packages/kn-next/src/__tests__/fixtures/standalone-drain-app/bun.lock",
+      "justification": "source-map-js allows event-loop denial of service through indexed source-map section offsets. source-map-js 1.2.1 (fixed 1.2.2) is postcss's source-map reader. The event-loop DoS needs an attacker-supplied indexed source map; postcss here only reads maps of first-party CSS during the fixture's build. The fixture (standalone-drain-app) is a frozen lockfile installed into a throwaway build directory by a docker or build e2e, never shipped, never serving traffic, and its pin is the thing under test; the Docker-based suites that install it cannot run in this change, so it is not bumped blind. Fixtures are deliberately pinned and exempt from Dependabot (tests/dependabot-ecosystems.test.ts), so re-triage at expiry.",
+      "added": "2026-10-20",
+      "expires": "2027-01-18"
+    },
+    {
+      "id": "GHSA-68fv-2mgg-jv7q",
+      "package": "source-map-js",
+      "version": "1.2.1",
+      "lockfile": "packages/kn-next/src/__tests__/fixtures/standalone-pages-app/bun.lock",
+      "justification": "source-map-js allows event-loop denial of service through indexed source-map section offsets. source-map-js 1.2.1 (fixed 1.2.2) is postcss's source-map reader. The event-loop DoS needs an attacker-supplied indexed source map; postcss here only reads maps of first-party CSS during the fixture's build. The fixture (standalone-pages-app) is a frozen lockfile installed into a throwaway build directory by a docker or build e2e, never shipped, never serving traffic, and its pin is the thing under test; the Docker-based suites that install it cannot run in this change, so it is not bumped blind. Fixtures are deliberately pinned and exempt from Dependabot (tests/dependabot-ecosystems.test.ts), so re-triage at expiry.",
+      "added": "2026-10-20",
+      "expires": "2027-01-18"
+    },
+    {
+      "id": "GHSA-vfj7-8cjw-p6xm",
+      "package": "braces",
+      "version": "3.0.3",
+      "lockfile": "packages/kn-next/src/__tests__/fixtures/vinext-bun-og-app/bun.lock",
+      "justification": "braces vulnerable to stack-exhaustion denial of service through deeply nested patterns. No patched release exists: 3.0.3 is the newest braces on npm and the advisory lists no fixed version, so there is nothing to bump to. The flaw is stack exhaustion on a pattern of deeply nested braces; in this throwaway e2e fixture it sits under vinext (vite-plugin-commonjs -> vite-plugin-dynamic-import -> fast-glob) at build time, where braces only expands glob patterns taken from first-party source and config, never request-supplied or attacker-controlled input. Re-triage when braces publishes a fix.",
+      "added": "2026-10-20",
+      "expires": "2027-01-18"
+    },
+    {
+      "id": "GHSA-f88m-g3jw-g9cj",
+      "package": "sharp",
+      "version": "0.34.5",
+      "lockfile": "packages/kn-next/src/__tests__/fixtures/vinext-bun-og-app/bun.lock",
+      "justification": "sharp inherited vulnerabilities in libvips: CVE-2026-33327, CVE-2026-33328, CVE-2026-35590, CVE-2026-35591. sharp 0.34.5 bundles libvips, libheif and librsvg builds with the advisory's inherited CVEs (fixed in 0.35.x). It arrives only as next's optional dependency; this fixture renders next/og images through satori and resvg from first-party markup and processes no untrusted image input. The shipped app and scaffold closures carry the sharp >=0.35.5 override. The fixture (vinext-bun-og-app) is a frozen lockfile installed into a throwaway build directory by a docker or build e2e, never shipped, never serving traffic, and its pin is the thing under test; the Docker-based suites that install it cannot run in this change, so it is not bumped blind. Fixtures are deliberately pinned and exempt from Dependabot (tests/dependabot-ecosystems.test.ts), so re-triage at expiry.",
+      "added": "2026-10-20",
+      "expires": "2027-01-18"
+    },
+    {
+      "id": "GHSA-rgj7-g3m4-5g8c",
+      "package": "sharp",
+      "version": "0.34.5",
+      "lockfile": "packages/kn-next/src/__tests__/fixtures/vinext-bun-og-app/bun.lock",
+      "justification": "sharp: Vulnerabilities in libheif: GHSA-g89c-p67h-r497 and GHSA-2jg2-4ch7-h545. sharp 0.34.5 bundles libvips, libheif and librsvg builds with the advisory's inherited CVEs (fixed in 0.35.x). It arrives only as next's optional dependency; this fixture renders next/og images through satori and resvg from first-party markup and processes no untrusted image input. The shipped app and scaffold closures carry the sharp >=0.35.5 override. The fixture (vinext-bun-og-app) is a frozen lockfile installed into a throwaway build directory by a docker or build e2e, never shipped, never serving traffic, and its pin is the thing under test; the Docker-based suites that install it cannot run in this change, so it is not bumped blind. Fixtures are deliberately pinned and exempt from Dependabot (tests/dependabot-ecosystems.test.ts), so re-triage at expiry.",
+      "added": "2026-10-20",
+      "expires": "2027-01-18"
+    },
+    {
+      "id": "GHSA-wq5f-xc86-pv6w",
+      "package": "sharp",
+      "version": "0.34.5",
+      "lockfile": "packages/kn-next/src/__tests__/fixtures/vinext-bun-og-app/bun.lock",
+      "justification": "sharp : Vulnerability in librsvg dependency CVE-2026-96889. sharp 0.34.5 bundles libvips, libheif and librsvg builds with the advisory's inherited CVEs (fixed in 0.35.x). It arrives only as next's optional dependency; this fixture renders next/og images through satori and resvg from first-party markup and processes no untrusted image input. The shipped app and scaffold closures carry the sharp >=0.35.5 override. The fixture (vinext-bun-og-app) is a frozen lockfile installed into a throwaway build directory by a docker or build e2e, never shipped, never serving traffic, and its pin is the thing under test; the Docker-based suites that install it cannot run in this change, so it is not bumped blind. Fixtures are deliberately pinned and exempt from Dependabot (tests/dependabot-ecosystems.test.ts), so re-triage at expiry.",
+      "added": "2026-10-20",
+      "expires": "2027-01-18"
+    },
+    {
+      "id": "GHSA-587h-7wmj-h5pm",
+      "package": "vite",
+      "version": "8.3.2",
+      "lockfile": "packages/kn-next/src/__tests__/fixtures/vinext-bun-og-app/bun.lock",
+      "justification": "vite bundles launch-editor-middleware: the fs.existsSync() existence check can be bypassed on Windows (published 2026-10-20). vite 8.3.2 (fixed 8.2.4 / 8.3.3) carries the advisory only through its dev server's open-in-editor middleware, and only when the dev server runs on Windows; this fixture runs vite build on Linux and never starts a dev server. The fixture (vinext-bun-og-app) is a frozen lockfile installed into a throwaway build directory by a docker or build e2e, never shipped, never serving traffic, and its pin is the thing under test; the Docker-based suites that install it cannot run in this change, so it is not bumped blind. Fixtures are deliberately pinned and exempt from Dependabot (tests/dependabot-ecosystems.test.ts), so re-triage at expiry.",
+      "added": "2026-10-20",
+      "expires": "2027-01-18"
+    },
+    {
+      "id": "GHSA-vfj7-8cjw-p6xm",
+      "package": "braces",
+      "version": "3.0.3",
+      "lockfile": "packages/kn-next/src/__tests__/fixtures/vinext-image-loaderfile-app/bun.lock",
+      "justification": "braces vulnerable to stack-exhaustion denial of service through deeply nested patterns. No patched release exists: 3.0.3 is the newest braces on npm and the advisory lists no fixed version, so there is nothing to bump to. The flaw is stack exhaustion on a pattern of deeply nested braces; in this throwaway e2e fixture it sits under vinext (vite-plugin-commonjs -> vite-plugin-dynamic-import -> fast-glob) at build time, where braces only expands glob patterns taken from first-party source and config, never request-supplied or attacker-controlled input. Re-triage when braces publishes a fix.",
+      "added": "2026-10-20",
+      "expires": "2027-01-18"
+    },
+    {
+      "id": "GHSA-px8p-9vwx-vf98",
+      "package": "fflate",
+      "version": "0.7.3",
+      "lockfile": "packages/kn-next/src/__tests__/fixtures/vinext-image-loaderfile-app/bun.lock",
+      "justification": "fflate unzipSync can enter an infinite loop when parsing malformed ZIP64 archives. fflate 0.7.3 (fixed 0.7.5) is satori's exact pin. The flaw is an infinite loop in unzipSync on a malformed ZIP; satori only calls inflateSync on font data the app bundles itself, so unzipSync is never reached with untrusted input. The fixture (vinext-image-loaderfile-app) is a frozen lockfile installed into a throwaway build directory by a docker or build e2e, never shipped, never serving traffic, and its pin is the thing under test; the Docker-based suites that install it cannot run in this change, so it is not bumped blind. Fixtures are deliberately pinned and exempt from Dependabot (tests/dependabot-ecosystems.test.ts), so re-triage at expiry.",
+      "added": "2026-10-20",
+      "expires": "2027-01-18"
+    },
+    {
+      "id": "GHSA-587h-7wmj-h5pm",
+      "package": "vite",
+      "version": "8.2.2",
+      "lockfile": "packages/kn-next/src/__tests__/fixtures/vinext-image-loaderfile-app/bun.lock",
+      "justification": "vite bundles launch-editor-middleware: the fs.existsSync() existence check can be bypassed on Windows (published 2026-10-20). vite 8.2.2 (fixed 8.2.4 / 8.3.3) carries the advisory only through its dev server's open-in-editor middleware, and only when the dev server runs on Windows; this fixture runs vite build on Linux and never starts a dev server. The fixture (vinext-image-loaderfile-app) is a frozen lockfile installed into a throwaway build directory by a docker or build e2e, never shipped, never serving traffic, and its pin is the thing under test; the Docker-based suites that install it cannot run in this change, so it is not bumped blind. Fixtures are deliberately pinned and exempt from Dependabot (tests/dependabot-ecosystems.test.ts), so re-triage at expiry.",
+      "added": "2026-10-20",
+      "expires": "2027-01-18"
+    },
+    {
+      "id": "GHSA-vfj7-8cjw-p6xm",
+      "package": "braces",
+      "version": "3.0.3",
+      "lockfile": "packages/kn-next/src/__tests__/fixtures/vinext-node-app/bun.lock",
+      "justification": "braces vulnerable to stack-exhaustion denial of service through deeply nested patterns. No patched release exists: 3.0.3 is the newest braces on npm and the advisory lists no fixed version, so there is nothing to bump to. The flaw is stack exhaustion on a pattern of deeply nested braces; in this throwaway e2e fixture it sits under vinext (vite-plugin-commonjs -> vite-plugin-dynamic-import -> fast-glob) at build time, where braces only expands glob patterns taken from first-party source and config, never request-supplied or attacker-controlled input. Re-triage when braces publishes a fix.",
+      "added": "2026-10-20",
+      "expires": "2027-01-18"
+    },
+    {
+      "id": "GHSA-px8p-9vwx-vf98",
+      "package": "fflate",
+      "version": "0.7.3",
+      "lockfile": "packages/kn-next/src/__tests__/fixtures/vinext-node-app/bun.lock",
+      "justification": "fflate unzipSync can enter an infinite loop when parsing malformed ZIP64 archives. fflate 0.7.3 (fixed 0.7.5) is satori's exact pin. The flaw is an infinite loop in unzipSync on a malformed ZIP; satori only calls inflateSync on font data the app bundles itself, so unzipSync is never reached with untrusted input. The fixture (vinext-node-app) is a frozen lockfile installed into a throwaway build directory by a docker or build e2e, never shipped, never serving traffic, and its pin is the thing under test; the Docker-based suites that install it cannot run in this change, so it is not bumped blind. Fixtures are deliberately pinned and exempt from Dependabot (tests/dependabot-ecosystems.test.ts), so re-triage at expiry.",
+      "added": "2026-10-20",
+      "expires": "2027-01-18"
+    },
+    {
+      "id": "GHSA-68fv-2mgg-jv7q",
+      "package": "source-map-js",
+      "version": "1.2.1",
+      "lockfile": "packages/kn-next/src/__tests__/fixtures/vinext-node-app/bun.lock",
+      "justification": "source-map-js allows event-loop denial of service through indexed source-map section offsets. source-map-js 1.2.1 (fixed 1.2.2) is postcss's source-map reader. The event-loop DoS needs an attacker-supplied indexed source map; postcss here only reads maps of first-party CSS during the fixture's build. The fixture (vinext-node-app) is a frozen lockfile installed into a throwaway build directory by a docker or build e2e, never shipped, never serving traffic, and its pin is the thing under test; the Docker-based suites that install it cannot run in this change, so it is not bumped blind. Fixtures are deliberately pinned and exempt from Dependabot (tests/dependabot-ecosystems.test.ts), so re-triage at expiry.",
+      "added": "2026-10-20",
+      "expires": "2027-01-18"
+    },
+    {
+      "id": "GHSA-587h-7wmj-h5pm",
+      "package": "vite",
+      "version": "8.3.0",
+      "lockfile": "packages/kn-next/src/__tests__/fixtures/vinext-node-app/bun.lock",
+      "justification": "vite bundles launch-editor-middleware: the fs.existsSync() existence check can be bypassed on Windows (published 2026-10-20). vite 8.3.0 (fixed 8.2.4 / 8.3.3) carries the advisory only through its dev server's open-in-editor middleware, and only when the dev server runs on Windows; this fixture runs vite build on Linux and never starts a dev server. The fixture (vinext-node-app) is a frozen lockfile installed into a throwaway build directory by a docker or build e2e, never shipped, never serving traffic, and its pin is the thing under test; the Docker-based suites that install it cannot run in this change, so it is not bumped blind. Fixtures are deliberately pinned and exempt from Dependabot (tests/dependabot-ecosystems.test.ts), so re-triage at expiry.",
+      "added": "2026-10-20",
+      "expires": "2027-01-18"
+    },
+    {
+      "id": "GHSA-vfj7-8cjw-p6xm",
+      "package": "braces",
+      "version": "3.0.3",
+      "lockfile": "packages/kn-next/src/__tests__/fixtures/vinext-styled-jsx-app/bun.lock",
+      "justification": "braces vulnerable to stack-exhaustion denial of service through deeply nested patterns. No patched release exists: 3.0.3 is the newest braces on npm and the advisory lists no fixed version, so there is nothing to bump to. The flaw is stack exhaustion on a pattern of deeply nested braces; in this throwaway e2e fixture it sits under vinext (vite-plugin-commonjs -> vite-plugin-dynamic-import -> fast-glob) at build time, where braces only expands glob patterns taken from first-party source and config, never request-supplied or attacker-controlled input. Re-triage when braces publishes a fix.",
+      "added": "2026-10-20",
+      "expires": "2027-01-18"
+    },
+    {
+      "id": "GHSA-px8p-9vwx-vf98",
+      "package": "fflate",
+      "version": "0.7.3",
+      "lockfile": "packages/kn-next/src/__tests__/fixtures/vinext-styled-jsx-app/bun.lock",
+      "justification": "fflate unzipSync can enter an infinite loop when parsing malformed ZIP64 archives. fflate 0.7.3 (fixed 0.7.5) is satori's exact pin. The flaw is an infinite loop in unzipSync on a malformed ZIP; satori only calls inflateSync on font data the app bundles itself, so unzipSync is never reached with untrusted input. The fixture (vinext-styled-jsx-app) is a frozen lockfile installed into a throwaway build directory by a docker or build e2e, never shipped, never serving traffic, and its pin is the thing under test; the Docker-based suites that install it cannot run in this change, so it is not bumped blind. Fixtures are deliberately pinned and exempt from Dependabot (tests/dependabot-ecosystems.test.ts), so re-triage at expiry.",
+      "added": "2026-10-20",
+      "expires": "2027-01-18"
+    },
+    {
+      "id": "GHSA-587h-7wmj-h5pm",
+      "package": "vite",
+      "version": "8.2.2",
+      "lockfile": "packages/kn-next/src/__tests__/fixtures/vinext-styled-jsx-app/bun.lock",
+      "justification": "vite bundles launch-editor-middleware: the fs.existsSync() existence check can be bypassed on Windows (published 2026-10-20). vite 8.2.2 (fixed 8.2.4 / 8.3.3) carries the advisory only through its dev server's open-in-editor middleware, and only when the dev server runs on Windows; this fixture runs vite build on Linux and never starts a dev server. The fixture (vinext-styled-jsx-app) is a frozen lockfile installed into a throwaway build directory by a docker or build e2e, never shipped, never serving traffic, and its pin is the thing under test; the Docker-based suites that install it cannot run in this change, so it is not bumped blind. Fixtures are deliberately pinned and exempt from Dependabot (tests/dependabot-ecosystems.test.ts), so re-triage at expiry.",
+      "added": "2026-10-20",
+      "expires": "2027-01-18"
+    },
+    {
+      "id": "GHSA-fjxv-7rqg-78g4",
+      "package": "form-data",
+      "version": "2.3.3",
+      "lockfile": "scripts/musl-native-lockfiles/sqlite3-5.0.2/package-lock.json",
+      "justification": "form-data uses unsafe random function in form-data for choosing boundary. form-data comes in via node-pre-gyp's request chain used to download the prebuilt binary, with fixed first-party fields, never user input. This lockfile (sqlite3-5.0.2) is a frozen `npm ci` pin of the install the pinned Next.js deploy-tests suite performs, used only inside the musl native-rebuild compat e2e container to reproduce that install; it is never shipped, and it is kept for the 1.x credential refs whose pinned suite still installs this addon (scripts/musl-native-lockfiles/suite-native-addons.json), so a transitive cannot be bumped without making the e2e stop modelling that install. Re-justify or retire when those refs drop this addon.",
+      "added": "2026-10-20",
+      "expires": "2027-04-18"
+    },
+    {
+      "id": "GHSA-hmw2-7cc7-3qxx",
+      "package": "form-data",
+      "version": "2.3.3",
+      "lockfile": "scripts/musl-native-lockfiles/sqlite3-5.0.2/package-lock.json",
+      "justification": "form-data: CRLF injection in form-data via unescaped multipart field names and filenames. form-data comes in via node-pre-gyp's request chain used to download the prebuilt binary, with fixed first-party fields, never user input. This lockfile (sqlite3-5.0.2) is a frozen `npm ci` pin of the install the pinned Next.js deploy-tests suite performs, used only inside the musl native-rebuild compat e2e container to reproduce that install; it is never shipped, and it is kept for the 1.x credential refs whose pinned suite still installs this addon (scripts/musl-native-lockfiles/suite-native-addons.json), so a transitive cannot be bumped without making the e2e stop modelling that install. Re-justify or retire when those refs drop this addon.",
+      "added": "2026-10-20",
+      "expires": "2027-04-18"
+    },
+    {
+      "id": "GHSA-c2qf-rxjj-qqgw",
+      "package": "semver",
+      "version": "5.3.0",
+      "lockfile": "scripts/musl-native-lockfiles/sqlite3-5.0.2/package-lock.json",
+      "justification": "semver vulnerable to Regular Expression Denial of Service. semver is node-gyp's version comparator and only parses the pinned toolchain versions. This lockfile (sqlite3-5.0.2) is a frozen `npm ci` pin of the install the pinned Next.js deploy-tests suite performs, used only inside the musl native-rebuild compat e2e container to reproduce that install; it is never shipped, and it is kept for the 1.x credential refs whose pinned suite still installs this addon (scripts/musl-native-lockfiles/suite-native-addons.json), so a transitive cannot be bumped without making the e2e stop modelling that install. Re-justify or retire when those refs drop this addon.",
+      "added": "2026-10-20",
+      "expires": "2027-04-18"
+    },
+    {
+      "id": "GHSA-9qrh-qjmc-5w2p",
+      "package": "sqlite3",
+      "version": "5.0.2",
+      "lockfile": "scripts/musl-native-lockfiles/sqlite3-5.0.2/package-lock.json",
+      "justification": "Denial-of-Service when binding invalid parameters in sqlite3. sqlite3 itself is the addon under test: the compat suite deploys exactly this version, so its binding behaviour is what the e2e verifies and the version cannot be bumped here; the e2e runs only the suite's own fixed queries, so no attacker-controlled bind parameter or object reaches it. This lockfile (sqlite3-5.0.2) is a frozen `npm ci` pin of the install the pinned Next.js deploy-tests suite performs, used only inside the musl native-rebuild compat e2e container to reproduce that install; it is never shipped, and it is kept for the 1.x credential refs whose pinned suite still installs this addon (scripts/musl-native-lockfiles/suite-native-addons.json), so a transitive cannot be bumped without making the e2e stop modelling that install. Re-justify or retire when those refs drop this addon.",
+      "added": "2026-10-20",
+      "expires": "2027-04-18"
+    },
+    {
+      "id": "GHSA-jqv5-7xpx-qj74",
+      "package": "sqlite3",
+      "version": "5.0.2",
+      "lockfile": "scripts/musl-native-lockfiles/sqlite3-5.0.2/package-lock.json",
+      "justification": "sqlite vulnerable to code execution due to Object coercion. sqlite3 itself is the addon under test: the compat suite deploys exactly this version, so its binding behaviour is what the e2e verifies and the version cannot be bumped here; the e2e runs only the suite's own fixed queries, so no attacker-controlled bind parameter or object reaches it. This lockfile (sqlite3-5.0.2) is a frozen `npm ci` pin of the install the pinned Next.js deploy-tests suite performs, used only inside the musl native-rebuild compat e2e container to reproduce that install; it is never shipped, and it is kept for the 1.x credential refs whose pinned suite still installs this addon (scripts/musl-native-lockfiles/suite-native-addons.json), so a transitive cannot be bumped without making the e2e stop modelling that install. Re-justify or retire when those refs drop this addon.",
+      "added": "2026-10-20",
+      "expires": "2027-04-18"
+    },
+    {
+      "id": "GHSA-23hp-3jrh-7fpw",
+      "package": "tar",
+      "version": "2.2.2",
+      "lockfile": "scripts/musl-native-lockfiles/sqlite3-5.0.2/package-lock.json",
+      "justification": "node-tar: Decompression/parse DoS via unlimited input. node-gyp and node-pre-gyp/prebuild-install use tar to unpack the sqlite3 source or prebuilt binary they download during the install, i.e. archives of the pinned package from its own release host, never user input at runtime. This lockfile (sqlite3-5.0.2) is a frozen `npm ci` pin of the install the pinned Next.js deploy-tests suite performs, used only inside the musl native-rebuild compat e2e container to reproduce that install; it is never shipped, and it is kept for the 1.x credential refs whose pinned suite still installs this addon (scripts/musl-native-lockfiles/suite-native-addons.json), so a transitive cannot be bumped without making the e2e stop modelling that install. Re-justify or retire when those refs drop this addon.",
+      "added": "2026-10-20",
+      "expires": "2027-04-18"
+    },
+    {
+      "id": "GHSA-34x7-hfp2-rc4v",
+      "package": "tar",
+      "version": "2.2.2",
+      "lockfile": "scripts/musl-native-lockfiles/sqlite3-5.0.2/package-lock.json",
+      "justification": "node-tar Vulnerable to Arbitrary File Creation/Overwrite via Hardlink Path Traversal. node-gyp and node-pre-gyp/prebuild-install use tar to unpack the sqlite3 source or prebuilt binary they download during the install, i.e. archives of the pinned package from its own release host, never user input at runtime. This lockfile (sqlite3-5.0.2) is a frozen `npm ci` pin of the install the pinned Next.js deploy-tests suite performs, used only inside the musl native-rebuild compat e2e container to reproduce that install; it is never shipped, and it is kept for the 1.x credential refs whose pinned suite still installs this addon (scripts/musl-native-lockfiles/suite-native-addons.json), so a transitive cannot be bumped without making the e2e stop modelling that install. Re-justify or retire when those refs drop this addon.",
+      "added": "2026-10-20",
+      "expires": "2027-04-18"
+    },
+    {
+      "id": "GHSA-3jfq-g458-7qm9",
+      "package": "tar",
+      "version": "2.2.2",
+      "lockfile": "scripts/musl-native-lockfiles/sqlite3-5.0.2/package-lock.json",
+      "justification": "Arbitrary File Creation/Overwrite due to insufficient absolute path sanitization. node-gyp and node-pre-gyp/prebuild-install use tar to unpack the sqlite3 source or prebuilt binary they download during the install, i.e. archives of the pinned package from its own release host, never user input at runtime. This lockfile (sqlite3-5.0.2) is a frozen `npm ci` pin of the install the pinned Next.js deploy-tests suite performs, used only inside the musl native-rebuild compat e2e container to reproduce that install; it is never shipped, and it is kept for the 1.x credential refs whose pinned suite still installs this addon (scripts/musl-native-lockfiles/suite-native-addons.json), so a transitive cannot be bumped without making the e2e stop modelling that install. Re-justify or retire when those refs drop this addon.",
+      "added": "2026-10-20",
+      "expires": "2027-04-18"
+    },
+    {
+      "id": "GHSA-5955-9wpr-37jh",
+      "package": "tar",
+      "version": "2.2.2",
+      "lockfile": "scripts/musl-native-lockfiles/sqlite3-5.0.2/package-lock.json",
+      "justification": "Arbitrary File Creation/Overwrite on Windows via insufficient relative path sanitization. node-gyp and node-pre-gyp/prebuild-install use tar to unpack the sqlite3 source or prebuilt binary they download during the install, i.e. archives of the pinned package from its own release host, never user input at runtime. This lockfile (sqlite3-5.0.2) is a frozen `npm ci` pin of the install the pinned Next.js deploy-tests suite performs, used only inside the musl native-rebuild compat e2e container to reproduce that install; it is never shipped, and it is kept for the 1.x credential refs whose pinned suite still installs this addon (scripts/musl-native-lockfiles/suite-native-addons.json), so a transitive cannot be bumped without making the e2e stop modelling that install. Re-justify or retire when those refs drop this addon.",
+      "added": "2026-10-20",
+      "expires": "2027-04-18"
+    },
+    {
+      "id": "GHSA-83g3-92jg-28cx",
+      "package": "tar",
+      "version": "2.2.2",
+      "lockfile": "scripts/musl-native-lockfiles/sqlite3-5.0.2/package-lock.json",
+      "justification": "Arbitrary File Read/Write via Hardlink Target Escape Through Symlink Chain in node-tar Extraction. node-gyp and node-pre-gyp/prebuild-install use tar to unpack the sqlite3 source or prebuilt binary they download during the install, i.e. archives of the pinned package from its own release host, never user input at runtime. This lockfile (sqlite3-5.0.2) is a frozen `npm ci` pin of the install the pinned Next.js deploy-tests suite performs, used only inside the musl native-rebuild compat e2e container to reproduce that install; it is never shipped, and it is kept for the 1.x credential refs whose pinned suite still installs this addon (scripts/musl-native-lockfiles/suite-native-addons.json), so a transitive cannot be bumped without making the e2e stop modelling that install. Re-justify or retire when those refs drop this addon.",
+      "added": "2026-10-20",
+      "expires": "2027-04-18"
+    },
+    {
+      "id": "GHSA-8qq5-rm4j-mr97",
+      "package": "tar",
+      "version": "2.2.2",
+      "lockfile": "scripts/musl-native-lockfiles/sqlite3-5.0.2/package-lock.json",
+      "justification": "node-tar is Vulnerable to Arbitrary File Overwrite and Symlink Poisoning via Insufficient Path Sanitization. node-gyp and node-pre-gyp/prebuild-install use tar to unpack the sqlite3 source or prebuilt binary they download during the install, i.e. archives of the pinned package from its own release host, never user input at runtime. This lockfile (sqlite3-5.0.2) is a frozen `npm ci` pin of the install the pinned Next.js deploy-tests suite performs, used only inside the musl native-rebuild compat e2e container to reproduce that install; it is never shipped, and it is kept for the 1.x credential refs whose pinned suite still installs this addon (scripts/musl-native-lockfiles/suite-native-addons.json), so a transitive cannot be bumped without making the e2e stop modelling that install. Re-justify or retire when those refs drop this addon.",
+      "added": "2026-10-20",
+      "expires": "2027-04-18"
+    },
+    {
+      "id": "GHSA-8x88-c5mf-7j5w",
+      "package": "tar",
+      "version": "2.2.2",
+      "lockfile": "scripts/musl-native-lockfiles/sqlite3-5.0.2/package-lock.json",
+      "justification": "node-tar: Negative tar entry size causes infinite loop in archive replace. node-gyp and node-pre-gyp/prebuild-install use tar to unpack the sqlite3 source or prebuilt binary they download during the install, i.e. archives of the pinned package from its own release host, never user input at runtime. This lockfile (sqlite3-5.0.2) is a frozen `npm ci` pin of the install the pinned Next.js deploy-tests suite performs, used only inside the musl native-rebuild compat e2e container to reproduce that install; it is never shipped, and it is kept for the 1.x credential refs whose pinned suite still installs this addon (scripts/musl-native-lockfiles/suite-native-addons.json), so a transitive cannot be bumped without making the e2e stop modelling that install. Re-justify or retire when those refs drop this addon.",
+      "added": "2026-10-20",
+      "expires": "2027-04-18"
+    },
+    {
+      "id": "GHSA-9ppj-qmqm-q256",
+      "package": "tar",
+      "version": "2.2.2",
+      "lockfile": "scripts/musl-native-lockfiles/sqlite3-5.0.2/package-lock.json",
+      "justification": "node-tar Symlink Path Traversal via Drive-Relative Linkpath. node-gyp and node-pre-gyp/prebuild-install use tar to unpack the sqlite3 source or prebuilt binary they download during the install, i.e. archives of the pinned package from its own release host, never user input at runtime. This lockfile (sqlite3-5.0.2) is a frozen `npm ci` pin of the install the pinned Next.js deploy-tests suite performs, used only inside the musl native-rebuild compat e2e container to reproduce that install; it is never shipped, and it is kept for the 1.x credential refs whose pinned suite still installs this addon (scripts/musl-native-lockfiles/suite-native-addons.json), so a transitive cannot be bumped without making the e2e stop modelling that install. Re-justify or retire when those refs drop this addon.",
+      "added": "2026-10-20",
+      "expires": "2027-04-18"
+    },
+    {
+      "id": "GHSA-qffp-2rhf-9h96",
+      "package": "tar",
+      "version": "2.2.2",
+      "lockfile": "scripts/musl-native-lockfiles/sqlite3-5.0.2/package-lock.json",
+      "justification": "tar has Hardlink Path Traversal via Drive-Relative Linkpath. node-gyp and node-pre-gyp/prebuild-install use tar to unpack the sqlite3 source or prebuilt binary they download during the install, i.e. archives of the pinned package from its own release host, never user input at runtime. This lockfile (sqlite3-5.0.2) is a frozen `npm ci` pin of the install the pinned Next.js deploy-tests suite performs, used only inside the musl native-rebuild compat e2e container to reproduce that install; it is never shipped, and it is kept for the 1.x credential refs whose pinned suite still installs this addon (scripts/musl-native-lockfiles/suite-native-addons.json), so a transitive cannot be bumped without making the e2e stop modelling that install. Re-justify or retire when those refs drop this addon.",
+      "added": "2026-10-20",
+      "expires": "2027-04-18"
+    },
+    {
+      "id": "GHSA-r292-9mhp-454m",
+      "package": "tar",
+      "version": "2.2.2",
+      "lockfile": "scripts/musl-native-lockfiles/sqlite3-5.0.2/package-lock.json",
+      "justification": "node-tar: Uncontrolled recursion in mapHas/filesFilter allows uncatchable stack-overflow DoS via crafted long-path tar with member selection. node-gyp and node-pre-gyp/prebuild-install use tar to unpack the sqlite3 source or prebuilt binary they download during the install, i.e. archives of the pinned package from its own release host, never user input at runtime. This lockfile (sqlite3-5.0.2) is a frozen `npm ci` pin of the install the pinned Next.js deploy-tests suite performs, used only inside the musl native-rebuild compat e2e container to reproduce that install; it is never shipped, and it is kept for the 1.x credential refs whose pinned suite still installs this addon (scripts/musl-native-lockfiles/suite-native-addons.json), so a transitive cannot be bumped without making the e2e stop modelling that install. Re-justify or retire when those refs drop this addon.",
+      "added": "2026-10-20",
+      "expires": "2027-04-18"
+    },
+    {
+      "id": "GHSA-r6q2-hw4h-h46w",
+      "package": "tar",
+      "version": "2.2.2",
+      "lockfile": "scripts/musl-native-lockfiles/sqlite3-5.0.2/package-lock.json",
+      "justification": "Race Condition in node-tar Path Reservations via Unicode Ligature Collisions on macOS APFS. node-gyp and node-pre-gyp/prebuild-install use tar to unpack the sqlite3 source or prebuilt binary they download during the install, i.e. archives of the pinned package from its own release host, never user input at runtime. This lockfile (sqlite3-5.0.2) is a frozen `npm ci` pin of the install the pinned Next.js deploy-tests suite performs, used only inside the musl native-rebuild compat e2e container to reproduce that install; it is never shipped, and it is kept for the 1.x credential refs whose pinned suite still installs this addon (scripts/musl-native-lockfiles/suite-native-addons.json), so a transitive cannot be bumped without making the e2e stop modelling that install. Re-justify or retire when those refs drop this addon.",
+      "added": "2026-10-20",
+      "expires": "2027-04-18"
+    },
+    {
+      "id": "GHSA-23hp-3jrh-7fpw",
+      "package": "tar",
+      "version": "4.4.19",
+      "lockfile": "scripts/musl-native-lockfiles/sqlite3-5.0.2/package-lock.json",
+      "justification": "node-tar: Decompression/parse DoS via unlimited input. node-gyp and node-pre-gyp/prebuild-install use tar to unpack the sqlite3 source or prebuilt binary they download during the install, i.e. archives of the pinned package from its own release host, never user input at runtime. This lockfile (sqlite3-5.0.2) is a frozen `npm ci` pin of the install the pinned Next.js deploy-tests suite performs, used only inside the musl native-rebuild compat e2e container to reproduce that install; it is never shipped, and it is kept for the 1.x credential refs whose pinned suite still installs this addon (scripts/musl-native-lockfiles/suite-native-addons.json), so a transitive cannot be bumped without making the e2e stop modelling that install. Re-justify or retire when those refs drop this addon.",
+      "added": "2026-10-20",
+      "expires": "2027-04-18"
+    },
+    {
+      "id": "GHSA-34x7-hfp2-rc4v",
+      "package": "tar",
+      "version": "4.4.19",
+      "lockfile": "scripts/musl-native-lockfiles/sqlite3-5.0.2/package-lock.json",
+      "justification": "node-tar Vulnerable to Arbitrary File Creation/Overwrite via Hardlink Path Traversal. node-gyp and node-pre-gyp/prebuild-install use tar to unpack the sqlite3 source or prebuilt binary they download during the install, i.e. archives of the pinned package from its own release host, never user input at runtime. This lockfile (sqlite3-5.0.2) is a frozen `npm ci` pin of the install the pinned Next.js deploy-tests suite performs, used only inside the musl native-rebuild compat e2e container to reproduce that install; it is never shipped, and it is kept for the 1.x credential refs whose pinned suite still installs this addon (scripts/musl-native-lockfiles/suite-native-addons.json), so a transitive cannot be bumped without making the e2e stop modelling that install. Re-justify or retire when those refs drop this addon.",
+      "added": "2026-10-20",
+      "expires": "2027-04-18"
+    },
+    {
+      "id": "GHSA-83g3-92jg-28cx",
+      "package": "tar",
+      "version": "4.4.19",
+      "lockfile": "scripts/musl-native-lockfiles/sqlite3-5.0.2/package-lock.json",
+      "justification": "Arbitrary File Read/Write via Hardlink Target Escape Through Symlink Chain in node-tar Extraction. node-gyp and node-pre-gyp/prebuild-install use tar to unpack the sqlite3 source or prebuilt binary they download during the install, i.e. archives of the pinned package from its own release host, never user input at runtime. This lockfile (sqlite3-5.0.2) is a frozen `npm ci` pin of the install the pinned Next.js deploy-tests suite performs, used only inside the musl native-rebuild compat e2e container to reproduce that install; it is never shipped, and it is kept for the 1.x credential refs whose pinned suite still installs this addon (scripts/musl-native-lockfiles/suite-native-addons.json), so a transitive cannot be bumped without making the e2e stop modelling that install. Re-justify or retire when those refs drop this addon.",
+      "added": "2026-10-20",
+      "expires": "2027-04-18"
+    },
+    {
+      "id": "GHSA-8qq5-rm4j-mr97",
+      "package": "tar",
+      "version": "4.4.19",
+      "lockfile": "scripts/musl-native-lockfiles/sqlite3-5.0.2/package-lock.json",
+      "justification": "node-tar is Vulnerable to Arbitrary File Overwrite and Symlink Poisoning via Insufficient Path Sanitization. node-gyp and node-pre-gyp/prebuild-install use tar to unpack the sqlite3 source or prebuilt binary they download during the install, i.e. archives of the pinned package from its own release host, never user input at runtime. This lockfile (sqlite3-5.0.2) is a frozen `npm ci` pin of the install the pinned Next.js deploy-tests suite performs, used only inside the musl native-rebuild compat e2e container to reproduce that install; it is never shipped, and it is kept for the 1.x credential refs whose pinned suite still installs this addon (scripts/musl-native-lockfiles/suite-native-addons.json), so a transitive cannot be bumped without making the e2e stop modelling that install. Re-justify or retire when those refs drop this addon.",
+      "added": "2026-10-20",
+      "expires": "2027-04-18"
+    },
+    {
+      "id": "GHSA-8x88-c5mf-7j5w",
+      "package": "tar",
+      "version": "4.4.19",
+      "lockfile": "scripts/musl-native-lockfiles/sqlite3-5.0.2/package-lock.json",
+      "justification": "node-tar: Negative tar entry size causes infinite loop in archive replace. node-gyp and node-pre-gyp/prebuild-install use tar to unpack the sqlite3 source or prebuilt binary they download during the install, i.e. archives of the pinned package from its own release host, never user input at runtime. This lockfile (sqlite3-5.0.2) is a frozen `npm ci` pin of the install the pinned Next.js deploy-tests suite performs, used only inside the musl native-rebuild compat e2e container to reproduce that install; it is never shipped, and it is kept for the 1.x credential refs whose pinned suite still installs this addon (scripts/musl-native-lockfiles/suite-native-addons.json), so a transitive cannot be bumped without making the e2e stop modelling that install. Re-justify or retire when those refs drop this addon.",
+      "added": "2026-10-20",
+      "expires": "2027-04-18"
+    },
+    {
+      "id": "GHSA-9ppj-qmqm-q256",
+      "package": "tar",
+      "version": "4.4.19",
+      "lockfile": "scripts/musl-native-lockfiles/sqlite3-5.0.2/package-lock.json",
+      "justification": "node-tar Symlink Path Traversal via Drive-Relative Linkpath. node-gyp and node-pre-gyp/prebuild-install use tar to unpack the sqlite3 source or prebuilt binary they download during the install, i.e. archives of the pinned package from its own release host, never user input at runtime. This lockfile (sqlite3-5.0.2) is a frozen `npm ci` pin of the install the pinned Next.js deploy-tests suite performs, used only inside the musl native-rebuild compat e2e container to reproduce that install; it is never shipped, and it is kept for the 1.x credential refs whose pinned suite still installs this addon (scripts/musl-native-lockfiles/suite-native-addons.json), so a transitive cannot be bumped without making the e2e stop modelling that install. Re-justify or retire when those refs drop this addon.",
+      "added": "2026-10-20",
+      "expires": "2027-04-18"
+    },
+    {
+      "id": "GHSA-qffp-2rhf-9h96",
+      "package": "tar",
+      "version": "4.4.19",
+      "lockfile": "scripts/musl-native-lockfiles/sqlite3-5.0.2/package-lock.json",
+      "justification": "tar has Hardlink Path Traversal via Drive-Relative Linkpath. node-gyp and node-pre-gyp/prebuild-install use tar to unpack the sqlite3 source or prebuilt binary they download during the install, i.e. archives of the pinned package from its own release host, never user input at runtime. This lockfile (sqlite3-5.0.2) is a frozen `npm ci` pin of the install the pinned Next.js deploy-tests suite performs, used only inside the musl native-rebuild compat e2e container to reproduce that install; it is never shipped, and it is kept for the 1.x credential refs whose pinned suite still installs this addon (scripts/musl-native-lockfiles/suite-native-addons.json), so a transitive cannot be bumped without making the e2e stop modelling that install. Re-justify or retire when those refs drop this addon.",
+      "added": "2026-10-20",
+      "expires": "2027-04-18"
+    },
+    {
+      "id": "GHSA-r292-9mhp-454m",
+      "package": "tar",
+      "version": "4.4.19",
+      "lockfile": "scripts/musl-native-lockfiles/sqlite3-5.0.2/package-lock.json",
+      "justification": "node-tar: Uncontrolled recursion in mapHas/filesFilter allows uncatchable stack-overflow DoS via crafted long-path tar with member selection. node-gyp and node-pre-gyp/prebuild-install use tar to unpack the sqlite3 source or prebuilt binary they download during the install, i.e. archives of the pinned package from its own release host, never user input at runtime. This lockfile (sqlite3-5.0.2) is a frozen `npm ci` pin of the install the pinned Next.js deploy-tests suite performs, used only inside the musl native-rebuild compat e2e container to reproduce that install; it is never shipped, and it is kept for the 1.x credential refs whose pinned suite still installs this addon (scripts/musl-native-lockfiles/suite-native-addons.json), so a transitive cannot be bumped without making the e2e stop modelling that install. Re-justify or retire when those refs drop this addon.",
+      "added": "2026-10-20",
+      "expires": "2027-04-18"
+    },
+    {
+      "id": "GHSA-r6q2-hw4h-h46w",
+      "package": "tar",
+      "version": "4.4.19",
+      "lockfile": "scripts/musl-native-lockfiles/sqlite3-5.0.2/package-lock.json",
+      "justification": "Race Condition in node-tar Path Reservations via Unicode Ligature Collisions on macOS APFS. node-gyp and node-pre-gyp/prebuild-install use tar to unpack the sqlite3 source or prebuilt binary they download during the install, i.e. archives of the pinned package from its own release host, never user input at runtime. This lockfile (sqlite3-5.0.2) is a frozen `npm ci` pin of the install the pinned Next.js deploy-tests suite performs, used only inside the musl native-rebuild compat e2e container to reproduce that install; it is never shipped, and it is kept for the 1.x credential refs whose pinned suite still installs this addon (scripts/musl-native-lockfiles/suite-native-addons.json), so a transitive cannot be bumped without making the e2e stop modelling that install. Re-justify or retire when those refs drop this addon.",
+      "added": "2026-10-20",
+      "expires": "2027-04-18"
+    },
+    {
+      "id": "GHSA-w5hq-g745-h8pq",
+      "package": "uuid",
+      "version": "3.4.0",
+      "lockfile": "scripts/musl-native-lockfiles/sqlite3-5.0.2/package-lock.json",
+      "justification": "uuid: Missing buffer bounds check in v3/v5/v6 when buf is provided. uuid 3.4.0 is request's request-id generator (v4 without a buffer argument), not the v3/v5/v6 buffer paths the advisory is about. This lockfile (sqlite3-5.0.2) is a frozen `npm ci` pin of the install the pinned Next.js deploy-tests suite performs, used only inside the musl native-rebuild compat e2e container to reproduce that install; it is never shipped, and it is kept for the 1.x credential refs whose pinned suite still installs this addon (scripts/musl-native-lockfiles/suite-native-addons.json), so a transitive cannot be bumped without making the e2e stop modelling that install. Re-justify or retire when those refs drop this addon.",
+      "added": "2026-10-20",
+      "expires": "2027-04-18"
+    },
+    {
+      "id": "GHSA-ch52-4w7c-c8xp",
+      "package": "http-cache-semantics",
+      "version": "4.2.0",
+      "lockfile": "scripts/musl-native-lockfiles/sqlite3-5.1.7/package-lock.json",
+      "justification": "http-cache-semantics max-stale handling can disclose cross-user cached responses. http-cache-semantics is make-fetch-happen's cache policy used by node-gyp's registry fetches during install, with no shared cache across users. This lockfile (sqlite3-5.1.7) is a frozen `npm ci` pin of the install the pinned Next.js deploy-tests suite performs, used only inside the musl native-rebuild compat e2e container to reproduce that install; it is never shipped, and it is kept for the 1.x credential refs whose pinned suite still installs this addon (scripts/musl-native-lockfiles/suite-native-addons.json), so a transitive cannot be bumped without making the e2e stop modelling that install. Re-justify or retire when those refs drop this addon.",
+      "added": "2026-10-20",
+      "expires": "2027-04-18"
+    },
+    {
+      "id": "GHSA-23hp-3jrh-7fpw",
+      "package": "tar",
+      "version": "6.2.1",
+      "lockfile": "scripts/musl-native-lockfiles/sqlite3-5.1.7/package-lock.json",
+      "justification": "node-tar: Decompression/parse DoS via unlimited input. node-gyp and node-pre-gyp/prebuild-install use tar to unpack the sqlite3 source or prebuilt binary they download during the install, i.e. archives of the pinned package from its own release host, never user input at runtime. This lockfile (sqlite3-5.1.7) is a frozen `npm ci` pin of the install the pinned Next.js deploy-tests suite performs, used only inside the musl native-rebuild compat e2e container to reproduce that install; it is never shipped, and it is kept for the 1.x credential refs whose pinned suite still installs this addon (scripts/musl-native-lockfiles/suite-native-addons.json), so a transitive cannot be bumped without making the e2e stop modelling that install. Re-justify or retire when those refs drop this addon.",
+      "added": "2026-10-20",
+      "expires": "2027-04-18"
+    },
+    {
+      "id": "GHSA-34x7-hfp2-rc4v",
+      "package": "tar",
+      "version": "6.2.1",
+      "lockfile": "scripts/musl-native-lockfiles/sqlite3-5.1.7/package-lock.json",
+      "justification": "node-tar Vulnerable to Arbitrary File Creation/Overwrite via Hardlink Path Traversal. node-gyp and node-pre-gyp/prebuild-install use tar to unpack the sqlite3 source or prebuilt binary they download during the install, i.e. archives of the pinned package from its own release host, never user input at runtime. This lockfile (sqlite3-5.1.7) is a frozen `npm ci` pin of the install the pinned Next.js deploy-tests suite performs, used only inside the musl native-rebuild compat e2e container to reproduce that install; it is never shipped, and it is kept for the 1.x credential refs whose pinned suite still installs this addon (scripts/musl-native-lockfiles/suite-native-addons.json), so a transitive cannot be bumped without making the e2e stop modelling that install. Re-justify or retire when those refs drop this addon.",
+      "added": "2026-10-20",
+      "expires": "2027-04-18"
+    },
+    {
+      "id": "GHSA-83g3-92jg-28cx",
+      "package": "tar",
+      "version": "6.2.1",
+      "lockfile": "scripts/musl-native-lockfiles/sqlite3-5.1.7/package-lock.json",
+      "justification": "Arbitrary File Read/Write via Hardlink Target Escape Through Symlink Chain in node-tar Extraction. node-gyp and node-pre-gyp/prebuild-install use tar to unpack the sqlite3 source or prebuilt binary they download during the install, i.e. archives of the pinned package from its own release host, never user input at runtime. This lockfile (sqlite3-5.1.7) is a frozen `npm ci` pin of the install the pinned Next.js deploy-tests suite performs, used only inside the musl native-rebuild compat e2e container to reproduce that install; it is never shipped, and it is kept for the 1.x credential refs whose pinned suite still installs this addon (scripts/musl-native-lockfiles/suite-native-addons.json), so a transitive cannot be bumped without making the e2e stop modelling that install. Re-justify or retire when those refs drop this addon.",
+      "added": "2026-10-20",
+      "expires": "2027-04-18"
+    },
+    {
+      "id": "GHSA-8qq5-rm4j-mr97",
+      "package": "tar",
+      "version": "6.2.1",
+      "lockfile": "scripts/musl-native-lockfiles/sqlite3-5.1.7/package-lock.json",
+      "justification": "node-tar is Vulnerable to Arbitrary File Overwrite and Symlink Poisoning via Insufficient Path Sanitization. node-gyp and node-pre-gyp/prebuild-install use tar to unpack the sqlite3 source or prebuilt binary they download during the install, i.e. archives of the pinned package from its own release host, never user input at runtime. This lockfile (sqlite3-5.1.7) is a frozen `npm ci` pin of the install the pinned Next.js deploy-tests suite performs, used only inside the musl native-rebuild compat e2e container to reproduce that install; it is never shipped, and it is kept for the 1.x credential refs whose pinned suite still installs this addon (scripts/musl-native-lockfiles/suite-native-addons.json), so a transitive cannot be bumped without making the e2e stop modelling that install. Re-justify or retire when those refs drop this addon.",
+      "added": "2026-10-20",
+      "expires": "2027-04-18"
+    },
+    {
+      "id": "GHSA-8x88-c5mf-7j5w",
+      "package": "tar",
+      "version": "6.2.1",
+      "lockfile": "scripts/musl-native-lockfiles/sqlite3-5.1.7/package-lock.json",
+      "justification": "node-tar: Negative tar entry size causes infinite loop in archive replace. node-gyp and node-pre-gyp/prebuild-install use tar to unpack the sqlite3 source or prebuilt binary they download during the install, i.e. archives of the pinned package from its own release host, never user input at runtime. This lockfile (sqlite3-5.1.7) is a frozen `npm ci` pin of the install the pinned Next.js deploy-tests suite performs, used only inside the musl native-rebuild compat e2e container to reproduce that install; it is never shipped, and it is kept for the 1.x credential refs whose pinned suite still installs this addon (scripts/musl-native-lockfiles/suite-native-addons.json), so a transitive cannot be bumped without making the e2e stop modelling that install. Re-justify or retire when those refs drop this addon.",
+      "added": "2026-10-20",
+      "expires": "2027-04-18"
+    },
+    {
+      "id": "GHSA-9ppj-qmqm-q256",
+      "package": "tar",
+      "version": "6.2.1",
+      "lockfile": "scripts/musl-native-lockfiles/sqlite3-5.1.7/package-lock.json",
+      "justification": "node-tar Symlink Path Traversal via Drive-Relative Linkpath. node-gyp and node-pre-gyp/prebuild-install use tar to unpack the sqlite3 source or prebuilt binary they download during the install, i.e. archives of the pinned package from its own release host, never user input at runtime. This lockfile (sqlite3-5.1.7) is a frozen `npm ci` pin of the install the pinned Next.js deploy-tests suite performs, used only inside the musl native-rebuild compat e2e container to reproduce that install; it is never shipped, and it is kept for the 1.x credential refs whose pinned suite still installs this addon (scripts/musl-native-lockfiles/suite-native-addons.json), so a transitive cannot be bumped without making the e2e stop modelling that install. Re-justify or retire when those refs drop this addon.",
+      "added": "2026-10-20",
+      "expires": "2027-04-18"
+    },
+    {
+      "id": "GHSA-qffp-2rhf-9h96",
+      "package": "tar",
+      "version": "6.2.1",
+      "lockfile": "scripts/musl-native-lockfiles/sqlite3-5.1.7/package-lock.json",
+      "justification": "tar has Hardlink Path Traversal via Drive-Relative Linkpath. node-gyp and node-pre-gyp/prebuild-install use tar to unpack the sqlite3 source or prebuilt binary they download during the install, i.e. archives of the pinned package from its own release host, never user input at runtime. This lockfile (sqlite3-5.1.7) is a frozen `npm ci` pin of the install the pinned Next.js deploy-tests suite performs, used only inside the musl native-rebuild compat e2e container to reproduce that install; it is never shipped, and it is kept for the 1.x credential refs whose pinned suite still installs this addon (scripts/musl-native-lockfiles/suite-native-addons.json), so a transitive cannot be bumped without making the e2e stop modelling that install. Re-justify or retire when those refs drop this addon.",
+      "added": "2026-10-20",
+      "expires": "2027-04-18"
+    },
+    {
+      "id": "GHSA-r292-9mhp-454m",
+      "package": "tar",
+      "version": "6.2.1",
+      "lockfile": "scripts/musl-native-lockfiles/sqlite3-5.1.7/package-lock.json",
+      "justification": "node-tar: Uncontrolled recursion in mapHas/filesFilter allows uncatchable stack-overflow DoS via crafted long-path tar with member selection. node-gyp and node-pre-gyp/prebuild-install use tar to unpack the sqlite3 source or prebuilt binary they download during the install, i.e. archives of the pinned package from its own release host, never user input at runtime. This lockfile (sqlite3-5.1.7) is a frozen `npm ci` pin of the install the pinned Next.js deploy-tests suite performs, used only inside the musl native-rebuild compat e2e container to reproduce that install; it is never shipped, and it is kept for the 1.x credential refs whose pinned suite still installs this addon (scripts/musl-native-lockfiles/suite-native-addons.json), so a transitive cannot be bumped without making the e2e stop modelling that install. Re-justify or retire when those refs drop this addon.",
+      "added": "2026-10-20",
+      "expires": "2027-04-18"
+    },
+    {
+      "id": "GHSA-r6q2-hw4h-h46w",
+      "package": "tar",
+      "version": "6.2.1",
+      "lockfile": "scripts/musl-native-lockfiles/sqlite3-5.1.7/package-lock.json",
+      "justification": "Race Condition in node-tar Path Reservations via Unicode Ligature Collisions on macOS APFS. node-gyp and node-pre-gyp/prebuild-install use tar to unpack the sqlite3 source or prebuilt binary they download during the install, i.e. archives of the pinned package from its own release host, never user input at runtime. This lockfile (sqlite3-5.1.7) is a frozen `npm ci` pin of the install the pinned Next.js deploy-tests suite performs, used only inside the musl native-rebuild compat e2e container to reproduce that install; it is never shipped, and it is kept for the 1.x credential refs whose pinned suite still installs this addon (scripts/musl-native-lockfiles/suite-native-addons.json), so a transitive cannot be bumped without making the e2e stop modelling that install. Re-justify or retire when those refs drop this addon.",
+      "added": "2026-10-20",
+      "expires": "2027-04-18"
     }
   ]
 }
