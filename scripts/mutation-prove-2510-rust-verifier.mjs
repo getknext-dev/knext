@@ -24,7 +24,10 @@
  *   C*  the cap (replay.rs): enforced, exact, never evicting a seen token, a
  *       replay reported as a replay even when full, a refused token not
  *       recorded, the default the vectors state.
- *   L*  the full-set warning (auth.rs): reported, and not on every call.
+ *   L*  the full-set warning (auth.rs): reported, naming the capacity in effect, and
+ *       not on every call.
+ *   E*  what a client sees (auth.rs): a full set is resource_exhausted, a replay
+ *       stays unauthenticated.
  *   W*  `Config::seen_capacity` reaching the check (rpc/mod.rs).
  *   N*  negative control: a change that must be tolerated, so the suite must
  *       stay GREEN.
@@ -284,6 +287,34 @@ const MUTATIONS = [
       '        if (last == i64::MIN || now.saturating_sub(last) >= FULL_WARNING_EVERY_SECS)\n',
     replacement:
       '        if (last == i64::MIN || true || now.saturating_sub(last) >= FULL_WARNING_EVERY_SECS)\n',
+  },
+  {
+    id: 'L3',
+    claim:
+      'the full-set warning names the configured capacity (0 under the defaults), not the one in effect',
+    subject: 'auth',
+    anchor: '                capacity = self.seen.capacity(),\n',
+    replacement: '                capacity = self.cfg.seen_capacity,\n',
+  },
+  // ── E: the code a client sees ─────────────────────────────────────────────
+  {
+    id: 'E1',
+    claim: 'a full replay set answers unauthenticated, as if the caller had done something wrong',
+    subject: 'auth',
+    anchor:
+      '                if err == AuthError::SeenSetFull {\n                    // Nothing is wrong',
+    replacement:
+      '                if false && err == AuthError::SeenSetFull {\n                    // Nothing is wrong',
+  },
+  {
+    id: 'E2',
+    claim:
+      'a replay is answered resource-exhausted too (a client is told to retry what it must not)',
+    subject: 'auth',
+    anchor:
+      '                if err == AuthError::SeenSetFull {\n                    // Nothing is wrong',
+    replacement:
+      '                if matches!(err, AuthError::SeenSetFull | AuthError::Replayed) {\n                    // Nothing is wrong',
   },
   // ── W: wiring ─────────────────────────────────────────────────────────────
   {

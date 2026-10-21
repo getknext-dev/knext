@@ -24,8 +24,11 @@ const (
 	// most 65 s (60 s of life plus 5 s of skew), so a pod holds about 65 times
 	// its rate of verified calls: 65,536 is the set of a pod doing about 1,000
 	// verified calls a second. Its cost is measured by
-	// TestSeenSetMemoryCostAtTheDefaultCap. A pod busier than that refuses
-	// calls, which is the signal to scale out or to raise Config.SeenCapacity.
+	// TestSeenSetMemoryCostAtTheDefaultCap (about 150 bytes an entry in Go). A
+	// pod busier than that refuses new tokens with ResourceExhausted. Those
+	// refusals are fast, so they do not raise the concurrency Knative scales on:
+	// the autoscaler gets no signal from them. Raise Config.SeenCapacity, or
+	// spread the calls over more pods yourself.
 	DefaultSeenCapacity = 65536
 	// MinJTIChars and MaxJTIChars bound a jti: 22 base64url characters are the
 	// 16 random bytes (128 bits) the signer mints; the maximum keeps an entry small.

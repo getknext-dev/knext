@@ -23,9 +23,10 @@ const EnvPath = "KNEXT_Z7_VECTORS"
 // File is the vectors file.
 type File struct {
 	Contract struct {
-		MaxLifetimeSeconds  int64 `json:"maxLifetimeSeconds"`
-		ClockSkewSeconds    int64 `json:"clockSkewSeconds"`
-		DefaultSeenCapacity int   `json:"defaultSeenCapacity"`
+		MaxLifetimeSeconds  int64  `json:"maxLifetimeSeconds"`
+		ClockSkewSeconds    int64  `json:"clockSkewSeconds"`
+		DefaultSeenCapacity int    `json:"defaultSeenCapacity"`
+		FullSetWireCode     string `json:"fullSetWireCode"`
 		JTIChars            struct {
 			Min int `json:"min"`
 			Max int `json:"max"`

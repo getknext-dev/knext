@@ -233,7 +233,7 @@ pub struct TokenVerifier {
 }
 
 impl TokenVerifier {
-    fn warn_full(&self, now: i64) {
+    pub(super) fn warn_full(&self, now: i64) {
         let last = self.full_logged_at.load(Ordering::Relaxed);
         if (last == i64::MIN || now.saturating_sub(last) >= FULL_WARNING_EVERY_SECS)
             && self
@@ -242,7 +242,7 @@ impl TokenVerifier {
                 .is_ok()
         {
             tracing::warn!(
-                capacity = self.cfg.seen_capacity,
+                capacity = self.seen.capacity(),
                 "the token replay set is full: new tokens are refused until entries expire"
             );
         }
@@ -363,6 +363,11 @@ where
                 // The cause is logged, never sent: the caller learns only that
                 // the token was refused.
                 tracing::debug!(procedure, error = %err, "token rejected");
+                if err == AuthError::SeenSetFull {
+                    // Nothing is wrong with the caller or its token: this pod has
+                    // no room to remember another one. Say so, so a client backs off.
+                    return Either::Right(ready(Ok(exhausted(req.headers()))));
+                }
                 return Either::Right(ready(Ok(refusal(req.headers(), "token rejected"))));
             }
         };
@@ -377,6 +382,13 @@ where
 /// `grpc-status` 16 on gRPC and gRPC-Web.
 fn refusal(headers: &HeaderMap, message: &str) -> Response<ConnectRpcBody> {
     ConnectError::unauthenticated(message).into_http_response(headers)
+}
+
+/// `resource_exhausted` in the caller's protocol: HTTP 429 on Connect,
+/// `grpc-status` 8 on gRPC and gRPC-Web. The replay set is full.
+fn exhausted(headers: &HeaderMap) -> Response<ConnectRpcBody> {
+    ConnectError::resource_exhausted("the function is at its token limit; retry")
+        .into_http_response(headers)
 }
 
 /// The token of an `Authorization: Bearer <token>` value.

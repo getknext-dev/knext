@@ -26,6 +26,8 @@
  *       a replay reported as a replay even when full, a refused token not
  *       recorded, the default the vectors state.
  *   L*  the full-set warning (verifier.go): reported, and not on every call.
+ *   E*  what a client sees (auth.go): a full set is ResourceExhausted, a replay
+ *       stays Unauthenticated.
  *   W*  Config.SeenCapacity reaching the check (rpc.go).
  *   N*  negative control: a change that must be tolerated, so the suite must
  *       stay GREEN.
@@ -65,12 +67,14 @@ const TEMPLATE_MODULE = `${REPO_ROOT}/templates/go`;
 const TOKEN = resolve(REPO_ROOT, 'templates/go/internal/auth/token.go');
 const REPLAY = resolve(REPO_ROOT, 'templates/go/internal/auth/replay.go');
 const VERIFIER = resolve(REPO_ROOT, 'templates/go/internal/auth/verifier.go');
+const AUTH = resolve(REPO_ROOT, 'templates/go/internal/auth/auth.go');
 const SERVER = resolve(REPO_ROOT, 'templates/go/internal/rpc/rpc.go');
 const PROVER = {
   subjects: {
     token: TOKEN,
     replay: REPLAY,
     verifier: VERIFIER,
+    auth: AUTH,
     server: SERVER,
   },
 };
@@ -305,6 +309,22 @@ const MUTATIONS = [
     anchor:
       '\tif (last == 0 || now-last >= fullWarningEvery) && v.fullLoggedAt.CompareAndSwap(last, now) {\n',
     replacement: '\tif v.fullLoggedAt.CompareAndSwap(last, now) || true {\n',
+  },
+  // ── E: the code a client sees ─────────────────────────────────────────────
+  {
+    id: 'E1',
+    claim: 'a full replay set answers unauthenticated, as if the caller had done something wrong',
+    subject: 'auth',
+    anchor: '\t\t\t\tif errors.Is(err, ErrSeenSetFull) {\n',
+    replacement: '\t\t\t\tif false && errors.Is(err, ErrSeenSetFull) {\n',
+  },
+  {
+    id: 'E2',
+    claim:
+      'a replay is answered resource-exhausted too (a client is told to retry what it must not)',
+    subject: 'auth',
+    anchor: '\t\t\t\tif errors.Is(err, ErrSeenSetFull) {\n',
+    replacement: '\t\t\t\tif errors.Is(err, ErrSeenSetFull) || errors.Is(err, ErrReplayed) {\n',
   },
   // ── W: wiring ─────────────────────────────────────────────────────────────
   {

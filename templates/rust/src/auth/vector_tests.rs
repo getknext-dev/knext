@@ -848,6 +848,113 @@ fn full_replay_set_is_reported_once_in_a_while() {
     }
 }
 
+/// A pod whose replay set is full is not refusing a bad caller: the token is
+/// fine and the pod is out of room. The caller is told so with
+/// `resource_exhausted` (the vectors name that code), while a replay stays
+/// `unauthenticated`.
+#[tokio::test]
+async fn full_replay_set_answers_resource_exhausted() {
+    let v = testvectors::load();
+    assert_eq!(v.contract.full_set_wire_code, "resource_exhausted");
+    let seq = v
+        .sequences
+        .iter()
+        .find(|s| s.name == "cap-reached-refuses-new")
+        .expect("the cap-reached-refuses-new sequence");
+    let (verifier, clock) = sequence_verifier(&v, seq, "full-wire-code");
+    clock.set(seq.steps[0].now);
+    let (mut svc, reached) = stand_in(Arc::new(verifier));
+    macro_rules! call {
+        ($i:expr) => {{
+            let req = post(&seq.procedure, Some(&seq.steps[$i].token()), b"{}");
+            let resp = svc.ready().await.unwrap().call(req).await.unwrap();
+            let status = resp.status();
+            let body = http_body_util::BodyExt::collect(resp.into_body())
+                .await
+                .unwrap()
+                .to_bytes();
+            (status, String::from_utf8_lossy(&body).into_owned())
+        }};
+    }
+    for i in 0..2 {
+        assert_eq!(
+            call!(i).0,
+            http::StatusCode::OK,
+            "filling the set, token {i}"
+        );
+    }
+    let (status, body) = call!(2);
+    assert_eq!(status, http::StatusCode::TOO_MANY_REQUESTS, "{body}");
+    assert!(body.contains("resource_exhausted"), "{body}");
+    assert!(
+        !body.contains(&seq.steps[2].jws[2]),
+        "the body carries the token"
+    );
+    let (status, body) = call!(0);
+    assert_eq!(
+        status,
+        http::StatusCode::UNAUTHORIZED,
+        "a replay into a full set: {body}"
+    );
+    assert_eq!(reached.lock().unwrap().len(), 2);
+}
+
+/// The warning names the set's effective capacity, not the configured one
+/// (zero means the default).
+#[test]
+fn full_warning_names_the_effective_capacity() {
+    use std::io::Write;
+
+    #[derive(Clone, Default)]
+    struct Sink(Arc<Mutex<Vec<u8>>>);
+    impl Write for Sink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let v = testvectors::load();
+    let seq = v
+        .sequences
+        .iter()
+        .find(|s| s.name == "cap-reached-refuses-new")
+        .expect("the cap-reached-refuses-new sequence");
+    // Capacity 2 configured: the warning must say 2. Then the default: 0 is configured,
+    // the warning must say the default, never 0.
+    for (configured, effective) in [(Some(2), 2), (None, DEFAULT_SEEN_CAPACITY)] {
+        let mut seq = seq.clone();
+        seq.capacity = configured;
+        let (verifier, clock) = sequence_verifier(&v, &seq, "full-capacity");
+        clock.set(seq.steps[0].now);
+        let sink = Sink::default();
+        let captured = sink.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || captured.clone())
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            if configured.is_some() {
+                for step in &seq.steps[..2] {
+                    verifier.verify(&step.token(), &seq.procedure).unwrap();
+                }
+                let _ = verifier.verify(&seq.steps[2].token(), &seq.procedure);
+            } else {
+                // Filling 65,536 tokens is not needed: ask the verifier for its warning directly.
+                verifier.warn_full(seq.steps[0].now);
+            }
+        });
+        let log = String::from_utf8(sink.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            log.contains(&format!("capacity={effective}")),
+            "configured {configured:?}: the warning should name capacity={effective}: {log}"
+        );
+    }
+}
+
 /// The measured cost behind the default replay-set cap. It counts allocations,
 /// so it needs a global allocator, and sits here with the repository-only
 /// tests rather than in a function's own.

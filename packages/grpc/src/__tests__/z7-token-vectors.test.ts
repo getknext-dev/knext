@@ -382,6 +382,7 @@ describe('z7 token vectors', () => {
   it('the contract names the replay rules, and the sequences cover each of them', () => {
     expect(committed.contract.claims).toEqual(['iss', 'aud', 'method', 'sub', 'jti', 'iat', 'exp']);
     expect(committed.contract.defaultSeenCapacity).toBeGreaterThan(0);
+    expect(committed.contract.fullSetWireCode).toBe('resource_exhausted');
     expect(committed.contract.jtiChars).toEqual({ min: 22, max: 64 });
     const names = new Set(committed.sequences.map((s) => s.name));
     for (const required of [

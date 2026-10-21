@@ -17,7 +17,8 @@
       "min": 22,
       "max": 64
     },
-    "defaultSeenCapacity": 65536
+    "defaultSeenCapacity": 65536,
+    "fullSetWireCode": "resource_exhausted"
   },
   "verifier": {
     "issuer": "knext:zone:shop/storefront",

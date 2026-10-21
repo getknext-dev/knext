@@ -37,6 +37,8 @@ pub struct Contract {
     pub clock_skew_seconds: i64,
     #[serde(rename = "defaultSeenCapacity")]
     pub default_seen_capacity: usize,
+    #[serde(rename = "fullSetWireCode")]
+    pub full_set_wire_code: String,
     #[serde(rename = "jtiChars")]
     pub jti_chars: JtiChars,
 }

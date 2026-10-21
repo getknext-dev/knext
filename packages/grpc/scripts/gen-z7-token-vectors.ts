@@ -93,6 +93,9 @@ export const REASONS = Object.freeze([
  */
 export const DEFAULT_SEEN_CAPACITY = 65536;
 
+/** The Connect code a client sees when the function's replay set is full. */
+export const FULL_SET_WIRE_CODE = 'resource_exhausted';
+
 /** A `jti` is 22-64 base64url characters: 22 is exactly 16 random bytes. */
 export const JTI_CHARS = Object.freeze({ min: 22, max: 64 });
 
@@ -866,6 +869,9 @@ export function buildVectors() {
       clockSkewSeconds: 5,
       jtiChars: JTI_CHARS,
       defaultSeenCapacity: DEFAULT_SEEN_CAPACITY,
+      // What a client sees when a function's replay set is full: not `unauthenticated`
+      // (the caller did nothing wrong), so it is told to back off.
+      fullSetWireCode: FULL_SET_WIRE_CODE,
     },
     verifier: { issuer: ISSUER, audience: AUDIENCE },
     reasons: [...REASONS],

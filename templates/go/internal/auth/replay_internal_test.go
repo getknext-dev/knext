@@ -132,7 +132,7 @@ func TestSeenSetCapacityDefaults(t *testing.T) {
 // ids and issuer, measures the retained heap, and holds the per-entry cost and
 // the total under a stated bound, so a change that doubles the cost reds here.
 func TestSeenSetMemoryCostAtTheDefaultCap(t *testing.T) {
-	const perEntryBudget = 200 // bytes; measured ~110-150 on go1.26 arm64/amd64
+	const perEntryBudget = 200 // bytes; measured 152 in Go on go1.26 arm64 (Rust measures 154)
 	s := newSeenSet(DefaultSeenCapacity)
 	var before, after runtime.MemStats
 	runtime.GC()

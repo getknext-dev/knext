@@ -100,7 +100,7 @@ async fn seen_capacity_reaches_the_token_check() {
         .unwrap_err();
     assert_eq!(
         err.code,
-        ErrorCode::Unauthenticated,
+        ErrorCode::ResourceExhausted,
         "a second token with room for one"
     );
     running.stop().await.unwrap();

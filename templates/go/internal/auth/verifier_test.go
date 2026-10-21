@@ -800,3 +800,47 @@ func TestFullReplaySetIsReportedOnceInAWhile(t *testing.T) {
 		}
 	}
 }
+
+// A pod whose replay set is full is not refusing a bad caller: the token is
+// fine and the pod is out of room. The caller is told so with ResourceExhausted
+// (and the vectors name that code), while a replay stays unauthenticated.
+func TestFullReplaySetAnswersResourceExhausted(t *testing.T) {
+	v := testvectors.Load(t)
+	if got := connect.CodeResourceExhausted.String(); got != v.Contract.FullSetWireCode {
+		t.Fatalf("the vectors name %q for a full set; connect's ResourceExhausted is %q", v.Contract.FullSetWireCode, got)
+	}
+	var seq testvectors.Sequence
+	for _, s := range v.Sequences {
+		if s.Name == "cap-reached-refuses-new" {
+			seq = s
+		}
+	}
+	if len(seq.Steps) < 3 {
+		t.Fatal("no cap-reached-refuses-new sequence")
+	}
+	verifier, clk := verifierFor(t, v, seq)
+	f := newFixture(t, verifier)
+	clk.Set(seq.Steps[0].Now)
+	call := func(i int) error {
+		_, err := f.example.PutItem(withAuthorization(t, "Bearer "+seq.Steps[i].Token()), &examplev1.PutItemRequest{Id: "a"})
+		return err
+	}
+	for i := range 2 {
+		if err := call(i); err != nil {
+			t.Fatalf("filling the set, token %d: %v", i, err)
+		}
+	}
+	err := call(2)
+	if got := connect.CodeOf(err); got != connect.CodeResourceExhausted {
+		t.Fatalf("a new token into a full set: code = %v (err %v); want ResourceExhausted", got, err)
+	}
+	var cerr *connect.Error
+	if errors.As(err, &cerr) && strings.Contains(cerr.Message(), seq.Steps[2].JWS[2]) {
+		t.Fatalf("the message %q carries the token", cerr.Message())
+	}
+	// A replay of a token already seen is still the caller's doing, even when full.
+	wantUnauthenticated(t, "a replay into a full set", call(0))
+	if n := f.handler.count(); n != 2 {
+		t.Fatalf("the handler ran %d times; want 2", n)
+	}
+}

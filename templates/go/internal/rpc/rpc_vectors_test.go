@@ -92,5 +92,5 @@ func TestSeenCapacityReachesTheTokenCheck(t *testing.T) {
 		t.Fatalf("the first token: %v", err)
 	}
 	_, err = example.PutItem(bearer(t, v.Token(t, "valid-user-second-jti")), &examplev1.PutItemRequest{Id: "a", Value: "b"})
-	wantCode(t, "a second, different token with room for one", err, connect.CodeUnauthenticated)
+	wantCode(t, "a second, different token with room for one", err, connect.CodeResourceExhausted)
 }

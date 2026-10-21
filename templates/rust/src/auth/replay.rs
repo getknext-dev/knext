@@ -23,9 +23,12 @@ use super::AuthError;
 /// How many tokens the set holds. A token is held at most 65 s (60 s of life
 /// plus 5 s of skew), so a pod holds about 65 times its rate of verified
 /// calls: 65,536 is the set of a pod doing about 1,000 verified calls a
-/// second. Its cost is measured by `memory_cost_at_the_default_cap`. A pod
-/// busier than that refuses calls, which is the signal to scale out or to
-/// raise `TokenConfig::seen_capacity`.
+/// second. Its cost is measured by `memory_cost_at_the_default_cap` (about
+/// 154 bytes an entry in Rust). A pod busier than that refuses new tokens with
+/// `resource_exhausted`. Those refusals are fast, so they do not raise the
+/// concurrency Knative scales on: the autoscaler gets no signal from them.
+/// Raise `TokenConfig::seen_capacity`, or spread the calls over more pods
+/// yourself.
 pub const DEFAULT_SEEN_CAPACITY: usize = 65_536;
 /// A `jti` is `MIN_JTI_CHARS..=MAX_JTI_CHARS` base64url characters: 22 are the
 /// 16 random bytes (128 bits) the signer mints, and the maximum keeps an entry
@@ -123,7 +126,7 @@ impl SeenSet {
         self.0.lock().unwrap().by_expiry.len()
     }
 
-    #[cfg(test)]
+    /// The capacity in effect (the default when none was configured).
     pub(super) fn capacity(&self) -> usize {
         self.0.lock().unwrap().capacity
     }
