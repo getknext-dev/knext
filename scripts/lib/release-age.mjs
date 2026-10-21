@@ -121,6 +121,12 @@ function npmFromId(id, registry) {
   return { ecosystem: 'npm', name, version: spec };
 }
 
+/** A real subresource-integrity value, as bun and npm write it. */
+const SRI = /^sha(?:256|384|512)-[A-Za-z0-9+/=]+$/;
+
+/** A repository source (`github:o/r#…`, `git+ssh://…`). */
+const REPO_SPEC = /^(?:github:|gitlab:|bitbucket:|git(?:\+[a-z]+)?:\/\/|git\+)/;
+
 /** Packages in a `bun.lock` (JSONC). */
 function parseBunLock(text, parseJsoncFn) {
   const lock = parseJsoncFn(text);
@@ -138,7 +144,11 @@ function parseBunLock(text, parseJsoncFn) {
         .slice(2)
         .filter((x) => typeof x === 'string')
         .at(-1);
-      if (integrity) e.integrity = integrity;
+      // Only a repository spec may carry bun's own non-SRI id (`o-r-abc`) as its identity;
+      // for any other source a trailing string that is not a real hash is not a hash.
+      if (integrity && (SRI.test(integrity) || REPO_SPEC.test(e.version))) {
+        e.integrity = integrity;
+      }
     }
     out.push(e);
   }
@@ -156,7 +166,8 @@ function parsePackageLock(text) {
     if (marker < 0 || e.inBundle) continue;
     const name = e.name ?? key.slice(marker + 'node_modules/'.length);
     const version = typeof e.version === 'string' ? e.version : '(none)';
-    const integrity = typeof e.integrity === 'string' ? { integrity: e.integrity } : {};
+    const integrity =
+      typeof e.integrity === 'string' && SRI.test(e.integrity) ? { integrity: e.integrity } : {};
     if (typeof e.resolved !== 'string') {
       out.push({ ecosystem: 'npm', name, version, unresolved: 'no resolved URL', ...integrity });
     } else if (e.resolved.startsWith('file:')) {
@@ -308,6 +319,32 @@ export function changedEntries(head, base) {
   return out;
 }
 
+/** A repository source that pins a commit in its own spec (`github:o/r#sha`, `git+ssh://…#sha`). */
+const PINNED_REPO_SPEC =
+  /^(?:github:|gitlab:|bitbucket:|git(?:\+[a-z]+)?:\/\/|git\+).*#(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+/** `github:` deps resolve to a codeload tarball addressed by the full commit sha. */
+const COMMIT_TARBALL =
+  /^https:\/\/codeload\.github\.com\/[^/]+\/[^/]+\/tar\.gz\/(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+
+/**
+ * An npm dependency fetched from a URL (tarball, other registry, no resolved URL) whose
+ * lockfile entry carries no integrity hash. With no hash there is nothing for the installer
+ * to verify and no lockfile diff when the bytes behind the URL change, so a release-age
+ * exception must never excuse it. A repository source pinned to a commit in its spec is not
+ * this case: the commit is its content address.
+ *
+ * @param {Entry} e
+ */
+export function isHashlessUrlSource(e) {
+  return (
+    e.ecosystem === 'npm' &&
+    Boolean(e.unresolved) &&
+    !SRI.test(e.integrity ?? '') &&
+    !(REPO_SPEC.test(e.version) && PINNED_REPO_SPEC.test(e.version)) &&
+    !COMMIT_TARBALL.test(e.version)
+  );
+}
+
 /** First-party registry packages are published by this repository, so have no quarantine. */
 export function isExcluded(entry, excludes) {
   return !entry.unresolved && entry.ecosystem === 'npm' && excludes.includes(entry.name);
@@ -456,6 +493,7 @@ export async function evaluateAges({
 }) {
   const tooNew = [];
   const unresolved = [];
+  const hashless = [];
   const excepted = [];
   const errors = [];
   const skipped = [];
@@ -472,8 +510,10 @@ export async function evaluateAges({
     );
   for (const e of entries) {
     if (e.unresolved) {
-      // No publish time exists to check, so it cannot pass on age: only a named exception.
-      (isExcepted(e) ? excepted : unresolved).push(e);
+      // No publish time exists to check, so it cannot pass on age: only a named exception,
+      // and never for a URL source with no integrity hash (nothing to verify its bytes by).
+      if (isHashlessUrlSource(e)) hashless.push(e);
+      else (isExcepted(e) ? excepted : unresolved).push(e);
     } else if (isExcluded(e, excludes)) skipped.push(e);
     else queue.push(e);
   }
@@ -498,6 +538,7 @@ export async function evaluateAges({
   return {
     tooNew,
     unresolved,
+    hashless,
     excepted,
     errors,
     skipped,
@@ -525,6 +566,13 @@ export function renderAgeReport(r, minSeconds) {
       `FAIL: ${r.unresolved.length} added or changed entr${r.unresolved.length === 1 ? 'y does' : 'ies do'} not resolve to a version on the public registry, so there is no publish time to check (git, tarball, other registry, no resolved URL):`,
       ...r.unresolved.map((e) => `${lineOf(e)}  [${e.unresolved}]`),
       'Use a registry release, or record a scoped entry (ecosystem, package, the exact source spec) in security/release-age-exceptions.json.',
+    );
+  }
+  if (r.hashless?.length) {
+    out.push(
+      `FAIL: ${r.hashless.length} unresolved dependenc${r.hashless.length === 1 ? 'y has' : 'ies have'} no valid integrity hash (sha256/384/512) and no full-commit pin, so nothing verifies the bytes behind the source and a security/release-age-exceptions.json exception cannot excuse it:`,
+      ...r.hashless.map((e) => `${lineOf(e)}  [${e.unresolved}]`),
+      'Re-lock with bun (it writes a sha512 for tarball dependencies), pin a git source to a commit, or use a registry release. Never hand-write the entry.',
     );
   }
   if (r.errors.length) {
@@ -574,4 +622,7 @@ export function renderUnscannable(entries) {
 
 /** @param {Awaited<ReturnType<typeof evaluateAges>>} r */
 export const ageFailed = (r) =>
-  r.tooNew.length > 0 || r.errors.length > 0 || r.unresolved.length > 0;
+  r.tooNew.length > 0 ||
+  r.errors.length > 0 ||
+  r.unresolved.length > 0 ||
+  (r.hashless?.length ?? 0) > 0;
