@@ -97,6 +97,11 @@ describe('the gate fails closed when govulncheck did not finish a scan', () => {
     expect(evaluate([config, called('GO-2026-6809')], [entry()], NOW).ok).toBe(false);
   });
 
+  it('fails when only an earlier progress stage was reached', () => {
+    const early = { progress: { message: 'Fetching vulnerabilities from the database...' } };
+    expect(evaluate([config, early], [], NOW).ok).toBe(false);
+  });
+
   it('passes a completed scan with no called findings and no exceptions', () => {
     expect(evaluate([config, scanned], [], NOW).ok).toBe(true);
   });

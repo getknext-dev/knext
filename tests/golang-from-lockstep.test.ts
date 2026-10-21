@@ -105,13 +105,31 @@ describe('the golang scan itself', () => {
   });
 });
 
-const dockerfiles = execFileSync(
-  'git',
-  ['ls-files', '*Dockerfile*', '*Containerfile*', '*.dockerfile'],
-  { cwd: REPO_ROOT, encoding: 'utf8' },
-)
+/** Dockerfile / Containerfile, with any prefix or suffix (Dockerfile.prod, api.Dockerfile). */
+export const CANDIDATE = /(?:^|\/)(?:[^/]*\.)?(?:Dockerfile|Containerfile)(?:\.[^/]*)?$/i;
+
+describe('which files the scan reads', () => {
+  it('selects Dockerfiles and Containerfiles in every common spelling', () => {
+    for (const f of [
+      'Dockerfile',
+      'a/b/Dockerfile',
+      'a/Dockerfile.prod',
+      'a/api.Dockerfile',
+      'Containerfile',
+      'a/Containerfile.go',
+      'a/svc.containerfile',
+    ]) {
+      expect(CANDIDATE.test(f), f).toBe(true);
+    }
+    for (const f of ['a/Dockerfile.md.bak/x.ts', 'a/notes.txt', 'a/MyDockerfileHelper.ts']) {
+      expect(CANDIDATE.test(f), f).toBe(false);
+    }
+  });
+});
+
+const dockerfiles = execFileSync('git', ['ls-files'], { cwd: REPO_ROOT, encoding: 'utf8' })
   .split('\n')
-  .filter(Boolean)
+  .filter((f) => CANDIDATE.test(f))
   .filter((f) => existsSync(resolve(REPO_ROOT, f)))
   .filter((f) => golangRefs(readFileSync(resolve(REPO_ROOT, f), 'utf8')).length > 0);
 
