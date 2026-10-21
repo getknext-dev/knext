@@ -140,7 +140,7 @@ const KEY_BLOCK =
   '    `  ${cacheTag}(${JSON.stringify(serviceTag(ctx.fn, method))});`,\n' +
   "    '  // protoVersion is part of the cache key only: a function rollout is a new entry.',\n" +
   "    '  void protoVersion;',\n" +
-  "    `  const token = ${mintExpr(ctx, p, 'subject')};`,";
+  "    `  const token = async () => ${mintExpr(ctx, p, 'subject')};`,";
 
 // The one line of the emitted action that refreshes the reads, and the one
 // that decides whether a failed call may have committed.
