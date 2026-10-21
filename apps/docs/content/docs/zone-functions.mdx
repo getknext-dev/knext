@@ -384,6 +384,22 @@ own it, the operator leaves it alone, publishes nothing, and reports `SigningKey
 `JWKSConfigMapConflict` on the `ZoneSigningKey` condition. Remove the object and the operator
 creates its own.
 
+### Tokens are single-use
+
+Every token the zone signs carries a random id. A function keeps the ids it has accepted until the
+token expires and refuses a second use, so a copy of a token captured on the network is refused by
+the function that already served the original. It is a limit, not a seal:
+
+- The memory is per pod. A copy can still be replayed once to a different replica of the same
+  function, or after the pod restarts or scales to zero, for as long as the token lives (about a
+  minute). Make writes idempotent.
+- The token does not cover the request body, so a copy that arrives before the original is served
+  with whatever body its sender chose.
+- A function that is busier than its memory (65,536 tokens by default) refuses new tokens instead of
+  forgetting one it has seen, and logs a warning.
+- A function refuses a token with no id, so upgrade the zone first, then its functions (the reverse of the usual order for contract versions). The zone
+  asks for a new token on every attempt of a retried read.
+
 ## Network
 
 The function's Knative Service is **cluster-local**: it has no public route. The operator also
