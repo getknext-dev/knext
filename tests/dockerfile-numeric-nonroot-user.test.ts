@@ -363,7 +363,10 @@ const BUILT_REPOS: [RegExp, string][] = [
 
 /** Files that deploy a NextApp or BackendService. */
 const DEPLOYING =
-  /kind:\s*(NextApp|BackendService)\b|\bkn?ext(\s+|\/)deploy\b|\bdeploy\s+(--[\w-]+\s+\S+\s+)*--image\b|NextApp\{|nextapp\b.*\bapply\b/;
+  /kind:\s*(NextApp|BackendService)\b|\bkn?ext(\s+|\/)deploy\b|NextApp\{|nextapp\b.*\bapply\b/;
+/** A CLI deploy of a prebuilt image: `... deploy ... --image <ref>` (published or local CLI). */
+const deploysImage = (text: string): boolean => /--image[ =]/.test(text) && /\bdeploy\b/.test(text);
+export const deploysApp = (text: string): boolean => DEPLOYING.test(text) || deploysImage(text);
 const DEPLOY_SCAN_ROOTS =
   /^(packages\/kn-next-operator\/test\/|packages\/grpc\/e2e\/|scripts\/|\.github\/workflows\/|apps\/file-manager\/scripts\/|packages\/scale-zero-pg\/demo\/manifests\/|packages\/kn-next-operator\/config\/samples\/)/;
 const DEPLOY_SKIP = /(^|\/)mutation-prove|(^|\/)mutate-|\.test\.ts$|README\.md$/;
@@ -400,7 +403,7 @@ export function classify(ref: string): Disposition | undefined {
 const DEPLOYERS = FILES.filter(
   (f) => DEPLOY_SCAN_ROOTS.test(f) && !DEPLOY_SKIP.test(f) && /\.(go|sh|ya?ml|mjs|ts|js)$/.test(f),
 );
-const DEPLOYING_FILES = DEPLOYERS.filter((f) => DEPLOYING.test(read(f)));
+const DEPLOYING_FILES = DEPLOYERS.filter((f) => deploysApp(read(f)));
 const DEPLOYED_REFS = DEPLOYING_FILES.flatMap((f) =>
   imageRefs(read(f)).map((ref) => ({ file: f, ref })),
 );
@@ -453,7 +456,8 @@ describe('3. images the e2e and nightly lanes deploy', () => {
           `${f} deploys root image ${ref} but is not a declared opt-out lane`,
         ).toContain(f);
         expect(read(f), `${f}: declared opt-out lane but renders no runAsNonRoot: false`).toMatch(
-          /runAsNonRoot:\s*false/,
+          // the YAML the lane applies, not a comment that mentions the field
+          /^[ \t]+security:[ \t]*\n[ \t]+runAsNonRoot:[ \t]*false[ \t]*$/m,
         );
       }
     }
@@ -505,6 +509,8 @@ describe('the checkers can say no', () => {
     const heredoc = `cat > Dockerfile <<EOF\nFROM alpine:3.22\nUSER 65532:65532\nEOF\n`;
     const b = inlineDockerfiles('b.sh', heredoc);
     expect(b).toHaveLength(1);
+    // reported at the heredoc, which owns the body up to its delimiter
+    expect(b[0]?.line).toBe(1);
     expect(inlineUser(b[0]?.text ?? '')).toBe('65532:65532');
     // SQL is not a Dockerfile
     expect(
