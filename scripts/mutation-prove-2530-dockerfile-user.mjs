@@ -173,6 +173,14 @@ const MUTATIONS = [
     replacement: "if (!m) return 'ok';",
     options: TS_INLINE,
   },
+  {
+    id: 'U17',
+    subject: 'operator',
+    claim: 'the operator image runs as a named user (runAsNonRoot would refuse it)',
+    anchor: 'USER 65532:65532\n',
+    replacement: 'USER nonroot\n',
+    options: DOCKER,
+  },
 
   // ---- scan 2: Dockerfiles written inline by scripts
   {
@@ -325,6 +333,7 @@ const prover = createGuardProver({
     standaloneHbs: 'packages/kn-next/templates/runtime-standalone/Dockerfile.standalone.hbs',
     zoneCaller: 'packages/grpc/e2e/z7-identity-kind/zone-caller/Dockerfile',
     szpgDemo: 'packages/scale-zero-pg/demo/app/Dockerfile',
+    operator: 'packages/kn-next-operator/Dockerfile',
     spec: 'tests/dockerfile-numeric-nonroot-user.test.ts',
     drill: 'packages/kn-next-operator/test/networkpolicy-enforcement-drill.sh',
     rollback: 'packages/kn-next-operator/test/e2e/rollback_e2e_test.go',

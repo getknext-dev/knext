@@ -65,8 +65,6 @@ export const DOCKERFILE_EXEMPTIONS: Record<string, string> = {
     'bake-off scratch image for the scale-to-zero database gateway, run by hand; never a NextApp or BackendService',
   'packages/scale-zero-pg/gateway/Dockerfile':
     'the scale-to-zero database gateway: a platform component with its own Deployment, not rendered by the NextApp operator (it sets USER nonroot:nonroot on distroless, which the kubelet accepts for that Deployment, not under this rule)',
-  'packages/kn-next-operator/Dockerfile':
-    'the operator itself: its own Deployment, which sets runAsNonRoot with an explicit runAsUser in config/manager/manager.yaml',
   'scripts/bench-cold-start-phases/gke/variants/Dockerfile.variants':
     'benchmark scratch variants layered on a scaffolded image for cold-start A/B runs, built and deployed by hand on a benchmark cluster',
   'apps/docs/Dockerfile.trivyscan':
