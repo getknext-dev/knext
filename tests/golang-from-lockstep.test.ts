@@ -108,6 +108,59 @@ describe('the golang scan itself', () => {
 /** Dockerfile / Containerfile, with any prefix or suffix (Dockerfile.prod, api.Dockerfile). */
 export const CANDIDATE = /(?:^|\/)(?:[^/]*\.)?(?:Dockerfile|Containerfile)(?:\.[^/]*)?$/i;
 
+/**
+ * FROM lines whose image is not pinned by digest. `scratch` and a reference to an
+ * earlier stage alias are not registry images and need no digest.
+ */
+export function unpinnedFroms(src: string): string[] {
+  const stages = new Set<string>();
+  const out: string[] = [];
+  for (const raw of src.split('\n')) {
+    const m = raw.trim().match(/^FROM\s+(?:--\S+\s+)*(\S+)(?:\s+AS\s+(\S+))?/i);
+    if (!m) continue;
+    const [, image, alias] = m;
+    if (
+      image !== 'scratch' &&
+      !stages.has(image.toLowerCase()) &&
+      !/@sha256:[0-9a-f]{64}$/.test(image)
+    ) {
+      out.push(image);
+    }
+    if (alias) stages.add(alias.toLowerCase());
+  }
+  return out;
+}
+
+describe('every FROM in a golang Dockerfile is digest-pinned, not only the golang one', () => {
+  const D64 = `@sha256:${'b'.repeat(64)}`;
+
+  it('flags a tag-only runtime image', () => {
+    const src = `FROM golang:1.26.9${D64} AS build\nFROM gcr.io/distroless/static:nonroot\n`;
+    expect(unpinnedFroms(src)).toEqual(['gcr.io/distroless/static:nonroot']);
+  });
+
+  it('accepts digest-pinned images, scratch and stage references', () => {
+    const src = `FROM golang:1.26.9${D64} AS build\nFROM build AS test\nFROM scratch\nFROM --platform=$BUILDPLATFORM gcr.io/distroless/static:nonroot${D64}\n`;
+    expect(unpinnedFroms(src)).toEqual([]);
+  });
+
+  for (const file of EXPECTED) {
+    it(`${file}: no unpinned FROM`, () => {
+      expect(unpinnedFroms(readFileSync(resolve(REPO_ROOT, file), 'utf8'))).toEqual([]);
+    });
+  }
+
+  it('the gateway runtime image carries a readable comment naming the tag it pins', () => {
+    const src = readFileSync(
+      resolve(REPO_ROOT, 'packages/scale-zero-pg/gateway/Dockerfile'),
+      'utf8',
+    );
+    expect(src).toMatch(
+      /^# gcr\.io\/distroless\/static:nonroot\n\s*FROM gcr\.io\/distroless\/static:nonroot@sha256:/m,
+    );
+  });
+});
+
 describe('which files the scan reads', () => {
   it('selects Dockerfiles and Containerfiles in every common spelling', () => {
     for (const f of [
