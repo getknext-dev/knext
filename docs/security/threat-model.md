@@ -837,7 +837,7 @@ exception, not as compliance with `security.md`'s reverse-proxy requirement.
 
 Every container the operator renders for a `NextApp` or a `BackendService` carries
 `allowPrivilegeEscalation: false`, `capabilities.drop: [ALL]`, `seccompProfile: RuntimeDefault` and
-`runAsNonRoot: true` (#2530), next to the app container's `readOnlyRootFilesystem`. Before this the
+`runAsNonRoot: true` next to the app container's `readOnlyRootFilesystem`. Before this the
 app container set only `readOnlyRootFilesystem`, and the function container lacked `runAsNonRoot`
 and a seccomp profile. The operator's own Deployment already set all four; this closes the gap in
 what it renders for others.
@@ -850,8 +850,9 @@ what it renders for others.
 
 **Rollout cost, stated.** The change alters the Knative Service template, so an operator upgrade rolls
 one new revision of every `NextApp` and `BackendService`. The previous revision serves until the new
-one is ready. This is listed in the upgrade notes (`apps/docs/content/docs/upgrading.mdx`) and belongs
-on the expected-churn list for the operator minor (#2405).
+one is ready. This is listed in the upgrade notes (`apps/docs/content/docs/upgrading.mdx`). The operator release
+that carries it should list it among the render changes that re-roll apps, so that a rollout check
+expecting exactly those re-rolls, once each and nothing else, treats it as expected.
 
 ---
 

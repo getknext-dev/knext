@@ -33,6 +33,7 @@
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createGuardProver } from './lib/guard-prover.mjs';
+import { MUTATION_MARKER } from './lib/mutation-harness.mjs';
 import { declareMutations, recordMutation } from './lib/prover-report.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -172,6 +173,128 @@ const MUTATIONS = [
     replacement: "if (!m) return 'ok';",
     options: TS_INLINE,
   },
+
+  // ---- scan 2: Dockerfiles written inline by scripts
+  {
+    id: 'V01',
+    subject: 'drill',
+    claim: 'the network policy drill image drops its USER line (it would run as root)',
+    anchor: 'COPY h2cecho /h2cecho\\nUSER 65532:65532\\nENTRYPOINT',
+    replacement: `COPY h2cecho /h2cecho\\n# ${MUTATION_MARKER}\\nENTRYPOINT`,
+  },
+  {
+    id: 'V02',
+    subject: 'drill',
+    claim: 'the network policy drill image runs as a named user',
+    anchor: 'USER 65532:65532\\nENTRYPOINT ["/h2cecho"]',
+    replacement: `USER nobody\\n# ${MUTATION_MARKER}\\nENTRYPOINT ["/h2cecho"]`,
+  },
+  {
+    id: 'V03',
+    subject: 'spec',
+    claim: 'the scan stops looking at printf and echo Dockerfiles',
+    anchor: 'if (!/(printf|echo)\\b/.test(l) || !FROM_IMAGE.test(l)) continue;',
+    replacement: 'continue;',
+    options: TS_INLINE,
+  },
+  {
+    id: 'V04',
+    subject: 'spec',
+    claim: 'the scan stops looking at heredoc Dockerfiles',
+    anchor: 'if (!h) continue;',
+    replacement: 'continue;',
+    options: TS_INLINE,
+  },
+  // ---- scan 1: the stage logic and the file discovery
+  {
+    id: 'V05',
+    subject: 'spec',
+    claim: 'a stage no longer inherits the USER of the stage it builds on',
+    anchor: "cur = stages.find((s) => s.name !== '' && s.name === cur?.from.toLowerCase());",
+    replacement: 'cur = undefined;',
+    options: TS_INLINE,
+  },
+  {
+    id: 'V06',
+    subject: 'spec',
+    claim: 'a builder stage that is only copied from is judged like a runnable one',
+    anchor: "return stages.filter((s) => s.name === '' || !referenced.has(s.name));",
+    replacement: 'return stages;',
+    options: TS_INLINE,
+  },
+  {
+    id: 'V07',
+    subject: 'spec',
+    claim: 'the file discovery no longer recognises `<name>.Dockerfile` files',
+    anchor: '|| /\\.(Dockerfile|Containerfile)$/.test(base)',
+    replacement: '|| false',
+    options: TS_INLINE,
+  },
+  // ---- scan 3: the images the lanes deploy
+  {
+    id: 'V08',
+    subject: 'rollback',
+    claim: 'the rollback lane deploys the root sample image but no longer opts out',
+    anchor: '  security:\n    runAsNonRoot: false\n',
+    replacement: `  # ${MUTATION_MARKER}\n`,
+  },
+  {
+    id: 'V09',
+    subject: 'platform',
+    claim: 'the platform lane goes back to the root sample image without opting out',
+    anchor:
+      'pfAppImage = "docker.io/mendhak/http-https-echo@sha256:" +\n\t\t"a265f55c86cb3baead76fdf379dc8e9e6440ed121874e101e60b833e05bce8d4"',
+    replacement: `// ${MUTATION_MARKER}\n\tpfAppImage = "ghcr.io/knative/helloworld-go@sha256:" +\n\t\t"c2b7412fbea6f1ef24a0cac60698e88df7ae3c4278e42d0cb34fe7d4b2641bba"`,
+  },
+  {
+    id: 'V10',
+    subject: 'assetGc',
+    claim: 'the asset GC lane goes back to the root sample image without opting out',
+    anchor:
+      'gcAppImage = "quay.io/openshift/origin-hello-openshift@sha256:" +\n\t\t"3d2cc2be080ec48a5a1a2cc1d0a762b944665212591e271a5ed6a481f885b1e3"',
+    replacement: `// ${MUTATION_MARKER}\n\tgcAppImage = "ghcr.io/knative/helloworld-go@sha256:" +\n\t\t"c2b7412fbea6f1ef24a0cac60698e88df7ae3c4278e42d0cb34fe7d4b2641bba"`,
+  },
+  {
+    id: 'V11',
+    subject: 'upgrade',
+    claim: 'the upgrade e2e goes back to the root sample image',
+    anchor:
+      'quay.io/openshift/origin-hello-openshift@sha256:3d2cc2be080ec48a5a1a2cc1d0a762b944665212591e271a5ed6a481f885b1e3',
+    replacement:
+      'ghcr.io/knative/helloworld-go@sha256:c2b7412fbea6f1ef24a0cac60698e88df7ae3c4278e42d0cb34fe7d4b2641bba',
+  },
+  {
+    id: 'V12',
+    subject: 'bundleNightly',
+    claim: 'the published-bundle nightly goes back to the root sample image',
+    anchor:
+      'quay.io/openshift/origin-hello-openshift@sha256:3d2cc2be080ec48a5a1a2cc1d0a762b944665212591e271a5ed6a481f885b1e3',
+    replacement:
+      'ghcr.io/knative/helloworld-go@sha256:c2b7412fbea6f1ef24a0cac60698e88df7ae3c4278e42d0cb34fe7d4b2641bba',
+  },
+  {
+    id: 'V13',
+    subject: 'spec',
+    claim: 'the table records the verified non-root image as uid 0',
+    anchor: "user: '1001',",
+    replacement: "user: '0',",
+    options: TS_INLINE,
+  },
+  {
+    id: 'V14',
+    subject: 'spec',
+    claim: 'the deploying-file scan finds nothing',
+    anchor: 'const DEPLOYING_FILES = DEPLOYERS.filter((f) => DEPLOYING.test(read(f)));',
+    replacement: 'const DEPLOYING_FILES = DEPLOYERS.filter(() => false);',
+    options: TS_INLINE,
+  },
+  {
+    id: 'V15',
+    subject: 'spec',
+    claim: 'an image nobody classified is accepted as infrastructure',
+    anchor: '  return undefined;\n}\n\nconst DEPLOYERS',
+    replacement: `  // ${MUTATION_MARKER}\n  return { kind: 'infra', note: 'x' };\n}\n\nconst DEPLOYERS`,
+  },
 ];
 
 // The canary: a real mutation of a real subject. If this stays green the harness
@@ -203,6 +326,12 @@ const prover = createGuardProver({
     zoneCaller: 'packages/grpc/e2e/z7-identity-kind/zone-caller/Dockerfile',
     szpgDemo: 'packages/scale-zero-pg/demo/app/Dockerfile',
     spec: 'tests/dockerfile-numeric-nonroot-user.test.ts',
+    drill: 'packages/kn-next-operator/test/networkpolicy-enforcement-drill.sh',
+    rollback: 'packages/kn-next-operator/test/e2e/rollback_e2e_test.go',
+    platform: 'packages/kn-next-operator/test/e2e/platform_e2e_test.go',
+    assetGc: 'packages/kn-next-operator/test/e2e/asset_gc_e2e_test.go',
+    upgrade: 'scripts/upgrade-e2e/run.sh',
+    bundleNightly: '.github/workflows/published-bundle-kind-nightly.yml',
   },
 });
 prover.preflight(MUTATIONS);
