@@ -779,18 +779,24 @@ fn concurrent_replay_admits_exactly_one() {
     }
 }
 
-/// A pod at its cap refuses every new token, which looks like an outage from
-/// outside, so it says so: one warning, then at most one every ten seconds.
-/// The warning never carries a token.
-#[test]
-fn full_replay_set_is_reported_once_in_a_while() {
+/// The log lines of the tests that read the verifier's warnings. A scoped
+/// subscriber (`with_default`) is not reliable here: tracing caches whether a
+/// call site is enabled, and a warning raised on another test thread with no
+/// subscriber can leave it disabled. So one global capture is installed once,
+/// and the tests that read it run one at a time and start from an empty buffer.
+mod capture {
     use std::io::Write;
+    use std::sync::{Mutex, MutexGuard, Once};
+
+    static SERIAL: Mutex<()> = Mutex::new(());
+    static LOG: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+    static INSTALL: Once = Once::new();
 
     #[derive(Clone, Default)]
-    struct Sink(Arc<Mutex<Vec<u8>>>);
+    struct Sink;
     impl Write for Sink {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
+            LOG.lock().unwrap().extend_from_slice(buf);
             Ok(buf.len())
         }
         fn flush(&mut self) -> std::io::Result<()> {
@@ -798,6 +804,45 @@ fn full_replay_set_is_reported_once_in_a_while() {
         }
     }
 
+    pub struct Capture(#[allow(dead_code)] MutexGuard<'static, ()>);
+
+    /// Takes the capture for one test: an empty buffer, nobody else writing a
+    /// line a test of this kind would read.
+    pub fn start() -> Capture {
+        let guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        INSTALL.call_once(|| {
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(|| Sink)
+                .with_ansi(false)
+                .with_thread_ids(true)
+                .finish();
+            tracing::subscriber::set_global_default(subscriber)
+                .expect("no other test installs a global subscriber");
+        });
+        LOG.lock().unwrap().clear();
+        Capture(guard)
+    }
+
+    impl Capture {
+        /// The lines written by the calling test's own thread: other tests run
+        /// at the same time and fill sets of their own.
+        pub fn log(&self) -> String {
+            let mine = format!("{:?}", std::thread::current().id());
+            String::from_utf8(LOG.lock().unwrap().clone())
+                .unwrap()
+                .lines()
+                .filter(|line| line.contains(&mine))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+    }
+}
+
+/// A pod at its cap refuses every new token, which looks like an outage from
+/// outside, so it says so: one warning, then at most one every ten seconds.
+/// The warning never carries a token.
+#[test]
+fn full_replay_set_is_reported_once_in_a_while() {
     let v = testvectors::load();
     let seq = v
         .sequences
@@ -812,37 +857,24 @@ fn full_replay_set_is_reported_once_in_a_while() {
             .expect("filling the set");
     }
     let full = seq.steps[2].token();
-    let sink = Sink::default();
-    let captured = sink.clone();
-    let subscriber = tracing_subscriber::fmt()
-        .with_writer(move || captured.clone())
-        .with_ansi(false)
-        .finish();
-    let warnings = || {
-        String::from_utf8(sink.0.lock().unwrap().clone())
-            .unwrap()
-            .matches("replay set is full")
-            .count()
-    };
-    tracing::subscriber::with_default(subscriber, || {
-        for _ in 0..5 {
-            assert_eq!(
-                verifier.verify(&full, &seq.procedure),
-                Err(AuthError::SeenSetFull)
-            );
-        }
-        assert_eq!(warnings(), 1, "five refusals in one second");
-        clock.advance(Duration::from_secs(9));
-        let _ = verifier.verify(&full, &seq.procedure);
-        assert_eq!(warnings(), 1, "after 9 s");
-        clock.advance(Duration::from_secs(2));
-        let _ = verifier.verify(&full, &seq.procedure);
-        assert_eq!(warnings(), 2, "after 11 s");
-    });
-    let log = String::from_utf8(sink.0.lock().unwrap().clone()).unwrap();
+    let capture = capture::start();
+    let warnings = || capture.log().matches("replay set is full").count();
+    for _ in 0..5 {
+        assert_eq!(
+            verifier.verify(&full, &seq.procedure),
+            Err(AuthError::SeenSetFull)
+        );
+    }
+    assert_eq!(warnings(), 1, "five refusals in one second");
+    clock.advance(Duration::from_secs(9));
+    let _ = verifier.verify(&full, &seq.procedure);
+    assert_eq!(warnings(), 1, "after 9 s");
+    clock.advance(Duration::from_secs(2));
+    let _ = verifier.verify(&full, &seq.procedure);
+    assert_eq!(warnings(), 2, "after 11 s");
     for segment in &seq.steps[2].jws {
         assert!(
-            !log.contains(segment),
+            !capture.log().contains(segment),
             "the warning carries part of a token"
         );
     }
@@ -903,51 +935,32 @@ async fn full_replay_set_answers_resource_exhausted() {
 /// (zero means the default).
 #[test]
 fn full_warning_names_the_effective_capacity() {
-    use std::io::Write;
-
-    #[derive(Clone, Default)]
-    struct Sink(Arc<Mutex<Vec<u8>>>);
-    impl Write for Sink {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
     let v = testvectors::load();
-    let seq = v
+    let base = v
         .sequences
         .iter()
         .find(|s| s.name == "cap-reached-refuses-new")
         .expect("the cap-reached-refuses-new sequence");
-    // Capacity 2 configured: the warning must say 2. Then the default: 0 is configured,
-    // the warning must say the default, never 0.
+    // Capacity 2 configured: the warning must say 2. Nothing configured: 0 is
+    // configured, and the warning must say the default, never 0.
     for (configured, effective) in [(Some(2), 2), (None, DEFAULT_SEEN_CAPACITY)] {
-        let mut seq = seq.clone();
+        let mut seq = base.clone();
         seq.capacity = configured;
         let (verifier, clock) = sequence_verifier(&v, &seq, "full-capacity");
         clock.set(seq.steps[0].now);
-        let sink = Sink::default();
-        let captured = sink.clone();
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(move || captured.clone())
-            .with_ansi(false)
-            .finish();
-        tracing::subscriber::with_default(subscriber, || {
-            if configured.is_some() {
-                for step in &seq.steps[..2] {
-                    verifier.verify(&step.token(), &seq.procedure).unwrap();
-                }
-                let _ = verifier.verify(&seq.steps[2].token(), &seq.procedure);
-            } else {
-                // Filling 65,536 tokens is not needed: ask the verifier for its warning directly.
-                verifier.warn_full(seq.steps[0].now);
+        if configured.is_some() {
+            for step in &seq.steps[..2] {
+                verifier.verify(&step.token(), &seq.procedure).unwrap();
             }
-        });
-        let log = String::from_utf8(sink.0.lock().unwrap().clone()).unwrap();
+        }
+        let capture = capture::start();
+        if configured.is_some() {
+            let _ = verifier.verify(&seq.steps[2].token(), &seq.procedure);
+        } else {
+            // Filling 65,536 tokens is not needed: ask for the warning directly.
+            verifier.warn_full(seq.steps[0].now);
+        }
+        let log = capture.log();
         assert!(
             log.contains(&format!("capacity={effective}")),
             "configured {configured:?}: the warning should name capacity={effective}: {log}"

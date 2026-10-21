@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"sync"
 	"testing"
 )
 
@@ -158,4 +159,40 @@ func TestSeenSetMemoryCostAtTheDefaultCap(t *testing.T) {
 		t.Fatalf("%d bytes per entry; budget %d", perEntry, perEntryBudget)
 	}
 	runtime.KeepAlive(s)
+}
+
+// Many goroutines admitting distinct tokens, and the same ones, at once: no
+// lost update, no data race (run under -race), and exactly one admission of
+// each token. A set that is not locked fails this, whether the race detector
+// or a lost entry shows it first.
+func TestSeenSetIsSafeUnderConcurrency(t *testing.T) {
+	const workers, perWorker = 16, 2000
+	s := newSeenSet(workers * perWorker)
+	var admitted [workers * perWorker]int32
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for w := range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			// Every worker offers every token, in its own order: each is admitted once overall.
+			for i := range workers * perWorker {
+				n := (i + w*perWorker) % (workers * perWorker)
+				if s.admit(iss, jti(n), 5000+int64(n%7), 1000) == nil {
+					mu.Lock()
+					admitted[n]++
+					mu.Unlock()
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	for n, got := range admitted {
+		if got != 1 {
+			t.Fatalf("token %d was admitted %d times; want exactly 1", n, got)
+		}
+	}
+	if got := s.len(); got != workers*perWorker {
+		t.Fatalf("len = %d; want %d", got, workers*perWorker)
+	}
 }
