@@ -114,7 +114,11 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const file = resolve(import.meta.dirname, '../security/govulncheck-exceptions.json');
   const entries = JSON.parse(readFileSync(file, 'utf8')).allow;
   if (!Array.isArray(entries)) throw new Error(`${file}: "allow" must be an array`);
-  const input = readFileSync(0, 'utf8');
+  // Async chunked read: a ~600 KB pipe through readFileSync(0) aborted node
+  // ("malloc(): invalid size") on the CI runner.
+  const chunks = [];
+  for await (const chunk of process.stdin) chunks.push(chunk);
+  const input = Buffer.concat(chunks).toString('utf8');
   const result = evaluate(parseStream(input), entries);
   if (!result.ok) {
     for (const e of result.errors) console.error(`govulncheck-gate: ${e}`);
