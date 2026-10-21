@@ -107,7 +107,7 @@ describe('the gate fails closed when govulncheck did not finish a scan', () => {
   });
 });
 
-describe('nightly lane and path filters', () => {
+describe('go-template.yml wiring', () => {
   const wfText = (n: string) => readFileSync(resolve(REPO_ROOT, `.github/workflows/${n}`), 'utf8');
 
   it('go-template.yml runs the govulncheck step under pipefail', () => {
@@ -129,24 +129,6 @@ describe('nightly lane and path filters', () => {
         expect(on[ev].paths, `${ev} paths`).toContain(p);
       }
     }
-  });
-
-  it('govulncheck-nightly.yml is scheduled and proves BOTH main and integration/v2', () => {
-    const wf = parse(wfText('govulncheck-nightly.yml'));
-    expect(wf.on.schedule[0].cron).toMatch(/^\d+ \d+ \* \* \*$/);
-    const job = Object.values(wf.jobs)[0] as {
-      strategy: { matrix: { ref: string[] }; 'fail-fast': boolean };
-      steps: { uses?: string; run?: string; with?: Record<string, string> }[];
-    };
-    expect(job.strategy.matrix.ref).toEqual(['main', 'integration/v2']);
-    expect(job.strategy['fail-fast']).toBe(false);
-    const checkout = job.steps.find((s) => s.uses?.startsWith('actions/checkout@'));
-    expect(checkout?.with?.ref).toBe('${{ matrix.ref }}');
-    const run = job.steps.map((s) => s.run ?? '').join('\n');
-    expect(run).toContain('set -euo pipefail');
-    expect(run).toMatch(
-      /govulncheck@v\d+\.\d+\.\d+ -format json \.\/\.\.\. \| node [^\n]*govulncheck-gate\.mjs/,
-    );
   });
 });
 

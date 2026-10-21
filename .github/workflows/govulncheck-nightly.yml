@@ -34,6 +34,19 @@ jobs:
         with:
           ref: ${{ matrix.ref }}
 
+      # The skip-by-file-presence below is for main, which carries no Go template.
+      # On integration/v2 the template, the gate and the exceptions MUST exist: a
+      # missing one means the checkout is wrong, and a skip there would be a green
+      # run that proved nothing.
+      - name: Require the Go template and gate on integration/v2
+        if: ${{ matrix.ref == 'integration/v2' }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$1 is missing on integration/v2; refusing to pass without scanning"; exit 1; }
+          test -f templates/go/go.mod || fail templates/go/go.mod
+          test -f scripts/govulncheck-gate.mjs || fail scripts/govulncheck-gate.mjs
+          test -f security/govulncheck-exceptions.json || fail security/govulncheck-exceptions.json
+
       - name: Set up Go (templates/go/go.mod)
         if: ${{ hashFiles('templates/go/go.mod') != '' }}
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
