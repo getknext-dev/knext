@@ -255,3 +255,30 @@ updates:
       prefix: 'chore(go)'
     labels:
       - 'dependencies'
+
+  # The golang builder images are digest-pinned (tests/golang-from-lockstep.test.ts),
+  # so without this entry a pin only ever moves by hand. Dependabot rewrites tag and
+  # digest together; its go.mod is NOT bumped with it, and the lockstep guard reds
+  # the PR until the `go` directive follows, which is the intended review point.
+  # The same 3-day cooldown as every other ecosystem is the release-age rule.
+  - package-ecosystem: 'docker'
+    directories:
+      - '/packages/scale-zero-pg/gateway'
+      - '/packages/kn-next-operator'
+      - '/templates/go'
+    schedule:
+      interval: 'weekly'
+    cooldown:
+      default-days: 3
+    groups:
+      go-base-images:
+        patterns:
+          - '*'
+        update-types:
+          - 'minor'
+          - 'patch'
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: 'chore(go)'
+    labels:
+      - 'dependencies'

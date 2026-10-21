@@ -52,6 +52,19 @@ export function parseStream(text) {
 
 export function evaluate(messages, entries, now = new Date()) {
   const errors = [];
+  // Fail closed on a crashed or truncated govulncheck: an empty stream must not
+  // read as "no vulnerabilities". A real run opens with `config` and reaches the
+  // call-graph stage before any finding is emitted.
+  if (!messages.some((m) => m?.config)) {
+    errors.push('govulncheck produced no config message (crashed or no output)');
+  }
+  if (
+    !messages.some((m) =>
+      /Checking the code against the vulnerabilities/.test(m?.progress?.message ?? ''),
+    )
+  ) {
+    errors.push('govulncheck did not complete a scan (no call-graph stage reached)');
+  }
   const called = new Set();
   for (const m of messages) {
     const f = m?.finding;

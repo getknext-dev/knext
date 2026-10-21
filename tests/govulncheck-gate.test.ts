@@ -7,6 +7,7 @@
 import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { parse } from 'yaml';
 // @ts-expect-error plain ESM script, no types
 import { evaluate, parseStream } from '../scripts/govulncheck-gate.mjs';
 
@@ -14,6 +15,9 @@ const REPO_ROOT = resolve(import.meta.dirname, '..');
 const NOW = new Date('2026-10-22T00:00:00Z');
 const JUST =
   'fixed upstream in go1.26.10, held back by the release-age rule until 2026-10-24, tracked in #2567';
+const config = { config: { protocol_version: 'v1.0.0' } };
+const scanned = { progress: { message: 'Checking the code against the vulnerabilities...' } };
+const DONE = [config, scanned];
 const entry = (over: Record<string, unknown> = {}) => ({
   id: 'GO-2026-6809',
   expires: '2026-10-25',
@@ -25,27 +29,31 @@ const importOnly = (id: string) => ({ finding: { osv: id, trace: [{ module: 'std
 
 describe('govulncheck gate', () => {
   it('fails an un-excepted called vulnerability', () => {
-    const r = evaluate([called('GO-2026-6809')], [], NOW);
+    const r = evaluate([...DONE, called('GO-2026-6809')], [], NOW);
     expect(r.ok).toBe(false);
     expect(r.errors.join('\n')).toContain('GO-2026-6809');
   });
 
   it('ignores findings that are not called symbols', () => {
-    expect(evaluate([importOnly('GO-2026-1')], [], NOW).ok).toBe(true);
+    expect(evaluate([...DONE, importOnly('GO-2026-1')], [], NOW).ok).toBe(true);
   });
 
   it('passes a called vulnerability covered by a live entry', () => {
-    expect(evaluate([called('GO-2026-6809')], [entry()], NOW).ok).toBe(true);
+    expect(evaluate([...DONE, called('GO-2026-6809')], [entry()], NOW).ok).toBe(true);
   });
 
   it('fails once the entry has expired', () => {
-    const r = evaluate([called('GO-2026-6809')], [entry()], new Date('2026-10-26T00:00:00Z'));
+    const r = evaluate(
+      [...DONE, called('GO-2026-6809')],
+      [entry()],
+      new Date('2026-10-26T00:00:00Z'),
+    );
     expect(r.ok).toBe(false);
     expect(r.errors.join('\n')).toMatch(/expired/);
   });
 
   it('fails a stale entry whose vulnerability is no longer called', () => {
-    const r = evaluate([], [entry()], NOW);
+    const r = evaluate(DONE, [entry()], NOW);
     expect(r.ok).toBe(false);
     expect(r.errors.join('\n')).toMatch(/no longer|stale/i);
   });
@@ -58,7 +66,7 @@ describe('govulncheck gate', () => {
       entry({ justification: 'later' }),
       entry({ extra: 1 }),
     ]) {
-      expect(evaluate([called('GO-2026-6809')], [bad], NOW).ok).toBe(false);
+      expect(evaluate([...DONE, called('GO-2026-6809')], [bad], NOW).ok).toBe(false);
     }
   });
 
@@ -69,6 +77,71 @@ describe('govulncheck gate', () => {
 
   it('fails closed on an unparseable stream', () => {
     expect(() => parseStream('{ "finding": ')).toThrow();
+  });
+});
+
+describe('the gate fails closed when govulncheck did not finish a scan', () => {
+  it('fails on an empty stream with an empty allow list', () => {
+    const r = evaluate([], [], NOW);
+    expect(r.ok).toBe(false);
+    expect(r.errors.join('\n')).toMatch(/config/);
+  });
+
+  it('fails on a config-only stream with an empty allow list', () => {
+    const r = evaluate([config], [], NOW);
+    expect(r.ok).toBe(false);
+    expect(r.errors.join('\n')).toMatch(/scan/);
+  });
+
+  it('fails when the scan never reached the call-graph stage even with findings', () => {
+    expect(evaluate([config, called('GO-2026-6809')], [entry()], NOW).ok).toBe(false);
+  });
+
+  it('passes a completed scan with no called findings and no exceptions', () => {
+    expect(evaluate([config, scanned], [], NOW).ok).toBe(true);
+  });
+});
+
+describe('nightly lane and path filters', () => {
+  const wfText = (n: string) => readFileSync(resolve(REPO_ROOT, `.github/workflows/${n}`), 'utf8');
+
+  it('go-template.yml runs the govulncheck step under pipefail', () => {
+    const wf = wfText('go-template.yml');
+    const step = wf.slice(wf.indexOf('- name: govulncheck (pinned)'));
+    const run = step.slice(step.indexOf('run:'), step.indexOf('\n  image:'));
+    expect(run).toContain('set -euo pipefail');
+    expect(run.indexOf('set -euo pipefail')).toBeLessThan(run.indexOf('govulncheck-gate.mjs'));
+  });
+
+  it('push and pull_request path filters include the gate, its exceptions and its tests', () => {
+    const on = parse(wfText('go-template.yml')).on;
+    for (const ev of ['push', 'pull_request']) {
+      for (const p of [
+        'scripts/govulncheck-gate.mjs',
+        'security/govulncheck-exceptions.json',
+        'tests/govulncheck-gate.test.ts',
+      ]) {
+        expect(on[ev].paths, `${ev} paths`).toContain(p);
+      }
+    }
+  });
+
+  it('govulncheck-nightly.yml is scheduled and proves BOTH main and integration/v2', () => {
+    const wf = parse(wfText('govulncheck-nightly.yml'));
+    expect(wf.on.schedule[0].cron).toMatch(/^\d+ \d+ \* \* \*$/);
+    const job = Object.values(wf.jobs)[0] as {
+      strategy: { matrix: { ref: string[] }; 'fail-fast': boolean };
+      steps: { uses?: string; run?: string; with?: Record<string, string> }[];
+    };
+    expect(job.strategy.matrix.ref).toEqual(['main', 'integration/v2']);
+    expect(job.strategy['fail-fast']).toBe(false);
+    const checkout = job.steps.find((s) => s.uses?.startsWith('actions/checkout@'));
+    expect(checkout?.with?.ref).toBe('${{ matrix.ref }}');
+    const run = job.steps.map((s) => s.run ?? '').join('\n');
+    expect(run).toContain('set -euo pipefail');
+    expect(run).toMatch(
+      /govulncheck@v\d+\.\d+\.\d+ -format json \.\/\.\.\. \| node [^\n]*govulncheck-gate\.mjs/,
+    );
   });
 });
 
