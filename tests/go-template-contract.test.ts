@@ -154,7 +154,9 @@ describe('the template image workflow scans and holds no credential', () => {
   it('the check job runs the tests, the drift check and govulncheck', () => {
     const runs = wf.jobs.check.steps.map((s) => s.run ?? '').join('\n');
     expect(runs).toContain('go test -race -count=1 ./...');
-    expect(runs).toMatch(/go run golang\.org\/x\/vuln\/cmd\/govulncheck@v\d+\.\d+\.\d+ \.\/\.\.\./);
+    expect(runs).toMatch(
+      /go run golang\.org\/x\/vuln\/cmd\/govulncheck@v\d+\.\d+\.\d+ (?:-format json )?\.\/\.\.\./,
+    );
     expect(runs).toContain('verified-buf.ts generate');
     expect(runs).toContain('git status --porcelain -- gen');
   });

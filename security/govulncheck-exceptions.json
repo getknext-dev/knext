@@ -1,0 +1,10 @@
+{
+  "$schema-note": "Dated exceptions for scripts/govulncheck-gate.mjs. A called Go vulnerability passes only through a live entry here. Each entry is { id (GO-YYYY-NNNN), expires (ISO date), justification (at least 20 characters) }; unknown keys, an expired entry, and an entry whose vulnerability is no longer called all FAIL the gate.",
+  "allow": [
+    {
+      "id": "GO-2026-6809",
+      "expires": "2026-10-25",
+      "justification": "crypto/x509, fixed upstream in go1.26.10 (published 2026-10-21T02:17Z), held back by the 3-day release-age rule until 2026-10-24; the bump to 1.26.10 is tracked in #2567."
+    }
+  ]
+}
