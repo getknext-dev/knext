@@ -284,7 +284,7 @@ const MUTATIONS = [
     id: 'V14',
     subject: 'spec',
     claim: 'the deploying-file scan finds nothing',
-    anchor: 'const DEPLOYING_FILES = DEPLOYERS.filter((f) => DEPLOYING.test(read(f)));',
+    anchor: 'const DEPLOYING_FILES = DEPLOYERS.filter((f) => deploysApp(read(f)));',
     replacement: 'const DEPLOYING_FILES = DEPLOYERS.filter(() => false);',
     options: TS_INLINE,
   },
