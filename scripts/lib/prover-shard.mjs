@@ -74,6 +74,8 @@ export const PROVER_WEIGHT_MINUTES = Object.freeze({
   'scripts/mutation-prove-compat-cell-fingerprint.mjs': 20,
   'scripts/mutation-prove-2331-use-cache-tag-replay.mjs': 14,
   'scripts/mutation-prove-2462-operator-write-policy.mjs': 14,
+  // 26 mutations, each a `go test` (the envtest rows start a real apiserver) or a bundle re-render.
+  'scripts/mutation-prove-2500-write-policy-selfcheck.mjs': 12,
   // 12 minutes for 23 mutations with the per-leg cargo dir and generator dir adopted;
   // the earlier 60-minute estimate was the cold worst case.
   'scripts/mutation-prove-2489-rust-scaffold.mjs': 12,
@@ -105,6 +107,7 @@ export const WEIGHTED_ON_ONE_REF_ONLY = Object.freeze([
   'scripts/mutation-prove-2052-backendservice.mjs',
   'scripts/mutation-prove-2331-use-cache-tag-replay.mjs',
   'scripts/mutation-prove-2462-operator-write-policy.mjs',
+  'scripts/mutation-prove-2500-write-policy-selfcheck.mjs',
   'scripts/mutation-prove-2489-rust-scaffold.mjs',
   'scripts/mutation-prove-rust-template-auth.mjs',
   'scripts/mutation-prove-go-template-auth.mjs',

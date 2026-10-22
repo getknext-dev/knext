@@ -199,6 +199,30 @@ describe('PrometheusRule manifest', () => {
     expect(prewarm?.annotations?.runbook_url ?? prewarm?.annotations?.runbook).toBeTruthy();
   });
 
+  // The operator's Secret/ConfigMap write policy can be off with nothing saying
+  // so: a server older than 1.30 rejects it, a repackaged install leaves a
+  // matchCondition that matches nobody, a prune deletes it. The operator reports
+  // it as a 0/1 gauge; this alert is what makes a 0 visible.
+  it('alerts when the operator write policy is not in force', () => {
+    const { docs } = loadRule();
+    const rule = docs.find((d) => d?.kind === 'PrometheusRule');
+    const alerts: (Rule & { for?: string })[] = rule.spec.groups.flatMap(
+      (g: { rules: Rule[] }) => g.rules,
+    );
+    const off = alerts.find((a) => a.alert === 'KnextOperatorWritePolicyNotEnforced');
+
+    expect(off, 'KnextOperatorWritePolicyNotEnforced alert must exist').toBeDefined();
+    // Per pod, not aggregated: every replica reports, and one that cannot see the
+    // policy is itself a finding.
+    expect(off?.expr).toMatch(/knext_operator_write_policy_enforced\s*==\s*0/);
+    // Warning, not critical: it is a missing safety net, not an outage, and every
+    // pre-1.30 cluster would page forever otherwise. A "for" longer than the
+    // operator's re-check interval keeps a restart from flapping it.
+    expect(off?.labels?.severity).toBe('warning');
+    expect(off?.for).toBeTruthy();
+    expect(off?.annotations?.runbook_url ?? off?.annotations?.runbook).toBeTruthy();
+  });
+
   // The reconcile-error page must stay CRITICAL — the decoupling narrowed what
   // reaches it, and if that alert were softened too, nothing would page on a
   // genuinely failing control loop.

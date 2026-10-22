@@ -474,6 +474,39 @@ Two limits. The policy checks name and type, not ownership: a compromised operat
 change an `Opaque` Secret or a ConfigMap that happens to carry the name of a zone's key or key set.
 And a cluster administrator can remove the policy.
 
+#### Knowing whether the policy is in force [#write-policy-enforced]
+
+The policy can be off without anything failing. A cluster older than Kubernetes 1.30 rejects the two
+objects while the rest of the bundle installs. An install under a different namespace or
+ServiceAccount name than the bundle rendered leaves a policy that names a user the operator is not.
+An administrator, or a GitOps tool pruning objects it does not own, can delete either object. In
+each case the operator is simply unrestricted.
+
+So the operator checks for itself, when it starts and every five minutes after. It reads the policy
+and its binding (a read-only `get` on those two names, nothing else) and compares the policy's
+username with the one the API server reports for the operator. It publishes the result as a gauge:
+
+| Metric | Meaning |
+|---|---|
+| `knext_operator_write_policy_enforced` | `1` when the policy exists, its binding denies, and the policy names the identity the operator runs as. `0` when any of that is false, or when the objects could not be read. |
+
+It logs one warning each time the answer changes to "not in force", naming the reason. The operator
+still starts: refusing to run is your decision, not the operator's. The `KnextOperatorWritePolicyNotEnforced`
+alert (warning, 15 minutes) fires on a `0`; see [SLOs & alerting](/docs/slos-alerting).
+
+The gauge reads `0` for any of these:
+
+- the policy or the binding is missing;
+- the binding does not include `Deny` (a binding that only audits or warns refuses nothing), or it
+  limits the policy to some namespaces;
+- the policy names a different user than the operator runs as;
+- the policy fails open (`failurePolicy: Ignore`), does not cover create, update and delete on both
+  Secrets and ConfigMaps, or has a condition the check cannot read as an exact user.
+
+`knext doctor` reports the same verdict from your machine, plus the server version against the 1.30
+floor. It reads the policy name from the operator's `WRITE_POLICY_NAME` environment variable, which
+the bundle sets, so a renamed install is checked under its own name.
+
 The policy needs **Kubernetes 1.30 or later**, where `ValidatingAdmissionPolicy` became generally
 available. That is the same server floor as the rest of knext (see the
 [support matrix](/docs/support-matrix#kubernetes)). On an older cluster the API server does not

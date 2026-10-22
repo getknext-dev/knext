@@ -45,6 +45,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
@@ -53,6 +54,7 @@ import (
 	appsv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/api/v1alpha1"
 	"github.com/AhmedElBanna80/knext/packages/kn-next-operator/internal/controller"
 	webhookv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/internal/webhook/v1alpha1"
+	"github.com/AhmedElBanna80/knext/packages/kn-next-operator/internal/writepolicy"
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	servingv1beta1 "knative.dev/serving/pkg/apis/serving/v1beta1"
 	// +kubebuilder:scaffold:imports
@@ -83,6 +85,8 @@ func main() {
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var zoneKeyPropagationBound, zoneKeyRotationInterval time.Duration
+	var writePolicyName string
+	var writePolicyCheckInterval time.Duration
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -108,6 +112,12 @@ func main() {
 	flag.DurationVar(&zoneKeyRotationInterval, "zone-signing-key-rotation-interval", 0,
 		"Rotate every zone signing key this long after it became current. 0 (the default) rotates only on "+
 			"request, through the apps.kn-next.dev/rotate-signing-key annotation on the zone's NextApp.")
+	flag.StringVar(&writePolicyName, "write-policy-name", writePolicyNameDefault(os.Getenv),
+		"Name of the ValidatingAdmissionPolicy (and of its binding) that limits this operator's Secret and "+
+			"ConfigMap writes. The shipped bundle sets WRITE_POLICY_NAME to the prefixed name it renders; the "+
+			"self-check reports knext_operator_write_policy_enforced from it.")
+	flag.DurationVar(&writePolicyCheckInterval, "write-policy-check-interval", writepolicy.DefaultInterval,
+		"How often the operator re-reads its write policy and binding to report whether the policy is in force.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -217,6 +227,14 @@ func main() {
 	}
 	// +kubebuilder:scaffold:builder
 
+	// Report whether the policy that bounds this operator's Secret/ConfigMap
+	// writes is actually in force. It never blocks start-up (that is the
+	// owner's call, not the monitor's); it publishes a gauge and warns.
+	if err := addWritePolicyMonitor(mgr.Add, mgr.GetConfig(), writePolicyName, writePolicyCheckInterval); err != nil {
+		setupLog.Error(err, "Failed to set up the write-policy self-check")
+		os.Exit(1)
+	}
+
 	if err := setupHealthChecks(mgr, len(webhookCertPath) > 0); err != nil {
 		setupLog.Error(err, "Failed to set up health/ready checks")
 		os.Exit(1)
@@ -313,4 +331,36 @@ func setupHealthChecks(mgr ctrl.Manager, webhookEnabled bool) error {
 		}
 	}
 	return nil
+}
+
+// defaultWritePolicyName is the policy's name in the unprefixed base manifests
+// (config/admission). The rendered bundle prefixes it and says so in
+// WRITE_POLICY_NAME.
+const defaultWritePolicyName = "secret-configmap-writes"
+
+// writePolicyNameDefault is the --write-policy-name default: the name the
+// bundle rendered into WRITE_POLICY_NAME, else the unprefixed base name. A
+// name the bundle did not render is how a repackaged install reports the
+// policy missing rather than silently checking nothing.
+func writePolicyNameDefault(getenv func(string) string) string {
+	if v := getenv("WRITE_POLICY_NAME"); v != "" {
+		return v
+	}
+	return defaultWritePolicyName
+}
+
+// addWritePolicyMonitor registers the write-policy self-check
+// (internal/writepolicy) with the manager. It is its own function, taking the
+// manager's Add, so the wiring is testable without standing up a manager.
+func addWritePolicyMonitor(add func(manager.Runnable) error, cfg *rest.Config, name string, interval time.Duration) error {
+	src, err := writepolicy.NewClientSource(cfg)
+	if err != nil {
+		return fmt.Errorf("building the write-policy reader: %w", err)
+	}
+	return add(&writepolicy.Monitor{
+		Source:   src,
+		Name:     name,
+		Interval: interval,
+		Log:      ctrl.Log.WithName("write-policy"),
+	})
 }

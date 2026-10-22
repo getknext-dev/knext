@@ -20,7 +20,7 @@ catalog and scrape setup see [Observability](/docs/observability); for logs see
 | `knext_bunexec_http_inflight_requests` | App runtime. Saturation |
 | `knext_bunexec_startup_duration_seconds` | App runtime. Set once per process, when the listener binds — the cold-start signal |
 | `knext_bunexec_process_uptime_seconds`, `knext_bunexec_process_resident_memory_bytes` | App runtime |
-| `knext_nextapp_reconcile_total{result}`, `knext_nextapp_reconcile_errors_total`, `knext_nextapp_reconcile_duration_seconds_bucket`, `knext_nextapp_image_prewarm_errors_total` | Operator |
+| `knext_nextapp_reconcile_total{result}`, `knext_nextapp_reconcile_errors_total`, `knext_nextapp_reconcile_duration_seconds_bucket`, `knext_nextapp_image_prewarm_errors_total`, `knext_operator_write_policy_enforced` | Operator |
 | `workqueue_depth{name="nextapp"}` | Operator (control-plane saturation) |
 | `knext_nextapp_condition{type,status,namespace,name}` | kube-state-metrics, reading `NextApp.status.conditions` ([setup below](#kube-state-metrics)) |
 | `up{job="knext-nextapp"}` | Prometheus itself — scrape health, and the anchor for the meta-alerts |
@@ -121,6 +121,22 @@ histogram_quantile(0.95,
 
 Alert `KnextOperatorReconcileSlow` (p95 above 30 seconds for 15 minutes, warning). A related alert,
 `KnextImagePrewarmFailing` (warning), fires when image pre-warming errors persist for 15 minutes.
+
+## Operator write policy (control plane)
+
+**Objective:** the policy that limits the operator's Secret and ConfigMap writes is in force on every
+cluster that supports it.
+
+```text
+knext_operator_write_policy_enforced
+```
+
+The operator sets this gauge to `1` when the policy exists, is bound with `Deny` and names the user
+the operator runs as, and to `0` otherwise, including when the objects cannot be read. Alert
+`KnextOperatorWritePolicyNotEnforced` (a `0` for 15 minutes, warning, one series per operator pod).
+It is a warning because a missing safety net is not an outage, and a cluster older than Kubernetes
+1.30 cannot hold the policy at all. `knext doctor` names the reason; see
+[Security](/docs/security#write-policy-enforced).
 
 ## NextApp health (control plane)
 

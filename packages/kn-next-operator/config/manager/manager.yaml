@@ -83,6 +83,14 @@ spec:
         # the bundle resolves to and the bootstrap/release notes for issue #76.
         image: controller
         name: manager
+        # The name of the ValidatingAdmissionPolicy (and binding) that limits this operator's
+        # Secret/ConfigMap writes. The operator reads it to report whether the policy is in
+        # force (knext_operator_write_policy_enforced). The value is the BASE name; config/default
+        # rewrites it from the policy's real, prefixed name (see replacements there), because
+        # kustomize's name prefix does not reach an env value.
+        env:
+        - name: WRITE_POLICY_NAME
+          value: secret-configmap-writes
         ports: []
         securityContext:
           readOnlyRootFilesystem: true

@@ -86,6 +86,7 @@ export const NON_JS_TEST_SUITE_PROVERS = Object.freeze([
   'scripts/mutation-prove-2476-propagation-bound.mjs',
   'scripts/mutation-prove-2462-operator-write-policy.mjs',
   'scripts/mutation-prove-2498-transient-secret.mjs',
+  'scripts/mutation-prove-2500-write-policy-selfcheck.mjs',
 ]);
 
 /** The toolchains a `NON_JS_TEST_SUITE_PROVERS` entry may run its guards with. */

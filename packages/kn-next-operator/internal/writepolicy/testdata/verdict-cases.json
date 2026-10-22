@@ -1,0 +1,263 @@
+{
+  "$comment": "Shared by the operator (internal/writepolicy) and by `knext doctor` (packages/kn-next/src/cli/doctor/checks/write-policy.ts): both must reach the same verdict on the same objects, so the self-check and the CLI cannot drift. Objects are shaped as the apiserver returns them for the rendered bundle (name prefix and namespace applied). Ops: remove-policy, remove-binding, set (target policy|binding, dotted path, value; arrays are replaced whole), identity (the operator's username; absent = the rendered one).",
+  "operatorUsername": "system:serviceaccount:kn-next-operator-system:kn-next-operator-controller-manager",
+  "policy": {
+    "apiVersion": "admissionregistration.k8s.io/v1",
+    "kind": "ValidatingAdmissionPolicy",
+    "metadata": { "name": "kn-next-operator-secret-configmap-writes" },
+    "spec": {
+      "failurePolicy": "Fail",
+      "matchConstraints": {
+        "resourceRules": [
+          {
+            "apiGroups": [""],
+            "apiVersions": ["v1"],
+            "operations": ["CREATE", "UPDATE", "DELETE"],
+            "resources": ["secrets", "configmaps"]
+          }
+        ]
+      },
+      "matchConditions": [
+        {
+          "name": "request-is-from-the-operator",
+          "expression": "request.userInfo.username == 'system:serviceaccount:' + 'kn-next-operator-system' + ':' + 'kn-next-operator-controller-manager'"
+        }
+      ],
+      "validations": [{ "expression": "true" }]
+    }
+  },
+  "binding": {
+    "apiVersion": "admissionregistration.k8s.io/v1",
+    "kind": "ValidatingAdmissionPolicyBinding",
+    "metadata": { "name": "kn-next-operator-secret-configmap-writes" },
+    "spec": {
+      "policyName": "kn-next-operator-secret-configmap-writes",
+      "validationActions": ["Deny", "Audit"]
+    }
+  },
+  "cases": [
+    {
+      "name": "policy and binding present and matching",
+      "ops": [],
+      "enforced": true,
+      "reason": "Enforced"
+    },
+    {
+      "name": "Deny alone is enough",
+      "ops": [
+        { "op": "set", "target": "binding", "path": "spec.validationActions", "value": ["Deny"] }
+      ],
+      "enforced": true,
+      "reason": "Enforced"
+    },
+    {
+      "name": "policy deleted",
+      "ops": [{ "op": "remove-policy" }],
+      "enforced": false,
+      "reason": "PolicyMissing"
+    },
+    {
+      "name": "binding deleted",
+      "ops": [{ "op": "remove-binding" }],
+      "enforced": false,
+      "reason": "BindingMissing"
+    },
+    {
+      "name": "both deleted reports the policy first",
+      "ops": [{ "op": "remove-policy" }, { "op": "remove-binding" }],
+      "enforced": false,
+      "reason": "PolicyMissing"
+    },
+    {
+      "name": "operator runs as another namespace",
+      "ops": [
+        {
+          "op": "identity",
+          "value": "system:serviceaccount:platform:kn-next-operator-controller-manager"
+        }
+      ],
+      "enforced": false,
+      "reason": "IdentityMismatch"
+    },
+    {
+      "name": "operator runs as another service account",
+      "ops": [
+        {
+          "op": "identity",
+          "value": "system:serviceaccount:kn-next-operator-system:controller-manager"
+        }
+      ],
+      "enforced": false,
+      "reason": "IdentityMismatch"
+    },
+    {
+      "name": "the operator's identity cannot be determined",
+      "ops": [{ "op": "identity", "value": "" }],
+      "enforced": false,
+      "reason": "IdentityUnknown"
+    },
+    {
+      "name": "binding audits only",
+      "ops": [
+        { "op": "set", "target": "binding", "path": "spec.validationActions", "value": ["Audit"] }
+      ],
+      "enforced": false,
+      "reason": "BindingNotDeny"
+    },
+    {
+      "name": "binding warns only",
+      "ops": [
+        {
+          "op": "set",
+          "target": "binding",
+          "path": "spec.validationActions",
+          "value": ["Warn", "Audit"]
+        }
+      ],
+      "enforced": false,
+      "reason": "BindingNotDeny"
+    },
+    {
+      "name": "binding names a different policy",
+      "ops": [
+        { "op": "set", "target": "binding", "path": "spec.policyName", "value": "something-else" }
+      ],
+      "enforced": false,
+      "reason": "BindingPolicyMismatch"
+    },
+    {
+      "name": "binding scoped to labelled namespaces",
+      "ops": [
+        {
+          "op": "set",
+          "target": "binding",
+          "path": "spec.matchResources",
+          "value": { "namespaceSelector": { "matchLabels": { "scoped": "true" } } }
+        }
+      ],
+      "enforced": false,
+      "reason": "BindingScoped"
+    },
+    {
+      "name": "policy fails open",
+      "ops": [{ "op": "set", "target": "policy", "path": "spec.failurePolicy", "value": "Ignore" }],
+      "enforced": false,
+      "reason": "PolicyFailsOpen"
+    },
+    {
+      "name": "policy does not cover UPDATE",
+      "ops": [
+        {
+          "op": "set",
+          "target": "policy",
+          "path": "spec.matchConstraints.resourceRules",
+          "value": [
+            {
+              "apiGroups": [""],
+              "apiVersions": ["v1"],
+              "operations": ["CREATE", "DELETE"],
+              "resources": ["secrets", "configmaps"]
+            }
+          ]
+        }
+      ],
+      "enforced": false,
+      "reason": "PolicyScope"
+    },
+    {
+      "name": "policy does not cover ConfigMaps",
+      "ops": [
+        {
+          "op": "set",
+          "target": "policy",
+          "path": "spec.matchConstraints.resourceRules",
+          "value": [
+            {
+              "apiGroups": [""],
+              "apiVersions": ["v1"],
+              "operations": ["CREATE", "UPDATE", "DELETE"],
+              "resources": ["secrets"]
+            }
+          ]
+        }
+      ],
+      "enforced": false,
+      "reason": "PolicyScope"
+    },
+    {
+      "name": "wildcard rule covers everything",
+      "ops": [
+        {
+          "op": "set",
+          "target": "policy",
+          "path": "spec.matchConstraints.resourceRules",
+          "value": [
+            { "apiGroups": ["*"], "apiVersions": ["*"], "operations": ["*"], "resources": ["*"] }
+          ]
+        }
+      ],
+      "enforced": true,
+      "reason": "Enforced"
+    },
+    {
+      "name": "matchCondition is not a plain equality",
+      "ops": [
+        {
+          "op": "set",
+          "target": "policy",
+          "path": "spec.matchConditions",
+          "value": [
+            {
+              "name": "request-is-from-the-operator",
+              "expression": "request.userInfo.username.startsWith('system:serviceaccount:')"
+            }
+          ]
+        }
+      ],
+      "enforced": false,
+      "reason": "IdentityUnparseable"
+    },
+    {
+      "name": "matchCondition is negated",
+      "ops": [
+        {
+          "op": "set",
+          "target": "policy",
+          "path": "spec.matchConditions",
+          "value": [
+            {
+              "name": "request-is-from-the-operator",
+              "expression": "request.userInfo.username != 'system:serviceaccount:' + 'kn-next-operator-system' + ':' + 'kn-next-operator-controller-manager'"
+            }
+          ]
+        }
+      ],
+      "enforced": false,
+      "reason": "IdentityUnparseable"
+    },
+    {
+      "name": "policy has no matchCondition",
+      "ops": [{ "op": "set", "target": "policy", "path": "spec.matchConditions", "value": [] }],
+      "enforced": false,
+      "reason": "IdentityUnparseable"
+    },
+    {
+      "name": "identity spelled as one literal",
+      "ops": [
+        {
+          "op": "set",
+          "target": "policy",
+          "path": "spec.matchConditions",
+          "value": [
+            {
+              "name": "request-is-from-the-operator",
+              "expression": "request.userInfo.username == 'system:serviceaccount:kn-next-operator-system:kn-next-operator-controller-manager'"
+            }
+          ]
+        }
+      ],
+      "enforced": true,
+      "reason": "Enforced"
+    }
+  ]
+}

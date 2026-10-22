@@ -1,0 +1,5 @@
+---
+"@getknext/core": patch
+---
+
+`knext doctor` now checks that the operator's Secret and ConfigMap write policy is in force. The policy, a `ValidatingAdmissionPolicy` shipped in the install bundle, is the only thing that limits the operator to its per-zone signing-key Secrets and JWKS ConfigMaps. It can be off with nothing saying so: a cluster older than Kubernetes 1.30 rejects it while the rest of the bundle installs, an install under a different namespace or ServiceAccount name than the bundle rendered leaves a policy that names a user the operator is not, and an admin or a GitOps prune can delete it. The new `write-policy` row reports a `WARN` that names which of these it is, and `PASS` only when the policy exists, its binding denies, and the policy names the ServiceAccount the operator runs as. The operator reports the same verdict as the `knext_operator_write_policy_enforced` gauge (re-checked every five minutes, warning log on change, still starts when it is `0`), with a `KnextOperatorWritePolicyNotEnforced` alert. The operator's role gains `get` on exactly the policy and its binding, by name, and nothing else.

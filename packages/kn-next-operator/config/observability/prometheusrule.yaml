@@ -84,6 +84,32 @@ spec:
               daemonsets create/update/delete.
             runbook_url: "https://github.com/getknext-dev/knext/blob/main/docs/runbooks/troubleshooting.md"
 
+        # The ValidatingAdmissionPolicy that limits the operator's Secret/ConfigMap
+        # writes is not in force, so the operator is unrestricted. The gauge is the
+        # operator's own read of the policy and its binding (internal/writepolicy):
+        # 0 when either is missing, the binding does not Deny, the policy names a
+        # different username than the operator runs as, or the objects could not be
+        # read. Warning, not critical: a missing safety net, not an outage, and a
+        # cluster older than Kubernetes 1.30 cannot have the policy at all. Per pod
+        # (no aggregation): each replica reports, and one that cannot read the
+        # policy is a finding too. `for` is longer than the operator's 5m re-check.
+        - alert: KnextOperatorWritePolicyNotEnforced
+          expr: knext_operator_write_policy_enforced == 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "the knext operator's Secret/ConfigMap write policy is not in force"
+            description: >-
+              Pod {{ $labels.pod }} reports that the ValidatingAdmissionPolicy that
+              limits the operator to its per-zone signing-key Secrets and JWKS
+              ConfigMaps is not in force, so a compromised operator could write any
+              Secret or ConfigMap its RBAC allows. Run `knext doctor` for the
+              reason (deleted policy or binding, a Kubernetes version older than
+              1.30, a binding that only audits, or an operator running under a
+              different ServiceAccount than the policy names).
+            runbook_url: "https://github.com/getknext-dev/knext/blob/main/docs/security/threat-model.md"
+
         # SLO: reconcile latency. A slow control loop delays scale-up and
         # rollbacks. p95 over 30s sustained is degraded.
         - alert: KnextOperatorReconcileSlow

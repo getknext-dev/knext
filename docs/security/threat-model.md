@@ -340,6 +340,24 @@ to replace it, and a ServiceAccount with the operator's name in another namespac
   bundle is one artifact; there is no policy-free variant (jev: align the docs 1.00, ship a second
   bundle 0.00). On an older cluster the apply rejects the two policy objects and the rest of the
   bundle applies, leaving the operator unrestricted.
+- *Silent-off detection (#2500).* Three ways leave the operator unrestricted with nothing reporting
+  it: the version floor above, an install under another namespace or ServiceAccount name than the
+  bundle rendered (a Helm or OLM repackage, a hand-edited overlay), and deletion of the policy or its
+  binding by an admin or a GitOps prune. `internal/writepolicy` is the operator's read-only
+  self-check: at start-up and every five minutes it `get`s the policy and binding, asks the API
+  server who it is (`SelfSubjectReview`, which every authenticated user may create), and publishes
+  `knext_operator_write_policy_enforced` (1 only if the policy exists, its binding includes `Deny`
+  with no narrowing scope, the policy covers create/update/delete on Secrets and ConfigMaps with
+  `failurePolicy: Fail`, and its matchCondition is an exact equality on the operator's own
+  username). Unreadable or unknown is 0, never 1. It logs one warning per change and **does not
+  refuse to start** (that is a founder decision, not made here). The alert
+  `KnextOperatorWritePolicyNotEnforced` and `knext doctor`'s `write-policy` row report the same
+  verdict; both are held to one shared table (`internal/writepolicy/testdata/verdict-cases.json`).
+  The RBAC cost is `get` on exactly the two named objects (`config/rbac/write_policy_reader_role.yaml`,
+  pinned by `TestWritePolicyReaderRoleIsExactlyGetOnTheTwoNamedObjects`), a separate role because a
+  marker's `resourceNames` is not rewritten by the bundle's name prefix and the bundle rewrites it
+  from the policy's real name. **Residual:** a compromised operator can still read the two objects
+  it already could not change, and the check detects a missing control, it does not restore it.
 
 **Defence in depth: the function mounts the JWKS only if the zone controls it (#2464).** Before it
 renders a function, the BackendService reconciler reads the metadata of `<zone>-knext-jwks`

@@ -40,6 +40,7 @@ import {
     probeManifest,
     runDoctor,
 } from "../cli/doctor";
+import { WRITE_POLICY_STUBS } from "./doctor-write-policy-stubs";
 
 /**
  * bun's `typeof fetch` carries a `preconnect` property; a bare async arrow does
@@ -98,6 +99,7 @@ function healthyStubs(): Record<
 > {
     return {
         "kubectl get --raw /version": { ok: true, stdout: "{}" },
+        ...WRITE_POLICY_STUBS,
         // (g) local client version — modern enough for --validate=strict.
         "kubectl version --client -o json": {
             ok: true,
@@ -244,6 +246,7 @@ describe("runDoctor — healthy cluster", () => {
             "crd-schema",
             "operator",
             "operator-version",
+            "write-policy",
             "cert-manager",
             "ingress",
             "image",

@@ -32,6 +32,7 @@ import {
     runDoctor,
 } from "../cli/doctor";
 import type { KnativeNextConfig } from "../config";
+import { WRITE_POLICY_STUBS } from "./doctor-write-policy-stubs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CRD_YAML = join(
@@ -101,6 +102,7 @@ function healthyStubs(
 ): Record<string, StubEntry> {
     return {
         "kubectl get --raw /version": { ok: true, stdout: "{}" },
+        ...WRITE_POLICY_STUBS,
         "kubectl version --client -o json": {
             ok: true,
             stdout: JSON.stringify({

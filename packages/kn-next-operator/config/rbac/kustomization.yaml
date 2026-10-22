@@ -7,6 +7,10 @@ resources:
 - service_account.yaml
 - role.yaml
 - role_binding.yaml
+# Read-only `get` on the write policy and its binding, so the operator can report whether
+# the policy that bounds its Secret/ConfigMap writes is in force (internal/writepolicy).
+- write_policy_reader_role.yaml
+- write_policy_reader_role_binding.yaml
 - leader_election_role.yaml
 - leader_election_role_binding.yaml
 # The following RBAC configurations are used to protect

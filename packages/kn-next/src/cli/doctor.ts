@@ -65,6 +65,7 @@ import { storageModeCheck } from "./doctor/checks/storage-mode";
 import { turbopackFragmentsCheck } from "./doctor/checks/turbopack-fragments";
 import { cacheComponentsCheck } from "./doctor/checks/use-cache";
 import { vinextPatchesCheck } from "./doctor/checks/vinext-patches";
+import { writePolicyCheck } from "./doctor/checks/write-policy";
 import { kubectlRunner, probeManifest } from "./doctor/kubectl";
 import { formatDoctorTable } from "./doctor/report";
 import type {
@@ -146,6 +147,7 @@ export async function runDoctor(
     checks.push(...crdSchemaCheck(ctx));
     checks.push(...operatorCheck(ctx)); // sets ctx.operatorImage + ctx.operatorManager
     checks.push(...operatorVersionCheck(ctx)); // reads ctx.operatorManager (#1947)
+    checks.push(...writePolicyCheck(ctx)); // reads ctx.operatorManager: is the operator's Secret/ConfigMap write policy in force?
     checks.push(...certManagerCheck(ctx));
     checks.push(...ingressCheck(ctx));
     checks.push(...(await operatorImageCheck(ctx))); // reads ctx.operatorImage
@@ -200,7 +202,9 @@ function readOwnVersion(): string | undefined {
 const DOCTOR_HELP = `knext doctor — cluster-prereq preflight (read-only)
 
 Checks: NextApp CRD, operator readiness, the installed operator's release
-version and whether it pairs with this CLI (WARN only), cert-manager webhook, Knative
+version and whether it pairs with this CLI (WARN only), whether the operator's
+Secret/ConfigMap write policy is in force (WARN only; needs Kubernetes 1.30+),
+cert-manager webhook, Knative
 ingress-class vs its reconciler (#208), operator-image pullability (#198),
 app-image pullability vs the namespace's pull credentials (#952),
 NextApps whose Redis key prefixes collide (WARN only),
