@@ -403,8 +403,8 @@ const RULE_GROUPS: Record<
     { emitters: readonly EmitterId[]; why: string }
 > = {
     "knext.operator": {
-        emitters: ["operator"],
-        why: "the Go controller's own registry",
+        emitters: ["operator", "external"],
+        why: "the Go controller's own registry, plus Prometheus' own `up` (the write-policy meta-alert keys on a discovered operator target, as the app staleness rules do)",
     },
     "knext.nextapp": {
         emitters: ["external"],

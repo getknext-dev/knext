@@ -28,11 +28,12 @@ import (
 
 	"github.com/AhmedElBanna80/knext/packages/kn-next-operator/internal/metriccontract"
 
-	// The two packages that register on the operator's /metrics today. They are
+	// The packages that register on the operator's /metrics today. They are
 	// imported ONLY for the live cross-check below; the scan itself discovers
 	// packages from cmd/'s import graph and does not rely on this list.
 	_ "github.com/AhmedElBanna80/knext/packages/kn-next-operator/internal/controller"
 	_ "github.com/AhmedElBanna80/knext/packages/kn-next-operator/internal/webhook/v1alpha1"
+	_ "github.com/AhmedElBanna80/knext/packages/kn-next-operator/internal/writepolicy"
 )
 
 // moduleRoot is the operator module, two levels up from this package.

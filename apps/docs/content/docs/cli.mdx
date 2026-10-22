@@ -478,6 +478,19 @@ whether your cluster's CNI can **enforce** the default-on `NetworkPolicy` the op
 on flannel it cannot (the policy is declarative only), and doctor says so plainly rather than
 guessing; "cannot determine" is reported as its own outcome, never as "enforced".
 
+**Operator write policy.** The operator's Secret and ConfigMap writes are limited by a
+`ValidatingAdmissionPolicy` that can be off with nothing failing: a server older than Kubernetes
+1.30, an install under a different namespace or ServiceAccount name than the bundle rendered, or a
+deleted policy or binding. Doctor reads the policy and its binding by name and reports `PASS` only
+when the policy exists, covers create, update and delete on Secrets and ConfigMaps without narrowing
+(no `resourceNames`, `Cluster` scope or `excludeResourceRules`), carries the validations this release
+ships, has a binding that includes `Deny`, and names the ServiceAccount the operator Deployment runs
+as. Anything else, including output it cannot read, is a `WARN` that says which part is wrong, and a server
+older than 1.30 is a `WARN` naming the floor. A read that RBAC denies is a `WARN` ("cannot
+determine"), never a pass. It never fails the run, because the missing safety net is not an
+outage; the operator publishes the same verdict as the `knext_operator_write_policy_enforced` gauge
+(see [Security](/docs/security#write-policy-enforced)).
+
 **Redis key prefixes.** When any `NextApp` uses a Redis cache, doctor compares the apps' key
 prefixes: `cache.keyPrefix`, a `REDIS_KEY_PREFIX` in `env`, or the per-app default the operator
 derives. It `WARN`s, naming the apps, when:

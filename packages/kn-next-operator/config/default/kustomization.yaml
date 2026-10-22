@@ -195,6 +195,35 @@ replacements:
     options:
       delimiter: "'"
       index: 7
+# [ADMISSION] The operator's write-policy self-check reads the policy and its binding by NAME, and
+# its role grants `get` on exactly that name. The name prefix is applied to the policy but reaches
+# neither a Deployment env value nor a rule's resourceNames, so both are rewritten from the policy's
+# real name. A base name left in either place makes the check read (or be forbidden from reading) an
+# object that is not there. internal/install/write_policy_selfcheck_test.go proves the three agree.
+# policy name -> manager env WRITE_POLICY_NAME
+- source:
+    kind: ValidatingAdmissionPolicy
+    group: admissionregistration.k8s.io
+    name: secret-configmap-writes
+    fieldPath: .metadata.name
+  targets:
+  - select:
+      kind: Deployment
+      name: controller-manager
+    fieldPaths:
+    - .spec.template.spec.containers.[name=manager].env.[name=WRITE_POLICY_NAME].value
+# policy name -> write-policy-reader role resourceNames
+- source:
+    kind: ValidatingAdmissionPolicy
+    group: admissionregistration.k8s.io
+    name: secret-configmap-writes
+    fieldPath: .metadata.name
+  targets:
+  - select:
+      kind: ClusterRole
+      name: write-policy-reader
+    fieldPaths:
+    - .rules.0.resourceNames.0
 # --- The original commented metrics/conversion replacement scaffold follows (left disabled) ---
 #replacements_disabled:
 # - source: # Uncomment the following block to enable certificates for metrics

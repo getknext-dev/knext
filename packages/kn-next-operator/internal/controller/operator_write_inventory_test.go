@@ -116,6 +116,9 @@ var dynamicWriteAllowlist = map[string]string{
 var readOnlyKindUses = map[string]string{
 	"(*BackendServiceReconciler).secretMetadata":  "metadata-only GET of a Secret a function references",
 	"(*BackendServiceReconciler).observeZoneJWKS": "metadata-only GET of the zone's JWKS ConfigMap",
+	"github.com/AhmedElBanna80/knext/packages/kn-next-operator/internal/writepolicy.covers": "reads the write " +
+		"policy's own matchConstraints and spells the resource names \"secrets\" and \"configmaps\" to check the " +
+		"policy covers them; it touches no Secret or ConfigMap object",
 }
 
 var writeVerbs = map[string]bool{

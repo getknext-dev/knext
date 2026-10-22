@@ -340,6 +340,34 @@ to replace it, and a ServiceAccount with the operator's name in another namespac
   bundle is one artifact; there is no policy-free variant (jev: align the docs 1.00, ship a second
   bundle 0.00). On an older cluster the apply rejects the two policy objects and the rest of the
   bundle applies, leaving the operator unrestricted.
+- *Silent-off detection (#2500).* Three ways leave the operator unrestricted with nothing reporting
+  it: the version floor above, an install under another namespace or ServiceAccount name than the
+  bundle rendered (a Helm or OLM repackage, a hand-edited overlay), and deletion of the policy or its
+  binding by an admin or a GitOps prune. `internal/writepolicy` is the operator's read-only
+  self-check: at start-up and every five minutes it `get`s the policy and binding, asks the API
+  server who it is (`SelfSubjectReview`, which every authenticated user may create), and publishes
+  `knext_operator_write_policy_enforced`. It is 1 only if ALL of this holds: the policy exists with
+  `failurePolicy` not `Ignore`; its `matchConstraints` cover create/update/delete on core `v1`
+  Secrets and ConfigMaps through a rule with no `resourceNames`, no `Cluster` scope and the `v1` (or
+  `*`) apiVersion, with no `excludeResourceRules` (any is treated as carving something out) and no
+  namespace/object selector; its matchCondition is an exact equality on the operator's own username;
+  **its variables and validations are the shipped CEL** (round-1 review finding: matchConstraints,
+  identity and binding can all be right while a validation was replaced by `true`; compared are each
+  variable's name and expression and each validation's expression and `messageExpression`, against a
+  copy in `canonical.go` / `write-policy.ts` that `TestCanonicalPolicyCELEqualsTheShippedPolicy` and
+  its TS twin fail on if `config/admission` changes without it; `message` and `reason` are cosmetic
+  and not compared; an operator newer than the installed policy reports `PolicyModified` until the
+  bundle is reapplied); and the binding exists, names the policy, includes `Deny` and is not scoped.
+  Unreadable or unknown is 0, never 1. The `== 0` alert is blind if the series is missing, so
+  `KnextOperatorWritePolicyUnreported` fires on a discovered operator target (`up`) with no gauge. It logs one warning per change and **does not
+  refuse to start** (that is a founder decision, not made here). The alert
+  `KnextOperatorWritePolicyNotEnforced` and `knext doctor`'s `write-policy` row report the same
+  verdict; both are held to one shared table (`internal/writepolicy/testdata/verdict-cases.json`).
+  The RBAC cost is `get` on exactly the two named objects (`config/rbac/write_policy_reader_role.yaml`,
+  pinned by `TestWritePolicyReaderRoleIsExactlyGetOnTheTwoNamedObjects`), a separate role because a
+  marker's `resourceNames` is not rewritten by the bundle's name prefix and the bundle rewrites it
+  from the policy's real name. **Residual:** a compromised operator can still read the two objects
+  it already could not change, and the check detects a missing control, it does not restore it.
 
 **Defence in depth: the function mounts the JWKS only if the zone controls it (#2464).** Before it
 renders a function, the BackendService reconciler reads the metadata of `<zone>-knext-jwks`

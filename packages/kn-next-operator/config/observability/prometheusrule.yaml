@@ -84,6 +84,61 @@ spec:
               daemonsets create/update/delete.
             runbook_url: "https://github.com/getknext-dev/knext/blob/main/docs/runbooks/troubleshooting.md"
 
+        # The ValidatingAdmissionPolicy that limits the operator's Secret/ConfigMap
+        # writes is not in force, so the operator is unrestricted. The gauge is the
+        # operator's own read of the policy and its binding (internal/writepolicy):
+        # 0 when either is missing, the binding does not Deny, the policy names a
+        # different username than the operator runs as, or the objects could not be
+        # read. Warning, not critical: a missing safety net, not an outage, and a
+        # cluster older than Kubernetes 1.30 cannot have the policy at all. Per pod
+        # (no aggregation): each replica reports, and one that cannot read the
+        # policy is a finding too. `for` is longer than the operator's 5m re-check.
+        - alert: KnextOperatorWritePolicyNotEnforced
+          expr: knext_operator_write_policy_enforced == 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "the knext operator's Secret/ConfigMap write policy is not in force"
+            description: >-
+              Pod {{ $labels.pod }} reports that the ValidatingAdmissionPolicy that
+              limits the operator to its per-zone signing-key Secrets and JWKS
+              ConfigMaps is not in force, so a compromised operator could write any
+              Secret or ConfigMap its RBAC allows. Run `knext doctor` for the
+              reason (deleted policy or binding, a Kubernetes version older than
+              1.30, a binding that only audits, or an operator running under a
+              different ServiceAccount than the policy names).
+            runbook_url: "https://github.com/getknext-dev/knext/blob/main/docs/security/threat-model.md"
+
+        # The alert above reads `== 0`, so it is blind exactly when the operator
+        # never publishes the gauge: an operator older than the self-check, a
+        # monitor that did not start, or a scrape that fails. PromQL over a series
+        # nobody emits is an empty vector, which looks like "all enforced". This
+        # fires on a DISCOVERED operator target (`up` exists only for one) that
+        # exports no gauge. Keyed on `up`, not a bare absent(): with no operator
+        # at all there is nothing to report on, and absent() would fire on every
+        # cluster before install (the same reason the knext.app.staleness rules
+        # below key on `up`). The job selector matches the metrics Service as the
+        # bundle renders it (name prefix + controller-manager-metrics-service);
+        # prometheusrule.test.ts checks it against the manifests.
+        - alert: KnextOperatorWritePolicyUnreported
+          expr: >-
+            up{job=~".*controller-manager-metrics-service"}
+              unless on (namespace, pod) knext_operator_write_policy_enforced
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "the knext operator pod {{ $labels.namespace }}/{{ $labels.pod }} reports no write-policy gauge"
+            description: >-
+              Prometheus has discovered this operator pod but it exports no
+              knext_operator_write_policy_enforced series, so
+              KnextOperatorWritePolicyNotEnforced cannot fire for it and nothing
+              says whether its Secret/ConfigMap write policy is in force. Check
+              that the operator is a release that ships the self-check, that its
+              metrics scrape succeeds, and run `knext doctor`.
+            runbook_url: "https://github.com/getknext-dev/knext/blob/main/docs/security/threat-model.md"
+
         # SLO: reconcile latency. A slow control loop delays scale-up and
         # rollbacks. p95 over 30s sustained is degraded.
         - alert: KnextOperatorReconcileSlow
