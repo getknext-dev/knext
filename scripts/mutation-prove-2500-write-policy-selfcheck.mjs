@@ -97,7 +97,7 @@ const MUTATIONS = [
   {
     id: 'V01',
     claim: 'the check is forced to true: a deleted policy is reported as enforced',
-    subject: 'verdict',
+    subject: 'monitor',
     // The deleted-policy case has to be read off a real apiserver to count.
     anchor: '	return Evaluate(policy, binding, username)\n}',
     replacement:
@@ -171,7 +171,7 @@ const MUTATIONS = [
   {
     id: 'V10',
     claim: 'a read that fails (RBAC, transport) is reported as enforced',
-    subject: 'verdict',
+    subject: 'monitor',
     anchor:
       '		return no(ReasonUnverifiable, "reading ValidatingAdmissionPolicy %q failed: %v", name, err)',
     replacement: '		return Verdict{Enforced: true, Reason: ReasonEnforced}',
