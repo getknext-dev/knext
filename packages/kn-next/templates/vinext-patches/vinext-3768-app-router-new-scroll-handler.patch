@@ -1,4 +1,4 @@
-knext bundled fix for vinext 1.1.0 (dist output)
+knext bundled fix for vinext 1.3.0 (dist output)
 Upstream: https://github.com/cloudflare/vinext/pull/3768 (issues https://github.com/cloudflare/vinext/issues/2831 and https://github.com/cloudflare/vinext/issues/2810; builds on https://github.com/cloudflare/vinext/pull/2839)
 What it fixes: Next.js 16.3 made its new App Router scroll handler the default, and vinext still
 follows the legacy one, so three Next.js deploy-test files fail (navigation-focus, router-autoscroll,
@@ -19,7 +19,7 @@ markAppRouterScrollIntentHeadHoisted) existed only for the legacy handler and is
 Applies on top of every earlier patch in manifest order.
 Retire: delete this file (and its manifest entry) when the pinned vinext is >= the first
 release that includes cloudflare/vinext#3768.
-Ported by hand from the upstream src change to the published 1.1.0 dist files.
+Ported by hand from the upstream src change to the published 1.3.0 dist files.
 Applied by `knext vinext-patches` (runs from the app's postinstall and before `knext build`).
 --- a/dist/shims/app-router-scroll-state.js
 +++ b/dist/shims/app-router-scroll-state.js
@@ -73,8 +73,9 @@ Applied by `knext vinext-patches` (runs from the app's postinstall and before `k
 +export { beginAppRouterScrollIntent, claimAppRouterScrollIntentForCommit, clearAppRouterScrollIntent, consumeAppRouterScrollIntent, getPendingAppRouterScrollIntent, isLatestAppRouterScrollIntent };
 --- a/dist/shims/app-router-scroll.js
 +++ b/dist/shims/app-router-scroll.js
-@@ -1,22 +1,12 @@
+@@ -1,23 +1,13 @@
  "use client";
+ import { disableSmoothScrollDuringRouteTransition } from "./disable-smooth-scroll.js";
  import { decodeHashFragment } from "./hash-scroll.js";
 -import { consumeAppRouterScrollIntent, getPendingAppRouterScrollIntent, markAppRouterScrollIntentHeadHoisted } from "./app-router-scroll-state.js";
 +import { consumeAppRouterScrollIntent, getPendingAppRouterScrollIntent } from "./app-router-scroll-state.js";
@@ -97,7 +98,7 @@ Applied by `knext vinext-patches` (runs from the app's postinstall and before `k
  function readFindDOMNode() {
  	const internals = Reflect.get(ReactDOM, reactDomInternalsKey);
  	if (typeof internals !== "object" || internals === null) return null;
-@@ -30,18 +20,18 @@
+@@ -31,18 +21,18 @@
  	const node = findDOMNodeImpl(instance);
  	return node instanceof Element || node instanceof Text ? node : null;
  }
@@ -126,7 +127,7 @@ Applied by `knext vinext-patches` (runs from the app's postinstall and before `k
  }
  function getHashFragmentDomNode(hash) {
  	const fragment = decodeHashFragment(hash.startsWith("#") ? hash.slice(1) : hash);
-@@ -52,34 +42,34 @@
+@@ -53,34 +43,34 @@
  	const head = node.ownerDocument?.head;
  	return head != null && head.contains(node);
  }
@@ -183,7 +184,7 @@ Applied by `knext vinext-patches` (runs from the app's postinstall and before `k
  var AppRouterScrollTargetInner = class extends React$1.Component {
  	scheduledCommitId = null;
  	schedulePotentialScroll = () => {
-@@ -94,24 +84,23 @@
+@@ -95,26 +85,25 @@
  		const intent = getPendingAppRouterScrollIntent();
  		if (intent === null) return;
  		if (this.props.commitId === null || intent.commitId !== this.props.commitId) return;
@@ -208,8 +209,6 @@ Applied by `knext vinext-patches` (runs from the app's postinstall and before `k
 -		const target = next.element;
 -		const consumed = consumeAppRouterScrollIntent(intent, this.props.commitId);
 -		if (consumed === null) return;
--		scrollToElement(target, consumed.hash);
--		target.focus();
 +		if (intent.parallelSlotOwned) {
 +			consumeAppRouterScrollIntent(intent, this.props.commitId);
 +			return;
@@ -217,16 +216,20 @@ Applied by `knext vinext-patches` (runs from the app's postinstall and before `k
 +		const elements = collectRouteContentElements(findDOMNode(this));
 +		if (!hasBox(elements)) return;
 +		if (consumeAppRouterScrollIntent(intent, this.props.commitId) === null) return;
-+		if (intent.hash !== null) scrollFirstBoxIntoView(elements);
-+		else scrollToRouteContent(elements);
+ 		disableSmoothScrollDuringRouteTransition(() => {
+-			scrollToElement(target, consumed.hash);
++			if (intent.hash !== null) scrollFirstBoxIntoView(elements);
++			else scrollToRouteContent(elements);
+ 		});
+-		target.focus();
  	};
  	componentDidMount() {
  		this.schedulePotentialScroll();
 --- a/dist/server/app-browser-navigation-controller.js
 +++ b/dist/server/app-browser-navigation-controller.js
-@@ -513,7 +513,7 @@
- 					releaseSnapshot: snapshotRenderIds.delete(renderId)
- 				});
+@@ -561,7 +561,7 @@
+ 					commitEffect.publish({ releaseSnapshot: snapshotRenderIds.delete(renderId) });
+ 				}
  			});
 -			claimAppRouterScrollIntentForCommit(options.scrollIntent, renderId);
 +			claimAppRouterScrollIntentForCommit(options.scrollIntent, renderId, { parallelSlotOwned: approvedCommit.interception !== null });

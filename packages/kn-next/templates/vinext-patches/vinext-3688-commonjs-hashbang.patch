@@ -1,4 +1,4 @@
-knext bundled fix for vinext 1.1.0 (dist output)
+knext bundled fix for vinext 1.3.0 (dist output)
 Upstream: https://github.com/cloudflare/vinext/pull/3688
 What it fixes: A module that starts with a hashbang line (`#!/usr/bin/env node`) and also contains CommonJS
 syntax goes through vite-plugin-commonjs, which prepends a `module`/`exports` facade and so pushes
@@ -6,23 +6,23 @@ syntax goes through vite-plugin-commonjs, which prepends a `module`/`exports` fa
 This is the maintainer's version: the displaced hashbang is turned into a `//` line comment (same
 length, so source maps hold) both in vinext's CommonJS transform wrapper and in the client dependency
 optimizer (new dist/plugins/commonjs-hashbang.js). The upstream ESM-facade check it also precedes is
-is composed with: 1.1.0's own export-facade strip runs first, then the hashbang fix.
+is composed with: 1.3.0's own export-facade strip runs first, then the hashbang fix.
 Retire: delete this file (and its manifest entry) when the pinned vinext is >= the first
 release that includes cloudflare/vinext#3688.
-Ported by hand from the upstream src change to the published 1.1.0 dist files.
+Ported by hand from the upstream src change to the published 1.3.0 dist files.
 Applied by `knext vinext-patches` (runs from the app's postinstall and before `knext build`).
 
 --- a/dist/index.js
 +++ b/dist/index.js
-@@ -113,6 +113,7 @@
- import { createWorkerImageImportsPlugin } from "./plugins/worker-image-imports.js";
+@@ -124,6 +124,7 @@
+ import { createWorkerUseServerPlugins } from "./plugins/worker-use-server.js";
  import { createRequireContextPlugin } from "./plugins/require-context.js";
  import { commonJsEsmFacadeOptimizeDepsPlugin, stripEsmCommonJsExportFacade } from "./plugins/commonjs-esm-facade.js";
 +import { commentOutDisplacedHashbang, commonJsHashbangOptimizeDepsPlugin } from "./plugins/commonjs-hashbang.js";
  import { COMMONJS_SYNTAX_CODE_FILTER } from "./plugins/commonjs-syntax.js";
  import { createRequireConditionResolutionPlugin, isConditionalRequireScriptModuleId } from "./plugins/require-condition-resolution.js";
  import { createExtensionlessDynamicImportPlugin } from "./plugins/extensionless-dynamic-import.js";
-@@ -1173,8 +1174,9 @@
+@@ -1283,9 +1284,10 @@
  			return Promise.resolve(result).then((transformed) => {
  				if (typeof transformed !== "object" || typeof transformed?.code !== "string") return transformed;
  				const stripped = stripEsmCommonJsExportFacade(transformed.code);
@@ -34,7 +34,8 @@ Applied by `knext vinext-patches` (runs from the app's postinstall and before `k
 +					code: output
  				};
  			});
-@@ -1706,7 +1708,7 @@
+ 		};
+@@ -1839,7 +1841,7 @@
  					...depOptimizeNodeEnvOptions,
  					rolldownOptions: {
  						...depOptimizeNodeEnvOptions.rolldownOptions,

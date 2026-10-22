@@ -1,4 +1,4 @@
-knext bundled fix for vinext 1.1.0 (dist output)
+knext bundled fix for vinext 1.3.0 (dist output)
 Upstream: https://github.com/cloudflare/vinext/pull/3741
 What it fixes: On a Nitro production build of a Pages Router app, `/_next/image` answered 404:
 the Pages request handler only serves it through a Workers ASSETS binding, and Nitro has none.
@@ -17,16 +17,16 @@ Applied by `knext vinext-patches` (runs from the app's postinstall and before `k
 
 --- a/dist/server/pages-request-stage-entry.js
 +++ b/dist/server/pages-request-stage-entry.js
-@@ -12,7 +12,7 @@
+@@ -13,7 +13,7 @@
  import { CACHEABILITY_REQUEST_STATE } from "../shims/cacheability-classification.js";
  import { applyCdnResponseIdentityHeaders, captureCdnResponsePolicyOverrides, reconcileCdnResponseHeadersAfterOuterPolicy, validateCdnRequest } from "./cache-control.js";
  import { registerLazyDataCacheHandler } from "../shims/cache-handler.js";
--import { DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES, handleConfiguredImageOptimization, isImageOptimizationPath } from "./image-optimization.js";
-+import { DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES, handleConfiguredImageOptimization, handleNitroImageOptimization, isImageOptimizationPath } from "./image-optimization.js";
+-import { DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES, handleConfiguredImageOptimization, isImageOptimizationPath, isImageSourceBodyStatus } from "./image-optimization.js";
++import { DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES, handleConfiguredImageOptimization, handleNitroImageOptimization, isImageOptimizationPath, isImageSourceBodyStatus } from "./image-optimization.js";
  import { traceFrameworkRequest } from "./request-tracing.js";
  import { resolveResponseStageCachePolicy } from "./config-headers.js";
- import { fetchWorkerFilesystemRoute, runPagesRequest, wrapMiddlewareWithBasePath } from "./pages-request-pipeline.js";
-@@ -60,6 +60,23 @@
+ import { createStaticAssetRequest } from "./worker-utils.js";
+@@ -68,6 +68,23 @@
  	contentDispositionType: vinextConfig.images.contentDispositionType,
  	contentSecurityPolicy: vinextConfig.images.contentSecurityPolicy
  } : void 0;
@@ -47,22 +47,22 @@ Applied by `knext vinext-patches` (runs from the app's postinstall and before `k
 +		return false;
 +	}
 +}
- /** Run the request-time stage with a host-owned response dispatcher. */
- function handleRequestStage(request, env, ctx, dispatchResponseStage) {
- 	const originalRequest = request;
-@@ -286,7 +303,14 @@
+ /**
+ * Whether the request stage serves this request as a client build file
+ * outside `_next/static`. Such responses resolve no route, so the Worker
+@@ -315,7 +332,14 @@
  				}) : dispatched;
  			},
- 			serveFilesystemRoute: async (requestPathname, _stagedHeaders, phase, resolvedUrl) => {
+ 			serveFilesystemRoute: async (requestPathname, _stagedHeaders, phase, resolvedUrl, filesystemRequest, resolvedPathnameHasBasePath) => {
 -				if (!assets) return false;
 +				if (!assets) {
-+					const nitroFetch = isImageOptimizationPath(requestPathname) ? getNitroAppFetch() : void 0;
++					const nitroFetch = resolvedPathnameHasBasePath && isImageOptimizationPath(requestPathname) ? getNitroAppFetch() : void 0;
 +					if (!nitroFetch) return false;
 +					const imageUrl = new URL(resolvedUrl, request.url);
 +					if (isRecursiveImageSource(imageUrl)) return new Response("\"url\" parameter cannot be recursive", { status: 400 });
 +					const allowedWidths = [...vinextConfig?.images?.deviceSizes ?? DEFAULT_DEVICE_SIZES, ...vinextConfig?.images?.imageSizes ?? DEFAULT_IMAGE_SIZES];
 +					return handleNitroImageOptimization(new Request(imageUrl, request), nitroFetch, allowedWidths, imageConfig, basePath);
 +				}
- 				if (isImageOptimizationPath(requestPathname)) {
+ 				if (resolvedPathnameHasBasePath && isImageOptimizationPath(requestPathname)) {
  					const imageUrl = new URL(resolvedUrl, request.url);
- 					const imageRequest = new Request(imageUrl, request);
+ 					const imageRequest = cloneRequestWithUrl(request, imageUrl.href);

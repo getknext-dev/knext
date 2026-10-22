@@ -1,4 +1,4 @@
-knext bundled fix for vinext 1.1.0 (dist output)
+knext bundled fix for vinext 1.3.0 (dist output)
 Upstream: https://github.com/cloudflare/vinext/pull/3686
 What it fixes: `images.loaderFile` in next.config was silently ignored on the
 vinext target, so a custom image loader configured that way was never used
@@ -17,22 +17,24 @@ vinext-3686-image-trailingslash-loader-srcset.patch, which MUST apply first
 install that already carries the first half still applies cleanly.
 Retire: delete this file (and its manifest entry) when the pinned vinext is >= the first
 release that includes cloudflare/vinext#3686.
-Ported by hand from the upstream src change to the published 1.1.0 dist files.
+Ported by hand from the upstream src change to the published 1.3.0 dist files.
 Applied by `knext vinext-patches` (runs from the app's postinstall and before `knext build`).
 
 --- a/dist/build/client-build-config.js
 +++ b/dist/build/client-build-config.js
-@@ -6,6 +6,7 @@
+@@ -10,7 +10,9 @@
  	"dynamic-preload-chunks",
  	"form",
  	"image",
 +	"image-external",
+ 	"image-props",
++	"image-props-external",
  	"internal/hybrid-client-route-owner",
  	"layout-segment-context",
  	"legacy-image",
 --- a/dist/check.js
 +++ b/dist/check.js
-@@ -198,7 +198,7 @@
+@@ -197,7 +197,7 @@
  	env: { status: "supported" },
  	images: {
  		status: "partial",
@@ -43,7 +45,7 @@ Applied by `knext vinext-patches` (runs from the app's postinstall and before `k
  		status: "supported",
 --- a/dist/index.js
 +++ b/dist/index.js
-@@ -751,7 +751,22 @@
+@@ -833,7 +833,22 @@
  const _appRscCombinedHandlerPath = resolveShimModulePath(_serverDir, "app-rsc-combined-handler");
  const _appRscHandlerPath = resolveShimModulePath(_serverDir, "app-rsc-handler");
  const _pagesClientAssetsPath = resolveShimModulePath(_serverDir, "pages-client-assets");
@@ -66,16 +68,16 @@ Applied by `knext vinext-patches` (runs from the app's postinstall and before `k
  function isValidExportIdentifier(name) {
  	return /^[$A-Z_a-z][$\w]*$/.test(name);
  }
-@@ -1463,6 +1478,8 @@
+@@ -1567,6 +1582,8 @@
  				defines["process.env.__VINEXT_IMAGE_DANGEROUSLY_ALLOW_SVG"] = JSON.stringify(String(nextConfig.images?.dangerouslyAllowSVG ?? false));
  				defines["process.env.__VINEXT_IMAGE_DANGEROUSLY_ALLOW_LOCAL_IP"] = JSON.stringify(String(nextConfig.images?.dangerouslyAllowLocalIP ?? false));
  				defines["process.env.__VINEXT_IMAGE_UNOPTIMIZED"] = JSON.stringify(String(nextConfig.images?.unoptimized === true));
 +				defines["process.env.__VINEXT_IMAGE_CUSTOM_LOADER"] = JSON.stringify(String(nextConfig.images?.loader === "custom"));
 +				defines["process.env.__VINEXT_IMAGE_LOADER_FILE"] = JSON.stringify(String(Boolean(nextConfig.images?.loaderFile)));
- 				defines["process.env.__VINEXT_BUILD_ID"] = JSON.stringify(nextConfig.buildId);
- 				defines["process.env.__VINEXT_RSC_COMPATIBILITY_ID"] = JSON.stringify(rscCompatibilityId);
- 				defines["process.env.__VINEXT_RSC_BUILD_IDENTITY"] = JSON.stringify(rscBuildIdentity ?? "");
-@@ -1629,7 +1646,8 @@
+ 				defines["process.env.__VINEXT_BUILD_ID"] = "undefined";
+ 				defines["process.env.__VINEXT_RSC_COMPATIBILITY_ID"] = JSON.stringify("");
+ 				defines["process.env.__VINEXT_RSC_BUILD_IDENTITY"] = JSON.stringify("");
+@@ -1745,7 +1762,8 @@
  							...tsconfigPathAliases,
  							...nextConfig.aliases,
  							...nextShimMap,
@@ -85,9 +87,29 @@ Applied by `knext vinext-patches` (runs from the app's postinstall and before `k
  						}, tsconfigPathAliases, {
  							...nextConfig.aliases,
  							...nextShimMap
+@@ -2365,8 +2383,9 @@
+ 						}, instrumentationPath);
+ 					}
+ 					if (id === RESOLVED_NEXT_IMAGE_RSC) return [
+-						`export { getImageProps, imageOptimizationUrl } from "vinext/shims/image-props";`,
+-						`export { default } from "vinext/shims/image";`,
++						`export { imageOptimizationUrl } from "vinext/shims/image-props";`,
++						`export { getImageProps } from "vinext/shims/image-props-external";`,
++						`export { default } from "vinext/shims/image-external";`,
+ 						""
+ 					].join("\n");
+ 					if (id === RESOLVED_ROOT_PARAMS) return generateRootParamsModule((hasAppDir ? await appRouter(appDir, nextConfig?.pageExtensions, fileMatcher) : []).flatMap((route) => route.rootParamNames ?? []));
 --- a/dist/shims/image.js
 +++ b/dist/shims/image.js
-@@ -357,6 +357,7 @@
+@@ -5,6 +5,7 @@
+ import { jsx } from "react/jsx-runtime";
+ import * as ReactDOM from "react-dom";
+ import { Image as Image$1 } from "@unpic/react";
++import { __customImageLoader, missingLoaderError } from "./image-props.js";
+ //#region src/shims/image.tsx
+ /**
+ * next/image shim
+@@ -104,6 +105,7 @@
  		height,
  		blurDataURL
  	});
@@ -95,18 +117,6 @@ Applied by `knext vinext-patches` (runs from the app's postinstall and before `k
  	const shouldPreload = preload === true || priority === true;
  	const priorityFetchPriority = priority ? "high" : void 0;
  	const imageLoading = priority ? "eager" : shouldPreload ? loading : loading ?? "lazy";
-@@ -663,4 +664,10 @@
- 	return { props: Object.assign(imageProps, { "data-nimg": fill ? "fill" : "1" }) };
- }
- //#endregion
--export { Image as default, getImageProps, imageOptimizationUrl };
-+/** `images.loader: "custom"`: optimized images need a loader prop. */
-+const __customImageLoader = process.env.__VINEXT_IMAGE_CUSTOM_LOADER === "true";
-+/** Internal: also thrown by shims/image-external.js for next/image. */
-+function missingLoaderError(src) {
-+	return /* @__PURE__ */ new Error(`Image with src "${src}" is missing "loader" prop.\nRead more: https://nextjs.org/docs/messages/next-image-missing-loader`);
-+}
-+export { Image as default, getImageProps, imageOptimizationUrl, missingLoaderError };
 --- a/dist/shims/public-shim-map.json.js
 +++ b/dist/shims/public-shim-map.json.js
 @@ -17,7 +17,7 @@
@@ -120,12 +130,12 @@ Applied by `knext vinext-patches` (runs from the app's postinstall and before `k
  	"next/legacy/image": {
 --- /dev/null
 +++ b/dist/shims/image-external.js
-@@ -0,0 +1,43 @@
+@@ -0,0 +1,22 @@
 +"use client";
-+import ImageWithoutLoaderFile, { getImageProps as getImagePropsWithoutLoaderFile, missingLoaderError } from "./image.js";
++import ImageWithoutLoaderFile from "./image.js";
++import { getImageProps, withConfiguredLoader } from "./image-props-external.js";
 +import { forwardRef } from "react";
 +import { jsx } from "react/jsx-runtime";
-+import * as imageLoaderFileModule from "vinext/shims/image-loader-file";
 +//#region src/shims/image-external.tsx
 +/**
 +* next/image entry: the shared shim in ./image.tsx plus `images.loaderFile`.
@@ -135,33 +145,12 @@ Applied by `knext vinext-patches` (runs from the app's postinstall and before `k
 +* while next/legacy/image never imports it. shims/legacy-image.tsx imports
 +* ./image.tsx directly, so legacy-only pages never evaluate the loader file.
 +*/
-+const configuredImageLoader = imageLoaderFileModule.default;
-+/** `images.loaderFile` is set, so `configuredImageLoader` must be its default export. */
-+const __hasImageLoaderFile = process.env.__VINEXT_IMAGE_LOADER_FILE === "true";
-+/** `images.loader: "custom"`: images need a loader prop or `images.loaderFile`. */
-+const __customImageLoader = process.env.__VINEXT_IMAGE_CUSTOM_LOADER === "true";
-+/** Ported from the loader checks at the top of Next.js's getImgProps. */
-+function withConfiguredLoader(props) {
-+	if (__hasImageLoaderFile && typeof configuredImageLoader === "undefined") throw new Error("images.loaderFile detected but the file is missing default export.\nRead more: https://nextjs.org/docs/messages/invalid-images-config");
-+	const loader = props.loader || configuredImageLoader;
-+	if (!loader && __customImageLoader) {
-+		const { src } = props;
-+		throw missingLoaderError(typeof src === "string" ? src : ("default" in src ? src.default : src).src);
-+	}
-+	return loader === props.loader ? props : {
-+		...props,
-+		loader
-+	};
-+}
 +const ImageWithLoaderFile = forwardRef(function Image(props, ref) {
 +	return /* @__PURE__ */ jsx(ImageWithoutLoaderFile, {
 +		...withConfiguredLoader(props),
 +		ref
 +	});
 +});
-+function getImageProps(props) {
-+	return getImagePropsWithoutLoaderFile(withConfiguredLoader(props));
-+}
 +//#endregion
 +export { ImageWithLoaderFile as default, getImageProps };
 --- /dev/null
@@ -180,3 +169,56 @@ Applied by `knext vinext-patches` (runs from the app's postinstall and before `k
 +const loader = void 0;
 +//#endregion
 +export { loader as default };
+--- /dev/null
++++ b/dist/shims/image-props-external.js
+@@ -0,0 +1,34 @@
++import { __customImageLoader, getImageProps as getImagePropsWithoutLoaderFile, missingLoaderError } from "./image-props.js";
++import * as imageLoaderFileModule from "vinext/shims/image-loader-file";
++//#region src/shims/image-props-external.ts
++/**
++* next/image's server-safe prop building plus `images.loaderFile`.
++*
++* Mirrors Next.js, where next/image (shared/lib/image-external.tsx) imports
++* the default image-loader module that `images.loaderFile` is aliased over,
++* while next/legacy/image never imports it. This module has no "use client"
++* directive so Server Components can call `getImageProps` with the configured
++* loader; shims/image-external.js (the client entry) wraps the Image
++* component with the same `withConfiguredLoader`.
++*/
++const configuredImageLoader = imageLoaderFileModule.default;
++/** `images.loaderFile` is set, so `configuredImageLoader` must be its default export. */
++const __hasImageLoaderFile = process.env.__VINEXT_IMAGE_LOADER_FILE === "true";
++/** Ported from the loader checks at the top of Next.js's getImgProps. */
++function withConfiguredLoader(props) {
++	if (__hasImageLoaderFile && typeof configuredImageLoader === "undefined") throw new Error("images.loaderFile detected but the file is missing default export.\nRead more: https://nextjs.org/docs/messages/invalid-images-config");
++	const loader = props.loader || configuredImageLoader;
++	if (!loader && __customImageLoader) {
++		const { src } = props;
++		throw missingLoaderError(typeof src === "string" ? src : ("default" in src ? src.default : src).src);
++	}
++	return loader === props.loader ? props : {
++		...props,
++		loader
++	};
++}
++function getImageProps(props) {
++	return getImagePropsWithoutLoaderFile(withConfiguredLoader(props));
++}
++//#endregion
++export { getImageProps, withConfiguredLoader };
+--- a/dist/shims/image-props.js
++++ b/dist/shims/image-props.js
+@@ -67,6 +67,13 @@
+ */
+ const __dangerouslyAllowLocalIP = process.env.__VINEXT_IMAGE_DANGEROUSLY_ALLOW_LOCAL_IP === "true";
+ const __globallyUnoptimized = process.env.__VINEXT_IMAGE_UNOPTIMIZED === "true";
++/** `images.loader: "custom"`: optimized images need a loader prop. */
++const __customImageLoader = process.env.__VINEXT_IMAGE_CUSTOM_LOADER === "true";
++/** Internal: also thrown by shims/image-props-external.js for next/image. */
++function missingLoaderError(src) {
++	return /* @__PURE__ */ new Error(`Image with src "${src}" is missing "loader" prop.\nRead more: https://nextjs.org/docs/messages/next-image-missing-loader`);
++}
++export { __customImageLoader, missingLoaderError };
+ /**
+ * Validate that a remote URL is allowed by the configured remote patterns.
+ * Returns true if the URL is allowed, false otherwise.
