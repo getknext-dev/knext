@@ -12,7 +12,7 @@ name: govulncheck nightly
 
 on:
   schedule:
-    - cron: '23 5 * * *'
+    - cron: '13 2 * * *'
   workflow_dispatch:
 
 permissions:
