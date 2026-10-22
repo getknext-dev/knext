@@ -58,7 +58,7 @@ func TestApplyImageEnvOverrides(t *testing.T) {
 // forbids uid 0 and a non-numeric id cannot be rendered.
 func TestApplyImageEnvRejectsBadIdentity(t *testing.T) {
 	for _, key := range []string{"APPDB_COMPUTE_UID", "APPDB_COMPUTE_GID", "APPDB_INIT_UID", "APPDB_INIT_GID"} {
-		for _, bad := range []string{"0", "-1", "postgres", "1000x", "1.5", "99999999999999999999"} {
+		for _, bad := range []string{"0", "-1", "postgres", "1000x", "1.5", "2147483648", "99999999999999999999"} {
 			clearIdentityEnv(t)
 			t.Setenv(key, bad)
 			c := appdb.DefaultRenderConfig("ns")
