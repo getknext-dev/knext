@@ -47,7 +47,11 @@ function gatedModules(): Gated[] {
   return out;
 }
 
-const gated = gatedModules();
+const NIGHTLY = 'govulncheck-nightly.yml';
+const allGated = gatedModules();
+// A schedule-only run is not PR-time coverage: a module must be gated by at least
+// one PR/push workflow that is NOT the nightly.
+const gated = allGated.filter((g) => g.file !== NIGHTLY);
 
 describe('govulncheck covers every Go module', () => {
   it('finds the known modules (the scan itself is not vacuous)', () => {
@@ -96,10 +100,14 @@ describe('govulncheck covers every Go module', () => {
         // only if it has no path filter on this event either.
         const unfiltered = wf.on?.[ev] && !wf.on[ev].paths;
         const covers = unfiltered || paths.some((p) => p === `${dir}/**`);
-        if (file === 'govulncheck-nightly.yml') continue;
         expect(covers, `${file} ${ev} must cover ${dir}/**`).toBe(true);
       }
     }
+  });
+
+  it('the nightly scans every gated module too, so an exception expires on its date', () => {
+    const nightly = new Set(allGated.filter((g) => g.file === NIGHTLY).map((g) => g.dir));
+    for (const g of gated) expect(nightly.has(g.dir), `nightly must scan ${g.dir}`).toBe(true);
   });
 
   it('GO-2026-6809 is excepted for the shared gate (covers every module)', () => {

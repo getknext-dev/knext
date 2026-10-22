@@ -10,6 +10,12 @@
  * entry is `{ id, expires, justification }`; a malformed entry, an expired
  * entry, and an entry whose vulnerability is no longer called all FAIL, so an
  * exception cannot outlive its reason or sit around unread.
+ *
+ * One exceptions file serves every Go module, so an entry may carry an optional
+ * `modules: [dir, ...]` scope (module directories relative to the repo root).
+ * Omitted means every module. The module being scanned is the first argument
+ * (or GOVULNCHECK_MODULE) and is REQUIRED on the command line, so a step that
+ * forgets it fails rather than silently applying every entry.
  */
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -17,7 +23,7 @@ import { fileURLToPath } from 'node:url';
 
 const ID = /^GO-\d{4}-\d{4,}$/;
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
-const KEYS = new Set(['id', 'expires', 'justification']);
+const KEYS = new Set(['id', 'expires', 'justification', 'modules']);
 
 /** Split govulncheck's stream of concatenated JSON objects. Throws if truncated. */
 export function parseStream(text) {
@@ -50,7 +56,7 @@ export function parseStream(text) {
   return out;
 }
 
-export function evaluate(messages, entries, now = new Date()) {
+export function evaluate(messages, entries, now = new Date(), module = undefined) {
   const errors = [];
   // Fail closed on a crashed or truncated govulncheck: an empty stream must not
   // read as "no vulnerabilities". A real run opens with `config` and reaches the
@@ -97,6 +103,19 @@ export function evaluate(messages, entries, now = new Date()) {
       errors.push(`${label}: expired on ${e.expires}; bump the toolchain and remove it`);
       continue;
     }
+    if (e.modules !== undefined) {
+      if (
+        !Array.isArray(e.modules) ||
+        e.modules.length === 0 ||
+        e.modules.some((m) => typeof m !== 'string' || m.trim() === '')
+      ) {
+        errors.push(`${label}: modules must be a non-empty array of module directories`);
+        continue;
+      }
+      // Out of scope for the module being scanned: it neither covers a finding nor
+      // can it be stale here (the module it names is scanned in its own leg).
+      if (module !== undefined && !e.modules.includes(module)) continue;
+    }
     if (!called.has(e.id)) {
       errors.push(`${label}: stale, ${e.id} is no longer called; remove the entry`);
       continue;
@@ -111,6 +130,13 @@ export function evaluate(messages, entries, now = new Date()) {
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const module = process.argv[2] ?? process.env.GOVULNCHECK_MODULE;
+  if (!module) {
+    console.error(
+      'govulncheck-gate: the module is required (argument or GOVULNCHECK_MODULE), e.g. templates/go',
+    );
+    process.exit(1);
+  }
   const file = resolve(import.meta.dirname, '../security/govulncheck-exceptions.json');
   const entries = JSON.parse(readFileSync(file, 'utf8')).allow;
   if (!Array.isArray(entries)) throw new Error(`${file}: "allow" must be an array`);
@@ -119,7 +145,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const chunks = [];
   for await (const chunk of process.stdin) chunks.push(chunk);
   const input = Buffer.concat(chunks).toString('utf8');
-  const result = evaluate(parseStream(input), entries);
+  const result = evaluate(parseStream(input), entries, new Date(), module);
   if (!result.ok) {
     for (const e of result.errors) console.error(`govulncheck-gate: ${e}`);
     process.exit(1);

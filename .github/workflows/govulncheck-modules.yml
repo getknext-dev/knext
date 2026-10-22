@@ -7,9 +7,9 @@ name: govulncheck (Go modules)
 # fails when a go.mod exists that is neither gated in CI nor listed as excluded
 # (with a reason) in security/govulncheck-modules.json.
 #
-# The dated-exception nightly (govulncheck-nightly.yml) is deliberately NOT
-# changed here: it must stay byte-identical with main's copy. Mirroring these
-# modules into it is a main-side follow-up.
+# The dated-exception nightly (govulncheck-nightly.yml) scans the same modules
+# over both lane refs, so an exception expires ON its date. That file is kept
+# byte-identical with main's copy.
 
 on:
   pull_request:
@@ -21,6 +21,8 @@ on:
       - 'security/govulncheck-exceptions.json'
       - 'security/govulncheck-modules.json'
       - 'tests/govulncheck-all-modules.test.ts'
+      - 'tests/govulncheck-gate.test.ts'
+      - 'tests/govulncheck-gate-scope.test.ts'
   push:
     branches: [main, 'integration/**']
     paths:
@@ -31,6 +33,8 @@ on:
       - 'security/govulncheck-exceptions.json'
       - 'security/govulncheck-modules.json'
       - 'tests/govulncheck-all-modules.test.ts'
+      - 'tests/govulncheck-gate.test.ts'
+      - 'tests/govulncheck-gate-scope.test.ts'
   workflow_dispatch:
 
 permissions:
@@ -73,4 +77,4 @@ jobs:
         # through a dated entry in security/govulncheck-exceptions.json.
         run: |
           set -euo pipefail
-          go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 -format json ./... | node "$GITHUB_WORKSPACE/scripts/govulncheck-gate.mjs"
+          go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 -format json ./... | node "$GITHUB_WORKSPACE/scripts/govulncheck-gate.mjs" "${{ matrix.module }}"
