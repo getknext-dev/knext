@@ -61,7 +61,6 @@ const PROVER = {
     role: 'packages/kn-next-operator/config/rbac/write_policy_reader_role.yaml',
     rbacKust: 'packages/kn-next-operator/config/rbac/kustomization.yaml',
     defaultKust: 'packages/kn-next-operator/config/default/kustomization.yaml',
-    manager: 'packages/kn-next-operator/config/manager/manager.yaml',
   },
 };
 
@@ -245,6 +244,14 @@ const MUTATIONS = [
     replacement: '		Name:     defaultWritePolicyName,',
     test: WIRING,
   },
+  {
+    id: 'M03',
+    claim: 'the operator reads the policy name from the wrong environment variable',
+    subject: 'main',
+    anchor: '	if v := getenv("WRITE_POLICY_NAME"); v != "" {',
+    replacement: '	if v := getenv("WRITE_POLICY"); v != "" {',
+    test: WIRING,
+  },
   // --- the RBAC ---------------------------------------------------------------
   {
     id: 'R01',
@@ -309,15 +316,6 @@ const MUTATIONS = [
       '      kind: ClusterRole\n      name: no-such-role\n    fieldPaths:\n    - .rules.0.resourceNames.0',
     test: BUNDLE,
   },
-  {
-    id: 'K03',
-    claim: 'the manager is not told the policy name',
-    subject: 'manager',
-    anchor:
-      '        env:\n        - name: WRITE_POLICY_NAME\n          value: secret-configmap-writes\n',
-    replacement: '',
-    test: BUNDLE,
-  },
 ];
 
 // MUTATION_ONLY=V01,K01 runs just those rows. Unset, every row runs; the declared count
@@ -378,8 +376,9 @@ function renderBundle(kustomize) {
 function guardExit(test, kustomize) {
   if (test.kind === 'bundle') {
     if (renderBundle(kustomize) !== 0) {
-      console.error(`${NAME}: kustomize could not render config/default; the row proves nothing`);
-      process.exit(2);
+      // throw, not process.exit: exiting would skip the caller's restore and leave the
+      // tree mutated.
+      throw new Error(`${NAME}: kustomize could not render config/default; the row proves nothing`);
     }
     return run(
       'go',
