@@ -19,6 +19,12 @@ type RenderConfig struct {
 	RolePrefix     string // "app_"
 	ComputeImage   string // neondatabase/compute-node-v17:8464
 	InitImage      string // neondatabase/neon:8464
+	// ComputeUID/ComputeGID is the numeric identity the compute container runs as;
+	// InitUID/InitGID the one the init containers run as. They are the identity
+	// the matching IMAGE declares, so an overridden image needs its own values
+	// (see DefaultImageUID). Must be > 0: runAsNonRoot forbids 0.
+	ComputeUID, ComputeGID int64
+	InitUID, InitGID       int64
 }
 
 // DefaultRenderConfig fills a RenderConfig from the template's pinned values.
@@ -30,31 +36,39 @@ func DefaultRenderConfig(ns string) RenderConfig {
 		RolePrefix:     "app_",
 		ComputeImage:   "docker.io/neondatabase/compute-node-v17:8464@sha256:13ab146d3e7bbabb25a8532f315ac443e7512351d1ede0bab586def5c70e26c3",
 		InitImage:      "docker.io/neondatabase/neon:8464@sha256:7a4f124917bb929964b2d696d710f19584f80bb9bd51b2af4a6e2425434c761f",
+		ComputeUID:     DefaultImageUID,
+		ComputeGID:     DefaultImageUID,
+		InitUID:        DefaultImageUID,
+		InitGID:        DefaultImageUID,
 	}
 }
 
-// computeImageUID is the numeric uid/gid every container of a rendered compute
-// pod runs as. Measured from /etc/passwd of the pinned digests: the compute image
-// declares USER `postgres` (1000:1000) and the init image USER `neon` (1000:1000).
-// Both are NAMES in the image config, which the kubelet cannot verify as
-// non-root, so runAsNonRoot needs the numeric id spelled out here. It equals the
-// uid the pods already ran as, so nothing about file ownership or the boot
-// changes. Bumping either image digest means re-reading it (crane export + the
-// image's /etc/passwd): a different uid is a silent boot failure otherwise.
-const computeImageUID int64 = 1000
+// DefaultImageUID is the numeric uid/gid the PINNED default images run as.
+// Measured from /etc/passwd of the pinned digests: the compute image declares
+// USER `postgres` (1000:1000) and the init image USER `neon` (1000:1000). Both
+// are NAMES in the image config, which the kubelet cannot verify as non-root, so
+// runAsNonRoot needs the numeric id spelled out. It equals the uid the pods
+// already ran as, so nothing about file ownership or the boot changes.
+//
+// It is only right for those digests. Bumping a digest means re-reading the new
+// image's /etc/passwd and recording the uid in pinnedImageUIDs
+// (image_uid_table_test.go), which fails until it is done; an image supplied at
+// run time (APPDB_COMPUTE_IMAGE / APPDB_INIT_IMAGE) needs its identity supplied
+// with it (APPDB_COMPUTE_UID/GID, APPDB_INIT_UID/GID).
+const DefaultImageUID int64 = 1000
 
 // restrictedContainerSecurityContext is the container securityContext every
 // container of a gateway-rendered compute pod carries, so the pod is admitted in
 // a namespace enforcing the Kubernetes Pod Security `restricted` level:
 // allowPrivilegeEscalation false, capabilities drop ALL (nothing added back -
 // compute_ctl and Postgres run unprivileged on ports above 1024 and need none),
-// seccomp RuntimeDefault, runAsNonRoot with the numeric uid/gid above.
+// seccomp RuntimeDefault, runAsNonRoot with the numeric uid/gid of the image the
+// container runs (RenderConfig.ComputeUID/InitUID).
 // readOnlyRootFilesystem is deliberately not set: Postgres and compute_ctl write
 // under the container filesystem (PGDATA, the staged TLS key), and it is not part
 // of the restricted profile.
-func restrictedContainerSecurityContext() *corev1.SecurityContext {
+func restrictedContainerSecurityContext(uid, gid int64) *corev1.SecurityContext {
 	no, yes := false, true
-	uid, gid := computeImageUID, computeImageUID
 	return &corev1.SecurityContext{
 		AllowPrivilegeEscalation: &no,
 		Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
@@ -189,7 +203,7 @@ echo "timeline ready"`
 					InitContainers: []corev1.Container{{
 						Name:            "wait-timeline",
 						Image:           c.InitImage,
-						SecurityContext: restrictedContainerSecurityContext(),
+						SecurityContext: restrictedContainerSecurityContext(c.InitUID, c.InitGID),
 						EnvFrom:         []corev1.EnvFromSource{{ConfigMapRef: &corev1.ConfigMapEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "compute-config-" + s.App}}}},
 						Command:         []string{"/bin/sh", "-c"},
 						Args:            []string{waitScript},
@@ -198,7 +212,7 @@ echo "timeline ready"`
 						Name:            "compute",
 						Image:           c.ComputeImage,
 						ImagePullPolicy: corev1.PullIfNotPresent,
-						SecurityContext: restrictedContainerSecurityContext(),
+						SecurityContext: restrictedContainerSecurityContext(c.ComputeUID, c.ComputeGID),
 						Command:         []string{"/bin/sh", "/compute-files/entrypoint.sh"},
 						EnvFrom:         []corev1.EnvFromSource{{ConfigMapRef: &corev1.ConfigMapEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "compute-config-" + s.App}}}},
 						Env: []corev1.EnvVar{{
@@ -366,7 +380,7 @@ echo "resolved tip LSN = ${LSN:-<none>}"`
 						{
 							Name:            "wait-timeline",
 							Image:           c.InitImage,
-							SecurityContext: restrictedContainerSecurityContext(),
+							SecurityContext: restrictedContainerSecurityContext(c.InitUID, c.InitGID),
 							EnvFrom:         cmRef,
 							Command:         []string{"/bin/sh", "-c"},
 							Args:            []string{waitScript},
@@ -374,7 +388,7 @@ echo "resolved tip LSN = ${LSN:-<none>}"`
 						{
 							Name:            "resolve-lsn",
 							Image:           c.InitImage,
-							SecurityContext: restrictedContainerSecurityContext(),
+							SecurityContext: restrictedContainerSecurityContext(c.InitUID, c.InitGID),
 							EnvFrom:         cmRef,
 							Command:         []string{"/bin/sh", "-c"},
 							Args:            []string{resolveLSNScript},
@@ -385,7 +399,7 @@ echo "resolved tip LSN = ${LSN:-<none>}"`
 						Name:            "compute",
 						Image:           c.ComputeImage,
 						ImagePullPolicy: corev1.PullIfNotPresent,
-						SecurityContext: restrictedContainerSecurityContext(),
+						SecurityContext: restrictedContainerSecurityContext(c.ComputeUID, c.ComputeGID),
 						Command:         []string{"/bin/sh", "/compute-files/entrypoint-ro.sh"},
 						EnvFrom:         cmRef,
 						// Same security env as the per-app WRITER (RenderDeployment): both are

@@ -117,6 +117,32 @@ func TestRestrictedEvaluatorRejectsUnhardenedPod(t *testing.T) {
 	}
 }
 
+// An operator that overrides the compute or init image can override the uid the
+// containers run as: the compute image's identity applies to the compute
+// container only and the init image's to the init containers only, in both the
+// writer and the read replica.
+func TestRenderHonoursImageIdentityOverrides(t *testing.T) {
+	c := DefaultRenderConfig("scale-zero-pg")
+	c.ComputeUID, c.ComputeGID = 2001, 2002
+	c.InitUID, c.InitGID = 3001, 3002
+	w := c.RenderDeployment(ComputeSpec{App: "shop", TenantID: "t", TimelineID: "l"})
+	r := c.RenderRODeployment(ROComputeSpec{App: "shop", TenantID: "t", TimelineID: "l", MaxReplicas: 2})
+	for name, spec := range map[string]*corev1.PodSpec{"writer": &w.Spec.Template.Spec, "read replica": &r.Spec.Template.Spec} {
+		for _, ic := range spec.InitContainers {
+			sc := ic.SecurityContext
+			if sc == nil || sc.RunAsUser == nil || *sc.RunAsUser != 3001 || sc.RunAsGroup == nil || *sc.RunAsGroup != 3002 {
+				t.Errorf("%s init container %q: runAsUser/runAsGroup = %+v, want 3001/3002 (InitUID/InitGID)", name, ic.Name, sc)
+			}
+		}
+		for _, mc := range spec.Containers {
+			sc := mc.SecurityContext
+			if sc == nil || sc.RunAsUser == nil || *sc.RunAsUser != 2001 || sc.RunAsGroup == nil || *sc.RunAsGroup != 2002 {
+				t.Errorf("%s container %q: runAsUser/runAsGroup = %+v, want 2001/2002 (ComputeUID/ComputeGID)", name, mc.Name, sc)
+			}
+		}
+	}
+}
+
 // The break-glass path (provision-app.sh renders deploy/compute-app.template.yaml)
 // must meet the same profile, field for field, as the operator's render: the
 // structural parity guard only sees that a securityContext is PRESENT.

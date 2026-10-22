@@ -2393,15 +2393,38 @@ the pods are admitted in a namespace labelled
 - `capabilities.drop: [ALL]` (nothing is added back; compute_ctl and Postgres run
   unprivileged on ports above 1024)
 - `seccompProfile: RuntimeDefault`
-- `runAsNonRoot: true`, with `runAsUser` / `runAsGroup` set to `1000`
+- `runAsNonRoot: true`, with a numeric `runAsUser` / `runAsGroup` (default `1000`, see below to override)
 
 The numeric uid matters: the pinned compute image declares its user by name
 (`postgres`) and the init image as `neon`, and the kubelet refuses `runAsNonRoot`
 for a named user it cannot resolve to a number. Both are uid/gid 1000 in the pinned
 digests, which is the identity the pods already ran as, so file ownership and the
-boot sequence are unchanged. **If you bump either image digest, check its
-`/etc/passwd` and update the uid** (`crane export <image> - | tar -xO etc/passwd`).
-`readOnlyRootFilesystem` is not set: Postgres writes under the container filesystem.
+boot sequence are unchanged. `readOnlyRootFilesystem` is not set: Postgres writes
+under the container filesystem.
+
+**Using your own compute or init image.** The operator can be pointed at other
+images with `APPDB_COMPUTE_IMAGE` and `APPDB_INIT_IMAGE`. The uid above is only
+right for the default digests, so an image that runs as a different user needs its
+identity supplied with it, on the operator Deployment:
+
+| Variable | Applies to | Default |
+| --- | --- | --- |
+| `APPDB_COMPUTE_UID` / `APPDB_COMPUTE_GID` | the `compute` container | `1000` / `1000` |
+| `APPDB_INIT_UID` / `APPDB_INIT_GID` | the `wait-timeline` and `resolve-lsn` init containers | `1000` / `1000` |
+
+The compute and init images are separate images with their own users, which is why
+each has its own pair. Read the real value from the image rather than guessing:
+`crane export <image> - | tar -xO etc/passwd`. Each value must be a decimal number
+from 1 to 2147483647; `0` is refused because `runAsNonRoot` forbids root, and a
+user name is refused because the kubelet cannot verify a name as non-root. A bad
+value stops the operator at start-up with a message naming the variable. If the
+uid is wrong for the image, the container starts as the wrong user and the compute
+fails to boot (typically a permission error on its data directory), so set it
+whenever you override an image.
+
+**If you bump the default image digests in the manifests**, record each new
+image's uid first: the repository's unit tests keep a hand-maintained table of
+every pinned digest and its uid and fail when a digest has no entry.
 
 The break-glass template (`deploy/compute-app.template.yaml`) carries the same
 fields. The base-tier manifests (`20-compute.yaml`, `25-compute-warm.yaml`,
