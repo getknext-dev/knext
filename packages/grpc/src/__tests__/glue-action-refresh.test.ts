@@ -17,7 +17,7 @@
  */
 
 import { afterAll, afterEach, beforeAll, describe, expect, it, mock } from 'bun:test';
-import { mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { dirname, join } from 'node:path';
@@ -29,7 +29,7 @@ import {
 } from '../../fixtures/zone/src/generated/grpc/orders/v1/orders_pb';
 import { generateFiles } from '../generate';
 import * as runtime from '../runtime';
-import { emptyDir, FIXTURE_ZONE, PKG_DIR, removeScratchDirs } from './helpers';
+import { emptyDir, FIXTURE_ZONE, linkWorkspaceRuntime, removeScratchDirs } from './helpers';
 
 const TAG = 'knext:orders:orders.v1.OrdersService';
 const AUTHORIZE = Symbol.for('knext.test.glueActionRefresh.authorize');
@@ -98,7 +98,7 @@ beforeAll(async () => {
 }
 `,
   );
-  symlinkSync(join(PKG_DIR, 'node_modules'), join(dir, 'node_modules'));
+  linkWorkspaceRuntime(dir);
   actions = await import(
     join(dir, 'src', 'generated', 'grpc', 'orders', 'v1', 'orders_knext_actions.ts')
   );

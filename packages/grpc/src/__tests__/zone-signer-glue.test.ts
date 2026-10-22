@@ -26,7 +26,7 @@ import { CatalogService } from '../../fixtures/zone/src/generated/grpc/orders/v1
 import { OrdersService } from '../../fixtures/zone/src/generated/grpc/orders/v1/orders_pb';
 import { generateFiles } from '../generate';
 import * as runtime from '../runtime';
-import { emptyDir, FIXTURE_ZONE, PKG_DIR, removeScratchDirs } from './helpers';
+import { emptyDir, FIXTURE_ZONE, linkWorkspaceRuntime, removeScratchDirs } from './helpers';
 
 const ISSUER = 'knext:zone:shop/storefront';
 const AUDIENCE = 'knext:fn:shop/orders';
@@ -168,7 +168,12 @@ beforeAll(async () => {
 }
 `,
   );
-  symlinkSync(join(PKG_DIR, 'node_modules'), join(dir, 'node_modules'));
+  // The glue imports `@getknext/grpc/runtime`. `mock.module` alone is not enough
+  // from a scratch dir outside the repo: Bun keys the mock under the bare name
+  // only while `packages/grpc/dist` is absent; once any earlier test has built
+  // dist it keys the mock to the dist path and the bare import misses it. Link
+  // the workspace runtime so the import resolves for real either way.
+  linkWorkspaceRuntime(dir);
   const out = join(dir, 'src', 'generated', 'grpc', 'orders', 'v1');
   server_ = await import(join(out, 'orders_knext_server.ts'));
   actions = await import(join(out, 'orders_knext_actions.ts'));
