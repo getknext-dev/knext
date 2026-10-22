@@ -31,6 +31,7 @@ const RULE = 'packages/kn-next-operator/config/observability/prometheusrule.yaml
 const DOCTOR = 'packages/kn-next/src/cli/doctor/checks/write-policy.ts';
 const ALERT_SPEC = 'apps/file-manager/src/app/api/_metrics/prometheusrule.test.ts';
 const DOCTOR_SPEC = 'packages/kn-next/src/__tests__/doctor-write-policy.test.ts';
+const CANONICAL_SPEC = 'packages/kn-next/src/__tests__/doctor-write-policy-canonical.test.ts';
 
 const ALERT_ROWS = [
   {
@@ -58,6 +59,33 @@ const ALERT_ROWS = [
       '          expr: knext_operator_write_policy_enforced == 0\n          for: 15m\n          labels:\n            severity: warning',
     replacement:
       '          expr: knext_operator_write_policy_enforced == 0\n          for: 15m\n          labels:\n            severity: critical',
+  },
+  {
+    id: 'A4',
+    expect: 'red',
+    claim:
+      'the companion alert no longer pairs the scraped target with the gauge (it would never fire, or always)',
+    subject: 'rule',
+    anchor: 'unless on (namespace, pod) knext_operator_write_policy_enforced\n          for: 15m',
+    replacement:
+      'unless on (namespace, pod) knext_operator_write_policy_enforced_typo\n          for: 15m',
+  },
+  {
+    id: 'A5',
+    expect: 'red',
+    claim:
+      'the companion alert selects a job the operator is not scraped under (silent in exactly the case it exists for)',
+    subject: 'rule',
+    anchor: 'up{job=~".*controller-manager-metrics-service"}',
+    replacement: 'up{job=~"knext-nextapp"}',
+  },
+  {
+    id: 'A6',
+    expect: 'red',
+    claim: 'the companion alert has no `for`, so a scrape gap at start-up pages',
+    subject: 'rule',
+    anchor: 'unless on (namespace, pod) knext_operator_write_policy_enforced\n          for: 15m\n',
+    replacement: 'unless on (namespace, pod) knext_operator_write_policy_enforced\n',
   },
 ];
 
@@ -126,6 +154,77 @@ const DOCTOR_ROWS = [
     anchor: '    if (policy.spec?.failurePolicy === "Ignore") {',
     replacement: '    if (false) {',
   },
+  {
+    id: 'D9',
+    expect: 'red',
+    claim: 'doctor accepts an excludeResourceRules entry that carves resources out of the policy',
+    subject: 'doctor',
+    anchor: '    if ((policy.spec.matchConstraints.excludeResourceRules ?? []).length > 0) {',
+    replacement: '    if (false) {',
+  },
+  {
+    id: 'D10',
+    expect: 'red',
+    claim: 'doctor accepts a covering rule that names objects (resourceNames)',
+    subject: 'doctor',
+    anchor: '                    (r.resourceNames ?? []).length === 0 &&\n',
+    replacement: '',
+  },
+  {
+    id: 'D11',
+    expect: 'red',
+    claim: 'doctor accepts a cluster-scoped rule as covering namespaced Secrets and ConfigMaps',
+    subject: 'doctor',
+    anchor: '                    (r.scope === undefined ||',
+    replacement: '                    (true ||',
+  },
+  {
+    id: 'D12',
+    expect: 'red',
+    claim: 'doctor accepts a rule for another apiVersion as covering core v1',
+    subject: 'doctor',
+    anchor: '                    has(r.apiVersions, "v1") &&\n',
+    replacement: '',
+  },
+  {
+    id: 'D13',
+    expect: 'red',
+    claim:
+      'doctor never compares the policy body with the shipped CEL (validations: [true] passes)',
+    subject: 'doctor',
+    anchor: '    if (!sameCEL(policy)) {',
+    replacement: '    if (false) {',
+  },
+];
+
+const CANONICAL_ROWS = [
+  {
+    id: 'D14',
+    expect: 'red',
+    claim: 'doctor SKIPs, instead of WARNing, on a read failure it cannot classify',
+    subject: 'doctor',
+    anchor: '                "warn",\n                `could not read the operator\'s write policy',
+    replacement:
+      '                "skip",\n                `could not read the operator\'s write policy',
+  },
+  {
+    id: 'D15',
+    expect: 'red',
+    claim: 'doctor SKIPs, instead of WARNing, on unparseable policy output',
+    subject: 'doctor',
+    anchor:
+      '                "warn",\n                `the operator\'s write policy ${name} returned unreadable output',
+    replacement:
+      '                "skip",\n                `the operator\'s write policy ${name} returned unreadable output',
+  },
+  {
+    id: 'D16',
+    expect: 'red',
+    claim: "doctor's canonical CEL copy drifts from the shipped policy",
+    subject: 'doctor',
+    anchor: '{ name: "allowedSecretType", expression: "\'Opaque\'" },',
+    replacement: '{ name: "allowedSecretType", expression: "\'Opaque2\'" },',
+  },
 ];
 
 // Real mutations of the real subjects, so each also proves its runner reads them.
@@ -133,6 +232,11 @@ const ALERT_CANARY = {
   subject: 'rule',
   anchor: '          expr: knext_operator_write_policy_enforced == 0',
   replacement: '          expr: knext_operator_write_policy_enforced == 1',
+};
+const CANONICAL_CANARY = {
+  subject: 'doctor',
+  anchor: '{ name: "allowedSecretType", expression: "\'Opaque\'" },',
+  replacement: '{ name: "allowedSecretType", expression: "\'Opaque3\'" },',
 };
 const DOCTOR_CANARY = {
   subject: 'doctor',
@@ -151,10 +255,17 @@ const doctor = createGuardProver({
   subjects: { doctor: DOCTOR },
 });
 
+const canonical = createGuardProver({
+  repoRoot: REPO_ROOT,
+  spec: CANONICAL_SPEC,
+  subjects: { doctor: DOCTOR },
+});
+
 console.log('=== mutation proof: the write-policy alert and the doctor mirror (#2500) ===');
 alert.preflight([...ALERT_ROWS, { id: 'canary', ...ALERT_CANARY }]);
 doctor.preflight([...DOCTOR_ROWS, { id: 'canary', ...DOCTOR_CANARY }]);
-declareMutations(ALERT_ROWS.length + DOCTOR_ROWS.length);
+canonical.preflight([...CANONICAL_ROWS, { id: 'canary', ...CANONICAL_CANARY }]);
+declareMutations(ALERT_ROWS.length + DOCTOR_ROWS.length + CANONICAL_ROWS.length);
 
 console.log(`\n=== ${ALERT_SPEC} ===`);
 alert.baseline();
@@ -173,3 +284,12 @@ for (const m of DOCTOR_ROWS) {
   recordMutation();
 }
 doctor.finish(DOCTOR_ROWS.length);
+
+console.log(`\n=== ${CANONICAL_SPEC} ===`);
+canonical.baseline();
+canonical.proveCanSeeRed(CANONICAL_CANARY);
+for (const m of CANONICAL_ROWS) {
+  canonical.run(m);
+  recordMutation();
+}
+canonical.finish(CANONICAL_ROWS.length);

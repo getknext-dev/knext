@@ -55,6 +55,8 @@ const subjectPath = (key) => {
 const PROVER = {
   subjects: {
     verdict: 'packages/kn-next-operator/internal/writepolicy/verdict.go',
+    canonical: 'packages/kn-next-operator/internal/writepolicy/canonical.go',
+    shippedPolicy: 'packages/kn-next-operator/config/admission/secret-configmap-writes.yaml',
     monitor: 'packages/kn-next-operator/internal/writepolicy/monitor.go',
     source: 'packages/kn-next-operator/internal/writepolicy/source.go',
     main: 'packages/kn-next-operator/cmd/main.go',
@@ -73,6 +75,11 @@ const CMD = './cmd/';
 const unit = (run, pkg) => ({ kind: 'go', args: ['-run', run, pkg] });
 /** The verdict table and the monitor, no cluster. */
 const VERDICT = unit('TestEvaluateMatchesTheSharedVerdictTable', WP);
+/** The canonical CEL copy equals the shipped policy, and the shared table's base policy carries it. */
+const CANON = unit(
+  'TestCanonicalPolicyCELEqualsTheShippedPolicy|TestSharedTableBasePolicyCarriesTheShippedCEL',
+  WP,
+);
 const MONITOR = unit(
   'TestGaugeIsOneWhenThePolicyIsEnforced|TestGaugeIsZeroAndOneWarningIsLoggedWhenNotEnforced|TestWarningFollowsTheStateAcrossRecoveryAndRegression|TestMonitorRunsOnEveryReplicaAndRechecksOnAnInterval',
   WP,
@@ -175,6 +182,65 @@ const MUTATIONS = [
       '		return no(ReasonUnverifiable, "reading ValidatingAdmissionPolicy %q failed: %v", name, err)',
     replacement: '		return Verdict{Enforced: true, Reason: ReasonEnforced}',
     test: MONITOR,
+  },
+  // --- narrowed scope and a modified validation body (round-1 review) ----------
+  {
+    id: 'V11',
+    claim: 'an excludeResourceRules entry that carves Secrets out of the policy is accepted',
+    subject: 'verdict',
+    anchor: '	if len(mc.ExcludeResourceRules) > 0 {',
+    replacement: '	if false && len(mc.ExcludeResourceRules) > 0 {',
+    test: VERDICT,
+  },
+  {
+    id: 'V12',
+    claim: 'a covering rule that names objects (resourceNames) is accepted',
+    subject: 'verdict',
+    anchor: 'len(r.ResourceNames) == 0 && ',
+    replacement: '',
+    test: VERDICT,
+  },
+  {
+    id: 'V13',
+    claim: 'a cluster-scoped rule is accepted as covering namespaced Secrets and ConfigMaps',
+    subject: 'verdict',
+    anchor:
+      '	return s == nil || *s == admissionregistrationv1.NamespacedScope || *s == admissionregistrationv1.AllScopes',
+    replacement: '	return true',
+    test: VERDICT,
+  },
+  {
+    id: 'V14',
+    claim: 'a rule for another apiVersion is accepted as covering core v1',
+    subject: 'verdict',
+    anchor: 'has(r.APIVersions, "v1") && ',
+    replacement: '',
+    test: VERDICT,
+  },
+  {
+    id: 'V15',
+    claim:
+      'the policy body is never compared with the shipped CEL (validations: [true] is Enforced)',
+    subject: 'verdict',
+    anchor: '	if !reflect.DeepEqual(policyCEL(policy), canonicalCEL()) {',
+    replacement: '	if false && !reflect.DeepEqual(policyCEL(policy), canonicalCEL()) {',
+    test: VERDICT,
+  },
+  {
+    id: 'V16',
+    claim: 'the canonical CEL copy drifts from the shipped policy (a variable differs)',
+    subject: 'canonical',
+    anchor: '{Name: "allowedSecretType", Expression: "\'Opaque\'"},',
+    replacement: '{Name: "allowedSecretType", Expression: "\'Opaque2\'"},',
+    test: CANON,
+  },
+  {
+    id: 'V17',
+    claim: 'config/admission changes the shipped CEL without the canonical copy being updated',
+    subject: 'shippedPolicy',
+    anchor: `    expression: "['-knext-signing-key']"`,
+    replacement: `    expression: "['-knext-signing-key', '-extra']"`,
+    test: CANON,
   },
   // --- the gauge and the monitor ----------------------------------------------
   {
