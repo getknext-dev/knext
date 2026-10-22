@@ -1,0 +1,9 @@
+{
+  "$schema-note": "Go modules that are NOT govulncheck-gated in CI. tests/govulncheck-all-modules.test.ts requires every go.mod in the repo to be either gated in a workflow or listed here with a reason (at least 20 characters).",
+  "excluded": [
+    {
+      "path": "spikes/zone-functions-coldstart/fn-go",
+      "reason": "Throwaway cold-start benchmark spike, never shipped or released, pinned to go 1.26.0 whose stdlib carries eight called advisories (measured 2026-10-22). Bumping a spike toolchain is not worth a gate."
+    }
+  ]
+}

@@ -10,14 +10,20 @@
  * entry is `{ id, expires, justification }`; a malformed entry, an expired
  * entry, and an entry whose vulnerability is no longer called all FAIL, so an
  * exception cannot outlive its reason or sit around unread.
+ *
+ * One exceptions file serves every Go module, so an entry may carry an optional
+ * `modules: [dir, ...]` scope (module directories relative to the repo root).
+ * Omitted means every module. The module being scanned is the first argument
+ * (or GOVULNCHECK_MODULE) and is REQUIRED on the command line, so a step that
+ * forgets it fails rather than silently applying every entry.
  */
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { posix, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ID = /^GO-\d{4}-\d{4,}$/;
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
-const KEYS = new Set(['id', 'expires', 'justification']);
+const KEYS = new Set(['id', 'expires', 'justification', 'modules']);
 
 /** Split govulncheck's stream of concatenated JSON objects. Throws if truncated. */
 export function parseStream(text) {
@@ -50,7 +56,49 @@ export function parseStream(text) {
   return out;
 }
 
-export function evaluate(messages, entries, now = new Date()) {
+/**
+ * The modules an exception may be scoped to: canonical repo-relative directories
+ * (no `./`, trailing slash or `..`) that hold a go.mod and are not listed as
+ * excluded from the scan in security/govulncheck-modules.json (absent on a ref
+ * that has no exclusions).
+ * @param {string} root repo root
+ * @returns {{ has: (m: string) => boolean }}
+ */
+export function knownModules(root) {
+  const excludedFile = resolve(root, 'security/govulncheck-modules.json');
+  const excluded = new Set(
+    existsSync(excludedFile)
+      ? (JSON.parse(readFileSync(excludedFile, 'utf8')).excluded ?? []).map((x) => x.path)
+      : [],
+  );
+  return {
+    has: (m) =>
+      typeof m === 'string' &&
+      m !== '' &&
+      posix.normalize(m) === m &&
+      !m.startsWith('/') &&
+      !m.endsWith('/') &&
+      !m.startsWith('../') &&
+      m !== '.' &&
+      !excluded.has(m) &&
+      existsSync(resolve(root, m, 'go.mod')),
+  };
+}
+
+/**
+ * @param {unknown[]} messages
+ * @param {unknown[]} entries
+ * @param {Date} [now]
+ * @param {string} [module] the module being scanned (repo-relative directory)
+ * @param {{ has: (m: string) => boolean }} [known] when given, scope values must be in it
+ */
+export function evaluate(
+  messages,
+  entries,
+  now = new Date(),
+  module = undefined,
+  known = undefined,
+) {
   const errors = [];
   // Fail closed on a crashed or truncated govulncheck: an empty stream must not
   // read as "no vulnerabilities". A real run opens with `config` and reaches the
@@ -97,6 +145,26 @@ export function evaluate(messages, entries, now = new Date()) {
       errors.push(`${label}: expired on ${e.expires}; bump the toolchain and remove it`);
       continue;
     }
+    if (e.modules !== undefined) {
+      if (
+        !Array.isArray(e.modules) ||
+        e.modules.length === 0 ||
+        e.modules.some((m) => typeof m !== 'string' || m.trim() === '')
+      ) {
+        errors.push(`${label}: modules must be a non-empty array of module directories`);
+        continue;
+      }
+      const unknown = known ? e.modules.filter((m) => !known.has(m)) : [];
+      if (unknown.length) {
+        errors.push(
+          `${label}: modules ${unknown.map((m) => JSON.stringify(m)).join(', ')} is not a scanned module (use the exact repo-relative directory, no ./ or trailing slash)`,
+        );
+        continue;
+      }
+      // Out of scope for the module being scanned: it neither covers a finding nor
+      // can it be stale here (the module it names is scanned in its own leg).
+      if (module !== undefined && !e.modules.includes(module)) continue;
+    }
     if (!called.has(e.id)) {
       errors.push(`${label}: stale, ${e.id} is no longer called; remove the entry`);
       continue;
@@ -111,6 +179,13 @@ export function evaluate(messages, entries, now = new Date()) {
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const module = process.argv[2] ?? process.env.GOVULNCHECK_MODULE;
+  if (!module) {
+    console.error(
+      'govulncheck-gate: the module is required (argument or GOVULNCHECK_MODULE), e.g. templates/go',
+    );
+    process.exit(1);
+  }
   const file = resolve(import.meta.dirname, '../security/govulncheck-exceptions.json');
   const entries = JSON.parse(readFileSync(file, 'utf8')).allow;
   if (!Array.isArray(entries)) throw new Error(`${file}: "allow" must be an array`);
@@ -119,7 +194,13 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const chunks = [];
   for await (const chunk of process.stdin) chunks.push(chunk);
   const input = Buffer.concat(chunks).toString('utf8');
-  const result = evaluate(parseStream(input), entries);
+  const result = evaluate(
+    parseStream(input),
+    entries,
+    new Date(),
+    module,
+    knownModules(resolve(import.meta.dirname, '..')),
+  );
   if (!result.ok) {
     for (const e of result.errors) console.error(`govulncheck-gate: ${e}`);
     process.exit(1);
