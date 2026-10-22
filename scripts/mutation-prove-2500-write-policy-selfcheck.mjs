@@ -196,8 +196,10 @@ const MUTATIONS = [
     id: 'V12',
     claim: 'a covering rule that names objects (resourceNames) is accepted',
     subject: 'verdict',
-    anchor: 'len(r.ResourceNames) == 0 && ',
-    replacement: '',
+    // Whole tail of the line: the harness appends its residue comment after the
+    // replacement, which would otherwise comment out the rest of the condition.
+    anchor: 'len(r.ResourceNames) == 0 && scopeCoversNamespaced(r.Scope) {',
+    replacement: 'scopeCoversNamespaced(r.Scope) {',
     test: VERDICT,
   },
   {
@@ -213,8 +215,8 @@ const MUTATIONS = [
     id: 'V14',
     claim: 'a rule for another apiVersion is accepted as covering core v1',
     subject: 'verdict',
-    anchor: 'has(r.APIVersions, "v1") && ',
-    replacement: '',
+    anchor: 'has(r.APIVersions, "v1") && has(r.Resources, resource) && has(ops, string(op)) &&',
+    replacement: 'has(r.Resources, resource) && has(ops, string(op)) &&',
     test: VERDICT,
   },
   {

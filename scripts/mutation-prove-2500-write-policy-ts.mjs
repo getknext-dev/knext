@@ -167,8 +167,8 @@ const DOCTOR_ROWS = [
     expect: 'red',
     claim: 'doctor accepts a covering rule that names objects (resourceNames)',
     subject: 'doctor',
-    anchor: '                    (r.resourceNames ?? []).length === 0 &&\n',
-    replacement: '',
+    anchor: '(r.resourceNames ?? []).length === 0 &&',
+    replacement: 'true &&',
   },
   {
     id: 'D11',
@@ -183,8 +183,8 @@ const DOCTOR_ROWS = [
     expect: 'red',
     claim: 'doctor accepts a rule for another apiVersion as covering core v1',
     subject: 'doctor',
-    anchor: '                    has(r.apiVersions, "v1") &&\n',
-    replacement: '',
+    anchor: 'has(r.apiVersions, "v1") &&',
+    replacement: 'true &&',
   },
   {
     id: 'D13',
