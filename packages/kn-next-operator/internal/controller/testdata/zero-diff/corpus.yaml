@@ -276,6 +276,20 @@ spec:
     networkPolicy: false
     readOnlyRootFilesystem: false
 ---
+# Opted out of runAsNonRoot only: the other three restricted-profile fields stay.
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata:
+  name: run-as-root-optout
+  namespace: default
+spec:
+  image: registry.example.com/app:v1@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1
+  scaling:
+    minScale: 0
+    maxScale: 10
+  security:
+    runAsNonRoot: false
+---
 # Observability with RUM + tracing, custom health path, custom timeout.
 apiVersion: apps.kn-next.dev/v1alpha1
 kind: NextApp

@@ -94,7 +94,14 @@ spec:
             cpu: 250m
             memory: 512Mi
         securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
           readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          seccompProfile:
+            type: RuntimeDefault
       serviceAccountName: database-binding-sa
       timeoutSeconds: 300
 ---

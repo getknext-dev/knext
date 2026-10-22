@@ -348,6 +348,45 @@ describe('the harness never touches what it did not create', () => {
   });
 });
 
+describe('the lane admits the zone and its functions under Pod Security restricted', () => {
+  it('labels the namespace to enforce restricted BEFORE the first apply', () => {
+    const create = runSh.indexOf('k create namespace "${NS}"');
+    const label = runSh.indexOf('pod-security.kubernetes.io/enforce=restricted');
+    const apply = runSh.indexOf('k apply --validate=strict -f -');
+    expect(create, 'the namespace is created').toBeGreaterThan(0);
+    expect(label, 'the namespace is labelled to enforce restricted').toBeGreaterThan(create);
+    expect(apply, 'the zone and functions are applied after the label').toBeGreaterThan(label);
+    expect(runSh).toMatch(
+      /label namespace "\$\{NS\}" pod-security\.kubernetes\.io\/enforce=restricted/,
+    );
+  });
+
+  it('asserts restricted per pod: the label is present and the four fields are on the serving container', () => {
+    const fn = runSh.slice(runSh.indexOf('assert_restricted_pod() {'));
+    const body = fn.slice(0, fn.indexOf('\n}\n'));
+    expect(body).toContain('pod-security.kubernetes.io/enforce');
+    expect(body).toContain('allowPrivilegeEscalation == false');
+    expect(body).toContain('capabilities.drop == ["ALL"]');
+    expect(body).toContain('seccompProfile.type == "RuntimeDefault"');
+    expect(body).toContain('runAsNonRoot == true');
+    expect(body).toMatch(/\|\| fail /);
+  });
+
+  it('runs that assertion for the zone, the Go function and the Rust function', () => {
+    expect(runSh).toContain('assert_restricted_pod "${ZONE}"');
+    expect(runSh).toContain('assert_restricted_pod "${GO_FN}"');
+    expect(runSh).toMatch(
+      /if \[ "\$\{WITH_RUST\}" = 1 \]; then assert_restricted_pod "\$\{RUST_FN\}"; fi/,
+    );
+  });
+
+  it('builds the zone image with a numeric user, which runAsNonRoot requires', () => {
+    const dockerfile = readFileSync(resolve(LANE_DIR, 'zone-caller/Dockerfile'), 'utf8');
+    expect(dockerfile).toMatch(/^USER \d+:\d+$/m);
+    expect(dockerfile).not.toMatch(/^USER [a-z]/m);
+  });
+});
+
 describe('the lane proves what it claims', () => {
   it('runs the phases the issue maps to, in order, by default', () => {
     expect(runSh).toMatch(/^PHASES="\$\{PHASES:-up images deploy verify rotate pin leaks\}"$/m);

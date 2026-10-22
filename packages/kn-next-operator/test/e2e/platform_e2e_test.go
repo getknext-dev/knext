@@ -93,9 +93,14 @@ const (
 	pfMetricsBinding    = "kn-next-platform-e2e-metrics"
 
 	// pfAppImage is a REAL, SERVABLE, public, digest-pinned multi-arch image that
-	// answers "Hello ${TARGET}!" — the same pin the rollback suite uses.
-	pfAppImage = "ghcr.io/knative/helloworld-go@sha256:" +
-		"c2b7412fbea6f1ef24a0cac60698e88df7ae3c4278e42d0cb34fe7d4b2641bba"
+	// runs as the NUMERIC non-root uid 1000 (the operator renders Pod Security
+	// restricted, which the Knative helloworld-go sample, running as root, fails).
+	// It echoes the request and, with ECHO_INCLUDE_ENV_VARS, its environment, so
+	// pfNextApp carries the marker "Hello ${TARGET}!" in a GREETING variable and
+	// the body assertions find it unchanged. HTTP_PORT moves it onto the
+	// operator's containerPort.
+	pfAppImage = "docker.io/mendhak/http-https-echo@sha256:" +
+		"a265f55c86cb3baead76fdf379dc8e9e6440ed121874e101e60b833e05bce8d4"
 
 	// 8 x 10 = 80: exactly the built-in connection budget, so valid on its own
 	// and over budget only once the platform lowers it.
@@ -146,11 +151,14 @@ spec:
   healthCheckPath: /
   env:
     TARGET: %q
+    GREETING: "Hello %s!"
+    HTTP_PORT: "3000"
+    ECHO_INCLUDE_ENV_VARS: "1"
   scaling:
     minScale: 0
     maxScale: %d
     poolMax: %d
-`, name, pfNamespace, pfAppImage, target, pfMaxScale, pfPoolMax)
+`, name, pfNamespace, pfAppImage, target, target, pfMaxScale, pfPoolMax)
 }
 
 // pfPlatform renders the singleton KnextPlatform. timeout and budget of 0 mean

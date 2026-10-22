@@ -234,6 +234,72 @@ No app gets a writable `/tmp` by default except a self-contained vinext binary. 
 set `spec.security.readOnlyRootFilesystem: false` to opt out entirely.
 </Callout>
 
+## Pod Security `restricted`
+
+Every pod knext renders — your app's and every function's — meets the Kubernetes **Pod Security
+`restricted`** level by default, so it is admitted in a namespace that enforces it:
+
+```bash
+kubectl label namespace my-apps pod-security.kubernetes.io/enforce=restricted
+```
+
+knext renders four settings on the serving container:
+
+| Setting | Value | What it stops |
+| --- | --- | --- |
+| `runAsNonRoot` | `true` | The container starting as root (uid 0). |
+| `allowPrivilegeEscalation` | `false` | A process gaining more privilege than its parent, for example through a setuid binary. |
+| `capabilities.drop` | `[ALL]` | Every Linux capability, including the default set (`NET_RAW`, `CHOWN`, `SETUID`, …). |
+| `seccompProfile` | `RuntimeDefault` | The syscalls outside the container runtime's default filter. |
+
+The app container also keeps `readOnlyRootFilesystem` (see
+[Read-only root filesystem](#read-only-root-filesystem)). Functions get the same four settings;
+they have no opt-out.
+
+The settings are rendered on the container, not on the pod, on purpose: Knative rejects a pod-level
+security context unless a cluster admin turns on a non-default feature flag, while the
+container-level settings are always accepted. Pod Security accepts either level, and the
+`queue-proxy` sidecar Knative adds to every pod already carries the same four settings itself.
+The enforcement is Kubernetes admission, so it does not depend on your cluster's network plugin.
+
+### Your image must name a numeric, non-root user
+
+`runAsNonRoot: true` makes the kubelet check the image's user before it starts the container, and it
+refuses two cases:
+
+- an image with **no `USER`** (it would run as root);
+- an image whose `USER` is a **name** (`USER node`), because the kubelet cannot tell whether a name
+  is root.
+
+The revision then stays unready and the pod reports `CreateContainerConfigError`
+(`container has runAsNonRoot and image has non-numeric user (node), cannot verify user is non-root`).
+Your previous revision keeps serving, and the `NextApp` stays not-ready until you fix the image.
+
+Every image `knext create` and `knext build` produce already runs as `65532:65532`, so nothing
+changes for them. For your own Dockerfile, use a numeric user:
+
+```dockerfile
+USER 65532:65532
+```
+
+The `node` user in the official Node images is uid 1000, so `USER 1000:1000` is the same user by
+number.
+
+### Opting out of `runAsNonRoot`
+
+An image that must run as root and cannot be rebuilt can opt out of the one setting that depends on
+how the image was built:
+
+```yaml
+spec:
+  security:
+    runAsNonRoot: false
+```
+
+This omits `runAsNonRoot` only; the other three settings stay. A namespace that enforces
+`restricted` still rejects the pod, so the opt-out is for clusters that do not enforce it. There is
+no opt-out for the other three settings, because none of them depends on the image.
+
 ## Digest pinning
 
 knext rejects mutable image tags everywhere.
@@ -318,7 +384,9 @@ The same discipline applies to what knext itself builds from, before any image e
 ## Runtime hardening
 
 - **Distroless, non-root.** The operator image is `gcr.io/distroless/static:nonroot` running as
-  UID `65532`; the app image runs as non-root UID `65532`.
+  UID `65532`; the app image runs as non-root UID `65532`. The pods the operator renders for your
+  apps and functions meet Pod Security `restricted`
+  ([details](#pod-security-restricted)).
 - **No token automount.** knext sets `AutomountServiceAccountToken: false` on the app's
   ServiceAccount.
 - **Graceful shutdown.** On `SIGTERM` the server **drains in-flight requests and runs `after()`

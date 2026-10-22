@@ -103,6 +103,11 @@ const (
 	// per-revision marker these specs route on. Override via
 	// ROLLBACK_TEST_IMAGE only with another digest-pinned image that honors
 	// PORT and TARGET the same way.
+	//
+	// helloworld-go runs as ROOT, so this is the one e2e lane that renders the
+	// NextApp with spec.security.runAsNonRoot: false: it exercises the opt-out
+	// against a live cluster (the operator omits runAsNonRoot and the pod starts),
+	// while every other lane deploys a numeric non-root image.
 	rbAppImageDefault = "ghcr.io/knative/helloworld-go@sha256:" +
 		"c2b7412fbea6f1ef24a0cac60698e88df7ae3c4278e42d0cb34fe7d4b2641bba"
 )
@@ -233,6 +238,8 @@ metadata:
 spec:
   image: %q
   healthCheckPath: /
+  security:
+    runAsNonRoot: false
   env:
     TARGET: %q
   scaling:

@@ -82,7 +82,14 @@ spec:
             cpu: 250m
             memory: 512Mi
         securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
           readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          seccompProfile:
+            type: RuntimeDefault
       serviceAccountName: v10-minimal-sa
       timeoutSeconds: 300
 ---

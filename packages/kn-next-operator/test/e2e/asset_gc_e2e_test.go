@@ -141,15 +141,17 @@ const (
 	gcMinioImage = "docker.io/bitnamilegacy/minio@sha256:" +
 		"451fe6858cb770cc9d0e77ba811ce287420f781c7c1b806a386f6896471a349c"
 
-	// gcAppImage is the same REAL, SERVABLE, public, digest-pinned,
-	// multi-arch image the rollback suite uses (ghcr.io/knative/helloworld-go)
-	// — revisions must genuinely become Ready for status.currentTraffic to be
-	// populated. (Fixture-app stretch assessed and SKIPPED — see the plan
+	// gcAppImage is a REAL, SERVABLE, public, digest-pinned image that runs as
+	// the NUMERIC non-root uid 1001 and listens on $PORT (the Pod Security
+	// restricted profile the operator renders requires a numeric non-root user;
+	// the Knative helloworld-go sample runs as root). Revisions must genuinely
+	// become Ready for status.currentTraffic to be populated; no served byte is
+	// asserted here, so the image need not echo anything. amd64 only. (Fixture-app stretch assessed and SKIPPED — see the plan
 	// report: a kn-next-built fixture adds a full Next build + registry to
 	// every nightly run and adds no assertion power to the live-set
 	// guarantee, which rides on labels + status, not served bytes.)
-	gcAppImage = "ghcr.io/knative/helloworld-go@sha256:" +
-		"c2b7412fbea6f1ef24a0cac60698e88df7ae3c4278e42d0cb34fe7d4b2641bba"
+	gcAppImage = "quay.io/openshift/origin-hello-openshift@sha256:" +
+		"3d2cc2be080ec48a5a1a2cc1d0a762b944665212591e271a5ed6a481f885b1e3"
 )
 
 // The seeded build-ids. Lexicographic order == age order (mirrors real

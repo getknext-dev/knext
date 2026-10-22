@@ -44,7 +44,7 @@ OPERATOR_DIR="$ROOT/packages/kn-next-operator"
 : "${OLD_CLI_VERSION:=0.4.3}"
 : "${OLD_OPERATOR_TAG:=kn-next@0.4.3}"
 : "${NEW_CLI_VERSION:=}" # empty => install this tree's built dist directly
-: "${APP_IMAGE:=ghcr.io/knative/helloworld-go@sha256:c2b7412fbea6f1ef24a0cac60698e88df7ae3c4278e42d0cb34fe7d4b2641bba}"
+: "${APP_IMAGE:=quay.io/openshift/origin-hello-openshift@sha256:3d2cc2be080ec48a5a1a2cc1d0a762b944665212591e271a5ed6a481f885b1e3}"
 : "${TRAFFIC_INTERVAL_MS:=500}"
 : "${READY_BOUND_SECONDS:=90}"     # CUMULATIVE not-Ready time across the window (sum of every
                                     # flap, not the single longest one — see ready-flap.mjs)

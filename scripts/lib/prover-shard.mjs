@@ -70,7 +70,7 @@ export const PROVER_WEIGHT_MINUTES = Object.freeze({
   // when a 100-minute bound killed it on another (run 39029215555).
   'scripts/mutation-prove-kind-manifest-apply-safety.mjs': 100,
   'scripts/mutation-prove-published-seam-scan.mjs': 27,
-  'scripts/mutation-prove-2052-backendservice.mjs': 22,
+  'scripts/mutation-prove-2052-backendservice.mjs': 27,
   'scripts/mutation-prove-compat-cell-fingerprint.mjs': 20,
   'scripts/mutation-prove-2331-use-cache-tag-replay.mjs': 14,
   'scripts/mutation-prove-2462-operator-write-policy.mjs': 14,
