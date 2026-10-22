@@ -216,7 +216,7 @@ const MUTATIONS = [
     claim: "the operator's identity is not the one the apiserver reports",
     subject: 'source',
     anchor: '	return r.Status.UserInfo.Username, nil',
-    replacement: '	return "", nil',
+    replacement: '	_ = r\n	return "", nil',
     test: APISERVER,
   },
   {
