@@ -23,9 +23,10 @@ type Step = {
   uses?: string;
   run?: string;
   with?: Record<string, string>;
+  'working-directory'?: string;
 };
 const job = Object.values(wf.jobs)[0] as {
-  strategy: { matrix: { ref: string[] }; 'fail-fast': boolean };
+  strategy: { matrix: { ref: string[]; module: string[] }; 'fail-fast': boolean };
   steps: Step[];
 };
 
