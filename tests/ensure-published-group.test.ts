@@ -615,7 +615,10 @@ describe('integration/v1.3 — 1.3.0 GA: pre mode exited, stable version', () =>
   // An unresolvable branch (a feature branch pushed with no PR base) is not asked.
   it('.changeset/pre.json matches the lane: present on pre-mode lanes, absent elsewhere', () => {
     const env = process.env;
+    // PROVER_LANE_REF first: the nightly prover lane runs on a schedule, where GITHUB_REF_NAME is
+    // the workflow's ref (main) while the tree under proof is another lane's checkout.
     const branch =
+      env.PROVER_LANE_REF ||
       env.GITHUB_BASE_REF ||
       env.GITHUB_REF_NAME ||
       spawnSync('git', ['branch', '--show-current'], {
