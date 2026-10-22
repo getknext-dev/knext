@@ -500,11 +500,26 @@ The gauge reads `0` for any of these:
 - the binding does not include `Deny` (a binding that only audits or warns refuses nothing), or it
   limits the policy to some namespaces;
 - the policy names a different user than the operator runs as;
-- the policy fails open (`failurePolicy: Ignore`), does not cover create, update and delete on both
-  Secrets and ConfigMaps, or has a condition the check cannot read as an exact user.
+- the policy fails open (`failurePolicy: Ignore`);
+- the policy does not cover create, update and delete on both Secrets and ConfigMaps in the core
+  `v1` API: a rule that names objects (`resourceNames`), is scoped `Cluster`, or is for another API
+  version does not count, a namespace or object selector narrows it, and any `excludeResourceRules`
+  entry is treated as removing something;
+- the policy has a condition the check cannot read as an exact user;
+- the policy's validations are not the ones this release ships. The check compares the policy's
+  variables (the allow-lists and the Secret type) and each validation's expression and
+  `messageExpression` with the shipped copy, so a validation replaced by `true` is caught. The
+  `message` text and the `reason` are not compared. An operator newer than the policy installed in the
+  cluster reads `0` here until you reapply the bundle.
+
+Everything the check cannot read, it counts as not in force.
+
+If the operator exports no such gauge at all (a release older than the check, or a failing metrics
+scrape), the `0` alert cannot fire, so a second alert, `KnextOperatorWritePolicyUnreported`, fires
+for an operator pod that Prometheus has discovered but that exports no gauge.
 
 `knext doctor` reports the same verdict from your machine, plus the server version against the 1.30
-floor. It reads the policy name from the operator's `WRITE_POLICY_NAME` environment variable, which
+floor. A read it cannot classify or parse is a `WARN`, not a skip. It reads the policy name from the operator's `WRITE_POLICY_NAME` environment variable, which
 the bundle sets, so a renamed install is checked under its own name.
 
 The policy needs **Kubernetes 1.30 or later**, where `ValidatingAdmissionPolicy` became generally

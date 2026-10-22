@@ -346,10 +346,20 @@ to replace it, and a ServiceAccount with the operator's name in another namespac
   binding by an admin or a GitOps prune. `internal/writepolicy` is the operator's read-only
   self-check: at start-up and every five minutes it `get`s the policy and binding, asks the API
   server who it is (`SelfSubjectReview`, which every authenticated user may create), and publishes
-  `knext_operator_write_policy_enforced` (1 only if the policy exists, its binding includes `Deny`
-  with no narrowing scope, the policy covers create/update/delete on Secrets and ConfigMaps with
-  `failurePolicy: Fail`, and its matchCondition is an exact equality on the operator's own
-  username). Unreadable or unknown is 0, never 1. It logs one warning per change and **does not
+  `knext_operator_write_policy_enforced`. It is 1 only if ALL of this holds: the policy exists with
+  `failurePolicy` not `Ignore`; its `matchConstraints` cover create/update/delete on core `v1`
+  Secrets and ConfigMaps through a rule with no `resourceNames`, no `Cluster` scope and the `v1` (or
+  `*`) apiVersion, with no `excludeResourceRules` (any is treated as carving something out) and no
+  namespace/object selector; its matchCondition is an exact equality on the operator's own username;
+  **its variables and validations are the shipped CEL** (round-1 review finding: matchConstraints,
+  identity and binding can all be right while a validation was replaced by `true`; compared are each
+  variable's name and expression and each validation's expression and `messageExpression`, against a
+  copy in `canonical.go` / `write-policy.ts` that `TestCanonicalPolicyCELEqualsTheShippedPolicy` and
+  its TS twin fail on if `config/admission` changes without it; `message` and `reason` are cosmetic
+  and not compared; an operator newer than the installed policy reports `PolicyModified` until the
+  bundle is reapplied); and the binding exists, names the policy, includes `Deny` and is not scoped.
+  Unreadable or unknown is 0, never 1. The `== 0` alert is blind if the series is missing, so
+  `KnextOperatorWritePolicyUnreported` fires on a discovered operator target (`up`) with no gauge. It logs one warning per change and **does not
   refuse to start** (that is a founder decision, not made here). The alert
   `KnextOperatorWritePolicyNotEnforced` and `knext doctor`'s `write-policy` row report the same
   verdict; both are held to one shared table (`internal/writepolicy/testdata/verdict-cases.json`).

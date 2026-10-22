@@ -110,6 +110,35 @@ spec:
               different ServiceAccount than the policy names).
             runbook_url: "https://github.com/getknext-dev/knext/blob/main/docs/security/threat-model.md"
 
+        # The alert above reads `== 0`, so it is blind exactly when the operator
+        # never publishes the gauge: an operator older than the self-check, a
+        # monitor that did not start, or a scrape that fails. PromQL over a series
+        # nobody emits is an empty vector, which looks like "all enforced". This
+        # fires on a DISCOVERED operator target (`up` exists only for one) that
+        # exports no gauge. Keyed on `up`, not a bare absent(): with no operator
+        # at all there is nothing to report on, and absent() would fire on every
+        # cluster before install (the same reason the knext.app.staleness rules
+        # below key on `up`). The job selector matches the metrics Service as the
+        # bundle renders it (name prefix + controller-manager-metrics-service);
+        # prometheusrule.test.ts checks it against the manifests.
+        - alert: KnextOperatorWritePolicyUnreported
+          expr: >-
+            up{job=~".*controller-manager-metrics-service"}
+              unless on (namespace, pod) knext_operator_write_policy_enforced
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "the knext operator pod {{ $labels.namespace }}/{{ $labels.pod }} reports no write-policy gauge"
+            description: >-
+              Prometheus has discovered this operator pod but it exports no
+              knext_operator_write_policy_enforced series, so
+              KnextOperatorWritePolicyNotEnforced cannot fire for it and nothing
+              says whether its Secret/ConfigMap write policy is in force. Check
+              that the operator is a release that ships the self-check, that its
+              metrics scrape succeeds, and run `knext doctor`.
+            runbook_url: "https://github.com/getknext-dev/knext/blob/main/docs/security/threat-model.md"
+
         # SLO: reconcile latency. A slow control loop delays scale-up and
         # rollbacks. p95 over 30s sustained is degraded.
         - alert: KnextOperatorReconcileSlow

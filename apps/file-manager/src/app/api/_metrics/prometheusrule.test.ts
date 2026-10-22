@@ -223,6 +223,50 @@ describe('PrometheusRule manifest', () => {
     expect(off?.annotations?.runbook_url ?? off?.annotations?.runbook).toBeTruthy();
   });
 
+  // The alert above reads `== 0`, and PromQL over a series nobody emits returns
+  // an empty vector: an operator that never publishes the gauge (an older
+  // operator over a newer rule file, the monitor not started, a scrape that
+  // fails) would make it silent forever. This companion fires on a DISCOVERED
+  // operator target that exports no gauge. It keys on `up`, never a bare
+  // absent(): with no operator running at all there is nothing to report on,
+  // and an always-on absent() would fire on every cluster before install.
+  it('alerts when a scraped operator pod exports no write-policy gauge', () => {
+    const { docs } = loadRule();
+    const rule = docs.find((d) => d?.kind === 'PrometheusRule');
+    const alerts: (Rule & { for?: string })[] = rule.spec.groups.flatMap(
+      (g: { rules: Rule[] }) => g.rules,
+    );
+    const blind = alerts.find((a) => a.alert === 'KnextOperatorWritePolicyUnreported');
+
+    expect(blind, 'KnextOperatorWritePolicyUnreported alert must exist').toBeDefined();
+    expect(blind?.expr).toMatch(/\bup\{/);
+    expect(blind?.expr).not.toMatch(/\babsent\(/);
+    expect(blind?.expr).toMatch(
+      /unless\s+on\s*\(\s*namespace\s*,\s*pod\s*\)\s*knext_operator_write_policy_enforced/,
+    );
+    expect(blind?.labels?.severity).toBe('warning');
+    expect(blind?.for).toBeTruthy();
+    expect(blind?.annotations?.runbook_url ?? blind?.annotations?.runbook).toBeTruthy();
+
+    // The job selector must actually match the operator's metrics Service as the
+    // bundle renders it (name prefix + service name), or the alert selects
+    // nothing and is silent in exactly the way it exists to prevent.
+    const op = join(__dirname, '../../../../../../packages/kn-next-operator/config');
+    const prefix = /^namePrefix:\s*(\S+)/m.exec(
+      readFileSync(join(op, 'default/kustomization.yaml'), 'utf8'),
+    )?.[1];
+    const svc = /^kind: Service[\s\S]*?^ {2}name:\s*(\S+)/m.exec(
+      readFileSync(join(op, 'default/metrics_service.yaml'), 'utf8'),
+    )?.[1];
+    expect(prefix, 'namePrefix must be readable').toBeTruthy();
+    expect(svc, 'the metrics Service name must be readable').toBeTruthy();
+    const job = /job=~"([^"]+)"/.exec(blind?.expr ?? '')?.[1];
+    expect(job, 'the alert must select the operator by job=~"..."').toBeTruthy();
+    expect(new RegExp(`^(?:${job})$`).test(`${prefix}${svc}`)).toBe(true);
+    // ...and must not select the app pods or anything else.
+    expect(new RegExp(`^(?:${job})$`).test('knext-nextapp')).toBe(false);
+  });
+
   // The reconcile-error page must stay CRITICAL — the decoupling narrowed what
   // reaches it, and if that alert were softened too, nothing would page on a
   // genuinely failing control loop.

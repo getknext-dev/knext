@@ -8,6 +8,8 @@
  * a healthy-cluster test that forgot them would fail its all-pass assertion.
  */
 
+import { CANONICAL_POLICY_CEL } from "../cli/doctor/checks/write-policy";
+
 const NAME = "kn-next-operator-secret-configmap-writes";
 
 export const WRITE_POLICY_STUBS: Record<
@@ -20,6 +22,8 @@ export const WRITE_POLICY_STUBS: Record<
             metadata: { name: NAME },
             spec: {
                 failurePolicy: "Fail",
+                variables: CANONICAL_POLICY_CEL.variables,
+                validations: CANONICAL_POLICY_CEL.validations,
                 matchConstraints: {
                     resourceRules: [
                         {

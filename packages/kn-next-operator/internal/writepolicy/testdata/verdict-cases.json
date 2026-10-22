@@ -1,10 +1,12 @@
 {
-  "$comment": "Shared by the operator (internal/writepolicy) and by `knext doctor` (packages/kn-next/src/cli/doctor/checks/write-policy.ts): both must reach the same verdict on the same objects, so the self-check and the CLI cannot drift. Objects are shaped as the apiserver returns them for the rendered bundle (name prefix and namespace applied). Ops: remove-policy, remove-binding, set (target policy|binding, dotted path, value; arrays are replaced whole), identity (the operator's username; absent = the rendered one).",
+  "$comment": "Shared by the operator (internal/writepolicy) and by `knext doctor` (packages/kn-next/src/cli/doctor/checks/write-policy.ts): both must reach the same verdict on the same objects, so the self-check and the CLI cannot drift. Objects are shaped as the apiserver returns them for the rendered bundle (name prefix and namespace applied). Ops: remove-policy, remove-binding, set (target policy|binding, dotted path, value; arrays are replaced whole), identity (the operator's username; absent = the rendered one). The base policy carries the SHIPPED variables and validations verbatim (config/admission/secret-configmap-writes.yaml); a test in each language fails if the shipped CEL changes without this file and the check's canonical copy being updated.",
   "operatorUsername": "system:serviceaccount:kn-next-operator-system:kn-next-operator-controller-manager",
   "policy": {
     "apiVersion": "admissionregistration.k8s.io/v1",
     "kind": "ValidatingAdmissionPolicy",
-    "metadata": { "name": "kn-next-operator-secret-configmap-writes" },
+    "metadata": {
+      "name": "kn-next-operator-secret-configmap-writes"
+    },
     "spec": {
       "failurePolicy": "Fail",
       "matchConstraints": {
@@ -23,13 +25,48 @@
           "expression": "request.userInfo.username == 'system:serviceaccount:' + 'kn-next-operator-system' + ':' + 'kn-next-operator-controller-manager'"
         }
       ],
-      "validations": [{ "expression": "true" }]
+      "variables": [
+        {
+          "name": "objectName",
+          "expression": "request.operation == 'DELETE' ? oldObject.metadata.name : object.metadata.name"
+        },
+        {
+          "name": "allowedSecretSuffixes",
+          "expression": "['-knext-signing-key']"
+        },
+        {
+          "name": "allowedConfigMapSuffixes",
+          "expression": "['-knext-jwks']"
+        },
+        {
+          "name": "allowedSecretType",
+          "expression": "'Opaque'"
+        },
+        {
+          "name": "allowedSuffixes",
+          "expression": "request.resource.resource == 'secrets' ? variables.allowedSecretSuffixes : variables.allowedConfigMapSuffixes"
+        }
+      ],
+      "validations": [
+        {
+          "expression": "variables.allowedSuffixes.exists(s, variables.objectName.endsWith(s) && size(variables.objectName) > size(s))",
+          "messageExpression": "'the knext operator may not ' + request.operation.lowerAscii() + ' the ' + request.resource.resource + ' object \"' + variables.objectName + '\": it writes only the per-zone signing key and JWKS'",
+          "reason": "Forbidden"
+        },
+        {
+          "expression": "request.resource.resource != 'secrets' || request.operation == 'DELETE' || dyn(object).type == variables.allowedSecretType",
+          "message": "the knext operator may write only Opaque Secrets: a service-account-token or any other Secret type under an allowed name would let it mint a credential",
+          "reason": "Forbidden"
+        }
+      ]
     }
   },
   "binding": {
     "apiVersion": "admissionregistration.k8s.io/v1",
     "kind": "ValidatingAdmissionPolicyBinding",
-    "metadata": { "name": "kn-next-operator-secret-configmap-writes" },
+    "metadata": {
+      "name": "kn-next-operator-secret-configmap-writes"
+    },
     "spec": {
       "policyName": "kn-next-operator-secret-configmap-writes",
       "validationActions": ["Deny", "Audit"]
@@ -45,26 +82,46 @@
     {
       "name": "Deny alone is enough",
       "ops": [
-        { "op": "set", "target": "binding", "path": "spec.validationActions", "value": ["Deny"] }
+        {
+          "op": "set",
+          "target": "binding",
+          "path": "spec.validationActions",
+          "value": ["Deny"]
+        }
       ],
       "enforced": true,
       "reason": "Enforced"
     },
     {
       "name": "policy deleted",
-      "ops": [{ "op": "remove-policy" }],
+      "ops": [
+        {
+          "op": "remove-policy"
+        }
+      ],
       "enforced": false,
       "reason": "PolicyMissing"
     },
     {
       "name": "binding deleted",
-      "ops": [{ "op": "remove-binding" }],
+      "ops": [
+        {
+          "op": "remove-binding"
+        }
+      ],
       "enforced": false,
       "reason": "BindingMissing"
     },
     {
       "name": "both deleted reports the policy first",
-      "ops": [{ "op": "remove-policy" }, { "op": "remove-binding" }],
+      "ops": [
+        {
+          "op": "remove-policy"
+        },
+        {
+          "op": "remove-binding"
+        }
+      ],
       "enforced": false,
       "reason": "PolicyMissing"
     },
@@ -92,14 +149,24 @@
     },
     {
       "name": "the operator's identity cannot be determined",
-      "ops": [{ "op": "identity", "value": "" }],
+      "ops": [
+        {
+          "op": "identity",
+          "value": ""
+        }
+      ],
       "enforced": false,
       "reason": "IdentityUnknown"
     },
     {
       "name": "binding audits only",
       "ops": [
-        { "op": "set", "target": "binding", "path": "spec.validationActions", "value": ["Audit"] }
+        {
+          "op": "set",
+          "target": "binding",
+          "path": "spec.validationActions",
+          "value": ["Audit"]
+        }
       ],
       "enforced": false,
       "reason": "BindingNotDeny"
@@ -120,7 +187,12 @@
     {
       "name": "binding names a different policy",
       "ops": [
-        { "op": "set", "target": "binding", "path": "spec.policyName", "value": "something-else" }
+        {
+          "op": "set",
+          "target": "binding",
+          "path": "spec.policyName",
+          "value": "something-else"
+        }
       ],
       "enforced": false,
       "reason": "BindingPolicyMismatch"
@@ -132,7 +204,13 @@
           "op": "set",
           "target": "binding",
           "path": "spec.matchResources",
-          "value": { "namespaceSelector": { "matchLabels": { "scoped": "true" } } }
+          "value": {
+            "namespaceSelector": {
+              "matchLabels": {
+                "scoped": "true"
+              }
+            }
+          }
         }
       ],
       "enforced": false,
@@ -140,7 +218,14 @@
     },
     {
       "name": "policy fails open",
-      "ops": [{ "op": "set", "target": "policy", "path": "spec.failurePolicy", "value": "Ignore" }],
+      "ops": [
+        {
+          "op": "set",
+          "target": "policy",
+          "path": "spec.failurePolicy",
+          "value": "Ignore"
+        }
+      ],
       "enforced": false,
       "reason": "PolicyFailsOpen"
     },
@@ -192,7 +277,12 @@
           "target": "policy",
           "path": "spec.matchConstraints.resourceRules",
           "value": [
-            { "apiGroups": ["*"], "apiVersions": ["*"], "operations": ["*"], "resources": ["*"] }
+            {
+              "apiGroups": ["*"],
+              "apiVersions": ["*"],
+              "operations": ["*"],
+              "resources": ["*"]
+            }
           ]
         }
       ],
@@ -237,7 +327,14 @@
     },
     {
       "name": "policy has no matchCondition",
-      "ops": [{ "op": "set", "target": "policy", "path": "spec.matchConditions", "value": [] }],
+      "ops": [
+        {
+          "op": "set",
+          "target": "policy",
+          "path": "spec.matchConditions",
+          "value": []
+        }
+      ],
       "enforced": false,
       "reason": "IdentityUnparseable"
     },
@@ -258,6 +355,389 @@
       ],
       "enforced": true,
       "reason": "Enforced"
+    },
+    {
+      "name": "excludeResourceRules removes Secrets from the policy",
+      "ops": [
+        {
+          "op": "set",
+          "target": "policy",
+          "path": "spec.matchConstraints.excludeResourceRules",
+          "value": [
+            {
+              "apiGroups": [""],
+              "apiVersions": ["v1"],
+              "operations": ["*"],
+              "resources": ["secrets"]
+            }
+          ]
+        }
+      ],
+      "enforced": false,
+      "reason": "PolicyScope"
+    },
+    {
+      "name": "excludeResourceRules removes ConfigMaps from the policy",
+      "ops": [
+        {
+          "op": "set",
+          "target": "policy",
+          "path": "spec.matchConstraints.excludeResourceRules",
+          "value": [
+            {
+              "apiGroups": [""],
+              "apiVersions": ["*"],
+              "operations": ["CREATE", "UPDATE"],
+              "resources": ["configmaps"]
+            }
+          ]
+        }
+      ],
+      "enforced": false,
+      "reason": "PolicyScope"
+    },
+    {
+      "name": "the covering rule names objects (resourceNames)",
+      "ops": [
+        {
+          "op": "set",
+          "target": "policy",
+          "path": "spec.matchConstraints.resourceRules",
+          "value": [
+            {
+              "apiGroups": [""],
+              "apiVersions": ["v1"],
+              "operations": ["CREATE", "UPDATE", "DELETE"],
+              "resources": ["secrets", "configmaps"],
+              "resourceNames": ["only-this-one"]
+            }
+          ]
+        }
+      ],
+      "enforced": false,
+      "reason": "PolicyScope"
+    },
+    {
+      "name": "the covering rule is cluster-scoped",
+      "ops": [
+        {
+          "op": "set",
+          "target": "policy",
+          "path": "spec.matchConstraints.resourceRules",
+          "value": [
+            {
+              "apiGroups": [""],
+              "apiVersions": ["v1"],
+              "operations": ["CREATE", "UPDATE", "DELETE"],
+              "resources": ["secrets", "configmaps"],
+              "scope": "Cluster"
+            }
+          ]
+        }
+      ],
+      "enforced": false,
+      "reason": "PolicyScope"
+    },
+    {
+      "name": "the covering rule is for another apiVersion",
+      "ops": [
+        {
+          "op": "set",
+          "target": "policy",
+          "path": "spec.matchConstraints.resourceRules",
+          "value": [
+            {
+              "apiGroups": [""],
+              "apiVersions": ["v1beta1"],
+              "operations": ["CREATE", "UPDATE", "DELETE"],
+              "resources": ["secrets", "configmaps"]
+            }
+          ]
+        }
+      ],
+      "enforced": false,
+      "reason": "PolicyScope"
+    },
+    {
+      "name": "a rule scoped Namespaced still covers Secrets and ConfigMaps",
+      "ops": [
+        {
+          "op": "set",
+          "target": "policy",
+          "path": "spec.matchConstraints.resourceRules",
+          "value": [
+            {
+              "apiGroups": [""],
+              "apiVersions": ["v1"],
+              "operations": ["CREATE", "UPDATE", "DELETE"],
+              "resources": ["secrets", "configmaps"],
+              "scope": "Namespaced"
+            }
+          ]
+        }
+      ],
+      "enforced": true,
+      "reason": "Enforced"
+    },
+    {
+      "name": "a wildcard scope and apiVersion still cover them",
+      "ops": [
+        {
+          "op": "set",
+          "target": "policy",
+          "path": "spec.matchConstraints.resourceRules",
+          "value": [
+            {
+              "apiGroups": [""],
+              "apiVersions": ["*"],
+              "operations": ["CREATE", "UPDATE", "DELETE"],
+              "resources": ["secrets", "configmaps"],
+              "scope": "*"
+            }
+          ]
+        }
+      ],
+      "enforced": true,
+      "reason": "Enforced"
+    },
+    {
+      "name": "one unrestricted rule is enough beside a rule with resourceNames",
+      "ops": [
+        {
+          "op": "set",
+          "target": "policy",
+          "path": "spec.matchConstraints.resourceRules",
+          "value": [
+            {
+              "apiGroups": [""],
+              "apiVersions": ["v1"],
+              "operations": ["CREATE", "UPDATE", "DELETE"],
+              "resources": ["secrets", "configmaps"],
+              "resourceNames": ["x"]
+            },
+            {
+              "apiGroups": [""],
+              "apiVersions": ["v1"],
+              "operations": ["CREATE", "UPDATE", "DELETE"],
+              "resources": ["secrets", "configmaps"]
+            }
+          ]
+        }
+      ],
+      "enforced": true,
+      "reason": "Enforced"
+    },
+    {
+      "name": "validations replaced by a constant true",
+      "ops": [
+        {
+          "op": "set",
+          "target": "policy",
+          "path": "spec.validations",
+          "value": [
+            {
+              "expression": "true"
+            }
+          ]
+        }
+      ],
+      "enforced": false,
+      "reason": "PolicyModified"
+    },
+    {
+      "name": "a validation removed",
+      "ops": [
+        {
+          "op": "set",
+          "target": "policy",
+          "path": "spec.validations",
+          "value": [
+            {
+              "expression": "variables.allowedSuffixes.exists(s, variables.objectName.endsWith(s) && size(variables.objectName) > size(s))",
+              "messageExpression": "'the knext operator may not ' + request.operation.lowerAscii() + ' the ' + request.resource.resource + ' object \"' + variables.objectName + '\": it writes only the per-zone signing key and JWKS'",
+              "reason": "Forbidden"
+            }
+          ]
+        }
+      ],
+      "enforced": false,
+      "reason": "PolicyModified"
+    },
+    {
+      "name": "a validation added",
+      "ops": [
+        {
+          "op": "set",
+          "target": "policy",
+          "path": "spec.validations",
+          "value": [
+            {
+              "expression": "variables.allowedSuffixes.exists(s, variables.objectName.endsWith(s) && size(variables.objectName) > size(s))",
+              "messageExpression": "'the knext operator may not ' + request.operation.lowerAscii() + ' the ' + request.resource.resource + ' object \"' + variables.objectName + '\": it writes only the per-zone signing key and JWKS'",
+              "reason": "Forbidden"
+            },
+            {
+              "expression": "request.resource.resource != 'secrets' || request.operation == 'DELETE' || dyn(object).type == variables.allowedSecretType",
+              "message": "the knext operator may write only Opaque Secrets: a service-account-token or any other Secret type under an allowed name would let it mint a credential",
+              "reason": "Forbidden"
+            },
+            {
+              "expression": "true"
+            }
+          ]
+        }
+      ],
+      "enforced": false,
+      "reason": "PolicyModified"
+    },
+    {
+      "name": "a validation expression weakened",
+      "ops": [
+        {
+          "op": "set",
+          "target": "policy",
+          "path": "spec.validations",
+          "value": [
+            {
+              "expression": "variables.allowedSuffixes.exists(s, variables.objectName.contains(s))",
+              "messageExpression": "'the knext operator may not ' + request.operation.lowerAscii() + ' the ' + request.resource.resource + ' object \"' + variables.objectName + '\": it writes only the per-zone signing key and JWKS'",
+              "reason": "Forbidden"
+            },
+            {
+              "expression": "request.resource.resource != 'secrets' || request.operation == 'DELETE' || dyn(object).type == variables.allowedSecretType",
+              "message": "the knext operator may write only Opaque Secrets: a service-account-token or any other Secret type under an allowed name would let it mint a credential",
+              "reason": "Forbidden"
+            }
+          ]
+        }
+      ],
+      "enforced": false,
+      "reason": "PolicyModified"
+    },
+    {
+      "name": "the Secret type check dropped",
+      "ops": [
+        {
+          "op": "set",
+          "target": "policy",
+          "path": "spec.validations",
+          "value": [
+            {
+              "expression": "variables.allowedSuffixes.exists(s, variables.objectName.endsWith(s) && size(variables.objectName) > size(s))",
+              "messageExpression": "'the knext operator may not ' + request.operation.lowerAscii() + ' the ' + request.resource.resource + ' object \"' + variables.objectName + '\": it writes only the per-zone signing key and JWKS'",
+              "reason": "Forbidden"
+            },
+            {
+              "expression": "dyn(object).type != ''",
+              "message": "the knext operator may write only Opaque Secrets: a service-account-token or any other Secret type under an allowed name would let it mint a credential",
+              "reason": "Forbidden"
+            }
+          ]
+        }
+      ],
+      "enforced": false,
+      "reason": "PolicyModified"
+    },
+    {
+      "name": "a validation's messageExpression changed",
+      "ops": [
+        {
+          "op": "set",
+          "target": "policy",
+          "path": "spec.validations",
+          "value": [
+            {
+              "expression": "variables.allowedSuffixes.exists(s, variables.objectName.endsWith(s) && size(variables.objectName) > size(s))",
+              "messageExpression": "'refused'",
+              "reason": "Forbidden"
+            },
+            {
+              "expression": "request.resource.resource != 'secrets' || request.operation == 'DELETE' || dyn(object).type == variables.allowedSecretType",
+              "message": "the knext operator may write only Opaque Secrets: a service-account-token or any other Secret type under an allowed name would let it mint a credential",
+              "reason": "Forbidden"
+            }
+          ]
+        }
+      ],
+      "enforced": false,
+      "reason": "PolicyModified"
+    },
+    {
+      "name": "an allow-list variable widened",
+      "ops": [
+        {
+          "op": "set",
+          "target": "policy",
+          "path": "spec.variables",
+          "value": [
+            {
+              "name": "objectName",
+              "expression": "request.operation == 'DELETE' ? oldObject.metadata.name : object.metadata.name"
+            },
+            {
+              "name": "allowedSecretSuffixes",
+              "expression": "['-knext-signing-key', '']"
+            },
+            {
+              "name": "allowedConfigMapSuffixes",
+              "expression": "['-knext-jwks']"
+            },
+            {
+              "name": "allowedSecretType",
+              "expression": "'Opaque'"
+            },
+            {
+              "name": "allowedSuffixes",
+              "expression": "request.resource.resource == 'secrets' ? variables.allowedSecretSuffixes : variables.allowedConfigMapSuffixes"
+            }
+          ]
+        }
+      ],
+      "enforced": false,
+      "reason": "PolicyModified"
+    },
+    {
+      "name": "a variable removed",
+      "ops": [
+        {
+          "op": "set",
+          "target": "policy",
+          "path": "spec.variables",
+          "value": [
+            {
+              "name": "allowedSecretSuffixes",
+              "expression": "['-knext-signing-key']"
+            },
+            {
+              "name": "allowedConfigMapSuffixes",
+              "expression": "['-knext-jwks']"
+            },
+            {
+              "name": "allowedSecretType",
+              "expression": "'Opaque'"
+            },
+            {
+              "name": "allowedSuffixes",
+              "expression": "request.resource.resource == 'secrets' ? variables.allowedSecretSuffixes : variables.allowedConfigMapSuffixes"
+            }
+          ]
+        }
+      ],
+      "enforced": false,
+      "reason": "PolicyModified"
+    },
+    {
+      "name": "the policy has no validations at all",
+      "ops": [
+        {
+          "op": "set",
+          "target": "policy",
+          "path": "spec.validations",
+          "value": []
+        }
+      ],
+      "enforced": false,
+      "reason": "PolicyModified"
     }
   ]
 }

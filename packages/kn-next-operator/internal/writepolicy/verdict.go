@@ -37,6 +37,7 @@ package writepolicy
 
 import (
 	"fmt"
+	"reflect"
 	"regexp"
 	"strings"
 
@@ -66,6 +67,10 @@ const (
 	// ReasonPolicyScope: the policy does not cover create, update and delete on
 	// both Secrets and ConfigMaps, or narrows by namespace or object selector.
 	ReasonPolicyScope Reason = "PolicyScope"
+	// ReasonPolicyModified: the policy's variables or validations are not the CEL
+	// this operator ships, so what it admits is not what the bundle intended
+	// (for example a validation replaced by `true`).
+	ReasonPolicyModified Reason = "PolicyModified"
 	// ReasonIdentityUnparseable: the matchCondition is not a plain equality on
 	// request.userInfo.username, so which principal it confines cannot be read.
 	ReasonIdentityUnparseable Reason = "IdentityUnparseable"
@@ -129,6 +134,12 @@ func selectorNarrows(s *metav1.LabelSelector) bool {
 	return s != nil && (len(s.MatchLabels) > 0 || len(s.MatchExpressions) > 0)
 }
 
+// scopeCoversNamespaced: Secrets and ConfigMaps are namespaced, so a rule scoped
+// "Cluster" never matches them. An absent scope means all.
+func scopeCoversNamespaced(s *admissionregistrationv1.ScopeType) bool {
+	return s == nil || *s == admissionregistrationv1.NamespacedScope || *s == admissionregistrationv1.AllScopes
+}
+
 func has(list []string, want string) bool {
 	for _, v := range list {
 		if v == want || v == "*" {
@@ -146,6 +157,12 @@ func covers(p *admissionregistrationv1.ValidatingAdmissionPolicy) (missing strin
 	if mc == nil {
 		return "it has no matchConstraints"
 	}
+	// Any exclusion could be carving Secrets or ConfigMaps (or an operation) back
+	// out of the rules below, and reading which is a re-implementation of the
+	// apiserver's matching. The shipped policy has none, so none is accepted.
+	if len(mc.ExcludeResourceRules) > 0 {
+		return "it excludes some requests through excludeResourceRules"
+	}
 	for _, resource := range []string{"secrets", "configmaps"} {
 		for _, op := range []admissionregistrationv1.OperationType{
 			admissionregistrationv1.Create, admissionregistrationv1.Update, admissionregistrationv1.Delete,
@@ -156,7 +173,11 @@ func covers(p *admissionregistrationv1.ValidatingAdmissionPolicy) (missing strin
 				for _, o := range r.Operations {
 					ops = append(ops, string(o))
 				}
-				if has(r.APIGroups, "") && has(r.Resources, resource) && has(ops, string(op)) {
+				// A rule that names objects, is cluster-scoped, or is for another
+				// apiVersion does not cover the operator's writes, however it spells
+				// the resources.
+				if has(r.APIGroups, "") && has(r.APIVersions, "v1") && has(r.Resources, resource) && has(ops, string(op)) &&
+					len(r.ResourceNames) == 0 && scopeCoversNamespaced(r.Scope) {
 					found = true
 				}
 			}
@@ -201,6 +222,10 @@ func Evaluate(policy *admissionregistrationv1.ValidatingAdmissionPolicy, binding
 	if confined != operatorUsername {
 		return no(ReasonIdentityMismatch, "the policy %q confines %q but the operator runs as %q: it matches nobody the operator is "+
 			"(installed under another namespace or service-account name than the bundle rendered?)", policy.Name, confined, operatorUsername)
+	}
+	if !reflect.DeepEqual(policyCEL(policy), canonicalCEL()) {
+		return no(ReasonPolicyModified, "the policy %q does not carry the variables and validations this operator ships, so what it admits is not what "+
+			"the bundle intended (its validation CEL, an allow-list variable or a messageExpression was changed, added or removed)", policy.Name)
 	}
 	if binding.Spec.PolicyName != policy.Name {
 		return no(ReasonBindingPolicyMismatch, "the binding %q names policy %q, not %q", binding.Name, binding.Spec.PolicyName, policy.Name)

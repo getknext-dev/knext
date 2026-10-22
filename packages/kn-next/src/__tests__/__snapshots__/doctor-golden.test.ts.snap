@@ -10,7 +10,7 @@ PASS  NextApp CRD                                 served version: v1alpha1; pair
 PASS  NextApp CRD schema coverage                 all 95 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)
 PASS  Operator deployment                         kn-next-operator-controller-manager Ready in kn-next-operator-system
 WARN  Operator version                            no release version reported, image sha256:75be42bb6b4c… (a bundle from before the operator version line); compatibility with this CLI cannot be checked (hint: Move to a versioned operator (operator first, then CLI). Apply a specific release's digest-pinned bundle: \`kubectl apply --server-side -f https://github.com/getknext-dev/knext/releases/download/operator-v<X.Y.Z>/install-v<X.Y.Z>.yaml\` (see https://knext-platform.dev/docs/versioning).)
-PASS  Operator write policy                       kn-next-operator-secret-configmap-writes is bound with Deny and confines system:serviceaccount:kn-next-operator-system:default, so the operator may write only its per-zone signing-key Secrets and JWKS ConfigMaps
+PASS  Operator write policy                       kn-next-operator-secret-configmap-writes is bound with Deny, covers create/update/delete on Secrets and ConfigMaps, confines system:serviceaccount:kn-next-operator-system:default and carries the shipped validations, so the operator may write only its per-zone signing-key Secrets and JWKS ConfigMaps
 PASS  cert-manager webhook                        cert-manager-webhook Ready
 PASS  Knative ingress-class                       ingress-class kourier.ingress.networking.knative.dev is served by net-kourier-controller
 PASS  Operator image pullable                     ghcr.io/getknext-dev/kn-next-operator@sha256:75be42bb6b4c6d03c902b4fc90b36b246cc6cacf2233926fa183a6051521a99d is anonymously pullable
@@ -79,7 +79,7 @@ exports[`doctor golden output (#1055 byte-identical pin) reachable — all check
     "title": "Operator version",
   },
   {
-    "detail": "kn-next-operator-secret-configmap-writes is bound with Deny and confines system:serviceaccount:kn-next-operator-system:default, so the operator may write only its per-zone signing-key Secrets and JWKS ConfigMaps",
+    "detail": "kn-next-operator-secret-configmap-writes is bound with Deny, covers create/update/delete on Secrets and ConfigMaps, confines system:serviceaccount:kn-next-operator-system:default and carries the shipped validations, so the operator may write only its per-zone signing-key Secrets and JWKS ConfigMaps",
     "id": "write-policy",
     "status": "pass",
     "title": "Operator write policy",
@@ -537,7 +537,7 @@ PASS  NextApp CRD                                 served version: v1alpha1; pair
 PASS  NextApp CRD schema coverage                 all 95 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)
 PASS  Operator deployment                         kn-next-operator-controller-manager Ready in kn-next-operator-system
 WARN  Operator version                            no release version reported, image sha256:75be42bb6b4c… (a bundle from before the operator version line); compatibility with this CLI cannot be checked (hint: Move to a versioned operator (operator first, then CLI). Apply a specific release's digest-pinned bundle: \`kubectl apply --server-side -f https://github.com/getknext-dev/knext/releases/download/operator-v<X.Y.Z>/install-v<X.Y.Z>.yaml\` (see https://knext-platform.dev/docs/versioning).)
-PASS  Operator write policy                       kn-next-operator-secret-configmap-writes is bound with Deny and confines system:serviceaccount:kn-next-operator-system:default, so the operator may write only its per-zone signing-key Secrets and JWKS ConfigMaps
+PASS  Operator write policy                       kn-next-operator-secret-configmap-writes is bound with Deny, covers create/update/delete on Secrets and ConfigMaps, confines system:serviceaccount:kn-next-operator-system:default and carries the shipped validations, so the operator may write only its per-zone signing-key Secrets and JWKS ConfigMaps
 PASS  cert-manager webhook                        cert-manager-webhook Ready
 PASS  Knative ingress-class                       ingress-class kourier.ingress.networking.knative.dev is served by net-kourier-controller
 PASS  Operator image pullable                     ghcr.io/getknext-dev/kn-next-operator@sha256:75be42bb6b4c6d03c902b4fc90b36b246cc6cacf2233926fa183a6051521a99d is anonymously pullable
@@ -606,7 +606,7 @@ exports[`doctor golden output (#1055 byte-identical pin) budget-exhausted — th
     "title": "Operator version",
   },
   {
-    "detail": "kn-next-operator-secret-configmap-writes is bound with Deny and confines system:serviceaccount:kn-next-operator-system:default, so the operator may write only its per-zone signing-key Secrets and JWKS ConfigMaps",
+    "detail": "kn-next-operator-secret-configmap-writes is bound with Deny, covers create/update/delete on Secrets and ConfigMaps, confines system:serviceaccount:kn-next-operator-system:default and carries the shipped validations, so the operator may write only its per-zone signing-key Secrets and JWKS ConfigMaps",
     "id": "write-policy",
     "status": "pass",
     "title": "Operator write policy",
@@ -668,7 +668,7 @@ PASS  NextApp CRD                                 served version: v1alpha1; pair
 FAIL  NextApp CRD schema coverage                 operator behind CLI: the installed CRD is missing 1 field(s) this CLI emits — they would be dropped. Upgrade the operator first (operator, then CLI). (hint: upgrade the operator/CRD FIRST, then the CLI — see https://knext-platform.dev/docs/upgrading)
 PASS  Operator deployment                         kn-next-operator-controller-manager Ready in kn-next-operator-system
 WARN  Operator version                            no release version reported, image sha256:75be42bb6b4c… (a bundle from before the operator version line); compatibility with this CLI cannot be checked (hint: Move to a versioned operator (operator first, then CLI). Apply a specific release's digest-pinned bundle: \`kubectl apply --server-side -f https://github.com/getknext-dev/knext/releases/download/operator-v<X.Y.Z>/install-v<X.Y.Z>.yaml\` (see https://knext-platform.dev/docs/versioning).)
-PASS  Operator write policy                       kn-next-operator-secret-configmap-writes is bound with Deny and confines system:serviceaccount:kn-next-operator-system:default, so the operator may write only its per-zone signing-key Secrets and JWKS ConfigMaps
+PASS  Operator write policy                       kn-next-operator-secret-configmap-writes is bound with Deny, covers create/update/delete on Secrets and ConfigMaps, confines system:serviceaccount:kn-next-operator-system:default and carries the shipped validations, so the operator may write only its per-zone signing-key Secrets and JWKS ConfigMaps
 PASS  cert-manager webhook                        cert-manager-webhook Ready
 PASS  Knative ingress-class                       ingress-class kourier.ingress.networking.knative.dev is served by net-kourier-controller
 PASS  Operator image pullable                     ghcr.io/getknext-dev/kn-next-operator@sha256:75be42bb6b4c6d03c902b4fc90b36b246cc6cacf2233926fa183a6051521a99d is anonymously pullable
@@ -738,7 +738,7 @@ exports[`doctor golden output (#1055 byte-identical pin) crd-schema — an insta
     "title": "Operator version",
   },
   {
-    "detail": "kn-next-operator-secret-configmap-writes is bound with Deny and confines system:serviceaccount:kn-next-operator-system:default, so the operator may write only its per-zone signing-key Secrets and JWKS ConfigMaps",
+    "detail": "kn-next-operator-secret-configmap-writes is bound with Deny, covers create/update/delete on Secrets and ConfigMaps, confines system:serviceaccount:kn-next-operator-system:default and carries the shipped validations, so the operator may write only its per-zone signing-key Secrets and JWKS ConfigMaps",
     "id": "write-policy",
     "status": "pass",
     "title": "Operator write policy",
@@ -800,7 +800,7 @@ FAIL  NextApp CRD                                 this CLI emits apps.kn-next.de
 PASS  NextApp CRD schema coverage                 all 95 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)
 PASS  Operator deployment                         kn-next-operator-controller-manager Ready in kn-next-operator-system
 WARN  Operator version                            no release version reported, image sha256:75be42bb6b4c… (a bundle from before the operator version line); compatibility with this CLI cannot be checked (hint: Move to a versioned operator (operator first, then CLI). Apply a specific release's digest-pinned bundle: \`kubectl apply --server-side -f https://github.com/getknext-dev/knext/releases/download/operator-v<X.Y.Z>/install-v<X.Y.Z>.yaml\` (see https://knext-platform.dev/docs/versioning).)
-PASS  Operator write policy                       kn-next-operator-secret-configmap-writes is bound with Deny and confines system:serviceaccount:kn-next-operator-system:default, so the operator may write only its per-zone signing-key Secrets and JWKS ConfigMaps
+PASS  Operator write policy                       kn-next-operator-secret-configmap-writes is bound with Deny, covers create/update/delete on Secrets and ConfigMaps, confines system:serviceaccount:kn-next-operator-system:default and carries the shipped validations, so the operator may write only its per-zone signing-key Secrets and JWKS ConfigMaps
 PASS  cert-manager webhook                        cert-manager-webhook Ready
 PASS  Knative ingress-class                       ingress-class kourier.ingress.networking.knative.dev is served by net-kourier-controller
 PASS  Operator image pullable                     ghcr.io/getknext-dev/kn-next-operator@sha256:75be42bb6b4c6d03c902b4fc90b36b246cc6cacf2233926fa183a6051521a99d is anonymously pullable
@@ -870,7 +870,7 @@ exports[`doctor golden output (#1055 byte-identical pin) crd-version — a CRD t
     "title": "Operator version",
   },
   {
-    "detail": "kn-next-operator-secret-configmap-writes is bound with Deny and confines system:serviceaccount:kn-next-operator-system:default, so the operator may write only its per-zone signing-key Secrets and JWKS ConfigMaps",
+    "detail": "kn-next-operator-secret-configmap-writes is bound with Deny, covers create/update/delete on Secrets and ConfigMaps, confines system:serviceaccount:kn-next-operator-system:default and carries the shipped validations, so the operator may write only its per-zone signing-key Secrets and JWKS ConfigMaps",
     "id": "write-policy",
     "status": "pass",
     "title": "Operator write policy",
@@ -932,7 +932,7 @@ PASS  NextApp CRD                                 served version: v1alpha1; pair
 PASS  NextApp CRD schema coverage                 all 95 field(s) this CLI emits are defined by the installed CRD (read from the aggregated OpenAPI v3 discovery document)
 PASS  Operator deployment                         kn-next-operator-controller-manager Ready in kn-next-operator-system
 PASS  Operator version                            v1.5.0 (from label), image sha256:75be42bb6b4c…; different major from CLI 2.0.0 (the operator keeps its own version line) — supported pairing is decided by the CRD API version, see the NextApp CRD row
-PASS  Operator write policy                       kn-next-operator-secret-configmap-writes is bound with Deny and confines system:serviceaccount:kn-next-operator-system:default, so the operator may write only its per-zone signing-key Secrets and JWKS ConfigMaps
+PASS  Operator write policy                       kn-next-operator-secret-configmap-writes is bound with Deny, covers create/update/delete on Secrets and ConfigMaps, confines system:serviceaccount:kn-next-operator-system:default and carries the shipped validations, so the operator may write only its per-zone signing-key Secrets and JWKS ConfigMaps
 PASS  cert-manager webhook                        cert-manager-webhook Ready
 PASS  Knative ingress-class                       ingress-class kourier.ingress.networking.knative.dev is served by net-kourier-controller
 PASS  Operator image pullable                     ghcr.io/getknext-dev/kn-next-operator@sha256:75be42bb6b4c6d03c902b4fc90b36b246cc6cacf2233926fa183a6051521a99d is anonymously pullable
@@ -1000,7 +1000,7 @@ exports[`doctor golden output (#1055 byte-identical pin) cli-2.0 — a 2.0 CLI a
     "title": "Operator version",
   },
   {
-    "detail": "kn-next-operator-secret-configmap-writes is bound with Deny and confines system:serviceaccount:kn-next-operator-system:default, so the operator may write only its per-zone signing-key Secrets and JWKS ConfigMaps",
+    "detail": "kn-next-operator-secret-configmap-writes is bound with Deny, covers create/update/delete on Secrets and ConfigMaps, confines system:serviceaccount:kn-next-operator-system:default and carries the shipped validations, so the operator may write only its per-zone signing-key Secrets and JWKS ConfigMaps",
     "id": "write-policy",
     "status": "pass",
     "title": "Operator write policy",

@@ -17,6 +17,7 @@
  * `kn-next-operator/internal/writepolicy/testdata/verdict-cases.json`.
  */
 
+import { excerpt } from "../../shared";
 import { classifyKubectlFailure, infraFailure, safeJson } from "../kubectl";
 import { mk } from "../report";
 import type { CheckContext, CheckResult } from "../types";
@@ -25,8 +26,65 @@ import { OPERATOR_NAMESPACE, SKIP_UNREACHABLE } from "../types";
 const ID = "write-policy";
 const TITLE = "Operator write policy";
 
-/** The policy's name in the unprefixed base manifests; the bundle prefixes it. */
+/**
+ * The policy's name AS THE BUNDLE RENDERS IT (the `kn-next-operator-` name
+ * prefix applied), used when the operator Deployment carries no
+ * WRITE_POLICY_NAME, i.e. an operator from before the self-check existed.
+ *
+ * The operator's own flag default (cmd/main.go, `--write-policy-name`) is the
+ * UNPREFIXED base name `secret-configmap-writes` on purpose: it runs inside an
+ * operator whose bundle always sets the env, so the fallback only matters for a
+ * hand-run `make run`. Doctor runs outside it and is most likely to meet a
+ * stock bundle, so the rendered name is the useful guess.
+ */
 const DEFAULT_POLICY_NAME = "kn-next-operator-secret-configmap-writes";
+
+/**
+ * The variables and validations the shipped policy carries, reduced to their
+ * CEL: what the policy ADMITS, which matchConstraints, identity and binding all
+ * being right do not guarantee (a validation replaced by `true` admits
+ * everything). A copy of config/admission/secret-configmap-writes.yaml.
+ *
+ * KEEP IN LOCKSTEP: doctor-write-policy-canonical.test.ts fails if
+ * config/admission changes without this, and the operator holds the same copy
+ * (internal/writepolicy/canonical.go). Cosmetic fields (message, reason) are not
+ * compared; messageExpression is, because it is CEL the apiserver evaluates.
+ * An operator whose bundle is newer than the installed policy reports
+ * PolicyModified until the bundle is reapplied, which is the honest answer.
+ */
+export const CANONICAL_POLICY_CEL = {
+    variables: [
+        {
+            name: "objectName",
+            expression:
+                "request.operation == 'DELETE' ? oldObject.metadata.name : object.metadata.name",
+        },
+        {
+            name: "allowedSecretSuffixes",
+            expression: "['-knext-signing-key']",
+        },
+        { name: "allowedConfigMapSuffixes", expression: "['-knext-jwks']" },
+        { name: "allowedSecretType", expression: "'Opaque'" },
+        {
+            name: "allowedSuffixes",
+            expression:
+                "request.resource.resource == 'secrets' ? variables.allowedSecretSuffixes : variables.allowedConfigMapSuffixes",
+        },
+    ],
+    validations: [
+        {
+            expression:
+                "variables.allowedSuffixes.exists(s, variables.objectName.endsWith(s) && size(variables.objectName) > size(s))",
+            messageExpression:
+                "'the knext operator may not ' + request.operation.lowerAscii() + ' the ' + request.resource.resource + ' object \"' + variables.objectName + '\": it writes only the per-zone signing key and JWKS'",
+        },
+        {
+            expression:
+                "request.resource.resource != 'secrets' || request.operation == 'DELETE' || dyn(object).type == variables.allowedSecretType",
+            messageExpression: "",
+        },
+    ],
+} as const;
 
 /** ValidatingAdmissionPolicy is admissionregistration.k8s.io/v1 from here. */
 const FLOOR = { major: 1, minor: 30 } as const;
@@ -38,6 +96,7 @@ export type WritePolicyReason =
     | "IdentityUnknown"
     | "PolicyFailsOpen"
     | "PolicyScope"
+    | "PolicyModified"
     | "IdentityUnparseable"
     | "IdentityMismatch"
     | "BindingPolicyMismatch"
@@ -58,8 +117,11 @@ interface Selector {
 
 interface ResourceRule {
     apiGroups?: string[];
+    apiVersions?: string[];
     resources?: string[];
+    resourceNames?: string[];
     operations?: string[];
+    scope?: string;
 }
 
 interface PolicyJson {
@@ -68,10 +130,13 @@ interface PolicyJson {
         failurePolicy?: string;
         matchConstraints?: {
             resourceRules?: ResourceRule[];
+            excludeResourceRules?: ResourceRule[];
             namespaceSelector?: Selector;
             objectSelector?: Selector;
         };
         matchConditions?: { name?: string; expression?: string }[];
+        variables?: { name?: string; expression?: string }[];
+        validations?: { expression?: string; messageExpression?: string }[];
     };
 }
 
@@ -125,18 +190,48 @@ const has = (list: string[] | undefined, want: string): boolean =>
 function uncovered(policy: PolicyJson): string {
     const rules = policy.spec?.matchConstraints?.resourceRules;
     if (!policy.spec?.matchConstraints) return "it has no matchConstraints";
+    // Any exclusion could be carving Secrets or ConfigMaps (or an operation)
+    // back out of the rules below, and reading which is a re-implementation of
+    // the apiserver's matching. The shipped policy has none, so none is accepted.
+    if ((policy.spec.matchConstraints.excludeResourceRules ?? []).length > 0) {
+        return "it excludes some requests through excludeResourceRules";
+    }
     for (const resource of ["secrets", "configmaps"]) {
         for (const op of ["CREATE", "UPDATE", "DELETE"]) {
+            // A rule that names objects, is cluster-scoped, or is for another
+            // apiVersion does not cover the operator's writes, however it spells
+            // the resources. Secrets and ConfigMaps are namespaced; an absent
+            // scope means all.
             const found = (rules ?? []).some(
                 (r) =>
                     has(r.apiGroups, "") &&
+                    has(r.apiVersions, "v1") &&
                     has(r.resources, resource) &&
-                    has(r.operations, op),
+                    has(r.operations, op) &&
+                    (r.resourceNames ?? []).length === 0 &&
+                    (r.scope === undefined ||
+                        r.scope === "Namespaced" ||
+                        r.scope === "*"),
             );
             if (!found) return `it does not cover ${op} on ${resource}`;
         }
     }
     return "";
+}
+
+/** Whether the policy's variables and validations are exactly the shipped CEL. */
+function sameCEL(policy: PolicyJson): boolean {
+    const got = {
+        variables: (policy.spec?.variables ?? []).map((v) => ({
+            name: v.name ?? "",
+            expression: v.expression ?? "",
+        })),
+        validations: (policy.spec?.validations ?? []).map((v) => ({
+            expression: v.expression ?? "",
+            messageExpression: v.messageExpression ?? "",
+        })),
+    };
+    return JSON.stringify(got) === JSON.stringify(CANONICAL_POLICY_CEL);
 }
 
 /**
@@ -199,6 +294,12 @@ export function evaluateWritePolicy(
         return no(
             "IdentityMismatch",
             `the policy ${name} confines ${confined} but the operator runs as ${operatorUsername}: it matches nobody the operator is (installed under another namespace or ServiceAccount name than the bundle rendered?)`,
+        );
+    }
+    if (!sameCEL(policy)) {
+        return no(
+            "PolicyModified",
+            `the policy ${name} does not carry the variables and validations this CLI ships, so what it admits is not what the bundle intended (its validation CEL, an allow-list variable or a messageExpression was changed, added or removed)`,
         );
     }
     if (binding.spec?.policyName !== name) {
@@ -320,11 +421,15 @@ export function writePolicyCheck(ctx: CheckContext): CheckResult[] {
         const infra = infraFailure(r);
         if (infra) return [mk(ID, TITLE, "error", infra.detail, infra.hint)];
         return [
+            // Unknown is not enforced: a read that failed for a reason doctor does
+            // not recognise says nothing about the policy, so it is a WARN, not a
+            // skip that reads as "nothing to see".
             mk(
                 ID,
                 TITLE,
-                "skip",
-                `could not read the operator's write policy ${name} — not verified`,
+                "warn",
+                `could not read the operator's write policy ${name} (${excerpt(r.stderr.replace(/[^\x20-\x7e\s]/g, "")) || "no error text"}) — not verified; treat the operator as UNRESTRICTED until it is`,
+                REPAIR_HINT,
             ),
         ];
     }
@@ -341,8 +446,9 @@ export function writePolicyCheck(ctx: CheckContext): CheckResult[] {
             mk(
                 ID,
                 TITLE,
-                "skip",
-                `the operator's write policy ${name} returned unreadable output — not verified`,
+                "warn",
+                `the operator's write policy ${name} returned unreadable output — not verified; treat the operator as UNRESTRICTED until it is`,
+                REPAIR_HINT,
             ),
         ];
     }
@@ -354,7 +460,7 @@ export function writePolicyCheck(ctx: CheckContext): CheckResult[] {
                 ID,
                 TITLE,
                 "pass",
-                `${name} is bound with Deny and confines ${username}, so the operator may write only its per-zone signing-key Secrets and JWKS ConfigMaps`,
+                `${name} is bound with Deny, covers create/update/delete on Secrets and ConfigMaps, confines ${username} and carries the shipped validations, so the operator may write only its per-zone signing-key Secrets and JWKS ConfigMaps`,
             ),
         ];
     }
