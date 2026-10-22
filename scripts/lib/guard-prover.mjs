@@ -44,6 +44,11 @@ import { mutate, restore, snapshot } from './mutation-harness.mjs';
  * @returns {number}
  */
 export function runSpecExit(repoRoot, spec) {
+  return runSpecCapture(repoRoot, spec).status;
+}
+
+/** As `runSpecExit`, but also returns the runner's combined output (diagnostics only). */
+export function runSpecCapture(repoRoot, spec) {
   const runner = resolveSpecRunner(repoRoot, spec);
   const res = spawnSync(runner.command, [...runner.args, ...runner.runArgs(spec)], {
     cwd: repoRoot,
@@ -53,7 +58,24 @@ export function runSpecExit(repoRoot, spec) {
   if (res.status === null) {
     throw new Error(`runner did not exit cleanly for ${spec}: ${res.signal ?? res.error}`);
   }
-  return res.status;
+  return { status: res.status, output: `${res.stdout ?? ''}\n${res.stderr ?? ''}` };
+}
+
+/**
+ * What to print when the baseline is red: the failing test names and error lines, so an
+ * abort names its cause instead of only its exit code. Falls back to the output tail.
+ * Never decides pass/fail; that stays the exit code.
+ *
+ * @param {string} spec
+ * @param {number} status
+ * @param {string} output
+ */
+export function baselineFailureReport(spec, status, output) {
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping ANSI escapes
+  const lines = output.replace(/\u001b\[[0-9;]*m/g, '').split(/\r?\n/);
+  const hits = lines.filter((l) => /^\s*\(fail\)|^\s*error:|✗|FAIL /.test(l)).slice(0, 20);
+  const body = hits.length > 0 ? hits : lines.filter((l) => l.trim()).slice(-20);
+  return `${spec} exited ${status}; runner output:\n${body.map((l) => `    ${l}`).join('\n')}`;
 }
 
 /**
@@ -120,8 +142,9 @@ export function createGuardProver({ repoRoot, spec, subjects }) {
   /** The unmutated guard must be GREEN, or nothing below means anything. */
   function baseline() {
     assertTreeClean(repoRoot, 'baseline');
-    const status = runSpecExit(repoRoot, spec);
+    const { status, output } = runSpecCapture(repoRoot, spec);
     if (status !== 0) {
+      console.error(baselineFailureReport(spec, status, output));
       console.error(
         `ABORT: ${spec} exits ${status} before any mutation. Every verdict below would be noise.`,
       );
