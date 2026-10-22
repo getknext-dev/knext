@@ -234,8 +234,8 @@ const MUTATIONS = [
     claim:
       'New naming its default auth policy explicitly (nil: the compiled contract) changes nothing',
     subject: 'server',
-    anchor: '\t\tNow:      cfg.Now,\n\t}))\n',
-    replacement: '\t\tNow:      cfg.Now,\n\t\tMethodAuth: nil,\n\t}))\n',
+    anchor: '\t\tLogger:       cfg.Logger,\n\t}))\n',
+    replacement: '\t\tLogger:       cfg.Logger,\n\t\tMethodAuth: nil,\n\t}))\n',
   },
 ];
 

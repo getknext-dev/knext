@@ -62,11 +62,21 @@ export interface FunctionClientDefinition<
   readonly methods: P;
 }
 
+/** Produces one identity token, called once per attempt. */
+export type TokenSource = () => string | Promise<string>;
+
 export interface CallOptions {
   readonly signal?: AbortSignal;
   readonly headers?: HeadersInit;
-  /** The per-call identity token, sent as `authorization: Bearer <token>`. */
-  readonly token?: string;
+  /**
+   * The per-call identity token, sent as `authorization: Bearer <token>`. A
+   * function is asked for a new token on every attempt: a function refuses a
+   * token it has already accepted, so a retried read must not re-send the
+   * token of the attempt before it. A string is sent as given on each attempt
+   * (a stream or a write, which are never retried, is given one). A stream
+   * takes a string only.
+   */
+  readonly token?: string | TokenSource;
 }
 
 export interface WriteCallOptions extends CallOptions {
@@ -295,12 +305,23 @@ export function defineFunctionClient<S extends DescService, P extends MethodPoli
   function headersFor(options: CallOptions | undefined): Headers {
     const headers = new Headers(options?.headers);
     headers.set(CONTRACT_VERSION_HEADER, def.contractVersion);
-    if (options?.token !== undefined) {
-      if (typeof options.token !== 'string' || !/^[\x21-\x7e]{1,8192}$/.test(options.token)) {
-        throw new ConnectError('the call token is not a usable bearer token', Code.Unauthenticated);
-      }
-      headers.set(AUTHORIZATION_HEADER, `Bearer ${options.token}`);
+    return headers;
+  }
+
+  /** One attempt's token: the string given, or a new one from the source. */
+  async function tokenFor(token: CallOptions['token']): Promise<string | undefined> {
+    const value = typeof token === 'function' ? await token() : token;
+    if (value === undefined) return undefined;
+    if (typeof value !== 'string' || !/^[\x21-\x7e]{1,8192}$/.test(value)) {
+      throw new ConnectError('the call token is not a usable bearer token', Code.Unauthenticated);
     }
+    return value;
+  }
+
+  function withToken(base: Headers, token: string | undefined): Headers {
+    if (token === undefined) return base;
+    const headers = new Headers(base);
+    headers.set(AUTHORIZATION_HEADER, `Bearer ${token}`);
     return headers;
   }
 
@@ -313,12 +334,30 @@ export function defineFunctionClient<S extends DescService, P extends MethodPoli
       (c[name as keyof Client<S>] as (req: unknown, o: object) => unknown)(request, opts);
 
     if (policy.kind === 'stream') {
-      client[name] = (request: unknown, options?: CallOptions) =>
-        call(connectClient(), request, {
+      client[name] = (request: unknown, options?: CallOptions) => {
+        const token = options?.token;
+        if (typeof token === 'function') {
+          throw new ConnectError(
+            'a stream takes its identity token as a string',
+            Code.InvalidArgument,
+          );
+        }
+        let headers = headersFor(options);
+        if (token !== undefined) {
+          if (typeof token !== 'string' || !/^[\x21-\x7e]{1,8192}$/.test(token)) {
+            throw new ConnectError(
+              'the call token is not a usable bearer token',
+              Code.Unauthenticated,
+            );
+          }
+          headers = withToken(headers, token);
+        }
+        return call(connectClient(), request, {
           timeoutMs: def.deadlineMs,
-          headers: headersFor(options),
+          headers,
           signal: options?.signal,
         });
+      };
       continue;
     }
 
@@ -326,6 +365,7 @@ export function defineFunctionClient<S extends DescService, P extends MethodPoli
     client[name] = async (request: unknown, options?: CallOptions | WriteCallOptions) => {
       let headers: Headers;
       let c: Client<S>;
+      let firstToken: string | undefined;
       try {
         headers = headersFor(options);
         if (policy.kind === 'mutation') {
@@ -335,6 +375,7 @@ export function defineFunctionClient<S extends DescService, P extends MethodPoli
           );
         }
         c = connectClient();
+        firstToken = await tokenFor(options?.token);
       } catch (err) {
         // Nothing has been sent: the function cannot have seen this call.
         throw markNotSent(err);
@@ -349,7 +390,14 @@ export function defineFunctionClient<S extends DescService, P extends MethodPoli
           );
         }
         try {
-          return await call(c, request, { timeoutMs: remaining, headers, signal: options?.signal });
+          // A new token for each attempt after the first, from a token source:
+          // the function refuses a token it has already accepted.
+          const token = attempt === 1 ? firstToken : await tokenFor(options?.token);
+          return await call(c, request, {
+            timeoutMs: remaining,
+            headers: withToken(headers, token),
+            signal: options?.signal,
+          });
         } catch (err) {
           const e = ConnectError.from(err);
           if (attempt >= attempts || e.code !== Code.Unavailable || options?.signal?.aborted)

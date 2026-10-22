@@ -23,6 +23,8 @@ const LEVELS = new Set(['major', 'minor', 'patch']);
  * lands, not by its feature-branch name.
  */
 function currentBranch(env: Record<string, string | undefined> = process.env): string {
+  // The prover lane runs on a schedule (GITHUB_REF_NAME = main) over another lane's checkout.
+  if (env.PROVER_LANE_REF) return env.PROVER_LANE_REF;
   if (env.GITHUB_BASE_REF) return env.GITHUB_BASE_REF;
   if (env.GITHUB_REF_NAME) return env.GITHUB_REF_NAME;
   const r = spawnSync('git', ['branch', '--show-current'], { cwd: ROOT, encoding: 'utf8' });
@@ -209,6 +211,12 @@ describe('no major changeset on a 1.x fixed group (#2036)', () => {
           'integration/v2',
         );
         expect(currentBranch({ GITHUB_BASE_REF: '', GITHUB_REF_NAME: 'main' })).toBe('main');
+        expect(currentBranch({ PROVER_LANE_REF: 'integration/v2', GITHUB_REF_NAME: 'main' })).toBe(
+          'integration/v2',
+        );
+        expect(currentBranch({ PROVER_LANE_REF: 'integration/v2', GITHUB_BASE_REF: 'main' })).toBe(
+          'integration/v2',
+        );
       });
     });
     it('ignores major on a non-fixed package', () => {

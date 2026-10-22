@@ -183,8 +183,22 @@ const SPKI_ED25519_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
 /** A check to drop: a refusal reason, or `weak-key` (trust any 32-byte x). */
 type Skip = Partial<Record<Reason | 'weak-key', true>>;
 
+/** A `jti` is 22-64 base64url characters (a 128-bit random id is exactly 22). */
+const JTI_FORMAT = /^[A-Za-z0-9_-]{22,64}$/;
+
+/** What a verifier takes from a token it accepts, for the replay set. */
+interface Accepted {
+  readonly sub: string;
+  readonly iss: string;
+  readonly jti: string;
+  readonly exp: number;
+}
+
 /** The contract's verifier. `skip` drops named checks, to show a case is single-fault. */
-function referenceVerify(c: Case, skip: Skip = {}): string {
+function referenceVerify(
+  c: Pick<Case, 'jws' | 'jwks' | 'now' | 'procedure' | 'auth'>,
+  skip: Skip = {},
+): Accepted {
   if (c.jws === null) return refuse('no-token');
   // The mounted JWKS is read before the token is looked at.
   const keys = usableKeys(committed.jwks[c.jwks as keyof Vectors['jwks']], skip);
@@ -211,6 +225,11 @@ function referenceVerify(c: Case, skip: Skip = {}): string {
   for (const name of ['iss', 'aud', 'method', 'sub']) {
     if (typeof claims[name] !== 'string') refuse('malformed');
   }
+  if (!('jti' in claims)) {
+    if (!skip['missing-jti']) refuse('missing-jti');
+  } else if (typeof claims.jti !== 'string' || !JTI_FORMAT.test(claims.jti)) {
+    refuse('malformed');
+  }
   for (const name of ['iat', 'exp']) if (!Number.isSafeInteger(claims[name])) refuse('malformed');
   const iat = claims.iat as number;
   const exp = claims.exp as number;
@@ -225,16 +244,53 @@ function referenceVerify(c: Case, skip: Skip = {}): string {
   if (!skip['missing-subject'] && c.auth === 'AUTH_USER' && claims.sub === '') {
     refuse('missing-subject');
   }
-  return claims.sub as string;
+  return {
+    sub: claims.sub as string,
+    iss: claims.iss as string,
+    jti: (claims.jti ?? '') as string,
+    exp,
+  };
 }
 
 function outcome(c: Case, skip?: Skip): { expect: 'accept'; sub: string } | Refused {
   try {
-    return { expect: 'accept', sub: referenceVerify(c, skip) };
+    return { expect: 'accept', sub: referenceVerify(c, skip).sub };
   } catch (err) {
     if (err instanceof Refused) return err;
     throw err;
   }
+}
+
+type Sequence = Vectors['sequences'][number];
+type Step = Sequence['steps'][number];
+
+/**
+ * The contract's replay set, written from the contract: keyed by (iss, jti), an
+ * entry lives until exp + skew and is then purged; a token seen before is
+ * `replayed`, even when the set is full; a new token into a full set is
+ * `seen-set-full` and is never recorded. A token is recorded only after every
+ * other check has passed. Returns each step's outcome, in order.
+ */
+function runSequence(seq: Sequence, skip: Skip = {}): Array<'accept' | Reason> {
+  const capacity = seq.capacity ?? committed.contract.defaultSeenCapacity;
+  const seen = new Map<string, number>();
+  return seq.steps.map((step: Step) => {
+    const c = { ...seq, jws: step.jws, now: step.now };
+    try {
+      const got = referenceVerify(c, skip);
+      for (const [key, expiry] of seen) if (expiry <= step.now) seen.delete(key);
+      const key = `${got.iss}\n${got.jti}`;
+      if (!skip.replayed && seen.has(key)) refuse('replayed');
+      if (!skip['seen-set-full'] && !seen.has(key) && seen.size >= capacity) {
+        refuse('seen-set-full');
+      }
+      seen.set(key, got.exp + committed.contract.clockSkewSeconds);
+      return 'accept' as const;
+    } catch (err) {
+      if (err instanceof Refused) return err.reason;
+      throw err;
+    }
+  });
 }
 
 describe('z7 token vectors', () => {
@@ -273,6 +329,7 @@ describe('z7 token vectors', () => {
       'wrong-method',
       'missing-subject',
       'bad-jwks',
+      'missing-jti',
     ];
     let checked = 0;
     for (const c of committed.cases) {
@@ -284,10 +341,65 @@ describe('z7 token vectors', () => {
       });
       checked++;
     }
-    expect(checked).toBeGreaterThanOrEqual(21);
+    expect(checked).toBeGreaterThanOrEqual(22);
     // alg confusion with a VALID EdDSA signature is caught only by the alg check.
     const algName = committed.cases.find((c) => c.name === 'alg-ed25519-name');
     expect(algName && !(outcome(algName, { 'bad-alg': true }) instanceof Refused)).toBe(true);
+  });
+
+  it('every replay sequence meets its expectation under the reference replay set', () => {
+    expect(committed.sequences.length).toBeGreaterThanOrEqual(8);
+    for (const seq of committed.sequences) {
+      const got = runSequence(seq);
+      expect({ name: seq.name, got }).toEqual({
+        name: seq.name,
+        got: seq.steps.map((st) => (st.expect === 'accept' ? 'accept' : st.reason)),
+      });
+    }
+  });
+
+  // A refusal for `replayed` or `seen-set-full` must be the replay set's doing
+  // alone: a verifier without that rule must not refuse the step for that reason.
+  it('every replay-set refusal is single-fault', () => {
+    let checked = 0;
+    for (const seq of committed.sequences) {
+      seq.steps.forEach((st, i) => {
+        if (st.expect !== 'reject' || (st.reason !== 'replayed' && st.reason !== 'seen-set-full')) {
+          return;
+        }
+        const got = runSequence(seq, { [st.reason]: true })[i];
+        expect({ name: seq.name, step: i, still: got === st.reason }).toEqual({
+          name: seq.name,
+          step: i,
+          still: false,
+        });
+        checked++;
+      });
+    }
+    expect(checked).toBeGreaterThanOrEqual(6);
+  });
+
+  it('the contract names the replay rules, and the sequences cover each of them', () => {
+    expect(committed.contract.claims).toEqual(['iss', 'aud', 'method', 'sub', 'jti', 'iat', 'exp']);
+    expect(committed.contract.defaultSeenCapacity).toBeGreaterThan(0);
+    expect(committed.contract.fullSetWireCode).toBe('resource_exhausted');
+    expect(committed.contract.jtiChars).toEqual({ min: 22, max: 64 });
+    const names = new Set(committed.sequences.map((s) => s.name));
+    for (const required of [
+      'replay-same-token',
+      'replay-until-exp-plus-skew',
+      'distinct-jti-both-accepted',
+      'cap-reached-refuses-new',
+      'cap-reached-keeps-seen',
+      'expired-entry-purged',
+      'purge-is-per-entry',
+      'refused-token-is-not-recorded',
+    ]) {
+      expect({ required, present: names.has(required) }).toEqual({ required, present: true });
+    }
+    for (const seq of committed.sequences) {
+      for (const st of seq.steps) if (st.expect === 'reject') expect(REASONS).toContain(st.reason);
+    }
   });
 
   it('covers every negative case the contract names, and only known reasons', () => {
@@ -307,6 +419,11 @@ describe('z7 token vectors', () => {
       'alg-hs256-with-public-key',
       'lifetime-over-60',
       'user-empty-sub',
+      'missing-jti',
+      'jti-null',
+      'jti-too-short',
+      'jti-too-long',
+      'jti-not-base64url',
       'rotation-previous-during-overlap',
       'rotation-previous-after-overlap',
       'rotation-next-before-propagation',

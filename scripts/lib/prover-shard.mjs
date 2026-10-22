@@ -88,6 +88,9 @@ export const PROVER_WEIGHT_MINUTES = Object.freeze({
   'scripts/mutation-prove-1533-kubeconfig-ci-secret.mjs': 5,
   'scripts/mutation-prove-2171-redis-prefix-isolation.mjs': 4,
   'scripts/mutation-prove-2051-rust-verifier.mjs': 4,
+  // 27 rows each. ESTIMATES (local run), not yet measured on a hosted runner.
+  'scripts/mutation-prove-2510-go-verifier.mjs': 4,
+  'scripts/mutation-prove-2510-rust-verifier.mjs': 6,
   'scripts/mutation-prove-compat-window-packed-anchor.mjs': 4,
   'scripts/mutation-prove-compat-credential-freeze-guard.mjs': 2,
   'scripts/mutation-prove-compat-credential-line.mjs': 2,
@@ -113,6 +116,8 @@ export const WEIGHTED_ON_ONE_REF_ONLY = Object.freeze([
   'scripts/mutation-prove-go-template-auth.mjs',
   'scripts/mutation-prove-2171-redis-prefix-isolation.mjs',
   'scripts/mutation-prove-2051-rust-verifier.mjs',
+  'scripts/mutation-prove-2510-go-verifier.mjs',
+  'scripts/mutation-prove-2510-rust-verifier.mjs',
 ]);
 
 /** @param {{ relPath: string }} p */

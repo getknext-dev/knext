@@ -16,7 +16,7 @@ import (
 
 // A zone identity token is a JWS in compact form, header
 // {"alg":"EdDSA","typ":"JWT","kid":"<kid>"} and claims iss, aud, method, sub,
-// iat and exp. It is parsed here by hand, on the standard library alone, and
+// jti, iat and exp. It is parsed here by hand, on the standard library alone, and
 // strictly: the algorithm is fixed (never taken from the header), base64url
 // must be canonical and unpadded, JSON must be valid UTF-8 with no duplicate
 // member names, and every claim is required with its exact type. The
@@ -24,8 +24,8 @@ import (
 
 // claims are a token's verified claims.
 type claims struct {
-	iss, aud, method, sub string
-	iat, exp              int64
+	iss, aud, method, sub, jti string
+	iat, exp                   int64
 }
 
 func malformed(format string, args ...any) error {
@@ -100,6 +100,16 @@ func verifyToken(token string, keys map[string]ed25519.PublicKey) (claims, error
 		if *m.to, err = stringMember(payload, m.name); err != nil {
 			return claims{}, err
 		}
+	}
+	// A token with no jti cannot be remembered, so it could be replayed.
+	if _, ok := payload["jti"]; !ok {
+		return claims{}, ErrMissingJTI
+	}
+	if c.jti, err = stringMember(payload, "jti"); err != nil {
+		return claims{}, err
+	}
+	if !validJTI(c.jti) {
+		return claims{}, malformed("jti is not %d-%d base64url characters", MinJTIChars, MaxJTIChars)
 	}
 	if c.iat, err = intMember(payload, "iat"); err != nil {
 		return claims{}, err

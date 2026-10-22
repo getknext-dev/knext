@@ -15,6 +15,11 @@
  * - `sub` — the user authorize() verified. Required for an AUTH_USER RPC;
  *   empty for AUTH_PUBLIC. Nothing else the caller passes can set it, and a
  *   request body never reaches the token;
+ * - `jti` — a fresh random id for this one token: 16 bytes from the system's
+ *   CSPRNG, base64url (22 characters), never reused. A function keeps the ids
+ *   it has accepted until the token expires and refuses a second use, so a
+ *   token captured on the pod network cannot be replayed to it. A token is
+ *   therefore single-use: every attempt, a retry included, needs its own;
  * - `iat`, `exp` — integer seconds, 60 s apart.
  *
  * The private key is read from the zone's signing-key Secret, mounted as a
@@ -30,7 +35,14 @@
  * Nothing here logs.
  */
 
-import { createHash, createPrivateKey, createPublicKey, type KeyObject, sign } from 'node:crypto';
+import {
+  createHash,
+  createPrivateKey,
+  createPublicKey,
+  type KeyObject,
+  randomBytes,
+  sign,
+} from 'node:crypto';
 import { readFileSync, realpathSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { Code, ConnectError } from '@connectrpc/connect';
@@ -45,6 +57,9 @@ export const ZONE_ISSUER_ENV = 'KNEXT_ZONE_ISSUER';
 
 /** A token's lifetime: `exp - iat`. The contract allows at most 60 s. */
 export const TOKEN_TTL_SECONDS = 60;
+
+/** The size of a token's `jti`, in random bytes: 128 bits, 22 base64url characters. */
+const JTI_BYTES = 16;
 
 const KEY_FILE = 'current.key';
 const KID_FILE = 'current.kid';
@@ -268,8 +283,10 @@ export function createZoneTokenSigner(options: ZoneSignerOptions = {}): TokenMin
     const { key, kid } = currentKey();
     const iat = Math.floor(now() / 1000);
     const header = b64url(JSON.stringify({ alg: 'EdDSA', typ: 'JWT', kid }));
+    // Single-use: a function refuses a jti it has already accepted.
+    const jti = randomBytes(JTI_BYTES).toString('base64url');
     const claims = b64url(
-      JSON.stringify({ iss, aud, method, sub, iat, exp: iat + TOKEN_TTL_SECONDS }),
+      JSON.stringify({ iss, aud, method, sub, jti, iat, exp: iat + TOKEN_TTL_SECONDS }),
     );
     const input = `${header}.${claims}`;
     const signature = sign(null, Buffer.from(input, 'utf8'), key).toString('base64url');

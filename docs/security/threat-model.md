@@ -479,7 +479,7 @@ function with a per-call EdDSA (Ed25519) JWT. There is no shared token.
 
 | STRIDE | Threat | Mitigation | Residual / action |
 |---|---|---|---|
-| **S**poof | A pod impersonates a zone to call a function directly. | Functions are labelled `networking.knative.dev/visibility: cluster-local`. That is Knative's setting, not a guarantee: on some installs a DomainMapping is routed on the public load balancer regardless (on OKE keep private apps behind a tunnel). The token is the control. Every call needs a JWT signed by the zone's own key, verified against its JWKS, with the function's `aud` and the call's `method`. Functions hold no signing key, so they cannot call each other. | Residual G1 below: a captured token is replayable for up to 60 s, with a body of the attacker's choosing. A same-namespace actor who can write ConfigMaps can forge the JWKS owner reference (JWKS residual (a) in §1). |
+| **S**poof | A pod impersonates a zone to call a function directly. | Functions are labelled `networking.knative.dev/visibility: cluster-local`. That is Knative's setting, not a guarantee: on some installs a DomainMapping is routed on the public load balancer regardless (on OKE keep private apps behind a tunnel). The token is the control. Every call needs a JWT signed by the zone's own key, verified against its JWKS, with the function's `aud` and the call's `method`. Functions hold no signing key, so they cannot call each other. | Residual G1 below: a captured token is refused a second time by the pod that accepted it, but can still be replayed once to another replica or after a restart, with a body of the attacker's choosing. A same-namespace actor who can write ConfigMaps can forge the JWKS owner reference (JWKS residual (a) in §1). |
 | **T**amper | In-cluster MITM rewrites an h2c request or its response. | The token binds `iss`, `aud`, `method`, `sub` and a 60 s life, so a request cannot be re-aimed at another function or method. A default-on internal-only `NetworkPolicy` limits who can reach the pod. | Residual G2 below: the response is not authenticated, and the request body is not covered by the token. NetworkPolicy is enforced only on a CNI that implements it (not flannel). |
 | **R**epudiate | No attribution for a function mutation. | The token names the zone (`iss`) and the user (`sub`); the function can log both. | The `sub` is the zone's assertion, not the user's (G3 below). |
 | **I**nfo disclosure | A function leaks data, or a zone reads another zone's data through it. | cluster-local label (Knative's; see Spoof); the function holds no other zone's DB credential (allowlist) and no signing key. | Plaintext h2c: anything on the pod network path can read traffic (G2). |
@@ -493,20 +493,45 @@ sit beside the operator-side residuals (a)–(d) of the signing-key and JWKS sec
 open items in ADR-0004's "Z7 operator write surface" (names-only binding, read-error removal); none
 of those is repeated here.
 
-**G1. Replay within the token's life (#2510).** The token has no `jti` and the verifier keeps no replay
-cache. An attacker who captures a token on the pod network can replay it, unchanged, against the
-**same** function and the **same** method for up to 60 s plus 5 s of skew. The token carries no
-hash of the request body, so the replay is not of the original call: it runs that RPC with an
-**attacker-chosen body**. This is the same missing integrity as G2.
+**G1. Replay within the token's life (#2510), narrowed, not closed.** Every token now carries a `jti`
+(16 random bytes, base64url) and a function keeps the `(iss, jti)` of every token it has accepted until
+`exp` plus the 5 s skew, then refuses a second use. A token with no `jti` is refused. The Go and Rust
+templates both do this (shared vectors, mutation-proved). **What this does NOT close:**
+- *The set is per pod.* A token captured on the pod network can still be replayed **once** to a
+  *different replica* of the same function (a function scaled to more than one pod), and again after the
+  pod that accepted it restarts or scales to zero, for as long as the token lives (up to 65 s). Closing
+  that needs shared state (a store every replica reads, which would also wake and load a dependency) or
+  mTLS so the token cannot be captured at all.
+- *No body hash (this is G2).* The token does not cover the request body, so the **first use** of a
+  captured token carries an attacker-chosen body. If the attacker's copy reaches the function before the
+  zone's own call, the attacker's request is the one served and the zone's own call is the one refused.
+  The jti makes the second arrival fail; it does not make the first one trustworthy.
+- *The set can fill, and the autoscaler does not help.* It holds 65,536 tokens by default (about
+  1,000 verified calls a second on one pod; measured at 152 bytes per entry in Go and 154 in Rust,
+  9.5 and 9.7 MiB at the cap). When it is full the function refuses **new** tokens with Connect
+  `ResourceExhausted` (HTTP 429), not `unauthenticated`, because the caller did nothing wrong and may
+  retry; a replay of a token already seen stays `unauthenticated`. It logs one warning every 10 s
+  naming the capacity in effect, and never forgets a seen token to make room. These refusals are
+  answered immediately, so they add no in-flight concurrency: the Knative autoscaler gets no signal from
+  them and will not add pods. A flood of valid tokens, or a pod busier than about 1,000 calls a second,
+  therefore turns into refused calls until entries expire (at most 65 s) or the cap is raised
+  (`SeenCapacity` / `seen_capacity` in the scaffolded `main`). This is a deliberate fail-closed
+  availability cost.
+- *Rollout.* A function with this check refuses tokens that carry no `jti` (fail closed, no deprecation
+  window: v2 is unreleased and nothing deployed signs without one; jev 0.86 for immediate refusal over a
+  deprecation step). Functions ignore claims they do not know, so an older function accepts a token that
+  has a `jti`. For this change the safe order is therefore **zone first, then functions**: the opposite of
+  the usual function-first order for contract versions. A function upgraded before its zone refuses the
+  zone's calls until the zone is upgraded.
+- *Retries.* A token is single-use, so the client asks for a new token on every attempt of a retried
+  read. A custom token source (`registerTokenMinter`) must return a fresh token per call.
 - *Likelihood:* low. Capture needs a position on the pod network, which is plaintext h2c, and on a
   flannel cluster (OKE, OrbStack) the NetworkPolicy that would limit who can reach the pod is not
   enforced.
-- *Impact:* bounded. `aud` limits it to one function and `method` to one RPC. A replayed call
-  repeats whatever that RPC does, so a non-idempotent write is the worst case.
-- *Mitigation today:* the 60 s life; `aud` and `method` binding.
-- *Closes it:* a `jti` claim plus a short replay cache in the verifier (per-pod memory; lost on
-  scale-to-zero, which is acceptable because the life bounds it), or mTLS so the token is not
-  capturable in the first place.
+- *Impact:* bounded. `aud` limits it to one function and `method` to one RPC. Within one pod a replay
+  is refused; across replicas a non-idempotent write can still repeat once per extra replica.
+- *Mitigation today:* the 60 s life; `aud` and `method` binding; the per-pod single-use set.
+- *Closes it fully:* mTLS between zone and function, or a replay store shared by every replica.
 
 **G2. Responses are not authenticated (#2511).** The token authenticates the zone to the function. Nothing
 authenticates the function's reply to the zone, and nothing integrity-protects the request body.

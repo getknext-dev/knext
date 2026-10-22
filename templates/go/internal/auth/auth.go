@@ -97,6 +97,11 @@ func NewInterceptor(v Verifier) connect.ServerInterceptor {
 			}
 			caller, err := v.Verify(ctx, token, spec.Procedure)
 			if err != nil {
+				if errors.Is(err, ErrSeenSetFull) {
+					// Nothing is wrong with the caller or its token: this pod has no
+					// room to remember another one. Say so, so a client backs off.
+					return connect.NewError(connect.CodeResourceExhausted, "the function is at its token limit; retry").WithCause(err)
+				}
 				return connect.NewError(connect.CodeUnauthenticated, "token rejected").WithCause(err)
 			}
 			return next(withCaller(ctx, caller), spec, stream)

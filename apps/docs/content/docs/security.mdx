@@ -517,7 +517,7 @@ for these two objects, and the operator would run without the restriction.
 **Honest scope.** Zone functions and their identity tokens are **Beta**. They are available on the **v2** line only; released 1.x has none of this. A zone's calls to its functions are authenticated with a
 short-lived token signed by the zone's own key; cluster-local visibility is Knative's, and the
 token is the control. Three limits remain: a captured token
-can be replayed for up to about a minute, replies from a function are not authenticated, and a
+is refused a second time by the function that served it, but can still be replayed once to another replica or after a restart, replies from a function are not authenticated, and a
 function accepts the user the zone names. Mutual TLS between zone and function is not built. See the
 [threat model](/docs/threat-model).
 </Callout>

@@ -33,7 +33,7 @@ async function getOrder$cached(subject: string, protoVersion: string, request: s
   $cacheTag("knext:orders:orders.v1.OrdersService");
   // protoVersion is part of the cache key only: a function rollout is a new entry.
   void protoVersion;
-  const token = await $mintCallToken({ function: "orders", method: "/orders.v1.OrdersService/GetOrder", auth: "user", sub: $subjectSub(subject) });
+  const token = async () => await $mintCallToken({ function: "orders", method: "/orders.v1.OrdersService/GetOrder", auth: "user", sub: $subjectSub(subject) });
   return $ordersService.getOrder($decodeRequest(GetOrderRequestSchema, request), { token });
 }
 

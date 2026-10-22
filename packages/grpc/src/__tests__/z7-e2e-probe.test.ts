@@ -92,9 +92,11 @@ function claimsOk(p: Parts, now = Date.now()): { ok: boolean; why: string[] } {
   const why: string[] = [];
   const c = p.claims as Record<string, number | string>;
   if (
-    JSON.stringify(Object.keys(c)) !== JSON.stringify(['iss', 'aud', 'method', 'sub', 'iat', 'exp'])
+    JSON.stringify(Object.keys(c)) !==
+    JSON.stringify(['iss', 'aud', 'method', 'sub', 'jti', 'iat', 'exp'])
   )
     why.push('claim set');
+  if (typeof c.jti !== 'string' || !/^[A-Za-z0-9_-]{22,64}$/.test(c.jti)) why.push('jti');
   if (c.iss !== ISSUER) why.push('iss');
   if (c.aud !== AUDIENCE) why.push('aud');
   if (c.method !== METHOD) why.push('method');
@@ -277,6 +279,9 @@ describe('hand-built tokens, signed by the zone key (mode raw)', () => {
     expect((control.claims.exp as number) - (control.claims.iat as number)).toBe(60);
     expect(control.signatureOk).toBe(true);
     expect(claimsOk(control)).toEqual({ ok: true, why: [] });
+    // Each hand-built token has its own jti, as each signed one does.
+    const again = parts((await authorizationHeader(raw)).header);
+    expect(again.claims.jti).not.toBe(control.claims.jti);
   });
 
   it('an empty sub: only sub differs from the control, and the real key signed it', async () => {
@@ -311,6 +316,50 @@ describe('hand-built tokens, signed by the zone key (mode raw)', () => {
 });
 
 describe('the probe command line', () => {
+  it('--twice sends the SAME token twice and prints one line per call', async () => {
+    const seen: IncomingHttpHeaders[] = [];
+    const server = createServer((req, res) => {
+      seen.push(req.headers);
+      req.resume();
+      const first = seen.length === 1;
+      res.writeHead(first ? 200 : 401, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(first ? { ok: true } : { code: 'unauthenticated', message: 'nope' }));
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const port = (server.address() as AddressInfo).port;
+    try {
+      const proc = Bun.spawn(
+        [
+          process.execPath,
+          join(import.meta.dir, '../../e2e/z7-identity-kind/probe.ts'),
+          '--base',
+          `http://127.0.0.1:${port}`,
+          '--host',
+          'pricing.shop.svc.cluster.local',
+          '--issuer',
+          ISSUER,
+          '--rpc',
+          'put',
+          '--auth',
+          'signer',
+          '--key-dir',
+          KEY_DIR,
+          '--twice',
+        ],
+        { stdout: 'pipe', stderr: 'pipe' },
+      );
+      expect(await proc.exited).toBe(0);
+      const lines = (await new Response(proc.stdout).text()).trim().split('\n');
+      expect(lines.map((l) => JSON.parse(l).status)).toEqual([200, 401]);
+      expect(seen).toHaveLength(2);
+      expect(seen[0]?.authorization).toBeDefined();
+      expect(seen[1]?.authorization).toBe(seen[0]?.authorization);
+      for (const l of lines) expect(l).not.toContain(String(seen[0]?.authorization).slice(7, 30));
+    } finally {
+      server.close();
+    }
+  });
+
   it('--sub= sends an empty sub and --lifetime sets the token life, both signed by the key dir', async () => {
     const seen: IncomingHttpHeaders[] = [];
     const server = createServer((req, res) => {

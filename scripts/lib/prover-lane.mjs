@@ -80,6 +80,8 @@ export const NON_JS_TEST_SUITE_PROVERS = Object.freeze([
   'scripts/mutation-prove-rust-template-auth.mjs',
   'scripts/mutation-prove-2051-go-verifier.mjs',
   'scripts/mutation-prove-2051-rust-verifier.mjs',
+  'scripts/mutation-prove-2510-go-verifier.mjs',
+  'scripts/mutation-prove-2510-rust-verifier.mjs',
   'scripts/mutation-prove-2171-go-redis-key-prefix.mjs',
   'scripts/mutation-prove-2052-backendservice.mjs',
   'scripts/mutation-prove-2398-keyprefix-crd.mjs',
