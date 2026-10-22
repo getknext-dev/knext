@@ -211,6 +211,12 @@ describe('no major changeset on a 1.x fixed group (#2036)', () => {
           'integration/v2',
         );
         expect(currentBranch({ GITHUB_BASE_REF: '', GITHUB_REF_NAME: 'main' })).toBe('main');
+        expect(currentBranch({ PROVER_LANE_REF: 'integration/v2', GITHUB_REF_NAME: 'main' })).toBe(
+          'integration/v2',
+        );
+        expect(currentBranch({ PROVER_LANE_REF: 'integration/v2', GITHUB_BASE_REF: 'main' })).toBe(
+          'integration/v2',
+        );
       });
     });
     it('ignores major on a non-fixed package', () => {

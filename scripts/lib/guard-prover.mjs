@@ -71,7 +71,8 @@ export function runSpecCapture(repoRoot, spec) {
  * @param {string} output
  */
 export function baselineFailureReport(spec, status, output) {
-  const lines = output.split(/\r?\n/);
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping ANSI escapes
+  const lines = output.replace(/\u001b\[[0-9;]*m/g, '').split(/\r?\n/);
   const hits = lines.filter((l) => /^\s*\(fail\)|^\s*error:|✗|FAIL /.test(l)).slice(0, 20);
   const body = hits.length > 0 ? hits : lines.filter((l) => l.trim()).slice(-20);
   return `${spec} exited ${status}; runner output:\n${body.map((l) => `    ${l}`).join('\n')}`;

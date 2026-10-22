@@ -24,4 +24,10 @@ describe('guard-prover baseline abort diagnostic', () => {
     const report = baselineFailureReport('s', 2, 'boom\nlast line');
     expect(report).toContain('last line');
   });
+
+  it('recognises failure markers wrapped in ANSI colour codes', () => {
+    const report = baselineFailureReport('s', 1, 'ok\n\u001b[31m(fail) c > broke\u001b[0m\nx');
+    expect(report).toContain('(fail) c > broke');
+    expect(report).not.toContain('\u001b');
+  });
 });

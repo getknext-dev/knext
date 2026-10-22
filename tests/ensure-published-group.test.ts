@@ -13,6 +13,7 @@ import {
   prereleaseDistTag,
   RegistryUnreachableError,
 } from '../scripts/ensure-published-group.mjs';
+import { laneBranchFromEnv } from '../scripts/lib/lane-branch.mjs';
 import { checkPreMode, PRE_MODE_TAGS, resolveLane } from '../scripts/publish-lane-guard.mjs';
 
 const SCRIPT_PATH = resolve(
@@ -614,23 +615,33 @@ describe('integration/v1.3 — 1.3.0 GA: pre mode exited, stable version', () =>
   // On a pre-mode lane (integration/v2) pre.json must exist; on every other lane it must not.
   // An unresolvable branch (a feature branch pushed with no PR base) is not asked.
   it('.changeset/pre.json matches the lane: present on pre-mode lanes, absent elsewhere', () => {
-    const env = process.env;
-    // PROVER_LANE_REF first: the nightly prover lane runs on a schedule, where GITHUB_REF_NAME is
-    // the workflow's ref (main) while the tree under proof is another lane's checkout.
-    const branch =
-      env.PROVER_LANE_REF ||
-      env.GITHUB_BASE_REF ||
-      env.GITHUB_REF_NAME ||
+    const branch = laneBranchFromEnv(process.env, () =>
       spawnSync('git', ['branch', '--show-current'], {
         cwd: repoRoot,
         encoding: 'utf8',
-      }).stdout.trim();
+      }).stdout.trim(),
+    );
     const lane = resolveLane(`refs/heads/${branch}`);
     if (!lane.ok) return;
     const prePath = resolve(repoRoot, '.changeset/pre.json');
     const pre = existsSync(prePath) ? JSON.parse(readFileSync(prePath, 'utf8')) : undefined;
     expect(checkPreMode({ lane, pre })).toEqual([]);
     expect(pre !== undefined).toBe(PRE_MODE_TAGS.has(lane.ref));
+  });
+
+  it('lane branch precedence: PROVER_LANE_REF beats PR target, pushed ref and checkout', () => {
+    const fallback = () => 'from-checkout';
+    expect(
+      laneBranchFromEnv(
+        { PROVER_LANE_REF: 'integration/v2', GITHUB_BASE_REF: 'x', GITHUB_REF_NAME: 'main' },
+        fallback,
+      ),
+    ).toBe('integration/v2');
+    expect(laneBranchFromEnv({ GITHUB_BASE_REF: 'a', GITHUB_REF_NAME: 'main' }, fallback)).toBe(
+      'a',
+    );
+    expect(laneBranchFromEnv({ GITHUB_REF_NAME: 'main' }, fallback)).toBe('main');
+    expect(laneBranchFromEnv({}, fallback)).toBe('from-checkout');
   });
 
   it('a stable tree version has no prerelease dist-tag (null -> latest)', () => {
