@@ -23,6 +23,7 @@ on:
       - 'tests/govulncheck-all-modules.test.ts'
       - 'tests/govulncheck-gate.test.ts'
       - 'tests/govulncheck-gate-scope.test.ts'
+      - 'tests/govulncheck-gate-known-modules.test.ts'
   push:
     branches: [main, 'integration/**']
     paths:
@@ -35,6 +36,7 @@ on:
       - 'tests/govulncheck-all-modules.test.ts'
       - 'tests/govulncheck-gate.test.ts'
       - 'tests/govulncheck-gate-scope.test.ts'
+      - 'tests/govulncheck-gate-known-modules.test.ts'
   workflow_dispatch:
 
 permissions:
