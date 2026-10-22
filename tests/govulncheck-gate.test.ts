@@ -8,7 +8,6 @@ import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parse } from 'yaml';
-// @ts-expect-error plain ESM script, no types
 import { evaluate, parseStream } from '../scripts/govulncheck-gate.mjs';
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
