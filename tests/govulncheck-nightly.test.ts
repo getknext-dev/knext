@@ -62,17 +62,39 @@ describe('govulncheck-nightly.yml', () => {
     }
   });
 
-  it('FAILS on integration/v2 when the template, gate or exceptions are missing', () => {
-    const idx = job.steps.findIndex((s) => s.if?.includes("matrix.ref == 'integration/v2'"));
-    expect(idx, 'a step gated on the integration/v2 leg').toBeGreaterThan(-1);
+  it('scans EVERY Go module, on every ref', () => {
+    expect(job.strategy.matrix.module).toEqual([
+      'templates/go',
+      'packages/kn-next-operator',
+      'packages/scale-zero-pg/gateway',
+    ]);
+  });
+
+  it('the cron is unchanged', () => {
+    expect(wf.on.schedule).toEqual([{ cron: '13 2 * * *' }]);
+  });
+
+  it('passes the module to the gate', () => {
+    const gate = job.steps.find((s) => s.run?.includes('govulncheck@'));
+    expect(gate?.run).toMatch(/govulncheck-gate\.mjs" "\$\{\{ matrix\.module \}\}"/);
+    expect(gate?.['working-directory']).toBe('${{ matrix.module }}');
+  });
+
+  it('FAILS on every leg but main/templates/go when the module, gate or exceptions are missing', () => {
+    const idx = job.steps.findIndex((s) => s.run?.includes('fail()'));
+    expect(idx, 'a require step').toBeGreaterThan(-1);
     const step = job.steps[idx];
+    // Only the main/templates/go leg is exempt: the operator and gateway exist on
+    // main, so a hashFiles skip there would be a silent pass.
+    expect(step.if).toContain("matrix.ref == 'main' && matrix.module == 'templates/go'");
+    expect(step.if).toMatch(/!\(/);
     expect(step.run).toContain('set -euo pipefail');
     for (const f of [
-      'templates/go/go.mod',
+      '"$MODULE/go.mod"',
       'scripts/govulncheck-gate.mjs',
       'security/govulncheck-exceptions.json',
     ]) {
-      expect(step.run, f).toMatch(new RegExp(`test -f ${f.replaceAll('.', '\\.')} \\|\\| fail`));
+      expect(step.run, f).toContain(`test -f ${f} || fail`);
     }
     expect(step.run).toMatch(/fail\(\) \{[^}]*exit 1/);
     // It runs before any step that is skipped by file presence.
@@ -80,9 +102,11 @@ describe('govulncheck-nightly.yml', () => {
     expect(idx).toBeLessThan(firstSkippable);
   });
 
-  it('skips the main leg by file presence, never the v2 leg', () => {
+  it('skips by file presence only on the module being scanned, and only after the require step', () => {
     const skippable = job.steps.filter((s) => s.if?.includes('hashFiles'));
     expect(skippable.length).toBeGreaterThanOrEqual(3);
-    for (const s of skippable) expect(s.if).toContain("hashFiles('templates/go/go.mod') != ''");
+    for (const s of skippable) {
+      expect(s.if).toContain("hashFiles(format('{0}/go.mod', matrix.module)) != ''");
+    }
   });
 });
