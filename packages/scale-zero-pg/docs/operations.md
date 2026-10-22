@@ -2381,6 +2381,32 @@ that `compute:55433` is unreachable from a non-gateway pod and **fails** (not wa
 if it is not — so a regression in the policies, or a CNI that only partially enforces,
 is caught instead of passing silently.
 
+## Pod Security: per-app compute pods meet `restricted`
+
+Every container of the per-app compute pods the operator renders (the writer and
+the read-replica pool, init containers included) carries a container
+`securityContext` that satisfies the Kubernetes Pod Security `restricted` level, so
+the pods are admitted in a namespace labelled
+`pod-security.kubernetes.io/enforce=restricted`:
+
+- `allowPrivilegeEscalation: false`
+- `capabilities.drop: [ALL]` (nothing is added back; compute_ctl and Postgres run
+  unprivileged on ports above 1024)
+- `seccompProfile: RuntimeDefault`
+- `runAsNonRoot: true`, with `runAsUser` / `runAsGroup` set to `1000`
+
+The numeric uid matters: the pinned compute image declares its user by name
+(`postgres`) and the init image as `neon`, and the kubelet refuses `runAsNonRoot`
+for a named user it cannot resolve to a number. Both are uid/gid 1000 in the pinned
+digests, which is the identity the pods already ran as, so file ownership and the
+boot sequence are unchanged. **If you bump either image digest, check its
+`/etc/passwd` and update the uid** (`crane export <image> - | tar -xO etc/passwd`).
+`readOnlyRootFilesystem` is not set: Postgres writes under the container filesystem.
+
+The break-glass template (`deploy/compute-app.template.yaml`) carries the same
+fields. The base-tier manifests (`20-compute.yaml`, `25-compute-warm.yaml`,
+`26-compute-ro.yaml`) still set only the pod-level seccomp profile.
+
 ## Tenant isolation controls (issue #112 / #113 / #114)
 
 Because NetworkPolicy is **inert on flannel** (above), the tenant boundary must not

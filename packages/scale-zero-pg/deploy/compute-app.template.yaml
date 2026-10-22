@@ -72,6 +72,16 @@ spec:
       initContainers:
         - name: wait-timeline
           image: docker.io/neondatabase/neon:8464@sha256:7a4f124917bb929964b2d696d710f19584f80bb9bd51b2af4a6e2425434c761f
+          # Pod Security `restricted`. Both images name their USER (neon / postgres,
+          # uid 1000:1000 in these digests), which the kubelet cannot verify as
+          # non-root, so the numeric id is spelled out.
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            seccompProfile: { type: RuntimeDefault }
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
           envFrom:
             - configMapRef: { name: compute-config-__APP__ }
           command: ["/bin/sh", "-c"]
@@ -87,6 +97,13 @@ spec:
         - name: compute
           image: docker.io/neondatabase/compute-node-v17:8464@sha256:13ab146d3e7bbabb25a8532f315ac443e7512351d1ede0bab586def5c70e26c3 # PINNED pair with storage (ops "Upgrades")
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            seccompProfile: { type: RuntimeDefault }
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
           command: ["/bin/sh", "/compute-files/entrypoint.sh"]
           envFrom:
             - configMapRef: { name: compute-config-__APP__ }

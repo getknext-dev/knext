@@ -33,6 +33,38 @@ func DefaultRenderConfig(ns string) RenderConfig {
 	}
 }
 
+// computeImageUID is the numeric uid/gid every container of a rendered compute
+// pod runs as. Measured from /etc/passwd of the pinned digests: the compute image
+// declares USER `postgres` (1000:1000) and the init image USER `neon` (1000:1000).
+// Both are NAMES in the image config, which the kubelet cannot verify as
+// non-root, so runAsNonRoot needs the numeric id spelled out here. It equals the
+// uid the pods already ran as, so nothing about file ownership or the boot
+// changes. Bumping either image digest means re-reading it (crane export + the
+// image's /etc/passwd): a different uid is a silent boot failure otherwise.
+const computeImageUID int64 = 1000
+
+// restrictedContainerSecurityContext is the container securityContext every
+// container of a gateway-rendered compute pod carries, so the pod is admitted in
+// a namespace enforcing the Kubernetes Pod Security `restricted` level:
+// allowPrivilegeEscalation false, capabilities drop ALL (nothing added back -
+// compute_ctl and Postgres run unprivileged on ports above 1024 and need none),
+// seccomp RuntimeDefault, runAsNonRoot with the numeric uid/gid above.
+// readOnlyRootFilesystem is deliberately not set: Postgres and compute_ctl write
+// under the container filesystem (PGDATA, the staged TLS key), and it is not part
+// of the restricted profile.
+func restrictedContainerSecurityContext() *corev1.SecurityContext {
+	no, yes := false, true
+	uid, gid := computeImageUID, computeImageUID
+	return &corev1.SecurityContext{
+		AllowPrivilegeEscalation: &no,
+		Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+		SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+		RunAsNonRoot:             &yes,
+		RunAsUser:                &uid,
+		RunAsGroup:               &gid,
+	}
+}
+
 func labelsFor(app string) map[string]string {
 	return map[string]string{"app": "compute-" + app, "tier": "apps", "plane": "compute"}
 }
@@ -155,16 +187,18 @@ echo "timeline ready"`
 					SecurityContext:               &corev1.PodSecurityContext{SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault}},
 					TerminationGracePeriodSeconds: &grace,
 					InitContainers: []corev1.Container{{
-						Name:    "wait-timeline",
-						Image:   c.InitImage,
-						EnvFrom: []corev1.EnvFromSource{{ConfigMapRef: &corev1.ConfigMapEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "compute-config-" + s.App}}}},
-						Command: []string{"/bin/sh", "-c"},
-						Args:    []string{waitScript},
+						Name:            "wait-timeline",
+						Image:           c.InitImage,
+						SecurityContext: restrictedContainerSecurityContext(),
+						EnvFrom:         []corev1.EnvFromSource{{ConfigMapRef: &corev1.ConfigMapEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "compute-config-" + s.App}}}},
+						Command:         []string{"/bin/sh", "-c"},
+						Args:            []string{waitScript},
 					}},
 					Containers: []corev1.Container{{
 						Name:            "compute",
 						Image:           c.ComputeImage,
 						ImagePullPolicy: corev1.PullIfNotPresent,
+						SecurityContext: restrictedContainerSecurityContext(),
 						Command:         []string{"/bin/sh", "/compute-files/entrypoint.sh"},
 						EnvFrom:         []corev1.EnvFromSource{{ConfigMapRef: &corev1.ConfigMapEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "compute-config-" + s.App}}}},
 						Env: []corev1.EnvVar{{
@@ -330,25 +364,28 @@ echo "resolved tip LSN = ${LSN:-<none>}"`
 					TerminationGracePeriodSeconds: &grace,
 					InitContainers: []corev1.Container{
 						{
-							Name:    "wait-timeline",
-							Image:   c.InitImage,
-							EnvFrom: cmRef,
-							Command: []string{"/bin/sh", "-c"},
-							Args:    []string{waitScript},
+							Name:            "wait-timeline",
+							Image:           c.InitImage,
+							SecurityContext: restrictedContainerSecurityContext(),
+							EnvFrom:         cmRef,
+							Command:         []string{"/bin/sh", "-c"},
+							Args:            []string{waitScript},
 						},
 						{
-							Name:         "resolve-lsn",
-							Image:        c.InitImage,
-							EnvFrom:      cmRef,
-							Command:      []string{"/bin/sh", "-c"},
-							Args:         []string{resolveLSNScript},
-							VolumeMounts: []corev1.VolumeMount{{Name: "ro-lsn", MountPath: "/ro-lsn"}},
+							Name:            "resolve-lsn",
+							Image:           c.InitImage,
+							SecurityContext: restrictedContainerSecurityContext(),
+							EnvFrom:         cmRef,
+							Command:         []string{"/bin/sh", "-c"},
+							Args:            []string{resolveLSNScript},
+							VolumeMounts:    []corev1.VolumeMount{{Name: "ro-lsn", MountPath: "/ro-lsn"}},
 						},
 					},
 					Containers: []corev1.Container{{
 						Name:            "compute",
 						Image:           c.ComputeImage,
 						ImagePullPolicy: corev1.PullIfNotPresent,
+						SecurityContext: restrictedContainerSecurityContext(),
 						Command:         []string{"/bin/sh", "/compute-files/entrypoint-ro.sh"},
 						EnvFrom:         cmRef,
 						// Same security env as the per-app WRITER (RenderDeployment): both are
