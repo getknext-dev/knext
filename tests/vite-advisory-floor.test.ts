@@ -30,6 +30,11 @@ const atLeast = (a: V, b: V) => {
   return true;
 };
 
+/** Fixed lines: 8.2.4+ (8.2.x) and 8.3.3+. NOT 8.3.0-8.3.2, which are vulnerable. */
+const isFixedVite = (v: V) =>
+  v[0] > 8 ||
+  (v[0] === 8 && (v[1] > 3 || atLeast(v, [8, 3, 3]) || (v[1] === 2 && atLeast(v, [8, 2, 4]))));
+
 /** Every resolved `"<name>@x.y.z"` ident in a bun.lock (hoisted + nested). */
 const resolved = (lock: string, name: string): string[] => {
   const re = new RegExp(`"${name}@(\\d+\\.\\d+\\.\\d+)"`, 'g');
@@ -41,13 +46,13 @@ const LOCKS = ['bun.lock', 'examples/bun-exec/bun.lock'];
 describe('GHSA-587h-7wmj-h5pm floor', () => {
   for (const rel of LOCKS) {
     const lock = readFileSync(resolve(repoRoot, rel), 'utf8');
-    it(`${rel}: vite resolves at >= 8.2.4`, () => {
+    it(`${rel}: vite resolves a fixed release (8.2.x >= 8.2.4, or >= 8.3.3)`, () => {
       const found = resolved(lock, 'vite');
       expect(found.length, `${rel} no longer resolves vite — update this guard`).toBeGreaterThan(0);
       for (const v of found) {
         expect(
-          atLeast(parse(v), [8, 2, 4]),
-          `${rel} resolves vite@${v}, below the 8.2.4 fix for GHSA-587h-7wmj-h5pm`,
+          isFixedVite(parse(v)),
+          `${rel} resolves vite@${v}, not a fixed release for GHSA-587h-7wmj-h5pm (fixed: 8.2.4+ on 8.2.x, 8.3.3+ on 8.3+; 8.3.0-8.3.2 are vulnerable)`,
         ).toBe(true);
       }
     });
