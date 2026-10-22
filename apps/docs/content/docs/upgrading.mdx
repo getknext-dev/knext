@@ -185,6 +185,34 @@ behaviour with nothing to change: apps with `spec.storage` configured keep a wri
 `.next/cache`, and single-executable builds (`build: 'vinext'` or `selfContained: true`) keep a
 writable `/tmp`. See [Read-only root filesystem](/docs/security#read-only-root-filesystem).
 
+## Version-specific step: pods now meet Pod Security `restricted`
+
+The operator now renders every app and function container with `runAsNonRoot: true`,
+`allowPrivilegeEscalation: false`, all capabilities dropped and the runtime's default seccomp
+profile, so they are admitted in a namespace that enforces the `restricted` Pod Security level. See
+[Pod Security restricted](/docs/security#pod-security-restricted).
+
+**What an operator upgrade does.** Changing the rendered container changes the Knative Service's
+template, so **every `NextApp` and every `BackendService` rolls exactly one new revision** the first
+time the new operator reconciles it. Apps running with `minScale: 0` start one pod to prove the new
+revision ready, then scale back to zero; apps with a warm floor replace their pods. Nothing else
+about the app changes, and the previous revision keeps serving until the new one is ready, so a
+revision that cannot start never takes traffic. Plan for it as you would for any rollout of every
+app at once (image pulls, one cold start each).
+
+**What can fail, and how to check before upgrading.** The new revision stays unready if the image
+has no `USER` (it would run as root) or names its user (`USER node`) instead of a number. Images
+built by `knext create` and `knext build` already use `USER 65532:65532`. Check your own images:
+
+```bash
+docker image inspect --format '{{.Config.User}}' <your-image>   # want a number such as 65532, not empty or a name
+```
+
+For an image you cannot rebuild yet, set `spec.security.runAsNonRoot: false` on that `NextApp`
+before upgrading (this field needs the new operator, and an older one rejects it with a
+strict-decoding error). Functions have no such opt-out; build them from the Go or Rust template, which
+run as `65532:65532`.
+
 ## Version-specific step: the `kn-next` command is gone
 
 The CLI is run as **`knext`**. The old `kn-next` command name, which 1.x kept as a deprecated alias

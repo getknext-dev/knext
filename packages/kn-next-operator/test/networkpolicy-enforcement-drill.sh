@@ -299,7 +299,7 @@ case "$NODE_ARCH" in
 esac
 FN_BUILD_DIR=$(mktemp -d)
 (cd "$OPERATOR_DIR" && CGO_ENABLED=0 GOOS=linux GOARCH="$GOARCH_NODE" go build -o "$FN_BUILD_DIR/h2cecho" ./test/h2cecho)
-printf 'FROM scratch\nCOPY h2cecho /h2cecho\nENTRYPOINT ["/h2cecho"]\n' > "$FN_BUILD_DIR/Dockerfile"
+printf 'FROM scratch\nCOPY h2cecho /h2cecho\nUSER 65532:65532\nENTRYPOINT ["/h2cecho"]\n' > "$FN_BUILD_DIR/Dockerfile"
 docker build -q -t "$FN_IMAGE" "$FN_BUILD_DIR" >/dev/null
 rm -rf "$FN_BUILD_DIR"
 kind load docker-image "$FN_IMAGE" --name "$CLUSTER"

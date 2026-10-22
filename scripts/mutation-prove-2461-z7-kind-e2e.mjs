@@ -616,6 +616,51 @@ const LANE_ROWS = [
     anchor: '    fail() {\n      printf \'%s\\n\' "$*" >"${watch_failed}"\n      exit 1\n    }\n',
     replacement: '    : # a fail in here ends only this subshell\n',
   },
+  {
+    id: 'PSA1',
+    subject: 'run',
+    claim:
+      'the namespace is never labelled to enforce Pod Security restricted: admission proves nothing',
+    anchor: '  k label namespace "${NS}" pod-security.kubernetes.io/enforce=restricted\n',
+    replacement: '  :\n',
+  },
+  {
+    id: 'PSA2',
+    subject: 'run',
+    claim:
+      'the namespace enforces baseline, not restricted: a pod missing the four fields is admitted',
+    anchor: '  k label namespace "${NS}" pod-security.kubernetes.io/enforce=restricted\n',
+    replacement: '  k label namespace "${NS}" pod-security.kubernetes.io/enforce=baseline\n',
+  },
+  {
+    id: 'PSA3',
+    subject: 'run',
+    claim: "the zone's pod is no longer checked for the restricted fields",
+    anchor: '  assert_restricted_pod "${ZONE}"\n',
+    replacement: '  :\n',
+  },
+  {
+    id: 'PSA4',
+    subject: 'run',
+    claim: "the Go function's pod is no longer checked for the restricted fields",
+    anchor: '  assert_restricted_pod "${GO_FN}"\n',
+    replacement: '  :\n',
+  },
+  {
+    id: 'PSA5',
+    subject: 'run',
+    claim: 'the per-pod assertion stops requiring the seccomp profile',
+    anchor: '        and .securityContext.seccompProfile.type == "RuntimeDefault"\n',
+    replacement: '        and true\n',
+  },
+  {
+    id: 'PSA6',
+    subject: 'run',
+    claim: 'the per-pod assertion no longer requires the namespace label to be present',
+    anchor:
+      '  [ "$(k get namespace "${NS}" -o json | jq -r \'.metadata.labels["pod-security.kubernetes.io/enforce"] // ""\')" = restricted ] \\\n',
+    replacement: '  true \\\n',
+  },
 ];
 
 // Validators for the probe and needle rows (TypeScript).

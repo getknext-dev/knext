@@ -233,6 +233,7 @@ func maximalWarmScheduleSpec() appsv1alpha1.NextAppSpec {
 	readOnlyRootFS := true
 	writableCache := true
 	writeFree := true
+	runAsNonRoot := true
 	return appsv1alpha1.NextAppSpec{
 		Image:            guardFixtureImage,
 		ImagePullSecrets: []corev1.LocalObjectReference{{Name: "ocir-secret"}},
@@ -280,8 +281,11 @@ func maximalWarmScheduleSpec() appsv1alpha1.NextAppSpec {
 		// annotation ever stamped from it stays inside the disposition guard.
 		SelfContained:  true,
 		TimeoutSeconds: 111,
-		Security:       &appsv1alpha1.SecuritySpec{NetworkPolicy: &networkPolicy, ReadOnlyRootFilesystem: &readOnlyRootFS, WritableCache: &writableCache, WriteFree: &writeFree},
-		BuildID:        "build-1",
+		// RunAsNonRoot renders a container securityContext field, outside both
+		// scans in this file; non-zero (true: the default) only to satisfy the
+		// fixture-completeness leaf walk.
+		Security: &appsv1alpha1.SecuritySpec{NetworkPolicy: &networkPolicy, ReadOnlyRootFilesystem: &readOnlyRootFS, WritableCache: &writableCache, WriteFree: &writeFree, RunAsNonRoot: &runAsNonRoot},
+		BuildID:  "build-1",
 		// Networking (#1865) is a ksvc.Labels entry, not an
 		// autoscaling.knative.dev/* annotation or a RevisionSpec field, so it
 		// is outside both scans in this file by construction — it only needs

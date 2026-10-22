@@ -858,6 +858,27 @@ remainder is a **bounded, dated exception** in the shape of ADR-0015 — re-revi
 close, with a hard expiry at **Tier-A exit or v1.0**, whichever comes first. This is recorded as an
 exception, not as compliance with `security.md`'s reverse-proxy requirement.
 
+## 7. Rendered pod hardening (Pod Security `restricted`)
+
+Every container the operator renders for a `NextApp` or a `BackendService` carries
+`allowPrivilegeEscalation: false`, `capabilities.drop: [ALL]`, `seccompProfile: RuntimeDefault` and
+`runAsNonRoot: true` next to the app container's `readOnlyRootFilesystem`. Before this the
+app container set only `readOnlyRootFilesystem`, and the function container lacked `runAsNonRoot`
+and a seccomp profile. The operator's own Deployment already set all four; this closes the gap in
+what it renders for others.
+
+| STRIDE | Threat | Mitigation | Residual / action |
+|---|---|---|---|
+| **E**levation | An RCE in an app (a Next.js server-side CVE is the realistic case) lands in a container that keeps the default capability set (`NET_RAW`, `CHOWN`, `SETUID`, …) and no syscall filter, and is root if the image has no `USER`. | The four settings above. `NET_RAW` spoofing and sniffing, setuid gain and the wider syscall surface are removed. Proved by the Kubernetes Pod Security evaluator run over the rendered pod (`pod_security_restricted_test.go`, mutation-proved by rows H01-H15 of `mutation-prove-2052-backendservice.mjs`) and by a kind lane whose namespace enforces `restricted` (Z7). | A container escape still depends on the kernel and runtime; this narrows the surface, it does not remove it. |
+| **E**levation (availability) | A user image that runs as root, or names its user (`USER node`), is refused by the kubelet under `runAsNonRoot`. | Fails closed: the new revision never becomes ready and the previous one keeps serving. Every shipped Dockerfile names a numeric uid (`tests/dockerfile-numeric-nonroot-user.test.ts`, proved by `mutation-prove-2530-dockerfile-user.mjs`). | **One opt-out, deliberate:** `spec.security.runAsNonRoot: false` omits only that setting, for an image that cannot be rebuilt. A namespace enforcing `restricted` still rejects such a pod. Functions have no opt-out. |
+| **T**amper (platform) | The settings are lost because Knative's webhook rejects them. | Rendered on the container, not the pod: Knative rejects a pod-level security context unless the cluster admin enables a non-default flag (pinned by `TestKnativeRejectsPodLevelSecurityContextByDefault`), and always accepts the container-level fields. The `queue-proxy` sidecar Knative adds already carries all four. | The `queue-proxy` context is Knative's, not ours: a Knative release that weakened it would fail the Z7 kind lane, not a unit test. |
+
+**Rollout cost, stated.** The change alters the Knative Service template, so an operator upgrade rolls
+one new revision of every `NextApp` and `BackendService`. The previous revision serves until the new
+one is ready. This is listed in the upgrade notes (`apps/docs/content/docs/upgrading.mdx`). The operator release
+that carries it should list it among the render changes that re-roll apps, so that a rollout check
+expecting exactly those re-rolls, once each and nothing else, treats it as expected.
+
 ---
 
 ## Out of scope (and why)

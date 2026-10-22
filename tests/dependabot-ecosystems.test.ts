@@ -154,6 +154,22 @@ describe('dependabot.yml: ecosystems', () => {
   });
 });
 
+describe('dependabot.yml: docker base images', () => {
+  const docker = config.updates.filter((u) => u['package-ecosystem'] === 'docker');
+
+  it('covers every directory whose Dockerfile pins golang by digest', () => {
+    const dirs = docker.flatMap(dirsOf);
+    for (const d of [
+      '/packages/scale-zero-pg/gateway',
+      '/packages/kn-next-operator',
+      '/templates/go',
+    ]) {
+      expect(dirs, 'docker directories').toContain(d);
+      expect(existsSync(resolve(REPO_ROOT, `.${d}`, 'Dockerfile')), `${d}/Dockerfile`).toBe(true);
+    }
+  });
+});
+
 describe('dependabot.yml: grouping, cadence and cooldown', () => {
   const ecosystems = config.updates.filter((u) => u['package-ecosystem'] !== 'github-actions');
 

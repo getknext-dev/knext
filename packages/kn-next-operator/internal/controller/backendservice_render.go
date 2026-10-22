@@ -245,10 +245,11 @@ func buildFunctionKsvc(bs *appsv1alpha1.BackendService, retention time.Duration,
 		EnvFrom:      append([]corev1.EnvFromSource(nil), bs.Spec.EnvFrom...),
 		VolumeMounts: mounts,
 		Resources:    resources,
-		SecurityContext: &corev1.SecurityContext{
-			AllowPrivilegeEscalation: ptr.To(false),
-			Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
-		},
+		// Pod Security `restricted`, no opt-out: a function image is built from
+		// the scaffolded templates (distroless nonroot, numeric uid). The root
+		// filesystem setting is left as the image has it (nil): functions have
+		// never had it rendered and this change does not introduce it.
+		SecurityContext: restrictedContainerSecurityContext(nil, true),
 	}}
 	// No traffic split: a function always serves its latest Ready revision, so
 	// the served version is that revision's stamp.

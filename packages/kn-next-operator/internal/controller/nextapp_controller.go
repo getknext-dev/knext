@@ -1366,9 +1366,9 @@ func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc
 			Env:          envVars,
 			EnvFrom:      envFrom,
 			VolumeMounts: volumeMounts,
-			SecurityContext: &corev1.SecurityContext{
-				ReadOnlyRootFilesystem: ptr.To(readOnlyRootFS),
-			},
+			// Pod Security `restricted` by default; only runAsNonRoot has an
+			// opt-out (spec.security.runAsNonRoot). See pod_hardening.go.
+			SecurityContext: restrictedContainerSecurityContext(ptr.To(readOnlyRootFS), nextAppRunAsNonRoot(nextApp.Spec.Security)),
 			Ports: []corev1.ContainerPort{
 				{ContainerPort: 3000},
 			},

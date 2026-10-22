@@ -41,6 +41,15 @@
  *     field, a dishonest class). The CLI's twin of the canonical form is proved by
  *     scripts/mutation-prove-2526-spec-digest-cli.mjs.
  *
+ * - the pod hardening both renderers apply (Pod Security `restricted`, rows H01-H15):
+ *     each of the four profile fields dropped in turn from the shared container
+ *     context, a weakened value (an Unconfined seccomp profile, an added capability),
+ *     each renderer (NextApp, function) no longer calling the shared context, the
+ *     one opt-out (ignored, or inverted so the default is off), a pod-level
+ *     securityContext that Knative's webhook rejects, the CRD dropping the opt-out
+ *     field so a stored value is pruned, and the Pod Security checker itself made
+ *     unable to say no. The Dockerfile half is scripts/mutation-prove-2530-dockerfile-user.mjs.
+ *
  * Besides the rows: a CANARY (the first pin row graded by the same runner before
  * the table; it must go red or the harness cannot see red) and a NEUTRAL control
  * (the same conjunction with its operands swapped; it must stay green, or a
@@ -63,6 +72,9 @@
  * (`make setup-envtest`). Exit 0 = every row went red; 1 = a row survived;
  * 2 = the prover could not run (anchor drift, red baseline, a mutation that does
  * not compile, missing tool). Never parses output.
+ *
+ * KNEXT_PROVER_ROWS=H selects the rows whose id starts with H (comma list of prefixes);
+ * unset, the whole table runs.
  *
  * Usage:
  *   node scripts/mutation-prove-2052-backendservice.mjs
@@ -108,6 +120,11 @@ const NEXTAPP_CRD = resolve(REPO_ROOT, 'packages/kn-next-operator/config/crd/bas
 // biome-ignore format: one-line resolve() for the anchor-drift scan
 const SPECPIN = resolve(REPO_ROOT, 'packages/kn-next-operator/internal/controller/backendservice_spec_pin.go');
 
+// biome-ignore format: one-line resolve() for the anchor-drift scan
+const HARDENING = resolve(REPO_ROOT, 'packages/kn-next-operator/internal/controller/pod_hardening.go');
+// biome-ignore format: one-line resolve() for the anchor-drift scan
+const PSATEST = resolve(REPO_ROOT, 'packages/kn-next-operator/internal/controller/pod_security_restricted_test.go');
+
 const PROVER = {
   subjects: {
     sov: SOV,
@@ -123,6 +140,8 @@ const PROVER = {
     role: ROLE,
     nextappcrd: NEXTAPP_CRD,
     specpin: SPECPIN,
+    hardening: HARDENING,
+    psatest: PSATEST,
   },
 };
 
@@ -135,6 +154,11 @@ const envtest = (focus) => ({
   kind: 'go',
   args: ['-run', 'TestControllers', PKG, `-ginkgo.focus=${focus}`],
 });
+
+/** The pod hardening guards: the evaluator over the render, the opt-out, Knative's webhook. */
+const HARDENING_UNIT = unit(
+  'TestNextAppKsvcMeetsPodSecurityRestricted|TestBackendServiceKsvcMeetsPodSecurityRestricted|TestNextAppRunAsNonRootOptOut|TestNextAppKsvcPassesKnativeAdmissionWithRestrictedContext',
+);
 
 const MUTATIONS = [
   // --- the credential allowlist, one row per Secret source ------------------
@@ -1047,6 +1071,140 @@ const MUTATIONS = [
     replacement: '_ = metrics.Registry',
     test: unit('TestGoldenMatchesTheOperatorsRegisteredMetrics', './internal/metriccontract/'),
   },
+
+  // --- pod hardening: Pod Security restricted on every rendered pod ----------
+  // Graded by the Kubernetes Pod Security evaluator over the rendered pod (plus
+  // the field-by-field assertions), the opt-out cases, Knative's own webhook
+  // validation, and the zero-diff goldens.
+  {
+    id: 'H01',
+    claim: 'the container context stops forbidding privilege escalation',
+    subject: 'hardening',
+    anchor: '\t\tAllowPrivilegeEscalation: ptr.To(false),\n',
+    replacement: '\n',
+    test: HARDENING_UNIT,
+  },
+  {
+    id: 'H02',
+    claim: 'the container context stops dropping every capability',
+    subject: 'hardening',
+    anchor:
+      '\t\tCapabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},\n',
+    replacement: '\n',
+    test: HARDENING_UNIT,
+  },
+  {
+    id: 'H03',
+    claim: 'the container context stops carrying a seccomp profile',
+    subject: 'hardening',
+    anchor:
+      '\t\tSeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},\n',
+    replacement: '\n',
+    test: HARDENING_UNIT,
+  },
+  {
+    id: 'H04',
+    claim: 'runAsNonRoot is never rendered, whatever the opt-out says',
+    subject: 'hardening',
+    anchor: '\t\tsc.RunAsNonRoot = ptr.To(true)\n',
+    replacement: '\t\tsc.RunAsNonRoot = nil\n',
+    test: HARDENING_UNIT,
+  },
+  {
+    id: 'H05',
+    claim: 'the seccomp profile is Unconfined: present, but no filter',
+    subject: 'hardening',
+    anchor: 'Type: corev1.SeccompProfileTypeRuntimeDefault},',
+    replacement: 'Type: corev1.SeccompProfileTypeUnconfined},',
+    test: HARDENING_UNIT,
+  },
+  {
+    id: 'H06',
+    claim: 'a capability is added back after dropping ALL',
+    subject: 'hardening',
+    anchor: 'Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},',
+    replacement:
+      'Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}, Add: []corev1.Capability{"NET_RAW"}},',
+    test: HARDENING_UNIT,
+  },
+  {
+    id: 'H07',
+    claim: "the app's readOnlyRootFilesystem knob is dropped from the shared context",
+    subject: 'hardening',
+    anchor: '\t\tReadOnlyRootFilesystem:   readOnlyRootFS,\n',
+    replacement: '\n',
+    test: HARDENING_UNIT,
+  },
+  {
+    id: 'H08',
+    claim: 'the NextApp renderer goes back to rendering only readOnlyRootFilesystem',
+    subject: 'nextapp',
+    anchor:
+      'SecurityContext: restrictedContainerSecurityContext(ptr.To(readOnlyRootFS), nextAppRunAsNonRoot(nextApp.Spec.Security)),',
+    replacement:
+      'SecurityContext: &corev1.SecurityContext{ReadOnlyRootFilesystem: ptr.To(readOnlyRootFS)},',
+    test: HARDENING_UNIT,
+  },
+  {
+    id: 'H09',
+    claim: 'the function renderer goes back to rendering no runAsNonRoot or seccomp profile',
+    subject: 'render',
+    anchor: 'SecurityContext: restrictedContainerSecurityContext(nil, true),',
+    replacement:
+      'SecurityContext: &corev1.SecurityContext{AllowPrivilegeEscalation: ptr.To(false), Capabilities: &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}}},',
+    test: HARDENING_UNIT,
+  },
+  {
+    id: 'H10',
+    claim: 'the runAsNonRoot opt-out is ignored: an explicit false still renders true',
+    subject: 'hardening',
+    anchor: '\treturn s == nil || s.RunAsNonRoot == nil || *s.RunAsNonRoot\n',
+    replacement: '\treturn true\n',
+    test: HARDENING_UNIT,
+  },
+  {
+    id: 'H11',
+    claim: 'the opt-out default is inverted: an unset field renders NO runAsNonRoot',
+    subject: 'hardening',
+    anchor: '\treturn s == nil || s.RunAsNonRoot == nil || *s.RunAsNonRoot\n',
+    replacement: '\treturn s != nil && s.RunAsNonRoot != nil && *s.RunAsNonRoot\n',
+    test: HARDENING_UNIT,
+  },
+  {
+    id: 'H12',
+    claim: "a pod-level securityContext is rendered, which Knative's webhook rejects by default",
+    subject: 'nextapp',
+    anchor: '\tksvc.Spec.Template.Spec.TimeoutSeconds = &timeoutSeconds\n',
+    replacement:
+      '\tksvc.Spec.Template.Spec.TimeoutSeconds = &timeoutSeconds\n\tksvc.Spec.Template.Spec.SecurityContext = &corev1.PodSecurityContext{RunAsNonRoot: ptr.To(true)}\n',
+    test: HARDENING_UNIT,
+  },
+  {
+    id: 'H13',
+    claim:
+      'the shipped CRD no longer knows spec.security.runAsNonRoot, so a stored opt-out is pruned',
+    subject: 'nextappcrd',
+    anchor: '                  runAsNonRoot:\n',
+    replacement: '                  runAsNonRootRenamed:\n',
+    test: envtest('Pod Security restricted on rendered pods'),
+  },
+  {
+    id: 'H14',
+    claim:
+      'runAsNonRoot is not rendered for any app, and the zero-diff goldens (which record it) go red',
+    subject: 'hardening',
+    anchor: '\tif runAsNonRoot {\n\t\tsc.RunAsNonRoot = ptr.To(true)\n\t}\n',
+    replacement: '\n',
+    test: unit('TestZeroDiffGolden'),
+  },
+  {
+    id: 'H15',
+    claim: 'the Pod Security checker stops reporting violations, so every render passes',
+    subject: 'psatest',
+    anchor: '\t\tif !r.Allowed {\n',
+    replacement: '\t\tif false {\n',
+    test: unit('TestRestrictedCheckerRejectsThePreviousRender'),
+  },
 ];
 
 // A mutation that changes NOTHING about behaviour (the same conjunction, its
@@ -1076,6 +1234,25 @@ if (CALICO_CLUSTER !== '') {
       env: { CLUSTER: CALICO_CLUSTER, REUSE_CLUSTER: '1', LEGS: 'function' },
     },
   });
+}
+
+// The canary is always the first pin row, whatever subset is selected below.
+const CANARY_ROW = MUTATIONS.find((m) => m.id === 'I01');
+
+// Optional: run a subset while iterating on one family of rows, for example
+// KNEXT_PROVER_ROWS=H runs only the pod hardening rows (ids starting with H).
+// A comma list of id prefixes. Unset, the whole table runs, which is what the
+// nightly lane does; the declared count follows the selection so a partial run
+// reports honestly.
+const ROW_FILTER = (process.env.KNEXT_PROVER_ROWS ?? '').split(',').filter(Boolean);
+if (ROW_FILTER.length > 0) {
+  const kept = MUTATIONS.filter((m) => ROW_FILTER.some((p) => m.id.startsWith(p)));
+  if (kept.length === 0) {
+    console.error(`${NAME}: KNEXT_PROVER_ROWS=${ROW_FILTER.join(',')} selects no row`);
+    process.exit(2);
+  }
+  MUTATIONS.length = 0;
+  MUTATIONS.push(...kept);
 }
 
 function envtestAssetsPresent() {
@@ -1186,7 +1363,7 @@ function grade(m) {
 
 // STEP 0: the harness can SEE red. A real mutation of a real subject, graded by
 // the same runner: if it stays green, nothing below means anything.
-const canary = grade({ ...MUTATIONS.find((m) => m.id === 'I01'), id: 'canary' });
+const canary = grade({ ...CANARY_ROW, id: 'canary' });
 if (canary === 0) {
   console.error(
     `${NAME}: the canary mutation left the guard GREEN; the harness cannot observe red`,
