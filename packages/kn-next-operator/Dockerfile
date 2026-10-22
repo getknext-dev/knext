@@ -19,7 +19,7 @@
 # together when bumping. Resolve with:
 #   docker buildx imagetools inspect golang:1.26.9
 # Enforced by scripts/check-base-images-pinned.sh (CI: base-image-pin-guard).
-FROM golang:1.26.9@sha256:37cfcca63222ec499bec5e8ad7aad52dbf7529db36d5812b8eae2f0621aa92d6 AS builder
+FROM golang:1.27.2@sha256:820153096fda4de6ac1b7194d12e416b7dd8f4e9a33d17e0345b111b945162d8 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 
