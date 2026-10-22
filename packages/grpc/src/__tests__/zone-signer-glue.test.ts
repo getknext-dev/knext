@@ -15,7 +15,7 @@
 
 import { afterAll, afterEach, beforeAll, describe, expect, it, mock } from 'bun:test';
 import { createHash, generateKeyPairSync, type KeyObject, verify } from 'node:crypto';
-import { mkdirSync, readdirSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { dirname, join } from 'node:path';
@@ -26,7 +26,7 @@ import { CatalogService } from '../../fixtures/zone/src/generated/grpc/orders/v1
 import { OrdersService } from '../../fixtures/zone/src/generated/grpc/orders/v1/orders_pb';
 import { generateFiles } from '../generate';
 import * as runtime from '../runtime';
-import { emptyDir, FIXTURE_ZONE, PKG_DIR, removeScratchDirs } from './helpers';
+import { emptyDir, FIXTURE_ZONE, linkWorkspaceRuntime, removeScratchDirs } from './helpers';
 
 const ISSUER = 'knext:zone:shop/storefront';
 const AUDIENCE = 'knext:fn:shop/orders';
@@ -40,30 +40,6 @@ interface Key {
   readonly pem: string;
   readonly publicKey: KeyObject;
   readonly kid: string;
-}
-
-function linkWorkspaceRuntime(dir: string): void {
-  const modules = join(dir, 'node_modules');
-  mkdirSync(modules, { recursive: true });
-  const deps = join(PKG_DIR, 'node_modules');
-  for (const entry of readdirSync(deps)) {
-    if (entry === '.bin' || entry === '@getknext') continue;
-    symlinkSync(join(deps, entry), join(modules, entry));
-  }
-  const stub = join(modules, '@getknext', 'grpc');
-  mkdirSync(stub, { recursive: true });
-  writeFileSync(
-    join(stub, 'package.json'),
-    JSON.stringify({
-      name: '@getknext/grpc',
-      type: 'module',
-      exports: { './runtime': './runtime.ts' },
-    }),
-  );
-  writeFileSync(
-    join(stub, 'runtime.ts'),
-    `export * from ${JSON.stringify(join(PKG_DIR, 'src', 'runtime'))};\n`,
-  );
 }
 
 function newKey(): Key {
@@ -192,11 +168,11 @@ beforeAll(async () => {
 }
 `,
   );
-  // The generated glue imports `@getknext/grpc/runtime`. A scratch dir outside
-  // the repo has no workspace link, and whether a bare `mock.module` alone
-  // rescues an unresolvable specifier depends on the platform's resolver, so make
-  // it RESOLVE for real: a real node_modules whose entries link the package's own
-  // dependencies, plus a `@getknext/grpc` stub that exports the source runtime.
+  // The glue imports `@getknext/grpc/runtime`. `mock.module` alone is not enough
+  // from a scratch dir outside the repo: Bun keys the mock under the bare name
+  // only while `packages/grpc/dist` is absent; once any earlier test has built
+  // dist it keys the mock to the dist path and the bare import misses it. Link
+  // the workspace runtime so the import resolves for real either way.
   linkWorkspaceRuntime(dir);
   const out = join(dir, 'src', 'generated', 'grpc', 'orders', 'v1');
   server_ = await import(join(out, 'orders_knext_server.ts'));
