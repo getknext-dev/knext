@@ -1,6 +1,6 @@
 //! A zone identity token is a JWS in compact form, header
 //! `{"alg":"EdDSA","typ":"JWT","kid":"<kid>"}` and claims `iss`, `aud`,
-//! `method`, `sub`, `iat` and `exp`. It is parsed here by hand and strictly:
+//! `method`, `sub`, `jti`, `iat` and `exp`. It is parsed here by hand and strictly:
 //! the algorithm is fixed (never taken from the header), base64url must be
 //! canonical and unpadded, JSON must be one object with no duplicate member
 //! names, and every claim is required with its exact type. The signature is
@@ -15,6 +15,7 @@ use ed25519_dalek::{Signature, VerifyingKey};
 use serde::de::{Deserializer, Error as _, MapAccess, Visitor};
 use serde_json::Value;
 
+use super::replay::{MAX_JTI_CHARS, MIN_JTI_CHARS, valid_jti};
 use super::{AuthError, CLOCK_SKEW_SECS, MAX_TOKEN_LIFETIME_SECS};
 use crate::proto::knext::v1::Auth;
 
@@ -25,6 +26,7 @@ pub(super) struct Claims {
     pub aud: String,
     pub method: String,
     pub sub: String,
+    pub jti: String,
     pub iat: i64,
     pub exp: i64,
 }
@@ -72,11 +74,26 @@ pub(super) fn verify(
         .map_err(|_| AuthError::BadSignature)?;
 
     let payload = object(&payload_json)?;
+    let iss = payload.string("iss")?.to_owned();
+    let aud = payload.string("aud")?.to_owned();
+    let method = payload.string("method")?.to_owned();
+    let sub = payload.string("sub")?.to_owned();
+    // A token with no jti cannot be remembered, so it could be replayed.
+    if payload.get("jti").is_none() {
+        return Err(AuthError::MissingJti);
+    }
+    let jti = payload.string("jti")?.to_owned();
+    if !valid_jti(&jti) {
+        return Err(malformed(format!(
+            "jti is not {MIN_JTI_CHARS}-{MAX_JTI_CHARS} base64url characters"
+        )));
+    }
     Ok(Claims {
-        iss: payload.string("iss")?.to_owned(),
-        aud: payload.string("aud")?.to_owned(),
-        method: payload.string("method")?.to_owned(),
-        sub: payload.string("sub")?.to_owned(),
+        iss,
+        aud,
+        method,
+        sub,
+        jti,
         iat: payload.integer("iat")?,
         exp: payload.integer("exp")?,
     })

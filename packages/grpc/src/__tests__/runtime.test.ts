@@ -4,6 +4,7 @@ import type { AddressInfo } from 'node:net';
 import { Code, ConnectError, createRouterTransport, type ServiceImpl } from '@connectrpc/connect';
 import { connectNodeAdapter } from '@connectrpc/connect-node';
 import { OrdersService } from '../../fixtures/zone/src/generated/grpc/orders/v1/orders_pb';
+import { wasNotSent } from '../glue';
 import { defineFunctionClient, type RuntimeDeps } from '../runtime';
 
 /** The generated definition for the fixture, as protoc-gen-knext writes it. */
@@ -81,6 +82,81 @@ describe('generated client runtime — retry policy', () => {
     const res = await client.getOrder({ id: 'o-1' });
     expect(res.id).toBe('o-1');
     expect(seen.calls.getOrder).toBe(3);
+  });
+
+  // A function refuses a token it has already seen, so a retry must not re-send
+  // the token of the attempt that reached the function.
+  it('a read asks its token source again on every attempt, so no token is sent twice', async () => {
+    const { deps, seen } = fakeFunction(2);
+    const client = defineFunctionClient(DEFINITION, deps);
+    let minted = 0;
+    const res = await client.getOrder({ id: 'o-1' }, { token: async () => `tok-${++minted}` });
+    expect(res.id).toBe('o-1');
+    expect(minted).toBe(3);
+    expect(seen.headers.map((h) => h.get('authorization'))).toEqual([
+      'Bearer tok-1',
+      'Bearer tok-2',
+      'Bearer tok-3',
+    ]);
+  });
+
+  it('a fixed token string is still sent as given', async () => {
+    const { deps, seen } = fakeFunction(1);
+    const client = defineFunctionClient(DEFINITION, deps);
+    await client.getOrder({ id: 'o-1' }, { token: 'fixed' });
+    expect(seen.headers.map((h) => h.get('authorization'))).toEqual([
+      'Bearer fixed',
+      'Bearer fixed',
+    ]);
+  });
+
+  it('a token source that fails before the first attempt sends nothing and is marked not sent', async () => {
+    const { deps, seen } = fakeFunction(0);
+    const client = defineFunctionClient(DEFINITION, deps);
+    const err = await client
+      .getOrder(
+        { id: 'o-1' },
+        {
+          token: () => {
+            throw new ConnectError('no key', Code.FailedPrecondition);
+          },
+        },
+      )
+      .then(
+        () => undefined,
+        (e: unknown) => e,
+      );
+    expect(err).toMatchObject({ code: Code.FailedPrecondition });
+    expect(wasNotSent(err)).toBe(true);
+    expect(seen.calls.getOrder).toBeUndefined();
+  });
+
+  it('a stream is never retried, so it takes its token as a string, not a source', () => {
+    const { deps } = fakeFunction(0);
+    const client = defineFunctionClient(DEFINITION, deps);
+    expect(() => client.watchOrders({}, { token: async () => 'tok' })).toThrow(
+      'a stream takes its identity token as a string',
+    );
+  });
+
+  it('a stream with a string token sends it', async () => {
+    const { deps, seen } = fakeFunction(0);
+    const client = defineFunctionClient(DEFINITION, deps);
+    for await (const _ of client.watchOrders({}, { token: 'stream-tok' })) {
+      // drain
+    }
+    expect(seen.headers.map((h) => h.get('authorization'))).toEqual(['Bearer stream-tok']);
+  });
+
+  it('a token source returning an unusable token is refused before anything is sent', async () => {
+    const { deps, seen } = fakeFunction(0);
+    const client = defineFunctionClient(DEFINITION, deps);
+    await expect(
+      client.getOrder({ id: 'o-1' }, { token: () => 'has a space' }),
+    ).rejects.toMatchObject({
+      code: Code.Unauthenticated,
+    });
+    expect(seen.calls.getOrder).toBeUndefined();
   });
 
   it('gives up on a read after maxAttempts', async () => {

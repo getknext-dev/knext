@@ -303,6 +303,9 @@ function mintExpr(ctx: FileCtx, p: PlannedMethod, subject: string): string {
   );
 }
 
+// A query's token is a source, not a string: the client retries a read, and a
+// function refuses a token it has already accepted, so it asks for a new token
+// on every attempt.
 function emitQuery(ctx: FileCtx, p: PlannedMethod): void {
   const { method } = p;
   const name = method.localName;
@@ -341,7 +344,7 @@ function emitQuery(ctx: FileCtx, p: PlannedMethod): void {
     `  ${cacheTag}(${JSON.stringify(serviceTag(ctx.fn, method))});`,
     '  // protoVersion is part of the cache key only: a function rollout is a new entry.',
     '  void protoVersion;',
-    `  const token = ${mintExpr(ctx, p, 'subject')};`,
+    `  const token = async () => ${mintExpr(ctx, p, 'subject')};`,
     `  return ${client}.${name}(${decode}(${input}, request), { token });`,
     '}',
     '',

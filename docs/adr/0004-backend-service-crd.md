@@ -183,9 +183,10 @@ and flannel (OKE, OrbStack) does not enforce NetworkPolicy at all.
    key.
 10. **Verification** checks signature, `kid`, `exp`, `aud` = this function, `iss` = the owning zone,
     and `method` = the RPC being called. Verifiers accept the **current and previous** key. **Only
-    the health RPC is exempt.** A user id in a request body is never trusted. There is **no `jti`
-    cache** (it would be pod-local under scale-out), so a token can be replayed inside its 60 s
-    life; that window is documented to users rather than hidden.
+    the health RPC is exempt.** A user id in a request body is never trusted. *(Amended: every
+    token now carries a random `jti` and a function keeps a bounded per-pod set of accepted
+    `(iss, jti)` pairs, refusing a second use. It stays per pod, so a token can still be replayed once
+    to another replica or after a restart; see `docs/security/threat-model.md` G1.)*
 11. **Rotation order (load-bearing):** (1) publish the new public key to the JWKS; (2) **wait at
     least the ConfigMap volume propagation time** (the kubelet's ConfigMap refresh, worst case about 90 s; the operator flag
     `--zone-signing-key-propagation-bound` defaults to **120 s** with a **90 s minimum**, and the

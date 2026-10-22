@@ -22,12 +22,14 @@
 
 mod jwks;
 mod policy;
+mod replay;
 mod token;
 
 use std::fmt;
 use std::future::{Ready, ready};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::task::{Context, Poll};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -37,6 +39,7 @@ use http::{HeaderMap, Request, Response};
 
 pub use jwks::jwks_mounted;
 pub use policy::contract_auth;
+pub use replay::{DEFAULT_SEEN_CAPACITY, MAX_JTI_CHARS, MIN_JTI_CHARS};
 
 use crate::proto::knext::v1::Auth;
 
@@ -88,6 +91,14 @@ pub enum AuthError {
     WrongAudience,
     WrongMethod,
     MissingSubject,
+    /// The token has no `jti`, so it could not be remembered and could be
+    /// replayed.
+    MissingJti,
+    /// This token was already accepted by this pod.
+    Replayed,
+    /// The replay set is at its cap: a new token is refused rather than a seen
+    /// one forgotten.
+    SeenSetFull,
     /// Another verifier refused the token.
     Rejected(String),
 }
@@ -113,6 +124,9 @@ impl fmt::Display for AuthError {
             Self::WrongAudience => f.write_str("auth: token audience is not this function"),
             Self::WrongMethod => f.write_str("auth: token method is not the RPC called"),
             Self::MissingSubject => f.write_str("auth: token names no user for a user RPC"),
+            Self::MissingJti => f.write_str("auth: token has no jti"),
+            Self::Replayed => f.write_str("auth: token already used"),
+            Self::SeenSetFull => f.write_str("auth: the replay set is full"),
             Self::Rejected(why) => write!(f, "auth: token rejected: {why}"),
         }
     }
@@ -163,6 +177,9 @@ pub struct TokenConfig {
     /// Each RPC's auth option: the contract table, [`contract_auth`].
     pub method_auth: MethodAuth,
     pub clock: Clock,
+    /// How many accepted tokens the verifier remembers to refuse a replay;
+    /// zero is [`DEFAULT_SEEN_CAPACITY`]. At the cap new tokens are refused.
+    pub seen_capacity: usize,
 }
 
 impl TokenConfig {
@@ -178,6 +195,7 @@ impl TokenConfig {
             audience: audience.into(),
             method_auth: Arc::new(contract_auth),
             clock: Arc::new(SystemTime::now),
+            seen_capacity: 0,
         }
     }
 }
@@ -187,13 +205,48 @@ impl TokenConfig {
 /// [`JWKS_REREAD_INTERVAL`], without a restart.
 pub fn token_verifier(cfg: TokenConfig) -> TokenVerifier {
     let jwks = jwks::JwksFile::new(cfg.jwks_path.clone(), Arc::clone(&cfg.clock));
-    TokenVerifier { cfg, jwks }
+    let seen = replay::SeenSet::new(cfg.seen_capacity);
+    let issuer = Arc::from(cfg.issuer.as_str());
+    TokenVerifier {
+        cfg,
+        jwks,
+        seen,
+        issuer,
+        full_logged_at: AtomicI64::new(i64::MIN),
+    }
 }
+
+/// How often, in seconds, a full replay set is reported: a pod at its cap
+/// refuses every new token, and one line a call would bury the log.
+const FULL_WARNING_EVERY_SECS: i64 = 10;
 
 /// See [`token_verifier`].
 pub struct TokenVerifier {
     cfg: TokenConfig,
     jwks: jwks::JwksFile,
+    /// Every token accepted and not yet expired, to refuse a second use.
+    seen: replay::SeenSet,
+    /// The configured issuer, shared by every entry of `seen`.
+    issuer: Arc<str>,
+    /// When the "replay set is full" warning last went out (Unix seconds).
+    full_logged_at: AtomicI64,
+}
+
+impl TokenVerifier {
+    pub(super) fn warn_full(&self, now: i64) {
+        let last = self.full_logged_at.load(Ordering::Relaxed);
+        if (last == i64::MIN || now.saturating_sub(last) >= FULL_WARNING_EVERY_SECS)
+            && self
+                .full_logged_at
+                .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
+            tracing::warn!(
+                capacity = self.seen.capacity(),
+                "the token replay set is full: new tokens are refused until entries expire"
+            );
+        }
+    }
 }
 
 impl Verifier for TokenVerifier {
@@ -209,6 +262,19 @@ impl Verifier for TokenVerifier {
         let claims = token::verify(token, &keys)?;
         let now = unix_seconds((self.cfg.clock)());
         claims.check(now, &self.cfg.issuer, &self.cfg.audience, procedure, mode)?;
+        // Last, so only a token that passed every check is remembered: a
+        // refused token burns nothing.
+        if let Err(err) = self.seen.admit(
+            &self.issuer,
+            &claims.jti,
+            claims.exp.saturating_add(CLOCK_SKEW_SECS),
+            now,
+        ) {
+            if err == AuthError::SeenSetFull {
+                self.warn_full(now);
+            }
+            return Err(err);
+        }
         Ok(Caller {
             subject: claims.sub,
             zone: claims.iss,
@@ -297,6 +363,11 @@ where
                 // The cause is logged, never sent: the caller learns only that
                 // the token was refused.
                 tracing::debug!(procedure, error = %err, "token rejected");
+                if err == AuthError::SeenSetFull {
+                    // Nothing is wrong with the caller or its token: this pod has
+                    // no room to remember another one. Say so, so a client backs off.
+                    return Either::Right(ready(Ok(exhausted(req.headers()))));
+                }
                 return Either::Right(ready(Ok(refusal(req.headers(), "token rejected"))));
             }
         };
@@ -313,12 +384,21 @@ fn refusal(headers: &HeaderMap, message: &str) -> Response<ConnectRpcBody> {
     ConnectError::unauthenticated(message).into_http_response(headers)
 }
 
+/// `resource_exhausted` in the caller's protocol: HTTP 429 on Connect,
+/// `grpc-status` 8 on gRPC and gRPC-Web. The replay set is full.
+fn exhausted(headers: &HeaderMap) -> Response<ConnectRpcBody> {
+    ConnectError::resource_exhausted("the function is at its token limit; retry")
+        .into_http_response(headers)
+}
+
 /// The token of an `Authorization: Bearer <token>` value.
 pub fn bearer_token(header: &str) -> Option<&str> {
     let token = header.strip_prefix("Bearer ")?.trim();
     (!token.is_empty()).then_some(token)
 }
 
+#[cfg(test)]
+mod replay_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(all(test, feature = "shared-vectors"))]

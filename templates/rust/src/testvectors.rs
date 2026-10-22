@@ -22,10 +22,60 @@ pub const ENV_PATH: &str = "KNEXT_Z7_VECTORS";
 
 #[derive(Deserialize)]
 pub struct Vectors {
+    pub contract: Contract,
     pub verifier: Expected,
     pub reasons: Vec<String>,
     pub jwks: HashMap<String, serde_json::Value>,
     pub cases: Vec<Case>,
+    /// Several tokens presented, in order, to ONE verifier: the replay rules.
+    pub sequences: Vec<Sequence>,
+}
+
+#[derive(Deserialize)]
+pub struct Contract {
+    #[serde(rename = "clockSkewSeconds")]
+    pub clock_skew_seconds: i64,
+    #[serde(rename = "defaultSeenCapacity")]
+    pub default_seen_capacity: usize,
+    #[serde(rename = "fullSetWireCode")]
+    pub full_set_wire_code: String,
+    #[serde(rename = "jtiChars")]
+    pub jti_chars: JtiChars,
+}
+
+#[derive(Deserialize)]
+pub struct JtiChars {
+    pub min: usize,
+    pub max: usize,
+}
+
+/// A run of tokens presented to one verifier, each at its own clock reading.
+/// `capacity` is the verifier's replay-set size (`None`: its default).
+#[derive(Deserialize, Clone)]
+pub struct Sequence {
+    pub name: String,
+    pub jwks: String,
+    pub procedure: String,
+    pub auth: String,
+    pub capacity: Option<usize>,
+    pub steps: Vec<Step>,
+}
+
+#[derive(Deserialize, Clone)]
+pub struct Step {
+    pub now: i64,
+    pub jws: Vec<String>,
+    pub expect: String,
+    #[serde(default)]
+    pub sub: String,
+    #[serde(default)]
+    pub reason: String,
+}
+
+impl Step {
+    pub fn token(&self) -> String {
+        self.jws.join(".")
+    }
 }
 
 #[derive(Deserialize)]
@@ -127,6 +177,11 @@ impl TestClock {
 
     pub fn advance(&self, by: Duration) {
         *self.0.lock().unwrap() += by;
+    }
+
+    /// Moves the clock to an absolute reading, in Unix seconds.
+    pub fn set(&self, unix: i64) {
+        *self.0.lock().unwrap() = UNIX_EPOCH + Duration::from_secs(u64::try_from(unix).unwrap());
     }
 
     pub fn clock(&self) -> Clock {

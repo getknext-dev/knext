@@ -141,9 +141,30 @@ set, its tokens are refused. A token signed by a key the function has not receiv
 too, which is why a rotation publishes the new key, waits for it to reach every function, and only
 then signs with it.
 
-A token can be replayed within its 60-second life: there is no per-token replay cache, since it
-could only be per pod. Make writes idempotent; the zone sends an `idempotency-key` header with
-each one for that reason.
+A token can be used once. Each one the zone signs carries a random id, and the function remembers
+the ids it has accepted until the token expires and refuses a second use, so a copy of a token taken
+off the network is refused by the function that already served the original. Two limits remain:
+
+- The memory is per pod. A copy can still be replayed once to a different replica of the same
+  function, or after the pod restarts or scales to zero, for as long as the token lives (about a
+  minute). Make writes idempotent; the zone sends an `idempotency-key` header with each one for that
+  reason.
+- The token does not cover the request body. A copy that reaches the function before the original is
+  served with whatever body its sender chose.
+
+The memory is bounded: it holds 65,536 tokens by default, which is about 1,000 verified calls a second
+on one pod, and about 10 MiB when full. A pod that is busier than that refuses new tokens, and logs a
+warning, rather than forgetting one it has seen. `seen_capacity` in the scaffolded `main` raises the
+limit.
+
+When a pod is over that ceiling it refuses the new token with `ResourceExhausted` (HTTP 429 on Connect),
+not `unauthenticated`: the caller did nothing wrong and may retry, and a replay of a token already seen
+is still `unauthenticated`. Those refusals are answered at once, so they do not add the in-flight
+concurrency Knative scales on: the autoscaler gets no signal from them and does not add pods by itself.
+If one function must serve more than about 1,000 verified calls a second per pod, raise the capacity or
+split the load across functions.
+
+A token with no id is refused, so upgrade the zone before its functions (the reverse of the usual order).
 
 ## Generated code and the contract
 
@@ -180,7 +201,7 @@ pipeline. The Rust release in `rust-toolchain.toml` and the `rust` builder image
 ## Limits
 
 - **Beta.** Zone functions are not covered by knext's compatibility credential.
-- A zone identity token can be replayed within its 60-second life (see [Key rotation](#key-rotation)).
+- A zone identity token is single-use on the pod that accepted it, but can be replayed once to another replica or after a restart (see [Key rotation](#key-rotation)).
 - A compressed request must use gzip.
 - The template's example store is in memory: per pod, and lost when the function scales to zero.
   Keep real data in your zone's own database, through the `DATABASE_URL` the zone binds; a

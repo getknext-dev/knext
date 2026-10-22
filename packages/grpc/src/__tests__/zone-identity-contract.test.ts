@@ -11,7 +11,8 @@
  *    verifier defaults (Go and Rust) are held to the same fixture here.
  * 2. The shared token vectors (`packages/grpc/testdata/z7-token-vectors.json`),
  *    which the Go and Rust verifiers run: given each accept case's seed key,
- *    clock and claims, the signer mints exactly that token, byte for byte.
+ *    clock and claims, the signer mints exactly that token, byte for byte
+ *    except the `jti`, which is random on every mint and so cannot be fixed.
  *
  * Both files are read, never skipped: a missing file is a failure.
  */
@@ -226,12 +227,12 @@ describe('the shared token vectors', () => {
       });
       expect({ name: c.name, claims: Object.keys(json(p)) }).toEqual({
         name: c.name,
-        claims: ['iss', 'aud', 'method', 'sub', 'iat', 'exp'],
+        claims: ['iss', 'aud', 'method', 'sub', 'jti', 'iat', 'exp'],
       });
     }
   });
 
-  it('the signer, given each accept case’s seed key, clock and claims, mints it byte for byte', async () => {
+  it('the signer, given each accept case’s seed key, clock and claims, mints that token but for its own random jti', async () => {
     const byKid = new Map(Object.values(vectors.keys).map((k) => [k.kid, k]));
     const fn = /^knext:fn:([^/]+)\/([^/]+)$/.exec(vectors.verifier.audience);
     if (!fn) throw new Error('the vectors name no function audience');
@@ -258,10 +259,33 @@ describe('the shared token vectors', () => {
         auth: c.auth === 'AUTH_PUBLIC' ? 'public' : 'user',
         sub: c.sub,
       });
-      expect({ name: c.name, token }).toEqual({
+      // The jti is random on every mint: swap in the case's jti, and the
+      // payload must be the case's payload byte for byte. The signature covers
+      // the minted jti, so it is checked against the key, not compared.
+      const [mh, mp, ms] = token.split('.') as [string, string, string];
+      const minted = json(mp);
+      expect({ name: c.name, jti: minted.jti }).toEqual({
         name: c.name,
-        token: (c.jws as [string, string, string]).join('.'),
+        jti: expect.stringMatching(/^[A-Za-z0-9_-]{22,64}$/),
       });
+      expect(minted.jti).not.toBe(json(p).jti);
+      const swapped = Buffer.from(JSON.stringify({ ...minted, jti: json(p).jti })).toString(
+        'base64url',
+      );
+      expect({ name: c.name, header: mh, payload: swapped }).toEqual({
+        name: c.name,
+        header: h,
+        payload: p,
+      });
+      const spki = Buffer.concat([
+        Buffer.from('302a300506032b6570032100', 'hex'),
+        Buffer.from(key.x, 'base64url'),
+      ]);
+      const publicKey = createPublicKey({ key: spki, format: 'der', type: 'spki' });
+      expect({
+        name: c.name,
+        signed: verify(null, Buffer.from(`${mh}.${mp}`), publicKey, Buffer.from(ms, 'base64url')),
+      }).toEqual({ name: c.name, signed: true });
       reproduced++;
     }
     expect(reproduced).toBe(accepts.length);

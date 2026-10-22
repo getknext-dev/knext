@@ -264,6 +264,24 @@ expect() {
   ok "${desc} (status=${status}${code:+ code=${code}})"
 }
 
+# expect_replay <description> <probe args...>: the SAME token is sent twice; the
+# first call is accepted and the second is refused as unauthenticated. A token is
+# single-use, so a copy of it captured on the pod network is refused by the pod
+# that already accepted it (a different replica, or a restarted pod, would not
+# have seen it: the threat model records that).
+expect_replay() {
+  local desc=$1 out first second
+  shift
+  out="$(probe "$@" --twice)" || fail "${desc}: the function did not answer"
+  first="$(sed -n 1p <<<"${out}")"
+  second="$(sed -n 2p <<<"${out}")"
+  [ "$(jq -r .status <<<"${first}")" = 200 ] \
+    || fail "${desc}: the first use was not accepted (${first})"
+  [ "$(jq -r .status <<<"${second}")" = 401 ] && [ "$(jq -r '.code // ""' <<<"${second}")" = unauthenticated ] \
+    || fail "${desc}: the same token sent a second time was not refused as unauthenticated (${second})"
+  ok "${desc} (first status=200, second status=401 code=unauthenticated)"
+}
+
 zone_call() { # <path?query>: sets ZC_STATUS / ZC_BODY from the zone, through the cluster-local gateway
   local out attempt
   for attempt in 1 2 3; do
@@ -561,6 +579,8 @@ refusal_matrix() {
   # below repeats this call with ONE property changed.
   expect "${label}: control, a token from the zone's real key is accepted" 200 "" \
     "${common[@]}" --rpc put --id "ok-${label}" --value "v-${label}" --auth signer --key-dir "${keydir}"
+  expect_replay "${label}: the same token sent twice, the second use is refused" \
+    "${common[@]}" --rpc put --id "replay-${label}" --value "r-${label}" --auth signer --key-dir "${keydir}"
   expect "${label}: the write is visible to a second authorised call" 200 "" \
     "${common[@]}" --rpc get --id "ok-${label}" --auth signer --key-dir "${keydir}"
   expect "${label}: the health check is served with no token" 200 "" "${common[@]}" --rpc health --auth none
