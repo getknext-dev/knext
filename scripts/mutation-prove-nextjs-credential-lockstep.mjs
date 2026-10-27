@@ -58,6 +58,9 @@ const PROOF = {
     manifest: '.github/compat-credentialed-next-version.json',
     scaffoldPkg: 'packages/kn-next/templates/app/package.json.hbs',
     ledger: 'scripts/compat-vinext-ledger.mjs',
+    fixtureDrain: 'packages/kn-next/src/__tests__/fixtures/standalone-drain-app/package.json',
+    fixturePages: 'packages/kn-next/src/__tests__/fixtures/standalone-pages-app/package.json',
+    fixtureVinextNode: 'packages/kn-next/src/__tests__/fixtures/vinext-node-app/package.json',
   },
 };
 
@@ -118,13 +121,29 @@ const MUTATIONS = [
     replacement: 'The credential window now runs against Next.js v16.3.3.',
   },
   {
+    // #2594: the docs legitimately claim a "newer Next.js release" today (the
+    // scaffold is on 16.4.3, the credential on v16.3.8), so a docs-only edit
+    // can no longer reach the no-divergence branch. Instead CLOSE the
+    // divergence everywhere the lockstep compares the shipped pin (manifest,
+    // scaffold, the three docker-e2e fixtures) and leave the docs' claim in
+    // place: the only assertion that can go red is the stale "newer" claim.
     label:
-      'compat-matrix.mdx: falsely claim a "newer Next.js release" while the manifest shows NO divergence (credentialedNextRef already equals shippedNextPin)',
-    subject: 'docsMatrixMdx',
-    anchor:
-      'anything a self-hosted deploy can or should reproduce; those are documented and excluded the same\nway the architectural gaps below are, with their own evidence trail.\n</Callout>',
-    replacement:
-      'anything a self-hosted deploy can or should reproduce; those are documented and excluded the same\nway the architectural gaps below are, with their own evidence trail.\n\nNew apps pin a newer Next.js release than what is credentialed above.\n</Callout>',
+      'compat-matrix.mdx: keep claiming a "newer Next.js release" after the divergence closes (shippedNextPin back to the credentialed v16.3.8 everywhere)',
+    edits: [
+      {
+        subject: 'manifest',
+        anchor: '"shippedNextPin": "16.4.3",',
+        replacement: '"shippedNextPin": "16.3.8",',
+      },
+      { subject: 'scaffoldPkg', anchor: '"next": "16.4.3",', replacement: '"next": "16.3.8",' },
+      { subject: 'fixtureDrain', anchor: '"next": "16.4.3",', replacement: '"next": "16.3.8",' },
+      { subject: 'fixturePages', anchor: '"next": "16.4.3",', replacement: '"next": "16.3.8",' },
+      {
+        subject: 'fixtureVinextNode',
+        anchor: '"next": "16.4.3",',
+        replacement: '"next": "16.3.8",',
+      },
+    ],
   },
   {
     label:
