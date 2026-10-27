@@ -357,7 +357,11 @@ to replace it, and a ServiceAccount with the operator's name in another namespac
   copy in `canonical.go` / `write-policy.ts` that `TestCanonicalPolicyCELEqualsTheShippedPolicy` and
   its TS twin fail on if `config/admission` changes without it; `message` and `reason` are cosmetic
   and not compared; an operator newer than the installed policy reports `PolicyModified` until the
-  bundle is reapplied); and the binding exists, names the policy, includes `Deny` and is not scoped.
+  bundle is reapplied); the policy declares no `paramKind` and the binding sets no `paramRef`
+  (closing-review finding: a `paramKind` plus a `paramRef` that finds nothing, with
+  `parameterNotFoundAction: Allow`, makes the apiserver run no validation while everything else
+  checks out; the shipped bundle sets neither, so either is `PolicyModified` / `BindingScoped`); and
+  the binding exists, names the policy, includes `Deny` and is not scoped.
   Unreadable or unknown is 0, never 1. The `== 0` alert is blind if the series is missing, so
   `KnextOperatorWritePolicyUnreported` fires on a discovered operator target (`up`) with no gauge. It logs one warning per change and **does not
   refuse to start** (that is a founder decision, not made here). The alert

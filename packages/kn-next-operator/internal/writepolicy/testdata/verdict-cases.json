@@ -738,6 +738,75 @@
       ],
       "enforced": false,
       "reason": "PolicyModified"
+    },
+    {
+      "name": "the policy declares paramKind (a binding paramRef that finds nothing then runs no validation)",
+      "ops": [
+        {
+          "op": "set",
+          "target": "policy",
+          "path": "spec.paramKind",
+          "value": { "apiVersion": "v1", "kind": "ConfigMap" }
+        }
+      ],
+      "enforced": false,
+      "reason": "PolicyModified"
+    },
+    {
+      "name": "the binding sets paramRef to a parameter that does not exist, with parameterNotFoundAction Allow",
+      "ops": [
+        {
+          "op": "set",
+          "target": "binding",
+          "path": "spec.paramRef",
+          "value": {
+            "name": "does-not-exist",
+            "namespace": "default",
+            "parameterNotFoundAction": "Allow"
+          }
+        }
+      ],
+      "enforced": false,
+      "reason": "BindingScoped"
+    },
+    {
+      "name": "the binding sets a paramRef selector that matches nothing",
+      "ops": [
+        {
+          "op": "set",
+          "target": "binding",
+          "path": "spec.paramRef",
+          "value": {
+            "selector": { "matchLabels": { "nothing": "matches" } },
+            "parameterNotFoundAction": "Allow"
+          }
+        }
+      ],
+      "enforced": false,
+      "reason": "BindingScoped"
+    },
+    {
+      "name": "paramKind on the policy and a paramRef on the binding together",
+      "ops": [
+        {
+          "op": "set",
+          "target": "policy",
+          "path": "spec.paramKind",
+          "value": { "apiVersion": "v1", "kind": "ConfigMap" }
+        },
+        {
+          "op": "set",
+          "target": "binding",
+          "path": "spec.paramRef",
+          "value": {
+            "name": "does-not-exist",
+            "namespace": "default",
+            "parameterNotFoundAction": "Allow"
+          }
+        }
+      ],
+      "enforced": false,
+      "reason": "PolicyModified"
     }
   ]
 }

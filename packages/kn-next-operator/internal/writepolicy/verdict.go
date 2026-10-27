@@ -223,6 +223,13 @@ func Evaluate(policy *admissionregistrationv1.ValidatingAdmissionPolicy, binding
 		return no(ReasonIdentityMismatch, "the policy %q confines %q but the operator runs as %q: it matches nobody the operator is "+
 			"(installed under another namespace or service-account name than the bundle rendered?)", policy.Name, confined, operatorUsername)
 	}
+	// The shipped policy takes no parameters. A paramKind lets a binding's paramRef
+	// resolve to nothing, and the apiserver then runs no validation at all
+	// (with parameterNotFoundAction Allow), however right everything else is.
+	if policy.Spec.ParamKind != nil {
+		return no(ReasonPolicyModified, "the policy %q declares paramKind, which the shipped policy does not: a binding paramRef that "+
+			"finds no parameter makes the apiserver skip every validation", policy.Name)
+	}
 	if !reflect.DeepEqual(policyCEL(policy), canonicalCEL()) {
 		return no(ReasonPolicyModified, "the policy %q does not carry the variables and validations this operator ships, so what it admits is not what "+
 			"the bundle intended (its validation CEL, an allow-list variable or a messageExpression was changed, added or removed)", policy.Name)
@@ -237,6 +244,12 @@ func Evaluate(policy *admissionregistrationv1.ValidatingAdmissionPolicy, binding
 	if !deny {
 		return no(ReasonBindingNotDeny, "the binding %q does not include the Deny action (actions %v): a violation is warned about or audited, never refused",
 			binding.Name, binding.Spec.ValidationActions)
+	}
+	// Likewise the shipped binding sets no paramRef: one that resolves to no
+	// parameter (a missing name, a selector matching nothing) runs no validation.
+	if binding.Spec.ParamRef != nil {
+		return no(ReasonBindingScoped, "the binding %q sets paramRef, which the shipped binding does not: a parameter that cannot be found "+
+			"makes the apiserver skip every validation", binding.Name)
 	}
 	if mr := binding.Spec.MatchResources; mr != nil &&
 		(selectorNarrows(mr.NamespaceSelector) || selectorNarrows(mr.ObjectSelector) ||

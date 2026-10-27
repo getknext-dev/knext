@@ -135,6 +135,7 @@ interface PolicyJson {
             objectSelector?: Selector;
         };
         matchConditions?: { name?: string; expression?: string }[];
+        paramKind?: { apiVersion?: string; kind?: string } | null;
         variables?: { name?: string; expression?: string }[];
         validations?: { expression?: string; messageExpression?: string }[];
     };
@@ -144,6 +145,7 @@ interface BindingJson {
     metadata?: { name?: string };
     spec?: {
         policyName?: string;
+        paramRef?: Record<string, unknown> | null;
         validationActions?: string[];
         matchResources?: {
             namespaceSelector?: Selector;
@@ -296,6 +298,15 @@ export function evaluateWritePolicy(
             `the policy ${name} confines ${confined} but the operator runs as ${operatorUsername}: it matches nobody the operator is (installed under another namespace or ServiceAccount name than the bundle rendered?)`,
         );
     }
+    // The shipped policy takes no parameters. A paramKind lets a binding's
+    // paramRef resolve to nothing, and the apiserver then runs no validation at
+    // all (with parameterNotFoundAction Allow), however right everything else is.
+    if (policy.spec?.paramKind != null) {
+        return no(
+            "PolicyModified",
+            `the policy ${name} declares paramKind, which the shipped policy does not: a binding paramRef that finds no parameter makes the apiserver skip every validation`,
+        );
+    }
     if (!sameCEL(policy)) {
         return no(
             "PolicyModified",
@@ -312,6 +323,14 @@ export function evaluateWritePolicy(
         return no(
             "BindingNotDeny",
             `the binding does not include the Deny action (actions ${JSON.stringify(binding.spec?.validationActions ?? [])}): a violation is warned about or audited, never refused`,
+        );
+    }
+    // Likewise the shipped binding sets no paramRef: one that resolves to no
+    // parameter (a missing name, a selector matching nothing) runs no validation.
+    if (binding.spec?.paramRef != null) {
+        return no(
+            "BindingScoped",
+            `the binding sets paramRef, which the shipped binding does not: a parameter that cannot be found makes the apiserver skip every validation`,
         );
     }
     const mr = binding.spec?.matchResources;

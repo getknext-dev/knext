@@ -506,6 +506,8 @@ The gauge reads `0` for any of these:
   version does not count, a namespace or object selector narrows it, and any `excludeResourceRules`
   entry is treated as removing something;
 - the policy has a condition the check cannot read as an exact user;
+- the policy declares parameters (`paramKind`) or its binding sets a `paramRef`. The shipped policy
+  takes none, and a parameter that cannot be found makes the API server skip every validation;
 - the policy's validations are not the ones this release ships. The check compares the policy's
   variables (the allow-lists and the Secret type) and each validation's expression and
   `messageExpression` with the shipped copy, so a validation replaced by `true` is caught. The
