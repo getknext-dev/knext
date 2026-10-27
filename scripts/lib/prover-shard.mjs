@@ -150,7 +150,8 @@ const byPath = (a, b) => (a.relPath < b.relPath ? -1 : a.relPath > b.relPath ? 1
  * Longest-processing-time-first assignment: heaviest prover first, each to the
  * currently lightest leg (ties to the lowest index). Pure and deterministic, a
  * function of the SET and the weights, never of readdir order, so every leg
- * computes the same partition independently and the aggregate can recompute it.
+ * computes the same partition independently. The aggregate does NOT recompute it (a
+ * leg uses its own ref's weight table; see `aggregateReports`).
  *
  * @param {Array<{ relPath: string }>} provers
  * @param {number} count
@@ -248,9 +249,10 @@ export function buildMatrix({ refs, shards, onlyShard }) {
 }
 
 /**
- * The report a leg writes. `assigned` is DERIVED from `discovered` by the same
- * function the aggregate re-runs, so a leg cannot claim a different slice than
- * the one it was entitled to.
+ * The report a leg writes. `assigned` is DERIVED from `discovered` by this ref's
+ * own partition function and recorded, because the aggregate (which runs from
+ * another ref's checkout and weight table) verifies the REPORTED slices instead of
+ * recomputing them.
  *
  * @param {{ ref: string, sha: string, shard: number, shards: number, discovered: string[],
  *           results: Array<{relPath: string, summary?: {declared:number, run:number}|null, findings: string[]}> }} r
@@ -305,6 +307,17 @@ export function aggregateReports({ expected, reports }) {
   const findings = [];
   const partialRefs = [];
   const unionVerified = [];
+  // A finding about the PARTITION of a ref (missing leg, wrong sha, bad or duplicated
+  // assignment, disagreeing discovery, a prover in no/two legs) means the ref is not
+  // "union verified". A prover's OWN red (its mutation counts, a missing result row)
+  // is a lane failure but says nothing about whether the shards tile the set.
+  const flagged = new Set();
+  const integrity = (ref) => ({
+    push: (msg) => {
+      findings.push(msg);
+      flagged.add(ref);
+    },
+  });
   if (!Array.isArray(expected) || expected.length === 0) {
     return {
       findings: [
@@ -324,36 +337,45 @@ export function aggregateReports({ expected, reports }) {
     list.push({ leg, report });
     byRef.set(leg.ref, list);
     if (!report || typeof report !== 'object') {
-      findings.push(
+      integrity(leg.ref).push(
         `${label}: no report — the leg was cancelled, crashed, or its artifact is missing`,
       );
       return;
     }
     if (report.sha !== leg.sha) {
-      findings.push(`${label}: report is for sha ${report.sha}, the plan pinned ${leg.sha}`);
+      integrity(leg.ref).push(
+        `${label}: report is for sha ${report.sha}, the plan pinned ${leg.sha}`,
+      );
     }
     if (report.shard !== leg.shard || report.shards !== leg.shards) {
-      findings.push(`${label}: report claims shard ${report.shard}/${report.shards}`);
+      integrity(leg.ref).push(`${label}: report claims shard ${report.shard}/${report.shards}`);
     }
     if (!Array.isArray(report.discovered) || report.discovered.length === 0) {
-      findings.push(`${label}: discovered zero provers — a vacuous green`);
+      integrity(leg.ref).push(`${label}: discovered zero provers — a vacuous green`);
       return;
     }
     if (!Array.isArray(report.assigned)) {
-      findings.push(
+      integrity(leg.ref).push(
         `${label}: the report has no assigned list — what this leg proved is unknowable`,
       );
       return;
     }
     const entitled = report.assigned;
+    if (entitled.length === 0 && leg.shards <= report.discovered.length) {
+      integrity(leg.ref).push(
+        `${label}: empty assigned list although ${report.discovered.length} provers were discovered for ${leg.shards} shards — this leg proved nothing`,
+      );
+    }
     const discoveredSet = new Set(report.discovered);
     for (const relPath of new Set(entitled)) {
       if (!discoveredSet.has(relPath)) {
-        findings.push(`${label}: ${relPath} is assigned to this leg but not in its discovered set`);
+        integrity(leg.ref).push(
+          `${label}: ${relPath} is assigned to this leg but not in its discovered set`,
+        );
       }
     }
     if (new Set(entitled).size !== entitled.length) {
-      findings.push(`${label}: the assigned list names a prover more than once`);
+      integrity(leg.ref).push(`${label}: the assigned list names a prover more than once`);
     }
     const results = new Map((report.results ?? []).map((r) => [r.relPath, r]));
     for (const relPath of entitled) {
@@ -388,8 +410,25 @@ export function aggregateReports({ expected, reports }) {
     const first = present[0].report.discovered;
     for (const { leg, report } of present) {
       if (!sameSet(first, report.discovered)) {
-        findings.push(
+        integrity(ref).push(
           `${ref} ${leg.shard}/${leg.shards}: discovered a different prover set than shard ${present[0].leg.shard} — the legs did not prove one tree`,
+        );
+      }
+    }
+    // Pairwise disjoint over the legs that reported — also in a PARTIAL dispatch,
+    // where two present legs can still claim the same prover.
+    const owners = new Map();
+    for (const { leg, report } of present) {
+      for (const relPath of new Set(report.assigned ?? [])) {
+        const o = owners.get(relPath) ?? [];
+        o.push(`${leg.shard}/${leg.shards}`);
+        owners.set(relPath, o);
+      }
+    }
+    for (const [relPath, o] of [...owners].sort()) {
+      if (o.length > 1) {
+        integrity(ref).push(
+          `${ref}: ${relPath} is assigned to more than one leg (${o.join(', ')}) — it would be proved twice`,
         );
       }
     }
@@ -400,35 +439,17 @@ export function aggregateReports({ expected, reports }) {
       continue;
     }
     if (present.length !== legs.length) continue;
-    // Pairwise disjoint: which legs claim each prover.
-    const owners = new Map();
-    for (const { leg, report } of present) {
-      for (const relPath of new Set(report.assigned ?? [])) {
-        const o = owners.get(relPath) ?? [];
-        o.push(`${leg.shard}/${leg.shards}`);
-        owners.set(relPath, o);
-      }
-    }
-    let ok = true;
-    for (const [relPath, o] of [...owners].sort()) {
-      if (o.length > 1) {
-        ok = false;
-        findings.push(
-          `${ref}: ${relPath} is assigned to more than one leg (${o.join(', ')}) — it would be proved twice`,
-        );
-      }
-    }
     // The union is the discovered set: nothing dropped from every leg.
     const missing = first.filter((relPath) => !owners.has(relPath)).sort();
     if (missing.length > 0) {
-      ok = false;
-      findings.push(
+      integrity(ref).push(
         `${ref}: the shards' union is not the discovered set — ${missing.length} prover(s) are in no shard: ${missing.join(', ')}`,
       );
     }
-    if (ok) unionVerified.push(ref);
+    unionVerified.push(ref);
   }
-  return { findings, partialRefs, unionVerified };
+  const clean = unionVerified.filter((ref) => !flagged.has(ref));
+  return { findings, partialRefs, unionVerified: clean };
 }
 
 /** The per-prover bound, in ms. Overridable so the guard can use a short one. */

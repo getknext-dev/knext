@@ -431,6 +431,50 @@ describe('#2499 aggregateReports — declared == run, and a missing prover FAILS
     expect(aggregateReports({ expected, reports }).findings.join('\n')).toMatch(/no assigned list/);
   });
 
+  it('#2592 r2: a PARTIAL dispatch still catches a prover claimed by two present legs', () => {
+    const expected = legsFor(3).slice(0, 2);
+    const [a, b, c] = discovered;
+    const reports = [reportWith(expected[0], [a, b]), reportWith(expected[1], [b, c])];
+    const out = aggregateReports({ expected, reports });
+    expect(out.partialRefs).toEqual(['integration/v2']);
+    expect(out.findings.join('\n')).toMatch(/more than one leg/);
+    expect(out.findings.join('\n')).toContain(b);
+    expect(out.unionVerified).toEqual([]);
+  });
+
+  it('#2592 r2: an empty assigned list is a finding when there are at least as many provers as shards', () => {
+    const expected = legsFor(3);
+    const reports = expected.map((leg) =>
+      reportWith(leg, leg.shard === 1 ? discovered : leg.shard === 2 ? [] : []),
+    );
+    // Shard 1 claims everything while 2 and 3 claim nothing: disjoint, union complete.
+    const out = aggregateReports({ expected, reports });
+    expect(out.findings.join('\n')).toMatch(/empty assigned list/);
+    expect(out.unionVerified).toEqual([]);
+  });
+
+  it('#2592 r2: a finding of any kind about a ref keeps it out of unionVerified', () => {
+    // A prover named twice inside ONE leg's assigned list.
+    const dupExpected = legsFor(2);
+    const dupReports = dupExpected.map((leg) =>
+      reportWith(leg, otherTable(discovered, leg.shard, leg.shards)),
+    );
+    dupReports[0].assigned.push(dupReports[0].assigned[0]);
+    const dup = aggregateReports({ expected: dupExpected, reports: dupReports });
+    expect(dup.findings.join('\n')).toMatch(/more than once/);
+    expect(dup.unionVerified).toEqual([]);
+
+    // Legs that discovered different sets.
+    const diffExpected = legsFor(2);
+    const diffReports = diffExpected.map((leg) =>
+      reportWith(leg, otherTable(discovered, leg.shard, leg.shards)),
+    );
+    diffReports[1].discovered = diffReports[1].discovered.slice(0, -1);
+    const diff = aggregateReports({ expected: diffExpected, reports: diffReports });
+    expect(diff.findings.join('\n')).toMatch(/discovered a different prover set/);
+    expect(diff.unionVerified).toEqual([]);
+  });
+
   it('the final UNION check catches a partition that is wrong the same way everywhere', () => {
     // The per-leg recomputation cannot see this: runner and aggregate would agree
     // on the same lossy function. Only comparing the union with the discovered set

@@ -290,7 +290,7 @@ const MUTATIONS = [
     subject: 'lib',
     claim: 'a leg with no report is not a finding',
     anchor:
-      '      findings.push(\n        `${label}: no report — the leg was cancelled, crashed, or its artifact is missing`,\n      );',
+      '      integrity(leg.ref).push(\n        `${label}: no report — the leg was cancelled, crashed, or its artifact is missing`,\n      );',
     replacement: '      void label;',
   },
   {
@@ -386,6 +386,29 @@ const MUTATIONS = [
     claim: 'a leg assigned a prover outside its discovered set is not a finding',
     anchor: '      if (!discoveredSet.has(relPath)) {',
     replacement: '      if (false) {',
+  },
+  {
+    id: 'L16',
+    subject: 'lib',
+    claim:
+      'a prover claimed by two PRESENT legs of a PARTIAL dispatch is not a finding (disjointness only on full runs)',
+    anchor: '      if (o.length > 1) {',
+    replacement:
+      '      if (o.length > 1 && present.length === legs.length && new Set(legs.map((l) => l.leg.shard)).size === legs[0].leg.shards) {',
+  },
+  {
+    id: 'L17',
+    subject: 'lib',
+    claim: 'a leg with an empty assigned list passes although there are provers for every shard',
+    anchor: '    if (entitled.length === 0 && leg.shards <= report.discovered.length) {',
+    replacement: '    if (false) {',
+  },
+  {
+    id: 'L18',
+    subject: 'lib',
+    claim: 'a ref with a partition finding is still listed as union-verified',
+    anchor: '  const clean = unionVerified.filter((ref) => !flagged.has(ref));',
+    replacement: '  const clean = unionVerified;',
   },
   // ── the runner ────────────────────────────────────────────────────────────
   {
@@ -525,8 +548,8 @@ const MUTATIONS = [
     id: 'U01',
     subject: 'lib',
     claim: 'the aggregate never records that a ref’s union was verified (nothing to print)',
-    anchor: '    if (ok) unionVerified.push(ref);',
-    replacement: '    void ok;',
+    anchor: '    unionVerified.push(ref);',
+    replacement: '    void ref;',
   },
   {
     id: 'Q01',
