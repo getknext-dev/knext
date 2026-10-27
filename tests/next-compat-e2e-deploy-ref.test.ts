@@ -65,9 +65,17 @@ describe("the compat harness tests this line's own Next floor (#2296)", () => {
     expect(envFallbackRef(`# ${line}`)).toBeUndefined();
   });
 
-  it('next-compat.ts declares a parseable floor, and it is the credential pin', () => {
+  it("next-compat.ts declares a parseable floor, and the first matrix leg is on the floor's minor", () => {
     expect(floor, `cannot read a floor from NEXT_PEER_RANGE ${NEXT_PEER_RANGE}`).toBeDefined();
-    expect(NEXT_MATRIX_VERSIONS[0]).toBe(floor as string);
+    // #2594: the floor (16.4.0) is still the credential pin the harness tests,
+    // but it carries critical advisories fixed in 16.4.1, so the cache-handler
+    // spec leg (= the kn-next devDependency, next-minor-matrix.test.ts) runs the
+    // patched release users get. Same minor as the floor, never below it; the
+    // floor <-> NEXTJS_REF <-> manifest ties are the three tests below.
+    const [fMaj, fMin, fPatch] = (floor as string).split('.').map(Number);
+    const [lMaj, lMin, lPatch] = NEXT_MATRIX_VERSIONS[0].split('.').map(Number);
+    expect(`${lMaj}.${lMin}`).toBe(`${fMaj}.${fMin}`);
+    expect(lPatch).toBeGreaterThanOrEqual(fPatch);
   });
 
   it("test-e2e-deploy.yml's NEXTJS_REF env fallback is the next-compat.ts floor", () => {
