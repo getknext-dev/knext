@@ -493,6 +493,14 @@ never touch the cluster, so they still run even when nothing above is reachable:
   already include them. Both name the fix: install the version knext expects and run
   `knext vinext-patches`. Apps without vinext get no row, and `KNEXT_VINEXT_PATCHES=0` reports
   `SKIP`.
+- **Next.js minor** — whether the Next.js your app resolves is on a minor the official
+  compatibility suite has credentialed. A supported but uncredentialed minor is a `WARN`, never a
+  failure.
+- **Next.js security advisories** — whether that Next.js is affected by a published critical or
+  high advisory that has a fix. An affected version is a `FAIL` that names each advisory by its
+  GHSA id and the version to upgrade to (for example, anything up to 16.4.0 must move to 16.4.1 or
+  later — see [Next.js security upgrades](/docs/upgrading#nextjs-security-upgrades)). Apps with no
+  resolvable Next.js get no row.
 
 ```bash
 knext doctor                                        # human-readable checklist

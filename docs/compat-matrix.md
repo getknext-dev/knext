@@ -5,8 +5,12 @@
 > ✅ ("supported") row cannot be backed up. When in doubt we mark ⚠️, not ✅.
 >
 > **The compat credential window now runs against `vercel/next.js` **v16.3.8**** (rc.2's
-> re-credential, #1560, 2026-09-30) — the same tag `knext create` scaffolds today, closing the
-> deliberate v16.2.x/16.3.x divergence rc.1 opened. `NEXTJS_REF` in `test-e2e-deploy.yml` moved to
+> re-credential, #1560, 2026-09-30). **Divergence since #2594 (2026-10-27):** `knext create` now
+> scaffolds next 16.4.3 (the 16.4.x line), ahead of the credential, because GHSA-2464-fhr4-w9xw /
+> GHSA-673q-mjm6-r5xr (critical, unauthenticated RCE) and GHSA-p3m5-59mp-jv5r (high, DoS) affect
+> every 16.x through 16.4.0 and have no 16.3.x fix. Moving `NEXTJS_REF` restarts the credential
+> windows and is a separate decision recorded on #2594. The history below is the v16.3.8
+> re-credential, which closed the deliberate v16.2.x/16.3.x divergence rc.1 opened. `NEXTJS_REF` in `test-e2e-deploy.yml` moved to
 > this ref in the same PR that re-audited the pre-existing quarantine ledger against it with real
 > dispatch evidence: all four cells (node/bun x turbopack/webpack), 16/16 shards each attempted
 > (runs 36638853381 / 36638856495 / 36638859599 / 36638862596). The two **bun** cells and the

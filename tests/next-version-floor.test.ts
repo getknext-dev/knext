@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'bun:test';
+import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { nextAdvisoriesFor } from '../packages/kn-next/src/next-advisories';
 import { workspaceGlobs } from '../scripts/lib/workspace-globs.mjs';
 import { REPO_ROOT, WORKSPACE_DIRS, workspaceManifests } from './helpers/workspace-manifests';
 
@@ -11,6 +13,15 @@ import { REPO_ROOT, WORKSPACE_DIRS, workspaceManifests } from './helpers/workspa
  * CVE-2026-64642 (GHSA-6gpp-xcg3-4w24), CVE-2026-64645 (GHSA-p9j2-gv94-2wf4) and
  * CVE-2026-64649 (GHSA-89xv-2m56-2m9x) — plus 5 MODERATE, all fixed in 16.2.11.
  * Remediation discipline for this repo is BUMP, never suppress (#155/#199/#319/#320/#465).
+ *
+ * #2594 raised the floor to 16.4.1: GHSA-2464-fhr4-w9xw (critical, RCE in the
+ * Image Optimization API with SVG), GHSA-673q-mjm6-r5xr (critical, RCE in
+ * `'use cache'` functions returning typed arrays) and GHSA-p3m5-59mp-jv5r (high,
+ * Server Actions DoS) affect every 16.x through 16.4.0; no 16.3.x patch exists.
+ * The same PR added the REPO-WIDE scan at the bottom of this file: the workspace
+ * scan above never saw the scaffold templates, the standalone e2e fixtures with
+ * their own `bun.lock`, or the demo apps outside the workspace globs, and those
+ * are exactly what users get and what knext deploys.
  *
  * This guard locks the floor so a later `pnpm update`, a new app, or a copy-pasted
  * pin cannot silently walk the tree back under a fixed version. It SCANS the
@@ -40,7 +51,7 @@ import { REPO_ROOT, WORKSPACE_DIRS, workspaceManifests } from './helpers/workspa
  * than from this constant for exactly that reason: a tree sitting at the floor
  * while the workspace has moved on satisfies this and is still drift.
  */
-const FLOOR: [number, number, number] = [16, 2, 11];
+const FLOOR: [number, number, number] = [16, 4, 1];
 
 type Version = [number, number, number];
 
@@ -58,7 +69,7 @@ function gte(a: Version, b: Version): boolean {
   return true;
 }
 
-describe('#579 — the workspace `next` floor is 16.2.11', () => {
+describe('#579/#2594 — the workspace `next` floor is 16.4.1', () => {
   it('scans the same workspace globs the repo declares', () => {
     // Read through the shared helper, not by re-parsing the declaration here.
     // Three guards make this same "hardcoded list still matches the workspace"
@@ -85,11 +96,11 @@ describe('#579 — the workspace `next` floor is 16.2.11', () => {
         return range ? [{ path, field, range }] : [];
       }),
     ),
-  )('$path ($field) pins next >= 16.2.11 — got $range', ({ range }) => {
+  )('$path ($field) pins next >= 16.4.1 — got $range', ({ range }) => {
     expect(gte(floorOf(range), FLOOR)).toBe(true);
   });
 
-  it('resolves no next below 16.2.11 anywhere in the lockfile', () => {
+  it('resolves no next below 16.4.1 anywhere in the root lockfile', () => {
     // `bun.lock` since the repo left pnpm. The scan is unchanged because both
     // formats spell a resolved dependency the same way — `name@x.y.z` — so this
     // guard's subject (no `next` below the floor resolves ANYWHERE) survives the
@@ -98,5 +109,101 @@ describe('#579 — the workspace `next` floor is 16.2.11', () => {
     const resolved = [...new Set([...lock.matchAll(/\bnext@(\d+\.\d+\.\d+)\b/g)].map((m) => m[1]))];
     expect(resolved.length).toBeGreaterThan(0);
     expect(resolved.filter((v) => !gte(floorOf(v), FLOOR))).toEqual([]);
+  });
+});
+
+/**
+ * Every tracked manifest and lockfile outside the workspace globs, too (#2594).
+ *
+ * DISCOVERED from `git ls-files`, never enumerated: the scaffold templates
+ * (`package.json.hbs`, `package.json.vinext.hbs`), the e2e fixtures that carry
+ * their own `bun.lock`, the examples and the demo apps. The verdict comes from
+ * `next-advisories.ts` — the same table `knext doctor` FAILs on — so a 15.x
+ * demo pinned to the 15.x backport passes and a 16.3.x pin does not.
+ *
+ * HARNESS_PINS is the only way out, and each entry says why. These are
+ * test-harness pins that reproduce a bug or freeze evidence at one exact
+ * version; they are never built into anything a user runs or knext deploys.
+ */
+const HARNESS_PINS: Record<string, string> = {
+  'test/bun-sandbox-fetch-ab/fixture/package.json':
+    'A/B reproduction of a Bun sandbox-fetch bug, pinned to the exact Next.js it was measured on; run only by its own manual workflow, never deployed.',
+  'docs/wayfinder/spike-vinext-image-intercept/fixture-app/package.json':
+    'Frozen evidence for a finished spike under docs/; never installed or deployed by any workflow.',
+};
+
+function trackedFiles(): string[] {
+  return execFileSync('git', ['ls-files'], {
+    cwd: REPO_ROOT,
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
+  })
+    .split('\n')
+    .filter(Boolean);
+}
+
+/** Exact `next` pins in a manifest: every dependency field, `X.Y.Z`-anchored. */
+function manifestNextPins(text: string): string[] {
+  const pkg = JSON.parse(text) as Record<string, Record<string, string> | undefined>;
+  return (['dependencies', 'devDependencies', 'optionalDependencies'] as const)
+    .map((field) => pkg[field]?.next)
+    .filter((r): r is string => typeof r === 'string' && /\d+\.\d+\.\d+/.test(r))
+    .map((r) => (r.match(/(\d+\.\d+\.\d+)/) as RegExpMatchArray)[1]);
+}
+
+describe('#2594 — no tracked manifest or lockfile pins a next with a known advisory', () => {
+  const files = trackedFiles();
+  const manifests = files.filter((f) => /(^|\/)package\.json(\.[a-z]+)*(\.hbs)?$/.test(f));
+  const lockfiles = files.filter((f) => /(^|\/)bun\.lock$/.test(f));
+
+  it('the harness exclusions still exist and each carries a reason', () => {
+    for (const [path, reason] of Object.entries(HARNESS_PINS)) {
+      expect(files, `${path} is no longer tracked; drop it from HARNESS_PINS`).toContain(path);
+      expect(reason.length).toBeGreaterThan(20);
+    }
+  });
+
+  it('the scan reaches the scaffold templates and the fixture lockfiles', () => {
+    // An over-narrowed filter would pass vacuously; pin the floor of what it must see.
+    for (const known of [
+      'packages/kn-next/templates/app/package.json.hbs',
+      'packages/kn-next/templates/app/package.json.vinext.hbs',
+      'turbo/generators/templates/zone/package.json.hbs',
+      'apps/file-manager/package.json',
+    ]) {
+      expect(manifests).toContain(known);
+    }
+    expect(lockfiles).toContain('bun.lock');
+    expect(lockfiles.length).toBeGreaterThan(1);
+  });
+
+  it('every pinned manifest is clear of the advisories knext doctor fails on', () => {
+    const bad: string[] = [];
+    let checked = 0;
+    for (const path of manifests) {
+      if (path in HARNESS_PINS) continue;
+      for (const v of manifestNextPins(readFileSync(resolve(REPO_ROOT, path), 'utf8'))) {
+        checked++;
+        const hits = nextAdvisoriesFor(v).map((h) => h.id);
+        if (hits.length) bad.push(`${path}: next ${v} (${hits.join(', ')})`);
+      }
+    }
+    expect(checked).toBeGreaterThan(5);
+    expect(bad).toEqual([]);
+  });
+
+  it('every tracked bun.lock resolves only advisory-free next versions', () => {
+    const bad: string[] = [];
+    let resolvedAny = 0;
+    for (const path of lockfiles) {
+      const lock = readFileSync(resolve(REPO_ROOT, path), 'utf8');
+      for (const v of new Set([...lock.matchAll(/"next@(\d+\.\d+\.\d+)"/g)].map((m) => m[1]))) {
+        resolvedAny++;
+        const hits = nextAdvisoriesFor(v).map((h) => h.id);
+        if (hits.length) bad.push(`${path}: next@${v} (${hits.join(', ')})`);
+      }
+    }
+    expect(resolvedAny).toBeGreaterThan(1);
+    expect(bad).toEqual([]);
   });
 });

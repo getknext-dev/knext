@@ -47,9 +47,17 @@ describe('next-minor matrix (#2286)', () => {
     });
   });
 
-  it('the credential pin is a leg, and equals the kn-next next devDependency', () => {
+  it('the credential pin and the kn-next next devDependency are both legs', () => {
+    // #2594: these were one version until the October advisories forced the
+    // shipped/dev pin onto 16.4.x while the credential stayed on 16.3.8. The
+    // credential pin is still the FIRST leg; the devDependency is whichever leg
+    // carries its minor.
     const pkg = JSON.parse(readFileSync(resolve(ROOT, 'packages/kn-next/package.json'), 'utf8'));
-    expect(NEXT_MATRIX_VERSIONS[0]).toBe(pkg.devDependencies.next);
+    expect(NEXT_MATRIX_VERSIONS).toContain(pkg.devDependencies.next);
+    const credential = JSON.parse(
+      readFileSync(resolve(ROOT, '.github/compat-credentialed-next-version.json'), 'utf8'),
+    ) as { credentialedNextRef: string };
+    expect(NEXT_MATRIX_VERSIONS[0]).toBe(credential.credentialedNextRef.replace(/^v/, ''));
     for (const minor of CREDENTIALED_NEXT_MINORS) {
       expect(NEXT_MATRIX_VERSIONS.some((v) => v.startsWith(`${minor}.`))).toBe(true);
     }

@@ -165,17 +165,17 @@ const MUTATIONS = [
   // ── must carry a reason ──────────────────────────────────────────────────
   {
     label:
-      'scaffold pin + manifest bumped TOGETHER to 16.4.0: the docs still cite 16.3.x -> the DERIVED check must catch it',
+      'scaffold pin + manifest bumped TOGETHER to 16.5.0: the docs still cite 16.4.x -> the DERIVED check must catch it',
     edits: [
       {
         subject: 'scaffoldPkg',
-        anchor: '"next": "16.3.8",',
-        replacement: '"next": "16.4.0",',
+        anchor: '"next": "16.4.3",',
+        replacement: '"next": "16.5.0",',
       },
       {
         subject: 'manifest',
-        anchor: '"shippedNextPin": "16.3.8",',
-        replacement: '"shippedNextPin": "16.4.0",',
+        anchor: '"shippedNextPin": "16.4.3",',
+        replacement: '"shippedNextPin": "16.5.0",',
       },
     ],
   },
