@@ -26,7 +26,7 @@ import { CatalogService } from '../../fixtures/zone/src/generated/grpc/orders/v1
 import { OrdersService } from '../../fixtures/zone/src/generated/grpc/orders/v1/orders_pb';
 import { generateFiles } from '../generate';
 import * as runtime from '../runtime';
-import { emptyDir, FIXTURE_ZONE, PKG_DIR, removeScratchDirs } from './helpers';
+import { emptyDir, FIXTURE_ZONE, linkWorkspaceRuntime, removeScratchDirs } from './helpers';
 
 const ISSUER = 'knext:zone:shop/storefront';
 const AUDIENCE = 'knext:fn:shop/orders';
@@ -61,6 +61,10 @@ const jwks = new Map<string, KeyObject>();
 const seen: { path: string; body: string; claims: Record<string, unknown>; kid: string }[] = [];
 /** The RPCs the contract marks AUTH_PUBLIC. */
 const PUBLIC_RPCS = new Set(['/orders.v1.CatalogService/GetMenu']);
+/** The `iss`/`jti` pairs already accepted: a function refuses a token it has seen. */
+const used = new Set<string>();
+/** How many verified calls to answer UNAVAILABLE, after the token was accepted. */
+let unavailableAfterVerify = 0;
 
 function verifyCall(ctx: HandlerContext, body: string): void {
   const path = `/${ctx.service.typeName}/${ctx.method.name}`;
@@ -84,7 +88,9 @@ function verifyCall(ctx: HandlerContext, body: string): void {
   const claims = JSON.parse(Buffer.from(c, 'base64url').toString('utf8'));
   const now = Math.floor(Date.now() / 1000);
   const ok =
-    JSON.stringify(Object.keys(claims)) === '["iss","aud","method","sub","iat","exp"]' &&
+    JSON.stringify(Object.keys(claims)) === '["iss","aud","method","sub","jti","iat","exp"]' &&
+    typeof claims.jti === 'string' &&
+    /^[A-Za-z0-9_-]{22,64}$/.test(claims.jti) &&
     claims.iss === ISSUER &&
     claims.aud === AUDIENCE &&
     claims.method === path &&
@@ -97,7 +103,14 @@ function verifyCall(ctx: HandlerContext, body: string): void {
     now < claims.exp + 5 &&
     claims.iat <= now + 5;
   if (!ok) throw new ConnectError('claims refused', Code.Unauthenticated);
+  const replayKey = `${claims.iss}\n${claims.jti}`;
+  if (used.has(replayKey)) throw new ConnectError('token replayed', Code.Unauthenticated);
+  used.add(replayKey);
   seen.push({ path, body, claims, kid: header.kid });
+  if (unavailableAfterVerify > 0) {
+    unavailableAfterVerify--;
+    throw new ConnectError('the function is busy', Code.Unavailable);
+  }
 }
 
 let server: Server | undefined;
@@ -155,7 +168,12 @@ beforeAll(async () => {
 }
 `,
   );
-  symlinkSync(join(PKG_DIR, 'node_modules'), join(dir, 'node_modules'));
+  // The glue imports `@getknext/grpc/runtime`. `mock.module` alone is not enough
+  // from a scratch dir outside the repo: Bun keys the mock under the bare name
+  // only while `packages/grpc/dist` is absent; once any earlier test has built
+  // dist it keys the mock to the dist path and the bare import misses it. Link
+  // the workspace runtime so the import resolves for real either way.
+  linkWorkspaceRuntime(dir);
   const out = join(dir, 'src', 'generated', 'grpc', 'orders', 'v1');
   server_ = await import(join(out, 'orders_knext_server.ts'));
   actions = await import(join(out, 'orders_knext_actions.ts'));
@@ -207,6 +225,8 @@ function keyVolume(prefix: string) {
 /** Wire the zone: env, authorize(), and the real signer over `keyDir`. */
 function zone(keyDir: string, sub = 'alice'): void {
   seen.length = 0;
+  used.clear();
+  unavailableAfterVerify = 0;
   process.env.ORDERS_SERVICE_URL = url;
   process.env.ORDERS_SERVICE_PROTO_VERSION = '1.2.0';
   (globalThis as Record<symbol, unknown>)[AUTHORIZE] = async () => ({ sub });
@@ -283,6 +303,21 @@ describe('every generated shape carries a token the function accepts', () => {
     expect(seen).toHaveLength(1);
     expect(seen[0]?.claims.sub).toBe('');
     expect(seen[0]?.claims.iss).toBe(ISSUER);
+  });
+
+  it('a read retried after the function accepted its token sends a new token, never the same one', async () => {
+    const key = newKey();
+    jwks.set(key.kid, key.publicKey);
+    const vol = keyVolume('glue-retry');
+    vol.publish(key);
+    zone(vol.dir);
+    // The function verifies the token, then answers UNAVAILABLE twice: the
+    // zone's client retries the read, and a token reused would be a replay.
+    unavailableAfterVerify = 2;
+    const res = (await server_.getOrder({ id: 'o-retry' })) as { id: string };
+    expect(res.id).toBe('o-retry');
+    expect(seen).toHaveLength(3);
+    expect(new Set(seen.map((s) => s.claims.jti)).size).toBe(3);
   });
 
   it('a rotated key is used on the next call, without a restart', async () => {

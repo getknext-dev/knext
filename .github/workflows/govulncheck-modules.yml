@@ -1,0 +1,82 @@
+name: govulncheck (Go modules)
+
+# Every Go module the repo ships is scanned by govulncheck through the same
+# fail-closed gate (scripts/govulncheck-gate.mjs + security/govulncheck-exceptions.json)
+# at the same pinned version. templates/go is scanned in go-template.yml; this
+# workflow covers the other shipped modules. tests/govulncheck-all-modules.test.ts
+# fails when a go.mod exists that is neither gated in CI nor listed as excluded
+# (with a reason) in security/govulncheck-modules.json.
+#
+# The dated-exception nightly (govulncheck-nightly.yml) scans the same modules
+# over both lane refs, so an exception expires ON its date. That file is kept
+# byte-identical with main's copy.
+
+on:
+  pull_request:
+    paths:
+      - 'packages/kn-next-operator/**'
+      - 'packages/scale-zero-pg/gateway/**'
+      - '.github/workflows/govulncheck-modules.yml'
+      - 'scripts/govulncheck-gate.mjs'
+      - 'security/govulncheck-exceptions.json'
+      - 'security/govulncheck-modules.json'
+      - 'tests/govulncheck-all-modules.test.ts'
+      - 'tests/govulncheck-gate.test.ts'
+      - 'tests/govulncheck-gate-scope.test.ts'
+      - 'tests/govulncheck-gate-known-modules.test.ts'
+  push:
+    branches: [main, 'integration/**']
+    paths:
+      - 'packages/kn-next-operator/**'
+      - 'packages/scale-zero-pg/gateway/**'
+      - '.github/workflows/govulncheck-modules.yml'
+      - 'scripts/govulncheck-gate.mjs'
+      - 'security/govulncheck-exceptions.json'
+      - 'security/govulncheck-modules.json'
+      - 'tests/govulncheck-all-modules.test.ts'
+      - 'tests/govulncheck-gate.test.ts'
+      - 'tests/govulncheck-gate-scope.test.ts'
+      - 'tests/govulncheck-gate-known-modules.test.ts'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: govulncheck-modules-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  govulncheck:
+    name: govulncheck gate (${{ matrix.module }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        module:
+          - packages/kn-next-operator
+          - packages/scale-zero-pg/gateway
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go (${{ matrix.module }}/go.mod)
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: ${{ matrix.module }}/go.mod
+          cache-dependency-path: ${{ matrix.module }}/go.sum
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+
+      - name: govulncheck (pinned) through the fail-closed gate
+        working-directory: ${{ matrix.module }}
+        # JSON mode exits 0 on findings; the gate does the failing, and only
+        # through a dated entry in security/govulncheck-exceptions.json.
+        run: |
+          set -euo pipefail
+          go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 -format json ./... | node "$GITHUB_WORKSPACE/scripts/govulncheck-gate.mjs" "${{ matrix.module }}"

@@ -338,6 +338,7 @@ jobs:
           severity: HIGH,CRITICAL
           exit-code: "1"
           ignore-unfixed: true
+          trivyignores: security/trivy-go-stdlib.trivyignore.yaml
           format: table
 
       # ── Hand the SCANNED bytes to the publish job ───────────────────────────────

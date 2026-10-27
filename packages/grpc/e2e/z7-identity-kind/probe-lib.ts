@@ -20,6 +20,7 @@ import {
   createPrivateKey,
   generateKeyPairSync,
   type KeyObject,
+  randomBytes,
   sign,
 } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -74,6 +75,9 @@ export interface Authorization {
   /** The `kid` in the token's header (public), when a token was built. */
   readonly kid?: string;
 }
+
+/** A fresh 128-bit token id, as the real signer mints it. */
+const newJti = (): string => randomBytes(16).toString('base64url');
 
 function b64url(json: string): string {
   return Buffer.from(json, 'utf8').toString('base64url');
@@ -148,6 +152,7 @@ export async function authorizationHeader(a: ProbeAuth): Promise<Authorization> 
           aud: a.audience,
           method: a.method,
           sub: a.sub,
+          jti: newJti(),
           iat,
           exp: iat + (a.lifetimeSeconds ?? TOKEN_TTL_SECONDS),
         }),
@@ -170,6 +175,7 @@ export async function authorizationHeader(a: ProbeAuth): Promise<Authorization> 
           aud: a.audience,
           method: a.method,
           sub: a.sub,
+          jti: newJti(),
           iat,
           exp: iat + TOKEN_TTL_SECONDS,
         }),

@@ -42,6 +42,9 @@ on:
       - 'packages/grpc/turbo.json'
       - 'scripts/kind-manifests/**'
       - 'tests/go-template-contract.test.ts'
+      - 'scripts/govulncheck-gate.mjs'
+      - 'security/govulncheck-exceptions.json'
+      - 'tests/govulncheck-gate.test.ts'
   push:
     branches: [main, 'integration/**']
     paths:
@@ -59,6 +62,9 @@ on:
       - 'packages/grpc/turbo.json'
       - 'scripts/kind-manifests/**'
       - 'tests/go-template-contract.test.ts'
+      - 'scripts/govulncheck-gate.mjs'
+      - 'security/govulncheck-exceptions.json'
+      - 'tests/govulncheck-gate.test.ts'
   workflow_dispatch:
 
 permissions:
@@ -150,7 +156,11 @@ jobs:
 
       - name: govulncheck (pinned)
         working-directory: templates/go
-        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+        # JSON mode exits 0 on findings; the gate does the failing, and only
+        # through a dated entry in security/govulncheck-exceptions.json.
+        run: |
+          set -euo pipefail
+          go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 -format json ./... | node "$GITHUB_WORKSPACE/scripts/govulncheck-gate.mjs" templates/go
 
   image:
     name: Go template image (build, SBOM, Trivy; read-only, every event)
@@ -199,6 +209,7 @@ jobs:
           severity: HIGH,CRITICAL
           exit-code: "1"
           ignore-unfixed: true
+          trivyignores: security/trivy-go-stdlib.trivyignore.yaml
           format: table
 
   kind-e2e:

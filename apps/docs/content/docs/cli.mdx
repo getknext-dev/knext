@@ -973,13 +973,25 @@ The function checks the token against the zone's public keys, which the operator
 [Identity and the JWKS](/docs/zone-functions#identity-and-the-jwks) for the objects, the variables
 and how to rotate the key.
 
-A token can be used again by whoever holds it until it expires; there is no one-time check. Treat
-anything that records the `authorization` header of calls to your functions, such as request logs
-or traces, as sensitive.
+A token works once. Each one carries a random id, and a function remembers the ids it has accepted
+until the token expires and refuses a second use, so a copy taken from a log or the network is
+refused by the function that served the original. The memory is per pod: the copy can still be
+replayed once to another replica of the function, or after the pod restarts or scales to zero, for as
+long as the token lives (about a minute). Treat anything that records the `authorization` header of
+calls to your functions, such as request logs or traces, as sensitive.
+
+Because a token is single-use, the generated client asks for a fresh one on every attempt: a read
+that is retried after the function accepted its token (for example when the function then answered
+`UNAVAILABLE`) sends a new token, never the same one again. In the client runtime, the `token` call
+option takes either a string, sent as given, or a function that returns a token (a token source),
+which is called once per attempt. A stream is never retried and takes a string only.
 
 A function accepts only the keys the operator publishes for the zone, so a token signed with any
 other key is refused by every function. To read the zone's own key from another directory, for
-example in a local run, register a signer in `instrumentation.ts`:
+example in a local run, register a signer in `instrumentation.ts`. A signer you register in place of
+the default (a custom minter) must return a fresh token on every call, because a function refuses a
+token it has already accepted; a minter that caches and reuses one token has every call after the
+first refused. The default signer does this; to point it at another key directory:
 
 ```ts
 import { createZoneTokenSigner, registerTokenMinter } from "@getknext/grpc/runtime";

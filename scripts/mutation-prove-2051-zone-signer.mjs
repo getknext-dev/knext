@@ -47,9 +47,9 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const MINT_RETURN = '    return `${input}.${signature}`;';
 const TTL = 'export const TOKEN_TTL_SECONDS = 60;';
 const CLAIMS =
-  '      JSON.stringify({ iss, aud, method, sub, iat, exp: iat + TOKEN_TTL_SECONDS }),';
+  '      JSON.stringify({ iss, aud, method, sub, jti, iat, exp: iat + TOKEN_TTL_SECONDS }),';
 const KID_IN_CLAIMS =
-  '      JSON.stringify({ iss, aud, method, sub, iat, exp: iat + TOKEN_TTL_SECONDS, kid }),';
+  '      JSON.stringify({ iss, aud, method, sub, jti, iat, exp: iat + TOKEN_TTL_SECONDS, kid }),';
 const KID_DIGEST =
   "  return createHash('sha256').update(raw).digest().subarray(0, 16).toString('base64url');";
 

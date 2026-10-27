@@ -1,0 +1,12 @@
+# Dated Trivy ignore for the Go stdlib advisory fixed in go1.26.10. Wired only
+# into the Trivy steps that scan an image built from the Go toolchain
+# (tests/trivy-go-stdlib-ignore.test.ts). `expired_at` makes Trivy stop applying
+# it on its own; delete this file with the 1.26.10 bump.
+vulnerabilities:
+  - id: CVE-2026-111943
+    statement: >-
+      crypto/x509 in Go stdlib 1.26.9, fixed in go1.26.10 (published
+      2026-10-21T02:17Z). The bump is held back by the 3-day release-age rule
+      until 2026-10-24 and is tracked in #2567. Same advisory as the dated
+      govulncheck exception (GO-2026-6809).
+    expired_at: 2026-10-26

@@ -16,6 +16,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"os/signal"
@@ -47,6 +48,51 @@ func env(key, def string) string {
 // with a custom DNS zone or gateway Service keeps full control (never auto-rooted).
 func gatewayHostFromEnv() string {
 	return env("APPDB_GATEWAY_HOST", appdb.DefaultGatewayHost)
+}
+
+// applyImageEnv applies the image overrides (APPDB_COMPUTE_IMAGE, APPDB_INIT_IMAGE)
+// together with the numeric identity those images run as. The compute pods run
+// every container with runAsNonRoot and an explicit runAsUser/runAsGroup, because
+// the images declare their user by name and the kubelet cannot verify a name as
+// non-root. The compute image and the init image are different images with their
+// own users, so each has its own pair: APPDB_COMPUTE_UID/GID and
+// APPDB_INIT_UID/GID. Unset keeps the pinned defaults (right only for the pinned
+// digests); an image override whose user is not that default MUST set its pair,
+// or the container starts as the wrong user. A malformed value is an error here
+// (start-up), never a silent fallback.
+func applyImageEnv(render *appdb.RenderConfig) error {
+	render.ComputeImage = env("APPDB_COMPUTE_IMAGE", render.ComputeImage)
+	render.InitImage = env("APPDB_INIT_IMAGE", render.InitImage)
+	for _, f := range []struct {
+		key string
+		dst *int64
+	}{
+		{"APPDB_COMPUTE_UID", &render.ComputeUID},
+		{"APPDB_COMPUTE_GID", &render.ComputeGID},
+		{"APPDB_INIT_UID", &render.InitUID},
+		{"APPDB_INIT_GID", &render.InitGID},
+	} {
+		v, err := idFromEnv(f.key, *f.dst)
+		if err != nil {
+			return err
+		}
+		*f.dst = v
+	}
+	return nil
+}
+
+// idFromEnv reads a numeric uid/gid: unset or empty -> def; otherwise a decimal
+// integer in [1, 2147483647]. 0 is refused because runAsNonRoot forbids root.
+func idFromEnv(key string, def int64) (int64, error) {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return def, nil
+	}
+	n, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || n < 1 || n > math.MaxInt32 {
+		return 0, fmt.Errorf("%s=%q is invalid: want a numeric id between 1 and %d (runAsNonRoot forbids 0, and the container image's user name cannot be used)", key, raw, math.MaxInt32)
+	}
+	return n, nil
 }
 
 func envInt(key string, def int) int {
@@ -112,8 +158,9 @@ func main() {
 	render.PageserverHost = pageserverHost
 	render.PGVersion = strconv.Itoa(pgVersion)
 	render.RolePrefix = rolePrefix
-	render.ComputeImage = env("APPDB_COMPUTE_IMAGE", render.ComputeImage)
-	render.InitImage = env("APPDB_INIT_IMAGE", render.InitImage)
+	if err := applyImageEnv(&render); err != nil {
+		logger.Fatalf("[appdb] %v", err)
+	}
 
 	cluster := appdb.NewK8sCluster(cs, dyn, namespace, render, reclaimCM, logger)
 	// The DB warm-hold actuator (knext #388, ADR-0030 addendum; #777): the

@@ -3,7 +3,9 @@ package auth
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/protobuf/proto"
@@ -50,6 +52,14 @@ var (
 	ErrWrongAudience  = errors.New("auth: token audience is not this function")
 	ErrWrongMethod    = errors.New("auth: token method is not the RPC called")
 	ErrMissingSubject = errors.New("auth: token names no user for a user RPC")
+	// ErrMissingJTI means the token has no jti, so it could not be remembered
+	// and could be replayed: it is refused.
+	ErrMissingJTI = errors.New("auth: token has no jti")
+	// ErrReplayed means this token was already accepted by this pod.
+	ErrReplayed = errors.New("auth: token already used")
+	// ErrSeenSetFull means the replay set is at its cap: a new token is refused
+	// rather than a seen one forgotten.
+	ErrSeenSetFull = errors.New("auth: the replay set is full")
 )
 
 // MethodAuth returns the (knext.v1.auth) option of an RPC, by its procedure
@@ -110,6 +120,12 @@ type Config struct {
 	MethodAuth MethodAuth
 	// Now defaults to time.Now; tests set it.
 	Now func() time.Time
+	// SeenCapacity is how many accepted tokens the verifier remembers to refuse
+	// a replay; zero is DefaultSeenCapacity. At the cap new tokens are refused.
+	SeenCapacity int
+	// Logger receives the warning that the replay set is full; it defaults to
+	// slog.Default().
+	Logger *slog.Logger
 }
 
 // NewVerifier returns the verifier that checks zone identity tokens against
@@ -122,12 +138,34 @@ func NewVerifier(cfg Config) Verifier {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &tokenVerifier{cfg: cfg, jwks: &jwksFile{path: cfg.JWKSPath, now: cfg.Now}}
+	if cfg.Logger == nil {
+		cfg.Logger = slog.Default()
+	}
+	return &tokenVerifier{
+		cfg:  cfg,
+		jwks: &jwksFile{path: cfg.JWKSPath, now: cfg.Now},
+		seen: newSeenSet(cfg.SeenCapacity),
+	}
 }
 
 type tokenVerifier struct {
 	cfg  Config
 	jwks *jwksFile
+	seen *seenSet
+	// fullLoggedAt is when the "replay set is full" warning last went out.
+	fullLoggedAt atomic.Int64
+}
+
+// fullWarningEvery bounds how often a full replay set is reported: a pod at its
+// cap refuses every new token, and one line a call would bury the log.
+const fullWarningEvery = 10 // seconds
+
+func (v *tokenVerifier) warnFull(now int64) {
+	last := v.fullLoggedAt.Load()
+	if (last == 0 || now-last >= fullWarningEvery) && v.fullLoggedAt.CompareAndSwap(last, now) {
+		v.cfg.Logger.Warn("the token replay set is full: new tokens are refused until entries expire",
+			"capacity", v.seen.capacity)
+	}
 }
 
 func (v *tokenVerifier) Verify(_ context.Context, token, procedure string) (Caller, error) {
@@ -146,7 +184,17 @@ func (v *tokenVerifier) Verify(_ context.Context, token, procedure string) (Call
 	if err != nil {
 		return Caller{}, err
 	}
-	if err := c.check(v.cfg.Now().Unix(), v.cfg.Issuer, v.cfg.Audience, procedure, mode); err != nil {
+	now := v.cfg.Now().Unix()
+	if err := c.check(now, v.cfg.Issuer, v.cfg.Audience, procedure, mode); err != nil {
+		return Caller{}, err
+	}
+	// Last, so only a token that passed every check is remembered: a refused
+	// token burns nothing. The issuer is the configured string, which every
+	// entry shares.
+	if err := v.seen.admit(v.cfg.Issuer, c.jti, c.exp+seenSkew, now); err != nil {
+		if errors.Is(err, ErrSeenSetFull) {
+			v.warnFull(now)
+		}
 		return Caller{}, err
 	}
 	return Caller{Subject: c.sub, Zone: c.iss}, nil
