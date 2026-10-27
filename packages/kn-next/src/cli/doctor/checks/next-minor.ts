@@ -10,6 +10,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { nextAdvisoriesFor } from "../../../next-advisories";
 import {
     CREDENTIALED_NEXT_MINORS,
     NEXT_PEER_RANGE,
@@ -66,6 +67,30 @@ export function nextMinorCheck(
     }
     const minor = `${v.major}.${v.minor}`;
     if (minors.includes(minor)) {
+        // #2594: never PASS a version the next-advisories row FAILs — the
+        // credential says it is compatible, not that it is safe to run.
+        const hits = nextAdvisoriesFor(installed);
+        if (hits.length > 0) {
+            const fixed = hits
+                .map((h) => h.fixed)
+                .reduce((a, b) => {
+                    const pa = a.split(".").map(Number);
+                    const pb = b.split(".").map(Number);
+                    for (let i = 0; i < 3; i++) {
+                        if (pa[i] !== pb[i]) return pa[i] > pb[i] ? a : b;
+                    }
+                    return a;
+                });
+            return [
+                mk(
+                    ID,
+                    TITLE,
+                    "warn",
+                    `Next.js ${installed} is on a credentialed minor (${credentialed}), but the credential does not make it safe to run; it is affected by ${hits.map((h) => h.id).join(", ")} (see the next-advisories row)`,
+                    `upgrade next to ${fixed} or later`,
+                ),
+            ];
+        }
         return [
             mk(
                 ID,

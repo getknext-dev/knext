@@ -433,6 +433,17 @@ builds exactly as before.
 **Exit code:** `0` on success (including `--help`); `1` on a usage error (an unknown flag), a missing
 `knext.config.ts`, or a build/smoke failure.
 
+<Callout type="warn">
+**A Next.js with a known security advisory builds, but not silently.** `knext build` and
+`knext deploy` read the Next.js your app resolves — the same way
+[`knext doctor`](#knext-doctor) does — and print a warning when it is affected by a published
+critical or high advisory, naming each GHSA id and the version to upgrade to (for example, any
+Next.js up to 16.4.0 must move to 16.4.1 or later). It is a warning, not a failure: the build and
+deploy continue, and `knext doctor` is the check that fails. `knext deploy --image` deploys an
+image built elsewhere, so it has no local Next.js to check. See
+[Next.js security upgrades](/docs/upgrading#nextjs-security-upgrades).
+</Callout>
+
 ## `knext cleanup`
 
 Tears down the app named in `knext.config.ts` by issuing exactly **one** cluster write:
@@ -535,6 +546,15 @@ never touch the cluster, so they still run even when nothing above is reachable:
   already include them. Both name the fix: install the version knext expects and run
   `knext vinext-patches`. Apps without vinext get no row, and `KNEXT_VINEXT_PATCHES=0` reports
   `SKIP`.
+- **Next.js minor** — whether the Next.js your app resolves is on a minor the official
+  compatibility suite has credentialed. A supported but uncredentialed minor is a `WARN`, never a
+  failure. A release on a credentialed minor that is affected by a published security advisory
+  (for example 16.4.0) is also a `WARN`, not a `PASS`.
+- **Next.js security advisories** — whether that Next.js is affected by a published critical or
+  high advisory that has a fix. An affected version is a `FAIL` that names each advisory by its
+  GHSA id and the version to upgrade to (for example, anything up to 16.4.0 must move to 16.4.1 or
+  later — see [Next.js security upgrades](/docs/upgrading#nextjs-security-upgrades)). Apps with no
+  resolvable Next.js get no row.
 
 ```bash
 knext doctor                                        # human-readable checklist

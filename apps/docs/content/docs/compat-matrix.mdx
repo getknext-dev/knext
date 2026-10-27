@@ -10,7 +10,10 @@ description: Honest, evidence-gated status of what the knext adapter supports.
 <Callout type="warn">
 **Status: a credentialing window is currently in progress, not complete.**
 On the knext 2.x line the official suite now runs against Next.js v16.4.0.
-That is the release `knext create` scaffolds and the minimum knext 2.0 supports. Every credential run executes against a published release-candidate build, not the
+That is the minimum knext 2.0 supports. `knext create` scaffolds a newer Next.js release on the
+same 16.4.x line, 16.4.3, because 16.4.0 and every earlier release are affected by critical
+security advisories (GHSA-2464-fhr4-w9xw, GHSA-673q-mjm6-r5xr) fixed in 16.4.1 — see
+[Next.js security upgrades](/docs/upgrading#nextjs-security-upgrades). Every credential run executes against a published release-candidate build, not the
 fast-moving main branch. The 14-consecutive-run count needed before any cell is
 considered fully credentialed **has not yet completed for any cell, and no credential run at
 v16.4.0 has counted yet**, so don't read anything on this page as "14 of 14, passing."

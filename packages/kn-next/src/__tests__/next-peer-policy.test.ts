@@ -7,6 +7,7 @@
 import { describe, expect, it } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { nextAdvisoriesFor } from "../next-advisories";
 import { CREDENTIALED_NEXT_MINORS, NEXT_PEER_RANGE } from "../next-compat";
 
 const PKGS = resolve(import.meta.dirname, "../../..");
@@ -40,7 +41,7 @@ describe("next peer policy", () => {
         expect(seen, "scan found the core manifest").toBeGreaterThanOrEqual(1);
     });
 
-    it("scaffold templates pin a credentialed minor inside the range", () => {
+    it("scaffold templates pin an advisory-free next on a credentialed minor inside the range", () => {
         const dir = join(PKGS, "kn-next/templates/app");
         const pins = readdirSync(dir)
             .filter((f) => f.startsWith("package.json"))
@@ -50,6 +51,10 @@ describe("next peer policy", () => {
             expect(pin).toBeTruthy();
             const [maj, min] = (pin as string).split(".");
             expect(CREDENTIALED_NEXT_MINORS).toContain(`${maj}.${min}`);
+            // What users get never carries a known critical/high advisory
+            // (#2594: 16.4.0 is inside the range and the credentialed minor,
+            // and still vulnerable).
+            expect(nextAdvisoriesFor(pin as string)).toEqual([]);
         }
     });
 });
