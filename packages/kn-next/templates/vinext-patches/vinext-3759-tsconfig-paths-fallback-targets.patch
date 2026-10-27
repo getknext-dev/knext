@@ -1,4 +1,4 @@
-knext bundled fix for vinext 1.1.0 (dist output)
+knext bundled fix for vinext 1.3.0 (dist output)
 Upstream: https://github.com/cloudflare/vinext/pull/3759 (issue https://github.com/cloudflare/vinext/issues/3756)
 What it fixes: a tsconfig `paths` entry with several targets (`"@lib/*": ["lib/a/*", "lib/b/*"]`) only
 used its first target, so an import that exists only under a later target failed to build
@@ -7,12 +7,12 @@ target in order and skips `.d.ts` targets (Next.js e2e `typescript-paths`). The 
 tries the remaining targets when the first does not resolve, and `.d.ts` targets are dropped.
 Retire: delete this file (and its manifest entry) when the pinned vinext is >= the first
 release that includes cloudflare/vinext#3759.
-Ported by hand from the upstream src change to the published 1.1.0 dist files.
+Ported by hand from the upstream src change to the published 1.3.0 dist files.
 Applied by `knext vinext-patches` (runs from the app's postinstall and before `knext build`).
 
 --- a/dist/index.js
 +++ b/dist/index.js
-@@ -419,6 +419,7 @@
+@@ -492,6 +492,7 @@
  }
  function materializeTsconfigPathAliases(pathsConfig, baseUrl, projectRoot) {
  	const vite = {};
@@ -20,7 +20,7 @@ Applied by `knext vinext-patches` (runs from the app's postinstall and before `k
  	const sass = [];
  	for (const [find, rawTargets] of Object.entries(pathsConfig)) {
  		const targets = Array.isArray(rawTargets) ? rawTargets.filter((value) => typeof value === "string") : typeof rawTargets === "string" ? [rawTargets] : [];
-@@ -431,23 +432,35 @@
+@@ -504,23 +505,35 @@
  				replacements
  			});
  		}
@@ -59,7 +59,7 @@ Applied by `knext vinext-patches` (runs from the app's postinstall and before `k
  function toViteAliasReplacement(absolutePath, projectRoot) {
  	const normalizedPath = toSlash(absolutePath);
  	const rootCandidates = /* @__PURE__ */ new Set([projectRoot]);
-@@ -510,6 +523,10 @@
+@@ -583,6 +596,10 @@
  					...aliases.vite,
  					...parent.vite
  				},
@@ -70,7 +70,7 @@ Applied by `knext vinext-patches` (runs from the app's postinstall and before `k
  				sass: mergeSassTsconfigPathAliases(aliases.sass, parent.sass)
  			};
  		}
-@@ -524,6 +541,10 @@
+@@ -597,6 +614,10 @@
  			...aliases.vite,
  			...own.vite
  		},
@@ -81,7 +81,7 @@ Applied by `knext vinext-patches` (runs from the app's postinstall and before `k
  		sass: mergeSassTsconfigPathAliases(aliases.sass, own.sass)
  	};
  }
-@@ -575,6 +596,12 @@
+@@ -648,6 +669,12 @@
  }
  const _tsconfigAliasCache = /* @__PURE__ */ new Map();
  /**
@@ -94,7 +94,7 @@ Applied by `knext vinext-patches` (runs from the app's postinstall and before `k
  * Order materialized tsconfig path aliases by descending prefix length.
  *
  * TypeScript (and Next.js) match `paths` patterns by longest matched prefix,
-@@ -601,6 +628,7 @@
+@@ -674,6 +701,7 @@
  			vite: sortTsconfigAliasesBySpecificity(materialized.vite),
  			sass: materialized.sass
  		};
@@ -102,7 +102,7 @@ Applied by `knext vinext-patches` (runs from the app's postinstall and before `k
  		break;
  	}
  	_tsconfigAliasCache.set(cacheKey, aliases);
-@@ -639,23 +667,36 @@
+@@ -712,23 +740,36 @@
  * glob/dynamic-import transforms — which require blind prefix replacement
  * because their patterns never exist on disk — keep working.
  */

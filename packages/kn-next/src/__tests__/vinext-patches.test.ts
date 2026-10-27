@@ -15,7 +15,6 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { AsyncLocalStorage } from "node:async_hooks";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
@@ -426,6 +425,28 @@ describe("the bundled patches against the published tarball", () => {
         }
     });
 
+    it("vinext#3750 / #3753 / #3769 / #3774: no longer bundled — vinext 1.2.0 and 1.3.0 ship their fixes", () => {
+        // #3753 (next/dynamic preload hints inside the Suspense boundary) landed
+        // upstream as #3790 in 1.2.0; #3774 (sortedPages in _buildManifest.js) as
+        // #4035, and #3750 / #3769 (public files reached through a rewrite, and
+        // middleware before a public file, on Nitro) as #4064 / #4065, in 1.3.0.
+        // The behaviour tests for #3753 / #3774 below run against the UNPATCHED
+        // 1.3.0 copy and still pass; the Nitro public-file behaviour is proved
+        // end to end by vinext-nitro-public-files.test.ts. So the patch files and
+        // manifest entries are retired.
+        const bundled = manifest.patches.map((p) => p.file);
+        for (const num of ["3750", "3753", "3769", "3774"]) {
+            expect(
+                bundled.filter((f) => f.startsWith(`vinext-${num}-`)),
+            ).toEqual([]);
+            expect(
+                readdirSync(PATCHES_DIR).filter((f) =>
+                    f.startsWith(`vinext-${num}-`),
+                ),
+            ).toEqual([]);
+        }
+    });
+
     it("vinext#3423: require targets are pre-resolved with a bundling resolver pair, and only packages Vite would just externalize are taken over", async () => {
         applyVinextPatches(patched);
         const mod = await importPatched<{
@@ -719,9 +740,12 @@ describe("the bundled patches against the published tarball", () => {
             status: 308,
             location: "/docs/",
         });
-        // Nothing to collapse: left alone (and a non-origin-form target too).
+        // Nothing to collapse: left alone. A non-origin-form (absolute-form)
+        // target is never redirected: vinext 1.3.0 answers it with a 404.
         expect(mod.getRepeatedSlashRedirect("/a/b")).toBeNull();
-        expect(mod.getRepeatedSlashRedirect("http://h//x")).toBeNull();
+        expect(mod.getRepeatedSlashRedirect("http://h//x")).toEqual({
+            status: 404,
+        });
         // A collapsed path that is still protocol-relative shaped is never echoed.
         expect(mod.getRepeatedSlashRedirect("//%2Fevil.com")).toEqual({
             status: 404,
@@ -817,25 +841,25 @@ describe("the bundled patches against the published tarball", () => {
         expect(evalExpr(false, false, ["sqlite3"], {})).toEqual({});
     });
 
-    it("vinext#3686: the image optimizer path honours trailingSlash (both branches)", async () => {
+    it("vinext#3686 (upstream since 1.3.0, no longer bundled): the image optimizer path honours trailingSlash (both branches)", async () => {
         applyVinextPatches(patched);
         // bun's module cache keys on the resolved path (a query-string
-        // cache-buster does not force re-evaluation), and __trailingSlash is
-        // read from process.env once at module scope — so each branch needs
+        // cache-buster does not force re-evaluation), and the image endpoint is
+        // read from process.env once at module scope (shims/image-props.js) — so each branch needs
         // its OWN file path, not just its own import call, or the first
         // branch's value sticks for the second import too.
-        const srcPath = join(patched, "dist", "shims", "image.js");
+        const srcPath = join(patched, "dist", "shims", "image-props.js");
         const truePath = join(
             patched,
             "dist",
             "shims",
-            "image.trailingslash-true-probe.js",
+            "image-props.trailingslash-true-probe.js",
         );
         const falsePath = join(
             patched,
             "dist",
             "shims",
-            "image.trailingslash-false-probe.js",
+            "image-props.trailingslash-false-probe.js",
         );
         cpSync(srcPath, truePath);
         cpSync(srcPath, falsePath);
@@ -970,7 +994,8 @@ describe("the bundled patches against the published tarball", () => {
         const missing = await mod.handleImageOptimization(new Request(url), {
             fetchAsset: async () => new Response("", { status: 404 }),
         });
-        expect(missing.status).toBe(404);
+        // A source that yields no image is a 400 ("isn't a valid image") on 1.3.0.
+        expect(missing.status).toBe(400);
         expect(missing.headers.has("x-nextjs-cache")).toBe(false);
         const blocked = await mod.handleImageOptimization(new Request(url), {
             fetchAsset: async () => svg(),
@@ -990,149 +1015,6 @@ describe("the bundled patches against the published tarball", () => {
         );
     });
 
-    it("vinext#3750: a rewrite to a public/ file on Nitro goes back through the Nitro app (Pages wrapper, App SSR entry)", async () => {
-        applyVinextPatches(patched);
-        // Pages: the generated Nitro wrapper hands the request stage a
-        // public-file fetcher, on Node-like presets and `vite build` only.
-        const index = readFileSync(join(patched, "dist", "index.js"), "utf8");
-        expect(index).toContain(
-            'const servesNitroPublicFiles = !isServeCommand && nitroHostRuntime === "node";',
-        );
-        expect(index).toContain(
-            '", publicFileFetcher: getNitroPublicFileFetcher()"',
-        );
-        expect(index).toContain(
-            'nitroPublicFiles: hasNitroPlugin && !isServeCommand && nitroHostRuntime === "node" ? NITRO_PUBLIC_FILES_MODULE : null',
-        );
-        // ...which the stage uses for every filesystem route but /_next/image
-        // (that branch stays with the #3741 Pages patch).
-        const stage = readFileSync(
-            join(patched, "dist", "server", "pages-request-stage-entry.js"),
-            "utf8",
-        );
-        expect(stage).toContain(
-            "const publicFileFetcher = assets ? void 0 : platformCtx?.publicFileFetcher;",
-        );
-        expect(stage).toContain(
-            "isImageOptimizationPath(requestPathname) ? serveFilesystemRoute(requestPathname, stagedHeaders, phase, resolvedUrl) : fetchWorkerFilesystemRoute(",
-        );
-        // The derived execution context keeps the fetcher.
-        const ctxMod = await importPatched<{
-            createWorkerRevalidationContext: (
-                base: unknown,
-                handle: unknown,
-                hostRuntime?: string,
-            ) => Record<string, unknown>;
-        }>("dist/server/worker-revalidation-context.js");
-        const fetcher = { fetch: () => new Response("x") };
-        expect(
-            ctxMod.createWorkerRevalidationContext(
-                { publicFileFetcher: fetcher },
-                async () => new Response(null),
-                "node",
-            ).publicFileFetcher,
-        ).toBe(fetcher);
-        // App: the SSR entry (Nitro's service) wraps its default export only
-        // when asked to.
-        const ssr = await importPatched<{
-            generateSsrEntry: (
-                hasPagesDir?: boolean,
-                options?: { nitroPublicFiles?: string | null },
-            ) => string;
-        }>("dist/entries/app-ssr-entry.js");
-        expect(ssr.generateSsrEntry(false)).toContain(
-            "export { default } from ",
-        );
-        const wrapped = ssr.generateSsrEntry(false, {
-            nitroPublicFiles: "/nitro-public-files.js",
-        });
-        expect(wrapped).not.toContain("export { default } from ");
-        expect(wrapped).toContain(
-            "return resolveNitroStaticFileSignal(await __ssrEntry.fetch(request), request);",
-        );
-    });
-
-    it("vinext#3750: a static-file signal is served by the Nitro app; a miss inside the sub-request is a 404, never a second fetch", async () => {
-        applyVinextPatches(patched);
-        type Signal = (
-            pathname: string,
-            context: { headers: Headers | null; status: number | null },
-        ) => Response;
-        const { createStaticFileSignal } = await importPatched<{
-            createStaticFileSignal: Signal;
-        }>("dist/server/static-file-signal.js");
-        const mod = await importPatched<{
-            getNitroPublicFileFetcher(): unknown;
-            resolveNitroStaticFileSignal(
-                response: Response,
-                request: Request,
-            ): Promise<Response>;
-        }>("dist/server/nitro-public-files.js");
-        const signal = (path: string, headers: Headers | null = null) =>
-            createStaticFileSignal(path, { headers, status: null });
-        const g = globalThis as { __nitro__?: unknown };
-        const previous = g.__nitro__;
-        const seen: string[] = [];
-        try {
-            // No Nitro app (dev, other hosts): the signal is left alone.
-            delete g.__nitro__;
-            expect(mod.getNitroPublicFileFetcher()).toBeUndefined();
-            const lone = signal("/file.txt");
-            expect(
-                await mod.resolveNitroStaticFileSignal(
-                    lone,
-                    new Request("http://app/before/file.txt"),
-                ),
-            ).toBe(lone);
-
-            g.__nitro__ = {
-                default: {
-                    async fetch(request: Request) {
-                        const path = new URL(request.url).pathname;
-                        seen.push(path);
-                        if (path === "/file.txt") {
-                            return new Response("public file", {
-                                headers: { "content-type": "text/plain" },
-                            });
-                        }
-                        // Nitro has no such file, so the sub-request reaches
-                        // vinext again, which signals the same file again.
-                        return mod.resolveNitroStaticFileSignal(
-                            signal(path),
-                            request,
-                        );
-                    },
-                },
-            };
-            const served = await mod.resolveNitroStaticFileSignal(
-                signal("/file.txt", new Headers({ "x-mw": "ran" })),
-                new Request("http://app/before/file.txt"),
-            );
-            expect(served.status).toBe(200);
-            expect(await served.text()).toBe("public file");
-            expect(served.headers.get("x-mw")).toBe("ran");
-
-            const missing = await mod.resolveNitroStaticFileSignal(
-                signal("/gone.txt"),
-                new Request("http://app/before/gone.txt"),
-            );
-            expect(missing.status).toBe(404);
-            // One sub-request per signal: the miss did not loop.
-            expect(seen).toEqual(["/file.txt", "/gone.txt"]);
-
-            const page = new Response("page");
-            expect(
-                await mod.resolveNitroStaticFileSignal(
-                    page,
-                    new Request("http://app/"),
-                ),
-            ).toBe(page);
-        } finally {
-            if (previous === undefined) delete g.__nitro__;
-            else g.__nitro__ = previous;
-        }
-    });
-
     it("vinext#3741: the App Router handler hands /_next/image to the Nitro app instead of redirecting", () => {
         applyVinextPatches(patched);
         const handler = readFileSync(
@@ -1143,12 +1025,13 @@ describe("the bundled patches against the published tarball", () => {
             "const nitroFetch = options.isDev ? void 0 : getNitroAppFetch();",
         );
         expect(handler).toContain(
-            "return handleNitroImageOptimization(request, nitroFetch,",
+            "return handleNitroImageOptimization(new Request(imageUrl.href, {",
         );
         expect(handler).toContain("globalThis.__nitro__?.default");
-        // Dev (and hosts without Nitro) keep the redirect.
+        // Dev (and hosts without Nitro) keep the redirect signal the Node
+        // production server consumes.
         expect(handler).toContain(
-            "return Response.redirect(assetUrl.href, 302);",
+            "markImageOptimizationSignal(Response.redirect(assetUrl.href, 302), {",
         );
     });
 
@@ -1320,6 +1203,9 @@ describe("the bundled patches against the published tarball", () => {
             createPayloadRouteId: (pathname: string, ctx: string | null) =>
                 `${pathname}:${ctx ?? "none"}`,
             createRscOnErrorHandler: () => () => undefined,
+            // vinext 1.3.0 hands decodeReply a route-scoped server manifest
+            // (a Proxy that rejects ids the route does not own).
+            createServerManifest: () => ({}),
             createTemporaryReferenceSet: () => ({}),
             currentRouteMatch: matchRoute("/dashboard"),
             currentRoutePathname: "/dashboard",
@@ -1383,6 +1269,7 @@ describe("the bundled patches against the published tarball", () => {
             toInterceptOpts: (intercept: { slotKey: string }) => ({
                 slot: intercept.slotKey,
             }),
+            validateActionReferences: () => true,
             ...overrides,
         });
     }
@@ -1758,7 +1645,7 @@ describe("the bundled patches against the published tarball", () => {
             rmSync(tmpDir, { recursive: true, force: true });
         }
     }, 60_000);
-    it("vinext#3753: text before a next/dynamic component gets no extra `<!-- -->` ahead of the boundary, and the preload hint is still emitted", async () => {
+    it("vinext#3753 (upstream since 1.2.0, no longer bundled): text before a next/dynamic component gets no extra `<!-- -->` ahead of the boundary, and the preload hint is still emitted", async () => {
         // Ported from Next.js: test/e2e/next-dynamic — `#foo`'s innerHTML must
         // be `Index<!--$-->1<!--/$-->...`. A hoisted <link> right after text
         // makes React write a text separator, so the preload hints render
@@ -2243,12 +2130,12 @@ describe("the bundled patches against the published tarball", () => {
                 "build",
             );
             const hook = resolved.plugins.find(
-                (p) => p.name === "vinext:nitro-route-rules",
+                (p) => p.name === "vinext:nitro-asset-prefix",
             ) as
                 | { nitro: { setup: (n: FakeNitro) => Promise<void> } }
                 | undefined;
             if (!hook)
-                throw new Error("vinext:nitro-route-rules plugin not found");
+                throw new Error("vinext:nitro-asset-prefix plugin not found");
             const nitro: FakeNitro = {
                 options: {
                     dev: false,
@@ -2483,290 +2370,6 @@ describe("the bundled patches against the published tarball", () => {
             applyVinextPatches(patched);
             expect(readFileSync(join(patched, rel), "utf8")).toContain(wiring);
         });
-    });
-    it("vinext#3769: on Nitro, a public file the middleware matcher covers goes to vinext first; the setup hook registers the plugin", async () => {
-        // Ported from Next.js: test/e2e/middleware-static-files — a matcher
-        // that lists `/file.svg` must make middleware answer that request.
-        // Nitro's static handler runs first, so the setup hook registers a
-        // Nitro runtime plugin listing the covered files.
-        applyVinextPatches(patched);
-        writeFileSync(
-            join(patched, "dist", "__knext_vite_resolve_bridge.mjs"),
-            'export { resolveConfig } from "vite";\n',
-        );
-        const { resolveConfig } = await importPatched<{
-            resolveConfig: (
-                config: unknown,
-                command: "build",
-            ) => Promise<{ plugins: readonly Record<string, unknown>[] }>;
-        }>("dist/__knext_vite_resolve_bridge.mjs");
-        const vinextMod = await importPatched<{
-            default: (options?: Record<string, unknown>) => unknown;
-        }>("dist/index.js");
-
-        type FakeNitro = {
-            options: {
-                dev: boolean;
-                exportConditions?: string[];
-                output: { publicDir: string; serverDir: string };
-                plugins: string[];
-                publicAssets: Record<string, unknown>[];
-                routeRules: Record<string, Record<string, unknown>>;
-                traceDeps: string[];
-                virtual: Record<string, () => string>;
-            };
-            logger: { warn: () => void };
-        };
-        const runSetup = async (
-            middleware: string | null,
-            exportConditions?: string[],
-        ) => {
-            const root = mkdtempSync(join(tmpdir(), "knext-vp-3769-"));
-            tempRoots.push(root);
-            symlinkSync(
-                dirname(INSTALLED_VINEXT),
-                join(root, "node_modules"),
-                "junction",
-            );
-            writeFileSync(
-                join(root, "package.json"),
-                JSON.stringify({ type: "module" }),
-            );
-            mkdirSync(join(root, "app"));
-            mkdirSync(join(root, "public", "docs"), { recursive: true });
-            writeFileSync(
-                join(root, "app", "layout.tsx"),
-                "export default function RootLayout({ children }) {\n  return <html><body>{children}</body></html>;\n}\n",
-            );
-            writeFileSync(
-                join(root, "app", "page.tsx"),
-                "export default function Page() {\n  return <p>home</p>;\n}\n",
-            );
-            for (const file of [
-                "file.svg",
-                "vercel copy.svg",
-                "open.txt",
-                "docs/index.html",
-            ]) {
-                writeFileSync(join(root, "public", file), file);
-            }
-            if (middleware !== null) {
-                writeFileSync(join(root, "middleware.ts"), middleware);
-            }
-            const resolved = await resolveConfig(
-                {
-                    root,
-                    configFile: false,
-                    logLevel: "silent",
-                    plugins: [vinextMod.default({ appDir: root })],
-                },
-                "build",
-            );
-            // Nitro calls every Vite plugin's `nitro.setup`, in plugin order.
-            const hooks = resolved.plugins.filter(
-                (p) =>
-                    typeof (p as { nitro?: { setup?: unknown } }).nitro
-                        ?.setup === "function",
-            ) as unknown as {
-                name: string;
-                nitro: { setup: (n: FakeNitro) => Promise<void> };
-            }[];
-            expect(hooks.map((h) => h.name)).toContain(
-                "vinext:nitro-middleware-public-files",
-            );
-            const nitro: FakeNitro = {
-                options: {
-                    dev: false,
-                    ...(exportConditions ? { exportConditions } : {}),
-                    output: {
-                        publicDir: join(root, ".output", "public"),
-                        serverDir: join(root, ".output", "server"),
-                    },
-                    plugins: [],
-                    publicAssets: [],
-                    routeRules: {},
-                    traceDeps: [],
-                    virtual: {},
-                },
-                logger: { warn: () => {} },
-            };
-            for (const hook of hooks) await hook.nitro.setup(nitro);
-            return { root, nitro };
-        };
-        const PLUGIN_ID = "#vinext/nitro-middleware-public-files";
-        const MIDDLEWARE = `import { NextResponse } from "next/server";
-export const config = { matcher: ["/file.svg", "/vercel copy.svg", "/docs"] };
-export default function middleware() { return NextResponse.json({ middleware: true }); }
-`;
-
-        const withMatcher = await runSetup(MIDDLEWARE);
-        expect(withMatcher.nitro.options.plugins).toEqual([PLUGIN_ID]);
-        const source = withMatcher.nitro.options.virtual[PLUGIN_ID]?.();
-        if (!source) throw new Error("plugin source not registered");
-        expect(source).toContain(
-            'new Set(["/docs/index.html","/file.svg","/vercel copy.svg"])',
-        );
-
-        // No matcher: middleware covers every public file (Next.js parity).
-        const everything = await runSetup(
-            "export default function middleware() {}\n",
-        );
-        expect(everything.nitro.options.virtual[PLUGIN_ID]?.()).toContain(
-            'new Set(["/docs/index.html","/file.svg","/open.txt","/vercel copy.svg"])',
-        );
-
-        // No middleware, or a workerd preset: no plugin.
-        expect((await runSetup(null)).nitro.options.plugins).toEqual([]);
-        expect(
-            (await runSetup(MIDDLEWARE, ["workerd"])).nitro.options.plugins,
-        ).toEqual([]);
-
-        // The plugin itself, run against a fake Nitro app. Its one import is
-        // Nitro's own service fetch, stubbed here.
-        const pluginFile = join(withMatcher.root, "nitro-plugin.mjs");
-        writeFileSync(
-            pluginFile,
-            source.replace(
-                'import { fetchViteEnv } from "nitro/vite/runtime";',
-                "const fetchViteEnv = (name, request) => globalThis.__knextFetchViteEnv(name, request);",
-            ),
-        );
-        const seen: string[] = [];
-        const store = () =>
-            String(
-                (
-                    globalThis as Record<
-                        symbol,
-                        { getStore(): unknown } | undefined
-                    >
-                )[Symbol.for("vinext.nitro.middlewarePublicFile")]?.getStore(),
-            );
-        const app = {
-            fetch: async (request: Request): Promise<Response> => {
-                seen.push(
-                    `nitro:${request.method}:${new URL(request.url).pathname}:${store()}`,
-                );
-                return new Response("nitro");
-            },
-        };
-        const g = globalThis as { __knextFetchViteEnv?: unknown };
-        g.__knextFetchViteEnv = async (name: string, request: Request) => {
-            const path = new URL(request.url).pathname;
-            seen.push(`vinext:${name}:${request.method}:${path}:${store()}`);
-            // vinext fetching the file back once middleware lets it continue:
-            // the nested fetch must reach the Nitro app (its static handler).
-            if (path === "/file.svg" && request.method === "GET") {
-                await app.fetch(new Request("http://app/file.svg"));
-            }
-            return new Response("vinext");
-        };
-        try {
-            const plugin = (
-                (await import(pathToFileURL(pluginFile).href)) as {
-                    default: (a: typeof app) => void;
-                }
-            ).default;
-            plugin(app);
-            const hit = (path: string, method = "GET") =>
-                app.fetch(new Request(`http://app${path}`, { method }));
-            for (const path of [
-                "/file.svg",
-                "/file.svg/",
-                "/vercel%20copy.svg",
-                "/file.svg.gz",
-                "/docs",
-            ]) {
-                await hit(path);
-            }
-            await hit("/file.svg", "HEAD");
-            await hit("/file.svg", "POST");
-            await hit("/open.txt");
-            await hit("/_next/static/chunks/a.js");
-            await hit("/file%2esvg/x");
-            expect(seen).toEqual([
-                "vinext:ssr:GET:/file.svg:forwarded",
-                "nitro:GET:/file.svg:forwarded",
-                "vinext:ssr:GET:/file.svg/:forwarded",
-                "vinext:ssr:GET:/vercel%20copy.svg:forwarded",
-                "vinext:ssr:GET:/file.svg.gz:forwarded",
-                "vinext:ssr:GET:/docs:forwarded",
-                "vinext:ssr:HEAD:/file.svg:forwarded",
-                "nitro:POST:/file.svg:handling",
-                "nitro:GET:/open.txt:handling",
-                "nitro:GET:/_next/static/chunks/a.js:handling",
-                "nitro:GET:/file%2esvg/x:handling",
-            ]);
-
-            // An encoded slash is not a path separator: Nitro's static handler
-            // keeps `%2F` un-decoded, so `/a%2Fb.svg` is not the covered public
-            // file `/a/b.svg` and must stay on the static fast path.
-            const slashSource = source.replace(
-                /new Set\(\[.*?\]\)/,
-                'new Set(["/a/b.svg"])',
-            );
-            expect(slashSource).not.toBe(source);
-            const slashFile = join(withMatcher.root, "nitro-plugin-slash.mjs");
-            writeFileSync(
-                slashFile,
-                slashSource.replace(
-                    'import { fetchViteEnv } from "nitro/vite/runtime";',
-                    "const fetchViteEnv = (name, request) => globalThis.__knextFetchViteEnv(name, request);",
-                ),
-            );
-            const slashPlugin = (
-                (await import(pathToFileURL(slashFile).href)) as {
-                    default: (a: typeof app) => void;
-                }
-            ).default;
-            slashPlugin(app);
-            seen.length = 0;
-            await hit("/a/b.svg");
-            await hit("/a%2Fb.svg");
-            await hit("/a%2fb.svg");
-            expect(seen).toEqual([
-                "vinext:ssr:GET:/a/b.svg:forwarded",
-                "nitro:GET:/a%2Fb.svg:handling",
-                "nitro:GET:/a%2fb.svg:handling",
-            ]);
-        } finally {
-            delete g.__knextFetchViteEnv;
-        }
-    }, 120_000);
-
-    it("vinext#3769: the Pages filesystem route serves a direct public-file request only when the Nitro plugin forwarded it", async () => {
-        applyVinextPatches(patched);
-        const { fetchWorkerFilesystemRoute } = await importPatched<{
-            fetchWorkerFilesystemRoute: (
-                request: Request,
-                pathname: string,
-                phase: string,
-                fetchAsset: (r: Request) => Promise<Response>,
-                publicFiles: ReadonlySet<string>,
-            ) => Promise<Response | false>;
-        }>("dist/server/pages-request-pipeline.js");
-        const key = Symbol.for("vinext.nitro.middlewarePublicFile");
-        const registry = globalThis as Record<
-            symbol,
-            AsyncLocalStorage<string> | undefined
-        >;
-        registry[key] ??= new AsyncLocalStorage<string>();
-        const als = registry[key];
-        const direct = () =>
-            fetchWorkerFilesystemRoute(
-                new Request("http://app/file.svg"),
-                "/file.svg",
-                "direct",
-                async () => new Response("file"),
-                new Set(["/file.svg"]),
-            );
-        // Workers, or a Nitro request the plugin did not forward: the host's
-        // asset layer owns direct requests.
-        expect(await direct()).toBe(false);
-        expect(await als.run("handling", direct)).toBe(false);
-        const served = await als.run("forwarded", direct);
-        expect(served instanceof Response && (await served.text())).toBe(
-            "file",
-        );
     });
     // Builds a hybrid app/ + pages/ fixture with the patched vinext and
     // serves it from the production server.
@@ -3030,7 +2633,7 @@ export default function middleware() { return NextResponse.json({ middleware: tr
             .sortedPages;
     };
 
-    it("vinext#3774: _buildManifest.js lists the Pages and API routes in Next.js sortedPages order", async () => {
+    it("vinext#3774 (upstream since 1.3.0, no longer bundled): _buildManifest.js lists the Pages and API routes in Next.js sortedPages order", async () => {
         // Ported from Next.js: test/e2e/custom-routes-catchall — the manifest
         // reached through a /docs/:path* rewrite must list /hello. Next.js
         // (Turbopack, writeBuildManifest) writes sortedPages as
@@ -3085,7 +2688,7 @@ export default function middleware() { return NextResponse.json({ middleware: tr
         }
     }, 180_000);
 
-    it("vinext#3774: an App Router-only build lists just /_app and /_error, as Next.js always builds both", async () => {
+    it("vinext#3774 (upstream since 1.3.0, no longer bundled): an App Router-only build lists just /_app and /_error, as Next.js always builds both", async () => {
         const app = await serveHybridFixture({
             "package.json": JSON.stringify({ type: "module" }),
             "app/layout.tsx":
@@ -3108,7 +2711,7 @@ export default function middleware() { return NextResponse.json({ middleware: tr
         }
     }, 180_000);
 
-    it("vinext#3774: getSortedRoutes keeps Next.js's optional catch-all specificity error", async () => {
+    it("vinext#3774 (upstream since 1.3.0, no longer bundled): getSortedRoutes keeps Next.js's optional catch-all specificity error", async () => {
         // The pages scan validates first, so a build never reaches this; the
         // error belongs to the ported sort all the same.
         applyVinextPatches(patched);
@@ -3288,8 +2891,8 @@ describe("delivery", () => {
                         from.includes("knext-patch")
                     ) {
                         renames++;
-                        // index.js is renamed by 3226/3424/3241 first; fail 3436's.
-                        if (renames === 4) throw new Error("EIO: simulated");
+                        // index.js is renamed by 3423/3226/3424/3747 first; fail 3436's.
+                        if (renames === 5) throw new Error("EIO: simulated");
                     }
                     renameSync(from, to);
                 },
@@ -3362,8 +2965,8 @@ describe("delivery", () => {
                         from.includes("knext-patch")
                     ) {
                         indexRenames++;
-                        // 3436 is the 4th patch to rename index.js (its last file).
-                        if (indexRenames === 4) {
+                        // 3436 is the 5th patch to rename index.js (its last file).
+                        if (indexRenames === 5) {
                             restoring = true;
                             throw new Error("EIO: simulated");
                         }

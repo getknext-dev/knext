@@ -1,4 +1,4 @@
-knext bundled fix for vinext 1.1.0 (dist output)
+knext bundled fix for vinext 1.3.0 (dist output)
 Upstream: https://github.com/cloudflare/vinext/pull/3766 (issue https://github.com/cloudflare/vinext/issues/3765)
 What it fixes: with an absolute-URL `assetPrefix` that has a path component
 (`https://cdn.example.com/custom-asset-prefix`), a Nitro build (vinext() + nitro(), the knext
@@ -13,14 +13,18 @@ plain-origin `assetPrefix` values are unchanged. Applies on top of every earlier
 manifest order.
 Retire: delete this file (and its manifest entry) when the pinned vinext is >= the first
 release that includes cloudflare/vinext#3766.
-Ported by hand from the upstream src change to the published 1.1.0 dist file.
+Ported by hand from the upstream src change to the published 1.3.0 dist file.
 Applied by `knext vinext-patches` (runs from the app's postinstall and before `knext build`).
 --- a/dist/index.js
 +++ b/dist/index.js
-@@ -3917,6 +3917,26 @@
- 					pagesDir: hasPagesDir ? pagesDir : null,
- 					pageExtensions: nextConfig.pageExtensions
- 				});
+@@ -4080,6 +4080,33 @@
+ 			}
+ 		},
+ 		{
++			name: "vinext:nitro-asset-prefix",
++			nitro: { setup: async (nitro) => {
++				if (nitro.options.dev || !nextConfig) return;
++				if (!hasAppDir && !hasPagesDir) return;
 +				const { ASSET_PREFIX_URL_DIR, isAbsoluteAssetPrefix } = await import("./utils/asset-prefix.js");
 +				const assetPrefix = nextConfig.assetPrefix ?? "";
 +				const assetPathPrefix = assetPrefixPathname(assetPrefix);
@@ -41,6 +45,9 @@ Applied by `knext vinext-patches` (runs from the app's postinstall and before `k
 +						"cache-control": "public, max-age=31536000, immutable"
 +					};
 +				}
- 				if (Object.keys(generatedRouteRules).length === 0) return;
- 				const { routeRules, skippedRoutes } = mergeNitroRouteRules(nitro.options.routeRules, generatedRouteRules);
- 				nitro.options.routeRules = routeRules;
++			} }
++		},
++		{
+ 			name: "vinext:nitro-setup",
+ 			writeBundle() {
+ 				if (this.environment?.name === "nitro") writeNitroTraceIncludes?.();

@@ -58,6 +58,9 @@ const PROOF = {
     manifest: '.github/compat-credentialed-next-version.json',
     scaffoldPkg: 'packages/kn-next/templates/app/package.json.hbs',
     ledger: 'scripts/compat-vinext-ledger.mjs',
+    fixtureDrain: 'packages/kn-next/src/__tests__/fixtures/standalone-drain-app/package.json',
+    fixturePages: 'packages/kn-next/src/__tests__/fixtures/standalone-pages-app/package.json',
+    fixtureVinextNode: 'packages/kn-next/src/__tests__/fixtures/vinext-node-app/package.json',
   },
 };
 
@@ -118,13 +121,28 @@ const MUTATIONS = [
     replacement: 'the official suite now runs against Next.js v16.3.3.',
   },
   {
-    // #2296: the v2 harness moved to v16.4.0, so credentialedNextRef equals
-    // shippedNextPin again and the guard's CONVERGED branch is the live one.
+    // #2594: the docs legitimately claim a "newer Next.js release" today
+    // (scaffold 16.4.3, credential v16.4.0), so a docs-only edit can no longer
+    // reach the CONVERGED branch. Close the divergence everywhere the lockstep
+    // compares the shipped pin (manifest, scaffold, the three docker-e2e
+    // fixtures) and leave the docs' claim: only the stale claim can go red.
     label:
-      'compat-matrix.mdx: claim a "newer Next.js release" while the manifest documents NO divergence (shipped 16.4.0 = credential v16.4.0)',
-    subject: 'docsMatrixMdx',
-    anchor: 'That is the release `knext create` scaffolds and the minimum knext 2.0 supports.',
-    replacement: 'New apps scaffold a newer Next.js release than the suite covers.',
+      'compat-matrix.mdx: keep claiming a "newer Next.js release" after the divergence closes (shippedNextPin back to the credentialed v16.4.0 everywhere)',
+    edits: [
+      {
+        subject: 'manifest',
+        anchor: '"shippedNextPin": "16.4.3",',
+        replacement: '"shippedNextPin": "16.4.0",',
+      },
+      { subject: 'scaffoldPkg', anchor: '"next": "16.4.3",', replacement: '"next": "16.4.0",' },
+      { subject: 'fixtureDrain', anchor: '"next": "16.4.3",', replacement: '"next": "16.4.0",' },
+      { subject: 'fixturePages', anchor: '"next": "16.4.3",', replacement: '"next": "16.4.0",' },
+      {
+        subject: 'fixtureVinextNode',
+        anchor: '"next": "16.4.3",',
+        replacement: '"next": "16.4.0",',
+      },
+    ],
   },
   {
     label:
@@ -169,28 +187,28 @@ const MUTATIONS = [
     edits: [
       {
         subject: 'scaffoldPkg',
-        anchor: '"next": "16.4.0",',
+        anchor: '"next": "16.4.3",',
         replacement: '"next": "16.5.0",',
       },
       {
         subject: 'manifest',
-        anchor: '"shippedNextPin": "16.4.0",',
+        anchor: '"shippedNextPin": "16.4.3",',
         replacement: '"shippedNextPin": "16.5.0",',
       },
     ],
   },
   {
     label:
-      'scaffold pin bumped to 16.4.1 with the manifest still documenting 16.4.0 (silent drift)',
+      'scaffold pin bumped to 16.4.4 with the manifest still documenting 16.4.3 (silent drift)',
     subject: 'scaffoldPkg',
-    anchor: '"next": "16.4.0",',
-    replacement: '"next": "16.4.1",',
+    anchor: '"next": "16.4.3",',
+    replacement: '"next": "16.4.4",',
   },
   {
     label:
-      'scaffold pin put back to 16.3.8 (below the peer floor) with the manifest still documenting 16.4.0',
+      'scaffold pin put back to 16.3.8 (below the peer floor) with the manifest still documenting 16.4.3',
     subject: 'scaffoldPkg',
-    anchor: '"next": "16.4.0",',
+    anchor: '"next": "16.4.3",',
     replacement: '"next": "16.3.8",',
   },
 

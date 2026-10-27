@@ -7,6 +7,10 @@ import { describe, expect, it } from "bun:test";
 import type { KubectlFn, ProbeOutcome } from "../cli/doctor";
 import { nextMinorCheck } from "../cli/doctor/checks/next-minor";
 import type { CheckContext, DoctorDeps } from "../cli/doctor/types";
+import {
+    minorWithoutFixedRelease,
+    nextAdvisoriesFor,
+} from "../next-advisories";
 import { CREDENTIALED_NEXT_MINORS, NEXT_PEER_RANGE } from "../next-compat";
 
 const noKubectl: KubectlFn = () => ({
@@ -42,12 +46,39 @@ describe("doctor next-minor row", () => {
         ).toEqual([]);
     });
 
-    it("passes on every credentialed minor", () => {
+    it("passes a credentialed minor only when no advisory affects the version", () => {
         expect(CREDENTIALED_NEXT_MINORS.length).toBeGreaterThan(0);
         for (const minor of CREDENTIALED_NEXT_MINORS) {
-            const [row] = nextMinorCheck(ctxFor(`${minor}.2`));
+            const v = `${minor}.2`;
+            const [row] = nextMinorCheck(ctxFor(v));
             expect(row?.id).toBe("next-minor");
-            expect(row?.status).toBe("pass");
+            expect(row?.status).toBe(
+                nextAdvisoriesFor(v).length === 0 ? "pass" : "warn",
+            );
+        }
+    });
+
+    // #2594 round 2: never PASS what the next-advisories row FAILs. 16.4.0 is
+    // on the credentialed minor AND affected by the October advisories.
+    it("never PASSes a version next-advisories FAILs (16.4.0)", () => {
+        const [row] = nextMinorCheck(ctxFor("16.4.0"));
+        expect(row?.status).toBe("warn");
+        expect(row?.detail).toContain("GHSA-2464-fhr4-w9xw");
+        expect(row?.hint).toContain("16.4.1");
+    });
+
+    it("still passes the patched credentialed release (16.4.3)", () => {
+        expect(nextMinorCheck(ctxFor("16.4.3"))[0]?.status).toBe("pass");
+    });
+
+    it("never recommends a credentialed minor that has no fixed release", () => {
+        for (const v of ["canary", "16.5.0", "15.5.28"]) {
+            const hint = nextMinorCheck(ctxFor(v))[0]?.hint ?? "";
+            for (const minor of CREDENTIALED_NEXT_MINORS) {
+                if (minorWithoutFixedRelease(minor).length > 0) {
+                    expect(hint).not.toContain(`${minor}.x`);
+                }
+            }
         }
     });
 
@@ -65,7 +96,10 @@ describe("doctor next-minor row", () => {
     });
 
     it("every minor the shipped range admits is credentialed (no silent uncredentialed minor)", () => {
-        const [row] = nextMinorCheck(ctxFor("16.4.0"));
+        // 16.4.3, not 16.4.0: the floor release carries the October
+        // advisories, so it WARNs on that ground (#2594) — this test is about
+        // the minor, so it uses the minor's patched release.
+        const [row] = nextMinorCheck(ctxFor("16.4.3"));
         expect(row?.status).toBe("pass");
     });
 

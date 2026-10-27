@@ -1,17 +1,17 @@
-knext bundled fix for vinext 1.1.0 (dist output)
+knext bundled fix for vinext 1.3.0 (dist output)
 Upstream: https://github.com/cloudflare/vinext/pull/3689
 What it fixes: a server action's redirect() answered with HTTP 303 whenever the action was invoked via fetch (the client-side JS router path) and the target route wasn't an already-forwarded action, an ancestor/stale-sibling route, or a different runtime from the current route -- handleServerActionRscRequest's shouldUseForwardedActionRedirectStatus() only chose 200 in those specific cases. Next.js' own action-handler.ts answers every fetch-invoked action's redirect with 200 unconditionally (vercel/next.js#96310) and reserves 303 for the no-JS, progressive-enhancement form-POST path (handleProgressiveServerActionRequest here, left untouched and still correctly 303). The client already treats a 303 RSC response as if it were 200 before decoding it (app-browser-server-action-client.js, the `fetchResponse.status === 303` rewrap) as a defensive skew-protection shim for an older, unpatched server -- this fix removes the need for that rewrap on a patched server, but keeps the shim itself in place. Security: this only changes which status code accompanies a response that already carries no Location header and whose redirect target already passed vinext's existing same-origin/basePath checks (resolveInternalActionRedirectTarget, dispatchActionRedirectTarget's same-origin guard on followed redirects) -- those checks are unmodified, so no open-redirect surface changes; an external redirect target still only reaches the browser via the ACTION_REDIRECT_HEADER value the client already validates, never via a Location header or an auto-followed 3xx.
 Includes the maintainer's follow-ups: a header-only fetch-action redirect is marked config-headers-applied (here and in app-action-forwarding.js) so finalization cannot apply the source headers a second time at 200.
 Retire: delete this file (and its manifest entry) when the pinned vinext is >= the first
 release that includes cloudflare/vinext#3689.
-Ported by hand from the upstream src change to the published 1.1.0 dist files.
+Ported by hand from the upstream src change to the published 1.3.0 dist files.
 Applied by `knext vinext-patches` (runs from the app's postinstall and before `knext build`).
 
 --- a/dist/server/app-action-forwarding.js
 +++ b/dist/server/app-action-forwarding.js
 @@ -4,6 +4,7 @@
+ import { patternToNextFormat } from "../routing/route-validation.js";
  import { RequestCookies, ResponseCookies } from "../shims/server.js";
- import { attachRequestCfMetadata, processMiddlewareHeaders, validateCsrfOrigin } from "./request-pipeline.js";
  import { mergeMiddlewareResponseHeaders } from "./middleware-response-headers.js";
 +import { markAppRscResponseConfigHeadersApplied } from "./app-rsc-response-finalizer.js";
  import { getSetCookieName } from "./cookie-utils.js";
@@ -34,17 +34,21 @@ Applied by `knext vinext-patches` (runs from the app's postinstall and before `k
  	const headers = new Headers(middlewareContext.headers ?? void 0);
 --- a/dist/server/app-server-action-execution.js
 +++ b/dist/server/app-server-action-execution.js
-@@ -2,8 +2,7 @@
+@@ -3,12 +3,11 @@
  import { buildRequestHeadersFromMiddlewareResponse } from "../utils/middleware-request-headers.js";
  import { parseEdgeRequestCookieHeader } from "../utils/parse-cookie.js";
  import { isExternalUrl } from "../utils/external-url.js";
--import { splitPathSegments } from "../routing/utils.js";
 -import { addBasePathToPathname, hasBasePath, stripBasePath } from "../utils/base-path.js";
 +import { addBasePathToPathname, hasBasePath } from "../utils/base-path.js";
  import { NEXT_ROUTER_STATE_TREE_HEADER, VINEXT_RSC_VARY_HEADER } from "./app-rsc-vary.js";
  import { ACTION_FORWARDED_HEADER, ACTION_REDIRECT_HEADER, ACTION_REDIRECT_STATUS_HEADER, ACTION_REDIRECT_TYPE_HEADER, ACTION_REVALIDATED_HEADER, VINEXT_RENDERED_PATH_AND_SEARCH_HEADER } from "./headers.js";
  import { internalServerErrorResponse, payloadTooLargeResponse } from "./http-error-responses.js";
-@@ -273,6 +272,18 @@
+ import { attachRequestCfMetadata, validateCsrfOrigin, validateServerActionPayload } from "./request-pipeline.js";
+-import { splitPathSegments } from "../routing/utils.js";
+ import { getRequestExecutionContext } from "../shims/request-context.js";
+ import { shareIsolatePromise } from "./isolate-shared-promise.js";
+ import { APP_RSC_RENDER_MODE_NAVIGATION } from "./app-rsc-render-mode.js";
+@@ -291,6 +290,18 @@
  	nextHeaders.delete("Vary");
  	return nextHeaders;
  }
@@ -63,7 +67,7 @@ Applied by `knext vinext-patches` (runs from the app's postinstall and before `k
  function isReadableStreamBody(body) {
  	return typeof ReadableStream !== "undefined" && body instanceof ReadableStream;
  }
-@@ -449,29 +460,6 @@
+@@ -467,29 +478,6 @@
  	} catch {
  		return null;
  	}
@@ -91,9 +95,9 @@ Applied by `knext vinext-patches` (runs from the app's postinstall and before `k
 -	if (!options.currentRoute || !options.targetRoute || !options.resolveRouteRuntime) return false;
 -	return normalizeRuntime(options.resolveRouteRuntime(options.currentRoute)) !== normalizeRuntime(options.resolveRouteRuntime(options.targetRoute));
  }
- function getActionHttpFallbackStatus(error) {
- 	const digest = getNextErrorDigest(error);
-@@ -847,13 +835,15 @@
+ /**
+ * A failed fetch action's result, as Next.js sends it: a rejected promise.
+@@ -880,13 +868,15 @@
  			for (const cookie of actionPendingCookies) redirectHeaders.append("Set-Cookie", cookie);
  			if (actionDraftCookie) redirectHeaders.append("Set-Cookie", actionDraftCookie);
  			setActionRevalidatedHeader(redirectHeaders, actionRevalidationKind);
@@ -113,7 +117,7 @@ Applied by `knext vinext-patches` (runs from the app's postinstall and before `k
  			}
  			let targetResponse = null;
  			try {
-@@ -881,25 +871,11 @@
+@@ -914,25 +904,11 @@
  			if (!targetResponse || !targetResponse.headers.get("content-type")?.startsWith("text/x-component") || !targetResponse.body) {
  				targetResponse?.body?.cancel().catch(() => {});
  				options.clearRequestContext();

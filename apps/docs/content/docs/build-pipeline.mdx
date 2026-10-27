@@ -81,7 +81,7 @@ middleware:
   binary rather than left behind on the machine that built it.
 - **Node.js:** `knext build` copies the same files into `.output/server`, which the image ships.
 
-This includes `@vercel/og` 1.0.3, the version `vinext` 1.1.0 installs. Its published package is
+This includes `@vercel/og` 1.0.3, the version `vinext` 1.3.0 installs. Its published package is
 missing the HarfBuzz text-shaping file (`hb.wasm`), so the build takes that file from the exact
 `satori` and `harfbuzzjs` versions `@vercel/og` was built against. On Node.js it is staged next to
 the `harfbuzzjs` MIT licence (`hb.wasm.LICENSE`). On the Bun single executable the file is embedded
@@ -456,7 +456,7 @@ yourself (`0`, `false`, `off` and `no` all turn them off). A misspelled value, s
 treated as unset and a vinext build prints a warning that names it. Each fix is removed from knext once a
 vinext release includes it.
 
-The fixes bundled with vinext 1.1.0:
+The fixes bundled with vinext 1.3.0:
 
 - **`require()` of CommonJS dependencies in server code** resolves the package's `require` export
   condition, even for a package Vite would otherwise leave external.
@@ -486,15 +486,6 @@ The fixes bundled with vinext 1.1.0:
   server's single React copy, including after you move the `.output` directory. If your app
   was scaffolded before this fix and you do not use the bundled fixes, add
   `traceDeps: ['react', 'react-dom']` to the `nitro({ ... })` options in `vite.config.ts`.
-- **A rewrite to a file in `public/`** (a `next.config` rewrite, or `NextResponse.rewrite()` in
-  middleware) serves that file instead of the 404 page. Pages Router apps get this for
-  `beforeFiles`, `afterFiles` and `fallback` rewrites, App Router apps for `beforeFiles` and
-  middleware rewrites.
-- **Middleware runs before a file in `public/` that its `matcher` covers**, as in Next.js. A
-  request for such a file reaches your middleware first, and the file is served only if the
-  middleware lets the request continue. Middleware without a `matcher` runs for every file in
-  `public/`. Files the matcher does not cover, and the build's own `/_next/static/` assets, are
-  still served directly without running middleware.
 - **A tsconfig `paths` entry with several targets** (`"@lib/*": ["lib/a/*", "lib/b/*"]`) falls back
   to the later targets when the first one does not resolve, and a `.d.ts` target is never used as
   a module, as in TypeScript and Next.js. Before, only the first target was used.
@@ -510,9 +501,6 @@ The fixes bundled with vinext 1.1.0:
   route's `Cache-Control`. An app with no `app/not-found` of its own gets the built-in not-found page,
   not `pages/404`, as in Next.js. This applies to production builds; the development server still
   shows `pages/404`.
-- **The client build manifest** (`/_next/static/<buildId>/_buildManifest.js`) lists the app's
-  Pages Router routes in `sortedPages`, in the order Next.js uses, instead of an empty list. API
-  routes, `/_app` and `/_error` are included, as in a Next.js build.
 
 ## Build the image on your own builder (Cloud Build / CI)
 
