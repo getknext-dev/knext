@@ -15,7 +15,7 @@
  * fixture (exact pins plus a lockfile) into a temp dir, writes the `public/`
  * files, a `next.config` with the rewrites and a middleware beside it,
  * `bun install --frozen-lockfile`s, runs `vite build` and requests the files
- * from the built `.output` server under node. No knext patch is applied: the
+ * from the built `.output` server under node (the node preset) and bun (the bun preset). No knext patch is applied: the
  * point is that the unpatched vinext already behaves. (On vinext 1.1.0 the same
  * requests answered 404, an empty 200, or skipped the middleware.)
  */
@@ -62,11 +62,15 @@ export const config = {
 };
 `;
 
-const NODE_VITE_CONFIG = `import { nitro } from "nitro/vite";
+/** The two Nitro presets knext ships: the Node server and the Bun server. */
+type Preset = "node" | "bun";
+const PRESETS: Preset[] = ["node", "bun"];
+
+const viteConfig = (preset: Preset) => `import { nitro } from "nitro/vite";
 import vinext from "vinext";
 import { defineConfig } from "vite";
 export default defineConfig({
-    plugins: [vinext(), nitro({ preset: "node" })],
+    plugins: [vinext(), nitro({ preset: "${preset}" })],
 });
 `;
 
@@ -86,11 +90,14 @@ async function buildAndServe(
     fixture: string,
     files: Record<string, string>,
     remove: string[] = [],
+    preset: Preset = "node",
 ): Promise<Built> {
     const root = mkdtempSync(join(tmpdir(), "knext-nitro-public-"));
     tempRoots.push(root);
     cpSync(join(FIXTURES, fixture), root, { recursive: true });
     for (const rel of remove) rmSync(join(root, rel), { force: true });
+    // The scenario's preset decides the server that serves the built output.
+    files = { ...files, "vite.config.mjs": viteConfig(preset) };
     for (const [rel, text] of Object.entries(files)) {
         mkdirSync(join(root, rel, ".."), { recursive: true });
         writeFileSync(join(root, rel), text);
@@ -104,10 +111,18 @@ async function buildAndServe(
     sh(join(root, "node_modules", ".bin", "vite"), ["build"]);
 
     const port = 20000 + Math.floor(Math.random() * 20000);
-    const srv = spawn("node", [".output/server/index.mjs"], {
-        cwd: root,
-        env: { ...process.env, PORT: String(port), NITRO_PORT: String(port) },
-    });
+    const srv = spawn(
+        preset === "bun" ? "bun" : "node",
+        [".output/server/index.mjs"],
+        {
+            cwd: root,
+            env: {
+                ...process.env,
+                PORT: String(port),
+                NITRO_PORT: String(port),
+            },
+        },
+    );
     let log = "";
     srv.stdout.on("data", (d) => {
         log += d;
@@ -177,13 +192,20 @@ async function expectPublicFileBehaviour(app: Built) {
     expect(viaMiddleware.body).toBe("public-file-body");
 }
 
-describe("vinext x nitro: public files, rewrites to them and middleware before them", () => {
+describe.each(
+    PRESETS,
+)("vinext x nitro (%s preset): public files, rewrites to them and middleware before them", (preset) => {
     it("Pages Router: unpatched vinext serves them as Next.js does", async () => {
-        const app = await buildAndServe("vinext-styled-jsx-app", {
-            ...PUBLIC_FILES,
-            "next.config.mjs": NEXT_CONFIG,
-            "middleware.js": MIDDLEWARE,
-        });
+        const app = await buildAndServe(
+            "vinext-styled-jsx-app",
+            {
+                ...PUBLIC_FILES,
+                "next.config.mjs": NEXT_CONFIG,
+                "middleware.js": MIDDLEWARE,
+            },
+            [],
+            preset,
+        );
         try {
             // (The fixture's only page uses <style jsx>, which needs the
             // react-tracing fix this test deliberately leaves out; the
@@ -201,10 +223,11 @@ describe("vinext x nitro: public files, rewrites to them and middleware before t
                 ...PUBLIC_FILES,
                 "next.config.mjs": NEXT_CONFIG,
                 "middleware.js": MIDDLEWARE,
-                "vite.config.mjs": NODE_VITE_CONFIG,
             },
-            // The fixture's own bun-preset config and TypeScript next.config.
+            // The fixture's own bun-preset config and TypeScript next.config
+            // (replaced by the scenario's preset config and a .mjs next.config).
             ["vite.config.ts", "next.config.ts"],
+            preset,
         );
         try {
             await expectPublicFileBehaviour(app);
