@@ -106,7 +106,7 @@ jobs:
       CLUSTER: standalone-e2e
       APP_NS: standalone-e2e
       APP_NAME: standalone-e2e
-      NEXT_VERSION: 16.3.8
+      NEXT_VERSION: 16.4.3
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 

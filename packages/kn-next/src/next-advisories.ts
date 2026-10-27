@@ -90,6 +90,38 @@ export function isComparableNextVersion(version: string): boolean {
     return triple(version) !== undefined;
 }
 
+/**
+ * Advisories for which NO release of the `major.minor` line `minor` is fixed:
+ * every release of the line is inside the affected range and the fix ships on
+ * a later minor. Such a minor must never be recommended to a user — doing so
+ * tells them to downgrade into the advisory.
+ */
+export function minorWithoutFixedRelease(minor: string): string[] {
+    const m = /^(\d+)\.(\d+)$/.exec(minor.trim());
+    if (!m) return [];
+    const [maj, min] = [Number(m[1]), Number(m[2])];
+    const cmpMinor = (v: string): number => {
+        const t = triple(v) as Triple;
+        return t[0] !== maj ? t[0] - maj : t[1] - min;
+    };
+    const ids: string[] = [];
+    for (const advisory of NEXT_ADVISORIES) {
+        if (
+            advisory.ranges.some(
+                (r) =>
+                    // affected from the line's first release (X.Y.0) ...
+                    cmp(triple(r.introduced) as Triple, [maj, min, 0]) <= 0 &&
+                    // ... through past its end, with the fix on a later minor.
+                    cmpMinor(r.lastAffected) > 0 &&
+                    cmpMinor(r.fixed) > 0,
+            )
+        ) {
+            ids.push(advisory.id);
+        }
+    }
+    return ids;
+}
+
 /** Every advisory in {@link NEXT_ADVISORIES} that affects `version`. */
 export function nextAdvisoriesFor(version: string): NextAdvisoryHit[] {
     const v = triple(version);
