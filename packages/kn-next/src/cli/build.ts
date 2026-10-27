@@ -47,6 +47,7 @@ import {
 import { resolveCompileToolchain } from "./bun-toolchain";
 import { type CompileToolchain, compileIncludeGlobs } from "./compile-config";
 import { isEntrypoint } from "./exec";
+import { warnOnVulnerableNext } from "./next-advisory-warning";
 import { runPostCompileSmoke } from "./postcompile-smoke";
 import { runProjectBuild } from "./project-build";
 import {
@@ -347,6 +348,12 @@ export async function build(options: BuildOptions = {}) {
         // HTML that nothing uploads, so clear it BEFORE `next build` reads it.
         // (The mode notice itself prints at the upload step below.)
         delete process.env.ASSET_PREFIX;
+    }
+
+    // #2594: runProjectBuild warns on a Next.js with a published advisory;
+    // `--skip-next` reuses an earlier build of the same app, so warn here.
+    if (options.skipNextBuild) {
+        warnOnVulnerableNext(process.cwd());
     }
 
     // 2. Run `next build` via the project's build script.

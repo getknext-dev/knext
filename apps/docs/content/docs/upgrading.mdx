@@ -109,6 +109,43 @@ that need the newer operator:
 use one, `knext deploy` refuses before building or uploading anything and names the field. Upgrade
 the operator first, then the CLI, as above.
 
+## Next.js security upgrades
+
+**Apps on Next.js 16.4.0 or older must upgrade to 16.4.1 or later.** Three published Next.js
+advisories affect every 16.x release up to and including 16.4.0:
+
+| Advisory | Severity | What it allows |
+|---|---|---|
+| GHSA-2464-fhr4-w9xw | Critical | Unauthenticated remote code execution in the Image Optimization API when SVG files are used |
+| GHSA-673q-mjm6-r5xr | Critical | Unauthenticated remote code execution in `'use cache'` functions that return typed arrays |
+| GHSA-p3m5-59mp-jv5r | High | Denial of service in the App Router through Server Actions |
+
+knext serves images through Next.js's optimizer and backs `'use cache'` with its shared cache, so
+both remote code execution paths are reachable on a knext app that has not upgraded. There is no
+16.3.x patch: the fix ships only on the 16.4.x line. New apps from `knext create` already pin
+16.4.3.
+
+To upgrade an existing app, pin `next` to 16.4.3 (or any later 16.4.x) in its `package.json`,
+reinstall so the lockfile resolves it, then rebuild and redeploy — the running image keeps the old
+Next.js until you deploy a new one:
+
+```bash
+npm install next@16.4.3      # or: bun add next@16.4.3 / pnpm add next@16.4.3
+knext doctor                 # the Next.js advisory row should now PASS
+knext deploy
+```
+
+`knext doctor` reads the Next.js your app actually resolves and reports **FAIL** (exit code 1),
+naming each advisory, while it is still on an affected version, so you can gate CI on it. Apps on
+the 15.x line are affected by the image optimizer and Server Actions advisories up to 15.5.27;
+the fix there is 15.5.28 — although knext itself supports Next.js 16 only.
+
+Moving to 16.4 also moves the app from the Next.js minor the official compatibility suite has
+credentialed (16.3) to one that is supported but not yet credentialed; `knext doctor` says so as a
+warning. That is the deliberate trade: a known remote code execution is worse than a not-yet-finished
+credential window. See the [compatibility matrix](/docs/compat-matrix) for where the credential
+stands.
+
 ## Version-specific step: upgrading a 0.4.x app to 1.0
 
 1.0 changes five things a 0.4.x app needs to walk through, in this order.
