@@ -283,7 +283,7 @@ describe("#953 layer 2 — the adapter subpath the templates reference actually 
     });
 });
 
-describe("#953 layer 2b — one factory serves vinext 1.0.x (plain call) and 1.1.0 (instantiateCacheAdapter)", () => {
+describe("#953 layer 2b — one factory serves vinext 1.0.x (plain call) and 1.1.0 and later (instantiateCacheAdapter; run against the installed 1.3.0)", () => {
     const MODULES = [
         "vinext-cache-adapter.mjs",
         "vinext-cache-adapter-node.mjs",
@@ -322,7 +322,7 @@ describe("#953 layer 2b — one factory serves vinext 1.0.x (plain call) and 1.1
             expect(handler.options).toEqual({ maxMemoryCacheSize: 5 });
         });
 
-        it(`${file}: vinext 1.1.0's instantiateCacheAdapter still calls it as a factory and gets a working handler`, async () => {
+        it(`${file}: the installed vinext's (1.3.0) instantiateCacheAdapter still calls it as a factory and gets a working handler`, async () => {
             const { instantiateCacheAdapter } = (await import(
                 "vinext/shims/cache-adapter-instantiate"
             )) as unknown as {
@@ -341,7 +341,7 @@ describe("#953 layer 2b — one factory serves vinext 1.0.x (plain call) and 1.1
             expect(handler).toBeInstanceOf(mod.KnextCacheHandler);
         });
 
-        it(`${file}: the named class is what vinext 1.1.0 constructs directly with { env, options }`, async () => {
+        it(`${file}: the named class is what the installed vinext (1.3.0) constructs directly with { env, options }`, async () => {
             const { instantiateCacheAdapter } = (await import(
                 "vinext/shims/cache-adapter-instantiate"
             )) as unknown as {

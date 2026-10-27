@@ -1,4 +1,4 @@
-knext bundled fix for vinext 1.1.0 (dist output)
+knext bundled fix for vinext 1.3.0 (dist output)
 Upstream: https://github.com/cloudflare/vinext/pull/3436
 What it fixes: Nitro builds: `outputFileTracingIncludes` / `outputFileTracingExcludes` from next.config are applied to the traced server dependencies.
 This is the maintainer's version of the PR: Next.js route-key matching (per route, negated keys, generated metadata and
@@ -7,7 +7,7 @@ failing safe on unsupported shapes), the legacy `experimental.outputFileTracing*
 Nitro skips its dependency trace. New modules: dist/build/{glob-match,trace-glob,nitro-trace-includes}.js.
 Retire: delete this file (and its manifest entry) when the pinned vinext is >= the first
 release that includes cloudflare/vinext#3436.
-Ported by hand from the upstream src change to the published 1.1.0 dist files.
+Ported by hand from the upstream src change to the published 1.3.0 dist files.
 Applied by `knext vinext-patches` (runs from the app's postinstall and before `knext build`).
 
 --- /dev/null
@@ -1541,7 +1541,7 @@ Applied by `knext vinext-patches` (runs from the app's postinstall and before `k
 +}
 --- a/dist/config/next-config.js
 +++ b/dist/config/next-config.js
-@@ -567,6 +567,22 @@
+@@ -584,6 +584,22 @@
  }
  function readStringArray(value) {
  	return Array.isArray(value) ? value.filter((item) => typeof item === "string") : [];
@@ -1564,7 +1564,7 @@ Applied by `knext vinext-patches` (runs from the app's postinstall and before `k
  }
  /**
  * Convert lightningcss feature names from `experimental.lightningCssFeatures`
-@@ -783,6 +799,8 @@
+@@ -889,6 +905,8 @@
  			reactMaxHeadersLength: DEFAULT_REACT_MAX_HEADERS_LENGTH,
  			htmlLimitedBots: void 0,
  			serverExternalPackages: [],
@@ -1573,7 +1573,7 @@ Applied by `knext vinext-patches` (runs from the app's postinstall and before `k
  			cacheHandler: void 0,
  			cacheMaxMemorySize: void 0,
  			enablePrerenderSourceMaps: true,
-@@ -967,6 +985,8 @@
+@@ -1098,6 +1116,8 @@
  		reactMaxHeadersLength: typeof config.reactMaxHeadersLength === "number" ? config.reactMaxHeadersLength : DEFAULT_REACT_MAX_HEADERS_LENGTH,
  		htmlLimitedBots,
  		serverExternalPackages,
@@ -1584,28 +1584,38 @@ Applied by `knext vinext-patches` (runs from the app's postinstall and before `k
  		enablePrerenderSourceMaps: config.enablePrerenderSourceMaps ?? true,
 --- a/dist/index.js
 +++ b/dist/index.js
-@@ -878,6 +878,7 @@
+@@ -960,6 +960,7 @@
  	let warnedInlineNextConfigOverride = false;
  	let hasNitroPlugin = false;
  	let nitroHostRuntime = "node";
 +	let writeNitroTraceIncludes;
+ 	let nitroPublicFiles = false;
+ 	let nitroPublicDir = "public";
  	let resolvedServerExternalPackages = [];
- 	let registerNodeOpenTelemetryLoader = false;
- 	let pagesTsconfigAliases = {};
-@@ -3787,6 +3788,9 @@
+@@ -4014,6 +4015,9 @@
  		},
  		{
- 			name: "vinext:nitro-route-rules",
+ 			name: "vinext:nitro-setup",
 +			writeBundle() {
 +				if (this.environment?.name === "nitro") writeNitroTraceIncludes?.();
 +			},
- 			nitro: { setup: async (nitro) => {
+ 			configResolved(config) {
+ 				nitroPublicDir = config.publicDir;
+ 			},
+@@ -4027,7 +4031,7 @@
+ 					force: true
+ 				});
+ 			},
+-			nitro: { setup: (nitro) => {
++			nitro: { setup: async (nitro) => {
  				nitroBuildDir = nitro.options.buildDir ? path.resolve(root, nitro.options.buildDir) : void 0;
  				nitroHostRuntime = nitro.options.exportConditions?.includes("workerd") ? "worker" : "node";
-@@ -3794,6 +3798,31 @@
+ 				if (!nextConfig) return;
+@@ -4040,6 +4044,32 @@
  				if (!hasAppDir && !hasPagesDir) return;
+ 				nitroPublicFiles = registerNitroPublicFiles(nitro.options, NITRO_PUBLIC_FILES_PLUGIN, () => scanPublicFiles(root, nitroPublicDir));
  				if (resolvedServerExternalPackages.length > 0) nitro.options.traceDeps = [.../* @__PURE__ */ new Set([...nitro.options.traceDeps ?? [], ...resolvedServerExternalPackages])];
- 				if (nitro.options.dev) return;
++				if (nitro.options.dev) return;
 +				const { collectTraceRouteNames, createNitroTraceIncludes } = await import("./build/nitro-trace-includes.js");
 +				const { outputFileTracingIncludes, outputFileTracingExcludes } = nextConfig;
 +				const traceIncludes = Object.keys(outputFileTracingIncludes).length > 0 || Object.keys(outputFileTracingExcludes).length > 0 ? createNitroTraceIncludes({
@@ -1631,9 +1641,9 @@ Applied by `knext vinext-patches` (runs from the app's postinstall and before `k
 +					const serverDir = nitro.options.output?.serverDir;
 +					if (serverDir && nitro.options.node !== false && nitro.options.preset !== "nitro-prerender") writeNitroTraceIncludes = () => traceIncludes.write(serverDir);
 +				}
- 				const { collectNitroRouteRules, mergeNitroRouteRules } = await import("./build/nitro-route-rules.js");
- 				const generatedRouteRules = await collectNitroRouteRules({
- 					appDir: hasAppDir ? appDir : null,
+ 			} }
+ 		},
+ 		{
 --- a/dist/server/metadata-routes.js
 +++ b/dist/server/metadata-routes.js
 @@ -440,4 +440,4 @@

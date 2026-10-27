@@ -68,8 +68,9 @@ too, rather than left implied.
   declares it will work with. Next.js 16.0 through 16.3 are no longer supported from knext 2.0; stay
   on the 1.x line of knext to keep using them. The upper bound is widened one minor at a time as
   compatibility evidence lands; see [Versioning](/docs/versioning).
-- **The official compatibility suite runs against `v16.4.0`**, the same release new apps
-  scaffold. What is proven there so far is dispatched runs of the Turbopack build on the Node runtime.
+- **The official compatibility suite runs against `v16.4.0`**. New apps scaffold 16.4.3 on the
+  same line, because 16.4.0 is affected by critical security advisories fixed in 16.4.1 — see
+  [Next.js security upgrades](/docs/upgrading#nextjs-security-upgrades). What is proven there so far is dispatched runs of the Turbopack build on the Node runtime.
   The latest passed 1165 of 1166 test files, and the one failure is a test-setup gap, not a knext
   defect. The other three cells have not yet been run at `v16.4.0`, and no cell has
   started its 14-consecutive-run credential there. See

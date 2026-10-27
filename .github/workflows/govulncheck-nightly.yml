@@ -1,14 +1,21 @@
 name: govulncheck nightly
 
 # A dated govulncheck exception (security/govulncheck-exceptions.json) must stop
-# passing ON its expiry date, not whenever the next PR happens to touch the Go
-# template. go-template.yml only runs on path-filtered events, so this nightly
-# runs the same fail-closed gate over BOTH lane refs, the way
+# passing ON its expiry date, not whenever the next PR happens to touch Go code.
+# The PR-time workflows are path-filtered, so this nightly runs the same
+# fail-closed gate over BOTH lane refs and EVERY Go module, the way
 # mutation-prover-nightly.yml does: a `schedule:` trigger only fires from the
 # default branch's copy of this file (main), so the integration/v2 content it must
-# prove is reached by checking the ref out explicitly. A ref that carries no Go
-# template (main, today) skips its steps by FILE PRESENCE, so the lane turns on by
-# itself when the template lands there.
+# prove is reached by checking the ref out explicitly. Each leg runs THAT ref's
+# own gate script and exceptions file.
+#
+# Fail-closed: every leg requires its module, the gate and the exceptions file and
+# FAILS when one is missing. The one exemption is templates/go on main, which has
+# no Go template yet; that single leg skips by FILE PRESENCE and turns on by itself
+# when the template lands there. The operator and gateway modules exist on both
+# refs, so they can never skip.
+#
+# This file is kept byte-identical on main and integration/v2.
 
 on:
   schedule:
@@ -20,7 +27,7 @@ permissions:
 
 jobs:
   govulncheck:
-    name: govulncheck gate (${{ matrix.ref }})
+    name: govulncheck gate (${{ matrix.ref }}, ${{ matrix.module }})
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -29,40 +36,43 @@ jobs:
       fail-fast: false
       matrix:
         ref: [main, integration/v2]
+        module: [templates/go, packages/kn-next-operator, packages/scale-zero-pg/gateway]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ matrix.ref }}
 
-      # The skip-by-file-presence below is for main, which carries no Go template.
-      # On integration/v2 the template, the gate and the exceptions MUST exist: a
-      # missing one means the checkout is wrong, and a skip there would be a green
-      # run that proved nothing.
-      - name: Require the Go template and gate on integration/v2
-        if: ${{ matrix.ref == 'integration/v2' }}
+      # Everything but the main/templates/go leg MUST find its module, the gate and
+      # the exceptions file: a missing one means the checkout is wrong, and a skip
+      # there would be a green run that proved nothing.
+      - name: Require the module, the gate and the exceptions
+        if: ${{ !(matrix.ref == 'main' && matrix.module == 'templates/go') }}
+        env:
+          MODULE: ${{ matrix.module }}
+          REF: ${{ matrix.ref }}
         run: |
           set -euo pipefail
-          fail() { echo "::error::$1 is missing on integration/v2; refusing to pass without scanning"; exit 1; }
-          test -f templates/go/go.mod || fail templates/go/go.mod
+          fail() { echo "::error::$1 is missing on $REF; refusing to pass without scanning"; exit 1; }
+          test -f "$MODULE/go.mod" || fail "$MODULE/go.mod"
           test -f scripts/govulncheck-gate.mjs || fail scripts/govulncheck-gate.mjs
           test -f security/govulncheck-exceptions.json || fail security/govulncheck-exceptions.json
 
-      - name: Set up Go (templates/go/go.mod)
-        if: ${{ hashFiles('templates/go/go.mod') != '' }}
+      - name: Set up Go (${{ matrix.module }}/go.mod)
+        if: ${{ hashFiles(format('{0}/go.mod', matrix.module)) != '' }}
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: templates/go/go.mod
-          cache-dependency-path: templates/go/go.sum
+          go-version-file: ${{ matrix.module }}/go.mod
+          cache-dependency-path: ${{ matrix.module }}/go.sum
 
       - name: Setup Node.js
-        if: ${{ hashFiles('templates/go/go.mod') != '' }}
+        if: ${{ hashFiles(format('{0}/go.mod', matrix.module)) != '' }}
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24'
 
       - name: govulncheck (pinned) through the fail-closed gate
-        if: ${{ hashFiles('templates/go/go.mod') != '' }}
-        working-directory: templates/go
+        if: ${{ hashFiles(format('{0}/go.mod', matrix.module)) != '' }}
+        working-directory: ${{ matrix.module }}
         run: |
           set -euo pipefail
-          go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 -format json ./... | node "$GITHUB_WORKSPACE/scripts/govulncheck-gate.mjs"
+          go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 -format json ./... | node "$GITHUB_WORKSPACE/scripts/govulncheck-gate.mjs" "${{ matrix.module }}"
