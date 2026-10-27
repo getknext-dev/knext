@@ -103,8 +103,10 @@ unsupported even when they happen to work. A **bump is credentialed** as follows
    the fingerprint and restarts the cell's count.
 2. It carries **one full 16-shard measurement** on the new pin, recorded in the matrix, showing no net
    regression against the previous number (the 1.1.0 re-pin is the precedent: it dropped five
-   patches the release shipped, re-ported five, and lowered the structural-gap cap from 49 to 41;
-   the 1.3.0 re-pin dropped four, narrowed two and re-ported the rest).
+   patches the release shipped, re-ported five, and lowered the structural-gap cap from 49 to 41).
+   The 1.3.0 re-pin is NOT a precedent for this rule: its measurement (docs/compat-matrix.md) showed
+   net +6 files but not zero regression (2 files and 15 cases newly red, tracked as issues), and the
+   lane needed `nextjsRef` v16.4.0 on this line because the default ref cannot install here.
 3. Every bundled patch is re-evaluated: dropped if the release ships it, re-ported otherwise, and
    each remaining patch keeps a registered retirement path.
 4. The structural-gap ledger is pruned for entries that went stale (a passing file reds the lane).
