@@ -96,14 +96,15 @@ green; a Bun major or minor bump is a credential-restarting change like any othe
 **vinext version.** knext supports **exactly the vinext version it pins**, an exact version (not a
 range) held in lockstep across the core package, the reference app, the docs app, the scaffold and
 zone templates and the compat install script (`tests/vinext-pin-lockstep.test.ts` scans every
-manifest and lockfile). Today that pin is 1.1.0 with a bundled patch set. Other vinext versions are
+manifest and lockfile). Today that pin is 1.3.0 with a bundled patch set (and the React family at 19.3.1 and `@vitejs/plugin-rsc` at 0.5.38, which 1.3.0 requires for App Router builds). Other vinext versions are
 unsupported even when they happen to work. A **bump is credentialed** as follows:
 
 1. It lands on the integration line **between credential windows** or on a new rc, because it moves
    the fingerprint and restarts the cell's count.
 2. It carries **one full 16-shard measurement** on the new pin, recorded in the matrix, showing no net
    regression against the previous number (the 1.1.0 re-pin is the precedent: it dropped five
-   patches the release shipped, re-ported five, and lowered the structural-gap cap from 49 to 41).
+   patches the release shipped, re-ported five, and lowered the structural-gap cap from 49 to 41;
+   the 1.3.0 re-pin dropped four, narrowed two and re-ported the rest).
 3. Every bundled patch is re-evaluated: dropped if the release ships it, re-ported otherwise, and
    each remaining patch keeps a registered retirement path.
 4. The structural-gap ledger is pruned for entries that went stale (a passing file reds the lane).

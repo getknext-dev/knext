@@ -8,14 +8,14 @@
     "build": "vite build"
   },
   "dependencies": {
-    "react": "^19.2.6",
-    "react-dom": "^19.2.6",
-    "react-server-dom-webpack": "^19.2.6",
-    "vinext": "1.1.0"
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "react-server-dom-webpack": "^19.3.1",
+    "vinext": "1.3.0"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^6.0.0",
-    "@vitejs/plugin-rsc": "^0.5.26",
+    "@vitejs/plugin-rsc": "^0.5.38",
     "next": "16.4.0",
     "nitro": "3.0.260610-beta",
     "vite": "^8.2.2"

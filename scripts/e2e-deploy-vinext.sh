@@ -121,25 +121,27 @@ VINEXT_VERSION="${KNEXT_VINEXT_VERSION:-${VINEXT_PINNED_VERSION}}"
 # END vinext-version-resolution
 VITE_VERSION="${KNEXT_VITE_VERSION:-8.2.2}"
 NITRO_VERSION="${KNEXT_NITRO_VERSION:-3.0.260610-beta}"
-# vinext declares `@vitejs/plugin-rsc@^0.5.34` as an (optional) peer.
-# (Unchanged from beta.9 through 1.0.1 — confirmed via `npm view vinext@<v>
-# peerDependencies`; re-verify with the same command on every future bump.)
+# vinext declares `@vitejs/plugin-rsc@^0.5.37` as an (optional) peer (raised from
+# `^0.5.34` in 1.3.0, which also refuses to build an App Router app below it —
+# confirmed via `npm view vinext@<v> peerDependencies`; re-verify with the same
+# command on every future bump).
 # Because the toolchain install pulls this package explicitly, npm enforces that
-# range even though the peer is optional — 0.5.26 does NOT satisfy `^0.5.34`, so
+# range even though the peer is optional — 0.5.26 does NOT satisfy `^0.5.37`, so
 # every fixture install still aborts with `npm ERESOLVE` (a SECOND conflict edge
 # that only surfaces after the react-family pin is fixed, since npm reports one
-# edge at a time). Pinned at 0.5.34 the whole toolchain install resolves cleanly.
-PLUGIN_RSC_VERSION="${KNEXT_PLUGIN_RSC_VERSION:-0.5.34}"
+# edge at a time). Pinned at 0.5.38 the whole toolchain install resolves cleanly.
+PLUGIN_RSC_VERSION="${KNEXT_PLUGIN_RSC_VERSION:-0.5.38}"
 # The React family (react, react-dom, react-server-dom-webpack) is versioned in
 # lockstep upstream and MUST be pinned together here. vinext declares a
-# `react@^19.2.6` peer (unchanged from beta.9 through 1.0.1); the corpus
+# `react@^19.3.1` peer (raised from `^19.2.6` in 1.3.0, which throws at build
+# time for an App Router app below 19.3.1); the corpus
 # fixtures otherwise pull react@19.2.4
 # transitively via next@16.2, which does NOT satisfy that peer — every fixture
 # install then aborts with `npm ERESOLVE` before it can build, reddening the whole
 # axis for a reason that has nothing to do with the compiled artifact. Pinning the
 # whole family at the version vinext's RSC transform was built against keeps the
 # runtime coherent, which `--legacy-peer-deps` (accept-and-skew) would not.
-REACT_VERSION="${KNEXT_REACT_VERSION:-19.2.6}"
+REACT_VERSION="${KNEXT_REACT_VERSION:-19.3.1}"
 # The `app-dir/scss` fixtures (29 in the v16.2.0 window) ship `sass@1.54.0` —
 # Next.js's own pin — but the toolchain's `vite@8.2.2` declares
 # `peerOptional sass@^1.70.0`, and 1.54.0 does NOT satisfy it. Without a coherent
