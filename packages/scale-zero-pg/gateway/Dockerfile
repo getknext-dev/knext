@@ -1,6 +1,6 @@
 # Multi-stage build: static Go binary -> distroless.
-# golang:1.26.9 (digest-pinned; tests/golang-from-lockstep.test.ts keeps it equal to go.mod)
-FROM golang:1.26.9@sha256:37cfcca63222ec499bec5e8ad7aad52dbf7529db36d5812b8eae2f0621aa92d6 AS build
+# golang:1.26.10 (digest-pinned; tests/golang-from-lockstep.test.ts keeps it equal to go.mod)
+FROM golang:1.26.10@sha256:24a707af49702fa44f02785475d02fb752f6982d3e9c0afb7696e1f0204e7ce9 AS build
 WORKDIR /src
 
 # Cache modules first.

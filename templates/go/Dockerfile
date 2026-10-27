@@ -4,13 +4,13 @@
 # Both base images are DIGEST-PINNED so the bytes of the image are fixed; the
 # tag is kept in the comment above each FROM (Docker rejects a trailing
 # comment on a FROM line). Refresh the tag and digest together:
-#   docker buildx imagetools inspect golang:1.26.9
+#   docker buildx imagetools inspect golang:1.26.10
 #   docker buildx imagetools inspect gcr.io/distroless/static:nonroot
 # The Go point release must match the `go` line in go.mod: Trivy and
 # govulncheck read the standard library version compiled into the binary.
 
-# golang:1.26.9
-FROM golang:1.26.9@sha256:37cfcca63222ec499bec5e8ad7aad52dbf7529db36d5812b8eae2f0621aa92d6 AS build
+# golang:1.26.10
+FROM golang:1.26.10@sha256:24a707af49702fa44f02785475d02fb752f6982d3e9c0afb7696e1f0204e7ce9 AS build
 ARG TARGETOS
 ARG TARGETARCH
 WORKDIR /src
