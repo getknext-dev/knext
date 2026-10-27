@@ -9,7 +9,11 @@ import { describe, expect, it } from "bun:test";
 import { type KubectlFn, type ProbeOutcome, runDoctor } from "../cli/doctor";
 import { nextAdvisoriesCheck } from "../cli/doctor/checks/next-advisories";
 import type { CheckContext, DoctorDeps } from "../cli/doctor/types";
-import { NEXT_ADVISORIES, nextAdvisoriesFor } from "../next-advisories";
+import {
+    minorWithoutFixedRelease,
+    NEXT_ADVISORIES,
+    nextAdvisoriesFor,
+} from "../next-advisories";
 
 const noKubectl: KubectlFn = () => ({
     ok: false,
@@ -68,6 +72,20 @@ describe("next advisory table", () => {
         // GHSA-p3m5 starts at 13.0.0, GHSA-2464 at 10.0.0.
         expect(ids("12.3.4")).toEqual([RCE_IMAGE]);
         expect(ids("9.5.0")).toEqual([]);
+    });
+
+    it("knows which minors have no fixed release at all", () => {
+        expect(minorWithoutFixedRelease("16.3").sort()).toEqual(
+            [DOS_ACTIONS, RCE_IMAGE, RCE_USE_CACHE].sort(),
+        );
+        expect(minorWithoutFixedRelease("16.4")).toEqual([]);
+        expect(minorWithoutFixedRelease("15.5")).toEqual([]);
+        expect(minorWithoutFixedRelease("15.4").sort()).toEqual(
+            [DOS_ACTIONS, RCE_IMAGE].sort(),
+        );
+        expect(minorWithoutFixedRelease("12.3")).toEqual([RCE_IMAGE]);
+        expect(minorWithoutFixedRelease("16.5")).toEqual([]);
+        expect(minorWithoutFixedRelease("nope")).toEqual([]);
     });
 
     it("returns nothing for a version it cannot parse", () => {

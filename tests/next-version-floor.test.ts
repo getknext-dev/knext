@@ -207,3 +207,105 @@ describe('#2594 — no tracked manifest or lockfile pins a next with a known adv
     expect(bad).toEqual([]);
   });
 });
+
+/**
+ * Workflows install, `npm pkg set` and assert `next` versions too (#2594 round 2).
+ *
+ * The kind e2e jobs stage a fixture, force its `next` with
+ * `npm pkg set "dependencies.next=${NEXT_VERSION}"` and deploy it; the JS-closure
+ * Trivy job pins `dependencies.next=X` before scanning. After the first round
+ * bumped every manifest, three such workflow pins still put 16.3.8 back on main
+ * (and 16.4.0 on v2), and v2's quoted `v !== '16.4.0'` assertions went red the
+ * other way. So every NON-COMMENT workflow line is scanned for the four shapes
+ * a literal `next` version takes there:
+ *
+ *   - `next@X.Y.Z`              (an install spec; `kn-next@`/`@next/` excluded)
+ *   - `next=X.Y.Z`              (`npm pkg set dependencies.next=X`)
+ *   - `NEXT_VERSION: X.Y.Z`     (the env the kind jobs install from)
+ *   - a quoted `'X.Y.Z'` / `"X.Y.Z"` on a line that mentions `next`
+ *     (a version assertion against `node_modules/next/package.json`)
+ *
+ * and each hit is judged by `next-advisories.ts`, the table doctor fails on.
+ * Comment lines are history (`# previously pinned to next@16.0.3`), not pins.
+ *
+ * WORKFLOW_HARNESS_PINS excuses a hit only by file AND exact version AND reason.
+ * The compat-suite credential harness (`NEXTJS_REF`, `credentialedNextRef`, the
+ * quarantine ledgers) is tracked separately in #2602; its refs are written
+ * `vX.Y.Z`, which none of the four shapes match, so it needs no entry today.
+ * An entry here must name a version actually present, so a stale excuse reds.
+ */
+const WORKFLOW_HARNESS_PINS: { file: string; version: string; reason: string }[] = [];
+
+type WorkflowPin = { file: string; line: number; version: string; text: string };
+
+function workflowNextPins(file: string, text: string): WorkflowPin[] {
+  const pins: WorkflowPin[] = [];
+  text.split('\n').forEach((raw, i) => {
+    if (/^\s*#/.test(raw)) return;
+    const found = new Set<string>();
+    for (const m of raw.matchAll(/(?<![\w@/-])next@(\d+\.\d+\.\d+)/g)) found.add(m[1]);
+    for (const m of raw.matchAll(/(?<![\w-])next=(\d+\.\d+\.\d+)/g)) found.add(m[1]);
+    for (const m of raw.matchAll(/\bNEXT_VERSION:\s*['"]?(\d+\.\d+\.\d+)/g)) found.add(m[1]);
+    if (/(?<![a-z])next(?![a-z])/i.test(raw)) {
+      for (const m of raw.matchAll(/(['"])(\d+\.\d+\.\d+)\1/g)) found.add(m[2]);
+    }
+    for (const version of found) pins.push({ file, line: i + 1, version, text: raw.trim() });
+  });
+  return pins;
+}
+
+describe('#2594 — no workflow pins, sets or asserts a next with a known advisory', () => {
+  const workflows = trackedFiles().filter((f) => /^\.github\/workflows\/[^/]+\.ya?ml$/.test(f));
+  const pins = workflows.flatMap((f) =>
+    workflowNextPins(f, readFileSync(resolve(REPO_ROOT, f), 'utf8')),
+  );
+
+  it('recognises every shape it claims to (self-test)', () => {
+    const sample = [
+      '      NEXT_VERSION: 16.4.0',
+      '          npm pkg set "dependencies.next=16.3.8"',
+      '          bun add next@16.2.10',
+      "          node -e \"const v=require('./node_modules/next/package.json').version; if (v !== '16.4.0') {}\"",
+      '          # previously pinned to next@16.0.3',
+      '          npx kn-next@0.4.3 deploy',
+      '          bun add @next/env@16.0.0',
+      "          VINEXT_VERSION: '1.0.1'",
+    ].join('\n');
+    expect(workflowNextPins('x.yml', sample).map((p) => `${p.line}:${p.version}`)).toEqual([
+      '1:16.4.0',
+      '2:16.3.8',
+      '3:16.2.10',
+      '4:16.4.0',
+    ]);
+  });
+
+  it('the scan reaches the kind e2e jobs that stage and deploy a fixture', () => {
+    expect(workflows).toContain('.github/workflows/standalone-deploy-kind-e2e.yml');
+    expect(workflows).toContain('.github/workflows/supply-chain.yml');
+    expect(pins.length).toBeGreaterThan(0);
+  });
+
+  it('every harness exclusion names a version the scan still finds, with a reason', () => {
+    for (const ex of WORKFLOW_HARNESS_PINS) {
+      expect(ex.reason.length).toBeGreaterThan(20);
+      expect(
+        pins.some((p) => p.file === ex.file && p.version === ex.version),
+        `${ex.file} no longer carries next ${ex.version}; drop the exclusion`,
+      ).toBe(true);
+    }
+  });
+
+  it('every non-excluded workflow pin is clear of the advisories knext doctor fails on', () => {
+    const bad = pins
+      .filter(
+        (p) => !WORKFLOW_HARNESS_PINS.some((ex) => ex.file === p.file && ex.version === p.version),
+      )
+      .flatMap((p) => {
+        const hits = nextAdvisoriesFor(p.version).map((h) => h.id);
+        return hits.length
+          ? [`${p.file}:${p.line}: next ${p.version} (${hits.join(', ')}) — ${p.text}`]
+          : [];
+      });
+    expect(bad).toEqual([]);
+  });
+});
