@@ -17,9 +17,9 @@
 # image we build + sign. The tag is kept in this comment block (Docker rejects
 # trailing/inline comments on a FROM line); refresh the digest and this comment
 # together when bumping. Resolve with:
-#   docker buildx imagetools inspect golang:1.26.9
+#   docker buildx imagetools inspect golang:1.26.10
 # Enforced by scripts/check-base-images-pinned.sh (CI: base-image-pin-guard).
-FROM golang:1.26.9@sha256:37cfcca63222ec499bec5e8ad7aad52dbf7529db36d5812b8eae2f0621aa92d6 AS builder
+FROM golang:1.26.10@sha256:24a707af49702fa44f02785475d02fb752f6982d3e9c0afb7696e1f0204e7ce9 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 
