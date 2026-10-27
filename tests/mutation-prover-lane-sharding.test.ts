@@ -307,7 +307,7 @@ describe('#2499 aggregateReports — declared == run, and a missing prover FAILS
     reports[0].assigned = reports[0].assigned.slice(1);
     reports[0].results = reports[0].results.slice(1);
     expect(aggregateReports({ expected, reports }).findings.join('\n')).toMatch(
-      /assigned set differs from the deterministic shard/,
+      /union is not the discovered set.*in no shard/s,
     );
   });
 
@@ -328,10 +328,113 @@ describe('#2499 aggregateReports — declared == run, and a missing prover FAILS
     );
   });
 
+  /**
+   * #2592 — a leg shards with the weight table of the ref it checked out; the
+   * aggregate runs from main's checkout. Model "another ref's table" as a different
+   * but VALID partition (a rotated round-robin over the sorted set, which is not what the
+   * aggregate's own `shardProvers` returns) and hand it to every leg of that ref.
+   */
+  const otherTable = (all: string[], index: number, count: number) =>
+    [...all].sort().filter((_, i) => (i + 1) % count === index - 1);
+  const reportWith = (
+    leg: { ref: string; sha: string; shard: number; shards: number },
+    assigned: string[],
+    all: string[] = discovered,
+  ) => ({
+    version: 1,
+    ref: leg.ref,
+    sha: leg.sha,
+    shard: leg.shard,
+    shards: leg.shards,
+    discovered: [...all].sort(),
+    assigned,
+    results: assigned.map((relPath) => ({ relPath, declared: 2, run: 2, findings: [] })),
+  });
+  const twoRefLegs = (shards: number) =>
+    ['main', 'integration/v2'].flatMap((ref) =>
+      Array.from({ length: shards }, (_, i) => ({ ref, sha: SHA, shard: i + 1, shards })),
+    );
+
+  it('#2592 a ref whose legs sharded with a DIFFERENT weight table than the aggregate is not a finding', () => {
+    const expected = twoRefLegs(3);
+    const reports = expected.map((leg) =>
+      leg.ref === 'main'
+        ? goodReport(leg)
+        : reportWith(leg, otherTable(discovered, leg.shard, leg.shards)),
+    );
+    // Precondition: the two tables really disagree, or this proves nothing.
+    expect(reports[3].assigned).not.toEqual(reports[0].assigned);
+    const out = aggregateReports({ expected, reports });
+    expect(out.findings).toEqual([]);
+    expect(out.unionVerified.sort()).toEqual(['integration/v2', 'main']);
+  });
+
+  it('#2592 a prover dropped from EVERY leg of a ref is a finding naming it', () => {
+    const expected = legsFor(3);
+    const victim = discovered[0];
+    const reports = expected.map((leg) =>
+      reportWith(
+        leg,
+        otherTable(discovered, leg.shard, leg.shards).filter((r) => r !== victim),
+      ),
+    );
+    const { findings } = aggregateReports({ expected, reports });
+    expect(findings.join('\n')).toMatch(/union is not the discovered set/);
+    expect(findings.join('\n')).toContain(victim);
+  });
+
+  it('#2592 a prover assigned to TWO legs is a finding naming it, even when nothing else is dropped', () => {
+    const expected = legsFor(3);
+    const reports = expected.map((leg) =>
+      reportWith(leg, otherTable(discovered, leg.shard, leg.shards)),
+    );
+    const dup = reports[0].assigned[0];
+    reports[1].assigned.push(dup);
+    reports[1].results.push({ relPath: dup, declared: 2, run: 2, findings: [] });
+    const { findings } = aggregateReports({ expected, reports });
+    expect(findings.join('\n')).toMatch(/more than one leg/);
+    expect(findings.join('\n')).toContain(dup);
+  });
+
+  it('#2592 a leg whose results miss a prover it was assigned is a finding, whatever table it used', () => {
+    const expected = legsFor(3);
+    const reports = expected.map((leg) =>
+      reportWith(leg, otherTable(discovered, leg.shard, leg.shards)),
+    );
+    const dropped = reports[2].results.pop();
+    const { findings } = aggregateReports({ expected, reports });
+    expect(findings.join('\n')).toMatch(/missing from its results/);
+    expect(findings.join('\n')).toContain(dropped?.relPath ?? '<none>');
+  });
+
+  it('#2592 a leg assigned a prover that was never discovered is a finding', () => {
+    const expected = legsFor(2);
+    const reports = expected.map((leg) =>
+      reportWith(leg, otherTable(discovered, leg.shard, leg.shards)),
+    );
+    reports[0].assigned.push('scripts/mutation-prove-ghost.mjs');
+    reports[0].results.push({
+      relPath: 'scripts/mutation-prove-ghost.mjs',
+      declared: 2,
+      run: 2,
+      findings: [],
+    });
+    expect(aggregateReports({ expected, reports }).findings.join('\n')).toMatch(
+      /not in its discovered set/,
+    );
+  });
+
+  it('#2592 a leg with no assigned list is a finding', () => {
+    const expected = legsFor(2);
+    const reports = reportsFor(expected);
+    delete (reports[0] as { assigned?: string[] }).assigned;
+    expect(aggregateReports({ expected, reports }).findings.join('\n')).toMatch(/no assigned list/);
+  });
+
   it('the final UNION check catches a partition that is wrong the same way everywhere', () => {
     // The per-leg recomputation cannot see this: runner and aggregate would agree
     // on the same lossy function. Only comparing the union with the discovered set
-    // does. (Inject the lossy partition; the real one is covered above.)
+    // does. (The aggregate never calls a partition function now; the reports carry it.)
     const lossy = (all: Array<{ relPath: string }>, index: number, count: number) =>
       shardProvers(all, index, count).slice(1);
     const expected = legsFor(2);
@@ -356,7 +459,7 @@ describe('#2499 aggregateReports — declared == run, and a missing prover FAILS
       r.assigned = r.results.map((x: { relPath: string }) => x.relPath);
       void i;
     });
-    const out = aggregateReports({ expected, reports, shard: lossy });
+    const out = aggregateReports({ expected, reports });
     expect(out.findings.join('\n')).toMatch(/union is not the discovered set/);
   });
 
