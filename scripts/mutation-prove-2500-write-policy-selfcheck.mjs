@@ -244,6 +244,24 @@ const MUTATIONS = [
     replacement: `    expression: "['-knext-signing-key', '-extra']"`,
     test: CANON,
   },
+  {
+    id: 'V18',
+    claim:
+      'a policy that declares paramKind is accepted (a paramRef that finds nothing then runs no validation)',
+    subject: 'verdict',
+    anchor: '	if policy.Spec.ParamKind != nil {',
+    replacement: '	if false && policy.Spec.ParamKind != nil {',
+    test: VERDICT,
+  },
+  {
+    id: 'V19',
+    claim:
+      'a binding that sets paramRef is accepted (a missing parameter makes the apiserver skip every validation)',
+    subject: 'verdict',
+    anchor: '	if binding.Spec.ParamRef != nil {',
+    replacement: '	if false && binding.Spec.ParamRef != nil {',
+    test: VERDICT,
+  },
   // --- the gauge and the monitor ----------------------------------------------
   {
     id: 'G01',

@@ -195,6 +195,24 @@ const DOCTOR_ROWS = [
     anchor: '    if (!sameCEL(policy)) {',
     replacement: '    if (false) {',
   },
+  {
+    id: 'D17',
+    expect: 'red',
+    claim:
+      'doctor accepts a policy that declares paramKind (a paramRef that finds nothing then runs no validation)',
+    subject: 'doctor',
+    anchor: '    if (policy.spec?.paramKind != null) {',
+    replacement: '    if (false) {',
+  },
+  {
+    id: 'D18',
+    expect: 'red',
+    claim:
+      'doctor accepts a binding that sets paramRef (a missing parameter makes the apiserver skip every validation)',
+    subject: 'doctor',
+    anchor: '    if (binding.spec?.paramRef != null) {',
+    replacement: '    if (false) {',
+  },
 ];
 
 const CANONICAL_ROWS = [
