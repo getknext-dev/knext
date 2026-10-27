@@ -6,7 +6,11 @@
 >
 > **On the 2.x line the harness now runs against `vercel/next.js` **v16.4.0**** (#2296,
 > 2026-10-13), the floor `packages/kn-next/src/next-compat.ts` declares and the version
-> `knext create` scaffolds, so the harness and the scaffold agree again.
+> `knext create` scaffolded then, so the harness and the scaffold agreed. **Patch divergence since
+> #2594 (2026-10-27):** the scaffold and every app knext deploys now pin next 16.4.3 (still the
+> 16.4.x line) because GHSA-2464-fhr4-w9xw / GHSA-673q-mjm6-r5xr (critical) and
+> GHSA-p3m5-59mp-jv5r (high) affect 16.4.0; moving `NEXTJS_REF` to v16.4.3 restarts the credential
+> windows and is a separate decision recorded on #2594.
 > `tests/next-compat-e2e-deploy-ref.test.ts` reds if `test-e2e-deploy.yml`'s defaults drift from
 > that floor. **Evidence at v16.4.0 is two dispatched node × turbopack runs.** Run 38384745675
 > passed 1160 of 1168 test files, and all eight reds are triaged in #2296:
