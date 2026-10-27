@@ -9,9 +9,13 @@ description: Honest, evidence-gated status of what the knext adapter supports.
 
 <Callout type="warn">
 **Status: a credentialing window is currently in progress, not complete.**
-The credential window now runs against Next.js v16.3.8. That is the same release new apps scaffold
-today, and every credential run executes against that published release-candidate build, not the
-fast-moving main branch. The 14-consecutive-run count needed before any cell is
+The credential window now runs against Next.js v16.3.8. Every credential run executes against that
+published release-candidate build, not the fast-moving main branch. New apps scaffold a
+newer Next.js release on the 16.4.x line (16.4.3): every Next.js release up to and including 16.4.0 is
+affected by critical security advisories (GHSA-2464-fhr4-w9xw, GHSA-673q-mjm6-r5xr) that are fixed
+only on 16.4.x, so the scaffold moved ahead of the credential. `knext doctor` reports 16.4 as a
+supported but not yet credentialed minor until the credential catches up. See
+[Next.js security upgrades](/docs/upgrading#nextjs-security-upgrades). The 14-consecutive-run count needed before any cell is
 considered fully credentialed **started recently and has not yet completed for any cell** — do not
 read anything on this page as "14 of 14, passing." Dispatched confirmation runs at v16.3.8 passed
 on all four v1.0 cells (node/bun x turbopack/webpack): 16 shards each, 1101 of 1101 tests passing.

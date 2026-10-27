@@ -27,6 +27,7 @@ import { createRequire } from "node:module";
 import { join } from "node:path";
 import { KNEXT_RUNTIME_ENV } from "../adapters/runtime-env";
 import { runQuiet } from "./exec";
+import { warnOnVulnerableNext } from "./next-advisory-warning";
 import { UsageError } from "./shared";
 import {
     assertNotStaticExport,
@@ -115,6 +116,11 @@ export interface RunProjectBuildOptions {
      * turbopack-fragments guard. REQUIRED for the same reason as `builderId`.
      */
     readonly runtimeId: string;
+    /**
+     * Where the vulnerable-Next.js warning goes (#2594); defaults to stderr.
+     * Injectable for tests.
+     */
+    readonly warn?: (line: string) => void;
 }
 
 /**
@@ -300,6 +306,10 @@ export function checkTurbopackAdapterStandaloneRegression(
 export function runProjectBuild(opts: RunProjectBuildOptions): void {
     const run = opts.run ?? runQuiet;
     const cwd = opts.cwd ?? process.cwd();
+
+    // A Next.js with a published critical/high advisory builds and deploys,
+    // but never silently (#2594). Here, so build, deploy and preview all say it.
+    warnOnVulnerableNext(cwd, opts.warn);
 
     if (opts.requireEsm) {
         preflightEsmPackage(cwd);

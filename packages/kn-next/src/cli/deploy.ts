@@ -68,6 +68,7 @@ import {
 import { isEntrypoint, runCapture, runInherit } from "./exec";
 import { runAssetGC } from "./gc";
 import { CLI_HELP } from "./help";
+import { warnOnVulnerableNext } from "./next-advisory-warning";
 import { assertNoPlaceholders } from "./placeholder-preflight";
 import { runProjectBuild } from "./project-build";
 import {
@@ -675,6 +676,14 @@ export async function deploy() {
             { builtThisRun: !options.skipBuild, imageCacheRouted: true },
             options.image,
         );
+    }
+
+    // #2594: a build run warns from runProjectBuild; `--skip-build` deploys
+    // what an earlier local build left, so it warns here from the same app
+    // dir. `--image` deploys an image built elsewhere — its Next.js is not
+    // the one in this directory, so there is nothing honest to check.
+    if (options.skipBuild && !options.image) {
+        warnOnVulnerableNext(process.cwd());
     }
 
     if (!options.skipBuild) {

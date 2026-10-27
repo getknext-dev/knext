@@ -80,7 +80,7 @@ jobs:
       CLUSTER: public-hosts-e2e
       APP_NS: public-hosts-e2e
       APP_NAME: public-hosts-e2e
-      NEXT_VERSION: 16.3.8
+      NEXT_VERSION: 16.4.3
       PUBLIC_HOST_1: www.example.com
       PUBLIC_HOST_2: app.example.org
     steps:
