@@ -277,7 +277,7 @@ jobs:
       # the operator's was installed). Install ORDER matters: setup-go prepends to
       # PATH, so the LAST step wins and must be the newest go.mod a prover builds
       # (asserted by tests/mutation-prover-lane-sharding.test.ts). Both modules sit
-      # at go 1.26.9, a tie the guard resolves to the operator, so the operator's
+      # at go 1.26.10, a tie the guard resolves to the operator, so the operator's
       # install follows this one. A newer Go builds either module (a go.mod names
       # a MINIMUM). Gated by FILE PRESENCE like the Rust toolchains.
       - name: Setup Go for the Go zone template (templates/go/go.mod)

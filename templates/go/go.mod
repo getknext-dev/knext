@@ -1,6 +1,6 @@
 module example.com/function
 
-go 1.26.9
+go 1.26.10
 
 require (
 	connectrpc.com/connect/v2 v2.0.1
