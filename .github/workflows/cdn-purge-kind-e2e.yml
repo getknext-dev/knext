@@ -177,7 +177,7 @@ jobs:
           cp -R packages/kn-next/src/__tests__/fixtures/cdn-kind-app "$APP_DIR"
           cd "$APP_DIR"
           bun install
-          node -e "const v=require('./node_modules/next/package.json').version; if (v !== '16.4.0') { console.error('next is ' + v); process.exit(1) }"
+          node -e "const v=require('./node_modules/next/package.json').version; if (v !== require('./package.json').dependencies.next) { console.error('next is ' + v); process.exit(1) }"
           mkdir -p public
           LIB_TGZ="$(find "${TARBALLS_DIR}" -maxdepth 1 -name 'getknext-lib-*.tgz' | sort | tail -n1)"
           DB_TGZ="$(find "${TARBALLS_DIR}" -maxdepth 1 -name 'getknext-db-*.tgz' | sort | tail -n1)"
@@ -199,7 +199,7 @@ jobs:
           cp -R packages/kn-next/src/__tests__/fixtures/cdn-use-cache-kind-app "$UC_APP_DIR"
           cd "$UC_APP_DIR"
           bun install --backend=copyfile
-          node -e "const v=require('./node_modules/next/package.json').version; if (v !== '16.4.0') { console.error('next is ' + v); process.exit(1) }"
+          node -e "const v=require('./node_modules/next/package.json').version; if (v !== require('./package.json').dependencies.next) { console.error('next is ' + v); process.exit(1) }"
           mkdir -p public
           LIB_TGZ="$(find "${TARBALLS_DIR}" -maxdepth 1 -name 'getknext-lib-*.tgz' | sort | tail -n1)"
           DB_TGZ="$(find "${TARBALLS_DIR}" -maxdepth 1 -name 'getknext-db-*.tgz' | sort | tail -n1)"
