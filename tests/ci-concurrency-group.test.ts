@@ -405,7 +405,7 @@ describe('the macOS safety-hook job has a timeout (#2607)', () => {
       '`safety-hook-guard` has no `timeout-minutes` — the macOS job ran for 5+ hours with no bound (#2607)',
     ).toBeTypeOf('number');
     expect(timeout as number).toBeGreaterThan(0);
-    expect(timeout as number).toBeLessThanOrEqual(20);
+    expect(timeout as number).toBeLessThanOrEqual(30);
   });
 });
 

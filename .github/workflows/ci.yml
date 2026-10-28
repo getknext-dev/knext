@@ -840,9 +840,11 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     # Bounded (#2607): the macOS half ran `in_progress` for 5+ hours with no
-    # timeout, holding its whole run open. The suite takes minutes, so 15 is
-    # generous; a hang now fails the job instead of stalling the run.
-    timeout-minutes: 15
+    # timeout, holding its whole run open. The macOS leg has taken up to ~12.5 min
+    # in recent green runs, so 25 leaves headroom; a hang still fails the job
+    # instead of stalling the run. One value for both legs (a per-leg expression
+    # would make the bound a string, which the guard does not model).
+    timeout-minutes: 25
     # `.claude/hooks/block-dangerous-bash.sh` is the ONLY enforcement of the
     # operations `.claude/rules/security.md` calls never acceptable on an agent's
     # behalf: force/mirror/--all push, direct push to main/master, history rewrite,
