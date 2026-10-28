@@ -404,7 +404,8 @@ const MUTATIONS = [
   },
   {
     id: 'R12',
-    claim: 'the narrowed gateway peer stops matching the gateway pods, so a warm call is blackholed',
+    claim:
+      'the narrowed gateway peer stops matching the gateway pods, so a warm call is blackholed',
     subject: 'peers',
     anchor: '\tnamespaces := kourierGatewayNamespaces()\n',
     replacement: '\tnamespaces := kourierGatewayNamespaces()[:0]\n',
@@ -1263,8 +1264,7 @@ if (CALICO_CLUSTER !== '') {
   });
   MUTATIONS.push({
     id: 'K02',
-    claim:
-      'Calico: the gateway peer is dropped, so a WARM gateway-routed call is blackholed (F1b)',
+    claim: 'Calico: the gateway peer is dropped, so a WARM gateway-routed call is blackholed (F1b)',
     subject: 'peers',
     anchor: '\tnamespaces := kourierGatewayNamespaces()\n',
     replacement: '\tnamespaces := kourierGatewayNamespaces()[:0]\n',
