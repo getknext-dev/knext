@@ -1,6 +1,6 @@
 module github.com/alpheya/scale-zero-pg/gateway
 
-go 1.26.9
+go 1.26.10
 
 require (
 	github.com/lib/pq v1.10.9

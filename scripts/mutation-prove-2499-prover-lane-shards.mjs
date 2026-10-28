@@ -14,7 +14,7 @@
  *     aggregate; a soft-fail on the lane; a toolchain gated by ref name instead of
  *     file presence; a write scope on a non-alert job; a single shard.
  *   library (L..) — the partition leaking a prover; a missing report, a wrong sha,
- *     a missing prover, a declared != run, a broken union, an empty plan, a
+ *     a missing prover, a declared != run, a prover in no leg or in two legs, an empty plan, a
  *     disagreeing discovery, a wrong per-leg assignment, an unsafe ref, a bad
  *     shard index, or an unbounded timeout all no longer being findings.
  *   runner (R..) — the kill reaching only the child, the child not leading its own
@@ -290,7 +290,7 @@ const MUTATIONS = [
     subject: 'lib',
     claim: 'a leg with no report is not a finding',
     anchor:
-      '      findings.push(\n        `${label}: no report — the leg was cancelled, crashed, or its artifact is missing`,\n      );',
+      '      integrity(leg.ref).push(\n        `${label}: no report — the leg was cancelled, crashed, or its artifact is missing`,\n      );',
     replacement: '      void label;',
   },
   {
@@ -319,8 +319,9 @@ const MUTATIONS = [
   {
     id: 'L06',
     subject: 'lib',
-    claim: 'the final union check is gone (a partition wrong everywhere passes)',
-    anchor: '    if (present.length === legs.length && !sameSet(first, assignedAll)) {',
+    claim:
+      'a prover dropped from EVERY leg of a ref is not a finding (the union is no longer the discovered set)',
+    anchor: '    if (missing.length > 0) {',
     replacement: '    if (false) {',
   },
   {
@@ -347,9 +348,9 @@ const MUTATIONS = [
   {
     id: 'L10',
     subject: 'lib',
-    claim: "a leg's assigned set is no longer checked against the partition function",
-    anchor: '    if (!Array.isArray(report.assigned) || !sameSet(entitled, report.assigned)) {',
-    replacement: '    if (false) {',
+    claim: 'a prover assigned to TWO legs of a ref is not a finding (it would be proved twice)',
+    anchor: '      if (o.length > 1) {',
+    replacement: '      if (false) {',
   },
   {
     id: 'L11',
@@ -371,6 +372,43 @@ const MUTATIONS = [
     claim: 'the default per-prover bound is zero (every prover times out) ',
     anchor: "  if (raw === undefined || raw === '') return 130 * 60 * 1000;",
     replacement: "  if (raw === undefined || raw === '') return 0;",
+  },
+  {
+    id: 'L14',
+    subject: 'lib',
+    claim: 'a leg that wrote no assigned list is not a finding',
+    anchor: '    if (!Array.isArray(report.assigned)) {',
+    replacement: '    if (false) {',
+  },
+  {
+    id: 'L15',
+    subject: 'lib',
+    claim: 'a leg assigned a prover outside its discovered set is not a finding',
+    anchor: '      if (!discoveredSet.has(relPath)) {',
+    replacement: '      if (false) {',
+  },
+  {
+    id: 'L16',
+    subject: 'lib',
+    claim:
+      'a prover claimed by two PRESENT legs of a PARTIAL dispatch is not a finding (disjointness only on full runs)',
+    anchor: '      if (o.length > 1) {',
+    replacement:
+      '      if (o.length > 1 && present.length === legs.length && new Set(legs.map((l) => l.leg.shard)).size === legs[0].leg.shards) {',
+  },
+  {
+    id: 'L17',
+    subject: 'lib',
+    claim: 'a leg with an empty assigned list passes although there are provers for every shard',
+    anchor: '    if (entitled.length === 0 && leg.shards <= report.discovered.length) {',
+    replacement: '    if (false) {',
+  },
+  {
+    id: 'L18',
+    subject: 'lib',
+    claim: 'a ref with a partition finding is still listed as union-verified',
+    anchor: '  const clean = unionVerified.filter((ref) => !flagged.has(ref));',
+    replacement: '  const clean = unionVerified;',
   },
   // ── the runner ────────────────────────────────────────────────────────────
   {
@@ -510,8 +548,8 @@ const MUTATIONS = [
     id: 'U01',
     subject: 'lib',
     claim: 'the aggregate never records that a ref’s union was verified (nothing to print)',
-    anchor: '      unionVerified.push(ref);',
-    replacement: '      void ref;',
+    anchor: '    unionVerified.push(ref);',
+    replacement: '    void ref;',
   },
   {
     id: 'Q01',
