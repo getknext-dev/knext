@@ -53,8 +53,21 @@ on:
 # bisectable. The saving #674 is for is entirely in the `pull_request` group, so
 # it is taken there and nowhere else. The cost, stated: consecutive merges to
 # `main` are billed in full.
+# #2607 — `push` and `merge_group` runs are NOT grouped by ref. Keyed on ref, a
+# requeued PR's merge_group run shares `gh-readonly-queue/main/pr-N-<sha>` with
+# the stale queued attempt; the stale run holds the group and the new run sits
+# `pending` with zero jobs (main's queue stalled ~3h on 2026-10-28). The same
+# held for old `push` runs on a line. Those events now key on `run_id` and
+# `run_attempt`, so each run is its own group and never waits behind another.
+# That is the smallest change that fixes both: it adds no cancellation, so
+# `main` still keeps a verdict per commit (the decision above). A re-run of a
+# run keeps its `run_id`, so `run_attempt` is in the key as well. The cost, stated:
+# a superseded merge_group or push run now finishes rather than being cancelled.
+# `pull_request` keeps the ref key and cancels as before. The `${{ github.ref }}`
+# interpolation stays as its own standalone interpolation, which the #667
+# blocking-gate helper requires to recognise the group as ref-scoped.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}-${{ github.event_name != 'pull_request' && github.run_id || '' }}-${{ github.event_name != 'pull_request' && github.run_attempt || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -826,6 +839,10 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    # Bounded (#2607): the macOS half ran `in_progress` for 5+ hours with no
+    # timeout, holding its whole run open. The suite takes minutes, so 15 is
+    # generous; a hang now fails the job instead of stalling the run.
+    timeout-minutes: 15
     # `.claude/hooks/block-dangerous-bash.sh` is the ONLY enforcement of the
     # operations `.claude/rules/security.md` calls never acceptable on an agent's
     # behalf: force/mirror/--all push, direct push to main/master, history rewrite,

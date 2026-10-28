@@ -316,6 +316,99 @@ describe('ci.yml concurrency group (#674)', () => {
   });
 });
 
+/**
+ * Evaluate a workflow `concurrency.group` string for one run's context.
+ *
+ * Each `${{ ... }}` body is rewritten `github.x` -> `ctx.x` and evaluated as JS.
+ * That is faithful for the operators this file's group uses (`!=`, `&&`, `||`,
+ * string literals) on the non-empty string values a run actually carries. A
+ * group that is ever written with an operator outside that set fails loudly here
+ * rather than comparing silently wrong.
+ */
+function evalGroup(group: string, ctx: Record<string, string>): string {
+  return group.replace(/\$\{\{([^}]*)\}\}/g, (_m, body: string) => {
+    const js = body.replace(/github\.([a-z_]+)/g, (_x, key: string) => `ctx.${key}`);
+    const fn = new Function('ctx', `return (${js});`) as (c: Record<string, string>) => unknown;
+    return String(fn(ctx));
+  });
+}
+
+describe('ci.yml concurrency for queue and push runs (#2607)', () => {
+  const { doc } = readWorkflow(CI_YML);
+  const group = String((doc.concurrency as { group?: unknown })?.group ?? '');
+  const run = (over: Record<string, string>) =>
+    evalGroup(group, { workflow: 'CI', ref: 'refs/heads/main', run_attempt: '1', ...over });
+
+  // A requeued PR gets the SAME `gh-readonly-queue/main/pr-N-<sha>` ref when main
+  // has not moved. Keyed on ref alone, the new merge_group run joins the group
+  // of the stale queued run and stays `pending` with zero jobs (#2607).
+  it('gives each merge_group run its own group, even when a requeue shares the ref', () => {
+    const queueRef = 'refs/heads/gh-readonly-queue/main/pr-2593-8ae13e89b';
+    const stale = run({ event_name: 'merge_group', ref: queueRef, run_id: '40613506999' });
+    const requeued = run({ event_name: 'merge_group', ref: queueRef, run_id: '40624604052' });
+    expect(
+      requeued,
+      `merge_group runs on the same queue ref share group \`${requeued}\` — the requeued run waits behind the stale one`,
+    ).not.toBe(stale);
+  });
+
+  it('gives a re-run of the same merge_group run its own group, not the attempt it re-runs', () => {
+    const queueRef = 'refs/heads/gh-readonly-queue/main/pr-2593-8ae13e89b';
+    const first = run({
+      event_name: 'merge_group',
+      ref: queueRef,
+      run_id: '40624604052',
+      run_attempt: '1',
+    });
+    const rerun = run({
+      event_name: 'merge_group',
+      ref: queueRef,
+      run_id: '40624604052',
+      run_attempt: '2',
+    });
+    expect(rerun, 'a re-run shares the group of the attempt it re-runs').not.toBe(first);
+  });
+
+  it('never makes a push run wait behind an earlier push run to the same ref', () => {
+    const first = run({ event_name: 'push', ref: 'refs/heads/main', run_id: '300' });
+    const second = run({ event_name: 'push', ref: 'refs/heads/main', run_id: '301' });
+    expect(
+      second,
+      `push runs on \`refs/heads/main\` share group \`${second}\` — an older push run blocks the newer one`,
+    ).not.toBe(first);
+  });
+
+  it('keeps stacked-PR cancellation: two runs of the same PR still share one group', () => {
+    const prRef = 'refs/pull/2593/merge';
+    const older = run({ event_name: 'pull_request', ref: prRef, run_id: '500' });
+    const newer = run({ event_name: 'pull_request', ref: prRef, run_id: '501' });
+    expect(
+      newer,
+      'pull_request runs of one PR no longer share a group — #674 cancellation is gone',
+    ).toBe(older);
+  });
+
+  it('keeps a push group and a pull_request group apart', () => {
+    const push = run({ event_name: 'push', ref: 'refs/heads/main', run_id: '300' });
+    const pr = run({ event_name: 'pull_request', ref: 'refs/pull/2593/merge', run_id: '500' });
+    expect(push).not.toBe(pr);
+  });
+});
+
+describe('the macOS safety-hook job has a timeout (#2607)', () => {
+  it('bounds the safety-hook job so a hung runner cannot hold a run for hours', () => {
+    const { doc } = readWorkflow(CI_YML);
+    const jobs = doc.jobs as Record<string, { 'timeout-minutes'?: unknown }>;
+    const timeout = jobs['safety-hook-guard']?.['timeout-minutes'];
+    expect(
+      timeout,
+      '`safety-hook-guard` has no `timeout-minutes` — the macOS job ran for 5+ hours with no bound (#2607)',
+    ).toBeTypeOf('number');
+    expect(timeout as number).toBeGreaterThan(0);
+    expect(timeout as number).toBeLessThanOrEqual(20);
+  });
+});
+
 describe('publish/sign workflows never cancel in progress (#674)', () => {
   const scanned = workflowFiles().map((file) => {
     const { markers, doc } = readWorkflow(file);
