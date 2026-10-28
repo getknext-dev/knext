@@ -52,10 +52,11 @@ export default function HomePage() {
               target idle → 0
             </div>
             <div className={styles.pods}>
-              {Array.from({ length: 8 }).map((_, i) => (
-                // eslint-disable-next-line react/no-array-index-key
-                <div key={i} className={styles.pod} />
-              ))}
+              {['pod-1', 'pod-2', 'pod-3', 'pod-4', 'pod-5', 'pod-6', 'pod-7', 'pod-8'].map(
+                (id) => (
+                  <div key={id} className={styles.pod} />
+                ),
+              )}
             </div>
             <div className={styles.meterFoot}>
               <span>
