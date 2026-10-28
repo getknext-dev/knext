@@ -1,0 +1,33 @@
+# Lets the operator READ, and only read, the two objects that bound its writes.
+#
+# The operator checks at start-up and every few minutes that its Secret/ConfigMap
+# write policy is in force (internal/writepolicy). That is a `get` on the policy
+# and its binding, by name, and nothing else: no list, no watch, no write. A
+# role that could write them would let a compromised operator lift its own
+# restriction, which internal/controller TestOperatorCannotEditItsOwnWritePolicy
+# forbids and TestWritePolicyReaderRoleIsExactlyGetOnTheTwoNamedObjects pins.
+#
+# It is a separate hand-written role rather than a +kubebuilder:rbac marker on
+# manager-role: a marker's resourceNames is a literal, and the bundle's name
+# prefix does not reach it. config/default rewrites the name below from the
+# policy's real (prefixed) name, so the grant follows a renamed install.
+#
+# The operator learns its own username with SelfSubjectReview, which every
+# authenticated user may create (system:basic-user); that needs no rule here.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: write-policy-reader
+  labels:
+    app.kubernetes.io/name: kn-next-operator
+    app.kubernetes.io/managed-by: kustomize
+rules:
+- apiGroups:
+  - admissionregistration.k8s.io
+  resources:
+  - validatingadmissionpolicies
+  - validatingadmissionpolicybindings
+  resourceNames:
+  - secret-configmap-writes
+  verbs:
+  - get

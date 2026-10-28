@@ -264,11 +264,22 @@ export interface DaemonSetRef {
 }
 
 export interface DeploymentJson {
-    metadata?: { name?: string; labels?: Record<string, string> };
+    metadata?: {
+        name?: string;
+        namespace?: string;
+        labels?: Record<string, string>;
+    };
     spec?: {
         template?: {
             metadata?: { labels?: Record<string, string> };
-            spec?: { containers?: { image?: string }[] };
+            spec?: {
+                serviceAccountName?: string;
+                containers?: {
+                    name?: string;
+                    image?: string;
+                    env?: { name: string; value?: string }[];
+                }[];
+            };
         };
     };
     status?: { readyReplicas?: number; replicas?: number };
