@@ -93,16 +93,19 @@ func autoscalerPeer() networkingv1.NetworkPolicyPeer {
 // (kourier-system), the Knative Operator (knative-serving) and OpenShift
 // Serverless (knative-serving-ingress). Each yields its own pod-scoped peer, so
 // no layout is admitted as a whole namespace.
-var kourierGatewayNamespaces = []string{
-	kourierSystemNamespace,
-	knativeServingNamespace,
-	knativeServingIngressNamespace,
+func kourierGatewayNamespaces() []string {
+	return []string{
+		kourierSystemNamespace,
+		knativeServingNamespace,
+		knativeServingIngressNamespace,
+	}
 }
 
 // kourierGatewayPeers returns one pod-scoped peer per gateway namespace.
 func kourierGatewayPeers() []networkingv1.NetworkPolicyPeer {
-	peers := make([]networkingv1.NetworkPolicyPeer, 0, len(kourierGatewayNamespaces))
-	for _, ns := range kourierGatewayNamespaces {
+	namespaces := kourierGatewayNamespaces()
+	peers := make([]networkingv1.NetworkPolicyPeer, 0, len(namespaces))
+	for _, ns := range namespaces {
 		peers = append(peers, podInNamespacePeer(ns, map[string]string{
 			kourierGatewayPodLabelKey: kourierGatewayPodLabelValue,
 		}))

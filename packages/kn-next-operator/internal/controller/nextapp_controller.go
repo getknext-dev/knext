@@ -1913,7 +1913,8 @@ func desiredIngressRules() []networkingv1.NetworkPolicyIngressRule {
 			//
 			// PEER NARROWING (#2494): only Knative activator pods
 			// (`knative-serving` AND `app=activator`) and Kourier gateway pods
-			// (`kourier-system` AND `app=3scale-kourier-gateway`) may reach the
+			// (`app=3scale-kourier-gateway` in `kourier-system`, `knative-serving`
+			// or `knative-serving-ingress`, one peer each) may reach the
 			// serving ports. Other control-plane pods in `knative-serving`
 			// (controller, webhook, autoscaler, net-kourier-controller) and
 			// non-gateway pods in `kourier-system` are excluded. Non-Kourier

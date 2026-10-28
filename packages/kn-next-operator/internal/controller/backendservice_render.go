@@ -80,7 +80,8 @@ func functionLabels(bs *appsv1alpha1.BackendService) map[string]string {
 // functionIngressRules is the function NetworkPolicy's ingress (ADR-0004
 // Amendment 2 Decision 5, narrowed in #2494): Knative activator pods
 // (`knative-serving` AND `app=activator`) and Kourier gateway pods
-// (`kourier-system` AND `app=3scale-kourier-gateway`) on queue-proxy's serving
+// (`app=3scale-kourier-gateway` in `kourier-system`, `knative-serving` or
+// `knative-serving-ingress`, one peer each) on queue-proxy's serving
 // ports (8012/8013/8112), plus Knative autoscaler pods (`knative-serving` AND
 // `app=autoscaler`) on queue-proxy's metrics port (9090) only. These are the
 // same pod-scoped Knative/Kourier peers as the NextApp policy's first two rules

@@ -342,7 +342,8 @@ activator, or in-namespace callers reach the app while external paths cannot. Tu
 
 **Cause.** The operator reconciles a default-on `NetworkPolicy`, `<app>-allow-ingress`, restricting
 the serving ports to the Knative activator pods (`app=activator` in `knative-serving`) and the
-Kourier gateway pods (`app=3scale-kourier-gateway` in `kourier-system`), the queue-proxy metrics port
+Kourier gateway pods (`app=3scale-kourier-gateway` in `kourier-system`, `knative-serving` or
+`knative-serving-ingress`), the queue-proxy metrics port
 to the autoscaler pods (`app=autoscaler`), and the metrics ports to the app's own namespace. If those
 namespaces are not labelled `kubernetes.io/metadata.name=<ns>`, those pods carry different labels,
 the activator runs elsewhere, or your ingress layer is not Kourier, legitimate traffic is dropped on a

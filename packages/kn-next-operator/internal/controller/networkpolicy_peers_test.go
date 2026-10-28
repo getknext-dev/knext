@@ -454,6 +454,7 @@ func TestNetworkPolicyPodLabelsPinnedAgainstUpstreamDrift(t *testing.T) {
 	const (
 		wantKnativeNS          = "knative-serving"
 		wantKourierNS          = "kourier-system"
+		wantIngressNS          = "knative-serving-ingress"
 		wantKnativeLabelKey    = "app"
 		wantActivatorLabelVal  = "activator"
 		wantAutoscalerLabelVal = "autoscaler"
@@ -465,6 +466,7 @@ func TestNetworkPolicyPodLabelsPinnedAgainstUpstreamDrift(t *testing.T) {
 	}{
 		{"knativeServingNamespace", knativeServingNamespace, wantKnativeNS},
 		{"kourierSystemNamespace", kourierSystemNamespace, wantKourierNS},
+		{"knativeServingIngressNamespace", knativeServingIngressNamespace, wantIngressNS},
 		{"knativePodLabelKey", knativePodLabelKey, wantKnativeLabelKey},
 		{"activatorPodLabelValue", activatorPodLabelValue, wantActivatorLabelVal},
 		{"autoscalerPodLabelValue", autoscalerPodLabelValue, wantAutoscalerLabelVal},
