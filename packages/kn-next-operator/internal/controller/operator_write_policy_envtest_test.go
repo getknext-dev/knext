@@ -366,6 +366,9 @@ func TestOperatorWritePolicyNarrowsSecretAndConfigMapWrites(t *testing.T) {
 		wrongKind.Kind, wrongKind.APIVersion = "ConfigMap", "v1"
 		wrongGroup := zoneOwnerRef("zone-group")
 		wrongGroup.APIVersion = "example.com/v1"
+		// A near miss on the group: the check must anchor on the trailing slash.
+		lookalikeGroup := zoneOwnerRef("zone-lookalike")
+		lookalikeGroup.APIVersion = "apps.kn-next.dev.evil/v1"
 		notController := zoneOwnerRef("zone-noctl")
 		notController.Controller = nil
 		for _, c := range []struct {
@@ -377,6 +380,7 @@ func TestOperatorWritePolicyNarrowsSecretAndConfigMapWrites(t *testing.T) {
 			{"another zone's NextApp", "zone-wrong", []metav1.OwnerReference{zoneOwnerRef("zone-other")}},
 			{"a ConfigMap of the same name", "zone-kind", []metav1.OwnerReference{wrongKind}},
 			{"an object of another API group", "zone-group", []metav1.OwnerReference{wrongGroup}},
+			{"a look-alike API group", "zone-lookalike", []metav1.OwnerReference{lookalikeGroup}},
 			{"a reference that is not the controller", "zone-noctl", []metav1.OwnerReference{notController}},
 		} {
 			sec := secret(ZoneSigningKeySecretName(c.zone))
