@@ -538,8 +538,14 @@ the path** (the gateway peer is admitted), and direct dials are refused from the
 another namespace, and from a non-activator `knative-serving` pod. The warm leg depends on a
 drill-only `target-burst-capacity: "0"` on the drill's own function and fails unless the
 ServerlessService reports mode `Serve`: with the default budget a warm call still travels through the
-activator and would pass while the gateway peer was broken. A mutation that drops each peer in turn
-turns the corresponding leg red, which is what makes the drill evidence rather than decoration.
+activator and would pass while the gateway peer was broken. It also pins one replica
+(`min-scale: "1"`, drill-only in the same way), because `Serve` is not a state the leg can simply
+wait for: the autoscaler sets it only while it wants a replica, so it reverts to `Proxy` a few
+seconds after the cold call while pod retention keeps the pod Running. Without that pin the leg would
+be timing a stopwatch it cannot re-enter — waiting generates no traffic, so it cannot restore the
+replica the autoscaler no longer wants — and the direct-dial legs below would lose the address they
+refuse. A mutation that drops each peer in turn turns the corresponding leg red, which is what makes
+the drill evidence rather than decoration.
 
 **Drift.** The pinned pod labels are constants guarded by a test, so an upstream rename is a
 deliberate code change rather than a silent outage. The drill runs the upstream Kourier installer;
