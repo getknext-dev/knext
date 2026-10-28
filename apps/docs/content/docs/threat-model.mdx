@@ -167,7 +167,7 @@ enforced inside the app on every build.
 
 ### Scraping across namespaces
 
-The default policy admits only `knative-serving`, `kourier-system` and the app's own namespace. A
+The default policy admits only the Knative activator and autoscaler pods, the Kourier gateway pods and the app's own namespace. A
 Prometheus in another namespace is admitted on the **app metrics port only** (`9464`) once that
 namespace carries the label `knext.dev/metrics-scrape=true`. A cluster that labels nothing keeps the
 stricter posture.

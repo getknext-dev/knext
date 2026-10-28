@@ -35,14 +35,37 @@
 #       activator (knative-serving) is the peer, so a policy that admitted only
 #       the zone's pods would blackhole this call on Calico while every flannel
 #       cluster stayed green;
+#   F1b. a WARM call through the same URL SUCCEEDS with the ACTIVATOR OUT OF THE
+#       PATH. A warm function is not automatically gateway-served: with the
+#       default target-burst-capacity the SKS stays in `Proxy` and the activator
+#       keeps buffering, so a "warm" call is still admitted by the activator peer
+#       and proves nothing about the gateway. The leg therefore sets
+#       target-burst-capacity=0 on the drill's own function (drill-only, never
+#       shipped), requires the ServerlessService to report mode `Serve` with a pod
+#       up, and FAILS if it never does. Only then is the call admitted by the
+#       GATEWAY peer alone — without this leg a policy that dropped the gateway
+#       peer would blackhole every warm cross-zone call while F1 stayed green;
+#       it also pins ONE replica for the warm legs (min-scale=1, drill-only). A
+#       warm pod is not the same as `Serve`: the autoscaler wants a replica only
+#       while traffic is recent, so `Serve` collapses back to `Proxy` seconds
+#       after the cold call while pod retention keeps the pod up. Judging the
+#       call inside that window makes the leg a stopwatch, and it cannot be
+#       re-entered by waiting — waiting generates no traffic. The pin also keeps
+#       the pod alive for the direct-dial legs, which dial its IP;
 #   F2. a co-resident pod's DIRECT dial to the warm function pod (user port and
 #       queue-proxy ports) is REFUSED, from the zone's namespace and from another
 #       namespace. The policy cannot express "only the owning zone" (calls
 #       arrive through shared Knative peers), so the per-zone control is the
 #       identity token, not this policy;
+#   F2b. a pod in knative-serving that is NOT the activator and NOT the
+#       autoscaler — a stand-in labelled `app=controller`, standing for the
+#       controller, webhook and net-kourier-controller pods — is REFUSED on every
+#       serving port. Namespace membership alone must not admit a pod, which is
+#       the whole point of the narrowing;
 #   F3. mutation: with the function's policy DELETED, F2's direct dial
 #       succeeds — the refusal is the policy's doing.
-# A mutation that drops the activator peer turns F1 red; that is proved by
+# Mutations that drop the activator peer (F1), drop the gateway peer (F1b) or
+# widen every peer back to its whole namespace (F2, F2b) are proved by
 # scripts/mutation-prove-2052-backendservice.mjs, which re-runs this leg on a
 # kept cluster (REUSE_CLUSTER=1 LEGS=function) and judges by exit code.
 #
@@ -316,6 +339,29 @@ echo "$FN_OBJS" | grep -q "port: 8080" && fail "the function policy ADMITS the u
 echo "$FN_OBJS" | kubectl apply -f -
 kubectl -n "$FN_NS" wait "ksvc/$FN" --for=condition=Ready --timeout=300s
 
+# DRILL-ONLY autoscaler tuning, and the reason F1b can prove anything at all.
+#
+# A warm Knative function is NOT automatically served by the gateway. With the
+# default target-burst-capacity (200) the autoscaler keeps counting requests
+# against the activator's buffer, so the ServerlessService stays in `Proxy` mode
+# and a warm call through the function URL still travels gateway -> ACTIVATOR ->
+# queue-proxy. Such a call is admitted by the ACTIVATOR peer and says nothing
+# about the gateway peer, so dropping the gateway peer would leave the leg green.
+#
+# target-burst-capacity=0 makes the SKS switch to `Serve` — route straight to the
+# pods — as soon as one pod is up, so the activator leaves the path and the warm
+# call is admitted by the GATEWAY peer alone. F1b asserts the mode before it
+# calls and fails rather than passes while the mode is still `Proxy`.
+#
+# This is a setting on the drill's own fixture, not on what the operator ships.
+kubectl -n "$FN_NS" patch ksvc "$FN" --type=json \
+  -p '[{"op":"add","path":"/spec/template/metadata/annotations/autoscaling.knative.dev~1target-burst-capacity","value":"0"}]'
+# JSON Patch on one annotation path, never --type=merge: a merge patch on a ksvc
+# once dropped env/resources/probes silently. Prove the container survived.
+[ "$(kubectl -n "$FN_NS" get ksvc "$FN" -o jsonpath='{.spec.template.spec.containers[0].image}')" = "$FN_IMAGE" ] \
+  || fail "the ksvc lost its container image after the target-burst-capacity patch"
+kubectl -n "$FN_NS" wait "ksvc/$FN" --for=condition=Ready --timeout=300s >/dev/null
+
 kubectl -n "$FN_NS" run zone-caller --image=curlimages/curl --labels="serving.knative.dev/service=$ZONE" \
   --command -- sleep 3600 >/dev/null
 kubectl -n "$FN_OTHER_NS" run other-zone --image=curlimages/curl --command -- sleep 3600 >/dev/null
@@ -341,11 +387,97 @@ case "$BODY" in
   *) fail "the cold call answered, but not from the function over h2c: $BODY" ;;
 esac
 
+log "F1b. a WARM call through the function URL must SUCCEED (gateway peer, activator out of path)"
+# The leg is only meaningful with the ACTIVATOR OUT OF THE PATH, which is what
+# the target-burst-capacity patch above buys: at zero replicas the SKS is
+# `Proxy` and the activator buffers; once a pod is up it flips to `Serve` and the
+# gateway routes straight to the pod. So BOTH halves are asserted before the
+# call — a pod Ready AND sks mode == Serve — and the whole thing is retried
+# while the pinned revision's pod comes up and the autoscaler moves the SKS to
+# `Serve`.
+# If Serve is never reached with a pod up, the leg FAILS: a warm call through the
+# activator proves nothing about the gateway peer.
+F1B_OK=0
+# Pin one replica for the remaining function legs (drill-only, like the burst
+# capacity above). `Serve` is NOT a function of "a pod exists": the autoscaler
+# sets it only while it wants a replica (`want > 0`), and `want` drops to zero
+# one stable-window after the last request. Pod retention then keeps the pod
+# Running for its full 30s with the SKS back in `Proxy` — measured on a failing
+# run, `Serve` survived 2-3 seconds after the cold call and never returned. A
+# wait-only retry can never recover from missing it: waiting generates no
+# traffic, so it cannot restore `want > 0`. Pinning the replica makes `want`>=1
+# persistently, which makes `Serve` a steady state instead of a stopwatch —
+# and it keeps the pod alive for F2/F3, which dial its IP: with the autoscaler
+# reclaiming it 40s after the cold call those legs measured a dead address, so
+# F2 could read "refused" for the wrong reason and F3 could never open.
+kubectl -n "$FN_NS" patch ksvc "$FN" --type=json \
+  -p '[{"op":"add","path":"/spec/template/metadata/annotations/autoscaling.knative.dev~1min-scale","value":"1"}]'
+[ "$(kubectl -n "$FN_NS" get ksvc "$FN" -o jsonpath='{.spec.template.spec.containers[0].image}')" = "$FN_IMAGE" ] \
+  || fail "the ksvc lost its container image after the min-scale patch"
+kubectl -n "$FN_NS" wait "ksvc/$FN" --for=condition=Ready --timeout=300s >/dev/null
+
+for _ in $(seq 1 10); do
+  # The SKS is named after its revision, and only the LATEST READY revision's
+  # mode is the path a new request takes — earlier revisions stay `Proxy`.
+  FN_REV=$(kubectl -n "$FN_NS" get ksvc "$FN" -o jsonpath='{.status.latestReadyRevisionName}' 2>/dev/null || true)
+  [ -n "$FN_REV" ] || { sleep 2; continue; }
+  # Scope to the revision as well as the service: a draining pod of the previous
+  # revision still answers the service label, and the assertion below must not
+  # be made against an address that is about to disappear.
+  FN_POD=$(kubectl -n "$FN_NS" get pods \
+    -l "serving.knative.dev/service=$FN,serving.knative.dev/revision=$FN_REV" \
+    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+  [ -n "$FN_POD" ] || { sleep 2; continue; }
+  # A pod that exists but is not Ready is not "warm": the `Serve` transition
+  # (and therefore a gateway-only warm call) presupposes a ready backend, so the
+  # precondition is readiness, not bare pod existence.
+  if ! kubectl -n "$FN_NS" wait --for=condition=Ready "pod/$FN_POD" --timeout=60s >/dev/null 2>&1; then
+    log "   F1b: function pod $FN_POD exists but is not Ready; waiting"
+    sleep 2
+    continue
+  fi
+  SKS_MODE=$(kubectl -n "$FN_NS" get sks "$FN_REV" -o jsonpath='{.spec.mode}' 2>/dev/null || true)
+  if [ "$SKS_MODE" != "Serve" ]; then
+    log "   F1b: function is warm but sks mode=${SKS_MODE:-<none>} — the activator is still in the path, so a call here would not prove the gateway; waiting"
+    sleep 2
+    continue
+  fi
+  before="$FN_POD"
+  BODY_WARM=$(kubectl -n "$FN_NS" exec zone-caller -- curl -sS -m 30 "$FN_URL/" 2>&1) || BODY_WARM=""
+  after=$(kubectl -n "$FN_NS" get pods \
+    -l "serving.knative.dev/service=$FN,serving.knative.dev/revision=$FN_REV" \
+    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+  if [ -n "$BODY_WARM" ] && [ "$before" = "$after" ]; then
+    echo "   warm call: $BODY_WARM (revision $FN_REV, sks mode=Serve, warm pod $before unchanged across the call)"
+    case "$BODY_WARM" in
+      *"knext-function-ok proto=HTTP/2.0"*) F1B_OK=1; break ;;
+      *) fail "the warm call answered, but not from the function over h2c: $BODY_WARM" ;;
+    esac
+  fi
+  echo "   F1b retry: pod=$before -> $after, answer=${BODY_WARM:-<none>}"
+  sleep 3
+done
+[ "$F1B_OK" = 1 ] || fail "no warm call could be proved with the activator out of the path: either sks mode never reached Serve while a pod was up (so the gateway peer is unproven), or the pod did not hold across the call, or the warm call was blackholed"
+
 log "F2. a co-resident pod's DIRECT dial to the warm function pod must be REFUSED"
-FN_POD_IP=$(kubectl -n "$FN_NS" get pods -l "serving.knative.dev/service=$FN" -o jsonpath='{.items[0].status.podIP}')
+# The SAME revision F1b proved warm: with the replica pinned it stays up for the
+# whole leg, so these refusals are attributable to the policy rather than to an
+# address the autoscaler already took away (and F3 needs it still alive to
+# prove the refusal was the policy's).
+FN_POD_IP=$(kubectl -n "$FN_NS" get pods \
+  -l "serving.knative.dev/service=$FN,serving.knative.dev/revision=$FN_REV" \
+  -o jsonpath='{.items[0].status.podIP}')
 [ -n "$FN_POD_IP" ] || fail "no warm function pod after the call"
 fdial() { # $1=namespace $2=pod $3=port -> open|refused
-  if kubectl -n "$1" exec "$2" -- curl -s -o /dev/null -m 8 "http://$FN_POD_IP:$3/" 2>/dev/null; then
+  # The SCHEME matters. 8112 is queue-proxy's TLS port and 8013 is h2c, so a
+  # plain http:// probe fails its handshake on an ADMITTED port too and would
+  # read "refused" — a refusal must come from the policy, never from curl.
+  local scheme=http extra=""
+  case "$3" in
+    8112) scheme=https extra="-k" ;;
+    8013) extra="--http2-prior-knowledge" ;;
+  esac
+  if kubectl -n "$1" exec "$2" -- curl -s -o /dev/null -m 8 $extra "$scheme://$FN_POD_IP:$3/" 2>/dev/null; then
     echo open
   else
     echo refused
@@ -357,12 +489,53 @@ for caller in "$FN_NS/zone-caller" "$FN_OTHER_NS/other-zone"; do
   cpod="${caller##*/}"
   kubectl -n "$cns" exec "$cpod" -- curl -sk -o /dev/null -m 8 "https://kubernetes.default.svc/" 2>/dev/null \
     || fail "$caller cannot reach the apiserver either, so a refusal would not be attributable to the policy"
-  for port in 8080 8012 8013; do
+  for port in 8080 8012 8013 8112; do
     R=$(fdial "$cns" "$cpod" "$port")
     echo "   $caller -> function pod :$port: $R"
     [ "$R" = refused ] || fail "$caller dialled the function pod's :$port directly — the Knative path is bypassable"
   done
 done
+
+log "F2b. a non-activator knative-serving pod's DIRECT dial must be REFUSED"
+# The narrowed peer select knative-serving AND a pod label. Namespace membership
+# alone must not admit a pod, so the rest of the control plane (controller,
+# webhook, net-kourier-controller) has to be refused on every serving port. The
+# stand-in carries `app=controller`; the real pods are distroless and carry
+# knative's own labels, and neither can be exec'd into.
+kubectl apply -f - >/dev/null <<'YAML'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: np-drill-controller
+  namespace: knative-serving
+  labels:
+    app: controller
+spec:
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: probe
+      image: curlimages/curl
+      command: ["sleep", "3600"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+YAML
+kubectl -n knative-serving wait --for=condition=Ready pod/np-drill-controller --timeout=180s >/dev/null
+# Vacuity guard: a refusal only counts if this pod can reach something.
+kubectl -n knative-serving exec np-drill-controller -- curl -sk -o /dev/null -m 8 "https://kubernetes.default.svc/" 2>/dev/null \
+  || fail "the knative-serving stand-in cannot reach the apiserver, so a refusal would not be attributable to the policy"
+for port in 8080 8012 8013 8112; do
+  R=$(fdial knative-serving np-drill-controller "$port")
+  echo "   knative-serving/app=controller -> function pod :$port: $R"
+  [ "$R" = refused ] || fail "a NON-activator knative-serving pod dialled the function pod's :$port — namespace membership admits it"
+done
+kubectl -n knative-serving delete pod np-drill-controller --wait=false >/dev/null
 
 log "F3. MUTATION: delete the function's policy — the direct dial must succeed"
 kubectl -n "$FN_NS" delete networkpolicy "$FN-function-ingress"
@@ -375,7 +548,7 @@ done
 echo "   user port without the policy: $R"
 [ "$R" = open ] || fail "the direct dial is still refused with NO policy — F2 proved nothing"
 
-log "FUNCTION LEG PASSED: a cold call through the activator succeeds on Calico, direct dials are refused, and the refusal is the policy's"
+log "FUNCTION LEG PASSED: cold (activator) and warm (gateway) calls succeed on Calico, direct dials from zone pods and from a non-activator knative-serving pod are refused, and the refusal is the policy's"
 fi
 
 log "DRILL PASSED (legs: $LEGS)"

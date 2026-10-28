@@ -341,22 +341,30 @@ activator, or in-namespace callers reach the app while external paths cannot. Tu
 `spec.security.networkPolicy` coincided with the break.
 
 **Cause.** The operator reconciles a default-on `NetworkPolicy`, `<app>-allow-ingress`, restricting
-ingress to the app's pods to `knative-serving` (the activator), `kourier-system` (the ingress gateway)
-and the app's own namespace — and, on the serving ports only, to those. If those namespaces are not
-labelled `kubernetes.io/metadata.name=<ns>`, or the activator runs elsewhere on a policy-enforcing CNI,
-legitimate traffic is dropped. The policy is layer 3/4 and a no-op on a CNI without NetworkPolicy
+the serving ports to the Knative activator pods (`app=activator` in `knative-serving`) and the
+Kourier gateway pods (`app=3scale-kourier-gateway` in `kourier-system`, `knative-serving` or
+`knative-serving-ingress`), the queue-proxy metrics port
+to the autoscaler pods (`app=autoscaler` in `knative-serving`), and the metrics ports to the app's own
+namespace. If those namespaces are not labelled `kubernetes.io/metadata.name=<ns>`, those pods carry
+different labels, the activator runs elsewhere, or your ingress layer is not Kourier, legitimate
+traffic is dropped on a policy-enforcing CNI. The policy is layer 3/4 and a no-op on a CNI without NetworkPolicy
 support. See [Security](/docs/security#network-isolation).
 
 **Fix.**
 
 ```sh title="shell"
 kubectl get networkpolicy <app>-allow-ingress -n <ns> -o yaml
-kubectl get ns knative-serving kourier-system \
+# Every namespace a peer names must carry the metadata.name label, and the
+# gateway pods must carry the exact label, wherever your install puts them.
+kubectl get ns knative-serving kourier-system knative-serving-ingress \
   -o jsonpath='{range .items[*]}{.metadata.name}={.metadata.labels.kubernetes\.io/metadata\.name}{"\n"}{end}'
+kubectl get pods -A -l 'app in (activator,3scale-kourier-gateway,autoscaler)' \
+  -o custom-columns=NS:.metadata.namespace,POD:.metadata.name,APP:.metadata.labels.app
 ```
 
-Make sure both namespaces carry the `kubernetes.io/metadata.name` label (Kubernetes 1.21 and later add
-it automatically). To opt out entirely, set `spec.security.networkPolicy: false` and the operator
+Each namespace a peer names must carry the `kubernetes.io/metadata.name` label (Kubernetes 1.21 and
+later add it automatically), and each of those three label values must match the pods your install
+actually runs. A namespace that does not exist is fine: its peer simply matches nothing. To opt out entirely, set `spec.security.networkPolicy: false` and the operator
 removes the policy. Do not hand-edit the policy: it is owner-referenced and reconciled.
 
 ## Wakes got slower on one app

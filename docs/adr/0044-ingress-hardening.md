@@ -507,3 +507,47 @@ and `self-contained-e2e.test.ts` remain green.
 The two v16.3.5 compat runs from Round 1 (bun × webpack: **36646418499**; node × turbopack:
 **36646409104**, with one documented flake unattributed to the cap) still stand. Round 2 changes only
 the preload internals, no builder change, so no new dispatch was made.
+
+## Amendment 7 (2026-10-28, #2494): pod-scoped Knative and Kourier peers
+
+**Decision.** The default policy no longer admits whole namespaces. Each peer is one `from` element
+that ANDs a namespace selector with a pod selector, built by a single helper (`podInNamespacePeer`)
+that refuses an empty pod selector:
+
+- Knative activator (`knative-serving`, `app=activator`): serving ports 8012/8013/8112.
+- Kourier gateway (`app=3scale-kourier-gateway`): serving ports 8012/8013/8112, one pod-scoped peer
+  per install layout: `kourier-system` (upstream net-kourier), `knative-serving` (Knative Operator),
+  `knative-serving-ingress` (OpenShift Serverless).
+- Knative autoscaler (`knative-serving`, `app=autoscaler`): queue-proxy metrics 9090 only. Dropping
+  it would silently stall scale-up, since the autoscaler scrapes queue-proxy.
+- Same-namespace and label-gated cross-namespace scraping: unchanged.
+
+The Knative peers lose the app metrics port (9464), which they never needed. The same rules apply to
+the `BackendService` function policy (ADR-0004 Amendment 2 Decision 5).
+
+**Kourier only.** No flag for other ingress layers. Clusters on Istio, Contour or Gateway API turn
+the default policy off and write their own. `BackendService` has no opt-out yet, so functions on a
+non-Kourier layer with an enforcing CNI are unreachable; recorded as a known limit.
+
+**Enforcement, and what "proved" means here.** The claim is checked by the kind + Calico drill
+(`test/networkpolicy-enforcement-drill.sh`), not by the object tests, because envtest has no CNI and
+flannel enforces nothing. The drill renders the policy with `cmd/policygen`, so it applies exactly
+what the reconciler writes, and asserts three separate things: a **cold** call through the function
+URL succeeds (the activator peer is admitted), a **warm** call succeeds **with the activator out of
+the path** (the gateway peer is admitted), and direct dials are refused from the zone namespace, from
+another namespace, and from a non-activator `knative-serving` pod. The warm leg depends on a
+drill-only `target-burst-capacity: "0"` on the drill's own function and fails unless the
+ServerlessService reports mode `Serve`: with the default budget a warm call still travels through the
+activator and would pass while the gateway peer was broken. It also pins one replica
+(`min-scale: "1"`, drill-only in the same way), because `Serve` is not a state the leg can simply
+wait for: the autoscaler sets it only while it wants a replica, so it reverts to `Proxy` a few
+seconds after the cold call while pod retention keeps the pod Running. Without that pin the leg would
+be timing a stopwatch it cannot re-enter — waiting generates no traffic, so it cannot restore the
+replica the autoscaler no longer wants — and the direct-dial legs below would lose the address they
+refuse. A mutation that drops each peer in turn turns the corresponding leg red, which is what makes
+the drill evidence rather than decoration.
+
+**Drift.** The pinned pod labels are constants guarded by a test, so an upstream rename is a
+deliberate code change rather than a silent outage. The drill runs the upstream Kourier installer;
+the pod label of a Knative Operator or OpenShift Serverless install is not exercised there, so those
+layouts are covered by the label-pin test plus the per-layout peers, not by a live run.

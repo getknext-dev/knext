@@ -405,9 +405,11 @@ the function that already served the original. It is a limit, not a seal:
 ## Network
 
 The function's Knative Service is **cluster-local**: it has no public route. The operator also
-writes a `NetworkPolicy` that admits only the Knative data path, which is the activator that wakes
-a function from zero and the networking layer's gateway, on the queue-proxy ports. It stops a pod
-from dialling the function's pod directly. Because every call arrives through those shared
+writes a `NetworkPolicy` that admits only the Knative data path: the activator that wakes a
+function from zero and the Kourier gateway pods, on the queue-proxy serving ports, plus the Knative
+autoscaler on the queue-proxy metrics port. It stops a pod from dialling the function's pod
+directly. Kourier is the only supported ingress layer here, and the function policy cannot be
+turned off yet, so a function on a different ingress layer with an enforcing CNI is unreachable. Because every call arrives through those shared
 Knative components, the policy cannot tell your zone from another one; the per-call identity token
 is what does that. NetworkPolicy is enforced only by a CNI that supports it (Calico, Cilium);
 flannel enforces none.
