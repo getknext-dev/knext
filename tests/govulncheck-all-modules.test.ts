@@ -109,11 +109,11 @@ describe('govulncheck covers every Go module', () => {
     for (const g of gated) expect(nightly.has(g.dir), `nightly must scan ${g.dir}`).toBe(true);
   });
 
-  it('GO-2026-6809 is excepted for the shared gate (covers every module)', () => {
+  it('GO-2026-6809 is no longer excepted: go1.26.10 fixes it in every module (#2567)', () => {
     const ex = JSON.parse(
       readFileSync(resolve(REPO_ROOT, 'security/govulncheck-exceptions.json'), 'utf8'),
     );
-    expect(ex.allow.map((a: any) => a.id)).toContain('GO-2026-6809');
+    expect(ex.allow.map((a: any) => a.id)).not.toContain('GO-2026-6809');
   });
 
   it('the new workflow holds read-only permissions and SHA-pinned actions', () => {

@@ -110,10 +110,7 @@ describe('committed exceptions file and workflow wiring', () => {
     readFileSync(resolve(REPO_ROOT, 'security/govulncheck-exceptions.json'), 'utf8'),
   );
 
-  it('carries the GO-2026-6809 entry expiring 2026-10-25 and no other', () => {
-    expect(file.allow).toHaveLength(1);
-    expect(file.allow[0].id).toBe('GO-2026-6809');
-    expect(file.allow[0].expires).toBe('2026-10-25');
-    expect(file.allow[0].justification).toContain('#2567');
+  it('carries no exceptions: GO-2026-6809 was removed with the go1.26.10 bump (#2567)', () => {
+    expect(file.allow).toEqual([]);
   });
 });
