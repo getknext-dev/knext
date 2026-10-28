@@ -198,10 +198,15 @@ func TestRenderedBundlePolicyConfinesTheIdentityTheOperatorRunsAs(t *testing.T) 
 	}
 
 	// Allowed: the two names the operator writes. Refused: anything else.
-	if err := operator.Create(ctx, secret(ZoneSigningKeySecretName("zone-a"))); err != nil {
+	// Each carries the zone's controller ownerReference, as the reconciler sets it.
+	ownedKey := secret(ZoneSigningKeySecretName("zone-a"))
+	ownedKey.OwnerReferences = []metav1.OwnerReference{zoneOwnerRef("zone-a")}
+	if err := operator.Create(ctx, ownedKey); err != nil {
 		t.Errorf("the operator was refused its own signing-key Secret: %v", err)
 	}
-	if err := operator.Create(ctx, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: ZoneJWKSConfigMapName("zone-a"), Namespace: "bundle-zone"}}); err != nil {
+	ownedJWKS := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: ZoneJWKSConfigMapName("zone-a"), Namespace: "bundle-zone",
+		OwnerReferences: []metav1.OwnerReference{zoneOwnerRef("zone-a")}}}
+	if err := operator.Create(ctx, ownedJWKS); err != nil {
 		t.Errorf("the operator was refused its own JWKS ConfigMap: %v", err)
 	}
 	if err := operator.Create(ctx, secret("evil")); !isPolicyDenial(err) {
@@ -213,6 +218,7 @@ func TestRenderedBundlePolicyConfinesTheIdentityTheOperatorRunsAs(t *testing.T) 
 	// The name is allowed but the type is not: a service-account-token Secret would be
 	// filled in with a credential for the ServiceAccount its annotation names.
 	token := secret(ZoneSigningKeySecretName("kube-system"))
+	token.OwnerReferences = []metav1.OwnerReference{zoneOwnerRef("kube-system")}
 	token.Type = corev1.SecretTypeServiceAccountToken
 	token.Annotations = map[string]string{corev1.ServiceAccountNameKey: "privileged"}
 	if err := operator.Create(ctx, token); !isPolicyDenial(err) || !strings.Contains(err.Error(), "Opaque") {

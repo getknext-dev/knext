@@ -212,7 +212,9 @@ func TestOperatorWritePolicyNarrowsSecretAndConfigMapWrites(t *testing.T) {
 	allowedCM := ZoneJWKSConfigMapName("zone-a")
 
 	t.Run("the operator writes the names it owns", func(t *testing.T) {
+		// The zone's controller ownerReference, as the reconciler sets it at create.
 		s := secret(allowedSecret)
+		s.OwnerReferences = []metav1.OwnerReference{zoneOwnerRef("zone-a")}
 		if err := operator.Create(ctx, s); err != nil {
 			t.Fatalf("create Secret %s: %v", allowedSecret, err)
 		}
@@ -221,6 +223,7 @@ func TestOperatorWritePolicyNarrowsSecretAndConfigMapWrites(t *testing.T) {
 			t.Fatalf("update Secret %s: %v", allowedSecret, err)
 		}
 		c := cm(allowedCM)
+		c.OwnerReferences = []metav1.OwnerReference{zoneOwnerRef("zone-a")}
 		if err := operator.Create(ctx, c); err != nil {
 			t.Fatalf("create ConfigMap %s: %v", allowedCM, err)
 		}
@@ -299,6 +302,8 @@ func TestOperatorWritePolicyNarrowsSecretAndConfigMapWrites(t *testing.T) {
 		const policyMessage = "may write only Opaque Secrets"
 		typed := func(name string, secretType corev1.SecretType, data map[string][]byte) *corev1.Secret {
 			s := secret(name)
+			// Owned by its own zone, so the refusal below is the type's, not the owner's.
+			s.OwnerReferences = []metav1.OwnerReference{zoneOwnerRef(strings.TrimSuffix(name, "-knext-signing-key"))}
 			s.Type = secretType
 			s.StringData = nil
 			s.Data = data
@@ -342,6 +347,143 @@ func TestOperatorWritePolicyNarrowsSecretAndConfigMapWrites(t *testing.T) {
 		foreign.Labels = map[string]string{"touched": "by-the-operator"}
 		if err := operator.Update(ctx, foreign); !typeDenial(err) {
 			t.Errorf("the operator updated a foreign service-account-token Secret under an allowed name (want the type denial): %v", err)
+		}
+	})
+
+	// Ownership: the name and the type are right in every case below, and only the
+	// owner is wrong. Each refusal is attributed to an ownership check by its
+	// message, so a refusal by any other check cannot pass for one of these.
+	t.Run("the operator writes only objects its zone's NextApp controls", func(t *testing.T) {
+		ownerDenial := func(err error) bool {
+			return isPolicyDenial(err) && strings.Contains(err.Error(), "controller ownerReference to that NextApp")
+		}
+		changedDenial := func(err error) bool {
+			return isPolicyDenial(err) && strings.Contains(err.Error(), "may not change an object's ownerReferences")
+		}
+		// Existing objects under the allowed names, owned in each wrong way. Each
+		// zone's name is its own, so the cases do not share an object.
+		wrongKind := zoneOwnerRef("zone-kind")
+		wrongKind.Kind, wrongKind.APIVersion = "ConfigMap", "v1"
+		wrongGroup := zoneOwnerRef("zone-group")
+		wrongGroup.APIVersion = "example.com/v1"
+		// A near miss on the group: the check must anchor on the trailing slash.
+		lookalikeGroup := zoneOwnerRef("zone-lookalike")
+		lookalikeGroup.APIVersion = "apps.kn-next.dev.evil/v1"
+		notController := zoneOwnerRef("zone-noctl")
+		notController.Controller = nil
+		for _, c := range []struct {
+			what  string
+			zone  string
+			owner []metav1.OwnerReference
+		}{
+			{"no owner", "zone-unowned", nil},
+			{"another zone's NextApp", "zone-wrong", []metav1.OwnerReference{zoneOwnerRef("zone-other")}},
+			{"a ConfigMap of the same name", "zone-kind", []metav1.OwnerReference{wrongKind}},
+			{"an object of another API group", "zone-group", []metav1.OwnerReference{wrongGroup}},
+			{"a look-alike API group", "zone-lookalike", []metav1.OwnerReference{lookalikeGroup}},
+			{"a reference that is not the controller", "zone-noctl", []metav1.OwnerReference{notController}},
+		} {
+			sec := secret(ZoneSigningKeySecretName(c.zone))
+			sec.OwnerReferences = c.owner
+			cmo := cm(ZoneJWKSConfigMapName(c.zone))
+			cmo.OwnerReferences = c.owner
+			for _, o := range []client.Object{sec, cmo} {
+				if err := admin.Create(ctx, o); err != nil {
+					t.Fatal(err)
+				}
+			}
+			sec.Data = map[string][]byte{"k": []byte("changed")}
+			if err := operator.Update(ctx, sec); !ownerDenial(err) {
+				t.Errorf("%s: the operator updated Secret %s (want the ownership denial): %v", c.what, sec.Name, err)
+			}
+			cmo.Data = map[string]string{"k": "changed"}
+			if err := operator.Update(ctx, cmo); !ownerDenial(err) {
+				t.Errorf("%s: the operator updated ConfigMap %s (want the ownership denial): %v", c.what, cmo.Name, err)
+			}
+			if err := operator.Delete(ctx, sec); !ownerDenial(err) {
+				t.Errorf("%s: the operator deleted Secret %s (want the ownership denial): %v", c.what, sec.Name, err)
+			}
+			if err := operator.Delete(ctx, cmo); !ownerDenial(err) {
+				t.Errorf("%s: the operator deleted ConfigMap %s (want the ownership denial): %v", c.what, cmo.Name, err)
+			}
+			// Controls: refused, so both still stand, unchanged.
+			if err := admin.Get(ctx, client.ObjectKeyFromObject(sec), &corev1.Secret{}); err != nil {
+				t.Errorf("%s: the refused Secret %s is gone: %v", c.what, sec.Name, err)
+			}
+			if err := admin.Get(ctx, client.ObjectKeyFromObject(cmo), &corev1.ConfigMap{}); err != nil {
+				t.Errorf("%s: the refused ConfigMap %s is gone: %v", c.what, cmo.Name, err)
+			}
+		}
+
+		// Create: an allowed name with no owner, or with another zone's, is refused.
+		for _, owner := range [][]metav1.OwnerReference{nil, {zoneOwnerRef("zone-other")}} {
+			s := secret(ZoneSigningKeySecretName("zone-new"))
+			s.OwnerReferences = owner
+			if err := operator.Create(ctx, s); !ownerDenial(err) {
+				t.Errorf("the operator created Secret %s with owners %v (want the ownership denial): %v", s.Name, owner, err)
+			}
+			c := cm(ZoneJWKSConfigMapName("zone-new"))
+			c.OwnerReferences = owner
+			if err := operator.Create(ctx, c); !ownerDenial(err) {
+				t.Errorf("the operator created ConfigMap %s with owners %v (want the ownership denial): %v", c.Name, owner, err)
+			}
+		}
+		if err := admin.Get(ctx, types.NamespacedName{Namespace: ns, Name: ZoneSigningKeySecretName("zone-new")}, &corev1.Secret{}); !apierrors.IsNotFound(err) {
+			t.Errorf("a refused create left a Secret behind: %v", err)
+		}
+
+		// Update: the owner an object has is kept. A write may not drop it, swap it for
+		// another zone's, or forge its UID, and the stored owner is unchanged after.
+		held := zoneOwnerRef("zone-held")
+		heldSecret := secret(ZoneSigningKeySecretName("zone-held"))
+		heldSecret.OwnerReferences = []metav1.OwnerReference{held}
+		heldCM := cm(ZoneJWKSConfigMapName("zone-held"))
+		heldCM.OwnerReferences = []metav1.OwnerReference{held}
+		for _, o := range []client.Object{heldSecret, heldCM} {
+			if err := admin.Create(ctx, o); err != nil {
+				t.Fatal(err)
+			}
+		}
+		forged := zoneOwnerRef("zone-held")
+		forged.UID = "forged-uid"
+		for _, c := range []struct {
+			what  string
+			owner []metav1.OwnerReference
+		}{
+			{"dropped", nil},
+			{"swapped for another zone's NextApp", []metav1.OwnerReference{zoneOwnerRef("zone-other")}},
+			{"given a forged UID", []metav1.OwnerReference{forged}},
+		} {
+			// A fresh read each time, so each write carries the stored resourceVersion.
+			sec := &corev1.Secret{}
+			if err := operator.Get(ctx, client.ObjectKeyFromObject(heldSecret), sec); err != nil {
+				t.Fatal(err)
+			}
+			sec.OwnerReferences = c.owner
+			if err := operator.Update(ctx, sec); !changedDenial(err) {
+				t.Errorf("the operator's Secret update %s (want the owner-change denial): %v", c.what, err)
+			}
+			obj := &corev1.ConfigMap{}
+			if err := operator.Get(ctx, client.ObjectKeyFromObject(heldCM), obj); err != nil {
+				t.Fatal(err)
+			}
+			obj.OwnerReferences = c.owner
+			if err := operator.Update(ctx, obj); !changedDenial(err) {
+				t.Errorf("the operator's ConfigMap update %s (want the owner-change denial): %v", c.what, err)
+			}
+		}
+		for _, o := range []client.Object{&corev1.Secret{}, &corev1.ConfigMap{}} {
+			name := heldSecret.Name
+			if _, ok := o.(*corev1.ConfigMap); ok {
+				name = heldCM.Name
+			}
+			if err := admin.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, o); err != nil {
+				t.Fatalf("held object %s vanished: %v", name, err)
+			}
+			refs := o.GetOwnerReferences()
+			if len(refs) != 1 || refs[0].UID != held.UID || refs[0].Name != held.Name {
+				t.Errorf("a refused write changed %s's owner: %+v", name, refs)
+			}
 		}
 	})
 
@@ -497,6 +639,21 @@ func TestOperatorWritePolicyNarrowsSecretAndConfigMapWrites(t *testing.T) {
 			time.Sleep(500 * time.Millisecond)
 		}
 	})
+}
+
+// zoneOwnerRef is the controller ownerReference the operator sets on a zone's key
+// Secret and JWKS ConfigMap at create (ctrl.SetControllerReference on the NextApp).
+// The UID is a stand-in: the policy cannot see UIDs, and the reconciler's own
+// controlledByZone check is what compares them.
+func zoneOwnerRef(zone string) metav1.OwnerReference {
+	controller := true
+	return metav1.OwnerReference{
+		APIVersion: appsv1alpha1.GroupVersion.String(),
+		Kind:       "NextApp",
+		Name:       zone,
+		UID:        types.UID("uid-" + zone),
+		Controller: &controller,
+	}
 }
 
 // policyOperatorUsername reads the identity the policy confines: the string
