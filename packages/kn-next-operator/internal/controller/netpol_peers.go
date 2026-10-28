@@ -31,6 +31,9 @@ const (
 	// TestNetworkPolicyPodLabelsPinnedAgainstUpstreamDrift.
 	knativeServingNamespace = "knative-serving"
 	kourierSystemNamespace  = "kourier-system"
+	// knativeServingIngressNamespace is where OpenShift Serverless runs the
+	// Kourier gateway. The Knative Operator runs it in knativeServingNamespace.
+	knativeServingIngressNamespace = "knative-serving-ingress"
 
 	knativePodLabelKey          = "app"
 	activatorPodLabelValue      = "activator"
@@ -85,8 +88,24 @@ func autoscalerPeer() networkingv1.NetworkPolicyPeer {
 	})
 }
 
-func kourierGatewayPeer() networkingv1.NetworkPolicyPeer {
-	return podInNamespacePeer(kourierSystemNamespace, map[string]string{
-		kourierGatewayPodLabelKey: kourierGatewayPodLabelValue,
-	})
+// kourierGatewayNamespaces are the namespaces the Kourier gateway pods run in
+// across the supported install layouts: the upstream net-kourier manifest
+// (kourier-system), the Knative Operator (knative-serving) and OpenShift
+// Serverless (knative-serving-ingress). Each yields its own pod-scoped peer, so
+// no layout is admitted as a whole namespace.
+var kourierGatewayNamespaces = []string{
+	kourierSystemNamespace,
+	knativeServingNamespace,
+	knativeServingIngressNamespace,
+}
+
+// kourierGatewayPeers returns one pod-scoped peer per gateway namespace.
+func kourierGatewayPeers() []networkingv1.NetworkPolicyPeer {
+	peers := make([]networkingv1.NetworkPolicyPeer, 0, len(kourierGatewayNamespaces))
+	for _, ns := range kourierGatewayNamespaces {
+		peers = append(peers, podInNamespacePeer(ns, map[string]string{
+			kourierGatewayPodLabelKey: kourierGatewayPodLabelValue,
+		}))
+	}
+	return peers
 }

@@ -331,6 +331,27 @@ func TestNetworkPolicyPeerPortMatrix(t *testing.T) {
 					wantPorts: []int32{8012, 8013, 8112},
 				},
 				{
+					desc:      "Kourier gateway pod in knative-serving (Knative Operator layout) gets serving ports",
+					podNS:     "knative-serving",
+					nsLabels:  knativeNSLabels,
+					podLabels: map[string]string{"app": "3scale-kourier-gateway"},
+					wantPorts: []int32{8012, 8013, 8112},
+				},
+				{
+					desc:      "Kourier gateway pod in knative-serving-ingress (OpenShift layout) gets serving ports",
+					podNS:     "knative-serving-ingress",
+					nsLabels:  map[string]string{"kubernetes.io/metadata.name": "knative-serving-ingress"},
+					podLabels: map[string]string{"app": "3scale-kourier-gateway"},
+					wantPorts: []int32{8012, 8013, 8112},
+				},
+				{
+					desc:      "non-gateway pod in knative-serving-ingress is refused on all ports",
+					podNS:     "knative-serving-ingress",
+					nsLabels:  map[string]string{"kubernetes.io/metadata.name": "knative-serving-ingress"},
+					podLabels: map[string]string{"app": "other"},
+					wantPorts: nil,
+				},
+				{
 					desc:      "knative-serving controller pod is refused on all ports",
 					podNS:     "knative-serving",
 					nsLabels:  knativeNSLabels,
@@ -529,9 +550,11 @@ func TestNetworkPolicyPodLabelsPinnedAgainstUpstreamDrift(t *testing.T) {
 
 	// Verify both rendered policies contain the exact three pinned (namespace, app=<label>) peers.
 	wantPeers := map[string]bool{
-		"ns=knative-serving,pod=app:activator":             false,
-		"ns=knative-serving,pod=app:autoscaler":            false,
-		"ns=kourier-system,pod=app:3scale-kourier-gateway": false,
+		"ns=knative-serving,pod=app:activator":                      false,
+		"ns=knative-serving,pod=app:autoscaler":                     false,
+		"ns=kourier-system,pod=app:3scale-kourier-gateway":          false,
+		"ns=knative-serving,pod=app:3scale-kourier-gateway":         false,
+		"ns=knative-serving-ingress,pod=app:3scale-kourier-gateway": false,
 	}
 	for _, tc := range []struct {
 		name string

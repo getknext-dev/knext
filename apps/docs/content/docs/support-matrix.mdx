@@ -56,6 +56,11 @@ too, rather than left implied.
   is the tested configuration; re-validating EKS on the pinned version is part of the next EKS run.
 - Any Knative Serving install that satisfies the operator's Kubernetes client version above should
   work, but `knative-v1.16.0` is the only version CI actually exercises.
+- **Kourier is the supported ingress layer.** The default `NetworkPolicy` admits only the Kourier
+  gateway pods (in `kourier-system`, `knative-serving` or `knative-serving-ingress`). On a CNI that
+  enforces NetworkPolicy, Istio, Contour or Gateway API ingress needs the default policy turned off
+  and replaced with your own; zone functions cannot opt out yet. See
+  [Security](/docs/security#network-isolation).
 
 ## cert-manager
 

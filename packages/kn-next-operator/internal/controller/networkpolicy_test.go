@@ -110,7 +110,7 @@ var _ = Describe("NextApp NetworkPolicy reconciliation", func() {
 		}
 		Expect(nsLabels).To(ContainElement("knative-serving"))
 		Expect(nsLabels).To(ContainElement("kourier-system"))
-		Expect(podAppLabels).To(ConsistOf("activator", "3scale-kourier-gateway", "autoscaler"))
+		Expect(podAppLabels).To(ConsistOf("activator", "3scale-kourier-gateway", "3scale-kourier-gateway", "3scale-kourier-gateway", "autoscaler"))
 		Expect(sameNamespace).To(BeTrue(), "expected a same-namespace ingress peer")
 
 		By("owner-referencing the NextApp so it is GC'd on delete")

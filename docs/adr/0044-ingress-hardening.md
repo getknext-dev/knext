@@ -515,7 +515,9 @@ that ANDs a namespace selector with a pod selector, built by a single helper (`p
 that refuses an empty pod selector:
 
 - Knative activator (`knative-serving`, `app=activator`): serving ports 8012/8013/8112.
-- Kourier gateway (`kourier-system`, `app=3scale-kourier-gateway`): serving ports 8012/8013/8112.
+- Kourier gateway (`app=3scale-kourier-gateway`): serving ports 8012/8013/8112, one pod-scoped peer
+  per install layout: `kourier-system` (upstream net-kourier), `knative-serving` (Knative Operator),
+  `knative-serving-ingress` (OpenShift Serverless).
 - Knative autoscaler (`knative-serving`, `app=autoscaler`): queue-proxy metrics 9090 only. Dropping
   it would silently stall scale-up, since the autoscaler scrapes queue-proxy.
 - Same-namespace and label-gated cross-namespace scraping: unchanged.
@@ -524,7 +526,8 @@ The Knative peers lose the app metrics port (9464), which they never needed. The
 the `BackendService` function policy (ADR-0004 Amendment 2 Decision 5).
 
 **Kourier only.** No flag for other ingress layers. Clusters on Istio, Contour or Gateway API turn
-the default policy off and write their own. This is documented on the security page.
+the default policy off and write their own. `BackendService` has no opt-out yet, so functions on a
+non-Kourier layer with an enforcing CNI are unreachable; recorded as a known limit.
 
 **Drift.** The pinned pod labels are constants guarded by a test, so an upstream rename is a
 deliberate code change. Enforcement is proved only by the kind + Calico drill, which is pending for

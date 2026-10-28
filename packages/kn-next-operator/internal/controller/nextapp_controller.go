@@ -1929,10 +1929,9 @@ func desiredIngressRules() []networkingv1.NetworkPolicyIngressRule {
 				{Port: ptr.To(intstr.FromInt32(queueProxyH2CPort))},
 				{Port: ptr.To(intstr.FromInt32(queueProxyHTTPSPort))},
 			},
-			From: []networkingv1.NetworkPolicyPeer{
+			From: append([]networkingv1.NetworkPolicyPeer{
 				activatorPeer(),
-				kourierGatewayPeer(),
-			},
+			}, kourierGatewayPeers()...),
 		},
 		// SECOND RULE — Knative autoscaler scrape of queue-proxy metrics (#2494).
 		//

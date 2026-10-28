@@ -279,7 +279,7 @@ var _ = Describe("BackendService reconciler: zone resolution and the two-sided b
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: FunctionNetworkPolicyName("pricing")}, np)).To(Succeed())
 		Expect(np.Spec.PodSelector.MatchLabels).To(HaveKeyWithValue("serving.knative.dev/service", "pricing"))
 		Expect(np.Spec.Ingress).To(HaveLen(2))
-		Expect(np.Spec.Ingress[0].From).To(ConsistOf(activatorPeer(), kourierGatewayPeer()))
+		Expect(np.Spec.Ingress[0].From).To(ConsistOf(append([]networkingv1.NetworkPolicyPeer{activatorPeer()}, kourierGatewayPeers()...)))
 		Expect(np.Spec.Ingress[1].From).To(ConsistOf(autoscalerPeer()))
 		for _, rule := range np.Spec.Ingress {
 			for _, p := range rule.Ports {
