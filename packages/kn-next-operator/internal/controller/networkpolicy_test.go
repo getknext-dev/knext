@@ -182,8 +182,9 @@ var _ = Describe("NextApp NetworkPolicy reconciliation", func() {
 		// could reach 8012/8013 — co-resident zones calling each other's app pods
 		// synchronously, which the SCS contract permits only via the browser or
 		// async events. Legitimate in-cluster calls address the ksvc URL and
-		// arrive via Kourier gateway pods in kourier-system, so the same-namespace
-		// peer is needed ONLY for metric scraping.
+		// arrive via the Kourier gateway pods (wherever the install puts them:
+		// kourier-system, knative-serving or knative-serving-ingress), so the
+		// same-namespace peer is needed ONLY for metric scraping.
 		nn := reconcileApp("np-scoped-peer", nil)
 
 		np := &networkingv1.NetworkPolicy{}

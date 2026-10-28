@@ -123,6 +123,8 @@ const SPECPIN = resolve(REPO_ROOT, 'packages/kn-next-operator/internal/controlle
 // biome-ignore format: one-line resolve() for the anchor-drift scan
 const HARDENING = resolve(REPO_ROOT, 'packages/kn-next-operator/internal/controller/pod_hardening.go');
 // biome-ignore format: one-line resolve() for the anchor-drift scan
+const PEERS = resolve(REPO_ROOT, 'packages/kn-next-operator/internal/controller/netpol_peers.go');
+// biome-ignore format: one-line resolve() for the anchor-drift scan
 const PSATEST = resolve(REPO_ROOT, 'packages/kn-next-operator/internal/controller/pod_security_restricted_test.go');
 
 const PROVER = {
@@ -142,6 +144,7 @@ const PROVER = {
     specpin: SPECPIN,
     hardening: HARDENING,
     psatest: PSATEST,
+    peers: PEERS,
   },
 };
 
@@ -398,6 +401,30 @@ const MUTATIONS = [
     anchor: 'activatorPeer(),',
     replacement: '',
     test: envtest('operator-owned ServiceAccount and the function NetworkPolicy'),
+  },
+  {
+    id: 'R12',
+    claim: 'the narrowed gateway peer stops matching the gateway pods, so a warm call is blackholed',
+    subject: 'peers',
+    anchor: '\tnamespaces := kourierGatewayNamespaces()\n',
+    replacement: '\tnamespaces := kourierGatewayNamespaces()[:0]\n',
+    test: unit('TestNetworkPolicyPeerPortMatrix|TestNetworkPolicyNoWholeNamespacePeers'),
+  },
+  {
+    id: 'R13',
+    claim: 'the autoscaler peer stops matching the autoscaler, so scale-up stalls silently',
+    subject: 'peers',
+    anchor: '\t\tknativePodLabelKey: autoscalerPodLabelValue,\n',
+    replacement: '\t\tknativePodLabelKey: "not-the-autoscaler",\n',
+    test: unit('TestNetworkPolicyPeerPortMatrix'),
+  },
+  {
+    id: 'R14',
+    claim: 'every peer is widened back to its whole namespace, admitting the entire control plane',
+    subject: 'peers',
+    anchor: '\t\tPodSelector: &metav1.LabelSelector{\n\t\t\tMatchLabels: cloned,\n\t\t},\n',
+    replacement: '\t\tPodSelector: &metav1.LabelSelector{},\n',
+    test: unit('TestNetworkPolicyNoWholeNamespacePeers|TestNetworkPolicyPeerPortMatrix'),
   },
   {
     id: 'R09',
@@ -1228,6 +1255,32 @@ if (CALICO_CLUSTER !== '') {
     subject: 'render',
     anchor: 'activatorPeer(),',
     replacement: '',
+    test: {
+      kind: 'bash',
+      args: ['test/networkpolicy-enforcement-drill.sh'],
+      env: { CLUSTER: CALICO_CLUSTER, REUSE_CLUSTER: '1', LEGS: 'function' },
+    },
+  });
+  MUTATIONS.push({
+    id: 'K02',
+    claim:
+      'Calico: the gateway peer is dropped, so a WARM gateway-routed call is blackholed (F1b)',
+    subject: 'peers',
+    anchor: '\tnamespaces := kourierGatewayNamespaces()\n',
+    replacement: '\tnamespaces := kourierGatewayNamespaces()[:0]\n',
+    test: {
+      kind: 'bash',
+      args: ['test/networkpolicy-enforcement-drill.sh'],
+      env: { CLUSTER: CALICO_CLUSTER, REUSE_CLUSTER: '1', LEGS: 'function' },
+    },
+  });
+  MUTATIONS.push({
+    id: 'K03',
+    claim:
+      'Calico: every peer is widened to its whole namespace, so a non-activator knative-serving pod gets in (F2b)',
+    subject: 'peers',
+    anchor: '\t\tPodSelector: &metav1.LabelSelector{\n\t\t\tMatchLabels: cloned,\n\t\t},\n',
+    replacement: '\t\tPodSelector: &metav1.LabelSelector{},\n',
     test: {
       kind: 'bash',
       args: ['test/networkpolicy-enforcement-drill.sh'],

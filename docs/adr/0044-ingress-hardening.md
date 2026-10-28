@@ -529,6 +529,19 @@ the `BackendService` function policy (ADR-0004 Amendment 2 Decision 5).
 the default policy off and write their own. `BackendService` has no opt-out yet, so functions on a
 non-Kourier layer with an enforcing CNI are unreachable; recorded as a known limit.
 
+**Enforcement, and what "proved" means here.** The claim is checked by the kind + Calico drill
+(`test/networkpolicy-enforcement-drill.sh`), not by the object tests, because envtest has no CNI and
+flannel enforces nothing. The drill renders the policy with `cmd/policygen`, so it applies exactly
+what the reconciler writes, and asserts three separate things: a **cold** call through the function
+URL succeeds (the activator peer is admitted), a **warm** call succeeds **with the activator out of
+the path** (the gateway peer is admitted), and direct dials are refused from the zone namespace, from
+another namespace, and from a non-activator `knative-serving` pod. The warm leg depends on a
+drill-only `target-burst-capacity: "0"` on the drill's own function and fails unless the
+ServerlessService reports mode `Serve`: with the default budget a warm call still travels through the
+activator and would pass while the gateway peer was broken. A mutation that drops each peer in turn
+turns the corresponding leg red, which is what makes the drill evidence rather than decoration.
+
 **Drift.** The pinned pod labels are constants guarded by a test, so an upstream rename is a
-deliberate code change. Enforcement is proved only by the kind + Calico drill, which is pending for
-this amendment; until it runs, the object-level tests are the evidence.
+deliberate code change rather than a silent outage. The drill runs the upstream Kourier installer;
+the pod label of a Knative Operator or OpenShift Serverless install is not exercised there, so those
+layouts are covered by the label-pin test plus the per-layout peers, not by a live run.
