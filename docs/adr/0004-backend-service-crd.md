@@ -576,7 +576,8 @@ surface:
   ConfigMap named `*-knext-jwks` (the public set). The operator holds `create` and `update` on
   Secrets and ConfigMaps for this.
 - **Confinement.** A `ValidatingAdmissionPolicy` (#2482) limits the operator's writes to those two
-  names and, for the Secret, the Opaque type. It needs **Kubernetes 1.30**, which is also the v2
+  names, for the Secret the Opaque type, and only objects the zone's `NextApp` controls (Amendment 5).
+  It needs **Kubernetes 1.30**, which is also the v2
   server floor (ADR-0017 Amendment 3). Below 1.30 the policy does not apply and the operator runs
   unrestricted; that silent fail-open is tracked in #2486 (apply side) and #2500 (runtime
   self-check).
@@ -893,3 +894,62 @@ Context and the tests below.
 - [x] kind: the Z7 lane pin phase adds an env with `kubectl patch` and asserts the refusal and that no pod
       or Knative Service mounts the database Secret (runs in CI; not run locally).
 - [ ] Sprint-6 close review: accept, amend or reject this amendment.
+
+## Amendment 5 (2026-10-28) — the operator write policy binds writes to ownership (#2487)
+
+Status: Accepted (architecture review, 2026-10-28). It tightens the Z7 write policy of Amendment 2
+(#2482). The change is in the policy's CEL, so an operator newer than the installed bundle reports the
+policy as not enforced until the bundle is reapplied, as it does for any CEL change.
+
+### Context
+
+The policy bounds the operator's Secret and ConfigMap writes by name and, for Secrets, by type. It does
+not bound them by ownership, so a compromised operator can still overwrite a foreign object that already
+carries an allowed name: another zone's `<zone>-knext-signing-key` or `<zone>-knext-jwks`, or a leftover
+(threat-model residual (a)). The reconciler refuses such objects, but only the reconciler does.
+
+### Decision
+
+Bind writes to ownership in the policy's CEL, with no webhook. The object a write touches must carry a
+controller `ownerReference` to the zone's `NextApp`: kind `NextApp`, an `apps.kn-next.dev/` apiVersion,
+and a name equal to the object's name without its suffix.
+
+- **CREATE:** the new object carries the reference. The reconciler sets it at create, so its creates pass.
+- **UPDATE and DELETE:** the stored object carries the reference.
+- **UPDATE:** `ownerReferences` must equal the stored ones, so a write cannot drop, swap or forge the owner.
+
+The reconciler's rotation is a full update that keeps the reference, so it passes. There is no adopt
+flow: the operator reports a `SigningKeySecretConflict` or `JWKSConfigMapConflict` and writes nothing.
+The operator never writes the db-bind Secret, and BackendService only reads these objects, so `NextApp` is
+the only owner kind needed.
+
+### Options considered
+
+| Option | Verdict |
+|---|---|
+| A. CEL on the stored object's controller ownerReference (**chosen**) | Runs in the apiserver, with no webhook and no network hop. Compares name, kind and group, not UID. |
+| B. A webhook that looks up the owner's UID | Breaks the "runs in the apiserver" design; adds a failure surface that can refuse the operator. |
+| C. A label set at create | Weaker than an ownerReference and redundant with it. |
+| D. Audit only | Detects a foreign write after it has happened. |
+
+Narrower names are not an option, because the names are per zone.
+
+### Consequences
+
+- The operator's own writes are unchanged. A write to a foreign object of an allowed name is refused.
+- CEL cannot check the UID, so a leftover or a pre-created object whose reference names the zone with a
+  foreign UID is still writable by a compromised operator. The reconciler's `controlledByZone` UID check
+  stays the guard against it. This residual is recorded in the threat model.
+- The policy's CEL changed, so the CLI's copy (`write-policy.ts`), the operator's copy (`canonical.go`) and
+  the shared verdict table move together, and the drift tests hold them to the shipped file.
+
+### Action items
+
+- [x] `config/admission/secret-configmap-writes.yaml`: the owner variables and the two validations; the
+      header comment states the ownership rule and the UID residual.
+- [x] `internal/writepolicy/canonical.go`, `packages/kn-next/src/cli/doctor/checks/write-policy.ts` and
+      `internal/writepolicy/testdata/verdict-cases.json`, in lockstep with the shipped file.
+- [x] envtest on a real apiserver: the positive writes (create, rotate, a full reconcile) and the negative
+      cases (no owner, another zone's owner, another kind or group, a non-controller reference, a create
+      without an owner, a delete, a changed owner).
+- [x] Docs: the threat model (residual (a) and the ownership bullet) and the user security page.

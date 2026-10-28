@@ -335,6 +335,16 @@ to replace it, and a ServiceAccount with the operator's name in another namespac
   because the policy also matches ConfigMaps, which have no type. The scan pins the code side: the
   writer's Secret literal must set `Type` to the constant `Opaque`, nothing may assign a Secret's
   `Type` afterwards, and the policy's allowed type must equal it.
+- *Ownership (#2487).* A name is not enough, because an object under an allowed name can belong to
+  someone else. Each write is therefore also to an object whose controller `ownerReference` names
+  the zone's `NextApp` (kind `NextApp`, the `apps.kn-next.dev` group, and the name the object's
+  suffix is appended to). The reference must be on the new object at create and on the stored
+  object at update and delete, and an update may not change `ownerReferences`, so it cannot swap or
+  forge the owner. The reconciler already sets that reference at create, so its writes pass, and it
+  rotates a key with an update that keeps the reference. The operator never adopts an object it does
+  not control: it reports the conflict and writes nothing, so the rule needs no adoption path.
+  Pinned by envtest (positive, and negative for no owner, another zone's owner, another kind or
+  group, a non-controller reference, a create without an owner, a delete, and a changed owner).
 - *Version floor.* `ValidatingAdmissionPolicy` is `admissionregistration.k8s.io/v1` from
   Kubernetes 1.30, the documented server floor (support matrix, and now the install page too). The
   bundle is one artifact; there is no policy-free variant (jev: align the docs 1.00, ship a second
@@ -409,14 +419,15 @@ optional mount; a replaced one is unmounted and mounts again once it is gone; th
 the uncached reader; a read failure changes nothing), and the mutation prover
 `scripts/mutation-prove-2052-backendservice.mjs` (one row per rule).
 
-**Residual.** (a) The write policy (#2462, above) bounds **name and Secret type, not ownership**. A
-compromised operator can still overwrite an `Opaque` Secret or a ConfigMap that carries an allowed
-name and belongs to someone else (another zone's `<zone>-knext-signing-key` or
-`<zone>-knext-jwks`); the reconciler's own
-controller-ownership test refuses that in normal operation, the policy does not enforce it.
-Requiring a controller `ownerReference` to a `NextApp` on update and delete would close it, and was
-left out on purpose (jev 1.00 for names only): it risks breaking crash recovery and the adoption of
-objects an earlier operator made, and the task is the names. The policy also leaves the operator's
+**Residual.** (a) The write policy (#2462, above) bounds names, the Secret type and, since #2487,
+**ownership** (see *Ownership* above). A compromised operator can no longer overwrite another zone's
+`<zone>-knext-signing-key` or `<zone>-knext-jwks`, or any Secret or ConfigMap that no NextApp
+controls. What remains is a name check on the owner, not an identity check: CEL does not compare the
+UID of the controller `ownerReference`. So an object of an allowed name whose reference names the
+zone but carries a stale or foreign UID is still writable by a compromised operator. That covers a
+leftover from an earlier `NextApp` of the same name awaiting garbage collection, and an object that
+anyone who can write to the namespace pre-creates with such a reference. The reconciler's UID check
+(`controlledByZone`) refuses both in normal operation, and only the reconciler makes it. The policy also leaves the operator's
 reads alone, can be removed by anyone with rights on admission policies (a cluster admin; the
 operator has none), and needs Kubernetes 1.30. A write that bypasses the apiserver's admission
 chain (etcd directly) is out of scope. The guard behind the lockstep follows calls and types it can
@@ -487,7 +498,8 @@ function with a per-call EdDSA (Ed25519) JWT. There is no shared token.
   overlap hour. Rotation state lives in Secret annotations (residuals (b)–(d) of the signing-key
   section in §1 apply).
 - **Write policy.** The operator can write only an `Opaque` Secret named `*-knext-signing-key` and a
-  ConfigMap named `*-knext-jwks`, enforced by a ValidatingAdmissionPolicy (Kubernetes 1.30+). A
+  ConfigMap named `*-knext-jwks`, and only one its zone's `NextApp` controls (#2487), enforced by a
+  ValidatingAdmissionPolicy (Kubernetes 1.30+). A
   function that references a signing-key Secret or another zone's JWKS is refused. See "Z7 operator
   write surface" in ADR-0004 and residuals (a)–(d) in the signing-key and JWKS sections of §1.
 

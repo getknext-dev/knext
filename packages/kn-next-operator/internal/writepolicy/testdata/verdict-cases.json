@@ -45,6 +45,18 @@
         {
           "name": "allowedSuffixes",
           "expression": "request.resource.resource == 'secrets' ? variables.allowedSecretSuffixes : variables.allowedConfigMapSuffixes"
+        },
+        {
+          "name": "newOwners",
+          "expression": "request.operation == 'DELETE' || !has(object.metadata.ownerReferences) ? [] : object.metadata.ownerReferences"
+        },
+        {
+          "name": "oldOwners",
+          "expression": "request.operation == 'CREATE' || !has(oldObject.metadata.ownerReferences) ? [] : oldObject.metadata.ownerReferences"
+        },
+        {
+          "name": "zoneOwners",
+          "expression": "request.operation == 'CREATE' ? variables.newOwners : variables.oldOwners"
         }
       ],
       "validations": [
@@ -56,6 +68,16 @@
         {
           "expression": "request.resource.resource != 'secrets' || request.operation == 'DELETE' || dyn(object).type == variables.allowedSecretType",
           "message": "the knext operator may write only Opaque Secrets: a service-account-token or any other Secret type under an allowed name would let it mint a credential",
+          "reason": "Forbidden"
+        },
+        {
+          "expression": "variables.allowedSuffixes.exists(s, variables.zoneOwners.exists(r, has(r.controller) && r.controller == true && r.kind == 'NextApp' && r.apiVersion.startsWith('apps.kn-next.dev/') && r.name + s == variables.objectName))",
+          "message": "the knext operator may write only an object its zone's NextApp controls: it needs a controller ownerReference to that NextApp, named after the object's zone",
+          "reason": "Forbidden"
+        },
+        {
+          "expression": "request.operation != 'UPDATE' || variables.newOwners == variables.oldOwners",
+          "message": "the knext operator may not change an object's ownerReferences: a write that swaps, drops or forges its owner is refused",
           "reason": "Forbidden"
         }
       ]
@@ -537,6 +559,101 @@
           "value": [
             {
               "expression": "true"
+            }
+          ]
+        }
+      ],
+      "enforced": false,
+      "reason": "PolicyModified"
+    },
+    {
+      "name": "the ownership check replaced by a constant true",
+      "ops": [
+        {
+          "op": "set",
+          "target": "policy",
+          "path": "spec.validations",
+          "value": [
+            {
+              "expression": "variables.allowedSuffixes.exists(s, variables.objectName.endsWith(s) && size(variables.objectName) > size(s))",
+              "messageExpression": "'the knext operator may not ' + request.operation.lowerAscii() + ' the ' + request.resource.resource + ' object \"' + variables.objectName + '\": it writes only the per-zone signing key and JWKS'",
+              "reason": "Forbidden"
+            },
+            {
+              "expression": "request.resource.resource != 'secrets' || request.operation == 'DELETE' || dyn(object).type == variables.allowedSecretType",
+              "message": "the knext operator may write only Opaque Secrets: a service-account-token or any other Secret type under an allowed name would let it mint a credential",
+              "reason": "Forbidden"
+            },
+            {
+              "expression": "true"
+            },
+            {
+              "expression": "request.operation != 'UPDATE' || variables.newOwners == variables.oldOwners",
+              "message": "the knext operator may not change an object's ownerReferences: a write that swaps, drops or forges its owner is refused",
+              "reason": "Forbidden"
+            }
+          ]
+        }
+      ],
+      "enforced": false,
+      "reason": "PolicyModified"
+    },
+    {
+      "name": "the owner-unchanged check dropped",
+      "ops": [
+        {
+          "op": "set",
+          "target": "policy",
+          "path": "spec.validations",
+          "value": [
+            {
+              "expression": "variables.allowedSuffixes.exists(s, variables.objectName.endsWith(s) && size(variables.objectName) > size(s))",
+              "messageExpression": "'the knext operator may not ' + request.operation.lowerAscii() + ' the ' + request.resource.resource + ' object \"' + variables.objectName + '\": it writes only the per-zone signing key and JWKS'",
+              "reason": "Forbidden"
+            },
+            {
+              "expression": "request.resource.resource != 'secrets' || request.operation == 'DELETE' || dyn(object).type == variables.allowedSecretType",
+              "message": "the knext operator may write only Opaque Secrets: a service-account-token or any other Secret type under an allowed name would let it mint a credential",
+              "reason": "Forbidden"
+            },
+            {
+              "expression": "variables.allowedSuffixes.exists(s, variables.zoneOwners.exists(r, has(r.controller) && r.controller == true && r.kind == 'NextApp' && r.apiVersion.startsWith('apps.kn-next.dev/') && r.name + s == variables.objectName))",
+              "message": "the knext operator may write only an object its zone's NextApp controls: it needs a controller ownerReference to that NextApp, named after the object's zone",
+              "reason": "Forbidden"
+            }
+          ]
+        }
+      ],
+      "enforced": false,
+      "reason": "PolicyModified"
+    },
+    {
+      "name": "the owner check accepts a controller of any kind",
+      "ops": [
+        {
+          "op": "set",
+          "target": "policy",
+          "path": "spec.validations",
+          "value": [
+            {
+              "expression": "variables.allowedSuffixes.exists(s, variables.objectName.endsWith(s) && size(variables.objectName) > size(s))",
+              "messageExpression": "'the knext operator may not ' + request.operation.lowerAscii() + ' the ' + request.resource.resource + ' object \"' + variables.objectName + '\": it writes only the per-zone signing key and JWKS'",
+              "reason": "Forbidden"
+            },
+            {
+              "expression": "request.resource.resource != 'secrets' || request.operation == 'DELETE' || dyn(object).type == variables.allowedSecretType",
+              "message": "the knext operator may write only Opaque Secrets: a service-account-token or any other Secret type under an allowed name would let it mint a credential",
+              "reason": "Forbidden"
+            },
+            {
+              "expression": "variables.allowedSuffixes.exists(s, variables.zoneOwners.exists(r, has(r.controller) && r.controller == true && r.apiVersion.startsWith('apps.kn-next.dev/') && r.name + s == variables.objectName))",
+              "message": "the knext operator may write only an object its zone's NextApp controls: it needs a controller ownerReference to that NextApp, named after the object's zone",
+              "reason": "Forbidden"
+            },
+            {
+              "expression": "request.operation != 'UPDATE' || variables.newOwners == variables.oldOwners",
+              "message": "the knext operator may not change an object's ownerReferences: a write that swaps, drops or forges its owner is refused",
+              "reason": "Forbidden"
             }
           ]
         }

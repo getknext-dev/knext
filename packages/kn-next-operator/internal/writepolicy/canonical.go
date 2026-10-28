@@ -51,6 +51,9 @@ var canonicalVariables = []celPair{
 	{Name: "allowedConfigMapSuffixes", Expression: "['-knext-jwks']"},
 	{Name: "allowedSecretType", Expression: "'Opaque'"},
 	{Name: "allowedSuffixes", Expression: "request.resource.resource == 'secrets' ? variables.allowedSecretSuffixes : variables.allowedConfigMapSuffixes"},
+	{Name: "newOwners", Expression: "request.operation == 'DELETE' || !has(object.metadata.ownerReferences) ? [] : object.metadata.ownerReferences"},
+	{Name: "oldOwners", Expression: "request.operation == 'CREATE' || !has(oldObject.metadata.ownerReferences) ? [] : oldObject.metadata.ownerReferences"},
+	{Name: "zoneOwners", Expression: "request.operation == 'CREATE' ? variables.newOwners : variables.oldOwners"},
 }
 
 var canonicalValidations = []celPair{
@@ -60,6 +63,12 @@ var canonicalValidations = []celPair{
 	},
 	{
 		Expression: "request.resource.resource != 'secrets' || request.operation == 'DELETE' || dyn(object).type == variables.allowedSecretType",
+	},
+	{
+		Expression: "variables.allowedSuffixes.exists(s, variables.zoneOwners.exists(r, has(r.controller) && r.controller == true && r.kind == 'NextApp' && r.apiVersion.startsWith('apps.kn-next.dev/') && r.name + s == variables.objectName))",
+	},
+	{
+		Expression: "request.operation != 'UPDATE' || variables.newOwners == variables.oldOwners",
 	},
 }
 

@@ -70,6 +70,21 @@ export const CANONICAL_POLICY_CEL = {
             expression:
                 "request.resource.resource == 'secrets' ? variables.allowedSecretSuffixes : variables.allowedConfigMapSuffixes",
         },
+        {
+            name: "newOwners",
+            expression:
+                "request.operation == 'DELETE' || !has(object.metadata.ownerReferences) ? [] : object.metadata.ownerReferences",
+        },
+        {
+            name: "oldOwners",
+            expression:
+                "request.operation == 'CREATE' || !has(oldObject.metadata.ownerReferences) ? [] : oldObject.metadata.ownerReferences",
+        },
+        {
+            name: "zoneOwners",
+            expression:
+                "request.operation == 'CREATE' ? variables.newOwners : variables.oldOwners",
+        },
     ],
     validations: [
         {
@@ -81,6 +96,16 @@ export const CANONICAL_POLICY_CEL = {
         {
             expression:
                 "request.resource.resource != 'secrets' || request.operation == 'DELETE' || dyn(object).type == variables.allowedSecretType",
+            messageExpression: "",
+        },
+        {
+            expression:
+                "variables.allowedSuffixes.exists(s, variables.zoneOwners.exists(r, has(r.controller) && r.controller == true && r.kind == 'NextApp' && r.apiVersion.startsWith('apps.kn-next.dev/') && r.name + s == variables.objectName))",
+            messageExpression: "",
+        },
+        {
+            expression:
+                "request.operation != 'UPDATE' || variables.newOwners == variables.oldOwners",
             messageExpression: "",
         },
     ],

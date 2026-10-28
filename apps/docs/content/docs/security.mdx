@@ -455,6 +455,13 @@ on create, update and delete. Those are the two objects it writes for each zone,
 nothing else. Any other write from the operator, such as overwriting one of your Secrets, is refused
 by the API server with `Forbidden`, whatever its RBAC says.
 
+A name alone does not make an object the zone's. Each of those objects must also carry a controller
+`ownerReference` to the `NextApp` it is named after: `orders-knext-jwks` belongs to the `NextApp`
+called `orders`. An update cannot change that reference, so the operator cannot hand an object to
+another zone. The operator sets the reference when it creates the object, so its own writes pass. The
+policy compares the owner's name and kind, not its UID. The operator still compares the UID itself
+before it writes, and it never writes an object that its `NextApp` does not control.
+
 The type is part of the rule because the name alone is not enough. Kubernetes fills in a Secret of
 type `kubernetes.io/service-account-token` with a credential for whichever ServiceAccount its
 annotation names, and the operator can read the Secret it wrote. Without the type check, a
