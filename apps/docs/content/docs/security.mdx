@@ -97,10 +97,17 @@ Auth is one factor; **network isolation** is the second. knext reconciles a defa
 - **Object:** a `NetworkPolicy` named `<app>-allow-ingress`, tied to your app's lifecycle
   (garbage-collected on delete).
 - **Targets:** the app's serving pods (selected by `serving.knative.dev/service: <app>`).
-- **Allows ingress from:** the `knative-serving` and `kourier-system` namespaces (so
-  scale-from-zero traffic keeps flowing) on the serving and metrics ports, plus same-namespace
-  pods on the **metrics ports only**. Everything else — arbitrary cross-namespace and external
-  pod-direct traffic — is denied.
+- **Allows ingress from:** specific pods, not whole namespaces. The Knative activator
+  (`knative-serving`, `app=activator`) and the Kourier gateway (`kourier-system`,
+  `app=3scale-kourier-gateway`) reach the serving ports, so scale-from-zero and routed traffic
+  keep flowing. The Knative autoscaler (`knative-serving`, `app=autoscaler`) reaches the
+  queue-proxy metrics port (`9090`) only. Same-namespace pods reach the **metrics ports only**.
+  Other pods in `knative-serving` and `kourier-system`, and everything else (arbitrary
+  cross-namespace and external pod-direct traffic), are denied.
+- **Kourier only.** The default policy admits the Kourier gateway pods. If your cluster uses a
+  different Knative ingress layer (Istio, Contour, Gateway API), its gateway pods are not
+  admitted and your app will be unreachable on a policy-enforcing CNI: turn the default policy
+  off (`spec.security.networkPolicy: false`) and write your own.
 - **Ports are restricted, and your app's own port is not among them.** The policy admits the
   Knative queue-proxy ports (`8012`/`8013`, plus `8112` for internal TLS), the queue-proxy
   metrics port (`9090`) and knext's app-metrics port (`9464`). Your app's container port is deliberately **excluded**: the

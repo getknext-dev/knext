@@ -507,3 +507,25 @@ and `self-contained-e2e.test.ts` remain green.
 The two v16.3.5 compat runs from Round 1 (bun × webpack: **36646418499**; node × turbopack:
 **36646409104**, with one documented flake unattributed to the cap) still stand. Round 2 changes only
 the preload internals, no builder change, so no new dispatch was made.
+
+## Amendment 7 (2026-10-28, #2494): pod-scoped Knative and Kourier peers
+
+**Decision.** The default policy no longer admits whole namespaces. Each peer is one `from` element
+that ANDs a namespace selector with a pod selector, built by a single helper (`podInNamespacePeer`)
+that refuses an empty pod selector:
+
+- Knative activator (`knative-serving`, `app=activator`): serving ports 8012/8013/8112.
+- Kourier gateway (`kourier-system`, `app=3scale-kourier-gateway`): serving ports 8012/8013/8112.
+- Knative autoscaler (`knative-serving`, `app=autoscaler`): queue-proxy metrics 9090 only. Dropping
+  it would silently stall scale-up, since the autoscaler scrapes queue-proxy.
+- Same-namespace and label-gated cross-namespace scraping: unchanged.
+
+The Knative peers lose the app metrics port (9464), which they never needed. The same rules apply to
+the `BackendService` function policy (ADR-0004 Amendment 2 Decision 5).
+
+**Kourier only.** No flag for other ingress layers. Clusters on Istio, Contour or Gateway API turn
+the default policy off and write their own. This is documented on the security page.
+
+**Drift.** The pinned pod labels are constants guarded by a test, so an upstream rename is a
+deliberate code change. Enforcement is proved only by the kind + Calico drill, which is pending for
+this amendment; until it runs, the object-level tests are the evidence.

@@ -274,11 +274,13 @@ var _ = Describe("BackendService reconciler: zone resolution and the two-sided b
 		Expect(mount.SubPath).To(BeEmpty())
 		Expect(mount.ReadOnly).To(BeTrue())
 
-		By("the NetworkPolicy admits the Knative data path (activator and gateway), not the user port")
+		By("the NetworkPolicy admits only pod-scoped activator, Kourier gateway, and autoscaler peers, not the user port")
 		np := &networkingv1.NetworkPolicy{}
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: FunctionNetworkPolicyName("pricing")}, np)).To(Succeed())
 		Expect(np.Spec.PodSelector.MatchLabels).To(HaveKeyWithValue("serving.knative.dev/service", "pricing"))
-		Expect(fmt.Sprint(np.Spec.Ingress)).To(ContainSubstring("knative-serving"))
+		Expect(np.Spec.Ingress).To(HaveLen(2))
+		Expect(np.Spec.Ingress[0].From).To(ConsistOf(activatorPeer(), kourierGatewayPeer()))
+		Expect(np.Spec.Ingress[1].From).To(ConsistOf(autoscalerPeer()))
 		for _, rule := range np.Spec.Ingress {
 			for _, p := range rule.Ports {
 				Expect(p.Port.IntValue()).NotTo(Equal(9000), "the user port stays out of the allowlist")

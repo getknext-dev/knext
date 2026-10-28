@@ -341,10 +341,12 @@ activator, or in-namespace callers reach the app while external paths cannot. Tu
 `spec.security.networkPolicy` coincided with the break.
 
 **Cause.** The operator reconciles a default-on `NetworkPolicy`, `<app>-allow-ingress`, restricting
-ingress to the app's pods to `knative-serving` (the activator), `kourier-system` (the ingress gateway)
-and the app's own namespace — and, on the serving ports only, to those. If those namespaces are not
-labelled `kubernetes.io/metadata.name=<ns>`, or the activator runs elsewhere on a policy-enforcing CNI,
-legitimate traffic is dropped. The policy is layer 3/4 and a no-op on a CNI without NetworkPolicy
+the serving ports to the Knative activator pods (`app=activator` in `knative-serving`) and the
+Kourier gateway pods (`app=3scale-kourier-gateway` in `kourier-system`), the queue-proxy metrics port
+to the autoscaler pods (`app=autoscaler`), and the metrics ports to the app's own namespace. If those
+namespaces are not labelled `kubernetes.io/metadata.name=<ns>`, those pods carry different labels,
+the activator runs elsewhere, or your ingress layer is not Kourier, legitimate traffic is dropped on a
+policy-enforcing CNI. The policy is layer 3/4 and a no-op on a CNI without NetworkPolicy
 support. See [Security](/docs/security#network-isolation).
 
 **Fix.**

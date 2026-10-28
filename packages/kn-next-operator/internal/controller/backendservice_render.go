@@ -78,29 +78,43 @@ func functionLabels(bs *appsv1alpha1.BackendService) map[string]string {
 }
 
 // functionIngressRules is the function NetworkPolicy's ingress (ADR-0004
-// Amendment 2 Decision 5): the Knative serving system (the activator carries
-// scale-from-zero, the autoscaler scrapes queue-proxy) and the networking
-// layer's gateway namespace, on queue-proxy's ports only. These are the same
-// peers and port allowlist as the NextApp policy's first rule (ADR-0044) minus
-// the knext runtime's metrics port, which a function does not serve. The user
-// container port is absent: queue-proxy reaches it over loopback.
+// Amendment 2 Decision 5, narrowed in #2494): Knative activator pods
+// (`knative-serving` AND `app=activator`) and Kourier gateway pods
+// (`kourier-system` AND `app=3scale-kourier-gateway`) on queue-proxy's serving
+// ports (8012/8013/8112), plus Knative autoscaler pods (`knative-serving` AND
+// `app=autoscaler`) on queue-proxy's metrics port (9090) only. These are the
+// same pod-scoped Knative/Kourier peers as the NextApp policy's first two rules
+// without the knext runtime's metrics rules, which a function does not serve.
+// The user container port is absent: queue-proxy reaches it over loopback.
 //
-// HONEST SCOPE. A zone's calls arrive through these shared Knative peers, so the
-// policy cannot express "only the owning zone": it stops direct dials that skip
-// the Knative path. The per-zone control is the identity token. Enforcement
+// HONEST SCOPE. A zone's calls arrive through these shared Knative/Kourier
+// pods, so the policy cannot express "only the owning zone": it stops direct
+// dials (including from non-activator/non-gateway control-plane pods) that skip
+// the Knative path. Non-Kourier ingress gateways are not supported by the
+// default policy. The per-zone control is the identity token. Enforcement
 // depends on the CNI: flannel enforces no NetworkPolicy.
 func functionIngressRules() []networkingv1.NetworkPolicyIngressRule {
-	return []networkingv1.NetworkPolicyIngressRule{{
-		Ports: []networkingv1.NetworkPolicyPort{
-			{Port: ptr.To(intstr.FromInt32(queueProxyHTTPPort))},
-			{Port: ptr.To(intstr.FromInt32(queueProxyH2CPort))},
-			{Port: ptr.To(intstr.FromInt32(queueProxyHTTPSPort))},
-			{Port: ptr.To(intstr.FromInt32(queueProxyMetricsPort))},
+	return []networkingv1.NetworkPolicyIngressRule{
+		{
+			Ports: []networkingv1.NetworkPolicyPort{
+				{Port: ptr.To(intstr.FromInt32(queueProxyHTTPPort))},
+				{Port: ptr.To(intstr.FromInt32(queueProxyH2CPort))},
+				{Port: ptr.To(intstr.FromInt32(queueProxyHTTPSPort))},
+			},
+			From: []networkingv1.NetworkPolicyPeer{
+				activatorPeer(),
+				kourierGatewayPeer(),
+			},
 		},
-		From: []networkingv1.NetworkPolicyPeer{
-			inNamespaceLabelsPeer("knative-serving", "kourier-system"),
+		{
+			Ports: []networkingv1.NetworkPolicyPort{
+				{Port: ptr.To(intstr.FromInt32(queueProxyMetricsPort))},
+			},
+			From: []networkingv1.NetworkPolicyPeer{
+				autoscalerPeer(),
+			},
 		},
-	}}
+	}
 }
 
 // DesiredFunctionNetworkPolicy renders the function's NetworkPolicy. Exported

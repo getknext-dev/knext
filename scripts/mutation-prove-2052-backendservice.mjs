@@ -395,8 +395,8 @@ const MUTATIONS = [
     id: 'R08',
     claim: 'the function NetworkPolicy drops the activator peer (knative-serving)',
     subject: 'render',
-    anchor: 'inNamespaceLabelsPeer("knative-serving", "kourier-system"),',
-    replacement: 'inNamespaceLabelsPeer("kourier-system"),',
+    anchor: 'activatorPeer(),',
+    replacement: '',
     test: envtest('operator-owned ServiceAccount and the function NetworkPolicy'),
   },
   {
@@ -1226,8 +1226,8 @@ if (CALICO_CLUSTER !== '') {
     claim:
       'Calico: the function NetworkPolicy drops the activator peer, so a cold call is blackholed',
     subject: 'render',
-    anchor: 'inNamespaceLabelsPeer("knative-serving", "kourier-system"),',
-    replacement: 'inNamespaceLabelsPeer("kourier-system"),',
+    anchor: 'activatorPeer(),',
+    replacement: '',
     test: {
       kind: 'bash',
       args: ['test/networkpolicy-enforcement-drill.sh'],

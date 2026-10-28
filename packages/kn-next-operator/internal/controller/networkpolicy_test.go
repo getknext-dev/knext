@@ -74,12 +74,13 @@ var _ = Describe("NextApp NetworkPolicy reconciliation", func() {
 		By("declaring an Ingress policy type")
 		Expect(np.Spec.PolicyTypes).To(ContainElement(networkingv1.PolicyTypeIngress))
 
-		By("restricting ingress to in-cluster sources (knative-serving + gateway + same namespace)")
-		// THREE rules: [0] serving+metrics from knative-serving/kourier (ADR-0044),
-		// [1] metrics only from the same namespace (ADR-0044), [2] metrics only from
-		// a namespace LABELLED for scraping (#735). The union of their peers is what
-		// this original assertion checks.
-		Expect(np.Spec.Ingress).To(HaveLen(3))
+		By("restricting ingress to in-cluster pod-scoped sources (activator + Kourier gateway + autoscaler + same namespace)")
+		// FOUR rules (#2494 + ADR-0044 + #735):
+		//   [0] serving ports (8012/8013/8112) from Knative activator + Kourier gateway pods
+		//   [1] queue-proxy metrics port (9090) from Knative autoscaler pods only
+		//   [2] metrics ports (9090/9464) from the same namespace
+		//   [3] app metrics port (9464) from a namespace LABELLED for scraping (#735)
+		Expect(np.Spec.Ingress).To(HaveLen(4))
 		var froms []networkingv1.NetworkPolicyPeer
 		for _, rule := range np.Spec.Ingress {
 			froms = append(froms, rule.From...)
@@ -87,16 +88,17 @@ var _ = Describe("NextApp NetworkPolicy reconciliation", func() {
 		Expect(froms).NotTo(BeEmpty())
 
 		var nsLabels []string
+		var podAppLabels []string
 		sameNamespace := false
 		for _, peer := range froms {
 			if peer.NamespaceSelector != nil {
-				for _, expr := range peer.NamespaceSelector.MatchExpressions {
-					if expr.Key == "kubernetes.io/metadata.name" {
-						nsLabels = append(nsLabels, expr.Values...)
-					}
-				}
 				for _, v := range peer.NamespaceSelector.MatchLabels {
 					nsLabels = append(nsLabels, v)
+				}
+				if _, isScrape := peer.NamespaceSelector.MatchLabels[metricsScrapeNamespaceLabel]; !isScrape {
+					Expect(peer.PodSelector).NotTo(BeNil(), "Knative/Kourier peers must combine namespaceSelector and podSelector in one element")
+					Expect(peer.PodSelector.MatchLabels).NotTo(BeEmpty(), "whole-namespace peers are forbidden (#2494)")
+					podAppLabels = append(podAppLabels, peer.PodSelector.MatchLabels["app"])
 				}
 			}
 			// A from-peer with neither selector populated would mean "all sources"
@@ -108,6 +110,7 @@ var _ = Describe("NextApp NetworkPolicy reconciliation", func() {
 		}
 		Expect(nsLabels).To(ContainElement("knative-serving"))
 		Expect(nsLabels).To(ContainElement("kourier-system"))
+		Expect(podAppLabels).To(ConsistOf("activator", "3scale-kourier-gateway", "autoscaler"))
 		Expect(sameNamespace).To(BeTrue(), "expected a same-namespace ingress peer")
 
 		By("owner-referencing the NextApp so it is GC'd on delete")
@@ -134,31 +137,42 @@ var _ = Describe("NextApp NetworkPolicy reconciliation", func() {
 
 		np := &networkingv1.NetworkPolicy{}
 		Expect(k8sClient.Get(ctx, policyName(nn.Name), np)).To(Succeed())
-		Expect(np.Spec.Ingress).To(HaveLen(3))
+		Expect(np.Spec.Ingress).To(HaveLen(4))
 
-		ports := np.Spec.Ingress[0].Ports
-		Expect(ports).NotTo(BeEmpty(), "no Ports means ALL ports — the ADR-0044 bypass")
-		var got []int32
-		for _, p := range ports {
-			Expect(p.Port).NotTo(BeNil())
-			Expect(p.Port.Type).To(Equal(intstr.Int), "named ports would silently not match")
-			// EndPort turns an entry into a RANGE: {Port: 8012, EndPort: 65535}
-			// satisfies every other assertion here while reopening all high ports.
-			Expect(p.EndPort).To(BeNil(), "a port RANGE reopens what the allowlist closes")
-			got = append(got, p.Port.IntVal)
+		extractPorts := func(ports []networkingv1.NetworkPolicyPort) []int32 {
+			Expect(ports).NotTo(BeEmpty(), "no Ports means ALL ports — the ADR-0044 bypass")
+			var out []int32
+			for _, p := range ports {
+				Expect(p.Port).NotTo(BeNil())
+				Expect(p.Port.Type).To(Equal(intstr.Int), "named ports would silently not match")
+				// EndPort turns an entry into a RANGE: {Port: 8012, EndPort: 65535}
+				// satisfies every other assertion here while reopening all high ports.
+				Expect(p.EndPort).To(BeNil(), "a port RANGE reopens what the allowlist closes")
+				out = append(out, p.Port.IntVal)
+			}
+			return out
 		}
-		By("admitting the queue-proxy serving ports — the only sanctioned path to the app")
+
+		servingPorts := extractPorts(np.Spec.Ingress[0].Ports)
+		autoscalerPorts := extractPorts(np.Spec.Ingress[1].Ports)
+		sameNsPorts := extractPorts(np.Spec.Ingress[2].Ports)
+		scrapePorts := extractPorts(np.Spec.Ingress[3].Ports)
+
+		By("admitting the queue-proxy serving ports on the activator/Kourier rule — the only sanctioned path to the app")
 		// 8112 (BackendHTTPSPort) is appended to EVERY knative revision pod
 		// unconditionally (v0.48 queue.go) and the activator dials it under
 		// system-internal-tls. Omitting it is an OUTAGE, not a hardening — code
 		// review caught its absence here.
-		Expect(got).To(ContainElements(int32(8012), int32(8013), int32(8112)))
-		By("still admitting BOTH metrics ports — a queue-proxy-only rule kills scraping")
-		Expect(got).To(ContainElements(int32(9090), int32(9464)))
-		By("refusing the app's user port — the direct-dial bypass this exists to close")
-		Expect(got).NotTo(ContainElement(int32(3000)))
-		By("and nothing else — an allowlist that grows silently is how the next bypass lands")
-		Expect(got).To(HaveLen(5))
+		Expect(servingPorts).To(ConsistOf(int32(8012), int32(8013), int32(8112)))
+		By("limiting the autoscaler rule strictly to queue-proxy metrics port 9090 (#2494)")
+		Expect(autoscalerPorts).To(ConsistOf(int32(9090)))
+		By("still admitting BOTH metrics ports on the same-namespace rule — a queue-proxy-only rule kills scraping")
+		Expect(sameNsPorts).To(ConsistOf(int32(9090), int32(9464)))
+		Expect(scrapePorts).To(ConsistOf(int32(9464)))
+		By("refusing the app's user port across every rule — the direct-dial bypass this exists to close")
+		for _, rulePorts := range [][]int32{servingPorts, autoscalerPorts, sameNsPorts, scrapePorts} {
+			Expect(rulePorts).NotTo(ContainElement(int32(3000)))
+		}
 	})
 
 	It("scopes the same-namespace peer to METRICS ports — closing the SCS synchronous-call leak (ADR-0044)", func() {
@@ -168,16 +182,15 @@ var _ = Describe("NextApp NetworkPolicy reconciliation", func() {
 		// could reach 8012/8013 — co-resident zones calling each other's app pods
 		// synchronously, which the SCS contract permits only via the browser or
 		// async events. Legitimate in-cluster calls address the ksvc URL and
-		// arrive via kourier-system, so the same-namespace peer is needed ONLY
-		// for metric scraping.
+		// arrive via Kourier gateway pods in kourier-system, so the same-namespace
+		// peer is needed ONLY for metric scraping.
 		nn := reconcileApp("np-scoped-peer", nil)
 
 		np := &networkingv1.NetworkPolicy{}
 		Expect(k8sClient.Get(ctx, policyName(nn.Name), np)).To(Succeed())
-		Expect(np.Spec.Ingress).To(HaveLen(3))
+		Expect(np.Spec.Ingress).To(HaveLen(4))
 
-		// Classify each rule by whether its peers include the same-namespace one
-		// (NamespaceSelector nil + non-nil PodSelector).
+		// Classify each rule by its peer role.
 		portsOf := func(rule networkingv1.NetworkPolicyIngressRule) []int32 {
 			var out []int32
 			for _, p := range rule.Ports {
@@ -187,9 +200,9 @@ var _ = Describe("NextApp NetworkPolicy reconciliation", func() {
 			}
 			return out
 		}
-		sameNsRules, systemRules := 0, 0
+		sameNsRules, servingRules, autoscalerRules := 0, 0, 0
 		for _, rule := range np.Spec.Ingress {
-			hasSameNs, hasScrapeLabel := false, false
+			hasSameNs, hasScrapeLabel, hasAutoscaler := false, false, false
 			for _, peer := range rule.From {
 				if peer.NamespaceSelector == nil && peer.PodSelector != nil {
 					hasSameNs = true
@@ -199,25 +212,34 @@ var _ = Describe("NextApp NetworkPolicy reconciliation", func() {
 						hasScrapeLabel = true
 					}
 				}
+				if peer.PodSelector != nil && peer.PodSelector.MatchLabels["app"] == "autoscaler" {
+					hasAutoscaler = true
+				}
 			}
-			// The #735 scrape rule has its own dedicated spec above; classify it out
-			// here rather than letting it masquerade as the system rule.
+			// The #735 scrape rule has its own dedicated spec below; classify it out
+			// here rather than letting it masquerade as a system rule.
 			if hasScrapeLabel {
 				continue
 			}
-			if hasSameNs {
+			switch {
+			case hasSameNs:
 				sameNsRules++
 				By("the same-namespace rule admits metrics ports ONLY")
 				Expect(portsOf(rule)).To(ConsistOf(int32(9090), int32(9464)),
 					"a same-namespace peer that can reach a serving port is the SCS contract leak")
-			} else {
-				systemRules++
-				By("the system rule carries the serving ports")
-				Expect(portsOf(rule)).To(ContainElements(int32(8012), int32(8013), int32(8112)))
+			case hasAutoscaler:
+				autoscalerRules++
+				By("the autoscaler rule admits queue-proxy metrics port 9090 ONLY (#2494)")
+				Expect(portsOf(rule)).To(ConsistOf(int32(9090)))
+			default:
+				servingRules++
+				By("the activator + Kourier gateway rule carries the serving ports ONLY")
+				Expect(portsOf(rule)).To(ConsistOf(int32(8012), int32(8013), int32(8112)))
 			}
 		}
 		Expect(sameNsRules).To(Equal(1), "expected exactly one same-namespace rule")
-		Expect(systemRules).To(Equal(1), "expected exactly one knative-serving/kourier rule")
+		Expect(autoscalerRules).To(Equal(1), "expected exactly one autoscaler metrics rule")
+		Expect(servingRules).To(Equal(1), "expected exactly one activator/kourier serving rule")
 	})
 
 	It("admits a LABELLED monitoring namespace on the metrics ports only (#735)", func() {

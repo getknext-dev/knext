@@ -1891,12 +1891,13 @@ var (
 func desiredIngressRules() []networkingv1.NetworkPolicyIngressRule {
 	return []networkingv1.NetworkPolicyIngressRule{
 		{
-			// PORT ALLOWLIST (ADR-0044). Without it the rule admits EVERY port,
-			// so any same-namespace pod dials the app container's user port
-			// directly — skipping queue-proxy and, with it, the
-			// containerConcurrency bound and the Go HTTP parser. That is the
-			// in-cluster bypass ADR-0044 measured; restricting ports is the only
-			// control that closes it without touching the runtime.
+			// PORT ALLOWLIST (ADR-0044) + POD-SCOPED PEERS (#2494). Without the
+			// port allowlist the rule admits EVERY port, so any admitted peer
+			// dials the app container's user port directly — skipping
+			// queue-proxy and, with it, the containerConcurrency bound and the
+			// Go HTTP parser. That is the in-cluster bypass ADR-0044 measured;
+			// restricting ports is the only control that closes it without
+			// touching the runtime.
 			//
 			// The user port is deliberately ABSENT: queue-proxy reaches it over
 			// pod-local loopback (127.0.0.1:USER_PORT), which no NetworkPolicy
@@ -1906,21 +1907,19 @@ func desiredIngressRules() []networkingv1.NetworkPolicyIngressRule {
 			// hardening: knative v0.48's queue.go appends queueHTTPSPort to
 			// EVERY revision pod unconditionally
 			// (`ports = append(ports, servingPort, queueHTTPSPort)`), the SKS
-			// targets it, and the activator dials it when system-internal-tls is
-			// on. Omitting it makes every app unreachable on a policy-enforcing
-			// CNI with internal TLS enabled.
+			// targets it, and the activator and Kourier gateway dial it when
+			// system-internal-tls is on. Omitting it makes every app unreachable
+			// on a policy-enforcing CNI with internal TLS enabled.
 			//
-			// 9464 is NOT optional: the operator stamps prometheus.io/port=9464,
-			// so omitting it would kill metric scraping by a Prometheus running
-			// BESIDE the app (the same-namespace rule below is what serves that
-			// scrape — a scraper in a third namespace is already excluded by the
-			// From peers, so that is the only scraping this policy can support).
-			// CAVEAT: the runtime lets an app override its metrics port via
-			// METRICS_PORT; this allowlist is fixed at the default 9464, so an
-			// app that moves its metrics port loses scraping until the policy is
-			// disabled. Recorded rather than solved — wiring it through the CRD
-			// is a public-API change, which is a separate, gated decision.
-			// Both halves are asserted in networkpolicy_test.go.
+			// PEER NARROWING (#2494): only Knative activator pods
+			// (`knative-serving` AND `app=activator`) and Kourier gateway pods
+			// (`kourier-system` AND `app=3scale-kourier-gateway`) may reach the
+			// serving ports. Other control-plane pods in `knative-serving`
+			// (controller, webhook, autoscaler, net-kourier-controller) and
+			// non-gateway pods in `kourier-system` are excluded. Non-Kourier
+			// ingress layers are deliberately NOT supported by the default
+			// policy; operators on Istio/Contour/Gateway API set
+			// spec.security.networkPolicy:false and bring their own policy.
 			//
 			// CNI CAVEAT: flannel (OKE GA, OrbStack) ships no NetworkPolicy
 			// controller, so there this object is declarative-only and enforces
@@ -1929,29 +1928,44 @@ func desiredIngressRules() []networkingv1.NetworkPolicyIngressRule {
 				{Port: ptr.To(intstr.FromInt32(queueProxyHTTPPort))},
 				{Port: ptr.To(intstr.FromInt32(queueProxyH2CPort))},
 				{Port: ptr.To(intstr.FromInt32(queueProxyHTTPSPort))},
-				{Port: ptr.To(intstr.FromInt32(queueProxyMetricsPort))},
-				{Port: ptr.To(intstr.FromInt32(appMetricsPort))},
 			},
 			From: []networkingv1.NetworkPolicyPeer{
-				// Knative serving system (activator handles scale-from-zero) and the
-				// Kourier ingress gateway namespace. These are the ONLY peers that
-				// may reach the serving ports.
-				inNamespaceLabelsPeer("knative-serving", "kourier-system"),
+				activatorPeer(),
+				kourierGatewayPeer(),
 			},
 		},
-		// SECOND RULE — the same-namespace peer, SCOPED (ADR-0044).
+		// SECOND RULE — Knative autoscaler scrape of queue-proxy metrics (#2494).
 		//
-		// It used to sit in the rule above with an empty PodSelector, which
+		// Narrowing `knative-serving` to `app=activator` alone would silently
+		// break autoscaling: the autoscaler scrapes queue-proxy on 9090
+		// (AutoscalingQueueMetricsPort), and a dropped scrape stalls scale-up
+		// with no error on the request path. Admitting `app=autoscaler` on 9090
+		// ONLY keeps autoscaling working while denying a compromised autoscaler
+		// pod access to the serving ports (8012/8013/8112) and app metrics (9464).
+		{
+			Ports: []networkingv1.NetworkPolicyPort{
+				{Port: ptr.To(intstr.FromInt32(queueProxyMetricsPort))},
+			},
+			From: []networkingv1.NetworkPolicyPeer{
+				autoscalerPeer(),
+			},
+		},
+		// THIRD RULE — the same-namespace peer, SCOPED (ADR-0044).
+		//
+		// It used to sit in the serving rule with an empty PodSelector, which
 		// meant every co-resident pod could reach the SERVING ports. That is
 		// the SCS contract leak ADR-0044 names: co-resident zones calling each
 		// other's app pods synchronously, when the zone contract permits only
 		// the browser and async events. Legitimate in-cluster calls to a knext
 		// app address its ksvc URL and are routed by Kourier, so they arrive
-		// from `kourier-system` above — the same-namespace peer is NOT needed
-		// for app traffic at all.
+		// from the Kourier gateway peer above — the same-namespace peer is NOT
+		// needed for app traffic at all.
 		//
 		// What it IS needed for is metric scraping by a Prometheus running
-		// beside the app. So the peer survives, narrowed to the metrics ports.
+		// beside the app (the operator stamps prometheus.io/port=9464; CAVEAT:
+		// the runtime lets an app override its metrics port via METRICS_PORT,
+		// whereas this allowlist is fixed at 9464). So the peer survives,
+		// narrowed to the metrics ports.
 		//
 		// Scoped by PORT rather than by pod LABEL deliberately: the operator
 		// cannot know a user's monitoring pod labels, and guessing them would
@@ -1969,7 +1983,7 @@ func desiredIngressRules() []networkingv1.NetworkPolicyIngressRule {
 				{PodSelector: &metav1.LabelSelector{}},
 			},
 		},
-		// THIRD RULE — cross-namespace metric scraping, label-gated (#735).
+		// FOURTH RULE — cross-namespace metric scraping, label-gated (#735).
 		//
 		// The APP metrics port ONLY — deliberately narrower than the
 		// same-namespace rule above. #735's motivation is the operator's shipped
@@ -2002,22 +2016,6 @@ func desiredIngressRules() []networkingv1.NetworkPolicyIngressRule {
 				{NamespaceSelector: &metav1.LabelSelector{
 					MatchLabels: map[string]string{metricsScrapeNamespaceLabel: "true"},
 				}},
-			},
-		},
-	}
-}
-
-// inNamespaceLabelsPeer matches namespaces by their well-known
-// `kubernetes.io/metadata.name` label.
-func inNamespaceLabelsPeer(names ...string) networkingv1.NetworkPolicyPeer {
-	return networkingv1.NetworkPolicyPeer{
-		NamespaceSelector: &metav1.LabelSelector{
-			MatchExpressions: []metav1.LabelSelectorRequirement{
-				{
-					Key:      "kubernetes.io/metadata.name",
-					Operator: metav1.LabelSelectorOpIn,
-					Values:   names,
-				},
 			},
 		},
 	}
@@ -2067,9 +2065,10 @@ func DesiredNetworkPolicy(appName, namespace string) *networkingv1.NetworkPolicy
 const metricsScrapeNamespaceLabel = "knext.dev/metrics-scrape"
 
 // reconcileNetworkPolicy emits a Kubernetes NetworkPolicy that restricts ingress
-// to the app's pods to in-cluster sources only: the Knative serving system
-// (`knative-serving`), the Kourier gateway (`kourier-system`), and the app's own
-// namespace. This is defense-in-depth for the (already Bearer-authed) mutating
+// to the app's pods to in-cluster sources only: Knative activator and Kourier
+// gateway pods on serving ports, Knative autoscaler pods on 9090, the app's own
+// namespace on metrics ports, and opt-in metrics-scrape namespaces on 9464.
+// This is defense-in-depth for the (already Bearer-authed) mutating
 // cache endpoints (`POST /api/cache/invalidate`, `DELETE /api/cache/events`).
 //
 // IMPORTANT (honesty): a NetworkPolicy is L3/L4 — it filters by source pod/
