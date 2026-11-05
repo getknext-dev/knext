@@ -214,11 +214,26 @@ describe('evaluateWatchdog — cancelled runs across every credential workflow',
       now: checkAt,
       graceHours: GRACE,
       checkAt,
-      // A one-minute window: no credential fire falls inside it. The cancel does.
+      // The cancel at 05:00 is inside (04:59, 09:00].
       previousCheckAt: new Date('2026-11-05T04:59:00Z'),
       credentialWorkflowFiles: ['test-e2e-deploy.yml'],
     });
     expect(cancelled(verdicts)).toHaveLength(1);
+  });
+
+  it('a cancellation the previous check already saw is not flagged again', () => {
+    const { gh } = ghFor({ 'test-e2e-deploy.yml': [run({ id: 32 })] });
+    const verdicts = evaluateWatchdog({
+      workflowYamlText: WORKFLOW_YAML,
+      gh,
+      now: checkAt,
+      graceHours: GRACE,
+      checkAt,
+      // The cancel at 05:00 is before this window opens, (05:30, 09:00].
+      previousCheckAt: new Date('2026-11-05T05:30:00Z'),
+      credentialWorkflowFiles: ['test-e2e-deploy.yml'],
+    });
+    expect(cancelled(verdicts)).toEqual([]);
   });
 
   it('a listing that fails is a crash, never a silent pass', () => {
@@ -230,48 +245,50 @@ describe('evaluateWatchdog — cancelled runs across every credential workflow',
 });
 
 describe('the CLI turns a cancelled run into the alert output', () => {
-  const env = { WATCHDOG_GRACE_HOURS: '8' };
-  const cli = (gh: (a: string[]) => string) => {
+  // These fixtures hold no run for the fires, so `missing` verdicts raise the alert on
+  // their own: the assertions read the cancelled verdict's own log line as well.
+  const cli = (gh: (a: string[]) => string, credentialWorkflowFiles?: string[]) => {
     const outputs: Record<string, string> = {};
+    const logs: string[] = [];
     const code = runCli({
       workflowYamlText: WORKFLOW_YAML,
       gh,
       // A dispatch checks the lookback window, which holds this cancellation.
       now: new Date('2026-11-05T09:00:00Z'),
-      env,
+      env: { WATCHDOG_GRACE_HOURS: '8' },
       writeOutput: (k: string, v: string) => {
         outputs[k] = v;
         return true;
       },
-      log: () => {},
+      log: (m: string) => logs.push(m),
       error: () => {},
-      credentialWorkflowFiles: ['compat-credential-v1.3.yml'],
+      credentialWorkflowFiles,
     });
-    return { code, outputs };
+    return { code, outputs, cancelledLines: logs.filter((l) => l.includes(': cancelled —')) };
   };
 
   it('with no list passed, the CLI watches every workflow the scan finds, not just the v1.0 lane', () => {
-    const outputs: Record<string, string> = {};
-    const code = runCli({
-      workflowYamlText: WORKFLOW_YAML,
-      gh: ghFor({ 'compat-vinext.yml': [run({ id: 51 })] }).gh,
-      now: new Date('2026-11-05T09:00:00Z'),
-      env,
-      writeOutput: (k: string, v: string) => {
-        outputs[k] = v;
-        return true;
-      },
-      log: () => {},
-      error: () => {},
-    });
-    expect(code).toBe(0);
-    expect(outputs.alert).toBe('true');
+    const r = cli(ghFor({ 'compat-vinext.yml': [run({ id: 51 })] }).gh);
+    expect(r.code).toBe(0);
+    expect(r.cancelledLines).toHaveLength(1);
+    expect(r.cancelledLines[0]).toContain('compat-vinext.yml');
   });
 
   it('a cancelled credential run alerts through the output and still exits 0', () => {
-    const r = cli(ghFor({ 'compat-credential-v1.3.yml': [run({ id: 41 })] }).gh);
+    const r = cli(ghFor({ 'compat-credential-v1.3.yml': [run({ id: 41 })] }).gh, [
+      'compat-credential-v1.3.yml',
+    ]);
     expect(r.code).toBe(0);
     expect(r.outputs.alert).toBe('true');
+    expect(r.cancelledLines).toHaveLength(1);
+  });
+
+  it('a green run of the same workflow logs no cancelled verdict (the other half)', () => {
+    const r = cli(ghFor({ 'compat-credential-v1.3.yml': [run({ conclusion: 'success' })] }).gh, [
+      'compat-credential-v1.3.yml',
+    ]);
+    expect(r.code).toBe(0);
+    expect(r.cancelledLines).toEqual([]);
   });
 });
 
