@@ -250,6 +250,24 @@ describe('the CLI turns a cancelled run into the alert output', () => {
     return { code, outputs };
   };
 
+  it('with no list passed, the CLI watches every workflow the scan finds, not just the v1.0 lane', () => {
+    const outputs: Record<string, string> = {};
+    const code = runCli({
+      workflowYamlText: WORKFLOW_YAML,
+      gh: ghFor({ 'compat-vinext.yml': [run({ id: 51 })] }).gh,
+      now: new Date('2026-11-05T09:00:00Z'),
+      env,
+      writeOutput: (k: string, v: string) => {
+        outputs[k] = v;
+        return true;
+      },
+      log: () => {},
+      error: () => {},
+    });
+    expect(code).toBe(0);
+    expect(outputs.alert).toBe('true');
+  });
+
   it('a cancelled credential run alerts through the output and still exits 0', () => {
     const r = cli(ghFor({ 'compat-credential-v1.3.yml': [run({ id: 41 })] }).gh);
     expect(r.code).toBe(0);
