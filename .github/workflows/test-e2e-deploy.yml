@@ -259,8 +259,8 @@ on:
 # cancels the older one when a third arrives. Replayed over 14 days of real arrivals
 # (25 a day), that drops 9-19% of runs at a 0.8-1.0 h run length, and a dropped run
 # has no markers, so the audit resets EVERY cell of its line. `max` holds up to 100
-# pending, FIFO. It only stays drained while the run length is under the 57 min gap
-# between arrivals (measured uncontended mean: 49 min, utilisation 0.85): see
+# pending, FIFO. It only stays drained while the mean run is under the 55 min gap
+# between arrivals (measured without overlap: 49 min, utilisation 0.88): see
 # docs/ci/capacity-budget.md §4. The slot watchdog alerts on a run still waiting past
 # its grace, and on any cancelled scheduled run.
 #

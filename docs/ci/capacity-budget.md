@@ -170,11 +170,21 @@ timed out scheduled run of a workflow in the group. If they fire, the levers are
 the two early-warning crons out of the group (critical length becomes 60 min), or
 retiring a line's cells when its window completes.
 
-Effects that stay within the audit's rules: a run's slot is dated by `createdAt`, which
-waiting does not move; two runs of one cell that start under 2 h apart are not counted
-but do not reset (0.08% in the simulation); and a run still waiting or running 10 h
-after its fire reads `missing-night` until it completes (2% in the simulation), which
-corrects itself on the next read.
+Measured live on this repo with throwaway workflows, three arrivals per group: with
+`queue` evaluating to `single` the middle run ended `cancelled` the moment the third
+arrived; with `max` all three stayed `pending` and started in order. The `queue`
+expression is accepted, and so is its `single` branch next to a true `cancel-in-progress`,
+which is the dispatch path. A literal `queue: max` next to a true `cancel-in-progress` was
+not rejected at creation; its runs sat `queued` and never started, which is why the
+expression picks `single` for a dispatch.
+
+Effects on the audit: a run's slot is dated by `createdAt`, which waiting does not move.
+`run_started_at` does not move either: it stays at creation while the run waits and after
+it starts (measured), so rule 10's spacing reads creation time for a run that waited.
+Two fires of one cell are at least 2.9 h apart at creation under the measured delay
+spread, above the 2 h floor, and the group itself now guarantees the runs did not overlap.
+A run still waiting or running 10 h after its fire reads `missing-night` until it
+completes (2% in the simulation), which corrects itself on the next read.
 
 Enforced by `tests/credential-concurrency-group.test.ts` (scans for every credential
 workflow) and `tests/ci-capacity-budget.test.ts`, in the same style as
