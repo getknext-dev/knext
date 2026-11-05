@@ -22,6 +22,7 @@ import { parse } from 'yaml';
 import { buildLedger } from '../scripts/compat-run-ledger.mjs';
 import { CREDENTIAL_CELLS, LANE_MARKER_PREFIX } from '../scripts/compat-window-audit.mjs';
 import { summarize } from '../scripts/e2e-summary.mjs';
+import { CREDENTIAL_CONCURRENCY_GROUP } from '../scripts/lib/credential-slot-watchdog.mjs';
 import { evaluate, exprBody, truthy } from './helpers/gha-expr';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -222,40 +223,28 @@ describe('webpack credential crons (#1245)', () => {
     }
   });
 
-  it('the #1301 workflow-level concurrency group can NEVER share a group across scheduled runs', () => {
-    // #1301 added a workflow-level concurrency group for BRANCH DISPATCHES
-    // ONLY — full coverage, including the mutation proof (swapping
-    // github.ref <-> github.run_id in the real expression), lives in
-    // tests/ci-capacity-budget.test.ts. What this file's own premise ("a
-    // cancelled pending run would reset a window") requires is narrower and
-    // re-asserted here: every `schedule` trigger (every credential AND
-    // early-warning cron, including the two webpack ones this file is
-    // about) must EVALUATE to a group keyed on github.run_id — checked by
-    // evaluating the real expression under a schedule context, not by
-    // checking `github.run_id` merely appears in the text (a text-presence
-    // check stays green if the schedule branch were ref-scoped instead).
+  it('every scheduled run queues in the one credential group, so none is ever replaced while it waits', () => {
+    // v2 R5 replaced the per-run group: full coverage, including the scan across
+    // every credential workflow, lives in tests/credential-concurrency-group.test.ts.
+    // What this file's own premise ("a cancelled pending run would reset a window")
+    // requires is narrower and re-asserted here: every `schedule` trigger (every
+    // credential AND early-warning cron, including the two webpack ones this file is
+    // about) must EVALUATE to the shared group with `queue: max`, because GitHub's
+    // default replaces a pending run when a third one arrives.
     const concurrency = wf.concurrency as
-      | { group?: unknown; 'cancel-in-progress'?: unknown }
+      | { group?: unknown; queue?: unknown; 'cancel-in-progress'?: unknown }
       | undefined;
     expect(concurrency, 'workflow-level concurrency block').toBeDefined();
-    const groupExpr = exprBody(concurrency?.group);
-    const scheduleResult = String(
-      evaluate(groupExpr, {
-        github: {
-          event_name: 'schedule',
-          workflow: 'test-e2e-deploy.yml',
-          ref: 'refs/heads/sentinel-schedule-ref',
-          run_id: 987654,
-        },
-      }) ?? '',
-    );
-    expect(scheduleResult, 'the schedule branch must evaluate to a run_id-scoped group').toContain(
-      '987654',
-    );
-    expect(
-      scheduleResult,
-      'the schedule branch must NOT evaluate to a ref-scoped group — that is the "schedules keyed on ref, sharing one group on main" defect',
-    ).not.toContain('sentinel-schedule-ref');
+    const schedule = {
+      github: {
+        event_name: 'schedule',
+        workflow: 'test-e2e-deploy.yml',
+        ref: 'refs/heads/sentinel-schedule-ref',
+        run_id: 987654,
+      },
+    };
+    expect(evaluate(exprBody(concurrency?.group), schedule)).toBe(CREDENTIAL_CONCURRENCY_GROUP);
+    expect(evaluate(exprBody(concurrency?.queue), schedule)).toBe('max');
 
     const cancelExpr =
       typeof concurrency?.['cancel-in-progress'] === 'string'

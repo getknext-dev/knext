@@ -250,26 +250,35 @@ on:
     # 07:47 / 15:47 / 23:47 UTC — the WEBPACK × BUN CREDENTIAL runs (#1245).
     - cron: '47 7,15,23 * * *'
 
-# #1301 — per-branch concurrency for DISPATCHES ONLY. A workflow_dispatch run
-# groups (and cancels a superseded run) by ref, so a second dispatch on the
-# same branch stops paying for the first one's remaining shards (measured:
-# one branch ran 12 full dispatches — ~1.8k job-minutes — in a day). Every
-# OTHER trigger (i.e. every `schedule` — every credential and early-warning
-# cron) gets a group keyed on github.run_id, which by construction no other
-# run can ever share, so no credential/early-warning night is EVER grouped
-# with anything and cancel-in-progress is likewise gated to
-# workflow_dispatch only — cancelling a pending credential run resets its
-# 14-night window (jev 0.83; see docs/ci/capacity-budget.md and
-# tests/ci-concurrency-group.test.ts for the ci.yml precedent this mirrors).
-# #1382 — the dispatch group now also folds in `inputs.dispatchId` (falling
-# back to the literal 'shared' when unset, so an ORDINARY dispatch keeps
-# grouping — and cancelling a re-dispatch on the same ref — exactly as
-# before). A caller that sets a distinct dispatchId per leg (the shipped-pin
-# early-warning lane's 4-leg fan-out) gets a group UNIQUE to that leg, so
-# concurrent legs on the same ref never cancel each other, and never collide
-# with a developer's own plain manual dispatch either.
+# ONE CONCURRENCY GROUP ACROSS EVERY CREDENTIAL WORKFLOW (v2 R5). A SCHEDULED run
+# of this workflow, compat-credential-v1.3.yml or compat-vinext.yml joins the one
+# group below, so one such run is in flight at a time: two credential runs never
+# spoil each other's "cold" or share the runner pool.
+#
+# `queue: max` IS LOAD-BEARING. GitHub's default keeps one pending run per group and
+# cancels the older one when a third arrives. Replayed over 14 days of real arrivals
+# (25 a day), that drops 9-19% of runs at a 0.8-1.0 h run length, and a dropped run
+# has no markers, so the audit resets EVERY cell of its line. `max` holds up to 100
+# pending, FIFO. It only stays drained while the run length is under the 57 min gap
+# between arrivals (measured uncontended mean: 49 min, utilisation 0.85): see
+# docs/ci/capacity-budget.md §4. The slot watchdog alerts on a run still waiting past
+# its grace, and on any cancelled scheduled run.
+#
+# A `workflow_dispatch` stays OUT of the group: a manual diagnostic neither waits
+# behind nor holds a credential run. Dispatches keep #1301's per-ref group that cancels
+# a superseded dispatch, so a second dispatch on a branch stops paying for the first
+# one's remaining shards. #1382 folds `inputs.dispatchId` in where the workflow offers
+# it (falling back to 'shared'), so a multi-leg fan-out's legs never cancel each other.
+# Their group holds only themselves, so a parent cannot wait on its own group; no
+# job-level group or reusable workflow here can either
+# (tests/credential-concurrency-group.test.ts scans for all of this).
+#
+# `queue` is an expression because GitHub rejects `queue: max` next to a true
+# `cancel-in-progress`, which is what a dispatch evaluates to. actionlint 1.7.12 does
+# not know the key yet; actionlint.yml ignores exactly that one finding.
 concurrency:
-  group: ${{ github.event_name == 'workflow_dispatch' && format('{0}-dispatch-{1}-{2}', github.workflow, github.ref, github.event.inputs.dispatchId || 'shared') || format('{0}-run-{1}', github.workflow, github.run_id) }}
+  group: ${{ github.event_name == 'schedule' && 'knext-compat-credential-lanes' || format('{0}-dispatch-{1}-{2}', github.workflow, github.ref, github.event.inputs.dispatchId || 'shared') }}
+  queue: ${{ github.event_name == 'schedule' && 'max' || 'single' }}
   cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}
 
 # Pin the Next.js ref so a failure is attributable to knext, not upstream churn.

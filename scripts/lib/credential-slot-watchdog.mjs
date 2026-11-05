@@ -146,10 +146,41 @@
  * fire (`computeExpectedSlots(lanes, fire)`), which is exactly what a check at
  * `fire + grace` would have seen, so attribution and the ambiguity rule are
  * unchanged per fire.
+ *
+ * A CANCELLED CREDENTIAL RUN ALERTS (v2 R5). Every credential workflow's scheduled
+ * runs share one concurrency group (`CREDENTIAL_CONCURRENCY_GROUP`), so one run is
+ * in flight at a time and the rest wait. A run GitHub cancels while waiting never
+ * reaches its first job: no markers, no ledger. `compat-window-audit.mjs` grades it
+ * as a lost run of unknown lane, which resets every cell of that line, but only when
+ * somebody next reads the audit. `decideCancelledCredentialRuns` says so at the next
+ * watchdog run, for every workflow in the group. It keys on when the run was
+ * CANCELLED (`updated_at`), in `(previous check, this check]`, not on the fire: a run
+ * can wait in the queue long past its fire's grace, and these windows tile the same
+ * way the fire windows do, so a cancellation is flagged once.
+ *
+ * A RUN WAITING IS NOT A RUN THAT STARTED (v2 R5). The Actions API sets
+ * `run_started_at` on a run still `queued` (measured live), so `run_started_at`
+ * alone cannot tell a waiting run from a running one: `queued-too-long` could never
+ * fire on it. `decideOne` also reads `status`, which makes `queued-too-long` the
+ * backlog signal for the group: a run still waiting past its grace means the group's
+ * arrival rate has outrun its run length.
  */
 
 /** Default grace period (hours) if no override is supplied. */
 export const DEFAULT_GRACE_HOURS = 8;
+
+/**
+ * The one concurrency group every credential workflow's scheduled runs share. Each
+ * workflow writes it as a literal in its `concurrency.group` expression;
+ * `tests/credential-concurrency-group.test.ts` scans for the workflows that must.
+ */
+export const CREDENTIAL_CONCURRENCY_GROUP = 'knext-compat-credential-lanes';
+
+/** Run conclusions that leave a credential run with no result. */
+export const LOST_RUN_CONCLUSIONS = new Set(['cancelled', 'timed_out']);
+
+/** Statuses of a run that exists but has not begun: `run_started_at` is set on these too. */
+const NOT_STARTED_STATUSES = new Set(['queued', 'pending', 'waiting', 'requested']);
 
 /**
  * Window (hours, ending at `start - grace`) checked when no previous watchdog
@@ -662,7 +693,8 @@ export function decideCredentialSlotVerdicts({ lanes, runs, now, ambiguousLanes 
     const graceElapsed = nowTime >= deadline;
 
     const candidates = runs.filter((r) => r.lane === laneDef.lane);
-    const started = candidates.find((r) => r.run_started_at);
+    const hasStarted = (r) => r.run_started_at && !NOT_STARTED_STATUSES.has(r.status);
+    const started = candidates.find(hasStarted);
     const relevant = started ?? candidates[0] ?? null;
 
     if (!relevant) {
@@ -684,7 +716,7 @@ export function decideCredentialSlotVerdicts({ lanes, runs, now, ambiguousLanes 
       };
     }
 
-    if (relevant.run_started_at) {
+    if (hasStarted(relevant)) {
       return {
         lane: laneDef.lane,
         verdict: 'quiet',
@@ -711,6 +743,54 @@ export function decideCredentialSlotVerdicts({ lanes, runs, now, ambiguousLanes 
 /** Every verdict names the fire it decided (`slot`, ISO). */
 function withSlot(laneDef, verdict) {
   return { ...verdict, slot: laneDef.expectedSlotTime };
+}
+
+/**
+ * True when `workflowText` holds the credential group in its WORKFLOW-level
+ * `concurrency:` block. A mention anywhere else (a comment, a test fixture in a
+ * heredoc) does not make a workflow a member. Text, not YAML: this module stays
+ * dependency-free so the watchdog job needs no install step.
+ *
+ * @param {string} workflowText
+ */
+export function joinsCredentialGroup(workflowText) {
+  const block = /^concurrency:[^\n]*\n((?:[ \t]+[^\n]*\n)+)/m.exec(workflowText)?.[1] ?? '';
+  const group = /^[ \t]+group:[^\n]*$/m.exec(block)?.[0] ?? '';
+  return group.includes(`'${CREDENTIAL_CONCURRENCY_GROUP}'`);
+}
+
+/**
+ * The `cancelled` verdicts for one workflow's runs: every SCHEDULED run that ended
+ * with no result, cancelled inside `window`. Quiet on a dispatch (a manual diagnostic
+ * is not a credential run), on a run its own marker calls early-warning, on a run
+ * that succeeded or failed (those carry their own verdict and grading) and on a run
+ * still waiting or running. A run with no marker cannot be proven non-credential, so
+ * it alerts as `unattributed`: the dangerous direction is a false quiet.
+ *
+ * @param {{runs: {event?: string, status: string, conclusion?: string|null, created_at: string, updated_at?: string, html_url?: string, exactLane?: string|null, earlyWarning?: boolean}[], window: {start: Date, end: Date}, workflowFile: string}} args
+ * @returns {{lane: string, slot: string, verdict: 'cancelled', reason: string}[]}
+ */
+export function decideCancelledCredentialRuns({ runs, window, workflowFile }) {
+  const startMs = new Date(window.start).getTime();
+  const endMs = new Date(window.end).getTime();
+  const out = [];
+  for (const run of runs) {
+    if (run.event !== undefined && run.event !== 'schedule') continue;
+    if (run.status !== 'completed' || !LOST_RUN_CONCLUSIONS.has(run.conclusion)) continue;
+    if (run.earlyWarning === true) continue;
+    const cancelledAt = new Date(run.updated_at ?? run.created_at).getTime();
+    if (!(cancelledAt > startMs && cancelledAt <= endMs)) continue;
+    out.push({
+      lane: run.exactLane ?? 'unattributed',
+      slot: run.created_at,
+      verdict: 'cancelled',
+      reason:
+        `a scheduled run of ${workflowFile} ended ${run.conclusion} with no result ` +
+        `(${run.html_url ?? `created ${run.created_at}`}); the audit grades it a lost run, ` +
+        'and with no lane marker it resets every cell of that line',
+    });
+  }
+  return out;
 }
 
 /** True if any lane's verdict warrants the standard pinned alert. */

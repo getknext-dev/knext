@@ -88,12 +88,10 @@ twice.
 
 The workflow's own existing design comment (`.github/workflows/test-e2e-deploy.yml`,
 `concurrency:` block) documents a *related* but different concurrency
-decision made deliberately the other way: credential and early-warning crons
-are **never** grouped together, specifically so an in-progress credential
-night's shards are never cancelled by a later cron starting (cancelling a
-pending credential run resets its 14-run window). Adding a per-cluster lock
-across those same crons would need to reopen that decision, not layer on top
-of it.
+decision: since v2 R5, scheduled credential and early-warning runs across every
+credential workflow share one group and queue in it, so one is in flight at a time
+and none is cancelled by a later cron starting (cancelling a pending credential run
+resets its 14-run window). That serialises the runs; it is not a per-cluster lock.
 
 If a future credential cell (or a different workflow this scope grows to
 cover) does deploy through a shared cluster, this guard's concurrency +

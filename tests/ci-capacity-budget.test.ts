@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import { readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parse } from 'yaml';
+import { CREDENTIAL_CONCURRENCY_GROUP } from '../scripts/lib/credential-slot-watchdog.mjs';
 import { cronsOverlap, findOverlappingPairs, parseCron } from '../scripts/lib/cron-overlap.mjs';
 import { deriveSmokeManifest } from '../scripts/lib/smoke-manifest.mjs';
 import { evaluate, exprBody } from './helpers/gha-expr';
@@ -20,14 +21,12 @@ import { evaluate, exprBody } from './helpers/gha-expr';
  *   2. `max-parallel: 8` on both credential shard matrices;
  *   3. the branch smoke manifest is DERIVED from (never drifts from) the real
  *      credential manifest, and the dispatch-only `smoke` input wires it in;
- *   4. workflow-level concurrency groups EVALUATE ref-scoped on dispatch and
- *      run_id-scoped on schedule (tests/helpers/gha-expr's real evaluator,
- *      not a text-presence check — a text check stays green if `github.ref`
- *      and `github.run_id` are swapped between branches; mutation-proved
- *      below by performing exactly that swap on the real expression and
- *      confirming the property reds), so no credential/early-warning cron
- *      can ever share a group with anything, following
+ *   4. workflow-level concurrency groups EVALUATE ref-scoped on dispatch and to
+ *      the one credential group on schedule (v2 R5; tests/helpers/gha-expr's real
+ *      evaluator, not a text-presence check; mutation-proved below by swapping the
+ *      trigger on the real expression and confirming the property reds), following
  *      tests/ci-concurrency-group.test.ts's pattern.
+ *      tests/credential-concurrency-group.test.ts scans for the rest of the set.
  */
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
@@ -374,7 +373,7 @@ describe('the branch smoke manifest never drifts from the credential manifest (#
   });
 });
 
-describe('per-branch concurrency: dispatches cancel each other, credential crons never share a group (#1301)', () => {
+describe('per-branch concurrency: dispatches cancel each other, scheduled runs queue in the credential group (#1301, v2 R5)', () => {
   type Concurrency = { group?: unknown; 'cancel-in-progress'?: unknown } | string | undefined;
 
   // Distinct, unmistakable sentinel values per trigger context, so a
@@ -406,27 +405,19 @@ describe('per-branch concurrency: dispatches cancel each other, credential crons
   }
 
   /**
-   * The #1301 review round-1 mutation: swap every `github.ref` <-> every
-   * `github.run_id` in the REAL extracted expression — the exact "schedules
-   * keyed on ref, sharing one group on main" defect named in review. Fails
-   * closed (throws) unless BOTH identifiers appear at least once, so a
-   * future rewrite of the expression that drops one of them cannot make
-   * this swap silently a no-op.
+   * Swap which trigger joins the group, in the REAL extracted expression: a
+   * dispatch lands in the credential group and a schedule on a ref-scoped one.
+   * Fails closed (throws) unless the literal it swaps is there, so a future
+   * rewrite of the expression cannot make this silently a no-op.
    */
-  function swapRefAndRunId(expr: string): string {
-    const refCount = (expr.match(/github\.ref\b/g) ?? []).length;
-    const runIdCount = (expr.match(/github\.run_id\b/g) ?? []).length;
-    if (refCount === 0 || runIdCount === 0) {
-      throw new Error(
-        `swapRefAndRunId: expected both github.ref and github.run_id in the expression, found ref=${refCount} run_id=${runIdCount} in: ${expr}`,
-      );
+  function swapTriggers(expr: string): string {
+    if (!/github\.event_name == 'schedule'/.test(expr)) {
+      throw new Error(`swapTriggers: no schedule test in the expression: ${expr}`);
     }
-    const PLACEHOLDER = '\u0000SWAP_RUN_ID\u0000';
-    return expr
-      .replace(/github\.run_id\b/g, PLACEHOLDER)
-      .replace(/github\.ref\b/g, 'github.run_id')
-      .split(PLACEHOLDER)
-      .join('github.ref');
+    return expr.replace(
+      /github\.event_name == 'schedule'/g,
+      "github.event_name == 'workflow_dispatch'",
+    );
   }
 
   for (const file of CREDENTIAL_WORKFLOWS) {
@@ -441,11 +432,9 @@ describe('per-branch concurrency: dispatches cancel each other, credential crons
 
     // #1301 review round 1: EVALUATE the group expression per trigger (the
     // real gha-expr evaluator, the same one tests/compat-webpack-credential-lanes.test.ts
-    // uses) instead of checking that `github.ref` and `github.run_id` merely
-    // APPEAR somewhere in the text. A text-presence check stays green if the
-    // two identifiers are swapped between branches; evaluating the real
-    // expression under a dispatch context and a schedule context cannot.
-    it(`${file}'s concurrency group EVALUATES ref-scoped on dispatch, run_id-scoped on schedule`, () => {
+    // uses) instead of checking that an identifier merely APPEARS somewhere in the
+    // text. tests/credential-concurrency-group.test.ts holds the queue and the scan.
+    it(`${file}'s concurrency group EVALUATES ref-scoped on dispatch, the credential group on schedule`, () => {
       const doc = readWorkflowDoc(file);
       const concurrency = doc.concurrency as { group?: unknown; 'cancel-in-progress'?: unknown };
       const groupExpr = exprBody(concurrency.group);
@@ -460,15 +449,14 @@ describe('per-branch concurrency: dispatches cancel each other, credential crons
         dispatchResult,
         `${file}: dispatch trigger's group must not carry a run_id`,
       ).not.toContain(String(DISPATCH_RUN_ID));
+      expect(dispatchResult, `${file}: a dispatch must stay out of the credential group`).not.toBe(
+        CREDENTIAL_CONCURRENCY_GROUP,
+      );
 
       expect(
         scheduleResult,
-        `${file}: schedule (credential/early-warning) trigger must produce a run_id-scoped group — a ref-scoped schedule group means every scheduled run on the same ref (e.g. every credential cron on main) shares ONE group`,
-      ).toContain(String(SCHEDULE_RUN_ID));
-      expect(
-        scheduleResult,
-        `${file}: schedule trigger's group must not carry the ref — that is the exact "schedules keyed on ref, sharing one group on main" defect`,
-      ).not.toContain(SCHEDULE_REF);
+        `${file}: every scheduled run must join the one credential group, so one is in flight at a time`,
+      ).toBe(CREDENTIAL_CONCURRENCY_GROUP);
 
       const cancelExpr =
         typeof concurrency['cancel-in-progress'] === 'string'
@@ -481,47 +469,27 @@ describe('per-branch concurrency: dispatches cancel each other, credential crons
     });
 
     // ── MUTATION-PROOF, against the REAL extracted expression ──────────────
-    // Swap github.ref <-> github.run_id in the ACTUAL workflow's group
-    // expression and re-evaluate. If the assertions above only checked that
-    // both identifiers appear somewhere in the text, this swap would leave
-    // them green — proving that would be decoration. Evaluating per trigger
-    // catches it: the swapped expression must now FAIL the schedule
-    // assertion (its schedule branch is ref-scoped) and FAIL the dispatch
-    // assertion (its dispatch branch is run_id-scoped).
-    it(`MUTATION-PROOF (${file}): swapping github.ref <-> github.run_id reds the property above`, () => {
+    // Swap the trigger the group keys on in the ACTUAL workflow's expression and
+    // re-evaluate. A text-presence check would stay green; evaluating per trigger
+    // cannot: a dispatch now lands in the credential group, a schedule outside it.
+    it(`MUTATION-PROOF (${file}): swapping the trigger reds the property above`, () => {
       const doc = readWorkflowDoc(file);
       const concurrency = doc.concurrency as { group?: unknown };
       const realExpr = exprBody(concurrency.group);
-      const swapped = swapRefAndRunId(realExpr);
-      // The swap must actually change something, or it isn't exercising the
-      // mutation at all.
-      expect(swapped, 'swapRefAndRunId produced no change — nothing was proven').not.toBe(realExpr);
+      const swapped = swapTriggers(realExpr);
+      expect(swapped, 'swapTriggers produced no change — nothing was proven').not.toBe(realExpr);
 
       const scheduleResultSwapped = String(evaluate(swapped, scheduleCtx(file)) ?? '');
       const dispatchResultSwapped = String(evaluate(swapped, dispatchCtx(file)) ?? '');
 
-      // Under the swap, the schedule branch is now ref-scoped — the exact
-      // "schedules keyed on ref, sharing one group on main" defect.
-      expect(
-        scheduleResultSwapped,
-        'the swap must make the schedule branch ref-scoped (proving the un-swapped assertion actually discriminates this)',
-      ).toContain(SCHEDULE_REF);
-      expect(scheduleResultSwapped).not.toContain(String(SCHEDULE_RUN_ID));
-
-      // And the dispatch branch is now run_id-scoped instead of ref-scoped.
-      expect(dispatchResultSwapped).toContain(String(DISPATCH_RUN_ID));
-      expect(dispatchResultSwapped).not.toContain(DISPATCH_REF);
+      expect(scheduleResultSwapped).not.toBe(CREDENTIAL_CONCURRENCY_GROUP);
+      expect(scheduleResultSwapped).toContain(SCHEDULE_REF);
+      expect(dispatchResultSwapped).toBe(CREDENTIAL_CONCURRENCY_GROUP);
     });
   }
 
-  it('swapRefAndRunId fails closed when the expression carries only one of the two identifiers', () => {
-    expect(() => swapRefAndRunId("${{ format('x-{0}', github.ref) }}")).toThrow(/expected both/);
-    expect(() => swapRefAndRunId("${{ format('x-{0}', github.run_id) }}")).toThrow(/expected both/);
-  });
-
-  it('swapRefAndRunId is its own inverse (sanity: the swap is a true swap, not a one-way collapse)', () => {
-    const expr = "github.event_name == 'workflow_dispatch' && github.ref || github.run_id";
-    expect(swapRefAndRunId(swapRefAndRunId(expr))).toBe(expr);
+  it('swapTriggers fails closed when the expression does not test for a schedule', () => {
+    expect(() => swapTriggers("format('x-{0}', github.ref)")).toThrow(/no schedule test/);
   });
 });
 

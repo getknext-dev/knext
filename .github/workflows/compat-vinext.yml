@@ -91,13 +91,13 @@ on:
     # (03:17 daily, 05:17 Sunday) so the three never contend for runners.
     - cron: '17 7 * * 0'
 
-# #1301 — same per-branch dispatch-only concurrency policy as
-# test-e2e-deploy.yml (see there for the full rationale and
-# docs/ci/capacity-budget.md): a workflow_dispatch run groups and cancels by
-# ref; the weekly schedule gets a run_id-unique group so it can never be
-# grouped with, or cancelled by, anything else.
+# v2 R5 — the same policy as test-e2e-deploy.yml (see there for the rationale and
+# docs/ci/capacity-budget.md §4): the weekly schedule joins the one group every
+# credential workflow shares and queues in it; a workflow_dispatch run stays out,
+# grouping and cancelling by ref (#1301).
 concurrency:
-  group: ${{ github.event_name == 'workflow_dispatch' && format('{0}-dispatch-{1}', github.workflow, github.ref) || format('{0}-run-{1}', github.workflow, github.run_id) }}
+  group: ${{ github.event_name == 'schedule' && 'knext-compat-credential-lanes' || format('{0}-dispatch-{1}', github.workflow, github.ref) }}
+  queue: ${{ github.event_name == 'schedule' && 'max' || 'single' }}
   cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}
 
 env:

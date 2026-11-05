@@ -234,4 +234,8 @@ jobs:
           FILES: ${{ steps.diff.outputs.files }}
         run: |
           set -euo pipefail
-          printf '%s\n' "${FILES}" | xargs -d '\n' ./actionlint
+          # `concurrency.queue` is a real key (docs: workflow syntax, "queue"), but the
+          # pinned actionlint 1.7.12, the latest release, does not know it yet. Exactly
+          # that finding is ignored, and tests/actionlint-workflow.test.ts proves any
+          # other unknown concurrency key still fails. Remove with the bump that knows it.
+          printf '%s\n' "${FILES}" | xargs -d '\n' ./actionlint -ignore 'unexpected key "queue" for "concurrency" section'

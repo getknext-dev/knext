@@ -313,6 +313,50 @@ function actionlintAvailable(): boolean {
   return r.status === 0;
 }
 
+/**
+ * v2 R5: `concurrency.queue` is a real key the pinned actionlint does not know yet.
+ * The gate ignores exactly that finding, so both halves are proved: the key passes,
+ * and any other unknown concurrency key still fails.
+ */
+const QUEUE_IGNORE = 'unexpected key "queue" for "concurrency" section';
+
+describe('the actionlint gate ignores the concurrency queue key and nothing wider', () => {
+  const runLine = () =>
+    readFileSync(resolve(REPO_ROOT, '.github/workflows/actionlint.yml'), 'utf8')
+      .split('\n')
+      .filter((line) => /xargs -d .* \.\/actionlint/.test(line));
+
+  it('has one lint invocation, carrying exactly that one -ignore', () => {
+    const lines = runLine();
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain(`-ignore '${QUEUE_IGNORE}'`);
+    expect(lines[0].match(/-ignore/g)).toHaveLength(1);
+  });
+});
+
+describe.skipIf(!actionlintAvailable())(
+  'the -ignore against the real binary: queue passes, a typo of it does not',
+  () => {
+    const lint = (key: string) => {
+      const dir = trackedMkdtemp('knext-actionlint-queue-');
+      const file = join(dir, 'wf.yml');
+      writeFileSync(
+        file,
+        `name: x\non: push\nconcurrency:\n  group: g\n  ${key}: max\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi\n`,
+      );
+      return spawnSync('actionlint', ['-ignore', QUEUE_IGNORE, file], { encoding: 'utf8' }).status;
+    };
+
+    it('the queue key is accepted', () => {
+      expect(lint('queue')).toBe(0);
+    });
+
+    it('any other unknown concurrency key still fails', () => {
+      expect(lint('queues')).not.toBe(0);
+    });
+  },
+);
+
 describe.skipIf(!actionlintAvailable())(
   '#1397: a changed composite action re-lints its REFERENCING workflow, never the action.yml itself',
   () => {
