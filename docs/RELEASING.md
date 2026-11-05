@@ -525,10 +525,9 @@ parallel. GitHub starts v1.0's scheduled runs hours late, every day: measured on
 early-warning runs at about 10:20-12:40 and the 05:47 bun credential run at about 12:00-13:00 UTC.
 That was measured when each v1.0 cell fired once a day; with three fires a day per cell in both
 lines, the v1.3 slots (`32 0,8,16`, `32 2,10,18`, `32 3,11,19`, `32 4,12,20`) are chosen at least 60
-minutes from every other compat cron, and overlap with a delayed v1.0 run is now routine rather than
-rare. Overlap means **queueing** (a
-run starts late), never cancellation — the two workflows have different names, so their concurrency
-groups never collide. Because the v1.3 slots fall in the daytime, a running v1.3 run (16 shards, up
+minutes from every other compat cron, but GitHub's delay still bunches them. Scheduled runs of both
+lines share one concurrency group and queue in it (`docs/ci/capacity-budget.md` §4), so a bunched run
+**waits**, never overlaps or is cancelled. Because the v1.3 slots fall in the daytime, a running v1.3 run (16 shards, up
 to 8 in parallel) can also slow daytime PR CI and the merge queue. If that bites, move the slots in
 `CREDENTIAL_LINES['v1.3'].cronMap`, regenerate the workflow, and expect the v1.3 windows to restart.
 

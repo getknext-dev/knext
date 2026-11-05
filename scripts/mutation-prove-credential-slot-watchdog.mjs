@@ -67,8 +67,8 @@ const MUTATIONS = [
     label:
       'decideCredentialSlotVerdicts: "started" check inverted (a started run reads as not-started)',
     subject: 'lib',
-    anchor: 'if (relevant.run_started_at) {',
-    replacement: 'if (!relevant.run_started_at) {',
+    anchor: 'if (hasStarted(relevant)) {',
+    replacement: 'if (!hasStarted(relevant)) {',
   },
   {
     // This single check does double duty (see the code comment above it in

@@ -85,15 +85,10 @@ mid-shard when 05:47 fires. This is **not** a cron collision (staggering
 already fixes those, see §1) and `cronsOverlap` correctly reports no overlap
 between these two literals — it is a **runtime duration overlap**: two
 DIFFERENT scheduled runs of the same workflow legitimately executing at the
-same wall-clock time. Because each gets its own `run_id`-scoped concurrency
-group (§4), neither cancels or queues behind the other at the *group* level —
-but they DO compete for the shared 20-job cap, and `max-parallel: 8` on each
-is what keeps that competition from exhausting it outright (worst case, two
-concurrent credential-class runs at `max-parallel: 8` each is 16 of the 20
-slots, still under the cap, though leaving little headroom for anything
-else). This is a **queueing** effect (GitHub schedules what it can within the
-cap and queues the rest), not a failure — no run is cancelled or reset — but
-it is real added latency this issue does not eliminate.
+same wall-clock time. Since v2 R5 these runs **cannot** overlap: every scheduled
+credential-class run shares one concurrency group and queues in it (§4). What they
+still compete with for the shared 20-job cap is PR CI, the merge queue and manual
+dispatches; `max-parallel: 8` keeps one run to 8 of the 20 slots.
 
 ### 3. A branch 16-shard smoke mode
 
@@ -126,24 +121,89 @@ This directly targets the measured "12 dispatches in a day" cost: a routine
 branch dispatch (`smoke=true`) now runs a fraction of the file count a full
 credential-equivalent dispatch does, at the same shard/job topology.
 
-### 4. Per-branch concurrency — dispatches only, never credential crons
+### 4. One group for scheduled runs, per-branch for dispatches
 
-`test-e2e-deploy.yml` and `compat-vinext.yml` each carry a workflow-level
-`concurrency` block whose **group** is keyed on `github.event_name`:
+`test-e2e-deploy.yml`, `compat-credential-v1.3.yml` and `compat-vinext.yml` each
+carry a workflow-level `concurrency` block keyed on `github.event_name`:
 
-- `workflow_dispatch` runs against the same `ref` share a group and
-  **cancel** a superseded dispatch — a second dispatch on a branch stops
-  paying for the first one's remaining shards.
-- Every other event (`schedule` — i.e. every credential and early-warning
-  cron) gets a group keyed on `github.run_id`, which by construction no other
-  run can ever share — so **no credential/early-warning night is ever
-  grouped with anything**, and none can be cancelled by another scheduled
-  run or by a dispatch. This is deliberate: a cancelled pending credential
-  run resets its 14-night window (jev 0.83) — see the hand-off note this
-  issue inherited. `cancel-in-progress` is likewise gated to
-  `workflow_dispatch` only.
+- A scheduled **credential** run joins the one group `knext-compat-credential-lanes`
+  with `queue: max`, so one such run is in flight at a time and the rest wait, first in
+  first out. Two credential runs never spoil each other's "cold" or share the pool.
+- The two **early-warning** crons of `test-e2e-deploy.yml` (`17 3 * * *`,
+  `47 4 * * *`) stay out, in a group keyed on `github.run_id` that nothing else
+  shares. The group cannot spare their arrivals, and taking them out later would
+  restart every credential window again. `compat-vinext.yml`'s weekly cron joins:
+  that cell is not wired yet, and joining now means wiring it restarts nothing.
+- A `workflow_dispatch` run stays **out**: runs against the same `ref` share a group
+  and **cancel** a superseded dispatch, so a second dispatch on a branch stops paying
+  for the first one's remaining shards. A manual diagnostic neither waits behind a
+  credential run nor holds one, though it can still overlap one in the pool.
+  `cancel-in-progress` is gated to `workflow_dispatch` only.
 
-Enforced by `tests/ci-capacity-budget.test.ts`, in the same style as
+**Why `queue: max` is load-bearing.** GitHub's default keeps one pending run per
+group and cancels the older one when a third arrives. A cancelled pending run never
+reached its first job, so it has no markers and no ledger, and the audit grades it as a
+lost run of unknown lane: it restarts **every** cell of that line. The default would
+drop runs constantly here:
+
+| Input (measured) | Value |
+|---|---|
+| Arrivals | 24 credential fires a day, one per 60 min on average (vinext adds one a week; the 2 early-warning fires stay out) |
+| GitHub's scheduling delay | 2.3 to 7.4 h, so fires bunch whatever the crons say |
+| Run length, no other compat run overlapping (58 runs) | mean 0.81 h, p50 0.80, p90 1.00, max 1.54 |
+| Run length, as overlapped today (348 runs) | mean 1.07 h, p50 0.88, p90 1.68, max 4.54 |
+
+| Model of one group | Runs dropped | Wait p50 / p90 |
+|---|---|---|
+| Replay of real arrivals, one pending, 0.8 to 1.0 h runs | 9-19% | n/a |
+| Simulated grid, one pending, mean 0.81 h | 19% | 0.1 / 0.6 h |
+| Simulated grid, `queue: max`, mean 0.70 h | 0 | 0.4 / 1.4 h |
+| Simulated grid, `queue: max`, mean 0.81 h | 0 | 0.9 / 2.4 h |
+| Simulated grid, `queue: max`, mean 0.90 h | 0, but the queue no longer drains | 33 / 51 h |
+
+Spaced crons cannot replace the queue. Keeping a third arrival out of the longest run
+plus the delay spread (4.5 + 5.1 h) would leave about five fires a day against the 24
+scheduled, and the 14 run bar would take about 22 days per cell at that rate.
+
+**There is no margin today, and this is the number to watch.** With 24 arrivals a day
+the queue drains only while the mean credential run stays under 60 min. The review of
+this change measured the group's utilisation from run history:
+
+| Period | Utilisation | Margin |
+|---|---|---|
+| Before 2026-11-02 | 0.91 counting active run time, 0.95 counting wall time | about 3 min of mean run length |
+| Since 2026-11-02 (v1.3 runs red, about 2.2 h wall each) | 1.16 to 1.47 | none: a replay ends with a 23 to 54 h backlog |
+
+**Merge precondition: the v1.3 lane is green.** Above 1.0 the queue grows without bound
+until the 100 pending limit, when GitHub cancels arrivals, so this group is not merged
+while red v1.3 runs hold it at 1.16 to 1.47. The founder chose to keep one group and hold
+the merge until the next v1.3 rc runs green.
+
+Three alarms cover it. The slot watchdog's `over-capacity` verdict fires when the group's
+utilisation over the last 24 h exceeds 1.0. Its `queued-too-long` verdict fires on a run
+still waiting past its grace. Its `cancelled` verdict fires on any scheduled run in the
+group that was cancelled, timed out or failed to start. If they fire, the lever is
+retiring a line's cells when its window completes.
+
+Measured live on this repo with throwaway workflows, three arrivals per group: with
+`queue` evaluating to `single` the middle run ended `cancelled` the moment the third
+arrived; with `max` all three stayed `pending` and started in order. The `queue`
+expression is accepted, and so is its `single` branch next to a true `cancel-in-progress`,
+which is the dispatch path. A literal `queue: max` next to a true `cancel-in-progress` was
+not rejected at creation, but its runs were still `queued` after 34 min while the other
+variants ran, when the probe was cancelled. GitHub documents that pairing as invalid, so
+the expression picks `single` for a dispatch.
+
+Effects on the audit: a run's slot is dated by `createdAt`, which waiting does not move.
+`run_started_at` does not move either: it stays at creation while the run waits and after
+it starts (measured), so rule 10's spacing reads creation time for a run that waited.
+Two fires of one cell are at least 2.9 h apart at creation under the measured delay
+spread, above the 2 h floor, and the group itself now guarantees the runs did not overlap.
+A run still waiting or running 10 h after its fire reads `missing-night` until it
+completes (2% in the simulation), which corrects itself on the next read.
+
+Enforced by `tests/credential-concurrency-group.test.ts` (scans for every credential
+workflow) and `tests/ci-capacity-budget.test.ts`, in the same style as
 `tests/ci-concurrency-group.test.ts` (`ci.yml`'s PR-scoped group).
 
 ## What this budget does not claim
@@ -211,8 +271,8 @@ measured spread allows more in the worst case). At three runs the pool is over
 capacity. Credential shards then queue behind each other, and every PR CI job
 and merge-queue check queues behind them. That can **stall** PR CI and the
 merge queue for the length of a run or longer, not just slow feedback down.
-Nothing is cancelled (scheduled runs keep the per-`run_id` concurrency group of
-§4), and a stalled credential shard only waits. Fresh caches (ADR-0056
+Nothing is cancelled (scheduled runs queue in the group of §4), and a stalled
+credential shard only waits. Fresh caches (ADR-0056
 Amendment 5, D11) add about a minute to each run. If the merge queue stalls
 repeatedly, that is the trigger to revisit N (the ADR's action items) or move
 the v1.3 lane's slots.

@@ -53,9 +53,8 @@ const MUTATIONS = [
     label: 'test-e2e-deploy.yml: concurrency group drops dispatchId (reverts to pre-#1382 shape)',
     subject: 'testE2eDeploy',
     anchor:
-      "group: ${{ github.event_name == 'workflow_dispatch' && format('{0}-dispatch-{1}-{2}', github.workflow, github.ref, github.event.inputs.dispatchId || 'shared') || format('{0}-run-{1}', github.workflow, github.run_id) }}",
-    replacement:
-      "group: ${{ github.event_name == 'workflow_dispatch' && format('{0}-dispatch-{1}', github.workflow, github.ref) || format('{0}-run-{1}', github.workflow, github.run_id) }}",
+      "format('{0}-dispatch-{1}-{2}', github.workflow, github.ref, github.event.inputs.dispatchId || 'shared')",
+    replacement: "format('{0}-dispatch-{1}', github.workflow, github.ref)",
   },
 
   // ── finding 3: alert must be a single job after the matrix ───────────────

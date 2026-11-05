@@ -42,6 +42,7 @@ import {
   parseCredentialCronsFromWorkflow,
   parseScheduleCrons,
 } from '../scripts/compat-window-audit.mjs';
+import { CREDENTIAL_CONCURRENCY_GROUP } from '../scripts/lib/credential-slot-watchdog.mjs';
 import { cronsOverlap } from '../scripts/lib/cron-overlap.mjs';
 import { evaluate, exprBody } from './helpers/gha-expr';
 
@@ -56,8 +57,9 @@ import { evaluate, exprBody } from './helpers/gha-expr';
  *   A. the v1.3 lane resolves the v1.3 tag and NEVER the v1.0 tag (or main);
  *   B. the v1.0 lane is unchanged: none of the v1.3 lane's files is in the
  *      v1.0 frozen set, the v1.0 crons/pin/resolver/audit still read v1.0, and
- *      every name the two lanes could collide on (workflow name → concurrency
- *      group, alert title, reset label, tracker title/label, crons) is disjoint.
+ *      every name the two lanes could collide on (workflow name → dispatch
+ *      concurrency group, alert title, reset label, tracker title/label, crons) is
+ *      disjoint. Their SCHEDULED runs deliberately share one group (v2 R5).
  */
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -653,18 +655,19 @@ describe('B — the v1.0 lane is untouched and nothing collides with it', () => 
     expect(all.sort((a, b) => a - b)).toEqual(Array.from({ length: 24 }, (_, h) => h));
   });
 
-  it('the workflow names differ, so github.workflow-keyed concurrency groups never collide', () => {
+  it('both lanes share the credential group on a schedule; dispatch groups stay disjoint by workflow name', () => {
     const a = parse(read(V10_WORKFLOW)) as any;
     const b = parse(read(V13_WORKFLOW)) as any;
     expect(b.name).toBe(SPEC.workflowName);
     expect(b.name).not.toBe(a.name);
     expect(b.concurrency.group).toBe(a.concurrency.group);
-    const group = (wf: any) =>
+    const group = (wf: any, event_name: string) =>
       evaluate(exprBody(wf.concurrency.group), {
-        github: { event_name: 'schedule', workflow: wf.name, run_id: '42', event: {} },
+        github: { event_name, workflow: wf.name, ref: 'refs/heads/x', run_id: '42', event: {} },
       });
-    expect(group(b)).not.toBe(group(a));
-    expect(String(group(b))).toContain('-run-42');
+    expect(group(b, 'schedule')).toBe(group(a, 'schedule'));
+    expect(group(b, 'schedule')).toBe(CREDENTIAL_CONCURRENCY_GROUP);
+    expect(group(b, 'workflow_dispatch')).not.toBe(group(a, 'workflow_dispatch'));
   });
 
   it('alert title, reset label and tracker title/label are disjoint from v1.0', () => {

@@ -214,6 +214,43 @@ export function sourceShapeOf(sourceText) {
 }
 
 /**
+ * THE CONCURRENCY BLOCK A TAG CARRIES (v2 R5). Every credential workflow's scheduled
+ * runs share one group, so one credential run is in flight across both lines. A tag
+ * cut before that carries the per-run block (`legacy`), and the derivation moves it to
+ * the shared one, so the v1.3 lane joins the group from the moment it is regenerated,
+ * without waiting for its pin to reach a tag that already carries it (`grouped`, which
+ * passes through unchanged). tests/credential-concurrency-group.test.ts holds the
+ * derived file to the same block as test-e2e-deploy.yml.
+ */
+const LEGACY_CONCURRENCY =
+  'concurrency:\n' +
+  "  group: ${{ github.event_name == 'workflow_dispatch' && format('{0}-dispatch-{1}-{2}', github.workflow, github.ref, github.event.inputs.dispatchId || 'shared') || format('{0}-run-{1}', github.workflow, github.run_id) }}\n" +
+  "  cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}\n";
+export const GROUPED_CONCURRENCY =
+  'concurrency:\n' +
+  "  group: ${{ github.event_name == 'schedule' && github.event.schedule != '17 3 * * *' && github.event.schedule != '47 4 * * *' && 'knext-compat-credential-lanes' || github.event_name == 'workflow_dispatch' && format('{0}-dispatch-{1}-{2}', github.workflow, github.ref, github.event.inputs.dispatchId || 'shared') || format('{0}-run-{1}', github.workflow, github.run_id) }}\n" +
+  "  queue: ${{ github.event_name == 'schedule' && 'max' || 'single' }}\n" +
+  "  cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}\n";
+
+/**
+ * Which concurrency block a tag's `test-e2e-deploy.yml` carries. Throws unless it is
+ * exactly one of the two: a source with neither would derive a file outside the group.
+ *
+ * @param {string} sourceText
+ * @returns {'legacy'|'grouped'}
+ */
+export function sourceConcurrencyOf(sourceText) {
+  const legacy = count(sourceText, LEGACY_CONCURRENCY);
+  const grouped = count(sourceText, GROUPED_CONCURRENCY);
+  if (legacy + grouped !== 1) {
+    throw new Error(
+      `compat-line-workflow: the source workflow carries ${legacy} legacy and ${grouped} grouped concurrency block(s), expected exactly one; update the derivation deliberately`,
+    );
+  }
+  return legacy === 1 ? 'legacy' : 'grouped';
+}
+
+/**
  * The declared substitutions for `spec` on a source of `shape`, in
  * application order. Each is `{ id, from, to, count }`: `from` must occur
  * EXACTLY `count` times in the text it is applied to, and `to` must occur zero
@@ -222,8 +259,10 @@ export function sourceShapeOf(sourceText) {
  * @param {ReturnType<typeof lineSpec>} spec
  * @param {keyof typeof SOURCE_SHAPES} [shape] the source's shape (default: the
  *   current one, `runs`)
+ * @param {'legacy'|'grouped'} [concurrency] the source's concurrency block
+ *   (default: `legacy`, what the pinned tag carries)
  */
-export function lineSubstitutions(spec, shape = 'runs') {
+export function lineSubstitutions(spec, shape = 'runs', concurrency = 'legacy') {
   const sourceShape = SOURCE_SHAPES[shape];
   if (!sourceShape) throw new Error(`compat-line-workflow: unknown source shape ${shape}`);
   const derivedPath = `.github/workflows/${spec.workflowFile}`;
@@ -356,6 +395,18 @@ export function lineSubstitutions(spec, shape = 'runs') {
     },
     ...sourceShape.coldCaches,
   );
+  if (concurrency === 'legacy') {
+    subs.push({
+      id: 'credential-concurrency-group',
+      from: LEGACY_CONCURRENCY,
+      to:
+        `# ${v} line: joins the one group every credential workflow shares (a declared\n` +
+        '# substitution in scripts/compat-line-workflow.mjs); this replaces the per-run\n' +
+        '# group the comment above describes.\n' +
+        GROUPED_CONCURRENCY,
+      count: 1,
+    });
+  }
   return subs;
 }
 
@@ -517,7 +568,8 @@ function buildHeader(spec, tag, digest, guards) {
     '# scripts/compat-line-workflow.mjs applied: the workflow name, the four',
     "# credential crons moved to this line's offset slots, the two early-warning",
     `# crons unscheduled, the ${spec.line} pin + line resolver + this derivation check,`,
-    '# the executing-file path, and the alert title/label/tracker text. Every other',
+    '# the executing-file path, the credential concurrency group, and the alert',
+    '# title/label/tracker text. Every other',
     '# byte — including every comment below, which still names v1.0 slots and',
     "# paths — is the tag's. The credential-ref job REFUSES the night unless this",
     '# file equals derive(<resolved tag>:.github/workflows/test-e2e-deploy.yml).',
@@ -547,7 +599,8 @@ export function deriveLineWorkflow(sourceText, { line, tag, repoRoot }) {
     throw new Error(`compat-line-workflow: ${JSON.stringify(tag)} is not a ${line} RC tag`);
   }
   let text = sourceText;
-  for (const s of lineSubstitutions(spec, sourceShapeOf(sourceText))) {
+  const subs = lineSubstitutions(spec, sourceShapeOf(sourceText), sourceConcurrencyOf(sourceText));
+  for (const s of subs) {
     const n = count(text, s.from);
     if (n !== s.count) {
       throw new Error(
@@ -611,25 +664,27 @@ export function underiveLineWorkflow(derivedText, { line, repoRoot }) {
   // recovered source hashes to the recorded digest.
   const errors = [];
   for (const shape of /** @type {(keyof typeof SOURCE_SHAPES)[]} */ (Object.keys(SOURCE_SHAPES))) {
-    let text = derivedText.slice(header.length);
-    try {
-      for (const s of [...lineSubstitutions(spec, shape)].reverse()) {
-        const n = count(text, s.to);
-        if (n !== s.count) {
-          throw new Error(
-            `compat-line-workflow: cannot invert "${s.id}" (${shape} shape): its replacement occurs ${n} time(s), expected ${s.count} — the derived file was hand-edited`,
-          );
+    for (const concurrency of /** @type {const} */ (['legacy', 'grouped'])) {
+      let text = derivedText.slice(header.length);
+      try {
+        for (const s of [...lineSubstitutions(spec, shape, concurrency)].reverse()) {
+          const n = count(text, s.to);
+          if (n !== s.count) {
+            throw new Error(
+              `compat-line-workflow: cannot invert "${s.id}" (${shape} shape): its replacement occurs ${n} time(s), expected ${s.count} — the derived file was hand-edited`,
+            );
+          }
+          text = text.split(s.to).join(s.from);
         }
-        text = text.split(s.to).join(s.from);
+      } catch (err) {
+        errors.push(err.message);
+        continue;
       }
-    } catch (err) {
-      errors.push(err.message);
-      continue;
+      if (sha256(text) === digest) return { sourceText: text, tag, digest, guards, shape };
+      errors.push(
+        `compat-line-workflow: the ${shape}-shape, ${concurrency}-concurrency inversion does not hash to the recorded digest`,
+      );
     }
-    if (sha256(text) === digest) return { sourceText: text, tag, digest, guards, shape };
-    errors.push(
-      `compat-line-workflow: the ${shape}-shape inversion does not hash to the recorded digest`,
-    );
   }
   throw new Error(errors.join('; '));
 }

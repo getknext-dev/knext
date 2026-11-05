@@ -9,7 +9,7 @@
  *
  * VERDICT VIA OUTPUT, NOT EXIT CODE (PR #2013 round 3). When any credential
  * fire needs the standard pinned alert (`missing`, `queued-too-long`,
- * `ambiguous`, `coverage-gap` — see the lib module's header) the script
+ * `ambiguous`, `coverage-gap`, `cancelled` — see the lib module's header) the script
  * writes `alert=true` to `$GITHUB_OUTPUT` and still EXITS 0; the companion
  * workflow's alert job (`.github/workflows/credential-slot-watchdog.yml`)
  * keys on that output. Exit 0 therefore means "this run evaluated its
@@ -37,18 +37,25 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { appendFileSync, readFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { appendFileSync, readdirSync, readFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { laneFromArtifacts, modeFromArtifacts } from './compat-window-audit.mjs';
 import {
   attributeRunsToLanes,
+  CREDENTIAL_CONCURRENCY_GROUP,
   computeExpectedSlots,
   DEFAULT_GRACE_HOURS,
+  decideCancelledCredentialRuns,
   decideCredentialSlotVerdicts,
+  decideGroupCapacity,
   dueFiresInWindow,
+  estimateGroupUtilisation,
+  joinsCredentialGroup,
+  LOST_RUN_CONCLUSIONS,
   parseAllDeclaredSlots,
   resolveCredentialLanes,
+  UTILISATION_WINDOW_HOURS,
   WATCHDOG_LOOKBACK_HOURS,
   WATCHDOG_MAX_WINDOW_HOURS,
   watchdogWindow,
@@ -57,9 +64,39 @@ import {
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 export const REPO = 'getknext-dev/knext';
 export const WORKFLOW_FILE = 'test-e2e-deploy.yml';
+
+/**
+ * One watchdog verdict: a lane's fire (`missing`, `queued-too-long`, `ambiguous`,
+ * `quiet`), or one of the group-wide ones (`coverage-gap`, `cancelled`, `over-capacity`).
+ *
+ * @typedef {{lane: string, slot: string, verdict: string, reason: string}} WatchdogVerdict
+ */
 /** This watchdog's own workflow — its previous run anchors the window. */
 export const WATCHDOG_WORKFLOW_FILE = 'credential-slot-watchdog.yml';
-const WORKFLOW_PATH = resolve(REPO_ROOT, '.github/workflows', WORKFLOW_FILE);
+const WORKFLOW_DIR = resolve(REPO_ROOT, '.github/workflows');
+const WORKFLOW_PATH = resolve(WORKFLOW_DIR, WORKFLOW_FILE);
+
+/**
+ * Every workflow whose scheduled runs share the credential concurrency group: the
+ * workflows a cancelled run is checked in. Scanned, so a new credential workflow is
+ * watched from the PR that adds it to the group. An empty scan throws: it means the
+ * group was renamed or this read the wrong directory, and it must not read as quiet.
+ *
+ * @param {{dir?: string}} [opts]
+ * @returns {string[]} workflow basenames
+ */
+export function discoverCredentialWorkflowFiles({ dir = WORKFLOW_DIR } = {}) {
+  const files = readdirSync(dir)
+    .filter((f) => f.endsWith('.yml') || f.endsWith('.yaml'))
+    .filter((f) => joinsCredentialGroup(readFileSync(join(dir, f), 'utf8')))
+    .sort();
+  if (files.length === 0) {
+    throw new Error(
+      `no workflow in ${dir} holds the credential concurrency group ${CREDENTIAL_CONCURRENCY_GROUP}`,
+    );
+  }
+  return files;
+}
 
 function runGh(args) {
   const r = spawnSync('gh', args, { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
@@ -81,6 +118,8 @@ function mapRun(r) {
     conclusion: r.conclusion,
     created_at: r.created_at,
     run_started_at: r.run_started_at ?? null,
+    // When a completed run ended: what a cancellation is windowed on.
+    updated_at: r.updated_at,
     // 1 on a first attempt, higher on a re-run, which resets `run_started_at`.
     run_attempt: r.run_attempt,
     html_url: r.html_url,
@@ -316,11 +355,56 @@ export function resolveCheckAnchors(gh, { runId = null, eventName = null, now })
 }
 
 /**
+ * The `cancelled` verdicts for every workflow in the credential group, over the
+ * time between the two watchdog runs: the fire window shifted forward by the grace
+ * (a cancellation has no grace to wait out). The listing reaches back further than
+ * the window, because a run can wait in the queue long before it is cancelled. A
+ * listing that fails on both shapes throws, so the run crashes and the next one
+ * re-checks this window. The same listings give the group's utilisation over the
+ * `UTILISATION_WINDOW_HOURS` ending at this check, which adds `over-capacity` above 1.0.
+ *
+ * @param {{gh: (args: string[]) => string, window: {start: Date, end: Date}, graceHours: number, workflowFiles: string[]}} args
+ */
+function cancelledRunVerdicts({ gh, window, graceHours, workflowFiles }) {
+  const graceMs = graceHours * 60 * 60 * 1000;
+  const between = {
+    start: new Date(window.start.getTime() + graceMs),
+    end: new Date(window.end.getTime() + graceMs),
+  };
+  const since = new Date(
+    between.start.getTime() - WATCHDOG_MAX_WINDOW_HOURS * 60 * 60 * 1000,
+  ).toISOString();
+  const utilisationSince = between.end.getTime() - UTILISATION_WINDOW_HOURS * 60 * 60 * 1000;
+  const verdicts = [];
+  const groupRuns = [];
+  for (const workflowFile of workflowFiles) {
+    const runs = fetchWindowRuns(gh, { since, workflowFile });
+    // Only the runs a verdict reads pay for an artifact listing: those that ended
+    // with no result, and those inside the utilisation window.
+    const marked = attachExactLanes(
+      gh,
+      runs.filter(
+        (r) =>
+          LOST_RUN_CONCLUSIONS.has(r.conclusion) ||
+          new Date(r.created_at).getTime() > utilisationSince,
+      ),
+    );
+    verdicts.push(
+      ...decideCancelledCredentialRuns({ runs: marked, window: between, workflowFile }),
+    );
+    groupRuns.push(...marked);
+  }
+  const estimate = estimateGroupUtilisation({ runs: groupRuns, now: between.end });
+  verdicts.push(...decideGroupCapacity({ estimate, now: between.end }));
+  return verdicts;
+}
+
+/**
  * Run the full check: parse lanes, fetch runs, attribute, decide — for EVERY
  * credential fire in `watchdogWindow({checkAt, previousCheckAt})` (see the lib
- * module header). Pure given its inputs (`gh`, `now`, `checkAt` and
- * `previousCheckAt` are all injectable), so this is what the CLI and the
- * offline tests both call.
+ * module header) — plus every credential run cancelled since the previous check.
+ * Pure given its inputs (`gh`, `now`, `checkAt` and `previousCheckAt` are all
+ * injectable), so this is what the CLI and the offline tests both call.
  *
  * Each fire is decided in its own context — the lanes' slots taken at that
  * fire — so attribution and the ambiguity rule see exactly what a check at
@@ -328,7 +412,8 @@ export function resolveCheckAnchors(gh, { runId = null, eventName = null, now })
  * (`slot`). A window clamped to WATCHDOG_MAX_WINDOW_HOURS adds one
  * `coverage-gap` verdict, which alerts.
  *
- * @param {{workflowYamlText: string, gh: (args: string[]) => string, now?: Date, graceHours?: number, checkAt?: Date|null, previousCheckAt?: Date|null}} args
+ * @param {{workflowYamlText: string, gh: (args: string[]) => string, now?: Date, graceHours?: number, checkAt?: Date|null, previousCheckAt?: Date|null, credentialWorkflowFiles?: string[]}} args
+ * @returns {WatchdogVerdict[]}
  */
 export function evaluateWatchdog({
   workflowYamlText,
@@ -337,6 +422,7 @@ export function evaluateWatchdog({
   graceHours,
   checkAt = null,
   previousCheckAt = null,
+  credentialWorkflowFiles = [WORKFLOW_FILE],
 }) {
   const resolvedGraceHours =
     graceHours ?? (Number(process.env.WATCHDOG_GRACE_HOURS) || DEFAULT_GRACE_HOURS);
@@ -384,6 +470,14 @@ export function evaluateWatchdog({
         `fires before ${window.start.toISOString()} were never checked`,
     });
   }
+  verdicts.push(
+    ...cancelledRunVerdicts({
+      gh,
+      window,
+      graceHours: resolvedGraceHours,
+      workflowFiles: credentialWorkflowFiles,
+    }),
+  );
   if (fireTimes.length === 0) return verdicts;
 
   // One context per fire: every lane's slot at that fire.
@@ -473,6 +567,7 @@ function githubOutputWriter(env) {
  *   writeOutput?: (name: string, value: string) => boolean,
  *   log?: (msg: string) => void,
  *   error?: (msg: string) => void,
+ *   credentialWorkflowFiles?: string[],
  * }} args
  * @returns {number}
  */
@@ -484,6 +579,7 @@ export function runCli({
   writeOutput = githubOutputWriter(env),
   log = console.log,
   error = console.error,
+  credentialWorkflowFiles,
 }) {
   const graceHours = Number(env.WATCHDOG_GRACE_HOURS) || DEFAULT_GRACE_HOURS;
   let window = null;
@@ -506,7 +602,14 @@ export function runCli({
     writeOutput('window', window);
     log(`Checking every credential fire in ${window}.`);
 
-    const verdicts = evaluateWatchdog({ workflowYamlText, gh, now, graceHours, ...anchors });
+    const verdicts = evaluateWatchdog({
+      workflowYamlText,
+      gh,
+      now,
+      graceHours,
+      ...anchors,
+      credentialWorkflowFiles: credentialWorkflowFiles ?? discoverCredentialWorkflowFiles(),
+    });
     if (verdicts.length === 0) log('No credential fire came due since the previous check.');
     for (const v of verdicts) log(`${v.lane} @ ${v.slot}: ${v.verdict} — ${v.reason}`);
 
