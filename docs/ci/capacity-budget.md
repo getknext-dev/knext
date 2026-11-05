@@ -175,8 +175,9 @@ Measured live on this repo with throwaway workflows, three arrivals per group: w
 arrived; with `max` all three stayed `pending` and started in order. The `queue`
 expression is accepted, and so is its `single` branch next to a true `cancel-in-progress`,
 which is the dispatch path. A literal `queue: max` next to a true `cancel-in-progress` was
-not rejected at creation; its runs sat `queued` and never started, which is why the
-expression picks `single` for a dispatch.
+not rejected at creation, but its runs were still `queued` after 34 min while the other
+variants ran, when the probe was cancelled. GitHub documents that pairing as invalid, so
+the expression picks `single` for a dispatch.
 
 Effects on the audit: a run's slot is dated by `createdAt`, which waiting does not move.
 `run_started_at` does not move either: it stays at creation while the run waits and after
