@@ -126,10 +126,14 @@ credential-equivalent dispatch does, at the same shard/job topology.
 `test-e2e-deploy.yml`, `compat-credential-v1.3.yml` and `compat-vinext.yml` each
 carry a workflow-level `concurrency` block keyed on `github.event_name`:
 
-- A `schedule` run (every credential and early-warning cron) joins the one group
-  `knext-compat-credential-lanes` with `queue: max`, so one such run is in flight at
-  a time and the rest wait, first in first out. Two credential runs never spoil each
-  other's "cold" or share the pool.
+- A scheduled **credential** run joins the one group `knext-compat-credential-lanes`
+  with `queue: max`, so one such run is in flight at a time and the rest wait, first in
+  first out. Two credential runs never spoil each other's "cold" or share the pool.
+- The two **early-warning** crons of `test-e2e-deploy.yml` (`17 3 * * *`,
+  `47 4 * * *`) stay out, in a group keyed on `github.run_id` that nothing else
+  shares. The group cannot spare their arrivals, and taking them out later would
+  restart every credential window again. `compat-vinext.yml`'s weekly cron joins:
+  that cell is not wired yet, and joining now means wiring it restarts nothing.
 - A `workflow_dispatch` run stays **out**: runs against the same `ref` share a group
   and **cancel** a superseded dispatch, so a second dispatch on a branch stops paying
   for the first one's remaining shards. A manual diagnostic neither waits behind a
@@ -144,7 +148,7 @@ drop runs constantly here:
 
 | Input (measured) | Value |
 |---|---|
-| Arrivals | 24 credential + 2 early-warning fires a day, 26/day, one per 55 min on average (25.1/day seen over the last 14 days; vinext adds one a week) |
+| Arrivals | 24 credential fires a day, one per 60 min on average (vinext adds one a week; the 2 early-warning fires stay out) |
 | GitHub's scheduling delay | 2.3 to 7.4 h, so fires bunch whatever the crons say |
 | Run length, no other compat run overlapping (58 runs) | mean 0.81 h, p50 0.80, p90 1.00, max 1.54 |
 | Run length, as overlapped today (348 runs) | mean 1.07 h, p50 0.88, p90 1.68, max 4.54 |
@@ -158,16 +162,27 @@ drop runs constantly here:
 | Simulated grid, `queue: max`, mean 0.90 h | 0, but the queue no longer drains | 33 / 51 h |
 
 Spaced crons cannot replace the queue. Keeping a third arrival out of the longest run
-plus the delay spread (4.5 + 5.1 h) would leave about five fires a day against the 26
+plus the delay spread (4.5 + 5.1 h) would leave about five fires a day against the 24
 scheduled, and the 14 run bar would take about 22 days per cell at that rate.
 
-**The margin is thin, and this is the number to watch.** Utilisation is 26 x 0.81 / 24
-= 0.88: the queue only drains while the mean run length stays under 55 min (24 / 26 h).
-Above that it grows without bound until the 100 pending limit, when GitHub cancels
-arrivals. Two alarms cover it: the slot watchdog's `queued-too-long` verdict fires on a
-run still waiting past its grace, and its `cancelled` verdict fires on any cancelled or
-timed out scheduled run of a workflow in the group. If they fire, the levers are taking
-the two early-warning crons out of the group (critical length becomes 60 min), or
+**There is no margin today, and this is the number to watch.** With 24 arrivals a day
+the queue drains only while the mean credential run stays under 60 min. The review of
+this change measured the group's utilisation from run history:
+
+| Period | Utilisation | Margin |
+|---|---|---|
+| Before 2026-11-02 | 0.91 counting active run time, 0.95 counting wall time | about 3 min of mean run length |
+| Since 2026-11-02 (v1.3 runs red, about 2.2 h wall each) | 1.16 to 1.47 | none: a replay ends with a 23 to 54 h backlog |
+
+**Merge precondition: the v1.3 lane is green.** Above 1.0 the queue grows without bound
+until the 100 pending limit, when GitHub cancels arrivals, so this group is not merged
+while red v1.3 runs hold it at 1.16 to 1.47. The founder chose to keep one group and hold
+the merge until the next v1.3 rc runs green.
+
+Three alarms cover it. The slot watchdog's `over-capacity` verdict fires when the group's
+utilisation over the last 24 h exceeds 1.0. Its `queued-too-long` verdict fires on a run
+still waiting past its grace. Its `cancelled` verdict fires on any scheduled run in the
+group that was cancelled, timed out or failed to start. If they fire, the lever is
 retiring a line's cells when its window completes.
 
 Measured live on this repo with throwaway workflows, three arrivals per group: with

@@ -164,10 +164,28 @@
  * fire on it. `decideOne` also reads `status`, which makes `queued-too-long` the
  * backlog signal for the group: a run still waiting past its grace means the group's
  * arrival rate has outrun its run length.
+ *
+ * THE GROUP OVER CAPACITY ALERTS (v2 R5). `queued-too-long` fires only once a run has
+ * waited past its grace, which is late. `estimateGroupUtilisation` measures the cause
+ * directly: over the last `UTILISATION_WINDOW_HOURS`, arrivals times mean run length,
+ * divided by the window. One server, first in first out, so a run started when it was
+ * created or when the run before it ended, whichever is later (`run_started_at` cannot
+ * say: it stays at creation for a run that waited). Above 1.0 the queue grows without
+ * bound, so that alerts `over-capacity`. Early-warning runs are not in the group and
+ * are left out.
  */
 
 /** Default grace period (hours) if no override is supplied. */
 export const DEFAULT_GRACE_HOURS = 8;
+
+/** The trailing window the group's utilisation is measured over. */
+export const UTILISATION_WINDOW_HOURS = 24;
+
+/** Above this the group's queue grows without bound. */
+export const OVER_CAPACITY_UTILISATION = 1;
+
+/** Fewer finished runs than this in the window is too few to judge. */
+export const UTILISATION_MIN_FINISHED = 6;
 
 /**
  * The one concurrency group every credential workflow's scheduled runs share. Each
@@ -177,7 +195,7 @@ export const DEFAULT_GRACE_HOURS = 8;
 export const CREDENTIAL_CONCURRENCY_GROUP = 'knext-compat-credential-lanes';
 
 /** Run conclusions that leave a credential run with no result. */
-export const LOST_RUN_CONCLUSIONS = new Set(['cancelled', 'timed_out']);
+export const LOST_RUN_CONCLUSIONS = new Set(['cancelled', 'timed_out', 'startup_failure']);
 
 /** Statuses of a run that exists but has not begun: `run_started_at` is set on these too. */
 const NOT_STARTED_STATUSES = new Set(['queued', 'pending', 'waiting', 'requested']);
@@ -791,6 +809,69 @@ export function decideCancelledCredentialRuns({ runs, window, workflowFile }) {
     });
   }
   return out;
+}
+
+/**
+ * The group's utilisation over the trailing window: arrivals times the mean run length,
+ * over the window (see the module header). `null` when fewer than
+ * `UTILISATION_MIN_FINISHED` runs in the window finished with a result.
+ *
+ * @param {{runs: {event?: string, status: string, conclusion?: string|null, created_at: string, updated_at?: string, earlyWarning?: boolean}[], now: Date, windowHours?: number}} args
+ * @returns {{arrivals: number, finished: number, meanRunHours: number, utilisation: number}|null}
+ */
+export function estimateGroupUtilisation({ runs, now, windowHours = UTILISATION_WINDOW_HOURS }) {
+  const endMs = new Date(now).getTime();
+  const startMs = endMs - windowHours * HOUR_MS;
+  const arrivals = runs
+    .filter((r) => r.event === undefined || r.event === 'schedule')
+    .filter((r) => r.earlyWarning !== true)
+    .filter((r) => {
+      const created = new Date(r.created_at).getTime();
+      return created > startMs && created <= endMs;
+    })
+    .sort((a, b) => a.created_at.localeCompare(b.created_at));
+  let previousEnd = Number.NEGATIVE_INFINITY;
+  const lengths = [];
+  for (const run of arrivals) {
+    const ended = new Date(run.updated_at ?? Number.NaN).getTime();
+    if (run.status !== 'completed' || !Number.isFinite(ended)) continue;
+    const started = Math.max(new Date(run.created_at).getTime(), previousEnd);
+    previousEnd = Math.max(previousEnd, ended);
+    // A run lost before it began demanded no run time; it still counts as an arrival.
+    if (run.conclusion === 'success' || run.conclusion === 'failure') {
+      lengths.push(Math.max(0, ended - started) / HOUR_MS);
+    }
+  }
+  if (lengths.length < UTILISATION_MIN_FINISHED) return null;
+  const meanRunHours = lengths.reduce((a, b) => a + b, 0) / lengths.length;
+  return {
+    arrivals: arrivals.length,
+    finished: lengths.length,
+    meanRunHours,
+    utilisation: (arrivals.length * meanRunHours) / windowHours,
+  };
+}
+
+/**
+ * The `over-capacity` verdict, or none.
+ *
+ * @param {{estimate: ReturnType<typeof estimateGroupUtilisation>, now: Date, windowHours?: number}} args
+ * @returns {{lane: string, slot: string, verdict: 'over-capacity', reason: string}[]}
+ */
+export function decideGroupCapacity({ estimate, now, windowHours = UTILISATION_WINDOW_HOURS }) {
+  if (!estimate || !(estimate.utilisation > OVER_CAPACITY_UTILISATION)) return [];
+  return [
+    {
+      lane: '*',
+      slot: new Date(now).toISOString(),
+      verdict: 'over-capacity',
+      reason:
+        `the credential group's utilisation over the last ${windowHours}h is ` +
+        `${estimate.utilisation.toFixed(2)} (${estimate.arrivals} arrivals x ` +
+        `${estimate.meanRunHours.toFixed(2)}h mean run, ${estimate.finished} finished): above ` +
+        `${OVER_CAPACITY_UTILISATION} its queue grows without bound — docs/ci/capacity-budget.md §4`,
+    },
+  ];
 }
 
 /** True if any lane's verdict warrants the standard pinned alert. */

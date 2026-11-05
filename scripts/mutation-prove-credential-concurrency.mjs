@@ -59,17 +59,23 @@ const MUTATIONS = [
     replacement: "&& 'max' || 'max' }}",
   },
   {
-    label: 'test-e2e-deploy.yml: a scheduled run leaves the group for a per-run one',
+    label: 'test-e2e-deploy.yml: a scheduled credential run leaves the group for a per-run one',
     subject: 'e2e',
-    anchor: "github.event_name == 'schedule' && 'knext-compat-credential-lanes' || format(",
-    replacement: "github.event_name == 'schedule' && github.run_id || format(",
+    anchor: "&& 'knext-compat-credential-lanes' || github.event_name == 'workflow_dispatch'",
+    replacement: "&& github.run_id || github.event_name == 'workflow_dispatch'",
+  },
+  {
+    label: 'test-e2e-deploy.yml: the early-warning crons join the group',
+    subject: 'e2e',
+    anchor: "github.event.schedule != '17 3 * * *' && github.event.schedule != '47 4 * * *' && ",
+    replacement: '',
   },
   {
     label: 'test-e2e-deploy.yml: a dispatch joins the group',
     subject: 'e2e',
     anchor:
-      "group: ${{ github.event_name == 'schedule' && 'knext-compat-credential-lanes' || format('{0}-dispatch-{1}-{2}', github.workflow, github.ref, github.event.inputs.dispatchId || 'shared') }}",
-    replacement: "group: 'knext-compat-credential-lanes'",
+      "github.event_name == 'workflow_dispatch' && format('{0}-dispatch-{1}-{2}', github.workflow, github.ref, github.event.inputs.dispatchId || 'shared') || format('{0}-run-{1}', github.workflow, github.run_id) }}",
+    replacement: "'knext-compat-credential-lanes' }}",
   },
   {
     label: 'test-e2e-deploy.yml: cancel-in-progress on every trigger',
@@ -98,21 +104,51 @@ const MUTATIONS = [
   {
     label: 'credential-slot-watchdog.yml: the alert stops naming the cancelled verdict',
     subject: 'alert',
-    anchor: 'was CANCELLED or timed out',
+    anchor: 'was CANCELLED, timed out or failed to start',
     replacement: 'ended',
+  },
+  {
+    label: 'credential-slot-watchdog.yml: the alert stops naming the over-capacity verdict',
+    subject: 'alert',
+    anchor: 'Or the credential group is OVER CAPACITY',
+    replacement: 'Or the credential group is busy',
   },
   // ── the watchdog ─────────────────────────────────────────────────────────
   {
     label: 'lib: a cancelled run is not a lost run',
     subject: 'lib',
-    anchor: "new Set(['cancelled', 'timed_out'])",
-    replacement: "new Set(['timed_out'])",
+    anchor: "new Set(['cancelled', 'timed_out', 'startup_failure'])",
+    replacement: "new Set(['timed_out', 'startup_failure'])",
   },
   {
     label: 'lib: a timed-out run is not a lost run',
     subject: 'lib',
-    anchor: "new Set(['cancelled', 'timed_out'])",
-    replacement: "new Set(['cancelled'])",
+    anchor: "new Set(['cancelled', 'timed_out', 'startup_failure'])",
+    replacement: "new Set(['cancelled', 'startup_failure'])",
+  },
+  {
+    label: 'lib: a run that failed to start is not a lost run',
+    subject: 'lib',
+    anchor: "new Set(['cancelled', 'timed_out', 'startup_failure'])",
+    replacement: "new Set(['cancelled', 'timed_out'])",
+  },
+  {
+    label: 'lib: utilisation above 1.0 does not alert',
+    subject: 'lib',
+    anchor: '!(estimate.utilisation > OVER_CAPACITY_UTILISATION)',
+    replacement: '!(estimate.utilisation > 100)',
+  },
+  {
+    label: 'lib: utilisation counts early-warning runs, which are not in the group',
+    subject: 'lib',
+    anchor: '    .filter((r) => r.earlyWarning !== true)\n',
+    replacement: '',
+  },
+  {
+    label: 'lib: run length read from creation, so queue wait counts as run time',
+    subject: 'lib',
+    anchor: 'const started = Math.max(new Date(run.created_at).getTime(), previousEnd);',
+    replacement: 'const started = new Date(run.created_at).getTime();',
   },
   {
     label: 'lib: a cancelled dispatch flags',
@@ -164,6 +200,12 @@ const MUTATIONS = [
     replacement: 'start: new Date(window.start.getTime()),',
   },
   {
+    label: 'cli: the watchdog never raises over-capacity',
+    subject: 'cli',
+    anchor: '  verdicts.push(...decideGroupCapacity({ estimate, now: between.end }));\n',
+    replacement: '',
+  },
+  {
     label: 'cli: an empty scan reads as quiet',
     subject: 'cli',
     anchor: '  if (files.length === 0) {\n',
@@ -171,10 +213,10 @@ const MUTATIONS = [
   },
 ];
 
-declareMutations(20);
+declareMutations(27);
 
-if (MUTATIONS.length !== 20) {
-  console.error(`FATAL: declared 20 mutations, table has ${MUTATIONS.length}`);
+if (MUTATIONS.length !== 27) {
+  console.error(`FATAL: declared 27 mutations, table has ${MUTATIONS.length}`);
   process.exit(1);
 }
 

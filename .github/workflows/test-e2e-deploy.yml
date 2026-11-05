@@ -250,19 +250,25 @@ on:
     # 07:47 / 15:47 / 23:47 UTC — the WEBPACK × BUN CREDENTIAL runs (#1245).
     - cron: '47 7,15,23 * * *'
 
-# ONE CONCURRENCY GROUP ACROSS EVERY CREDENTIAL WORKFLOW (v2 R5). A SCHEDULED run
-# of this workflow, compat-credential-v1.3.yml or compat-vinext.yml joins the one
-# group below, so one such run is in flight at a time: two credential runs never
-# spoil each other's "cold" or share the runner pool.
+# ONE CONCURRENCY GROUP ACROSS EVERY CREDENTIAL WORKFLOW (v2 R5). A SCHEDULED
+# credential run of this workflow, compat-credential-v1.3.yml or compat-vinext.yml
+# joins the one group below, so one such run is in flight at a time: two credential
+# runs never spoil each other's "cold" or share the runner pool.
+#
+# The two EARLY-WARNING crons ('17 3 * * *', '47 4 * * *') stay out, in a group keyed
+# on github.run_id that nothing else shares, as before R5. They cost the group 2 of 26
+# arrivals a day it cannot spare (below), and keeping them out now means no later edit
+# has to restart the credential windows again to take them out.
 #
 # `queue: max` IS LOAD-BEARING. GitHub's default keeps one pending run per group and
-# cancels the older one when a third arrives. Replayed over 14 days of real arrivals
-# (25 a day), that drops 9-19% of runs at a 0.8-1.0 h run length, and a dropped run
-# has no markers, so the audit resets EVERY cell of its line. `max` holds up to 100
-# pending, FIFO. It only stays drained while the mean run is under the 55 min gap
-# between arrivals (measured without overlap: 49 min, utilisation 0.88): see
+# cancels the older one when a third arrives. Replayed over 14 days of real arrivals,
+# that drops 9-19% of runs at a 0.8-1.0 h run length, and a dropped run has no
+# markers, so the audit resets EVERY cell of its line. `max` holds up to 100 pending,
+# FIFO. It only drains while the mean run is under the 60 min gap between the 24
+# credential arrivals a day, and the margin is thin or negative: see
 # docs/ci/capacity-budget.md §4. The slot watchdog alerts on a run still waiting past
-# its grace, and on any cancelled scheduled run.
+# its grace, on any cancelled scheduled run, and when the group's measured utilisation
+# over the last 24 h exceeds 1.0.
 #
 # A `workflow_dispatch` stays OUT of the group: a manual diagnostic neither waits
 # behind nor holds a credential run. Dispatches keep #1301's per-ref group that cancels
@@ -277,7 +283,7 @@ on:
 # `cancel-in-progress`, which is what a dispatch evaluates to. actionlint 1.7.12 does
 # not know the key yet; actionlint.yml ignores exactly that one finding.
 concurrency:
-  group: ${{ github.event_name == 'schedule' && 'knext-compat-credential-lanes' || format('{0}-dispatch-{1}-{2}', github.workflow, github.ref, github.event.inputs.dispatchId || 'shared') }}
+  group: ${{ github.event_name == 'schedule' && github.event.schedule != '17 3 * * *' && github.event.schedule != '47 4 * * *' && 'knext-compat-credential-lanes' || github.event_name == 'workflow_dispatch' && format('{0}-dispatch-{1}-{2}', github.workflow, github.ref, github.event.inputs.dispatchId || 'shared') || format('{0}-run-{1}', github.workflow, github.run_id) }}
   queue: ${{ github.event_name == 'schedule' && 'max' || 'single' }}
   cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}
 

@@ -163,6 +163,34 @@ describe('every credential-bearing workflow is in one concurrency group', () => 
     expect(outsiders).toEqual([]);
   });
 
+  it('every credential cron joins the group, and an early-warning cron stays in a group of its own', () => {
+    let earlyWarning = 0;
+    for (const file of files) {
+      const doc = readDoc(file);
+      for (const { cron } of doc.on?.schedule ?? []) {
+        const at = ctx('schedule');
+        at.github.event.schedule = cron;
+        const mode = doc.env?.KNEXT_COMPAT_MODE;
+        // A workflow with no mode selector (compat-vinext.yml, not wired yet) is all
+        // credential-bound: its cron joins now so wiring it later restarts nothing.
+        const credential = mode === undefined || value(mode, at) === 'credential';
+        const group = String(value(doc.concurrency.group, at));
+        if (credential) {
+          expect(group, `${file} ${cron}`).toBe(CREDENTIAL_CONCURRENCY_GROUP);
+        } else {
+          earlyWarning += 1;
+          expect(group, `${file} ${cron}`).not.toBe(CREDENTIAL_CONCURRENCY_GROUP);
+          expect(group, `${file} ${cron} must be unique to its run`).toContain('424242');
+          expect(group, `${file} ${cron} must not share a ref-keyed group`).not.toContain(
+            'refs/heads/sentinel-ref',
+          );
+        }
+      }
+    }
+    // The two early-warning crons of test-e2e-deploy.yml, so the branch above ran.
+    expect(earlyWarning).toBe(2);
+  });
+
   it('only a schedule joins: a push or a merge-queue event never lands in the group', () => {
     for (const file of files) {
       const { group } = readDoc(file).concurrency;
@@ -194,7 +222,9 @@ describe('the v1.3 derivation moves a pre-group tag into the group', () => {
     const withBlock = (text: string) => {
       const blocks = text.match(/^concurrency:\n(?: +[^\n]*\n)+/gm) ?? [];
       expect(blocks).toHaveLength(1);
-      return text.replace(blocks[0], () => GROUPED_CONCURRENCY);
+      const [block] = blocks;
+      if (block === undefined) throw new Error('the tag source has no concurrency block');
+      return text.replace(block, () => GROUPED_CONCURRENCY);
     };
     const future = withBlock(tagSource);
     expect(sourceConcurrencyOf(future)).toBe('grouped');

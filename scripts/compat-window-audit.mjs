@@ -227,8 +227,14 @@
  *      previous COUNTED run of the same streak. A run that is too close is
  *      NOT COUNTED and does NOT reset — it is green, just not a second
  *      independent sample (`night.counted`, `night.notCountedReason`,
- *      `audit.spacingSkipped`). Measured on actual start times, never on cron
- *      times. A recorded start that cannot be read fails closed (not counted);
+ *      `audit.spacingSkipped`). Measured on `run_started_at`, never on cron
+ *      times. Since ADR-0056 Amendment 6 that is creation time for a run that
+ *      waited in the credential concurrency group: GitHub sets `run_started_at`
+ *      when the run is created and does not move it when the run leaves the
+ *      queue (measured). Independence then rests on the group, which lets no
+ *      two credential runs overlap, and the spacing floor holds on creation
+ *      times (two fires of one cell are at least 2.9 h apart under the measured
+ *      delay). A recorded start that cannot be read fails closed (not counted);
  *      an undated run (`--dir` input) is counted but listed in
  *      `audit.spacingUnverified`, which holds `met` false. Credential scope
  *      only, like rule 8. The output keeps its historical field names
@@ -266,11 +272,13 @@ export const WINDOW_REQUIRED_RUNS = 14;
 export const WINDOW_REQUIRED_NIGHTS = WINDOW_REQUIRED_RUNS;
 
 /**
- * Rule 10 (ADR-0056 Amendment 5): the minimum time between the ACTUAL START of
+ * Rule 10 (ADR-0056 Amendment 5): the minimum time between the recorded START of
  * two counted runs of the same streak. A run that started closer than this to
  * the previous counted run is not counted — and does not reset the count — so
  * two runs that shared a runner window cannot both bank. Measured on
- * `startedAt` (GitHub's `run_started_at`), never on the cron time.
+ * `startedAt` (GitHub's `run_started_at`), never on the cron time. Since
+ * Amendment 6 that is creation time for a run that waited in the credential
+ * concurrency group (see rule 10 in the module header).
  */
 export const MIN_RUN_SPACING_HOURS = 2;
 

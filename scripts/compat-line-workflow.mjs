@@ -228,7 +228,7 @@ const LEGACY_CONCURRENCY =
   "  cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}\n";
 export const GROUPED_CONCURRENCY =
   'concurrency:\n' +
-  "  group: ${{ github.event_name == 'schedule' && 'knext-compat-credential-lanes' || format('{0}-dispatch-{1}-{2}', github.workflow, github.ref, github.event.inputs.dispatchId || 'shared') }}\n" +
+  "  group: ${{ github.event_name == 'schedule' && github.event.schedule != '17 3 * * *' && github.event.schedule != '47 4 * * *' && 'knext-compat-credential-lanes' || github.event_name == 'workflow_dispatch' && format('{0}-dispatch-{1}-{2}', github.workflow, github.ref, github.event.inputs.dispatchId || 'shared') || format('{0}-run-{1}', github.workflow, github.run_id) }}\n" +
   "  queue: ${{ github.event_name == 'schedule' && 'max' || 'single' }}\n" +
   "  cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}\n";
 

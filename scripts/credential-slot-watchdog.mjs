@@ -48,11 +48,14 @@ import {
   DEFAULT_GRACE_HOURS,
   decideCancelledCredentialRuns,
   decideCredentialSlotVerdicts,
+  decideGroupCapacity,
   dueFiresInWindow,
+  estimateGroupUtilisation,
   joinsCredentialGroup,
   LOST_RUN_CONCLUSIONS,
   parseAllDeclaredSlots,
   resolveCredentialLanes,
+  UTILISATION_WINDOW_HOURS,
   WATCHDOG_LOOKBACK_HOURS,
   WATCHDOG_MAX_WINDOW_HOURS,
   watchdogWindow,
@@ -61,6 +64,13 @@ import {
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 export const REPO = 'getknext-dev/knext';
 export const WORKFLOW_FILE = 'test-e2e-deploy.yml';
+
+/**
+ * One watchdog verdict: a lane's fire (`missing`, `queued-too-long`, `ambiguous`,
+ * `quiet`), or one of the group-wide ones (`coverage-gap`, `cancelled`, `over-capacity`).
+ *
+ * @typedef {{lane: string, slot: string, verdict: string, reason: string}} WatchdogVerdict
+ */
 /** This watchdog's own workflow — its previous run anchors the window. */
 export const WATCHDOG_WORKFLOW_FILE = 'credential-slot-watchdog.yml';
 const WORKFLOW_DIR = resolve(REPO_ROOT, '.github/workflows');
@@ -350,7 +360,8 @@ export function resolveCheckAnchors(gh, { runId = null, eventName = null, now })
  * (a cancellation has no grace to wait out). The listing reaches back further than
  * the window, because a run can wait in the queue long before it is cancelled. A
  * listing that fails on both shapes throws, so the run crashes and the next one
- * re-checks this window.
+ * re-checks this window. The same listings give the group's utilisation over the
+ * `UTILISATION_WINDOW_HOURS` ending at this check, which adds `over-capacity` above 1.0.
  *
  * @param {{gh: (args: string[]) => string, window: {start: Date, end: Date}, graceHours: number, workflowFiles: string[]}} args
  */
@@ -363,17 +374,29 @@ function cancelledRunVerdicts({ gh, window, graceHours, workflowFiles }) {
   const since = new Date(
     between.start.getTime() - WATCHDOG_MAX_WINDOW_HOURS * 60 * 60 * 1000,
   ).toISOString();
-  return workflowFiles.flatMap((workflowFile) => {
-    // Only runs that ended with no result pay for an artifact listing.
-    const lost = fetchWindowRuns(gh, { since, workflowFile }).filter((r) =>
-      LOST_RUN_CONCLUSIONS.has(r.conclusion),
+  const utilisationSince = between.end.getTime() - UTILISATION_WINDOW_HOURS * 60 * 60 * 1000;
+  const verdicts = [];
+  const groupRuns = [];
+  for (const workflowFile of workflowFiles) {
+    const runs = fetchWindowRuns(gh, { since, workflowFile });
+    // Only the runs a verdict reads pay for an artifact listing: those that ended
+    // with no result, and those inside the utilisation window.
+    const marked = attachExactLanes(
+      gh,
+      runs.filter(
+        (r) =>
+          LOST_RUN_CONCLUSIONS.has(r.conclusion) ||
+          new Date(r.created_at).getTime() > utilisationSince,
+      ),
     );
-    return decideCancelledCredentialRuns({
-      runs: attachExactLanes(gh, lost),
-      window: between,
-      workflowFile,
-    });
-  });
+    verdicts.push(
+      ...decideCancelledCredentialRuns({ runs: marked, window: between, workflowFile }),
+    );
+    groupRuns.push(...marked);
+  }
+  const estimate = estimateGroupUtilisation({ runs: groupRuns, now: between.end });
+  verdicts.push(...decideGroupCapacity({ estimate, now: between.end }));
+  return verdicts;
 }
 
 /**
@@ -390,6 +413,7 @@ function cancelledRunVerdicts({ gh, window, graceHours, workflowFiles }) {
  * `coverage-gap` verdict, which alerts.
  *
  * @param {{workflowYamlText: string, gh: (args: string[]) => string, now?: Date, graceHours?: number, checkAt?: Date|null, previousCheckAt?: Date|null, credentialWorkflowFiles?: string[]}} args
+ * @returns {WatchdogVerdict[]}
  */
 export function evaluateWatchdog({
   workflowYamlText,

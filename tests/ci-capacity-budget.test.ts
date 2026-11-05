@@ -483,7 +483,6 @@ describe('per-branch concurrency: dispatches cancel each other, scheduled runs q
       const dispatchResultSwapped = String(evaluate(swapped, dispatchCtx(file)) ?? '');
 
       expect(scheduleResultSwapped).not.toBe(CREDENTIAL_CONCURRENCY_GROUP);
-      expect(scheduleResultSwapped).toContain(SCHEDULE_REF);
       expect(dispatchResultSwapped).toBe(CREDENTIAL_CONCURRENCY_GROUP);
     });
   }

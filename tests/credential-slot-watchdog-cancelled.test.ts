@@ -6,12 +6,15 @@ import {
   discoverCredentialWorkflowFiles,
   evaluateWatchdog,
   runCli,
+  type WatchdogVerdict,
 } from '../scripts/credential-slot-watchdog.mjs';
 import {
   anyLaneNeedsAlert,
   CREDENTIAL_CONCURRENCY_GROUP,
   decideCancelledCredentialRuns,
   decideCredentialSlotVerdicts,
+  decideGroupCapacity,
+  estimateGroupUtilisation,
 } from '../scripts/lib/credential-slot-watchdog.mjs';
 
 /**
@@ -74,6 +77,12 @@ describe('decideCancelledCredentialRuns', () => {
 
   it('flags a run that timed out: it left no result either', () => {
     expect(decide([run({ conclusion: 'timed_out' })]).map((v) => v.verdict)).toEqual(['cancelled']);
+  });
+
+  it('flags a run that never started: a startup failure left no result either', () => {
+    expect(decide([run({ conclusion: 'startup_failure' })]).map((v) => v.verdict)).toEqual([
+      'cancelled',
+    ]);
   });
 
   it('names the lane when the run published its marker, and says unattributed when it did not', () => {
@@ -156,7 +165,7 @@ const GRACE = 8;
 // (previous check, this check] = (01:00, 09:00].
 const checkAt = new Date('2026-11-05T09:00:00Z');
 const previousCheckAt = new Date('2026-11-05T01:00:00Z');
-const cancelled = (verdicts: { verdict: string }[]) =>
+const cancelled = (verdicts: WatchdogVerdict[]) =>
   verdicts.filter((v) => v.verdict === 'cancelled');
 
 const evaluate = (gh: (a: string[]) => string, credentialWorkflowFiles = FILES) =>
@@ -198,7 +207,7 @@ describe('evaluateWatchdog — cancelled runs across every credential workflow',
       },
     );
     const found = cancelled(evaluate(gh));
-    expect(found.map((v) => (v as { lane: string }).lane)).toEqual(['bun']);
+    expect(found.map((v) => v.lane)).toEqual(['bun']);
   });
 
   it('a run in both listings is flagged once', () => {
@@ -326,6 +335,80 @@ describe('discoverCredentialWorkflowFiles', () => {
   });
 });
 
+describe('the group over capacity alerts', () => {
+  const NOW = new Date('2026-11-05T12:00:00Z');
+  const H = 3_600_000;
+  /** `n` arrivals one an hour across the window, run back to back for `hours` each. */
+  const series = (n: number, hours: number, over: Partial<Run> = {}) => {
+    const out: Run[] = [];
+    let free = 0;
+    for (let i = 0; i < n; i += 1) {
+      const created = NOW.getTime() - 24 * H + (i + 0.5) * H;
+      const start = Math.max(created, free);
+      free = start + hours * H;
+      out.push(
+        run({
+          id: 100 + i,
+          conclusion: 'success',
+          created_at: new Date(created).toISOString(),
+          run_started_at: new Date(created).toISOString(),
+          updated_at: new Date(Math.min(free, NOW.getTime())).toISOString(),
+          status: free <= NOW.getTime() ? 'completed' : 'in_progress',
+          ...over,
+        }),
+      );
+    }
+    return out;
+  };
+  const verdictOf = (runs: Run[]) =>
+    decideGroupCapacity({ estimate: estimateGroupUtilisation({ runs, now: NOW }), now: NOW });
+
+  it('measures run length from the hand-off, not from run_started_at, which stays at creation', () => {
+    const est = estimateGroupUtilisation({ runs: series(24, 1.3), now: NOW });
+    expect(est?.meanRunHours).toBeCloseTo(1.3, 5);
+    expect(est?.utilisation).toBeGreaterThan(1);
+  });
+
+  it('alerts over-capacity above 1.0', () => {
+    const v = verdictOf(series(24, 1.3));
+    expect(v.map((x) => x.verdict)).toEqual(['over-capacity']);
+    expect(anyLaneNeedsAlert(v)).toBe(true);
+  });
+
+  it('stays quiet under 1.0 (the other half)', () => {
+    expect(verdictOf(series(24, 0.8))).toEqual([]);
+  });
+
+  it('leaves early-warning runs out: they are not in the group', () => {
+    const credential = series(12, 1.6);
+    const early = series(12, 1.6, { earlyWarning: true }).map((r, i) => ({ ...r, id: 900 + i }));
+    expect(estimateGroupUtilisation({ runs: credential, now: NOW })?.arrivals).toBe(12);
+    expect(estimateGroupUtilisation({ runs: [...credential, ...early], now: NOW })?.arrivals).toBe(
+      12,
+    );
+  });
+
+  it('too few finished runs is no verdict, never a guess', () => {
+    expect(estimateGroupUtilisation({ runs: series(3, 3), now: NOW })).toBeNull();
+    expect(verdictOf(series(3, 3))).toEqual([]);
+  });
+
+  it('the watchdog raises it from the group listings', () => {
+    const runs = series(24, 1.3);
+    const { gh } = ghFor({ 'compat-credential-v1.3.yml': runs });
+    const verdicts = evaluateWatchdog({
+      workflowYamlText: WORKFLOW_YAML,
+      gh,
+      now: new Date(NOW.getTime() + 8 * H),
+      graceHours: 8,
+      checkAt: new Date(NOW.getTime() + 8 * H),
+      previousCheckAt: new Date(NOW.getTime()),
+      credentialWorkflowFiles: ['compat-credential-v1.3.yml'],
+    });
+    expect(verdicts.filter((v) => v.verdict === 'over-capacity')).toHaveLength(1);
+  });
+});
+
 describe('a run still waiting in the queue is not a run that started', () => {
   // Measured live: the Actions API sets `run_started_at` on a `queued` run, so that
   // field alone reads a waiting run as started and `queued-too-long` never fires.
@@ -370,6 +453,7 @@ describe('the alert text names the cancelled verdict', () => {
       'utf8',
     );
     expect(wf).toContain('CANCELLED');
+    expect(wf).toContain('OVER CAPACITY');
     expect(wf).toContain('compat-credential-v1.3.yml');
   });
 });

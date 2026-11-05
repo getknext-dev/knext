@@ -998,17 +998,23 @@ Sub-decisions, each scored with `jev pick` on the measured numbers above:
 cancellation" consequence. Decided in the v2 plan (one concurrency group, jev 0.91); the founder
 approved landing it on 2026-11-05.
 
-- **Decision.** A scheduled run of any credential workflow joins one group,
+- **Decision.** A scheduled credential run of any credential workflow joins one group,
   `knext-compat-credential-lanes`, with `queue: max`. One such run is in flight at a time and the rest
-  wait, first in first out. A `workflow_dispatch` stays out of the group. The slot watchdog alerts on a
-  cancelled scheduled run and on a run still waiting past its grace.
+  wait, first in first out. A `workflow_dispatch` and the two early-warning crons stay out of the group.
+  The slot watchdog alerts on a cancelled, timed-out or never-started scheduled run, on a run still
+  waiting past its grace, and when the group's utilisation over the last 24 h exceeds 1.0.
 - **Why not the default queue.** GitHub's default keeps one pending run and cancels the older one when
-  a third arrives. With 26 fires a day and runs of about 49 min that drops 9-19% of runs, and each one
+  a third arrives. At these arrival rates and runs of about 49 min that drops 9-19% of runs, and each one
   restarts every cell of its line, because a run cancelled while waiting has no markers. The v2 plan's
   premise ("cron slots stay at least a run-length apart") stopped holding at Amendment 5's grid.
-- **Consequence.** Utilisation is 0.88, so the queue only drains while the mean run stays under 55 min.
-  The arithmetic and the levers are in `docs/ci/capacity-budget.md` §4.
+- **Consequence.** With 24 arrivals a day the queue drains only while the mean run stays under 60 min.
+  Measured utilisation was 0.91 active / 0.95 wall before 2026-11-02 (about a 3 min margin) and 1.16 to
+  1.47 since, while v1.3 runs are red. **Merge precondition: the v1.3 lane is green.** The arithmetic
+  is in `docs/ci/capacity-budget.md` §4.
 - **Freeze.** The workflow is a fingerprinted input, so landing this restarts the live streaks. It
   landed under a dated `rcBumpMarker` that records the restart. The plan's original exit criterion ("the
-  freeze guard confirms the windows did not restart") cannot hold for a change to a hashed file; the
-  amended criterion is that two overlapping dispatches serialise and the marker records the restart.
+  freeze guard confirms the windows did not restart") cannot hold for a change to a hashed file, and its
+  "two overlapping dispatches serialise" cannot either, because dispatches stay out of the group. The
+  amended criterion: after merge, overlapping SCHEDULED credential runs serialise (no run in the group
+  starts before the one ahead of it completes, none is cancelled), read from the run history with no
+  dispatch, and the marker records the restart.
