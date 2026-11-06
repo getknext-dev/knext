@@ -429,7 +429,8 @@ const MUTATIONS = [
     id: 'E36',
     subject: 'engine',
     claim: 'an unreadable script in a credentialed job is no longer reported',
-    anchor: 'const scriptProblems = credentialed(job, wfDoc) ? problems : [];',
+    anchor:
+      'const scriptProblems = credentialed(job, wfDoc, resolveAction, inheritedSecrets) ? problems : [];',
     replacement: 'const scriptProblems: Finding[] = [];',
   },
   {

@@ -236,7 +236,12 @@ const lane = (o: LaneOpts = {}): Workflow => ({
   doc: {
     on: o.on ?? { push: { branches: ['main'] } },
     jobs: {
-      scan: { steps: o.scan ?? [trivyStep(), sbomStep()], ...(o.scanJob ?? {}) },
+      // contents: read — a job with NO permissions block is credentialed (fail closed).
+      scan: {
+        permissions: { contents: 'read' },
+        steps: o.scan ?? [trivyStep(), sbomStep()],
+        ...(o.scanJob ?? {}),
+      },
       publish: {
         needs: 'scan',
         steps: o.push ?? [pushStep(), signStep()],
@@ -952,7 +957,312 @@ describe('repo-local scripts are read for pushes', () => {
     }
   });
   it('an unreadable script in a job with no registry credential cannot publish, so it is not a finding', () => {
-    expect(findingsOf(invoke('bash hack/p.sh'), null)).toEqual([]);
+    const ro = { permissions: { contents: 'read' } };
+    expect(findingsOf(invoke('bash hack/p.sh', {}, ro), null)).toEqual([]);
+    expect(findingsOf(invoke('bash hack/p.sh', {}, { permissions: {} }), null)).toEqual([]);
+  });
+
+  describe('credential scope the raw job.steps/permissions do not show', () => {
+    const ro = { permissions: { contents: 'read' } };
+    const withAction = (resolved: Any[] | null) =>
+      discoverImageLanes(
+        [
+          {
+            file: 'fx.yml',
+            doc: {
+              on: {},
+              jobs: {
+                j: { ...ro, steps: [{ uses: './.github/actions/reg' }, { run: 'bash hack/p.sh' }] },
+              },
+            },
+          },
+        ],
+        { resolveAction: () => resolved, readScript: () => null },
+      ).findings;
+    it('a registry login inside a local composite action makes the job credentialed', () => {
+      expect(checks(withAction([{ uses: 'docker/login-action@abc' }]))).toContain(
+        'unresolved-script',
+      );
+      expect(checks(withAction([{ run: 'crane auth login ghcr.io -u x' }]))).toContain(
+        'unresolved-script',
+      );
+    });
+    it('...also when the login is nested one composite deeper', () => {
+      const nested = (u: string) =>
+        u === './.github/actions/reg'
+          ? [{ uses: './.github/actions/inner' }]
+          : [{ uses: 'docker/login-action@abc' }];
+      const f = discoverImageLanes(
+        [
+          {
+            file: 'fx.yml',
+            doc: {
+              on: {},
+              jobs: {
+                j: { ...ro, steps: [{ uses: './.github/actions/reg' }, { run: 'bash h.sh' }] },
+              },
+            },
+          },
+        ],
+        { resolveAction: nested, readScript: () => null },
+      ).findings;
+      expect(checks(f)).toContain('unresolved-script');
+    });
+    describe('third-party registry login shapes (#2756)', () => {
+      const direct = (steps: Any[]) =>
+        discoverImageLanes(
+          [
+            {
+              file: 'fx.yml',
+              doc: { on: {}, jobs: { j: { ...ro, steps: [...steps, { run: 'bash hack/p.sh' }] } } },
+            },
+          ],
+          { resolveAction: () => null, readScript: () => null },
+        ).findings;
+      const positives: Array<[string, Any[]]> = [
+        ['aws-actions/amazon-ecr-login', [{ uses: 'aws-actions/amazon-ecr-login@abc' }]],
+        ['azure/docker-login', [{ uses: 'azure/docker-login@abc' }]],
+        ['az acr login', [{ run: 'az acr login --name reg' }]],
+        ['helm registry login', [{ run: 'helm registry login ghcr.io -u x' }]],
+        [
+          'gcloud auth configure-docker',
+          [{ run: 'gcloud auth configure-docker us-docker.pkg.dev' }],
+        ],
+        ['aws ecr get-login-password', [{ run: 'aws ecr get-login-password | crane x' }]],
+        ['aws ecr-public get-login-password', [{ run: 'aws ecr-public get-login-password' }]],
+        ['buildah login', [{ run: 'buildah login -u x ghcr.io' }]],
+        ['nerdctl login', [{ run: 'nerdctl login ghcr.io' }]],
+        [
+          'google-github-actions/auth + docker push',
+          [{ uses: 'google-github-actions/auth@abc' }, { run: 'docker push img' }],
+        ],
+        [
+          'google-github-actions/auth + pkg.dev image',
+          [
+            { uses: 'google-github-actions/auth@abc' },
+            { run: 'crane copy a us-docker.pkg.dev/p/r/i:1' },
+          ],
+        ],
+        [
+          'google-github-actions/auth + gcr.io image in with',
+          [
+            { uses: 'google-github-actions/auth@abc' },
+            { uses: 'x/y@abc', with: { image: 'gcr.io/p/i' } },
+          ],
+        ],
+        [
+          'google-github-actions/auth + configure-docker',
+          [{ uses: 'google-github-actions/auth@abc' }, { run: 'gcloud auth configure-docker' }],
+        ],
+      ];
+      for (const [label, steps] of positives) {
+        it(`${label} makes the job credentialed`, () => {
+          expect(checks(direct(steps))).toContain('unresolved-script');
+        });
+      }
+      const negatives: Array<[string, Any[]]> = [
+        ['helm repo add', [{ run: 'helm repo add bitnami https://charts.bitnami.com' }]],
+        ['az login without acr', [{ run: 'az login --service-principal' }]],
+        ['aws s3 cp', [{ run: 'aws s3 cp a s3://b/c' }]],
+        ['google-github-actions/auth alone', [{ uses: 'google-github-actions/auth@abc' }]],
+        ['xbuildah login', [{ run: 'xbuildah login' }]],
+        [
+          'aws-actions/configure-aws-credentials',
+          [{ uses: 'aws-actions/configure-aws-credentials@abc' }],
+        ],
+      ];
+      for (const [label, steps] of negatives) {
+        it(`${label} does not make the job credentialed`, () => {
+          expect(checks(direct(steps))).not.toContain('unresolved-script');
+        });
+      }
+    });
+    it('a composite action with no registry login leaves the job uncredentialed', () => {
+      expect(checks(withAction([{ run: 'echo hi' }]))).not.toContain('unresolved-script');
+    });
+    it('a job with no permissions block anywhere inherits the repo default token, so it is credentialed', () => {
+      expect(checks(findingsOf(invoke('bash hack/p.sh'), null))).toContain('unresolved-script');
+    });
+    it('...a workflow-level permissions block covers a job that has none', () => {
+      const w: Workflow = {
+        file: 'fx.yml',
+        doc: {
+          on: {},
+          permissions: { contents: 'read' },
+          jobs: { j: { steps: [{ run: 'bash hack/p.sh' }] } },
+        },
+      };
+      expect(findingsOf(w, null)).toEqual([]);
+    });
+    it('a secret handed in through workflow_call.secrets makes the callee credentialed', () => {
+      const w: Workflow = {
+        file: 'fx.yml',
+        doc: {
+          on: { workflow_call: { secrets: { REGISTRY_TOKEN: { required: true } } } },
+          jobs: { j: { ...ro, steps: [{ run: 'bash hack/p.sh' }] } },
+        },
+      };
+      expect(checks(findingsOf(w, null))).toContain('unresolved-script');
+    });
+    it('a registry-named secret in job env, step env or step with makes the job credentialed', () => {
+      const tok = '${{ secrets.REGISTRY_TOKEN }}';
+      for (const extra of [
+        { env: { T: tok }, steps: [{ run: 'bash hack/p.sh' }] },
+        { steps: [{ run: 'bash hack/p.sh', env: { T: tok } }] },
+        { steps: [{ uses: 'some/action@abc', with: { token: tok } }, { run: 'bash hack/p.sh' }] },
+      ]) {
+        const w: Workflow = {
+          file: 'fx.yml',
+          doc: { on: {}, jobs: { j: { ...ro, ...extra } } },
+        };
+        expect(checks(findingsOf(w, null))).toContain('unresolved-script');
+      }
+    });
+    it('bracket-form, toJSON(secrets) and dynamic secrets[...] reads make the job credentialed', () => {
+      for (const tok of [
+        "${{ secrets['DOCKER_TOKEN'] }}",
+        '${{ secrets["DOCKER_TOKEN"] }}',
+        '${{ toJSON(secrets) }}',
+        '${{ secrets[matrix.name] }}',
+      ]) {
+        const w: Workflow = {
+          file: 'fx.yml',
+          doc: {
+            on: {},
+            jobs: { j: { ...ro, steps: [{ run: 'bash hack/p.sh', env: { T: tok } }] } },
+          },
+        };
+        expect(checks(findingsOf(w, null))).toContain('unresolved-script');
+      }
+    });
+    it('...but a non-registry secret in bracket form does not', () => {
+      const w: Workflow = {
+        file: 'fx.yml',
+        doc: {
+          on: {},
+          jobs: {
+            j: {
+              ...ro,
+              steps: [
+                { run: 'bash hack/p.sh', env: { T: "${{ secrets['PREVIEW_KUBECONFIG'] }}" } },
+              ],
+            },
+          },
+        },
+      };
+      expect(findingsOf(w, null)).toEqual([]);
+    });
+    it('registry credentials on job.container or job.services.* make the job credentialed', () => {
+      const creds = { username: 'u', password: '${{ secrets.PULL_PW }}' };
+      for (const extra of [
+        { container: { image: 'x', credentials: creds } },
+        { services: { db: { image: 'x', credentials: creds } } },
+      ]) {
+        const w: Workflow = {
+          file: 'fx.yml',
+          doc: { on: {}, jobs: { j: { ...ro, ...extra, steps: [{ run: 'bash hack/p.sh' }] } } },
+        };
+        expect(checks(findingsOf(w, null))).toContain('unresolved-script');
+      }
+    });
+    it('...a container without credentials does not', () => {
+      const w: Workflow = {
+        file: 'fx.yml',
+        doc: {
+          on: {},
+          jobs: { j: { ...ro, container: { image: 'x' }, steps: [{ run: 'bash hack/p.sh' }] } },
+        },
+      };
+      expect(findingsOf(w, null)).toEqual([]);
+    });
+    it('generic push names (PUSH_TOKEN, CR_PAT) count as registry secrets; NPM_TOKEN does not', () => {
+      const run = (name: string) =>
+        findingsOf(
+          {
+            file: 'fx.yml',
+            doc: {
+              on: {},
+              jobs: {
+                j: {
+                  ...ro,
+                  steps: [{ run: 'bash hack/p.sh', env: { T: '${{ secrets.' + name + ' }}' } }],
+                },
+              },
+            },
+          },
+          null,
+        );
+      expect(checks(run('PUSH_TOKEN'))).toContain('unresolved-script');
+      expect(checks(run('CR_PAT'))).toContain('unresolved-script');
+      expect(run('NPM_TOKEN')).toEqual([]);
+    });
+    describe('a caller handing secrets to a local reusable workflow', () => {
+      const pair = (callerSecrets: Any | string | undefined) => {
+        const caller: Workflow = {
+          file: 'caller.yml',
+          doc: {
+            on: {},
+            jobs: {
+              c: {
+                uses: './.github/workflows/callee.yml',
+                ...(callerSecrets === undefined ? {} : { secrets: callerSecrets }),
+              },
+            },
+          },
+        };
+        const callee: Workflow = {
+          file: 'callee.yml',
+          doc: {
+            on: { workflow_call: {} },
+            jobs: { j: { ...ro, steps: [{ run: 'bash hack/p.sh' }] } },
+          },
+        };
+        return discoverImageLanes([caller, callee], {
+          resolveAction: () => null,
+          ...script(null),
+        }).findings;
+      };
+      it('secrets: inherit makes the callee credentialed even with no declared secrets', () => {
+        expect(checks(pair('inherit'))).toContain('unresolved-script');
+      });
+      it('a secrets map naming a registry secret (key or value) does too', () => {
+        expect(checks(pair({ REGISTRY_TOKEN: 'x' }))).toContain('unresolved-script');
+        expect(checks(pair({ T: '${{ secrets.GHCR_PAT }}' }))).toContain('unresolved-script');
+      });
+      it('...but no secrets, or only a non-registry one, leaves the callee uncredentialed', () => {
+        expect(pair(undefined)).toEqual([]);
+        expect(pair({ KUBECONFIG: '${{ secrets.PREVIEW_KUBECONFIG }}' })).toEqual([]);
+      });
+    });
+    it('a non-registry secret (kubeconfig, deploy hook) does not make the job credentialed', () => {
+      const tok = '${{ secrets.PREVIEW_KUBECONFIG }}';
+      for (const extra of [
+        { env: { T: tok }, steps: [{ run: 'bash hack/p.sh' }] },
+        { steps: [{ run: 'bash hack/p.sh', env: { T: tok } }] },
+        { steps: [{ uses: 'some/action@abc', with: { token: tok } }, { run: 'bash hack/p.sh' }] },
+      ]) {
+        const w: Workflow = {
+          file: 'fx.yml',
+          doc: { on: {}, jobs: { j: { ...ro, ...extra } } },
+        };
+        expect(findingsOf(w, null)).toEqual([]);
+      }
+    });
+    it('the GITHUB_TOKEN alone, with contents: read, is not a registry credential', () => {
+      const w: Workflow = {
+        file: 'fx.yml',
+        doc: {
+          on: {},
+          jobs: {
+            j: {
+              ...ro,
+              steps: [{ run: 'bash hack/p.sh', env: { GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}' } }],
+            },
+          },
+        },
+      };
+      expect(findingsOf(w, null)).toEqual([]);
+    });
   });
   it('a script path built from a variable, in a credentialed job, reds', () => {
     const w = invoke('bash "$DIR/p.sh"', {}, { permissions: { 'id-token': 'write' } });

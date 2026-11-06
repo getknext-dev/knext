@@ -55,6 +55,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
+import { stripComments } from '../packages/kn-next/src/adapters/js-source-lexer.mjs';
 import { computeAdapterClosure } from './adapter-import-closure.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -104,11 +105,6 @@ const JS_RUNTIME_TOKENS = new Set([
   '"bun"',
   '`bun`',
 ]);
-
-/** Strip comments, same rule as adapter-import-closure.mjs, so a commented-out spawn call never counts. */
-function stripComments(source) {
-  return source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
-}
 
 /** Split a call's argument text on TOP-LEVEL commas (not nested in `()`/`[]`/`{}`, not inside a string). */
 function splitTopLevelArgs(text) {

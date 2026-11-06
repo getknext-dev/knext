@@ -134,7 +134,7 @@ export const VINEXT_PATCHES_DISABLE_VALUES = [
 ] as const;
 
 /** The value that makes a vinext version mismatch a build error, not a warning. */
-export const VINEXT_PATCHES_STRICT_VALUE = "strict";
+const VINEXT_PATCHES_STRICT_VALUE = "strict";
 
 /** `KNEXT_VINEXT_PATCHES=strict` (case-insensitive): fail instead of skipping on a version mismatch. */
 export function vinextPatchesStrict(
@@ -163,7 +163,7 @@ export function vinextPatchesDisabled(
  * blank are not unrecognised. The unrecognised value keeps the default warn
  * behaviour; this only exists so that it is not silent.
  */
-export function unrecognisedVinextPatchesValue(
+function unrecognisedVinextPatchesValue(
     env: Record<string, string | undefined> = process.env,
 ): string | undefined {
     const raw = env[VINEXT_PATCHES_ENV]?.trim();

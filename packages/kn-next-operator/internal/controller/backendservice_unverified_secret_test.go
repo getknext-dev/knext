@@ -455,34 +455,14 @@ func parsedReconcilerSources(t *testing.T) map[string]*ast.File {
 	return out
 }
 
-// G4: the only Delete in the reconciler is the one inside removeRendered.
+// G4: a function is deleted only inside removeRendered. The one other Delete,
+// inside removeFunctionNetworkPolicy (the spec.security.networkPolicy opt-out,
+// which leaves the function running), is allowed only on its NetworkPolicy-typed
+// parameter; deleteViolations checks the type, not just the function name.
 func TestKnativeServiceIsDeletedOnlyInsideRemoveRendered(t *testing.T) {
-	deletes := 0
-	for file, f := range parsedReconcilerSources(t) {
-		for _, decl := range f.Decls {
-			fn, ok := decl.(*ast.FuncDecl)
-			if !ok || fn.Body == nil {
-				continue
-			}
-			ast.Inspect(fn.Body, func(n ast.Node) bool {
-				call, ok := n.(*ast.CallExpr)
-				if !ok {
-					return true
-				}
-				sel, ok := call.Fun.(*ast.SelectorExpr)
-				if !ok || (sel.Sel.Name != "Delete" && sel.Sel.Name != "DeleteAllOf") {
-					return true
-				}
-				deletes++
-				// removeFunctionNetworkPolicy is the only other sanctioned Delete: it
-				// removes the NetworkPolicy alone (spec.security.networkPolicy=false)
-				// and never the Knative Service, so the function is not torn down.
-				if fn.Name.Name != lcRemoveRendered && fn.Name.Name != "removeFunctionNetworkPolicy" {
-					t.Errorf("%s: %s calls %s; a function is torn down only through removeRendered (see G1)", file, fn.Name.Name, sel.Sel.Name)
-				}
-				return true
-			})
-		}
+	deletes, bad := deleteViolations(parsedReconcilerSources(t))
+	for _, msg := range bad {
+		t.Error(msg)
 	}
 	if deletes == 0 {
 		t.Fatal("found no Delete call at all; the scan is not seeing removeRendered")

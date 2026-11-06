@@ -15,7 +15,7 @@
 import { resolve } from "node:path";
 
 /** The env var naming the compiled standalone executable. */
-export const STANDALONE_SERVER_EXEC_ENV = "STANDALONE_SERVER_EXEC";
+const STANDALONE_SERVER_EXEC_ENV = "STANDALONE_SERVER_EXEC";
 
 export interface ChildSpawnPlan {
     readonly mode: "script" | "exec";

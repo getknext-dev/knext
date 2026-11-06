@@ -103,7 +103,7 @@ export function harfbuzzNoticeText(hbWasm) {
 }
 
 /** Hard cap on the embedded/staged binary — a build error, never a silent skip. */
-export const HARFBUZZ_MAX_BYTES = 16 * 1024 * 1024;
+const HARFBUZZ_MAX_BYTES = 16 * 1024 * 1024;
 
 const EXACT_VERSION = /^\d+\.\d+\.\d+$/;
 const readJson = (p) => JSON.parse(readFileSync(p, "utf8"));

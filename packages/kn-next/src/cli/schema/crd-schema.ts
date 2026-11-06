@@ -22,10 +22,10 @@
  *   from `items`).
  */
 
-export const NEXTAPP_GROUP = "apps.kn-next.dev";
-export const NEXTAPP_VERSION = "v1alpha1";
+const NEXTAPP_GROUP = "apps.kn-next.dev";
+const NEXTAPP_VERSION = "v1alpha1";
 export const NEXTAPP_KIND = "NextApp";
-export const NEXTAPP_CRD_NAME = `nextapps.${NEXTAPP_GROUP}`;
+const NEXTAPP_CRD_NAME = `nextapps.${NEXTAPP_GROUP}`;
 
 /**
  * The zone-function kind (same group and version as NextApp). The readers

@@ -41,17 +41,51 @@
 // `typeof` on an identifier with no binding in scope never throws (only
 // reading past it would), so running this file directly as plain Node ESM
 // (no bundler, `require` never declared) safely falls through to
-// `createRequire(import.meta.url)` instead.
+// `createRequire(runtimeAnchor())` instead.
+//
+// The anchor is NOT `import.meta.url`: a webpack build rewrites that to the
+// build machine's absolute path (as a file URL) and ships it in the server
+// chunk (path leak, non-reproducible output, and a base that does not exist in
+// the image). `runtimeAnchor()` asks the engine for this file's name at call
+// time instead. It is a deliberate COPY of `runtime-anchor.ts` (this file is
+// unprocessed and cannot import a transpiled sibling); keep the two in step,
+// the build-path test over a webpack bundle of the real lib covers both.
 import { createRequire } from 'node:module';
+
+const REAL_LOCATION = /^(?:file:\/\/|\/(?!\$bunfs\/)|[A-Za-z]:[\\/])/;
+const BUN_VIRTUAL = /(?:\$bunfs|~BUN)/;
+
+function ownFileName() {
+  const previousPrepare = Error.prepareStackTrace;
+  const previousLimit = Error.stackTraceLimit;
+  try {
+    Error.stackTraceLimit = 1;
+    Error.prepareStackTrace = (_error, sites) => sites;
+    const sites = new Error().stack;
+    if (!Array.isArray(sites)) return undefined;
+    return sites[0]?.getFileName() ?? undefined;
+  } catch {
+    return undefined;
+  } finally {
+    Error.prepareStackTrace = previousPrepare;
+    Error.stackTraceLimit = previousLimit;
+  }
+}
+
+function runtimeAnchor() {
+  const file = ownFileName();
+  if (file !== undefined && REAL_LOCATION.test(file) && !BUN_VIRTUAL.test(file)) return file;
+  return `${process.cwd()}/`;
+}
 
 /** Lazily load `@cerbos/grpc`. See the file banner for why this is unbundled. */
 export function loadCerbosSdk() {
   return typeof require === 'function'
     ? require('@cerbos/grpc')
-    : createRequire(import.meta.url)('@cerbos/grpc');
+    : createRequire(runtimeAnchor())('@cerbos/grpc');
 }
 
 /** Lazily load `minio`. See the file banner for why this is unbundled. */
 export function loadMinioSdk() {
-  return typeof require === 'function' ? require('minio') : createRequire(import.meta.url)('minio');
+  return typeof require === 'function' ? require('minio') : createRequire(runtimeAnchor())('minio');
 }

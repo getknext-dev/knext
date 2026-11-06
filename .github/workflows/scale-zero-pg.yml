@@ -69,6 +69,8 @@ jobs:
   validate-manifests:
     name: deploy manifest contracts (static — no cluster)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     timeout-minutes: 10
     steps:
       - name: Checkout

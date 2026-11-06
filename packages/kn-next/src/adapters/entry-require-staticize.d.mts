@@ -1,5 +1,3 @@
-export function isBareNonBuiltin(spec: string): boolean;
-
 export function analyzeServerModule(
     src: string,
     analyzerPath?: string,

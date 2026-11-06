@@ -27,10 +27,6 @@ export type RouteMatcher = {
 
 export declare function loadRouteMatcher(root: string): RouteMatcher;
 
-export declare function configEnvironment(
-    parentEnv?: Record<string, string | undefined>,
-): Record<string, string | undefined>;
-
 export declare function deriveTraceRules(
     includes: Record<string, string[]>,
     excludes: Record<string, string[]>,
@@ -42,8 +38,6 @@ export declare function globalExcludes(
     excludes: Record<string, string[]>,
     matcher?: RouteMatcher,
 ): string[];
-
-export declare function serverOutputFiles(serverDir: string): string[];
 
 export declare function scanDataLiterals(source: string, cwdRoot: string, entryDir: string): string[];
 

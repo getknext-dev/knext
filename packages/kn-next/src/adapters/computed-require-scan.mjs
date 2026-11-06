@@ -16,126 +16,17 @@
 import { readFileSync, realpathSync } from 'node:fs';
 import { createRequire, isBuiltin } from 'node:module';
 import { isAbsolute, relative } from 'node:path';
-
-/** Characters after which a `/` starts a regex literal rather than a division. */
-const REGEX_PREFIX = new Set([...'(,=:[!&|?{};+-*%<>~^']);
-/** Keywords after which a `/` starts a regex literal (`return /x/.test(s)`). */
-const REGEX_KEYWORDS = new Set([
-  'return', 'typeof', 'case', 'void', 'in', 'of', 'throw', 'yield', 'await', 'else',
-  'delete', 'instanceof', 'new', 'do',
-]);
-
-/** Whether a `/` at `i` starts a regex literal, given the code before it. */
-function slashStartsRegex(src, i, lastSignificant) {
-  if (lastSignificant === '' || REGEX_PREFIX.has(lastSignificant)) return true;
-  if (!/[\w$]/.test(lastSignificant)) return false;
-  let end = i - 1;
-  while (end >= 0 && /\s/.test(src[end])) end--;
-  let start = end;
-  while (start >= 0 && /[\w$]/.test(src[start])) start--;
-  // `x.return / 2` is a property, not the keyword.
-  let before = start;
-  while (before >= 0 && /\s/.test(src[before])) before--;
-  if (src[before] === '.') return false;
-  return REGEX_KEYWORDS.has(src.slice(start + 1, end + 1));
-}
+import { stripComments } from './js-source-lexer.mjs';
 
 /**
  * `src` with the contents of comments, string literals, template-literal TEXT
  * and regex literals blanked to spaces (delimiters kept, length unchanged), so
  * a scan over the result sees only code. Code inside a template's `${…}` is
- * code and stays visible; templates nest to any depth.
+ * code and stays visible; templates nest to any depth. The lexer is the shared
+ * one (`./js-source-lexer.mjs`) in its blank-strings + blank-regex mode.
  */
-export function maskCommentsAndStrings(src) {
-  const out = src.split('');
-  const blank = (from, to) => {
-    for (let k = from; k < to; k++) if (out[k] !== '\n') out[k] = ' ';
-  };
-  // Mode stack: { t: 'code', depth } for code (depth counts `{` opened inside a
-  // template expression), { t: 'tpl' } for template text.
-  const stack = [{ t: 'code', depth: 0 }];
-  let lastSignificant = '';
-  let i = 0;
-  while (i < src.length) {
-    const top = stack[stack.length - 1];
-    const c = src[i];
-    const n = src[i + 1];
-    if (top.t === 'tpl') {
-      if (c === '\\') {
-        blank(i, i + 2);
-        i += 2;
-      } else if (c === '`') {
-        stack.pop();
-        lastSignificant = '`';
-        i++;
-      } else if (c === '$' && n === '{') {
-        stack.push({ t: 'code', depth: 0 });
-        lastSignificant = '{';
-        i += 2;
-      } else {
-        blank(i, i + 1);
-        i++;
-      }
-      continue;
-    }
-    if (c === '/' && n === '/') {
-      const end = src.indexOf('\n', i);
-      const stop = end === -1 ? src.length : end;
-      blank(i, stop);
-      i = stop;
-      continue;
-    }
-    if (c === '/' && n === '*') {
-      const end = src.indexOf('*/', i + 2);
-      const stop = end === -1 ? src.length : end + 2;
-      blank(i, stop);
-      i = stop;
-      continue;
-    }
-    if (c === '"' || c === "'") {
-      let k = i + 1;
-      while (k < src.length && src[k] !== c && src[k] !== '\n') {
-        if (src[k] === '\\') k++;
-        k++;
-      }
-      blank(i + 1, Math.min(k, src.length));
-      i = k + 1;
-      lastSignificant = c;
-      continue;
-    }
-    if (c === '`') {
-      stack.push({ t: 'tpl' });
-      i++;
-      continue;
-    }
-    if (c === '/' && slashStartsRegex(src, i, lastSignificant)) {
-      let k = i + 1;
-      let inClass = false;
-      while (k < src.length && src[k] !== '\n') {
-        if (src[k] === '\\') k++;
-        else if (src[k] === '[') inClass = true;
-        else if (src[k] === ']') inClass = false;
-        else if (src[k] === '/' && !inClass) break;
-        k++;
-      }
-      blank(i + 1, Math.min(k, src.length));
-      i = k + 1;
-      lastSignificant = '/';
-      continue;
-    }
-    if (c === '{') top.depth++;
-    else if (c === '}') {
-      if (top.depth === 0 && stack.length > 1) {
-        stack.pop(); // back into the enclosing template's text
-        i++;
-        continue;
-      }
-      top.depth--;
-    }
-    if (!/\s/.test(c)) lastSignificant = c;
-    i++;
-  }
-  return out.join('');
+function maskCommentsAndStrings(src) {
+  return stripComments(src, { blankStrings: true, blankRegex: true });
 }
 
 const CALL = /(?<![\w$.])(require|import|__non_webpack_require__)\s*\(/g;

@@ -92,6 +92,8 @@ export const COMMENT_PREFIX = {
   '.jsx': '//',
   '.mjs': '//',
   '.cjs': '//',
+  '.mts': '//',
+  '.cts': '//',
   '.rs': '//',
   '.java': '//',
   '.c': '//',

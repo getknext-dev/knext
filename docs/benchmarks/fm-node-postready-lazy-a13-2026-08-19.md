@@ -141,7 +141,7 @@ cost scales with app-graph size, so one app cannot settle the entry-contract que
 the ADR's re-measure caveat (Next major, entry rewrite — and, per the knife-edge, any heavier
 page) is load-bearing, not boilerplate.
 
-Harness: `scripts/bench-a13-postready-lazy.py` (committed with this record) — 8-cycle
+Harness: `bench-a13-postready-lazy.py` (retired; recover with `git show 9926074f6a4240b8a93efbaf98232d9c878fdea8:scripts/bench-a13-postready-lazy.py`) — 8-cycle
 wake-then-measure (health-wake, then first/warm/warm on the measured path, pod-event pull
 evidence per cycle); run from the workstation against the public URL, cluster otherwise quiet,
 one run at a time.

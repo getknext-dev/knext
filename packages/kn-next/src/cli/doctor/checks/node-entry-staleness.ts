@@ -42,7 +42,7 @@ import {
 import { mk } from "../report";
 import type { CheckContext, CheckResult } from "../types";
 
-export const NODE_ENTRY_FILENAME = "knext-node-entry.mjs";
+const NODE_ENTRY_FILENAME = "knext-node-entry.mjs";
 const TEMPLATE_FILENAME = "knext-node-entry.mjs.hbs";
 const MARKER_RE = /KNEXT_NODE_ENTRY_MARKER:\s*(\d+)/;
 
@@ -95,7 +95,7 @@ async function defaultLoadAppConfig(): Promise<KnativeNextConfig | undefined> {
  * defaults to `"bun"` (ADR-0058/#1183) — an absent `runtime` under
  * `build: 'vinext'` is the bun entry (`knext-bun-entry.mjs`), never this one.
  */
-export function isVinextOnNode(config: KnativeNextConfig | undefined): boolean {
+function isVinextOnNode(config: KnativeNextConfig | undefined): boolean {
     if (!config) return false;
     return (
         config.build === "vinext" &&

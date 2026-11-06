@@ -58,7 +58,7 @@ no `Owns(&corev1.Secret{})`, no `Watches` on Secrets, and no typed or unstructur
 
 | Surface | What the operator actually does | Who touches the Secret |
 |---|---|---|
-| `spec.secrets.envFrom` / `envMap` (`nextapp_controller.go` env assembly) | Emits `envFrom.secretRef` / `valueFrom.secretKeyRef` **by name** into the Knative Service | The **kubelet** resolves it when the pod starts |
+| `spec.secrets.envFrom` / `envMap` (`nextapp_env.go` env assembly) | Emits `envFrom.secretRef` / `valueFrom.secretKeyRef` **by name** into the Knative Service | The **kubelet** resolves it when the pod starts |
 | `spec.database.secretRef` / `roSecretRef` (`database_binding.go`) | Rewrites those names onto `DATABASE_URL(_RO)` `secretKeyRef` entries, in memory | The **kubelet** |
 | Image pull (`image_prewarm.go`) | Reads the app **ServiceAccount**'s `imagePullSecrets` (a list of names) | The **kubelet** pulls |
 | Webhook / metrics serving certs | Mounted as volumes (cert-manager) | The **kubelet** |

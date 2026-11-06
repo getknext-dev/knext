@@ -488,8 +488,12 @@ jobs:
           - image: node:24-alpine@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85
     steps:
       - name: Trivy scan base image — report HIGH/CRITICAL (signal, non-blocking)
+        id: base-trivy
         # REPORT-ONLY everywhere — see the block comment above. The base-ref scan
         # is a digest-bump signal; the shipped image is patched at build time.
+        # `continue-on-error` masks this step's `conclusion` (success even on
+        # failure), so the next step reads `steps.base-trivy.outcome` and surfaces
+        # it. Guarded by tests/continue-on-error-outcome-readers.test.ts.
         continue-on-error: true
         # SHA-pinned to match the image gate above.
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
@@ -499,6 +503,25 @@ jobs:
           exit-code: "1"
           ignore-unfixed: true
           format: table
+
+      # Surface the tolerated scan's REAL outcome: job summary always, a
+      # `::warning::` annotation on failure. Still non-blocking by design (the
+      # scan stays report-only); this only makes a failing report visible.
+      # Values arrive via env, never interpolated into the script.
+      - name: Surface the base-image scan outcome (the scan step is continue-on-error)
+        if: always()
+        env:
+          OUTCOME: ${{ steps.base-trivy.outcome }}
+          IMAGE: ${{ matrix.image }}
+        run: |
+          {
+            echo "### Base-image Trivy scan (report-only)"
+            echo "- image: \`${IMAGE}\`"
+            echo "- scan step outcome: **${OUTCOME}** (continue-on-error: the job result alone reads success)"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$OUTCOME" = "failure" ]; then
+            echo "::warning::Trivy base-image scan FAILED for ${IMAGE} (report-only, not blocking) - open the scan step log or consider a digest bump"
+          fi
 
   # ── BUILT-IMAGE CVE ENFORCEMENT (#981) ───────────────────────────────────
   #
@@ -823,6 +846,21 @@ jobs:
           ignore-unfixed: true
           format: json
           output: trivy-js-closure.json
+
+      # The scan step above is `continue-on-error`, which masks its `conclusion`.
+      # Read its real `outcome` and surface it; still non-blocking (report-only).
+      - name: Surface the JS closure scan outcome (the scan step is continue-on-error)
+        if: always()
+        env:
+          OUTCOME: ${{ steps.trivy.outcome }}
+        run: |
+          {
+            echo "### JS closure Trivy scan (report-only)"
+            echo "- scan step outcome: **${OUTCOME}** (continue-on-error: the job result alone reads success)"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$OUTCOME" = "failure" ]; then
+            echo "::warning::Trivy JS-closure scan FAILED (report-only, not blocking) - the report below may be missing or partial"
+          fi
 
       # `always()` so a red scan still publishes both the raw JSON (for
       # triage) and a human summary (counts by severity + the top affected

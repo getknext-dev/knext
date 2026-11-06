@@ -1,3 +1,6 @@
+# CLUSTER-SPECIFIC EXAMPLE: this manifest records the cluster one study ran on (namespace,
+# node name or IP, kubectl context). Before applying it, set metadata.namespace to your
+# --namespace and spec.nodeName to your own node names; see README.md.
 # The NextApps this benchmark measures. Applied with
 #   kubectl --context knext-oke-sa apply --validate=strict -f nextapps.yaml
 # The operator reconciles each into a Knative Service; nothing here writes Knative

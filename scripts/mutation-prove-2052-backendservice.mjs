@@ -108,6 +108,8 @@ const ZONEKEY = resolve(REPO_ROOT, 'packages/kn-next-operator/internal/controlle
 // biome-ignore format: one-line resolve() for the anchor-drift scan
 const NEXTAPP = resolve(REPO_ROOT, 'packages/kn-next-operator/internal/controller/nextapp_controller.go');
 // biome-ignore format: one-line resolve() for the anchor-drift scan
+const NEXTAPP_KSVC = resolve(REPO_ROOT, 'packages/kn-next-operator/internal/controller/nextapp_ksvc.go');
+// biome-ignore format: one-line resolve() for the anchor-drift scan
 const STATUS = resolve(REPO_ROOT, 'packages/kn-next-operator/internal/controller/status_verdict.go');
 // biome-ignore format: one-line resolve() for the anchor-drift scan
 const METRICS = resolve(REPO_ROOT, 'packages/kn-next-operator/internal/controller/backendservice_metrics.go');
@@ -135,6 +137,7 @@ const PROVER = {
     verdict: VERDICT,
     bind: BIND,
     nextapp: NEXTAPP,
+    nextappksvc: NEXTAPP_KSVC,
     zonekey: ZONEKEY,
     status: STATUS,
     metrics: METRICS,
@@ -1166,7 +1169,7 @@ const MUTATIONS = [
   {
     id: 'H08',
     claim: 'the NextApp renderer goes back to rendering only readOnlyRootFilesystem',
-    subject: 'nextapp',
+    subject: 'nextappksvc',
     anchor:
       'SecurityContext: restrictedContainerSecurityContext(new(readOnlyRootFS), nextAppRunAsNonRoot(nextApp.Spec.Security)),',
     replacement:
@@ -1201,7 +1204,7 @@ const MUTATIONS = [
   {
     id: 'H12',
     claim: "a pod-level securityContext is rendered, which Knative's webhook rejects by default",
-    subject: 'nextapp',
+    subject: 'nextappksvc',
     anchor: '\tksvc.Spec.Template.Spec.TimeoutSeconds = &timeoutSeconds\n',
     replacement:
       '\tksvc.Spec.Template.Spec.TimeoutSeconds = &timeoutSeconds\n\tksvc.Spec.Template.Spec.SecurityContext = &corev1.PodSecurityContext{RunAsNonRoot: new(true)}\n',

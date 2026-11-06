@@ -42,7 +42,8 @@ const OPERATOR_MODULE = `${REPO_ROOT}/packages/kn-next-operator`;
 // biome-ignore format: one-line resolve() for the anchor-drift scan
 const PREFIX = resolve(REPO_ROOT, 'packages/kn-next-operator/internal/controller/redis_key_prefix.go');
 // biome-ignore format: one-line resolve() for the anchor-drift scan
-const CONTROLLER = resolve(REPO_ROOT, 'packages/kn-next-operator/internal/controller/nextapp_controller.go');
+// The env builders (buildKsvcEnv / appendUserEnv) live in nextapp_env.go.
+const CONTROLLER = resolve(REPO_ROOT, 'packages/kn-next-operator/internal/controller/nextapp_env.go');
 // biome-ignore format: one-line resolve() for the anchor-drift scan
 const CLEANER = resolve(REPO_ROOT, 'packages/kn-next-operator/internal/controller/external_cleaner.go');
 // biome-ignore format: one-line resolve() for the anchor-drift scan

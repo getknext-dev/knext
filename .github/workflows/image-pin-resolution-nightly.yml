@@ -30,6 +30,17 @@ name: Operator image pin resolution (nightly)
 # specific PRs pay the registry call and nothing else does. The nightly still
 # owns the "upstream moved under us" case, which no PR can detect.
 #
+# A PR RESOLVES ONLY THE PINS IT ADDS OR CHANGES (#2739). Upstream tags are
+# rebuilt in place, so a correct pin goes stale within a day; resolving the whole
+# tree on a PR reddened PRs whose diff touched no pin (a docs-and-Go PR went red
+# on a Dockerfile it never opened) and every re-pin cost a PR, a review and a CI
+# run. `--base` makes the script compare each pin (file + tag + digest, not line
+# number) against the merge base; the schedule and manual runs pass no `--base`,
+# resolve the FULL tree and open the tracking issue below. WHAT THIS GIVES UP: an
+# unrelated PR no longer tells you a pin drifted — the nightly is the only signal
+# for that — and a tag rebuilt between two nightlies goes unnoticed until the
+# next run. A diff that cannot be computed (shallow clone, missing base) FAILS.
+#
 # An unreachable registry is a FAILURE, never a pass. The resolution logic (the
 # OCI token dance, missing tags, digest mismatch) lives in
 # `scripts/verify-image-pins.mjs` and is unit-tested OFFLINE against an injected
@@ -73,18 +84,40 @@ permissions:
 
 jobs:
   resolve-image-pins:
-    name: Resolve every operator-pinned image against its tag
+    name: Resolve image pins against their tags (PR - changed pins; nightly - every pin)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # A PR run resolves only the pins the PR adds or changes, which needs
+          # the merge base and therefore full history (a shallow clone makes the
+          # script fail closed). The schedule resolves the whole tree and needs
+          # none of it.
+          # Strings, not numbers: `cond && 0 || 1` is `1` because 0 is falsy.
+          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
 
       # No dependencies and no setup-node: the script is dependency-free ESM on
       # the runner's built-in Node, so this job cannot itself become a
       # supply-chain surface while auditing one.
+      #
+      # PR: diff-scoped — an unrelated PR no longer reds because an upstream tag
+      # was rebuilt. Schedule / manual: the FULL tree, which is now the only
+      # signal for drift in a pin nobody touched. The two share one step (the
+      # gate step may not carry an `if:`), and the event name and base ref reach
+      # the shell through `env:`, never interpolated into the script text.
       - name: Verify tag↔digest correspondence (FAIL on any finding)
-        run: node scripts/verify-image-pins.mjs
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            node scripts/verify-image-pins.mjs --base "origin/${BASE_REF}"
+          else
+            node scripts/verify-image-pins.mjs
+          fi
 
   nightly-red-alert:
     name: Nightly red alert (pinned issue)

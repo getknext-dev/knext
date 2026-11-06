@@ -16,11 +16,21 @@
 //
 // Both halves are asserted: a good trace id survives to the handler, AND a
 // missing / malformed one is detected (fresh valid id, never the garbage).
-// Not covered here (tracked separately): span TREES and OTLP export.
+//
+// #2657 adds the span TREE + OTLP EXPORT half: the fixture registers @vercel/otel
+// the way the app does (span processors direct-passed, ADR-0027; exporter from
+// OTEL_EXPORTER_OTLP_* env) and exports over OTLP/HTTP-JSON to a loopback receiver
+// this test holds open on an ephemeral port for the whole run (never closed and
+// rebound). NOT covered: a real collector/Tempo, protobuf encoding (JSON is used
+// so the receiver can parse it), the app's own knext processors (the fixture's
+// inline processor stands in), and Vercel's split middleware/render topology.
+// Flush: no explicit forceFlush across the process boundary; the batch processor
+// is set to a short schedule delay and the test awaits receipt (event-driven).
 
-import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from 'bun:test';
 import { type ChildProcess, spawn, spawnSync } from 'node:child_process';
 import { readdirSync, statSync } from 'node:fs';
+import { createServer, type Server } from 'node:http';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -31,6 +41,9 @@ const FIXTURE = join(HERE, '__fixtures__', 'traceparent-app');
 const NEXT_BIN = join(HERE, 'node_modules', 'next', 'dist', 'bin', 'next');
 const BUILD_TIMEOUT_MS = 150_000;
 const READY_TIMEOUT_MS = 60_000;
+// Export waits are event-driven but bounded (waitForSpans: 30 s); let that bound,
+// not bun's 5 s default, be what fails a missing export (with a useful message).
+setDefaultTimeout(40_000);
 
 const TRACE_ID = '0af7651916cd43dd8448eb211c80319c';
 const INCOMING = `00-${TRACE_ID}-b7ad6b7169203331-01`;
@@ -46,6 +59,83 @@ interface Echo {
 let server: ChildProcess | undefined;
 let base = '';
 let output = '';
+
+interface ExportedSpan {
+  traceId: string;
+  spanId: string;
+  parentSpanId?: string;
+  name: string;
+  attrs: Record<string, unknown>;
+  serviceName: string | undefined;
+}
+
+/** Loopback OTLP/HTTP-JSON receiver, bound once to an OS-chosen port and held. */
+let receiver: Server | undefined;
+let receiverPort = 0;
+const exported: ExportedSpan[] = [];
+const waiters: Array<() => void> = [];
+
+type OtlpAttr = { key: string; value: Record<string, unknown> };
+const attrMap = (list: OtlpAttr[] = []): Record<string, unknown> =>
+  Object.fromEntries(list.map((a) => [a.key, Object.values(a.value)[0]]));
+
+function startReceiver(): Promise<void> {
+  receiver = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on('data', (c: Buffer) => chunks.push(c));
+    req.on('end', () => {
+      try {
+        const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        for (const rs of body.resourceSpans ?? []) {
+          const serviceName = attrMap(rs.resource?.attributes)['service.name'] as
+            | string
+            | undefined;
+          for (const ss of rs.scopeSpans ?? []) {
+            for (const s of ss.spans ?? []) {
+              exported.push({
+                traceId: s.traceId,
+                spanId: s.spanId,
+                parentSpanId: s.parentSpanId || undefined,
+                name: s.name,
+                attrs: attrMap(s.attributes),
+                serviceName,
+              });
+            }
+          }
+        }
+      } catch {
+        // non-JSON export: ignore; the assertions will fail on missing spans
+      }
+      res.statusCode = 200;
+      res.setHeader('content-type', 'application/json');
+      res.end('{}');
+      for (const w of waiters.splice(0)) w();
+    });
+  });
+  return new Promise((resolve, reject) => {
+    receiver?.once('error', reject);
+    receiver?.listen(0, '127.0.0.1', () => {
+      receiverPort = (receiver?.address() as { port: number }).port;
+      resolve();
+    });
+  });
+}
+
+/** Resolve once `pred` holds over the exported spans; event-driven, bounded. */
+async function waitForSpans(pred: () => boolean, label: string): Promise<void> {
+  const deadline = Date.now() + 30_000;
+  while (!pred()) {
+    if (Date.now() > deadline) {
+      throw new Error(
+        `never received expected spans (${label}); got: ${JSON.stringify(exported.map((s) => s.name))}\n${output}`,
+      );
+    }
+    await new Promise<void>((resolve) => {
+      waiters.push(resolve);
+      setTimeout(resolve, 1000).unref?.();
+    });
+  }
+}
 
 async function echo(path: string, traceparent?: string): Promise<Echo> {
   const res = await fetch(`${base}${path}`, {
@@ -122,6 +212,7 @@ beforeAll(async () => {
 
   // Hold the port until the instant before spawn (no self-collision); the
   // remaining release->bind window is the irreducible one child-ports.ts documents.
+  await startReceiver();
   const held = await reserveHeldPorts(1);
   const port = held.ports[0];
   base = `http://127.0.0.1:${port}`;
@@ -136,6 +227,9 @@ beforeAll(async () => {
       NEXT_TELEMETRY_DISABLED: '1',
       PORT: String(port),
       HOSTNAME: '127.0.0.1',
+      OTEL_EXPORTER_OTLP_ENDPOINT: `http://127.0.0.1:${receiverPort}`,
+      OTEL_EXPORTER_OTLP_PROTOCOL: 'http/json',
+      OTEL_BSP_SCHEDULE_DELAY: '50',
     },
   });
   server.stdout?.on('data', (d: Buffer) => {
@@ -165,6 +259,9 @@ afterAll(async () => {
     }
   }
   await closed;
+  const r = receiver;
+  receiver = undefined;
+  if (r) await new Promise<void>((done) => r.close(() => done()));
 });
 
 describe('traceparent through middleware, standalone server (#2627)', () => {
@@ -204,5 +301,102 @@ describe('traceparent through middleware, standalone server (#2627)', () => {
     // trace id, not the incoming one (measured on Next 16.4.3).
     expect(seen.activeTraceId).toBe(MW_TRACEPARENT.split('-')[1]);
     expect(seen.activeTraceId).not.toBe(TRACE_ID);
+  });
+});
+
+const HANDLER_SPAN = 'AppRouteRouteHandlers.runHandler';
+const REQUEST_SPAN = 'BaseServer.handleRequest';
+const byType = (spans: ExportedSpan[], type: string): ExportedSpan[] =>
+  spans.filter((s) => s.attrs['next.span_type'] === type);
+
+/**
+ * Wait until the whole request tree (handler + both request spans) for `traceId`
+ * has been received AFTER `mark` (a snapshot of `exported.length` taken before the
+ * request was sent), so spans exported by earlier requests can never satisfy it.
+ */
+async function exportedTree(traceId: string, mark: number): Promise<ExportedSpan[]> {
+  const fresh = (): ExportedSpan[] => exported.slice(mark).filter((s) => s.traceId === traceId);
+  await waitForSpans(
+    () => byType(fresh(), HANDLER_SPAN).length >= 1 && byType(fresh(), REQUEST_SPAN).length >= 2,
+    `tree for ${traceId}`,
+  );
+  return fresh();
+}
+
+describe('span tree + OTLP export, standalone server (#2657)', () => {
+  it('exports the inbound request span tree under the incoming traceparent, correctly parented', async () => {
+    const traceId = 'cccccccccccccccccccccccccccccc01';
+    const incomingSpanId = 'c0c0c0c0c0c0c001';
+    const mark = exported.length;
+    await echo('/api/echo', `00-${traceId}-${incomingSpanId}-01`);
+    const spans = await exportedTree(traceId, mark);
+
+    // (b) the outermost in-process span is parented on the INCOMING span id.
+    const outer = spans.find((s) => s.parentSpanId === incomingSpanId);
+    expect(outer).toBeDefined();
+    expect(outer?.attrs['next.span_type']).toBe(REQUEST_SPAN);
+
+    // (a) parent/child shape: outer request span -> route request span -> handler span.
+    const route = spans.find((s) => s.parentSpanId === outer?.spanId && s.name === 'GET /api/echo');
+    expect(route).toBeDefined();
+    const handler = byType(spans, HANDLER_SPAN)[0];
+    expect(handler.parentSpanId).toBe(route?.spanId);
+    expect(handler.name).toContain('/api/echo');
+
+    // Every parent other than the incoming remote one is itself exported.
+    const ids = new Set(spans.map((s) => s.spanId));
+    expect(ids.size).toBe(spans.length);
+    for (const s of spans) {
+      if (s.parentSpanId !== incomingSpanId) expect(ids.has(s.parentSpanId ?? '')).toBe(true);
+    }
+  });
+
+  it('actually exports over OTLP with the registered service name and the direct-passed processor attribute', async () => {
+    const traceId = 'cccccccccccccccccccccccccccccc02';
+    const mark = exported.length;
+    await echo('/api/echo', `00-${traceId}-c0c0c0c0c0c0c002-01`);
+    const spans = await exportedTree(traceId, mark);
+    // (c) service identity from registerOTel, on every exported span...
+    for (const s of spans) expect(s.serviceName).toBe('traceparent-fixture');
+    // ...and the spanProcessors entry passed directly into registerOTel ran on all of them.
+    for (const s of spans) expect(s.attrs['knext.fixture.processor']).toBe('ran');
+    const handler = byType(spans, HANDLER_SPAN)[0];
+    expect(String(handler.attrs['next.span_name'])).toContain('/api/echo');
+  });
+
+  it('a request with no traceparent exports a fresh, internally consistent tree (single root)', async () => {
+    const mark = exported.length;
+    const seen = await echo('/api/echo');
+    const traceId = seen.activeTraceId as string;
+    expect(traceId).toMatch(VALID_ID);
+    const spans = await exportedTree(traceId, mark);
+    const roots = spans.filter((s) => !s.parentSpanId);
+    expect(roots.length).toBe(1);
+    expect(roots[0].attrs['next.span_type']).toBe(REQUEST_SPAN);
+  });
+
+  it('a middleware-set traceparent re-roots the exported handler span under the middleware trace', async () => {
+    // The middleware sets a FIXED traceparent, so the trace id cannot identify
+    // this request: only spans received after `mark` are considered.
+    const [, mwTrace, mwSpanId] = MW_TRACEPARENT.split('-');
+    const incomingTrace = 'cccccccccccccccccccccccccccccc04';
+    const mark = exported.length;
+    await echo('/api/echo/mw-sets', `00-${incomingTrace}-c0c0c0c0c0c0c004-01`);
+    const fresh = (traceId: string): ExportedSpan[] =>
+      exported.slice(mark).filter((s) => s.traceId === traceId);
+    // Wait for this request's own spans on BOTH traces before asserting absence:
+    // the handler span under the middleware trace, and the outer request span
+    // under the incoming trace (so the negative below cannot pass vacuously).
+    await waitForSpans(
+      () =>
+        byType(fresh(mwTrace), HANDLER_SPAN).length >= 1 &&
+        byType(fresh(incomingTrace), REQUEST_SPAN).length >= 1,
+      'mw-sets spans on both traces',
+    );
+    const handler = byType(fresh(mwTrace), HANDLER_SPAN)[0];
+    expect(handler.name).toContain('/api/echo/mw-sets');
+    // parented on the middleware-supplied span id, never the incoming trace
+    expect(fresh(mwTrace).some((s) => s.parentSpanId === mwSpanId)).toBe(true);
+    expect(byType(fresh(incomingTrace), HANDLER_SPAN)).toEqual([]);
   });
 });

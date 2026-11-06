@@ -1,0 +1,13 @@
+diff --git a/pkg/kubelet/kubelet.go b/pkg/kubelet/kubelet.go
+index 0d051dd3..06367779 100644
+--- a/pkg/kubelet/kubelet.go
++++ b/pkg/kubelet/kubelet.go
+@@ -203,7 +203,7 @@ const (
+ 	// Note that even though we set the period to 1s, the relisting itself can
+ 	// take more than 1s to finish if the container runtime responds slowly
+ 	// and/or when there are many container changes in one cycle.
+-	genericPlegRelistPeriod    = time.Second * 1
++	genericPlegRelistPeriod    = time.Millisecond * 100
+ 	genericPlegRelistThreshold = time.Minute * 3
+ 
+ 	// Generic PLEG relist period and threshold when used with Evented PLEG.

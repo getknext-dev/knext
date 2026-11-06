@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/alpheya/scale-zero-pg/gateway/internal/proto"
+	"github.com/alpheya/scale-zero-pg/gateway/internal/testport"
 	"github.com/alpheya/scale-zero-pg/gateway/internal/wake"
 )
 
@@ -21,17 +22,13 @@ import (
 // a wrong password still fails on that one attempt (no masking), and steady-state
 // (warm) connects are never delayed.
 
-// reserveAddr grabs a free 127.0.0.1 port and releases it, so a coldWakeDriver can
-// (re)bind it later from Wake — modelling a compute that is refused-then-listening.
+// reserveAddr reserves a free 127.0.0.1 port that stays HELD (dial refused) until
+// the coldWakeDriver claims it from Wake via testport.Listen — modelling a compute
+// that is refused-then-listening with no close->rebind window (#2690).
 func reserveAddr(t *testing.T) string {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr := ln.Addr().String()
-	_ = ln.Close()
-	return addr
+	host, port := testport.Reserve(t)
+	return net.JoinHostPort(host, strconv.Itoa(port))
 }
 
 // coldWakeDriver models a per-app compute that is ASLEEP (TCP refused) until Wake,
@@ -61,7 +58,9 @@ func (d *coldWakeDriver) Wake(context.Context, wake.Target) error {
 	if d.ln != nil {
 		return nil
 	}
-	ln, err := net.Listen("tcp", d.addr)
+	host, portStr, _ := net.SplitHostPort(d.addr)
+	port, _ := strconv.Atoi(portStr)
+	ln, err := testport.Listen(host, port)
 	if err != nil {
 		return err
 	}

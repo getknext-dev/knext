@@ -160,7 +160,7 @@ export function patchedBunPlatformKey(host: HostPlatform): string | undefined {
     return undefined;
 }
 
-export function currentHost(): HostPlatform {
+function currentHost(): HostPlatform {
     return {
         platform: process.platform,
         arch: process.arch,

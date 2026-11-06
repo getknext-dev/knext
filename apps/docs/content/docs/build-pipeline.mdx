@@ -228,7 +228,11 @@ directory. Two things put a file in:
   absolute path inside the app root also works). A glob such as `./**/*.json` does not descend into
   `node_modules`; name `node_modules` in the pattern to include a file there. A directory pattern
   and a glob over the same directory select the same files, and both enter a symlinked directory
-  that stays inside the app root.
+  that stays inside the app root. Listing a pattern's directories is bounded (10,000 directories or
+  200,000 entries per pattern): a directory reached through several symlinks is listed once per path,
+  so a dense web of linked folders fails the build with a message naming the pattern instead of
+  hanging. Narrow the pattern to the folder that holds the data, or remove the links between those
+  folders.
 - **A literal path in your server code.** `join(process.cwd(), 'content/post.md')`,
   `` `${process.cwd()}/content/post.md` `` and `new URL('../data.json', import.meta.url)` are found
   in the server output, and the file is embedded if it exists at build time. A path computed at
@@ -293,7 +297,10 @@ file is refused when:
 - any directory above it is `.ssh`, `.aws`, `.kube`, `.gnupg`, `.gcloud`, `.azure` or `.docker`
   (compared without regard to letter case), starts with `.env`, or has a name containing one of the
   words above (`secrets/db.json`). Directories below a `node_modules` are not judged, only the file
-  name.
+  name; this applies to a path spelled through `node_modules` (`node_modules/pkg/secrets/words.json`
+  embeds), and a credential-named directory above `node_modules` still counts. A package folder
+  reached through a link outside `node_modules` (a `vendor` link to `node_modules/pkg`) is judged by
+  the path as you wrote it, so list it through `node_modules`.
 
 Every match is judged by where it really points: a symlink with an ordinary name whose target
 matches is refused, and so is a symlink that leaves the app root. Nothing under `.git` is ever
@@ -302,7 +309,12 @@ as `design-tokens/colors.json` match the word list and are refused too; the opt-
 them. This is a safeguard against accidents, not a guarantee: a secret stored under an ordinary
 name is not recognised, so do not list a directory that holds one. The one opt-out is deliberate and
 visible in the config: a pattern that is an exact file path (no glob, not a directory, not a
-symlink), such as `config/.env.public`, embeds that file even though its name matches.
+symlink), such as `config/.env.public`, embeds that file even though its name matches. The path may
+not pass through a symlink, with one exception: under a package manager that links packages
+(pnpm), `node_modules/pkg/data/.env.public` is a link into `node_modules/.pnpm/…`, and an exact path
+that is written inside `node_modules`, really lives inside `node_modules` and is itself a regular
+file still opts out. A path through a link anywhere else, or a file that is itself a link, is
+refused.
 
 `next.config` is read by the compile step itself, in a separate process from the one that built the
 app. A config that provably cannot declare `outputFileTracingIncludes` (no `require`, no
@@ -512,8 +524,9 @@ One computed name is exempt: `ioredis`, assembled as `['io', 'redis'].join('')`.
 it that way on purpose so no bundler follows it, and its Redis client never reaches that load under Bun,
 which uses its built-in Redis client. A strict build does not fail for it, and the `knext build` log
 names it as "deliberately not bundled" when the server output has the form the build looks for: the
-vinext build, and a standalone build whose bundler keeps `createRequire(import.meta.url)`. A webpack
-standalone build rewrites that call, so the build does not name an `ioredis` load there. The exemption is
+vinext build, a standalone build whose bundler keeps `createRequire(import.meta.url)`, and a webpack
+standalone build, which rewrites that call to `createRequire("file:///...")("ioredis")` (the build
+recognises that exact shape: a `file:` URL and the literal name `ioredis`). The exemption is
 by name and applies wherever the build finds that load, so it does not check that your own code guards
 it. The binary would throw if that code path ran without the package beside it. Any other computed
 name, including one assembled from string literals, is a non-literal require and fails a strict build.

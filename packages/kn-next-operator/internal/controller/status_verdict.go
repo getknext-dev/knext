@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -29,6 +30,7 @@ import (
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 
 	appsv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/api/v1alpha1"
+	"github.com/AhmedElBanna80/knext/packages/kn-next-operator/internal/validation"
 )
 
 // This file holds the PURE status-verdict computation extracted from Reconcile
@@ -144,6 +146,71 @@ type verdictExtras struct {
 	platform *platformDefaultsState
 	bindings *backendBindingsState
 	zoneKey  *zoneSigningKeyState
+	// invalidSpecSet records that withInvalidSpec was supplied, independent of the
+	// error's value: the early return keys on this flag so a nil error cannot fall
+	// through to the observed-state roll-up.
+	invalidSpecSet bool
+	// invalidSpec is the error the spec-validation gate rejected the app with
+	// (meaningful when invalidSpecSet). It selects the invalid-spec outcome
+	// (invalidSpecVerdict) instead of
+	// the observed-state roll-up.
+	invalidSpec error
+}
+
+// errNilInvalidSpec stands in when withInvalidSpec is given a nil error, so the
+// rejected-spec outcome always has a message to carry.
+var errNilInvalidSpec = errors.New("spec rejected by validation")
+
+// withInvalidSpec supplies the spec-validation failure. The verdict for a rejected
+// spec is decidable from the spec alone, so no observed-state input (ksvc,
+// database, revision, ...) is consulted: the app was never reconciled this pass.
+func withInvalidSpec(err error) verdictOption {
+	return func(x *verdictExtras) { x.invalidSpecSet, x.invalidSpec = true, err }
+}
+
+// invalidSpecEventReason names the cause on the Warning event. An image that fails
+// digest pinning keeps ReasonInvalidImage, the reason users already alert on;
+// every other spec failure is ReasonInvalidSpec. The Degraded/Ready condition
+// reason is lcInvalidSpec either way.
+func invalidSpecEventReason(app *appsv1alpha1.NextApp) string {
+	if validation.ValidateImageRef(app.Spec.Image) != nil {
+		return ReasonInvalidImage
+	}
+	return ReasonInvalidSpec
+}
+
+// invalidSpecVerdict is the outcome for a spec that failed validation: Degraded
+// then Ready (append order is part of the #98 contract), one Warning event, and no
+// requeue — the returned error drives the backoff. The event is emitted on every
+// rejected pass, as it always was; the #98 no-op guard in applyStatusVerdict keeps
+// the unchanged status from being rewritten.
+func invalidSpecVerdict(app *appsv1alpha1.NextApp, err error) statusVerdict {
+	if err == nil {
+		err = errNilInvalidSpec
+	}
+	return statusVerdict{
+		conditions: []metav1.Condition{
+			{
+				Type:               ConditionDegraded,
+				Status:             metav1.ConditionTrue,
+				ObservedGeneration: app.Generation,
+				Reason:             lcInvalidSpec,
+				Message:            err.Error(),
+			},
+			{
+				Type:               ConditionReady,
+				Status:             metav1.ConditionFalse,
+				ObservedGeneration: app.Generation,
+				Reason:             lcInvalidSpec,
+				Message:            "Spec does not meet validation requirements",
+			},
+		},
+		events: []verdictEvent{{
+			eventType: corev1.EventTypeWarning,
+			reason:    invalidSpecEventReason(app),
+			message:   fmt.Sprintf("Spec rejected: %s", err.Error()),
+		}},
+	}
 }
 
 // withZoneSigningKey supplies the zone signing key's state (zone_signing_key.go)
@@ -305,6 +372,12 @@ func computeStatusVerdict( //nolint:gocyclo // long branch-per-condition orchest
 	var extras verdictExtras
 	for _, opt := range opts {
 		opt(&extras)
+	}
+
+	// A rejected spec is a precondition failure decided from the spec alone: the
+	// child state below was never observed, so it is not consulted.
+	if extras.invalidSpecSet {
+		return invalidSpecVerdict(app, extras.invalidSpec)
 	}
 
 	// 0. BYO database binding (ADR-0019). Managed provisioning was removed
@@ -1010,6 +1083,19 @@ func computeStatusVerdict( //nolint:gocyclo // long branch-per-condition orchest
 		}
 	} else if extras.zoneKey != nil && prevZoneKey != nil {
 		v.removeConditions = append(v.removeConditions, ConditionZoneSigningKey)
+	}
+
+	// NetworkPolicyDisabled: spec.security.networkPolicy=false silently removes the
+	// app's pod-level isolation, so say so (Warning-class: Ready untouched). Appended
+	// LAST (#98 order), present only while opted out, removed only if previously
+	// reported, and the Warning event fires on entry only.
+	if cond, remove, ev := networkPolicyOptOutVerdict(!networkPolicyEnabled(app), "the app", app.Generation, app.Status.Conditions); cond != nil {
+		v.conditions = append(v.conditions, *cond)
+		if ev != nil {
+			v.events = append(v.events, *ev)
+		}
+	} else if remove {
+		v.removeConditions = append(v.removeConditions, ConditionNetworkPolicyDisabled)
 	}
 
 	return v

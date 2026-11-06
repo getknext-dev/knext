@@ -16,6 +16,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -138,7 +139,14 @@ func newFakeCompute(t *testing.T, p *testPKI, offerTLS bool, addr string) *fakeC
 	if addr == "" {
 		addr = "127.0.0.1:0"
 	}
-	ln, err := net.Listen("tcp", addr)
+	var ln net.Listener
+	var err error
+	if addr == "127.0.0.1:0" {
+		ln, err = net.Listen("tcp", addr)
+	} else {
+		h, p := ParseHostPort(addr, 0)
+		ln, err = listenReserved(h, p) // claims a reservePort reservation, no rebind
+	}
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
@@ -502,12 +510,7 @@ func TestTryConnectTLS_NoDelayOnRawConnBeforeHandshake(t *testing.T) {
 // C2: a failed DIAL and a failed TLS upgrade are DISTINGUISHABLE error classes.
 func TestTryConnectTLS_DialFailureIsDistinctFromTLSUnavailable(t *testing.T) {
 	// Reserve then release a port so the dial is refused (compute asleep).
-	probe, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("probe listen: %v", err)
-	}
-	host, port := ParseHostPort(probe.Addr().String(), 0)
-	_ = probe.Close()
+	host, port := reservePort(t)
 
 	p := newTestPKI(t)
 	btls, _, _ := clientBackendTLS(t, p)
@@ -569,13 +572,8 @@ func TestConnectWithWake_WarmPathIsTLS(t *testing.T) {
 // ...and the COLD-WAKE poll, whose retry loop makes a TLS failure retryable.
 func TestConnectWithWake_ColdWakePollIsTLS(t *testing.T) {
 	p := newTestPKI(t)
-	probe, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("probe listen: %v", err)
-	}
-	addr := probe.Addr().String()
-	host, port := ParseHostPort(addr, 0)
-	_ = probe.Close()
+	host, port := reservePort(t)
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
 
 	d := &tlsWakeDriver{t: t, pki: p, addr: addr}
 	btls, _, _ := clientBackendTLS(t, p)

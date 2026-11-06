@@ -121,6 +121,21 @@ the following. Not two.
   guarantee — it is per-reconcile, it depends on a default this project does not own, and a panic in
   a goroutine the reconciler spawns is not covered by it at all. Rule 2 stands on its own.
 
+## Amendment 1 (2026-11-06, #2729): the spec-validation gate moved into the verdict path
+
+The "precondition, so it stays inline" carve-out above is **withdrawn**. The cost it guarded
+against was real but avoidable: the rejection is routed through `computeStatusVerdict` by one
+guarded early return (`withInvalidSpec(err)` → `invalidSpecVerdict`, both in `status_verdict.go`)
+that runs **before** any observed-state input is read, so the pure observed-state composition is
+untouched and the invalid-spec outcome is a separate function, not a branch threaded through it.
+`Reconcile` now holds **zero** inline status-condition writes and emits no spec-rejection event;
+`applyStatusVerdict` is the single writer. Observable output is unchanged (same conditions, order,
+messages, no requeue) except the Warning event reason: `InvalidImage` is kept for an image that
+fails digest pinning, and every other spec failure now uses `InvalidSpec`. The guard is
+`TestNoInlineStatusBranchesInReconcile` (the invariant is now "zero", asserted in both halves).
+Rules that validate a spec field still go in `validation.ValidateNextAppSpec`; the verdict path
+carries the outcome.
+
 ## Action items
 
 - [x] Shared quantity fixture + both halves of the parity contract (#455).

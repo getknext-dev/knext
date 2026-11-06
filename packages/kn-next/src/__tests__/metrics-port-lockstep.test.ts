@@ -62,13 +62,23 @@ const ENTRY_TEMPLATE_FILE = resolve(
     "app",
     "knext-bun-entry.mjs.hbs",
 );
+// The annotation is stamped in the ksvc builder; the NetworkPolicy grant lives
+// in the network-policy file (nextapp_controller.go was split by concern).
 const OPERATOR_FILE = resolve(
     REPO_ROOT,
     "packages",
     "kn-next-operator",
     "internal",
     "controller",
-    "nextapp_controller.go",
+    "nextapp_ksvc.go",
+);
+const OPERATOR_NETPOL_FILE = resolve(
+    REPO_ROOT,
+    "packages",
+    "kn-next-operator",
+    "internal",
+    "controller",
+    "nextapp_networkpolicy.go",
 );
 const PODMONITOR_FILE = resolve(
     REPO_ROOT,
@@ -148,7 +158,7 @@ function extractNetworkPolicyMetricsPort(src: string): number {
     if (alias) return 9091;
     throw new Error(
         `Could not find the appMetricsPort assignment (appMetricsPort = int32(<N>)) ` +
-            `in ${OPERATOR_FILE}. The lockstep guard cannot run — fix the regex or the source.`,
+            `in ${OPERATOR_NETPOL_FILE}. The lockstep guard cannot run — fix the regex or the source.`,
     );
 }
 
@@ -206,7 +216,7 @@ function allSurfaces(): Record<string, number> {
         ),
         "operator NetworkPolicy appMetricsPort":
             extractNetworkPolicyMetricsPort(
-                readFileSync(OPERATOR_FILE, "utf8"),
+                readFileSync(OPERATOR_NETPOL_FILE, "utf8"),
             ),
         "PodMonitor targetPort": extractPodMonitorTargetPort(
             readFileSync(PODMONITOR_FILE, "utf8"),

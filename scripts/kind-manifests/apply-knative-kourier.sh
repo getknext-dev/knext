@@ -30,7 +30,25 @@ CORE_OUT="${TMPDIR}/serving-core.yaml"
 KOURIER_OUT="${TMPDIR}/kourier.yaml"
 
 fetch() { # <url> <sha256> <file>
-  curl -fsSL -o "$3" "$1"
+  # curl's --retry covers timeouts + 408/429/5xx; --retry-connrefused covers
+  # refused connections; the bounded loop covers resets (exit 56/52/35).
+  # NOT --retry-all-errors: that would also retry a permanent 404.
+  local delay="${KIND_MANIFEST_RETRY_DELAY:-5}" attempt=1 rc
+  while :; do
+    if curl -fsSL --retry 5 --retry-connrefused --retry-delay "$delay" -o "$3" "$1"; then
+      break
+    else
+      rc=$?
+    fi
+    case "$rc" in
+      56 | 52 | 35)
+        if [ "$attempt" -ge 5 ]; then return "$rc"; fi
+        attempt=$((attempt + 1))
+        sleep "$delay"
+        ;;
+      *) return "$rc" ;;
+    esac
+  done
   echo "$2  $3" | sha256sum -c -
 }
 

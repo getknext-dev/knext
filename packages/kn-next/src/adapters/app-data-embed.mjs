@@ -91,6 +91,12 @@ function looksSecret(rel) {
     hasSecretWord(name)
   );
 }
+/**
+ * A package-manager link layout (pnpm): the file is spelled and really lives
+ * below a `node_modules`, reached through a directory link there. The one case
+ * where an exact path may pass through a link and still opt out of the name check.
+ */
+const isPackageLayout = (spelled, real) => spelled.startsWith('node_modules/') && real.startsWith('node_modules/');
 const hasGitSegment = (rel) => rel.split('/').includes('.git');
 /** A native addon dlopens a real file; `$bunfs` cannot provide one. */
 const NATIVE_ADDON = /\.(?:node|so|dylib|dll)$/i;
@@ -387,7 +393,7 @@ const CONFIG_CHILD = `
  *
  * @param {Record<string, string | undefined>} parentEnv
  */
-export function configEnvironment(parentEnv = process.env) {
+function configEnvironment(parentEnv = process.env) {
   return { ...parentEnv, NODE_ENV: parentEnv.NODE_ENV || 'production' };
 }
 
@@ -475,7 +481,7 @@ export async function readTraceRules(root) {
 }
 
 /** Every `.js`/`.mjs`/`.cjs` file of the server output proper (never a traced `node_modules`). */
-export function serverOutputFiles(serverDir) {
+function serverOutputFiles(serverDir) {
   const out = [];
   const walk = (dir) => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -575,15 +581,43 @@ export function scanDataLiterals(source, cwdRoot, entryDir) {
 }
 
 /**
+ * The walk's bound. A directory already on the CURRENT path is not re-entered,
+ * but one reached by several different paths is entered once per path, so a
+ * dense graph of linked directories grows factorially (seven mutually linked
+ * directories took seconds, nine over a minute). A real app's data tree is far
+ * below either number; reaching one fails the build with a message instead of
+ * a build that looks hung.
+ */
+const MAX_WALK_DIRS = 10_000;
+const MAX_WALK_ENTRIES = 200_000;
+
+/** A fresh walk budget for one include pattern. */
+function newBudget(pattern) {
+  return {
+    dirs: 0,
+    entries: 0,
+    exceeded: (what, limit) =>
+      new Error(
+        `outputFileTracingIncludes: '${pattern}' reaches more than ${limit.toLocaleString('en-US')} ${what} ` +
+          '(too many to list). A directory reached by several symlinks is listed once per path that ' +
+          'reaches it, so a dense graph of symlinked directories explodes. Narrow the pattern to the ' +
+          'folder that holds the data, or remove the links between those folders',
+      ),
+  };
+}
+
+/**
  * Every file under `dir` as absolute paths, following symlinked directories (a
  * directory already on the current path is not entered again, so a link loop
- * ends). A link whose target does not exist goes to `dangling`. Never descends
+ * ends; the total work is bounded, see MAX_WALK_DIRS). A link whose target does not exist goes to `dangling`. Never descends
  * into `.git`. Special files (a FIFO) are returned: the planner refuses them.
  *
  * Directory patterns and glob patterns both list through this, so what a
  * declared directory embeds and what a glob over it embeds are the same files.
  */
-function walkTree(dir, out, dangling, chain, skipNodeModules) {
+function walkTree(dir, out, dangling, chain, skipNodeModules, budget) {
+  budget.dirs += 1;
+  if (budget.dirs > MAX_WALK_DIRS) throw budget.exceeded('directories', MAX_WALK_DIRS);
   let realDir;
   try {
     realDir = realpathSync(dir);
@@ -593,11 +627,13 @@ function walkTree(dir, out, dangling, chain, skipNodeModules) {
   if (chain.has(realDir)) return;
   const here = new Set(chain).add(realDir);
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    budget.entries += 1;
+    if (budget.entries > MAX_WALK_ENTRIES) throw budget.exceeded('entries', MAX_WALK_ENTRIES);
     if (entry.name === '.git') continue;
     if (skipNodeModules && entry.name === 'node_modules') continue;
     const path = join(dir, entry.name);
     if (entry.isDirectory()) {
-      walkTree(path, out, dangling, here, skipNodeModules);
+      walkTree(path, out, dangling, here, skipNodeModules, budget);
     } else if (entry.isSymbolicLink()) {
       let target;
       try {
@@ -606,7 +642,7 @@ function walkTree(dir, out, dangling, chain, skipNodeModules) {
         dangling.push(path);
         continue;
       }
-      if (target.isDirectory()) walkTree(path, out, dangling, here, skipNodeModules);
+      if (target.isDirectory()) walkTree(path, out, dangling, here, skipNodeModules, budget);
       else out.push(path);
     } else {
       out.push(path);
@@ -647,14 +683,15 @@ function normalisePattern(root, pattern, what = 'outputFileTracingIncludes') {
  * entered by a glob exactly as by a directory pattern, and a dangling link that
  * matches is reported, not skipped.
  */
-function expandPattern(root, rel) {
+function expandPattern(root, rel, pattern = rel) {
+  const budget = newBudget(pattern);
   const abs = resolve(root, rel);
   const names = rel.split('/');
   const skipNodeModules = !names.includes('node_modules');
   const files = [];
   const dangling = [];
   if (existsSync(abs)) {
-    if (statSync(abs).isDirectory()) walkTree(abs, files, dangling, new Set(), skipNodeModules);
+    if (statSync(abs).isDirectory()) walkTree(abs, files, dangling, new Set(), skipNodeModules, budget);
     else files.push(abs);
     return { files, dangling };
   }
@@ -671,7 +708,7 @@ function expandPattern(root, rel) {
   const glob = new Bun.Glob(rel);
   const walked = [];
   const walkedDangling = [];
-  walkTree(start, walked, walkedDangling, new Set(), skipNodeModules);
+  walkTree(start, walked, walkedDangling, new Set(), skipNodeModules, budget);
   const matches = (p) => glob.match(toPosix(relative(root, p)));
   return { files: walked.filter(matches), dangling: walkedDangling.filter(matches) };
 }
@@ -785,7 +822,7 @@ export function planAppData({
     const isExcluded = compileExcludes(base, rule.excludes);
     for (const pattern of rule.includes) {
       const rel = normalisePattern(base, pattern);
-      const { files: matches, dangling } = expandPattern(base, rel);
+      const { files: matches, dangling } = expandPattern(base, rel, pattern);
       for (const abs of dangling) {
         const linkRel = relOf(abs);
         if (!isExcluded(linkRel)) danglingLinks.push(linkRel);
@@ -823,7 +860,9 @@ export function planAppData({
           special.push(via(fileRel, realRel));
           continue;
         }
-        const optedOut = fileRel === realRel && exactFiles.has(fileRel);
+        const optedOut =
+          exactFiles.has(fileRel) &&
+          (fileRel === realRel || (isPackageLayout(fileRel, realRel) && !lstatSync(abs).isSymbolicLink()));
         if ((looksSecret(fileRel) || looksSecret(realRel)) && !optedOut) {
           secrets.push(via(fileRel, realRel));
           continue;
@@ -876,7 +915,8 @@ export function planAppData({
     throw new Error(
       `outputFileTracingIncludes: refusing to embed files that look like secrets: ${secrets.sort().join(', ')} — ` +
         'this check matches names and is a safeguard, not a guarantee. If a file really belongs in the ' +
-        'executable, list it by its exact path (no glob, not through a link)',
+        'executable, list it by its exact path (no glob, and not through a link unless both the path and the ' +
+        'file are inside node_modules, as under pnpm)',
     );
   }
   if (addons.length > 0) {

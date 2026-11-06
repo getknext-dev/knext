@@ -39,8 +39,6 @@ import { dirname, join, resolve, sep } from "node:path";
 
 /** Conditions for a CommonJS `require` (the hook, and the entry shims). */
 export const REQUIRE_CONDITIONS = ["bun", "node", "require", "default"];
-/** Conditions for an ESM import, used only to classify a package's format. */
-export const IMPORT_CONDITIONS = ["bun", "node", "import", "default"];
 
 const BUILTINS = new Set(builtinModules);
 const EXTENSIONS = ["", ".js", ".cjs", ".mjs", ".json", ".node"];
@@ -74,7 +72,7 @@ export function splitRequest(request) {
  * `..` segment. Relative segments are never needed to name a package file, and
  * they are the way out of the sidecar, so they are refused outright.
  */
-export function isSafeRequest(request) {
+function isSafeRequest(request) {
     return request.split("/").every((s) => s !== "" && s !== "." && s !== "..");
 }
 
@@ -83,7 +81,7 @@ export function isSafeRequest(request) {
  * `node_modules` segment after the leading `.` (the Node.js package-target
  * rule), so it cannot leave its own package.
  */
-export function isSafeExportsTarget(target) {
+function isSafeExportsTarget(target) {
     if (typeof target !== "string" || !target.startsWith("./")) return false;
     return target
         .slice(2)
@@ -109,7 +107,7 @@ function isFile(p) {
 }
 
 /** The file a path names, trying the usual extensions and `index` files. */
-export function probeFile(base) {
+function probeFile(base) {
     for (const ext of EXTENSIONS) if (isFile(base + ext)) return base + ext;
     for (const ext of EXTENSIONS.slice(1)) {
         const idx = join(base, `index${ext}`);

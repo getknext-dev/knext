@@ -1,3 +1,6 @@
+# CLUSTER-SPECIFIC EXAMPLE: this manifest records the cluster one study ran on (namespace,
+# node name or IP, kubectl context). Before applying it, set metadata.namespace to your
+# --namespace and spec.nodeName to your own node names; see README.md.
 # Pre-pull every variant image of nextapps-runtime-min.yaml onto EVERY node (including
 # the c3 experiment pool) so no measured wake includes an image pull. One DaemonSet,
 # one sleeping container per image. The baselines' own pre-pull DaemonSets

@@ -47,11 +47,32 @@
  *
  * An unreachable registry is a FAILURE, never a pass.
  *
- * Usage: node scripts/verify-image-pins.mjs [--root <repo-root>]
+ * TWO SCOPES (#2739)
+ * -------------------
+ * Upstream tags are rebuilt in place (base-image CVE refreshes), so a CORRECT
+ * pin goes stale within a day — `golang:1.26.10` carried four digests in two
+ * days. Resolving the whole tree on every PR therefore reddened PRs whose diff
+ * touches no pin, and each re-pin cost a PR, a review and a CI run.
+ *
+ *  - FULL TREE (no `--base`; the nightly and manual runs): every pin is resolved
+ *    and any drift fails. This is the only owner of "upstream moved under us".
+ *  - DIFF-SCOPED (`--base <rev>`; pull requests): only pins the PR ADDS OR
+ *    CHANGES are resolved. A pin is identified by (file, tag, digest) — never by
+ *    line number, so a moved line is not a changed pin — and compared against the
+ *    same file at the merge base (following git renames, so a renamed file cannot
+ *    hide a changed digest). A pin in a file the PR did not touch is not resolved.
+ *    The checks that need no network (a digest-only `no-tag` reference, the
+ *    no-sources guard) stay full-tree on a PR.
+ *
+ * If the diff cannot be computed (shallow clone, missing base, not a git repo) the
+ * run FAILS (`diff-unavailable`); it never degrades to "nothing changed".
+ *
+ * Usage: node scripts/verify-image-pins.mjs [--root <repo-root>] [--base <rev>]
  * Exits 1 on any finding, on an unrecognised argument, or if it can see no
  * sources to check.
  */
 
+import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -270,9 +291,80 @@ export async function verifyImagePin(pin, { api = resolveTagDigest } = {}) {
   return undefined;
 }
 
+const gitIn = (root, args) =>
+  execFileSync('git', args, {
+    cwd: root,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    maxBuffer: 256 * 1024 * 1024,
+  });
+
+/** What identifies a pin across revisions: file + reference (tag and digest), never the line. */
+const pinKey = (pin) => `${pin.file}\u0000${pin.ref}`;
+
+/**
+ * The pins that already existed at the merge base, for the given head files.
+ * Throws on ANYTHING it cannot establish: the caller turns that into a
+ * `diff-unavailable` finding, because a diff that cannot be computed must never
+ * read as "nothing changed".
+ *
+ * A head file absent from the base tree (added, or an untracked local file) has
+ * no base pins, so all of its pins are "added". A file git reports as renamed is
+ * read from its OLD path, so the rename itself changes nothing but a digest edit
+ * inside it still does. A tracked file the diff does not list is byte-identical
+ * to the base, so all of its pins are by definition unchanged.
+ */
+export function basePinKeys(root, base, files, run = gitIn) {
+  if (run(root, ['rev-parse', '--is-shallow-repository']).trim() === 'true') {
+    throw new Error('shallow clone: the merge base is not reliably available (fetch full history)');
+  }
+  const mergeBase = run(root, ['merge-base', base, 'HEAD']).trim();
+  if (!/^[0-9a-f]{40,64}$/.test(mergeBase)) throw new Error(`no merge base with ${base}`);
+
+  const inBase = new Set(run(root, ['ls-tree', '-r', '--name-only', '-z', mergeBase]).split('\0'));
+  const tokens = run(root, ['diff', '-M', '--name-status', '-z', mergeBase]).split('\0');
+  const changed = new Set();
+  const renamedFrom = new Map();
+  for (let i = 0; i < tokens.length && tokens[i] !== ''; ) {
+    const status = tokens[i];
+    if (status.startsWith('R') || status.startsWith('C')) {
+      renamedFrom.set(tokens[i + 2], tokens[i + 1]);
+      changed.add(tokens[i + 2]);
+      i += 3;
+    } else {
+      changed.add(tokens[i + 1]);
+      i += 2;
+    }
+  }
+
+  const keys = new Set();
+  const unchangedFiles = new Set();
+  for (const file of files) {
+    const source = renamedFrom.get(file) ?? file;
+    if (!inBase.has(source)) continue; // new file: every pin in it is added
+    if (!changed.has(file)) {
+      unchangedFiles.add(file);
+      continue;
+    }
+    const text = run(root, ['show', `${mergeBase}:${source}`]);
+    for (const pin of parseImagePins(text, file)) keys.add(pinKey(pin));
+  }
+  return { keys, unchangedFiles, mergeBase };
+}
+
+/**
+ * @param {string} repoRoot
+ * @param {{
+ *   api?: (pin: any) => Promise<{ status: number, digest?: string }>,
+ *   exclusions?: import('./lib/dockerfile-base-images.mjs').Exclusion[],
+ *   today?: Date,
+ *   base?: string,
+ * }} [options] `base` is a git revision: set it for a diff-scoped (PR) run, leave it
+ *   unset for the full tree (nightly / manual).
+ */
 export async function verifyRepo(
   repoRoot,
-  { api = resolveTagDigest, exclusions = loadExclusions(repoRoot), today = new Date() } = {},
+  { api = resolveTagDigest, exclusions = loadExclusions(repoRoot), today = new Date(), base } = {},
 ) {
   // Dockerfile base images are in scope too (#2660). A pin an UNEXPIRED, dated,
   // justified `registry-resolution` exclusion names (security/dockerfile-base-
@@ -292,7 +384,33 @@ export async function verifyRepo(
     parseImagePins(readFileSync(resolve(repoRoot, file), 'utf8'), file),
   );
   const findings = [];
+
+  // Diff scope (#2739): which pins existed, unchanged, at the merge base.
+  let baseline;
+  if (base !== undefined) {
+    try {
+      baseline = basePinKeys(repoRoot, base, files);
+    } catch (error) {
+      const cause = error instanceof Error ? error.message : String(error);
+      return {
+        files,
+        pins,
+        findings: [
+          {
+            reason: 'diff-unavailable',
+            detail:
+              `cannot compute the diff against ${base}: ${cause.trim().split('\n')[0]}. ` +
+              'A PR run needs the full history and the base ref; it refuses to assume nothing changed.',
+          },
+        ],
+      };
+    }
+  }
+  let skipped = 0;
   for (const pin of pins) {
+    // An unexpired, dated, file+digest-bound exclusion applies in BOTH scopes,
+    // before anything else: a PR run must treat an unchanged excluded pin exactly
+    // as the full-tree run does for the checks that need no network.
     if (
       dockerfiles.includes(pin.file) &&
       isExcluded(
@@ -304,18 +422,32 @@ export async function verifyRepo(
     ) {
       continue;
     }
+    if (baseline && (baseline.unchangedFiles.has(pin.file) || baseline.keys.has(pinKey(pin)))) {
+      // Unchanged by this PR: upstream drift is the nightly's to report. The
+      // check that needs no network (a digest-only reference) still runs.
+      if (!pin.tag) findings.push(await verifyImagePin(pin, { api }));
+      else skipped++;
+      continue;
+    }
     const finding = await verifyImagePin(pin, { api });
     if (finding) findings.push(finding);
   }
-  return { files, pins, findings };
+  return {
+    files,
+    pins,
+    findings,
+    scope: baseline ? { mode: 'diff', mergeBase: baseline.mergeBase, skipped } : { mode: 'full' },
+  };
 }
 
 /* c8 ignore start — CLI wrapper */
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   const args = process.argv.slice(2);
   let root = process.cwd();
+  let base;
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--root' && args[i + 1]) root = args[++i];
+    else if (args[i] === '--base' && args[i + 1]) base = args[++i];
     else {
       console.error(`unrecognised argument: ${args[i]}`);
       process.exit(1);
@@ -326,10 +458,16 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
     process.exit(1);
   }
 
-  const { files, pins, findings } = await verifyRepo(root);
+  const { files, pins, findings, scope } = await verifyRepo(root, { base });
   console.log(
     `scanned ${files.length} operator + benchmark + Dockerfile source file(s), ${pins.length} digest-pinned image(s)`,
   );
+  if (scope?.mode === 'diff') {
+    console.log(
+      `diff-scoped against merge base ${scope.mergeBase}: ${scope.skipped} unchanged pin(s) not resolved ` +
+        '(upstream drift in those is reported by the nightly full-tree run)',
+    );
+  }
   for (const pin of pins) {
     console.log(`  ${pin.file}:${pin.line}  ${pin.ref}`);
   }

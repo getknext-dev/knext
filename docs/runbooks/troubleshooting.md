@@ -56,6 +56,7 @@ every reason to a section.
 | Surfaced by | reason / condition | Section |
 | --- | --- | --- |
 | Event + `Degraded=True` (`InvalidSpec`) | `InvalidImage` | [1](#1--image-rejected-latex-or-tag-only-not-digest-pinned) |
+| Event + `Degraded=True` (`InvalidSpec`) | `InvalidSpec` | [1](#1--image-rejected-latex-or-tag-only-not-digest-pinned) |
 | Event + `Degraded=True` | `ReconcileFailed` | [2](#2--reconcile-failing-degradedtrue) |
 | `Ready=Unknown/False` | `IngressNotProgrammed` | [3](#3--route-never-programs-ingressnotprogrammed) |
 | `Ready=False` + Event | `PinnedRevisionNotFound` | [4](#4--pinned-rollback-revision-missing-pinnedrevisionnotfound) |
@@ -75,7 +76,11 @@ every reason to a section.
 **Symptom.** `knext deploy` or `kubectl apply` is accepted but the app never
 rolls out; `kubectl describe nextapp <app>` shows a Warning Event with
 `reason: InvalidImage` and the status carries `Degraded=True`
-(`reason: InvalidSpec`). The Event message reads, verbatim from the validator:
+(`reason: InvalidSpec`). Any other spec validation failure (a bad `resources`
+quantity, `maxScale` × `poolMax` over the connection budget, …) raises the Event
+reason `InvalidSpec` instead, with the same `Degraded`/`Ready` conditions; read the
+message, fix the named field and re-apply. The Event message reads, verbatim from
+the validator:
 
 ```
 image "myapp:latest" uses the :latest tag which is forbidden:

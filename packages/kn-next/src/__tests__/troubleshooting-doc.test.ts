@@ -40,6 +40,10 @@ const GROUNDED_TOKENS: Array<{ token: string; source: string }> = [
         source: "packages/kn-next-operator/internal/controller/nextapp_controller.go",
     },
     {
+        token: "InvalidSpec",
+        source: "packages/kn-next-operator/internal/controller/nextapp_controller.go",
+    },
+    {
         token: "ReconcileFailed",
         source: "packages/kn-next-operator/internal/controller/nextapp_controller.go",
     },

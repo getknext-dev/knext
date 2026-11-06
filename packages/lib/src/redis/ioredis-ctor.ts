@@ -1,5 +1,6 @@
 import { createRequire } from 'node:module';
 import type RedisClient from 'ioredis';
+import { runtimeAnchor } from '../runtime-anchor';
 
 /**
  * Resolving ioredis's constructor, isolated into its own module so it can be
@@ -47,7 +48,12 @@ export function loadRedisCtor(): RedisCtor {
   // `createRequire`, not a bare `require`: this package ships ESM now, where
   // `require` does not exist. The specifier stays computed so no bundler can
   // follow it — that part is unchanged and still load-bearing.
-  const require = createRequire(import.meta.url);
+  //
+  // The anchor is `runtimeAnchor()`, NOT `import.meta.url`: a webpack build
+  // rewrites that to the build machine's absolute path, which then ships in the
+  // server chunk (leak, non-reproducible, and a base that does not exist in the
+  // image). See `runtime-anchor.ts`.
+  const require = createRequire(runtimeAnchor());
   const mod = require(IOREDIS_SPECIFIER) as { default?: RedisCtor } & RedisCtor;
   return (mod.default ?? mod) as RedisCtor;
 }

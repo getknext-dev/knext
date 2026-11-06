@@ -298,6 +298,9 @@ func (r *BackendServiceReconciler) applyFunctionVerdict(
 	if v.refusal != "" {
 		backendServiceRefusalsTotal.WithLabelValues(v.refusal).Inc()
 	}
+	for _, condType := range v.removeConditions {
+		apimeta.RemoveStatusCondition(&bs.Status.Conditions, condType)
+	}
 	for _, c := range v.conditions {
 		// SetStatusCondition moves LastTransitionTime on a Status change only. A
 		// condition that was Unknown for another reason (ZoneNotFound) and now

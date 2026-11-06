@@ -592,9 +592,81 @@ function scriptsInvoked(
   return { paths, bad };
 }
 
-/** Could this job push to a registry at all? It needs a credential: packages/id-token write, a login, cosign. */
-function credentialed(job: Job, wfDoc: Record<string, unknown> | undefined): boolean {
+/**
+ * Secret names that look like a registry / signing credential. Matching ANY
+ * secret would over-fire (a deploy-preview kubeconfig cannot push an image), so
+ * only names carrying a registry token count: registry, docker, ghcr, ocir, ecr,
+ * gcr, acr, quay, harbor, cosign, sigstore, push, or the GitHub-packages `CR_PAT`.
+ * `GITHUB_TOKEN` never does. Every secret the repo's workflows reference today
+ * (NPM_TOKEN, CODECOV_TOKEN, *_KUBECONFIG*, OCIR_*) classifies correctly under
+ * this pattern. Known limit: a registry secret with a name that carries none of
+ * these tokens (e.g. `DEPLOY_KEY`) is NOT detected by name; the guards that
+ * catch it are the permission and login-step rules, and `secrets: inherit` /
+ * `toJSON(secrets)` / dynamic `secrets[...]` are treated as credentialed.
+ */
+const REGISTRY_SECRET_NAME =
+  /(?:^|_)(?:REGISTRY|DOCKER(?:HUB)?|GHCR|OCIR|ECR|GCR|ACR|QUAY|HARBOR|COSIGN|SIGSTORE|PUSH)(?:_|$)|(?:^|_)CR_PAT(?:_|$)/i;
+
+/** Names a string reads through `secrets.NAME` or `secrets['NAME']`; `*` = the whole/dynamic secrets object. */
+function secretNamesIn(s: string): string[] {
+  const names = [...s.matchAll(/\bsecrets\.([A-Za-z0-9_]+)/g)].map((m) => m[1]);
+  for (const m of s.matchAll(/\bsecrets\s*\[\s*(?:'([^']*)'|"([^"]*)")\s*\]/g))
+    names.push(m[1] ?? m[2]);
+  // toJSON(secrets), a bare `secrets` argument or `secrets[<expression>]`: every secret is reachable.
+  if (/\btoJSON\(\s*secrets\s*\)|\bsecrets\s*\[\s*[^\s'"]/.test(s)) names.push('*');
+  return names;
+}
+
+/** A registry-looking secret (not `GITHUB_TOKEN`) referenced anywhere in a value tree. */
+function referencesSecret(v: unknown): boolean {
+  if (typeof v === 'string')
+    return secretNamesIn(v).some(
+      (n) => n === '*' || (n !== 'GITHUB_TOKEN' && REGISTRY_SECRET_NAME.test(n)),
+    );
+  if (Array.isArray(v)) return v.some(referencesSecret);
+  if (v && typeof v === 'object') return Object.values(v).some(referencesSecret);
+  return false;
+}
+
+/**
+ * Could this job push to a registry at all? It needs a credential. Judged on
+ * what the job can actually reach, not only its own raw keys:
+ *  - `packages`/`id-token` write, or a login / cosign in a step, INCLUDING steps
+ *    inside local composite actions (followed to depth 5);
+ *  - no `permissions` block at job or workflow level: the job inherits the repo
+ *    default `GITHUB_TOKEN`, whose scope is a repo setting this file cannot see,
+ *    so it is assumed read/write (fail closed);
+ *  - a registry-named secret (`REGISTRY_SECRET_NAME`; any other secret, e.g. a
+ *    kubeconfig, does not count) read in job env or step env/with/run, in either
+ *    `secrets.NAME` or `secrets['NAME']` form, or the whole object via
+ *    `toJSON(secrets)` / a dynamic index;
+ *  - ANY non-`GITHUB_TOKEN` secret in `container.credentials` or
+ *    `services.*.credentials` (a registry login by definition);
+ *  - any declared `on.workflow_call.secrets`, or being the callee of a caller job
+ *    passing `secrets: inherit` / a registry-named secret (`inheritedSecrets`).
+ */
+function credentialed(
+  job: Job,
+  wfDoc: Record<string, unknown> | undefined,
+  resolveAction: ActionResolver,
+  inheritedSecrets = false,
+): boolean {
+  if (inheritedSecrets) return true;
   const perms = [job.permissions, wfDoc?.permissions];
+  if (perms.every((pm) => pm === undefined)) return true;
+  const cred = (c: unknown): boolean =>
+    !!c &&
+    typeof c === 'object' &&
+    Object.values((c as Record<string, unknown>).credentials ?? {}).some(
+      (x) => typeof x === 'string' && secretNamesIn(x).some((n) => n !== 'GITHUB_TOKEN'),
+    );
+  if (cred(job.container)) return true;
+  if (
+    job.services &&
+    typeof job.services === 'object' &&
+    Object.values(job.services as Record<string, unknown>).some(cred)
+  )
+    return true;
   for (const pm of perms) {
     if (pm === 'write-all') return true;
     if (pm && typeof pm === 'object') {
@@ -602,14 +674,52 @@ function credentialed(job: Job, wfDoc: Record<string, unknown> | undefined): boo
       if (o.packages === 'write' || o['id-token'] === 'write') return true;
     }
   }
-  const steps = Array.isArray(job.steps) ? (job.steps as Step[]) : [];
-  return steps.some(
-    (st) =>
+  const on = onOf({ file: '', doc: wfDoc ?? {} });
+  const call = on?.workflow_call;
+  if (call && typeof call === 'object') {
+    const declared = (call as Record<string, unknown>).secrets;
+    if (declared && typeof declared === 'object' && Object.keys(declared).length > 0) return true;
+  }
+  if (referencesSecret(job.env)) return true;
+  // #2756: google-github-actions/auth only mints a cloud credential, so it counts as a registry
+  // login ONLY when the same job also uses a registry: `docker push`, a *.pkg.dev / gcr.io
+  // image, or `gcloud auth configure-docker`. Alone it is not credentialed.
+  // Known gap: only the job's own steps are read, so a registry use inside a local composite
+  // action or a repo script does not make the auth step count.
+  const jobSteps = Array.isArray(job.steps) ? (job.steps as Step[]) : [];
+  const usesGcpRegistry = jobSteps.some((x) =>
+    /\bdocker\s+push\b|\b[\w.-]*pkg\.dev\b|\bgcr\.io\b|\bgcloud\s+auth\s+configure-docker\b/.test(
+      `${code(x)}\n${JSON.stringify(x.with ?? {})}`,
+    ),
+  );
+  const credStep = (st: Step, depth: number): boolean => {
+    if (/^google-github-actions\/auth@/.test(uses(st)) && usesGcpRegistry) return true;
+    if (
       /^docker\/login-action@/.test(uses(st)) ||
+      /^aws-actions\/amazon-ecr-login@/.test(uses(st)) ||
+      /^azure\/docker-login@/.test(uses(st)) ||
+      /\baz\s+acr\s+login\b/.test(code(st)) ||
+      /\bhelm\s+registry\s+login\b/.test(code(st)) ||
+      /\bgcloud\s+auth\s+configure-docker\b/.test(code(st)) ||
+      /\baws\s+ecr(?:-public)?\s+get-login-password\b/.test(code(st)) ||
+      /\b(?:buildah|nerdctl)\s+login\b/.test(code(st)) ||
       /\b(?:docker|podman|crane|regctl|skopeo|oras)\s+(?:auth\s+)?login\b|\bcosign\b/.test(
         code(st),
-      ),
-  );
+      ) ||
+      referencesSecret(st.env) ||
+      referencesSecret(st.with) ||
+      referencesSecret(st.run)
+    )
+      return true;
+    const u = uses(st);
+    if (u.startsWith('./') && !u.includes('/.github/workflows/') && depth < 5) {
+      const inner = resolveAction(u);
+      return inner !== null && inner.some((i) => credStep(i, depth + 1));
+    }
+    return false;
+  };
+  const steps = Array.isArray(job.steps) ? (job.steps as Step[]) : [];
+  return steps.some((st) => credStep(st, 0));
 }
 
 /**
@@ -627,9 +737,10 @@ function expandedSteps(
   opts: LaneAuditOptions,
   problems: Finding[],
   wfDoc?: Record<string, unknown>,
+  inheritedSecrets = false,
 ): Step[] {
   const resolveAction = opts.resolveAction ?? fsActionResolver;
-  const scriptProblems = credentialed(job, wfDoc) ? problems : [];
+  const scriptProblems = credentialed(job, wfDoc, resolveAction, inheritedSecrets) ? problems : [];
   const checkouts = new Map<string, boolean>();
   for (const st of stepsOf(file, id, job)) {
     if (/^actions\/checkout@/.test(uses(st)) && typeof withOf(st).path === 'string') {
@@ -723,6 +834,25 @@ export function discoverImageLanes(
 ): { lanes: Array<{ wf: Workflow; id: string }>; findings: Finding[] } {
   const findings: Finding[] = [];
   const lanes: Array<{ wf: Workflow; id: string }> = [];
+  // Callee workflow files a caller hands registry secrets to (`secrets: inherit`, or a
+  // map naming a registry secret): the callee need not declare them to receive them.
+  const inheritedCallees = new Set<string>();
+  for (const wf of wfs)
+    for (const job of Object.values(jobsOf(wf))) {
+      const local = /^\.\/\.github\/workflows\/([^@]+\.ya?ml)$/.exec(
+        typeof job.uses === 'string' ? job.uses : '',
+      );
+      if (!local) continue;
+      const s = job.secrets;
+      const passes =
+        s === 'inherit' ||
+        (!!s &&
+          typeof s === 'object' &&
+          Object.entries(s as Record<string, unknown>).some(
+            ([k, val]) => REGISTRY_SECRET_NAME.test(k) || referencesSecret(val),
+          ));
+      if (passes) inheritedCallees.add(local[1]);
+    }
   for (const wf of wfs) {
     for (const [id, job] of Object.entries(jobsOf(wf))) {
       const ju = typeof job.uses === 'string' ? job.uses : '';
@@ -736,7 +866,15 @@ export function discoverImageLanes(
           });
         continue; // a resolvable callee is scanned as a workflow in its own right
       }
-      const steps = expandedSteps(wf.file, id, job, opts, findings, wf.doc);
+      const steps = expandedSteps(
+        wf.file,
+        id,
+        job,
+        opts,
+        findings,
+        wf.doc,
+        inheritedCallees.has(wf.file),
+      );
       if (steps.some(pushesImage)) lanes.push({ wf, id });
     }
   }

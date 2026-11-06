@@ -37,11 +37,17 @@ revision name alone.
 cp bench-config.example.json bench-config.json   # edit context, namespace, agent map
 python3 drive.py 11 arm-a,arm-b out.jsonl
 python3 drive.py 11 arm-a@pool-1,arm-a@pool-2 out.jsonl   # pin an arm to a node pool
+python3 drive.py 30 a@pool-1,b@pool-2 out.jsonl --place-mode=restore --block=b1
+                                  # pin by cordon, but leave every cordon as found; label the rows
 python3 analyze.py out.jsonl --autoscaler=autoscaler.jsonl --activator=activator.jsonl
 ```
 
-The in-cluster pieces (`node-agents.yaml`, `harness-rbac.yaml`, and the GKE variants under `gke/`)
-are manifests you apply to your own cluster; set their namespace to match `--namespace`.
+The in-cluster pieces (`node-agents.yaml`, `harness-rbac.yaml`, `phase-bench-2.yaml`, the study
+NextApp manifests, and the GKE variants under `gke/`) are manifests you apply to your own cluster.
+They are not templated: each records the cluster one study ran on and starts with a
+`CLUSTER-SPECIFIC EXAMPLE` comment saying so. Before applying one, edit:
 
-Scripts that still carry cluster literals of their own (the `*-incluster.py` and
-`baseline-stability-*` studies) are not yet driven by this config.
+- `metadata.namespace` (and every `namespace:` in `harness-rbac.yaml`) to match `--namespace`;
+- `spec.nodeName` on the agent and harness pods to node names from `kubectl get nodes`, and put the
+  same names in the `agentPods` map (or rely on the `--agent-label` lookup);
+- the kubectl context in any `kubectl --context ...` example comment to yours.

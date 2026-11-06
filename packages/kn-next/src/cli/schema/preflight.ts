@@ -294,7 +294,7 @@ export function preflightCRSchema(
  * structural schema — while still satisfying any digest-pinning admission rule
  * that a bare tag would trip. The applied CR always carries the real digest.
  */
-export const PREFLIGHT_PLACEHOLDER_DIGEST = `sha256:${"0".repeat(64)}`;
+const PREFLIGHT_PLACEHOLDER_DIGEST = `sha256:${"0".repeat(64)}`;
 
 export function preflightImageRef(taggedRef: string): string {
     return taggedRef.includes("@sha256:")

@@ -1,6 +1,6 @@
 //go:build unix
 
-package wake
+package testport
 
 import (
 	"fmt"
@@ -12,11 +12,11 @@ import (
 	"testing"
 )
 
-// coldReservations holds ports reserved by reservePort until a driver claims them
-// via listenReserved (keyed by "host:port").
+// coldReservations holds ports reserved by Reserve until a driver claims them
+// via Listen (keyed by "host:port").
 var coldReservations sync.Map
 
-// reservePort reserves a free localhost port WITHOUT a close->rebind window.
+// Reserve reserves a free localhost port WITHOUT a close->rebind window.
 //
 // The old helper listened on :0, closed the listener and handed back the number;
 // the driver re-bound it later. In that gap another listener, or an ephemeral
@@ -24,9 +24,9 @@ var coldReservations sync.Map
 // rebind failed with EADDRINUSE. Here the port stays owned by a BOUND but not
 // LISTENING socket: a dial to it is refused (the compute looks asleep), other
 // binders and the outbound autobind both skip it (no SO_REUSEADDR on the
-// reservation, so a second bind conflicts), and listenReserved later calls
+// reservation, so a second bind conflicts), and Listen later calls
 // listen() on this very socket, so the port never changes hands.
-func reservePort(t *testing.T) (string, int) {
+func Reserve(t *testing.T) (string, int) {
 	t.Helper()
 	syscall.ForkLock.RLock()
 	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_STREAM, 0)
@@ -51,7 +51,7 @@ func reservePort(t *testing.T) (string, int) {
 	coldReservations.Store(key, fd)
 	t.Cleanup(func() {
 		// Only an UNCLAIMED reservation is still registered; a claimed one is now
-		// owned by the listener returned from listenReserved.
+		// owned by the listener returned from Listen.
 		if v, ok := coldReservations.LoadAndDelete(key); ok {
 			_ = syscall.Close(v.(int))
 		}
@@ -59,10 +59,10 @@ func reservePort(t *testing.T) (string, int) {
 	return "127.0.0.1", port
 }
 
-// listenReserved binds host:port for a driver's Wake. If the port was reserved by
-// reservePort it turns that socket into the listener (no rebind); otherwise it
+// Listen binds host:port for a driver's Wake. If the port was reserved by
+// Reserve it turns that socket into the listener (no rebind); otherwise it
 // falls back to a plain net.Listen.
-func listenReserved(host string, port int) (net.Listener, error) {
+func Listen(host string, port int) (net.Listener, error) {
 	addr := net.JoinHostPort(host, strconv.Itoa(port))
 	v, ok := coldReservations.LoadAndDelete(addr)
 	if !ok {

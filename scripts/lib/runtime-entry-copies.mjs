@@ -148,8 +148,12 @@ export const DIVERGENT = {
       'the same hunks by one script. The recorded divergence is still ONLY the item-4 comment block.' +
       '\n\nHASH UPDATED for the bridge size cap (APP_METRICS_MAX_BYTES and the bounded read in ' +
       'fetchAppMetrics): applied to the template and every copy from the same hunks by one script. The ' +
-      'recorded divergence is still ONLY the item-4 comment block.',
-    sha256: '2277c0e1547fc3dc1bcf350f95b8f809cc586e000f16de7d7fdd03b87225bd5d',
+      'recorded divergence is still ONLY the item-4 comment block.' +
+      '\n\nHASH UPDATED for #2728 (checkBearer compares with node:crypto timingSafeEqual over ' +
+      'equal-length Buffers instead of a hand-rolled char loop; the node:crypto import and the ' +
+      'removed helper): applied to the template and every copy from the same hunks by one script. ' +
+      'The recorded divergence is still ONLY the item-4 comment block.',
+    sha256: '0d85d1e83bd07f3758453addc411ba6de34386b9669a9f29da35698925dc86b6',
   },
 };
 

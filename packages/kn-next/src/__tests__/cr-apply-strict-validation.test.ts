@@ -56,6 +56,7 @@ import {
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { stripComments } from "../adapters/js-source-lexer.mjs";
 import type { KnativeNextConfig } from "../config";
 import { reconciledNextAppCapture } from "./helpers/reconciled-nextapp";
 
@@ -280,13 +281,6 @@ const realFs = createRequire(import.meta.url)(
 
 const TEST_FILE = fileURLToPath(import.meta.url);
 const CLI_DIR = join(dirname(TEST_FILE), "..", "cli");
-
-/** Blank out comments while preserving line numbers (so failures point home). */
-function stripComments(src: string): string {
-    return src
-        .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " "))
-        .replace(/(^|[^:"'`\\])\/\/.*$/gm, "$1");
-}
 
 /** Index of the string terminator starting at `start` (quote char at start). */
 function skipString(s: string, start: number): number {

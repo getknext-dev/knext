@@ -161,7 +161,7 @@ const RFC1123_LABEL = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/;
  * unsubstituted placeholder: the scaffolder does not ship something it knows
  * is wrong.
  */
-export function assertValidAppName(name: string): void {
+function assertValidAppName(name: string): void {
     if (name.length === 0 || name.length > 63 || !RFC1123_LABEL.test(name)) {
         throw new UsageError(
             `invalid app name ${JSON.stringify(name)} — it becomes the NextApp / ` +
@@ -356,7 +356,7 @@ export type RuntimeChoice = "bun" | "node";
  * so the two never disagree. Parses and re-serializes in the template's own
  * format (2-space JSON, trailing newline); every other key keeps its place.
  */
-export function withNodeRedisClient(packageJson: string): string {
+function withNodeRedisClient(packageJson: string): string {
     const pkg = JSON.parse(packageJson) as {
         dependencies?: Record<string, string>;
     };
@@ -669,7 +669,7 @@ const RUNTIME_DETAIL: Record<CreateChoices["runtime"], string> = {
  * Names the build target and runtime this scaffold uses — defaults included,
  * so nobody has to discover them from a build log — and how to change them.
  */
-export function targetNote(c: CreateChoices): string {
+function targetNote(c: CreateChoices): string {
     return (
         `\nBuild target: ${c.builder} (${BUILD_TARGET_DETAIL[c.builder]})\n` +
         `Runtime: ${c.runtime} (${RUNTIME_DETAIL[c.runtime]})\n` +
@@ -682,7 +682,7 @@ export function targetNote(c: CreateChoices): string {
  * What a non-default answer leaves the user to do. Empty at the defaults, so
  * the default scaffold's output is unchanged.
  */
-export function choicesNote(c: CreateChoices): string {
+function choicesNote(c: CreateChoices): string {
     const lines: string[] = [];
     if (c.cache === "redis") {
         lines.push(

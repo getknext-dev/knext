@@ -17,8 +17,11 @@ limitations under the License.
 package controller
 
 import (
+	"bytes"
+	"compress/gzip"
 	"crypto/sha256"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -509,15 +512,24 @@ func TestNetworkPolicyPodLabelsPinnedAgainstUpstreamDrift(t *testing.T) {
 	if got := fmt.Sprintf("%x", sha256.Sum256(kourierRaw)); got != pin("KOURIER_SHA256") {
 		t.Fatalf("testdata kourier.yaml sha256 %s != KOURIER_SHA256 pin %s: refresh the fixture from the pinned release", got, pin("KOURIER_SHA256"))
 	}
-	// serving-core.yaml is ~500 KB, so only its four Deployments are vendored,
-	// unmodified, with the hash of the whole file recorded in a header.
-	coreRaw, err := os.ReadFile(filepath.Join(fixtureDir, "serving-core-deployments.yaml"))
+	// serving-core.yaml (~500 KB) is vendored whole but gzipped, and its
+	// DECOMPRESSED bytes must hash to the pin, exactly as kourier.yaml's do. A
+	// header naming the source hash would be a self-attested string: editing the
+	// pin and that header alone would leave a stale body green.
+	coreGz, err := os.ReadFile(filepath.Join(fixtureDir, "serving-core.yaml.gz"))
 	if err != nil {
-		t.Fatalf("read vendored serving-core deployments for %s: %v", versionMatch[1], err)
+		t.Fatalf("read vendored serving-core.yaml.gz for %s (refresh testdata when the pin moves): %v", versionMatch[1], err)
 	}
-	srcSHA := regexp.MustCompile(`(?m)^# source-sha256: ([0-9a-f]{64})$`).FindSubmatch(coreRaw)
-	if srcSHA == nil || string(srcSHA[1]) != pin("SERVING_CORE_SHA256") {
-		t.Fatalf("testdata serving-core-deployments.yaml was not extracted from the pinned SERVING_CORE_SHA256 (%s): refresh the fixture", pin("SERVING_CORE_SHA256"))
+	gz, err := gzip.NewReader(bytes.NewReader(coreGz))
+	if err != nil {
+		t.Fatalf("open vendored serving-core.yaml.gz: %v", err)
+	}
+	coreRaw, err := io.ReadAll(gz)
+	if err != nil {
+		t.Fatalf("decompress vendored serving-core.yaml.gz: %v", err)
+	}
+	if got := fmt.Sprintf("%x", sha256.Sum256(coreRaw)); got != pin("SERVING_CORE_SHA256") {
+		t.Fatalf("testdata serving-core.yaml.gz decompresses to sha256 %s != SERVING_CORE_SHA256 pin %s: refresh the fixture from the pinned release", got, pin("SERVING_CORE_SHA256"))
 	}
 
 	deployments := func(raw []byte) map[string]*appsv1.Deployment {

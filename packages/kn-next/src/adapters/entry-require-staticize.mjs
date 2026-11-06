@@ -84,7 +84,7 @@ function escapeRe(s) {
     return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-export function isBareNonBuiltin(spec) {
+function isBareNonBuiltin(spec) {
     if (spec.startsWith(".") || spec.startsWith("/") || spec.startsWith("node:")) {
         return false;
     }

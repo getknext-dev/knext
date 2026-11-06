@@ -83,7 +83,7 @@ export function parseDbMigrateArgs(argv: readonly string[]): DbMigrateOptions {
     return out;
 }
 
-export const DB_MIGRATE_HELP = `knext db migrate — apply pending migrations against the writer, once (ADR-0021 §3)
+const DB_MIGRATE_HELP = `knext db migrate — apply pending migrations against the writer, once (ADR-0021 §3)
 
 Usage:
   knext db migrate [options]

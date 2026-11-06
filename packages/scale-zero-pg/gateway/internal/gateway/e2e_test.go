@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/alpheya/scale-zero-pg/gateway/internal/proto"
+	"github.com/alpheya/scale-zero-pg/gateway/internal/testport"
 	"github.com/alpheya/scale-zero-pg/gateway/internal/wake"
 )
 
@@ -31,7 +32,7 @@ func (fc *fakeCompute) start() error {
 	if fc.ln != nil {
 		return nil
 	}
-	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", fc.port))
+	ln, err := testport.Listen("127.0.0.1", fc.port)
 	if err != nil {
 		return err
 	}
@@ -150,12 +151,8 @@ func fileExists(p string) bool {
 
 func freePort(t *testing.T) int {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("freePort: %v", err)
-	}
-	port := l.Addr().(*net.TCPAddr).Port
-	l.Close()
+	// Held (not closed) until fakeCompute.start claims it: no close->rebind window.
+	_, port := testport.Reserve(t)
 	return port
 }
 

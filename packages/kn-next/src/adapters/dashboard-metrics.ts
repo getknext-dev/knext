@@ -58,7 +58,7 @@ export function extractKnextMetricTokens(dashboardJson: string): string[] {
  * Normalise a queried token to its registered base metric name by stripping a
  * single trailing histogram-derived suffix if present.
  */
-export function baseMetricName(token: string): string {
+function baseMetricName(token: string): string {
     for (const suffix of HISTOGRAM_SUFFIXES) {
         if (token.endsWith(suffix)) {
             return token.slice(0, -suffix.length);

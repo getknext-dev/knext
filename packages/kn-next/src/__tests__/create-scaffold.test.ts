@@ -1312,7 +1312,7 @@ describe("#910 the scaffold ships the shallow health route the operator probes",
         const go = readFileSync(
             resolve(
                 repoRoot(),
-                "packages/kn-next-operator/internal/controller/nextapp_controller.go",
+                "packages/kn-next-operator/internal/controller/nextapp_ksvc.go",
             ),
             "utf8",
         );

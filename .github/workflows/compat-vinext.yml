@@ -432,6 +432,11 @@ jobs:
     name: Deploy tests — vinext binary (shard ${{ matrix.shard }})
     needs: build-next
     runs-on: ubuntu-latest
+    # Least privilege: this job reads the repo and the run's own artifacts; it
+    # pushes nothing and calls no GitHub API. Without a block it would inherit
+    # the repo-default GITHUB_TOKEN scope, which this file cannot see.
+    permissions:
+      contents: read
     # The node lane's budget plus headroom: this axis pays a `vite build` AND a
     # `bun build --compile --bytecode` per fixture, where the node lane pays one
     # `next build`. HONESTY: 120 is inherited, not measured for this axis — the

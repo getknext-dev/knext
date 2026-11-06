@@ -23,7 +23,8 @@ pooler.
 
 All fields below are defined on the `NextApp` CRD in
 `packages/kn-next-operator/api/v1alpha1/nextapp_types.go` and reconciled in
-`packages/kn-next-operator/internal/controller/nextapp_controller.go`.
+`packages/kn-next-operator/internal/controller/nextapp_controller.go` (the Knative Service
+rendering is in `nextapp_ksvc.go`).
 
 ### `spec.scaling` (`ScalingSpec`)
 

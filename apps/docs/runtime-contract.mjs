@@ -21,6 +21,7 @@
 // The only imports are node: builtins, which resolve identically under node,
 // under bun, and inside the compiled binary — the "dependency-free" property
 // above is about bun/nitro/vinext coupling, not about the standard library.
+import { timingSafeEqual } from 'node:crypto';
 import { basename, dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -530,7 +531,9 @@ export function renderMetrics(state) {
 // security.md hard rule: no unauthenticated mutating endpoints. Returns `null`
 // when the request is authorised, or a 401 `Response` when it is NOT. Fails
 // CLOSED on every ambiguity: unset server token, missing header, and mismatch
-// all deny. Constant-time comparison avoids leaking the token via timing.
+// all deny. `timingSafeEqual` (the primitive the Next routes use) avoids leaking
+// the token via timing; the length is checked first, as it must be, because
+// `timingSafeEqual` throws on unequal lengths.
 export function checkBearer(req, token) {
   if (!token) {
     // Misconfigured server (token env unset) → deny, never allow-through.
@@ -539,9 +542,9 @@ export function checkBearer(req, token) {
       reason: 'server misconfigured: CACHE_INVALIDATE_TOKEN is not set',
     });
   }
-  const header = req.headers.get('authorization') ?? '';
-  const expected = `Bearer ${token}`;
-  if (!constantTimeEqual(header, expected)) {
+  const provided = Buffer.from(req.headers.get('authorization') ?? '');
+  const expected = Buffer.from(`Bearer ${token}`);
+  if (provided.length !== expected.length || !timingSafeEqual(provided, expected)) {
     return jsonResponse(401, { error: 'unauthorized' });
   }
   return null;
@@ -552,17 +555,6 @@ function jsonResponse(status, body) {
     status,
     headers: { 'content-type': 'application/json' },
   });
-}
-
-// Length-independent constant-time-ish compare: iterate to the longer length so
-// the loop count does not branch on a match, and fold the length difference in.
-function constantTimeEqual(a, b) {
-  let mismatch = a.length ^ b.length;
-  const len = Math.max(a.length, b.length);
-  for (let i = 0; i < len; i++) {
-    mismatch |= (a.charCodeAt(i) || 0) ^ (b.charCodeAt(i) || 0);
-  }
-  return mismatch === 0;
 }
 
 // ── Request-path hardening (srvx middleware + srvx `error` handler) ─────────

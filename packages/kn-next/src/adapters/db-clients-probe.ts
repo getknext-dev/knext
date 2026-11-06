@@ -40,7 +40,7 @@ import { createLogger } from "../utils/logger";
 const log = createLogger({ module: "server" });
 
 /** The exact specifier `db-drain.ts` and `image-cache-sync.ts` dynamically import. */
-export const DB_CLIENTS_SPECIFIER = "@getknext/lib/clients";
+const DB_CLIENTS_SPECIFIER = "@getknext/lib/clients";
 
 /** Minimal logger surface (pino's `warn(obj, msg)`), injectable for tests. */
 export interface ProbeLogger {

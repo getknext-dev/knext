@@ -985,6 +985,8 @@ jobs:
     name: Deploy tests (shard ${{ matrix.shard }})
     needs: build-next
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     # #147 A3-3 fix round 1 — 120 min (was 60). Run 28558576615 never exceeded
     # ~46 min ONLY because zero fixtures built (every deploy died at npm
     # install in ~5s). With the tarball fixed, every file runs a REAL

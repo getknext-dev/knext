@@ -533,7 +533,7 @@ const MUTATIONS = [
     id: 'R17',
     subject: 'runner',
     claim: 'the temp entries a prover leaves are never removed',
-    anchor: '    const n = cleanNewTmp(tmpBefore);',
+    anchor: '    const n = cleanPrivateTmp();',
     replacement: '    const n = 0;',
   },
   {

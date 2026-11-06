@@ -21,7 +21,7 @@ import { join } from "node:path";
 import { UsageError } from "./shared";
 
 /** What nitro writes into `.output/nitro.json` for its `node` preset. */
-export const NODE_NITRO_PRESET = "node-server";
+const NODE_NITRO_PRESET = "node-server";
 
 /**
  * Refuse unless `<cwd>/.output` is a node-preset nitro build with its entry.

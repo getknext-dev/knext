@@ -84,7 +84,7 @@ function parseKubeVersion(name: string): KubeVersion | undefined {
  * Positive when `a` outranks `b`; `undefined` when either is not a Kubernetes
  * version name, i.e. the two are incomparable.
  */
-export function compareKubeVersions(a: string, b: string): number | undefined {
+function compareKubeVersions(a: string, b: string): number | undefined {
     const va = parseKubeVersion(a);
     const vb = parseKubeVersion(b);
     if (!va || !vb) {

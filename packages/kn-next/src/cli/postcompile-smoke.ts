@@ -82,7 +82,7 @@ export interface SmokeBudgets {
  * a 60 s boot budget is ~1000x headroom for a cold page cache on a loaded CI
  * box — generous enough that a red here means BROKEN, not slow.
  */
-export const DEFAULT_BUDGETS: SmokeBudgets = {
+const DEFAULT_BUDGETS: SmokeBudgets = {
     bootMs: 60_000,
     healthMs: 20_000,
     metricsMs: 10_000,

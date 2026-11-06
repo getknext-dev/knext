@@ -1,6 +1,6 @@
 //go:build !unix
 
-package wake
+package testport
 
 import (
 	"net"
@@ -9,9 +9,9 @@ import (
 )
 
 // Non-unix fallback: the original close->rebind reservation. It keeps the test
-// package compiling off unix; the race-free version lives in reserve_unix_test.go
+// package compiling off unix; the race-free version lives in testport_unix.go
 // and the gateway only ships on linux.
-func reservePort(t *testing.T) (string, int) {
+func Reserve(t *testing.T) (string, int) {
 	t.Helper()
 	probe, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -23,6 +23,6 @@ func reservePort(t *testing.T) (string, int) {
 	return host, port
 }
 
-func listenReserved(host string, port int) (net.Listener, error) {
+func Listen(host string, port int) (net.Listener, error) {
 	return net.Listen("tcp", net.JoinHostPort(host, strconv.Itoa(port)))
 }

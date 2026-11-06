@@ -76,4 +76,11 @@ describe("doctor use-cache check (#2083)", () => {
             expect(report.checks.some((c) => c.id === "use-cache")).toBe(false);
         }
     });
+
+    it("does not read a commented-out cacheComponents after `i++ / 2` as set", async () => {
+        const cfg =
+            "let n = i++ / 2; // cacheComponents: true\nexport default {};";
+        const report = await run(cfg);
+        expect(report.checks.find((c) => c.id === "use-cache")).toBeUndefined();
+    });
 });

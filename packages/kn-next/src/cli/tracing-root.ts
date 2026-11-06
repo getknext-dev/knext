@@ -31,6 +31,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
+import { stripComments } from "../adapters/js-source-lexer.mjs";
 import { createLogger } from "../utils/logger";
 
 /**
@@ -236,13 +237,6 @@ export function shadowingConfigFor(
         if (existsSync(join(app, candidate))) return candidate;
     }
     return null;
-}
-
-/** Strip comments so a commented-out setting is not read as configuration. */
-function stripComments(source: string): string {
-    return source
-        .replace(/\/\*[\s\S]*?\*\//g, "")
-        .replace(/(^|\s)\/\/.*$/gm, "$1");
 }
 
 /**

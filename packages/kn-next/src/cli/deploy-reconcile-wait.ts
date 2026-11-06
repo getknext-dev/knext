@@ -44,7 +44,7 @@ export interface ReconcileWaitResult {
 }
 
 /** The Ready reason the operator writes when it holds an app change. */
-export const HELD_REASON = "EffectiveSpecInvalid";
+const HELD_REASON = "EffectiveSpecInvalid";
 
 /**
  * The reason the operator writes when the app's OWN spec is invalid
@@ -53,7 +53,7 @@ export const HELD_REASON = "EffectiveSpecInvalid";
  * generic ("Spec does not meet validation requirements"); the specific,
  * field-naming message is on the Degraded condition with the same reason.
  */
-export const INVALID_SPEC_REASON = "InvalidSpec";
+const INVALID_SPEC_REASON = "InvalidSpec";
 
 /** The actionable failure for an app whose own spec the operator rejected. */
 export function invalidSpecMessage(operatorMessage: string): string {

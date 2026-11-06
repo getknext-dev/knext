@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -250,7 +251,8 @@ func (d *wakeListenerDriver) Wake(_ context.Context, _ Target) error {
 		return transientErr
 	}
 	if d.ln == nil {
-		ln, err := net.Listen("tcp", d.addr)
+		h, p := ParseHostPort(d.addr, 0)
+		ln, err := listenReserved(h, p)
 		if err != nil {
 			return err
 		}
@@ -270,13 +272,10 @@ func (d *wakeListenerDriver) Wake(_ context.Context, _ Target) error {
 
 func TestConnectWithWakeSucceedsThroughTransientScaleWindow(t *testing.T) {
 	// Grab a free port, then close it so the initial TryConnect fails (compute asleep).
-	probe, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("probe listen: %v", err)
-	}
-	addr := probe.Addr().String()
-	host, port := ParseHostPort(addr, 0)
-	_ = probe.Close()
+	// The port stays held by a bound-not-listening socket (dial refused) until the
+	// driver's Wake claims it via listenReserved: no close->rebind window (#2690).
+	host, port := reservePort(t)
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
 
 	d := &wakeListenerDriver{failures: 3, addr: addr}
 	defer func() {

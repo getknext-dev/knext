@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alpheya/scale-zero-pg/gateway/internal/testport"
 	"github.com/alpheya/scale-zero-pg/gateway/internal/wake"
 )
 
@@ -133,13 +134,7 @@ func TestStatusProbe_AwaitReady_TokenRejectedGivesUpFast(t *testing.T) {
 // but stays bounded by the deadline and then falls back.
 func TestStatusProbe_AwaitReady_UnreachableBoundedByDeadline(t *testing.T) {
 	// Reserve then release a port so nothing is listening.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, portStr, _ := net.SplitHostPort(ln.Addr().String())
-	_ = ln.Close()
-	port, _ := strconv.Atoi(portStr)
+	_, port := testport.Reserve(t) // held, never listening: dials are refused
 	p := newStatusProbe(port, "jwt", "running", 10, 100)
 
 	t0 := time.Now()
@@ -193,13 +188,7 @@ func TestGateColdWake_FallsBackToSettleWhenUnconfigured(t *testing.T) {
 // never proceed instantly and never wedge.
 func TestGateColdWake_UnreachableFallsBackToSettle(t *testing.T) {
 	const settleMs = 120
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, portStr, _ := net.SplitHostPort(ln.Addr().String())
-	_ = ln.Close()
-	port, _ := strconv.Atoi(portStr)
+	_, port := testport.Reserve(t) // held, never listening: dials are refused
 
 	gw := gatewayWithDriver(t, &oracleDriver{target: wake.Target{Host: "127.0.0.1", Port: 1, Key: "x"}})
 	gw.opts.WakeTimeoutMs = 5000

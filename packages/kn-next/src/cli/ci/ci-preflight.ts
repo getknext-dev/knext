@@ -50,7 +50,7 @@ export type KubectlRawFn = (rawPath: string, body: string) => string;
  * unrecognized by this kubectl release, mirroring `preflight.mjs`'s
  * `submitRaw` verbatim — this is the same fallback, ported.
  */
-export const defaultKubectlRaw: KubectlRawFn = (rawPath, body) => {
+const defaultKubectlRaw: KubectlRawFn = (rawPath, body) => {
     try {
         return execFileSync(
             "kubectl",

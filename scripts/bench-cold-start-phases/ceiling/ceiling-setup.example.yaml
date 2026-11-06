@@ -1,0 +1,59 @@
+# The objects the kubelet ceiling test needs besides the node-agent pods and the harness RBAC
+# (RUNBOOK.md section 4 says how to get those). A template: replace every <...>; the imagePullSecrets lines go only if the image is public.
+#
+#   <NS>      the bench namespace (an existing one; the harness's service account lives there)
+#   <S node>  the control worker S, exactly as `kubectl get nodes` prints it
+#   <IMAGE>   the bench app image, pinned by digest (never :latest), the same for both arms
+#   <PULL SECRET>  the image pull secret every other bench NextApp carries (a private registry)
+#
+# Apply (founder's go required, see RUNBOOK.md section 1):
+#   kubectl apply --validate=strict -f ceiling-setup.example.yaml
+#
+# ceil-p and ceil-s are two NextApps with IDENTICAL specs. They are two because one app cannot be woken
+# twice in a round without waiting for zero pods in between. The operator reconciles each into a Knative
+# Service; nothing here writes Knative objects. The NextApp has no field for a node selector, affinity or
+# tolerations, so the apps are NOT pinned to a node by their spec; drive.py --place-mode=restore places
+# each wake by cordon (RUNBOOK.md section 2).
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata:
+  name: ceil-p
+  namespace: <NS>
+spec:
+  image: <IMAGE>
+  runtime: node
+  build: turbopack
+  imagePullSecrets: [{name: <PULL SECRET>}]
+  scaling: {minScale: 0, maxScale: 1}
+---
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata:
+  name: ceil-s
+  namespace: <NS>
+spec:
+  image: <IMAGE>
+  runtime: node
+  build: turbopack
+  imagePullSecrets: [{name: <PULL SECRET>}]
+  scaling: {minScale: 0, maxScale: 1}
+---
+# The harness pod, pinned to S (the unpatched control). nodeName bypasses the scheduler, so it is placed
+# even though P is cordoned and S is toggled by the driver. Needs the ServiceAccount, Role and RoleBinding
+# from harness-rbac.yaml (its first three documents) in <NS>.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ceil-harness
+  namespace: <NS>
+spec:
+  serviceAccountName: phase-bench
+  nodeName: <S node>
+  restartPolicy: Never
+  containers:
+    - name: harness
+      # node:24-alpine, resolved with crane digest (multi-arch index)
+      image: node@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85
+      command: [sleep, "172800"]
+      resources:
+        requests: {cpu: 100m, memory: 128Mi}

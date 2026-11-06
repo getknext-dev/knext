@@ -3,16 +3,5 @@
   "tracking": "https://github.com/getknext-dev/knext/issues/2705",
   "added": "2026-11-04",
   "expires": "2026-12-04",
-  "entries": [
-    {
-      "path": "scripts/bench-a13-postready-lazy-incluster.py",
-      "kind": "cluster-driver",
-      "reason": "module-level script with a hard-coded kubeconfig context and public hostname; needs those made configurable before a fake kubectl can drive it, or it should be retired with a ledger note"
-    },
-    {
-      "path": "scripts/bench-a13-postready-lazy.py",
-      "kind": "cluster-driver",
-      "reason": "module-level script with a hard-coded kubeconfig context and public hostname; needs those made configurable before a fake kubectl can drive it, or it should be retired with a ledger note"
-    }
-  ]
+  "entries": []
 }

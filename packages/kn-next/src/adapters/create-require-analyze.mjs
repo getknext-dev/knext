@@ -1156,10 +1156,90 @@ function analyzeParsed(ast) {
         } else if (call.arguments.some((a) => mayDeriveFromImportMeta(a, scopes))) {
             sites.push({ kind: "handed" }); // a wrapper, or an anchor derived from import.meta
         }
+        else {
+            // @getknext/lib anchors its ioredis load at a call-time `runtimeAnchor()`,
+            // not `import.meta.url` (#2758): not embedded, but still named.
+            const folded = runtimeAnchoredFold(call, parents, getFacts);
+            if (folded !== null) {
+                sites.push({ kind: "direct", dynamic: true, spec: null, folded });
+            }
+        }
         // Anything else is anchored somewhere other than this module (a literal,
         // the cwd): it was never embedded by this check and is not changed here.
     }
+    for (const call of parents.keys()) {
+        if (isWebpackFoldedLoad(call)) {
+            sites.push({ kind: "direct", dynamic: true, spec: null, folded: FOLDED_RUNTIME_PACKAGE });
+        }
+    }
     return { aliases, sites, parseError: null };
+}
+
+/**
+ * Whether `node` is the one anchor shape @getknext/lib uses instead of
+ * `import.meta.url` (#2758): a call with no arguments (`runtimeAnchor()`, however a
+ * bundler spells the callee). A literal, an identifier, or a call that takes
+ * arguments is some other anchor and is not matched.
+ */
+function isRuntimeAnchorCall(node) {
+    return node.type === "CallExpression" && node.arguments.length === 0;
+}
+
+/**
+ * `FOLDED_RUNTIME_PACKAGE` when `call` is `create(runtimeAnchor())(SPEC)` with SPEC the
+ * ioredis literal-join (directly or through a once-bound name), else null. The
+ * rolldown / ESM counterpart of `isWebpackFoldedLoad`.
+ */
+function runtimeAnchoredFold(call, parents, getFacts) {
+    if (call.arguments.length !== 1 || !isRuntimeAnchorCall(call.arguments[0])) return null;
+    const parent = parents.get(call);
+    if (parent?.type !== "CallExpression" || parent.callee !== call) return null;
+    if (parent.arguments.length !== 1) return null;
+    const arg = parent.arguments[0];
+    if (literalSpec(arg) === FOLDED_RUNTIME_PACKAGE) return FOLDED_RUNTIME_PACKAGE;
+    return foldSpecifier(arg, getFacts());
+}
+
+/**
+ * The webpack standalone shape of the deliberate ioredis load (#2688).
+ *
+ * A webpack `next build` rewrites `import.meta.url` to a string literal URL
+ * (`file:///<build path>/chunk.js`) and constant-folds the specifier, so
+ * @getknext/lib's loader reaches the server chunks as
+ * `(0, <ns>.createRequire)("file:///...")("ioredis")`. The creator there is an
+ * external webpack module, not an ES import, so no alias or anchor is tracked
+ * and `createRequire(import.meta.url)` never appears.
+ *
+ * Decision: match the SHAPE rather than follow webpack's module graph. A call
+ * `C("file:...")("ioredis")` where `C` is `createRequire`, `<x>.createRequire`
+ * or `(0, <x>.createRequire)`, with exactly one string-literal argument each,
+ * is the same deliberate load the other targets name, so it is reported under
+ * the same name-only exemption. It is deliberately narrow: another package, a
+ * non-`file:` literal anchor, or an extra argument is not matched (the rest of the
+ * literal-specifier cases stay with the scans that already own them).
+ *
+ * The anchor is either that `file:` literal (a lib built before #2758) or a
+ * zero-argument call (`runtimeAnchor()`, which replaced `import.meta.url` so the
+ * build path no longer reaches the chunk; see `isRuntimeAnchorCall`).
+ */
+function isWebpackFoldedLoad(call) {
+    if (call.type !== "CallExpression" || call.arguments.length !== 1) return false;
+    if (literalSpec(call.arguments[0]) !== FOLDED_RUNTIME_PACKAGE) return false;
+    const create = call.callee;
+    if (create.type !== "CallExpression" || create.arguments.length !== 1) return false;
+    const url = literalSpec(create.arguments[0]);
+    if (url === null ? !isRuntimeAnchorCall(create.arguments[0]) : !url.startsWith("file:")) {
+        return false;
+    }
+    let callee = create.callee;
+    if (callee.type === "SequenceExpression") callee = callee.expressions[callee.expressions.length - 1];
+    if (callee.type === "Identifier") return callee.name === "createRequire";
+    return (
+        callee.type === "MemberExpression" &&
+        !callee.computed &&
+        callee.property.type === "Identifier" &&
+        callee.property.name === "createRequire"
+    );
 }
 
 /**
@@ -1173,7 +1253,7 @@ function analyzeParsed(ast) {
  * @param {string[]} names local names of the imported require bindings
  * @returns {{ escapes: boolean, parseError: string | null }}
  */
-export function analyzeImportedRequire(src, names) {
+function analyzeImportedRequire(src, names) {
     if (names.length === 0) return { escapes: false, parseError: null };
     let ast;
     try {

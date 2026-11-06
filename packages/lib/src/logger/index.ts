@@ -1,6 +1,7 @@
 import { createRequire } from 'node:module';
 import pino from 'pino';
 import { correlationLogFields } from '../context';
+import { runtimeAnchor } from '../runtime-anchor';
 
 const isProduction = process.env.NODE_ENV === 'production';
 
@@ -75,7 +76,7 @@ export const logger = buildLogger();
 function prettyTransport(): Record<string, unknown> {
   if (isProduction) return {};
   try {
-    createRequire(import.meta.url).resolve('pino-pretty');
+    createRequire(runtimeAnchor()).resolve('pino-pretty');
   } catch {
     return {};
   }

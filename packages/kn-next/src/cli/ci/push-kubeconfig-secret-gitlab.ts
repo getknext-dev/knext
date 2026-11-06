@@ -33,7 +33,7 @@ export type GlabRunFn = (
     input: string,
 ) => GlabRunResult;
 
-export const defaultGlabRun: GlabRunFn = (args, input) => {
+const defaultGlabRun: GlabRunFn = (args, input) => {
     const r = spawnSync("glab", args, {
         input,
         encoding: "utf8",
@@ -57,7 +57,7 @@ export const DEFAULT_SECRET_NAME = "KNEXT_KUBECONFIG";
  * so a missing CLI is "print the manual steps" rather than an ENOENT crash. */
 export type GlabAvailableFn = () => boolean;
 
-export const defaultGlabAvailable: GlabAvailableFn = () => {
+const defaultGlabAvailable: GlabAvailableFn = () => {
     const r = spawnSync("glab", ["--version"], {
         stdio: ["ignore", "ignore", "ignore"],
     });

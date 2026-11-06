@@ -1,3 +1,6 @@
+# CLUSTER-SPECIFIC EXAMPLE: this manifest records the cluster one study ran on (namespace,
+# node name or IP, kubectl context). Before applying it, set metadata.namespace to your
+# --namespace and spec.nodeName to your own node names; see README.md.
 # Part 2 (primer A/B) NextApps for the GKE cold-start sitting
 # (docs/benchmarks/cold-start-phase-breakdown-gke-2026-10-01.md). Same bun x turbopack image as
 # bc-bun-turbopack (nextapps.yaml); the only variable is spec.coldStart.arpPrimer, PR #1762's

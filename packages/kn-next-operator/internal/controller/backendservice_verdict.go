@@ -239,9 +239,12 @@ type unverifiedReport struct {
 type functionVerdict struct {
 	// conditions are set in this order (the persisted order is part of the
 	// no-op status guard, as for NextApp).
-	conditions   []metav1.Condition
-	events       []verdictEvent
-	requeueAfter time.Duration
+	conditions []metav1.Condition
+	// removeConditions are condition types dropped from status, applied before
+	// conditions are set (as for NextApp).
+	removeConditions []string
+	events           []verdictEvent
+	requeueAfter     time.Duration
 	// observedGeneration is the generation Reconcile records as observed. An
 	// undecided pass rolled nothing out, so it keeps the previous value: the new
 	// spec has not been observed.
@@ -430,6 +433,20 @@ func computeBackendServiceVerdict(bs *appsv1alpha1.BackendService, o functionObs
 		ready = cond(ConditionReady, metav1.ConditionTrue, ReasonFunctionReady, msg)
 	}
 	v.conditions = append(v.conditions, ready)
+
+	// NetworkPolicyDisabled — a warning only (Ready untouched): the opt-out
+	// removes the function's pod-level isolation, and nothing else would say so.
+	// A fact about the spec, so reported whatever the render outcome. Appended
+	// after Ready so every other condition keeps its persisted order (#98), and
+	// removed only if previously reported.
+	if cond, remove, ev := networkPolicyOptOutVerdict(!functionNetworkPolicyEnabled(bs), "the function", gen, bs.Status.Conditions); cond != nil {
+		v.conditions = append(v.conditions, *cond)
+		if ev != nil {
+			v.events = append(v.events, *ev)
+		}
+	} else if remove {
+		v.removeConditions = append(v.removeConditions, ConditionNetworkPolicyDisabled)
+	}
 
 	if ready.Status != metav1.ConditionTrue && ready.Reason != ReasonFunctionNotReady {
 		prev := apimeta.FindStatusCondition(bs.Status.Conditions, ConditionReady)

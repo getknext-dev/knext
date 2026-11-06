@@ -19,7 +19,8 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { NEXT_CONFIG_FILES, stripComments } from "./doctor/checks/use-cache";
+import { stripComments } from "../adapters/js-source-lexer.mjs";
+import { NEXT_CONFIG_FILES } from "./doctor/checks/use-cache";
 import { UsageError } from "./shared";
 
 /** True iff the config text switches the flag on (comments ignored). */

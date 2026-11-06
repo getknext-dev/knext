@@ -865,6 +865,8 @@ jobs:
   bench-harness-guards:
     name: Benchmark harness guards (no cluster)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     # #425 item 3. These suites were documented as MANUAL-ONLY, which means
     # nothing caught a regression in them — and they cover the most dangerous path
     # in the harness: capture/restore of a live service's autoscaling config. A
@@ -909,6 +911,8 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
     # `.claude/hooks/block-dangerous-bash.sh` is the ONLY enforcement of the
     # operations `.claude/rules/security.md` calls never acceptable on an agent's
     # behalf: force/mirror/--all push, direct push to main/master, history rewrite,

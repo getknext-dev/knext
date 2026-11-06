@@ -970,12 +970,24 @@ describe('#2208 the runner: --shard, --list, --report and a PER-PROVER timeout',
     for (const k of LANE_ENV) delete env[k];
     return { ...env, ...extra } as Record<string, string>;
   };
-  const run = (dir: string, args: string[], env: Record<string, string> = {}) =>
-    spawnSync(process.execPath, [join(dir, RUNNER), ...args], {
-      encoding: 'utf8',
-      env: hermeticEnv(env),
-      timeout: 60_000,
-    });
+  // The runner under test gets its OWN temp dir (#2775). Its between-prover sweep
+  // (KNEXT_LANE_CLEANUP=1) deletes every entry that appeared in `os.tmpdir()` since the
+  // prover started; `bun-test.mjs` runs test files concurrently in one shared temp dir, so
+  // a runner sharing it deleted OTHER files' fixtures mid-test (git repos vanishing:
+  // "not a git repository", `git config` status null, `process.cwd failed`). A caller
+  // that passes its own TMPDIR keeps it.
+  const run = (dir: string, args: string[], env: Record<string, string> = {}) => {
+    const ownTmp = mkdtempSync(join(tmpdir(), 'knext-lane-run-tmp-'));
+    try {
+      return spawnSync(process.execPath, [join(dir, RUNNER), ...args], {
+        encoding: 'utf8',
+        env: hermeticEnv({ TMPDIR: ownTmp, ...env }),
+        timeout: 60_000,
+      });
+    } finally {
+      rmSync(ownTmp, { recursive: true, force: true });
+    }
+  };
 
   it('prints free memory and disk after each prover (a starved runner dies without a log)', () => {
     const dir = makeTree({ 'mutation-prove-a.mjs': ok(1, 1), 'mutation-prove-b.mjs': ok(1, 1) });
@@ -1232,6 +1244,84 @@ describe('#2208 the runner: --shard, --list, --report and a PER-PROVER timeout',
         expect(existsSync(join(cargo, 'dep.rlib')), 'not cleaned under pressure').toBe(false);
       } finally {
         rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('the cleanup sweeps only the runner OWN temp dir, never a concurrent process (#2775)', () => {
+      // `bun-test.mjs` runs two test files at once in ONE shared temp dir. The runner's
+      // between-prover sweep deletes every entry that APPEARED in its temp dir since the
+      // prover started, so a runner under test that shared the ambient temp dir deleted
+      // other files' freshly-made fixtures (git repos: "not a git repository", spawn ENOENT).
+      // The "bystander" here is exactly that: a sibling's directory created in the AMBIENT
+      // temp dir while the runner is mid-run.
+      const ambient = tmpdir();
+      const dir = makeTree({
+        'mutation-prove-a.mjs': `
+          import { mkdirSync, writeFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          const by = join(process.env.AMBIENT_TMP, 'bystander-2775-' + process.pid);
+          mkdirSync(by);
+          writeFileSync(process.env.BYSTANDER_REC, by);
+          console.log('::prover-summary:: ' + JSON.stringify({ declared: 1, run: 1 }));`,
+      });
+      let by: string | undefined;
+      try {
+        const rec = join(dir, 'bystander.txt'); // inside `dir`, which pre-dates the runner
+        const r = run(dir, [], {
+          KNEXT_LANE_CLEANUP: '1',
+          AMBIENT_TMP: ambient,
+          BYSTANDER_REC: rec,
+        });
+        expect(r.status, `${r.stdout}${r.stderr}`).toBe(0);
+        expect(existsSync(rec), 'the prover did not run').toBe(true);
+        by = read(rec);
+        expect(existsSync(by), 'the runner swept a directory that is not its own').toBe(true);
+      } finally {
+        if (by !== undefined) rmSync(by, { recursive: true, force: true });
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('with the runner handed an AMBIENT tmpdir, only the provers own temp files are removed (#2777)', () => {
+      // The runner gets only a test-owned "ambient" TMPDIR (so the real /tmp is never at risk).
+      // A bystander appearing in that ambient dir while a prover runs must survive; the
+      // prover's own os.tmpdir() leftovers must not.
+      const ambient = mkdtempSync(join(tmpdir(), 'knext-lane-ambient-'));
+      const dir = makeTree({
+        'mutation-prove-a.mjs': `
+          import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          import { tmpdir } from 'node:os';
+          mkdirSync(join(process.env.AMBIENT_TMP, 'bystander-2777'));
+          const d = mkdtempSync(join(tmpdir(), 'own-leak-'));
+          writeFileSync(join(d, 'big.bin'), 'x');
+          writeFileSync(process.env.OWN_REC, d);
+          console.log('::prover-summary:: ' + JSON.stringify({ declared: 1, run: 1 }));`,
+      });
+      try {
+        writeFileSync(join(ambient, 'pre-existing.txt'), 'keep');
+        const rec = join(dir, 'own.txt');
+        const r = run(dir, [], {
+          TMPDIR: ambient,
+          KNEXT_LANE_CLEANUP: '1',
+          AMBIENT_TMP: ambient,
+          OWN_REC: rec,
+        });
+        expect(r.status, `${r.stdout}${r.stderr}`).toBe(0);
+        expect(existsSync(rec), 'the prover did not run').toBe(true);
+        expect(existsSync(read(rec)), 'the prover own temp dir survived').toBe(false);
+        expect(
+          existsSync(join(ambient, 'bystander-2777')),
+          'the runner swept an ambient entry that is not its prover',
+        ).toBe(true);
+        expect(existsSync(join(ambient, 'pre-existing.txt'))).toBe(true);
+        expect(
+          readdirSync(ambient).filter((n) => n.startsWith('knext-lane-provers-')),
+          'the private dir was not removed at exit',
+        ).toHaveLength(0);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+        rmSync(ambient, { recursive: true, force: true });
       }
     });
 

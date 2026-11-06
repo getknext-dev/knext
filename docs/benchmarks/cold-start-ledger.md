@@ -3,9 +3,9 @@
 > The standing loop: **measure cold start after each iteration; improve it next iteration.**
 > This file is the loop's memory. Every iteration appends its measurement and names the next
 > lever it chose FROM that measurement. Instruments (each row names which it used):
-> `scripts/bench-a13-postready-lazy.py [path]` (rows 0–1: workstation-timed over the public URL,
+> `bench-a13-postready-lazy.py [path]` (retired; last in commit `9926074f6a4240b8a93efbaf98232d9c878fdea8`; rows 0–1: workstation-timed over the public URL,
 > ±100 ms class noise — see the A13 record's Limitations) and
-> `scripts/bench-a13-postready-lazy-incluster.py` (row 2+: in-pod timing via `kubectl exec`,
+> `bench-a13-postready-lazy-incluster.py` (retired, same commit; row 2+: in-pod timing via `kubectl exec`,
 > which removes WAN noise and adds the exec-gap consideration stated in row 2). Both: 8 cold
 > cycles against `fm-node`; per-cycle image-presence evidence; `wake` = full cold start to first
 > health response, `first` = the first page render after readiness, `warm` = the same page on
@@ -99,7 +99,7 @@ cache-poisoning class.
 
 **Instrument change, stated:** rows 0–1 timed from the workstation; row 2 times **in-cluster**
 (pod `bench-timer`, `kubectl exec`, milliseconds measured in-pod around the HTTP call —
-`scripts/bench-a13-postready-lazy-incluster.py`). Forced, not chosen: the workstation WAN
+`bench-a13-postready-lazy-incluster.py`, retired; recover with `git show 9926074f6a4240b8a93efbaf98232d9c878fdea8:scripts/bench-a13-postready-lazy-incluster.py`). Forced, not chosen: the workstation WAN
 degraded mid-sitting to SYN timeouts and 90 s transfers on a path also serving 372 ms probes.
 One full sitting was **discarded as instrument-invalid**; its numbers are preserved here rather
 than in an unfindable side-channel — per-cycle lazies
@@ -108,8 +108,8 @@ renders up to 92 s and 3 SYN-timeout retries — 90 s *warm* renders on requests
 served in ~530 ms is what "instrument-invalid" means concretely. **Provenance:** that sitting ran
 on the WORKSTATION harness with a logged-retry loop that had been added mid-investigation in a
 scratchpad copy (the committed script would have died on the first SYN timeout); the retry loop
-is now committed into `scripts/bench-a13-postready-lazy.py`, so the instrument that produced
-these numbers exists in the repo. Timing was workstation-side, so the WAN framing stands — the
+was committed into `bench-a13-postready-lazy.py`; the harness is since retired, and the instrument that produced
+these numbers is recoverable with `git show 9926074f6a4240b8a93efbaf98232d9c878fdea8:scripts/bench-a13-postready-lazy.py`. Timing was workstation-side, so the WAN framing stands — the
 in-pod row-2 instrument shares only the LB/ingress hop, not the degraded WAN path.
 
 Three consequences, none asserted away:

@@ -29,6 +29,9 @@ on:
     paths:
       - 'packages/kn-next-operator/api/v1alpha1/nextapp_types.go'
       - 'packages/kn-next-operator/internal/controller/nextapp_controller.go'
+      - 'packages/kn-next-operator/internal/controller/nextapp_ksvc.go'
+      - 'packages/kn-next-operator/internal/controller/nextapp_env.go'
+      - 'packages/kn-next-operator/internal/controller/nextapp_networkpolicy.go'
       - 'packages/kn-next-operator/config/crd/bases/apps.kn-next.dev_nextapps.yaml'
       - 'packages/kn-next/src/cli/cr-builder.ts'
       - 'packages/kn-next/src/cli/runtime-image.ts'
@@ -42,6 +45,9 @@ on:
     paths:
       - 'packages/kn-next-operator/api/v1alpha1/nextapp_types.go'
       - 'packages/kn-next-operator/internal/controller/nextapp_controller.go'
+      - 'packages/kn-next-operator/internal/controller/nextapp_ksvc.go'
+      - 'packages/kn-next-operator/internal/controller/nextapp_env.go'
+      - 'packages/kn-next-operator/internal/controller/nextapp_networkpolicy.go'
       - 'packages/kn-next-operator/config/crd/bases/apps.kn-next.dev_nextapps.yaml'
       - 'packages/kn-next/src/cli/cr-builder.ts'
       - 'packages/kn-next/src/cli/runtime-image.ts'

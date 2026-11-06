@@ -17,14 +17,10 @@ import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { stripComments } from "../adapters/js-source-lexer.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const NODE_SERVER_SRC = resolve(__dirname, "..", "adapters", "node-server.ts");
-
-/** Strip block + line comments so a comment reference can't false-match. */
-function stripComments(src: string): string {
-    return src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
-}
 
 describe("node-server startup log ordering (#441)", () => {
     const src = stripComments(readFileSync(NODE_SERVER_SRC, "utf8"));

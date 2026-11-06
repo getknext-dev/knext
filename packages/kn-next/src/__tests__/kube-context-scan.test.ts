@@ -36,6 +36,7 @@ import { describe, expect, it } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { stripComments } from "../adapters/js-source-lexer.mjs";
 
 const TEST_FILE = fileURLToPath(import.meta.url);
 const CLI_DIR = join(dirname(TEST_FILE), "..", "cli");
@@ -44,13 +45,6 @@ const CLI_DIR = join(dirname(TEST_FILE), "..", "cli");
  * Lexer helpers — copied from cr-apply-strict-validation.test.ts so    *
  * the two guards read kubectl argv literals the same way.              *
  * ------------------------------------------------------------------ */
-
-/** Blank out comments while preserving line numbers (so failures point home). */
-function stripComments(src: string): string {
-    return src
-        .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " "))
-        .replace(/(^|[^:"'`\\])\/\/.*$/gm, "$1");
-}
 
 /** Index of the string terminator starting at `start` (quote char at start). */
 function skipString(s: string, start: number): number {

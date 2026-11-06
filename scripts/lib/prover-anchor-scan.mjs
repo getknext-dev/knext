@@ -60,6 +60,7 @@
 
 import { readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { stripComments } from '../../packages/kn-next/src/adapters/js-source-lexer.mjs';
 import { activeExemptions } from './dated-exemptions.mjs';
 
 /**
@@ -145,69 +146,28 @@ export function findProverFiles(repoRoot) {
 }
 
 /**
- * Blank out the INTERIOR of every real top-level JS string literal in `src`,
- * keeping length/line structure intact.
+ * Blank the INTERIOR of every real JS string literal in `src` AND every comment,
+ * keeping length/line structure intact (the shared token-aware lexer,
+ * `js-source-lexer.mjs`, in its blank-strings mode).
  *
  * A prover that mutates another SCRIPT's source (e.g.
  * `mutation-prove-scratch-space.mjs`, whose `anchor`/`replacement` pairs are
  * themselves JS snippets containing calls like `resolve(repoRoot, 'tests/…')`
  * AS TEXT) would otherwise have that quoted-inside-a-quote text picked up by
  * the subject-file `resolve(...)` scan below as if it named a real target —
- * a false positive this masking exists to prevent. Real string literals
- * cannot nest in JS, so a single linear scan (quote-state + escape handling,
- * no stack) is enough; this is NOT the brace-matching this module's history
- * tried and dropped for being bug-prone — no nesting depth is tracked here.
+ * a false positive this masking exists to prevent.
  *
- * Comments are skipped FIRST, before quote detection: this repo's own prose
+ * Comments are lexed FIRST, before quote detection: this repo's own prose
  * comments are full of apostrophes ("the run's ledger", "it's"), and an
- * apostrophe inside a `//`/`/* *\/` comment is not a string delimiter. Without
- * this, an odd apostrophe count in a comment desyncs the quote-state tracker
- * for the rest of the file — measured against
- * `mutation-prove-ledger-completeness.mjs`, whose real `resolve(...)` subject
- * declarations vanished entirely until this was added.
+ * apostrophe inside a comment is not a string delimiter. Without this, an odd
+ * apostrophe count in a comment desyncs the quote state for the rest of the file —
+ * measured against `mutation-prove-ledger-completeness.mjs`, whose real
+ * `resolve(...)` subject declarations vanished entirely until this was added.
+ * Template `${…}` expressions are code, so a template that interpolates a string
+ * no longer desyncs the scan either.
  */
 function maskStringLiterals(src) {
-  let out = '';
-  let i = 0;
-  while (i < src.length) {
-    const c = src[i];
-    if (c === '/' && src[i + 1] === '/') {
-      const nl = src.indexOf('\n', i);
-      const end = nl === -1 ? src.length : nl;
-      out += src.slice(i, end);
-      i = end;
-      continue;
-    }
-    if (c === '/' && src[i + 1] === '*') {
-      const close = src.indexOf('*/', i + 2);
-      const end = close === -1 ? src.length : close + 2;
-      out += src.slice(i, end);
-      i = end;
-      continue;
-    }
-    if (c === "'" || c === '"' || c === '`') {
-      const quote = c;
-      out += quote;
-      i += 1;
-      while (i < src.length && src[i] !== quote) {
-        if (src[i] === '\\') {
-          out += '  ';
-          i += 2;
-          continue;
-        }
-        out += src[i] === '\n' ? '\n' : ' ';
-        i += 1;
-      }
-      if (i < src.length) {
-        out += quote;
-        i += 1;
-      }
-      continue;
-    }
-    out += c;
-    i += 1;
-  }
-  return out;
+  return stripComments(src, { blankStrings: true });
 }
 
 /** Index of the matching `)` for an `(` at `openIdx` in `masked` (comments/strings already blanked). */

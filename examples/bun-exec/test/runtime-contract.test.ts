@@ -372,6 +372,35 @@ describe('checkBearer — fail-closed mutating-route guard', () => {
     const res = checkBearer(withAuth(`Bearer ${token}`), token);
     expect(res).toBeNull();
   });
+
+  it('denies (401) a wrong token of a different length, without throwing', () => {
+    // timingSafeEqual throws on unequal-length buffers: the length check must
+    // run first, shorter and longer alike.
+    expect(checkBearer(withAuth(`Bearer ${token}x`), token)?.status).toBe(401);
+    expect(checkBearer(withAuth('Bearer s'), token)?.status).toBe(401);
+    expect(checkBearer(withAuth('Bearer '), token)?.status).toBe(401);
+  });
+
+  it('denies (401) a wrong token of the SAME length', () => {
+    const sameLen = 'x'.repeat(token.length);
+    expect(checkBearer(withAuth(`Bearer ${sameLen}`), token)?.status).toBe(401);
+  });
+
+  it('denies (401) the bare token without the Bearer scheme', () => {
+    expect(checkBearer(withAuth(token), token)?.status).toBe(401);
+  });
+
+  it('denies (401) on an empty-string server token — fail closed', () => {
+    expect(checkBearer(withAuth('Bearer '), '')?.status).toBe(401);
+  });
+
+  it('compares multi-byte tokens by bytes, not UTF-16 length', () => {
+    // Latin-1 only: header values outside it cannot be constructed.
+    const t = 'tökén-ü';
+    expect(checkBearer(withAuth(`Bearer ${t}`), t)).toBeNull();
+    // same UTF-16 length, different bytes
+    expect(checkBearer(withAuth('Bearer token-u'), t)?.status).toBe(401);
+  });
 });
 
 describe('createGracefulShutdown — drain ordering + hardcap', () => {

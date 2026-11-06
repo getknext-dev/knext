@@ -306,7 +306,7 @@ Redis-backed cache. Kafka-driven revalidation returns when knext ships the consu
 The operator is also the policy boundary:
 
 - **Digest pinning is enforced.** A CR whose `image` is `:latest`, tag-only, or untagged is
-  **rejected** (`Degraded` / reason `InvalidImage`) and never deployed. The validator accepts a ref
+  **rejected** (`Degraded` / reason `InvalidSpec`, with a Warning event of reason `InvalidImage`) and never deployed. The validator accepts a ref
   only if it contains `@sha256:`.
 - **Mutating endpoints require auth.** App-level cache-invalidation routes require a signed bearer
   token; nothing mutating is open by default.

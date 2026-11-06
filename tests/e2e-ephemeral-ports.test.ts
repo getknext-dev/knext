@@ -77,6 +77,7 @@ import { describe, expect, it } from 'bun:test';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { stripComments } from '../packages/kn-next/src/adapters/js-source-lexer.mjs';
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
 
@@ -116,11 +117,6 @@ function scannedFiles(): string[] {
       /(^|\/)e2e-support\/[^/]*\.(mjs|cjs|js|ts)$/.test(f) ||
       /examples\/bun-exec\/test\/runtime-contract\.test\.ts$/.test(f),
   );
-}
-
-/** Strip comments so PROSE mentioning a port is never mistaken for a bind. */
-function stripComments(src: string): string {
-  return src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
 }
 
 /**

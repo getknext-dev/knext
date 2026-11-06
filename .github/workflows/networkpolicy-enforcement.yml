@@ -18,6 +18,7 @@ on:
     branches: ['**']
     paths:
       - 'packages/kn-next-operator/internal/controller/nextapp_controller.go'
+      - 'packages/kn-next-operator/internal/controller/nextapp_networkpolicy.go'
       - 'packages/kn-next-operator/internal/controller/networkpolicy_test.go'
       - 'packages/kn-next-operator/internal/controller/backendservice_render.go'
       - 'packages/kn-next-operator/cmd/policygen/**'

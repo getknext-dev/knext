@@ -25,6 +25,7 @@ import { describe, expect, it } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { stripComments } from "../adapters/js-source-lexer.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CLI_DIR = join(__dirname, "..", "cli");
@@ -44,13 +45,6 @@ function cliSources(): Map<string, string> {
     };
     walk(CLI_DIR, "");
     return out;
-}
-
-/** Blank out comments while preserving line numbers (mirrors the apply-strict-validation guard). */
-function stripComments(src: string): string {
-    return src
-        .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " "))
-        .replace(/(^|[^:"'`\\])\/\/.*$/gm, "$1");
 }
 
 /** Index of the string terminator starting at `start` (quote char at start). */

@@ -2820,6 +2820,15 @@ export const REMOTE_FETCH_ALLOWLIST = [
     // reads.
     segment: /^node scripts\/audit-published\.mjs$/,
   },
+  {
+    id: 'kubelet-ceiling-build-source',
+    // scripts/bench-cold-start-phases/ceiling/build.sh (local, offline build of the ceiling-test
+    // kubelet): shallow-clones upstream kubernetes at the pinned tag. The very next lines compare
+    // the checked-out commit with the pinned COMMIT and exit non-zero on a mismatch, then
+    // `reset --hard` to it. The tree is only compiled into a local binary; the script contacts no
+    // cluster and applies no manifest.
+    segment: /^git clone --depth 1 --branch "\$TAG" "\$REPO" "\$WORK"$/,
+  },
 ];
 
 /**

@@ -22,10 +22,14 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/types"
+	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	appsv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/api/v1alpha1"
 )
@@ -38,7 +42,7 @@ var _ = Describe("NextApp Controller", func() {
 
 		typeNamespacedName := types.NamespacedName{
 			Name:      resourceName,
-			Namespace: "default", // TODO(user):Modify as needed
+			Namespace: "default",
 		}
 		nextapp := &appsv1alpha1.NextApp{}
 
@@ -66,7 +70,7 @@ var _ = Describe("NextApp Controller", func() {
 			// finalizer (issue #74) is removed and the object is GC'd.
 			deleteAndFinalize(ctx, typeNamespacedName)
 		})
-		It("should successfully reconcile the resource", func() {
+		It("adds the finalizer, creates the child Knative Service and sets a verdict condition", func() {
 			By("Reconciling the created resource")
 			controllerReconciler := &NextAppReconciler{
 				Client: k8sClient,
@@ -77,8 +81,30 @@ var _ = Describe("NextApp Controller", func() {
 				NamespacedName: typeNamespacedName,
 			})
 			Expect(err).NotTo(HaveOccurred())
-			// TODO(user): Add more specific assertions depending on your controller's reconciliation logic.
-			// Example: If you expect a certain status condition after reconciliation, verify it here.
+
+			fetched := &appsv1alpha1.NextApp{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, fetched)).To(Succeed())
+
+			By("the external-cleanup finalizer was added")
+			Expect(controllerutil.ContainsFinalizer(fetched, ExternalCleanupFinalizer)).To(BeTrue())
+
+			By("exactly one child Knative Service exists, owned by the NextApp")
+			svcs := &servingv1.ServiceList{}
+			Expect(k8sClient.List(ctx, svcs, client.InNamespace(typeNamespacedName.Namespace))).To(Succeed())
+			var children []servingv1.Service
+			for _, svc := range svcs.Items {
+				if metav1.IsControlledBy(&svc, fetched) {
+					children = append(children, svc)
+				}
+			}
+			Expect(children).To(HaveLen(1))
+			Expect(children[0].Name).To(Equal(resourceName))
+
+			By("computeStatusVerdict set the Ready condition (envtest runs no Knative controller, so the child is not Ready)")
+			ready := apimeta.FindStatusCondition(fetched.Status.Conditions, ConditionReady)
+			Expect(ready).NotTo(BeNil(), "Ready condition must be set by the status verdict")
+			Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+			Expect(ready.Reason).To(Equal("KnativeServiceNotReady"))
 		})
 	})
 })

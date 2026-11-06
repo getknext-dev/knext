@@ -444,6 +444,11 @@ per-call identity token still decides who may call, but it is no longer backed b
 isolation. Do this only when you replace the policy with one of your own that admits your
 ingress layer's pods, and leave it unset on a Kourier cluster.
 
+While the policy is off, the function's status carries a `NetworkPolicyDisabled` condition set to
+`True` and a `Warning` event with reason `NetworkPolicyOptedOut` is emitted once when it takes
+effect, so the lost isolation is visible with `kubectl describe backendservice pricing`. `Ready`
+is not changed. The condition is removed when you set the field back to `true` or unset it.
+
 A bound function stays up a little longer than its zone after its own last call, so a zone that
 just called it does not find it cold on the next request.
 

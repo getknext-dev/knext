@@ -339,7 +339,7 @@ const INFRA_REPOS = [
   /^registry:2/,
   /^(mirror\.gcr\.io\/library\/)?postgres:/,
   /^oven\/bun:/,
-  /^node:/,
+  /^node[:@]/,
   /^curlimages\/curl@/,
   /^gcr\.io\/distroless\//,
 ];

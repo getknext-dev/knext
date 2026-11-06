@@ -636,7 +636,7 @@ const MUTATIONS = [
     id: 'M73',
     expect: 'red',
     claim: 'regex literals are not recognised — `/https?:\\/\\//` swallows the rest of the line',
-    subject: 'guard',
+    subject: 'lexer',
     anchor: "    } else if (c === '/' && regexMayStart() && scanRegex()) {",
     replacement: '    } else if (false) {',
   },
@@ -644,7 +644,7 @@ const MUTATIONS = [
     id: 'M74',
     expect: 'red',
     claim: "strings are not recognised — a '/*' inside one opens a comment",
-    subject: 'guard',
+    subject: 'lexer',
     anchor: '    } else if (c === \'"\' || c === "\'") {\n      scanString(c);',
     replacement: '    } else if (false) {\n      scanString(c);',
   },
@@ -829,6 +829,8 @@ const prover = createGuardProver({
   spec: SPEC,
   subjects: {
     guard: 'scripts/check-escalation-triggers.mjs',
+    // The comment/string lexer the guard imports (shared with the other source-text guards).
+    lexer: 'packages/kn-next/src/adapters/js-source-lexer.mjs',
   },
 });
 

@@ -25,6 +25,7 @@
 
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
+import { stripComments } from "../adapters/js-source-lexer.mjs";
 import { UsageError } from "./shared";
 import { readNextConfigStrict } from "./turbopack-fragments-guard";
 
@@ -61,30 +62,31 @@ export function classifyStaticExport(
     configText: string,
 ): StaticExportDeclaration {
     const text = stripCommentsStringAware(configText);
+    // The brace walk reads a copy with string and regex BODIES blanked (same
+    // width, so offsets line up with `text`): a quote or bracket inside a
+    // string, template or regex literal is then plain padding, and the walk
+    // needs no quote tracking of its own.
+    const walk = stripComments(configText, {
+        blankStrings: true,
+        blankRegex: true,
+    });
     const re = /\boutput\s*:\s*(["'`])export\1/g;
     let result: StaticExportDeclaration = "none";
     for (let m = re.exec(text); m !== null; m = re.exec(text)) {
         const stack: { c: string; at: number }[] = [];
-        let quote: string | undefined;
         let broken = false;
         for (let i = 0; i < m.index; i++) {
-            const c = text[i];
-            if (quote) {
-                if (c === "\\") i++;
-                else if (c === quote) quote = undefined;
-            } else if (c === '"' || c === "'" || c === "`") quote = c;
-            else if (c === "{" || c === "[" || c === "(")
-                stack.push({ c, at: i });
+            const c = walk[i];
+            if (c === "{" || c === "[" || c === "(") stack.push({ c, at: i });
             else if (c === "}" || c === "]" || c === ")") {
                 if (stack.pop() === undefined) broken = true;
             }
         }
         const braces = stack.filter((s) => s.c === "{");
         const brackets = stack.filter((s) => s.c === "[").length;
-        const prev = text.slice(0, m.index).trimEnd().slice(-1);
+        const prev = walk.slice(0, m.index).trimEnd().slice(-1);
         const topLevel =
             !broken &&
-            quote === undefined &&
             braces.length === 1 &&
             brackets === 0 &&
             (prev === "{" || prev === ",");
@@ -96,30 +98,13 @@ export function classifyStaticExport(
     return result;
 }
 
-const QUOTES = ["'", '"', "`"];
-
-/** Strip `//` and block comments, but never inside a string or template literal. */
+/**
+ * Strip `//` and block comments, but never inside a string, template literal
+ * or regex literal. The shared lexer (keep-strings mode): comments become
+ * same-width blanks, so offsets and newlines are preserved.
+ */
 export function stripCommentsStringAware(src: string): string {
-    let out = "";
-    let quote: string | undefined;
-    for (let i = 0; i < src.length; i++) {
-        const c = src[i];
-        if (quote) {
-            out += c;
-            if (c === "\\") out += src[++i] ?? "";
-            else if (c === quote) quote = undefined;
-        } else if (QUOTES.includes(c)) {
-            quote = c;
-            out += c;
-        } else if (c === "/" && src[i + 1] === "/") {
-            while (i < src.length && src[i] !== "\n") i++;
-            i--;
-        } else if (c === "/" && src[i + 1] === "*") {
-            const end = src.indexOf("*/", i + 2);
-            i = end === -1 ? src.length : end + 1;
-        } else out += c;
-    }
-    return out;
+    return stripComments(src);
 }
 
 /** Wrapper calls (`defineConfig(`, `withX(`) and an optional `(phase) => (` arrow. */

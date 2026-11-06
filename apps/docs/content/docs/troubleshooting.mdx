@@ -42,6 +42,7 @@ kubectl get events -n <ns> --field-selector involvedObject.name=<app> --sort-by=
 | Surfaced by | Reason or condition | Section |
 | --- | --- | --- |
 | Event, `Degraded=True` | `InvalidImage` | [Image rejected](#image-rejected) |
+| Event, `Degraded=True` | `InvalidSpec` | [Spec rejected](#spec-rejected) |
 | Event, `Degraded=True` | `ReconcileFailed` | [Reconcile failing](#reconcile-failing) |
 | `Ready=Unknown` or `False` | `IngressNotProgrammed` | [Route never programs](#route-never-programs) |
 | `Ready=False`, event | `PinnedRevisionNotFound` | [Pinned revision missing](#pinned-revision-missing) |
@@ -57,7 +58,8 @@ kubectl get events -n <ns> --field-selector involvedObject.name=<app> --sort-by=
 ## Image rejected [#image-rejected]
 
 **Symptom.** The app never rolls out. `kubectl describe nextapp <app>` shows a Warning event with
-`reason: InvalidImage` and the status carries `Degraded=True` (`reason: InvalidSpec`). The message
+`reason: InvalidImage` and the status carries `Degraded=True` (`reason: InvalidSpec`). Other spec
+errors raise the event reason `InvalidSpec` instead (see [Spec rejected](#spec-rejected)). The message
 reads:
 
 ```
@@ -80,6 +82,22 @@ docker buildx imagetools inspect ghcr.io/you/myapp:v1 --format '{{json .Manifest
 `knext deploy` resolves the digest for you; if you author the `NextApp` by hand, the `@sha256:` suffix
 is mandatory. The check runs at admission and again in the reconciler, so a webhook that is down does
 not let a bad image through.
+
+## Spec rejected [#spec-rejected]
+
+**Symptom.** The app never rolls out. `kubectl describe nextapp <app>` shows a Warning event with
+`reason: InvalidSpec`, and the status carries `Degraded=True` and `Ready=False`, both with
+`reason: InvalidSpec`. The message names the field and the rule, for example a `resources` quantity that
+does not parse, or `maxScale` × `poolMax` above the connection budget.
+
+**Cause.** The spec failed validation. An image that is not digest-pinned is the one spec error with its
+own event reason, `InvalidImage` (see [Image rejected](#image-rejected)); every other spec error uses
+`InvalidSpec`. The `Degraded` and `Ready` conditions say `InvalidSpec` in both cases. If you alert on the
+`InvalidImage` event reason, that alert keeps firing for unpinned images and for a missing image
+(`spec.image` empty), and for nothing else.
+
+**Fix.** Read the message in `kubectl get nextapp <app> -n <ns> -o jsonpath='{.status.conditions}' | jq`,
+correct the named field, and re-apply the `NextApp`. The operator re-validates on the next reconcile.
 
 ## Reconcile failing [#reconcile-failing]
 

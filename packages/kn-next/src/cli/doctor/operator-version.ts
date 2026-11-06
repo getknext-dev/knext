@@ -9,14 +9,14 @@
 
 import type { DeploymentJson } from "./types";
 
-export const VERSION_LABEL = "app.kubernetes.io/version";
+const VERSION_LABEL = "app.kubernetes.io/version";
 
 /**
  * The committed sentinel a source / `operator-edge` build carries in
  * `config/manager/manager.yaml`. Only an `operator-vX.Y.Z` tag publish
  * replaces it, so it must never be mistaken for (or parsed as) a version.
  */
-export const UNRELEASED_SENTINEL = "unreleased";
+const UNRELEASED_SENTINEL = "unreleased";
 
 export interface Semver {
     major: number;

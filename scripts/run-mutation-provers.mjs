@@ -46,7 +46,7 @@
  */
 
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { loadavg, tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -120,11 +120,12 @@ const MAX_CAPTURE = 64 * 1024 * 1024;
  */
 function runProver(
   absPath,
-  { cwd, timeoutMs, echo = (c) => process.stdout.write(c), watch, watchEveryMs = 2000 },
+  { cwd, timeoutMs, env, echo = (c) => process.stdout.write(c), watch, watchEveryMs = 2000 },
 ) {
   return new Promise((resolvePromise) => {
     const child = spawn(process.execPath, [absPath], {
       cwd,
+      env,
       // Its own process group, so the kill below can take the whole tree.
       detached: true,
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -350,23 +351,31 @@ const thresholds = thresholdsFromEnv();
 const MEMINFO_PATH = process.env.KNEXT_LANE_MEMINFO_PATH || '/proc/meminfo';
 const SAMPLE_EVERY_MS = Number(process.env.KNEXT_LANE_SAMPLE_MS) || 10_000;
 const WATCH_EVERY_MS = Number(process.env.KNEXT_LANE_WATCH_MS) || 2_000;
-const SYSTEM_TMP_PREFIXES = ['.', 'systemd-private', 'snap-private', 'tmux-'];
 
-function tmpEntries() {
-  try {
-    return new Set(readdirSync(tmpdir()));
-  } catch {
-    return new Set();
-  }
-}
+/**
+ * The runner's PRIVATE temp dir (only when cleanup is on). Each prover gets it as
+ * TMPDIR/TMP/TEMP, so everything a prover leaves via `os.tmpdir()` lands here and is
+ * the only thing the cleanup touches. The ambient temp dir is shared with every other
+ * process on the machine; sweeping it deleted bystanders' files.
+ */
+const privateTmp = cleanupOn ? mkdtempSync(resolve(tmpdir(), 'knext-lane-provers-')) : null;
+const proverEnv = privateTmp
+  ? { ...process.env, TMPDIR: privateTmp, TMP: privateTmp, TEMP: privateTmp }
+  : process.env;
 
-/** Remove the entries that appeared in the temp dir since `before`. */
-function cleanNewTmp(before) {
+/** Remove everything inside the private temp dir (the dir itself stays for the next prover). */
+function cleanPrivateTmp() {
+  if (!privateTmp) return 0;
   let removed = 0;
-  for (const name of tmpEntries()) {
-    if (before.has(name) || SYSTEM_TMP_PREFIXES.some((p) => name.startsWith(p))) continue;
+  let names = [];
+  try {
+    names = readdirSync(privateTmp);
+  } catch {
+    return 0;
+  }
+  for (const name of names) {
     try {
-      rmSync(resolve(tmpdir(), name), { recursive: true, force: true });
+      rmSync(resolve(privateTmp, name), { recursive: true, force: true });
       removed += 1;
     } catch {
       // a diagnostic/cleanup step must never fail the lane
@@ -374,6 +383,13 @@ function cleanNewTmp(before) {
   }
   return removed;
 }
+process.on('exit', () => {
+  if (privateTmp) rmSync(privateTmp, { recursive: true, force: true });
+});
+// A job timeout or cancellation sends SIGTERM/SIGINT, which skips 'exit' unless
+// handled; exit with the conventional code so the private dir is still removed.
+process.once('SIGTERM', () => process.exit(143));
+process.once('SIGINT', () => process.exit(130));
 
 /** Delete regenerable build output; returns what was removed. */
 function cleanBuildOutput() {
@@ -477,9 +493,9 @@ for (const prover of provers) {
   const started = Date.now();
   const untrackedBefore = untrackedFiles();
   const modifiedBefore = modifiedTrackedFiles();
-  const tmpBefore = tmpEntries();
   const run = await runProver(prover.absPath, {
     cwd: REPO_ROOT,
+    env: proverEnv,
     timeoutMs,
     watch: makeWatch(prover.relPath),
     watchEveryMs: WATCH_EVERY_MS,
@@ -508,7 +524,7 @@ for (const prover of provers) {
   results.push({ relPath: prover.relPath, summary, findings });
 
   if (cleanupOn) {
-    const n = cleanNewTmp(tmpBefore);
+    const n = cleanPrivateTmp();
     if (n > 0)
       console.log(`   cleanup: removed ${n} temp entr${n === 1 ? 'y' : 'ies'} the prover left`);
   }

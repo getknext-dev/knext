@@ -136,7 +136,7 @@ Auth is one factor; the second is **network isolation**. The operator reconciles
 is **not** a hand-applied or CLI-generated manifest).
 
 - **Object:** `NetworkPolicy` named `<app>-allow-ingress`, owner-referenced to the `NextApp`
-  (garbage-collected on delete). Reconciled in `internal/controller/nextapp_controller.go`
+  (garbage-collected on delete). Reconciled in `internal/controller/nextapp_networkpolicy.go`
   (`reconcileNetworkPolicy`), modeled on the operator's existing
   `config/network-policy/allow-metrics-traffic.yaml`.
 - **podSelector:** `serving.knative.dev/service: <app>` — the label Knative stamps on every revision
