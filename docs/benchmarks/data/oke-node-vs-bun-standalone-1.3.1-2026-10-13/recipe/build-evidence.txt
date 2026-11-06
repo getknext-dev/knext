@@ -1,0 +1,12 @@
+Step #0: [13:37:21] INFO (kn-next): Standalone executable compiled (bytecode verified)
+Step #0: bun 1.4.2 node v22.23.3 npm 10.9.9
+Step #0: VERSION @getknext/core 1.3.1
+Step #0: VERSION @getknext/db 1.3.1
+Step #0: VERSION @getknext/lib 1.3.1
+Step #0: VERSION next 16.3.8
+Step #0: VERSION react 19.3.0
+Step #0: VERSION react-dom 19.3.0
+Step #1: #22 [standalone-node 13/13] RUN PORT=8901 HOSTNAME=127.0.0.1 KNEXT_WARM_PATH="/api/health" node /app/knext-compile-cache-bake.mjs  && bytes=$(find /app/.next/standalone/.next/compile-cache -type f -exec cat {} + | wc -c)  && echo "compile cache baked: ${bytes} bytes in $(find /app/.next/standalone/.next/compile-cache -type f | wc -l) file(s)"  && if [ "${bytes}" -lt "262144" ]; then       echo "compile-cache bake produced ${bytes} bytes, below the floor of 262144" >&2;       exit 1;     fi
+Step #1: #22 1.329 compile cache baked: 1352888 bytes in 470 file(s)
+Step #1: b131 us-central1-docker.pkg.dev/gsw-mcp/knative-next-repo/bench131-b131@sha256:f6954acebc8a936fb68298510a0aa724b336fd04baec77e604b9e45316b8bcc2
+Step #1: n131 us-central1-docker.pkg.dev/gsw-mcp/knative-next-repo/bench131-n131@sha256:c127c08d2e866df628b21ff07c0371d60b7acef3ba897a2938f20461a1ef42f5
