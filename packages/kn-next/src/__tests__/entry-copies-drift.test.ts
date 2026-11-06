@@ -24,7 +24,18 @@ const TEMPLATES: Record<string, string> = {
         "packages/kn-next/templates/app/knext-node-entry.mjs.hbs",
 };
 // copy path -> reason its body intentionally differs from the template.
-const ALLOWLIST: Record<string, string> = {};
+const ALLOWLIST: Record<string, string> = {
+    "examples/bun-exec/knext-bun-entry.mjs":
+        "standalone example: own lockfile, no @getknext/core dependency, so it cannot take the template image-optimizer and sharp imports",
+};
+// Lines every copy (allowlisted or not) must keep: the taken-port guard.
+const GUARD_MARKERS = [
+    "import { serve as srvxServe } from 'srvx/bun';",
+    "let appListenerReported = false;",
+    "process.once('exit', (code) => {",
+    "return srvxServe(options);",
+    "appListenerReported = true;",
+];
 
 function stripHeader(src: string): string {
     const m = /^\/\*\*[\s\S]*?\*\/\n?/.exec(src);
@@ -67,6 +78,13 @@ describe("in-repo knext entry copies match the scaffold template (#2780)", () =>
             } else {
                 expect(got).toBe(want);
             }
+        });
+    }
+
+    for (const copy of copies) {
+        it(`${copy} keeps the taken-port guard`, () => {
+            const got = read(copy);
+            for (const m of GUARD_MARKERS) expect(got, m).toContain(m);
         });
     }
 
