@@ -118,6 +118,10 @@ CloudNativePG pooler) so many pods share a bounded set of backend connections.
 That work is **explicitly out of scope here and owned by W3 (#378)**; this ADR
 only makes the wall visible and enforced.
 
+**Amended by ADR-0064.** The operator default (20) is the built-in layer. A `KnextPlatform` may
+override it per cluster; an app's own value (including the scaffold's 100) always wins. Whether
+the scaffold keeps 100 is decided by experiment G3.
+
 ## Consequences
 
 - **Reactive scale-out actually works** under high traffic: apps add pods at

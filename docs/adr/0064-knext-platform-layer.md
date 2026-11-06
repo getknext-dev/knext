@@ -1,14 +1,15 @@
 # ADR-0064: The knext platform layer — a cluster-scoped `KnextPlatform` config read by the operator
 
-- **Status:** **Accepted for direction** (founder, 2026-10-03). **Proposed for design**, pending the
-  sprint-close design review and the founder applying the rules-file amendments in Appendix A.
+- **Status:** **Accepted** (founder, 2026-10-11): direction accepted 2026-10-03, design and
+  Appendix A accepted 2026-10-11. A4, A5 and A7 are applied in the ADRs they amend; A1, A2, A3, A6
+  and A8 are applied by the founder to `CLAUDE.md` and `.claude/rules/`.
   jev on this status split: accepted-direction/proposed-design **0.87** / accepted 0.10 / proposed
   0.03.
 - **Date:** 2026-10-03
 - **Trigger class:** ADR + CRD + security (new CRD group, new cluster components, a privileged node
   agent). Founder-directed. Reviewed at sprint close per `.claude/rules/workflow.md` (2026-09-22
   amendment: not a merge gate).
-- **Relates to / amends (proposed, see Appendix A):** ADR-0001 (operator = single source of truth),
+- **Relates to / amends (see Appendix A):** ADR-0001 (operator = single source of truth),
   ADR-0028 (`containerConcurrency` default and the connection wall), ADR-0037 (image pre-pull
   DaemonSet, "opt-in, never default"), ADR-0044 (8 MiB body cap derived from concurrency 20),
   ADR-0025 and the 2026-06-26 DB-engine scope decision (no DB machinery, kept unchanged), ADR-0063
@@ -705,7 +706,7 @@ decision above; each item is a place the build had to choose within it.
   does emit, because the operator reads a present block's `maxScale` literally and 0 is Knative's
   "unbounded". The resource back-fill (D2 consequence b, action P2-3) is **not** changed here.
 
-## Appendix A — rules-file and ADR amendments, proposed for the founder to apply
+## Appendix A — rules-file and ADR amendments (accepted 2026-10-11)
 
 This PR edits none of these files. Exact proposed wording:
 

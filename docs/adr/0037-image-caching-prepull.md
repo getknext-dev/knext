@@ -62,6 +62,9 @@ against containerd GC) — every node. Scale-from-zero then never waits on the p
 - **Reconciliation home:** in the operator (ADR-0001), gated by `computeStatusVerdict` for any status
   condition (never a new `Reconcile` branch). The CLI only emits the CR field; it never creates the
   DaemonSet.
+- **Amended by ADR-0064.** `imagePrewarm` stays off and opt-in per app, and is never on in the
+  default platform profile or when no `KnextPlatform` exists. A cluster admin may enable a capped
+  platform policy (`images.prewarm.mode: selected | all`, bounded by `maxApps`, reported in status).
 
 ## Options considered
 
