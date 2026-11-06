@@ -10,7 +10,7 @@
 # govulncheck read the standard library version compiled into the binary.
 
 # golang:1.26.10
-FROM golang:1.26.10@sha256:b27fde63cc160f04a81cf7cf43c6560b47d736a1f0e3babe17745e8fbdff198d AS build
+FROM golang:1.27.2@sha256:820153096fda4de6ac1b7194d12e416b7dd8f4e9a33d17e0345b111b945162d8 AS build
 ARG TARGETOS
 ARG TARGETARCH
 WORKDIR /src
