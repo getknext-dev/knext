@@ -576,15 +576,20 @@ describe('the v1.3 workflow is DERIVED from the tag harness, provably', () => {
   it('runs the same 16-shard x 4-cell shape and the tag-declared NEXTJS_REF', () => {
     const { source } = derived();
     const wf = parse(committed) as any;
-    const v10 = parse(read(V10_WORKFLOW)) as any;
     expect(wf.env.COMPAT_SHARD_TOTAL).toBe('16');
     expect(wf.jobs['deploy-tests'].strategy.matrix.shard).toHaveLength(16);
-    // NEXTJS_REF comes from the SOURCE (the tag's own YAML) untouched — no
-    // substitution may rewrite it.
-    expect(
-      lineSubstitutions(SPEC).some((s: { from: string }) => s.from.includes('NEXTJS_REF')),
-    ).toBe(false);
-    expect(source.sourceText).toContain(`NEXTJS_REF: ${v10.env.NEXTJS_REF}`);
+    // NEXTJS_REF comes from the SOURCE (the tag's own YAML) untouched, except
+    // for the ONE declared v1.3-only override (SPEC.nextjsRefOverride, asserted
+    // in tests/compat-v13-next-ref-override.test.ts): no other substitution may
+    // rewrite it, and the override's `to` is what the lane then carries.
+    const touching = lineSubstitutions(SPEC)
+      .filter((s: { from: string }) => s.from.includes('NEXTJS_REF'))
+      .map((s: { id: string }) => s.id);
+    expect(touching).toEqual(['nextjs-ref-env']);
+    expect(source.sourceText).toContain(
+      `NEXTJS_REF: \${{ github.event.inputs.nextjsRef || '${SPEC.nextjsRefOverride.from}' }}`,
+    );
+    expect(parse(committed).env.NEXTJS_REF).toContain(`'${SPEC.nextjsRefOverride.to}'`);
   });
 });
 

@@ -48,6 +48,12 @@
  *     --base-pin-file <path> \
  *     --head-pin-file <path> \
  *     --merge-base-pin-file <path> \
+ *     --inherited-pins-file <path> \
+ *       (#2342: JSON array of the pins at every merged-in parent in the PR's
+ *       range, from scripts/collect-merged-in-pins.mjs; required)
+ *     [--base-sha <PR base commit>]
+ *       (#2435: a released base only skips when a v<base-version> tag is an ancestor of this sha;
+ *       absent = guarded, fail closed)
  *     [--base-version <base commit's @getknext/core version>]
  *       (#2098: a base on a different major.minor than the pinned rcTag is skipped
  *       with a stated reason; absent or unparseable = guarded, fail closed)
@@ -61,6 +67,7 @@ import {
   decidePublishedBytesScope,
   PIN_FILE,
   publishScopeDirs,
+  releasedBaseSupersedesRc,
 } from './lib/published-bytes-freeze-check.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -112,6 +119,41 @@ export function defaultTagResolves(repoRoot, tag) {
   }
 }
 
+/**
+ * #2435 — is `version` genuinely released as of `baseSha`? True only when a tag
+ * `v<version>` exists and is an ANCESTOR of `baseSha`. Every failure (non-X.Y.Z
+ * version, unknown sha, tag absent, shallow/tagless checkout, not a repo) is
+ * `false`, so the caller's guard runs — fail closed, never open.
+ *
+ * @param {string} repoRoot
+ * @param {string | undefined} baseSha
+ * @param {string | undefined} version
+ * @returns {boolean}
+ */
+export function defaultBaseReleaseTagged(repoRoot, baseSha, version) {
+  if (typeof version !== 'string' || !/^\d+\.\d+\.\d+$/.test(version)) return false;
+  if (typeof baseSha !== 'string' || !/^[0-9a-f]{7,64}$/i.test(baseSha)) return false;
+  const git = (args) =>
+    execFileSync('git', args, {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+  try {
+    const tagCommit = git([
+      'rev-parse',
+      '--verify',
+      '--quiet',
+      `refs/tags/v${version}^{commit}`,
+    ]).trim();
+    const base = git(['rev-parse', '--verify', '--quiet', `${baseSha}^{commit}`]).trim();
+    git(['merge-base', '--is-ancestor', tagCommit, base]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // `./ga-tarball-diff.mjs` is deliberately NOT imported at module scope — see
 // `ga-tarball-diff-gate.mjs`'s own header for the identical reasoning: it
 // pulls in `lib/tar-entries.mjs` -> the `tar` npm devDependency, and a SKIP
@@ -154,6 +196,10 @@ const TITLE = 'Published-bytes freeze check';
  *   merge base; defaults to `basePin`. Decides whether a present head marker
  *   was INTRODUCED by this PR rather than inherited (the #1635 rule, applied
  *   here).
+ * @param {readonly unknown[]} [opts.inheritedPins] the pins at every
+ *   merged-in parent in the PR's range (#2342); a head marker matching one
+ *   arrived with a merged branch and exempts nothing. Defaults to `[]` (the
+ *   CLI requires the file).
  * @param {string} [opts.repoRoot]
  * @param {(...args: unknown[]) => void} [opts.log]
  * @param {Date} [opts.now]
@@ -161,6 +207,10 @@ const TITLE = 'Published-bytes freeze check';
  * @param {(argv: string[], opts?: { log?: typeof console.log, repoRoot?: string }) => number} [opts.runDiff]
  *   injectable so unit tests never spawn `git worktree`/`bun`/a child `node` process.
  * @param {string | undefined} [opts.summaryPath] `$GITHUB_STEP_SUMMARY`; unset locally.
+ * @param {string | undefined} [opts.baseSha] the PR base commit; with `baseVersion`, used to
+ *   verify an ancestor `v<baseVersion>` tag (#2435). Absent = no tag verified = guarded.
+ * @param {(repoRoot: string, baseSha: string | undefined, version: string | undefined) => boolean} [opts.baseReleaseTagged]
+ *   injectable release-tag verifier.
  * @param {string | undefined} [opts.baseVersion] the PR base commit's `@getknext/core` version
  *   (#2098); a different major.minor than the pinned rcTag is not the credentialed line and is
  *   skipped, anything else (incl. unset or unparseable) stays guarded.
@@ -171,6 +221,7 @@ export function main({
   basePin,
   headPin,
   mergeBasePin = basePin,
+  inheritedPins = [],
   repoRoot = defaultRepoRoot,
   log = console.log,
   now = new Date(),
@@ -178,6 +229,8 @@ export function main({
   runDiff = defaultRunDiff,
   summaryPath = process.env.GITHUB_STEP_SUMMARY,
   baseVersion,
+  baseSha,
+  baseReleaseTagged = defaultBaseReleaseTagged,
 }) {
   if (!Array.isArray(changedFiles)) {
     throw new Error('main() requires changedFiles: string[] — the files this PR touched');
@@ -201,9 +254,14 @@ export function main({
     basePin,
     headPin,
     mergeBasePin,
+    inheritedPins,
     changedFiles,
     packageDirs,
     baseVersion,
+    baseReleaseTagged:
+      baseSha !== undefined &&
+      releasedBaseSupersedesRc(baseVersion, basePin?.rcTag) &&
+      baseReleaseTagged(repoRoot, baseSha, baseVersion),
     now,
   });
 
@@ -211,6 +269,10 @@ export function main({
     announce('notice', 'SKIP', decision.reason);
     return 0;
   }
+
+  // Before the tag lookup, so a fail-closed exit still says why the marker
+  // the author added did not exempt this PR.
+  if (decision.markerNote) announce('warning', 'MARKER IGNORED', decision.markerNote);
 
   if (!tagResolves(repoRoot, decision.rcTag)) {
     announce(
@@ -255,7 +317,9 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const basePinFile = arg('base-pin-file');
   const headPinFile = arg('head-pin-file');
   const mergeBasePinFile = arg('merge-base-pin-file');
+  const inheritedPinsFile = arg('inherited-pins-file');
   const baseVersion = arg('base-version') || undefined;
+  const baseSha = arg('base-sha') || undefined;
   if (!changedFilesFile || !basePinFile || !headPinFile) {
     console.error(
       'published-bytes-freeze-check: --changed-files-file, --base-pin-file and --head-pin-file are all required',
@@ -269,6 +333,15 @@ if (import.meta.url === `file://${process.argv[1]}`) {
         'introduced the marker" check — mirrors compat-credential-freeze-guard.mjs\'s identical ' +
         'requirement). Pass the pin read at `git merge-base` of the PR base and head, even when ' +
         'it is `{"rcTag": null}`.',
+    );
+    process.exit(2);
+  }
+  if (!inheritedPinsFile) {
+    console.error(
+      'published-bytes-freeze-check: --inherited-pins-file is required — without it this would ' +
+        'fail OPEN, reading a publishedBytesBumpMarker brought in by a merged branch as ' +
+        'introduced by this PR (#2342). Pass the JSON array scripts/collect-merged-in-pins.mjs ' +
+        'writes for the merged-in parents in merge-base..head, even when it is `[]`.',
     );
     process.exit(2);
   }
@@ -297,8 +370,17 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const basePin = readPinFile(basePinFile, 'base pin file');
   const headPin = readPinFile(headPinFile, 'head pin file');
   const mergeBasePin = readPinFile(mergeBasePinFile, 'merge-base pin file');
+  const inheritedPins = readPinFile(inheritedPinsFile, 'inherited pins file');
+  if (!Array.isArray(inheritedPins)) {
+    console.error(
+      `published-bytes-freeze-check: ${inheritedPinsFile} must be a JSON array of pins`,
+    );
+    process.exit(2);
+  }
   try {
-    process.exit(main({ changedFiles, basePin, headPin, mergeBasePin, baseVersion }));
+    process.exit(
+      main({ changedFiles, basePin, headPin, mergeBasePin, inheritedPins, baseVersion, baseSha }),
+    );
   } catch (err) {
     console.error(`[published-bytes-freeze-check] ERROR: ${err.message}`);
     process.exit(1);

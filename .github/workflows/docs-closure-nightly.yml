@@ -90,6 +90,7 @@ jobs:
           severity: HIGH,CRITICAL
           exit-code: '1'
           ignore-unfixed: true
+          trivyignores: security/docs-closure-trivyignore.yaml
           format: table
 
   # ── Idempotent pinned alert (mirrors nightly-red-alert in test-e2e-deploy) ───

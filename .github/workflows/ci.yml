@@ -3,8 +3,14 @@ name: CI
 on:
   pull_request:
     branches: ['**']
+  # Every long-lived release line, not just `main` (#2249): a push to
+  # `integration/v2` used to run no ci.yml job, so the combined tree after a
+  # merge or forward-merge was never tested on its own. `integration/**`, not a
+  # list of today's lines, so the next line is covered before it exists. A push
+  # only runs the ci.yml AT THE PUSHED COMMIT, so a line picks this up when this
+  # file reaches it. Guarded by tests/integration-line-ci-triggers.test.ts.
   push:
-    branches: [main]
+    branches: [main, 'integration/**']
   # The GitHub merge queue runs this repo's REQUIRED status checks on a temporary
   # `refs/heads/gh-readonly-queue/main/...` ref via the `merge_group` event. Six
   # of ci.yml's jobs post required contexts, so without this trigger those checks
@@ -22,9 +28,10 @@ on:
 # in real run logs): a `pull_request` run's ref is `refs/pull/<n>/merge`
 # (run 31047101359) and a `push` run's is `refs/heads/main` (run 31047831835),
 # so the two triggers cannot collide on `github.ref` and do not cancel each
-# other. `event_name` is in the key so that stays true by construction if
-# `push:` is ever widened past `[main]`, and `workflow` so another workflow
-# copying this idiom cannot join CI's group.
+# other. `event_name` is in the key so that stays true by construction now that
+# `push:` is widened past `[main]` to `integration/**` (#2249), and `workflow`
+# so another workflow copying this idiom cannot join CI's group. Each release
+# line's push group is keyed on its own ref, so lines never cancel each other.
 #
 # Ref scoping is also what keeps this compatible with the #667 blocking-gate
 # audit (tests/helpers/blocking-gate.ts): the only run that can cancel a gate
@@ -40,13 +47,27 @@ on:
 # Keying the GROUP on `event_name` stops the two triggers cancelling each other,
 # but it does not stop the `push`->`main` group cancelling ITSELF: two merges
 # landing inside one CI duration would cancel `main`'s run for the intermediate
-# commit and leave it with no verdict. `main` has already been red across three
+# commit and leave it with no verdict. The same holds for every
+# `integration/**` line (#2249): its push runs are not cancelled either. `main` has already been red across three
 # consecutive commits here, and a per-commit result is what makes that
 # bisectable. The saving #674 is for is entirely in the `pull_request` group, so
 # it is taken there and nowhere else. The cost, stated: consecutive merges to
 # `main` are billed in full.
+# #2607 — `push` and `merge_group` runs are NOT grouped by ref. Keyed on ref, a
+# requeued PR's merge_group run shares `gh-readonly-queue/main/pr-N-<sha>` with
+# the stale queued attempt; the stale run holds the group and the new run sits
+# `pending` with zero jobs (main's queue stalled ~3h on 2026-10-28). The same
+# held for old `push` runs on a line. Those events now key on `run_id` and
+# `run_attempt`, so each run is its own group and never waits behind another.
+# That is the smallest change that fixes both: it adds no cancellation, so
+# `main` still keeps a verdict per commit (the decision above). A re-run of a
+# run keeps its `run_id`, so `run_attempt` is in the key as well. The cost, stated:
+# a superseded merge_group or push run now finishes rather than being cancelled.
+# `pull_request` keeps the ref key and cancels as before. The `${{ github.ref }}`
+# interpolation stays as its own standalone interpolation, which the #667
+# blocking-gate helper requires to recognise the group as ref-scoped.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}-${{ github.event_name != 'pull_request' && github.run_id || '' }}-${{ github.event_name != 'pull_request' && github.run_attempt || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -818,6 +839,12 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    # Bounded (#2607): the macOS half ran `in_progress` for 5+ hours with no
+    # timeout, holding its whole run open. The macOS leg has taken up to ~12.5 min
+    # in recent green runs, so 25 leaves headroom; a hang still fails the job
+    # instead of stalling the run. One value for both legs (a per-leg expression
+    # would make the bound a string, which the guard does not model).
+    timeout-minutes: 25
     # `.claude/hooks/block-dangerous-bash.sh` is the ONLY enforcement of the
     # operations `.claude/rules/security.md` calls never acceptable on an agent's
     # behalf: force/mirror/--all push, direct push to main/master, history rewrite,
@@ -875,19 +902,54 @@ jobs:
           git diff --quiet -- .claude/hooks/block-dangerous-bash.sh ||
             { echo "::error::this step modified the in-tree hook"; exit 1; }
           echo "OK: neutering deny() reddens the suite, and the in-tree hook is untouched"
-      - name: Run the jev hook suite (offline, stubbed jev) and mutation-prove it
+      - name: Run the jev hook suites (offline, stubbed jev)
+        # Step-level bound: this step once HUNG (see the mutation-proof job below) and sat for
+        # the rest of the job's 25 minutes. A healthy run takes 1-3 minutes on either OS.
+        timeout-minutes: 10
         run: |
           set -euo pipefail
           # The jev result screen is an advisory layer ON TOP of the hook above; it fails
           # open by design, so only a test can show the flag branch, the literal-secret
           # skip and each fail-open path still work. The suite stubs jev (no network, no
-          # key). The harness mutates a temp COPY, requires the baseline green first, and
-          # aborts non-zero on a missed anchor. --smoke runs one mutation per guard family
-          # (the suite takes minutes on a hosted runner); the full sweep stays the local
-          # evidence tool.
+          # key). Its mutation proof runs in `safety-hook-mutation-proof`, sharded.
           bash .claude/hooks/jev-hooks.test.sh
           bash .claude/skills/jev/pr-risk.test.sh
-          python3 .claude/hooks/jev-hooks-mutation-proof.py --smoke
+
+  safety-hook-mutation-proof:
+    name: Agent safety-control hook mutation proof (${{ matrix.os }}, shard ${{ matrix.shard }}/3)
+    # Split out of `safety-hook-guard`, and sharded, because the work is serial-per-mutant and
+    # the macOS leg could not finish it inside one job: every mutant re-runs the whole jev suite
+    # in a fresh temp copy (about 40 mutants x one to two ~45 s suite runs), and macOS runs this
+    # spawn-heavy bash about 2.5x slower than ubuntu (the sibling steps measured 2.5-2.8x on the
+    # same runs). Run as one step after the other two, that put the macOS job past its 25 minutes
+    # even once the hang below was gone. Three shards keep each macOS shard near 6-7 minutes;
+    # every smoke mutant still runs on both platforms, exactly once per platform.
+    #
+    # THE HANG (not slowness) that used to kill the macOS job: jev-hooks.test.sh built test text
+    # with `yes x | tr -d '\n' | head -c N`. GitHub's macOS runners start jobs with SIGPIPE ignored,
+    # and `tr` ignores the failed write (EPIPE) and keeps draining the infinite `yes`, so the pipeline
+    # never ended and the step ran to the job timeout (6 hours before #2607 bounded it). (`yes | head`
+    # alone exits; the rule is never to feed an infinite producer through a filter that ignores
+    # EPIPE.) Ubuntu runs with SIGPIPE default, which is why the ubuntu twin finished. The suite now
+    # uses finite generators and refuses to run if an infinite `yes` producer comes back.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        shard: [1, 2, 3]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Mutation-prove the jev hook suites (one slice of the smoke set)
+        run: |
+          set -euo pipefail
+          # The harness mutates a temp COPY, requires the baseline green first, and aborts
+          # non-zero on a missed anchor. --smoke runs one mutation per guard family; the full
+          # sweep stays the local evidence tool. --shard i/3 runs every third mutant, so the
+          # three shards together are exactly the smoke set.
+          python3 .claude/hooks/jev-hooks-mutation-proof.py --smoke --shard "${{ matrix.shard }}/3"
 
   operator-codegen-check:
     name: Operator codegen is up-to-date (make generate + make manifests)
@@ -1172,8 +1234,11 @@ jobs:
         if: github.event_name != 'merge_group'
         uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         with:
-          # For push (main) the base is the previous commit; on PRs the action
-          # diffs against the PR base automatically.
+          # For push to main the base is the previous commit; on PRs the action
+          # diffs against the PR base automatically. For push to an
+          # `integration/**` line (#2249) no `base` is set, so the action diffs
+          # against the default branch (main): the docs build runs whenever the
+          # line differs from main there. That over-runs; it never under-runs.
           filters: |
             docs:
               - 'apps/docs/**'
@@ -1317,8 +1382,9 @@ jobs:
         if: steps.filter.outputs.docs == 'true' || github.event_name == 'merge_group'
         run: node scripts/sbom-docs-closure.mjs ./.docs-closure ./.docs-closure/closure.cdx.json
 
-      # ENFORCE (fail) on main — the same phased gate the image supply-chain job
-      # uses. FAIL on HIGH/CRITICAL.
+      # ENFORCE (fail) on main and on every `integration/**` release line
+      # (#2249) — the same phased gate the image supply-chain job uses; report
+      # only on PRs and the merge-queue ref. FAIL on HIGH/CRITICAL.
       #
       # The old note here said any HIGH in this closure was "a pre-existing
       # REPO-WIDE toolchain CVE ... not a docs-runtime issue". That was wrong on
@@ -1328,7 +1394,7 @@ jobs:
       # here is now a finding about what ships.
       - name: Trivy scan — docs dependency closure (FAIL on HIGH/CRITICAL)
         if: steps.filter.outputs.docs == 'true' || github.event_name == 'merge_group'
-        continue-on-error: ${{ github.ref != 'refs/heads/main' }}
+        continue-on-error: ${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/heads/integration/') }}
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: sbom
@@ -1336,6 +1402,7 @@ jobs:
           severity: HIGH,CRITICAL
           exit-code: '1'
           ignore-unfixed: true
+          trivyignores: security/docs-closure-trivyignore.yaml
           format: table
 
   docs-drift-reminder:
@@ -1357,9 +1424,13 @@ jobs:
           fetch-depth: 0
 
       - name: Public-surface-changed-without-docs reminder
+        # The base branch name is chosen by whoever opens the PR's target, so it
+        # reaches the script through env, never as `${{ }}` text inside it.
+        env:
+          BASE_REF: ${{ github.base_ref }}
         run: |
-          BASE="origin/${{ github.base_ref }}"
-          git fetch --no-tags --depth=1 origin "${{ github.base_ref }}" || true
+          BASE="origin/$BASE_REF"
+          git fetch --no-tags --depth=1 origin "$BASE_REF" || true
           CHANGED="$(git diff --name-only "$BASE"...HEAD || true)"
           echo "Changed files:"; echo "$CHANGED"
           SURFACE="$(echo "$CHANGED" | grep -E '^packages/kn-next/src/|^packages/kn-next/package.json' || true)"
@@ -1371,9 +1442,13 @@ jobs:
           fi
 
       - name: User-facing internal-reference reminder (content/** only)
+        # The base branch name is chosen by whoever opens the PR's target, so it
+        # reaches the script through env, never as `${{ }}` text inside it.
+        env:
+          BASE_REF: ${{ github.base_ref }}
         run: |
-          BASE="origin/${{ github.base_ref }}"
-          git fetch --no-tags --depth=1 origin "${{ github.base_ref }}" || true
+          BASE="origin/$BASE_REF"
+          git fetch --no-tags --depth=1 origin "$BASE_REF" || true
           # Only scan ADDED lines in content/** — the app's next-adapter/config
           # legitimately reference internals; this guard is content-only.
           DIFF="$(git diff "$BASE"...HEAD -- 'apps/docs/content/**' || true)"
@@ -1885,9 +1960,21 @@ jobs:
         with:
           node-version: '24'
 
+      # On `push` there is no PR base; use the before-SHA of the push, or, on a
+      # push that CREATES the branch (all-zero before), the merge-base with
+      # origin/main. Anything else passes through unchanged.
+      # Tested by tests/ci-resolve-push-base.test.ts.
+      - name: Resolve the diff base (branch-creation push → merge-base with main)
+        if: github.event_name != 'merge_group'
+        id: base
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PUSH_CREATED: ${{ github.event.created }}
+          RAW_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: node scripts/ci-resolve-push-base.mjs
+
       # needs.*.result arrive via env (never interpolated into the shell) and are
-      # read as data by the aggregator. On `push` there is no PR base; use the
-      # before-SHA of the push. The aggregator refuses to scope-out on an
+      # read as data by the aggregator. The aggregator refuses to scope-out on an
       # uncomputable diff (exits non-zero), so it is fail-closed there too.
       - name: Assert every e2e-round leg concluded success (path-scoped)
         if: github.event_name != 'merge_group'
@@ -1897,6 +1984,6 @@ jobs:
           E2E_RESULT_STANDALONE_DRAIN_BUN_IMAGE: ${{ needs.standalone-drain-bun-image.result }}
           E2E_RESULT_BUN_EXEC_ALPINE_IMAGE: ${{ needs.bun-exec-alpine-image.result }}
           E2E_RESULT_SELF_CONTAINED_EXEC_E2E: ${{ needs.self-contained-exec-e2e.result }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          BASE_SHA: ${{ steps.base.outputs.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: node apps/file-manager/scripts/e2e-round-aggregate.mjs

@@ -138,19 +138,96 @@ credentialed Next.js version moves. It currently holds two distinct families:
   This is a Bun runtime limitation, independent of the Next.js version under test.
 - **`vercel-infra-coupled`** — tests whose deploy-mode assertion encodes behavior that only
   Vercel's own hosting infrastructure produces (for example, a response header set by Vercel's own
-  CDN), not anything a self-hosted deployment can or should reproduce. Each entry in this family is
-  checked case-by-case: knext's actual result is confirmed to match the correct self-hosted
-  expectation before the entry is quarantined.
+  CDN), not anything a self-hosted deployment can or should reproduce. Older entries in this family
+  were checked case-by-case against knext's result. Entries added at Next 16.4.3 were classified
+  from the failing assertion and its deploy branch in the upstream test source; a self-hosted match
+  was not re-run for them. These entries exclude a whole file, so they are used only for files where
+  every case that runs fails.
 
 <Callout type="info">
 **Counts, kept honest by a CI check.** As of the current manifest, `bun-edge-fetch` quarantines 2
-entries (3 test cases) and `vercel-infra-coupled` quarantines 6 entries (21 test cases). These
+entries (3 test cases) and `vercel-infra-coupled` quarantines 9 entries (36 test cases). These
 numbers are asserted against the manifest by a docs test, so this page cannot silently drift from
 the ledger it describes.
 </Callout>
 
-Neither ledger above is used to manufacture a green run — both exist to keep the nightly signal
-honest, and both shrink toward zero over time rather than growing pre-emptively.
+### 4 · Per-case entries pinned to one Next.js version
+
+A file that fails only some of its cases should not lose the cases that pass. For a failure that
+is deterministic (it fails the same way every run, so it is not a flake) knext deselects the
+individual case, never the file, and only under bars that are each checked by CI:
+
+- **Pinned to a version.** The entry names the exact Next.js version it was measured at. Before the
+  tests run, the harness drops the entry's deselections at any other version, so those cases run
+  there, and a missing or unreadable version fails the step. CI also rejects an entry once no test
+  lane runs its version, so bumping the credentialed version forces every entry to be re-measured or
+  removed. A lane pinned to an older release candidate has no such entries to scope; a lane gains
+  the step when its candidate is cut from a build that includes it.
+- **Exact case names that must still exist.** The entry lists full test names, and CI checks each
+  against a snapshot of the upstream test file at that version. A separate job re-fetches the
+  upstream files on every change to the list and nightly, and fails if the snapshot differs or
+  upstream cannot be reached. A name that has disappeared upstream fails the check.
+- **Cited and categorised.** The entry cites the upstream file line it rests on and a mechanism
+  category (a Vercel-only header, an upstream expected-failure marker, a harness gap, and so on),
+  with a written reason.
+- **Measured, per cell.** The entry records the run IDs and which of the four cells (Node or Bun,
+  Turbopack or webpack) it was measured on, and may not claim a cell nobody measured.
+- **Capped.** Files and cases are both counted, with a hard ceiling of 10 files and 20 cases.
+
+A deselected case is not run, so one that starts passing is not reported until the version moves
+and the entry is re-measured. These checks establish form, not truth: that a citation is on the line
+it names, not that the failure is really what the entry says. Review of each entry is what guards
+that.
+
+<Callout type="info">
+**Counts, kept honest by a CI check.** The per-case list currently holds 9 files (19 test cases),
+measured at Next.js 16.4.3 on the Node/Turbopack and Bun/webpack cells. The Node/webpack and
+Bun/Turbopack cells were not measured at that version and no entry claims them.
+</Callout>
+
+One entry is a **known gap in Bun support**, not a Vercel-specific behavior: the fixture's native
+addon uses the V8 C++ API, and the Bun runtime loads it with a different native-module ABI version
+than Node. Those 2 cases are deselected so the Bun cell is not red. This is not a claim that
+V8-API native addons work on Bun. Because one manifest serves every cell, the Node/Turbopack cell,
+which was measured passing, also stops running those 2 cases; the Node/webpack cell was not
+measured.
+
+### 5 · A known defect in the Bun runtime, scoped to one cell
+
+Some failures are caused by a bug in a runtime knext does not own, on one cell only. For these,
+knext keeps a separate, small list. An entry is admitted only when all of the following hold, each
+checked by CI:
+
+- **One cell.** The entry names exactly one runtime and one builder (for example, Bun with
+  Turbopack). Before the tests run, the harness deselects the entry's cases on that cell only, and
+  only at the Next.js version and the Bun version the entry was measured at. On every other cell,
+  version or Bun build the cases run.
+- **Whole files are excluded, not counted.** When an entry covers every case in a test file, the
+  harness skips the file on that cell rather than running it with no cases, so the run never counts
+  that file as passed.
+- **A named upstream fix.** The entry cites the runtime's own issue and fix, and its removal
+  condition is the release that contains that fix.
+- **Cannot outlive the bug.** Moving the Bun version the test lanes run fails CI until each entry
+  is re-measured on the new Bun or removed. The entry must cite a run on the new Bun, so changing
+  the recorded version without a run is not enough. The re-measure runs the cases, so a Bun release
+  that fixes the bug shows them passing.
+- **knext refuses the configuration.** knext rejects the affected setup at build time, so an app
+  cannot reach the failing state silently.
+- **Exact names, measured, capped.** Case names are checked against the upstream test file at that
+  version, the entry records the runs it was measured on, and the list has its own ceiling of 5.
+
+<Callout type="info">
+**Counts, kept honest by a CI check.** This list currently holds 2 files (2 test cases), both on the
+Bun/Turbopack cell at Next.js 16.4.3 on Bun 1.4.2. Both fixtures enable Next's experimental
+`turbopackModuleFragments` flag, which Turbopack compiles into code Bun's parser rejects when it
+loads it, where Node only fails if the code runs (it never does). The same files pass on the
+Node/Turbopack, Node/webpack and Bun/webpack cells, where they keep running. knext refuses
+`turbopackModuleFragments` on the Bun runtime; see
+[Bun & the compiled executable](/docs/bun-runtime).
+</Callout>
+
+No ledger above is used to manufacture a green run — they exist to keep the nightly signal
+honest, and they shrink toward zero over time rather than growing pre-emptively.
 
 ## The harness boot-path caveat
 

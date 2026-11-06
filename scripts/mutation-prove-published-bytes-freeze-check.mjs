@@ -126,8 +126,10 @@ const MUTATIONS = [
   {
     label: 'decision: let a valid, PR-introduced override marker fall through to proceed anyway',
     subject: 'lib',
-    anchor: '  if (marker.valid && overrideMarkerIntroducedByPr(mergeBasePin, headPin)) {',
-    replacement: '  if (false) {',
+    // #2342 split the marker test into three branches (merged-in, inherited
+    // from the merge base, honoured); this is the honoured one.
+    anchor: '  } else if (marker.valid) {',
+    replacement: '  } else if (false) {',
   },
   {
     label:
@@ -142,8 +144,11 @@ const MUTATIONS = [
     label:
       'decision: honour ANY structurally-valid marker regardless of who introduced it (the #1635-class bypass)',
     subject: 'lib',
-    anchor: '  if (marker.valid && overrideMarkerIntroducedByPr(mergeBasePin, headPin)) {',
-    replacement: '  if (marker.valid) {',
+    // Removing the merge-base branch sends an inherited marker on to the
+    // honoured branch below it.
+    anchor:
+      '  } else if (marker.valid && !overrideMarkerIntroducedByPr(mergeBasePin, headPin, inheritedPins)) {',
+    replacement: '  } else if (false) {',
   },
   {
     label: 'decision: proceed even when the PR touches no publishable scope',
@@ -228,8 +233,8 @@ const MUTATIONS = [
   {
     label: 'cli: stops passing baseVersion to the decision',
     subject: 'cli',
-    anchor: '    packageDirs,\n    baseVersion,\n    now,\n  });',
-    replacement: '    packageDirs,\n    now,\n  });',
+    anchor: '    packageDirs,\n    baseVersion,\n    baseReleaseTagged:',
+    replacement: '    packageDirs,\n    baseReleaseTagged:',
   },
   {
     label: 'select-script: a per-line pin absent at the base commit is not read from main',
@@ -268,9 +273,78 @@ const MUTATIONS = [
     anchor: ' \\\n            --base-version "${BASE_VERSION}"',
     replacement: '',
   },
+
+  // ── #2429: a released base at or above the pinned rc base ends the window ──
+  {
+    label:
+      'released-base: never skip a released base past the rc (the #2428 always-red job returns)',
+    subject: 'lib',
+    anchor: '  if (baseReleaseTagged === true && releasedBaseSupersedesRc(baseVersion, rcTag)) {',
+    replacement: '  if (false) {',
+  },
+  {
+    label:
+      'released-base: a prerelease base counts as released (an in-window rc base escapes the freeze)',
+    subject: 'lib',
+    anchor: 'const RELEASED_VERSION_RE = /^(\\d+)\\.(\\d+)\\.(\\d+)$/;',
+    replacement: 'const RELEASED_VERSION_RE = /^(\\d+)\\.(\\d+)\\.(\\d+)/;',
+  },
+  {
+    label:
+      'released-base: ignore the comparison direction (a released base BELOW the rc base escapes the freeze)',
+    subject: 'lib',
+    anchor: '    if (diff !== 0) return diff > 0;',
+    replacement: '    if (diff !== 0) return true;',
+  },
+  {
+    label: 'released-base: the GA of the pinned rc itself ("at", 1.3.0 vs rc.10) no longer skips',
+    subject: 'lib',
+    anchor: '    if (diff !== 0) return diff > 0;\n  }\n  return true;',
+    replacement: '    if (diff !== 0) return diff > 0;\n  }\n  return false;',
+  },
+
+  // ── #2435: "released" needs an ancestor vX.Y.Z tag, not the version string ──
+  {
+    label: 'release-tag: the version string alone ends the window again (tag not required)',
+    subject: 'lib',
+    anchor: '  if (baseReleaseTagged === true && releasedBaseSupersedesRc(baseVersion, rcTag)) {',
+    replacement: '  if (releasedBaseSupersedesRc(baseVersion, rcTag)) {',
+  },
+  {
+    label: 'release-tag: ancestry is not checked (a tag on a non-ancestor commit counts)',
+    subject: 'cli',
+    anchor: "    git(['merge-base', '--is-ancestor', tagCommit, base]);\n",
+    replacement: '',
+  },
+  {
+    label: 'release-tag: a git failure (missing tag, shallow/tagless checkout) fails OPEN',
+    subject: 'cli',
+    anchor:
+      '    return true;\n  } catch {\n    return false;\n  }\n}\n\n// `./ga-tarball-diff.mjs`',
+    replacement:
+      '    return true;\n  } catch {\n    return true;\n  }\n}\n\n// `./ga-tarball-diff.mjs`',
+  },
+  {
+    label: 'release-tag: main() never consults the verifier (always treats the base as tagged)',
+    subject: 'cli',
+    anchor: '      baseReleaseTagged(repoRoot, baseSha, baseVersion),',
+    replacement: '      true,',
+  },
+  {
+    label: 'release-tag: main() verifies without a base SHA (missing SHA no longer fails closed)',
+    subject: 'cli',
+    anchor: '      baseSha !== undefined &&\n',
+    replacement: '',
+  },
+  {
+    label: 'release-tag: the workflow stops passing --base-sha to the check',
+    subject: 'workflow',
+    anchor: '"${BASE_VERSION}" \\\n            --base-sha "${BASE_SHA}"',
+    replacement: '"${BASE_VERSION}"',
+  },
 ];
 
-declareMutations(28);
+declareMutations(38);
 
 const RUNNER = resolveSpecRunner(REPO_ROOT, SPECS[0]);
 
@@ -283,8 +357,8 @@ function specPasses() {
   return r.status === 0;
 }
 
-if (MUTATIONS.length !== 28) {
-  console.error(`FATAL: declared 28 mutations, table has ${MUTATIONS.length}`);
+if (MUTATIONS.length !== 38) {
+  console.error(`FATAL: declared 38 mutations, table has ${MUTATIONS.length}`);
   process.exit(1);
 }
 

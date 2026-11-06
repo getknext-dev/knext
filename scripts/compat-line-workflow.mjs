@@ -258,6 +258,29 @@ export function lineSubstitutions(spec, shape = 'runs') {
       count: 1,
     });
   }
+  // The line's own Next.js ref (see `nextjsRefOverride` in the line spec). Both
+  // places the harness reads it from; each must occur exactly once in the
+  // tag's source, so a source whose ref is not `from` fails the derivation.
+  if (spec.nextjsRefOverride) {
+    const { from, to } = spec.nextjsRefOverride;
+    const dispatchHead =
+      "        description: 'vercel/next.js git ref to test against (pinned tag ≥ v16.2.0; do NOT use canary)'\n" +
+      '        required: false\n';
+    subs.push(
+      {
+        id: 'nextjs-ref-dispatch',
+        from: `${dispatchHead}        default: '${from}'`,
+        to: `${dispatchHead}        default: '${to}'`,
+        count: 1,
+      },
+      {
+        id: 'nextjs-ref-env',
+        from: `NEXTJS_REF: \${{ github.event.inputs.nextjsRef || '${from}' }}`,
+        to: `NEXTJS_REF: \${{ github.event.inputs.nextjsRef || '${to}' }}`,
+        count: 1,
+      },
+    );
+  }
   subs.push(
     {
       // The executing-file path: the frozen-set workflow entry (ADR-0039

@@ -147,7 +147,8 @@ and admitting every future minor unvetted. Within the range, the minors covered 
 Next.js compatibility credential are `16.3`; for an installed minor outside that list `knext doctor`
 warns (it never blocks an install or a build). The range and the list live in
 `packages/kn-next/src/next-compat.ts`, the single source the manifest, the scaffold pin, the doctor
-row and the docs tests read.
+row and the docs tests read. A minor above the range is an npm `ERESOLVE` (pnpm warns, Bun is
+silent) until a release widens the bound.
 <!-- next-policy:end -->
 
 Maintainer notes (not user docs): the 16.0-16.3 ISR build-scoping seed on 1.x retires when the 1.x

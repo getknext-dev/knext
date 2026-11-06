@@ -1922,6 +1922,30 @@ jobs:
           fi
           echo "ok=$([ "${STATUS}" -eq 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
 
+      # ADR-0007 amendment (ref-pinned per-case entries), bar 1 enforced at RUN time. The runner
+      # knows no refs: `suites[file].failed` deselects at whatever NEXTJS_REF is under test. This step
+      # writes a COPY of the manifest in which every ref-pinned entry measured at another ref has its
+      # `failed` names dropped, so those cases RUN here. FAIL CLOSED: a missing or unparseable
+      # NEXTJS_REF fails the step and leaves no copy. The script ships with the checkout, so an rc
+      # tag cut before it existed has no ledger to scope: that passes through, but a manifest that
+      # carries a ledger with no script to scope it fails. Held by tests/compat-manifest-for-ref.test.ts.
+      - name: Scope ref-pinned per-case deselections to NEXTJS_REF
+        working-directory: knext
+        env:
+          SCOPE_SOURCE_MANIFEST: test/${{ env.KNEXT_DEPLOY_MANIFEST }}
+          SCOPED_MANIFEST: ${{ runner.temp }}/knext-deploy-manifest.json
+        run: |
+          set -euo pipefail
+          rm -f "${SCOPED_MANIFEST}"
+          if [ -f scripts/compat-manifest-for-ref.mjs ]; then
+            node scripts/compat-manifest-for-ref.mjs --manifest "${SCOPE_SOURCE_MANIFEST}" --ref "${NEXTJS_REF}" --out "${SCOPED_MANIFEST}"
+          elif grep -Eq '"[$]knextRefPinnedCases"[[:space:]]*:' "${SCOPE_SOURCE_MANIFEST}"; then
+            echo "::error::${SCOPE_SOURCE_MANIFEST} carries ref-pinned per-case deselections but this checkout has no scripts/compat-manifest-for-ref.mjs to scope them to NEXTJS_REF; refusing to run with them applied at an unmeasured ref"
+            exit 1
+          else
+            cp "${SCOPE_SOURCE_MANIFEST}" "${SCOPED_MANIFEST}"
+          fi
+
       - name: Run official deploy tests (knext adapter)
         working-directory: next.js
         env:
@@ -2001,7 +2025,7 @@ jobs:
           # v16.2.0+ get-test-filter.js supports comma-separated manifest
           # MERGING; we deliberately keep the single-file mirror (ADR-0007
           # follow-up records the layering option).
-          NEXT_EXTERNAL_TESTS_FILTERS: ${{ github.workspace }}/knext/test/${{ env.KNEXT_DEPLOY_MANIFEST }}
+          NEXT_EXTERNAL_TESTS_FILTERS: ${{ runner.temp }}/knext-deploy-manifest.json
           # #147 item 4 — the lane, decided ONCE at the workflow env level
           # (dispatch input / weekly bun cron / node default). run-tests.js and
           # next-deploy.ts spawn children with {...process.env}, so this reaches

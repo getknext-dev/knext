@@ -107,7 +107,15 @@
     "first NEXTJS_REF containing the fix. Enforced by quarantineEntryProblems in",
     "tests/compat-lane-ledger.ts (guard: tests/compat-lane-ledger.test.ts), which",
     "also renders the per-lane summary (passing/quarantined/failing per lane) the",
-    "parity doc embeds — see docs/compat-matrix.md 'Lane-scoped ledger'."
+    "parity doc embeds — see docs/compat-matrix.md 'Lane-scoped ledger'.",
+    "",
+    "$knextRefPinnedCases (ADR-0007 amendment 2026-11-04): deterministic per-case failures, written",
+    "to suites[file].failed. The runner treats failed and flakey alike: the case is DESELECTED and",
+    "does not run, so a case that starts passing is silent at the same ref. Each entry is pinned to",
+    "the Next ref it was measured at (CI rejects it at any other ref), lists exact case names that",
+    "must still exist upstream (test/compat-ref-pinned-cases.upstream.json), cites upstream lines,",
+    "records run IDs and measured cells, and counts against a cap. Guard:",
+    "tests/compat-ref-pinned-cases.test.ts. This is NOT the flakey ledger."
   ],
   "suites": {
     "test/e2e/app-dir/app-client-cache/client-cache.defaults.test.ts": {
@@ -203,6 +211,59 @@
         "edge api can use async local storage cans use a single instance per request",
         "edge api can use async local storage cans use multiple instances per request"
       ]
+    },
+    "test/e2e/app-dir/segment-cache/cached-navigations/cached-navigations.test.ts": {
+      "failed": [
+        "cached navigations caches a fully static on-demand param for repeated navigations"
+      ]
+    },
+    "test/e2e/app-dir/metadata-streaming-parallel-routes/metadata-streaming-parallel-routes.test.ts": {
+      "failed": [
+        "app-dir - metadata-streaming (parallelRouteMetadata: false) should only bundle the selected metadata resolution implementation",
+        "app-dir - metadata-streaming (parallelRouteMetadata: true) should only bundle the selected metadata resolution implementation"
+      ]
+    },
+    "test/e2e/app-dir/partial-fallback-shell-upgrade/partial-fallback-shell-upgrade.test.ts": {
+      "failed": [
+        "partial-fallback-shell-upgrade - partialPrefetching disabled shares an on-demand shell across params without generateStaticParams",
+        "partial-fallback-shell-upgrade - partialPrefetching disabled keeps params without generateStaticParams dynamic after explicit revalidation of an on-demand shell",
+        "partial-fallback-shell-upgrade - partialPrefetching disabled reuses generated optional catch-all pages before and after explicit revalidation"
+      ]
+    },
+    "test/e2e/app-dir/non-root-project-monorepo/non-root-project-monorepo.test.ts": {
+      "failed": [
+        "non-root-project-monorepo import.meta.url should work during RSC",
+        "non-root-project-monorepo import.meta.url should work during SSR",
+        "non-root-project-monorepo import.meta.url non-url-safe characters should encode special chars during RSC",
+        "non-root-project-monorepo import.meta.url non-url-safe characters should encode special chars during SSR",
+        "non-root-project-monorepo import.meta.url should work on client-side",
+        "non-root-project-monorepo import.meta.url non-url-safe characters should encode special chars on client-side"
+      ]
+    },
+    "test/e2e/app-dir/prerender-encoding/prerender-encoding.test.ts": {
+      "failed": [
+        "prerender-encoding should preserve an encoded slash in an exact closed catch-all path",
+        "prerender-encoding should preserve an encoded slash in an open catch-all fallback"
+      ]
+    },
+    "test/e2e/app-dir/segment-cache/metadata/segment-cache-metadata.test.ts": {
+      "failed": [
+        "segment cache (metadata) requests only the head when the page segments are cached"
+      ]
+    },
+    "test/e2e/app-dir/cache-components-allow-otel-spans/cache-components-allow-otel-spans.test.ts": {
+      "failed": [
+        "cache-components OTEL spans should allow creating Spans during prerendering at runtime - inside a Cache Components"
+      ]
+    },
+    "test/e2e/transpile-packages-typescript-foreign/index.test.ts": {
+      "failed": ["transpile-packages-typescript-foreign without transpilePackages should fail"]
+    },
+    "test/e2e/prerender-native-module.test.ts": {
+      "failed": [
+        "prerender native module should render /blog/first correctly",
+        "prerender native module should render /blog/second correctly"
+      ]
     }
   },
   "rules": {
@@ -244,7 +305,13 @@
       "test/e2e/incremental-cache-path-traversal/index.test.ts",
       "test/e2e/app-dir/not-found-non-document/not-found-non-document.test.ts",
       "test/e2e/app-dir/expire-time/expire-time.test.ts",
-      "test/e2e/middleware-rewrites/test/index.test.ts"
+      "test/e2e/middleware-rewrites/test/index.test.ts",
+      "test/e2e/app-dir/otel-middleware-trace/otel-middleware-trace.test.ts",
+      "test/e2e/app-dir/empty-generate-static-params/empty-generate-static-params.test.ts",
+      "test/e2e/app-dir/use-cache-segment-configs/use-cache-segment-configs.test.ts",
+      "test/e2e/app-dir/use-cache-output-export/use-cache-output-export.test.ts",
+      "test/e2e/middleware-src/middleware-src.test.ts",
+      "test/e2e/middleware-src-node/middleware-src-node.test.ts"
     ]
   },
   "$knextQuarantines": [
@@ -365,6 +432,55 @@
       "evidence": "runs 36332946048 (node x webpack) / 36332959885 (bun x webpack), NEXTJS_REF=v16.3.5: FINAL 3/3 attempts, the case named in the shard 9/16 summary; runs 36430362513 (node x webpack) / 36430368139 (bun x webpack): FINAL 3/3 (1 failed, 2 skipped, 56 passed, 59 total). Turbopack cells 36332940411 / 36332951393 / 36430353283 / 36430358027: the file is skipped upstream (finished in 2.09 s with IS_TURBOPACK_TEST=1 and NEXT_ENABLE_ADAPTER=1), not passed. RE-AUDITED at v16.3.6 (rc.4 security bump, GHSA-vcvr-r3jv-pc5j) by source equivalence, not by a fresh run: The v16.3.5...v16.3.6 compare (3 commits: the version bump, a hardened next/og SVG serialization in packages/next/src/compiled/@vercel/og, and test/production/deterministic-build/deployment-id.test.ts) changes no file of this test or its fixture and no runtime file outside next/og. The failing assertion sits in the isNextDeploy branch and encodes Vercel-only routing behaviour that an og serialization change cannot reach, and the file is in rules.exclude, so it did not execute in the bump branch's dispatches (node x turbopack 36835179424 and bun x turbopack 36835175500, each 1099 passed / 0 failed, identical per-shard counts to the v16.3.5 baselines 36829124072 and 36638859599). No webpack cell was dispatched (two-dispatch budget). RE-AUDITED at v16.3.8 (rc.6 security bump, GHSA-cjq9-62q9-8jv4) by source equivalence, not by a fresh run of this file: the v16.3.6...v16.3.8 compare (10 commits, 192 files, summarised in .github/compat-credentialed-next-version.json) changes no file of this test or its fixture. The quarantined cases stay excluded or jest-deselected, so they do not execute in the credential dispatches either; this stamp does not claim the case passes or fails at v16.3.8. CAVEAT: unlike the og-only 16.3.6 bump, this compare does change routing and cache runtime code near this surface (case-sensitive /_next/data path matching in match-next-data-pathname.ts, response-cache keys scoped to the source route, the app-page and app-route build templates). The failing assertion still encodes an expectation only Vercel infrastructure produces, but that was NOT re-run at v16.3.8; un-exclude this file at v16.3.8 to confirm.",
       "provenance": "https://github.com/getknext-dev/knext/issues/1633 (triage: https://github.com/getknext-dev/knext/issues/1633#issuecomment-5895614465; founder decision 2026-09-29 to evidence-quarantine on the webpack cells for rc.2) + vercel/next.js#94905 (runApi keeps req.url as the original URL) + vercel/next.js#99435 (upstream issue asking for an adapter-neutral expectation). Retire when upstream changes the deploy-branch req.url expectation for non-Vercel adapters, then restore the mirrored suites.failed entry.",
       "reaudited": "v16.3.8"
+    },
+    {
+      "test": "test/e2e/app-dir/otel-middleware-trace/otel-middleware-trace.test.ts",
+      "nextjsRef": "v16.4.3",
+      "lane": "node",
+      "family": "vercel-infra-coupled",
+      "level": "file",
+      "cases": [
+        "traces a page rendered after NextResponse.next()",
+        "traces a route handler executed after NextResponse.next()",
+        "traces a rewritten page",
+        "traces a middleware redirect",
+        "traces a direct middleware response",
+        "traces a request the middleware does not match",
+        "traces /page with an incoming traceparent",
+        "traces /route-handler with an incoming traceparent",
+        "traces /rewrite with an incoming traceparent",
+        "still applies request header overrides set by middleware",
+        "respects a traceparent explicitly set by middleware",
+        "traces instrumentation registration in the triggering request"
+      ],
+      "mechanism": "Every failing case is a `toMatchInlineSnapshot` span-tree mismatch inside the `describe.each(VARIANTS)` block, for both the proxy and the middleware variant (12 cases each). The deployed snapshots are selected by `isNextDeploy` (deploy branches at lines 164, 336, 362 and 1106 of the v16.4.3 file). The file's own comments (lines 115-122 and 136-138) attribute the deployed span shape to the platform invoking the middleware and the render separately, which is the Vercel deploy shape and not knext's. The custom-server block at line 1139 is skipped on deploy, so the file-level entry covers every case that runs on deploy.",
+      "evidence": "run 41754152861 (node x turbopack, main at aea548047, NEXTJS_REF=v16.4.3): FINAL 3/3 attempts on all 24 cases (12 proxy, 12 middleware), each title appearing in every attempt of the job logs. Only the node x turbopack cell was measured at v16.4.3; the other cells are not claimed here.",
+      "provenance": "https://github.com/getknext-dev/knext/issues/2627 (ADR-0007 section (h); precedent #1571 / #1624). Retire when upstream's deployed snapshots stop attributing the span shape to the platform, or at the first Next ref where the deployed snapshots match knext's span shape on all four cells."
+    },
+    {
+      "test": "test/e2e/app-dir/empty-generate-static-params/empty-generate-static-params.test.ts",
+      "nextjsRef": "v16.4.3",
+      "lane": "node",
+      "family": "vercel-infra-coupled",
+      "level": "file",
+      "cases": [
+        "points the computed empty array build error at the declaration",
+        "points the literal empty array build error at the array"
+      ],
+      "mechanism": "Both failing cases are `toMatchInlineSnapshot` assertions of the build-error text, reached through the `isTurbopack && isNextDeploy` branch (line 67 of the v16.4.3 file; the same shape repeats at line 148). Its comments (lines 68, 84, 149 and 166) read 'Vercel build logs omit leading indentation from stack and code frames.', so the deployed snapshot encodes Vercel's build-log formatting.",
+      "evidence": "run 41754152861 (node x turbopack, NEXTJS_REF=v16.4.3): FINAL 3/3 attempts on both cases. Observed at v16.4.0 on all four cells in the #2149 record: runs 38040527044, 38161219571, 38174324666, 38181750458, 38186195085.",
+      "provenance": "https://github.com/getknext-dev/knext/issues/2128 (ADR-0007 section (h); precedent #1571 / #1624). Retire when upstream's isNextDeploy snapshot stops encoding Vercel's build-log formatting for non-Vercel adapters."
+    },
+    {
+      "test": "test/e2e/app-dir/use-cache-segment-configs/use-cache-segment-configs.test.ts",
+      "nextjsRef": "v16.4.3",
+      "lane": "node",
+      "family": "vercel-infra-coupled",
+      "level": "file",
+      "cases": ["it should error when using segment configs that aren't supported by useCache"],
+      "mechanism": "The failing case is a `toMatchInlineSnapshot` of the build error, reached through the `isTurbopack && isNextDeploy` branch (line 76 of the v16.4.3 file). Its comment (line 77) reads 'Vercel removes code-frame indentation and may omit blank log lines.', and the other deploy branch (lines 133-134) repeats it: 'Vercel strips code-frame indentation and trailing whitespace'.",
+      "evidence": "run 41754152861 (node x turbopack, NEXTJS_REF=v16.4.3): FINAL 3/3 attempts. Observed at v16.4.0 on all four cells in the #2149 record: runs 38040527044, 38161219571, 38174324666, 38181750458, 38186195085.",
+      "provenance": "https://github.com/getknext-dev/knext/issues/2128 (ADR-0007 section (h); precedent #1571 / #1624). Retire when upstream's isNextDeploy snapshot stops encoding Vercel's code-frame formatting for non-Vercel adapters."
     }
   ],
   "$knextExclusions": [
@@ -382,6 +498,598 @@
       "test": "test/e2e/app-dir/ppr-full/**/*",
       "category": "ppr",
       "rationale": "Partial Prerendering (PPR) is not adapter-standardizable yet (CLAUDE.md §6 Tier C, upstream-gated); knext does not implement the PPR resume/stream contract. compat-matrix row: PPR ❌."
+    },
+    {
+      "test": "test/e2e/app-dir/use-cache-output-export/use-cache-output-export.test.ts",
+      "category": "static-export",
+      "rationale": "Deliberate product scope exclusion, NOT platform coupling. knext deploys a server (output: 'standalone') only. A static export (output: 'export') emits out/ and no .next/standalone/server.js, so there is nothing to boot, and the CLI refuses a static export after the next build (assertNotStaticExport, run by runProjectBuild, project-build.ts:355). The compat harness builds with next build directly, so it fails in e2e-deploy.sh with 'standalone server.js not found under .next/standalone' (run 41754152861, node x turbopack, FINAL 3/3). This file is the VALID export case and cannot pass by design. Removal condition: knext gains a static-export serving path."
+    },
+    {
+      "test": "test/e2e/middleware-src/middleware-src.test.ts",
+      "category": "static-export",
+      "rationale": "Deliberate product scope exclusion, NOT platform coupling. Both cases build with output: 'export' and call next.start() on deploy (isNextDeploy branch, lines 85-86 of the v16.4.3 file). knext deploys only a standalone server, so a static export has no server to boot and the CLI refuses it (assertNotStaticExport). The harness fails in e2e-deploy.sh with 'standalone server.js not found under .next/standalone' (run 41754152861, node x turbopack, FINAL 3/3 on both cases). Removal condition: knext gains a static-export serving path."
+    },
+    {
+      "test": "test/e2e/middleware-src-node/middleware-src-node.test.ts",
+      "category": "static-export",
+      "rationale": "Deliberate product scope exclusion, NOT platform coupling. Same shape as the middleware-src entry: both cases build with output: 'export' and call next.start() on deploy (isNextDeploy branch, lines 85-86 of the v16.4.3 file). knext deploys only a standalone server and refuses a static export (assertNotStaticExport). The harness fails in e2e-deploy.sh with 'standalone server.js not found under .next/standalone' (run 41754152861, node x turbopack, FINAL 3/3 on both cases). Removal condition: knext gains a static-export serving path."
+    }
+  ],
+  "$knextRefPinnedCases": [
+    {
+      "test": "test/e2e/app-dir/segment-cache/cached-navigations/cached-navigations.test.ts",
+      "nextjsRef": "v16.4.3",
+      "mechanismCategory": "vercel-serving-model",
+      "mechanism": "The failing case asserts, inside the `if (isNextDeploy)` branch (line 618), that the second navigation issues no network request, under the comment 'The platform serves a completed static prerender, not an unmarked live-render prefix.' (line 619). knext serves the live-render prefix, as `next start` does, so the harness reports 'Expected no network requests to be initiated'. The file's other 19 cases pass on both measured cells and keep running.",
+      "upstream": [
+        {
+          "line": 618,
+          "anchor": "if (isNextDeploy) {"
+        },
+        {
+          "line": 619,
+          "anchor": "The platform serves a completed static prerender"
+        }
+      ],
+      "cases": [
+        {
+          "path": ["cached navigations"],
+          "title": "caches a fully static on-demand param for repeated navigations",
+          "cells": ["node-turbopack", "bun-webpack"]
+        }
+      ],
+      "runs": [
+        {
+          "run": "41754152861",
+          "cell": "node-turbopack",
+          "ref": "v16.4.3"
+        },
+        {
+          "run": "41770412157",
+          "cell": "bun-webpack",
+          "ref": "v16.4.3"
+        }
+      ],
+      "measured": {
+        "node-turbopack": {
+          "failed": 1,
+          "passed": 19
+        },
+        "bun-webpack": {
+          "failed": 1,
+          "passed": 19
+        }
+      },
+      "provenance": "https://github.com/getknext-dev/knext/issues/2129",
+      "retire": "Retire when upstream's isNextDeploy branch for this case stops encoding the platform's static-prerender serving, or at the first Next ref where it passes on every measured cell."
+    },
+    {
+      "test": "test/e2e/app-dir/metadata-streaming-parallel-routes/metadata-streaming-parallel-routes.test.ts",
+      "nextjsRef": "v16.4.3",
+      "mechanismCategory": "expected-failure-gate",
+      "mechanism": "Upstream marks the case `// @gate !deploy` (line 42) under the comment 'The deploy harness does not expose the emitted server bundle.' (line 41), so on a deploy lane the harness expects it to fail. knext's harness leaves the server directory readable, the body passes, and the harness reports 'Failing test passed even though it was supposed to fail'. The premise at line 41 holds for upstream's harness, not knext's. Hiding the bundle in knext to match would be faking, so the case is deselected, and the 14 other cases (7 in each parallelRouteMetadata variant) keep running.",
+      "upstream": [
+        {
+          "line": 41,
+          "anchor": "The deploy harness does not expose the emitted server bundle."
+        },
+        {
+          "line": 42,
+          "anchor": "@gate !deploy"
+        }
+      ],
+      "cases": [
+        {
+          "path": ["app-dir - metadata-streaming (parallelRouteMetadata: false)"],
+          "title": "should only bundle the selected metadata resolution implementation",
+          "cells": ["node-turbopack", "bun-webpack"]
+        },
+        {
+          "path": ["app-dir - metadata-streaming (parallelRouteMetadata: true)"],
+          "title": "should only bundle the selected metadata resolution implementation",
+          "cells": ["node-turbopack", "bun-webpack"]
+        }
+      ],
+      "runs": [
+        {
+          "run": "41754152861",
+          "cell": "node-turbopack",
+          "ref": "v16.4.3"
+        },
+        {
+          "run": "41770412157",
+          "cell": "bun-webpack",
+          "ref": "v16.4.3"
+        }
+      ],
+      "measured": {
+        "node-turbopack": {
+          "failed": 2,
+          "passed": 14
+        },
+        "bun-webpack": {
+          "failed": 2,
+          "passed": 14
+        }
+      },
+      "provenance": "https://github.com/getknext-dev/knext/issues/2127",
+      "retire": "Retire when upstream drops the deploy-only expected failure for this case, or at the first Next ref where the harness no longer reports it."
+    },
+    {
+      "test": "test/e2e/app-dir/partial-fallback-shell-upgrade/partial-fallback-shell-upgrade.test.ts",
+      "nextjsRef": "v16.4.3",
+      "mechanismCategory": "vercel-cdn-header",
+      "mechanism": "Each failing case asserts `x-vercel-cache` is HIT inside an `if (isNextDeploy)` block (lines 297-300, 315-316, 326-329, 370-371 and 423-428). x-vercel-cache is set by Vercel's CDN, and the file's comment at line 217 says the legacy Vercel builder does not implement the Cache Components shell. The received value is null: knext serves no CDN header. At v16.4.0 a local run with ONLY the x-vercel-cache assertions removed passed all three cases on knext; that stub check was not re-run at v16.4.3. A harness-side header fake is rejected (ADR-0007 section (h) option (c)). The other 10 cases pass and keep running.",
+      "upstream": [
+        {
+          "line": 217,
+          "anchor": "The legacy Vercel builder does not implement the Cache Components shell"
+        },
+        {
+          "line": 300,
+          "anchor": "x-vercel-cache"
+        },
+        {
+          "line": 316,
+          "anchor": "x-vercel-cache"
+        },
+        {
+          "line": 329,
+          "anchor": "x-vercel-cache"
+        },
+        {
+          "line": 371,
+          "anchor": "x-vercel-cache"
+        },
+        {
+          "line": 428,
+          "anchor": "x-vercel-cache"
+        }
+      ],
+      "cases": [
+        {
+          "path": ["partial-fallback-shell-upgrade - partialPrefetching disabled"],
+          "title": "shares an on-demand shell across params without generateStaticParams",
+          "cells": ["node-turbopack", "bun-webpack"]
+        },
+        {
+          "path": ["partial-fallback-shell-upgrade - partialPrefetching disabled"],
+          "title": "keeps params without generateStaticParams dynamic after explicit revalidation of an on-demand shell",
+          "cells": ["node-turbopack", "bun-webpack"]
+        },
+        {
+          "path": ["partial-fallback-shell-upgrade - partialPrefetching disabled"],
+          "title": "reuses generated optional catch-all pages before and after explicit revalidation",
+          "cells": ["node-turbopack", "bun-webpack"]
+        }
+      ],
+      "runs": [
+        {
+          "run": "41754152861",
+          "cell": "node-turbopack",
+          "ref": "v16.4.3"
+        },
+        {
+          "run": "41770412157",
+          "cell": "bun-webpack",
+          "ref": "v16.4.3"
+        }
+      ],
+      "measured": {
+        "node-turbopack": {
+          "failed": 3,
+          "passed": 10
+        },
+        "bun-webpack": {
+          "failed": 3,
+          "passed": 10
+        }
+      },
+      "provenance": "https://github.com/getknext-dev/knext/issues/2128",
+      "retire": "Retire when upstream stops asserting x-vercel-cache for non-Vercel adapters in these cases, or at the first Next ref where the file passes on every measured cell."
+    },
+    {
+      "test": "test/e2e/app-dir/non-root-project-monorepo/non-root-project-monorepo.test.ts",
+      "nextjsRef": "v16.4.3",
+      "mechanismCategory": "vercel-build-root",
+      "mechanism": "The helper `sourceFileUrl` returns `file:///vercel/path0/apps/web/` when isNextDeploy is set (lines 45-46), and every failing case compares import.meta.url against it. The received values are knext's real build paths (`file:///tmp/next-test-.../apps/web/...`), so the monorepo layout built and resolved apps/web: the mismatch is the Vercel build-root literal, not a layout failure. The four RSC and SSR cases fail on both measured cells. The two client-side cases fail only on bun x webpack and pass on node x turbopack, so the lane-blind deselection costs node x turbopack those two passing cases. The file's remaining cases keep running.",
+      "upstream": [
+        {
+          "line": 45,
+          "anchor": "if (isNextDeploy) {"
+        },
+        {
+          "line": 46,
+          "anchor": "file:///vercel/path0/apps/web/"
+        }
+      ],
+      "cases": [
+        {
+          "path": ["non-root-project-monorepo", "import.meta.url"],
+          "title": "should work during RSC",
+          "cells": ["node-turbopack", "bun-webpack"]
+        },
+        {
+          "path": ["non-root-project-monorepo", "import.meta.url"],
+          "title": "should work during SSR",
+          "cells": ["node-turbopack", "bun-webpack"]
+        },
+        {
+          "path": ["non-root-project-monorepo", "import.meta.url", "non-url-safe characters"],
+          "title": "should encode special chars during RSC",
+          "cells": ["node-turbopack", "bun-webpack"]
+        },
+        {
+          "path": ["non-root-project-monorepo", "import.meta.url", "non-url-safe characters"],
+          "title": "should encode special chars during SSR",
+          "cells": ["node-turbopack", "bun-webpack"]
+        },
+        {
+          "path": ["non-root-project-monorepo", "import.meta.url"],
+          "title": "should work on client-side",
+          "cells": ["bun-webpack"]
+        },
+        {
+          "path": ["non-root-project-monorepo", "import.meta.url", "non-url-safe characters"],
+          "title": "should encode special chars on client-side",
+          "cells": ["bun-webpack"]
+        }
+      ],
+      "runs": [
+        {
+          "run": "41754152861",
+          "cell": "node-turbopack",
+          "ref": "v16.4.3"
+        },
+        {
+          "run": "41770412157",
+          "cell": "bun-webpack",
+          "ref": "v16.4.3"
+        }
+      ],
+      "measured": {
+        "node-turbopack": {
+          "failed": 4,
+          "passed": 6
+        },
+        "bun-webpack": {
+          "failed": 6,
+          "passed": 4
+        }
+      },
+      "provenance": "https://github.com/getknext-dev/knext/issues/2128",
+      "retire": "Retire when upstream stops hard-coding the Vercel build root for non-Vercel adapters, or at the first Next ref where the file passes on every measured cell."
+    },
+    {
+      "test": "test/e2e/app-dir/prerender-encoding/prerender-encoding.test.ts",
+      "nextjsRef": "v16.4.3",
+      "mechanismCategory": "expected-failure-gate",
+      "mechanism": "Both cases carry upstream gate pragmas, not an isNextDeploy assertion: `// @gate !deploy` (line 35) on the closed case and `// @gate !deploy || !adapter` (line 50) on the open case, so the harness expects both to fail on a deploy lane. knext's results pass ('Failing test passed even though it was supposed to fail'): next start preserves the encoded slash, which is what knext returns. The upstream comments give the platform reason (Vercel's filesystem lookup, and the Vercel adapter path decoding the captured slash). The other 3 cases pass and keep running.",
+      "upstream": [
+        {
+          "line": 35,
+          "anchor": "@gate !deploy"
+        },
+        {
+          "line": 50,
+          "anchor": "@gate !deploy || !adapter"
+        }
+      ],
+      "cases": [
+        {
+          "path": ["prerender-encoding"],
+          "title": "should preserve an encoded slash in an exact closed catch-all path",
+          "cells": ["node-turbopack", "bun-webpack"]
+        },
+        {
+          "path": ["prerender-encoding"],
+          "title": "should preserve an encoded slash in an open catch-all fallback",
+          "cells": ["node-turbopack", "bun-webpack"]
+        }
+      ],
+      "runs": [
+        {
+          "run": "41754152861",
+          "cell": "node-turbopack",
+          "ref": "v16.4.3"
+        },
+        {
+          "run": "41770412157",
+          "cell": "bun-webpack",
+          "ref": "v16.4.3"
+        }
+      ],
+      "measured": {
+        "node-turbopack": {
+          "failed": 2,
+          "passed": 3
+        },
+        "bun-webpack": {
+          "failed": 2,
+          "passed": 3
+        }
+      },
+      "provenance": "https://github.com/getknext-dev/knext/issues/2127",
+      "retire": "Retire when upstream drops the deploy-only expected failure for these cases, or at the first Next ref where they pass on every measured cell."
+    },
+    {
+      "test": "test/e2e/app-dir/segment-cache/metadata/segment-cache-metadata.test.ts",
+      "nextjsRef": "v16.4.3",
+      "mechanismCategory": "expected-failure-gate",
+      "mechanism": "The case carries `// @gate !deploy` (line 150), under the comment (lines 147-149) 'On the platform a cold ISR path is served from a completed static prerender that cannot vary on the request tree, so the page body is sent along with the head.' The harness expects it to fail on a deploy lane; knext's head-only response passes the assertion and the harness reports 'Failing test passed even though it was supposed to fail'. The other 2 cases pass and keep running.",
+      "upstream": [
+        {
+          "line": 150,
+          "anchor": "@gate !deploy"
+        }
+      ],
+      "cases": [
+        {
+          "path": ["segment cache (metadata)"],
+          "title": "requests only the head when the page segments are cached",
+          "cells": ["node-turbopack", "bun-webpack"]
+        }
+      ],
+      "runs": [
+        {
+          "run": "41754152861",
+          "cell": "node-turbopack",
+          "ref": "v16.4.3"
+        },
+        {
+          "run": "41770412157",
+          "cell": "bun-webpack",
+          "ref": "v16.4.3"
+        }
+      ],
+      "measured": {
+        "node-turbopack": {
+          "failed": 1,
+          "passed": 2
+        },
+        "bun-webpack": {
+          "failed": 1,
+          "passed": 2
+        }
+      },
+      "provenance": "https://github.com/getknext-dev/knext/issues/2127",
+      "retire": "Retire when upstream drops the deploy-only expected failure for this case, or at the first Next ref where it passes on every measured cell."
+    },
+    {
+      "test": "test/e2e/app-dir/cache-components-allow-otel-spans/cache-components-allow-otel-spans.test.ts",
+      "nextjsRef": "v16.4.3",
+      "mechanismCategory": "upstream-next-start-regression",
+      "mechanism": "Not a Vercel-platform assertion. The deploy branch (line 346) expects the first request to be a blocking prerender, and upstream's own TODO (lines 330-337) says that behaviour 'appeared to have regressed recently with `next start`', so a dynamic SSR response is served first. knext's observed behaviour equals `next start` (recorded by the earlier triage of this change, not re-measured here); upstream masks it in its own CI with the jest retry. The other 3 cases pass and keep running.",
+      "upstream": [
+        {
+          "line": 330,
+          "anchor": "TODO: Normally we'd expect the first request to be a blocking"
+        },
+        {
+          "line": 346,
+          "anchor": "if (isNextDeploy) {"
+        }
+      ],
+      "cases": [
+        {
+          "path": ["cache-components OTEL spans"],
+          "title": "should allow creating Spans during prerendering at runtime - inside a Cache Components",
+          "cells": ["node-turbopack", "bun-webpack"]
+        }
+      ],
+      "runs": [
+        {
+          "run": "41754152861",
+          "cell": "node-turbopack",
+          "ref": "v16.4.3"
+        },
+        {
+          "run": "41770412157",
+          "cell": "bun-webpack",
+          "ref": "v16.4.3"
+        }
+      ],
+      "measured": {
+        "node-turbopack": {
+          "failed": 1,
+          "passed": 3
+        },
+        "bun-webpack": {
+          "failed": 1,
+          "passed": 3
+        }
+      },
+      "provenance": "https://github.com/getknext-dev/knext/issues/2129",
+      "retire": "Retire when upstream fixes the next start regression its TODO names and consolidates the assertions, or at the first Next ref where the case passes on every measured cell."
+    },
+    {
+      "test": "test/e2e/transpile-packages-typescript-foreign/index.test.ts",
+      "nextjsRef": "v16.4.3",
+      "mechanismCategory": "harness-package-manager",
+      "mechanism": "Harness gap, not product scope and not platform coupling. Upstream's comment (line 3) says vercel.json uses pnpm so file: dependencies are installed inside node_modules; npm instead links them to fixture source, which is transpiled, so the expected build failure never happens and `next.start()` resolves. The compat harness installs with npm. The file's other case ('with transpilePackages should work') passes and keeps running. The fix is not small: the harness would install with the fixture's declared package manager.",
+      "upstream": [
+        {
+          "line": 3,
+          "anchor": "vercel.json uses pnpm so file: dependencies are installed inside node_modules."
+        }
+      ],
+      "cases": [
+        {
+          "path": ["transpile-packages-typescript-foreign", "without transpilePackages"],
+          "title": "should fail",
+          "cells": ["node-turbopack", "bun-webpack"]
+        }
+      ],
+      "runs": [
+        {
+          "run": "41754152861",
+          "cell": "node-turbopack",
+          "ref": "v16.4.3"
+        },
+        {
+          "run": "41770412157",
+          "cell": "bun-webpack",
+          "ref": "v16.4.3"
+        }
+      ],
+      "measured": {
+        "node-turbopack": {
+          "failed": 1,
+          "passed": 1
+        },
+        "bun-webpack": {
+          "failed": 1,
+          "passed": 1
+        }
+      },
+      "provenance": "https://github.com/getknext-dev/knext/issues/2709",
+      "retire": "Retire when the harness installs with the fixture's declared package manager and the linked issue closes."
+    },
+    {
+      "test": "test/e2e/prerender-native-module.test.ts",
+      "nextjsRef": "v16.4.3",
+      "mechanismCategory": "runtime-abi-gap",
+      "mechanism": "A KNOWN GAP IN BUN SUPPORT, deselected so the bun cell is not red, not a claim that it is fine. The fixture's native-addon uses the V8 C++ API (NODE_MODULE_INIT). On the bun cell the runtime dlopens an addon compiled against NODE_MODULE_VERSION 137 (the runner's Node 24), and Bun 1.4.2 requires 147; a correct musl rebuild would not fix that alone, because Bun must also implement the V8 calls the addon uses. A real user with a V8-API native addon on the Bun runtime probably hits this. The Node cells never rebuild or hit this ABI check: the file PASSED on node x turbopack, so the lane-blind deselection costs the Node cells these two passing cases. The index case keeps running. The mechanism cannot scope a deselection to one runtime, so this is the narrowest honest option.",
+      "upstream": [
+        {
+          "line": 14,
+          "anchor": "native-addon"
+        },
+        {
+          "line": 35,
+          "anchor": "should render /blog/first correctly"
+        }
+      ],
+      "cases": [
+        {
+          "path": ["prerender native module"],
+          "title": "should render /blog/first correctly",
+          "cells": ["bun-webpack"]
+        },
+        {
+          "path": ["prerender native module"],
+          "title": "should render /blog/second correctly",
+          "cells": ["bun-webpack"]
+        }
+      ],
+      "runs": [
+        {
+          "run": "41754152861",
+          "cell": "node-turbopack",
+          "ref": "v16.4.3"
+        },
+        {
+          "run": "41770412157",
+          "cell": "bun-webpack",
+          "ref": "v16.4.3"
+        }
+      ],
+      "measured": {
+        "node-turbopack": {
+          "failed": 0,
+          "passed": null
+        },
+        "bun-webpack": {
+          "failed": 2,
+          "passed": 1
+        }
+      },
+      "provenance": "https://github.com/getknext-dev/knext/issues/2713",
+      "retire": "Retire when Bun can load a V8-API addon built for its own ABI and the musl rebuild builds the fixture addon from source, then re-measure."
+    }
+  ],
+  "$knextUpstreamRuntimeDefects": [
+    {
+      "test": "test/e2e/app-dir/treeshake-mw/mw.test.ts",
+      "lane": "bun/turbopack",
+      "nextjsRef": "v16.4.3",
+      "bunVersion": "1.4.2",
+      "wholeFile": true,
+      "cases": [
+        {
+          "path": ["treeshake-mw"],
+          "title": "builds and runs Node.js middleware importing via a star re-export"
+        }
+      ],
+      "mechanism": "The fixture sets `experimental.turbopackModuleFragments: true`. The Node.js-runtime middleware chunk Turbopack emits contains an assignment to a `const` binding in code that never runs. The compiled Bun executable loads the chunk through Bun's own parser, which reports it as a load-time error (`Cannot assign to \"t\" because it is a constant`), so the middleware never runs and the `x-key` response header is absent. Node defers the same assignment to a runtime TypeError that is never reached. Minimal repro: `if (process.argv[2]===\"x\") { const e = 1; e = 2 }` loads under node and exits 1 under bun 1.4.2.",
+      "evidence": "run 42048108176 (dispatch on main e32f00187, NEXTJS_REF=v16.4.3, bun x turbopack, Bun 1.4.2, shard 12/16): FINAL 3/3 attempts, `expect(res.headers.get('x-key')).toBe('k')` Received null. The file is not among the failures of run 42048101712 (node x webpack, v16.4.3, 1176 passed, 0 failed), run 41754152861 (node x turbopack, v16.4.3) or run 41770412157 (bun x webpack, v16.4.3, Bun 1.4.2). The same file was red the same way on bun x turbopack at v16.4.0 (run 38181750458) before the ref moved.",
+      "runs": [
+        {
+          "run": "42048108176",
+          "cell": "bun-turbopack",
+          "ref": "v16.4.3",
+          "bun": "1.4.2"
+        },
+        {
+          "run": "42048101712",
+          "cell": "node-webpack",
+          "ref": "v16.4.3"
+        },
+        {
+          "run": "41754152861",
+          "cell": "node-turbopack",
+          "ref": "v16.4.3"
+        },
+        {
+          "run": "41770412157",
+          "cell": "bun-webpack",
+          "ref": "v16.4.3",
+          "bun": "1.4.2"
+        }
+      ],
+      "upstream": {
+        "issue": "oven-sh/bun#45007",
+        "fix": "oven-sh/bun#45010"
+      },
+      "knextRefusal": "packages/kn-next/src/cli/turbopack-fragments-guard.ts#assertNoBunTurbopackFragments: knext refuses `experimental.turbopackModuleFragments` on the Bun runtime at build time (`knext build`, `deploy`, `preview`, and `doctor`), so a user cannot reach this state silently. The compat harness runs `next build` directly, not through the CLI, so the refusal is not on its path and the red is expected there.",
+      "removeWhen": "a Bun release containing oven-sh/bun#45010 (an assignment to a const in code that never runs becomes a runtime TypeError, not a load-time error). Mechanically: the entry is pinned to the lane's Bun (bunVersion), so the PR that moves the lane's Bun pin is red until this entry is re-measured at the new Bun or removed, and at any other Bun the run-time scope does not deselect, so the re-measure runs the case. When it passes, delete this entry and the knext refusal in the same change.",
+      "provenance": "https://github.com/getknext-dev/knext/issues/2225 (the bun x turbopack red, filed from the Next 16.4 smoke) + oven-sh/bun#45007 (upstream issue) + oven-sh/bun#45010 (upstream fix, open). Founder instruction 2026-11-05: \"Batch the bun bug on knext until the upstream merge\". ADR-0007 amendment 2026-11-05. NOT in rules.exclude: the file runs on every cell; the run-time scope deselects it only on bun/turbopack at v16.4.3 on Bun 1.4.2."
+    },
+    {
+      "test": "test/e2e/app-dir/turbopack-tree-shaking-chunkgroup/turbopack-tree-shaking-chunkgroup.test.ts",
+      "lane": "bun/turbopack",
+      "nextjsRef": "v16.4.3",
+      "bunVersion": "1.4.2",
+      "wholeFile": true,
+      "cases": [
+        {
+          "path": ["turbopack-tree-shaking-chunkgroup"],
+          "title": "builds an app-router app with tree-shaking enabled and renders"
+        }
+      ],
+      "mechanism": "The fixture sets `experimental.turbopackModuleFragments: true`. Turbopack's module-fragment chunks (`server/chunks/ssr/node_modules_next_dist_esm_build_templates_app-page_*.js`) contain assignments to `const` bindings in code that never runs. The compiled Bun executable loads the chunk through Bun's own parser, which reports them as load-time errors (`Cannot assign to \"e\" because it is a constant`), so the page fails with `ChunkLoadError` and renders no `h1`. Node defers the same assignment to a runtime TypeError that is never reached. Same Bun parser defect as treeshake-mw.",
+      "evidence": "run 42048108176 (dispatch on main e32f00187, NEXTJS_REF=v16.4.3, bun x turbopack, Bun 1.4.2, shard 2/16): FINAL 3/3 attempts, `expect($('h1').text()).toContain('tree shaking app')` Received ''. The file is not among the failures of run 42048101712 (node x webpack, v16.4.3, 1176 passed, 0 failed), run 41754152861 (node x turbopack, v16.4.3) or run 41770412157 (bun x webpack, v16.4.3, Bun 1.4.2). The same file was red the same way on bun x turbopack at v16.4.0 (run 38181750458) before the ref moved.",
+      "runs": [
+        {
+          "run": "42048108176",
+          "cell": "bun-turbopack",
+          "ref": "v16.4.3",
+          "bun": "1.4.2"
+        },
+        {
+          "run": "42048101712",
+          "cell": "node-webpack",
+          "ref": "v16.4.3"
+        },
+        {
+          "run": "41754152861",
+          "cell": "node-turbopack",
+          "ref": "v16.4.3"
+        },
+        {
+          "run": "41770412157",
+          "cell": "bun-webpack",
+          "ref": "v16.4.3",
+          "bun": "1.4.2"
+        }
+      ],
+      "upstream": {
+        "issue": "oven-sh/bun#45007",
+        "fix": "oven-sh/bun#45010"
+      },
+      "knextRefusal": "packages/kn-next/src/cli/turbopack-fragments-guard.ts#assertNoBunTurbopackFragments: knext refuses `experimental.turbopackModuleFragments` on the Bun runtime at build time (`knext build`, `deploy`, `preview`, and `doctor`), so a user cannot reach this state silently. The compat harness runs `next build` directly, not through the CLI, so the refusal is not on its path and the red is expected there.",
+      "removeWhen": "a Bun release containing oven-sh/bun#45010 (an assignment to a const in code that never runs becomes a runtime TypeError, not a load-time error). Mechanically: the entry is pinned to the lane's Bun (bunVersion), so the PR that moves the lane's Bun pin is red until this entry is re-measured at the new Bun or removed, and at any other Bun the run-time scope does not deselect, so the re-measure runs the case. When it passes, delete this entry and the knext refusal in the same change.",
+      "provenance": "https://github.com/getknext-dev/knext/issues/2225 (the bun x turbopack red, filed from the Next 16.4 smoke) + oven-sh/bun#45007 (upstream issue) + oven-sh/bun#45010 (upstream fix, open). Founder instruction 2026-11-05: \"Batch the bun bug on knext until the upstream merge\". ADR-0007 amendment 2026-11-05. NOT in rules.exclude: the file runs on every cell; the run-time scope deselects it only on bun/turbopack at v16.4.3 on Bun 1.4.2."
     }
   ]
 }

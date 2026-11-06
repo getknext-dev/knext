@@ -5,8 +5,15 @@
 > ✅ ("supported") row cannot be backed up. When in doubt we mark ⚠️, not ✅.
 >
 > **The compat credential window now runs against `vercel/next.js` **v16.3.8**** (rc.2's
-> re-credential, #1560, 2026-09-30) — the same tag `knext create` scaffolds today, closing the
-> deliberate v16.2.x/16.3.x divergence rc.1 opened. `NEXTJS_REF` in `test-e2e-deploy.yml` moved to
+> re-credential, #1560, 2026-09-30). **Divergence since #2594 (2026-10-27):** `knext create` now
+> scaffolds next 16.4.3 (the 16.4.x line), ahead of the credential, because GHSA-2464-fhr4-w9xw /
+> GHSA-673q-mjm6-r5xr (critical, unauthenticated RCE) and GHSA-p3m5-59mp-jv5r (high, DoS) affect
+> every 16.x through 16.4.0 and have no 16.3.x fix. **v1.3 lane (2026-11-02):** the parallel v1.3
+> credential lane tests `vercel/next.js` **v16.4.3** through a declared v1.3-only substitution in
+> `compat-credential-v1.3.yml` (`nextjsRefOverride`); the v1.0 lane and `test-e2e-deploy.yml` keep
+> v16.3.8, so no v1.0 window restarts. No run at v16.4.3 has counted yet. Moving `NEXTJS_REF` restarts the credential
+> windows and is a separate decision recorded on #2594. The history below is the v16.3.8
+> re-credential, which closed the deliberate v16.2.x/16.3.x divergence rc.1 opened. `NEXTJS_REF` in `test-e2e-deploy.yml` moved to
 > this ref in the same PR that re-audited the pre-existing quarantine ledger against it with real
 > dispatch evidence: all four cells (node/bun x turbopack/webpack), 16/16 shards each attempted
 > (runs 36638853381 / 36638856495 / 36638859599 / 36638862596). The two **bun** cells and the
@@ -23,11 +30,12 @@
 > fix's bytecode-liveness proof on the node cells. That is dispatched confirmation regardless, not
 > the 14 consecutive scheduled credential runs the v1.0 gate requires (three scheduled runs per
 > cell per day since ADR-0056 Amendment 5) — those start fresh at this
-> ref. Six upstream tests are evidence-quarantined at this ref (the
+> ref. Six upstream tests were evidence-quarantined at the v16.3.5 ref (the
 > `vercel-infra-coupled` family, ADR-0007 §h addendum): each fails deterministically because its
 > `deploy` branch encodes behaviour only Vercel's own infrastructure produces, and knext's result
 > matches the self-hosted expectation in every case — full per-test provenance is in the ADR
-> addendum and `.github/compat-credentialed-next-version.json`.
+> addendum and `.github/compat-credentialed-next-version.json`. At v16.4.3 the exclusions are
+> recorded in the bullet below, measured on two of the four cells; the runner does not scope them by ref.
 >
 > **The last COMPLETED 14-run-eligible credential evidence is the rc.1 rehearsal, still at
 > `v16.2.12`.** re-credentialed 2026-09-27 (#1570) — the four credential cells each ran green
@@ -106,6 +114,74 @@ gate, not the official suite — the official suite has its own row, own workflo
   row back (the guard permits an honest ❌ regression without ceremony) or annotate it. The
   quarantine + exclusion ledgers in `test/deploy-tests-manifest.knext.json` are the public
   scoreboard — shrinking them to zero is the standing goal (ADR-0007 A3-3).
+- **Next.js 16.4.3 exclusions (read these as three different things).** Measured at v16.4.3 on
+  two of the four cells only: node/turbopack (run 41754152861) and bun/webpack (run 41770412157).
+  node/webpack and bun/turbopack were **not** measured at this ref, and nothing below claims them.
+  - **Deliberate product scope, file level (3 files).** knext deploys a server
+    (`output: 'standalone'`) only, so a static export (`output: 'export'`) is refused and its deploy
+    tests cannot pass by design. The harness fails on `standalone server.js not found`.
+  - **Platform-coupled, file level (3 files).** Every
+    case that runs fails on an assertion in a branch that expects the Vercel platform: span shape
+    set by the platform, or Vercel's build-log formatting.
+  - **Ref-pinned per-case entries (9 files, 19 cases).** Files that fail only some cases keep the
+    rest running. Each entry is pinned to the exact Next ref it was measured at, lists exact case
+    names that must still exist upstream at that ref, cites the upstream line and a mechanism
+    category, records its run IDs and the cells it was measured on, and counts against a cap of 10
+    files and 20 cases (ADR-0007 amendment 2026-11-04). The mechanisms: Vercel CDN header
+    (`partial-fallback-shell-upgrade`), Vercel static-prerender serving (`cached-navigations`), the
+    Vercel build root (`non-root-project-monorepo`), upstream `@gate` pragmas that expect a deploy
+    to fail while knext's result passes (`prerender-encoding`, `segment-cache/metadata`,
+    `metadata-streaming-parallel-routes`), a `next start` regression upstream names in its own TODO
+    (`cache-components-allow-otel-spans`; that knext matches `next start` is an earlier finding, not
+    re-measured here), a harness package-manager gap
+    (`transpile-packages-typescript-foreign`), and a **Bun gap**.
+  - **The Bun gap, stated plainly.** `prerender-native-module` (2 cases) fails on the Bun cell
+    because the fixture's native addon uses the V8 C++ API and the Bun runtime loads it with a
+    different ABI version (Node 24's 137 against Bun 1.4.2's 147). It is deselected so the Bun cell
+    is not red. **It is not a claim that V8-API native addons work on Bun.** The manifest cannot scope
+    a deselection to one runtime, so node/turbopack, which was measured passing, also stops running
+    those 2 cases; node/webpack was not measured.
+  - **What a deselected case does at the same ref.** The runner does not run it, so a case that
+    starts passing is silent. A ref bump is what re-exposes it: an entry is only admissible at a
+    lane's default ref or the shipped ref, so a bump turns CI red until each entry is re-measured
+    or removed. The guards check form, not truth: human review is the defence that an entry's
+    mechanism is real.
+  - **Passing cases lost, on the cells that were measured:** node/turbopack 4 (2 client-side cases
+    in `non-root-project-monorepo` that fail on bun/webpack but pass on node/turbopack, and the 2
+    Bun-gap cases above; runtime and builder are confounded in these two cells), bun/webpack 0. The
+    earlier file-level version of this change lost 41 and 39.
+- **Ref scope of the per-case entries, exactly.** The runner has no notion of a ref, so a step
+  before the tests (`scripts/compat-manifest-for-ref.mjs`) writes a copy of the manifest without the
+  per-case deselections whose ref differs from `NEXTJS_REF`; a missing or unparseable ref fails the
+  step. `test-e2e-deploy.yml` (early-warning crons, dispatches, and the v1.0 credential nights) and
+  `compat-vinext.yml` carry it. The v1.3 credential workflow is generated from its pinned release
+  candidate tag, so it gets the step when that pin moves to a candidate cut from a `main` that has
+  it. The candidates pinned today predate the per-case entries, so their manifests deselect nothing
+  of this kind. A separate CI job re-fetches the pinned upstream files on every pull request that
+  touches the entries, and nightly, and fails if the committed snapshot differs or upstream is
+  unreachable. The constraint that remains: the manifest is one file for every cell at one ref.
+- **Upstream-runtime defects, scoped to one cell (2 files, 2 cases; ADR-0007 amendment
+  2026-11-05).** A separate ledger, `$knextUpstreamRuntimeDefects`, for a red on exactly one cell
+  caused by a runtime knext does not own. The committed manifest deselects nothing of this kind;
+  the same scope step applies an entry to the copy the harness reads only on the entry's lane
+  (`KNEXT_RUNTIME`/`KNEXT_BUILDER`), at its ref, and on Bun at its `bunVersion` (`bun --version`).
+  An entry that covers every case in its file (`wholeFile`) adds the **file** to the copy's
+  `rules.exclude`. A `failed` list that covers a whole file would make jest run no case and exit 0,
+  and the shard summary would count a passed file. A partial-file entry adds its case names to
+  `failed`. The shard summary's `excluded` figure comes from the committed manifest, so it does not
+  count these files.
+  Today: `treeshake-mw` and `turbopack-tree-shaking-chunkgroup` on **bun/turbopack** at v16.4.3 on
+  Bun 1.4.2 (run 42048108176, 3 of 3 attempts each). Each has one case, so both files are excluded
+  on that cell. Both fixtures set
+  `experimental.turbopackModuleFragments`; Bun's parser rejects a `const` assignment in dead code
+  at load time where Node defers it (oven-sh/bun#45007, fix oven-sh/bun#45010, unreleased). Green
+  and still running on node/webpack (run 42048101712), node/turbopack (run 41754152861) and
+  bun/webpack (run 41770412157). knext refuses the flag on Bun at build time. Removal: the Bun
+  release containing the fix. A PR that moves the lanes' Bun pin is red until each entry is
+  re-measured at the new Bun or removed. Each Bun-cell run records its Bun, and an entry needs an
+  own-cell run at its `bunVersion`, so editing `bunVersion` with the pin is not enough. At any other
+  Bun (a canary dispatch included) the cases run. Its own cap is 5; it counts toward no other cap. The v1.0 credential (rc tag checkout,
+  v16.3.8) is unaffected; the v1.3 credential gains it with the next rc cut from `main`.
 - **Red-nightly procedure (mechanized, end to end).** Red **test results actually fail the
   workflow**: each shard's final "Fail shard on red results" gate exits 1 when its summary JSON
   carries `failed>0` or `notRun>0` (the run step's `|| true` only swallows the *step* exit so the

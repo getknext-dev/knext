@@ -56,6 +56,15 @@ export const CREDENTIAL_LINES = Object.freeze({
     line: 'v1.3',
     /** The pin, read from `main` (the executing ref of a scheduled run). */
     pinFile: '.github/compat-credential-ref-v1.3.json',
+    /**
+     * The Next.js ref THIS lane tests, when it differs from the one its RC tag's
+     * own `test-e2e-deploy.yml` declares. A derivation step
+     * (`nextjs-ref-dispatch` / `nextjs-ref-env` in compat-line-workflow.mjs), so
+     * the move to 16.4.3 (1.x security patch) lives in the v1.3 lane only: the
+     * v1.0 lane's executing file, `test-e2e-deploy.yml`, is untouched and its
+     * fingerprint does not move.
+     */
+    nextjsRefOverride: Object.freeze({ from: 'v16.3.8', to: 'v16.4.3' }),
     /** A tag is on this line iff it matches. */
     tagPattern: new RegExp(`^v1\\.3\\.${NUM}-rc\\.${NUM}$`),
     /** The DERIVED workflow that executes this line's nights (basename). */

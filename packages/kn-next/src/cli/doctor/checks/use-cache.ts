@@ -34,8 +34,12 @@ import {
     readFileSync,
 } from "node:fs";
 import { extname, join, relative } from "node:path";
+import { stripCodeComments } from "../../../utils/strip-code-comments";
 import { mk } from "../report";
 import type { CheckContext, CheckResult } from "../types";
+
+// Re-exported: the doctor check and its tests have always imported it from here.
+export { stripCodeComments };
 
 export const NEXT_CONFIG_FILES = [
     "next.config.ts",
@@ -95,56 +99,10 @@ export interface UseCacheScan {
     truncated: boolean;
 }
 
-/**
- * Regex comment strip, kept ONLY for `turbopack-fragments-guard.ts`, which
- * imports it. It is not string-aware (a `'/img/**'` glob opens a "comment"),
- * so nothing in this module uses it -- see {@link stripCodeComments}.
- */
-export function stripComments(src: string): string {
-    return src
-        .replace(/\/\*[\s\S]*?\*\//g, "")
-        .replace(/(^|[^:])\/\/.*$/gm, "$1");
-}
-
-/**
- * Remove // and block comments from source while leaving string and
- * template-literal contents untouched, so `'/api/*'` does not open a
- * "comment" that swallows the code after it. Block comments keep their
- * newlines, so the line structure the directive regex relies on survives.
- */
-export function stripCodeComments(src: string): string {
-    let out = "";
-    let i = 0;
-    const n = src.length;
-    while (i < n) {
-        const c = src[i];
-        if (c === '"' || c === "'" || c === "`") {
-            const start = i;
-            i++;
-            while (i < n && src[i] !== c) {
-                if (src[i] === "\\") i++;
-                else if (c !== "`" && src[i] === "\n") break;
-                i++;
-            }
-            i++;
-            out += src.slice(start, i);
-            continue;
-        }
-        if (c === "/" && src[i + 1] === "/") {
-            while (i < n && src[i] !== "\n") i++;
-            continue;
-        }
-        if (c === "/" && src[i + 1] === "*") {
-            const end = src.indexOf("*/", i + 2);
-            const stop = end === -1 ? n : end + 2;
-            out += src.slice(i, stop).replace(/[^\n]/g, "");
-            i = stop;
-            continue;
-        }
-        out += c;
-        i++;
-    }
-    return out;
+/** Filesystem seam for {@link scanUseCache} (tests inject Dirents). */
+export interface ScanIO {
+    /** `readdirSync(dir, { withFileTypes: true })` by default. */
+    readdir?: (dir: string) => Dirent[];
 }
 
 /**
@@ -173,20 +131,25 @@ export function setsZeroCacheMemory(configText: string): boolean {
  * dot-directories (`.next`, `.git`, ...), `node_modules` at any depth and
  * build output and `public/` at the root. Directories and source files count
  * toward `limits.maxEntries` (other files cost no syscall: the walk reads
- * entry types from `readdir`); hitting the cap sets `truncated`. Never throws: an
+ * entry types from `readdir`, with an `lstat` fallback only where `readdir`
+ * reports no type); hitting the cap sets `truncated`. Never throws: an
  * unreadable entry is skipped, because doctor must not crash on the state it
  * is diagnosing.
  */
 export function scanUseCache(
     root: string,
     limits: ScanLimits = DEFAULT_SCAN_LIMITS,
+    io: ScanIO = {},
 ): UseCacheScan {
+    const readdir =
+        io.readdir ??
+        ((dir: string) => readdirSync(dir, { withFileTypes: true }));
     let entries = 0;
     let truncated = false;
     const walk = (dir: string, atRoot: boolean): string | undefined => {
         let dirents: Dirent[];
         try {
-            dirents = readdirSync(dir, { withFileTypes: true });
+            dirents = readdir(dir);
         } catch {
             return undefined;
         }
@@ -199,11 +162,23 @@ export function scanUseCache(
             // Dirent types come from readdir without following links: a
             // symlink is neither a directory nor a file here, so it is never
             // followed (no loops, no escaping the app root).
-            const isDir = d.isDirectory();
+            let isDir = d.isDirectory();
+            let isFile = d.isFile();
+            if (!isDir && !isFile && !d.isSymbolicLink()) {
+                // No type from readdir (DT_UNKNOWN on some filesystems):
+                // ask lstat, which -- unlike stat -- does not follow a link.
+                try {
+                    const st = lstatSync(join(dir, name));
+                    isDir = st.isDirectory();
+                    isFile = st.isFile();
+                } catch {
+                    continue;
+                }
+            }
             if (isDir) {
                 if (ALWAYS_SKIPPED_DIRS.has(name)) continue;
                 if (atRoot && ROOT_ONLY_SKIPPED_DIRS.has(name)) continue;
-            } else if (!d.isFile() || !SOURCE_EXTENSIONS.has(extname(name))) {
+            } else if (!isFile || !SOURCE_EXTENSIONS.has(extname(name))) {
                 continue;
             }
             if (entries >= limits.maxEntries) {

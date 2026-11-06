@@ -368,6 +368,10 @@ export const CREDENTIAL_CELLS = Object.freeze([
       // via `node …/compat-sharp-pin.mjs`, and the record it reads.
       'scripts/compat-sharp-pin.mjs',
       'scripts/musl-native-lockfiles/next-sharp-resolution.json',
+      // ADR-0007 amendment (ref-pinned per-case entries): the run step scopes the
+      // manifest's per-case deselections to NEXTJS_REF via
+      // `node scripts/compat-manifest-for-ref.mjs` (a subprocess call, not an import).
+      'scripts/compat-manifest-for-ref.mjs',
       ...MUSL_NATIVE_LOCKFILE_FILES,
     ]),
   }),
@@ -390,6 +394,10 @@ export const CREDENTIAL_CELLS = Object.freeze([
       // via `node …/compat-sharp-pin.mjs`, and the record it reads.
       'scripts/compat-sharp-pin.mjs',
       'scripts/musl-native-lockfiles/next-sharp-resolution.json',
+      // ADR-0007 amendment (ref-pinned per-case entries): the run step scopes the
+      // manifest's per-case deselections to NEXTJS_REF via
+      // `node scripts/compat-manifest-for-ref.mjs` (a subprocess call, not an import).
+      'scripts/compat-manifest-for-ref.mjs',
       ...MUSL_NATIVE_LOCKFILE_FILES,
     ]),
   }),
@@ -415,6 +423,10 @@ export const CREDENTIAL_CELLS = Object.freeze([
       // via `node …/compat-sharp-pin.mjs`, and the record it reads.
       'scripts/compat-sharp-pin.mjs',
       'scripts/musl-native-lockfiles/next-sharp-resolution.json',
+      // ADR-0007 amendment (ref-pinned per-case entries): the run step scopes the
+      // manifest's per-case deselections to NEXTJS_REF via
+      // `node scripts/compat-manifest-for-ref.mjs` (a subprocess call, not an import).
+      'scripts/compat-manifest-for-ref.mjs',
       ...MUSL_NATIVE_LOCKFILE_FILES,
     ]),
   }),
@@ -437,6 +449,10 @@ export const CREDENTIAL_CELLS = Object.freeze([
       // via `node …/compat-sharp-pin.mjs`, and the record it reads.
       'scripts/compat-sharp-pin.mjs',
       'scripts/musl-native-lockfiles/next-sharp-resolution.json',
+      // ADR-0007 amendment (ref-pinned per-case entries): the run step scopes the
+      // manifest's per-case deselections to NEXTJS_REF via
+      // `node scripts/compat-manifest-for-ref.mjs` (a subprocess call, not an import).
+      'scripts/compat-manifest-for-ref.mjs',
       ...MUSL_NATIVE_LOCKFILE_FILES,
     ]),
   }),
@@ -469,6 +485,9 @@ export const CREDENTIAL_CELLS = Object.freeze([
       'scripts/compat-run-ledger.mjs',
       'scripts/compat-vinext-ledger.mjs',
       'test/compat-vinext-ledger.json',
+      // ADR-0007 amendment: scopes ref-pinned per-case deselections to NEXTJS_REF
+      // (`node scripts/compat-manifest-for-ref.mjs`, a subprocess call).
+      'scripts/compat-manifest-for-ref.mjs',
       'scripts/lib/musl-lockfile-lookup.sh',
       ...MUSL_NATIVE_LOCKFILE_FILES,
     ]),

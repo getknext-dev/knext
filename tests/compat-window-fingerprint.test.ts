@@ -95,6 +95,8 @@ function makeFixture(): { repoRoot: string; tarballsDir: string } {
   writeFileSync(join(root, 'scripts/compat-disk-floor-check.mjs'), 'export const noop = 1;\n');
   // #1620 follow-up: the bun-credential sharp pin + the record it reads.
   writeFileSync(join(root, 'scripts/compat-sharp-pin.mjs'), 'export const noop = 1;\n');
+  // ADR-0007 amendment: the run step scopes ref-pinned deselections via this script.
+  writeFileSync(join(root, 'scripts/compat-manifest-for-ref.mjs'), 'export const noop = 1;\n');
   mkdirSync(join(root, 'scripts/musl-native-lockfiles'), { recursive: true });
   writeFileSync(join(root, 'scripts/musl-native-lockfiles/next-sharp-resolution.json'), '{}\n');
   // #1321: the bun-vinext cell declares its quarantine ledger + script.

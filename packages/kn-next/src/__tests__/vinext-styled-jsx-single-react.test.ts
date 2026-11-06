@@ -18,6 +18,7 @@ import { cpSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { applyVinextPatches } from "../cli/vinext-patches";
+import { pickServerPort } from "./helpers/free-port";
 import { waitForHttpOk } from "./helpers/wait-for-http-ok";
 
 const tempRoots: string[] = [];
@@ -50,7 +51,7 @@ describe("vinext x nitro: <style jsx> keeps a single React", () => {
         const serve = async (
             cwd: string,
         ): Promise<{ status?: number; body: string; log: string }> => {
-            const port = 20000 + Math.floor(Math.random() * 20000);
+            const port = await pickServerPort();
             const srv = spawn("node", [".output/server/index.mjs"], {
                 cwd,
                 env: {

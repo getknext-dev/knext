@@ -1,0 +1,98 @@
+name: Ref-pinned compat cases vs upstream (verify)
+
+# ── ADR-0007 amendment (ref-pinned per-case entries), bars 2 and 3 ────────────
+# The offline spec (`tests/compat-ref-pinned-cases.test.ts`) checks the ledger against a COMMITTED
+# snapshot of the upstream test files (`test/compat-ref-pinned-cases.upstream.json`). A committed
+# file is editable: a forged case plus a forged snapshot title would satisfy it. This workflow is the
+# network half. It re-fetches every ledgered file from vercel/next.js at the pinned ref, rebuilds the
+# snapshot, and FAILS on any difference (a title, a describe, a cited line, the blob SHA, a missing
+# file).
+#
+# FAILS CLOSED. An unreachable or rate-limited upstream is a failure, never a pass: a checker that goes
+# green when it cannot reach upstream is worse than none (same convention as the action-pin nightly).
+#
+# WHEN IT RUNS
+#   * pull_request, only when the ledger, the snapshot, the tooling or this file changes, so a forged
+#     entry is red on the PR that adds it;
+#   * nightly, so a snapshot that drifted from upstream (a retagged ref) is found without a PR;
+#   * workflow_dispatch, to re-run after a fix.
+# The alert job is scheduled-only, so a dispatch experiment never files an issue.
+
+on:
+  pull_request:
+    paths:
+      - 'test/deploy-tests-manifest.knext.json'
+      - 'test/compat-ref-pinned-cases.upstream.json'
+      - 'scripts/compat-ref-pinned-cases-snapshot.mjs'
+      - 'scripts/lib/ref-pinned-cases.mjs'
+      - '.github/workflows/compat-ref-pinned-cases-verify.yml'
+  # 09:19 UTC nightly, offset from the other security/compat signals.
+  schedule:
+    - cron: '19 9 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: compat-ref-pinned-cases-verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify-ref-pinned-cases:
+    # Not a required-check name: renaming it cannot orphan a branch-protection rule.
+    name: Verify the ref-pinned ledger against upstream (FAIL on any drift)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Dependency-free ESM on the runner's built-in Node, like the action-pin check.
+      - name: Rebuild the upstream snapshot and diff it against the committed one
+        env:
+          # The workflow token, not an anonymous request: 60 req/h anonymously would be a flaky red.
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/compat-ref-pinned-cases-snapshot.mjs --verify
+
+  # Idempotent alert (shared, never-pinning helper: scripts/lib/nightly-alert-issue.mjs).
+  # Cancelled counts as red (a timed-out run must not be silent); always() so the condition can fire
+  # when the check job has failed.
+  nightly-red-alert:
+    name: Nightly red alert (ref-pinned cases)
+    needs: [verify-ref-pinned-cases]
+    if: >-
+      always() &&
+      github.event_name == 'schedule' &&
+      (needs.verify-ref-pinned-cases.result == 'failure' || needs.verify-ref-pinned-cases.result == 'cancelled')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Create or update the "Ref-pinned compat cases drifted from upstream" issue (idempotent)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          CHECK_RESULT: ${{ needs.verify-ref-pinned-cases.result }}
+        run: |
+          set -euo pipefail
+          title='Ref-pinned compat cases drifted from upstream RED'
+          body="The nightly check that every ref-pinned per-case deselection still matches vercel/next.js at its pinned ref FAILED.
+
+          - Run (the job log names the file and the difference): ${RUN_URL}
+          - Check job result: ${CHECK_RESULT}
+
+          **Triage**
+          - *DRIFT* — the committed snapshot differs from upstream at the pinned ref. Either the entry was forged or edited, or the ref was retagged. Do not regenerate the snapshot to go green: find out which.
+          - *cannot build the upstream snapshot* — upstream was unreachable or rate-limited. Treated as a failure, never a pass. Re-run to confirm before assuming it was transient.
+
+          Re-run this workflow to confirm green, then close this issue."
+          TITLE="${title}" BODY="${body}" node scripts/nightly-alert-issue.mjs

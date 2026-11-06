@@ -1,6 +1,6 @@
 {
   "$comment": "Reviewed computed require/import call sites in the Next.js server core (the literal closure of `next` and `next/dist/server/lib/start-server`). The compiled standalone executable's disk-closure scan cannot follow these. Each reason says why the site cannot load a second instance of a module the executable bundles. A Next upgrade that changes this set fails standalone-computed-requires.test.ts: re-review the changed sites before updating this file.",
-  "reviewedAgainstNext": "16.3.8",
+  "reviewedAgainstNext": "16.4.3",
   "sites": {
     "dist/build/get-babel-loader-config.js": {
       "count": 1,
@@ -118,6 +118,10 @@
       "count": 3,
       "reason": "Loads next.config.* and the configured adapterPath by path. In a standalone build the config is inlined into server.js (__NEXT_PRIVATE_STANDALONE_CONFIG), so this runs only if a config file is loaded at runtime. The adapter is build-time only."
     },
+    "dist/server/dev/next-dev-server.js": {
+      "count": 1,
+      "reason": "Development server only (`next dev`): `requireManifest(id)` requires build manifests (JSON) under .next by path, wrapped in try/catch. Took over from the manifest loader Next 16.4 removed. Not executed by the production server, and no module identity involved."
+    },
     "dist/server/lib/module-loader/node-module-loader.js": {
       "count": 2,
       "reason": "Generic `require(id)` used to load page and route modules from .next/server by path. These are disk-loaded build output, in the disk closure."
@@ -145,10 +149,6 @@
     "dist/server/require.js": {
       "count": 2,
       "reason": "`require(pagePath)`: loads the page/route module from .next/server. Build output, in the disk closure."
-    },
-    "dist/server/route-matcher-providers/helpers/manifest-loaders/node-manifest-loader.js": {
-      "count": 1,
-      "reason": "Requires build manifests (JSON) under .next by path. No module identity involved."
     },
     "dist/server/route-modules/route-module.js": {
       "count": 1,

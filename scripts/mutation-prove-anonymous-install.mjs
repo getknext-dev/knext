@@ -217,8 +217,12 @@ const MUTATIONS = [
   [
     WORKFLOW,
     'the workflow drops `persist-credentials: false` and keeps the runner token',
-    '          persist-credentials: false',
-    '          persist-credentials: true',
+    // The workflow has TWO checkouts (the check job and the red-alert job), so
+    // the bare `persist-credentials: false` line occurs twice. Anchor on the
+    // check job's own checkout (the explanatory comment before it plus the step
+    // header) so this row mutates the job the audit is about.
+    'sibling nightlies set it for the same measured reason.\n      - name: Checkout code\n        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n        with:\n          persist-credentials: false',
+    'sibling nightlies set it for the same measured reason.\n      - name: Checkout code\n        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n        with:\n          persist-credentials: true',
   ],
   // ── R3: every guard must hold at EVERY site, not the one that exists today ─
   [
@@ -258,8 +262,8 @@ const MUTATIONS = [
   [
     SCRIPT,
     'the `env:` rule is re-anchored to end-of-line, so the inline form escapes',
-    '  if (/^\\s*["\']?env["\']?\\s*:/m.test(block)) {',
-    '  if (/^\\s*env:\\s*$/m.test(block)) {',
+    '  if (/^\\s*["\']?env["\']?\\s*:/m.test(jobLevelBlock)) {',
+    '  if (/^\\s*env:\\s*$/m.test(jobLevelBlock)) {',
   ],
   // ── R4: every rule at every SPELLING, not just every site ─────────────────
   //
@@ -348,8 +352,11 @@ const MUTATIONS = [
   [
     WORKFLOW,
     'a registry login step nobody put on a denylist is added',
-    '      - name: Checkout code',
-    '      - name: Log in to GHCR\n        uses: docker/login-action@v3\n      - name: Checkout code',
+    // Two jobs each have a `Checkout code` step; anchor on the check job's (the
+    // one preceded by its persist-credentials explanation) so the login step
+    // lands in the job the allowlist audits.
+    'sibling nightlies set it for the same measured reason.\n      - name: Checkout code',
+    'sibling nightlies set it for the same measured reason.\n      - name: Log in to GHCR\n        uses: docker/login-action@v3\n      - name: Checkout code',
   ],
 ];
 

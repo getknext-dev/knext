@@ -54,8 +54,10 @@ too, rather than left implied.
 - **Peer dependency range: `next >=16.0.0 <16.5.0`** — the Next.js minors `@getknext/core`
   declares it will work with. The upper bound is widened one minor at a time as compatibility
   evidence lands; see [Versioning](/docs/versioning).
-- **The compatibility credential window currently runs against `v16.3.8`** — the same release new
-  apps scaffold today. See [the compatibility credential](/docs/compat-suite) and the
+- **The compatibility credential window currently runs against `v16.3.8`**. New apps scaffold
+  16.4.3, a newer release, because every Next.js up to and including 16.4.0 is affected by
+  critical security advisories fixed only on 16.4.x — see
+  [Next.js security upgrades](/docs/upgrading#nextjs-security-upgrades). See [the compatibility credential](/docs/compat-suite) and the
   [Compatibility matrix](/docs/compat-matrix) for exactly which official-suite cells have
   passed at that version and which are still accumulating the 14-consecutive-run credential.
 - A version between the peer floor and the credentialed release is expected to work — Next's own

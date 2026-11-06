@@ -18,6 +18,26 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCREEN="$HERE/jev-result-screen.sh"
 command -v jq >/dev/null 2>&1 || { echo "jq is required" >&2; exit 2; }
 
+# Rule: never feed an infinite producer (`yes`) through a filter that ignores EPIPE. GitHub's macOS
+# runners start jobs with SIGPIPE ignored; `yes | head -c/-n` still exits (yes gets EPIPE and quits),
+# but `yes ... | tr -d '\n' | head -c N` hung this suite until the job timeout, because `tr` ignores
+# the failed write and keeps draining an endless producer. Use rep_bytes / rep_lines /
+# rep_text_bytes below.
+# Checked first and fatal, because the failure mode is a hang: a case-level FAIL would never be
+# reached. Scans every *.test.sh under .claude/hooks plus the jev pr-risk suite, for `yes` in command
+# position (after start of line, | ; & ( { backtick, $(, command/exec/then/do/else, or as /usr/bin/yes).
+# Still missed: `yes` behind env/xargs/sudo, after a line-continuation, built via a variable, or an
+# infinite producer other than `yes` (e.g. `cat /dev/zero`). Quoted prose such as "...; yes" can
+# false-positive; reword it.
+YES_PAT='(^|[|;&({`]|(^|[[:space:]])(command|exec|then|do|else))[[:space:]]*(/usr/bin/)?yes([[:space:]|;&)]|$)'
+for f in "$HERE"/*.test.sh "$HERE/../skills/jev/pr-risk.test.sh"; do
+  [ -f "$f" ] || continue
+  if grep -nE "$YES_PAT" "$f" | grep -v '^[0-9]*:[[:space:]]*#'; then
+    echo "FAIL  $f uses \`yes\` (infinite producer; hangs on macOS when SIGPIPE is ignored and a filter such as tr ignores EPIPE)" >&2
+    exit 1
+  fi
+done
+
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 FAKE="$TMP/fake-jev"
@@ -55,6 +75,20 @@ fail() { printf 'FAIL  %s\n' "$1"; fails=1; }
 
 calls() { [ -f "$FAKE_JEV_LOG" ] && wc -l <"$FAKE_JEV_LOG" | tr -d ' ' || echo 0; }
 reset() { rm -f "$FAKE_JEV_LOG" "$FAKE_JEV_SIZES" "$FAKE_JEV_SEEN"; export FAKE_JEV_MODE=ok; }
+
+# Bounded text generators. Never feed an infinite producer (`yes`) through a filter that ignores EPIPE:
+# with SIGPIPE ignored (GitHub's macOS runners), `yes ... | tr -d '\n' | head -c N` never finished
+# because `tr` keeps draining the endless producer, and the job ran to its timeout (a hang, not
+# slowness). These producers are finite, so they end whatever the signal disposition is.
+rep_bytes() { # <string> <bytes>: <string> repeated, cut to exactly <bytes> bytes, no newline added
+  awk -v s="$1" -v n="$2" 'BEGIN { l = length(s); q = int(n / l); for (i = 0; i < q; i++) printf "%s", s; printf "%s", substr(s, 1, n - q * l) }'
+}
+rep_lines() { # <string> <count>: <string> on <count> lines
+  awk -v s="$1" -v n="$2" 'BEGIN { for (i = 0; i < n; i++) print s }'
+}
+rep_text_bytes() { # <string> <bytes>: <string> as a line, repeated, cut to exactly <bytes> bytes
+  awk -v s="$1" -v n="$2" 'BEGIN { s = s "\n"; l = length(s); q = int(n / l); for (i = 0; i < q; i++) printf "%s", s; printf "%s", substr(s, 1, n - q * l) }'
+}
 
 # fixtures --------------------------------------------------------------------
 screen_json() { # <P(instructs an agent)>
@@ -289,7 +323,7 @@ EOF
 TOK="ghp_${L36}"
 PADN=$((32768 - 7))
 reset; screen_json 0.99
-screen "token straddling the 32 KiB cut: redacted before the cut" Bash "gh pr view 12" "$(yes 'x ' | tr -d '\n' | head -c "$PADN")${TOK}" 1 yes
+screen "token straddling the 32 KiB cut: redacted before the cut" Bash "gh pr view 12" "$(rep_bytes 'x ' "$PADN")${TOK}" 1 yes
 if grep -qF 'ghp_abc' "$FAKE_JEV_SEEN"; then fail "  a prefix of the straddling token reached the stub"; else pass "  no prefix of the straddling token reached the stub"; fi
 unset TOK PADN
 
@@ -448,12 +482,127 @@ ${D5}BEGIN RSA-PSS PRIVATE KEY${D5}
 $PEMA
 $PEMB" "$PEMB"
 
+# --- round 6: a label is ANY run of characters on the BEGIN line except a run of 3+ dashes
+# (RFC 7468 allows ':', '(', '+', '/', '*', and two hyphens in a row). It never crosses a line
+# break, and never a run of 3+ dashes, so it cannot swallow the closing dashes, an END marker on
+# the same line, or the text after it.
+pem_leak "label with a double hyphen: RSA--PSS PRIVATE KEY" \
+  "$INJ
+${D5}BEGIN RSA--PSS PRIVATE KEY${D5}
+$PEMA
+$PEMB
+${D5}END RSA--PSS PRIVATE KEY${D5}
+after: tail text" "$PEMA" "after: tail text"
+pem_leak "label with a double hyphen, no END line" \
+  "$INJ
+${D5}BEGIN RSA--PSS PRIVATE KEY${D5}
+$PEMA
+$PEMB" "$PEMB"
+TAB=$(printf '\t')
+while IFS='|' read -r what lbl; do
+  [ -z "$what" ] && continue
+  pem_leak "label with $what: $lbl" \
+    "$INJ
+${D5}BEGIN $lbl${D5}
+$PEMA
+$PEMB
+${D5}END $lbl${D5}
+after: tail text" "$PEMA" "after: tail text"
+done <<EOF
+a colon|SSH2 KEY: ED25519
+a slash|PKCS7/SIGNED DATA
+a parenthesis|PRIVATE KEY (V2)
+a plus|RSA+PSS PRIVATE KEY
+an asterisk|PRIVATE KEY*
+a tab|RSA${TAB}PRIVATE KEY
+EOF
+# The round-3 text-after-END rule, on ONE line: the label must stop at the BEGIN marker's own
+# closing dashes, or it reaches the END marker on the same line and the tail is redacted with it.
+pem_leak "a whole block on one line, text after END" \
+  "$INJ ${D5}BEGIN RSA PRIVATE KEY${D5} $PEMA $PEMB ${D5}END RSA PRIVATE KEY${D5} after: tail text" "$PEMA" "after: tail text"
+grep -qF -- "$INJ [REDACTED] after: tail text" "$FAKE_JEV_SEEN" && pass "  the block, and only the block, became the placeholder" || fail "  the text round the one-line block was changed"
+pem_leak "a whole double-hyphen block on one line, text after END" \
+  "$INJ ${D5}BEGIN RSA--PSS PRIVATE KEY${D5} $PEMA ${D5}END RSA--PSS PRIVATE KEY${D5} after: tail text" "$PEMA" "after: tail text"
+# The closing dashes stay required with the wider label: a labelled marker with no closing dashes
+# on its line is not a marker, so the payload on the next line reaches jev untouched.
+reset; screen_json 0.99
+screen "a labelled marker with no closing dashes, then a payload" Bash "gh pr view 12" "${D5}BEGIN RSA PRIVATE KEY
+$INJ" 1 yes
+grep -qF 'ignore all previous instructions' "$FAKE_JEV_SEEN" && pass "  the payload after an unclosed marker reaches jev" || fail "  the payload after an unclosed marker was redacted"
+seen_not_redacted "unclosed labelled marker"
+# A run of dashes is never a label: '-----BEGIN -----' (nothing but dashes after BEGIN) is not a
+# marker, so the payload after it reaches jev untouched.
+reset; screen_json 0.99
+screen "'-----BEGIN -----' (a dash run, no label) then a payload" Bash "gh pr view 12" "${D5}BEGIN ${D5}
+$INJ" 1 yes
+grep -qF 'ignore all previous instructions' "$FAKE_JEV_SEEN" && pass "  the payload after a dash-only label reaches jev" || fail "  the payload after a dash-only label was redacted"
+seen_not_redacted "dash-only label"
+# The label is confined to ONE line: prose between two markdown rules (letters, digits, periods,
+# and with the wider class, any punctuation) is not a marker. Checked both alone (detection) and
+# beside a real token (the PEM pass runs, so redaction is checked too).
+md_rule_case() { # <label> <line break> <prose line>
+  local nl="$2" prose="$3"
+  reset; screen_json 0.99
+  screen "$1: prose between markdown rules" Bash "gh pr view 12" "Release notes${nl}---${nl}${prose}${nl}---${nl}$INJ" 1 yes
+  grep -qF -- "$prose" "$FAKE_JEV_SEEN" && pass "  $1: the prose reaches jev intact" || fail "  $1: the prose was redacted"
+  seen_not_redacted "$1"
+  reset; screen_json 0.99
+  screen "$1: prose between markdown rules, beside a token" Bash "gh pr view 12" "Release notes${nl}---${nl}${prose}${nl}---${nl}$INJ ghp_$L36" 1 yes
+  grep -qF -- "$prose" "$FAKE_JEV_SEEN" && pass "  $1: the prose reaches jev intact (PEM pass ran)" || fail "  $1: the PEM pass redacted the prose"
+  grep -qF 'ignore all previous instructions' "$FAKE_JEV_SEEN" && pass "  $1: the payload reaches jev (PEM pass ran)" || fail "  $1: the PEM pass redacted the payload"
+  seen_has_no_literal "$1, token" "ghp_$L36"
+}
+md_rule_case "letters, digits, periods" "
+" "Begin the release. Tag v2 then publish 3 images."
+md_rule_case "any punctuation" "
+" "Begin: the release, (v2) + notes/a*b."
+md_rule_case "CRLF line ends" "${CR}
+" "Begin the release. Tag v2 then publish 3 images."
+md_rule_case "bare CR line ends" "${CR}" "Begin the release. Tag v2 then publish 3 images."
+# BEGIN alone on its line, the next line ending in dashes: the label does not start on the next line.
+reset; screen_json 0.99
+screen "BEGIN alone on its line, then a line ending in dashes" Bash "gh pr view 12" "${D5}BEGIN
+$INJ ${D5}" 1 yes
+grep -qF 'ignore all previous instructions' "$FAKE_JEV_SEEN" && pass "  the payload on the next line reaches jev" || fail "  the payload on the next line was redacted"
+seen_not_redacted "BEGIN alone on its line"
+# A label of blanks only is no label (the label starts with a character that is not a blank).
+reset; screen_json 0.99
+screen "'-----BEGIN   -----' (blanks, no label) then a payload" Bash "gh pr view 12" "${D5}BEGIN   ${D5}
+$INJ" 1 yes
+grep -qF 'ignore all previous instructions' "$FAKE_JEV_SEEN" && pass "  the payload after a blank-only label reaches jev" || fail "  the payload after a blank-only label was redacted"
+seen_not_redacted "blank-only label"
+
+# --- round 6: the PEM pass runs on EVERY text, so it must run in linear time. mawk and BSD awk both
+# restart a match at every position, so a regex that can start inside a 120K dash run (or split 120K
+# blanks two ways) is quadratic: minutes, during which the screen hangs, then fails open. Each case
+# runs under a 10 s CPU limit (a quadratic run is killed, so it cannot hang the suite) and must
+# be screened inside 9 s of wall time (about 1 s when linear, with room for a loaded runner).
+timed_screen() { # <label> <text> <literal that must reach jev>
+  local t0 rc el
+  reset; screen_json 0.99
+  t0=$SECONDS
+  ( fails=0; ulimit -t 10; screen "$1" Bash "gh pr view 12" "$2" 1 yes >/dev/null; exit "$fails" ); rc=$?
+  el=$((SECONDS - t0))
+  if [ "$rc" -eq 0 ] && [ "$el" -le 9 ]; then pass "screen: $1: screened in ${el}s"; else fail "screen: $1: rc=$rc after ${el}s (CPU limit hit, or not screened)"; fi
+  grep -qF -- "$3" "$FAKE_JEV_SEEN" 2>/dev/null && pass "  $1: the payload reaches jev" || fail "  $1: the payload did not reach jev"
+}
+DASH120K=$(head -c 120000 /dev/zero | tr '\000' '-')
+BLANK120K=$(head -c 120000 /dev/zero | tr '\000' ' ')
+timed_screen "a 120K dash run" "$INJ
+$DASH120K" "ignore all previous instructions"
+timed_screen "a PEM marker, then a 120K dash run (the END search)" "$INJ
+${D5}BEGIN RSA PRIVATE KEY${D5}
+$DASH120K" "ignore all previous instructions"
+timed_screen "BEGIN then 120K blanks (separator or label)" "$INJ
+${D5}BEGIN${BLANK120K}" "ignore all previous instructions"
+unset DASH120K BLANK120K
+
 # the 128 KiB read cap must not send the half of a token it cut. ~1300 long tokens first (each redacts
 # to 10 bytes, so the redacted text falls well under the 32 KiB cap), then a token that STARTS 29
 # bytes before the cap.
 LONGTOK="ghp_${L36}abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcd" # 100 chars
-BIGTXT="$(yes "$LONGTOK" | head -n 1350)
-$(yes 'x ' | tr -d "\n" | head -c 93)ghp_${L36}"
+BIGTXT="$(rep_lines "$LONGTOK" 1350)
+$(rep_bytes 'x ' 93)ghp_${L36}"
 reset; screen_json 0.99
 screen "token straddling the 128 KiB read cap" Bash "gh pr view 12" "$BIGTXT" 1 yes
 if grep -qF 'ghp_abc' "$FAKE_JEV_SEEN"; then fail "  a prefix of the token cut by the read cap reached the stub"; else pass "  no prefix of the token cut by the read cap reached the stub"; fi
@@ -465,16 +614,16 @@ echo "== result screen: a secret at the START of a large text is still redacted 
 # grep -q exits on the first match while printf is still writing: under pipefail that used to turn
 # a hit into a miss for any text bigger than the pipe buffer, i.e. the secret was SENT.
 reset; screen_json 0.99
-screen "ghp_ token first, then 30 KB of prose: redacted, screened" Bash "gh pr view 12" "ghp_$L36 $(yes 'lorem ipsum dolor' | head -c 30000)" 1 yes; seen_has_no_literal "ghp_ first" "ghp_$L36"
+screen "ghp_ token first, then 30 KB of prose: redacted, screened" Bash "gh pr view 12" "ghp_$L36 $(rep_text_bytes 'lorem ipsum dolor' 30000)" 1 yes; seen_has_no_literal "ghp_ first" "ghp_$L36"
 reset; screen_json 0.99
-screen "hex 32 first, then 30 KB of prose: redacted, screened" Bash "gh pr view 12" "$H32 $(yes 'lorem ipsum dolor' | head -c 30000)" 1 yes; seen_has_no_literal "hex first" "$H32"
+screen "hex 32 first, then 30 KB of prose: redacted, screened" Bash "gh pr view 12" "$H32 $(rep_text_bytes 'lorem ipsum dolor' 30000)" 1 yes; seen_has_no_literal "hex first" "$H32"
 
 echo "== literal-secret check: no broken-pipe noise when SIGPIPE is ignored =="
 # GitHub's macOS runners start jobs with SIGPIPE ignored. grep -q then closes the pipe while printf is
 # still writing, printf gets EPIPE instead of dying, and bash prints "printf: write error: Broken
 # pipe" to stderr. The hook's stderr reaches the session, and the "skip is silent" cases above only
 # caught it intermittently. Ignore SIGPIPE here so the case is deterministic on every runner.
-big="ghp_$L36 $(yes 'lorem ipsum dolor' | head -c 2000000)"
+big="ghp_$L36 $(rep_text_bytes 'lorem ipsum dolor' 2000000)"
 for i in 1 2 3; do
   err=$( (trap '' PIPE; . "$HERE/jev-hook-lib.sh"; printf '%s' "$big" | jev_has_literal_secret) 2>&1 >/dev/null ); rc=$?
   if [ "$rc" -eq 0 ] && [ -z "$err" ]; then pass "secret-first 2 MB text, SIGPIPE ignored (run $i): hit, silent"
@@ -504,8 +653,8 @@ lib_check "(c') clean text, no invalid byte: screened" 1 "hello world"
 # The mock fails exactly the Nth call of one tool (counter file) and runs the real tool otherwise,
 # so each command in the check is proven to propagate its OWN failure -- failing every call would
 # let an earlier guard mask a removed later one. Call order in jev_has_literal_secret:
-#   sed#1 Unicode-space normalise, grep#1 literal formats, sed#2 data-URI strip, sed#3/#4 hash-strip passes,
-#   grep#2 long-run extraction, grep#3 digit check.
+#   sed#1 Unicode-space normalise, grep#1 literal formats, awk#1 whole-text PEM marker, sed#2 data-URI
+#   strip, sed#3/#4 hash-strip passes, grep#2 long-run extraction, grep#3 digit check.
 export REAL_GREP REAL_SED REAL_AWK
 REAL_GREP=$(command -v grep); REAL_SED=$(command -v sed); REAL_AWK=$(command -v awk)
 MOCK="$TMP/mockbin"; mkdir -p "$MOCK"
@@ -526,9 +675,9 @@ EOF
 done
 mock_check() { # <label> <tool> <Nth call to fail> <text>
   local rc
-  rm -f "$TMP/cnt-grep" "$TMP/cnt-sed"
-  (PATH="$MOCK:$PATH"; export MOCK_COUNT_grep="$TMP/cnt-grep" MOCK_COUNT_sed="$TMP/cnt-sed"
-   if [ "$2" = grep ]; then export MOCK_FAIL_grep=$3; else export MOCK_FAIL_sed=$3; fi
+  rm -f "$TMP/cnt-grep" "$TMP/cnt-sed" "$TMP/cnt-awk"
+  (PATH="$MOCK:$PATH"; export MOCK_COUNT_grep="$TMP/cnt-grep" MOCK_COUNT_sed="$TMP/cnt-sed" MOCK_COUNT_awk="$TMP/cnt-awk"
+   case "$2" in grep) export MOCK_FAIL_grep=$3 ;; sed) export MOCK_FAIL_sed=$3 ;; awk) export MOCK_FAIL_awk=$3 ;; esac
    . "$HERE/jev-hook-lib.sh"; printf '%s' "$4" | jev_has_literal_secret) >/dev/null 2>&1; rc=$?
   if [ "$rc" -eq 0 ]; then pass "$1: fail closed (rc=0)"; else fail "$1: rc=$rc, an error read as 'no secret'"; fi
 }
@@ -538,15 +687,15 @@ mock_check "(b) sed #1 (Unicode-space normalise) exits 2" sed 1 "$CLEAN"
 mock_check "(b) sed #2 (data-URI strip) exits 2" sed 2 "$CLEAN"
 mock_check "(b) sed #3 (hash strip, pass 1) exits 2" sed 3 "$CLEAN"
 mock_check "(b) sed #4 (hash strip, pass 2) exits 2" sed 4 "$CLEAN"
-mock_check "(b) grep #2 (line-flattened PEM marker) exits 2" grep 2 "$CLEAN"
-mock_check "(b) grep #3 (long-run extraction) exits 2" grep 3 "$CLEAN"
-mock_check "(b) grep #4 (digit check) exits 2" grep 4 "$CLEAN"
-mock_check "(b) grep #4 (digit check) exits 2 after a digit-free long run" grep 4 "${L36}${L36}"
+mock_check "(b) awk #1 (whole-text PEM marker) exits 2" awk 1 "$CLEAN"
+mock_check "(b) grep #2 (long-run extraction) exits 2" grep 2 "$CLEAN"
+mock_check "(b) grep #3 (digit check) exits 2" grep 3 "$CLEAN"
+mock_check "(b) grep #3 (digit check) exits 2 after a digit-free long run" grep 3 "${L36}${L36}"
 
 # Locale probe (works on GNU and BSD): every sed/grep must run under LC_ALL=C even though the
 # caller is UTF-8. A clean text must come back rc=1 (screened) -- a probe-failed call would read as
 # fail-closed rc=0, so this goes red the moment LC_ALL=C is dropped.
-probe_rc=$( (PATH="$MOCK:$PATH"; export MOCK_PROBE_LOCALE=1 LC_ALL=$UTF8 MOCK_COUNT_grep="$TMP/cnt-grep" MOCK_COUNT_sed="$TMP/cnt-sed"
+probe_rc=$( (PATH="$MOCK:$PATH"; export MOCK_PROBE_LOCALE=1 LC_ALL=$UTF8 MOCK_COUNT_grep="$TMP/cnt-grep" MOCK_COUNT_sed="$TMP/cnt-sed" MOCK_COUNT_awk="$TMP/cnt-awk"
   . "$HERE/jev-hook-lib.sh"; printf '%s' "$CLEAN" | jev_has_literal_secret) >/dev/null 2>&1; echo $? )
 if [ "$probe_rc" -eq 1 ]; then pass "locale probe: every sed/grep ran under LC_ALL=C (rc=1)"; else fail "locale probe: rc=$probe_rc, a tool ran outside LC_ALL=C"; fi
 
@@ -575,7 +724,7 @@ unset BIGLINE
 TOK="ghp_${L36}"
 PADN=$((32768 - ${#TOK}))
 reset; screen_json 0.99
-screen "token ending exactly at the 32 KiB cap: redacted, screened" Bash "gh pr view 12" "$(yes 'x ' | tr -d '\n' | head -c "$PADN")${TOK}" 1 yes
+screen "token ending exactly at the 32 KiB cap: redacted, screened" Bash "gh pr view 12" "$(rep_bytes 'x ' "$PADN")${TOK}" 1 yes
 seen_has_no_literal "token at the cap" "$TOK"
 unset TOK PADN
 
@@ -696,7 +845,7 @@ screen "plain text with no signal is still screened" Bash "gh pr view 12" "pleas
 
 echo "== result screen: cap and fail-open =="
 reset; screen_json 0.1
-big=$(yes 'lorem ipsum dolor' | head -c 200000) # words, not one run: a long run is a credential signal
+big=$(rep_text_bytes 'lorem ipsum dolor' 200000) # words, not one run: a long run is a credential signal
 t0=$(date +%s)
 screen "oversize text is capped, still screened" Bash "gh pr view 12" "$big" 1 no
 el=$(( $(date +%s) - t0 ))

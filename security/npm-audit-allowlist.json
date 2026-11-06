@@ -1,4 +1,17 @@
 {
   "$schema-note": "Dated + justified allowlist for the npm/JS supply-chain gate (scripts/audit-published.mjs, v4-P3). Mirrors the Trivy .trivyignore triage discipline: an accepted HIGH/CRITICAL advisory in the PUBLISHED (@getknext/{core,lib,db}) production closure is suppressed ONLY by an entry here, so the gate can never be silently neutered. Each entry MUST carry: `id` (a GHSA/advisory id), `justification` (why it's accepted — not exploitable in our usage, no fix available, etc.), and `added` (ISO date it was accepted). `expires` (ISO date) is optional; past its expiry the entry stops suppressing and the risk must be re-justified. Bump the dependency FIRST; allowlist only when there is no fix.",
-  "allow": []
+  "allow": [
+    {
+      "id": "GHSA-qr28-fpjm-wq7f",
+      "justification": "Same advisory and reasoning as the matching entry in precompile-closure-allowlist.json: decode-uri-component 0.2.2 reaches the published @getknext/lib production closure only via minio -> query-string 7.1.3, whose decode path (parse/parseUrl/extract) minio never calls (it uses only stringify). The fixed 0.5.1 is ESM-only and breaks query-string 7's require(); minio's latest still pins query-string ^7.1.3, and a local patch would not reach published consumers. Drop on the first minio/query-string release that pulls a fixed decode-uri-component.",
+      "added": "2026-11-01",
+      "expires": "2026-12-01"
+    },
+    {
+      "id": "GHSA-vcc3-ghjq-m6fr",
+      "justification": "decode-uri-component 0.2.2 (exponential-time DoS in percent-decoding; advisory range <= 0.4.2, fixed in 0.5.0). Same package, same chain and same posture as GHSA-qr28-fpjm-wq7f: it reaches the published @getknext/lib production closure only via minio -> query-string 7.1.3. NO COMPATIBLE FIX: every fixed decode-uri-component (>= 0.5.0) is ESM-only and query-string 7 require()s it expecting a CJS function (`decodeComponent is not a function`, measured under node 24 and bun 1.4.2); query-string >= 8 is ESM-only too; minio 8.0.7 (latest, 2026-11-06) still pins query-string ^7.1.3; and an override or patch in this repo would not reach consumers of the published tarball. REACHABILITY: minio calls only query-string.stringify (dist/main/internal/client.js, dist/main/helpers.js — re-verified against 8.0.7); the vulnerable decode path (parse/parseUrl/extract) is never invoked and no request or response bytes are ever decoded by this package. npm audit rates this advisory moderate but reports it on the same decode-uri-component group as the HIGH one, so the group is only cleared when both are listed. Drop on the first minio/query-string release that pulls a fixed decode-uri-component.",
+      "added": "2026-11-06",
+      "expires": "2026-12-06"
+    }
+  ]
 }

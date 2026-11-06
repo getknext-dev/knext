@@ -244,8 +244,8 @@ refusal above still runs.
 | `registry` | **yes** | — | Registry host and namespace, e.g. `ghcr.io/acme`. Your app's `name` is appended, so the image is pushed to `ghcr.io/acme/<name>` |
 | `registry-token` | no | — | On GHCR, `github.token` suffices |
 | `registry-username` | no | `github.actor` | |
-| `tag` | no | `github.sha` | Image tag. The commit SHA traces an image to its commit |
-| `bucket` | no | from `knext.config.ts` | Object-storage bucket for static assets |
+| `tag` | no | `github.sha` | Image tag. The commit SHA traces an image to its commit. Letters, digits, `_`, `.` and `-` only (up to 128 characters, not starting with `.` or `-`); anything else is refused. A branch name such as `feature/login` is not a valid tag, so replace the `/` or use the SHA |
+| `bucket` | no | from `knext.config.ts` | Object-storage bucket for static assets. Lowercase letters, digits, `.`, `_` and `-` (3 to 222 characters, starting and ending with a letter or digit); anything else is refused |
 | `skip-upload` | no | `false` | Skip the static-asset upload. Needs only a kubeconfig and registry auth |
 | `skip-build` | no | `false` | Skip `next build`, for when a previous job already produced the output |
 | `auth` | no | `kubeconfig` | Reserved for short-lived cloud credentials later |
@@ -253,7 +253,8 @@ refusal above still runs.
 | `working-directory` | no | `.` | Where `knext.config.ts` lives |
 | `doctor` | no | `true` | Read-only preflight; fails fast on an unready cluster |
 | `skip-credential-preflight` | no | `false` | Turns off the credential check. Read the callout above first |
-| `cli` | no | `npx --yes @getknext/core` | The command that runs the CLI, split on whitespace. Leave this at its default — it is only there so this action can be tested against a locally built CLI instead of the published package |
+| `cli-version` | no | an exact release (see the action) | The version of the published `@getknext/core` CLI the action runs. It must be an exact version such as `1.3.1`; ranges and tags like `latest` are refused. The action never runs an unpinned latest, because this step holds your kubeconfig and registry token |
+| `cli` | no | empty | A command to run instead of the published package, split on whitespace. Leave it empty — it is only there so this action can be tested against a locally built CLI. When set, `cli-version` is ignored |
 
 The action sets no outputs. The deployed URL is reported by the cluster — read it with
 `kubectl get ksvc -n <namespace>`, or `knext status`. An output that was empty on every dry run
@@ -283,6 +284,14 @@ jobs:
 ```
 
 This makes the diff reviewable before it lands — the same instinct as `terraform plan`.
+
+## Passing values from pull requests
+
+Every input reaches the action's scripts as an environment variable, never pasted into script text, so
+a value like a branch name cannot run as a command. `tag` and `bucket` are also checked against the
+shapes listed above and refused if they do not fit, with an error that names the rule and does not
+repeat the value. Your own workflow is still yours to protect: prefer `github.sha` for the tag, and
+do not build the input from text an outside contributor controls without checking it first.
 
 ## Why `doctor` runs first
 

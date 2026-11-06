@@ -1,13 +1,13 @@
 # Build the manager binary.
 #
 # Pin the builder to a specific patched Go point release (NOT a floating
-# `golang:1.25`). The operator runtime image is distroless/static + this
+# `golang:1.26`). The operator runtime image is distroless/static + this
 # CGO-disabled binary, so the only fixable HIGH/CRITICAL surface Trivy scans
 # (`--ignore-unfixed`) is the Go stdlib version baked into the binary's
-# build-info. A floating minor tag can resolve to an unpatched 1.25.x and leak
+# build-info. A floating minor tag can resolve to an unpatched 1.26.x and leak
 # a fixable Go-stdlib CVE, failing operator-supply-chain.yml's
 # `trivy image --severity HIGH,CRITICAL --exit-code 1` gate on main and blocking
-# the whole bundle publish (refs #117). 1.25.13 is the latest patched 1.25 line (clears the 7 HIGH stdlib CVEs Trivy flagged in 1.25.12: CVE-2026-33818 asn1 DoS, CVE-2026-39821 idna, +5)
+# the whole bundle publish (refs #117). 1.26.9 is the first line carrying the fixes (x/net >= 0.60 requires Go 1.26; the 1.25 line is unpatched for the 2026-10 net/http, HTTP/2 and crypto/tls DoS CVEs; 1.25.13 cleared the 7 HIGH stdlib CVEs Trivy flagged in 1.25.12: CVE-2026-33818 asn1 DoS, CVE-2026-39821 idna, +5)
 # (fixes CVE-2026-39822, os.Root symlink following, HIGH).
 # Bump this in lockstep with hack/check-trivy-baseimage.bats.sh (MIN_PATCH).
 #
@@ -17,9 +17,9 @@
 # image we build + sign. The tag is kept in this comment block (Docker rejects
 # trailing/inline comments on a FROM line); refresh the digest and this comment
 # together when bumping. Resolve with:
-#   docker buildx imagetools inspect golang:1.25.13
+#   docker buildx imagetools inspect golang:1.26.10
 # Enforced by scripts/check-base-images-pinned.sh (CI: base-image-pin-guard).
-FROM golang:1.25.13@sha256:cbff9d1a9041b316010f2da6b701b6c0d597718cb90928c85eb597334a0d23d4 AS builder
+FROM golang:1.26.10@sha256:24a707af49702fa44f02785475d02fb752f6982d3e9c0afb7696e1f0204e7ce9 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 

@@ -20,6 +20,43 @@ name: Mutation provers (nightly)
 # same discovered set at PR time for the runner-resolution and declaration
 # contracts, and asserts this file's shape.
 #
+# ── #2499 / #2208: TWO REFS, SHARDED, EVERY PROVER BOUNDED ────────────────────
+# Two defects, one cause each, both measured.
+#
+#  (1) COVERAGE. A `schedule` fires from the DEFAULT branch only, and the v2
+#      sovereignty provers exist only on `integration/v2`. So each of them was a
+#      one-time PR artifact: a later commit that weakened a rule while keeping the
+#      unit tests green went undetected. The scheduled run now covers BOTH `main`
+#      and `integration/v2`: the workflow file executes from `main`, and every leg
+#      CHECKS OUT the ref it is proving. (Alternatives weighed: a separate job per
+#      ref with no sharding; a cron on `main` that `workflow_dispatch`es a lane
+#      living on `integration/v2`, which would split the result across two runs
+#      and leave "did it start" as the only thing the scheduled run could report.)
+#
+#  (2) TIMEOUT (#2208). The lane was ONE serial job under a 100-minute ceiling and
+#      the last five runs were CANCELLED at it. Measured on run 38140088966: the
+#      first 40 provers took 53 minutes, then `mutation-prove-empty-dir-guard.mjs`
+#      ran 47 minutes with no bound of its own until the job ceiling cancelled
+#      everything — ninety provers never started, and because the runner printed a
+#      prover's output only AFTER it exited, the cancelled log held nothing about
+#      the one that ate the night. Raising the ceiling again would only have moved
+#      the cliff. So: the provers are SHARDED across matrix legs (each with its own
+#      timeout), every prover is bounded by `KNEXT_PROVER_TIMEOUT_MS` (a hang is a
+#      red finding and the next prover still runs), and output is streamed.
+#
+# SPLITTING A LANE IS HOW A PROVER QUIETLY FALLS OUT OF IT, so the `aggregate` job
+# proves it did not: every planned leg reported, every leg proved the sha the plan
+# pinned, the shards' union is the discovered set exactly once, and declared == run
+# for every prover. A leg that was cancelled or crashed has no report, and a
+# missing report is a finding — never a skip (`scripts/prover-lane-aggregate.mjs`,
+# `scripts/lib/prover-shard.mjs`, `tests/mutation-prover-lane-sharding.test.ts`).
+#
+# Toolchains that exist only on some refs (the Rust crates and template are on
+# `integration/v2`, not yet on `main`) are installed BY FILE PRESENCE
+# (`hashFiles(...)`), never by ref name: a toolchain a prover needs but the ref
+# lacks fails that prover loudly, and a step skipped by ref name would silently
+# drop a toolchain the next time a prover on `main` needed it.
+#
 # WHY NOT A PR GATE — stated, not implied. The provers MUTATE
 # `.github/workflows/ci.yml` and `tests/helpers/*` in the working tree and run a
 # vitest process per mutation: ~60 spec runs for `mutation-prove-ci-blocking-gates`
@@ -42,10 +79,11 @@ name: Mutation provers (nightly)
 #
 # #670 / #640 — A NIGHTLY WITHOUT AN OWNER BECOMES BACKGROUND NOISE, and a
 # permanently-red gate stops being read. The alert job below is the same
-# create-or-update-ONE-pinned-issue shape as `action-pin-resolution-nightly.yml`;
-# do not add a sixth unwatched nightly instead.
+# create-or-update-ONE-issue shape as `action-pin-resolution-nightly.yml`;
+# do not add a sixth unwatched nightly instead. It fires on a red OR CANCELLED
+# plan / leg / aggregate, so a run killed at a ceiling cannot pass silently.
 #
-# HUMAN PRECONDITION: the alert-issue create/pin needs "Settings → Actions →
+# HUMAN PRECONDITION: the alert-issue create needs "Settings → Actions →
 # General → Workflow permissions → Allow GitHub Actions to create and approve
 # pull requests" ENABLED (it also governs issue creation by the default token).
 
@@ -54,45 +92,121 @@ on:
   # action-pin (05:11) and image-pin (05:41) nightlies, so the longest-running
   # job of the set does not make the security signals queue behind it.
   # (#1675) — WEEKLY during the rc credential window to reduce runner contention
-  # with the credential lanes. Restore to daily after GA.
+  # with the credential lanes: Sunday proves BOTH refs. Restore to daily after GA.
+  #
+  # The second entry is DAILY and covers `integration/v2` ONLY (Monday-Saturday;
+  # Sunday's full run already includes it). The v2 sovereignty provers are the ones
+  # whose rules a later commit can weaken while the unit tests stay green, so they
+  # are re-proved every day, while `main` (the credential line) stays weekly to
+  # keep the runner pool free. Which ref a run proves is decided from
+  # `github.event.schedule` in the plan step below; if that string and this cron
+  # drift apart the run falls through to BOTH refs, which is the safe direction.
+  # `tests/rc-window-thin-nightlies.test.ts` asserts both entries on purpose.
   schedule:
     - cron: '7 6 * * 0'
+    - cron: '37 6 * * 1,2,3,4,5,6'
   # Manual re-runs after fixing a prover; the alert job is scheduled-only (below)
-  # so a dispatch experiment never files or updates the pinned issue.
-  workflow_dispatch: {}
+  # so a dispatch experiment never files or updates the issue.
+  #   refs        space/comma separated branches to prove (default: both lane refs).
+  #   only_shard  prove just this 1-based shard of each ref — a partial run, which
+  #               the aggregate labels PARTIAL rather than asserting the union.
+  workflow_dispatch:
+    inputs:
+      refs:
+        description: 'Branches to prove (space or comma separated)'
+        required: false
+        default: 'main integration/v2'
+        type: string
+      only_shard:
+        description: 'Run only this 1-based shard of each ref (empty = all shards)'
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: read
 
 jobs:
-  run-mutation-provers:
-    # Not a required-check name: this workflow is `schedule` + `workflow_dispatch`
-    # only, so renaming the job cannot orphan a branch-protection rule.
-    name: Run every mutation prover (glob-discovered)
+  # ── Pin each ref to ONE sha and fan out ref x shard ─────────────────────────
+  plan:
+    name: Plan the lane (pin refs to shas, shard the provers)
     runs-on: ubuntu-latest
-    # Each prover spawns a vitest run per mutation and the lane runs them all;
-    # generous, but bounded, so a hung prover does not burn a runner all day.
-    #
-    # Raised from 60 on measurement, not on feel. Three consecutive nightlies ran
-    # 27, 25 and 26 minutes, and `mutation-prove-install-smoke-coverage.mjs` adds
-    # roughly half an hour on its own because most of its mutations are graded by a
-    # full pack + clean install. That lands the job near 57 minutes — inside 60 only
-    # by luck, and a nightly that reds on duration trains people to ignore it.
-    #
-    # Deliberately NOT restated as a mutation count: an earlier draft of this comment
-    # said "six of its mutations", which was true when written and was fifteen by the
-    # time anyone read it. A number that drifts silently is worse than a range.
-    #
-    # The bound that SHOULD exist is per-prover rather than per-job: the lane's
-    # spawnSync sets `maxBuffer` and no `timeout`, so one hung prover still eats
-    # whatever this number is before the remaining fifteen run. Left as follow-up
-    # because it changes shared lane semantics for every prover, not just the one
-    # this PR adds.
-    timeout-minutes: 100
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      expected: ${{ steps.plan.outputs.expected }}
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+
+      # Dispatch inputs reach the script as ENV only, never interpolated into the
+      # shell, and the script rejects any ref that is not a plain branch name.
+      # LANE_SHARDS is the shard count: 6 legs per ref. The provers are placed by
+      # estimated cost (`PROVER_WEIGHT_MINUTES` in scripts/lib/prover-shard.mjs),
+      # so the slowest three never share a leg, while the per-leg setup — install,
+      # closure build, toolchains — is paid 12 times, not 30. `max-parallel` on
+      # the lane bounds the load on the shared runner pool.
+      - name: Plan
+        id: plan
+        env:
+          LANE_REFS: ${{ inputs.refs || (github.event.schedule == '37 6 * * 1,2,3,4,5,6' && 'integration/v2') || 'main integration/v2' }}
+          LANE_SHARDS: 6
+          LANE_ONLY_SHARD: ${{ inputs.only_shard }}
+        run: node scripts/prover-lane-plan.mjs
+
+  run-mutation-provers:
+    # Not a required-check name: this workflow is `schedule` + `workflow_dispatch`
+    # only, so renaming the job cannot orphan a branch-protection rule.
+    name: Prove ${{ matrix.name }}
+    needs: [plan]
+    runs-on: ubuntu-latest
+    # PER SHARD (the leg, not the lane). Replaces the single 100-minute job
+    # ceiling that cancelled five runs running (#2208). The provers are split by
+    # ESTIMATED COST (`PROVER_WEIGHT_MINUTES`): the heaviest provers
+    # (`kind-manifest-apply-safety`: 71 then 100+ minutes on two hosted runners,
+    # 111 mutations; `empty-dir-guard`: 68 minutes measured) never share a leg. The per-prover
+    # bound below is 130 minutes, so one hung prover costs one prover (named and
+    # red), and this ceiling is deliberately ABOVE the bound plus a leg's normal
+    # work so that a hang is reported by the runner rather than by a blind
+    # cancellation. A leg that DOES hit this has no report, which the aggregate
+    # turns into a named finding for that ref and shard — never a silent pass.
+    timeout-minutes: 200
+    strategy:
+      # A red leg must not hide the other eleven: the whole board is the point.
+      fail-fast: false
+      max-parallel: 6
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    # `mutation-prove-2331-use-cache-tag-replay.mjs` grades its Lua rows (the
+    # replay's compare-and-set script) on the live suite, which EVALs the exact
+    # script on a real Redis. That prover REFUSES to run without
+    # KNEXT_REDIS_LIVE_URL (a red night, never a silent skip), so the lane gets
+    # the same digest-pinned Redis as ci.yml's use-cache-lua-live-redis job. The
+    # variable is set on the prover step only, and it is not REDIS_URL, so no
+    # other prover's spec is pointed at this Redis.
+    services:
+      redis:
+        image: mirror.gcr.io/library/redis:7-alpine@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      # The sha the plan pinned, not the branch name: two legs of one ref must
+      # prove the same tree even if a push lands between their checkouts.
+      - name: Checkout code (the ref under proof, at the planned sha)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ matrix.sha }}
           persist-credentials: false
 
       # Same pins and same order as every ci.yml job (node, then pnpm), so this
@@ -119,7 +233,7 @@ jobs:
       # HARD-THROWS when `packages/kn-next/dist/cli/kn-next.js` is absent — and
       # `dist/` is gitignored, so on a clean checkout that prover ABORTS before
       # its first mutation (`{"declared":4,"run":0}`, exit 1), which the runner
-      # correctly treats as a fatal declared-vs-run mismatch and reds the lane.
+      # treats as a fatal declared-vs-run mismatch and reds the lane.
       # Build the publishable closure in dependency order — the SAME command and
       # order every ci.yml job uses (lib -> db -> core) — so the bundle exists
       # before the provers run. Carries no soft-fail flag: a build failure here
@@ -131,8 +245,118 @@ jobs:
           bun run --filter @getknext/db build
           bun run --filter @getknext/core build
 
-      - name: Run every mutation prover (FAIL on exit code OR count mismatch)
-        run: node scripts/run-mutation-provers.mjs
+      # `mutation-prove-knext-ffi-crates.mjs` (#2343) grades `cargo test` targets
+      # and the Bun harness in `crates/`, so a ref that HAS `crates/` needs the
+      # Rust toolchain that `crates/rust-toolchain.toml` pins (rustup is on the
+      # runner image). Gated by FILE PRESENCE, not ref name (see the header):
+      # `main` has no `crates/` yet. Where the file exists, a prover that needs
+      # cargo and cannot find it exits 2 at its first spawn — a red night.
+      - name: Install the pinned Rust toolchain (crates/rust-toolchain.toml)
+        if: ${{ hashFiles('crates/rust-toolchain.toml') != '' }}
+        working-directory: crates
+        run: |
+          rustup toolchain install
+          rustc -V
+          cargo -V
+
+      # `mutation-prove-rust-template-auth.mjs` grades `cargo test` in
+      # `templates/rust`, which pins its own toolchain
+      # (`templates/rust/rust-toolchain.toml`). Installed here so the prover
+      # never depends on rustup auto-installing it at the first `cargo` spawn.
+      - name: Install the Rust template's pinned toolchain (templates/rust/rust-toolchain.toml)
+        if: ${{ hashFiles('templates/rust/rust-toolchain.toml') != '' }}
+        working-directory: templates/rust
+        run: |
+          rustup toolchain install
+          rustc -V
+
+      # `mutation-prove-2321-go-metric-contract.mjs` (#2321) grades
+      # `go test ./internal/metriccontract/` in the operator module, so the lane
+      # needs the Go toolchain the operator's go.mod names (read from the file,
+      # never restated here). Without it that prover exits 2 at its first `go`
+      # spawn — a red night, never a silent skip.
+      - name: Setup Go (packages/kn-next-operator/go.mod)
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: packages/kn-next-operator/go.mod
+          cache-dependency-path: packages/kn-next-operator/go.sum
+
+      # `mutation-prove-2479-go-scaffold.mjs` grades the Go zone-function scaffold,
+      # which runs REAL generation over `templates/go`. That module requires a
+      # NEWER Go than the operator's (go 1.26.9 vs 1.25.3), and `setup-go` pins
+      # GOTOOLCHAIN=local, so with only the operator's toolchain the grading spec
+      # exited 1 within seconds ("requires go >= ..."), found by the first full run
+      # that reached it (run 39029215555). A newer Go builds the operator module
+      # fine (a go.mod names a MINIMUM), so this second install, which wins on PATH,
+      # serves both. Gated by FILE PRESENCE like the Rust toolchains: a ref without
+      # `templates/go` keeps the operator's.
+      - name: Setup Go for the Go zone template (templates/go/go.mod)
+        if: ${{ hashFiles('templates/go/go.mod') != '' }}
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: templates/go/go.mod
+          cache-dependency-path: templates/go/go.sum
+
+      # `mutation-prove-2052-backendservice.mjs` (#2052) grades envtest specs (a
+      # real kube-apiserver + etcd) as well as plain `go test` targets, so the
+      # lane needs the envtest binaries the operator's Makefile pins. They land
+      # in packages/kn-next-operator/bin/k8s, where the suite finds them without
+      # KUBEBUILDER_ASSETS. Without them that prover exits 2 before its baseline
+      # — a red night, never a silent skip.
+      - name: Install the operator's envtest binaries
+        working-directory: packages/kn-next-operator
+        run: make setup-envtest
+
+      # `mutation-prove-2462-operator-write-policy.mjs` re-renders the install
+      # bundle (`kustomize build config/default`) for every row that mutates the
+      # overlay, so the lane needs the kustomize the operator's Makefile pins, at
+      # packages/kn-next-operator/bin/kustomize where the prover looks first.
+      # Without it that prover exits 2 before its baseline: a red night, never a
+      # silent skip.
+      - name: Install the operator's kustomize
+        working-directory: packages/kn-next-operator
+        run: make kustomize
+
+      # THIS LEG'S SLICE, each prover under its own bound, with the report the
+      # aggregate job consumes written OUTSIDE the tree (the residue check below
+      # must see only what a prover left behind). 7800000 ms = 130 minutes per
+      # prover: above the slowest MEASURED prover. `kind-manifest-apply-safety` took
+      # 71 minutes on one hosted runner and was still on mutation 109 of 111 when a
+      # 100-minute bound killed it on another (run 39029215555), so the same prover
+      # varies by 40%+ between runners; 130 leaves headroom without hiding a real
+      # hang. Below the leg's ceiling.
+      #
+      # KNEXT_LANE_CARGO_TARGET_DIR is an OPT-IN seam, deliberately NOT
+      # `CARGO_TARGET_DIR`. The Rust scaffold prover (about 20 spec runs, each a
+      # cold cargo generation, 3+ minutes) adopts it for its OWN process only
+      # (`mutation-prove-2489-rust-scaffold.mjs`), so its cargo reuses one build
+      # directory outside the tree. It is not set lane-wide because that was
+      # measured to break another prover: a lane-wide
+      # `CARGO_TARGET_DIR` made `knext-ffi-crates` red at its baseline (it
+      # hardcodes `target/release/` for its Bun harness; run 39009526071). A
+      # global side effect on every cargo call is the wrong default.
+      # Untracked, non-ignored files BEFORE the provers run. The residue step below
+      # compares against this, so a prover that leaves a stray NEW file behind is
+      # caught as well as one that leaves a modified tracked file (`git diff` alone
+      # cannot see an untracked file). Files the setup steps legitimately create are
+      # in the "before" set and are not flagged.
+      - name: Record the untracked files before the provers run
+        run: git ls-files --others --exclude-standard | sort > "${{ runner.temp }}/untracked-before.txt"
+
+      - name: Run this shard's mutation provers (FAIL on exit code, count mismatch OR timeout)
+        env:
+          KNEXT_REDIS_LIVE_URL: redis://127.0.0.1:6379
+          KNEXT_PROVER_TIMEOUT_MS: 7800000
+          KNEXT_LANE_CARGO_TARGET_DIR: ${{ runner.temp }}/cargo-target
+          # The Rust scaffold prover documents this as the way to keep the code
+          # generators between its ~20 runs instead of rebuilding them each time.
+          KNEXT_RUST_CODEGEN_DIR: ${{ runner.temp }}/rust-codegen
+          PROVER_LANE_REF: ${{ matrix.ref }}
+          PROVER_LANE_SHA: ${{ matrix.sha }}
+        run: >-
+          node scripts/run-mutation-provers.mjs
+          --shard ${{ matrix.shard }}/${{ matrix.shards }}
+          --report "${{ runner.temp }}/lane-report/mutation-prover-report-${{ matrix.slug }}-${{ matrix.shard }}-of-${{ matrix.shards }}.json"
 
       # The provers mutate tracked files and restore from byte snapshots. If a
       # restore is ever wrong the lane must say so rather than leaving the finding
@@ -143,23 +367,88 @@ jobs:
           set -euo pipefail
           node scripts/scan-mutation-residue.mjs
           git diff --exit-code
+          git ls-files --others --exclude-standard | sort > "${RUNNER_TEMP}/untracked-after.txt"
+          new="$(comm -13 "${RUNNER_TEMP}/untracked-before.txt" "${RUNNER_TEMP}/untracked-after.txt")"
+          if [ -n "${new}" ]; then
+            echo "::error::a prover left NEW untracked file(s) behind:"
+            echo "${new}"
+            exit 1
+          fi
 
-  # ── Idempotent pinned alert (same pattern as action-pin-resolution-nightly) ───
+      # Uploaded even from a red leg: the report is what lets the aggregate tell
+      # "this prover failed" from "this leg never reported". `if-no-files-found:
+      # warn` because a leg killed at its ceiling writes none, and that absence is
+      # exactly what the aggregate names.
+      - name: Upload this leg's report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mutation-prover-report-${{ matrix.slug }}-${{ matrix.shard }}-of-${{ matrix.shards }}
+          path: ${{ runner.temp }}/lane-report/
+          if-no-files-found: warn
+          retention-days: 14
+
+  # ── Prove the legs add up to the lane ───────────────────────────────────────
+  aggregate:
+    name: Aggregate the legs (every leg reported, union == discovered, declared == run)
+    needs: [plan, run-mutation-provers]
+    # always(): this is where a cancelled or missing leg is NAMED. It is
+    # downstream of the lane and nothing needs it, so it cannot make the lane
+    # skippable.
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # The findings, split into NEW and known-red (scripts/lib/known-red-provers.mjs),
+    # for the alert issue. Labelling only: every finding still fails this job.
+    outputs:
+      summary: ${{ steps.aggregate.outputs.summary }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+
+      - name: Download every leg's report
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: mutation-prover-report-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/lane-reports
+
+      - name: Aggregate (FAIL on a missing leg, a missing prover, or declared != run)
+        id: aggregate
+        env:
+          EXPECTED_LEGS: ${{ needs.plan.outputs.expected }}
+          REPORT_DIR: ${{ runner.temp }}/lane-reports
+        run: node scripts/prover-lane-aggregate.mjs
+
+  # ── Idempotent alert (same pattern as action-pin-resolution-nightly) ────────
   nightly-red-alert:
-    name: Nightly red alert (pinned issue)
-    needs: [run-mutation-provers]
+    name: Nightly red alert (issue)
+    needs: [plan, run-mutation-provers, aggregate]
     # always() so this is not skipped when the lane fails; the needs-result check
-    # fires on failure OR cancelled (#1645 — a cancelled/timed-out lane used to
-    # leave this condition false and the alert silent, which is exactly what
-    # happened on 2026-09-28/09-29); the event check scopes it to the schedule.
+    # fires on failure OR cancelled of ANY of plan / lane / aggregate (#1645 — a
+    # cancelled/timed-out lane used to leave this condition false and the alert
+    # silent, which is exactly what happened on 2026-09-28/09-29, and for five
+    # runs after that: #2208). The event check scopes it to the schedule.
     if: >-
       always() &&
       github.event_name == 'schedule' &&
-      (needs.run-mutation-provers.result == 'failure' || needs.run-mutation-provers.result == 'cancelled')
+      ((needs.plan.result == 'failure' || needs.plan.result == 'cancelled') ||
+      (needs.run-mutation-provers.result == 'failure' || needs.run-mutation-provers.result == 'cancelled') ||
+      (needs.aggregate.result == 'failure' || needs.aggregate.result == 'cancelled'))
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       issues: write
+      # Read-only: lists which legs were not green, so the issue names the ref
+      # and shard instead of sending the reader to a 12-leg matrix.
+      actions: read
     steps:
       # #1406 — this job's own steps shell out to scripts/nightly-alert-issue.mjs,
       # which requires the repo to be checked out; nothing upstream shares a
@@ -173,23 +462,50 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUN_ID: ${{ github.run_id }}
+          PLAN_RESULT: ${{ needs.plan.result }}
           CHECK_RESULT: ${{ needs.run-mutation-provers.result }}
+          AGGREGATE_RESULT: ${{ needs.aggregate.result }}
+          AGG_SUMMARY: ${{ needs.aggregate.outputs.summary }}
         run: |
           set -euo pipefail
+          # Which legs were not green. Best effort by design: failing to LIST
+          # them must never suppress the alert itself.
+          legs="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/jobs" --paginate \
+            --jq '.jobs[] | select(.conclusion != "success" and .conclusion != "skipped" and .conclusion != null) | "- " + .name + ": " + .conclusion' \
+            2>/dev/null || true)"
+          [ -n "${legs}" ] || legs="- (could not list the legs; read the run)"
           # The idempotency KEY is this fixed literal title — the lookup and the
           # create MUST share it, so keep it a constant (never interpolated).
           title='Mutation provers RED'
-          body="The nightly mutation-prover lane FAILED. At least one prover either exited non-zero
-          or ran a different number of mutations than it DECLARES — and the second case is the one
-          this lane exists for: a prover that runs 4 of 13 and exits 0 certifies nothing while
-          reading as evidence.
+          body="The mutation-prover lane FAILED or was CANCELLED. At least one prover either exited
+          non-zero, timed out, or ran a different number of mutations than it DECLARES — and the
+          last case is the one this lane exists for: a prover that runs 4 of 13 and exits 0
+          certifies nothing while reading as evidence. The lane covers \`main\` AND
+          \`integration/v2\`, sharded; a leg or prover that never reported is a failure too.
 
-          - Run (per-prover output and the LANE SUMMARY table are in the job log): ${RUN_URL}
-          - Lane job result: ${CHECK_RESULT}
+          - Run (per-prover output and each leg's LANE SUMMARY table are in the job logs): ${RUN_URL}
+          - Plan: ${PLAN_RESULT} · Legs: ${CHECK_RESULT} · Aggregate: ${AGGREGATE_RESULT}
 
-          **Triage — read the LANE SUMMARY table at the end of the log first.** It prints
-          \`run/declared\` per prover, so it separates the two cases before you open anything:
+          Legs that were not green:
 
+          ${legs}
+
+          Aggregate findings (new red first, then the known red):
+
+          ${AGG_SUMMARY}
+
+          $(node scripts/prover-lane-known-red.mjs)
+
+          **Triage — read the failing leg's LANE SUMMARY table at the end of its log first, then the
+          Aggregate job's findings (they name the ref, shard and prover).** The summary prints
+          \`run/declared\` per prover, so it separates the cases before you open anything:
+
+          - *TIMED OUT* — a prover exceeded its own bound and was killed with its process group.
+            Open its streamed output above the summary: the log shows what it was doing when it was
+            killed. Fix the hang; do NOT raise the bound to make the night green.
+          - *leg has no report (Aggregate)* — the leg was cancelled at its ceiling or crashed before
+            writing one. The leg's own log says which prover was running.
           - *declared N but ran M* — the prover stopped early. The usual cause is ANCHOR ROT: a
             mutation's anchor string no longer occurs exactly once in its subject, so the harness
             refused to mutate. Fix the anchor; do NOT lower the declared count to match.
@@ -204,7 +520,7 @@ jobs:
           Never make this lane green by weakening a prover. Re-run the workflow to confirm the fix,
           then close this issue."
           # Idempotency: exactly-one open alert issue. --limit 100 explicitly
-          # (gh defaults to 30) so the pinned alert cannot fall off the first
+          # (gh defaults to 30) so the alert cannot fall off the first
           # page and make every red night file a NEW issue.
           # #1347 — create-or-update via the shared, never-pinning helper.
           # This alert used to `gh issue pin` its own issue, racing 9 OTHER

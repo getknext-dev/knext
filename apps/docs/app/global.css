@@ -70,3 +70,16 @@ h3,
   font-family: var(--display);
   letter-spacing: -0.03em;
 }
+
+/* Long identifiers in prose (inline `code`, bold names) have no break opportunity.
+ * At narrow widths such a token overflows its line, and the docs layout clips it
+ * (overflow: clip), so the text is cut off with no scrollbar and scrollWidth does
+ * not see it. Let them wrap below 1000px. Desktop line lengths never need it, so
+ * the desktop rendering is unchanged. */
+@media (max-width: 999px) {
+  .prose code:not(pre code),
+  .prose strong,
+  .prose :is(h1, h2, h3, h4) {
+    overflow-wrap: anywhere;
+  }
+}

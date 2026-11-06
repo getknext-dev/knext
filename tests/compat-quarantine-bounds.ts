@@ -32,3 +32,24 @@ export function capBindingMessage(): string {
     `Diverging them silently is exactly the ADR-0007 §g failure this binding prevents.`
   );
 }
+
+/**
+ * The suites entries that are a VERBATIM mirror of upstream's own deploy manifest (re-mirrored on a
+ * ref bump). Everything else in `suites` is knext's: flakey quarantines, or ref-pinned per-case
+ * `failed` entries (ADR-0007 amendment 2026-11-04). Shared by tests/deploy-manifest.test.ts and
+ * tests/compat-ref-pinned-cases.test.ts so the two guards cannot disagree about which is which.
+ */
+export const UPSTREAM_MIRROR_SUITES: ReadonlySet<string> = new Set([
+  'test/e2e/app-dir/app-client-cache/client-cache.defaults.test.ts',
+  'test/e2e/app-dir/app-client-cache/client-cache.experimental.test.ts',
+  'test/e2e/app-dir/segment-cache/prefetch-runtime/prefetch-runtime.test.ts',
+  'test/e2e/app-dir/actions/app-action.test.ts',
+  'test/e2e/app-dir/actions/app-action-node-middleware.test.ts',
+  'test/e2e/app-dir/app-static/app-static.test.ts',
+  'test/e2e/app-dir/metadata/metadata.test.ts',
+  'test/e2e/app-dir/searchparams-reuse-loading/searchparams-reuse-loading.test.ts',
+  // test/e2e/middleware-rewrites/test/index.test.ts is excluded at file level
+  // by the §h vercel-infra-coupled family (#1633), which subsumes upstream's
+  // mirrored `failed` entry. Restore both here and in the manifest when that
+  // entry retires.
+]);

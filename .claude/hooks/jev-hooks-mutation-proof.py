@@ -3,6 +3,8 @@
 
     python3 .claude/hooks/jev-hooks-mutation-proof.py           # every mutation
     python3 .claude/hooks/jev-hooks-mutation-proof.py --smoke   # one representative per guard family (CI)
+    python3 .claude/hooks/jev-hooks-mutation-proof.py --smoke --shard 2/3   # every 3rd mutant, from the 2nd (CI)
+    python3 .claude/hooks/jev-hooks-mutation-proof.py --smoke --shard 2/3 --list   # print the slice, run nothing
 
 For each guard in jev-result-screen.sh / jev-hook-lib.sh / pr-risk.sh: neuter the one thing it
 protects, run the owning suite, and require it to go RED. A guard whose removal leaves the suite
@@ -14,12 +16,15 @@ Rules, all from workflow.md / the block-dangerous-bash harness:
   * The unmutated suites must be GREEN first — a harness that cannot see green proves nothing
     about red.
   * Every anchor must occur EXACTLY once or the run ABORTS, non-zero. No silent no-ops.
+  * A suite that does not finish inside its bound (JEV_PROOF_SUITE_TIMEOUT, default 300 s) is a TIMEOUT:
+    it is reported by mutation name, fails the run, and is NEVER counted as a killed mutation.
   * Mutates a COPY in a temp directory; the in-repo hooks are never opened for writing.
   * No mutation may target code that is not in the tree: every anchor is looked up in the real
     file, so a mutation of removed code aborts instead of passing.
 """
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -70,8 +75,8 @@ MUTATIONS = [
     (
         "lib: screen skips on plain WORDS again (an injection evades by saying 'token')",
         LIB,
-        'JEV_LITERAL_RE="$JEV_PEM_RE|"\'',
-        'JEV_LITERAL_RE="secret|token|password|passwd|api[_-]?key|private[_-]?key|cookie|$JEV_PEM_RE|"\'',
+        "JEV_LITERAL_RE='gh[pousr]_",
+        "JEV_LITERAL_RE='secret|token|password|passwd|api[_-]?key|private[_-]?key|cookie|gh[pousr]_",
     ),
     ("lib: literal match is case-sensitive", LIB, 'grep -Eiq -- "$JEV_LITERAL_RE"', 'grep -Eq -- "$JEV_LITERAL_RE"'),
     ("lib: literal check never matches", LIB, 'grep -Eiq -- "$JEV_LITERAL_RE" <<<"$orig"', "false"),
@@ -125,7 +130,7 @@ MUTATIONS = [
     ("screen: the redacted text is not the one sent", SCREEN, 'mv "$tmp/redacted.txt" "$tmp/text.txt" || exit 0', ":"),
     ("screen: a failed mv no longer stops the call (sends the original)", SCREEN, 'mv "$tmp/redacted.txt" "$tmp/text.txt" || exit 0', 'mv "$tmp/redacted.txt" "$tmp/text.txt" || :'),
     ("lib: the placeholder is empty (literal deleted, nothing marks it)", LIB, 'out = out substr(line, 1, i - 1) "[REDACTED]"; line = substr(line, i + l)', 'out = out substr(line, 1, i - 1) ""; line = substr(line, i + l)'),
-    ("lib: pass 1 (token shapes, PEM, headers) not redacted", LIB, 'cur=$(_jev_replace_fixed "$w/pat1" "$w/t1") || return 1', "cur=$cur"),
+    ("lib: pass 1 (token shapes, headers) not redacted", LIB, 'cur=$(_jev_replace_fixed "$w/pat1" "$w/t1") || return 1', "cur=$cur"),
     ("lib: pass 2 (entropy runs) not redacted", LIB, 'cur=$(_jev_replace_fixed "$w/pat2" "$w/t2") || return 1', "cur=$cur"),
     ("lib: pass 1 redacts with a different pattern than detection", LIB, 'grep -Eio -- "$JEV_LITERAL_RE" <<<"$cur" >"$w/pat1"', 'grep -Eio -- "ghp_[A-Za-z0-9]{36}" <<<"$cur" >"$w/pat1"'),
     ("lib: the re-check of the redacted text removed (a surviving literal is sent)", LIB, '  [ "$rc" -eq 1 ] || return 1\n  cp', "  cp"),
@@ -144,14 +149,16 @@ MUTATIONS = [
     ("lib: PEM redaction error ignored", LIB, 'cur=$(_jev_redact_pem "$w/t0") || return 1', 'cur=$(_jev_redact_pem "$w/t0") || :'),
     ("lib: PEM marker matched case-sensitively", LIB, "        low = tolower(rem)\n", "        low = rem\n"),
     ("lib: PEM block with no END line is not redacted to the end of the text", LIB, "if (e == 0) { endpos = length(rem) }", "if (e == 0) { endpos = b }"),
-    ("lib: PEM redaction stops at the FIRST END marker (a spoofed early END ends it)", LIB, "while (match(substr(low, off), /---+[ \\t\\r\\n]*end/)) {", "if (match(substr(low, off), /---+[ \\t\\r\\n]*end/)) {"),
+    ("lib: PEM redaction stops at the FIRST END marker (a spoofed early END ends it)", LIB, "while (match(substr(low, off), /(^|[^-])---+[ \\t\\r\\n]*end/)) {", "if (match(substr(low, off), /(^|[^-])---+[ \\t\\r\\n]*end/)) {"),
     ("lib: PEM END without closing dashes ends the block at the marker (the rest is sent)", LIB, "} else { endpos = length(rem) }", "} else { endpos = e + elen - 1 }"),
-    ("lib: PEM marker needs exactly 5 dashes", LIB, "/---+[ \\t\\r\\n]*begin", "/-----[ \\t\\r\\n]*begin"),
-    ("lib: PEM marker allows no whitespace between the dashes and BEGIN", LIB, "/---+[ \\t\\r\\n]*begin", "/---+begin"),
-    ("lib: PEM marker does not match across a line break (CRLF split)", LIB, "/---+[ \\t\\r\\n]*begin", "/---+[ \\t]*begin"),
-    ("lib: detection does not treat CR/LF as a space (a marker split by CRLF is not detected)", LIB, "flat=$(tr '\\r\\n' '  ' <<<\"$orig\") || return 0", "flat=$orig"),
-    ("lib: detection marker needs exactly 5 dashes and no space", LIB, "JEV_PEM_RE='---+[[:space:]]*BEGIN[[:space:]]+([A-Za-z0-9_.[:space:]]|-[A-Za-z0-9_.[:space:]])+---+'", "JEV_PEM_RE='-----BEGIN'"),
-    ("lib: the flattened-marker grep error reads as 'no secret'", LIB, '[ "$rc" -ne 1 ] && return 0', ":"),
+    ("lib: PEM marker needs exactly 5 dashes", LIB, "JEV_PEM_RE='(^|[^-])---+[ \\t", "JEV_PEM_RE='(^|[^-])-----[ \\t"),
+    ("lib: PEM marker allows no whitespace between the dashes and BEGIN", LIB, ")---+[ \\t\\r\\n\\v\\f]*begin", ")---+begin"),
+    ("lib: PEM marker does not match across a line break (CRLF split)", LIB, "[ \\t\\r\\n\\v\\f]*begin", "[ \\t\\v\\f]*begin"),
+    ("lib: PEM detection never matches (a block beside no other literal is sent in clear)", LIB, "exit (match(tolower(t), re) ? 0 : 1)", "exit 1"),
+    ("lib: PEM detection matched case-sensitively (an upper-case BEGIN block is sent in clear)", LIB, "exit (match(tolower(t), re) ? 0 : 1)", "exit (match(t, re) ? 0 : 1)"),
+    ("lib: PEM detection falls through to the redaction (every text reads as a marker)", LIB, '      if (mode == "detect") exit (match(tolower(t), re) ? 0 : 1)\n', ''),
+    ("lib: PEM redaction uses its own line-crossing regex again (prose between rules is redacted)", LIB, "if (!match(low, re))", "if (!match(low, /---+[ \\t\\r\\n]*begin[ \\t\\r\\n]+([a-z0-9_. \\t\\r\\n]|-[a-z0-9_. \\t\\r\\n])+---+/))"),
+    ("lib: the PEM detection error reads as 'no secret'", LIB, '[ "$rc" -ne 1 ] && return 0', ":"),
     ("screen: the read-cap trim removed (a token cut by the cap is half-sent)", SCREEN, """sed -E '$ s/[^[:space:]]*$//' "$tmp/raw.txt" >"$tmp/raw2.txt" || exit 0""", """cp "$tmp/raw.txt" "$tmp/raw2.txt" || exit 0"""),
     ("screen: the read-cap trim never fires", SCREEN, "-ge 131072 ]", "-ge 1310720 ]"),
     ("screen: the read-cap trim fires on every text (drops the last word)", SCREEN, "-ge 131072 ]", "-ge 0 ]"),
@@ -169,17 +176,23 @@ MUTATIONS = [
     ("lib: a user:pass@ password may not contain a slash", LIB, "+:[^@[:space:]]+@", "+:[^/@[:space:]]+@"),
     ("screen: a NUL byte skips the screen again (not replaced)", SCREEN, """tr '\\000' ' ' <"$tmp/raw.txt" >"$tmp/text.txt" || exit 0""", """cp "$tmp/raw.txt" "$tmp/text.txt" || exit 0"""),
     ("screen: the cut runs BEFORE redaction (a straddling token's prefix is sent)", SCREEN, "head -c 131072", "head -c 32768"),
-    ("lib: PEM redaction needs no label (a bare '---begin' hides the payload after it)", LIB, "begin[ \\t\\r\\n]+([a-z0-9_. \\t\\r\\n]|-[a-z0-9_. \\t\\r\\n])+---+/", "begin/"),
-    ("lib: PEM redaction needs no closing dashes (an unclosed '---begin foo' hides the payload)", LIB, "([a-z0-9_. \\t\\r\\n]|-[a-z0-9_. \\t\\r\\n])+---+/", "[a-z0-9_ \\t\\r\\n]+/"),
-    ("lib: detection marker needs no label", LIB, "BEGIN[[:space:]]+([A-Za-z0-9_.[:space:]]|-[A-Za-z0-9_.[:space:]])+---+'", "BEGIN'"),
-    ("lib: detection marker needs no closing dashes", LIB, "([A-Za-z0-9_.[:space:]]|-[A-Za-z0-9_.[:space:]])+---+'", "([A-Za-z0-9_.[:space:]]|-[A-Za-z0-9_.[:space:]])+'"),
-    ("lib: detection label class loses digits (X25519 PRIVATE KEY is not a marker)", LIB, "([A-Za-z0-9_.[:space:]]|-[A-Za-z0-9_.[:space:]])+---+'", "([A-Za-z_.[:space:]]|-[A-Za-z_.[:space:]])+---+'"),
-    ("lib: detection label class loses the hyphen (RSA-PSS)", LIB, "([A-Za-z0-9_.[:space:]]|-[A-Za-z0-9_.[:space:]])+---+'", "([A-Za-z0-9_.[:space:]])+---+'"),
-    ("lib: detection label class loses the dot (RSA.KEY)", LIB, "([A-Za-z0-9_.[:space:]]|-[A-Za-z0-9_.[:space:]])+---+'", "([A-Za-z0-9_[:space:]]|-[A-Za-z0-9_[:space:]])+---+'"),
-    ("lib: PEM pass label class loses digits", LIB, "([a-z0-9_. \\t\\r\\n]|-[a-z0-9_. \\t\\r\\n])+---+/", "([a-z_. \\t\\r\\n]|-[a-z_. \\t\\r\\n])+---+/"),
-    ("lib: PEM pass label class loses the hyphen", LIB, "([a-z0-9_. \\t\\r\\n]|-[a-z0-9_. \\t\\r\\n])+---+/", "([a-z0-9_. \\t\\r\\n])+---+/"),
-    ("lib: PEM pass label class loses the dot", LIB, "([a-z0-9_. \\t\\r\\n]|-[a-z0-9_. \\t\\r\\n])+---+/", "([a-z0-9_ \\t\\r\\n]|-[a-z0-9_ \\t\\r\\n])+---+/"),
-    ("lib: PEM pass label may swallow dash runs (the END marker and the text after it)", LIB, "([a-z0-9_. \\t\\r\\n]|-[a-z0-9_. \\t\\r\\n])+---+/", "[a-z0-9_. \\t\\r\\n-]+---+/"),
+    ("lib: PEM marker needs no label (a bare '---begin' hides the payload after it)", LIB, "begin[ \\t]+([^- \\t\\r\\n]|--?[^-\\r\\n])([^-\\r\\n]|--?[^-\\r\\n])*---+'", "begin'"),
+    ("lib: PEM marker needs no closing dashes (an unclosed labelled marker hides the payload)", LIB, "([^-\\r\\n]|--?[^-\\r\\n])*---+'", "([^-\\r\\n]|--?[^-\\r\\n])*'"),
+    ("lib: PEM label loses the hyphen (RSA-PSS)", LIB, "([^-\\r\\n]|--?[^-\\r\\n])*", "([^-\\r\\n])*"),
+    ("lib: PEM label loses the double hyphen (RSA--PSS)", LIB, "|--?[^-\\r\\n])*", "|-[^-\\r\\n])*"),
+    ("lib: PEM label restricted to word characters again (a ':', '/', '(', '+' or '*' label leaks)", LIB, "([^-\\r\\n]|--?[^-\\r\\n])*", "([a-z0-9_. \\t]|--?[a-z0-9_. \\t])*"),
+    ("lib: PEM label crosses line breaks (prose between markdown rules is a marker)", LIB, "([^-\\r\\n]|--?[^-\\r\\n])*", "([^-]|--?[^-])*"),
+    ("lib: PEM label crosses a bare CR", LIB, "([^-\\r\\n]|--?[^-\\r\\n])*", "([^-\\n]|--?[^-\\n])*"),
+    ("lib: PEM label may swallow dash runs (the END marker on the same line and the text after it)", LIB, "([^-\\r\\n]|--?[^-\\r\\n])*", "[^\\r\\n]*"),
+    ("lib: PEM label may hold a dash run before a non-dash", LIB, "|--?[^-\\r\\n])*", "|-+[^-\\r\\n])*"),
+    ("lib: PEM label may be empty ('-----BEGIN -----' is a marker)", LIB, "([^- \\t\\r\\n]|--?[^-\\r\\n])(", "([^- \\t\\r\\n]|--?[^-\\r\\n])?("),
+    ("lib: PEM separator after BEGIN crosses a line break", LIB, "begin[ \\t]+", "begin[ \\t\\r\\n]+"),
+    ("lib: PEM label may start with a blank (a blank-only label is a marker; 120K blanks are quadratic on mawk)", LIB, "([^- \\t\\r\\n]|--?[^-\\r\\n])(", "([^-\\r\\n]|--?[^-\\r\\n])("),
+    ("lib: PEM marker may start inside a dash run (a 120K dash run is quadratic: the screen hangs)", LIB, "JEV_PEM_RE='(^|[^-])---+", "JEV_PEM_RE='---+"),
+    ("lib: the END search may start inside a dash run (quadratic after a marker)", LIB, "/(^|[^-])---+[ \\t\\r\\n]*end/", "/---+[ \\t\\r\\n]*end/"),
+    ("lib: the redaction eats the character before the marker", LIB, '        if (substr(low, b, 1) != "-") b++ # the match began one character before the dashes\n', ''),
+    # --- the suite itself must not hang on macOS (SIGPIPE ignored there; an infinite `yes` producer behind a filter that ignores EPIPE, e.g. `tr`, never exits) ---
+    ("suite: feeds the infinite `yes` producer again (an EPIPE-ignoring filter makes it hang on macOS)", "jev-hooks.test.sh", '$(rep_lines "$LONGTOK" 1350)', '$(yes "$LONGTOK" | head -n 1350)'),
     # --- pr-risk -----------------------------------------------------------------------------
     ("pr-risk: security weight dropped", "pr-risk.sh", ":-0.40}", ":-0.00}"),
     ("pr-risk: tests weight dropped", "pr-risk.sh", ":-0.25}", ":-0.00}"),
@@ -204,7 +217,7 @@ MUTATIONS = [
 # Each literal-format alternative must be covered by its own case in the suite, so remove them ONE
 # AT A TIME. (label, anchor, replacement)
 for _label, _anchor, _repl in [
-    ("PEM block", "JEV_PEM_RE='---+[[:space:]]*BEGIN[[:space:]]+([A-Za-z0-9_.[:space:]]|-[A-Za-z0-9_.[:space:]])+---+'", "JEV_PEM_RE='zzzzz'"),
+    ("PEM block", "JEV_PEM_RE='(^|[^-])---+[ \\t\\r\\n\\v\\f]*begin[ \\t]+([^- \\t\\r\\n]|--?[^-\\r\\n])([^-\\r\\n]|--?[^-\\r\\n])*---+'", "JEV_PEM_RE='zzzzz'"),
     ("gh[pousr]_", "gh[pousr]_[A-Za-z0-9]{36}[A-Za-z0-9_-]*|", ""),
     ("github_pat_", "github_pat_[A-Za-z0-9_]{22,}|", ""),
     ("npm_", "npm_[A-Za-z0-9]{36}[A-Za-z0-9_-]*|", ""),
@@ -215,13 +228,71 @@ for _label, _anchor, _repl in [
     MUTATIONS.append((f"lib: literal pattern removed: {_label}", LIB, _anchor, _repl))
 
 
-def run_suite(work: Path, test: str) -> int:
-    return subprocess.run(
+# Per-suite wall-clock bound, seconds. A healthy run is ~45 s on ubuntu and ~110 s on macOS (about 2.5x
+# slower; see the `safety-hook-mutation-proof` job in ci.yml), so 300 s is already ~2.7x the slow leg.
+# Not raised: a suite past it is more likely hung (the yes|tr hang) than slow, and a raise only
+# delays that signal. Overridable for tests and for a deliberately slow machine.
+SUITE_TIMEOUT = int(os.environ.get("JEV_PROOF_SUITE_TIMEOUT", "300"))
+
+
+class SuiteTimeout(Exception):
+    """A suite did not finish inside its bound. It is NOT an exit code: a suite that never finished
+    proves nothing, so it must never be folded into "went red" (killed) or "stayed green"."""
+
+    def __init__(self, test: str, timeout: float, note: str = ""):
+        self.test, self.timeout = test, timeout
+        super().__init__(f"{test} did not finish within {timeout}s{note}")
+
+
+def run_suite(work: Path, test: str, timeout: float = None) -> int:
+    """Run one suite; return its exit code, or raise SuiteTimeout (never a bare exit code) if it
+    exceeds `timeout`. On timeout the whole process group is killed and the leader reaped."""
+    timeout = SUITE_TIMEOUT if timeout is None else timeout
+    # Own session (start_new_session=True -> setsid) so the child is a group leader and p.pid IS its
+    # process-group id; a timeout then kills the whole group. Killing only bash would orphan a
+    # spinning child (an infinite producer, a leaked sleep) onto the runner for the rest of the job.
+    p = subprocess.Popen(
         ["bash", str(work / test)],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        timeout=300,
-    ).returncode
+        start_new_session=True,
+    )
+    try:
+        return p.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        pass
+    note = ""
+    try:
+        os.killpg(p.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError) as e:
+        # The group is already gone, or holds only a leader that has exited but is not yet reaped:
+        # Linux answers ESRCH for that, macOS answers EPERM (it refuses to signal a zombie). Either
+        # way there is nothing left to kill in the group except possibly the leader itself.
+        note = f" (killpg: {type(e).__name__})"
+        if p.poll() is None:
+            try:
+                p.kill()  # EPERM for some other reason: at least take down the leader
+            except ProcessLookupError:
+                pass
+    try:
+        p.wait(timeout=30)  # reap: no zombie, no orphan record
+    except subprocess.TimeoutExpired:
+        note += " (child could not be reaped after SIGKILL)"
+    raise SuiteTimeout(test, timeout, note)
+
+
+def judge(label: str, which: str, work: Path, timeout: float = None):
+    """Run the owning suite(s) on a mutated tree -> (status, line). status is RED (killed), GREEN
+    (survived) or TIMEOUT. TIMEOUT is its own outcome on purpose: the suites are folded below with
+    max(), and a timeout turned into an exit code would read as RED and certify a proof the suite
+    never finished."""
+    try:
+        rc = max(run_suite(work, t, timeout) for t in SUITE[which])
+    except SuiteTimeout as e:
+        return "TIMEOUT", f"TIMEOUT {label}: {e}; NOT counted as killed, the proof is incomplete"
+    if rc != 0:
+        return "RED", f"RED    {label} (suite exit {rc})"
+    return "GREEN", f"GREEN  {label}  <-- SURVIVED, the guard is decoration"
 
 
 # CI cost: a suite run takes minutes on a hosted runner, so the full sweep would be too long for a
@@ -246,11 +317,12 @@ SMOKE = [
     "PEM blocks not redacted",
     "PEM redaction stops at the FIRST END",
     "PEM marker does not match across a line break",
-    "PEM redaction needs no label",
-    "detection marker needs no label",
-    "detection label class loses digits",
-    "PEM pass label class loses the hyphen",
-    "detection does not treat CR/LF as a space",
+    "PEM marker needs no label",
+    "PEM label loses the double hyphen",
+    "PEM label crosses line breaks",
+    "PEM label may swallow dash runs",
+    "PEM detection never matches",
+    "PEM marker may start inside a dash run",
     "the read-cap trim removed",
     "a NUL byte skips the screen again",
     "the cut runs BEFORE redaction",
@@ -259,6 +331,7 @@ SMOKE = [
     "redaction pass-1 grep error ignored",
     "redaction exempt-strip error ignored",
     "goes back to a pipeline (SIGPIPE",
+    "feeds the infinite `yes` producer",
     "LC_ALL=C dropped",
     "NUL bytes no longer skip",
     "Unicode spaces no longer normalised",
@@ -268,10 +341,37 @@ SMOKE = [
 ]
 
 
+def parse_shard(argv):
+    """`--shard i/n` -> (i, n), 1-based; None when absent. A malformed spec ABORTS: a typo must not
+    silently run an empty (or the whole) slice and report green."""
+    if "--shard" not in argv:
+        return None
+    try:
+        i, n = argv[argv.index("--shard") + 1].split("/")
+        i, n = int(i), int(n)
+    except (IndexError, ValueError):
+        sys.exit("ABORT: --shard expects i/n, e.g. --shard 2/3")
+    if not 1 <= i <= n:
+        sys.exit(f"ABORT: --shard {i}/{n} is out of range (need 1 <= i <= n)")
+    return i, n
+
+
 def main() -> int:
-    smoke = "--smoke" in sys.argv[1:]
+    argv = sys.argv[1:]
+    smoke = "--smoke" in argv
     todo = [(i, m) for i, m in enumerate(MUTATIONS) if not smoke or any(k in m[0] for k in SMOKE)]
-    aborts, survivors, killed = [], [], 0
+    shard = parse_shard(argv)
+    if shard:
+        # Round-robin by position in the (declaration-ordered) selection: the slices are disjoint, their
+        # union is the whole selection, and neighbouring mutants (which share a file and a cost) spread out.
+        todo = todo[shard[0] - 1 :: shard[1]]
+        if not todo:
+            sys.exit(f"ABORT: shard {shard[0]}/{shard[1]} selected no mutation; refusing to report green on nothing")
+    if "--list" in argv:
+        for _, m in todo:
+            print(m[0])
+        return 0
+    aborts, survivors, timeouts, killed = [], [], [], 0
     with tempfile.TemporaryDirectory() as td:
         base = Path(td) / "base"
         base.mkdir()
@@ -279,11 +379,15 @@ def main() -> int:
             (base / dest).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(d / f, base / dest)
         for t in SUITE["both"]:
-            rc = run_suite(base, t)
-            if rc != 0:
-                print(f"ABORT: the UNMUTATED suite {t} is not green (exit {rc}); cannot prove anything")
+            try:
+                rc = run_suite(base, t)
+            except SuiteTimeout as e:
+                print(f"ABORT: the UNMUTATED suite timed out: {e}; cannot prove anything", flush=True)
                 return 2
-        print("baseline: green (exit 0)")
+            if rc != 0:
+                print(f"ABORT: the UNMUTATED suite {t} is not green (exit {rc}); cannot prove anything", flush=True)
+                return 2
+        print("baseline: green (exit 0)", flush=True)
 
         def prove(item):
             i, (label, fname, anchor, repl) = item
@@ -299,25 +403,26 @@ def main() -> int:
                 return "ABORT", f"ABORT  {label}: substitution produced no change"
             target.write_text(out)
             which = "pr-risk" if fname == "pr-risk.sh" else "both" if fname == LIB else "hooks"
-            rc = max(run_suite(work, t) for t in SUITE[which])
-            if rc != 0:
-                return "RED", f"RED    {label} (suite exit {rc})"
-            return "GREEN", f"GREEN  {label}  <-- SURVIVED, the guard is decoration"
+            return judge(label, which, work)
 
         # Independent temp copies, so mutations run in parallel (each suite keeps its own TMP).
         # Results print in declaration order.
         with ThreadPoolExecutor(max_workers=min(4, os.cpu_count() or 2)) as pool:
             for status, line in pool.map(prove, todo):
-                print(line)
+                print(line, flush=True)
                 if status == "RED":
                     killed += 1
                 elif status == "GREEN":
                     survivors.append(line)
+                elif status == "TIMEOUT":
+                    timeouts.append(line)
                 else:
                     aborts.append(line)
     suffix = f" (smoke subset of {len(MUTATIONS)})" if smoke else ""
-    print(f"\n{killed}/{len(todo)} mutations killed{suffix}; survivors={len(survivors)} aborts={len(aborts)}")
-    return 0 if not survivors and not aborts else 1
+    if shard:
+        suffix += f" [shard {shard[0]}/{shard[1]}]"
+    print(f"\n{killed}/{len(todo)} mutations killed{suffix}; survivors={len(survivors)} timeouts={len(timeouts)} aborts={len(aborts)}")
+    return 0 if not survivors and not timeouts and not aborts else 1
 
 
 if __name__ == "__main__":

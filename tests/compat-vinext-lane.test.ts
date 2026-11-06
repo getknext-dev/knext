@@ -146,7 +146,15 @@ describe('the vinext-axis compat lane exists and is wired to the corpus', () => 
   });
 
   it('runs knext’s own manifest — the SAME selection the node lane runs by default (#1301)', () => {
-    const mine = harnessStep(parse(LANE)).env?.NEXT_EXTERNAL_TESTS_FILTERS ?? '';
+    // ADR-0007 amendment: the harness reads a COPY scoped to NEXTJS_REF; the copy's SOURCE is the
+    // node lane's default manifest, and the scope only drops ref-pinned names (rules untouched —
+    // tests/compat-manifest-for-ref.test.ts), so the corpus is still the same one.
+    const wf = parse(LANE);
+    expect(harnessStep(wf).env?.NEXT_EXTERNAL_TESTS_FILTERS ?? '').toContain(
+      'knext-deploy-manifest.json',
+    );
+    const scopeStep = steps(wf).find((s) => s.name?.startsWith('Scope ref-pinned per-case'));
+    const mine = scopeStep?.env?.SCOPE_SOURCE_MANIFEST ?? '';
     const manifest = 'test/deploy-tests-manifest.knext.json';
     expect(mine).toContain(manifest);
     // #1301 — the node lane's filename now flows through the

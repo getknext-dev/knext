@@ -12,7 +12,11 @@ import { join, resolve } from 'node:path';
 import { blankNonCode } from '../scripts/lib/blank-non-code.mjs';
 import { codeWithLiterals } from '../scripts/lib/prover-lane.mjs';
 import { absTmpdir } from './helpers/abs-tmp';
-import { auditBlockingGate, type BlockingGateOptions } from './helpers/blocking-gate';
+import {
+  auditBlockingGate,
+  auditJobCanNotSkip,
+  type BlockingGateOptions,
+} from './helpers/blocking-gate';
 
 /**
  * Regression coverage for the AUDIT ENGINE itself (#661 round 2).
@@ -1273,5 +1277,62 @@ describe('#690 every `allowPathsFilter` caller pins the filter CONTENTS', () => 
       { path: 'tests/prose.test.ts', source: '// the audit takes allowPathsFilter; see #677\n' },
     ]);
     expect(callers).toEqual([]);
+  });
+});
+
+describe('#2499 the dynamic-matrix opt-in is per job id and shape-checked', () => {
+  const dyn = (strategy: unknown) =>
+    ({
+      lane: {
+        'runs-on': 'ubuntu-latest',
+        needs: ['plan'],
+        strategy,
+        steps: [{ run: 'x' }],
+      },
+      plan: { 'runs-on': 'ubuntu-latest', steps: [{ run: 'y' }] },
+    }) as never;
+  const GOOD = { 'fail-fast': false, matrix: '${{ fromJSON(needs.plan.outputs.matrix) }}' };
+
+  it('WITHOUT the opt-in, `strategy` is still rejected (the strict reading is the default)', () => {
+    const problems: string[] = [];
+    auditJobCanNotSkip(dyn(GOOD), 'lane', problems);
+    expect(problems.join('\n')).toMatch(/unrecognised job-level key `strategy`/);
+  });
+
+  it('WITH the opt-in, a fromJSON matrix fed by a needed job is accepted', () => {
+    const problems: string[] = [];
+    auditJobCanNotSkip(dyn(GOOD), 'lane', problems, { dynamicMatrixJobs: ['lane'] });
+    expect(problems).toEqual([]);
+  });
+
+  it('the opt-in names a JOB: another job with a strategy is still rejected', () => {
+    const jobs = dyn(GOOD) as Record<string, Record<string, unknown>>;
+    jobs.plan.strategy = GOOD;
+    const problems: string[] = [];
+    auditJobCanNotSkip(jobs as never, 'lane', problems, { dynamicMatrixJobs: ['lane'] });
+    expect(problems.join('\n')).toMatch(/job `plan`.*unrecognised job-level key `strategy`/s);
+  });
+
+  it('a STATIC matrix, an expression that is not a bare fromJSON, and extra strategy keys are rejected', () => {
+    for (const bad of [
+      { matrix: { n: [1] } },
+      { matrix: "${{ github.event_name == 'schedule' && fromJSON(needs.plan.outputs.matrix) }}" },
+      { ...GOOD, 'continue-on-error': true },
+      { ...GOOD, matrix: '${{ fromJSON(needs.plan.outputs.matrix) }} ' + '${{ x }}' },
+    ]) {
+      const problems: string[] = [];
+      auditJobCanNotSkip(dyn(bad), 'lane', problems, { dynamicMatrixJobs: ['lane'] });
+      expect(problems.join('\n'), JSON.stringify(bad)).toMatch(/not a safe dynamic matrix/);
+    }
+  });
+
+  it('opting in does not waive `if:` or a step-level soft-fail', () => {
+    const jobs = dyn(GOOD) as Record<string, Record<string, unknown>>;
+    jobs.lane.if = 'always()';
+    (jobs.lane.steps as Array<Record<string, unknown>>)[0]['continue-on-error'] = true;
+    const problems: string[] = [];
+    auditJobCanNotSkip(jobs as never, 'lane', problems, { dynamicMatrixJobs: ['lane'] });
+    expect(problems.join('\n')).toMatch(/job-level `if:`/);
+    expect(problems.join('\n')).toMatch(/continue-on-error/);
   });
 });

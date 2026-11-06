@@ -393,21 +393,11 @@ function main() {
     die(`could not parse npm audit output:\n${audit.stdout}\n${audit.stderr}`);
   }
   const vulns = report.vulnerabilities ?? {};
-  const failing = [];
-  for (const [name, v] of Object.entries(vulns)) {
-    if (!FAILING_SEVERITIES.has(v.severity)) continue;
-    // `via` entries carry the advisory. Object entries have a source id/url.
-    const advisories = (Array.isArray(v.via) ? v.via : []).filter((x) => typeof x === 'object');
-    // A vuln is suppressed only if EVERY contributing advisory is allowlisted.
-    const ids = advisories.map((a) => advisoryId(a)).filter(Boolean);
-    const allSuppressed = ids.length > 0 && ids.every((id) => allowed.has(id));
-    if (allSuppressed) {
-      console.log(
-        `[audit-published] ${name} (${v.severity}) suppressed by allowlist: ${ids.join(', ')}`,
-      );
-      continue;
-    }
-    failing.push({ name, severity: v.severity, ids, advisories });
+  const { failing, suppressed } = classifyVulnerabilities(vulns, allowed);
+  for (const s of suppressed) {
+    console.log(
+      `[audit-published] ${s.name} (${s.severity}) suppressed by allowlist: ${s.ids.join(', ')}`,
+    );
   }
 
   // ── SBOM per published package (CycloneDX, prod-only). ────────────────────
@@ -448,6 +438,63 @@ function main() {
   ok(
     'no un-allowlisted HIGH/CRITICAL advisories in the published production closure; SBOMs written to sbom/.',
   );
+}
+
+/**
+ * Split the `npm audit --json` vulnerability map into groups that FAIL the gate
+ * and groups the allowlist suppresses. Pure, exported for tests.
+ *
+ * npm reports a transitive advisory as a chain: the carrier package has OBJECT
+ * `via` entries (the advisories); each dependent up the chain is a DERIVED
+ * group whose `via` is only package-name strings. A group is suppressed only if
+ * EVERY advisory that makes it vulnerable is allowlisted:
+ *   - a carrier's own advisories must ALL be allowlisted (strict, any severity);
+ *   - a derived group is resolved through its name-via chain to the carriers'
+ *     advisories, counting only FAILING-severity ones (HIGH/CRITICAL — the gate's
+ *     threshold; a moderate sibling dependency must not need an allowlist entry).
+ * Fail closed: a derived group that resolves to no advisory (name missing from
+ * the report, cycle) is never suppressed.
+ */
+export function classifyVulnerabilities(vulns, allowed) {
+  const failing = [];
+  const suppressed = [];
+
+  /** Failing-severity advisory ids reachable from `name` via name-strings. */
+  const resolveChain = (name, seen) => {
+    if (seen.has(name)) return null; // cycle: unresolved -> fail closed
+    const path = new Set(seen).add(name); // per-path, so a diamond is not a cycle
+    const v = vulns[name];
+    if (!v) return null;
+    const ids = [];
+    for (const x of Array.isArray(v.via) ? v.via : []) {
+      if (typeof x === 'object' && x !== null) {
+        if (FAILING_SEVERITIES.has(x.severity)) ids.push(advisoryId(x));
+      } else if (typeof x === 'string') {
+        const sub = resolveChain(x, path);
+        if (sub === null) return null;
+        ids.push(...sub);
+      }
+    }
+    return ids.filter(Boolean);
+  };
+
+  for (const [name, v] of Object.entries(vulns)) {
+    if (!FAILING_SEVERITIES.has(v.severity)) continue;
+    const via = Array.isArray(v.via) ? v.via : [];
+    const advisories = via.filter((x) => typeof x === 'object');
+    let ids;
+    if (advisories.length > 0) {
+      // Carrier (possibly also depending on others): own advisories, strict.
+      ids = advisories.map((a) => advisoryId(a)).filter(Boolean);
+    } else {
+      // Derived group: resolve through the dependency chain.
+      ids = resolveChain(name, new Set()) ?? [];
+    }
+    const allSuppressed = ids.length > 0 && ids.every((id) => allowed.has(id));
+    if (allSuppressed) suppressed.push({ name, severity: v.severity, ids });
+    else failing.push({ name, severity: v.severity, ids, advisories });
+  }
+  return { failing, suppressed };
 }
 
 /** Extract a stable advisory id (GHSA/url) from an npm-audit `via` object. */

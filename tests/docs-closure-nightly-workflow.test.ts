@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { parse } from 'yaml';
 
 /**
  * GUARD TESTS for the docs dependency-closure NIGHTLY Trivy scan (#320).
@@ -180,7 +181,14 @@ describe('#320 NO DRIFT: nightly scan config equals the per-PR docs-site scan co
     // The security-load-bearing keys must be byte-equal between the two jobs so
     // they cannot diverge (one enforcing a different severity/ref than the
     // other). `format` is presentation-only and excluded.
-    const loadBearing = ['scan-type', 'scan-ref', 'severity', 'exit-code', 'ignore-unfixed'];
+    const loadBearing = [
+      'scan-type',
+      'scan-ref',
+      'severity',
+      'exit-code',
+      'ignore-unfixed',
+      'trivyignores',
+    ];
     for (const key of loadBearing) {
       expect(
         nightly[key],
@@ -395,7 +403,7 @@ describe('#465 docs-closure HIGH remediation is by BUMP, not suppression', () =>
     }
   });
 
-  it('the nightly gate itself is NOT weakened (no ignorefile, no severity relaxation)', () => {
+  it('the nightly gate itself is NOT weakened (no severity relaxation, only the triaged ignorefile)', () => {
     const nightly = read(NIGHTLY_WORKFLOW_PATH);
     expect(/severity:\s*HIGH,CRITICAL/.test(nightly), 'severity must stay HIGH,CRITICAL').toBe(
       true,
@@ -403,9 +411,59 @@ describe('#465 docs-closure HIGH remediation is by BUMP, not suppression', () =>
     expect(/exit-code:\s*'1'/.test(nightly), 'the nightly must keep failing on a finding').toBe(
       true,
     );
+    // The only exception mechanism is the single dated-and-justified file
+    // asserted below. Any other ignorefile / env override / skip is a bypass.
     expect(
-      /trivyignores?:|TRIVY_IGNOREFILE|\.trivyignore|skip-(dirs|files):/.test(nightly),
-      'remediation must be by bump — no ignorefile/skip may be introduced',
+      /TRIVY_IGNOREFILE|skip-(dirs|files):|ignore-policy:/.test(nightly),
+      'no env ignorefile, skip-dirs/files or ignore-policy may be introduced',
     ).toBe(false);
+    const ignores = [...nightly.matchAll(/^\s*trivyignores:\s*(\S+)\s*$/gm)].map((m) => m[1]);
+    expect(ignores, 'exactly the one triaged ignorefile').toEqual([TRIVY_IGNORE_PATH]);
+  });
+});
+
+// The docs closure carries minio -> query-string 7.1.3 -> decode-uri-component
+// 0.2.2 (HIGH, fixed only in an ESM-only 0.5.1 that breaks query-string 7's
+// require()). Same triage as the GHSA entries in security/*-allowlist.json:
+// scoped, justified, expiring. Trivy's YAML ignorefile enforces expiry itself.
+const TRIVY_IGNORE_PATH = 'security/docs-closure-trivyignore.yaml';
+
+describe('docs-closure Trivy ignorefile is narrow, justified and expiring', () => {
+  const doc = parse(read(resolve(REPO_ROOT, TRIVY_IGNORE_PATH))) as {
+    vulnerabilities?: {
+      id: string;
+      purls?: string[];
+      paths?: string[];
+      expired_at?: string | Date;
+      statement?: string;
+    }[];
+  };
+
+  it('both gates reference the same ignorefile', () => {
+    expect(trivyWithConfig(read(CI_WORKFLOW_PATH)).trivyignores).toBe(TRIVY_IGNORE_PATH);
+    expect(trivyWithConfig(read(NIGHTLY_WORKFLOW_PATH)).trivyignores).toBe(TRIVY_IGNORE_PATH);
+  });
+
+  it('ignores exactly CVE-2026-118664 on decode-uri-component@0.2.2, nothing else', () => {
+    expect(Object.keys(doc)).toEqual(['vulnerabilities']);
+    const v = doc.vulnerabilities ?? [];
+    expect(v.length).toBe(1);
+    expect(v[0].id).toBe('CVE-2026-118664');
+    expect(v[0].purls).toEqual(['pkg:npm/decode-uri-component@0.2.2']);
+    expect(v[0].paths).toBeUndefined();
+  });
+
+  it('expires on 2026-12-01 and carries a reachability statement', () => {
+    const v = (doc.vulnerabilities ?? [])[0];
+    const exp = v.expired_at instanceof Date ? v.expired_at.toISOString() : String(v.expired_at);
+    expect(exp.startsWith('2026-12-01')).toBe(true);
+    expect(v.statement ?? '').toMatch(/query-string/);
+    expect(v.statement ?? '').toMatch(/minio/);
+  });
+
+  it('the severity gate is untouched in ci.yml', () => {
+    const cfg = trivyWithConfig(read(CI_WORKFLOW_PATH));
+    expect(cfg.severity).toBe('HIGH,CRITICAL');
+    expect(cfg['exit-code']).toBe('1');
   });
 });

@@ -733,6 +733,30 @@ jobs:
           fi
           echo "jest discovery alive: ${COUNT} match(es) for ${PROBE}"
 
+      # ADR-0007 amendment (ref-pinned per-case entries), bar 1 enforced at RUN time. The runner
+      # knows no refs: `suites[file].failed` deselects at whatever NEXTJS_REF is under test. This step
+      # writes a COPY of the manifest in which every ref-pinned entry measured at another ref has its
+      # `failed` names dropped, so those cases RUN here. FAIL CLOSED: a missing or unparseable
+      # NEXTJS_REF fails the step and leaves no copy. The script ships with the checkout, so an rc
+      # tag cut before it existed has no ledger to scope: that passes through, but a manifest that
+      # carries a ledger with no script to scope it fails. Held by tests/compat-manifest-for-ref.test.ts.
+      - name: Scope ref-pinned per-case deselections to NEXTJS_REF
+        working-directory: knext
+        env:
+          SCOPE_SOURCE_MANIFEST: test/deploy-tests-manifest.knext.json
+          SCOPED_MANIFEST: ${{ runner.temp }}/knext-deploy-manifest.json
+        run: |
+          set -euo pipefail
+          rm -f "${SCOPED_MANIFEST}"
+          if [ -f scripts/compat-manifest-for-ref.mjs ]; then
+            node scripts/compat-manifest-for-ref.mjs --manifest "${SCOPE_SOURCE_MANIFEST}" --ref "${NEXTJS_REF}" --out "${SCOPED_MANIFEST}"
+          elif grep -Eq '"[$]knextRefPinnedCases"[[:space:]]*:' "${SCOPE_SOURCE_MANIFEST}"; then
+            echo "::error::${SCOPE_SOURCE_MANIFEST} carries ref-pinned per-case deselections but this checkout has no scripts/compat-manifest-for-ref.mjs to scope them to NEXTJS_REF; refusing to run with them applied at an unmeasured ref"
+            exit 1
+          else
+            cp "${SCOPE_SOURCE_MANIFEST}" "${SCOPED_MANIFEST}"
+          fi
+
       - name: Run official deploy tests (vinext single executable)
         working-directory: next.js
         env:
@@ -753,7 +777,7 @@ jobs:
           # THE SAME CORPUS. Changing this file, or narrowing it for this lane,
           # would make the published number incomparable to the node lane's 778 —
           # guarded by tests/compat-vinext-lane.test.ts.
-          NEXT_EXTERNAL_TESTS_FILTERS: ${{ github.workspace }}/knext/test/deploy-tests-manifest.knext.json
+          NEXT_EXTERNAL_TESTS_FILTERS: ${{ runner.temp }}/knext-deploy-manifest.json
           KNEXT_RUNTIME: ${{ env.KNEXT_RUNTIME }}
           KNEXT_BUILDER: ${{ env.KNEXT_BUILDER }}
           # #1455 (F6) — the empty-dir lane mode (dispatch-only; '' on the

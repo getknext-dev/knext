@@ -74,11 +74,13 @@ jev_ge() { awk -v x="$1" -v t="$2" 'BEGIN { exit !(x + 0 >= t + 0) }'; }
 #     loose enough to skip those blinds the screen to nearly all real GitHub output.
 #
 # What counts (each alternative is mutation-proved):
-#   * a PEM marker: 3+ dashes, optional whitespace, BEGIN, a LABEL (word characters and whitespace),
+#   * a PEM marker: 3+ dashes, optional whitespace (line breaks included), BEGIN, blanks, a LABEL,
 #     3+ closing dashes. The label and closing dashes are required: a bare `---begin` or a markdown
 #     rule before prose starting "Begin" must not redact what follows (that would be an evasion).
-#     The label may hold a single hyphen or dot (RSA-PSS, RSA.KEY) but never a run of dashes: a label
-#     that could swallow dashes would swallow the END marker and the text after it;
+#     The label is any run of characters on the BEGIN line (RFC 7468 allows ':', '(', '+', '/', '*',
+#     dots, digits, and one or two hyphens in a row: RSA--PSS) but never a line break and never a
+#     run of 3+ dashes. A label that could cross a line would turn prose between two markdown rules
+#     into a marker; one that could swallow dashes would swallow the END marker and the text after it;
 #   * GitHub tokens: gh[pousr]_ + 36 alnum (and any further token characters: an over-long token is
 #     matched, and so redacted, in full); github_pat_ + 22 or more [A-Za-z0-9_];
 #   * npm_ + 36 alnum; `sk-` + 20 or more (needs a non-alphanumeric before it, so disk-/task-
@@ -98,7 +100,11 @@ jev_ge() { awk -v x="$1" -v t="$2" 'BEGIN { exit !(x + 0 >= t + 0) }'; }
 #   * KNOWN LIMIT, accepted: a token split across lines (`ghp_abc<newline>def...`) is matched per
 #     line and is not caught; so is `://host:port/path@x` read as userinfo (over-redacted, harmless).
 #   * PEM: redaction removes BEGIN through the LAST END marker (to the end of the text when there is
-#     none, or when that END has no closing dashes); the detection rule only needs the marker.
+#     none, or when that END has no closing dashes); the detection rule only needs the marker. Both
+#     read the WHOLE text with the one regex JEV_PEM_RE (an awk regex, matched on the lower-cased
+#     text), so a marker split by a line break is seen and the two can never disagree: a marker
+#     detection saw but redaction could not remove would fail closed, and the text would not be
+#     screened at all.
 #
 # The screen does NOT skip on a hit any more (a skip let an attacker evade it by pasting one fake
 # literal): jev_redact replaces every matched literal with a placeholder and the REDACTED text is
@@ -107,8 +113,14 @@ jev_ge() { awk -v x="$1" -v t="$2" 'BEGIN { exit !(x + 0 >= t + 0) }'; }
 # redaction errors or a literal survives it returns non-zero and the caller falls back to the old
 # skip. pr-risk.sh keeps the skip (it sends no diff content at all).
 JEV_Q="[\"']" # an optional quote around a header value (JSON / shell)
-JEV_PEM_RE='---+[[:space:]]*BEGIN[[:space:]]+([A-Za-z0-9_.[:space:]]|-[A-Za-z0-9_.[:space:]])+---+' # also checked on the line-flattened text (a marker split by a line break)
-JEV_LITERAL_RE="$JEV_PEM_RE|"'gh[pousr]_[A-Za-z0-9]{36}[A-Za-z0-9_-]*|github_pat_[A-Za-z0-9_]{22,}|npm_[A-Za-z0-9]{36}[A-Za-z0-9_-]*|(^|[^a-z0-9])sk-[A-Za-z0-9_-]{20,}|xox[bp]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}[A-Za-z0-9_-]*|://[^/@[:space:]]+:[^@[:space:]]+@|authorization'"$JEV_Q"'?[[:space:]]*:[[:space:]]*'"$JEV_Q"'?basic[[:space:]]+[^[:space:]]+|(authorization'"$JEV_Q"'?[[:space:]]*:[[:space:]]*'"$JEV_Q"'?|bearer[[:space:]]+'"$JEV_Q"'?)([A-Za-z]+[[:space:]]+)?([A-Za-z0-9._~+/=-]{16,}|[A-Za-z._~+/=-]*[0-9][A-Za-z0-9._~+/=-]{7,})'
+# JEV_PEM_RE is an awk regex, passed with -v (the \t etc. become the characters) and matched on the
+# lower-cased text. Written to run in LINEAR time on mawk and BSD awk, which both restart the match
+# at every position: `(^|[^-])` stops a match from starting inside a dash run (a 130K run of dashes
+# was quadratic: minutes), and the label's first character is not a blank, so the blanks after
+# BEGIN can be split between separator and label in only one way (130K blanks: minutes on mawk).
+# The match may start one character before the dashes; callers skip that character.
+JEV_PEM_RE='(^|[^-])---+[ \t\r\n\v\f]*begin[ \t]+([^- \t\r\n]|--?[^-\r\n])([^-\r\n]|--?[^-\r\n])*---+'
+JEV_LITERAL_RE='gh[pousr]_[A-Za-z0-9]{36}[A-Za-z0-9_-]*|github_pat_[A-Za-z0-9_]{22,}|npm_[A-Za-z0-9]{36}[A-Za-z0-9_-]*|(^|[^a-z0-9])sk-[A-Za-z0-9_-]{20,}|xox[bp]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}[A-Za-z0-9_-]*|://[^/@[:space:]]+:[^@[:space:]]+@|authorization'"$JEV_Q"'?[[:space:]]*:[[:space:]]*'"$JEV_Q"'?basic[[:space:]]+[^[:space:]]+|(authorization'"$JEV_Q"'?[[:space:]]*:[[:space:]]*'"$JEV_Q"'?|bearer[[:space:]]+'"$JEV_Q"'?)([A-Za-z]+[[:space:]]+)?([A-Za-z0-9._~+/=-]{16,}|[A-Za-z._~+/=-]*[0-9][A-Za-z0-9._~+/=-]{7,})'
 JEV_ENTROPY_RUN_RE='[A-Za-z0-9+=]{32,}'
 JEV_UNICODE_SPACES="$(printf '\302\240|\341\232\200|\342\200[\200-\212]|\342\200\257|\342\201\237|\343\200\200')"
 # _jev_has_nul <file> — true (0) if the file holds a NUL byte OR the test itself failed.
@@ -146,7 +158,7 @@ _jev_secret_check() { # <file>: the text, byte-exact
   # is screened normally; only a genuine failure of the check skips the call.
   local LC_ALL
   export LC_ALL=C # local yet exported: children see it, the caller's locale is restored on return
-  local orig flat stripped runs rc
+  local orig stripped runs rc
   # NUL: bash cannot hold a NUL in a variable and `$(...)` silently DROPS it, so `a<NUL>sk-...` would
   # be checked as `ask-...` (the `sk-` word boundary is lost) while the file jev would be sent still
   # has the NUL. A NUL anywhere is treated as "possible secret": skip.
@@ -162,16 +174,16 @@ _jev_secret_check() { # <file>: the text, byte-exact
   # caller ignores SIGPIPE (GitHub's macOS runners do), where printf would print "Broken pipe" to
   # the hook's stderr instead of dying quietly.
   #
-  # 1. Token shapes, PEM, user:pass@, headers: on the ORIGINAL text. No exemption may run first: a
+  # 1. Token shapes, user:pass@, headers: on the ORIGINAL text. No exemption may run first: a
   #    token placed right after `data:x/y;base64,` must not be eaten by the data-URI strip.
   grep -Eiq -- "$JEV_LITERAL_RE" <<<"$orig"
   rc=$?
   [ "$rc" -eq 1 ] || return 0 # 1 = no match; 0 = hit, 2+ = error: both skip the call
-  # 1b. A PEM marker split by a line break (`-----<CR><LF>BEGIN`): per-line grep cannot see it, so look
-  #     for the marker alone on the text with CR and LF turned into spaces. Kept out of rule 1 so that
-  #     rule keeps its per-line early exit on big texts (the SIGPIPE cases above).
-  flat=$(tr '\r\n' '  ' <<<"$orig") || return 0
-  grep -Eiq -- "$JEV_PEM_RE" <<<"$flat"
+  # 1b. A PEM marker, on the WHOLE text read as one record: the gap between the dashes and BEGIN may
+  #     hold a line break (`-----<CR><LF>BEGIN`), the label may not. The same regex and the same
+  #     reading as the redaction pass (_jev_pem_awk), so detection and redaction agree.
+  #     awk exits 0 = marker, 1 = none, 2+ = error (fail closed).
+  _jev_pem_awk detect <<<"$orig"
   rc=$?
   [ "$rc" -ne 1 ] && return 0
   # 2. Exemptions (inline data URIs, 40/64-hex hashes), then the entropy rule on what is left.
@@ -217,23 +229,34 @@ _jev_replace_fixed() {
 }
 
 # _jev_redact_pem <textfile> — print the text with PEM blocks replaced by a placeholder. The marker
-# is loose on purpose (over-redaction is cheap): 3+ dashes, optional whitespace -- newlines and CRs
-# included -- then BEGIN, any case. From a BEGIN marker the redaction runs through the LAST END
-# marker's closing dashes anywhere after it, so a spoofed early END, a nested block or a second
+# is JEV_PEM_RE: 3+ dashes, optional whitespace -- newlines and CRs included -- then BEGIN (any
+# case), blanks, a one-line label, 3+ closing dashes. From a BEGIN marker the redaction runs through
+# the LAST END marker's closing dashes anywhere after it, so a spoofed early END, a nested block or a second
 # block cannot end it early; if that last END has no closing dashes, or there is no END at all, it
 # runs to the end of the text. The whole text is read as ONE record (RS is a byte that is not in
 # text) so a marker split across lines still matches.
 _jev_redact_pem() {
-  awk '
+  _jev_pem_awk redact "$1"
+}
+
+# _jev_pem_awk <detect|redact> [<textfile>] — the one PEM pass, on the file (or stdin) read as ONE
+# record. detect: exit 0 if the text holds a marker (JEV_PEM_RE), 1 if not. redact: print the text
+# with the blocks replaced.
+_jev_pem_awk() {
+  local mode="$1"
+  shift
+  awk -v mode="$mode" -v re="$JEV_PEM_RE" '
     BEGIN { RS = "\001" }
     { t = (NR > 1 ? t "\001" : "") $0 }
     END {
+      if (mode == "detect") exit (match(tolower(t), re) ? 0 : 1)
       out = ""; rem = t
       while (1) {
         low = tolower(rem)
-        if (!match(low, /---+[ \t\r\n]*begin[ \t\r\n]+([a-z0-9_. \t\r\n]|-[a-z0-9_. \t\r\n])+---+/)) { out = out rem; break }
-        b = RSTART; off = b + RLENGTH; e = 0
-        while (match(substr(low, off), /---+[ \t\r\n]*end/)) { e = off + RSTART - 1; elen = RLENGTH; off = e + elen }
+        if (!match(low, re)) { out = out rem; break }
+        b = RSTART; off = RSTART + RLENGTH; e = 0
+        if (substr(low, b, 1) != "-") b++ # the match began one character before the dashes
+        while (match(substr(low, off), /(^|[^-])---+[ \t\r\n]*end/)) { e = off + RSTART - 1; elen = RLENGTH; off = e + elen }
         if (e == 0) { endpos = length(rem) }
         else {
           after = substr(low, e + elen)
@@ -243,7 +266,7 @@ _jev_redact_pem() {
         rem = substr(rem, endpos + 1)
       }
       printf "%s", out
-    }' "$1"
+    }' "$@"
 }
 
 # jev_redact <in> <out> — write <in> to <out> with every matched literal replaced by [REDACTED].

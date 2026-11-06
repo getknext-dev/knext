@@ -97,7 +97,12 @@ function run(scriptPath = SCRIPT_PATH): { status: number | null; calls: Call[]; 
       version: '0.0.1',
       optionalDependencies: { '@img/sharp-libvips-linux-arm64': '0.0.1' },
     });
-    pkg(root, 'nolock', { name: 'nolock', version: '1.0.0' });
+    // _resolved = a registry record, so the unpinned install site is reachable (#2713 gate).
+    pkg(root, 'nolock', {
+      name: 'nolock',
+      version: '1.0.0',
+      _resolved: 'https://registry.npmjs.org/nolock/-/nolock-1.0.0.tgz',
+    });
     const r = spawnSync('sh', [scriptPath, root, LOCKFILES_DIR], {
       env: { ...cleanAmbientEnv(), PATH: `${bin}:${process.env.PATH}`, REC: rec },
       encoding: 'utf8',

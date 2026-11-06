@@ -37,8 +37,13 @@ package that makes the bare `npx kn-next` resolve; it forwards to `@getknext/cor
 the `fixed` group in #820, so all four now move to the same version together.
 
 All four carry `"publishConfig": { "access": "public", "provenance": true }`, so `changeset publish`
-publishes them publicly and CI attaches a signed provenance attestation (via the workflow's
-`id-token: write` permission).
+publishes them publicly and CI attaches a signed provenance attestation. The workflow is
+read-only at its top level (`contents: read`); `id-token: write`, the OIDC token-request
+credential that provenance needs, is held by the `release` job **only**. The `Publish` and
+`Heal` steps also export `NPM_CONFIG_PROVENANCE=true`, so a package that gains a public manifest
+without the `publishConfig` opt-in is still attested. Check a published version with
+`npm view @getknext/core dist.attestations` or `npm audit signatures`.
+`tests/release-provenance-scope.test.ts` pins all of this.
 
 **Does NOT publish:**
 
@@ -284,9 +289,19 @@ from git objects at the PR's **base** commit by `scripts/published-bytes-select-
    check skips with the visible reason "the base is not the line whose bytes are credentialed" — no
    pack, no tag lookup, no marker. This is what lets a core change on `main` (1.3) merge while the
    v1.0 window is open without a `publishedBytesBumpMarker`.
+3. **Released base.** If the base's version is a released `X.Y.Z` (no prerelease) numerically **at
+   or above** the pinned rc's `X.Y.Z` base — e.g. `integration/v1.3` carrying `1.3.1` while the pin
+   is still `v1.3.0-rc.10` — that rc's GA is already cut on this line, so there is no pending
+   GA-vs-rc diff left to protect (and the diff itself would only ever reject the version pair
+   `rc.10 -> 1.3.1` before comparing a byte). The check skips with the visible reason "has ended on
+   this line". "Released" is never decided from the version string alone: it also requires a
+   `v<version>` tag that is an ancestor of the base commit, so a merged Version PR whose publish has
+   not happened yet (version bumped, tag absent) stays guarded. A checkout without that tag (shallow,
+   tagless) is guarded too. A prerelease base, or a released base **below** the rc's base (a new rc cut ahead of
+   its GA), stays guarded.
 
-A base on the credentialed line is unchanged: it still packs and diffs, and a change to its
-published bytes still fails red. An absent or unparseable base version stays **guarded** (fail
+A base on the credentialed line that is still in its rc window is unchanged: it still packs and
+diffs, and a change to its published bytes still fails red. An absent or unparseable base version stays **guarded** (fail
 closed). `scripts/mutation-prove-published-bytes-freeze-check.mjs` proves both directions by exit
 code. Two follow-ups are deliberately not done here: `dependabot-published-bytes-pause.yml` still
 reads only the v1.0 pin and is not line-scoped (it is a `pull_request_target` job, so widening it is
@@ -302,6 +317,33 @@ PR (capped at 14 days from today, same rule as `rcBumpMarker`), and it is honour
 introduces it, not when it is inherited from a marker already on `main`. The check then skips itself
 for that PR; once the real content lands and a new `vX.Y.Z-rc.N+1` tag is cut and pinned, later PRs
 are diffed against the new baseline.
+
+A marker that arrives **through a merge** is inherited too, the same rule the credential freeze
+guard applies to `rcBumpMarker`. A merge PR (an integration branch into `main`, or a feature branch
+that merged one) has a merge base older than the other branch's marker, so the merge base alone would
+read that marker as introduced. The workflow's "Collect the pins at merged-in parents" step
+(`scripts/collect-merged-in-pins.mjs`, logic in `scripts/lib/merged-in-pins.mjs`) reads the
+`publishedBytesBumpMarker` of the selected pin file at every **merged-in parent** (each non-first
+parent of each merge commit in `merge-base..head`) into `inherited-pins.json`. The check
+(`--inherited-pins-file`, required, a JSON array) treats a head marker with the same `date` and
+`reason` as any of them as inherited, announces `MARKER IGNORED` with the reason, and packs and
+diffs as if there were no marker. A merge PR that really is an intentional rc bump adds its **own**
+marker (a new `date` or `reason`) on top of the merge.
+
+- On `merge_group`, the queue's own merge commits are skipped (their second parents are the queued
+  PR heads); merges inside a queued PR are still read. A squash or rebase queue leaves no merge commit
+  to inspect, so only the merge-base rule applies there; the `pull_request` run already applied this
+  one.
+- Only markers that reached the merged-in branch **through a merge commit** are seen. One that
+  landed on the integration branch by squash, rebase or direct push is part of that branch's own
+  history and still reads as introduced by a PR that merges it.
+- Merging the PR's own base branch back in (`git merge main`) is harmless: the base carries no
+  marker the PR wrote.
+- Ambiguity resolves closed: if a marker the PR wrote also comes back through a merged branch, it
+  reads as inherited. Change its `reason` to re-authorize.
+
+`scripts/mutation-prove-inherited-published-bytes-marker.mjs` proves each part red by exit code,
+against unit tests and against the workflow's own steps run in real git fixture repos.
 
 This check fails closed — never silently skips — when the pinned `rcTag` does not resolve to a real
 git tag in the checkout, and it is not yet a required check (same status as the sibling
@@ -355,8 +397,12 @@ needing the tag.
 **Moving the v1.3 pin (rc.N → rc.N+1) restarts only the v1.3 window.** It is the v1.3 mirror of the
 v1.0 pin PR (the rc.6 one was a pin-only diff of `.github/compat-credential-ref.json`):
 
-1. The founder pushes the annotated `v1.3.X-rc.N+1` tag on `integration/v1.3` (publishing it is the
-   normal release lane). Confirm it exists: `git ls-remote --tags origin v1.3.X-rc.N+1`.
+1. The founder pushes the annotated `v1.3.X-rc.N+1` tag. **Cut it from `main`, not `integration/v1.3`**
+   (founder direction, 2026-11-05): `integration/v1.3` diverged from `main` on 2026-10-16 and carries
+   neither the ref-pinned scoping step, the ledger, nor the harness fixes since. A candidate cut
+   there would derive a v1.3 workflow with no scoping step. See "Cutting the next v1.3 rc from
+   `main`" below for the exact name and procedure. Confirm the tag exists:
+   `git ls-remote --tags origin v1.3.X-rc.N+1`.
 2. On a branch off `origin/main`, set `rcTag` in `.github/compat-credential-ref-v1.3.json` to the new
    tag. No `rcBumpMarker` is needed: the v1.0 freeze guard does not cover the v1.3 pin.
 3. Regenerate the derived workflow from the new tag, in the same PR:
@@ -374,6 +420,71 @@ v1.0 pin PR (the rc.6 one was a pin-only diff of `.github/compat-credential-ref.
    an edit to any file in the guard closure regenerates the same workflow the same way).
    It merges through the merge queue like any PR; the next v1.3 slot runs the new tag and every v1.3
    cell's window restarts (its fingerprint moved). The v1.0 windows do not move.
+
+**Cutting the next v1.3 rc from `main` (after 1.3.1).** What the repo settles, and what it does not.
+
+*Settled by the repo.*
+
+- **The tag is immutable.** The repository ruleset "release tags (v*) immutable" blocks deleting,
+  updating and force-moving any `refs/tags/v*`, with no bypass actor; creating is allowed
+  (`.github/workflows/npm-publish-drift-nightly.yml` header). A wrong tag cannot be fixed: it burns
+  its name for ever, and the repair is the next rc number. So verify the commit before pushing
+  (step 4).
+- **The tag name equals the package version at the tagged commit.** `v1.3.0-rc.10` points at the
+  merge of `release/prepare-v1.3.0-rc.10`, where `@getknext/core` is `1.3.0-rc.10`, and the release
+  cut guard requires a `release/vX.Y.Z-rc.N` cut's computed version to equal `X.Y.Z-rc.N` exactly.
+- **The pin accepts `v1.3.N-rc.M`** (`tagPattern` in `scripts/compat-credential-line.mjs`) and the
+  tag must exist on the remote. It is a lightweight ls-remote check; the v1.3 pin has no
+  reachable-from-`main` precheck (the v1.0 pin does).
+- **`1.3.0` and `1.3.1` are taken.** Both are published to npm and tagged (`v1.3.0`, and `v1.3.1`,
+  which lives on `integration/v1.3`). `main` is at `1.3.0` but already contains the 1.3.1 source
+  change (`cache-handler.js`): the 15 commits `v1.3.1` has that `main` lacks are the version fields,
+  changelogs, release notes and CI, not shipped source.
+
+*The name, by inference (confirm before tagging).* **`v1.3.2-rc.1`**, with every `@getknext/*`
+package at `1.3.2-rc.1` at the tagged commit. The next unpublished patch of the 1.3 line is `1.3.2`,
+so this is the rc "cut ahead of its GA" that the published-bytes rules describe. `v1.3.0-rc.11`
+would pass the pin's pattern but names a prerelease of a version that is already GA, sorts below
+`1.3.0` and `1.3.1`, and confuses the GA-vs-rc gate's "highest `vX.Y.Z-rc.N`" lookup. Nothing in
+the repo states the post-GA rc naming rule in words, so this is derived, not documented.
+
+*Not settled by the repo, decide before step 3.* `main`'s version is `1.3.0`, so a stock
+`changeset version` there would propose `1.3.1`, which is already on npm and which
+`publish-preflight` would refuse. Either bring the `v1.3.1` version fields, changelogs and
+`docs/release/v1.3.1.md` into `main` first, or set the versions by hand to `1.3.2-rc.1` in the
+prepare PR. Whether the prepare PR uses changesets pre mode is likewise not specified for a
+post-GA rc. Also note the published-bytes guard's selector applies the v1.3 pin only to
+`integration/v1.3`, so a window whose tag comes from `main` is not covered by that guard
+(`scripts/published-bytes-select-pin.mjs`, "Which pin"); that is a gap to accept or fix
+deliberately, not a given.
+
+*Procedure.*
+
+1. Preconditions: the ref-pinned PR and the musl-rebuild PR are merged to `main`, `main` CI is
+   green, and `git show origin/main:scripts/compat-manifest-for-ref.mjs` exists.
+2. Open `release/prepare-v1.3.2-rc.1` off `origin/main` (mirroring `release/prepare-v1.3.0-rc.10`):
+   `@getknext/*` fixed group to `1.3.2-rc.1`, `docs/release/v1.3.2-rc.1.md` (the release job checks
+   for it), and any lockfile change. Merge it through the queue.
+3. Resolve the merge commit `SHA` on `main`.
+4. **Before tagging, on that exact `SHA`:** `git show SHA:packages/kn-next/package.json` reads
+   `"version": "1.3.2-rc.1"`; `git show SHA:scripts/compat-manifest-for-ref.mjs` exists;
+   `git show SHA:test/deploy-tests-manifest.knext.json` has `"$knextRefPinnedCases"`;
+   `git show SHA:.github/workflows/test-e2e-deploy.yml` contains the step
+   `Scope ref-pinned per-case deselections to NEXTJS_REF`.
+5. `git tag -a v1.3.2-rc.1 SHA -m "v1.3.2-rc.1 (dist-tag next)" && git push origin v1.3.2-rc.1`, then
+   publish through the normal release lane (a `release/v1.3.2-rc.1` cut from `main`, or the `main`
+   lane, per "Publish lanes").
+6. Pin PR, off `origin/main`: set `rcTag` in `.github/compat-credential-ref-v1.3.json` to
+   `v1.3.2-rc.1` and regenerate the derived workflow exactly as in the numbered steps above
+   (`git show v1.3.2-rc.1:.github/workflows/test-e2e-deploy.yml`, then `compat-line-workflow.mjs
+   --write --line v1.3 --tag v1.3.2-rc.1`). The regenerated file now contains the scoping step, and
+   every v1.3 cell's window restarts. The v1.0 pin stays at `v1.0.0-rc.6`.
+
+**Do not extend `LEDGER_FREE_RC_TAGS`** (`tests/compat-manifest-for-ref.test.ts`) to get this PR green.
+It lists the two tags that predate the ledger, `v1.0.0-rc.6` and `v1.3.0-rc.10`, and it is the guard
+that stops a v1.3 workflow derived from a tag with no scoping step from running ledgered
+deselections at an unmeasured ref. If the regenerated workflow lacks the step, the tag was cut from
+the wrong commit: leave the list alone, burn the name, and cut the next rc from the right one.
 
 **What protects the v1.3 harness mid-window.** There is no PR-time freeze guard for the v1.3 harness
 (the v1.0 one protects v1.0's files only), so protection is the fingerprint plus the PR-time spec:

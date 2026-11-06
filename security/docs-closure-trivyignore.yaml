@@ -1,0 +1,23 @@
+# Dated + justified Trivy ignorefile for the docs-closure SBOM scan
+# (ci.yml "Docs site build" + docs-closure-nightly.yml). Trivy enforces
+# `expired_at` itself: after the date the finding is reported again.
+# Mirrors the GHSA-qr28-fpjm-wq7f entries in npm-audit-allowlist.json and
+# precompile-closure-allowlist.json (same advisory, same reasoning).
+# Scoped to ONE id on ONE exact purl; guarded by
+# tests/docs-closure-nightly-workflow.test.ts.
+vulnerabilities:
+  - id: CVE-2026-118664
+    purls:
+      - "pkg:npm/decode-uri-component@0.2.2"
+    expired_at: 2026-12-01
+    statement: >-
+      decode-uri-component 0.2.2 (denial of service in percent-decoding; fixed
+      only in 0.5.1) reaches the docs closure ONLY via @getknext/lib -> minio
+      8.0.6 -> query-string 7.1.3. minio calls only query-string's stringify;
+      the decode path (parse/extract) is never invoked, so no request or
+      response bytes are decoded by this package. The bump is not possible:
+      0.5.1 is ESM-only and breaks query-string 7's require(), and minio's
+      latest still pins query-string ^7.1.3. Added 2026-11-03, expires
+      2026-12-01. Re-check at expiry; drop this entry (do not renew) once
+      minio or query-string pulls a fixed version, and drop it immediately if
+      any code calls query-string.parse on untrusted input.

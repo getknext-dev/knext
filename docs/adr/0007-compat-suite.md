@@ -782,6 +782,233 @@ mutation-proved by exit code (`scripts/mutation-prove-compat-vinext-structural-g
 - Review trigger: at `reviewBy`, or when vinext ships a client-router implementation,
   whichever comes first.
 
+## Amendment (2026-11-04): ref-pinned per-case entries for deterministic failures
+
+- Status: Accepted (founder decision, 2026-11-04). This amends section (c.1) and section (h): a
+  per-case entry for a **deterministic** failure is admitted, but only under the five bars below.
+  `flakey` handling is unchanged (see Decision).
+- Decision record: option (a) below scored 0.82 in jev against 0.17 for a new narrow family class
+  and 0.01 for raising the family soft bound.
+
+### Context
+
+Section (h) put deterministic failures at **file level**, for one reason: a per-case list can
+quietly hide a failing assertion, and calling a deterministic failure `flakey` misstates it.
+File level has a price. Next 16.4.3 measurements (run 41754152861 on node x turbopack, run
+41770412157 on bun x webpack) left several files that are mostly green: `cached-navigations`
+fails 1 of 20 cases, `partial-fallback-shell-upgrade` 3 of 13, `non-root-project-monorepo` 4 to
+6 of 10, `prerender-encoding` 2 of 5. Excluding those files whole stopped 41 passing cases on
+node x turbopack and 39 on bun x webpack to hide 12 failing ones (14 on bun x webpack). That is the wrong trade,
+and the platform-coupled family would also have crossed its soft bound of 15 files.
+
+Two more files had no honest home at file level. `metadata-streaming-parallel-routes` and
+`cache-components-allow-otel-spans` each fail one case and pass the rest, and neither failure is a
+Vercel-platform assertion.
+
+### Decision
+
+A `suites[file].failed` entry for a deterministic failure is admitted **only if all five bars
+hold**. Each is a guard (`scripts/lib/ref-pinned-cases.mjs`, held by
+`tests/compat-ref-pinned-cases.test.ts`), not a sentence:
+
+1. **Ref pin.** The entry carries the exact Next ref it was measured at (`nextjsRef`). Enforced
+   twice. At **PR time**, that ref must equal the default `NEXTJS_REF` of a workflow that runs the
+   harness (`test-e2e-deploy.yml`, `compat-credential-v1.3.yml` or `compat-vinext.yml`, all read; a
+   scan fails if a new harness workflow is not in the list), or the shipped pin while that pin is
+   ahead of every lane. There is **no `reaudited` escape**: moving a lane's ref turns CI red until
+   the entry is re-measured or removed. At **run time**, the lanes run
+   `scripts/compat-manifest-for-ref.mjs` before the tests: it writes a copy of the manifest in
+   which every entry whose `nextjsRef` differs from `NEXTJS_REF` has its names dropped from
+   `suites[file].failed`, so those cases RUN at any other ref (an early-warning night, a
+   dispatch). It fails closed: a missing or unparseable ref, an entry with no parseable ref, an
+   unreadable manifest, or a manifest that carries the ledger in a checkout without the script all
+   fail the step and leave no copy. Every cited run must name the entry's ref.
+2. **Exact names that still exist.** Entries list full jest names (describe path plus title), never
+   globs. A committed snapshot of the upstream file at that ref
+   (`test/compat-ref-pinned-cases.upstream.json`, written by
+   `scripts/compat-ref-pinned-cases-snapshot.mjs --write`, checked against upstream by `--verify`)
+   must contain the title and every describe element. A case name that no longer exists in the file
+   at the ref is a red, so an entry cannot outlive its subject.
+3. **Citation and mechanism.** Each entry cites upstream lines (file implied, line, and an anchor
+   string that must be on that line in the snapshot), a mechanism **category** from a closed set
+   (`vercel-cdn-header`, `vercel-serving-model`, `vercel-build-root`, `expected-failure-gate`,
+   `harness-package-manager`, `upstream-next-start-regression`, `runtime-abi-gap`), a written reason,
+   a provenance link, and a retirement condition.
+4. **Evidence and measured cells.** Entries record run IDs, each with the cell it measured, and the
+   measured failure count per cell. A case may claim only a cell that has a run, and the number of
+   cases claiming a cell must equal the failures measured there. An unmeasured cell cannot be
+   claimed.
+5. **Cap.** Files and cases are both counted: **10 files and 20 cases**. The need at v16.4.3 is 9
+   files and 19 cases, which is 0.8% of the 1,182 files the node x turbopack run selected and 19
+   of the 76 cases inside those nine files. One file and one case of headroom covers a surprise at
+   re-measure; anything above it is a red, and raising it needs an amendment of this ADR.
+
+`flakey` handling is unchanged: the flakey ledger, its evidence bar and the family soft bound of
+15 (section (g)) are not touched. A deterministic failure is listed under `failed`, never
+`flakey`, so its label stays true. File-level entries (section (h)) remain for files that fail
+every case, and the static-export file-level exclusions keep their wording.
+
+**What the runner does with a listed case, verified.** In `vercel/next.js` v16.4.3,
+`test/get-test-filter.js` merges `failed` and `flakey` into one `excludedCases` list, and
+`test/run-tests.js` passes jest `--testNamePattern '^(?!(?:<escaped names>)$).'`. Both lists
+**deselect** the case: it does not run. So a listed case that starts passing is **silent** at the
+same ref: nothing goes red and nothing says it is fixed. Visibility comes from bar 1, not from the
+runner. A ref bump forces a re-measure, and a re-measure runs the case. A knext fix inside one ref
+stays invisible until then, which is why every entry carries a retirement condition and why the
+cap is small.
+
+**Where the run-time scoping reaches, exactly.** `test-e2e-deploy.yml` (the early-warning crons,
+dispatches, and the v1.0 credential nights, whose executing workflow is main's) and
+`compat-vinext.yml` carry the step. `compat-credential-v1.3.yml` is **generated** from its pinned
+rc tag's own `test-e2e-deploy.yml`, so it gains the step when the pin moves to a candidate cut from
+a main that has it; a test fails if its derived-from tag is not one known to have no ledger and
+the step is absent. The currently pinned tags (v1.0.0-rc.6, v1.3.0-rc.10) predate the ledger: their
+manifests carry no entries, so nothing is deselected there, and the step passes their manifest
+through unchanged. Within one ref the manifest is still **lane-blind**: one file serves every
+cell, so a deselection applies to a cell that was not measured too. Entries therefore record the
+measured cells, and the passing cases each cell loses are computed from them
+(`passingCasesLostPerCell`), not assumed.
+
+**What the guards prove and what they do not.** They check form: names exist upstream (and
+`--verify` re-fetches upstream, in CI on every PR that touches the ledger and nightly, failing
+closed when upstream is unreachable), a cited anchor is on the cited line, the cells and counts
+agree, the ref is current, the cap holds. They do **not** prove truth. An anchor only has to be on
+the line cited; a real knext bug with a plausible citation and a believable mechanism passes every
+guard. The defence against that is human review of each entry's mechanism, and the stub check that
+section (h) requires where a Vercel-only assertion could be masking a content check. Do not read
+"enforced by a guard" as "verified correct".
+
+### Options considered
+
+| Option | Keeps the protection against hiding a failure | Keeps passing cases | Verdict (jev) |
+|---|---|---|---|
+| (a) Per-case `failed` entries under five guarded bars (ref pin, existing names, citation, measured cells, cap) | partly: guards check form, not truth; human review of each mechanism is the defence for truth | yes | **accepted** (0.82) |
+| (b) A new narrow family class for the mostly-green files | partly: a class is still a label | partly | rejected (0.17) |
+| (c) Raise the family soft bound above 15 to take two more files | no: section (g) says never raise the bound to go green | no | rejected (0.01) |
+| (d) File level for everything | yes | no: 41 passing cases stop on one cell | rejected: the cost is the cause of this amendment |
+| (e) Leave the harness red on the two files that fit no family | yes | yes | rejected as a standing state: main stays red for a platform assertion knext should not fake |
+
+### Consequences
+
+- At v16.4.3 the ledger holds **9 files and 19 cases**. Passing cases lost: node x turbopack **4**
+  (two client-side cases in `non-root-project-monorepo` that fail on bun x webpack but pass on node x
+  turbopack, and two `prerender-native-module` cases that fail on bun x webpack but pass on node x
+  turbopack; runtime and builder are confounded in these two cells, so neither a webpack-only nor a
+  Bun-only cause is established), bun x webpack **0**. Before, with file-level
+  entries, it was 41 and 39. The node x webpack and bun x turbopack cells were **not measured** at
+  v16.4.3; the ledger makes no claim about them, and the entries record only the cells that were.
+- `prerender-native-module` is a **known gap in Bun support**, deselected so the Bun cell is not red.
+  It is not a claim that V8-API native addons work on Bun. The manifest cannot scope a deselection
+  to one runtime, so node x turbopack, which was measured passing, gives up those two cases; node x
+  webpack was not measured and is not claimed either way.
+- `metadata-streaming-parallel-routes` is deselected because the case's premise (upstream's
+  harness hides the server bundle) does not hold for knext, not because knext is wrong; knext does
+  not hide its bundle to match. `cache-components-allow-otel-spans` is deselected because upstream's
+  own TODO (lines 330-337) calls the deploy expectation a regression of `next start`; the claim that
+  knext behaves as `next start` does is the earlier triage's finding and was **not re-measured**
+  by this amendment.
+- A fix is invisible inside a ref (see the runner paragraph). The mitigation is the ref pin, the
+  small cap, and a retirement condition on every entry. It is a real limit, stated, not hidden.
+- The section (h) entries from before this amendment stay at file level. Moving any of them is a
+  separate measurement under the same five bars.
+- The bun-vinext ledgers are consulted again for the files that now run on the vinext lane
+  (`partial-fallback-shell-upgrade`, `cached-navigations`): their records stay valid and apply.
+- Review trigger: any Next ref bump, or the first time the cap is approached.
+
+## Amendment (2026-11-05): the upstream-runtime-defect category, deselected on its own lane only
+
+- Status: Accepted (founder instruction, 2026-11-05: "Batch the bun bug on knext until the upstream
+  merge"). Backports the integration/v2 category (its amendment of 2026-10-12) onto main's
+  ref-pinned scheme above, with one change of substance: on main the entry **deselects**, at run
+  time and on its lane only. On v2 it is a record and the cell stays red.
+
+### Context
+
+At Next v16.4.3 two files are red on **bun x turbopack** and on no other cell: `treeshake-mw` and
+`turbopack-tree-shaking-chunkgroup` (run 42048108176, Bun 1.4.2, 3 of 3 attempts each; green on
+node x webpack run 42048101712, node x turbopack run 41754152861 and bun x webpack run
+41770412157). Both fixtures set `experimental.turbopackModuleFragments`. Turbopack emits an
+assignment to a `const` in code that never runs; Bun's parser reports it as a load-time error where
+Node defers it to a runtime TypeError that is never reached. Upstream issue oven-sh/bun#45007, fix
+oven-sh/bun#45010 (open, unreleased). knext already refuses that combination at build time
+(`assertNoBunTurbopackFragments` in `packages/kn-next/src/cli/turbopack-fragments-guard.ts`); the
+harness runs `next build` directly, so the refusal is not on its path.
+
+No existing category fits. Section (h) and the global exclusions are file level on every cell, so
+the three cells where the files pass would lose them. The ref-pinned ledger above is lane-blind
+(one manifest serves every cell), so a `failed` entry there would deselect on node too; it would
+also take its cap from 9 files and 19 cases to 11 and 21.
+
+### Decision
+
+A separate ledger, `$knextUpstreamRuntimeDefects`, in the credential manifest and its derived
+smoke manifest. The committed manifest deselects **nothing** of this kind. At run time
+`scripts/compat-manifest-for-ref.mjs` (the step already in `test-e2e-deploy.yml` and
+`compat-vinext.yml`) applies an entry to the scoped copy only when all three hold: the lane under
+test (the workflow-level `KNEXT_RUNTIME`/`KNEXT_BUILDER` the step inherits) is the entry's lane;
+`NEXTJS_REF` is the entry's ref; on a Bun lane, `bun --version` is the entry's `bunVersion`.
+
+How it applies depends on whether the entry covers every case in its file (`wholeFile`, checked
+against the upstream snapshot). A whole-file entry adds the **file** to the copy's `rules.exclude`,
+so it is not selected. It must not become a `failed` list. Next's runner turns `failed` into a jest
+`--testNamePattern`, and for a one-case file that pattern filters out every test. Jest then exits 0,
+run-tests prints `<file> finished on retry 0/N`, and `scripts/e2e-summary.mjs` counts a passed file
+that ran no case. A partial-file entry adds its case names to `suites[file].failed`, like the
+ref-pinned ledger. Rules, each a guard in `scripts/lib/upstream-runtime-defects.mjs`:
+
+| Rule | Value |
+|---|---|
+| Lane | `<node or bun>/<turbopack or webpack>`, exactly one cell. A runtime-wide or vinext lane is rejected |
+| Ref | the ref-pinned bar 1: a harness lane's default `NEXTJS_REF` or the shipped pin while it is ahead. No `reaudited` escape |
+| Bun pin | a Bun-lane entry carries the Bun it was measured on, and it must equal the lane's pinned Bun in `test-e2e-deploy.yml`. Every Bun-cell run records the Bun it ran on, and the entry needs a run on its own cell at its `bunVersion`. So moving the pin is red until each entry is re-measured at the new Bun or removed; editing `bunVersion` alongside the pin, without a new run, is still red |
+| Upstream | an issue **and** a fix, as `owner/repo#N` outside `getknext-dev` |
+| Removal condition | non-empty and names the entry's own upstream fix |
+| knext refusal | names a real guard: a repo path that exists, as `path#symbol` with the symbol in that file |
+| Names | full jest names whose title and describe path exist in the committed upstream snapshot at the entry's ref (the snapshot and its `--verify` job now cover this ledger's files too) |
+| Evidence | at least one run on the entry's own cell (on Bun lanes, at the entry's Bun), every run at the entry's ref |
+| Whole file | `wholeFile` is true exactly when the entry's cases account for every title literal in the upstream file; true means a file exclusion at run time, false a `failed` list |
+| Boundaries | not in `rules.exclude`, `$knextExclusions`, `$knextQuarantines` or `$knextRefPinnedCases`; its names are not in the committed `failed` lists |
+| Cap | **5**, its own constant (`UPSTREAM_RUNTIME_DEFECT_CAP`); it counts toward no other cap. Raising it needs an amendment of this ADR |
+
+Fail closed, like the ref scope: a non-empty ledger on an unknown lane, an entry without a
+parseable lane, ref, cases or `wholeFile`, or a matching Bun entry whose Bun cannot be read exits non-zero and
+leaves no copy. A checkout without the script (an older rc tag) deselects nothing of this kind, so
+the files run and report red, which is the safe direction.
+
+**Why it cannot outlive the bug.** The Bun release that will contain the fix is unknown until it
+ships, so no guard can compare against it. The mechanical equivalent is the Bun pin: the deselection
+holds only at the Bun it was measured on, a dispatch on another Bun (`bun-version=canary`) runs the
+cases, and the PR that moves the lane to a Bun carrying the fix is red until the entry is
+re-measured there, which runs the case. When it passes, the entry and the knext refusal are deleted
+in the same change.
+
+### Options considered
+
+| Option | Verdict |
+|---|---|
+| A `failed` entry in the ref-pinned ledger | Rejected: lane-blind, deselects on node, and over that ledger's cap |
+| File-level exclusion (section (h) or `$knextExclusions`) | Rejected: drops the files on the three cells where they pass |
+| The v2 record-only form (cell stays red) | Rejected for main by the founder instruction: the cell's red is triaged and has a named upstream cause |
+| **Separate, capped ledger, deselected at run time on its lane, ref and Bun only** | **Chosen** |
+
+### Consequences
+
+- At v16.4.3 the ledger holds **2 files and 2 cases**, both bun/turbopack on Bun 1.4.2. No passing
+  case is lost on any other cell. Each file has one case, so both are whole-file entries: on
+  bun/turbopack the scoped copy excludes the two files, and the shard summary credits them as
+  nothing, not as passed. The summary's `excluded` figure is read from the committed manifest's
+  `rules.exclude` by a workflow step and so does not include them; changing that step would move
+  the executing workflow and restart the v1.0 credential windows, and was judged not worth it for
+  two files.
+- The v1.0 credential nights check out the pinned rc tag, whose checkout has neither the ledger nor
+  the new code, and run at v16.3.8: nothing changes there. The v1.3 credential lane is generated
+  from its own pinned rc tag and gains this when an rc is cut from a main that has it.
+- A fix inside one Bun is invisible until the Bun moves, the same limit as the ref pin above.
+- The guards check form, not truth. Human review of each mechanism is the defence for truth.
+- Guards: `tests/compat-upstream-runtime-defects.test.ts`; the run-time half is also executed through
+  the real workflow step text in `tests/compat-manifest-for-ref.test.ts`. Mutation proofs, by exit
+  code: `scripts/mutation-prove-upstream-runtime-defects.mjs`.
+
 ## Action items
 
 - **A3-1 (per-PR gate, this PR's deliverable):**

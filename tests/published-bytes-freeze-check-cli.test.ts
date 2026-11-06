@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it } from 'bun:test';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
+  defaultBaseReleaseTagged,
   defaultRunDiff,
   defaultTagResolves,
   main,
@@ -235,6 +236,41 @@ describe('main — the reviewed override for an intentional rc.N+1', () => {
     expect(r.summary).toContain('RUN');
   });
 
+  it('#2342 — a marker that arrived with a MERGED-IN branch does not exempt, and the ignored marker is announced', () => {
+    const marker = { date: '2026-09-25', expires: '2026-10-02', reason: 'reviewed for v2' };
+    const root = buildFixtureRoot();
+    let runDiffCalled = false;
+    const r = run(root, ['packages/kn-next/src/index.ts'], {
+      basePin: pin('v1.0.0-rc.1'),
+      headPin: pin('v1.0.0-rc.1', marker),
+      mergeBasePin: pin('v1.0.0-rc.1'),
+      inheritedPins: [pin('v1.0.0-rc.1', marker)],
+      runDiff: () => {
+        runDiffCalled = true;
+        return 0;
+      },
+    });
+    expect(runDiffCalled).toBe(true);
+    expect(r.out).toMatch(/::warning title=Published-bytes freeze check::MARKER IGNORED/);
+    expect(r.summary).toMatch(/inherited from a branch merged into this PR/);
+    expect(r.summary).toContain('RUN');
+  });
+
+  it('#2342 — the ignored-marker warning precedes the fail-closed tag lookup, so it is never lost', () => {
+    const marker = { date: '2026-09-25', expires: '2026-10-02', reason: 'reviewed for v2' };
+    const root = buildFixtureRoot();
+    const r = run(root, ['packages/kn-next/src/index.ts'], {
+      basePin: pin('v1.0.0-rc.1'),
+      headPin: pin('v1.0.0-rc.1', marker),
+      mergeBasePin: pin('v1.0.0-rc.1'),
+      inheritedPins: [pin('v1.0.0-rc.1', marker)],
+      tagResolves: () => false,
+    });
+    expect(r.code).toBe(1);
+    expect(r.out).toMatch(/MARKER IGNORED[^\n]*merged into this PR/);
+    expect(r.out).toMatch(/does not resolve/);
+  });
+
   it('closing the window together with a published-bytes change still runs the diff (round 2)', () => {
     const root = buildFixtureRoot();
     let runDiffCalled = false;
@@ -319,6 +355,61 @@ describe('main — requires changedFiles/basePin/headPin to be provided explicit
         basePin: pin(null),
       } as unknown as Parameters<typeof main>[0]),
     ).toThrow(/headPin/);
+  });
+});
+
+// #2342: the pins at merged-in parents decide whether a head marker is the
+// PR's own. A missing file would fail OPEN (every merged-in marker reads as
+// introduced), so the CLI requires it, like --merge-base-pin-file.
+describe('CLI — --inherited-pins-file is required and must be a JSON array (#2342)', () => {
+  const SCRIPT = resolve(import.meta.dirname, '..', 'scripts/published-bytes-freeze-check.mjs');
+  const cliDirs: string[] = [];
+  afterEach(() => {
+    for (const dir of cliDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  function runCli(inherited: string | null): { status: number | null; out: string } {
+    const dir = mkdtempSync(join(tmpdir(), 'published-bytes-freeze-cli-'));
+    cliDirs.push(dir);
+    const pinFile = join(dir, 'pin.json');
+    const changedFile = join(dir, 'changed-files.txt');
+    writeFileSync(pinFile, JSON.stringify({ rcTag: null }));
+    writeFileSync(changedFile, 'docs/RELEASING.md\n');
+    const args = [
+      SCRIPT,
+      '--changed-files-file',
+      changedFile,
+      '--base-pin-file',
+      pinFile,
+      '--head-pin-file',
+      pinFile,
+      '--merge-base-pin-file',
+      pinFile,
+    ];
+    if (inherited !== null) {
+      const f = join(dir, 'inherited-pins.json');
+      writeFileSync(f, inherited);
+      args.push('--inherited-pins-file', f);
+    }
+    const { GITHUB_STEP_SUMMARY: _drop, ...env } = process.env;
+    const r = spawnSync(process.execPath, args, { encoding: 'utf8', env, timeout: 20_000 });
+    return { status: r.status, out: `${r.stdout}${r.stderr}` };
+  }
+
+  it('exit 2 when the flag is omitted, in a scenario that would otherwise exit 0', () => {
+    const r = runCli(null);
+    expect(r.status).toBe(2);
+    expect(r.out).toMatch(/--inherited-pins-file is required/);
+  });
+
+  it('exit 2 when the file is not a JSON array', () => {
+    const r = runCli('{"publishedBytesBumpMarker": {}}');
+    expect(r.status).toBe(2);
+    expect(r.out).toMatch(/must be a JSON array/);
+  });
+
+  it('exit 0 with an empty array, isolating the flag as what changed', () => {
+    expect(runCli('[]').status).toBe(0);
   });
 });
 
@@ -421,7 +512,7 @@ describe('main — release-line scope (#2098)', () => {
     const r = run(root, ['packages/kn-next/src/index.ts'], {
       basePin: pin('v1.0.0-rc.6'),
       headPin: pin('v1.0.0-rc.6'),
-      baseVersion: '1.0.4',
+      baseVersion: '1.0.0-rc.6',
       runDiff: () => 1,
     });
     expect(r.code).toBe(1);
@@ -433,9 +524,168 @@ describe('main — release-line scope (#2098)', () => {
     const r = run(root, ['packages/kn-next/src/index.ts'], {
       basePin: pin('v1.0.0-rc.6'),
       headPin: pin('v1.0.0-rc.6'),
-      baseVersion: '1.0.4',
+      baseVersion: '1.0.0-rc.6',
       tagResolves: () => false,
     });
     expect(r.code).toBe(1);
+  });
+});
+
+describe('main — released-base scope (#2429)', () => {
+  it('a base released as 1.3.1 against the v1.3.0-rc.10 pin: SKIP announced with the reason, no tag lookup, no diff', () => {
+    const root = buildFixtureRoot();
+    let touched = false;
+    const r = run(root, ['packages/kn-next/src/__tests__/x.test.ts'], {
+      basePin: pin('v1.3.0-rc.10'),
+      headPin: pin('v1.3.0-rc.10'),
+      baseVersion: '1.3.1',
+      baseSha: 'abc123',
+      baseReleaseTagged: () => true,
+      tagResolves: () => {
+        touched = true;
+        return true;
+      },
+      runDiff: () => {
+        touched = true;
+        return 1;
+      },
+    });
+    expect(r.code).toBe(0);
+    expect(touched).toBe(false);
+    expect(r.summary).toContain('SKIP');
+    expect(r.out).toContain('has ended on this line');
+  });
+
+  it('a base still in the window (1.3.0-rc.10) with a byte change still FAILS when the diff fails', () => {
+    const root = buildFixtureRoot();
+    const r = run(root, ['packages/kn-next/src/index.ts'], {
+      basePin: pin('v1.3.0-rc.10'),
+      headPin: pin('v1.3.0-rc.10'),
+      baseVersion: '1.3.0-rc.10',
+      runDiff: () => 1,
+    });
+    expect(r.code).toBe(1);
+    expect(r.summary).toContain('FAIL');
+  });
+
+  it('a released base BELOW the pinned rc base (1.3.1 vs v1.3.2-rc.1) with a byte change still FAILS', () => {
+    const root = buildFixtureRoot();
+    const r = run(root, ['packages/kn-next/src/index.ts'], {
+      basePin: pin('v1.3.2-rc.1'),
+      headPin: pin('v1.3.2-rc.1'),
+      baseVersion: '1.3.1',
+      runDiff: () => 1,
+    });
+    expect(r.code).toBe(1);
+    expect(r.summary).toContain('FAIL');
+  });
+});
+
+describe('main — released base needs a verified release tag (#2435)', () => {
+  it('a version-string-only released base (no verified tag) is NOT skipped: the diff runs', () => {
+    const root = buildFixtureRoot();
+    const r = run(root, ['packages/kn-next/src/index.ts'], {
+      basePin: pin('v1.3.0-rc.10'),
+      headPin: pin('v1.3.0-rc.10'),
+      baseVersion: '1.3.1',
+      baseSha: 'abc123',
+      baseReleaseTagged: () => false,
+      runDiff: () => 1,
+    });
+    expect(r.code).toBe(1);
+    expect(r.summary).toContain('FAIL');
+  });
+
+  it('a missing baseSha fails closed (guard runs) even if the tag checker would say yes', () => {
+    const root = buildFixtureRoot();
+    const r = run(root, ['packages/kn-next/src/index.ts'], {
+      basePin: pin('v1.3.0-rc.10'),
+      headPin: pin('v1.3.0-rc.10'),
+      baseVersion: '1.3.1',
+      baseReleaseTagged: () => true,
+      runDiff: () => 1,
+    });
+    expect(r.code).toBe(1);
+  });
+});
+
+describe('defaultBaseReleaseTagged — real temp git repos (#2435)', () => {
+  const git = (cwd: string, ...a: string[]) =>
+    execFileSync(
+      'git',
+      [
+        '-c',
+        'user.email=t@t',
+        '-c',
+        'user.name=t',
+        '-c',
+        'commit.gpgsign=false',
+        '-c',
+        'tag.gpgsign=false',
+        ...a,
+      ],
+      { cwd, encoding: 'utf8' },
+    ).trim();
+  function repo() {
+    const dir = mkdtempSync(join(tmpdir(), 'pb-tag-repo-'));
+    registry.push(dir);
+    git(dir, 'init', '-q', '-b', 'main');
+    git(dir, 'commit', '-q', '--allow-empty', '-m', 'one');
+    const c1 = git(dir, 'rev-parse', 'HEAD');
+    git(dir, 'commit', '-q', '--allow-empty', '-m', 'two');
+    const c2 = git(dir, 'rev-parse', 'HEAD');
+    return { dir, c1, c2 };
+  }
+
+  it('tag vX.Y.Z present and an ancestor of the base: true (annotated or lightweight)', () => {
+    const { dir, c1, c2 } = repo();
+    git(dir, 'tag', 'v1.3.1', c1);
+    expect(defaultBaseReleaseTagged(dir, c2, '1.3.1')).toBe(true);
+    git(dir, 'tag', '-a', 'v1.3.2', c1, '-m', 'x');
+    expect(defaultBaseReleaseTagged(dir, c2, '1.3.2')).toBe(true);
+    expect(defaultBaseReleaseTagged(dir, c1, '1.3.1')).toBe(true);
+  });
+
+  it('tag absent (merged-but-unpublished Version PR): false', () => {
+    const { dir, c2 } = repo();
+    expect(defaultBaseReleaseTagged(dir, c2, '1.3.1')).toBe(false);
+  });
+
+  it('tag exists on a commit that is NOT an ancestor of the base: false', () => {
+    const { dir, c1 } = repo();
+    git(dir, 'switch', '-q', '-c', 'other');
+    git(dir, 'commit', '-q', '--allow-empty', '-m', 'side');
+    git(dir, 'tag', 'v1.3.1');
+    expect(defaultBaseReleaseTagged(dir, c1, '1.3.1')).toBe(false);
+  });
+
+  it('only the exact vX.Y.Z tag counts (a different version tag does not)', () => {
+    const { dir, c1, c2 } = repo();
+    git(dir, 'tag', 'v1.3.0', c1);
+    expect(defaultBaseReleaseTagged(dir, c2, '1.3.1')).toBe(false);
+  });
+
+  it('a prerelease/garbage version, unknown sha, or non-repo: false (fail closed)', () => {
+    const { dir, c1, c2 } = repo();
+    git(dir, 'tag', 'v1.3.1', c1);
+    expect(defaultBaseReleaseTagged(dir, c2, '1.3.1-rc.1')).toBe(false);
+    expect(defaultBaseReleaseTagged(dir, c2, undefined)).toBe(false);
+    expect(defaultBaseReleaseTagged(dir, 'deadbeef', '1.3.1')).toBe(false);
+    const notRepo = mkdtempSync(join(tmpdir(), 'pb-not-repo-'));
+    registry.push(notRepo);
+    expect(defaultBaseReleaseTagged(notRepo, c2, '1.3.1')).toBe(false);
+  });
+
+  it('shallow clone WITHOUT tags: false; after fetching tags + history: true', () => {
+    const { dir, c1, c2 } = repo();
+    git(dir, 'tag', 'v1.3.1', c1);
+    const clone = mkdtempSync(join(tmpdir(), 'pb-shallow-'));
+    registry.push(clone);
+    git(clone, 'init', '-q');
+    git(clone, 'remote', 'add', 'origin', `file://${dir}`);
+    git(clone, 'fetch', '-q', '--no-tags', '--depth=1', 'origin', c2);
+    expect(defaultBaseReleaseTagged(clone, c2, '1.3.1')).toBe(false);
+    git(clone, 'fetch', '-q', '--unshallow', '--tags', 'origin');
+    expect(defaultBaseReleaseTagged(clone, c2, '1.3.1')).toBe(true);
   });
 });

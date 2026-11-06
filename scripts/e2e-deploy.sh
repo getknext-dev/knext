@@ -201,8 +201,147 @@ EOF
   # @getknext/core's @getknext/lib + @getknext/db deps from the local tarballs instead of
   # the (not-yet-published) registry, and a single reify keeps the
   # snapshot/restore window minimal.
+  # ── Exact-prerelease React pins vs next's `^19.0.0` peer (v1.3 lane, Next >= 16.4).
+  # Fixtures pin an EXACT React canary (`react@19.3.0-canary-fef12a01-20260413`,
+  # `-da9325b5-20260417`; test/e2e/gssp-redirect*, rewrite-with-browser-history,
+  # router-hash-navigation, scroll-back-restoration, …). next@16.4.3 peers
+  # `react@"^18.2.0 || 19.0.0-rc-de68d2f4-20241204 || ^19.0.0"`, and by semver a
+  # prerelease of 19.3.0 does NOT satisfy `^19.0.0`, so `npm install` aborts with
+  # ERESOLVE before the fixture builds (~10 files red for an install artifact, not a
+  # runtime result). Upstream's own harness reconciles exactly this pair by rewriting
+  # peers to exact versions (`prepareLocalPackages`); do the same, TARGETED: only a
+  # react / react-dom spec that is an exact prerelease gets next's own react /
+  # react-dom peer edge overridden to the fixture's pin (npm `overrides`, scoped under
+  # `next`, `$name` = the root dependency spec). NOT `--legacy-peer-deps`: that is a
+  # blanket flag which would also accept every other peer conflict (sass, a stable
+  # React that is genuinely out of range, …) and mask a real regression. Anything that
+  # is not an exact-prerelease react family pin resolves exactly as before.
+  # The override is also applied ONLY when the pin's BASE version (19.3.0 for
+  # 19.3.0-canary-…) satisfies the peer range next itself declares, read from the
+  # registry with `npm view next@<spec> peerDependencies --json`: a canary of a
+  # React line next does not support (18.0.0-canary-… vs ^18.2.0) must still
+  # ERESOLVE. A peer range that cannot be read (view fails, non-registry next spec,
+  # no semver to evaluate it) FAILS CLOSED: no override, the install runs as before.
+  # package.json is rewritten for the duration of the install ONLY and restored
+  # byte-for-byte afterwards — on success, on install failure, and when the
+  # script is killed by SIGINT/SIGTERM/SIGHUP mid-install (see the signal block
+  # below).
+  PKG_JSON="${APP_DIR}/package.json"
+  PKG_ORIG=""
+  PEER_PKG="$(node -e '
+    const fs = require("node:fs");
+    const path = require("node:path");
+    const cp = require("node:child_process");
+    const file = process.argv[1];
+    const note = (m) => process.stderr.write("[e2e-deploy] " + m + "\n");
+    let raw;
+    try { raw = fs.readFileSync(file, "utf8"); } catch { process.exit(0); }
+    let p;
+    try { p = JSON.parse(raw); } catch { process.exit(0); }
+    const PRE = /^(\d+\.\d+\.\d+)-[0-9A-Za-z.-]+$/;
+    const specOf = (name) => {
+      for (const sec of ["dependencies", "devDependencies", "optionalDependencies"]) {
+        const spec = p[sec] && p[sec][name];
+        if (typeof spec === "string") return spec;
+      }
+      return undefined;
+    };
+    const pinned = [];
+    for (const name of ["react", "react-dom"]) {
+      const spec = specOf(name);
+      if (spec !== undefined && PRE.test(spec)) pinned.push(name);
+    }
+    if (pinned.length === 0) process.exit(0);
+    // ── fail closed from here on: any doubt => no override.
+    const nextSpec = specOf("next");
+    if (nextSpec === undefined || nextSpec === "") { note("not reconciling the React prerelease pin: the fixture declares no next dependency to read a peer range from"); process.exit(0); }
+    let peers;
+    try {
+      const out = cp.execFileSync("npm", ["view", "next@" + nextSpec, "peerDependencies", "--json"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 120000 });
+      peers = JSON.parse(out);
+    } catch { note("not reconciling the React prerelease pin: could not read next@" + nextSpec + " peerDependencies (npm view failed or unparseable)"); process.exit(0); }
+    if (peers === null || typeof peers !== "object" || Array.isArray(peers)) { note("not reconciling the React prerelease pin: next@" + nextSpec + " peerDependencies is not a single object"); process.exit(0); }
+    let semver;
+    const here = path.dirname(process.execPath);
+    const candidates = [
+      path.join(here, "..", "lib", "node_modules", "npm", "node_modules", "semver"),
+      path.join(here, "node_modules", "npm", "node_modules", "semver"),
+      path.join(here, "..", "node_modules", "npm", "node_modules", "semver"),
+      "semver",
+    ];
+    try {
+      const g = cp.execFileSync("npm", ["root", "-g"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 60000 }).trim();
+      if (g) candidates.splice(3, 0, path.join(g, "npm", "node_modules", "semver"));
+    } catch {}
+    for (const c of candidates) { try { semver = require(c); break; } catch {} }
+    if (!semver || typeof semver.satisfies !== "function") { note("not reconciling the React prerelease pin: no semver available to evaluate next peer range"); process.exit(0); }
+    const eligible = [];
+    for (const name of pinned) {
+      const range = peers[name];
+      const base = PRE.exec(specOf(name))[1];
+      let ok = false;
+      try { ok = typeof range === "string" && semver.validRange(range) !== null && semver.satisfies(base, range); } catch {}
+      if (ok) eligible.push(name);
+      else note("not reconciling " + name + "@" + specOf(name) + ": base " + base + " does not satisfy next@" + nextSpec + " peer range " + JSON.stringify(range));
+    }
+    if (eligible.length === 0) process.exit(0);
+    pinned.length = 0;
+    pinned.push(...eligible);
+    const ov = p.overrides === undefined ? {} : p.overrides;
+    if (ov === null || typeof ov !== "object" || Array.isArray(ov)) process.exit(0);
+    if (ov.next !== undefined && (ov.next === null || typeof ov.next !== "object")) process.exit(0);
+    const nextOv = Object.assign({}, ov.next || {});
+    for (const name of pinned) if (nextOv[name] === undefined) nextOv[name] = "$" + name;
+    p.overrides = Object.assign({}, ov, { next: nextOv });
+    process.stdout.write(JSON.stringify(p, null, 2) + "\n");
+  ' "${PKG_JSON}" || true)"
+  # ── Restore package.json even if the run is killed mid-install. A bare
+  # `npm install ... || rc=$?` leaves the rewritten package.json on disk when the
+  # harness SIGTERMs a timed-out fixture. So: npm runs as a background job and the
+  # shell `wait`s on it (a trapped signal interrupts `wait` immediately; it would
+  # NOT interrupt a foreground child), and ONLY the INT/TERM/HUP traps are saved,
+  # replaced and put back. EXIT traps are never touched — the pack-lock trap above
+  # and the suite-restore trap armed later (ed_suite_arm_restore_trap) own those,
+  # and `exit` from the handler still fires them.
+  NPM_PID=""
+  restore_pkg_json() {
+    if [ -n "${PKG_ORIG}" ]; then
+      cp -p "${PKG_ORIG}" "${PKG_JSON}"
+      rm -f "${PKG_ORIG}"
+      PKG_ORIG=""
+    fi
+  }
+  on_install_signal() { # <exit code>
+    if [ -n "${NPM_PID}" ]; then
+      kill -TERM "${NPM_PID}" 2>/dev/null || true
+      wait "${NPM_PID}" 2>/dev/null || true
+      NPM_PID=""
+    fi
+    restore_pkg_json
+    exit "$1"
+  }
+  SAVED_SIGNAL_TRAPS="$(trap -p INT TERM HUP)"
+  trap 'on_install_signal 130' INT
+  trap 'on_install_signal 143' TERM
+  trap 'on_install_signal 129' HUP
+  if [ -n "${PEER_PKG}" ]; then
+    log "fixture pins an exact React prerelease — reconciling next's react/react-dom peer edge to the fixture's own pin for this install only (npm overrides under next; NOT --legacy-peer-deps)"
+    PKG_ORIG="$(mktemp "${APP_DIR}/.knext-pkg-orig.XXXXXX")"
+    cp -p "${PKG_JSON}" "${PKG_ORIG}"
+    printf '%s' "${PEER_PKG}" > "${PKG_JSON}"
+  fi
+  NPM_INSTALL_RC=0
   # shellcheck disable=SC2086
-  npm install --no-save --no-audit --no-fund "${LIB_TGZ}" "${DB_TGZ}" "${CORE_TGZ}" ${TS_PIN} >&2
+  npm install --no-save --no-audit --no-fund "${LIB_TGZ}" "${DB_TGZ}" "${CORE_TGZ}" ${TS_PIN} >&2 &
+  NPM_PID=$!
+  wait "${NPM_PID}" || NPM_INSTALL_RC=$?
+  NPM_PID=""
+  trap - INT TERM HUP
+  eval "${SAVED_SIGNAL_TRAPS}"
+  restore_pkg_json
+  if [ "${NPM_INSTALL_RC}" != "0" ]; then
+    exit "${NPM_INSTALL_RC}"
+  fi
 
   # Restore fixture-shipped packages the reify pruned (B3).
   if [ -n "${NM_SNAP}" ]; then
@@ -491,6 +630,20 @@ if [ -n "${FIXTURE_SCRIPT_TO_RUN}" ] \
   && [ -n "$(find "${APP_DIR}" -maxdepth 4 \( -name node_modules -o -name .next \) -prune -o \( -name 'next.config.ts' -o -name 'next.config.mts' \) -print 2>/dev/null | head -n1)" ]; then
   export __NEXT_NODE_NATIVE_TS_LOADER_ENABLED=true
   log "next.config.(m)ts detected — exporting __NEXT_NODE_NATIVE_TS_LOADER_ENABLED=true for the wrapper script (B2 #173)"
+fi
+
+# jest sets NODE_ENV=test and the deploy harness hands this script the raw jest
+# env, but `next build` KEEPS an inherited NODE_ENV (next/dist/bin/next:
+# `NODE_ENV = NODE_ENV || defaultEnv`), so every build below ran as `test` and a
+# webpack SWC plugin saw `env=test` (test/e2e/swc-plugins-env@v16.4.3 expects
+# `production`). Next's own start/dev modes blank NODE_ENV for the build child
+# (`NODE_ENV: this.env.NODE_ENV || ''`, test/lib/next-modes/base.ts); mirror that.
+# Only jest's own value is cleared — an explicit production/development is the
+# caller's choice. Past this point nothing in this script needs the jest value:
+# the server boots below pin NODE_ENV=production themselves.
+if [ "${NODE_ENV:-}" = "test" ]; then
+  unset NODE_ENV
+  log "NODE_ENV=test is jest's, not the build's — cleared so next build defaults to production (as Next's own start mode does)"
 fi
 
 : > "${BUILD_LOG}"

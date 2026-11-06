@@ -14,9 +14,12 @@
 #   (DT_NEEDED libm.so.6), but this Bun build uses musl. glibc-targeted
 #   native addons cannot be loaded on Alpine/musl even with gcompat.
 #
-# The REAL shipped image does not hit this: its Dockerfile installs the app's
-# deps INSIDE the alpine build stage, so native addons are musl-linked from
-# the start. This script makes the harness match that.
+# NOTE: the shipped standalone-on-Bun image (Dockerfile.standalone.hbs) does
+# NOT install the app's deps in a build stage. It copies the build host's
+# `.next/standalone` tree, and its deps stage installs only three pure-JS
+# packages (pino, prom-client, @opentelemetry/api). This script is therefore
+# a harness-side rebuild so a glibc-built addon can be booted on musl; it does
+# not reproduce a step the shipped image performs.
 #
 # ROUND 2 (review finding on the round-1 fix): round 1 ran `npm run install
 # --if-present` INSIDE the TRACED package directory
@@ -308,6 +311,42 @@ musl_install_sibling() { # <spec> <dest-name>
   return 0
 }
 
+# addon_provenance <pkg-dir> <name> — prints `local`, `registry` or `unknown`.
+# Signals read: the traced package.json (`_resolved`, `_from`), the
+# standalone root's node_modules/.package-lock.json entry for this path
+# (`link` / `resolved`), and the root package.json dependency spec. Any
+# local signal wins; registry needs a positive http(s) record or a plain
+# semver spec; no signal is `unknown`.
+addon_provenance() { # <pkg-dir> <name>
+  PV_ROOT="${ROOT}" PV_DIR="$1" PV_NAME="$2" node -e '
+    const fs = require("node:fs");
+    const read = (f) => { try { return JSON.parse(fs.readFileSync(f, "utf8")); } catch { return null; } };
+    const root = process.env.PV_ROOT, dir = process.env.PV_DIR, name = process.env.PV_NAME;
+    let local = false, registry = false;
+    const url = (v) => typeof v === "string" && /^https?:\/\//.test(v);
+    const localSpec = (v) => typeof v === "string" && /^(file:|link:|workspace:|git[+:]|github:|gitlab:|bitbucket:|\.{0,2}\/|~\/)/.test(v);
+    const pj = read(dir + "/package.json") || {};
+    for (const v of [pj._resolved, pj._from]) {
+      if (localSpec(v)) local = true;
+    }
+    if (url(pj._resolved)) registry = true;
+    if (pj._requested && ["directory", "file", "git"].includes(pj._requested.type)) local = true;
+    const lock = read(root + "/node_modules/.package-lock.json");
+    const e = lock && lock.packages && lock.packages[dir.slice(root.length + 1)];
+    if (e) {
+      if (e.link === true || (typeof e.resolved === "string" && !url(e.resolved))) local = true;
+      else if (url(e.resolved)) registry = true;
+    }
+    const rp = read(root + "/package.json");
+    for (const k of ["dependencies", "optionalDependencies"]) {
+      const spec = rp && rp[k] && rp[k][name];
+      if (localSpec(spec) || url(spec)) local = true;
+      else if (typeof spec === "string" && /^[\^~<>=v0-9*xX|. -]+$/.test(spec)) registry = true;
+    }
+    process.stdout.write(local ? "local" : registry ? "registry" : "unknown");
+  ' 2>/dev/null || printf unknown
+}
+
 echo "${HITS}" | while IFS= read -r f; do
   [ -z "${f}" ] && continue
   # Walk up from the .node file to the nearest package.json — the addon
@@ -418,6 +457,19 @@ echo "${HITS}" | while IFS= read -r f; do
     ;;
   esac
 
+  # #2713 — provenance gate. A traced package whose source is local (a
+  # `file:` dependency, a workspace link, a git checkout) has no registry
+  # identity, and the same name on the public registry is a different
+  # package. Positive local evidence skips the package whether or not a
+  # pin exists; with no pin, only a package PROVEN registry-sourced may be
+  # fetched. Anything else is treated as local: the traced tree is kept.
+  PROVENANCE="$(addon_provenance "${d}" "${NAME}")"
+  if [ "${PROVENANCE}" = "local" ]; then
+    echo "[native-rebuild] WARNING: ${NAME}@${VERSION} at ${d} has a local (non-registry) source — NOT fetching it from the registry; the traced copy is kept as-is (it may still fail to dlopen under musl)"
+    echo "::warning::[native-rebuild] ${NAME}@${VERSION}: local source, musl rebuild skipped"
+    continue
+  fi
+
   echo "[native-rebuild] installing ${NAME}@${VERSION} for musl (the traced tree at ${d} lacks install-time tooling like node-pre-gyp — a rebuild IN PLACE cannot run its own install script)"
   PKG_SCRATCH="$(mktemp -d "${SCRATCH_ROOT}/pkg.XXXXXX")"
   chown builder:builder "${PKG_SCRATCH}"
@@ -458,6 +510,16 @@ echo "${HITS}" | while IFS= read -r f; do
       echo "::error::[native-rebuild] no committed, reproducible lockfile for ${NAME}@${VERSION} and KNEXT_COMPAT_MODE=credential — refusing the non-reproducible fresh-install fallback in credential mode"
       exit 1
     fi
+    # #2713 — fail closed: no pin and no proof of registry provenance means
+    # the name may belong to a different package on the public registry.
+    if [ "${PROVENANCE}" != "registry" ]; then
+      echo "[native-rebuild] WARNING: cannot establish that ${NAME}@${VERSION} at ${d} comes from the registry (no pin, no registry-resolved record) — treating it as local and NOT fetching; the traced copy is kept as-is"
+      echo "::warning::[native-rebuild] ${NAME}@${VERSION}: unknown provenance, musl rebuild skipped"
+      continue
+    fi
+    # No --ignore-scripts on the install below: the package's own install
+    # script (node-pre-gyp / node-gyp rebuild) IS the deliberate from-source
+    # build; skipping it leaves no *.node file.
     # npm_config_build_from_source=true (review finding, round 4 — live CI
     # evidence, run 35862123588): WITHOUT this, `npm install` runs sqlite3's
     # own `node-pre-gyp install --fallback-to-build`, which tries a PREBUILT

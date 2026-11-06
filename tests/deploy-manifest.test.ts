@@ -5,6 +5,7 @@ import {
   capBindingMessage,
   FAMILY_QUARANTINE_CAP,
   QUARANTINE_CAP_CALLSITES,
+  UPSTREAM_MIRROR_SUITES,
 } from './compat-quarantine-bounds';
 
 /**
@@ -115,6 +116,9 @@ const KNOWN_UNSUPPORTED_CATEGORIES = new Set([
   'ppr',
   'cache-components',
   'image-optimization',
+  // A deliberate product scope exclusion (knext refuses `output: 'export'`), NOT a
+  // platform-coupling one. Loud on purpose: see the static-export describe below.
+  'static-export',
 ]);
 
 const manifest: Manifest = existsSync(MANIFEST_PATH)
@@ -705,28 +709,32 @@ describe('deploy-tests-manifest — per-case quarantines outside the family (§c
   // GENERIC: every suites entry is either part of the upstream v16.2.0 mirror
   // (the verbatim block re-mirrored on ref bumps) or MUST carry a
   // $knextQuarantines record covering exactly its flakey cases.
-  const UPSTREAM_MIRROR_SUITES = new Set([
-    'test/e2e/app-dir/app-client-cache/client-cache.defaults.test.ts',
-    'test/e2e/app-dir/app-client-cache/client-cache.experimental.test.ts',
-    'test/e2e/app-dir/segment-cache/prefetch-runtime/prefetch-runtime.test.ts',
-    'test/e2e/app-dir/actions/app-action.test.ts',
-    'test/e2e/app-dir/actions/app-action-node-middleware.test.ts',
-    'test/e2e/app-dir/app-static/app-static.test.ts',
-    'test/e2e/app-dir/metadata/metadata.test.ts',
-    'test/e2e/app-dir/searchparams-reuse-loading/searchparams-reuse-loading.test.ts',
-    // test/e2e/middleware-rewrites/test/index.test.ts is excluded at file level
-    // by the §h vercel-infra-coupled family (#1633), which subsumes upstream's
-    // mirrored `failed` entry. Restore both here and in the manifest when that
-    // entry retires.
-  ]);
+  // The verbatim upstream mirror lives in tests/compat-quarantine-bounds.ts, shared with
+  // tests/compat-ref-pinned-cases.test.ts so the two guards cannot disagree about it.
 
   it('ANY suites entry outside the upstream mirror MUST have a complete $knextQuarantines record (generic, no hardcoded allowlist)', () => {
+    const refPinned = new Set(
+      (
+        (manifest as unknown as { $knextRefPinnedCases?: { test: string }[] })
+          .$knextRefPinnedCases ?? []
+      ).map((e) => e.test),
+    );
     for (const [file, entry] of Object.entries(manifest.suites)) {
       if (UPSTREAM_MIRROR_SUITES.has(file)) continue;
-      // A knext-observed entry must be flakey-only (quarantine != known-failing)...
+      // A ref-pinned deterministic entry (ADR-0007 amendment 2026-11-04) is held to its own five
+      // bars by tests/compat-ref-pinned-cases.test.ts; it is `failed`, never `flakey`, and it
+      // is NOT a quarantine, so it carries no $knextQuarantines record.
+      if (refPinned.has(file)) {
+        expect(
+          entry.flakey ?? [],
+          `ref-pinned suites["${file}"] must not also carry a flakey list`,
+        ).toEqual([]);
+        continue;
+      }
+      // Any other knext-observed entry must be flakey-only (quarantine != known-failing)...
       expect(
         entry.failed ?? [],
-        `knext-observed suites["${file}"] must not carry a failed list — quarantines are flakey-only`,
+        `knext-observed suites["${file}"] must not carry a failed list — quarantines are flakey-only; a deterministic per-case entry must be in $knextRefPinnedCases`,
       ).toEqual([]);
       expect(
         (entry.flakey ?? []).length,
@@ -787,6 +795,8 @@ const VERCEL_COUPLED_FILE_QUARANTINES: Record<
   {
     childIssue: number;
     observedRuns: string[];
+    /** The NEXTJS_REF the entry was observed at. Defaults to v16.3.5 (the rc.2 cohort). */
+    observedRef?: string;
     stubRuns?: string[];
     upstreamRef?: string;
     upstreamIssue?: string;
@@ -823,7 +833,63 @@ const VERCEL_COUPLED_FILE_QUARANTINES: Record<
     upstreamRef: 'vercel/next.js#94905',
     upstreamIssue: 'vercel/next.js#99435',
   },
+  // v16.4.3 entries (run 41754152861, node x turbopack, FINAL 3/3). Each file fails EVERY
+  // case that runs, and its failing assertion sits in a branch that cites the Vercel platform
+  // or its build environment (upstream line numbers in the ledger's mechanism). Files that
+  // fail only some cases are per-case entries in `$knextRefPinnedCases` instead (ADR-0007
+  // amendment 2026-11-04, tests/compat-ref-pinned-cases.test.ts), so their passing cases run.
+  'test/e2e/app-dir/otel-middleware-trace/otel-middleware-trace.test.ts': {
+    childIssue: 2627,
+    observedRuns: ['41754152861'],
+    observedRef: 'v16.4.3',
+  },
+  'test/e2e/app-dir/empty-generate-static-params/empty-generate-static-params.test.ts': {
+    childIssue: 2128,
+    observedRuns: ['41754152861'],
+    observedRef: 'v16.4.3',
+  },
+  'test/e2e/app-dir/use-cache-segment-configs/use-cache-segment-configs.test.ts': {
+    childIssue: 2128,
+    observedRuns: ['41754152861'],
+    observedRef: 'v16.4.3',
+  },
 };
+
+describe('deploy-tests-manifest — static-export scope exclusion (v16.4.3)', () => {
+  // These guards SCAN every entry of the category, so a new static-export entry is held to
+  // the same bar whether or not anyone lists it here. Static-export: deliberate product scope
+  // (knext deploys a server only), never platform coupling.
+
+  it('every static-export entry is a DELIBERATE product scope exclusion, enforced at file level', () => {
+    const entries = manifest.$knextExclusions.filter((e) => e.category === 'static-export');
+    expect(entries.length, 'at least one static-export entry must exist').toBeGreaterThan(0);
+    for (const entry of entries) {
+      expect(
+        entry.rationale ?? '',
+        `${entry.test}: rationale must say it is a deliberate product scope exclusion`,
+      ).toMatch(/deliberate product scope exclusion/i);
+      expect(
+        entry.rationale ?? '',
+        `${entry.test}: rationale must cite the real harness failure`,
+      ).toMatch(/standalone server\.js not found/);
+      expect(
+        manifest.rules.exclude.includes(entry.test),
+        `${entry.test} must be in rules.exclude verbatim`,
+      ).toBe(true);
+    }
+  });
+
+  it('static-export is NOT platform coupling: no static-export entry carries a vercel-infra-coupled quarantine', () => {
+    const quarantines: KnextQuarantine[] =
+      (manifest as unknown as { $knextQuarantines?: KnextQuarantine[] }).$knextQuarantines ?? [];
+    for (const entry of manifest.$knextExclusions.filter((e) => e.category === 'static-export')) {
+      expect(
+        quarantines.some((q) => q.test === entry.test),
+        `${entry.test} must not be a §h quarantine`,
+      ).toBe(false);
+    }
+  });
+});
 
 describe('deploy-tests-manifest — vercel-infra-coupled family (ADR-0007 §h, #1571)', () => {
   const quarantines: KnextQuarantine[] =
@@ -846,12 +912,13 @@ describe('deploy-tests-manifest — vercel-infra-coupled family (ADR-0007 §h, #
   });
 
   it('every §h file has a complete level:"file" ledger record — mechanism, cases, run-cited evidence', () => {
-    for (const [file, { observedRuns, stubRuns }] of coupled) {
+    for (const [file, { observedRuns, stubRuns, observedRef }] of coupled) {
       const ledger = quarantines.find((q) => q.test === file);
       expect(ledger, `no $knextQuarantines ledger entry for §h file ${file}`).toBeTruthy();
       expect(ledger?.level, `${file}: §h quarantine must declare level:"file"`).toBe('file');
       expect(ledger?.family, `${file}: §h family`).toBe('vercel-infra-coupled');
-      expect(ledger?.nextjsRef, `${file}: observed at v16.3.5`).toBe('v16.3.5');
+      const expectedRef = observedRef ?? 'v16.3.5';
+      expect(ledger?.nextjsRef, `${file}: observed at ${expectedRef}`).toBe(expectedRef);
       expect((ledger?.cases ?? []).length, `${file}: failing cases preserved`).toBeGreaterThan(0);
       // The mechanism must name the deploy branch it rests on — the whole §h bar.
       expect(

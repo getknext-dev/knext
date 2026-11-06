@@ -142,3 +142,32 @@ updates:
     labels:
       - 'operator'
       - 'reliability'
+
+  # Keeps the Go builder-image digests moving on integration/v2. Dependabot reads
+  # this file from the DEFAULT branch only, so the entry lives here and points at
+  # the v2 lane via target-branch; integration/v2 carries a copy that becomes live
+  # when v2 merges to main. The 3-day cooldown is the release-age rule: a fresh
+  # golang tag is not proposed until it has aged. A Dockerfile bump does not move
+  # go.mod; the lockstep guard on v2 reds the PR until the `go` directive follows.
+  - package-ecosystem: 'docker'
+    target-branch: 'integration/v2'
+    directories:
+      - '/packages/scale-zero-pg/gateway'
+      - '/packages/kn-next-operator'
+      - '/templates/go'
+    schedule:
+      interval: 'weekly'
+    cooldown:
+      default-days: 3
+    groups:
+      go-base-images:
+        patterns:
+          - '*'
+        update-types:
+          - 'minor'
+          - 'patch'
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: 'chore(go)'
+    labels:
+      - 'dependencies'
