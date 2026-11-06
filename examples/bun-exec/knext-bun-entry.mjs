@@ -45,10 +45,36 @@
 // vinext route wiring entirely → the compiled binary answers a framework 404 for
 // every app route (no `_ssr` chunks are even emitted). With it, routes are bundled
 // and the binary is self-contained.
+// ---------------------------------------------------------------------------
+// Image optimization (ADR-0048 / ADR-0006).
+//
+// vinext's `/_next/image` is gated on the Cloudflare Workers assets binding:
+//
+//     if (isImageOptimizationPath(...) && env?.ASSETS && getImageOptimizer())
+//
+// On the node/bun platform `env.ASSETS` is undefined, so that branch is DEAD —
+// registering an optimizer cannot reach it. Both registration routes were tried
+// and measured: the `images: { optimizer }` plugin option (read only on the
+// Cloudflare init path) and a direct `setImageOptimizer()` call from this entry.
+// Each left /_next/image returning 181,277 bytes of image/png, byte-identical
+// to the source, even with `Accept: image/webp`.
+//
+// So knext INTERCEPTS the route here instead, before nitro routing sees it.
+// The handler returns null for anything that is not a same-origin optimizable
+// request, and that null falls through to the app unchanged.
+// ---------------------------------------------------------------------------
+import { handleImageRequest } from '@getknext/core/internal/vinext-image-optimizer';
+// Statically imported so the BUNDLER embeds sharp's JavaScript. That is not a
+// preference — inside a `bun build --compile` binary nothing can resolve a
+// package from disk, so a runtime `require('sharp')` cannot work there no matter
+// where sharp is installed. Only the native addon stays external, opened by path
+// (see @getknext/core's sharp-addon-dlopen shim, aliased in vite.config.ts).
+import sharp from 'sharp';
+
 import '#nitro/virtual/polyfills';
 import { existsSync } from 'node:fs';
 import { useNitroApp } from 'nitro/app';
-import { serve } from 'srvx/bun';
+import { serve as srvxServe } from 'srvx/bun';
 // vinext's `after()` hands its work to the request's EXECUTION CONTEXT
 // (`ctx.waitUntil`). On Cloudflare the platform supplies one; under nitro's bun
 // server nothing does, so without this an `after()` callback is fire-and-forget
@@ -159,6 +185,37 @@ const EXECUTION_CONTEXT = { waitUntil };
 // drain below owns the exit. `silent` suppresses srvx's listen banner (we print
 // our own startup-order signal). srvx starts the Bun listener synchronously in
 // the constructor, so it is bound before the log line below.
+//
+// Listen-failure guard (#2724). The srvx 0.11 line can swallow a listen failure
+// (its node adapter starts with `this.serve().catch(() => {})`), leaving a bare
+// process that exits 0 with an empty log — in a pod, a restart loop with nothing
+// to read. srvx 1.x reports it itself (h3js/srvx 81a3b646, first released in
+// v1.0.1), so REMOVE this guard — the `serve` wrapper below and the `process.once('exit')`
+// hook — once nitro depends on srvx >= 1.0.1. It hooks the REAL listen (the throw
+// from `serve`), so unlike a pre-bind probe it has no check-then-bind race; the
+// exit hook is the fallback for a srvx that lets the process die with code 0.
+let appListenerReported = false;
+process.once('exit', (code) => {
+  if (appListenerReported) return;
+  console.error(
+    `[knext] exiting before the app listener on ${HOSTNAME}:${PORT} was up (exit code ${code}) —` +
+      ' if no error is printed above, the port could not be bound (another process may own it).',
+  );
+  if (!code) process.exitCode = 1;
+});
+const serve = (options) => {
+  try {
+    return srvxServe(options);
+  } catch (err) {
+    console.error(
+      `[knext] failed to bind the app listener on ${HOSTNAME}:${PORT}` +
+        (err?.code ? ` (${err.code})` : '') +
+        ' — if this is EADDRINUSE, another process owns PORT; pick a free port or stop that process.',
+    );
+    appListenerReported = true; // already reported; the exit hook stays quiet
+    throw err;
+  }
+};
 const appSrvx = serve({
   port: PORT,
   hostname: HOSTNAME,
@@ -203,8 +260,23 @@ const appSrvx = serve({
     // runtime-contract.mjs). Inside the counting middleware, so they are
     // counted as 4xx.
     rejectMalformedPath,
+    // Image optimization — see the note above on why this is an intercept and
+    // not a registered optimizer. Inside the counting middleware, so optimized
+    // requests are still counted like any other.
+    async (req, next) => {
+      const optimized = await handleImageRequest(req, {
+        // Resolve the source through the app's own pipeline, so it finds the
+        // asset exactly as a normal static request would.
+        fetchSource: (path) => nitro.fetch(new Request(new URL(path, req.url))),
+        // Direct-pass, per architecture.md §4 — and the only thing that works in
+        // the compiled binary, where the optimizer's own runtime resolve cannot.
+        sharp,
+      });
+      return optimized ?? next();
+    },
   ],
 });
+appListenerReported = true;
 // Adapt srvx's BunServer to the { port, stop(force) } shape the metrics log and
 // the shared drain orchestrator (runtime-contract.mjs) expect. srvx `close()`
 // awaits only srvx's OWN waitUntil() tasks — vinext's `after()` never reaches

@@ -74,7 +74,7 @@ import sharp from 'sharp';
 import '#nitro/virtual/polyfills';
 import { existsSync } from 'node:fs';
 import { useNitroApp } from 'nitro/app';
-import { serve } from 'srvx/bun';
+import { serve as srvxServe } from 'srvx/bun';
 // vinext's `after()` hands its work to the request's EXECUTION CONTEXT
 // (`ctx.waitUntil`). On Cloudflare the platform supplies one; under nitro's bun
 // server nothing does, so without this an `after()` callback is fire-and-forget
@@ -185,6 +185,37 @@ const EXECUTION_CONTEXT = { waitUntil };
 // drain below owns the exit. `silent` suppresses srvx's listen banner (we print
 // our own startup-order signal). srvx starts the Bun listener synchronously in
 // the constructor, so it is bound before the log line below.
+//
+// Listen-failure guard (#2724). The srvx 0.11 line can swallow a listen failure
+// (its node adapter starts with `this.serve().catch(() => {})`), leaving a bare
+// process that exits 0 with an empty log — in a pod, a restart loop with nothing
+// to read. srvx 1.x reports it itself (h3js/srvx 81a3b646, first released in
+// v1.0.1), so REMOVE this guard — the `serve` wrapper below and the `process.once('exit')`
+// hook — once nitro depends on srvx >= 1.0.1. It hooks the REAL listen (the throw
+// from `serve`), so unlike a pre-bind probe it has no check-then-bind race; the
+// exit hook is the fallback for a srvx that lets the process die with code 0.
+let appListenerReported = false;
+process.once('exit', (code) => {
+  if (appListenerReported) return;
+  console.error(
+    `[knext] exiting before the app listener on ${HOSTNAME}:${PORT} was up (exit code ${code}) —` +
+      ' if no error is printed above, the port could not be bound (another process may own it).',
+  );
+  if (!code) process.exitCode = 1;
+});
+const serve = (options) => {
+  try {
+    return srvxServe(options);
+  } catch (err) {
+    console.error(
+      `[knext] failed to bind the app listener on ${HOSTNAME}:${PORT}` +
+        (err?.code ? ` (${err.code})` : '') +
+        ' — if this is EADDRINUSE, another process owns PORT; pick a free port or stop that process.',
+    );
+    appListenerReported = true; // already reported; the exit hook stays quiet
+    throw err;
+  }
+};
 const appSrvx = serve({
   port: PORT,
   hostname: HOSTNAME,
@@ -245,6 +276,7 @@ const appSrvx = serve({
     },
   ],
 });
+appListenerReported = true;
 // Adapt srvx's BunServer to the { port, stop(force) } shape the metrics log and
 // the shared drain orchestrator (runtime-contract.mjs) expect. srvx `close()`
 // awaits only srvx's OWN waitUntil() tasks — vinext's `after()` never reaches
