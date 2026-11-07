@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Cloud Build step 1 (ubuntu:20.04, digest-pinned in cloudbuild.yaml): the glibc 2.31 + gcc-13
 # libstdc++ sysroot Bun's own release lanes link against (oven-sh/bun scripts/bootstrap.sh
-# install_linux_glibc_sysroot at bun-v1.4.2). Building against it keeps the patched toolchain's
-# glibc symbol versions at <= 2.31, so it runs on the same hosts stock Bun 1.4.2 does — not only on
+# install_linux_glibc_sysroot at bun-v1.4.2; bun-v1.4.4's ci-images/spec.ts glibcSysroot pins
+# the same glibc 2.31 + gcc-13-focal-debs). Building against it keeps the patched toolchain's
+# glibc symbol versions at <= 2.31, so it runs on the same hosts stock Bun 1.4.x does — not only on
 # whatever glibc the build host has.
 #
 # Bun's recipe copies an ubuntu:20.04 rootfs with skopeo; this step IS an ubuntu:20.04 container, so

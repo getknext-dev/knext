@@ -3,8 +3,8 @@
 # the tag in UPSTREAM plus patches/*.patch, for ONE linux-gnu target, linked against the glibc 2.31
 # sysroot step 1 produced. Derived from infra/bun-base/build.sh (same pins and the same
 # prefetch-cache proof for the prebuilt WebKit); the differences are the source (a release tag,
-# not a main commit), LLVM 21 (what bun-v1.4.2's scripts/build/tools.ts requires) and glibc
-# instead of musl.
+# not a main commit), LLVM 23 (bun-v1.4.4's scripts/build/ci-images/spec.ts pins clang 23.1.x;
+# scripts/build/tools.ts accepts any 23.1 patch release) and glibc instead of musl.
 #
 # This binary is the opt-in `compile.bun: 'knext-patched'` toolchain: knext runs it for the
 # `bun build --compile` step only. RETIREMENT: delete this directory once a stock Bun release
@@ -22,10 +22,11 @@ case "$TARGET" in
   aarch64) WKARCH=arm64; SYSROOT=/opt/linux-sysroot-glibc-arm64; TRIPLE=aarch64-linux-gnu; XBINUTILS=binutils-x86-64-linux-gnu ;;
   *) echo "build.sh: unknown target '$TARGET' (want x64 or aarch64)" >&2; exit 2 ;;
 esac
-LLVM_MAJOR=21
+LLVM_MAJOR=23
 # apt.llvm.org archive signer, grouped the way `gpg --fingerprint` prints it (see
 # infra/bun-base/README.md "Secret-scan hygiene"); compared with spaces stripped.
 LLVM_SIGNER_FPR='6084 F3CF 814B 57C1 CF12  EFD5 15CF 4D18 AF4F 7421'
+# bun-v1.4.4's ci-images/spec.ts pins the bootstrap Bun at 1.4.2 too.
 BOOTSTRAP_BUN=1.4.2
 RUSTUP_VERSION=1.29.1
 pin() { # pin <file-in-cwd>: exactly one fetch-pins.sha256 line, and it must match
@@ -123,7 +124,8 @@ wk="$(grep -oE 'WEBKIT_VERSION = "[0-9a-f]{40}"' scripts/build/deps/webkit.ts | 
 wkshort="$(printf '%s' "$wk" | cut -c1-16)"
 export BUN_BUILD_PREFETCH_DIR=/tmp/bun-prefetch
 mkdir -p "$BUN_BUILD_PREFETCH_DIR/by-url" /tmp/wk
-# `--profile=release` at bun-v1.4.2 is lto:false, so the prebuilt WebKit has no -lto suffix.
+# The build passes --lto=off (below), so the prebuilt WebKit is the non-LTO one (no -lto suffix).
+# bun-v1.4.4 turned LTO on by default for release; off keeps the shape knext.2 shipped and smoked.
 wkurl="https://github.com/oven-sh/WebKit/releases/download/autobuild-$wk/bun-webkit-linux-$WKARCH.tar.gz"
 wkfile="bun-webkit-linux-$WKARCH-$wkshort.tar.gz"
 curl -fsSL "$wkurl" -o "/tmp/wk/$wkfile"
@@ -134,7 +136,7 @@ lap source
 
 # ── build ────────────────────────────────────────────────────────────────────
 bd="build/release-linux-$TARGET"
-bun scripts/build.ts --profile=release --os=linux --arch="$TARGET" --abi=gnu --canary=off \
+bun scripts/build.ts --profile=release --lto=off --os=linux --arch="$TARGET" --abi=gnu --canary=off \
   --build-dir="$bd" 2>&1 | tee "/tmp/build-$TARGET.log" | tail -n 80
 test -x "$bd/bun"
 # Proof the pinned tarball, not a fresh network fetch, is what got linked.

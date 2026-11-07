@@ -1,5 +1,5 @@
 # Publishes the opt-in knext-patched Bun toolchain (`compile: { bun: 'knext-patched' }`):
-# bun-v1.4.2 + oven-sh/bun#44059 (`--compile --include`), built from deploy/bun-patched/ on Cloud
+# bun-v1.4.4 + oven-sh/bun#44059 (`--compile --include`), built from deploy/bun-patched/ on Cloud
 # Build. RETIREMENT: delete this workflow with deploy/bun-patched/ once a stock Bun release ships
 # oven-sh/bun#44059 (the `bun-patched-toolchain` retirement probe goes red on it).
 #
@@ -12,7 +12,7 @@
 #      anything is signed or published, against the draft's bytes — a red gate means no release:
 #      - verify:      the git tag equals the tag knext pins; EVERY binary matches RELEASE.sha256 at the
 #                     tagged commit and every shipped binary is pinned (fail closed);
-#      - smoke-x64:   lazy `--include` from the executable on ubuntu-24.04 (stock 1.4.2 control);
+#      - smoke-x64:   lazy `--include` from the executable on ubuntu-24.04 (stock 1.4.4 control);
 #      - smoke-arm64: the same smoke on ubuntu-24.04-arm — arm64 is published only if this is green
 #                     (a red arm64 smoke fails the whole release: knext pins the arm64 sha256, so an
 #                     x64-only release would 404 every arm64 build);
@@ -38,8 +38,9 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # Stock Bun 1.4.2 — the smoke's negative control (it has no `--compile --include`).
-  STOCK_BUN_URL: https://github.com/oven-sh/bun/releases/download/bun-v1.4.2
+  # Stock Bun 1.4.4, the same release unpatched — the smoke's negative control (it has no
+  # `--compile --include`).
+  STOCK_BUN_URL: https://github.com/oven-sh/bun/releases/download/bun-v1.4.4
 
 jobs:
   verify:
@@ -115,7 +116,7 @@ jobs:
           (cd out && grep -E '  bun-linux-x64$' "$GITHUB_WORKSPACE/deploy/bun-patched/RELEASE.sha256" | sha256sum -c --strict -)
           chmod +x out/bun-linux-x64
           curl -fsSLo /tmp/bun-stock.zip "$STOCK_BUN_URL/bun-linux-x64.zip"
-          echo "36368faef7527875d5ffa52e53cd48021741f2a83eb6208a8dd64068d422a913  /tmp/bun-stock.zip" | sha256sum -c -
+          echo "bf8ccbfb2b0b80159e0f9a6d15c55317add8077534dbc6130a3edb52fccb395c  /tmp/bun-stock.zip" | sha256sum -c -
           unzip -q /tmp/bun-stock.zip -d /tmp/bun-stock
           BUN="$PWD/out/bun-linux-x64" STOCK_BUN=/tmp/bun-stock/bun-linux-x64/bun bash deploy/bun-patched/smoke.sh
 
@@ -140,7 +141,7 @@ jobs:
           (cd out && grep -E '  bun-linux-aarch64$' "$GITHUB_WORKSPACE/deploy/bun-patched/RELEASE.sha256" | sha256sum -c --strict -)
           chmod +x out/bun-linux-aarch64
           curl -fsSLo /tmp/bun-stock.zip "$STOCK_BUN_URL/bun-linux-aarch64.zip"
-          echo "54328bbc2d9c8e0c9f892c544d66c57a83b84139e34909e5ee81758f1ac8fda7  /tmp/bun-stock.zip" | sha256sum -c -
+          echo "baa6bb36f51d6e58561e02bbea825038a9df454f673d6d776e8bbf86f8c7850e  /tmp/bun-stock.zip" | sha256sum -c -
           unzip -q /tmp/bun-stock.zip -d /tmp/bun-stock
           BUN="$PWD/out/bun-linux-aarch64" STOCK_BUN=/tmp/bun-stock/bun-linux-aarch64/bun bash deploy/bun-patched/smoke.sh
 

@@ -1,4 +1,4 @@
-# knext opt-in patched Bun toolchain (`compile.bun: 'knext-patched'`): bun-v1.4.2 + oven-sh/bun#44059.
+# knext opt-in patched Bun toolchain (`compile.bun: 'knext-patched'`): bun-v1.4.4 + oven-sh/bun#44059.
 #
 # One build per target, submitted with this directory as the source, so the artifacts are a function
 # of the committed files (UPSTREAM, patches/, fetch-pins.sha256, the three scripts):

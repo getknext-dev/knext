@@ -291,9 +291,9 @@ describe("cache dir", () => {
 });
 
 describe("the embedded pins", () => {
-    it("pin a 1.4.2-based release with a 64-hex sha256 per supported platform", () => {
-        expect(PATCHED_BUN.bunVersion).toBe("1.4.2");
-        expect(PATCHED_BUN.tag).toMatch(/^bun-patched-1\.4\.2-knext\.\d+$/);
+    it("pin a 1.4.4-based release with a 64-hex sha256 per supported platform", () => {
+        expect(PATCHED_BUN.bunVersion).toBe("1.4.4");
+        expect(PATCHED_BUN.tag).toMatch(/^bun-patched-1\.4\.4-knext\.\d+$/);
         expect(PATCHED_BUN.baseUrl).toBe(
             `https://github.com/getknext-dev/knext/releases/download/${PATCHED_BUN.tag}`,
         );

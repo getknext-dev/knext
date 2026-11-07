@@ -1,12 +1,15 @@
-From 8b9ef8f4996ad4fea04677f249f7800f177d46a9 Mon Sep 17 00:00:00 2001
+From be9e1c8bcc93233c5e4cfde7a7ad1b8b4520608c Mon Sep 17 00:00:00 2001
 From: Ahmed ElBanna <AhmedElBanna80@users.noreply.github.com>
 Date: Fri, 2 Oct 2026 00:00:00 +0000
 Subject: [PATCH] compile: --include embeds extra files as lazily loaded
  modules
 
-Backport of oven-sh/bun#44059 (feat/compile-include, head 903936e16a6b) onto bun-v1.4.2
-(744846f844374847c902b5e7fd59b4342a51ef99). The 17 non-merge commits of the PR, cherry-picked
-in order with no conflicts and squashed into this one patch:
+Backport of oven-sh/bun#44059 (feat/compile-include, head 903936e16a6b) onto bun-v1.4.4
+(38afee6c84fcf48c0edb2466aa4b27d287a59c30). The 17 non-merge commits of the PR, cherry-picked
+in order and squashed into this one patch (first onto bun-v1.4.2 with no conflicts; carried to
+bun-v1.4.4 with `git am --3way`, which merged the 1.4.2..1.4.4 upstream edits to
+docs/bundler/executables.mdx, bun.d.ts, context.rs, JSBundler.rs, Arguments.rs and
+build_command.rs without conflicts):
 
   97fe149d2d6df58f8b6911e5d2ca6feb0a3fe523 feat(compile): --include embeds extra files as lazily loaded modules (#11732)
   1792671ccbb1b9e64b154129f0a4304bbc1356f9 fix(compile): --include glob walk from its literal prefix, reject html-only browser target, fix bytecode test
@@ -40,10 +43,10 @@ knext-shim: bun-patched-toolchain
  create mode 100644 test/bundler/compile-include.test.ts
 
 diff --git a/docs/bundler/executables.mdx b/docs/bundler/executables.mdx
-index 80d19ef7ea..2a844855e5 100644
+index a05760ff4..bc0b946ca 100644
 --- a/docs/bundler/executables.mdx
 +++ b/docs/bundler/executables.mdx
-@@ -847,6 +847,46 @@ const html = await Bun.file(path.join(publicDir, "index.html")).text();
+@@ -933,6 +933,46 @@ const html = await Bun.file(path.join(publicDir, "index.html")).text();
  
  Pass `--asset` multiple times to embed several directories (for example `--asset ./client --asset ./prerendered` for a SvelteKit build). Bun embeds only regular files; it skips symlinks and empty subdirectories inside the tree.
  
@@ -91,10 +94,10 @@ index 80d19ef7ea..2a844855e5 100644
  
  ```ts
 diff --git a/packages/bun-types/bun.d.ts b/packages/bun-types/bun.d.ts
-index 0d36f8b3cf..3bdb573f52 100644
+index 59aa530c8..35b417de7 100644
 --- a/packages/bun-types/bun.d.ts
 +++ b/packages/bun-types/bun.d.ts
-@@ -3680,6 +3680,37 @@ declare module "bun" {
+@@ -3747,6 +3747,37 @@ declare module "bun" {
       * Equivalent CLI flag: `--asset` (repeatable)
       */
      assets?: string[];
@@ -133,12 +136,12 @@ index 0d36f8b3cf..3bdb573f52 100644
       * Whether the standalone executable loads .env files when it runs
       *
 diff --git a/src/options_types/context.rs b/src/options_types/context.rs
-index 76ed4c6a68..340d63850c 100644
+index d7dd2d282..7e8b98c5f 100644
 --- a/src/options_types/context.rs
 +++ b/src/options_types/context.rs
-@@ -235,6 +235,11 @@ pub struct BundlerOptions {
-     pub compile_autoload_package_json: bool,
-     pub compile_executable_path: Option<Box<[u8]>>,
+@@ -241,6 +241,11 @@ pub struct BundlerOptions {
+     /// `--compile-jit-policy`: JSC tier-up threshold scale baked into the executable (1 = normal).
+     pub compile_jit_policy: f32,
      pub compile_assets: Vec<Box<[u8]>>,
 +    /// `--include <path|glob>`: raw, unexpanded arguments. Expanded into extra
 +    /// bundler entry points (directory recursion / glob matching happens against
@@ -148,19 +151,19 @@ index 76ed4c6a68..340d63850c 100644
      pub windows: bundle_enums::WindowsOptions,
      pub allow_unresolved: Option<Vec<Box<[u8]>>>,
  }
-@@ -291,6 +296,7 @@ impl Default for BundlerOptions {
-             compile_autoload_package_json: false,
+@@ -300,6 +305,7 @@ impl Default for BundlerOptions {
              compile_executable_path: None,
+             compile_jit_policy: 1.0,
              compile_assets: Vec::new(),
 +            compile_include: Vec::new(),
              windows: bundle_enums::WindowsOptions::default(),
              allow_unresolved: None,
          }
 diff --git a/src/runtime/api/JSBundler.rs b/src/runtime/api/JSBundler.rs
-index a352831363..171dacf778 100644
+index 5044e93e3..f1b9b5536 100644
 --- a/src/runtime/api/JSBundler.rs
 +++ b/src/runtime/api/JSBundler.rs
-@@ -865,6 +865,66 @@ pub mod js_bundler {
+@@ -960,6 +960,66 @@ pub(crate) mod js_bundler {
                  )));
              }
  
@@ -228,10 +231,10 @@ index a352831363..171dacf778 100644
              if let Some(files_obj) = config.get_own_object(global_this, "files")? {
                  this.files = file_map_from_js(global_this, JSValue::from_cell(files_obj))?;
 diff --git a/src/runtime/cli/Arguments.rs b/src/runtime/cli/Arguments.rs
-index 8ed18c929d..60e15544c7 100644
+index d2a105468..883ea5fac 100644
 --- a/src/runtime/cli/Arguments.rs
 +++ b/src/runtime/cli/Arguments.rs
-@@ -429,6 +429,9 @@ pub(crate) const BUILD_ONLY_PARAMS: &[ParamType] = concat_params!(
+@@ -442,6 +442,9 @@ pub(crate) const BUILD_ONLY_PARAMS: &[ParamType] = concat_params!(
          parse_param!(
              "--asset <STR>...                 Embed a file or directory into the compiled executable, preserving its relative path (requires --compile)"
          ),
@@ -241,7 +244,7 @@ index 8ed18c929d..60e15544c7 100644
          parse_param!("--bytecode                       Use a bytecode cache"),
          parse_param!(
              "--bytecode-depth <NUMBER>        How many levels of nested functions to compile to bytecode ahead of time. Defaults to all"
-@@ -2251,6 +2254,17 @@ fn parse_build_command_options(
+@@ -2287,6 +2290,17 @@ fn parse_build_command_options(
          }
      }
  
@@ -260,7 +263,7 @@ index 8ed18c929d..60e15544c7 100644
      {
          let has_positive = args.flag(b"--compile-autoload-dotenv");
 diff --git a/src/runtime/cli/build_command.rs b/src/runtime/cli/build_command.rs
-index a175206c57..1a37f22551 100644
+index 02697be05..5b7605cb6 100644
 --- a/src/runtime/cli/build_command.rs
 +++ b/src/runtime/cli/build_command.rs
 @@ -140,6 +140,46 @@ impl BuildCommand {
@@ -310,7 +313,7 @@ index a175206c57..1a37f22551 100644
          // Note: clone the first entry point so `outfile` can borrow owned
          // storage instead of `this_transpiler.options.entry_points[0]`, which
          // would otherwise hold an immutable borrow of `this_transpiler` across
-@@ -293,6 +333,12 @@ impl BuildCommand {
+@@ -320,6 +360,12 @@ impl BuildCommand {
                      );
                      Global::exit(1);
                  }
@@ -323,7 +326,7 @@ index a175206c57..1a37f22551 100644
  
                  // This is not a bun executable compile - clear compile flags
                  this_transpiler.options.compile_mode = options::CompileMode::StandaloneHtml;
-@@ -1270,6 +1316,289 @@ fn print_summary(
+@@ -1232,6 +1278,289 @@ fn print_summary(
      bun_core::prettyln!("  <green>bundle<r>  {} modules", reachable_file_count);
  }
  
@@ -615,7 +618,7 @@ index a175206c57..1a37f22551 100644
      outfile: &[u8],
 diff --git a/test/bundler/compile-include.test.ts b/test/bundler/compile-include.test.ts
 new file mode 100644
-index 0000000000..9c5c5fda2d
+index 000000000..9c5c5fda2
 --- /dev/null
 +++ b/test/bundler/compile-include.test.ts
 @@ -0,0 +1,710 @@
@@ -1329,3 +1332,6 @@ index 0000000000..9c5c5fda2d
 +    TIMEOUT,
 +  );
 +});
+-- 
+2.51.0
+

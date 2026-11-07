@@ -27,7 +27,7 @@ on:
   # It carried a temporary `pull_request` trigger scoped to its own files (the 1812-vinext-stable-proof
   # precedent) to get one green run on the PR that introduced it — run 37055710314: health 200, the
   # included module loaded from /$bunfs/root/plugins/greet.js with before=0 / after=1, no copy on
-  # disk in the image, compiler 1.4.2+cc97fa834 vs shipped base 1.4.2+744846f84. Removed after.
+  # disk in the image, compiler 1.4.2+cc97fa834 vs shipped base 1.4.2+744846f84 (at the 1.4.2 pin). Removed after.
 
 permissions:
   contents: read
@@ -141,12 +141,24 @@ jobs:
           KNEXT_CACHE_DIR: ${{ runner.temp }}/knext-cache
         run: |
           set -euo pipefail
-          node_modules/.bin/knext build --skip-smoke 2>&1 | tee build.log
-          grep -q 'knext-patched Bun toolchain (sha256 verified)' build.log
-          grep -q '\[knext compile\] wrote .*(bytecode: on' build.log
+          # --verbose: since the quiet default build log, every informational `[knext compile]` line is
+          # collapsed into "N notes; rerun with --verbose" — the lines asserted below only print with it
+          # (tests/bun-patched-release-workflow.test.ts keeps the two in step).
+          node_modules/.bin/knext build --skip-smoke --verbose 2>&1 | tee build.log
+          # Every check names itself and prints what it found when it fails.
+          log_has() { # log_has <ERE> — a line of build.log matches it
+            grep -qE -- "$1" build.log && return 0
+            echo "::error::build.log has no line matching: $1"
+            echo "--- [knext compile] / toolchain lines it does have:"
+            grep -E '\[knext compile\]|knext-patched|Single executable' build.log || echo '(none)'
+            return 1
+          }
+          log_has 'knext-patched Bun toolchain \(sha256 verified\)'
+          log_has '\[knext compile\] wrote .*\(bytecode: on'
           # The SAME checked plan as the stock path, embedded through the patched Bun's native --include.
-          grep -q '\[knext compile\] compile.include: embedded 1 module(s): plugins/greet.js' build.log
-          grep -q '\[knext compile\] compile.include: via native --include (knext-patched Bun)' build.log
+          log_has '\[knext compile\] compile\.include: embedded 1 module\(s\): plugins/greet\.js'
+          log_has '\[knext compile\] compile\.include: via native --include \(knext-patched Bun\)'
+          test -f knext-exec-linux-x64 || { echo "::error::no knext-exec-linux-x64 after the build"; ls -la; exit 1; }
           if grep -q 'must-not-be-embedded-7c1e' knext-exec-linux-x64; then
             echo "::error::a node_modules file under the included directory was embedded"; exit 1
           fi
@@ -154,23 +166,33 @@ jobs:
             # Release gate: the binary knext used is the seeded draft binary it verified.
             echo "compiled with the seeded release candidate for $SEEDED_TAG" | tee -a "$GITHUB_STEP_SUMMARY"
           fi
-          test -f knext-exec-linux-x64
           PATCHED="$(find "$KNEXT_CACHE_DIR/bun-patched" -type f -name 'bun-linux-x64')"
           "$PATCHED" --revision | tee patched-revision.txt
           # The included module's text is IN the executable.
-          grep -c 'hello-from-included-module' knext-exec-linux-x64
-          # Which Bun the SHIPPED (musl) executable runs on: expected the stock 1.4.2 base Bun
-          # downloads for a cross-target, not the patched (glibc) compiler. Evidence, not a gate:
-          # BUN_BE_BUN makes a compiled executable act as its own Bun.
+          embedded="$(grep -c 'hello-from-included-module' knext-exec-linux-x64 || true)"
+          [ "${embedded:-0}" -gt 0 ] || { echo "::error::the included module's text is not in the executable (found ${embedded:-0} matches)"; exit 1; }
+          # Which Bun the SHIPPED (musl) executable runs on: expected the STOCK base of the release the
+          # toolchain is built from, which Bun downloads for a cross-target, not the patched (glibc)
+          # compiler. BUN_BE_BUN makes a compiled executable act as its own Bun.
           docker run --rm -v "$PWD:/w:ro" -e BUN_BE_BUN=1 \
             alpine:3.23@sha256:85fe1e81d6758c208f3e1eed4338a1997e19d4be002d4dd32d3100c9a8c010a0 \
             sh -c 'apk add --no-cache libstdc++ libgcc >/dev/null; timeout 20 /w/knext-exec-linux-x64 --revision' \
             | tee shipped-revision.txt || true
           echo "compiler: $(cat patched-revision.txt) / shipped base: $(cat shipped-revision.txt)" | tee -a "$GITHUB_STEP_SUMMARY"
-          # Compile step only: the shipped executable must run on STOCK 1.4.2 (744846f84), not on
-          # the patched compiler (measured on the first proof run: 1.4.2+744846f84 vs +cc97fa834).
-          grep -qx '1.4.2+744846f84' shipped-revision.txt
-          ! grep -qxF "$(cat shipped-revision.txt)" patched-revision.txt
+          # Compile step only: the shipped executable must run on the STOCK base, not on the patched
+          # compiler. The expected revision is DERIVED from the pin (deploy/bun-patched/UPSTREAM:
+          # `bun-v<X.Y.Z> <commit>` -> `<X.Y.Z>+<commit[:9]>`, the form `bun --revision` prints),
+          # never written here (tests/bun-patched-release-workflow.test.ts keeps it derived).
+          read -r UPSTREAM_TAG UPSTREAM_SHA < <(awk '!/^#/ && NF { print $1, $2; exit }' "$GITHUB_WORKSPACE/deploy/bun-patched/UPSTREAM")
+          SHIPPED_WANT="${UPSTREAM_TAG#bun-v}+$(printf '%s' "$UPSTREAM_SHA" | cut -c1-9)"
+          echo "expected shipped base: $SHIPPED_WANT" | tee -a "$GITHUB_STEP_SUMMARY"
+          grep -qxF "$SHIPPED_WANT" shipped-revision.txt \
+            || { echo "::error::shipped base is '$(cat shipped-revision.txt)', want '$SHIPPED_WANT' (stock base of the pinned release)"; exit 1; }
+          # An `if` rather than `! grep`: bash's errexit ignores a negated command, so `! grep …` could
+          # never fail this step.
+          if grep -qxF "$(cat shipped-revision.txt)" patched-revision.txt; then
+            echo "::error::the shipped executable runs on the patched compiler ($(cat patched-revision.txt)), not on the stock base"; exit 1
+          fi
 
       - name: docker build (the shipped musl image), boot, 200, lazy include
         working-directory: ${{ env.APP }}

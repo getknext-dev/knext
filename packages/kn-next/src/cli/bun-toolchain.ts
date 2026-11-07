@@ -16,7 +16,7 @@
  * `/$bunfs/root/<path relative to the app root>` paths.
  *
  * Opted in, `knext build` downloads ONE pinned release asset —
- * `bun-v1.4.2` plus the `--compile --include` patch (oven-sh/bun#44059),
+ * `bun-v1.4.4` plus the `--compile --include` patch (oven-sh/bun#44059),
  * built from `deploy/bun-patched/` — into a per-user cache, checks it against
  * the sha256 EMBEDDED below, and runs the compile script with it. The check is
  * fail-closed: a mismatch, an HTTP error or a network error is a build error,
@@ -97,22 +97,21 @@ export interface BunToolchainPins {
  * build is a new tag and new sha256s here, in the same change.
  */
 export const PATCHED_BUN: BunToolchainPins = {
-    tag: "bun-patched-1.4.2-knext.2",
-    bunVersion: "1.4.2",
+    tag: "bun-patched-1.4.4-knext.3",
+    bunVersion: "1.4.4",
     baseUrl:
-        "https://github.com/getknext-dev/knext/releases/download/bun-patched-1.4.2-knext.2",
+        "https://github.com/getknext-dev/knext/releases/download/bun-patched-1.4.4-knext.3",
     assets: {
         "linux-x64": {
             file: "bun-linux-x64",
-            // Cloud Build 67b747f8 (gsw-mcp): bun-v1.4.2 + patch 001, HEAD cc97fa834.
-            // The same bytes knext.1 shipped; knext.2 adds the gated release.
-            sha256: "2f1bb84ad480fce9e618b8bf4b7eb4553d5a1179d2013c7d22cbe054ca271df3",
+            // Cloud Build 0511b7d0 (gsw-mcp): bun-v1.4.4 + patch 001, HEAD a623dd48d.
+            sha256: "25d7307a42dd047b0a9edab602f108481ea7dd5ec573b1540287da602e40f0b3",
         },
         "linux-arm64": {
             file: "bun-linux-aarch64",
-            // Cloud Build b35c5945 (gsw-mcp): the same source, cross-compiled
+            // Cloud Build f9e3fad1 (gsw-mcp): the same source, cross-compiled
             // for aarch64; published only through the arm64 smoke gate.
-            sha256: "aa931626fc2707aaf1911a99ee57d9de05ad3dc76bf3cc6e14b0497a5f6bb35a",
+            sha256: "593f483ef2b13d813fda2bb5068f19fb5e2f56f1f50742f0789315f01dc2a799",
         },
     },
 };

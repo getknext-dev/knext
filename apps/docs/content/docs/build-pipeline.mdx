@@ -685,7 +685,7 @@ It is experimental: the option may change in a minor release.
 ## Optional patched Bun toolchain (experimental)
 
 By default the compile step runs the Bun on your `PATH`, and `compile.include` works as described
-above. As an **opt-in**, knext can run that one step with a knext-published build of **Bun 1.4.2
+above. As an **opt-in**, knext can run that one step with a knext-published build of **Bun 1.4.4
 plus `--compile --include`**, an option that is not in a Bun release yet:
 
 ```ts title="knext.config.ts"
@@ -717,14 +717,14 @@ attestation**. `knext build` does not check either — the pinned sha256 is the 
 you can, with the release tag the knext version you installed pins:
 
 ```sh
-TAG=bun-patched-1.4.2-knext.2
+TAG=bun-patched-1.4.4-knext.3
 gh release download "$TAG" -R getknext-dev/knext
 cosign verify-blob --bundle SHA256SUMS.sigstore.json \
-  --certificate-identity "https://github.com/getknext-dev/knext/.github/workflows/bun-patched-release.yml@refs/tags/bun-patched-1.4.2-knext.2" \
+  --certificate-identity "https://github.com/getknext-dev/knext/.github/workflows/bun-patched-release.yml@refs/tags/bun-patched-1.4.4-knext.3" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com SHA256SUMS
 sha256sum -c SHA256SUMS --ignore-missing
 gh attestation verify bun-linux-x64 -R getknext-dev/knext \
-  --cert-identity "https://github.com/getknext-dev/knext/.github/workflows/bun-patched-release.yml@refs/tags/bun-patched-1.4.2-knext.2" \
+  --cert-identity "https://github.com/getknext-dev/knext/.github/workflows/bun-patched-release.yml@refs/tags/bun-patched-1.4.4-knext.3" \
   --source-ref "refs/tags/$TAG"
 ```
 

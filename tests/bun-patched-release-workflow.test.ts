@@ -74,12 +74,12 @@ describe('bun-patched-release: every gate runs BEFORE anything is signed or publ
     }
   });
 
-  it('the arm64 smoke runs on a real arm64 runner against the pinned stock 1.4.2 control', () => {
+  it('the arm64 smoke runs on a real arm64 runner against the pinned stock 1.4.4 control', () => {
     const job = release.jobs['smoke-arm64'] as Job;
     expect(job['runs-on']).toBe('ubuntu-24.04-arm');
     const text = stepText(job);
     expect(text).toContain('bun-linux-aarch64');
-    expect(text).toContain('54328bbc2d9c8e0c9f892c544d66c57a83b84139e34909e5ee81758f1ac8fda7');
+    expect(text).toContain('baa6bb36f51d6e58561e02bbea825038a9df454f673d6d776e8bbf86f8c7850e');
     expect(text).toContain('deploy/bun-patched/smoke.sh');
   });
 
@@ -157,7 +157,7 @@ describe('bun-patched drift check (informational, nightly)', () => {
   });
 
   it('reads the pinned stock version from bun-toolchain.ts (exactly one pin)', () => {
-    expect(pinnedBunVersion(read('packages/kn-next/src/cli/bun-toolchain.ts'))).toBe('1.4.2');
+    expect(pinnedBunVersion(read('packages/kn-next/src/cli/bun-toolchain.ts'))).toBe('1.4.4');
     expect(() => pinnedBunVersion('')).toThrow();
   });
 
@@ -179,5 +179,75 @@ describe('bun-patched drift check (informational, nightly)', () => {
     const v = driftVerdict({ pinned: '1.4.2', latestTag: 'bun-v1.4.2', upstreamMerged: true });
     expect(v.drift).toBe(false);
     expect(v.messages.join('\n')).toContain('retire the patched toolchain');
+  });
+});
+
+describe('bun-patched-e2e: the expected shipped base is derived from the pin, never hardcoded', () => {
+  /** Every `run:` line of every e2e job, comments dropped (they may cite past revisions). */
+  const runCode = Object.values(e2e.jobs)
+    .flatMap((j) => (j.steps ?? []).map((s) => s.run ?? ''))
+    .flatMap((r) => r.split('\n'))
+    .map((l) => l.trim())
+    .filter((l) => !l.startsWith('#'));
+  const upstream = read('deploy/bun-patched/UPSTREAM')
+    .split('\n')
+    .find((l) => l.trim() !== '' && !l.startsWith('#'));
+  const [tag, commit] = String(upstream).trim().split(/\s+/);
+
+  it('derives `<X.Y.Z>+<commit[:9]>` from deploy/bun-patched/UPSTREAM and asserts exactly that', () => {
+    expect(runCode).toContain(
+      `read -r UPSTREAM_TAG UPSTREAM_SHA < <(awk '!/^#/ && NF { print $1, $2; exit }' "$GITHUB_WORKSPACE/deploy/bun-patched/UPSTREAM")`,
+    );
+    expect(runCode).toContain(
+      'SHIPPED_WANT="${UPSTREAM_TAG#bun-v}+$(printf \'%s\' "$UPSTREAM_SHA" | cut -c1-9)"',
+    );
+    expect(runCode).toContain('grep -qxF "$SHIPPED_WANT" shipped-revision.txt \\');
+  });
+
+  it('carries no hardcoded Bun revision literal anywhere in its run steps', () => {
+    expect(runCode.filter((l) => /\b\d+\.\d+\.\d+\+[0-9a-f]{7,}\b/.test(l))).toEqual([]);
+  });
+
+  it('the UPSTREAM release is the release knext pins (bunVersion and tag), so the two cannot drift', () => {
+    expect(tag).toMatch(/^bun-v\d+\.\d+\.\d+$/);
+    expect(commit).toMatch(/^[0-9a-f]{40}$/);
+    const version = String(tag).replace(/^bun-v/, '');
+    const toolchain = read('packages/kn-next/src/cli/bun-toolchain.ts');
+    expect(pinnedBunVersion(toolchain)).toBe(version);
+    expect(toolchain).toContain(`tag: "bun-patched-${version}-knext.`);
+  });
+});
+
+describe('bun-patched-e2e: its build-log checks can see the lines they check, and fail loudly', () => {
+  const steps = Object.values(e2e.jobs).flatMap((j) => j.steps ?? []);
+  const lines = (r: string) =>
+    r
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l !== '' && !l.startsWith('#'));
+
+  it('a step that checks `[knext compile]` lines in build.log builds with --verbose (the default log collapses them into a count)', () => {
+    const checking = steps.filter(
+      (s) => /\\\[knext compile\\\]/.test(s.run ?? '') && /build\.log/.test(s.run ?? ''),
+    );
+    expect(checking.length).toBeGreaterThan(0);
+    for (const s of checking) {
+      const builds = lines(s.run ?? '').filter((l) => /knext build\b/.test(l));
+      expect(builds.length, `${s.name}: one knext build`).toBe(1);
+      expect(builds[0], `${s.name}`).toMatch(/knext build .*--verbose\b/);
+    }
+  });
+
+  it('no check is a bare `! grep` (errexit ignores a negated command, so it can never fail the step)', () => {
+    const negated = steps.flatMap((s) => lines(s.run ?? '').filter((l) => /^!\s/.test(l)));
+    expect(negated).toEqual([]);
+  });
+
+  it('a failed build-log check prints the compile lines it did find', () => {
+    const run = steps.map((s) => s.run ?? '').join('\n');
+    expect(run).toContain('echo "::error::build.log has no line matching: $1"');
+    expect(run).toContain(
+      "grep -E '\\[knext compile\\]|knext-patched|Single executable' build.log || echo '(none)'",
+    );
   });
 });
