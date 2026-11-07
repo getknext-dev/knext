@@ -1,5 +1,14 @@
 # @getknext/db
 
+## 1.4.0
+
+### Patch Changes
+
+- Updated dependencies [d478b84]
+- Updated dependencies [ae03815]
+- Updated dependencies [aecbaca]
+  - @getknext/lib@1.4.0
+
 ## 1.3.0
 
 ### Patch Changes
